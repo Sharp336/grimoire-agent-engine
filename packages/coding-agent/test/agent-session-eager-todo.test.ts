@@ -104,12 +104,20 @@ describe("AgentSession eager todo enforcement", () => {
 	let sharedModelRegistry: ModelRegistry;
 	const observedCalls: ObservedPromptCall[] = [];
 
+	type HarnessTools = {
+		builtInAsk?: boolean;
+		externalThink?: boolean;
+	};
+
 	async function createSession(
 		settingsOverride: Record<string, unknown> = {},
 		sessionOverride: Partial<AgentSessionConfig> = {},
+		harnessTools: HarnessTools = {},
 	): Promise<void> {
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+		const model = harnessTools.externalThink
+			? getBundledModel("openai", "gpt-5")
+			: getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected the harness model to exist");
 
 		const modelRegistry = sharedModelRegistry;
 		const settings = Settings.isolated({
@@ -139,13 +147,33 @@ describe("AgentSession eager todo enforcement", () => {
 			parameters: type({}),
 			execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
 		};
+		const optionalTools: AgentTool[] = [];
+		if (harnessTools.builtInAsk) {
+			optionalTools.push({
+				name: "ask",
+				label: "Ask",
+				description: "Mock built-in ask tool",
+				parameters: type({}),
+				execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
+			});
+		}
+		if (harnessTools.externalThink) {
+			optionalTools.push({
+				name: "think",
+				label: "Think",
+				description: "Mock private think tool",
+				parameters: type({}),
+				execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
+			});
+		}
+		const tools = [todoTool as unknown as AgentTool, mockBashTool, ...optionalTools];
 
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: {
 				model,
 				systemPrompt: ["Test"],
-				tools: [todoTool, mockBashTool],
+				tools,
 				messages: [],
 			},
 			convertToLlm,
@@ -176,10 +204,7 @@ describe("AgentSession eager todo enforcement", () => {
 			},
 		});
 
-		const toolRegistry = new Map<string, AgentTool>([
-			[todoTool.name, todoTool as unknown as AgentTool],
-			[mockBashTool.name, mockBashTool],
-		]);
+		const toolRegistry = new Map<string, AgentTool>(tools.map(tool => [tool.name, tool]));
 
 		session = new AgentSession({
 			agent,
@@ -187,6 +212,7 @@ describe("AgentSession eager todo enforcement", () => {
 			settings,
 			modelRegistry,
 			toolRegistry,
+			builtInToolNames: harnessTools.builtInAsk ? ["ask"] : undefined,
 			...sessionOverride,
 		});
 	}
@@ -194,12 +220,13 @@ describe("AgentSession eager todo enforcement", () => {
 	async function recreateSession(
 		settingsOverride: Record<string, unknown> = {},
 		sessionOverride: Partial<AgentSessionConfig> = {},
+		harnessTools: HarnessTools = {},
 	): Promise<void> {
 		await session.dispose();
 		streamCallCount = 0;
 		scriptedResponses = [];
 		observedCalls.length = 0;
-		await createSession(settingsOverride, sessionOverride);
+		await createSession(settingsOverride, sessionOverride, harnessTools);
 	}
 
 	function waitForSessionName(expected: string): Promise<void> {
@@ -512,6 +539,53 @@ describe("AgentSession eager todo enforcement", () => {
 			lastMessageRole: "user",
 			lastMessageText: "actually skip that, just fix the typo",
 		});
+	});
+
+	it("lets plan-first guidance precede eager todo forcing on a fresh interactive session", async () => {
+		await recreateSession({}, {}, { builtInAsk: true });
+
+		await session.prompt("Build a project dashboard with authentication and reports");
+
+		expect(observedCalls).toHaveLength(1);
+		expect(observedCalls[0]?.toolChoice).toBeUndefined();
+		expect(observedCalls[0]?.toolNames).toEqual(["todo", "bash", "ask"]);
+		expect(observedCalls[0]?.messageRoles).toEqual(["developer", "user"]);
+	});
+
+	it("keeps eager todo forcing when startup plan mode was configured but later cleared", async () => {
+		await recreateSession({ "plan.defaultOnStartup": true }, {}, { builtInAsk: true });
+
+		await session.prompt("Build a project dashboard with authentication and reports");
+
+		expect(observedCalls).toHaveLength(1);
+		expect(observedCalls[0]?.toolChoice).toBe("todo");
+		expect(observedCalls[0]?.toolNames).toEqual(["todo", "bash", "ask"]);
+		expect(observedCalls[0]?.messageRoles).toEqual(["developer", "user"]);
+	});
+
+	it("lets plan-first guidance precede external thinking forcing on a fresh interactive session", async () => {
+		await recreateSession(
+			{ externalThinking: true, "todo.eager": "default" },
+			{},
+			{ builtInAsk: true, externalThink: true },
+		);
+
+		await session.prompt("Build a project dashboard with authentication and reports");
+
+		expect(observedCalls).toHaveLength(1);
+		expect(observedCalls[0]?.toolChoice).toBeUndefined();
+		expect(observedCalls[0]?.toolNames).toEqual(["todo", "bash", "ask", "think"]);
+		expect(observedCalls[0]?.messageRoles).toEqual(["user"]);
+	});
+
+	it("does not force external thinking on synthetic turns", async () => {
+		await recreateSession({ externalThinking: true, "todo.eager": "default" }, {}, { externalThink: true });
+
+		await session.prompt("Continue after the approved plan", { synthetic: true });
+
+		expect(observedCalls).toHaveLength(1);
+		expect(observedCalls[0]?.toolChoice).toBeUndefined();
+		expect(observedCalls[0]?.messageRoles).toEqual(["developer"]);
 	});
 
 	it("prepends the eager todo reminder without forcing the todo tool when todo.eager is preferred", async () => {

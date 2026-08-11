@@ -186,7 +186,7 @@ import {
 import { isLowSignalTitleInput } from "../tiny/text";
 import { shutdownTinyTitleClient } from "../tiny/title-client";
 import { resolveApproval } from "../tools/approval";
-import { type AskToolDetails, type AskToolInput, recoverAskQuestions } from "../tools/ask";
+import { type AskToolDetails, type AskToolInput, recoverAskInput } from "../tools/ask";
 import { releaseTabsForOwner } from "../tools/browser/tab-supervisor";
 import type { CheckpointState, CompletedRewindState } from "../tools/checkpoint";
 import { releaseComputerSessionsForOwner } from "../tools/computer/supervisor";
@@ -5245,11 +5245,25 @@ export class AgentSession {
 			return true;
 		}
 
-		// Skip eager preludes when the user has already queued a directive
+		// Skip eager preludes when the user has already queued a directive.
 		const hasPendingUserDirective = this.#toolChoiceQueue.inspect().includes("user-force");
+		const currentSessionIsFresh = !this.sessionManager.getBranch().some(entry => entry.type === "message");
+		// The first-response planning questionnaire must get the unforced opening turn.
+		// The guidance classifies exempt requests before substantial ones, so it owns
+		// precedence over both optional scratchpad forcing and eager todo enforcement.
+		const planFirstSuggestionHasPriority =
+			this.#agentKind === "main" &&
+			currentSessionIsFresh &&
+			!this.#planModeState?.enabled &&
+			!this.settings.get("plan.defaultOnStartup") &&
+			this.settings.get("plan.enabled") &&
+			this.settings.get("plan.suggestBeforeSubstantialWork") &&
+			this.#tools.hasBuiltInTool("ask") &&
+			this.getActiveToolNames().includes("ask");
 		const activeModel = this.agent.state.model;
 		const externalThinkingToolChoice =
 			!options?.synthetic &&
+			!planFirstSuggestionHasPriority &&
 			!hasPendingUserDirective &&
 			this.settings.get("externalThinking") &&
 			this.getEnabledToolNames().includes("think") &&
@@ -5285,7 +5299,7 @@ export class AgentSession {
 
 		const preludeMessages: AgentMessage[] = [];
 		if (eagerTodoPrelude) {
-			if (eagerTodoPrelude.toolChoice) {
+			if (eagerTodoPrelude.toolChoice && !planFirstSuggestionHasPriority) {
 				this.#toolChoiceQueue.pushOnce(eagerTodoPrelude.toolChoice, {
 					label: "eager-todo",
 				});
@@ -8154,12 +8168,17 @@ export class AgentSession {
 		/**
 		 * Set when `targetId` is an `ask` toolResult, `options.allowAskReopen`
 		 * was set, and `options.reanswerAskResult` was not supplied: nothing was
-		 * mutated. The caller must re-open the ask picker with these
-		 * `questions`, then call `navigateTree(targetId, { ...options,
+		 * mutated. The caller must re-open the ask picker with the validated
+		 * `input`, then call `navigateTree(targetId, { ...options,
 		 * reanswerAskResult })` with the produced result to actually branch
 		 * (issue #5642).
 		 */
-		reopenAsk?: { toolCallId: string; questions: AskToolInput["questions"] };
+		reopenAsk?: {
+			toolCallId: string;
+			input: AskToolInput;
+			/** Original questions retained for callers that only consume this established field. */
+			questions: AskToolInput["questions"];
+		};
 		/**
 		 * `true` when this call committed a new sibling answer for an `ask`
 		 * re-answer (`reanswerAskResult` was applied). The interactive caller
@@ -8212,9 +8231,9 @@ export class AgentSession {
 			targetEntry.message.toolName === "ask"
 		) {
 			const toolCallId = targetEntry.message.toolCallId;
-			const questions = this.#recoverAskReanswerQuestions(targetEntry.parentId, toolCallId);
-			if (questions) {
-				return { cancelled: false, reopenAsk: { toolCallId, questions } };
+			const input = this.#recoverAskReanswerInput(targetEntry.parentId, toolCallId);
+			if (input) {
+				return { cancelled: false, reopenAsk: { toolCallId, input, questions: input.questions } };
 			}
 			// Original arguments couldn't be recovered (corrupted/legacy session
 			// data) — fall through to a plain leaf move so navigation still works.
@@ -8461,20 +8480,17 @@ export class AgentSession {
 
 	/**
 	 * Look up the `ask` toolCall's persisted `arguments` and validate them
-	 * back into `questions`, for `/tree` `ask` re-answer (issue #5642). Walks
-	 * up from the toolResult's parent past any interleaved ancestor entries
-	 * — sibling toolResults from other tool calls in the same turn (`ask`
-	 * runs `exclusive`, which only serializes *execution*, not persistence
-	 * order — roboomp review on #5895), and bookkeeping entries such as the
-	 * `tool_execution_start` custom entry `#recordToolExecutionStart()`
-	 * appends before every toolResult in real persisted sessions (chatgpt-codex
-	 * review on #5895) — until it finds the assistant entry that actually
-	 * emitted `toolCallId`. Stops at a `user` message (turn boundary) or a
-	 * dead end. Returns `undefined` when no ancestor entry holds a matching
-	 * `ask` toolCall, or the arguments can't be resolved — the caller falls
-	 * back to a plain leaf move rather than opening a picker with bad data.
+	 * back into a complete input for `/tree` re-answer (issue #5642). Walks up
+	 * from the toolResult's parent past any interleaved ancestor entries —
+	 * sibling toolResults from other tool calls in the same turn (`ask` runs
+	 * `exclusive`, which only serializes execution, not persistence order) and
+	 * bookkeeping entries such as `tool_execution_start` — until it finds the
+	 * assistant entry that emitted `toolCallId`. Stops at a `user` message
+	 * (turn boundary) or a dead end. Returns `undefined` when no ancestor holds
+	 * a matching `ask` toolCall or its arguments fail validation, so callers
+	 * fall back to a plain leaf move.
 	 */
-	#recoverAskReanswerQuestions(parentId: string | null, toolCallId: string): AskToolInput["questions"] | undefined {
+	#recoverAskReanswerInput(parentId: string | null, toolCallId: string): AskToolInput | undefined {
 		let current = parentId;
 		while (current !== null) {
 			const entry = this.sessionManager.getEntry(current);
@@ -8489,7 +8505,7 @@ export class AgentSession {
 					const args = this.#obfuscator?.hasSecrets()
 						? deobfuscateToolArguments(this.#obfuscator, toolCall.arguments)
 						: toolCall.arguments;
-					return recoverAskQuestions(args);
+					return recoverAskInput(args);
 				}
 				if (entry.message.role === "user") return undefined;
 			}

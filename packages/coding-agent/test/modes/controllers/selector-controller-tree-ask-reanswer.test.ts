@@ -8,7 +8,9 @@
  * ask toolResults).
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
+import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -79,12 +81,17 @@ function createEditorSlot(): EditorSlot {
 	};
 }
 
-function createCtx(leafEntry: SessionEntry, navigateTreeResult: unknown = { cancelled: false }) {
+function createCtx(
+	leafEntry: SessionEntry,
+	navigateTreeResult: unknown = { cancelled: false },
+	toolUIContext?: ExtensionUIContext,
+) {
 	const tree: SessionTreeNode[] = [{ entry: leafEntry, children: [] }];
 	const navigateTree = vi.fn(async () => navigateTreeResult as never);
 	const showStatus = vi.fn();
 	const showError = vi.fn();
 	const editorContainer = createEditorSlot();
+	const settings = Settings.isolated();
 	// Records the order of UI-rebuild vs agent-resume so a test can prove the
 	// re-answer continuation is deferred until after the transcript rebuild
 	// (issue #6483).
@@ -98,6 +105,17 @@ function createCtx(leafEntry: SessionEntry, navigateTreeResult: unknown = { canc
 	const resumeAfterAskReanswer = vi.fn(() => {
 		order.push("resume");
 	});
+	const session = {
+		navigateTree,
+		resumeAfterAskReanswer,
+		getPlanModeState: () => ({ enabled: false }),
+		buildAskReanswerContext: (uiContext: ExtensionUIContext) =>
+			({
+				hasUI: true,
+				ui: uiContext,
+				abort: vi.fn(),
+			}) as unknown as AgentToolContext,
+	};
 	const ctx = {
 		editor: { id: "editor", getText: () => "", setText: vi.fn() },
 		editorContainer,
@@ -105,8 +123,11 @@ function createCtx(leafEntry: SessionEntry, navigateTreeResult: unknown = { canc
 			getTree: () => tree,
 			getLeafId: () => leafEntry.id,
 			getEntry: (id: string) => (id === leafEntry.id ? leafEntry : undefined),
+			getCwd: () => "/tmp/test",
+			getSessionFile: () => null,
 		},
-		session: { navigateTree, resumeAfterAskReanswer },
+		settings,
+		session,
 		ui: {
 			setFocus: vi.fn(),
 			requestRender: vi.fn(),
@@ -116,13 +137,7 @@ function createCtx(leafEntry: SessionEntry, navigateTreeResult: unknown = { canc
 		reloadTodos,
 		showStatus,
 		showError,
-		// No UI context available in this unit test — forces `#reanswerAsk` to
-		// bail out immediately via its own "Ask tool UI is not ready" path
-		// instead of requiring a full AskTool/dialog harness. The point of
-		// this test is proving `navigateTree` gets reached with
-		// `allowAskReopen: true` at all, not exercising the re-answer dialog
-		// itself (already covered at the session level).
-		getToolUIContext: () => undefined,
+		getToolUIContext: () => toolUIContext,
 	} as unknown as InteractiveModeContext;
 	return { ctx, editorContainer, navigateTree, showStatus, showError, resumeAfterAskReanswer, order };
 }
@@ -158,7 +173,11 @@ describe("SelectorController.showTreeSelector re-answering the active ask leaf",
 			},
 		];
 		const { ctx, editorContainer, navigateTree, showStatus, showError } = createCtx(entry, {
-			reopenAsk: { questions: reopenQuestions },
+			reopenAsk: {
+				toolCallId: "call-1",
+				questions: reopenQuestions,
+				input: { questions: reopenQuestions },
+			},
 		});
 		const controller = new SelectorController(ctx);
 
@@ -174,6 +193,69 @@ describe("SelectorController.showTreeSelector re-answering the active ask leaf",
 		expect(navigateTree).toHaveBeenCalledWith("leaf-ask", expect.objectContaining({ allowAskReopen: true }));
 		expect(showError).toHaveBeenCalledWith("Ask tool UI is not ready");
 		expect(showStatus).toHaveBeenCalledWith("Re-answer cancelled");
+	});
+
+	it("preserves helpText through three recovered Ask re-answer cycles", async () => {
+		const entry = askResultEntry("leaf-ask");
+		const helpText = "Turn off Plan-First Suggestions in /settings → Tasks → Modes.";
+		const input = {
+			questions: [
+				{
+					id: "plan_first",
+					question: "How should I proceed?",
+					options: [{ label: "Create a plan" }, { label: "Proceed directly" }],
+					recommended: 0,
+				},
+			],
+			helpText,
+		};
+		const askDialog = vi.fn(async () => ({
+			kind: "submit" as const,
+			results: [
+				{
+					id: "plan_first",
+					question: "How should I proceed?",
+					options: ["Create a plan", "Proceed directly"],
+					multi: false,
+					selectedOptions: ["Create a plan"],
+				},
+			],
+		}));
+		const toolUIContext = { askDialog } as unknown as ExtensionUIContext;
+		const { ctx, editorContainer, navigateTree } = createCtx(entry, { cancelled: false }, toolUIContext);
+		for (let cycle = 0; cycle < 3; cycle++) {
+			navigateTree
+				.mockResolvedValueOnce({
+					cancelled: false,
+					reopenAsk: { toolCallId: "call-1", questions: input.questions, input },
+				} as never)
+				.mockResolvedValueOnce({ cancelled: false } as never);
+		}
+		const controller = new SelectorController(ctx);
+
+		for (let cycle = 0; cycle < 3; cycle++) {
+			controller.showTreeSelector();
+			await pickEntry(editorContainer, "leaf-ask");
+		}
+
+		expect(askDialog).toHaveBeenCalledTimes(3);
+		for (let cycle = 1; cycle <= 3; cycle++) {
+			expect(askDialog).toHaveBeenNthCalledWith(cycle, input.questions, {
+				timeout: undefined,
+				signal: undefined,
+				helpText,
+			});
+			expect(navigateTree).toHaveBeenNthCalledWith(
+				cycle * 2,
+				"leaf-ask",
+				expect.objectContaining({
+					allowAskReopen: true,
+					reanswerAskResult: expect.objectContaining({
+						content: [{ type: "text", text: "User selected: Create a plan" }],
+					}),
+				}),
+			);
+		}
 	});
 
 	it("resumes the agent only after rebuilding the transcript when navigateTree reports a committed re-answer", async () => {

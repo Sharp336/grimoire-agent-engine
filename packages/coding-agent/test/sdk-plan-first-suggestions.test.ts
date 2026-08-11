@@ -30,6 +30,7 @@ interface PromptOptions {
 	hasUI?: boolean;
 	settings?: Settings;
 	taskDepth?: number;
+	newSessionAfterCreate?: boolean;
 	toolNames?: string[];
 }
 
@@ -82,6 +83,9 @@ describe("createAgentSession plan-first suggestions", () => {
 			workspaceTree: { rootPath: cwd, rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] },
 		});
 		try {
+			if (options.newSessionAfterCreate) {
+				await session.newSession();
+			}
 			return session.systemPrompt.join("\n\n");
 		} finally {
 			await session.dispose();
@@ -94,7 +98,7 @@ describe("createAgentSession plan-first suggestions", () => {
 
 		expect(guidanceStart).toBeGreaterThanOrEqual(0);
 		const guidance = prompt.slice(guidanceStart);
-		expect(guidance).toContain("classify the user's request as substantial, exempt, or unclear");
+		expect(guidance).toContain("MUST classify the user's request as substantial, exempt, or unclear");
 		for (const substantialExample of [
 			"whole project or app",
 			"feature",
@@ -115,12 +119,28 @@ describe("createAgentSession plan-first suggestions", () => {
 		]) {
 			expect(guidance).toContain(exemptExample);
 		}
-		expect(guidance).toContain("before using any tool or starting implementation");
+		expect(guidance).toContain("MUST call `ask` before any other tool call or implementation");
+		const questionnairePayload = guidance.match(/```json\n([\s\S]*?)\n```/)?.[1];
+		expect(questionnairePayload).toBeDefined();
+		expect(JSON.parse(questionnairePayload!)).toEqual({
+			questions: [
+				{
+					id: "plan_first",
+					question: "Would you like me to create a plan before I start?",
+					options: [{ label: "Create a plan" }, { label: "Proceed directly" }],
+					recommended: 0,
+				},
+			],
+			helpText: HELP_TEXT,
+		});
 		expect(guidance).toContain('"label": "Create a plan"');
 		expect(guidance).toContain('"label": "Proceed directly"');
 		expect(guidance).toContain('"recommended": 0');
 		expect(guidance).toContain(`"helpText": "${HELP_TEXT}"`);
-		expect(guidance).toContain("Respect the selected answer");
+		expect(guidance).toContain("MUST follow the selected answer and any custom response");
+		expect(guidance).toContain("Exempt classification MUST take precedence over substantial classification");
+		expect(guidance).toContain("MUST wait for the answer before continuing");
+		expect(guidance).toContain("NEVER use another tool or start implementation while the answer is pending");
 	});
 
 	const suppressionCases: Array<[string, PromptOptions]> = [
@@ -140,5 +160,18 @@ describe("createAgentSession plan-first suggestions", () => {
 
 	it.each(suppressionCases)("omits plan-first guidance from %s", async (_name, options) => {
 		expect(await assembledPrompt(options)).not.toContain(GUIDANCE_HEADING);
+	});
+
+	const coexistenceCases: Array<[string, PromptOptions]> = [
+		["external thinking enabled", { settings: Settings.isolated({ externalThinking: true }) }],
+		["eager todo enforcement", { settings: Settings.isolated({ "todo.eager": "always" }) }],
+	];
+
+	it.each(coexistenceCases)("keeps plan-first guidance with %s", async (_name, options) => {
+		expect(await assembledPrompt(options)).toContain(GUIDANCE_HEADING);
+	});
+
+	it("includes plan-first guidance after /new replaces a resumed session", async () => {
+		expect(await assembledPrompt({ existingSession: true, newSessionAfterCreate: true })).toContain(GUIDANCE_HEADING);
 	});
 });

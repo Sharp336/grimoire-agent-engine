@@ -2850,12 +2850,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const appendParts: string[] = [];
 			if (memoryInstructions) appendParts.push(memoryInstructions);
 			if (autoLearnInstructions) appendParts.push(autoLearnInstructions);
+			const currentSessionIsFresh = !sessionManager.getBranch().some(entry => entry.type === "message");
 			if (
 				agentKind === "main" &&
-				!hasExistingSession &&
+				currentSessionIsFresh &&
+				!settings.get("plan.defaultOnStartup") &&
 				settings.get("plan.enabled") &&
 				settings.get("plan.suggestBeforeSubstantialWork") &&
-				!settings.get("plan.defaultOnStartup") &&
 				builtInRegistryToolNames.has("ask") &&
 				toolNames.includes("ask")
 			) {

@@ -39,6 +39,7 @@ function createContext(args: {
 			selectionMarker?: "radio" | "checkbox";
 			checkedIndices?: readonly number[];
 			markableCount?: number;
+			helpText?: string;
 		},
 	) => Promise<string | undefined>;
 	editor?: (
@@ -1681,6 +1682,52 @@ describe("AskTool rich ask dialog", () => {
 		expect(result.details).toEqual({ chatRedirect: true, questions: ["Q1?"] });
 		expect(result.content[0]?.type).toBe("text");
 		expect((result.content[0] as { text: string }).text).toContain("chat about this");
+	});
+
+	it("shows top-level helpText alongside keyboard controls in the degraded select path", async () => {
+		const helpText = "Turn off Plan-First Suggestions in /settings → Tasks → Modes.";
+		const tool = new AskTool(createSession());
+		const select = vi.fn().mockResolvedValue("Create a plan");
+		const context = createContext({ select });
+
+		const result = await tool.execute(
+			"call-degraded-help",
+			{
+				helpText,
+				questions: [
+					{
+						id: "plan_first",
+						question: "How should I proceed?",
+						options: [{ label: "Create a plan" }, { label: "Proceed directly" }],
+						recommended: 0,
+					},
+				],
+			},
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(select.mock.calls[0]?.[2]?.helpText).toBe(`up/down navigate  enter select  esc cancel\n${helpText}`);
+		expect(result.content).toEqual([{ type: "text", text: "User selected: Create a plan" }]);
+	});
+
+	it("keeps the existing degraded select footer when helpText is absent", async () => {
+		const tool = new AskTool(createSession());
+		const select = vi.fn().mockResolvedValue("Option A");
+		const context = createContext({ select });
+
+		await tool.execute(
+			"call-degraded-no-help",
+			{
+				questions: [{ id: "q1", question: "Q1?", options: [{ label: "Option A" }] }],
+			},
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(select.mock.calls[0]?.[2]?.helpText).toBe("up/down navigate  enter select  esc cancel");
 	});
 
 	it("ignores preview and header in degraded select path", async () => {
