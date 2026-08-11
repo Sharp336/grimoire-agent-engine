@@ -2769,7 +2769,12 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async #finishGuidedGoalInterview(): Promise<void> {
-		if (!this.#guidedGoalInterviewActive || this.#guidedGoalQueuedKickoff !== undefined) return;
+		if (!this.#guidedGoalInterviewActive) return;
+		const queuedKickoff = this.#guidedGoalQueuedKickoff;
+		if (queuedKickoff !== undefined) {
+			if (this.session.hasQueuedAgentFollowUp(queuedKickoff)) return;
+			this.#guidedGoalQueuedKickoff = undefined;
+		}
 		if (this.#guidedGoalInterviewCleanup) {
 			await this.#guidedGoalInterviewCleanup;
 			return;

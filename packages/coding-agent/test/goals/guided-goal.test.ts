@@ -254,6 +254,26 @@ describe("guided goal setup", () => {
 		}
 	});
 
+	it("restores tools when an interrupt drops a queued interview", async () => {
+		const harness = await createHarness();
+		try {
+			await harness.mode.init();
+			Object.defineProperty(harness.session, "isStreaming", { configurable: true, get: () => true });
+			vi.spyOn(harness.session, "followUp");
+
+			await harness.mode.handleGuidedGoalCommand("ship it");
+			expect(harness.session.getEnabledToolNames()).toEqual(expect.arrayContaining(["ask", "goal"]));
+
+			harness.session.clearQueue({ forInterrupt: true });
+			expect(harness.session.agent.peekFollowUpQueue()).toHaveLength(0);
+			await harness.dispatchSessionEvent({ type: "agent_end", messages: [], isTerminal: true });
+
+			expect(harness.session.getEnabledToolNames()).toEqual(["read"]);
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
 	it("interrupts a running interview before starting its replacement", async () => {
 		const harness = await createHarness();
 		try {
