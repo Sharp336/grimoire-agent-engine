@@ -27,6 +27,7 @@ const askOverrideExtension: ExtensionFactory = pi => {
 interface PromptOptions {
 	existingSession?: boolean;
 	existingSummary?: "compaction" | "branch_summary";
+	clearAfterCreate?: boolean;
 	extensions?: ExtensionFactory[];
 	hasUI?: boolean;
 	settings?: Settings;
@@ -94,6 +95,9 @@ describe("createAgentSession plan-first suggestions", () => {
 		try {
 			if (options.newSessionAfterCreate) {
 				await session.newSession();
+			}
+			if (options.clearAfterCreate) {
+				await session.resetSessionContext();
 			}
 			if (options.activePlanModeAfterCreate) {
 				session.setPlanModeState({ enabled: true, planFilePath: "local://PLAN.md" });
@@ -170,6 +174,8 @@ describe("createAgentSession plan-first suggestions", () => {
 		["resumed sessions", { existingSession: true }],
 		["sessions resumed from a compaction summary", { existingSummary: "compaction" }],
 		["sessions resumed from a branch summary", { existingSummary: "branch_summary" }],
+		["fresh sessions cleared in place with /clear", { clearAfterCreate: true }],
+		["sessions cleared in place with /clear", { existingSession: true, clearAfterCreate: true }],
 		["sessions with a replacement system prompt", { systemPrompt: "Custom SDK prompt" }],
 		["sessions whose active ask is an extension override", { extensions: [askOverrideExtension] }],
 		["subagent sessions", { taskDepth: 1 }],

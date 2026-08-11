@@ -317,8 +317,12 @@ import {
 } from "./queued-messages";
 import type { ServingModel } from "./retry-fallback-chains";
 import { type AdvisorStats, SessionAdvisors, type SessionAdvisorsHost } from "./session-advisors";
-import type { BuildSessionContextOptions, SessionContext } from "./session-context";
-import { getRestorableSessionModels } from "./session-context";
+import {
+	type BuildSessionContextOptions,
+	getRestorableSessionModels,
+	isFreshSessionContext,
+	type SessionContext,
+} from "./session-context";
 import { formatSessionDumpText } from "./session-dump-format";
 import type { BranchSummaryEntry, NewSessionOptions } from "./session-entries";
 import { SessionHandoff, type SessionHandoffHost } from "./session-handoff";
@@ -4138,18 +4142,19 @@ export class AgentSession {
 		// history rewrite (issue #1246).
 		this.#planReferenceSent = false;
 
-		// Re-prime the advisors across the conversation boundary and undo any
-		// memory promotion so the next turn rebuilds from the base system prompt.
-		this.#advisors.resetSessionState();
-		await this.#memory.resetContextForNewTranscript();
-
-		// Record a durable boundary on the persisted branch. The collapsed live
-		// transcript and the model-context rebuild start emission after the latest
-		// boundary, so a rebuild across a `/clear` (theme change, focus attach,
-		// on-disk record and the plain `transcript:true` export path keep the full
-		// pre-reset history.
+		// Record the durable boundary before any reset work that can rebuild the
+		// base prompt. The collapsed live transcript and model context start after
+		// the latest boundary, while the on-disk record and transcript:true export
+		// keep the full pre-reset history.
 		this.sessionManager.appendResetBoundary();
 
+		// Re-prime the advisors, undo memory promotion, then rebuild even when the
+		// selected memory backend performs no prompt refresh. agent.reset() keeps
+		// the old system prompt, so /clear must explicitly remove first-turn-only
+		// guidance before it returns.
+		this.#advisors.resetSessionState();
+		await this.#memory.resetContextForNewTranscript();
+		await this.refreshBaseSystemPrompt();
 		return { droppedCount };
 	}
 
@@ -5530,7 +5535,7 @@ export class AgentSession {
 			// the first turn instead of both behaviors being suppressed.
 			const userTurn = message.role === "user";
 			const turnHasPendingUserDirective = this.#toolChoiceQueue.inspect().includes("user-force");
-			const currentSessionIsFresh = this.messages.length === 0;
+			const currentSessionIsFresh = isFreshSessionContext(this.messages, this.sessionManager.getBranch());
 			const planFirstSuggestionHasPriority =
 				finalTurnSystemPrompt.some(part => part.includes(planFirstSuggestionsPrompt.trim())) &&
 				this.#agentKind === "main" &&

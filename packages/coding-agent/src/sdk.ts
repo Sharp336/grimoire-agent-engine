@@ -153,7 +153,7 @@ import {
 	type RetryFallbackResolutionContext,
 	resolveRetryFallbackChainKey,
 } from "./session/retry-fallback-chains";
-import { getRestorableSessionModels } from "./session/session-context";
+import { getRestorableSessionModels, isFreshSessionContext } from "./session/session-context";
 import { SessionManager } from "./session/session-manager";
 import { collectMountedMCPToolRoutes, projectMountedMCPXdevGuidance } from "./session/session-tools";
 import { createSettingsAwareStreamFn } from "./session/settings-stream-fn";
@@ -2850,7 +2850,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const appendParts: string[] = [];
 			if (memoryInstructions) appendParts.push(memoryInstructions);
 			if (autoLearnInstructions) appendParts.push(autoLearnInstructions);
-			const currentSessionIsFresh = (hasSession ? session.messages : existingSession.messages).length === 0;
+			const currentSessionIsFresh = isFreshSessionContext(
+				hasSession ? session.messages : existingSession.messages,
+				sessionManager.getBranch(),
+			);
 			if (
 				agentKind === "main" &&
 				currentSessionIsFresh &&
