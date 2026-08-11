@@ -1585,6 +1585,61 @@ describe("AskTool rich ask dialog", () => {
 		});
 	});
 
+	it("forwards top-level helpText to the rich dialog without changing the ask result", async () => {
+		const helpText = "Turn off Plan-First Suggestions in /settings → Tasks → Modes.";
+		const tool = new AskTool(createSession());
+		const askDialog = vi.fn().mockResolvedValue({
+			kind: "submit",
+			results: [
+				{
+					id: "plan_first",
+					question: "How should I proceed?",
+					options: ["Create a plan", "Proceed directly"],
+					multi: false,
+					selectedOptions: ["Create a plan"],
+				},
+			],
+		});
+		const context = createContext({ askDialog });
+
+		const result = await tool.execute(
+			"call-rich-dialog-help",
+			{
+				helpText,
+				questions: [
+					{
+						id: "plan_first",
+						question: "How should I proceed?",
+						options: [{ label: "Create a plan" }, { label: "Proceed directly" }],
+						recommended: 0,
+					},
+				],
+			},
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(askDialog).toHaveBeenCalledTimes(1);
+		expect(askDialog.mock.calls[0]?.[1]).toEqual({
+			timeout: undefined,
+			signal: undefined,
+			helpText,
+		});
+		expect(result).toEqual({
+			content: [{ type: "text", text: "User selected: Create a plan" }],
+			details: {
+				question: "How should I proceed?",
+				options: ["Create a plan", "Proceed directly"],
+				multi: false,
+				selectedOptions: ["Create a plan"],
+				customInput: undefined,
+				note: undefined,
+				timedOut: undefined,
+			},
+		});
+	});
+
 	it("aborts and throws ToolAbortError when askDialog returns undefined", async () => {
 		const tool = new AskTool(createSession());
 		const abort = vi.fn();

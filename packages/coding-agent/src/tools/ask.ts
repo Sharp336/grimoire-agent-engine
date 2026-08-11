@@ -77,6 +77,9 @@ const QuestionItem = arkType({
 
 const askSchema = arkType({
 	questions: QuestionItem.array().atLeastLength(1).describe("questions to ask"),
+	"helpText?": arkType("string").describe(
+		"optional supplementary footer text shown below questionnaire keyboard controls",
+	),
 });
 
 export type AskToolInput = typeof askSchema.infer;
@@ -907,7 +910,11 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 							...(q.multi !== undefined ? { multi: q.multi } : {}),
 							...(q.recommended !== undefined ? { recommended: q.recommended } : {}),
 						})),
-						{ timeout: timeout ?? undefined, signal },
+						{
+							timeout: timeout ?? undefined,
+							signal,
+							...(params.helpText !== undefined ? { helpText: params.helpText } : {}),
+						},
 					);
 				const richResult = signal ? await untilAborted(signal, showRichDialog) : await showRichDialog();
 				if (!richResult) {

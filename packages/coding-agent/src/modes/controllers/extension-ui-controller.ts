@@ -691,6 +691,7 @@ export class ExtensionUiController {
 					timeout: dialogOptions?.timeout,
 					onTimeout: dialogOptions?.onTimeout,
 					tui: this.ctx.ui,
+					helpText: dialogOptions?.helpText,
 					inputGuard,
 				},
 			);
