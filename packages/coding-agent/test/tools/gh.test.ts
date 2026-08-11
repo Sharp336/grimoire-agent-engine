@@ -15,6 +15,7 @@ import {
 	parseSearchDateBound,
 	resolveDefaultRepoMemoized,
 } from "@oh-my-pi/pi-coding-agent/tools/gh";
+import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
 import * as piUtils from "@oh-my-pi/pi-utils";
@@ -1470,7 +1471,7 @@ describe("github tool", () => {
 					}
 					return {
 						data: { r0: { issue: { id: "I_created" } } },
-						errors: [{ message: "GraphQL addSubIssue failed" }],
+						errors: [{ message: `GraphQL\taddSubIssue\r\nfailed ${"x".repeat(200)}\x1b[31m` }],
 					} as never;
 				}
 				if (args[2] === "8") {
@@ -1502,7 +1503,14 @@ describe("github tool", () => {
 			expect(jsonSpy).toHaveBeenCalledTimes(5);
 			expect(text).toContain("WARNING");
 			expect(text).toContain(createdUrl);
-			expect(text).toContain("GraphQL addSubIssue failed");
+			const warningLine = text.split("\n").find(line => line.startsWith("WARNING:"));
+			expect(warningLine).toBeDefined();
+			expect(warningLine).toMatch(/GraphQL +addSubIssue failed/);
+			expect(warningLine).not.toContain("\t");
+			expect(text).not.toContain("\x1b");
+			expect(text.split("\n").some(line => line.startsWith("failed "))).toBe(false);
+			const warningMessage = warningLine!.slice(warningLine!.lastIndexOf("GraphQL"));
+			expect(Bun.stringWidth(warningMessage)).toBeLessThanOrEqual(TRUNCATE_LENGTHS.LINE);
 			expect(text).toContain("may already have been applied");
 			expect(result.details?.meta?.source).toEqual({ type: "url", value: createdUrl });
 			expect(result.details?.status).toBe("partial");
@@ -1800,7 +1808,7 @@ describe("github tool", () => {
 				} as never;
 			});
 			const textSpy = vi.spyOn(git.github, "text").mockImplementation(async (_cwd, args) => {
-				if (args[2] === "8") throw new Error("permission denied for #8");
+				if (args[2] === "8") throw new Error(`permission\tdenied\r\nfor #8 ${"x".repeat(200)}\x1b[31m`);
 				return "closed";
 			});
 
@@ -1820,7 +1828,14 @@ describe("github tool", () => {
 			}
 			expect(text).toContain("#7 → CLOSED");
 			expect(text).toContain("## Failed (1)");
-			expect(text).toContain("#8: permission denied for #8");
+			const failureLine = text.split("\n").find(line => line.startsWith("- #8:"));
+			expect(failureLine).toBeDefined();
+			expect(failureLine).toMatch(/permission +denied for #8/);
+			expect(failureLine).not.toContain("\t");
+			expect(text).not.toContain("\x1b");
+			expect(text.split("\n").some(line => line.startsWith("for #8 "))).toBe(false);
+			const failureMessage = failureLine!.slice("- #8: ".length);
+			expect(Bun.stringWidth(failureMessage)).toBeLessThanOrEqual(TRUNCATE_LENGTHS.LINE);
 			expect(result.details?.status).toBe("partial");
 		});
 

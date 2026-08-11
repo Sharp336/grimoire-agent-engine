@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import { sanitizeText } from "@oh-my-pi/pi-utils";
 import * as git from "../utils/git";
 import type { ToolSession } from ".";
 import type { GhToolDetails } from "./gh";
@@ -19,6 +20,7 @@ import {
 import type { GithubInput } from "./gh-types";
 import { githubIssueJsonWithStateReasonFallback } from "./gh-view";
 import { invalidateAllIssueViews } from "./github-cache";
+import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "./render-utils";
 import { ToolError, throwIfAborted } from "./tool-errors";
 
 const GH_ISSUE_HIERARCHY_MAX_DEPTH = 8;
@@ -641,6 +643,14 @@ async function preflightIssueStateTarget(
 	};
 }
 
+function formatIssueMutationError(reason: unknown): string {
+	const message = reason instanceof Error ? reason.message : String(reason);
+	const sanitized = replaceTabs(sanitizeText(message))
+		.replace(/[\r\n]+/g, " ")
+		.trim();
+	return truncateToWidth(sanitized, TRUNCATE_LENGTHS.LINE);
+}
+
 function formatIssueStateResult(options: {
 	repo?: string;
 	state: "open" | "closed";
@@ -675,8 +685,7 @@ function formatIssueStateResult(options: {
 	if (options.failures.length > 0) {
 		lines.push("", `## Failed (${options.failures.length})`);
 		for (const failure of options.failures) {
-			const message = failure.reason instanceof Error ? failure.reason.message : String(failure.reason);
-			lines.push(`- #${failure.target.issueNumber}: ${message}`);
+			lines.push(`- #${failure.target.issueNumber}: ${formatIssueMutationError(failure.reason)}`);
 		}
 	}
 	return lines.join("\n").trim();
@@ -1086,6 +1095,7 @@ async function executeIssueCreate(
 			{ status: "created" },
 		);
 	} catch (error) {
+		const message = formatIssueMutationError(error);
 		return buildTextResult(
 			formatIssueCreateResult({
 				title,
@@ -1093,12 +1103,8 @@ async function executeIssueCreate(
 				created,
 				hierarchyAttached: false,
 				warning: hierarchyMutationAttempted
-					? `The issue remains created, but hierarchy attachment failed. Some requested relationships may already have been applied; inspect the issue hierarchy before retrying attachments and do not retry issue creation. ${
-							error instanceof Error ? error.message : String(error)
-						}`
-					: `The issue remains created, but hierarchy attachment failed. ${
-							error instanceof Error ? error.message : String(error)
-						}`,
+					? `The issue remains created, but hierarchy attachment failed. Some requested relationships may already have been applied; inspect the issue hierarchy before retrying attachments and do not retry issue creation. ${message}`
+					: `The issue remains created, but hierarchy attachment failed. ${message}`,
 			}),
 			created.value,
 			{ status: "partial" },
