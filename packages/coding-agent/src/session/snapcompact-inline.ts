@@ -43,11 +43,11 @@ export type SnapcompactSavingsSink = (
 	model: Model,
 ) => void;
 
-// Per-provider image-count budgets live in @oh-my-pi/snapcompact
-// (`providerImageBudget`): snapcompact frames are 1568px (<2000px) so
-// dimension/size limits never bind; only COUNT does. Once the budget is
-// spent by already-attached archive/system-prompt images, tool results ship
-// verbatim as text.
+// Per-provider budgets live in @oh-my-pi/snapcompact: snapcompact frames are
+// 1568px (<2000px) so per-image dimension limits never bind, leaving COUNT
+// (`providerImageBudget`) and, when configured, total base64 BYTES
+// (`providerImageByteBudget`). Once either is spent by already-attached
+// archive/system-prompt images, tool results ship verbatim as text.
 const MAX_SYSTEM_PROMPT_FRAMES = 6;
 /** Tool results under this many tokens are never rasterized — the swap can't
  *  save enough to justify trading crisp text for an image. */
@@ -55,17 +55,26 @@ const MIN_TOOL_RESULT_TOKENS = 3000;
 /** Render only if imageTokens <= textTokens * SAVINGS_MARGIN. */
 const SAVINGS_MARGIN = 0.9;
 
-/** Count image blocks already present across all message contents. */
-function countContextImages(context: Context): number {
+/** Image blocks already present across all message contents, with their base64 bytes. */
+function contextImageStats(context: Context): { count: number; bytes: number } {
 	let count = 0;
+	let bytes = 0;
 	for (const message of context.messages) {
 		const content = message.content;
 		if (typeof content === "string") continue;
 		for (const block of content) {
-			if (block.type === "image") count++;
+			if (block.type !== "image") continue;
+			count++;
+			bytes += block.data.length;
 		}
 	}
-	return count;
+	return { count, bytes };
+}
+
+function frameBytes(frames: readonly ImageContent[]): number {
+	let bytes = 0;
+	for (const frame of frames) bytes += frame.data.length;
+	return bytes;
 }
 
 function isTextContent(block: TextContent | ImageContent): block is TextContent {
@@ -259,7 +268,7 @@ export interface SnapcompactSavingsEstimate {
 }
 
 /** Loose block-array view of unknown message content. */
-type BlockViews = ReadonlyArray<{ type?: unknown; text?: unknown }>;
+type BlockViews = ReadonlyArray<{ type?: unknown; text?: unknown; data?: unknown }>;
 
 /**
  * Estimate what `SnapcompactInlineTransformer.transform` would save on the
@@ -283,13 +292,23 @@ export function estimateInlineSavings(input: {
 
 	const shape = snapcompact.resolveShape(model, options.shape);
 	let existingImages = 0;
+	let existingImageBytes = 0;
 	for (const message of input.messages) {
 		if (!Array.isArray(message.content)) continue;
 		for (const block of message.content as BlockViews) {
-			if (block.type === "image") existingImages++;
+			if (block.type !== "image") continue;
+			existingImages++;
+			if (typeof block.data === "string") existingImageBytes += block.data.length;
 		}
 	}
-	const budget = snapcompact.providerImageBudget(model.provider) - existingImages;
+	let budget = snapcompact.providerImageBudget(model.provider, model.api) - existingImages;
+	const byteLimit = snapcompact.providerImageByteBudget(model.provider);
+	if (byteLimit !== undefined) {
+		budget = Math.min(
+			budget,
+			Math.max(0, Math.floor((byteLimit - existingImageBytes) / snapcompact.FRAME_DATA_BYTES_ESTIMATE)),
+		);
+	}
 
 	const candidates: InlineToolResultCandidate[] = [];
 	if (options.renderToolResults) {
@@ -420,7 +439,16 @@ export class SnapcompactInlineTransformer {
 		if (!model.input.includes("image")) return context;
 
 		const shape = snapcompact.resolveShape(model, this.options.shape);
-		const budget = snapcompact.providerImageBudget(model.provider) - countContextImages(context);
+		const existing = contextImageStats(context);
+		// A swap the byte clamp would reclaim is worse than no swap: the frames go
+		// and the note pointing at them is all that reaches the model. Plan under
+		// the byte cap too, then confirm against the rendered bytes below.
+		const byteLimit = snapcompact.providerImageByteBudget(model.provider);
+		let remainingBytes = byteLimit === undefined ? Number.POSITIVE_INFINITY : byteLimit - existing.bytes;
+		let budget = snapcompact.providerImageBudget(model.provider, model.api) - existing.count;
+		if (byteLimit !== undefined) {
+			budget = Math.min(budget, Math.max(0, Math.floor(remainingBytes / snapcompact.FRAME_DATA_BYTES_ESTIMATE)));
+		}
 		if (budget <= 0) return context;
 
 		const messages = [...context.messages];
@@ -483,6 +511,9 @@ export class SnapcompactInlineTransformer {
 			const target = targets.get(swap.id);
 			if (!target) continue;
 			const frames = await this.#framesFor(this.#toolCache, swap.id, target.text, shape);
+			const bytes = frameBytes(frames);
+			if (bytes > remainingBytes) continue;
+			remainingBytes -= bytes;
 			messages[target.index] = { ...target.message, content: [{ type: "text", text: toolResultNote }, ...frames] };
 			changed = true;
 			savings.push({
@@ -514,15 +545,17 @@ export class SnapcompactInlineTransformer {
 				this.#systemCache = cached;
 			}
 			const frames = cached.frames;
-			const original = messages[userIndex] as UserMessage;
-			const originalContent: (TextContent | ImageContent)[] =
-				typeof original.content === "string" ? [{ type: "text", text: original.content }] : original.content;
-			messages[userIndex] = {
-				...original,
-				content: [{ type: "text", text: systemPromptTarget.userNote }, ...frames, ...originalContent],
-			};
-			systemPrompt = systemPromptTarget.replacement;
-			changed = true;
+			if (frameBytes(frames) <= remainingBytes) {
+				const original = messages[userIndex] as UserMessage;
+				const originalContent: (TextContent | ImageContent)[] =
+					typeof original.content === "string" ? [{ type: "text", text: original.content }] : original.content;
+				messages[userIndex] = {
+					...original,
+					content: [{ type: "text", text: systemPromptTarget.userNote }, ...frames, ...originalContent],
+				};
+				systemPrompt = systemPromptTarget.replacement;
+				changed = true;
+			}
 		}
 
 		if (!changed) return context;

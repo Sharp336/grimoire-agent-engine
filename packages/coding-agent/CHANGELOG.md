@@ -225,6 +225,13 @@
 
 ### Fixed
 
+- Fixed extension/custom/hook tool wrappers stripping schema methods off `parameters`: `applyToolProxy` bound every callable property, and binding a schema (a plain function carrying `toJsonSchema`/`assert`) dropped those properties, breaking wire-schema detection and crashing the status-line token estimator with `JSON.stringify(schema) === undefined`. Prototype methods are still bound; own data properties and schema callables now pass through untouched.
+- Fixed bug where `agent()` calls in eval cells ignored turn cancellation and continued running indefinitely
+- Fixed the built-in `tail` printing `tail: Broken pipe` and failing when a downstream pipeline reader exited early (e.g. `tail -c N file.jsonl | jq …` with jq aborting on a parse error); it now exits silently with 141 (128+SIGPIPE) like a real tail, in every output path including `--follow`.
+- Fixed the in-process ps shell builtin rejecting common procps/BSD format specifiers (`ps -o tpgid,...` failed with `unknown output format specifier`); added `tpgid`, `pri`, `flags`, real/effective user and group columns, `wchan`, fault counters, `sz`, and the STAT `+` foreground flag.
+### Added
+
+- Added `providers.maxImagesPerRequest` and `providers.maxImageBytesPerRequest`: per-provider budgets for how many images and how many total base64 image bytes a single request may carry, settable per provider id from `config.yml`, `omp config set`, or the settings panel. A custom gateway that is unknown by id now inherits its wire API family's image budget (`anthropic-messages` 90, `google-generative-ai` 200) instead of falling to the 5-image floor, which keeps a compaction archive readable on a private gateway. The byte budget removes the oldest droppable images until the request fits or none are left; images retained in assistant turns are never removed and count against the budget. Snapcompact's inline imaging plans against both budgets, so a tool result or system prompt whose frames would not fit ships as text instead of a note pointing at frames the clamp would remove. A turn the clamp leaves with no images and no text keeps an `[image omitted: provider image limit]` placeholder, so an image-only user turn is not silently dropped from the request
 - Fixed an issue where custom, extension, or hook tool wrappers stripped schema methods off parameters, causing wire-schema detection failures and status-line token estimator crashes.
 - Fixed a bug where agent() calls in evaluation cells ignored turn cancellation and continued running indefinitely.
 - Fixed the built-in tail command to exit silently with code 141 (SIGPIPE) instead of failing with a "Broken pipe" error when a downstream pipeline reader exits early.
