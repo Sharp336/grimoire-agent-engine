@@ -5,6 +5,7 @@
 ### Added
 
 - Added the Fireworks Kimi K3 Fast serving-path variant (`fireworks/kimi-k3-fast`, routed to `accounts/fireworks/routers/kimi-k3-fast`) with Fast-tier pricing ($4.50/$22.50 per 1M tokens, $0.45 cache read), inheriting Kimi K3's 1M context, 131K output, and low/high/max thinking ladder.
+
 ## [17.2.12] - 2026-08-08
 
 ### Fixed
