@@ -5635,11 +5635,13 @@ export class AgentSession {
 			// A prompt issued while the session is already disposing must still run:
 			// the dispose-driven abort settles its turn (see "does not auto-retry
 			// empty reasonless aborts once the session is disposing"). Only drop the
-			// prompt when disposal began during the backend-transition await, where
-			// resuming would start a turn on a torn-down session.
-			const disposingBeforeTransition = this.#isDisposed;
+			// prompt when disposal began while waiting for the session-memory
+			// transition or memory-backend reconciliation below, where resuming
+			// would start a turn on a torn-down session.
+			const disposingBeforeMemoryGate = this.#isDisposed;
 			await this.#memory.transition;
-			if ((this.#isDisposed && !disposingBeforeTransition) || this.#promptGeneration !== generation) return;
+			await this.waitForMemoryBackendReconcile();
+			if ((this.#isDisposed && !disposingBeforeMemoryGate) || this.#promptGeneration !== generation) return;
 			const beforeAgentStartSystemPrompt = await this.#buildSystemPromptForAgentStart(expandedText);
 
 			let baseXdevCatalogDelivered = true;

@@ -429,6 +429,11 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			try {
 				await runtime.settings.flush();
 			} catch (err) {
+				try {
+					await memoryTransition?.complete();
+				} catch (restartError) {
+					await runtime.output(`Memory backend restore failed: ${errorMessage(restartError)}`);
+				}
 				return usage(`Failed to save pending settings: ${errorMessage(err)}`, runtime);
 			}
 			try {

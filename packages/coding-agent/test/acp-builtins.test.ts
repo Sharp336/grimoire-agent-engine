@@ -1293,14 +1293,56 @@ describe("wave 5 — adapters and polish", () => {
 });
 
 describe("/move preflight flush", () => {
-	it("aborts text-mode /move when pending settings flush fails", async () => {
+	it("restores memory and aborts text-mode /move when pending settings flush fails", async () => {
 		const targetDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-acp-move-"));
 		try {
-			const { output, fakeSessionManager, runtime } = createRuntime();
+			const { output, fakeSessionManager, runtime, session } = createRuntime();
+			const completeStarted = Promise.withResolvers<void>();
+			const releaseComplete = Promise.withResolvers<void>();
+			let restartEnabled = false;
+			spyOn(session, "suspendMemoryBackendForWorkspaceTransition").mockResolvedValue({
+				complete: async options => {
+					restartEnabled = options?.restart ?? true;
+					completeStarted.resolve();
+					await releaseComplete.promise;
+				},
+			});
 			spyOn(runtime.settings, "flush").mockRejectedValue(new Error("disk full"));
 
-			const result = await executeAcpBuiltinSlashCommand(`/move ${targetDir}`, runtime);
+			const execution = executeAcpBuiltinSlashCommand(`/move ${targetDir}`, runtime);
+			let settled = false;
+			const executionSettled = execution.then(
+				() => {
+					settled = true;
+					return "command-settled" as const;
+				},
+				() => {
+					settled = true;
+					return "command-settled" as const;
+				},
+			);
+			let firstBoundary: "complete-started" | "command-settled";
+			let settledWhileCompleteBlocked = false;
+			let restartEnabledWhileBlocked = false;
+			let movedWhileCompleteBlocked: string | undefined;
+			try {
+				firstBoundary = await Promise.race([
+					completeStarted.promise.then(() => "complete-started" as const),
+					executionSettled,
+				]);
+				await Bun.sleep(0);
+				settledWhileCompleteBlocked = settled;
+				restartEnabledWhileBlocked = restartEnabled;
+				movedWhileCompleteBlocked = fakeSessionManager!._movedTo;
+			} finally {
+				releaseComplete.resolve();
+			}
+			const result = await execution;
 
+			expect(firstBoundary).toBe("complete-started");
+			expect(settledWhileCompleteBlocked).toBe(false);
+			expect(restartEnabledWhileBlocked).toBe(true);
+			expect(movedWhileCompleteBlocked).toBeUndefined();
 			expect(result).toEqual({ consumed: true });
 			expect(output[0]).toContain("disk full");
 			expect(fakeSessionManager!._movedTo).toBeUndefined();
