@@ -1039,6 +1039,7 @@ export const SETTINGS_SCHEMA = {
 
 	"display.hideToolActivity": {
 		type: "boolean",
+		rpcReadable: true,
 		default: false,
 		ui: {
 			tab: "appearance",
@@ -1132,6 +1133,7 @@ export const SETTINGS_SCHEMA = {
 
 	hideThinkingBlock: {
 		type: "boolean",
+		rpcReadable: true,
 		default: false,
 		ui: {
 			tab: "model",
@@ -1142,6 +1144,7 @@ export const SETTINGS_SCHEMA = {
 	},
 	proseOnlyThinking: {
 		type: "boolean",
+		rpcReadable: true,
 		default: true,
 		ui: {
 			tab: "model",

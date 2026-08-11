@@ -161,6 +161,45 @@ describe("RpcClient lifecycle (issue #4079 B)", () => {
 		]);
 	}, 20_000);
 
+	test("returns typed newest and older display transcript pages", async () => {
+		using client = new RpcClient({ cliPath: MOCK_AGENT, env: { MOCK_RPC_V2: "1" } });
+		await client.start();
+
+		const newest = await client.getTranscriptPage({ limit: 1, collapseCompactedHistory: true });
+		expect(newest).toEqual({
+			messages: [{ role: "assistant", content: [{ type: "text", text: "newest" }], timestamp: 2 }],
+			cacheMissExplainedAt: [true],
+			startIndex: 1,
+			totalMessages: 2,
+			olderCursor: "older-page",
+		});
+		expect(await client.getTranscriptPage({ cursor: newest.olderCursor })).toEqual({
+			messages: [{ role: "user", content: "oldest", timestamp: 1 }],
+			cacheMissExplainedAt: [false],
+			startIndex: 0,
+			totalMessages: 2,
+		});
+	}, 20_000);
+
+	test("preserves transcript page busy and stale error codes", async () => {
+		using busyClient = new RpcClient({
+			cliPath: MOCK_AGENT,
+			env: { MOCK_RPC_V2: "1", MOCK_RPC_PAGE_BUSY: "1" },
+		});
+		await busyClient.start();
+		await expect(busyClient.getTranscriptPage()).rejects.toMatchObject({ code: "session_busy" });
+
+		using staleClient = new RpcClient({
+			cliPath: MOCK_AGENT,
+			env: { MOCK_RPC_V2: "1", MOCK_RPC_PAGE_STALE: "1" },
+		});
+		await staleClient.start();
+		const first = await staleClient.getTranscriptPage();
+		await expect(staleClient.getTranscriptPage({ cursor: first.olderCursor })).rejects.toMatchObject({
+			code: "stale_cursor",
+		});
+	}, 20_000);
+
 	test("start() succeeds a second time after stop() on the same instance", async () => {
 		using client = new RpcClient({
 			cliPath: MOCK_AGENT,

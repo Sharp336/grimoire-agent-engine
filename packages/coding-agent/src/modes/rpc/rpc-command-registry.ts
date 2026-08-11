@@ -1538,6 +1538,14 @@ export const RPC_COMMAND_DEFINITIONS = {
 		{ type: "get_messages_page" },
 		{ cursor: optionalStringField, limit: positiveIntegerField },
 	),
+	get_transcript_page: sessionCommand(
+		{ type: "get_transcript_page" },
+		{
+			cursor: optionalStringField,
+			limit: positiveIntegerField,
+			collapseCompactedHistory: optionalBooleanField,
+		},
+	),
 } as const satisfies RpcCommandDefinitions;
 
 export function getRpcCommandRequiredFeatures(commandType: RpcCommandType): readonly string[] {

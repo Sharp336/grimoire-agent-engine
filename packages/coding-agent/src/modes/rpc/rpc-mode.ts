@@ -134,7 +134,7 @@ import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameEncoder } from 
 import { handleGetSettings } from "./rpc-get-settings";
 import { claimRpcInput } from "./rpc-input";
 import { RpcInteractiveSurfaceError, RpcInteractiveSurfaceManager } from "./rpc-interactive-surface";
-import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
+import { pageRpcMessages, pageRpcTranscript, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
 import { type RpcOperationHandle, RpcOperationManager, RpcOperationMessageOwnership } from "./rpc-operations";
 import { RpcProvenanceManager, type RpcProvenanceSource } from "./rpc-provenance";
 import { RpcResourceLifecycleManager, RpcResourceNotFoundError } from "./rpc-resource-lifecycle";
@@ -4711,6 +4711,42 @@ export async function runRpcMode(
 					return error(
 						id,
 						"get_messages_page",
+						pageError instanceof Error ? pageError.message : String(pageError),
+						pageError instanceof RpcMessagesPageError ? pageError.code : undefined,
+					);
+				}
+			}
+
+			case "get_transcript_page": {
+				if (session.isStreaming || session.isCompacting)
+					return error(id, "get_transcript_page", RPC_MESSAGES_PAGE_BUSY_ERROR, "session_busy");
+				try {
+					const collapseCompactedHistory =
+						command.cursor === undefined && command.collapseCompactedHistory === undefined
+							? session.settings.get("display.collapseCompacted")
+							: command.collapseCompactedHistory;
+					const transcript = session.buildTranscriptSessionContext({
+						collapseCompactedHistory,
+						keepDanglingToolCalls: session.isStreaming,
+					});
+					return success(
+						id,
+						"get_transcript_page",
+						pageRpcTranscript(
+							transcript.messages,
+							transcript.cacheMissExplainedAt,
+							{
+								sessionId: session.sessionId,
+								leafId: session.sessionManager.getLeafId(),
+								messageCount: transcript.messages.length,
+							},
+							{ cursor: command.cursor, limit: command.limit, collapseCompactedHistory },
+						),
+					);
+				} catch (pageError) {
+					return error(
+						id,
+						"get_transcript_page",
 						pageError instanceof Error ? pageError.message : String(pageError),
 						pageError instanceof RpcMessagesPageError ? pageError.code : undefined,
 					);

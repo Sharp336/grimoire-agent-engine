@@ -152,11 +152,14 @@ describe("settings snapshot", () => {
 			"colorBlindMode",
 			"display.cacheMissMarker",
 			"display.collapseCompacted",
+			"display.hideToolActivity",
 			"display.shimmer",
 			"display.showTokenUsage",
 			"display.smoothStreaming",
+			"hideThinkingBlock",
 			"images.autoResize",
 			"images.blockImages",
+			"proseOnlyThinking",
 			"showHardwareCursor",
 			"statusLine.compactThinkingLevel",
 			"statusLine.preset",
@@ -179,12 +182,12 @@ describe("settings snapshot", () => {
 	});
 
 	it("keeps every disclosed setting inside its reviewed shape", () => {
-		// Settings the panel already shows, whose values are a bool or one of a
-		// fixed enum, so none can carry a path, a URL or a credential.
+		// Reviewed presentation booleans/enums only, so none can carry a path,
+		// URL, prompt, or credential. Thinking presentation belongs to Model.
 		for (const entry of buildSettingsSnapshot(Settings.isolated()).settings) {
 			if (entry.redacted === true) continue;
 			expect(entry.ui).toBeDefined();
-			expect(entry.ui?.tab).toBe("appearance");
+			expect(["appearance", "model"]).toContain(entry.ui?.tab);
 			expect(entry.ui?.secret).not.toBe(true);
 			expect(["boolean", "enum"]).toContain(entry.type);
 		}

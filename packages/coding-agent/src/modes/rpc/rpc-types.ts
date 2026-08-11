@@ -113,6 +113,19 @@ export type * from "./rpc-provenance";
 export type * from "./rpc-resource-lifecycle";
 export type * from "./rpc-semantic-rendering";
 
+export interface RpcTranscriptPageOptions {
+	cursor?: string;
+	limit?: number;
+	collapseCompactedHistory?: boolean;
+}
+
+export interface RpcTranscriptPage {
+	messages: AgentMessage[];
+	cacheMissExplainedAt: boolean[];
+	startIndex: number;
+	totalMessages: number;
+	olderCursor?: string;
+}
 export type RpcJsonValue = string | number | boolean | null | RpcJsonValue[] | { [key: string]: RpcJsonValue };
 
 export interface RpcSettingsChange {
@@ -629,7 +642,14 @@ export type RpcCommand =
 
 	// Messages
 	| { id?: string; type: "get_messages" }
-	| { id?: string; type: "get_messages_page"; cursor?: string; limit?: number };
+	| { id?: string; type: "get_messages_page"; cursor?: string; limit?: number }
+	| {
+			id?: string;
+			type: "get_transcript_page";
+			cursor?: string;
+			limit?: number;
+			collapseCompactedHistory?: boolean;
+	  };
 
 // ============================================================================
 // RPC State
@@ -1834,6 +1854,13 @@ export type RpcResponse =
 	// Messages
 	| { id?: string; type: "response"; command: "get_messages"; success: true; data: { messages: AgentMessage[] } }
 	| { id?: string; type: "response"; command: "get_messages_page"; success: true; data: RpcMessagesPage }
+	| {
+			id?: string;
+			type: "response";
+			command: "get_transcript_page";
+			success: true;
+			data: RpcTranscriptPage;
+	  }
 
 	// Error response (any command can fail); `code` is an optional machine-readable reason.
 	| {

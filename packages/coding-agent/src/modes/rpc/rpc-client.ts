@@ -116,6 +116,8 @@ import type {
 	RpcSessionState,
 	RpcSettingsChange,
 	RpcSettingsUpdateFrame,
+	RpcTranscriptPage,
+	RpcTranscriptPageOptions,
 	RpcSubagentEventFrame,
 	RpcSubagentLifecycleFrame,
 	RpcSubagentMessagesResult,
@@ -2435,6 +2437,12 @@ export class RpcClient {
 	async getMessagesPage(options: RpcMessagesPageOptions = {}): Promise<RpcMessagesPage> {
 		const response = await this.#send({ type: "get_messages_page", ...options });
 		return this.#getData<RpcMessagesPage>(response);
+	}
+
+	/** Get one newest-first stable display-transcript page. */
+	async getTranscriptPage(options: RpcTranscriptPageOptions = {}): Promise<RpcTranscriptPage> {
+		const response = await this.#send({ type: "get_transcript_page", ...options });
+		return this.#getData<RpcTranscriptPage>(response);
 	}
 
 	/** Get all messages, draining stable pages when protocol v2 is available. */

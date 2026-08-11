@@ -419,6 +419,52 @@ for await (const raw of console) {
 				});
 				continue;
 			}
+			if (frame.type === "get_transcript_page") {
+				if (Bun.env.MOCK_RPC_PAGE_BUSY === "1") {
+					writeFrame({
+						id,
+						type: "response",
+						command: frame.type,
+						success: false,
+						error: "Cannot page messages while the session is changing",
+						code: "session_busy",
+					});
+					continue;
+				}
+				if (Bun.env.MOCK_RPC_PAGE_STALE === "1" && frame.cursor !== undefined) {
+					writeFrame({
+						id,
+						type: "response",
+						command: frame.type,
+						success: false,
+						error: "RPC message cursor is stale",
+						code: "stale_cursor",
+					});
+					continue;
+				}
+				const newest = frame.cursor === undefined;
+				writeFrame({
+					id,
+					type: "response",
+					command: frame.type,
+					success: true,
+					data: newest
+						? {
+								messages: [{ role: "assistant", content: [{ type: "text", text: "newest" }], timestamp: 2 }],
+								cacheMissExplainedAt: [true],
+								startIndex: 1,
+								totalMessages: 2,
+								olderCursor: "older-page",
+							}
+						: {
+								messages: [{ role: "user", content: "oldest", timestamp: 1 }],
+								cacheMissExplainedAt: [false],
+								startIndex: 0,
+								totalMessages: 2,
+							},
+				});
+				continue;
+			}
 			if (
 				frame.type === "get_messages" &&
 				(Bun.env.MOCK_RPC_PAGE_BUSY === "1" || Bun.env.MOCK_RPC_PAGE_STALE === "1")
