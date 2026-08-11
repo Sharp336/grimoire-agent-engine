@@ -4589,6 +4589,11 @@ export class AgentSession {
 		return this.#models.scopedModels;
 	}
 
+	/** Replace the session's cycle scope after late model discovery. */
+	setScopedModels(scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>): void {
+		this.#models.setScopedModels(scopedModels);
+	}
+
 	/** Prompt templates */
 	getPlanModeState(): PlanModeState | undefined {
 		return this.#planModeState;

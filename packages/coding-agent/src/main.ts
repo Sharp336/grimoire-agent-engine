@@ -691,16 +691,33 @@ async function switchToResumedProject(
  * failing that, the active project's `enabledModels`. Re-run after a resume
  * switches projects so the destination project's settings-derived scope wins
  * over the launch directory's.
+ *
+ * Startup calls this before `createSession` kicks off the background discovery
+ * refresh, so patterns that only match discovery-backed providers (proxies,
+ * Ollama, ...) would resolve against an empty registry and silently collapse
+ * to "unscoped" — the /model hub, alt+p picker, and Ctrl+P cycle then fall
+ * back to the full catalog. Mirror the initial-model discovery fallback:
+ * refresh once (cache-guided), then retry the same patterns.
  */
-async function resolveScopedModels(
+export async function resolveScopedModels(
 	parsed: Args,
-	modelRegistry: ModelRegistry,
+	modelRegistry: Pick<ModelRegistry, "getAvailable" | "getDiscoverableProviders" | "refresh">,
 	activeSettings: Settings,
 ): Promise<ScopedModel[]> {
 	const modelPatterns = parsed.models ?? activeSettings.get("enabledModels");
 	if (!modelPatterns || modelPatterns.length === 0) {
 		return [];
 	}
+	const scopedModels = await resolveModelScope(
+		modelPatterns,
+		modelRegistry,
+		getModelMatchPreferences(activeSettings),
+		activeSettings,
+	);
+	if (scopedModels.length > 0 || modelRegistry.getDiscoverableProviders().length === 0) {
+		return scopedModels;
+	}
+	await logger.time("resolveModelScopeDiscoveryFallback", () => modelRegistry.refresh("online-if-uncached"));
 	return await resolveModelScope(
 		modelPatterns,
 		modelRegistry,

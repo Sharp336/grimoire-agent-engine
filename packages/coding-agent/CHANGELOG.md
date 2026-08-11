@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `--models`/`enabledModels` scopes matching only discovery-backed providers (models.yml `discovery:` endpoints, Ollama, proxies) silently collapsing to "unscoped" on startup: the `/model` hub, alt+p picker, and Ctrl+P cycle showed the full catalog, `omp models` ignored the allow-list, and a transiently empty first discovery pass left the session on "no model" without recovering. Scope resolution now retries after a discovery refresh, `omp models` applies the `enabledModels` allow-list, and a session that starts without a model re-resolves the configured default once discovery completes instead of surfacing a false "No model available matching enabledModels" warning.
+
 ## [17.2.12] - 2026-08-08
 
 ### Fixed
