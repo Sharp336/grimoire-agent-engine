@@ -32,6 +32,7 @@ import type { ExtensionRunner } from "../extensibility/extensions";
 import type { ContextUsage } from "../extensibility/extensions/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
+import type { AgentRegistry } from "../registry/agent-registry";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { XdevState } from "../tools/xdev";
@@ -123,6 +124,8 @@ export interface AgentSessionConfig {
 	agent: Agent;
 	sessionManager: SessionManager;
 	settings: Settings;
+	/** Agent registry this session belongs to; its IRC bus is keyed by it (AgentRegistry.global() for the root). */
+	agentRegistry?: AgentRegistry;
 	/** Whether the session spawn policy permits the read-only `scout` subagent. Defaults to true. */
 	scoutAllowedBySpawnPolicy?: boolean;
 	/** Whether the caller explicitly requested yolo/auto-approve behavior for this session. */

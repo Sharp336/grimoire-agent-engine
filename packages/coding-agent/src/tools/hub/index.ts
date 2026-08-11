@@ -398,7 +398,7 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 		let removeBusAbortListener: (() => void) | undefined;
 		const busLeg =
 			messaging && busAbort
-				? IrcBus.global()
+				? IrcBus.forRegistry(messaging.registry)
 						.wait(messaging.senderId, { from }, 0, busAbort.signal)
 						.then(
 							message => ({ message, error: null as Error | null }),

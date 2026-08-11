@@ -232,7 +232,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		this.#registry = deps.registry ?? AgentRegistry.global();
 		this.#observers = deps.observers;
 		this.#settings = deps.settings;
-		this.#irc = deps.irc ?? IrcBus.global();
+		this.#irc = deps.irc ?? IrcBus.forRegistry(this.#registry);
 		// Lazy: the lifecycle global self-constructs against the global
 		// registry, so only touch it when revive/kill actually needs it.
 		this.#lifecycle = () => deps.lifecycle ?? AgentLifecycleManager.global();
