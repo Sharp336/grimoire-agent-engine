@@ -214,41 +214,18 @@ describe("guided goal setup", () => {
 		}
 	});
 
-	it("replaces a queued interview with the latest command", async () => {
+	it("queues the kickoff as a synthetic follow-up while the agent is streaming", async () => {
 		const harness = await createHarness();
 		try {
-			await harness.mode.init();
 			Object.defineProperty(harness.session, "isStreaming", { configurable: true, get: () => true });
 			const promptSpy = vi.spyOn(harness.session, "prompt").mockResolvedValue(true);
-			const followUp = vi.spyOn(harness.session, "followUp");
+			const followUp = vi.spyOn(harness.session, "followUp").mockResolvedValue();
 
 			await harness.mode.handleGuidedGoalCommand("ship it");
-			await harness.mode.handleGuidedGoalCommand("replace it");
 
 			expect(promptSpy).not.toHaveBeenCalled();
 			expect(followUp).toHaveBeenCalledTimes(1);
-			expect(harness.session.getEnabledToolNames()).toEqual(expect.arrayContaining(["ask", "goal"]));
-			const queued = harness.session.agent.peekFollowUpQueue();
-			expect(queued).toHaveLength(1);
-			const kickoff = queued[0];
-			if (kickoff?.role !== "developer") throw new Error("expected queued guided-goal kickoff");
-			const kickoffText =
-				typeof kickoff.content === "string"
-					? kickoff.content
-					: kickoff.content.find(part => part.type === "text")?.text;
-			expect(kickoffText).toContain("replace it");
-			expect(kickoffText).not.toContain("ship it");
-
-			await harness.dispatchSessionEvent({ type: "agent_end", messages: [], isTerminal: true });
-			expect(harness.session.getEnabledToolNames()).toEqual(expect.arrayContaining(["ask", "goal"]));
-
-			harness.session.agent.popLastFollowUp();
-			await harness.dispatchSessionEvent({ type: "message_start", message: kickoff });
-			await harness.dispatchSessionEvent({ type: "agent_end", messages: [], isTerminal: false });
-			expect(harness.session.getEnabledToolNames()).toEqual(expect.arrayContaining(["ask", "goal"]));
-
-			await harness.dispatchSessionEvent({ type: "agent_end", messages: [], isTerminal: true });
-			expect(harness.session.getEnabledToolNames()).toEqual(["read"]);
+			expect(followUp.mock.calls[0]?.[2]).toEqual({ synthetic: true });
 		} finally {
 			await harness.cleanup();
 		}
@@ -268,37 +245,6 @@ describe("guided goal setup", () => {
 			expect(harness.session.agent.peekFollowUpQueue()).toHaveLength(0);
 			await harness.dispatchSessionEvent({ type: "agent_end", messages: [], isTerminal: true });
 
-			expect(harness.session.getEnabledToolNames()).toEqual(["read"]);
-		} finally {
-			await harness.cleanup();
-		}
-	});
-
-	it("interrupts a running interview before starting its replacement", async () => {
-		const harness = await createHarness();
-		try {
-			await harness.mode.init();
-			let streaming = true;
-			Object.defineProperty(harness.session, "isStreaming", { configurable: true, get: () => streaming });
-			vi.spyOn(harness.session, "followUp");
-
-			await harness.mode.handleGuidedGoalCommand("ship it");
-			const kickoff = harness.session.agent.popLastFollowUp();
-			if (kickoff?.role !== "developer") throw new Error("expected queued guided-goal kickoff");
-			await harness.dispatchSessionEvent({ type: "message_start", message: kickoff });
-
-			const abort = vi.spyOn(harness.session, "abort").mockImplementation(async () => {
-				streaming = false;
-			});
-			const promptSpy = vi.spyOn(harness.session, "prompt").mockResolvedValue(true);
-			await harness.mode.handleGuidedGoalCommand("replace it");
-
-			expect(abort).toHaveBeenCalledWith({ goalReason: "internal" });
-			expect(promptSpy).toHaveBeenCalledTimes(1);
-			const [replacement, promptOptions] = promptSpy.mock.calls[0]!;
-			expect(replacement).toContain("replace it");
-			expect(replacement).not.toContain("ship it");
-			expect(promptOptions).toEqual({ synthetic: true });
 			expect(harness.session.getEnabledToolNames()).toEqual(["read"]);
 		} finally {
 			await harness.cleanup();

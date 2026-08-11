@@ -6085,38 +6085,12 @@ export class AgentSession {
 	 *  non-user steer (hidden goal/plan/budget, IRC/extension asides) is dropped, so abort()'s
 	 *  #drainStrandedQueuedMessages can't auto-resume the run the user just interrupted (the drain only
 	 *  fires while agent.hasQueuedMessages()). Plain Alt+Up dequeue preserves those non-user steers. */
-	#queuedAgentFollowUpIndex(text: string): number {
-		return this.agent.peekFollowUpQueue().findIndex(message => {
+	hasQueuedAgentFollowUp(text: string): boolean {
+		return this.agent.peekFollowUpQueue().some(message => {
 			if (message.role !== "developer" || message.attribution !== "agent") return false;
 			if (typeof message.content === "string") return message.content === text;
 			return message.content.some(part => part.type === "text" && part.text === text);
 		});
-	}
-
-	hasQueuedAgentFollowUp(text: string): boolean {
-		return this.#queuedAgentFollowUpIndex(text) >= 0;
-	}
-
-	/** Replace one queued hidden developer follow-up without disturbing user-authored queue entries. */
-	replaceQueuedAgentFollowUp(previousText: string, nextText: string): boolean {
-		const steering = this.agent.peekSteeringQueue();
-		const followUp = this.agent.peekFollowUpQueue();
-		const index = this.#queuedAgentFollowUpIndex(previousText);
-		if (index < 0) return false;
-
-		const message = followUp[index];
-		if (message?.role !== "developer") return false;
-		const content =
-			typeof message.content === "string"
-				? nextText
-				: message.content.map(part =>
-						part.type === "text" && part.text === previousText ? { ...part, text: nextText } : part,
-					);
-		const nextFollowUp = [...followUp];
-		nextFollowUp[index] = { ...message, content };
-		this.agent.replaceQueues([...steering], nextFollowUp);
-		this.#reconcileQueuedMessageDrain();
-		return true;
 	}
 
 	clearQueue(options?: { forInterrupt?: boolean }): {
