@@ -341,6 +341,8 @@ export interface ExecutorOptions {
 	additionalDirectories?: string[];
 	/** Exact provider credential resolver inherited from the parent session. */
 	getApiKey?: CreateAgentSessionOptions["getApiKey"];
+	/** The parent session's agent registry, so a spawned subagent shares its IRC world (peers + bus). Default global. */
+	agentRegistry?: CreateAgentSessionOptions["agentRegistry"];
 	worktree?: string;
 	agent: AgentDefinition;
 	task: string;
@@ -3055,6 +3057,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				authStorage,
 				modelRegistry,
 				getApiKey: options.getApiKey,
+				agentRegistry: options.agentRegistry,
 				settings: subagentSettings,
 				model,
 				modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,
