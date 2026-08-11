@@ -221,6 +221,27 @@ describe("omp import prime child CLI", () => {
 		}
 	});
 
+	it("falls back to the legacy ~/.pi/agent source when ~/.prime/agent is absent", async () => {
+		const fixture = await makeFixture();
+		const legacySource = path.join(fixture.project, ".pi", "agent");
+		try {
+			await fs.mkdir(legacySource, { recursive: true });
+			await fs.writeFile(path.join(legacySource, "settings.json"), '{"defaultThinkingLevel":"high"}\n');
+			const result = await runCliProcess(
+				["import", "prime", "--cwd", fixture.project, "--agent-dir", fixture.agent, "--json"],
+				fixture.project,
+			);
+			expect(result.exitCode, `${result.error}\n${result.output}`).toBe(0);
+			const report = JSON.parse(result.output) as PrimeImportReport;
+			expect(report.items).toContainEqual(
+				expect.objectContaining({ itemId: "setting:defaultThinkingLevel", outcome: "planned" }),
+			);
+			expect(report.losses).not.toContainEqual(expect.objectContaining({ code: "source-missing" }));
+		} finally {
+			await fs.rm(fixture.root, { recursive: true, force: true });
+		}
+	});
+
 	it("keeps colliding session IDs visible with globally unique dry-run item IDs", async () => {
 		const fixture = await makeSessionIdCollisionFixture();
 		try {

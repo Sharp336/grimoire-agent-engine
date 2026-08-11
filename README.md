@@ -560,6 +560,8 @@ On first run omp inherits rules, skills, and MCP servers already on disk from `.
 omp import prime [--source <prime-home>] [--cwd <project>] [--session-root <dir>] [--prime-cli-config <file>] [--agent-dir <omp-home>] [--apply] [--json]
 ```
 
+Without `--source`, OMP uses `~/.prime/agent` when present and otherwise falls back to the legacy `~/.pi/agent` directory.
+
 The command is a read-only dry run unless `--apply` is set. It imports representable global and project settings, model/provider definitions, literal API keys, skills, sessions, and session images/artifacts. Prime sessions receive fresh OMP identities and provenance; valid child transcripts are imported independently without reactivating child state. Kernel snapshots, schedules, leases, heartbeats, live RLM topology, OAuth sessions, command or environment credential references, and other unsupported records are reported as typed losses rather than activated or guessed.
 
 Imports are create-only: existing OMP settings, model entries, credentials, skills, and session data win. Source digests are checked again before apply, and reruns are audited and idempotent. OAuth providers are listed for re-login with `/login <provider>`.

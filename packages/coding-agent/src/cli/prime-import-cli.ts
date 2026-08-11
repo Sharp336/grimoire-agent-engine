@@ -129,6 +129,24 @@ async function implicitPrimeCliConfigPath(): Promise<string | undefined> {
 	}
 }
 
+async function implicitPrimeSourceRoot(): Promise<string> {
+	const primary = path.join(os.homedir(), ".prime", "agent");
+	try {
+		await fs.lstat(primary);
+		return primary;
+	} catch (error) {
+		if (error === null || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") return primary;
+	}
+	const legacy = path.join(os.homedir(), ".pi", "agent");
+	try {
+		await fs.lstat(legacy);
+		return legacy;
+	} catch (error) {
+		if (error !== null && typeof error === "object" && "code" in error && error.code !== "ENOENT") return legacy;
+		return primary;
+	}
+}
+
 function fallbackDiscovery(
 	sourceRoot: string,
 	cwd: string,
@@ -376,7 +394,7 @@ export function primeImportExitCode(report: PrimeImportReport): 0 | 1 {
 }
 
 export async function runPrimeImportCommand(args: PrimeImportCommandArgs): Promise<PrimeImportCliResult> {
-	const sourceRoot = path.resolve(args.source ?? path.join(os.homedir(), ".prime", "agent"));
+	const sourceRoot = path.resolve(args.source ?? (await implicitPrimeSourceRoot()));
 	const cwd = path.resolve(args.cwd ?? getProjectDir());
 	const sessionRoot = args.sessionRoot === undefined ? undefined : path.resolve(args.sessionRoot);
 	const resolvedSessionRoot = sessionRoot ?? path.join(sourceRoot, "sessions");
