@@ -2952,6 +2952,17 @@ export class AgentSession {
 				compactionResult = await compactionTask;
 			}
 			await this.#recovery.onErrorSettledWithoutRetry(msg, compactionResult);
+			// When compaction pruned the trailing assistant (overflow / length stop
+			// with no recovery path), periodic shake would rebuild agent.state from
+			// persisted entries and reintroduce the pruned assistant into the
+			// prompt. Consume the pending counter and sync flag — a mid-run interval
+			// shake may have set #shakeNeedsAgentSync before this turn failed — so
+			// no later agent_end fires a rebuild. Runs before the early returns
+			// below: turns ending mid-tool-use skip the shake call entirely.
+			if (compactionResult.tailPruned) {
+				this.#shakeToolCallCounter = 0;
+				this.#shakeNeedsAgentSync = false;
+			}
 			// Stop-time todo reconciliation only fires at a text-only final stop. A run
 			// that ends still mid-tool-use (deadline hit, context full, etc.) skips the
 			// reminder so we don't pile a follow-up onto an already in-flight turn.
@@ -2976,17 +2987,12 @@ export class AgentSession {
 			}
 
 			// When compaction pruned the trailing assistant (overflow / length
-			// stop with no recovery path), periodic shake would rebuild agent.state
-			// from persisted entries and reintroduce the pruned assistant into the
-			// prompt. Skip it but allow normal agent_end processing (session_stop
-			// hooks, rewind, todo checks) to continue.
+			// stop with no recovery path), skip periodic shake: the pending
+			// counter/sync were consumed above. Allow normal agent_end processing
+			// (session_stop hooks, rewind, todo checks) to continue.
 			if (!compactionResult.tailPruned) {
 				// Periodic shake — independent of compaction strategy/auto-compaction
 				await this.#runPeriodicShake();
-			} else {
-				// Consume the due counter so the next normal turn doesn't immediately
-				// fire shake and reintroduce the pruned assistant via state rebuild.
-				this.#shakeToolCallCounter = 0;
 			}
 			if (msg.stopReason !== "error") {
 				if (this.#enforceRewindBeforeYield()) {

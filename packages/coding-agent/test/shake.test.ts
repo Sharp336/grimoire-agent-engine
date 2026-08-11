@@ -1117,6 +1117,32 @@ describe("AgentSession shake", () => {
 			expect(shakeSpy).toHaveBeenCalledTimes(1);
 		});
 
+		it("tailPruned consumes the pending sync so the pruned assistant is not reintroduced", async () => {
+			const { session, scripted, setResult } = createPeriodicHarness({
+				"contextPromotion.enabled": false,
+				"compaction.strategy": "off",
+				"shake.interval": 1,
+			});
+			const shakeSpy = vi.spyOn(session, "shake");
+
+			setResult("ok");
+			// Mid-run: the turn_end hook shake fires and sets #shakeNeedsAgentSync
+			scripted.push({ stopReason: "toolUse", toolCalls: 1 });
+			// Overflow terminal turn: agent_end tailPrunes and must consume the
+			// pending sync — otherwise the next normal agent_end rebuilds
+			// agent.state from the branch and reintroduces the pruned assistant.
+			scripted.push({ stopReason: "error", errorMessage: "prompt is too long", text: "" });
+			await session.prompt("do it");
+			await settle(session);
+			expect(shakeSpy).toHaveBeenCalledTimes(1);
+
+			// A normal follow-up prompt must NOT trigger a stale sync shake
+			scripted.push({ stopReason: "stop", text: "again" });
+			await session.prompt("again");
+			await settle(session);
+			expect(shakeSpy).toHaveBeenCalledTimes(1);
+		});
+
 		it("mid-run shake requires the awaited turn-end hook; agent_end still fires the counter fallback", async () => {
 			session.settings.set("compaction.strategy", "off");
 			session.settings.set("shake.interval", 1);
