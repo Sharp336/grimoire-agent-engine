@@ -1,7 +1,13 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { pickWeightedTip, WelcomeComponent } from "@oh-my-pi/pi-coding-agent/modes/components/welcome";
+import {
+	pickWeightedTip,
+	renderWelcomeTip,
+	WelcomeComponent,
+} from "@oh-my-pi/pi-coding-agent/modes/components/welcome";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { appendContributionReminder, CONTRIBUTION_REMINDER } from "@oh-my-pi/pi-coding-agent/utils/contribution";
+import { visibleWidth } from "@oh-my-pi/pi-tui";
 
 describe("WelcomeComponent tips", () => {
 	beforeAll(async () => {
@@ -36,6 +42,40 @@ describe("WelcomeComponent tips", () => {
 		expect(welcomeRegular.tip).toBeDefined();
 	});
 
+	it("keeps the complete contribution reminder directly after the rotating tip at boundary widths", () => {
+		vi.spyOn(theme, "getSymbolPreset").mockReturnValue("nerd");
+		const random = vi.spyOn(Math, "random");
+
+		for (const termWidth of [16, 22, 23, 80]) {
+			for (const sample of [0, 0.25, 0.5, 0.75, 0.999_999]) {
+				random.mockReturnValue(sample);
+				const welcome = new WelcomeComponent("1.0.0", "model", "provider");
+				const lines = welcome.render(termWidth);
+				const plain = lines.map(line => Bun.stripANSI(line));
+				const tipStart = plain.findIndex(line => /^\s*Tip: /.test(line));
+				const contributionStart = plain.findIndex(line => line.includes("Contribute:"));
+
+				expect(tipStart).toBeGreaterThanOrEqual(0);
+				expect(contributionStart).toBeGreaterThan(tipStart);
+
+				const expectedTip = renderWelcomeTip(welcome.tip ?? "", termWidth - 2).map(line => Bun.stripANSI(line));
+				expect(plain.slice(tipStart, contributionStart)).toEqual(expectedTip);
+				expect(
+					plain
+						.slice(contributionStart)
+						.map(line => line.trim())
+						.join(" "),
+				).toBe(`Contribute: ${CONTRIBUTION_REMINDER}`);
+				if (termWidth === 80) {
+					expect(plain[contributionStart]).toMatch(/^\s*Contribute: Something broken\?/);
+				}
+				for (const line of lines) {
+					expect(visibleWidth(line)).toBeLessThanOrEqual(termWidth);
+				}
+			}
+		}
+	});
+
 	it("weights [NEW] tips above ordinary tips in selection", () => {
 		// Data-independent: tips.txt may legitimately carry zero "[NEW]" tips, so
 		// exercise the weighting contract on a synthetic list.
@@ -60,5 +100,17 @@ describe("WelcomeComponent tips", () => {
 		expect(newMax).toBeGreaterThan(0);
 		expect(newMax).toBeGreaterThan(ordinaryMax);
 		expect(pickWeightedTip([], 0.5)).toBe("");
+	});
+});
+
+describe("contribution reminder", () => {
+	it("exposes the exact shared reminder text", () => {
+		expect(CONTRIBUTION_REMINDER).toBe("Something broken? Ask your agent to fix it and submit a PR.");
+	});
+
+	it("trims only trailing whitespace before appending a blank line and the reminder", () => {
+		expect(appendContributionReminder("  Startup changes stay indented.  \n\t")).toBe(
+			`  Startup changes stay indented.\n\n${CONTRIBUTION_REMINDER}`,
+		);
 	});
 });

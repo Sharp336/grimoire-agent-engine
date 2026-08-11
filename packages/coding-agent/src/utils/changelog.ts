@@ -2,6 +2,7 @@ import * as path from "node:path";
 import { getLastChangelogVersionPath, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import bundledChangelogPath from "../../CHANGELOG.md" with { type: "file" };
 import type { SettingValue } from "../config/settings";
+import { appendContributionReminder } from "./contribution";
 
 export interface ChangelogEntry {
 	major: number;
@@ -124,6 +125,15 @@ export function formatStartupChangelogSummary(selection: StartupChangelogSelecti
 			: "Use /changelog for details.";
 
 	return breakdown ? `${firstLine}\n${breakdown} · ${detailHint}` : `${firstLine}\n${detailHint}`;
+}
+
+/** Format the selected startup changelog mode with the permanent contribution reminder. */
+export function formatStartupChangelogForDisplay(
+	selection: StartupChangelogSelection,
+	mode: "summary" | "expanded",
+): string {
+	const content = mode === "summary" ? formatStartupChangelogSummary(selection) : (selection.markdown ?? "");
+	return appendContributionReminder(content);
 }
 
 /**

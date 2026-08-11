@@ -131,7 +131,7 @@ import {
 } from "../tools/todo";
 import { vocalizer } from "../tts/vocalizer";
 import { renderTreeList } from "../tui/tree-list";
-import { formatStartupChangelogSummary, type StartupChangelogSelection } from "../utils/changelog";
+import { formatStartupChangelogForDisplay, type StartupChangelogSelection } from "../utils/changelog";
 import { copyToClipboard } from "../utils/clipboard";
 import type { EventBus } from "../utils/event-bus";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
@@ -1015,18 +1015,17 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 
 			// Add changelog if provided
-			if (this.#startupChangelog && settings.get("startup.changelogMode") !== "hidden") {
+			const changelogMode = settings.get("startup.changelogMode");
+			if (this.#startupChangelog && changelogMode !== "hidden") {
 				this.ui.addChild(new DynamicBorder());
 				this.ui.addChild(new Text(theme.bold(theme.fg("accent", "What's New")), 1, 0));
 				this.ui.addChild(new Spacer(1));
-				if (settings.get("startup.changelogMode") === "summary") {
-					const summary = formatStartupChangelogSummary(this.#startupChangelog).replace(
-						/\/changelog(?: full)?/g,
-						command => theme.bold(command),
-					);
+				const changelog = formatStartupChangelogForDisplay(this.#startupChangelog, changelogMode);
+				if (changelogMode === "summary") {
+					const summary = changelog.replace(/\/changelog(?: full)?/g, command => theme.bold(command));
 					this.ui.addChild(new Text(summary, 1, 0));
 				} else {
-					this.ui.addChild(new Markdown(this.#startupChangelog.markdown?.trim() ?? "", 1, 0, getMarkdownTheme()));
+					this.ui.addChild(new Markdown(changelog, 1, 0, getMarkdownTheme()));
 				}
 				this.ui.addChild(new Spacer(1));
 				this.ui.addChild(new DynamicBorder());

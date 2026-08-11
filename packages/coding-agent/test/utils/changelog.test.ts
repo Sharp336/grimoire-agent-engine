@@ -18,6 +18,7 @@ import { removeWithRetries, VERSION } from "@oh-my-pi/pi-utils";
 import { SETTINGS_SCHEMA, Settings } from "../../src/config/settings";
 import {
 	type ChangelogEntry,
+	formatStartupChangelogForDisplay,
 	formatStartupChangelogSummary,
 	getNewEntries,
 	parseChangelog,
@@ -30,6 +31,7 @@ import {
 	selectStartupChangelog,
 	writeLastChangelogVersion,
 } from "../../src/utils/changelog";
+import { appendContributionReminder, CONTRIBUTION_REMINDER } from "../../src/utils/contribution";
 
 const CURRENT_VERSION = "2.0.0";
 const repoRoot = path.resolve(import.meta.dir, "..", "..", "..", "..");
@@ -225,6 +227,43 @@ describe("formatStartupChangelogSummary", () => {
 		expect(formatStartupChangelogSummary(selection)).toBe(
 			["Updated to v2.0.0 · 1 change in 1 release", "1 breaking change · Use /changelog for details."].join("\n"),
 		);
+	});
+});
+
+describe("formatStartupChangelogForDisplay", () => {
+	test("ends summary startup output with the shared reminder exactly once", () => {
+		const selection = selectStartupChangelog([release(2, 0, 0, "### Added\n\n- Current release.")], "1.0.0", "2.0.0");
+
+		const output = formatStartupChangelogForDisplay(selection, "summary");
+
+		expect(output).toBe(
+			[
+				"Updated to v2.0.0 · 1 change in 1 release",
+				"1 added · Use /changelog for details.",
+				"",
+				CONTRIBUTION_REMINDER,
+			].join("\n"),
+		);
+		expect(output.split(CONTRIBUTION_REMINDER)).toHaveLength(2);
+	});
+
+	test("ends expanded startup output with the shared reminder exactly once", () => {
+		const selection = selectStartupChangelog([release(2, 0, 0, "### Added\n\n- Current release.")], "1.0.0", "2.0.0");
+
+		const output = formatStartupChangelogForDisplay(selection, "expanded");
+
+		expect(output).toBe(`${selection.markdown}\n\n${CONTRIBUTION_REMINDER}`);
+		expect(output.split(CONTRIBUTION_REMINDER)).toHaveLength(2);
+	});
+
+	test("keeps exactly one shared reminder after repeated application", () => {
+		const selection = selectStartupChangelog([release(2, 0, 0, "### Added\n\n- Current release.")], "1.0.0", "2.0.0");
+		const formatted = formatStartupChangelogForDisplay(selection, "expanded");
+
+		const repeated = appendContributionReminder(formatted);
+
+		expect(repeated).toBe(formatted);
+		expect(repeated.split(CONTRIBUTION_REMINDER)).toHaveLength(2);
 	});
 });
 
