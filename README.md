@@ -557,12 +557,14 @@ On first run omp inherits rules, skills, and MCP servers already on disk from `.
 `omp import prime` previews or imports state from Prime Agent without starting Prime or modifying its files:
 
 ```sh
-omp import prime [--source <prime-home>] [--cwd <project>] [--session-root <dir>] [--prime-cli-config <file>] [--agent-dir <omp-home>] [--apply] [--json]
+omp import prime [--source <prime-home>] [--cwd <project>] [--session-root <dir>] [--prime-cli-config <file>] [--agent-dir <omp-home>] [--config-only] [--apply] [--json]
 ```
 
 Without `--source`, OMP uses `~/.prime/agent` when present and otherwise falls back to the legacy `~/.pi/agent` directory.
 
 The command is a read-only dry run unless `--apply` is set. It imports representable global and project settings, model/provider definitions, literal API keys, skills, sessions, and session images/artifacts. Prime sessions receive fresh OMP identities and provenance; valid child transcripts are imported independently without reactivating child state. Kernel snapshots, schedules, leases, heartbeats, live RLM topology, OAuth sessions, command or environment credential references, and other unsupported records are reported as typed losses rather than activated or guessed.
+
+Use `--config-only` to import only settings, model/provider definitions, and literal API keys. Skills, sessions, and artifacts are skipped.
 
 Imports are create-only: existing OMP settings, model entries, credentials, skills, and session data win. Source digests are checked again before apply, and reruns are audited and idempotent. OAuth providers are listed for re-login with `/login <provider>`.
 The destination directory and its nearest existing parent must be owned by the current user and not group- or world-writable. Higher ancestors must be owned by the current user or root; writable ancestors require a sticky bit that protects the trusted-owned child entry. This validated chain is the trust boundary for create-only publication.

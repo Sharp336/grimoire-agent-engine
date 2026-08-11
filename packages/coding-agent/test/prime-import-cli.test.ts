@@ -221,6 +221,52 @@ describe("omp import prime child CLI", () => {
 		}
 	});
 
+	it("applies configuration only when legacy sessions cannot be imported", async () => {
+		const fixture = await makeFixture();
+		try {
+			await fs.writeFile(path.join(fixture.source, "sessions", "prime-session.jsonl"), "{not-json}\n");
+			const args = [
+				"import",
+				"prime",
+				"--source",
+				fixture.source,
+				"--cwd",
+				fixture.project,
+				"--agent-dir",
+				fixture.agent,
+				"--apply",
+				"--json",
+			];
+
+			const refused = await runCliProcess(args, fixture.project);
+			expect(refused.exitCode).toBe(1);
+			expect(
+				await fs.stat(fixture.agent).then(
+					() => true,
+					() => false,
+				),
+			).toBe(false);
+
+			const applied = await runCliProcess([...args, "--config-only"], fixture.project);
+			expect(applied.exitCode, `${applied.error}\n${applied.output}`).toBe(0);
+			const report = JSON.parse(applied.output) as PrimeImportReport;
+			expect(report.losses.some(loss => loss.domain === "sessions")).toBe(false);
+			expect(report.items).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({ itemId: "setting:defaultThinkingLevel", outcome: "imported" }),
+					expect.objectContaining({ itemId: "credential:openai", outcome: "imported" }),
+				]),
+			);
+			expect(report.items.some(item => item.kind === "sessions")).toBe(false);
+			await expect(fs.stat(path.join(fixture.agent, "config.yml"))).resolves.toBeDefined();
+			await expect(fs.stat(path.join(fixture.agent, "agent.db"))).resolves.toBeDefined();
+			for (const excludedPath of ["skills", "sessions", "blobs", ".prime-import"])
+				await expect(fs.stat(path.join(fixture.agent, excludedPath))).rejects.toThrow();
+		} finally {
+			await fs.rm(fixture.root, { recursive: true, force: true });
+		}
+	});
+
 	it("falls back to the legacy ~/.pi/agent source when ~/.prime/agent is absent", async () => {
 		const fixture = await makeFixture();
 		const legacySource = path.join(fixture.project, ".pi", "agent");

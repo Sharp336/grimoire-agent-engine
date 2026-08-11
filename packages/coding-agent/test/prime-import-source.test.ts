@@ -526,4 +526,21 @@ describe("discoverPrimeSource", () => {
 			expect.objectContaining({ code: "source-missing", sourceRef: "global/settings.json" }),
 		);
 	});
+
+	it("ignores drift outside explicitly revalidated domains", async () => {
+		const root = await temporaryDirectory();
+		const sourceRoot = path.join(root, "prime");
+		const cwd = path.join(root, "project");
+		const sessionPath = path.join(sourceRoot, "sessions", "session.jsonl");
+		await writeText(path.join(sourceRoot, "settings.json"), '{"stable":true}\n');
+		await writeText(sessionPath, '{"type":"session"}\n');
+		const discovered = await discoverPrimeSource({ sourceRoot, cwd });
+
+		await writeText(sessionPath, '{"type":"session","changed":true}\n');
+		expect(
+			await revalidatePrimeSource(discovered.snapshot, {
+				domains: ["config", "settings", "models", "credentials"],
+			}),
+		).toEqual({ ok: true, losses: [] });
+	});
 });

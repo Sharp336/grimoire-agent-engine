@@ -40,6 +40,10 @@ export default class Import extends Command {
 		"prime-cli-config": Flags.string({ description: "Prime CLI config file" }),
 		"agent-dir": Flags.string({ description: "OMP agent directory" }),
 		apply: Flags.boolean({ description: "Apply changes (default is dry-run)", default: false }),
+		"config-only": Flags.boolean({
+			description: "Import settings, models, and credentials without importing skills, sessions, or artifacts",
+			default: false,
+		}),
 		json: Flags.boolean({ description: "Output JSON", default: false }),
 	};
 
@@ -55,6 +59,7 @@ export default class Import extends Command {
 				primeCliConfigPath: parsed.flags["prime-cli-config"],
 				agentDir: parsed.flags["agent-dir"],
 				apply: parsed.flags.apply,
+				configOnly: parsed.flags["config-only"],
 			};
 			const result = await runPrimeImportCommand(args);
 			if (parsed.flags.json) {

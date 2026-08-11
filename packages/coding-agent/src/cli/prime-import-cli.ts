@@ -30,6 +30,7 @@ import { parsePrimeSkills } from "../import/prime/skill-parser";
 import { discoverPrimeSource } from "../import/prime/source";
 import {
 	PRIME_IMPORT_SCHEMA_VERSION,
+	type PrimeImportDomain,
 	type PrimeImportItemResult,
 	type PrimeImportLoss,
 	type PrimeImportReport,
@@ -44,6 +45,7 @@ export interface PrimeImportCommandArgs {
 	readonly primeCliConfigPath?: string;
 	readonly agentDir?: string;
 	readonly apply: boolean;
+	readonly configOnly?: boolean;
 }
 
 export interface PrimeImportDestinationDisplay {
@@ -88,6 +90,8 @@ const FATAL_CODES: Partial<Record<PrimeImportLoss["code"], true>> = {
 	"skills-invalid-frontmatter": true,
 	"sessions-malformed": true,
 };
+
+const CONFIG_ONLY_DOMAINS: readonly PrimeImportDomain[] = ["config", "settings", "models", "credentials"];
 
 function compare(a: string, b: string): number {
 	return a < b ? -1 : a > b ? 1 : 0;
@@ -394,6 +398,7 @@ export function primeImportExitCode(report: PrimeImportReport): 0 | 1 {
 }
 
 export async function runPrimeImportCommand(args: PrimeImportCommandArgs): Promise<PrimeImportCliResult> {
+	const configOnly = args.configOnly === true;
 	const sourceRoot = path.resolve(args.source ?? (await implicitPrimeSourceRoot()));
 	const cwd = path.resolve(args.cwd ?? getProjectDir());
 	const sessionRoot = args.sessionRoot === undefined ? undefined : path.resolve(args.sessionRoot);
@@ -423,16 +428,21 @@ export async function runPrimeImportCommand(args: PrimeImportCommandArgs): Promi
 		});
 	}
 
-	const config = parsePrimeConfig(discovery);
-	const skills = parsePrimeSkills(discovery);
-	const sessions = parsePrimeSessions(discovery);
+	const sourceDomains = configOnly ? CONFIG_ONLY_DOMAINS : undefined;
+	const sourceLosses = sourceDomains
+		? discovery.losses.filter(loss => sourceDomains.includes(loss.domain))
+		: discovery.losses;
+	const parserDiscovery = configOnly ? { ...discovery, losses: sourceLosses } : discovery;
+	const config = parsePrimeConfig(parserDiscovery);
+	const skills = configOnly ? { candidates: [], losses: [] } : parsePrimeSkills(discovery);
+	const sessions = configOnly ? { sessions: [], losses: [] } : parsePrimeSessions(discovery);
 	let report: PrimeImportReport;
 	const initialIsolationLoss = await destinationIsolationLoss(discovery, destination);
 	if (initialIsolationLoss) {
 		report = reportFrom(
 			discovery.snapshot.snapshotId,
 			[],
-			[...discovery.losses, ...config.losses, ...skills.losses, ...sessions.losses, initialIsolationLoss],
+			[...sourceLosses, ...config.losses, ...skills.losses, ...sessions.losses, initialIsolationLoss],
 		);
 		const execution = { report, destination };
 		return {
@@ -441,7 +451,12 @@ export async function runPrimeImportCommand(args: PrimeImportCommandArgs): Promi
 			exitCode: primeImportExitCode(report),
 		};
 	}
-	const input: PrimeDestinationInput = { snapshot: discovery.snapshot, config, skills };
+	const input: PrimeDestinationInput = {
+		snapshot: discovery.snapshot,
+		config,
+		skills,
+		...(sourceDomains ? { sourceDomains } : {}),
+	};
 	let destinationPlan: PrimeDestinationPlan;
 	try {
 		destinationPlan = await planPrimeDestination(input, { agentDir, cwd });
@@ -451,7 +466,7 @@ export async function runPrimeImportCommand(args: PrimeImportCommandArgs): Promi
 			discovery.snapshot.snapshotId,
 			[],
 			[
-				...discovery.losses,
+				...sourceLosses,
 				...config.losses,
 				...skills.losses,
 				...sessions.losses,
@@ -463,11 +478,11 @@ export async function runPrimeImportCommand(args: PrimeImportCommandArgs): Promi
 	}
 	destination = destinationDisplay(destinationPlan.destination.agentDir);
 
-	const plannedSessionItems = sessionPlanItems(sessions.sessions);
+	const plannedSessionItems = configOnly ? [] : sessionPlanItems(sessions.sessions);
 	const plannedReport = reportFrom(
 		discovery.snapshot.snapshotId,
 		[...destinationPlan.items, ...plannedSessionItems],
-		[...discovery.losses, ...config.losses, ...skills.losses, ...sessions.losses, ...destinationPlan.losses],
+		[...sourceLosses, ...config.losses, ...skills.losses, ...sessions.losses, ...destinationPlan.losses],
 	);
 	if (!args.apply || primeImportExitCode(plannedReport) !== 0) {
 		report = plannedReport;
@@ -477,14 +492,16 @@ export async function runPrimeImportCommand(args: PrimeImportCommandArgs): Promi
 			".prime-import",
 			`rollback-${discovery.snapshot.snapshotId}.json`,
 		);
-		const manifestPreflightLoss = await preflightPrimeSessionRollbackManifest(discovery.snapshot, {
-			destinationCwd: destinationPlan.destination.cwd,
-			sessionDir: destination.sessionsRoot,
-			blobDir: destination.blobsRoot,
-			rollbackManifestPath,
-			validateDestinationRollbackEntry: entry =>
-				validatePrimeDestinationRollbackEntry(entry, destinationPlan.destination),
-		});
+		const manifestPreflightLoss = configOnly
+			? undefined
+			: await preflightPrimeSessionRollbackManifest(discovery.snapshot, {
+					destinationCwd: destinationPlan.destination.cwd,
+					sessionDir: destination.sessionsRoot,
+					blobDir: destination.blobsRoot,
+					rollbackManifestPath,
+					validateDestinationRollbackEntry: entry =>
+						validatePrimeDestinationRollbackEntry(entry, destinationPlan.destination),
+				});
 		if (manifestPreflightLoss) {
 			report = reportFrom(
 				discovery.snapshot.snapshotId,
@@ -493,7 +510,7 @@ export async function runPrimeImportCommand(args: PrimeImportCommandArgs): Promi
 					...sessionLostItems(sessions.sessions, manifestPreflightLoss.code),
 				],
 				[
-					...discovery.losses,
+					...sourceLosses,
 					...config.losses,
 					...skills.losses,
 					...sessions.losses,
@@ -517,7 +534,7 @@ export async function runPrimeImportCommand(args: PrimeImportCommandArgs): Promi
 					...sessionLostItems(sessions.sessions, preApplyIsolationLoss.code),
 				],
 				[
-					...discovery.losses,
+					...sourceLosses,
 					...config.losses,
 					...skills.losses,
 					...sessions.losses,
@@ -541,7 +558,7 @@ export async function runPrimeImportCommand(args: PrimeImportCommandArgs): Promi
 				discovery.snapshot.snapshotId,
 				markItemsLost([...destinationPlan.items, ...plannedSessionItems], lossCode),
 				[
-					...discovery.losses,
+					...sourceLosses,
 					...config.losses,
 					...skills.losses,
 					...sessions.losses,
@@ -560,7 +577,8 @@ export async function runPrimeImportCommand(args: PrimeImportCommandArgs): Promi
 		const destinationReport = destinationApplied.report;
 		const destinationFailed = primeImportExitCode(destinationReport) !== 0;
 		const hasInitialRollbackEntries = destinationApplied.rollbackEntries.length > 0;
-		const shouldFinalizeSessions = hasInitialRollbackEntries || (!destinationFailed && sessions.sessions.length > 0);
+		const shouldFinalizeSessions =
+			!configOnly && (hasInitialRollbackEntries || (!destinationFailed && sessions.sessions.length > 0));
 		let sessionReport: PrimeImportReport | undefined;
 		let manifestPath: string | undefined;
 		if (shouldFinalizeSessions) {
@@ -609,7 +627,7 @@ export async function runPrimeImportCommand(args: PrimeImportCommandArgs): Promi
 					discovery.snapshot.snapshotId,
 					[...destinationReport.items, ...sessionLostItems(sessions.sessions, lossCode)],
 					[
-						...discovery.losses,
+						...sourceLosses,
 						...config.losses,
 						...skills.losses,
 						...sessions.losses,
@@ -649,7 +667,7 @@ export async function runPrimeImportCommand(args: PrimeImportCommandArgs): Promi
 		report = reportFrom(
 			discovery.snapshot.snapshotId,
 			[...reportItems, ...laterSessionItems],
-			[...discovery.losses, ...config.losses, ...skills.losses, ...sessions.losses, ...reportLosses],
+			[...sourceLosses, ...config.losses, ...skills.losses, ...sessions.losses, ...reportLosses],
 			reports.some(value => value.partialApply) ||
 				(destinationFailed && hasInitialRollbackEntries) ||
 				sessionFinalizationFailed,

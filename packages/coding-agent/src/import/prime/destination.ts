@@ -14,6 +14,7 @@ import { revalidatePrimeSource } from "./source";
 import type {
 	PrimeConfigParserResult,
 	PrimeCredentialClassification,
+	PrimeImportDomain,
 	PrimeImportItemResult,
 	PrimeImportLoss,
 	PrimeImportPlan,
@@ -165,6 +166,7 @@ export interface PrimeDestinationInput {
 	readonly snapshot: PrimeSourceSnapshot;
 	readonly config: PrimeConfigParserResult;
 	readonly skills: PrimeSkillParserResult;
+	readonly sourceDomains?: readonly PrimeImportDomain[];
 }
 export interface PrimeDestinationPlan extends PrimeImportPlan {
 	readonly destination: PrimeDestinationPaths;
@@ -2130,7 +2132,10 @@ export async function applyPrimeDestination(
 			await validateSkills(skillRoot, skills);
 		}
 		await verifyStage();
-		const sourceDrift = await revalidatePrimeSource(input.snapshot),
+		const sourceDrift = await revalidatePrimeSource(
+				input.snapshot,
+				input.sourceDomains ? { domains: input.sourceDomains } : {},
+			),
 			preconditionResult = await preconditionsHold(plan, false),
 			destinationCode: PrimeImportLoss["code"] =
 				preconditionResult === "invalid" ? "destination-invalid" : "destination-drift";
@@ -2150,7 +2155,10 @@ export async function applyPrimeDestination(
 		);
 		return await withFileLock(lockPath, async () => {
 			await verifyStage();
-			const again = await revalidatePrimeSource(input.snapshot),
+			const again = await revalidatePrimeSource(
+					input.snapshot,
+					input.sourceDomains ? { domains: input.sourceDomains } : {},
+				),
 				preconditionResult = await preconditionsHold(plan, false),
 				destinationCode: PrimeImportLoss["code"] =
 					preconditionResult === "invalid" ? "destination-invalid" : "destination-drift";

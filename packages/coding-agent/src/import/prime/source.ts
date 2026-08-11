@@ -1054,7 +1054,10 @@ export async function discoverPrimeSource(options: PrimeImportSourceOptions): Pr
 	return { snapshot, inventory, losses: sortLosses(losses) };
 }
 
-export async function revalidatePrimeSource(snapshot: PrimeSourceSnapshot): Promise<PrimeSourceDrift> {
+export async function revalidatePrimeSource(
+	snapshot: PrimeSourceSnapshot,
+	options: { readonly domains?: readonly PrimeImportDomain[] } = {},
+): Promise<PrimeSourceDrift> {
 	const rediscovered = await discoverPrimeSource({
 		sourceRoot: snapshot.sourceRoot,
 		cwd: snapshot.cwd,
@@ -1065,28 +1068,46 @@ export async function revalidatePrimeSource(snapshot: PrimeSourceSnapshot): Prom
 		maxEntries: snapshot.maxEntries,
 	});
 	const losses: PrimeImportLoss[] = [];
-	const expectedByRef = new Map(snapshot.files.map(file => [file.sourceRef, file]));
-	const expectedTreeByRef = new Map(snapshot.treeEntries.map(entry => [entry.sourceRef, entry]));
-	const currentFilesByRef = new Map(rediscovered.snapshot.files.map(file => [file.sourceRef, file]));
-	const currentTreeByRef = new Map(rediscovered.snapshot.treeEntries.map(entry => [entry.sourceRef, entry]));
-	const currentRecordsByRef = new Map(rediscovered.inventory.records.map(record => [record.sourceRef, record]));
+	const domains = options.domains ? new Set(options.domains) : undefined;
+	const included = (domain: PrimeImportDomain): boolean => domains?.has(domain) ?? true;
+	const expectedByRef = new Map(
+		snapshot.files.filter(file => included(file.domain)).map(file => [file.sourceRef, file]),
+	);
+	const expectedTreeByRef = new Map(
+		snapshot.treeEntries.filter(entry => included(entry.domain)).map(entry => [entry.sourceRef, entry]),
+	);
+	const currentFilesByRef = new Map(
+		rediscovered.snapshot.files.filter(file => included(file.domain)).map(file => [file.sourceRef, file]),
+	);
+	const currentTreeByRef = new Map(
+		rediscovered.snapshot.treeEntries.filter(entry => included(entry.domain)).map(entry => [entry.sourceRef, entry]),
+	);
+	const currentRecordsByRef = new Map(
+		rediscovered.inventory.records
+			.filter(record => included(record.domain))
+			.map(record => [record.sourceRef, record]),
+	);
 	const rediscoveryLossesByRef = new Map<string, PrimeImportLoss[]>();
 	for (const item of rediscovered.losses) {
+		if (!included(item.domain)) continue;
 		const items = rediscoveryLossesByRef.get(item.sourceRef);
 		if (items) items.push(item);
 		else rediscoveryLossesByRef.set(item.sourceRef, [item]);
 	}
 	for (const current of rediscovered.snapshot.files) {
+		if (!included(current.domain)) continue;
 		if (!expectedByRef.has(current.sourceRef) && !expectedTreeByRef.has(current.sourceRef)) {
 			losses.push(loss("source-changed", current.domain, current.sourceRef, current.canonicalPath));
 		}
 	}
 	for (const current of rediscovered.snapshot.treeEntries) {
+		if (!included(current.domain)) continue;
 		if (!expectedByRef.has(current.sourceRef) && !expectedTreeByRef.has(current.sourceRef)) {
 			losses.push(loss("source-changed", current.domain, current.sourceRef, current.canonicalPath));
 		}
 	}
 	for (const expected of snapshot.files) {
+		if (!included(expected.domain)) continue;
 		const current = currentFilesByRef.get(expected.sourceRef);
 		if (current) {
 			const metadataChanged =
@@ -1121,6 +1142,7 @@ export async function revalidatePrimeSource(snapshot: PrimeSourceSnapshot): Prom
 		}
 	}
 	for (const expected of snapshot.treeEntries) {
+		if (!included(expected.domain)) continue;
 		const current = currentTreeByRef.get(expected.sourceRef);
 		if (current) {
 			const metadataChanged =
