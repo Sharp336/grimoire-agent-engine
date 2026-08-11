@@ -449,6 +449,22 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "hub",
+		description: "Open the live Agent Hub",
+		handleTui: (_command, runtime) => {
+			runtime.ctx.showAgentHub({ initialSection: "activity" });
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "irc",
+		description: "Open Agent Hub messages",
+		handleTui: (_command, runtime) => {
+			runtime.ctx.showAgentHub({ initialSection: "messages" });
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
 		name: "branch",
 		description: "Create a new branch from a previous message",
 		handleTui: (_command, runtime) => {

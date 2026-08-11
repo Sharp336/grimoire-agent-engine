@@ -26,11 +26,18 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
-import { formatAge, formatNumber, getProjectDir, logger } from "@oh-my-pi/pi-utils";
+import { formatAge, formatNumber, getProjectDir, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import {
+	AgentActivityIndex,
+	type AgentActivityKind,
+	type AgentActivityRow,
+	activityRowsFromProgress,
+} from "../../activity";
 import type { KeyId } from "../../config/keybindings";
 import type { Settings } from "../../config/settings";
 import type { MessageRenderer } from "../../extensibility/extensions/types";
-import { IrcBus } from "../../irc/bus";
+import { IrcBus, type IrcHistoryRecord, type IrcReadCursor } from "../../irc/bus";
+import { deriveIrcConversations, type IrcConversation } from "../../irc/conversations";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, type AgentStatus, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import { registerPersistedSubagents } from "../../registry/persisted-agents";
@@ -75,7 +82,15 @@ import {
 	topBorderSplit,
 } from "./overlay-box";
 
+/** Two-pane mode needs a useful roster and a readable inspector. */
+const SPLIT_MIN_WIDTH = 96;
+const DETAIL_MIN_WIDTH = 34;
+const ROSTER_MIN_WIDTH = 48;
+
+export type AgentHubSection = "agents" | "activity" | "messages";
 type HubViewMode = "roster" | "tree";
+type ActivityFilter = "all" | "errors" | "responses" | "tools";
+type ActivityScope = "all" | "agent" | "subtree";
 
 /** Refresh cadence for the relative-time column. */
 const AGE_TICK_MS = 5_000;
@@ -83,10 +98,30 @@ const DATA_CHANGE_RENDER_COALESCE_MS = 100;
 /** Double-tap window for the table's left-left "close hub" gesture. */
 const LEFT_TAP_WINDOW_MS = 500;
 
-/** Two-pane mode needs a useful roster and a readable inspector. */
-const SPLIT_MIN_WIDTH = 96;
-const DETAIL_MIN_WIDTH = 34;
-const ROSTER_MIN_WIDTH = 48;
+function activityGlyph(row: AgentActivityRow): string {
+	if (row.status === "error") return theme.fg("error", theme.status.error);
+	if (row.status === "aborted") return theme.fg("warning", theme.status.aborted);
+	if (row.status === "pending") return theme.fg("accent", theme.status.running);
+	switch (row.kind) {
+		case "response":
+			return theme.fg("success", "◆");
+		case "tool":
+			return theme.fg("success", theme.status.success);
+		case "irc":
+			return theme.fg("accent", "→");
+		case "lifecycle":
+			return theme.fg("muted", "○");
+	}
+}
+
+function activityClock(timestamp: number): string {
+	return new Date(timestamp).toLocaleTimeString(undefined, {
+		hour: "2-digit",
+		minute: "2-digit",
+		second: "2-digit",
+		hour12: false,
+	});
+}
 /** Result of one host-backed transcript read for the Agent Hub viewer. */
 export interface AgentHubRemoteTranscript {
 	text: string;
@@ -101,6 +136,8 @@ export interface AgentHubRemote {
 	kill(id: string): void;
 	revive(id: string): void;
 	/** Mirrors readFileIncremental: text from fromByte (complete JSONL lines), newSize = next fromByte base; null = temporarily unavailable. */
+	readMessages?(): Promise<IrcHistoryRecord[] | null>;
+	sendMessage?(to: string, body: string, replyTo?: string): Promise<string | undefined>;
 	readTranscript(id: string, fromByte: number): Promise<AgentHubRemoteTranscript | null>;
 }
 
@@ -138,6 +175,10 @@ export interface AgentHubDeps {
 	focusAgent?: (id: string) => Promise<void>;
 	/** Current main session file; used to seed parked historical subagents after restart. */
 	sessionFile?: string | null;
+	/** Initial top-level projection; slash commands deep-link into this surface. */
+	initialSection?: AgentHubSection;
+	/** Injectable unified activity source; production creates one from local or remote transcripts. */
+	activity?: AgentActivityIndex;
 
 	/** Collab guest: route actions/transcripts to the host instead of local sessions. */
 	remote?: AgentHubRemote;
@@ -161,6 +202,33 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	readonly persistedSubagentsReady: Promise<void>;
 	/** Prevent the async persisted-session scan from flashing a false empty state. */
 	#loadingPersistedSubagents = false;
+	#section: AgentHubSection;
+	#activity: AgentActivityIndex;
+	#manageActivityLive: boolean;
+	#activityRows: AgentActivityRow[] = [];
+	#selectedActivityRow = 0;
+	#activityFilter: ActivityFilter = "all";
+	#activityScope: ActivityScope = "all";
+	#activitySearch = "";
+	#activitySearchEditing = false;
+	#activityFollow = true;
+	#activitySyncGeneration = 0;
+	#activitySyncStamp = new Map<string, string>();
+	#conversations: IrcConversation[] = [];
+	#selectedConversationRow = 0;
+	#selectedMessageRow = 0;
+	#messageFocus: "conversations" | "thread" = "conversations";
+	#messageDraft = "";
+	#messageComposing = false;
+	#messageSending = false;
+	#messageThreadOpen = false;
+	#messagesSplitVisible = false;
+	#messageReplyTo: string | undefined;
+	#messageNotice: string | undefined;
+	#remoteHistoryRecords: IrcHistoryRecord[] = [];
+	#remoteMessagesFetchInFlight = false;
+	#remoteMessageReadAt = new Map<string, IrcReadCursor>();
+	#conversationMessageCounts = new Map<string, number>();
 
 	// Table state
 	#rows: AgentRef[] = [];
@@ -226,6 +294,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		this.#observers = deps.observers;
 		this.#settings = deps.settings;
 		this.#irc = deps.irc ?? IrcBus.global();
+		if (!deps.remote) this.#irc.configureHistory(deps.sessionFile);
 		// Lazy: the lifecycle global self-constructs against the global
 		// registry, so only touch it when revive/kill actually needs it.
 		this.#lifecycle = () => deps.lifecycle ?? AgentLifecycleManager.global();
@@ -233,6 +302,9 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		this.#requestRender = deps.requestRender;
 		this.#hubKeys = deps.hubKeys;
 		this.#remote = deps.remote;
+		this.#section = deps.initialSection ?? "agents";
+		this.#activity = deps.activity ?? new AgentActivityIndex({ remote: deps.remote });
+		this.#manageActivityLive = !deps.activity;
 		this.#loadingPersistedSubagents = !this.#remote && Boolean(deps.sessionFile?.endsWith(".jsonl"));
 		this.#ui =
 			deps.ui ??
@@ -251,10 +323,27 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 
 		this.#unsubscribers.push(this.#registry.onChange(() => this.#scheduleDataChange()));
 		this.#unsubscribers.push(this.#observers.onChange(() => this.#scheduleDataChange()));
+		if (!this.#manageActivityLive) {
+			this.#unsubscribers.push(
+				this.#activity.onChange(() => {
+					this.#refreshActivityRows();
+					this.#requestRender();
+				}),
+			);
+		}
+		if (!this.#remote) {
+			this.#unsubscribers.push(
+				this.#irc.history.onChange(() => {
+					this.#refreshMessages();
+					this.#requestRender();
+				}),
+			);
+		}
 		this.#ageTimer = setInterval(() => {
 			if (this.#hasFallbackLiveSessions) {
 				this.#refreshAggregate(true);
 			}
+			if (this.#remote) void this.#refreshRemoteMessages();
 			this.#requestRender();
 		}, AGE_TICK_MS);
 		this.#ageTimer.unref?.();
@@ -304,7 +393,13 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 
 	override render(width: number): readonly string[] {
 		const termHeight = this.#ui.terminal?.rows || process.stdout.rows || 40;
-		const frame = this.#renderTable(width, termHeight).map(line => clampHubLine(line, width));
+		const frame = (
+			this.#section === "activity"
+				? this.#renderActivityTable(width, termHeight)
+				: this.#section === "messages"
+					? this.#renderMessagesTable(width, termHeight)
+					: this.#renderTable(width, termHeight)
+		).map(line => clampHubLine(line, width));
 		if (frame.length <= termHeight) return frame;
 
 		// A tiny terminal can leave less room than the fixed chrome needs. Keep
@@ -325,14 +420,35 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			return;
 		}
 
-		// The hub/observe keys always close the overlay (toggle semantics)
 		for (const key of this.#hubKeys) {
 			if (matchesKey(keyData, key)) {
 				this.#onDone();
 				return;
 			}
 		}
-		this.#handleTableInput(keyData);
+		if (this.#section === "activity" && this.#activitySearchEditing) {
+			this.#handleActivitySearchInput(keyData);
+			return;
+		}
+		if (this.#section === "messages" && this.#messageComposing) {
+			this.#handleMessageComposerInput(keyData);
+			return;
+		}
+		if (keyData === "1") {
+			this.#switchSection("agents");
+			return;
+		}
+		if (keyData === "2") {
+			this.#switchSection("activity");
+			return;
+		}
+		if (keyData === "3") {
+			this.#switchSection("messages");
+			return;
+		}
+		if (this.#section === "activity") this.#handleActivityInput(keyData);
+		else if (this.#section === "messages") this.#handleMessagesInput(keyData);
+		else this.#handleTableInput(keyData);
 	}
 
 	/**
@@ -354,7 +470,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	 * owns the alternate screen; the hub table stays mounted underneath and is
 	 * restored when the viewer closes. No-op without a real TUI (render-only test stub).
 	 */
-	openChat(id: string): void {
+	openChat(id: string, entryId?: string): void {
 		if (this.#disposed || !this.#registry.get(id)) return;
 		if (typeof this.#ui.showOverlay !== "function") return;
 		this.#closeTranscriptOverlay();
@@ -362,6 +478,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		let viewer: AgentTranscriptViewer;
 		viewer = new AgentTranscriptViewer({
 			agentId: id,
+			initialEntryId: entryId,
 			registry: this.#registry,
 			remote: this.#remote,
 			observers: this.#observers,
@@ -478,6 +595,176 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		this.#statusCounts = { running: 0, idle: 0, parked: 0, aborted: 0 };
 		for (const ref of rosterRows) this.#statusCounts[ref.status]++;
 		this.#refreshAggregate();
+		this.#refreshActivityData(rosterRows);
+		this.#refreshActivityRows();
+		this.#refreshMessages();
+	}
+
+	#refreshActivityData(refs: readonly AgentRef[]): void {
+		if (this.#manageActivityLive) {
+			const liveIds = new Set<string>();
+			for (const ref of refs) {
+				const observed = this.#observedById.get(ref.id);
+				if (observed?.progress) {
+					liveIds.add(ref.id);
+					this.#activity.setLive(ref.id, activityRowsFromProgress(observed.progress, observed.lastUpdate));
+				}
+			}
+			for (const ref of refs) {
+				if (!liveIds.has(ref.id)) this.#activity.setLive(ref.id, []);
+			}
+		}
+
+		const generation = ++this.#activitySyncGeneration;
+		const pending: Promise<void>[] = [];
+		for (const ref of refs) {
+			if (!this.#remote && !ref.sessionFile) continue;
+			const stamp = `${ref.sessionFile ?? ""}:${ref.lastActivity}`;
+			if (this.#activitySyncStamp.get(ref.id) === stamp) continue;
+			this.#activitySyncStamp.set(ref.id, stamp);
+			pending.push(this.#activity.sync(ref.id, ref.sessionFile));
+		}
+		if (pending.length === 0) return;
+		void Promise.all(pending)
+			.then(() => {
+				if (this.#disposed || generation !== this.#activitySyncGeneration) return;
+				this.#refreshActivityRows();
+				this.#requestRender();
+			})
+			.catch(() => {
+				// Individual sync paths already guard I/O failures; keep the hub render loop alive.
+			});
+	}
+
+	#activityAgentIds(): ReadonlySet<string> | undefined {
+		if (this.#activityScope === "all") return undefined;
+		const selected = this.#rows[this.#selectedRow]?.id;
+		if (!selected) return new Set();
+		const ids = new Set([selected]);
+		if (this.#activityScope === "agent") return ids;
+		const queue = [selected];
+		for (let index = 0; index < queue.length; index++) {
+			for (const child of this.#childrenByParent.get(queue[index]!) ?? []) {
+				if (ids.has(child.id)) continue;
+				ids.add(child.id);
+				queue.push(child.id);
+			}
+		}
+		return ids;
+	}
+
+	#refreshActivityRows(): void {
+		const kinds: ReadonlySet<AgentActivityKind> | undefined =
+			this.#activityFilter === "responses"
+				? new Set(["response"])
+				: this.#activityFilter === "tools"
+					? new Set(["tool"])
+					: undefined;
+		let rows = this.#activity.query({
+			agentIds: this.#activityAgentIds(),
+			kinds,
+			search: this.#activitySearch,
+			limit: 2_000,
+		});
+		if (this.#activityFilter === "errors") rows = rows.filter(row => row.status === "error");
+		this.#activityRows = rows;
+		if (rows.length === 0) this.#selectedActivityRow = 0;
+		else if (this.#activityFollow) this.#selectedActivityRow = rows.length - 1;
+		else this.#selectedActivityRow = Math.min(this.#selectedActivityRow, rows.length - 1);
+	}
+
+	#ensureComposableConversations(): void {
+		const byId = new Map(this.#conversations.map(conversation => [conversation.id, conversation]));
+		const ensure = (id: string, label: string, participants: string[]): void => {
+			if (byId.has(id)) return;
+			const conversation: IrcConversation = {
+				id,
+				label,
+				participants,
+				messages: [],
+				lastMessageAt: 0,
+				unread: 0,
+			};
+			byId.set(id, conversation);
+			this.#conversations.push(conversation);
+		};
+		ensure("broadcast:all", "All agents", [MAIN_AGENT_ID]);
+		for (const ref of this.#registry.listVisibleTo(MAIN_AGENT_ID)) {
+			if (ref.id === MAIN_AGENT_ID || ref.kind === "advisor") continue;
+			const id = `direct:${[MAIN_AGENT_ID, ref.id].sort().join(":")}`;
+			ensure(id, ref.displayName || ref.id, [MAIN_AGENT_ID, ref.id]);
+		}
+		this.#conversations.sort((a, b) => {
+			const aLive = a.messages.length > 0 ? 1 : 0;
+			const bLive = b.messages.length > 0 ? 1 : 0;
+			if (aLive !== bLive) return bLive - aLive;
+			if (a.lastMessageAt !== b.lastMessageAt) return b.lastMessageAt - a.lastMessageAt;
+			if (a.id === "broadcast:all") return 1;
+			if (b.id === "broadcast:all") return -1;
+			return a.id.localeCompare(b.id);
+		});
+	}
+
+	#refreshMessages(): void {
+		const selectedId = this.#conversations[this.#selectedConversationRow]?.id;
+		if (this.#remote) void this.#refreshRemoteMessages();
+		const records = this.#remote ? this.#remoteHistoryRecords : this.#irc.historyRecords();
+		this.#conversations = deriveIrcConversations(records, {
+			registry: this.#registry,
+			viewerId: MAIN_AGENT_ID,
+			readAt: id =>
+				this.#remote
+					? (this.#remoteMessageReadAt.get(id) ?? { timestamp: 0, messageId: "" })
+					: this.#irc.history.readAt(id),
+		});
+		this.#ensureComposableConversations();
+		const kept = selectedId ? this.#conversations.findIndex(conversation => conversation.id === selectedId) : -1;
+		if (kept >= 0) {
+			this.#selectedConversationRow = kept;
+		} else {
+			const withMessages = this.#conversations.findIndex(conversation => conversation.messages.length > 0);
+			this.#selectedConversationRow =
+				withMessages >= 0
+					? withMessages
+					: Math.min(this.#selectedConversationRow, Math.max(0, this.#conversations.length - 1));
+		}
+		const selected = this.#conversations[this.#selectedConversationRow];
+		if (!selected) {
+			this.#selectedMessageRow = 0;
+		} else {
+			const previousCount = this.#conversationMessageCounts.get(selected.id) ?? 0;
+			const nextCount = selected.messages.length;
+			this.#conversationMessageCounts.set(selected.id, nextCount);
+			if (!selectedId || (previousCount === 0 && nextCount > 0)) {
+				this.#selectedMessageRow = Math.max(0, nextCount - 1);
+			} else {
+				this.#selectedMessageRow = Math.min(this.#selectedMessageRow, Math.max(0, nextCount - 1));
+			}
+		}
+	}
+
+	#markSelectedConversationRead(): void {
+		const conversation = this.#conversations[this.#selectedConversationRow];
+		const lastMessage = conversation?.messages.at(-1);
+		if (!conversation || !lastMessage) return;
+		const cursor = { timestamp: lastMessage.ts, messageId: lastMessage.id };
+		if (this.#remote) this.#remoteMessageReadAt.set(conversation.id, cursor);
+		else this.#irc.history.markRead(conversation.id, cursor);
+		conversation.unread = 0;
+	}
+
+	async #refreshRemoteMessages(): Promise<void> {
+		if (!this.#remote?.readMessages || this.#remoteMessagesFetchInFlight) return;
+		this.#remoteMessagesFetchInFlight = true;
+		try {
+			const records = await this.#remote.readMessages();
+			if (!records || this.#disposed) return;
+			this.#remoteHistoryRecords = records;
+			this.#refreshMessages();
+			this.#requestRender();
+		} finally {
+			this.#remoteMessagesFetchInFlight = false;
+		}
 	}
 
 	#metricsFor(ref: AgentRef, observed: ObservableSession | undefined): AgentMetrics | undefined {
@@ -499,6 +786,223 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	// ========================================================================
 	// Table view
 	// ========================================================================
+
+	#sectionTabs(): string {
+		const tab = (section: AgentHubSection, label: string): string =>
+			this.#section === section
+				? theme.bg("selectedBg", theme.bold(theme.fg("accent", ` ${label} `)))
+				: theme.fg("muted", ` ${label} `);
+		return `${tab("agents", "1 Agents")}${theme.fg("dim", theme.sep.dot)}${tab("activity", "2 Activity")}${theme.fg("dim", theme.sep.dot)}${tab("messages", "3 Messages")}`;
+	}
+
+	#renderActivityTable(width: number, termHeight: number): string[] {
+		this.#hitRows.length = 0;
+		const innerWidth = Math.max(1, width - 4);
+		const contentRows = Math.max(1, termHeight - 4);
+		const body: string[] = [this.#sectionTabs()];
+		const selectedAgent = this.#rows[this.#selectedRow]?.id;
+		const scope =
+			this.#activityScope === "all"
+				? "all agents"
+				: this.#activityScope === "agent"
+					? (selectedAgent ?? "selected agent")
+					: `${selectedAgent ?? "selected"} subtree`;
+		const search = this.#activitySearchEditing
+			? theme.fg("accent", `search: ${this.#activitySearch}▌`)
+			: this.#activitySearch
+				? `search: ${this.#activitySearch}`
+				: "search: —";
+		body.push(
+			theme.fg(
+				"dim",
+				`${scope}${theme.sep.dot}${this.#activityFilter}${theme.sep.dot}${this.#activityFollow ? "following" : "paused"}${theme.sep.dot}${search}`,
+			),
+		);
+		if (contentRows >= 8) body.push("");
+
+		const budget = Math.max(0, contentRows - body.length);
+		if (this.#activityRows.length === 0 && budget > 0) {
+			body.push(theme.fg("muted", this.#activitySearch ? "No matching activity" : "No agent activity recorded yet"));
+		} else if (budget > 0) {
+			const selected = Math.min(this.#selectedActivityRow, this.#activityRows.length - 1);
+			const start = this.#activityFollow
+				? Math.max(0, this.#activityRows.length - budget)
+				: Math.max(0, Math.min(selected - Math.floor(budget / 2), this.#activityRows.length - budget));
+			const end = Math.min(this.#activityRows.length, start + budget);
+			if (start > 0) {
+				body.push(theme.fg("dim", `… ${start} earlier`));
+			}
+			for (let index = start + Number(start > 0); index < end; index++) {
+				this.#hitRows[1 + body.length] = index;
+				body.push(this.#formatActivityRow(this.#activityRows[index]!, index === selected, innerWidth));
+			}
+		}
+		while (body.length < contentRows) body.push("");
+
+		const lines = [topBorder(width, "Agent Hub")];
+		for (const line of body.slice(0, contentRows)) lines.push(row(line, width));
+		lines.push(divider(width));
+		lines.push(
+			row(
+				theme.fg(
+					"dim",
+					"1:agents  3:messages  j/k:select  Enter:transcript  Space:follow  f:filter  s:scope  /:search",
+				),
+				width,
+			),
+		);
+		lines.push(bottomBorder(width));
+		return lines;
+	}
+
+	#renderMessagesTable(width: number, termHeight: number): string[] {
+		this.#hitRows.length = 0;
+		const contentRows = Math.max(1, termHeight - 4);
+		const body: string[] = [this.#sectionTabs()];
+		const split = width >= 90 && !this.#messageThreadOpen;
+		this.#messagesSplitVisible = split;
+		if (split || this.#messageThreadOpen) this.#markSelectedConversationRead();
+		const conversationWidth = split ? Math.max(24, Math.min(36, Math.floor(width * 0.3))) : Math.max(1, width - 4);
+		const threadWidth = split ? Math.max(1, width - conversationWidth - 7) : Math.max(1, width - 4);
+		const selected = this.#conversations[this.#selectedConversationRow];
+		const chromeRows = this.#messageComposing || this.#messageNotice ? 1 : 0;
+		const paneRows = Math.max(1, contentRows - body.length - chromeRows);
+		const conversationLines = this.#renderConversationList(conversationWidth, paneRows);
+		const threadLines = this.#renderMessageThread(selected, threadWidth, paneRows);
+		const conversationStart = this.#conversationListStart(paneRows);
+
+		if (split) {
+			for (let index = 0; index < paneRows; index++) {
+				const left = conversationLines[index] ?? "";
+				const leftWidth = visibleWidth(left);
+				const right = threadLines[index] ?? "";
+				body.push(`${left}${padding(Math.max(0, conversationWidth - leftWidth))} ${theme.fg("dim", "│")} ${right}`);
+				if (index > 0 && conversationStart + index - 1 < this.#conversations.length) {
+					this.#hitRows[body.length] = conversationStart + index - 1;
+				}
+			}
+		} else if (this.#messageThreadOpen && selected) {
+			body.push(...threadLines);
+		} else {
+			body.push(...conversationLines);
+			for (let index = 1; index < conversationLines.length; index++) {
+				if (conversationStart + index - 1 < this.#conversations.length) {
+					this.#hitRows[1 + index] = conversationStart + index - 1;
+				}
+			}
+		}
+
+		if (this.#messageComposing) {
+			const reply = this.#messageReplyTo ? `reply ${this.#messageReplyTo} · ` : "";
+			body.push(
+				`${theme.bold(theme.fg("accent", "Message"))} ${theme.fg("dim", reply)}${truncateToWidth(this.#messageDraft, Math.max(1, width - 18))}${theme.fg("accent", "▌")}`,
+			);
+		} else if (this.#messageNotice) {
+			body.push(theme.fg("warning", truncateToWidth(this.#messageNotice, Math.max(1, width - 4))));
+		}
+		while (body.length < contentRows) body.push("");
+
+		const lines = [topBorder(width, "Agent Hub")];
+		for (const line of body.slice(0, contentRows)) lines.push(row(line, width));
+		lines.push(divider(width));
+		lines.push(
+			row(
+				theme.fg(
+					"dim",
+					"1:agents  2:activity  Tab:pane  j/k:select  Enter:open  c:compose  R:reply  r/x:manage  Esc:close",
+				),
+				width,
+			),
+		);
+		lines.push(bottomBorder(width));
+		return lines;
+	}
+
+	#conversationListStart(rows: number): number {
+		const budget = Math.max(0, rows - 1);
+		const selected = Math.min(this.#selectedConversationRow, Math.max(0, this.#conversations.length - 1));
+		return Math.max(0, Math.min(selected - Math.floor(budget / 2), Math.max(0, this.#conversations.length - budget)));
+	}
+
+	#renderConversationList(width: number, rows: number): string[] {
+		const lines = [theme.bold("Conversations")];
+		if (this.#conversations.length === 0) {
+			lines.push(theme.fg("muted", "No IRC messages recorded yet"));
+		} else {
+			const budget = Math.max(0, rows - 1);
+			const selected = Math.min(this.#selectedConversationRow, this.#conversations.length - 1);
+			const start = this.#conversationListStart(rows);
+			for (let index = start; index < Math.min(this.#conversations.length, start + budget); index++) {
+				const conversation = this.#conversations[index]!;
+				const cursor = index === selected ? theme.fg("accent", theme.nav.cursor) : " ";
+				const unread = conversation.unread > 0 ? theme.fg("warning", ` ${conversation.unread}`) : "";
+				const preview = sanitizeDisplayText(conversation.messages.at(-1)?.body ?? "");
+				const label = sanitizeDisplayText(conversation.label);
+				const prefix = `${cursor} ${theme.bold(label)}${unread} `;
+				lines.push(
+					`${prefix}${theme.fg("muted", truncateToWidth(preview, Math.max(1, width - visibleWidth(prefix))))}`,
+				);
+			}
+		}
+		while (lines.length < rows) lines.push("");
+		return lines.slice(0, rows);
+	}
+
+	#renderMessageThread(conversation: IrcConversation | undefined, width: number, rows: number): string[] {
+		if (!conversation) {
+			return [
+				theme.fg("muted", "Select a conversation"),
+				...Array.from({ length: Math.max(0, rows - 1) }, () => ""),
+			];
+		}
+		const lines = [
+			theme.bold(`${sanitizeDisplayText(conversation.label)} · ${conversation.messages.length} messages`),
+		];
+		const budget = Math.max(0, rows - 1);
+		const selected = Math.min(this.#selectedMessageRow, Math.max(0, conversation.messages.length - 1));
+		const start = Math.max(
+			0,
+			Math.min(selected - Math.floor(budget / 2), Math.max(0, conversation.messages.length - budget)),
+		);
+		for (let index = start; index < conversation.messages.length; index++) {
+			const message = conversation.messages[index]!;
+			const cursor =
+				this.#messageFocus === "thread" && index === selected ? theme.fg("accent", theme.nav.cursor) : " ";
+			const direction = `${sanitizeDisplayText(message.from)} → ${sanitizeDisplayText(message.to)}`;
+			const reply = message.replyTo ? ` ↳${sanitizeDisplayText(message.replyTo)}` : "";
+			const outcome =
+				message.outcome === "failed"
+					? theme.fg("error", "×")
+					: message.outcome === "pending"
+						? theme.fg("warning", "…")
+						: theme.fg("success", "✓");
+			const error = message.outcome === "failed" && message.error ? ` ${sanitizeDisplayText(message.error)}` : "";
+			const prefix = `${cursor} ${activityClock(message.ts)} ${outcome} ${theme.fg("muted", direction)}${theme.fg("dim", reply)} `;
+			lines.push(
+				`${prefix}${truncateToWidth(sanitizeLine(message.body + error), Math.max(1, width - visibleWidth(prefix)))}`,
+			);
+		}
+		while (lines.length < rows) lines.push("");
+		return lines.slice(0, rows);
+	}
+
+	#formatActivityRow(activity: AgentActivityRow, selected: boolean, width: number): string {
+		const cursor = selected ? theme.fg("accent", theme.nav.cursor) : " ";
+		const ref = this.#registry.get(activity.agentId);
+		const observed = this.#observedById.get(activity.agentId);
+		const role = observed?.progress?.modelRole ?? ref?.history?.modelRole;
+		const roleBadge = role && this.#settings ? `${formatRoleBadge(role, this.#settings)} ` : "";
+		const agent = sanitizeLine(activity.agentId, Math.max(8, Math.min(18, Math.floor(width * 0.18))));
+		const title = sanitizeLine(
+			activity.kind === "tool" ? (activity.toolName ?? activity.title) : activity.title,
+			width,
+		);
+		const prefix =
+			`${cursor} ${theme.fg("dim", activityClock(activity.timestamp))} ${activityGlyph(activity)} ` +
+			`${roleBadge}${theme.bold(agent)} ${theme.fg(activity.kind === "response" ? "success" : "muted", title)}`;
+		const available = Math.max(1, width - visibleWidth(prefix) - visibleWidth(theme.sep.dot));
+		return `${prefix}${theme.fg("dim", theme.sep.dot)}${sanitizeLine(activity.summary, available)}`;
+	}
 
 	#renderTable(width: number, termHeight: number): string[] {
 		this.#hitRows.length = 0;
@@ -555,14 +1059,17 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	#footer(showingNarrowDetails: boolean, availableWidth: number): string {
 		const nextView = this.#viewMode === "roster" ? "by parent" : "flat";
 		if (showingNarrowDetails) {
-			return theme.fg("dim", `Tab:roster  PgUp/PgDn:scroll  Enter:open  t:${nextView}  Esc:roster`);
+			return theme.fg(
+				"dim",
+				`1:agents  2:activity  3:messages  Tab:roster  PgUp/PgDn:scroll  Enter:open  Esc:roster`,
+			);
 		}
 		if (availableWidth < 96) {
-			return theme.fg("dim", `j/k:select  Enter:open  t:${nextView}  Tab:details  r/x:manage  Esc:close`);
+			return theme.fg("dim", `1/2/3:view  j/k:select  t:${nextView}  Tab:details  r/x:manage`);
 		}
 		return theme.fg(
 			"dim",
-			`j/k/wheel:select  PgUp/PgDn:details  Enter/click:open  t:${nextView}  r:revive  x:kill  Esc:close`,
+			`1:agents  2:activity  3:messages  j/k/wheel:select  PgUp/PgDn:details  Enter/click:open  t:${nextView}  r:revive  x:kill  Esc:close`,
 		);
 	}
 
@@ -783,13 +1290,12 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 
 		add(`${statusGlyph(ref.status)} ${theme.bold(sanitizeDisplayText(ref.displayName || ref.id))}`);
 		if (ref.displayName && ref.displayName !== ref.id) add(theme.fg("dim", sanitizeDisplayText(ref.id)));
-		const lifecycleDetails = [
+		const lifecycle = [
+			statusText(ref.status, ref.status),
 			metrics ? formatMetricDuration(metrics) : undefined,
 			`active ${formatAge(Math.max(1, Math.round((Date.now() - ref.lastActivity) / 1000)))}`,
 		].filter(Boolean);
-		add(
-			`${statusText(ref.status, ref.status)}${theme.fg("dim", `${theme.sep.dot}${lifecycleDetails.join(theme.sep.dot)}`)}`,
-		);
+		add(lifecycle.join(theme.fg("dim", theme.sep.dot)));
 		const modelDetails: string[] = [];
 		const modelRole = progress?.modelRole ?? ref.history?.modelRole;
 		if (modelRole && this.#settings) modelDetails.push(formatRoleBadge(modelRole, this.#settings));
@@ -844,6 +1350,19 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		if (artifacts?.outputPath) addWrapped(`Output ${shortenPath(artifacts.outputPath)}`);
 		if (artifacts?.patchPath) addWrapped(`Patch ${shortenPath(artifacts.patchPath)}`);
 		if (artifacts?.branchName) addWrapped(`Worktree branch ${artifacts.branchName}`);
+
+		if (lines.length < rows) add();
+		if (lines.length < rows) add(theme.bold(theme.fg("accent", "Recent activity")));
+		const activityBudget = Math.max(0, rows - lines.length);
+		const activity = this.#activity.recent(ref.id, activityBudget);
+		if (activity.length === 0 && activityBudget > 0) add(theme.fg("muted", "No response or tool activity yet"));
+		else {
+			for (const event of activity) {
+				const title = sanitizeLine(event.kind === "tool" ? (event.toolName ?? event.title) : event.title, width);
+				const prefix = `${theme.fg("dim", activityClock(event.timestamp))} ${activityGlyph(event)} ${theme.fg("muted", title)} `;
+				add(`${prefix}${sanitizeLine(event.summary, Math.max(1, width - visibleWidth(prefix)))}`);
+			}
+		}
 
 		const maxScroll = Math.max(0, lines.length - rows);
 		this.#detailScrollOffset = Math.min(this.#detailScrollOffset, maxScroll);
@@ -942,7 +1461,27 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 
 	handleWheel(delta: -1 | 1): void {
 		this.#hoveredRow = null;
-		if (this.#rows.length > 0) {
+		if (this.#section === "activity") {
+			if (this.#activityRows.length > 0) {
+				this.#activityFollow = false;
+				this.#selectedActivityRow = Math.max(
+					0,
+					Math.min(this.#selectedActivityRow + delta, this.#activityRows.length - 1),
+				);
+			}
+		} else if (this.#section === "messages") {
+			if (this.#messageFocus === "thread") {
+				const messages = this.#conversations[this.#selectedConversationRow]?.messages ?? [];
+				this.#selectedMessageRow = Math.max(0, Math.min(this.#selectedMessageRow + delta, messages.length - 1));
+			} else if (this.#conversations.length > 0) {
+				this.#selectedConversationRow = Math.max(
+					0,
+					Math.min(this.#selectedConversationRow + delta, this.#conversations.length - 1),
+				);
+				this.#selectedMessageRow = (this.#conversations[this.#selectedConversationRow]?.messages.length ?? 1) - 1;
+				// Wide split marks on render; narrow list-only must keep unread until thread open.
+			}
+		} else if (this.#rows.length > 0) {
 			this.#selectRow(Math.max(0, Math.min(this.#selectedRow + delta, this.#rows.length - 1)));
 		}
 		this.#requestRender();
@@ -953,18 +1492,360 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	}
 
 	setHoverIndex(index: number | null): void {
+		if (this.#section !== "agents") return;
 		if (index === this.#hoveredRow) return;
 		this.#hoveredRow = index;
 		this.#requestRender();
 	}
 
 	clickItem(index: number): void {
+		if (this.#section === "activity") {
+			if (index === this.#selectedActivityRow) {
+				const activity = this.#activityRows[index];
+				if (activity) this.openChat(activity.agentId, activity.entryId);
+				return;
+			}
+			this.#activityFollow = false;
+			this.#selectedActivityRow = index;
+			this.#requestRender();
+			return;
+		}
+		if (this.#section === "messages") {
+			if (index === this.#selectedConversationRow) {
+				this.#messageFocus = "thread";
+				this.#messageThreadOpen = true;
+				this.#markSelectedConversationRead();
+			} else {
+				this.#selectedConversationRow = index;
+				this.#selectedMessageRow = (this.#conversations[this.#selectedConversationRow]?.messages.length ?? 1) - 1;
+			}
+			this.#requestRender();
+			return;
+		}
 		const selected = this.#rows[index];
 		if (!selected) return;
 		this.#hoveredRow = index;
 		this.#selectRow(index);
+		this.#refreshActivityRows();
 		this.#requestRender();
 		this.#activateAgent(selected);
+	}
+
+	#switchSection(section: AgentHubSection): void {
+		if (this.#section === section) return;
+		this.#section = section;
+		this.#hoveredRow = null;
+		this.#narrowDetailsOpen = false;
+		if (section === "activity") this.#refreshActivityRows();
+		if (section === "messages") {
+			this.#messageFocus = "conversations";
+			this.#messageThreadOpen = false;
+			this.#refreshMessages();
+		}
+		this.#requestRender();
+	}
+
+	#handleMessageComposerInput(keyData: string): void {
+		if (matchesKey(keyData, "escape")) {
+			this.#messageComposing = false;
+			this.#messageDraft = "";
+			this.#messageReplyTo = undefined;
+		} else if (matchesKey(keyData, "backspace")) {
+			this.#messageDraft = this.#messageDraft.slice(0, -1);
+		} else if (matchesKey(keyData, "enter") || keyData === "\r" || keyData === "\n") {
+			if (!this.#messageSending) void this.#submitMessage();
+		} else if (keyData.length === 1 && keyData >= " " && keyData !== "\u007f") {
+			this.#messageDraft += keyData;
+		} else {
+			return;
+		}
+		this.#requestRender();
+	}
+
+	#handleMessagesInput(keyData: string): void {
+		if (matchesKey(keyData, "escape")) {
+			if (this.#messageThreadOpen || this.#messageFocus === "thread") {
+				this.#messageThreadOpen = false;
+				this.#messageFocus = "conversations";
+				this.#requestRender();
+			} else {
+				this.#onDone();
+			}
+			return;
+		}
+		if (matchesKey(keyData, "left")) {
+			if (this.#messageFocus === "thread") {
+				this.#messageFocus = "conversations";
+				this.#messageThreadOpen = false;
+				this.#requestRender();
+			} else {
+				this.#switchSection("activity");
+			}
+			return;
+		}
+		if (matchesKey(keyData, "right") || matchesKey(keyData, "enter") || keyData === "\r" || keyData === "\n") {
+			if (this.#conversations.length > 0) {
+				this.#messageFocus = "thread";
+				this.#messageThreadOpen = true;
+				this.#markSelectedConversationRead();
+				this.#requestRender();
+			}
+			return;
+		}
+		if (matchesKey(keyData, "tab") || keyData === "\t") {
+			this.#messageFocus = this.#messageFocus === "conversations" ? "thread" : "conversations";
+			if (this.#messageFocus === "thread") {
+				// Narrow layout only shows the thread when drilled in; wide split is already visible.
+				if (!this.#messagesSplitVisible) this.#messageThreadOpen = true;
+				this.#markSelectedConversationRead();
+			} else {
+				this.#messageThreadOpen = false;
+			}
+			this.#requestRender();
+			return;
+		}
+		if (matchesKey(keyData, "j") || matchesSelectDown(keyData)) {
+			this.#moveMessageSelection(1);
+			return;
+		}
+		if (matchesKey(keyData, "k") || matchesSelectUp(keyData)) {
+			this.#moveMessageSelection(-1);
+			return;
+		}
+		if (keyData === "c") {
+			this.#ensureComposableConversations();
+			if (this.#conversations.length === 0) {
+				this.#messageNotice = "No agents available to message";
+				this.#requestRender();
+				return;
+			}
+			this.#messageComposing = true;
+			this.#messageDraft = "";
+			this.#messageReplyTo = undefined;
+			this.#messageNotice = undefined;
+			this.#requestRender();
+			return;
+		}
+		if (keyData === "R") {
+			const conversation = this.#conversations[this.#selectedConversationRow];
+			this.#messageReplyTo = conversation?.messages[this.#selectedMessageRow]?.id;
+			this.#messageComposing = Boolean(conversation);
+			this.#messageDraft = "";
+			this.#messageNotice = undefined;
+			this.#requestRender();
+			return;
+		}
+		if (keyData === "r" || keyData === "x") {
+			this.#manageConversationPeer(keyData);
+		}
+	}
+
+	#moveMessageSelection(delta: -1 | 1): void {
+		if (this.#messageFocus === "thread") {
+			const messages = this.#conversations[this.#selectedConversationRow]?.messages ?? [];
+			this.#selectedMessageRow = Math.max(0, Math.min(this.#selectedMessageRow + delta, messages.length - 1));
+		} else if (this.#conversations.length > 0) {
+			this.#selectedConversationRow = Math.max(
+				0,
+				Math.min(this.#selectedConversationRow + delta, this.#conversations.length - 1),
+			);
+			this.#selectedMessageRow = (this.#conversations[this.#selectedConversationRow]?.messages.length ?? 1) - 1;
+		}
+		this.#requestRender();
+	}
+
+	#conversationPeer(): string | undefined {
+		const conversation = this.#conversations[this.#selectedConversationRow];
+		if (!conversation || conversation.id === "broadcast:all" || !conversation.participants.includes(MAIN_AGENT_ID)) {
+			return undefined;
+		}
+		return conversation.participants.find(id => id !== MAIN_AGENT_ID);
+	}
+
+	#manageConversationPeer(action: "r" | "x"): void {
+		const peer = this.#conversationPeer();
+		if (!peer) {
+			this.#messageNotice = "This conversation has no single Main-session peer to manage";
+			this.#requestRender();
+			return;
+		}
+		const index = this.#rows.findIndex(ref => ref.id === peer);
+		if (index < 0) {
+			this.#messageNotice = `Agent ${peer} is no longer registered`;
+			this.#requestRender();
+			return;
+		}
+		this.#selectedRow = index;
+		if (action === "r") this.#reviveSelected();
+		else this.#killSelected();
+	}
+
+	async #submitMessage(): Promise<void> {
+		const body = this.#messageDraft.trim();
+		if (!body) return;
+		this.#ensureComposableConversations();
+		const conversation = this.#conversations[this.#selectedConversationRow];
+		if (!conversation) {
+			this.#messageNotice = "Select a recipient conversation (or All agents) before sending";
+			this.#requestRender();
+			return;
+		}
+		this.#messageSending = true;
+		this.#messageNotice = undefined;
+		try {
+			if (this.#remote) {
+				const target = conversation.id === "broadcast:all" ? "all" : this.#conversationPeer();
+				if (!target) {
+					this.#messageNotice = "Sibling-agent conversations are read-only from Main";
+					return;
+				}
+				if (!this.#remote.sendMessage) {
+					this.#messageNotice = "Messaging is unavailable on this collab host";
+					return;
+				}
+				const error = await this.#remote.sendMessage(target, body, this.#messageReplyTo);
+				this.#messageNotice = error ?? (target === "all" ? "Broadcast delivered" : `Delivered to ${target}`);
+				if (!error) {
+					this.#messageDraft = "";
+					this.#messageReplyTo = undefined;
+					this.#messageComposing = false;
+					await this.#refreshRemoteMessages();
+				}
+				return;
+			}
+			if (conversation.id === "broadcast:all") {
+				const targets = this.#registry
+					.listVisibleTo(MAIN_AGENT_ID)
+					.filter(
+						ref =>
+							ref.id !== MAIN_AGENT_ID &&
+							ref.kind !== "advisor" &&
+							(ref.status === "running" || ref.status === "idle"),
+					);
+				const broadcastId = Snowflake.next();
+				const receipts = await Promise.all(
+					targets.map(ref =>
+						this.#irc.send({
+							from: MAIN_AGENT_ID,
+							to: ref.id,
+							body,
+							replyTo: this.#messageReplyTo,
+							broadcastId,
+						}),
+					),
+				);
+				const failed = receipts.filter(receipt => receipt.outcome === "failed").length;
+				this.#messageNotice =
+					targets.length === 0
+						? "No live agents available for broadcast"
+						: failed > 0
+							? `Broadcast delivered to ${targets.length - failed}/${targets.length} agents`
+							: `Broadcast delivered to ${targets.length} agents`;
+			} else {
+				const peer = this.#conversationPeer();
+				if (!peer) {
+					this.#messageNotice = "Sibling-agent conversations are read-only from Main";
+					return;
+				}
+				const receipt = await this.#irc.send({
+					from: MAIN_AGENT_ID,
+					to: peer,
+					body,
+					replyTo: this.#messageReplyTo,
+				});
+				this.#messageNotice =
+					receipt.outcome === "failed" ? (receipt.error ?? `Delivery to ${peer} failed`) : `Delivered to ${peer}`;
+			}
+			this.#messageDraft = "";
+			this.#messageReplyTo = undefined;
+			this.#messageComposing = false;
+			this.#refreshMessages();
+		} finally {
+			this.#messageSending = false;
+			this.#requestRender();
+		}
+	}
+
+	#handleActivitySearchInput(keyData: string): void {
+		if (matchesKey(keyData, "escape") || matchesKey(keyData, "enter") || keyData === "\r" || keyData === "\n") {
+			this.#activitySearchEditing = false;
+		} else if (matchesKey(keyData, "backspace")) {
+			this.#activitySearch = this.#activitySearch.slice(0, -1);
+		} else if (keyData.length === 1 && keyData >= " " && keyData !== "\u007f") {
+			this.#activitySearch += keyData;
+		} else {
+			return;
+		}
+		this.#refreshActivityRows();
+		this.#requestRender();
+	}
+
+	#handleActivityInput(keyData: string): void {
+		if (matchesKey(keyData, "escape")) {
+			if (this.#activitySearch) {
+				this.#activitySearch = "";
+				this.#refreshActivityRows();
+				this.#requestRender();
+			} else {
+				this.#onDone();
+			}
+			return;
+		}
+		if (matchesKey(keyData, "left")) {
+			this.#switchSection("agents");
+			return;
+		}
+		if (matchesKey(keyData, "right")) {
+			this.#switchSection("messages");
+			return;
+		}
+		if (keyData === "/") {
+			this.#activitySearchEditing = true;
+			this.#requestRender();
+			return;
+		}
+		if (keyData === " ") {
+			this.#activityFollow = !this.#activityFollow;
+			if (this.#activityFollow && this.#activityRows.length > 0) {
+				this.#selectedActivityRow = this.#activityRows.length - 1;
+			}
+			this.#requestRender();
+			return;
+		}
+		if (keyData === "f") {
+			const filters: ActivityFilter[] = ["all", "errors", "responses", "tools"];
+			this.#activityFilter = filters[(filters.indexOf(this.#activityFilter) + 1) % filters.length]!;
+			this.#refreshActivityRows();
+			this.#requestRender();
+			return;
+		}
+		if (keyData === "s") {
+			const scopes: ActivityScope[] = ["all", "agent", "subtree"];
+			this.#activityScope = scopes[(scopes.indexOf(this.#activityScope) + 1) % scopes.length]!;
+			this.#refreshActivityRows();
+			this.#requestRender();
+			return;
+		}
+		if (matchesKey(keyData, "j") || matchesSelectDown(keyData)) {
+			if (this.#activityRows.length > 0) {
+				this.#activityFollow = false;
+				this.#selectedActivityRow = Math.min(this.#selectedActivityRow + 1, this.#activityRows.length - 1);
+			}
+			this.#requestRender();
+			return;
+		}
+		if (matchesKey(keyData, "k") || matchesSelectUp(keyData)) {
+			if (this.#activityRows.length > 0) {
+				this.#activityFollow = false;
+				this.#selectedActivityRow = Math.max(this.#selectedActivityRow - 1, 0);
+			}
+			this.#requestRender();
+			return;
+		}
+		if (matchesKey(keyData, "enter") || keyData === "\r" || keyData === "\n") {
+			const activity = this.#activityRows[this.#selectedActivityRow];
+			if (activity) this.openChat(activity.agentId, activity.entryId);
+		}
 	}
 
 	#handleTableInput(keyData: string): void {
@@ -999,6 +1880,10 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			this.#requestRender();
 			return;
 		}
+		if (matchesKey(keyData, "right")) {
+			this.#switchSection("activity");
+			return;
+		}
 		if (matchesKey(keyData, "left")) {
 			if (this.#narrowDetailsOpen && !this.#lastRenderWasSplit) {
 				this.#narrowDetailsOpen = false;
@@ -1019,6 +1904,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			if (this.#rows.length > 0) {
 				this.#selectRow(Math.min(this.#selectedRow + 1, this.#rows.length - 1));
 			}
+			this.#refreshActivityRows();
 			this.#requestRender();
 			return;
 		}
@@ -1026,6 +1912,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			if (this.#rows.length > 0) {
 				this.#selectRow(Math.max(this.#selectedRow - 1, 0));
 			}
+			this.#refreshActivityRows();
 			this.#requestRender();
 			return;
 		}
