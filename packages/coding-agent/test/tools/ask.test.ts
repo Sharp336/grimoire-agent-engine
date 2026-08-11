@@ -1712,6 +1712,35 @@ describe("AskTool rich ask dialog", () => {
 		expect(result.content).toEqual([{ type: "text", text: "User selected: Create a plan" }]);
 	});
 
+	it("normalizes and bounds model helpText in the degraded select path", async () => {
+		const originalColumns = process.stdout.columns;
+		Object.defineProperty(process.stdout, "columns", { value: 20, configurable: true });
+		try {
+			const tool = new AskTool(createSession());
+			const select = vi.fn().mockResolvedValue("Option A");
+			const context = createContext({ select });
+
+			await tool.execute(
+				"call-degraded-bounded-help",
+				{
+					helpText: "\t  Plan\n first   setting " + "x".repeat(80),
+					questions: [{ id: "q1", question: "Q1?", options: [{ label: "Option A" }] }],
+				},
+				undefined,
+				undefined,
+				context,
+			);
+
+			const helpLines = (select.mock.calls[0]?.[2]?.helpText ?? "").split("\n");
+			expect(helpLines).toHaveLength(2);
+			expect(helpLines[1]).toStartWith("Plan first");
+			expect(helpLines[1]?.length).toBeLessThanOrEqual(18);
+			expect(helpLines[1]).toEndWith("…");
+		} finally {
+			Object.defineProperty(process.stdout, "columns", { value: originalColumns, configurable: true });
+		}
+	});
+
 	it("keeps the existing degraded select footer when helpText is absent", async () => {
 		const tool = new AskTool(createSession());
 		const select = vi.fn().mockResolvedValue("Option A");

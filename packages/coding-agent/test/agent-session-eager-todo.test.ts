@@ -562,6 +562,17 @@ describe("AgentSession eager todo enforcement", () => {
 		expect(observedCalls[0]?.messageRoles).toEqual(["user"]);
 	});
 
+	it("keeps plan-first guidance ahead of eager todo after enabling the next-session startup default", async () => {
+		await recreateSession({}, {}, { builtInAsk: true, planFirstGuidance: true });
+		session.settings.set("plan.defaultOnStartup", true);
+
+		await session.prompt("Build a project dashboard with authentication and reports");
+
+		expect(observedCalls).toHaveLength(1);
+		expect(observedCalls[0]?.toolChoice).toBeUndefined();
+		expect(observedCalls[0]?.messageRoles).toEqual(["user"]);
+	});
+
 	it("keeps eager todo forcing after /clear resets an existing conversation", async () => {
 		await recreateSession({}, {}, { builtInAsk: true, planFirstGuidance: true });
 		await session.prompt("What changed?");

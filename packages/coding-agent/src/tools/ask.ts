@@ -482,8 +482,17 @@ async function askSingleQuestion(
 		const controlsHelpText = navigation
 			? "up/down navigate  enter select  ←/→ question  esc cancel"
 			: "up/down navigate  enter select  esc cancel";
+		const normalizedSupplementaryHelpText =
+			supplementaryHelpText === undefined
+				? undefined
+				: clampLineToWidth(
+						replaceTabs(supplementaryHelpText).replace(/\s+/g, " ").trim(),
+						Math.max(1, (process.stdout.columns ?? 80) - 2),
+					);
 		const helpText =
-			supplementaryHelpText === undefined ? controlsHelpText : `${controlsHelpText}\n${supplementaryHelpText}`;
+			normalizedSupplementaryHelpText === undefined
+				? controlsHelpText
+				: `${controlsHelpText}\n${normalizedSupplementaryHelpText}`;
 		const timeoutMs = typeof timeout === "number" && timeout > 0 ? timeout : undefined;
 		const timeoutController = timeoutMs === undefined ? undefined : new AbortController();
 		const dialogSignal =

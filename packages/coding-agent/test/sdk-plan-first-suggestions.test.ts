@@ -34,6 +34,7 @@ interface PromptOptions {
 	taskDepth?: number;
 	newSessionAfterCreate?: boolean;
 	activePlanModeAfterCreate?: boolean;
+	enableStartupDefaultAfterCreate?: boolean;
 	toolNames?: string[];
 	systemPrompt?: string;
 }
@@ -69,6 +70,7 @@ describe("createAgentSession plan-first suggestions", () => {
 		} else if (options.existingSummary === "branch_summary") {
 			sessionManager.branchWithSummary(null, "Prior branch summary");
 		}
+		const settings = options.settings ?? Settings.isolated();
 		const { session } = await createAgentSession({
 			cwd,
 			agentDir: cwd,
@@ -76,7 +78,7 @@ describe("createAgentSession plan-first suggestions", () => {
 			model,
 			sessionManager,
 			extensions: options.extensions,
-			settings: options.settings ?? Settings.isolated(),
+			settings,
 			hasUI: options.hasUI ?? true,
 			toolNames: options.toolNames,
 			systemPrompt: options.systemPrompt,
@@ -98,6 +100,10 @@ describe("createAgentSession plan-first suggestions", () => {
 			}
 			if (options.clearAfterCreate) {
 				await session.resetSessionContext();
+			}
+			if (options.enableStartupDefaultAfterCreate) {
+				settings.set("plan.defaultOnStartup", true);
+				await session.refreshBaseSystemPrompt();
 			}
 			if (options.activePlanModeAfterCreate) {
 				session.setPlanModeState({ enabled: true, planFilePath: "local://PLAN.md" });
@@ -196,5 +202,9 @@ describe("createAgentSession plan-first suggestions", () => {
 
 	it("includes plan-first guidance after /new replaces a resumed session", async () => {
 		expect(await assembledPrompt({ existingSession: true, newSessionAfterCreate: true })).toContain(GUIDANCE_HEADING);
+	});
+
+	it("preserves current-session guidance when the next-session startup default is enabled", async () => {
+		expect(await assembledPrompt({ enableStartupDefaultAfterCreate: true })).toContain(GUIDANCE_HEADING);
 	});
 });

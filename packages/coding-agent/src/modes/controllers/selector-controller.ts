@@ -474,7 +474,6 @@ export class SelectorController {
 				});
 				break;
 			case "plan.enabled":
-			case "plan.defaultOnStartup":
 			case "plan.suggestBeforeSubstantialWork":
 				void this.ctx.session.refreshBaseSystemPrompt().catch(err => {
 					this.ctx.showError(`Failed to apply plan-first setting: ${err}`);

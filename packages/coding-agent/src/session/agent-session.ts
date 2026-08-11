@@ -5541,9 +5541,8 @@ export class AgentSession {
 				this.#agentKind === "main" &&
 				currentSessionIsFresh &&
 				!this.#planModeState?.enabled &&
-				!this.settings.get("plan.defaultOnStartup") &&
-				this.settings.get("plan.enabled") &&
 				this.settings.get("plan.suggestBeforeSubstantialWork") &&
+				this.settings.get("plan.enabled") &&
 				this.#tools.hasBuiltInTool("ask") &&
 				this.getActiveToolNames().includes("ask");
 			const activeModel = this.agent.state.model;

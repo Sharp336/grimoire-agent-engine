@@ -2808,6 +2808,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const eagerTasksAlways = settings.get("task.eager") === "always";
 		const intentField = $flag("PI_INTENT_TRACING", settings.get("tools.intentTracing")) ? INTENT_FIELD : undefined;
 		const includeWorkspaceTree = settings.get("includeWorkspaceTree") ?? false;
+		const planDefaultOnStartup = settings.get("plan.defaultOnStartup");
 		const rebuildSystemPrompt = async (
 			toolNames: string[],
 			tools: Map<string, AgentTool>,
@@ -2858,7 +2859,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				agentKind === "main" &&
 				currentSessionIsFresh &&
 				(!hasSession || !session.getPlanModeState()?.enabled) &&
-				!settings.get("plan.defaultOnStartup") &&
+				!planDefaultOnStartup &&
 				settings.get("plan.enabled") &&
 				settings.get("plan.suggestBeforeSubstantialWork") &&
 				builtInRegistryToolNames.has("ask") &&
