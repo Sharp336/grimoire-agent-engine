@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import * as path from "node:path";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
+import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const MOCK_AGENT = path.join(import.meta.dir, "fixtures", "mock-rpc-agent.ts");
@@ -119,6 +121,46 @@ describe("RpcClient frame coverage", () => {
 			content: "fixture contents",
 			contentType: "text/plain",
 			immutable: true,
+		});
+	});
+
+	test("preserves the legacy model list while exposing catalog metadata", async () => {
+		using client = new RpcClient({ cliPath: MOCK_AGENT });
+		await client.start();
+
+		await expect(client.getAvailableModels()).resolves.toEqual([
+			{
+				provider: "anthropic",
+				id: "claude-sonnet",
+				contextWindow: 200_000,
+				reasoning: true,
+			},
+		]);
+		await expect(client.getAvailableModelsResult()).resolves.toEqual({
+			models: [
+				{
+					provider: "anthropic",
+					id: "claude-sonnet",
+					contextWindow: 200_000,
+					reasoning: true,
+				},
+			],
+			usageOrder: ["anthropic/claude-sonnet"],
+			roles: [
+				{
+					role: "default",
+					provider: "anthropic",
+					id: "claude-sonnet",
+					autoSelected: true,
+				},
+			],
+			thinkingOptions: [
+				{
+					provider: "anthropic",
+					id: "claude-sonnet",
+					levels: [ThinkingLevel.Off, AUTO_THINKING, ThinkingLevel.High],
+				},
+			],
 		});
 	});
 

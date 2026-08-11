@@ -119,6 +119,9 @@ _EFFORT_VALUES: Final[frozenset[str]] = frozenset(
     {"minimal", "low", "medium", "high", "xhigh", "max"}
 )
 _THINKING_LEVEL_VALUES: Final[frozenset[str]] = _EFFORT_VALUES | frozenset({"off"})
+_CONFIGURED_THINKING_LEVEL_VALUES: Final[frozenset[str]] = (
+    _THINKING_LEVEL_VALUES | frozenset({"auto"})
+)
 _STEERING_MODE_VALUES: Final[frozenset[str]] = frozenset({"all", "one-at-a-time"})
 _INTERRUPT_MODE_VALUES: Final[frozenset[str]] = frozenset({"immediate", "wait"})
 _SESSION_ACTIVITY_PHASE_VALUES: Final[frozenset[str]] = frozenset(
@@ -870,6 +873,29 @@ class ModelInfo:
     priority: int | None = None
     thinking: ThinkingConfig | None = None
     compat: JsonObject | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class AvailableModelRole:
+    role: str
+    provider: str
+    id: str
+    auto_selected: bool
+
+
+@dataclass(slots=True, frozen=True)
+class AvailableModelThinkingOptions:
+    provider: str
+    id: str
+    levels: tuple[ConfiguredThinkingLevel, ...]
+
+
+@dataclass(slots=True, frozen=True)
+class AvailableModelsResult:
+    models: tuple[ModelInfo, ...]
+    usage_order: tuple[str, ...]
+    roles: tuple[AvailableModelRole, ...]
+    thinking_options: tuple[AvailableModelThinkingOptions, ...]
 
 
 @dataclass(slots=True, frozen=True)
@@ -2711,6 +2737,83 @@ def parse_model_info(payload: JsonObject | None) -> ModelInfo | None:
         priority=int(payload["priority"]) if "priority" in payload else None,
         thinking=_parse_thinking_config(thinking_payload),
         compat=_optional_json_object(compat_payload, field="model.compat"),
+    )
+
+
+def parse_available_models_result(payload: JsonObject) -> AvailableModelsResult:
+    raw_models = payload.get("models")
+    if not isinstance(raw_models, list):
+        raise ValueError("get_available_models.models must be a list")
+    models: list[ModelInfo] = []
+    for index, item in enumerate(raw_models):
+        if not isinstance(item, dict):
+            raise ValueError(f"get_available_models.models[{index}] must be an object")
+        model = parse_model_info(cast(JsonObject, item))
+        if model is None:
+            raise ValueError(f"get_available_models.models[{index}] must not be null")
+        models.append(model)
+
+    raw_roles = payload.get("roles")
+    roles: list[AvailableModelRole] = []
+    if raw_roles is not None:
+        if not isinstance(raw_roles, list):
+            raise ValueError("get_available_models.roles must be a list")
+        for index, item in enumerate(raw_roles):
+            if not isinstance(item, dict):
+                raise ValueError(f"get_available_models.roles[{index}] must be an object")
+            role = cast(JsonObject, item)
+            roles.append(
+                AvailableModelRole(
+                    role=_require_str(role, "role"),
+                    provider=_require_str(role, "provider"),
+                    id=_require_str(role, "id"),
+                    auto_selected=_require_bool(role, "autoSelected"),
+                )
+            )
+
+    raw_thinking_options = payload.get("thinkingOptions")
+    thinking_options: list[AvailableModelThinkingOptions] = []
+    if raw_thinking_options is not None:
+        if not isinstance(raw_thinking_options, list):
+            raise ValueError("get_available_models.thinkingOptions must be a list")
+        for index, item in enumerate(raw_thinking_options):
+            if not isinstance(item, dict):
+                raise ValueError(
+                    f"get_available_models.thinkingOptions[{index}] must be an object"
+                )
+            thinking = cast(JsonObject, item)
+            raw_levels = thinking.get("levels")
+            if not isinstance(raw_levels, list):
+                raise ValueError(
+                    f"get_available_models.thinkingOptions[{index}].levels must be a list"
+                )
+            levels = tuple(
+                cast(
+                    ConfiguredThinkingLevel,
+                    _require_literal(
+                        level,
+                        _CONFIGURED_THINKING_LEVEL_VALUES,
+                        field=f"get_available_models.thinkingOptions[{index}].levels",
+                    ),
+                )
+                for level in raw_levels
+            )
+            thinking_options.append(
+                AvailableModelThinkingOptions(
+                    provider=_require_str(thinking, "provider"),
+                    id=_require_str(thinking, "id"),
+                    levels=levels,
+                )
+            )
+
+    return AvailableModelsResult(
+        models=tuple(models),
+        usage_order=_tuple_of_strings(
+            payload.get("usageOrder"), field="get_available_models.usageOrder"
+        )
+        or (),
+        roles=tuple(roles),
+        thinking_options=tuple(thinking_options),
     )
 
 

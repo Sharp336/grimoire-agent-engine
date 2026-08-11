@@ -179,6 +179,29 @@ export interface RpcClientOptions {
 
 export type ModelInfo = Pick<Model, "provider" | "id" | "contextWindow" | "reasoning" | "thinking">;
 
+/** A configured model role resolved by the RPC server. */
+export interface AvailableModelRole {
+	role: string;
+	provider: string;
+	id: string;
+	autoSelected: boolean;
+}
+
+/** Selectable thinking levels for one available model. */
+export interface AvailableModelThinkingOptions {
+	provider: string;
+	id: string;
+	levels: ConfiguredThinkingLevel[];
+}
+
+/** Full `get_available_models` response, including catalog presentation metadata. */
+export interface AvailableModelsResult {
+	models: ModelInfo[];
+	usageOrder: string[];
+	roles: AvailableModelRole[];
+	thinkingOptions: AvailableModelThinkingOptions[];
+}
+
 export type RpcEventListener = (event: AgentEvent) => void;
 export type RpcSessionEventListener = (event: AgentSessionEvent) => void;
 export type RpcSubagentLifecycleListener = (payload: RpcSubagentLifecycleFrame["payload"]) => void;
@@ -2170,11 +2193,32 @@ export class RpcClient {
 	}
 
 	/**
-	 * Get list of available models.
+	 * Get the legacy list of available models.
+	 *
+	 * Use {@link getAvailableModelsResult} when model ordering, role assignments,
+	 * or per-model thinking selectors are needed.
 	 */
 	async getAvailableModels(): Promise<ModelInfo[]> {
+		return (await this.getAvailableModelsResult()).models;
+	}
+
+	/**
+	 * Get available models together with the server's catalog presentation metadata.
+	 */
+	async getAvailableModelsResult(): Promise<AvailableModelsResult> {
 		const response = await this.#send({ type: "get_available_models" });
-		return this.#getData<{ models: ModelInfo[] }>(response).models;
+		const {
+			models,
+			usageOrder = [],
+			roles = [],
+			thinkingOptions = [],
+		} = this.#getData<{
+			models: ModelInfo[];
+			usageOrder?: string[];
+			roles?: AvailableModelRole[];
+			thinkingOptions?: AvailableModelThinkingOptions[];
+		}>(response);
+		return { models, usageOrder, roles, thinkingOptions };
 	}
 
 	/**

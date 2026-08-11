@@ -758,6 +758,14 @@ entries.
 - `{ id?, type: "cycle_model" }`
 - `{ id?, type: "get_available_models" }`
 
+`get_available_models` returns the TUI-sorted `models` plus `usageOrder`,
+resolved `roles` (`role`, `provider`, `id`, and `autoSelected`), and
+per-model `thinkingOptions` (`provider`, `id`, and selectable `levels`,
+including `auto` where supported). The bundled clients preserve their
+list-only methods—TypeScript `getAvailableModels()` and Python
+`get_available_models()`—and expose the complete response through
+`getAvailableModelsResult()` and `get_available_models_result()`.
+
 ### Thinking
 
 - `{ id?, type: "set_thinking_level", level: ThinkingLevel }`

@@ -317,6 +317,41 @@ for await (const raw of console) {
 				protocolV2Enabled = true;
 				continue;
 			}
+			if (frame.type === "get_available_models") {
+				writeFrame({
+					id,
+					type: "response",
+					command: frame.type,
+					success: true,
+					data: {
+						models: [
+							{
+								provider: "anthropic",
+								id: "claude-sonnet",
+								contextWindow: 200_000,
+								reasoning: true,
+							},
+						],
+						usageOrder: ["anthropic/claude-sonnet"],
+						roles: [
+							{
+								role: "default",
+								provider: "anthropic",
+								id: "claude-sonnet",
+								autoSelected: true,
+							},
+						],
+						thinkingOptions: [
+							{
+								provider: "anthropic",
+								id: "claude-sonnet",
+								levels: ["off", "auto", "high"],
+							},
+						],
+					},
+				});
+				continue;
+			}
 			if (frame.type === "get_settings") {
 				// Deterministic stand-in for the real snapshot: one disclosed entry and
 				// one redacted entry, so a client test can assert both shapes.

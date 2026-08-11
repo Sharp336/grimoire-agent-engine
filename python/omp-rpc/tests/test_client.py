@@ -803,7 +803,23 @@ FAKE_SERVER = textwrap.dedent(
                     "models": [
                         model_info("claude-sonnet-4-5", "anthropic"),
                         model_info("claude-sonnet-4-6", "anthropic"),
-                    ]
+                    ],
+                    "usageOrder": ["anthropic/claude-sonnet-4-6"],
+                    "roles": [
+                        {
+                            "role": "default",
+                            "provider": "anthropic",
+                            "id": "claude-sonnet-4-6",
+                            "autoSelected": True,
+                        }
+                    ],
+                    "thinkingOptions": [
+                        {
+                            "provider": "anthropic",
+                            "id": "claude-sonnet-4-5",
+                            "levels": ["off", "auto", "high"],
+                        }
+                    ],
                 },
             )
         elif command_type == "set_thinking_level":
@@ -2640,11 +2656,24 @@ class RpcClientTests(unittest.TestCase):
             self.assertIsNotNone(cycled)
             self.assertEqual(cycled.model.id, "claude-sonnet-4-5")
 
-            available = client.get_available_models()
+            available_result = client.get_available_models_result()
             self.assertEqual(
-                [item.id for item in available],
+                [item.id for item in available_result.models],
                 ["claude-sonnet-4-5", "claude-sonnet-4-6"],
             )
+            self.assertEqual(
+                available_result.usage_order,
+                ("anthropic/claude-sonnet-4-6",),
+            )
+            self.assertEqual(available_result.roles[0].role, "default")
+            self.assertTrue(available_result.roles[0].auto_selected)
+            self.assertEqual(
+                available_result.thinking_options[0].levels,
+                ("off", "auto", "high"),
+            )
+
+            available = client.get_available_models()
+            self.assertEqual(available, available_result.models)
 
             client.set_thinking_level("high")
             self.assertEqual(client.get_state().thinking_level, "high")

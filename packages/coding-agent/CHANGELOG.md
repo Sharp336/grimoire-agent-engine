@@ -8,7 +8,7 @@
 
 ### Changed
 
-- Extended RPC `get_available_models` with TUI-consistent ordering, resolved model-role preferences, most-recently-used model order, and each model's authoritative thinking selectors; RPC clients can also select and observe `auto` thinking directly.
+- Extended RPC `get_available_models` with TUI-consistent ordering, resolved model-role preferences, most-recently-used model order, and each model's authoritative thinking selectors; bundled TypeScript and Python clients expose that metadata and can also select and observe `auto` thinking directly.
 
 ### Fixed
 

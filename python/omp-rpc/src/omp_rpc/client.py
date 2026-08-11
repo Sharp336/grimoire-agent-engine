@@ -37,6 +37,7 @@ from .protocol import (
     AutoRetryEndEvent,
     AutoRetryStartEvent,
     AvailableCommandsUpdateEvent,
+    AvailableModelsResult,
     BashResult,
     BranchMessage,
     BranchResult,
@@ -192,6 +193,7 @@ from .protocol import (
     parse_job_snapshot,
     parse_mode_change_result,
     parse_model_cycle_result,
+    parse_available_models_result,
     parse_model_info,
     parse_notification,
     parse_plan_state,
@@ -2078,9 +2080,12 @@ class RpcClient:
         return parse_model_cycle_result(self._request("cycle_model"))
 
     def get_available_models(self) -> tuple[ModelInfo, ...]:
-        payload = self._request("get_available_models")
-        models = cast(list[JsonObject], payload.get("models") or [])
-        return tuple(filter(None, (parse_model_info(model) for model in models)))
+        """Return the legacy available-model list without catalog metadata."""
+        return self.get_available_models_result().models
+
+    def get_available_models_result(self) -> AvailableModelsResult:
+        """Return available models and the server's ordering, role, and thinking metadata."""
+        return parse_available_models_result(self._request("get_available_models"))
 
     def set_thinking_level(self, level: ThinkingLevel) -> None:
         self._request("set_thinking_level", level=level)
