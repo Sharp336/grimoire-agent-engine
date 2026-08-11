@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added configurable terminal notifications for tool approval prompts via `approval.notify`.
+
 ## [17.2.14] - 2026-08-11
 
 ### Added

@@ -9,9 +9,11 @@ import type {
 	ToolLoadMode,
 } from "@oh-my-pi/pi-agent-core";
 import type { ComputerSafetyCheck, ImageContent, Static, TextContent, TSchema } from "@oh-my-pi/pi-ai";
-import { sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
+import { TERMINAL } from "@oh-my-pi/pi-tui";
+import { isInteractiveHost, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../../config/settings";
 import type { Theme } from "../../modes/theme/theme";
+import { isWarpCliAgentProtocolActive } from "../../modes/warp-events";
 import { type ApprovalMode, formatApprovalPrompt, resolveApproval, truncateForPrompt } from "../../tools/approval";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
@@ -312,6 +314,16 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 						`  2. Add tools.approval.${this.tool.name}: allow to config\n` +
 						`  3. Use an interactive UI to approve the tool call`,
 				);
+			}
+
+			if (isInteractiveHost() && !isWarpCliAgentProtocolActive() && settings?.get("approval.notify") !== "off") {
+				TERMINAL.sendNotification({
+					title: context?.sessionManager?.getSessionName() || "Oh My Pi",
+					body: `Permission required: ${this.tool.name}`,
+					type: "approval",
+					urgency: "normal",
+					actions: "focus",
+				});
 			}
 
 			const uiContext = this.runner.getUIContext();
