@@ -1948,6 +1948,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"approval.notify": {
+		type: "enum",
+		values: ["on", "off"] as const,
+		default: "on",
+		ui: {
+			tab: "interaction",
+			group: "Notifications",
+			label: "Approval Notification",
+			description: "Notify when a tool is waiting for approval",
+		},
+	},
+
 	"ask.timeout": {
 		type: "number",
 		default: 0,

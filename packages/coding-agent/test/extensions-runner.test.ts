@@ -29,7 +29,11 @@ import type {
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
+import { TERMINAL } from "@oh-my-pi/pi-tui";
+import { getProjectAgentDir, isInteractiveHost, logger, setInteractiveHost, TempDir } from "@oh-my-pi/pi-utils";
+
+const originalInteractiveHost = isInteractiveHost();
+const originalWarpProtocolVersion = process.env.WARP_CLI_AGENT_PROTOCOL_VERSION;
 
 describe("ExtensionRunner", () => {
 	let tempDir: TempDir;
@@ -65,6 +69,12 @@ describe("ExtensionRunner", () => {
 		testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
 		testSetSessionShutdownHandlerTimeoutMs(SESSION_SHUTDOWN_HANDLER_TIMEOUT_MS);
 		tempDir.removeSync();
+		setInteractiveHost(originalInteractiveHost);
+		if (originalWarpProtocolVersion === undefined) {
+			delete process.env.WARP_CLI_AGENT_PROTOCOL_VERSION;
+		} else {
+			process.env.WARP_CLI_AGENT_PROTOCOL_VERSION = originalWarpProtocolVersion;
+		}
 	});
 
 	const loadTestExtensions = async (configuredPaths: string[] = []) => {
@@ -1903,6 +1913,7 @@ describe("ExtensionRunner", () => {
 		};
 
 		it("emits requested before waiting and resolved after approval", async () => {
+			const notify = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
 			const events: Array<{ type: string; approved?: boolean }> = [];
 			const extCode = `
 				export default function(pi) {
@@ -1933,25 +1944,56 @@ describe("ExtensionRunner", () => {
 			initializeRunner(runner, select);
 
 			const wrapper = new ExtensionToolWrapper(approvalTool, runner);
-			await (wrapper as ExtensionToolWrapper<any>).execute("call-approval", {}, undefined, undefined, {
+			let approvalNotification = "on";
+			const toolContext = {
 				sessionManager,
 				modelRegistry,
 				model: undefined,
 				isIdle: () => true,
 				hasQueuedMessages: () => false,
 				abort: () => {},
-				settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) } as never,
-			});
+				settings: {
+					get: (key: string) => {
+						if (key === "tools.approvalMode") return "always-ask";
+						if (key === "approval.notify") return approvalNotification;
+						return {};
+					},
+				},
+			} as never;
+			setInteractiveHost(true);
+			await wrapper.execute("call-approval", {} as never, undefined, undefined, toolContext);
 
 			expect(events).toEqual([
 				{ type: "tool_approval_requested" },
 				{ type: "ui_select" },
 				{ type: "tool_approval_resolved", approved: true },
 			]);
+			expect(notify).toHaveBeenCalledWith({
+				title: "Oh My Pi",
+				body: "Permission required: dangerous_tool",
+				type: "approval",
+				urgency: "normal",
+				actions: "focus",
+			});
+			expect(notify).toHaveBeenCalledTimes(1);
 			expect(select).toHaveBeenCalledWith(expect.stringContaining("Allow tool: dangerous_tool"), [
 				"Approve",
 				"Deny",
 			]);
+			notify.mockClear();
+			approvalNotification = "off";
+			await wrapper.execute("call-approval-notify-off", {} as never, undefined, undefined, toolContext);
+			expect(notify).not.toHaveBeenCalled();
+			notify.mockClear();
+			approvalNotification = "on";
+			setInteractiveHost(false);
+			await wrapper.execute("call-approval-non-terminal", {} as never, undefined, undefined, toolContext);
+			expect(notify).not.toHaveBeenCalled();
+			notify.mockClear();
+			setInteractiveHost(true);
+			process.env.WARP_CLI_AGENT_PROTOCOL_VERSION = "1";
+			await wrapper.execute("call-approval-warp", {} as never, undefined, undefined, toolContext);
+			expect(notify).not.toHaveBeenCalled();
 			delete globalState.__approvalEvents;
 		});
 
