@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
+import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, TextContent, ToolCall } from "@oh-my-pi/pi-ai";
@@ -666,6 +667,49 @@ describe("AgentSession eager todo enforcement", () => {
 		expect(observedCalls).toHaveLength(1);
 		expect(observedCalls[0]?.toolChoice).toBeUndefined();
 		expect(observedCalls[0]?.messageRoles).toEqual(["developer"]);
+	});
+
+	it("uses an in-flight refreshed base prompt for the next turn", async () => {
+		const rebuildStarted = Promise.withResolvers<void>();
+		const releaseRebuild = Promise.withResolvers<void>();
+		await recreateSession(
+			{},
+			{
+				rebuildSystemPrompt: async () => {
+					rebuildStarted.resolve();
+					await releaseRebuild.promise;
+					return { systemPrompt: ["Test", planFirstSuggestionsPrompt.trim()], xdevCatalogNames: [] };
+				},
+			},
+			{ builtInAsk: true },
+		);
+
+		const apiKeyChecked = Promise.withResolvers<void>();
+		vi.spyOn(session.modelRegistry, "getApiKey").mockImplementation(async () => {
+			apiKeyChecked.resolve();
+			return "test-key";
+		});
+
+		session.settings.set("plan.suggestBeforeSubstantialWork", false);
+		expect(session.settings.get("plan.suggestBeforeSubstantialWork")).toBe(false);
+		session.settings.set("plan.suggestBeforeSubstantialWork", true);
+		expect(session.settings.get("plan.suggestBeforeSubstantialWork")).toBe(true);
+		expect(session.settings.get("plan.enabled")).toBe(true);
+		expect(session.getActiveToolNames()).toContain("ask");
+		expect(session.messages).toHaveLength(0);
+		const refresh = session.refreshBaseSystemPrompt();
+		await rebuildStarted.promise;
+		const prompt = session.prompt("Build a project dashboard with authentication and reports");
+		await apiKeyChecked.promise;
+		for (let turn = 0; turn < 100 && observedCalls.length === 0; turn++) {
+			await scheduler.yield();
+		}
+
+		expect(observedCalls).toHaveLength(0);
+		releaseRebuild.resolve();
+		await Promise.all([refresh, prompt]);
+		expect(observedCalls).toHaveLength(1);
+		expect(observedCalls[0]?.toolChoice).toBeUndefined();
 	});
 
 	it("prepends the eager todo reminder without forcing the todo tool when todo.eager is preferred", async () => {

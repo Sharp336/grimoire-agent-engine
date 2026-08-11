@@ -1361,6 +1361,10 @@ export class SessionTools {
 
 	/** Applies one-turn memory prompt injection before an agent run. */
 	async buildSystemPromptForAgentStart(promptText: string): Promise<string[]> {
+		// Settings side effects rebuild the base prompt asynchronously. Wait for the
+		// mutation queue before taking this turn's prompt snapshot so a prompt
+		// submitted immediately after /settings cannot use the previous policy.
+		if (!this.#toolRegistryMutationScope.getStore()) await this.#toolRegistryMutationTail;
 		const backend = await resolveMemoryBackend(this.#host.settings);
 		if (!backend.beforeAgentStartPrompt) return this.#baseSystemPrompt;
 
