@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Extended `--advisor` to accept explicit `on`/`off` values and per-run `provider/model[:thinking]` selectors without persisting settings. ([#8232](https://github.com/can1357/oh-my-pi/pull/8232)) by [@olegpulatov](https://github.com/olegpulatov)
+
 ## [17.2.12] - 2026-08-08
 
 ### Fixed

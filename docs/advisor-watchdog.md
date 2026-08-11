@@ -45,12 +45,20 @@ Model selectors use normal role/model resolution, including provider-prefixed id
 
 ### Headless runs
 
-Use `--advisor` to enable the advisor for one print-mode process without
-persisting `advisor.enabled`:
+Use `--advisor` or `--advisor on` to enable the advisor for one process without
+persisting `advisor.enabled`. Use `--advisor off` to disable a persisted advisor
+for one process. A provider-qualified model selector can override the
+role-based advisor model, including its thinking suffix:
 
 ```sh
 omp -p --advisor "Review this task."
+omp -p --advisor off "Skip review for this run."
+omp -p --advisor=openai/gpt-5:med "Review this task with medium reasoning."
 ```
+
+Use equals syntax for model selectors (`--advisor=opus` or
+`--advisor=openai/gpt-5:med`) so the bare `--advisor` form never consumes
+initial prompt text. Separate values are consumed only for `on` and `off`.
 
 While a primary prompt is running, advisor concerns and blockers continue to steer that live turn. After the final prompt settles, print mode preserves late advisor notes without starting hidden primary turns, then waits up to ten minutes for final reviews before disposing the session. Error exits use a 30-second drain budget so failed automation can terminate. If either deadline expires, OMP logs the reviews that disposal will abandon; completed reviews retain their transcript and token/cost usage.
 

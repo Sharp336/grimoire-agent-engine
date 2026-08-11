@@ -10,6 +10,7 @@ import { BUILTIN_TOOL_NAMES, HIDDEN_TOOL_NAMES, normalizeToolNames } from "../to
 import {
 	OPTIONAL_FLAGS,
 	OPTIONAL_VALUE_FLAGS,
+	optionalFlagConsumesValue,
 	type ParseDeps,
 	PROFILE_BOOTSTRAP_BOUNDARY_ARG,
 	STRING_SETTERS,
@@ -47,7 +48,7 @@ export interface Args {
 	thinking?: ConfiguredThinkingLevel;
 	serviceTier?: ServiceTierOpenAISettingValue;
 	hideThinking?: boolean;
-	advisor?: boolean;
+	advisor?: boolean | string;
 	continue?: boolean;
 	resume?: string | true;
 	fromClaude?: boolean;
@@ -219,7 +220,9 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			const config = OPTIONAL_FLAGS[arg];
 			const next = args[i + 1];
 			const consume =
-				next !== undefined && !next.startsWith("-") && !(config.rejectEmpty === true && next.length === 0);
+				equalsValueIndex !== -1
+					? next !== undefined && !(config.rejectEmpty === true && next.length === 0)
+					: optionalFlagConsumesValue(config, next);
 			config.set(result, consume ? args[++i] : undefined);
 		} else if (arg === "--help" || arg === "-h") {
 			result.help = true;
@@ -253,8 +256,6 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.noPty = true;
 		} else if (arg === "--hide-thinking") {
 			result.hideThinking = true;
-		} else if (arg === "--advisor") {
-			result.advisor = true;
 		} else if (arg === "--prewalk") {
 			result.prewalk = true;
 		} else if (arg === "--no-prewalk") {
