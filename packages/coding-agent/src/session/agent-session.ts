@@ -5251,34 +5251,7 @@ export class AgentSession {
 
 		// Skip eager preludes when the user has already queued a directive.
 		const hasPendingUserDirective = this.#toolChoiceQueue.inspect().includes("user-force");
-		const currentSessionIsFresh = !this.sessionManager.getBranch().some(entry => entry.type === "message");
-		// The first-response planning questionnaire must get the unforced opening turn.
-		// The guidance classifies exempt requests before substantial ones, so it owns
-		// precedence over both optional scratchpad forcing and eager todo enforcement.
-		const planFirstSuggestionHasPriority =
-			this.systemPrompt.some(part => part.includes(planFirstSuggestionsPrompt.trim())) &&
-			this.#agentKind === "main" &&
-			currentSessionIsFresh &&
-			!this.#planModeState?.enabled &&
-			!this.settings.get("plan.defaultOnStartup") &&
-			this.settings.get("plan.enabled") &&
-			this.settings.get("plan.suggestBeforeSubstantialWork") &&
-			this.#tools.hasBuiltInTool("ask") &&
-			this.getActiveToolNames().includes("ask");
-		const activeModel = this.agent.state.model;
-		const externalThinkingToolChoice =
-			!options?.synthetic &&
-			!planFirstSuggestionHasPriority &&
-			!hasPendingUserDirective &&
-			this.settings.get("externalThinking") &&
-			this.getEnabledToolNames().includes("think") &&
-			supportsExternalThinking(activeModel)
-				? buildNamedToolChoice("think", activeModel)
-				: undefined;
-		const eagerTodoPrelude =
-			!planFirstSuggestionHasPriority && !options?.synthetic && !hasPendingUserDirective
-				? this.#todo.createEagerTodoPrelude(expandedText)
-				: undefined;
+
 		const eagerTaskPrelude =
 			!options?.synthetic && !hasPendingUserDirective ? this.#todo.createEagerTaskPrelude(expandedText) : undefined;
 		const normalizedImages = await this.#normalizeImagesForModel(options?.images);
@@ -5294,25 +5267,11 @@ export class AgentSession {
 			: undefined;
 
 		const promptAttribution = options?.attribution ?? (options?.synthetic ? "agent" : "user");
-		if (externalThinkingToolChoice) {
-			this.#toolChoiceQueue.pushOnce(externalThinkingToolChoice, {
-				label: "external-thinking",
-				now: true,
-			});
-		}
 		const message = options?.synthetic
 			? { role: "developer" as const, content: userContent, attribution: promptAttribution, timestamp: Date.now() }
 			: { role: "user" as const, content: userContent, attribution: promptAttribution, timestamp: Date.now() };
 
 		const preludeMessages: AgentMessage[] = [];
-		if (eagerTodoPrelude) {
-			if (eagerTodoPrelude.toolChoice && !planFirstSuggestionHasPriority) {
-				this.#toolChoiceQueue.pushOnce(eagerTodoPrelude.toolChoice, {
-					label: "eager-todo",
-				});
-			}
-			preludeMessages.push(eagerTodoPrelude.message);
-		}
 		if (eagerTaskPrelude) {
 			preludeMessages.push(eagerTaskPrelude);
 		}
@@ -5471,6 +5430,7 @@ export class AgentSession {
 			if (vibeModeMessage) {
 				messages.push(vibeModeMessage);
 			}
+			const turnPreludeMessageIndex = messages.length;
 			if (options?.prependMessages) {
 				messages.push(...options.prependMessages);
 			}
@@ -5485,7 +5445,7 @@ export class AgentSession {
 			// never an agent-initiated continuation. Reserve its pre-user position,
 			// but consume it only after before_agent_start determines whether the
 			// final provider prompt still carries the base xd:// catalog.
-			const xdevMountNoticeIndex = messages.length;
+			let xdevMountNoticeIndex = messages.length;
 			messages.push(message);
 			// Inject any pending "nextTurn" messages as context alongside the user message
 			for (const msg of this.#pendingNextTurnMessages) {
@@ -5515,6 +5475,7 @@ export class AgentSession {
 			await this.#memory.transition;
 			if ((this.#isDisposed && !disposingBeforeTransition) || this.#promptGeneration !== generation) return;
 			const beforeAgentStartSystemPrompt = await this.#buildSystemPromptForAgentStart(expandedText);
+			let finalTurnSystemPrompt = beforeAgentStartSystemPrompt;
 
 			let baseXdevCatalogDelivered = true;
 			// Emit before_agent_start extension event
@@ -5553,6 +5514,7 @@ export class AgentSession {
 				if (result?.systemPrompt !== undefined) {
 					baseXdevCatalogDelivered = false;
 					this.#tools.setTurnSystemPromptOverride(result.systemPrompt);
+					finalTurnSystemPrompt = result.systemPrompt;
 				} else {
 					this.#tools.clearTurnSystemPromptOverride();
 					this.agent.setSystemPrompt(beforeAgentStartSystemPrompt);
@@ -5560,6 +5522,56 @@ export class AgentSession {
 			} else {
 				this.#tools.clearTurnSystemPromptOverride();
 				this.agent.setSystemPrompt(beforeAgentStartSystemPrompt);
+			}
+
+			// Resolve plan-first precedence from the prompt that will reach the
+			// provider. A before_agent_start replacement can remove the base
+			// guidance, in which case eager todo or external thinking must retain
+			// the first turn instead of both behaviors being suppressed.
+			const userTurn = message.role === "user";
+			const turnHasPendingUserDirective = this.#toolChoiceQueue.inspect().includes("user-force");
+			const currentSessionIsFresh = this.messages.length === 0;
+			const planFirstSuggestionHasPriority =
+				finalTurnSystemPrompt.some(part => part.includes(planFirstSuggestionsPrompt.trim())) &&
+				this.#agentKind === "main" &&
+				currentSessionIsFresh &&
+				!this.#planModeState?.enabled &&
+				!this.settings.get("plan.defaultOnStartup") &&
+				this.settings.get("plan.enabled") &&
+				this.settings.get("plan.suggestBeforeSubstantialWork") &&
+				this.#tools.hasBuiltInTool("ask") &&
+				this.getActiveToolNames().includes("ask");
+			const activeModel = this.agent.state.model;
+			const externalThinkingToolChoice =
+				userTurn &&
+				!planFirstSuggestionHasPriority &&
+				!turnHasPendingUserDirective &&
+				this.settings.get("externalThinking") &&
+				this.getEnabledToolNames().includes("think") &&
+				activeModel &&
+				(activeModel.api === "openai-responses" ||
+					activeModel.api === "azure-openai-responses" ||
+					activeModel.api === "openai-codex-responses")
+					? buildNamedToolChoice("think", activeModel)
+					: undefined;
+			if (externalThinkingToolChoice) {
+				this.#toolChoiceQueue.pushOnce(externalThinkingToolChoice, {
+					label: "external-thinking",
+					now: true,
+				});
+			}
+			const eagerTodoPrelude =
+				userTurn && !planFirstSuggestionHasPriority && !turnHasPendingUserDirective
+					? this.#todo.createEagerTodoPrelude(expandedText)
+					: undefined;
+			if (eagerTodoPrelude) {
+				if (eagerTodoPrelude.toolChoice) {
+					this.#toolChoiceQueue.pushOnce(eagerTodoPrelude.toolChoice, {
+						label: "eager-todo",
+					});
+				}
+				messages.splice(turnPreludeMessageIndex, 0, eagerTodoPrelude.message);
+				xdevMountNoticeIndex++;
 			}
 
 			// Bail out if a newer abort/prompt cycle has started since we began setup

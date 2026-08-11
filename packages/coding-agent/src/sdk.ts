@@ -2850,7 +2850,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const appendParts: string[] = [];
 			if (memoryInstructions) appendParts.push(memoryInstructions);
 			if (autoLearnInstructions) appendParts.push(autoLearnInstructions);
-			const currentSessionIsFresh = !sessionManager.getBranch().some(entry => entry.type === "message");
+			const currentSessionIsFresh = (hasSession ? session.messages : existingSession.messages).length === 0;
 			if (
 				agentKind === "main" &&
 				currentSessionIsFresh &&

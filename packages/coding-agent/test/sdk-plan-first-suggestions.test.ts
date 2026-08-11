@@ -26,6 +26,7 @@ const askOverrideExtension: ExtensionFactory = pi => {
 
 interface PromptOptions {
 	existingSession?: boolean;
+	existingSummary?: "compaction" | "branch_summary";
 	extensions?: ExtensionFactory[];
 	hasUI?: boolean;
 	settings?: Settings;
@@ -61,6 +62,11 @@ describe("createAgentSession plan-first suggestions", () => {
 		const sessionManager = SessionManager.inMemory(cwd);
 		if (options.existingSession) {
 			sessionManager.appendMessage({ role: "user", content: "Prior request", timestamp: 1 });
+		}
+		if (options.existingSummary === "compaction") {
+			sessionManager.appendCompaction("Prior conversation summary", undefined, "root", 100);
+		} else if (options.existingSummary === "branch_summary") {
+			sessionManager.branchWithSummary(null, "Prior branch summary");
 		}
 		const { session } = await createAgentSession({
 			cwd,
@@ -162,6 +168,8 @@ describe("createAgentSession plan-first suggestions", () => {
 		["sessions configured to start in plan mode", { settings: Settings.isolated({ "plan.defaultOnStartup": true }) }],
 		["sessions already in plan mode", { activePlanModeAfterCreate: true }],
 		["resumed sessions", { existingSession: true }],
+		["sessions resumed from a compaction summary", { existingSummary: "compaction" }],
+		["sessions resumed from a branch summary", { existingSummary: "branch_summary" }],
 		["sessions with a replacement system prompt", { systemPrompt: "Custom SDK prompt" }],
 		["sessions whose active ask is an extension override", { extensions: [askOverrideExtension] }],
 		["subagent sessions", { taskDepth: 1 }],

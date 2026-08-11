@@ -8,6 +8,7 @@ import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream"
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { AgentSession, type AgentSessionConfig } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -109,6 +110,7 @@ describe("AgentSession eager todo enforcement", () => {
 		builtInAsk?: boolean;
 		externalThink?: boolean;
 		planFirstGuidance?: boolean;
+		beforeAgentStartSystemPrompt?: string[];
 	};
 
 	async function createSession(
@@ -215,6 +217,12 @@ describe("AgentSession eager todo enforcement", () => {
 			modelRegistry,
 			toolRegistry,
 			builtInToolNames: harnessTools.builtInAsk ? ["ask"] : undefined,
+			extensionRunner: harnessTools.beforeAgentStartSystemPrompt
+				? ({
+						emitBeforeAgentStart: async () => ({ systemPrompt: harnessTools.beforeAgentStartSystemPrompt }),
+						emit: async () => undefined,
+					} as unknown as ExtensionRunner)
+				: undefined,
 			...sessionOverride,
 		});
 	}
@@ -563,6 +571,23 @@ describe("AgentSession eager todo enforcement", () => {
 		expect(observedCalls[0]?.toolChoice).toBe("todo");
 		expect(observedCalls[0]?.messageRoles).toEqual(["developer", "user"]);
 	});
+	it("keeps eager todo forcing when before_agent_start removes plan-first guidance", async () => {
+		await recreateSession(
+			{},
+			{},
+			{
+				builtInAsk: true,
+				planFirstGuidance: true,
+				beforeAgentStartSystemPrompt: ["Extension replacement"],
+			},
+		);
+
+		await session.prompt("Build a project dashboard with authentication and reports");
+
+		expect(observedCalls).toHaveLength(1);
+		expect(observedCalls[0]?.toolChoice).toBe("todo");
+		expect(observedCalls[0]?.messageRoles).toEqual(["developer", "user"]);
+	});
 
 	it("keeps eager todo forcing when startup plan mode was configured but later cleared", async () => {
 		await recreateSession({ "plan.defaultOnStartup": true }, {}, { builtInAsk: true });
@@ -587,6 +612,24 @@ describe("AgentSession eager todo enforcement", () => {
 		expect(observedCalls).toHaveLength(1);
 		expect(observedCalls[0]?.toolChoice).toBeUndefined();
 		expect(observedCalls[0]?.toolNames).toEqual(["todo", "bash", "ask", "think"]);
+		expect(observedCalls[0]?.messageRoles).toEqual(["user"]);
+	});
+	it("keeps external thinking forcing when before_agent_start removes plan-first guidance", async () => {
+		await recreateSession(
+			{ externalThinking: true, "todo.eager": "default" },
+			{},
+			{
+				builtInAsk: true,
+				externalThink: true,
+				planFirstGuidance: true,
+				beforeAgentStartSystemPrompt: ["Extension replacement"],
+			},
+		);
+
+		await session.prompt("Build a project dashboard with authentication and reports");
+
+		expect(observedCalls).toHaveLength(1);
+		expect(observedCalls[0]?.toolChoice).toBe("think");
 		expect(observedCalls[0]?.messageRoles).toEqual(["user"]);
 	});
 
