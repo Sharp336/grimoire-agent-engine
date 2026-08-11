@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a permanent self-fix contribution reminder to every welcome screen and after startup changelog output following updates.
+
 ## [17.2.14] - 2026-08-11
 
 ### Added

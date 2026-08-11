@@ -9,6 +9,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { APP_NAME } from "@oh-my-pi/pi-utils";
 import { theme } from "../../modes/theme/theme";
+import { CONTRIBUTION_REMINDER } from "../../utils/contribution";
 import tipsText from "./tips.txt" with { type: "text" };
 
 /** Tips embedded at build time, one per line; blanks dropped. */
@@ -82,14 +83,28 @@ function renderNewTag(phase: number, encoding: ColorEncoding): string {
 	}
 	return out + reset;
 }
-export function renderWelcomeTip(tip: string, boxWidth: number, phase = 0): string[] {
-	const label = "Tip: ";
+const MIN_LABELED_BODY_WIDTH = 8;
+const MIN_INLINE_LABELED_BODY_WIDTH = 10;
+
+function renderLabeledMessage(label: string, body: string, boxWidth: number, stackLabelWhenNarrow = false): string[] {
 	const labelWidth = visibleWidth(label);
 	const bodyBudget = boxWidth - 1 - labelWidth; // 1 = leading indent
-	if (bodyBudget < 8) return [];
+	const requiresStackedLabel = stackLabelWhenNarrow && bodyBudget < MIN_INLINE_LABELED_BODY_WIDTH;
+	if (bodyBudget < MIN_LABELED_BODY_WIDTH || requiresStackedLabel) {
+		if (!stackLabelWhenNarrow) return [];
 
-	const isNew = NEW_TIP_MARKER.test(tip);
-	const body = isNew ? tip.replace(NEW_TIP_MARKER, "") : tip;
+		const stackedLabel = label.trimEnd();
+		const stackedBodyBudget = boxWidth - 1; // 1 = leading indent
+		if (stackedBodyBudget < MIN_LABELED_BODY_WIDTH || visibleWidth(stackedLabel) > stackedBodyBudget) return [];
+
+		const wrappedBody = wrapTextWithAnsi(replaceTabs(body), stackedBodyBudget);
+		if (wrappedBody.length === 0) return [];
+
+		return [
+			` ${theme.italic(theme.fg("customMessageLabel", stackedLabel))}`,
+			...wrappedBody.map(line => ` ${theme.italic(theme.fg("muted", line))}`),
+		];
+	}
 
 	const wrappedBody = wrapTextWithAnsi(replaceTabs(body), bodyBudget);
 	if (wrappedBody.length === 0) return [];
@@ -100,11 +115,19 @@ export function renderWelcomeTip(tip: string, boxWidth: number, phase = 0): stri
 	const continuationIndent = padding(labelWidth);
 	const styledLabel = theme.fg("customMessageLabel", label);
 
-	const lines = wrappedBody.map((line, index) => {
+	return wrappedBody.map((line, index) => {
 		const styledBody = theme.fg("muted", line);
 		const content = index === 0 ? `${styledLabel}${styledBody}` : `${continuationIndent}${styledBody}`;
 		return ` ${theme.italic(content)}`;
 	});
+}
+
+export function renderWelcomeTip(tip: string, boxWidth: number, phase = 0): string[] {
+	const label = "Tip: ";
+	const isNew = NEW_TIP_MARKER.test(tip);
+	const body = isNew ? tip.replace(NEW_TIP_MARKER, "") : tip;
+	const lines = renderLabeledMessage(label, body, boxWidth);
+	if (lines.length === 0) return [];
 
 	if (isNew) {
 		// Append the rainbow tag to the final body line when it fits within the
@@ -117,7 +140,7 @@ export function renderWelcomeTip(tip: string, boxWidth: number, phase = 0): stri
 		if (lastLine !== undefined && visibleWidth(lastLine) + tagWidth <= boxWidth) {
 			lines[lines.length - 1] = `${lastLine} ${tag}`;
 		} else {
-			lines.push(` ${continuationIndent}${tag}`);
+			lines.push(` ${padding(visibleWidth(label))}${tag}`);
 		}
 	}
 
@@ -383,8 +406,9 @@ export class WelcomeComponent implements Component {
 			lines.push(bl + h.repeat(leftCol) + br);
 		}
 
-		// Randomly picked tip, rendered directly beneath the box.
+		// Randomly picked tip with the permanent contribution reminder directly beneath it.
 		lines.push(...this.#renderTip(boxWidth));
+		lines.push(...renderLabeledMessage("Contribute: ", CONTRIBUTION_REMINDER, boxWidth, true));
 
 		return lines;
 	}
