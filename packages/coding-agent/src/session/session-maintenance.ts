@@ -26,7 +26,10 @@ import {
 	DEFAULT_SHAKE_CONFIG,
 	effectiveReserveTokens,
 	estimateTokens,
+	hasContextTokenUsage,
+	NativeCompactionError,
 	prepareCompaction,
+	RESCUE_SHAKE_CONFIG,
 	resolveBudgetReserveTokens,
 	resolveThresholdTokens,
 	type ShakeConfig,
@@ -34,6 +37,7 @@ import {
 	type SummaryOptions,
 	shouldCompact,
 	shouldUseOpenAiRemoteCompaction,
+	shouldUseProviderNativeCompaction,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	DEFAULT_PRUNE_CONFIG,
@@ -72,7 +76,7 @@ import {
 	resolveRoleModelFull,
 } from "./role-models";
 import type { SessionContext } from "./session-context";
-import { getLatestCompactionEntry } from "./session-context";
+import { getLatestCompactionEntry, getOpenAiRemoteCompactionPayload } from "./session-context";
 import type { CompactionEntry, SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 import type { ShakeMode, ShakeResult } from "./shake-types";
@@ -94,7 +98,6 @@ export type CompactionCheckResult = Readonly<{
 export const COMPACTION_CHECK_NONE: CompactionCheckResult = {
 	deferredHandoff: false,
 	continuationScheduled: false,
-	tailPruned: false,
 };
 export const COMPACTION_CHECK_NONE_TAIL_PRUNED: CompactionCheckResult = {
 	deferredHandoff: false,
@@ -104,17 +107,14 @@ export const COMPACTION_CHECK_NONE_TAIL_PRUNED: CompactionCheckResult = {
 const COMPACTION_CHECK_DEFERRED_HANDOFF: CompactionCheckResult = {
 	deferredHandoff: true,
 	continuationScheduled: false,
-	tailPruned: false,
 };
 const COMPACTION_CHECK_CONTINUATION: CompactionCheckResult = {
 	deferredHandoff: false,
 	continuationScheduled: true,
-	tailPruned: false,
 };
 const COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION: CompactionCheckResult = {
 	deferredHandoff: false,
 	continuationScheduled: false,
-	tailPruned: false,
 	automaticContinuationBlocked: true,
 };
 
@@ -193,6 +193,7 @@ export interface SessionMaintenanceHost {
 	extensionRunner: ExtensionRunner | undefined;
 	sideStreamFn: StreamFn;
 	providerSessionState: Map<string, ProviderSessionState>;
+	preferWebsockets: boolean | undefined;
 	model(): Model | undefined;
 	thinkingLevel(): ThinkingLevel | undefined;
 	isDisposed(): boolean;
@@ -245,8 +246,9 @@ export interface SessionMaintenanceHost {
 	resetCodexProviderAfterCompaction(compaction: CodexCompactionContext): void;
 	resetPlanReference(): void;
 	syncTodoPhasesFromBranch(): void;
-	resetAdvisorRuntimes(): void;
+	resetAdvisorRuntimes(reason?: string): void;
 	rebaseAfterCompaction(): void;
+	recordAnchoredHistoryRewrite(tokensRemoved: number): void;
 	getContextBreakdown(options?: {
 		contextWindow?: number;
 		pendingMessages?: AgentMessage[];
@@ -281,6 +283,19 @@ export interface SessionMaintenanceHost {
 export class SessionMaintenance {
 	#compactionAbortController: AbortController | undefined;
 	#autoCompactionAbortController: AbortController | undefined;
+	/**
+	 * Live tool-loop contexts parked after mid-turn maintenance hit a no-progress
+	 * dead end. Membership suppresses the repeated rescue + warning while no cut
+	 * point exists; {@link maintainContextMidRun} re-arms the entry once a later
+	 * tool result makes `prepareCompaction` viable again.
+	 */
+	readonly #midTurnCompactionDeadEnds = new WeakSet<AgentMessage[]>();
+	/**
+	 * Carries a mid-turn dead end across the loop's final answer to the next
+	 * pre-prompt check. That check must not warn again for the same oversized
+	 * persisted turn, but a new agent loop still gets its own live-array guard.
+	 */
+	#midTurnDeadEndPendingPrePrompt = false;
 	#skipPostTurnMaintenanceAssistantTimestamp: number | undefined;
 	readonly #host: SessionMaintenanceHost;
 
@@ -341,7 +356,7 @@ export class SessionMaintenance {
 		await this.#host.sessionManager.rewriteEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
-		this.#host.resetAdvisorRuntimes();
+		this.#host.resetAdvisorRuntimes("prune-tool-outputs");
 		this.#host.syncTodoPhasesFromBranch();
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
 		return result;
@@ -384,7 +399,7 @@ export class SessionMaintenance {
 		await this.#host.sessionManager.rewriteEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
-		this.#host.resetAdvisorRuntimes();
+		this.#host.resetAdvisorRuntimes("prune-stale-tool-results");
 		this.#host.syncTodoPhasesFromBranch();
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
 		return result;
@@ -435,7 +450,7 @@ export class SessionMaintenance {
 		await this.#host.sessionManager.rewriteEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
-		this.#host.resetAdvisorRuntimes();
+		this.#host.resetAdvisorRuntimes("drop-images");
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
 		return { removed };
 	}
@@ -453,18 +468,22 @@ export class SessionMaintenance {
 	 *
 	 * No-op (zero counts) when nothing is eligible.
 	 */
-	async shake(mode: ShakeMode, opts: { config?: ShakeConfig; signal?: AbortSignal } = {}): Promise<ShakeResult> {
+	async shake(
+		mode: ShakeMode,
+		opts: { config?: ShakeConfig; signal?: AbortSignal; skipAgentUpdate?: boolean } = {},
+	): Promise<ShakeResult> {
 		if (mode === "images") {
 			const { removed } = await this.#host.dropImages();
 			return { mode, toolResultsDropped: 0, blocksDropped: 0, imagesDropped: removed, tokensFreed: 0 };
 		}
 
 		const branchEntries = this.#host.sessionManager.getBranch();
+		const latestCompaction = getLatestCompactionEntry(branchEntries);
 		const config = this.#withPlanProtection({
 			...(opts.config ?? AGGRESSIVE_SHAKE_CONFIG),
 			// Skip entries summarized away by the latest compaction — shaking them
 			// only churns persisted history with no prompt/cache effect.
-			keepBoundaryId: getLatestCompactionEntry(branchEntries)?.firstKeptEntryId,
+			keepBoundaryId: latestCompaction?.firstKeptEntryId,
 		});
 		const regions = collectShakeRegions(branchEntries, config);
 		if (regions.length === 0) {
@@ -474,26 +493,61 @@ export class SessionMaintenance {
 		const artifactId = await this.#saveShakeArtifact(regions);
 		const replacements = regions.map((region, index) => this.#shakeElidePlaceholder(region, index, artifactId));
 
+		const hasRemoteReplacementHistory = getOpenAiRemoteCompactionPayload(latestCompaction) !== undefined;
+		const compactionIndex = latestCompaction ? branchEntries.lastIndexOf(latestCompaction) : -1;
+		let anchorIndex = -1;
+		for (let index = branchEntries.length - 1; index > compactionIndex; index--) {
+			const entry = branchEntries[index];
+			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+			const assistant = entry.message;
+			if (
+				assistant.stopReason !== "aborted" &&
+				assistant.stopReason !== "error" &&
+				assistant.usage &&
+				hasContextTokenUsage(assistant.usage)
+			) {
+				anchorIndex = index;
+				break;
+			}
+		}
+		const entryIndexes = new Map(branchEntries.map((entry, index) => [entry, index]));
+
 		let toolResultsDropped = 0;
 		let blocksDropped = 0;
 		let originalTokens = 0;
 		let replacementTokens = 0;
+		let anchoredTokensRemoved = 0;
 		const items = regions.map((region, index) => {
 			if (region.kind === "toolResult") toolResultsDropped++;
 			else blocksDropped++;
 			originalTokens += region.tokens;
 			const replacement = replacements[index];
-			if (replacement.length > 0) replacementTokens += countTokens(replacement);
+			const replacementTokenCount = replacement.length > 0 ? countTokens(replacement) : 0;
+			replacementTokens += replacementTokenCount;
+			const entryIndex = entryIndexes.get(region.entry) ?? -1;
+			if (
+				entryIndex >= 0 &&
+				entryIndex < anchorIndex &&
+				(!hasRemoteReplacementHistory || entryIndex > compactionIndex)
+			) {
+				anchoredTokensRemoved += Math.max(0, region.tokens - replacementTokenCount);
+			}
 			return { region, replacement };
 		});
 
 		applyShakeRegions(items);
+		this.#host.recordAnchoredHistoryRewrite(anchoredTokensRemoved);
 
 		await this.#host.sessionManager.rewriteEntries();
-		const sessionContext = this.#host.buildDisplaySessionContext();
-		this.#host.agent.replaceMessages(sessionContext.messages);
-		this.#host.resetAdvisorRuntimes();
-		this.#host.closeCodexProviderSessionsForHistoryRewrite();
+		// Periodic shake fires mid-loop (turn_end) with skipAgentUpdate so the
+		// live agent state is not rebuilt while the agent is still streaming; the
+		// agent_end sync pass rebuilds it once the turn settles.
+		if (!opts.skipAgentUpdate) {
+			const sessionContext = this.#host.buildDisplaySessionContext();
+			this.#host.agent.replaceMessages(sessionContext.messages);
+			this.#host.resetAdvisorRuntimes("shake");
+			this.#host.closeCodexProviderSessionsForHistoryRewrite();
+		}
 
 		return {
 			mode,
@@ -844,7 +898,7 @@ export class SessionMaintenance {
 			// plan reference. Clear the sent-flag so #buildPlanReferenceMessage re-reads
 			// the plan from disk and re-injects it on the next turn (issue #1246).
 			this.#host.resetPlanReference();
-			this.#host.resetAdvisorRuntimes();
+			this.#host.resetAdvisorRuntimes("compact");
 			this.#host.syncTodoPhasesFromBranch();
 			if (codexCompaction) {
 				this.#host.resetCodexProviderAfterCompaction(codexCompaction);
@@ -981,7 +1035,18 @@ export class SessionMaintenance {
 		if (contextWindow <= 0) return;
 		const compactionSettings = this.#host.settings.getGroup("compaction");
 		const contextTokens = this.#estimatePrePromptContextTokens(messages, contextWindow);
+		const pendingMidTurnDeadEnd = this.#midTurnDeadEndPendingPrePrompt;
+		this.#midTurnDeadEndPendingPrePrompt = false;
 		if (!shouldCompact(contextTokens, contextWindow, compactionSettings)) return;
+		if (
+			pendingMidTurnDeadEnd &&
+			prepareCompaction(this.#host.sessionManager.getBranch(), compactionSettings, model) === undefined
+		) {
+			// The prior tool loop already attempted the rescue and warned for this
+			// persisted oversized turn. Only a later persisted cut point makes a
+			// pre-prompt retry useful; the new agent loop may warn for its own turn.
+			return;
+		}
 
 		// Auto-promote first: switching to a larger-context model avoids compacting
 		// the history at all. The post-turn threshold path already promotes before
@@ -1052,6 +1117,25 @@ export class SessionMaintenance {
 		if (!lastAssistant || lastAssistant.stopReason === "aborted" || lastAssistant.stopReason === "error") return;
 
 		if (!(await this.#host.persistTurnMessagesForMidRunCompaction(context))) return;
+		if (this.#midTurnCompactionDeadEnds.has(activeMessages)) {
+			// A prior boundary already ran the dead-end rescue and could not reduce
+			// this turn. Re-running the rescue and re-emitting its warning on every
+			// following tool boundary is wasted work while nothing summarizable
+			// exists. But the tool loop keeps appending turns: once a later
+			// (smaller) tool result gives prepareCompaction a cut point before the
+			// now-older oversized turn, compaction can finally make progress and
+			// MUST run rather than stay suppressed until provider overflow (#7153
+			// review). Stay parked only while no cut point is available; re-arm as
+			// soon as one appears.
+			if (
+				!model ||
+				prepareCompaction(this.#host.sessionManager.getBranch(), compactionSettings, model) === undefined
+			) {
+				return;
+			}
+			this.#midTurnCompactionDeadEnds.delete(activeMessages);
+			this.#midTurnDeadEndPendingPrePrompt = false;
+		}
 
 		const billedContextTokens = calculateContextTokens(lastAssistant.usage);
 		const storedContextTokens = this.#estimateStoredContextTokens();
@@ -1074,14 +1158,17 @@ export class SessionMaintenance {
 		}
 
 		const messagesBefore = activeMessages.length;
-		await this.runAutoCompaction("threshold", false, false, false, {
+		const result = await this.runAutoCompaction("threshold", false, false, false, {
 			autoContinue: false,
 			suppressContinuation: true,
 			suppressHandoff: true,
 			triggerContextTokens: contextTokens,
 			phase: "mid_turn",
-			tailPruned: true,
 		});
+		if (result.automaticContinuationBlocked) {
+			this.#midTurnCompactionDeadEnds.add(activeMessages);
+			this.#midTurnDeadEndPendingPrePrompt = true;
+		}
 
 		if (signal?.aborted) return;
 		const compactedMessages = this.#host.agent.state.messages;
@@ -1171,6 +1258,9 @@ export class SessionMaintenance {
 					autoContinue,
 				});
 			}
+			// Neither promotion nor compaction is available — the trailing assistant
+			// stays pruned from agent.state while its branch entry remains, so
+			// periodic shake must not rebuild agent.state from the branch.
 			return COMPACTION_CHECK_NONE_TAIL_PRUNED;
 		}
 		// A context promotion can land while the failing call is already in
@@ -1254,6 +1344,8 @@ export class SessionMaintenance {
 			logger.warn("response.incomplete with no recovery path (promotion + compaction both unavailable)", {
 				model: `${assistantMessage.provider}/${assistantMessage.model}`,
 			});
+			// Same pruned-tail contract as the overflow no-recovery path: the dead
+			// turn stays out of agent.state, so periodic shake must not rebuild it.
 			return COMPACTION_CHECK_NONE_TAIL_PRUNED;
 		}
 
@@ -1389,7 +1481,11 @@ export class SessionMaintenance {
 		}
 	}
 
-	async resolveContextPromotionTarget(currentModel: Model, contextWindow: number): Promise<Model | undefined> {
+	async resolveContextPromotionTarget(
+		currentModel: Model,
+		contextWindow: number,
+		signal?: AbortSignal,
+	): Promise<Model | undefined> {
 		const availableModels = this.#host.modelRegistry.getAvailable();
 		if (availableModels.length === 0) return undefined;
 
@@ -1397,7 +1493,7 @@ export class SessionMaintenance {
 		if (!candidate) return undefined;
 		if (modelsAreEqual(candidate, currentModel)) return undefined;
 		if (candidate.contextWindow == null || candidate.contextWindow <= contextWindow) return undefined;
-		const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
+		const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId(), { signal });
 		if (!apiKey) return undefined;
 		return candidate;
 	}
@@ -1470,10 +1566,18 @@ export class SessionMaintenance {
 		const candidates =
 			precomputedCandidates ?? this.#getCompactionModelCandidates(this.#host.modelRegistry.getAvailable());
 		const telemetry = resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId());
+		let nativeCompactionFailure: { error: NativeCompactionError; provider: string } | undefined;
 
 		for (const candidate of candidates) {
 			const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
 			if (!apiKey) continue;
+			if (
+				nativeCompactionFailure &&
+				(candidate.provider !== nativeCompactionFailure.provider ||
+					!shouldUseProviderNativeCompaction(candidate, preparation.settings))
+			) {
+				throw nativeCompactionFailure.error;
+			}
 
 			try {
 				return await compact(
@@ -1494,8 +1598,9 @@ export class SessionMaintenance {
 						thinkingLevel: this.#host.thinkingLevel(),
 						tools: this.#host.agent.state.tools,
 						sessionId: this.#host.sessionId(),
-						promptCacheKey: this.#host.sessionId(),
+						promptCacheKey: this.#host.agent.promptCacheKey ?? this.#host.agent.sessionId,
 						providerSessionState: this.#host.providerSessionState,
+						preferWebsockets: this.#host.preferWebsockets,
 						// Route every summarization HTTP request through the
 						// session's side-stream transport so the provider
 						// concurrency cap (e.g. providers.ollama-cloud.maxConcurrency)
@@ -1511,12 +1616,17 @@ export class SessionMaintenance {
 					},
 				);
 			} catch (error) {
-				if (!AIError.is(AIError.classify(error, candidate.api), AIError.Flag.AuthFailed)) {
-					throw error;
+				const id = AIError.classify(error instanceof NativeCompactionError ? error.cause : error, candidate.api);
+				if (AIError.is(id, AIError.Flag.AuthFailed)) continue;
+				if (error instanceof NativeCompactionError) {
+					nativeCompactionFailure ??= { error, provider: candidate.provider };
+					continue;
 				}
+				throw error;
 			}
 		}
 
+		if (nativeCompactionFailure) throw nativeCompactionFailure.error;
 		throw this.#buildCompactionAuthError();
 	}
 
@@ -1807,7 +1917,7 @@ export class SessionMaintenance {
 		let elideSink = "placeholders";
 		if (!options.skipElide) {
 			try {
-				const result = await this.#host.shake("elide", { signal });
+				const result = await this.#host.shake("elide", { config: RESCUE_SHAKE_CONFIG, signal });
 				elided = result.toolResultsDropped + result.blocksDropped;
 				elidedTokens = result.tokensFreed;
 				if (result.artifactId) elideSink = "an artifact";
@@ -2008,7 +2118,7 @@ export class SessionMaintenance {
 		// and advisor cursors / todo phases were derived from the replaced
 		// history.
 		this.#host.resetPlanReference();
-		this.#host.resetAdvisorRuntimes();
+		this.#host.resetAdvisorRuntimes("compaction-rescue");
 		this.#host.syncTodoPhasesFromBranch();
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
 		// Extensions must see the entry that is now active, not (only) the one
@@ -2056,13 +2166,11 @@ export class SessionMaintenance {
 			suppressHandoff?: boolean;
 			phase?: CodexCompactionContext["phase"];
 			terminalTextAnswer?: boolean;
-			tailPruned?: boolean;
 		} = {},
 	): Promise<CompactionCheckResult> {
 		const compactionSettings = this.#host.settings.getGroup("compaction");
-		const noneResult = options.tailPruned ? COMPACTION_CHECK_NONE_TAIL_PRUNED : COMPACTION_CHECK_NONE;
-		if (compactionSettings.strategy === "off") return noneResult;
-		if (reason !== "idle" && !compactionSettings.enabled) return noneResult;
+		if (compactionSettings.strategy === "off") return COMPACTION_CHECK_NONE;
+		if (reason !== "idle" && !compactionSettings.enabled) return COMPACTION_CHECK_NONE;
 		const generation = this.#host.promptGeneration();
 		const terminalTextAnswer =
 			options.terminalTextAnswer ?? isTerminalTextAssistantAnswer(this.#host.findLastAssistantMessage());
@@ -2165,7 +2273,7 @@ export class SessionMaintenance {
 							aborted: true,
 							willRetry: false,
 						});
-						return noneResult;
+						return COMPACTION_CHECK_NONE;
 					}
 					logger.warn("Auto-handoff returned no document; falling back to context-full maintenance", {
 						reason,
@@ -2204,7 +2312,7 @@ export class SessionMaintenance {
 					willRetry: false,
 					skipped: true,
 				});
-				return noneResult;
+				return COMPACTION_CHECK_NONE;
 			}
 
 			const availableModels = this.#host.modelRegistry.getAvailable();
@@ -2217,7 +2325,7 @@ export class SessionMaintenance {
 					willRetry: false,
 					skipped: true,
 				});
-				return noneResult;
+				return COMPACTION_CHECK_NONE;
 			}
 
 			const pathEntries = this.#host.sessionManager.getBranch();
@@ -2365,7 +2473,7 @@ export class SessionMaintenance {
 						aborted: true,
 						willRetry: false,
 					});
-					return noneResult;
+					return COMPACTION_CHECK_NONE;
 				}
 
 				if (hookResult?.compaction) {
@@ -2491,6 +2599,7 @@ export class SessionMaintenance {
 				const telemetry = resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId());
 				let compactResult: CompactionResult | undefined;
 				let lastError: unknown;
+				let nativeCompactionFailure: { error: NativeCompactionError; provider: string } | undefined;
 				codexCompaction = createCodexCompactionContext({
 					trigger: "auto",
 					reason: "context_limit",
@@ -2504,6 +2613,13 @@ export class SessionMaintenance {
 					const hasMoreCandidates = candidateIndex < candidates.length - 1;
 					const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
 					if (!apiKey) continue;
+					if (
+						nativeCompactionFailure &&
+						(candidate.provider !== nativeCompactionFailure.provider ||
+							!shouldUseProviderNativeCompaction(candidate, preparation.settings))
+					) {
+						throw nativeCompactionFailure.error;
+					}
 
 					let attempt = 0;
 					while (true) {
@@ -2529,8 +2645,9 @@ export class SessionMaintenance {
 									thinkingLevel: this.#host.thinkingLevel(),
 									tools: this.#host.agent.state.tools,
 									sessionId: this.#host.sessionId(),
-									promptCacheKey: this.#host.sessionId(),
+									promptCacheKey: this.#host.agent.promptCacheKey ?? this.#host.agent.sessionId,
 									providerSessionState: this.#host.providerSessionState,
+									preferWebsockets: this.#host.preferWebsockets,
 									codexCompaction,
 								},
 							);
@@ -2541,22 +2658,33 @@ export class SessionMaintenance {
 							}
 
 							const message = error instanceof Error ? error.message : String(error);
-							const id = AIError.classify(error, candidate.api);
+							const id = AIError.classify(
+								error instanceof NativeCompactionError ? error.cause : error,
+								candidate.api,
+							);
 							if (AIError.is(id, AIError.Flag.AuthFailed)) {
-								lastError = this.#buildCompactionAuthError();
+								if (!nativeCompactionFailure) lastError = this.#buildCompactionAuthError();
 								break;
 							}
 							if (AIError.is(id, AIError.Flag.Timeout)) {
+								const nativeFailure = error instanceof NativeCompactionError;
 								logger.warn(
-									hasMoreCandidates
-										? "Auto-compaction summarization timed out, trying next model"
-										: "Auto-compaction summarization timed out, not retrying same model",
+									nativeFailure
+										? "Provider-native auto-compaction timed out, preserving native failure"
+										: hasMoreCandidates
+											? "Auto-compaction summarization timed out, trying next model"
+											: "Auto-compaction summarization timed out, not retrying same model",
 									{
 										error: message,
 										model: `${candidate.provider}/${candidate.id}`,
 									},
 								);
-								lastError = error;
+								if (nativeFailure) {
+									nativeCompactionFailure ??= { error, provider: candidate.provider };
+									lastError = nativeCompactionFailure.error;
+								} else {
+									lastError = error;
+								}
 								break;
 							}
 
@@ -2568,7 +2696,12 @@ export class SessionMaintenance {
 									AIError.is(id, AIError.Flag.Transient) ||
 									AIError.is(id, AIError.Flag.UsageLimit));
 							if (!shouldRetry) {
-								lastError = error;
+								if (error instanceof NativeCompactionError) {
+									nativeCompactionFailure ??= { error, provider: candidate.provider };
+									lastError = nativeCompactionFailure.error;
+								} else {
+									lastError = error;
+								}
 								break;
 							}
 
@@ -2578,6 +2711,11 @@ export class SessionMaintenance {
 							// If retry delay is too long (>30s), try next candidate instead of waiting
 							const maxAcceptableDelayMs = 30_000;
 							if (delayMs > maxAcceptableDelayMs && hasMoreCandidates) {
+								if (error instanceof NativeCompactionError) {
+									nativeCompactionFailure ??= { error, provider: candidate.provider };
+									lastError = nativeCompactionFailure.error;
+									break;
+								}
 								logger.warn("Auto-compaction retry delay too long, trying next model", {
 									delayMs,
 									retryAfterMs,
@@ -2629,7 +2767,7 @@ export class SessionMaintenance {
 					aborted: true,
 					willRetry: false,
 				});
-				return noneResult;
+				return COMPACTION_CHECK_NONE;
 			}
 
 			this.#host.sessionManager.appendCompaction(
@@ -2649,7 +2787,7 @@ export class SessionMaintenance {
 			// plan reference. Clear the sent-flag so #buildPlanReferenceMessage re-reads
 			// the plan from disk and re-injects it on the next turn (issue #1246).
 			this.#host.resetPlanReference();
-			this.#host.resetAdvisorRuntimes();
+			this.#host.resetAdvisorRuntimes("auto-compaction");
 			this.#host.syncTodoPhasesFromBranch();
 			if (codexCompaction) {
 				this.#host.resetCodexProviderAfterCompaction(codexCompaction);
@@ -2797,7 +2935,7 @@ export class SessionMaintenance {
 					aborted: true,
 					willRetry: false,
 				});
-				return noneResult;
+				return COMPACTION_CHECK_NONE;
 			}
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
 			await this.#host.emitSessionEvent({
@@ -2818,7 +2956,7 @@ export class SessionMaintenance {
 				this.#autoCompactionAbortController = undefined;
 			}
 		}
-		return noneResult;
+		return COMPACTION_CHECK_NONE;
 	}
 
 	/**
@@ -2962,7 +3100,7 @@ export class SessionMaintenance {
 					aborted: true,
 					willRetry: false,
 				});
-				return noneResult;
+				return COMPACTION_CHECK_NONE;
 			}
 			const message = error instanceof Error ? error.message : "shake failed";
 			await this.#host.emitSessionEvent({

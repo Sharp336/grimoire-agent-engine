@@ -1,6 +1,6 @@
-//! Apple DeviceCheck token generation (`DCDevice.generateToken`).
+//! Apple `DeviceCheck` token generation (`DCDevice.generateToken`).
 //!
-//! Reimplements the flow the ChatGPT desktop app's `devicecheck.node` addon
+//! Reimplements the flow the `ChatGPT` desktop app's `devicecheck.node` addon
 //! uses to mint attestation tokens: resolve `DCDevice.currentDevice`, check
 //! `isSupported`, then call `generateTokenWithCompletionHandler:` and wait up
 //! to one second for the completion block, reporting the base64-encoded token
@@ -22,7 +22,8 @@ use crate::task;
 pub struct DeviceCheckTokenResult {
 	/// Whether `DCDevice.isSupported` reported attestation support.
 	pub supported:    bool,
-	/// Base64-encoded DeviceCheck token; present only when generation succeeded.
+	/// Base64-encoded `DeviceCheck` token; present only when generation
+	/// succeeded.
 	pub token_base64: Option<String>,
 	/// Human-readable failure reason when no token was produced.
 	pub error:        Option<String>,
@@ -30,7 +31,7 @@ pub struct DeviceCheckTokenResult {
 	pub latency_ms:   f64,
 }
 
-/// Generate an Apple DeviceCheck attestation token.
+/// Generate an Apple `DeviceCheck` attestation token.
 ///
 /// Resolves with the token (or the error reason) after at most a 1-second
 /// wait, matching the upstream `devicecheck.node` addon contract.
@@ -55,7 +56,7 @@ mod platform {
 
 	use super::DeviceCheckTokenResult;
 
-	/// How long to wait for the DeviceCheck completion handler before giving
+	/// How long to wait for the `DeviceCheck` completion handler before giving
 	/// up, matching the timeout in the upstream `devicecheck.node` addon.
 	const TOKEN_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -66,7 +67,8 @@ mod platform {
 	// the standard idiom for raw ObjC messaging without an objc crate.
 	#[allow(
 		clashing_extern_declarations,
-		reason = "objc_msgSend is an assembly trampoline that forwards to the method IMP; each alias types the same symbol for a distinct call signature"
+		reason = "objc_msgSend is an assembly trampoline that forwards to the method IMP; each \
+		          alias types the same symbol for a distinct call signature"
 	)]
 	#[link(name = "objc")]
 	unsafe extern "C" {
@@ -93,7 +95,7 @@ mod platform {
 	unsafe extern "C" {}
 
 	unsafe extern "C" {
-		/// Stack-block class from libsystem_blocks; used as the literal's isa.
+		/// Stack-block class from `libsystem_blocks`; used as the literal's isa.
 		static _NSConcreteStackBlock: *const c_void;
 	}
 
@@ -110,7 +112,7 @@ mod platform {
 		isa:        *const c_void,
 		flags:      i32,
 		reserved:   i32,
-		invoke:     unsafe extern "C" fn(*mut CompletionBlock, Id, Id),
+		invoke:     unsafe extern "C" fn(*mut Self, Id, Id),
 		descriptor: *const CompletionBlockDescriptor,
 		sender:     *const SyncSender<Completion>,
 	}
@@ -133,7 +135,8 @@ mod platform {
 	const BLOCK_SIGNATURE: &CStr = c"v24@?0@8@16";
 
 	/// Immutable, process-lifetime data; the raw signature pointer is never
-	/// mutated, so shared access from the ObjC runtime is race-free.
+	/// mutated, so shared access from the `ObjC` runtime is race-free.
+	// SAFETY: every field is immutable process-lifetime data.
 	unsafe impl Sync for CompletionBlockDescriptor {}
 
 	static COMPLETION_DESCRIPTOR: CompletionBlockDescriptor = CompletionBlockDescriptor {
@@ -176,7 +179,7 @@ mod platform {
 		unsafe { copy_c_string(msg_send_noarg(string, selector(c"UTF8String")).cast()) }
 	}
 
-	/// Completion block body. Runs on DeviceCheck's XPC reply queue, which is
+	/// Completion block body. Runs on `DeviceCheck`'s XPC reply queue, which is
 	/// why the result travels over a channel instead of a return value.
 	///
 	/// # Safety
@@ -234,7 +237,7 @@ mod platform {
 		let (sender, receiver) = mpsc::sync_channel::<Completion>(1);
 		let sender = Box::into_raw(Box::new(sender));
 		let block = CompletionBlock {
-			isa:        ptr::addr_of!(_NSConcreteStackBlock).cast::<c_void>(),
+			isa: ptr::addr_of!(_NSConcreteStackBlock).cast::<c_void>(),
 			flags: BLOCK_HAS_SIGNATURE,
 			reserved: 0,
 			invoke: completion_invoke,
@@ -248,8 +251,8 @@ mod platform {
 				device,
 				selector(c"generateTokenWithCompletionHandler:"),
 				(&raw const block).cast(),
-			)
-		};
+			);
+		}
 
 		let mut result = DeviceCheckTokenResult {
 			supported:    true,
@@ -337,7 +340,7 @@ mod platform {
 mod platform {
 	use super::DeviceCheckTokenResult;
 
-	pub fn generate_token() -> DeviceCheckTokenResult {
+	pub const fn generate_token() -> DeviceCheckTokenResult {
 		DeviceCheckTokenResult {
 			supported:    false,
 			token_base64: None,

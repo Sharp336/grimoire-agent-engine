@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
-import { type AfterToolCallContext, Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type AfterToolCallContext, Agent, type AgentMessage, RESCUE_SHAKE_CONFIG } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import { DEFAULT_SHAKE_CONFIG } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
@@ -118,6 +118,125 @@ describe("AgentSession shake", () => {
 			expect(text).toContain("shaken");
 		});
 
+		it("updates provider-anchored context usage immediately after rewriting prompt history", async () => {
+			seedHeavyToolResult("X".repeat(20_000));
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "done" }],
+				...apiInfo,
+				stopReason: "stop",
+				usage: { ...usage, input: 20_000, totalTokens: 20_008 },
+				timestamp: Date.now(),
+			});
+			session.agent.replaceMessages(
+				sessionManager
+					.getBranch()
+					.filter(entry => entry.type === "message")
+					.map(entry => entry.message as AgentMessage),
+			);
+			const before = session.getContextUsage()?.tokens;
+			expect(before).toBe(20_000);
+
+			const result = await session.shake("elide");
+
+			expect(result.tokensFreed).toBeGreaterThan(0);
+			expect(session.getContextUsage()?.tokens).toBe(20_000 - result.tokensFreed);
+			const anchor = sessionManager
+				.getBranch()
+				.findLast(
+					entry =>
+						entry.type === "message" && entry.message.role === "assistant" && entry.message.stopReason === "stop",
+				);
+			expect(
+				anchor?.type === "message" && anchor.message.role === "assistant"
+					? anchor.message.contextSnapshot?.historyRewriteTokensRemoved
+					: undefined,
+			).toBe(result.tokensFreed);
+		});
+
+		it("skips response-only usage when selecting the correction anchor", async () => {
+			seedHeavyToolResult("X".repeat(20_000));
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "anchored" }],
+				...apiInfo,
+				stopReason: "stop",
+				usage: { ...usage, input: 20_000, totalTokens: 20_008 },
+				timestamp: Date.now(),
+			});
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "response-only" }],
+				...apiInfo,
+				stopReason: "stop",
+				usage: { ...usage, input: 0, output: 8, totalTokens: 8 },
+				timestamp: Date.now() + 1,
+			});
+			session.agent.replaceMessages(
+				sessionManager
+					.getBranch()
+					.filter(entry => entry.type === "message")
+					.map(entry => entry.message as AgentMessage),
+			);
+			const before = session.getContextUsage()?.tokens;
+			expect(before).toBeDefined();
+
+			const result = await session.shake("elide");
+
+			expect(result.tokensFreed).toBeGreaterThan(0);
+			expect(session.getContextUsage()?.tokens).toBe(before! - result.tokensFreed);
+			const assistants = sessionManager
+				.getBranch()
+				.filter(entry => entry.type === "message" && entry.message.role === "assistant");
+			const usableAnchor = assistants.at(-2);
+			const responseOnly = assistants.at(-1);
+			expect(
+				usableAnchor?.type === "message" && usableAnchor.message.role === "assistant"
+					? usableAnchor.message.contextSnapshot?.historyRewriteTokensRemoved
+					: undefined,
+			).toBe(result.tokensFreed);
+			expect(
+				responseOnly?.type === "message" && responseOnly.message.role === "assistant"
+					? responseOnly.message.contextSnapshot?.historyRewriteTokensRemoved
+					: undefined,
+			).toBeUndefined();
+		});
+
+		it("does not subtract remote-compacted entries omitted from the provider prompt", async () => {
+			seedHeavyToolResult("X".repeat(20_000));
+			const firstKeptEntryId = sessionManager.getBranch()[0]?.id;
+			if (!firstKeptEntryId) throw new Error("Expected seeded branch");
+			sessionManager.appendCompaction("remote summary", undefined, firstKeptEntryId, 10_000, {}, false, {
+				openaiRemoteCompaction: {
+					provider: "openai",
+					replacementHistory: [],
+				},
+			});
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "post-compaction" }],
+				...apiInfo,
+				stopReason: "stop",
+				usage: { ...usage, input: 20_000, totalTokens: 20_008 },
+				timestamp: Date.now(),
+			});
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+			expect(session.getContextUsage()?.tokens).toBe(20_000);
+
+			const result = await session.shake("elide");
+
+			expect(result.tokensFreed).toBeGreaterThan(0);
+			expect(session.getContextUsage()?.tokens).toBe(20_000);
+			const anchor = sessionManager
+				.getBranch()
+				.findLast(entry => entry.type === "message" && entry.message.role === "assistant");
+			expect(
+				anchor?.type === "message" && anchor.message.role === "assistant"
+					? anchor.message.contextSnapshot?.historyRewriteTokensRemoved
+					: undefined,
+			).toBeUndefined();
+		});
+
 		it("returns zero counts for an empty branch", async () => {
 			const result = await session.shake("elide");
 			expect(result.toolResultsDropped).toBe(0);
@@ -151,6 +270,62 @@ describe("AgentSession shake", () => {
 			seedHeavyToolResult("S".repeat(4000), "skill");
 			const result = await session.shake("elide");
 			expect(result.toolResultsDropped).toBe(0);
+		});
+
+		/** Seed a user → assistant(read toolCall) → toolResult turn recovering an artifact. */
+		function seedArtifactRecoveryResult(text: string, args: Record<string, unknown>, details?: unknown): void {
+			const toolCallId = `call_read_${Math.random().toString(36).slice(2)}`;
+			sessionManager.appendMessage({
+				role: "user",
+				content: [{ type: "text", text: "recover it" }],
+				timestamp: Date.now() - 3,
+			});
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [
+					{ type: "text", text: "recovering" },
+					{ type: "toolCall", id: toolCallId, name: "read", arguments: args },
+				],
+				...apiInfo,
+				stopReason: "toolUse",
+				usage,
+				timestamp: Date.now() - 2,
+			});
+			sessionManager.appendMessage({
+				role: "toolResult",
+				toolCallId,
+				toolName: "read",
+				content: [{ type: "text", text }],
+				...(details === undefined ? {} : { details }),
+				isError: false,
+				timestamp: Date.now() - 1,
+			});
+		}
+
+		it("rescue config never re-elides artifact recovery reads, by path or by source meta", async () => {
+			seedArtifactRecoveryResult("R".repeat(4000), { path: "artifact://0" });
+			seedArtifactRecoveryResult(
+				"F".repeat(4000),
+				{ path: "/tmp/artifacts/3.shake.log" },
+				{
+					meta: { source: { type: "internal", value: "artifact://3" } },
+				},
+			);
+			const result = await session.shake("elide", { config: RESCUE_SHAKE_CONFIG });
+			expect(result.toolResultsDropped).toBe(0);
+			const texts = branchToolResults().map(m => (m.content[0] as { text: string }).text);
+			expect(texts.some(t => t.startsWith("R"))).toBe(true);
+			expect(texts.some(t => t.startsWith("F"))).toBe(true);
+		});
+
+		it("rescue config still elides ordinary oversized results", async () => {
+			seedHeavyToolResult("B".repeat(4000));
+			seedArtifactRecoveryResult("R".repeat(4000), { path: "artifact://0" });
+			const result = await session.shake("elide", { config: RESCUE_SHAKE_CONFIG });
+			expect(result.toolResultsDropped).toBe(1);
+			const texts = branchToolResults().map(m => (m.content[0] as { text: string }).text);
+			expect(texts.some(t => t.startsWith("B"))).toBe(false);
+			expect(texts.some(t => t.startsWith("R"))).toBe(true);
 		});
 	});
 
@@ -765,17 +940,17 @@ describe("AgentSession shake", () => {
 			expect(shakeSpy).toHaveBeenCalledTimes(1);
 		});
 
-		it("skips periodic shake when overflow recovery fails and tail was pruned", async () => {
-			// Disable context promotion so overflow goes to compaction
+		it("skips periodic shake when overflow leaves a pruned tail (no recovery path)", async () => {
+			// Disable context promotion and compaction so overflow has no recovery
+			// path: checkCompaction prunes the trailing assistant from agent.state
+			// and reports tailPruned, which must suppress the agent_end shake.
 			session.settings.set("contextPromotion.enabled", false);
+			session.settings.set("compaction.strategy", "off");
 			session.settings.set("shake.interval", 1);
 
 			const shakeSpy = vi
 				.spyOn(session, "shake")
 				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 1_000 });
-
-			// Mock model registry to return no candidates — forces compaction failure
-			vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([]);
 
 			// Mid-run: counter reaches interval, turn_end fires mid-run shake
 			bumpToolCallCounter();
@@ -801,15 +976,14 @@ describe("AgentSession shake", () => {
 			expect(shakeSpy).toHaveBeenCalledTimes(1);
 		});
 
-		it("skips periodic shake when length-stop recovery fails and tail was pruned", async () => {
+		it("skips periodic shake when length-stop leaves a pruned tail (no recovery path)", async () => {
 			session.settings.set("contextPromotion.enabled", false);
+			session.settings.set("compaction.strategy", "off");
 			session.settings.set("shake.interval", 1);
 
 			const shakeSpy = vi
 				.spyOn(session, "shake")
 				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 1_000 });
-
-			vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([]);
 
 			// Mid-run: counter reaches interval, turn_end fires mid-run shake
 			bumpToolCallCounter();
@@ -875,8 +1049,6 @@ describe("AgentSession shake", () => {
 			// Two shake calls: one mid-run, one agent_end sync
 			expect(shakeSpy).toHaveBeenCalledTimes(2);
 			// replaceMessages should have been called by the sync path
-			// (the mid-run pass with skipAgentUpdate does NOT call replaceMessages;
-			// the agent_end sync does — either via shake's internal path or our rebuild)
 			expect(replaceSpy).toHaveBeenCalled();
 		});
 	});
