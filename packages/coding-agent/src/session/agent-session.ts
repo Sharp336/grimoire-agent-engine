@@ -6478,6 +6478,19 @@ export class AgentSession {
 				});
 			}
 
+			// Reconcile session-scoped mode (e.g. goal mode) against the new
+			// transcript now that the transition is committed, mirroring
+			// switchSession(). Non-fatal: a reconciler failure must not roll
+			// back a successful new session.
+			try {
+				await this.#sessionSwitchReconciler?.();
+			} catch (error) {
+				logger.warn("Failed to reconcile session mode after new session", {
+					previousSessionFile,
+					error: String(error),
+				});
+			}
+
 			return true;
 		} finally {
 			if (advisorRecordersDetached) {
@@ -7828,6 +7841,20 @@ export class AgentSession {
 
 			this.#advisors.reattachRecorderFeeds();
 			advisorRecordersDetached = false;
+
+			// Reconcile session-scoped mode (e.g. goal mode) against the
+			// branched transcript now that the transition is committed,
+			// mirroring switchSession(). Non-fatal: a reconciler failure must
+			// not roll back a successful branch.
+			try {
+				await this.#sessionSwitchReconciler?.();
+			} catch (error) {
+				logger.warn("Failed to reconcile session mode after branch", {
+					previousSessionFile,
+					error: String(error),
+				});
+			}
+
 			return { selectedText, selectedImages, cancelled: false };
 		} finally {
 			if (advisorRecordersDetached) {
