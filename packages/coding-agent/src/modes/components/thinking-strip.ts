@@ -64,17 +64,25 @@ export class ThinkingStripComponent implements Component {
 	}
 
 	render(width: number): string[] {
-		const prefix = `${theme.fg("accent", this.#modelLabel)} ${theme.fg("dim", "→")} `;
+		const contentWidth = Math.max(1, width - 4);
 		// Horizontal window (the hub strip idiom): once the chips overflow,
 		// drop leading chips behind a dim ellipsis so the selected chip stays
 		// visible while cycling right. row() insets content by 2 per side.
-		const available = Math.max(1, width - 4 - visibleWidth(prefix));
 		const chips = this.#levels.map(level => {
 			const label = getConfiguredThinkingLevelMetadata(level).label;
 			const glyph = thinkingLevelGlyph(level);
 			return glyph ? `${theme.fg("accent", glyph)} ${label}` : label;
 		});
 		const chipWidths = chips.map((chip, i) => visibleWidth(` ${chip} `) + (i === this.#index ? 2 : 0) + 1);
+		const selectedChipWidth = chipWidths[this.#index] ?? 1;
+		const separator = ` ${theme.fg("dim", "→")} `;
+		const modelBudget = Math.max(
+			0,
+			contentWidth - selectedChipWidth - (this.#index > 0 ? 2 : 0) - visibleWidth(separator),
+		);
+		const prefix =
+			modelBudget > 0 ? `${truncateToWidth(theme.fg("accent", this.#modelLabel), modelBudget)}${separator}` : "";
+		const available = Math.max(1, contentWidth - visibleWidth(prefix));
 		const startFor = (target: number): number => {
 			let start = 0;
 			while (start < target) {
@@ -89,7 +97,7 @@ export class ThinkingStripComponent implements Component {
 		if (start > this.#index) start = startFor(this.#index);
 
 		let line = prefix;
-		if (start > 0) line += theme.fg("dim", "… ");
+		if (start > 0 && available >= selectedChipWidth + 2) line += theme.fg("dim", "… ");
 		for (let i = start; i < chips.length; i++) {
 			const body = ` ${chips[i]} `;
 			line +=
@@ -101,7 +109,7 @@ export class ThinkingStripComponent implements Component {
 
 		return [
 			topBorder(width, "Thinking"),
-			row(truncateToWidth(line, Math.max(1, width - 4)), width),
+			row(truncateToWidth(line, contentWidth), width),
 			row(theme.fg("dim", FOOTER_HINT), width),
 			bottomBorder(width),
 		];

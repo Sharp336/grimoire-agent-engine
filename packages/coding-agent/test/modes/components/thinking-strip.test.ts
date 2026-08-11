@@ -22,6 +22,17 @@ describe("ThinkingStripComponent", () => {
 		expect(rendered).toContain("medium");
 		expect(rendered).toContain("←/→ thinking level");
 	});
+	it("keeps the selected effort visible beside a long model label", () => {
+		const strip = new ThinkingStripComponent(
+			"provider/very-long-custom-model-identifier",
+			[Effort.Low, Effort.Medium, Effort.High],
+			Effort.High,
+			() => {},
+			() => {},
+		);
+
+		expect(strip.render(32)[1]).toContain("high");
+	});
 
 	it("moves right and applies the highlighted level", () => {
 		let selected: string | undefined;

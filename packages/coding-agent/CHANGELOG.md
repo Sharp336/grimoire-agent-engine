@@ -17,9 +17,6 @@
 - Fixed long-running sessions leaking memory for every completed keep-alive `task`/scout subagent: a disposed (parked) subagent's `AgentSession` stayed pinned through the lifecycle adoption record's reviver closure, and `dispose()` never released the message array, append-only provider transcript, session-manager entries, or the raw-SSE debug buffer, so heavy transcripts and captured provider wire frames accumulated for the process lifetime ([#8003](https://github.com/can1357/oh-my-pi/issues/8003)).
 - Fixed Z.AI web search dropping sources and exposing raw JSON when MCP responses double-encode content text ([#8000](https://github.com/can1357/oh-my-pi/issues/8000)).
 - Fixed `/handoff` masking empty/whitespace-only generation and harness-initiated aborts as "Handoff cancelled"; manual empty generation now surfaces a logged failure, harness aborts preserve their reason (or report "Handoff aborted by session"), and auto-handoff still falls back to context-full compaction ([#7993](https://github.com/can1357/oh-my-pi/issues/7993)).
-### Added
-
-- Added a thinking-effort strip to the session-only model switch (alt+p / `/switch`): after choosing a reasoning model, a horizontal chip strip (the model hub's thinking-strip idiom) offers `off`, `auto`, and the model's supported effort levels before the switch applies. Esc keeps the previous behavior (the role-configured or model-default level). Non-reasoning models switch immediately as before.
 
 ## [17.2.11] - 2026-08-07
 
