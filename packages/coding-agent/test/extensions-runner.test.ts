@@ -68,6 +68,7 @@ describe("ExtensionRunner", () => {
 	afterEach(() => {
 		testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
 		testSetSessionShutdownHandlerTimeoutMs(SESSION_SHUTDOWN_HANDLER_TIMEOUT_MS);
+		vi.restoreAllMocks();
 		tempDir.removeSync();
 		setInteractiveHost(originalInteractiveHost);
 		if (originalWarpProtocolVersion === undefined) {
