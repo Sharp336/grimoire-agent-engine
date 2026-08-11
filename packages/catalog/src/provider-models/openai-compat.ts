@@ -4127,7 +4127,6 @@ export function basetenModelManagerOptions(
 		},
 	});
 }
-}
 
 // ---------------------------------------------------------------------------
 // 15. Together
