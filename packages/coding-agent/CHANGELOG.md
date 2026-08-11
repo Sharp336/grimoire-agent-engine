@@ -25,6 +25,9 @@
 - Fixed `/handoff` losing local artifacts (plans, scratch files, research notes) by copying them across the handoff session boundary.
 - Replaced libarchive-based tar parsing with a hardened, in-process tar reader to prevent crashes and safely handle complex archive structures, symlinks, and sparse metadata.
 - Fixed `Ctrl+O` tool-output expansion failing to reach launch-completion messages wrapped in the hidden tool activity container.
+### Added
+
+- Added `pi.irc.deliverInbound` — a scoped extension API (`ExtensionAPI.irc`) for delivering an inbound IRC message (e.g. from an external transport) into a local agent's session on the process-global bus; local-only, so a registry miss returns `failed` and never re-forwards, and it returns omp's freshly-minted native message id so callers can correlate it ([#7400](https://github.com/can1357/oh-my-pi/pull/7400)).
 
 ## [17.2.14] - 2026-08-11
 
@@ -88,9 +91,6 @@
 
 - Removed the `resolveAgentModelSource` model-resolver export, whose only use was being fed to `resolveExplicitModelRole`. Replaced by `resolveAgentModelSelection`, which returns the expanded `patterns` and the pre-expansion `role` together so a spawn path cannot derive one without the other ([#7910](https://github.com/can1357/oh-my-pi/pull/7910) by [@enieuwy](https://github.com/enieuwy)).
 - A run is now attributed to the model that actually produced its output, not whichever model the session was last pointed at. A retry fallback that errored on its first request — an exhausted quota, a hard provider error — was credited with the whole run in the Agent Hub row and the settled task result, even when the previous model did every turn. Sessions expose the serving model directly, holding the last model that produced output while a candidate is armed but unproven, and transcript-derived history stops at the newest turn that produced output.
-### Added
-
-- Added `pi.irc.deliverInbound` — a scoped extension API (`ExtensionAPI.irc`) for delivering an inbound IRC message (e.g. from an external transport) into a local agent's session on the process-global bus; local-only, so a registry miss returns `failed` and never re-forwards, and it returns omp's freshly-minted native message id so callers can correlate it ([#7400](https://github.com/can1357/oh-my-pi/pull/7400)).
 
 ## [17.2.12] - 2026-08-08
 
