@@ -199,6 +199,7 @@ export class MCPManager {
 	#connections = new Map<string, MCPServerConnection>();
 	#tools: CustomTool<TSchema, MCPToolDetails>[] = [];
 	#pendingConnections = new Map<string, Promise<MCPServerConnection>>();
+	#pendingConnectionAborts = new Map<string, AbortController>();
 	#pendingToolLoads = new Map<string, Promise<ToolLoadResult>>();
 	#sources = new Map<string, SourceMeta>();
 	#authStorage: AuthStorage | null = null;
@@ -218,6 +219,7 @@ export class MCPManager {
 	#subscribedResources = new Map<string, Set<string>>();
 	#pendingResourceRefresh = new Map<string, { connection: MCPServerConnection; promise: Promise<void> }>();
 	#pendingReconnections = new Map<string, Promise<MCPServerConnection | null>>();
+	#connectionGenerations = new Map<string, number>();
 	/** Preserved configs for reconnection after connection loss. */
 	#serverConfigs = new Map<string, MCPServerConfig>();
 	/**
@@ -475,6 +477,9 @@ export class MCPManager {
 			// Save config early so reconnection works even if the initial connect times out
 			// and falls back to cached/deferred tools.
 			this.#serverConfigs.set(name, config);
+			const managerEpoch = this.#epoch;
+			const connectionGeneration = this.#connectionGenerations.get(name) ?? 0;
+			const connectionAbort = new AbortController();
 
 			// Resolve auth config before connecting, but do so per-server in parallel.
 			const connectionPromise = (async () => {
@@ -486,9 +491,21 @@ export class MCPManager {
 					onRequest: (method, params) => {
 						return this.#handleServerRequest(method, params);
 					},
+					signal: connectionAbort.signal,
 				});
 			})().then(
-				connection => {
+				async connection => {
+					if (this.#pendingConnectionAborts.get(name) === connectionAbort) {
+						this.#pendingConnectionAborts.delete(name);
+					}
+					if (
+						this.#epoch !== managerEpoch ||
+						(this.#connectionGenerations.get(name) ?? 0) !== connectionGeneration
+					) {
+						connection.transport.onClose = undefined;
+						await disconnectServer(connection).catch(() => {});
+						throw new Error(`Server "${name}" was disconnected while its initial connection was pending`);
+					}
 					// Store original config (without resolved tokens) to keep
 					// cache keys stable and avoid leaking rotating credentials.
 					connection.config = config;
@@ -528,6 +545,9 @@ export class MCPManager {
 					return connection;
 				},
 				error => {
+					if (this.#pendingConnectionAborts.get(name) === connectionAbort) {
+						this.#pendingConnectionAborts.delete(name);
+					}
 					if (this.#pendingConnections.get(name) === connectionPromise) {
 						this.#pendingConnections.delete(name);
 					}
@@ -535,6 +555,7 @@ export class MCPManager {
 				},
 			);
 			this.#pendingConnections.set(name, connectionPromise);
+			this.#pendingConnectionAborts.set(name, connectionAbort);
 
 			const toolsPromise = connectionPromise.then(async connection => {
 				const serverTools = await listTools(connection);
@@ -858,6 +879,9 @@ export class MCPManager {
 	 * Disconnect from a specific server.
 	 */
 	async disconnectServer(name: string): Promise<void> {
+		this.#connectionGenerations.set(name, (this.#connectionGenerations.get(name) ?? 0) + 1);
+		this.#pendingConnectionAborts.get(name)?.abort(new Error(`MCP server "${name}" was disconnected`));
+		this.#pendingConnectionAborts.delete(name);
 		this.#pendingConnections.delete(name);
 		this.#pendingToolLoads.delete(name);
 		this.#pendingReconnections.delete(name);
@@ -902,9 +926,13 @@ export class MCPManager {
 			conn.transport.onClose = undefined;
 		}
 		const promises = Array.from(this.#connections.values()).map(conn => disconnectServer(conn));
+		for (const controller of this.#pendingConnectionAborts.values()) {
+			controller.abort(new Error("MCP manager disconnected"));
+		}
 		await Promise.allSettled(promises);
 
 		this.#pendingConnections.clear();
+		this.#pendingConnectionAborts.clear();
 		this.#pendingToolLoads.clear();
 		this.#pendingReconnections.clear();
 		this.#pendingResourceRefresh.clear();
@@ -945,8 +973,13 @@ export class MCPManager {
 		}
 
 		const attempt = this.#doReconnect(name, options?.authChallenge);
-		this.#pendingReconnections.set(name, attempt);
-		return attempt.finally(() => this.#pendingReconnections.delete(name));
+		const tracked = attempt.finally(() => {
+			if (this.#pendingReconnections.get(name) === tracked) {
+				this.#pendingReconnections.delete(name);
+			}
+		});
+		this.#pendingReconnections.set(name, tracked);
+		return tracked;
 	}
 
 	/**
@@ -990,6 +1023,7 @@ export class MCPManager {
 	}
 
 	async #doReconnect(name: string, authChallenge?: MCPAuthChallenge): Promise<MCPServerConnection | null> {
+		const reconnectGeneration = this.#connectionGenerations.get(name) ?? 0;
 		const oldConnection = this.#connections.get(name);
 		let config = oldConnection?.config ?? this.#serverConfigs.get(name);
 		const source = this.#sources.get(name) ?? oldConnection?._source;
@@ -1005,6 +1039,7 @@ export class MCPManager {
 			try {
 				const refreshedConfig = await this.#authHandler(name, authChallenge);
 				if (!refreshedConfig) return null;
+				if ((this.#connectionGenerations.get(name) ?? 0) !== reconnectGeneration) return null;
 				config = refreshedConfig;
 				this.#serverConfigs.set(name, config);
 			} catch (error) {
@@ -1033,7 +1068,7 @@ export class MCPManager {
 		// Retry with backoff — the server may still be starting up.
 		const delays = [500, 1000, 2000, 4000];
 		for (let attempt = 0; attempt <= delays.length; attempt++) {
-			if (this.#epoch !== reconnectEpoch) {
+			if (this.#epoch !== reconnectEpoch || (this.#connectionGenerations.get(name) ?? 0) !== reconnectGeneration) {
 				logger.debug("MCP reconnect aborted before attempt after configuration changed", {
 					path: `mcp:${name}`,
 					storedEpoch: reconnectEpoch,
@@ -1042,11 +1077,20 @@ export class MCPManager {
 				return null;
 			}
 			try {
-				const connection = await this.#connectAndWireServer(name, config, source, reconnectEpoch);
+				const connection = await this.#connectAndWireServer(
+					name,
+					config,
+					source,
+					reconnectEpoch,
+					reconnectGeneration,
+				);
 				logger.debug("MCP reconnected", { path: `mcp:${name}`, tools: connection.tools?.length ?? 0 });
 				return connection;
 			} catch (error) {
-				if (this.#epoch !== reconnectEpoch) {
+				if (
+					this.#epoch !== reconnectEpoch ||
+					(this.#connectionGenerations.get(name) ?? 0) !== reconnectGeneration
+				) {
 					logger.debug("MCP reconnect aborted after configuration changed", {
 						path: `mcp:${name}`,
 						storedEpoch: reconnectEpoch,
@@ -1081,23 +1125,39 @@ export class MCPManager {
 		config: MCPServerConfig,
 		source: SourceMeta | undefined,
 		reconnectEpoch: number,
+		reconnectGeneration: number,
 	): Promise<MCPServerConnection> {
-		const resolvedConfig = await this.#resolveAuthConfig(config);
-		const connection = await connectToServer(name, resolvedConfig, {
-			onNotification: (method, params) => {
-				this.#handleServerNotification(name, method, params);
-			},
-			onRequest: (method, params) => {
-				return this.#handleServerRequest(method, params);
-			},
-		});
+		const connectionAbort = new AbortController();
+		this.#pendingConnectionAborts.set(name, connectionAbort);
+		let connection: MCPServerConnection;
+		try {
+			const resolvedConfig = await this.#resolveAuthConfig(config);
+			connection = await connectToServer(name, resolvedConfig, {
+				onNotification: (method, params) => {
+					this.#handleServerNotification(name, method, params);
+				},
+				onRequest: (method, params) => {
+					return this.#handleServerRequest(method, params);
+				},
+				signal: connectionAbort.signal,
+			});
+		} catch (error) {
+			if (this.#pendingConnectionAborts.get(name) === connectionAbort) {
+				this.#pendingConnectionAborts.delete(name);
+			}
+			throw error;
+		}
 
 		connection.config = config;
 		if (source) connection._source = source;
 
 		// Bail out if the server was disconnected or the manager was reset
 		// while we were connecting (e.g. /mcp reload called disconnectAll).
-		if (!this.#serverConfigs.has(name) || this.#epoch !== reconnectEpoch) {
+		if (
+			!this.#serverConfigs.has(name) ||
+			this.#epoch !== reconnectEpoch ||
+			(this.#connectionGenerations.get(name) ?? 0) !== reconnectGeneration
+		) {
 			await connection.transport.close().catch(() => {});
 			throw new Error(`Server "${name}" was disconnected during reconnection`);
 		}
@@ -1120,19 +1180,28 @@ export class MCPManager {
 			void this.reconnectServer(name);
 		};
 		try {
-			const serverTools = await listTools(connection);
+			const serverTools = await listTools(connection, { signal: connectionAbort.signal });
+			if (this.#epoch !== reconnectEpoch || (this.#connectionGenerations.get(name) ?? 0) !== reconnectGeneration) {
+				throw new Error(`Server "${name}" was disconnected while reconnecting`);
+			}
 			const reconnect = (options?: { authChallenge?: MCPAuthChallenge }) => this.reconnectServer(name, options);
 			const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
 			void this.toolCache?.set(name, config, serverTools);
 			this.#replaceServerTools(name, customTools);
 			void this.#onToolsChanged?.(this.#tools);
 			void this.#loadServerResourcesAndPrompts(name, connection);
+			if (this.#pendingConnectionAborts.get(name) === connectionAbort) {
+				this.#pendingConnectionAborts.delete(name);
+			}
 			return connection;
 		} catch (error) {
 			// Clean up the connection to avoid zombie transports
 			connection.transport.onClose = undefined;
 			await connection.transport.close().catch(() => {});
 			this.#connections.delete(name);
+			if (this.#pendingConnectionAborts.get(name) === connectionAbort) {
+				this.#pendingConnectionAborts.delete(name);
+			}
 			throw error;
 		}
 	}

@@ -105,6 +105,7 @@ import { TreeSelectorComponent } from "../components/tree-selector";
 import { UserMessageSelectorComponent } from "../components/user-message-selector";
 import type { SessionObserverRegistry } from "../session-observer-registry";
 import { buildCopyTargets } from "../utils/copy-targets";
+import { refreshMcpServer } from "./mcp-live-refresh";
 
 const MANUAL_LOGIN_PROMPT = "Paste the authorization code (or full redirect URL), then press Enter:";
 
@@ -367,7 +368,30 @@ export class SelectorController {
 	 * Replaces /status with a unified view of all providers and extensions.
 	 */
 	async showExtensionsDashboard(): Promise<void> {
-		const dashboard = await ExtensionDashboard.create(getProjectDir(), this.ctx.settings, this.ctx.ui.terminal.rows);
+		const dashboard = await ExtensionDashboard.create(getProjectDir(), this.ctx.settings, this.ctx.ui.terminal.rows, {
+			notify: message => this.ctx.showStatus(message),
+			notifyError: message => this.ctx.showError(message),
+			refreshMcpLive: this.ctx.mcpManager
+				? async (serverName, enabled) => {
+						const manager = this.ctx.mcpManager;
+						if (!manager) throw new Error("MCP manager is no longer available");
+						const result = await refreshMcpServer({
+							cwd: getProjectDir(),
+							serverName,
+							enabled,
+							manager,
+							refreshTools: async liveManager => this.ctx.session.refreshMCPTools(liveManager.getTools()),
+						});
+						if (result.state === "failed") {
+							throw new Error(
+								Array.from(result.errors, ([name, error]) => `${name}: ${error}`).join("\n") ||
+									`MCP server "${serverName}" did not refresh`,
+							);
+						}
+						return result.state === "connecting" ? "pending" : "updated";
+					}
+				: undefined,
+		});
 		// Fullscreen dashboard on the alternate screen (the /settings idiom): the
 		// overlay borrows the terminal's alt buffer and enables mouse tracking for
 		// its lifetime, leaving the transcript untouched underneath.

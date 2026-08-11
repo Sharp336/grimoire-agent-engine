@@ -25,6 +25,7 @@ import { MCPManager } from "../src/mcp/manager";
 import type { MCPStdioServerConfig } from "../src/mcp/types";
 
 const FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "hang-during-init-mcp.ts");
+const DELAYED_FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "delayed-tool-mcp.ts");
 const BUN_EXEC = process.execPath;
 
 describe("MCP startup (issue #2100)", () => {
@@ -74,4 +75,27 @@ describe("MCP startup (issue #2100)", () => {
 			await manager.disconnectAll();
 		}
 	}, 15_000);
+
+	it("does not revive a slow initial connection after it is disconnected", async () => {
+		const manager = new MCPManager(workDir);
+		const config: MCPStdioServerConfig = {
+			type: "stdio",
+			command: BUN_EXEC,
+			args: [DELAYED_FIXTURE_PATH],
+		};
+
+		try {
+			await manager.connectServers({ delayed: config }, {});
+			expect(manager.getConnectionStatus("delayed")).toBe("connecting");
+
+			await manager.disconnectServer("delayed");
+			await Bun.sleep(700);
+
+			expect(manager.getConnectionStatus("delayed")).toBe("disconnected");
+			expect(manager.getServerConfig("delayed")).toBeUndefined();
+			expect(manager.getTools().some(tool => tool.mcpServerName === "delayed")).toBe(false);
+		} finally {
+			await manager.disconnectAll();
+		}
+	}, 10_000);
 });

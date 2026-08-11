@@ -26,6 +26,16 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { getMCPConfigPath, logger } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../../config/settings";
+import { clearPluginRootsAndCaches, resolveOrDefaultProjectRegistryPath } from "../../../discovery/helpers";
+import { PluginManager } from "../../../extensibility/plugins/manager";
+import {
+	getInstalledPluginsRegistryPath,
+	getMarketplacesCacheDir,
+	getMarketplacesRegistryPath,
+	getPluginsCacheDir,
+	type InstalledPluginSummary,
+	MarketplaceManager,
+} from "../../../extensibility/plugins/marketplace";
 import { setMcpServerEnabled } from "../../../mcp/config-writer";
 import { getTabBarTheme } from "../../../modes/shared";
 import { theme } from "../../../modes/theme/theme";
@@ -35,6 +45,7 @@ import { ExtensionList } from "./extension-list";
 import { InspectorPanel } from "./inspector-panel";
 import {
 	applyDisabledExtensionsToState,
+	applyExtensionEnabledToState,
 	applyFilter,
 	createInitialState,
 	filterByProvider,
@@ -42,6 +53,15 @@ import {
 	toggleProvider,
 } from "./state-manager";
 import type { DashboardState, ProviderTab } from "./types";
+
+export interface DashboardHooks {
+	/** Called after an MCP enable/disable persists. Reports completed or pending live application. */
+	refreshMcpLive?: (serverName: string, enabled: boolean) => Promise<"updated" | "pending">;
+	/** Free-text success/status message shown to the user. */
+	notify?: (message: string) => void;
+	/** Persistence or live-refresh failure shown to the user. */
+	notifyError?: (message: string) => void;
+}
 
 const EXT_FOOTER = " ↑/↓: navigate · Space: toggle · ←/→: provider · Esc: close";
 
@@ -70,38 +90,48 @@ export class ExtensionDashboard implements Component {
 	#tabBar!: TabBar;
 	#body!: TwoColumnBody;
 	#refreshToken = 0;
+	#pluginToggleQueue = Promise.resolve();
+	#mcpToggleQueues = new Map<string, Promise<void>>();
+	#pendingExtensionStates = new Map<string, { enabled: boolean; generation: number }>();
+	#toggleGeneration = 0;
 	// Frame geometry from the last render, for SGR mouse hit-testing. The
 	// fullscreen overlay paints from screen row 0, so mouse rows map 1:1.
 	#tabRowStart = 0;
 	#tabRowCount = 0;
 	#bodyRowStart = 0;
 	#bodyRowCount = 0;
+	#hooks: DashboardHooks;
+	#cwd: string;
+	#settings: Settings | null;
+	#terminalHeight: number;
 
 	onClose?: () => void;
 	onRequestRender?: () => void;
 
-	private constructor(
-		private readonly cwd: string,
-		private readonly settings: Settings | null,
-		private readonly terminalHeight: number,
-	) {}
+	private constructor(cwd: string, settings: Settings | null, terminalHeight: number, hooks?: DashboardHooks) {
+		this.#cwd = cwd;
+		this.#settings = settings;
+		this.#terminalHeight = terminalHeight;
+		this.#hooks = hooks ?? {};
+	}
 
 	static async create(
 		cwd: string,
 		settings: Settings | null = null,
 		terminalHeight?: number,
+		hooks?: DashboardHooks,
 	): Promise<ExtensionDashboard> {
-		const dashboard = new ExtensionDashboard(cwd, settings, terminalHeight ?? process.stdout.rows ?? 24);
+		const dashboard = new ExtensionDashboard(cwd, settings, terminalHeight ?? process.stdout.rows ?? 24, hooks);
 		await dashboard.#init();
 		return dashboard;
 	}
 
 	async #init(): Promise<void> {
-		const sm = this.settings ?? (await Settings.init());
+		const sm = this.#settings ?? (await Settings.init());
 		const disabledIds = sm ? ((sm.get("disabledExtensions") as string[]) ?? []) : [];
-		this.#state = await createInitialState(this.cwd, disabledIds);
+		this.#state = await createInitialState(this.#cwd, disabledIds);
 
-		const initialMaxVisible = Math.max(3, this.terminalHeight - 9);
+		const initialMaxVisible = Math.max(3, this.#terminalHeight - 9);
 		this.#mainList = new ExtensionList(
 			this.#state.searchFiltered,
 			{
@@ -119,12 +149,12 @@ export class ExtensionDashboard implements Component {
 		);
 		this.#mainList.setFocused(true);
 
-		this.#inspector = new InspectorPanel();
+		this.#inspector = new InspectorPanel({ mcpLiveRefreshAvailable: this.#hooks.refreshMcpLive !== undefined });
 		if (this.#state.selected) {
 			this.#inspector.setExtension(this.#state.selected);
 		}
 
-		this.#body = new TwoColumnBody(this.#mainList, this.#inspector, this.terminalHeight);
+		this.#body = new TwoColumnBody(this.#mainList, this.#inspector, this.#terminalHeight);
 
 		this.#tabBar = new TabBar("", buildTabBarTabs(this.#state.tabs), getTabBarTheme());
 		this.#tabBar.showHint = false;
@@ -140,7 +170,7 @@ export class ExtensionDashboard implements Component {
 
 	/** Live terminal height so the dashboard tracks resize while open. */
 	#terminalRows(): number {
-		return process.stdout.rows || this.terminalHeight || 24;
+		return process.stdout.rows || this.#terminalHeight || 24;
 	}
 
 	/**
@@ -262,14 +292,34 @@ export class ExtensionDashboard implements Component {
 	}
 
 	#handleExtensionToggle(extensionId: string, enabled: boolean): void {
-		const sm = this.settings ?? Settings.instance;
+		const sm = this.#settings ?? Settings.instance;
+		if (extensionId.startsWith("plugin:")) {
+			const generation = ++this.#toggleGeneration;
+			this.#pendingExtensionStates.set(extensionId, { enabled, generation });
+			const toggle = () => this.#togglePluginExtension(extensionId, enabled, generation);
+			this.#pluginToggleQueue = this.#pluginToggleQueue.then(toggle, toggle);
+			return;
+		}
+
 		if (!sm) return;
 
 		// MCP toggles route through the canonical denylist in
 		// `~/.omp/agent/mcp.json` so `/mcp list`, the MCP runtime, and this
 		// dashboard agree on every server's enabled state (issue #3827).
 		if (extensionId.startsWith("mcp:")) {
-			void this.#toggleMcpExtension(extensionId, enabled, sm);
+			const generation = ++this.#toggleGeneration;
+			this.#pendingExtensionStates.set(extensionId, { enabled, generation });
+			const previous = this.#mcpToggleQueues.get(extensionId) ?? Promise.resolve();
+			const toggle = () => this.#toggleMcpExtension(extensionId, enabled, generation, sm);
+			const queued = previous.then(toggle, toggle);
+			this.#mcpToggleQueues.set(extensionId, queued);
+			void queued
+				.finally(() => {
+					if (this.#mcpToggleQueues.get(extensionId) === queued) {
+						this.#mcpToggleQueues.delete(extensionId);
+					}
+				})
+				.catch(() => {});
 			return;
 		}
 
@@ -291,18 +341,74 @@ export class ExtensionDashboard implements Component {
 		void this.#refreshFromState();
 	}
 
-	async #toggleMcpExtension(extensionId: string, enabled: boolean, sm: Settings): Promise<void> {
+	async #togglePluginExtension(extensionId: string, enabled: boolean, generation: number): Promise<void> {
+		const rest = extensionId.slice("plugin:".length);
+
+		try {
+			if (rest.startsWith("npm/")) {
+				const pluginName = rest.slice("npm/".length);
+				const npmManager = new PluginManager(this.#cwd);
+				await npmManager.setEnabled(pluginName, enabled, { clearProjectDisabled: true });
+			} else if (rest.startsWith("mkt/")) {
+				const spec = rest.slice("mkt/".length);
+				const atIndex = spec.lastIndexOf("@");
+				const pluginId = atIndex > 0 ? spec.slice(0, atIndex) : spec;
+				const scope = atIndex > 0 ? (spec.slice(atIndex + 1) as "user" | "project") : undefined;
+				const projectPath = await resolveOrDefaultProjectRegistryPath(this.#cwd);
+				const manager = new MarketplaceManager({
+					marketplacesRegistryPath: getMarketplacesRegistryPath(),
+					installedRegistryPath: getInstalledPluginsRegistryPath(),
+					projectInstalledRegistryPath: projectPath ?? undefined,
+					marketplacesCacheDir: getMarketplacesCacheDir(),
+					pluginsCacheDir: getPluginsCacheDir(),
+					clearPluginRootsCache: clearPluginRootsAndCaches,
+				});
+				await manager.setPluginEnabled(pluginId, enabled, scope);
+				if (enabled) {
+					const extension = this.#state.extensions.find(item => item.id === extensionId);
+					const raw = extension?.raw as { type?: string; summary?: InstalledPluginSummary } | undefined;
+					if (raw?.type === "marketplace" && raw.summary) {
+						const pluginManager = new PluginManager(this.#cwd);
+						const effective = await pluginManager.getMarketplaceAggregateEffectiveState(
+							pluginId,
+							raw.summary.entries,
+						);
+						await pluginManager.clearProjectDisabledOverrides(effective.packageNames);
+					}
+				}
+			}
+			this.#hooks.notify?.("Plugin change saved — restart to apply");
+		} catch (error) {
+			logger.warn("Failed to persist plugin toggle", { id: rest, enabled, error: String(error) });
+			this.#hooks.notifyError?.(`Failed to toggle plugin: ${String(error)}`);
+		}
+
+		this.#clearPendingExtensionState(extensionId, generation);
+
+		try {
+			await this.#refreshFromState();
+		} catch (error) {
+			logger.warn("Failed to refresh extension dashboard after plugin toggle", { id: rest, error: String(error) });
+			this.#hooks.notifyError?.(`Plugin changed, but the dashboard failed to refresh: ${String(error)}`);
+		}
+	}
+
+	async #toggleMcpExtension(extensionId: string, enabled: boolean, generation: number, sm: Settings): Promise<void> {
 		const name = extensionId.slice("mcp:".length);
 		try {
 			await setMcpServerEnabled({
-				userPath: getMCPConfigPath("user", this.cwd),
-				projectPath: getMCPConfigPath("project", this.cwd),
+				userPath: getMCPConfigPath("user", this.#cwd),
+				projectPath: getMCPConfigPath("project", this.#cwd),
 				sourcePath: this.#writableMcpSourcePath(extensionId),
 				name,
 				enabled,
 			});
 		} catch (error) {
 			logger.warn("Failed to persist MCP toggle", { name, enabled, error: String(error) });
+			this.#hooks.notifyError?.(`Failed to save MCP toggle for "${name}": ${String(error)}`);
+			this.#clearPendingExtensionState(extensionId, generation);
+			await this.#refreshFromState();
+			return;
 		}
 
 		// Reconcile `settings.disabledExtensions` with the canonical mcp.json
@@ -317,7 +423,31 @@ export class ExtensionDashboard implements Component {
 			this.#applyDisabledExtensions(stored);
 		}
 
+		let liveState: "updated" | "pending" | "restart-required" = "restart-required";
+		let liveError: string | undefined;
+		try {
+			liveState = (await this.#hooks.refreshMcpLive?.(name, enabled)) ?? "restart-required";
+		} catch (error) {
+			liveError = String(error);
+		}
+		if (liveError) {
+			this.#hooks.notifyError?.(`Live refresh failed for "${name}": ${liveError}`);
+		} else if (liveState === "updated") {
+			this.#hooks.notify?.("MCP tools updated live");
+		} else if (liveState === "pending") {
+			this.#hooks.notify?.("MCP connection in progress — tools will update live");
+		} else {
+			this.#hooks.notify?.("MCP change saved — restart to apply");
+		}
+
+		this.#clearPendingExtensionState(extensionId, generation);
 		await this.#refreshFromState();
+	}
+
+	#clearPendingExtensionState(extensionId: string, generation: number): void {
+		if (this.#pendingExtensionStates.get(extensionId)?.generation === generation) {
+			this.#pendingExtensionStates.delete(extensionId);
+		}
 	}
 
 	#writableMcpSourcePath(extensionId: string): string | undefined {
@@ -332,11 +462,14 @@ export class ExtensionDashboard implements Component {
 		// Remember the current tab so it survives the re-sort.
 		const currentTabId = this.#state.tabs[this.#state.activeTabIndex]?.id;
 
-		const sm = this.settings ?? Settings.instance;
+		const sm = this.#settings ?? Settings.instance;
 		const disabledIds = sm ? ((sm.get("disabledExtensions") as string[]) ?? []) : [];
-		const nextState = await refreshState(this.#state, this.cwd, disabledIds);
+		const nextState = await refreshState(this.#state, this.#cwd, disabledIds);
 		if (refreshToken !== this.#refreshToken) return;
 		this.#state = nextState;
+		for (const [extensionId, pending] of this.#pendingExtensionStates) {
+			this.#state = applyExtensionEnabledToState(this.#state, extensionId, pending.enabled);
+		}
 
 		// Re-anchor on the same tab id in the (re-sorted) list.
 		if (currentTabId) {
@@ -422,12 +555,12 @@ class TwoColumnBody implements Component {
 	#rightScroll = 0;
 	#rightTotal = 0;
 	#leftWidth = 0;
+	#leftPane: ExtensionList;
+	#rightPane: InspectorPanel;
 
-	constructor(
-		private readonly leftPane: ExtensionList,
-		private readonly rightPane: InspectorPanel,
-		maxHeight: number,
-	) {
+	constructor(leftPane: ExtensionList, rightPane: InspectorPanel, maxHeight: number) {
+		this.#leftPane = leftPane;
+		this.#rightPane = rightPane;
 		this.#maxHeight = maxHeight;
 	}
 
@@ -456,8 +589,8 @@ class TwoColumnBody implements Component {
 		const rightWidth = Math.max(0, width - leftWidth - 3);
 		const numLines = this.#maxHeight;
 
-		const leftLines = this.leftPane.render(leftWidth);
-		const rightLines = this.rightPane.render(rightWidth);
+		const leftLines = this.#leftPane.render(leftWidth);
+		const rightLines = this.#rightPane.render(rightWidth);
 		this.#rightTotal = rightLines.length;
 		const maxScroll = Math.max(0, this.#rightTotal - numLines);
 		if (this.#rightScroll > maxScroll) this.#rightScroll = maxScroll;
@@ -486,7 +619,7 @@ class TwoColumnBody implements Component {
 	}
 
 	invalidate(): void {
-		this.leftPane.invalidate?.();
-		this.rightPane.invalidate?.();
+		this.#leftPane.invalidate?.();
+		this.#rightPane.invalidate?.();
 	}
 }
