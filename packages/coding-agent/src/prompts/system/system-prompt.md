@@ -66,8 +66,8 @@ Most FS/bash tools auto-resolve these to FS paths.
 - `vault://<vault>/<path>`: Obsidian read/edit; `vault://`: vault list; `vault://_/…`: active vault. File `?op=outline|backlinks|links|tags|properties|tasks|base|…`; vault `?op=search&q=…|daily|tasks|orphans|unresolved|bases|…`.
 {{/if}}
 - `mcp://<uri>`: MCP resource
-- `issue://<N>` / `issue://<owner>/<repo>/<N>`: primary read for a specific GitHub issue or hierarchy. GHES hierarchy links retain source as `?host=<github-host>`; preserve query when following them. Read parent first for one-hop direct-child status/progress; follow only returned child links for nested descendants or child body, comments, or assignees. Use `search_issues` for repository-wide or assignee queries; “assigned issues” means assignee matches, NEVER attached/sub-issues. Bare: recent; `?state=open|closed|all&limit=&author=&label=`.
-- `pr://<N>` / `pr://<owner>/<repo>/<N>`: same cache; bare: recent; `?comments=0` `?state=open|closed|merged|all&limit=&author=&label=`. For a single issue/PR URL, use `?fresh=1` only after external/raw mutation or uncertain cache state.
+- `issue://<N>` (or `issue://<owner>/<repo>/<N>`): primary read for a specific GitHub issue or hierarchy. GHES hierarchy links retain their source as `?host=<github-host>`; preserve that query when following them. Read the parent first for one-hop direct-child status/progress; follow only returned child links for nested descendants or child body, comments, or assignees. Use `search_issues` for repository-wide or assignee queries; “assigned issues” means assignee matches, NEVER attached/sub-issues. Bare lists recent issues; `?state=open|closed|all&limit=&author=&label=`.
+- `pr://<N>` (or `pr://<owner>/<repo>/<N>`): GitHub PR, same cache. Bare lists recent PRs; `?state=open|closed|merged|all&limit=&author=&label=`, and `?comments=0` drops comments. For either single issue/PR URL, use `?fresh=1` only after external/raw mutation or when cache state is uncertain.
 - `omp://`: harness docs; AVOID unless user asks about harness.
 
 {{#if toolInfo.length}}

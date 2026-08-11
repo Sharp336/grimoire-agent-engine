@@ -21,7 +21,7 @@ import type { GithubInput } from "./gh-types";
 import { githubIssueJsonWithStateReasonFallback } from "./gh-view";
 import { invalidateAllIssueViews } from "./github-cache";
 import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "./render-utils";
-import { ToolError, throwIfAborted } from "./tool-errors";
+import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
 
 const GH_ISSUE_HIERARCHY_MAX_DEPTH = 8;
 const GH_ISSUE_HIERARCHY_MAX_DESCENDANT_PREFLIGHTS = 100;
@@ -658,11 +658,17 @@ function formatIssueStateResult(options: {
 	requestedStateReason?: IssueStateReason;
 	updated: IssueStateTarget[];
 	skipped: IssueStateTarget[];
+	outcomeUnknown: IssueStateTarget[];
+	cancelledBeforeLaunch: IssueStateTarget[];
 	failures: IssueStateFailure[];
+	cancelledAfterLaunch: boolean;
 }): string {
 	const desired = options.state.toUpperCase();
 	const lines = [`# Issue State Reconciliation: ${desired}`, ""];
 	pushLine(lines, "Repository", options.repo);
+	if (options.cancelledAfterLaunch) {
+		lines.push("", "Cancellation requested after mutation commands launched; settled outcomes are shown below.");
+	}
 	if (options.updated.length > 0) {
 		lines.push("", `## Updated (${options.updated.length})`);
 		for (const target of options.updated) {
@@ -680,6 +686,22 @@ function formatIssueStateResult(options: {
 						? ` (state reason: ${target.stateReason})`
 						: "";
 			lines.push(`- #${target.issueNumber}${reason} — ${target.url}`);
+		}
+	}
+	if (options.outcomeUnknown.length > 0) {
+		lines.push("", `## Outcome Unknown (${options.outcomeUnknown.length})`, "Verify these targets before retrying.");
+		for (const target of options.outcomeUnknown) {
+			lines.push(`- #${target.issueNumber} — ${target.url}`);
+		}
+	}
+	if (options.cancelledBeforeLaunch.length > 0) {
+		lines.push(
+			"",
+			`## Not Attempted (${options.cancelledBeforeLaunch.length})`,
+			"These commands did not launch because cancellation was observed.",
+		);
+		for (const target of options.cancelledBeforeLaunch) {
+			lines.push(`- #${target.issueNumber} — ${target.url}`);
 		}
 	}
 	if (options.failures.length > 0) {
@@ -758,6 +780,9 @@ async function executeIssueState(
 					requestedStateReason,
 					updated: [],
 					skipped,
+					outcomeUnknown: [],
+					cancelledBeforeLaunch: [],
+					cancelledAfterLaunch: false,
 					failures: [],
 				}),
 				targets.length === 1 ? targets[0]?.url : undefined,
@@ -765,7 +790,10 @@ async function executeIssueState(
 			);
 		}
 
-		const mutationSettled = await settleIssueStateBatch(toUpdate, target => {
+		const launchedMutationIndexes = new Set<number>();
+		const mutationSettled = await settleIssueStateBatch(toUpdate, (target, index) => {
+			throwIfAborted(signal);
+			launchedMutationIndexes.add(index);
 			const args = ["issue", desiredState === "closed" ? "close" : "reopen", String(target.issueNumber)];
 			appendRepoFlag(args, repo);
 			if (desiredState === "closed") {
@@ -773,15 +801,33 @@ async function executeIssueState(
 			}
 			return git.github.text(session.cwd, args, signal, { repoProvided: Boolean(repo) });
 		});
-		throwIfAborted(signal);
+		const cancelledAfterLaunch = launchedMutationIndexes.size > 0 && Boolean(signal?.aborted);
+		if (launchedMutationIndexes.size === 0) throwIfAborted(signal);
 		const updated: IssueStateTarget[] = [];
+		const outcomeUnknown: IssueStateTarget[] = [];
+		const cancelledBeforeLaunch: IssueStateTarget[] = [];
 		const failures: IssueStateFailure[] = [];
 		for (const [index, result] of mutationSettled.entries()) {
 			const target = toUpdate[index]!;
-			if (result.status === "fulfilled") updated.push(target);
-			else failures.push({ target, reason: result.reason });
+			if (result.status === "fulfilled") {
+				updated.push(target);
+			} else if (result.reason instanceof ToolAbortError) {
+				if (launchedMutationIndexes.has(index)) {
+					outcomeUnknown.push(target);
+				} else {
+					cancelledBeforeLaunch.push(target);
+				}
+			} else {
+				failures.push({ target, reason: result.reason });
+			}
 		}
-		if (failures.length > 0 && updated.length === 0 && skipped.length === 0) {
+		if (
+			!cancelledAfterLaunch &&
+			failures.length > 0 &&
+			outcomeUnknown.length === 0 &&
+			updated.length === 0 &&
+			skipped.length === 0
+		) {
 			if (failures.length === 1) throw failures[0]!.reason;
 			const lines = failures.map(failure => {
 				const message = failure.reason instanceof Error ? failure.reason.message : String(failure.reason);
@@ -798,10 +844,16 @@ async function executeIssueState(
 				requestedStateReason,
 				updated,
 				skipped,
+				outcomeUnknown,
+				cancelledBeforeLaunch,
 				failures,
+				cancelledAfterLaunch,
 			}),
 			targets.length === 1 ? targets[0]?.url : undefined,
-			{ repo, status: failures.length > 0 ? "partial" : "updated" },
+			{
+				repo,
+				status: cancelledAfterLaunch || failures.length > 0 || outcomeUnknown.length > 0 ? "partial" : "updated",
+			},
 		);
 	} finally {
 		if (anyPreflightSucceeded) {

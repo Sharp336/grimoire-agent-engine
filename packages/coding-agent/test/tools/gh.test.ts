@@ -2021,8 +2021,11 @@ describe("github tool", () => {
 			expect(textSpy).not.toHaveBeenCalled();
 		});
 
-		it("preserves cancellation after a settled mutation batch", async () => {
+		it("keeps successfully settled mutations updated when cancellation follows launch", async () => {
 			const controller = new AbortController();
+			const firstCompletion = Promise.withResolvers<string>();
+			const secondCompletion = Promise.withResolvers<string>();
+			let mutationCalls = 0;
 			vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
 				const issueNumber = Number(args[2]);
 				return {
@@ -2031,24 +2034,137 @@ describe("github tool", () => {
 					url: `https://github.com/owner/repo/issues/${issueNumber}`,
 				} as never;
 			});
-			const textSpy = vi.spyOn(git.github, "text").mockImplementation(async () => {
-				controller.abort();
-				return "closed";
+			const textSpy = vi.spyOn(git.github, "text").mockImplementation((_cwd, args) => {
+				mutationCalls++;
+				if (mutationCalls === 2) {
+					firstCompletion.resolve("closed");
+					secondCompletion.resolve("closed");
+					controller.abort();
+				}
+				return args[2] === "20" ? firstCompletion.promise : secondCompletion.promise;
 			});
 
-			await expect(
-				new GithubTool(createSession()).execute(
-					"issue-state-mutation-abort",
-					{
-						op: "issue_state",
-						repo: "owner/repo",
-						issue: ["20", "21"],
-						state: "closed",
-					},
-					controller.signal,
-				),
-			).rejects.toBeInstanceOf(ToolAbortError);
+			const result = await new GithubTool(createSession()).execute(
+				"issue-state-settled-mutations-abort",
+				{
+					op: "issue_state",
+					repo: "owner/repo",
+					issue: ["20", "21"],
+					state: "closed",
+				},
+				controller.signal,
+			);
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+
 			expect(textSpy).toHaveBeenCalledTimes(2);
+			expect(text).toContain("## Updated (2)");
+			expect(text).toContain("#20 → CLOSED");
+			expect(text).toContain("#21 → CLOSED");
+			expect(text).toContain("Cancellation requested after mutation commands launched");
+			expect(result.details?.status).toBe("partial");
+		});
+
+		it("reports signal-aborted launched mutations as outcome unknown", async () => {
+			const controller = new AbortController();
+			const mutationsStarted = Promise.withResolvers<void>();
+			const successfulMutation = Promise.withResolvers<string>();
+			let mutationCalls = 0;
+			vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+				const issueNumber = Number(args[2]);
+				return {
+					number: issueNumber,
+					state: "OPEN",
+					url: `https://github.com/owner/repo/issues/${issueNumber}`,
+				} as never;
+			});
+			const textSpy = vi.spyOn(git.github, "text").mockImplementation((_cwd, args, signal) => {
+				mutationCalls++;
+				if (mutationCalls === 2) mutationsStarted.resolve();
+				if (args[2] === "20") return successfulMutation.promise;
+
+				const aborted = Promise.withResolvers<never>();
+				if (signal?.aborted) {
+					aborted.reject(new ToolAbortError());
+				} else {
+					signal?.addEventListener("abort", () => aborted.reject(new ToolAbortError()), { once: true });
+				}
+				return aborted.promise;
+			});
+
+			const pending = new GithubTool(createSession()).execute(
+				"issue-state-mixed-mutation-abort",
+				{
+					op: "issue_state",
+					repo: "owner/repo",
+					issue: ["20", "21"],
+					state: "closed",
+				},
+				controller.signal,
+			);
+			await mutationsStarted.promise;
+			successfulMutation.resolve("closed");
+			controller.abort();
+			const result = await pending;
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+			const outcomeUnknown = text.split("## Outcome Unknown (1)")[1] ?? "";
+
+			expect(textSpy).toHaveBeenCalledTimes(2);
+			expect(text).toContain("## Updated (1)");
+			expect(text).toContain("#20 → CLOSED");
+			expect(text).toContain("## Outcome Unknown (1)");
+			expect(outcomeUnknown).toContain("#21");
+			expect(outcomeUnknown).toMatch(/verify/i);
+			expect(text).not.toContain("## Failed");
+			expect(result.details?.status).toBe("partial");
+		});
+
+		it("marks queued mutations as not attempted when cancellation stops a later wave", async () => {
+			const controller = new AbortController();
+			const mutationsStarted = Promise.withResolvers<void>();
+			let mutationCalls = 0;
+			vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+				const issueNumber = Number(args[2]);
+				return {
+					number: issueNumber,
+					state: "OPEN",
+					url: `https://github.com/owner/repo/issues/${issueNumber}`,
+				} as never;
+			});
+			const textSpy = vi.spyOn(git.github, "text").mockImplementation((_cwd, _args, signal) => {
+				mutationCalls++;
+				if (mutationCalls === 6) mutationsStarted.resolve();
+
+				const aborted = Promise.withResolvers<never>();
+				if (signal?.aborted) {
+					aborted.reject(new ToolAbortError());
+				} else {
+					signal?.addEventListener("abort", () => aborted.reject(new ToolAbortError()), { once: true });
+				}
+				return aborted.promise;
+			});
+
+			const pending = new GithubTool(createSession()).execute(
+				"issue-state-queued-mutation-abort",
+				{
+					op: "issue_state",
+					repo: "owner/repo",
+					issue: Array.from({ length: 7 }, (_, index) => String(index + 1)),
+					state: "closed",
+				},
+				controller.signal,
+			);
+			await mutationsStarted.promise;
+			controller.abort();
+			const result = await pending;
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+			const notAttempted = text.split("## Not Attempted (1)")[1] ?? "";
+
+			expect(textSpy).toHaveBeenCalledTimes(6);
+			expect(text).toContain("## Outcome Unknown (6)");
+			expect(notAttempted).toContain("#7");
+			expect(notAttempted).toMatch(/did not launch/i);
+			expect(text).not.toContain("## Failed");
+			expect(result.details?.status).toBe("partial");
 		});
 
 		it("rejects invalid issue lists and close reasons before invoking gh", async () => {
