@@ -1171,18 +1171,20 @@ export class AgentSession {
 			}
 			this.#loopGuards.recordTurn(messages, context);
 			await this.#prewalk.advanceAtTurnEnd(messages, context);
-			await this.#advisors.onPrimaryTurnEnd(messages, context?.willContinue, signal);
 			// Deferred mid-run periodic shake: the counter crossed shake.interval
 			// during this turn's tool calls. It runs on the awaited turn-end path
 			// because that path owns the live loop array — the rebuilt messages can
 			// be spliced in place before the next model call, so a long tool-heavy
 			// run actually shrinks its live prompt, not just persisted history.
-			// Runs before mid-run compaction so the pruned estimate can lower the
-			// compaction trigger.
+			// Runs before the turn is delivered to advisors so their runtime/backlog
+			// receives the shaken (pruned) turn instead of the full unshaken tool
+			// result, and before mid-run compaction so the pruned estimate can
+			// lower the compaction trigger.
 			if (this.#midRunShakeDue) {
 				this.#midRunShakeDue = false;
 				await this.#runMidRunShake(messages, context);
 			}
+			await this.#advisors.onPrimaryTurnEnd(messages, context?.willContinue, signal);
 			await this.#maintenance.maintainContextMidRun(messages, signal, context);
 		});
 		this.yieldQueue = new YieldQueue({
