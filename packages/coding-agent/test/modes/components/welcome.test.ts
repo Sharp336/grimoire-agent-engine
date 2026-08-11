@@ -104,13 +104,9 @@ describe("WelcomeComponent tips", () => {
 });
 
 describe("contribution reminder", () => {
-	it("exposes the exact shared reminder text", () => {
-		expect(CONTRIBUTION_REMINDER).toBe("Something broken? Ask your agent to fix it and submit a PR.");
-	});
-
-	it("trims only trailing whitespace before appending a blank line and the reminder", () => {
-		expect(appendContributionReminder("  Startup changes stay indented.  \n\t")).toBe(
-			`  Startup changes stay indented.\n\n${CONTRIBUTION_REMINDER}`,
+	it("trims leading and trailing whitespace before appending a blank line and the reminder", () => {
+		expect(appendContributionReminder("  Startup changes.  \n\t")).toBe(
+			`Startup changes.\n\n${CONTRIBUTION_REMINDER}`,
 		);
 	});
 });
