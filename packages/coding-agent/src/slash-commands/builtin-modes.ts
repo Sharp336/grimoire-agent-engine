@@ -12,6 +12,7 @@ import type { AgentSession } from "../session/agent-session";
 import type { ComputerTool } from "../tools/computer";
 import { computerExposureMode } from "../tools/computer/exposure";
 import type { InspectImageMode } from "../utils/inspect-image-mode";
+import { handleGoalAcp, handleGuidedGoalAcp } from "./helpers/goal";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSecurityCommand } from "./helpers/security";
 import type { SlashCommandSpec } from "./types";
@@ -225,6 +226,9 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		],
 		inlineHint: "[objective]",
 		allowArgs: true,
+		acpDescription: "Manage goal mode",
+		acpInputHint: "[set <objective>|show|pause|resume|drop|budget <N|off>]",
+		handle: handleGoalAcp,
 		getTuiAutocompleteDescription: runtime => {
 			if (!runtime.ctx.settings.get("goal.enabled" as SettingPath)) return "Goal: disabled in settings";
 			if (runtime.ctx.planModeEnabled) return "Goal: blocked by plan mode";
@@ -241,6 +245,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		description: "Have the agent interview you in chat, then set up goal mode",
 		inlineHint: "[rough objective]",
 		allowArgs: true,
+		handle: handleGuidedGoalAcp,
 		handleTui: async (command, runtime) => {
 			// Clear the slash draft BEFORE the await: the handler blocks for the
 			// whole kickoff turn, and a post-await clear would wipe an answer the

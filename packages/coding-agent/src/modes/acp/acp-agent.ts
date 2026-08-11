@@ -55,6 +55,7 @@ import { runExtensionCompact } from "../../extensibility/extensions/compact-hand
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
 import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
+import { attachHeadlessGoalAdapter } from "../../goals/headless-goal-adapter";
 import { resolveLocalUrlToPath } from "../../internal-urls";
 import { MCPManager } from "../../mcp/manager";
 import type { MCPServerConfig } from "../../mcp/types";
@@ -177,6 +178,9 @@ type ManagedSessionRecord = {
 	// Installed inside `#scheduleBootstrapUpdates` (post-race-guard); released
 	// in `#disposeSessionRecord`. Lives independent of any prompt turn.
 	lifetimeUnsubscribe: (() => void) | undefined;
+	// Headless goal-mode adapter (drives GoalModeController from session events).
+	// Installed in `#registerPreparedSession`; released in `#disposeSessionRecord`.
+	goalAdapterUnsubscribe: (() => void) | undefined;
 	closedError: PromptLifecycleError | undefined;
 	promptEventHandlers: Set<Promise<void>>;
 	extensionUserMessageTasks: Set<Promise<void>>;
@@ -185,6 +189,7 @@ type ManagedSessionRecord = {
 type ReplayableMessage = {
 	role: string;
 	content?: unknown;
+	attribution?: string;
 	errorMessage?: string;
 	toolCallId?: string;
 	toolName?: string;
@@ -839,7 +844,12 @@ export class AcpAgent implements Agent {
 		});
 		if (builtinResult !== false) {
 			if ("prompt" in builtinResult) {
-				await record.session.prompt(builtinResult.prompt, { images });
+				// Synthetic residual prompts (guided-goal interview kickoff) are
+				// delivered as hidden developer messages, matching the TUI path.
+				await record.session.prompt(builtinResult.prompt, {
+					images,
+					synthetic: builtinResult.synthetic === true,
+				});
 				return;
 			}
 			const promptTurn = record.promptTurn;
@@ -1134,6 +1144,9 @@ export class AcpAgent implements Agent {
 
 	async #registerPreparedSession(session: AgentSession, mcpServers: McpServer[]): Promise<ManagedSessionRecord> {
 		const record = this.#createManagedSessionRecord(session);
+		// Drive goal-mode lifecycle for this headless ACP session (enter/resume/
+		// drop + opt-in auto-continuation). Released in `#disposeSessionRecord`.
+		record.goalAdapterUnsubscribe = await attachHeadlessGoalAdapter(session, "acp");
 		session.setClientBridge(createAcpClientBridge(this.#connection, session.sessionId, this.#clientCapabilities));
 		// `record.lifetimeUnsubscribe` is installed in `#scheduleBootstrapUpdates`
 		// so it shares the bootstrap race guard — see that comment for why.
@@ -1163,6 +1176,7 @@ export class AcpAgent implements Agent {
 			promptEventHandlers: new Set(),
 			extensionUserMessageTasks: new Set(),
 			lifetimeUnsubscribe: undefined,
+			goalAdapterUnsubscribe: undefined,
 		};
 	}
 
@@ -2082,6 +2096,17 @@ export class AcpAgent implements Agent {
 			message.role === "custom" ||
 			message.role === "hookMessage"
 		) {
+			// Synthetic prompts persist as developer-role messages with agent
+			// attribution (see AgentSession.prompt). They are hidden steering —
+			// the guided-goal interview kickoff among them — not user-authored
+			// content, so replaying them as a user_message_chunk would expose
+			// internal instructions as if the user had typed them. Keep them
+			// hidden from ACP clients, matching the TUI's hidden-developer
+			// treatment. User-attributed developer messages (e.g. file mentions)
+			// still replay.
+			if (message.role === "developer" && message.attribution === "agent") {
+				return [];
+			}
 			return this.#wrapReplayContent(
 				sessionId,
 				this.#extractReplayContent(message.content, undefined),
@@ -2547,6 +2572,7 @@ export class AcpAgent implements Agent {
 
 	async #disposeSessionRecord(record: ManagedSessionRecord, reason?: postmortem.Reason): Promise<void> {
 		record.lifetimeUnsubscribe?.();
+		record.goalAdapterUnsubscribe?.();
 		if (record.mcpManager) {
 			try {
 				await record.mcpManager.disconnectAll();

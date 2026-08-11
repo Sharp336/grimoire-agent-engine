@@ -140,6 +140,7 @@ import type { HookCommandContext } from "../extensibility/hooks/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slash-commands";
 import { normalizeToolEventInput, resolveToolEventInput } from "../extensibility/tool-event-input";
+import { GoalModeController } from "../goals/goal-mode-controller";
 import { GoalRuntime } from "../goals/runtime";
 import type { GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
@@ -468,6 +469,7 @@ export class AgentSession {
 	#vibeModeState: VibeModeState | undefined;
 	#goalModeState: GoalModeState | undefined;
 	#goalRuntime: GoalRuntime;
+	#goalModeController: GoalModeController;
 	readonly #advisors: SessionAdvisors;
 	#goalTurnCounter = 0;
 	#planReferenceSent = false;
@@ -1376,6 +1378,7 @@ export class AgentSession {
 				);
 			},
 		});
+		this.#goalModeController = new GoalModeController(this, this.sessionManager);
 		this.#cancelExitRecorder = postmortem.register(`agent-session:${this.sessionManager.getSessionId()}`, reason => {
 			this.#recordSessionExit(reason);
 		});
@@ -4639,6 +4642,10 @@ export class AgentSession {
 		return this.#goalRuntime;
 	}
 
+	get goalModeController(): GoalModeController {
+		return this.#goalModeController;
+	}
+
 	markPlanReferenceSent(): void {
 		this.#planReferenceSent = true;
 	}
@@ -6471,6 +6478,19 @@ export class AgentSession {
 				});
 			}
 
+			// Reconcile session-scoped mode (e.g. goal mode) against the new
+			// transcript now that the transition is committed, mirroring
+			// switchSession(). Non-fatal: a reconciler failure must not roll
+			// back a successful new session.
+			try {
+				await this.#sessionSwitchReconciler?.();
+			} catch (error) {
+				logger.warn("Failed to reconcile session mode after new session", {
+					previousSessionFile,
+					error: String(error),
+				});
+			}
+
 			return true;
 		} finally {
 			if (advisorRecordersDetached) {
@@ -7821,6 +7841,20 @@ export class AgentSession {
 
 			this.#advisors.reattachRecorderFeeds();
 			advisorRecordersDetached = false;
+
+			// Reconcile session-scoped mode (e.g. goal mode) against the
+			// branched transcript now that the transition is committed,
+			// mirroring switchSession(). Non-fatal: a reconciler failure must
+			// not roll back a successful branch.
+			try {
+				await this.#sessionSwitchReconciler?.();
+			} catch (error) {
+				logger.warn("Failed to reconcile session mode after branch", {
+					previousSessionFile,
+					error: String(error),
+				});
+			}
+
 			return { selectedText, selectedImages, cancelled: false };
 		} finally {
 			if (advisorRecordersDetached) {
