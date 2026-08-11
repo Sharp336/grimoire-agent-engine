@@ -1474,6 +1474,10 @@ export async function runRpcMode(
   if (loopEnabled) loopScheduler.request(options.messageTag);
   return task;
  };
+ const startRpcUserPrompt = (prompt: string, options: PromptOptions): Promise<boolean> => {
+  session.maybeStartTitleGeneration(prompt);
+  return startRpcPrompt(prompt, options);
+ };
  const operationOwnership = new RpcOperationMessageOwnership(session);
  const rpcEvalOperationIds = new Set<string>();
  const rpcEvalConfirmationControllers = new Map<string, AbortController>();
@@ -3108,7 +3112,7 @@ export async function runRpcMode(
         const trackedPrompt = watchAndReportLocalOnlyPromptResult({
          id,
          startPrompt: () =>
-          startRpcPrompt(builtinResult.prompt, {
+          startRpcUserPrompt(builtinResult.prompt, {
            images: command.images,
            messageTag: operation.operationId,
            signal: preparationController.signal,
@@ -3135,7 +3139,7 @@ export async function runRpcMode(
       const trackedPrompt = watchAndReportLocalOnlyPromptResult({
        id,
        startPrompt: () =>
-        startRpcPrompt(command.message, {
+        startRpcUserPrompt(command.message, {
          images: command.images,
          streamingBehavior: command.streamingBehavior,
          messageTag: operation.operationId,
@@ -3286,7 +3290,7 @@ export async function runRpcMode(
       watchAndReportLocalOnlyPromptResult({
        id,
        startPrompt: () =>
-        startRpcPrompt(command.message, {
+        startRpcUserPrompt(command.message, {
          images: command.images,
          messageTag: operation.operationId,
         }),
