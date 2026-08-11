@@ -85,7 +85,7 @@ export abstract class OAuthCallbackFlow {
 			this.callbackPath = callbackPath;
 			this.callbackHostname = DEFAULT_HOSTNAME;
 			this.allowPortFallback = true;
-			this.#manualInputOnly = false;
+			this.#manualInputOnly = ctrl.manualInputOnly === true;
 			return;
 		}
 
@@ -94,7 +94,7 @@ export abstract class OAuthCallbackFlow {
 		this.callbackHostname = preferredPortOrOptions.callbackHostname ?? DEFAULT_HOSTNAME;
 		this.redirectUri = preferredPortOrOptions.redirectUri;
 		this.allowPortFallback = preferredPortOrOptions.allowPortFallback ?? true;
-		this.#manualInputOnly = preferredPortOrOptions.manualInputOnly ?? false;
+		this.#manualInputOnly = ctrl.manualInputOnly === true || preferredPortOrOptions.manualInputOnly === true;
 	}
 
 	/**

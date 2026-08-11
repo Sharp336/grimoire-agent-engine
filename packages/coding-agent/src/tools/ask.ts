@@ -890,11 +890,10 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 			vocalizer.speak(params.questions.map(q => q.question).join("\n"));
 		}
 
-		const richAskDialog = extensionUi.askDialog;
-		if (richAskDialog) {
+		if (extensionUi.askDialog) {
 			try {
 				const showRichDialog = () =>
-					richAskDialog(
+					extensionUi.askDialog!(
 						params.questions.map(q => ({
 							id: q.id,
 							question: q.question,

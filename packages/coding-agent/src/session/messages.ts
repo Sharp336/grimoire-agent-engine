@@ -27,6 +27,7 @@ import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import userInterjectionTemplate from "../prompts/steering/user-interjection.md" with { type: "text" };
 import { formatTitleConversationContext, type TitleConversationTurn } from "../tiny/message-preproc";
+import type { ArtifactDescriptor, ArtifactReference } from "./artifacts";
 
 export {
 	type BranchSummaryMessage,
@@ -38,6 +39,11 @@ export {
 
 import type { OutputMeta } from "../tools/output-meta";
 import { formatOutputNotice } from "../tools/output-meta";
+import {
+	type ContextTransformLineage,
+	contextSourceIdsForMessage,
+	type ProviderTransformRelation,
+} from "./session-context-projection";
 
 export const SKILL_PROMPT_MESSAGE_TYPE = "skill-prompt";
 export const LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE = "lsp-late-diagnostic";
@@ -869,12 +875,24 @@ export interface BashExecutionMessage {
  */
 export interface PythonExecutionMessage {
 	role: "pythonExecution";
+	/** Runtime token. Missing on legacy entries and interpreted as Python. */
+	language?: "py" | "js" | "rb" | "jl";
 	code: string;
 	output: string;
 	exitCode: number | undefined;
 	cancelled: boolean;
 	truncated: boolean;
 	meta?: OutputMeta;
+	/** Lossless output artifact for RPC eval history. Missing on legacy entries. */
+	artifact?: ArtifactDescriptor;
+	artifactRef?: ArtifactReference;
+	/** Complete and preview byte counts for lossless RPC eval history. */
+	outputBytes?: number;
+	outputPreviewBytes?: number;
+	outputTruncation?: {
+		truncated: boolean;
+		direction: "none" | "tail";
+	};
 	timestamp: number;
 	/** If true, this message is excluded from LLM context ($$ prefix) */
 	excludeFromContext?: boolean;
@@ -1302,4 +1320,55 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 	lastConvertTail = tail;
 	lastConvertPrefixOutputLen = prefixOutputLen;
 	return out;
+}
+export interface ProjectedLlmConversion {
+	messages: Message[];
+	relations: ProviderTransformRelation[];
+}
+
+/** Converts messages while retaining explicit source cardinality through the provider seam. */
+export function convertToLlmWithRelations(
+	messages: AgentMessage[],
+	lineage?: readonly ContextTransformLineage[],
+): ProjectedLlmConversion {
+	const converted = convertToLlm(messages);
+	const providerIndexesByTransformedIndex: number[][] = [];
+	let providerIndex = 0;
+	for (let index = 0; index < messages.length; index++) {
+		const message = messages[index];
+		const interruptedNext = message.role === "assistant" && followedByInterruptedThinking(messages, index);
+		const fragment = convertOneCached(message, interruptedNext);
+		const indexes: number[] = [];
+		for (let fragmentIndex = 0; fragmentIndex < fragment.length; fragmentIndex++) indexes.push(providerIndex++);
+		providerIndexesByTransformedIndex.push(indexes);
+	}
+	const effectiveLineage =
+		lineage ??
+		messages.map((message, index) => ({
+			sourceIds: contextSourceIdsForMessage(message),
+			transformedMessageIndexes: [index],
+			rewritten: false,
+		}));
+	const relations = effectiveLineage.map(item => {
+		const providerMessageIndexes = item.transformedMessageIndexes.flatMap(
+			index => providerIndexesByTransformedIndex[index] ?? [],
+		);
+		const kind =
+			providerMessageIndexes.length === 0
+				? "dropped"
+				: item.sourceIds.length > 1 && providerMessageIndexes.length === 1
+					? "merged"
+					: item.sourceIds.length === 1 && providerMessageIndexes.length > 1
+						? "split"
+						: item.rewritten
+							? "rewritten"
+							: "preserved";
+		return {
+			kind,
+			sourceIds: item.sourceIds,
+			transformedMessageIndexes: item.transformedMessageIndexes,
+			providerMessageIndexes,
+		} satisfies ProviderTransformRelation;
+	});
+	return { messages: converted, relations };
 }

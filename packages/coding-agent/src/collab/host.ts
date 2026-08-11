@@ -119,14 +119,44 @@ const SNAPSHOT_CHUNK_BYTES = 512 * 1024;
  */
 export type CollabGuestUiResult = { kind: "answered"; value: CollabUiResponseValue } | { kind: "unavailable" };
 
+export interface CollabHostContext {
+	session: InteractiveModeContext["session"];
+	sessionManager: InteractiveModeContext["sessionManager"];
+	settings: Pick<InteractiveModeContext["settings"], "get">;
+	eventBus?: InteractiveModeContext["eventBus"];
+	statusLine: Pick<
+		InteractiveModeContext["statusLine"],
+		"getCachedContextBreakdown" | "setCollabStatus" | "invalidate"
+	>;
+	ui: Pick<InteractiveModeContext["ui"], "requestRender">;
+	collabHost?: CollabHost;
+	updatePendingMessagesDisplay(): void;
+	showStatus(message: string, options?: { dim?: boolean }): void;
+}
+
+export interface CollabHostPeer {
+	participantId: string;
+	name: string;
+	canWrite: boolean;
+}
+
+export interface CollabHostEvents {
+	onStatus?(state: "connected" | "reconnecting" | "failed", reason?: "network_lost" | "room_closed"): void;
+	onParticipants?(participants: CollabHostPeer[]): void;
+}
+
 export class CollabHost {
-	#ctx: InteractiveModeContext;
+	#ctx: CollabHostContext;
 	#socket: CollabSocket | null = null;
 	#link = "";
 	#webLink = "";
 	#viewLink = "";
 	#webViewLink = "";
 	#writeToken: Uint8Array | null = null;
+	#rawKey: Uint8Array | null = null;
+	#roomId = "";
+	#relayUrl = "";
+	#webUrl = "";
 	#sessionId = "";
 	#unsubscribe?: () => void;
 	#peers = new Map<number, { name: string; canWrite: boolean }>();
@@ -139,9 +169,11 @@ export class CollabHost {
 	#busUnsubscribers: (() => void)[] = [];
 	#registryUnsubscribe?: () => void;
 	#stopped = false;
+	readonly #events: CollabHostEvents;
 
-	constructor(ctx: InteractiveModeContext) {
+	constructor(ctx: CollabHostContext, events: CollabHostEvents = {}) {
 		this.#ctx = ctx;
+		this.#events = events;
 	}
 
 	get link(): string {
@@ -169,6 +201,48 @@ export class CollabHost {
 			list.push({ name: peer.name, role: "guest", readOnly: peer.canWrite ? undefined : true });
 		}
 		return list;
+	}
+
+	get peers(): CollabHostPeer[] {
+		return [...this.#peers].map(([peerId, peer]) => ({
+			participantId: String(peerId),
+			name: peer.name,
+			canWrite: peer.canWrite,
+		}));
+	}
+
+	revokeWriteAccess(participantId: string): void {
+		const peerId = Number(participantId);
+		const peer = Number.isSafeInteger(peerId) ? this.#peers.get(peerId) : undefined;
+		if (!peer) throw new Error(`Collaboration participant does not exist: ${participantId}`);
+		if (!peer.canWrite) return;
+		peer.canWrite = false;
+		this.#socket?.send({ t: "authority", readOnly: true }, peerId);
+		this.#notifyParticipants();
+		this.#updateStatusSegment();
+		this.#scheduleStateBroadcast();
+	}
+
+	rotateWriteAccess(): { link: string; viewLink: string; webLink: string; webViewLink: string } {
+		const rawKey = this.#rawKey;
+		if (!rawKey || !this.#roomId || !this.#relayUrl) throw new Error("Collaboration host is not active");
+		const writeToken = generateWriteToken();
+		this.#writeToken = writeToken;
+		this.#link = formatCollabLink(this.#relayUrl, this.#roomId, rawKey, writeToken);
+		this.#webLink = formatCollabWebLink(this.#relayUrl, this.#roomId, rawKey, writeToken, this.#webUrl);
+		for (const [peerId, peer] of this.#peers) {
+			if (!peer.canWrite) continue;
+			peer.canWrite = false;
+			this.#socket?.send({ t: "authority", readOnly: true }, peerId);
+		}
+		this.#notifyParticipants();
+		this.#scheduleStateBroadcast();
+		return {
+			link: this.#link,
+			viewLink: this.#viewLink,
+			webLink: this.#webLink,
+			webViewLink: this.#webViewLink,
+		};
 	}
 
 	requestGuestUi(request: CollabUiRequestDraft, signal?: AbortSignal): Promise<CollabGuestUiResult> | null {
@@ -212,6 +286,11 @@ export class CollabHost {
 		const rawKey = generateRoomKey();
 		const writeToken = generateWriteToken();
 		const roomId = generateRoomId();
+		this.#stopped = false;
+		this.#rawKey = rawKey;
+		this.#roomId = roomId;
+		this.#relayUrl = relayUrl;
+		this.#webUrl = webUrl;
 		this.#writeToken = writeToken;
 		this.#link = formatCollabLink(relayUrl, roomId, rawKey, writeToken);
 		this.#webLink = formatCollabWebLink(relayUrl, roomId, rawKey, writeToken, webUrl);
@@ -228,6 +307,7 @@ export class CollabHost {
 		const firstOpen = Promise.withResolvers<void>();
 		let opened = false;
 		socket.onOpen = () => {
+			this.#events.onStatus?.("connected");
 			if (!opened) {
 				opened = true;
 				firstOpen.resolve();
@@ -244,8 +324,10 @@ export class CollabHost {
 				return;
 			}
 			if (willReconnect) {
+				this.#events.onStatus?.("reconnecting", "network_lost");
 				this.#ctx.showStatus(`Collab relay connection lost (${reason}), reconnecting…`, { dim: true });
 			} else {
+				this.#events.onStatus?.("failed", "room_closed");
 				void this.#teardown();
 				this.#ctx.session.emitNotice("warning", `Collab ended: ${reason}`, "collab");
 			}
@@ -285,6 +367,7 @@ export class CollabHost {
 			this.#scheduleStateBroadcast();
 		};
 		this.#updateStatusSegment();
+		this.#notifyParticipants();
 	}
 
 	/** Broadcast a goodbye, detach all taps, and close the socket. */
@@ -313,6 +396,7 @@ export class CollabHost {
 		for (const pending of this.#pendingUi.values()) pending.settle({ kind: "unavailable" });
 		this.#pendingUi.clear();
 		this.#peers.clear();
+		this.#notifyParticipants();
 		this.#socket?.close();
 		this.#socket = null;
 		this.#ctx.collabHost = undefined;
@@ -379,6 +463,7 @@ export class CollabHost {
 		const cleanName = name.trim().slice(0, 64) || `guest-${fromPeer}`;
 		const canWrite = this.#verifyWriteToken(writeToken);
 		this.#peers.set(fromPeer, { name: cleanName, canWrite });
+		this.#notifyParticipants();
 
 		// Snapshot and send synchronously: no awaits between snapshot, welcome,
 		// and chunk sends, so subsequent broadcast frames (entry/event/state/bus)
@@ -514,6 +599,7 @@ export class CollabHost {
 	#handlePeerLeft(peer: number): void {
 		const name = this.#peers.get(peer)?.name;
 		this.#peers.delete(peer);
+		this.#notifyParticipants();
 		if (name) this.#ctx.session.emitNotice("info", `${name} left the collab session`, "collab");
 		this.#updateStatusSegment();
 		this.#scheduleStateBroadcast();
@@ -682,6 +768,10 @@ export class CollabHost {
 			this.#lastStateJson = json;
 			this.#broadcast({ t: "state", state });
 		}, STATE_DEBOUNCE_MS);
+	}
+
+	#notifyParticipants(): void {
+		this.#events.onParticipants?.(this.peers);
 	}
 
 	#updateStatusSegment(): void {

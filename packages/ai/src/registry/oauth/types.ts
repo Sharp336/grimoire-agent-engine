@@ -73,6 +73,11 @@ export interface OAuthProviderInfo {
 export interface OAuthController {
 	onAuth?(info: OAuthAuthInfo): void;
 	onProgress?(message: string): void;
+	/**
+	 * Select a pasted redirect/code flow instead of binding a loopback callback
+	 * server. `false` suppresses an otherwise default paste-code prompt.
+	 */
+	manualInputOnly?: boolean;
 	onManualCodeInput?(): Promise<string>;
 	onPrompt?(prompt: OAuthPrompt): Promise<string>;
 	signal?: AbortSignal;

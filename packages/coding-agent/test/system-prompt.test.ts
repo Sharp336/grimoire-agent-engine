@@ -234,3 +234,49 @@ describe("non-Linux system prompt CPU model", () => {
 		}
 	});
 });
+
+describe("system prompt logical sources", () => {
+	it("keeps skill, rule, custom, append, and context inputs distinct before folding", async () => {
+		const result = await buildSystemPrompt({
+			resolvedCustomPrompt: "custom instructions",
+			resolvedAppendSystemPrompt: "append instructions",
+			contextFiles: [{ path: "/workspace/AGENTS.md", content: "context instructions", depth: 1 }],
+			skills: [
+				{
+					name: "review",
+					description: "Review changes",
+					filePath: "/skills/review/SKILL.md",
+					baseDir: "/skills/review",
+					source: "test",
+				},
+			],
+			rules: [{ name: "typescript", description: "Use strict types", path: "/rules/typescript.md" }],
+			alwaysApplyRules: [{ name: "safety", content: "Never expose secrets", path: "/rules/safety.md" }],
+			toolNames: ["read"],
+			workspaceTree: {
+				rootPath: "/workspace",
+				rendered: "workspace tree",
+				truncated: false,
+				totalLines: 1,
+				agentsMdFiles: [],
+			},
+			activeRepoContext: null,
+		});
+
+		expect(
+			result.logicalSources
+				.filter(source =>
+					["custom", "append", "context-file", "skill", "rule", "always-apply-rule"].includes(source.kind),
+				)
+				.map(source => [source.kind, source.content]),
+		).toEqual([
+			["custom", "custom instructions"],
+			["append", "append instructions"],
+			["context-file", "context instructions"],
+			["skill", "Review changes"],
+			["rule", "Use strict types"],
+			["always-apply-rule", "Never expose secrets"],
+		]);
+		expect(result.logicalSources.every(source => source.foldedInto.every(index => index >= 0))).toBe(true);
+	});
+});

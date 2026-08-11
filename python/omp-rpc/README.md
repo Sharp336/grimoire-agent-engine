@@ -1,6 +1,6 @@
 # omp-rpc
 
-Typed Python bindings for the `omp --mode rpc` protocol used by the coding agent.
+Typed Python bindings for the `omp --mode rpc` and negotiated `omp --mode rpc-ui` protocols used by the coding agent.
 
 This package wraps the newline-delimited JSON RPC transport exposed by the CLI and
 provides:
@@ -14,6 +14,9 @@ provides:
 - typed per-event listeners plus a typed catch-all notification hook
 - helpers for collecting prompt runs and handling extension UI requests in manual or headless mode
 - typed host-tool helpers so Python RPC owners can expose custom tools with JSON Schema metadata
+- explicit RPC v3 negotiation, ordered session observations, authoritative mutations,
+  artifacts, resource lifecycle, collaboration, provenance, graceful shutdown, and
+  the client-rendered RPC UI surface
 
 ## Basic Usage
 
@@ -98,6 +101,113 @@ with RpcClient(
 ) as client:
     print(client.get_state().session_id)
 ```
+
+## RPC v3 Session Authority
+
+Pass `rpc_v3` to require the `omp.session` v3 semantic profile. Startup raises
+`RpcSemanticIncompatibilityError` instead of silently falling back:
+
+```python
+import threading
+
+from omp_rpc import (
+    RpcClient,
+    RpcV3ClientOptions,
+    SessionCommand,
+    SessionHostClientCapabilities,
+)
+
+observation_received = threading.Event()
+observations = []
+
+options = RpcV3ClientOptions(
+    requested_capabilities=("session.observe", "session.execute", "session.shutdown"),
+    host_capabilities=SessionHostClientCapabilities(
+        interactions=("confirm", "input", "approval", "ask"),
+        semantic_content=("markdown", "fields", "table", "diff", "artifact"),
+    ),
+)
+
+with RpcClient(rpc_v3=options) as client:
+    client.on_session_observation(
+        lambda event: (observations.append(event), observation_received.set())
+    )
+    opened = client.open_session(snapshot=True)
+    assert opened.snapshot is not None
+
+    outcome = client.invoke_session(
+        SessionCommand(
+            kind="queue_insert",
+            input={"lane": "followUp", "text": "Review the current changes."},
+            expected_revision=opened.snapshot.revision,
+            idempotency_key="host-generated-unique-key",
+        )
+    )
+    if outcome.outcome != "completed":
+        raise RuntimeError(f"queue insertion settled as {outcome.outcome}")
+
+    if observation_received.wait(timeout=5):
+        observation = observations[-1].observation
+        if observation.type == "observation":
+            client.acknowledge_session(opened.subscription_id, observation.sequence)
+
+    client.unsubscribe_session(opened.subscription_id)
+    client.shutdown_session()
+```
+
+Do not issue blocking client requests from a notification listener: listeners
+run on the stdout reader thread. Hand observations to the owning thread or a
+worker, then acknowledge cumulatively.
+
+The same client exposes bounded artifact reads and verified export,
+`list_resources()` plus resource lifecycle controls, collaboration controls,
+and `get_runtime_provenance()`. See the canonical protocol reference for wire
+schemas, reconnect behavior, and shutdown guarantees.
+
+## Negotiated RPC UI
+
+Use `mode="rpc-ui"` and request the v3 `ui` capability. The process exposes
+authoritative semantic state; Python owns rendering, physical keybindings,
+clipboard access, and other terminal-local effects.
+
+```python
+from omp_rpc import (
+    RpcClient,
+    RpcV3ClientOptions,
+    SessionHostClientCapabilities,
+)
+
+ui_options = RpcV3ClientOptions(
+    requested_capabilities=("session.execute", "session.shutdown", "ui"),
+    host_capabilities=SessionHostClientCapabilities(
+        interactions=("confirm", "input", "approval", "ask"),
+        semantic_content=("text", "markdown"),
+    ),
+)
+
+with RpcClient(mode="rpc-ui", rpc_v3=ui_options) as client:
+    ui = client.open_ui("python-terminal", width=100)
+    operation_ids: list[str] = []
+    suggestions = client.suggest_ui_autocomplete(
+        ui.fence,
+        ("@src",),
+        0,
+        4,
+        on_operation_id=operation_ids.append,
+    )
+    if suggestions and suggestions.items:
+        client.apply_ui_autocomplete(ui.fence, suggestions.items[0].id)
+    client.close_ui(ui.fence)
+```
+
+The snapshot includes the full lifecycle fence, revisioned editor/theme/title
+and tool-expansion state, active semantic presentations, and the semantic
+application-action inventory. Commands use `channel_id` and `generation`;
+frames carry the full fence. Stale editor writes raise `RpcCommandError` with
+code `editor_conflict`. The callback above exposes the in-flight request ID so
+another thread can call `cancel_ui_operation(...)` without waiting for
+suggestion settlement. Notification listeners run on the stdout reader thread;
+handoff blocking work to another thread.
 
 ## Host-Owned Custom Tools
 
@@ -219,8 +329,13 @@ allows:
 
 - id-less `parse` and unknown-command failures are correlated back to the
   waiting request when they can be matched unambiguously
-- late `prompt` / `abort_and_prompt` scheduling failures cause
-  `prompt_and_wait()` and `wait_for_idle()` to raise instead of timing out
+- accepted `prompt` / `abort_and_prompt` calls return a server-generated
+  operation ID; `operation_started` marks actual execution and exactly one
+  completed, failed, or cancelled event settles the operation
+- `cancel_operation(operation_id)` is target-specific and idempotent, while
+  `get_operations()` reconciles live work with the bounded recent outcome set
+- `prompt_and_wait()` preserves its legacy `PromptTurn` return behavior while
+  using correlated operation settlement rather than guessing from `agent_end`
 - unmatched background error responses are exposed through
   `client.protocol_errors` and `client.on_protocol_error(...)`
 - listener exceptions no longer kill the stdout reader thread; they are exposed

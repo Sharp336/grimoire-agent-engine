@@ -58,6 +58,7 @@ describe.skipIf(!e2eApiKey("ANTHROPIC_API_KEY"))("RPC mode", () => {
 		expect(state.model?.provider).toBe("anthropic");
 		expect(state.model?.id).toBe("claude-sonnet-4-5");
 		expect(state.isStreaming).toBe(false);
+		expect(state.activityPhase).toBe("idle");
 		expect(state.messageCount).toBe(0);
 		expect(state.tokensPerSecond).toBeNull();
 	}, 30000);
@@ -346,7 +347,8 @@ describe("RPC fast mode with unsupported Fireworks model and priority tier", () 
 		await client.start();
 
 		await expect(client.setFastMode(true)).rejects.toMatchObject({
-			message: "Fast mode is unavailable for the current model.",
+			message: "Required RPC feature is unavailable: model.fast-mode",
+			code: "feature_unavailable",
 		});
 
 		const disabled = await client.setFastMode(false);

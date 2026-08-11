@@ -1,9 +1,9 @@
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
-import { stringProperty } from "@oh-my-pi/pi-utils";
+import { isRecord, stringProperty } from "@oh-my-pi/pi-utils";
 import type { CompletedRewindState } from "../tools/checkpoint";
 import { writeDeviceDispatch } from "../tools/resolve";
 import type { SessionEntry } from "./session-entries";
+export const RPC_CHECKPOINT_CUSTOM_TYPE = "rpc_checkpoint";
 
 /** Extracts text from custom message content. */
 export function customMessageContentText(content: string | (TextContent | ImageContent)[]): string {
@@ -59,10 +59,9 @@ export function completedRewindFromEntry(entry: SessionEntry): CompletedRewindSt
 	return report.length > 0 ? { report, startedAt, rewoundAt } : undefined;
 }
 
-/** Whether an entry is a successful checkpoint tool result. */
-export function isSuccessfulCheckpointEntry(
-	entry: SessionEntry,
-): entry is SessionEntry & { type: "message"; message: Extract<AgentMessage, { role: "toolResult" }> } {
+/** Whether an entry is a successful checkpoint transition from a tool or session host. */
+export function isSuccessfulCheckpointEntry(entry: SessionEntry): boolean {
+	if (entry.type === "custom" && entry.customType === RPC_CHECKPOINT_CUSTOM_TYPE) return true;
 	if (entry.type !== "message" || entry.message.role !== "toolResult" || entry.message.isError === true) {
 		return false;
 	}
@@ -72,10 +71,25 @@ export function isSuccessfulCheckpointEntry(
 /** Returns the checkpoint start timestamp represented by an entry. */
 export function checkpointStartedAtFromEntry(entry: SessionEntry): string | undefined {
 	if (!isSuccessfulCheckpointEntry(entry)) return undefined;
+	if (entry.type === "custom" && entry.customType === RPC_CHECKPOINT_CUSTOM_TYPE) {
+		return isRecord(entry.data) ? (stringProperty(entry.data, "startedAt") ?? entry.timestamp) : entry.timestamp;
+	}
+	if (entry.type !== "message" || entry.message.role !== "toolResult") return entry.timestamp;
 	const details = semanticToolResult(entry.message.toolName, entry.message)?.details;
 	if (details && typeof details === "object") {
 		const startedAt = stringProperty(details, "startedAt");
 		if (startedAt) return startedAt;
 	}
 	return entry.timestamp;
+}
+
+/** Returns the checkpoint goal represented by a durable entry. */
+export function checkpointGoalFromEntry(entry: SessionEntry): string | undefined {
+	if (!isSuccessfulCheckpointEntry(entry)) return undefined;
+	if (entry.type === "custom" && entry.customType === RPC_CHECKPOINT_CUSTOM_TYPE) {
+		return isRecord(entry.data) ? stringProperty(entry.data, "goal")?.trim() || undefined : undefined;
+	}
+	if (entry.type !== "message" || entry.message.role !== "toolResult") return undefined;
+	const details = semanticToolResult(entry.message.toolName, entry.message)?.details;
+	return isRecord(details) ? stringProperty(details, "goal")?.trim() || undefined : undefined;
 }

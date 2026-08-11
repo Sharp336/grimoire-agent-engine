@@ -42,6 +42,10 @@ import {
 	resolveSymbolColumn,
 	uriToFile,
 } from "@oh-my-pi/pi-coding-agent/lsp/utils";
+import {
+	type RpcRuntimeResourceServices,
+	RpcRuntimeResourceSource,
+} from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-runtime-resources";
 import { getThemeByName } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
@@ -347,6 +351,49 @@ describe("lsp regressions", () => {
 				message => message.method === "textDocument/didOpen" && message !== diskOpen,
 			);
 			expect(syncedOpen.params).toMatchObject({ textDocument: { languageId: "gdscript" } });
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
+	it("drives runtime resource refresh and disposal through the real LSP lifecycle", async () => {
+		const tempDir = TempDir.createSync("@omp-rpc-lsp-lifecycle-");
+		try {
+			const server = installFakeLsp((message, srv) => {
+				if (message.method === "initialize") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
+				} else if (message.method === "shutdown") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					srv.exit(0);
+				}
+			});
+			const config: ServerConfig = {
+				command: "rpc-fake-lsp",
+				fileTypes: [".ts"],
+				rootMarkers: [],
+			};
+			const services: RpcRuntimeResourceServices = {
+				getLspServers: () => [["fake", config]],
+				getActiveLspClients: lspClient.getActiveClients,
+				async startLsp(serverConfig, cwd, signal) {
+					await lspClient.getOrCreateClient(serverConfig, cwd, 1_000, signal);
+				},
+				shutdownLsp: lspClient.shutdownClient,
+				getDapAdapters: () => [],
+				getDapSessions: () => [],
+				terminateDapAdapter: async () => 0,
+			};
+			const source = new RpcRuntimeResourceSource(() => tempDir.path(), undefined, services);
+
+			expect(await source.refreshLifecycle("lsp:fake", new AbortController().signal)).toBe("connected");
+			expect(source.getConnectionStatus("lsp:fake")).toBe("connected");
+			await source.disconnectServer("lsp:fake");
+			expect(source.getConnectionStatus("lsp:fake")).toBe("disconnected");
+			expect(server.received.map(message => message.method)).toEqual(
+				expect.arrayContaining(["initialize", "shutdown", "exit"]),
+			);
 		} finally {
 			await lspClient.shutdownAll();
 			tempDir.removeSync();

@@ -41,6 +41,81 @@ describe("RpcClient lifecycle (issue #4079 B)", () => {
 		expect(state.fastModeEnabled).toBe(false);
 		expect(state.fastModeActive).toBe(false);
 		expect(state.tokensPerSecond).toBeNull();
+		expect(state.activityPhase).toBe("idle");
+		expect(state.advisor).toBeUndefined();
+	}, 20_000);
+
+	test("normalizes advisor snapshots without conflating configured and active", async () => {
+		using client = new RpcClient({
+			cliPath: MOCK_AGENT,
+			env: { MOCK_RPC_ADVISOR_STATE: "1" },
+		});
+
+		await client.start();
+		const state = await client.getState();
+		expect(state.advisor).toEqual({
+			configured: true,
+			active: false,
+			advisors: [{ name: "reviewer", status: "no_model" }],
+		});
+	}, 20_000);
+
+	test("returns authoritative advisor state and emits typed config updates", async () => {
+		using client = new RpcClient({ cliPath: MOCK_AGENT });
+		const updates: unknown[] = [];
+		client.onConfigUpdate(frame => updates.push(frame.advisor));
+
+		await client.start();
+		expect(await client.getAdvisorState()).toEqual({
+			configured: true,
+			active: false,
+			advisors: [{ name: "reviewer", status: "no_model" }],
+		});
+		const disabled = {
+			configured: false,
+			active: false,
+			advisors: [{ name: "reviewer", status: "paused" as const }],
+		};
+		expect(await client.setAdvisorEnabled(false)).toEqual(disabled);
+		expect(updates).toContainEqual(disabled);
+	}, 20_000);
+
+	test("rejects malformed and future-status advisor snapshots as a whole", async () => {
+		const environments: Record<string, string>[] = [
+			{ MOCK_RPC_INVALID_ADVISOR: "1" },
+			{ MOCK_RPC_FUTURE_ADVISOR_STATUS: "1" },
+		];
+		for (const env of environments) {
+			using client = new RpcClient({ cliPath: MOCK_AGENT, env });
+			await client.start();
+
+			expect((await client.getState()).advisor).toBeUndefined();
+			await expect(client.getAdvisorState()).rejects.toThrow("Invalid get_advisor_state response");
+		}
+	}, 20_000);
+
+	test("preserves all authoritative activity phases from get_state", async () => {
+		for (const activityPhase of ["provider", "maintenance", "idle"] as const) {
+			using client = new RpcClient({
+				cliPath: MOCK_AGENT,
+				env: { MOCK_RPC_ACTIVITY_PHASE: activityPhase },
+			});
+
+			await client.start();
+			expect((await client.getState()).activityPhase).toBe(activityPhase);
+		}
+	}, 20_000);
+
+	test("normalizes unclassified activity as non-idle maintenance", async () => {
+		const cases: Array<Record<string, string>> = [
+			{ MOCK_RPC_LEGACY_STREAMING: "1" },
+			{ MOCK_RPC_ACTIVITY_PHASE: "future-settlement-phase" },
+		];
+		for (const env of cases) {
+			using client = new RpcClient({ cliPath: MOCK_AGENT, env });
+			await client.start();
+			expect((await client.getState()).activityPhase).toBe("maintenance");
+		}
 	}, 20_000);
 
 	test("normalizes a runtime-invalid tokensPerSecond from the RPC server", async () => {
@@ -84,6 +159,45 @@ describe("RpcClient lifecycle (issue #4079 B)", () => {
 		expect((await client.getMessages()) as unknown).toEqual([
 			{ role: "assistant", content: [{ type: "text", text: "streaming snapshot" }], timestamp: 3 },
 		]);
+	}, 20_000);
+
+	test("returns typed newest and older display transcript pages", async () => {
+		using client = new RpcClient({ cliPath: MOCK_AGENT, env: { MOCK_RPC_V2: "1" } });
+		await client.start();
+
+		const newest = await client.getTranscriptPage({ limit: 1, collapseCompactedHistory: true });
+		expect(newest).toEqual({
+			messages: [{ role: "assistant", content: [{ type: "text", text: "newest" }], timestamp: 2 }],
+			cacheMissExplainedAt: [true],
+			startIndex: 1,
+			totalMessages: 2,
+			olderCursor: "older-page",
+		});
+		expect(await client.getTranscriptPage({ cursor: newest.olderCursor })).toEqual({
+			messages: [{ role: "user", content: "oldest", timestamp: 1 }],
+			cacheMissExplainedAt: [false],
+			startIndex: 0,
+			totalMessages: 2,
+		});
+	}, 20_000);
+
+	test("preserves transcript page busy and stale error codes", async () => {
+		using busyClient = new RpcClient({
+			cliPath: MOCK_AGENT,
+			env: { MOCK_RPC_V2: "1", MOCK_RPC_PAGE_BUSY: "1" },
+		});
+		await busyClient.start();
+		await expect(busyClient.getTranscriptPage()).rejects.toMatchObject({ code: "session_busy" });
+
+		using staleClient = new RpcClient({
+			cliPath: MOCK_AGENT,
+			env: { MOCK_RPC_V2: "1", MOCK_RPC_PAGE_STALE: "1" },
+		});
+		await staleClient.start();
+		const first = await staleClient.getTranscriptPage();
+		await expect(staleClient.getTranscriptPage({ cursor: first.olderCursor })).rejects.toMatchObject({
+			code: "stale_cursor",
+		});
 	}, 20_000);
 
 	test("start() succeeds a second time after stop() on the same instance", async () => {

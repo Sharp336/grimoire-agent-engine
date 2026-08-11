@@ -28,6 +28,13 @@ def test_no_user_group_defaults_to_none():
     assert call.kwargs["group"] is None
     assert call.kwargs["extra_groups"] is None
 
+def test_rpc_ui_mode_is_opt_in_and_default_remains_headless():
+    default_call = _start_and_capture(executable="omp")
+    rpc_ui_call = _start_and_capture(executable="omp", mode="rpc-ui")
+
+    assert default_call.args[0][:3] == ["omp", "--mode", "rpc"]
+    assert rpc_ui_call.args[0][:3] == ["omp", "--mode", "rpc-ui"]
+
 
 def test_user_and_group_kwargs_threaded():
     call = _start_and_capture(

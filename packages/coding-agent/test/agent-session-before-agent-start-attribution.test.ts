@@ -11,7 +11,9 @@ import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/ex
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { SessionContextProjection } from "@oh-my-pi/pi-coding-agent/session/session-context-projection";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { ActiveSessionProviderProjection } from "@oh-my-pi/pi-coding-agent/session/session-provider-boundary";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 describe("AgentSession before_agent_start attribution fallback", () => {
@@ -48,6 +50,7 @@ describe("AgentSession before_agent_start attribution fallback", () => {
 					display: false,
 				},
 			],
+			systemPrompt: ["Extension system prompt"],
 		});
 		const extensionRunner = {
 			emitBeforeAgentStart,
@@ -56,6 +59,16 @@ describe("AgentSession before_agent_start attribution fallback", () => {
 
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+		const contextProjection = new SessionContextProjection();
+		const providerProjection = new ActiveSessionProviderProjection({
+			projection: () => contextProjection,
+			transformContext: async messages => [...messages],
+			convertToLlm,
+			transformProviderContext: async context => {
+				const messages = context.messages.map(message => ({ ...message }));
+				return { ...context, messages };
+			},
+		});
 
 		const agent = new Agent({
 			getApiKey: () => "test-key",
@@ -65,6 +78,9 @@ describe("AgentSession before_agent_start attribution fallback", () => {
 				tools: [],
 				messages: [],
 			},
+			convertToLlm: providerProjection.convertToLlm,
+			transformContext: providerProjection.transformContext,
+			transformProviderContext: providerProjection.transformProviderContext,
 			streamFn: createMockModel({ responses: [{ content: ["Done"] }] }).stream,
 		});
 
@@ -74,6 +90,7 @@ describe("AgentSession before_agent_start attribution fallback", () => {
 			settings: Settings.isolated({ "compaction.enabled": false }),
 			modelRegistry,
 			extensionRunner,
+			contextProjection,
 		});
 
 		return { emitBeforeAgentStart };
@@ -118,6 +135,33 @@ describe("AgentSession before_agent_start attribution fallback", () => {
 			throw new Error("Expected injected message in converted LLM context");
 		}
 		expect(llmInjected.attribution).toBe("user");
+		const snapshot = session.contextProjection.read();
+		const hiddenSource = snapshot.sources.find(
+			source => source.category === "turn" && source.kind === "before-start",
+		);
+		expect(snapshot.sessionId).toBe(session.sessionId);
+		expect(snapshot.requestId).toStartWith("context:");
+		expect(hiddenSource).toMatchObject({
+			visibility: { persisted: false, display: false, model: true },
+			inclusion: { included: true, reason: "pending-turn" },
+			sessionId: session.sessionId,
+			leafId: null,
+		});
+		expect(
+			snapshot.provider?.relations.some(
+				relation => relation.sourceIds.includes(hiddenSource?.id ?? "") && relation.kind !== "dropped",
+			),
+		).toBe(true);
+		expect(snapshot.provider?.systemPrompt).toEqual(["Extension system prompt"]);
+		expect(snapshot.systemPrompt.rendered).toEqual(["Extension system prompt"]);
+		expect(snapshot.systemPrompt.logicalSources).toEqual([
+			{
+				id: `turn-override:${snapshot.requestId}:0`,
+				kind: "turn-override",
+				content: "Extension system prompt",
+				foldedInto: [0],
+			},
+		]);
 		expect(inferCopilotInitiator(llmMessages)).toBe("user");
 	});
 

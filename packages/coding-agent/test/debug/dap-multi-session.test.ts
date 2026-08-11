@@ -31,6 +31,9 @@ interface FakeOptions {
 	threads?: DapThread[];
 	/** Thread id reported by the synthetic `stopped` event (defaults to 7). */
 	stopThreadId?: number;
+	/** Optional gate proving terminate waits for adapter disposal. */
+	disposeGate?: Promise<void>;
+	disposeError?: Error;
 }
 
 class FakeDapClient {
@@ -123,6 +126,8 @@ class FakeDapClient {
 
 	async dispose(): Promise<void> {
 		this.disposed = true;
+		if (this.options.disposeGate) await this.options.disposeGate;
+		if (this.options.disposeError) throw this.options.disposeError;
 		this.#alive = false;
 		this.#exited.resolve();
 	}
@@ -372,5 +377,56 @@ describe("DAP multi-session debugging", () => {
 		]);
 
 		await manager.terminate(undefined, 1_000);
+	});
+
+	it("scopes adapter termination to cwd and settles only after physical disposal", async () => {
+		const disposal = Promise.withResolvers<void>();
+		const client = new FakeDapClient(undefined, "launch", true, { disposeGate: disposal.promise });
+		spyOn(DapClient, "spawn").mockResolvedValue(client as unknown as DapClient);
+		const manager = new DapSessionManager();
+		await manager.launch(
+			{ adapter: TEST_ADAPTER, program: "/workspace-a/target.js", cwd: "/workspace-a" },
+			undefined,
+			1_000,
+		);
+
+		expect(await manager.terminateAdapter(TEST_ADAPTER.name, undefined, 1_000, "/workspace-b")).toBe(0);
+		expect(client.disposed).toBe(false);
+
+		let settled = 0;
+		const termination = manager.terminateAdapter(TEST_ADAPTER.name, undefined, 1_000, "/workspace-a").finally(() => {
+			settled++;
+		});
+		const concurrentTermination = manager
+			.terminateAdapter(TEST_ADAPTER.name, undefined, 1_000, "/workspace-a")
+			.finally(() => {
+				settled++;
+			});
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(client.disposed).toBe(true);
+		expect(settled).toBe(0);
+
+		disposal.resolve();
+		expect(await Promise.all([termination, concurrentTermination])).toEqual([1, 1]);
+		expect(settled).toBe(2);
+	});
+
+	it("preserves physical adapter disposal failure", async () => {
+		const client = new FakeDapClient(undefined, "launch", true, {
+			disposeError: new Error("adapter disposal failed"),
+		});
+		spyOn(DapClient, "spawn").mockResolvedValue(client as unknown as DapClient);
+		const manager = new DapSessionManager();
+		await manager.launch(
+			{ adapter: TEST_ADAPTER, program: "/workspace/target.js", cwd: "/workspace" },
+			undefined,
+			1_000,
+		);
+
+		await expect(manager.terminateAdapter(TEST_ADAPTER.name, undefined, 1_000, "/workspace")).rejects.toThrow(
+			"adapter disposal failed",
+		);
+		expect(manager.listSessions()).toEqual([expect.objectContaining({ status: "terminated" })]);
 	});
 });

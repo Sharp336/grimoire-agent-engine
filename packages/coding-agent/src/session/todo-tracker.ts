@@ -58,6 +58,19 @@ export interface TodoTrackerHost {
 	planModeEnabled(): boolean;
 	consumeLastServedToolChoiceLabel(): string | undefined;
 }
+export interface TodoTrackerSnapshot {
+	phases: TodoPhase[];
+	reminder: {
+		attempt: number;
+		maxAttempts: number;
+		awaitingProgress: boolean;
+	};
+	reconciliation: {
+		mutationsSinceLastTouch: number;
+		midRunNudges: number;
+		maxMidRunNudges: number;
+	};
+}
 
 /** Owns canonical todo state, eager preludes, and completion reminders. */
 export class TodoTracker {
@@ -75,6 +88,22 @@ export class TodoTracker {
 	/** Returns a defensive clone of the current todo phases. */
 	get phases(): TodoPhase[] {
 		return this.#clonePhases(this.#phases);
+	}
+	/** Authoritative todo and reminder state for non-terminal hosts. */
+	get snapshot(): TodoTrackerSnapshot {
+		return {
+			phases: this.phases,
+			reminder: {
+				attempt: this.#reminderCount,
+				maxAttempts: this.#host.settings.get("todo.remindersMax"),
+				awaitingProgress: this.#reminderAwaitingProgress,
+			},
+			reconciliation: {
+				mutationsSinceLastTouch: this.#mutationsSinceLastTouch,
+				midRunNudges: this.#midRunNudgeCount,
+				maxMidRunNudges: MID_RUN_NUDGE_MAX_PER_CYCLE,
+			},
+		};
 	}
 
 	/** Replaces todo phases with a defensive clone. */

@@ -21,6 +21,7 @@ export interface ResolvedApproval {
 	reason?: string;
 	override: boolean;
 	source?: "tool" | "user" | "mode";
+	declarationPolicy?: ApprovalPolicy;
 }
 
 const POLICY_VALUES: ReadonlySet<ApprovalPolicy> = new Set(["allow", "deny", "prompt"]);
@@ -115,73 +116,67 @@ export function resolveApproval(
 ): ResolvedApproval {
 	const decision = getToolDecision(tool, args);
 	const userPolicy = Object.hasOwn(userConfig, tool.name) ? normalizePolicy(userConfig[tool.name]) : undefined;
+	let resolved: ResolvedApproval;
 
 	if (decision.policy === "deny") {
-		return {
+		resolved = {
 			policy: "deny",
 			tier: decision.tier,
 			override: decision.override,
 			source: "tool",
 			...(decision.reason ? { reason: decision.reason } : {}),
 		};
-	}
-	if (userPolicy === "deny") {
-		return { policy: "deny", tier: decision.tier, override: decision.override, source: "user" };
-	}
-
-	if (mode === "yolo") {
+	} else if (userPolicy === "deny") {
+		resolved = { policy: "deny", tier: decision.tier, override: decision.override, source: "user" };
+	} else if (mode === "yolo") {
 		if (decision.policy) {
-			return {
+			resolved = {
 				policy: decision.policy,
 				tier: decision.tier,
 				override: false,
 				source: "tool",
 				...(decision.reason ? { reason: decision.reason } : {}),
 			};
+		} else {
+			resolved = {
+				policy: userPolicy ?? "allow",
+				tier: decision.tier,
+				override: false,
+				source: userPolicy ? "user" : "mode",
+			};
 		}
-		return {
-			policy: userPolicy ?? "allow",
-			tier: decision.tier,
-			override: false,
-			source: userPolicy ? "user" : "mode",
-		};
-	}
-
-	if (decision.override) {
-		return {
+	} else if (decision.override) {
+		resolved = {
 			policy: decision.policy === "allow" ? "allow" : "prompt",
 			tier: decision.tier,
 			override: true,
 			source: "tool",
 			...(decision.reason ? { reason: decision.reason } : {}),
 		};
-	}
-
-	if (decision.policy === "allow" || decision.policy === "prompt") {
-		return {
+	} else if (decision.policy === "allow" || decision.policy === "prompt") {
+		resolved = {
 			policy: decision.policy,
 			tier: decision.tier,
 			override: false,
 			source: "tool",
 			...(decision.reason ? { reason: decision.reason } : {}),
 		};
+	} else if (userPolicy) {
+		resolved = { policy: userPolicy, tier: decision.tier, override: false, source: "user" };
+	} else if (modeApprovesTier(mode, decision.tier)) {
+		resolved = { policy: "allow", tier: decision.tier, override: false, source: "mode" };
+	} else {
+		resolved = {
+			policy: "prompt",
+			tier: decision.tier,
+			override: false,
+			source: "mode",
+			...(decision.reason ? { reason: decision.reason } : {}),
+		};
 	}
 
-	if (userPolicy) {
-		return { policy: userPolicy, tier: decision.tier, override: false, source: "user" };
-	}
-
-	if (modeApprovesTier(mode, decision.tier)) {
-		return { policy: "allow", tier: decision.tier, override: false, source: "mode" };
-	}
-
-	return {
-		policy: "prompt",
-		tier: decision.tier,
-		override: false,
-		source: "mode",
-		...(decision.reason ? { reason: decision.reason } : {}),
-	};
+	resolved.declarationPolicy = decision.policy;
+	return resolved;
 }
 
 /**

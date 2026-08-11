@@ -6,9 +6,9 @@ import {
 	resolveCliModel,
 } from "../config/model-resolver";
 import type { SettingPath } from "../config/settings";
-import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import type { InteractiveModeContext } from "../modes/types";
 import type { AgentSession } from "../session/agent-session";
+import { describeLoopLimitRuntime } from "../session/session-loop-limit";
 import type { ComputerTool } from "../tools/computer";
 import { computerExposureMode } from "../tools/computer/exposure";
 import type { InspectImageMode } from "../utils/inspect-image-mode";

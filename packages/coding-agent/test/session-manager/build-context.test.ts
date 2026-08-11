@@ -182,6 +182,85 @@ describe("buildSessionContext", () => {
 			// downgrades both produce such mismatched messages.
 			expect(ctx.models.default).toBe("openai/gpt-4");
 		});
+		it("projects reset exclusion without losing persisted branch identity", () => {
+			const entries: SessionEntry[] = [
+				msg("1", null, "user", "before"),
+				{ type: "reset_boundary", id: "2", parentId: "1", timestamp: "2025-01-01T00:00:00Z" },
+				msg("3", "2", "user", "after"),
+			];
+			const ctx = buildSessionContext(entries, "3");
+
+			expect(ctx.messages.map(message => (message.role === "user" ? message.content : message.role))).toEqual([
+				"after",
+			]);
+			const before = ctx.contextAssembly.sources.find(source => source.branch?.entryId === "1");
+			expect(before?.visibility).toEqual({ persisted: true, display: true, model: false });
+			expect(before?.inclusion.reason).toBe("before-reset");
+			expect(ctx.contextAssembly.relations.find(relation => relation.kind === "reset-excludes")).toEqual({
+				kind: "reset-excludes",
+				sourceIds: ["entry:1"],
+				targetIds: ["entry:2"],
+			});
+		});
+
+		it("retains hidden TTSR injection provenance in effective context", () => {
+			const entry: SessionMessageEntry = {
+				type: "message",
+				id: "1",
+				parentId: null,
+				timestamp: "2025-01-01T00:00:00Z",
+				message: {
+					role: "custom",
+					customType: "ttsr-injection",
+					content: "Injected time-travel rule",
+					display: false,
+					details: { rules: ["guard-rule"] },
+					timestamp: 1,
+				},
+			};
+			const source = buildSessionContext([entry]).contextAssembly.sources.find(
+				candidate => candidate.branch?.entryId === entry.id,
+			);
+
+			expect(source?.kind).toBe("ttsr-injection");
+			expect(source?.visibility).toEqual({ persisted: true, display: false, model: true });
+			expect(source?.inclusion).toEqual({ included: true, reason: "active-branch" });
+		});
+
+		it("preserves authoritative tool truncation and artifact metadata", () => {
+			const entry: SessionMessageEntry = {
+				type: "message",
+				id: "1",
+				parentId: null,
+				timestamp: "2025-01-01T00:00:00Z",
+				message: {
+					role: "bashExecution",
+					command: "printf output",
+					output: "output",
+					exitCode: 0,
+					cancelled: false,
+					truncated: true,
+					meta: {
+						truncation: {
+							direction: "tail",
+							truncatedBy: "bytes",
+							totalLines: 10,
+							totalBytes: 1000,
+							outputLines: 2,
+							outputBytes: 100,
+							artifactId: "artifact-7",
+						},
+					},
+					timestamp: 1,
+				},
+			};
+			const source = buildSessionContext([entry]).contextAssembly.sources.find(
+				candidate => candidate.branch?.entryId === entry.id,
+			);
+
+			expect(source?.outputMeta?.truncation?.artifactId).toBe("artifact-7");
+			expect(source?.outputMeta?.truncation?.totalBytes).toBe(1000);
+		});
 	});
 
 	describe("with compaction", () => {
@@ -634,6 +713,26 @@ describe("buildSessionContext", () => {
 			expect(ctx.messages).toHaveLength(4);
 			expect((ctx.messages[2] as any).summary).toContain("Summary of abandoned work");
 			expect((ctx.messages[3] as any).content).toBe("new direction");
+			const generated = ctx.contextAssembly.sources.find(source => source.kind === "branch-summary");
+			expect(generated?.inclusion.reason).toBe("generated-branch-summary");
+			expect(
+				ctx.contextAssembly.relations.find(
+					relation =>
+						relation.kind === "generated-from" &&
+						relation.targetIds.includes(`generated:branch-summary:${entries[3].id}`),
+				),
+			).toEqual({
+				kind: "generated-from",
+				sourceIds: [`entry:${entries[3].id}`, `entry:${entries[2].id}`],
+				targetIds: [`generated:branch-summary:${entries[3].id}`],
+			});
+			expect(ctx.contextAssembly.sources.find(source => source.id === `entry:${entries[2].id}`)?.branch).toEqual({
+				entryId: entries[2].id,
+				entryType: "message",
+				parentId: entries[2].parentId,
+				position: null,
+				active: false,
+			});
 		});
 
 		it("complex tree with multiple branches and compaction", () => {

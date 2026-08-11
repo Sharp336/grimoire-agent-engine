@@ -88,6 +88,7 @@ import {
 	ExtensionRunner,
 	ExtensionToolWrapper,
 	type ExtensionUIContext,
+	isInlineExtensionPath,
 	type LoadExtensionsResult,
 	loadExtensionFromFactory,
 	loadExtensions,
@@ -151,6 +152,7 @@ import {
 } from "./session/retry-fallback-chains";
 import { getRestorableSessionModels } from "./session/session-context";
 import { SessionManager } from "./session/session-manager";
+import { ActiveSessionProviderProjection } from "./session/session-provider-boundary";
 import { collectMountedMCPToolRoutes, projectMountedMCPXdevGuidance } from "./session/session-tools";
 import { createSettingsAwareStreamFn } from "./session/settings-stream-fn";
 import { SnapcompactInlineTransformer } from "./session/snapcompact-inline";
@@ -1694,8 +1696,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getEvalSessionId: () =>
 				session?.getEvalSessionId() ?? options.parentEvalSessionId ?? defaultEvalSessionId(toolSession),
 			assertEvalExecutionAllowed: () => session?.assertEvalExecutionAllowed(),
-			trackEvalExecution: (execution, abortController) =>
-				session ? session.trackEvalExecution(execution, abortController) : execution,
+			trackEvalExecution: (execution, abortController, executionId) =>
+				session ? session.trackEvalExecution(execution, abortController, executionId) : execution,
 			getSessionId: () => sessionManager.getSessionId?.() ?? null,
 			isDisposed: () => session?.isDisposed ?? false,
 			getHindsightSessionState: () => session?.getHindsightSessionState(),
@@ -1763,9 +1765,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			clearPendingInvokers: () => session.clearPendingInvokers(),
 			peekPlanProposalHandler: () => session.peekPlanProposalHandler(),
 			setPlanProposalHandler: handler => session.setPlanProposalHandler(handler),
-			allocateOutputArtifact: async toolType => {
+			allocateOutputArtifact: async (toolType, related) => {
 				try {
-					return await sessionManager.allocateArtifactPath(toolType);
+					return await sessionManager.allocateArtifactPath(toolType, related);
 				} catch {
 					return {};
 				}
@@ -1991,7 +1993,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// entries (`<inline-N>`) — those are per-session, not source paths.
 			extensionPaths = extensionsResult.extensions
 				.map(ext => ext.resolvedPath)
-				.filter(p => !p.startsWith("<inline"));
+				.filter(p => !isInlineExtensionPath(p));
 		} else if (options.preloadedExtensionPaths) {
 			extensionPaths = options.preloadedExtensionPaths;
 			extensionsResult = await logger.time("loadExtensions", loadExtensions, extensionPaths, cwd, eventBus);
@@ -2913,8 +2915,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				typeof options.systemPrompt === "function"
 					? options.systemPrompt(defaultPrompt.systemPrompt)
 					: options.systemPrompt;
+			const resolved = typeof customPrompt === "string" ? [customPrompt] : customPrompt;
 			return {
-				systemPrompt: typeof customPrompt === "string" ? [customPrompt] : customPrompt,
+				systemPrompt: resolved,
+				logicalSources: resolved.map((content, index) => ({
+					id: `sdk-system-override:${index}`,
+					kind: "custom",
+					content,
+					foldedInto: [index],
+				})),
 			};
 		};
 
@@ -3039,12 +3048,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 
 		setActiveToolNames(initialToolNames);
-		const { systemPrompt } = await logger.time(
+		const initialSystemPromptResult = await logger.time(
 			"buildSystemPrompt",
 			rebuildSystemPrompt,
 			initialToolNames,
 			toolRegistry,
 		);
+		const { systemPrompt } = initialSystemPromptResult;
 
 		const promptTemplates = await promptTemplatesPromise;
 		toolSession.promptTemplates = promptTemplates;
@@ -3084,6 +3094,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const withContext = await extensionRunner.emitContext(messages);
 			return wrapSteeringForModel(withContext);
 		};
+
 		// Per-request provider-context transforms. Obfuscate FIRST so secrets are
 		// redacted from text before snapcompact rasterizes it into PNG frames, then
 		// clamp images to the active provider budget before the request is sent.
@@ -3106,6 +3117,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (snapcompactInline) transformed = await snapcompactInline.transform(transformed, transformModel);
 			return clampProviderContextImages(transformed, transformModel);
 		};
+		const activeProviderProjection = new ActiveSessionProviderProjection({
+			projection: () => (hasSession ? session.contextProjection : undefined),
+			transformContext,
+			convertToLlm: convertToLlmFinal,
+			transformProviderContext,
+		});
 		const onPayload = async (payload: unknown, model?: Model) => {
 			return await extensionRunner.emitBeforeProviderRequest(payload, model);
 		};
@@ -3180,14 +3197,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// namespace/project discovery on the original repo's git remote. Re-read it
 			// per turn from the SessionManager.
 			cwdResolver: () => sessionManager.getCwd(),
-			convertToLlm: convertToLlmFinal,
+			convertToLlm: activeProviderProjection.convertToLlm,
 			onPayload,
 			onResponse,
 			sessionId: providerSessionId,
 			promptCacheKey: providerPromptCacheKey,
 			deadline: options.deadline,
-			transformContext,
-			transformProviderContext,
+			transformContext: activeProviderProjection.transformContext,
+			transformProviderContext: activeProviderProjection.transformProviderContext,
 			steeringMode: settings.get("steeringMode") ?? "one-at-a-time",
 			followUpMode: settings.get("followUpMode") ?? "one-at-a-time",
 			interruptMode: settings.get("interruptMode") ?? "immediate",
@@ -3359,6 +3376,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			modelRegistry,
 			toolRegistry,
 			memoryAgentDir: agentDir,
+			initialSystemPromptSources: initialSystemPromptResult.logicalSources,
 			memoryTaskDepth: taskDepth,
 			createMemoryTools: restrictToolNames
 				? undefined
@@ -3368,6 +3386,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						);
 						return tools.filter((tool): tool is AgentTool => tool !== null);
 					},
+			createEvalTool: restrictToolNames ? undefined : () => new EvalTool(toolSession),
 			createComputerTool: restrictToolNames
 				? undefined
 				: async () => (await BUILTIN_TOOLS.computer(toolSession)) ?? null,

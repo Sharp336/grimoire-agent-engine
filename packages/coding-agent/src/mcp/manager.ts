@@ -32,6 +32,7 @@ import {
 	type MCPOAuthCredentialLookup,
 	selectMcpOAuthRefreshMaterial,
 } from "./oauth-credentials";
+import { analyzeAuthError } from "./oauth-discovery";
 import { type MCPStoredOAuthCredential, refreshMCPOAuthToken } from "./oauth-flow";
 import type { McpConnectionStatusEvent } from "./startup-events";
 import type { MCPToolDetails } from "./tool-bridge";
@@ -173,6 +174,8 @@ export interface MCPDiscoverOptions {
 /** Handles an MCP `WWW-Authenticate` challenge and returns refreshed config. */
 export type MCPAuthHandler = (serverName: string, challenge: MCPAuthChallenge) => Promise<MCPServerConfig | undefined>;
 
+export type MCPReconnectFailure = "authentication_required" | "failed";
+
 /**
  * MCP Server Manager.
  *
@@ -225,6 +228,8 @@ export class MCPManager {
 	 * crash-storm circuit breaker (see {@link RECONNECT_BURST_LIMIT}).
 	 */
 	#reconnectHistory = new Map<string, number[]>();
+	/** Safe classification of the most recent reconnect failure per server. */
+	#reconnectFailures = new Map<string, MCPReconnectFailure>();
 	/** Monotonic epoch incremented on disconnectAll to invalidate stale reconnections. */
 	#epoch = 0;
 
@@ -794,6 +799,11 @@ export class MCPManager {
 		return "disconnected";
 	}
 
+	/** Return a secret-free classification for the most recent reconnect attempt. */
+	getReconnectFailure(name: string): MCPReconnectFailure | undefined {
+		return this.#reconnectFailures.get(name);
+	}
+
 	/**
 	 * Get the source metadata for a server.
 	 */
@@ -865,6 +875,7 @@ export class MCPManager {
 		this.#serverConfigs.delete(name);
 		this.#pendingResourceRefresh.delete(name);
 		this.#reconnectHistory.delete(name);
+		this.#reconnectFailures.delete(name);
 
 		const connection = this.#connections.get(name);
 
@@ -914,6 +925,7 @@ export class MCPManager {
 		this.#tools = [];
 		this.#subscribedResources.clear();
 		this.#reconnectHistory.clear();
+		this.#reconnectFailures.clear();
 	}
 
 	/**
@@ -933,14 +945,16 @@ export class MCPManager {
 		name: string,
 		options?: { manual?: boolean; authChallenge?: MCPAuthChallenge },
 	): Promise<MCPServerConnection | null> {
+		const pending = this.#pendingReconnections.get(name);
+		if (pending) return pending;
+
+		this.#reconnectFailures.delete(name);
 		if (options?.manual) {
 			this.#reconnectHistory.delete(name);
 		}
 
-		const pending = this.#pendingReconnections.get(name);
-		if (pending) return pending;
-
 		if (this.#tripReconnectBreaker(name)) {
+			this.#reconnectFailures.set(name, "failed");
 			return null;
 		}
 
@@ -993,22 +1007,32 @@ export class MCPManager {
 		const oldConnection = this.#connections.get(name);
 		let config = oldConnection?.config ?? this.#serverConfigs.get(name);
 		const source = this.#sources.get(name) ?? oldConnection?._source;
-		if (!config) return null;
+		if (!config) {
+			this.#reconnectFailures.set(name, "failed");
+			return null;
+		}
 
 		if (authChallenge) {
 			if (!this.#authHandler) {
 				logger.error("MCP auth challenge cannot be handled; no auth handler is configured", {
 					path: `mcp:${name}`,
 				});
+				this.#reconnectFailures.set(name, "authentication_required");
 				return null;
 			}
 			try {
 				const refreshedConfig = await this.#authHandler(name, authChallenge);
-				if (!refreshedConfig) return null;
+				if (!refreshedConfig) {
+					this.#reconnectFailures.set(name, "authentication_required");
+					return null;
+				}
 				config = refreshedConfig;
 				this.#serverConfigs.set(name, config);
 			} catch (error) {
 				logger.error("MCP auth challenge handling failed", { path: `mcp:${name}`, error });
+				const failure =
+					error instanceof Error && analyzeAuthError(error).requiresAuth ? "authentication_required" : "failed";
+				this.#reconnectFailures.set(name, failure);
 				return null;
 			}
 		}
@@ -1043,6 +1067,7 @@ export class MCPManager {
 			}
 			try {
 				const connection = await this.#connectAndWireServer(name, config, source, reconnectEpoch);
+				this.#reconnectFailures.delete(name);
 				logger.debug("MCP reconnected", { path: `mcp:${name}`, tools: connection.tools?.length ?? 0 });
 				return connection;
 			} catch (error) {
@@ -1055,6 +1080,11 @@ export class MCPManager {
 					return null;
 				}
 
+				if (error instanceof Error && analyzeAuthError(error).requiresAuth) {
+					this.#reconnectFailures.set(name, "authentication_required");
+					logger.debug("MCP reconnect requires authentication", { path: `mcp:${name}` });
+					return null;
+				}
 				const msg = error instanceof Error ? error.message : String(error);
 				if (attempt < delays.length) {
 					logger.debug("MCP reconnect attempt failed, retrying", {
@@ -1072,6 +1102,7 @@ export class MCPManager {
 				}
 			}
 		}
+		this.#reconnectFailures.set(name, "failed");
 		return null;
 	}
 

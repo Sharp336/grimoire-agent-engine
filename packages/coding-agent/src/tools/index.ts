@@ -238,7 +238,7 @@ export interface ToolSession {
 	/** Reject new eval work once session disposal has started. */
 	assertEvalExecutionAllowed?: () => void;
 	/** Track tool-owned eval work so session disposal can await/abort it like direct session eval runs. */
-	trackEvalExecution?<T>(execution: Promise<T>, abortController: AbortController): Promise<T>;
+	trackEvalExecution?<T>(execution: Promise<T>, abortController: AbortController, executionId?: string): Promise<T>;
 	/** Get session ID */
 	getSessionId?: () => string | null;
 	/** Get Hindsight runtime state for this agent session. */
@@ -266,7 +266,10 @@ export interface ToolSession {
 	/** Get the ArtifactManager backing this session (shared across parent + subagents). */
 	getArtifactManager?: () => ArtifactManager | null;
 	/** Allocate a new artifact path and ID for session-scoped truncated output. */
-	allocateOutputArtifact?: (toolType: string) => Promise<{ id?: string; path?: string }>;
+	allocateOutputArtifact?: (
+		toolType: string,
+		related?: { toolCallId?: string },
+	) => Promise<{ id?: string; path?: string }>;
 	/** Get session spawns */
 	getSessionSpawns: () => string | null;
 	/** Get resolved model string if explicitly set for this session */

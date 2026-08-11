@@ -23,7 +23,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import { extractRetryHint, logger, prompt } from "@oh-my-pi/pi-utils";
+import { extractRetryHint, logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelStringWithRouting, resolveModelOverride } from "../config/model-resolver";
 
@@ -160,6 +160,22 @@ export interface TurnRecoveryHost {
 export interface TurnRecoveryOptions {
 	initialRetryFallback?: InitialRetryFallbackState;
 }
+/** Secret-safe projection of the active turn-recovery saga. */
+export interface TurnRecoverySnapshot {
+	retrying: boolean;
+	attempt: number;
+	fallbackModel?: string;
+	fallback?: {
+		role: string;
+		from: string;
+		to: string;
+		pinned: boolean;
+	};
+	pendingRecoveredErrors: number;
+	emptyStopRetries: number;
+	unexpectedStopRetries: number;
+	acceptingTerminalEmptyStop: boolean;
+}
 
 type PendingRetryError = {
 	entryId: string;
@@ -218,6 +234,30 @@ export class TurnRecovery {
 		return this.#activeRetryFallback && model
 			? formatRetryFallbackSelector(model, this.#host.thinkingLevel())
 			: undefined;
+	}
+	/** Secret-safe recovery state for non-terminal session hosts. */
+	get snapshot(): TurnRecoverySnapshot {
+		const fallbackModel = this.retryFallbackModel;
+		const fallback = this.#activeRetryFallback;
+		return {
+			retrying: this.#retryPromise !== undefined,
+			attempt: this.#retryAttempt,
+			...(fallbackModel ? { fallbackModel } : {}),
+			...(fallback && fallbackModel
+				? {
+						fallback: {
+							role: fallback.role,
+							from: fallback.originalSelector,
+							to: fallbackModel,
+							pinned: fallback.pinned,
+						},
+					}
+				: {}),
+			pendingRecoveredErrors: this.#pendingRetryErrors.length,
+			emptyStopRetries: this.#emptyStopRetryCount,
+			unexpectedStopRetries: this.#unexpectedStopRetryCount,
+			acceptingTerminalEmptyStop: this.#acceptTerminalEmptyStopForPrompt,
+		};
 	}
 
 	/** Resets per-prompt recovery counters and terminal-stop acceptance. */
@@ -359,6 +399,14 @@ export class TurnRecovery {
 					this.#host.sessionId(),
 					{ retryAfterMs, baseUrl: activeModel.baseUrl, modelId: activeModel.id },
 				);
+				if (outcome.switched) {
+					await this.#host.emitSessionEvent({
+						type: "credential_rotated",
+						provider: activeModel.provider,
+						model: activeModel.id,
+						reason: "usage_limit",
+					});
+				}
 				return {
 					switchedCredential: outcome.switched,
 					retryAfterMs,
@@ -371,8 +419,12 @@ export class TurnRecovery {
 	}
 
 	/** Prompts after transient overlap with a prior agent run. */
-	promptAgentWithIdleRetry(messages: AgentMessage[], options?: { toolChoice?: ToolChoice }): Promise<void> {
-		return this.#promptAgentWithIdleRetry(messages, options);
+	promptAgentWithIdleRetry(
+		messages: AgentMessage[],
+		options?: { toolChoice?: ToolChoice },
+		signal?: AbortSignal,
+	): Promise<void> {
+		return this.#promptAgentWithIdleRetry(messages, options, signal);
 	}
 
 	/** Parses provider retry and rate-limit reset hints into a delay. */
@@ -1954,9 +2006,14 @@ export class TurnRecovery {
 		this.resolveRetry();
 	}
 
-	async #promptAgentWithIdleRetry(messages: AgentMessage[], options?: { toolChoice?: ToolChoice }): Promise<void> {
+	async #promptAgentWithIdleRetry(
+		messages: AgentMessage[],
+		options?: { toolChoice?: ToolChoice },
+		signal?: AbortSignal,
+	): Promise<void> {
 		const deadline = Date.now() + 30_000;
 		for (;;) {
+			signal?.throwIfAborted();
 			try {
 				await this.#host.agent.prompt(messages, options);
 				return;
@@ -1967,7 +2024,8 @@ export class TurnRecovery {
 				if (Date.now() >= deadline) {
 					throw new Error("Timed out waiting for prior agent run to finish before prompting.");
 				}
-				await this.#host.agent.waitForIdle();
+				await untilAborted(signal, () => this.#host.agent.waitForIdle());
+				signal?.throwIfAborted();
 			}
 		}
 	}

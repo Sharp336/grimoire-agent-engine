@@ -4,9 +4,18 @@ import type { ImageContent, Message, TextContent } from "@oh-my-pi/pi-ai";
 import { inferCopilotInitiator } from "@oh-my-pi/pi-ai/providers/github-copilot-headers";
 import {
 	convertToLlm,
+	convertToLlmWithRelations,
 	SKILL_PROMPT_MESSAGE_TYPE,
 	wrapSteeringForModel,
 } from "@oh-my-pi/pi-coding-agent/session/messages";
+import {
+	contextRequestIdForMessages,
+	reconcileProviderRelations,
+	relateContextTransform,
+	SessionContextProjection,
+	StoredContextAssemblyBuilder,
+	setContextSourceIdsForMessage,
+} from "@oh-my-pi/pi-coding-agent/session/session-context-projection";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 
 function expectAttribution(message: Message | undefined, expected: "user" | "agent" | undefined): void {
@@ -478,5 +487,156 @@ describe("wrapSteeringForModel", () => {
 		expect(wrapped[1]).not.toBe(second);
 		expect(getUserText(wrapped[0])).toContain("first steer");
 		expect(getUserText(wrapped[1])).toContain("second steer");
+	});
+});
+
+describe("provider context provenance", () => {
+	it("reports dropped, split, merged, and rewritten source relations explicitly", () => {
+		const dropped: AgentMessage = {
+			role: "bashExecution",
+			command: "secret",
+			output: "hidden",
+			exitCode: 0,
+			cancelled: false,
+			truncated: false,
+			excludeFromContext: true,
+			timestamp: 1,
+		};
+		const split: AgentMessage = {
+			role: "fileMention",
+			files: [
+				{ path: "notes.txt", content: "notes" },
+				{
+					path: "diagram.png",
+					content: "",
+					image: { type: "image", data: "abc", mimeType: "image/png" },
+				},
+			],
+			timestamp: 2,
+		};
+		setContextSourceIdsForMessage(dropped, ["entry:dropped"]);
+		setContextSourceIdsForMessage(split, ["entry:split"]);
+
+		const direct = convertToLlmWithRelations([dropped, split]);
+		expect(direct.relations.map(relation => [relation.kind, relation.sourceIds])).toEqual([
+			["dropped", ["entry:dropped"]],
+			["split", ["entry:split"]],
+		]);
+
+		const first: AgentMessage = { role: "user", content: "one", timestamp: 3 };
+		const second: AgentMessage = { role: "user", content: "two", timestamp: 4 };
+		setContextSourceIdsForMessage(first, ["entry:first"]);
+		setContextSourceIdsForMessage(second, ["entry:second"]);
+		const merged: AgentMessage = {
+			role: "custom",
+			customType: "merged-hook-context",
+			content: "one and two",
+			display: false,
+			timestamp: 5,
+		};
+		const lineage = relateContextTransform([first, second], [merged]);
+		const mergedConversion = convertToLlmWithRelations([merged], lineage);
+
+		expect(mergedConversion.relations).toEqual([
+			{
+				kind: "merged",
+				sourceIds: ["entry:first", "entry:second"],
+				transformedMessageIndexes: [0],
+				providerMessageIndexes: [0],
+			},
+		]);
+		const original: AgentMessage = { role: "user", content: "original", timestamp: 6 };
+		setContextSourceIdsForMessage(original, ["entry:original"]);
+		const rewritten: AgentMessage = { role: "user", content: "rewritten", timestamp: 6 };
+		const rewrittenLineage = relateContextTransform([original], [rewritten]);
+		expect(convertToLlmWithRelations([rewritten], rewrittenLineage).relations[0]).toEqual({
+			kind: "rewritten",
+			sourceIds: ["entry:original"],
+			transformedMessageIndexes: [0],
+			providerMessageIndexes: [0],
+		});
+		const cloned = relateContextTransform(
+			[first, second],
+			[
+				{ role: "user", content: "one cloned", timestamp: 7 },
+				{ role: "user", content: "two cloned", timestamp: 8 },
+			],
+		);
+		expect(cloned.map(relation => relation.sourceIds)).toEqual([["entry:first"], ["entry:second"]]);
+	});
+
+	it("keeps an explicit aggregate relation when a provider pipeline rewrites and filters without preserving identity", () => {
+		const source: AgentMessage = {
+			role: "fileMention",
+			files: [
+				{ path: "notes.txt", content: "notes" },
+				{
+					path: "diagram.png",
+					content: "",
+					image: { type: "image", data: "abc", mimeType: "image/png" },
+				},
+			],
+			timestamp: 1,
+		};
+		setContextSourceIdsForMessage(source, ["entry:source"]);
+		const canonical = convertToLlmWithRelations([source]);
+		const rewritten: Message[] = [{ role: "user", content: "rewritten", timestamp: 2 }];
+
+		expect(reconcileProviderRelations(canonical.messages, rewritten, canonical.relations)).toEqual([
+			{
+				kind: "rewritten",
+				sourceIds: ["entry:source"],
+				transformedMessageIndexes: [0],
+				providerMessageIndexes: [0],
+			},
+		]);
+	});
+
+	it("request-binds cloned transforms and rejects a stale provider completion", () => {
+		const projection = new SessionContextProjection();
+		const stored = new StoredContextAssemblyBuilder([], null).finish();
+		const first: AgentMessage = { role: "user", content: "first", timestamp: 1 };
+		projection.captureTurn({
+			sessionId: "session",
+			leafId: null,
+			requestId: "first-request",
+			stored,
+			messages: [first],
+			systemPrompt: [],
+		});
+		const cloned: AgentMessage[] = [{ ...first }];
+		relateContextTransform([first], cloned);
+		expect(contextRequestIdForMessages(cloned)).toBe("first-request");
+		const added: AgentMessage = {
+			role: "custom",
+			customType: "provider-hook",
+			content: "provider-only context",
+			display: false,
+			timestamp: 2,
+		};
+		const transformed = [first, added];
+		const addedLineage = relateContextTransform([first], transformed);
+		const addedConversion = convertToLlmWithRelations(transformed, addedLineage);
+		projection.captureProvider("first-request", addedConversion.messages, addedConversion.relations, transformed);
+		expect(projection.read().sources.find(source => source.kind === "provider-hook")?.inclusion).toEqual({
+			included: true,
+			reason: "provider-transform",
+		});
+
+		projection.captureTurn({
+			sessionId: "session",
+			leafId: null,
+			requestId: "second-request",
+			stored,
+			messages: [{ role: "user", content: "second", timestamp: 2 }],
+			systemPrompt: [],
+		});
+		projection.captureProvider(
+			"first-request",
+			[{ role: "user", content: "stale provider payload", timestamp: 3 }],
+			[],
+		);
+		expect(projection.read().requestId).toBe("second-request");
+		expect(projection.read().provider).toBeUndefined();
 	});
 });

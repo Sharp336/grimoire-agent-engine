@@ -140,6 +140,15 @@ export const AUTO_THINKING = "auto" as const;
 /** A thinking selector as configured by the user — a concrete level or `auto`. */
 export type ConfiguredThinkingLevel = ThinkingLevel | typeof AUTO_THINKING;
 
+/**
+ * Returns the configured selectors exposed by the session thinking control.
+ * This is the authoritative TUI order: off → auto → supported efforts.
+ */
+export function getSelectableThinkingLevels(model: Model | undefined): ReadonlyArray<ConfiguredThinkingLevel> {
+	if (!model?.reasoning) return [];
+	return [ThinkingLevel.Off, AUTO_THINKING, ...getSupportedEfforts(model)];
+}
+
 /** Maps the session-level `auto` sentinel to `undefined`; concrete levels pass through. */
 export function concreteThinkingLevel(level: ConfiguredThinkingLevel | undefined): ThinkingLevel | undefined {
 	return level === AUTO_THINKING ? undefined : level;

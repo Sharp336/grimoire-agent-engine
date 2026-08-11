@@ -2,7 +2,15 @@
 
 import type { Agent, AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { CompactionPreparation } from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, ImageContent, Message, Model, SimpleStreamOptions, TextContent } from "@oh-my-pi/pi-ai";
+import type {
+	AssistantMessage,
+	Context,
+	ImageContent,
+	Message,
+	Model,
+	SimpleStreamOptions,
+	TextContent,
+} from "@oh-my-pi/pi-ai";
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { ModelRegistry } from "../config/model-registry";
@@ -15,9 +23,17 @@ import type { SecretObfuscator } from "../secrets/obfuscator";
 import { stripPendingSecretPlaceholderSuffix } from "../secrets/placeholder";
 import { normalizeModelContextImages } from "../utils/image-loading";
 import { describeAttachedImagesForTextModel } from "../utils/image-vision-fallback";
-import { type CustomMessage, convertToLlm } from "./messages";
+import { type CustomMessage, convertToLlm, convertToLlmWithRelations } from "./messages";
 import { IMAGE_ATTACHMENT_DESCRIPTION_TYPE } from "./queued-messages";
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
+import {
+	type ContextTransformLineage,
+	contextRequestIdForMessages,
+	type ProviderTransformRelation,
+	reconcileProviderRelations,
+	relateContextTransform,
+	type SessionContextProjection,
+} from "./session-context-projection";
 import type { SessionManager } from "./session-manager";
 
 type NormalizableContentBlock = AssistantMessage["content"][number] | TextContent | ImageContent;
@@ -37,6 +53,78 @@ export interface SessionProviderBoundaryHost {
 	onResponse: SimpleStreamOptions["onResponse"] | undefined;
 	onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;
 	obfuscator: SecretObfuscator | undefined;
+	contextProjection: SessionContextProjection;
+}
+
+export interface ActiveSessionProviderProjectionOptions {
+	projection(): SessionContextProjection | undefined;
+	transformContext(messages: AgentMessage[], signal?: AbortSignal): AgentMessage[] | Promise<AgentMessage[]>;
+	convertToLlm(messages: AgentMessage[]): Message[] | Promise<Message[]>;
+	transformProviderContext(context: Context, model: Model): Context | Promise<Context>;
+}
+
+type ActiveProviderProjectionRecord = {
+	requestId: string | undefined;
+	messages: readonly Message[];
+	relations: readonly ProviderTransformRelation[];
+	transformedMessages: readonly AgentMessage[];
+};
+
+/** Correlates the active Agent loop's three provider-preparation stages without parsing message content. */
+export class ActiveSessionProviderProjection {
+	readonly #options: ActiveSessionProviderProjectionOptions;
+	readonly #lineageByMessages = new WeakMap<AgentMessage[], readonly ContextTransformLineage[]>();
+	readonly #projectionByMessages = new WeakMap<readonly Message[], ActiveProviderProjectionRecord>();
+	readonly #projectionByMessage = new WeakMap<object, ActiveProviderProjectionRecord>();
+
+	constructor(options: ActiveSessionProviderProjectionOptions) {
+		this.#options = options;
+	}
+
+	readonly transformContext = async (messages: AgentMessage[], signal?: AbortSignal): Promise<AgentMessage[]> => {
+		const transformed = await this.#options.transformContext(messages, signal);
+		this.#lineageByMessages.set(transformed, relateContextTransform(messages, transformed));
+		return transformed;
+	};
+
+	readonly convertToLlm = async (messages: AgentMessage[]): Promise<Message[]> => {
+		const canonical = convertToLlmWithRelations(messages, this.#lineageByMessages.get(messages));
+		const converted = await this.#options.convertToLlm(messages);
+		const record: ActiveProviderProjectionRecord = {
+			requestId: contextRequestIdForMessages(messages),
+			messages: converted,
+			relations: reconcileProviderRelations(canonical.messages, converted, canonical.relations),
+			transformedMessages: messages,
+		};
+		this.#projectionByMessages.set(converted, record);
+		for (const message of converted) this.#projectionByMessage.set(message, record);
+		return converted;
+	};
+
+	readonly transformProviderContext = async (context: Context, model: Model): Promise<Context> => {
+		let record = this.#projectionByMessages.get(context.messages);
+		if (!record) {
+			for (let index = context.messages.length - 1; index >= 0; index--) {
+				record = this.#projectionByMessage.get(context.messages[index]);
+				if (record) break;
+			}
+		}
+		const normalizedRelations = record
+			? reconcileProviderRelations(record.messages, context.messages, record.relations)
+			: [];
+		const transformed = await this.#options.transformProviderContext(context, model);
+		const projection = this.#options.projection();
+		if (record && projection) {
+			projection.captureProvider(
+				record.requestId,
+				transformed.messages,
+				reconcileProviderRelations(context.messages, transformed.messages, normalizedRelations),
+				record.transformedMessages,
+				transformed.systemPrompt,
+			);
+		}
+		return transformed;
+	};
 }
 
 /** Owns the transformations at the session/provider boundary. */
@@ -125,8 +213,14 @@ export class SessionProviderBoundary {
 
 	/** Converts session messages using the configured pre-LLM pipeline. */
 	async convertMessagesToLlm(messages: AgentMessage[], signal?: AbortSignal): Promise<Message[]> {
+		const requestId = contextRequestIdForMessages(messages);
 		const transformedMessages = await this.#host.transformContext(messages, signal);
-		return await this.#host.convertToLlm(transformedMessages);
+		const lineage = relateContextTransform(messages, transformedMessages);
+		const canonical = convertToLlmWithRelations(transformedMessages, lineage);
+		const converted = await this.#host.convertToLlm(transformedMessages);
+		const relations = reconcileProviderRelations(canonical.messages, converted, canonical.relations);
+		this.#host.contextProjection.captureProvider(requestId, converted, relations, transformedMessages);
+		return converted;
 	}
 
 	/** Applies session-level stream hooks and provider defaults to a side request. */

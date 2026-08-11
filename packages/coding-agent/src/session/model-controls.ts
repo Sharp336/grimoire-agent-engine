@@ -29,6 +29,7 @@ import {
 	type ConfiguredThinkingLevel,
 	clampAutoThinkingEffort,
 	clampThinkingLevelToCeiling,
+	getSelectableThinkingLevels,
 	resolveProvisionalAutoLevel,
 	resolveThinkingLevelForModel,
 	shouldDisableReasoning,
@@ -558,13 +559,8 @@ export class ModelControls {
 	 * @returns New selector, or undefined if model doesn't support thinking
 	 */
 	cycleThinkingLevel(): ConfiguredThinkingLevel | undefined {
-		if (!this.#model?.reasoning) return undefined;
-
-		const levels: ConfiguredThinkingLevel[] = [
-			ThinkingLevel.Off,
-			AUTO_THINKING,
-			...this.getAvailableThinkingLevels(),
-		];
+		const levels = getSelectableThinkingLevels(this.#model);
+		if (levels.length === 0) return undefined;
 		const configured = this.configuredThinkingLevel();
 		const currentLevel = configured === ThinkingLevel.Inherit ? ThinkingLevel.Off : configured;
 		const currentIndex = currentLevel ? levels.indexOf(currentLevel) : -1;

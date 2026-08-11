@@ -259,6 +259,7 @@ function buildSummary(session: DapSession): DapSessionSummary {
 
 export class DapSessionManager {
 	#sessions = new Map<string, DapSession>();
+	#sessionDisposals = new Map<string, Promise<void>>();
 	#activeSessionId: string | null = null;
 	#cleanupLoopPromise?: Promise<void>;
 	#nextId = 0;
@@ -1109,6 +1110,22 @@ export class DapSessionManager {
 		return summary;
 	}
 
+	async terminateAdapter(
+		adapterName: string,
+		signal?: AbortSignal,
+		timeoutMs: number = 30_000,
+		cwd?: string,
+	): Promise<number> {
+		const roots = [...this.#sessions.values()].filter(
+			session =>
+				session.parentSessionId === undefined &&
+				session.adapter.name === adapterName &&
+				(cwd === undefined || session.cwd === cwd),
+		);
+		await Promise.all(roots.map(session => this.#terminateSessionTree(session, signal, timeoutMs)));
+		return roots.length;
+	}
+
 	async #terminateSessionTree(session: DapSession, signal?: AbortSignal, timeoutMs: number = 30_000): Promise<void> {
 		session.status = "terminated";
 		try {
@@ -1124,10 +1141,8 @@ export class DapSessionManager {
 			await session.client
 				.sendRequest("disconnect", { terminateDebuggee: true }, signal, timeoutMs)
 				.catch(() => undefined);
-		} catch {
-			/* Disposal remains mandatory when a caller aborts best-effort DAP shutdown. */
 		} finally {
-			this.#disposeSession(session);
+			await this.#disposeSession(session);
 		}
 	}
 
@@ -1139,23 +1154,23 @@ export class DapSessionManager {
 	async #runCleanupLoop(): Promise<void> {
 		for await (const _ of timers.setInterval(CLEANUP_INTERVAL_MS, null, { ref: false })) {
 			try {
-				this.#cleanupIdleSessions();
+				await this.#cleanupIdleSessions();
 			} catch (error) {
 				logger.error("DAP idle session cleanup failed", { error: toErrorMessage(error) });
 			}
 		}
 	}
 
-	#cleanupIdleSessions(): void {
+	async #cleanupIdleSessions(): Promise<void> {
 		if (this.#sessions.size === 0) return;
 		const now = Date.now();
-		for (const session of this.#sessions.values()) {
+		for (const session of [...this.#sessions.values()]) {
 			if (
 				session.status === "terminated" ||
 				now - session.lastUsedAt > IDLE_TIMEOUT_MS ||
 				!session.client.isAlive()
 			) {
-				this.#disposeSession(session);
+				await this.#disposeSession(session);
 			}
 		}
 	}
@@ -1295,7 +1310,7 @@ export class DapSessionManager {
 	async #ensureLaunchSlot(): Promise<void> {
 		for (const session of [...this.#sessions.values()]) {
 			if (session.status === "terminated" || !session.client.isAlive()) {
-				this.#disposeSession(session);
+				await this.#disposeSession(session);
 			}
 		}
 		const root = [...this.#sessions.values()].find(session => !session.parentSessionId);
@@ -1820,12 +1835,23 @@ export class DapSessionManager {
 		}
 	}
 
-	#disposeSession(session: DapSession): void {
+	#disposeSession(session: DapSession): Promise<void> {
+		const existing = this.#sessionDisposals.get(session.id);
+		if (existing) return existing;
+		const disposal = this.#disposeSessionOwned(session).finally(() => {
+			if (this.#sessionDisposals.get(session.id) === disposal) this.#sessionDisposals.delete(session.id);
+		});
+		this.#sessionDisposals.set(session.id, disposal);
+		return disposal;
+	}
+
+	async #disposeSessionOwned(session: DapSession): Promise<void> {
 		if (!this.#sessions.has(session.id)) return;
 		for (const childId of [...session.childSessionIds]) {
 			const child = this.#sessions.get(childId);
-			if (child) this.#disposeSession(child);
+			if (child) await this.#disposeSession(child);
 		}
+		await session.client.dispose();
 		this.#sessions.delete(session.id);
 		if (session.parentSessionId) {
 			this.#sessions.get(session.parentSessionId)?.childSessionIds.delete(session.id);
@@ -1834,7 +1860,6 @@ export class DapSessionManager {
 			const parent = session.parentSessionId ? this.#sessions.get(session.parentSessionId) : undefined;
 			this.#activeSessionId = parent?.id ?? this.#sessions.values().next().value?.id ?? null;
 		}
-		void session.client.dispose().catch(() => {});
 	}
 }
 

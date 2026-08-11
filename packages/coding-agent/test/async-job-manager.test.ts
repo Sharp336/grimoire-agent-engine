@@ -62,6 +62,24 @@ describe("AsyncJobManager", () => {
 		expect(manager.getJob(jobId)?.status).toBe("completed");
 	});
 
+	test("isolates throwing change subscribers from successful jobs and other subscribers", async () => {
+		const manager = new AsyncJobManager({});
+		let observedChanges = 0;
+		manager.subscribe(() => {
+			throw new Error("projection failed");
+		});
+		manager.subscribe(() => {
+			observedChanges++;
+		});
+
+		const jobId = manager.register("task", "successful task", async () => "completed");
+		await manager.waitForAll();
+
+		expect(manager.getJob(jobId)?.status).toBe("completed");
+		expect(manager.getJob(jobId)?.resultText).toBe("completed");
+		expect(observedChanges).toBeGreaterThan(0);
+	});
+
 	test("delivers error text when run fails", async () => {
 		const completions: Array<{ jobId: string; text: string }> = [];
 		const manager = new AsyncJobManager({

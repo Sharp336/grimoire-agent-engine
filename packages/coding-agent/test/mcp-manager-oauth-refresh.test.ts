@@ -15,6 +15,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
+import * as mcpClient from "@oh-my-pi/pi-coding-agent/mcp/client";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import * as oauthFlow from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
 import type { MCPServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
@@ -276,6 +277,20 @@ describe("MCPManager OAuth refresh failure", () => {
 		expect(preparedSettled).toBe(true);
 		expect(releaseSpy).toHaveBeenCalledTimes(1);
 		expect(getAuthorizationHeader(preparedConfig)).toBe(`Bearer ${STALE_ACCESS}`);
+	});
+
+	test("classifies a real reconnect authentication challenge without retaining error details", async () => {
+		vi.spyOn(mcpClient, "connectToServer").mockRejectedValue(
+			new Error('HTTP 401: WWW-Authenticate: Bearer realm="rpc-resource-test"'),
+		);
+		const config: MCPServerConfig = {
+			type: "http",
+			url: "https://auth-required.example.com/mcp",
+		};
+		await manager.connectServers({ auth_required: config }, {});
+
+		expect(await manager.reconnectServer("auth_required", { manual: true })).toBeNull();
+		expect(manager.getReconnectFailure("auth_required")).toBe("authentication_required");
 	});
 });
 

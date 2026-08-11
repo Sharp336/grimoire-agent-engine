@@ -36,6 +36,7 @@ import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { XdevState } from "../tools/xdev";
 import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
+import type { SessionContextProjection, SystemPromptLogicalSource } from "./session-context-projection";
 import type { SessionManager } from "./session-manager";
 
 /** Maximum time the interactive shutdown path waits for Mnemopi consolidation. */
@@ -44,6 +45,8 @@ export const SHUTDOWN_CONSOLIDATE_BUDGET_MS = 1_500;
 /** Options controlling session disposal. */
 export interface AgentSessionDisposeOptions {
 	mnemopiConsolidateTimeoutMs?: number;
+	/** Leave process-scoped AsyncJobManager work running when only an RPC transport disconnects. */
+	preserveAsyncJobs?: boolean;
 	/**
 	 * Deadline for the settle/drain wait before the terminal memory release
 	 * (default 5s). The bounded-teardown paths (signal handlers, tests) may
@@ -123,6 +126,8 @@ export interface AgentSessionConfig {
 	agent: Agent;
 	sessionManager: SessionManager;
 	settings: Settings;
+	initialSystemPromptSources?: readonly SystemPromptLogicalSource[];
+	contextProjection?: SessionContextProjection;
 	/** Whether the session spawn policy permits the read-only `scout` subagent. Defaults to true. */
 	scoutAllowedBySpawnPolicy?: boolean;
 	/** Whether the caller explicitly requested yolo/auto-approve behavior for this session. */
@@ -162,6 +167,8 @@ export interface AgentSessionConfig {
 	memoryTaskDepth?: number;
 	/** Creates built-in memory tools for the current backend. */
 	createMemoryTools?: () => Promise<AgentTool[]>;
+	/** Creates a session-bound eval tool for host-controlled execution even when eval is not model-active. */
+	createEvalTool?: () => unknown;
 	/** Creates the built-in `computer` tool for session-scoped runtime enablement (see {@link AgentSession.setComputerToolEnabled}). */
 	createComputerTool?: () => Promise<AgentTool | null>;
 	/** Creates the built-in `inspect_image` tool for session-scoped runtime enablement (see {@link AgentSession.setInspectImageMode}). */
@@ -206,7 +213,11 @@ export interface AgentSessionConfig {
 	rebuildSystemPrompt?: (
 		toolNames: string[],
 		tools: Map<string, AgentTool>,
-	) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
+	) => Promise<{
+		systemPrompt: string[];
+		xdevCatalogNames?: readonly string[];
+		logicalSources?: readonly SystemPromptLogicalSource[];
+	}>;
 	/** Local calendar date provider used by prompt-cache invalidation. */
 	getLocalCalendarDate?: () => string;
 	/** Tools mounted under `xd://`, for `/tools` display. */
@@ -302,6 +313,10 @@ export interface PromptOptions {
 	attribution?: MessageAttribution;
 	/** Skip pre-send compaction checks for this prompt. */
 	skipCompactionCheck?: boolean;
+	/** Stable caller-owned tag attached to the prompt's agent message. */
+	messageTag?: string;
+	/** Abort pre-start preparation before an agent message becomes active. */
+	signal?: AbortSignal;
 }
 
 /** Options for AgentSession.followUp(). */

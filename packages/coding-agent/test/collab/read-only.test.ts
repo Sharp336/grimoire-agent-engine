@@ -13,9 +13,19 @@ import { importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
 import { COLLAB_PROTO, type CollabFrame, parseCollabLink } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
+import {
+	type RpcCollaborationFrame,
+	RpcCollaborationManager,
+} from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-collaboration";
+import {
+	RpcCollaborationSessionMediaStore,
+	RpcCollaborationTransportFactoryImpl,
+} from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-collaboration-transport";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { ArtifactManager } from "@oh-my-pi/pi-coding-agent/session/artifacts";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 
 // In-memory transport: FakeWebSocket + InMemoryRelay (see ./helpers/in-memory-relay)
@@ -307,5 +317,72 @@ describe("collab read-only links", () => {
 		const reply = await guest.nextFrame();
 		expect(reply.t).toBe("error");
 		expect(prompts).toHaveLength(0);
+	});
+	it("drives the real encrypted guest transport as a non-authoritative RPC replica", async () => {
+		using temp = TempDir.createSync("@omp-rpc-collaboration-transport-");
+		const artifacts = new ArtifactManager(temp.path());
+		const fakeSession = { settings: { get: () => "" } } as unknown as AgentSession;
+		const frames: RpcCollaborationFrame[] = [];
+		const manager = new RpcCollaborationManager({
+			factory: new RpcCollaborationTransportFactoryImpl(fakeSession),
+			media: new RpcCollaborationSessionMediaStore(
+				() => artifacts,
+				() => "rpc-session",
+			),
+			getSessionId: () => "rpc-session",
+			output: frame => frames.push(frame),
+		});
+
+		const joined = await manager.join({ link: host.link, displayName: "rpc-guest" });
+		expect(joined).toMatchObject({
+			state: "connected",
+			role: "guest",
+			authority: "full",
+			authoritative: false,
+			replication: { generation: 1, latestSequence: 1, retainedFrames: 1 },
+		});
+		expect(frames).toContainEqual(
+			expect.objectContaining({
+				type: "collaboration_replicated",
+				authoritative: false,
+				kind: "snapshot",
+				cursor: { generation: 1, sequence: 1 },
+			}),
+		);
+
+		const prompted = harness.nextPrompt();
+		manager.sendPrompt("remote RPC prompt");
+		expect(await prompted).toEqual({ from: "rpc-guest" });
+		await manager.leave("test done");
+		expect(manager.snapshot()).toMatchObject({ state: "off", role: "none" });
+	});
+
+	it("revokes a guest's write authority and rotates the full-access token", async () => {
+		const previousFullLink = host.link;
+		const guest = await joinAsGuest(previousFullLink, "revoked-writer");
+		guestCleanups.push(() => guest.socket.close());
+		const welcome = await guest.nextFrame();
+		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+		const participant = host.peers.find(peer => peer.name === "revoked-writer");
+		if (!participant) throw new Error("expected host participant");
+
+		host.revokeWriteAccess(participant.participantId);
+		expect(await guest.nextFrame()).toEqual({ t: "authority", readOnly: true });
+		guest.socket.send({ t: "prompt", text: "blocked after revocation" });
+		expect(await guest.nextFrame()).toMatchObject({ t: "error", message: expect.stringContaining("read-only") });
+
+		const rotated = host.rotateWriteAccess();
+		expect(rotated.link).not.toBe(previousFullLink);
+		const oldLinkGuest = await joinAsGuest(previousFullLink, "old-token");
+		guestCleanups.push(() => oldLinkGuest.socket.close());
+		const oldWelcome = await oldLinkGuest.nextFrame();
+		if (oldWelcome.t !== "welcome") throw new Error(`expected welcome, got ${oldWelcome.t}`);
+		expect(oldWelcome.readOnly).toBe(true);
+
+		const freshGuest = await joinAsGuest(rotated.link, "fresh-token");
+		guestCleanups.push(() => freshGuest.socket.close());
+		const freshWelcome = await freshGuest.nextFrame();
+		if (freshWelcome.t !== "welcome") throw new Error(`expected welcome, got ${freshWelcome.t}`);
+		expect(freshWelcome.readOnly).toBeUndefined();
 	});
 });

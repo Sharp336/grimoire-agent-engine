@@ -1200,6 +1200,11 @@ describe("buildSessionContext", () => {
 		expect(loaded.messages.length).toBe(4);
 		expect(loaded.thinkingLevel).toBe("off");
 		expect(loaded.models.default).toBe("anthropic/claude-sonnet-4-5");
+		expect(
+			loaded.contextAssembly.sources
+				.filter(source => source.category === "stored")
+				.map(source => [source.branch?.entryId, source.inclusion.reason]),
+		).toEqual(entries.map(entry => [entry.id, "active-branch"]));
 	});
 
 	it("should handle single compaction", () => {
@@ -1219,6 +1224,20 @@ describe("buildSessionContext", () => {
 		expect(loaded.messages.length).toBe(5);
 		expect(loaded.messages[0].role).toBe("compactionSummary");
 		expect((loaded.messages[0] as any).summary).toContain("Summary of 1,a,2,b");
+		const sourceByEntryId = new Map(
+			loaded.contextAssembly.sources.filter(source => source.branch).map(source => [source.branch!.entryId, source]),
+		);
+		expect(sourceByEntryId.get(u1.id)?.inclusion.reason).toBe("compacted");
+		expect(sourceByEntryId.get(a1.id)?.inclusion.reason).toBe("compacted");
+		expect(sourceByEntryId.get(u2.id)?.visibility.model).toBe(true);
+		expect(
+			loaded.contextAssembly.relations.some(
+				relation =>
+					relation.kind === "replaces" &&
+					relation.sourceIds.includes(`entry:${u1.id}`) &&
+					relation.targetIds.includes(`generated:compaction:${compaction.id}:summary`),
+			),
+		).toBe(true);
 	});
 
 	it("re-attaches snapcompact frames from preserveData as compaction summary images", () => {
@@ -1236,6 +1255,9 @@ describe("buildSessionContext", () => {
 		const summaryMessage = loaded.messages[0] as { role: string; images?: unknown };
 		expect(summaryMessage.role).toBe("compactionSummary");
 		expect(summaryMessage.images).toEqual([{ type: "image", data: "ZmFrZQ==", mimeType: "image/png" }]);
+		const archive = loaded.contextAssembly.sources.find(source => source.kind === "snapcompact-archive");
+		expect(archive?.inclusion.reason).toBe("generated-archive");
+		expect(archive?.metadata).toEqual({ frameCount: 1, truncatedChars: 0 });
 	});
 
 	it("transcript option keeps full history with every compaction inline at its position", () => {
@@ -1328,6 +1350,12 @@ describe("buildSessionContext", () => {
 		expect(dump).toContain("kept-user");
 		expect(dump).toContain("kept-assistant");
 		expect(dump).toContain("after-compact");
+		const modelContext = buildSessionContext(entries);
+		expect(
+			modelContext.contextAssembly.sources
+				.filter(source => source.branch?.entryId === uKept.id || source.branch?.entryId === aKept.id)
+				.map(source => source.inclusion.reason),
+		).toEqual(["provider-replacement-history", "provider-replacement-history"]);
 	});
 
 	it("should handle multiple compactions (only latest matters)", () => {
