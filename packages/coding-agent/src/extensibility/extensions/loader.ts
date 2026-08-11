@@ -188,7 +188,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 			const namespace = this.#claimedNamespace;
 			if (namespace === undefined || !isValidRemoteName(peer.name)) return undefined;
 			const id = composeRemoteId(namespace, peer.name);
-			AgentRegistry.global().register({
+			this.registry.register({
 				id,
 				displayName: peer.displayName ?? peer.name,
 				kind: "remote",
@@ -205,7 +205,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 			if (remoteNamespaceOf(idOrName) === undefined && namespace !== undefined && isValidRemoteName(idOrName)) {
 				id = composeRemoteId(namespace, idOrName);
 			}
-			const registry = AgentRegistry.global();
+			const registry = this.registry;
 			const ref = registry.get(id);
 			// Ownership-checked: a load may retract only the remote proxies it registered.
 			if (ref?.kind !== "remote" || ref.ownerToken !== this.ownerToken) return false;
@@ -227,6 +227,12 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		public readonly events: EventBus,
 		/** Per-load owner token stamped on refs this load registers (see {@link AgentRef.ownerToken}). */
 		private readonly ownerToken: string,
+		/**
+		 * The session's agent registry (default AgentRegistry.global()). Remote-peer proxies this load
+		 * registers - and their teardown - target THIS registry, so an SDK embedder with a custom
+		 * per-session registry lists/receives its own peers instead of leaking into the global one.
+		 */
+		private readonly registry: AgentRegistry,
 	) {}
 
 	/**
@@ -238,7 +244,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	#armIrcTeardown(): void {
 		if (this.#ircTeardownArmed) return;
 		this.#ircTeardownArmed = true;
-		this.on("session_shutdown", async () => releaseExtensionIrc(this.ownerToken));
+		this.on("session_shutdown", async () => releaseExtensionIrc(this.ownerToken, this.registry));
 	}
 
 	on<F extends HandlerFn>(event: string, handler: F): void {
@@ -405,14 +411,14 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 }
 
 /**
- * Release every process-global IRC resource a single extension load owns, keyed by its `ownerToken`:
- * drop its namespace claims + transports (freeing the namespaces for re-claim) and unregister every
- * `remote` proxy ref it registered. Owner-scoped + idempotent, so sibling loads are untouched. Runs on
- * BOTH factory-failure rollback and clean session_shutdown teardown, so a claim never outlives its load.
+ * Release the IRC resources a single extension load owns, keyed by its `ownerToken`: drop its
+ * namespace claims + transports on the process-global bus (freeing the namespaces for re-claim) and
+ * unregister from `registry` (the load's session registry) every `remote` proxy ref it registered.
+ * Owner-scoped + idempotent, so sibling loads are untouched. Runs on BOTH factory-failure rollback and
+ * clean session_shutdown teardown, so a claim never outlives its load.
  */
-function releaseExtensionIrc(ownerToken: string): void {
+function releaseExtensionIrc(ownerToken: string, registry: AgentRegistry): void {
 	IrcBus.global().releaseTransportsForOwner(ownerToken);
-	const registry = AgentRegistry.global();
 	for (const ref of registry.list()) {
 		if (ref.ownerToken === ownerToken) registry.unregister(ref.id);
 	}
@@ -432,6 +438,7 @@ async function runExtensionFactory(
 	api: ExtensionAPI,
 	runtime: IExtensionRuntime,
 	ownerToken: string,
+	registry: AgentRegistry,
 ): Promise<void> {
 	const providerRegistrationCheckpoint = [...runtime.pendingProviderRegistrations];
 
@@ -445,7 +452,7 @@ async function runExtensionFactory(
 		);
 		// Release this load's IRC state (namespace claims + transports + `remote` refs), owner-scoped so
 		// sibling loads are untouched. Identical to the clean session_shutdown teardown (#armIrcTeardown).
-		releaseExtensionIrc(ownerToken);
+		releaseExtensionIrc(ownerToken, registry);
 		throw error;
 	}
 }
@@ -483,6 +490,7 @@ async function bindExtension(
 	cwd: string,
 	eventBus: EventBus,
 	runtime: IExtensionRuntime,
+	registry: AgentRegistry,
 ): Promise<{ extension: Extension | null; error: string | null }> {
 	const factory = imported.factory;
 	if (imported.error !== null || factory === null) {
@@ -491,8 +499,8 @@ async function bindExtension(
 	try {
 		const extension = createExtension(extensionPath, imported.resolvedPath);
 		const ownerToken = `${extension.path}:${crypto.randomUUID()}`;
-		const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus, ownerToken);
-		await withHostGuard(() => runExtensionFactory(factory, api, runtime, ownerToken));
+		const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus, ownerToken, registry);
+		await withHostGuard(() => runExtensionFactory(factory, api, runtime, ownerToken, registry));
 
 		return { extension, error: null };
 	} catch (err) {
@@ -510,11 +518,12 @@ export async function loadExtensionFromFactory(
 	eventBus: EventBus,
 	runtime: IExtensionRuntime,
 	name = "<inline>",
+	registry: AgentRegistry = AgentRegistry.global(),
 ): Promise<Extension> {
 	const extension = createExtension(name, name);
 	const ownerToken = `${extension.path}:${crypto.randomUUID()}`;
-	const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus, ownerToken);
-	await runExtensionFactory(factory, api, runtime, ownerToken);
+	const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus, ownerToken, registry);
+	await runExtensionFactory(factory, api, runtime, ownerToken, registry);
 	return extension;
 }
 
@@ -526,7 +535,12 @@ export async function loadExtensionFromFactory(
  * sequentially in the original path order, so registration semantics
  * (last-wins collisions, shared runtime flag defaults) stay deterministic.
  */
-export async function loadExtensions(paths: string[], cwd: string, eventBus?: EventBus): Promise<LoadExtensionsResult> {
+export async function loadExtensions(
+	paths: string[],
+	cwd: string,
+	eventBus?: EventBus,
+	registry: AgentRegistry = AgentRegistry.global(),
+): Promise<LoadExtensionsResult> {
 	const extensions: Extension[] = [];
 	const errors: Array<{ path: string; error: string }> = [];
 	const resolvedEventBus = eventBus ?? new EventBus();
@@ -536,7 +550,7 @@ export async function loadExtensions(paths: string[], cwd: string, eventBus?: Ev
 
 	for (let i = 0; i < paths.length; i++) {
 		const extPath = paths[i]!;
-		const { extension, error } = await bindExtension(extPath, imported[i]!, cwd, resolvedEventBus, runtime);
+		const { extension, error } = await bindExtension(extPath, imported[i]!, cwd, resolvedEventBus, runtime, registry);
 
 		if (error) {
 			errors.push({ path: extPath, error });
@@ -825,7 +839,8 @@ export async function discoverAndLoadExtensions(
 	eventBus?: EventBus,
 	disabledExtensionIds?: string[],
 	options: DiscoverExtensionPathOptions = {},
+	registry: AgentRegistry = AgentRegistry.global(),
 ): Promise<LoadExtensionsResult> {
 	const paths = await discoverExtensionPaths(configuredPaths, cwd, disabledExtensionIds, options);
-	return loadExtensions(paths, cwd, eventBus);
+	return loadExtensions(paths, cwd, eventBus, registry);
 }
