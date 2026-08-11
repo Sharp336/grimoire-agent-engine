@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added configurable message-boundary editor actions, with Super+Up and Super+Down defaults for native macOS prompt navigation.
+
 ## [17.2.12] - 2026-08-08
 
 ### Fixed

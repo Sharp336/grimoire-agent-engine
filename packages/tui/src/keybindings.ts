@@ -14,6 +14,8 @@ export interface Keybindings {
 	"tui.editor.cursorWordRight": true;
 	"tui.editor.cursorLineStart": true;
 	"tui.editor.cursorLineEnd": true;
+	"tui.editor.cursorMessageStart": true;
+	"tui.editor.cursorMessageEnd": true;
 	"tui.editor.jumpForward": true;
 	"tui.editor.jumpBackward": true;
 	"tui.editor.pageUp": true;
@@ -80,6 +82,14 @@ export const TUI_KEYBINDINGS = {
 	"tui.editor.cursorLineEnd": {
 		defaultKeys: ["end", "ctrl+e"],
 		description: "Move to line end",
+	},
+	"tui.editor.cursorMessageStart": {
+		defaultKeys: "super+up",
+		description: "Move to message start",
+	},
+	"tui.editor.cursorMessageEnd": {
+		defaultKeys: "super+down",
+		description: "Move to message end",
 	},
 	"tui.editor.jumpForward": {
 		defaultKeys: "ctrl+]",

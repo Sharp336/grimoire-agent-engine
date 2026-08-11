@@ -42,6 +42,19 @@ describe("Editor component", () => {
 		});
 	});
 
+	describe("Message boundary keybindings", () => {
+		it("moves to the whole message boundaries with Super+Up and Super+Down", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setText("first line\nsecond line\nthird");
+
+			editor.handleInput("\x1b[1;9A"); // Kitty Super+Up
+			expect(editor.getCursor()).toEqual({ line: 0, col: 0 });
+
+			editor.handleInput("\x1b[1;9B"); // Kitty Super+Down
+			expect(editor.getCursor()).toEqual({ line: 2, col: 5 });
+		});
+	});
+
 	describe("Prompt history navigation", () => {
 		it("does nothing on Up arrow when history is empty", () => {
 			const editor = new Editor(defaultEditorTheme);

@@ -1472,6 +1472,12 @@ export class Editor implements Component, Focusable {
 		else if (kb.matchesCanonical(canonical, "tui.editor.deleteCharBackward") || matchesKey(data, "shift+backspace")) {
 			this.#handleBackspace();
 		}
+		// Message navigation shortcuts (Cmd+Up/Down on macOS terminals)
+		else if (kb.matchesCanonical(canonical, "tui.editor.cursorMessageStart")) {
+			this.#moveToMessageStart();
+		} else if (kb.matchesCanonical(canonical, "tui.editor.cursorMessageEnd")) {
+			this.#moveToMessageEnd();
+		}
 		// Line navigation shortcuts (Home/End keys)
 		else if (kb.matchesCanonical(canonical, "tui.editor.cursorLineStart")) {
 			this.#moveToLineStart();
