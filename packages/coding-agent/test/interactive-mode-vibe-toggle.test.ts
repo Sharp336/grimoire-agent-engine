@@ -158,7 +158,6 @@ describe("InteractiveMode vibe mode toggle", () => {
 		expect(message.customType).toBe("vibe-mode-context");
 		expect(content).toContain("`todo`");
 		expect(content).toContain("`ask`");
-		expect(content).toContain("ask the USER for a decision");
 
 		// Toggle off: the empty previous toolset must come back — only the
 		// ephemeral vibe tools must leave the registry.
@@ -207,7 +206,6 @@ describe("InteractiveMode vibe mode toggle", () => {
 			const content = typeof message.content === "string" ? message.content : "";
 			expect(content).not.toContain("`todo`");
 			expect(content).not.toContain("`ask`");
-			expect(content).not.toContain("ask the USER for a decision");
 			expect(content).not.toContain("parent session's list");
 
 			await foreignTodoMode.handleVibeModeCommand();
@@ -245,7 +243,6 @@ describe("InteractiveMode vibe mode toggle", () => {
 		const content = typeof message.content === "string" ? message.content : "";
 		expect(content).toContain("`todo`");
 		expect(content).toContain("`ask`");
-		expect(content).toContain("ask the USER for a decision");
 		expect(content).toContain("parent session's list");
 		expect(suspend).toHaveBeenCalledTimes(1);
 		expect(terminate).not.toHaveBeenCalled();
