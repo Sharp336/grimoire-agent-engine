@@ -38,6 +38,59 @@ function thinkingGlyph(display: string): string {
 	return space === -1 ? display : display.slice(0, space);
 }
 
+const PROVIDER_LABELS: Readonly<Record<string, string>> = {
+	anthropic: "A",
+	cursor: "C",
+	google: "G",
+	"google-antigravity": "AG",
+	meta: "M",
+	openai: "OA",
+	"openai-codex": "OC",
+	openrouter: "OR",
+	xai: "X",
+	zai: "Z",
+};
+
+function compactProviderLabel(provider: string | undefined): string {
+	if (!provider) return "?";
+	const known = PROVIDER_LABELS[provider];
+	if (known) return known;
+	const initials = provider
+		.split(/[-_/]+/)
+		.filter(Boolean)
+		.map(part => part[0]?.toUpperCase() ?? "")
+		.join("");
+	return initials.slice(0, 3) || provider.slice(0, 2).toUpperCase();
+}
+
+function compactModelLabel(
+	name: string,
+	id: string | undefined,
+	provider: string | undefined,
+	maxLength: number,
+): string {
+	let modelName = name.replace(/^Claude\s+/i, "");
+	const identity = `${name} ${id ?? ""}`.toLowerCase();
+	let qualifier = "";
+	if (identity.includes("contributor")) {
+		modelName = modelName.replace(/\s+Contributor$/i, "");
+		qualifier = "C";
+	} else if (identity.includes("preview")) {
+		modelName = modelName.replace(/\s+Preview$/i, "");
+		qualifier = "P";
+	} else if (identity.includes("experimental")) {
+		modelName = modelName.replace(/\s+Experimental$/i, "");
+		qualifier = "X";
+	}
+
+	const providerLabel = compactProviderLabel(provider);
+	const prefix = `${providerLabel}·${modelName}`;
+	const full = `${prefix}${qualifier}`;
+	if (Bun.stringWidth(full) <= maxLength) return full;
+	if (!qualifier) return truncateToWidth(full, maxLength);
+	return `${truncateToWidth(prefix, Math.max(1, maxLength - Bun.stringWidth(qualifier)))}${qualifier}`;
+}
+
 function stripDisplayRoot(pwd: string): string {
 	for (const root of [path.join(os.homedir(), "Projects"), "/work"]) {
 		const relative = relativePathWithinRoot(root, pwd);
@@ -99,10 +152,13 @@ const modelSegment: StatusLineSegment = {
 		const state = ctx.session.state;
 		const opts = ctx.options.model ?? {};
 
-		let modelName = state.model?.name || state.model?.id || "no-model";
-		if (modelName.startsWith("Claude ")) {
-			modelName = modelName.slice(7);
-		}
+		const rawModelName = state.model?.name || state.model?.id || "no-model";
+		const modelName = compactModelLabel(
+			rawModelName,
+			state.model?.id,
+			state.model?.provider,
+			opts.maxLength ?? 18,
+		);
 
 		// Resolve the current thinking-level display ("◉ xhigh", "⟳ auto", …)
 		// when the model supports thinking and the segment isn't hiding it.
@@ -567,14 +623,15 @@ const cacheHitSegment: StatusLineSegment = {
 	id: "cache_hit",
 	render(ctx) {
 		const { cacheRead, cacheWrite, input } = ctx.usageStats;
-		if (!cacheRead) return { content: "", visible: false };
 
 		// Hit rate = cacheRead / total prompt tokens. The prompt is the sum of
 		// cacheRead (served from cache), cacheWrite (newly cached this turn) and
 		// input (uncached). Including uncached input keeps the denominator honest
 		// for Anthropic/OpenRouter; DeepSeek reports its miss as input with
-		// cacheWrite 0, so this still yields hit/(hit+miss).
+		// cacheWrite 0, so this still yields hit/(hit+miss). Once prompt usage
+		// exists, render 0% misses too instead of hiding the cache metric entirely.
 		const total = cacheRead + cacheWrite + input;
+		if (total <= 0) return { content: "", visible: false };
 
 		const rate = (cacheRead / total) * 100;
 		const rateStr = rate.toFixed(2);
@@ -642,8 +699,9 @@ const usageSegment: StatusLineSegment = {
 		if (!u || (!u.fiveHour && !u.sevenDay && !u.monthly)) {
 			return { content: "", visible: false };
 		}
+		const compact = typeof ctx.width === "number" && ctx.width > 0 && ctx.width <= 160;
 		const parts: string[] = [];
-		if (u.tier) {
+		if (u.tier && !compact) {
 			const tier = truncateToWidth(sanitizeStatusText(u.tier), TRUNCATE_LENGTHS.SHORT);
 			if (tier) parts.push(theme.fg("accent", tier));
 		}
@@ -651,19 +709,19 @@ const usageSegment: StatusLineSegment = {
 			const pct = u.fiveHour.percent;
 			const pctText = theme.fg(pickUsageColor(pct), `${Math.round(pct)}%`);
 			const reset =
-				u.fiveHour.resetMinutes !== undefined
+				!compact && u.fiveHour.resetMinutes !== undefined
 					? theme.fg("muted", ` (${formatUsageReset(u.fiveHour.resetMinutes, "m")})`)
 					: "";
-			parts.push(`5h ${pctText}${reset}`);
+			parts.push(compact ? `5h${pctText}` : `5h ${pctText}${reset}`);
 		}
 		if (u.sevenDay) {
 			const pct = u.sevenDay.percent;
 			const pctText = theme.fg(pickUsageColor(pct), `${Math.round(pct)}%`);
 			const reset =
-				u.sevenDay.resetHours !== undefined
+				!compact && u.sevenDay.resetHours !== undefined
 					? theme.fg("muted", ` (${formatUsageReset(u.sevenDay.resetHours, "h")})`)
 					: "";
-			parts.push(`7d ${pctText}${reset}`);
+			parts.push(compact ? `7d${pctText}` : `7d ${pctText}${reset}`);
 		}
 		if (u.monthly) {
 			const pct = u.monthly.percent;
@@ -672,12 +730,13 @@ const usageSegment: StatusLineSegment = {
 			// "1% used"; OpenCode's endpoint already emits floored integers).
 			const pctText = theme.fg(pickUsageColor(pct), `${Math.floor(pct)}%`);
 			const reset =
-				u.monthly.resetHours !== undefined
+				!compact && u.monthly.resetHours !== undefined
 					? theme.fg("muted", ` (${formatUsageReset(u.monthly.resetHours, "h")})`)
 					: "";
-			parts.push(`mo ${pctText}${reset}`);
+			parts.push(compact ? `mo${pctText}` : `mo ${pctText}${reset}`);
 		}
-		const content = withIcon(theme.icon.time, parts.join(theme.sep.dot));
+		const joined = parts.join(compact ? "·" : theme.sep.dot);
+		const content = compact ? joined : withIcon(theme.icon.time, joined);
 		return { content, visible: true };
 	},
 };

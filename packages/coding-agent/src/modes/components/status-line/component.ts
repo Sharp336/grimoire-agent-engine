@@ -286,6 +286,65 @@ function hasGitBackedSegment(segments: readonly StatusLineSegmentId[]): boolean 
 	return hasGitSegment(segments) || hasPrSegment(segments);
 }
 
+interface WrappedStatusItem {
+	id?: StatusLineSegmentId;
+	content: string;
+}
+
+function wrappedStatusPriority(id: StatusLineSegmentId | undefined): number {
+	switch (id) {
+		case "context_pct":
+			return 100;
+		case "model":
+			return 95;
+		case "path":
+			return 90;
+		case "git":
+			return 85;
+		case "cache_hit":
+			return 80;
+		case "cache_read":
+			return 78;
+		case "token_total":
+			return 75;
+		case "mode":
+			return 72;
+		case "usage":
+			return 82;
+		case "token_rate":
+			return 68;
+		case "subagents":
+			return 65;
+		case "pr":
+			return 60;
+		case "cost":
+			return 55;
+		case "collab":
+			return 50;
+		case "time_spent":
+			return 45;
+		case "pi":
+			return 40;
+		case "token_in":
+		case "token_out":
+			return 35;
+		case "cache_write":
+			return 30;
+		case "context_total":
+			return 25;
+		case "session_name":
+			return 20;
+		case "session":
+			return 15;
+		case "hostname":
+			return 10;
+		case "time":
+			return 5;
+		default:
+			return 55; // synthetic runtime badges (for example background jobs)
+	}
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // StatusLineComponent
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1861,6 +1920,151 @@ export class StatusLineComponent implements Component {
 		const gapColor = getSessionAccentAnsi(accentHex) ?? theme.getFgAnsi("border");
 		const gapFill = `${gapColor}${theme.boxRound.horizontal.repeat(gapWidth)}\x1b[39m`;
 		return leftGroup + gapFill + rightGroup;
+	}
+
+	#buildWrappedRow(items: readonly WrappedStatusItem[], width: number): { content: string; width: number } {
+		if (width <= 0 || items.length === 0) return { content: "", width: 0 };
+
+		const effectiveSettings = this.#resolveSettings();
+		const separatorDef = getSeparator(effectiveSettings.separator ?? "powerline-thin", theme);
+		const TRANSPARENT_BG_ANSI = "\x1b[49m";
+		const themeBgAnsi = theme.getBgAnsi("statusLineBg");
+		const bgAnsi = effectiveSettings.transparent ? TRANSPARENT_BG_ANSI : themeBgAnsi;
+		const transparentBg = bgAnsi === TRANSPARENT_BG_ANSI;
+		const fgAnsi = theme.getFgAnsi("text");
+		const sepAnsi = theme.getFgAnsi("statusLineSep");
+		const sep = separatorDef.left;
+		const sepWidth = visibleWidth(sep);
+		const cap = separatorDef.endCaps && !transparentBg ? separatorDef.endCaps.right : "";
+		const capWidth = visibleWidth(cap);
+		const maxPartWidth = Math.max(1, width - 2 - capWidth);
+		const parts = items.map(item => truncateToWidth(item.content, maxPartWidth));
+		const partsWidth = parts.reduce((sum, part) => sum + visibleWidth(part), 0);
+		const rowWidth = Math.min(width, partsWidth + Math.max(0, parts.length - 1) * (sepWidth + 2) + 2 + capWidth);
+		const capPrefix = separatorDef.endCaps?.useBgAsFg ? bgAnsi.replace("\x1b[48;", "\x1b[38;") : bgAnsi + sepAnsi;
+		const capText = cap ? `${capPrefix}${this.#focusedAgentId ? "\x1b[22m" : ""}${cap}\x1b[0m` : "";
+
+		let content = bgAnsi + fgAnsi;
+		content += ` ${parts.join(` ${sepAnsi}${sep}${fgAnsi} `)} `;
+		content += "\x1b[0m";
+		if (capText) content += capText;
+
+		const gapWidth = Math.max(0, width - rowWidth);
+		if (gapWidth > 0) {
+			const sessionName =
+				effectiveSettings.sessionAccent !== false ? this.session.sessionManager?.getSessionName() : undefined;
+			const accentHex = sessionName
+				? getSessionAccentHex(sessionName, theme.getMajorThemeColorHexes(), theme.accentSurfaceLuminance)
+				: undefined;
+			const gapColor = getSessionAccentAnsi(accentHex) ?? theme.getFgAnsi("border");
+			content += `${gapColor}${theme.boxRound.horizontal.repeat(gapWidth)}\x1b[39m`;
+		}
+
+		if (this.#focusedAgentId && content) {
+			content = `\x1b[2m${content.replaceAll("\x1b[0m", "\x1b[0m\x1b[2m")}\x1b[22m`;
+		}
+		return { content, width: visibleWidth(content) };
+	}
+
+	getTopBorderRows(width: number): readonly { content: string; width: number }[] {
+		if (width <= 0) return [{ content: "", width: 0 }];
+
+		const effectiveSettings = this.#resolveSettings();
+		const allSegmentIds: StatusLineSegmentId[] = [];
+		const seen = new Set<StatusLineSegmentId>();
+		for (const id of [...effectiveSettings.leftSegments, ...effectiveSettings.rightSegments]) {
+			if (seen.has(id)) continue;
+			seen.add(id);
+			allSegmentIds.push(id);
+		}
+
+		const includePath = hasPathSegment(allSegmentIds);
+		const includeContext = hasContextSegment(allSegmentIds);
+		const gitEnabled = this.#gitEnabled();
+		const includeGit = gitEnabled && hasGitSegment(allSegmentIds);
+		const includePr = gitEnabled && hasPrSegment(allSegmentIds);
+		const ctx = this.#buildSegmentContext(
+			width,
+			effectiveSettings.segmentOptions,
+			includePath,
+			includeContext,
+			includeGit,
+			includePr,
+		);
+
+		let items: WrappedStatusItem[] = [];
+		for (const id of allSegmentIds) {
+			const rendered = renderSegment(id, ctx);
+			if (rendered.visible && rendered.content) items.push({ id, content: rendered.content });
+		}
+
+		const runningBackgroundJobs = this.session.getAsyncJobSnapshot()?.running.length ?? 0;
+		if (runningBackgroundJobs > 0) {
+			const jobItem: WrappedStatusItem = {
+				content: theme.fg("statusLineSubagents", `${theme.icon.job} ${runningBackgroundJobs}`),
+			};
+			const metricsStart = items.findIndex(item => item.id === "context_pct");
+			items.splice(metricsStart >= 0 ? metricsStart : items.length, 0, jobItem);
+		}
+
+		const separatorDef = getSeparator(effectiveSettings.separator ?? "powerline-thin", theme);
+		const transparentBg = effectiveSettings.transparent || theme.getBgAnsi("statusLineBg") === "\x1b[49m";
+		const sepWidth = visibleWidth(separatorDef.left);
+		const capWidth = separatorDef.endCaps && !transparentBg ? visibleWidth(separatorDef.endCaps.right) : 0;
+		const maxItemWidth = Math.max(1, width - 2 - capWidth);
+		items = items.map(item => ({ ...item, content: truncateToWidth(item.content, maxItemWidth) }));
+
+		const rowWidth = (row: readonly WrappedStatusItem[]): number => {
+			if (row.length === 0) return 0;
+			const contentWidth = row.reduce((sum, item) => sum + visibleWidth(item.content), 0);
+			return contentWidth + Math.max(0, row.length - 1) * (sepWidth + 2) + 2 + capWidth;
+		};
+
+		const pack = (source: readonly WrappedStatusItem[]): WrappedStatusItem[][] => {
+			const rows: WrappedStatusItem[][] = [];
+			let current: WrappedStatusItem[] = [];
+			for (const item of source) {
+				if (current.length === 0 || rowWidth([...current, item]) <= width) {
+					current.push(item);
+					continue;
+				}
+				rows.push(current);
+				current = [item];
+			}
+			if (current.length > 0) rows.push(current);
+			return rows;
+		};
+
+		const layoutRows = (): WrappedStatusItem[][] => {
+			// On narrow terminals, reserve row 2 for operational metrics even when
+			// normal packing would put one metric on row 1 and leave row 2 sparse.
+			if (width <= 160) {
+				const metricsStart = items.findIndex(item => item.id === "context_pct");
+				if (metricsStart > 0 && metricsStart < items.length) {
+					return [items.slice(0, metricsStart), items.slice(metricsStart)];
+				}
+			}
+			return pack(items);
+		};
+
+		let rows = layoutRows();
+		while ((rows.length > 2 || rows.some(row => rowWidth(row) > width)) && items.length > 2) {
+			let dropIndex = -1;
+			let dropPriority = Number.POSITIVE_INFINITY;
+			for (let index = items.length - 1; index >= 0; index--) {
+				const priority = wrappedStatusPriority(items[index]?.id);
+				if (priority < dropPriority) {
+					dropPriority = priority;
+					dropIndex = index;
+				}
+			}
+			if (dropIndex < 0) break;
+			items.splice(dropIndex, 1);
+			rows = layoutRows();
+		}
+
+		if (rows.length === 0) return [{ content: "", width: 0 }];
+		return rows.slice(0, 2).map(row => this.#buildWrappedRow(row, width));
 	}
 
 	getTopBorder(width: number): { content: string; width: number; revision: number } {

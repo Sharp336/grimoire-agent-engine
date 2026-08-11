@@ -287,6 +287,22 @@ describe("usage status-line segment", () => {
 		expect(content).toContain("10%");
 	});
 
+	it("compacts but preserves both usage percentages on narrow status lines", () => {
+		const result = renderSegment("usage", {
+			width: 80,
+			usage: {
+				tier: "max",
+				fiveHour: { percent: 3, resetMinutes: 120 },
+				sevenDay: { percent: 92, resetHours: 2 },
+			},
+		} as unknown as SegmentContext);
+		const content = stripVTControlCharacters(result.content);
+
+		expect(content).toBe("5h3%·7d92%");
+		expect(content).not.toContain("max");
+		expect(content).not.toContain("2h");
+	});
+
 	it("sanitizes tier labels before rendering", () => {
 		const result = renderSegment("usage", {
 			usage: {
