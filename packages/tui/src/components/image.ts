@@ -143,16 +143,10 @@ export class ImageBudget {
 		return id;
 	}
 
-	/**
-	 * Release a keyed image that has left the component tree.
-	 *
-	 * Kitty keeps transmitted image data after text rows disappear, so ephemeral
-	 * placements such as composer previews must explicitly retire their id.
-	 */
-	releaseKey(key: string): void {
-		const id = this.#keyToId.get(key);
-		if (id === undefined) return;
-		this.#keyToId.delete(key);
+	/** Release an image id that has left the component tree. */
+	releaseId(id: number): void {
+		const key = this.#idToKey.get(id);
+		if (key !== undefined) this.#keyToId.delete(key);
 		this.#idToKey.delete(id);
 		this.#suppressedIds.delete(id);
 		if (this.#transmitted.delete(id) && !this.#purgeIds.includes(id)) {
@@ -375,6 +369,19 @@ export class Image implements Component {
 	invalidate(): void {
 		this.#cachedLines = undefined;
 		this.#cachedWidth = undefined;
+	}
+
+	/**
+	 * Retire this image's terminal data before removing the component.
+	 *
+	 * Releasing by id remains valid after a global terminal-image clear resets
+	 * the budget's keyed lookup tables and the component later retransmits.
+	 */
+	dispose(): void {
+		if (this.#imageId === undefined) return;
+		this.#budget?.releaseId(this.#imageId);
+		this.#imageId = undefined;
+		this.invalidate();
 	}
 
 	render(width: number): readonly string[] {

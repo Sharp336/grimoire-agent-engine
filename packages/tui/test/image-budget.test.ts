@@ -408,6 +408,32 @@ describe("Image budget integration", () => {
 		expect([...budget.takeTransmits()]).toEqual([]);
 	});
 
+	it("purges a disposed image after a global clear and retransmit", () => {
+		const budget = new ImageBudget(3, () => {});
+		const image = new Image(
+			BASE64_ONE_PIXEL_PNG,
+			"image/png",
+			{ fallbackColor: text => text },
+			{ maxWidthCells: 4, maxHeightCells: 4, budget, imageKey: "k" },
+		);
+
+		budget.beginPass();
+		image.render(20);
+		budget.endPass();
+		expect(budget.takeTransmits()).toHaveLength(1);
+		const [imageId] = budget.takeAllTransmittedIds();
+		expect(imageId).toBeDefined();
+
+		image.invalidate();
+		budget.beginPass();
+		image.render(20);
+		budget.endPass();
+		expect(budget.takeTransmits()).toHaveLength(1);
+
+		image.dispose();
+		expect(budget.takePurgeIds()).toEqual([imageId]);
+	});
+
 	it("moves back up before multi-row direct Kitty placements and restores the cursor below them", () => {
 		const budget = new ImageBudget(3, () => {});
 		const id = budget.acquireId("k");

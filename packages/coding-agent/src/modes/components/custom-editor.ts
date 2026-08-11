@@ -400,7 +400,6 @@ class PendingImagePreview implements Component {
 	#displayImage: ImageContent | undefined;
 	#currentImageProtocol: typeof TERMINAL.imageProtocol = null;
 	#currentImageComponent: Image | undefined;
-	#currentImageKey: string | undefined;
 	#conversionVersion = 0;
 	#requestRender: (() => void) | undefined;
 
@@ -441,12 +440,11 @@ class PendingImagePreview implements Component {
 
 	clear(): void {
 		this.#conversionVersion++;
-		if (this.#currentImageKey !== undefined) this.#budget?.releaseKey(this.#currentImageKey);
+		this.#currentImageComponent?.dispose();
 		this.#currentImage = undefined;
 		this.#displayImage = undefined;
 		this.#currentImageProtocol = null;
 		this.#currentImageComponent = undefined;
-		this.#currentImageKey = undefined;
 	}
 
 	#selectImage(image: ImageContent, protocol: typeof TERMINAL.imageProtocol): void {
@@ -499,7 +497,6 @@ class PendingImagePreview implements Component {
 
 		if (this.#currentImageComponent === undefined) {
 			const imageKey = `composer-preview:${++nextComposerImagePreviewKey}`;
-			this.#currentImageKey = imageKey;
 			this.#currentImageComponent = new Image(
 				displayImage.data,
 				displayImage.mimeType,
