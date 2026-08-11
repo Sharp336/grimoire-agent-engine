@@ -15,13 +15,16 @@ import {
 	type LiveClientMessage,
 	type LiveServerEvent,
 } from "./protocol";
-import { CodexLiveTransport } from "./transport";
+import { resolveVoiceProvider, type VoiceProviderConfig, type VoiceProviderId } from "./provider";
+import type { ILiveTransport, LiveTransportIdentity } from "./transport-types";
 import type { LivePhase } from "./visualizer";
-import { DEFAULT_LIVE_VOICE } from "./voices";
 
 const OUTPUT_ACTIVE_LEVEL = 0.015;
-const MIN_BARGE_IN_LEVEL = 0.04;
-const OUTPUT_ECHO_RATIO = 0.65;
+
+interface PendingDelegation {
+	id: string;
+	request: string;
+}
 
 /** Incremental or final transcript for one realtime conversational turn. */
 export interface LiveTranscript {
@@ -30,6 +33,7 @@ export interface LiveTranscript {
 	/** Monotonic role-local turn number used to coalesce streaming updates. */
 	turn: number;
 	final: boolean;
+	identity: LiveTransportIdentity;
 }
 
 /** UI notifications emitted during a live session. */
@@ -52,8 +56,12 @@ export interface LiveSessionControllerOptions {
 	callbacks: LiveSessionCallbacks;
 	/** Extracts visible assistant text using the caller's normal UI rules. */
 	extractAssistantText(message: AssistantMessage): string;
-	/** Realtime output voice, defaulting to sol. */
-	voice?: string;
+	/** Ranked provider preference; unlisted providers retain built-in fallback order. */
+	providerOrder?: readonly VoiceProviderId[];
+	/** Optional one-session provider override. */
+	provider?: VoiceProviderId;
+	/** Provider-owned voice and model settings. */
+	providerConfigs?: Partial<Record<VoiceProviderId, VoiceProviderConfig>>;
 }
 
 function errorFrom(cause: unknown): Error {
@@ -92,9 +100,11 @@ export class LiveSessionController {
 	readonly #session: AgentSession;
 	readonly #callbacks: LiveSessionCallbacks;
 	readonly #extractAssistantText: (message: AssistantMessage) => string;
-	readonly #voice: string;
+	readonly #providerOrder: readonly VoiceProviderId[];
+	readonly #provider: VoiceProviderId | undefined;
+	readonly #providerConfigs: Partial<Record<VoiceProviderId, VoiceProviderConfig>>;
 
-	#transport: CodexLiveTransport | undefined;
+	#transport: ILiveTransport | undefined;
 	#recorder: AudioCapture | undefined;
 	#unsubscribeSession: (() => void) | undefined;
 	#sendChain: Promise<void> = Promise.resolve();
@@ -108,6 +118,7 @@ export class LiveSessionController {
 	#inputLevel = 0;
 	#outputLevel = 0;
 	#activeDelegationId: string | undefined;
+	readonly #delegationQueue: PendingDelegation[] = [];
 	#userTranscript = "";
 	#assistantTranscript = "";
 	#userTranscriptFinal = false;
@@ -120,9 +131,10 @@ export class LiveSessionController {
 		this.#session = options.session;
 		this.#callbacks = options.callbacks;
 		this.#extractAssistantText = options.extractAssistantText;
-		this.#voice = options.voice?.trim() || DEFAULT_LIVE_VOICE;
+		this.#providerOrder = options.providerOrder ?? [];
+		this.#provider = options.provider;
+		this.#providerConfigs = options.providerConfigs ?? {};
 	}
-
 	/** Current realtime call phase. */
 	get phase(): LivePhase {
 		return this.#phase;
@@ -151,16 +163,29 @@ export class LiveSessionController {
 		try {
 			const user = currentUser();
 			const instructions = prompt.render(liveInstructionsTemplate, user);
-			const transport = new CodexLiveTransport({
+			const provider = await resolveVoiceProvider({
+				authStorage: this.#session.modelRegistry.authStorage,
+				sessionId: this.#session.sessionId,
+				order: this.#providerOrder,
+				forced: this.#provider,
+			});
+			if (this.#stopped) {
+				throw this.#failure ?? new Error("The live session stopped while selecting a provider.");
+			}
+			const transport = provider.createTransport({
 				authStorage: this.#session.modelRegistry.authStorage,
 				sessionId: this.#session.sessionId,
 				instructions,
-				voice: this.#voice,
+				config: this.#providerConfigs[provider.id],
 				callbacks: {
 					onEvent: event => this.#guardEvent(() => this.#handleLiveEvent(event)),
 					onOutputLevel: level => this.#guardEvent(() => this.#handleOutputLevel(level)),
 				},
 			});
+			if (this.#stopped) {
+				await transport.close();
+				throw this.#failure ?? new Error("The live session stopped while creating a provider transport.");
+			}
 			this.#transport = transport;
 			await transport.connect();
 			if (this.#stopped) {
@@ -172,6 +197,11 @@ export class LiveSessionController {
 			if (this.#muted) await transport.setMuted(true);
 			if (this.#stopped) {
 				throw this.#failure ?? new Error("The live session stopped before recording began.");
+			}
+			if (typeof AudioCapture !== "function") {
+				throw new Error(
+					"Microphone capture is unavailable because the installed native bindings do not include AudioCapture.",
+				);
 			}
 			const recorder = new AudioCapture(16_000, (error, samples) => {
 				if (error) {
@@ -223,6 +253,8 @@ export class LiveSessionController {
 		this.#stopped = true;
 		this.#unsubscribeSession?.();
 		this.#unsubscribeSession = undefined;
+		this.#activeDelegationId = undefined;
+		this.#delegationQueue.length = 0;
 		let cleanupError: Error | undefined;
 
 		const recorder = this.#recorder;
@@ -299,13 +331,24 @@ export class LiveSessionController {
 		}
 		request = request.trim();
 		if (!request) return;
-		this.#activeDelegationId = event.item.id;
+		this.#delegationQueue.push({ id: event.item.id, request });
+		this.#startNextDelegation();
+	}
+
+	#startNextDelegation(): void {
+		if (this.#activeDelegationId || this.#stopped) return;
+		const delegation = this.#delegationQueue.shift();
+		if (!delegation) {
+			this.#refreshAudioPhase();
+			return;
+		}
+		this.#activeDelegationId = delegation.id;
 		this.#emitPhase("working");
 		void this.#session
 			.sendCustomMessage(
 				{
 					customType: LIVE_DELEGATION_MESSAGE_TYPE,
-					content: request,
+					content: delegation.request,
 					display: true,
 					attribution: "agent",
 				},
@@ -336,19 +379,20 @@ export class LiveSessionController {
 	#appendFinalResponse(messages: readonly AgentMessage[]): void {
 		const delegationId = this.#activeDelegationId;
 		if (!delegationId) return;
+		let text = "";
 		for (let index = messages.length - 1; index >= 0; index -= 1) {
 			const message = messages[index];
 			if (message?.role !== "assistant") continue;
-			const text = this.#extractAssistantText(message).trim();
-			if (!text) continue;
-			const finalContext = prompt.render(agentFinalMessageTemplate, { message: text });
-			for (const chunk of chunkLiveContext(finalContext)) {
-				this.#queueSend(buildDelegationContextAppend(delegationId, chunk));
-			}
-			break;
+			text = this.#extractAssistantText(message).trim();
+			if (text) break;
+		}
+		const finalContext = chunkLiveContext(prompt.render(agentFinalMessageTemplate, { message: text }));
+		for (const [chunkIndex, chunk] of finalContext.entries()) {
+			const channel = chunkIndex === finalContext.length - 1 ? "speakable" : "commentary";
+			this.#queueSend(buildDelegationContextAppend(delegationId, chunk, channel));
 		}
 		this.#activeDelegationId = undefined;
-		this.#refreshAudioPhase();
+		this.#startNextDelegation();
 	}
 
 	#handleOutputLevel(level: number): void {
@@ -358,13 +402,10 @@ export class LiveSessionController {
 	}
 
 	#handleMicrophoneAudio(samples: Float32Array): void {
-		if (this.#stopped || !this.#transport) return;
-		if (this.#muted) return;
+		if (this.#stopped || !this.#transport || this.#muted) return;
 		this.#inputLevel = microphoneLevel(samples);
 		this.#emitLevels();
-		const outputActive = this.#outputLevel > OUTPUT_ACTIVE_LEVEL;
-		const echoThreshold = Math.max(MIN_BARGE_IN_LEVEL, this.#outputLevel * OUTPUT_ECHO_RATIO);
-		if (outputActive && this.#inputLevel < echoThreshold) return;
+		if (!this.#transport.shouldStreamAudio(this.#inputLevel, this.#outputLevel)) return;
 		try {
 			this.#transport.pushAudio(samples);
 		} catch (cause) {
@@ -418,7 +459,8 @@ export class LiveSessionController {
 
 	#storeTranscript(role: LiveTranscript["role"], text: string, final: boolean): void {
 		const normalized = text.trim();
-		if (!normalized) return;
+		const identity = this.#transport?.identity;
+		if (!normalized || !identity) return;
 		const turn = role === "user" ? this.#userTranscriptTurn : this.#assistantTranscriptTurn;
 		if (role === "user") {
 			this.#userTranscript = normalized;
@@ -435,7 +477,7 @@ export class LiveSessionController {
 		) {
 			return;
 		}
-		this.#emitTranscript({ role, turn, text: normalized, final });
+		this.#emitTranscript({ role, turn, text: normalized, final, identity });
 	}
 
 	#queueSend(message: LiveClientMessage): void {

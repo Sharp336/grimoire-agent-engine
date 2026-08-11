@@ -1374,6 +1374,21 @@ export class Settings {
 		}
 		delete raw.collapseChangelog;
 		delete raw["startup.changelogMode"];
+		// live.voice -> live.codexVoice. `/live` now keeps provider-specific
+		// voice preferences so selecting a Grok voice never overwrites Codex.
+		// Preserve an explicit new key and handle nested or quoted-dotted legacy sources.
+		const liveObj = isRecord(raw.live) ? (raw.live as Record<string, unknown>) : undefined;
+		const nestedLegacyVoice = typeof liveObj?.voice === "string" ? liveObj.voice : undefined;
+		const flatLegacyVoice = typeof raw["live.voice"] === "string" ? (raw["live.voice"] as string) : undefined;
+		if (nestedLegacyVoice !== undefined || flatLegacyVoice !== undefined) {
+			if (!liveObj) raw.live = {};
+			const target = raw.live as Record<string, unknown>;
+			if (target.codexVoice === undefined) {
+				target.codexVoice = nestedLegacyVoice ?? flatLegacyVoice;
+			}
+			delete target.voice;
+		}
+		delete raw["live.voice"];
 
 		// ask.timeout: ms -> seconds (if value > 1000, it's old ms format)
 		if (raw.ask && typeof (raw.ask as Record<string, unknown>).timeout === "number") {

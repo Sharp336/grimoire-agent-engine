@@ -1,4 +1,4 @@
-import { type AuthStorage, isAuthRetryableError, type OAuthAccess, withOAuthAccess } from "@oh-my-pi/pi-ai";
+import { isAuthRetryableError, type OAuthAccess, withOAuthAccess } from "@oh-my-pi/pi-ai";
 import { getProxyForUrl, wrapFetchForProxy } from "@oh-my-pi/pi-ai/utils/proxy";
 import {
 	CODEX_BASE_URL,
@@ -8,12 +8,7 @@ import {
 } from "@oh-my-pi/pi-catalog/wire/codex";
 import { LiveWebRtcPeer } from "@oh-my-pi/pi-natives";
 import { generateCodexAttestation } from "./attestation";
-import {
-	buildLiveSessionPayload,
-	type LiveClientMessage,
-	type LiveServerEvent,
-	parseLiveServerEvent,
-} from "./protocol";
+import { buildLiveSessionPayload, LIVE_MODEL, type LiveClientMessage, parseLiveServerEvent } from "./protocol";
 
 const SIGNALING_URL = `${CODEX_BASE_URL}/codex/realtime/calls?intent=quicksilver&architecture=avas`;
 const MAX_ERROR_BODY_LENGTH = 2_048;
@@ -22,6 +17,9 @@ const SIDEBAND_CONNECT_TIMEOUT_MS = 15_000;
 const LIVE_PROVIDER = "openai-codex";
 const LIVE_ORIGINATOR = "Codex Desktop";
 const LIVE_CALL_ID_PATTERN = /^rtc_[\w-]+$/;
+const MIN_BARGE_IN_LEVEL = 0.04;
+const OUTPUT_ACTIVE_LEVEL = 0.015;
+const OUTPUT_ECHO_RATIO = 0.65;
 
 type Lifecycle = "idle" | "connecting" | "connected" | "closing" | "closed";
 
@@ -44,21 +42,9 @@ class LiveSignalingError extends Error {
 	}
 }
 
-/** Callbacks emitted by the live WebRTC transport. */
-export interface LiveTransportCallbacks {
-	onEvent(event: LiveServerEvent): void;
-	onOutputLevel(level: number): void;
-}
+export * from "./transport-types";
 
-/** Configuration required to establish a Codex live call. */
-export interface LiveTransportOptions {
-	authStorage: AuthStorage;
-	sessionId: string;
-	instructions: string;
-	voice: string;
-	callbacks: LiveTransportCallbacks;
-	signal?: AbortSignal;
-}
+import type { ILiveTransport, LiveTransportIdentity, LiveTransportOptions } from "./transport-types";
 
 /** Extracts the server-assigned `rtc_*` call ID from a signaling Location header. */
 export function parseLiveCallId(location: string | null): string | undefined {
@@ -115,7 +101,13 @@ function abortReason(signal: AbortSignal | undefined): Error {
 }
 
 /** Native WebRTC transport for a Codex Frameless Bidi live session. */
-export class CodexLiveTransport {
+export class CodexLiveTransport implements ILiveTransport {
+	readonly identity = {
+		voiceProvider: "codex",
+		api: "openai-codex-responses",
+		provider: LIVE_PROVIDER,
+		model: LIVE_MODEL,
+	} satisfies LiveTransportIdentity;
 	readonly #options: LiveTransportOptions;
 	#peer: LiveWebRtcPeer | undefined;
 	readonly #realtimeSessionId = crypto.randomUUID();
@@ -380,6 +372,13 @@ export class CodexLiveTransport {
 		});
 		this.#sendTail = operation.catch(() => {});
 		return operation;
+	}
+
+	/** Preserve Codex's client-side speaker-echo gate while output audio is active. */
+	shouldStreamAudio(inputLevel: number, outputLevel: number): boolean {
+		if (outputLevel <= OUTPUT_ACTIVE_LEVEL) return true;
+		const echoThreshold = Math.max(MIN_BARGE_IN_LEVEL, outputLevel * OUTPUT_ECHO_RATIO);
+		return inputLevel >= echoThreshold;
 	}
 
 	/** Queue 16 kHz mono Float32 PCM for native Opus transmission. */
