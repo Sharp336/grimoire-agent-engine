@@ -3570,20 +3570,30 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.showWarning("Resume the current goal first, or drop it before setting a new objective.");
 				return;
 			}
-			if (this.#goalModePreviousTools !== undefined) {
-				this.showStatus("A guided goal interview is already active.");
-				return;
-			}
 
 			if (!this.session.hasBuiltInTool("ask")) {
 				this.showWarning("Guided goal requires the ask tool. Enable ask.enabled and include ask in --tools.");
 				return;
 			}
+			if (this.#guidedGoalInterviewCleanup) {
+				await this.#guidedGoalInterviewCleanup;
+			}
+			const kickoff = prompt.render(guidedGoalInterviewPrompt, { initial: rest?.trim() || undefined });
+			const queuedKickoff = this.#guidedGoalQueuedKickoff;
+			if (queuedKickoff !== undefined && this.session.replaceQueuedAgentFollowUp(queuedKickoff, kickoff)) {
+				this.#guidedGoalQueuedKickoff = kickoff;
+				return;
+			}
+			if (this.#goalModePreviousTools !== undefined && this.session.isStreaming) {
+				this.#guidedGoalInterviewActive = false;
+				this.#guidedGoalQueuedKickoff = undefined;
+				await this.session.abort({ goalReason: "internal" });
+			}
 
 			// Expose ask and goal for the interview. Record the pre-interview
 			// toolset so goal exit restores the user's exact selection.
 			const enabledTools = this.session.getEnabledToolNames();
-			this.#goalModePreviousTools = enabledTools;
+			this.#goalModePreviousTools ??= enabledTools;
 			this.#guidedGoalInterviewActive = true;
 			this.#guidedGoalQueuedKickoff = undefined;
 			const interviewTools = [...enabledTools];
@@ -3593,10 +3603,8 @@ export class InteractiveMode implements InteractiveModeContext {
 				await this.session.setActiveToolsByName(interviewTools);
 			}
 
-			// The hidden kickoff routes questions through the blocking ask dialog,
-			// except when the user explicitly redirects to chat. Queue behind an
-			// in-flight run instead of aborting it.
-			const kickoff = prompt.render(guidedGoalInterviewPrompt, { initial: rest?.trim() || undefined });
+			// Queue the first interview behind unrelated in-flight work. A repeat
+			// above coalesces a pending kickoff or aborts the running interview.
 			if (this.session.isStreaming) {
 				await this.#queueGuidedGoalKickoff(kickoff);
 				return;
