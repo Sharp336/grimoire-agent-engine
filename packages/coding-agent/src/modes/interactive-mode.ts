@@ -3506,20 +3506,25 @@ export class InteractiveMode implements InteractiveModeContext {
 				return;
 			}
 
-			// Expose the goal tool for the interview so the agent can finish by
-			// calling `goal create`. Record the pre-interview toolset first: the
-			// tool-driven create flips goalModeEnabled via `goal_updated`, and the
-			// eventual goal exit restores this set (dropping the goal tool again).
-			const enabledTools = this.session.getEnabledToolNames();
-			this.#goalModePreviousTools = enabledTools.filter(name => name !== "goal");
-			if (!enabledTools.includes("goal")) {
-				await this.session.setActiveToolsByName([...enabledTools, "goal"]);
+			if (!this.session.hasBuiltInTool("ask")) {
+				this.showWarning("Guided goal requires the ask tool. Enable ask.enabled and include ask in --tools.");
+				return;
 			}
 
-			// The interview is a normal conversation: the kickoff rides in as a
-			// hidden developer message, the agent asks its questions as regular
-			// assistant turns, and the user answers in the ordinary editor. Queue
-			// behind an in-flight run instead of aborting it.
+			// Expose ask and goal for the interview. Record the pre-interview
+			// toolset so goal exit restores the user's exact selection.
+			const enabledTools = this.session.getEnabledToolNames();
+			this.#goalModePreviousTools = enabledTools.filter(name => name !== "goal");
+			const interviewTools = [...enabledTools];
+			if (!interviewTools.includes("ask")) interviewTools.push("ask");
+			if (!interviewTools.includes("goal")) interviewTools.push("goal");
+			if (interviewTools.length !== enabledTools.length) {
+				await this.session.setActiveToolsByName(interviewTools);
+			}
+
+			// The hidden kickoff routes questions through the blocking ask dialog,
+			// except when the user explicitly redirects to chat. Queue behind an
+			// in-flight run instead of aborting it.
 			const kickoff = prompt.render(guidedGoalInterviewPrompt, { initial: rest?.trim() || undefined });
 			if (this.session.isStreaming) {
 				await this.session.followUp(kickoff, undefined, { synthetic: true });

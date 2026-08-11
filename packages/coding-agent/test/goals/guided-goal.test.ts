@@ -33,12 +33,17 @@ type GuidedGoalHarness = {
 	cleanup: () => Promise<void>;
 };
 
-async function createHarness(options?: { goalEnabled?: boolean }): Promise<GuidedGoalHarness> {
+async function createHarness(options?: {
+	askEnabled?: boolean;
+	goalEnabled?: boolean;
+	includeAsk?: boolean;
+}): Promise<GuidedGoalHarness> {
 	resetSettingsForTest();
 	const tempDir = TempDir.createSync("@pi-guided-goal-");
 	await Settings.init({ inMemory: true, cwd: tempDir.path() });
 	const settings = Settings.isolated({
 		"compaction.enabled": false,
+		"ask.enabled": options?.askEnabled ?? true,
 		"goal.enabled": options?.goalEnabled ?? true,
 		"plan.enabled": true,
 	});
@@ -48,8 +53,12 @@ async function createHarness(options?: { goalEnabled?: boolean }): Promise<Guide
 	if (!model) {
 		throw new Error("Expected claude-sonnet-4-5 to exist in registry");
 	}
-	const initialTools = await createTools(createToolSession(tempDir.path(), settings), ["read"]);
-	const toolRegistry = new Map<string, Tool>(initialTools.map(tool => [tool.name, tool] as const));
+	const registeredTools = await createTools(
+		createToolSession(tempDir.path(), settings, { hasUI: true }),
+		options?.includeAsk === false ? ["read"] : ["read", "ask"],
+	);
+	const initialTools = registeredTools.filter(tool => tool.name === "read");
+	const toolRegistry = new Map<string, Tool>(registeredTools.map(tool => [tool.name, tool] as const));
 	const session = new AgentSession({
 		agent: new Agent({
 			initialState: {
@@ -63,6 +72,7 @@ async function createHarness(options?: { goalEnabled?: boolean }): Promise<Guide
 		settings,
 		modelRegistry,
 		toolRegistry,
+		builtInToolNames: registeredTools.map(tool => tool.name),
 		rebuildSystemPrompt: async () => ({ systemPrompt: ["Test"] }),
 	});
 	// Mirror sdk.ts assembly: the goal tool is pre-registered (hidden) whenever
@@ -102,10 +112,13 @@ describe("guided goal setup", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("kicks off the interview as a hidden developer prompt and exposes the goal tool", async () => {
+	it("activates the ask and goal tools before kicking off the interview", async () => {
 		const harness = await createHarness();
 		try {
-			const promptSpy = vi.spyOn(harness.session, "prompt").mockResolvedValue(true);
+			const promptSpy = vi.spyOn(harness.session, "prompt").mockImplementation(async () => {
+				expect(harness.session.getEnabledToolNames()).toEqual(expect.arrayContaining(["ask", "goal"]));
+				return true;
+			});
 
 			await harness.mode.handleGuidedGoalCommand("automate flaky test triage");
 
@@ -116,9 +129,8 @@ describe("guided goal setup", () => {
 			// agent how to finish: `goal` tool, op create.
 			expect(text).toContain("automate flaky test triage");
 			expect(text).toContain('op: "create"');
-			// The goal tool is activated up front so the agent can create the goal
-			// once the interview concludes.
-			expect(harness.session.getEnabledToolNames()).toContain("goal");
+			// Both tools must be active before the model receives the kickoff.
+			expect(harness.session.getEnabledToolNames()).toEqual(expect.arrayContaining(["ask", "goal"]));
 		} finally {
 			await harness.cleanup();
 		}
@@ -278,23 +290,23 @@ describe("guided goal setup", () => {
 		}
 	});
 
-	it("orders the interview through the ask tool so the loop stops for input", async () => {
-		const harness = await createHarness();
-		try {
-			const promptSpy = vi.spyOn(harness.session, "prompt").mockResolvedValue(true);
+	it("refuses the interview when the built-in ask tool is unavailable", async () => {
+		for (const options of [{ askEnabled: false }, { includeAsk: false }]) {
+			const harness = await createHarness(options);
+			try {
+				const promptSpy = vi.spyOn(harness.session, "prompt").mockResolvedValue(true);
+				const warning = vi.spyOn(harness.mode, "showWarning");
 
-			await harness.mode.handleGuidedGoalCommand("automate flaky test triage");
+				await harness.mode.handleGuidedGoalCommand("automate flaky test triage");
 
-			const [text] = promptSpy.mock.calls[0]!;
-			// A prose question is not a turn boundary. Under auto-accept, YOLO, or any
-			// non-interactive run the loop continues on its own, so a prose interview
-			// never receives an answer and the agent invents the objective instead. The
-			// kickoff must route questions through a tool prompt, and must not order the
-			// agent to avoid tool calls while interviewing.
-			expect(text).toContain("exactly one `ask` call per reply");
-			expect(text).not.toContain("No tool calls");
-		} finally {
-			await harness.cleanup();
+				expect(promptSpy).not.toHaveBeenCalled();
+				expect(warning).toHaveBeenCalledWith(
+					"Guided goal requires the ask tool. Enable ask.enabled and include ask in --tools.",
+				);
+				expect(harness.session.getEnabledToolNames()).not.toContain("goal");
+			} finally {
+				await harness.cleanup();
+			}
 		}
 	});
 });

@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed `/guided-goal` ordering a prose interview with no tool calls; the kickoff now runs the interview through the `ask` tool, so auto-accept, YOLO, and non-interactive runs stop for an answer instead of auto-continuing while the agent invents the objective.
+- Fixed `/guided-goal` interviewing from assumptions and asking in prose; the TUI command now requires the `ask` tool, allows read-only recon before questions, and abandons missing or timed-out input instead of inventing an objective.
 
 ## [17.2.12] - 2026-08-08
 
