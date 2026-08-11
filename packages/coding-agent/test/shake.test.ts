@@ -1,15 +1,24 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
-import { type AfterToolCallContext, Agent, type AgentMessage, RESCUE_SHAKE_CONFIG } from "@oh-my-pi/pi-agent-core";
+import { type } from "@oh-my-pi/omptype";
+import {
+	type AfterToolCallContext,
+	Agent,
+	type AgentMessage,
+	type AgentTool,
+	RESCUE_SHAKE_CONFIG,
+} from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import { DEFAULT_SHAKE_CONFIG } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -759,6 +768,7 @@ describe("AgentSession shake", () => {
 
 	describe("periodic shake interval", () => {
 		let toolCallCounter = 0;
+		const harnessSessions: AgentSession[] = [];
 
 		/** Bump the periodic shake counter by invoking afterToolCall with a minimal fixture. */
 		function bumpToolCallCounter(): void {
@@ -791,20 +801,136 @@ describe("AgentSession shake", () => {
 				timestamp: Date.now(),
 			};
 		}
-		/** Emit a turn_end event to flush deferred mid-run shake. */
-		function emitTurnEnd(msg = makeAssistantMessage()): void {
-			session.agent.emitExternalEvent({ type: "turn_end", message: msg, toolResults: [] });
-		}
-
-		/** Emit message_end + agent_end for a given message. */
+		/** Emit message_end + agent_end for a given message (external-event path). */
 		function emitEnd(msg: AssistantMessage): void {
 			session.agent.emitExternalEvent({ type: "message_end", message: msg });
 			session.agent.emitExternalEvent({ type: "agent_end", messages: [msg] });
 		}
 
-		afterEach(() => {
+		afterEach(async () => {
 			toolCallCounter = 0;
+			for (const harnessSession of harnessSessions) await harnessSession.dispose();
+			harnessSessions.length = 0;
 		});
+
+		// Real-loop harness: session.prompt() drives a scripted mock provider so
+		// the awaited onTurnEnd hook fires against the live loop array — the only
+		// path that can splice rebuilt messages into the running prompt context.
+		// Synthetic external turn_end events (emitExternalEvent) never reach the
+		// awaited hook (agent.ts #emit is fire-and-forget), so the mid-run shake
+		// contract is exercised through real loops below; agent_end-only paths
+		// (disabled interval, no-turn_end fallback) still use external events.
+		// ≈10k tokens: clears DEFAULT_SHAKE_CONFIG minSavings; `useless` results
+		// bypass the shake's protect-recent window, so a single heavy result is
+		// elidable even as the newest entry.
+		const HEAVY_USELESS_RESULT = "U".repeat(40_000);
+		type ScriptedTurn = {
+			text?: string;
+			stopReason?: "stop" | "toolUse" | "length" | "error";
+			errorMessage?: string;
+			usage?: typeof usage;
+			toolCalls?: number;
+		};
+		function createPeriodicHarness(settings: Record<string, unknown> = {}) {
+			const callContexts: AgentMessage[][] = [];
+			const scripted: ScriptedTurn[] = [];
+			let resultText = "";
+			let resultUseless = false;
+
+			const mockBash: AgentTool = {
+				name: "bash",
+				label: "Bash",
+				description: "Mock bash tool",
+				parameters: type({}),
+				execute: async () => ({
+					content: [{ type: "text" as const, text: resultText }],
+					...(resultUseless ? { useless: true } : {}),
+				}),
+			};
+
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected built-in anthropic model to exist");
+
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model, systemPrompt: ["Test"], tools: [mockBash], messages: [] },
+				convertToLlm,
+				streamFn: (_model, context) => {
+					callContexts.push(context.messages.map(message => message));
+					const turn = scripted.shift() ?? { stopReason: "stop", text: "done" };
+					const message: AssistantMessage = {
+						role: "assistant",
+						content: [
+							...(turn.text ? [{ type: "text" as const, text: turn.text }] : []),
+							...Array.from({ length: turn.toolCalls ?? 0 }, (_, index) => ({
+								type: "toolCall" as const,
+								id: `call_${toolCallCounter++}_${index}`,
+								name: "bash",
+								arguments: { command: "ls" },
+							})),
+						],
+						...apiInfo,
+						stopReason: turn.stopReason ?? "stop",
+						...(turn.errorMessage ? { errorMessage: turn.errorMessage } : {}),
+						usage: turn.usage ?? usage,
+						timestamp: Date.now(),
+					};
+					const stream = new AssistantMessageEventStream();
+					queueMicrotask(() => {
+						if (message.stopReason === "error") {
+							stream.push({ type: "error", reason: "error", error: message });
+						} else {
+							stream.push({ type: "start", partial: message });
+							stream.push({
+								type: "done",
+								reason:
+									message.stopReason === "length"
+										? "length"
+										: message.stopReason === "toolUse"
+											? "toolUse"
+											: "stop",
+								message,
+							});
+						}
+					});
+					return stream;
+				},
+			});
+
+			const harnessSession = new AgentSession({
+				agent,
+				sessionManager,
+				settings: Settings.isolated({
+					"compaction.enabled": true,
+					"compaction.autoContinue": false,
+					...settings,
+				}),
+				modelRegistry,
+			});
+			harnessSessions.push(harnessSession);
+
+			return {
+				session: harnessSession,
+				callContexts,
+				scripted,
+				/** Configure the mock bash tool's result for the next prompt. */
+				setResult: (text: string, useless = false) => {
+					resultText = text;
+					resultUseless = useless;
+				},
+			};
+		}
+
+		/** Let the fire-and-forget agent_end listener settle its shake pass. */
+		async function settle(target: AgentSession): Promise<void> {
+			await target.agent.waitForIdle();
+			await Bun.sleep(30);
+		}
+
+		function toolResultText(message: AgentMessage | undefined): string {
+			if (message?.role !== "toolResult") return "";
+			return message.content.map(block => (block.type === "text" ? block.text : "")).join("");
+		}
 
 		it("disabled interval resets pending counter so re-enabling starts fresh", async () => {
 			session.settings.set("compaction.strategy", "off");
@@ -825,103 +951,116 @@ describe("AgentSession shake", () => {
 			emitEnd(makeAssistantMessage("again"));
 			await Bun.sleep(30);
 
-			// Still no call — counter was reset when interval was 0
+			// Still no call — counter (and the pending mid-run flag) were reset
 			expect(shakeSpy).not.toHaveBeenCalled();
 		});
 
-		it("fires at interval boundary with conservative config and resets", async () => {
-			session.settings.set("compaction.strategy", "off");
-			session.settings.set("shake.interval", 2);
-			const shakeSpy = vi
-				.spyOn(session, "shake")
-				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 1_000 });
+		it("fires at interval boundary, syncs at agent_end, and does not re-fire after reset", async () => {
+			const { session, scripted, setResult } = createPeriodicHarness({
+				"compaction.strategy": "off",
+				"shake.interval": 2,
+			});
+			const shakeSpy = vi.spyOn(session, "shake");
 
-			// First tool call + end — below interval
-			bumpToolCallCounter();
-			emitEnd(makeAssistantMessage());
-			await Bun.sleep(30);
-			expect(shakeSpy).not.toHaveBeenCalled();
+			setResult("ok");
+			// Two tool calls (counter 1, then 2 ≥ interval), then a terminal turn
+			scripted.push({ stopReason: "toolUse", toolCalls: 1 });
+			scripted.push({ stopReason: "toolUse", toolCalls: 1 });
+			scripted.push({ stopReason: "stop", text: "done" });
+			await session.prompt("do it");
+			await settle(session);
 
-			// Second tool call + turn_end (mid-run) + agent_end (sync) — reaches interval.
-			// Shakes twice: once mid-run (skipAgentUpdate) and once at agent_end (sync state).
-			bumpToolCallCounter();
-			emitTurnEnd();
-			await Bun.sleep(10);
-			emitEnd(makeAssistantMessage("second"));
-			await Bun.sleep(30);
+			// Shakes twice: once mid-run at the turn_end hook, once at agent_end (sync).
 			expect(shakeSpy).toHaveBeenCalledTimes(2);
 			expect(shakeSpy).toHaveBeenCalledWith("elide", expect.objectContaining({ config: DEFAULT_SHAKE_CONFIG }));
 
-			// Extra end without tool call — counter was reset, sync flag cleared, no third fire
-			emitEnd(makeAssistantMessage("third"));
-			await Bun.sleep(30);
+			// Second prompt with no tool calls — counter was reset, no third fire
+			scripted.push({ stopReason: "stop", text: "again" });
+			await session.prompt("again");
+			await settle(session);
 			expect(shakeSpy).toHaveBeenCalledTimes(2);
 		});
 
 		it("fires once after multiple tool calls in one autonomous turn", async () => {
-			session.settings.set("compaction.strategy", "off");
-			session.settings.set("shake.interval", 3);
-			const shakeSpy = vi
-				.spyOn(session, "shake")
-				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 1_000 });
+			const { session, scripted, setResult } = createPeriodicHarness({
+				"compaction.strategy": "off",
+				"shake.interval": 3,
+			});
+			const shakeSpy = vi.spyOn(session, "shake");
 
-			// Three tool calls in one turn — third hits interval.
+			setResult("ok");
+			// Three tool calls in a single assistant turn — the third reaches interval
+			scripted.push({ stopReason: "toolUse", toolCalls: 3 });
+			scripted.push({ stopReason: "stop", text: "done" });
+			await session.prompt("do it");
+			await settle(session);
+
 			// Shakes twice: once mid-run (skipAgentUpdate) and once at agent_end (sync state).
-			bumpToolCallCounter();
-			bumpToolCallCounter();
-			bumpToolCallCounter();
-			emitTurnEnd();
-			await Bun.sleep(10);
-			emitEnd(makeAssistantMessage());
-			await Bun.sleep(30);
-
 			expect(shakeSpy).toHaveBeenCalledTimes(2);
 		});
 
 		it("fires mid-run and syncs agent state at agent_end", async () => {
-			session.settings.set("compaction.strategy", "off");
-			session.settings.set("shake.interval", 1);
-			const shakeSpy = vi
-				.spyOn(session, "shake")
-				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 1_000 });
+			const { session, scripted, setResult } = createPeriodicHarness({
+				"compaction.strategy": "off",
+				"shake.interval": 1,
+			});
+			const shakeSpy = vi.spyOn(session, "shake");
 
-			// Mid-run: bump counter, then turn_end fires deferred shake
-			bumpToolCallCounter();
-			emitTurnEnd();
-			await Bun.sleep(10);
-			expect(shakeSpy).toHaveBeenCalledTimes(1);
+			setResult("ok");
+			scripted.push({ stopReason: "toolUse", toolCalls: 1 });
+			scripted.push({ stopReason: "stop", text: "done" });
+			await session.prompt("do it");
+			await settle(session);
 
-			// Agent_end: #shakeNeedsAgentSync triggers sync shake (w/ replaceMessages)
-			emitEnd(makeAssistantMessage());
-			await Bun.sleep(30);
+			// Mid-run shake at the turn_end hook + agent_end sync shake
 			expect(shakeSpy).toHaveBeenCalledTimes(2);
 		});
 
+		it("splices rebuilt messages into the live loop array before the next model call", async () => {
+			const { session, callContexts, scripted, setResult } = createPeriodicHarness({
+				"compaction.strategy": "off",
+				"shake.interval": 1,
+			});
+			const shakeSpy = vi.spyOn(session, "shake");
+
+			// Heavy + contextually-useless result: useless results bypass the
+			// shake's protect-recent window, so the turn_end hook shake elides it.
+			setResult(HEAVY_USELESS_RESULT, true);
+			scripted.push({ stopReason: "toolUse", toolCalls: 1 });
+			scripted.push({ stopReason: "stop", text: "done" });
+			await session.prompt("do it");
+			await settle(session);
+
+			expect(shakeSpy).toHaveBeenCalledTimes(2);
+
+			// The second provider call runs after the hook: the live loop array
+			// must already carry the rebuilt (shaken) tool result, not the raw
+			// heavy payload — rewriting persisted history alone would not shrink
+			// the live prompt in a tool-heavy run.
+			const secondContext = callContexts[1];
+			expect(secondContext).toBeDefined();
+			const text = toolResultText(secondContext.find(message => message.role === "toolResult"));
+			expect(text).toContain("artifact://");
+			expect(text).toContain("shaken");
+			expect(text).not.toContain(HEAVY_USELESS_RESULT.slice(0, 200));
+		});
+
 		it("skips periodic shake when compaction continuation owns the next turn", async () => {
-			// Use handoff strategy (doesn't call shake) with threshold trigger to
-			// produce COMPACTION_CHECK_DEFERRED_HANDOFF (continuationScheduled: true).
-			session.settings.override("compaction.autoContinue", true);
-			session.settings.set("compaction.strategy", "handoff");
-			session.settings.set("compaction.thresholdPercent", 1);
-			session.settings.set("contextPromotion.enabled", false);
-			session.settings.set("shake.interval", 1);
+			const { session, scripted, setResult } = createPeriodicHarness({
+				"compaction.strategy": "handoff",
+				"compaction.thresholdPercent": 1,
+				"contextPromotion.enabled": false,
+				"shake.interval": 1,
+			});
+			const shakeSpy = vi.spyOn(session, "shake");
 
-			const shakeSpy = vi
-				.spyOn(session, "shake")
-				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 10_000 });
-
-			// Mid-run: counter reaches interval, turn_end fires mid-run shake
-			bumpToolCallCounter();
-			emitTurnEnd();
-			await Bun.sleep(10);
-			expect(shakeSpy).toHaveBeenCalledTimes(1);
-
-			// High-usage assistant message to trigger threshold compaction
-			const assistantMessage: AssistantMessage = {
-				role: "assistant",
-				content: [{ type: "text", text: "trigger" }],
-				...apiInfo,
+			setResult("ok");
+			// Mid-run: counter reaches interval, the turn_end hook fires mid-run shake
+			scripted.push({ stopReason: "toolUse", toolCalls: 1 });
+			// High-usage terminal turn triggers threshold compaction at agent_end
+			scripted.push({
 				stopReason: "stop",
+				text: "trigger",
 				usage: {
 					input: 10_000,
 					output: 1_000,
@@ -930,125 +1069,97 @@ describe("AgentSession shake", () => {
 					totalTokens: 11_000,
 					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 				},
-				timestamp: Date.now(),
-			};
-			emitEnd(assistantMessage);
-			await Bun.sleep(50);
+			});
+			await session.prompt("do it");
+			await settle(session);
 
-			// Agent_end: compaction continuation guard prevents re-fire.
-			// Total remains 1 (only mid-run call).
+			// Agent_end: the handoff continuation guard prevents the sync shake.
+			// Total remains 1 (only the mid-run call).
 			expect(shakeSpy).toHaveBeenCalledTimes(1);
 		});
 
 		it("skips periodic shake when overflow leaves a pruned tail (no recovery path)", async () => {
-			// Disable context promotion and compaction so overflow has no recovery
-			// path: checkCompaction prunes the trailing assistant from agent.state
-			// and reports tailPruned, which must suppress the agent_end shake.
-			session.settings.set("contextPromotion.enabled", false);
-			session.settings.set("compaction.strategy", "off");
-			session.settings.set("shake.interval", 1);
+			const { session, scripted, setResult } = createPeriodicHarness({
+				"contextPromotion.enabled": false,
+				"compaction.strategy": "off",
+				"shake.interval": 1,
+			});
+			const shakeSpy = vi.spyOn(session, "shake");
 
-			const shakeSpy = vi
-				.spyOn(session, "shake")
-				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 1_000 });
+			setResult("ok");
+			scripted.push({ stopReason: "toolUse", toolCalls: 1 });
+			// Overflow terminal turn: error stop with a context-overflow message
+			scripted.push({ stopReason: "error", errorMessage: "prompt is too long", text: "" });
+			await session.prompt("do it");
+			await settle(session);
 
-			// Mid-run: counter reaches interval, turn_end fires mid-run shake
-			bumpToolCallCounter();
-			emitTurnEnd();
-			await Bun.sleep(10);
-			expect(shakeSpy).toHaveBeenCalledTimes(1);
-
-			// Overflow assistant with context-overflow matching error message
-			const overflowMsg: AssistantMessage = {
-				role: "assistant",
-				content: [{ type: "text", text: "" }],
-				...apiInfo,
-				stopReason: "error",
-				errorMessage: "prompt is too long",
-				usage,
-				timestamp: Date.now(),
-			};
-			emitEnd(overflowMsg);
-			await Bun.sleep(50);
-
-			// Agent_end: tailPruned guard prevents re-fire.
-			// Total remains 1 (only mid-run call).
+			// Agent_end: the tailPruned guard prevents the sync shake.
+			// Total remains 1 (only the mid-run call).
 			expect(shakeSpy).toHaveBeenCalledTimes(1);
 		});
 
 		it("skips periodic shake when length-stop leaves a pruned tail (no recovery path)", async () => {
-			session.settings.set("contextPromotion.enabled", false);
-			session.settings.set("compaction.strategy", "off");
-			session.settings.set("shake.interval", 1);
+			const { session, scripted, setResult } = createPeriodicHarness({
+				"contextPromotion.enabled": false,
+				"compaction.strategy": "off",
+				"shake.interval": 1,
+			});
+			const shakeSpy = vi.spyOn(session, "shake");
 
-			const shakeSpy = vi
-				.spyOn(session, "shake")
-				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 1_000 });
+			setResult("ok");
+			scripted.push({ stopReason: "toolUse", toolCalls: 1 });
+			scripted.push({ stopReason: "length", text: "" });
+			await session.prompt("do it");
+			await settle(session);
 
-			// Mid-run: counter reaches interval, turn_end fires mid-run shake
-			bumpToolCallCounter();
-			emitTurnEnd();
-			await Bun.sleep(10);
-			expect(shakeSpy).toHaveBeenCalledTimes(1);
-
-			const lengthMsg: AssistantMessage = {
-				role: "assistant",
-				content: [{ type: "text", text: "" }],
-				...apiInfo,
-				stopReason: "length",
-				usage,
-				timestamp: Date.now(),
-			};
-			emitEnd(lengthMsg);
-			await Bun.sleep(50);
-
-			// Agent_end: tailPruned guard prevents re-fire.
-			// Total remains 1 (only mid-run call).
+			// Agent_end: the tailPruned guard prevents the sync shake.
+			// Total remains 1 (only the mid-run call).
 			expect(shakeSpy).toHaveBeenCalledTimes(1);
 		});
 
-		it("deferred mid-run shake does not fire without turn_end event", async () => {
+		it("mid-run shake requires the awaited turn-end hook; agent_end still fires the counter fallback", async () => {
 			session.settings.set("compaction.strategy", "off");
 			session.settings.set("shake.interval", 1);
 			const shakeSpy = vi
 				.spyOn(session, "shake")
 				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 1_000 });
 
-			// Bump counter without turn_end — shake should NOT fire mid-run
+			// Counter crossed but no turn_end hook fires (external events bypass
+			// the awaited onTurnEnd hook) — no mid-run shake.
 			bumpToolCallCounter();
 			await Bun.sleep(10);
 			expect(shakeSpy).not.toHaveBeenCalled();
 
-			// Agent_end still fires the sync shake via #shakeNeedsAgentSync
+			// Agent_end still fires via the counter (>= interval) and clears the
+			// pending mid-run flag so the next turn does not shake.
 			emitEnd(makeAssistantMessage());
+			await Bun.sleep(30);
+			expect(shakeSpy).toHaveBeenCalledTimes(1);
+
+			// Another end without tool calls — counter was reset, no re-fire
+			emitEnd(makeAssistantMessage("again"));
 			await Bun.sleep(30);
 			expect(shakeSpy).toHaveBeenCalledTimes(1);
 		});
 
-		it("state sync rebuilds agent state even when shake finds no regions", async () => {
-			session.settings.set("compaction.strategy", "off");
-			session.settings.set("shake.interval", 1);
-			const shakeSpy = vi
-				.spyOn(session, "shake")
-				// Simulate no-op shake (no regions found, e.g. already pruned by mid-run pass)
-				.mockResolvedValue({ mode: "elide", toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 });
+		it("agent_end sync rebuilds agent state even when shake finds no new regions", async () => {
+			const { session, scripted, setResult } = createPeriodicHarness({
+				"compaction.strategy": "off",
+				"shake.interval": 1,
+			});
+			const shakeSpy = vi.spyOn(session, "shake");
 			const replaceSpy = vi.spyOn(session.agent, "replaceMessages");
 
-			// Mid-run: set flag via afterToolCall + turn_end
-			bumpToolCallCounter();
-			emitTurnEnd();
-			await Bun.sleep(10);
-			expect(shakeSpy).toHaveBeenCalledTimes(1);
+			setResult(HEAVY_USELESS_RESULT, true);
+			scripted.push({ stopReason: "toolUse", toolCalls: 1 });
+			scripted.push({ stopReason: "stop", text: "done" });
+			await session.prompt("do it");
+			await settle(session);
 
-			// Agent_end: sync shake returns no-op (0 regions found), but
-			// #shakeNeedsAgentSync should still trigger replaceMessages rebuild
-			// because wasSync && blocks===0 && tokens===0 triggers the rebuild branch.
-			emitEnd(makeAssistantMessage());
-			await Bun.sleep(30);
-
-			// Two shake calls: one mid-run, one agent_end sync
+			// Mid-run shake (skipAgentUpdate — no replaceMessages) elided the
+			// result; the agent_end sync pass finds nothing new and rebuilds
+			// agent state via replaceMessages (#shakeNeedsAgentSync).
 			expect(shakeSpy).toHaveBeenCalledTimes(2);
-			// replaceMessages should have been called by the sync path
 			expect(replaceSpy).toHaveBeenCalled();
 		});
 	});
