@@ -114,7 +114,12 @@ function activityGlyph(row: AgentActivityRow): string {
 }
 
 function activityClock(timestamp: number): string {
-	return new Date(timestamp).toISOString().slice(11, 19);
+	return new Date(timestamp).toLocaleTimeString(undefined, {
+		hour: "2-digit",
+		minute: "2-digit",
+		second: "2-digit",
+		hour12: false,
+	});
 }
 /** Result of one host-backed transcript read for the Agent Hub viewer. */
 export interface AgentHubRemoteTranscript {
@@ -580,11 +585,15 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			pending.push(this.#activity.sync(ref.id, ref.sessionFile));
 		}
 		if (pending.length === 0) return;
-		void Promise.all(pending).then(() => {
-			if (this.#disposed || generation !== this.#activitySyncGeneration) return;
-			this.#refreshActivityRows();
-			this.#requestRender();
-		});
+		void Promise.all(pending)
+			.then(() => {
+				if (this.#disposed || generation !== this.#activitySyncGeneration) return;
+				this.#refreshActivityRows();
+				this.#requestRender();
+			})
+			.catch(() => {
+				// Individual sync paths already guard I/O failures; keep the hub render loop alive.
+			});
 	}
 
 	#activityAgentIds(): ReadonlySet<string> | undefined {

@@ -93,4 +93,47 @@ describe("AgentActivityIndex", () => {
 		expect(rows.map(row => row.kind)).toEqual(["tool", "tool", "lifecycle", "response"]);
 		expect(rows.at(-1)?.summary).toBe("Found unsafe redirect");
 	});
+
+	it("bounds retained rows and drops terminal tool mappings after eviction", async () => {
+		using tempDir = TempDir.createSync("activity-index-bound-");
+		const sessionFile = path.join(tempDir.path(), "worker.jsonl");
+		const lines: string[] = [];
+		for (let index = 0; index < 300; index++) {
+			const callId = `call-${index}`;
+			lines.push(
+				messageEntry(`tool-call-${index}`, index * 2 + 1_000, {
+					role: "assistant",
+					content: [{ type: "toolCall", id: callId, name: "read", arguments: { path: `src/${index}.ts` } }],
+				}),
+			);
+			lines.push(
+				messageEntry(`tool-result-${index}`, index * 2 + 1_001, {
+					role: "toolResult",
+					toolCallId: callId,
+					toolName: "read",
+					content: [{ type: "text", text: "ok" }],
+				}),
+			);
+		}
+		await Bun.write(sessionFile, `${lines.join("\n")}\n`);
+		const activity = new AgentActivityIndex();
+		await activity.sync("Worker", sessionFile);
+		const rows = activity.query({ agentIds: new Set(["Worker"]), limit: 2_000 });
+		expect(rows.length).toBe(256);
+		expect(rows[0]?.toolCallId).toBe("call-44");
+		expect(rows.at(-1)?.toolCallId).toBe("call-299");
+		expect(activity.retainedToolMappings("Worker")).toBe(0);
+	});
+
+	it("swallows rejecting remote transcript reads without throwing", async () => {
+		const activity = new AgentActivityIndex({
+			remote: {
+				readTranscript: async () => {
+					throw new Error("host unavailable");
+				},
+			},
+		});
+		await expect(activity.sync("Guest")).resolves.toBeUndefined();
+		expect(activity.query()).toEqual([]);
+	});
 });

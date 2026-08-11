@@ -156,12 +156,21 @@ function compareRows(a: AgentActivityRow, b: AgentActivityRow): number {
 	return a.timestamp - b.timestamp || a.id.localeCompare(b.id);
 }
 
-function boundedPush(rows: AgentActivityRow[], row: AgentActivityRow): void {
+function boundedPush(rows: AgentActivityRow[], row: AgentActivityRow): AgentActivityRow[] {
 	const existing = rows.findIndex(candidate => candidate.id === row.id);
 	if (existing >= 0) rows[existing] = row;
 	else rows.push(row);
 	rows.sort(compareRows);
-	if (rows.length > MAX_ROWS_PER_AGENT) rows.splice(0, rows.length - MAX_ROWS_PER_AGENT);
+	if (rows.length <= MAX_ROWS_PER_AGENT) return [];
+	return rows.splice(0, rows.length - MAX_ROWS_PER_AGENT);
+}
+
+function pruneToolRows(state: TranscriptState, evicted: readonly AgentActivityRow[]): void {
+	if (evicted.length === 0) return;
+	const retained = new Set(state.rows.map(row => row.id));
+	for (const [toolCallId, row] of state.toolRows) {
+		if (!retained.has(row.id)) state.toolRows.delete(toolCallId);
+	}
 }
 
 export function activityRowsFromProgress(progress: AgentProgress, lastUpdate = Date.now()): AgentActivityRow[] {
@@ -260,6 +269,11 @@ export class AgentActivityIndex {
 		await this.#syncLocal(agentId, sessionFile);
 	}
 
+	/** Test/diag helper: number of toolCallId mappings retained for an agent. */
+	retainedToolMappings(agentId: string): number {
+		return this.#states.get(agentId)?.toolRows.size ?? 0;
+	}
+
 	recent(agentId: string, limit = 12): AgentActivityRow[] {
 		const persisted = this.#states.get(agentId)?.rows ?? [];
 		const live = this.#liveRows.get(agentId) ?? [];
@@ -348,7 +362,12 @@ export class AgentActivityIndex {
 			state = { offset: 0, mtimeMs: 0, pending: "", rows: [], toolRows: new Map() };
 			this.#states.set(agentId, state);
 		}
-		const result = await this.#remote?.readTranscript(agentId, state.offset);
+		let result: AgentActivityTranscript | null | undefined;
+		try {
+			result = await this.#remote?.readTranscript(agentId, state.offset);
+		} catch {
+			return;
+		}
 		if (!result || result.error) return;
 		if (result.newSize < state.offset) {
 			state.offset = 0;
@@ -387,17 +406,20 @@ export class AgentActivityIndex {
 			if (message.role === "assistant") {
 				const response = textContent(message.content);
 				if (response) {
-					boundedPush(state.rows, {
-						id: `${agentId}:response:${entry.id}`,
-						agentId,
-						timestamp,
-						kind: "response",
-						title: "Response",
-						summary: response,
-						status: message.isError ? "error" : "success",
-						entryId: entry.id,
-						source: "transcript",
-					});
+					pruneToolRows(
+						state,
+						boundedPush(state.rows, {
+							id: `${agentId}:response:${entry.id}`,
+							agentId,
+							timestamp,
+							kind: "response",
+							title: "Response",
+							summary: response,
+							status: message.isError ? "error" : "success",
+							entryId: entry.id,
+							source: "transcript",
+						}),
+					);
 					changed = true;
 				}
 				for (const call of toolBlocks(message.content)) {
@@ -415,7 +437,7 @@ export class AgentActivityIndex {
 						source: "transcript",
 					};
 					state.toolRows.set(call.id, row);
-					boundedPush(state.rows, row);
+					pruneToolRows(state, boundedPush(state.rows, row));
 					changed = true;
 				}
 				continue;
@@ -425,7 +447,8 @@ export class AgentActivityIndex {
 				if (!row) continue;
 				row.status = message.isError ? "error" : "success";
 				row.timestamp = Math.max(row.timestamp, timestamp);
-				if (!state.rows.includes(row)) boundedPush(state.rows, row);
+				if (!state.rows.includes(row)) pruneToolRows(state, boundedPush(state.rows, row));
+				state.toolRows.delete(message.toolCallId);
 				changed = true;
 			}
 		}
