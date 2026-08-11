@@ -476,6 +476,11 @@ export class AgentLifecycleManager {
 		this.#unsubscribe?.();
 		this.#unsubscribe = undefined;
 		this.#roots.clear();
+		// Evict this dead manager so a later session on the same registry gets a FRESH, re-subscribed
+		// one from forRegistry() — a disposed manager has torn down its registry.onChange listener and
+		// would silently miss status_changed/removed for future adopted subagents (#7401 review).
+		AgentLifecycleManager.#managers.delete(this.#registry);
+		if (AgentLifecycleManager.#global === this) AgentLifecycleManager.#global = undefined;
 		await this.#releaseIds([...new Set([...this.#adopted.keys(), ...this.#parks.keys()])], deadlineAt);
 		this.#revivals.clear();
 		this.#parks.clear();
