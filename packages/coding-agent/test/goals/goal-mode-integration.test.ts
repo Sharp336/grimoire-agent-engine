@@ -489,4 +489,41 @@ describe("InteractiveMode goal mode integration", () => {
 		harness.mode.onInputCallback?.(harness.mode.startPendingSubmission({ text: "next turn" }));
 		await nextTurn;
 	});
+	it("drops a goal via the bare /goal menu and restores the previous toolset", async () => {
+		await harness.session.setActiveToolsByName(["read", "edit"]);
+		await harness.mode.handleGoalModeCommand("Ship the release");
+		expect(await toolNamesFor(harness)).toContain("goal");
+
+		vi.spyOn(harness.mode, "showHookSelector").mockResolvedValue("Drop");
+		vi.spyOn(harness.mode, "showHookConfirm").mockResolvedValue(true);
+
+		await harness.mode.handleGoalModeCommand();
+
+		expect(harness.mode.goalModeEnabled).toBe(false);
+		expect(harness.mode.goalModePaused).toBe(false);
+		expect(harness.session.getGoalModeState()).toBeUndefined();
+		expect(await toolNamesFor(harness)).not.toContain("goal");
+	});
+
+	it("fires the goal continuation prompt when idle and active", async () => {
+		await harness.mode.handleGoalModeCommand("Ship the release");
+
+		vi.useFakeTimers();
+		const waiter = await armInputWaiter(harness.mode);
+
+		// Not streaming, goal active, editor empty, continuationModes includes
+		// "interactive" (default) — the armed 800ms continuation should fire and
+		// resolve getUserInput with the continuation prompt.
+		vi.advanceTimersByTime(800);
+		await waitForMicrotasks();
+
+		const text = waiter.getResolvedText();
+		expect(text).toBeTruthy();
+		// The continuation prompt is rendered from the goal-continuation template;
+		// it carries the live objective.
+		expect(text).toContain("Ship the release");
+
+		harness.mode.onInputCallback?.(harness.mode.startPendingSubmission({ text: "done" }));
+		await waiter.inputPromise;
+	});
 });

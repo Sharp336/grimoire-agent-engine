@@ -123,4 +123,23 @@ describe("buildAvailableSlashCommands", () => {
 
 		expect(commands.find(command => command.name === "legacy")?.source).toBe("custom");
 	});
+
+	test("exposes /goal and /guided-goal to RPC clients (regression: handle required for visibility)", async () => {
+		// Root cause of the original gap: ACP/RPC advertise only specs with a
+		// `handle`. /goal + /guided-goal now carry one, so they MUST appear in the
+		// RPC command list with their ACP hints — assert the actual contract.
+		const commands = await buildAvailableSlashCommands(
+			{ customCommands: [], skills: [], sessionManager: { getCwd: () => process.cwd() }, setSlashCommands() {} } as never,
+			async () => [],
+		);
+		const byName = Object.fromEntries(commands.map(command => [command.name, command]));
+
+		expect(byName.goal).toBeDefined();
+		expect(byName.goal.source).toBe("builtin");
+		expect(byName.goal.description).toBe("Manage goal mode");
+		expect(byName.goal.input?.hint).toBe("[set <objective>|show|pause|resume|drop|budget <N|off>]");
+
+		expect(byName["guided-goal"]).toBeDefined();
+		expect(byName["guided-goal"].source).toBe("builtin");
+	});
 });

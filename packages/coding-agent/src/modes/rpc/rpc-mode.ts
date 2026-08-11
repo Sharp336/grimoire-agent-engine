@@ -25,6 +25,7 @@ import {
 } from "../../extensibility/extensions";
 import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
+import { attachHeadlessGoalAdapter } from "../../goals/headless-goal-adapter";
 import { type Theme, theme } from "../../modes/theme/theme";
 import type { AgentSession } from "../../session/agent-session";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
@@ -953,6 +954,11 @@ export async function runRpcMode(
 		output(event);
 	});
 
+	// Drive goal-mode lifecycle for this headless RPC session (enter/resume/
+	// drop + opt-in auto-continuation). Detached at shutdown so no continuation
+	// can be submitted after session.dispose().
+	const detachGoalAdapter = await attachHeadlessGoalAdapter(session, "rpc");
+
 	const getAvailableCommands = async () => buildAvailableSlashCommands(session);
 	const reloadPluginState = async () => {
 		const cwd = session.sessionManager.getCwd();
@@ -1460,6 +1466,7 @@ export async function runRpcMode(
 			// the process exits. dispose() also emits `session_shutdown`, so we
 			// must NOT emit it separately here or the event fires twice. Skipping
 			// dispose left OMP-owned Chromium alive after RPC shutdown (#5643).
+			detachGoalAdapter();
 			await session.dispose();
 			process.exit(0);
 		},
@@ -1514,6 +1521,7 @@ export async function runRpcMode(
 	// bounded teardown run on the stdin-EOF path too (#5643). Idempotent: a
 	// prior pi.shutdown() through the coordinator makes this await settle
 	// immediately.
+	detachGoalAdapter();
 	await session.dispose();
 	process.exit(0);
 }

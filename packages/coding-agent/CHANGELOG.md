@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Exposed `/goal` and `/guided-goal` in ACP and RPC modes. The goal-mode lifecycle (enter/resume/pause/drop/budget, tool-set recording/restoration, continuation, and restore-on-session-switch) was extracted into a shared `GoalModeController` that the TUI and the headless modes both drive, so ACP/RPC clients can now create and manage goals. Headless goal auto-continuation is opt-in via `goal.continuationModes` (add `"acp"`/`"rpc"`); it routes through the central agent-initiated-turn path so ACP's `deferAgentInitiatedTurns` contract is respected.
+
 ## [17.2.12] - 2026-08-08
 
 ### Fixed
