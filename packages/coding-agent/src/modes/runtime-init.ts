@@ -28,11 +28,32 @@ export interface InitializeExtensionsOptions {
 	markAgentInvokingMessage?: () => void;
 	/** Optional lifecycle hook for extension-originated sends whose success/failure determines turn ownership. */
 	trackAgentInvokingMessage?: (task: Promise<unknown>) => void;
+	/**
+	 * Whether `initializeExtensions` emits the extension `session_start` event
+	 * once the runner is initialized. Defaults to true. Callers that must
+	 * restore session state (e.g. a persisted goal) before extensions observe
+	 * the session should pass `false` and emit the event themselves via
+	 * {@link emitExtensionSessionStart} after restoring.
+	 */
+	emitSessionStart?: boolean;
+	/**
+	 * When true, the runner holds `credential_disabled` / `mcp_notification`
+	 * delivery — buffering them, even after initialize — until
+	 * {@link ExtensionRunner.resumeRuntimeEventDelivery} is called. RPC sets
+	 * this so a startup notification handler that sends a message cannot start
+	 * a turn before the persisted goal is restored.
+	 */
+	pauseRuntimeEventDelivery?: boolean;
 }
 
 /**
  * Initialize the session's extension runner with the standard action set
  * shared by non-interactive modes, then emit `session_start`.
+ *
+ * Emits `session_start` unless `emitSessionStart: false` is passed; callers
+ * that need session state (e.g. a restored goal) visible to `session_start`
+ * handlers must defer the event with {@link emitExtensionSessionStart} until
+ * after that state is in place.
  *
  * No-op when the session was constructed without an extension runner.
  */
@@ -47,6 +68,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 		uiContext,
 		markAgentInvokingMessage,
 		trackAgentInvokingMessage,
+		pauseRuntimeEventDelivery,
 	} = options;
 	const shutdown = onShutdown ?? (() => {});
 
@@ -137,8 +159,23 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 			compact: instructionsOrOptions => runExtensionCompact(session, instructionsOrOptions),
 		},
 		uiContext,
+		{ pauseRuntimeEventDelivery },
 	);
 
 	runner.onError(reportRuntimeError);
-	await runner.emit({ type: "session_start" });
+	if (options.emitSessionStart !== false) {
+		await runner.emit({ type: "session_start" });
+	}
+}
+
+/**
+ * Emit the extension `session_start` event. Use with
+ * {@link initializeExtensions} `emitSessionStart: false` when `session_start`
+ * must observe state that is only available after initialization — e.g. a
+ * persisted goal restored by the goal-mode adapter, which emits `goal_updated`
+ * during restore. No-op when the session was constructed without an extension
+ * runner.
+ */
+export async function emitExtensionSessionStart(session: AgentSession): Promise<void> {
+	await session.extensionRunner?.emit({ type: "session_start" });
 }

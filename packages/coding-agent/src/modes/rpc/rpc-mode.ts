@@ -25,7 +25,6 @@ import {
 } from "../../extensibility/extensions";
 import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
-import { attachHeadlessGoalAdapter } from "../../goals/headless-goal-adapter";
 import { type Theme, theme } from "../../modes/theme/theme";
 import type { AgentSession } from "../../session/agent-session";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
@@ -34,12 +33,12 @@ import { buildAvailableSlashCommands } from "../../slash-commands/available-comm
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import type { EventBus } from "../../utils/event-bus";
 import { calculateTokensPerSecond } from "../../utils/token-rate";
-import { initializeExtensions } from "../runtime-init";
 import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./host-tools";
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameEncoder } from "./rpc-frame";
 import { claimRpcInput } from "./rpc-input";
 import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
+import { runRpcSessionStartup } from "./rpc-session-init";
 import { RpcSubagentRegistry, readRpcSubagentTranscript } from "./rpc-subagents";
 import type {
 	RpcCommand,
@@ -932,8 +931,10 @@ export async function runRpcMode(
 	const rpcUiContext = new RpcExtensionUIContext(pendingExtensionRequests, output);
 	setToolUIContext?.(rpcUiContext, true);
 
-	// Set up extensions with RPC-based UI context
-	await initializeExtensions(session, {
+	// Run the ordering-critical RPC startup sequence — subscribe -> deferred
+	// extension init -> goal restore -> session_start — through the shared
+	// helper so the production wiring and the ordering test bind to one place.
+	const detachGoalAdapter = await runRpcSessionStartup(session, output, {
 		reportSendError: (action, err) => {
 			output(error(undefined, action, err.message));
 		},
@@ -948,16 +949,6 @@ export async function runRpcMode(
 		},
 		uiContext: rpcUiContext,
 	});
-
-	// Output all agent events as JSON
-	session.subscribe(event => {
-		output(event);
-	});
-
-	// Drive goal-mode lifecycle for this headless RPC session (enter/resume/
-	// drop + opt-in auto-continuation). Detached at shutdown so no continuation
-	// can be submitted after session.dispose().
-	const detachGoalAdapter = await attachHeadlessGoalAdapter(session, "rpc");
 
 	const getAvailableCommands = async () => buildAvailableSlashCommands(session);
 	const reloadPluginState = async () => {

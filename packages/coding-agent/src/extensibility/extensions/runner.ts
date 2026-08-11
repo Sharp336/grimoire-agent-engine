@@ -354,6 +354,15 @@ export class ExtensionRunner {
 	#commandDiagnostics: Array<{ type: string; message: string; path: string }> = [];
 	#initialized = false;
 	/**
+	 * While true, `credential_disabled` / `mcp_notification` events are buffered
+	 * instead of delivered — including ones that arrive AFTER {@link initialize}
+	 * has run — until {@link resumeRuntimeEventDelivery} drains them. RPC startup
+	 * engages this gate between initialize and the persisted-goal restore so a
+	 * notification handler that calls `pi.sendUserMessage` starts its turn only
+	 * once goal mode is restored (see {@link resumeRuntimeEventDelivery}).
+	 */
+	#runtimeEventDeliveryPaused = false;
+	/**
 	 * Buffer for `credential_disabled` events received via {@link emitCredentialDisabled}
 	 * before {@link initialize} has run. Drained through {@link emit} once initialize sets
 	 * up the runtime context, so extension handlers see a populated UI/runtime context
@@ -514,6 +523,7 @@ export class ExtensionRunner {
 		contextActions: ExtensionContextActions,
 		commandContextActions?: ExtensionCommandContextActions,
 		uiContext?: ExtensionUIContext,
+		options?: { pauseRuntimeEventDelivery?: boolean },
 	): void {
 		// Copy actions into the shared runtime (all extension APIs reference this)
 		this.runtime.sendMessage = actions.sendMessage;
@@ -560,56 +570,122 @@ export class ExtensionRunner {
 		this.#uiContext = uiContext ?? noOpUIContext;
 		this.#initialized = true;
 
-		// Drain events buffered by emitCredentialDisabled() before initialize ran. The
-		// spread adds the `type` discriminator — `event` is the pi-ai shape (no `type`).
-		// Deferred by one microtask so callers that register an onError listener
-		// synchronously after initialize() see handler errors routed through it.
-		const pending = this.#pendingCredentialDisabled.splice(0);
-		queueMicrotask(() => {
-			for (const event of pending) {
-				this.emit({ type: "credential_disabled", ...event }).catch((error: unknown) => {
-					logger.warn("credential_disabled handler threw during initialize flush", {
-						provider: event.provider,
-						error: error instanceof Error ? error.message : String(error),
+		if (options?.pauseRuntimeEventDelivery) {
+			// Hold the pre-initialize buffers (and any credential_disabled /
+			// mcp_notification that arrive while paused — see the broadened
+			// buffer conditions in emitCredentialDisabled/emitMcpNotification)
+			// for resumeRuntimeEventDelivery(). RPC uses this to defer startup
+			// notification delivery until the persisted goal is restored, so a
+			// handler that sends a message starts its turn in goal mode.
+			this.#runtimeEventDeliveryPaused = true;
+		} else {
+			// Drain events buffered by emitCredentialDisabled() before initialize ran. The
+			// spread adds the `type` discriminator — `event` is the pi-ai shape (no `type`).
+			// Deferred by one microtask so callers that register an onError listener
+			// synchronously after initialize() see handler errors routed through it.
+			const pending = this.#pendingCredentialDisabled.splice(0);
+			queueMicrotask(() => {
+				for (const event of pending) {
+					this.emit({ type: "credential_disabled", ...event }).catch((error: unknown) => {
+						logger.warn("credential_disabled handler threw during initialize flush", {
+							provider: event.provider,
+							error: error instanceof Error ? error.message : String(error),
+						});
 					});
-				});
-			}
-		});
+				}
+			});
 
-		// Drain events buffered by emitMcpNotification() before initialize ran, using the
-		// same deferred-microtask ordering as the credential-disabled drain above so any
-		// onError listener registered synchronously after initialize() still catches
-		// handler errors during flush.
-		const pendingMcp = this.#pendingMcpNotifications.splice(0);
-		queueMicrotask(() => {
-			for (const event of pendingMcp) {
-				this.emit({ type: "mcp_notification", ...event }).catch((error: unknown) => {
-					logger.warn("mcp_notification handler threw during initialize flush", {
-						server: event.server,
-						method: event.method,
-						error: error instanceof Error ? error.message : String(error),
+			// Drain events buffered by emitMcpNotification() before initialize ran, using the
+			// same deferred-microtask ordering as the credential-disabled drain above so any
+			// onError listener registered synchronously after initialize() still catches
+			// handler errors during flush.
+			const pendingMcp = this.#pendingMcpNotifications.splice(0);
+			queueMicrotask(() => {
+				for (const event of pendingMcp) {
+					this.emit({ type: "mcp_notification", ...event }).catch((error: unknown) => {
+						logger.warn("mcp_notification handler threw during initialize flush", {
+							server: event.server,
+							method: event.method,
+							error: error instanceof Error ? error.message : String(error),
+						});
 					});
+				}
+			});
+		}
+	}
+
+	/**
+	 * Resume delivery of `credential_disabled` / `mcp_notification` events
+	 * buffered while {@link initialize} ran with `pauseRuntimeEventDelivery`
+	 * (see {@link ExtensionRunner.initialize}).
+	 *
+	 * The gate exists so startup notification delivery can be deferred until
+	 * persisted session state is restored: RPC restores the persisted goal
+	 * between initialize and this call, so a notification handler that starts a
+	 * turn via `pi.sendUserMessage` runs it in goal mode. Only
+	 * `credential_disabled` and `mcp_notification` are gated — `goal_updated`
+	 * (and every other event) delivers immediately, so the restore's
+	 * `goal_updated` still reaches initialized handlers while the gate is held.
+	 *
+	 * Drains `credential_disabled` then `mcp_notification`, in the same order
+	 * as the initialize drains, emitting each through {@link emit} with the
+	 * same per-event error isolation (handler errors are logged and routed
+	 * through {@link onError}; a throw here never escapes). No-op when the
+	 * gate is not engaged. Unlike the initialize drains, no one-microtask
+	 * deferral is needed: callers engage the gate only after their onError
+	 * listener is registered.
+	 */
+	async resumeRuntimeEventDelivery(): Promise<void> {
+		if (!this.#runtimeEventDeliveryPaused) return;
+		// Release the gate BEFORE draining so an event a handler surfaces mid-drain
+		// (the SDK bridges are fire-and-forget — a fresh credential_disabled /
+		// mcp_notification can arrive during an await here) delivers inline instead
+		// of buffering into a queue this drain no longer re-reads (which would
+		// strand it, since RPC has no second resume).
+		this.#runtimeEventDeliveryPaused = false;
+
+		const pendingCredential = this.#pendingCredentialDisabled.splice(0);
+		for (const event of pendingCredential) {
+			await this.emit({ type: "credential_disabled", ...event }).catch((error: unknown) => {
+				logger.warn("credential_disabled handler threw during resume", {
+					provider: event.provider,
+					error: error instanceof Error ? error.message : String(error),
 				});
-			}
-		});
+			});
+		}
+
+		const pendingMcp = this.#pendingMcpNotifications.splice(0);
+		for (const event of pendingMcp) {
+			await this.emit({ type: "mcp_notification", ...event }).catch((error: unknown) => {
+				logger.warn("mcp_notification handler threw during resume", {
+					server: event.server,
+					method: event.method,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			});
+		}
 	}
 
 	/**
 	 * Forward a `credential_disabled` event from `AuthStorage` to extension handlers.
 	 *
-	 * If {@link initialize} has not yet run, the event is buffered and replayed once
-	 * initialize wires the runtime/UI context. This matters because mode controllers
-	 * (interactive, RPC, ACP, print, subagent) call `initialize()` AFTER `createAgentSession`
-	 * returns, but `AuthStorage` can fire `credential_disabled` during startup model probes
-	 * inside `createAgentSession()`. Without deferral, extension handlers would observe
-	 * `hasUI=false`, an unset model, and no-op runtime actions on exactly the headline
-	 * "OAuth invalid_grant during startup" path the event was designed to surface.
+	 * If {@link initialize} has not yet run — or the runtime event delivery gate
+	 * is engaged (`pauseRuntimeEventDelivery`, see
+	 * {@link resumeRuntimeEventDelivery}) — the event is buffered and replayed
+	 * once initialize wires the runtime/UI context (or the gate is resumed).
+	 * This matters because mode controllers (interactive, RPC, ACP, print,
+	 * subagent) call `initialize()` AFTER `createAgentSession` returns, but
+	 * `AuthStorage` can fire `credential_disabled` during startup model probes
+	 * inside `createAgentSession()`. Without deferral, extension handlers would
+	 * observe `hasUI=false`, an unset model, and no-op runtime actions on
+	 * exactly the headline "OAuth invalid_grant during startup" path the event
+	 * was designed to surface.
 	 *
 	 * Always returns; never throws. Errors from handlers are routed through
 	 * {@link onError} via {@link emit}'s normal isolation.
 	 */
 	async emitCredentialDisabled(event: CredentialDisabledEvent): Promise<void> {
-		if (!this.#initialized) {
+		if (!this.#initialized || this.#runtimeEventDeliveryPaused) {
 			if (this.#pendingCredentialDisabled.length >= MAX_PENDING_CREDENTIAL_DISABLED) {
 				this.#pendingCredentialDisabled.shift();
 			}
@@ -622,20 +698,23 @@ export class ExtensionRunner {
 	/**
 	 * Forward an MCP server notification to extension handlers.
 	 *
-	 * If {@link initialize} has not yet run, the notification is buffered and replayed
-	 * once initialize wires the runtime/UI context. Matches the credential-disabled
-	 * deferral above: the sdk.ts bridge registers `MCPManager.addNotificationListener`
-	 * inside `createAgentSession` — BEFORE the mode controller calls `initialize()` on
+	 * If {@link initialize} has not yet run — or the runtime event delivery gate
+	 * is engaged (`pauseRuntimeEventDelivery`, see
+	 * {@link resumeRuntimeEventDelivery}) — the notification is buffered and
+	 * replayed once initialize wires the runtime/UI context (or the gate is
+	 * resumed). Matches the credential-disabled deferral above: the sdk.ts
+	 * bridge registers `MCPManager.addNotificationListener` inside
+	 * `createAgentSession` — BEFORE the mode controller calls `initialize()` on
 	 * this runner — so notification frames drained by the manager (either fresh
-	 * arrivals or replay from its own startup buffer) can reach us pre-init. Without
-	 * this buffer they would evaporate for a second time here.
+	 * arrivals or replay from its own startup buffer) can reach us pre-init.
+	 * Without this buffer they would evaporate for a second time here.
 	 *
 	 * Bounded at {@link MAX_PENDING_MCP_NOTIFICATIONS}; oldest entries drop under
 	 * pressure. Never throws; per-handler errors are routed through {@link onError}
 	 * via {@link emit}'s normal isolation.
 	 */
 	async emitMcpNotification(event: Omit<McpNotificationEvent, "type">): Promise<void> {
-		if (!this.#initialized) {
+		if (!this.#initialized || this.#runtimeEventDeliveryPaused) {
 			if (this.#pendingMcpNotifications.length >= MAX_PENDING_MCP_NOTIFICATIONS) {
 				this.#pendingMcpNotifications.shift();
 			}
