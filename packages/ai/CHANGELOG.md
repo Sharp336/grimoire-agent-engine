@@ -10,6 +10,12 @@
 ### Breaking Changes
 
 - Fixed GitHub Copilot's permanent `model_not_available_for_integrator` response being retried and replaced with transient fleet-skew guidance, preserving the provider's actionable `Available models` list instead ([#7819](https://github.com/can1357/oh-my-pi/issues/7819)).
+## [17.2.14] - 2026-08-11
+
+### Added
+
+- Added `forceReasoningOff` and `disableReasoning` options to disable reasoning in OpenAI and Azure OpenAI models
+
 ## [17.2.13] - 2026-08-11
 
 ### Changed

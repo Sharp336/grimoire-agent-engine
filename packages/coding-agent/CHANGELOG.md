@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [17.2.14] - 2026-08-11
+
+### Added
+
+- Added `externalThinking` setting for private scratchpad reasoning via the new `think` tool
+
 ## [17.2.13] - 2026-08-11
 
 ### Added
