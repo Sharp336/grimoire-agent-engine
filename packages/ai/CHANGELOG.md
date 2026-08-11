@@ -187,6 +187,13 @@
 - Fixed the AWS credential resolver ignoring `role_arn` profiles: shared-config role chaining (`source_profile` recursion, `web_identity_token_file`, `credential_source`) now resolves via STS `AssumeRole`/`AssumeRoleWithWebIdentity`, honoring `role_session_name`/`duration_seconds`/`external_id`, so Bedrock is detected on EKS/IRSA and multi-account setups instead of reporting "No models available" ([#8209](https://github.com/can1357/oh-my-pi/issues/8209)).
 - Fixed Bedrock availability being under-detected on Nitro/EKS hosts: the EC2 metadata probe now recognizes Nitro DMI markers (`board_asset_tag` instance ids, `Amazon EC2` vendor fields) in addition to the Xen `ec2` UUID prefix ([#8209](https://github.com/can1357/oh-my-pi/issues/8209)).
 - Fixed DeepSeek Responses targets (opencode-go) rejecting a thinking-mode continuation with `400 The reasoning_text in the thinking mode must be passed back to the API` after a prewalk hand-off plus mid-run compaction: the Responses input builder re-encoded replayed assistant turns without a reasoning item, so the request enabled reasoning but shipped no `reasoning_text`. The encoder now synthesizes a `reasoning_text` reasoning item for every replayed assistant turn when the target requires reasoning replay in thinking mode (`requiresReasoningContentForAllAssistantTurns` / `requiresReasoningContentForToolCalls`), mirroring the chat-completions `reasoning_content` safety net ([#8248](https://github.com/can1357/oh-my-pi/issues/8248)).
+### Added
+
+- Added FriendliAI provider with API key login and model validation
+
+### Changed
+
+- `applyOpenAIExtraBody` now strips reasoning-specific keys (`thinking` for DeepSeek, `parse_reasoning`/`include_reasoning` for Friendli) from `extraBody` when the request disables thinking, instead of skipping the entire merge. The fields are no-ops on the disabled path, but `extraBody` is an arbitrary record that commonly carries gateway routing and controller fields — skipping the whole merge would drop provider-required configuration and route the request to the wrong backend. Only the known reasoning-only keys are removed; the rest flows through unchanged. DeepSeek always-reasoning models are unaffected (`reasoning.disabled` is never true for them).
 
 ## [17.2.12] - 2026-08-08
 
@@ -264,13 +271,7 @@
 - Fixed an issue where Codex Responses dropped native image-generation results from assistant content and replays due to stale `generating` statuses.
 - Fixed Anthropic stream truncation handling where unexpected connection closures were incorrectly treated as clean stops, causing the agent loop to halt silently mid-sentence.
 - Optimized Anthropic prompt caching to prevent unnecessary cache invalidation of the entire system prefix when volatile project footer details (such as current working directory, date, or workspace tree) change.
-### Added
 
-- Added FriendliAI provider with API key login and model validation
-
-### Changed
-
-- `applyOpenAIExtraBody` now strips reasoning-specific keys (`thinking` for DeepSeek, `parse_reasoning`/`include_reasoning` for Friendli) from `extraBody` when the request disables thinking, instead of skipping the entire merge. The fields are no-ops on the disabled path, but `extraBody` is an arbitrary record that commonly carries gateway routing and controller fields — skipping the whole merge would drop provider-required configuration and route the request to the wrong backend. Only the known reasoning-only keys are removed; the rest flows through unchanged. DeepSeek always-reasoning models are unaffected (`reasoning.disabled` is never true for them).
 
 ## [17.2.4] - 2026-08-01
 

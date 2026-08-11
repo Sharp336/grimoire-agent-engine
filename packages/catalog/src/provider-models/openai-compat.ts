@@ -2360,15 +2360,14 @@ function mapFriendliThinking(
 	if (reference?.provider === "friendli" && reference.thinking) {
 		return reference.thinking;
 	}
-	// No Friendli reference and no `type: "effort"`. If the endpoint
-	// advertises a `type: "toggle"` entry, the model supports the binary
-	// `enable_thinking` control. Give it a single-tier thinking config so
-	// the binary-collapse path and the `qwen-template-false` disable mode can
-	// drive it on/off — without it, `thinking` is undefined and callers can
-	// neither enable nor disable reasoning despite the toggle.
-	if (Array.isArray(reasoningOptions) && reasoningOptions.some(opt => isRecord(opt) && opt.type === "toggle")) {
-		return { mode: "effort", efforts: [Effort.High] };
-	}
+	// No Friendli reference and no `type: "effort"`. A `type: "toggle"`
+	// entry advertises the binary `enable_thinking` control, but returning
+	// a synthetic effort tier here would misclassify the model as having an
+	// effort surface in `buildOpenAICompat` and emit top-level
+	// `reasoning_effort`, which toggle-only models reject. Leave `thinking`
+	// undefined — `reasoning: true` + `qwen-template-false` still drives
+	// `enable_thinking: true/false` on the wire, and
+	// `supportsReasoningEffort: false` keeps `reasoning_effort` suppressed.
 	return undefined;
 }
 

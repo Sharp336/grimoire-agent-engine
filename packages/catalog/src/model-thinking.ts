@@ -153,13 +153,14 @@ export function resolveModelThinking<TApi extends Api>(
 		thinking = fillThinkingWireDefaults(spec, compat, spec.thinking);
 	} else {
 		// Friendli: discovery is authoritative. `mapFriendliThinking` gives
-		// effort models their API ladder and toggle-only models (e.g.
-		// GLM-4.5) a single-tier binary config, so `spec.thinking` is
-		// populated for every Friendli reasoning model the endpoint
-		// advertises a control surface for. This early-return only fires for
-		// a Friendli model with `spec.thinking === undefined` AND no
-		// identity-known effort ladder — i.e. the API reported reasoning
-		// with neither a `type: "effort"` nor a `type: "toggle"` entry. Return
+		// effort models their API ladder from `type: "effort"`; toggle-only
+		// models (e.g. GLM-4.5) are left with `thinking: undefined` so the
+		// `qwen-template-false` disable mode drives `enable_thinking` on/off
+		// without misclassifying them as having an effort surface. This
+		// early-return fires for a Friendli model with
+		// `spec.thinking === undefined` AND no identity-known effort ladder
+		// — i.e. the API reported reasoning with neither a
+		// `type: "effort"` entry nor a GLM-5.2 identity match. Return
 		// undefined instead of fabricating a generic effort ladder the
 		// endpoint rejects.
 		// A custom provider pointing at Friendli with GLM-5.2 but no

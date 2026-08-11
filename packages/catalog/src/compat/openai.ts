@@ -686,7 +686,9 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		// endpoint advertising the toggle.
 		compat.reasoningDisableMode = requiresEnabledThinking
 			? "omit"
-			: resolveReasoningDisableMode(compat.thinkingFormat);
+			: isDirectDeepseekReasoning
+				? "zai-thinking-disabled"
+				: resolveReasoningDisableMode(compat.thinkingFormat);
 	}
 	if (spec.compat?.omitReasoningEffort === undefined && !compat.supportsReasoningEffort) {
 		compat.omitReasoningEffort = true;

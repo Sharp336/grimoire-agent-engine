@@ -167,14 +167,14 @@ describe("Friendli provider discovery", () => {
 		expect(glm.thinking?.efforts).toEqual([Effort.High, Effort.Max]);
 	});
 
-	test("returns binary thinking for toggle-only reasoning model with no reference", async () => {
+	test("leaves thinking undefined for toggle-only reasoning model with no reference", async () => {
 		// A model not in any bundled catalog: reasoning: true with a
 		// `type: "toggle"` in reasoning_options but no `type: "effort"`.
-		// The toggle advertises the `enable_thinking` binary control, so the
-		// mapper gives the model a single-tier thinking config representing
-		// it — without this, `thinking` would be undefined and callers could
-		// neither enable nor disable reasoning despite the endpoint
-		// supporting the toggle.
+		// The toggle advertises the binary `enable_thinking` control, but
+		// synthesizing an effort tier would set `supportsReasoningEffort`
+		// and emit `reasoning_effort`, which toggle-only models reject. So
+		// `thinking` stays undefined — `reasoning: true` + the
+		// `qwen-template-false` disable mode still drive the toggle on/off.
 		const fetchMock: FetchImpl = async (_input: string | URL | Request, _init?: RequestInit) => {
 			return new Response(
 				JSON.stringify({
@@ -208,9 +208,10 @@ describe("Friendli provider discovery", () => {
 		expect(models).toHaveLength(1);
 		const m = models![0];
 		expect(m.reasoning).toBe(true);
-		// Toggle-only → single-tier binary thinking config (not undefined)
-		expect(m.thinking).toBeDefined();
-		expect(m.thinking?.efforts).toEqual([Effort.High]);
+		// Toggle-only → thinking stays undefined. The binary toggle is
+		// driven by `reasoning: true` + `qwen-template-false`, not by a
+		// synthetic effort tier that would misclassify as an effort surface.
+		expect(m.thinking).toBeUndefined();
 	});
 
 	test("does not borrow effort metadata from a cross-provider reference", async () => {
@@ -219,9 +220,10 @@ describe("Friendli provider discovery", () => {
 		// type: "effort" in reasoning_options. The cross-provider reference's
 		// effort ladder must NOT leak into the Friendli model — doing so would
 		// set supportsReasoningEffort and send reasoning_effort the
-		// Friendli endpoint rejects. The model still gets a single-tier binary
-		// thinking config from its `type: "toggle"` entry, but NOT the
-		// multi-tier effort ladder the cross-provider reference advertises.
+		// Friendli endpoint rejects. The model's `type: "toggle"` entry
+		// drives the binary `enable_thinking` toggle via `reasoning: true`
+		// + `qwen-template-false`, without a synthetic effort tier and
+		// without the multi-tier ladder the cross-provider reference advertises.
 		const fetchMock: FetchImpl = async (_input: string | URL | Request, _init?: RequestInit) => {
 			return new Response(
 				JSON.stringify({
@@ -251,11 +253,10 @@ describe("Friendli provider discovery", () => {
 		expect(models).toHaveLength(1);
 		const m = models![0];
 		expect(m.reasoning).toBe(true);
-		// Toggle-only → binary thinking config from Friendli's own toggle
-		// entry — NOT the multi-tier effort ladder a cross-provider reference
-		// might advertise for the same model id.
-		expect(m.thinking).toBeDefined();
-		expect(m.thinking?.efforts).toEqual([Effort.High]);
+		// Toggle-only → no thinking config. The binary toggle is driven by
+		// `reasoning: true` + `qwen-template-false`, not a synthetic effort
+		// tier. The cross-provider reference's multi-tier ladder does NOT leak.
+		expect(m.thinking).toBeUndefined();
 	});
 
 	test("uses the bundled reference cost as-is when /v1/models omits a pricing field", async () => {
