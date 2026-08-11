@@ -672,7 +672,7 @@ tui:
 | `showHardwareCursor`        | boolean | `true`           | Show the terminal hardware cursor.                                        |
 | `statusLine.preset`         | enum    | `default`        | `default`, `minimal`, `compact`, `full`, `nerd`, `ascii`, `custom`.       |
 | `statusLine.separator`      | enum    | `powerline-thin` | `powerline`, `powerline-thin`, `slash`, `pipe`, `block`, `none`, `ascii`. |
-| `statusLine.costInclude`   | enum    | `main-subagents-advisors` | Which costs the cost segment adds up: `main`, `main-subagents`, `main-subagents-advisors`, `main-advisors`. |
+| `statusLine.costInclude`      | enum    | `main-subagents-advisors` | Which costs the cost segment adds up: `main`, `main-subagents`, `main-subagents-advisors`, `main-advisors`. |
 | `statusLine.sessionAccent`  | boolean | `true`           | Tint the editor border with the session color.                            |
 | `statusLine.transparent`    | boolean | `false`          | Use the terminal background for the status line.                          |
 | `statusLine.showHookStatus` | boolean | `true`           | Show hook status messages.                                                |

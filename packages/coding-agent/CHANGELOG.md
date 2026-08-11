@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `statusLine.costInclude` setting to control which cost buckets the status line's cost segment shows: `main` (main agent only), `main+subagents`, `main+subagents+advisors` (default, current behavior), or `main+advisors`. Subagent costs now include background (async) subagents, which were previously omitted from the aggregate; async subagent usage is recorded on the parent session (`async-result` entries) so it feeds the status line, token segments, and usage reports alike.
+- Added `statusLine.costInclude` setting to control which cost buckets the status line's cost segment shows: `main` (main agent only), `main-subagents`, `main-subagents-advisors` (default, current behavior), or `main-advisors`. Subagent costs now include background (async) subagents, which were previously omitted from the aggregate; async subagent usage is recorded on the parent session (via `async-result` deliveries and `hub` wait/jobs/cancel results) so it feeds the status line, token segments, and usage reports alike ([#8258](https://github.com/can1357/oh-my-pi/pull/8258) by [@MertSoylu](https://github.com/MertSoylu)).
 
 ## [17.2.13] - 2026-08-11
 

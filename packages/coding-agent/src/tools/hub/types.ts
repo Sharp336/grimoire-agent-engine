@@ -5,6 +5,7 @@
  */
 
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import type { Usage } from "@oh-my-pi/pi-ai";
 import type { IrcDeliveryReceipt, IrcMessage } from "../../irc/bus";
 import type { LaunchParams, LaunchToolDetails } from "./launch";
 
@@ -50,6 +51,13 @@ export interface JobSnapshot {
 	resolvedModel?: string;
 	resultText?: string;
 	errorText?: string;
+	/**
+	 * LLM usage reported by a settled task job. Surfaced so a `hub`
+	 * wait/jobs/cancel result that acknowledges (consumes) the delivery can
+	 * carry the usage onward instead of dropping the background subagent's
+	 * cost/tokens (see `buildJobResult`).
+	 */
+	usage?: Usage;
 }
 
 export type CancelStatus = "cancelled" | "not_found" | "already_completed";
@@ -90,6 +98,13 @@ export interface CoordinationDetails {
 	cancelled?: { id: string; status: CancelStatus }[];
 	/** Running subagents not represented by a job row in this result. */
 	agents?: AgentActivitySnapshot[];
+	/**
+	 * Aggregated LLM usage across the settled task jobs this result consumed.
+	 * Present only for job ops (`wait`/`jobs`/`cancel`) that acknowledged
+	 * deliveries, so the session can bill background subagent usage that never
+	 * reached an `async-result` follow-up.
+	 */
+	usage?: Usage;
 }
 
 /** Hub result details: coordination snapshots or launch (process) state. */

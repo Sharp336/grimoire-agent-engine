@@ -1562,10 +1562,22 @@ export class StatusLineComponent implements Component {
 			...aggregateUsageStats,
 			tokensPerSecond: this.#getTokensPerSecond(),
 		};
-		// Fall back to the aggregate when the session manager is absent or lacks
-		// the subagent ledger (e.g. minimal test doubles): the selection logic
-		// then simply has no subagent share to subtract.
-		const subagentUsageStats = this.session.sessionManager?.getSubagentUsageStatistics?.() ?? aggregateUsageStats;
+		// Fall back to a zeroed ledger when the session manager is absent or
+		// lacks the subagent ledger (e.g. minimal test doubles): treating the
+		// aggregate as the subagent share would zero out the main agent's cost
+		// for `main`/`main-advisors`, so subtract nothing instead.
+		const subagentUsageStats = this.session.sessionManager?.getSubagentUsageStatistics?.() ?? {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			orchestrationInput: 0,
+			orchestrationOutput: 0,
+			orchestrationCacheRead: 0,
+			premiumRequests: 0,
+			cost: 0,
+		};
 
 		let contextWindow = state.model?.contextWindow ?? this.session.model?.contextWindow ?? 0;
 		let contextPercent: number | null = 0;

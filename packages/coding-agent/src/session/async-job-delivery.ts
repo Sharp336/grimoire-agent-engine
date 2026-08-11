@@ -57,7 +57,14 @@ export type AsyncResultDetails = {
 	usage?: Usage;
 };
 
-function aggregateJobUsage(entries: AsyncResultEntry[]): Usage | undefined {
+/**
+ * Sum a set of job usages into one `Usage` record. Returns `undefined` when no
+ * entry reported usage, so callers can omit the field entirely. Shared by the
+ * `async-result` delivery (background subagent jobs) and the `hub`
+ * wait/jobs/cancel consumption path, which acknowledges the same deliveries
+ * before an `async-result` follow-up could form.
+ */
+export function aggregateUsages(usages: readonly (Usage | undefined)[]): Usage | undefined {
 	const totals: Usage = {
 		input: 0,
 		output: 0,
@@ -71,8 +78,7 @@ function aggregateJobUsage(entries: AsyncResultEntry[]): Usage | undefined {
 	let orchestrationCacheRead = 0;
 	let premiumRequests = 0;
 	let sawUsage = false;
-	for (const entry of entries) {
-		const usage = entry.job?.resultUsage;
+	for (const usage of usages) {
 		if (!usage) continue;
 		sawUsage = true;
 		totals.input += usage.input ?? 0;
@@ -103,6 +109,10 @@ function aggregateJobUsage(entries: AsyncResultEntry[]): Usage | undefined {
 	}
 	if (premiumRequests > 0) totals.premiumRequests = premiumRequests;
 	return totals;
+}
+
+function aggregateJobUsage(entries: AsyncResultEntry[]): Usage | undefined {
+	return aggregateUsages(entries.map(entry => entry.job?.resultUsage));
 }
 
 export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): CustomMessage<AsyncResultDetails> | null {

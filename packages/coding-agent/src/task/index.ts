@@ -66,6 +66,7 @@ function createUsageTotals(): Usage {
 		cacheRead: 0,
 		cacheWrite: 0,
 		totalTokens: 0,
+		premiumRequests: 0,
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
 }
@@ -91,6 +92,7 @@ function addUsageTotals(target: Usage, usage: Partial<Usage>): void {
 	target.cacheRead += cacheRead;
 	target.cacheWrite += cacheWrite;
 	target.totalTokens += totalTokens;
+	target.premiumRequests = (target.premiumRequests ?? 0) + (usage.premiumRequests ?? 0);
 	target.cost.input += cost.input;
 	target.cost.output += cost.output;
 	target.cost.cacheRead += cost.cacheRead;

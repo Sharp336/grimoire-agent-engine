@@ -1065,6 +1065,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		cacheWrite: 0,
 		totalTokens: 0,
 		reasoningTokens: 0,
+		premiumRequests: 0,
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
 	let hasUsage = false;
@@ -1633,6 +1634,8 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 						accumulatedUsage.totalTokens += getNumberField(messageUsage, "totalTokens") ?? 0;
 						accumulatedUsage.reasoningTokens =
 							(accumulatedUsage.reasoningTokens ?? 0) + (getNumberField(messageUsage, "reasoningTokens") ?? 0);
+						accumulatedUsage.premiumRequests =
+							(accumulatedUsage.premiumRequests ?? 0) + (getNumberField(messageUsage, "premiumRequests") ?? 0);
 						if (costRecord) {
 							accumulatedUsage.cost.input += getNumberField(costRecord, "input") ?? 0;
 							accumulatedUsage.cost.output += getNumberField(costRecord, "output") ?? 0;

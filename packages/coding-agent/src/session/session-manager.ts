@@ -143,17 +143,27 @@ function taskUsageFrom(details: unknown): Usage | undefined {
 	return maybeUsage !== null && typeof maybeUsage === "object" ? (maybeUsage as Usage) : undefined;
 }
 
-function entryUsage(entry: SessionEntry): Usage | undefined {
+function isSubagentUsageMessage(message: SessionMessageEntry["message"]): boolean {
 	// The main agent's own spend is its assistant messages. Subagent spend is
-	// carried by sync task tool-results and async background job deliveries
-	// (an `async-result` custom message whose details carry the aggregated
-	// usage); {@link isSubagentUsageEntry} mirrors these two subagent sources
-	// so the session usage totals (status line, cost reports, token segments)
-	// cover every source exactly once.
+	// carried by sync task tool-results, `hub` wait/jobs/cancel results that
+	// consumed a background task job's delivery (their details carry the
+	// aggregated usage), and async background job deliveries (an
+	// `async-result` custom message). {@link entryUsage} mirrors these three
+	// subagent sources so the session usage totals (status line, cost reports,
+	// token segments) cover every source exactly once.
+	if (message.role !== "toolResult") return false;
+	return message.toolName === "task" || message.toolName === "hub";
+}
+
+function entryUsage(entry: SessionEntry): Usage | undefined {
 	if (entry.type === "message") {
 		const message = entry.message;
 		if (message.role === "assistant") return message.usage;
-		if (message.role === "toolResult" && message.toolName === "task") return taskUsageFrom(message.details);
+		// Inline narrowing over the message union: a bare boolean helper cannot
+		// close the union, so `message.details` is only readable here.
+		if (message.role === "toolResult" && (message.toolName === "task" || message.toolName === "hub")) {
+			return taskUsageFrom(message.details);
+		}
 		return undefined;
 	}
 	if (entry.type === "custom_message" && entry.customType === ASYNC_RESULT_MESSAGE_TYPE) {
@@ -178,8 +188,7 @@ function addUsage(target: UsageStatistics, usage: Usage | undefined): void {
 
 function isSubagentUsageEntry(entry: SessionEntry): boolean {
 	if (entry.type === "message") {
-		const message = entry.message;
-		return message.role === "toolResult" && message.toolName === "task";
+		return isSubagentUsageMessage(entry.message);
 	}
 	return entry.type === "custom_message" && entry.customType === ASYNC_RESULT_MESSAGE_TYPE;
 }

@@ -49,6 +49,13 @@ export interface AsyncJob {
 	 */
 	resultUsage?: Usage;
 	/**
+	 * True when the job settled while its delivery was suppressed (foreground
+	 * `hub` wait/jobs consumption), so the delivery was never enqueued and no
+	 * `async-result` will ever carry this job's usage. Consumers folding a
+	 * consumed job's usage into their own result must count these too.
+	 */
+	deliverySkipped?: boolean;
+	/**
 	 * Registry id of the agent that registered the job (e.g. "Main",
 	 * "AuthLoader"). Used by scoped cancel/list APIs so a subagent's teardown
 	 * does not cancel its parent's jobs. Undefined for callers that don't
@@ -387,21 +394,33 @@ export class AsyncJobManager {
 		this.#pollEscalation.set(ownerId, { level: prev?.level ?? 0, lastPollEndAt: now });
 	}
 
-	acknowledgeDeliveries(jobIds: string[]): number {
+	/**
+	 * Acknowledge deliveries for the given job ids: mark them suppressed and
+	 * drop any matching queued delivery. Returns the ids whose queued delivery
+	 * this call actually removed — callers folding a consumed job's usage into
+	 * their own result must only count those, never a job already delivered via
+	 * an `async-result` follow-up or acknowledged by an earlier call (both leave
+	 * no queued delivery, so re-counting it would double-bill the session).
+	 */
+	acknowledgeDeliveries(jobIds: string[]): string[] {
 		const uniqueJobIds = Array.from(new Set(jobIds.map(id => id.trim()).filter(id => id.length > 0)));
-		if (uniqueJobIds.length === 0) return 0;
+		if (uniqueJobIds.length === 0) return [];
 
 		for (const jobId of uniqueJobIds) {
 			this.#suppressedDeliveries.add(jobId);
 		}
 
-		const before = this.#deliveries.length;
+		const suppressed: string[] = [];
+		const uniqueSet = new Set(uniqueJobIds);
+		for (const delivery of this.#deliveries) {
+			if (uniqueSet.has(delivery.jobId)) suppressed.push(delivery.jobId);
+		}
 		this.#deliveries.splice(
 			0,
 			this.#deliveries.length,
 			...this.#deliveries.filter(delivery => !this.isDeliverySuppressed(delivery.jobId)),
 		);
-		return before - this.#deliveries.length;
+		return suppressed;
 	}
 
 	/**
@@ -734,8 +753,12 @@ export class AsyncJobManager {
 	}
 
 	#enqueueDelivery(jobId: string, text: string): void {
-		// Skip delivery if already acknowledged
+		// Skip delivery if already acknowledged; the job settles with no queued
+		// delivery, so no `async-result` follow-up will ever carry its usage —
+		// mark it for consumers that fold consumed-job usage into their result.
 		if (this.isDeliverySuppressed(jobId)) {
+			const job = this.#jobs.get(jobId);
+			if (job) job.deliverySkipped = true;
 			return;
 		}
 		this.#deliveries.push({

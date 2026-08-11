@@ -5,6 +5,7 @@
  */
 
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import type { Usage } from "@oh-my-pi/pi-ai";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
 import type { AsyncJob, AsyncJobManager } from "../../async";
@@ -12,6 +13,7 @@ import { settings } from "../../config/settings";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
 import { shimmerEnabled, shimmerText } from "../../modes/theme/shimmer";
 import type { Theme } from "../../modes/theme/theme";
+import { aggregateUsages } from "../../session/async-job-delivery";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
 import { Ellipsis, Hasher, type RenderCache, renderStatusLine, renderTreeList, truncateToWidth } from "../../tui";
 import type { ToolSession } from "..";
@@ -139,6 +141,8 @@ interface TrackedJobLike {
 	latestDetails?: Record<string, unknown>;
 	resultText?: string;
 	errorText?: string;
+	/** LLM usage reported by a settled task job (see {@link AsyncJob.resultUsage}). */
+	resultUsage?: Usage;
 }
 
 export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobSnapshot[] {
@@ -176,6 +180,7 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 			...(resolvedModel ? { resolvedModel } : {}),
 			...(latest.resultText ? { resultText: latest.resultText } : {}),
 			...(latest.errorText ? { errorText: latest.errorText } : {}),
+			...(latest.resultUsage ? { usage: latest.resultUsage } : {}),
 		};
 	});
 }
@@ -197,10 +202,22 @@ export function buildJobResult(
 	});
 	const jobResults = snapshotJobs(session, uniqueJobs);
 
-	manager.acknowledgeDeliveries(jobResults.filter(j => j.status !== "running").map(j => j.id));
-
 	const completed = jobResults.filter(j => j.status !== "running");
 	const running = jobResults.filter(j => j.status === "running");
+	// Consuming a delivery here (acknowledgeDeliveries below) means no
+	// `async-result` follow-up will ever carry those task jobs' usage — persist
+	// it on the result details instead so the session's usage index can bill
+	// background subagent cost/tokens exactly like a delivery would. Only jobs
+	// whose usage no other path will count: deliveries this call actually
+	// removed, plus jobs that settled while suppressed (foreground `hub` wait
+	// watches them, so their delivery was never enqueued). A job already
+	// delivered via an `async-result` (or acknowledged by an earlier hub call)
+	// still sits in retention with its usage intact, and re-aggregating it
+	// would double-bill the session.
+	const consumedIds = new Set(manager.acknowledgeDeliveries(completed.map(j => j.id)));
+	const consumedUsage = aggregateUsages(
+		jobResults.filter(j => consumedIds.has(j.id) || manager.getJob(j.id)?.deliverySkipped === true).map(j => j.usage),
+	);
 
 	const lines: string[] = [];
 
@@ -248,6 +265,7 @@ export function buildJobResult(
 		jobs: jobResults,
 		...(cancelOutcomes.length ? { cancelled: cancelOutcomes.map(({ id, status }) => ({ id, status })) } : {}),
 		...(agents.length ? { agents } : {}),
+		...(consumedUsage ? { usage: consumedUsage } : {}),
 	};
 	return {
 		content: [{ type: "text", text: lines.join("\n").trimEnd() }],

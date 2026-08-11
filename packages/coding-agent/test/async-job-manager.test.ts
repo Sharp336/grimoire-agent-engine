@@ -266,7 +266,7 @@ describe("AsyncJobManager", () => {
 
 		expect(manager.hasPendingDeliveries()).toBe(true);
 		const removed = manager.acknowledgeDeliveries([jobId]);
-		expect(removed).toBeGreaterThanOrEqual(1);
+		expect(removed).toContain(jobId);
 
 		const drained = await manager.drainDeliveries({ timeoutMs: 200 });
 		expect(drained).toBe(true);
@@ -350,7 +350,7 @@ describe("AsyncJobManager", () => {
 		expect(subagentCompletions).toEqual([{ jobId: targetJobId, text: "subagent result" }]);
 		expect(manager.hasPendingDeliveries({ ownerId: "3-AuthLoader" })).toBe(false);
 
-		expect(manager.acknowledgeDeliveries([mainJobId])).toBe(0);
+		expect(manager.acknowledgeDeliveries([mainJobId])).toEqual([]);
 		expect(manager.hasPendingDeliveries({ ownerId: "0-Main" })).toBe(false);
 		releaseMainDelivery();
 		await Bun.sleep(0);

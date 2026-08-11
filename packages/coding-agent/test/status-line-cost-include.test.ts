@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
-	resolveCostParts,
 	type CostSegmentInputs,
+	resolveCostParts,
 } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/segments";
 
 function inputs(overrides: Partial<CostSegmentInputs> = {}): CostSegmentInputs {

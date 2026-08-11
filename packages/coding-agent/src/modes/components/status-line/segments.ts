@@ -466,15 +466,8 @@ export interface CostSegmentParts {
  * unit-testable without a full segment context.
  */
 export function resolveCostParts(inputs: CostSegmentInputs): CostSegmentParts {
-	const {
-		include,
-		cost,
-		subagentCost,
-		premiumRequests,
-		subagentPremiumRequests,
-		advisorCost,
-		usingSubscription,
-	} = inputs;
+	const { include, cost, subagentCost, premiumRequests, subagentPremiumRequests, advisorCost, usingSubscription } =
+		inputs;
 	const includeSubagents = include === "main-subagents" || include === "main-subagents-advisors";
 	const includeAdvisors = include === "main-subagents-advisors" || include === "main-advisors";
 
@@ -519,7 +512,9 @@ const costSegment: StatusLineSegment = {
 		if (parts.cost) billingParts.push(`$${parts.cost.toFixed(2)}`);
 		if (parts.premiumRequests) billingParts.push(`★ ${formatNumber(parts.premiumRequests)}`);
 		if (parts.usingSubscription) billingParts.push("(sub)");
-		if (parts.advisorCost) billingParts.push(`${billingParts.length ? "+ " : ""}$${parts.advisorCost.toFixed(2)} (adv)`);
+		if (parts.advisorCost) {
+			billingParts.push(`${billingParts.length ? "+ " : ""}$${parts.advisorCost.toFixed(2)} (adv)`);
+		}
 
 		return { content: theme.fg("statusLineCost", billingParts.join(" ")), visible: true };
 	},

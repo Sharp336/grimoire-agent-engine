@@ -290,4 +290,98 @@ describe("SessionManager usage statistics", () => {
 		expect(usage.cacheRead).toBe(200);
 		expect(usage.cost).toBeCloseTo(18, 8);
 	});
+
+	it("counts background subagent usage consumed via a hub jobs/wait result", () => {
+		// Contract: when a background task job is consumed through `hub`
+		// (`jobs`/`wait`/`cancel`) before the idle async-result delivery, the hub
+		// tool result carries the aggregated usage in its details; the session
+		// must bill it exactly like a sync task tool-result so the background
+		// subagent's cost/tokens reach the status line and usage reports.
+		const session = SessionManager.inMemory();
+
+		session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+		session.appendMessage({
+			role: "toolResult",
+			toolCallId: "hub_1",
+			toolName: "hub",
+			content: [{ type: "text", text: "1 job settled" }],
+			details: {
+				op: "jobs",
+				jobs: [{ id: "bg_1", type: "task", status: "completed", label: "bg_1", durationMs: 100 }],
+				usage: {
+					input: 7,
+					output: 8,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 15,
+					premiumRequests: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 4 },
+				},
+			},
+			isError: false,
+			timestamp: 2,
+		});
+
+		const usage = session.getUsageStatistics();
+		expect(usage.input).toBe(7);
+		expect(usage.output).toBe(8);
+		expect(usage.premiumRequests).toBe(2);
+		expect(usage.cost).toBeCloseTo(4, 8);
+
+		const subagent = session.getSubagentUsageStatistics();
+		expect(subagent.input).toBe(7);
+		expect(subagent.premiumRequests).toBe(2);
+	});
+
+	it("keeps subagent premium requests in the subagent ledger for cost filtering", () => {
+		// Contract: `statusLine.costInclude` filters premium-request stars by the
+		// same main/subagent split as cost, so subagent premium requests (sync
+		// task results and async deliveries) must land in the subagent ledger
+		// rather than staying trapped in the aggregate.
+		const session = SessionManager.inMemory();
+
+		session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+		session.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "hi" }],
+			api: "openai-completions",
+			provider: "github-copilot",
+			model: "gpt-4o",
+			usage: {
+				input: 10,
+				output: 5,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 15,
+				premiumRequests: 1,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 1 },
+			},
+			stopReason: "stop",
+			timestamp: 2,
+		});
+		session.appendMessage({
+			role: "toolResult",
+			toolCallId: "task_1",
+			toolName: "task",
+			content: [{ type: "text", text: "task output" }],
+			details: {
+				usage: {
+					input: 2,
+					output: 3,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 5,
+					premiumRequests: 3,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 2 },
+				},
+			},
+			isError: false,
+			timestamp: 3,
+		});
+
+		const total = session.getUsageStatistics();
+		expect(total.premiumRequests).toBe(4);
+		const subagent = session.getSubagentUsageStatistics();
+		expect(subagent.premiumRequests).toBe(3);
+	});
 });
