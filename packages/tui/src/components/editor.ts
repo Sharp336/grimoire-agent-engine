@@ -518,6 +518,7 @@ export class Editor implements Component, Focusable {
 	#borderVisible = true;
 	/** Optional content rendered inside the editor chrome above the text buffer. */
 	#headerComponent?: Component;
+	#lastHeaderRows = 0;
 
 	constructor(theme: EditorTheme) {
 		this.#theme = theme;
@@ -757,6 +758,12 @@ export class Editor implements Component, Focusable {
 		return Math.max(1, this.#maxHeight - verticalChrome - headerRows);
 	}
 
+	#getVisibleHeaderHeight(headerRows: number): number {
+		if (this.#maxHeight === undefined) return headerRows;
+		const verticalChrome = this.#borderVisible ? 2 : 0;
+		return Math.min(headerRows, Math.max(0, this.#maxHeight - verticalChrome - 1));
+	}
+
 	/** Apply the optional input decorator to a plain (ANSI-free) text segment.
 	 *  Decoration only adds zero-width SGR codes, so visible width is unchanged.
 	 *  Splits around CURSOR_MARKER so each user-text segment is decorated in
@@ -844,7 +851,9 @@ export class Editor implements Component, Focusable {
 
 	#getPageScrollStep(totalVisualLines: number): number {
 		const visibleHeight =
-			this.#maxHeight === undefined ? DEFAULT_PAGE_SCROLL_LINES : this.#getVisibleContentHeight(totalVisualLines);
+			this.#maxHeight === undefined
+				? DEFAULT_PAGE_SCROLL_LINES
+				: this.#getVisibleContentHeight(totalVisualLines, this.#lastHeaderRows);
 		return Math.max(1, visibleHeight - 1);
 	}
 
@@ -882,10 +891,13 @@ export class Editor implements Component, Focusable {
 		const bottomLeft = this.borderColor(`${box.bottomLeft}${box.horizontal}${padding(Math.max(0, paddingX - 1))}`);
 		const horizontal = this.borderColor(box.horizontal);
 
-		const headerLines = this.#headerComponent?.render(contentAreaWidth) ?? [];
+		const renderedHeaderLines = this.#headerComponent?.render(contentAreaWidth) ?? [];
+		const headerRows = this.#getVisibleHeaderHeight(renderedHeaderLines.length);
+		const headerLines = renderedHeaderLines.slice(0, headerRows);
+		this.#lastHeaderRows = headerRows;
 		// Layout the text
 		const layoutLines = this.#layoutText(layoutWidth);
-		const visibleContentHeight = this.#getVisibleContentHeight(layoutLines.length, headerLines.length);
+		const visibleContentHeight = this.#getVisibleContentHeight(layoutLines.length, headerRows);
 		this.#updateScrollOffset(layoutWidth, layoutLines, visibleContentHeight);
 		const visibleLayoutLines = layoutLines.slice(this.#scrollOffset, this.#scrollOffset + visibleContentHeight);
 

@@ -506,6 +506,7 @@ export class SelectorController {
 			case "terminal.showImages":
 			case "showImages": {
 				const visible = value as boolean;
+				if (!visible) this.ctx.ui.clearInlineImages();
 				this.ctx.editor.setImagePreviewEnabled(visible && this.ctx.settings.get("tui.pastedImagePreview"));
 				for (const child of this.ctx.chatContainer.children) {
 					if (child instanceof ToolExecutionComponent) {
@@ -514,7 +515,6 @@ export class SelectorController {
 						child.setImagesVisible(visible);
 					}
 				}
-				if (!visible) this.ctx.ui.clearInlineImages();
 				this.ctx.ui.resetDisplay();
 				break;
 			}

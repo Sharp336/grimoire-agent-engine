@@ -70,6 +70,19 @@ describe("ImageBudget", () => {
 		expect(second.purge).toEqual([]);
 	});
 
+	it("keeps cap-exempt images live without evicting counted images", () => {
+		const budget = new ImageBudget(2, () => {});
+
+		for (let frame = 0; frame < 2; frame++) {
+			budget.beginPass();
+			expect(budget.observe(1)).toBe(false);
+			expect(budget.observe(2)).toBe(false);
+			expect(budget.observe(3, false)).toBe(false);
+			expect(budget.endPass()).toBe(false);
+			expect([...budget.takePurgeIds()]).toEqual([]);
+		}
+	});
+
 	it("demotes the oldest image on the frame after the cap is exceeded, purging its graphics id", () => {
 		let renders = 0;
 		const budget = new ImageBudget(2, () => {

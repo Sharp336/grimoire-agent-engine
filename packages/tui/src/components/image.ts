@@ -19,6 +19,8 @@ export interface ImageOptions {
 	filename?: string;
 	/** Shared budget that caps how many inline images render as live graphics. */
 	budget?: ImageBudget;
+	/** Whether this image participates in the shared live-image cap. Defaults to true. */
+	countTowardsBudget?: boolean;
 	/**
 	 * Stable identity for the underlying image (e.g. `toolCallId:index`). Lets the
 	 * budget hand back the same graphics id across component re-creations so a
@@ -181,7 +183,8 @@ export class ImageBudget {
 	 * are not authoritative, so the decision is the committed on-terminal split
 	 * (`#suppressedIds`) keyed by id — order- and partiality-independent.
 	 */
-	observe(imageId: number): boolean {
+	observe(imageId: number, countTowardsBudget = true): boolean {
+		if (!countTowardsBudget) return false;
 		if (this.#stablePass) {
 			const suppressed = this.#cap > 0 && this.#suppressedIds.has(imageId);
 			if (suppressed) this.#forgetKeyForId(imageId);
@@ -383,7 +386,10 @@ export class Image implements Component {
 		// its display-order slot in the budget. Only graphics-capable frames count
 		// toward (and are demoted by) the budget; without a protocol every image is
 		// already text.
-		const suppressed = hasProtocol && this.#budget !== undefined ? this.#budget.observe(this.#imageId ?? 0) : false;
+		const suppressed =
+			hasProtocol && this.#budget !== undefined
+				? this.#budget.observe(this.#imageId ?? 0, this.#options.countTowardsBudget)
+				: false;
 
 		if (
 			this.#cachedLines &&

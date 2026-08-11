@@ -126,6 +126,9 @@ describe("selector setting side effects", () => {
 					expect(clearInlineImages.mock.invocationCallOrder[0]).toBeLessThan(
 						resetDisplay.mock.invocationCallOrder[0],
 					);
+					expect(clearInlineImages.mock.invocationCallOrder[0]).toBeLessThan(
+						setImagePreviewEnabled.mock.invocationCallOrder[0],
+					);
 				}
 			});
 		}

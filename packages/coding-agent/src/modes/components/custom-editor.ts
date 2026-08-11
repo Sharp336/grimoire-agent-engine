@@ -507,6 +507,7 @@ class PendingImagePreview implements Component {
 				{
 					budget: this.#budget,
 					imageKey,
+					countTowardsBudget: false,
 					maxWidthCells: COMPOSER_IMAGE_PREVIEW_MAX_COLUMNS,
 					maxHeightCells: this.#maxImageRows,
 				},
