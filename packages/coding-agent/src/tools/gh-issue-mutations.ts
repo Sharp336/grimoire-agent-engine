@@ -1019,9 +1019,11 @@ async function executeIssueCreate(
 	createArgs.push("--title", title);
 	for (const assignee of assignees) createArgs.push("--assignee", assignee);
 	for (const label of labels) createArgs.push("--label", label);
-	const output = await withGhBodyArgument(createArgs, params.body, "gh-issue-body-", bodyArgs =>
-		git.github.text(session.cwd, bodyArgs, signal, { repoProvided: Boolean(repo) }),
-	);
+	const output = await withGhBodyArgument(createArgs, params.body, "gh-issue-body-", bodyArgs => {
+		// Creating an issue is a commit point: honour cancellation only before launch.
+		throwIfAborted(signal);
+		return git.github.text(session.cwd, bodyArgs, undefined, { repoProvided: Boolean(repo) });
+	});
 
 	const created = extractCreatedIssueReference(output);
 	const sourceUrl = created?.value ?? extractSourceUrl(output);

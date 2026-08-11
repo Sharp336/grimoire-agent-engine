@@ -1415,6 +1415,61 @@ describe("github tool", () => {
 			expect(jsonSpy).toHaveBeenCalledTimes(3);
 			expect(textSpy).not.toHaveBeenCalled();
 		});
+		it("keeps a launched issue creation running after cancellation", async () => {
+			const createdUrl = "https://github.com/owner/repo/issues/48";
+			const controller = new AbortController();
+			const createStarted = Promise.withResolvers<void>();
+			const releaseCreate = Promise.withResolvers<string>();
+			const cancellation = Promise.withResolvers<never>();
+			const textSpy = vi.spyOn(git.github, "text").mockImplementation(async (_cwd, _args, signal) => {
+				createStarted.resolve();
+				if (signal?.aborted) {
+					cancellation.reject(new ToolAbortError());
+				} else {
+					signal?.addEventListener("abort", () => cancellation.reject(new ToolAbortError()), { once: true });
+				}
+				return await Promise.race([releaseCreate.promise, cancellation.promise]);
+			});
+			const pending = new GithubTool(createSession()).execute(
+				"issue-create-cancel-after-launch",
+				{
+					op: "issue_create",
+					repo: "owner/repo",
+					title: "Created despite cancellation",
+				},
+				controller.signal,
+			);
+
+			await createStarted.promise;
+			controller.abort(new Error("cancelled after create launch"));
+			releaseCreate.resolve(`${createdUrl}\n`);
+			const result = await pending;
+
+			expect(textSpy).toHaveBeenCalledTimes(1);
+			expect(result.details?.meta?.source).toEqual({ type: "url", value: createdUrl });
+			expect(result.details?.status).toBe("created");
+		});
+
+		it("does not launch issue creation when already aborted", async () => {
+			const controller = new AbortController();
+			controller.abort(new Error("cancelled before create launch"));
+			const textSpy = vi.spyOn(git.github, "text").mockRejectedValue(new Error("create command must not launch"));
+
+			await expect(
+				new GithubTool(createSession()).execute(
+					"issue-create-cancel-before-launch",
+					{
+						op: "issue_create",
+						repo: "owner/repo",
+						title: "Never created",
+						body: "Prepare this body before checking cancellation.",
+					},
+					controller.signal,
+				),
+			).rejects.toBeInstanceOf(ToolAbortError);
+
+			expect(textSpy).not.toHaveBeenCalled();
+		});
 
 		it("returns the created URL and partial status when aborted after creation", async () => {
 			const createdUrl = "https://github.com/owner/repo/issues/47";
