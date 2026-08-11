@@ -1144,15 +1144,22 @@ export class AcpAgent implements Agent {
 
 	async #registerPreparedSession(session: AgentSession, mcpServers: McpServer[]): Promise<ManagedSessionRecord> {
 		const record = this.#createManagedSessionRecord(session);
-		// Drive goal-mode lifecycle for this headless ACP session (enter/resume/
-		// drop + opt-in auto-continuation). Released in `#disposeSessionRecord`.
-		record.goalAdapterUnsubscribe = await attachHeadlessGoalAdapter(session, "acp");
 		session.setClientBridge(createAcpClientBridge(this.#connection, session.sessionId, this.#clientCapabilities));
 		// `record.lifetimeUnsubscribe` is installed in `#scheduleBootstrapUpdates`
 		// so it shares the bootstrap race guard — see that comment for why.
 		try {
-			await this.#configureExtensions(record);
 			await this.#configureMcpServers(record, mcpServers);
+			// Drive goal-mode lifecycle for this headless ACP session (enter/resume/
+			// drop + opt-in auto-continuation). Released in `#disposeSessionRecord`.
+			// Attach AFTER MCP config and BEFORE extensions' `session_start`: the
+			// attach-time `controller.restore()` snapshots `#previousTools` from the
+			// enabled tool set (so MCP tools must already be enabled — otherwise a
+			// later pause/drop/complete restores a stale snapshot and deactivates
+			// them), and the adapter must be subscribed before `session_start` so an
+			// extension that sends a message there starts its turn with goal state
+			// restored and lifecycle events forwarded.
+			record.goalAdapterUnsubscribe = await attachHeadlessGoalAdapter(session, "acp");
+			await this.#configureExtensions(record);
 			this.#sessions.set(session.sessionId, record);
 			return record;
 		} catch (error) {

@@ -175,11 +175,10 @@ export class GoalModeController {
 		// /goal resume re-adds it. Own the restore here so headless adapters (which
 		// don't run a TUI #exitGoalMode) get it; the TUI's subsequent
 		// #exitGoalMode({paused}) sees #previousTools already cleared and no-ops.
-		// resume() re-captures the then-current toolset as previousTools.
-		if (this.#previousTools !== undefined) {
-			await this.#session.setActiveToolsByName(this.#previousTools);
-			this.#previousTools = undefined;
-		}
+		// The restore merges in tools enabled after the snapshot (e.g. late MCP
+		// tools), so pausing can never disable a client tool. resume() re-captures
+		// the then-current toolset as previousTools.
+		await this.#restoreGoalTools();
 		return { ok: true };
 	}
 
@@ -191,14 +190,12 @@ export class GoalModeController {
 		} catch (error) {
 			return { ok: false, error: error instanceof Error ? error.message : String(error) };
 		}
-		// Drop is terminal: restore the pre-goal toolset here so standalone adapters
-		// (headless) get the restore without an exit call. In the TUI the
+		// Drop is terminal: restore the merged pre-goal toolset here so standalone
+		// adapters (headless) get the restore without an exit call. In the TUI the
 		// `goal_updated`(dropped) event already restored via onGoalUpdated, so this
-		// is a no-op there.
-		if (this.#previousTools !== undefined) {
-			await this.#session.setActiveToolsByName(this.#previousTools);
-			this.#previousTools = undefined;
-		}
+		// is a no-op there. The merge preserves tools that arrived after the
+		// snapshot (e.g. late MCP tools).
+		await this.#restoreGoalTools();
 		return { ok: true };
 	}
 
@@ -235,7 +232,8 @@ export class GoalModeController {
 	 * Guided-goal interview setup: records the pre-interview toolset and exposes
 	 * the goal tool so the agent can finish the interview with `goal create`
 	 * (which turns goal mode on via `goal_updated`). The eventual goal exit
-	 * restores the recorded set.
+	 * restores the recorded set merged with whatever is enabled then (so tools
+	 * that arrive after this snapshot, e.g. late MCP tools, are never dropped).
 	 */
 	async exposeGoalTool(): Promise<void> {
 		const enabledTools = this.#session.getEnabledToolNames();
@@ -287,12 +285,27 @@ export class GoalModeController {
 		return restored;
 	}
 
-	/** Restore the pre-goal tool set recorded by enter/resume/exposeGoalTool.
-	 *  Shared by every goal exit path so all of them clean up the `goal` tool
-	 *  identically; no-op when no snapshot exists. */
+	/**
+	 * Restore the pre-goal tool set recorded by enter/resume/exposeGoalTool,
+	 * MERGED with the currently-enabled non-goal tools. Goal mode only ever
+	 * ADDS the `goal` tool — it never removes or restricts other tools — so the
+	 * union is a strict superset of the snapshot-only restore: every tool that
+	 * should remain enabled is kept, and only `goal` is dropped.
+	 *
+	 * The merge matters because the snapshot is point-in-time: MCP servers can
+	 * enable tools AFTER it was taken (`MCPManager.connectServers` resolves via
+	 * `Promise.race` at `STARTUP_TIMEOUT_MS`, so slow servers register their
+	 * tools later through the background `onToolsChanged` -> `refreshMCPTools`
+	 * path). A full replace with the stale snapshot would disable those late
+	 * tools when the goal is paused/dropped/completed. The merge guarantees
+	 * ending a goal never disables a client MCP tool. Shared by every goal exit
+	 * path so all of them clean up the `goal` tool identically; no-op when no
+	 * snapshot exists. */
 	async #restoreGoalTools(): Promise<void> {
 		if (this.#previousTools === undefined) return;
-		await this.#session.setActiveToolsByName(this.#previousTools);
+		const currentNonGoal = this.#session.getEnabledToolNames().filter(name => name !== "goal");
+		const merged = [...new Set([...this.#previousTools, ...currentNonGoal])];
+		await this.#session.setActiveToolsByName(merged);
 		this.#previousTools = undefined;
 	}
 
@@ -310,9 +323,11 @@ export class GoalModeController {
 	 * is preserved; `completed` records the goal-completion journal entry.
 	 */
 	async deactivate(options?: { restoreTools?: boolean; completed?: boolean; clearState?: boolean }): Promise<void> {
-		if (options?.restoreTools && this.#previousTools !== undefined) {
-			await this.#session.setActiveToolsByName(this.#previousTools);
+		if (options?.restoreTools) {
+			await this.#restoreGoalTools();
 		}
+		// #restoreGoalTools() clears the snapshot itself; this unconditional clear
+		// covers the restoreTools===false case so the snapshot never leaks.
 		this.#previousTools = undefined;
 		if (options?.completed) {
 			const currentState = this.#session.getGoalModeState();
@@ -346,13 +361,12 @@ export class GoalModeController {
 		}
 	}
 
-	/** Adapter hook for `goal_updated` session events. Drop restores the previous tool set. */
+	/** Adapter hook for `goal_updated` session events. Drop restores the merged
+	 *  pre-goal tool set (snapshot ∪ currently-enabled non-goal tools) so late
+	 *  MCP tools survive the goal exit. */
 	async onGoalUpdated(state: GoalModeState | undefined): Promise<void> {
 		if (state?.goal?.status !== "dropped") return;
-		if (this.#previousTools !== undefined) {
-			await this.#session.setActiveToolsByName(this.#previousTools);
-			this.#previousTools = undefined;
-		}
+		await this.#restoreGoalTools();
 	}
 
 	/**
@@ -366,9 +380,10 @@ export class GoalModeController {
 			this.#goalContinuationTurnInFlight = false;
 		}
 		if (this.#session.getGoalModeState()?.mode === "exiting") {
-			// Completion exit must re-apply the pre-goal tool set; deactivate()
-			// clears #previousTools after restoring, so gate on the snapshot
-			// still being present (F1).
+			// Completion exit must re-apply the pre-goal tool set (merged with
+			// currently-enabled non-goal tools, so late MCP tools survive);
+			// deactivate() clears #previousTools after restoring, so gate on the
+			// snapshot still being present (F1).
 			await this.deactivate({ restoreTools: this.#previousTools !== undefined, completed: true });
 			return null;
 		}

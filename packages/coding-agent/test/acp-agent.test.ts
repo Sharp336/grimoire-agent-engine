@@ -2,26 +2,30 @@ import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { type } from "@oh-my-pi/omptype";
+import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { CustomTool } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools";
+import { GoalTool } from "@oh-my-pi/pi-coding-agent/goals/tools/goal-tool";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
+import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import {
 	ACP_BOOTSTRAP_RACE_GUARD_MS,
 	AcpAgent,
 	createAcpExtensionUiContext,
 } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
 import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";
-import type {
-	AgentSession,
-	AgentSessionEvent,
-	UsageFallbackConfirmation,
-} from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AgentSessionEvent, UsageFallbackConfirmation } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SILENT_ABORT_MARKER } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS } from "@oh-my-pi/pi-coding-agent/stt/models";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { createTools, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import {
 	DEFAULT_TTS_LOCAL_MODEL_KEY,
 	DEFAULT_TTS_VOICE,
@@ -476,7 +480,10 @@ afterEach(async () => {
 });
 
 async function createHarness(
-	options: { elicitationHandler?: (req: CreateElicitationRequest) => Promise<CreateElicitationResponse> } = {},
+	options: {
+		elicitationHandler?: (req: CreateElicitationRequest) => Promise<CreateElicitationResponse>;
+		sessionFactory?: (cwd: string) => Promise<AgentSession>;
+	} = {},
 ): Promise<AgentHarness> {
 	const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-acp-test-"));
 	cleanupRoots.push(root);
@@ -506,6 +513,9 @@ async function createHarness(
 	const initialSession = new FakeAgentSession(cwdA);
 	sessions.push(initialSession);
 	const factory = async (cwd: string): Promise<AgentSession> => {
+		if (options.sessionFactory) {
+			return await options.sessionFactory(cwd);
+		}
 		const session = new FakeAgentSession(cwd);
 		sessions.push(session);
 		return session as unknown as AgentSession;
@@ -2914,4 +2924,220 @@ describe("ACP agent MCP server configuration (late-connecting servers)", () => {
 			refreshSpy.mockRestore();
 		}
 	}, 15_000);
+});
+
+describe("ACP goal-mode restore ordering (MCP tools in the pre-goal snapshot)", () => {
+	// Regression for the PR #8225 Codex P2: `#registerPreparedSession` used to
+	// attach the headless goal adapter BEFORE `#configureMcpServers`, so the
+	// attach-time `controller.restore()` snapshotted `#previousTools` from a
+	// toolset that had no MCP tools yet. A later pause/drop/complete then
+	// restored that stale set and deactivated every client MCP tool for the
+	// rest of the session.
+	//
+	// The test drives the real AgentSession + GoalModeController + session tool
+	// registry through the real ACP registration path; only the MCP transport
+	// (subprocess protocol) is stubbed via per-test prototype spies so the
+	// ordering is exercised deterministically regardless of server latency.
+	const FIXTURE_MCP_TOOL: CustomTool = {
+		name: "mcp__fixture_notes_list",
+		label: "fixture/notes_list",
+		description: "Fixture MCP tool.",
+		parameters: type({}),
+		strict: true,
+		mcpServerName: "fixture",
+		mcpToolName: "notes_list",
+		async execute() {
+			return { content: [{ type: "text", text: "ok" }] };
+		},
+	};
+
+	// Real delayed-MCP fixture (test/fixtures/delayed-tool-mcp.ts): answers
+	// `initialize` only after `MCPManager`'s 250ms startup race, so its tool
+	// lands via the background `onToolsChanged` -> `refreshMCPTools` path —
+	// strictly AFTER the attach-time `controller.restore()` snapshot.
+	const DELAYED_FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "delayed-tool-mcp.ts");
+	const DELAYED_SERVER_NAME = "delayed";
+	const LATE_MCP_TOOL_NAME = `mcp__${DELAYED_SERVER_NAME}_${DELAYED_MCP_TOOL_NAME}`;
+
+	// Real polling, not fake timers: the fixture is a genuine child process
+	// racing MCPManager's own `Bun.sleep`-based 250ms startup window, and a
+	// subprocess's timers cannot be advanced from this test's fake-timer clock.
+	async function pollUntil(predicate: () => boolean, timeoutMs = 3_000): Promise<void> {
+		const deadline = Date.now() + timeoutMs;
+		while (!predicate()) {
+			if (Date.now() >= deadline) throw new Error("pollUntil timed out");
+			await Bun.sleep(5);
+		}
+	}
+
+	async function createGoalAwareSession(
+		cwd: string,
+		shared: { authStorage: AuthStorage; modelRegistry: ModelRegistry; model: Model },
+		root: string,
+	): Promise<AgentSession> {
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"goal.enabled": true,
+			"plan.enabled": true,
+		});
+		const bootstrapToolSession = {
+			...createTaskSession(cwd),
+			settings,
+		} as ToolSession;
+		const initialTools = await createTools(bootstrapToolSession, ["read", "edit"]);
+		const toolRegistry = new Map<string, Tool>(initialTools.map(tool => [tool.name, tool] as const));
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model: shared.model,
+					systemPrompt: ["Test"],
+					tools: initialTools,
+					messages: [],
+				},
+			}),
+			sessionManager: SessionManager.create(cwd, root),
+			settings,
+			modelRegistry: shared.modelRegistry,
+			toolRegistry,
+			rebuildSystemPrompt: async () => ({ systemPrompt: ["Test"] }),
+		});
+		const goalToolSession = {
+			...bootstrapToolSession,
+			getGoalModeState: () => session.getGoalModeState(),
+			getGoalRuntime: () => session.goalRuntime,
+		} as ToolSession;
+		toolRegistry.set("goal", new GoalTool(goalToolSession) as unknown as Tool);
+		// Persisted active goal in the transcript: the headless adapter's initial
+		// `controller.restore()` must reconcile this entry and snapshot the
+		// currently-enabled toolset (the contract under test).
+		session.sessionManager.appendModeChange("goal", {
+			goal: {
+				id: "restore-ordering-fixture",
+				objective: "Persisted goal from a resumed ACP session",
+				status: "active",
+				tokensUsed: 0,
+				timeUsedSeconds: 0,
+				createdAt: Date.now(),
+				updatedAt: Date.now(),
+			},
+		});
+		return session;
+	}
+
+	it("snapshots MCP tools during the attach-time restore so a goal drop keeps them enabled", async () => {
+		const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-acp-goal-order-"));
+		cleanupRoots.push(root);
+		const authStorage = await AuthStorage.create(path.join(root, "auth.db"));
+		const modelRegistry = new ModelRegistry(authStorage);
+		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 to exist in registry");
+		const shared = { authStorage, modelRegistry, model };
+
+		// Stub the MCP transport only: `connectServers` reports success and
+		// `getTools` reports the fixture tool, so `#configureMcpServers` runs its
+		// full session-enablement path deterministically (no subprocess, no
+		// 250ms startup race).
+		const connectSpy = spyOn(MCPManager.prototype, "connectServers").mockResolvedValue({
+			tools: [],
+			errors: new Map<string, string>(),
+			connectedServers: [],
+			exaApiKeys: [],
+		});
+		const getToolsSpy = spyOn(MCPManager.prototype, "getTools").mockReturnValue([FIXTURE_MCP_TOOL]);
+
+		let registeredSession: AgentSession | undefined;
+		const harness = await createHarness({
+			sessionFactory: async cwd => {
+				const session = await createGoalAwareSession(cwd, shared, root);
+				registeredSession = session;
+				return session;
+			},
+		});
+
+		try {
+			const created = await harness.agent.newSession({
+				cwd: harness.cwdA,
+				mcpServers: [{ name: "fixture", command: process.execPath, args: [], env: [] }],
+			});
+			expectAcpStructure(zNewSessionResponse, created);
+
+			const session = registeredSession;
+			if (!session) throw new Error("expected the session factory to have created a session");
+			const controller = session.goalModeController;
+
+			// Precondition: MCP config ran and enabled the client's tool on the
+			// session (true both before and after the ordering fix).
+			expect(session.getEnabledToolNames()).toContain(FIXTURE_MCP_TOOL.name);
+
+			// Contract: the attach-time restore snapshot must include the MCP tool.
+			// Fails pre-fix because the snapshot was taken before MCP config.
+			expect(controller.previousTools).toEqual(expect.arrayContaining(["read", "edit", FIXTURE_MCP_TOOL.name]));
+
+			// Observable outcome: ending the goal restores that snapshot, so the MCP
+			// tool stays enabled for the rest of the session.
+			const dropped = await controller.drop();
+			expect(dropped.ok).toBe(true);
+			expect(session.getEnabledToolNames()).toContain(FIXTURE_MCP_TOOL.name);
+		} finally {
+			await harness.agent.dispose();
+			connectSpy.mockRestore();
+			getToolsSpy.mockRestore();
+			authStorage.close();
+		}
+	}, 20_000);
+
+	it("keeps a late-connecting MCP tool enabled when the goal is dropped (merge, not snapshot replace)", async () => {
+		const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-acp-goal-late-mcp-"));
+		cleanupRoots.push(root);
+		const authStorage = await AuthStorage.create(path.join(root, "auth.db"));
+		const modelRegistry = new ModelRegistry(authStorage);
+		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 to exist in registry");
+		const shared = { authStorage, modelRegistry, model };
+
+		let registeredSession: AgentSession | undefined;
+		const harness = await createHarness({
+			sessionFactory: async cwd => {
+				const session = await createGoalAwareSession(cwd, shared, root);
+				registeredSession = session;
+				return session;
+			},
+		});
+
+		try {
+			const created = await harness.agent.newSession({
+				cwd: harness.cwdA,
+				mcpServers: [
+					{ name: DELAYED_SERVER_NAME, command: process.execPath, args: [DELAYED_FIXTURE_PATH], env: [] },
+				],
+			});
+			expectAcpStructure(zNewSessionResponse, created);
+
+			const session = registeredSession;
+			if (!session) throw new Error("expected the session factory to have created a session");
+			const controller = session.goalModeController;
+
+			// The real delayed subprocess answers `initialize` only after the
+			// manager's 250ms startup race, so `late_tool` lands via the
+			// background onToolsChanged -> refreshMCPTools path — after the
+			// attach-time snapshot. Poll with a bounded retry (the latency is
+			// the real subprocess's, so no fixed sleeps).
+			await pollUntil(() => session.getEnabledToolNames().includes(LATE_MCP_TOOL_NAME), 15_000);
+
+			// Precondition proving the snapshot is stale: the late tool was not
+			// enabled when controller.restore() recorded #previousTools.
+			expect(session.getEnabledToolNames()).toContain(LATE_MCP_TOOL_NAME);
+			expect(controller.previousTools).not.toContain(LATE_MCP_TOOL_NAME);
+
+			// Contract: ending a goal must never disable a client MCP tool.
+			// Pre-merge, drop() full-replaced the active set with the stale
+			// snapshot and removed the late tool; the merge restore keeps it.
+			const dropped = await controller.drop();
+			expect(dropped.ok).toBe(true);
+			expect(session.getEnabledToolNames()).toContain(LATE_MCP_TOOL_NAME);
+		} finally {
+			await harness.agent.dispose();
+			authStorage.close();
+		}
+	}, 20_000);
 });
