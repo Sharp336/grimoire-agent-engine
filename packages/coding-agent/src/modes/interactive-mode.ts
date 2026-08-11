@@ -3570,6 +3570,10 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.showWarning("Resume the current goal first, or drop it before setting a new objective.");
 				return;
 			}
+			if (this.#goalModePreviousTools !== undefined) {
+				this.showStatus("A guided goal interview is already active.");
+				return;
+			}
 
 			if (!this.session.hasBuiltInTool("ask")) {
 				this.showWarning("Guided goal requires the ask tool. Enable ask.enabled and include ask in --tools.");

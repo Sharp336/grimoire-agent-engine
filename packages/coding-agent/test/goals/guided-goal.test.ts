@@ -214,7 +214,7 @@ describe("guided goal setup", () => {
 		}
 	});
 
-	it("keeps queued and non-terminal guided runs on the interview tool slate", async () => {
+	it("rejects duplicate queued interviews and keeps non-terminal runs on the interview tool slate", async () => {
 		const harness = await createHarness();
 		try {
 			await harness.mode.init();
@@ -228,6 +228,8 @@ describe("guided goal setup", () => {
 			expect(followUp).toHaveBeenCalledTimes(1);
 			expect(followUp.mock.calls[0]?.[2]).toEqual({ synthetic: true });
 			expect(harness.session.getEnabledToolNames()).toEqual(expect.arrayContaining(["ask", "goal"]));
+			await harness.mode.handleGuidedGoalCommand("replace it");
+			expect(followUp).toHaveBeenCalledTimes(1);
 
 			await harness.dispatchSessionEvent({ type: "agent_end", messages: [], isTerminal: true });
 			expect(harness.session.getEnabledToolNames()).toEqual(expect.arrayContaining(["ask", "goal"]));
