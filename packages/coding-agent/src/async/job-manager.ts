@@ -1,3 +1,4 @@
+import type { Usage } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 
 const DELIVERY_RETRY_BASE_MS = 500;
@@ -41,6 +42,12 @@ export interface AsyncJob {
 	errorText?: string;
 	/** Latest tool-render details reported by the running job. */
 	latestDetails?: Record<string, unknown>;
+	/**
+	 * LLM usage reported by the job (task jobs only) via `reportUsage`. Lets
+	 * the owning session fold a background subagent's cost into its own usage
+	 * totals when the result is delivered as an `async-result` follow-up.
+	 */
+	resultUsage?: Usage;
 	/**
 	 * Registry id of the agent that registered the job (e.g. "Main",
 	 * "AuthLoader"). Used by scoped cancel/list APIs so a subagent's teardown
@@ -190,6 +197,8 @@ export class AsyncJobManager {
 			reportProgress: (text: string, details?: Record<string, unknown>) => Promise<void>;
 			/** Clear the queued flag once the job actually starts executing. */
 			markRunning: () => void;
+			/** Record the job's final LLM usage so the owning session can bill it. */
+			reportUsage?: (usage: Usage) => void;
 		}) => Promise<string>,
 		options?: AsyncJobRegisterOptions,
 	): string {
@@ -246,6 +255,9 @@ export class AsyncJobManager {
 					reportProgress,
 					markRunning: () => {
 						job.queued = false;
+					},
+					reportUsage: usage => {
+						job.resultUsage = usage;
 					},
 				});
 				if (job.status === "cancelled") {

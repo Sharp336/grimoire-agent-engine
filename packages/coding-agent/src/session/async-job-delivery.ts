@@ -8,6 +8,7 @@
  * This replaces the old single hardwired `onJobComplete` closure that routed
  * every completion — regardless of owner — into the first top-level session.
  */
+import type { Usage } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import type { AsyncJob } from "../async";
 import asyncResultTemplate from "../prompts/tools/async-result.md" with { type: "text" };
@@ -48,7 +49,61 @@ type AsyncResultJobDetails = {
 
 export type AsyncResultDetails = {
 	jobs: AsyncResultJobDetails[];
+	/**
+	 * Aggregated LLM usage across the delivered jobs (task jobs that reported
+	 * usage). Lets the session's usage index count background subagent cost the
+	 * same way it counts sync task tool-results.
+	 */
+	usage?: Usage;
 };
+
+function aggregateJobUsage(entries: AsyncResultEntry[]): Usage | undefined {
+	const totals: Usage = {
+		input: 0,
+		output: 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: 0,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+	let orchestrationInput = 0;
+	let orchestrationOutput = 0;
+	let orchestrationCacheRead = 0;
+	let premiumRequests = 0;
+	let sawUsage = false;
+	for (const entry of entries) {
+		const usage = entry.job?.resultUsage;
+		if (!usage) continue;
+		sawUsage = true;
+		totals.input += usage.input ?? 0;
+		totals.output += usage.output ?? 0;
+		totals.cacheRead += usage.cacheRead ?? 0;
+		totals.cacheWrite += usage.cacheWrite ?? 0;
+		totals.totalTokens += usage.totalTokens ?? 0;
+		const cost = usage.cost;
+		if (cost) {
+			totals.cost.input += cost.input ?? 0;
+			totals.cost.output += cost.output ?? 0;
+			totals.cost.cacheRead += cost.cacheRead ?? 0;
+			totals.cost.cacheWrite += cost.cacheWrite ?? 0;
+			totals.cost.total += cost.total ?? 0;
+		}
+		orchestrationInput += usage.orchestration?.input ?? 0;
+		orchestrationOutput += usage.orchestration?.output ?? 0;
+		orchestrationCacheRead += usage.orchestration?.cacheRead ?? 0;
+		premiumRequests += usage.premiumRequests ?? 0;
+	}
+	if (!sawUsage) return undefined;
+	if (orchestrationInput || orchestrationOutput || orchestrationCacheRead) {
+		totals.orchestration = {
+			input: orchestrationInput,
+			output: orchestrationOutput,
+			cacheRead: orchestrationCacheRead,
+		};
+	}
+	if (premiumRequests > 0) totals.premiumRequests = premiumRequests;
+	return totals;
+}
 
 export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): CustomMessage<AsyncResultDetails> | null {
 	if (entries.length === 0) return null;
@@ -66,6 +121,7 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			label: job.label,
 			durationMs: job.durationMs,
 		})),
+		usage: aggregateJobUsage(entries),
 	};
 	return {
 		role: "custom",

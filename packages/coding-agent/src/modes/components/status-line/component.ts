@@ -1562,6 +1562,10 @@ export class StatusLineComponent implements Component {
 			...aggregateUsageStats,
 			tokensPerSecond: this.#getTokensPerSecond(),
 		};
+		// Fall back to the aggregate when the session manager is absent or lacks
+		// the subagent ledger (e.g. minimal test doubles): the selection logic
+		// then simply has no subagent share to subtract.
+		const subagentUsageStats = this.session.sessionManager?.getSubagentUsageStatistics?.() ?? aggregateUsageStats;
 
 		let contextWindow = state.model?.contextWindow ?? this.session.model?.contextWindow ?? 0;
 		let contextPercent: number | null = 0;
@@ -1623,6 +1627,7 @@ export class StatusLineComponent implements Component {
 			vibeMode: this.#vibeModeStatus,
 			collab: this.#collabStatus,
 			usageStats,
+			subagentUsageStats,
 			contextPercent,
 			contextTokens,
 			contextWindow,

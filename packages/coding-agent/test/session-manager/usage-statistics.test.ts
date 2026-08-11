@@ -152,6 +152,109 @@ describe("SessionManager usage statistics", () => {
 		expect(usage.premiumRequests).toBe(0);
 	});
 
+	it("accumulates async subagent usage delivered as an async-result custom message", () => {
+		// Contract: background (async) subagent jobs deliver their result as an
+		// `async-result` custom message whose details carry the aggregated usage;
+		// the parent session must count it like a sync task tool-result so async
+		// subagent cost reaches the status line and usage reports.
+		const session = SessionManager.inMemory();
+
+		session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+		session.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "hi" }],
+			api: "openai-completions",
+			provider: "openai",
+			model: "gpt-4o",
+			usage: {
+				input: 10,
+				output: 5,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 15,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 1 },
+			},
+			stopReason: "stop",
+			timestamp: 2,
+		});
+		session.appendCustomMessageEntry("async-result", "async task done", true, {
+			usage: {
+				input: 7,
+				output: 8,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 15,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 2 },
+			},
+		});
+
+		const usage = session.getUsageStatistics();
+		expect(usage.input).toBe(17);
+		expect(usage.output).toBe(13);
+		expect(usage.cost).toBeCloseTo(3, 8);
+	});
+
+	it("separates subagent usage (sync task results + async-result deliveries) from the main agent", () => {
+		const session = SessionManager.inMemory();
+
+		session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+		session.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "hi" }],
+			api: "openai-completions",
+			provider: "openai",
+			model: "gpt-4o",
+			usage: {
+				input: 10,
+				output: 5,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 15,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 1 },
+			},
+			stopReason: "stop",
+			timestamp: 2,
+		});
+		session.appendMessage({
+			role: "toolResult",
+			toolCallId: "task_1",
+			toolName: "task",
+			content: [{ type: "text", text: "task output" }],
+			details: {
+				usage: {
+					input: 2,
+					output: 3,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 5,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 2 },
+				},
+			},
+			isError: false,
+			timestamp: 3,
+		});
+		session.appendCustomMessageEntry("async-result", "async task done", true, {
+			usage: {
+				input: 7,
+				output: 8,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 15,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 3 },
+			},
+		});
+
+		// Subagent-only ledger: sync task tool-result (input 2) + async-result (input 7).
+		const subagent = session.getSubagentUsageStatistics();
+		expect(subagent.input).toBe(9);
+		expect(subagent.cost).toBeCloseTo(5, 8);
+
+		// Full ledger: main (input 10) + both subagent sources.
+		const total = session.getUsageStatistics();
+		expect(total.input).toBe(19);
+		expect(total.cost).toBeCloseTo(6, 8);
+	});
+
 	it("accumulates the full billed cost across turns, including cache-read cost", () => {
 		// Contract: the session cost aggregate sums each turn's full `cost.total`
 		// (input+output+cacheRead+cacheWrite), not a cache-excluded "new-work"

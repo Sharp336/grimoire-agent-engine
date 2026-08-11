@@ -20,6 +20,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import type { StructuredSubagentSchemaMode } from "../task/types";
 import { ArtifactManager } from "./artifacts";
+import { ASYNC_RESULT_MESSAGE_TYPE } from "./async-job-delivery";
 import { type BlobPutOptions, type BlobPutResult, BlobStore } from "./blob-store";
 import {
 	type BashExecutionMessage,
@@ -143,10 +144,21 @@ function taskUsageFrom(details: unknown): Usage | undefined {
 }
 
 function entryUsage(entry: SessionEntry): Usage | undefined {
-	if (entry.type !== "message") return undefined;
-	const message = entry.message;
-	if (message.role === "assistant") return message.usage;
-	if (message.role === "toolResult" && message.toolName === "task") return taskUsageFrom(message.details);
+	// The main agent's own spend is its assistant messages. Subagent spend is
+	// carried by sync task tool-results and async background job deliveries
+	// (an `async-result` custom message whose details carry the aggregated
+	// usage); {@link isSubagentUsageEntry} mirrors these two subagent sources
+	// so the session usage totals (status line, cost reports, token segments)
+	// cover every source exactly once.
+	if (entry.type === "message") {
+		const message = entry.message;
+		if (message.role === "assistant") return message.usage;
+		if (message.role === "toolResult" && message.toolName === "task") return taskUsageFrom(message.details);
+		return undefined;
+	}
+	if (entry.type === "custom_message" && entry.customType === ASYNC_RESULT_MESSAGE_TYPE) {
+		return taskUsageFrom(entry.details);
+	}
 	return undefined;
 }
 
@@ -162,6 +174,14 @@ function addUsage(target: UsageStatistics, usage: Usage | undefined): void {
 	target.orchestrationCacheRead += usage.orchestration?.cacheRead ?? 0;
 	target.premiumRequests += usage.premiumRequests ?? 0;
 	target.cost += usage.cost.total;
+}
+
+function isSubagentUsageEntry(entry: SessionEntry): boolean {
+	if (entry.type === "message") {
+		const message = entry.message;
+		return message.role === "toolResult" && message.toolName === "task";
+	}
+	return entry.type === "custom_message" && entry.customType === ASYNC_RESULT_MESSAGE_TYPE;
 }
 
 function isAssistantEntry(entry: SessionEntry): boolean {
@@ -204,6 +224,8 @@ class SessionEntryIndex {
 	#labels = new Map<string, string>();
 	#leaf: string | null = null;
 	#usage = emptyUsageStatistics();
+	/** Running usage totals for subagent-originated entries only (task tool results, async-result deliveries). */
+	#subagentUsage = emptyUsageStatistics();
 
 	clear(): void {
 		this.#entriesById.clear();
@@ -211,6 +233,7 @@ class SessionEntryIndex {
 		this.#labels.clear();
 		this.#leaf = null;
 		this.#usage = emptyUsageStatistics();
+		this.#subagentUsage = emptyUsageStatistics();
 	}
 
 	rebuild(entries: readonly SessionEntry[]): void {
@@ -231,7 +254,9 @@ class SessionEntryIndex {
 			else this.#labels.delete(entry.targetId);
 		}
 
-		addUsage(this.#usage, entryUsage(entry));
+		const usage = entryUsage(entry);
+		addUsage(this.#usage, usage);
+		if (isSubagentUsageEntry(entry)) addUsage(this.#subagentUsage, usage);
 	}
 
 	has(id: string): boolean {
@@ -276,6 +301,10 @@ class SessionEntryIndex {
 
 	usageSnapshot(): UsageStatistics {
 		return { ...this.#usage };
+	}
+
+	subagentUsageSnapshot(): UsageStatistics {
+		return { ...this.#subagentUsage };
 	}
 
 	pathTo(id: string | null | undefined = this.#leaf): SessionEntry[] {
@@ -345,6 +374,7 @@ export type ReadonlySessionManager = Pick<
 	| "getEntries"
 	| "getTree"
 	| "getUsageStatistics"
+	| "getSubagentUsageStatistics"
 	| "putBlob"
 	| "putBlobSync"
 >;
@@ -1853,6 +1883,11 @@ export class SessionManager {
 
 	getUsageStatistics(): UsageStatistics {
 		return this.#index.usageSnapshot();
+	}
+
+	/** Usage totals attributable to subagent work only (sync task results + async-result deliveries). */
+	getSubagentUsageStatistics(): UsageStatistics {
+		return this.#index.subagentUsageSnapshot();
 	}
 
 	/**

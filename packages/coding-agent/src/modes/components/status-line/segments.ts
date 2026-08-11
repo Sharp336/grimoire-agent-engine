@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { formatDuration, formatNumber, getProjectDir, pathIsWithin, relativePathWithinRoot } from "@oh-my-pi/pi-utils";
+import type { StatusLineCostInclude } from "../../../config/settings-schema";
 import { type ThemeColor, theme } from "../../../modes/theme/theme";
 import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../../../tools/render-utils";
 import { fileHyperlink } from "../../../tui/hyperlink";
@@ -429,24 +430,96 @@ const tokenRateSegment: StatusLineSegment = {
 	},
 };
 
+export interface CostSegmentInputs {
+	/** Which cost sources the segment should add up (`statusLine.costInclude`). */
+	include: StatusLineCostInclude;
+	/** Aggregate dollar cost across main agent + subagents. */
+	cost: number;
+	/** Subagent-attributable dollar cost (sync task results + async-result deliveries). */
+	subagentCost: number;
+	/** Aggregate premium-request count across main agent + subagents. */
+	premiumRequests: number;
+	/** Subagent-attributable premium-request count. */
+	subagentPremiumRequests: number;
+	/** Advisor dollar cost. */
+	advisorCost: number;
+	/** Whether the active model is accessed through a subscription (shows the `(sub)` badge). */
+	usingSubscription: boolean;
+}
+
+export interface CostSegmentParts {
+	visible: boolean;
+	/** Dollar figure for the included set (main agent ± subagents). */
+	cost: number;
+	/** Premium-request count for the included set. */
+	premiumRequests: number;
+	/** Advisor dollars, when advisors are included. */
+	advisorCost: number;
+	usingSubscription: boolean;
+}
+
+/**
+ * Resolve which cost buckets `statusLine.costInclude` selects out of the
+ * aggregate usage stats. The main agent's share is the aggregate minus the
+ * subagent-attributable portion; subagent usage is only subtracted when the
+ * setting excludes it. Extracted as a pure function so the selection logic is
+ * unit-testable without a full segment context.
+ */
+export function resolveCostParts(inputs: CostSegmentInputs): CostSegmentParts {
+	const {
+		include,
+		cost,
+		subagentCost,
+		premiumRequests,
+		subagentPremiumRequests,
+		advisorCost,
+		usingSubscription,
+	} = inputs;
+	const includeSubagents = include === "main-subagents" || include === "main-subagents-advisors";
+	const includeAdvisors = include === "main-subagents-advisors" || include === "main-advisors";
+
+	// Guard against float drift: the subagent portion is always a subset of the
+	// aggregate, so the main share can only go slightly negative from rounding.
+	const mainCost = Math.max(0, cost - subagentCost);
+	const mainPremiumRequests = Math.max(0, premiumRequests - subagentPremiumRequests);
+
+	const shownCost = includeSubagents ? cost : mainCost;
+	const shownPremiumRequests = includeSubagents ? premiumRequests : mainPremiumRequests;
+	const shownAdvisorCost = includeAdvisors ? advisorCost : 0;
+	const normalizedPremiumRequests = normalizePremiumRequests(shownPremiumRequests);
+
+	const visible = shownCost > 0 || normalizedPremiumRequests > 0 || shownAdvisorCost > 0 || usingSubscription;
+	return {
+		visible,
+		cost: shownCost,
+		premiumRequests: normalizedPremiumRequests,
+		advisorCost: shownAdvisorCost,
+		usingSubscription,
+	};
+}
+
 const costSegment: StatusLineSegment = {
 	id: "cost",
 	render(ctx) {
-		const { cost, premiumRequests } = ctx.usageStats;
-		const advisorCost = ctx.session.getAdvisorCost?.() ?? 0;
-		const normalizedPremiumRequests = normalizePremiumRequests(premiumRequests);
 		const state = ctx.session.state;
 		const usingSubscription = state.model ? ctx.session.modelRegistry.isUsingOAuth(state.model) : false;
+		const parts = resolveCostParts({
+			include: ctx.session.settings.get("statusLine.costInclude"),
+			cost: ctx.usageStats.cost,
+			subagentCost: ctx.subagentUsageStats.cost,
+			premiumRequests: ctx.usageStats.premiumRequests,
+			subagentPremiumRequests: ctx.subagentUsageStats.premiumRequests,
+			advisorCost: ctx.session.getAdvisorCost?.() ?? 0,
+			usingSubscription,
+		});
 
-		if (!cost && !advisorCost && !usingSubscription && !normalizedPremiumRequests) {
-			return { content: "", visible: false };
-		}
+		if (!parts.visible) return { content: "", visible: false };
 
 		const billingParts: string[] = [];
-		if (cost) billingParts.push(`$${cost.toFixed(2)}`);
-		if (normalizedPremiumRequests) billingParts.push(`★ ${formatNumber(normalizedPremiumRequests)}`);
-		if (usingSubscription) billingParts.push("(sub)");
-		if (advisorCost) billingParts.push(`${billingParts.length ? "+ " : ""}$${advisorCost.toFixed(2)} (adv)`);
+		if (parts.cost) billingParts.push(`$${parts.cost.toFixed(2)}`);
+		if (parts.premiumRequests) billingParts.push(`★ ${formatNumber(parts.premiumRequests)}`);
+		if (parts.usingSubscription) billingParts.push("(sub)");
+		if (parts.advisorCost) billingParts.push(`${billingParts.length ? "+ " : ""}$${parts.advisorCost.toFixed(2)} (adv)`);
 
 		return { content: theme.fg("statusLineCost", billingParts.join(" ")), visible: true };
 	},

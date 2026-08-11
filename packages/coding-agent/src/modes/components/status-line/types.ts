@@ -92,6 +92,23 @@ export interface SegmentContext {
 		cost: number;
 		tokensPerSecond: number | null;
 	};
+	/**
+	 * Usage totals attributable to subagent work only (sync task tool-results
+	 * plus async-result deliveries). Lets the cost segment split the main
+	 * agent's share out of the aggregate usage stats.
+	 */
+	subagentUsageStats: {
+		input: number;
+		output: number;
+		cacheRead: number;
+		cacheWrite: number;
+		totalTokens: number;
+		orchestrationInput: number;
+		orchestrationOutput: number;
+		orchestrationCacheRead: number;
+		premiumRequests: number;
+		cost: number;
+	};
 	/** Context usage percent, or null when unknown (e.g. right after compaction). */
 	contextPercent: number | null;
 	contextTokens: number;

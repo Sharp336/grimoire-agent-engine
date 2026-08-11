@@ -1089,7 +1089,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		return manager.register(
 			"task",
 			agentId,
-			async ({ signal: runSignal, reportProgress, markRunning }) => {
+			async ({ signal: runSignal, reportProgress, markRunning, reportUsage }) => {
 				const startedAt = Date.now();
 				const semaphore = this.#getSpawnSemaphore();
 				let semaphoreHeld = false;
@@ -1178,6 +1178,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					progress.contextTokens = singleResult?.contextTokens;
 					progress.contextWindow = singleResult?.contextWindow;
 					progress.cost = singleResult?.usage?.cost.total ?? 0;
+					// Hand the subagent's full usage to the job so the parent session can
+					// fold async subagent cost/tokens into its own usage totals when the
+					// result is delivered as an async-result follow-up (the sync path
+					// already lands usage via the tool result's `details.usage`).
+					if (singleResult?.usage) reportUsage?.(singleResult.usage);
 					progress.extractedToolData = singleResult?.extractedToolData;
 					progress.retryFailure = singleResult?.retryFailure;
 					progress.retryState = undefined;

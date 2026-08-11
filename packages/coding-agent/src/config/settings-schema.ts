@@ -707,6 +707,37 @@ export const SETTINGS_SCHEMA = {
 				"Show the thinking level as a single icon on the model name instead of a separate ` · <level>` suffix.",
 		},
 	},
+	"statusLine.costInclude": {
+		type: "enum",
+		values: ["main", "main-subagents", "main-subagents-advisors", "main-advisors"] as const,
+		default: "main-subagents-advisors",
+		ui: {
+			tab: "appearance",
+			group: "Status Line",
+			label: "Cost Sources",
+			description:
+				"Which costs the status line's cost segment adds up: the main agent, background subagents, and the advisor.",
+			options: [
+				{ value: "main", label: "Main only", description: "Only the main agent's usage" },
+				{
+					value: "main-subagents",
+					label: "Main + subagents",
+					description: "Main agent and all subagents (sync and background)",
+				},
+				{
+					value: "main-subagents-advisors",
+					label: "Main + subagents + advisors",
+					description: "Everything: main agent, subagents, and the advisor (default)",
+				},
+				{
+					value: "main-advisors",
+					label: "Main + advisors",
+					description: "Main agent and the advisor, excluding subagents",
+				},
+			],
+		},
+	},
+
 	"tools.artifactSpillThreshold": {
 		type: "number",
 		default: 50,
@@ -5647,6 +5678,9 @@ export function getEnumValues(path: SettingPath): readonly string[] | undefined 
 /** Status line preset - derived from schema */
 export type StatusLinePreset = SettingValue<"statusLine.preset">;
 
+/** Status line cost sources included in the cost segment - derived from schema */
+export type StatusLineCostInclude = SettingValue<"statusLine.costInclude">;
+
 /** Status line separator style - derived from schema */
 export type StatusLineSeparatorStyle = SettingValue<"statusLine.separator">;
 
@@ -5781,6 +5815,7 @@ export interface StatusLineSettings {
 	leftSegments: StatusLineSegmentId[];
 	rightSegments: StatusLineSegmentId[];
 	segmentOptions: Record<string, unknown>;
+	costInclude: SettingValue<"statusLine.costInclude">;
 }
 
 export interface ThinkingBudgetsSettings {
