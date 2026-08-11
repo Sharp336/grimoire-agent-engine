@@ -5471,6 +5471,11 @@ export const SETTINGS_SCHEMA = {
 		default: undefined,
 	},
 
+	"searxng.safesearch": {
+		type: "number",
+		default: undefined,
+	},
+
 	"commit.mapReduceEnabled": { type: "boolean", default: true },
 
 	"commit.mapReduceMinFiles": { type: "number", default: 4 },
