@@ -603,6 +603,8 @@ export class RpcClient {
 		const state = this.#getData<RpcSessionState>(response);
 		return {
 			...state,
+			// Older servers predate the `mode` field; treat it as absent → "none".
+			mode: state.mode ?? "none",
 			fastModeEnabled: state.fastModeEnabled === true,
 			fastModeActive: state.fastModeActive === true,
 			tokensPerSecond:
