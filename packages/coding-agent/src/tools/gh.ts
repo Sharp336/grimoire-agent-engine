@@ -51,9 +51,6 @@ export {
 	type ViewLookupResult,
 } from "./gh-view";
 
-
-
-
 const GITHUB_READONLY_OPS: ReadonlySet<string> = new Set([
 	"repo_view",
 	"file_read",
@@ -63,13 +60,6 @@ const GITHUB_READONLY_OPS: ReadonlySet<string> = new Set([
 	"search_commits",
 	"search_repos",
 	"run_watch",
-]);
-const GITHUB_HOST_QUALIFIED_REPO_OPS: ReadonlySet<string> = new Set([
-	"repo_view",
-	"issue_create",
-	"issue_state",
-	"pr_create",
-	"pr_checkout",
 ]);
 
 const githubSchema = type({
@@ -178,13 +168,6 @@ export interface GhRunWatchViewDetails {
 	runs?: GhRunWatchRunDetails[];
 	failedLogs?: GhRunWatchFailedLogDetails[];
 }
-
-
-
-
-
-
-
 export class GithubTool implements AgentTool<typeof githubSchema, GhToolDetails> {
 	readonly name = "github";
 	readonly approval = (args: unknown): ToolApprovalDecision => {
@@ -283,8 +266,3 @@ async function executeFileRead(
 	const sourceUrl = `https://github.com/${repo}/blob/${encodeURIComponent(branch ?? "HEAD")}/${endpointPath}`;
 	return buildTextResult(text, sourceUrl, { repo, branch });
 }
-
-
-
-
-
