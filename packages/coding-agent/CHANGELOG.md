@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `skills.hideSkills` for keeping selected skills manually reachable without listing them in the model prompt.
+
 ## [17.2.12] - 2026-08-08
 
 ### Fixed
