@@ -2,17 +2,23 @@ import { fileURLToPath } from "node:url";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	addKeyAliases,
+	type Component,
 	canonicalKeyId,
 	Editor,
 	type EditorTheme,
+	Image,
+	type ImageBudget,
+	ImageProtocol,
 	type KeyId,
 	parseKey,
 	parseKittySequence,
+	TERMINAL,
 	TUI,
 } from "@oh-my-pi/pi-tui";
 import { BracketedPasteHandler } from "@oh-my-pi/pi-tui/bracketed-paste";
 import type { AppKeybinding } from "../../config/keybindings";
 import { isSettingsInitialized, settings } from "../../config/settings";
+import { convertImageToPng } from "../../utils/image-loading";
 import { imageReferenceHyperlink, PLACEHOLDER_REGEX, renderPlaceholders } from "../image-references";
 import { hasMagicKeyword, highlightMagicKeywords } from "../magic-keywords";
 import { isQueuedMessageList, parseQueueShorthand, QUEUE_LIST_MARKER_RE } from "../queue-input";
@@ -376,15 +382,159 @@ function isEditorTheme(value: unknown): value is EditorTheme {
 	);
 }
 
+const COMPOSER_IMAGE_PREVIEW_MAX_COLUMNS = 28;
+const COMPOSER_IMAGE_PREVIEW_MAX_ROWS = 6;
+let nextComposerImagePreviewKey = 0;
+
+/**
+ * Ephemeral preview of the most recently attached draft image.
+ *
+ * A single bounded preview keeps the composer compact when a prompt has several
+ * attachments; the editor's existing `[Image #N]` chips retain the full list.
+ */
+class PendingImagePreview implements Component {
+	#enabled = false;
+	#maxImageRows = COMPOSER_IMAGE_PREVIEW_MAX_ROWS;
+	#budget: ImageBudget | undefined;
+	#currentImage: ImageContent | undefined;
+	#displayImage: ImageContent | undefined;
+	#currentImageProtocol: typeof TERMINAL.imageProtocol = null;
+	#currentImageComponent: Image | undefined;
+	#conversionVersion = 0;
+	#requestRender: (() => void) | undefined;
+
+	constructor(readImages: () => readonly ImageContent[]) {
+		this.#readImages = readImages;
+	}
+
+	readonly #readImages: () => readonly ImageContent[];
+
+	setEnabled(enabled: boolean): void {
+		if (this.#enabled === enabled) return;
+		this.#enabled = enabled;
+		if (!enabled) this.clear();
+	}
+
+	setBudget(budget: ImageBudget | undefined): void {
+		if (this.#budget === budget) return;
+		this.clear();
+		this.#budget = budget;
+	}
+
+	setRequestRender(requestRender: (() => void) | undefined): void {
+		this.#requestRender = requestRender;
+	}
+
+	setEditorMaxHeight(maxHeight: number | undefined): void {
+		const next = Math.max(
+			0,
+			Math.min(
+				COMPOSER_IMAGE_PREVIEW_MAX_ROWS,
+				maxHeight === undefined ? COMPOSER_IMAGE_PREVIEW_MAX_ROWS : maxHeight - 4,
+			),
+		);
+		if (this.#maxImageRows === next) return;
+		this.clear();
+		this.#maxImageRows = next;
+	}
+
+	clear(): void {
+		this.#conversionVersion++;
+		this.#currentImageComponent?.dispose();
+		this.#currentImage = undefined;
+		this.#displayImage = undefined;
+		this.#currentImageProtocol = null;
+		this.#currentImageComponent = undefined;
+	}
+
+	#selectImage(image: ImageContent, protocol: typeof TERMINAL.imageProtocol): void {
+		this.clear();
+		this.#currentImage = image;
+		this.#currentImageProtocol = protocol;
+		if (protocol !== ImageProtocol.Kitty || image.mimeType === "image/png") {
+			this.#displayImage = image;
+			return;
+		}
+
+		const version = this.#conversionVersion;
+		void convertImageToPng(image)
+			.then(converted => {
+				if (version !== this.#conversionVersion || this.#currentImage !== image) return;
+				this.#displayImage = converted;
+				this.#requestRender?.();
+			})
+			.catch(() => {
+				if (version !== this.#conversionVersion || this.#currentImage !== image) return;
+				this.#displayImage = undefined;
+				this.#requestRender?.();
+			});
+	}
+
+	invalidate(): void {
+		this.#currentImageComponent?.invalidate();
+	}
+
+	render(width: number): readonly string[] {
+		const images = this.#readImages();
+		const image = images.at(-1);
+		const protocol = TERMINAL.imageProtocol;
+		if (
+			!this.#enabled ||
+			this.#budget === undefined ||
+			protocol === null ||
+			this.#maxImageRows === 0 ||
+			image === undefined
+		) {
+			this.clear();
+			return [];
+		}
+
+		if (this.#currentImage !== image || this.#currentImageProtocol !== protocol) {
+			this.#selectImage(image, protocol);
+		}
+		const displayImage = this.#displayImage;
+		if (displayImage === undefined) return [];
+
+		if (this.#currentImageComponent === undefined) {
+			const imageKey = `composer-preview:${++nextComposerImagePreviewKey}`;
+			this.#currentImageComponent = new Image(
+				displayImage.data,
+				displayImage.mimeType,
+				{ fallbackColor: text => fgOrPlain("muted", text) },
+				{
+					budget: this.#budget,
+					imageKey,
+					countTowardsBudget: false,
+					maxWidthCells: COMPOSER_IMAGE_PREVIEW_MAX_COLUMNS,
+					maxHeightCells: this.#maxImageRows,
+				},
+			);
+		}
+
+		return [...this.#currentImageComponent.render(width), ""];
+	}
+}
+
 /**
  * Custom editor that handles configurable app-level shortcuts for coding-agent.
  */
 export class CustomEditor extends Editor {
 	imageLinks?: readonly (string | undefined)[];
 
+	#pendingImages: ImageContent[] = [];
+	#imagePreview = new PendingImagePreview(() => this.#pendingImages);
+
 	/** Draft images pasted into the composer, consumed on submit. Co-located with
 	 *  {@link imageLinks} so every piece of draft-image state lives on the editor. */
-	pendingImages: ImageContent[] = [];
+	get pendingImages(): ImageContent[] {
+		return this.#pendingImages;
+	}
+
+	set pendingImages(images: ImageContent[]) {
+		this.#pendingImages = images;
+		if (images.length === 0) this.#imagePreview.clear();
+	}
+
 	/** Per-image source links (file:// targets) parallel to {@link pendingImages};
 	 *  `undefined` entries are images without a backing reference yet. */
 	pendingImageLinks: (string | undefined)[] = [];
@@ -412,8 +562,32 @@ export class CustomEditor extends Editor {
 	 * keep working.
 	 */
 	constructor(...args: readonly unknown[]) {
-		super(pickEditorTheme(args));
-		if (args[0] instanceof TUI) this.tui = args[0];
+		const editorTheme = pickEditorTheme(args);
+		super(editorTheme);
+		this.setHeaderComponent(this.#imagePreview);
+		const tui = args[0] instanceof TUI ? args[0] : undefined;
+		if (tui) {
+			this.tui = tui;
+			this.#imagePreview.setBudget(tui.imageBudget);
+			this.#imagePreview.setRequestRender(() => tui.requestRender());
+		}
+	}
+
+	setImagePreviewEnabled(enabled: boolean): void {
+		this.#imagePreview.setEnabled(enabled);
+	}
+
+	setImagePreviewBudget(budget: ImageBudget): void {
+		this.#imagePreview.setBudget(budget);
+	}
+
+	setImagePreviewRepaintHandler(requestRender: (() => void) | undefined): void {
+		this.#imagePreview.setRequestRender(requestRender);
+	}
+
+	override setMaxHeight(maxHeight: number | undefined): void {
+		super.setMaxHeight(maxHeight);
+		this.#imagePreview.setEditorMaxHeight(maxHeight);
 	}
 
 	/** Clear the composer draft: optionally commit `historyText` to history, then

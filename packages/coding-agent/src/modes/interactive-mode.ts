@@ -730,6 +730,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.errorBannerContainer = new AnchoredLiveContainer();
 		this.modelCycleContainer = new AnchoredLiveContainer();
 		this.editor = new CustomEditor(getEditorTheme());
+		this.editor.setImagePreviewBudget(this.ui.imageBudget);
+		this.editor.setImagePreviewRepaintHandler(() => this.ui.requestRender());
+		this.editor.setImagePreviewEnabled(settings.get("terminal.showImages") && settings.get("tui.pastedImagePreview"));
 		this.ui.enableScopedInputRender(this.editor);
 		this.editor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		this.editor.setImeSafeCursorLayout(settings.get("tui.imeSafeCursor"));
@@ -4101,6 +4104,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		nextEditor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		nextEditor.setImeSafeCursorLayout(this.settings.get("tui.imeSafeCursor"));
 		nextEditor.setAutocompleteMaxVisible(this.settings.get("autocompleteMaxVisible"));
+		nextEditor.setImagePreviewBudget(this.ui.imageBudget);
+		nextEditor.setImagePreviewEnabled(
+			this.settings.get("terminal.showImages") && this.settings.get("tui.pastedImagePreview"),
+		);
+		nextEditor.setImagePreviewRepaintHandler(() => this.ui.requestRender());
 		nextEditor.onAutocompleteCancel = () => {
 			this.ui.requestRender(true);
 		};
@@ -4114,6 +4122,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			nextEditor.setHistoryStorage(this.historyStorage);
 		}
 		nextEditor.setText(previousText);
+		previousEditor.setImagePreviewEnabled(false);
 
 		this.editorContainer.clear();
 		this.editor = nextEditor;

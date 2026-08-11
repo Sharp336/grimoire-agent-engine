@@ -2080,6 +2080,18 @@ describe("Editor component", () => {
 			expect(editor.getCursor()).toEqual({ line: 6, col: 2 });
 		});
 
+		it("accounts for rendered header rows in PageUp/PageDown steps", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setHeaderComponent({ render: () => ["preview 1", "preview 2"] });
+			editor.setMaxHeight(6);
+			editor.setText("l0\nl1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9");
+			editor.render(24);
+
+			editor.handleInput("\x1b[5~"); // PageUp
+
+			expect(editor.getCursor()).toEqual({ line: 8, col: 2 });
+		});
+
 		it("PageUp/PageDown on an idle editor never step prompt history (#4754)", () => {
 			const editor = new Editor(defaultEditorTheme);
 
@@ -2746,6 +2758,45 @@ describe("Editor component", () => {
 			expect(editor.getText()).toBe("line one\nline two");
 			editor.setVolatileText("single line");
 			expect(editor.getText()).toBe("single line");
+		});
+	});
+	describe("header component", () => {
+		it("renders header rows inside the editor border above the draft", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setHeaderComponent({ render: () => ["preview"] });
+			editor.setText("draft");
+
+			const lines = editor.render(24).map(line => stripVTControlCharacters(line));
+
+			expect(lines).toHaveLength(3);
+			expect(lines[1]).toMatch(/^\| {2}preview/);
+			expect(lines[2]).toContain("draft");
+		});
+
+		it("counts header rows against the editor height cap", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setHeaderComponent({ render: () => ["preview 1", "preview 2"] });
+			editor.setMaxHeight(5);
+			editor.setText("one\ntwo\nthree");
+
+			expect(editor.render(24)).toHaveLength(4);
+		});
+
+		it("clamps header rows to leave room for the draft within the height cap", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setHeaderComponent({
+				render: () => ["preview 1", "preview 2", "preview 3", "preview 4"],
+			});
+			editor.setMaxHeight(5);
+			editor.setText("draft");
+
+			const lines = editor.render(24).map(line => stripVTControlCharacters(line));
+
+			expect(lines).toHaveLength(4);
+			expect(lines.join("\n")).toContain("preview 1");
+			expect(lines.join("\n")).toContain("preview 2");
+			expect(lines.join("\n")).not.toContain("preview 3");
+			expect(lines.at(-1)).toContain("draft");
 		});
 	});
 });

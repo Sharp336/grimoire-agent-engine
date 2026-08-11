@@ -70,6 +70,19 @@ describe("ImageBudget", () => {
 		expect(second.purge).toEqual([]);
 	});
 
+	it("keeps cap-exempt images live without evicting counted images", () => {
+		const budget = new ImageBudget(2, () => {});
+
+		for (let frame = 0; frame < 2; frame++) {
+			budget.beginPass();
+			expect(budget.observe(1)).toBe(false);
+			expect(budget.observe(2)).toBe(false);
+			expect(budget.observe(3, false)).toBe(false);
+			expect(budget.endPass()).toBe(false);
+			expect([...budget.takePurgeIds()]).toEqual([]);
+		}
+	});
+
 	it("demotes the oldest image on the frame after the cap is exceeded, purging its graphics id", () => {
 		let renders = 0;
 		const budget = new ImageBudget(2, () => {
@@ -393,6 +406,32 @@ describe("Image budget integration", () => {
 		image.render(20);
 		budget.endPass();
 		expect([...budget.takeTransmits()]).toEqual([]);
+	});
+
+	it("purges a disposed image after a global clear and retransmit", () => {
+		const budget = new ImageBudget(3, () => {});
+		const image = new Image(
+			BASE64_ONE_PIXEL_PNG,
+			"image/png",
+			{ fallbackColor: text => text },
+			{ maxWidthCells: 4, maxHeightCells: 4, budget, imageKey: "k" },
+		);
+
+		budget.beginPass();
+		image.render(20);
+		budget.endPass();
+		expect(budget.takeTransmits()).toHaveLength(1);
+		const [imageId] = budget.takeAllTransmittedIds();
+		expect(imageId).toBeDefined();
+
+		image.invalidate();
+		budget.beginPass();
+		image.render(20);
+		budget.endPass();
+		expect(budget.takeTransmits()).toHaveLength(1);
+
+		image.dispose();
+		expect(budget.takePurgeIds()).toEqual([imageId]);
 	});
 
 	it("moves back up before multi-row direct Kitty placements and restores the cursor below them", () => {

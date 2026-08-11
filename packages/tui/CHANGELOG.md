@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an editor header slot for bounded inline content such as pasted-image previews, with explicit cleanup for ephemeral Kitty image ids. ([#1628](https://github.com/can1357/oh-my-pi/issues/1628))
+
 ## [17.2.12] - 2026-08-08
 
 ### Fixed

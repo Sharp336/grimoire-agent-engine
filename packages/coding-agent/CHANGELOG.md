@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in previews for pasted images inside the prompt composer on graphics-capable terminals via `tui.pastedImagePreview`. ([#1628](https://github.com/can1357/oh-my-pi/issues/1628))
+
 ## [17.2.12] - 2026-08-08
 
 ### Fixed

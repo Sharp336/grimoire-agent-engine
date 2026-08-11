@@ -19,6 +19,8 @@ export interface ImageOptions {
 	filename?: string;
 	/** Shared budget that caps how many inline images render as live graphics. */
 	budget?: ImageBudget;
+	/** Whether this image participates in the shared live-image cap. Defaults to true. */
+	countTowardsBudget?: boolean;
 	/**
 	 * Stable identity for the underlying image (e.g. `toolCallId:index`). Lets the
 	 * budget hand back the same graphics id across component re-creations so a
@@ -141,6 +143,18 @@ export class ImageBudget {
 		return id;
 	}
 
+	/** Release an image id that has left the component tree. */
+	releaseId(id: number): void {
+		const key = this.#idToKey.get(id);
+		if (key !== undefined) this.#keyToId.delete(key);
+		this.#idToKey.delete(id);
+		this.#suppressedIds.delete(id);
+		if (this.#transmitted.delete(id) && !this.#purgeIds.includes(id)) {
+			this.#purgeIds.push(id);
+		}
+		this.#requestRender();
+	}
+
 	/**
 	 * Begin a render pass. Called by the renderer before composing the frame.
 	 * Pass `stable: true` for a partial/throwaway pass that does not walk the
@@ -163,7 +177,8 @@ export class ImageBudget {
 	 * are not authoritative, so the decision is the committed on-terminal split
 	 * (`#suppressedIds`) keyed by id — order- and partiality-independent.
 	 */
-	observe(imageId: number): boolean {
+	observe(imageId: number, countTowardsBudget = true): boolean {
+		if (!countTowardsBudget) return false;
 		if (this.#stablePass) {
 			const suppressed = this.#cap > 0 && this.#suppressedIds.has(imageId);
 			if (suppressed) this.#forgetKeyForId(imageId);
@@ -356,6 +371,19 @@ export class Image implements Component {
 		this.#cachedWidth = undefined;
 	}
 
+	/**
+	 * Retire this image's terminal data before removing the component.
+	 *
+	 * Releasing by id remains valid after a global terminal-image clear resets
+	 * the budget's keyed lookup tables and the component later retransmits.
+	 */
+	dispose(): void {
+		if (this.#imageId === undefined) return;
+		this.#budget?.releaseId(this.#imageId);
+		this.#imageId = undefined;
+		this.invalidate();
+	}
+
 	render(width: number): readonly string[] {
 		const imageProtocol = TERMINAL.imageProtocol;
 		const hasProtocol = imageProtocol != null;
@@ -365,7 +393,10 @@ export class Image implements Component {
 		// its display-order slot in the budget. Only graphics-capable frames count
 		// toward (and are demoted by) the budget; without a protocol every image is
 		// already text.
-		const suppressed = hasProtocol && this.#budget !== undefined ? this.#budget.observe(this.#imageId ?? 0) : false;
+		const suppressed =
+			hasProtocol && this.#budget !== undefined
+				? this.#budget.observe(this.#imageId ?? 0, this.#options.countTowardsBudget)
+				: false;
 
 		if (
 			this.#cachedLines &&

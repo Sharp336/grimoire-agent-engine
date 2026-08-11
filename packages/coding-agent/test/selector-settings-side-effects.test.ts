@@ -99,6 +99,8 @@ describe("selector setting side effects", () => {
 		for (const visible of [false, true]) {
 			it(`updates every image owner and rebuilds the transcript when ${id}=${visible}`, () => {
 				const setShowImages = vi.fn();
+				const setImagePreviewEnabled = vi.fn();
+				Settings.instance.override("tui.pastedImagePreview", true);
 				const setImagesVisible = vi.fn();
 				const clearInlineImages = vi.fn();
 				const resetDisplay = vi.fn();
@@ -107,6 +109,8 @@ describe("selector setting side effects", () => {
 				const assistant = Object.create(AssistantMessageComponent.prototype) as AssistantMessageComponent;
 				assistant.setImagesVisible = setImagesVisible;
 				const controller = new SelectorController({
+					editor: { setImagePreviewEnabled },
+					settings: Settings.instance,
 					chatContainer: { children: [tool, assistant] },
 					ui: { clearInlineImages, resetDisplay },
 				} as unknown as InteractiveModeContext);
@@ -114,6 +118,7 @@ describe("selector setting side effects", () => {
 				controller.handleSettingChange(id, visible);
 
 				expect(setShowImages).toHaveBeenCalledWith(visible);
+				expect(setImagePreviewEnabled).toHaveBeenCalledWith(visible);
 				expect(setImagesVisible).toHaveBeenCalledWith(visible);
 				expect(clearInlineImages).toHaveBeenCalledTimes(visible ? 0 : 1);
 				expect(resetDisplay).toHaveBeenCalledTimes(1);
@@ -121,9 +126,30 @@ describe("selector setting side effects", () => {
 					expect(clearInlineImages.mock.invocationCallOrder[0]).toBeLessThan(
 						resetDisplay.mock.invocationCallOrder[0],
 					);
+					expect(clearInlineImages.mock.invocationCallOrder[0]).toBeLessThan(
+						setImagePreviewEnabled.mock.invocationCallOrder[0],
+					);
 				}
 			});
 		}
+	}
+
+	for (const showImages of [false, true]) {
+		it(`gates tui.pastedImagePreview by terminal.showImages=${showImages}`, () => {
+			const setImagePreviewEnabled = vi.fn();
+			const requestRender = vi.fn();
+			Settings.instance.override("terminal.showImages", showImages);
+			const controller = new SelectorController({
+				editor: { setImagePreviewEnabled },
+				settings: Settings.instance,
+				ui: { requestRender },
+			} as unknown as InteractiveModeContext);
+
+			controller.handleSettingChange("tui.pastedImagePreview", true);
+
+			expect(setImagePreviewEnabled).toHaveBeenCalledWith(showImages);
+			expect(requestRender).toHaveBeenCalledTimes(1);
+		});
 	}
 
 	for (const hidden of [true, false]) {
