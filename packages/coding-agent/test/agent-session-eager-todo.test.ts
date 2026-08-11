@@ -15,6 +15,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { TodoTool } from "@oh-my-pi/pi-coding-agent/tools";
 import { setInteractiveHost, TempDir } from "@oh-my-pi/pi-utils";
+import planFirstSuggestionsPrompt from "../src/prompts/system/plan-first-suggestions.md" with { type: "text" };
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
 type ObservedPromptCall = {
@@ -107,6 +108,7 @@ describe("AgentSession eager todo enforcement", () => {
 	type HarnessTools = {
 		builtInAsk?: boolean;
 		externalThink?: boolean;
+		planFirstGuidance?: boolean;
 	};
 
 	async function createSession(
@@ -172,7 +174,7 @@ describe("AgentSession eager todo enforcement", () => {
 			getApiKey: () => "test-key",
 			initialState: {
 				model,
-				systemPrompt: ["Test"],
+				systemPrompt: harnessTools.planFirstGuidance ? ["Test", planFirstSuggestionsPrompt.trim()] : ["Test"],
 				tools,
 				messages: [],
 			},
@@ -542,13 +544,23 @@ describe("AgentSession eager todo enforcement", () => {
 	});
 
 	it("lets plan-first guidance precede eager todo forcing on a fresh interactive session", async () => {
-		await recreateSession({}, {}, { builtInAsk: true });
+		await recreateSession({}, {}, { builtInAsk: true, planFirstGuidance: true });
 
 		await session.prompt("Build a project dashboard with authentication and reports");
 
 		expect(observedCalls).toHaveLength(1);
 		expect(observedCalls[0]?.toolChoice).toBeUndefined();
 		expect(observedCalls[0]?.toolNames).toEqual(["todo", "bash", "ask"]);
+		expect(observedCalls[0]?.messageRoles).toEqual(["user"]);
+	});
+
+	it("keeps eager todo forcing when the effective prompt omits plan-first guidance", async () => {
+		await recreateSession({}, {}, { builtInAsk: true });
+
+		await session.prompt("Build a project dashboard with authentication and reports");
+
+		expect(observedCalls).toHaveLength(1);
+		expect(observedCalls[0]?.toolChoice).toBe("todo");
 		expect(observedCalls[0]?.messageRoles).toEqual(["developer", "user"]);
 	});
 
@@ -567,7 +579,7 @@ describe("AgentSession eager todo enforcement", () => {
 		await recreateSession(
 			{ externalThinking: true, "todo.eager": "default" },
 			{},
-			{ builtInAsk: true, externalThink: true },
+			{ builtInAsk: true, externalThink: true, planFirstGuidance: true },
 		);
 
 		await session.prompt("Build a project dashboard with authentication and reports");

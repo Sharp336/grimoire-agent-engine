@@ -2673,6 +2673,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 
+		const previousPlanModePaused = this.planModePaused;
 		this.planModePaused = false;
 
 		const planFilePath = options?.planFilePath ?? (await this.#getPlanFilePath());
@@ -2693,20 +2694,36 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		const uniquePlanTools = [...new Set([...previousTools, ...planAugmentations])];
 
+		const previousMountedTools = this.session.getMountedXdevToolNames();
+		const previousPlanModeState = this.session.getPlanModeState();
+		const previousPlanModePlanFilePath = this.planModePlanFilePath;
+		const previousPlanModePreviousTools = this.#planModePreviousTools;
+		const previousLastAssistantUsage = this.lastAssistantUsage;
 		this.#planModePreviousTools = previousTools;
 		this.planModePlanFilePath = planFilePath;
 		this.planModeEnabled = true;
 		// Suppress cache-miss marker on the next turn: plan mode changes the system
 		// prompt, which predictably invalidates the cache.
 		this.lastAssistantUsage = undefined;
-
-		await this.session.setActiveToolsByName(uniquePlanTools);
 		this.session.setPlanModeState({
 			enabled: true,
 			planFilePath,
 			workflow: options?.workflow ?? "parallel",
 			reentry: this.#planModeHasEntered,
 		});
+		try {
+			// Apply tools and rebuild the prompt as one transaction. The rebuild must
+			// observe active plan state so it removes the first-response questionnaire.
+			await this.session.setActiveToolPresentation(uniquePlanTools, previousMountedTools, true);
+		} catch (error) {
+			this.session.setPlanModeState(previousPlanModeState);
+			this.#planModePreviousTools = previousPlanModePreviousTools;
+			this.planModePlanFilePath = previousPlanModePlanFilePath;
+			this.planModeEnabled = false;
+			this.planModePaused = previousPlanModePaused;
+			this.lastAssistantUsage = previousLastAssistantUsage;
+			throw error;
+		}
 		this.session.setPlanProposalHandler?.(title => this.session.preparePlanForReview(title));
 		if (this.session.isStreaming) {
 			await this.session.sendPlanModeContext({ deliverAs: "steer" });

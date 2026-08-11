@@ -65,8 +65,14 @@ export interface PrewalkCoordinatorHost {
 		options?: { ephemeral?: boolean },
 	): Promise<void>;
 	setActiveToolsByName(names: string[]): Promise<void>;
+	setActiveToolPresentation(
+		toolNames: string[],
+		mountedToolNames: string[],
+		forcePromptRefresh?: boolean,
+	): Promise<void>;
 	getActiveToolNames(): string[];
 	getEnabledToolNames(): string[];
+	getMountedXdevToolNames(): string[];
 	hasBuiltInTool(name: string): boolean;
 	getPlanModeState(): PlanModeState | undefined;
 	setPlanModeState(state: PlanModeState | undefined): void;
@@ -248,14 +254,26 @@ export class PrewalkCoordinator {
 		if (!this.#planYolo || this.#planYoloArmed) return;
 		this.#planYoloArmed = true;
 		const previousTools = this.#host.getEnabledToolNames();
+		const previousMountedTools = this.#host.getMountedXdevToolNames();
+		const previousPlanModeState = this.#host.getPlanModeState();
 		const augmentations = this.#host.hasBuiltInTool("write") ? ["write"] : [];
-		await this.#host.setActiveToolsByName([...new Set([...previousTools, ...augmentations])]);
-		this.#planYoloPreviousTools = previousTools;
 		this.#host.setPlanModeState({
 			enabled: true,
 			planFilePath: this.#host.getPlanReferencePath() || "local://PLAN.md",
 			workflow: "parallel",
 		});
+		try {
+			await this.#host.setActiveToolPresentation(
+				[...new Set([...previousTools, ...augmentations])],
+				previousMountedTools,
+				true,
+			);
+		} catch (error) {
+			this.#host.setPlanModeState(previousPlanModeState);
+			this.#planYoloArmed = false;
+			throw error;
+		}
+		this.#planYoloPreviousTools = previousTools;
 		this.#host.setPlanProposalHandler(title => this.#finalizePlanYoloProposal(title));
 	}
 

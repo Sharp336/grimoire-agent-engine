@@ -31,7 +31,9 @@ interface PromptOptions {
 	settings?: Settings;
 	taskDepth?: number;
 	newSessionAfterCreate?: boolean;
+	activePlanModeAfterCreate?: boolean;
 	toolNames?: string[];
+	systemPrompt?: string;
 }
 
 describe("createAgentSession plan-first suggestions", () => {
@@ -70,6 +72,7 @@ describe("createAgentSession plan-first suggestions", () => {
 			settings: options.settings ?? Settings.isolated(),
 			hasUI: options.hasUI ?? true,
 			toolNames: options.toolNames,
+			systemPrompt: options.systemPrompt,
 			taskDepth: options.taskDepth,
 			disableExtensionDiscovery: true,
 			skills: [],
@@ -85,6 +88,10 @@ describe("createAgentSession plan-first suggestions", () => {
 		try {
 			if (options.newSessionAfterCreate) {
 				await session.newSession();
+			}
+			if (options.activePlanModeAfterCreate) {
+				session.setPlanModeState({ enabled: true, planFilePath: "local://PLAN.md" });
+				await session.refreshBaseSystemPrompt();
 			}
 			return session.systemPrompt.join("\n\n");
 		} finally {
@@ -153,7 +160,9 @@ describe("createAgentSession plan-first suggestions", () => {
 			{ settings: Settings.isolated({ "plan.suggestBeforeSubstantialWork": false }) },
 		],
 		["sessions configured to start in plan mode", { settings: Settings.isolated({ "plan.defaultOnStartup": true }) }],
+		["sessions already in plan mode", { activePlanModeAfterCreate: true }],
 		["resumed sessions", { existingSession: true }],
+		["sessions with a replacement system prompt", { systemPrompt: "Custom SDK prompt" }],
 		["sessions whose active ask is an extension override", { extensions: [askOverrideExtension] }],
 		["subagent sessions", { taskDepth: 1 }],
 	];

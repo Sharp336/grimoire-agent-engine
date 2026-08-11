@@ -26,6 +26,8 @@ function makeTool(name: string): AgentTool {
 	};
 }
 
+const PLAN_FIRST_GUIDANCE = "## First-Response Planning Check";
+
 interface HarnessOptions {
 	extraRegistryTools?: readonly AgentTool[];
 	builtInToolNames?: Iterable<string>;
@@ -94,7 +96,7 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 			agent: new Agent({
 				initialState: {
 					model: initialModel,
-					systemPrompt: ["Test"],
+					systemPrompt: ["Test", PLAN_FIRST_GUIDANCE],
 					tools: [readTool],
 					messages: [],
 					thinkingLevel: Effort.Medium,
@@ -109,7 +111,9 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 				? async () => {
 						if (options.rebuildGate) options.rebuildGate.calls = (options.rebuildGate.calls ?? 0) + 1;
 						if (options.rebuildGate?.fail) throw new Error("rebuild failed");
-						return { systemPrompt: ["Test"] };
+						return {
+							systemPrompt: session?.getPlanModeState()?.enabled ? ["Test"] : ["Test", PLAN_FIRST_GUIDANCE],
+						};
 					}
 				: undefined,
 			xdev,
@@ -127,6 +131,72 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		expect(created.planModeEnabled).toBe(true);
 		expect(session?.getPlanModeState()).toMatchObject({ enabled: true, planFilePath: "local://PLAN.md" });
 		expect(session?.getActiveToolNames()).toContain("read");
+	});
+
+	it("removes first-response guidance after manual plan mode becomes active", async () => {
+		const rebuildGate = { fail: false, calls: 0 };
+		const created = createHarness(Settings.isolated({ "compaction.enabled": false }), { rebuildGate });
+		await created.init({ suppressWelcomeIntro: true });
+		expect(session?.systemPrompt.join("\n")).toContain(PLAN_FIRST_GUIDANCE);
+
+		await created.handlePlanModeCommand();
+
+		expect(created.planModeEnabled).toBe(true);
+		expect(session?.getPlanModeState()?.enabled).toBe(true);
+		expect(session?.systemPrompt.join("\n")).not.toContain(PLAN_FIRST_GUIDANCE);
+	});
+
+	it("rolls back manual plan mode when its prompt rebuild fails", async () => {
+		const rebuildGate = { fail: true, calls: 0 };
+		const created = createHarness(Settings.isolated({ "compaction.enabled": false }), { rebuildGate });
+		await created.init({ suppressWelcomeIntro: true });
+		const promptBefore = session?.systemPrompt;
+
+		await expect(created.handlePlanModeCommand()).rejects.toThrow("rebuild failed");
+
+		expect(created.planModeEnabled).toBe(false);
+		expect(session?.getPlanModeState()).toBeUndefined();
+		expect(session?.getActiveToolNames()).toEqual(["read"]);
+		expect(session?.systemPrompt).toEqual(promptBefore);
+		expect(session?.peekPlanProposalHandler()).toBeUndefined();
+	});
+
+	it("rolls back startup plan mode when its prompt rebuild fails", async () => {
+		const rebuildGate = { fail: true, calls: 0 };
+		const created = createHarness(Settings.isolated({ "plan.defaultOnStartup": true, "compaction.enabled": false }), {
+			rebuildGate,
+		});
+		const promptBefore = session?.systemPrompt;
+
+		await expect(created.init({ suppressWelcomeIntro: true })).rejects.toThrow("rebuild failed");
+
+		expect(created.planModeEnabled).toBe(false);
+		expect(session?.getPlanModeState()).toBeUndefined();
+		expect(session?.getActiveToolNames()).toEqual(["read"]);
+		expect(session?.systemPrompt).toEqual(promptBefore);
+		expect(session?.peekPlanProposalHandler()).toBeUndefined();
+	});
+
+	it("restores paused plan mode when prompted re-entry cannot rebuild the prompt", async () => {
+		const rebuildGate = { fail: false, calls: 0 };
+		const created = createHarness(Settings.isolated({ "plan.defaultOnStartup": true, "compaction.enabled": false }), {
+			rebuildGate,
+		});
+		await created.init({ suppressWelcomeIntro: true });
+		await created.handlePlanModeCommand();
+		expect(created.planModePaused).toBe(true);
+		const promptBefore = session?.systemPrompt;
+		const toolsBefore = session?.getActiveToolNames();
+		rebuildGate.fail = true;
+
+		await expect(created.handlePlanModeCommand("Revise the plan")).rejects.toThrow("rebuild failed");
+
+		expect(created.planModeEnabled).toBe(false);
+		expect(created.planModePaused).toBe(true);
+		expect(session?.getPlanModeState()).toBeUndefined();
+		expect(session?.getActiveToolNames()).toEqual(toolsBefore);
+		expect(session?.systemPrompt).toEqual(promptBefore);
+		expect(session?.sessionManager.buildSessionContext().mode).toBe("plan_paused");
 	});
 
 	it("activates write when entering plan mode even if it was hidden by discoveryMode (issue #3165)", async () => {

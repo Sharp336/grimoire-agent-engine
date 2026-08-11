@@ -161,6 +161,7 @@ import goalModeContextPrompt from "../prompts/goals/goal-mode-context.md" with {
 import goalTodoContextPrompt from "../prompts/goals/goal-todo-context.md" with { type: "text" };
 import autoContinuePrompt from "../prompts/system/auto-continue.md" with { type: "text" };
 import interruptedThinkingTemplate from "../prompts/system/interrupted-thinking.md" with { type: "text" };
+import planFirstSuggestionsPrompt from "../prompts/system/plan-first-suggestions.md" with { type: "text" };
 import planModeActivePrompt from "../prompts/system/plan-mode-active.md" with { type: "text" };
 import planModeReferencePrompt from "../prompts/system/plan-mode-reference.md" with { type: "text" };
 import planModeToolDecisionReminderPrompt from "../prompts/system/plan-mode-tool-decision-reminder.md" with {
@@ -999,10 +1000,13 @@ export class AgentSession {
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
 			setModelTemporary: (model, thinkingLevel, options) => this.setModelTemporary(model, thinkingLevel, options),
 			setActiveToolsByName: names => this.setActiveToolsByName(names),
+			setActiveToolPresentation: (names, mountedNames, forcePromptRefresh) =>
+				this.setActiveToolPresentation(names, mountedNames, forcePromptRefresh),
 			getActiveToolNames: () => this.getActiveToolNames(),
 			getEnabledToolNames: () => this.getEnabledToolNames(),
 			hasBuiltInTool: name => this.hasBuiltInTool(name),
 			getPlanModeState: () => this.getPlanModeState(),
+			getMountedXdevToolNames: () => this.getMountedXdevToolNames(),
 			setPlanModeState: state => this.setPlanModeState(state),
 			getPlanReferencePath: () => this.getPlanReferencePath(),
 			setPlanProposalHandler: handler => this.setPlanProposalHandler(handler),
@@ -5252,6 +5256,7 @@ export class AgentSession {
 		// The guidance classifies exempt requests before substantial ones, so it owns
 		// precedence over both optional scratchpad forcing and eager todo enforcement.
 		const planFirstSuggestionHasPriority =
+			this.systemPrompt.some(part => part.includes(planFirstSuggestionsPrompt.trim())) &&
 			this.#agentKind === "main" &&
 			currentSessionIsFresh &&
 			!this.#planModeState?.enabled &&
@@ -5271,7 +5276,9 @@ export class AgentSession {
 				? buildNamedToolChoice("think", activeModel)
 				: undefined;
 		const eagerTodoPrelude =
-			!options?.synthetic && !hasPendingUserDirective ? this.#todo.createEagerTodoPrelude(expandedText) : undefined;
+			!planFirstSuggestionHasPriority && !options?.synthetic && !hasPendingUserDirective
+				? this.#todo.createEagerTodoPrelude(expandedText)
+				: undefined;
 		const eagerTaskPrelude =
 			!options?.synthetic && !hasPendingUserDirective ? this.#todo.createEagerTaskPrelude(expandedText) : undefined;
 		const normalizedImages = await this.#normalizeImagesForModel(options?.images);

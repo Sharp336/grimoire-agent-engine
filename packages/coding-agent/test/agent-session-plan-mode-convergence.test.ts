@@ -24,6 +24,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { Snowflake, TempDir } from "@oh-my-pi/pi-utils";
+import planFirstSuggestionsPrompt from "../src/prompts/system/plan-first-suggestions.md" with { type: "text" };
 import planModeReminderPrompt from "../src/prompts/system/plan-mode-tool-decision-reminder.md" with { type: "text" };
 
 /** A stable, literal (non-templated) line of the reminder prompt, so the test
@@ -70,6 +71,7 @@ function countReminders(messages: readonly AgentMessage[]): number {
 interface PlanHarness {
 	session: AgentSession;
 	mock: MockModel;
+	systemPrompts: string[][];
 	advisorMock?: MockModel;
 	sideMock?: MockModel;
 }
@@ -99,6 +101,7 @@ describe("AgentSession plan-mode convergence", () => {
 			advisorResponses?: MockResponse[];
 			sideResponses?: MockResponse[];
 			planYolo?: boolean;
+			planYoloGuidance?: boolean;
 			rebuildGate?: { fail: boolean };
 		},
 	): Promise<PlanHarness> {
@@ -108,19 +111,24 @@ describe("AgentSession plan-mode convergence", () => {
 		const askTool = makeTool("ask");
 		const writeTool = makeTool("write");
 		const readTool = makeTool("read");
+		const initialSystemPrompt = options?.planYoloGuidance ? ["Test", planFirstSuggestionsPrompt.trim()] : ["Test"];
 
 		const mock = createMockModel({ responses });
+		const systemPrompts: string[][] = [];
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			// All three tools active so a scripted ask/write/read call (and a
 			// forced "required" choice) can actually execute (isToolChoiceActive).
 			initialState: {
 				model,
-				systemPrompt: ["Test"],
+				systemPrompt: initialSystemPrompt,
 				tools: options?.planYolo ? [readTool] : [askTool, writeTool, readTool],
 				messages: [],
 			},
-			streamFn: mock.stream,
+			streamFn: (activeModel, context, streamOptions) => {
+				systemPrompts.push([...(context.systemPrompt ?? [])]);
+				return mock.stream(activeModel, context, streamOptions);
+			},
 		});
 
 		const authStorage = await AuthStorage.create(tempDir.join(`auth-${Snowflake.next()}.db`));
@@ -142,7 +150,8 @@ describe("AgentSession plan-mode convergence", () => {
 			sideStreamFn = sideMock.stream;
 		}
 
-		const created = new AgentSession({
+		let created!: AgentSession;
+		created = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({
@@ -160,16 +169,19 @@ describe("AgentSession plan-mode convergence", () => {
 			advisorStreamFn,
 			sideStreamFn,
 			planYolo: options?.planYolo ? { target: model } : undefined,
-			rebuildSystemPrompt: options?.rebuildGate
-				? async () => {
-						if (options.rebuildGate?.fail) throw new Error("rebuild failed");
-						return { systemPrompt: ["Test"] };
-					}
-				: undefined,
+			rebuildSystemPrompt:
+				options?.rebuildGate || options?.planYoloGuidance
+					? async () => {
+							if (options.rebuildGate?.fail) throw new Error("rebuild failed");
+							return {
+								systemPrompt: created.getPlanModeState()?.enabled ? ["Test"] : initialSystemPrompt,
+							};
+						}
+					: undefined,
 		});
 		if (!options?.planYolo) created.setPlanModeState({ enabled: true, planFilePath: "local://PLAN.md" });
 		session = created;
-		return { session: created, mock, advisorMock, sideMock };
+		return { session: created, mock, systemPrompts, advisorMock, sideMock };
 	}
 
 	it("T1: an advisor concern does not wake the primary in plan mode", async () => {
@@ -311,6 +323,19 @@ describe("AgentSession plan-mode convergence", () => {
 		expect(harness.mock.calls.length).toBe(4);
 	});
 
+	it("removes first-response guidance before the first PlanYolo provider turn", async () => {
+		const harness = await createPlanSession([{ content: ["planning"] }], {
+			planYolo: true,
+			planYoloGuidance: true,
+		});
+
+		await harness.session.prompt("make a plan");
+		await harness.session.waitForIdle();
+
+		expect(harness.session.getPlanModeState()?.enabled).toBe(true);
+		expect(harness.systemPrompts.length).toBeGreaterThan(0);
+		expect(harness.systemPrompts[0]?.join("\n")).not.toContain(planFirstSuggestionsPrompt.trim());
+	});
 	it("restores the pre-plan tool set after PlanYolo approval", async () => {
 		const harness = await createPlanSession(
 			[
