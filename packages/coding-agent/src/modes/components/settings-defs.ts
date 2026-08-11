@@ -63,6 +63,11 @@ export interface SubmenuSettingDef extends BaseSettingDef {
 	options: OptionList;
 	onPreview?: (value: string) => void;
 	onPreviewCancel?: (originalValue: string) => void;
+	/** Append a free-form "Custom…" entry that swaps into a validated text input. */
+	custom?: boolean;
+	/** Inclusive bounds for the free-form entry (undefined = unbounded). */
+	min?: number;
+	max?: number;
 }
 
 export interface TextInputSettingDef extends BaseSettingDef {
@@ -182,7 +187,15 @@ function pathToSettingDef(path: SettingPath): SettingDef | null {
 	if (schemaType === "number") {
 		// Numbers without options are intentionally hidden from the UI.
 		if (!options || options === "runtime") return null;
-		return { ...base, type: "submenu", options };
+		const ui = getUi(path);
+		return {
+			...base,
+			type: "submenu",
+			options,
+			...(ui?.custom ? { custom: true } : {}),
+			...(ui?.min !== undefined ? { min: ui.min } : {}),
+			...(ui?.max !== undefined ? { max: ui.max } : {}),
+		};
 	}
 
 	if (schemaType === "string") {

@@ -222,6 +222,56 @@ class SelectSubmenu extends Container {
 }
 
 /**
+ * Submenu for numeric settings that offer presets plus a free-form entry
+ * (compaction thresholds). Selecting the injected `__custom__` option swaps
+ * the preset list for a text input; Esc at any point returns to the caller.
+ */
+class ThresholdInputSubmenu extends Container {
+	constructor(
+		title: string,
+		description: string,
+		options: ReadonlyArray<SelectItem>,
+		currentValue: string,
+		onSubmit: (value: string) => void,
+		onCancel: () => void,
+	) {
+		super();
+		const showSelect = (): void => {
+			this.clear();
+			this.addChild(
+				new SelectSubmenu(
+					title,
+					description,
+					options,
+					currentValue,
+					value => {
+						if (value === "__custom__") {
+							showInput();
+							return;
+						}
+						onSubmit(value);
+					},
+					onCancel,
+				),
+			);
+			this.invalidate();
+		};
+		const showInput = (): void => {
+			this.clear();
+			this.addChild(new TextInputSubmenu(title, description, "", false, value => onSubmit(value), onCancel));
+			this.invalidate();
+		};
+		showSelect();
+	}
+
+	handleInput(data: string): void {
+		for (const child of this.children) {
+			child.handleInput?.(data);
+		}
+	}
+}
+
+/**
  * Submenu for array-of-enum settings: every option is a toggle row. Enter or
  * Space flips membership; ordered lists render 1-based positions and reorder
  * the highlighted member with ←/→. Changes apply live; Esc goes back.
@@ -460,6 +510,22 @@ let cachedSidebarWidth: number | undefined;
  * the visible tab), so the divider column never moves when switching tabs or
  * when condition-gated groups appear.
  */
+function parseNumericInput(raw: string): number | undefined {
+	const trimmed = raw.trim().replace(/,/g, "");
+	const percent = /^(\d+(?:\.\d+)?)%$/.exec(trimmed);
+	if (percent) {
+		const value = Number(percent[1]);
+		return Number.isFinite(value) ? value : undefined;
+	}
+	const kSuffix = /^(\d+(?:\.\d+)?)k$/i.exec(trimmed);
+	if (kSuffix) {
+		const value = Number(kSuffix[1]) * 1000;
+		return Number.isFinite(value) ? value : undefined;
+	}
+	const number = Number(trimmed);
+	return Number.isFinite(number) ? number : undefined;
+}
+
 function settingsSidebarWidth(): number {
 	if (cachedSidebarWidth === undefined) {
 		let nameWidth = 0;
@@ -1041,6 +1107,11 @@ export class SettingsSelectorComponent implements Component {
 			});
 		} else if (def.path === "theme.dark" || def.path === "theme.light") {
 			options = this.context.availableThemes.map(t => ({ value: t, label: t }));
+		} else if (def.custom) {
+			// Preset-only numbers can opt into a free-form entry via the schema's
+			// `custom` flag (#8210): append a "Custom…" row that swaps into a
+			// validated text input.
+			options = [...options, { value: "__custom__", label: "Custom…", description: "Type an arbitrary value" }];
 		}
 
 		// Preview handlers
@@ -1100,24 +1171,41 @@ export class SettingsSelectorComponent implements Component {
 		const isThemeSetting = def.path === "theme.dark" || def.path === "theme.light";
 		const getPreview = isThemeSetting ? this.callbacks.getStatusLinePreview : undefined;
 
-		return new SelectSubmenu(
-			def.label,
-			def.description,
-			options,
-			currentValue,
-			value => {
-				this.#setSettingValue(def.path, value);
-				this.callbacks.onChange(def.path, value);
-				done(value);
-			},
-			() => {
-				onPreviewCancel?.();
-				done();
-			},
-			onPreview,
-			getPreview,
-			footer,
-		);
+		const onSelect = (value: string): void => {
+			this.#setSettingValue(def.path, value);
+			this.callbacks.onChange(def.path, settings.get(def.path));
+			done(String(settings.get(def.path)));
+		};
+		const onCancel = (): void => {
+			onPreviewCancel?.();
+			done();
+		};
+
+		if (def.custom) {
+			const label = def.label.toLowerCase();
+			return new ThresholdInputSubmenu(def.label, def.description, options, currentValue, value => {
+				const trimmed = value.trim();
+				if (trimmed === "" || trimmed === "default") {
+					onSelect("default");
+					return;
+				}
+				const parsed = parseNumericInput(trimmed);
+				if (parsed === undefined) {
+					throw new Error(
+						`Invalid ${label} value: ${JSON.stringify(trimmed)}. Expected a number (e.g. 65, 35,000, 160K).`,
+					);
+				}
+				if (def.min !== undefined && parsed < def.min) {
+					throw new Error(`Invalid ${label} value: ${JSON.stringify(trimmed)}. Minimum is ${def.min}.`);
+				}
+				if (def.max !== undefined && parsed > def.max) {
+					throw new Error(`Invalid ${label} value: ${JSON.stringify(trimmed)}. Maximum is ${def.max}.`);
+				}
+				onSelect(String(parsed));
+			}, onCancel);
+		}
+
+		return new SelectSubmenu(def.label, def.description, options, currentValue, onSelect, onCancel, onPreview, getPreview, footer);
 	}
 
 	/**

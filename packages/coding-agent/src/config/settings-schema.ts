@@ -212,6 +212,11 @@ interface UiEnum<T extends readonly string[]> extends UiBase {
 interface UiNumber extends UiBase {
 	/** Submenu options. Without options, a numeric setting has no UI representation (intentional hide). */
 	options?: ReadonlyArray<SubmenuOption>;
+	/** Offer a free-form "Custom…" entry alongside the preset options. */
+	custom?: boolean;
+	/** Inclusive bounds enforced on the free-form entry (undefined = unbounded). */
+	min?: number;
+	max?: number;
 }
 
 interface UiString extends UiBase {
@@ -238,6 +243,9 @@ export type AnyUiMetadata = UiBase & {
 	options?: ReadonlyArray<SubmenuOption> | "runtime";
 	secret?: boolean;
 	ordered?: boolean;
+	custom?: boolean;
+	min?: number;
+	max?: number;
 };
 
 /**
@@ -2201,6 +2209,9 @@ export const SETTINGS_SCHEMA = {
 		type: "number",
 		default: -1,
 		ui: {
+			custom: true,
+			min: 1,
+			max: 100,
 			tab: "context",
 			group: "Compaction",
 			label: "Compaction Threshold",
@@ -2226,6 +2237,8 @@ export const SETTINGS_SCHEMA = {
 		type: "number",
 		default: -1,
 		ui: {
+			custom: true,
+			min: 1,
 			tab: "context",
 			group: "Compaction",
 			label: "Compaction Token Limit",
