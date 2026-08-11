@@ -20,6 +20,7 @@ export class ThinkingStripComponent implements Component {
 	#index: number;
 	#onSelect: (level: ConfiguredThinkingLevel) => void;
 	#onCancel: () => void;
+	#inputLocked = false;
 
 	constructor(
 		modelLabel: string,
@@ -39,13 +40,18 @@ export class ThinkingStripComponent implements Component {
 	invalidate(): void {}
 
 	handleInput(data: string): void {
+		if (this.#inputLocked) return;
 		if (matchesSelectCancel(data)) {
+			this.#inputLocked = true;
 			this.#onCancel();
 			return;
 		}
 		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n" || data === "\r") {
 			const level = this.#levels[this.#index];
-			if (level !== undefined) this.#onSelect(level);
+			if (level !== undefined) {
+				this.#inputLocked = true;
+				this.#onSelect(level);
+			}
 			return;
 		}
 		if (matchesKey(data, "left") || matchesKey(data, "shift+tab")) {

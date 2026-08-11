@@ -79,6 +79,7 @@ export class ModelPickerComponent implements Component {
 	#quickRoleItems: ModelBrowserItem[] = [];
 	#quickRoles = new Map<string, ResolvedRoleModel>();
 	#roleMode = false;
+	#inputLocked = false;
 
 	constructor(
 		tui: TUI,
@@ -207,7 +208,13 @@ export class ModelPickerComponent implements Component {
 		}
 	}
 
+	/** Ignore input after selection while the session model is being applied. */
+	lockInput(): void {
+		this.#inputLocked = true;
+	}
+
 	handleInput(data: string): void {
+		if (this.#inputLocked) return;
 		// Mouse tracking is off outside fullscreen overlays; drop any stray SGR
 		// reports instead of feeding them to the search input.
 		if (data.startsWith("\x1b[<")) return;

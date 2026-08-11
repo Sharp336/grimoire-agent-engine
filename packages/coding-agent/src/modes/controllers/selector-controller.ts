@@ -714,11 +714,17 @@ export class SelectorController {
 		const quickRoleOrder = this.ctx.settings.get("cycleOrder");
 		const quickRoleCycle = this.ctx.session.getRoleModelCycle(quickRoleOrder);
 		let overlayHandle: OverlayHandle | undefined;
+		let pickerHidden = false;
 		let closed = false;
+		const hidePicker = () => {
+			if (pickerHidden) return;
+			pickerHidden = true;
+			overlayHandle?.hide();
+		};
 		const done = () => {
 			if (closed) return;
 			closed = true;
-			overlayHandle?.hide();
+			hidePicker();
 			this.focusActiveEditorArea();
 			this.ctx.ui.requestRender();
 		};
@@ -729,6 +735,7 @@ export class SelectorController {
 			this.ctx.session.scopedModels,
 			{
 				onPick: async (model, selector, { overContext }) => {
+					picker.lockInput();
 					// Session-only: update agent state but don't persist the model to settings.
 					const applySessionModel = async (thinkingLevel: ConfiguredThinkingLevel | undefined) => {
 						await this.ctx.session.setModelTemporary(model, thinkingLevel);
@@ -759,10 +766,10 @@ export class SelectorController {
 							await switchAfterCompaction(outcome);
 							return;
 						}
+						await this.#pickSessionThinkingLevel(model, applySessionModel, hidePicker);
 						done();
-						const thinkingLevel = await this.#pickSessionThinkingLevel(model);
-						await applySessionModel(thinkingLevel);
 					} catch (error) {
+						done();
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
 					}
 				},
@@ -811,20 +818,43 @@ export class SelectorController {
 	 * behavior by resolving with the role-configured level for the model (or
 	 * the model's default when none is configured).
 	 */
-	#pickSessionThinkingLevel(model: Model): Promise<ConfiguredThinkingLevel | undefined> {
+	#pickSessionThinkingLevel(
+		model: Model,
+		apply?: (thinkingLevel: ConfiguredThinkingLevel | undefined) => Promise<void>,
+		beforeShow?: () => void,
+	): Promise<ConfiguredThinkingLevel | undefined> {
 		const fallback = this.ctx.session.resolveTemporaryModelThinkingLevel(model);
 		const options = sessionSwitchThinkingOptions(model, fallback);
-		if (!options) return Promise.resolve(fallback);
-		const { promise, resolve } = Promise.withResolvers<ConfiguredThinkingLevel | undefined>();
+		if (!options) {
+			return apply ? apply(fallback).then(() => fallback) : Promise.resolve(fallback);
+		}
+		beforeShow?.();
+		const { promise, resolve, reject } = Promise.withResolvers<ConfiguredThinkingLevel | undefined>();
 		let overlayHandle: OverlayHandle | undefined;
 		let closed = false;
-		const finish = (level: ConfiguredThinkingLevel | undefined) => {
-			if (closed) return;
-			closed = true;
+		const close = () => {
 			overlayHandle?.hide();
 			this.focusActiveEditorArea();
 			this.ctx.ui.requestRender();
-			resolve(level);
+		};
+		const finish = (level: ConfiguredThinkingLevel | undefined) => {
+			if (closed) return;
+			closed = true;
+			if (!apply) {
+				close();
+				resolve(level);
+				return;
+			}
+			void apply(level).then(
+				() => {
+					close();
+					resolve(level);
+				},
+				error => {
+					close();
+					reject(error);
+				},
+			);
 		};
 		const strip = new ThinkingStripComponent(
 			`${model.provider}/${model.id}`,
