@@ -16,13 +16,7 @@ import type { Settings } from "../../config/settings";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
 import { IrcBus, type IrcDeliveryReceipt, type IrcMessage } from "../../irc/bus";
 import type { Theme } from "../../modes/theme/theme";
-import {
-	type AgentRegistry,
-	BROADCAST_ID,
-	isLocalSession,
-	isMessageablePeer,
-	MAIN_AGENT_ID,
-} from "../../registry/agent-registry";
+import { type AgentRegistry, BROADCAST_ID, isLocalSession, isMessageablePeer } from "../../registry/agent-registry";
 import { registerPersistedSubagents } from "../../registry/persisted-agents";
 import { canSpawnAtDepth } from "../../task/types";
 import { Ellipsis, renderStatusLine, renderTreeList, truncateToWidth } from "../../tui";
@@ -217,10 +211,12 @@ export async function executeSend(
 		// parked agent on a broadcast would be a stampede. Direct sends go
 		// through the bus unfiltered so parked recipients are revived.
 		const targets = isBroadcast ? registry.listVisibleTo(senderId).map(ref => ref.id) : [to];
-		// A broadcast that also reaches the main agent delivers the body to it
-		// directly (its own incoming card); relaying the sibling legs to the
-		// main UI would then show the same body once per other recipient.
-		const suppressRelay = isBroadcast && targets.includes(MAIN_AGENT_ID);
+		// A broadcast that also reaches the sender's own root delivers the body to it directly (its
+		// own incoming card); relaying the sibling legs to that root's UI would then duplicate the
+		// body once per other recipient. Resolve the sender's ACTUAL root — an ACP/custom-root
+		// registry's root is not "Main" — so the dedup fires for every root, not just the default.
+		const rootId = bus.rootIdFor(senderId);
+		const suppressRelay = isBroadcast && rootId !== undefined && targets.includes(rootId);
 		const receipts = await Promise.all(
 			targets.map(target =>
 				bus.send(
