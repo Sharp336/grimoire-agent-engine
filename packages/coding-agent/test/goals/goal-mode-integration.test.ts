@@ -342,11 +342,11 @@ describe("InteractiveMode goal mode integration", () => {
 		const waiter = await armInputWaiter(harness.mode);
 		const setupStarted = Promise.withResolvers<void>();
 		const continueSetup = Promise.withResolvers<void>();
-		const setActiveTools = harness.session.setActiveToolsByName.bind(harness.session);
-		vi.spyOn(harness.session, "setActiveToolsByName").mockImplementationOnce(async toolNames => {
+		const setActiveToolPresentation = harness.session.setActiveToolPresentation.bind(harness.session);
+		vi.spyOn(harness.session, "setActiveToolPresentation").mockImplementationOnce(async (...args) => {
 			setupStarted.resolve();
 			await continueSetup.promise;
-			await setActiveTools(toolNames);
+			await setActiveToolPresentation(...args);
 		});
 
 		const command = executeBuiltinSlashCommand("/plan [Image #1, 10x10] plan this", {
