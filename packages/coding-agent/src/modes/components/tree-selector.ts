@@ -676,7 +676,10 @@ class TreeList implements Component {
 			}
 			case "compaction": {
 				const tokens = Math.round(entry.tokensBefore / 1000);
-				result = theme.fg("borderAccent", `[compaction: ${tokens}k tokens]`);
+				const goal = entry.summary.match(/(?:^|\n)##\s*Goal\s*\n([\s\S]*?)(?=\n##\s|\s*$)/i)?.[1]?.trim();
+				result = goal
+					? theme.fg("borderAccent", `[goal: ${normalize(goal)}]`)
+					: theme.fg("borderAccent", `[compaction: ${tokens}k tokens]`);
 				break;
 			}
 			case "branch_summary":

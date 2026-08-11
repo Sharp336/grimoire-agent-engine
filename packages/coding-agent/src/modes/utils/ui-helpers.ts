@@ -63,6 +63,16 @@ import {
 } from "./transcript-render-helpers";
 
 type TextBlock = { type: "text"; text: string };
+export function createTimestampComponent(
+	timestamp: number | string | undefined,
+	enabled: boolean = true,
+): Text | undefined {
+	if (!enabled || timestamp === undefined) return undefined;
+	const date = new Date(timestamp);
+	if (Number.isNaN(date.getTime())) return undefined;
+	return new Text(theme.fg("dim", date.toLocaleString()), 1, 0);
+}
+
 interface RenderInitialMessagesOptions {
 	preserveExistingChat?: boolean;
 	clearTerminalHistory?: boolean;
@@ -133,6 +143,13 @@ export class UiHelpers {
 	}
 
 	addMessageToChat(message: AgentMessage, options?: AddMessageOptions): Component[] {
+		const showTimestamps = this.ctx.settings?.get?.("display.showTimestamps") ?? true;
+		const presentTimestamped = (component: Component): Component[] => {
+			const timestamp = createTimestampComponent(message.timestamp, showTimestamps);
+			const components = timestamp ? [timestamp, component] : [component];
+			this.ctx.present(components);
+			return components;
+		};
 		switch (message.role) {
 			case "bashExecution": {
 				const component = new BashExecutionComponent(message.command, this.ctx.ui, message.excludeFromContext);
@@ -142,7 +159,7 @@ export class UiHelpers {
 				component.setComplete(message.exitCode, message.cancelled, {
 					truncation: message.meta?.truncation,
 				});
-				this.ctx.chatContainer.addChild(component);
+				presentTimestamped(component);
 				break;
 			}
 			case "pythonExecution": {
@@ -153,14 +170,14 @@ export class UiHelpers {
 				component.setComplete(message.exitCode, message.cancelled, {
 					truncation: message.meta?.truncation,
 				});
-				this.ctx.chatContainer.addChild(component);
+				presentTimestamped(component);
 				break;
 			}
 			case "hookMessage":
 			case "custom": {
 				if (message.display) {
 					if (message.customType === "async-result") {
-						this.ctx.chatContainer.addChild(buildAsyncResultBlock(message));
+						presentTimestamped(buildAsyncResultBlock(message));
 						break;
 					}
 					if (message.customType === LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE) {
@@ -171,18 +188,18 @@ export class UiHelpers {
 						).details;
 						const component = new LateDiagnosticsMessageComponent(details?.files ?? []);
 						component.setExpanded(this.ctx.toolOutputExpanded);
-						this.ctx.chatContainer.addChild(component);
+						presentTimestamped(component);
 						break;
 					}
 					if (message.customType === COLLAB_PROMPT_MESSAGE_TYPE) {
 						const component = new CollabPromptMessageComponent(message as CustomMessage<CollabPromptDetails>);
-						this.ctx.chatContainer.addChild(component);
+						presentTimestamped(component);
 						break;
 					}
 					if (message.customType === SKILL_PROMPT_MESSAGE_TYPE) {
 						const component = new SkillMessageComponent(message as CustomMessage<SkillPromptDetails>);
 						component.setExpanded(this.ctx.toolOutputExpanded);
-						this.ctx.chatContainer.addChild(component);
+						presentTimestamped(component);
 						break;
 					}
 					if (
@@ -191,18 +208,15 @@ export class UiHelpers {
 						message.customType === "irc:relay"
 					) {
 						const card = buildIrcMessageCard(message, () => this.ctx.toolOutputExpanded);
-						this.ctx.chatContainer.addChild(card);
-						return [card];
+						return presentTimestamped(card);
 					}
 					if (message.customType === "advisor") {
 						const details = (message as CustomMessage<AdvisorMessageDetails>).details;
-						this.ctx.chatContainer.addChild(
-							createAdvisorMessageCard(details, () => this.ctx.toolOutputExpanded, theme),
-						);
+						presentTimestamped(createAdvisorMessageCard(details, () => this.ctx.toolOutputExpanded, theme));
 						break;
 					}
 					if (message.customType === BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE) {
-						this.ctx.chatContainer.addChild(createBackgroundTanDispatchBlock(message as CustomMessage<unknown>));
+						presentTimestamped(createBackgroundTanDispatchBlock(message as CustomMessage<unknown>));
 						break;
 					}
 					const handoffComponent = createHandoffSummaryMessageComponent(
@@ -210,33 +224,32 @@ export class UiHelpers {
 						this.ctx.toolOutputExpanded,
 					);
 					if (handoffComponent) {
-						this.ctx.chatContainer.addChild(handoffComponent);
+						presentTimestamped(handoffComponent);
 						break;
 					}
 					const renderer = this.ctx.viewSession.extensionRunner?.getMessageRenderer(message.customType);
-					// Both HookMessage and CustomMessage have the same structure, cast for compatibility
 					const component = new CustomMessageComponent(message as CustomMessage<unknown>, renderer);
 					component.setExpanded(this.ctx.toolOutputExpanded);
-					this.ctx.chatContainer.addChild(component);
+					presentTimestamped(component);
 				}
 				break;
 			}
 			case "compactionSummary": {
 				const component = new CompactionSummaryMessageComponent(message);
 				component.setExpanded(this.ctx.toolOutputExpanded);
-				this.ctx.chatContainer.addChild(component);
+				presentTimestamped(component);
 				break;
 			}
 			case "branchSummary": {
 				const component = new BranchSummaryMessageComponent(message);
 				component.setExpanded(this.ctx.toolOutputExpanded);
-				this.ctx.chatContainer.addChild(component);
+				presentTimestamped(component);
 				break;
 			}
 			case "fileMention": {
 				// Render compact file mention display
 				const block = buildFileMentionBlock(message.files, 0);
-				if (block.children.length > 0) this.ctx.chatContainer.addChild(block);
+				if (block.children.length > 0) presentTimestamped(block);
 				break;
 			}
 			case "user":
@@ -260,7 +273,7 @@ export class UiHelpers {
 						userComponent = new UserMessageComponent(textContent, isSynthetic, imageLinks);
 						this.ctx.transcriptMessageComponents.set(message, userComponent);
 					}
-					this.ctx.chatContainer.addChild(userComponent);
+					presentTimestamped(userComponent);
 					if (options?.populateHistory && message.role === "user" && !isSynthetic) {
 						this.ctx.editor.addToHistory(textContent);
 					}
@@ -278,7 +291,7 @@ export class UiHelpers {
 				if (cached !== assistantComponent) {
 					this.ctx.transcriptMessageComponents.set(message, assistantComponent);
 				}
-				this.ctx.chatContainer.addChild(assistantComponent);
+				presentTimestamped(assistantComponent);
 				break;
 			}
 			case "toolResult": {

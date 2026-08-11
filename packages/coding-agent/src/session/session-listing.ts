@@ -22,6 +22,18 @@ import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from
  */
 export type SessionStatus = "complete" | "interrupted" | "aborted" | "error" | "pending" | "unknown";
 
+export interface SessionUserMessage {
+	entryId: string;
+	text: string;
+	timestamp: string;
+}
+
+export interface SessionGoal {
+	text: string;
+	timestamp: string;
+	source: "initial" | "compaction" | "branch_summary";
+}
+
 export interface SessionInfo {
 	path: string;
 	id: string;
@@ -37,6 +49,11 @@ export interface SessionInfo {
 	size: number;
 	firstMessage: string;
 	allMessagesText: string;
+	userMessages?: SessionUserMessage[];
+	lastUserMessage?: string;
+	lastUserMessageTimestamp?: Date;
+	goalHistory?: SessionGoal[];
+	goal?: string;
 	/**
 	 * Coarse lifecycle status from the session's last persisted message. Optional:
 	 * synthesized {@link SessionInfo}s (cross-project stubs, tests) leave it unset.
@@ -152,6 +169,12 @@ function extractTextFromContent(content: Message["content"]): string {
 		if (block.type === "text") text.push(block.text);
 	}
 	return text.join(" ");
+}
+
+function extractGoalText(summary: string): string | undefined {
+	const match = summary.match(/(?:^|\n)##\s*Goal\s*\n([\s\S]*?)(?=\n##\s|\s*$)/i);
+	const goal = match?.[1]?.trim();
+	return goal && !/^\[[^\]]+\]$/.test(goal) ? goal : undefined;
 }
 
 /**
@@ -402,8 +425,6 @@ async function scanSessionFile(
 		return undefined;
 	}
 	const cache = getSessionScanCache(storage);
-	// `withStatus` changes what a scan reads (tail window) and returns, so the
-	// two variants are cached under distinct keys.
 	const cacheKey = withStatus ? `s\0${file}` : `h\0${file}`;
 	const cached = cache.get(cacheKey);
 	if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
@@ -428,26 +449,49 @@ async function scanSessionFile(
 		let parsedMessageCount = 0;
 		let firstMessage = "";
 		const allMessages: string[] = [];
+		const userMessages: SessionUserMessage[] = [];
+		const goalHistory: SessionGoal[] = [];
 		let shortSummary: string | undefined;
+		const fallbackTimestamp = header.timestamp ?? new Date(0).toISOString();
 
 		for (let i = 1; i < entries.length; i++) {
-			const entry = entries[i] as { type?: string; message?: Message; shortSummary?: string };
+			const entry = entries[i] as {
+				type?: string;
+				message?: Message;
+				shortSummary?: string;
+				summary?: string;
+				timestamp?: string;
+				id?: string;
+			};
 
-			if (entry.type === "compaction" && typeof entry.shortSummary === "string") {
-				shortSummary = entry.shortSummary;
+			if ((entry.type === "compaction" || entry.type === "branch_summary") && entry.summary) {
+				const goal = extractGoalText(entry.summary);
+				if (goal) {
+					goalHistory.push({
+						text: goal,
+						source: entry.type === "compaction" ? "compaction" : "branch_summary",
+						timestamp: entry.timestamp ?? fallbackTimestamp,
+					});
+				}
 			}
 
 			if (entry.type === "message" && entry.message) {
 				parsedMessageCount++;
-
 				if (entry.message.role === "user" || entry.message.role === "assistant") {
 					const textContent = extractTextFromContent(entry.message.content);
-
 					if (textContent) {
 						allMessages.push(textContent);
-
-						if (!firstMessage && entry.message.role === "user") {
-							firstMessage = textContent;
+						if (entry.message.role === "user") {
+							const messageTimestamp = (entry.message as { timestamp?: number }).timestamp;
+							const timestamp =
+								typeof messageTimestamp === "number"
+									? new Date(messageTimestamp).toISOString()
+									: (entry.timestamp ?? fallbackTimestamp);
+							userMessages.push({ entryId: entry.id ?? `message-${i}`, text: textContent, timestamp });
+							if (!firstMessage) {
+								firstMessage = textContent;
+								goalHistory.unshift({ text: textContent, timestamp, source: "initial" });
+							}
 						}
 					}
 				}
@@ -468,6 +512,11 @@ async function scanSessionFile(
 			size,
 			firstMessage: firstMessage || "(no messages)",
 			allMessagesText: allMessages.length > 0 ? allMessages.join(" ") : firstMessage,
+			userMessages,
+			lastUserMessage: userMessages.at(-1)?.text,
+			lastUserMessageTimestamp: userMessages.at(-1) ? new Date(userMessages.at(-1)!.timestamp) : undefined,
+			goalHistory,
+			goal: goalHistory.at(-1)?.text,
 			status: withStatus ? deriveSessionStatus(suffix) : undefined,
 		};
 		// The cache keeps its own shallow copy; hits also hand out copies, so

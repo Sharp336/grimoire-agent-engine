@@ -1063,6 +1063,39 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"display.showTimestamps": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Show Timestamps",
+			description: "Show timestamps on session events and transcript messages",
+		},
+	},
+
+	"display.showRecentUserMessages": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Show Recent User Messages",
+			description: "Show user message previews and last-said times in session search and selector views",
+		},
+	},
+
+	"display.showGoalHistory": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Show Goal History",
+			description: "Expose current goal and retained goal history in session views",
+		},
+	},
+
 	showHardwareCursor: {
 		type: "boolean",
 		default: true, // will be computed based on platform if undefined

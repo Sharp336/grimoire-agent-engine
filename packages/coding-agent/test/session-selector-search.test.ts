@@ -197,4 +197,42 @@ describe("session picker incremental search", () => {
 		expect(calls).toEqual([]);
 		expect(harness.filtered().length).toBe(partial);
 	});
+
+	it("searches latest user messages and retained goals", () => {
+		const sessions = [
+			makeSession("recent", {
+				firstMessage: "old request",
+				lastUserMessage: "latest request",
+				userMessages: [{ entryId: "u1", text: "latest request", timestamp: "2026-01-01T00:00:00.000Z" }],
+				goal: "ship timestamps",
+				goalHistory: [{ text: "ship timestamps", timestamp: "2026-01-01T00:00:00.000Z", source: "initial" }],
+			}),
+			makeSession("other", { firstMessage: "unrelated" }),
+		];
+		expect(ids(rankSessionSearchMatches(sessions, "latest request"))).toEqual(["recent"]);
+		expect(ids(rankSessionSearchMatches(sessions, "ship timestamps"))).toEqual(["recent"]);
+	});
+
+	it("hides recent-message and goal metadata when disabled", () => {
+		const session = makeSession("hidden", {
+			firstMessage: "old request",
+			lastUserMessage: "latest request",
+			lastUserMessageTimestamp: new Date("2026-01-01T00:00:00.000Z"),
+			goalHistory: [{ text: "ship timestamps", timestamp: "2026-01-01T00:00:00.000Z", source: "initial" }],
+		});
+		const selector = new SessionSelectorComponent(
+			[session],
+			() => {},
+			() => {},
+			() => {},
+			{
+				showRecentUserMessages: false,
+				showGoalHistory: false,
+			},
+		);
+		const rendered = selector.render(120).join("\n");
+		expect(rendered).toContain("old request");
+		expect(rendered).not.toContain("latest request");
+		expect(rendered).not.toContain("goals 1");
+	});
 });

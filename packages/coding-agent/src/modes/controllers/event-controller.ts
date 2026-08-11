@@ -40,6 +40,7 @@ import {
 	assistantUsageIsBilled,
 	splitAssistantMessageToolTimeline,
 } from "../utils/transcript-render-helpers";
+import { createTimestampComponent } from "../utils/ui-helpers";
 import { isWarpCliAgentProtocolActive } from "../warp-events";
 import { StreamingRevealController } from "./streaming-reveal";
 import { streamingStringKeysForTool, ToolArgsRevealController } from "./tool-args-reveal";
@@ -834,13 +835,15 @@ export class EventController {
 			this.ctx.addMessageToChat(event.message);
 			this.ctx.ui.requestRender();
 		} else if (event.message.role === "assistant") {
-			this.#lastVisibleBlockCount = 0;
 			this.#streamedToolCallIdByIndex.clear();
-			this.ctx.streamingComponent = createAssistantMessageComponent(this.ctx);
+			const streamingComponent = createAssistantMessageComponent(this.ctx);
+			this.ctx.streamingComponent = streamingComponent;
 			this.ctx.streamingMessage = event.message;
-			this.ctx.chatContainer.addChild(this.ctx.streamingComponent);
+			const showTimestamps = this.ctx.settings?.get?.("display.showTimestamps") ?? true;
+			const timestamp = createTimestampComponent(event.message.timestamp, showTimestamps);
+			this.ctx.present(timestamp ? [timestamp, streamingComponent] : streamingComponent);
 			this.#streamingReveal.begin(
-				this.ctx.streamingComponent,
+				streamingComponent,
 				splitAssistantMessageToolTimeline(this.ctx.streamingMessage).beforeTools,
 			);
 			this.ctx.ui.requestRender();
