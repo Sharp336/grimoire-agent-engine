@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Stopped `eval`, `glob`, `grep`, and `ast_grep` from advertising subagents after recursion depth or spawn policy disables task spawning. ([#8231](https://github.com/can1357/oh-my-pi/pull/8231)) by [@olegpulatov](https://github.com/olegpulatov)
+
 ## [17.2.12] - 2026-08-08
 
 ### Fixed
