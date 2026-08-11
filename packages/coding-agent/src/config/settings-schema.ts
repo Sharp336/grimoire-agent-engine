@@ -4805,6 +4805,8 @@ export const SETTINGS_SCHEMA = {
 
 	"skills.ignoredSkills": { type: "array", default: [] as string[] },
 
+	"skills.hideSkills": { type: "array", default: [] as string[] },
+
 	"skills.includeSkills": { type: "array", default: [] as string[] },
 
 	// Commands
@@ -5739,6 +5741,7 @@ export interface SkillsSettings {
 	enableAgentsProject?: boolean;
 	customDirectories?: string[];
 	ignoredSkills?: string[];
+	hideSkills?: string[];
 	includeSkills?: string[];
 	disabledExtensions?: string[];
 }
