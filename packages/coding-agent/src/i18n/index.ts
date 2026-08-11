@@ -236,17 +236,15 @@ class I18nManager {
 	/**
 	 * 合并翻译
 	 */
-	#mergeTranslations(target: TranslationFile, source: TranslationFile): void {
+	#mergeTranslations(target: TranslationFile, source: TranslationFile, prefix = ""): void {
 		for (const [key, value] of Object.entries(source)) {
-			if (key === "meta") {
+			const flatKey = prefix + key;
+			if (key === "meta" && prefix === "") {
 				target.meta = value as TranslationMeta;
 			} else if (typeof value === "string") {
-				target[key] = value;
+				target[flatKey] = value;
 			} else if (typeof value === "object" && value !== null) {
-				if (!target[key] || typeof target[key] !== "object") {
-					target[key] = {};
-				}
-				this.#mergeTranslations(target[key] as TranslationDict, value as TranslationDict);
+				this.#mergeTranslations(target, value as TranslationDict, `${flatKey}.`);
 			}
 		}
 	}
@@ -264,37 +262,16 @@ class I18nManager {
 			return fallback ?? key;
 		}
 
-		// 先尝试直接查找扁平 key
-		let value = this.#dict[key];
-		if (value !== undefined && typeof value === "string" && value !== "") {
-			return params ? this.#interpolate(value, params) : value;
-		}
-
-		// 再尝试嵌套查找
-		value = this.#getNestedValue(this.#dict, key);
-		if (value !== undefined && typeof value === "string" && value !== "") {
+		// 字典在合并时已扁平化为点号键，后合并的源覆盖先合并的：
+		// 用户覆盖（无论嵌套还是扁平形式）总是优先于 bundled 翻译
+		const value = this.#dict[key];
+		if (typeof value === "string" && value !== "") {
 			return params ? this.#interpolate(value, params) : value;
 		}
 
 		// 返回用户提供的 fallback 或 key 本身
 		const result = fallback ?? key;
 		return params ? this.#interpolate(result, params) : result;
-	}
-
-	/**
-	 * 获取嵌套值
-	 */
-	#getNestedValue(obj: unknown, key: string): string | TranslationDict | undefined {
-		const keys = key.split(".");
-		let current: unknown = obj;
-
-		for (const k of keys) {
-			if (current === undefined || current === null) return undefined;
-			if (typeof current !== "object") return undefined;
-			current = (current as Record<string, unknown>)[k];
-		}
-
-		return current as string | TranslationDict | undefined;
 	}
 
 	/**
@@ -343,10 +320,8 @@ class I18nManager {
 	 */
 	has(key: string): boolean {
 		if (!this.#initialized) return false;
-		// 先检查扁平 key
-		if (this.#dict[key] !== undefined) return true;
-		// 再检查嵌套 key
-		return this.#getNestedValue(this.#dict, key) !== undefined;
+		const value = this.#dict[key];
+		return typeof value === "string" && value !== "";
 	}
 
 	/**

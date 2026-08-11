@@ -76,6 +76,27 @@ describe("i18n", () => {
 			expect(i18n.t("custom.feature.settings.description")).toBe("测试描述");
 		});
 
+		it("user nested override wins over bundled flat key", async () => {
+			// 嵌入式 bundle 以扁平键提供 "ui.tip.label"；用户文件以嵌套结构覆盖同一键
+			// （回归：flat 优先查找曾导致嵌套覆盖被忽略）
+			await fs.writeFile(
+				path.join(tempDir, "zh-ui.json"),
+				JSON.stringify({
+					ui: {
+						tip: {
+							label: "用户嵌套覆盖",
+						},
+					},
+				}),
+			);
+
+			const i18n = createI18n(tempDir);
+			await i18n.init();
+
+			expect(i18n.t("ui.tip.label")).toBe("用户嵌套覆盖");
+			expect(i18n.has("ui.tip.label")).toBe(true);
+		});
+
 		it("skips invalid JSON files", async () => {
 			await fs.writeFile(path.join(tempDir, "zh-valid.json"), JSON.stringify({ key: "值" }));
 			await fs.writeFile(path.join(tempDir, "zh-invalid.json"), "{ invalid json }");
