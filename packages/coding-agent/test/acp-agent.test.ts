@@ -36,6 +36,7 @@ import type {
 	CreateElicitationResponse,
 	PromptRequest,
 	SessionNotification,
+	SessionUpdate,
 	Validator,
 } from "@oh-my-pi/pi-utils/acp";
 import {
@@ -143,6 +144,15 @@ class FakeAgentSession {
 		this.refreshSkillsCalls++;
 	}
 	planModeState: PlanModeState | undefined;
+	// Minimal goal-mode surface so builtin `/goal` / `/guided-goal` handlers
+	// run through the real ACP dispatch without a real GoalModeController.
+	goalModeController = {
+		entryGuard: () => null,
+		exposeGoalTool: async () => {},
+	};
+	getGoalModeState(): undefined {
+		return undefined;
+	}
 	waitForIdleCalls = 0;
 	waitForIdleBlocker: (() => Promise<void>) | undefined;
 	asyncJobDrain: ((options?: { timeoutMs?: number }) => Promise<boolean>) | undefined;
@@ -1480,6 +1490,52 @@ describe("ACP agent", () => {
 		harness.abortController.abort();
 	});
 
+	it("does not replay a synthetic guided-goal kickoff as user content", async () => {
+		const harness = await createHarness();
+		const stored = new FakeAgentSession(harness.cwdA);
+		harness.sessions.push(stored);
+		// A synthetic prompt persists as a developer-role message with agent
+		// attribution (see AgentSession.prompt) — the exact shape of the
+		// guided-goal interview kickoff delivered via `synthetic: true`.
+		stored.sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "Build a widget" }],
+			timestamp: Date.now(),
+		});
+		stored.sessionManager.appendMessage({
+			role: "developer",
+			content: [{ type: "text", text: "Hidden guided-goal interview kickoff" }],
+			attribution: "agent",
+			timestamp: Date.now(),
+		});
+		stored.sessionManager.appendMessage(makeAssistantMessage("widget done"));
+		await stored.sessionManager.ensureOnDisk();
+		await stored.sessionManager.flush();
+
+		await harness.agent.loadSession({
+			sessionId: stored.sessionId,
+			cwd: harness.cwdA,
+			mcpServers: [],
+		});
+
+		const userChunkTexts = harness.updates
+			.filter(update => update.sessionId === stored.sessionId)
+			.map(notification => notification.update)
+			.filter(
+				(update): update is SessionUpdate & { sessionUpdate: "user_message_chunk" } =>
+					update.sessionUpdate === "user_message_chunk",
+			)
+			.map(update => update.content)
+			.filter((block): block is { type: "text"; text: string } => block.type === "text")
+			.map(block => block.text);
+		// The real user message still replays; the synthetic kickoff must not
+		// surface as user-authored content.
+		expect(userChunkTexts).toContain("Build a widget");
+		expect(userChunkTexts.some(text => text.includes("guided-goal interview"))).toBe(false);
+
+		harness.abortController.abort();
+	});
+
 	it("preserves tool_use input payloads when replaying assistant tool calls", async () => {
 		const harness = await createHarness();
 		const stored = new FakeAgentSession(harness.cwdA);
@@ -1857,6 +1913,33 @@ describe("ACP agent", () => {
 		expect(customMessage.content).toContain(`[Skill directory: ${skillDir}]`);
 		expect(customMessage.content).toContain("User: extra context");
 		expect(session.customMessageOptions[0]).toEqual({ streamingBehavior: "steer" });
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("dispatches a /guided-goal residual prompt to session.prompt with synthetic:true", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId);
+		if (!session) throw new Error("expected ACP session to exist after newSession");
+		const promptSpy = spyOn(session, "prompt");
+
+		const response = await harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "/guided-goal rough idea" }],
+		} as PromptRequest);
+		expectAcpStructure(zPromptResponse, response);
+
+		// The guided-goal handler returns the interview as a residual prompt;
+		// the ACP dispatcher must feed it to session.prompt as a hidden
+		// synthetic message so the internal instructions are not recorded as
+		// user-authored chat content.
+		expect(promptSpy).toHaveBeenCalledTimes(1);
+		const [text, options] = promptSpy.mock.calls[0] as [text: string, options?: unknown];
+		expect(text).toBeTypeOf("string");
+		expect(text).toContain("rough idea");
+		expect(options).toEqual(expect.objectContaining({ synthetic: true }));
 
 		harness.abortController.abort();
 		await Bun.sleep(0);

@@ -189,6 +189,7 @@ type ManagedSessionRecord = {
 type ReplayableMessage = {
 	role: string;
 	content?: unknown;
+	attribution?: string;
 	errorMessage?: string;
 	toolCallId?: string;
 	toolName?: string;
@@ -843,7 +844,12 @@ export class AcpAgent implements Agent {
 		});
 		if (builtinResult !== false) {
 			if ("prompt" in builtinResult) {
-				await record.session.prompt(builtinResult.prompt, { images });
+				// Synthetic residual prompts (guided-goal interview kickoff) are
+				// delivered as hidden developer messages, matching the TUI path.
+				await record.session.prompt(builtinResult.prompt, {
+					images,
+					synthetic: builtinResult.synthetic === true,
+				});
 				return;
 			}
 			const promptTurn = record.promptTurn;
@@ -2090,6 +2096,17 @@ export class AcpAgent implements Agent {
 			message.role === "custom" ||
 			message.role === "hookMessage"
 		) {
+			// Synthetic prompts persist as developer-role messages with agent
+			// attribution (see AgentSession.prompt). They are hidden steering —
+			// the guided-goal interview kickoff among them — not user-authored
+			// content, so replaying them as a user_message_chunk would expose
+			// internal instructions as if the user had typed them. Keep them
+			// hidden from ACP clients, matching the TUI's hidden-developer
+			// treatment. User-attributed developer messages (e.g. file mentions)
+			// still replay.
+			if (message.role === "developer" && message.attribution === "agent") {
+				return [];
+			}
 			return this.#wrapReplayContent(
 				sessionId,
 				this.#extractReplayContent(message.content, undefined),

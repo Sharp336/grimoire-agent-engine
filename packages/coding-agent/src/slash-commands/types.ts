@@ -44,8 +44,13 @@ export interface ParsedSlashCommand {
  * - `{ consumed: true }` — explicit equivalent of the above (ACP shape).
  * - `{ prompt: string }` — command handled, pass `prompt` through as the new
  *   user input (e.g. `/force <tool> <prompt>` keeps `<prompt>` as the message).
+ * - `{ prompt: string; synthetic?: true }` — like above, but deliver the
+ *   residual prompt as a hidden synthetic (developer-role) message instead of
+ *   a user-authored one. Used by `/guided-goal` so the internal interview
+ *   kickoff is not recorded/exposed as user chat content. Dispatchers that
+ *   lack a synthetic channel fall back to a plain user prompt.
  */
-export type SlashCommandResult = undefined | { consumed: true } | { prompt: string };
+export type SlashCommandResult = undefined | { consumed: true } | { prompt: string; synthetic?: boolean };
 
 /**
  * Runtime visible to slash-command handlers that run in text/ACP mode.
@@ -136,4 +141,4 @@ export interface SlashCommandSpec extends BuiltinSlashCommand {
 }
 
 /** Result returned by `executeAcpBuiltinSlashCommand`. */
-export type AcpBuiltinSlashCommandResult = false | { consumed: true } | { prompt: string };
+export type AcpBuiltinSlashCommandResult = false | { consumed: true } | { prompt: string; synthetic?: boolean };

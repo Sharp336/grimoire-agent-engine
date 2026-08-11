@@ -98,5 +98,8 @@ export async function handleGuidedGoalAcp(
 	// feeds it as model input WITHIN the current client request — calling
 	// session.prompt() directly would nest an agent-initiated turn and break the
 	// ACP lifecycle (mirrors how /goal set returns {prompt} for its first turn).
-	return { prompt: interviewPrompt };
+	// Mark it synthetic (mirroring the TUI kickoff) so the dispatcher delivers
+	// it as a hidden developer message instead of recording the internal
+	// interview instructions as user-authored chat content.
+	return { prompt: interviewPrompt, synthetic: true };
 }

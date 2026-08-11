@@ -1,9 +1,9 @@
-import { type Mock, afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, type Mock, vi } from "bun:test";
 import type { GoalControllerResult } from "@oh-my-pi/pi-coding-agent/goals/goal-mode-controller";
 import type { Goal } from "@oh-my-pi/pi-coding-agent/goals/state";
-import type { SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import { handleGoalAcp, handleGuidedGoalAcp } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/goal";
+import type { SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
 
 /**
  * handleGoalAcp / handleGuidedGoalAcp dispatch tests. The runtime is stubbed
@@ -210,9 +210,7 @@ describe("handleGoalAcp", () => {
 		const result = await handleGoalAcp(command("frobnicate"), runtime);
 
 		expect(controller.enter).not.toHaveBeenCalled();
-		expect(output).toHaveBeenCalledWith(
-			"Unknown /goal subcommand. Use set|show|pause|resume|drop|budget",
-		);
+		expect(output).toHaveBeenCalledWith("Unknown /goal subcommand. Use set|show|pause|resume|drop|budget");
 		expect(result).toEqual({ consumed: true });
 	});
 
@@ -243,7 +241,9 @@ describe("handleGuidedGoalAcp", () => {
 		// Must NOT call session.prompt() directly — that would nest an
 		// agent-initiated turn. The interview is returned as a residual prompt.
 		expect(prompt).not.toHaveBeenCalled();
-		expect(result).toEqual({ prompt: expect.any(String) });
+		// The kickoff is marked synthetic so the dispatcher delivers it as a
+		// hidden developer message instead of user-authored chat content.
+		expect(result).toEqual({ prompt: expect.any(String), synthetic: true });
 		if (result && typeof result === "object" && "prompt" in result) {
 			// The interview kickoff is rendered from the guided-goal template and
 			// carries the supplied rough objective.
