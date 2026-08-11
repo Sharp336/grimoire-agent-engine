@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an Activity view to the Agent Hub: a bounded, searchable, filterable multi-agent timeline over live progress and persisted transcripts, with `/hub` as the live-operations entry point while `/agents` keeps Control Center semantics.
+
 ## [17.2.12] - 2026-08-08
 
 ### Fixed
