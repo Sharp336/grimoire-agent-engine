@@ -88,6 +88,10 @@
 - Replaced libarchive-based tar parsing with a hardened, in-process tar reader to prevent crashes and safely handle complex archive structures, symlinks, and sparse metadata.
 - Fixed `Ctrl+O` tool-output expansion failing to reach launch-completion messages wrapped in the hidden tool activity container.
 
+### Fixed
+
+- Fixed unnecessary compaction triggered by `response.incomplete` (output `stopReason === "length"`) when context was below the compaction threshold. Previously, the incomplete-output recovery path ran compaction unconditionally whenever compaction was enabled, even though the truncation was caused by the model's output-token budget — not context pressure. Now gates on `shouldCompact(...)` and retries directly when context is below threshold.
+
 ## [17.2.14] - 2026-08-11
 
 ### Added

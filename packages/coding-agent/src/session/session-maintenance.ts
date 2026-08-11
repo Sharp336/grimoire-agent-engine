@@ -1313,14 +1313,41 @@ export class SessionMaintenance {
 
 			const incompleteCompactionSettings = this.#host.settings.getGroup("compaction");
 			if (incompleteCompactionSettings.enabled && incompleteCompactionSettings.strategy !== "off") {
-				logger.debug("Compaction triggered by response.incomplete (length stop, no promotion target)", {
+				// Gate recovery compaction on the actual threshold: the model hit
+				// its output-token limit (stopReason "length"), not a context
+				// overflow. If context is well below the compaction threshold,
+				// compacting shrinks the prompt for no reason — the retry will
+				// produce the same truncated output on a smaller context. Only
+				// compact when context is genuinely above the threshold.
+				const incompleteContextWindow = this.#model?.contextWindow ?? 0;
+				const incompleteContextTokens = calculateContextTokens(assistantMessage.usage);
+				const incompleteShouldCompact =
+					incompleteContextWindow > 0 &&
+					shouldCompact(incompleteContextTokens, incompleteContextWindow, incompleteCompactionSettings);
+				if (incompleteShouldCompact) {
+					logger.debug("Compaction triggered by response.incomplete (length stop, no promotion target)", {
+						model: `${assistantMessage.provider}/${assistantMessage.model}`,
+						strategy: incompleteCompactionSettings.strategy,
+						contextTokens: incompleteContextTokens,
+						contextWindow: incompleteContextWindow,
+					});
+					return await this.#host.runRecoveryCompactionWithRollback("incomplete", assistantMessage, allowDefer, {
+						autoContinue,
+						triggerContextTokens: incompleteContextTokens,
+					});
+				}
+				// Context is below the compaction threshold — drop the dead
+				// turn and retry on the same context. The output truncation was
+				// caused by the model's output-token budget, not by context
+				// pressure, so compaction would not help.
+				logger.debug("response.incomplete (length stop) below compaction threshold — retrying without compaction", {
 					model: `${assistantMessage.provider}/${assistantMessage.model}`,
-					strategy: incompleteCompactionSettings.strategy,
+					contextTokens: incompleteContextTokens,
+					contextWindow: incompleteContextWindow,
 				});
-				return await this.#host.runRecoveryCompactionWithRollback("incomplete", assistantMessage, allowDefer, {
-					autoContinue,
-					triggerContextTokens: calculateContextTokens(assistantMessage.usage),
-				});
+				await this.#host.dropPersistedAssistantTurn(assistantMessage);
+				this.#host.scheduleAgentContinue({ delayMs: 100, generation });
+				return COMPACTION_CHECK_CONTINUATION;
 			}
 			// Neither promotion nor compaction is available — surface the dead-end so
 			// the user understands why the turn yielded with nothing.
