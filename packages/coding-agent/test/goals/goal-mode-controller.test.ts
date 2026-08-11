@@ -214,6 +214,29 @@ describe("GoalModeController", () => {
 		}
 	});
 
+	it("restore() clears goal state when switching to a non-goal session (headless reconciler)", async () => {
+		// Headless ACP/RPC drives goal↔non-goal switches via restore() ALONE.
+		// On a goal→none switch, restore() must clear the in-memory goal state
+		// and reset the continuation flags — otherwise goal prompts and
+		// continuations fire in a goal-less session.
+		const harness = await createHarness(shared);
+		try {
+			await harness.session.setActiveToolsByName(["read", "edit"]);
+			await harness.controller.enter("Ship it");
+			expect(harness.session.getGoalModeState()?.goal).toBeDefined();
+			expect(harness.session.getGoalModeState()?.goal.status).toBe("active");
+
+			harness.sessionManager.appendModeChange("none");
+			await harness.controller.restore();
+
+			expect(harness.session.getGoalModeState()).toBeUndefined();
+			expect(harness.controller.isContinuationSuppressed()).toBe(false);
+			expect(harness.controller.buildContinuationForSubmission()).toBeNull();
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
 	it("rejects pause and budget on a paused goal (must resume first)", async () => {
 		// Contract (matches TUI fix #5): a paused goal is not actionable for
 		// pause/budget — resume first. Headless adapters rely on the controller

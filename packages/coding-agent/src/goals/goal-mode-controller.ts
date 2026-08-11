@@ -2,6 +2,7 @@ import type { AgentSession } from "../session/agent-session";
 import type { SessionContext } from "../session/session-context";
 import type { SessionManager } from "../session/session-manager";
 import type { Goal, GoalModeState } from "./state";
+import { formatDuration } from "../slash-commands/helpers/duration";
 
 /**
  * Shared session-level goal lifecycle, used by BOTH the TUI (InteractiveMode)
@@ -20,22 +21,6 @@ import type { Goal, GoalModeState } from "./state";
 export type GoalContinuationDecision = { prompt: string } | null;
 
 export type GoalControllerResult = { ok: true; prompt?: string } | { ok: false; error: string };
-
-/**
- * Duration formatter mirroring `formatDuration` in
- * `slash-commands/helpers/format.ts` — kept local so the core does not pull the
- * TUI theme module graph into goals/. Both must stay in lockstep.
- */
-function formatGoalDuration(ms: number): string {
-	const seconds = Math.max(0, Math.round(ms / 1000));
-	if (seconds < 60) return `${seconds}s`;
-	const minutes = Math.round(seconds / 60);
-	if (minutes < 60) return `${minutes}m`;
-	const hours = Math.round(minutes / 60);
-	if (hours < 48) return `${hours}h`;
-	const days = Math.round(hours / 24);
-	return `${days}d`;
-}
 
 /** Validates a persisted `mode_change` goal payload (mirrors the TUI's #goalFromModeData). */
 function goalFromModeData(modeData: SessionContext["modeData"]): Goal | undefined {
@@ -242,7 +227,7 @@ export class GoalModeController {
 			`Objective: ${goal.objective}`,
 			`Status: ${goal.status}${state?.enabled ? "" : " (paused)"}`,
 			`Tokens: ${budgetLine}`,
-			`Time spent: ${formatGoalDuration(goal.timeUsedSeconds * 1000)}`,
+			`Time spent: ${formatDuration(goal.timeUsedSeconds * 1000)}`,
 		].join("\n");
 	}
 
@@ -267,15 +252,18 @@ export class GoalModeController {
 		if (!goalEnabled && (sessionContext.mode === "goal" || sessionContext.mode === "goal_paused")) {
 			this.#session.goalRuntime.clearAccounting();
 			this.#sessionManager.appendModeChange("none");
+			this.#clearGoalModeState();
 			return undefined;
 		}
 		if (sessionContext.mode !== "goal" && sessionContext.mode !== "goal_paused") {
 			this.#session.goalRuntime.clearAccounting();
+			this.#clearGoalModeState();
 			return undefined;
 		}
 		const goal = goalFromModeData(sessionContext.modeData);
 		if (!goal) {
 			this.#sessionManager.appendModeChange("none");
+			this.#clearGoalModeState();
 			return undefined;
 		}
 		this.#session.setGoalModeState({
@@ -294,6 +282,14 @@ export class GoalModeController {
 			await this.#session.setActiveToolsByName([...new Set([...previousTools, "goal"])]);
 		}
 		return restored;
+	}
+
+	/** Clear in-memory goal state + continuation flags (early-return branches of restore()). */
+	#clearGoalModeState(): void {
+		this.#session.setGoalModeState(undefined);
+		this.#goalTurnHadToolCalls = false;
+		this.#goalContinuationTurnInFlight = false;
+		this.#goalSuppressNextContinuation = false;
 	}
 
 	/**
