@@ -5,24 +5,28 @@
  * When a model burns its output-token budget (reasoning-only or truncated
  * output), the recovery path previously ran compaction unconditionally — even
  * when context was well below the compaction threshold. This test verifies the
- * fix: compaction only fires when context is above the threshold; below it,
- * the dead turn is dropped and the agent retries directly.
+ * fix:
+ *   - compaction only fires when context is above the threshold
+ *   - below it, the dead turn is dropped from the branch and a continuation
+ *     is scheduled (verify via observable session state)
+ *   - repeated length stops fall back to compaction after the retry bound
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
-function createIncompleteMessage(
-	model: Model,
-	contextTokens: number,
-): AssistantMessage {
+/** A length-stop message as produced by OpenAI Responses/Codex for response.incomplete. */
+function createIncompleteMessage(model: Model, contextTokens: number): AssistantMessage {
 	return {
 		role: "assistant",
 		content: [{ type: "thinking", thinking: "" }],
@@ -42,11 +46,45 @@ function createIncompleteMessage(
 	};
 }
 
+/** Same pattern as agent-session-context-promotion.test.ts: queueMicrotask drains
+ *  the fire-and-forget agent_end handler; waitForIdle settles tracked continuation
+ *  work (the 100ms delayed scheduleAgentContinue lands on a real timer, so awaiting
+ *  one event-loop turn is enough). */
+async function settle(session: AgentSession): Promise<void> {
+	const { promise, resolve } = Promise.withResolvers<void>();
+	queueMicrotask(() => resolve());
+	await promise;
+	await session.waitForIdle();
+}
+
+function branchEntriesOf(session: AgentSession): SessionEntry[] {
+	return session.sessionManager.getBranch();
+}
+
+function lengthStopMessagesOf(session: AgentSession): SessionEntry[] {
+	return branchEntriesOf(session).filter(
+		entry =>
+			entry.type === "message" &&
+			entry.message.role === "assistant" &&
+			(entry.message as AssistantMessage).stopReason === "length",
+	);
+}
+
+/**
+ * Observable compaction trigger. `auto_compaction_start` fires before the
+ * actual summarization model call, so it is the true contract signal for
+ * "the recovery path decided to compact" — the entry only lands on the branch
+ * if the summarization succeeds, which requires a real API key in tests.
+ */
+function compactionStartEventsOf(events: AgentSessionEvent[]): number {
+	return events.filter(event => event.type === "auto_compaction_start").length;
+}
+
 describe("response.incomplete recovery — compaction threshold gating", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
-	const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+	const bundledModel = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 
 	beforeAll(async () => {
 		tempDir = TempDir.createSync("@pi-incomplete-compaction-");
@@ -64,26 +102,18 @@ describe("response.incomplete recovery — compaction threshold gating", () => {
 		vi.restoreAllMocks();
 	});
 
-	/** Drain the fire-and-forget `agent_end` handler (microtask-based). */
-	async function settle(session: AgentSession): Promise<void> {
-		const { promise, resolve } = Promise.withResolvers<void>();
-		queueMicrotask(() => resolve());
-		await promise;
-		await session.waitForIdle();
-	}
-
-	function createSession(contextWindow: number, thresholdTokens: number): {
+	function createSession(options: { contextWindow: number; thresholdTokens: number }): {
 		session: AgentSession;
-		compactSpy: ReturnType<typeof vi.fn>;
+		events: AgentSessionEvent[];
 	} {
 		const settings = Settings.isolated({
 			"compaction.enabled": true,
 			"compaction.strategy": "context-full",
-			"compaction.thresholdTokens": thresholdTokens,
+			"compaction.thresholdTokens": options.thresholdTokens,
 			"contextPromotion.enabled": false,
 		});
 
-		const testModel: Model = { ...model, contextWindow };
+		const testModel: Model = { ...bundledModel, contextWindow: options.contextWindow };
 
 		const agent = new Agent({
 			initialState: {
@@ -101,49 +131,62 @@ describe("response.incomplete recovery — compaction threshold gating", () => {
 			modelRegistry,
 		});
 
-		const compactSpy = vi.fn().mockResolvedValue({
-			deferredHandoff: false,
-			continuationScheduled: false,
-		});
-		vi.spyOn(session as never, "runRecoveryCompactionWithRollback" as never).mockImplementation(
-			compactSpy as never,
-		);
-
-		return { session, compactSpy };
+		const events: AgentSessionEvent[] = [];
+		session.subscribe(event => events.push(event));
+		return { session, events };
 	}
 
 	it("does NOT compact when context is below the threshold", async () => {
-		// Context window 100k, threshold 80k, actual context 10k.
-		// The model hit its output-token limit, not context pressure.
-		const { session, compactSpy } = createSession(100_000, 80_000);
+		const { session, events } = createSession({ contextWindow: 100_000, thresholdTokens: 80_000 });
 
-		const incompleteMsg = createIncompleteMessage(model, 10_000);
+		const incompleteMsg = createIncompleteMessage(bundledModel, 10_000);
 		session.agent.emitExternalEvent({ type: "message_end", message: incompleteMsg });
 		session.agent.emitExternalEvent({ type: "agent_end", messages: [incompleteMsg] });
 
 		await settle(session);
 
-		expect(compactSpy).not.toHaveBeenCalled();
+		// The fix: no compaction was triggered for a below-threshold length stop.
+		expect(compactionStartEventsOf(events)).toBe(0);
+		// The dead turn is dropped from the persisted branch.
+		expect(lengthStopMessagesOf(session).length).toBe(0);
 		await session.dispose();
 	});
 
 	it("DOES compact when context exceeds the threshold", async () => {
-		// Context window 100k, threshold 80k, actual context 90k.
-		const { session, compactSpy } = createSession(100_000, 80_000);
+		const { session, events } = createSession({ contextWindow: 100_000, thresholdTokens: 80_000 });
 
-		const incompleteMsg = createIncompleteMessage(model, 90_000);
+		const incompleteMsg = createIncompleteMessage(bundledModel, 90_000);
 		session.agent.emitExternalEvent({ type: "message_end", message: incompleteMsg });
 		session.agent.emitExternalEvent({ type: "agent_end", messages: [incompleteMsg] });
 
 		await settle(session);
 
-		expect(compactSpy).toHaveBeenCalledTimes(1);
-		expect(compactSpy).toHaveBeenCalledWith(
-			"incomplete",
-			expect.objectContaining({ stopReason: "length" }),
-			expect.anything(),
-			expect.objectContaining({ autoContinue: expect.any(Boolean) }),
-		);
+		// Above threshold: the recovery path triggers compaction. The summarization
+		// itself fails without a real API key, but the trigger decision is the contract.
+		expect(compactionStartEventsOf(events)).toBeGreaterThan(0);
+		await session.dispose();
+	});
+
+	it("falls back to compaction after 3 consecutive below-threshold length stops", async () => {
+		const { session, events } = createSession({ contextWindow: 100_000, thresholdTokens: 80_000 });
+
+		for (let i = 0; i < 3; i++) {
+			const incompleteMsg = createIncompleteMessage(bundledModel, 10_000);
+			session.agent.emitExternalEvent({ type: "message_end", message: incompleteMsg });
+			session.agent.emitExternalEvent({ type: "agent_end", messages: [incompleteMsg] });
+			await settle(session);
+		}
+
+		// First 3: retried without compaction.
+		expect(compactionStartEventsOf(events)).toBe(0);
+
+		// 4th stop: exceeds the retry bound, compaction fires.
+		const incompleteMsg = createIncompleteMessage(bundledModel, 10_000);
+		session.agent.emitExternalEvent({ type: "message_end", message: incompleteMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [incompleteMsg] });
+		await settle(session);
+
+		expect(compactionStartEventsOf(events)).toBe(1);
 		await session.dispose();
 	});
 });

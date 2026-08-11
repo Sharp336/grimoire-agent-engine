@@ -286,6 +286,16 @@ export class SessionMaintenance {
 	 */
 	#midTurnDeadEndPendingPrePrompt = false;
 	#skipPostTurnMaintenanceAssistantTimestamp: number | undefined;
+	/**
+	 * Consecutive below-threshold direct retries after an output-side
+	 * `stopReason === "length"`. Each retry re-enters the same recovery branch,
+	 * so without a bound the session can spin forever issuing paid model calls
+	 * that all hit the same output-token cap. Reset on any other stop reason.
+	 * After the cap, the incomplete path falls back to compaction (or, with
+	 * compaction disabled, the existing no-recovery warning) instead of
+	 * scheduling another identical retry.
+	 */
+	#incompleteBelowThresholdRetries = 0;
 	readonly #host: SessionMaintenanceHost;
 
 	get #model(): Model | undefined {
@@ -1202,6 +1212,11 @@ export class SessionMaintenance {
 		allowDefer = true,
 		autoContinue = true,
 	): Promise<CompactionCheckResult> {
+		// Reset the below-threshold incomplete-retry counter on any non-length
+		// stop: the loop hazard only exists while consecutive turns burn their
+		// output budget. A successful (or errored/aborted) turn means the model
+		// produced output, so the next length stop gets a fresh budget.
+		if (assistantMessage.stopReason !== "length") this.#incompleteBelowThresholdRetries = 0;
 		// Skip if message was aborted (user cancelled) - unless skipAbortedCheck is false
 		if (skipAbortedCheck && assistantMessage.stopReason === "aborted") return COMPACTION_CHECK_NONE;
 		const contextWindow = this.#model?.contextWindow ?? 0;
@@ -1319,8 +1334,18 @@ export class SessionMaintenance {
 				// compacting shrinks the prompt for no reason — the retry will
 				// produce the same truncated output on a smaller context. Only
 				// compact when context is genuinely above the threshold.
+				//
+				// Use the same stored-context floor as the threshold path
+				// (compactionContextTokens): the billed usage from this turn and
+				// the agent's own estimate of the stored conversation. A
+				// payload-compression hook or thinking-signature mismatch can
+				// deflate billed usage below what the next prompt actually
+				// carries (#3174); flooring by the local estimate keeps the
+				// compaction trigger honest.
 				const incompleteContextWindow = this.#model?.contextWindow ?? 0;
-				const incompleteContextTokens = calculateContextTokens(assistantMessage.usage);
+				const billedTokens = calculateContextTokens(assistantMessage.usage);
+				const storedTokens = this.#estimateStoredContextTokens();
+				const incompleteContextTokens = compactionContextTokens(billedTokens, storedTokens);
 				const incompleteShouldCompact =
 					incompleteContextWindow > 0 &&
 					shouldCompact(incompleteContextTokens, incompleteContextWindow, incompleteCompactionSettings);
@@ -1329,6 +1354,8 @@ export class SessionMaintenance {
 						model: `${assistantMessage.provider}/${assistantMessage.model}`,
 						strategy: incompleteCompactionSettings.strategy,
 						contextTokens: incompleteContextTokens,
+						billedTokens,
+						storedTokens,
 						contextWindow: incompleteContextWindow,
 					});
 					return await this.#host.runRecoveryCompactionWithRollback("incomplete", assistantMessage, allowDefer, {
@@ -1339,11 +1366,30 @@ export class SessionMaintenance {
 				// Context is below the compaction threshold — drop the dead
 				// turn and retry on the same context. The output truncation was
 				// caused by the model's output-token budget, not by context
-				// pressure, so compaction would not help.
+				// pressure, so compaction would not help. Bound the number of
+				// consecutive retries: a model that always burns its output
+				// budget would otherwise spin forever issuing paid calls.
+				this.#incompleteBelowThresholdRetries++;
+				if (this.#incompleteBelowThresholdRetries > 3) {
+					logger.warn("response.incomplete repeated on every retry below threshold — falling back to compaction", {
+						model: `${assistantMessage.provider}/${assistantMessage.model}`,
+						consecutiveRetries: this.#incompleteBelowThresholdRetries,
+						contextTokens: incompleteContextTokens,
+						contextWindow: incompleteContextWindow,
+					});
+					this.#incompleteBelowThresholdRetries = 0;
+					return await this.#host.runRecoveryCompactionWithRollback("incomplete", assistantMessage, allowDefer, {
+						autoContinue,
+						triggerContextTokens: incompleteContextTokens,
+					});
+				}
 				logger.debug("response.incomplete (length stop) below compaction threshold — retrying without compaction", {
 					model: `${assistantMessage.provider}/${assistantMessage.model}`,
 					contextTokens: incompleteContextTokens,
+					billedTokens,
+					storedTokens,
 					contextWindow: incompleteContextWindow,
+					consecutiveRetries: this.#incompleteBelowThresholdRetries,
 				});
 				await this.#host.dropPersistedAssistantTurn(assistantMessage);
 				this.#host.scheduleAgentContinue({ delayMs: 100, generation });

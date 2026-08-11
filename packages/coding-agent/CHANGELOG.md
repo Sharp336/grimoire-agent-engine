@@ -90,7 +90,7 @@
 
 ### Fixed
 
-- Fixed unnecessary compaction triggered by `response.incomplete` (output `stopReason === "length"`) when context was below the compaction threshold. Previously, the incomplete-output recovery path ran compaction unconditionally whenever compaction was enabled, even though the truncation was caused by the model's output-token budget — not context pressure. Now gates on `shouldCompact(...)` and retries directly when context is below threshold.
+- Fixed unnecessary compaction triggered by `response.incomplete` (output `stopReason === "length"`) when context was below the compaction threshold. Previously, the incomplete-output recovery path ran compaction unconditionally whenever compaction was enabled, even though the truncation was caused by the model's output-token budget — not context pressure. Now gates on `shouldCompact(...)` (using the stored-conversation floor via `compactionContextTokens`, matching the threshold path) and retries directly when context is below threshold. Direct retries are bounded at 3 consecutive below-threshold length stops; the 4th falls back to compaction to break the loop.
 
 ## [17.2.14] - 2026-08-11
 
