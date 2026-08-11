@@ -14,11 +14,14 @@
   - `packages/coding-agent/src/mnemopi/state.ts` — scoped local recall and result formatting with ids.
   - `packages/coding-agent/src/mnemopi/config.ts` — local bank scoping and recall limits.
   - `docs/tools/retain.md` — shared backend, storage, scoping, and retention behavior.
+- OpenViking collaborators:
+  - `packages/coding-agent/src/openviking/state.ts` — scoped search, score filtering, content budgets, and memory URI formatting.
+  - `packages/coding-agent/src/openviking/client.ts` — authenticated search and content reads.
 
 ## Registration / Visibility
 - Tool metadata: `approval = "read"`, `strict = true`, `loadMode = "discoverable"`.
-- The tool is registered only for `memory.backend = "hindsight"` or `"mnemopi"`; it is absent for `"off"` and `"local"`.
-- In unrestricted sessions with an explicit tool list, registration auto-includes the shared `recall`/`retain`/`reflect` set for either supported backend. Restricted lists are not widened.
+- The tool is registered only for `memory.backend = "hindsight"`, `"mnemopi"`, or `"openviking"`; it is absent for `"off"` and `"local"`.
+- In unrestricted sessions with an explicit tool list, registration auto-includes the shared `recall`/`retain`/`reflect` set for any supported backend. Restricted lists are not widened.
 - In an ordinary `tools.xdev` session, discoverable built-ins may be presented as `xd://recall`; an explicitly requested tool remains top-level.
 - Execution is single-shot. The tool does not emit streaming argument/result updates.
 
@@ -50,7 +53,7 @@ When no matches exist:
 - `useless = true`, allowing callers/renderers to treat the result as non-contributing context.
 
 ## Flow
-1. `MemoryRecallTool.createIf(...)` exposes the tool when `memory.backend` is either `"hindsight"` or `"mnemopi"`.
+1. `MemoryRecallTool.createIf(...)` exposes the tool when `memory.backend` is `"hindsight"`, `"mnemopi"`, or `"openviking"`.
 2. `execute(...)` wraps the operation in `untilAborted(...)`.
 3. If the backend is `mnemopi`:
    - it reads `session.getMnemopiSessionState()` and throws if the backend was not started;
@@ -59,16 +62,17 @@ When no matches exist:
    - per-project modes may include safe legacy banks whose working-memory rows all belong to the active absolute cwd; startup scanning is capped at 64 candidate bank directories;
    - in `per-project-tagged`, the shared bank may receive one extra fallback query with project-bank literal tokens stripped so broad global memories still match;
    - results are formatted with ids for later full-row reads and `memory_edit`.
-4. If the backend is `hindsight`:
+4. If the backend is `openviking`, it searches the active parent state, applies the configured score threshold, resolves bounded content, and returns `memory://` ids for follow-up reads.
+5. If the backend is `hindsight`:
    - it reads `session.getHindsightSessionState()` and throws if the backend was not started;
    - it calls `state.client.recall(...)` with `bankId`, query, configured `budget`, `maxTokens`, `types`, and bank-scope tag filters;
    - `HindsightApi.recall(...)` POSTs `/v1/default/banks/{bank_id}/memories/recall`;
    - results are formatted into a plain-text list with `formatMemories(...)`.
-5. Backend failures are logged with `logger.warn("recall failed", ...)` and rethrown as `Error` instances when needed.
+6. Backend failures are logged with `logger.warn("recall failed", ...)` and rethrown as `Error` instances when needed.
 
 ## Modes / Variants
 - Tool path: explicit query-only recall. It does not compose context from recent turns.
-- Backend auto-recall has a richer query-composition path in `HindsightSessionState.beforeAgentStartPrompt(...)` / `maybeRecallOnAgentStart(...)` and `MnemopiSessionState.beforeAgentStartPrompt(...)` / `maybeRecallOnAgentStart(...)`.
+- Backend auto-recall has a richer query-composition path in `HindsightSessionState.beforeAgentStartPrompt(...)` / `maybeRecallOnAgentStart(...)`, `MnemopiSessionState.beforeAgentStartPrompt(...)` / `maybeRecallOnAgentStart(...)`, and `OpenVikingSessionState.beforeAgentStartPrompt(...)`. OpenViking refreshes its injected context before every agent turn while auto-recall is enabled.
 - Hindsight bank scoping:
   - `global` — no tag filter.
   - `per-project` — separate bank id per project label (git primary checkout root basename; cwd basename outside a repo).
@@ -84,13 +88,14 @@ When no matches exist:
 - Network
   - Hindsight: `POST /v1/default/banks/{bank_id}/memories/recall`.
   - Mnemopi: none unless configured local runtime providers perform embedding/LLM work during recall.
+  - OpenViking: `POST /api/v1/search/recall` plus skill enrichment through `POST /api/v1/search/find`. OpenViking 0.4.8 rejects the newer `peer_scope` field but already scopes actor recall to the actor header, so that exact extra-field rejection is retried without the field. All-peer recall omits the actor header so a configured workspace peer cannot silently narrow cross-project results. Other actor-scope failures remain fail-closed. When no actor peer isolation is required, servers without the recall endpoint may use `/api/v1/search/find` for global memories. Selected results without embedded content may also require `GET /api/v1/content/read`.
 - Session state
   - None on success for the explicit tool path. Unlike backend auto-recall, this tool does not update `lastRecallSnippet` or refresh the system prompt.
 - Background work / cancellation
-  - Aborts through `untilAborted(...)` if the tool call signal is cancelled.
+  - Aborts through `untilAborted(...)` if the tool call signal is cancelled. OpenViking also forwards that signal into remote search and content-read requests.
 
 ## Limits & Caps
-- Tool availability requires `memory.backend` to be `"hindsight"` or `"mnemopi"`; default `memory.backend` is `"off"`.
+- Tool availability requires `memory.backend` to be `"hindsight"`, `"mnemopi"`, or `"openviking"`; default `memory.backend` is `"off"`.
 - Hindsight client default budget for raw `HindsightApi.recall(...)` is `"mid"`; this tool overrides from config.
 - Hindsight recall settings:
   - `hindsight.recallBudget = "mid"`
@@ -106,6 +111,7 @@ When no matches exist:
 ## Errors
 - Throws `Mnemopi backend is not initialised for this session.` when `memory.backend == "mnemopi"` but no state exists.
 - Throws `Hindsight backend is not initialised for this session.` when `memory.backend == "hindsight"` but no state exists.
+- Throws `OpenViking backend is not initialised for this session.` when `memory.backend == "openviking"` but no state exists.
 - Hindsight HTTP, fetch, and timeout failures become `HindsightError`; HTTP errors include `statusCode` and parsed `details` when available.
 - Mnemopi recall catches failures per target and logs them. Healthy targets still contribute results; if every attempted target fails, the original error (one target) or an `AggregateError` with bank details (multiple targets) is thrown rather than converted to an empty result.
 - Non-`Error` failures caught by the tool are normalized to `new Error(String(err))` before rethrow.

@@ -249,6 +249,11 @@
 ### Fixed
 
 - Fixed keyboard navigation paying an extra frame of input latency after idle; the queue-drain grace now applies only to Ctrl+C and Escape double-press gestures.
+- Added `SettingItem.displayValue` for rendering an effective setting value while keeping `currentValue` as the value used for editing and cycling.
+
+### Fixed
+
+- Sanitized settings-list/search values and programmatically assigned single-line input values, preventing ANSI escapes, control characters, line breaks, and tabs from corrupting terminal rows while preserving token boundaries.
 
 ## [16.4.6] - 2026-07-12
 

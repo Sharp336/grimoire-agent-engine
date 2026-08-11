@@ -154,6 +154,7 @@ import { parseTurnBudget } from "../modes/turn-budget";
 import { containsUltrathink, ULTRATHINK_NOTICE } from "../modes/ultrathink";
 import { computeNonMessageTokens } from "../modes/utils/context-usage";
 import { containsWorkflow, renderWorkflowNotice } from "../modes/workflow";
+import { getOpenVikingSessionState, type OpenVikingSessionState, setOpenVikingSessionState } from "../openviking/state";
 import { type PlanApprovalDetails, resolveApprovedPlan } from "../plan-mode/approved-plan";
 import { listPlanFiles, readPlanFile } from "../plan-mode/plan-files";
 import type { PlanModeState } from "../plan-mode/state";
@@ -417,6 +418,36 @@ type SetSessionNameWithTrigger = (
 	source?: SessionTitleSource,
 	trigger?: SessionNameTrigger,
 ) => Promise<boolean>;
+
+export interface MemoryBackendReconcilerStopOptions {
+	consolidateTimeoutMs?: number;
+}
+
+export interface MemoryBackendReconciler {
+	depth: number;
+	parentSession(): AgentSession | undefined;
+	relatedSessions(): readonly AgentSession[];
+	suspend?(): Promise<void>;
+	stop(options?: MemoryBackendReconcilerStopOptions): Promise<void>;
+	start(options: { parentReconciled: boolean }): Promise<void>;
+}
+
+interface MemoryBackendParticipant {
+	session: AgentSession;
+	reconciler: MemoryBackendReconciler;
+}
+
+interface MemoryBackendTransitionGate {
+	participants: readonly MemoryBackendParticipant[];
+	completion: Promise<void>;
+	resolve(): void;
+	reject(error: unknown): void;
+	completing?: Promise<void>;
+}
+
+export interface MemoryBackendWorkspaceTransition {
+	complete(options?: { restart?: boolean }): Promise<void>;
+}
 
 const kPersistedSessionEntryId = Symbol("persistedSessionEntryId");
 type PersistedAssistantMessage = AssistantMessage & { [kPersistedSessionEntryId]?: string };
@@ -1227,6 +1258,8 @@ export class AgentSession {
 			clearInheritedProviderPromptCacheKey: () => this.#clearInheritedProviderPromptCacheKey(),
 			clearMemoryPromotionSnapshot: () => this.#memory.clearPromotionSnapshot(),
 			captureMemoryPromotionSnapshot: prompt => this.#memory.capturePromotionSnapshot(prompt),
+			memoryPromotionSnapshot: () => this.#memory.promotionSnapshot,
+			restoreMemoryPromotionSnapshot: prompt => this.#memory.restorePromotionSnapshot(prompt),
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
 			notifyCommandMetadataChanged: () => this.#notifyCommandMetadataChanged(),
 			localProtocolOptions: () => this.#localProtocolOptions(),
@@ -1686,6 +1719,191 @@ export class AgentSession {
 		this.#sessionSwitchReconciler = reconciler ?? undefined;
 	}
 
+	#memoryBackendReconciler: MemoryBackendReconciler | undefined;
+	#memoryBackendReconcileQueue: Promise<void> = Promise.resolve();
+	#memoryBackendTransition: MemoryBackendTransitionGate | undefined;
+
+	setMemoryBackendReconciler(reconciler: MemoryBackendReconciler | null): void {
+		this.#memoryBackendReconciler = reconciler ?? undefined;
+	}
+
+	static #memoryBackendParticipants(sessions: Iterable<AgentSession>): MemoryBackendParticipant[] {
+		return [...new Set(sessions)]
+			.map(session => ({ session, reconciler: session.#memoryBackendReconciler }))
+			.filter(
+				(entry): entry is MemoryBackendParticipant => !entry.session.#isDisposed && entry.reconciler !== undefined,
+			);
+	}
+
+	static async #beginMemoryBackendTransition(
+		sessions: Iterable<AgentSession>,
+	): Promise<MemoryBackendTransitionGate | undefined> {
+		const requestedSessions = [...new Set(sessions)];
+		while (true) {
+			const participants = AgentSession.#memoryBackendParticipants(requestedSessions);
+			if (participants.length === 0) return undefined;
+			const activeTransitions = [
+				...new Set(
+					participants
+						.map(entry => entry.session.#memoryBackendTransition)
+						.filter((transition): transition is MemoryBackendTransitionGate => transition !== undefined),
+				),
+			];
+			if (activeTransitions.length > 0) {
+				await Promise.all(activeTransitions.map(transition => transition.completion.catch(() => {})));
+				continue;
+			}
+
+			const completion = Promise.withResolvers<void>();
+			const transition: MemoryBackendTransitionGate = {
+				participants,
+				completion: completion.promise,
+				resolve: completion.resolve,
+				reject: completion.reject,
+			};
+			for (const { session } of participants) session.#memoryBackendTransition = transition;
+			return transition;
+		}
+	}
+
+	static #completeMemoryBackendTransition(transition: MemoryBackendTransitionGate, restart: boolean): Promise<void> {
+		if (!transition.completing) {
+			transition.completing = (async () => {
+				try {
+					if (restart) {
+						const sessions = new Set(transition.participants.map(entry => entry.session));
+						await AgentSession.reconcileMemoryBackends(sessions);
+					}
+				} finally {
+					for (const { session } of transition.participants) {
+						if (session.#memoryBackendTransition === transition) session.#memoryBackendTransition = undefined;
+					}
+				}
+			})();
+			void transition.completing.then(transition.resolve, transition.reject);
+		}
+		return transition.completion;
+	}
+
+	static #suspendMemoryBackends(sessions: Iterable<AgentSession>): Promise<void> {
+		const participants = AgentSession.#memoryBackendParticipants(sessions);
+		if (participants.length === 0) return Promise.resolve();
+		const depths = [...new Set(participants.map(entry => entry.reconciler.depth))].sort((a, b) => a - b);
+		const previous = Promise.all(participants.map(entry => entry.session.#memoryBackendReconcileQueue));
+		const result = previous.then(async () => {
+			const errors: unknown[] = [];
+			for (const depth of depths.toReversed()) {
+				const group = participants.filter(entry => entry.reconciler.depth === depth);
+				const outcomes = await Promise.allSettled(
+					group.map(entry => entry.reconciler.suspend?.() ?? entry.reconciler.stop()),
+				);
+				for (const outcome of outcomes) {
+					if (outcome.status === "rejected") errors.push(outcome.reason);
+				}
+			}
+			if (errors.length > 0) throw errors[0];
+		});
+		const settled = result.catch(() => {});
+		for (const { session } of participants) session.#memoryBackendReconcileQueue = settled;
+		return result;
+	}
+
+	static reconcileMemoryBackends(sessions: Iterable<AgentSession>): Promise<void> {
+		const participants = AgentSession.#memoryBackendParticipants(sessions);
+		if (participants.length === 0) return Promise.resolve();
+
+		const participantSessions = new Set(participants.map(entry => entry.session));
+		const depths = [...new Set(participants.map(entry => entry.reconciler.depth))].sort((a, b) => a - b);
+		const previous = Promise.all(participants.map(entry => entry.session.#memoryBackendReconcileQueue));
+		const result = previous.then(async () => {
+			const errors: unknown[] = [];
+			const stopped = new Set<AgentSession>();
+			for (const depth of depths.toReversed()) {
+				const group = participants.filter(entry => entry.reconciler.depth === depth);
+				const results = await Promise.allSettled(group.map(entry => entry.reconciler.stop()));
+				for (let index = 0; index < results.length; index++) {
+					const outcome = results[index];
+					if (outcome.status === "fulfilled") stopped.add(group[index].session);
+					else errors.push(outcome.reason);
+				}
+			}
+			for (const depth of depths) {
+				const group = participants.filter(entry => entry.reconciler.depth === depth && stopped.has(entry.session));
+				const results = await Promise.allSettled(
+					group.map(entry => {
+						const parent = entry.reconciler.parentSession();
+						return entry.reconciler.start({
+							parentReconciled: parent === undefined || participantSessions.has(parent),
+						});
+					}),
+				);
+				for (const outcome of results) {
+					if (outcome.status === "rejected") errors.push(outcome.reason);
+				}
+			}
+			if (errors.length > 0) throw errors[0];
+		});
+		const settled = result.catch(() => {});
+		for (const { session } of participants) session.#memoryBackendReconcileQueue = settled;
+		return result;
+	}
+
+	reconcileMemoryBackend(): Promise<void> {
+		const reconciler = this.#memoryBackendReconciler;
+		if (!reconciler || this.#isDisposed) return Promise.resolve();
+		const sessions = [...new Set([this, ...reconciler.relatedSessions()])];
+		const activeTransitions = [
+			...new Set(
+				sessions
+					.map(session => session.#memoryBackendTransition)
+					.filter((transition): transition is MemoryBackendTransitionGate => transition !== undefined),
+			),
+		];
+		if (activeTransitions.length > 0) {
+			return Promise.all(activeTransitions.map(transition => transition.completion)).then(() => {});
+		}
+		return AgentSession.reconcileMemoryBackends(sessions);
+	}
+
+	waitForMemoryBackendReconcile(): Promise<void> {
+		const transition = this.#memoryBackendTransition;
+		return transition
+			? Promise.all([this.#memoryBackendReconcileQueue, transition.completion]).then(() => {})
+			: this.#memoryBackendReconcileQueue;
+	}
+
+	async suspendMemoryBackendForWorkspaceTransition(): Promise<MemoryBackendWorkspaceTransition | undefined> {
+		await this.waitForMemoryBackendReconcile();
+		const reconciler = this.#memoryBackendReconciler;
+		const sessions = [...new Set(reconciler ? [this, ...reconciler.relatedSessions()] : [this])];
+		if (sessions.some(session => session !== this && session.getOpenVikingSessionState())) {
+			throw new Error("Cannot move the session while an OpenViking child agent is still active.");
+		}
+		if (!reconciler) throw new Error("Cannot safely suspend OpenViking before changing workspace.");
+		if (!(await this.#flushOpenVikingMemoryForSessionTransition())) {
+			throw new Error("Cannot move because the current OpenViking transcript tail could not be flushed.");
+		}
+		const transition = await AgentSession.#beginMemoryBackendTransition(sessions);
+		if (!transition) throw new Error("Cannot safely reserve OpenViking before changing workspace.");
+		try {
+			await AgentSession.#suspendMemoryBackends(sessions);
+			return {
+				complete: async options => {
+					await AgentSession.#completeMemoryBackendTransition(transition, options?.restart ?? true);
+				},
+			};
+		} catch (error) {
+			try {
+				await AgentSession.#completeMemoryBackendTransition(transition, true);
+			} catch (restartError) {
+				logger.warn("OpenViking: failed to restore the backend after workspace suspension failed", {
+					error: String(restartError),
+				});
+			}
+			throw error;
+		}
+	}
+
 	/** Provider-scoped mutable state store for transport/session caches. */
 	get providerSessionState(): Map<string, ProviderSessionState> {
 		return this.#providerSessionState;
@@ -1708,6 +1926,30 @@ export class AgentSession {
 
 	getMnemopiSessionState(): MnemopiSessionState | undefined {
 		return getMnemopiSessionState(this);
+	}
+
+	getOpenVikingSessionState(): OpenVikingSessionState | undefined {
+		return getOpenVikingSessionState(this);
+	}
+
+	async #flushOpenVikingMemoryForSessionTransition(): Promise<boolean> {
+		const state = this.getOpenVikingSessionState();
+		if (!state) return true;
+		try {
+			const flushed = await state.flushAndCommit();
+			await this.sessionManager.flush();
+			return flushed;
+		} catch (error) {
+			logger.warn("OpenViking: session transition flush failed", { error: String(error) });
+			return false;
+		}
+	}
+
+	async #rekeyOpenVikingMemoryForCurrentSessionId(baselineExistingTranscript = false): Promise<void> {
+		if (this.settings.get("memory.backend") !== "openviking") return;
+		const sessionId = this.sessionManager.getSessionId();
+		if (!sessionId) return;
+		await this.getOpenVikingSessionState()?.rekeySession(sessionId, { baselineExistingTranscript });
 	}
 
 	/** TTSR manager for time-traveling stream rules */
@@ -3816,6 +4058,12 @@ export class AgentSession {
 
 	async #doDispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
 		this.beginDispose();
+		const memoryBackendReconciler = this.#memoryBackendReconciler;
+		this.#memoryBackendReconciler = undefined;
+		// Do not await a live reconcile here: provider or credential discovery may
+		// be stalled indefinitely. beginDispose() excludes this session from new
+		// coordination, while the reconciler stop below clears any already
+		// published backend and backend start paths reject late publication.
 		this.#recordSessionExit(options.reason ?? "dispose");
 		this.#cancelExitRecorder?.();
 		this.#cancelExitRecorder = undefined;
@@ -3844,9 +4092,18 @@ export class AgentSession {
 		}
 		await this.#drainAutolearnCapture();
 		await this.#memory.transition;
+		try {
+			await memoryBackendReconciler?.stop({ consolidateTimeoutMs: options.mnemopiConsolidateTimeoutMs });
+		} catch (error) {
+			logger.warn("Failed to stop memory backend during dispose", { error: String(error) });
+		}
+		if (!(await this.#flushOpenVikingMemoryForSessionTransition())) {
+			logger.warn("OpenViking: final session tail could not be flushed during dispose");
+		}
 
 		const hindsightState = this.getHindsightSessionState();
 		const mnemopiState = setMnemopiSessionState(this, undefined);
+		const openVikingState = setOpenVikingSessionState(this, undefined);
 		const advisorRecorderClosed = this.#advisors.recorderClosed();
 		const results = await Promise.allSettled([
 			this.#disposeOwnedAsyncJobs(),
@@ -3858,6 +4115,7 @@ export class AgentSession {
 			advisorRecorderClosed,
 			hindsightState?.flushRetainQueue() ?? Promise.resolve(),
 			this.#disposeMnemopi(mnemopiState, options.mnemopiConsolidateTimeoutMs),
+			openVikingState?.dispose({ flush: false }) ?? Promise.resolve(),
 		]);
 		for (const result of results) {
 			if (result.status === "rejected") {
@@ -4418,6 +4676,34 @@ export class AgentSession {
 	/** Rebuilds the stable base prompt for the current tools and model. */
 	refreshBaseSystemPrompt(): Promise<void> {
 		return this.#tools.refreshBaseSystemPrompt();
+	}
+
+	/** Replaces only backend-dependent built-ins while preserving unrelated tools. */
+	refreshMemoryTools(memoryTools: AgentTool[], options: { rebuildSystemPrompt?: boolean } = {}): Promise<void> {
+		return this.#tools.replaceMemoryTools(memoryTools, options);
+	}
+
+	/** Removes a detached backend fragment if a canonical prompt rebuild fails. */
+	removeBaseSystemPromptFragment(fragment: string): boolean {
+		if (!fragment) return false;
+		let changed = false;
+		const strip = (parts: string[]): string[] =>
+			parts
+				.map(part => {
+					if (!part.includes(fragment)) return part;
+					changed = true;
+					return part.replaceAll(fragment, "").replace(/\n{3,}/g, "\n\n");
+				})
+				.filter(part => part.length > 0);
+		const nextBaseSystemPrompt = strip(this.#tools.baseSystemPrompt);
+		const promotionSnapshot = this.#memory.promotionSnapshot;
+		const nextPromotionSnapshot = promotionSnapshot ? strip(promotionSnapshot) : undefined;
+		if (!changed) return false;
+		this.#tools.setBaseSystemPrompt(nextBaseSystemPrompt);
+		this.#memory.restorePromotionSnapshot(nextPromotionSnapshot);
+		this.#clearInheritedProviderPromptCacheKey();
+		this.agent.setSystemPrompt(nextBaseSystemPrompt);
+		return true;
 	}
 
 	#buildSystemPromptForAgentStart(promptText: string): Promise<string[]> {
@@ -5349,11 +5635,13 @@ export class AgentSession {
 			// A prompt issued while the session is already disposing must still run:
 			// the dispose-driven abort settles its turn (see "does not auto-retry
 			// empty reasonless aborts once the session is disposing"). Only drop the
-			// prompt when disposal began during the backend-transition await, where
-			// resuming would start a turn on a torn-down session.
-			const disposingBeforeTransition = this.#isDisposed;
+			// prompt when disposal began while waiting for the session-memory
+			// transition or memory-backend reconciliation below, where resuming
+			// would start a turn on a torn-down session.
+			const disposingBeforeMemoryGate = this.#isDisposed;
 			await this.#memory.transition;
-			if ((this.#isDisposed && !disposingBeforeTransition) || this.#promptGeneration !== generation) return;
+			await this.waitForMemoryBackendReconcile();
+			if ((this.#isDisposed && !disposingBeforeMemoryGate) || this.#promptGeneration !== generation) return;
 			const beforeAgentStartSystemPrompt = await this.#buildSystemPromptForAgentStart(expandedText);
 
 			let baseXdevCatalogDelivered = true;
@@ -6399,6 +6687,8 @@ export class AgentSession {
 				return false;
 			}
 		}
+		await this.waitForMemoryBackendReconcile();
+		if (!(await this.#flushOpenVikingMemoryForSessionTransition())) return false;
 
 		this.#disconnectFromAgent();
 		let advisorRecordersDetached = false;
@@ -6443,6 +6733,7 @@ export class AgentSession {
 			this.#clearInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();
 			this.#memory.rekeyForCurrentSessionId();
+			await this.#rekeyOpenVikingMemoryForCurrentSessionId(true);
 			await this.#memory.resetContextForNewTranscript();
 			this.#pendingNextTurnMessages = [];
 			this.#scheduledHiddenNextTurnGeneration = undefined;
@@ -6509,6 +6800,8 @@ export class AgentSession {
 				return false;
 			}
 		}
+		await this.waitForMemoryBackendReconcile();
+		if (!(await this.#flushOpenVikingMemoryForSessionTransition())) return false;
 
 		await this.#bash.flushPending();
 		// Flush current session to ensure all entries are written
@@ -6560,6 +6853,7 @@ export class AgentSession {
 			this.#adoptInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();
 			this.#memory.rekeyForCurrentSessionId();
+			await this.#rekeyOpenVikingMemoryForCurrentSessionId(true);
 			this.#advisors.reattachRecorderFeeds();
 			advisorRecordersDetached = false;
 			await this.#memory.resetContextForNewTranscript();
@@ -7446,6 +7740,8 @@ export class AgentSession {
 				return false;
 			}
 		}
+		await this.waitForMemoryBackendReconcile();
+		if (!(await this.#flushOpenVikingMemoryForSessionTransition())) return false;
 
 		this.#disconnectFromAgent();
 		await this.abort({ goalReason: "internal" });
@@ -7519,6 +7815,7 @@ export class AgentSession {
 			}
 			this.#syncAgentSessionId(undefined, false);
 			this.#memory.rekeyForCurrentSessionId();
+			await this.#rekeyOpenVikingMemoryForCurrentSessionId(true);
 
 			let sessionContext = this.buildDisplaySessionContext();
 			const didReloadConversationChange =
@@ -7634,6 +7931,14 @@ export class AgentSession {
 					error: String(error),
 				});
 			}
+			try {
+				await this.reconcileMemoryBackend();
+			} catch (error) {
+				logger.warn("Failed to reconcile memory backend after session switch", {
+					targetSessionFile: sessionPath,
+					error: String(error),
+				});
+			}
 			// Refresh the workspace-roots block to match the resumed session's directory set.
 			// Wrapped so a rebuild failure (e.g. a gate that intentionally fails in tests)
 			// doesn't roll back an otherwise-successful session switch.
@@ -7663,6 +7968,7 @@ export class AgentSession {
 			this.#freshProviderSessionId = previousFreshProviderSessionId;
 			this.#syncAgentSessionId(previousSessionState.sessionId, false);
 			this.#memory.rekeyForCurrentSessionId();
+			await this.#rekeyOpenVikingMemoryForCurrentSessionId(true);
 			this.agent.setTools(previousTools);
 			this.#tools.setBaseSystemPrompt(previousBaseSystemPrompt);
 			this.#memory.restorePromotionSnapshot(previousBaseSystemPromptBeforeMemoryPromotion);
@@ -7758,6 +8064,7 @@ export class AgentSession {
 			}
 			skipConversationRestore = result?.skipConversationRestore ?? false;
 		}
+		await this.waitForMemoryBackendReconcile();
 
 		// Clear pending messages (bound to old session state)
 		this.#pendingNextTurnMessages = [];
@@ -7768,6 +8075,9 @@ export class AgentSession {
 		await this.#bash.flushPending();
 		// Flush pending writes before branching
 		await this.sessionManager.flush();
+		if (!(await this.#flushOpenVikingMemoryForSessionTransition())) {
+			throw new Error("Cannot branch because the OpenViking session tail could not be flushed");
+		}
 		const bashTransition = this.#bash.beginSessionTransition();
 		this.#cancelOwnAsyncJobs();
 		this.#abortAutolearnCapture();
@@ -7800,6 +8110,7 @@ export class AgentSession {
 			this.#clearInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();
 			this.#memory.rekeyForCurrentSessionId();
+			await this.#rekeyOpenVikingMemoryForCurrentSessionId(true);
 			await this.#memory.resetContextForNewTranscript();
 
 			// Reload messages from entries (works for both file and in-memory mode)
@@ -7867,6 +8178,7 @@ export class AgentSession {
 				return { cancelled: true, sessionFile: previousSessionFile };
 			}
 		}
+		await this.waitForMemoryBackendReconcile();
 
 		if (this.sessionManager.getSessionId() !== sessionId || this.sessionManager.getLeafId() !== leafId) {
 			throw new Error("Cannot branch /btw: session changed since /btw started");
@@ -7895,6 +8207,9 @@ export class AgentSession {
 		this.#usagePreflightReadyForNextModelCall = false;
 		await this.#bash.flushPending();
 		await this.sessionManager.flush();
+		if (!(await this.#flushOpenVikingMemoryForSessionTransition())) {
+			throw new Error("Cannot branch because the OpenViking session tail could not be flushed");
+		}
 		const bashTransition = this.#bash.beginSessionTransition();
 		this.#cancelOwnAsyncJobs();
 		this.#abortAutolearnCapture();
@@ -7930,6 +8245,7 @@ export class AgentSession {
 			this.#freshProviderSessionId = undefined;
 			this.#syncAgentSessionId();
 			this.#memory.rekeyForCurrentSessionId();
+			await this.#rekeyOpenVikingMemoryForCurrentSessionId(true);
 			await this.#memory.resetContextForNewTranscript();
 
 			const sessionContext = this.buildDisplaySessionContext();

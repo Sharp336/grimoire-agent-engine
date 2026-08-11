@@ -28,7 +28,7 @@ export class MemoryRetainTool implements AgentTool<typeof memoryRetainSchema> {
 
 	static createIf(session: ToolSession): MemoryRetainTool | null {
 		const backend = session.settings.get("memory.backend");
-		if (backend !== "hindsight" && backend !== "mnemopi") return null;
+		if (backend !== "hindsight" && backend !== "mnemopi" && backend !== "openviking") return null;
 		return new MemoryRetainTool(session);
 	}
 
@@ -63,6 +63,50 @@ export class MemoryRetainTool implements AgentTool<typeof memoryRetainSchema> {
 			return {
 				content: [{ type: "text", text: `${count} ${noun} stored.` }],
 				details: { count },
+			};
+		}
+
+		if (backend === "openviking") {
+			const state = this.session.getOpenVikingSessionState?.();
+			const primary = state?.aliasOf ?? state;
+			if (!state?.isReady || !primary) {
+				throw new Error("OpenViking backend is not initialised for this session.");
+			}
+			const outcome = await primary.saveMany(params.items);
+			if (outcome.status === "failed") {
+				throw new Error(outcome.error);
+			}
+			if (outcome.status === "reconciling") {
+				return { content: [{ type: "text", text: outcome.message }], details: { count: 0 } };
+			}
+			if (outcome.status === "completed") {
+				return {
+					content: [
+						{
+							type: "text",
+							text:
+								outcome.extracted === 0
+									? "0 memories stored; OpenViking completed extraction without creating a durable memory."
+									: "OpenViking completed extraction, but did not report a durable-memory count.",
+						},
+					],
+					details: { count: 0 },
+				};
+			}
+			const count = outcome.status === "stored" ? outcome.extracted : params.items.length;
+			const noun = count === 1 ? "memory" : "memories";
+			const inputNoun = count === 1 ? "memory input" : "memory inputs";
+			const text =
+				outcome.status === "stored"
+					? `${count} ${noun} stored.`
+					: outcome.reason === "timeout"
+						? `${count} ${noun} queued for extraction.`
+						: outcome.reason === "aborted"
+							? `${count} ${inputNoun} archived; extraction status check interrupted.`
+							: `${count} ${inputNoun} archived; extraction status unavailable.`;
+			return {
+				content: [{ type: "text", text }],
+				details: outcome.status === "queued" && outcome.reason === "timeout" ? { count, queued: true } : { count },
 			};
 		}
 

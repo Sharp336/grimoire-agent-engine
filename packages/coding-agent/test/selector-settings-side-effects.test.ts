@@ -14,7 +14,8 @@ import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/componen
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import type { ResolvedRoleModel } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import type { AgentSession, ResolvedRoleModel } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
@@ -22,16 +23,73 @@ import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } f
 let settingsState: SettingsTestState | undefined;
 
 beforeEach(async () => {
+	AgentRegistry.resetGlobalForTests();
 	settingsState = beginSettingsTest();
 	await Settings.init({ inMemory: true });
 });
 
 afterEach(() => {
+	AgentRegistry.resetGlobalForTests();
 	restoreSettingsTestState(settingsState);
 	settingsState = undefined;
 });
 
 describe("selector setting side effects", () => {
+	it("reconciles memory settings across live sessions that share Settings", () => {
+		const childReconcile = vi.fn(async () => {});
+		const rootReconcile = vi.fn(async () => {
+			await childReconcile();
+		});
+		const rootSession = { settings: Settings.instance, reconcileMemoryBackend: rootReconcile };
+		const childSession = { settings: Settings.instance, reconcileMemoryBackend: childReconcile };
+		AgentRegistry.global().register({
+			id: "Main",
+			displayName: "Main",
+			kind: "main",
+			session: rootSession as unknown as AgentSession,
+		});
+		AgentRegistry.global().register({
+			id: "child",
+			displayName: "child",
+			kind: "sub",
+			parentId: "Main",
+			session: childSession as unknown as AgentSession,
+		});
+		const showError = vi.fn();
+		const controller = new SelectorController({
+			settings: Settings.instance,
+			session: rootSession,
+			showError,
+		} as unknown as ConstructorParameters<typeof SelectorController>[0]);
+
+		controller.handleSettingChange("memory.backend", "openviking");
+		controller.handleSettingChange("openviking.apiUrl", "https://openviking.test");
+
+		expect(rootReconcile).toHaveBeenCalledTimes(2);
+		expect(childReconcile).toHaveBeenCalledTimes(2);
+		expect(showError).not.toHaveBeenCalled();
+	});
+
+	it("surfaces a failed memory backend reconcile", async () => {
+		const showError = vi.fn();
+		const controller = new SelectorController({
+			settings: Settings.instance,
+			session: {
+				settings: Settings.instance,
+				reconcileMemoryBackend: async () => {
+					throw new Error("flush failed");
+				},
+			},
+			showError,
+		} as unknown as ConstructorParameters<typeof SelectorController>[0]);
+
+		controller.handleSettingChange("openviking.apiKey", "replacement");
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(showError).toHaveBeenCalledWith("Failed to apply memory backend settings: flush failed");
+	});
+
 	it("refreshes the status line when git integration changes at runtime", () => {
 		const updateSettings = vi.fn();
 		const requestRender = vi.fn();
@@ -68,15 +126,15 @@ describe("selector setting side effects", () => {
 		expect(requestRender).toHaveBeenCalledTimes(1);
 	});
 	it("applies memory backend changes to the live session", () => {
-		const applyMemoryBackend = vi.fn(async () => {});
+		const reconcileMemoryBackend = vi.fn(async () => {});
 		const controller = new SelectorController({
-			session: { applyMemoryBackend },
+			session: { reconcileMemoryBackend },
 			showError: vi.fn(),
 		} as unknown as InteractiveModeContext);
 
 		controller.handleSettingChange("memory.backend", "mnemopi");
 
-		expect(applyMemoryBackend).toHaveBeenCalledTimes(1);
+		expect(reconcileMemoryBackend).toHaveBeenCalledTimes(1);
 	});
 	it("stops the live advisor runtime when advisor.enabled is turned off in /settings", () => {
 		const setAdvisorEnabled = vi.fn();

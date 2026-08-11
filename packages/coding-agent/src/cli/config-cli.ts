@@ -5,7 +5,7 @@
  * Uses the settings schema as the source of truth for available settings.
  */
 
-import { APP_NAME, getAgentDir } from "@oh-my-pi/pi-utils";
+import { APP_NAME, getAgentDir, sanitizeText } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import {
 	getDefault,
@@ -21,6 +21,7 @@ import {
 } from "../config/settings";
 import { SETTINGS_SCHEMA } from "../config/settings-schema";
 import { theme } from "../modes/theme/theme";
+import { loadOpenVikingConfig } from "../openviking/config";
 import { initXdg } from "./commands/init-xdg";
 
 // =============================================================================
@@ -46,6 +47,7 @@ type CliSettingDef = {
 	type: string;
 	description: string;
 	tab: string;
+	credential: boolean;
 };
 
 const ALL_SETTING_PATHS = Object.keys(SETTINGS_SCHEMA) as SettingPath[];
@@ -63,6 +65,7 @@ function findSettingDef(path: string): CliSettingDef | undefined {
 		type: getType(key),
 		description: ui?.description ?? "",
 		tab: ui?.tab ?? "internal",
+		credential: isCredential(key),
 	};
 }
 
@@ -150,6 +153,50 @@ function formatValue(value: unknown): string {
 		}
 	}
 	return chalk.yellow(String(value));
+}
+
+/** Environment fallbacks used by credential-bearing runtime integrations. */
+const CREDENTIAL_ENVIRONMENT: Partial<Record<SettingPath, readonly string[]>> = {
+	"auth.broker.token": ["OMP_AUTH_BROKER_TOKEN"],
+	"hindsight.apiToken": ["HINDSIGHT_API_TOKEN"],
+	"mnemopi.embeddingApiKey": ["MNEMOPI_EMBEDDING_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY"],
+	"mnemopi.llmApiKey": ["MNEMOPI_LLM_API_KEY"],
+	"searxng.token": ["SEARXNG_TOKEN"],
+	"searxng.basicPassword": ["SEARXNG_BASIC_PASSWORD"],
+	"dev.autoqaPush.token": ["PI_AUTO_QA_PUSH_TOKEN"],
+};
+
+function isCredentialConfigured(value: unknown): boolean {
+	if (typeof value === "string") return sanitizeText(value).trim().length > 0;
+	return value !== undefined && value !== null;
+}
+
+async function isSettingCredentialConfigured(def: CliSettingDef, value: unknown): Promise<boolean> {
+	if (def.path === "openviking.apiKey") {
+		return isCredentialConfigured((await loadOpenVikingConfig(settings)).apiKey);
+	}
+
+	for (const name of CREDENTIAL_ENVIRONMENT[def.path] ?? []) {
+		if (isCredentialConfigured(Bun.env[name])) return true;
+	}
+	return isCredentialConfigured(value);
+}
+
+async function displaySettingValue(def: CliSettingDef, value: unknown): Promise<unknown> {
+	if (!def.credential) return value;
+	return (await isSettingCredentialConfigured(def, value)) ? "(configured)" : undefined;
+}
+
+async function jsonSettingValue(
+	def: CliSettingDef,
+	value: unknown,
+	options: { redactUnset?: boolean } = {},
+): Promise<{ value?: unknown; configured?: boolean; redacted?: true }> {
+	if (!def.credential) return { value };
+	const configured = await isSettingCredentialConfigured(def, value);
+	if (!configured && options.redactUnset === false) return { value };
+	if (options.redactUnset === false) return { configured: true, redacted: true };
+	return { value: null, configured, redacted: true };
 }
 
 function getTypeDisplay(def: CliSettingDef): string {
@@ -248,7 +295,7 @@ export async function runConfigCommand(cmd: ConfigCommandArgs): Promise<void> {
 			await handleList(cmd.flags);
 			break;
 		case "get":
-			handleGet(cmd.key, cmd.flags);
+			await handleGet(cmd.key, cmd.flags);
 			break;
 		case "set":
 			await handleSet(cmd.key, cmd.value, cmd.flags);
@@ -281,22 +328,16 @@ async function handleList(flags: { json?: boolean }): Promise<void> {
 	const defs = ALL_SETTING_PATHS.map(path => findSettingDef(path)).filter((def): def is CliSettingDef => !!def);
 
 	if (flags.json) {
-		// A redacted entry omits `value` and says so, rather than substituting a
-		// placeholder string: a consumer cannot tell a stand-in from a real value
-		// and could write it back as the credential.
-		//
-		// Redaction is driven by the value, not by classification alone. Marking an
-		// unset credential as redacted would report every fresh install as having
-		// one configured, which leaks the opposite of what redaction is for. The
-		// settings panel persists "" when a credential is cleared and renders that
-		// as unset; the same semantics apply here (credentials are all strings).
-		const result: Record<string, { value?: unknown; redacted?: true; type: string; description: string }> = {};
+		const result: Record<
+			string,
+			{ value?: unknown; configured?: boolean; redacted?: true; type: string; description: string }
+		> = {};
 		for (const def of defs) {
-			const value = settings.get(def.path);
-			result[def.path] =
-				isCredential(def.path) && value
-					? { redacted: true, type: def.type, description: def.description }
-					: { value, type: def.type, description: def.description };
+			result[def.path] = {
+				...(await jsonSettingValue(def, settings.get(def.path), { redactUnset: false })),
+				type: def.type,
+				description: def.description,
+			};
 		}
 		await writeStdout(`${JSON.stringify(result, null, 2)}\n`);
 		return;
@@ -321,13 +362,8 @@ async function handleList(flags: { json?: boolean }): Promise<void> {
 	for (const group of sortedGroups) {
 		console.log(chalk.bold.blue(`[${group}]`));
 		for (const def of groups[group]) {
-			// `list` dumps every value without anyone asking for a specific
-			// credential, so redact here. `get <path>` stays an explicit
-			// single-value request and is left alone. An unset or cleared ("")
-			// credential keeps its ordinary rendering: masking it would imply one
-			// is configured.
-			const value = settings.get(def.path);
-			const valueStr = isCredential(def.path) && value ? REDACTED : formatValue(value);
+			const value = await displaySettingValue(def, settings.get(def.path));
+			const valueStr = def.credential && value === "(configured)" ? REDACTED : formatValue(value);
 			const typeStr = getTypeDisplay(def);
 			console.log(`  ${chalk.white(def.path)} = ${valueStr} ${chalk.dim(typeStr)}`);
 		}
@@ -335,7 +371,7 @@ async function handleList(flags: { json?: boolean }): Promise<void> {
 	}
 }
 
-function handleGet(key: string | undefined, flags: { json?: boolean }): void {
+async function handleGet(key: string | undefined, flags: { json?: boolean }): Promise<void> {
 	if (!key) {
 		console.error(chalk.red(`Usage: ${APP_NAME} config get <key>`));
 		console.error(chalk.dim(`\nRun '${APP_NAME} config list' to see available keys`));
@@ -352,11 +388,22 @@ function handleGet(key: string | undefined, flags: { json?: boolean }): void {
 	const value = settings.get(def.path);
 
 	if (flags.json) {
-		console.log(JSON.stringify({ key: def.path, value, type: def.type, description: def.description }, null, 2));
+		console.log(
+			JSON.stringify(
+				{
+					key: def.path,
+					...(await jsonSettingValue(def, value)),
+					type: def.type,
+					description: def.description,
+				},
+				null,
+				2,
+			),
+		);
 		return;
 	}
 
-	console.log(formatValue(value));
+	console.log(formatValue(await displaySettingValue(def, value)));
 }
 
 async function handleSet(key: string | undefined, value: string | undefined, flags: { json?: boolean }): Promise<void> {
@@ -384,9 +431,13 @@ async function handleSet(key: string | undefined, value: string | undefined, fla
 	const newValue = settings.get(def.path);
 
 	if (flags.json) {
-		console.log(JSON.stringify({ key: def.path, value: newValue }));
+		console.log(JSON.stringify({ key: def.path, ...(await jsonSettingValue(def, newValue)) }));
 	} else {
-		console.log(chalk.green(`${theme.status.success} Set ${def.path} = ${formatValue(newValue)}`));
+		console.log(
+			chalk.green(
+				`${theme.status.success} Set ${def.path} = ${formatValue(await displaySettingValue(def, newValue))}`,
+			),
+		);
 	}
 }
 
@@ -415,9 +466,13 @@ async function handleReset(key: string | undefined, flags: { json?: boolean }): 
 	}
 
 	if (flags.json) {
-		console.log(JSON.stringify({ key: def.path, value: defaultValue }));
+		console.log(JSON.stringify({ key: def.path, ...(await jsonSettingValue(def, defaultValue)) }));
 	} else {
-		console.log(chalk.green(`${theme.status.success} Reset ${def.path} to ${formatValue(defaultValue)}`));
+		console.log(
+			chalk.green(
+				`${theme.status.success} Reset ${def.path} to ${formatValue(await displaySettingValue(def, defaultValue))}`,
+			),
+		);
 	}
 }
 

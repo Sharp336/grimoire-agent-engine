@@ -54,6 +54,8 @@ export interface SessionToolsHost {
 	clearInheritedProviderPromptCacheKey(): void;
 	clearMemoryPromotionSnapshot(): void;
 	captureMemoryPromotionSnapshot(prompt: string[]): void;
+	memoryPromotionSnapshot(): string[] | undefined;
+	restoreMemoryPromotionSnapshot(prompt: string[] | undefined): void;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 	notifyCommandMetadataChanged(): void;
 	localProtocolOptions(): LocalProtocolOptions;
@@ -208,6 +210,8 @@ export class SessionTools {
 	 */
 	#turnSystemPromptOverride: string[] | undefined;
 	#lastAppliedToolSignature: string | undefined;
+	/** Only the newest asynchronous prompt rebuild may publish its result. */
+	#promptRebuildGeneration = 0;
 	/**
 	 * `xd://` device names the current base system prompt renders in its catalog
 	 * (the last rebuild's {@link BuildSystemPromptResult.xdevCatalogNames}). Consulted
@@ -633,7 +637,7 @@ export class SessionTools {
 	}
 
 	/** Applies an enabled tool set and reconciles its `xd://` partition. */
-	async applyActiveToolsByName(toolNames: string[]): Promise<void> {
+	async applyActiveToolsByName(toolNames: string[], options: { rebuildSystemPrompt?: boolean } = {}): Promise<void> {
 		toolNames = normalizeToolNames(toolNames);
 		let builtInWriteAvailable = this.#builtInToolNames.has("write");
 		if (toolNames.includes("write") && !builtInWriteAvailable) {
@@ -697,13 +701,16 @@ export class SessionTools {
 		let rebuiltSignature: string | undefined;
 		let rebuiltXdevCatalogNames: readonly string[] | undefined;
 		try {
-			if (this.#rebuildSystemPrompt) {
+			if (this.#rebuildSystemPrompt && options.rebuildSystemPrompt !== false) {
 				const signature = this.#computeAppliedToolSignature(validToolNames, tools);
 				if (signature !== this.#lastAppliedToolSignature) {
+					const generation = ++this.#promptRebuildGeneration;
 					const built = await this.#rebuildSystemPrompt(validToolNames, this.#toolRegistry);
-					rebuiltSystemPrompt = built.systemPrompt;
-					rebuiltSignature = signature;
-					rebuiltXdevCatalogNames = built.xdevCatalogNames;
+					if (generation === this.#promptRebuildGeneration) {
+						rebuiltSystemPrompt = built.systemPrompt;
+						rebuiltSignature = signature;
+						rebuiltXdevCatalogNames = built.xdevCatalogNames;
+					}
 				}
 			}
 		} catch (error) {
@@ -982,7 +989,7 @@ export class SessionTools {
 	}
 
 	/** Replaces memory-backend tools while preserving unrelated selections. */
-	async replaceMemoryTools(tools: AgentTool[]): Promise<void> {
+	async replaceMemoryTools(tools: AgentTool[], options: { rebuildSystemPrompt?: boolean } = {}): Promise<void> {
 		const removed = new Set<string>(MEMORY_BACKEND_TOOL_NAMES.filter(name => this.#builtInToolNames.has(name)));
 		const nextActive = this.getEnabledToolNames().filter(name => !removed.has(name));
 		for (const name of removed) {
@@ -999,7 +1006,7 @@ export class SessionTools {
 			this.#builtInToolNames.add(wrapped.name);
 			nextActive.push(wrapped.name);
 		}
-		await this.applyActiveToolsByName([...new Set(nextActive)]);
+		await this.applyActiveToolsByName([...new Set(nextActive)], options);
 	}
 
 	/**
@@ -1153,8 +1160,9 @@ export class SessionTools {
 		const activeToolNames = this.getActiveToolNames();
 		this.#setActiveToolNames?.(activeToolNames);
 		const previousBaseSystemPrompt = this.#baseSystemPrompt;
+		const generation = ++this.#promptRebuildGeneration;
 		const built = await this.#rebuildSystemPrompt(activeToolNames, this.#toolRegistry);
-		if (this.#host.isDisposed()) return;
+		if (this.#host.isDisposed() || generation !== this.#promptRebuildGeneration) return;
 		this.#baseSystemPrompt = built.systemPrompt;
 		this.#basePromptXdevNames = new Set(built.xdevCatalogNames);
 		this.#host.clearMemoryPromotionSnapshot();
@@ -1182,9 +1190,8 @@ export class SessionTools {
 
 		try {
 			const injected = await backend.beforeAgentStartPrompt(this.#host.memoryBackendSession(), promptText);
-			if (!injected) return this.#baseSystemPrompt;
-
 			const previousBaseSystemPrompt = this.#baseSystemPrompt;
+			const previousPromotionSnapshot = this.#host.memoryPromotionSnapshot();
 			try {
 				await this.refreshBaseSystemPrompt();
 			} catch (refreshErr) {
@@ -1192,6 +1199,18 @@ export class SessionTools {
 					backend: backend.id,
 					error: String(refreshErr),
 				});
+			}
+			if (!injected) {
+				if (
+					previousPromotionSnapshot !== undefined &&
+					this.#baseSystemPrompt.length === previousBaseSystemPrompt.length &&
+					this.#baseSystemPrompt.every((part, index) => part === previousBaseSystemPrompt[index])
+				) {
+					this.#baseSystemPrompt = previousPromotionSnapshot;
+					this.#host.restoreMemoryPromotionSnapshot(undefined);
+					this.#host.agent.setSystemPrompt(this.#baseSystemPrompt);
+				}
+				return this.#baseSystemPrompt;
 			}
 
 			if (

@@ -8,6 +8,7 @@ import { type SettingPath, Settings } from "@oh-my-pi/pi-coding-agent/config/set
 import { resetActiveSkillsForTests, type Skill, setActiveSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import type { HindsightSessionState } from "@oh-my-pi/pi-coding-agent/hindsight/state";
 import type { MnemopiSessionState } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
+import type { OpenVikingSessionState } from "@oh-my-pi/pi-coding-agent/openviking/state";
 import { createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { LearnTool } from "@oh-my-pi/pi-coding-agent/tools/learn";
 import { ManageSkillTool } from "@oh-my-pi/pi-coding-agent/tools/manage-skill";
@@ -299,6 +300,98 @@ describe("learn execute", () => {
 			}),
 		).rejects.toThrow(/Lesson queued for retention, but the managed skill could not be written/);
 		expect(queued).toEqual(["queued lesson"]);
+	});
+
+	it("surfaces OpenViking reconciliation and skips the managed skill", async () => {
+		const message =
+			"OpenViking archived the previously pending session tail; this new memory input was not sent. Retry it after reconciliation completes.";
+		const session = makeSession(
+			{ "autolearn.enabled": true, "memory.backend": "openviking" },
+			{
+				getOpenVikingSessionState: () =>
+					({
+						save: async () => ({ status: "reconciling" as const, message }),
+					}) as unknown as OpenVikingSessionState,
+			},
+		);
+
+		await expect(
+			new LearnTool(session).execute("openviking-reconciling", {
+				memory: "retry this lesson",
+				skill: {
+					action: "create",
+					name: "should-not-exist",
+					description: "A skill that must not be created.",
+					body: "# Should not exist",
+				},
+			}),
+		).rejects.toThrow(message);
+		expect(await Bun.file(path.join(getManagedSkillsDir(), "should-not-exist", "SKILL.md")).exists()).toBe(false);
+	});
+
+	it("reports an unfinished OpenViking extraction as queued", async () => {
+		const session = makeSession(
+			{ "autolearn.enabled": true, "memory.backend": "openviking" },
+			{
+				getOpenVikingSessionState: () =>
+					({
+						save: async () => ({
+							status: "queued" as const,
+							taskId: "task-1",
+							archiveUri: "viking://session/archive",
+							reason: "timeout" as const,
+							message: "OpenViking archived the write and memory extraction is still queued.",
+						}),
+					}) as unknown as OpenVikingSessionState,
+			},
+		);
+
+		const result = await new LearnTool(session).execute("openviking-queued", { memory: "queued lesson" });
+
+		expect(result.content[0]).toEqual({ type: "text", text: "Lesson queued for extraction." });
+	});
+
+	it("distinguishes unavailable OpenViking extraction status from a known queue", async () => {
+		const session = makeSession(
+			{ "autolearn.enabled": true, "memory.backend": "openviking" },
+			{
+				getOpenVikingSessionState: () =>
+					({
+						save: async () => ({
+							status: "queued" as const,
+							taskId: "task-1",
+							archiveUri: "viking://session/archive",
+							reason: "unknown" as const,
+							message: "OpenViking archived the write, but extraction status is temporarily unknown.",
+						}),
+					}) as unknown as OpenVikingSessionState,
+			},
+		);
+
+		const result = await new LearnTool(session).execute("openviking-unknown", { memory: "unknown lesson" });
+
+		expect(result.content[0]).toEqual({ type: "text", text: "Lesson archived; extraction status unavailable." });
+	});
+
+	it("does not report an OpenViking zero-memory extraction as stored", async () => {
+		const session = makeSession(
+			{ "autolearn.enabled": true, "memory.backend": "openviking" },
+			{
+				getOpenVikingSessionState: () =>
+					({
+						save: async () => ({
+							status: "completed" as const,
+							taskId: "task-1",
+							archiveUri: "viking://session/archive",
+							extracted: 0,
+						}),
+					}) as unknown as OpenVikingSessionState,
+			},
+		);
+
+		const result = await new LearnTool(session).execute("openviking-empty", { memory: "weak lesson" });
+
+		expect(result.content[0]).toEqual({ type: "text", text: "Lesson processed; no durable memory extracted." });
 	});
 
 	it("fails the lesson and skips the skill when mnemopi returns no id", async () => {

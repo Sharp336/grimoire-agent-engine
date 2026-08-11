@@ -34,6 +34,7 @@ import type { HindsightSessionState } from "../hindsight/state";
 import type { LocalProtocolOptions } from "../internal-urls";
 import type { MCPManager } from "../mcp/manager";
 import type { MnemopiSessionState } from "../mnemopi/state";
+import type { OpenVikingSessionState } from "../openviking/state";
 import subagentAsyncPendingTemplate from "../prompts/system/subagent-async-pending.md" with { type: "text" };
 import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
@@ -460,6 +461,11 @@ export interface ExecutorOptions {
 	parentArtifactManager?: ArtifactManager;
 	parentHindsightSessionState?: HindsightSessionState;
 	parentMnemopiSessionState?: MnemopiSessionState;
+	parentOpenVikingSessionState?: OpenVikingSessionState;
+	/** Parent AgentSession transcript id captured when this child was created. */
+	parentTranscriptId?: string;
+	/** Parent workspace captured with the transcript pin. */
+	parentWorkspaceCwd?: string;
 	/** Parent agent's eval executor session id. Subagents reuse it so eval state is shared. */
 	parentEvalSessionId?: string;
 	/**
@@ -2999,6 +3005,17 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// the same JSONL file re-invokes createAgentSession with the exact options
 			// of the original run (same agent id, tools, model, system prompt,
 			// artifacts dir) — only the SessionManager differs.
+			const subagentSystemPrompt = prompt.render(subagentSystemPromptTemplate, {
+				agent: agent.systemPrompt,
+				context: options.context?.trim() ?? "",
+				planReference: options.planReference?.content ?? "",
+				planReferencePath: options.planReference?.path ?? "",
+				worktree: worktree ?? "",
+				outputSchema: normalizedOutputSchema,
+				outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
+				ircPeers: ircEnabled ? renderIrcPeerRoster(id) : "",
+				ircSelfId: ircEnabled ? id : "",
+			});
 			const buildSubagentSessionOptions = (
 				sessionManagerForRun: SessionManager,
 				expectedAgentRef: CreateAgentSessionOptions["expectedAgentRef"],
@@ -3032,20 +3049,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				preloadedExtensionPaths: restrictToolNames ? [] : options.preloadedExtensionPaths,
 				preloadedCustomToolPaths: restrictToolNames ? [] : options.preloadedCustomToolPaths,
 				systemPrompt: defaultPrompt => {
-					const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
-						agent: agent.systemPrompt,
-						context: options.context?.trim() ?? "",
-						planReference: options.planReference?.content ?? "",
-						planReferencePath: options.planReference?.path ?? "",
-						worktree: worktree ?? "",
-						outputSchema: normalizedOutputSchema,
-						outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
-						ircPeers: ircEnabled ? renderIrcPeerRoster(id) : "",
-						ircSelfId: ircEnabled ? id : "",
-					});
 					return defaultPrompt.length === 0
-						? [subagentPrompt]
-						: [...defaultPrompt.slice(0, -1), subagentPrompt, defaultPrompt[defaultPrompt.length - 1]];
+						? [subagentSystemPrompt]
+						: [...defaultPrompt.slice(0, -1), subagentSystemPrompt, defaultPrompt[defaultPrompt.length - 1]];
 				},
 				sessionManager: sessionManagerForRun,
 				hasUI: false,
@@ -3054,6 +3060,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				taskDepth: childDepth,
 				parentHindsightSessionState: options.parentHindsightSessionState,
 				parentMnemopiSessionState: options.parentMnemopiSessionState,
+				parentOpenVikingSessionState: options.parentOpenVikingSessionState,
+				parentTranscriptId: options.parentTranscriptId,
+				parentWorkspaceCwd: options.parentWorkspaceCwd,
 				parentTaskPrefix: id,
 				parentAgentId: options.parentAgentId,
 				agentId: id,
@@ -3142,6 +3151,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 			session.sessionManager.appendSessionInit({
 				systemPrompt: session.agent.state.systemPrompt.join("\n\n"),
+				subagentSystemPrompt,
 				task,
 				tools: session.getActiveToolNames(),
 				agent: agent.name,
@@ -3150,6 +3160,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				readOnly: isReadOnlyAgent(agent),
 				spawns: spawnsEnv,
 				readSummarize: agent.readSummarize,
+				parentTranscriptId: options.parentTranscriptId,
+				parentWorkspaceCwd: options.parentWorkspaceCwd,
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,
 				restrictToolNames: restrictToolNames || undefined,

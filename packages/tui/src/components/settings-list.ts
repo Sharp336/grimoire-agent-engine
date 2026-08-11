@@ -1,3 +1,4 @@
+import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { fuzzyFilter } from "../fuzzy";
 import { getKeybindings } from "../keybindings";
 import { extractPrintableText } from "../keys";
@@ -6,11 +7,12 @@ import type { Component } from "../tui";
 import { Ellipsis, padding, replaceTabs, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils";
 import { ScrollView } from "./scroll-view";
 
-function sanitizeSingleLine(text: string): string {
-	return replaceTabs(text)
-		.replace(/[\r\n]+/g, " ")
-		.replace(/\s+/g, " ")
-		.trim();
+function sanitizeDisplayLine(text: string): string {
+	return replaceTabs(sanitizeText(text.replace(/[\r\n]+/g, " ")));
+}
+
+function normalizeSearchText(text: string): string {
+	return sanitizeDisplayLine(text).replace(/\s+/g, " ").trim();
 }
 
 export interface SettingItem {
@@ -22,6 +24,8 @@ export interface SettingItem {
 	description?: string;
 	/** Current value to display (right side) */
 	currentValue: string;
+	/** Optional value rendered on the right side; currentValue still drives editing/cycling. */
+	displayValue?: string;
 	/** If provided, Enter/Space cycles through these values */
 	values?: string[];
 	/** If provided, Enter opens this submenu. Receives current value and done callback. */
@@ -80,14 +84,14 @@ export interface SettingsListOptions {
 
 /** Searchable text for a setting item: label, id, value, description, and cycle values. */
 export function getSettingItemFilterText(item: SettingItem): string {
-	let text = `${item.label} ${item.id} ${item.currentValue}`;
+	let text = `${item.label} ${item.id} ${item.displayValue ?? item.currentValue}`;
 	if (item.description) {
 		text += ` ${item.description}`;
 	}
 	if (item.values) {
 		text += ` ${item.values.join(" ")}`;
 	}
-	return sanitizeSingleLine(text);
+	return normalizeSearchText(text);
 }
 
 export class SettingsList implements Component {
@@ -408,7 +412,7 @@ export class SettingsList implements Component {
 	}
 
 	#renderSearchStatus(width: number): string {
-		const query = sanitizeSingleLine(this.#filterQuery);
+		const query = normalizeSearchText(this.#filterQuery);
 		const statusText = query ? `  Search: ${query}` : "  Type to search";
 		return this.#theme.hint(truncateToWidth(statusText, width, Ellipsis.Omit));
 	}
@@ -498,7 +502,11 @@ export class SettingsList implements Component {
 		const labelPadded = item.label + padding(Math.max(0, maxLabelWidth - visibleWidth(item.label)));
 		const separator = "  ";
 		const valueMaxWidth = rowWidth - prefixWidth - maxLabelWidth - visibleWidth(separator) - 2;
-		const valuePlain = truncateToWidth(String(item.currentValue ?? ""), valueMaxWidth, Ellipsis.Omit);
+		const valuePlain = truncateToWidth(
+			sanitizeDisplayLine(String(item.displayValue ?? item.currentValue ?? "")),
+			valueMaxWidth,
+			Ellipsis.Omit,
+		);
 		const hovered = !isSelected && this.#theme.hovered !== undefined && item.id === this.#hoveredItemId;
 		// De-emphasized rows (outside the active section) render as plain text
 		// under one dim wash so inner label/value colors don't fight it.

@@ -9,7 +9,8 @@ import type {
 	UsageReport,
 } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { openVikingBackend } from "@oh-my-pi/pi-coding-agent/openviking/backend";
+import type { AgentSession, MemoryBackendWorkspaceTransition } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import { removeWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
@@ -45,6 +46,9 @@ interface FakeAcpBuiltinSession {
 	exportToHtml(outputPath?: string): Promise<string>;
 	getTodoPhases(): Array<{ name: string; tasks: Array<{ content: string; status: string }> }>;
 	setTodoPhases(phases: Array<{ name: string; tasks: Array<{ content: string; status: string }> }>): void;
+	waitForMemoryBackendReconcile(): Promise<void>;
+	suspendMemoryBackendForWorkspaceTransition(): Promise<MemoryBackendWorkspaceTransition | undefined>;
+	reconcileMemoryBackend(): Promise<void>;
 	refreshBaseSystemPrompt(): Promise<void>;
 	getToolByName(name: string): unknown;
 	compact(args?: string): Promise<void>;
@@ -144,6 +148,11 @@ function createRuntime() {
 		setTodoPhases(phases) {
 			this._todoPhases = phases;
 		},
+		async waitForMemoryBackendReconcile() {},
+		async suspendMemoryBackendForWorkspaceTransition() {
+			return undefined;
+		},
+		async reconcileMemoryBackend() {},
 		async refreshBaseSystemPrompt() {},
 		getAsyncJobSnapshot: () => null,
 		formatSessionAsText: () => "",
@@ -783,11 +792,23 @@ describe("wave 3 commands", () => {
 		expect(output[0]).toContain("does not exist");
 	});
 
+	it("/move: keeps a current-cwd no-op from suspending memory", async () => {
+		const { output, runtime, session } = createRuntime();
+		const suspend = spyOn(session, "suspendMemoryBackendForWorkspaceTransition");
+
+		const result = await executeAcpBuiltinSlashCommand("/move /tmp/project", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(suspend).not.toHaveBeenCalled();
+		expect(output).toEqual(["Already in /tmp/project."]);
+	});
+
 	it("/move: relocates the current session instead of switching to an empty target session", async () => {
 		const { output, runtime, session, fakeSessionManager } = createRuntime();
 		const targetDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-target-"));
 		const originalProjectDir = process.cwd();
 		const reloadForCwd = spyOn(runtime.settings, "reloadForCwd");
+		const reconcileMemoryBackend = spyOn(session, "reconcileMemoryBackend");
 		let configNotified = 0;
 		runtime.notifyConfigChanged = () => {
 			configNotified++;
@@ -802,8 +823,56 @@ describe("wave 3 commands", () => {
 			expect(session._switchedTo).toBeUndefined();
 			expect(session._movedFromEmptySessionFile).toBeUndefined();
 			expect(reloadForCwd).toHaveBeenCalledWith(targetDir);
+			expect(reconcileMemoryBackend).toHaveBeenCalledTimes(1);
 			expect(configNotified).toBe(1);
 			expect(output[0]).toContain(`Moved to ${targetDir}.`);
+		} finally {
+			setProjectDir(originalProjectDir);
+			await fs.rm(targetDir, { recursive: true, force: true });
+		}
+	});
+
+	it("/move: leaves memory inactive after a partially applied session move", async () => {
+		const { output, runtime, session, fakeSessionManager } = createRuntime();
+		const targetDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-target-"));
+		const originalProjectDir = process.cwd();
+		const completeOptions: Array<{ restart?: boolean } | undefined> = [];
+		const suspend = spyOn(session, "suspendMemoryBackendForWorkspaceTransition").mockResolvedValueOnce({
+			complete: async options => {
+				completeOptions.push(options);
+			},
+		});
+		spyOn(fakeSessionManager, "moveTo").mockImplementationOnce(async cwd => {
+			fakeSessionManager._cwd = cwd;
+			throw new Error("rewrite failed");
+		});
+
+		try {
+			const result = await executeAcpBuiltinSlashCommand(`/move ${targetDir}`, runtime);
+
+			expect(result).toEqual({ consumed: true });
+			expect(suspend).toHaveBeenCalledTimes(1);
+			expect(completeOptions).toEqual([{ restart: false }]);
+			expect(output).toContain("Move partially applied; memory remains inactive: rewrite failed");
+		} finally {
+			setProjectDir(originalProjectDir);
+			await fs.rm(targetDir, { recursive: true, force: true });
+		}
+	});
+
+	it("/move: completes the cwd transition when memory backend rebuild fails closed", async () => {
+		const { output, runtime, session, fakeSessionManager } = createRuntime();
+		const targetDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-target-"));
+		const originalProjectDir = process.cwd();
+		spyOn(session, "reconcileMemoryBackend").mockRejectedValue(new Error("peer baseline unavailable"));
+
+		try {
+			const result = await executeAcpBuiltinSlashCommand(`/move ${targetDir}`, runtime);
+
+			expect(result).toEqual({ consumed: true });
+			expect(fakeSessionManager.getCwd()).toBe(targetDir);
+			expect(output).toContain("Memory backend reload failed after move: peer baseline unavailable");
+			expect(output).toContain(`Moved to ${targetDir}.`);
 		} finally {
 			setProjectDir(originalProjectDir);
 			await fs.rm(targetDir, { recursive: true, force: true });
@@ -838,6 +907,32 @@ describe("wave 3 commands", () => {
 		const result = await executeAcpBuiltinSlashCommand("/memory stats", runtime);
 		expect(result).toEqual({ consumed: true });
 		expect(output[0]).toBe("Memory stats is not available for the local backend.");
+	});
+
+	it("/memory clear: reports that OpenViking cannot safely bulk-delete remote memory", async () => {
+		const { output, runtime, session } = createRuntime();
+		runtime.settings.set("memory.backend", "openviking");
+		const refreshBaseSystemPrompt = spyOn(session, "refreshBaseSystemPrompt");
+
+		const result = await executeAcpBuiltinSlashCommand("/memory clear", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(output).toHaveLength(1);
+		expect(output[0]).toContain("Memory clear failed: OpenViking memory is server-side");
+		expect(output[0]).not.toContain("Memory cleared.");
+		expect(refreshBaseSystemPrompt).not.toHaveBeenCalled();
+	});
+
+	it("/memory enqueue: reports OpenViking capture failures instead of success", async () => {
+		const { output, runtime } = createRuntime();
+		runtime.settings.set("memory.backend", "openviking");
+		const enqueue = spyOn(openVikingBackend, "enqueue").mockRejectedValue(new Error("capture failed"));
+
+		const result = await executeAcpBuiltinSlashCommand("/memory enqueue", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(output).toEqual(["Memory enqueue failed: capture failed"]);
+		expect(enqueue).toHaveBeenCalledTimes(1);
 	});
 
 	// /todo start fuzzy match
@@ -1198,14 +1293,56 @@ describe("wave 5 — adapters and polish", () => {
 });
 
 describe("/move preflight flush", () => {
-	it("aborts text-mode /move when pending settings flush fails", async () => {
+	it("restores memory and aborts text-mode /move when pending settings flush fails", async () => {
 		const targetDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-acp-move-"));
 		try {
-			const { output, fakeSessionManager, runtime } = createRuntime();
+			const { output, fakeSessionManager, runtime, session } = createRuntime();
+			const completeStarted = Promise.withResolvers<void>();
+			const releaseComplete = Promise.withResolvers<void>();
+			let restartEnabled = false;
+			spyOn(session, "suspendMemoryBackendForWorkspaceTransition").mockResolvedValue({
+				complete: async options => {
+					restartEnabled = options?.restart ?? true;
+					completeStarted.resolve();
+					await releaseComplete.promise;
+				},
+			});
 			spyOn(runtime.settings, "flush").mockRejectedValue(new Error("disk full"));
 
-			const result = await executeAcpBuiltinSlashCommand(`/move ${targetDir}`, runtime);
+			const execution = executeAcpBuiltinSlashCommand(`/move ${targetDir}`, runtime);
+			let settled = false;
+			const executionSettled = execution.then(
+				() => {
+					settled = true;
+					return "command-settled" as const;
+				},
+				() => {
+					settled = true;
+					return "command-settled" as const;
+				},
+			);
+			let firstBoundary: "complete-started" | "command-settled";
+			let settledWhileCompleteBlocked = false;
+			let restartEnabledWhileBlocked = false;
+			let movedWhileCompleteBlocked: string | undefined;
+			try {
+				firstBoundary = await Promise.race([
+					completeStarted.promise.then(() => "complete-started" as const),
+					executionSettled,
+				]);
+				await Bun.sleep(0);
+				settledWhileCompleteBlocked = settled;
+				restartEnabledWhileBlocked = restartEnabled;
+				movedWhileCompleteBlocked = fakeSessionManager!._movedTo;
+			} finally {
+				releaseComplete.resolve();
+			}
+			const result = await execution;
 
+			expect(firstBoundary).toBe("complete-started");
+			expect(settledWhileCompleteBlocked).toBe(false);
+			expect(restartEnabledWhileBlocked).toBe(true);
+			expect(movedWhileCompleteBlocked).toBeUndefined();
 			expect(result).toEqual({ consumed: true });
 			expect(output[0]).toContain("disk full");
 			expect(fakeSessionManager!._movedTo).toBeUndefined();

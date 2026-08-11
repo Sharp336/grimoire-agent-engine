@@ -15,7 +15,7 @@
 
 ## Registration / Visibility
 - Tool metadata: `approval = "read"`, `strict = true`, `loadMode = "discoverable"`.
-- The tool is registered only for `memory.backend = "hindsight"` or `"mnemopi"`; it is absent for `"off"` and `"local"`.
+- The tool is registered only for `memory.backend = "hindsight"`, `"mnemopi"`, or `"openviking"`; it is absent for `"off"` and `"local"`.
 - In unrestricted sessions with an explicit tool list, registration auto-includes the shared `recall`/`retain`/`reflect` set. Restricted lists are not widened.
 - In an ordinary `tools.xdev` session, discoverable built-ins may be presented as `xd://reflect`; an explicitly requested tool remains top-level.
 - Execution is single-shot and emits no progress updates.
@@ -42,22 +42,26 @@ Mnemopi:
 - `details = {}`
 - The local path performs recall plus formatting; it does not call a synthesis model or separate synthesis endpoint. Its result can therefore be raw recalled context rather than a blended answer.
 
+OpenViking:
+- Searches the active remote scope and returns `Based on recalled OpenViking memories:` followed by bounded context with `memory://` ids.
+
 ## Flow
-1. `MemoryReflectTool.createIf(...)` exposes the tool when `memory.backend` is either `"hindsight"` or `"mnemopi"`.
+1. `MemoryReflectTool.createIf(...)` exposes the tool when `memory.backend` is `"hindsight"`, `"mnemopi"`, or `"openviking"`.
 2. `execute(...)` runs under `untilAborted(...)`.
 3. If the backend is `mnemopi`:
    - it reads `session.getMnemopiSessionState()` and throws if the backend was not started;
    - if `context` has non-whitespace content, it recalls with `<query>\n\nAdditional context:\n<context>`; otherwise it recalls with `query`;
    - it calls `state.recallResultsScoped(...)` using the same local scoping and merge behavior as `recall`;
    - if results exist, it renders them through `state.formatContextScoped(...)` and prefixes `Based on recalled memories:`.
-4. If the backend is `hindsight`:
+4. If the backend is `openviking`, it appends optional context to the query, searches the active parent state, and formats matching resources with ids.
+5. If the backend is `hindsight`:
    - it reads `session.getHindsightSessionState()` and throws if the backend was not started;
    - it calls `ensureBankExists(...)` with the current `bankId`, config, and the session state's `banksSet`;
    - `ensureBankExists(...)` best-effort `PUT`s `/v1/default/banks/{bank_id}` (`createBank`) with optional `reflect_mission` / `retain_mission` once per bank per session state; failures are swallowed;
    - it calls `state.client.reflect(...)` with `query`, optional `context`, configured recall budget, and bank-scope tag filters;
    - `HindsightApi.reflect(...)` POSTs `/v1/default/banks/{bank_id}/reflect` and defaults its own budget to `"low"` when callers omit one; this tool always passes the configured budget;
    - blank or whitespace-only responses are replaced with `No relevant information found to reflect on.`
-5. Backend failures are logged with `logger.warn("reflect failed", ...)` and rethrown as `Error` instances when needed.
+6. Backend failures are logged with `logger.warn("reflect failed", ...)` and rethrown as `Error` instances when needed.
 
 ## Modes / Variants
 - Hindsight tool path: one remote reflect request, optionally focused by `context`.
@@ -77,13 +81,14 @@ Mnemopi:
 - Network
   - Hindsight: optional `PUT /v1/default/banks/{bank_id}` from `ensureBankExists(...)`, then `POST /v1/default/banks/{bank_id}/reflect`.
   - Mnemopi: none unless configured embedding or LLM providers are used by the local runtime during recall.
+  - OpenViking: the remote search and optional content-read requests documented for [`recall`](./recall.md#side-effects).
 - Session state
   - Reads session-held backend scope and config only. Does not update `lastRecallSnippet`, Hindsight mental-model cache, or retain queues.
 - Background work / cancellation
-  - Aborts through `untilAborted(...)` if the tool call signal is cancelled.
+  - Aborts through `untilAborted(...)` if the tool call signal is cancelled. OpenViking also forwards that signal into remote search and content-read requests.
 
 ## Limits & Caps
-- Tool availability requires `memory.backend` to be `"hindsight"` or `"mnemopi"`; default `memory.backend` is `"off"`.
+- Tool availability requires `memory.backend` to be `"hindsight"`, `"mnemopi"`, or `"openviking"`; default `memory.backend` is `"off"`.
 - Tool-level params: only `query` is required; `context` is optional. Both are plain strings with no schema-level minimum length.
 - Hindsight budget comes from `hindsight.recallBudget`, default `"mid"`.
 - Hindsight `reflect` has no client-side token cap parameter here; its request deadline defaults to `hindsight.reflectTimeoutMs = 120_000`.
@@ -93,6 +98,7 @@ Mnemopi:
 ## Errors
 - Throws `Mnemopi backend is not initialised for this session.` when `memory.backend == "mnemopi"` but no state exists.
 - Throws `Hindsight backend is not initialised for this session.` when `memory.backend == "hindsight"` but no state exists.
+- Throws `OpenViking backend is not initialised for this session.` when `memory.backend == "openviking"` but no state exists.
 - Hindsight HTTP, fetch, and timeout failures become `HindsightError`; HTTP errors include `statusCode` and parsed `details` when available.
 - Hindsight `ensureBankExists(...)` failures are logged at debug level and hidden from the caller; only the later reflect request can fail visibly.
 - Mnemopi recall catches failures per target and logs them. Healthy targets still contribute; if every attempted target fails, the original error or a multi-bank `AggregateError` is thrown rather than converted to the no-information text.

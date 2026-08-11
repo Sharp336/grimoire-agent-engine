@@ -1,3 +1,4 @@
+import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { BracketedPasteHandler, decodeReencodedPasteControls } from "../bracketed-paste";
 import { getKeybindings } from "../keybindings";
 import { extractPrintableText } from "../keys";
@@ -53,9 +54,9 @@ export class Input implements Component, Focusable {
 	}
 
 	setValue(value: string): void {
-		this.#value = value;
+		this.#value = replaceTabs(sanitizeText(value.replace(/[\r\n]+/g, " "))).normalize("NFC");
 		// Callers seed or replace the value wholesale; typing continues at the end.
-		this.#cursor = value.length;
+		this.#cursor = this.#value.length;
 	}
 
 	setUseTerminalCursor(useTerminalCursor: boolean): void {

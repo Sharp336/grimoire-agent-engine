@@ -18,7 +18,7 @@ import type { CompactOptions } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import type { MCPManager } from "../mcp";
 import type { PlanApprovalDetails } from "../plan-mode/approved-plan";
-import type { AgentSession } from "../session/agent-session";
+import type { AgentSession, MemoryBackendWorkspaceTransition } from "../session/agent-session";
 import type { CompactMode } from "../session/compact-modes";
 import type { ForeignSessionSource } from "../session/foreign-session-store";
 import type { HistoryStorage } from "../session/history-storage";
@@ -378,7 +378,7 @@ export interface InteractiveModeContext {
 	refreshSlashCommandState(cwd?: string): Promise<void>;
 	/** Reload session skills and derived `/skill:<name>` commands. */
 	refreshSkillState(): Promise<void>;
-	applyCwdChange(newCwd: string): Promise<void>;
+	applyCwdChange(newCwd: string, memoryTransition?: MemoryBackendWorkspaceTransition): Promise<void>;
 
 	// Selector handling
 	showSettingsSelector(): void;

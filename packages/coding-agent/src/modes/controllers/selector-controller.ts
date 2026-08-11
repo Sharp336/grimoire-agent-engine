@@ -422,6 +422,15 @@ export class SelectorController {
 	 * This handles side effects and session-specific settings.
 	 */
 	handleSettingChange(id: string, value: unknown): void {
+		if (id === "memory.backend" || id.startsWith("openviking.")) {
+			void this.ctx.session.reconcileMemoryBackend().catch(error => {
+				this.ctx.showError(
+					`Failed to apply memory backend settings: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			});
+			return;
+		}
+
 		// Discovery provider toggles
 		if (id.startsWith("discovery.")) {
 			const providerId = id.replace("discovery.", "");
@@ -1584,7 +1593,11 @@ export class SelectorController {
 		}
 		// Switch session via AgentSession (emits hook and tool session events). The
 		// SessionManager adopts the resumed session's own cwd when it differs.
-		await this.ctx.session.switchSession(sessionPath);
+		const switched = await this.ctx.session.switchSession(sessionPath);
+		if (!switched) {
+			this.ctx.showStatus("Session resume cancelled");
+			return false;
+		}
 		this.ctx.clearTransientSessionUi();
 		const newCwd = this.ctx.sessionManager.getCwd();
 		const movedProject = normalizePathForComparison(newCwd) !== normalizePathForComparison(previousCwd);

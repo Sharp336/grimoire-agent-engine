@@ -322,6 +322,10 @@ function redactShareEntry(
 			return {
 				...entry,
 				systemPrompt: o.obfuscate(entry.systemPrompt, sharedRegexSecretValues),
+				subagentSystemPrompt:
+					entry.subagentSystemPrompt === undefined
+						? undefined
+						: o.obfuscate(entry.subagentSystemPrompt, sharedRegexSecretValues),
 				task: o.obfuscate(entry.task, sharedRegexSecretValues),
 				outputSchema: undefined,
 			};

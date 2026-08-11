@@ -45,7 +45,9 @@ import {
 	type ModelChangeEntry,
 	type NewSessionOptions,
 	type ResetBoundaryEntry,
+	SESSION_CWD_TRANSITION_CUSTOM_TYPE,
 	type ServiceTierChangeEntry,
+	type SessionCwdTransitionData,
 	type SessionEntry,
 	type SessionHeader,
 	type SessionInitEntry,
@@ -59,7 +61,12 @@ import {
 	type UsageStatistics,
 } from "./session-entries";
 import { findMostRecentSession, listAllSessions, listSessions, type SessionInfo } from "./session-listing";
-import { loadEntriesFromFile, readTitleSlotFromFile, resolveBlobRefsInEntries } from "./session-loader";
+import {
+	loadEntriesFromFile,
+	parseSessionContent,
+	readTitleSlotFromFile,
+	resolveBlobRefsInEntries,
+} from "./session-loader";
 import { generateId, migrateToCurrentVersion } from "./session-migrations";
 import {
 	computeDefaultSessionDir,
@@ -82,6 +89,7 @@ import {
 } from "./session-workspace";
 
 const JSONL_SUFFIX_LENGTH = ".jsonl".length;
+const SESSION_IDENTITY_PREFIX_BYTES = 16 * 1024;
 const DRAFT_ONLY_SESSION_MARKER = ".draft-only-session";
 
 function mintSessionId(): string {
@@ -1143,6 +1151,47 @@ export class SessionManager {
 		this.#index.setLeaf(restoredLeaf && this.#index.has(restoredLeaf) ? restoredLeaf : null);
 	}
 
+	#latestCwdTransition(): SessionCwdTransitionData | undefined {
+		for (const entry of this.#entries.toReversed()) {
+			if (
+				entry.type !== "custom" ||
+				entry.customType !== SESSION_CWD_TRANSITION_CUSTOM_TYPE ||
+				!entry.data ||
+				typeof entry.data !== "object"
+			)
+				continue;
+			const data = entry.data as Record<string, unknown>;
+			if (data.version === 1 && typeof data.fromCwd === "string" && typeof data.toCwd === "string") {
+				return { version: 1, fromCwd: data.fromCwd, toCwd: data.toCwd };
+			}
+		}
+		return undefined;
+	}
+
+	#createCwdTransitionEntry(fromCwd: string, toCwd: string): CustomEntry<SessionCwdTransitionData> | undefined {
+		const resolvedFrom = path.resolve(fromCwd);
+		const resolvedTo = path.resolve(toCwd);
+		if (resolvedFrom === resolvedTo) return undefined;
+		const latest = this.#latestCwdTransition();
+		if (latest && path.resolve(latest.fromCwd) === resolvedFrom && path.resolve(latest.toCwd) === resolvedTo) {
+			return undefined;
+		}
+		return {
+			type: "custom",
+			customType: SESSION_CWD_TRANSITION_CUSTOM_TYPE,
+			data: { version: 1, fromCwd: resolvedFrom, toCwd: resolvedTo },
+			...this.#freshEntryFields(),
+		};
+	}
+
+	/** Persist a cwd boundary discovered outside {@link moveTo}, such as an atomically replaced session file. */
+	recordCwdTransition(fromCwd: string, toCwd: string): string | undefined {
+		const entry = this.#createCwdTransitionEntry(fromCwd, toCwd);
+		if (!entry) return undefined;
+		this.#recordEntry(entry);
+		return entry.id;
+	}
+
 	#draftPath(): string | null {
 		const artifactsDir = this.getArtifactsDir();
 		return artifactsDir ? path.join(artifactsDir, "draft.txt") : null;
@@ -1336,6 +1385,23 @@ export class SessionManager {
 		if (this.sanitizeLoadedOpenAIResponsesReplayMetadata()) this.#rewriteRequired = true;
 	}
 
+	/** Read the persisted identity used to detect transcript replacement even when the path is unchanged. */
+	async inspectSessionFileIdentity(sessionFile: string): Promise<{ id: string; cwd?: string } | null> {
+		try {
+			const [prefix] = await this.#storage.readTextSlices(
+				path.resolve(sessionFile),
+				SESSION_IDENTITY_PREFIX_BYTES,
+				0,
+			);
+			const entries = parseSessionContent(prefix).entries;
+			const header = entries.find(entry => entry.type === "session") as SessionHeader | undefined;
+			if (!header?.id) return null;
+			return { id: header.id, ...(header.cwd ? { cwd: header.cwd } : {}) };
+		} catch {
+			return null;
+		}
+	}
+
 	/** Start a new session. Drains and closes any existing writer first. */
 	async newSession(options?: NewSessionOptions): Promise<string | undefined> {
 		await this.#drainAndCloseWriter();
@@ -1401,11 +1467,9 @@ export class SessionManager {
 	 */
 	async moveTo(newCwd: string, targetSessionDir?: string): Promise<void> {
 		const resolvedCwd = path.resolve(newCwd);
+		const previousCwd = path.resolve(this.#cwd);
 		const resolvedTargetDir = targetSessionDir ? path.resolve(targetSessionDir) : undefined;
-		if (
-			resolvedCwd === path.resolve(this.#cwd) &&
-			(!resolvedTargetDir || resolvedTargetDir === path.resolve(this.#sessionDir))
-		) {
+		if (resolvedCwd === previousCwd && (!resolvedTargetDir || resolvedTargetDir === path.resolve(this.#sessionDir))) {
 			return;
 		}
 
@@ -1497,6 +1561,15 @@ export class SessionManager {
 				this.#artifactManagerSessionFile = null;
 				// Path is repointed; hot-path appends may use `#sessionFile` again.
 				this.#sessionFileRelocating = null;
+			}
+
+			// Insert the boundary after path relocation succeeds but before the
+			// header cwd changes. The following rewrite publishes both together.
+			const cwdTransition = this.#createCwdTransitionEntry(previousCwd, resolvedCwd);
+			if (cwdTransition) {
+				this.#entries.push(cwdTransition);
+				this.#index.insert(cwdTransition);
+				this.#notifyEntryAppended(cwdTransition);
 			}
 
 			this.#cwd = resolvedCwd;
@@ -2127,6 +2200,7 @@ export class SessionManager {
 
 	appendSessionInit(init: {
 		systemPrompt: string;
+		subagentSystemPrompt?: string;
 		task: string;
 		tools: string[];
 		agent?: string;
@@ -2138,6 +2212,8 @@ export class SessionManager {
 		restrictToolNames?: boolean;
 		spawns?: string;
 		readSummarize?: boolean;
+		parentTranscriptId?: string;
+		parentWorkspaceCwd?: string;
 	}): string {
 		const entry: SessionInitEntry = { type: "session_init", ...this.#freshEntryFields(), ...init };
 		this.#recordEntry(entry);
@@ -2620,6 +2696,7 @@ export class SessionManager {
 		cwd: string;
 		init: {
 			systemPrompt: string;
+			subagentSystemPrompt?: string;
 			task: string;
 			tools: string[];
 			agent?: string;
@@ -2630,6 +2707,8 @@ export class SessionManager {
 			restrictToolNames?: boolean;
 			spawns?: string;
 			readSummarize?: boolean;
+			parentTranscriptId?: string;
+			parentWorkspaceCwd?: string;
 		} | null;
 	} | null> {
 		let loaded: FileEntry[];
@@ -2643,6 +2722,7 @@ export class SessionManager {
 		const header = loaded.find(entry => entry.type === "session") as SessionHeader | undefined;
 		let init: {
 			systemPrompt: string;
+			subagentSystemPrompt?: string;
 			task: string;
 			tools: string[];
 			agent?: string;
@@ -2653,12 +2733,17 @@ export class SessionManager {
 			restrictToolNames?: boolean;
 			spawns?: string;
 			readSummarize?: boolean;
+			parentTranscriptId?: string;
+			parentWorkspaceCwd?: string;
 		} | null = null;
 		for (let index = loaded.length - 1; index >= 0; index--) {
 			const entry = loaded[index];
 			if (entry.type === "session_init") {
 				init = {
 					systemPrompt: entry.systemPrompt,
+					...(entry.subagentSystemPrompt !== undefined
+						? { subagentSystemPrompt: entry.subagentSystemPrompt }
+						: {}),
 					task: entry.task,
 					tools: entry.tools,
 					agent: entry.agent,
@@ -2669,6 +2754,8 @@ export class SessionManager {
 					restrictToolNames: entry.restrictToolNames,
 					readSummarize: entry.readSummarize,
 					spawns: entry.spawns,
+					...(entry.parentTranscriptId ? { parentTranscriptId: entry.parentTranscriptId } : {}),
+					...(entry.parentWorkspaceCwd ? { parentWorkspaceCwd: entry.parentWorkspaceCwd } : {}),
 				};
 				break;
 			}

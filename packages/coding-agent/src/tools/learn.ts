@@ -44,7 +44,8 @@ export class LearnTool implements AgentTool<typeof learnSchema> {
 	static createIf(session: ToolSession): LearnTool | null {
 		if (!session.settings.get("autolearn.enabled")) return null;
 		const backend = session.settings.get("memory.backend");
-		if (backend !== "hindsight" && backend !== "mnemopi" && backend !== "local") return null;
+		if (backend !== "hindsight" && backend !== "mnemopi" && backend !== "local" && backend !== "openviking")
+			return null;
 		return new LearnTool(session);
 	}
 
@@ -85,6 +86,33 @@ export class LearnTool implements AgentTool<typeof learnSchema> {
 			);
 			if (!result || result.stored === 0) {
 				throw new Error("Lesson was empty after sanitization; nothing stored.");
+			}
+		} else if (backend === "openviking") {
+			const state = this.session.getOpenVikingSessionState?.();
+			const primary = state?.aliasOf ?? state;
+			if (!primary) {
+				throw new Error("OpenViking backend is not initialised for this session.");
+			}
+			const outcome = await primary.save(params.memory, params.context);
+			if (outcome.status === "failed") {
+				throw new Error(outcome.error);
+			}
+			if (outcome.status === "reconciling") {
+				throw new Error(outcome.message);
+			}
+			if (outcome.status === "queued") {
+				memoryMessage =
+					outcome.reason === "timeout"
+						? "Lesson queued for extraction"
+						: outcome.reason === "aborted"
+							? "Lesson archived; extraction status check interrupted"
+							: "Lesson archived; extraction status unavailable";
+			}
+			if (outcome.status === "completed") {
+				memoryMessage =
+					outcome.extracted === 0
+						? "Lesson processed; no durable memory extracted"
+						: "Lesson extraction completed; durable-memory count unavailable";
 			}
 		} else {
 			const state = this.session.getHindsightSessionState?.();

@@ -10,6 +10,15 @@ export const SESSION_TITLE_SLOT_ENTRY_TYPE = "title";
 
 export const TITLE_CHANGE_ENTRY_TYPE = "title_change";
 
+/** Durable boundary written atomically with a session cwd change. */
+export const SESSION_CWD_TRANSITION_CUSTOM_TYPE = "session-cwd-transition";
+
+export interface SessionCwdTransitionData {
+	version: 1;
+	fromCwd: string;
+	toCwd: string;
+}
+
 export type SessionTitleSource = "auto" | "user";
 
 /** Fixed-width first-line slot carrying the mutable current session title. */
@@ -205,6 +214,13 @@ export interface SessionInitEntry extends SessionEntryBase {
 	type: "session_init";
 	/** Full system prompt sent to the model */
 	systemPrompt: string;
+	/**
+	 * Subagent-specific prompt block, excluding the runtime-generated harness,
+	 * project context, and memory backend instructions. Cold revival combines
+	 * this with the current runtime prompt so backend switches do not resurrect
+	 * stale memory guidance. Absent on older session files.
+	 */
+	subagentSystemPrompt?: string;
 	/** Initial task/user message */
 	task: string;
 	/** Tools available to the agent */
@@ -227,6 +243,10 @@ export interface SessionInitEntry extends SessionEntryBase {
 	spawns?: string;
 	/** The agent's `readSummarize` setting (`false` = read summarization disabled); absent uses the session default. */
 	readSummarize?: boolean;
+	/** Parent AgentSession transcript id captured at child creation. */
+	parentTranscriptId?: string;
+	/** Parent workspace captured at child creation. */
+	parentWorkspaceCwd?: string;
 }
 
 /** Mode change entry - tracks agent mode transitions (e.g. plan mode). */

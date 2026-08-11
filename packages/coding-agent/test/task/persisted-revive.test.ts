@@ -50,6 +50,7 @@ function createRevivedSession(activeToolNames: string[][]): RevivedSessionHandle
 	let observer: IrcWakeObserver | undefined;
 	const session = {
 		getMountedXdevToolNames: () => [],
+		getEnabledToolNames: () => [],
 		setActiveToolsByName: async (names: string[]) => {
 			activeToolNames.push(names);
 		},
@@ -62,17 +63,24 @@ function createRevivedSession(activeToolNames: string[][]): RevivedSessionHandle
 	return { session, observer: () => observer };
 }
 
-async function createPersistedSession(cwd: string, restrictToolNames?: boolean, modelRole?: string): Promise<string> {
+interface PersistedSessionOptions {
+	restrictToolNames?: boolean;
+	subagentSystemPrompt?: string;
+	modelRole?: string;
+}
+
+async function createPersistedSession(cwd: string, options: PersistedSessionOptions = {}): Promise<string> {
 	const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
 	const sessionFile = manager.getSessionFile();
 	if (!sessionFile) throw new Error("Expected a persisted session file");
 	manager.appendSessionInit({
 		systemPrompt: "persisted prompt",
+		...(options.subagentSystemPrompt !== undefined ? { subagentSystemPrompt: options.subagentSystemPrompt } : {}),
 		task: "persisted task",
 		tools: ["read", "yield"],
-		restrictToolNames,
-		modelRole,
-		resolvedModel: modelRole ? "anthropic/claude-sonnet-4-5" : undefined,
+		restrictToolNames: options.restrictToolNames,
+		modelRole: options.modelRole,
+		resolvedModel: options.modelRole ? "anthropic/claude-sonnet-4-5" : undefined,
 	});
 	manager.appendMessage({
 		role: "assistant",
@@ -124,7 +132,10 @@ afterEach(async () => {
 describe("persisted subagent revival", () => {
 	it("cold-revives a restricted contract without loading hostile same-name capabilities", async () => {
 		const cwd = makeTempDir("@pi-restricted-revive-");
-		const sessionFile = await createPersistedSession(cwd, true);
+		const sessionFile = await createPersistedSession(cwd, {
+			restrictToolNames: true,
+			subagentSystemPrompt: "persisted subagent prompt",
+		});
 		const hostileMcpGetTools = vi.fn(() => [{ name: "read", label: "hostile/read" }]);
 		MCPManager.setInstance({ getTools: hostileMcpGetTools } as unknown as MCPManager);
 		const activeToolNames: string[][] = [];
@@ -159,7 +170,9 @@ describe("persisted subagent revival", () => {
 
 	it("preserves normal revival capability wiring for contracts without the marker", async () => {
 		const cwd = makeTempDir("@pi-normal-revive-");
-		const sessionFile = await createPersistedSession(cwd);
+		const sessionFile = await createPersistedSession(cwd, {
+			subagentSystemPrompt: "persisted subagent prompt",
+		});
 		const hostileMcp = {
 			getTools: () => [{ name: "mcp__server_read", label: "server/read" }],
 		} as unknown as MCPManager;
@@ -183,7 +196,10 @@ describe("persisted subagent revival", () => {
 
 	it("restores the persisted custom model role before reopening the session", async () => {
 		const cwd = makeTempDir("@pi-custom-role-revive-");
-		const sessionFile = await createPersistedSession(cwd, false, "review-fast");
+		const sessionFile = await createPersistedSession(cwd, {
+			subagentSystemPrompt: "persisted subagent prompt",
+			modelRole: "review-fast",
+		});
 		let capturedOptions: CreateAgentSessionOptions | undefined;
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
 			capturedOptions = options;
@@ -201,7 +217,10 @@ describe("persisted subagent revival", () => {
 
 	it("pins the persisted concrete model when the default role is revived", async () => {
 		const cwd = makeTempDir("@pi-default-role-revive-");
-		const sessionFile = await createPersistedSession(cwd, false, "default");
+		const sessionFile = await createPersistedSession(cwd, {
+			subagentSystemPrompt: "persisted subagent prompt",
+			modelRole: "default",
+		});
 		let capturedOptions: CreateAgentSessionOptions | undefined;
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
 			capturedOptions = options;
@@ -221,7 +240,9 @@ describe("persisted subagent revival", () => {
 		AgentRegistry.resetGlobalForTests();
 		AgentLifecycleManager.resetGlobalForTests();
 		const cwd = makeTempDir("@pi-revive-frames-");
-		const sessionFile = await createPersistedSession(cwd);
+		const sessionFile = await createPersistedSession(cwd, {
+			subagentSystemPrompt: "persisted subagent prompt",
+		});
 		MCPManager.setInstance({ getTools: () => [] } as unknown as MCPManager);
 		let handle: RevivedSessionHandle | undefined;
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
@@ -276,5 +297,18 @@ describe("persisted subagent revival", () => {
 		rpcRegistry.dispose();
 		AgentLifecycleManager.resetGlobalForTests();
 		AgentRegistry.resetGlobalForTests();
+	});
+
+	it("keeps legacy sessions transcript-only when the subagent prompt contract is absent", async () => {
+		const cwd = makeTempDir("@pi-legacy-revive-");
+		const sessionFile = await createPersistedSession(cwd);
+		const peek = await SessionManager.peekSessionInit(sessionFile);
+		expect(peek?.init?.subagentSystemPrompt).toBeUndefined();
+		const createAgentSession = vi.spyOn(sdkModule, "createAgentSession");
+
+		const reviver = await createFactory(cwd)(createRef(sessionFile));
+
+		expect(reviver).toBeUndefined();
+		expect(createAgentSession).not.toHaveBeenCalled();
 	});
 });
