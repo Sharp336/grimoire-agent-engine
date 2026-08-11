@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { CURSOR_MARKER } from "@oh-my-pi/pi-tui";
+import { CURSOR_MARKER, ImageBudget, ImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
 import { setKittyProtocolActive } from "@oh-my-pi/pi-tui/keys";
 import { $ } from "bun";
 import { getDefaultPasteImageKeys } from "../../../src/config/keybindings";
@@ -105,6 +105,80 @@ describe("CustomEditor restored image drafts", () => {
 			text: "Inspect [Image #1, 1x1]",
 			images: [image],
 		});
+	});
+});
+
+describe("CustomEditor pasted image preview", () => {
+	const originalProtocol = TERMINAL.imageProtocol;
+	const terminal = TERMINAL as unknown as { imageProtocol: ImageProtocol | null };
+	const image: ImageContent = {
+		type: "image",
+		data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg==",
+		mimeType: "image/png",
+	};
+
+	beforeAll(async () => {
+		await initTheme();
+	});
+
+	beforeEach(() => {
+		terminal.imageProtocol = ImageProtocol.Kitty;
+	});
+
+	afterEach(() => {
+		terminal.imageProtocol = originalProtocol;
+	});
+
+	it("renders an opt-in preview above the image marker and retires it when the draft clears", () => {
+		const budget = new ImageBudget(8, () => {});
+		const editor = new CustomEditor(getEditorTheme());
+		editor.setImagePreviewBudget(budget);
+		editor.setMaxHeight(10);
+		editor.pendingImages = [image];
+		editor.setText("[Image #1, 1x1] describe this");
+
+		budget.beginPass();
+		const disabledRender = editor.render(50).join("\n");
+		budget.endPass();
+		expect(disabledRender).not.toContain("\x1b_Ga=p");
+
+		editor.setImagePreviewEnabled(true);
+		budget.beginPass();
+		const enabledRender = editor.render(50).join("\n");
+		budget.endPass();
+		expect(enabledRender).toContain("\x1b_Ga=p");
+		expect(enabledRender.indexOf("\x1b_Ga=p")).toBeLessThan(enabledRender.indexOf("[Image #1"));
+		expect(budget.takeTransmits()).toHaveLength(1);
+
+		editor.pendingImages = [];
+		expect(budget.takePurgeIds()).toHaveLength(1);
+		budget.beginPass();
+		const clearedRender = editor.render(50).join("\n");
+		budget.endPass();
+		expect(clearedRender).not.toContain("\x1b_Ga=p");
+	});
+
+	it("converts resized non-PNG drafts before rendering them with Kitty", async () => {
+		const budget = new ImageBudget(8, () => {});
+		const repaint = Promise.withResolvers<void>();
+		const editor = new CustomEditor(getEditorTheme());
+		editor.setImagePreviewBudget(budget);
+		editor.setImagePreviewRepaintHandler(() => repaint.resolve());
+		editor.setImagePreviewEnabled(true);
+		editor.setMaxHeight(10);
+		editor.pendingImages = [{ ...image, mimeType: "image/webp" }];
+
+		budget.beginPass();
+		expect(editor.render(50).join("\n")).not.toContain("\x1b_Ga=p");
+		budget.endPass();
+
+		await repaint.promise;
+		budget.beginPass();
+		const convertedRender = editor.render(50).join("\n");
+		budget.endPass();
+
+		expect(convertedRender).toContain("\x1b_Ga=p");
+		expect(budget.takeTransmits()).toHaveLength(1);
 	});
 });
 

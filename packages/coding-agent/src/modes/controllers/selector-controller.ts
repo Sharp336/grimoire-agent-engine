@@ -506,6 +506,7 @@ export class SelectorController {
 			case "terminal.showImages":
 			case "showImages": {
 				const visible = value as boolean;
+				this.ctx.editor.setImagePreviewEnabled(visible && this.ctx.settings.get("tui.pastedImagePreview"));
 				for (const child of this.ctx.chatContainer.children) {
 					if (child instanceof ToolExecutionComponent) {
 						child.setShowImages(visible);
@@ -517,6 +518,10 @@ export class SelectorController {
 				this.ctx.ui.resetDisplay();
 				break;
 			}
+			case "tui.pastedImagePreview":
+				this.ctx.editor.setImagePreviewEnabled((value as boolean) && this.ctx.settings.get("terminal.showImages"));
+				this.ctx.ui.requestRender();
+				break;
 			case "hideThinkingBlock":
 				this.ctx.hideThinkingBlock = value as boolean;
 				for (const child of this.ctx.chatContainer.children) {

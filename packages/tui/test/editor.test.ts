@@ -2748,4 +2748,26 @@ describe("Editor component", () => {
 			expect(editor.getText()).toBe("single line");
 		});
 	});
+	describe("header component", () => {
+		it("renders header rows inside the editor border above the draft", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setHeaderComponent({ render: () => ["preview"] });
+			editor.setText("draft");
+
+			const lines = editor.render(24).map(line => stripVTControlCharacters(line));
+
+			expect(lines).toHaveLength(3);
+			expect(lines[1]).toMatch(/^\| {2}preview/);
+			expect(lines[2]).toContain("draft");
+		});
+
+		it("counts header rows against the editor height cap", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setHeaderComponent({ render: () => ["preview 1", "preview 2"] });
+			editor.setMaxHeight(5);
+			editor.setText("one\ntwo\nthree");
+
+			expect(editor.render(24)).toHaveLength(4);
+		});
+	});
 });

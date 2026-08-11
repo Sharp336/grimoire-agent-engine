@@ -142,6 +142,24 @@ export class ImageBudget {
 	}
 
 	/**
+	 * Release a keyed image that has left the component tree.
+	 *
+	 * Kitty keeps transmitted image data after text rows disappear, so ephemeral
+	 * placements such as composer previews must explicitly retire their id.
+	 */
+	releaseKey(key: string): void {
+		const id = this.#keyToId.get(key);
+		if (id === undefined) return;
+		this.#keyToId.delete(key);
+		this.#idToKey.delete(id);
+		this.#suppressedIds.delete(id);
+		if (this.#transmitted.delete(id) && !this.#purgeIds.includes(id)) {
+			this.#purgeIds.push(id);
+		}
+		this.#requestRender();
+	}
+
+	/**
 	 * Begin a render pass. Called by the renderer before composing the frame.
 	 * Pass `stable: true` for a partial/throwaway pass that does not walk the
 	 * whole tree in display order (the resize viewport fast path): {@link observe}

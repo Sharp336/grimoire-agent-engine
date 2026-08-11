@@ -516,6 +516,8 @@ export class Editor implements Component, Focusable {
 	#topBorderContent?: EditorTopBorder;
 	#topBorderProvider?: (availableWidth: number) => EditorTopBorder | undefined;
 	#borderVisible = true;
+	/** Optional content rendered inside the editor chrome above the text buffer. */
+	#headerComponent?: Component;
 
 	constructor(theme: EditorTheme) {
 		this.#theme = theme;
@@ -551,6 +553,16 @@ export class Editor implements Component, Focusable {
 	 */
 	setTopBorderProvider(provider: ((availableWidth: number) => EditorTopBorder | undefined) | undefined): void {
 		this.#topBorderProvider = provider;
+	}
+
+	/**
+	 * Render a component inside the editor border above the text buffer.
+	 *
+	 * Header rows count toward {@link #maxHeight}, so the text buffer keeps at
+	 * least one visible row while previews or other composer chrome are shown.
+	 */
+	setHeaderComponent(component: Component | undefined): void {
+		this.#headerComponent = component;
 	}
 
 	/**
@@ -694,7 +706,7 @@ export class Editor implements Component, Focusable {
 	}
 
 	invalidate(): void {
-		// No cached state to invalidate currently
+		this.#headerComponent?.invalidate?.();
 	}
 
 	#getEditorPaddingX(): number {
@@ -739,10 +751,10 @@ export class Editor implements Component, Focusable {
 		return Math.max(1, contentWidth - cursorReserve);
 	}
 
-	#getVisibleContentHeight(contentLines: number): number {
+	#getVisibleContentHeight(contentLines: number, headerRows = 0): number {
 		if (this.#maxHeight === undefined) return contentLines;
 		const verticalChrome = this.#borderVisible ? 2 : 0;
-		return Math.max(1, this.#maxHeight - verticalChrome);
+		return Math.max(1, this.#maxHeight - verticalChrome - headerRows);
 	}
 
 	/** Apply the optional input decorator to a plain (ANSI-free) text segment.
@@ -870,9 +882,10 @@ export class Editor implements Component, Focusable {
 		const bottomLeft = this.borderColor(`${box.bottomLeft}${box.horizontal}${padding(Math.max(0, paddingX - 1))}`);
 		const horizontal = this.borderColor(box.horizontal);
 
+		const headerLines = this.#headerComponent?.render(contentAreaWidth) ?? [];
 		// Layout the text
 		const layoutLines = this.#layoutText(layoutWidth);
-		const visibleContentHeight = this.#getVisibleContentHeight(layoutLines.length);
+		const visibleContentHeight = this.#getVisibleContentHeight(layoutLines.length, headerLines.length);
 		this.#updateScrollOffset(layoutWidth, layoutLines, visibleContentHeight);
 		const visibleLayoutLines = layoutLines.slice(this.#scrollOffset, this.#scrollOffset + visibleContentHeight);
 
@@ -917,6 +930,23 @@ export class Editor implements Component, Focusable {
 			} else {
 				result.push(topLeft + horizontal.repeat(topFillWidth) + topRight);
 			}
+		}
+
+		// Header rows share the editor's side chrome and horizontal padding. This
+		// keeps terminal image placements anchored inside the composer instead of
+		// creating a separate box above it.
+		for (const rawLine of headerLines) {
+			const rawWidth = visibleWidth(rawLine);
+			const displayText = rawWidth > contentAreaWidth ? sliceByColumn(rawLine, 0, contentAreaWidth, true) : rawLine;
+			const displayWidth = rawWidth > contentAreaWidth ? visibleWidth(displayText) : rawWidth;
+			const linePad = padding(Math.max(0, contentAreaWidth - displayWidth));
+			if (!borderVisible) {
+				result.push((promptGutter?.continuation ?? "") + displayText + linePad);
+				continue;
+			}
+			const leftBorder = this.borderColor(`${box.vertical}${padding(paddingX)}`);
+			const rightBorder = this.borderColor(`${padding(paddingX)}${box.vertical}`);
+			result.push(leftBorder + displayText + linePad + rightBorder);
 		}
 
 		// Render each layout line

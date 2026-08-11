@@ -843,6 +843,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"tui.pastedImagePreview": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "appearance",
+			group: "Images",
+			label: "Preview Pasted Images",
+			description: "Show the most recently pasted image above the prompt while it is attached",
+			condition: "hasImageProtocol",
+		},
+	},
+
 	"images.autoResize": {
 		type: "boolean",
 		default: true,

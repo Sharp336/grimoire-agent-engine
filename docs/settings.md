@@ -675,6 +675,7 @@ tui:
 | `statusLine.transparent`    | boolean | `false`          | Use the terminal background for the status line.                          |
 | `statusLine.showHookStatus` | boolean | `true`           | Show hook status messages.                                                |
 | `terminal.showImages`       | boolean | `true`           | Render images inline (when the terminal supports it).                     |
+| `tui.pastedImagePreview`    | boolean | `false`          | Preview the latest pasted image inside the prompt composer.               |
 | `images.autoResize`         | boolean | `true`           | Resize large images for model compatibility.                              |
 | `images.blockImages`        | boolean | `false`          | Never send images to providers.                                           |
 | `tui.hyperlinks`            | enum    | `auto`           | `off`, `auto`, `always`.                                                  |

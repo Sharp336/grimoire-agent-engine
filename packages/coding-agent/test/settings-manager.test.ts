@@ -397,6 +397,12 @@ describe("Settings", () => {
 			expect(settings.get("tui.maxInlineImages")).toBe(8);
 		});
 
+		it("keeps pasted image previews opt-in", async () => {
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("tui.pastedImagePreview")).toBe(false);
+			expect(getDefault("tui.pastedImagePreview")).toBe(false);
+		});
+
 		it("keeps native terminal progress disabled by default", async () => {
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			expect(settings.get("terminal.showProgress")).toBe(false);
