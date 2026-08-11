@@ -441,6 +441,16 @@ function tryRealpath(p: string): string | undefined {
 	}
 }
 
+function isSourceCheckoutLauncher(ompPath: string): boolean {
+	const resolved = tryRealpath(ompPath);
+	if (!resolved) return false;
+	return resolved.endsWith(path.join("packages", "coding-agent", "scripts", "omp"));
+}
+
+export function isSourceCheckoutLauncherForTest(ompPath: string): boolean {
+	return isSourceCheckoutLauncher(ompPath);
+}
+
 function isPathInDirectoryLexical(filePath: string, directoryPath: string): boolean {
 	const normalizedPath = normalizePathForComparison(path.resolve(filePath));
 	const normalizedDirectory = normalizePathForComparison(path.resolve(directoryPath));
@@ -637,6 +647,12 @@ async function resolveUpdateTarget(options: { allowPackageManagers: boolean }): 
 	const miseBinDirs = miseAvailable ? await getMiseBinDirs() : [];
 	const miseDataDir = miseAvailable ? getMiseDataDir() : undefined;
 	const ompPath = resolveOmpPath();
+
+	if (ompPath && isSourceCheckoutLauncher(ompPath)) {
+		throw new Error(
+			"This omp command is linked to a source checkout. Self-update is disabled so `omp update` cannot replace the custom source link. Update the checkout, then keep using the linked launcher.",
+		);
+	}
 
 	if (ompPath) {
 		return resolveUpdateTargetFromPath(ompPath, bunBinDir, {

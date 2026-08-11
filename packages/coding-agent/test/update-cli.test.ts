@@ -16,6 +16,7 @@ import {
 	downloadVerifiedBinary,
 	isMuslLinuxForTest,
 	migrateRenamedInstall,
+	isSourceCheckoutLauncherForTest,
 	parseUpdateArgs,
 	pruneBunInstallCache,
 	type ReleaseInfo,
@@ -116,6 +117,19 @@ describe("update-cli install target detection", () => {
 		);
 
 		expect(method).toBe("nix");
+	});
+
+	it("recognizes a source-checkout launcher through a PATH symlink", async () => {
+		const dir = await makeTempDir();
+		const launcher = path.join(dir, "repo", "packages", "coding-agent", "scripts", "omp");
+		const binDir = path.join(dir, "bin");
+		await fs.mkdir(path.dirname(launcher), { recursive: true });
+		await fs.mkdir(binDir, { recursive: true });
+		await Bun.write(launcher, "#!/bin/sh\n");
+		const linked = path.join(binDir, "omp");
+		await fs.symlink(launcher, linked);
+
+		expect(isSourceCheckoutLauncherForTest(linked)).toBe(true);
 	});
 
 	it("uses bun update when prioritized omp is inside bun global bin", () => {
