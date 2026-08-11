@@ -87,16 +87,34 @@ interface RevivingAgent {
 }
 
 export class AgentLifecycleManager {
+	/**
+	 * One manager per AgentRegistry — mirrors IrcBus.forRegistry so the per-registry
+	 * (registry, bus, lifecycle) trio stays consistent: the root + its subagents share the
+	 * process-global registry (one manager, so Main<->Scout adoption/revival works), while an
+	 * isolated session registry gets its own manager owning ONLY its refs. Weak so a manager is
+	 * collected with its registry; #global caches the global-registry manager for a deterministic,
+	 * order-independent test reset.
+	 */
+	static #managers = new WeakMap<AgentRegistry, AgentLifecycleManager>();
 	static #global: AgentLifecycleManager | undefined;
 
-	static global(): AgentLifecycleManager {
-		if (!AgentLifecycleManager.#global) {
-			AgentLifecycleManager.#global = new AgentLifecycleManager();
+	/** The manager owning `registry`'s adopted-subagent lifecycle, created on first use. */
+	static forRegistry(registry: AgentRegistry = AgentRegistry.global()): AgentLifecycleManager {
+		let manager = AgentLifecycleManager.#managers.get(registry);
+		if (!manager) {
+			manager = new AgentLifecycleManager(registry);
+			AgentLifecycleManager.#managers.set(registry, manager);
 		}
-		return AgentLifecycleManager.#global;
+		if (registry === AgentRegistry.global()) AgentLifecycleManager.#global = manager;
+		return manager;
 	}
 
-	/** Reset the global manager. Test-only. */
+	/** The manager for the process-global registry — the default for the root session and subagents. */
+	static global(): AgentLifecycleManager {
+		return AgentLifecycleManager.forRegistry(AgentRegistry.global());
+	}
+
+	/** Reset the global registry's manager. Test-only. */
 	static resetGlobalForTests(): void {
 		const current = AgentLifecycleManager.#global;
 		if (current) {
@@ -109,6 +127,7 @@ export class AgentLifecycleManager {
 			current.#revivals.clear();
 			current.#parks.clear();
 			current.#persistedReviverFactory = undefined;
+			AgentLifecycleManager.#managers.delete(current.#registry);
 		}
 		AgentLifecycleManager.#global = undefined;
 	}

@@ -275,10 +275,8 @@ function installSubagentRetryFallbackChain(args: {
 	return role;
 }
 
-function renderIrcPeerRoster(selfId: string): string {
-	const peers = AgentRegistry.global()
-		.list()
-		.filter(ref => ref.id !== selfId && ref.status !== "aborted" && ref.kind !== "advisor");
+function renderIrcPeerRoster(selfId: string, registry: AgentRegistry): string {
+	const peers = registry.list().filter(ref => ref.id !== selfId && ref.status !== "aborted" && ref.kind !== "advisor");
 	if (peers.length === 0) return "- (no other agents)";
 	const lines = peers.map(
 		peer =>
@@ -910,6 +908,8 @@ const MAX_YIELD_TOOL_ERRORS = 6;
 interface RunMonitorArgs {
 	index: number;
 	id: string;
+	/** Registry this subagent's status/activity + IRC roster are keyed to. */
+	registry: AgentRegistry;
 	agent: AgentDefinition;
 	task: string;
 	assignment?: string;
@@ -1251,7 +1251,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		onProgress?.({ ...progress });
 		const activityGist =
 			progress.lastIntent ?? (progress.currentTool ? `running ${progress.currentTool}` : undefined);
-		if (activityGist) AgentRegistry.global().setActivity(id, activityGist);
+		if (activityGist) args.registry.setActivity(id, activityGist);
 		if (args.eventBus) {
 			args.eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, {
 				index,
@@ -2277,6 +2277,8 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 export interface IrcWakeTurnMonitorOptions {
 	/** Registry id of the kept-alive subagent whose autonomous IRC wake turns are monitored. */
 	id: string;
+	/** Registry the subagent belongs to; defaults to the process-global one. */
+	registry?: AgentRegistry;
 	index?: number;
 	agent: AgentDefinition;
 	description?: string;
@@ -2306,6 +2308,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 	const { id, agent } = options;
 	const index = options.index ?? 0;
 	const maxRuntimeMs = options.maxRuntimeMs ?? 0;
+	const registry = options.registry ?? AgentRegistry.global();
 	session.setIrcWakeTurnObserver(records => {
 		const ircTask =
 			records
@@ -2319,10 +2322,11 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 				.filter(Boolean)
 				.join("\n\n") || "IRC follow-up";
 		const turnStartTime = Date.now();
-		const sessionFile = AgentRegistry.global().get(id)?.sessionFile ?? options.sessionFile ?? undefined;
+		const sessionFile = registry.get(id)?.sessionFile ?? options.sessionFile ?? undefined;
 		const turnMonitor = createSubagentRunMonitor({
 			index,
 			id,
+			registry,
 			agent,
 			task: ircTask,
 			description: options.description,
@@ -2415,6 +2419,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
  */
 export async function finalizeSubagentLifecycle(args: {
 	id: string;
+	registry: AgentRegistry;
 	session: AgentSession;
 	aborted: boolean;
 	/** Which watchdog (if any) requested the abort; decides revivability. */
@@ -2426,7 +2431,7 @@ export async function finalizeSubagentLifecycle(args: {
 	cleanupDeadlineAt?: number;
 	onCleanupDeferred?: (completion: Promise<void>) => void;
 }): Promise<void> {
-	const registry = AgentRegistry.global();
+	const registry = args.registry;
 	const ref = registry.get(args.id);
 	const ownsRef = Boolean(ref && ref.session === args.session);
 	const cleanupDeadlineAt = args.cleanupDeadlineAt ?? Date.now() + 5000;
@@ -2457,7 +2462,7 @@ export async function finalizeSubagentLifecycle(args: {
 		if (ref && ownsRef) {
 			if (args.abortKind === "shutdown") {
 				try {
-					await AgentLifecycleManager.global().release(args.id, ref);
+					await AgentLifecycleManager.forRegistry(registry).release(args.id, ref);
 				} catch (error) {
 					logger.warn("runSubagent: failed to release session during manager shutdown", {
 						id: args.id,
@@ -2471,7 +2476,7 @@ export async function finalizeSubagentLifecycle(args: {
 				// decision is durable and a restart cannot rediscover the transcript
 				// as a revivable parked agent.
 				try {
-					await AgentLifecycleManager.global().release(args.id, ref, { tombstone: true });
+					await AgentLifecycleManager.forRegistry(registry).release(args.id, ref, { tombstone: true });
 				} catch (error) {
 					logger.warn("runSubagent: failed to persist kill tombstone", { id: args.id, error: String(error) });
 					registry.setStatus(args.id, "aborted", ref);
@@ -2510,7 +2515,7 @@ export async function finalizeSubagentLifecycle(args: {
 		await disposeSession();
 		return;
 	}
-	AgentLifecycleManager.global().adopt(
+	AgentLifecycleManager.forRegistry(registry).adopt(
 		args.id,
 		{
 			idleTtlMs: args.agentIdleTtlMs,
@@ -2524,6 +2529,8 @@ export async function finalizeSubagentLifecycle(args: {
 export interface FollowUpTurnOptions {
 	/** Registry id of the (live or parked) subagent to continue. */
 	id: string;
+	/** Registry the subagent belongs to; defaults to the process-global one. */
+	registry?: AgentRegistry;
 	/** Agent definition the session was originally spawned with (drives progress labels + finalize). */
 	agent: AgentDefinition;
 	/** The follow-up message; sent as the turn's user prompt. */
@@ -2561,13 +2568,15 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	const { id, agent, message, signal } = options;
 	const index = options.index ?? 0;
 	const startTime = Date.now();
-	const session = await AgentLifecycleManager.global().ensureLive(id);
-	const ref = AgentRegistry.global().get(id);
+	const registry = options.registry ?? AgentRegistry.global();
+	const session = await AgentLifecycleManager.forRegistry(registry).ensureLive(id);
+	const ref = registry.get(id);
 	const sessionFile = ref?.sessionFile ?? undefined;
 
 	const monitor = createSubagentRunMonitor({
 		index,
 		id,
+		registry,
 		agent,
 		task: message,
 		description: options.description,
@@ -2656,6 +2665,14 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		onProgress,
 	} = options;
 	const startTime = Date.now();
+
+	// The registry this subagent belongs to: a custom one for an isolated SDK
+	// embedder, else the process-global registry. Its paired IrcBus +
+	// AgentLifecycleManager (both keyed by it) own this subagent's whole
+	// lifecycle — status, activity, roster, adoption, revival, teardown — so a
+	// custom-registry session keeps its finished keep-alive subagents rather
+	// than the global manager disposing a ref it cannot see.
+	const registry = options.agentRegistry ?? AgentRegistry.global();
 	// Set by the session's onFirstChatDispatch hook the first time the agent
 	// loop dispatches a chat request to the provider — the launch-complete boundary.
 	let firstChatDispatchAt: number | undefined;
@@ -2762,6 +2779,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	const monitor = createSubagentRunMonitor({
 		index,
 		id,
+		registry,
 		agent,
 		task,
 		assignment,
@@ -2790,15 +2808,16 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	const installRegistryStatusSync = (target: AgentSession): void => {
 		target.subscribe(event => {
 			if (event.type === "agent_start") {
-				AgentRegistry.global().setStatus(id, "running", target);
+				registry.setStatus(id, "running", target);
 			} else if (event.type === "agent_end") {
-				AgentRegistry.global().setStatus(id, "idle", target);
+				registry.setStatus(id, "idle", target);
 			}
 		});
 	};
 	const installIrcWakeTurnMonitor = (target: AgentSession): void => {
 		attachIrcWakeTurnMonitor(target, {
 			id,
+			registry,
 			index,
 			agent,
 			description: options.description,
@@ -3090,7 +3109,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						worktree: worktree ?? "",
 						outputSchema: normalizedOutputSchema,
 						outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
-						ircPeers: ircEnabled ? renderIrcPeerRoster(id) : "",
+						ircPeers: ircEnabled ? renderIrcPeerRoster(id, registry) : "",
 						ircSelfId: ircEnabled ? id : "",
 					});
 					return defaultPrompt.length === 0
@@ -3378,6 +3397,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				}
 				await finalizeSubagentLifecycle({
 					id,
+					registry,
 					session,
 					aborted,
 					abortKind: monitor.abortKind(),
@@ -3480,6 +3500,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		sessionFile: subtaskSessionFile,
 		startTime,
 	});
-	AgentRegistry.global().setHistory(id, { outputPath: result.outputPath });
+	registry.setHistory(id, { outputPath: result.outputPath });
 	return result;
 }

@@ -1716,11 +1716,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getAgentId: () => resolvedAgentId,
 			getToolByName: name => session?.getToolByName(name),
 			agentRegistry,
-			// The global lifecycle releases through AgentRegistry.global(); wiring it
-			// onto a caller-supplied registry would report a cancel while releasing an
-			// unrelated global ref. With no lifecycle, hub cancel falls back to
-			// dispose + unregister on the session's own registry.
-			agentLifecycle: options.agentRegistry ? undefined : () => AgentLifecycleManager.global(),
+			// Hub cancel/revive routes through the AgentLifecycleManager paired with this
+			// session's registry (the same one IrcBus.forRegistry uses), so a custom per-session
+			// registry releases its OWN refs — never an unrelated global one — and the global
+			// case stays identical (forRegistry(global) === global()).
+			agentLifecycle: () => AgentLifecycleManager.forRegistry(agentRegistry),
 			getSessionSpawns: () => options.spawns ?? "*",
 			getModelString: () => (hasExplicitModel && model ? formatModelString(model) : undefined),
 			getActiveModelString,
