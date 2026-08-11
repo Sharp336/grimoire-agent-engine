@@ -27,6 +27,7 @@ function createToolSession(cwd: string, settings: Settings, overrides: Partial<T
 type GuidedGoalHarness = {
 	mode: InteractiveMode;
 	session: AgentSession;
+	dispatchSessionEvent: (event: AgentSessionEvent) => Promise<void>;
 	settings: Settings;
 	goalTool: GoalTool;
 	tempDir: TempDir;
@@ -37,6 +38,7 @@ async function createHarness(options?: {
 	askEnabled?: boolean;
 	goalEnabled?: boolean;
 	includeAsk?: boolean;
+	initialGoalToolActive?: boolean;
 }): Promise<GuidedGoalHarness> {
 	resetSettingsForTest();
 	const tempDir = TempDir.createSync("@pi-guided-goal-");
@@ -83,6 +85,15 @@ async function createHarness(options?: {
 	});
 	const goalTool = new GoalTool(goalToolSession);
 	toolRegistry.set("goal", goalTool as unknown as Tool);
+	if (options?.initialGoalToolActive) {
+		await session.setActiveToolsByName(["read", "goal"]);
+	}
+	const sessionEventListeners: Array<(event: AgentSessionEvent) => void | Promise<void>> = [];
+	const subscribe = session.subscribe.bind(session);
+	const subscribeSpy = vi.spyOn(session, "subscribe").mockImplementation(listener => {
+		sessionEventListeners.push(listener);
+		return subscribe(listener);
+	});
 	const mode = new InteractiveMode(session, "test");
 	vi.spyOn(mode, "addMessageToChat").mockReturnValue([]);
 	vi.spyOn(mode, "ensureLoadingAnimation").mockImplementation(() => {});
@@ -90,10 +101,16 @@ async function createHarness(options?: {
 	return {
 		mode,
 		session,
+		dispatchSessionEvent: async event => {
+			for (const listener of sessionEventListeners) {
+				await listener(event);
+			}
+		},
 		settings,
 		goalTool,
 		tempDir,
 		cleanup: async () => {
+			subscribeSpy.mockRestore();
 			mode.stop();
 			await session.dispose();
 			authStorage.close();
@@ -112,8 +129,8 @@ describe("guided goal setup", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("activates the ask and goal tools before kicking off the interview", async () => {
-		const harness = await createHarness();
+	it("temporarily activates ask and goal, then restores tools when the interview is abandoned", async () => {
+		const harness = await createHarness({ initialGoalToolActive: true });
 		try {
 			const promptSpy = vi.spyOn(harness.session, "prompt").mockImplementation(async () => {
 				expect(harness.session.getEnabledToolNames()).toEqual(expect.arrayContaining(["ask", "goal"]));
@@ -129,8 +146,54 @@ describe("guided goal setup", () => {
 			// agent how to finish: `goal` tool, op create.
 			expect(text).toContain("automate flaky test triage");
 			expect(text).toContain('op: "create"');
-			// Both tools must be active before the model receives the kickoff.
+			// The unfinished interview must not leak its temporary tools.
+			expect(harness.session.getEnabledToolNames()).toEqual(["read", "goal"]);
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
+	it("restores the previous tools when the kickoff fails before creating a goal", async () => {
+		const harness = await createHarness();
+		try {
+			const showError = vi.spyOn(harness.mode, "showError");
+			vi.spyOn(harness.session, "prompt").mockImplementation(async () => {
+				expect(harness.session.getEnabledToolNames()).toEqual(expect.arrayContaining(["ask", "goal"]));
+				throw new Error("kickoff failed");
+			});
+
+			await harness.mode.handleGuidedGoalCommand("ship it");
+
+			expect(harness.session.getEnabledToolNames()).toEqual(["read"]);
+			expect(showError).toHaveBeenCalledWith("kickoff failed");
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
+	it("keeps cleanup retryable when restoring the previous tools fails", async () => {
+		const harness = await createHarness();
+		try {
+			await harness.mode.init();
+			const setActiveTools = harness.session.setActiveToolsByName.bind(harness.session);
+			let restoreAttempts = 0;
+			vi.spyOn(harness.session, "setActiveToolsByName").mockImplementation(async toolNames => {
+				if (toolNames.length === 1 && toolNames[0] === "read" && restoreAttempts++ < 2) {
+					throw new Error("restore failed");
+				}
+				await setActiveTools(toolNames);
+			});
+			const showError = vi.spyOn(harness.mode, "showError");
+			vi.spyOn(harness.session, "prompt").mockResolvedValue(true);
+
+			await harness.mode.handleGuidedGoalCommand("ship it");
+
+			expect(showError).toHaveBeenCalledWith("restore failed");
 			expect(harness.session.getEnabledToolNames()).toEqual(expect.arrayContaining(["ask", "goal"]));
+
+			await harness.dispatchSessionEvent({ type: "agent_end", messages: [], isTerminal: true });
+
+			expect(harness.session.getEnabledToolNames()).toEqual(["read"]);
 		} finally {
 			await harness.cleanup();
 		}
@@ -151,9 +214,10 @@ describe("guided goal setup", () => {
 		}
 	});
 
-	it("queues the kickoff as a synthetic follow-up while the agent is streaming", async () => {
+	it("keeps queued and non-terminal guided runs on the interview tool slate", async () => {
 		const harness = await createHarness();
 		try {
+			await harness.mode.init();
 			Object.defineProperty(harness.session, "isStreaming", { configurable: true, get: () => true });
 			const promptSpy = vi.spyOn(harness.session, "prompt").mockResolvedValue(true);
 			const followUp = vi.spyOn(harness.session, "followUp").mockResolvedValue();
@@ -163,6 +227,27 @@ describe("guided goal setup", () => {
 			expect(promptSpy).not.toHaveBeenCalled();
 			expect(followUp).toHaveBeenCalledTimes(1);
 			expect(followUp.mock.calls[0]?.[2]).toEqual({ synthetic: true });
+			expect(harness.session.getEnabledToolNames()).toEqual(expect.arrayContaining(["ask", "goal"]));
+
+			await harness.dispatchSessionEvent({ type: "agent_end", messages: [], isTerminal: true });
+			expect(harness.session.getEnabledToolNames()).toEqual(expect.arrayContaining(["ask", "goal"]));
+
+			const kickoff = followUp.mock.calls[0]?.[0];
+			if (!kickoff) throw new Error("expected queued guided-goal kickoff");
+			await harness.dispatchSessionEvent({
+				type: "message_start",
+				message: {
+					role: "developer",
+					content: [{ type: "text", text: kickoff }],
+					attribution: "agent",
+					timestamp: Date.now(),
+				},
+			});
+			await harness.dispatchSessionEvent({ type: "agent_end", messages: [], isTerminal: false });
+			expect(harness.session.getEnabledToolNames()).toEqual(expect.arrayContaining(["ask", "goal"]));
+
+			await harness.dispatchSessionEvent({ type: "agent_end", messages: [], isTerminal: true });
+			expect(harness.session.getEnabledToolNames()).toEqual(["read"]);
 		} finally {
 			await harness.cleanup();
 		}
