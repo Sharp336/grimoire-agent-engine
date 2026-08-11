@@ -145,9 +145,26 @@ export async function ensurePrRemote(
 	}
 
 	const headRepository = requireNonEmpty(data.headRepository?.nameWithOwner, "head repository");
+	const prUrl = requireNonEmpty(data.url, "pull request URL");
+	let canonicalHost: string;
+	try {
+		const parsedUrl = new URL(prUrl);
+		if (
+			(parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") ||
+			parsedUrl.username !== "" ||
+			parsedUrl.password !== "" ||
+			parsedUrl.host === ""
+		) {
+			throw new Error("invalid canonical pull request URL");
+		}
+		canonicalHost = parsedUrl.host;
+	} catch {
+		throw new ToolError("Could not determine the canonical host for the pull request.");
+	}
+	const headRepositorySelector = `${canonicalHost}/${headRepository}`;
 	const repoSummary = await git.github.json<GhRepoViewData>(
 		repoRoot,
-		["repo", "view", headRepository, "--json", GH_REPO_CLONE_FIELDS.join(",")],
+		["repo", "view", headRepositorySelector, "--json", GH_REPO_CLONE_FIELDS.join(",")],
 		signal,
 		{ repoProvided: true },
 	);

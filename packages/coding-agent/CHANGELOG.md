@@ -197,6 +197,10 @@
 
 - Added GitHub issue workflow support: one-hop hierarchy context in `issue://` reads (parent/direct sub-issue links and completion progress), parent-first routing guidance with explicit assignee terminology, approval-gated `issue_create` hierarchy attachment and `issue_state` close/reopen, and forced-fresh single issue/PR reads. Hierarchy/state operations preserve compatibility fallbacks for older `gh` and GitHub Enterprise Server versions; mutations invalidate cached parent summaries.
 
+### Fixed
+
+- Fixed cross-repository `pr_checkout` resolving fork remotes on the wrong GitHub host when checking out a host-qualified GitHub Enterprise Server repository.
+
 ## [17.2.13] - 2026-08-11
 
 ### Added

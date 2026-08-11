@@ -2524,11 +2524,12 @@ describe("github tool", () => {
 		});
 
 		it("checks out a pull request into a worktree and configures contributor push metadata", async () => {
-			vi.spyOn(git.github, "json")
+			const jsonSpy = vi
+				.spyOn(git.github, "json")
 				.mockResolvedValueOnce({
 					number: 123,
 					title: "Contributor fix",
-					url: "https://github.com/base/repo/pull/123",
+					url: "https://ghe.example.test/base/repo/pull/123",
 					baseRefName: "main",
 					headRefName: fixture.headRefName,
 					headRefOid: fixture.headRefOid,
@@ -2544,7 +2545,11 @@ describe("github tool", () => {
 				});
 
 			const tool = new GithubTool(createSession(fixture.repoRoot));
-			const result = await tool.execute("pr-checkout", { op: "pr_checkout", pr: "123" });
+			const result = await tool.execute("pr-checkout", {
+				op: "pr_checkout",
+				pr: "123",
+				repo: "ghe.example.test/base/repo",
+			});
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 			const primaryRoot = (await git.repo.primaryRoot(fixture.repoRoot)) ?? fixture.repoRoot;
 			const worktreePath = await expectedWorktreePath(tempHome.home, primaryRoot, "pr-123");
@@ -2558,6 +2563,12 @@ describe("github tool", () => {
 			expect(cfg).toContain(`branch.pr-123.merge refs/heads/${fixture.headRefName}`);
 			expect(runGit(fixture.repoRoot, ["worktree", "list", "--porcelain"])).toContain(`worktree ${worktreePath}`);
 			expect(runGit(worktreePath, ["branch", "--show-current"])).toBe("pr-123");
+
+			const headRepoViewArgs = jsonSpy.mock.calls
+				.map(([, args]) => args)
+				.find(args => args[0] === "repo" && args[1] === "view");
+			expect(headRepoViewArgs?.slice(0, 2)).toEqual(["repo", "view"]);
+			expect(headRepoViewArgs).toContain("ghe.example.test/contrib/repo");
 		});
 
 		// These assertions are non-mutating (a no-op add and rejected adds), so
