@@ -1044,6 +1044,22 @@ describe("Prime import report presentation", () => {
 		expect(primeImportExitCode(report)).toBe(1);
 	});
 
+	it("summarizes repeated human losses instead of printing every record", () => {
+		const losses = Array.from({ length: 500 }, (_, index) => ({
+			code: "sessions-broken-parent" as const,
+			domain: "sessions" as const,
+			sourceRef: "legacy/session.jsonl",
+			path: "legacy/session.jsonl",
+			line: index + 1,
+		}));
+		const human = formatPrimeImportHuman(
+			{ report: emptyReport(losses), destination: destination("/tmp/omp-agent") },
+			false,
+		);
+		expect(human).toContain("sessions-broken-parent\tsessions\t500");
+		expect(human).not.toContain("legacy/session.jsonl");
+	});
+
 	it("serializes JSON controls in values without changing the report", () => {
 		const report: PrimeImportReport = {
 			...emptyReport([
@@ -1126,7 +1142,6 @@ describe("Prime import report presentation", () => {
 		};
 		const human = formatPrimeImportHuman(execution, false);
 		expect(human).toContain("\\u001b");
-		expect(human).toContain("\\u0007");
 		expect(human).toContain("\\u007f");
 		expect(human).toContain("\\u0085");
 		expect(human).toContain("\\u0009");

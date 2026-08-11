@@ -732,19 +732,20 @@ export function formatPrimeImportHuman(execution: PrimeImportCliExecution, apply
 		`  blobs: ${escapeTerminal(destination.blobsRoot)}`,
 		`Counts: planned=${counts.planned} imported=${counts.imported} skipped=${counts.skipped} lost=${counts.lost}`,
 		"Losses:",
-		"  CODE\tDOMAIN\tSOURCE\tPATH/LINE",
+		"  CODE\tDOMAIN\tCOUNT",
 	];
 	if (report.losses.length === 0) lines.push("  none");
-	else
+	else {
+		const summaries = new Map<string, { code: string; domain: string; count: number }>();
 		for (const loss of report.losses) {
-			const sourceRef = escapeTerminal(loss.sourceRef);
-			const location = loss.path
-				? `${escapeTerminal(loss.path)}${loss.line === undefined ? "" : `:${loss.line}`}`
-				: loss.line === undefined
-					? sourceRef
-					: `${sourceRef}:${loss.line}`;
-			lines.push(`  ${escapeTerminal(loss.code)}\t${escapeTerminal(loss.domain)}\t${sourceRef}\t${location}`);
+			const key = JSON.stringify([loss.code, loss.domain]);
+			const summary = summaries.get(key);
+			if (summary) summary.count++;
+			else summaries.set(key, { code: loss.code, domain: loss.domain, count: 1 });
 		}
+		for (const summary of summaries.values())
+			lines.push(`  ${escapeTerminal(summary.code)}\t${escapeTerminal(summary.domain)}\t${summary.count}`);
+	}
 	lines.push("OAuth re-login:");
 	const oauth = report.items.filter(
 		item => item.kind === "credentials" && item.lossCodes?.includes("credentials-oauth-relogin"),
