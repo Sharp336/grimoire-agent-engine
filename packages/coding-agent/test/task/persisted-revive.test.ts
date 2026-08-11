@@ -66,6 +66,7 @@ function createRevivedSession(activeToolNames: string[][]): RevivedSessionHandle
 interface PersistedSessionOptions {
 	restrictToolNames?: boolean;
 	subagentSystemPrompt?: string;
+	modelRole?: string;
 }
 
 async function createPersistedSession(cwd: string, options: PersistedSessionOptions = {}): Promise<string> {
@@ -78,6 +79,8 @@ async function createPersistedSession(cwd: string, options: PersistedSessionOpti
 		task: "persisted task",
 		tools: ["read", "yield"],
 		restrictToolNames: options.restrictToolNames,
+		modelRole: options.modelRole,
+		resolvedModel: options.modelRole ? "anthropic/claude-sonnet-4-5" : undefined,
 	});
 	manager.appendMessage({
 		role: "assistant",
@@ -189,6 +192,48 @@ describe("persisted subagent revival", () => {
 		expect(capturedOptions?.enableLsp).toBe(true);
 		expect(capturedOptions?.mcpManager).toBe(hostileMcp);
 		expect(capturedOptions?.customTools?.map(tool => tool.name)).toEqual(["mcp__server_read"]);
+	});
+
+	it("restores the persisted custom model role before reopening the session", async () => {
+		const cwd = makeTempDir("@pi-custom-role-revive-");
+		const sessionFile = await createPersistedSession(cwd, {
+			subagentSystemPrompt: "persisted subagent prompt",
+			modelRole: "review-fast",
+		});
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(capturedOptions?.modelPattern).toEqual(["@review-fast", "anthropic/claude-sonnet-4-5"]);
+		expect(capturedOptions?.modelPatternAuthFallback).toBe("anthropic/claude-sonnet-4-5");
+	});
+
+	it("pins the persisted concrete model when the default role is revived", async () => {
+		const cwd = makeTempDir("@pi-default-role-revive-");
+		const sessionFile = await createPersistedSession(cwd, {
+			subagentSystemPrompt: "persisted subagent prompt",
+			modelRole: "default",
+		});
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(capturedOptions?.modelPattern).toBe("anthropic/claude-sonnet-4-5");
+		expect(capturedOptions?.modelPatternAuthFallback).toBe("anthropic/claude-sonnet-4-5");
 	});
 
 	it("installs an IRC wake monitor that emits cold-revive lifecycle frames on the shared bus", async () => {
