@@ -1143,6 +1143,49 @@ describe("AgentSession shake", () => {
 			expect(shakeSpy).toHaveBeenCalledTimes(1);
 		});
 
+		it("bails the mid-run shake when turn persistence is out of order", async () => {
+			const { session, callContexts, scripted, setResult } = createPeriodicHarness({
+				"compaction.strategy": "off",
+				"shake.interval": 1,
+			});
+			const shakeSpy = vi.spyOn(session, "shake");
+
+			// Drop the tool-calling assistant message from the branch while its
+			// tool result persists — planTurnPersistence reports out-of-order, so
+			// the mid-run shake must bail: shake() would read an unsafe branch and
+			// the splice could remove the turn the next model call must see.
+			let skippedAssistantAppends = 0;
+			const originalAppend = sessionManager.appendMessage.bind(sessionManager);
+			const appendSpy = vi.spyOn(sessionManager, "appendMessage");
+			appendSpy.mockImplementation(message => {
+				const anyMessage = message as { role?: string; content?: { type?: string }[] };
+				if (anyMessage.role === "assistant" && anyMessage.content?.some(block => block.type === "toolCall")) {
+					skippedAssistantAppends++;
+					return "skipped";
+				}
+				return originalAppend(message);
+			});
+
+			setResult("RESULT_TEXT_MARKER");
+			scripted.push({ stopReason: "toolUse", toolCalls: 1 });
+			scripted.push({ stopReason: "stop", text: "done" });
+			await session.prompt("do it");
+			await settle(session);
+
+			expect(skippedAssistantAppends).toBe(1);
+			// Mid-run shake bailed (out-of-order persistence); only the agent_end
+			// sync shake fired, once persistence settled.
+			expect(shakeSpy).toHaveBeenCalledTimes(1);
+
+			// The live loop array was not spliced: the next model call still sees
+			// the full assistant turn with its raw tool result.
+			const secondContext = callContexts[1];
+			expect(secondContext.some(message => message.role === "assistant")).toBe(true);
+			expect(toolResultText(secondContext.find(message => message.role === "toolResult"))).toContain(
+				"RESULT_TEXT_MARKER",
+			);
+		});
+
 		it("mid-run shake requires the awaited turn-end hook; agent_end still fires the counter fallback", async () => {
 			session.settings.set("compaction.strategy", "off");
 			session.settings.set("shake.interval", 1);
