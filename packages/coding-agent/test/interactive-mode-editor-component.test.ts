@@ -9,6 +9,7 @@ import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { ImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 class TestModalEditor extends CustomEditor {}
@@ -72,5 +73,34 @@ describe("InteractiveMode.setEditorComponent", () => {
 		expect(mode.editor.onSubmit).toBeDefined();
 		expect(mode.editor.onEscape).toBeDefined();
 		expect(refreshSpy).toHaveBeenCalled();
+	});
+
+	it("retires the previous editor preview before replacing it", () => {
+		const terminal = TERMINAL as unknown as { imageProtocol: ImageProtocol | null };
+		const originalProtocol = terminal.imageProtocol;
+		terminal.imageProtocol = ImageProtocol.Kitty;
+		try {
+			const previousEditor = mode.editor;
+			previousEditor.setImagePreviewEnabled(true);
+			previousEditor.setMaxHeight(10);
+			previousEditor.pendingImages = [
+				{
+					type: "image",
+					data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg==",
+					mimeType: "image/png",
+				},
+			];
+
+			mode.ui.imageBudget.beginPass();
+			previousEditor.render(50);
+			mode.ui.imageBudget.endPass();
+			expect(mode.ui.imageBudget.takeTransmits()).toHaveLength(1);
+
+			mode.setEditorComponent((_tui, editorTheme) => new TestModalEditor(editorTheme));
+
+			expect(mode.ui.imageBudget.takePurgeIds()).toHaveLength(1);
+		} finally {
+			terminal.imageProtocol = originalProtocol;
+		}
 	});
 });

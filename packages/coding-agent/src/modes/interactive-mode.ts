@@ -4122,6 +4122,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			nextEditor.setHistoryStorage(this.historyStorage);
 		}
 		nextEditor.setText(previousText);
+		previousEditor.setImagePreviewEnabled(false);
 
 		this.editorContainer.clear();
 		this.editor = nextEditor;
