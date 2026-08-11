@@ -479,6 +479,11 @@ export class SelectorController {
 					this.ctx.showError(`Failed to apply vision mode: ${err}`);
 				});
 				break;
+			case "externalThinking":
+				void this.ctx.session.setThinkToolEnabled(value as boolean).catch(err => {
+					this.ctx.showError(`Failed to apply external thinking: ${err}`);
+				});
+				break;
 
 			case "autocompleteMaxVisible":
 				this.ctx.editor.setAutocompleteMaxVisible(typeof value === "number" ? value : Number(value));
@@ -2026,6 +2031,7 @@ export class SelectorController {
 			remote: this.ctx.collabGuest?.hubRemote,
 			ui: this.ctx.ui,
 			getTool: name => this.ctx.session.getToolByName(name),
+			isBuiltInTool: name => this.ctx.session.hasBuiltInTool(name),
 			getMessageRenderer: type => this.ctx.session.extensionRunner?.getMessageRenderer(type),
 			cwd: this.ctx.sessionManager.getCwd(),
 			hideThinkingBlock: () => this.ctx.effectiveHideThinkingBlock,

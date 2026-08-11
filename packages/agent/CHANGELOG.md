@@ -11,6 +11,12 @@
 - The error→toolUse salvage in the agent loop (`recoverTransientErrorToolTurn`) now recognizes Anthropic stream-envelope truncation errors, so a turn cut after streaming complete tool calls runs those calls instead of ending the run with an error.
 - Shake no longer elides artifact recovery reads; the compaction dead-end rescue uses a dedicated `RESCUE_SHAKE_CONFIG`.
 - Fixed the proxy transport dropping `thinkingMode` and `disableReasoning`, so proxied agents ignored a requested thinking-off.
+## [17.2.13] - 2026-08-11
+
+### Fixed
+
+- Fixed Cursor sessions re-executing settled tools when an owned dialect projector rebuilds toolCall blocks: `snapshotAssistantContentBlock` now copies `kCursorExecResolved` explicitly so agent-loop still skips already-settled calls.
+
 ## [17.2.10] - 2026-08-06
 
 ### Fixed
