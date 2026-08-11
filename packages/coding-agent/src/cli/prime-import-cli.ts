@@ -455,6 +455,7 @@ export async function runPrimeImportCommand(args: PrimeImportCommandArgs): Promi
 		snapshot: discovery.snapshot,
 		config,
 		skills,
+		...(configOnly ? { allowModelLosses: true } : {}),
 		...(sourceDomains ? { sourceDomains } : {}),
 	};
 	let destinationPlan: PrimeDestinationPlan;

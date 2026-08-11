@@ -34,6 +34,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 	value !== null && typeof value === "object" && !Array.isArray(value);
 const missing = (error: unknown): boolean => isRecord(error) && error.code === "ENOENT";
 class DestinationValidationError extends Error {}
+class ModelValidationError extends DestinationValidationError {}
 class SkillExistingWinsError extends Error {}
 
 function expectedDestinationError(error: unknown): boolean {
@@ -100,6 +101,8 @@ function bindingDigest(input: PrimeDestinationInput): string {
 					config: input.config.operations,
 					settings: input.config.effectiveSettings,
 					skills: input.skills.candidates,
+					sourceDomains: input.sourceDomains,
+					allowModelLosses: input.allowModelLosses,
 					secrets,
 				}),
 			),
@@ -166,6 +169,7 @@ export interface PrimeDestinationInput {
 	readonly snapshot: PrimeSourceSnapshot;
 	readonly config: PrimeConfigParserResult;
 	readonly skills: PrimeSkillParserResult;
+	readonly allowModelLosses?: boolean;
 	readonly sourceDomains?: readonly PrimeImportDomain[];
 }
 export interface PrimeDestinationPlan extends PrimeImportPlan {
@@ -1667,9 +1671,9 @@ async function validateModels(modelPath: string, config: PrimeConfigParserResult
 			auth.insertCredentialsIfProviderAbsent(operation.provider, [{ type: "api_key", key: secret }]);
 		}
 		const loaded = ModelsConfigFile.relocate(modelPath).tryLoad();
-		if (loaded.status !== "ok") throw new DestinationValidationError("invalid staged models");
+		if (loaded.status !== "ok") throw new ModelValidationError("invalid staged models");
 		const registry = new ModelRegistry(auth, modelPath);
-		if (registry.getError()) throw new DestinationValidationError("invalid staged registry");
+		if (registry.getError()) throw new ModelValidationError("invalid staged registry");
 	} finally {
 		auth.close();
 	}
@@ -2207,12 +2211,42 @@ export async function applyPrimeDestination(
 					for (const group of active)
 						if (!changed.includes(group)) items = mark(items, [modelId(group.operation)], "skipped");
 					if (changed.length === 0) return;
-					const merged: Record<string, unknown> = clone(current.value);
-					for (const group of changed)
-						for (const operation of group.operations) mergeModel(merged, operation, input.config);
+					let merged: Record<string, unknown> = clone(current.value);
+					let importable = changed;
+					if (input.allowModelLosses) {
+						importable = [];
+						const rejectedSourceRefs = new Set<string>();
+						for (const group of changed) {
+							const candidate: Record<string, unknown> = clone(merged);
+							for (const operation of group.operations) mergeModel(candidate, operation, input.config);
+							const candidateBytes = Buffer.from(YAML.stringify(candidate, null, 2));
+							try {
+								if (candidateBytes.byteLength > plan.maxFileBytes)
+									throw new ModelValidationError("staged models byte budget exhausted");
+								await fs.writeFile(modelPath, candidateBytes, { flag: "wx", mode: 0o600 });
+								await validateModels(modelPath, input.config);
+							} catch (error) {
+								if (!(error instanceof ModelValidationError)) throw error;
+								for (const operation of group.operations)
+									for (const sourceRef of operation.sourceRefs) rejectedSourceRefs.add(sourceRef);
+								items = markLostIds(items, [modelId(group.operation)], "models-invalid-value");
+								continue;
+							} finally {
+								await fs.rm(modelPath, { force: true });
+							}
+							merged = candidate;
+							importable.push(group);
+						}
+						for (const sourceRef of rejectedSourceRefs)
+							losses.push({ code: "models-invalid-value", domain: "models", sourceRef });
+						if (importable.length === 0) return;
+					} else {
+						for (const group of changed)
+							for (const operation of group.operations) mergeModel(merged, operation, input.config);
+					}
 					const stagedModelBytes = Buffer.from(YAML.stringify(merged, null, 2));
 					if (stagedModelBytes.byteLength > plan.maxFileBytes)
-						throw new DestinationValidationError("staged models byte budget exhausted");
+						throw new ModelValidationError("staged models byte budget exhausted");
 					await fs.writeFile(modelPath, stagedModelBytes, { flag: "wx", mode: 0o600 });
 					await validateModels(modelPath, input.config);
 					const modelPrior = await priorFor(plan.destination.modelsPath);
@@ -2228,18 +2262,18 @@ export async function applyPrimeDestination(
 						losses.push(loss("destination-drift", "destination", plan.destination.modelsPath));
 						items = markLostIds(
 							items,
-							changed.map(group => modelId(group.operation)),
+							importable.map(group => modelId(group.operation)),
 							"destination-drift",
 						);
 						return;
 					}
 					items = mark(
 						items,
-						changed.map(group => modelId(group.operation)),
+						importable.map(group => modelId(group.operation)),
 						"imported",
 					);
 					committed = true;
-					for (const group of changed)
+					for (const group of importable)
 						rollbackEntries.push(
 							rollbackEntry(
 								modelId(group.operation),
@@ -2250,6 +2284,22 @@ export async function applyPrimeDestination(
 								"regular-file",
 							),
 						);
+				}).catch(async error => {
+					if (
+						!input.allowModelLosses ||
+						!(error instanceof ModelValidationError) ||
+						committed ||
+						publicationUncertain
+					)
+						throw error;
+					await fs.rm(modelPath, { force: true });
+					for (const sourceRef of new Set(modelItems.flatMap(item => item.sourceRefs)))
+						losses.push({ code: "models-invalid-value", domain: "models", sourceRef });
+					items = markLostIds(
+						items,
+						modelItems.map(item => item.itemId),
+						"models-invalid-value",
+					);
 				});
 			}
 			let skillsAvailable = true;

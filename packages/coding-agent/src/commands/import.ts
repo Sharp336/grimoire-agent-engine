@@ -41,7 +41,7 @@ export default class Import extends Command {
 		"agent-dir": Flags.string({ description: "OMP agent directory" }),
 		apply: Flags.boolean({ description: "Apply changes (default is dry-run)", default: false }),
 		"config-only": Flags.boolean({
-			description: "Import settings, models, and credentials without importing skills, sessions, or artifacts",
+			description: "Import settings, compatible models, and credentials without skills, sessions, or artifacts",
 			default: false,
 		}),
 		json: Flags.boolean({ description: "Output JSON", default: false }),

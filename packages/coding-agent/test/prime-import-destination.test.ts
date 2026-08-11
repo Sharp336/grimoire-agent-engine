@@ -7,6 +7,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { getAgentDbPath } from "@oh-my-pi/pi-utils";
+import { YAML } from "bun";
 import {
 	applyPrimeDestination,
 	type PrimeDestinationApplyResult,
@@ -271,27 +272,43 @@ describe("prime destination planning and apply", () => {
 			agentDir = path.join(root, "omp"),
 			modelsPath = path.join(agentDir, "models.yml"),
 			existing =
-				"providers:\n  local:\n    baseUrl: http://existing\n    api: openai-completions\n    auth: none\n    models:\n      - id: shared\n        name: Existing\n        contextWindow: 1024\n";
+				"providers:\n  local:\n    baseUrl: http://existing\n    api: openai-completions\n    auth: none\n    compat:\n      openRouterRouting:\n        only: [existing]\n    models:\n      - id: shared\n        name: Existing\n        contextWindow: 1024\n";
 		await fs.mkdir(agentDir, { recursive: true });
 		await fs.writeFile(modelsPath, existing);
 		const operation: PrimeNormalizedModelOperation = {
 			kind: "models",
 			modelKind: "definition",
 			provider: "local",
-			providerConfig: { baseUrl: "http://imported" },
-			model: { id: "shared", name: "Imported", contextWindow: 4096, api: "openai-completions" },
+			providerConfig: {
+				baseUrl: "http://imported",
+				compat: { openRouterRouting: { only: ["imported"], order: ["fallback"] } },
+			},
+			model: {
+				id: "shared",
+				name: "Imported",
+				contextWindow: 4096,
+				api: "openai-completions",
+				compat: { supportsStore: true },
+			},
 			sourceRefs: ["global/models.json"],
 		};
 		const value = input(snapshot, { models: [operation], operations: [operation] }),
 			plan = await planPrimeDestination(value, { agentDir, cwd: snapshot.cwd }),
 			applied = await applyPrimeDestination(plan, value),
 			text = await fs.readFile(modelsPath, "utf8"),
+			parsed = YAML.parse(text) as {
+				providers: { local: { compat?: unknown; models: Array<{ compat?: unknown }> } };
+			},
 			entry = applied.rollbackEntries.find(item => item.itemId === "model:local:definition:shared"),
 			priorDigest = createHash("sha256").update(existing).digest("hex");
 		expect(text).toContain("baseUrl: http://existing");
 		expect(text).toContain("name: Existing");
 		expect(text).toContain("contextWindow: 1024");
 		expect(text).not.toContain("name: Imported");
+		expect(parsed.providers.local.compat).toEqual({
+			openRouterRouting: { only: ["existing"], order: ["fallback"] },
+		});
+		expect(parsed.providers.local.models[0]?.compat).toEqual({ supportsStore: true });
 		expect(entry).toEqual(
 			expect.objectContaining({
 				created: false,
@@ -690,6 +707,101 @@ describe("prime destination planning and apply", () => {
 		expect(await fs.stat(agentDir).catch(() => undefined)).toBeUndefined();
 	});
 
+	it("continues configuration-only apply when staged models are invalid", async () => {
+		const root = await temp();
+		const snapshot = await sourceSnapshot(root);
+		const agentDir = path.join(root, "omp");
+		const invalidModel: PrimeNormalizedModelOperation = {
+			kind: "models",
+			modelKind: "definition",
+			provider: "broken",
+			providerConfig: { api: "openai-completions" },
+			model: { id: "one", api: "openai-completions" },
+			sourceRefs: ["global/models.json"],
+		};
+		const validModel: PrimeNormalizedModelOperation = {
+			kind: "models",
+			modelKind: "definition",
+			provider: "local",
+			providerConfig: { api: "openai-completions", auth: "none", baseUrl: "http://local" },
+			model: { id: "two", api: "openai-completions" },
+			sourceRefs: ["global/models.json"],
+		};
+		const setting = {
+			kind: "settings" as const,
+			scope: "global" as const,
+			values: { hideThinkingBlock: true },
+			sourceRefs: ["global/settings.json"],
+		};
+		const strictValue = input(snapshot, {
+			effectiveSettings: setting.values,
+			settings: [setting],
+			models: [invalidModel, validModel],
+			operations: [invalidModel, validModel, setting],
+		});
+		const strictPlan = await planPrimeDestination(strictValue, { agentDir, cwd: snapshot.cwd });
+		const refused = await applyPrimeDestination(strictPlan, strictValue);
+		expect(refused.report.losses).toContainEqual(
+			expect.objectContaining({ code: "destination-apply-failed", domain: "config" }),
+		);
+		await expect(fs.stat(path.join(agentDir, "config.yml"))).rejects.toThrow();
+
+		const value: PrimeDestinationInput = { ...strictValue, allowModelLosses: true };
+		const plan = await planPrimeDestination(value, { agentDir, cwd: snapshot.cwd });
+		const applied = await applyPrimeDestination(plan, value);
+
+		expect(applied.report.losses).toContainEqual(
+			expect.objectContaining({ code: "models-invalid-value", domain: "models" }),
+		);
+		expect(applied.report.losses.some(loss => loss.code === "destination-apply-failed")).toBe(false);
+		expect(applied.report.items).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ itemId: "model:broken:definition:one", outcome: "lost" }),
+				expect.objectContaining({ itemId: "model:local:definition:two", outcome: "imported" }),
+				expect.objectContaining({ itemId: "setting:hideThinkingBlock", outcome: "imported" }),
+			]),
+		);
+		await expect(fs.stat(path.join(agentDir, "config.yml"))).resolves.toBeDefined();
+		expect(await fs.readFile(path.join(agentDir, "models.yml"), "utf8")).toContain("local:");
+	});
+
+	it("does not downgrade staging I/O failures to model losses", async () => {
+		const root = await temp();
+		const snapshot = await sourceSnapshot(root);
+		const agentDir = path.join(root, "omp");
+		const model: PrimeNormalizedModelOperation = {
+			kind: "models",
+			modelKind: "definition",
+			provider: "local",
+			providerConfig: { api: "openai-completions", auth: "none", baseUrl: "http://local" },
+			model: { id: "one", api: "openai-completions" },
+			sourceRefs: ["global/models.json"],
+		};
+		const value: PrimeDestinationInput = {
+			...input(snapshot, { models: [model], operations: [model] }),
+			allowModelLosses: true,
+		};
+		const plan = await planPrimeDestination(value, { agentDir, cwd: snapshot.cwd });
+		const originalWriteFile = fs.writeFile;
+		const writeFileSpy = vi.spyOn(fs, "writeFile").mockImplementation(async (...args) => {
+			if (
+				path.basename(String(args[0])) === "models.yml" &&
+				path.basename(path.dirname(String(args[0]))).startsWith(".prime-import-")
+			)
+				throw Object.assign(new Error("staging write failed"), { code: "ENOSPC" });
+			return originalWriteFile(...args);
+		});
+		try {
+			const applied = await applyPrimeDestination(plan, value);
+			expect(applied.report.losses).toContainEqual(
+				expect.objectContaining({ code: "destination-apply-failed", domain: "config" }),
+			);
+			expect(applied.report.losses.some(loss => loss.code === "models-invalid-value")).toBe(false);
+		} finally {
+			writeFileSpy.mockRestore();
+		}
+	});
+
 	it("redacts literal credentials, lets the atomic insert decide races, and reruns idempotently", async () => {
 		const root = await temp(),
 			snapshot = await sourceSnapshot(root),
@@ -963,6 +1075,12 @@ describe("prime destination planning and apply", () => {
 		await expect(
 			applyPrimeDestination(plan, { ...value, snapshot: { ...snapshot, snapshotId: "different" } }),
 		).rejects.toThrow("plan input mismatch");
+		await expect(applyPrimeDestination(plan, { ...value, allowModelLosses: true })).rejects.toThrow(
+			"plan input mismatch",
+		);
+		await expect(applyPrimeDestination(plan, { ...value, sourceDomains: ["config"] })).rejects.toThrow(
+			"plan input mismatch",
+		);
 	});
 
 	it("keeps valid-payload invalid skills separate from model validation", async () => {

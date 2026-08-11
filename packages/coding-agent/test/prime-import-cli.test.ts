@@ -225,6 +225,17 @@ describe("omp import prime child CLI", () => {
 		const fixture = await makeFixture();
 		try {
 			await fs.writeFile(path.join(fixture.source, "sessions", "prime-session.jsonl"), "{not-json}\n");
+			await fs.writeFile(
+				path.join(fixture.source, "models.json"),
+				JSON.stringify({
+					providers: {
+						broken: {
+							api: "openai-completions",
+							models: [{ id: "invalid-without-provider-auth" }],
+						},
+					},
+				}),
+			);
 			const args = [
 				"import",
 				"prime",
@@ -251,15 +262,23 @@ describe("omp import prime child CLI", () => {
 			expect(applied.exitCode, `${applied.error}\n${applied.output}`).toBe(0);
 			const report = JSON.parse(applied.output) as PrimeImportReport;
 			expect(report.losses.some(loss => loss.domain === "sessions")).toBe(false);
+			expect(report.losses).toContainEqual(
+				expect.objectContaining({ code: "models-invalid-value", domain: "models" }),
+			);
 			expect(report.items).toEqual(
 				expect.arrayContaining([
 					expect.objectContaining({ itemId: "setting:defaultThinkingLevel", outcome: "imported" }),
 					expect.objectContaining({ itemId: "credential:openai", outcome: "imported" }),
+					expect.objectContaining({
+						itemId: "model:broken:definition:invalid-without-provider-auth",
+						outcome: "lost",
+					}),
 				]),
 			);
 			expect(report.items.some(item => item.kind === "sessions")).toBe(false);
 			await expect(fs.stat(path.join(fixture.agent, "config.yml"))).resolves.toBeDefined();
 			await expect(fs.stat(path.join(fixture.agent, "agent.db"))).resolves.toBeDefined();
+			await expect(fs.stat(path.join(fixture.agent, "models.yml"))).rejects.toThrow();
 			for (const excludedPath of ["skills", "sessions", "blobs", ".prime-import"])
 				await expect(fs.stat(path.join(fixture.agent, excludedPath))).rejects.toThrow();
 		} finally {

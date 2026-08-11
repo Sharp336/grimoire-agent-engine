@@ -364,6 +364,26 @@ describe("parsePrimeConfig", () => {
 			expect.arrayContaining([expect.objectContaining({ code: "models-unsupported-routing" })]),
 		);
 	});
+	it("preserves provider and model compat at their original scopes", () => {
+		const result = parse([
+			models(
+				JSON.stringify({
+					providers: {
+						p: {
+							compat: { supportsDeveloperRole: false },
+							models: [{ id: "m", compat: { supportsStore: true } }],
+						},
+					},
+				}),
+			),
+		]);
+		expect(result.models[0]?.model.compat).toEqual({
+			supportsStore: true,
+		});
+		expect(result.models[0]?.providerConfig?.compat).toEqual({
+			supportsDeveloperRole: false,
+		});
+	});
 	it("validates compat enums and unsupported Prime compat keys", () => {
 		const result = parse([
 			models(
@@ -576,7 +596,7 @@ describe("parsePrimeConfig", () => {
 	it("keeps nested prototype keys out of Object.prototype while normalizing models", () => {
 		const result = parse([
 			models(
-				'{"providers":{"safe":{"headers":{"__proto__":"header-secret"},"compat":{"openRouterRouting":{"__proto__":["polluted"],"only":["safe"]}},"models":[{"id":"model"}]}}}',
+				'{"providers":{"safe":{"headers":{"__proto__":"header-secret"},"compat":{"openRouterRouting":{"__proto__":["polluted"],"only":["safe"]}},"models":[{"id":"model","compat":{"openRouterRouting":{"order":["model"]}}}]}}}',
 			),
 		]);
 		expect(result.models).toHaveLength(1);
@@ -585,6 +605,7 @@ describe("parsePrimeConfig", () => {
 		expect(result.models[0]?.providerConfig?.compat).toEqual({
 			openRouterRouting: { only: ["safe"] },
 		});
+		expect(result.models[0]?.model.compat).toEqual({ openRouterRouting: { order: ["model"] } });
 	});
 
 	it("selects auth credentials before legacy settings and models fallback", () => {

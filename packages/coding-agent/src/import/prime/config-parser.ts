@@ -761,7 +761,7 @@ function normalizeModel(
 		modelIndex,
 		modelValue.id,
 	);
-	const compat = normalizeCompat(modelValue.compat, sourceRef, losses);
+	const modelCompat = normalizeCompat(modelValue.compat, sourceRef, losses);
 	const api = normalizeApi(
 		modelValue.api ?? providerConfig.api,
 		sourceRef,
@@ -800,7 +800,7 @@ function normalizeModel(
 			? { omitMaxOutputTokens: modelValue.omitMaxOutputTokens }
 			: {}),
 		...(headers ? { headers } : {}),
-		...(compat ? { compat } : {}),
+		...(modelCompat ? { compat: modelCompat } : {}),
 	};
 	if (
 		modelValue.input !== undefined &&
@@ -918,7 +918,7 @@ function normalizeOverride(
 	);
 	const thinking =
 		value.thinkingLevelMap !== undefined ? normalizedThinking(value.thinkingLevelMap, sourceRef, losses) : undefined;
-	const compat = normalizeCompat(value.compat, sourceRef, losses);
+	const modelCompat = normalizeCompat(value.compat, sourceRef, losses);
 	let cost: PrimeNormalizedModelOverride["cost"] | undefined;
 	if (value.cost !== undefined) {
 		if (!isRecord(value.cost))
@@ -977,7 +977,7 @@ function normalizeOverride(
 			: {}),
 		...(typeof value.maxTokens === "number" && value.maxTokens > 0 ? { maxTokens: value.maxTokens } : {}),
 		...(headers ? { headers } : {}),
-		...(compat ? { compat } : {}),
+		...(modelCompat ? { compat: modelCompat } : {}),
 	};
 }
 
@@ -1090,6 +1090,7 @@ function collectModels(
 			null,
 		);
 		const providerCompat = normalizeCompat(rawConfig.compat, file.sourceRef, losses);
+		if (providerCompat) normalizedProviderConfig.compat = providerCompat;
 		const rawModels = rawConfig.models;
 		if (rawModels !== undefined && !Array.isArray(rawModels))
 			losses.push(loss("models-invalid-value", "models", file.sourceRef, `providers.${provider}.models`));
