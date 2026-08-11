@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Marked Baseten `zai-org/GLM-5.2-Fast` as a reasoning model with high/max thinking effort, matching the sibling `zai-org/GLM-5.2` ([#7950](https://github.com/can1357/oh-my-pi/pull/7950) by [@jcfrancisco](https://github.com/jcfrancisco)).
+
 ## [17.2.10] - 2026-08-06
 
 ### Changed
