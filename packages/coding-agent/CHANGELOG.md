@@ -2,19 +2,8 @@
 
 ## [Unreleased]
 
-### Added
-
-- Added `/delete` to remove the selected durable BTW thread.
-
-### Changed
-
-- Changed durable BTW knowledge sharing: `shareSummaryWithMain` now publishes a user-approved, source-attributed summary into Main as `btw:summary` inbound context instead of steering Main with a synthetic user message.
-- Changed durable BTW panes to open with the thread rail collapsed by default, provide a `+ New BTW` action that immediately creates a blank thread, and let `/new` omit its first question.
-
 ### Fixed
 
-- Fixed durable BTW panes diverging from Main's transcript rendering: live and completed side turns now use the same tool cards, runtime tool metadata, and streamed-argument decoding.
-- Fixed the durable BTW pane's `New BTW` action to render as a hoverable button, reuse the active blank thread, and delete untouched blank threads when the pane closes.
 - Fixed graceful OMP shutdown marking running subagents as hard-aborted; shutdown now closes their live sessions without tombstoning the transcripts, allowing them to return as parked agents after restart while explicit cancellation remains terminal.
 
 ## [17.2.12] - 2026-08-08
