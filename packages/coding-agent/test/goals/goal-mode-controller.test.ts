@@ -4,7 +4,7 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { GoalModeController } from "@oh-my-pi/pi-coding-agent/goals/goal-mode-controller";
+import type { GoalModeController } from "@oh-my-pi/pi-coding-agent/goals/goal-mode-controller";
 import { GoalTool } from "@oh-my-pi/pi-coding-agent/goals/tools/goal-tool";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -237,6 +237,30 @@ describe("GoalModeController", () => {
 		}
 	});
 
+	it("restore() re-applies the pre-goal tool set when switching to a non-goal session", async () => {
+		// F2 regression: restore()'s non-goal early return cleared goal state but
+		// never re-applied #previousTools, so the `goal` tool stayed active after
+		// a headless switch (AgentSession.switchSession does not reload the
+		// target's active tool set).
+		const harness = await createHarness(shared);
+		try {
+			await harness.session.setActiveToolsByName(["read", "edit"]);
+			await harness.controller.enter("Ship it");
+			expect(harness.session.getActiveToolNames()).toContain("goal");
+			expect(harness.controller.previousTools).toEqual(["read", "edit"]);
+
+			harness.sessionManager.appendModeChange("none");
+			await harness.controller.restore();
+
+			expect(harness.session.getActiveToolNames()).toEqual(["read", "edit"]);
+			expect(harness.session.getActiveToolNames()).not.toContain("goal");
+			expect(harness.controller.previousTools).toBeUndefined();
+			expect(harness.session.getGoalModeState()).toBeUndefined();
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
 	it("rejects pause and budget on a paused goal (must resume first)", async () => {
 		// Contract (matches TUI fix #5): a paused goal is not actionable for
 		// pause/budget — resume first. Headless adapters rely on the controller
@@ -270,6 +294,28 @@ describe("GoalModeController", () => {
 				expect(result.error).toContain("cannot replace goal");
 			}
 			expect(harness.session.getGoalModeState()).toBeUndefined();
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
+	it("completion restores the pre-goal tool set and clears goal state on agent end", async () => {
+		// F1 regression: onAgentEnd()'s exiting branch deactivated WITHOUT
+		// restoreTools, so the `goal` tool stayed advertised after a goal
+		// completed from the goal tool.
+		const harness = await createHarness(shared);
+		try {
+			await harness.session.setActiveToolsByName(["read", "edit"]);
+			await harness.controller.enter("Ship the release");
+			expect(harness.session.getActiveToolNames()).toContain("goal");
+
+			await harness.session.goalRuntime.completeGoalFromTool();
+			await harness.controller.onAgentEnd();
+
+			expect(harness.session.getActiveToolNames()).toEqual(["read", "edit"]);
+			expect(harness.session.getActiveToolNames()).not.toContain("goal");
+			expect(harness.session.getGoalModeState()).toBeUndefined();
+			expect(harness.controller.previousTools).toBeUndefined();
 		} finally {
 			await harness.cleanup();
 		}

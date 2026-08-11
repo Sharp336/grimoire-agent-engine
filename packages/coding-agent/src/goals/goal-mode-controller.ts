@@ -1,8 +1,8 @@
 import type { AgentSession } from "../session/agent-session";
 import type { SessionContext } from "../session/session-context";
 import type { SessionManager } from "../session/session-manager";
-import type { Goal, GoalModeState } from "./state";
 import { formatDuration } from "../slash-commands/helpers/duration";
+import type { Goal, GoalModeState } from "./state";
 
 /**
  * Shared session-level goal lifecycle, used by BOTH the TUI (InteractiveMode)
@@ -250,18 +250,21 @@ export class GoalModeController {
 		const sessionContext = this.#sessionManager.buildSessionContext();
 		const goalEnabled = this.#session.settings.get("goal.enabled");
 		if (!goalEnabled && (sessionContext.mode === "goal" || sessionContext.mode === "goal_paused")) {
+			await this.#restoreGoalTools();
 			this.#session.goalRuntime.clearAccounting();
 			this.#sessionManager.appendModeChange("none");
 			this.#clearGoalModeState();
 			return undefined;
 		}
 		if (sessionContext.mode !== "goal" && sessionContext.mode !== "goal_paused") {
+			await this.#restoreGoalTools();
 			this.#session.goalRuntime.clearAccounting();
 			this.#clearGoalModeState();
 			return undefined;
 		}
 		const goal = goalFromModeData(sessionContext.modeData);
 		if (!goal) {
+			await this.#restoreGoalTools();
 			this.#sessionManager.appendModeChange("none");
 			this.#clearGoalModeState();
 			return undefined;
@@ -282,6 +285,15 @@ export class GoalModeController {
 			await this.#session.setActiveToolsByName([...new Set([...previousTools, "goal"])]);
 		}
 		return restored;
+	}
+
+	/** Restore the pre-goal tool set recorded by enter/resume/exposeGoalTool.
+	 *  Shared by every goal exit path so all of them clean up the `goal` tool
+	 *  identically; no-op when no snapshot exists. */
+	async #restoreGoalTools(): Promise<void> {
+		if (this.#previousTools === undefined) return;
+		await this.#session.setActiveToolsByName(this.#previousTools);
+		this.#previousTools = undefined;
 	}
 
 	/** Clear in-memory goal state + continuation flags (early-return branches of restore()). */
@@ -354,7 +366,10 @@ export class GoalModeController {
 			this.#goalContinuationTurnInFlight = false;
 		}
 		if (this.#session.getGoalModeState()?.mode === "exiting") {
-			await this.deactivate({ completed: true });
+			// Completion exit must re-apply the pre-goal tool set; deactivate()
+			// clears #previousTools after restoring, so gate on the snapshot
+			// still being present (F1).
+			await this.deactivate({ restoreTools: this.#previousTools !== undefined, completed: true });
 			return null;
 		}
 		return this.buildContinuationForSubmission();
