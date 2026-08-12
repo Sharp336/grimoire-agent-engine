@@ -219,6 +219,7 @@ import {
 	type AsyncJobSnapshot,
 	type CommandMetadataChangedListener,
 	CommittedNewSessionTransitionError,
+	CommittedResetSessionContextError,
 	type ContextUsageBreakdown,
 	type FollowUpOptions,
 	type FreshSessionResult,
@@ -500,6 +501,9 @@ export class AgentSession {
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	#pendingNextTurnMessages: CustomMessage[] = [];
 	#scheduledHiddenNextTurnGeneration: number | undefined = undefined;
+	/** Blocks the next provider turn until a failed committed reset can rebuild its base prompt. */
+	#resetContextPromptRefreshPending = false;
+	#resetContextPromptRefreshInFlight: Promise<void> | undefined;
 	#queuedMessageDrainScheduled = false;
 	#planModeState: PlanModeState | undefined;
 	/** Session-scoped `/vision` override; undefined = follow persisted `inspect_image.mode`. */
@@ -605,7 +609,7 @@ export class AgentSession {
 	#usagePreflightReadyForNextModelCall = false;
 	#usagePreflightReadyModel: Model | undefined;
 	#detachUsageBeforeQueueDequeue: (() => void) | undefined;
-	#detachUsageBeforeModelCall: (() => void) | undefined;
+	#detachBeforeModelCall: (() => void) | undefined;
 
 	#transformContext: (messages: AgentMessage[], signal?: AbortSignal) => AgentMessage[] | Promise<AgentMessage[]>;
 	#onPayload: SimpleStreamOptions["onPayload"] | undefined;
@@ -1116,7 +1120,11 @@ export class AgentSession {
 				throw new DOMException("Usage preflight cancelled", "AbortError");
 			}
 		});
-		this.#detachUsageBeforeModelCall = this.agent.addBeforeModelCallHook(async signal => {
+		this.#detachBeforeModelCall = this.agent.addBeforeModelCallHook(async signal => {
+			// This is the lowest shared boundary for user prompts, agent-initiated
+			// prompts, scheduled/direct continuations, recovery, and idle yield
+			// injection. It runs before Agent re-reads state.systemPrompt.
+			await this.#ensureResetContextPromptRefresh(signal);
 			if (!this.settings.get("retry.usageAwareFallback")) return;
 			if (this.#usagePreflightReadyForNextModelCall) {
 				const checkedModel = this.#usagePreflightReadyModel;
@@ -3789,8 +3797,8 @@ export class AgentSession {
 		this.#usagePreflightReadyForNextModelCall = false;
 		this.#detachUsageBeforeQueueDequeue?.();
 		this.#detachUsageBeforeQueueDequeue = undefined;
-		this.#detachUsageBeforeModelCall?.();
-		this.#detachUsageBeforeModelCall = undefined;
+		this.#detachBeforeModelCall?.();
+		this.#detachBeforeModelCall = undefined;
 		this.#memory.cancelLocalMemoryStartup();
 		this.#titleGenerationAbortController.abort();
 		this.#abortAutolearnCapture();
@@ -4092,6 +4100,7 @@ export class AgentSession {
 	 *
 	 * Returns `undefined` without mutating anything while a response is
 	 * streaming or a foreground bash/python execution is in flight.
+	 * @throws {CommittedResetSessionContextError} when the reset committed but post-commit work failed
 	 */
 	async resetSessionContext(): Promise<ResetSessionContextResult | undefined> {
 		// Refuse while a response streams OR a foreground user bash/python
@@ -4117,57 +4126,69 @@ export class AgentSession {
 		await this.#cancelPostPromptTasks();
 		this.#cancelOwnAsyncJobs();
 
-		// Drop the conversation: messages, queued steers/follow-ups, pending tool
-		// calls, and error state. agent.reset() keeps the model and system prompt.
-		this.agent.reset();
-		this.#pendingNextTurnMessages = [];
-		this.#scheduledHiddenNextTurnGeneration = undefined;
-		// Reset the session_stop continuation chain: the queued continuation
-		// message is gone with the conversation, but the counters would otherwise
-		// carry over, so the next post-reset turn is reported to hooks as part of
-		// the old chain and can hit SESSION_STOP_CONTINUATION_CAP early (mirrors
-		// abort()/newSession()).
-		this.#resetSessionStopContinuationState();
+		let committed = false;
+		try {
+			// Drop the conversation: messages, queued steers/follow-ups, pending tool
+			// calls, and error state. agent.reset() keeps the model and system prompt.
+			this.agent.reset();
+			committed = true;
+			this.#resetContextPromptRefreshPending = true;
+			const result = { droppedCount };
+			this.#pendingNextTurnMessages = [];
+			this.#scheduledHiddenNextTurnGeneration = undefined;
+			// Reset the session_stop continuation chain: the queued continuation
+			// message is gone with the conversation, but the counters would otherwise
+			// carry over, so the next post-reset turn is reported to hooks as part of
+			// the old chain and can hit SESSION_STOP_CONTINUATION_CAP early (mirrors
+			// abort()/newSession()).
+			this.#resetSessionStopContinuationState();
 
-		// Drop checkpoint/rewind runtime state and deferred tool directives
-		// alongside the messages that carried them: the checkpoint tool result is
-		// gone from agent.state, so an intact #checkpointState would otherwise
-		// force a rewind onto the pre-reset transcript on the next turn (mirrors
-		// newSession()).
-		this.#clearCheckpointRuntimeState();
-		this.#clearSessionScopedToolState();
+			// Drop checkpoint/rewind runtime state and deferred tool directives
+			// alongside the messages that carried them: the checkpoint tool result is
+			// gone from agent.state, so an intact #checkpointState would otherwise
+			// force a rewind onto the pre-reset transcript on the next turn (mirrors
+			// newSession()).
+			this.#clearCheckpointRuntimeState();
+			this.#clearSessionScopedToolState();
 
-		// Rotate provider-side session state so a provider that keeps conversation
-		// history server-side starts a brand-new exchange rather than resuming the
-		// context we just dropped (mirrors freshSession()).
-		this.#closeAllProviderSessions("reset context");
-		this.#freshProviderSessionId = Bun.randomUUIDv7();
-		this.#syncAgentSessionId();
-		this.#memory.rekeyForCurrentSessionId();
-		this.agent.appendOnlyContext?.invalidateForModelChange();
+			// Rotate provider-side session state so a provider that keeps conversation
+			// history server-side starts a brand-new exchange rather than resuming the
+			// context we just dropped (mirrors freshSession()).
+			this.#closeAllProviderSessions("reset context");
+			this.#freshProviderSessionId = Bun.randomUUIDv7();
+			this.#syncAgentSessionId();
+			this.#memory.rekeyForCurrentSessionId();
+			this.agent.appendOnlyContext?.invalidateForModelChange();
 
-		// Re-arm the approved-plan reference: the reset dropped the plan-approved
-		// prompt/reference from agent.state, so mark it unsent (preserving the
-		// path — the plan file on disk is still the active plan) to let
-		// #buildPlanReferenceMessage re-read and re-inject it on the next turn.
-		// Mirrors the sent-flag reset newSession() and compaction perform after a
-		// history rewrite (issue #1246).
-		this.#planReferenceSent = false;
+			// Re-arm the approved-plan reference: the reset dropped the plan-approved
+			// prompt/reference from agent.state, so mark it unsent (preserving the
+			// path — the plan file on disk is still the active plan) to let
+			// #buildPlanReferenceMessage re-read and re-inject it on the next turn.
+			// Mirrors the sent-flag reset newSession() and compaction perform after a
+			// history rewrite (issue #1246).
+			this.#planReferenceSent = false;
 
-		// Record the durable boundary before any reset work that can rebuild the
-		// base prompt. The collapsed live transcript and model context start after
-		// the latest boundary, while the on-disk record and transcript:true export
-		// keep the full pre-reset history.
-		this.sessionManager.appendResetBoundary();
+			// Record the durable boundary before any reset work that can rebuild the
+			// base prompt. The collapsed live transcript and model context start after
+			// the latest boundary, while the on-disk record and transcript:true export
+			// keep the full pre-reset history.
+			this.sessionManager.appendResetBoundary();
 
-		// Re-prime the advisors, undo memory promotion, then rebuild even when the
-		// selected memory backend performs no prompt refresh. agent.reset() keeps
-		// the old system prompt, so /clear must explicitly remove first-turn-only
-		// guidance before it returns.
-		this.#advisors.resetSessionState();
-		await this.#memory.resetContextForNewTranscript();
-		await this.refreshBaseSystemPrompt();
-		return { droppedCount };
+			// Re-prime the advisors, undo memory promotion, then rebuild even when the
+			// selected memory backend performs no prompt refresh. agent.reset() keeps
+			// the old system prompt, so /clear must explicitly remove first-turn-only
+			// guidance before it returns.
+			this.#advisors.resetSessionState();
+			await this.#memory.resetContextForNewTranscript();
+			await this.#ensureResetContextPromptRefresh();
+			return result;
+		} catch (error) {
+			if (!committed) throw error;
+			const result = { droppedCount };
+			throw error instanceof CommittedResetSessionContextError
+				? error
+				: new CommittedResetSessionContextError(result, error);
+		}
 	}
 
 	// =========================================================================
@@ -4552,8 +4573,32 @@ export class AgentSession {
 	}
 
 	/** Rebuilds the stable base prompt for the current tools and model. */
-	refreshBaseSystemPrompt(): Promise<void> {
-		return this.#tools.refreshBaseSystemPrompt();
+	async refreshBaseSystemPrompt(): Promise<void> {
+		await this.#tools.refreshBaseSystemPrompt();
+		this.#resetContextPromptRefreshPending = false;
+	}
+
+	/**
+	 * Satisfies a committed reset's prompt-refresh obligation exactly once for
+	 * all provider entry paths. A failed attempt leaves the obligation pending;
+	 * concurrent callers share the same attempt instead of queueing rebuilds.
+	 */
+	async #ensureResetContextPromptRefresh(signal?: AbortSignal): Promise<void> {
+		if (!this.#resetContextPromptRefreshPending) return;
+		signal?.throwIfAborted();
+		let attempt = this.#resetContextPromptRefreshInFlight;
+		if (!attempt) {
+			attempt = this.refreshBaseSystemPrompt();
+			this.#resetContextPromptRefreshInFlight = attempt;
+		}
+		try {
+			await attempt;
+		} finally {
+			if (this.#resetContextPromptRefreshInFlight === attempt) {
+				this.#resetContextPromptRefreshInFlight = undefined;
+			}
+		}
+		signal?.throwIfAborted();
 	}
 
 	#buildSystemPromptForAgentStart(promptText: string): Promise<string[]> {

@@ -41,7 +41,11 @@ import { computeContextBreakdown, renderContextUsage } from "../../modes/utils/c
 import { buildHotkeysMarkdown } from "../../modes/utils/hotkeys-markdown";
 import { buildToolsMarkdown } from "../../modes/utils/tools-markdown";
 import type { AsyncJobSnapshotItem } from "../../session/agent-session";
-import { CommittedNewSessionTransitionError } from "../../session/agent-session-types";
+import {
+	CommittedNewSessionTransitionError,
+	CommittedResetSessionContextError,
+	type ResetSessionContextResult,
+} from "../../session/agent-session-types";
 import type { AuthStorage, OAuthAccountIdentity } from "../../session/auth-storage";
 import type { CompactMode } from "../../session/compact-modes";
 import type { NewSessionOptions } from "../../session/session-entries";
@@ -982,7 +986,15 @@ export class CommandController {
 				await Bun.sleep(10);
 			}
 		}
-		const result = await this.ctx.session.resetSessionContext();
+		let committedError: CommittedResetSessionContextError | undefined;
+		let result: ResetSessionContextResult | undefined;
+		try {
+			result = await this.ctx.session.resetSessionContext();
+		} catch (error) {
+			if (!(error instanceof CommittedResetSessionContextError)) throw error;
+			committedError = error;
+			result = error.result;
+		}
 		if (!result) {
 			this.ctx.showWarning("Wait for the current response to finish or abort it before resetting the context.");
 			return;
@@ -994,15 +1006,19 @@ export class CommandController {
 		this.ctx.resetTranscript();
 		this.ctx.statusLine.invalidate();
 		this.ctx.updateEditorBorderColor();
-		const noun = result.droppedCount === 1 ? "message" : "messages";
-		this.ctx.present([
-			new Spacer(1),
-			new Text(
-				`${theme.fg("accent", `${theme.status.success} Context reset — ${result.droppedCount} ${noun} dropped; session continues.`)}`,
-				1,
-				1,
-			),
-		]);
+		if (committedError) {
+			this.ctx.showError(committedError.message);
+		} else {
+			const noun = result.droppedCount === 1 ? "message" : "messages";
+			this.ctx.present([
+				new Spacer(1),
+				new Text(
+					`${theme.fg("accent", `${theme.status.success} Context reset — ${result.droppedCount} ${noun} dropped; session continues.`)}`,
+					1,
+					1,
+				),
+			]);
+		}
 		this.ctx.ui.requestRender(true, { clearScrollback: true });
 	}
 

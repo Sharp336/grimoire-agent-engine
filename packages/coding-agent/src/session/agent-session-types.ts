@@ -56,6 +56,24 @@ export class CommittedNewSessionTransitionError extends Error {
 	}
 }
 
+/**
+ * The in-place context reset committed, but post-commit transition work failed.
+ * Interactive callers must clear the discarded transcript before surfacing
+ * this error.
+ */
+export class CommittedResetSessionContextError extends Error {
+	readonly committed = true;
+
+	constructor(
+		readonly result: ResetSessionContextResult,
+		cause: unknown,
+	) {
+		const detail = cause instanceof Error ? cause.message : String(cause);
+		super(`Context reset committed, but post-commit transition work failed: ${detail}`, { cause });
+		this.name = "CommittedResetSessionContextError";
+	}
+}
+
 /** Options controlling session disposal. */
 export interface AgentSessionDisposeOptions {
 	mnemopiConsolidateTimeoutMs?: number;
