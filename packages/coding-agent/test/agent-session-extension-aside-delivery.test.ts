@@ -576,6 +576,22 @@ describe("AgentSession extension deliverAs aside", () => {
 		).toBe(false);
 	});
 
+	it("restores pending asides when switchSession rolls back after clear (case 9d)", async () => {
+		const { session: active, sessionManager } = await createIdleSession();
+		Object.defineProperty(active, "isStreaming", { value: true, configurable: true });
+		await active.sendCustomMessage(asidePayload("survive rollback"), { deliverAs: "aside" });
+		expect(active.agent.state.messages.filter(isExtensionAside)).toEqual([]);
+
+		const failure = new Error("switch failed");
+		vi.spyOn(sessionManager, "setSessionFile").mockRejectedValueOnce(failure);
+
+		await expect(active.switchSession(tempDir.join("missing-target.jsonl"))).rejects.toBe(failure);
+
+		expect(active.agent.state.messages.filter(isExtensionAside)).toEqual([]);
+		const drained = await drainExtensionAsides();
+		expect(drained.map(message => asideContent(message))).toEqual(["survive rollback"]);
+	});
+
 	it("flushes a pending aside on beginDispose instead of dropping it (case 10)", async () => {
 		const { session: parked, streamStarted } = await createParkedSession();
 		const running = parked.prompt("do work");
