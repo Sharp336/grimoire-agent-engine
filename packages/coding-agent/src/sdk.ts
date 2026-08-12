@@ -133,7 +133,7 @@ import {
 import { AgentSession, type InitialRetryFallbackState, type PlanYolo, type Prewalk } from "./session/agent-session";
 import { discoverAuthStorage as discoverAuthStorageFromConfig } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
-import { applyCostGate, type CostGateController } from "./session/cost-gate";
+import { applyCostGate, type CostGateController, resolveCostGate } from "./session/cost-gate";
 import { createInterruptedTurnAbortMessage } from "./session/exit-diagnostics";
 import {
 	type CustomMessage,
@@ -1269,6 +1269,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		options.settingsManager ??
 		logger.time("settings", Settings.init, { cwd, agentDir }));
 	logger.time("initializeWithSettings", initializeWithSettings, settings);
+	// SDK-created sessions honor the configured session.*Cost settings even
+	// when the caller never passed a controller; resolveCostGate also
+	// normalizes negative/non-finite configured values (#7978 review).
+	const costGate =
+		options.costGate ??
+		resolveCostGate({}, { warnCost: settings.get("session.warnCost"), maxCost: settings.get("session.maxCost") });
 	if (!options.modelRegistry) {
 		modelRegistry.refreshInBackground();
 	}
@@ -1659,7 +1665,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			get cwd() {
 				return sessionManager.getCwd();
 			},
-			costGate: options.costGate,
+			costGate,
 			isToolActive: name => activeToolNames.has(name),
 			setActiveToolNames,
 			toolRegistry,
@@ -3157,6 +3163,26 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			settings,
 			createSettingsAwareStreamFn(settings),
 		);
+		// Gate every provider dispatch in this session tree through the shared
+		// controller: primary stream, side turns, and advisor calls. Each
+		// session registers its own live stats source on setup, so a running
+		// child session's completed turns count immediately instead of only
+		// after the parent rolls them up on task write-back.
+		const sessionCostSource = (): number => session.getSessionStats().cost;
+		const gateDispatch = <T>(dispatch: () => T): T => {
+			const gate = costGate;
+			if (gate === undefined) return dispatch();
+			// Before any source registers the aggregate is undefined; bind a
+			// zero fallback so applyCostGate's `??=` cannot bind a
+			// self-referential getter.
+			gate.getCost ??= () => 0;
+			return applyCostGate(
+				gate,
+				() => gate.getCost?.() ?? 0,
+				message => session.emitNotice("warning", message, "cost-gate"),
+				dispatch,
+			);
+		};
 		const transformToolCallArguments = (args: Record<string, unknown>): Record<string, unknown> => {
 			let result = args;
 			const maxTimeout = settings.get("tools.maxTimeout");
@@ -3207,33 +3233,26 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			preferWebsockets: preferOpenAICodexWebsockets,
 			getToolContext: tc => toolContextStore.getContext(tc),
 			getApiKey: options.getApiKey ?? (requestModel => modelRegistry.resolver(requestModel, agent.sessionId)),
-			streamFn: (streamModel, context, streamOptions) => {
-				if (notifyFirstChatDispatch) {
-					const cb = notifyFirstChatDispatch;
-					notifyFirstChatDispatch = undefined;
-					try {
-						cb();
-					} catch (err) {
-						logger.warn("onFirstChatDispatch hook threw", {
-							error: err instanceof Error ? err.message : String(err),
-						});
+			// Shared gate wrapper for every provider dispatch in this session
+			// tree — the primary stream, side turns (branch summaries,
+			// compaction/handoff generation), and advisor calls all go through
+			// the same controller so --max-cost holds for every provider
+			// request, not just the main turn stream (#7978 review).
+			streamFn: (streamModel, context, streamOptions) =>
+				gateDispatch(() => {
+					if (notifyFirstChatDispatch) {
+						const cb = notifyFirstChatDispatch;
+						notifyFirstChatDispatch = undefined;
+						try {
+							cb();
+						} catch (err) {
+							logger.warn("onFirstChatDispatch hook threw", {
+								error: err instanceof Error ? err.message : String(err),
+							});
+						}
 					}
-				}
-				const gate = options.costGate;
-				if (gate === undefined) {
 					return settingsAwareStreamFn(streamModel, context, streamOptions);
-				}
-				// The first dispatcher (the root session) binds the authoritative
-				// cumulative cost getter; subagent sessions inherit it via the shared
-				// controller, so the gate reads the whole session tree's spend.
-				gate.getCost ??= () => session.getSessionStats().cost;
-				return applyCostGate(
-					gate,
-					() => gate.getCost!(),
-					message => session.emitNotice("warning", message, "cost-gate"),
-					() => settingsAwareStreamFn(streamModel, context, streamOptions),
-				);
-			},
+				}),
 			cursorExecHandlers,
 			getCursorTools: () => (toolSession.xdev ? listXdevTools(toolSession.xdev) : []),
 			transformToolCallArguments,
@@ -3340,7 +3359,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// line would restart its `(adv)` total at zero for the rest of the session.
 		const initialAdvisorCosts = await loadAdvisorTranscriptCosts(sessionManager.getSessionFile());
 		session = new AgentSession({
-			costGate: options.costGate,
+			costGate,
 			advisorWatchdogPrompt,
 			advisorContextPrompt,
 			advisorSharedInstructions: discoveredAdvisors.sharedInstructions,
@@ -3401,8 +3420,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			transformProviderContext,
 			onPayload,
 			onResponse,
-			sideStreamFn: settingsAwareStreamFn,
-			advisorStreamFn: settingsAwareStreamFn,
+			sideStreamFn: (streamModel, context, streamOptions) =>
+				gateDispatch(() => settingsAwareStreamFn(streamModel, context, streamOptions)),
+			advisorStreamFn: (streamModel, context, streamOptions) =>
+				gateDispatch(() => settingsAwareStreamFn(streamModel, context, streamOptions)),
 			preferWebsockets: preferOpenAICodexWebsockets,
 			convertToLlm: convertToLlmFinal,
 			rebuildSystemPrompt,
@@ -3451,6 +3472,23 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			titleSystemPrompt: options.titleSystemPrompt,
 		});
 		hasSession = true;
+		// Register this session's live spend with the shared tree controller.
+		// The source is dropped on dispose: once a child's task result is
+		// written back, the parent's own stats roll it up, so keeping the
+		// source would double-count.
+		if (costGate !== undefined) {
+			costGate.addCostSource?.(sessionCostSource);
+			disposeCallbacks.add(() => costGate.removeCostSource?.(sessionCostSource));
+			// A resumed session already crossed the warn threshold in a past
+			// run; do not re-emit the one-time warning on the first dispatch.
+			if (
+				hasExistingSession &&
+				costGate.warnCost !== undefined &&
+				session.getSessionStats().cost >= costGate.warnCost
+			) {
+				costGate.warned = true;
+			}
+		}
 		session.yieldQueue.register<McpNotificationEntry>("mcp-notification", {
 			build: buildMcpNotificationBatchMessage,
 		});
@@ -3659,7 +3697,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					kimiApiFormat,
 					preferWebsockets: preferOpenAICodexWebsockets,
 					getToolContext: toolCall => toolContextStore.getContext(toolCall),
-					streamFn: settingsAwareStreamFn,
+					streamFn: (streamModel, context, streamOptions) =>
+						gateDispatch(() => settingsAwareStreamFn(streamModel, context, streamOptions)),
 					transformToolCallArguments,
 					resolveFallbackTool: resolveDeviceTool,
 					intentTracing: !!intentField,

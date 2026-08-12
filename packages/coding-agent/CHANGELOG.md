@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added native per-session cost limits: `--warn-cost` / `--max-cost` CLI flags and `session.warnCost` / `session.maxCost` settings emit a one-time warning at the warn threshold and refuse the next provider dispatch once the max threshold is reached, enforced across the whole session tree including subagents ([#7802](https://github.com/can1357/oh-my-pi/issues/7802)).
+
 ## [17.2.11] - 2026-08-07
 
 ### Added
@@ -10,7 +14,6 @@
 - Remote MCP transports now enforce header precedence and origin policy: client-generated HTTP/MCP/authorization headers win over configured headers case-insensitively, and Agent Plugins servers never forward configured headers across a redirect to a different origin (method-changing redirects of JSON-RPC POSTs are refused). Agent Plugins stdio `env` values and remote `headers` are likewise exempt from config-value resolution (no ambient env-name lookup, no `!command` execution, empty values preserved).
 - Added `omp share <session>`: share a saved session by id prefix or `.jsonl` path without launching the agent — same encrypted upload, store selection, and `share.redactSecrets` handling as the `/share` slash command.
 - Added `AGENT=1` to coding-agent child-process environments so downstream tools can detect agent-driven execution ([#7847](https://github.com/can1357/oh-my-pi/issues/7847)).
-- Added native per-session cost limits: `--warn-cost` / `--max-cost` CLI flags and `session.warnCost` / `session.maxCost` settings emit a one-time warning at the warn threshold and refuse the next provider dispatch once the max threshold is reached, enforced across the whole session tree including subagents ([#7802](https://github.com/can1357/oh-my-pi/issues/7802)).
 - Added support for the Agent Plugins 1.0.0 standard, enabling automatic discovery, validation, and secure execution of compliant plugin packages.
 - Added the `omp share <session>` command to share saved sessions by ID prefix or file path without launching the agent.
 - Added the `AGENT=1` environment variable to child processes spawned by `coding-agent` to allow downstream tools to detect agent-driven execution.

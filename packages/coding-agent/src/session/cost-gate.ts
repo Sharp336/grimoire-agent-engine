@@ -3,8 +3,17 @@ export interface CostGateController {
 	maxCost?: number;
 	/** One-time warn flag, shared across the whole session tree. */
 	warned: boolean;
-	/** Bound by the root session on first dispatch. */
+	/**
+	 * Live cumulative cost across the whole session tree. Every session in
+	 * the tree registers its own stats source, so a running child session's
+	 * completed turns count immediately instead of only after the parent
+	 * rolls them up on task write-back (#7978 review).
+	 */
 	getCost?: () => number;
+	/** Register a session's live stats source (idempotent per session). */
+	addCostSource?(source: () => number): void;
+	/** Drop a session's source once its spend is rolled into a parent. */
+	removeCostSource?(source: () => number): void;
 }
 
 export class CostCapExceededError extends Error {
@@ -15,7 +24,29 @@ export class CostCapExceededError extends Error {
 }
 
 export function createCostGateController(options: { warnCost?: number; maxCost?: number }): CostGateController {
-	return { warnCost: options.warnCost, maxCost: options.maxCost, warned: false };
+	const sources = new Set<() => number>();
+	// Lazily installed: until the first source registers, getCost stays
+	// undefined so applyCostGate still binds a caller-supplied getter.
+	const aggregate = (): number => {
+		let total = 0;
+		for (const source of sources) total += source();
+		return total;
+	};
+	const controller: CostGateController = {
+		warnCost: options.warnCost,
+		maxCost: options.maxCost,
+		warned: false,
+		getCost: undefined,
+		addCostSource: source => {
+			sources.add(source);
+			controller.getCost = aggregate;
+		},
+		removeCostSource: source => {
+			sources.delete(source);
+			controller.getCost = sources.size > 0 ? aggregate : undefined;
+		},
+	};
+	return controller;
 }
 
 export type CostGateDecision = "ok" | "warn" | "cap";
