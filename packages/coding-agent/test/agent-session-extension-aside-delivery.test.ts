@@ -594,6 +594,49 @@ describe("AgentSession extension deliverAs aside", () => {
 		).toBe(false);
 	});
 
+	it("drops asides injected after the first switchSession clear and before reconnect (case 9f)", async () => {
+		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+		});
+		captureAsideProvider(agent);
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		const authStorage = await AuthStorage.create(tempDir.join(`auth-${Snowflake.next()}.db`));
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		const active = new AgentSession({ agent, sessionManager, settings, modelRegistry });
+		session = active;
+
+		sessionManager.appendMessage({ role: "user", content: "previous", timestamp: 1 });
+		await sessionManager.flush();
+
+		const otherManager = SessionManager.create(tempDir.path(), tempDir.path());
+		otherManager.appendMessage({ role: "user", content: "target", timestamp: 2 });
+		await otherManager.flush();
+		const targetSessionFile = otherManager.getSessionFile();
+		if (!targetSessionFile) throw new Error("expected target session file");
+		await otherManager.close();
+
+		Object.defineProperty(active, "isStreaming", { value: true, configurable: true });
+
+		const setSessionFile = sessionManager.setSessionFile.bind(sessionManager);
+		vi.spyOn(sessionManager, "setSessionFile").mockImplementation(async file => {
+			await setSessionFile(file);
+			await active.sendCustomMessage(asidePayload("must not leak after clear"), { deliverAs: "aside" });
+		});
+
+		const switched = await active.switchSession(targetSessionFile);
+		expect(switched).toBe(true);
+		await active.waitForIdle();
+
+		expect(active.agent.state.messages.filter(isExtensionAside)).toEqual([]);
+		expect(await drainExtensionAsides()).toEqual([]);
+	});
+
 	it("restores pending asides when switchSession rolls back after clear (case 9d)", async () => {
 		const { session: active, sessionManager } = await createIdleSession();
 		Object.defineProperty(active, "isStreaming", { value: true, configurable: true });

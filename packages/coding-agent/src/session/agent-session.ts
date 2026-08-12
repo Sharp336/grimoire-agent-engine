@@ -6990,6 +6990,7 @@ export class AgentSession {
 			this.#planReferencePath = "local://PLAN.md";
 			this.#advisors.resetSessionState();
 			advisorRecordersDetached = false;
+			this.#clearPendingExtensionAsides();
 			this.#reconnectToAgent();
 			// The workspace-roots block must reflect the new session's directory set,
 			// not the previous session's — refresh before the next turn goes out.
@@ -8198,6 +8199,7 @@ export class AgentSession {
 			if (switchingToDifferentSession || didReloadConversationChange) {
 				this.#clearSessionScopedToolState();
 			}
+			this.#clearPendingExtensionAsides();
 			this.#reconnectToAgent();
 			try {
 				await this.#sessionSwitchReconciler?.();
