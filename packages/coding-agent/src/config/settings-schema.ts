@@ -167,6 +167,7 @@ export type StatusLineSegmentId =
 	| "git"
 	| "pr"
 	| "subagents"
+	| "subagent_cost"
 	| "token_in"
 	| "token_out"
 	| "token_total"

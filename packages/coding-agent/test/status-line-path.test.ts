@@ -53,6 +53,7 @@ function createPathContext(): SegmentContext {
 		contextWindow: 0,
 		autoCompactEnabled: false,
 		subagentCount: 0,
+		subagentCost: 0,
 		activeMs: 0,
 		activeRepo: null,
 		worktree: null,

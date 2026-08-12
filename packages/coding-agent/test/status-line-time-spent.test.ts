@@ -63,6 +63,7 @@ function createCtx(activeMs: number): SegmentContext {
 		contextWindow: 0,
 		autoCompactEnabled: false,
 		subagentCount: 0,
+		subagentCost: 0,
 		activeMs,
 		activeRepo: null,
 		worktree: null,
