@@ -51,6 +51,7 @@ function createRevivedSession(
 	activeToolNames: string[][],
 	refreshedHostTools: string[][] = [],
 	mountedToolNames: string[][] = [],
+	registeredToolNames: string[] = [],
 ): RevivedSessionHandle {
 	let observer: IrcWakeObserver | undefined;
 	const session = {
@@ -58,7 +59,7 @@ function createRevivedSession(
 		refreshRpcHostTools: async (tools: AgentTool[]) => {
 			refreshedHostTools.push(tools.map(tool => tool.name));
 		},
-		getToolByName: () => undefined,
+		getToolByName: (name: string) => (registeredToolNames.includes(name) ? ({ name } as AgentTool) : undefined),
 		setActiveToolPresentation: async (names: string[], mountedNames: string[]) => {
 			activeToolNames.push(names);
 			mountedToolNames.push(mountedNames);
@@ -274,7 +275,8 @@ describe("persisted subagent revival", () => {
 		const mountedToolNames: string[][] = [];
 		const refreshedHostTools: string[][] = [];
 		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
-			session: createRevivedSession(activeToolNames, refreshedHostTools, mountedToolNames).session,
+			session: createRevivedSession(activeToolNames, refreshedHostTools, mountedToolNames, ["ida_execute_python"])
+				.session,
 		} as CreateAgentSessionResult);
 
 		const ref = createRef(sessionFile);
@@ -283,8 +285,8 @@ describe("persisted subagent revival", () => {
 		await reviver(ref);
 
 		expect(refreshedHostTools).toEqual([]);
-		expect(activeToolNames).toEqual([["read", "yield", "ida_execute_python"]]);
-		expect(mountedToolNames).toEqual([["ida_execute_python"]]);
+		expect(activeToolNames).toEqual([["read", "yield"]]);
+		expect(mountedToolNames).toEqual([[]]);
 	});
 
 	it("restores the persisted custom model role before reopening the session", async () => {

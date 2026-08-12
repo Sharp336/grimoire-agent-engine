@@ -100,9 +100,20 @@ export function createPersistedSubagentReviverFactory(
 			// state: same-name MCP tools are untrusted capability sources.
 			const restrictToolNames = init.restrictToolNames === true;
 			const enableMCP = !restrictToolNames && (init.enableMCP ?? true);
+			const parentRpcHostTools = restrictToolNames
+				? []
+				: ctx.session.getRpcHostTools().filter(tool => enableMCP || !isMCPToolName(tool.name));
+			const parentRpcHostToolNames = new Set(parentRpcHostTools.map(tool => tool.name));
+			const parentMountedTools = new Set(ctx.session.getMountedXdevToolNames());
 			const persistedMountedTools = restrictToolNames
 				? []
-				: (init.mountedTools ?? []).filter(name => enableMCP || !isMCPToolName(name));
+				: (init.mountedTools ?? []).filter(
+						name =>
+							(enableMCP || !isMCPToolName(name)) &&
+							(ctx.session.hasBuiltInTool(name) ||
+								parentRpcHostToolNames.has(name) ||
+								(parentMountedTools.has(name) && ctx.session.getToolByName(name) !== undefined)),
+					);
 			const persistedToolNames = new Set([...init.tools, ...persistedMountedTools]);
 			const mcpManager = enableMCP ? MCPManager.instance() : undefined;
 			const mcpProxyTools = mcpManager ? createMCPProxyTools(mcpManager) : [];
@@ -142,14 +153,11 @@ export function createPersistedSubagentReviverFactory(
 						}
 					: {}),
 			});
-			const parentMountedTools = new Set(ctx.session.getMountedXdevToolNames());
 			if (!restrictToolNames) {
 				const inheritedHostTools = [
 					...new Map(
 						[
-							...ctx.session
-								.getRpcHostTools()
-								.filter(tool => persistedToolNames.has(tool.name) && (enableMCP || !isMCPToolName(tool.name))),
+							...parentRpcHostTools.filter(tool => persistedToolNames.has(tool.name)),
 							...persistedMountedTools.flatMap(name => {
 								if (!parentMountedTools.has(name) || ctx.session.hasBuiltInTool(name)) return [];
 								const tool = ctx.session.getToolByName(name);
@@ -157,7 +165,7 @@ export function createPersistedSubagentReviverFactory(
 							}),
 						].map(tool => [tool.name, tool]),
 					).values(),
-				].filter(tool => !session.getToolByName(tool.name));
+				].filter(tool => persistedToolNames.has(tool.name));
 				if (inheritedHostTools.length > 0) await session.refreshRpcHostTools(inheritedHostTools);
 			}
 			// Restore the child's exact top-level versus mounted snapshot.
