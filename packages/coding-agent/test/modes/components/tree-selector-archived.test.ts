@@ -78,6 +78,53 @@ describe("tree selector with archived branches", () => {
 		expect(toggled).toBe(1);
 	});
 
+	it("hands the highlighted branch to the caller on Shift+A", async () => {
+		const session = sessionWithAnEmptyBranch();
+		const leafId = session.getLeafId() as string;
+		const archived: string[] = [];
+		const selector = new TreeSelectorComponent(
+			session.getTree(),
+			leafId,
+			60,
+			() => {},
+			() => {},
+			undefined,
+			"all",
+			{ showing: false, onArchiveToggle: id => archived.push(id) },
+		);
+		selector.handleInput("A");
+
+		expect(archived).toEqual([leafId]);
+	});
+
+	it("types a capital A into the search instead of archiving mid-search", async () => {
+		const session = sessionWithAnEmptyBranch();
+		const archived: string[] = [];
+		const selector = new TreeSelectorComponent(
+			session.getTree(),
+			session.getLeafId(),
+			60,
+			() => {},
+			() => {},
+			undefined,
+			"all",
+			{ showing: false, onArchiveToggle: id => archived.push(id) },
+		);
+		selector.handleInput("r");
+		selector.handleInput("A");
+
+		expect(archived).toEqual([]);
+		expect(Bun.stripANSI(selector.render(120).join("\n"))).toContain("rA");
+	});
+
+	it("offers restore as well as archive once archived rows are showing", async () => {
+		const session = sessionWithAnEmptyBranch();
+		await session.archiveEmptyBranches();
+
+		expect(render(session, false)).toContain("Shift+A: archive");
+		expect(render(session, true)).toContain("Shift+A: archive/restore");
+	});
+
 	it("never renders the archive bookkeeping record as a row", async () => {
 		const session = sessionWithAnEmptyBranch();
 		await session.archiveEmptyBranches();

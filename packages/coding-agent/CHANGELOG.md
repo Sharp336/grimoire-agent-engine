@@ -167,6 +167,7 @@
 - Added a `/prune` slash command that deletes conversation branches with nothing to read in them: an entry survives only if an answered assistant reply sits at or below it, so unanswered prompts, replies that errored or were aborted, replies left waiting on a tool call that never came back, and the tool traffic under them all go. The active branch is always kept intact.
 - `/prune` now hides empty branches instead of deleting them. An archive record is appended to the session file, the branch stays on disk byte for byte, and the tree, the HTML export, and `/share` stop offering it. `/prune delete` is the old destructive behavior, now opt-in, and archiving a branch also shields it from it.
 - Added `/unarchive` to bring hidden branches back: `/unarchive` restores them all, `/unarchive <branch id>` restores one, and `/unarchive list` shows what is hidden.
+- Added archiving from the `/tree` selector: `Shift+A` hides the highlighted branch whether or not it is empty, `Alt+R` reveals archived branches in place, and `Shift+A` on a revealed branch restores it.
 
 ## [17.2.9] - 2026-08-05
 

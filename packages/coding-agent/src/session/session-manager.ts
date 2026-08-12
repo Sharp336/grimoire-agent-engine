@@ -2480,7 +2480,7 @@ export class SessionManager {
 	 * of destroying it.
 	 *
 	 * One record per outermost empty branch, appended rather than written over
-	 * anything, so the branch survives in the file and `/prune --restore` brings
+	 * anything, so the branch survives in the file and `/unarchive` brings
 	 * it back verbatim. Returns how many branches were hidden and how many
 	 * entries went with them.
 	 */
@@ -2511,6 +2511,38 @@ export class SessionManager {
 		}
 
 		return { branches: roots.length, entries };
+	}
+
+	/**
+	 * Hide one branch by id, whatever is in it.
+	 *
+	 * `archiveEmptyBranches()` decides for you and only ever touches branches
+	 * with nothing to read; this is the manual counterpart behind the tree
+	 * selector, where you can see the branch you are hiding. Same append-only
+	 * record either way, so `restoreArchived()` brings it back the same way.
+	 *
+	 * Refuses the active branch: hiding an entry you are standing on would drop
+	 * the conversation out of its own tree. Returns how many entries went with
+	 * it, or 0 when it was already archived.
+	 */
+	async archiveBranch(targetId: string): Promise<number> {
+		if (!this.#index.has(targetId)) throw new Error(`No entry ${targetId} in this session.`);
+		if (this.#index.archivedRootIds().has(targetId)) return 0;
+		for (const entry of this.getBranch()) {
+			if (entry.id === targetId) throw new Error("That branch is the one you are in — switch away from it first.");
+		}
+
+		let entries = 0;
+		const stack = [targetId];
+		while (stack.length > 0) {
+			const id = stack.pop() as string;
+			entries++;
+			for (const child of this.#index.childrenOf(id)) stack.push(child.id);
+		}
+
+		const entry: ArchiveEntry = { type: "archive", ...this.#freshEntryFields(), targetId, archived: true };
+		this.#recordEntry(entry);
+		return entries;
 	}
 
 	/**

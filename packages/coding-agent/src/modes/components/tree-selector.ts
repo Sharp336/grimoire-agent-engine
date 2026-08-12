@@ -77,6 +77,11 @@ class TreeList implements Component {
 	onLabelEdit?: (entryId: string, currentLabel: string | undefined) => void;
 	/** Reveal or re-hide archived branches. The node set changes, so the caller rebuilds the list. */
 	onToggleArchived?: () => void;
+	/**
+	 * Hide the highlighted branch, or reveal it when it is already archived. The
+	 * node set changes either way, so the caller rebuilds the list.
+	 */
+	onArchiveToggle?: (entryId: string) => void;
 
 	constructor(
 		tree: SessionTreeNode[],
@@ -924,6 +929,13 @@ class TreeList implements Component {
 			if (selected && this.onLabelEdit) {
 				this.onLabelEdit(selected.node.entry.id, selected.node.label);
 			}
+		} else if (matchesKey(keyData, "shift+a") && !this.#searchQuery) {
+			// Capital A is also a search character, so this only fires while no
+			// search is being typed — the same rule Shift+L follows for labels.
+			const selected = this.#filteredNodes[this.#selectedIndex];
+			if (selected && this.onArchiveToggle) {
+				this.onArchiveToggle(selected.node.entry.id);
+			}
 		} else {
 			const printableText = extractPrintableText(keyData);
 			if (printableText) {
@@ -1008,7 +1020,7 @@ export class TreeSelectorComponent extends Container {
 		onCancel: () => void,
 		private readonly onLabelChangeCallback?: (entryId: string, label: string | undefined) => void,
 		initialFilterMode: FilterMode = "default",
-		archive: { showing?: boolean; onToggle?: () => void } = {},
+		archive: { showing?: boolean; onToggle?: () => void; onArchiveToggle?: (entryId: string) => void } = {},
 	) {
 		super();
 		const maxVisibleLines = Math.max(5, Math.floor(terminalHeight / 2));
@@ -1018,6 +1030,7 @@ export class TreeSelectorComponent extends Container {
 		this.#treeList.onCancel = onCancel;
 		this.#treeList.onLabelEdit = (entryId, currentLabel) => this.#showLabelInput(entryId, currentLabel);
 		if (archive.onToggle) this.#treeList.onToggleArchived = archive.onToggle;
+		if (archive.onArchiveToggle) this.#treeList.onArchiveToggle = archive.onArchiveToggle;
 
 		this.#treeContainer = new Container();
 		this.#treeContainer.addChild(this.#treeList);
@@ -1033,8 +1046,9 @@ export class TreeSelectorComponent extends Container {
 			new Text(
 				theme.bold("  Session Tree") +
 					(archive.showing
-						? theme.fg("warning", "  [showing archived]") + theme.fg("muted", "  Alt+R: hide")
-						: theme.fg("muted", "  Alt+R: show archived")),
+						? theme.fg("warning", "  [showing archived]") +
+							theme.fg("muted", "  Alt+R: hide  Shift+A: archive/restore")
+						: theme.fg("muted", "  Alt+R: show archived  Shift+A: archive")),
 				1,
 				0,
 			),

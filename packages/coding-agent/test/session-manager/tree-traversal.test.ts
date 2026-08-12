@@ -951,3 +951,74 @@ describe("archiveEmptyBranches", () => {
 		expect(treeIds(reloaded.getTree({ includeArchived: true }))).toContain(idAbandoned);
 	});
 });
+
+describe("archiveBranch", () => {
+	/** Every entry id reachable in a tree, in pre-order. */
+	function treeIds(nodes: SessionTreeNode[]): string[] {
+		const ids: string[] = [];
+		const walk = (list: SessionTreeNode[]) => {
+			for (const node of list) {
+				ids.push(node.entry.id);
+				walk(node.children);
+			}
+		};
+		walk(nodes);
+		return ids;
+	}
+
+	/** An answered branch the session sits on, plus an answered branch beside it. */
+	function buildTwoAnsweredBranches() {
+		const session = SessionManager.inMemory();
+		const idRoot = session.appendMessage(userMsg("root"));
+		const idAsst = session.appendMessage(assistantMsg("answer"));
+
+		session.branch(idRoot);
+		const idOther = session.appendMessage(userMsg("other question"));
+		const idOtherAsst = session.appendMessage(assistantMsg("other answer"));
+
+		session.branch(idAsst);
+		return { session, idRoot, idAsst, idOther, idOtherAsst };
+	}
+
+	it("hides a branch that prune would have kept, and everything under it", async () => {
+		const { session, idOther, idOtherAsst } = buildTwoAnsweredBranches();
+
+		expect(await session.archiveBranch(idOther)).toBe(2);
+
+		expect(treeIds(session.getTree())).not.toContain(idOther);
+		expect(treeIds(session.getTree())).not.toContain(idOtherAsst);
+		expect(session.getEntries().map(e => e.id)).toContain(idOtherAsst);
+		expect(session.getArchivedRootIds()).toEqual([idOther]);
+	});
+
+	it("refuses the branch the session is standing on", async () => {
+		const { session, idAsst, idRoot } = buildTwoAnsweredBranches();
+
+		await expect(session.archiveBranch(idAsst)).rejects.toThrow(/the one you are in/);
+		await expect(session.archiveBranch(idRoot)).rejects.toThrow(/the one you are in/);
+		expect(session.getArchivedRootIds()).toEqual([]);
+	});
+
+	it("rejects an id that is not in the session", async () => {
+		const { session } = buildTwoAnsweredBranches();
+		await expect(session.archiveBranch("nope")).rejects.toThrow(/No entry nope/);
+	});
+
+	it("archives once: a second call adds no record", async () => {
+		const { session, idOther } = buildTwoAnsweredBranches();
+		await session.archiveBranch(idOther);
+		const after = session.getEntries().length;
+
+		expect(await session.archiveBranch(idOther)).toBe(0);
+		expect(session.getEntries()).toHaveLength(after);
+	});
+
+	it("restores what it hid", async () => {
+		const { session, idOther, idOtherAsst } = buildTwoAnsweredBranches();
+		await session.archiveBranch(idOther);
+
+		expect(await session.restoreArchived(idOther)).toBe(1);
+		expect(treeIds(session.getTree())).toContain(idOther);
+		expect(treeIds(session.getTree())).toContain(idOtherAsst);
+	});
+});

@@ -1372,6 +1372,26 @@ export class SelectorController {
 						done();
 						this.showTreeSelector({ includeArchived: !includeArchived });
 					},
+					// Archive or restore whatever is highlighted, then rebuild: hiding a
+					// branch removes it from the tree the component is holding, and
+					// restoring one is only reachable while archived rows are showing.
+					onArchiveToggle: async (entryId: string) => {
+						const archived = this.ctx.sessionManager.getArchivedRootIds().includes(entryId);
+						try {
+							if (archived) {
+								await this.ctx.session.restoreArchived(entryId);
+							} else {
+								const hidden = await this.ctx.session.archiveBranch(entryId);
+								if (hidden === 0) return;
+							}
+						} catch (error) {
+							this.ctx.showError(error instanceof Error ? error.message : String(error));
+							return;
+						}
+						done();
+						this.showTreeSelector({ includeArchived });
+						this.ctx.showStatus(archived ? "Branch restored" : "Branch archived");
+					},
 				},
 			);
 			return { component: selector, focus: selector };

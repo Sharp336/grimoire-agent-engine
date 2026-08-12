@@ -4528,6 +4528,11 @@ export class AgentSession {
 		return this.sessionManager.archiveEmptyBranches();
 	}
 
+	/** Hide one branch by id, whatever is in it. Returns how many entries it hid. */
+	async archiveBranch(targetId: string): Promise<number> {
+		return this.sessionManager.archiveBranch(targetId);
+	}
+
 	/** Bring archived branches back into view; omit the id to restore them all. */
 	async restoreArchived(targetId?: string): Promise<number> {
 		return this.sessionManager.restoreArchived(targetId);
