@@ -559,6 +559,7 @@ describe("ExtensionRunner", () => {
 					getThinkingLevel: () => undefined,
 					setThinkingLevel: () => {},
 					getSessionName: () => undefined,
+					getAgentId: () => undefined,
 					setSessionName: async () => {},
 				},
 				{
@@ -921,6 +922,7 @@ describe("ExtensionRunner", () => {
 					getThinkingLevel: () => undefined,
 					setThinkingLevel: () => {},
 					getSessionName: () => undefined,
+					getAgentId: () => undefined,
 					setSessionName: async () => {},
 				},
 				{
@@ -1554,6 +1556,7 @@ describe("ExtensionRunner", () => {
 					getThinkingLevel: () => undefined,
 					setThinkingLevel: () => {},
 					getSessionName: () => undefined,
+					getAgentId: () => undefined,
 					setSessionName: async () => {},
 				},
 				{
@@ -1637,6 +1640,7 @@ describe("ExtensionRunner", () => {
 					getThinkingLevel: () => undefined,
 					setThinkingLevel: () => {},
 					getSessionName: () => undefined,
+					getAgentId: () => undefined,
 					setSessionName: async () => {},
 				},
 				{
@@ -1726,6 +1730,7 @@ describe("ExtensionRunner", () => {
 						setCalls.push([family, tier]);
 					},
 					getSessionName: () => undefined,
+					getAgentId: () => undefined,
 					setSessionName: async () => {},
 				},
 				{
@@ -1791,6 +1796,7 @@ describe("ExtensionRunner", () => {
 					getThinkingLevel: () => undefined,
 					setThinkingLevel: () => {},
 					getSessionName: () => sessionManager.getSessionName(),
+					getAgentId: () => undefined,
 					setSessionName: async name => {
 						await sessionManager.setSessionName(name);
 					},
@@ -1849,6 +1855,7 @@ describe("ExtensionRunner", () => {
 					getThinkingLevel: () => undefined,
 					setThinkingLevel: () => {},
 					getSessionName: () => undefined,
+					getAgentId: () => undefined,
 					setSessionName: async () => {},
 				},
 				{
@@ -3080,6 +3087,7 @@ describe("ExtensionRunner", () => {
 					getThinkingLevel: () => undefined,
 					setThinkingLevel: () => {},
 					getSessionName: () => sessionManager.getSessionName(),
+					getAgentId: () => undefined,
 					setSessionName: async () => {},
 				},
 				{
@@ -3152,6 +3160,7 @@ describe("ExtensionRunner", () => {
 					getThinkingLevel: () => undefined,
 					setThinkingLevel: () => {},
 					getSessionName: () => sessionManager.getSessionName(),
+					getAgentId: () => undefined,
 					setSessionName: async () => {},
 				},
 				{
@@ -3242,6 +3251,7 @@ describe("ExtensionRunner", () => {
 					getThinkingLevel: () => undefined,
 					setThinkingLevel: () => {},
 					getSessionName: () => sessionManager.getSessionName(),
+					getAgentId: () => undefined,
 					setSessionName: async () => {},
 				},
 				{

@@ -7,6 +7,7 @@
 
 import * as os from "node:os";
 import * as path from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import type { ToolCallContext } from "@oh-my-pi/pi-agent-core";
 import type { Ellipsis } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
@@ -21,6 +22,17 @@ import { formatDimensionNote, type ResizedImage } from "../utils/image-resize";
 
 export { Ellipsis } from "@oh-my-pi/pi-natives";
 export { replaceTabs, truncateToWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
+
+/** Normalize a single-line, externally-sourced string (e.g. a remote-transport receipt error or id)
+ * for TUI display: strip ANSI/VT escapes and C0/C1 control chars (which would otherwise break the
+ * row layout or inject terminal sequences), collapse whitespace, and bound length. */
+export function sanitizeInline(value: string, max = 200): string {
+	const clean = stripVTControlCharacters(value)
+		.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+		.replace(/ +/g, " ")
+		.trim();
+	return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
+}
 
 // =============================================================================
 // Standardized Display Constants

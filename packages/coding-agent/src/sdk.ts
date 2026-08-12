@@ -89,6 +89,7 @@ import {
 	ExtensionRunner,
 	ExtensionToolWrapper,
 	type ExtensionUIContext,
+	emitSessionShutdownEvent,
 	type LoadExtensionsResult,
 	loadExtensionFromFactory,
 	loadExtensions,
@@ -124,7 +125,7 @@ import type { MnemopiSessionState } from "./mnemopi/state";
 import mcpXdevGuidanceTemplate from "./prompts/system/mcp-xdev-guidance.md" with { type: "text" };
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
-import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "./registry/agent-registry";
+import { type AgentRef, AgentRegistry, MAIN_AGENT_ID, REMOTE_ID_PREFIX } from "./registry/agent-registry";
 import {
 	buildSecretObfuscator,
 	deobfuscateSessionContext,
@@ -212,7 +213,7 @@ import {
 } from "./tools";
 import { isMCPToolName, normalizeToolNames } from "./tools/builtin-names";
 import { ToolContextStore } from "./tools/context";
-import { isIrcEnabled } from "./tools/hub";
+import { HubTool, isIrcEnabled } from "./tools/hub";
 import { getImageGenTools } from "./tools/image-gen";
 import { wrapToolWithMetaNotice } from "./tools/output-meta";
 import { isAutoQaEnabled } from "./tools/report-tool-issue";
@@ -631,11 +632,15 @@ export type { CustomTool, CustomToolFactory } from "./extensibility/custom-tools
 export type * from "./extensibility/extensions";
 export type { Skill } from "./extensibility/skills";
 export type { FileSlashCommand } from "./extensibility/slash-commands";
+// IRC wire-shape types for the pi.irc extension surface (the murmur bridge). The IrcBus
+// class itself is intentionally NOT exported — extensions reach inbound delivery via pi.irc.
+export type { IrcDeliveryReceipt, IrcMessage, RemoteTransport } from "./irc/bus";
 export type { MCPManager, MCPServerConfig, MCPServerConnection, MCPToolsLoadResult } from "./mcp";
 // Agent registry: pass a private instance per `createAgentSession` when
 // embedding several concurrent top-level sessions in one process (the default
 // global registry admits only one "Main" per process generation).
 export { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "./registry/agent-registry";
+
 export type { Tool } from "./tools";
 export { buildDirectoryTree, buildWorkspaceTree, type DirectoryTree, type WorkspaceTree } from "./workspace-tree";
 
@@ -1613,6 +1618,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 	const agentRegistry = options.agentRegistry ?? AgentRegistry.global();
 	const resolvedAgentId = options.agentId ?? options.parentTaskPrefix ?? MAIN_AGENT_ID;
+	if (resolvedAgentId.startsWith(REMOTE_ID_PREFIX)) {
+		throw new Error(
+			`Local agent id ${JSON.stringify(resolvedAgentId)} may not start with "${REMOTE_ID_PREFIX}" — that prefix is reserved for cross-process remote peers (@namespace/name).`,
+		);
+	}
 	const resolvedAgentDisplayName =
 		options.agentDisplayName ?? ((options.taskDepth ?? 0) > 0 || options.parentTaskPrefix ? "sub" : "main");
 	const agentKind = (options.taskDepth ?? 0) > 0 || options.parentTaskPrefix ? ("sub" as const) : ("main" as const);
@@ -1707,11 +1717,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getAgentId: () => resolvedAgentId,
 			getToolByName: name => session?.getToolByName(name),
 			agentRegistry,
-			// The global lifecycle releases through AgentRegistry.global(); wiring it
-			// onto a caller-supplied registry would report a cancel while releasing an
-			// unrelated global ref. With no lifecycle, hub cancel falls back to
-			// dispose + unregister on the session's own registry.
-			agentLifecycle: options.agentRegistry ? undefined : () => AgentLifecycleManager.global(),
+			// Hub cancel/revive routes through the AgentLifecycleManager paired with this
+			// session's registry (the same one IrcBus.forRegistry uses), so a custom per-session
+			// registry releases its OWN refs — never an unrelated global one — and the global
+			// case stays identical (forRegistry(global) === global()).
+			agentLifecycle: () => AgentLifecycleManager.forRegistry(agentRegistry),
 			getSessionSpawns: () => options.spawns ?? "*",
 			getModelString: () => (hasExplicitModel && model ? formatModelString(model) : undefined),
 			getActiveModelString,
@@ -1987,7 +1997,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// Allocate a session runtime without evaluating caller-provided extension
 			// instances, paths, or factories.
 			extensionPaths = [];
-			extensionsResult = await loadExtensions([], cwd, eventBus);
+			extensionsResult = await loadExtensions([], cwd, eventBus, agentRegistry, agentKind === "main");
 		} else if (options.preloadedExtensions) {
 			extensionsResult = {
 				...options.preloadedExtensions,
@@ -2000,7 +2010,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				.filter(p => !p.startsWith("<inline"));
 		} else if (options.preloadedExtensionPaths) {
 			extensionPaths = options.preloadedExtensionPaths;
-			extensionsResult = await logger.time("loadExtensions", loadExtensions, extensionPaths, cwd, eventBus);
+			extensionsResult = await logger.time(
+				"loadExtensions",
+				loadExtensions,
+				extensionPaths,
+				cwd,
+				eventBus,
+				agentRegistry,
+				agentKind === "main",
+			);
 			for (const { path, error } of extensionsResult.errors) {
 				logger.error("Failed to load extension", { path, error });
 			}
@@ -2008,7 +2026,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			extensionPaths = await logger.time("discoverSessionExtensionPaths", () =>
 				discoverSessionExtensionPaths(options, cwd, settings),
 			);
-			extensionsResult = await logger.time("loadExtensions", loadExtensions, extensionPaths, cwd, eventBus);
+			extensionsResult = await logger.time(
+				"loadExtensions",
+				loadExtensions,
+				extensionPaths,
+				cwd,
+				eventBus,
+				agentRegistry,
+				agentKind === "main",
+			);
 			for (const { path, error } of extensionsResult.errors) {
 				logger.error("Failed to load extension", { path, error });
 			}
@@ -2016,6 +2042,38 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Forward the source-path list (NOT the loaded instances) so subagents
 		// rebuild their own session-scoped extensions.
 		toolSession.extensionPaths = extensionPaths;
+
+		// Construct the extension runner BEFORE the inline-factory loop below and the
+		// model/provider setup window, recording it as `credentialDisabledTarget`. Two
+		// reasons: (1) it is the shutdown owner the startup-abort catch (`!hasSession`)
+		// fires `session_shutdown` through to release loaded extensions' IRC state
+		// (namespace claims / transports / proxies) — a throw from an inline factory that
+		// ran after an earlier one already claimed a namespace, or anywhere in the
+		// model/provider window, must find a live owner or the claim leaks (#7401 review);
+		// (2) it is created unconditionally — even with zero extensions — because the
+		// `ExtensionToolWrapper` installed below is the only place the per-tool approval
+		// gate runs, so a conditional runner would silently drop approvals for
+		// extension-less users. Construction is inert (live action wiring is the later
+		// `initialize()`), and `hasHandlers`/`emit` read `extensionsResult.extensions`
+		// live, so inline extensions the loop pushes onto that same array are still seen
+		// at shutdown.
+		const extensionRunner: ExtensionRunner = new ExtensionRunner(
+			extensionsResult.extensions,
+			extensionsResult.runtime,
+			cwd,
+			sessionManager,
+			modelRegistry,
+			() => (hasSession ? createSessionMemoryRuntimeContext(session, agentDir, cwd) : undefined),
+			settings,
+			localProtocolOptions,
+			() => (hasSession ? session.getAsyncJobSnapshot() : null),
+		);
+
+		credentialDisabledTarget = extensionRunner;
+		for (const event of startupCredentialDisabledEvents.splice(0)) {
+			// Discard return: any handler error is routed through runner.onError listeners.
+			void extensionRunner.emitCredentialDisabled(event);
+		}
 
 		// Load inline extensions from factories
 		if (inlineExtensions.length > 0) {
@@ -2027,14 +2085,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					eventBus,
 					extensionsResult.runtime,
 					`<inline-${i}>`,
+					agentRegistry,
+					agentKind === "main",
 				);
 				extensionsResult.extensions.push(loaded);
 			}
 		}
 
-		// Process provider registrations queued during extension loading.
-		// This must happen before the runner is created so that models registered by
-		// extensions are available for model selection on session resume / fallback.
+		// Process provider registrations queued during extension loading, before model
+		// resolution below consumes them for session-resume / fallback model selection.
 		if (!restrictToolNames) {
 			const activeExtensionSources = extensionsResult.extensions.map(extension => extension.path);
 			modelRegistry.syncExtensionSources(activeExtensionSources);
@@ -2048,6 +2107,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 			extensionsResult.runtime.pendingProviderRegistrations = [];
 		}
+
 		// Hydrate cached runtime (extension) provider catalogs before model
 		// resolution. Dynamic-only providers have no synchronous registration side
 		// effect, so a cold --model/provider resume must see the same fresh SQLite
@@ -2541,31 +2601,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 		}
 
-		// The runner is created unconditionally — even with zero extensions loaded — because the
-		// `ExtensionToolWrapper` installed below is the only place the per-tool approval gate runs.
-		// A conditional runner means the approval system silently disappears for users with no
-		// extensions, contradicting non-yolo `tools.approvalMode` settings without feedback.
-		// (The builtin autoresearch extension is unconditionally loaded above, so this scenario
-		// is unreachable; unconditional runner construction keeps that invariant explicit and
-		// prevents future optional extensions from silently re-opening the hole.)
-		const extensionRunner: ExtensionRunner = new ExtensionRunner(
-			extensionsResult.extensions,
-			extensionsResult.runtime,
-			cwd,
-			sessionManager,
-			modelRegistry,
-			() => (hasSession ? createSessionMemoryRuntimeContext(session, agentDir, cwd) : undefined),
-			settings,
-			localProtocolOptions,
-			() => (hasSession ? session.getAsyncJobSnapshot() : null),
-		);
-
-		credentialDisabledTarget = extensionRunner;
-		for (const event of startupCredentialDisabledEvents.splice(0)) {
-			// Discard return: any handler error is routed through runner.onError listeners.
-			void extensionRunner.emitCredentialDisabled(event);
-		}
-
 		const getSessionContext = () => ({
 			sessionManager,
 			modelRegistry,
@@ -2642,6 +2677,24 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				builtInRegistryToolNames.add(goalTool.name);
 				nativeToolsByName.set(goalTool.name, wrapped);
 			}
+		}
+		if (
+			!restrictToolNames &&
+			!toolRegistry.has("hub") &&
+			toolSession.enableIrc !== false &&
+			isIrcEnabled(settings, options.taskDepth ?? 0, agentRegistry)
+		) {
+			// `createTools` builds the built-in slate before extensions load, so a bridge that
+			// installs its RemoteTransport during load (a leaf root with task.maxRecursionDepth=0
+			// has no spawn-based peers, only the transport's remote ones) was invisible to the hub
+			// gate and `hub` was dropped for the whole session. Re-check now that transports are
+			// claimed and add it, keeping the tool consistent with the `taskIrcEnabled` prompt block
+			// that already advertises those remote peers (#7401 review).
+			const hubTool = new HubTool(toolSession);
+			const wrapped = wrapToolWithMetaNotice(hubTool);
+			toolRegistry.set(hubTool.name, wrapped);
+			builtInRegistryToolNames.add(hubTool.name);
+			nativeToolsByName.set(hubTool.name, wrapped);
 		}
 		for (const tool of wrappedExtensionTools) {
 			toolRegistry.set(tool.name, tool);
@@ -2915,7 +2968,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					settings.get("task.disabledAgents") as string[] | undefined,
 					options.spawns ?? "*",
 				),
-				taskIrcEnabled: !restrictToolNames && isIrcEnabled(settings, options.taskDepth ?? 0),
+				taskIrcEnabled: !restrictToolNames && isIrcEnabled(settings, options.taskDepth ?? 0, agentRegistry),
 				autoQaEnabled: !restrictToolNames && isAutoQaEnabled(settings),
 				secretsEnabled,
 				workspaceTree: workspaceTreePromise,
@@ -3035,6 +3088,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				: agentRegistry.registerIfAvailable(registrationInput, options.expectedAgentRef);
 		if (!registeredAgentRef) {
 			throw new Error(`Agent "${resolvedAgentId}" is already owned by another session generation.`);
+		}
+		if (agentKind === "main") {
+			// Track this top-level session as a root of its registry's lifecycle manager: a shared
+			// (custom) registry only fully tears the manager down when its LAST root session disposes.
+			AgentLifecycleManager.forRegistry(agentRegistry).retainRoot(resolvedAgentId);
 		}
 		// A reused parked ref remains parked until the new AgentSession is fully
 		// constructed and attached. Startup failure therefore leaves it revivable.
@@ -3358,6 +3416,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			advisorSharedInstructions: discoveredAdvisors.sharedInstructions,
 			advisorConfigs: discoveredAdvisors.advisors,
 			agent,
+			agentRegistry,
 			pruneToolDescriptions: inlineToolDescriptors,
 			thinkingLevel: autoThinking ? AUTO_THINKING : effectiveThinkingLevel,
 			thinkingLevelCeiling: options.thinkingLevelCeiling,
@@ -3615,10 +3674,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					// AgentSession.dispose() would otherwise set its guards.
 					session.beginDispose();
 					if (agentKind === "main") {
-						// Top-level teardown owns the global agent lifecycle: park timers,
-						// adopted subagent sessions, revivers. Tear it down while shared
-						// resources (kernels, MCP, LSP) are still live. Subagent disposal
-						// must NOT touch the global lifecycle.
+						// Top-level teardown releases this root's adopted subtree through its registry-paired
+						// lifecycle manager, and fully disposes that manager only when this is the registry's
+						// LAST root — so a shared custom registry's other live sessions keep their keep-alive
+						// subagents. An in-repo session is the sole root of the global manager
+						// (forRegistry(global) === global()), so it tears down exactly as before.
 						const vibeRegistry = VibeSessionRegistry.global();
 						const vibeParentSession = {
 							getAgentId: () => resolvedAgentId,
@@ -3630,7 +3690,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							getActiveModelString,
 						};
 						await vibeRegistry.suspendScope(vibeRegistry.ownerScope(vibeParentSession), scopedAsyncJobManager);
-						await AgentLifecycleManager.global().dispose();
+						await AgentLifecycleManager.forRegistry(agentRegistry).releaseRoot(resolvedAgentId);
 					}
 					await originalDispose();
 				} finally {
@@ -3919,6 +3979,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				await session.dispose();
 				if (hasRegistered) unregisterUnlessParked();
 			} else {
+				// Startup aborted before the session existed, so AgentSession.dispose() (which fires
+				// session_shutdown) never ran: release the loaded extensions' IRC state (namespace claims
+				// + transports + remote proxies) and this session's lifecycle root here, so a never-started
+				// session leaves no stale peers or namespace claim (#7401 review).
+				await emitSessionShutdownEvent(credentialDisabledTarget);
+				if (agentKind === "main" && registeredAgentRef) {
+					await AgentLifecycleManager.forRegistry(agentRegistry).releaseRoot(resolvedAgentId);
+				}
 				if (hasRegistered) unregisterUnlessParked();
 				if (asyncJobManager) {
 					if (AsyncJobManager.instance() === asyncJobManager) {

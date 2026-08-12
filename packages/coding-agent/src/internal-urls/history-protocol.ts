@@ -17,7 +17,7 @@
  * - history://<agentId> - Concise markdown transcript of that agent
  */
 import type { AgentRef } from "../registry/agent-registry";
-import { AgentRegistry } from "../registry/agent-registry";
+import { AgentRegistry, isLocalSession } from "../registry/agent-registry";
 import { formatSessionHistoryMarkdown } from "../session/session-history-format";
 import { loadSessionMessagesReadOnly } from "../session/session-loader";
 import { sessionFilesFromDisk } from "./registry-helpers";
@@ -58,9 +58,9 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 	async resolve(url: InternalUrl): Promise<InternalResource> {
 		const agentId = url.rawHost || url.hostname;
 		const registry = AgentRegistry.global();
-		// Advisor transcripts are observability-only — surfaced in the Agent Hub, never
-		// in the agent-facing roster. Hide them from the index, lookup, and completions.
-		const visible = registry.list().filter(ref => ref.kind !== "advisor");
+		// Advisor transcripts are observability-only, and remote proxies (murmur-q00p) have no local
+		// transcript — neither belongs in the agent-facing history. Hide both from index/lookup/completions.
+		const visible = registry.list().filter(ref => isLocalSession(ref.kind));
 
 		if (!agentId) {
 			const content = await this.#renderIndex(visible);
@@ -73,7 +73,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		}
 
 		let ref = registry.get(agentId);
-		if (ref?.kind === "advisor") ref = undefined;
+		if (ref && !isLocalSession(ref.kind)) ref = undefined;
 		if (!ref) {
 			// Case-insensitive fallback: agent ids are human-typed (e.g. AuthLoader).
 			const lower = agentId.toLowerCase();
@@ -180,7 +180,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		const completions: UrlCompletion[] = [];
 		const seen = new Set<string>();
 		for (const ref of AgentRegistry.global().list()) {
-			if (ref.kind === "advisor") continue;
+			if (!isLocalSession(ref.kind)) continue;
 			seen.add(ref.id);
 			completions.push({
 				value: ref.id,

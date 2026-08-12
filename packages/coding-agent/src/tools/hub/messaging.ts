@@ -16,7 +16,7 @@ import type { Settings } from "../../config/settings";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
 import { IrcBus, type IrcDeliveryReceipt, type IrcMessage } from "../../irc/bus";
 import type { Theme } from "../../modes/theme/theme";
-import { type AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
+import { type AgentRegistry, BROADCAST_ID, isLocalSession, isMessageablePeer } from "../../registry/agent-registry";
 import { registerPersistedSubagents } from "../../registry/persisted-agents";
 import { canSpawnAtDepth } from "../../task/types";
 import { Ellipsis, renderStatusLine, renderTreeList, truncateToWidth } from "../../tui";
@@ -27,6 +27,7 @@ import {
 	getPreviewLines,
 	PREVIEW_LIMITS,
 	replaceTabs,
+	sanitizeInline,
 	type ToolUIColor,
 } from "../render-utils";
 import { type CoordinationDetails, type HubRenderArgs, hubErrorResult } from "./types";
@@ -39,12 +40,15 @@ export const DEFAULT_IRC_TIMEOUT_MS = 120_000;
  * session that can still spawn subagents through the task tool. Only a
  * top-level session with task spawning unavailable has no peers.
  */
-export function isIrcEnabled(settings: Settings, taskDepth: number): boolean {
+export function isIrcEnabled(settings: Settings, taskDepth: number, registry?: AgentRegistry): boolean {
 	if (taskDepth > 0) return true;
-	// Top-level session: peers exist only if it can still spawn subagents — the
-	// same capacity gate the task tool uses, reused here to avoid drift.
+	// Top-level session: peers exist if it can still spawn subagents (the capacity gate the task tool
+	// uses, reused to avoid drift) OR a remote namespace is claimed — the murmur bridge seeds remote
+	// cluster peers as proxy refs (murmur-q00p), so even a leaf root has peers to reach. Gate on the
+	// CLAIM (not an installed transport) so hub survives a bridge's install→clear→reinstall reconnect.
 	const maxDepth = settings.get("task.maxRecursionDepth") ?? 2;
-	return canSpawnAtDepth(maxDepth, taskDepth);
+	const bus = registry ? IrcBus.forRegistry(registry) : IrcBus.global();
+	return canSpawnAtDepth(maxDepth, taskDepth) || bus.hasClaimedNamespace();
 }
 
 export function formatIncoming(msg: IrcMessage): string {
@@ -91,14 +95,18 @@ export async function executeList(
 	senderId: string,
 ): Promise<AgentToolResult<CoordinationDetails>> {
 	let refs = registry.list();
-	if (!refs.some(ref => ref.id !== senderId && ref.status !== "aborted" && ref.kind !== "advisor")) {
+	// Only LOCAL restorable peers count here: a remote proxy (murmur-q00p) is not disk-restorable, so
+	// it must not suppress the persisted-subagent scan on a resumed session (else local parked
+	// subagents stay absent and direct sends to them miss instead of reviving). The peer list below
+	// still includes remotes.
+	if (!refs.some(ref => ref.id !== senderId && ref.status !== "aborted" && isLocalSession(ref.kind))) {
 		await registerPersistedSubagents(registry, registry.get(senderId)?.sessionFile);
 		refs = registry.list();
 	}
 
-	const bus = IrcBus.global();
+	const bus = IrcBus.forRegistry(registry);
 	const peers = refs
-		.filter(ref => ref.id !== senderId && ref.status !== "aborted" && ref.kind !== "advisor")
+		.filter(ref => ref.id !== senderId && ref.status !== "aborted" && isMessageablePeer(ref.kind))
 		.map(ref => ({
 			id: ref.id,
 			displayName: ref.displayName,
@@ -159,7 +167,7 @@ export async function executeSend(
 	if (to === senderId) {
 		return hubErrorResult("Cannot send a message to yourself.", { op: "send", from: senderId, to });
 	}
-	const isBroadcast = to === "all";
+	const isBroadcast = to === BROADCAST_ID;
 	if (isBroadcast && params.await) {
 		return hubErrorResult('`await` is invalid with to:"all" — broadcasts have no single replier.', {
 			op: "send",
@@ -168,7 +176,7 @@ export async function executeSend(
 		});
 	}
 
-	const bus = IrcBus.global();
+	const bus = IrcBus.forRegistry(registry);
 	let waited: IrcMessage | null | undefined;
 	const timeoutMs = params.await ? resolveMessageTimeoutMs(settings, params.timeoutMs) : undefined;
 	const awaitAbort = params.await ? new AbortController() : undefined;
@@ -204,10 +212,12 @@ export async function executeSend(
 		// parked agent on a broadcast would be a stampede. Direct sends go
 		// through the bus unfiltered so parked recipients are revived.
 		const targets = isBroadcast ? registry.listVisibleTo(senderId).map(ref => ref.id) : [to];
-		// A broadcast that also reaches the main agent delivers the body to it
-		// directly (its own incoming card); relaying the sibling legs to the
-		// main UI would then show the same body once per other recipient.
-		const suppressRelay = isBroadcast && targets.includes(MAIN_AGENT_ID);
+		// A broadcast that also reaches the sender's own root delivers the body to it directly (its
+		// own incoming card); relaying the sibling legs to that root's UI would then duplicate the
+		// body once per other recipient. Resolve the sender's ACTUAL root — an ACP/custom-root
+		// registry's root is not "Main" — so the dedup fires for every root, not just the default.
+		const rootId = bus.rootIdFor(senderId);
+		const suppressRelay = isBroadcast && rootId !== undefined && targets.includes(rootId);
 		const receipts = await Promise.all(
 			targets.map(target =>
 				bus.send(
@@ -232,8 +242,8 @@ export async function executeSend(
 		for (const receipt of receipts) {
 			lines.push(
 				receipt.outcome === "failed"
-					? `- ${receipt.to}: failed — ${receipt.error ?? "unknown error"}`
-					: `- ${receipt.to}: ${receipt.outcome}`,
+					? `- ${sanitizeInline(receipt.to)}: failed — ${sanitizeInline(receipt.error ?? "unknown error")}`
+					: `- ${sanitizeInline(receipt.to)}: ${receipt.outcome}`,
 			);
 		}
 
@@ -300,7 +310,7 @@ export async function executeMessageWait(
 	const from = params.from?.trim() || undefined;
 	const timeoutMs = resolveMessageTimeoutMs(settings, params.timeoutMs);
 	try {
-		const waited = await IrcBus.global().wait(senderId, { from }, timeoutMs, signal, {
+		const waited = await IrcBus.forRegistry(registry).wait(senderId, { from }, timeoutMs, signal, {
 			liveness: { registry, senderId },
 		});
 		if (!waited) {
@@ -326,7 +336,7 @@ export function executeInbox(
 	senderId: string,
 	peek?: boolean,
 ): AgentToolResult<CoordinationDetails> {
-	const busMessages = IrcBus.global().inbox(senderId, { peek });
+	const busMessages = IrcBus.forRegistry(registry).inbox(senderId, { peek });
 	const session = registry.get(senderId)?.session;
 	const pendingMessages =
 		typeof session?.drainPendingIrcInboxMessages === "function" ? session.drainPendingIrcInboxMessages(senderId) : [];
@@ -441,7 +451,7 @@ function callTitle(args: HubRenderArgs | undefined, theme: Theme): string {
 function callMeta(args: HubRenderArgs | undefined): string[] {
 	const meta: string[] = [];
 	if (args?.op === "send") {
-		if (args.to === "all") meta.push("broadcast");
+		if (args.to === BROADCAST_ID) meta.push("broadcast");
 		if (args.await) meta.push("await reply");
 		if (args.replyTo) meta.push("reply");
 	}
@@ -533,7 +543,7 @@ function renderSendResult(
 	const timedOut = waited === null;
 
 	const meta: string[] = [];
-	if (to === "all") meta.push("broadcast");
+	if (to === BROADCAST_ID) meta.push("broadcast");
 	if (receipts.length === 1) {
 		const receipt = receipts[0]!;
 		meta.push(theme.fg(outcomeColor(receipt.outcome), receipt.outcome));
@@ -565,9 +575,9 @@ function renderSendResult(
 						const badge = formatBadge(receipt.outcome, outcomeColor(receipt.outcome), theme);
 						const error =
 							receipt.outcome === "failed" && receipt.error
-								? ` ${theme.fg("error", `${theme.format.dash} ${receipt.error}`)}`
+								? ` ${theme.fg("error", `${theme.format.dash} ${sanitizeInline(receipt.error)}`)}`
 								: "";
-						return `${theme.fg("toolOutput", receipt.to)} ${badge}${error}`;
+						return `${theme.fg("toolOutput", sanitizeInline(receipt.to))} ${badge}${error}`;
 					},
 				},
 				theme,

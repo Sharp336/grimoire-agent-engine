@@ -14,6 +14,16 @@ import { oneLineLabel } from "../task/types";
 
 export const MAIN_AGENT_ID = "Main";
 
+/** Reserved pseudo-recipient for `hub send --to all` (broadcast fan-out); never a real/registered agent id. */
+export const BROADCAST_ID = "all";
+
+/**
+ * Reserved leading marker for the cross-process REMOTE agent id space (`@<namespace>/<name>`, see
+ * `src/irc/bus.ts`). A LOCAL agent id (`main`/`sub`) may never begin with it, so local and remote id
+ * spaces are disjoint by construction — no per-id reserved-name or clobber guards are needed.
+ */
+export const REMOTE_ID_PREFIX = "@";
+
 /** Sidecar marker retained beside a child transcript after an explicit kill. */
 const AGENT_TOMBSTONE_SUFFIX = ".tombstone";
 
@@ -32,12 +42,55 @@ export type AgentStatus = "running" | "idle" | "parked" | "aborted";
 /** Provenance of a displayed duration: active runtime, transcript span, or unavailable. */
 type AgentDurationKind = "active" | "span" | "unknown";
 /**
- * - `main`/`sub`: the user-facing agent tree (driving agent + task subagents).
- * - `advisor`: a passive review transcript persisted like a subagent for usage
- *   attribution and Agent Hub observability, but never a peer — hidden from
- *   agent-facing rosters (`hub`, `history://`) and not messageable/revivable.
+ * - `main`/`sub`: the user-facing agent tree (driving agent + task subagents) — messageable
+ *   peers with a locally-managed session.
+ * - `advisor`: a passive review transcript, persisted for usage attribution + Agent Hub
+ *   observability, but never a peer — hidden from agent-facing rosters (`hub`, `history://`)
+ *   and not messageable/revivable.
+ * - `remote`: a proxy for an agent on another node (murmur-q00p) — a messageable peer with NO
+ *   local session (controlled over IRC/the transport, not the local lifecycle).
+ * See the capability predicates below (isMessageablePeer / isLocalSession / hasLocalPresence).
  */
-export type AgentKind = "main" | "sub" | "advisor";
+export type AgentKind = "main" | "sub" | "advisor" | "remote";
+
+/**
+ * Capability taxonomy for {@link AgentKind} — the single source of truth for the class
+ * differences callers care about, so each surface tests a capability instead of a scattered
+ * `kind !== "advisor"` / `kind !== "remote"` denylist. A new kind declares its membership
+ * here once, not across every consumer.
+ */
+/** Messageable peer: appears in the IRC roster and is a broadcast target (main | sub | remote). */
+export function isMessageablePeer(kind: AgentKind): boolean {
+	return kind !== "advisor";
+}
+/**
+ * Locally-managed session (main | sub): focus/revive/kill via the local lifecycle,
+ * disk-restorable, drivable by collab guests, readable via the agent-facing `history://`.
+ * A `remote` proxy is controlled over IRC (no local session); an `advisor` is read-only.
+ */
+export function isLocalSession(kind: AgentKind): boolean {
+	return kind === "main" || kind === "sub";
+}
+/**
+ * Has a local presence to display/read — a live/parked session or a persisted transcript
+ * (main | sub | advisor); a `remote` proxy has neither.
+ */
+export function hasLocalPresence(kind: AgentKind): boolean {
+	return kind !== "remote";
+}
+/**
+ * A peer worth waiting on for a future message: a `running` local agent (its status tracks its
+ * turn), or any live `remote` proxy — a remote executes off-node and can deliver an inbound
+ * message at any time, so its local idle/running status is not a waitability signal. Takes the
+ * full ref (kind + status), unlike the kind-only predicates above.
+ *
+ * INTERIM band-aid over the `running`-only wait-liveness gate, which is already racy for local
+ * peers (an idle-but-wakeable peer can still deliver). Remove once that gate is redesigned to
+ * "waitable = alive, timeout as backstop" — see can1357/oh-my-pi#7503.
+ */
+export function isWaitablePeer(ref: AgentRef): boolean {
+	return ref.status === "running" || ref.kind === "remote";
+}
 
 /** Persisted per-agent totals reconstructed from the child session transcript. */
 export interface AgentMetricsSummary {
@@ -83,6 +136,14 @@ export interface AgentRef {
 	activity?: string;
 	/** Persisted identity and telemetry restored after the live observer is gone. */
 	history?: AgentHistorySummary;
+	/**
+	 * Per-load owner token of the extension that registered this ref (e.g. a `remote` proxy seeded via
+	 * `pi.irc.registerRemotePeer`), formatted `${extensionPath}:${randomId}`. Unique per extension
+	 * LOAD — not per source path — so a failed or unloading load rolls back exactly its own refs
+	 * without touching a sibling load of the same extension (subagents / other SDK sessions reuse the
+	 * path) (can1357/oh-my-pi#7401 review).
+	 */
+	ownerToken?: string;
 }
 
 export type AgentRefExpectation = AgentRef | AgentSession;
@@ -111,6 +172,8 @@ export interface RegisterInput {
 	lastActivity?: number;
 	/** Persisted identity and telemetry restored after the live observer is gone. */
 	history?: AgentHistorySummary;
+	/** Per-load owner token of the registering extension load, for attribution-based rollback (see {@link AgentRef.ownerToken}). */
+	ownerToken?: string;
 }
 
 export class AgentRegistry {
@@ -149,6 +212,7 @@ export class AgentRegistry {
 			lastActivity: input.lastActivity ?? now,
 			activity: input.activity,
 			history: input.history,
+			ownerToken: input.ownerToken,
 		};
 		this.#refs.set(ref.id, ref);
 		this.#emit({ type: "registered", ref });
@@ -260,13 +324,13 @@ export class AgentRegistry {
 	}
 
 	/**
-	 * Returns every alive agent (running | idle) except the caller. Advisor refs
-	 * are observability-only transcripts, never peers, so they are excluded.
-	 * Flat namespace: every other agent is visible.
+	 * Every alive (running | idle) messageable peer except the caller — the IRC roster /
+	 * broadcast target set. Advisors are observability-only (never peers); remote proxies are
+	 * included when live, since the bridge registers them running/idle (murmur-q00p).
 	 */
 	listVisibleTo(id: string): AgentRef[] {
 		return this.list().filter(
-			ref => ref.id !== id && ref.kind !== "advisor" && (ref.status === "running" || ref.status === "idle"),
+			ref => ref.id !== id && isMessageablePeer(ref.kind) && (ref.status === "running" || ref.status === "idle"),
 		);
 	}
 

@@ -61,6 +61,7 @@ const initializeRunnerForTest = (runner: ExtensionRunner | undefined): void => {
 			getThinkingLevel: () => undefined,
 			setThinkingLevel: () => {},
 			getSessionName: () => undefined,
+			getAgentId: () => undefined,
 			setSessionName: async () => {},
 		},
 		{
@@ -528,6 +529,7 @@ describe("createAgentSession credential_disabled subscription", () => {
 					getThinkingLevel: () => undefined,
 					setThinkingLevel: () => {},
 					getSessionName: () => undefined,
+					getAgentId: () => undefined,
 					setSessionName: async () => {},
 				},
 				{
