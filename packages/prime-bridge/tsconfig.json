@@ -1,0 +1,9 @@
+{
+	"extends": "../tsconfig.workspace.json",
+	"compilerOptions": {
+		"paths": {
+			"@oh-my-pi/prime-bridge-protocol": ["../prime-bridge-protocol/src/index.ts"]
+		}
+	},
+	"include": ["src", "test"]
+}

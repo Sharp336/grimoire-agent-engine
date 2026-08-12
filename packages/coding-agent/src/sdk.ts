@@ -104,6 +104,7 @@ import {
 } from "./extensibility/skills";
 import { type FileSlashCommand, loadSlashCommands as loadSlashCommandsInternal } from "./extensibility/slash-commands";
 import type { HindsightSessionState } from "./hindsight/state";
+import { createExternalPeerProvider, type ExternalPeerProvider } from "./integrations/prime-bridge";
 import { LocalProtocolHandler, type LocalProtocolOptions } from "./internal-urls";
 import { setSharedLspEnabled } from "./lsp/client";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-events";
@@ -489,6 +490,8 @@ export interface CreateAgentSessionOptions {
 	lspReadOnly?: boolean;
 	/** Whether this invocation may expose IRC. `false` removes it even for subagents. */
 	enableIrc?: boolean;
+	/** Optional Prime peer provider. Settings create one only when enabled and unrestricted. */
+	externalPeerProvider?: ExternalPeerProvider;
 	/** Skip subprocess-kernel availability checks and prelude warmup */
 	skipPythonPreflight?: boolean;
 	/** Tool names explicitly requested (enables disabled-by-default tools) */
@@ -1701,11 +1704,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				session ? session.trackEvalExecution(execution, abortController) : execution,
 			getSessionId: () => sessionManager.getSessionId?.() ?? null,
 			isDisposed: () => session?.isDisposed ?? false,
-			getHindsightSessionState: () => session?.getHindsightSessionState(),
-			getMnemopiSessionState: () => session?.getMnemopiSessionState(),
 			getAgentId: () => resolvedAgentId,
 			getToolByName: name => session?.getToolByName(name),
 			agentRegistry,
+			externalPeerProvider: restrictToolNames
+				? undefined
+				: (options.externalPeerProvider ??
+					createExternalPeerProvider({
+						enabled: settings.get("primeBridge.enabled"),
+						autoStart: settings.get("primeBridge.autoStart"),
+						url: settings.get("primeBridge.url"),
+						tokenPath: settings.get("primeBridge.tokenPath"),
+						originSessionId: sessionManager.getSessionId(),
+						projectRoot: cwd,
+					})),
 			// The global lifecycle releases through AgentRegistry.global(); wiring it
 			// onto a caller-supplied registry would report a cancel while releasing an
 			// unrelated global ref. With no lifecycle, hub cancel falls back to
@@ -1722,6 +1734,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getPlanReferencePath: () => session?.getPlanReferencePath() ?? "local://PLAN.md",
 			getGoalModeState: () => session?.getGoalModeState(),
 			getGoalRuntime: () => session?.goalRuntime,
+			getHindsightSessionState: () => session?.getHindsightSessionState(),
+			getMnemopiSessionState: () => session?.getMnemopiSessionState(),
 			getUsageStatistics: () => sessionManager.getUsageStatistics(),
 			getTurnBudget: () => sessionManager.getTurnBudget(),
 			recordEvalSubagentUsage: output => sessionManager.recordEvalSubagentOutput(output),

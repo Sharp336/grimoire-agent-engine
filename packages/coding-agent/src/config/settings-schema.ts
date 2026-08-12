@@ -397,6 +397,11 @@ export const SETTINGS_SCHEMA = {
 	// per-machine overrides remain trivial.
 	"auth.broker.url": { type: "string", default: undefined },
 	"auth.broker.token": { type: "string", default: undefined, credential: true },
+	// Prime bridge — disabled by default; all values are hidden from the UI.
+	"primeBridge.enabled": { type: "boolean", default: false },
+	"primeBridge.url": { type: "string", default: undefined },
+	"primeBridge.tokenPath": { type: "string", default: undefined },
+	"primeBridge.autoStart": { type: "boolean", default: false },
 
 	autoResume: {
 		type: "boolean",

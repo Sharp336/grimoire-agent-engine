@@ -1,0 +1,48 @@
+{
+  "type": "module",
+  "name": "@oh-my-pi/prime-bridge-protocol",
+  "version": "17.2.13",
+  "description": "Dependency-neutral Prime daemon and bridge wire contracts",
+  "homepage": "https://omp.sh",
+  "author": "Can Boluk",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/can1357/oh-my-pi.git",
+    "directory": "packages/prime-bridge-protocol"
+  },
+  "bugs": {
+    "url": "https://github.com/can1357/oh-my-pi/issues"
+  },
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "check": "biome check . && bun run check:types",
+    "check:types": "tsgo -p tsconfig.json --noEmit",
+    "lint": "biome lint .",
+    "fix": "biome check --write --unsafe .",
+    "fmt": "biome format --write .",
+    "test": "bun test --parallel"
+  },
+  "devDependencies": {
+    "@types/bun": "catalog:"
+  },
+  "engines": {
+    "bun": ">=1.3.14"
+  },
+  "files": [
+    "src",
+    "test"
+  ],
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    },
+    "./*": {
+      "types": "./src/*.ts",
+      "import": "./src/*.ts"
+    },
+    "./*.js": "./src/*.ts"
+  }
+}

@@ -62,6 +62,8 @@
     "@oh-my-pi/pi-tui": "catalog:",
     "@oh-my-pi/pi-utils": "catalog:",
     "@oh-my-pi/pi-wire": "catalog:",
+    "@oh-my-pi/prime-bridge": "workspace:*",
+    "@oh-my-pi/prime-bridge-protocol": "workspace:*",
     "@oh-my-pi/snapcompact": "catalog:",
     "@opentelemetry/api": "catalog:",
     "@opentelemetry/api-logs": "catalog:",

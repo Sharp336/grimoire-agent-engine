@@ -18,6 +18,12 @@ Background jobs auto-deliver when they finish. You NEVER need to poll; if `jobs`
 - NEVER use shell tools, grep, or read other sessions' files to figure out what a peer is doing. Message them directly.
 - NEVER use hub messaging for something a tool can answer (e.g., grepping codebase, running a build).
 
+# Prime external peers
+- IDs beginning with `prime://` target Prime daemon sessions. The encoded namespace keeps Prime session IDs distinct from local peer IDs.
+- `list` merges local peers with recently discovered Prime peers and deduplicates repeated Prime session IDs.
+- External `send` results include the verbatim Prime receipt in the result details. External `wait` returns the verbatim Prime message envelope.
+- External `inbox` is target-scoped and only consumes messages selected by the requested operation. A `wait` does not pre-drain the Prime inbox.
+
 # Processes
 
 Project-scoped long-running processes shared by every omp instance in the same directory. A long-running service, watcher, debugger, REPL, or process needing later input MUST use `op:"start"`, not `bash`.
