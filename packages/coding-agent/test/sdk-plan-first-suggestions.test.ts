@@ -12,6 +12,12 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 const GUIDANCE_HEADING = "## First-Response Planning Check";
 const HELP_TEXT = "Turn off Plan-First Suggestions in /settings → Tasks → Modes.";
 
+function extractGuidanceBullet(guidance: string, prefix: string): string {
+	const bullet = guidance.split("\n").find(line => line.startsWith(prefix));
+	expect(bullet).toBeDefined();
+	return bullet ?? "";
+}
+
 const askOverrideExtension: ExtensionFactory = pi => {
 	pi.registerTool({
 		name: "ask",
@@ -149,21 +155,120 @@ describe("createAgentSession plan-first suggestions", () => {
 			questions: [
 				{
 					id: "plan_first",
-					question: "Would you like me to create a plan before I start?",
-					options: [{ label: "Create a plan" }, { label: "Proceed directly" }],
+					question: "How would you like me to continue?",
+					options: [
+						{ label: "Research first, then start the questionnaire" },
+						{ label: "Start the questionnaire now" },
+						{ label: "Proceed without a questionnaire or plan" },
+					],
 					recommended: 0,
 				},
 			],
 			helpText: HELP_TEXT,
 		});
-		expect(guidance).toContain('"label": "Create a plan"');
-		expect(guidance).toContain('"label": "Proceed directly"');
+		expect(guidance).toContain('"label": "Research first, then start the questionnaire"');
+		expect(guidance).toContain('"label": "Start the questionnaire now"');
+		expect(guidance).toContain('"label": "Proceed without a questionnaire or plan"');
 		expect(guidance).toContain('"recommended": 0');
 		expect(guidance).toContain(`"helpText": "${HELP_TEXT}"`);
 		expect(guidance).toContain("MUST follow the selected answer and any custom response");
 		expect(guidance).toContain("Exempt classification MUST take precedence over substantial classification");
-		expect(guidance).toContain("MUST wait for the answer before continuing");
+		expect(guidance).toContain("MUST wait for this initial choice before continuing");
 		expect(guidance).toContain("NEVER use another tool or start implementation while the answer is pending");
+	});
+
+	it("requires the research-first path to finish the questionnaire before planning", async () => {
+		const guidance = (await assembledPrompt()).split(GUIDANCE_HEADING, 2)[1] ?? "";
+		const researchBullet = extractGuidanceBullet(
+			guidance,
+			"- If the user selects `Research first, then start the questionnaire`,",
+		);
+		const sharedGuardPrefix = "- For either questionnaire path, until the planning questionnaire answers arrive,";
+		const sharedGuardBullet = extractGuidanceBullet(guidance, sharedGuardPrefix);
+
+		expect(researchBullet).toContain("MAY use tools only to inspect context that is relevant to the request");
+		expect(researchBullet).toContain("MUST NOT start implementation");
+		expect(researchBullet).toContain("MUST call `ask` with the planning questionnaire after research");
+		expect(researchBullet).toContain("wait for its answers");
+		expect(sharedGuardBullet.startsWith(sharedGuardPrefix)).toBe(true);
+		expect(sharedGuardBullet).toContain("MUST NOT call a plan or `todo` tool");
+		expect(sharedGuardBullet).toContain("create or update a plan or to-do list");
+		expect(sharedGuardBullet).toContain("emit a plan in prose");
+		expect(sharedGuardBullet).toContain("Only after the answers arrive MAY you start planning");
+
+		const initialAskIndex = guidance.indexOf(
+			"If the request is substantial or unclear, you MUST call `ask` before any other tool call or implementation",
+		);
+		const initialChoiceWaitIndex = guidance.indexOf("MUST wait for this initial choice before continuing");
+		const researchPathIndex = guidance.indexOf(researchBullet);
+		const sharedGuardIndex = guidance.indexOf(sharedGuardBullet);
+		const questionnaireAnswersIndex = guidance.indexOf(
+			"until the planning questionnaire answers arrive",
+			sharedGuardIndex,
+		);
+		const planningIndex = guidance.indexOf("Only after the answers arrive MAY you start planning", sharedGuardIndex);
+
+		expect(initialAskIndex).toBeGreaterThanOrEqual(0);
+		expect(initialAskIndex).toBeLessThan(initialChoiceWaitIndex);
+		expect(initialChoiceWaitIndex).toBeLessThan(researchPathIndex);
+		expect(researchPathIndex).toBeLessThan(sharedGuardIndex);
+		expect(sharedGuardIndex).toBeLessThan(questionnaireAnswersIndex);
+		expect(questionnaireAnswersIndex).toBeLessThan(planningIndex);
+	});
+
+	it("requires the immediate-questionnaire path to ask before planning", async () => {
+		const guidance = (await assembledPrompt()).split(GUIDANCE_HEADING, 2)[1] ?? "";
+		const immediateBullet = extractGuidanceBullet(guidance, "- If the user selects `Start the questionnaire now`,");
+		const sharedGuardPrefix = "- For either questionnaire path, until the planning questionnaire answers arrive,";
+		const sharedGuardBullet = extractGuidanceBullet(guidance, sharedGuardPrefix);
+
+		expect(immediateBullet).toContain("MUST call `ask` immediately with the planning questionnaire");
+		expect(immediateBullet).toContain("before any other tool call, planning content, or implementation");
+		expect(sharedGuardBullet.startsWith(sharedGuardPrefix)).toBe(true);
+		expect(sharedGuardBullet).toContain("MUST NOT call a plan or `todo` tool");
+		expect(sharedGuardBullet).toContain("create or update a plan or to-do list");
+		expect(sharedGuardBullet).toContain("emit a plan in prose");
+		expect(sharedGuardBullet).toContain("Only after the answers arrive MAY you start planning");
+
+		const initialAskIndex = guidance.indexOf(
+			"If the request is substantial or unclear, you MUST call `ask` before any other tool call or implementation",
+		);
+		const initialChoiceWaitIndex = guidance.indexOf("MUST wait for this initial choice before continuing");
+		const immediatePathIndex = guidance.indexOf(immediateBullet);
+		const sharedGuardIndex = guidance.indexOf(sharedGuardBullet);
+		const questionnaireAnswersIndex = guidance.indexOf(
+			"until the planning questionnaire answers arrive",
+			sharedGuardIndex,
+		);
+		const planningIndex = guidance.indexOf("Only after the answers arrive MAY you start planning", sharedGuardIndex);
+
+		expect(initialAskIndex).toBeGreaterThanOrEqual(0);
+		expect(initialAskIndex).toBeLessThan(initialChoiceWaitIndex);
+		expect(initialChoiceWaitIndex).toBeLessThan(immediatePathIndex);
+		expect(immediatePathIndex).toBeLessThan(sharedGuardIndex);
+		expect(sharedGuardIndex).toBeLessThan(questionnaireAnswersIndex);
+		expect(questionnaireAnswersIndex).toBeLessThan(planningIndex);
+	});
+
+	it("requires the go-direct path to skip the questionnaire and planning", async () => {
+		const guidance = (await assembledPrompt()).split(GUIDANCE_HEADING, 2)[1] ?? "";
+		const directBullet = extractGuidanceBullet(
+			guidance,
+			"- If the user selects `Proceed without a questionnaire or plan`,",
+		);
+
+		expect(directBullet).toContain("MUST proceed without a questionnaire or plan");
+		expect(directBullet).toContain("MUST NOT call a plan or `todo` tool");
+		expect(directBullet).toContain("MUST NOT create or emit a plan or to-do list");
+
+		const initialAskIndex = guidance.indexOf(
+			"If the request is substantial or unclear, you MUST call `ask` before any other tool call or implementation",
+		);
+		const initialChoiceWaitIndex = guidance.indexOf("MUST wait for this initial choice before continuing");
+		const directPathIndex = guidance.indexOf(directBullet);
+		expect(initialAskIndex).toBeGreaterThanOrEqual(0);
+		expect(initialAskIndex).toBeLessThan(initialChoiceWaitIndex);
+		expect(initialChoiceWaitIndex).toBeLessThan(directPathIndex);
 	});
 
 	const suppressionCases: Array<[string, PromptOptions]> = [
