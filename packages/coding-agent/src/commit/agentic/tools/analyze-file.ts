@@ -59,6 +59,7 @@ export function createAnalyzeFileTool(options: {
 	settings: Settings;
 	spawns: string;
 	state: CommitAgentState;
+	maxFiles?: number;
 }): CustomTool<typeof analyzeFileSchema> {
 	return {
 		name: "analyze_files",
@@ -73,9 +74,14 @@ export function createAnalyzeFileTool(options: {
 			// The tool's session semaphore bounds the parallel fan-out.
 			const taskTool = await TaskTool.create(toolSession);
 			const numstat = options.state.overview?.numstat ?? [];
+			// Clamp a negative configured cap to zero: a negative slice end would
+			// silently drop files from the tail instead of capping the fan-out.
+			const cap = options.maxFiles === undefined ? undefined : Math.max(0, options.maxFiles);
+			const files = cap === undefined ? params.files : params.files.slice(0, cap);
+			const skipped = params.files.slice(files.length);
 
 			const analyses = await Promise.all(
-				params.files.map((file, index) => {
+				files.map((file, index) => {
 					const relatedFiles = formatRelatedFiles(params.files, file, numstat);
 					const assignment = prompt.render(analyzeFilePrompt, {
 						file,
@@ -95,8 +101,12 @@ export function createAnalyzeFileTool(options: {
 				.map(analysis => analysis.content.find(part => part.type === "text")?.text ?? "")
 				.filter(Boolean)
 				.join("\n\n");
+			const capWarning =
+				skipped.length > 0
+					? `\n\nwarning: analyze_files capped at ${files.length} file${files.length === 1 ? "" : "s"}; skipped: ${skipped.join(", ")}`
+					: "";
 			return {
-				content: [{ type: "text", text: text || "(no output)" }],
+				content: [{ type: "text", text: (text || "(no output)") + capWarning }],
 				details: {
 					projectAgentsDir: null,
 					results,

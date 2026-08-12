@@ -21,6 +21,7 @@ export interface CommitToolOptions {
 	state: CommitAgentState;
 	changelogTargets: string[];
 	enableAnalyzeFiles?: boolean;
+	maxAnalyzeFiles?: number;
 }
 
 export function createCommitTools(options: CommitToolOptions): Array<CustomTool<any, any>> {
@@ -40,6 +41,7 @@ export function createCommitTools(options: CommitToolOptions): Array<CustomTool<
 				settings: options.settings,
 				spawns: options.spawns,
 				state: options.state,
+				maxFiles: options.maxAnalyzeFiles,
 			}),
 		);
 	}
