@@ -1301,7 +1301,10 @@ export async function runRpcMode(
   features.add("interaction");
   features.add("approval");
   features.add("semantic-rendering");
-  if (setToolUIContext) features.add("ui");
+  if (setToolUIContext) {
+   features.add("ui");
+   features.add("ui.composer-input");
+  }
   if (session.sessionManager.getArtifactManager()) features.add("artifact");
   features.add("resource-lifecycle");
   features.add("runtime-provenance");

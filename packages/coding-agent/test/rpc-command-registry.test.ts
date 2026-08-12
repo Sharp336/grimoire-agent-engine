@@ -453,6 +453,7 @@ describe("RPC command registry", () => {
 				availability: "available",
 			});
 		}
+
 		expect(
 			validateRpcCommand({
 				id: "action-1",
@@ -479,5 +480,18 @@ describe("RPC command registry", () => {
 				actionId: "apply",
 			}),
 		).toMatchObject({ ok: true, scheduling: "control" });
+	});
+	test("advertises revision-fenced composer submit only when the composer capability is available", () => {
+		const unavailable = getRpcCapabilityManifest();
+		const available = getRpcCapabilityManifest({ features: new Set(["ui.composer-input"]) });
+		expect(unavailable.commands.find(command => command.name === "ui_editor_submit")).toMatchObject({
+			version: 3,
+			scope: "session",
+			availability: "conditional",
+			requiredFeatures: ["ui.composer-input"],
+		});
+		expect(available.commands.find(command => command.name === "ui_editor_submit")).toMatchObject({
+			availability: "available",
+		});
 	});
 });

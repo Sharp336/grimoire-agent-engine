@@ -1,3 +1,6 @@
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { KeybindingsManager as AppKeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
 import { createPromptActionAutocompleteProvider } from "@oh-my-pi/pi-coding-agent/modes/prompt-action-autocomplete";
@@ -56,6 +59,35 @@ describe("prompt action autocomplete", () => {
 		);
 		expect(suggestions?.items.find(item => item.label === "Move cursor to end of line")?.description).toBe("F7");
 		expect(suggestions?.items.find(item => item.label === "Undo")?.description).toBe("F8");
+	});
+
+	it("preserves @ file-reference discovery and quoted application from the TUI provider", async () => {
+		const basePath = await fs.mkdtemp(path.join(os.tmpdir(), "omp-at-completion-"));
+		try {
+			await fs.writeFile(path.join(basePath, "composer reference.md"), "");
+			const provider = createPromptActionAutocompleteProvider({
+				commands: [],
+				basePath,
+				keybindings: AppKeybindingsManager.inMemory(),
+				copyCurrentLine: () => {},
+				copyPrompt: () => {},
+				undo: () => {},
+				moveCursorToMessageEnd: () => {},
+				moveCursorToMessageStart: () => {},
+				moveCursorToLineStart: () => {},
+				moveCursorToLineEnd: () => {},
+			});
+			const suggestions = await provider.getSuggestions(['@"composer'], 0, 10);
+			expect(suggestions?.prefix).toBe('@"composer');
+			const item = suggestions?.items.find(candidate => candidate.value === '@"composer reference.md"');
+			expect(item).toBeDefined();
+			if (!item || !suggestions) throw new Error("expected @ file reference suggestion");
+			expect(provider.applyCompletion(['@"composer'], 0, 10, item, suggestions.prefix)).toMatchObject({
+				lines: ['@"composer reference.md" '],
+			});
+		} finally {
+			await fs.rm(basePath, { recursive: true, force: true });
+		}
 	});
 
 	it("passes the typed trigger to undo and leaves text removal to the editor", async () => {
