@@ -51,6 +51,7 @@ import {
 	resolveActiveProjectRegistryPath,
 } from "./discovery/helpers";
 import { injectOmpExtensionCliRoots } from "./discovery/omp-extension-roots";
+import commentaryCollapse from "./extensibility/extensions/commentary-collapse";
 import { formatExtensionLoadNotifications } from "./extensibility/extensions/load-errors";
 import { loadExtensions } from "./extensibility/extensions/loader";
 import { ExtensionRunner } from "./extensibility/extensions/runner";
@@ -104,6 +105,15 @@ type RunRpcMode = (
 	eventBus?: EventBus,
 	input?: ReadableStream<Uint8Array>,
 ) => Promise<never>;
+export function addInteractiveBuiltinExtensions(
+	options: Pick<CreateAgentSessionOptions, "extensions">,
+	isInteractive: boolean,
+	noExtensions: boolean,
+	hasTrustedExtensions: boolean,
+): void {
+	if (!isInteractive || noExtensions || hasTrustedExtensions) return;
+	options.extensions = [...(options.extensions ?? []), commentaryCollapse];
+}
 
 export function writeStartupNotice(parsedArgs: Pick<Args, "mode">, text: string): void {
 	(parsedArgs.mode === "json" ? process.stderr : process.stdout).write(text);
@@ -1600,10 +1610,13 @@ export async function runRootCommand(
 		// Resolve extension-registered CLI flags before creating the session so a
 		// bad `@file` fails fast WITHOUT leaving a junk session/breadcrumb
 		// (createAgentSession writes the terminal breadcrumb eagerly). Loading the
-		// extensions here also makes `@file` classification extension-aware — e.g. a
-		// string-flag value such as `--target @notes.md` is the flag's value, not a
-		// file — and the same result is handed to createAgentSession via
-		// `preloadedExtensions` so the discovery work is not repeated.
+		// extensions here also makes `@file` classification extension-aware.
+		addInteractiveBuiltinExtensions(
+			sessionOptions,
+			isInteractive,
+			parsedArgs.noExtensions === true,
+			(parsedArgs.trustedExtensions?.length ?? 0) > 0,
+		);
 		if (isInteractive && !parsedArgs.trustedExtensions?.length) {
 			sessionOptions.extensions = [...(sessionOptions.extensions ?? []), createWarpEventBridgeExtension()];
 		}

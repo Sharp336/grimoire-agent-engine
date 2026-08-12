@@ -70,18 +70,9 @@ export interface ChatTranscriptBuilderDeps {
 	ui: TUI;
 	/** Resolves a tool name to its host-registered tool definition. */
 	getTool?: (name: string) => AgentTool | undefined;
-1: 	/** Whether the active registry entry came from a built-in factory. */
+	/** Whether the active registry entry came from a built-in factory. */
 	isBuiltInTool?: (name: string) => boolean;
 	/** Resolves an extension message type to its host-registered renderer. */
-2: 	/**
-	 * Creates a host-owned builder with the dependencies for its transcript
-	 * container. The host controls this instance until its enclosing transcript
-	 * viewer is disposed; extensions must not call the constructor or manage
-	 * disposal.
-	 */
-	constructor(private readonly deps: ChatTranscriptBuilderDeps) {
-		this.container.setToolActivityVisible(!settings.get("display.hideToolActivity"));
-	}
 	getMessageRenderer?: (customType: string) => MessageRenderer | undefined;
 	/** Working directory used when rendering file-backed transcript entries. */
 	cwd: string;
@@ -126,10 +117,7 @@ export class ChatTranscriptBuilder {
 	#expandables: Array<{ setExpanded(expanded: boolean): void }> = [];
 	#expanded = false;
 
-1: 	/** Whether the active registry entry came from a built-in factory. */
-	isBuiltInTool?: (name: string) => boolean;
-	/** Resolves an extension message type to its host-registered renderer. */
-2: 	/**
+	/**
 	 * Creates a host-owned builder with the dependencies for its transcript
 	 * container. The host controls this instance until its enclosing transcript
 	 * viewer is disposed; extensions must not call the constructor or manage

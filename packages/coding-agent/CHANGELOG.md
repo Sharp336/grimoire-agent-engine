@@ -145,6 +145,12 @@
 - Remote MCP transports now enforce header precedence and origin policy: client-generated HTTP/MCP/authorization headers win over configured headers case-insensitively, and Agent Plugins servers never forward configured headers across a redirect to a different origin (method-changing redirects of JSON-RPC POSTs are refused). Agent Plugins stdio `env` values and remote `headers` are likewise exempt from config-value resolution (no ambient env-name lookup, no `!command` execution, empty values preserved).
 - Added `omp share <session>`: share a saved session by id prefix or `.jsonl` path without launching the agent — same encrypted upload, store selection, and `share.redactSecrets` handling as the `/share` slash command.
 - Added narrow live constructor handles for prototype wrapping to `ExtensionAPI.pi`: `ChatTranscriptBuilder`, `EventController`, and `UiHelpers` retain exact host identities while exposing only supported transcript presentation methods; they are not generally supported constructible internals.
+- Added the built-in, default-enabled model-agnostic commentary-collapse transcript presentation extension, with `--no-extensions`/`noExtensions` opt-out.
+
+### Fixed
+
+- Fixed commentary collapse disabling itself after OMP added native assistant error expansion, and generalized turn activity collapsing to every model API while preserving untagged terminal answers and composing with native Ctrl+O behavior.
+- Fixed commentary collapse emitting separate count rows and leaving provisional progress messages visible across multi-step tool loops; one user turn now renders as a single aggregate row whose latest thinking descriptor updates in place and whose full descriptor history remains available under Ctrl+O.
 
 ## [17.2.10] - 2026-08-06
 
