@@ -925,7 +925,6 @@ export class AssistantMessageComponent extends Container {
 				this.#fastPathItems = undefined;
 				return false;
 			}
-			item.md.transientRenderCache = transient;
 			if (newText !== item.lastText) {
 				// Only the last (actively streaming) block may mutate in place: a
 				// delta into an earlier block would invalidate rows the settled

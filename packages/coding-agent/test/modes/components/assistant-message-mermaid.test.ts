@@ -334,26 +334,24 @@ describe("AssistantMessageComponent thinking renderers", () => {
 	it("preserves mounted renderer components while later answer text streams", () => {
 		let rendererCalls = 0;
 		let mountedNote: Text | undefined;
-		const component = new AssistantMessageComponent(
-			{
-				...createAssistantMessage(""),
-				content: [{ type: "thinking", thinking: "Stable thinking." }],
+		const componentMessage: AssistantMessage = {
+			...createAssistantMessage(""),
+			content: [{ type: "thinking", thinking: "Stable thinking." }],
+		};
+		const component = new AssistantMessageComponent(componentMessage, false, undefined, [
+			() => {
+				rendererCalls += 1;
+				const note = new Text("translation loading", 1, 0);
+				mountedNote ??= note;
+				return note;
 			},
-			false,
-			undefined,
-			[
-				() => {
-					rendererCalls += 1;
-					const note = new Text("translation loading", 1, 0);
-					mountedNote ??= note;
-					return note;
-				},
-			],
-		);
+		]);
 
 		mountedNote?.setText("translation ready");
+		const nextMessage = createAssistantMessage("Answer");
 		component.updateContent({
-			...createAssistantMessage("Answer"),
+			...nextMessage,
+			timestamp: componentMessage.timestamp,
 			content: [
 				{ type: "thinking", thinking: "Stable thinking." },
 				{ type: "text", text: "Answer" },
