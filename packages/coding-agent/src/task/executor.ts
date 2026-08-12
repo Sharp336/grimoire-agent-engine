@@ -5,7 +5,7 @@
  */
 
 import path from "node:path";
-import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
+import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig, AgentTool } from "@oh-my-pi/pi-agent-core";
 import { recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
 import { logger, popLoopPhase, prompt, pushLoopPhase, untilAborted } from "@oh-my-pi/pi-utils";
@@ -444,6 +444,10 @@ export interface ExecutorOptions {
 	 * tool against its own `CustomToolAPI` (cwd, exec, pushPendingAction, UI).
 	 */
 	preloadedCustomToolPaths?: ToolPathWithSource[];
+	/** Parent host-provided tools proxied into this child and its live revivals. */
+	parentHostTools?: AgentTool[];
+	/** Subset of {@link parentHostTools} presented under `xd://` in the parent. */
+	parentMountedHostToolNames?: string[];
 	mcpManager?: MCPManager;
 	authStorage?: AuthStorage;
 	modelRegistry?: ModelRegistry;
@@ -3005,6 +3009,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const enableMCP = !restrictToolNames && (options.enableMCP ?? true);
 			const mcpManager = enableMCP ? options.mcpManager : undefined;
 			const mcpProxyTools = mcpManager ? createMCPProxyTools(mcpManager) : [];
+			const inheritedHostTools = restrictToolNames ? [] : (options.parentHostTools ?? []);
 
 			// Derive subagent-scoped telemetry from the parent's config so the
 			// child loop's spans nest under the parent's active execute_tool span
@@ -3137,30 +3142,22 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				void sessionPromise.then(created => created.session.dispose()).catch(() => {});
 				throw err;
 			}
-			sessionCreatedAt = performance.now();
-
 			monitor.setActiveSession(session);
-			installRegistryStatusSync(session);
-			if (sessionFile !== null && worktree === undefined) {
-				// Lifecycle reviver: park closed the JSONL writer, so reopening takes
-				// the single-writer lock cleanly and restores the full message history
-				// (createAgentSession → agent.replaceMessages). Isolated runs are not
-				// resumable (worktree is merged + cleaned) and never get a reviver.
-				reviveSession = async expectedAgentRef => {
-					const reopened = await SessionManager.open(sessionFile, undefined, undefined, {
-						suppressBreadcrumb: true,
-					});
-					if (options.parentArtifactManager) {
-						reopened.adoptArtifactManager(options.parentArtifactManager);
-					}
-					const { session: revived } = await createAgentSession(
-						buildSubagentSessionOptions(reopened, expectedAgentRef),
-					);
-					installRegistryStatusSync(revived);
-					installIrcWakeTurnMonitor(revived);
-					return revived;
-				};
+			const missingHostTools = inheritedHostTools.filter(tool => !session.getToolByName(tool.name));
+			if (missingHostTools.length > 0) {
+				const preRefreshMountedToolNames = session.getMountedXdevToolNames();
+				await session.refreshRpcHostTools(missingHostTools);
+				const mountedHostToolNames = new Set(options.parentMountedHostToolNames);
+				await session.setActiveToolPresentation(
+					[...session.getEnabledToolNames(), ...missingHostTools.map(tool => tool.name)],
+					[
+						...preRefreshMountedToolNames,
+						...missingHostTools.filter(tool => mountedHostToolNames.has(tool.name)).map(tool => tool.name),
+					],
+				);
 			}
+			sessionCreatedAt = performance.now();
+			installRegistryStatusSync(session);
 
 			// Emit lifecycle start event
 			if (options.eventBus) {
@@ -3191,7 +3188,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				systemPrompt: session.agent.state.systemPrompt.join("\n\n"),
 				task,
 				tools: session.getActiveToolNames(),
+				mountedTools: session.getMountedXdevToolNames(),
 				agent: agent.name,
+				enableMCP,
 				modelRole: modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings),
 				resolvedModel: progress.resolvedModel,
 				readOnly: isReadOnlyAgent(agent),
@@ -3201,6 +3200,43 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				outputSchemaMode: options.outputSchemaMode,
 				restrictToolNames: restrictToolNames || undefined,
 			});
+			const revivalTopLevelToolNames = session.getActiveToolNames();
+			const revivalMountedToolNames = session.getMountedXdevToolNames();
+			if (sessionFile !== null && worktree === undefined) {
+				// Lifecycle reviver: park closed the JSONL writer, so reopening takes
+				// the single-writer lock cleanly and restores the full message history
+				// (createAgentSession → agent.replaceMessages). Isolated runs are not
+				// resumable (worktree is merged + cleaned) and never get a reviver.
+				reviveSession = async expectedAgentRef => {
+					const reopened = await SessionManager.open(sessionFile, undefined, undefined, {
+						suppressBreadcrumb: true,
+					});
+					if (options.parentArtifactManager) {
+						reopened.adoptArtifactManager(options.parentArtifactManager);
+					}
+					const registry = AgentRegistry.global();
+					const { session: revived } = await createAgentSession(
+						buildSubagentSessionOptions(reopened, expectedAgentRef),
+					);
+					try {
+						const missingHostTools = inheritedHostTools.filter(tool => !revived.getToolByName(tool.name));
+						if (missingHostTools.length > 0) await revived.refreshRpcHostTools(missingHostTools);
+						await revived.setActiveToolPresentation(
+							[...revivalTopLevelToolNames, ...revivalMountedToolNames],
+							revivalMountedToolNames,
+						);
+						installRegistryStatusSync(revived);
+						installIrcWakeTurnMonitor(revived);
+						return revived;
+					} catch (error) {
+						if (registry.detachSession(id, expectedAgentRef)) {
+							registry.setStatus(id, "parked", expectedAgentRef);
+						}
+						await revived.dispose();
+						throw error;
+					}
+				};
+			}
 
 			abortSignal.addEventListener(
 				"abort",

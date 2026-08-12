@@ -1706,6 +1706,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getMnemopiSessionState: () => session?.getMnemopiSessionState(),
 			getAgentId: () => resolvedAgentId,
 			getToolByName: name => session?.getToolByName(name),
+			getRpcHostTools: () => session?.getRpcHostTools() ?? [],
+			getMountedXdevToolNames: () => session?.getMountedXdevToolNames() ?? [],
+			hasBuiltInTool: name => session?.hasBuiltInTool(name) ?? false,
 			agentRegistry,
 			// The global lifecycle releases through AgentRegistry.global(); wiring it
 			// onto a caller-supplied registry would report a cancel while releasing an

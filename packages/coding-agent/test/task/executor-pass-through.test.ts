@@ -4,7 +4,7 @@
  * paid for. Regression guard for issue #2190.
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { type AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -14,14 +14,20 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolPathWithSource } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools";
 import type { LoadExtensionsResult } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
+import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 
-function createMockSession(onPrompt: (params: { emit: (event: AgentSessionEvent) => void }) => void): AgentSession {
+function createMockSession(
+	onPrompt: (params: { emit: (event: AgentSessionEvent) => void }) => void,
+	refreshedHostTools: string[][] = [],
+): AgentSession {
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
 	const emit = (event: AgentSessionEvent) => {
 		for (const listener of listeners) listener(event);
@@ -34,7 +40,13 @@ function createMockSession(onPrompt: (params: { emit: (event: AgentSessionEvent)
 		sessionManager: { appendSessionInit: () => {} },
 		getActiveToolNames: () => ["read", "yield"],
 		getEnabledToolNames: () => ["read", "yield"],
+		getMountedXdevToolNames: () => [],
 		setActiveToolsByName: async (_toolNames: string[]) => {},
+		setActiveToolPresentation: async (_toolNames: string[], _mountedToolNames: string[]) => {},
+		getToolByName: () => undefined,
+		refreshRpcHostTools: async (tools: AgentTool[]) => {
+			refreshedHostTools.push(tools.map(tool => tool.name));
+		},
 		subscribe: (listener: (event: AgentSessionEvent) => void) => {
 			listeners.push(listener);
 			return () => {
@@ -54,7 +66,7 @@ function createMockSession(onPrompt: (params: { emit: (event: AgentSessionEvent)
 	return session as unknown as AgentSession;
 }
 
-function yieldEmittingSession(): AgentSession {
+function yieldEmittingSession(refreshedHostTools: string[][] = []): AgentSession {
 	return createMockSession(({ emit }) => {
 		emit({
 			type: "tool_execution_end",
@@ -66,7 +78,7 @@ function yieldEmittingSession(): AgentSession {
 			},
 			isError: false,
 		});
-	});
+	}, refreshedHostTools);
 }
 
 function createSessionResult(session: AgentSession): CreateAgentSessionResult {
@@ -107,6 +119,8 @@ function createModelRegistry(model: Model): ModelRegistry {
 
 describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 	afterEach(() => {
+		AgentLifecycleManager.resetGlobalForTests();
+		AgentRegistry.resetGlobalForTests();
 		vi.restoreAllMocks();
 	});
 
@@ -221,19 +235,159 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 	});
 
 	it("retains inherited MCP proxy tools for normal children", async () => {
-		const session = yieldEmittingSession();
+		const refreshedHostTools: string[][] = [];
+		const session = yieldEmittingSession(refreshedHostTools);
+		session.getMountedXdevToolNames = () => ["ida_execute_python"];
+		const persistedInits: Array<{ mountedTools?: string[] }> = [];
+		vi.spyOn(session.sessionManager, "appendSessionInit").mockImplementation(init => {
+			persistedInits.push(init);
+			return "session-init";
+		});
 		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
 		const mcpManager = {
 			getTools: () => [{ name: "mcp__private_read", label: "private/read" }],
 		} as unknown as MCPManager;
+		const hostTool = { name: "ida_execute_python" } as AgentTool;
 
-		const result = await runSubprocess({ ...baseOptions, id: "normal-child", mcpManager });
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "normal-child",
+			mcpManager,
+			parentHostTools: [hostTool],
+		});
 
 		expect(result.exitCode).toBe(0);
 		const forwarded = spy.mock.calls[0]?.[0];
 		expect(forwarded?.enableMCP).toBe(true);
 		expect(forwarded?.mcpManager).toBe(mcpManager);
 		expect(forwarded?.customTools?.map(tool => tool.name)).toEqual(["mcp__private_read"]);
+		expect(forwarded?.toolNames).toBeUndefined();
+		expect(refreshedHostTools).toEqual([["ida_execute_python"]]);
+		expect(persistedInits).toEqual([expect.objectContaining({ mountedTools: ["ida_execute_python"] })]);
+	});
+
+	it("preserves explicitly enabled hidden host tools and their mounted presentation", async () => {
+		const session = yieldEmittingSession();
+		const presentation = vi.spyOn(session, "setActiveToolPresentation");
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+		const hiddenTopLevel = { name: "hidden_top_level", hidden: true } as AgentTool;
+		const hiddenMounted = { name: "hidden_mounted", hidden: true } as AgentTool;
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "hidden-host-tools",
+			parentHostTools: [hiddenTopLevel, hiddenMounted],
+			parentMountedHostToolNames: [hiddenMounted.name],
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(presentation).toHaveBeenCalledWith(
+			["read", "yield", hiddenTopLevel.name, hiddenMounted.name],
+			[hiddenMounted.name],
+		);
+	});
+
+	it("keeps an inherited top-level discoverable host tool out of xd:// after refresh", async () => {
+		const session = yieldEmittingSession();
+		let mountedToolNames: string[] = [];
+		session.getMountedXdevToolNames = () => mountedToolNames;
+		session.refreshRpcHostTools = async tools => {
+			mountedToolNames = tools.map(tool => tool.name);
+		};
+		const presentation = vi.spyOn(session, "setActiveToolPresentation");
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+		const topLevelHostTool = { name: "top_level_host", loadMode: "discoverable" } as AgentTool;
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "top-level-host-tool",
+			parentHostTools: [topLevelHostTool],
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(presentation).toHaveBeenCalledWith(["read", "yield", topLevelHostTool.name], []);
+	});
+
+	it("disposes a newly created session when inherited host-tool refresh fails", async () => {
+		const session = yieldEmittingSession();
+		const dispose = vi.fn(async () => {});
+		session.dispose = dispose;
+		session.refreshRpcHostTools = async () => {
+			throw new Error("host refresh failed");
+		};
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+		const id = "host-refresh-failure";
+		AgentRegistry.global().register({
+			id,
+			displayName: id,
+			kind: "sub",
+			session,
+			status: "running",
+		});
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id,
+			keepAlive: false,
+			parentHostTools: [{ name: "ida_execute_python" } as AgentTool],
+		});
+
+		expect(result.exitCode).toBe(1);
+		expect(dispose).toHaveBeenCalledTimes(1);
+		expect(AgentRegistry.global().get(id)).toBeUndefined();
+	});
+
+	it("retries a warm revive after post-create host refresh cleanup", async () => {
+		const id = "warm-revive-refresh-failure";
+		const registry = AgentRegistry.global();
+		const initial = yieldEmittingSession();
+		const failed = createMockSession(() => {});
+		const failedDispose = vi.fn(async () => {});
+		failed.dispose = failedDispose;
+		failed.refreshRpcHostTools = async () => {
+			throw new Error("host refresh failed");
+		};
+		const recovered = createMockSession(() => {});
+		let reviveAttempts = 0;
+		vi.spyOn(SessionManager, "open").mockResolvedValue({} as SessionManager);
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			if (!options) throw new Error("Expected session options");
+			if (!options.expectedAgentRef) {
+				registry.register({
+					id,
+					displayName: id,
+					kind: "sub",
+					session: initial,
+					sessionFile: "warm-revive.jsonl",
+					status: "running",
+				});
+				return createSessionResult(initial);
+			}
+
+			const revived = reviveAttempts++ === 0 ? failed : recovered;
+			if (!registry.attachSession(id, revived, options.expectedAgentRef.sessionFile, options.expectedAgentRef)) {
+				throw new Error("failed to attach revived session");
+			}
+			registry.setStatus(id, "running", options.expectedAgentRef);
+			return createSessionResult(revived);
+		});
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id,
+			artifactsDir: "/tmp",
+			parentHostTools: [{ name: "ida_execute_python" } as AgentTool],
+		});
+		expect(result.exitCode).toBe(0);
+		await AgentLifecycleManager.global().park(id);
+
+		await expect(AgentLifecycleManager.global().ensureLive(id)).rejects.toThrow("host refresh failed");
+		expect(failedDispose).toHaveBeenCalledTimes(1);
+		expect(registry.get(id)).toMatchObject({ status: "parked", session: null, sessionFile: "warm-revive.jsonl" });
+
+		expect(await AgentLifecycleManager.global().ensureLive(id)).toBe(recovered);
+		expect(reviveAttempts).toBe(2);
+		expect(registry.get(id)).toMatchObject({ status: "idle", session: recovered });
 	});
 
 	it("preserves the legacy result shape when no output schema is selected", async () => {

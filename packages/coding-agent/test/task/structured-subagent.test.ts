@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	artifactsDirsFromRegistry,
@@ -402,6 +403,54 @@ describe("structured subagent primitive", () => {
 		for (const run of settled) await fs.rm(run.artifactsDir, { recursive: true, force: true });
 	});
 
+	it("forwards top-level RPC host tools once", async () => {
+		mockDiscovery();
+		const essentialTool = { name: "essential_host" } as AgentTool;
+		const mountedTool = { name: "mounted_host" } as AgentTool;
+		const parentSession = session();
+		Object.assign(parentSession, {
+			getRpcHostTools: () => [essentialTool, mountedTool],
+			getMountedXdevToolNames: () => [mountedTool.name],
+			hasBuiltInTool: () => false,
+			getToolByName: (name: string) => (name === mountedTool.name ? mountedTool : undefined),
+		});
+		let parentHostTools: AgentTool[] | undefined;
+		let parentMountedHostToolNames: string[] | undefined;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			parentHostTools = options.parentHostTools;
+			parentMountedHostToolNames = options.parentMountedHostToolNames;
+			return result();
+		});
+
+		await runStructuredSubagent(request({ session: parentSession }));
+
+		expect(parentHostTools).toEqual([essentialTool, mountedTool]);
+		expect(parentMountedHostToolNames).toEqual([mountedTool.name]);
+	});
+
+	it("does not forward parent-bound mounted custom tools", async () => {
+		mockDiscovery();
+		const rpcHostTool = { name: "ida_execute_python" } as AgentTool;
+		const parentBoundCustomTool = { name: "inline_parent_custom" } as AgentTool;
+		const parentSession = session();
+		Object.assign(parentSession, {
+			getRpcHostTools: () => [rpcHostTool],
+			getMountedXdevToolNames: () => [rpcHostTool.name, parentBoundCustomTool.name],
+			hasBuiltInTool: () => false,
+			getToolByName: (name: string) => (name === parentBoundCustomTool.name ? parentBoundCustomTool : undefined),
+		});
+		let options: executorModule.ExecutorOptions | undefined;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async executorOptions => {
+			options = executorOptions;
+			return result();
+		});
+
+		await runStructuredSubagent(request({ session: parentSession }));
+
+		expect(options?.parentHostTools).toEqual([rpcHostTool]);
+		expect(options?.parentMountedHostToolNames).toEqual([rpcHostTool.name]);
+	});
+
 	it("suppresses plan capability sources while preserving non-plan propagation", async () => {
 		mockDiscovery();
 		const mcpManager = {} as NonNullable<ToolSession["mcpManager"]>;
@@ -414,7 +463,15 @@ describe("structured subagent primitive", () => {
 		const nonPlanSession = session();
 		Object.assign(nonPlanSession, { mcpManager, extensionPaths, customToolPaths });
 		const mcpDisabledSession = session();
-		mcpDisabledSession.enableMCP = false;
+		const disabledMcpTool = { name: "mcp__server_read" } as AgentTool;
+		const enabledHostTool = { name: "ida_execute_python" } as AgentTool;
+		Object.assign(mcpDisabledSession, {
+			enableMCP: false,
+			getRpcHostTools: () => [disabledMcpTool, enabledHostTool],
+			getMountedXdevToolNames: () => [disabledMcpTool.name, enabledHostTool.name],
+			hasBuiltInTool: () => false,
+			getToolByName: (name: string) => [disabledMcpTool, enabledHostTool].find(tool => tool.name === name),
+		});
 		const restrictedSession = session();
 		const getApiKey = async () => "exact-account-key";
 		Object.assign(restrictedSession, {
@@ -453,6 +510,7 @@ describe("structured subagent primitive", () => {
 		expect(options[1]?.restrictToolNames).toBe(false);
 		expect(options[2]).toMatchObject({ enableMCP: false });
 		expect(options[2]?.mcpManager).toBeUndefined();
+		expect(options[2]?.parentHostTools).toEqual([enabledHostTool]);
 		expect(options[3]).toMatchObject({
 			enableMCP: false,
 			restrictToolNames: true,

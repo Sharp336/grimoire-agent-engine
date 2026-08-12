@@ -18,6 +18,7 @@ import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.m
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { TaskEffort } from "../thinking";
 import type { ToolSession } from "../tools";
+import { isMCPToolName } from "../tools/builtin-names";
 import { isIrcEnabled } from "../tools/hub";
 import { buildOutputValidator } from "../tools/output-schema-validator";
 import { trackLateCleanup } from "../utils/late-cleanup";
@@ -384,6 +385,11 @@ function buildExecutorOptions(
 	};
 	const restrictToolNames = policy.planMode || session.restrictToolNames === true;
 	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
+	const parentHostTools = (session.getRpcHostTools?.() ?? []).filter(tool => enableMCP || !isMCPToolName(tool.name));
+	const parentHostToolNames = new Set(parentHostTools.map(tool => tool.name));
+	const parentMountedHostToolNames = restrictToolNames
+		? []
+		: (session.getMountedXdevToolNames?.() ?? []).filter(name => parentHostToolNames.has(name));
 	return {
 		cwd: session.cwd,
 		additionalDirectories: session.additionalDirectories,
@@ -438,12 +444,14 @@ function buildExecutorOptions(
 		rules: session.rules,
 		preloadedExtensionPaths: restrictToolNames ? [] : session.extensionPaths,
 		preloadedCustomToolPaths: restrictToolNames ? [] : session.customToolPaths,
+		parentHostTools: restrictToolNames ? [] : parentHostTools,
 		localProtocolOptions,
 		parentArtifactManager: session.getArtifactManager?.() ?? undefined,
 		parentHindsightSessionState: session.getHindsightSessionState?.(),
 		parentMnemopiSessionState: session.getMnemopiSessionState?.(),
 		parentTelemetry: session.getTelemetry?.(),
 		parentEvalSessionId: request.shareEvalSession === false ? undefined : (session.getEvalSessionId?.() ?? undefined),
+		parentMountedHostToolNames,
 		parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
 		parentServiceTier: session.getServiceTierByFamily ? (session.getServiceTierByFamily() ?? null) : undefined,
 	};

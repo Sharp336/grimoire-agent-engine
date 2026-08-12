@@ -9,6 +9,8 @@ import { createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
 import type { AuthStorage } from "../session/auth-storage";
 import { SessionManager } from "../session/session-manager";
+import { BUILTIN_TOOLS } from "../tools";
+import { isMCPToolName } from "../tools/builtin-names";
 import type { EventBus } from "../utils/event-bus";
 import { attachIrcWakeTurnMonitor, createMCPProxyTools, createSubagentSettings } from "./executor";
 import type { AgentDefinition } from "./types";
@@ -98,7 +100,20 @@ export function createPersistedSubagentReviverFactory(
 			// A restricted persisted contract must not consult process-global MCP
 			// state: same-name MCP tools are untrusted capability sources.
 			const restrictToolNames = init.restrictToolNames === true;
-			const mcpManager = restrictToolNames ? undefined : MCPManager.instance();
+			const enableMCP = !restrictToolNames && (init.enableMCP ?? true);
+			const parentRpcHostTools = restrictToolNames
+				? []
+				: ctx.session.getRpcHostTools().filter(tool => enableMCP || !isMCPToolName(tool.name));
+			const parentRpcHostToolNames = new Set(parentRpcHostTools.map(tool => tool.name));
+			const persistedMountedTools = restrictToolNames
+				? []
+				: (init.mountedTools ?? []).filter(
+						name =>
+							(enableMCP || !isMCPToolName(name)) &&
+							(Object.hasOwn(BUILTIN_TOOLS, name) || parentRpcHostToolNames.has(name)),
+					);
+			const persistedToolNames = new Set([...init.tools, ...persistedMountedTools]);
+			const mcpManager = enableMCP ? MCPManager.instance() : undefined;
 			const mcpProxyTools = mcpManager ? createMCPProxyTools(mcpManager) : [];
 			const { session } = await createAgentSession({
 				cwd: ctx.session.sessionManager.getCwd(),
@@ -114,7 +129,7 @@ export function createPersistedSubagentReviverFactory(
 				parentAgentId: ref.parentId,
 				expectedAgentRef: expectedRef,
 				taskDepth,
-				toolNames: init.tools,
+				toolNames: [...persistedToolNames],
 				outputSchema: init.outputSchema,
 				outputSchemaMode: init.outputSchemaMode,
 				restrictToolNames: restrictToolNames || undefined,
@@ -125,49 +140,81 @@ export function createPersistedSubagentReviverFactory(
 				spawns: init.spawns ?? "",
 				hasUI: false,
 				enableLsp: restrictToolNames ? false : ctx.enableLsp,
+				enableMCP,
+				mcpManager,
+				customTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
 				...(restrictToolNames
 					? {
 							enableIrc: false,
-							enableMCP: false,
 							preloadedExtensionPaths: [],
 							preloadedCustomToolPaths: [],
 						}
-					: {
-							enableMCP: !mcpManager,
-							mcpManager,
-							customTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
-						}),
+					: {}),
 			});
-			// Clamp the active set to the persisted list: createAgentSession's
-			// `alwaysInclude` can re-add non-defaultInactive extension/custom tools
-			// the original run didn't carry. Unknown/missing names are ignored.
-			await session.setActiveToolsByName([...init.tools, ...session.getMountedXdevToolNames()]);
-			// Cold revives must drive registry status themselves — createAgentSession
-			// doesn't wire this generically (the live path does it in the executor).
-			// Without it the idle-TTL timer never clears on a turn and the lifecycle
-			// could park the agent mid-run.
-			session.subscribe(event => {
-				if (event.type === "agent_start") registry.setStatus(ref.id, "running", session);
-				else if (event.type === "agent_end") registry.setStatus(ref.id, "idle", session);
-			});
-			// Persisted files predate an agent-source field, so cold-revived frames
-			// report the runtime-neutral `user` source; name comes from the ref.
-			const wakeAgent: AgentDefinition = {
-				name: ref.displayName,
-				description: "",
-				systemPrompt: init.systemPrompt,
-				source: "user",
-			};
-			attachIrcWakeTurnMonitor(session, {
-				id: ref.id,
-				agent: wakeAgent,
-				eventBus: ctx.eventBus,
-				sessionFile,
-				outputSchema: init.outputSchema,
-				outputSchemaMode: init.outputSchemaMode,
-				artifactsDir: ctx.session.sessionFile?.slice(0, -6),
-			});
-			return session;
+			try {
+				const localHostToolCollisions = new Set(
+					parentRpcHostTools.flatMap(tool =>
+						persistedToolNames.has(tool.name) &&
+						session.getToolByName(tool.name) !== undefined &&
+						!session.hasRpcHostTool(tool.name)
+							? [tool.name]
+							: [],
+					),
+				);
+				if (!restrictToolNames) {
+					const inheritedHostTools = parentRpcHostTools.filter(
+						tool => persistedToolNames.has(tool.name) && !localHostToolCollisions.has(tool.name),
+					);
+					if (inheritedHostTools.length > 0) await session.refreshRpcHostTools(inheritedHostTools);
+				}
+				const restoredMountedTools = persistedMountedTools.filter(
+					name =>
+						!localHostToolCollisions.has(name) &&
+						(parentRpcHostToolNames.has(name)
+							? session.hasRpcHostTool(name)
+							: session.hasBuiltInTool(name) && session.getToolByName(name) !== undefined),
+				);
+				const restoredMountedToolNames = new Set(restoredMountedTools);
+				const restoredToolNames = [...persistedToolNames].filter(
+					name =>
+						!localHostToolCollisions.has(name) &&
+						(!persistedMountedTools.includes(name) || restoredMountedToolNames.has(name)),
+				);
+				// Restore the child's exact top-level versus mounted snapshot.
+				await session.setActiveToolPresentation(restoredToolNames, restoredMountedTools);
+				// Cold revives must drive registry status themselves — createAgentSession
+				// doesn't wire this generically (the live path does it in the executor).
+				// Without it the idle-TTL timer never clears on a turn and the lifecycle
+				// could park the agent mid-run.
+				session.subscribe(event => {
+					if (event.type === "agent_start") registry.setStatus(ref.id, "running", session);
+					else if (event.type === "agent_end") registry.setStatus(ref.id, "idle", session);
+				});
+				// Persisted files predate an agent-source field, so cold-revived frames
+				// report the runtime-neutral `user` source; name comes from the ref.
+				const wakeAgent: AgentDefinition = {
+					name: ref.displayName,
+					description: "",
+					systemPrompt: init.systemPrompt,
+					source: "user",
+				};
+				attachIrcWakeTurnMonitor(session, {
+					id: ref.id,
+					agent: wakeAgent,
+					eventBus: ctx.eventBus,
+					sessionFile,
+					outputSchema: init.outputSchema,
+					outputSchemaMode: init.outputSchemaMode,
+					artifactsDir: ctx.session.sessionFile?.slice(0, -6),
+				});
+				return session;
+			} catch (error) {
+				if (registry.detachSession(ref.id, expectedRef)) {
+					registry.setStatus(ref.id, "parked", expectedRef);
+				}
+				await session.dispose();
+				throw error;
+			}
 		};
 	};
 }

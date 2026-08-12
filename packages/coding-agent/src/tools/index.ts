@@ -251,6 +251,12 @@ export interface ToolSession {
 	getAgentId?: () => string | null;
 	/** Look up a registered tool by name (used by the eval js backend's tool bridge). */
 	getToolByName?: (name: string) => AgentTool | undefined;
+	/** Enabled host-provided RPC tools that child sessions must inherit. */
+	getRpcHostTools?: () => AgentTool[];
+	/** Names of dynamic tools mounted under `xd://`. */
+	getMountedXdevToolNames?: () => string[];
+	/** Whether the named registry entry came from a built-in factory. */
+	hasBuiltInTool?: (name: string) => boolean;
 	/** Return whether a built-in tool is active in this turn's tool set. */
 	isToolActive?: (name: string) => boolean;
 	/** Update the active built-in tool predicate when a session changes tools mid-run. */

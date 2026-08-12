@@ -398,6 +398,16 @@ export class SessionTools {
 		return this.#rpcHostToolNames.has(name);
 	}
 
+	/** Enabled host-owned RPC tools, unwrapped for child-session reconstruction. */
+	getRpcHostTools(): AgentTool[] {
+		const enabledToolNames = new Set(this.getEnabledToolNames());
+		return [...this.#rpcHostToolNames].flatMap(name => {
+			const tool = this.#toolRegistry.get(name);
+			if (!tool || !enabledToolNames.has(name)) return [];
+			return [tool instanceof ExtensionToolWrapper ? tool.unwrap() : tool];
+		});
+	}
+
 	/** Whether the current MCP entry came from the manager snapshot. */
 	hasMCPManagerTool(name: string): boolean {
 		return this.#mcpManagerToolNames.has(name);

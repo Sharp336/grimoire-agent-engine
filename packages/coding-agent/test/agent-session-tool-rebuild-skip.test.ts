@@ -1295,6 +1295,21 @@ These tools became available:
 		expect(session.getMountedXdevToolNames()).toContain(newTool.name);
 	});
 
+	it("excludes disabled RPC host tools from child inheritance", async () => {
+		const { session } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {
+			beforeAgentStartSystemPrompt: ["initial"],
+		});
+		const hostTool = { ...createBasicTool("rpc_host", "RPC Host"), loadMode: "essential" as const };
+		await session.refreshRpcHostTools([hostTool]);
+		expect(session.getRpcHostTools().map(tool => tool.name)).toEqual([hostTool.name]);
+		expect(session.getRpcHostTools()[0]).toBe(hostTool);
+		expect(session.getRpcHostTools()[0]).not.toBe(session.getToolByName(hostTool.name));
+
+		await session.setActiveToolsByName(["read"]);
+
+		expect(session.getRpcHostTools()).toEqual([]);
+	});
+
 	it("rolls back RPC catalog replacement when prompt rebuild fails", async () => {
 		let failRebuild = false;
 		let date = "2026-07-16";

@@ -2133,6 +2133,8 @@ export class SessionManager {
 		systemPrompt: string;
 		task: string;
 		tools: string[];
+		mountedTools?: string[];
+		enableMCP?: boolean;
 		agent?: string;
 		modelRole?: string;
 		resolvedModel?: string;
@@ -2626,6 +2628,8 @@ export class SessionManager {
 			systemPrompt: string;
 			task: string;
 			tools: string[];
+			mountedTools?: string[];
+			enableMCP?: boolean;
 			agent?: string;
 			modelRole?: string;
 			resolvedModel?: string;
@@ -2649,6 +2653,8 @@ export class SessionManager {
 			systemPrompt: string;
 			task: string;
 			tools: string[];
+			mountedTools?: string[];
+			enableMCP?: boolean;
 			agent?: string;
 			modelRole?: string;
 			resolvedModel?: string;
@@ -2665,6 +2671,8 @@ export class SessionManager {
 					systemPrompt: entry.systemPrompt,
 					task: entry.task,
 					tools: entry.tools,
+					mountedTools: entry.mountedTools,
+					enableMCP: entry.enableMCP,
 					agent: entry.agent,
 					modelRole: entry.modelRole,
 					resolvedModel: entry.resolvedModel,
