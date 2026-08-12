@@ -34,6 +34,8 @@ import {
 	type AgentToolResult,
 	type AgentTurnEndContext,
 	AppendOnlyContextManager,
+	ASIDE_MESSAGE_COMMIT,
+	ASIDE_MESSAGE_DISCARD,
 	type AsideMessage,
 	type BeforeToolCallContext,
 	type BeforeToolCallResult,
@@ -1317,7 +1319,7 @@ export class AgentSession {
 			const thunks: AsideMessage[] = this.#irc.drainPending().map(record => () => record);
 			const pendingExtension = [...this.#pendingExtensionAsides];
 			this.#pendingExtensionAsides = [];
-			thunks.push(...pendingExtension.map(record => () => record));
+			thunks.push(...pendingExtension.map(record => this.#createExtensionAsideThunk(record)));
 			thunks.push(...this.yieldQueue.drainLazy());
 			// Mid-run todo reconciliation — evaluated at injection time so a turn
 			// that flips a todo just before this poll suppresses the nudge.
@@ -7979,6 +7981,32 @@ export class AgentSession {
 		const records = [...this.#pendingExtensionAsides];
 		this.#pendingExtensionAsides = [];
 		emitPersistedCustomMessages(this.agent, records);
+	}
+
+	/** Single-shot thunk for a drained extension aside. COMMIT marks settled only
+	 *  (loop already inserted + emits); DISCARD persists without waking a turn. */
+	#createExtensionAsideThunk(record: CustomMessage): AsideMessage {
+		let settled = false;
+		return () => {
+			Object.defineProperties(record, {
+				[ASIDE_MESSAGE_COMMIT]: {
+					configurable: true,
+					value: () => {
+						if (settled) return;
+						settled = true;
+					},
+				},
+				[ASIDE_MESSAGE_DISCARD]: {
+					configurable: true,
+					value: (_error: Error) => {
+						if (settled) return;
+						settled = true;
+						emitPersistedCustomMessages(this.agent, [record]);
+					},
+				},
+			});
+			return record;
+		};
 	}
 
 	// =========================================================================

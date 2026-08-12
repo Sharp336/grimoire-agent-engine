@@ -6,7 +6,14 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
-import { Agent, type AgentMessage, type AgentTool, type AsideMessage } from "@oh-my-pi/pi-agent-core";
+import {
+	Agent,
+	type AgentMessage,
+	type AgentTool,
+	ASIDE_MESSAGE_DISCARD,
+	type AsideMessage,
+	type CommittableAsideMessage,
+} from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import type { ToolCall } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
@@ -56,6 +63,16 @@ function asideContent(message: AgentMessage): string | undefined {
 	if (!isExtensionAside(message)) return undefined;
 	const content = (message as CustomMessage).content;
 	return typeof content === "string" ? content : undefined;
+}
+
+function takeDrainedExtensionAside(thunks: AsideMessage[]): CommittableAsideMessage {
+	for (const entry of thunks) {
+		const message = typeof entry === "function" ? entry() : entry;
+		if (message?.role === "custom" && (message as CustomMessage).customType === ASIDE_TYPE) {
+			return message;
+		}
+	}
+	throw new Error("expected a drained extension aside");
 }
 
 describe("AgentSession extension deliverAs aside", () => {
@@ -707,5 +724,28 @@ describe("AgentSession extension deliverAs aside", () => {
 			"dispose flush",
 		]);
 		running.catch(() => {});
+	});
+
+	it("persists a drained-but-uncommitted aside on DISCARD without waking (case 11)", async () => {
+		const { session: active, sessionManager } = await createIdleSession();
+		const persisted = capturePersistedAsides(sessionManager);
+		const promptSpy = vi.spyOn(active.agent, "prompt");
+		Object.defineProperty(active, "isStreaming", { value: true, configurable: true });
+
+		await active.sendCustomMessage(asidePayload("polled then discarded"), { deliverAs: "aside" });
+
+		if (!asideProvider) throw new Error("aside provider was never captured");
+		const extensionMessage = takeDrainedExtensionAside(await asideProvider());
+		extensionMessage[ASIDE_MESSAGE_DISCARD]?.(
+			new Error("Aside message was not committed before the agent loop ended"),
+		);
+		await Bun.sleep(0);
+
+		expect(active.agent.state.messages.filter(isExtensionAside).map(message => asideContent(message))).toEqual([
+			"polled then discarded",
+		]);
+		expect(persisted).toEqual(["polled then discarded"]);
+		expect(await drainExtensionAsides()).toEqual([]);
+		expect(promptSpy).not.toHaveBeenCalled();
 	});
 });
