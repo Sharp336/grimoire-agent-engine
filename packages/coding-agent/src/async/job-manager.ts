@@ -51,9 +51,11 @@ export interface AsyncJob {
 	/**
 	 * True when the job settled while its delivery was suppressed (foreground
 	 * `hub` wait/jobs consumption), so the delivery was never enqueued and no
-	 * `async-result` will ever carry this job's usage. `acknowledgeDeliveries`
-	 * consumes the marker when the owning hub result bills the job, so a later
-	 * snapshot of the same retained job cannot bill it twice.
+	 * `async-result` will ever carry this job's usage. The consumer that bills
+	 * the job's usage (`buildJobResult`) clears the marker, so a later snapshot
+	 * of the same retained job cannot bill it twice — while a non-billing
+	 * consumer acknowledging the delivery (e.g. a vibe turn reap) leaves the
+	 * marker intact for a later `hub` snapshot to bill.
 	 */
 	deliverySkipped?: boolean;
 	/**
@@ -397,12 +399,14 @@ export class AsyncJobManager {
 
 	/**
 	 * Acknowledge deliveries for the given job ids: mark them suppressed and
-	 * drop any matching queued delivery. Returns the ids whose usage the caller
-	 * must now bill — deliveries this call removed from the queue, deliveries
+	 * drop any matching queued delivery. Returns the ids whose delivery this
+	 * call actually consumed — queued deliveries removed here plus deliveries
 	 * already in flight when suppression landed (their `async-result` is
-	 * cancelled before it can form), and jobs that settled while suppressed
-	 * (`deliverySkipped`). The skip marker is consumed here, so a later
-	 * snapshot of the same retained job is not billed twice. A job whose
+	 * cancelled before it can form). Jobs that settled while suppressed
+	 * (`deliverySkipped`) are deliberately NOT returned: that marker is
+	 * consumed by the caller that bills the job's usage (`buildJobResult`), so
+	 * a non-billing consumer acknowledging the delivery (e.g. a vibe turn reap)
+	 * leaves the usage available to a later `hub` snapshot. A job whose
 	 * delivery was already fully delivered via an `async-result` (or
 	 * acknowledged by an earlier call) is never returned, since re-counting it
 	 * would double-bill the session.
@@ -422,13 +426,6 @@ export class AsyncJobManager {
 		}
 		for (const delivery of this.#inFlightDeliveries) {
 			if (uniqueSet.has(delivery.jobId)) consumed.push(delivery.jobId);
-		}
-		for (const jobId of uniqueJobIds) {
-			const job = this.#jobs.get(jobId);
-			if (job?.deliverySkipped === true) {
-				job.deliverySkipped = false;
-				consumed.push(jobId);
-			}
 		}
 		this.#deliveries.splice(
 			0,
