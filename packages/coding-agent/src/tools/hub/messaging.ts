@@ -27,6 +27,7 @@ import {
 	getPreviewLines,
 	PREVIEW_LIMITS,
 	replaceTabs,
+	sanitizeInline,
 	type ToolUIColor,
 } from "../render-utils";
 import { type CoordinationDetails, type HubRenderArgs, hubErrorResult } from "./types";
@@ -241,8 +242,8 @@ export async function executeSend(
 		for (const receipt of receipts) {
 			lines.push(
 				receipt.outcome === "failed"
-					? `- ${receipt.to}: failed — ${receipt.error ?? "unknown error"}`
-					: `- ${receipt.to}: ${receipt.outcome}`,
+					? `- ${sanitizeInline(receipt.to)}: failed — ${sanitizeInline(receipt.error ?? "unknown error")}`
+					: `- ${sanitizeInline(receipt.to)}: ${receipt.outcome}`,
 			);
 		}
 
@@ -574,9 +575,9 @@ function renderSendResult(
 						const badge = formatBadge(receipt.outcome, outcomeColor(receipt.outcome), theme);
 						const error =
 							receipt.outcome === "failed" && receipt.error
-								? ` ${theme.fg("error", `${theme.format.dash} ${receipt.error}`)}`
+								? ` ${theme.fg("error", `${theme.format.dash} ${sanitizeInline(receipt.error)}`)}`
 								: "";
-						return `${theme.fg("toolOutput", receipt.to)} ${badge}${error}`;
+						return `${theme.fg("toolOutput", sanitizeInline(receipt.to))} ${badge}${error}`;
 					},
 				},
 				theme,

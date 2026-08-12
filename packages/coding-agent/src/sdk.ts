@@ -1997,7 +1997,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// Allocate a session runtime without evaluating caller-provided extension
 			// instances, paths, or factories.
 			extensionPaths = [];
-			extensionsResult = await loadExtensions([], cwd, eventBus, agentRegistry);
+			extensionsResult = await loadExtensions([], cwd, eventBus, agentRegistry, agentKind === "main");
 		} else if (options.preloadedExtensions) {
 			extensionsResult = {
 				...options.preloadedExtensions,
@@ -2017,6 +2017,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				cwd,
 				eventBus,
 				agentRegistry,
+				agentKind === "main",
 			);
 			for (const { path, error } of extensionsResult.errors) {
 				logger.error("Failed to load extension", { path, error });
@@ -2032,6 +2033,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				cwd,
 				eventBus,
 				agentRegistry,
+				agentKind === "main",
 			);
 			for (const { path, error } of extensionsResult.errors) {
 				logger.error("Failed to load extension", { path, error });
@@ -2084,6 +2086,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					extensionsResult.runtime,
 					`<inline-${i}>`,
 					agentRegistry,
+					agentKind === "main",
 				);
 				extensionsResult.extensions.push(loaded);
 			}

@@ -78,6 +78,36 @@ describe("hubToolRenderer send", () => {
 		);
 	});
 
+	it("sanitizes a remote transport's failed-receipt id and error before rendering (#7401)", async () => {
+		const uiTheme = await theme();
+		// A bridge/peer-controlled receipt carrying newlines + a tab: the renderer must neutralize them
+		// so an external transport failure cannot split the row or inject terminal control sequences.
+		const component = hubToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "" }],
+				details: {
+					op: "send",
+					from: "Main",
+					to: "all",
+					receipts: [
+						{ to: "AuthLoader", outcome: "woken" },
+						{ to: "@cluster/e\tvil", outcome: "failed", error: "boom\nINJECTED" },
+					],
+				} satisfies CoordinationDetails,
+			},
+			{ expanded: false, isPartial: false },
+			uiTheme,
+			{ op: "send", to: "all", message: "heads up" },
+		);
+		// Inspect the RAW render (only ANSI stripped) so the assertion proves the renderer's OWN
+		// sanitize ran — control chars collapse to single spaces, none survive into the row.
+		const raw = Bun.stripANSI(component.render(200).join("\n"));
+		expect(raw).toContain("boom INJECTED");
+		expect(raw).toContain("@cluster/e vil");
+		expect(raw).not.toContain("boom\n");
+		expect(raw).not.toContain("e\tvil");
+	});
+
 	it("flags an awaited send whose reply timed out", async () => {
 		const uiTheme = await theme();
 		const rendered = lines(
