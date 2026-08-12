@@ -389,9 +389,9 @@ export class TranscriptContainer
 				liveStartIndex = i;
 				hasLiveBlock = true;
 				this.#nativeScrollbackLiveRegionPinned =
-					(
-						this.children[i] as Component & Partial<NativeScrollbackLiveRegion>
-					).isNativeScrollbackLiveRegionPinned?.() === true;
+					!canCommitLiveBlock(child) ||
+					(child as Component & Partial<NativeScrollbackLiveRegion>).isNativeScrollbackLiveRegionPinned?.() ===
+						true;
 				break;
 			}
 		}

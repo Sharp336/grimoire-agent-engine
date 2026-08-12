@@ -326,6 +326,23 @@ describe("TranscriptContainer", () => {
 		expect(replacementContainer.getNativeScrollbackLiveRegionStart()).toBe(0);
 	});
 
+	it("pins finalized replacement-capable thinking above the viewport", () => {
+		const container = new TranscriptContainer();
+		const assistant = new AssistantMessageComponent(undefined, false, undefined, [() => undefined]);
+		assistant.updateContent(
+			makeAssistantMessage({
+				content: [{ type: "thinking", thinking: "raw final thinking" }],
+			}),
+		);
+		assistant.markTranscriptBlockFinalized();
+		container.addChild(assistant);
+
+		container.render(80);
+
+		expect(container.getNativeScrollbackLiveRegionStart()).toBe(0);
+		expect(container.isNativeScrollbackLiveRegionPinned()).toBe(true);
+	});
+
 	it("keeps finalized replacement-capable assistant thinking in the live region above later finalized blocks", () => {
 		const container = new TranscriptContainer();
 		const assistant = new AssistantMessageComponent(undefined, false, undefined, [() => undefined]);

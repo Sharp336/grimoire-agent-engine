@@ -194,6 +194,10 @@ function isStructuredThinkingResult(
 	return candidate.type === "append" || candidate.type === "replace";
 }
 
+interface ThinkingRendererCache {
+	text: string;
+	entries: Array<{ result: AssistantThinkingRenderResult; dirty: boolean } | undefined>;
+}
 /**
  * Component that renders a complete assistant message
  */
@@ -283,6 +287,8 @@ export class AssistantMessageComponent extends Container {
 	#thinkingRateLive = false;
 	#visibleThinkingUsesRenderers = false;
 	#thinkingRenderRefreshQueued = false;
+	#thinkingRendererCache = new Map<string, ThinkingRendererCache>();
+	#thinkingRendererCacheTimestamp: number | undefined;
 
 	#textColorTransform?: (text: string) => string;
 
@@ -336,6 +342,7 @@ export class AssistantMessageComponent extends Container {
 		// updateContent() directly and keep the fast path.
 		this.#fastPathKey = undefined;
 		this.#fastPathItems = undefined;
+		this.#thinkingRendererCache.clear();
 		if (this.#lastMessage) {
 			this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
 		}
@@ -732,65 +739,85 @@ export class AssistantMessageComponent extends Container {
 		thinkingIndex: number,
 		text: string,
 	): ThinkingExtensionComponents {
+		const key = `${contentIndex}:${thinkingIndex}`;
+		let cache = this.#thinkingRendererCache.get(key);
+		if (!cache || cache.text !== text) {
+			cache = { text, entries: [] };
+			this.#thinkingRendererCache.set(key, cache);
+		}
+
 		const append: Component[] = [];
 		let replacement: Component | undefined;
-		for (const renderer of this.thinkingRenderers) {
-			let rerunRenderersOnRequest = true;
-			try {
-				const result: AssistantThinkingRenderResult = renderer(
-					{
-						message: {
-							timestamp: message.timestamp,
-							responseId: message.responseId,
-							api: message.api,
-							provider: message.provider,
-							model: message.model,
+		for (let rendererIndex = 0; rendererIndex < this.thinkingRenderers.length; rendererIndex++) {
+			const renderer = this.thinkingRenderers[rendererIndex]!;
+			let entry = cache.entries[rendererIndex];
+			if (!entry || entry.dirty) {
+				entry = { result: undefined, dirty: false };
+				cache.entries[rendererIndex] = entry;
+				let rerunRendererOnRequest = true;
+				try {
+					entry.result = renderer(
+						{
+							message: {
+								timestamp: message.timestamp,
+								responseId: message.responseId,
+								api: message.api,
+								provider: message.provider,
+								model: message.model,
+							},
+							content: {
+								itemId: content.itemId,
+								thinkingSignature: content.thinkingSignature,
+							},
+							contentIndex,
+							thinkingIndex,
+							text,
+							requestRender: () => {
+								if (rerunRendererOnRequest) entry!.dirty = true;
+								this.#requestThinkingRender(rerunRendererOnRequest);
+							},
 						},
-						content: {
-							itemId: content.itemId,
-							thinkingSignature: content.thinkingSignature,
-						},
+						theme,
+					);
+					if (entry.result && (isComponent(entry.result) || isStructuredThinkingResult(entry.result))) {
+						rerunRendererOnRequest = false;
+						entry.dirty = false;
+					}
+					if (!entry.result) entry.dirty = true;
+				} catch (error) {
+					logger.warn("Assistant thinking renderer failed", {
 						contentIndex,
 						thinkingIndex,
-						text,
-						requestRender: () => this.#requestThinkingRender(rerunRenderersOnRequest),
-					},
-					theme,
-				);
-				if (!result) continue;
-				if (isComponent(result)) {
-					rerunRenderersOnRequest = false;
-					append.push(result);
-					continue;
+						error: error instanceof Error ? error.message : String(error),
+					});
 				}
-				if (!isStructuredThinkingResult(result)) {
-					logger.warn("Assistant thinking renderer returned an invalid result", {
+			}
+
+			const result = entry.result;
+			if (!result) continue;
+			if (isComponent(result)) {
+				append.push(result);
+				continue;
+			}
+			if (!isStructuredThinkingResult(result)) {
+				logger.warn("Assistant thinking renderer returned an invalid result", {
+					contentIndex,
+					thinkingIndex,
+				});
+				continue;
+			}
+			if (result.type === "replace") {
+				if (replacement) {
+					logger.warn("Assistant thinking replacement renderer ignored because one is already active", {
 						contentIndex,
 						thinkingIndex,
 					});
 					continue;
 				}
-				if (result.type === "replace") {
-					if (replacement) {
-						logger.warn("Assistant thinking replacement renderer ignored because one is already active", {
-							contentIndex,
-							thinkingIndex,
-						});
-						continue;
-					}
-					rerunRenderersOnRequest = false;
-					replacement = result.component;
-					continue;
-				}
-				rerunRenderersOnRequest = false;
-				append.push(result.component);
-			} catch (error) {
-				logger.warn("Assistant thinking renderer failed", {
-					contentIndex,
-					thinkingIndex,
-					error: error instanceof Error ? error.message : String(error),
-				});
+				replacement = result.component;
+				continue;
 			}
+			append.push(result.component);
 		}
 		return { append, replace: replacement };
 	}
@@ -806,9 +833,6 @@ export class AssistantMessageComponent extends Container {
 				else if (this.hideThinkingBlock) parts.push("KH");
 				else parts.push("KV");
 			} else {
-				// Non-rendered blocks (toolCall, redactedThinking, …) still occupy a
-				// content index. Encode their position so an inserted/removed one shifts
-				// the key and forces the teardown path instead of mis-indexing children.
 				parts.push(`O:${content.type}`);
 			}
 		}
@@ -828,9 +852,20 @@ export class AssistantMessageComponent extends Container {
 		) {
 			return false;
 		}
-		// Thinking renderers are arbitrary extension code: their output can change
-		// even when the message shape and text are identical.
-		if (this.thinkingRenderers.length > 0) return false;
+		if (this.thinkingRenderers.length > 0 && this.#fastPathItems) {
+			let thinkingIndex = 0;
+			for (let contentIndex = 0; contentIndex < message.content.length; contentIndex++) {
+				const content = message.content[contentIndex]!;
+				if (content.type !== "thinking") continue;
+				const display = resolveThinkingDisplay(content, this.proseOnlyThinking);
+				if (display.visible && !this.hideThinkingBlock) {
+					const cache = this.#thinkingRendererCache.get(`${contentIndex}:${thinkingIndex}`);
+					if (!cache || cache.text !== display.text) return false;
+					if (cache.entries.some(entry => entry?.dirty)) return false;
+				}
+				thinkingIndex++;
+			}
+		}
 		return true;
 	}
 
@@ -892,6 +927,10 @@ export class AssistantMessageComponent extends Container {
 	updateContent(message: AssistantMessage, opts?: { transient?: boolean }): void {
 		this.#blockVersion++;
 		this.#lastMessage = message;
+		if (this.#thinkingRendererCacheTimestamp !== message.timestamp) {
+			this.#thinkingRendererCache.clear();
+			this.#thinkingRendererCacheTimestamp = message.timestamp;
+		}
 		this.#lastUpdateTransient = opts?.transient === true;
 
 		// Streaming-speed gauge: only a live, in-flight render of the single

@@ -331,6 +331,41 @@ describe("AssistantMessageComponent thinking renderers", () => {
 		expect(rendered).not.toContain("translation loading");
 	});
 
+	it("preserves mounted renderer components while later answer text streams", () => {
+		let rendererCalls = 0;
+		let mountedNote: Text | undefined;
+		const component = new AssistantMessageComponent(
+			{
+				...createAssistantMessage(""),
+				content: [{ type: "thinking", thinking: "Stable thinking." }],
+			},
+			false,
+			undefined,
+			[
+				() => {
+					rendererCalls += 1;
+					const note = new Text("translation loading", 1, 0);
+					mountedNote ??= note;
+					return note;
+				},
+			],
+		);
+
+		mountedNote?.setText("translation ready");
+		component.updateContent({
+			...createAssistantMessage("Answer"),
+			content: [
+				{ type: "thinking", thinking: "Stable thinking." },
+				{ type: "text", text: "Answer" },
+			],
+		});
+
+		const rendered = Bun.stripANSI(component.render(120).join("\n"));
+		expect(rendererCalls).toBe(1);
+		expect(rendered).toContain("translation ready");
+		expect(rendered).not.toContain("translation loading");
+	});
+
 	it("mounts a replacement when an async renderer becomes ready after streaming stops", async () => {
 		let ready = false;
 		let renderRequests = 0;
