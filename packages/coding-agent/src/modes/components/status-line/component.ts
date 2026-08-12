@@ -1379,9 +1379,12 @@ export class StatusLineComponent implements Component {
 		if (this.#balanceFetchedAt > 0 && now - this.#balanceFetchedAt < STATUS_BALANCE_REFRESH_MS) return;
 
 		const provider = session.state.model?.provider ?? session.model?.provider;
-		if (provider !== "deepseek") return;
-
-		this.#balanceInFlight = true;
+		if (provider !== "deepseek") {
+			// Clear stale balance when switching away from DeepSeek (the
+			// session cache invalidation may fire after the next render).
+			if (this.#cachedBalance !== null) this.#cachedBalance = null;
+			return;
+		}
 		this.#balanceTimer = setTimeout(() => {
 			this.#balanceTimer = null;
 			void this.#runBalanceRefresh(session);
@@ -1418,16 +1421,20 @@ export class StatusLineComponent implements Component {
 			headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
 			signal,
 		});
-		if (!resp.ok) return null;
-
-		const json = (await resp.json()) as { balance_infos?: Array<{ total_balance?: string }> };
-		const total = parseFloat(json?.balance_infos?.[0]?.total_balance ?? "");
+		const json = (await resp.json()) as {
+			balance_infos?: Array<{ total_balance?: string; currency?: string }>;
+		};
+		const info = json?.balance_infos?.[0];
+		const total = parseFloat(info?.total_balance ?? "");
 		if (Number.isNaN(total)) return null;
+
+		const currencySymbol: Record<string, string> = { CNY: "¥", USD: "$", EUR: "€", GBP: "£" };
+		const symbol = currencySymbol[info?.currency ?? ""] ?? (info?.currency ?? "¥");
 
 		// Colour-code inline: green >50, yellow >10, red <=10
 		const G = "\x1b[32m", Y = "\x1b[33m", R = "\x1b[31m", E = "\x1b[0m";
 		const color = total > 50 ? G : total > 10 ? Y : R;
-		return `${color}¥${total.toFixed(2)}${E}`;
+		return `${color}${symbol}${total.toFixed(2)}${E}`;
 	}
 
 
