@@ -174,11 +174,14 @@ class I18nManager {
 				} catch {
 					continue;
 				}
-				const match =
-					content.match(/^\s*i18n:\s*\n(?:[^\n]*\n)*?\s*language:\s*["']?([^"'\s\n#]+)["']?/m) ||
-					content.match(/^\s*i18n\.language:\s*["']?([^"'\s\n#]+)["']?/m);
+				const blockMatch = content.match(
+					/^([ \t]*)i18n:\s*\n(?:[ \t]+[^\n]*\n|[ \t]*\n)*?^\1[ \t]+language:\s*["']?([^"'\s\n#]+)["']?/m,
+				);
+				const match = blockMatch ?? content.match(/^\s*i18n\.language:\s*["']?([^"'\s\n#]+)["']?/m);
 				if (match) {
-					const value = match[1].trim();
+					// Block form captures the indent in group 1 and the value in group 2;
+					// dotted form captures the value in group 1.
+					const value = (blockMatch ? match[2] : match[1]).trim();
 					if (value === "zh" || value === "en") return value;
 				}
 			}

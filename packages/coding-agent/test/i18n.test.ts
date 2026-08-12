@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-
+import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
+import { resetSettingsForTest } from "../src/config/settings";
 import { createI18n, type I18nManager, i18n } from "../src/i18n";
 import { interceptSlashCommand, interceptTips } from "../src/i18n/interceptor";
 
@@ -288,6 +289,53 @@ describe("i18n", () => {
 
 			// 重置后未初始化，应该返回 key
 			expect(i18n.t("key")).toBe("key");
+		});
+	});
+	describe("config language detection", () => {
+		const originalAgentDir = getAgentDir();
+
+		beforeEach(() => {
+			// Settings uninitialized → detectLanguageFromConfig falls back to parsing config.yml
+			resetSettingsForTest();
+			// OMP_LANG unset → init() consults config.yml
+			delete process.env.OMP_LANG;
+		});
+
+		afterEach(async () => {
+			setAgentDir(originalAgentDir);
+			i18n.reset();
+		});
+
+		it("does not treat sibling-block language values as the UI language", async () => {
+			await fs.writeFile(path.join(tempDir, "config.yml"), "i18n:\n  foo: 1\nstt:\n  language: zh\n");
+			setAgentDir(tempDir);
+
+			i18n.reset();
+			await i18n.init();
+
+			// If the regex crossed out of the i18n block, stt.language: zh would
+			// have switched the UI to zh; the key must stay untranslated (en).
+			expect(i18n.t("session.compaction.complete")).not.toBe("压缩完成");
+		});
+
+		it("detects language from the i18n block", async () => {
+			await fs.writeFile(path.join(tempDir, "config.yml"), "i18n:\n  language: zh\n");
+			setAgentDir(tempDir);
+
+			i18n.reset();
+			await i18n.init();
+
+			expect(i18n.t("session.compaction.complete")).toBe("压缩完成");
+		});
+
+		it("detects language from the dotted i18n.language form", async () => {
+			await fs.writeFile(path.join(tempDir, "config.yml"), "i18n.language: zh\n");
+			setAgentDir(tempDir);
+
+			i18n.reset();
+			await i18n.init();
+
+			expect(i18n.t("session.compaction.complete")).toBe("压缩完成");
 		});
 	});
 });

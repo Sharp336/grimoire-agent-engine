@@ -66,6 +66,10 @@ describe("exchange-rate", () => {
 			delete process.env.OMP_LANG;
 		}
 		resetCachePath();
+		// Reset in-memory rate state too so later tests in the same Bun process
+		// don't reuse the last test's temp/manual rate (resetCachePath only
+		// changes filenames).
+		resetRateForTest();
 		i18n.reset();
 	});
 
