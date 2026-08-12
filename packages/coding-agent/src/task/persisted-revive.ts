@@ -150,51 +150,59 @@ export function createPersistedSubagentReviverFactory(
 						}
 					: {}),
 			});
-			const localHostToolCollisions = new Set(
-				parentRpcHostTools.flatMap(tool =>
-					persistedToolNames.has(tool.name) &&
-					session.getToolByName(tool.name) !== undefined &&
-					!session.hasRpcHostTool(tool.name)
-						? [tool.name]
-						: [],
-				),
-			);
-			if (!restrictToolNames) {
-				const inheritedHostTools = parentRpcHostTools.filter(
-					tool => persistedToolNames.has(tool.name) && !localHostToolCollisions.has(tool.name),
+			try {
+				const localHostToolCollisions = new Set(
+					parentRpcHostTools.flatMap(tool =>
+						persistedToolNames.has(tool.name) &&
+						session.getToolByName(tool.name) !== undefined &&
+						!session.hasRpcHostTool(tool.name)
+							? [tool.name]
+							: [],
+					),
 				);
-				if (inheritedHostTools.length > 0) await session.refreshRpcHostTools(inheritedHostTools);
+				if (!restrictToolNames) {
+					const inheritedHostTools = parentRpcHostTools.filter(
+						tool => persistedToolNames.has(tool.name) && !localHostToolCollisions.has(tool.name),
+					);
+					if (inheritedHostTools.length > 0) await session.refreshRpcHostTools(inheritedHostTools);
+				}
+				const restoredToolNames = [...persistedToolNames].filter(name => !localHostToolCollisions.has(name));
+				const restoredMountedTools = persistedMountedTools.filter(name => !localHostToolCollisions.has(name));
+				// Restore the child's exact top-level versus mounted snapshot.
+				await session.setActiveToolPresentation(restoredToolNames, restoredMountedTools);
+				// Cold revives must drive registry status themselves — createAgentSession
+				// doesn't wire this generically (the live path does it in the executor).
+				// Without it the idle-TTL timer never clears on a turn and the lifecycle
+				// could park the agent mid-run.
+				session.subscribe(event => {
+					if (event.type === "agent_start") registry.setStatus(ref.id, "running", session);
+					else if (event.type === "agent_end") registry.setStatus(ref.id, "idle", session);
+				});
+				// Persisted files predate an agent-source field, so cold-revived frames
+				// report the runtime-neutral `user` source; name comes from the ref.
+				const wakeAgent: AgentDefinition = {
+					name: ref.displayName,
+					description: "",
+					systemPrompt: init.systemPrompt,
+					source: "user",
+				};
+				attachIrcWakeTurnMonitor(session, {
+					id: ref.id,
+					agent: wakeAgent,
+					eventBus: ctx.eventBus,
+					sessionFile,
+					outputSchema: init.outputSchema,
+					outputSchemaMode: init.outputSchemaMode,
+					artifactsDir: ctx.session.sessionFile?.slice(0, -6),
+				});
+				return session;
+			} catch (error) {
+				if (registry.detachSession(ref.id, expectedRef)) {
+					registry.setStatus(ref.id, "parked", expectedRef);
+				}
+				await session.dispose();
+				throw error;
 			}
-			const restoredToolNames = [...persistedToolNames].filter(name => !localHostToolCollisions.has(name));
-			const restoredMountedTools = persistedMountedTools.filter(name => !localHostToolCollisions.has(name));
-			// Restore the child's exact top-level versus mounted snapshot.
-			await session.setActiveToolPresentation(restoredToolNames, restoredMountedTools);
-			// Cold revives must drive registry status themselves — createAgentSession
-			// doesn't wire this generically (the live path does it in the executor).
-			// Without it the idle-TTL timer never clears on a turn and the lifecycle
-			// could park the agent mid-run.
-			session.subscribe(event => {
-				if (event.type === "agent_start") registry.setStatus(ref.id, "running", session);
-				else if (event.type === "agent_end") registry.setStatus(ref.id, "idle", session);
-			});
-			// Persisted files predate an agent-source field, so cold-revived frames
-			// report the runtime-neutral `user` source; name comes from the ref.
-			const wakeAgent: AgentDefinition = {
-				name: ref.displayName,
-				description: "",
-				systemPrompt: init.systemPrompt,
-				source: "user",
-			};
-			attachIrcWakeTurnMonitor(session, {
-				id: ref.id,
-				agent: wakeAgent,
-				eventBus: ctx.eventBus,
-				sessionFile,
-				outputSchema: init.outputSchema,
-				outputSchemaMode: init.outputSchemaMode,
-				artifactsDir: ctx.session.sessionFile?.slice(0, -6),
-			});
-			return session;
 		};
 	};
 }

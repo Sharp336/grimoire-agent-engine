@@ -148,6 +148,8 @@ function createFactory(
 afterEach(async () => {
 	vi.restoreAllMocks();
 	MCPManager.resetForTests();
+	AgentLifecycleManager.resetGlobalForTests();
+	AgentRegistry.resetGlobalForTests();
 	await Promise.all(tempDirs.splice(0).map(dir => dir.remove()));
 });
 
@@ -279,6 +281,45 @@ describe("persisted subagent revival", () => {
 		expect(refreshedHostTools).toEqual([["ida_execute_python"]]);
 		expect(activeToolNames).toEqual([["read", "yield", "ida_execute_python"]]);
 		expect(mountedToolNames).toEqual([["ida_execute_python"]]);
+	});
+
+	it("disposes a failed cold revive and leaves its parked ref retryable", async () => {
+		const cwd = makeTempDir("@pi-revive-restoration-failure-");
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, ["ida_execute_python"]);
+		const hostTool = { name: "ida_execute_python" } as AgentTool;
+		const registry = AgentRegistry.global();
+		const ref = registry.register({
+			...createRef(sessionFile),
+			session: null,
+			status: "parked",
+		});
+		const failed = createRevivedSession([]).session;
+		const failedDispose = vi.fn(async () => {});
+		failed.refreshRpcHostTools = async () => {
+			throw new Error("host refresh failed");
+		};
+		failed.dispose = failedDispose;
+		const recovered = createRevivedSession([]).session;
+		let attempts = 0;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
+			const session = attempts++ === 0 ? failed : recovered;
+			if (!registry.attachSession(ref.id, session, ref.sessionFile, ref)) {
+				throw new Error("failed to attach revived session");
+			}
+			registry.setStatus(ref.id, "running", ref);
+			return { session } as CreateAgentSessionResult;
+		});
+		const factory = createFactory(cwd, undefined, [hostTool], [hostTool]);
+		const lifecycle = AgentLifecycleManager.global();
+		lifecycle.setPersistedSubagentReviverFactory(factory, 0);
+
+		await expect(lifecycle.ensureLive(ref.id)).rejects.toThrow("host refresh failed");
+
+		expect(failedDispose).toHaveBeenCalledTimes(1);
+		expect(registry.get(ref.id)).toMatchObject({ status: "parked", session: null, sessionFile });
+		expect(await lifecycle.ensureLive(ref.id)).toBe(recovered);
+		expect(attempts).toBe(2);
+		expect(registry.get(ref.id)).toMatchObject({ status: "idle", session: recovered });
 	});
 
 	it("keeps MCP disabled while restoring non-MCP mounted tools", async () => {
