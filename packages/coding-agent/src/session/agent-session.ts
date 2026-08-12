@@ -7044,7 +7044,6 @@ export class AgentSession {
 			}
 		}
 
-		this.#clearPendingExtensionAsides();
 		await this.#bash.flushPending();
 		// Flush current session to ensure all entries are written
 		await this.sessionManager.flush();
@@ -7068,6 +7067,7 @@ export class AgentSession {
 				this.#bash.finishSessionTransition(bashTransition, false);
 				return false;
 			}
+			this.#clearPendingExtensionAsides();
 			this.#bash.markSessionTransition(bashTransition);
 			this.#bash.finishSessionTransition(bashTransition, true);
 			// The fork clones the transcript and keeps this recovery state running

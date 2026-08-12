@@ -534,6 +534,24 @@ describe("AgentSession extension deliverAs aside", () => {
 		).toBe(false);
 	});
 
+	it("preserves pending asides when fork returns false without persisting (case 9e)", async () => {
+		const { session: parked, streamStarted } = await createParkedSession();
+		const running = parked.prompt("do work");
+		await streamStarted;
+
+		await parked.sendCustomMessage(asidePayload("survive failed fork"), { deliverAs: "aside" });
+		expect(parked.agent.state.messages.filter(isExtensionAside)).toEqual([]);
+
+		expect(await parked.fork()).toBe(false);
+
+		const drained = await drainExtensionAsides();
+		expect(drained.map(message => asideContent(message))).toEqual(["survive failed fork"]);
+
+		await parked.abort();
+		await parked.waitForIdle();
+		await running.catch(() => {});
+	});
+
 	it("drops pending asides on switchSession without flushing into the target transcript (case 9b)", async () => {
 		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
