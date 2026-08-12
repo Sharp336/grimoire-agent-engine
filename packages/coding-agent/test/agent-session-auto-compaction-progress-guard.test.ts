@@ -117,6 +117,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 			}),
 			modelRegistry,
 			extensionRunner,
+			agentKind: "sub",
 		});
 	});
 
@@ -370,7 +371,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 		expect(noProgress.length).toBe(1);
 	});
 
-	it("drains queued messages when no-op threshold compaction pauses automatic maintenance", async () => {
+	it("keeps queued messages gated when no-op threshold compaction creates no headroom", async () => {
 		session.agent.followUp({
 			role: "custom",
 			customType: "test",
@@ -379,9 +380,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 			timestamp: Date.now(),
 		});
 
-		const continueSpy = vi.spyOn(session.agent, "continue").mockImplementation(async () => {
-			session.agent.clearAllQueues();
-		});
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
 		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
 		vi.spyOn(compactionModule, "prepareCompaction").mockReturnValue(undefined);
 
@@ -400,8 +399,8 @@ describe("AgentSession auto-compaction progress guard", () => {
 		await session.waitForIdle();
 
 		expect(promptSpy).not.toHaveBeenCalled();
-		expect(continueSpy).toHaveBeenCalledTimes(1);
-		expect(session.agent.hasQueuedMessages()).toBe(false);
+		expect(continueSpy).not.toHaveBeenCalled();
+		expect(session.agent.hasQueuedMessages()).toBe(true);
 		const noProgress = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes(NO_PROGRESS_FRAGMENT));
 		expect(noProgress.length).toBe(1);
 	});
@@ -455,6 +454,37 @@ describe("AgentSession auto-compaction progress guard", () => {
 		expect(promptSpy).toHaveBeenCalledTimes(1);
 		const noProgress = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes(NO_PROGRESS_FRAGMENT));
 		expect(noProgress.length).toBe(0);
+	});
+
+	it("uses the child ceiling for post-compaction headroom", async () => {
+		activateOngoingGoal("child-headroom");
+		session.settings.set("task.childContextBudgetTokens", 100_000);
+		session.settings.set("compaction.thresholdTokens", 150_000);
+		session.settings.set("compaction.thresholdPercent", -1);
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+		// Below the configured 150k threshold's 120k recovery band, but above
+		// the child ceiling's 80k recovery band.
+		vi.spyOn(session, "getContextUsage").mockReturnValue({ tokens: 90_000, contextWindow: 200_000, percent: 45 });
+
+		const notices = collectNotices();
+		const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_end") onCompactionDone();
+		});
+
+		const assistantMsg = highUsageAssistant();
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await compactionDone;
+		await session.waitForIdle();
+
+		expect(promptSpy).not.toHaveBeenCalled();
+		expect(continueSpy).not.toHaveBeenCalled();
+		expect(notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes(NO_PROGRESS_FRAGMENT))).toHaveLength(
+			1,
+		);
 	});
 
 	it("rebases the in-flight prompt snapshot so mid-run compaction is not misread as a dead-end", async () => {
@@ -751,10 +781,10 @@ describe("AgentSession auto-compaction progress guard", () => {
 		);
 	});
 
-	it("restores the persisted overflow error before draining queued no-op recovery", async () => {
-		// A queued user turn still deserves a follow-up, but no-op recovery has not
-		// written a compaction summary. Restore the failed assistant before the queue
-		// drains so the transcript keeps the reason recovery stopped.
+	it("restores the persisted overflow error while queued no-op recovery remains parked", async () => {
+		// No-op recovery has not created child-clamped headroom. Restore the failed
+		// assistant for transcript fidelity, but leave the queued turn parked so its
+		// eventual delivery re-enters the pre-prompt child budget gate.
 		session.agent.followUp({
 			role: "custom",
 			customType: "test",
@@ -796,8 +826,8 @@ describe("AgentSession auto-compaction progress guard", () => {
 		await session.waitForIdle();
 
 		expect(promptSpy).not.toHaveBeenCalled();
-		expect(continueSpy).toHaveBeenCalledTimes(1);
-		expect(session.agent.hasQueuedMessages()).toBe(false);
+		expect(continueSpy).not.toHaveBeenCalled();
+		expect(session.agent.hasQueuedMessages()).toBe(true);
 		expect(sessionManager.getBranch()).toContainEqual(
 			expect.objectContaining({
 				type: "message",

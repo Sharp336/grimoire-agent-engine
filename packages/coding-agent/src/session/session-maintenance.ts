@@ -184,6 +184,7 @@ export interface SessionMaintenanceHost {
 	providerSessionState: Map<string, ProviderSessionState>;
 	preferWebsockets: boolean | undefined;
 	model(): Model | undefined;
+	agentKind(): "main" | "sub";
 	thinkingLevel(): ThinkingLevel | undefined;
 	isDisposed(): boolean;
 	isStreaming(): boolean;
@@ -298,6 +299,25 @@ export class SessionMaintenance {
 
 	constructor(host: SessionMaintenanceHost) {
 		this.#host = host;
+	}
+
+	#childContextBudget(): number {
+		if (this.#host.agentKind() !== "sub") return 0;
+		const configuredBudget = Number(this.#host.settings.get("task.childContextBudgetTokens") ?? 0);
+		return Number.isFinite(configuredBudget) ? Math.max(0, Math.trunc(configuredBudget)) : 0;
+	}
+
+	#withChildContextBudget(contextWindow: number, settings: CompactionSettings): CompactionSettings {
+		const childContextBudget = this.#childContextBudget();
+		if (childContextBudget <= 0 || resolveThresholdTokens(contextWindow, settings) <= childContextBudget) {
+			return settings;
+		}
+		return { ...settings, thresholdTokens: childContextBudget };
+	}
+
+	#exceedsChildContextBudget(contextTokens: number): boolean {
+		const childContextBudget = this.#childContextBudget();
+		return childContextBudget > 0 && contextTokens > childContextBudget;
 	}
 
 	/** Whether manual or automatic context maintenance is active. */
@@ -1014,7 +1034,10 @@ export class SessionMaintenance {
 		if (!model) return;
 		const contextWindow = model.contextWindow ?? 0;
 		if (contextWindow <= 0) return;
-		const compactionSettings = this.#host.settings.getGroup("compaction");
+		const compactionSettings = this.#withChildContextBudget(
+			contextWindow,
+			this.#host.settings.getGroup("compaction"),
+		);
 		const contextTokens = this.#estimatePrePromptContextTokens(messages, contextWindow);
 		const pendingMidTurnDeadEnd = this.#midTurnDeadEndPendingPrePrompt;
 		this.#midTurnDeadEndPendingPrePrompt = false;
@@ -1029,11 +1052,10 @@ export class SessionMaintenance {
 			return;
 		}
 
-		// Auto-promote first: switching to a larger-context model avoids compacting
-		// the history at all. The post-turn threshold path already promotes before
-		// compacting; without this, the pre-prompt path would pre-empt promotion and
-		// compact (snapcompact/summary) a session that should have just been promoted.
-		if (await this.#promoteContextModel()) {
+		// Auto-promote first unless this child is already above its explicit
+		// budget: promotion would preserve the oversized history and bypass the
+		// configured ceiling.
+		if (!this.#exceedsChildContextBudget(contextTokens) && (await this.#promoteContextModel())) {
 			logger.debug("Pre-prompt context promotion avoided compaction", {
 				contextTokens,
 				contextWindow,
@@ -1083,7 +1105,10 @@ export class SessionMaintenance {
 		const contextWindow = model?.contextWindow ?? 0;
 		if (contextWindow <= 0) return;
 
-		const compactionSettings = this.#host.settings.getGroup("compaction");
+		const compactionSettings = this.#withChildContextBudget(
+			contextWindow,
+			this.#host.settings.getGroup("compaction"),
+		);
 		if (
 			!compactionSettings.enabled ||
 			compactionSettings.strategy === "off" ||
@@ -1123,13 +1148,9 @@ export class SessionMaintenance {
 		const contextTokens = compactionContextTokens(billedContextTokens, storedContextTokens);
 		if (!shouldCompact(contextTokens, contextWindow, compactionSettings)) return;
 
-		// Promote to a larger-context sibling before compacting, mirroring the
-		// pre-prompt (runPrePromptCompactionIfNeeded) and post-turn threshold
-		// (checkCompaction) paths. Without this, a long mid-turn tool loop that
-		// crosses the threshold compacts the history (and can hit the no-progress
-		// dead-end on a single oversized turn) on a model that should have just
-		// been promoted to a larger window instead.
-		if (await this.#promoteContextModel()) {
+		// Promote before ordinary threshold compaction. Once a child exceeds its
+		// explicit budget, compact instead because promotion preserves that history.
+		if (!this.#exceedsChildContextBudget(contextTokens) && (await this.#promoteContextModel())) {
 			logger.debug("Mid-run context promotion avoided compaction", {
 				contextTokens,
 				contextWindow,
@@ -1330,7 +1351,8 @@ export class SessionMaintenance {
 		// setting.
 		const supersedeResult = await this.#pruneStaleToolResults();
 
-		const compactionSettings = this.#host.settings.getGroup("compaction");
+		const configuredCompactionSettings = this.#host.settings.getGroup("compaction");
+		const compactionSettings = this.#withChildContextBudget(contextWindow, configuredCompactionSettings);
 		if (!compactionSettings.enabled || compactionSettings.strategy === "off") return COMPACTION_CHECK_NONE;
 
 		// Case 4: Threshold - turn succeeded but context is getting large
@@ -1370,7 +1392,12 @@ export class SessionMaintenance {
 			storedContextTokens,
 		);
 		const thresholdTokens = resolveThresholdTokens(contextWindow, compactionSettings);
-		const shouldThresholdCompact = shouldCompact(contextTokens, contextWindow, compactionSettings);
+		// Preserve the configured threshold's provider-anchored trigger (#3174),
+		// but apply the child ceiling to the next prompt after pruning. Otherwise
+		// bytes already removed can cause a child-only destructive compaction.
+		const shouldThresholdCompact =
+			shouldCompact(contextTokens, contextWindow, configuredCompactionSettings) ||
+			(compactionSettings.enabled && this.#exceedsChildContextBudget(postMaintenanceContextTokens));
 		logger.debug("Auto-compaction threshold decision", {
 			phase: "post-agent-end",
 			goalModeEnabled: this.#goalModeState?.enabled === true,
@@ -1389,8 +1416,11 @@ export class SessionMaintenance {
 			contextPromotionEnabled: this.#host.settings.get("contextPromotion.enabled") === true,
 		});
 		if (shouldThresholdCompact) {
-			// Try promotion first — if a larger model is available, switch instead of compacting
-			const promoted = await this.#tryContextPromotion(assistantMessage);
+			// Promote at an inherited threshold while the child remains within its
+			// budget; compact once the explicit child ceiling is exceeded.
+			const promoted = this.#exceedsChildContextBudget(postMaintenanceContextTokens)
+				? false
+				: await this.#tryContextPromotion(assistantMessage);
 			if (!promoted) {
 				return await this.runAutoCompaction("threshold", false, false, allowDefer, {
 					autoContinue,
@@ -1795,10 +1825,11 @@ export class SessionMaintenance {
 	 * When the model/window is unknown we cannot evaluate the band, so we
 	 * optimistically allow the continuation (preserving prior behavior).
 	 */
-	#compactionCreatedHeadroom(): boolean {
+	#compactionCreatedHeadroom(
+		compactionSettings: CompactionSettings = this.#host.settings.getGroup("compaction"),
+	): boolean {
 		const contextWindow = this.#model?.contextWindow ?? 0;
 		if (contextWindow <= 0) return true;
-		const compactionSettings = this.#host.settings.getGroup("compaction");
 		const residualTokens = compactionContextTokens(
 			this.#host.getContextUsage({ contextWindow })?.tokens ?? 0,
 			this.#estimateStoredContextTokens(),
@@ -2144,7 +2175,12 @@ export class SessionMaintenance {
 			terminalTextAnswer?: boolean;
 		} = {},
 	): Promise<CompactionCheckResult> {
-		const compactionSettings = this.#host.settings.getGroup("compaction");
+		const configuredCompactionSettings = this.#host.settings.getGroup("compaction");
+		const contextWindow = this.#model?.contextWindow ?? 0;
+		const compactionSettings =
+			reason === "threshold" && contextWindow > 0
+				? this.#withChildContextBudget(contextWindow, configuredCompactionSettings)
+				: configuredCompactionSettings;
 		if (compactionSettings.strategy === "off") return COMPACTION_CHECK_NONE;
 		if (reason !== "idle" && !compactionSettings.enabled) return COMPACTION_CHECK_NONE;
 		const generation = this.#host.promptGeneration();
@@ -2165,6 +2201,7 @@ export class SessionMaintenance {
 				generation,
 				shouldAutoContinue,
 				terminalTextAnswer,
+				compactionSettings,
 				options.triggerContextTokens,
 				suppressContinuation,
 			);
@@ -2347,7 +2384,7 @@ export class SessionMaintenance {
 					if (frameRescueResult) {
 						rescueRewroteHistory = true;
 						pathEntriesForCompaction = this.#host.sessionManager.getBranch();
-						frameRescueCreatedHeadroom = this.#compactionCreatedHeadroom();
+						frameRescueCreatedHeadroom = this.#compactionCreatedHeadroom(compactionSettings);
 					}
 					if (!frameRescueCreatedHeadroom) {
 						await this.#rescueCompactionDeadEnd(autoCompactionSignal, {
@@ -2396,6 +2433,9 @@ export class SessionMaintenance {
 						skipped: frameRescueResult === undefined,
 					});
 					let continuationScheduled = false;
+					// Queued messages must remain parked when the child-clamped
+					// recovery band was not reached. Routing them through
+					// agent.continue() here would bypass the pre-prompt child budget gate.
 					if (frameRescueCreatedHeadroom) {
 						continuationScheduled = this.#host.scheduleCompactionContinuation({
 							generation,
@@ -2403,13 +2443,6 @@ export class SessionMaintenance {
 							terminalTextAnswer,
 							suppressContinuation,
 						});
-					} else if (!suppressContinuation && this.#host.agent.hasQueuedMessages()) {
-						this.#host.scheduleAgentContinue({
-							delayMs: 100,
-							generation,
-							shouldContinue: () => this.#host.agent.hasQueuedMessages(),
-						});
-						continuationScheduled = true;
 					}
 					if (deadEndWarning) {
 						this.#host.emitNotice("warning", deadEndWarning, "compaction");
@@ -2856,11 +2889,11 @@ export class SessionMaintenance {
 				// when auto-continue is disabled, a no-headroom threshold pass must still
 				// block later automatic continuations (todo reminders/session_stop hooks)
 				// from re-entering the same oversized context.
-				hasHeadroom = this.#compactionCreatedHeadroom();
+				hasHeadroom = this.#compactionCreatedHeadroom(compactionSettings);
 				if (!hasHeadroom) {
 					hasHeadroom = await this.#rescueCompactionDeadEnd(autoCompactionSignal, {
 						skipElide: fallbackFromShake,
-						hasProgress: () => this.#compactionCreatedHeadroom(),
+						hasProgress: () => this.#compactionCreatedHeadroom(compactionSettings),
 					});
 				}
 				if (!hasHeadroom) {
@@ -2951,6 +2984,7 @@ export class SessionMaintenance {
 		generation: number,
 		autoContinue: boolean,
 		terminalTextAnswer: boolean,
+		compactionSettings: CompactionSettings,
 		triggerContextTokens?: number,
 		suppressContinuation = false,
 	): Promise<CompactionCheckResult | "fallback"> {
@@ -2994,7 +3028,6 @@ export class SessionMaintenance {
 			// without that pre-shake savings, shake can fall through to context-full
 			// even though the post-prune history is already inside the recovery band.
 			const contextWindow = this.#model?.contextWindow ?? 0;
-			const compactionSettings = this.#host.settings.getGroup("compaction");
 			let stillOverThreshold = false;
 			if (contextWindow > 0) {
 				if (typeof triggerContextTokens === "number" && Number.isFinite(triggerContextTokens)) {
