@@ -2142,6 +2142,8 @@ export class SessionManager {
 		restrictToolNames?: boolean;
 		spawns?: string;
 		readSummarize?: boolean;
+		serviceTierOverride?: string;
+		parentServiceTier?: ServiceTierByFamily;
 	}): string {
 		const entry: SessionInitEntry = { type: "session_init", ...this.#freshEntryFields(), ...init };
 		this.#recordEntry(entry);
@@ -2634,6 +2636,8 @@ export class SessionManager {
 			restrictToolNames?: boolean;
 			spawns?: string;
 			readSummarize?: boolean;
+			serviceTierOverride?: string;
+			parentServiceTier?: ServiceTierByFamily;
 		} | null;
 	} | null> {
 		let loaded: FileEntry[];
@@ -2657,6 +2661,8 @@ export class SessionManager {
 			restrictToolNames?: boolean;
 			spawns?: string;
 			readSummarize?: boolean;
+			serviceTierOverride?: string;
+			parentServiceTier?: ServiceTierByFamily;
 		} | null = null;
 		for (let index = loaded.length - 1; index >= 0; index--) {
 			const entry = loaded[index];
@@ -2672,6 +2678,8 @@ export class SessionManager {
 					outputSchemaMode: entry.outputSchemaMode,
 					restrictToolNames: entry.restrictToolNames,
 					readSummarize: entry.readSummarize,
+					serviceTierOverride: entry.serviceTierOverride,
+					parentServiceTier: entry.parentServiceTier,
 					spawns: entry.spawns,
 				};
 				break;

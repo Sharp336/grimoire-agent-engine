@@ -22,7 +22,13 @@ import {
 	resolveModelOverrideWithAuthFallback,
 } from "../config/model-resolver";
 import type { PromptTemplate } from "../config/prompt-templates";
-import { buildServiceTierByFamily, resolveSubagentServiceTier } from "../config/service-tier";
+import {
+	buildServiceTierByFamily,
+	isServiceTierInheritSettingValue,
+	resolveAgentServiceTierSetting,
+	resolveSubagentServiceTier,
+	type ServiceTierInheritSettingValue,
+} from "../config/service-tier";
 import { Settings } from "../config/settings";
 import { SETTINGS_SCHEMA, type SettingPath } from "../config/settings-schema";
 import type { ToolPathWithSource } from "../extensibility/custom-tools";
@@ -860,15 +866,15 @@ export function createSubagentSettings(
 	baseSettings: Settings,
 	overrides?: Partial<Record<SettingPath, unknown>>,
 	inheritedServiceTier?: ServiceTierByFamily | null,
+	serviceTierSetting: ServiceTierInheritSettingValue = baseSettings.get("tier.subagent"),
 ): Settings {
 	const snapshot: Partial<Record<SettingPath, unknown>> = {};
 	for (const key of Object.keys(SETTINGS_SCHEMA) as SettingPath[]) {
 		snapshot[key] = baseSettings.get(key);
 	}
-	// Resolve the subagent's per-family tiers from `tier.subagent` ("inherit" =
-	// match the parent's live tiers when a live session supplied them, else the
-	// subagent's own configured tier.* settings). The result is stamped back onto
-	// the snapshot so createAgentSession's tier.* reads pick it up.
+	// Resolve the selected subagent tier. It normally comes from
+	// `tier.subagent`, while a per-agent setting can be supplied by the task
+	// executor. `"inherit"` matches the parent's live tiers when available.
 	const inheritedTiers =
 		inheritedServiceTier === undefined
 			? buildServiceTierByFamily(
@@ -877,7 +883,7 @@ export function createSubagentSettings(
 					baseSettings.get("tier.google"),
 				)
 			: (inheritedServiceTier ?? {});
-	const subagentTiers = resolveSubagentServiceTier(baseSettings.get("tier.subagent"), inheritedTiers);
+	const subagentTiers = resolveSubagentServiceTier(serviceTierSetting, inheritedTiers);
 	snapshot["tier.openai"] = subagentTiers.openai ?? "none";
 	snapshot["tier.anthropic"] = subagentTiers.anthropic ?? "none";
 	snapshot["tier.google"] = subagentTiers.google ?? "none";
@@ -2690,6 +2696,24 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	}
 
 	const settings = options.settings ?? Settings.isolated();
+	const serviceTierOverrides = settings.get("task.agentServiceTierOverrides");
+	const configuredServiceTierOverride = serviceTierOverrides[agent.name];
+	const serviceTierOverride = isServiceTierInheritSettingValue(configuredServiceTierOverride)
+		? configuredServiceTierOverride
+		: undefined;
+	const serviceTierSetting = resolveAgentServiceTierSetting(
+		agent.name,
+		serviceTierOverrides,
+		settings.get("tier.subagent"),
+	);
+	const parentServiceTier =
+		options.parentServiceTier === undefined
+			? buildServiceTierByFamily(
+					settings.get("tier.openai"),
+					settings.get("tier.anthropic"),
+					settings.get("tier.google"),
+				)
+			: { ...(options.parentServiceTier ?? {}) };
 	const subagentSettings = createSubagentSettings(
 		settings,
 		{
@@ -2697,7 +2721,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// Isolated runs must not expose roots outside the worktree.
 			...(worktree !== undefined ? { "workspace.additionalDirectories": [] } : undefined),
 		},
-		options.parentServiceTier,
+		parentServiceTier,
+		serviceTierSetting,
 	);
 	const maxRecursionDepth = settings.get("task.maxRecursionDepth") ?? 2;
 	const maxRuntimeMs = Math.max(
@@ -3197,6 +3222,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				readOnly: isReadOnlyAgent(agent),
 				spawns: spawnsEnv,
 				readSummarize: agent.readSummarize,
+				serviceTierOverride,
+				parentServiceTier: serviceTierOverride === "inherit" ? parentServiceTier : undefined,
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,
 				restrictToolNames: restrictToolNames || undefined,

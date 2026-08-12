@@ -325,6 +325,9 @@
 - Fixed heavily branched conversation trees shifting linear continuations into disconnected columns.
 - Fixed plugin installation validation failures for legacy compatibility shims.
 - Removed hard-coded references to disabled or absent agents in system and tool prompts.
+### Added
+
+- Added sparse `task.agentServiceTierOverrides` settings so selected task/eval agents can opt into `priority` fast mode while unlisted agents retain the existing `tier.subagent` fallback; explicit `inherit` overrides preserve the immediate parent's tiers across cold revival ([#7106](https://github.com/can1357/oh-my-pi/issues/7106)).
 
 ## [17.2.4] - 2026-08-01
 
