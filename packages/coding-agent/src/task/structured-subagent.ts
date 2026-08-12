@@ -18,6 +18,7 @@ import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.m
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { TaskEffort } from "../thinking";
 import type { ToolSession } from "../tools";
+import { isMCPToolName } from "../tools/builtin-names";
 import { isIrcEnabled } from "../tools/hub";
 import { buildOutputValidator } from "../tools/output-schema-validator";
 import { trackLateCleanup } from "../utils/late-cleanup";
@@ -384,10 +385,16 @@ function buildExecutorOptions(
 	};
 	const restrictToolNames = policy.planMode || session.restrictToolNames === true;
 	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
-	const parentHostTools = new Map((session.getRpcHostTools?.() ?? []).map(tool => [tool.name, tool]));
+	const parentHostTools = new Map(
+		(session.getRpcHostTools?.() ?? [])
+			.filter(tool => enableMCP || !isMCPToolName(tool.name))
+			.map(tool => [tool.name, tool]),
+	);
 	if (!restrictToolNames) {
 		for (const name of session.getMountedXdevToolNames?.() ?? []) {
-			if (session.hasBuiltInTool?.(name) || parentHostTools.has(name)) continue;
+			if ((!enableMCP && isMCPToolName(name)) || session.hasBuiltInTool?.(name) || parentHostTools.has(name)) {
+				continue;
+			}
 			const tool = session.getToolByName?.(name);
 			if (tool) parentHostTools.set(name, tool);
 		}

@@ -47,7 +47,11 @@ interface RevivedSessionHandle {
 	observer: () => IrcWakeObserver | undefined;
 }
 
-function createRevivedSession(activeToolNames: string[][], refreshedHostTools: string[][] = []): RevivedSessionHandle {
+function createRevivedSession(
+	activeToolNames: string[][],
+	refreshedHostTools: string[][] = [],
+	mountedToolNames: string[][] = [],
+): RevivedSessionHandle {
 	let observer: IrcWakeObserver | undefined;
 	const session = {
 		getMountedXdevToolNames: () => [],
@@ -55,8 +59,9 @@ function createRevivedSession(activeToolNames: string[][], refreshedHostTools: s
 			refreshedHostTools.push(tools.map(tool => tool.name));
 		},
 		getToolByName: () => undefined,
-		setActiveToolsByName: async (names: string[]) => {
+		setActiveToolPresentation: async (names: string[], mountedNames: string[]) => {
 			activeToolNames.push(names);
+			mountedToolNames.push(mountedNames);
 		},
 		subscribe: (_listener: (event: AgentSessionEvent) => void) => () => {},
 		setIrcWakeTurnObserver: (next: IrcWakeObserver | undefined) => {
@@ -67,7 +72,13 @@ function createRevivedSession(activeToolNames: string[][], refreshedHostTools: s
 	return { session, observer: () => observer };
 }
 
-async function createPersistedSession(cwd: string, restrictToolNames?: boolean, modelRole?: string): Promise<string> {
+async function createPersistedSession(
+	cwd: string,
+	restrictToolNames?: boolean,
+	modelRole?: string,
+	mountedTools: string[] = [],
+	enableMCP?: boolean,
+): Promise<string> {
 	const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
 	const sessionFile = manager.getSessionFile();
 	if (!sessionFile) throw new Error("Expected a persisted session file");
@@ -75,7 +86,9 @@ async function createPersistedSession(cwd: string, restrictToolNames?: boolean, 
 		systemPrompt: "persisted prompt",
 		task: "persisted task",
 		tools: ["read", "yield"],
+		mountedTools,
 		restrictToolNames,
+		enableMCP,
 		modelRole,
 		resolvedModel: modelRole ? "anthropic/claude-sonnet-4-5" : undefined,
 	});
@@ -105,6 +118,7 @@ function createFactory(
 	eventBus?: EventBus,
 	mountedTools: AgentTool[] = [],
 	rpcHostTools: AgentTool[] = [],
+	registeredTools: AgentTool[] = mountedTools,
 ) {
 	const parentSession = {
 		sessionManager: {
@@ -112,9 +126,9 @@ function createFactory(
 			getArtifactManager: () => undefined,
 		},
 		getMountedXdevToolNames: () => mountedTools.map(tool => tool.name),
-		getToolByName: (name: string) => mountedTools.find(tool => tool.name === name),
+		getToolByName: (name: string) => registeredTools.find(tool => tool.name === name),
 		getRpcHostTools: () => rpcHostTools,
-		hasBuiltInTool: (name: string) => name === "read" || name === "bash",
+		hasBuiltInTool: (name: string) => name === "read" || name === "bash" || name === "browser",
 		get sessionFile() {
 			return path.join(cwd, "parent.jsonl");
 		},
@@ -173,25 +187,33 @@ describe("persisted subagent revival", () => {
 
 	it("preserves normal revival capability wiring for contracts without the marker", async () => {
 		const cwd = makeTempDir("@pi-normal-revive-");
-		const sessionFile = await createPersistedSession(cwd);
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, ["ida_execute_python", "browser"]);
 		const hostileMcp = {
 			getTools: () => [{ name: "mcp__server_read", label: "server/read" }],
 		} as unknown as MCPManager;
 		MCPManager.setInstance(hostileMcp);
 		const hostTool = { name: "ida_execute_python" } as AgentTool;
+		const laterHostTool = { name: "later_host_tool" } as AgentTool;
 		const builtInTool = { name: "bash" } as AgentTool;
+		const mountedBuiltInTool = { name: "browser" } as AgentTool;
 		const activeToolNames: string[][] = [];
+		const mountedToolNames: string[][] = [];
 		const refreshedHostTools: string[][] = [];
 		let capturedOptions: CreateAgentSessionOptions | undefined;
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
 			capturedOptions = options;
 			return {
-				session: createRevivedSession(activeToolNames, refreshedHostTools).session,
+				session: createRevivedSession(activeToolNames, refreshedHostTools, mountedToolNames).session,
 			} as CreateAgentSessionResult;
 		});
 
 		const ref = createRef(sessionFile);
-		const reviver = await createFactory(cwd, undefined, [hostTool, builtInTool], [hostTool])(ref);
+		const reviver = await createFactory(
+			cwd,
+			undefined,
+			[hostTool, laterHostTool, builtInTool, mountedBuiltInTool],
+			[hostTool, laterHostTool],
+		)(ref);
 		if (!reviver) throw new Error("Expected a persisted reviver");
 		await reviver(ref);
 
@@ -199,8 +221,70 @@ describe("persisted subagent revival", () => {
 		expect(capturedOptions?.enableLsp).toBe(true);
 		expect(capturedOptions?.mcpManager).toBe(hostileMcp);
 		expect(capturedOptions?.customTools?.map(tool => tool.name)).toEqual(["mcp__server_read"]);
+		expect(capturedOptions?.toolNames).toEqual(["read", "yield", "ida_execute_python", "browser"]);
+		expect(refreshedHostTools).toEqual([["ida_execute_python"]]);
+		expect(activeToolNames).toEqual([["read", "yield", "ida_execute_python", "browser"]]);
+		expect(mountedToolNames).toEqual([["ida_execute_python", "browser"]]);
+	});
+
+	it("keeps MCP disabled while restoring non-MCP mounted tools", async () => {
+		const cwd = makeTempDir("@pi-mcp-disabled-revive-");
+		const sessionFile = await createPersistedSession(
+			cwd,
+			undefined,
+			undefined,
+			["mcp__server_read", "ida_execute_python"],
+			false,
+		);
+		const mcpGetTools = vi.fn(() => [{ name: "mcp__server_read" }]);
+		MCPManager.setInstance({ getTools: mcpGetTools } as unknown as MCPManager);
+		const mcpTool = { name: "mcp__server_read" } as AgentTool;
+		const hostTool = { name: "ida_execute_python" } as AgentTool;
+		const activeToolNames: string[][] = [];
+		const mountedToolNames: string[][] = [];
+		const refreshedHostTools: string[][] = [];
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return {
+				session: createRevivedSession(activeToolNames, refreshedHostTools, mountedToolNames).session,
+			} as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd, undefined, [mcpTool, hostTool], [mcpTool, hostTool])(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(capturedOptions?.enableMCP).toBe(false);
+		expect(capturedOptions?.mcpManager).toBeUndefined();
+		expect(capturedOptions?.customTools).toBeUndefined();
+		expect(capturedOptions?.toolNames).toEqual(["read", "yield", "ida_execute_python"]);
+		expect(mcpGetTools).not.toHaveBeenCalled();
 		expect(refreshedHostTools).toEqual([["ida_execute_python"]]);
 		expect(activeToolNames).toEqual([["read", "yield", "ida_execute_python"]]);
+		expect(mountedToolNames).toEqual([["ida_execute_python"]]);
+	});
+
+	it("does not restore a mounted snapshot from a same-name unmounted parent tool", async () => {
+		const cwd = makeTempDir("@pi-mounted-source-revive-");
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, ["ida_execute_python"]);
+		const sameNameTool = { name: "ida_execute_python" } as AgentTool;
+		const activeToolNames: string[][] = [];
+		const mountedToolNames: string[][] = [];
+		const refreshedHostTools: string[][] = [];
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
+			session: createRevivedSession(activeToolNames, refreshedHostTools, mountedToolNames).session,
+		} as CreateAgentSessionResult);
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd, undefined, [], [], [sameNameTool])(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(refreshedHostTools).toEqual([]);
+		expect(activeToolNames).toEqual([["read", "yield", "ida_execute_python"]]);
+		expect(mountedToolNames).toEqual([["ida_execute_python"]]);
 	});
 
 	it("restores the persisted custom model role before reopening the session", async () => {

@@ -37,6 +37,7 @@ function createMockSession(
 		sessionManager: { appendSessionInit: () => {} },
 		getActiveToolNames: () => ["read", "yield"],
 		getEnabledToolNames: () => ["read", "yield"],
+		getMountedXdevToolNames: () => [],
 		setActiveToolsByName: async (_toolNames: string[]) => {},
 		getToolByName: () => undefined,
 		refreshRpcHostTools: async (tools: AgentTool[]) => {
@@ -230,6 +231,12 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 	it("retains inherited MCP proxy tools for normal children", async () => {
 		const refreshedHostTools: string[][] = [];
 		const session = yieldEmittingSession(refreshedHostTools);
+		session.getMountedXdevToolNames = () => ["ida_execute_python"];
+		const persistedInits: Array<{ mountedTools?: string[] }> = [];
+		vi.spyOn(session.sessionManager, "appendSessionInit").mockImplementation(init => {
+			persistedInits.push(init);
+			return "session-init";
+		});
 		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
 		const mcpManager = {
 			getTools: () => [{ name: "mcp__private_read", label: "private/read" }],
@@ -250,6 +257,7 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(forwarded?.customTools?.map(tool => tool.name)).toEqual(["mcp__private_read"]);
 		expect(forwarded?.toolNames).toBeUndefined();
 		expect(refreshedHostTools).toEqual([["ida_execute_python"]]);
+		expect(persistedInits).toEqual([expect.objectContaining({ mountedTools: ["ida_execute_python"] })]);
 	});
 
 	it("preserves the legacy result shape when no output schema is selected", async () => {

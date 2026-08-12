@@ -209,6 +209,10 @@ export interface SessionInitEntry extends SessionEntryBase {
 	task: string;
 	/** Tools available to the agent */
 	tools: string[];
+	/** Tools mounted under `xd://` when the subagent session started. */
+	mountedTools?: string[];
+	/** Whether MCP capabilities were enabled for this subagent. */
+	enableMCP?: boolean;
 	/** Agent definition name (for example `scout` or `reviewer`). */
 	agent?: string;
 	/** Semantic model role declared by the agent, retained even after concrete model resolution. */

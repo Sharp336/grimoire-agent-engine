@@ -61,6 +61,8 @@ function createCloneStub(overrides?: {
 		agent: { appendMessage },
 		sessionManager: overrides?.sessionManager,
 		setTodoPhases: vi.fn(),
+		getActiveToolNames: () => ["read", "bash"],
+		getMountedXdevToolNames: () => [],
 		subscribe: vi.fn((l: (event: TanSessionEvent) => void) => {
 			listener = l;
 			return () => {
@@ -377,6 +379,7 @@ describe("TanCommandController", () => {
 			systemPrompt: "system prompt",
 			task: "park me",
 			tools: ["read", "bash"],
+			mountedTools: [],
 		});
 		// Parked (not unregistered) before dispose, then the disposed session is nulled
 		// out — the hub keeps the ref and reads its transcript from the session file.

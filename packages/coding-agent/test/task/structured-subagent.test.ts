@@ -437,7 +437,15 @@ describe("structured subagent primitive", () => {
 		const nonPlanSession = session();
 		Object.assign(nonPlanSession, { mcpManager, extensionPaths, customToolPaths });
 		const mcpDisabledSession = session();
-		mcpDisabledSession.enableMCP = false;
+		const disabledMcpTool = { name: "mcp__server_read" } as AgentTool;
+		const enabledHostTool = { name: "ida_execute_python" } as AgentTool;
+		Object.assign(mcpDisabledSession, {
+			enableMCP: false,
+			getRpcHostTools: () => [disabledMcpTool, enabledHostTool],
+			getMountedXdevToolNames: () => [disabledMcpTool.name, enabledHostTool.name],
+			hasBuiltInTool: () => false,
+			getToolByName: (name: string) => [disabledMcpTool, enabledHostTool].find(tool => tool.name === name),
+		});
 		const restrictedSession = session();
 		const getApiKey = async () => "exact-account-key";
 		Object.assign(restrictedSession, {
@@ -476,6 +484,7 @@ describe("structured subagent primitive", () => {
 		expect(options[1]?.restrictToolNames).toBe(false);
 		expect(options[2]).toMatchObject({ enableMCP: false });
 		expect(options[2]?.mcpManager).toBeUndefined();
+		expect(options[2]?.parentHostTools).toEqual([enabledHostTool]);
 		expect(options[3]).toMatchObject({
 			enableMCP: false,
 			restrictToolNames: true,
