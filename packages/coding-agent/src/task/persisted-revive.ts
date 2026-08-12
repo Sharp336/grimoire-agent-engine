@@ -148,7 +148,10 @@ export function createPersistedSubagentReviverFactory(
 			// could park the agent mid-run.
 			session.subscribe(event => {
 				if (event.type === "agent_start") registry.setStatus(ref.id, "running", session);
-				else if (event.type === "agent_end") registry.setStatus(ref.id, "idle", session);
+				else if (event.type === "agent_end") {
+					const current = registry.get(ref.id);
+					if (current?.status !== "aborted") registry.setStatus(ref.id, "idle", session);
+				}
 			});
 			// Persisted files predate an agent-source field, so cold-revived frames
 			// report the runtime-neutral `user` source; name comes from the ref.

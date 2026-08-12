@@ -275,10 +275,8 @@ function installSubagentRetryFallbackChain(args: {
 	return role;
 }
 
-function renderIrcPeerRoster(selfId: string): string {
-	const peers = AgentRegistry.global()
-		.list()
-		.filter(ref => ref.id !== selfId && ref.status !== "aborted" && ref.kind !== "advisor");
+function renderIrcPeerRoster(selfId: string, registry: AgentRegistry): string {
+	const peers = registry.list().filter(ref => ref.id !== selfId && ref.status !== "aborted" && ref.kind !== "advisor");
 	if (peers.length === 0) return "- (no other agents)";
 	const lines = peers.map(
 		peer =>
@@ -476,6 +474,8 @@ export interface ExecutorOptions {
 	 * transition explicitly.
 	 */
 	parentTelemetry?: AgentTelemetryConfig;
+	/** Exact registry owned by the spawning session. Defaults to the process-global registry. */
+	agentRegistry?: AgentRegistry;
 	/** Skills to autoload via sendCustomMessage before the first prompt */
 	autoloadSkills?: Skill[];
 	/**
@@ -2596,6 +2596,10 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	}
 
 	monitor.setActiveSession(session);
+	const untrackRun = AgentLifecycleManager.global().trackRun(id, session, async () => {
+		monitor.requestAbort("signal");
+		await monitor.waitForActiveSessionAbort();
+	});
 	const unsubscribe = monitor.attach(session);
 	let outcome: DriveOutcome;
 	try {
@@ -2610,6 +2614,8 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		const active = monitor.takeActiveSession();
 		if (active) monitor.captureSalvage(active);
 		monitor.finish();
+		await AgentLifecycleManager.global().waitForTermination(id, session);
+		untrackRun();
 	}
 
 	return finalizeRunResult({
@@ -2682,6 +2688,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			abortReason: "Cancelled before start",
 		};
 	}
+
+	const agentRegistry = options.agentRegistry ?? AgentRegistry.global();
+	const expectedParentAgentRef =
+		options.parentAgentId === undefined ? undefined : (agentRegistry.get(options.parentAgentId) ?? null);
 
 	// Set up artifact paths and write input file upfront if artifacts dir provided
 	let subtaskSessionFile: string | undefined;
@@ -2780,6 +2790,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	});
 	const progress = monitor.progress;
 	let unsubscribe: (() => void) | null = null;
+	let untrackRun: (() => void) | null = null;
 	let reviveSession: AgentReviver | null = null;
 	// Adopted (kept-alive) subagents flip registry status from session events on
 	// later turns: revive/wake → running, turn drained → idle. The subscription
@@ -2788,9 +2799,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	const installRegistryStatusSync = (target: AgentSession): void => {
 		target.subscribe(event => {
 			if (event.type === "agent_start") {
-				AgentRegistry.global().setStatus(id, "running", target);
+				agentRegistry.setStatus(id, "running", target);
 			} else if (event.type === "agent_end") {
-				AgentRegistry.global().setStatus(id, "idle", target);
+				const ref = agentRegistry.get(id);
+				if (ref?.status !== "aborted") agentRegistry.setStatus(id, "idle", target);
 			}
 		});
 	};
@@ -3087,7 +3099,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						worktree: worktree ?? "",
 						outputSchema: normalizedOutputSchema,
 						outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
-						ircPeers: ircEnabled ? renderIrcPeerRoster(id) : "",
+						ircPeers: ircEnabled ? renderIrcPeerRoster(id, agentRegistry) : "",
 						ircSelfId: ircEnabled ? id : "",
 					});
 					return defaultPrompt.length === 0
@@ -3106,6 +3118,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				agentId: id,
 				agentDisplayName: agent.name,
 				expectedAgentRef,
+				expectedParentAgentRef,
+				agentRegistry,
 				enableLsp: lspEnabled,
 				enableIrc: options.enableIrc,
 				skipPythonPreflight,
@@ -3140,6 +3154,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			sessionCreatedAt = performance.now();
 
 			monitor.setActiveSession(session);
+			untrackRun = AgentLifecycleManager.global().trackRun(id, session, async () => {
+				monitor.requestAbort("signal");
+				await monitor.waitForActiveSessionAbort();
+			});
 			installRegistryStatusSync(session);
 			if (sessionFile !== null && worktree === undefined) {
 				// Lifecycle reviver: park closed the JSONL writer, so reopening takes
@@ -3388,6 +3406,15 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					},
 				});
 			}
+			untrackRun?.();
+			untrackRun = null;
+			// Structured-concurrency reap: cancel and await ALL surviving owner
+			// jobs (abort paths; suppressed/watched jobs the model left behind)
+			// so isolation capture/cleanup never races a live process writing
+			// into the worktree. This never proceeds while an owner process is
+			// live: cancellation SIGKILL-escalates, so settlement is expected
+			// within one interval — an unkillable process blocks here visibly
+			// (with periodic warnings) instead of silently racing teardown.
 			if (jobManager) {
 				if (deferredSessionShutdown) {
 					const finalReap = Promise.allSettled([deferredSessionShutdown]).then(async () => {
