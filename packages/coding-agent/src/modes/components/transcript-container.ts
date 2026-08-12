@@ -433,8 +433,6 @@ export class TranscriptContainer
 			const previous = previousSegments[i];
 			const finalized = isBlockFinalized(child);
 			const commitAllowed = canCommitLiveBlock(child);
-			const inLiveRegion = i >= liveStartIndex;
-			const liveBoundary = !finalized || !commitAllowed;
 			const version = getBlockVersion(child);
 			const committedReusable =
 				previous !== undefined &&
