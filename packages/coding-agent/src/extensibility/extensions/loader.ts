@@ -359,7 +359,11 @@ async function loadExtension(
 	cwd: string,
 	eventBus: EventBus,
 	runtime: IExtensionRuntime,
-	requiredLoad?: { snapshots: Map<string, string>; required: true },
+	requiredLoad?: {
+		snapshots: Map<string, string>;
+		snapshotDigests?: ReadonlyMap<string, string>;
+		required: true;
+	},
 ): Promise<{ extension: Extension | null; error: string | null }> {
 	const resolvedPath = resolvePath(extensionPath, cwd);
 	try {
@@ -377,9 +381,19 @@ async function loadExtension(
 
 		const extension = createExtension(extensionPath, resolvedPath);
 		const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus);
-		await withHostGuard(async () => {
-			await factory(api);
-		});
+		const providerRegistrationCheckpoint = [...runtime.pendingProviderRegistrations];
+		try {
+			await withHostGuard(async () => {
+				await factory(api);
+			});
+		} catch (error) {
+			runtime.pendingProviderRegistrations.splice(
+				0,
+				runtime.pendingProviderRegistrations.length,
+				...providerRegistrationCheckpoint,
+			);
+			throw error;
+		}
 
 		return { extension, error: null };
 	} catch (err) {
@@ -400,8 +414,17 @@ export async function loadExtensionFromFactory(
 ): Promise<Extension> {
 	const extension = createExtension(name, name);
 	const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus);
-	await factory(api);
-	return extension;
+	const providerRegistrationCheckpoint = [...runtime.pendingProviderRegistrations];
+	try {
+		await factory(api);
+	} catch (error) {
+		runtime.pendingProviderRegistrations.splice(
+			0,
+			runtime.pendingProviderRegistrations.length,
+			...providerRegistrationCheckpoint,
+		);
+		throw error;
+	}
 }
 
 async function canonicalizeRequiredSpecs(
@@ -487,7 +510,9 @@ async function loadRequiredExtensions(
 		seen.add(canonicalPath);
 	}
 
-	const snapshots = new Map(options.sourceSnapshots ?? []);
+	const snapshots =
+		options.sourceSnapshots instanceof Map ? options.sourceSnapshots : new Map(options.sourceSnapshots ?? []);
+	const snapshotDigests = new Map(specs.map(spec => [spec.path, spec.sha256]));
 
 	const extensions: Extension[] = [];
 	for (const canonicalPath of canonicalPaths) {
@@ -527,7 +552,11 @@ async function loadRequiredExtensions(
 				canonicalPath,
 			);
 		}
-		const loaded = await loadExtension(canonicalPath, cwd, eventBus, runtime, { snapshots, required: true });
+		const loaded = await loadExtension(canonicalPath, cwd, eventBus, runtime, {
+			snapshots,
+			snapshotDigests,
+			required: true,
+		});
 		if (loaded.error || !loaded.extension) {
 			throw new RequiredExtensionLoadError(
 				"load-failure",

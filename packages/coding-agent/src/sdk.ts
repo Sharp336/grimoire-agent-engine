@@ -2001,7 +2001,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		let extensionPaths: string[];
 		let extensionsResult: LoadExtensionsResult;
 		const reusablePreloadedExtensions =
-			options.preloadedExtensions && (!restrictToolNames || options.preloadedExtensions.requiredExtensionOptions)
+			options.preloadedExtensions &&
+			(!restrictToolNames ||
+				(options.requiredExtensionOptions !== undefined &&
+					options.preloadedExtensions.requiredExtensionOptions === options.requiredExtensionOptions))
 				? options.preloadedExtensions
 				: undefined;
 		if (reusablePreloadedExtensions) {
