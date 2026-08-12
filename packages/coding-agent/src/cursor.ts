@@ -17,6 +17,7 @@ import type {
 	CursorExecHandlers as ICursorExecHandlers,
 	ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
+import { setToolResultAdditionalContext } from "@oh-my-pi/pi-ai";
 import {
 	omitUndefinedArgs,
 	piEscapeRegexLiteral,
@@ -208,8 +209,9 @@ function createToolResultMessage(
 	toolName: string,
 	result: AgentToolResult<unknown>,
 	isError: boolean,
+	additionalContext: readonly string[] = [],
 ): ToolResultMessage {
-	return {
+	const message: ToolResultMessage = {
 		role: "toolResult",
 		toolCallId,
 		toolName,
@@ -218,12 +220,30 @@ function createToolResultMessage(
 		isError,
 		timestamp: Date.now(),
 	};
+	setToolResultAdditionalContext(message, additionalContext);
+	return message;
 }
 
 function buildToolErrorResult(message: string): AgentToolResult<unknown> {
 	return {
 		content: [{ type: "text", text: message }],
 		details: {},
+	};
+}
+
+function createToolContext(options: CursorExecBridgeOptions): {
+	context: AgentToolContext;
+	additionalContext: string[];
+} {
+	const additionalContext: string[] = [];
+	return {
+		context: {
+			...options.getToolContext?.(),
+			addAdditionalContext: (context: string) => {
+				if (context.trim().length > 0) additionalContext.push(context);
+			},
+		} as AgentToolContext,
+		additionalContext,
 	};
 }
 
@@ -248,6 +268,7 @@ async function executeTool(
 
 	let result: AgentToolResult<unknown>;
 	let isError = false;
+	const toolContext = createToolContext(options);
 
 	const onUpdate: AgentToolUpdateCallback<unknown> | undefined = options.emitEvent
 		? partialResult => {
@@ -271,7 +292,7 @@ async function executeTool(
 			toolArgs as Record<string, unknown>,
 			undefined,
 			onUpdate,
-			options.getToolContext?.(),
+			toolContext.context,
 		);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
@@ -286,7 +307,7 @@ async function executeTool(
 	};
 	options.emitEvent?.({ type: "tool_execution_end", toolCallId, toolName, result: sanitizedFinalResult, isError });
 
-	return createToolResultMessage(toolCallId, toolName, result, isError);
+	return createToolResultMessage(toolCallId, toolName, result, isError, toolContext.additionalContext);
 }
 
 /**
@@ -524,6 +545,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 
 		let result: AgentToolResult<unknown>;
 		let isError = false;
+		const toolContext = createToolContext(this.options);
 
 		let rawText = "";
 		let sanitizedRawText = "";
@@ -565,7 +587,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		};
 
 		try {
-			result = await tool.execute(toolCallId, toolArgs, undefined, onUpdate, this.options.getToolContext?.());
+			result = await tool.execute(toolCallId, toolArgs, undefined, onUpdate, toolContext.context);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			result = buildToolErrorResult(message);
@@ -599,7 +621,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			result: sanitizedFinalResult,
 			isError,
 		});
-		return createToolResultMessage(toolCallId, toolName, result, isError);
+		return createToolResultMessage(toolCallId, toolName, result, isError, toolContext.additionalContext);
 	}
 
 	async diagnostics(args: Parameters<NonNullable<ICursorExecHandlers["diagnostics"]>>[0]) {

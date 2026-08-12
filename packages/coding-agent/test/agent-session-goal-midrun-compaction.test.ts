@@ -462,6 +462,56 @@ describe("AgentSession mid-run threshold compaction", () => {
 		expect(persistedToolTurnRoles).toEqual(["assistant", "toolResult"]);
 	});
 
+	it("preserves passive tool context when message_end persistence overlaps mid-run compaction", async () => {
+		const releaseContextMessageEnd = Promise.withResolvers<void>();
+		const contextMessageEndEntered = Promise.withResolvers<void>();
+		const turnEndEntered = Promise.withResolvers<void>();
+		const extensionRunner = {
+			hasHandlers: vi.fn(
+				(eventType: string) => eventType === "tool_call" || eventType === "message_end" || eventType === "turn_end",
+			),
+			emitBeforeAgentStart: vi.fn(async () => undefined),
+			markToolCallEmitted: vi.fn(),
+			emitToolCall: vi.fn(async () => ({ additionalContext: "PASSIVE-TOOL-CONTEXT" })),
+			emit: vi.fn(async (event: { type: string; message?: AgentMessage }) => {
+				if (event.type === "turn_end") {
+					turnEndEntered.resolve();
+					return;
+				}
+				if (event.type === "message_end" && event.message?.role === "developer") {
+					contextMessageEndEntered.resolve();
+					await releaseContextMessageEnd.promise;
+				}
+			}),
+		} as unknown as ExtensionRunner;
+		const { session, sessionManager, observedContexts } = await createHarness({}, { extensionRunner });
+		const compactSpy = mockCompaction("MID-RUN-COMPACTED-WITH-PASSIVE-CONTEXT");
+
+		const prompt = session.prompt("work on the release");
+		await contextMessageEndEntered.promise;
+		await turnEndEntered.promise;
+		expect(compactSpy).not.toHaveBeenCalled();
+		releaseContextMessageEnd.resolve();
+		await prompt;
+
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		expect(observedContexts.length).toBeGreaterThanOrEqual(2);
+		const nextProviderContext = observedContexts[1].join("\n");
+		expect(nextProviderContext).toContain("MID-RUN-COMPACTED-WITH-PASSIVE-CONTEXT");
+		expect(nextProviderContext).toContain("PASSIVE-TOOL-CONTEXT");
+		const persistedContext = sessionManager
+			.getBranch()
+			.filter(entry => entry.type === "message")
+			.map(entry => entry.message)
+			.find(
+				message =>
+					message.role === "developer" &&
+					Array.isArray(message.content) &&
+					message.content.some(block => block.type === "text" && block.text === "PASSIVE-TOOL-CONTEXT"),
+			);
+		expect(persistedContext).toBeDefined();
+	});
+
 	it("keeps synchronous message_end mutations notification-local during mid-run compaction", async () => {
 		const extensionRuntime = new ExtensionRuntime();
 		const extension = await loadExtensionFromFactory(

@@ -219,6 +219,9 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 					const reason = callResult.reason || "Tool execution was blocked by an extension";
 					throw new Error(reason);
 				}
+				if (typeof callResult?.additionalContext === "string" && callResult.additionalContext.trim().length > 0) {
+					context?.addAdditionalContext?.(callResult.additionalContext);
+				}
 				// A non-blocking handler may replace the execution input. The returned object is the raw
 				// input passed to `execute` (handler-owned; not re-normalized). Skipped for `computer`
 				// tool calls, whose event input is a synthetic {actions,pendingSafetyChecks} view

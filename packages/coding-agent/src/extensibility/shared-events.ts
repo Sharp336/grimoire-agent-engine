@@ -313,6 +313,12 @@ export interface ToolCallEventResult {
 	/** Reason for blocking (returned to LLM as error) */
 	reason?: string;
 	/**
+	 * Passive model-visible context for the next provider request. Non-empty
+	 * values from every non-blocking handler are preserved in registration order.
+	 * Ignored when this or a later handler blocks the call.
+	 */
+	additionalContext?: string;
+	/**
 	 * Replacement input the tool executes with, instead of the original arguments. Ignored when
 	 * `block` is true. This is the raw execution input passed to the tool's `execute` (the handler
 	 * owns its correctness) — not the normalized `event.input` view, which may carry derived

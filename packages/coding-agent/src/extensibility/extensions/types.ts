@@ -493,6 +493,11 @@ export interface ExtensionContext {
 	/** Clear a timer scheduled via {@link setInterval} or {@link setTimeout}. */
 	clearTimer(timer: Timer): void;
 	/**
+	 * Attach passive model-visible context to the next provider request. Present
+	 * only while a registered tool is executing.
+	 */
+	addAdditionalContext?(context: string): void;
+	/**
 	 * Run the NATIVE built-in implementation of the tool this handler re-registered, with `params`,
 	 * and return its result. Lets a tool that re-registers a built-in (e.g. wrapping `write` to add
 	 * logging or a policy check) delegate to the original instead of reimplementing it — the native
