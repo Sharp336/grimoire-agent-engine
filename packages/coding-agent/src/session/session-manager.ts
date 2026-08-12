@@ -2575,7 +2575,9 @@ export class SessionManager {
 		// Counting it as an answer would strand every abandoned branch whose last
 		// act was a tool call — the prompt reads as answered when nothing came
 		// back. It still survives whenever a real reply hangs underneath, since
-		// the verdict propagates up from the children.
+		// the verdict propagates up from the children. `length` is deliberately
+		// not on the list: a reply cut off at the token ceiling is unfinished but
+		// not empty, and what it did write is worth keeping.
 		const isUnansweredAssistant = (entry: SessionEntry): boolean =>
 			entry.type === "message" &&
 			entry.message.role === "assistant" &&

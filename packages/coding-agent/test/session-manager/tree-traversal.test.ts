@@ -634,6 +634,28 @@ describe("pruneEmptyBranches", () => {
 		expect(session.getEntries().map(e => e.id)).toContain(idFailed);
 	});
 
+	it("keeps a branch whose only reply was truncated for length", async () => {
+		const session = SessionManager.inMemory();
+		const idRoot = session.appendMessage(userMsg("root"));
+		const idAsst = session.appendMessage(assistantMsg("answer"));
+
+		// Hitting the token ceiling is not the same as failing: the reply is cut
+		// off, but everything before the cut is real content someone may want to
+		// come back for. It answers the prompt above it.
+		session.branch(idRoot);
+		const idPrompt = session.appendMessage(userMsg("write me an essay"));
+		const idTruncated = session.appendMessage({
+			...assistantMsg("chapter one of forty"),
+			stopReason: "length" as const,
+		});
+		session.branch(idAsst);
+
+		expect(await session.pruneEmptyBranches()).toBe(0);
+		const ids = session.getEntries().map(e => e.id);
+		expect(ids).toContain(idPrompt);
+		expect(ids).toContain(idTruncated);
+	});
+
 	it("drops a dead-end failure hanging off an answered branch", async () => {
 		const session = SessionManager.inMemory();
 		session.appendMessage(userMsg("root"));
