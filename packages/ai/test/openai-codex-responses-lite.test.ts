@@ -153,6 +153,14 @@ describe("openai-codex optional response controls", () => {
 		expect("stream_options" in explicit).toBe(false);
 	});
 
+	it("forwards a supported summary request without synthesizing effort", async () => {
+		const model = createCodexModel("gpt-5.5");
+		const transformed = await transformRequestBody({ model: model.id }, model, {
+			reasoningSummary: "detailed",
+		});
+
+		expect(transformed.reasoning).toEqual({ summary: "detailed" });
+	});
 	it("omits reasoning.summary when explicitly suppressed", async () => {
 		const model = createCodexModel("gpt-5.5");
 		const suppressed = await transformRequestBody({ model: model.id }, model, {

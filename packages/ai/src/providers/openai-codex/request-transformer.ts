@@ -455,12 +455,21 @@ export async function transformRequestBody(
 		applyCodexResponsesLiteShape(body);
 	}
 
-	if (options.reasoningOff || options.reasoningEffort !== undefined || responsesLite) {
+	if (
+		options.reasoningOff ||
+		options.reasoningEffort !== undefined ||
+		options.reasoningSummary != null ||
+		responsesLite
+	) {
 		const reasoningConfig: Partial<ReasoningConfig> = options.reasoningOff
 			? { effort: "none" }
 			: options.reasoningEffort !== undefined
 				? getReasoningConfig(model, options.reasoningEffort, options)
-				: {};
+				: options.reasoningSummary != null &&
+						model.compat.supportsReasoningSummary !== false &&
+						supportsCodexReasoningSummary(model.id)
+					? { summary: options.reasoningSummary }
+					: {};
 		body.reasoning = {
 			...body.reasoning,
 			...reasoningConfig,
