@@ -39,6 +39,7 @@ interface PromptOptions {
 	settings?: Settings;
 	taskDepth?: number;
 	newSessionAfterCreate?: boolean;
+	exitStartupPlanModeBeforeNewSession?: boolean;
 	activePlanModeAfterCreate?: boolean;
 	enableStartupDefaultAfterCreate?: boolean;
 	toolNames?: string[];
@@ -101,6 +102,10 @@ describe("createAgentSession plan-first suggestions", () => {
 			workspaceTree: { rootPath: cwd, rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] },
 		});
 		try {
+			if (options.exitStartupPlanModeBeforeNewSession) {
+				session.setPlanModeState({ enabled: true, planFilePath: "local://PLAN.md" });
+				session.setPlanModeState(undefined);
+			}
 			if (options.newSessionAfterCreate) {
 				await session.newSession();
 			}
@@ -307,6 +312,16 @@ describe("createAgentSession plan-first suggestions", () => {
 
 	it("includes plan-first guidance after /new replaces a resumed session", async () => {
 		expect(await assembledPrompt({ existingSession: true, newSessionAfterCreate: true })).toContain(GUIDANCE_HEADING);
+	});
+
+	it("includes plan-first guidance after startup-default plan mode exits and /new starts a fresh session", async () => {
+		expect(
+			await assembledPrompt({
+				settings: Settings.isolated({ "plan.defaultOnStartup": true }),
+				exitStartupPlanModeBeforeNewSession: true,
+				newSessionAfterCreate: true,
+			}),
+		).toContain(GUIDANCE_HEADING);
 	});
 
 	it("preserves current-session guidance when the next-session startup default is enabled", async () => {

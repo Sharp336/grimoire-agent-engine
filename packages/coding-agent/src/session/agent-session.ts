@@ -5254,11 +5254,6 @@ export class AgentSession {
 			return true;
 		}
 
-		// Skip eager preludes when the user has already queued a directive.
-		const hasPendingUserDirective = this.#toolChoiceQueue.inspect().includes("user-force");
-
-		const eagerTaskPrelude =
-			!options?.synthetic && !hasPendingUserDirective ? this.#todo.createEagerTaskPrelude(expandedText) : undefined;
 		const normalizedImages = await this.#normalizeImagesForModel(options?.images);
 
 		const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
@@ -5276,18 +5271,13 @@ export class AgentSession {
 			? { role: "developer" as const, content: userContent, attribution: promptAttribution, timestamp: Date.now() }
 			: { role: "user" as const, content: userContent, attribution: promptAttribution, timestamp: Date.now() };
 
-		const preludeMessages: AgentMessage[] = [];
-		if (eagerTaskPrelude) {
-			preludeMessages.push(eagerTaskPrelude);
-		}
-
 		try {
 			await this.#promptWithMessage(message, expandedText, {
 				...options,
 				images: normalizedImages,
 				prependMessages:
-					preludeMessages.length > 0 || keywordNotices.length > 0 || imageDescriptionNotice
-						? [...preludeMessages, ...keywordNotices, ...(imageDescriptionNotice ? [imageDescriptionNotice] : [])]
+					keywordNotices.length > 0 || imageDescriptionNotice
+						? [...keywordNotices, ...(imageDescriptionNotice ? [imageDescriptionNotice] : [])]
 						: undefined,
 			});
 		} finally {
@@ -5417,7 +5407,7 @@ export class AgentSession {
 
 			await this.#prewalk.armPlanYoloIfNeeded();
 
-			// Build messages array (session context, eager todo prelude, then active prompt message)
+			// Build messages array (session context, turn preludes, then active prompt message)
 			const messages: AgentMessage[] = [];
 			const planReferenceMessage = await this.#buildPlanReferenceMessage?.();
 			if (planReferenceMessage) {
@@ -5531,8 +5521,8 @@ export class AgentSession {
 
 			// Resolve plan-first precedence from the prompt that will reach the
 			// provider. A before_agent_start replacement can remove the base
-			// guidance, in which case eager todo or external thinking must retain
-			// the first turn instead of both behaviors being suppressed.
+			// guidance, in which case eager todo, eager task, or external thinking
+			// must retain the first turn instead of all three being suppressed.
 			const userTurn = message.role === "user";
 			const turnHasPendingUserDirective = this.#toolChoiceQueue.inspect().includes("user-force");
 			const currentSessionIsFresh = isFreshSessionContext(this.messages, this.sessionManager.getBranch());
@@ -5565,6 +5555,10 @@ export class AgentSession {
 				userTurn && !planFirstSuggestionHasPriority && !turnHasPendingUserDirective
 					? this.#todo.createEagerTodoPrelude(expandedText)
 					: undefined;
+			const eagerTaskPrelude =
+				userTurn && !planFirstSuggestionHasPriority && !turnHasPendingUserDirective
+					? this.#todo.createEagerTaskPrelude(expandedText)
+					: undefined;
 			if (eagerTodoPrelude) {
 				if (eagerTodoPrelude.toolChoice) {
 					this.#toolChoiceQueue.pushOnce(eagerTodoPrelude.toolChoice, {
@@ -5572,6 +5566,11 @@ export class AgentSession {
 					});
 				}
 				messages.splice(turnPreludeMessageIndex, 0, eagerTodoPrelude.message);
+				xdevMountNoticeIndex++;
+			}
+			if (eagerTaskPrelude) {
+				const eagerTaskMessageIndex = turnPreludeMessageIndex + (eagerTodoPrelude ? 1 : 0);
+				messages.splice(eagerTaskMessageIndex, 0, eagerTaskPrelude);
 				xdevMountNoticeIndex++;
 			}
 
