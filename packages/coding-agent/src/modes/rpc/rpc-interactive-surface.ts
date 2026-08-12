@@ -19,6 +19,7 @@ import type {
 } from "../../extensibility/extensions";
 import { formatSessionTerminalTitle } from "../../utils/title-generator";
 import type { CustomEditor } from "../components/custom-editor";
+import { LARGE_PASTE_CHOICES, PromptDocumentService } from "../controllers/prompt-document-service";
 import { createPromptActionAutocompleteProvider } from "../prompt-action-autocomplete";
 import {
 	getAvailableThemesWithPaths,
@@ -34,6 +35,8 @@ import type {
 	RpcUiAutocompleteApplyResult,
 	RpcUiAutocompleteResult,
 	RpcUiChannelSettlementReason,
+	RpcUiEditorPasteChoice,
+	RpcUiEditorPasteResult,
 	RpcUiEditorState,
 	RpcUiFence,
 	RpcUiFrame,
@@ -64,6 +67,8 @@ interface RpcInteractiveSurfaceOptions {
 	getAuthority: () => RpcSessionAuthorityToken;
 	getSessionName: () => string | undefined;
 	getCwd: () => string;
+	getPasteLocalRoot?: () => string;
+	getLargePasteThreshold?: () => number;
 }
 
 interface ActiveChannel {
@@ -135,19 +140,19 @@ class RpcSemanticTerminal implements Terminal {
 		return undefined;
 	}
 
-	start(): void {}
-	stop(): void {}
-	async drainInput(): Promise<void> {}
-	write(): void {}
-	moveBy(): void {}
-	hideCursor(): void {}
-	showCursor(): void {}
-	clearLine(): void {}
-	clearFromCursor(): void {}
-	clearScreen(): void {}
-	setTitle(): void {}
-	setProgress(): void {}
-	onAppearanceChange(): void {}
+	start(): void { }
+	stop(): void { }
+	async drainInput(): Promise<void> { }
+	write(): void { }
+	moveBy(): void { }
+	hideCursor(): void { }
+	showCursor(): void { }
+	clearLine(): void { }
+	clearFromCursor(): void { }
+	clearScreen(): void { }
+	setTitle(): void { }
+	setProgress(): void { }
+	onAppearanceChange(): void { }
 }
 
 export class RpcInteractiveSurfaceError extends Error {
@@ -191,10 +196,14 @@ export class RpcInteractiveSurfaceManager {
 	#baseAutocompleteProvider: AutocompleteProvider | undefined;
 	#autocompleteProvider: AutocompleteProvider | undefined;
 	#customEditor: CustomEditor | undefined;
+	readonly #promptDocuments: PromptDocumentService;
 	#autocompleteApplyContext: AutocompleteApplyContext | undefined;
 
 	constructor(options: RpcInteractiveSurfaceOptions) {
 		this.#options = options;
+		this.#promptDocuments = new PromptDocumentService(
+			options.getPasteLocalRoot ? { getLocalRoot: options.getPasteLocalRoot } : undefined,
+		);
 		this.#tui.requestRender = () => this.#renderAllPresentations();
 	}
 
@@ -244,7 +253,7 @@ export class RpcInteractiveSurfaceManager {
 		this.#autocompleteSelections.clear();
 		for (const controller of this.#autocompleteOperations.values()) controller.abort(reason);
 		this.#autocompleteOperations.clear();
-		if (!sessionChanged) return;
+		this.#promptDocuments.clear();
 		this.#disposePresentations(new RpcInteractiveSurfaceError("session_changed", "Interactive UI session changed"));
 		this.#terminalInputHandlers.length = 0;
 		this.#customEditor = undefined;
@@ -320,12 +329,72 @@ export class RpcInteractiveSurfaceManager {
 		return this.#commitClientEditor(text);
 	}
 
-	pasteEditor(channelId: string, generation: number, expectedRevision: number, text: string): RpcUiEditorState {
+	pasteEditor(
+		channelId: string,
+		generation: number,
+		expectedRevision: number,
+		text: string,
+	): RpcUiEditorPasteResult {
 		this.#assertChannel(channelId, generation);
 		this.#assertEditorRevision(expectedRevision);
-		if (!this.#customEditor) return this.#commitClientEditor(text);
-		this.#customEditor.handleInput(`\u001b[200~${text}\u001b[201~`);
-		return this.setEditorText(this.#customEditor.getText(), "component");
+		const result = this.#promptDocuments.insertPastedText(text, this.#options.getLargePasteThreshold?.() ?? 0);
+		if (result.kind === "pending-choice") {
+			return {
+				status: "pending-choice",
+				editor: { ...this.#editor },
+				pendingId: result.pending.id,
+				lineCount: result.pending.lineCount,
+				choices: [...LARGE_PASTE_CHOICES],
+			};
+		}
+		return { status: "applied", editor: this.#insertPasteText(result.text) };
+	}
+
+	async resolvePasteChoice(
+		channelId: string,
+		generation: number,
+		expectedRevision: number,
+		pendingId: string,
+		choice?: RpcUiEditorPasteChoice,
+	): Promise<RpcUiEditorPasteResult> {
+		this.#assertChannel(channelId, generation);
+		this.#assertEditorRevision(expectedRevision);
+		const result = await this.#promptDocuments.resolvePasteChoice(pendingId, choice);
+		return {
+			status: "applied",
+			editor: this.#insertPasteText(result.text),
+			...(result.fallback ? { fallback: true } : {}),
+		};
+	}
+
+	expandEditorText(text: string): string {
+		return this.#promptDocuments.expandPasteMarkers(text);
+	}
+
+	#insertPasteText(text: string): RpcUiEditorState {
+		if (this.#customEditor) {
+			this.#customEditor.handleInput(`\u001b[200~${text}\u001b[201~`);
+			return this.setEditorText(this.#customEditor.getText(), "component");
+		}
+		return this.#commitClientEditor(`${this.#editor.text}${text}`);
+	}
+
+	prepareEditorSubmit(channelId: string, generation: number, expectedRevision: number): RpcUiEditorState {
+		this.#assertChannel(channelId, generation);
+		this.#assertEditorRevision(expectedRevision);
+		return { ...this.#editor };
+	}
+
+	acceptEditorSubmit(channelId: string, generation: number, expectedRevision: number): RpcUiEditorState {
+		this.#assertChannel(channelId, generation);
+		this.#assertEditorRevision(expectedRevision);
+		this.#rememberEditor();
+		this.#promptDocuments.clear();
+		this.#customEditor?.setText("");
+		this.#editor = { text: "", revision: this.#editor.revision + 1 };
+		this.#emitEditor("session");
+		this.#autocompleteSelections.clear();
+		return { ...this.#editor };
 	}
 
 	setAutocompleteProvider(provider: AutocompleteProvider): void {
@@ -458,6 +527,7 @@ export class RpcInteractiveSurfaceManager {
 			return {
 				editor: { ...this.#editor },
 				cursor: context?.cursor ?? { line: applied.cursorLine, column: applied.cursorCol },
+				submit: selection.prefix.startsWith("/") ? "primary" : null,
 				...(context?.clientAction === undefined ? {} : { clientAction: context.clientAction }),
 			};
 		} finally {
@@ -947,9 +1017,9 @@ export class RpcInteractiveSurfaceManager {
 			focused: record.focused,
 			actions: record.focused
 				? [
-						{ id: "input", kind: "input" },
-						...(record.kind === "custom" ? [{ id: "cancel" as const, kind: "cancel" as const }] : []),
-					]
+					{ id: "input", kind: "input" },
+					...(record.kind === "custom" ? [{ id: "cancel" as const, kind: "cancel" as const }] : []),
+				]
 				: [],
 		};
 	}

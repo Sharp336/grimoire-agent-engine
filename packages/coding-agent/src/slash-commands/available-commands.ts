@@ -14,7 +14,8 @@ export interface InternalAvailableSlashCommand {
 	aliases?: string[];
 	description?: string;
 	input?: { hint: string };
-	subcommands?: Array<{ name: string; description?: string; usage?: string }>;
+	allowArgs?: boolean;
+	subcommands?: Array<{ name: string; description: string; usage?: string }>;
 	source: AvailableSlashCommandSource;
 }
 
@@ -41,13 +42,13 @@ export async function buildAvailableSlashCommands(
 	};
 
 	for (const command of BUILTIN_SLASH_COMMANDS_INTERNAL) {
-		if (!command.handle) continue;
 		const hint = command.acpInputHint ?? command.inlineHint;
 		appendCommand({
 			name: command.name,
 			aliases: command.aliases,
 			description: command.acpDescription ?? command.description,
 			input: hint ? { hint } : undefined,
+			allowArgs: command.allowArgs,
 			subcommands: command.subcommands,
 			source: "builtin",
 		});

@@ -1,5 +1,4 @@
 import * as fs from "node:fs/promises";
-import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { type AutocompleteProvider, matchesKey, type SlashCommand } from "@oh-my-pi/pi-tui";
@@ -18,6 +17,8 @@ import { expandEmoticons } from "../../modes/emoji-autocomplete";
 import { materializeImageReferenceLinks, shiftImageMarkers } from "../../modes/image-references";
 import { createPromptActionAutocompleteProvider } from "../../modes/prompt-action-autocomplete";
 import { parseQueueShorthand, splitQueuedMessages } from "../../modes/queue-input";
+import { PromptDocumentService } from "./prompt-document-service";
+import { ComposerInputRouter } from "./composer-input-router";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "../../modes/skill-command";
 import type { InteractiveModeContext } from "../../modes/types";
 import manualContinuePrompt from "../../prompts/system/manual-continue.md" with { type: "text" };
@@ -125,10 +126,6 @@ function parsePythonCommandInput(text: string): { code: string; isExcluded: bool
 	};
 }
 
-/** Wrap pasted text in `<attachment>` tags so the model treats it as one quoted block. */
-function wrapPasteInAttachmentBlock(content: string): string {
-	return `<attachment>\n${content}\n</attachment>`;
-}
 
 /** Run a teardown abort that must never throw (Esc / Ctrl+C path). A thrown
  *  error is logged at debug instead of silently swallowed, so a failing abort
@@ -167,11 +164,11 @@ export class InputController {
 			readText: typeof readTextFromClipboard;
 			readMacFileUrls?: typeof readMacFileUrlsFromClipboard;
 		} = {
-			readImage: readImageFromClipboard,
-			readText: readTextFromClipboard,
-			readMacFileUrls: readMacFileUrlsFromClipboard,
-		},
-	) {}
+				readImage: readImageFromClipboard,
+				readText: readTextFromClipboard,
+				readMacFileUrls: readMacFileUrlsFromClipboard,
+			},
+	) { }
 
 	#enhancedPaste?: EnhancedPasteController;
 	#focusedLeftTapListenerInstalled = false;
@@ -183,9 +180,16 @@ export class InputController {
 	// (>= LEFT_DOUBLE_TAP_MAX_GAP_MS) starts a fresh sequence. See
 	// #detectLeftDoubleTap.
 	#leftTapCount = 0;
-	// Sequential index for `local://paste-N.md` references created by the large-paste
-	// flow. Seeded from 0 and bumped past existing paste files.
-	#pasteCounter = 0;
+	#pasteDocuments?: PromptDocumentService;
+	#pasteDocumentService(): PromptDocumentService {
+		return (this.#pasteDocuments ??= new PromptDocumentService({
+			getLocalRoot: () =>
+				resolveLocalRoot({
+					getArtifactsDir: () => this.ctx.sessionManager.getArtifactsDir(),
+					getSessionId: () => this.ctx.sessionManager.getSessionId(),
+				}),
+		}));
+	}
 
 	#showTinyTitleDownloadProgress(modelKey: string): void {
 		if (!isTinyTitleLocalModelKey(modelKey)) return;
@@ -630,6 +634,38 @@ export class InputController {
 
 	setupEditorSubmitHandler(): void {
 		this.ctx.editor.onSubmit = async (text: string) => {
+			const routed = await new ComposerInputRouter({
+				focusedAgentId: this.ctx.focusedAgentId,
+				isStreaming: this.ctx.session.isStreaming,
+				queuedMessageCount: this.ctx.session.queuedMessageCount,
+				isCompacting: this.ctx.session.isCompacting,
+				expandEmoticons: !isSettingsInitialized() || settings.get("emojiAutocomplete"),
+			}).route(text, this.ctx.editor.pendingImages, "primary");
+			if (routed.kind === "focused-agent-chat") {
+				await this.#submitToFocusedSession(routed.text, routed.streamingBehavior === "followUp" ? "followUp" : "steer");
+				return;
+			}
+			if (routed.kind === "abort-on-empty-running-input") {
+				const aborting = this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
+				await aborting;
+				this.ctx.updatePendingMessagesDisplay();
+				this.ctx.ui.requestRender();
+				return;
+			}
+			if (routed.kind === "noop") return;
+			if (routed.kind === "continue") {
+				if (this.ctx.onInputCallback) {
+					this.ctx.editor.clearDraft();
+					this.ctx.onInputCallback({
+						text: routed.text,
+						cancelled: false,
+						started: true,
+						synthetic: true,
+						userInitiated: true,
+					});
+				}
+				return;
+			}
 			text = text.trim();
 			const hasPendingImages = this.ctx.editor.pendingImages.length > 0;
 			if ((!isSettingsInitialized() || settings.get("emojiAutocomplete")) && text) text = expandEmoticons(text);
@@ -1282,8 +1318,8 @@ export class InputController {
 					remaining.length === 1
 						? `=> ${remaining[0]}`
 						: `=>\n${remaining
-								.map((message, index) => `${index + 1}. ${message.replaceAll("\n", "\n   ")}`)
-								.join("\n")}`;
+							.map((message, index) => `${index + 1}. ${message.replaceAll("\n", "\n   ")}`)
+							.join("\n")}`;
 				this.ctx.editor.setText(restored);
 			}
 			this.ctx.showError(error instanceof Error ? error.message : String(error));
@@ -1742,16 +1778,15 @@ export class InputController {
 			choice = undefined;
 		}
 
+		const documents = this.#pasteDocumentService();
 		switch (choice) {
 			case WRAPPED_BLOCK:
-				this.ctx.editor.insertPaste(wrapPasteInAttachmentBlock(text));
+				this.ctx.editor.insertPaste(documents.wrapPaste(text));
 				break;
 			case LOCAL_FILE:
 				await this.#attachPasteAsFile(text, lineCount);
 				break;
 			case INLINE:
-				this.ctx.editor.insertPaste(text);
-				break;
 			default:
 				// Esc / cancel: keep the original behavior — collapse to an inline paste marker.
 				this.ctx.editor.insertPaste(text);
@@ -1767,28 +1802,16 @@ export class InputController {
 	 * content is never lost.
 	 */
 	async #attachPasteAsFile(text: string, lineCount: number): Promise<void> {
+		const documents = this.#pasteDocumentService();
 		try {
-			// Mirror the exact mapping the read tool's local:// resolver uses so a later
-			// `read local://paste-N.md` lands on the file written here.
-			const localRoot = resolveLocalRoot({
-				getArtifactsDir: () => this.ctx.sessionManager.getArtifactsDir(),
-				getSessionId: () => this.ctx.sessionManager.getSessionId(),
-			});
-			let name: string;
-			let filePath: string;
-			do {
-				this.#pasteCounter++;
-				name = `paste-${this.#pasteCounter}.md`;
-				filePath = path.join(localRoot, name);
-			} while (await Bun.file(filePath).exists());
-			await Bun.write(filePath, text);
-			this.ctx.editor.insertText(`local://${name} `);
-			this.ctx.showStatus(`Saved ${lineCount} pasted lines to local://${name}`);
+			const localFile = await documents.storeLocalFile(text);
+			this.ctx.editor.insertText(`${localFile} `);
+			this.ctx.showStatus(`Saved ${lineCount} pasted lines to ${localFile}`);
 		} catch (error) {
 			logger.warn("failed to save large paste to file", {
 				error: error instanceof Error ? error.message : String(error),
 			});
-			this.ctx.editor.insertPaste(text);
+			this.ctx.editor.insertPaste(documents.createPasteMarker(text, lineCount));
 			this.ctx.showError("Failed to save paste to a file — pasted inline instead");
 		}
 	}

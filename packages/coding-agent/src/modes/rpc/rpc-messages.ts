@@ -135,7 +135,7 @@ function decodeCursor(cursor: string): RpcMessageCursorPayload {
 	return { version, sessionId, leafId, messageCount, offset };
 }
 
-function sameSnapshot(cursor: RpcMessageCursorPayload, snapshot: RpcMessageSnapshot): boolean {
+function sameSnapshot(cursor: RpcMessageSnapshot, snapshot: RpcMessageSnapshot): boolean {
 	return (
 		cursor.sessionId === snapshot.sessionId &&
 		cursor.leafId === snapshot.leafId &&

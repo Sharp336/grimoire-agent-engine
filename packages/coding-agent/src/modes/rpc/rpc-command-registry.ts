@@ -78,6 +78,11 @@ function optional(
 }
 
 const stringField = required("a string", value => typeof value === "string", { type: "string" });
+const editorSubmitModeField = required(
+	"a submit mode",
+	value => value === "primary" || value === "followUp",
+	{ type: "string", enum: ["primary", "followUp"] },
+);
 const booleanField = required("a boolean", value => typeof value === "boolean", { type: "boolean" });
 const boundedStringField = (name: string, maxLength: number): RpcFieldDefinition =>
 	required(name, value => typeof value === "string" && value.length <= maxLength, {
@@ -715,6 +720,44 @@ export const RPC_COMMAND_DEFINITIONS = {
 			generation: requiredNonNegativeIntegerField,
 			expectedRevision: requiredNonNegativeIntegerField,
 			text: boundedStringField("pasted text no longer than 1048576 characters", 1_048_576),
+		},
+		"serial",
+		{ version: 3, ...requiresFeature("ui") },
+	),
+	ui_editor_paste_resolve: sessionCommand(
+		{
+			type: "ui_editor_paste_resolve",
+			id: "request-1",
+			channelId: "channel-1",
+			generation: 1,
+			expectedRevision: 0,
+			pendingId: "paste-choice-1",
+		},
+		{
+			channelId: opaqueIdField,
+			generation: requiredNonNegativeIntegerField,
+			expectedRevision: requiredNonNegativeIntegerField,
+			pendingId: opaqueIdField,
+			choice: optionalEnumField("wrapped", "localFile", "inline"),
+		},
+		"serial",
+		{ version: 3, ...requiresFeature("ui") },
+	),
+	ui_editor_submit: sessionCommand(
+		{
+			type: "ui_editor_submit",
+			id: "request-1",
+			channelId: "channel-1",
+			generation: 1,
+			expectedRevision: 0,
+			mode: "primary",
+		},
+		{
+			channelId: opaqueIdField,
+			generation: requiredNonNegativeIntegerField,
+			expectedRevision: requiredNonNegativeIntegerField,
+			mode: editorSubmitModeField,
+			images: optionalObjectArrayField,
 		},
 		"serial",
 		{ version: 3, ...requiresFeature("ui") },
