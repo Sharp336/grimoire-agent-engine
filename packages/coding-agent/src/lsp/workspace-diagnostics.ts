@@ -4,7 +4,7 @@ import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 
 /** Project type detection result */
 interface ProjectType {
-	type: "rust" | "typescript" | "go" | "python" | "unknown";
+	type: "rust" | "typescript" | "go" | "python" | "vala" | "unknown";
 	command?: string[];
 	description: string;
 }
@@ -80,6 +80,33 @@ async function resolveGoWorkspaceDiagnosticsCommand(cwd: string, signal?: AbortS
 	}
 }
 
+/**
+ * Check whether meson.build's project() call declares 'vala' as a language.
+ * Parsing is simple: find project(...), then test for `'vala'` inside the call body.
+ * This avoids false positives from non-Vala Meson projects (C, C++, Rust, etc.).
+ */
+async function hasMesonValaBuild(cwd: string): Promise<boolean> {
+	try {
+		const content = await fs.promises.readFile(path.join(cwd, "meson.build"), "utf-8");
+		const start = content.indexOf("project(");
+		if (start === -1) return false;
+		// Walk forward matching parens to find the closing paren of project().
+		let depth = 0;
+		for (let i = start; i < content.length; i++) {
+			if (content[i] === "(") depth++;
+			if (content[i] === ")") {
+				depth--;
+				if (depth === 0) {
+					return /['"]vala['"]/.test(content.slice(start, i + 1));
+				}
+			}
+		}
+		return false;
+	} catch {
+		return false;
+	}
+}
+
 /** Detect project type from root markers */
 async function detectProjectType(cwd: string, signal?: AbortSignal): Promise<ProjectType> {
 	// Check for Rust (Cargo.toml)
@@ -111,6 +138,11 @@ async function detectProjectType(cwd: string, signal?: AbortSignal): Promise<Pro
 		return { type: "python", command: ["pyright"], description: "Python (pyright)" };
 	}
 
+	// Check for Vala — requires parsing meson.build to distinguish from other Meson languages.
+	if (await hasMesonValaBuild(cwd)) {
+		return { type: "vala", description: "Vala (vala-language-server)" };
+	}
+
 	return { type: "unknown", description: "Unknown project type" };
 }
 
@@ -122,10 +154,11 @@ export async function runWorkspaceDiagnostics(
 	throwIfAborted(signal);
 	const projectType = await detectProjectType(cwd, signal);
 	if (!projectType.command) {
-		return {
-			output: `Cannot detect project type. Supported: Rust (Cargo.toml), TypeScript (tsconfig.json), Go (go.work/go.mod), Python (pyproject.toml)`,
-			projectType,
-		};
+		const message =
+			projectType.type !== "unknown"
+				? `Workspace diagnostics not available for ${projectType.description}. Use per-file LSP diagnostics (lsp diagnostics file: "path/to/file") instead.`
+				: `Cannot detect project type. Supported: Rust (Cargo.toml), TypeScript (tsconfig.json), Go (go.work/go.mod), Python (pyproject.toml)`;
+		return { output: message, projectType };
 	}
 	try {
 		const proc = Bun.spawn(projectType.command, {
