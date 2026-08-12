@@ -29,6 +29,7 @@ describe("buildFireworksFastSeed", () => {
 	it("emits one fireworks fast variant per curated base", () => {
 		expect([...byId.keys()].sort()).toEqual([
 			"glm-5.1-fast",
+			"glm-5.2-fast",
 			"kimi-k2.6-fast",
 			"kimi-k2.7-code-fast",
 			"kimi-k3-fast",
@@ -43,6 +44,7 @@ describe("buildFireworksFastSeed", () => {
 		expect(byId.get("kimi-k2.6-fast")?.cost).toEqual({ input: 2, output: 8, cacheRead: 0.3, cacheWrite: 0 });
 		expect(byId.get("kimi-k2.7-code-fast")?.cost).toEqual({ input: 1.9, output: 8, cacheRead: 0.38, cacheWrite: 0 });
 		expect(byId.get("glm-5.1-fast")?.cost).toEqual({ input: 2.8, output: 8.8, cacheRead: 0.52, cacheWrite: 0 });
+		expect(byId.get("glm-5.2-fast")?.cost).toEqual({ input: 2.1, output: 6.6, cacheRead: 0.21, cacheWrite: 0 });
 		expect(byId.get("kimi-k3-fast")?.cost).toEqual({ input: 4.5, output: 22.5, cacheRead: 0.45, cacheWrite: 0 });
 	});
 
