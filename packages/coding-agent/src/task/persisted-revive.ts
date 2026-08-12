@@ -104,15 +104,12 @@ export function createPersistedSubagentReviverFactory(
 				? []
 				: ctx.session.getRpcHostTools().filter(tool => enableMCP || !isMCPToolName(tool.name));
 			const parentRpcHostToolNames = new Set(parentRpcHostTools.map(tool => tool.name));
-			const parentMountedTools = new Set(ctx.session.getMountedXdevToolNames());
 			const persistedMountedTools = restrictToolNames
 				? []
 				: (init.mountedTools ?? []).filter(
 						name =>
 							(enableMCP || !isMCPToolName(name)) &&
-							(ctx.session.hasBuiltInTool(name) ||
-								parentRpcHostToolNames.has(name) ||
-								(parentMountedTools.has(name) && ctx.session.getToolByName(name) !== undefined)),
+							(ctx.session.hasBuiltInTool(name) || parentRpcHostToolNames.has(name)),
 					);
 			const persistedToolNames = new Set([...init.tools, ...persistedMountedTools]);
 			const mcpManager = enableMCP ? MCPManager.instance() : undefined;
@@ -153,12 +150,25 @@ export function createPersistedSubagentReviverFactory(
 						}
 					: {}),
 			});
+			const localHostToolCollisions = new Set(
+				parentRpcHostTools.flatMap(tool =>
+					persistedToolNames.has(tool.name) &&
+					session.getToolByName(tool.name) !== undefined &&
+					!session.hasRpcHostTool(tool.name)
+						? [tool.name]
+						: [],
+				),
+			);
 			if (!restrictToolNames) {
-				const inheritedHostTools = parentRpcHostTools.filter(tool => persistedToolNames.has(tool.name));
+				const inheritedHostTools = parentRpcHostTools.filter(
+					tool => persistedToolNames.has(tool.name) && !localHostToolCollisions.has(tool.name),
+				);
 				if (inheritedHostTools.length > 0) await session.refreshRpcHostTools(inheritedHostTools);
 			}
+			const restoredToolNames = [...persistedToolNames].filter(name => !localHostToolCollisions.has(name));
+			const restoredMountedTools = persistedMountedTools.filter(name => !localHostToolCollisions.has(name));
 			// Restore the child's exact top-level versus mounted snapshot.
-			await session.setActiveToolPresentation([...persistedToolNames], persistedMountedTools);
+			await session.setActiveToolPresentation(restoredToolNames, restoredMountedTools);
 			// Cold revives must drive registry status themselves — createAgentSession
 			// doesn't wire this generically (the live path does it in the executor).
 			// Without it the idle-TTL timer never clears on a turn and the lifecycle
