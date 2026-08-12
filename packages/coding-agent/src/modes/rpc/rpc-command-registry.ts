@@ -768,7 +768,6 @@ export const RPC_COMMAND_DEFINITIONS = {
 			id: "request-1",
 			channelId: "channel-1",
 			generation: 1,
-			operationId: "autocomplete-1",
 			lines: ["/"],
 			cursorLine: 0,
 			cursorCol: 1,
@@ -776,7 +775,6 @@ export const RPC_COMMAND_DEFINITIONS = {
 		{
 			channelId: opaqueIdField,
 			generation: requiredNonNegativeIntegerField,
-			operationId: optionalOpaqueIdField,
 			lines: uiLinesField,
 			cursorLine: requiredNonNegativeIntegerField,
 			cursorCol: requiredNonNegativeIntegerField,

@@ -36,14 +36,6 @@ describe("RPC command registry", () => {
 		}
 	});
 
-	test("preserves client autocomplete operation ids through command validation", () => {
-		const validation = validateRpcCommand({
-			...RPC_COMMAND_DEFINITIONS.ui_autocomplete_suggest.example,
-			operationId: "autocomplete-client-1",
-		});
-		expect(validation).toMatchObject({ ok: true, command: { operationId: "autocomplete-client-1" } });
-	});
-
 	test("requires correlation ids for every v3 command in schemas and validation", () => {
 		for (const [name, definition] of Object.entries(RPC_COMMAND_DEFINITIONS)) {
 			if (definition.version !== 3) continue;

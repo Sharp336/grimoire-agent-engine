@@ -1234,14 +1234,12 @@ describe.skipIf(binaryPath.length === 0)("RPC v3 explicit native-binary process 
 					type: "ui_autocomplete_suggest",
 					channelId,
 					generation,
-					operationId: "ui-suggest-op",
 					lines: ["@rpc-ui"],
 					cursorLine: 0,
 					cursorCol: 7,
 				}),
 				"ui_autocomplete_suggest",
 			);
-			expect(suggestions).toMatchObject({ operationId: "ui-suggest-op" });
 			const suggestion = record(array(suggestions.items, "autocomplete items")[0], "autocomplete item");
 			expect(suggestion).toMatchObject({ label: "RPC UI extension" });
 
@@ -1250,12 +1248,10 @@ describe.skipIf(binaryPath.length === 0)("RPC v3 explicit native-binary process 
 				type: "ui_autocomplete_suggest",
 				channelId,
 				generation,
-				operationId: "ui-suggest-hanging-op",
 				lines: ["@rpc-ui-hang"],
 				cursorLine: 0,
 				cursorCol: 12,
 			});
-
 			expect(
 				responseData(
 					await process.request({
@@ -1263,7 +1259,7 @@ describe.skipIf(binaryPath.length === 0)("RPC v3 explicit native-binary process 
 						type: "ui_cancel",
 						channelId,
 						generation,
-						operationId: "ui-suggest-hanging-op",
+						operationId: "ui-suggest-hanging",
 					}),
 					"ui_cancel",
 				),
