@@ -1,6 +1,7 @@
 /**
  * Extension loader - loads TypeScript extension modules using native Bun import.
  */
+import { randomUUID } from "node:crypto";
 import type * as fs1 from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -34,6 +35,11 @@ import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/leg
 import { getAllPluginExtensionPaths } from "../plugins/loader";
 
 import { resolvePath, withHostGuard } from "../utils";
+import {
+	REQUIRED_EXTENSION_RECEIPT_SCHEMA,
+	type RequiredExtensionOptions,
+	type RequiredExtensionSpec,
+} from "./required";
 import type {
 	AssistantThinkingRenderer,
 	Extension,
@@ -65,6 +71,31 @@ export class ExtensionRuntimeNotInitializedError extends Error {
 	}
 }
 
+export type RequiredExtensionLoadErrorCode =
+	| "unexpected-extension"
+	| "digest-mismatch"
+	| "load-failure"
+	| "unsupported-graph";
+
+export class RequiredExtensionLoadError extends Error {
+	// Error.name is inherited from Error; keep the class structurally compatible.
+
+	constructor(
+		readonly code: RequiredExtensionLoadErrorCode,
+		message: string,
+		readonly extensionPath?: string,
+	) {
+		super(message);
+	}
+}
+
+export interface RequiredExtensionLoadReceipt {
+	readonly schema: typeof REQUIRED_EXTENSION_RECEIPT_SCHEMA;
+	readonly pid: number;
+	readonly loaded_at: string;
+	readonly extensions: readonly { path: string; sha256: string }[];
+}
+
 /**
  * Extension runtime with throwing stubs for action methods.
  * These are replaced with real implementations during initialization.
@@ -72,7 +103,6 @@ export class ExtensionRuntimeNotInitializedError extends Error {
 export class ExtensionRuntime implements IExtensionRuntime {
 	flagValues = new Map<string, boolean | string>();
 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; sourceId: string }> = [];
-
 	registerProvider(name: string, config: ProviderConfig, sourceId: string): void {
 		this.pendingProviderRegistrations.push({ name, config, sourceId });
 	}
@@ -175,12 +205,10 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	}
 
 	registerTool<TParams extends TSchema = TSchema, TDetails = unknown>(tool: ToolDefinition<TParams, TDetails>): void {
-		const registered = {
+		this.extension.tools.set(tool.name, {
 			definition: tool,
 			extensionPath: this.extension.path,
-		};
-		this.extension.tools.set(tool.name, registered);
-		for (const listener of this.extension.toolRegistrationListeners ?? []) listener(tool.name);
+		});
 	}
 
 	registerCommand(
@@ -318,7 +346,6 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		resolvedPath,
 		handlers: new Map(),
 		tools: new Map(),
-		toolRegistrationListeners: new Set(),
 		assistantThinkingRenderers: [],
 		messageRenderers: new Map(),
 		commands: new Map(),
@@ -327,72 +354,46 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 	};
 }
 
-/**
- * Runs an extension factory with provider registration rollback on failure.
- * Restores the complete registration queue when the factory throws because an
- * extension may unregister entries queued by an earlier extension.
- */
-async function runExtensionFactory(
-	factory: ExtensionFactory,
-	api: ExtensionAPI,
+async function loadExtension(
+	extensionPath: string,
+	cwd: string,
+	eventBus: EventBus,
 	runtime: IExtensionRuntime,
-): Promise<void> {
-	const providerRegistrationCheckpoint = [...runtime.pendingProviderRegistrations];
-
-	try {
-		await factory(api);
-	} catch (error) {
-		runtime.pendingProviderRegistrations.splice(
-			0,
-			runtime.pendingProviderRegistrations.length,
-			...providerRegistrationCheckpoint,
-		);
-		throw error;
-	}
-}
-
-interface ImportedExtensionModule {
-	factory: ExtensionFactory | null;
-	resolvedPath: string;
-	error: string | null;
-}
-
-async function importExtensionModule(extensionPath: string, cwd: string): Promise<ImportedExtensionModule> {
+	requiredLoad?: {
+		snapshots: Map<string, string>;
+		snapshotDigests?: ReadonlyMap<string, string>;
+		required: true;
+	},
+): Promise<{ extension: Extension | null; error: string | null }> {
 	const resolvedPath = resolvePath(extensionPath, cwd);
 	try {
-		const module = (await withHostGuard(() => loadLegacyPiModule(resolvedPath))) as LoadedExtensionModule;
+		const module = (await withHostGuard(() =>
+			loadLegacyPiModule(resolvedPath, requiredLoad),
+		)) as LoadedExtensionModule;
 		const factory = getExtensionFactory(module);
 
 		if (typeof factory !== "function") {
 			return {
-				factory: null,
-				resolvedPath,
+				extension: null,
 				error: `Extension does not export a valid factory function: ${extensionPath}`,
 			};
 		}
 
-		return { factory, resolvedPath, error: null };
-	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		return { factory: null, resolvedPath, error: `Failed to load extension: ${message}` };
-	}
-}
-
-async function bindExtension(
-	extensionPath: string,
-	imported: ImportedExtensionModule,
-	cwd: string,
-	eventBus: EventBus,
-	runtime: IExtensionRuntime,
-): Promise<{ extension: Extension | null; error: string | null }> {
-	const factory = imported.factory;
-	if (imported.error !== null || factory === null) {
-		return { extension: null, error: imported.error };
-	}
-	try {
-		const extension = createExtension(extensionPath, imported.resolvedPath);
+		const extension = createExtension(extensionPath, resolvedPath);
 		const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus);
-		await withHostGuard(() => runExtensionFactory(factory, api, runtime));
+		const providerRegistrationCheckpoint = [...runtime.pendingProviderRegistrations];
+		try {
+			await withHostGuard(async () => {
+				await factory(api);
+			});
+		} catch (error) {
+			runtime.pendingProviderRegistrations.splice(
+				0,
+				runtime.pendingProviderRegistrations.length,
+				...providerRegistrationCheckpoint,
+			);
+			throw error;
+		}
 
 		return { extension, error: null };
 	} catch (err) {
@@ -413,29 +414,201 @@ export async function loadExtensionFromFactory(
 ): Promise<Extension> {
 	const extension = createExtension(name, name);
 	const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus);
-	await runExtensionFactory(factory, api, runtime);
-	return extension;
+	const providerRegistrationCheckpoint = [...runtime.pendingProviderRegistrations];
+	try {
+		await factory(api);
+	} catch (error) {
+		runtime.pendingProviderRegistrations.splice(
+			0,
+			runtime.pendingProviderRegistrations.length,
+			...providerRegistrationCheckpoint,
+		);
+		throw error;
+	}
+}
+
+async function canonicalizeRequiredSpecs(
+	specs: readonly RequiredExtensionSpec[],
+	cwd: string,
+): Promise<readonly RequiredExtensionSpec[]> {
+	try {
+		return await Promise.all(
+			specs.map(async spec => ({
+				path: await fs.realpath(resolvePath(spec.path, cwd)),
+				sha256: spec.sha256,
+			})),
+		);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		throw new RequiredExtensionLoadError("load-failure", `Failed to resolve required extension: ${message}`);
+	}
+}
+
+async function readExtensionSnapshot(extensionPath: string): Promise<{ sha256: string; source: string }> {
+	const bytes = new Uint8Array(await Bun.file(extensionPath).arrayBuffer());
+	return {
+		sha256: Bun.SHA256.hash(bytes, "hex"),
+		source: new TextDecoder().decode(bytes),
+	};
+}
+
+async function writeRequiredExtensionReceipt(
+	receiptPath: string,
+	cwd: string,
+	extensions: readonly RequiredExtensionSpec[],
+): Promise<void> {
+	const targetPath = resolvePath(receiptPath, cwd);
+	const temporaryPath = `${targetPath}.${process.pid}.${randomUUID()}.tmp`;
+	const receipt: RequiredExtensionLoadReceipt = {
+		schema: REQUIRED_EXTENSION_RECEIPT_SCHEMA,
+		pid: process.pid,
+		loaded_at: new Date().toISOString(),
+		extensions,
+	};
+	try {
+		await fs.mkdir(path.dirname(targetPath), { recursive: true });
+		await fs.writeFile(temporaryPath, `${JSON.stringify(receipt, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+		await fs.rename(temporaryPath, targetPath);
+	} catch (error) {
+		await fs.rm(temporaryPath, { force: true }).catch(() => {});
+		throw error;
+	}
+}
+
+async function loadRequiredExtensions(
+	paths: string[],
+	cwd: string,
+	eventBus: EventBus,
+	runtime: ExtensionRuntime,
+	options: RequiredExtensionOptions,
+): Promise<LoadExtensionsResult> {
+	const specs = await canonicalizeRequiredSpecs(options.requiredExtensions, cwd);
+	const expectedByPath = new Map(specs.map(spec => [spec.path, spec]));
+	if (expectedByPath.size !== specs.length || paths.length !== specs.length) {
+		throw new RequiredExtensionLoadError(
+			"unexpected-extension",
+			"Required extension paths must be a unique exact set",
+		);
+	}
+
+	const canonicalPaths: string[] = [];
+	try {
+		for (const extensionPath of paths) canonicalPaths.push(await fs.realpath(resolvePath(extensionPath, cwd)));
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		throw new RequiredExtensionLoadError("load-failure", `Failed to resolve required extension: ${message}`);
+	}
+	const seen = new Set<string>();
+	for (const canonicalPath of canonicalPaths) {
+		if (seen.has(canonicalPath) || !expectedByPath.has(canonicalPath)) {
+			throw new RequiredExtensionLoadError(
+				"unexpected-extension",
+				`Loaded extension path is not in the required set: ${canonicalPath}`,
+				canonicalPath,
+			);
+		}
+		seen.add(canonicalPath);
+	}
+
+	const snapshots =
+		options.sourceSnapshots instanceof Map ? options.sourceSnapshots : new Map(options.sourceSnapshots ?? []);
+	const snapshotDigests = new Map(specs.map(spec => [spec.path, spec.sha256]));
+
+	const extensions: Extension[] = [];
+	for (const canonicalPath of canonicalPaths) {
+		const spec = expectedByPath.get(canonicalPath);
+		if (!spec) {
+			throw new RequiredExtensionLoadError(
+				"unexpected-extension",
+				`Loaded extension path is not in the required set: ${canonicalPath}`,
+				canonicalPath,
+			);
+		}
+		let source: string;
+		let actualSha256: string;
+		try {
+			const existing = snapshots.get(canonicalPath);
+			if (existing !== undefined) {
+				source = existing;
+				actualSha256 = Bun.SHA256.hash(new TextEncoder().encode(source), "hex");
+			} else {
+				const snapshot = await readExtensionSnapshot(canonicalPath);
+				source = snapshot.source;
+				actualSha256 = snapshot.sha256;
+				snapshots.set(canonicalPath, source);
+			}
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			throw new RequiredExtensionLoadError(
+				"load-failure",
+				`Failed to snapshot required extension ${canonicalPath}: ${message}`,
+				canonicalPath,
+			);
+		}
+		if (actualSha256 !== spec.sha256) {
+			throw new RequiredExtensionLoadError(
+				"digest-mismatch",
+				`SHA-256 mismatch for required extension ${canonicalPath}: expected ${spec.sha256}, got ${actualSha256}`,
+				canonicalPath,
+			);
+		}
+		const loaded = await loadExtension(canonicalPath, cwd, eventBus, runtime, {
+			snapshots,
+			snapshotDigests,
+			required: true,
+		});
+		if (loaded.error || !loaded.extension) {
+			throw new RequiredExtensionLoadError(
+				"load-failure",
+				loaded.error ?? `Failed to load required extension: ${canonicalPath}`,
+				canonicalPath,
+			);
+		}
+		extensions.push(loaded.extension);
+	}
+
+	const loadedSet = new Set(extensions.map(extension => extension.resolvedPath));
+	if (loadedSet.size !== specs.length || specs.some(spec => !loadedSet.has(spec.path))) {
+		throw new RequiredExtensionLoadError(
+			"unexpected-extension",
+			"Loaded extension set did not match the required set",
+		);
+	}
+	if (options.extensionLoadReceipt) {
+		try {
+			await writeRequiredExtensionReceipt(options.extensionLoadReceipt, cwd, specs);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			throw new RequiredExtensionLoadError("load-failure", `Failed to write required extension receipt: ${message}`);
+		}
+	}
+	return {
+		extensions,
+		errors: [],
+		runtime,
+		requiredExtensionOptions: { ...options, sourceSnapshots: snapshots },
+	};
 }
 
 /**
  * Load extensions from paths.
- *
- * Module import (the dominant cold-start cost — file I/O plus module
- * evaluation) runs concurrently across extensions; factory binding then runs
- * sequentially in the original path order, so registration semantics
- * (last-wins collisions, shared runtime flag defaults) stay deterministic.
  */
-export async function loadExtensions(paths: string[], cwd: string, eventBus?: EventBus): Promise<LoadExtensionsResult> {
-	const extensions: Extension[] = [];
-	const errors: Array<{ path: string; error: string }> = [];
+export async function loadExtensions(
+	paths: string[],
+	cwd: string,
+	eventBus?: EventBus,
+	requiredOptions?: RequiredExtensionOptions,
+): Promise<LoadExtensionsResult> {
 	const resolvedEventBus = eventBus ?? new EventBus();
 	const runtime = new ExtensionRuntime();
+	if (requiredOptions?.requiredExtensions.length) {
+		return loadRequiredExtensions(paths, cwd, resolvedEventBus, runtime, requiredOptions);
+	}
 
-	const imported = await Promise.all(paths.map(extPath => importExtensionModule(extPath, cwd)));
-
-	for (let i = 0; i < paths.length; i++) {
-		const extPath = paths[i]!;
-		const { extension, error } = await bindExtension(extPath, imported[i]!, cwd, resolvedEventBus, runtime);
+	const extensions: Extension[] = [];
+	const errors: Array<{ path: string; error: string }> = [];
+	for (const extPath of paths) {
+		const { extension, error } = await loadExtension(extPath, cwd, resolvedEventBus, runtime);
 
 		if (error) {
 			errors.push({ path: extPath, error });
@@ -453,7 +626,6 @@ export async function loadExtensions(paths: string[], cwd: string, eventBus?: Ev
 		runtime,
 	};
 }
-
 interface ExtensionManifest {
 	extensions?: string[];
 	themes?: string[];

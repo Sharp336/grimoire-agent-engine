@@ -11,6 +11,7 @@ import { checkJuliaKernelAvailability } from "../eval/jl/kernel";
 import { checkPythonKernelAvailability } from "../eval/py/kernel";
 import { checkRubyKernelAvailability } from "../eval/rb/kernel";
 import type { ToolPathWithSource } from "../extensibility/custom-tools";
+import type { RequiredExtensionOptions } from "../extensibility/extensions";
 import type { Skill } from "../extensibility/skills";
 import type { GoalModeState, GoalRuntime } from "../goals";
 import { GoalTool } from "../goals/tools/goal-tool";
@@ -192,6 +193,8 @@ export interface ToolSession {
 	 * (`<inline-N>`) are NOT included — those are session-local.
 	 */
 	extensionPaths?: string[];
+	/** Verified required-extension specs and source snapshots for child sessions. */
+	requiredExtensionOptions?: RequiredExtensionOptions;
 	/**
 	 * Pre-discovered custom-tool source paths from `.omp/tools/`, `.claude/tools/`,
 	 * plugins, etc. Forwarded to subagents so they skip the FS scan but still

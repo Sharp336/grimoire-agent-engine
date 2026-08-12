@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added digest-pinned required extension loading with fail-closed dependency graph verification.
+
 ## [17.2.15] - 2026-08-12
 
 ### Added

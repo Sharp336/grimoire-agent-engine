@@ -21,7 +21,7 @@ import {
 	setProjectDir,
 	VERSION,
 } from "@oh-my-pi/pi-utils";
-import chalk from "@oh-my-pi/pi-utils/chalk";
+import chalk from "chalk";
 import { reset as resetCapabilities } from "./capability";
 import { type Args, reportUnrecognizedFlags } from "./cli/args";
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
@@ -40,8 +40,8 @@ import {
 	resolveModelScope,
 	type ScopedModel,
 } from "./config/model-resolver";
-import { ModelsConfigFile } from "./config/models-config";
 import { serviceTierSettingToTier } from "./config/service-tier";
+import { ModelsConfigFile } from "./config/models-config";
 import { getDefault, type SettingPath, Settings, type SettingValue, settings } from "./config/settings";
 import { initializeWithSettings } from "./discovery";
 import {
@@ -53,6 +53,7 @@ import {
 import { injectOmpExtensionCliRoots } from "./discovery/omp-extension-roots";
 import { formatExtensionLoadNotifications } from "./extensibility/extensions/load-errors";
 import { loadExtensions } from "./extensibility/extensions/loader";
+import { validateRequiredExtensionOptions } from "./extensibility/extensions/required";
 import { ExtensionRunner } from "./extensibility/extensions/runner";
 import type { ExtensionUIContext } from "./extensibility/extensions/types";
 import { scheduleMarketplaceAutoUpdate } from "./extensibility/plugins/marketplace-auto-update";
@@ -190,9 +191,8 @@ function applyAcpDefaultSettingOverrides(targetSettings: Settings = settings): v
 	applyDefaultSettingOverrides(HOST_DEFAULTED_SETTING_PATHS, targetSettings);
 }
 
-/** Reads a non-TTY stdin stream as prompt text. */
 export async function readPipedInput(): Promise<string | undefined> {
-	if (process.stdin.isTTY === true) return undefined;
+	if (process.stdin.isTTY !== false) return undefined;
 	// stdin is a pipe: a producer that never writes nor closes would block
 	// startup forever with zero output. Say what we're blocked on after 1s.
 	const notice = setTimeout(() => {
@@ -395,6 +395,7 @@ async function loadTrustedSessionExtensions(
  * tool registry and shadow the client-supplied servers (issue #1234).
  */
 export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSessionFactory {
+	let requiredExtensionOptions = args.baseOptions.requiredExtensionOptions;
 	return async cwd => {
 		const nextSettings = await args.settings.cloneForCwd(cwd);
 		const nextSessionManager = SessionManager.create(cwd, args.sessionDir);
@@ -416,7 +417,7 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 				`Trusted extension failed to load: ${trustedExtensions.errors.map(item => item.error).join("; ")}`,
 			);
 		}
-		const { session: nextSession } = await args.createSession({
+		const result = await args.createSession({
 			...args.baseOptions,
 			cwd,
 			sessionManager: nextSessionManager,
@@ -424,6 +425,7 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 			authStorage: args.authStorage,
 			modelRegistry: args.modelRegistry,
 			agentId,
+			requiredExtensionOptions,
 			// Preserve reserve-policy confirmation until ACP capabilities are known
 			// without enabling AskTool or other UI-only session behavior.
 			deferUsageReserveConfirmation: true,
@@ -432,6 +434,8 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 			eventBus,
 			preloadedExtensions: trustedExtensions,
 		});
+		const { session: nextSession } = result;
+		requiredExtensionOptions = result.extensionsResult.requiredExtensionOptions ?? requiredExtensionOptions;
 		if (args.parsedArgs.apiKey && !args.baseOptions.model && nextSession.model) {
 			args.authStorage.setRuntimeApiKey(nextSession.model.provider, args.parsedArgs.apiKey);
 		}
@@ -896,10 +900,10 @@ export async function buildSessionOptions(
 		cwd: parsed.cwd ?? getProjectDir(),
 		autoApprove: parsed.autoApprove ?? false,
 	};
-	const restoringSession = Boolean(parsed.continue || parsed.resume || isForeignSessionImport(parsed));
 	if (parsed.serviceTier !== undefined) {
 		options.openAIServiceTier = serviceTierSettingToTier(parsed.serviceTier) ?? null;
 	}
+	const restoringSession = Boolean(parsed.continue || parsed.resume || isForeignSessionImport(parsed));
 	const cliDirs = parsed.addDir ?? [];
 	const settingsDirs = activeSettings.get("workspace.additionalDirectories");
 	if (cliDirs.length > 0 || settingsDirs.length > 0) {
@@ -1033,10 +1037,9 @@ export async function buildSessionOptions(
 	if (parsed.noPrewalk && (parsed.prewalk || parsed.prewalkInto !== undefined)) {
 		throw new Error("--no-prewalk cannot be combined with --prewalk or --prewalk-into");
 	}
-	const explicitPrewalk = parsed.prewalk === true || parsed.prewalkInto !== undefined;
 	const prewalkEnabled = parsed.noPrewalk
 		? false
-		: explicitPrewalk
+		: parsed.prewalk === true || parsed.prewalkInto !== undefined
 			? true
 			: !restoringSession && activeSettings.get("prewalk.enabled");
 	if (prewalkEnabled) {
@@ -1171,6 +1174,12 @@ export async function buildSessionOptions(
 		const cliExtensionPaths = [...(parsed.extensions ?? []), ...(parsed.hooks ?? [])];
 		if (cliExtensionPaths.length > 0) {
 			options.additionalExtensionPaths = cliExtensionPaths;
+		}
+		const requiredExtensions = validateRequiredExtensionOptions(parsed);
+		if (requiredExtensions) {
+			options.additionalExtensionPaths = requiredExtensions.requiredExtensions.map(extension => extension.path);
+			options.disableExtensionDiscovery = true;
+			options.requiredExtensionOptions = requiredExtensions;
 		}
 
 		if (parsed.noExtensions) {
@@ -1332,10 +1341,6 @@ export async function runRootCommand(
 	// Apply --advisor CLI flag (ephemeral, not persisted)
 	if (parsedArgs.advisor) {
 		settingsInstance.override("advisor.enabled", true);
-	}
-	// Apply --external-thinking CLI flag (ephemeral, not persisted)
-	if (parsedArgs.externalThinking) {
-		settingsInstance.override("externalThinking", true);
 	}
 
 	await logger.time(
@@ -1611,7 +1616,20 @@ export async function runRootCommand(
 		const eventBus = new EventBus();
 		const extensionsResult = parsedArgs.trustedExtensions?.length
 			? await loadTrustedSessionExtensions(sessionOptions, cwd, eventBus)
-			: await loadSessionExtensions(sessionOptions, cwd, settingsInstance, eventBus);
+			: await loadSessionExtensions(sessionOptions, cwd, settingsInstance, eventBus, {
+					requiredExtensions: parsedArgs.requiredExtensions,
+					requiredExtensionSha256: parsedArgs.requiredExtensionSha256,
+					extensionLoadReceipt: parsedArgs.extensionLoadReceipt,
+					extensions: parsedArgs.extensions,
+					hooks: parsedArgs.hooks,
+				});
+		sessionOptions.requiredExtensionOptions =
+			extensionsResult.requiredExtensionOptions ?? sessionOptions.requiredExtensionOptions;
+		if ((parsedArgs.trustedExtensions?.length ?? 0) > 0 && extensionsResult.errors.length > 0) {
+			throw new Error(
+				`Trusted extension failed to load: ${extensionsResult.errors.map(item => item.error).join("; ")}`,
+			);
+		}
 		const extensionFlagSink: ExtensionFlagSink = {
 			getFlags: () => ExtensionRunner.aggregateFlags(extensionsResult.extensions),
 			setFlagValue: (name, value) => {
@@ -1620,11 +1638,6 @@ export async function runRootCommand(
 		};
 		const initialArgs = applyExtensionFlags(extensionFlagSink, rawArgs) ?? parsedArgs;
 		normalizeContinueSessionArgs(initialArgs, rawArgs);
-		if ((parsedArgs.trustedExtensions?.length ?? 0) > 0 && extensionsResult.errors.length > 0) {
-			throw new Error(
-				`Trusted extension failed to load: ${extensionsResult.errors.map(item => item.error).join("; ")}`,
-			);
-		}
 		for (const message of formatExtensionLoadNotifications(extensionsResult.errors)) {
 			if (isInteractive) {
 				notifs.push({ kind: "warn", message });
@@ -1665,18 +1678,6 @@ export async function runRootCommand(
 			stdinIsTTY: process.stdin.isTTY,
 			stdoutIsTTY: process.stdout.isTTY,
 		});
-
-		// Startup changelog is only consumed by interactive mode below; kick the
-		// CHANGELOG.md parse off now so it overlaps session creation instead of
-		// serializing after it.
-		const startupChangelogPromise = isInteractive
-			? logger.time(
-					"main:getChangelogForDisplay",
-					getChangelogForDisplay,
-					parsedArgs,
-					settingsInstance.get("startup.changelogMode"),
-				)
-			: undefined;
 
 		const { session, setToolUIContext, modelFallbackMessage, lspServers, mcpManager } = await createSession({
 			...sessionOptions,
@@ -1737,7 +1738,12 @@ export async function runRootCommand(
 			await runRpcMode(session, mode === "rpc-ui" ? setToolUIContext : undefined, eventBus, rpcInput);
 		} else if (isInteractive) {
 			const versionCheckPromise = checkForNewVersion(VERSION).catch(() => undefined);
-			const startupChangelog = await startupChangelogPromise;
+			const startupChangelog = await logger.time(
+				"main:getChangelogForDisplay",
+				getChangelogForDisplay,
+				parsedArgs,
+				settingsInstance.get("startup.changelogMode"),
+			);
 
 			const modelScopeNotification = buildModelScopeNotification(
 				scopedModels,
