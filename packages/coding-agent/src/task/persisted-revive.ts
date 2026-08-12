@@ -138,10 +138,23 @@ export function createPersistedSubagentReviverFactory(
 							customTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
 						}),
 			});
+			if (!restrictToolNames) {
+				const inheritedHostTools = [
+					...ctx.session.getRpcHostTools(),
+					...[...new Set([...init.tools, ...ctx.session.getMountedXdevToolNames()])].flatMap(name => {
+						const tool = ctx.session.getToolByName(name);
+						return tool ? [tool] : [];
+					}),
+				].filter(tool => !session.getToolByName(tool.name));
+				if (inheritedHostTools.length > 0) await session.refreshRpcHostTools(inheritedHostTools);
+			}
 			// Clamp the active set to the persisted list: createAgentSession's
 			// `alwaysInclude` can re-add non-defaultInactive extension/custom tools
-			// the original run didn't carry. Unknown/missing names are ignored.
-			await session.setActiveToolsByName([...init.tools, ...session.getMountedXdevToolNames()]);
+			await session.setActiveToolsByName([
+				...init.tools,
+				...ctx.session.getMountedXdevToolNames(),
+				...session.getMountedXdevToolNames(),
+			]);
 			// Cold revives must drive registry status themselves — createAgentSession
 			// doesn't wire this generically (the live path does it in the executor).
 			// Without it the idle-TTL timer never clears on a turn and the lifecycle

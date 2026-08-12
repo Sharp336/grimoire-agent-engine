@@ -4295,6 +4295,11 @@ export class AgentSession {
 		return this.#tools.getMountedXdevToolNames();
 	}
 
+	/** Current host-owned RPC tools, for child-session reconstruction. */
+	getRpcHostTools(): AgentTool[] {
+		return this.#tools.getRpcHostTools();
+	}
+
 	/** Whether the edit tool is registered in this session. */
 	get hasEditTool(): boolean {
 		return this.#tools.hasEditTool;

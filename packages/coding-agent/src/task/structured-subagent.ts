@@ -438,6 +438,13 @@ function buildExecutorOptions(
 		rules: session.rules,
 		preloadedExtensionPaths: restrictToolNames ? [] : session.extensionPaths,
 		preloadedCustomToolPaths: restrictToolNames ? [] : session.customToolPaths,
+		parentHostTools: restrictToolNames
+			? []
+			: (session.getMountedXdevToolNames?.() ?? []).flatMap(name => {
+					if (session.hasBuiltInTool?.(name)) return [];
+					const tool = session.getToolByName?.(name);
+					return tool ? [tool] : [];
+				}),
 		localProtocolOptions,
 		parentArtifactManager: session.getArtifactManager?.() ?? undefined,
 		parentHindsightSessionState: session.getHindsightSessionState?.(),

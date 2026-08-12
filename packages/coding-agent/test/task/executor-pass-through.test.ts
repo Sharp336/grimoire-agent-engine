@@ -4,7 +4,7 @@
  * paid for. Regression guard for issue #2190.
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { type AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -35,6 +35,8 @@ function createMockSession(onPrompt: (params: { emit: (event: AgentSessionEvent)
 		getActiveToolNames: () => ["read", "yield"],
 		getEnabledToolNames: () => ["read", "yield"],
 		setActiveToolsByName: async (_toolNames: string[]) => {},
+		getToolByName: () => undefined,
+		refreshRpcHostTools: async () => {},
 		subscribe: (listener: (event: AgentSessionEvent) => void) => {
 			listeners.push(listener);
 			return () => {
@@ -226,14 +228,21 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		const mcpManager = {
 			getTools: () => [{ name: "mcp__private_read", label: "private/read" }],
 		} as unknown as MCPManager;
+		const hostTool = { name: "ida_execute_python" } as AgentTool;
 
-		const result = await runSubprocess({ ...baseOptions, id: "normal-child", mcpManager });
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "normal-child",
+			mcpManager,
+			parentHostTools: [hostTool],
+		});
 
 		expect(result.exitCode).toBe(0);
 		const forwarded = spy.mock.calls[0]?.[0];
 		expect(forwarded?.enableMCP).toBe(true);
 		expect(forwarded?.mcpManager).toBe(mcpManager);
 		expect(forwarded?.customTools?.map(tool => tool.name)).toEqual(["mcp__private_read"]);
+		expect(forwarded?.toolNames).toBeUndefined();
 	});
 
 	it("preserves the legacy result shape when no output schema is selected", async () => {
