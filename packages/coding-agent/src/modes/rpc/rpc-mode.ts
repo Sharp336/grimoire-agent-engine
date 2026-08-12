@@ -3117,7 +3117,7 @@ export async function runRpcMode(
      id,
      "ui_autocomplete_suggest",
      await interactiveSurface.suggest(
-      command.id,
+      command.operationId ?? command.id,
       command.channelId,
       command.generation,
       command.lines,

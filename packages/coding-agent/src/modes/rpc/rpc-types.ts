@@ -440,6 +440,7 @@ export type RpcCommand =
   type: "ui_autocomplete_suggest";
   channelId: string;
   generation: number;
+  operationId?: string;
   lines: string[];
   cursorLine: number;
   cursorCol: number;
