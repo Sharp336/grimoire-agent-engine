@@ -196,6 +196,9 @@ function isStructuredThinkingResult(
 
 interface ThinkingRendererCache {
 	text: string;
+	responseId: string | undefined;
+	itemId: string | undefined;
+	thinkingSignature: string | undefined;
 	entries: Array<{ result: AssistantThinkingRenderResult; dirty: boolean } | undefined>;
 }
 /**
@@ -741,8 +744,20 @@ export class AssistantMessageComponent extends Container {
 	): ThinkingExtensionComponents {
 		const key = `${contentIndex}:${thinkingIndex}`;
 		let cache = this.#thinkingRendererCache.get(key);
-		if (!cache || cache.text !== text) {
-			cache = { text, entries: [] };
+		if (
+			!cache ||
+			cache.text !== text ||
+			cache.responseId !== message.responseId ||
+			cache.itemId !== content.itemId ||
+			cache.thinkingSignature !== content.thinkingSignature
+		) {
+			cache = {
+				text,
+				responseId: message.responseId,
+				itemId: content.itemId,
+				thinkingSignature: content.thinkingSignature,
+				entries: [],
+			};
 			this.#thinkingRendererCache.set(key, cache);
 		}
 
@@ -860,7 +875,15 @@ export class AssistantMessageComponent extends Container {
 				const display = resolveThinkingDisplay(content, this.proseOnlyThinking);
 				if (display.visible && !this.hideThinkingBlock) {
 					const cache = this.#thinkingRendererCache.get(`${contentIndex}:${thinkingIndex}`);
-					if (!cache || cache.text !== display.text) return false;
+					if (
+						!cache ||
+						cache.text !== display.text ||
+						cache.responseId !== message.responseId ||
+						cache.itemId !== content.itemId ||
+						cache.thinkingSignature !== content.thinkingSignature
+					) {
+						return false;
+					}
 					if (cache.entries.some(entry => entry?.dirty)) return false;
 				}
 				thinkingIndex++;

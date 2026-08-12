@@ -366,6 +366,42 @@ describe("AssistantMessageComponent thinking renderers", () => {
 		expect(rendered).not.toContain("translation loading");
 	});
 
+	it("reruns renderers when provider metadata arrives without a text change", () => {
+		const signatures: Array<string | undefined> = [];
+		const component = new AssistantMessageComponent(
+			{
+				...createAssistantMessage(""),
+				content: [{ type: "thinking", thinking: "Stable thinking." }],
+			},
+			false,
+			undefined,
+			[
+				context => {
+					signatures.push(context.content.thinkingSignature);
+					return new Text(context.content.thinkingSignature ?? "pending signature", 1, 0);
+				},
+			],
+		);
+
+		component.updateContent({
+			...createAssistantMessage(""),
+			responseId: "response-final",
+			content: [
+				{
+					type: "thinking",
+					thinking: "Stable thinking.",
+					itemId: "reasoning-item",
+					thinkingSignature: "signature-final",
+				},
+			],
+		});
+
+		const rendered = Bun.stripANSI(component.render(120).join("\n"));
+		expect(signatures).toEqual([undefined, "signature-final"]);
+		expect(rendered).toContain("signature-final");
+		expect(rendered).not.toContain("pending signature");
+	});
+
 	it("mounts a replacement when an async renderer becomes ready after streaming stops", async () => {
 		let ready = false;
 		let renderRequests = 0;
