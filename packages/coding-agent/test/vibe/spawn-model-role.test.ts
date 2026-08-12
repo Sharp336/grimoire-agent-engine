@@ -9,6 +9,7 @@
  * chain and vibe children silently retry on the `default` role's chain.
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
@@ -18,7 +19,17 @@ import type { SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { type VibeCli, VibeSessionRegistry } from "@oh-my-pi/pi-coding-agent/vibe/runtime";
 
-function makeParentSession(settings: Settings): ToolSession {
+type ParentOptions = {
+	hostTools?: AgentTool[];
+	mountedNames?: string[];
+	enableMCP?: boolean;
+	restrictToolNames?: boolean;
+	mcpManager?: unknown;
+	extensionPaths?: string[];
+	customToolPaths?: unknown[];
+};
+
+function makeParentSession(settings: Settings, options: ParentOptions = {}): ToolSession {
 	return {
 		cwd: "/tmp",
 		settings,
@@ -27,13 +38,24 @@ function makeParentSession(settings: Settings): ToolSession {
 		// No session file: spawn skips lifecycle persistence and stays in-memory.
 		getSessionFile: () => null,
 		getArtifactsDir: () => null,
+		getRpcHostTools: () => options.hostTools ?? [],
+		getMountedXdevToolNames: () => options.mountedNames ?? [],
+		enableMCP: options.enableMCP,
+		restrictToolNames: options.restrictToolNames,
+		mcpManager: options.mcpManager,
+		extensionPaths: options.extensionPaths,
+		customToolPaths: options.customToolPaths,
 		taskDepth: 0,
 		enableLsp: false,
 	} as unknown as ToolSession;
 }
 
 /** Spawn one worker and capture the ExecutorOptions the vibe path hands the executor. */
-async function spawnAndCaptureOptions(cli: VibeCli, settings: Settings): Promise<ExecutorOptions> {
+async function spawnAndCaptureOptions(
+	cli: VibeCli,
+	settings: Settings,
+	parentOptions: ParentOptions = {},
+): Promise<ExecutorOptions> {
 	const captured = Promise.withResolvers<ExecutorOptions>();
 	vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
 		captured.resolve(options);
@@ -54,7 +76,7 @@ async function spawnAndCaptureOptions(cli: VibeCli, settings: Settings): Promise
 	});
 
 	const registry = VibeSessionRegistry.global();
-	await registry.spawn(makeParentSession(settings), { cli, prompt: "work" });
+	await registry.spawn(makeParentSession(settings, parentOptions), { cli, prompt: "work" });
 	return captured.promise;
 }
 
@@ -103,5 +125,60 @@ describe("vibe worker spawn model role", () => {
 
 		expect(options.modelOverride).toEqual(["openai-codex/sol"]);
 		expect(options.modelRole).toBeUndefined();
+	});
+
+	it("forwards parent host tools with their mounted presentation", async () => {
+		let idaCalls = 0;
+		const ida = {
+			name: "ida_execute_python",
+			execute: async () => {
+				idaCalls++;
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		} as unknown as AgentTool;
+		const browser = { name: "browser", execute: async () => ({ content: [] }) } as unknown as AgentTool;
+
+		const options = await spawnAndCaptureOptions("good", Settings.isolated(), {
+			hostTools: [ida, browser],
+			mountedNames: [ida.name],
+		});
+
+		expect(options.parentHostTools).toEqual([ida, browser]);
+		expect(options.parentMountedHostToolNames).toEqual([ida.name]);
+		await options.parentHostTools?.[0]?.execute("call", {}, undefined, () => {});
+		expect(idaCalls).toBe(1);
+	});
+
+	it("does not forward MCP host tools when the parent disables MCP", async () => {
+		const options = await spawnAndCaptureOptions("good", Settings.isolated(), {
+			enableMCP: false,
+			hostTools: [{ name: "mcp__poe_native_query" } as AgentTool],
+			mountedNames: ["mcp__poe_native_query"],
+			mcpManager: {} as unknown,
+		});
+
+		expect(options.enableMCP).toBe(false);
+		expect(options.mcpManager).toBeUndefined();
+		expect(options.parentHostTools).toEqual([]);
+		expect(options.parentMountedHostToolNames).toEqual([]);
+	});
+
+	it("does not forward any host capability to a restricted worker", async () => {
+		const options = await spawnAndCaptureOptions("good", Settings.isolated(), {
+			restrictToolNames: true,
+			hostTools: [{ name: "ida_execute_python" } as AgentTool, { name: "mcp__poe_native_query" } as AgentTool],
+			mountedNames: ["ida_execute_python", "mcp__poe_native_query"],
+			mcpManager: {} as unknown,
+			extensionPaths: ["/parent/extensions.ts"],
+			customToolPaths: [{ path: "/parent/tool.ts" }],
+		});
+
+		expect(options.restrictToolNames).toBe(true);
+		expect(options.enableMCP).toBe(false);
+		expect(options.mcpManager).toBeUndefined();
+		expect(options.parentHostTools).toEqual([]);
+		expect(options.parentMountedHostToolNames).toEqual([]);
+		expect(options.preloadedExtensionPaths).toEqual([]);
+		expect(options.preloadedCustomToolPaths).toEqual([]);
 	});
 });

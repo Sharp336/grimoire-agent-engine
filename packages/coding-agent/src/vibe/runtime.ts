@@ -32,6 +32,7 @@ import { generateTaskName } from "../task/name-generator";
 import { AgentOutputManager } from "../task/output-manager";
 import { type AgentDefinition, type AgentProgress, oneLineLabel, type SingleResult } from "../task/types";
 import type { ToolSession } from "../tools";
+import { isMCPToolName } from "../tools/builtin-names";
 import { formatDuration } from "../tools/render-utils";
 import { ToolError } from "../tools/tool-errors";
 import { calculateTokensPerSecond } from "../utils/token-rate";
@@ -1405,6 +1406,15 @@ export class VibeSessionRegistry {
 		signal: AbortSignal,
 		onProgress: (progress: AgentProgress) => void,
 	): Promise<ExecutorOptions> {
+		const restrictToolNames = session.restrictToolNames === true;
+		const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
+		const parentHostTools = (session.getRpcHostTools?.() ?? []).filter(
+			tool => enableMCP || !isMCPToolName(tool.name),
+		);
+		const parentHostToolNames = new Set(parentHostTools.map(tool => tool.name));
+		const parentMountedHostToolNames = restrictToolNames
+			? []
+			: (session.getMountedXdevToolNames?.() ?? []).filter(name => parentHostToolNames.has(name));
 		const sessionFile = session.getSessionFile();
 		const sessionArtifactsDir = sessionFile ? sessionFile.slice(0, -6) : null;
 		const artifactsDir = sessionArtifactsDir ?? path.join(os.tmpdir(), `omp-vibe-${Snowflake.next()}`);
@@ -1438,14 +1448,18 @@ export class VibeSessionRegistry {
 			authStorage: session.authStorage,
 			modelRegistry: session.modelRegistry,
 			settings: session.settings,
-			mcpManager: session.mcpManager ?? MCPManager.instance(),
+			mcpManager: enableMCP ? (session.mcpManager ?? MCPManager.instance()) : undefined,
 			contextFiles: session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md"),
 			skills: [...(session.skills ?? [])],
 			workspaceTree: session.workspaceTree,
 			promptTemplates: session.promptTemplates,
 			rules: session.rules,
-			preloadedExtensionPaths: session.extensionPaths,
-			preloadedCustomToolPaths: session.customToolPaths,
+			preloadedExtensionPaths: restrictToolNames ? [] : session.extensionPaths,
+			preloadedCustomToolPaths: restrictToolNames ? [] : session.customToolPaths,
+			restrictToolNames,
+			enableMCP,
+			parentHostTools: restrictToolNames ? [] : parentHostTools,
+			parentMountedHostToolNames,
 			localProtocolOptions,
 			parentArtifactManager: session.getArtifactManager?.() ?? undefined,
 			parentHindsightSessionState: session.getHindsightSessionState?.(),
