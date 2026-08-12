@@ -384,6 +384,14 @@ function buildExecutorOptions(
 	};
 	const restrictToolNames = policy.planMode || session.restrictToolNames === true;
 	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
+	const parentHostTools = new Map((session.getRpcHostTools?.() ?? []).map(tool => [tool.name, tool]));
+	if (!restrictToolNames) {
+		for (const name of session.getMountedXdevToolNames?.() ?? []) {
+			if (session.hasBuiltInTool?.(name) || parentHostTools.has(name)) continue;
+			const tool = session.getToolByName?.(name);
+			if (tool) parentHostTools.set(name, tool);
+		}
+	}
 	return {
 		cwd: session.cwd,
 		additionalDirectories: session.additionalDirectories,
@@ -438,13 +446,7 @@ function buildExecutorOptions(
 		rules: session.rules,
 		preloadedExtensionPaths: restrictToolNames ? [] : session.extensionPaths,
 		preloadedCustomToolPaths: restrictToolNames ? [] : session.customToolPaths,
-		parentHostTools: restrictToolNames
-			? []
-			: (session.getMountedXdevToolNames?.() ?? []).flatMap(name => {
-					if (session.hasBuiltInTool?.(name)) return [];
-					const tool = session.getToolByName?.(name);
-					return tool ? [tool] : [];
-				}),
+		parentHostTools: restrictToolNames ? [] : [...parentHostTools.values()],
 		localProtocolOptions,
 		parentArtifactManager: session.getArtifactManager?.() ?? undefined,
 		parentHindsightSessionState: session.getHindsightSessionState?.(),

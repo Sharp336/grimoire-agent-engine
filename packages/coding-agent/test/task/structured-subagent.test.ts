@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	artifactsDirsFromRegistry,
@@ -400,6 +401,28 @@ describe("structured subagent primitive", () => {
 		expect(ids.sort()).toEqual(["Worker", "Worker-2"]);
 		expect(sharedSession.agentOutputManager).toBeDefined();
 		for (const run of settled) await fs.rm(run.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("forwards top-level RPC host tools once", async () => {
+		mockDiscovery();
+		const essentialTool = { name: "essential_host" } as AgentTool;
+		const mountedTool = { name: "mounted_host" } as AgentTool;
+		const parentSession = session();
+		Object.assign(parentSession, {
+			getRpcHostTools: () => [essentialTool, mountedTool],
+			getMountedXdevToolNames: () => [mountedTool.name],
+			hasBuiltInTool: () => false,
+			getToolByName: (name: string) => (name === mountedTool.name ? mountedTool : undefined),
+		});
+		let parentHostTools: AgentTool[] | undefined;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			parentHostTools = options.parentHostTools;
+			return result();
+		});
+
+		await runStructuredSubagent(request({ session: parentSession }));
+
+		expect(parentHostTools).toEqual([essentialTool, mountedTool]);
 	});
 
 	it("suppresses plan capability sources while preserving non-plan propagation", async () => {
