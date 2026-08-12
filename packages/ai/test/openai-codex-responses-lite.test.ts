@@ -129,13 +129,11 @@ function createCodexFetchMock(sse: string, onRequest: (captured: CapturedCodexRe
 }
 
 describe("openai-codex optional response controls", () => {
-	it("defaults reasoning.summary on and forwards explicit controls", async () => {
+	it("preserves provider-default summary omission and forwards explicit controls", async () => {
 		const model = createCodexModel("gpt-5.5");
 
-		// The backend emits no reasoning summaries at all unless `summary` is
-		// sent, so an unset `reasoningSummary` must still request one.
 		const defaulted = await transformRequestBody({ model: model.id }, model, { reasoningEffort: "medium" });
-		expect(defaulted.reasoning).toEqual({ effort: "medium", summary: "auto" });
+		expect(defaulted.reasoning).toEqual({ effort: "medium" });
 		expect("context" in (defaulted.reasoning ?? {})).toBe(false);
 		expect("text" in defaulted).toBe(false);
 		expect("stream_options" in defaulted).toBe(false);
@@ -198,7 +196,7 @@ describe("openai-codex optional response controls", () => {
 			responsesLite: true,
 			reasoningContext: "current_turn",
 		});
-		expect(noneEffort.reasoning).toEqual({ effort: "none", summary: "auto", context: "all_turns" });
+		expect(noneEffort.reasoning).toEqual({ effort: "none", context: "all_turns" });
 
 		const plainRequest = await transformRequestBody({ model: model.id }, model, {
 			responsesLite: false,

@@ -1865,6 +1865,7 @@ function resolveGoogleThinkingOff<TApi extends Api>(model: Model<TApi>): NonNull
 		thinking.level = "MINIMAL";
 	}
 	return thinking;
+}
 
 function resolveOpenAiReasoningSummary<TApi extends Api>(
 	model: Model<TApi>,

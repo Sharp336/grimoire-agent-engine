@@ -641,20 +641,22 @@ describe("openai-codex streaming", () => {
 			});
 		};
 
-		const result = await streamSimple(model, context, {
-			apiKey: token,
-			fetch: fetchMock,
-			reasoning: Effort.XHigh,
-			reasoningSummary: "detailed",
-		}).result();
+		await withEnv({ PI_CODEX_CONCURRENT_SUMMARIES: "1" }, async () => {
+			const result = await streamSimple(model, context, {
+				apiKey: token,
+				fetch: fetchMock,
+				reasoning: Effort.XHigh,
+				reasoningSummary: "detailed",
+			}).result();
 
-		expect(result.stopReason).toBe("stop");
-		expect(capturedBody?.reasoning).toEqual({
-			effort: "xhigh",
-			summary: "detailed",
-			context: "all_turns",
+			expect(result.stopReason).toBe("stop");
+			expect(capturedBody?.reasoning).toEqual({
+				effort: "xhigh",
+				summary: "detailed",
+				context: "all_turns",
+			});
+			expect(capturedBody?.stream_options).toEqual({ reasoning_summary_delivery: "sequential_cutoff" });
 		});
-		expect(capturedBody?.stream_options).toEqual({ reasoning_summary_delivery: "sequential_cutoff" });
 	});
 
 	it("omits optional response controls from default SimpleStreamOptions", async () => {
