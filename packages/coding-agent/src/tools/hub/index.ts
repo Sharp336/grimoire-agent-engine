@@ -338,10 +338,13 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 
 	/**
 	 * Unified wait: race the caller's running jobs against incoming peer
-	 * messages. Returns on the FIRST settled job, the first matching message,
-	 * window expiry, or abort — never "when everything finishes"; the model
-	 * re-issues to keep waiting. With no job legs it degrades to a pure
-	 * message wait; with no messaging it is exactly the old job poll.
+	 * messages. By default returns on the FIRST settled job, the first
+	 * matching message, window expiry, or abort — never "when everything
+	 * finishes"; the model re-issues to keep waiting. With `all: true` it
+	 * instead blocks until every watched job settles (an explicit timeoutMs
+	 * or a matching peer message still short-circuits). With no job legs it
+	 * degrades to a pure message wait; with no messaging it is exactly the
+	 * old job poll.
 	 */
 	async #executeWait(
 		params: HubParams,
