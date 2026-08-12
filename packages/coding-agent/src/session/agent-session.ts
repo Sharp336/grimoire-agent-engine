@@ -48,6 +48,7 @@ import {
 	type CompactionResult,
 	calculatePromptTokens,
 	collectEntriesForBranchSummary,
+	DEFAULT_SHAKE_CONFIG,
 	estimateTokens,
 	generateBranchSummary,
 	type ShakeConfig,
@@ -333,7 +334,7 @@ import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
 import { SessionTools, type SessionToolsHost } from "./session-tools";
-import type { ShakeMode, ShakeResult } from "./shake-types";
+import { formatShakeSummary, type ShakeMode, type ShakeResult } from "./shake-types";
 import { ToolChoiceQueue } from "./tool-choice-queue";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 import { TurnRecovery, type TurnRecoveryHost } from "./turn-recovery";
@@ -553,6 +554,12 @@ export class AgentSession {
 	#turnIndex = 0;
 	#messageEndPersistenceTail: Promise<void> = Promise.resolve();
 	#pendingMessageEndPersistence = new Map<string, Promise<void>>();
+
+	// Periodic shake state (shake.interval setting)
+	#shakeToolCallCounter = 0;
+	#shakeNeedsAgentSync = false;
+	#midRunShakeDue = false;
+	#midRunShakeRunning = false;
 	#persistedMessageKeys: { anchor: string; keys: Set<string> } | undefined;
 
 	// Custom commands (TypeScript slash commands)
@@ -1165,6 +1172,19 @@ export class AgentSession {
 			}
 			this.#loopGuards.recordTurn(messages, context);
 			await this.#prewalk.advanceAtTurnEnd(messages, context);
+			// Deferred mid-run periodic shake: the counter crossed shake.interval
+			// during this turn's tool calls. It runs on the awaited turn-end path
+			// because that path owns the live loop array — the rebuilt messages can
+			// be spliced in place before the next model call, so a long tool-heavy
+			// run actually shrinks its live prompt, not just persisted history.
+			// Runs before the turn is delivered to advisors so their runtime/backlog
+			// receives the shaken (pruned) turn instead of the full unshaken tool
+			// result, and before mid-run compaction so the pruned estimate can
+			// lower the compaction trigger.
+			if (this.#midRunShakeDue) {
+				this.#midRunShakeDue = false;
+				await this.#runMidRunShake(messages, context);
+			}
 			await this.#advisors.onPrimaryTurnEnd(messages, context?.willContinue, signal);
 			await this.#maintenance.maintainContextMidRun(messages, signal, context);
 		});
@@ -2477,7 +2497,13 @@ export class AgentSession {
 			this.#ttsr.onTurnStart();
 		}
 
-		if (event.type === "turn_end") this.#ttsr.onTurnEnd();
+		if (event.type === "turn_end") {
+			this.#ttsr.onTurnEnd();
+			// The mid-run periodic shake fires from the awaited onTurnEnd hook,
+			// which owns the live loop array and can splice rebuilt messages into
+			// the next model call's context. This fire-and-forget listener path
+			// cannot, so it must not run the shake here.
+		}
 		// Finalize the tool-choice queue's in-flight yield after tools have executed.
 		// This must happen at turn_end (not message_end) because onInvoked handlers
 		// run during tool execution, which happens between message_end and turn_end.
@@ -2678,7 +2704,7 @@ export class AgentSession {
 		// Check auto-retry and auto-compaction after agent completes
 		if (event.type === "agent_end") {
 			const settledMessages = event.messages;
-			const activeMessages = this.agent.state.messages;
+			let activeMessages = this.agent.state.messages;
 			// TTSR retry work runs concurrently and clears the live flag before
 			// maintenance can emit agent_end, so preserve the state at settle entry.
 			const ttsrAbortPendingAtAgentEnd = this.#ttsr.abortPending;
@@ -2929,6 +2955,17 @@ export class AgentSession {
 				compactionResult = await compactionTask;
 			}
 			await this.#recovery.onErrorSettledWithoutRetry(msg, compactionResult);
+			// When compaction pruned the trailing assistant (overflow / length stop
+			// with no recovery path), periodic shake would rebuild agent.state from
+			// persisted entries and reintroduce the pruned assistant into the
+			// prompt. Consume the pending counter and sync flag — a mid-run interval
+			// shake may have set #shakeNeedsAgentSync before this turn failed — so
+			// no later agent_end fires a rebuild. Runs before the early returns
+			// below: turns ending mid-tool-use skip the shake call entirely.
+			if (compactionResult.tailPruned) {
+				this.#shakeToolCallCounter = 0;
+				this.#shakeNeedsAgentSync = false;
+			}
 			// Stop-time todo reconciliation only fires at a text-only final stop. A run
 			// that ends still mid-tool-use (deadline hit, context full, etc.) skips the
 			// reminder so we don't pile a follow-up onto an already in-flight turn.
@@ -2950,6 +2987,16 @@ export class AgentSession {
 			) {
 				await emitAgentEndNotification(compactionResult.continuationScheduled ? { willContinue: true } : undefined);
 				return;
+			}
+
+			// When compaction pruned the trailing assistant (overflow / length
+			// stop with no recovery path), skip periodic shake: the pending
+			// counter/sync were consumed above. Allow normal agent_end processing
+			// (session_stop hooks, rewind, todo checks) to continue.
+			if (!compactionResult.tailPruned) {
+				// Periodic shake — independent of compaction strategy/auto-compaction
+				await this.#runPeriodicShake();
+				activeMessages = this.agent.state.messages;
 			}
 			if (msg.stopReason !== "error") {
 				if (this.#enforceRewindBeforeYield()) {
@@ -3215,8 +3262,17 @@ export class AgentSession {
 			break;
 		}
 	}
-
 	#afterToolCall(ctx: AfterToolCallContext): AfterToolCallResult | undefined {
+		// Periodic shake counter: bump per tool call and flag a mid-run shake at
+		// the interval boundary. The shake itself fires from turn_end so the tool
+		// result is already emitted and persisted — shake() then sees it in the
+		// session branch.
+		this.#shakeToolCallCounter++;
+		const interval = this.settings.get("shake.interval") as number;
+		if (Number.isFinite(interval) && interval > 0 && this.#shakeToolCallCounter >= interval) {
+			this.#midRunShakeDue = true;
+		}
+
 		if (
 			this.#isTerminalYieldToolResult({
 				toolName: ctx.toolCall.name,
@@ -4504,8 +4560,112 @@ export class AgentSession {
 	}
 
 	/** Reduce stored context with the selected shake strategy. */
-	shake(mode: ShakeMode, opts: { config?: ShakeConfig; signal?: AbortSignal } = {}): Promise<ShakeResult> {
+	shake(
+		mode: ShakeMode,
+		opts: { config?: ShakeConfig; signal?: AbortSignal; skipAgentUpdate?: boolean } = {},
+	): Promise<ShakeResult> {
 		return this.#maintenance.shake(mode, opts);
+	}
+
+	/**
+	 * Periodic tool-output pruning (shake) every N tool calls, independent of the
+	 * compaction strategy. The counter is incremented per tool call via the
+	 * afterToolCall hook; this method fires shake("elide") when the counter
+	 * reaches the configured interval during the agent_end handler.
+	 *
+	 * Setting `shake.interval` to 0 (default) or a non-positive number disables.
+	 */
+	async #runPeriodicShake(): Promise<void> {
+		const interval = this.settings.get("shake.interval") as number;
+		if (!Number.isFinite(interval) || interval <= 0) {
+			this.#shakeToolCallCounter = 0;
+			this.#midRunShakeDue = false;
+			return;
+		}
+		if (this.#shakeToolCallCounter < interval && !this.#shakeNeedsAgentSync) return;
+
+		if (this.isCompacting || this.agent.state.isStreaming) return;
+
+		// At interval and not blocked — fire and reset
+		this.#shakeToolCallCounter = 0;
+		this.#midRunShakeDue = false;
+		logger.debug("Periodic shake firing", {
+			interval,
+			wasCompacting: this.isCompacting,
+			wasStreaming: this.agent.state.isStreaming,
+		});
+		try {
+			const wasSync = this.#shakeNeedsAgentSync;
+			this.#shakeNeedsAgentSync = false;
+			const result = await this.shake("elide", { config: DEFAULT_SHAKE_CONFIG });
+			// When shake was triggered by a pending mid-run sync (#shakeNeedsAgentSync),
+			// explicitly rebuild agent.state even if shake found no new regions. The
+			// mid-run pass (skipAgentUpdate:true) already rewrote persisted entries, so
+			// agent.state.messages may still carry unshaken tool output.
+			if (wasSync && result.blocksDropped === 0 && result.tokensFreed === 0) {
+				const sessionContext = this.buildDisplaySessionContext();
+				this.agent.replaceMessages(sessionContext.messages);
+				this.#advisors.resetAllRuntimes("shake");
+				this.#closeCodexProviderSessionsForHistoryRewrite();
+			}
+			if (result.blocksDropped > 0 || result.tokensFreed > 0) {
+				this.emitNotice("info", formatShakeSummary(result), "shake");
+			}
+		} catch (error) {
+			logger.warn("Periodic shake failed", { error: error instanceof Error ? error.message : String(error) });
+		}
+	}
+	/**
+	 * Mid-run periodic shake, fired from the awaited onTurnEnd hook during an
+	 * autonomous agent loop. Prunes persisted session entries (skipAgentUpdate
+	 * — the loop is still streaming, so agent state is not rebuilt here) and
+	 * splices the rebuilt display context into the live loop array in place,
+	 * mirroring maintainContextMidRun. The running currentContext.messages is
+	 * read by the next model call, so rewriting persisted history alone would
+	 * not reduce the live prompt in long tool-heavy runs. #shakeNeedsAgentSync
+	 * defers the full agent-state rebuild to the agent_end handler.
+	 */
+	async #runMidRunShake(activeMessages: AgentMessage[], context: AgentTurnEndContext | undefined): Promise<void> {
+		// Guard against concurrent entry from parallel tool calls
+		if (this.#midRunShakeRunning) return;
+		this.#midRunShakeRunning = true;
+		try {
+			const interval = this.settings.get("shake.interval") as number;
+			if (!Number.isFinite(interval) || interval <= 0) {
+				this.#shakeToolCallCounter = 0;
+				return;
+			}
+			this.#shakeToolCallCounter = 0;
+			this.#shakeNeedsAgentSync = true;
+			// Wait for (and persist) this turn's messages so shake() sees the
+			// tool result that crossed the interval in the session branch.
+			await this.#messageEndPersistenceTail;
+			// If the just-finished turn is out of order on the branch, bail without
+			// shaking: the next agent_end would otherwise re-enter #runPeriodicShake
+			// with the same unsafe branch and rebuild from stale tool results.
+			if (!(await this.#persistTurnMessagesForMidRunCompaction(context))) {
+				this.#shakeNeedsAgentSync = false;
+				return;
+			}
+			const result = await this.shake("elide", {
+				config: DEFAULT_SHAKE_CONFIG,
+				skipAgentUpdate: true,
+			});
+			// Splice the rebuilt context into the live loop array before the
+			// next model call reads it — same in-place pattern as
+			// maintainContextMidRun.
+			const rebuilt = this.buildDisplaySessionContext().messages;
+			if (rebuilt !== activeMessages) {
+				activeMessages.splice(0, activeMessages.length, ...rebuilt);
+			}
+			this.emitNotice("info", formatShakeSummary(result), "shake");
+		} catch (error) {
+			logger.warn("Mid-run shake failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		} finally {
+			this.#midRunShakeRunning = false;
+		}
 	}
 
 	/** Compact the active session history. */
@@ -6523,6 +6683,7 @@ export class AgentSession {
 			this.#scheduledHiddenNextTurnGeneration = undefined;
 			this.#queuedMessageDrainBlocked = false;
 			this.#usagePreflightReadyForNextModelCall = false;
+			this.#shakeToolCallCounter = 0;
 
 			this.sessionManager.appendThinkingLevelChange(this.thinkingLevel, this.configuredThinkingLevel());
 			this.sessionManager.appendServiceTierChange(this.#models.serviceTierEntry());
@@ -6641,6 +6802,7 @@ export class AgentSession {
 			this.#memory.rekeyForCurrentSessionId();
 			this.#advisors.reattachRecorderFeeds();
 			advisorRecordersDetached = false;
+			this.#shakeToolCallCounter = 0;
 			await this.#memory.resetContextForNewTranscript();
 
 			// Emit session_switch event with reason "fork" to hooks

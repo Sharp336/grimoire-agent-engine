@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Added periodic shake: the new `shake.interval` setting prunes tool output from stored context every N tool calls, independent of the compaction strategy. Fires mid-turn at `turn_end` (leaving the live agent state untouched) and syncs agent state at `agent_end`; skipped when compaction pruned the trailing assistant ([#6352](https://github.com/danvincent/oh-my-pi/pull/6352)).
 ## [17.2.15] - 2026-08-12
 
 ### Added

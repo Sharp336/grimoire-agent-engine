@@ -84,6 +84,12 @@ import type { ShakeMode, ShakeResult } from "./shake-types";
 export type CompactionCheckResult = Readonly<{
 	deferredHandoff: boolean;
 	continuationScheduled: boolean;
+	/** Set when #checkCompaction removed the trailing assistant from agent.state
+	 *  (e.g. context overflow / length stop with no recovery path) but returned
+	 *  without scheduling continuation. Periodic shake must NOT run in this case —
+	 *  it would rebuild agent.state from persisted entries and reintroduce the
+	 *  pruned assistant into the next turn's prompt. */
+	tailPruned?: boolean;
 	automaticContinuationBlocked?: boolean;
 	historyRewritten?: boolean;
 }>;
@@ -92,6 +98,11 @@ export type CompactionCheckResult = Readonly<{
 export const COMPACTION_CHECK_NONE: CompactionCheckResult = {
 	deferredHandoff: false,
 	continuationScheduled: false,
+};
+export const COMPACTION_CHECK_NONE_TAIL_PRUNED: CompactionCheckResult = {
+	deferredHandoff: false,
+	continuationScheduled: false,
+	tailPruned: true,
 };
 const COMPACTION_CHECK_DEFERRED_HANDOFF: CompactionCheckResult = {
 	deferredHandoff: true,
@@ -457,7 +468,10 @@ export class SessionMaintenance {
 	 *
 	 * No-op (zero counts) when nothing is eligible.
 	 */
-	async shake(mode: ShakeMode, opts: { config?: ShakeConfig; signal?: AbortSignal } = {}): Promise<ShakeResult> {
+	async shake(
+		mode: ShakeMode,
+		opts: { config?: ShakeConfig; signal?: AbortSignal; skipAgentUpdate?: boolean } = {},
+	): Promise<ShakeResult> {
 		if (mode === "images") {
 			const { removed } = await this.#host.dropImages();
 			return { mode, toolResultsDropped: 0, blocksDropped: 0, imagesDropped: removed, tokensFreed: 0 };
@@ -525,10 +539,15 @@ export class SessionMaintenance {
 		this.#host.recordAnchoredHistoryRewrite(anchoredTokensRemoved);
 
 		await this.#host.sessionManager.rewriteEntries();
-		const sessionContext = this.#host.buildDisplaySessionContext();
-		this.#host.agent.replaceMessages(sessionContext.messages);
-		this.#host.resetAdvisorRuntimes("shake");
-		this.#host.closeCodexProviderSessionsForHistoryRewrite();
+		// Periodic shake fires mid-loop (turn_end) with skipAgentUpdate so the
+		// live agent state is not rebuilt while the agent is still streaming; the
+		// agent_end sync pass rebuilds it once the turn settles.
+		if (!opts.skipAgentUpdate) {
+			const sessionContext = this.#host.buildDisplaySessionContext();
+			this.#host.agent.replaceMessages(sessionContext.messages);
+			this.#host.resetAdvisorRuntimes("shake");
+			this.#host.closeCodexProviderSessionsForHistoryRewrite();
+		}
 
 		return {
 			mode,
@@ -1239,7 +1258,10 @@ export class SessionMaintenance {
 					autoContinue,
 				});
 			}
-			return COMPACTION_CHECK_NONE;
+			// Neither promotion nor compaction is available — the trailing assistant
+			// stays pruned from agent.state while its branch entry remains, so
+			// periodic shake must not rebuild agent.state from the branch.
+			return COMPACTION_CHECK_NONE_TAIL_PRUNED;
 		}
 		// A context promotion can land while the failing call is already in
 		// flight (or on a run whose loop predates the switch): the overflow
@@ -1322,7 +1344,9 @@ export class SessionMaintenance {
 			logger.warn("response.incomplete with no recovery path (promotion + compaction both unavailable)", {
 				model: `${assistantMessage.provider}/${assistantMessage.model}`,
 			});
-			return COMPACTION_CHECK_NONE;
+			// Same pruned-tail contract as the overflow no-recovery path: the dead
+			// turn stays out of agent.state, so periodic shake must not rebuild it.
+			return COMPACTION_CHECK_NONE_TAIL_PRUNED;
 		}
 
 		// Stale-result pass runs every turn, before any threshold gating: it is

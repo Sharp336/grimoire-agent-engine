@@ -139,7 +139,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Agent",
 		"Git",
 	],
-	context: ["General", "Compaction", "Rules (TTSR)", "Experimental"],
+	context: ["General", "Compaction", "Shake", "Rules (TTSR)", "Experimental"],
 	memory: ["General", "Auto-Learn", "Mnemopi", "Hindsight"],
 	files: ["Editing", "Reading", "Read Summaries", "LSP"],
 	shell: ["Bash", "Eval & Runtimes"],
@@ -2374,6 +2374,26 @@ export const SETTINGS_SCHEMA = {
 			label: "Elide Uneventful Results",
 			description:
 				"Prune tool results flagged contextually useless (no matches, timed-out waits) once consumed (cache-aware)",
+		},
+	},
+
+	// Periodic shake (independent of compaction strategy)
+	"shake.interval": {
+		type: "number",
+		default: 0,
+		ui: {
+			tab: "context",
+			group: "Shake",
+			label: "Shake Interval",
+			description:
+				"Tool-output pruning (shake) every N tool calls; 0 = disabled. Runs independently of auto-compaction to keep tool tax low between full compaction cycles.",
+			options: [
+				{ value: "0", label: "Disabled", description: "Do not auto-shake" },
+				{ value: "5", label: "Every 5 tool calls" },
+				{ value: "10", label: "Every 10 tool calls" },
+				{ value: "20", label: "Every 20 tool calls" },
+				{ value: "50", label: "Every 50 tool calls" },
+			],
 		},
 	},
 
