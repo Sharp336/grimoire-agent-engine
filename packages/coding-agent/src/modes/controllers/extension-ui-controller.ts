@@ -1,5 +1,5 @@
 import type { Component, OverlayHandle, TUI } from "@oh-my-pi/pi-tui";
-import { Container, Ellipsis, replaceTabs, Spacer, Text, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
+import { Container, replaceTabs, Spacer, Text } from "@oh-my-pi/pi-tui";
 import type { CollabUiRequestDraft, CollabUiSelectItem } from "@oh-my-pi/pi-wire";
 import { KeybindingsManager } from "../../config/keybindings";
 import type {
@@ -40,10 +40,7 @@ const ASK_NEXT_OPTION = "Next →";
 function guestAskSelectHelpText(controls: string, supplementary: string | undefined): string {
 	if (supplementary === undefined) return controls;
 	const normalized = replaceTabs(supplementary).replace(/\s+/g, " ").trim();
-	const width = Math.max(1, (process.stdout.columns ?? 80) - 2);
-	const bounded =
-		visibleWidth(normalized) <= width ? normalized : truncateToWidth(normalized, width, Ellipsis.Unicode);
-	return `${controls}\n${bounded}`;
+	return normalized ? `${controls}\n${normalized}` : controls;
 }
 
 interface CollabDialogWinner {

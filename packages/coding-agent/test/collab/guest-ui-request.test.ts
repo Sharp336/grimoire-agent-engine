@@ -863,7 +863,7 @@ describe("guest ask multi-select Next gating (#4375 PRRT_kwDOQxs0bc6OFbDW)", () 
 		}
 	});
 
-	it("normalizes and bounds supplementary help on every guest Ask selector step (PRRT_kwDOQxs0bc6YZMYL)", async () => {
+	it("normalizes and preserves supplementary help on every guest Ask selector step (PRRT_kwDOQxs0bc6YZMYL)", async () => {
 		const originalColumns = Object.getOwnPropertyDescriptor(process.stdout, "columns");
 		Object.defineProperty(process.stdout, "columns", { configurable: true, value: 20 });
 		const ctx = makeAskHostContext();
@@ -893,13 +893,24 @@ describe("guest ask multi-select Next gating (#4375 PRRT_kwDOQxs0bc6OFbDW)", () 
 				{ helpText: `\t  Plan\n first   setting ${"x".repeat(80)}` },
 			);
 
+			const expectedSupplementaryHelp = `Plan first setting ${"x".repeat(80)}`;
 			const single = await nextUiRequest(guest);
 			const singleHelp = selectHelpLines(single);
 			expect(singleHelp[0]).toBe("up/down navigate  enter select  esc cancel");
-			expect(singleHelp[1]).toStartWith("Plan first");
-			expect(singleHelp[1]?.length).toBeLessThanOrEqual(18);
-			expect(singleHelp[1]).toEndWith("…");
-			guest.socket.send({ t: "ui-response", reqId: single.request.reqId, value: "Option A" });
+			expect(singleHelp[1]).toBe(expectedSupplementaryHelp);
+			guest.socket.send({
+				t: "ui-response",
+				reqId: single.request.reqId,
+				value: "Other (type your own)",
+			});
+
+			const otherEditor = await nextUiRequest(guest);
+			expect(otherEditor.request.kind).toBe("editor");
+			guest.socket.send({ t: "ui-response", reqId: otherEditor.request.reqId, value: undefined });
+
+			const repeatedSingle = await nextUiRequest(guest);
+			expect(selectHelpLines(repeatedSingle)).toEqual(singleHelp);
+			guest.socket.send({ t: "ui-response", reqId: repeatedSingle.request.reqId, value: "Option A" });
 
 			const multiInitial = await nextUiRequest(guest);
 			const multiInitialHelp = selectHelpLines(multiInitial);
@@ -918,6 +929,28 @@ describe("guest ask multi-select Next gating (#4375 PRRT_kwDOQxs0bc6OFbDW)", () 
 			if (settled?.kind === "submit") {
 				expect(settled.results.map(item => item.selectedOptions)).toEqual([["Option A"], ["Option A"]]);
 			}
+
+			const whitespaceResult = controller.showAskDialog(
+				[
+					{
+						id: "whitespace",
+						question: "Whitespace help?",
+						options: [{ label: "Option A" }],
+					},
+				],
+				{ helpText: "\t \n " },
+			);
+			const whitespaceHelp = await nextUiRequest(guest);
+			if (whitespaceHelp.request.kind !== "select") {
+				throw new Error(`expected select, got ${whitespaceHelp.request.kind}`);
+			}
+			expect(whitespaceHelp.request.helpText).toBe("up/down navigate  enter select  esc cancel");
+			guest.socket.send({
+				t: "ui-response",
+				reqId: whitespaceHelp.request.reqId,
+				value: "Option A",
+			});
+			expect((await whitespaceResult)?.kind).toBe("submit");
 			guest.socket.close();
 		} finally {
 			await host.stop("test done");
