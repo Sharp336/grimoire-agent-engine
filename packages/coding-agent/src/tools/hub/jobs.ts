@@ -207,17 +207,15 @@ export function buildJobResult(
 	// Consuming a delivery here (acknowledgeDeliveries below) means no
 	// `async-result` follow-up will ever carry those task jobs' usage — persist
 	// it on the result details instead so the session's usage index can bill
-	// background subagent cost/tokens exactly like a delivery would. Only jobs
-	// whose usage no other path will count: deliveries this call actually
-	// removed, plus jobs that settled while suppressed (foreground `hub` wait
-	// watches them, so their delivery was never enqueued). A job already
-	// delivered via an `async-result` (or acknowledged by an earlier hub call)
-	// still sits in retention with its usage intact, and re-aggregating it
-	// would double-bill the session.
+	// background subagent cost/tokens exactly like a delivery would. The
+	// manager returns exactly the ids this call consumed: deliveries removed
+	// from the queue, deliveries that were in flight when suppression landed
+	// (their async-result is cancelled before it can form), and jobs that
+	// settled while suppressed (`deliverySkipped`). Each is billed once, with
+	// the skip marker consumed, so a later snapshot of the same retained job
+	// cannot bill it again.
 	const consumedIds = new Set(manager.acknowledgeDeliveries(completed.map(j => j.id)));
-	const consumedUsage = aggregateUsages(
-		jobResults.filter(j => consumedIds.has(j.id) || manager.getJob(j.id)?.deliverySkipped === true).map(j => j.usage),
-	);
+	const consumedUsage = aggregateUsages(jobResults.filter(j => consumedIds.has(j.id)).map(j => j.usage));
 
 	const lines: string[] = [];
 

@@ -51,8 +51,9 @@ export interface AsyncJob {
 	/**
 	 * True when the job settled while its delivery was suppressed (foreground
 	 * `hub` wait/jobs consumption), so the delivery was never enqueued and no
-	 * `async-result` will ever carry this job's usage. Consumers folding a
-	 * consumed job's usage into their own result must count these too.
+	 * `async-result` will ever carry this job's usage. `acknowledgeDeliveries`
+	 * consumes the marker when the owning hub result bills the job, so a later
+	 * snapshot of the same retained job cannot bill it twice.
 	 */
 	deliverySkipped?: boolean;
 	/**
@@ -396,11 +397,15 @@ export class AsyncJobManager {
 
 	/**
 	 * Acknowledge deliveries for the given job ids: mark them suppressed and
-	 * drop any matching queued delivery. Returns the ids whose queued delivery
-	 * this call actually removed — callers folding a consumed job's usage into
-	 * their own result must only count those, never a job already delivered via
-	 * an `async-result` follow-up or acknowledged by an earlier call (both leave
-	 * no queued delivery, so re-counting it would double-bill the session).
+	 * drop any matching queued delivery. Returns the ids whose usage the caller
+	 * must now bill — deliveries this call removed from the queue, deliveries
+	 * already in flight when suppression landed (their `async-result` is
+	 * cancelled before it can form), and jobs that settled while suppressed
+	 * (`deliverySkipped`). The skip marker is consumed here, so a later
+	 * snapshot of the same retained job is not billed twice. A job whose
+	 * delivery was already fully delivered via an `async-result` (or
+	 * acknowledged by an earlier call) is never returned, since re-counting it
+	 * would double-bill the session.
 	 */
 	acknowledgeDeliveries(jobIds: string[]): string[] {
 		const uniqueJobIds = Array.from(new Set(jobIds.map(id => id.trim()).filter(id => id.length > 0)));
@@ -410,17 +415,27 @@ export class AsyncJobManager {
 			this.#suppressedDeliveries.add(jobId);
 		}
 
-		const suppressed: string[] = [];
+		const consumed: string[] = [];
 		const uniqueSet = new Set(uniqueJobIds);
 		for (const delivery of this.#deliveries) {
-			if (uniqueSet.has(delivery.jobId)) suppressed.push(delivery.jobId);
+			if (uniqueSet.has(delivery.jobId)) consumed.push(delivery.jobId);
+		}
+		for (const delivery of this.#inFlightDeliveries) {
+			if (uniqueSet.has(delivery.jobId)) consumed.push(delivery.jobId);
+		}
+		for (const jobId of uniqueJobIds) {
+			const job = this.#jobs.get(jobId);
+			if (job?.deliverySkipped === true) {
+				job.deliverySkipped = false;
+				consumed.push(jobId);
+			}
 		}
 		this.#deliveries.splice(
 			0,
 			this.#deliveries.length,
 			...this.#deliveries.filter(delivery => !this.isDeliverySuppressed(delivery.jobId)),
 		);
-		return suppressed;
+		return consumed;
 	}
 
 	/**

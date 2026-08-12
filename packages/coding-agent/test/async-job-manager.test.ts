@@ -350,7 +350,10 @@ describe("AsyncJobManager", () => {
 		expect(subagentCompletions).toEqual([{ jobId: targetJobId, text: "subagent result" }]);
 		expect(manager.hasPendingDeliveries({ ownerId: "3-AuthLoader" })).toBe(false);
 
-		expect(manager.acknowledgeDeliveries([mainJobId])).toEqual([]);
+		// The main job's delivery is in flight (its sink is still awaiting
+		// release): acknowledging it consumes that delivery, so the id is
+		// returned and no async-result can form for it.
+		expect(manager.acknowledgeDeliveries([mainJobId])).toEqual([mainJobId]);
 		expect(manager.hasPendingDeliveries({ ownerId: "0-Main" })).toBe(false);
 		releaseMainDelivery();
 		await Bun.sleep(0);

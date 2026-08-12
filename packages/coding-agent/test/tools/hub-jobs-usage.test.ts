@@ -121,4 +121,66 @@ describe("hub job consumption carries background task usage", () => {
 		expect(result.details?.jobs?.[0]?.status).toBe("completed");
 		expect(result.details?.usage).toEqual(USAGE);
 	});
+
+	test("a delivery already in flight when a hub snapshot consumes it still bills its usage", async () => {
+		// Contract: the delivery loop can hand a settled job's completion to the
+		// session sink (in flight) before the idle async-result flush forms. A
+		// hub wait/jobs snapshot landing in that window suppresses the in-flight
+		// delivery — no async-result will ever follow — so the consuming result
+		// must still carry the job's usage or the background subagent's cost is
+		// lost for that path.
+		const sinkEntered = Promise.withResolvers<void>();
+		const releaseSink = Promise.withResolvers<void>();
+		const manager = new AsyncJobManager({
+			onJobComplete: async () => {
+				sinkEntered.resolve();
+				await releaseSink.promise;
+			},
+		});
+		const id = manager.register("task", "bg_5", async ({ reportUsage }) => {
+			reportUsage?.(USAGE);
+			return "done";
+		});
+		await manager.waitForAll();
+		await sinkEntered.promise; // delivery is in flight, async-result not yet formed
+
+		const job = manager.getJob(id)!;
+		const result = buildJobResult(makeSession(manager), manager, "jobs", [job], [], []);
+		expect(result.details?.jobs?.[0]?.status).toBe("completed");
+		expect(result.details?.usage).toEqual(USAGE);
+
+		// Releasing the sink cannot form a second async-result for the consumed
+		// job: the suppressed in-flight delivery never enqueues, and a later
+		// snapshot of the same retained job must not bill it again.
+		releaseSink.resolve();
+		await Bun.sleep(0);
+		const second = buildJobResult(makeSession(manager), manager, "jobs", [job], [], []);
+		expect(second.details?.jobs?.[0]?.status).toBe("completed");
+		expect(second.details?.usage).toBeUndefined();
+	});
+
+	test("a suppressed-settled job is not re-billed by a later hub snapshot", async () => {
+		// Contract: a foreground `hub wait` watches running jobs, so a job that
+		// completes during the wait never enqueues a delivery. The first hub
+		// result to consume that job bills its usage; a later snapshot of the
+		// same retained job must NOT bill it again, or the session overreports
+		// cost/tokens whenever the agent inspects completed jobs more than once
+		// before retention expires.
+		const manager = new AsyncJobManager({ onJobComplete: async () => {} });
+		const id = manager.register("task", "bg_6", async ({ reportUsage }) => {
+			reportUsage?.(USAGE);
+			return "done";
+		});
+		manager.watchJobs([id]);
+		await manager.waitForAll();
+		manager.unwatchJobs([id]);
+
+		const job = manager.getJob(id)!;
+		const first = buildJobResult(makeSession(manager), manager, "wait", [job], [], []);
+		expect(first.details?.usage).toEqual(USAGE);
+
+		const second = buildJobResult(makeSession(manager), manager, "wait", [job], [], []);
+		expect(second.details?.jobs?.[0]?.status).toBe("completed");
+		expect(second.details?.usage).toBeUndefined();
+	});
 });
