@@ -190,6 +190,46 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(await toolNamesFor(harness)).not.toContain("goal");
 	});
 
+	it("starts /new outside goal mode with the pre-goal tools and a fresh transcript", async () => {
+		const previousTools = harness.session.getActiveToolNames();
+		await harness.mode.handleGoalModeCommand("Ship the release");
+		harness.session.sessionManager.appendMessage({ role: "user", content: "prior turn", timestamp: Date.now() });
+		const previousSessionFile = harness.session.sessionFile;
+
+		expect(harness.mode.goalModeEnabled).toBe(true);
+		expect(harness.session.getActiveToolNames()).toContain("goal");
+
+		await harness.mode.handleClearCommand();
+
+		expect(harness.session.sessionFile).not.toBe(previousSessionFile);
+		expect(harness.mode.goalModeEnabled).toBe(false);
+		expect(harness.mode.goalModePaused).toBe(false);
+		expect(harness.session.getGoalModeState()).toBeUndefined();
+		expect(harness.session.getActiveToolNames()).toEqual(previousTools);
+		expect(harness.session.sessionManager.buildSessionContext()).toMatchObject({ messages: [], mode: "none" });
+		expect(harness.session.sessionManager.getBranch().some(entry => entry.type === "mode_change")).toBe(false);
+	});
+
+	it("reconciles paused goal state when /new fails before the replacement transcript commits", async () => {
+		const previousTools = harness.session.getActiveToolNames();
+		await harness.mode.handleGoalModeCommand("Ship the release");
+		const previousSessionFile = harness.session.sessionFile;
+		vi.spyOn(harness.session.sessionManager, "newSession").mockRejectedValueOnce(new Error("new session failed"));
+
+		await expect(harness.mode.handleClearCommand()).rejects.toThrow("new session failed");
+
+		expect(harness.session.sessionFile).toBe(previousSessionFile);
+		expect(harness.mode.goalModeEnabled).toBe(false);
+		expect(harness.mode.goalModePaused).toBe(true);
+		expect(harness.session.getGoalModeState()).toMatchObject({
+			enabled: false,
+			goal: { status: "paused" },
+		});
+		expect(harness.session.getActiveToolNames()).toEqual(previousTools);
+		expect(harness.session.sessionManager.buildSessionContext().mode).toBe("goal_paused");
+		expect(harness.session.sessionManager.getBranch().filter(entry => entry.type === "mode_change")).toHaveLength(2);
+	});
+
 	it("replaces the active goal via /goal set", async () => {
 		await harness.mode.handleGoalModeCommand("Ship the release");
 		const originalGoal = harness.session.getGoalModeState()?.goal;

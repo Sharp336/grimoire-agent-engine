@@ -247,6 +247,81 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		expect(session?.getActiveToolNames()).toEqual(["read"]);
 	});
 
+	it("starts /new outside plan mode with restored tools and fresh plan-first guidance", async () => {
+		const writeTool = makeTool("write");
+		const rebuildGate = { fail: false, calls: 0 };
+		const created = createHarness(Settings.isolated({ "compaction.enabled": false }), {
+			extraRegistryTools: [writeTool],
+			builtInToolNames: ["read", "write"],
+			rebuildGate,
+		});
+		await created.init({ suppressWelcomeIntro: true });
+		await created.handlePlanModeCommand();
+		created.sessionManager.appendMessage({ role: "user", content: "prior turn", timestamp: Date.now() });
+		const previousSessionFile = session!.sessionFile;
+
+		expect(created.planModeEnabled).toBe(true);
+		expect(session!.getActiveToolNames()).toEqual(["read", "write"]);
+		expect(session!.systemPrompt.join("\n")).not.toContain(PLAN_FIRST_GUIDANCE);
+
+		await created.handleClearCommand();
+
+		expect(session!.sessionFile).not.toBe(previousSessionFile);
+		expect(created.planModeEnabled).toBe(false);
+		expect(created.planModePaused).toBe(false);
+		expect(created.planModePlanFilePath).toBeUndefined();
+		expect(session!.getPlanModeState()).toBeUndefined();
+		expect(session!.peekPlanProposalHandler()).toBeUndefined();
+		expect(session!.getActiveToolNames()).toEqual(["read"]);
+		expect(session!.systemPrompt.join("\n")).toContain(PLAN_FIRST_GUIDANCE);
+		expect(created.sessionManager.buildSessionContext()).toMatchObject({ messages: [], mode: "none" });
+		expect(created.sessionManager.getBranch().some(entry => entry.type === "mode_change")).toBe(false);
+	});
+
+	it("keeps plan controller and session state aligned when /new fails before commit", async () => {
+		const writeTool = makeTool("write");
+		const rebuildGate = { fail: false, calls: 0 };
+		const created = createHarness(Settings.isolated({ "compaction.enabled": false }), {
+			extraRegistryTools: [writeTool],
+			builtInToolNames: ["read", "write"],
+			rebuildGate,
+		});
+		await created.init({ suppressWelcomeIntro: true });
+		await created.handlePlanModeCommand();
+		const previousSessionFile = session!.sessionFile;
+		const planTools = session!.getActiveToolNames();
+		vi.spyOn(session!.sessionManager, "newSession").mockRejectedValueOnce(new Error("new session failed"));
+
+		await expect(created.handleClearCommand()).rejects.toThrow("new session failed");
+
+		expect(session!.sessionFile).toBe(previousSessionFile);
+		expect(created.planModeEnabled).toBe(true);
+		expect(created.planModePaused).toBe(false);
+		expect(session!.getPlanModeState()?.enabled).toBe(true);
+		expect(session!.peekPlanProposalHandler()).toBeDefined();
+		expect(session!.getActiveToolNames()).toEqual(planTools);
+		expect(created.sessionManager.buildSessionContext().mode).toBe("plan");
+	});
+
+	it("preserves paused plan controller state when /new fails before commit", async () => {
+		const created = createHarness(Settings.isolated({ "plan.defaultOnStartup": true, "compaction.enabled": false }));
+		await created.init({ suppressWelcomeIntro: true });
+		await created.handlePlanModeCommand();
+		const previousSessionFile = session!.sessionFile;
+		const pausedTools = session!.getActiveToolNames();
+		vi.spyOn(session!.sessionManager, "newSession").mockRejectedValueOnce(new Error("new session failed"));
+
+		await expect(created.handleClearCommand()).rejects.toThrow("new session failed");
+
+		expect(session!.sessionFile).toBe(previousSessionFile);
+		expect(created.planModeEnabled).toBe(false);
+		expect(created.planModePaused).toBe(true);
+		expect(session!.getPlanModeState()).toBeUndefined();
+		expect(session!.getActiveToolNames()).toEqual(pausedTools);
+		expect(created.sessionManager.buildSessionContext().mode).toBe("plan_paused");
+		expect(created.sessionManager.getBranch().filter(entry => entry.type === "mode_change")).toHaveLength(2);
+	});
+
 	it("keeps plan mode retryable when prior-tool restoration fails", async () => {
 		const writeTool = makeTool("write");
 		const rebuildGate = { fail: false };

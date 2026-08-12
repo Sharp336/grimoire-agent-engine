@@ -2396,8 +2396,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		if (event.type === "goal_updated") {
-			// Handle drop before clearing goalModeEnabled so #exitGoalMode can
-			// still restore the previous tool set while the flag is true.
+			// Route drops through normal teardown so the saved tools and
+			// controller state clear together.
 			if (event.state?.goal?.status === "dropped") {
 				await this.#exitGoalMode({ reason: "dropped", silent: true });
 				return;
@@ -2516,40 +2516,18 @@ export class InteractiveMode implements InteractiveModeContext {
 	async #clearTransientModeState(options?: {
 		preserveVibe?: boolean;
 		vibeScopeAlreadySuspended?: boolean;
+		restorePreviousPlanModel?: boolean;
 	}): Promise<void> {
 		if (this.planModeEnabled || this.planModePaused) {
-			this.session.setPlanModeState(undefined);
-			try {
-				if (this.#planModePreviousTools !== undefined) {
-					await this.session.setActiveToolsByName(this.#planModePreviousTools);
-				}
-			} finally {
-				this.session.setPlanProposalHandler?.(null);
-				this.planModeEnabled = false;
-				this.planModePaused = false;
-				this.planModePlanFilePath = undefined;
-				this.#planModePreviousTools = undefined;
-				this.#planModePreviousModelState = undefined;
-				this.#pendingModelSwitch = undefined;
-				this.#pendingPlanModelSwitch = false;
-				this.#planModeHasEntered = false;
-				this.#updatePlanModeStatus();
-			}
+			await this.#exitPlanMode({
+				silent: true,
+				deferModelRestore: options?.restorePreviousPlanModel !== true,
+				sessionTransition: true,
+			});
 		}
 
 		if (this.goalModeEnabled || this.goalModePaused) {
-			if (this.#goalModePreviousTools !== undefined) {
-				await this.session.setActiveToolsByName(this.#goalModePreviousTools);
-			}
-			this.session.setGoalModeState(undefined);
-			this.goalModeEnabled = false;
-			this.goalModePaused = false;
-			this.#goalModePreviousTools = undefined;
-			this.#goalTurnHadToolCalls = false;
-			this.#goalContinuationTurnInFlight = false;
-			this.#goalSuppressNextContinuation = false;
-			this.#cancelGoalContinuation();
-			this.#updateGoalModeStatus();
+			await this.#exitGoalMode({ silent: true, sessionTransition: true });
 		}
 
 		if (this.vibeModeEnabled && !options?.preserveVibe) {
@@ -2571,8 +2549,36 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
+	async reconcileModeAfterNewSession(): Promise<void> {
+		await this.#reconcileModeFromSession({ restorePreviousPlanModel: true });
+	}
+
+	async reconcileModeAfterFailedNewSession(replacementCommitted: boolean): Promise<void> {
+		if (replacementCommitted) {
+			await this.#clearTransientModeState({ restorePreviousPlanModel: true });
+			return;
+		}
+
+		const goalState = this.session.getGoalModeState();
+		if (
+			goalState?.enabled === true ||
+			(!this.goalModeEnabled && !this.goalModePaused && this.#goalModePreviousTools === undefined)
+		) {
+			return;
+		}
+		await this.#exitGoalMode({
+			silent: true,
+			paused: goalState?.goal.status === "paused",
+			reason: goalState?.goal.status === "dropped" ? "dropped" : undefined,
+			sessionTransition: goalState === undefined,
+		});
+	}
+
 	/** Reconcile mode state from session entries on resume/switch. */
-	async #reconcileModeFromSession(options?: { preserveActiveGoal?: boolean }): Promise<void> {
+	async #reconcileModeFromSession(options?: {
+		preserveActiveGoal?: boolean;
+		restorePreviousPlanModel?: boolean;
+	}): Promise<void> {
 		const vibeScopeAlreadySuspended = this.#vibeScopeSuspendedForSwitch;
 		this.#vibeScopeSuspendedForSwitch = false;
 		const sessionContext = this.sessionManager.buildSessionContext();
@@ -2592,7 +2598,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		// flags and settings, and that set — not a historical one — is what exiting
 		// vibe must restore.
 		const vibeToolsetLostToTeardown = this.vibeModeEnabled && !preserveVibe;
-		await this.#clearTransientModeState({ preserveVibe, vibeScopeAlreadySuspended });
+		await this.#clearTransientModeState({
+			preserveVibe,
+			vibeScopeAlreadySuspended,
+			restorePreviousPlanModel: options?.restorePreviousPlanModel,
+		});
 		await VibeSessionRegistry.global().rehydrate(vibeSession);
 		const goalEnabled = this.session.settings.get("goal.enabled");
 		if (!goalEnabled && (sessionContext.mode === "goal" || sessionContext.mode === "goal_paused")) {
@@ -2774,8 +2784,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
-	async #exitPlanMode(options?: { silent?: boolean; paused?: boolean; deferModelRestore?: boolean }): Promise<void> {
-		if (!this.planModeEnabled) {
+	async #exitPlanMode(options?: {
+		silent?: boolean;
+		paused?: boolean;
+		deferModelRestore?: boolean;
+		sessionTransition?: boolean;
+	}): Promise<void> {
+		const sessionTransition = options?.sessionTransition === true;
+		if (!this.planModeEnabled && !(sessionTransition && this.planModePaused)) {
 			return;
 		}
 
@@ -2785,6 +2801,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const planModeModelState = this.session.model
 			? { model: this.session.model, thinkingLevel: this.session.configuredThinkingLevel() }
 			: undefined;
+		let exitCommitted = sessionTransition;
 		this.session.setPlanModeState(undefined);
 		try {
 			if (this.#planModePreviousTools !== undefined) {
@@ -2801,47 +2818,60 @@ export class InteractiveMode implements InteractiveModeContext {
 			// (compact-approval path): otherwise the stale plan switch survives and
 			// flushPendingModelSwitch() later clobbers the restored/execution model.
 			if (this.#planModePreviousModelState) this.#clearPendingPlanModelSwitch();
+			exitCommitted = true;
 		} catch (error) {
-			this.session.setPlanModeState(planModeState);
-			if (
-				planModeModelState &&
-				(!modelsAreEqual(this.session.model, planModeModelState.model) ||
-					this.session.configuredThinkingLevel() !== planModeModelState.thinkingLevel)
-			) {
-				try {
-					await this.#restorePlanPreviousModel(planModeModelState);
-				} catch (rollbackError) {
-					logger.warn("Failed to restore plan model after plan exit failure", { error: String(rollbackError) });
+			if (!sessionTransition) {
+				this.session.setPlanModeState(planModeState);
+				if (
+					planModeModelState &&
+					(!modelsAreEqual(this.session.model, planModeModelState.model) ||
+						this.session.configuredThinkingLevel() !== planModeModelState.thinkingLevel)
+				) {
+					try {
+						await this.#restorePlanPreviousModel(planModeModelState);
+					} catch (rollbackError) {
+						logger.warn("Failed to restore plan model after plan exit failure", { error: String(rollbackError) });
+					}
 				}
-			}
-			const enabledTools = this.session.getEnabledToolNames();
-			const mountedTools = this.session.getMountedXdevToolNames();
-			if (
-				enabledTools.length !== planModeTools.length ||
-				enabledTools.some((name, index) => name !== planModeTools[index]) ||
-				mountedTools.length !== planModeMountedTools.length ||
-				mountedTools.some((name, index) => name !== planModeMountedTools[index])
-			) {
-				try {
-					await this.session.setActiveToolPresentation(planModeTools, planModeMountedTools);
-				} catch (rollbackError) {
-					logger.warn("Failed to restore plan tools after plan exit failure", { error: String(rollbackError) });
+				const enabledTools = this.session.getEnabledToolNames();
+				const mountedTools = this.session.getMountedXdevToolNames();
+				if (
+					enabledTools.length !== planModeTools.length ||
+					enabledTools.some((name, index) => name !== planModeTools[index]) ||
+					mountedTools.length !== planModeMountedTools.length ||
+					mountedTools.some((name, index) => name !== planModeMountedTools[index])
+				) {
+					try {
+						await this.session.setActiveToolPresentation(planModeTools, planModeMountedTools);
+					} catch (rollbackError) {
+						logger.warn("Failed to restore plan tools after plan exit failure", { error: String(rollbackError) });
+					}
 				}
 			}
 			throw error;
+		} finally {
+			if (exitCommitted) {
+				this.session.setPlanProposalHandler?.(null);
+				this.planModeEnabled = false;
+				// Suppress cache-miss marker on the next turn: plan exit changes the system
+				// prompt, which predictably invalidates the cache.
+				this.lastAssistantUsage = undefined;
+				this.planModePaused = options?.paused ?? false;
+				this.planModePlanFilePath = undefined;
+				this.#planModePreviousTools = undefined;
+				if (!options?.deferModelRestore || sessionTransition) this.#planModePreviousModelState = undefined;
+				if (sessionTransition) {
+					this.#pendingModelSwitch = undefined;
+					this.#pendingPlanModelSwitch = false;
+					this.#planModeHasEntered = false;
+				}
+				this.#updatePlanModeStatus();
+			}
 		}
-		this.session.setPlanProposalHandler?.(null);
-		this.planModeEnabled = false;
-		// Suppress cache-miss marker on the next turn: plan exit changes the system
-		// prompt, which predictably invalidates the cache.
-		this.lastAssistantUsage = undefined;
-		this.planModePaused = options?.paused ?? false;
-		this.planModePlanFilePath = undefined;
-		this.#planModePreviousTools = undefined;
-		if (!options?.deferModelRestore) this.#planModePreviousModelState = undefined;
-		this.#updatePlanModeStatus();
 		const paused = options?.paused ?? false;
-		this.sessionManager.appendModeChange(paused ? "plan_paused" : "none");
+		if (!sessionTransition) {
+			this.sessionManager.appendModeChange(paused ? "plan_paused" : "none");
+		}
 		if (!options?.silent) {
 			this.showStatus(paused ? "Plan mode paused." : "Plan mode disabled.");
 		}
@@ -2883,28 +2913,44 @@ export class InteractiveMode implements InteractiveModeContext {
 		silent?: boolean;
 		paused?: boolean;
 		reason?: "completed" | "paused" | "dropped";
+		sessionTransition?: boolean;
 	}): Promise<void> {
+		const sessionTransition = options?.sessionTransition === true;
 		const previousTools = this.#goalModePreviousTools;
-		if (this.goalModeEnabled && previousTools) {
-			await this.session.setActiveToolsByName(previousTools);
-		}
 		const currentState = this.session.getGoalModeState();
-		if (options?.reason === "completed") {
+		let exitCommitted = sessionTransition;
+		if (sessionTransition) {
 			this.session.setGoalModeState(undefined);
-			this.sessionManager.appendModeChange("none");
-			this.sessionManager.appendCustomEntry("goal-completed", {
-				objective: currentState?.goal?.objective,
-				tokensUsed: currentState?.goal?.tokensUsed,
-				tokenBudget: currentState?.goal?.tokenBudget,
-				timeUsedSeconds: currentState?.goal?.timeUsedSeconds,
-			});
 		}
-		this.goalModeEnabled = false;
-		this.goalModePaused = options?.paused ?? false;
-		this.#goalModePreviousTools = undefined;
-		this.#goalContinuationTurnInFlight = false;
-		this.#cancelGoalContinuation();
-		this.#updateGoalModeStatus();
+		try {
+			if (previousTools !== undefined) {
+				await this.session.setActiveToolsByName(previousTools);
+			}
+			if (options?.reason === "completed") {
+				this.session.setGoalModeState(undefined);
+				this.sessionManager.appendModeChange("none");
+				this.sessionManager.appendCustomEntry("goal-completed", {
+					objective: currentState?.goal?.objective,
+					tokensUsed: currentState?.goal?.tokensUsed,
+					tokenBudget: currentState?.goal?.tokenBudget,
+					timeUsedSeconds: currentState?.goal?.timeUsedSeconds,
+				});
+			}
+			exitCommitted = true;
+		} finally {
+			if (exitCommitted) {
+				this.goalModeEnabled = false;
+				this.goalModePaused = options?.paused ?? false;
+				this.#goalModePreviousTools = undefined;
+				this.#goalContinuationTurnInFlight = false;
+				if (sessionTransition) {
+					this.#goalTurnHadToolCalls = false;
+					this.#goalSuppressNextContinuation = false;
+				}
+				this.#cancelGoalContinuation();
+				this.#updateGoalModeStatus();
+			}
+		}
 		if (!options?.silent) {
 			if (options?.reason === "completed") {
 				this.showStatus("Goal mode completed.");
