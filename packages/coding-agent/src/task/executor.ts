@@ -3214,18 +3214,27 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					if (options.parentArtifactManager) {
 						reopened.adoptArtifactManager(options.parentArtifactManager);
 					}
+					const registry = AgentRegistry.global();
 					const { session: revived } = await createAgentSession(
 						buildSubagentSessionOptions(reopened, expectedAgentRef),
 					);
-					const missingHostTools = inheritedHostTools.filter(tool => !revived.getToolByName(tool.name));
-					if (missingHostTools.length > 0) await revived.refreshRpcHostTools(missingHostTools);
-					await revived.setActiveToolPresentation(
-						[...revivalTopLevelToolNames, ...revivalMountedToolNames],
-						revivalMountedToolNames,
-					);
-					installRegistryStatusSync(revived);
-					installIrcWakeTurnMonitor(revived);
-					return revived;
+					try {
+						const missingHostTools = inheritedHostTools.filter(tool => !revived.getToolByName(tool.name));
+						if (missingHostTools.length > 0) await revived.refreshRpcHostTools(missingHostTools);
+						await revived.setActiveToolPresentation(
+							[...revivalTopLevelToolNames, ...revivalMountedToolNames],
+							revivalMountedToolNames,
+						);
+						installRegistryStatusSync(revived);
+						installIrcWakeTurnMonitor(revived);
+						return revived;
+					} catch (error) {
+						if (registry.detachSession(id, expectedAgentRef)) {
+							registry.setStatus(id, "parked", expectedAgentRef);
+						}
+						await revived.dispose();
+						throw error;
+					}
 				};
 			}
 

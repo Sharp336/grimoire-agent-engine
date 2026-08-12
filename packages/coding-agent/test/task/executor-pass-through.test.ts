@@ -14,10 +14,12 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolPathWithSource } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools";
 import type { LoadExtensionsResult } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
+import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
@@ -117,6 +119,7 @@ function createModelRegistry(model: Model): ModelRegistry {
 
 describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 	afterEach(() => {
+		AgentLifecycleManager.resetGlobalForTests();
 		AgentRegistry.resetGlobalForTests();
 		vi.restoreAllMocks();
 	});
@@ -332,6 +335,59 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(result.exitCode).toBe(1);
 		expect(dispose).toHaveBeenCalledTimes(1);
 		expect(AgentRegistry.global().get(id)).toBeUndefined();
+	});
+
+	it("retries a warm revive after post-create host refresh cleanup", async () => {
+		const id = "warm-revive-refresh-failure";
+		const registry = AgentRegistry.global();
+		const initial = yieldEmittingSession();
+		const failed = createMockSession(() => {});
+		const failedDispose = vi.fn(async () => {});
+		failed.dispose = failedDispose;
+		failed.refreshRpcHostTools = async () => {
+			throw new Error("host refresh failed");
+		};
+		const recovered = createMockSession(() => {});
+		let reviveAttempts = 0;
+		vi.spyOn(SessionManager, "open").mockResolvedValue({} as SessionManager);
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			if (!options) throw new Error("Expected session options");
+			if (!options.expectedAgentRef) {
+				registry.register({
+					id,
+					displayName: id,
+					kind: "sub",
+					session: initial,
+					sessionFile: "warm-revive.jsonl",
+					status: "running",
+				});
+				return createSessionResult(initial);
+			}
+
+			const revived = reviveAttempts++ === 0 ? failed : recovered;
+			if (!registry.attachSession(id, revived, options.expectedAgentRef.sessionFile, options.expectedAgentRef)) {
+				throw new Error("failed to attach revived session");
+			}
+			registry.setStatus(id, "running", options.expectedAgentRef);
+			return createSessionResult(revived);
+		});
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id,
+			artifactsDir: "/tmp",
+			parentHostTools: [{ name: "ida_execute_python" } as AgentTool],
+		});
+		expect(result.exitCode).toBe(0);
+		await AgentLifecycleManager.global().park(id);
+
+		await expect(AgentLifecycleManager.global().ensureLive(id)).rejects.toThrow("host refresh failed");
+		expect(failedDispose).toHaveBeenCalledTimes(1);
+		expect(registry.get(id)).toMatchObject({ status: "parked", session: null, sessionFile: "warm-revive.jsonl" });
+
+		expect(await AgentLifecycleManager.global().ensureLive(id)).toBe(recovered);
+		expect(reviveAttempts).toBe(2);
+		expect(registry.get(id)).toMatchObject({ status: "idle", session: recovered });
 	});
 
 	it("preserves the legacy result shape when no output schema is selected", async () => {
