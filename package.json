@@ -11,7 +11,8 @@
   "workspaces": {
     "packages": [
       "packages/*",
-      "python/robomp/web"
+      "python/robomp/web",
+      "control-plane/packages/*"
     ],
     "catalog": {
       "@babel/generator": "^7.29.7",

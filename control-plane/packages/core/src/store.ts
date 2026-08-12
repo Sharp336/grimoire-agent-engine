@@ -1,0 +1,593 @@
+/**
+ * SQLite-backed store. The daemon is the only writer.
+ *
+ * `updates` exists rather than forwarding events straight to clients because a
+ * phone that drops mid-turn must reattach with `sinceSeq` and replay the gap.
+ * Without persistence, a lost connection means a lost turn.
+ */
+
+import { Database } from "bun:sqlite";
+import { redact } from "./redact.ts";
+import type {
+  Agent,
+  AgentId,
+  AgentState,
+  ApprovalRecord,
+  AuditAction,
+  AuditEntry,
+  Device,
+  Routine,
+  Run,
+} from "./contracts.ts";
+
+const SCHEMA = `
+PRAGMA journal_mode = WAL;
+PRAGMA busy_timeout = 5000;
+
+CREATE TABLE IF NOT EXISTS agents (
+  id TEXT PRIMARY KEY, name TEXT NOT NULL, state TEXT NOT NULL,
+  acp_session_id TEXT, host TEXT NOT NULL, cwd TEXT NOT NULL,
+  created_at TEXT NOT NULL, last_active_at TEXT NOT NULL,
+  routine_id TEXT, labels TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS updates (
+  agent_id TEXT NOT NULL, seq INTEGER NOT NULL,
+  ts TEXT NOT NULL, payload TEXT NOT NULL,
+  PRIMARY KEY (agent_id, seq)
+);
+
+CREATE TABLE IF NOT EXISTS approvals (
+  request_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, tool TEXT NOT NULL,
+  title TEXT NOT NULL, input TEXT NOT NULL, decision TEXT, scope TEXT,
+  rule TEXT, actor_device_id TEXT, created_at TEXT NOT NULL, decided_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS devices (
+  id TEXT PRIMARY KEY, name TEXT NOT NULL, public_key TEXT NOT NULL,
+  scopes TEXT NOT NULL, created_at TEXT NOT NULL, last_seen_at TEXT, revoked_at TEXT
+);
+
+-- Issued bearer tokens. Only the SHA-256 hash is ever written, so a stolen
+-- database yields nothing presentable. Persisted rather than held in memory
+-- because a pairing a daemon restart silently dissolved is not a pairing:
+-- every paired phone would be logged out by an upgrade, with no operator
+-- action behind it and nothing in the audit log to explain it.
+CREATE TABLE IF NOT EXISTS auth_tokens (
+  id TEXT PRIMARY KEY, device_id TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE,
+  label TEXT, created_at TEXT NOT NULL, last_used_at TEXT, revoked_at TEXT
+);
+CREATE INDEX IF NOT EXISTS auth_tokens_hash ON auth_tokens(token_hash);
+CREATE INDEX IF NOT EXISTS auth_tokens_device ON auth_tokens(device_id);
+
+CREATE TABLE IF NOT EXISTS routines (
+  id TEXT PRIMARY KEY, name TEXT NOT NULL, enabled INTEGER NOT NULL,
+  trigger_json TEXT NOT NULL, prompt TEXT NOT NULL, cwd TEXT NOT NULL,
+  host TEXT NOT NULL, singleton INTEGER NOT NULL DEFAULT 1,
+  timeout_seconds INTEGER, labels TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS runs (
+  id TEXT PRIMARY KEY, routine_id TEXT NOT NULL, agent_id TEXT, state TEXT NOT NULL,
+  started_at TEXT NOT NULL, finished_at TEXT, summary TEXT, error TEXT
+);
+CREATE INDEX IF NOT EXISTS runs_routine ON runs(routine_id, started_at DESC);
+
+CREATE TABLE IF NOT EXISTS audit (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, action TEXT NOT NULL,
+  actor_device_id TEXT, agent_id TEXT, detail TEXT NOT NULL, outcome TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS audit_ts ON audit(ts DESC);
+`;
+
+interface AgentRow {
+  id: string;
+  name: string;
+  state: string;
+  acp_session_id: string | null;
+  host: string;
+  cwd: string;
+  created_at: string;
+  last_active_at: string;
+  routine_id: string | null;
+  labels: string;
+}
+
+export interface UpdateRecord {
+  seq: number;
+  ts: string;
+  payload: unknown;
+}
+
+export interface OpenApprovalInput {
+  requestId: string;
+  agentId: AgentId;
+  tool: string;
+  title: string;
+  input: unknown;
+}
+
+export interface AuditInput {
+  action: AuditAction;
+  actorDeviceId?: string | null;
+  agentId?: AgentId;
+  detail?: Record<string, unknown>;
+  outcome: "ok" | "denied" | "error";
+}
+
+/**
+ * One issued bearer token, identified by its hash.
+ *
+ * `id` is opaque and safe to log, print, and pass over the wire; `tokenHash`
+ * is the only thing that ties a row to a credential, and it is a one-way
+ * function of a value this process saw once.
+ */
+export interface AuthTokenRecord {
+  id: string;
+  deviceId: string;
+  /** SHA-256 hex of the raw token. The raw token is never written. */
+  tokenHash: string;
+  label?: string;
+  createdAt: string;
+  lastUsedAt?: string;
+  revokedAt?: string;
+}
+
+export interface AddAuthTokenInput {
+  id: string;
+  deviceId: string;
+  tokenHash: string;
+  /** Free text for an operator listing credentials, e.g. "local operator". */
+  label?: string;
+}
+
+export class Store {
+  #db: Database;
+
+  constructor(path: string) {
+    this.#db = new Database(path, { create: true });
+    this.#db.run(SCHEMA);
+  }
+
+  close(): void {
+    this.#db.close();
+  }
+
+  // -- agents --------------------------------------------------------------
+
+  upsertAgent(a: Agent): void {
+    this.#db
+      .query(
+        `INSERT INTO agents (id,name,state,acp_session_id,host,cwd,created_at,last_active_at,routine_id,labels)
+         VALUES (?,?,?,?,?,?,?,?,?,?)
+         ON CONFLICT(id) DO UPDATE SET
+           name=excluded.name, state=excluded.state, acp_session_id=excluded.acp_session_id,
+           host=excluded.host, cwd=excluded.cwd, last_active_at=excluded.last_active_at,
+           routine_id=excluded.routine_id, labels=excluded.labels`,
+      )
+      .run(
+        a.id,
+        a.name,
+        a.state,
+        a.acpSessionId ?? null,
+        JSON.stringify(a.host),
+        a.cwd,
+        a.createdAt,
+        a.lastActiveAt,
+        a.routineId ?? null,
+        JSON.stringify(a.labels),
+      );
+  }
+
+  setAgentState(id: AgentId, state: AgentState): void {
+    this.#db
+      .query(`UPDATE agents SET state=?, last_active_at=? WHERE id=?`)
+      .run(state, new Date().toISOString(), id);
+  }
+
+  getAgent(id: AgentId): Agent | null {
+    const row = this.#db.query(`SELECT * FROM agents WHERE id=?`).get(id) as AgentRow | null;
+    return row ? rowToAgent(row) : null;
+  }
+
+  listAgents(): Agent[] {
+    const rows = this.#db
+      .query(`SELECT * FROM agents ORDER BY last_active_at DESC`)
+      .all() as AgentRow[];
+    return rows.map(rowToAgent);
+  }
+
+  // -- updates -------------------------------------------------------------
+
+  /** Append an update and return its assigned sequence number. */
+  appendUpdate(agentId: AgentId, payload: unknown): number {
+    const row = this.#db
+      .query(`SELECT COALESCE(MAX(seq),0)+1 AS next FROM updates WHERE agent_id=?`)
+      .get(agentId) as { next: number };
+    this.#db
+      .query(`INSERT INTO updates (agent_id,seq,ts,payload) VALUES (?,?,?,?)`)
+      .run(agentId, row.next, new Date().toISOString(), JSON.stringify(redact(payload)));
+    return row.next;
+  }
+
+  /** Replay everything after `sinceSeq`. This is what makes reattach lossless. */
+  updatesSince(agentId: AgentId, sinceSeq: number, limit = 1000): UpdateRecord[] {
+    const rows = this.#db
+      .query(`SELECT seq,ts,payload FROM updates WHERE agent_id=? AND seq>? ORDER BY seq LIMIT ?`)
+      .all(agentId, sinceSeq, limit) as Array<{ seq: number; ts: string; payload: string }>;
+    return rows.map((r) => ({ seq: r.seq, ts: r.ts, payload: JSON.parse(r.payload) }));
+  }
+
+  // -- approvals -----------------------------------------------------------
+
+  openApproval(rec: OpenApprovalInput): void {
+    this.#db
+      .query(
+        // Deliberately not INSERT OR REPLACE: a replayed request id must never
+        // overwrite an approval that already carries a decision.
+        `INSERT INTO approvals (request_id,agent_id,tool,title,input,created_at)
+         VALUES (?,?,?,?,?,?)
+         ON CONFLICT(request_id) DO NOTHING`,
+      )
+      .run(
+        rec.requestId,
+        rec.agentId,
+        rec.tool,
+        rec.title,
+        JSON.stringify(redact(rec.input)),
+        new Date().toISOString(),
+      );
+  }
+
+  resolveApproval(
+    requestId: string,
+    decision: "allow" | "deny",
+    scope: "once" | "always",
+    rule: string,
+    actorDeviceId: string | null,
+  ): void {
+    this.#db
+      .query(
+        // `decided_at IS NULL` makes the first decision final. Without it a
+        // second `decide` frame could flip a recorded deny into an allow.
+        `UPDATE approvals SET decision=?, scope=?, rule=?, actor_device_id=?, decided_at=?
+         WHERE request_id=? AND decided_at IS NULL`,
+      )
+      .run(decision, scope, rule, actorDeviceId, new Date().toISOString(), requestId);
+  }
+
+  listApprovals(agentId?: AgentId): ApprovalRecord[] {
+    const rows = (
+      agentId
+        ? this.#db
+            .query(`SELECT * FROM approvals WHERE agent_id=? ORDER BY created_at DESC`)
+            .all(agentId)
+        : this.#db.query(`SELECT * FROM approvals ORDER BY created_at DESC LIMIT 200`).all()
+    ) as Array<Record<string, string | null>>;
+    return rows.map((r) => ({
+      requestId: r.request_id as string,
+      agentId: r.agent_id as string,
+      tool: r.tool as string,
+      title: r.title as string,
+      input: JSON.parse(r.input as string),
+      createdAt: r.created_at as string,
+      decision: (r.decision ?? "deny") as "allow" | "deny",
+      scope: (r.scope ?? "once") as "once" | "always",
+      rule: r.rule ?? "",
+      actorDeviceId: r.actor_device_id ?? null,
+      decidedAt: r.decided_at ?? "",
+    }));
+  }
+
+  // -- devices -------------------------------------------------------------
+
+  addDevice(d: Device): void {
+    this.#db
+      .query(
+        `INSERT OR REPLACE INTO devices (id,name,public_key,scopes,created_at,last_seen_at,revoked_at)
+         VALUES (?,?,?,?,?,?,?)`,
+      )
+      .run(
+        d.id,
+        d.name,
+        d.publicKey,
+        JSON.stringify(d.scopes),
+        d.createdAt,
+        d.lastSeenAt ?? null,
+        d.revokedAt ?? null,
+      );
+  }
+
+  getDevice(id: string): Device | null {
+    const r = this.#db.query(`SELECT * FROM devices WHERE id=?`).get(id) as Record<
+      string,
+      string | null
+    > | null;
+    if (!r) return null;
+    return {
+      id: r.id as string,
+      name: r.name as string,
+      publicKey: r.public_key as string,
+      scopes: JSON.parse(r.scopes as string),
+      createdAt: r.created_at as string,
+      lastSeenAt: r.last_seen_at ?? undefined,
+      revokedAt: r.revoked_at ?? undefined,
+    };
+  }
+
+  /**
+   * Every device row, newest first, revoked ones included.
+   *
+   * Revoked rows are deliberately not filtered out. An operator listing
+   * devices is auditing who has ever been let in, and a device that vanished
+   * from the list on revocation would make the act of revoking unverifiable.
+   */
+  listDevices(): Device[] {
+    const rows = this.#db
+      .query(`SELECT * FROM devices ORDER BY created_at DESC`)
+      .all() as Array<Record<string, string | null>>;
+    return rows.map((r) => ({
+      id: r.id as string,
+      name: r.name as string,
+      publicKey: r.public_key as string,
+      scopes: JSON.parse(r.scopes as string),
+      createdAt: r.created_at as string,
+      lastSeenAt: r.last_seen_at ?? undefined,
+      revokedAt: r.revoked_at ?? undefined,
+    }));
+  }
+
+  /**
+   * Revoke a device and every credential issued to it, in one transaction.
+   *
+   * Transitive because tokens outlive the process now. A device row marked
+   * revoked while its token rows stayed live would leave a credential that
+   * only the device lookup refuses, and any future path that resolved a token
+   * without re-reading the device would let it back in. Revoking the tokens
+   * makes the refusal a property of the data rather than of one code path.
+   */
+  revokeDevice(id: string): void {
+    const at = new Date().toISOString();
+    this.#db.transaction(() => {
+      this.#db.query(`UPDATE devices SET revoked_at=? WHERE id=?`).run(at, id);
+      this.#db
+        .query(`UPDATE auth_tokens SET revoked_at=? WHERE device_id=? AND revoked_at IS NULL`)
+        .run(at, id);
+    })();
+  }
+
+  // -- auth tokens ---------------------------------------------------------
+
+  addAuthToken(input: AddAuthTokenInput): AuthTokenRecord {
+    const record: AuthTokenRecord = {
+      id: input.id,
+      deviceId: input.deviceId,
+      tokenHash: input.tokenHash,
+      createdAt: new Date().toISOString(),
+    };
+    if (input.label !== undefined) record.label = input.label;
+    this.#db
+      .query(
+        `INSERT INTO auth_tokens (id,device_id,token_hash,label,created_at) VALUES (?,?,?,?,?)`,
+      )
+      .run(record.id, record.deviceId, record.tokenHash, input.label ?? null, record.createdAt);
+    return record;
+  }
+
+  /**
+   * The row for a presented credential, revoked ones included.
+   *
+   * Revoked rows come back rather than reading as absent so the caller can
+   * tell "never issued" from "issued and withdrawn". Both refuse the request;
+   * only one of them is worth an audit line.
+   */
+  findAuthTokenByHash(tokenHash: string): AuthTokenRecord | null {
+    const row = this.#db.query(`SELECT * FROM auth_tokens WHERE token_hash=?`).get(tokenHash) as
+      | Record<string, string | null>
+      | null;
+    return row ? rowToAuthToken(row) : null;
+  }
+
+  listAuthTokens(deviceId?: string): AuthTokenRecord[] {
+    const rows = (
+      deviceId === undefined
+        ? this.#db.query(`SELECT * FROM auth_tokens ORDER BY created_at DESC`).all()
+        : this.#db
+            .query(`SELECT * FROM auth_tokens WHERE device_id=? ORDER BY created_at DESC`)
+            .all(deviceId)
+    ) as Array<Record<string, string | null>>;
+    return rows.map(rowToAuthToken);
+  }
+
+  /** Record that a credential was presented. Callers throttle this; see DeviceAuth. */
+  touchAuthToken(id: string): void {
+    this.#db
+      .query(`UPDATE auth_tokens SET last_used_at=? WHERE id=?`)
+      .run(new Date().toISOString(), id);
+  }
+
+  /**
+   * Withdraw one credential. The first revocation stands: `revoked_at IS NULL`
+   * keeps a second call from rewriting when it happened.
+   */
+  revokeAuthToken(id: string): void {
+    this.#db
+      .query(`UPDATE auth_tokens SET revoked_at=? WHERE id=? AND revoked_at IS NULL`)
+      .run(new Date().toISOString(), id);
+  }
+
+  /** Withdraw every live credential a device holds. Returns how many there were. */
+  revokeAuthTokensForDevice(deviceId: string): number {
+    return this.#db
+      .query(`UPDATE auth_tokens SET revoked_at=? WHERE device_id=? AND revoked_at IS NULL`)
+      .run(new Date().toISOString(), deviceId).changes;
+  }
+
+  // -- routines and runs ---------------------------------------------------
+
+  upsertRoutine(r: Routine): void {
+    this.#db
+      .query(
+        `INSERT OR REPLACE INTO routines
+         (id,name,enabled,trigger_json,prompt,cwd,host,singleton,timeout_seconds,labels,created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        r.id,
+        r.name,
+        r.enabled ? 1 : 0,
+        JSON.stringify(r.trigger),
+        r.prompt,
+        r.cwd,
+        JSON.stringify(r.host),
+        r.singleton ? 1 : 0,
+        r.timeoutSeconds ?? null,
+        JSON.stringify(r.labels),
+        r.createdAt,
+      );
+  }
+
+  listRoutines(): Routine[] {
+    const rows = this.#db.query(`SELECT * FROM routines ORDER BY created_at`).all() as Array<
+      Record<string, string | number | null>
+    >;
+    return rows.map((r) => ({
+      id: r.id as string,
+      name: r.name as string,
+      enabled: r.enabled === 1,
+      trigger: JSON.parse(r.trigger_json as string),
+      prompt: r.prompt as string,
+      cwd: r.cwd as string,
+      host: JSON.parse(r.host as string),
+      singleton: r.singleton === 1,
+      timeoutSeconds: (r.timeout_seconds as number | null) ?? undefined,
+      labels: JSON.parse((r.labels as string) ?? "{}"),
+      createdAt: r.created_at as string,
+    }));
+  }
+
+  upsertRun(run: Run): void {
+    this.#db
+      .query(
+        `INSERT OR REPLACE INTO runs (id,routine_id,agent_id,state,started_at,finished_at,summary,error)
+         VALUES (?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        run.id,
+        run.routineId,
+        run.agentId ?? null,
+        run.state,
+        run.startedAt,
+        run.finishedAt ?? null,
+        run.summary ?? null,
+        run.error ?? null,
+      );
+  }
+
+  hasActiveRun(routineId: string): boolean {
+    const r = this.#db
+      .query(`SELECT COUNT(*) AS n FROM runs WHERE routine_id=? AND state IN ('queued','running')`)
+      .get(routineId) as { n: number };
+    return r.n > 0;
+  }
+
+  /**
+   * Force every mid-flight run terminal, and report how many there were.
+   *
+   * A run row is written `running` before its turn starts, and the scheduler's
+   * own teardown is what settles it. A process that was killed never ran that
+   * teardown, so the row survives the daemon and keeps `hasActiveRun` true,
+   * which silences a singleton routine for good. Reconciling at startup is
+   * deterministic because nothing can be in flight before the scheduler is
+   * armed, where a timer sweeping for stale rows would have to guess.
+   *
+   * An error the run already recorded is kept: why it actually failed beats
+   * why nobody settled it.
+   */
+  failInterruptedRuns(error: string): number {
+    return this.#db
+      .query(
+        `UPDATE runs SET state='failed', finished_at=COALESCE(finished_at,?), error=COALESCE(error,?)
+         WHERE state IN ('queued','running')`,
+      )
+      .run(new Date().toISOString(), error).changes;
+  }
+
+  listRuns(routineId: string, limit = 50): Run[] {
+    const rows = this.#db
+      .query(`SELECT * FROM runs WHERE routine_id=? ORDER BY started_at DESC LIMIT ?`)
+      .all(routineId, limit) as Array<Record<string, string | null>>;
+    return rows.map((r) => ({
+      id: r.id as string,
+      routineId: r.routine_id as string,
+      agentId: r.agent_id ?? undefined,
+      state: r.state as Run["state"],
+      startedAt: r.started_at as string,
+      finishedAt: r.finished_at ?? undefined,
+      summary: r.summary ?? undefined,
+      error: r.error ?? undefined,
+    }));
+  }
+
+  // -- audit ---------------------------------------------------------------
+
+  audit(entry: AuditInput): void {
+    this.#db
+      .query(
+        `INSERT INTO audit (ts,action,actor_device_id,agent_id,detail,outcome) VALUES (?,?,?,?,?,?)`,
+      )
+      .run(
+        new Date().toISOString(),
+        entry.action,
+        entry.actorDeviceId ?? null,
+        entry.agentId ?? null,
+        JSON.stringify(redact(entry.detail ?? {})),
+        entry.outcome,
+      );
+  }
+
+  listAudit(limit = 200): AuditEntry[] {
+    const rows = this.#db.query(`SELECT * FROM audit ORDER BY id DESC LIMIT ?`).all(limit) as Array<
+      Record<string, string | number | null>
+    >;
+    return rows.map((r) => ({
+      id: r.id as number,
+      ts: r.ts as string,
+      action: r.action as AuditAction,
+      actorDeviceId: (r.actor_device_id as string | null) ?? null,
+      agentId: (r.agent_id as string | null) ?? undefined,
+      detail: JSON.parse(r.detail as string),
+      outcome: r.outcome as "ok" | "denied" | "error",
+    }));
+  }
+}
+
+function rowToAgent(row: AgentRow): Agent {
+  return {
+    id: row.id,
+    name: row.name,
+    state: row.state as AgentState,
+    acpSessionId: row.acp_session_id ?? undefined,
+    host: JSON.parse(row.host),
+    cwd: row.cwd,
+    createdAt: row.created_at,
+    lastActiveAt: row.last_active_at,
+    routineId: row.routine_id ?? undefined,
+    labels: JSON.parse(row.labels),
+  };
+}
+
+function rowToAuthToken(row: Record<string, string | null>): AuthTokenRecord {
+  const record: AuthTokenRecord = {
+    id: row.id as string,
+    deviceId: row.device_id as string,
+    tokenHash: row.token_hash as string,
+    createdAt: row.created_at as string,
+  };
+  if (row.label !== null && row.label !== undefined) record.label = row.label;
+  if (row.last_used_at !== null && row.last_used_at !== undefined) {
+    record.lastUsedAt = row.last_used_at;
+  }
+  if (row.revoked_at !== null && row.revoked_at !== undefined) record.revokedAt = row.revoked_at;
+  return record;
+}

@@ -1,0 +1,9 @@
+{
+  // Tests need bun's globals; the app must not see them, or a `Bun.*` call
+  // would typecheck its way into a browser bundle. Hence two projects.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["bun"]
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

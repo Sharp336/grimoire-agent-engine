@@ -1,0 +1,1163 @@
+/**
+ * The client-facing surface: HTTP for state, one websocket for everything live.
+ *
+ * Two properties shape this file.
+ *
+ * The first is that agent lifetime does not belong to a connection. Nothing
+ * here stops, cancels, or unblocks an agent because a socket went away, and the
+ * update log is written by the supervisor whether or not anyone is listening.
+ * That is what makes `attach` with `sinceSeq` able to hand a phone the exact
+ * frames it missed rather than a truncated turn.
+ *
+ * The second is that this layer is the least trusted part of the daemon. It
+ * terminates connections from a phone on someone else's network, so every frame
+ * is treated as hostile input: scopes are re-read from the device row, a
+ * client's `decide` is passed to the supervisor as evidence rather than applied,
+ * malformed input produces an error frame instead of a dropped socket, and no
+ * single client can monopolise the daemon.
+ */
+
+import { extname, join, resolve, sep } from "node:path";
+import type { Server, ServerWebSocket } from "bun";
+import {
+  SCOPE_APPROVE,
+  SCOPE_MANAGE,
+  SCOPE_PROMPT,
+  SCOPE_READ,
+  type Actor,
+  type AgentId,
+  type ClientFrame,
+  type HostSpec,
+  type Run,
+  type ServerFrame,
+  type Store,
+} from "@ompd/core";
+import { WEB_ASSETS, WEB_ASSETS_BUILT } from "../web-assets.ts";
+import { Supervisor, UnauthorizedError, type PendingApproval } from "../supervisor.ts";
+import { DeviceAuth, PairingBacklogError, PairingError } from "./auth.ts";
+import type { GatewayEvents } from "./events.ts";
+import { MODE_OPTION_ID, type SessionConfig } from "../hosts.ts";
+import { TokenBucket } from "./ratelimit.ts";
+
+/**
+ * Content types for the console's asset kinds.
+ *
+ * Explicit rather than inferred: a `.webmanifest` served as octet-stream makes
+ * the PWA silently uninstallable, and that failure looks like nothing at all.
+ */
+const CONTENT_TYPES: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".webmanifest": "application/manifest+json",
+  ".json": "application/json",
+  ".map": "application/json",
+};
+
+function contentTypeFor(key: string): string {
+  return CONTENT_TYPES[extname(key)] ?? "application/octet-stream";
+}
+
+/** Decode one embedded asset into a response with an explicit content type. */
+function embeddedResponse(base64: string, key: string): Response {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new Response(bytes, { headers: { "content-type": contentTypeFor(key) } });
+}
+
+/**
+ * Loopback by default. Reaching this daemon from elsewhere must be a separate,
+ * deliberate act (a tunnel the operator starts), never a default anyone
+ * inherits by running it.
+ */
+const DEFAULT_HOST = "127.0.0.1";
+const DEFAULT_VERSION = "0.1.0";
+
+/** Frames a socket may burst, and its steady-state allowance. */
+const RATE_BURST = 50;
+const RATE_PER_SECOND = 10;
+
+/** The only scopes a device row may carry. Anything else is a typo, not a grant. */
+const KNOWN_SCOPES: readonly string[] = [SCOPE_READ, SCOPE_PROMPT, SCOPE_MANAGE, SCOPE_APPROVE];
+
+/**
+ * The slice of the voice bridge the gateway needs.
+ *
+ * Declared structurally so the gateway never imports the voice package: the
+ * two slices are wired together by whoever builds the daemon, and a test double
+ * satisfies this just as well as the real bridge.
+ */
+export interface VoiceHandler {
+  handleFrame(frame: ClientFrame, actor: Actor): Promise<void>;
+  close(): void | Promise<void>;
+}
+
+/**
+ * Built once per socket so the bridge can push speech back down that socket.
+ *
+ * The actor comes with it because voice belongs to a device, not a
+ * connection: a phone that drops and reconnects is the same paired device and
+ * should still be spoken to, and a desktop attached to the same agent is a
+ * different device and should not be.
+ */
+export type VoiceHandlerFactory = (
+  send: (frame: ServerFrame) => void,
+  actor: Actor,
+) => VoiceHandler;
+
+/**
+ * The slice of the scheduler the gateway needs, declared structurally for the
+ * same reason `VoiceHandler` is: the two are wired together by whoever builds
+ * the daemon, and neither has to import the other.
+ */
+export interface RoutineRunner {
+  runNow(routineId: string, actor: Actor): Promise<Run>;
+}
+
+export interface GatewayOptions {
+  supervisor: Supervisor;
+  store: Store;
+  /**
+   * The same `GatewayEvents` instance handed to the supervisor as its event
+   * sink. Without it the HTTP surface still works and the socket still accepts
+   * frames, but nothing is pushed.
+   */
+  events?: GatewayEvents;
+  host?: string;
+  /** 0 asks the OS for a free port; read the real one back from `listen()`. */
+  port?: number;
+  version?: string;
+  /**
+   * Opaque identity of the state directory this daemon serves.
+   *
+   * Published on `/v1/health` so a second `ompd start` can tell "that is me
+   * already running" from "something else owns this port". Without it the CLI
+   * treats any healthy listener as itself and silently points the operator at
+   * a foreign daemon with a different token.
+   */
+  homeId?: string;
+  /** How long an unapproved pairing stays claimable. */
+  pairingTtlMs?: number;
+  voice?: VoiceHandlerFactory;
+  /**
+   * Called when a device sends a typed prompt.
+   *
+   * Exists so voice can follow the modality a device most recently used: it
+   * speaks, it hears; it types, it stops hearing. The gateway does not know
+   * what that means, only that it happened.
+   */
+  onTextPrompt?: (agentId: AgentId, actor: Actor) => void;
+  /**
+   * Runs routines on demand. Absent, `POST /v1/routines/:id/run` reports the
+   * feature off rather than pretending to have queued something.
+   */
+  routines?: RoutineRunner;
+  /**
+   * Reads and writes a session's ACP config options (mode, model). Absent,
+   * `/v1/agents/:id/config` reports the feature off rather than inventing a
+   * mode the agent has never heard of.
+   */
+  sessions?: SessionConfig;
+  /**
+   * Directory of built web-client files served from `/`.
+   *
+   * Unauthenticated on purpose: it is the app shell, and a browser has to load
+   * it before it can present a token. Nothing about this machine's agents is
+   * in it. Absent, the gateway is API-only.
+   */
+  staticRoot?: string;
+  /**
+   * Called with the replacement a rotation minted, before the response goes
+   * out. Returns the path it persisted the token to, if it persisted it.
+   *
+   * The daemon uses it to rewrite `<home>/token` when the local operator's
+   * credential is the one rotating, so a rotation performed from a phone does
+   * not lock the CLI on this machine out of its own daemon. The gateway itself
+   * knows nothing about the state directory, and reports back only so the
+   * answer can say which file moved rather than guessing.
+   */
+  onTokenRotated?: (deviceId: string, token: string) => string | undefined;
+}
+
+interface SocketState {
+  deviceId: string;
+  scopes: Set<string>;
+  /** Agents this socket asked for. Nothing is pushed for anything else. */
+  attached: Set<AgentId>;
+  /**
+   * Highest seq already delivered, per agent. Replay and the live stream both
+   * go through this, which is what guarantees a reattach has no duplicates.
+   */
+  delivered: Map<AgentId, number>;
+  /**
+   * Approval request ids already delivered, per agent. Serves the same purpose
+   * as `delivered` does for updates: replay and the live push share one choke
+   * point, so a reattach cannot show the same ask twice.
+   */
+  approvals: Map<AgentId, Set<string>>;
+  /**
+   * Highest turn already summarised to this socket, per agent. Serves the same
+   * purpose `delivered` does for updates: a repeat is how a client ends up
+   * saying the same sentence twice.
+   */
+  said: Map<AgentId, number>;
+  bucket: TokenBucket;
+  voice: VoiceHandler | null;
+}
+
+export class Gateway {
+  #sup: Supervisor;
+  #store: Store;
+  #auth: DeviceAuth;
+  #events: GatewayEvents | undefined;
+  #host: string;
+  #port: number;
+  #version: string;
+  #homeId: string | undefined;
+  #voice: VoiceHandlerFactory | undefined;
+  #onTextPrompt: ((agentId: AgentId, actor: Actor) => void) | undefined;
+  #routines: RoutineRunner | undefined;
+  #sessions: SessionConfig | undefined;
+  #onTokenRotated: ((deviceId: string, token: string) => string | undefined) | undefined;
+  #staticRoot: string | undefined;
+  /** Set by `listen`, so uptime measures serving rather than construction. */
+  #startedAtMs: number | undefined;
+
+  #server: Server<SocketState> | undefined;
+  #sockets = new Set<ServerWebSocket<SocketState>>();
+  #unsubscribeSay: (() => void) | undefined;
+  #unsubscribe: (() => void) | undefined;
+
+  constructor(opts: GatewayOptions) {
+    this.#sup = opts.supervisor;
+    this.#store = opts.store;
+    this.#auth = new DeviceAuth({ store: opts.store, pairingTtlMs: opts.pairingTtlMs });
+    this.#events = opts.events;
+    this.#host = opts.host ?? DEFAULT_HOST;
+    this.#port = opts.port ?? 0;
+    this.#version = opts.version ?? DEFAULT_VERSION;
+    this.#homeId = opts.homeId;
+    this.#voice = opts.voice;
+    this.#onTextPrompt = opts.onTextPrompt;
+    this.#routines = opts.routines;
+    this.#sessions = opts.sessions;
+    this.#onTokenRotated = opts.onTokenRotated;
+    // Resolved once so the traversal check below compares two absolute paths.
+    this.#staticRoot = opts.staticRoot === undefined ? undefined : resolve(opts.staticRoot);
+
+    this.#unsubscribe = this.#events?.add({
+      onUpdate: (agentId, seq, update) => {
+        for (const ws of this.#sockets) {
+          if (ws.data.attached.has(agentId)) this.#deliverUpdate(ws, agentId, seq, update);
+        }
+      },
+      onAgentsChanged: (agents) => {
+        // Attached sockets only, like the other two events. `hello` is what
+        // does discovery; a socket watching no agent refreshes the list with
+        // `GET /v1/agents` or by reconnecting, rather than being pushed to.
+        for (const ws of this.#sockets) {
+          if (ws.data.attached.size === 0) continue;
+          if (ws.data.scopes.has(SCOPE_READ)) this.#send(ws, { t: "agents", agents });
+        }
+      },
+      onApprovalNeeded: (approval) => {
+        for (const ws of this.#sockets) {
+          if (!ws.data.attached.has(approval.agentId)) continue;
+          this.#deliverApproval(ws, approval);
+        }
+      },
+    });
+
+    this.#unsubscribeSay = this.#events?.addSayListener((event) => {
+      for (const ws of this.#sockets) {
+        // The same rule the other pushes follow: attached to that agent, and
+        // holding read. Not a broadcast, and never to a socket that has not
+        // asked about this agent.
+        if (!ws.data.attached.has(event.agentId)) continue;
+        if (!ws.data.scopes.has(SCOPE_READ)) continue;
+        // One summary per turn per socket. A second copy of the same seq is
+        // how a client ends up saying the same sentence twice.
+        if ((ws.data.said.get(event.agentId) ?? 0) >= event.seq) continue;
+        ws.data.said.set(event.agentId, event.seq);
+        this.#send(ws, { t: "say", agentId: event.agentId, seq: event.seq, text: event.text });
+      }
+    });
+  }
+
+  /** Start serving. Returns the bound port, which matters when `port` was 0. */
+  async listen(): Promise<number> {
+    this.#server ??= Bun.serve({
+      hostname: this.#host,
+      port: this.#port,
+      fetch: (req, server) => this.#fetch(req, server),
+      websocket: {
+        open: (ws: ServerWebSocket<SocketState>) => this.#open(ws),
+        message: (ws: ServerWebSocket<SocketState>, message: string | Buffer) =>
+          this.#message(ws, message),
+        close: (ws: ServerWebSocket<SocketState>) => this.#close(ws),
+      },
+    });
+    this.#startedAtMs ??= Date.now();
+
+    // Bun reports no port for a unix-socket server. This one always binds TCP,
+    // so an absent port means the listen did not do what was asked.
+    const { port } = this.#server;
+    if (port === undefined) throw new Error("gateway did not bind a TCP port");
+    return port;
+  }
+
+  async close(): Promise<void> {
+    this.#unsubscribe?.();
+    this.#unsubscribe = undefined;
+    this.#unsubscribeSay?.();
+    this.#unsubscribeSay = undefined;
+    for (const ws of this.#sockets) {
+      void ws.data.voice?.close();
+      ws.data.voice = null;
+    }
+    this.#sockets.clear();
+    // `stop(true)` closes live connections itself. Closing each socket here
+    // first and then awaiting it deadlocks on Bun 1.3.4: the promise never
+    // settles. Measured, not guessed. Clients therefore see an abnormal close
+    // rather than a 1001, which is the right trade for a shutdown path that
+    // actually returns.
+    await this.#server?.stop(true);
+    this.#server = undefined;
+    this.#startedAtMs = undefined;
+  }
+
+  /**
+   * Operator action. Turns a recorded pairing intent into a device with scopes.
+   *
+   * In-process, and the scopes it writes are the caller's choice rather than
+   * the pairing client's. `POST /v1/pairings/approve` reaches this over HTTP,
+   * but only for a device that already holds `approve`, and only for scopes
+   * that device already holds. Nothing a client says at `POST /v1/pair`
+   * influences either check, so pairing still grants nothing by itself.
+   */
+  approvePairing(code: string, scopes: string[]): string {
+    return this.#auth.approvePairing(code, scopes);
+  }
+
+  /**
+   * Mint a token for a device row that already exists.
+   *
+   * In-process only, and deliberately unreachable over HTTP: a route that
+   * handed out a token for an arbitrary device id would be a way to impersonate
+   * one. The daemon uses it for the local operator device, whose authority
+   * comes from filesystem access rather than from pairing.
+   */
+  issueToken(deviceId: string): string {
+    return this.#auth.issueToken(deviceId);
+  }
+
+  /**
+   * Whether a raw token is still a live credential for that device, without
+   * recording a use.
+   *
+   * In-process only. The daemon asks it of the token file it finds at startup,
+   * which is how a plain restart reuses the operator's existing credential
+   * instead of minting a new one and logging every other device out with it.
+   */
+  hasLiveToken(deviceId: string, token: string): boolean {
+    return this.#auth.hasLiveToken(deviceId, token);
+  }
+
+  /** Revoke a paired device. Takes effect on its next request or frame. */
+  revokeDevice(deviceId: string): void {
+    this.#auth.revoke(deviceId);
+  }
+
+  // -- http ------------------------------------------------------------------
+
+  async #fetch(req: Request, server: Server<SocketState>): Promise<Response | undefined> {
+    // `req.url` is absolute only when the request carried a Host header, and
+    // HTTP/1.0 does not require one. Parsed bare, such a request threw here,
+    // before any authentication ran, so anything able to open the port could
+    // produce an unhandled exception on every request it sent. The bind
+    // address is a base rather than a guess at what the client meant: only the
+    // path and query are ever read from this.
+    const url = URL.parse(req.url, `http://${this.#host}`);
+    if (url === null) return Response.json({ error: "bad_request" }, { status: 400 });
+    const path = url.pathname;
+
+    if (path === "/v1/health") {
+      // Unauthenticated, so it carries liveness and nothing else. Anything
+      // about agents here would be an unauthenticated disclosure of what this
+      // machine is doing.
+      //
+      // `homeId` is the exception, and it earns its place: without it `ompd
+      // start` treats ANY healthy listener on its port as itself, silently
+      // reports "already listening", and leaves the operator pointed at a
+      // different daemon holding a different token. It is a hash rather than
+      // the path because the path contains a username and this route is
+      // unauthenticated.
+      return Response.json({ ok: true, version: this.#version, homeId: this.#homeId });
+    }
+
+    if (path === "/v1/pair") {
+      if (req.method !== "POST") return Response.json({ error: "not_found" }, { status: 404 });
+      let body: { name?: unknown; publicKey?: unknown };
+      try {
+        body = (await req.json()) as { name?: unknown; publicKey?: unknown };
+      } catch {
+        return Response.json({ error: "bad_json" }, { status: 400 });
+      }
+      if (typeof body.name !== "string" || typeof body.publicKey !== "string") {
+        return Response.json({ error: "name and publicKey are required" }, { status: 400 });
+      }
+      try {
+        // Only the code comes back. No token, no scopes, no device id: there is
+        // nothing here a client could present to any other route.
+        const code = this.#auth.beginPairing({ name: body.name, publicKey: body.publicKey });
+        return Response.json({ code });
+      } catch (err) {
+        if (err instanceof PairingBacklogError) {
+          return Response.json({ error: "pairing_backlog" }, { status: 429 });
+        }
+        throw err;
+      }
+    }
+
+    // Everything outside `/v1` is the web client, and it is terminal: a path
+    // that is not an API route must never fall through to the bearer check
+    // below, or a missing asset answers 401 and a browser is told to
+    // authenticate for a file that does not exist. Unauthenticated on purpose,
+    // because a browser cannot present a token it has not loaded the app to
+    // obtain.
+    if (!path.startsWith("/v1/")) {
+      return (await this.#serveStatic(path)) ?? Response.json({ error: "not_found" }, { status: 404 });
+    }
+
+    const header = req.headers.get("authorization");
+    const bearer = header?.startsWith("Bearer ") === true ? header.slice("Bearer ".length) : null;
+
+    if (path === "/v1/socket") {
+      // A browser cannot set headers on a websocket, so the query parameter is
+      // the primary carrier here and the header is the convenience.
+      const token = url.searchParams.get("token") ?? bearer;
+      const actor = token === null ? null : this.#auth.resolveActor(token);
+      if (!actor) return new Response("unauthorized", { status: 401 });
+
+      const data: SocketState = {
+        deviceId: actor.deviceId,
+        scopes: new Set(actor.scopes),
+        attached: new Set(),
+        delivered: new Map(),
+        approvals: new Map(),
+        said: new Map(),
+        bucket: new TokenBucket({ capacity: RATE_BURST, refillPerSecond: RATE_PER_SECOND }),
+        voice: null,
+      };
+      if (server.upgrade(req, { data })) return undefined;
+      return new Response("expected a websocket upgrade", { status: 426 });
+    }
+
+    const actor = bearer === null ? null : this.#auth.resolveActor(bearer);
+    if (!actor) return Response.json({ error: "unauthorized" }, { status: 401 });
+    const scopes = new Set(actor.scopes);
+
+    if (path === "/v1/agents" && req.method === "GET") {
+      if (!scopes.has(SCOPE_READ)) return Response.json({ error: "forbidden" }, { status: 403 });
+      return Response.json({ agents: this.#sup.listAgents() });
+    }
+
+    if (path === "/v1/agents" && req.method === "POST") {
+      if (!scopes.has(SCOPE_MANAGE)) return Response.json({ error: "forbidden" }, { status: 403 });
+      let body: {
+        name?: unknown;
+        cwd?: unknown;
+        host?: HostSpec;
+        routineId?: string;
+        labels?: Record<string, string>;
+      };
+      try {
+        body = (await req.json()) as typeof body;
+      } catch {
+        return Response.json({ error: "bad_json" }, { status: 400 });
+      }
+      if (typeof body.name !== "string" || typeof body.cwd !== "string") {
+        return Response.json({ error: "name and cwd are required" }, { status: 400 });
+      }
+      try {
+        const agent = await this.#sup.createAgent(
+          {
+            name: body.name,
+            cwd: body.cwd,
+            host: body.host,
+            routineId: body.routineId,
+            labels: body.labels,
+          },
+          actor,
+        );
+        return Response.json({ agent }, { status: 201 });
+      } catch (err) {
+        if (err instanceof UnauthorizedError) {
+          return Response.json({ error: "forbidden" }, { status: 403 });
+        }
+        return Response.json(
+          { error: err instanceof Error ? err.message : "agent creation failed" },
+          { status: 500 },
+        );
+      }
+    }
+
+    const agentRoute = /^\/v1\/agents\/([^/]+)$/.exec(path);
+    if (agentRoute && req.method === "DELETE") {
+      if (!scopes.has(SCOPE_MANAGE)) return Response.json({ error: "forbidden" }, { status: 403 });
+      try {
+        await this.#sup.stopAgent(agentRoute[1] ?? "", actor);
+        return Response.json({ ok: true });
+      } catch (err) {
+        if (err instanceof UnauthorizedError) {
+          return Response.json({ error: "forbidden" }, { status: 403 });
+        }
+        return Response.json(
+          { error: err instanceof Error ? err.message : "stop failed" },
+          { status: 404 },
+        );
+      }
+    }
+
+    const configRoute = /^\/v1\/agents\/([^/]+)\/config$/.exec(path);
+    if (configRoute && (req.method === "GET" || req.method === "POST")) {
+      // Reading the mode is watching; setting it is driving. `plan` is the
+      // read-only mode, so moving off it widens what the agent may do, and a
+      // device holding only `read` must not be able to do that. `prompt` is the
+      // right bar rather than `manage`: anyone who can send a prompt can
+      // already make a default-mode agent act.
+      const needed = req.method === "GET" ? SCOPE_READ : SCOPE_PROMPT;
+      if (!scopes.has(needed)) return Response.json({ error: "forbidden" }, { status: 403 });
+
+      const sessions = this.#sessions;
+      if (!sessions) return Response.json({ error: "config_unavailable" }, { status: 503 });
+
+      const agent = this.#store.getAgent(configRoute[1] ?? "");
+      if (!agent) return Response.json({ error: "not_found" }, { status: 404 });
+      const sessionId = agent.acpSessionId;
+      if (sessionId === undefined) {
+        return Response.json({ error: "no_session" }, { status: 409 });
+      }
+
+      if (req.method === "GET") {
+        const options = sessions.configFor(sessionId);
+        if (!options) return Response.json({ error: "config_unavailable" }, { status: 503 });
+        return Response.json({ agentId: agent.id, configOptions: options });
+      }
+
+      let body: { modeId?: unknown };
+      try {
+        body = (await req.json()) as typeof body;
+      } catch {
+        return Response.json({ error: "bad_json" }, { status: 400 });
+      }
+      if (typeof body.modeId !== "string") {
+        return Response.json({ error: "modeId is required" }, { status: 400 });
+      }
+
+      // Checked against what this session actually offers. Forwarding an
+      // unknown mode would either be ignored or wedge the turn, and both look
+      // like the daemon losing the request.
+      const known = sessions.configFor(sessionId)?.find((option) => option.id === MODE_OPTION_ID);
+      if (known && !known.options.some((choice) => choice.value === body.modeId)) {
+        return Response.json(
+          { error: "unknown_mode", known: known.options.map((choice) => choice.value) },
+          { status: 400 },
+        );
+      }
+
+      try {
+        // Not audited: `AuditAction` is a frozen closed union with no member
+        // for a mode change, and recording this under a member that means
+        // something else would corrupt the audit log to fake coverage.
+        const options = await sessions.setMode(sessionId, body.modeId);
+        return Response.json({ agentId: agent.id, configOptions: options });
+      } catch (err) {
+        return Response.json(
+          { error: err instanceof Error ? err.message : "set_mode failed" },
+          { status: 502 },
+        );
+      }
+    }
+
+    const promptRoute = /^\/v1\/agents\/([^/]+)\/prompt$/.exec(path);
+    if (promptRoute && req.method === "POST") {
+      // The same gate the socket's `prompt` frame passes, and the supervisor
+      // re-authorizes from the device row behind it either way.
+      if (!scopes.has(SCOPE_PROMPT)) return Response.json({ error: "forbidden" }, { status: 403 });
+      let body: { text?: unknown };
+      try {
+        body = (await req.json()) as typeof body;
+      } catch {
+        return Response.json({ error: "bad_json" }, { status: 400 });
+      }
+      if (typeof body.text !== "string" || body.text.length === 0) {
+        return Response.json({ error: "text is required" }, { status: 400 });
+      }
+
+      try {
+        // Awaited, unlike the socket path: the whole point of this route is to
+        // hand a script the stop reason, which does not exist until the turn
+        // settles. The turn itself is identical either way.
+        const result = await this.#sup.prompt(promptRoute[1] ?? "", body.text, actor);
+        return Response.json({ agentId: promptRoute[1], stopReason: result.stopReason });
+      } catch (err) {
+        if (err instanceof UnauthorizedError) {
+          return Response.json({ error: "forbidden" }, { status: 403 });
+        }
+        return Response.json(
+          { error: err instanceof Error ? err.message : "prompt failed" },
+          { status: 404 },
+        );
+      }
+    }
+
+    if (path === "/v1/audit" && req.method === "GET") {
+      if (!scopes.has(SCOPE_READ)) return Response.json({ error: "forbidden" }, { status: 403 });
+      const raw = Number(url.searchParams.get("limit") ?? "200");
+      const limit = Number.isFinite(raw) && raw > 0 ? Math.min(raw, 1000) : 200;
+      return Response.json({ entries: this.#store.listAudit(limit) });
+    }
+
+    if (path === "/v1/approvals" && req.method === "GET") {
+      if (!scopes.has(SCOPE_READ)) return Response.json({ error: "forbidden" }, { status: 403 });
+      return Response.json({
+        pending: this.#sup.pendingApprovals(),
+        recent: this.#store.listApprovals(url.searchParams.get("agentId") ?? undefined),
+      });
+    }
+
+    if (path === "/v1/status" && req.method === "GET") {
+      if (!scopes.has(SCOPE_READ)) return Response.json({ error: "forbidden" }, { status: 403 });
+      const byState: Record<string, number> = {};
+      for (const agent of this.#sup.listAgents()) {
+        byState[agent.state] = (byState[agent.state] ?? 0) + 1;
+      }
+      const startedAtMs = this.#startedAtMs ?? Date.now();
+      return Response.json({
+        version: this.#version,
+        startedAt: new Date(startedAtMs).toISOString(),
+        uptimeMs: Date.now() - startedAtMs,
+        agents: { total: this.#sup.listAgents().length, byState },
+      });
+    }
+
+    if (path === "/v1/pairings" && req.method === "GET") {
+      // Approve scope, not read: a code is the thing an approval is spent on,
+      // so seeing the queue is part of approving rather than part of watching.
+      if (!scopes.has(SCOPE_APPROVE)) {
+        return Response.json({ error: "forbidden" }, { status: 403 });
+      }
+      return Response.json({ pending: this.#auth.pendingPairings() });
+    }
+
+    if (path === "/v1/pairings/approve" && req.method === "POST") {
+      if (!scopes.has(SCOPE_APPROVE)) {
+        return Response.json({ error: "forbidden" }, { status: 403 });
+      }
+      let body: { code?: unknown; scopes?: unknown };
+      try {
+        body = (await req.json()) as typeof body;
+      } catch {
+        return Response.json({ error: "bad_json" }, { status: 400 });
+      }
+      if (typeof body.code !== "string" || !Array.isArray(body.scopes)) {
+        return Response.json({ error: "code and scopes are required" }, { status: 400 });
+      }
+
+      // Narrowed element by element rather than asserted wholesale: this array
+      // came off the wire and decides what a new device is allowed to do.
+      const requested: string[] = [];
+      for (const scope of body.scopes) {
+        if (typeof scope !== "string" || !KNOWN_SCOPES.includes(scope)) {
+          return Response.json({ error: "unknown_scope", known: KNOWN_SCOPES }, { status: 400 });
+        }
+        requested.push(scope);
+      }
+
+      // A device may never mint one more powerful than itself. Refused rather
+      // than quietly clamped: an operator who asked for `manage` and got a
+      // device without it would debug the wrong thing for a long time. The
+      // code is not spent, so the right approver can still use it.
+      const missing = requested.filter((scope) => !scopes.has(scope));
+      if (missing.length > 0) {
+        return Response.json({ error: "scope_escalation", missing }, { status: 403 });
+      }
+
+      try {
+        const token = this.#auth.approvePairing(body.code, requested);
+        return Response.json({ token });
+      } catch (err) {
+        if (err instanceof PairingError) {
+          return Response.json({ error: err.message }, { status: 404 });
+        }
+        throw err;
+      }
+    }
+
+    if (path === "/v1/devices" && req.method === "GET") {
+      if (!scopes.has(SCOPE_READ)) return Response.json({ error: "forbidden" }, { status: 403 });
+      return Response.json({ devices: this.#store.listDevices() });
+    }
+
+    const deviceRoute = /^\/v1\/devices\/([^/]+)$/.exec(path);
+    if (deviceRoute && req.method === "DELETE") {
+      if (!scopes.has(SCOPE_MANAGE)) return Response.json({ error: "forbidden" }, { status: 403 });
+      const deviceId = deviceRoute[1] ?? "";
+      if (!this.#store.getDevice(deviceId)) {
+        return Response.json({ error: "not_found" }, { status: 404 });
+      }
+      this.#auth.revoke(deviceId);
+      return Response.json({ ok: true });
+    }
+
+    if (path === "/v1/tokens/rotate" && req.method === "POST") {
+      // Read as text first: rotating your own token needs no body at all, and
+      // an absent one must not read as malformed.
+      const raw = await req.text();
+      let body: { deviceId?: unknown } = {};
+      if (raw.length > 0) {
+        try {
+          body = JSON.parse(raw) as { deviceId?: unknown };
+        } catch {
+          return Response.json({ error: "bad_json" }, { status: 400 });
+        }
+      }
+      if (body.deviceId !== undefined && typeof body.deviceId !== "string") {
+        return Response.json({ error: "deviceId must be a string" }, { status: 400 });
+      }
+
+      // Rotating your own credential needs no scope. It only ever withdraws
+      // authority the caller already holds and replaces it with the same
+      // authority under a new secret, which is a thing every device should be
+      // able to do the moment it suspects its token has leaked.
+      const target = body.deviceId ?? actor.deviceId;
+      const own = target === actor.deviceId;
+
+      if (!own) {
+        if (!scopes.has(SCOPE_MANAGE)) return Response.json({ error: "forbidden" }, { status: 403 });
+        const device = this.#store.getDevice(target);
+        if (!device) return Response.json({ error: "not_found" }, { status: 404 });
+        // The same clamp pairing approval uses, for the same reason. Rotation
+        // hands the caller a working credential for the target, so without
+        // this a device holding only `manage` could mint itself one holding
+        // `approve` and answer its own tool approvals.
+        const missing = device.scopes.filter((scope) => !scopes.has(scope));
+        if (missing.length > 0) {
+          return Response.json({ error: "scope_escalation", missing }, { status: 403 });
+        }
+      }
+
+      try {
+        // `bearer` is non-null here: the check above this block is what
+        // produced `actor`. Passing it makes a self-rotation withdraw exactly
+        // the row the caller presented rather than everything that device holds.
+        const rotated = this.#auth.rotateToken(target, own ? (bearer ?? undefined) : undefined);
+        const tokenPath = this.#onTokenRotated?.(rotated.deviceId, rotated.token);
+        return Response.json({
+          deviceId: rotated.deviceId,
+          tokenId: rotated.tokenId,
+          revoked: rotated.revoked,
+          ...(tokenPath === undefined ? {} : { tokenPath }),
+          token: rotated.token,
+        });
+      } catch (err) {
+        if (err instanceof PairingError) {
+          return Response.json({ error: err.message }, { status: 404 });
+        }
+        throw err;
+      }
+    }
+
+    if (path === "/v1/routines" && req.method === "GET") {
+      if (!scopes.has(SCOPE_READ)) return Response.json({ error: "forbidden" }, { status: 403 });
+      return Response.json({ routines: this.#store.listRoutines() });
+    }
+
+    const routineRun = /^\/v1\/routines\/([^/]+)\/run$/.exec(path);
+    if (routineRun && req.method === "POST") {
+      // The scheduler authorizes again from the device row. This is the cheap
+      // first gate, not the authority.
+      if (!scopes.has(SCOPE_MANAGE)) return Response.json({ error: "forbidden" }, { status: 403 });
+      const runner = this.#routines;
+      if (!runner) {
+        return Response.json({ error: "routines_unavailable" }, { status: 503 });
+      }
+      try {
+        const run = await runner.runNow(routineRun[1] ?? "", actor);
+        return Response.json({ run });
+      } catch (err) {
+        if (err instanceof UnauthorizedError) {
+          return Response.json({ error: "forbidden" }, { status: 403 });
+        }
+        return Response.json(
+          { error: err instanceof Error ? err.message : "run failed" },
+          { status: 404 },
+        );
+      }
+    }
+
+    return Response.json({ error: "not_found" }, { status: 404 });
+  }
+
+  /**
+   * Serve a built web-client file, or null to let the API's 404 stand.
+   *
+   * The traversal check compares resolved absolute paths rather than screening
+   * the request for `..`, because a request path is not a filesystem path until
+   * it has been decoded and normalised, and screening before that is how
+   * traversal bugs happen.
+   */
+  async #serveStatic(pathname: string): Promise<Response | null> {
+    const root = this.#staticRoot;
+    // No directory on disk means this is the compiled binary, which carries the
+    // console embedded instead. Without this branch the installed artifact
+    // serves the API and answers `/` with not_found, which is what `ompd open`
+    // used to land on.
+    if (root === undefined) return await this.#serveEmbedded(pathname);
+
+    let relative = "";
+    try {
+      relative = decodeURIComponent(pathname).replace(/^\/+/, "");
+    } catch {
+      // Malformed percent-encoding. Nothing here can name a real file.
+      return null;
+    }
+
+    const target = resolve(root, relative);
+    if (target !== root && !target.startsWith(root + sep)) return null;
+
+    const file = Bun.file(target);
+    if (await file.exists()) return new Response(file);
+
+    // The client owns its own routing, so a path with no file extension is a
+    // route rather than a missing asset and gets the shell. A missing `.js`
+    // stays a 404, because answering it with HTML turns a broken deploy into a
+    // console parse error somewhere unrelated.
+    if (extname(target) !== "") return null;
+    const shell = Bun.file(join(root, "index.html"));
+    if (!(await shell.exists())) return null;
+    return new Response(shell, { headers: { "content-type": "text/html; charset=utf-8" } });
+  }
+
+  /**
+   * Serve the console embedded in the compiled binary.
+   *
+   * The asset map is generated at build time by `scripts/gen-web-assets.ts`,
+   * so lookups are exact and there is no path to traverse: a request either
+   * names a key that was embedded or it does not exist.
+   */
+  #serveEmbedded(pathname: string): Response | null {
+    if (!WEB_ASSETS_BUILT) return null;
+
+    let key = "";
+    try {
+      key = decodeURIComponent(pathname);
+    } catch {
+      // Malformed percent-encoding cannot name an embedded key.
+      return null;
+    }
+    // The manifest keys all start with a slash, so normalise before lookup
+    // rather than trusting the request to have one.
+    if (!key.startsWith("/")) key = `/${key}`;
+    if (key === "/") key = "/index.html";
+
+    const embedded = WEB_ASSETS[key];
+    if (embedded !== undefined) return embeddedResponse(embedded, key);
+
+    // Same rule as the on-disk path: an extensionless path is a client route
+    // and gets the shell, while a missing asset stays a 404 so a broken build
+    // fails where it broke rather than as a parse error somewhere unrelated.
+    if (extname(key) !== "") return null;
+    const shell = WEB_ASSETS["/index.html"];
+    if (shell === undefined) return null;
+    return embeddedResponse(shell, "/index.html");
+  }
+
+  // -- websocket -------------------------------------------------------------
+
+  #open(ws: ServerWebSocket<SocketState>): void {
+    this.#sockets.add(ws);
+    if (this.#voice) ws.data.voice = this.#voice((frame) => this.#send(ws, frame), this.#actorOf(ws));
+    this.#send(ws, {
+      t: "hello",
+      deviceId: ws.data.deviceId,
+      agents: ws.data.scopes.has(SCOPE_READ) ? this.#sup.listAgents() : [],
+    });
+  }
+
+  #close(ws: ServerWebSocket<SocketState>): void {
+    this.#sockets.delete(ws);
+    void ws.data.voice?.close();
+    ws.data.voice = null;
+  }
+
+  #message(ws: ServerWebSocket<SocketState>, message: string | Buffer): void {
+    if (!ws.data.bucket.take()) {
+      this.#send(ws, { t: "error", code: "rate_limited", message: "too many frames" });
+      return;
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(typeof message === "string" ? message : message.toString());
+    } catch {
+      // A bad frame is a client bug, not grounds to drop a connection the
+      // client may be relying on to finish a turn.
+      this.#send(ws, { t: "error", code: "bad_json", message: "frame was not valid JSON" });
+      return;
+    }
+
+    if (parsed === null || typeof parsed !== "object" || !("t" in parsed)) {
+      this.#send(ws, { t: "error", code: "unknown_frame", message: "frame has no type" });
+      return;
+    }
+    const frameType = parsed.t;
+    if (typeof frameType !== "string") {
+      this.#send(ws, { t: "error", code: "unknown_frame", message: "frame type is not a string" });
+      return;
+    }
+
+    // Narrowed as far as a discriminant can take it. Whether the rest of the
+    // frame matches its type is checked per case below, because the wire is
+    // not a place to assume anyone kept to the contract.
+    const frame = parsed as ClientFrame;
+    try {
+      this.#handle(ws, frame, frameType);
+    } catch (err) {
+      // Last line of defence. A frame handler that throws would otherwise take
+      // the connection, and on an unhandled path the process, down with it. A
+      // hostile or merely malformed frame must cost one error frame, no more.
+      this.#send(ws, {
+        t: "error",
+        code: err instanceof UnauthorizedError ? "unauthorized" : "frame_failed",
+        message: err instanceof Error ? err.message : "frame handling failed",
+      });
+    }
+  }
+
+  #handle(ws: ServerWebSocket<SocketState>, frame: ClientFrame, frameType: string): void {
+    switch (frame.t) {
+      case "ping":
+        this.#send(ws, { t: "pong" });
+        return;
+
+      case "attach": {
+        if (!ws.data.scopes.has(SCOPE_READ)) {
+          this.#send(ws, { t: "error", code: "unauthorized", message: "attach requires read scope" });
+          return;
+        }
+        if (typeof frame.agentId !== "string") {
+          this.#send(ws, { t: "error", code: "bad_frame", message: "attach needs an agentId" });
+          return;
+        }
+        // Registering before the replay is what closes the gap. The store read
+        // and the sends below are synchronous, so no live update can interleave
+        // and arrive out of order, and `#deliverUpdate` drops anything at or
+        // below the high-water mark so nothing arrives twice either.
+        ws.data.attached.add(frame.agentId);
+        if (frame.sinceSeq !== undefined) {
+          for (const record of this.#store.updatesSince(frame.agentId, frame.sinceSeq)) {
+            this.#deliverUpdate(ws, frame.agentId, record.seq, record.payload);
+          }
+        }
+
+        // An approval is otherwise only ever pushed live, so a client that
+        // connects or reconnects while the agent is already blocked on one
+        // sees an agent that is simply not moving, with no way to unblock it.
+        // Replaying after the updates puts the ask in the same order it
+        // originally arrived in, behind the transcript that led to it. This is
+        // the update log's lossless-resume rule applied to the other thing a
+        // client cannot reconstruct on its own.
+        for (const approval of this.#sup.pendingApprovals()) {
+          if (approval.agentId !== frame.agentId) continue;
+          this.#deliverApproval(ws, approval);
+        }
+        return;
+      }
+
+      case "detach":
+        ws.data.attached.delete(frame.agentId);
+        // Forget the high-water mark too, so a later attach may replay again.
+        ws.data.delivered.delete(frame.agentId);
+        // Same for approvals, so a reattach is shown a still-pending ask.
+        ws.data.approvals.delete(frame.agentId);
+        // And the spoken summary, so a reattached client is told again what
+        // the turn it is watching came to.
+        ws.data.said.delete(frame.agentId);
+        return;
+
+      case "prompt": {
+        if (!ws.data.scopes.has(SCOPE_PROMPT)) {
+          this.#send(ws, {
+            t: "error",
+            agentId: frame.agentId,
+            code: "unauthorized",
+            message: "prompt requires prompt scope",
+          });
+          return;
+        }
+        // Announced before it is sent, so whoever is tracking how a device is
+        // talking to an agent learns it typed even if the prompt then fails.
+        this.#onTextPrompt?.(frame.agentId, this.#actorOf(ws));
+        // Deliberately not awaited: a turn outlives the frame that started it,
+        // and the socket has to stay responsive to `cancel` while it runs.
+        void this.#sup.prompt(frame.agentId, frame.text, this.#actorOf(ws)).catch((err: unknown) => {
+          this.#send(ws, {
+            t: "error",
+            agentId: frame.agentId,
+            code: err instanceof UnauthorizedError ? "unauthorized" : "prompt_failed",
+            message: err instanceof Error ? err.message : "prompt failed",
+          });
+        });
+        return;
+      }
+
+      case "cancel": {
+        if (!ws.data.scopes.has(SCOPE_PROMPT)) {
+          this.#send(ws, {
+            t: "error",
+            agentId: frame.agentId,
+            code: "unauthorized",
+            message: "cancel requires prompt scope",
+          });
+          return;
+        }
+        void this.#sup.cancel(frame.agentId, this.#actorOf(ws)).catch((err: unknown) => {
+          this.#send(ws, {
+            t: "error",
+            agentId: frame.agentId,
+            code: err instanceof UnauthorizedError ? "unauthorized" : "cancel_failed",
+            message: err instanceof Error ? err.message : "cancel failed",
+          });
+        });
+        return;
+      }
+
+      case "decide": {
+        // The frame contributes a request id and a choice. Everything about who
+        // is asking comes from the socket's resolved identity, and the
+        // supervisor re-reads the device row before honouring any of it, so a
+        // client cannot name a device or a scope it does not hold. A false
+        // return means unknown request or insufficient scope, and the pending
+        // approval is left to policy and the timeout.
+        const accepted = this.#sup.decide(
+          frame.requestId,
+          frame.choice,
+          frame.scope ?? "once",
+          this.#actorOf(ws),
+        );
+        if (!accepted) {
+          this.#send(ws, {
+            t: "error",
+            agentId: frame.agentId,
+            code: "unauthorized",
+            message: "decision refused: unknown request or missing approve scope",
+          });
+        }
+        return;
+      }
+
+      case "audio":
+      case "audio_end": {
+        if (!ws.data.scopes.has(SCOPE_PROMPT)) {
+          this.#send(ws, {
+            t: "error",
+            agentId: frame.agentId,
+            code: "unauthorized",
+            message: "audio requires prompt scope",
+          });
+          return;
+        }
+        const voice = ws.data.voice;
+        if (!voice) {
+          this.#send(ws, {
+            t: "error",
+            agentId: frame.agentId,
+            code: "voice_unavailable",
+            message: "no voice bridge is attached to this daemon",
+          });
+          return;
+        }
+        void voice.handleFrame(frame, this.#actorOf(ws));
+        return;
+      }
+
+      default:
+        this.#send(ws, {
+          t: "error",
+          code: "unknown_frame",
+          message: `unsupported frame type ${frameType}`,
+        });
+    }
+  }
+
+  // -- internals -------------------------------------------------------------
+
+  /**
+   * The identity a frame acts under.
+   *
+   * Resolved at connect time from the device row, never from frame contents.
+   * Revocation mid-session is still honoured because every privileged call this
+   * feeds re-reads the device row and rejects a revoked one.
+   */
+  #actorOf(ws: ServerWebSocket<SocketState>): Actor {
+    return { deviceId: ws.data.deviceId, scopes: [...ws.data.scopes] };
+  }
+
+  #deliverUpdate(
+    ws: ServerWebSocket<SocketState>,
+    agentId: AgentId,
+    seq: number,
+    update: unknown,
+  ): void {
+    // The single choke point replay and live traffic share, so a frame the
+    // socket already has can never be sent twice.
+    const delivered = ws.data.delivered.get(agentId) ?? 0;
+    if (seq <= delivered) return;
+    ws.data.delivered.set(agentId, seq);
+    this.#send(ws, { t: "update", agentId, seq, update });
+  }
+
+  /**
+   * The approval counterpart to `#deliverUpdate`, and the only place an
+   * `approval` frame is written.
+   *
+   * Keyed by request id rather than by a high-water mark, because approvals
+   * settle out of order and a pending set shrinks as well as grows. Detach
+   * clears the agent's set, so a deliberate reattach can be shown the ask
+   * again while a duplicate attach cannot.
+   */
+  #deliverApproval(
+    ws: ServerWebSocket<SocketState>,
+    approval: Omit<PendingApproval, "resolve">,
+  ): void {
+    let sent = ws.data.approvals.get(approval.agentId);
+    if (!sent) {
+      sent = new Set<string>();
+      ws.data.approvals.set(approval.agentId, sent);
+    }
+    if (sent.has(approval.requestId)) return;
+    sent.add(approval.requestId);
+    this.#send(ws, {
+      t: "approval",
+      agentId: approval.agentId,
+      requestId: approval.requestId,
+      title: approval.title,
+      tool: approval.tool,
+      input: approval.input,
+    });
+  }
+
+  #send(ws: ServerWebSocket<SocketState>, frame: ServerFrame): void {
+    try {
+      ws.send(JSON.stringify(frame));
+    } catch {
+      // The socket went away between an event firing and this send. `#close`
+      // removes it from the registry; there is nothing to report to.
+    }
+  }
+}
