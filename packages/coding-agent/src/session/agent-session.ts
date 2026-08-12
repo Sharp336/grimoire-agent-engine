@@ -2704,7 +2704,7 @@ export class AgentSession {
 		// Check auto-retry and auto-compaction after agent completes
 		if (event.type === "agent_end") {
 			const settledMessages = event.messages;
-			const activeMessages = this.agent.state.messages;
+			let activeMessages = this.agent.state.messages;
 			// TTSR retry work runs concurrently and clears the live flag before
 			// maintenance can emit agent_end, so preserve the state at settle entry.
 			const ttsrAbortPendingAtAgentEnd = this.#ttsr.abortPending;
@@ -2996,6 +2996,7 @@ export class AgentSession {
 			if (!compactionResult.tailPruned) {
 				// Periodic shake — independent of compaction strategy/auto-compaction
 				await this.#runPeriodicShake();
+				activeMessages = this.agent.state.messages;
 			}
 			if (msg.stopReason !== "error") {
 				if (this.#enforceRewindBeforeYield()) {
