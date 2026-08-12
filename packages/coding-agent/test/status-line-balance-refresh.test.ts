@@ -275,4 +275,63 @@ describe("StatusLineComponent balance refresh", () => {
 
 		expect(component.getTopBorder(120).content).not.toContain("42.00");
 	});
+
+	it("repaints once the fetched balance lands", async () => {
+		const component = new StatusLineComponent(makeDeepSeekSession());
+		const repaint = vi.fn();
+		component.watchBranch(repaint);
+		const before = repaint.mock.calls.length;
+
+		await render(component);
+		pending.resolve(new Response(JSON.stringify({ balance_infos: [{ total_balance: "42.00", currency: "CNY" }] })));
+		await flushMicrotasks();
+
+		// The fetch is async. Without this notification a quiet session shows an
+		// empty segment until an unrelated event rebuilds the top border.
+		expect(repaint.mock.calls.length).toBeGreaterThan(before);
+	});
+
+	it("does not repaint when the balance is unchanged", async () => {
+		const component = new StatusLineComponent(makeDeepSeekSession());
+		const body = JSON.stringify({ balance_infos: [{ total_balance: "42.00", currency: "CNY" }] });
+
+		await render(component);
+		pending.resolve(new Response(body));
+		await flushMicrotasks();
+
+		const repaint = vi.fn();
+		component.watchBranch(repaint);
+		const before = repaint.mock.calls.length;
+
+		// Force a second fetch past the TTL and return the identical figure.
+		vi.advanceTimersByTime(10 * 60_000);
+		pending = Promise.withResolvers<Response>();
+		await render(component);
+		pending.resolve(new Response(body));
+		await flushMicrotasks();
+
+		expect(repaint.mock.calls.length).toBe(before);
+	});
+
+	it("colours the balance without emitting a full SGR reset", async () => {
+		const component = new StatusLineComponent(makeDeepSeekSession());
+
+		await render(component);
+		pending.resolve(new Response(JSON.stringify({ balance_infos: [{ total_balance: "42.00", currency: "CNY" }] })));
+		await flushMicrotasks();
+		component.updateSettings({ preset: "custom", leftSegments: ["balance"], rightSegments: [] });
+
+		const content = component.getTopBorder(120).content;
+		expect(content).toContain("42.00");
+		// `#buildStatusLine` emits its own `\x1b[0m` when the segment group ends,
+		// so scope the check to the segment: everything the balance itself writes
+		// must appear before that wrapper reset, and must close with a
+		// foreground-only `\x1b[39m`. A segment-local full reset would clear the
+		// status line's background for everything that follows, and would land
+		// the amount in a slice with no `\x1b[39m` in it.
+		const fromGlyph = content.slice(content.indexOf("💳"));
+		const segmentText = fromGlyph.slice(0, fromGlyph.indexOf("\x1b[0m"));
+		expect(segmentText).toContain("42.00");
+		expect(segmentText).toContain("\x1b[39m");
+	});
 });

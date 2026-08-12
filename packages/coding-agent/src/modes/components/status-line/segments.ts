@@ -724,16 +724,23 @@ const usageSegment: StatusLineSegment = {
 	},
 };
 
+/** Green above 50, amber above 10, red at or below 10 — same ladder as usage. */
+function pickBalanceColor(amount: number): ThemeColor {
+	if (amount > 50) return "success";
+	if (amount > 10) return "warning";
+	return "error";
+}
+
 const balanceSegment: StatusLineSegment = {
 	id: "balance",
 	render(ctx) {
 		const b = ctx.balance;
 		if (!b) return { content: "", visible: false };
-		// Balance string may contain ANSI color codes from the provider fetcher.
-		// sanitizeStatusText preserves ANSI escapes, only strips control characters.
-		const text = sanitizeStatusText(b);
+		const text = sanitizeStatusText(`${b.symbol}${b.amount.toFixed(2)}`);
 		if (!text) return { content: "", visible: false };
-		return { content: `💳 ${text}`, visible: true };
+		// theme.fg closes with `\x1b[39m`, so the status line's own background
+		// and separator styling survive the segment.
+		return { content: `💳 ${theme.fg(pickBalanceColor(b.amount), text)}`, visible: true };
 	},
 };
 

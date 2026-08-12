@@ -34,6 +34,7 @@ import { getSeparator } from "./separators";
 import type {
 	CollabStatus,
 	EffectiveStatusLineSettings,
+	StatusLineBalance,
 	StatusLineSegmentId,
 	StatusLineSegmentOptions,
 	StatusLineSettings,
@@ -453,7 +454,7 @@ export class StatusLineComponent implements Component {
 	#codexResetSnapshots = new Map<string, CodexResetUsageSnapshot>();
 	#onCodexResetFireworks: ((event: CodexResetFireworksEvent) => void) | undefined;
 	// API-key provider balance caching (e.g. DeepSeek)
-	#cachedBalance: string | null = null;
+	#cachedBalance: StatusLineBalance | null = null;
 	#balanceModel: Model | null = null;
 	#balanceFetchedAt = 0;
 	#balanceInFlight = false;
@@ -1412,9 +1413,15 @@ export class StatusLineComponent implements Component {
 		try {
 			const balance = await this.#fetchDeepSeekBalance(session, model);
 			if (this.#disposed || this.session !== session || (session.state.model ?? session.model) !== model) return;
+			// Same reason as #applyUsageRefreshReports: the fetch is async, so
+			// without a repaint the segment stays blank until an unrelated event
+			// (git resolve, keystroke, agent turn) rebuilds the top border.
+			const changed =
+				this.#cachedBalance?.amount !== balance?.amount || this.#cachedBalance?.symbol !== balance?.symbol;
 			this.#cachedBalance = balance;
 			this.#balanceModel = model;
 			this.#balanceFetchedAt = Date.now();
+			if (changed) this.#onBranchChange?.();
 		} catch {
 			if (this.#disposed || this.session !== session || (session.state.model ?? session.model) !== model) return;
 			this.#balanceFetchedAt = Date.now();
@@ -1423,7 +1430,7 @@ export class StatusLineComponent implements Component {
 		}
 	}
 
-	async #fetchDeepSeekBalance(session: AgentSession, model: Model): Promise<string | null> {
+	async #fetchDeepSeekBalance(session: AgentSession, model: Model): Promise<StatusLineBalance | null> {
 		// A gateway key must never be sent to DeepSeek's public balance endpoint.
 		// Empty uses the first-party default; an explicit URL must have the exact
 		// direct API hostname. Substring matching is unsafe for credential gates.
@@ -1453,14 +1460,7 @@ export class StatusLineComponent implements Component {
 
 		const currencySymbol: Record<string, string> = { CNY: "¥", USD: "$", EUR: "€", GBP: "£" };
 		const symbol = currencySymbol[info?.currency ?? ""] ?? info?.currency ?? "¥";
-
-		// Colour-code inline: green >50, yellow >10, red <=10
-		const G = "\x1b[32m",
-			Y = "\x1b[33m",
-			R = "\x1b[31m",
-			E = "\x1b[0m";
-		const color = total > 50 ? G : total > 10 ? Y : R;
-		return `${color}${symbol}${total.toFixed(2)}${E}`;
+		return { symbol, amount: total };
 	}
 
 	async #raceUsageRefreshWithSignal(promise: Promise<unknown>, signal: AbortSignal): Promise<unknown> {
