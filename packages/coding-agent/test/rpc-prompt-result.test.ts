@@ -23,6 +23,59 @@ async function waitForTrackedPromptHandlers(trackedPrompt: {
 	await Promise.resolve();
 }
 
+const triggerTurnCustomMessage = {
+	customType: "test",
+	content: "aside",
+	display: false,
+	attribution: "agent",
+} as const;
+
+async function reportTriggerTurnCustomMessage(sendResult: boolean, id: string): Promise<object[]> {
+	let extensionActions: ExtensionActions | undefined;
+	const output: object[] = [];
+	const extensionUserMessages = new RpcExtensionUserMessageTracker();
+	const session = {
+		extensionRunner: {
+			initialize: (actions: ExtensionActions) => {
+				extensionActions = actions;
+			},
+			onError: () => {},
+			emit: async () => {},
+		},
+		sendCustomMessage: async () => sendResult,
+	} as unknown as AgentSession;
+
+	await initializeExtensions(session, {
+		reportSendError: (_action, error) => {
+			throw error;
+		},
+		reportRuntimeError: error => {
+			throw error.error;
+		},
+		trackAgentInvokingMessage: task => {
+			extensionUserMessages.trackAgentMessageTask(task);
+		},
+	});
+
+	const trackedPrompt = extensionUserMessages.watchPrompt(() => {
+		if (!extensionActions) throw new Error("extensions not initialized");
+		extensionActions.sendMessage(triggerTurnCustomMessage, { triggerTurn: true, deliverAs: "aside" });
+		return Promise.resolve(false);
+	});
+	reportLocalOnlyPromptResult({
+		id,
+		prompt: trackedPrompt.prompt,
+		output: frame => output.push(frame),
+		onError: error => {
+			throw error;
+		},
+		hasExtensionAgentMessageTask: trackedPrompt.hasAgentMessageTask,
+		waitForExtensionAgentMessageTasks: trackedPrompt.waitForAgentMessageTasks,
+	});
+	await waitForTrackedPromptHandlers(trackedPrompt);
+	return output;
+}
+
 describe("reportLocalOnlyPromptResult", () => {
 	test("emits prompt_result when prompt resolves without invoking the agent or extension user message", async () => {
 		const output: object[] = [];
@@ -148,6 +201,16 @@ describe("reportLocalOnlyPromptResult", () => {
 
 		expect(markCount).toBe(1);
 		expect(sentOptions).toEqual({ triggerTurn: true });
+	});
+
+	test("emits prompt_result when triggerTurn sendCustomMessage resolves false", async () => {
+		const output = await reportTriggerTurnCustomMessage(false, "req_parked_aside");
+		expect(output).toEqual([{ type: "prompt_result", id: "req_parked_aside", agentInvoked: false }]);
+	});
+
+	test("suppresses prompt_result when triggerTurn sendCustomMessage resolves true", async () => {
+		const output = await reportTriggerTurnCustomMessage(true, "req_aside_turn");
+		expect(output).toEqual([]);
 	});
 
 	test("suppresses prompt_result when extension sendUserMessage succeeds", async () => {

@@ -187,7 +187,8 @@ export class RpcExtensionUserMessageTracker {
 
 	#trackAgentMessageTaskForScope(scope: RpcExtensionUserMessageScope, task: Promise<unknown>): void {
 		const scopedTask = task.then(
-			() => {
+			result => {
+				if (result === false) return;
 				scope.hasAgentMessageTask = true;
 			},
 			() => {},
