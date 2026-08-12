@@ -10,7 +10,7 @@
  *      terminal settle, bounded by PLAN_MODE_REMINDER_MAX (then yields to the
  *      user), and either decision tool resets the counter.
  */
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool, type StreamFn } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
@@ -103,6 +103,7 @@ describe("AgentSession plan-mode convergence", () => {
 			planYolo?: boolean;
 			planYoloGuidance?: boolean;
 			rebuildGate?: { fail: boolean };
+			activeToolApplyGate?: { fail: boolean };
 		},
 	): Promise<PlanHarness> {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -179,6 +180,13 @@ describe("AgentSession plan-mode convergence", () => {
 						}
 					: undefined,
 		});
+		if (options?.activeToolApplyGate) {
+			const setActiveToolsByName = created.setActiveToolsByName.bind(created);
+			vi.spyOn(created, "setActiveToolsByName").mockImplementation(async toolNames => {
+				if (options.activeToolApplyGate?.fail) throw new Error("active tool apply failed");
+				await setActiveToolsByName(toolNames);
+			});
+		}
 		if (!options?.planYolo) created.setPlanModeState({ enabled: true, planFilePath: "local://PLAN.md" });
 		session = created;
 		return { session: created, mock, systemPrompts, advisorMock, sideMock };
@@ -362,6 +370,114 @@ describe("AgentSession plan-mode convergence", () => {
 
 		expect(harness.session.getPlanModeState()).toBeUndefined();
 		expect(harness.session.getActiveToolNames()).toEqual(["read"]);
+	});
+
+	it("tears down and rearms PlanYolo across a committed new session", async () => {
+		const harness = await createPlanSession([{ content: ["planning A"] }, { content: ["planning B"] }], {
+			planYolo: true,
+		});
+		await harness.session.prompt("make a plan");
+		await harness.session.waitForIdle();
+		const outgoingHandler = harness.session.peekPlanProposalHandler();
+		expect(outgoingHandler).toBeDefined();
+		expect(harness.session.getActiveToolNames()).toEqual(["read", "write"]);
+
+		expect(await harness.session.newSession()).toBe(true);
+		expect(harness.session.getPlanModeState()).toBeUndefined();
+		expect(harness.session.peekPlanProposalHandler()).toBeUndefined();
+		expect(harness.session.getActiveToolNames()).toEqual(["read"]);
+
+		await harness.session.prompt("make another plan");
+		await harness.session.waitForIdle();
+		const replacementHandler = harness.session.peekPlanProposalHandler();
+		expect(replacementHandler).toBeDefined();
+		expect(replacementHandler).not.toBe(outgoingHandler);
+		expect(harness.session.getPlanModeState()?.enabled).toBe(true);
+		expect(harness.session.getActiveToolNames()).toEqual(["read", "write"]);
+
+		const planPath = resolveLocalUrlToPath("local://replacement-plan.md", {
+			getArtifactsDir: () => harness.session.sessionManager.getArtifactsDir(),
+			getSessionId: () => harness.session.sessionManager.getSessionId(),
+		});
+		await Bun.write(planPath, "# Replacement plan\n\nImplement it.\n");
+		await replacementHandler!("replacement");
+		expect(harness.session.getPlanModeState()).toBeUndefined();
+		expect(harness.session.getActiveToolNames()).toEqual(["read"]);
+	});
+
+	it("keeps the replacement retryable when committed PlanYolo tool restoration fails", async () => {
+		const activeToolApplyGate = { fail: false };
+		const harness = await createPlanSession([{ content: ["planning A"] }, { content: ["planning B"] }], {
+			planYolo: true,
+			activeToolApplyGate,
+		});
+		await harness.session.prompt("make a plan");
+		await harness.session.waitForIdle();
+		const outgoingHandler = harness.session.peekPlanProposalHandler();
+		expect(outgoingHandler).toBeDefined();
+		expect(harness.session.getActiveToolNames()).toEqual(["read", "write"]);
+		activeToolApplyGate.fail = true;
+		harness.session.queueDeferredMessage({
+			role: "custom",
+			customType: "outgoing-plan-yolo-state",
+			content: "must not reach replacement",
+			display: false,
+			timestamp: Date.now(),
+		});
+		expect(harness.session.hasPostPromptWork).toBe(true);
+
+		await expect(harness.session.newSession()).rejects.toThrow(
+			"New session committed, but post-commit transition work failed: active tool apply failed",
+		);
+		expect(harness.session.getPlanModeState()).toBeUndefined();
+		expect(harness.session.peekPlanProposalHandler()).toBeUndefined();
+
+		activeToolApplyGate.fail = false;
+		expect(harness.session.hasPostPromptWork).toBe(false);
+		await harness.session.prompt("make another plan");
+		await harness.session.waitForIdle();
+		const replacementHandler = harness.session.peekPlanProposalHandler();
+		expect(replacementHandler).toBeDefined();
+		expect(replacementHandler).not.toBe(outgoingHandler);
+		expect(harness.session.getPlanModeState()?.enabled).toBe(true);
+		expect(
+			harness.mock.calls
+				.at(-1)
+				?.context.messages.some(message => messageText(message).includes("must not reach replacement")),
+		).toBe(false);
+		expect(harness.session.getActiveToolNames()).toEqual(["read", "write"]);
+
+		const planPath = resolveLocalUrlToPath("local://restored-replacement-plan.md", {
+			getArtifactsDir: () => harness.session.sessionManager.getArtifactsDir(),
+			getSessionId: () => harness.session.sessionManager.getSessionId(),
+		});
+		await Bun.write(planPath, "# Restored replacement plan\n\nImplement it.\n");
+		await replacementHandler!("restored replacement");
+		expect(harness.session.getPlanModeState()).toBeUndefined();
+		expect(harness.session.getActiveToolNames()).toEqual(["read"]);
+	});
+
+	it("preserves armed PlanYolo when a new session fails before commit", async () => {
+		const harness = await createPlanSession([{ content: ["planning A"] }, { content: ["planning B"] }], {
+			planYolo: true,
+		});
+		await harness.session.prompt("make a plan");
+		await harness.session.waitForIdle();
+		const outgoingHandler = harness.session.peekPlanProposalHandler();
+		const outgoingTools = harness.session.getActiveToolNames();
+		expect(outgoingHandler).toBeDefined();
+		vi.spyOn(harness.session.sessionManager, "newSession").mockRejectedValueOnce(new Error("new session failed"));
+
+		await expect(harness.session.newSession()).rejects.toThrow("new session failed");
+
+		expect(harness.session.getPlanModeState()?.enabled).toBe(true);
+		expect(harness.session.peekPlanProposalHandler()).toBe(outgoingHandler);
+		expect(harness.session.getActiveToolNames()).toEqual(outgoingTools);
+
+		await harness.session.prompt("continue planning");
+		await harness.session.waitForIdle();
+		expect(harness.session.peekPlanProposalHandler()).toBe(outgoingHandler);
+		expect(harness.session.getActiveToolNames()).toEqual(outgoingTools);
 	});
 
 	it("keeps PlanYolo retryable when pre-plan tool restoration fails", async () => {

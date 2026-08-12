@@ -253,7 +253,7 @@ export class PrewalkCoordinator {
 	async armPlanYoloIfNeeded(): Promise<void> {
 		if (!this.#planYolo || this.#planYoloArmed) return;
 		this.#planYoloArmed = true;
-		const previousTools = this.#host.getEnabledToolNames();
+		const previousTools = this.#planYoloPreviousTools ?? this.#host.getEnabledToolNames();
 		const previousMountedTools = this.#host.getMountedXdevToolNames();
 		const previousPlanModeState = this.#host.getPlanModeState();
 		const augmentations = this.#host.hasBuiltInTool("write") ? ["write"] : [];
@@ -275,6 +275,20 @@ export class PrewalkCoordinator {
 		}
 		this.#planYoloPreviousTools = previousTools;
 		this.#host.setPlanProposalHandler(title => this.#finalizePlanYoloProposal(title));
+	}
+
+	/**
+	 * Restores the tool set from before the outgoing plan-yolo phase and leaves
+	 * the configured handoff ready to arm in the replacement session. The
+	 * snapshot remains available if restoration fails, so a later arm retries it
+	 * instead of treating the augmented plan tool set as the new baseline.
+	 */
+	async resetPlanYoloForNewSession(): Promise<void> {
+		const previousTools = this.#planYoloPreviousTools;
+		this.#planYoloArmed = false;
+		this.#host.setPlanModeState(undefined);
+		if (previousTools) await this.#host.setActiveToolsByName(previousTools);
+		this.#planYoloPreviousTools = undefined;
 	}
 
 	#scrubPlanNudge(liveMessages: AgentMessage[]): void {

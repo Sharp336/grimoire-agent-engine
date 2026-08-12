@@ -6633,6 +6633,7 @@ export class AgentSession {
 		let advisorRecordersDetached = false;
 		let bashTransition: BashSessionTransition | undefined;
 		let sessionTransitioned = false;
+		let committedPlanYoloResetError: unknown;
 		let previousAgentMessages: AgentMessage[] | undefined;
 		let reconciliationAttempted = false;
 		const reconcileNewSessionTransition = async (committed: boolean): Promise<void> => {
@@ -6676,6 +6677,11 @@ export class AgentSession {
 				// Transient plan and goal states belong to the outgoing transcript. Clear them only
 				// after the session manager commits the replacement. A pre-commit failure
 				// keeps the outgoing session's post-abort mode state in place.
+				try {
+					await this.#prewalk.resetPlanYoloForNewSession();
+				} catch (error) {
+					committedPlanYoloResetError = error;
+				}
 				this.setPlanModeState(undefined);
 				this.setPlanProposalHandler(null);
 				this.setGoalModeState(undefined);
@@ -6723,6 +6729,7 @@ export class AgentSession {
 				});
 			}
 			await reconcileNewSessionTransition(true);
+			if (committedPlanYoloResetError) throw committedPlanYoloResetError;
 			return true;
 		} catch (error) {
 			if (!sessionTransitioned && previousAgentMessages) {
