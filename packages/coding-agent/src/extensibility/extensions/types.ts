@@ -1124,8 +1124,9 @@ export interface UserPythonEventResult {
 }
 
 /**
- * Exact approved policy text that an extension permits the native Advisor to
- * attribute visibly when it directly causes an `advise()` call.
+ * Exact approved policy text that an extension loaded through the exact-path
+ * `--trusted-extension` allowlist permits the native Advisor to attribute
+ * visibly when it directly causes an `advise()` call.
  */
 export interface AdvisorContextPolicyAttribution {
 	/** Opaque alias included in private Advisor context; never rendered. */
@@ -1141,7 +1142,7 @@ export interface AdvisorContextPolicyAttribution {
 export interface AdvisorContextEventResult {
 	/** Bounded context appended to the native Advisor review update. */
 	context?: string;
-	/** Bounded policy aliases the Advisor may cite for visible provenance. */
+	/** Policy aliases accepted only from exact-path `--trusted-extension` modules. */
 	policies?: AdvisorContextPolicyAttribution[];
 }
 
@@ -1753,6 +1754,8 @@ export interface ExtensionRuntime extends ExtensionRuntimeState, ExtensionAction
 export interface Extension {
 	path: string;
 	resolvedPath: string;
+	/** Loaded through the exact-path `--trusted-extension` allowlist. */
+	trusted?: boolean;
 	label?: string;
 	handlers: Map<string, HandlerFn[]>;
 	tools: Map<string, RegisteredTool<any, any>>;
