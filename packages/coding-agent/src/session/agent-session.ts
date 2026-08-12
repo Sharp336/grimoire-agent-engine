@@ -792,7 +792,9 @@ export class AgentSession {
 				this.#preserveAdvisorCard(card);
 			}
 		}
-		if (!this.#isDisposed) {
+		// Skip flush when a queued steer/follow-up will resume — a custom tail
+		// blocks follow-up-only auto-continue. Same gate as #resumeStrandedIrcAsides.
+		if (!this.#isDisposed && !(this.#canAutoContinueForFollowUp() && this.agent.hasQueuedMessages())) {
 			this.#flushPendingExtensionAsides();
 		}
 		this.#scheduleQueuedMessageDrain();

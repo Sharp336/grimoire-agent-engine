@@ -334,6 +334,10 @@
 
 - Added `deliverAs: "aside"` to extension `pi.sendMessage` for mid-turn custom message injection at the next agent step boundary without interrupting tools or aborting the stream; idle appends unless `triggerTurn`, stranded content persists with no wake. See `examples/extensions/aside-delivery.ts`.
 
+### Fixed
+
+- Fixed stranded extension asides flushed at settle blocking queued follow-up auto-resume by poisoning the transcript tail before the follow-up drain.
+
 ## [17.2.15] - 2026-08-12
 
 ### Added

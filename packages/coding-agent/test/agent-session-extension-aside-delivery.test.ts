@@ -477,6 +477,59 @@ describe("AgentSession extension deliverAs aside", () => {
 		expect(mock.calls.length).toBe(1);
 	});
 
+	it("does not flush a stranded aside ahead of a queued follow-up drain (case 8b)", async () => {
+		const { session: stopSession, mock } = await createMockSession([
+			{ content: ["first answer"], stopReason: "stop" },
+			{ content: ["continued after follow-up"] },
+			{ content: ["folded aside"] },
+		]);
+
+		let injected = false;
+		stopSession.agent.setOnBeforeYield(async () => {
+			if (injected) return;
+			injected = true;
+			await stopSession.sendCustomMessage(asidePayload("settle aside"), { deliverAs: "aside" });
+			const inner = asideProvider;
+			if (!inner) throw new Error("aside provider was never captured");
+			let skippedYieldPoll = false;
+			stopSession.agent.setAsideMessageProvider(() => {
+				if (!skippedYieldPoll) {
+					skippedYieldPoll = true;
+					return [];
+				}
+				return inner();
+			});
+		});
+
+		const resumed = Promise.withResolvers<void>();
+		let agentEnds = 0;
+		stopSession.subscribe(event => {
+			if (event.type !== "agent_end") return;
+			agentEnds += 1;
+			if (agentEnds === 1) {
+				stopSession.agent.followUp({
+					role: "user",
+					content: [{ type: "text", text: "then add the test" }],
+					attribution: "user",
+					timestamp: Date.now(),
+				});
+				return;
+			}
+			resumed.resolve();
+		});
+
+		await stopSession.prompt("hello");
+		await resumed.promise;
+		await stopSession.waitForIdle();
+
+		expect(mock.calls.length).toBeGreaterThanOrEqual(2);
+		expect(userMessageText(stopSession.agent.state.messages)).toContain("then add the test");
+		expect(userMessageText([...stopSession.agent.peekFollowUpQueue()])).not.toContain("then add the test");
+		expect(stopSession.agent.state.messages.filter(isExtensionAside).map(message => asideContent(message))).toContain(
+			"settle aside",
+		);
+	});
+
 	it("still flushes a stranded aside when a follow-up is queued (case 8)", async () => {
 		const { session: parked, mock, streamStarted } = await createParkedSession();
 		const running = parked.prompt("do work");
