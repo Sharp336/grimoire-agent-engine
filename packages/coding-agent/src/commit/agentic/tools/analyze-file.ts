@@ -82,7 +82,7 @@ export function createAnalyzeFileTool(options: {
 
 			const analyses = await Promise.all(
 				files.map((file, index) => {
-					const relatedFiles = formatRelatedFiles(params.files, file, numstat);
+					const relatedFiles = formatRelatedFiles(files, file, numstat);
 					const assignment = prompt.render(analyzeFilePrompt, {
 						file,
 						goal: params.goal,

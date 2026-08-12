@@ -107,6 +107,23 @@ describe("analyze_files cap behavior (issue #7833)", () => {
 		expect(text).toContain("skipped: f.ts");
 	});
 
+	it("limits related-file context to the capped set", async () => {
+		const execute = mockTaskTool();
+		const tool = await makeTool(5);
+		const files = ["a.ts", "b.ts", "c.ts", "d.ts", "e.ts", "f.ts"];
+
+		await tool.execute("tc1", { files }, () => {}, makeContext(), new AbortController().signal);
+
+		expect(execute).toHaveBeenCalledTimes(5);
+		// Each spawned analysis sees only the capped list as related files;
+		// the skipped path must not leak into the per-file context.
+		for (const call of execute.mock.calls) {
+			const task = String(call[1]?.task ?? "");
+			expect(task).toContain("OTHER FILES IN THIS CHANGE");
+			expect(task).not.toContain("f.ts");
+		}
+	});
+
 	it("does not cap when maxFiles is unset", async () => {
 		const execute = mockTaskTool();
 		const tool = await makeTool(undefined);

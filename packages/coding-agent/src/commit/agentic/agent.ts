@@ -39,8 +39,10 @@ export interface ExistingChangelogEntries {
 
 export async function runCommitAgentSession(input: CommitAgentInput): Promise<CommitAgentState> {
 	const typesDescription = prompt.render(typesDescriptionPrompt);
+	const enableAnalyzeFiles = input.settings.get("commit.analyzeFiles");
 	const systemPrompt = prompt.render(agentSystemPrompt, {
 		types_description: typesDescription,
+		enable_analyze_files: enableAnalyzeFiles,
 	});
 	const state: CommitAgentState = { diffText: input.diffText };
 	const spawns = "sonic";
@@ -158,6 +160,7 @@ export async function runCommitAgentSession(input: CommitAgentInput): Promise<Co
 			user_context: input.userContext,
 			changelog_targets: input.changelogTargets.length > 0 ? input.changelogTargets.join("\n") : undefined,
 			existing_changelog_entries: input.existingChangelogEntries,
+			enable_analyze_files: enableAnalyzeFiles,
 		});
 		const MAX_RETRIES = 3;
 		let retryCount = 0;

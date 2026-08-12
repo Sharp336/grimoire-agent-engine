@@ -9,7 +9,7 @@ Workflow rules:
 2. Keep tool calls minimal: prefer 1-2 git_file_diff calls for key files (hard limit 2).
 3. Use git_hunk only for large diffs.
 4. Use recent_commits only if you need style context.
-5. Use analyze_files only when diffs too large or unclear.
+{{#if enable_analyze_files}}5. Use analyze_files only when diffs too large or unclear.{{/if}}
 6. Do not use read.
 
 Commit requirements:
@@ -27,7 +27,7 @@ Tool guidance:
 - git_file_diff: diff for specific files
 - git_hunk: specific hunks for large diffs
 - recent_commits: recent commit subjects + style stats
-- analyze_files: spawn sonic subagents in parallel for analysis
+{{#if enable_analyze_files}}- analyze_files: spawn sonic subagents in parallel for analysis{{/if}}
 - propose_changelog: provide changelog entries for each changelog target
 - propose_commit: submit final commit proposal and run validation
 - split_commit: propose multiple commit groups (no overlapping files; all staged files covered)
