@@ -21,7 +21,10 @@ import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 
-function createMockSession(onPrompt: (params: { emit: (event: AgentSessionEvent) => void }) => void): AgentSession {
+function createMockSession(
+	onPrompt: (params: { emit: (event: AgentSessionEvent) => void }) => void,
+	refreshedHostTools: string[][] = [],
+): AgentSession {
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
 	const emit = (event: AgentSessionEvent) => {
 		for (const listener of listeners) listener(event);
@@ -36,7 +39,9 @@ function createMockSession(onPrompt: (params: { emit: (event: AgentSessionEvent)
 		getEnabledToolNames: () => ["read", "yield"],
 		setActiveToolsByName: async (_toolNames: string[]) => {},
 		getToolByName: () => undefined,
-		refreshRpcHostTools: async () => {},
+		refreshRpcHostTools: async (tools: AgentTool[]) => {
+			refreshedHostTools.push(tools.map(tool => tool.name));
+		},
 		subscribe: (listener: (event: AgentSessionEvent) => void) => {
 			listeners.push(listener);
 			return () => {
@@ -56,7 +61,7 @@ function createMockSession(onPrompt: (params: { emit: (event: AgentSessionEvent)
 	return session as unknown as AgentSession;
 }
 
-function yieldEmittingSession(): AgentSession {
+function yieldEmittingSession(refreshedHostTools: string[][] = []): AgentSession {
 	return createMockSession(({ emit }) => {
 		emit({
 			type: "tool_execution_end",
@@ -68,7 +73,7 @@ function yieldEmittingSession(): AgentSession {
 			},
 			isError: false,
 		});
-	});
+	}, refreshedHostTools);
 }
 
 function createSessionResult(session: AgentSession): CreateAgentSessionResult {
@@ -223,7 +228,8 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 	});
 
 	it("retains inherited MCP proxy tools for normal children", async () => {
-		const session = yieldEmittingSession();
+		const refreshedHostTools: string[][] = [];
+		const session = yieldEmittingSession(refreshedHostTools);
 		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
 		const mcpManager = {
 			getTools: () => [{ name: "mcp__private_read", label: "private/read" }],
@@ -243,6 +249,7 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(forwarded?.mcpManager).toBe(mcpManager);
 		expect(forwarded?.customTools?.map(tool => tool.name)).toEqual(["mcp__private_read"]);
 		expect(forwarded?.toolNames).toBeUndefined();
+		expect(refreshedHostTools).toEqual([["ida_execute_python"]]);
 	});
 
 	it("preserves the legacy result shape when no output schema is selected", async () => {

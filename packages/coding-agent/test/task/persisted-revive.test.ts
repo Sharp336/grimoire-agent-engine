@@ -100,15 +100,21 @@ async function createPersistedSession(cwd: string, restrictToolNames?: boolean, 
 	return sessionFile;
 }
 
-function createFactory(cwd: string, eventBus?: EventBus, hostTools: AgentTool[] = []) {
+function createFactory(
+	cwd: string,
+	eventBus?: EventBus,
+	mountedTools: AgentTool[] = [],
+	rpcHostTools: AgentTool[] = [],
+) {
 	const parentSession = {
 		sessionManager: {
 			getCwd: () => cwd,
 			getArtifactManager: () => undefined,
 		},
-		getMountedXdevToolNames: () => hostTools.map(tool => tool.name),
-		getToolByName: (name: string) => hostTools.find(tool => tool.name === name),
-		getRpcHostTools: () => [],
+		getMountedXdevToolNames: () => mountedTools.map(tool => tool.name),
+		getToolByName: (name: string) => mountedTools.find(tool => tool.name === name),
+		getRpcHostTools: () => rpcHostTools,
+		hasBuiltInTool: (name: string) => name === "read" || name === "bash",
 		get sessionFile() {
 			return path.join(cwd, "parent.jsonl");
 		},
@@ -173,15 +179,19 @@ describe("persisted subagent revival", () => {
 		} as unknown as MCPManager;
 		MCPManager.setInstance(hostileMcp);
 		const hostTool = { name: "ida_execute_python" } as AgentTool;
+		const builtInTool = { name: "bash" } as AgentTool;
+		const activeToolNames: string[][] = [];
 		const refreshedHostTools: string[][] = [];
 		let capturedOptions: CreateAgentSessionOptions | undefined;
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
 			capturedOptions = options;
-			return { session: createRevivedSession([], refreshedHostTools).session } as CreateAgentSessionResult;
+			return {
+				session: createRevivedSession(activeToolNames, refreshedHostTools).session,
+			} as CreateAgentSessionResult;
 		});
 
 		const ref = createRef(sessionFile);
-		const reviver = await createFactory(cwd, undefined, [hostTool])(ref);
+		const reviver = await createFactory(cwd, undefined, [hostTool, builtInTool], [hostTool])(ref);
 		if (!reviver) throw new Error("Expected a persisted reviver");
 		await reviver(ref);
 
@@ -190,6 +200,7 @@ describe("persisted subagent revival", () => {
 		expect(capturedOptions?.mcpManager).toBe(hostileMcp);
 		expect(capturedOptions?.customTools?.map(tool => tool.name)).toEqual(["mcp__server_read"]);
 		expect(refreshedHostTools).toEqual([["ida_execute_python"]]);
+		expect(activeToolNames).toEqual([["read", "yield", "ida_execute_python"]]);
 	});
 
 	it("restores the persisted custom model role before reopening the session", async () => {

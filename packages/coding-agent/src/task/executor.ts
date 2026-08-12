@@ -3161,7 +3161,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					const { session: revived } = await createAgentSession(
 						buildSubagentSessionOptions(reopened, expectedAgentRef),
 					);
-					if (inheritedHostTools.length > 0) await revived.refreshRpcHostTools(inheritedHostTools);
+					const missingHostTools = inheritedHostTools.filter(tool => !revived.getToolByName(tool.name));
+					if (missingHostTools.length > 0) await revived.refreshRpcHostTools(missingHostTools);
 					installRegistryStatusSync(revived);
 					installIrcWakeTurnMonitor(revived);
 					return revived;

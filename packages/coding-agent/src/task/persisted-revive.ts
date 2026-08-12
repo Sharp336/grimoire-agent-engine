@@ -138,23 +138,33 @@ export function createPersistedSubagentReviverFactory(
 							customTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
 						}),
 			});
+			const parentMountedXdevToolNames = restrictToolNames
+				? []
+				: ctx.session.getMountedXdevToolNames().filter(name => !ctx.session.hasBuiltInTool(name));
 			if (!restrictToolNames) {
 				const inheritedHostTools = [
-					...ctx.session.getRpcHostTools(),
-					...[...new Set([...init.tools, ...ctx.session.getMountedXdevToolNames()])].flatMap(name => {
-						const tool = ctx.session.getToolByName(name);
-						return tool ? [tool] : [];
-					}),
+					...new Map(
+						[
+							...ctx.session.getRpcHostTools(),
+							...[...new Set([...init.tools, ...parentMountedXdevToolNames])].flatMap(name => {
+								if (ctx.session.hasBuiltInTool(name)) return [];
+								const tool = ctx.session.getToolByName(name);
+								return tool ? [tool] : [];
+							}),
+						].map(tool => [tool.name, tool]),
+					).values(),
 				].filter(tool => !session.getToolByName(tool.name));
 				if (inheritedHostTools.length > 0) await session.refreshRpcHostTools(inheritedHostTools);
 			}
 			// Clamp the active set to the persisted list: createAgentSession's
-			// `alwaysInclude` can re-add non-defaultInactive extension/custom tools
-			await session.setActiveToolsByName([
-				...init.tools,
-				...ctx.session.getMountedXdevToolNames(),
-				...session.getMountedXdevToolNames(),
-			]);
+			// `alwaysInclude` can re-add non-defaultInactive extension/custom tools.
+			const mountedXdevToolNames = restrictToolNames
+				? []
+				: [
+						...parentMountedXdevToolNames,
+						...session.getMountedXdevToolNames().filter(name => !session.hasBuiltInTool(name)),
+					];
+			await session.setActiveToolsByName([...new Set([...init.tools, ...mountedXdevToolNames])]);
 			// Cold revives must drive registry status themselves — createAgentSession
 			// doesn't wire this generically (the live path does it in the executor).
 			// Without it the idle-TTL timer never clears on a turn and the lifecycle
