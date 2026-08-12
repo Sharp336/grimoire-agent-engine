@@ -131,6 +131,12 @@ const EXTENSION_LANG: Record<string, readonly [string, string]> = {
 	r: ["r", "r"],
 	jl: ["julia", "julia"],
 	dart: ["dart", "dart"],
+
+	// Vala / Genie
+	vala: ["vala", "vala"],
+	vapi: ["vala", "vala"],
+	gs: ["genie", "genie"],
+
 	elm: ["elm", "elm"],
 	v: ["verilog", "v"],
 	nim: ["nim", "nim"],
