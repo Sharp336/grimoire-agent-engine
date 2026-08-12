@@ -210,6 +210,9 @@
 ### Removed
 
 - Removed legacy local request-cost estimation machinery and database schemas previously used for OpenCode Go estimates.
+### Added
+
+- Added explicit reasoning-summary controls to unified OpenAI Responses and Codex stream options, preserving provider defaults unless callers opt into `auto`, `concise`, or `detailed` summaries. ([#8006](https://github.com/can1357/oh-my-pi/issues/8006))
 
 ## [17.2.15] - 2026-08-12
 
@@ -248,9 +251,6 @@
 ### Fixed
 
 - Fixed account-scoped Codex cyber-policy denials bypassing sibling credential rotation; replay-safe requests now try every configured account before surfacing the error.
-### Added
-
-- Added explicit reasoning-summary controls to unified OpenAI Responses and Codex stream options, preserving provider defaults unless callers opt into `auto`, `concise`, or `detailed` summaries. ([#8006](https://github.com/can1357/oh-my-pi/issues/8006))
 
 ## [17.2.11] - 2026-08-07
 

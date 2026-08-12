@@ -613,6 +613,7 @@
 - Fixed retry-fallback selection switching to a fallback model with a context window too small to hold the current session context.
 - Fixed OpenCode discovery ignoring `opencode.jsonc` files and rejecting comments in `opencode.json`.
 - Fixed WSL2 startup hanging forever when the Windows interop pipe is wedged: the WSL host-home discovery probes (`cmd.exe`, `wslpath`) now run under a 500ms hard timeout and fall back to the Linux `$HOME`/`~/.omp` candidates ([#8402](https://github.com/can1357/oh-my-pi/issues/8402)).
+- Added an OpenAI reasoning-summary setting with provider-default, none, auto, concise, and detailed modes, allowing supported Responses and Codex models to opt back into visible reasoning titles without restoring incompatible request defaults globally. ([#8006](https://github.com/can1357/oh-my-pi/issues/8006))
 
 ## [17.2.15] - 2026-08-12
 
@@ -713,9 +714,6 @@
 - Fixed long-running sessions leaking memory for every completed keep-alive `task`/scout subagent: a disposed (parked) subagent's `AgentSession` stayed pinned through the lifecycle adoption record's reviver closure, and `dispose()` never released the message array, append-only provider transcript, session-manager entries, or the raw-SSE debug buffer, so heavy transcripts and captured provider wire frames accumulated for the process lifetime ([#8003](https://github.com/can1357/oh-my-pi/issues/8003)).
 - Fixed Z.AI web search dropping sources and exposing raw JSON when MCP responses double-encode content text ([#8000](https://github.com/can1357/oh-my-pi/issues/8000)).
 - Fixed `/handoff` masking empty/whitespace-only generation and harness-initiated aborts as "Handoff cancelled"; manual empty generation now surfaces a logged failure, harness aborts preserve their reason (or report "Handoff aborted by session"), and auto-handoff still falls back to context-full compaction ([#7993](https://github.com/can1357/oh-my-pi/issues/7993)).
-### Added
-
-- Added an OpenAI reasoning-summary setting with provider-default, none, auto, concise, and detailed modes, allowing supported Responses and Codex models to opt back into visible reasoning titles without restoring incompatible request defaults globally. ([#8006](https://github.com/can1357/oh-my-pi/issues/8006))
 
 ## [17.2.11] - 2026-08-07
 
