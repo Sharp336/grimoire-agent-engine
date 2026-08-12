@@ -7,6 +7,9 @@
 ### Fixed
 
 - Fixed classification of model IDs with large minor versions (e.g., `claude-opus-5-11`) or three-part versions, ensuring they no longer fall back to stale default configurations.
+### Added
+
+- Added DeepInfra as an authenticated OpenAI-compatible provider with dynamic chat-model discovery and bundled model metadata.
 
 ## [17.2.13] - 2026-08-11
 
