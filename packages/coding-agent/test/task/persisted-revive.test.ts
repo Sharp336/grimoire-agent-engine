@@ -52,6 +52,7 @@ function createRevivedSession(
 	refreshedHostTools: string[][] = [],
 	mountedToolNames: string[][] = [],
 	registeredToolNames: string[] = [],
+	builtInToolNames: string[] = registeredToolNames,
 ): RevivedSessionHandle {
 	let observer: IrcWakeObserver | undefined;
 	const session = {
@@ -60,7 +61,8 @@ function createRevivedSession(
 			refreshedHostTools.push(tools.map(tool => tool.name));
 		},
 		getToolByName: (name: string) => (registeredToolNames.includes(name) ? ({ name } as AgentTool) : undefined),
-		hasRpcHostTool: () => false,
+		hasRpcHostTool: (name: string) => refreshedHostTools.some(names => names.includes(name)),
+		hasBuiltInTool: (name: string) => builtInToolNames.includes(name),
 		setActiveToolPresentation: async (names: string[], mountedNames: string[]) => {
 			activeToolNames.push(names);
 			mountedToolNames.push(mountedNames);
@@ -121,6 +123,7 @@ function createFactory(
 	mountedTools: AgentTool[] = [],
 	rpcHostTools: AgentTool[] = [],
 	registeredTools: AgentTool[] = mountedTools,
+	builtInToolNames = ["read", "bash", "browser"],
 ) {
 	const parentSession = {
 		sessionManager: {
@@ -130,7 +133,7 @@ function createFactory(
 		getMountedXdevToolNames: () => mountedTools.map(tool => tool.name),
 		getToolByName: (name: string) => registeredTools.find(tool => tool.name === name),
 		getRpcHostTools: () => rpcHostTools,
-		hasBuiltInTool: (name: string) => name === "read" || name === "bash" || name === "browser",
+		hasBuiltInTool: (name: string) => builtInToolNames.includes(name),
 		get sessionFile() {
 			return path.join(cwd, "parent.jsonl");
 		},
@@ -207,7 +210,7 @@ describe("persisted subagent revival", () => {
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
 			capturedOptions = options;
 			return {
-				session: createRevivedSession(activeToolNames, refreshedHostTools, mountedToolNames).session,
+				session: createRevivedSession(activeToolNames, refreshedHostTools, mountedToolNames, ["browser"]).session,
 			} as CreateAgentSessionResult;
 		});
 
@@ -281,6 +284,61 @@ describe("persisted subagent revival", () => {
 		expect(refreshedHostTools).toEqual([["ida_execute_python"]]);
 		expect(activeToolNames).toEqual([["read", "yield", "ida_execute_python"]]);
 		expect(mountedToolNames).toEqual([["ida_execute_python"]]);
+	});
+
+	it("rebuilds a mounted browser locally instead of inheriting a same-name parent custom tool", async () => {
+		const cwd = makeTempDir("@pi-local-browser-revive-");
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, ["browser"]);
+		const parentCustomBrowser = { name: "browser" } as AgentTool;
+		const activeToolNames: string[][] = [];
+		const mountedToolNames: string[][] = [];
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return {
+				session: createRevivedSession(activeToolNames, [], mountedToolNames, ["browser"]).session,
+			} as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd, undefined, [], [], [parentCustomBrowser], ["read", "bash"])(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(capturedOptions?.toolNames).toEqual(["read", "yield", "browser"]);
+		expect(capturedOptions?.customTools).toBeUndefined();
+		expect(activeToolNames).toEqual([["read", "yield", "browser"]]);
+		expect(mountedToolNames).toEqual([["browser"]]);
+	});
+
+	it("does not restore a same-name custom as a mounted built-in", async () => {
+		const cwd = makeTempDir("@pi-local-custom-browser-revive-");
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, ["browser"]);
+		const activeToolNames: string[][] = [];
+		const mountedToolNames: string[][] = [];
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return {
+				session: createRevivedSession(activeToolNames, [], mountedToolNames, ["browser"], []).session,
+			} as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(
+			cwd,
+			undefined,
+			[],
+			[],
+			[{ name: "browser" } as AgentTool],
+			["read", "bash"],
+		)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(capturedOptions?.toolNames).toEqual(["read", "yield", "browser"]);
+		expect(activeToolNames).toEqual([["read", "yield"]]);
+		expect(mountedToolNames).toEqual([[]]);
 	});
 
 	it("disposes a failed cold revive and leaves its parked ref retryable", async () => {

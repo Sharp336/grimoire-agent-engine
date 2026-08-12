@@ -9,6 +9,7 @@ import { createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
 import type { AuthStorage } from "../session/auth-storage";
 import { SessionManager } from "../session/session-manager";
+import { BUILTIN_TOOLS } from "../tools";
 import { isMCPToolName } from "../tools/builtin-names";
 import type { EventBus } from "../utils/event-bus";
 import { attachIrcWakeTurnMonitor, createMCPProxyTools, createSubagentSettings } from "./executor";
@@ -109,7 +110,7 @@ export function createPersistedSubagentReviverFactory(
 				: (init.mountedTools ?? []).filter(
 						name =>
 							(enableMCP || !isMCPToolName(name)) &&
-							(ctx.session.hasBuiltInTool(name) || parentRpcHostToolNames.has(name)),
+							(Object.hasOwn(BUILTIN_TOOLS, name) || parentRpcHostToolNames.has(name)),
 					);
 			const persistedToolNames = new Set([...init.tools, ...persistedMountedTools]);
 			const mcpManager = enableMCP ? MCPManager.instance() : undefined;
@@ -166,8 +167,19 @@ export function createPersistedSubagentReviverFactory(
 					);
 					if (inheritedHostTools.length > 0) await session.refreshRpcHostTools(inheritedHostTools);
 				}
-				const restoredToolNames = [...persistedToolNames].filter(name => !localHostToolCollisions.has(name));
-				const restoredMountedTools = persistedMountedTools.filter(name => !localHostToolCollisions.has(name));
+				const restoredMountedTools = persistedMountedTools.filter(
+					name =>
+						!localHostToolCollisions.has(name) &&
+						(parentRpcHostToolNames.has(name)
+							? session.hasRpcHostTool(name)
+							: session.hasBuiltInTool(name) && session.getToolByName(name) !== undefined),
+				);
+				const restoredMountedToolNames = new Set(restoredMountedTools);
+				const restoredToolNames = [...persistedToolNames].filter(
+					name =>
+						!localHostToolCollisions.has(name) &&
+						(!persistedMountedTools.includes(name) || restoredMountedToolNames.has(name)),
+				);
 				// Restore the child's exact top-level versus mounted snapshot.
 				await session.setActiveToolPresentation(restoredToolNames, restoredMountedTools);
 				// Cold revives must drive registry status themselves — createAgentSession
