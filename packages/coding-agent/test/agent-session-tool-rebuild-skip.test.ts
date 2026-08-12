@@ -1296,10 +1296,14 @@ These tools became available:
 	});
 
 	it("excludes disabled RPC host tools from child inheritance", async () => {
-		const { session } = newSession(async toolNames => `tools:${toolNames.join(",")}`);
+		const { session } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {
+			beforeAgentStartSystemPrompt: ["initial"],
+		});
 		const hostTool = { ...createBasicTool("rpc_host", "RPC Host"), loadMode: "essential" as const };
 		await session.refreshRpcHostTools([hostTool]);
 		expect(session.getRpcHostTools().map(tool => tool.name)).toEqual([hostTool.name]);
+		expect(session.getRpcHostTools()[0]).toBe(hostTool);
+		expect(session.getRpcHostTools()[0]).not.toBe(session.getToolByName(hostTool.name));
 
 		await session.setActiveToolsByName(["read"]);
 

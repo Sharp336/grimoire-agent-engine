@@ -385,13 +385,14 @@ function buildExecutorOptions(
 	};
 	const restrictToolNames = policy.planMode || session.restrictToolNames === true;
 	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
+	const parentMountedHostToolNames = session.getMountedXdevToolNames?.() ?? [];
 	const parentHostTools = new Map(
 		(session.getRpcHostTools?.() ?? [])
 			.filter(tool => enableMCP || !isMCPToolName(tool.name))
 			.map(tool => [tool.name, tool]),
 	);
 	if (!restrictToolNames) {
-		for (const name of session.getMountedXdevToolNames?.() ?? []) {
+		for (const name of parentMountedHostToolNames) {
 			if ((!enableMCP && isMCPToolName(name)) || session.hasBuiltInTool?.(name) || parentHostTools.has(name)) {
 				continue;
 			}
@@ -460,6 +461,7 @@ function buildExecutorOptions(
 		parentMnemopiSessionState: session.getMnemopiSessionState?.(),
 		parentTelemetry: session.getTelemetry?.(),
 		parentEvalSessionId: request.shareEvalSession === false ? undefined : (session.getEvalSessionId?.() ?? undefined),
+		parentMountedHostToolNames: parentMountedHostToolNames.filter(name => parentHostTools.has(name)),
 		parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
 		parentServiceTier: session.getServiceTierByFamily ? (session.getServiceTierByFamily() ?? null) : undefined,
 	};

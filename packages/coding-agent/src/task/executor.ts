@@ -446,6 +446,8 @@ export interface ExecutorOptions {
 	preloadedCustomToolPaths?: ToolPathWithSource[];
 	/** Parent host-provided tools proxied into this child and its live revivals. */
 	parentHostTools?: AgentTool[];
+	/** Subset of {@link parentHostTools} presented under `xd://` in the parent. */
+	parentMountedHostToolNames?: string[];
 	mcpManager?: MCPManager;
 	authStorage?: AuthStorage;
 	modelRegistry?: ModelRegistry;
@@ -3141,7 +3143,17 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				throw err;
 			}
 			const missingHostTools = inheritedHostTools.filter(tool => !session.getToolByName(tool.name));
-			if (missingHostTools.length > 0) await session.refreshRpcHostTools(missingHostTools);
+			if (missingHostTools.length > 0) {
+				await session.refreshRpcHostTools(missingHostTools);
+				const mountedHostToolNames = new Set(options.parentMountedHostToolNames);
+				await session.setActiveToolPresentation(
+					[...session.getEnabledToolNames(), ...missingHostTools.map(tool => tool.name)],
+					[
+						...session.getMountedXdevToolNames(),
+						...missingHostTools.filter(tool => mountedHostToolNames.has(tool.name)).map(tool => tool.name),
+					],
+				);
+			}
 			sessionCreatedAt = performance.now();
 
 			monitor.setActiveSession(session);

@@ -39,6 +39,7 @@ function createMockSession(
 		getEnabledToolNames: () => ["read", "yield"],
 		getMountedXdevToolNames: () => [],
 		setActiveToolsByName: async (_toolNames: string[]) => {},
+		setActiveToolPresentation: async (_toolNames: string[], _mountedToolNames: string[]) => {},
 		getToolByName: () => undefined,
 		refreshRpcHostTools: async (tools: AgentTool[]) => {
 			refreshedHostTools.push(tools.map(tool => tool.name));
@@ -258,6 +259,27 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(forwarded?.toolNames).toBeUndefined();
 		expect(refreshedHostTools).toEqual([["ida_execute_python"]]);
 		expect(persistedInits).toEqual([expect.objectContaining({ mountedTools: ["ida_execute_python"] })]);
+	});
+
+	it("preserves explicitly enabled hidden host tools and their mounted presentation", async () => {
+		const session = yieldEmittingSession();
+		const presentation = vi.spyOn(session, "setActiveToolPresentation");
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+		const hiddenTopLevel = { name: "hidden_top_level", hidden: true } as AgentTool;
+		const hiddenMounted = { name: "hidden_mounted", hidden: true } as AgentTool;
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "hidden-host-tools",
+			parentHostTools: [hiddenTopLevel, hiddenMounted],
+			parentMountedHostToolNames: [hiddenMounted.name],
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(presentation).toHaveBeenCalledWith(
+			["read", "yield", hiddenTopLevel.name, hiddenMounted.name],
+			[hiddenMounted.name],
+		);
 	});
 
 	it("preserves the legacy result shape when no output schema is selected", async () => {

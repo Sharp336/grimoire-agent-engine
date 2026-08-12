@@ -153,6 +153,7 @@ export class TanCommandController {
 							task: trimmedWork,
 							tools: clone.getActiveToolNames ? clone.getActiveToolNames() : toolNames,
 							mountedTools: clone.getMountedXdevToolNames(),
+							enableMCP: false,
 						});
 						const abortClone = () => {
 							void clone?.abort();

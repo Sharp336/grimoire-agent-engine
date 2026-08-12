@@ -157,6 +157,10 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 	) {
 		applyToolProxy(tool, this);
 	}
+	/** Returns the wrapped tool for cross-session rebinding. */
+	unwrap(): AgentTool<TParameters, TDetails> {
+		return this.tool;
+	}
 
 	/**
 	 * Forward browser mode changes when available.
