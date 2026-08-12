@@ -68,6 +68,8 @@ export interface SubmenuSettingDef extends BaseSettingDef {
 	/** Inclusive bounds for the free-form entry (undefined = unbounded). */
 	min?: number;
 	max?: number;
+	/** Value unit; gates which human-formatted suffixes the free-form entry accepts. */
+	unit?: "percent";
 }
 
 export interface TextInputSettingDef extends BaseSettingDef {
@@ -187,14 +189,14 @@ function pathToSettingDef(path: SettingPath): SettingDef | null {
 	if (schemaType === "number") {
 		// Numbers without options are intentionally hidden from the UI.
 		if (!options || options === "runtime") return null;
-		const ui = getUi(path);
 		return {
 			...base,
 			type: "submenu",
 			options,
-			...(ui?.custom ? { custom: true } : {}),
-			...(ui?.min !== undefined ? { min: ui.min } : {}),
-			...(ui?.max !== undefined ? { max: ui.max } : {}),
+			...(ui.custom ? { custom: true } : {}),
+			...(ui.min !== undefined ? { min: ui.min } : {}),
+			...(ui.max !== undefined ? { max: ui.max } : {}),
+			...(ui.unit !== undefined ? { unit: ui.unit } : {}),
 		};
 	}
 

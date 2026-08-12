@@ -217,6 +217,8 @@ interface UiNumber extends UiBase {
 	/** Inclusive bounds enforced on the free-form entry (undefined = unbounded). */
 	min?: number;
 	max?: number;
+	/** Value unit; gates which human-formatted suffixes the free-form entry accepts. */
+	unit?: "percent";
 }
 
 interface UiString extends UiBase {
@@ -246,6 +248,7 @@ export type AnyUiMetadata = UiBase & {
 	custom?: boolean;
 	min?: number;
 	max?: number;
+	unit?: "percent";
 };
 
 /**
@@ -2212,6 +2215,7 @@ export const SETTINGS_SCHEMA = {
 			custom: true,
 			min: 1,
 			max: 100,
+			unit: "percent",
 			tab: "context",
 			group: "Compaction",
 			label: "Compaction Threshold",

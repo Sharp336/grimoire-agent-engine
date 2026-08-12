@@ -2,12 +2,13 @@
 
 ## [Unreleased]
 
+- The `/config` settings UI now accepts a free-form value for `compaction.thresholdPercent` and `compaction.thresholdTokens` via a "Custom…" entry, instead of only the preset options ([#8210](https://github.com/can1357/oh-my-pi/issues/8210)).
+
 ## [17.2.13] - 2026-08-11
 
 ### Added
 
 - Added `searxng.safesearch` setting option for SearXNG searches
-- The `/config` settings UI now accepts a free-form value for `compaction.thresholdPercent` and `compaction.thresholdTokens` via a "Custom…" entry, instead of only the preset options ([#8210](https://github.com/can1357/oh-my-pi/issues/8210)).
 - `omp update` now honors an `omp.dist` distribution field published in the release's npm manifest and treats major-version bumps without one as binary-only: bun/npm-managed installs are migrated to the standalone GitHub release binary in place instead of running a package-manager install that a non-npm release (e.g. a runtime change) would break. Windows script-shim installs (npm's `omp.cmd`/`omp.ps1`) are taken over seamlessly by installing `omp.exe` beside the shims and retiring them.
 - Added support for Cloudflare AI Gateway routing for Gemini search
 - Added support for Exa MCP search provider

@@ -9,6 +9,7 @@ import {
 	getSettingItemFilterText,
 	type ImageBudget,
 	Input,
+	type MouseRoutable,
 	matchesKey,
 	replaceTabs,
 	routeSelectListMouse,
@@ -249,7 +250,14 @@ class ThresholdInputSubmenu extends Container {
 							showInput();
 							return;
 						}
-						onSubmit(value);
+						try {
+							onSubmit(value);
+						} catch (error) {
+							// Presets are static schema data, so a failure here means the
+							// schema drifted out of bounds — log instead of letting it crash
+							// the key handler (the text-input path shows errors inline).
+							console.error(`settings: preset ${JSON.stringify(value)} for "${title}" rejected:`, error);
+						}
 					},
 					onCancel,
 				),
@@ -267,6 +275,13 @@ class ThresholdInputSubmenu extends Container {
 	handleInput(data: string): void {
 		for (const child of this.children) {
 			child.handleInput?.(data);
+		}
+	}
+
+	/** Forward mouse routing to the active child so wheel/hover/clicks reach the preset list. */
+	routeMouse(event: SgrMouseEvent, line: number, col: number): void {
+		for (const child of this.children) {
+			(child as Component & Partial<MouseRoutable>).routeMouse?.(event, line, col);
 		}
 	}
 }
@@ -510,9 +525,11 @@ let cachedSidebarWidth: number | undefined;
  * the visible tab), so the divider column never moves when switching tabs or
  * when condition-gated groups appear.
  */
-function parseNumericInput(raw: string): number | undefined {
+function parseNumericInput(raw: string, allowPercent = false): number | undefined {
 	const trimmed = raw.trim().replace(/,/g, "");
-	const percent = /^(\d+(?:\.\d+)?)%$/.exec(trimmed);
+	// The `%` suffix only means anything for percent-valued settings; for
+	// others it is rejected so "65%" cannot silently store 65 tokens (#8271).
+	const percent = allowPercent ? /^(\d+(?:\.\d+)?)%$/.exec(trimmed) : null;
 	if (percent) {
 		const value = Number(percent[1]);
 		return Number.isFinite(value) ? value : undefined;
@@ -1183,29 +1200,46 @@ export class SettingsSelectorComponent implements Component {
 
 		if (def.custom) {
 			const label = def.label.toLowerCase();
-			return new ThresholdInputSubmenu(def.label, def.description, options, currentValue, value => {
-				const trimmed = value.trim();
-				if (trimmed === "" || trimmed === "default") {
-					onSelect("default");
-					return;
-				}
-				const parsed = parseNumericInput(trimmed);
-				if (parsed === undefined) {
-					throw new Error(
-						`Invalid ${label} value: ${JSON.stringify(trimmed)}. Expected a number (e.g. 65, 35,000, 160K).`,
-					);
-				}
-				if (def.min !== undefined && parsed < def.min) {
-					throw new Error(`Invalid ${label} value: ${JSON.stringify(trimmed)}. Minimum is ${def.min}.`);
-				}
-				if (def.max !== undefined && parsed > def.max) {
-					throw new Error(`Invalid ${label} value: ${JSON.stringify(trimmed)}. Maximum is ${def.max}.`);
-				}
-				onSelect(String(parsed));
-			}, onCancel);
+			return new ThresholdInputSubmenu(
+				def.label,
+				def.description,
+				options,
+				currentValue,
+				value => {
+					const trimmed = value.trim();
+					if (trimmed === "" || trimmed === "default") {
+						onSelect("default");
+						return;
+					}
+					const parsed = parseNumericInput(trimmed, def.unit === "percent");
+					if (parsed === undefined) {
+						throw new Error(
+							`Invalid ${label} value: ${JSON.stringify(trimmed)}. Expected a number (e.g. 65, 35,000, 160K).`,
+						);
+					}
+					if (def.min !== undefined && parsed < def.min) {
+						throw new Error(`Invalid ${label} value: ${JSON.stringify(trimmed)}. Minimum is ${def.min}.`);
+					}
+					if (def.max !== undefined && parsed > def.max) {
+						throw new Error(`Invalid ${label} value: ${JSON.stringify(trimmed)}. Maximum is ${def.max}.`);
+					}
+					onSelect(String(parsed));
+				},
+				onCancel,
+			);
 		}
 
-		return new SelectSubmenu(def.label, def.description, options, currentValue, onSelect, onCancel, onPreview, getPreview, footer);
+		return new SelectSubmenu(
+			def.label,
+			def.description,
+			options,
+			currentValue,
+			onSelect,
+			onCancel,
+			onPreview,
+			getPreview,
+			footer,
+		);
 	}
 
 	/**

@@ -128,6 +128,39 @@ describe("compaction threshold free-form input (issue #8210)", () => {
 		expect(settings.get("compaction.thresholdTokens")).toBe(160_000);
 	});
 
+	it("rejects a % suffix on the token-limit field instead of misreading it", () => {
+		const comp = createSelector();
+		for (const ch of "compaction threshold") comp.handleInput(ch);
+		for (let i = 0; i < 2; i++) comp.handleInput("\x1b[A"); // up to "Compaction Token Limit"
+		comp.handleInput("\n");
+		for (let i = 0; i < 8; i++) comp.handleInput("\x1b[B"); // down to "Custom…"
+		comp.handleInput("\n");
+
+		// "65%" would parse as 65 under the percent rule; for a token count the
+		// unit is meaningless, so the entry is rejected and nothing is stored.
+		for (const ch of "65%") comp.handleInput(ch);
+		comp.handleInput("\n");
+		expect(settings.get("compaction.thresholdTokens")).toBe(-1);
+
+		const rendered = comp.render(120).join("\n");
+		expect(rendered).toContain("Expected a number");
+	});
+
+	it("routes mouse clicks on preset rows through the threshold submenu", () => {
+		const comp = createSelector();
+		for (const ch of "compaction threshold") comp.handleInput(ch);
+		for (let i = 0; i < 4; i++) comp.handleInput("\x1b[A");
+		comp.handleInput("\n");
+
+		const lines = comp.render(120);
+		const row = lines.findIndex(l => l.includes("10%")) + 1; // SGR rows are 1-based
+		expect(row).toBeGreaterThan(0);
+
+		comp.handleInput(`\x1b[<0;3;${row}M`); // left-click on the "10%" preset row
+
+		expect(settings.get("compaction.thresholdPercent")).toBe(10);
+	});
+
 	it("rejects out-of-range percent values with an inline error", () => {
 		const comp = createSelector();
 		for (const ch of "compaction threshold") comp.handleInput(ch);
