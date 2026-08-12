@@ -98,6 +98,10 @@ export class Loader extends Text {
 		this.#lastSpinnerTick = performance.now();
 		this.#syncText();
 		this.#requestPaint();
+		// A single-frame spinner with a static colorizer can never change;
+		// scheduling a tick would just burn idle wakeups (setMessage/stop
+		// repaint and tear down independently).
+		if (this.#frames.length <= 1 && this.messageColorFn.animated !== true) return;
 		const intervalMs = this.messageColorFn.animated === true ? RENDER_INTERVAL_MS : SPINNER_ADVANCE_MS;
 		this.#scheduleTick(intervalMs, intervalMs);
 	}

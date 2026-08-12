@@ -59,6 +59,7 @@ import type { CollabHost } from "../collab/host";
 import { KeybindingsManager } from "../config/keybindings";
 import { formatModelString, type ResolvedModelRoleValue } from "../config/model-resolver";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
+import { isReduceMotion, REDUCE_MOTION_STRICT_RENDER_INTERVAL_MS, reduceMotionLevel } from "../config/reduce-motion";
 import {
 	isSettingsInitialized,
 	onModelRolesChanged,
@@ -773,6 +774,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui = new TUI(new ProcessTerminal(), settings.get("showHardwareCursor"));
 		this.ui.setMaxInlineImages(settings.get("tui.maxInlineImages"));
 		this.ui.setScrollbackRebuild(settings.get("tui.scrollbackRebuild"));
+		if (reduceMotionLevel() === "strict") {
+			this.ui.setMinRenderInterval(REDUCE_MOTION_STRICT_RENDER_INTERVAL_MS);
+		}
 		// OSC 66 text-sizing is Kitty-only; resolve the setting against the terminal's
 		// capability (`TERMINAL.textSizing` defaults on for Kitty) so it stays off
 		// unless the user opts in, and never emits raw escapes on other terminals.
@@ -4766,6 +4770,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.#voiceAnimationInterval) return;
 		this.#voiceHue = 0;
 		this.#updateMicIcon();
+		// Reduce motion: keep the static first hue; no color sweep.
+		if (isReduceMotion()) return;
 		this.#voiceAnimationInterval = setInterval(() => {
 			this.#voiceHue = (this.#voiceHue + 8) % 360;
 			this.#updateMicIcon();

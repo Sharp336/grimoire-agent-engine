@@ -49,6 +49,32 @@ describe("Loader component", () => {
 		loader.stop();
 	});
 
+	it("does not schedule ticks for a single-frame spinner with a static colorizer", () => {
+		vi.useFakeTimers();
+		const ui = { requestDirectWrite: vi.fn(), requestComponentRender: vi.fn() };
+		const loader = new Loader(
+			ui as unknown as TUI,
+			text => text,
+			text => text,
+			"Checking",
+			["•"],
+		);
+
+		// Exactly the initial paint; the frozen loader never ticks.
+		expect(ui.requestDirectWrite).toHaveBeenCalledTimes(1);
+
+		vi.advanceTimersByTime(400);
+
+		expect(ui.requestDirectWrite).toHaveBeenCalledTimes(1);
+		expect(ui.requestComponentRender).not.toHaveBeenCalled();
+
+		// setMessage still repaints independently.
+		loader.setMessage("Still checking");
+		expect(ui.requestDirectWrite).toHaveBeenCalledTimes(2);
+
+		loader.stop();
+	});
+
 	it("falls back to component-scoped renders for lightweight TUI stubs", () => {
 		vi.useFakeTimers();
 		const ui = { requestComponentRender: vi.fn() };

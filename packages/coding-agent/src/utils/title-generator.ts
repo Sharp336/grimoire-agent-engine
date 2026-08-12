@@ -11,6 +11,7 @@ import { isTerminalHeadless, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 
 import { resolveRoleSelection } from "../config/model-resolver";
+import { isReduceMotion } from "../config/reduce-motion";
 import type { Settings } from "../config/settings";
 import titleMarkerInstruction from "../prompts/system/title-marker-instruction.md" with { type: "text" };
 import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
@@ -511,11 +512,12 @@ export function buildTerminalTitleWithState(
 	frame: number,
 	enabled: boolean,
 	platform: NodeJS.Platform = process.platform,
+	staticSpinner: boolean = isReduceMotion(),
 ): string {
 	if (!enabled) return label ? `${DEFAULT_TERMINAL_TITLE}: ${label}` : DEFAULT_TERMINAL_TITLE;
 	const separator =
 		state === "working"
-			? platform === "win32"
+			? platform === "win32" || staticSpinner
 				? WINDOWS_TITLE_WORKING_SEPARATOR
 				: TITLE_SPINNER_FRAMES[frame % TITLE_SPINNER_FRAMES.length]
 			: state === "attention"
@@ -545,7 +547,7 @@ function stopTerminalTitleSpinner(): void {
 }
 
 function startTerminalTitleSpinner(): void {
-	if (isConPTYHosted() || terminalTitleRuntime.timer || !process.stdout.isTTY) return;
+	if (isConPTYHosted() || isReduceMotion() || terminalTitleRuntime.timer || !process.stdout.isTTY) return;
 	terminalTitleRuntime.timer = setInterval(() => {
 		terminalTitleRuntime.frame = (terminalTitleRuntime.frame + 1) % TITLE_SPINNER_FRAMES.length;
 		emitTerminalTitle();

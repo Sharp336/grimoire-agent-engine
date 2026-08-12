@@ -41,6 +41,7 @@ import {
 	type ScopedModel,
 } from "./config/model-resolver";
 import { ModelsConfigFile } from "./config/models-config";
+import { isReduceMotion } from "./config/reduce-motion";
 import { serviceTierSettingToTier } from "./config/service-tier";
 import { getDefault, type SettingPath, Settings, type SettingValue, settings } from "./config/settings";
 import { initializeWithSettings } from "./discovery";
@@ -489,7 +490,7 @@ async function runInteractiveMode(
 	const playStartupSplash = showStartupSplash && setupScenes.length === 0;
 
 	await mode.init({
-		suppressWelcomeIntro: resuming || setupScenes.length > 0 || playStartupSplash,
+		suppressWelcomeIntro: resuming || setupScenes.length > 0 || playStartupSplash || isReduceMotion(),
 		clearInitialTerminalHistory: true,
 	});
 
@@ -1329,6 +1330,10 @@ export async function runRootCommand(
 	if (parsedArgs.hideThinking) {
 		settingsInstance.override("hideThinkingBlock", true);
 	}
+	// Apply --reduce-motion CLI flag (ephemeral, not persisted)
+	if (parsedArgs.reduceMotion) {
+		settingsInstance.override("display.reduceMotion", parsedArgs.reduceMotion);
+	}
 	// Apply --advisor CLI flag (ephemeral, not persisted)
 	if (parsedArgs.advisor) {
 		settingsInstance.override("advisor.enabled", true);
@@ -1664,6 +1669,7 @@ export async function runRootCommand(
 			timing: Boolean($env.PI_TIMING),
 			stdinIsTTY: process.stdin.isTTY,
 			stdoutIsTTY: process.stdout.isTTY,
+			reduceMotion: isReduceMotion(),
 		});
 
 		// Startup changelog is only consumed by interactive mode below; kick the

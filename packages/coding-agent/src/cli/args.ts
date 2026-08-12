@@ -46,6 +46,7 @@ export interface Args {
 	appendSystemPrompt?: string;
 	thinking?: ConfiguredThinkingLevel;
 	serviceTier?: ServiceTierOpenAISettingValue;
+	reduceMotion?: "off" | "on" | "strict";
 	hideThinking?: boolean;
 	advisor?: boolean;
 	externalThinking?: boolean;

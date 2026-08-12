@@ -1223,13 +1223,19 @@ export class MCPAddWizard extends Container {
 			this.#contentContainer.addChild(healthText);
 
 			let spinnerIndex = 0;
-			const spinner = setInterval(() => {
-				healthText.setText(
-					theme.fg("muted", `${spinnerFrames[spinnerIndex % spinnerFrames.length]} Checking server connection...`),
-				);
-				spinnerIndex++;
-				this.#requestRender();
-			}, 80);
+			const spinner =
+				spinnerFrames.length > 1
+					? setInterval(() => {
+							healthText.setText(
+								theme.fg(
+									"muted",
+									`${spinnerFrames[spinnerIndex % spinnerFrames.length]} Checking server connection...`,
+								),
+							);
+							spinnerIndex++;
+							this.#requestRender();
+						}, 80)
+					: undefined;
 
 			let healthPassed = true;
 			let healthError = "";
