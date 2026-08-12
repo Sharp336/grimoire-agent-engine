@@ -455,6 +455,18 @@ export const SETTINGS_SCHEMA = {
 				"Pair a second model (assigned to the 'advisor' role) that passively reviews each turn and injects notes.",
 		},
 	},
+	"advisor.minSeverity": {
+		type: "enum",
+		values: ["nit", "concern", "blocker"] as const,
+		default: "nit",
+		ui: {
+			tab: "model",
+			group: "Advisor",
+			label: "Advisor Minimum Severity",
+			description: "Only deliver advisor notes at or above this severity.",
+			condition: "advisorEnabled",
+		},
+	},
 	"prewalk.enabled": {
 		type: "boolean",
 		default: false,

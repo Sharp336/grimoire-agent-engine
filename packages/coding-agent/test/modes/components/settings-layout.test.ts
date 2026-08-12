@@ -81,7 +81,12 @@ describe("settings layout", () => {
 	});
 
 	it("hides advisor dependent settings when advisor is disabled", () => {
-		const advisorDependentPaths: SettingPath[] = ["advisor.subagents", "advisor.syncBacklog", "advisor.immuneTurns"];
+		const advisorDependentPaths: SettingPath[] = [
+			"advisor.minSeverity",
+			"advisor.subagents",
+			"advisor.syncBacklog",
+			"advisor.immuneTurns",
+		];
 		const advisorDependentPathSet = new Set(advisorDependentPaths);
 		const defs = getSettingsForTab("model").filter(def => advisorDependentPathSet.has(def.path));
 
@@ -95,6 +100,15 @@ describe("settings layout", () => {
 		for (const def of defs) {
 			expect(def.condition?.()).toBe(true);
 		}
+	});
+
+	it("defaults advisor minimum severity to nit and exposes every accepted value", () => {
+		const def = getSettingsForTab("model").find(def => def.path === "advisor.minSeverity");
+		expect(Settings.instance.get("advisor.minSeverity")).toBe("nit");
+		expect(def).toMatchObject({
+			type: "enum",
+			values: ["nit", "concern", "blocker"],
+		});
 	});
 
 	it("shows provider request limits as a providers services submenu setting", () => {
