@@ -166,14 +166,16 @@ describe("RpcClient lifecycle (issue #4079 B)", () => {
 		await client.start();
 
 		const newest = await client.getTranscriptPage({ limit: 1, collapseCompactedHistory: true });
-		expect(newest).toEqual({
+		expect(newest as unknown).toEqual({
 			messages: [{ role: "assistant", content: [{ type: "text", text: "newest" }], timestamp: 2 }],
 			cacheMissExplainedAt: [true],
 			startIndex: 1,
 			totalMessages: 2,
 			olderCursor: "older-page",
 		});
-		expect(await client.getTranscriptPage({ cursor: newest.olderCursor })).toEqual({
+		const olderCursor = newest.olderCursor;
+		if (!olderCursor) throw new Error("Expected an older transcript cursor");
+		expect((await client.getTranscriptPage({ cursor: olderCursor })) as unknown).toEqual({
 			messages: [{ role: "user", content: "oldest", timestamp: 1 }],
 			cacheMissExplainedAt: [false],
 			startIndex: 0,

@@ -129,6 +129,7 @@ import type {
 	RpcUiAutocompleteApplyResult,
 	RpcUiAutocompleteResult,
 	RpcUiEditorState,
+	RpcUiEditorSubmitResult,
 	RpcUiFence,
 	RpcUiFrame,
 	RpcUiInputResult,
@@ -1480,6 +1481,24 @@ export class RpcClient {
 				generation: channel.generation,
 				expectedRevision,
 				text,
+			}),
+		);
+	}
+
+	async submitUiEditor(
+		channel: RpcUiChannelRef,
+		expectedRevision: number,
+		mode: "primary" | "followUp",
+		images?: ImageContent[],
+	): Promise<RpcUiEditorSubmitResult> {
+		return this.#getData(
+			await this.#send({
+				type: "ui_editor_submit",
+				channelId: channel.channelId,
+				generation: channel.generation,
+				expectedRevision,
+				mode,
+				...(images && images.length > 0 ? { images } : {}),
 			}),
 		);
 	}

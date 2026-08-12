@@ -299,6 +299,10 @@ export class RpcInteractiveSurfaceManager {
 		return this.#editor.text;
 	}
 
+
+	getAuthoritativeEditor(): RpcUiEditorState {
+		return { ...this.#editor };
+	}
 	setEditorText(text: string, source: "extension" | "component" | "session" = "extension"): RpcUiEditorState {
 		if (text === this.#editor.text) return { ...this.#editor };
 		this.#rememberEditor();
@@ -326,6 +330,16 @@ export class RpcInteractiveSurfaceManager {
 		if (!this.#customEditor) return this.#commitClientEditor(text);
 		this.#customEditor.handleInput(`\u001b[200~${text}\u001b[201~`);
 		return this.setEditorText(this.#customEditor.getText(), "component");
+	}
+
+	prepareEditorSubmit(channelId: string, generation: number, expectedRevision: number): RpcUiEditorState {
+		this.#assertChannel(channelId, generation);
+		this.#assertEditorRevision(expectedRevision);
+		return { ...this.#editor };
+	}
+
+	clearSubmittedEditor(): RpcUiEditorState {
+		return this.#commitClientEditor("");
 	}
 
 	setAutocompleteProvider(provider: AutocompleteProvider): void {

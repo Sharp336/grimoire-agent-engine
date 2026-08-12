@@ -1,11 +1,9 @@
 import * as fs from "node:fs/promises";
-import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { type AutocompleteProvider, matchesKey, type SlashCommand } from "@oh-my-pi/pi-tui";
 import { isEnoent, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { isSettingsInitialized, settings } from "../../config/settings";
-import { resolveLocalRoot } from "../../internal-urls";
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
 import { extractImagePathFromText } from "../../modes/components/custom-editor";
 import { ReadToolGroupComponent } from "../../modes/components/read-tool-group";
@@ -14,9 +12,10 @@ import { StrippedToolCallsPlaceholder } from "../../modes/components/stripped-to
 import { TinyTitleDownloadProgressComponent } from "../../modes/components/tiny-title-download-progress";
 import { ToolExecutionComponent } from "../../modes/components/tool-execution";
 import { TreeSelectorComponent } from "../../modes/components/tree-selector";
-import { expandEmoticons } from "../../modes/emoji-autocomplete";
 import { materializeImageReferenceLinks, shiftImageMarkers } from "../../modes/image-references";
 import { createPromptActionAutocompleteProvider } from "../../modes/prompt-action-autocomplete";
+import { PromptDocumentService, wrapPromptPaste } from "../../modes/prompt-document-service";
+import { ComposerInputRouter, parsePythonCommandInput } from "./composer-input-router";
 import { parseQueueShorthand, splitQueuedMessages } from "../../modes/queue-input";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "../../modes/skill-command";
 import type { InteractiveModeContext } from "../../modes/types";
@@ -89,46 +88,7 @@ function hasPasteText(value: unknown): value is PasteTarget {
 	return typeof value === "object" && value !== null && typeof (value as PasteTarget).pasteText === "function";
 }
 
-const SHELL_PROMPT_COMMAND_RE =
-	/^(?:\.{0,2}\/|~\/|cd(?:\s|$)|sudo(?:\s|$)|git(?:\s|$)|bun(?:\s|$)|npm(?:\s|$)|pnpm(?:\s|$)|yarn(?:\s|$)|node(?:\s|$)|python\d*(?:\s|$)|cargo(?:\s|$)|go(?:\s|$)|make(?:\s|$)|docker(?:\s|$)|kubectl(?:\s|$))/;
-const SHELL_PROMPT_OPERATOR_RE = /(?:^|\s)(?:&&|\|\||\||2>&1|[<>]{1,2})(?:\s|$)/;
-const OMP_STATUS_LINE_RE = /^\s*in:\s+\d+\s+out:\s+\d+(?:\s+cache\s+\S+)?\s+t:\s+\S+\s+tok\/s:\s+\S+/m;
 
-function looksLikePastedShellPrompt(code: string): boolean {
-	const firstLine = code.split("\n", 1)[0]?.trimStart() ?? "";
-	return (
-		SHELL_PROMPT_COMMAND_RE.test(firstLine) ||
-		SHELL_PROMPT_OPERATOR_RE.test(firstLine) ||
-		OMP_STATUS_LINE_RE.test(code)
-	);
-}
-
-function pythonCommandPrefixLength(trimmedText: string): 0 | 1 | 2 {
-	if (trimmedText.charCodeAt(0) !== 36 /* $ */) return 0;
-	if (trimmedText.charCodeAt(1) === 123 /* { */) return 0;
-
-	const prefixLength = trimmedText.charCodeAt(1) === 36 /* $ */ ? 2 : 1;
-	const next = trimmedText.charCodeAt(prefixLength);
-	if (Number.isNaN(next)) return prefixLength;
-	return next === 32 || next === 9 || next === 10 || next === 13 ? prefixLength : 0;
-}
-
-function parsePythonCommandInput(text: string): { code: string; isExcluded: boolean } | undefined {
-	const trimmed = text.trimStart();
-	const prefixLength = pythonCommandPrefixLength(trimmed);
-	if (prefixLength === 0) return undefined;
-	const code = trimmed.slice(prefixLength).trim();
-	if (prefixLength === 1 && looksLikePastedShellPrompt(code)) return undefined;
-	return {
-		code,
-		isExcluded: prefixLength === 2,
-	};
-}
-
-/** Wrap pasted text in `<attachment>` tags so the model treats it as one quoted block. */
-function wrapPasteInAttachmentBlock(content: string): string {
-	return `<attachment>\n${content}\n</attachment>`;
-}
 
 /** Run a teardown abort that must never throw (Esc / Ctrl+C path). A thrown
  *  error is logged at debug instead of silently swallowed, so a failing abort
@@ -183,9 +143,6 @@ export class InputController {
 	// (>= LEFT_DOUBLE_TAP_MAX_GAP_MS) starts a fresh sequence. See
 	// #detectLeftDoubleTap.
 	#leftTapCount = 0;
-	// Sequential index for `local://paste-N.md` references created by the large-paste
-	// flow. Seeded from 0 and bumped past existing paste files.
-	#pasteCounter = 0;
 
 	#showTinyTitleDownloadProgress(modelKey: string): void {
 		if (!isTinyTitleLocalModelKey(modelKey)) return;
@@ -629,49 +586,49 @@ export class InputController {
 	}
 
 	setupEditorSubmitHandler(): void {
-		this.ctx.editor.onSubmit = async (text: string) => {
-			text = text.trim();
+		this.ctx.editor.onSubmit = async (submittedText: string) => {
+			const router = new ComposerInputRouter<ImageContent>(
+				{
+					isFocusedAgent: this.ctx.focusedAgentId !== undefined,
+					isStreaming: this.ctx.session.isStreaming,
+					queuedMessageCount: this.ctx.session.queuedMessageCount,
+					isCompacting: this.ctx.session.isCompacting,
+					isCollabGuest: false,
+					isCollabReadOnly: false,
+					expandEmoticons: !isSettingsInitialized() || settings.get("emojiAutocomplete"),
+				},
+				{
+					focusedAgent: async draft => {
+						await this.#submitToFocusedSession(draft.text, "steer");
+						return true;
+					},
+					abortQueued: async () => {
+						await this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
+						this.ctx.updatePendingMessagesDisplay();
+						this.ctx.ui.requestRender();
+					},
+					continue: async () => {
+						if (!this.ctx.onInputCallback) return false;
+						this.ctx.editor.clearDraft();
+						this.ctx.onInputCallback({
+							text: manualContinuePrompt,
+							cancelled: false,
+							started: true,
+							synthetic: true,
+							userInitiated: true,
+						});
+						return true;
+					},
+					dispatch: async () => "prompt",
+				},
+			);
+			const routed = await router.submit({
+				text: submittedText,
+				images: this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined,
+			});
+			if (routed.disposition !== "prompt") return;
+			let text = routed.draft.text;
 			const hasPendingImages = this.ctx.editor.pendingImages.length > 0;
-			if ((!isSettingsInitialized() || settings.get("emojiAutocomplete")) && text) text = expandEmoticons(text);
-
-			// Focused subagent session: the editor is a plain chat box for it.
-			// Everything below (continue shortcuts, slash/bash/python, loop,
-			// compaction queueing) is main-session-only.
-			if (this.ctx.focusedAgentId) {
-				await this.#submitToFocusedSession(text, "steer");
-				return;
-			}
-
-			// Empty submit while streaming with queued messages: abort the active
-			// turn and let the post-unwind drain deliver the agent-core queue.
-			if (!text && !hasPendingImages && this.ctx.session.isStreaming) {
-				if (this.ctx.session.queuedMessageCount > 0) {
-					const aborting = this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
-					await aborting;
-					this.ctx.updatePendingMessagesDisplay();
-					this.ctx.ui.requestRender();
-				}
-				return;
-			}
-
-			if (!text && !hasPendingImages) return;
-
-			// Continue shortcuts: "." or "c" resume the agent with a hidden agent-authored
-			// developer directive (no visible user message) instead of an empty turn, so the
-			// model continues the prior intent rather than second-guessing the interrupt.
-			if (text === "." || text === "c") {
-				if (this.ctx.onInputCallback) {
-					this.ctx.editor.clearDraft();
-					this.ctx.onInputCallback({
-						text: manualContinuePrompt,
-						cancelled: false,
-						started: true,
-						synthetic: true,
-						userInitiated: true,
-					});
-				}
-				return;
-			}
 
 			const runner = this.ctx.session.extensionRunner;
 			let inputImages = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
@@ -1744,7 +1701,7 @@ export class InputController {
 
 		switch (choice) {
 			case WRAPPED_BLOCK:
-				this.ctx.editor.insertPaste(wrapPasteInAttachmentBlock(text));
+				this.ctx.editor.insertPaste(wrapPromptPaste(text));
 				break;
 			case LOCAL_FILE:
 				await this.#attachPasteAsFile(text, lineCount);
@@ -1768,22 +1725,9 @@ export class InputController {
 	 */
 	async #attachPasteAsFile(text: string, lineCount: number): Promise<void> {
 		try {
-			// Mirror the exact mapping the read tool's local:// resolver uses so a later
-			// `read local://paste-N.md` lands on the file written here.
-			const localRoot = resolveLocalRoot({
-				getArtifactsDir: () => this.ctx.sessionManager.getArtifactsDir(),
-				getSessionId: () => this.ctx.sessionManager.getSessionId(),
-			});
-			let name: string;
-			let filePath: string;
-			do {
-				this.#pasteCounter++;
-				name = `paste-${this.#pasteCounter}.md`;
-				filePath = path.join(localRoot, name);
-			} while (await Bun.file(filePath).exists());
-			await Bun.write(filePath, text);
-			this.ctx.editor.insertText(`local://${name} `);
-			this.ctx.showStatus(`Saved ${lineCount} pasted lines to local://${name}`);
+			const uri = await new PromptDocumentService(this.ctx.sessionManager).writeLocalPaste(text);
+			this.ctx.editor.insertText(`${uri} `);
+			this.ctx.showStatus(`Saved ${lineCount} pasted lines to ${uri}`);
 		} catch (error) {
 			logger.warn("failed to save large paste to file", {
 				error: error instanceof Error ? error.message : String(error),

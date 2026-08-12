@@ -59,6 +59,9 @@ import {
 } from "../../session/artifacts";
 import { materializeEvalOutput } from "../../session/eval-output";
 import { type PythonExecutionMessage, SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
+import { ComposerInputRouter } from "../controllers/composer-input-router";
+import manualContinuePrompt from "../../prompts/system/manual-continue.md" with { type: "text" };
+import { splitQueuedMessages } from "../queue-input";
 import { adaptSemanticRenderResultToHost } from "../../session/semantic-content";
 import {
  inspectPersistedSessionWorkspace,
@@ -81,6 +84,7 @@ import {
 import { SessionLoopScheduler } from "../../session/session-loop";
 import { SessionQueueEntryNotFoundError, SessionQueueInvalidPositionError } from "../../session/session-queue-service";
 import { FileSessionStorage } from "../../session/session-storage";
+import { BUILTIN_SLASH_COMMANDS } from "../../slash-commands/builtin-registry";
 import { ToolInventoryUnavailableError } from "../../session/session-tools";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands } from "../../slash-commands/available-commands";
@@ -1825,12 +1829,19 @@ export async function runRpcMode(
   },
   uiContext: rpcUiContext,
  });
- const autocompleteCommands = (await buildAvailableSlashCommands(session)).map(command => ({
-  name: command.name,
-  aliases: command.aliases,
-  description: command.description,
-  argumentHint: command.input?.hint,
- }));
+ const availableCommands = await buildAvailableSlashCommands(session);
+ const builtinNames = new Set(BUILTIN_SLASH_COMMANDS.map(command => command.name));
+ const autocompleteCommands = [
+  ...BUILTIN_SLASH_COMMANDS,
+  ...availableCommands
+   .filter(command => !builtinNames.has(command.name))
+   .map(command => ({
+    name: command.name,
+    aliases: command.aliases,
+    description: command.description,
+    argumentHint: command.input?.hint,
+   })),
+ ];
  interactiveSurface.configureAutocomplete(autocompleteCommands, session.sessionManager.getCwd());
  const semanticRendering = new RpcSemanticRenderingManager(output);
  const provenanceSource: RpcProvenanceSource = {
@@ -2886,6 +2897,99 @@ export async function runRpcMode(
       command.text,
      ),
     );
+   case "ui_editor_submit": {
+    let editor;
+    try {
+     editor = interactiveSurface.prepareEditorSubmit(
+      command.channelId,
+      command.generation,
+      command.expectedRevision,
+     );
+    } catch (cause) {
+     if (!(cause instanceof RpcInteractiveSurfaceError)) throw cause;
+     return success(id, "ui_editor_submit", {
+      accepted: false,
+      disposition: "no_op",
+      editor: interactiveSurface.getAuthoritativeEditor(),
+     });
+    }
+    let operationId: string | undefined;
+    const invokePrompt = async (
+     message: string,
+     streamingBehavior: "steer" | "followUp",
+    ): Promise<boolean> => {
+     const response = await handleCommand({
+      id: Snowflake.next() as string,
+      type: "prompt",
+      message,
+      images: command.images,
+      streamingBehavior,
+     });
+     if (!response.success || response.command !== "prompt" || !response.data.accepted) return false;
+     operationId = response.data.operationId;
+     return true;
+    };
+    try {
+     const router = new ComposerInputRouter({
+      isFocusedAgent: false,
+      isStreaming: session.isStreaming,
+      queuedMessageCount: session.queuedMessageCount,
+      isCompacting: session.isCompacting,
+      isCollabGuest: collaborationSnapshot.role === "guest",
+      isCollabReadOnly: collaborationSnapshot.authority !== "full",
+      expandEmoticons: true,
+     }, {
+      abortQueued: async () => {
+       const response = await handleCommand({ id: Snowflake.next() as string, type: "abort" });
+       if (!response.success) throw new Error(response.error);
+      },
+      continue: async () => invokePrompt(manualContinuePrompt, "steer"),
+      queue: async (body, draft) => {
+       const messages = splitQueuedMessages(body);
+       const queue = messages.length > 0 ? messages : draft.images?.length ? [""] : [];
+       if (queue.length === 0) return false;
+       if (!(await invokePrompt(queue[0] ?? "", "followUp"))) return false;
+       for (const message of queue.slice(1)) {
+        const response = await handleCommand({
+         id: Snowflake.next() as string,
+         type: "follow_up",
+         message,
+        });
+        if (!response.success) return false;
+       }
+       return true;
+      },
+      dispatch: async (draft, mode) => {
+       const accepted = await invokePrompt(draft.text, mode === "followUp" ? "followUp" : "steer");
+       if (!accepted) throw new Error("Prompt dispatch was rejected");
+       if (mode === "followUp") return "follow_up";
+       return session.isStreaming ? "steer" : "prompt";
+      },
+     });
+     const routed = await router.submit({ text: editor.text, images: command.images }, command.mode);
+     if (!routed.accepted) {
+      return success(id, "ui_editor_submit", {
+       accepted: false,
+       disposition: routed.disposition,
+       editor: interactiveSurface.getAuthoritativeEditor(),
+      });
+     }
+     const submittedEditor =
+      routed.disposition === "no_op" ? interactiveSurface.getAuthoritativeEditor() : interactiveSurface.clearSubmittedEditor();
+     return success(id, "ui_editor_submit", {
+      accepted: true,
+      disposition: routed.disposition,
+      editor: submittedEditor,
+      ...(operationId === undefined ? {} : { operationId }),
+     });
+    } catch (cause) {
+     return success(id, "ui_editor_submit", {
+      accepted: false,
+      disposition: "no_op",
+      editor: interactiveSurface.getAuthoritativeEditor(),
+     });
+    }
+   }
    case "ui_autocomplete_suggest":
     return success(
      id,
@@ -4743,7 +4847,7 @@ export async function runRpcMode(
       "get_transcript_page",
       pageRpcTranscript(
        transcript.messages,
-       transcript.cacheMissExplainedAt,
+       transcript.cacheMissExplainedAt ?? transcript.messages.map(() => false),
        {
         sessionId: session.sessionId,
         leafId: session.sessionManager.getLeafId(),

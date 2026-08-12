@@ -15,6 +15,7 @@ import type {
 	ServiceTierFamily,
 	ToolExample,
 } from "@oh-my-pi/pi-ai";
+import type { ComposerInputDisposition } from "../controllers/composer-input-router";
 import type { AdvisorRuntimeStatus } from "../../advisor";
 import type { SettingTab } from "../../config/settings-schema";
 import type { SettingsSnapshot } from "../../config/settings-snapshot";
@@ -180,6 +181,13 @@ export interface RpcUiFence {
 export interface RpcUiEditorState {
 	text: string;
 	revision: number;
+}
+
+export interface RpcUiEditorSubmitResult {
+	accepted: boolean;
+	disposition: ComposerInputDisposition;
+	editor: RpcUiEditorState;
+	operationId?: string;
 }
 
 export interface RpcUiThemeInfo {
@@ -379,6 +387,15 @@ export type RpcCommand =
 			generation: number;
 			expectedRevision: number;
 			text: string;
+	  }
+	| {
+			id: string;
+			type: "ui_editor_submit";
+			channelId: string;
+			generation: number;
+			expectedRevision: number;
+			mode: "primary" | "followUp";
+			images?: ImageContent[];
 	  }
 	| {
 			id: string;
@@ -1333,6 +1350,13 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "ui_input"; success: true; data: RpcUiInputResult }
 	| { id?: string; type: "response"; command: "ui_editor_update"; success: true; data: RpcUiEditorState }
 	| { id?: string; type: "response"; command: "ui_editor_paste"; success: true; data: RpcUiEditorState }
+	| {
+			id?: string;
+			type: "response";
+			command: "ui_editor_submit";
+			success: true;
+			data: RpcUiEditorSubmitResult;
+	  }
 	| {
 			id?: string;
 			type: "response";

@@ -41,7 +41,6 @@ export async function buildAvailableSlashCommands(
 	};
 
 	for (const command of BUILTIN_SLASH_COMMANDS_INTERNAL) {
-		if (!command.handle) continue;
 		const hint = command.acpInputHint ?? command.inlineHint;
 		appendCommand({
 			name: command.name,

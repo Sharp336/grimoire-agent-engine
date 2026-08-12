@@ -719,6 +719,28 @@ export const RPC_COMMAND_DEFINITIONS = {
 		"serial",
 		{ version: 3, ...requiresFeature("ui") },
 	),
+	ui_editor_submit: sessionCommand(
+		{
+			type: "ui_editor_submit",
+			id: "request-1",
+			channelId: "channel-1",
+			generation: 1,
+			expectedRevision: 0,
+			mode: "primary",
+		},
+		{
+			channelId: opaqueIdField,
+			generation: requiredNonNegativeIntegerField,
+			expectedRevision: requiredNonNegativeIntegerField,
+			mode: required('"primary" or "followUp"', value => value === "primary" || value === "followUp", {
+				type: "string",
+				enum: ["primary", "followUp"],
+			}),
+			images: optionalObjectArrayField,
+		},
+		"serial",
+		{ version: 3, ...requiresFeature("ui.composer-input") },
+	),
 	ui_autocomplete_suggest: sessionCommand(
 		{
 			type: "ui_autocomplete_suggest",
