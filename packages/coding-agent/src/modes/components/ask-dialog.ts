@@ -482,7 +482,8 @@ export class AskDialogComponent implements Component {
 		// keyboardFooter(1) + optionalHelpFooter(0|1) + bottomBorder(1)
 		// = N + 5|6 fixed rows outside the body.
 		const fixedRows = headerLines.length + (helpText === undefined ? 5 : 6);
-		const bodyRows = Math.max(MIN_BODY_ROWS, totalRows - fixedRows);
+		// MIN_BODY_ROWS sizes the natural panel; the terminal-height cap wins here.
+		const bodyRows = Math.max(1, totalRows - fixedRows);
 		this.#bodyRows = bodyRows;
 		const bodyLines = this.#isSubmitTab()
 			? this.#renderSubmitBody(innerWidth, bodyRows)

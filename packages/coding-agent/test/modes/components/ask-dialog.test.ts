@@ -1356,6 +1356,53 @@ describe("AskDialogComponent", () => {
 		expect(lines.at(-1)?.startsWith("╰")).toBe(true);
 	});
 
+	it("shrinks the scrollable body to fit a 12-row terminal on question and Submit tabs", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 12 });
+		try {
+			const helpText = "Choose every applicable option.";
+			const component = new AskDialogComponent(
+				[
+					{
+						id: "q1",
+						question: "Which options apply?",
+						options: [{ label: "Option A" }, { label: "Option B" }],
+						multi: true,
+					},
+				],
+				{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+				{ helpText },
+			);
+			const renderLines = (): string[] => component.render(80).map(line => stripVTControlCharacters(line));
+			const expectFrame = (lines: string[], keyboardHint: string): void => {
+				expect(lines).toHaveLength(12);
+				expect(lines.length).toBeLessThanOrEqual(process.stdout.rows);
+				expect(lines.at(0)?.startsWith("╭")).toBe(true);
+				expect(lines.at(-3)).toContain(keyboardHint);
+				expect(lines.at(-2)).toContain(helpText);
+				expect(lines.at(-1)?.startsWith("╰")).toBe(true);
+			};
+
+			const questionTab = renderLines();
+			expectFrame(questionTab, "Space/Enter toggle");
+			expect(questionTab.some(line => line.includes("Option A"))).toBe(true);
+
+			component.handleInput(TAB);
+			const submitTab = renderLines();
+			expectFrame(submitTab, "Enter submit");
+			expect(submitTab).toHaveLength(questionTab.length);
+			expect(submitTab.some(line => line.includes("unanswered"))).toBe(true);
+
+			component.handleInput(DOWN);
+			const scrolledSubmitTab = renderLines();
+			expectFrame(scrolledSubmitTab, "Enter submit");
+			expect(scrolledSubmitTab.slice(4, -4).some(line => line.includes("Submit"))).toBe(true);
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
 	it("keeps a fixed spawn-time height across tabs, clamped to 70% of the terminal", () => {
 		const questions: ExtensionAskDialogQuestion[] = [
 			{

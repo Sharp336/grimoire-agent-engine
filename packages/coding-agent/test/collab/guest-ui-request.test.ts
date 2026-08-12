@@ -811,6 +811,11 @@ describe("guest ask multi-select Next gating (#4375 PRRT_kwDOQxs0bc6OFbDW)", () 
 		return frame.request.options.map(o => (typeof o === "string" ? o : o.label));
 	}
 
+	function selectHelpLines(frame: CollabFrame & { t: "ui-request" }): string[] {
+		if (frame.request.kind !== "select") throw new Error(`expected select, got ${frame.request.kind}`);
+		return frame.request.helpText?.split("\n") ?? [];
+	}
+
 	it("omits Next from the first ui-request, includes it after a toggle", async () => {
 		const ctx = makeAskHostContext();
 		const host = new CollabHost(ctx);
@@ -855,6 +860,69 @@ describe("guest ask multi-select Next gating (#4375 PRRT_kwDOQxs0bc6OFbDW)", () 
 			guest.socket.close();
 		} finally {
 			await host.stop("test done");
+		}
+	});
+
+	it("normalizes and bounds supplementary help on every guest Ask selector step (PRRT_kwDOQxs0bc6YZMYL)", async () => {
+		const originalColumns = Object.getOwnPropertyDescriptor(process.stdout, "columns");
+		Object.defineProperty(process.stdout, "columns", { configurable: true, value: 20 });
+		const ctx = makeAskHostContext();
+		const host = new CollabHost(ctx);
+		try {
+			await host.start("ws://localhost:8787");
+			ctx.collabHost = host;
+			const controller = new ExtensionUiController(ctx);
+			const guest = await joinRawGuest(host.link, COLLAB_PROTO);
+			const welcome = await guest.nextFrame();
+			if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+			const result = controller.showAskDialog(
+				[
+					{
+						id: "single",
+						question: "Pick one?",
+						options: [{ label: "Option A" }, { label: "Option B" }],
+					},
+					{
+						id: "multi",
+						question: "Pick several?",
+						options: [{ label: "Option A" }, { label: "Option B" }],
+						multi: true,
+					},
+				],
+				{ helpText: `\t  Plan\n first   setting ${"x".repeat(80)}` },
+			);
+
+			const single = await nextUiRequest(guest);
+			const singleHelp = selectHelpLines(single);
+			expect(singleHelp[0]).toBe("up/down navigate  enter select  esc cancel");
+			expect(singleHelp[1]).toStartWith("Plan first");
+			expect(singleHelp[1]?.length).toBeLessThanOrEqual(18);
+			expect(singleHelp[1]).toEndWith("…");
+			guest.socket.send({ t: "ui-response", reqId: single.request.reqId, value: "Option A" });
+
+			const multiInitial = await nextUiRequest(guest);
+			const multiInitialHelp = selectHelpLines(multiInitial);
+			expect(multiInitialHelp[0]).toBe("up/down navigate  enter toggle  esc cancel");
+			expect(multiInitialHelp[1]).toBe(singleHelp[1]);
+			guest.socket.send({ t: "ui-response", reqId: multiInitial.request.reqId, value: "Option A" });
+
+			const multiSelected = await nextUiRequest(guest);
+			const multiSelectedHelp = selectHelpLines(multiSelected);
+			expect(multiSelectedHelp[0]).toBe("up/down navigate  enter toggle  Next → continue  esc cancel");
+			expect(multiSelectedHelp[1]).toBe(singleHelp[1]);
+			guest.socket.send({ t: "ui-response", reqId: multiSelected.request.reqId, value: "Next →" });
+
+			const settled = await result;
+			expect(settled?.kind).toBe("submit");
+			if (settled?.kind === "submit") {
+				expect(settled.results.map(item => item.selectedOptions)).toEqual([["Option A"], ["Option A"]]);
+			}
+			guest.socket.close();
+		} finally {
+			await host.stop("test done");
+			if (originalColumns) Object.defineProperty(process.stdout, "columns", originalColumns);
+			else Reflect.deleteProperty(process.stdout, "columns");
 		}
 	});
 });

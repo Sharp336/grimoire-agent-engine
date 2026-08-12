@@ -2859,6 +2859,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				agentKind === "main" &&
 				currentSessionIsFresh &&
 				(!hasSession ? !planDefaultOnStartup : !session.getPlanModeState()?.enabled) &&
+				(!hasSession || !session.getGoalModeState()?.enabled) &&
 				settings.get("plan.enabled") &&
 				settings.get("plan.suggestBeforeSubstantialWork") &&
 				builtInRegistryToolNames.has("ask") &&

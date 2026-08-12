@@ -12,6 +12,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 import { RpcSubagentRegistry, readRpcSubagentTranscript } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-subagents";
 import type { RpcSubagentFrame } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
+import { CommittedNewSessionTransitionError } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import {
 	type AgentProgress,
 	type SubagentEventPayload,
@@ -230,6 +231,51 @@ describe("RPC subagent registry", () => {
 			} finally {
 				registry.dispose();
 			}
+		}
+	});
+
+	test("acknowledges committed new sessions and clears stale snapshots after post-commit failures", async () => {
+		const registry = createRegistryWithSnapshot();
+		const committedError = new CommittedNewSessionTransitionError(new Error("mode reconciliation failed"));
+		const session: RpcSessionChangeSession = {
+			...createSessionChangeSession({}),
+			newSession: async () => {
+				throw committedError;
+			},
+		};
+
+		try {
+			const result = await handleRpcSessionChange(session, { type: "new_session" }, registry);
+
+			expect(result).toEqual({
+				type: "new_session",
+				data: { cancelled: false, postCommitError: committedError.message },
+			});
+			expect(registry.getSubagents()).toHaveLength(0);
+			expect(() => registry.resolveSessionFile({ subagentId: "SubagentA" })).toThrow(
+				/Unknown subagent or session file unavailable/,
+			);
+		} finally {
+			registry.dispose();
+		}
+	});
+
+	test("rejects ordinary new-session failures without clearing stale snapshots", async () => {
+		const registry = createRegistryWithSnapshot();
+		const failure = new Error("session creation failed");
+		const session: RpcSessionChangeSession = {
+			...createSessionChangeSession({}),
+			newSession: async () => {
+				throw failure;
+			},
+		};
+
+		try {
+			await expect(handleRpcSessionChange(session, { type: "new_session" }, registry)).rejects.toBe(failure);
+			expect(registry.getSubagents()).toMatchObject([{ id: "SubagentA" }]);
+			expect(registry.resolveSessionFile({ subagentId: "SubagentA" })).toBe("/tmp/subagent.jsonl");
+		} finally {
+			registry.dispose();
 		}
 	});
 

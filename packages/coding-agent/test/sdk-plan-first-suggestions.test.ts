@@ -41,6 +41,7 @@ interface PromptOptions {
 	newSessionAfterCreate?: boolean;
 	activeTransientModesBeforeNewSession?: boolean;
 	activePlanModeAfterCreate?: boolean;
+	activeGoalModeAfterCreate?: boolean;
 	enableStartupDefaultAfterCreate?: boolean;
 	toolNames?: string[];
 	systemPrompt?: string;
@@ -133,6 +134,23 @@ describe("createAgentSession plan-first suggestions", () => {
 				session.setPlanModeState({ enabled: true, planFilePath: "local://PLAN.md" });
 				await session.refreshBaseSystemPrompt();
 			}
+			if (options.activeGoalModeAfterCreate) {
+				const now = Date.now();
+				session.setGoalModeState({
+					enabled: true,
+					mode: "active",
+					goal: {
+						id: "active-goal",
+						objective: "Finish the active goal",
+						status: "active",
+						tokensUsed: 0,
+						timeUsedSeconds: 0,
+						createdAt: now,
+						updatedAt: now,
+					},
+				});
+				await session.refreshBaseSystemPrompt();
+			}
 			return {
 				prompt: session.systemPrompt.join("\n\n"),
 				planModeState: session.getPlanModeState(),
@@ -192,11 +210,6 @@ describe("createAgentSession plan-first suggestions", () => {
 			],
 			helpText: HELP_TEXT,
 		});
-		expect(guidance).toContain('"label": "Research first, then start the questionnaire"');
-		expect(guidance).toContain('"label": "Start the questionnaire now"');
-		expect(guidance).toContain('"label": "Proceed without a questionnaire or plan"');
-		expect(guidance).toContain('"recommended": 0');
-		expect(guidance).toContain(`"helpText": "${HELP_TEXT}"`);
 		expect(guidance).toContain("MUST follow the selected answer and any custom response");
 		expect(guidance).toContain("Exempt classification MUST take precedence over substantial classification");
 		expect(guidance).toContain("MUST wait for this initial choice before continuing");
@@ -219,6 +232,7 @@ describe("createAgentSession plan-first suggestions", () => {
 		expect(sharedGuardBullet.startsWith(sharedGuardPrefix)).toBe(true);
 		expect(sharedGuardBullet).toContain("MUST NOT call a plan or `todo` tool");
 		expect(sharedGuardBullet).toContain("create or update a plan or to-do list");
+		expect(sharedGuardBullet).toContain("MUST NOT create or update planning files such as `PLAN.md`");
 		expect(sharedGuardBullet).toContain("emit a plan in prose");
 		expect(sharedGuardBullet).toContain("Only after the answers arrive MAY you start planning");
 
@@ -253,6 +267,7 @@ describe("createAgentSession plan-first suggestions", () => {
 		expect(sharedGuardBullet.startsWith(sharedGuardPrefix)).toBe(true);
 		expect(sharedGuardBullet).toContain("MUST NOT call a plan or `todo` tool");
 		expect(sharedGuardBullet).toContain("create or update a plan or to-do list");
+		expect(sharedGuardBullet).toContain("MUST NOT create or update planning files such as `PLAN.md`");
 		expect(sharedGuardBullet).toContain("emit a plan in prose");
 		expect(sharedGuardBullet).toContain("Only after the answers arrive MAY you start planning");
 
@@ -286,6 +301,7 @@ describe("createAgentSession plan-first suggestions", () => {
 		expect(directBullet).toContain("MUST proceed without a questionnaire or plan");
 		expect(directBullet).toContain("MUST NOT call a plan or `todo` tool");
 		expect(directBullet).toContain("MUST NOT create or emit a plan or to-do list");
+		expect(directBullet).toContain("MUST NOT create or update planning files such as `PLAN.md`");
 
 		const initialAskIndex = guidance.indexOf(
 			"If the request is substantial or unclear, you MUST call `ask` before any other tool call or implementation",
@@ -308,6 +324,7 @@ describe("createAgentSession plan-first suggestions", () => {
 		],
 		["sessions configured to start in plan mode", { settings: Settings.isolated({ "plan.defaultOnStartup": true }) }],
 		["sessions already in plan mode", { activePlanModeAfterCreate: true }],
+		["sessions already in active goal mode", { activeGoalModeAfterCreate: true }],
 		["resumed sessions", { existingSession: true }],
 		["sessions resumed from a compaction summary", { existingSummary: "compaction" }],
 		["sessions resumed from a branch summary", { existingSummary: "branch_summary" }],

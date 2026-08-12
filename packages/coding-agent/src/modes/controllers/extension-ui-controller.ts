@@ -1,5 +1,5 @@
 import type { Component, OverlayHandle, TUI } from "@oh-my-pi/pi-tui";
-import { Container, Spacer, Text } from "@oh-my-pi/pi-tui";
+import { Container, Ellipsis, replaceTabs, Spacer, Text, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 import type { CollabUiRequestDraft, CollabUiSelectItem } from "@oh-my-pi/pi-wire";
 import { KeybindingsManager } from "../../config/keybindings";
 import type {
@@ -36,6 +36,15 @@ const MAX_WIDGET_LINES = 10;
 const ASK_OTHER_OPTION = "Other (type your own)";
 const ASK_CHAT_OPTION = "Chat about this";
 const ASK_NEXT_OPTION = "Next →";
+
+function guestAskSelectHelpText(controls: string, supplementary: string | undefined): string {
+	if (supplementary === undefined) return controls;
+	const normalized = replaceTabs(supplementary).replace(/\s+/g, " ").trim();
+	const width = Math.max(1, (process.stdout.columns ?? 80) - 2);
+	const bounded =
+		visibleWidth(normalized) <= width ? normalized : truncateToWidth(normalized, width, Ellipsis.Unicode);
+	return `${controls}\n${bounded}`;
+}
 
 interface CollabDialogWinner {
 	source: "local" | "remote";
@@ -636,9 +645,11 @@ export class ExtensionUiController {
 		const localWinner = this.#showLocalAskDialog(questions, { ...dialogOptions, signal: localSignal }).then(
 			(value): CollabAskDialogWinner => ({ source: "local", value }),
 		);
-		const remoteWinner: Promise<CollabAskDialogWinner> = this.#runGuestAskDialog(questions, remoteSignal).then(
-			result => (result === "unavailable" ? localWinner : { source: "remote", value: result }),
-		);
+		const remoteWinner: Promise<CollabAskDialogWinner> = this.#runGuestAskDialog(
+			questions,
+			remoteSignal,
+			dialogOptions?.helpText,
+		).then(result => (result === "unavailable" ? localWinner : { source: "remote", value: result }));
 		const winner = await Promise.race([localWinner, remoteWinner]);
 		if (winner.source === "remote") localAbort.abort();
 		else remoteAbort.abort();
@@ -780,10 +791,11 @@ export class ExtensionUiController {
 	async #runGuestAskDialog(
 		questions: ExtensionAskDialogQuestion[],
 		signal: AbortSignal,
+		supplementaryHelpText: string | undefined,
 	): Promise<ExtensionAskDialogResult | "unavailable" | undefined> {
 		const results: ExtensionAskDialogResultItem[] = [];
 		for (const question of questions) {
-			const result = await this.#runGuestAskQuestion(question, signal);
+			const result = await this.#runGuestAskQuestion(question, signal, supplementaryHelpText);
 			if (result === "unavailable" || result === undefined) return result;
 			if (result === "chat") return { kind: "chat" };
 			results.push(result);
@@ -794,6 +806,7 @@ export class ExtensionUiController {
 	async #runGuestAskQuestion(
 		question: ExtensionAskDialogQuestion,
 		signal: AbortSignal,
+		supplementaryHelpText: string | undefined,
 	): Promise<ExtensionAskDialogResultItem | "chat" | "unavailable" | undefined> {
 		const selected = new Set<string>();
 		let customInput: string | undefined;
@@ -822,9 +835,12 @@ export class ExtensionUiController {
 						selectionMarker: "checkbox",
 						checkedIndices,
 						markableCount: question.options.length,
-						helpText: hasAnswer
-							? "up/down navigate  enter toggle  Next → continue  esc cancel"
-							: "up/down navigate  enter toggle  esc cancel",
+						helpText: guestAskSelectHelpText(
+							hasAnswer
+								? "up/down navigate  enter toggle  Next → continue  esc cancel"
+								: "up/down navigate  enter toggle  esc cancel",
+							supplementaryHelpText,
+						),
 					},
 					signal,
 				);
@@ -862,7 +878,7 @@ export class ExtensionUiController {
 						initialIndex,
 						selectionMarker: "radio",
 						markableCount: question.options.length,
-						helpText: "up/down navigate  enter select  esc cancel",
+						helpText: guestAskSelectHelpText("up/down navigate  enter select  esc cancel", supplementaryHelpText),
 					},
 					signal,
 				);
