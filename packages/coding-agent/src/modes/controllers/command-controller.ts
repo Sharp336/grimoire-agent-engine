@@ -46,6 +46,7 @@ import type { CompactMode } from "../../session/compact-modes";
 import type { NewSessionOptions } from "../../session/session-entries";
 import { formatShakeSummary, type ShakeMode, type ShakeResult } from "../../session/shake-types";
 import { formatActiveAccountLabel, limitMatchesActiveAccount } from "../../slash-commands/helpers/active-oauth-account";
+import { type PruneMode, runPrune, runUnarchive, type UnarchiveMode } from "../../slash-commands/prune-modes";
 import { outputMeta } from "../../tools/output-meta";
 import { resolveToCwd, stripOuterDoubleQuotes } from "../../tools/path-utils";
 import { replaceTabs, truncateToWidth } from "../../tools/render-utils";
@@ -1304,6 +1305,40 @@ export class CommandController {
 		this.ctx.statusLine.invalidate();
 		this.ctx.ui.requestRender();
 		this.ctx.showStatus(formatShakeSummary(result));
+	}
+
+	/**
+	 * TUI handler for `/prune`. Archives or deletes, and says which — the
+	 * transcript above is unchanged either way, so the status line is the only
+	 * place the difference shows.
+	 */
+	async handlePruneCommand(mode: PruneMode = "archive"): Promise<void> {
+		let summary: string;
+		try {
+			summary = await runPrune(mode, this.ctx.session);
+		} catch (error) {
+			this.ctx.showError(`Prune failed: ${error instanceof Error ? error.message : String(error)}`);
+			return;
+		}
+
+		this.ctx.statusLine.invalidate();
+		this.ctx.ui.requestRender();
+		this.ctx.showStatus(summary);
+	}
+
+	/** TUI handler for `/unarchive`. */
+	async handleUnarchiveCommand(mode: UnarchiveMode = { verb: "all" }): Promise<void> {
+		let summary: string;
+		try {
+			summary = await runUnarchive(mode, this.ctx.session);
+		} catch (error) {
+			this.ctx.showError(`Unarchive failed: ${error instanceof Error ? error.message : String(error)}`);
+			return;
+		}
+
+		this.ctx.statusLine.invalidate();
+		this.ctx.ui.requestRender();
+		this.ctx.showStatus(summary);
 	}
 
 	async executeCompaction(

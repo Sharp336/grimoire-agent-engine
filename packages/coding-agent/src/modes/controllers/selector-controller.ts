@@ -1198,8 +1198,9 @@ export class SelectorController {
 		this.ctx.ui.requestRender();
 	}
 
-	showTreeSelector(): void {
-		const tree = this.ctx.sessionManager.getTree();
+	showTreeSelector(options: { includeArchived?: boolean } = {}): void {
+		const includeArchived = options.includeArchived ?? false;
+		const tree = this.ctx.sessionManager.getTree({ includeArchived });
 		const realLeafId = this.ctx.sessionManager.getLeafId();
 
 		if (tree.length === 0) {
@@ -1359,6 +1360,36 @@ export class SelectorController {
 					this.ctx.ui.requestRender();
 				},
 				settings.get("treeFilterMode"),
+				{
+					showing: includeArchived,
+					// Archived branches were filtered out before the component saw the
+					// tree, so revealing them means fetching a new one — the same
+					// rebuild Escape already does.
+					onToggle: () => {
+						done();
+						this.showTreeSelector({ includeArchived: !includeArchived });
+					},
+					// Archive or restore whatever is highlighted, then rebuild: hiding a
+					// branch removes it from the tree the component is holding, and
+					// restoring one is only reachable while archived rows are showing.
+					onArchiveToggle: async (entryId: string) => {
+						const archived = this.ctx.sessionManager.getArchivedRootIds().includes(entryId);
+						try {
+							if (archived) {
+								await this.ctx.session.restoreArchived(entryId);
+							} else {
+								const hidden = await this.ctx.session.archiveBranch(entryId);
+								if (hidden === 0) return;
+							}
+						} catch (error) {
+							this.ctx.showError(error instanceof Error ? error.message : String(error));
+							return;
+						}
+						done();
+						this.showTreeSelector({ includeArchived });
+						this.ctx.showStatus(archived ? "Branch restored" : "Branch archived");
+					},
+				},
 			);
 			return { component: selector, focus: selector };
 		});

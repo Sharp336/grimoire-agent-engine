@@ -55,6 +55,8 @@ export interface ExportOptions {
 	themeNames?: ExportThemeNames;
 	/** Embed subagent session transcripts found next to the session file (default true). */
 	includeSubSessions?: boolean;
+	/** Include archived branches, hidden by default so a shared page never leaks them. */
+	includeArchived?: boolean;
 }
 
 /** Parse a color string to RGB values. */
@@ -188,12 +190,46 @@ function sessionHeaderForExport(header: SessionHeader | null): SessionHeader | n
 	return exported;
 }
 
+/**
+ * Entries the exported page may render. Archived subtrees stay out unless asked
+ * for — an export is what gets shared, so a branch hidden in the TUI leaking
+ * into it defeats the point. The `archive` bookkeeping records go regardless:
+ * they carry no message content and would render as blank rows in the tree.
+ *
+ * The leaf comes back with them because dropping entries can strand it.
+ * `archiveEmptyBranches()` appends its records like any other entry, so the
+ * last one is the session leaf until the next turn; an export taken in between
+ * would otherwise name an entry the page does not have. Falls back to the
+ * nearest surviving ancestor, or null when nothing survives.
+ */
+function visibleForExport(sm: SessionManager, includeArchived: boolean): Pick<SessionData, "entries" | "leafId"> {
+	const all = sm.getEntries();
+	const hidden = includeArchived ? undefined : sm.getArchivedEntryIds();
+	const entries = all.filter(entry => entry.type !== "archive" && !hidden?.has(entry.id));
+
+	let leafId = sm.getLeafId();
+	if (leafId !== null && entries.length !== all.length) {
+		const visible = new Set(entries.map(entry => entry.id));
+		const parentOf = new Map(all.map(entry => [entry.id, entry.parentId]));
+		const seen = new Set<string>();
+		while (leafId !== null && !visible.has(leafId) && !seen.has(leafId)) {
+			seen.add(leafId);
+			leafId = parentOf.get(leafId) ?? null;
+		}
+		if (leafId !== null && !visible.has(leafId)) leafId = null;
+	}
+	return { entries, leafId };
+}
+
 /** Snapshot the session (plus optional agent state) into the JSON shape the viewer renders. */
-export function buildSessionData(sm: SessionManager, state?: AgentState): SessionData {
+export function buildSessionData(
+	sm: SessionManager,
+	state?: AgentState,
+	options?: { includeArchived?: boolean },
+): SessionData {
 	return {
 		header: sessionHeaderForExport(sm.getHeader()),
-		entries: sm.getEntries(),
-		leafId: sm.getLeafId(),
+		...visibleForExport(sm, options?.includeArchived === true),
 		systemPrompt: state?.systemPrompt.join("\n\n"),
 		tools: state?.tools?.map(t => ({ name: t.name, description: t.description })),
 	};
@@ -275,7 +311,7 @@ export async function exportSessionToHtml(
 	const sessionFile = sm.getSessionFile();
 	if (!sessionFile) throw new Error("Cannot export in-memory session to HTML");
 
-	const sessionData = buildSessionData(sm, state);
+	const sessionData = buildSessionData(sm, state, opts);
 	if (opts.includeSubSessions !== false) {
 		const subSessions = await collectSubSessions(sessionFile);
 		if (Object.keys(subSessions).length > 0) sessionData.subSessions = subSessions;
@@ -301,11 +337,7 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 		throw err;
 	}
 
-	const sessionData: SessionData = {
-		header: sessionHeaderForExport(sm.getHeader()),
-		entries: sm.getEntries(),
-		leafId: sm.getLeafId(),
-	};
+	const sessionData = buildSessionData(sm, undefined, opts);
 	if (opts.includeSubSessions !== false) {
 		const subSessions = await collectSubSessions(inputPath);
 		if (Object.keys(subSessions).length > 0) sessionData.subSessions = subSessions;

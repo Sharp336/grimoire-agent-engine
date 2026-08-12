@@ -33,6 +33,7 @@ import {
 } from "./messages";
 import { type BuildSessionContextOptions, buildSessionContext, type SessionContext } from "./session-context";
 import {
+	type ArchiveEntry,
 	type BranchSummaryEntry,
 	type CompactionEntry,
 	type CredentialPinEntry,
@@ -202,6 +203,7 @@ class SessionEntryIndex {
 	#entriesById = new Map<string, SessionEntry>();
 	#children = new Map<string | null, SessionEntry[]>();
 	#labels = new Map<string, string>();
+	#archivedRoots = new Set<string>();
 	#leaf: string | null = null;
 	#usage = emptyUsageStatistics();
 
@@ -209,6 +211,7 @@ class SessionEntryIndex {
 		this.#entriesById.clear();
 		this.#children.clear();
 		this.#labels.clear();
+		this.#archivedRoots.clear();
 		this.#leaf = null;
 		this.#usage = emptyUsageStatistics();
 	}
@@ -231,6 +234,13 @@ class SessionEntryIndex {
 			else this.#labels.delete(entry.targetId);
 		}
 
+		// Last record for a target wins: an unarchive is a later record, not an
+		// erasure, so replaying the journal in order lands on the current state.
+		if (entry.type === "archive") {
+			if (entry.archived) this.#archivedRoots.add(entry.targetId);
+			else this.#archivedRoots.delete(entry.targetId);
+		}
+
 		addUsage(this.#usage, entryUsage(entry));
 	}
 
@@ -240,6 +250,10 @@ class SessionEntryIndex {
 
 	get(id: string): SessionEntry | undefined {
 		return this.#entriesById.get(id);
+	}
+
+	archivedRootIds(): ReadonlySet<string> {
+		return this.#archivedRoots;
 	}
 
 	/**
@@ -2375,8 +2389,257 @@ export class SessionManager {
 	 * The session as a tree. A well-formed session has exactly one root; orphaned
 	 * entries (broken parent chain) are returned as roots too.
 	 */
-	getTree(): SessionTreeNode[] {
-		return this.#index.tree(this.#entries);
+	getTree(options?: { includeArchived?: boolean }): SessionTreeNode[] {
+		const tree = this.#index.tree(this.#entries);
+		if (options?.includeArchived) return tree;
+		const archived = this.#index.archivedRootIds();
+		if (archived.size === 0) return tree;
+		const prune = (nodes: SessionTreeNode[]): SessionTreeNode[] => {
+			const out: SessionTreeNode[] = [];
+			for (const node of nodes) {
+				if (archived.has(node.entry.id)) continue;
+				node.children = prune(node.children);
+				out.push(node);
+			}
+			return out;
+		};
+		return prune(tree);
+	}
+
+	/** Roots of the subtrees currently hidden by an archive record. */
+	getArchivedRootIds(): string[] {
+		return [...this.#index.archivedRootIds()];
+	}
+
+	/** Every entry an archive record hides: the archived roots and all below them. */
+	getArchivedEntryIds(): Set<string> {
+		const hidden = new Set<string>();
+		const stack = [...this.#index.archivedRootIds()];
+		while (stack.length > 0) {
+			const id = stack.pop() as string;
+			if (!hidden.add(id)) continue;
+			for (const child of this.#index.childrenOf(id)) stack.push(child.id);
+		}
+		return hidden;
+	}
+
+	/**
+	 * Prune every branch with nothing to read in it.
+	 *
+	 * An entry is kept when an answered assistant reply sits at or below it — so
+	 * a prompt survives on the strength of what came back, and everything on the
+	 * way down to that reply survives with it. A reply that errored, was
+	 * aborted, or stopped waiting on a tool call is not an answer: it records a
+	 * request that never landed, so a branch holding nothing else is as empty as
+	 * one holding no reply at all and goes whole, prompt included. A tool call
+	 * mid-conversation is answered by the reply that follows it, so it survives
+	 * on that reply the same way the prompt above it does; only the call left
+	 * dangling at the tail of an abandoned branch goes. The failure itself is
+	 * kept only when the retry that finally worked hangs below it.
+	 *
+	 * That leaves nothing behind at the tail of a branch: a prompt that was never
+	 * answered, a summary of a branch you abandoned, or the metadata
+	 * stranded at its head all go with it. Tool results are the exception, kept
+	 * with the reply that called them — nothing answers a tool result, and it is
+	 * not what you came back to the branch to read. The active path is always
+	 * kept, so pruning can never delete the conversation you are in, including a
+	 * failure or an unanswered prompt you are still looking at. A label is kept
+	 * when its target is.
+	 *
+	 * Runs in linear tree passes — no per-entry ancestor walks — so it stays
+	 * usable on deep sessions. Returns the number of pruned entries, and rewrites
+	 * the session file when anything was pruned.
+	 */
+	async pruneEmptyBranches(): Promise<number> {
+		const { inTree, kept } = this.#emptyBranchVerdict();
+
+		const oldLength = this.#entries.length;
+		const activeLeafId = this.#index.leafId();
+
+		this.#entries = this.#entries.filter(entry => !inTree.has(entry.id) || kept.has(entry.id));
+		this.#index.rebuild(this.#entries);
+		this.#setLeaf(activeLeafId);
+
+		const prunedCount = oldLength - this.#entries.length;
+		if (prunedCount > 0) {
+			// Deleting entries can only be published by rewriting the whole file:
+			// the append path never removes lines, and close() marks the file
+			// current without rewriting, so without this the prune would be lost
+			// on reload.
+			this.#fileIsCurrent = false;
+			this.#rewriteRequired = true;
+			this.#atomicRewriteDirty = true;
+			await this.#rewriteAtomically();
+		}
+
+		return prunedCount;
+	}
+
+	/**
+	 * Archive every branch `pruneEmptyBranches()` would delete, hiding it instead
+	 * of destroying it.
+	 *
+	 * One record per outermost empty branch, appended rather than written over
+	 * anything, so the branch survives in the file and `/unarchive` brings
+	 * it back verbatim. Returns how many branches were hidden and how many
+	 * entries went with them.
+	 */
+	async archiveEmptyBranches(): Promise<{ branches: number; entries: number }> {
+		const { inTree, kept, preOrder } = this.#emptyBranchVerdict();
+
+		// Outermost dropped node only: archiving a root hides everything under it,
+		// so a record for a dropped child would be redundant. Pre-order guarantees
+		// the parent is seen first.
+		const roots: string[] = [];
+		const covered = new Set<string>();
+		let entries = 0;
+		for (const node of preOrder) {
+			const { id, parentId } = node.entry;
+			if (!inTree.has(id) || kept.has(id)) continue;
+			entries++;
+			if (parentId && covered.has(parentId)) {
+				covered.add(id);
+				continue;
+			}
+			covered.add(id);
+			roots.push(id);
+		}
+
+		for (const targetId of roots) {
+			const entry: ArchiveEntry = { type: "archive", ...this.#freshEntryFields(), targetId, archived: true };
+			this.#recordEntry(entry);
+		}
+
+		return { branches: roots.length, entries };
+	}
+
+	/**
+	 * Hide one branch by id, whatever is in it.
+	 *
+	 * `archiveEmptyBranches()` decides for you and only ever touches branches
+	 * with nothing to read; this is the manual counterpart behind the tree
+	 * selector, where you can see the branch you are hiding. Same append-only
+	 * record either way, so `restoreArchived()` brings it back the same way.
+	 *
+	 * Refuses the active branch: hiding an entry you are standing on would drop
+	 * the conversation out of its own tree. Returns how many entries went with
+	 * it, or 0 when it was already archived.
+	 */
+	async archiveBranch(targetId: string): Promise<number> {
+		if (!this.#index.has(targetId)) throw new Error(`No entry ${targetId} in this session.`);
+		if (this.#index.archivedRootIds().has(targetId)) return 0;
+		for (const entry of this.getBranch()) {
+			if (entry.id === targetId) throw new Error("That branch is the one you are in — switch away from it first.");
+		}
+
+		let entries = 0;
+		const stack = [targetId];
+		while (stack.length > 0) {
+			const id = stack.pop() as string;
+			entries++;
+			for (const child of this.#index.childrenOf(id)) stack.push(child.id);
+		}
+
+		const entry: ArchiveEntry = { type: "archive", ...this.#freshEntryFields(), targetId, archived: true };
+		this.#recordEntry(entry);
+		return entries;
+	}
+
+	/**
+	 * Bring archived branches back into view. Pass a root id to restore one,
+	 * nothing to restore them all. Returns the number of branches revealed.
+	 */
+	async restoreArchived(targetId?: string): Promise<number> {
+		const targets = targetId ? [targetId] : [...this.#index.archivedRootIds()];
+		const restored = targets.filter(id => this.#index.archivedRootIds().has(id));
+		for (const id of restored) {
+			const entry: ArchiveEntry = { type: "archive", ...this.#freshEntryFields(), targetId: id, archived: false };
+			this.#recordEntry(entry);
+		}
+		return restored.length;
+	}
+
+	/**
+	 * Which entries hold nothing worth reading. Shared by prune (which deletes
+	 * them) and archive (which hides them), so the two can never disagree about
+	 * what counts as empty.
+	 *
+	 * `inTree` is every id the tree walk saw; anything outside it never got a
+	 * verdict and must be left alone. Already-archived branches are outside it
+	 * too — `getTree()` hides them — so archiving a branch also shields it from
+	 * a later prune, which is the point of archiving instead of deleting.
+	 */
+	#emptyBranchVerdict(): { inTree: Set<string>; kept: Set<string>; preOrder: SessionTreeNode[] } {
+		// A reply that stopped on `toolUse` is mid-turn by construction: the model
+		// asked for a tool and the answer, if it ever came, is the reply below it.
+		// Counting it as an answer would strand every abandoned branch whose last
+		// act was a tool call — the prompt reads as answered when nothing came
+		// back. It still survives whenever a real reply hangs underneath, since
+		// the verdict propagates up from the children.
+		const isUnansweredAssistant = (entry: SessionEntry): boolean =>
+			entry.type === "message" &&
+			entry.message.role === "assistant" &&
+			(entry.message.stopReason === "error" ||
+				entry.message.stopReason === "aborted" ||
+				entry.message.stopReason === "toolUse");
+		const isAnsweringAssistant = (entry: SessionEntry): boolean =>
+			entry.type === "message" && entry.message.role === "assistant" && !isUnansweredAssistant(entry);
+		const isToolResult = (entry: SessionEntry): boolean =>
+			entry.type === "message" && entry.message.role === "toolResult";
+
+		const kept = new Set<string>();
+		for (const entry of this.getBranch()) kept.add(entry.id);
+
+		const roots = this.getTree();
+
+		// Post-order: does an answered reply sit at or below this entry? Children
+		// are visited first, so a node's verdict only reads settled state.
+		const replyBelow = new Set<string>();
+		const preOrder: SessionTreeNode[] = [];
+		const stack = [...roots];
+		while (stack.length > 0) {
+			const node = stack.pop() as SessionTreeNode;
+			preOrder.push(node);
+			for (const child of node.children) stack.push(child);
+		}
+		for (let i = preOrder.length - 1; i >= 0; i--) {
+			const node = preOrder[i] as SessionTreeNode;
+			const id = node.entry.id;
+			if (isAnsweringAssistant(node.entry) || node.children.some(child => replyBelow.has(child.entry.id))) {
+				replyBelow.add(id);
+				kept.add(id);
+			}
+		}
+
+		// Pre-order: tool results belong to the reply that called them, so they
+		// live and die with their parent rather than earning a verdict of their
+		// own — nothing answers a tool result, and it is not what you came back to
+		// the branch to read. The same pass drops the children of anything else we
+		// dropped: they would reload as orphan roots, leaving a detached stub of a
+		// message that no longer exists. A parent is always visited first, so each
+		// verdict is final when it is read.
+		for (const node of preOrder) {
+			const { id, parentId } = node.entry;
+			if (!parentId) continue;
+			if (!kept.has(parentId)) kept.delete(id);
+			else if (isToolResult(node.entry)) kept.add(id);
+		}
+
+		// Labels and archive records live outside the parent chain: they follow
+		// their target. An archive record is what hides its branch, so deleting it
+		// would silently unhide one — it stays as long as its target exists.
+		for (const entry of this.#entries) {
+			if (entry.type === "label" && kept.has(entry.targetId)) kept.add(entry.id);
+			if (entry.type === "archive" && this.#index.has(entry.targetId)) kept.add(entry.id);
+		}
+
+		// Records that are not tree nodes — the session header, the title — carry
+		// no id the tree ever sees, so a verdict was never computed for them and
+		// dropping them would take the session's own metadata with the branches.
+		const inTree = new Set<string>();
+		for (const node of preOrder) inTree.add(node.entry.id);
+
+		return { inTree, kept, preOrder };
 	}
 
 	/**
