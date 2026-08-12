@@ -3736,7 +3736,8 @@ struct LsRuntime {
 
 impl LsRuntime {
 	fn resolve(&self, path: impl AsRef<Path>) -> PathBuf {
-		let path = path.as_ref();
+		let normalized = brush_core::sys::fs::normalize_shell_path(path.as_ref());
+		let path = normalized.as_ref();
 		if path.is_absolute() { path.to_path_buf() } else { self.cwd.join(path) }
 	}
 

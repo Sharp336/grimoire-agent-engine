@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed bash utility builtins (`ls`, `cat`, `stat`, …) resolving MSYS/Cygwin-style `/c/...` paths against a phantom rooted path (`C:\c\...`) on Windows instead of the live drive, causing stale reads and lost writes. `Host::resolve` and `LsRuntime::resolve` now normalize operands through the shared shell path resolver, matching redirections ([#8355](https://github.com/can1357/oh-my-pi/issues/8355)).
+
 ## [17.2.15] - 2026-08-12
 
 ### Added

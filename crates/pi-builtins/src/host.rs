@@ -119,60 +119,21 @@ impl Host {
 	/// filesystem: the host process's current directory is unrelated to the
 	/// shell's.
 	///
-	/// On Windows, an MSYS/Cygwin-style absolute path (`/c/Users/foo`) is first
-	/// rewritten to its native form (`C:\Users\foo`) by `msys_absolute_to_windows`,
-	/// since [`Path::is_absolute`] is `false` for such paths and they would
-	/// otherwise be joined onto the cwd's drive as a phantom `C:\c\Users\foo`.
+	/// The operand is first run through
+	/// [`brush_core::sys::fs::normalize_shell_path`] — the same resolver the shell
+	/// applies to redirections — so on Windows an MSYS/Cygwin-style absolute path
+	/// (`/c/Users/foo`, `/mnt/d/...`) is rewritten to its native form
+	/// (`C:\Users\foo`, `D:\...`). Without this, [`Path::is_absolute`] is `false`
+	/// for such rooted-but-prefixless paths and they would be joined onto the
+	/// cwd's drive as a phantom `C:\c\Users\foo` (stale reads, lost writes).
 	pub fn resolve(&self, path: impl AsRef<Path>) -> PathBuf {
-		let path = path.as_ref();
-		#[cfg(windows)]
-		if let Some(native) = Self::msys_absolute_to_windows(path) {
-			return native;
-		}
+		let normalized = brush_core::sys::fs::normalize_shell_path(path.as_ref());
+		let path = normalized.as_ref();
 		if path.is_absolute() {
 			path.to_path_buf()
 		} else {
 			self.cwd.join(path)
 		}
-	}
-
-	/// On Windows, translate an MSYS/Cygwin-style absolute path (`/c/Users/foo`,
-	/// `/c`) into a native path (`C:\Users\foo`, `C:\`).
-	///
-	/// Rust's [`Path::is_absolute`] is `false` for these — they have a root but
-	/// no drive prefix — so [`Host::resolve`] would otherwise `cwd.join` them.
-	/// Joining a rooted-but-prefixless path only replaces everything *after* the
-	/// cwd's drive, so `/c/Users/foo` becomes a phantom `C:\c\Users\foo`: reads
-	/// there miss the real files and writes never reach the real path. This
-	/// mirrors the MSYS drive-letter mapping already applied to `PATH` entries by
-	/// `pi-shell`'s `translate_msys_segment`.
-	#[cfg(windows)]
-	fn msys_absolute_to_windows(path: &Path) -> Option<PathBuf> {
-		let s = path.to_str()?;
-		// Only forward-slash-rooted paths (`/c`, `/c/...`). Native paths
-		// (`C:\...`, `C:/...`) and UNC (`//server/share`, `\\server`) are left
-		// untouched for the normal `is_absolute` handling.
-		let rest = s.strip_prefix('/')?;
-		if rest.starts_with('/') {
-			return None; // `//server/share`
-		}
-		let (drive, tail) = match rest.split_once('/') {
-			Some((drive, tail)) => (drive, Some(tail)),
-			None => (rest, None),
-		};
-		let mut chars = drive.chars();
-		let letter = chars.next()?;
-		if !letter.is_ascii_alphabetic() || chars.next().is_some() {
-			return None; // not a single drive letter (e.g. `/usr/bin`, `/tmp`)
-		}
-		let mut out = String::with_capacity(s.len() + 2);
-		out.push(letter.to_ascii_uppercase());
-		out.push(':');
-		out.push('\\');
-		if let Some(tail) = tail {
-			out.push_str(&tail.replace('/', "\\"));
-		}
-		Some(PathBuf::from(out))
 	}
 
 	/// Looks up an exported shell variable.
@@ -1013,46 +974,21 @@ pub(crate) use testing::{Capture, run_util};
 
 #[cfg(all(test, windows))]
 mod msys_path_tests {
-	use std::path::{Path, PathBuf};
+	use std::path::PathBuf;
 
 	use super::Host;
 
-	fn map(p: &str) -> Option<PathBuf> {
-		Host::msys_absolute_to_windows(Path::new(p))
-	}
-
 	#[test]
-	fn drive_letter_paths_translate() {
-		assert_eq!(map("/c/Users/foo").as_deref(), Some(Path::new(r"C:\Users\foo")));
-		assert_eq!(map("/c").as_deref(), Some(Path::new(r"C:\")));
-		assert_eq!(map("/d/").as_deref(), Some(Path::new(r"D:\")));
-		// lowercase drive is upcased
-		assert_eq!(map("/z/a/b").as_deref(), Some(Path::new(r"Z:\a\b")));
-	}
-
-	#[test]
-	fn non_drive_and_native_paths_are_untouched() {
-		// native Windows paths must pass through unchanged (handled by is_absolute)
-		assert_eq!(map(r"C:\Users\foo"), None);
-		assert_eq!(map("C:/Users/foo"), None);
-		// UNC
-		assert_eq!(map("//server/share"), None);
-		// non-drive MSYS roots (resolved elsewhere, not a phantom drive)
-		assert_eq!(map("/usr/bin"), None);
-		assert_eq!(map("/tmp"), None);
-		// relative paths are not our concern here
-		assert_eq!(map("foo/bar"), None);
-		assert_eq!(map("cc/x"), None);
-	}
-
-	#[test]
-	fn resolve_uses_translation_instead_of_phantom_drive() {
+	fn resolve_rewrites_msys_drive_paths_not_phantom_drive() {
 		let (host, _capture) = Host::for_test("ls", "", r"C:\work\repo");
-		// the bug: without translation this would be C:\c\Users\foo
+		// the bug (#8355): without normalization this joined onto the cwd's drive
+		// as a phantom `C:\c\Users\foo`
 		assert_eq!(host.resolve("/c/Users/foo"), PathBuf::from(r"C:\Users\foo"));
-		// relative still joins against cwd
+		// the shared normalizer also handles `/mnt/<drive>` cygwin-mount style
+		assert_eq!(host.resolve("/mnt/d/data"), PathBuf::from(r"D:\data"));
+		// relative operands still join against the shell cwd
 		assert_eq!(host.resolve("sub/x"), PathBuf::from(r"C:\work\repo\sub\x"));
-		// native absolute still passes through
+		// native absolute paths pass through unchanged
 		assert_eq!(host.resolve(r"D:\data"), PathBuf::from(r"D:\data"));
 	}
 }
