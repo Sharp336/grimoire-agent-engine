@@ -118,6 +118,11 @@ impl Host {
 	/// Every path argument must go through this before touching the
 	/// filesystem: the host process's current directory is unrelated to the
 	/// shell's.
+	///
+	/// On Windows, an MSYS/Cygwin-style absolute path (`/c/Users/foo`) is first
+	/// rewritten to its native form (`C:\Users\foo`) by `msys_absolute_to_windows`,
+	/// since [`Path::is_absolute`] is `false` for such paths and they would
+	/// otherwise be joined onto the cwd's drive as a phantom `C:\c\Users\foo`.
 	pub fn resolve(&self, path: impl AsRef<Path>) -> PathBuf {
 		let path = path.as_ref();
 		#[cfg(windows)]
