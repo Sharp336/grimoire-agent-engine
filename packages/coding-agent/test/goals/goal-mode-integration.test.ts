@@ -93,6 +93,9 @@ async function createGoalHarness(shared: SharedFixture): Promise<GoalHarness> {
 		rebuildSystemPrompt: async () => ({ systemPrompt: ["Test"] }),
 	});
 	const mode = new InteractiveMode(session, "test");
+	session.setNewSessionTransitionReconciler(outcome =>
+		outcome.committed ? mode.reconcileModeAfterNewSession() : mode.reconcileModeAfterFailedNewSession(false),
+	);
 	const toolSession = createToolSession(tempDir.path(), settings, {
 		getGoalModeState: () => session.getGoalModeState(),
 		getGoalRuntime: () => session.goalRuntime,

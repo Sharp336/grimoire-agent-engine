@@ -4,10 +4,18 @@ import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type {
+	ExtensionActions,
+	ExtensionCommandContextActions,
+	ExtensionContextActions,
+	ExtensionUIContext,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import type { SessionSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/session-selector";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentSession, type AgentSessionConfig } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../src/config/model-registry";
 import type { CustomTool } from "../src/extensibility/custom-tools/types";
@@ -26,6 +34,28 @@ function makeTool(name: string): AgentTool {
 	};
 }
 
+function createExtensionRunnerCapture(
+	capture: (actions: ExtensionCommandContextActions | undefined) => void,
+): NonNullable<AgentSessionConfig["extensionRunner"]> {
+	return {
+		initialize(
+			_actions: ExtensionActions,
+			_contextActions: ExtensionContextActions,
+			commandActions?: ExtensionCommandContextActions,
+			_uiContext?: ExtensionUIContext,
+		): void {
+			capture(commandActions);
+		},
+		onError(_handler: (error: unknown) => void): void {},
+		emit: async (_event: unknown) => undefined,
+		hasHandlers: (_eventType: string) => false,
+		getRegisteredCommands: () => [],
+		getCommandDiagnostics: () => [],
+		getShortcuts: () => [],
+		setToolApprovalPreviewWaiter: (_waiter: (toolCallId: string) => Promise<void>) => () => {},
+	} as unknown as NonNullable<AgentSessionConfig["extensionRunner"]>;
+}
+
 const PLAN_FIRST_GUIDANCE = "## First-Response Planning Check";
 
 interface HarnessOptions {
@@ -33,6 +63,7 @@ interface HarnessOptions {
 	builtInToolNames?: Iterable<string>;
 	rebuildGate?: { fail: boolean; calls?: number };
 	xdev?: XdevState;
+	extensionRunner?: AgentSessionConfig["extensionRunner"];
 }
 
 describe("InteractiveMode plan.defaultOnStartup", () => {
@@ -116,6 +147,7 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 						};
 					}
 				: undefined,
+			extensionRunner: options.extensionRunner,
 			xdev,
 		});
 		session = createdSession;
@@ -263,6 +295,7 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		expect(created.planModeEnabled).toBe(true);
 		expect(session!.getActiveToolNames()).toEqual(["read", "write"]);
 		expect(session!.systemPrompt.join("\n")).not.toContain(PLAN_FIRST_GUIDANCE);
+		const reconcileMode = vi.spyOn(created, "reconcileModeAfterNewSession");
 
 		await created.handleClearCommand();
 
@@ -276,6 +309,123 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		expect(session!.systemPrompt.join("\n")).toContain(PLAN_FIRST_GUIDANCE);
 		expect(created.sessionManager.buildSessionContext()).toMatchObject({ messages: [], mode: "none" });
 		expect(created.sessionManager.getBranch().some(entry => entry.type === "mode_change")).toBe(false);
+		expect(reconcileMode).toHaveBeenCalledTimes(1);
+	});
+
+	it("contains a committed /new reconciliation error and completes caller teardown", async () => {
+		const created = createHarness(Settings.isolated({ "compaction.enabled": false }));
+		await created.init({ suppressWelcomeIntro: true });
+		await created.handlePlanModeCommand();
+		const priorMessage = { role: "user" as const, content: "prior turn", timestamp: Date.now() };
+		session!.agent.appendMessage(priorMessage);
+		session!.sessionManager.appendMessage(priorMessage);
+		const previousSessionFile = session!.sessionFile;
+		const failure = new Error("reconciliation failed");
+		const reconcileModeAfterNewSession = created.reconcileModeAfterNewSession.bind(created);
+		const reconcileMode = vi.spyOn(created, "reconcileModeAfterNewSession").mockImplementation(async () => {
+			await reconcileModeAfterNewSession();
+			throw failure;
+		});
+		const resetTranscript = vi.spyOn(created, "resetTranscript");
+		const newSession = session!.newSession.bind(session);
+		let newSessionResult: boolean | undefined;
+		vi.spyOn(session!, "newSession").mockImplementation(async options => {
+			newSessionResult = await newSession(options);
+			return newSessionResult;
+		});
+
+		await expect(created.handleClearCommand()).resolves.toBeUndefined();
+
+		expect(newSessionResult).toBe(true);
+		expect(reconcileMode).toHaveBeenCalledTimes(1);
+		expect(session!.sessionFile).not.toBe(previousSessionFile);
+		expect(session!.messages).toEqual([]);
+		expect(created.planModeEnabled).toBe(false);
+		expect(created.planModePaused).toBe(false);
+		expect(session!.getPlanModeState()).toBeUndefined();
+		expect(created.sessionManager.buildSessionContext()).toMatchObject({ messages: [], mode: "none" });
+		expect(resetTranscript).toHaveBeenCalledTimes(1);
+	});
+
+	it("reconciles active plan mode when an extension starts a new session", async () => {
+		let commandActions: ExtensionCommandContextActions | undefined;
+		const writeTool = makeTool("write");
+		const created = createHarness(Settings.isolated({ "compaction.enabled": false }), {
+			extraRegistryTools: [writeTool],
+			builtInToolNames: ["read", "write"],
+			rebuildGate: { fail: false },
+			extensionRunner: createExtensionRunnerCapture(actions => {
+				commandActions = actions;
+			}),
+		});
+		await created.init({ suppressWelcomeIntro: true });
+		await created.handlePlanModeCommand();
+
+		const result = await commandActions!.newSession();
+
+		expect(result).toEqual({ cancelled: false });
+		expect(created.planModeEnabled).toBe(false);
+		expect(created.planModePaused).toBe(false);
+		expect(session!.getPlanModeState()).toBeUndefined();
+		expect(session!.getActiveToolNames()).toEqual(["read"]);
+		expect(session!.systemPrompt.join("\n")).toContain(PLAN_FIRST_GUIDANCE);
+		expect(created.sessionManager.buildSessionContext()).toMatchObject({ messages: [], mode: "none" });
+	});
+
+	it("reconciles active plan mode when deleting the selected active session", async () => {
+		const writeTool = makeTool("write");
+		const created = createHarness(Settings.isolated({ "compaction.enabled": false }), {
+			extraRegistryTools: [writeTool],
+			builtInToolNames: ["read", "write"],
+			rebuildGate: { fail: false },
+		});
+		await created.init({ suppressWelcomeIntro: true });
+		await created.handlePlanModeCommand();
+		created.sessionManager.appendMessage({ role: "user", content: "delete this session", timestamp: Date.now() });
+		await created.sessionManager.flush();
+		const previousSessionFile = session!.sessionFile;
+		if (!previousSessionFile) throw new Error("Expected active session file");
+		const listedAt = new Date();
+		vi.spyOn(SessionManager, "list").mockResolvedValue([
+			{
+				path: previousSessionFile,
+				id: created.sessionManager.getSessionId(),
+				cwd: created.sessionManager.getCwd(),
+				created: listedAt,
+				modified: listedAt,
+				messageCount: 1,
+				size: 1,
+				firstMessage: "delete this session",
+				allMessagesText: "delete this session",
+			},
+		]);
+
+		const selectorReady = Promise.withResolvers<SessionSelectorComponent>();
+		vi.spyOn(created.ui, "showOverlay").mockImplementation(component => {
+			selectorReady.resolve(component as SessionSelectorComponent);
+			return {
+				hide: vi.fn(),
+				setHidden: vi.fn(),
+				isHidden: () => false,
+			} as never;
+		});
+		const deleteRequested = Promise.withResolvers<string>();
+		vi.spyOn(FileSessionStorage.prototype, "deleteSessionWithArtifacts").mockImplementation(async sessionPath => {
+			deleteRequested.resolve(sessionPath);
+		});
+
+		created.showSessionSelector();
+		const selector = await selectorReady.promise;
+		selector.handleInput("\x1b[3~");
+		selector.handleInput("\n");
+		expect(await deleteRequested.promise).toBe(previousSessionFile);
+
+		expect(session!.sessionFile).not.toBe(previousSessionFile);
+		expect(created.planModeEnabled).toBe(false);
+		expect(created.planModePaused).toBe(false);
+		expect(session!.getPlanModeState()).toBeUndefined();
+		expect(session!.getActiveToolNames()).toEqual(["read"]);
+		expect(created.sessionManager.buildSessionContext()).toMatchObject({ messages: [], mode: "none" });
 	});
 
 	it("keeps plan controller and session state aligned when /new fails before commit", async () => {
@@ -288,6 +438,10 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		});
 		await created.init({ suppressWelcomeIntro: true });
 		await created.handlePlanModeCommand();
+		const priorMessage = { role: "user" as const, content: "prior turn", timestamp: Date.now() };
+		session!.agent.appendMessage(priorMessage);
+		session!.sessionManager.appendMessage(priorMessage);
+		const previousAgentMessages = session!.messages.slice();
 		const previousSessionFile = session!.sessionFile;
 		const planTools = session!.getActiveToolNames();
 		vi.spyOn(session!.sessionManager, "newSession").mockRejectedValueOnce(new Error("new session failed"));
@@ -298,9 +452,27 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		expect(created.planModeEnabled).toBe(true);
 		expect(created.planModePaused).toBe(false);
 		expect(session!.getPlanModeState()?.enabled).toBe(true);
+		expect(session!.messages).toEqual(previousAgentMessages);
 		expect(session!.peekPlanProposalHandler()).toBeDefined();
 		expect(session!.getActiveToolNames()).toEqual(planTools);
 		expect(created.sessionManager.buildSessionContext().mode).toBe("plan");
+	});
+
+	it("runs central failure reconciliation for an early pre-commit /new error", async () => {
+		const created = createHarness(Settings.isolated({ "plan.defaultOnStartup": true, "compaction.enabled": false }));
+		await created.init({ suppressWelcomeIntro: true });
+		const failure = new Error("abort failed");
+		vi.spyOn(session!, "abort").mockRejectedValueOnce(failure);
+		const subscribe = vi.spyOn(session!.agent, "subscribe");
+		const reconcileFailure = vi.spyOn(created, "reconcileModeAfterFailedNewSession");
+
+		await expect(created.handleClearCommand()).rejects.toThrow(failure);
+
+		expect(reconcileFailure).toHaveBeenCalledTimes(1);
+		expect(reconcileFailure).toHaveBeenCalledWith(false);
+		expect(created.planModeEnabled).toBe(true);
+		expect(session!.getPlanModeState()?.enabled).toBe(true);
+		expect(subscribe).toHaveBeenCalledTimes(1);
 	});
 
 	it("preserves paused plan controller state when /new fails before commit", async () => {

@@ -930,21 +930,7 @@ export class CommandController {
 				await Bun.sleep(10);
 			}
 		}
-		const previousSessionId = this.ctx.sessionManager.getSessionId();
-		let started: boolean;
-		try {
-			started = await this.ctx.session.newSession(options);
-		} catch (error) {
-			try {
-				const replacementCommitted = this.ctx.sessionManager.getSessionId() !== previousSessionId;
-				await this.ctx.reconcileModeAfterFailedNewSession(replacementCommitted);
-			} catch (reconcileError) {
-				logger.warn("Failed to reconcile mode after new session failure", { error: String(reconcileError) });
-			}
-			throw error;
-		}
-		if (!started) return;
-		await this.ctx.reconcileModeAfterNewSession();
+		if (!(await this.ctx.session.newSession(options))) return;
 		this.ctx.resetObserverRegistry();
 		setSessionTerminalTitle(this.ctx.sessionManager.getSessionName(), this.ctx.sessionManager.getCwd());
 

@@ -242,7 +242,7 @@ import {
 	type AsyncResultEntry,
 	buildAsyncResultBatchMessage,
 } from "./async-job-delivery";
-import { BashRunner, type BashRunnerHost } from "./bash-runner";
+import { BashRunner, type BashRunnerHost, type BashSessionTransition } from "./bash-runner";
 import {
 	checkpointStartedAtFromEntry,
 	completedRewindFromEntry,
@@ -1728,6 +1728,17 @@ export class AgentSession {
 
 	setSessionSwitchReconciler(reconciler: (() => Promise<void>) | null): void {
 		this.#sessionSwitchReconciler = reconciler ?? undefined;
+	}
+
+	/**
+	 * Optional UI reconciliation at the AgentSession new-session boundary.
+	 * Headless callers leave this unset. InteractiveMode installs one callback,
+	 * so every interactive caller observes the same committed/failed outcome.
+	 */
+	#newSessionTransitionReconciler: ((outcome: { committed: boolean }) => Promise<void>) | undefined;
+
+	setNewSessionTransitionReconciler(reconciler: ((outcome: { committed: boolean }) => Promise<void>) | null): void {
+		this.#newSessionTransitionReconciler = reconciler ?? undefined;
 	}
 
 	/** Provider-scoped mutable state store for transport/session caches. */
@@ -6572,18 +6583,27 @@ export class AgentSession {
 			}
 		}
 
-		this.#disconnectFromAgent();
 		let advisorRecordersDetached = false;
-		await this.abort();
-		this.#cancelOwnAsyncJobs();
-		this.#closeAllProviderSessions("new session");
-		await this.#bash.flushPending();
-		const bashTransition = this.#bash.beginSessionTransition({ persistDetached: options?.drop !== true });
+		let bashTransition: BashSessionTransition | undefined;
 		let sessionTransitioned = false;
+		let previousAgentMessages: AgentMessage[] | undefined;
+		let reconciliationAttempted = false;
+		const reconcileNewSessionTransition = async (committed: boolean): Promise<void> => {
+			if (reconciliationAttempted) return;
+			reconciliationAttempted = true;
+			await this.#newSessionTransitionReconciler?.({ committed });
+		};
 		try {
+			this.#disconnectFromAgent();
+			await this.abort();
+			this.#cancelOwnAsyncJobs();
+			this.#closeAllProviderSessions("new session");
+			await this.#bash.flushPending();
+			bashTransition = this.#bash.beginSessionTransition({ persistDetached: options?.drop !== true });
 			advisorRecordersDetached = true;
 			await this.#advisors.drainAndDetachRecorders();
 			try {
+				previousAgentMessages = this.agent.state.messages.slice();
 				this.agent.reset();
 				if (options?.drop && previousSessionFile) {
 					try {
@@ -6598,12 +6618,14 @@ export class AgentSession {
 					...options,
 					additionalDirectories: this.settings.get("workspace.additionalDirectories"),
 				});
+				sessionTransitioned = true;
+				previousAgentMessages = undefined;
 				this.#bash.markSessionTransition(bashTransition);
 				// The new session owns the transcript from here, so the previous
 				// conversation's advisor spend is retired with it. Clearing at the commit
 				// point keeps the status line honest even if a later step below throws.
 				this.#advisors.clearCost();
-				sessionTransitioned = true;
+				// The session manager has committed the replacement transcript.
 				// Transient plan and goal states belong to the outgoing transcript. Clear them only
 				// after the session manager commits the replacement. A pre-commit failure
 				// keeps the outgoing session's post-abort mode state in place.
@@ -6613,7 +6635,10 @@ export class AgentSession {
 				this.#goalRuntime.clearAccounting();
 				this.#goalTurnCounter = 0;
 			} finally {
-				this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
+				if (bashTransition) {
+					this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
+					bashTransition = undefined;
+				}
 			}
 
 			this.#clearSessionScopedToolState();
@@ -6650,13 +6675,37 @@ export class AgentSession {
 					previousSessionFile,
 				});
 			}
-
+			try {
+				await reconcileNewSessionTransition(true);
+			} catch (reconcileError) {
+				logger.warn("Failed to reconcile mode after new session", {
+					error: String(reconcileError),
+				});
+			}
 			return true;
+		} catch (error) {
+			if (!sessionTransitioned && previousAgentMessages) {
+				this.agent.replaceMessages(previousAgentMessages);
+			}
+			if (this.#newSessionTransitionReconciler) {
+				try {
+					await reconcileNewSessionTransition(sessionTransitioned);
+				} catch (reconcileError) {
+					logger.warn("Failed to reconcile mode after new session failure", {
+						error: String(reconcileError),
+					});
+				}
+			}
+			throw error;
 		} finally {
 			if (advisorRecordersDetached) {
 				if (sessionTransitioned) this.#advisors.resetSessionState();
 				else this.#advisors.reattachRecorderFeeds();
 			}
+			if (bashTransition && !sessionTransitioned) {
+				this.#bash.finishSessionTransition(bashTransition, false);
+			}
+			this.#reconnectToAgent();
 		}
 	}
 
