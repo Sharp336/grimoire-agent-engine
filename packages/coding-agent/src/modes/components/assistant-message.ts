@@ -197,6 +197,9 @@ function isStructuredThinkingResult(
 interface ThinkingRendererCache {
 	text: string;
 	responseId: string | undefined;
+	api: AssistantMessage["api"];
+	provider: AssistantMessage["provider"];
+	model: string;
 	itemId: string | undefined;
 	thinkingSignature: string | undefined;
 	entries: Array<{ result: AssistantThinkingRenderResult; dirty: boolean } | undefined>;
@@ -291,6 +294,7 @@ export class AssistantMessageComponent extends Container {
 	#visibleThinkingUsesRenderers = false;
 	#thinkingRenderRefreshQueued = false;
 	#thinkingRendererCache = new Map<string, ThinkingRendererCache>();
+	#disposed = false;
 	#thinkingRendererCacheTimestamp: number | undefined;
 
 	#textColorTransform?: (text: string) => string;
@@ -365,6 +369,9 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	override dispose(): void {
+		if (this.#disposed) return;
+		this.#disposed = true;
+		this.#thinkingRendererCache.clear();
 		this.#stopThinkingAnimation();
 		super.dispose();
 	}
@@ -709,6 +716,7 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	#requestThinkingRender(rerunRenderers: boolean): void {
+		if (this.#disposed) return;
 		if (!rerunRenderers) {
 			this.onImageUpdate?.();
 			return;
@@ -716,6 +724,10 @@ export class AssistantMessageComponent extends Container {
 		if (this.#thinkingRenderRefreshQueued) return;
 		this.#thinkingRenderRefreshQueued = true;
 		queueMicrotask(() => {
+			if (this.#disposed) {
+				this.#thinkingRenderRefreshQueued = false;
+				return;
+			}
 			try {
 				if (this.#lastMessage) {
 					this.#fastPathKey = undefined;
@@ -748,12 +760,18 @@ export class AssistantMessageComponent extends Container {
 			!cache ||
 			cache.text !== text ||
 			cache.responseId !== message.responseId ||
+			cache.api !== message.api ||
+			cache.provider !== message.provider ||
+			cache.model !== message.model ||
 			cache.itemId !== content.itemId ||
 			cache.thinkingSignature !== content.thinkingSignature
 		) {
 			cache = {
 				text,
 				responseId: message.responseId,
+				api: message.api,
+				provider: message.provider,
+				model: message.model,
 				itemId: content.itemId,
 				thinkingSignature: content.thinkingSignature,
 				entries: [],
@@ -879,6 +897,9 @@ export class AssistantMessageComponent extends Container {
 						!cache ||
 						cache.text !== display.text ||
 						cache.responseId !== message.responseId ||
+						cache.api !== message.api ||
+						cache.provider !== message.provider ||
+						cache.model !== message.model ||
 						cache.itemId !== content.itemId ||
 						cache.thinkingSignature !== content.thinkingSignature
 					) {

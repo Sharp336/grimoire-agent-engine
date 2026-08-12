@@ -400,9 +400,33 @@ describe("AssistantMessageComponent thinking renderers", () => {
 		expect(rendered).not.toContain("pending signature");
 	});
 
+	it("reruns renderers when the effective provider model changes", () => {
+		const models: string[] = [];
+		const componentMessage: AssistantMessage = {
+			...createAssistantMessage(""),
+			content: [{ type: "thinking", thinking: "Stable thinking." }],
+		};
+		const component = new AssistantMessageComponent(componentMessage, false, undefined, [
+			context => {
+				models.push(context.message.model);
+				return new Text(context.message.model, 1, 0);
+			},
+		]);
+
+		component.updateContent({
+			...componentMessage,
+			model: "claude-opus-4-8",
+		});
+
+		const rendered = Bun.stripANSI(component.render(120).join("\n"));
+		expect(models).toEqual(["claude-sonnet-4-5", "claude-opus-4-8"]);
+		expect(rendered).toContain("claude-opus-4-8");
+		expect(rendered).not.toContain("claude-sonnet-4-5");
+	});
 	it("mounts a replacement when an async renderer becomes ready after streaming stops", async () => {
 		let ready = false;
 		let renderRequests = 0;
+
 		let rendererCalls = 0;
 		let requestRender: (() => void) | undefined;
 		const component = new AssistantMessageComponent(
@@ -436,6 +460,31 @@ describe("AssistantMessageComponent thinking renderers", () => {
 		expect(rendererCalls).toBe(2);
 		expect(rendered).toContain("redacted 25");
 		expect(rendered).not.toContain("Sensitive async thinking.");
+	});
+	it("ignores late renderer refreshes after disposal", async () => {
+		let rendererCalls = 0;
+		let requestRender: (() => void) | undefined;
+		const component = new AssistantMessageComponent(
+			{
+				...createAssistantMessage(""),
+				content: [{ type: "thinking", thinking: "Pending thinking." }],
+			},
+			false,
+			undefined,
+			[
+				context => {
+					rendererCalls += 1;
+					requestRender = context.requestRender;
+					return undefined;
+				},
+			],
+		);
+
+		component.dispose();
+		requestRender?.();
+		await Promise.resolve();
+
+		expect(rendererCalls).toBe(1);
 	});
 
 	it("does not invoke extension renderers when thinking is hidden", () => {
