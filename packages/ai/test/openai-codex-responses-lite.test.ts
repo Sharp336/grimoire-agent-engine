@@ -161,6 +161,15 @@ describe("openai-codex optional response controls", () => {
 
 		expect(transformed.reasoning).toEqual({ summary: "detailed" });
 	});
+
+	it("omits unsupported summary-only requests without emitting an empty reasoning object", async () => {
+		const model = createCodexModel("gpt-5.3-codex");
+		const transformed = await transformRequestBody({ model: model.id }, model, {
+			reasoningSummary: "detailed",
+		});
+
+		expect(transformed.reasoning).toBeUndefined();
+	});
 	it("omits reasoning.summary when explicitly suppressed", async () => {
 		const model = createCodexModel("gpt-5.5");
 		const suppressed = await transformRequestBody({ model: model.id }, model, {

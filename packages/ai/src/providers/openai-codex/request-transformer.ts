@@ -455,20 +455,24 @@ export async function transformRequestBody(
 		applyCodexResponsesLiteShape(body);
 	}
 
+	const reasoningSummary =
+		options.reasoningSummary != null &&
+		model.compat.supportsReasoningSummary !== false &&
+		supportsCodexReasoningSummary(model.id)
+			? options.reasoningSummary
+			: undefined;
 	if (
 		options.reasoningOff ||
 		options.reasoningEffort !== undefined ||
-		options.reasoningSummary != null ||
+		reasoningSummary !== undefined ||
 		responsesLite
 	) {
 		const reasoningConfig: Partial<ReasoningConfig> = options.reasoningOff
 			? { effort: "none" }
 			: options.reasoningEffort !== undefined
 				? getReasoningConfig(model, options.reasoningEffort, options)
-				: options.reasoningSummary != null &&
-						model.compat.supportsReasoningSummary !== false &&
-						supportsCodexReasoningSummary(model.id)
-					? { summary: options.reasoningSummary }
+				: reasoningSummary !== undefined
+					? { summary: reasoningSummary }
 					: {};
 		body.reasoning = {
 			...body.reasoning,
