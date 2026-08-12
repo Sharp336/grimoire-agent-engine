@@ -39,7 +39,7 @@ interface PromptOptions {
 	settings?: Settings;
 	taskDepth?: number;
 	newSessionAfterCreate?: boolean;
-	exitStartupPlanModeBeforeNewSession?: boolean;
+	activeTransientModesBeforeNewSession?: boolean;
 	activePlanModeAfterCreate?: boolean;
 	enableStartupDefaultAfterCreate?: boolean;
 	toolNames?: string[];
@@ -66,7 +66,7 @@ describe("createAgentSession plan-first suggestions", () => {
 		await sharedDir.remove();
 	});
 
-	async function assembledPrompt(options: PromptOptions = {}): Promise<string> {
+	async function assembledPromptSnapshot(options: PromptOptions = {}) {
 		const cwd = sharedDir.path();
 		const sessionManager = SessionManager.inMemory(cwd);
 		if (options.existingSession) {
@@ -102,9 +102,22 @@ describe("createAgentSession plan-first suggestions", () => {
 			workspaceTree: { rootPath: cwd, rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] },
 		});
 		try {
-			if (options.exitStartupPlanModeBeforeNewSession) {
+			if (options.activeTransientModesBeforeNewSession) {
+				const now = Date.now();
 				session.setPlanModeState({ enabled: true, planFilePath: "local://PLAN.md" });
-				session.setPlanModeState(undefined);
+				session.setGoalModeState({
+					enabled: true,
+					mode: "active",
+					goal: {
+						id: "goal-before-new-session",
+						objective: "Finish the prior session",
+						status: "active",
+						tokensUsed: 0,
+						timeUsedSeconds: 0,
+						createdAt: now,
+						updatedAt: now,
+					},
+				});
 			}
 			if (options.newSessionAfterCreate) {
 				await session.newSession();
@@ -120,10 +133,18 @@ describe("createAgentSession plan-first suggestions", () => {
 				session.setPlanModeState({ enabled: true, planFilePath: "local://PLAN.md" });
 				await session.refreshBaseSystemPrompt();
 			}
-			return session.systemPrompt.join("\n\n");
+			return {
+				prompt: session.systemPrompt.join("\n\n"),
+				planModeState: session.getPlanModeState(),
+				goalModeState: session.getGoalModeState(),
+			};
 		} finally {
 			await session.dispose();
 		}
+	}
+
+	async function assembledPrompt(options: PromptOptions = {}): Promise<string> {
+		return (await assembledPromptSnapshot(options)).prompt;
 	}
 
 	it("includes the first-response classification and exact questionnaire contract by default", async () => {
@@ -314,14 +335,16 @@ describe("createAgentSession plan-first suggestions", () => {
 		expect(await assembledPrompt({ existingSession: true, newSessionAfterCreate: true })).toContain(GUIDANCE_HEADING);
 	});
 
-	it("includes plan-first guidance after startup-default plan mode exits and /new starts a fresh session", async () => {
-		expect(
-			await assembledPrompt({
-				settings: Settings.isolated({ "plan.defaultOnStartup": true }),
-				exitStartupPlanModeBeforeNewSession: true,
-				newSessionAfterCreate: true,
-			}),
-		).toContain(GUIDANCE_HEADING);
+	it("clears startup plan and goal state on direct /new so plan-first guidance returns", async () => {
+		const snapshot = await assembledPromptSnapshot({
+			settings: Settings.isolated({ "plan.defaultOnStartup": true }),
+			activeTransientModesBeforeNewSession: true,
+			newSessionAfterCreate: true,
+		});
+
+		expect(snapshot.planModeState).toBeUndefined();
+		expect(snapshot.goalModeState).toBeUndefined();
+		expect(snapshot.prompt).toContain(GUIDANCE_HEADING);
 	});
 
 	it("preserves current-session guidance when the next-session startup default is enabled", async () => {

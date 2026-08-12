@@ -6604,6 +6604,14 @@ export class AgentSession {
 				// point keeps the status line honest even if a later step below throws.
 				this.#advisors.clearCost();
 				sessionTransitioned = true;
+				// Transient plan and goal states belong to the outgoing transcript. Clear them only
+				// after the session manager commits the replacement. A pre-commit failure
+				// keeps the outgoing session's post-abort mode state in place.
+				this.setPlanModeState(undefined);
+				this.setPlanProposalHandler(null);
+				this.setGoalModeState(undefined);
+				this.#goalRuntime.clearAccounting();
+				this.#goalTurnCounter = 0;
 			} finally {
 				this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
 			}
