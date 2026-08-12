@@ -7,6 +7,8 @@
   "exports": { ".": "./src/index.ts" },
   "dependencies": {
     "@ompd/acp": "workspace:*",
-    "@ompd/core": "workspace:*"
+    "@ompd/core": "workspace:*",
+    "@ompd/tunnel": "workspace:*",
+    "@oh-my-pi/pi-coding-agent": "catalog:"
   }
 }

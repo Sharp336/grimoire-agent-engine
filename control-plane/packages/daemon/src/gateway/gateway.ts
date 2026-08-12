@@ -205,8 +205,58 @@ interface SocketState {
    */
   said: Map<AgentId, number>;
   bucket: TokenBucket;
+  /**
+   * Set when this device is revoked while the connection is live.
+   *
+   * Revocation is already enforced on every privileged call, because the
+   * supervisor re-reads the device row before honouring one. What that misses
+   * is a connection that has already attached and is only reading: it reaches
+   * no supervisor call, so nothing re-checks it. This flag is what closes that
+   * gap, and it closes it the same way for every transport.
+   *
+   * A flag rather than closing the socket, because `stop(true)` deadlocks on
+   * Bun 1.3.4 if a socket was closed here first, as the note on `close` below
+   * records. An inert socket is as good: it accepts no frame and is pushed
+   * nothing.
+   */
+  revoked: boolean;
   voice: VoiceHandler | null;
 }
+
+/**
+ * What the frame handler needs from a connection.
+ *
+ * A real `ServerWebSocket<SocketState>` satisfies this, and so does a tunnel
+ * session, which is the point: one handler, one set of scope checks, and no
+ * second authorization surface that can drift from this one.
+ *
+ * Deliberately structural in the transport and not in the payload. `data` stays
+ * `SocketState` so every check below still reads a known shape; widening that
+ * toward a loose record is how a scope check quietly starts trusting whatever
+ * the caller put there.
+ */
+export interface GatewaySocket {
+  data: SocketState;
+  send(data: string): unknown;
+  close(code?: number, reason?: string): void;
+}
+
+/**
+ * A live tunnel session, or the reason there is not one.
+ *
+ * The refusal reasons mirror `AuthVerdict` rather than flattening to a
+ * boolean, because the tunnel audits which door closed and "unknown token"
+ * and "revoked device" call for different responses from an operator.
+ */
+export type TunnelSessionResult =
+  | {
+      ok: true;
+      deviceId: string;
+      /** Hand one decrypted client frame to the shared handler. */
+      deliver(raw: string): void;
+      close(): void;
+    }
+  | { ok: false; reason: "unknown" | "revoked" };
 
 export class Gateway {
   #sup: Supervisor;
@@ -227,8 +277,9 @@ export class Gateway {
   #startedAtMs: number | undefined;
 
   #server: Server<SocketState> | undefined;
-  #sockets = new Set<ServerWebSocket<SocketState>>();
+  #sockets = new Set<GatewaySocket>();
   #unsubscribeSay: (() => void) | undefined;
+  #unsubscribeRevoked: (() => void) | undefined;
   #unsubscribe: (() => void) | undefined;
 
   constructor(opts: GatewayOptions) {
@@ -285,6 +336,23 @@ export class Gateway {
         this.#send(ws, { t: "say", agentId: event.agentId, seq: event.seq, text: event.text });
       }
     });
+
+    // Revocation is already enforced on every privileged call: the supervisor
+    // re-reads the device row before honouring one. What that does not cover is
+    // a socket that has already attached and is only reading, which reaches no
+    // supervisor call and so re-checks nothing. Dropping the connection closes
+    // that gap, and it closes it for every transport at once rather than for
+    // whichever one remembered to ask.
+    this.#unsubscribeRevoked = this.#auth.onRevoked((deviceId) => {
+      for (const ws of [...this.#sockets]) {
+        if (ws.data.deviceId !== deviceId) continue;
+        ws.data.revoked = true;
+        this.#send(ws, { t: "error", code: "unauthorized", message: "this device has been revoked" });
+        // Dropped from the push set so nothing further is streamed to it, and
+        // left open rather than closed: see the note on `revoked`.
+        this.#sockets.delete(ws);
+      }
+    });
   }
 
   /** Start serving. Returns the bound port, which matters when `port` was 0. */
@@ -314,6 +382,8 @@ export class Gateway {
     this.#unsubscribe = undefined;
     this.#unsubscribeSay?.();
     this.#unsubscribeSay = undefined;
+    this.#unsubscribeRevoked?.();
+    this.#unsubscribeRevoked = undefined;
     for (const ws of this.#sockets) {
       void ws.data.voice?.close();
       ws.data.voice = null;
@@ -340,6 +410,77 @@ export class Gateway {
    */
   approvePairing(code: string, scopes: string[]): string {
     return this.#auth.approvePairing(code, scopes);
+  }
+
+  /**
+   * Admit a connection that arrived over a tunnel rather than over the port.
+   *
+   * The whole point is that this is not a second authorization surface. The
+   * token goes to the same `authenticate` a local websocket uses, the identity
+   * comes only from that verdict, and every frame afterwards runs the same
+   * handler with the same scope checks. A caller cannot name a device, cannot
+   * choose a scope, and cannot skip a check, because none of those are
+   * parameters.
+   *
+   * Returns a refusal rather than throwing: the tunnel needs to say which door
+   * closed so the daemon can audit it, and an exception collapses that back to
+   * one outcome.
+   */
+  acceptTunnelSession(token: string, send: (raw: string) => void): TunnelSessionResult {
+    const verdict = this.#auth.authenticate(token);
+    if (!verdict.ok) {
+      switch (verdict.reason) {
+        case "unknown":
+          return { ok: false, reason: "unknown" };
+        case "revoked":
+          return { ok: false, reason: "revoked" };
+        default: {
+          // A variant added later must break the build here rather than fall
+          // through into an accidental admission.
+          const exhaustive: never = verdict.reason;
+          throw new Error(`unhandled auth verdict ${String(exhaustive)}`);
+        }
+      }
+    }
+
+    const ws: GatewaySocket = {
+      data: this.#socketStateFor(verdict.actor),
+      send,
+      close: () => {
+        this.#close(ws);
+      },
+    };
+    this.#open(ws);
+    return {
+      ok: true,
+      deviceId: verdict.actor.deviceId,
+      deliver: (raw) => {
+        this.#message(ws, raw);
+      },
+      close: () => {
+        this.#close(ws);
+      },
+    };
+  }
+
+  /**
+   * The one place a `SocketState` is built.
+   *
+   * Both transports come through here, so scopes are resolved from the device
+   * row exactly once and neither transport can supply its own.
+   */
+  #socketStateFor(actor: Actor): SocketState {
+    return {
+      deviceId: actor.deviceId,
+      scopes: new Set(actor.scopes),
+      attached: new Set(),
+      delivered: new Map(),
+      approvals: new Map(),
+      said: new Map(),
+      bucket: new TokenBucket({ capacity: RATE_BURST, refillPerSecond: RATE_PER_SECOND }),
+      revoked: false,
+      voice: null,
+    };
   }
 
   /**
@@ -442,16 +583,7 @@ export class Gateway {
       const actor = token === null ? null : this.#auth.resolveActor(token);
       if (!actor) return new Response("unauthorized", { status: 401 });
 
-      const data: SocketState = {
-        deviceId: actor.deviceId,
-        scopes: new Set(actor.scopes),
-        attached: new Set(),
-        delivered: new Map(),
-        approvals: new Map(),
-        said: new Map(),
-        bucket: new TokenBucket({ capacity: RATE_BURST, refillPerSecond: RATE_PER_SECOND }),
-        voice: null,
-      };
+      const data = this.#socketStateFor(actor);
       if (server.upgrade(req, { data })) return undefined;
       return new Response("expected a websocket upgrade", { status: 426 });
     }
@@ -879,7 +1011,7 @@ export class Gateway {
 
   // -- websocket -------------------------------------------------------------
 
-  #open(ws: ServerWebSocket<SocketState>): void {
+  #open(ws: GatewaySocket): void {
     this.#sockets.add(ws);
     if (this.#voice) ws.data.voice = this.#voice((frame) => this.#send(ws, frame), this.#actorOf(ws));
     this.#send(ws, {
@@ -889,13 +1021,17 @@ export class Gateway {
     });
   }
 
-  #close(ws: ServerWebSocket<SocketState>): void {
+  #close(ws: GatewaySocket): void {
     this.#sockets.delete(ws);
     void ws.data.voice?.close();
     ws.data.voice = null;
   }
 
-  #message(ws: ServerWebSocket<SocketState>, message: string | Buffer): void {
+  #message(ws: GatewaySocket, message: string | Buffer): void {
+    if (ws.data.revoked) {
+      this.#send(ws, { t: "error", code: "unauthorized", message: "this device has been revoked" });
+      return;
+    }
     if (!ws.data.bucket.take()) {
       this.#send(ws, { t: "error", code: "rate_limited", message: "too many frames" });
       return;
@@ -939,7 +1075,7 @@ export class Gateway {
     }
   }
 
-  #handle(ws: ServerWebSocket<SocketState>, frame: ClientFrame, frameType: string): void {
+  #handle(ws: GatewaySocket, frame: ClientFrame, frameType: string): void {
     switch (frame.t) {
       case "ping":
         this.#send(ws, { t: "pong" });
@@ -1104,12 +1240,12 @@ export class Gateway {
    * Revocation mid-session is still honoured because every privileged call this
    * feeds re-reads the device row and rejects a revoked one.
    */
-  #actorOf(ws: ServerWebSocket<SocketState>): Actor {
+  #actorOf(ws: GatewaySocket): Actor {
     return { deviceId: ws.data.deviceId, scopes: [...ws.data.scopes] };
   }
 
   #deliverUpdate(
-    ws: ServerWebSocket<SocketState>,
+    ws: GatewaySocket,
     agentId: AgentId,
     seq: number,
     update: unknown,
@@ -1132,7 +1268,7 @@ export class Gateway {
    * again while a duplicate attach cannot.
    */
   #deliverApproval(
-    ws: ServerWebSocket<SocketState>,
+    ws: GatewaySocket,
     approval: Omit<PendingApproval, "resolve">,
   ): void {
     let sent = ws.data.approvals.get(approval.agentId);
@@ -1152,7 +1288,7 @@ export class Gateway {
     });
   }
 
-  #send(ws: ServerWebSocket<SocketState>, frame: ServerFrame): void {
+  #send(ws: GatewaySocket, frame: ServerFrame): void {
     try {
       ws.send(JSON.stringify(frame));
     } catch {

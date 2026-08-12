@@ -77,6 +77,22 @@ export interface RotationResult {
   revoked: number;
 }
 
+/**
+ * Why a presented token is or is not a credential.
+ *
+ * `resolveActor` answers this question with a null, which is all a bearer
+ * check needs and strictly less than an operator needs: "the phone stopped
+ * working" has a different answer depending on whether that token was never
+ * real or was withdrawn on purpose. Only `ok` carries an `Actor`, so a caller
+ * cannot read an identity off a refusal even by mistake.
+ */
+export type AuthVerdict =
+  | { ok: true; actor: Actor }
+  | { ok: false; reason: "unknown" | "revoked" };
+
+/** Notified after a device is revoked, so live connections can be dropped. */
+export type RevocationListener = (deviceId: string) => void;
+
 /** Thrown when a pairing code is unknown, already used, or expired. */
 export class PairingError extends Error {
   constructor(message: string) {
@@ -112,11 +128,32 @@ export class DeviceAuth {
    */
   #touchedAtMs = new Map<string, number>();
 
+  /**
+   * Notified after a revocation lands, so whoever holds live connections for
+   * that device can drop them.
+   *
+   * Revocation is already enforced on every privileged call, because the
+   * supervisor re-reads the device row before honouring one. What that does
+   * not cover is a connection that has already attached and is only reading:
+   * no supervisor call, so nothing re-checks. Closing the connection is the
+   * symmetric fix, and it belongs here rather than in one transport so that
+   * every transport gets it.
+   */
+  #revocationListeners = new Set<RevocationListener>();
+
   constructor(opts: DeviceAuthOptions) {
     this.#store = opts.store;
     this.#pairingTtlMs = opts.pairingTtlMs ?? DEFAULT_PAIRING_TTL_MS;
     this.#touchIntervalMs = opts.touchIntervalMs ?? TOUCH_INTERVAL_MS;
     this.#now = opts.now ?? Date.now;
+  }
+
+  /** Subscribe to revocations. The returned function unsubscribes. */
+  onRevoked(listener: RevocationListener): () => void {
+    this.#revocationListeners.add(listener);
+    return () => {
+      this.#revocationListeners.delete(listener);
+    };
   }
 
   /**
@@ -237,13 +274,13 @@ export class DeviceAuth {
   }
 
   /**
-   * Resolve a presented bearer token to an actor.
+   * Resolve a presented bearer token to an actor, or say why not.
    *
-   * Four ways to be refused, all of them a plain null: the token was never
-   * issued, its row has been revoked, its device is gone, or its device has
-   * been revoked. Scopes come from the device row, never from the token, so
-   * narrowing a device narrows every credential it holds without reissuing
-   * anything.
+   * The one implementation both the local websocket and the tunnel run, so
+   * there is exactly one answer to "is this a credential" and no second copy
+   * to drift. Scopes come from the device row, never from the token and never
+   * from whatever transport carried it, so narrowing a device narrows every
+   * credential it holds without reissuing anything.
    *
    * The store is the source of truth on every call. There is no resolution
    * cache: the lookup is one indexed read of a local file, while a cache would
@@ -251,15 +288,30 @@ export class DeviceAuth {
    * honouring a credential an operator had already withdrawn. The cost worth
    * avoiding here is the write, and that is what the touch throttle is for.
    */
-  resolveActor(token: string): Actor | null {
+  authenticate(token: string): AuthVerdict {
     const row = this.#store.findAuthTokenByHash(hashToken(token));
-    if (!row || row.revokedAt !== undefined) return null;
+    if (!row) return { ok: false, reason: "unknown" };
+    if (row.revokedAt !== undefined) return { ok: false, reason: "revoked" };
 
     const device = this.#store.getDevice(row.deviceId);
-    if (!device || device.revokedAt) return null;
+    // A token row whose device row is gone is not a withdrawal an operator
+    // performed, so it is not reported as one.
+    if (!device) return { ok: false, reason: "unknown" };
+    if (device.revokedAt) return { ok: false, reason: "revoked" };
 
     this.#touch(row);
-    return { deviceId: device.id, scopes: device.scopes };
+    return { ok: true, actor: { deviceId: device.id, scopes: device.scopes } };
+  }
+
+  /**
+   * The bearer-check shape: an actor, or null for every way of being refused.
+   *
+   * Kept exactly as it was for existing callers. `authenticate` is where the
+   * distinction lives for anyone who needs it.
+   */
+  resolveActor(token: string): Actor | null {
+    const verdict = this.authenticate(token);
+    return verdict.ok ? verdict.actor : null;
   }
 
   /**
@@ -279,7 +331,13 @@ export class DeviceAuth {
     return device !== null && device.revokedAt === undefined;
   }
 
-  /** Revoke a device. The store withdraws its tokens in the same transaction. */
+  /**
+   * Revoke a device. The store withdraws its tokens in the same transaction.
+   *
+   * Listeners run after the write, so anything they close is already unable to
+   * authenticate again. A listener that throws must not leave the revocation
+   * half-announced, which is the one thing worse than not announcing it.
+   */
   revoke(deviceId: string): void {
     this.#store.revokeDevice(deviceId);
     for (const row of this.#store.listAuthTokens(deviceId)) this.#touchedAtMs.delete(row.id);
@@ -289,6 +347,14 @@ export class DeviceAuth {
       outcome: "ok",
       detail: {},
     });
+    for (const listener of this.#revocationListeners) {
+      try {
+        listener(deviceId);
+      } catch {
+        // A transport that failed to close its own connection cannot undo the
+        // revocation, and must not stop the next transport from closing its.
+      }
+    }
   }
 
   /** Pending pairing codes, for an operator listing what is waiting. */

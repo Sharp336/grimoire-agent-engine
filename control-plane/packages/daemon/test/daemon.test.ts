@@ -31,7 +31,13 @@ import {
   loadConfig,
   type OmpdOptions,
 } from "../src/daemon.ts";
-import { base64ToPcm, pcmToBase64, type SttEngine, type TtsEngine } from "../src/voice/index.ts";
+import {
+  base64ToPcm,
+  pcmToBase64,
+  type PcmAudio,
+  type SttEngine,
+  type TtsEngine,
+} from "../src/voice/index.ts";
 import { createFakeHost } from "./fake-host.ts";
 
 const scratch: string[] = [];
@@ -69,16 +75,16 @@ afterEach(async () => {
 });
 
 describe("config", () => {
-  test("defaults to loopback, 7777, standard policy, awake while working", () => {
+  test("defaults to loopback, 7777, standard policy, awake while working, no hub", () => {
     expect(loadConfig(tempDir("ompd-cfg-"))).toEqual({
       host: "127.0.0.1",
       port: 7777,
       policyMode: "standard",
       ompPath: "omp",
       keepAwake: true,
-      // Empty means "let the engine probe decide", which is the only default
-      // that cannot point at a model file this machine does not have.
-      whisperModel: "",
+      // Empty by default: dialing out to a hub publishes this machine to
+      // whoever holds a paired token, so it stays a deliberate edit.
+      hubUrl: "",
     });
   });
 
@@ -816,7 +822,8 @@ describe("voice wiring", () => {
     // Never reached here: the prompt fails before anything is spoken back.
     const tts: TtsEngine = {
       name: "test",
-      synthesize: () => Promise.resolve({ pcm: new Int16Array(0), sampleRate: 16_000 }),
+      // Yields nothing: the prompt fails before synthesis is reached.
+      async *stream(): AsyncIterable<PcmAudio> {},
     };
     const daemon = build(home, { voice: true, stt, tts });
     const info = await daemon.start();
@@ -859,11 +866,13 @@ describe("voice wiring", () => {
       stt: { name: "test", transcribe: () => Promise.resolve("what is the status") },
       tts: {
         name: "test",
-        synthesize: (text) => {
-          spoken.push(text);
-          // One sample per character, so the frame's length identifies which
-          // text was synthesised without decoding it.
-          return Promise.resolve({ pcm: new Int16Array(text.length).fill(1), sampleRate: 16_000 });
+        async *stream(segments: Iterable<string>): AsyncIterable<PcmAudio> {
+          for (const segment of segments) {
+            spoken.push(segment);
+            // One sample per character, so the frame's length identifies which
+            // text was synthesised without decoding it.
+            yield { pcm: new Int16Array(segment.length).fill(1), sampleRate: 16_000 };
+          }
         },
       },
     });
@@ -918,9 +927,11 @@ describe("voice wiring", () => {
       stt: { name: "test", transcribe: () => Promise.resolve("out loud") },
       tts: {
         name: "test",
-        synthesize: (text) => {
-          synthesised.push(text);
-          return Promise.resolve({ pcm: new Int16Array(8).fill(1), sampleRate: 16_000 });
+        async *stream(segments: Iterable<string>): AsyncIterable<PcmAudio> {
+          for (const segment of segments) {
+            synthesised.push(segment);
+            yield { pcm: new Int16Array(8).fill(1), sampleRate: 16_000 };
+          }
         },
       },
     });
@@ -972,8 +983,16 @@ describe("voice wiring", () => {
       stt: { name: "test", transcribe: () => Promise.resolve("say something") },
       tts: {
         name: "test",
-        synthesize: () =>
-          Promise.resolve({ pcm: new Int16Array(engineRate * seconds).fill(1000), sampleRate: engineRate }),
+        async *stream(segments: Iterable<string>): AsyncIterable<PcmAudio> {
+          // One second per segment, so the assertion below is about the rate
+          // conversion and not about how the reply happened to be segmented.
+          for (const _segment of segments) {
+            yield {
+              pcm: new Int16Array(engineRate * seconds).fill(1000),
+              sampleRate: engineRate,
+            };
+          }
+        },
       },
     });
     const info = await daemon.start();
@@ -1015,7 +1034,11 @@ describe("voice wiring", () => {
       stt: { name: "test", transcribe: () => Promise.resolve("take your time") },
       tts: {
         name: "test",
-        synthesize: () => Promise.resolve({ pcm: new Int16Array(16).fill(1), sampleRate: 16_000 }),
+        async *stream(segments: Iterable<string>): AsyncIterable<PcmAudio> {
+          for (const _segment of segments) {
+            yield { pcm: new Int16Array(16).fill(1), sampleRate: 16_000 };
+          }
+        },
       },
     });
     const info = await daemon.start();

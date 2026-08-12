@@ -43,7 +43,10 @@ import {
   type Device,
   type ServerFrame,
 } from "@ompd/core";
+import type { TunnelDaemon } from "@ompd/tunnel";
 import { SleepGuard, type AwakeProcess } from "./awake.ts";
+import { createTunnelDialer } from "./tunnel/dial.ts";
+import { loadIdentity } from "./tunnel/identity.ts";
 import { EvolutionEngine, ProposalStore } from "./evolution/index.ts";
 import { Gateway, GatewayEvents, type VoiceHandler } from "./gateway/index.ts";
 import { homeIdFor } from "./home-id.ts";
@@ -52,7 +55,7 @@ import { ContainerBackend, HostProvisioner, LocalBackend } from "./provisioner/i
 import { Scheduler } from "./routines/index.ts";
 import { Supervisor } from "./supervisor.ts";
 import {
-  sanitizeForSpeech,
+  speakableSegments,
   selectSttEngine,
   selectTtsEngine,
   VoiceBridge,
@@ -136,16 +139,13 @@ export interface OmpdConfig {
    */
   keepAwake: boolean;
   /**
-   * ggml weights for `whisper-cli`, used only when OMP exposes no one-shot
-   * transcription verb of its own.
+   * Hub to dial out to, or empty for none.
    *
-   * whisper.cpp ships no default weights, so without a path the engine
-   * declines and speech-to-text falls through to the null engine. Explicit
-   * config rather than only `WHISPER_MODEL`, because a daemon started by
-   * launchd inherits almost no environment and would silently lose its ears.
-   * Empty string means "not configured", which leaves the env var in charge.
+   * Empty by default: reaching this daemon from elsewhere stays a deliberate
+   * act. Set it and the daemon holds an outbound connection to that hub, which
+   * is how a laptop behind NAT becomes reachable without opening a port.
    */
-  whisperModel: string;
+  hubUrl: string;
 }
 
 export const DEFAULT_CONFIG: OmpdConfig = {
@@ -154,7 +154,7 @@ export const DEFAULT_CONFIG: OmpdConfig = {
   policyMode: "standard",
   ompPath: "omp",
   keepAwake: true,
-  whisperModel: "",
+  hubUrl: "",
 };
 
 export interface OmpdOptions {
@@ -254,16 +254,17 @@ export function loadConfig(home: string, overrides: Partial<OmpdConfig> = {}): O
   if (typeof merged.keepAwake !== "boolean") {
     throw new Error(`${path}: keepAwake must be true or false, got ${String(merged.keepAwake)}`);
   }
-  if (typeof merged.whisperModel !== "string") {
-    throw new Error(`${path}: whisperModel must be a string path, got ${String(merged.whisperModel)}`);
+  if (typeof merged.hubUrl !== "string") {
+    throw new Error(`${path}: hubUrl must be a string, got ${String(merged.hubUrl)}`);
   }
-  // A typo here is the difference between a daemon that hears and one that
-  // reports "no speech-to-text engine" forever, and the engine probe cannot
-  // tell those apart, so the path is checked where the operator can still see
-  // the error rather than at the first utterance.
-  if (merged.whisperModel.length > 0 && !existsSync(merged.whisperModel)) {
-    throw new Error(`${path}: whisperModel ${merged.whisperModel} does not exist`);
+  if (merged.hubUrl !== "" && !/^wss?:\/\//.test(merged.hubUrl)) {
+    // A hub reached over plain http is one anything on the path can answer for.
+    // The sealed channel would still refuse an impostor, but failing here names
+    // the misconfiguration rather than surfacing it as a handshake that never
+    // completes.
+    throw new Error(`${path}: hubUrl must be a ws:// or wss:// URL, got ${merged.hubUrl}`);
   }
+
 
   return merged;
 }
@@ -312,6 +313,8 @@ export class Ompd {
   #evolution: EvolutionEngine;
   #gateway: Gateway;
   #sleepGuard: SleepGuard;
+  /** The outbound leg, when a hub is configured. */
+  #tunnel: TunnelDaemon | undefined;
 
   #stt: SttEngine | undefined;
   #tts: TtsEngine | undefined;
@@ -525,9 +528,10 @@ export class Ompd {
     const reply = joinAssistantText(records.map((record) => record.payload));
     if (reply.length === 0) return null;
 
-    // A turn that was only a code fence sanitises to nothing, and silence is
-    // the right answer there.
-    const spoken = sanitizeForSpeech(reply);
+    // OMP's own markdown-to-speech transform, so the daemon and the terminal
+    // say the same words. A turn that was only a code fence produces no
+    // speakable segments, and silence is the right answer there.
+    const spoken = speakableSegments(reply).join(" ");
     if (spoken.length === 0) return null;
 
     // Capped at the source. A client is going to read this out; handing it an
@@ -622,12 +626,8 @@ export class Ompd {
       // the speech binaries, and doing that on every connection would put a
       // subprocess in the path of opening a page. Engines handed in at
       // construction skip the probe entirely.
-      const whisperModel = this.#config.whisperModel;
       const [stt, tts] = await Promise.all([
-        selectSttEngine({
-          onLog: this.#onLog,
-          whisper: whisperModel.length > 0 ? { model: whisperModel } : {},
-        }),
+        selectSttEngine({ onLog: this.#onLog }),
         selectTtsEngine({ onLog: this.#onLog }),
       ]);
       this.#stt ??= stt;
@@ -641,6 +641,23 @@ export class Ompd {
     // that was never bound. This is what lets the CLI find a daemon started
     // on a port the config file has never heard of.
     writeFileSync(endpointPath(this.#home), `${url}\n`);
+
+    // Dialed after the gateway is listening, so a session that arrives
+    // immediately has something to terminate into. A hub that is down is not a
+    // startup failure: the dialer retries forever and the daemon is fully
+    // usable over loopback meanwhile.
+    if (this.#config.hubUrl !== "") {
+      const identity = loadIdentity(this.#home);
+      this.#tunnel = createTunnelDialer({
+        hubUrl: this.#config.hubUrl,
+        identity,
+        gateway: this.#gateway,
+        store: this.#store,
+        onLog: this.#onLog,
+      });
+      this.#tunnel.start();
+      this.#onLog(`dialing hub ${this.#config.hubUrl} as ${identity.daemonId}`);
+    }
     // A run left mid-flight by a process that was killed cannot settle itself,
     // and until something does, `hasActiveRun` keeps a singleton routine
     // silent. Reconciled before the scheduler is armed, so nothing this
@@ -689,6 +706,10 @@ export class Ompd {
       // 3. No new client work. Sockets die here, which is survivable: agent
       //    lifetime never belonged to a connection.
       await this.#gateway.close();
+      // Between the two: the tunnel is a client of the gateway, so it stops
+      // once the gateway has, and before the hosts it was carrying frames for.
+      this.#tunnel?.stop();
+      this.#tunnel = undefined;
       // 4. Only now tear down what is running. Any earlier and a request could
       //    still arrive for a host that had already been killed.
       await this.#supervisor.shutdown();

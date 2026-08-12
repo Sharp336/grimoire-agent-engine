@@ -237,6 +237,10 @@ export type AuditAction =
   | "approval.decide"
   | "device.pair"
   | "device.revoke"
+  /** A daemon registered an outbound tunnel leg with a hub, or was refused. */
+  | "tunnel.register"
+  /** A client opened a tunnel session to this daemon, or was refused. */
+  | "tunnel.attach"
   | "routine.create"
   | "routine.run"
   | "proposal.submit"
