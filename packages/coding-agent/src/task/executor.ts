@@ -3142,6 +3142,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				void sessionPromise.then(created => created.session.dispose()).catch(() => {});
 				throw err;
 			}
+			monitor.setActiveSession(session);
 			const missingHostTools = inheritedHostTools.filter(tool => !session.getToolByName(tool.name));
 			if (missingHostTools.length > 0) {
 				await session.refreshRpcHostTools(missingHostTools);
@@ -3155,8 +3156,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				);
 			}
 			sessionCreatedAt = performance.now();
-
-			monitor.setActiveSession(session);
 			installRegistryStatusSync(session);
 
 			// Emit lifecycle start event

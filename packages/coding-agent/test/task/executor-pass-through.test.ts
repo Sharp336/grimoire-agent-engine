@@ -14,6 +14,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolPathWithSource } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools";
 import type { LoadExtensionsResult } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -116,6 +117,7 @@ function createModelRegistry(model: Model): ModelRegistry {
 
 describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 	afterEach(() => {
+		AgentRegistry.resetGlobalForTests();
 		vi.restoreAllMocks();
 	});
 
@@ -280,6 +282,35 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 			["read", "yield", hiddenTopLevel.name, hiddenMounted.name],
 			[hiddenMounted.name],
 		);
+	});
+
+	it("disposes a newly created session when inherited host-tool refresh fails", async () => {
+		const session = yieldEmittingSession();
+		const dispose = vi.fn(async () => {});
+		session.dispose = dispose;
+		session.refreshRpcHostTools = async () => {
+			throw new Error("host refresh failed");
+		};
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+		const id = "host-refresh-failure";
+		AgentRegistry.global().register({
+			id,
+			displayName: id,
+			kind: "sub",
+			session,
+			status: "running",
+		});
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id,
+			keepAlive: false,
+			parentHostTools: [{ name: "ida_execute_python" } as AgentTool],
+		});
+
+		expect(result.exitCode).toBe(1);
+		expect(dispose).toHaveBeenCalledTimes(1);
+		expect(AgentRegistry.global().get(id)).toBeUndefined();
 	});
 
 	it("preserves the legacy result shape when no output schema is selected", async () => {
