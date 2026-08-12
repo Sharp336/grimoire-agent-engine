@@ -213,27 +213,28 @@ import { generateSessionTitle } from "../utils/title-generator";
 import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
 import type { VibeModeState } from "../vibe/state";
 import type { AgentSessionEvent, AgentSessionEventListener } from "./agent-session-events";
-import type {
-	AgentSessionConfig,
-	AgentSessionDisposeOptions,
-	AsyncJobSnapshot,
-	CommandMetadataChangedListener,
-	ContextUsageBreakdown,
-	FollowUpOptions,
-	FreshSessionResult,
-	HandoffResult,
-	ModelCycleResult,
-	Prewalk,
-	PromptOptions,
-	ResetSessionContextResult,
-	ResolvedRoleModel,
-	RestoredQueuedMessage,
-	RoleModelCycle,
-	RoleModelCycleResult,
-	SessionHandoffOptions,
-	SessionOAuthAccountList,
-	SessionStats,
-	UsageFallbackConfirmer,
+import {
+	type AgentSessionConfig,
+	type AgentSessionDisposeOptions,
+	type AsyncJobSnapshot,
+	type CommandMetadataChangedListener,
+	CommittedNewSessionTransitionError,
+	type ContextUsageBreakdown,
+	type FollowUpOptions,
+	type FreshSessionResult,
+	type HandoffResult,
+	type ModelCycleResult,
+	type Prewalk,
+	type PromptOptions,
+	type ResetSessionContextResult,
+	type ResolvedRoleModel,
+	type RestoredQueuedMessage,
+	type RoleModelCycle,
+	type RoleModelCycleResult,
+	type SessionHandoffOptions,
+	type SessionOAuthAccountList,
+	type SessionStats,
+	type UsageFallbackConfirmer,
 } from "./agent-session-types";
 import {
 	ASYNC_INLINE_RESULT_MAX_CHARS,
@@ -6566,6 +6567,7 @@ export class AgentSession {
 	 * Listeners are preserved and will continue receiving events.
 	 * @param options - Optional initial messages and parent session path
 	 * @returns true if completed, false if cancelled by hook
+	 * @throws {CommittedNewSessionTransitionError} when the replacement committed but post-commit work failed
 	 */
 	async newSession(options?: NewSessionOptions): Promise<boolean> {
 		this.#assertVibeSessionTransitionAllowed("start a new session");
@@ -6675,13 +6677,7 @@ export class AgentSession {
 					previousSessionFile,
 				});
 			}
-			try {
-				await reconcileNewSessionTransition(true);
-			} catch (reconcileError) {
-				logger.warn("Failed to reconcile mode after new session", {
-					error: String(reconcileError),
-				});
-			}
+			await reconcileNewSessionTransition(true);
 			return true;
 		} catch (error) {
 			if (!sessionTransitioned && previousAgentMessages) {
@@ -6695,6 +6691,11 @@ export class AgentSession {
 						error: String(reconcileError),
 					});
 				}
+			}
+			if (sessionTransitioned) {
+				throw error instanceof CommittedNewSessionTransitionError
+					? error
+					: new CommittedNewSessionTransitionError(error);
 			}
 			throw error;
 		} finally {

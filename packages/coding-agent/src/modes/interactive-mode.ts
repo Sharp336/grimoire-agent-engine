@@ -2516,6 +2516,24 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
+	async #retryCommittedModeRestore(mode: "plan" | "goal", restore: () => Promise<void>): Promise<void> {
+		try {
+			await restore();
+		} catch (firstError) {
+			logger.warn(`Retrying ${mode} mode restore after committed session transition`, {
+				error: String(firstError),
+			});
+			try {
+				await restore();
+			} catch (retryError) {
+				throw new AggregateError(
+					[firstError, retryError],
+					`Failed to restore ${mode} mode state after committed session transition.`,
+				);
+			}
+		}
+	}
+
 	async #clearTransientModeState(options?: {
 		preserveVibe?: boolean;
 		vibeScopeAlreadySuspended?: boolean;
@@ -2753,8 +2771,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.showStatus(`Plan mode enabled. Plan file: ${planFilePath}`);
 	}
 
-	async #restorePlanPreviousModel(prev: { model: Model; thinkingLevel?: ConfiguredThinkingLevel }): Promise<void> {
-		if (modelsAreEqual(this.session.model, prev.model)) {
+	async #restorePlanPreviousModel(
+		prev: { model: Model; thinkingLevel?: ConfiguredThinkingLevel },
+		options?: { forceModelApply?: boolean },
+	): Promise<void> {
+		if (!options?.forceModelApply && modelsAreEqual(this.session.model, prev.model)) {
 			// Same model — only thinking level may differ. Avoid setModelTemporary()
 			// which would reset provider-side sessions and break continuity.
 			this.session.setThinkingLevel(prev.thinkingLevel);
@@ -2763,6 +2784,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#pendingPlanModelSwitch = false;
 		} else {
 			await this.session.setModelTemporary(prev.model, prev.thinkingLevel);
+			// `setModelTemporary(undefined)` otherwise selects the target model's
+			// default effort. The snapshot's undefined selector is intentional.
+			if (prev.thinkingLevel === undefined) this.session.setThinkingLevel(undefined);
 		}
 	}
 
@@ -2805,13 +2829,51 @@ export class InteractiveMode implements InteractiveModeContext {
 			? { model: this.session.model, thinkingLevel: this.session.configuredThinkingLevel() }
 			: undefined;
 		let exitCommitted = sessionTransition;
+		const previousTools = this.#planModePreviousTools;
+		const previousModelState = this.#planModePreviousModelState;
+		const forcePreviousModelApply =
+			previousModelState !== undefined &&
+			(planModeModelState === undefined || !modelsAreEqual(planModeModelState.model, previousModelState.model));
 		this.session.setPlanModeState(undefined);
 		try {
-			if (this.#planModePreviousTools !== undefined) {
-				await this.session.setActiveToolsByName(this.#planModePreviousTools);
-			}
-			if (this.#planModePreviousModelState && !options?.deferModelRestore) {
-				await this.#restorePlanPreviousModel(this.#planModePreviousModelState);
+			if (sessionTransition) {
+				await this.#retryCommittedModeRestore("plan", async () => {
+					if (previousTools !== undefined) {
+						await this.session.setActiveToolsByName(previousTools);
+					}
+					if (previousModelState && !options?.deferModelRestore) {
+						await this.#restorePlanPreviousModel(previousModelState, {
+							forceModelApply: forcePreviousModelApply,
+						});
+						if (
+							!this.session.model ||
+							!modelsAreEqual(this.session.model, previousModelState.model) ||
+							this.session.configuredThinkingLevel() !== previousModelState.thinkingLevel
+						) {
+							throw new Error("Pre-plan model did not converge after the session transition.");
+						}
+					}
+					// A failed model restore can reject after changing the model but before
+					// rebuilding its prompt. Rebuild last on every attempt so success proves
+					// the fresh, inactive-mode prompt matches the final tools and model.
+					await this.session.refreshBaseSystemPrompt();
+					if (previousTools !== undefined) {
+						const restoredTools = this.session.getEnabledToolNames();
+						if (
+							restoredTools.length !== previousTools.length ||
+							previousTools.some(name => !restoredTools.includes(name))
+						) {
+							throw new Error("Pre-plan tools did not converge after the session transition.");
+						}
+					}
+				});
+			} else {
+				if (previousTools !== undefined) {
+					await this.session.setActiveToolsByName(previousTools);
+				}
+				if (previousModelState && !options?.deferModelRestore) {
+					await this.#restorePlanPreviousModel(previousModelState);
+				}
 			}
 			// If #applyPlanModeModel queued a deferred switch to the plan-role model
 			// (because the session was streaming on entry), drop it now: we are
@@ -2926,7 +2988,21 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.session.setGoalModeState(undefined);
 		}
 		try {
-			if (previousTools !== undefined) {
+			if (sessionTransition) {
+				await this.#retryCommittedModeRestore("goal", async () => {
+					if (previousTools !== undefined) {
+						await this.session.setActiveToolsByName(previousTools);
+						const restoredTools = this.session.getEnabledToolNames();
+						if (
+							restoredTools.length !== previousTools.length ||
+							previousTools.some(name => !restoredTools.includes(name))
+						) {
+							throw new Error("Pre-goal tools did not converge after the session transition.");
+						}
+					}
+					await this.session.refreshBaseSystemPrompt();
+				});
+			} else if (previousTools !== undefined) {
 				await this.session.setActiveToolsByName(previousTools);
 			}
 			if (options?.reason === "completed") {

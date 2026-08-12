@@ -41,7 +41,7 @@ import {
 	theme,
 } from "../../modes/theme/theme";
 import type { InteractiveModeContext } from "../../modes/types";
-import type { SessionOAuthAccountList } from "../../session/agent-session-types";
+import { CommittedNewSessionTransitionError, type SessionOAuthAccountList } from "../../session/agent-session-types";
 import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome } from "../../session/auth-storage";
 import {
 	createForeignSessionStore,
@@ -1565,7 +1565,15 @@ export class SelectorController {
 			return true;
 		}
 
-		const detached = await this.ctx.session.newSession();
+		let committedError: CommittedNewSessionTransitionError | undefined;
+		let detached: boolean;
+		try {
+			detached = await this.ctx.session.newSession();
+		} catch (error) {
+			if (!(error instanceof CommittedNewSessionTransitionError)) throw error;
+			committedError = error;
+			detached = true;
+		}
 		if (!detached) {
 			return false;
 		}
@@ -1579,6 +1587,7 @@ export class SelectorController {
 		await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 		await this.ctx.reloadTodos();
 		this.ctx.ui.requestRender(true, { clearScrollback: true });
+		if (committedError) throw committedError;
 		return true;
 	}
 

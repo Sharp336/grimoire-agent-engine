@@ -23,6 +23,7 @@ import type { AgentHubRemote, AgentHubRemoteTranscript } from "../modes/componen
 import type { InteractiveModeContext } from "../modes/types";
 import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
+import { CommittedNewSessionTransitionError } from "../session/agent-session-types";
 import type { SessionEntry } from "../session/session-entries";
 import { shouldDisableReasoning, toReasoningEffort } from "../thinking";
 import { setSessionTerminalTitle } from "../utils/title-generator";
@@ -342,7 +343,7 @@ export class CollabGuestLink {
 				return;
 			}
 			this.#ctx.showStatus(`Collab session ended (${reason})`);
-			void this.#restoreLocalSession();
+			this.#restoreLocalSessionAfterRemoteEnd();
 		};
 		socket.connect();
 		// Cover the connect phase too: if the relay blackholes the WebSocket
@@ -371,8 +372,18 @@ export class CollabGuestLink {
 	/** User-initiated leave (or post-disconnect cleanup): restore the previous session. */
 	async leave(_reason: string): Promise<void> {
 		if (this.#left) return;
-		this.#socket?.close();
-		await this.#restoreLocalSession();
+		const socket = this.#socket;
+		const restore = this.#restoreLocalSession();
+		// #restoreLocalSession marks the link left synchronously before its first
+		// await, so the close callback cannot start a competing fire-and-forget restore.
+		socket?.close();
+		try {
+			await restore;
+		} catch (error) {
+			// The replacement UI already rendered this committed failure. Do not
+			// leak it through the TUI editor's fire-and-forget submit callback.
+			if (!(error instanceof CommittedNewSessionTransitionError)) throw error;
+		}
 	}
 
 	sendPrompt(text: string, images?: ImageContent[]): void {
@@ -546,7 +557,7 @@ export class CollabGuestLink {
 			case "bye": {
 				this.#ctx.showStatus(`Collab session ended (${frame.reason})`);
 				this.#socket?.close();
-				void this.#restoreLocalSession();
+				this.#restoreLocalSessionAfterRemoteEnd();
 				break;
 			}
 			case "error":
@@ -725,6 +736,16 @@ export class CollabGuestLink {
 			this.#ctx.loadingAnimation = undefined;
 		}
 	}
+	#restoreLocalSessionAfterRemoteEnd(): void {
+		void this.#restoreLocalSession().catch(error => {
+			logger.warn("collab guest failed to restore local session after remote end", { error: String(error) });
+			if (!(error instanceof CommittedNewSessionTransitionError)) {
+				this.#ctx.showError(
+					`Failed to restore local session: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		});
+	}
 
 	async #restoreLocalSession(): Promise<void> {
 		if (this.#left) return;
@@ -743,7 +764,13 @@ export class CollabGuestLink {
 			await this.#ctx.handleResumeSession(this.#returnSessionFile);
 			return;
 		}
-		await this.#ctx.session.newSession();
+		let committedError: CommittedNewSessionTransitionError | undefined;
+		try {
+			await this.#ctx.session.newSession();
+		} catch (error) {
+			if (!(error instanceof CommittedNewSessionTransitionError)) throw error;
+			committedError = error;
+		}
 		setSessionTerminalTitle(this.#ctx.sessionManager.getSessionName(), this.#ctx.sessionManager.getCwd());
 		this.#ctx.statusLine.invalidate();
 		this.#ctx.statusLine.resetActiveTime();
@@ -752,6 +779,10 @@ export class CollabGuestLink {
 		await this.#ctx.renderInitialMessages({ clearTerminalHistory: true });
 		await this.#ctx.reloadTodos();
 		this.#ctx.ui.requestRender(true, { clearScrollback: true });
+		if (committedError) {
+			this.#ctx.showError(committedError.message);
+			throw committedError;
+		}
 	}
 
 	#updateStatusSegment(): void {

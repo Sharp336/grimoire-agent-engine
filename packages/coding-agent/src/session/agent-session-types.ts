@@ -41,6 +41,21 @@ import type { SessionManager } from "./session-manager";
 /** Maximum time the interactive shutdown path waits for Mnemopi consolidation. */
 export const SHUTDOWN_CONSOLIDATE_BUDGET_MS = 1_500;
 
+/**
+ * The replacement transcript committed, but post-commit transition work
+ * failed. Interactive callers must render the replacement transcript before
+ * surfacing this error.
+ */
+export class CommittedNewSessionTransitionError extends Error {
+	readonly committed = true;
+
+	constructor(cause: unknown) {
+		const detail = cause instanceof Error ? cause.message : String(cause);
+		super(`New session committed, but post-commit transition work failed: ${detail}`, { cause });
+		this.name = "CommittedNewSessionTransitionError";
+	}
+}
+
 /** Options controlling session disposal. */
 export interface AgentSessionDisposeOptions {
 	mnemopiConsolidateTimeoutMs?: number;

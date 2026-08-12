@@ -14,6 +14,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/modes/running-subagent-badge";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { CommittedNewSessionTransitionError } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 
 // In-memory transport: shared FakeWebSocket + InMemoryRelay harness (see
@@ -161,11 +162,15 @@ describe("collab guest running-subagents badge", () => {
 			sendWelcome(nextWelcomeAgents);
 			await secondSnapshot.promise;
 			expect(ctx.statusLine.subagentCount).toBe(2);
+			const committedFailure = new CommittedNewSessionTransitionError(new Error("mode reconciliation failed"));
+			const showError = spyOn(ctx, "showError");
+			spyOn(ctx.session, "newSession").mockRejectedValueOnce(committedFailure);
 
-			await guest.leave("test cleanup");
+			await expect(guest.leave("test cleanup")).resolves.toBeUndefined();
 			expect(ctx.collabGuest).toBeUndefined();
 			expect(ctx.statusLine.subagentCount).toBe(0);
 			expect(counts.at(-1)).toBe(0);
+			expect(showError).toHaveBeenCalledWith(committedFailure.message);
 		} finally {
 			hostSocket.close();
 			writeSpy.mockRestore();

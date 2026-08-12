@@ -213,6 +213,33 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(harness.session.sessionManager.getBranch().some(entry => entry.type === "mode_change")).toBe(false);
 	});
 
+	it("converges after a rejected pre-goal tool restore before completing committed /new", async () => {
+		const previousTools = harness.session.getActiveToolNames();
+		await harness.mode.handleGoalModeCommand("Ship the release");
+		const priorMessage = { role: "user" as const, content: "prior turn", timestamp: Date.now() };
+		harness.session.agent.appendMessage(priorMessage);
+		harness.session.sessionManager.appendMessage(priorMessage);
+		const resetTranscript = vi.spyOn(harness.mode, "resetTranscript");
+		const setActiveToolsByName = harness.session.setActiveToolsByName.bind(harness.session);
+		const restoreTools = vi.spyOn(harness.session, "setActiveToolsByName").mockImplementationOnce(async names => {
+			await setActiveToolsByName(names);
+			throw new Error("tool restore failed after apply");
+		});
+
+		await expect(harness.mode.handleClearCommand()).resolves.toBeUndefined();
+
+		expect(restoreTools).toHaveBeenCalledTimes(2);
+		expect(harness.session.getActiveToolNames()).toEqual(previousTools);
+		expect(harness.session.getActiveToolNames()).not.toContain("goal");
+		expect(harness.mode.goalModeEnabled).toBe(false);
+		expect(harness.mode.goalModePaused).toBe(false);
+		expect(harness.session.getGoalModeState()).toBeUndefined();
+		expect(harness.session.messages).toEqual([]);
+		expect(harness.session.sessionManager.getBranch().some(entry => entry.type === "mode_change")).toBe(false);
+		expect(harness.session.sessionManager.buildSessionContext()).toMatchObject({ messages: [], mode: "none" });
+		expect(resetTranscript).toHaveBeenCalledTimes(1);
+	});
+
 	it("reconciles paused goal state when /new fails before the replacement transcript commits", async () => {
 		const previousTools = harness.session.getActiveToolNames();
 		await harness.mode.handleGoalModeCommand("Ship the release");

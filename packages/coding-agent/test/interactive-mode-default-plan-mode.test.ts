@@ -12,7 +12,11 @@ import type {
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import type { SessionSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/session-selector";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { AgentSession, type AgentSessionConfig } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import {
+	AgentSession,
+	type AgentSessionConfig,
+	CommittedNewSessionTransitionError,
+} from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
@@ -312,7 +316,46 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		expect(reconcileMode).toHaveBeenCalledTimes(1);
 	});
 
-	it("contains a committed /new reconciliation error and completes caller teardown", async () => {
+	it("converges after a rejected pre-plan model restore before completing committed /new", async () => {
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		settings.setModelRole("plan", "anthropic/claude-haiku-4-5:high");
+		const writeTool = makeTool("write");
+		const created = createHarness(settings, {
+			extraRegistryTools: [writeTool],
+			builtInToolNames: ["read", "write"],
+			rebuildGate: { fail: false },
+		});
+		const previousModel = session!.model;
+		await created.init({ suppressWelcomeIntro: true });
+		await created.handlePlanModeCommand();
+		const planModel = session!.model;
+		const priorMessage = { role: "user" as const, content: "prior turn", timestamp: Date.now() };
+		session!.agent.appendMessage(priorMessage);
+		session!.sessionManager.appendMessage(priorMessage);
+		const resetTranscript = vi.spyOn(created, "resetTranscript");
+		const setModelTemporary = session!.setModelTemporary.bind(session);
+		const restoreModel = vi.spyOn(session!, "setModelTemporary").mockImplementationOnce(async (...args) => {
+			await setModelTemporary(...args);
+			throw new Error("model restore failed after switch");
+		});
+
+		await expect(created.handleClearCommand()).resolves.toBeUndefined();
+
+		expect(restoreModel).toHaveBeenCalledTimes(2);
+		expect(session!.model?.id).toBe(previousModel?.id);
+		expect(session!.model?.id).not.toBe(planModel?.id);
+		expect(session!.getActiveToolNames()).toEqual(["read"]);
+		expect(created.planModeEnabled).toBe(false);
+		expect(created.planModePaused).toBe(false);
+		expect(session!.getPlanModeState()).toBeUndefined();
+		expect(session!.messages).toEqual([]);
+		expect(created.sessionManager.buildSessionContext()).toMatchObject({ messages: [], mode: "none" });
+		expect(created.sessionManager.getBranch().some(entry => entry.type === "mode_change")).toBe(false);
+		expect(session!.systemPrompt.join("\n")).toContain(PLAN_FIRST_GUIDANCE);
+		expect(resetTranscript).toHaveBeenCalledTimes(1);
+	});
+
+	it("surfaces a structured committed /new failure after completing caller teardown", async () => {
 		const created = createHarness(Settings.isolated({ "compaction.enabled": false }));
 		await created.init({ suppressWelcomeIntro: true });
 		await created.handlePlanModeCommand();
@@ -327,16 +370,22 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 			throw failure;
 		});
 		const resetTranscript = vi.spyOn(created, "resetTranscript");
+		const showError = vi.spyOn(created, "showError");
 		const newSession = session!.newSession.bind(session);
-		let newSessionResult: boolean | undefined;
+		let committedError: unknown;
 		vi.spyOn(session!, "newSession").mockImplementation(async options => {
-			newSessionResult = await newSession(options);
-			return newSessionResult;
+			try {
+				return await newSession(options);
+			} catch (error) {
+				committedError = error;
+				throw error;
+			}
 		});
 
 		await expect(created.handleClearCommand()).resolves.toBeUndefined();
 
-		expect(newSessionResult).toBe(true);
+		expect(committedError).toBeInstanceOf(CommittedNewSessionTransitionError);
+		expect((committedError as CommittedNewSessionTransitionError).cause).toBe(failure);
 		expect(reconcileMode).toHaveBeenCalledTimes(1);
 		expect(session!.sessionFile).not.toBe(previousSessionFile);
 		expect(session!.messages).toEqual([]);
@@ -345,6 +394,7 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		expect(session!.getPlanModeState()).toBeUndefined();
 		expect(created.sessionManager.buildSessionContext()).toMatchObject({ messages: [], mode: "none" });
 		expect(resetTranscript).toHaveBeenCalledTimes(1);
+		expect(showError).toHaveBeenCalledWith(expect.stringContaining("reconciliation failed"));
 	});
 
 	it("reconciles active plan mode when an extension starts a new session", async () => {

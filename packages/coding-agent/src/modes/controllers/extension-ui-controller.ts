@@ -28,6 +28,7 @@ import { HookInputComponent } from "../../modes/components/hook-input";
 import { HookSelectorComponent, type HookSelectorSlider } from "../../modes/components/hook-selector";
 import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "../../modes/theme/theme";
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
+import { CommittedNewSessionTransitionError } from "../../session/agent-session-types";
 import { normalizeCustomMessagePayload, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { setExtensionTerminalTitle, setSessionTerminalTitle } from "../../utils/title-generator";
 
@@ -213,14 +214,23 @@ export class ExtensionUiController {
 				// Create new session
 				this.clearExtensionTerminalInputListeners();
 				this.clearHookWidgets();
-				const success = await this.ctx.session.newSession({ parentSession: options?.parentSession });
+				let committedError: CommittedNewSessionTransitionError | undefined;
+				let success: boolean;
+				try {
+					success = await this.ctx.session.newSession({ parentSession: options?.parentSession });
+				} catch (error) {
+					if (!(error instanceof CommittedNewSessionTransitionError)) throw error;
+					committedError = error;
+					success = true;
+				}
 				if (!success) {
 					return { cancelled: true };
 				}
 				setSessionTerminalTitle(this.ctx.sessionManager.getSessionName(), this.ctx.sessionManager.getCwd());
 
-				// Call setup callback if provided
-				if (options?.setup) {
+				// Setup belongs to a fully reconciled session. A committed failure
+				// still clears the old transcript below, then rejects to the extension.
+				if (!committedError && options?.setup) {
 					await options.setup(this.ctx.sessionManager);
 				}
 
@@ -230,12 +240,17 @@ export class ExtensionUiController {
 				this.ctx.clearTransientSessionUi();
 				this.ctx.resetTranscript();
 
-				this.ctx.present([
-					new Spacer(1),
-					new Text(`${theme.fg("accent", `${theme.status.success} New session started`)}`, 1, 1),
-				]);
+				if (committedError) {
+					this.ctx.showError(committedError.message);
+				} else {
+					this.ctx.present([
+						new Spacer(1),
+						new Text(`${theme.fg("accent", `${theme.status.success} New session started`)}`, 1, 1),
+					]);
+				}
 				await this.ctx.reloadTodos();
 				this.ctx.ui.requestRender(true, { clearScrollback: true });
+				if (committedError) throw committedError;
 
 				return { cancelled: false };
 			},
@@ -446,13 +461,22 @@ export class ExtensionUiController {
 				// Create new session
 				this.clearExtensionTerminalInputListeners();
 				this.clearHookWidgets();
-				const success = await this.ctx.session.newSession({ parentSession: options?.parentSession });
+				let committedError: CommittedNewSessionTransitionError | undefined;
+				let success: boolean;
+				try {
+					success = await this.ctx.session.newSession({ parentSession: options?.parentSession });
+				} catch (error) {
+					if (!(error instanceof CommittedNewSessionTransitionError)) throw error;
+					committedError = error;
+					success = true;
+				}
 				if (!success) {
 					return { cancelled: true };
 				}
 
-				// Call setup callback if provided
-				if (options?.setup) {
+				// Setup belongs to a fully reconciled session. A committed failure
+				// still clears the old transcript below, then rejects to the extension.
+				if (!committedError && options?.setup) {
 					await options.setup(this.ctx.sessionManager);
 				}
 
@@ -460,12 +484,17 @@ export class ExtensionUiController {
 				this.ctx.clearTransientSessionUi();
 				this.ctx.resetTranscript();
 
-				this.ctx.present([
-					new Spacer(1),
-					new Text(`${theme.fg("accent", `${theme.status.success} New session started`)}`, 1, 1),
-				]);
+				if (committedError) {
+					this.ctx.showError(committedError.message);
+				} else {
+					this.ctx.present([
+						new Spacer(1),
+						new Text(`${theme.fg("accent", `${theme.status.success} New session started`)}`, 1, 1),
+					]);
+				}
 				await this.ctx.reloadTodos();
 				this.ctx.ui.requestRender(true, { clearScrollback: true });
+				if (committedError) throw committedError;
 
 				return { cancelled: false };
 			},
