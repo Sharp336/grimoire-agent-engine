@@ -43,6 +43,16 @@ import {
 
 export { parseAzureDeploymentNameMap } from "./openai-shared";
 
+export function isOfficialAzureOpenAIResponsesUrl(baseUrl: string | undefined): boolean {
+	if (!baseUrl) return false;
+	try {
+		const hostname = new URL(baseUrl).hostname.toLowerCase();
+		return hostname.endsWith(".openai.azure.com") || hostname === "models.inference.ai.azure.com";
+	} catch {
+		return false;
+	}
+}
+
 const DEFAULT_AZURE_API_VERSION = "v1";
 const AZURE_OPENAI_RESPONSES_FIRST_EVENT_TIMEOUT_MESSAGE =
 	"Azure OpenAI responses stream timed out while waiting for the first event";
@@ -134,7 +144,11 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
 			const { url, headers, baseUrl } = buildAzureResponsesRequest(model, apiKey, options);
 			const requestModel = modelForAzureEndpoint(model, baseUrl);
-			let params = buildParams(requestModel, context, options, deploymentName);
+			const requestOptions =
+				options?.reasoningSummary && !isOfficialAzureOpenAIResponsesUrl(baseUrl)
+					? { ...options, reasoningSummary: null }
+					: options;
+			let params = buildParams(requestModel, context, requestOptions, deploymentName);
 			const replacementPayload = await options?.onPayload?.(params, requestModel);
 			if (replacementPayload !== undefined) {
 				params = replacementPayload as typeof params;

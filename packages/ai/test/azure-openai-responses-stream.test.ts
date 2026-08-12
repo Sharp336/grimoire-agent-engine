@@ -199,6 +199,19 @@ describe("azure openai responses streaming", () => {
 			{ reasoning: Effort.High, reasoningSummary: "detailed" },
 			incompatibleAzureCodexModel,
 		);
+		expect(payload.reasoning).toEqual({ effort: "high" });
+	});
+
+	it("omits requested summaries when Azure routes through a compatible gateway", async () => {
+		const payload = await captureAzurePayload(
+			{ messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }] },
+			legacyAzureCodexModel,
+			{
+				azureBaseUrl: "https://gateway.example/openai/v1",
+				reasoning: "high",
+				reasoningSummary: "detailed",
+			},
+		);
 
 		expect(payload.reasoning).toEqual({ effort: "high" });
 	});
