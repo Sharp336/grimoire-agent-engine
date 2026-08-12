@@ -284,6 +284,27 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		);
 	});
 
+	it("keeps an inherited top-level discoverable host tool out of xd:// after refresh", async () => {
+		const session = yieldEmittingSession();
+		let mountedToolNames: string[] = [];
+		session.getMountedXdevToolNames = () => mountedToolNames;
+		session.refreshRpcHostTools = async tools => {
+			mountedToolNames = tools.map(tool => tool.name);
+		};
+		const presentation = vi.spyOn(session, "setActiveToolPresentation");
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+		const topLevelHostTool = { name: "top_level_host", loadMode: "discoverable" } as AgentTool;
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "top-level-host-tool",
+			parentHostTools: [topLevelHostTool],
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(presentation).toHaveBeenCalledWith(["read", "yield", topLevelHostTool.name], []);
+	});
+
 	it("disposes a newly created session when inherited host-tool refresh fails", async () => {
 		const session = yieldEmittingSession();
 		const dispose = vi.fn(async () => {});

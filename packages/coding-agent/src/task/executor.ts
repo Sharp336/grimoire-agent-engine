@@ -3145,12 +3145,13 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			monitor.setActiveSession(session);
 			const missingHostTools = inheritedHostTools.filter(tool => !session.getToolByName(tool.name));
 			if (missingHostTools.length > 0) {
+				const preRefreshMountedToolNames = session.getMountedXdevToolNames();
 				await session.refreshRpcHostTools(missingHostTools);
 				const mountedHostToolNames = new Set(options.parentMountedHostToolNames);
 				await session.setActiveToolPresentation(
 					[...session.getEnabledToolNames(), ...missingHostTools.map(tool => tool.name)],
 					[
-						...session.getMountedXdevToolNames(),
+						...preRefreshMountedToolNames,
 						...missingHostTools.filter(tool => mountedHostToolNames.has(tool.name)).map(tool => tool.name),
 					],
 				);
