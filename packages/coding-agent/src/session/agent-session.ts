@@ -272,6 +272,7 @@ import {
 	shouldPromptCodexAutoRedeem,
 } from "./codex-auto-reset";
 import { recordCredentialPin, seedCredentialPins } from "./credential-pin";
+import { emitPersistedCustomMessages } from "./custom-message-delivery";
 import { EvalRunner, type EvalRunnerHost } from "./eval-runner";
 import {
 	collectPendingToolCalls,
@@ -917,7 +918,7 @@ export class AgentSession {
 	/** Record a suppressed advisor concern as visible, persisted advice without
 	 *  triggering a turn. When the agent is idle (the normal post-interrupt case,
 	 *  including the post-prompt unwind window where the core loop has ended), emit
-	 *  message_start/message_end like #flushPendingIrcAsides so #handleAgentEvent
+	 *  message_start/message_end like IrcBridge.flushPending so #handleAgentEvent
 	 *  renders it live (TUI/ACP) and persists it as a CustomMessageEntry. Only while
 	 *  an abort is still tearing a live turn down do we park it hidden, so abort's
 	 *  settle step replays it once idle — never appended into a live streamMessage. */
@@ -926,17 +927,7 @@ export class AgentSession {
 			this.#pendingNextTurnMessages.push(card);
 			return;
 		}
-		this.#emitPersistedCustomMessages([card]);
-	}
-
-	#emitPersistedCustomMessages(records: CustomMessage[]): void {
-		for (const record of records) {
-			// emitExternalEvent on message_end appends to agent state and dispatches
-			// to all session listeners, which in turn handle TUI rendering and
-			// sessionManager persistence via #handleAgentEvent.
-			this.agent.emitExternalEvent({ type: "message_start", message: record });
-			this.agent.emitExternalEvent({ type: "message_end", message: record });
-		}
+		emitPersistedCustomMessages(this.agent, [card]);
 	}
 
 	#appendAndPersistCustomMessage(message: CustomMessage): void {
@@ -6473,8 +6464,7 @@ export class AgentSession {
 		}
 
 		if (options?.deliverAs === "aside") {
-			// Agent disconnected / not subscribed — park until reconnect or flush.
-			if (this.isStreaming || this.isCompacting || this.#unsubscribeAgent === undefined) {
+			if (this.#shouldParkExtensionAside()) {
 				this.#pendingExtensionAsides.push(normalizedAppMessage);
 				return false;
 			}
@@ -7974,13 +7964,18 @@ export class AgentSession {
 		return messages;
 	}
 
+	/** True when aside must queue: streaming, compacting, or agent disconnected. */
+	#shouldParkExtensionAside(): boolean {
+		return this.isStreaming || this.isCompacting || this.#unsubscribeAgent === undefined;
+	}
+
 	/** Persist extension asides that missed step-boundary injection (stranded at
 	 *  turn tail, next prompt, or dispose). Never wakes a turn — unlike IRC. */
 	#flushPendingExtensionAsides(): void {
 		if (this.#pendingExtensionAsides.length === 0) return;
 		const records = [...this.#pendingExtensionAsides];
 		this.#pendingExtensionAsides = [];
-		this.#emitPersistedCustomMessages(records);
+		emitPersistedCustomMessages(this.agent, records);
 	}
 
 	// =========================================================================

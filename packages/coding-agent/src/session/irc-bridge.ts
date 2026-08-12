@@ -7,6 +7,7 @@ import ircAutoReplyTemplate from "../prompts/system/irc-autoreply.md" with { typ
 import ircIncomingTemplate from "../prompts/system/irc-incoming.md" with { type: "text" };
 import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "./agent-session-events";
+import { emitPersistedCustomMessages } from "./custom-message-delivery";
 import type { CustomMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
 
@@ -169,10 +170,7 @@ export class IrcBridge {
 
 	/** Persists queued IRC records that missed their step-boundary injection. */
 	flushPending(): void {
-		for (const record of this.drainPending()) {
-			this.#host.agent.emitExternalEvent({ type: "message_start", message: record });
-			this.#host.agent.emitExternalEvent({ type: "message_end", message: record });
-		}
+		emitPersistedCustomMessages(this.#host.agent, this.drainPending());
 	}
 
 	async #runAutoReply(msg: IrcMessage): Promise<void> {
