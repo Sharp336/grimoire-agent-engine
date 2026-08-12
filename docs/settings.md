@@ -530,6 +530,8 @@ Computer settings are captured when the desktop controller is created. A model s
 ### Shell, eval, and LSP
 
 ```yaml
+shellPath: /bin/zsh # optional
+
 bash:
   enabled: true
   autoBackground:
@@ -569,7 +571,18 @@ lsp:
 | `lsp.diagnosticsOnEdit`           | boolean | `false`   | Run diagnostics after an edit.                                                                                                                              |
 | `lsp.formatOnWrite`               | boolean | `false`   | Format files on write.                                                                                                                                      |
 | `lsp.diagnosticsDeduplicate`      | boolean | `true`    | Collapse duplicate diagnostics.                                                                                                                             |
-| `shellPath`                       | string  | _(unset)_ | Override the shell binary used by bash.                                                                                                                     |
+| `shellPath`                       | string  | _(unset)_ | Override the shell binary used by shell shortcuts and the bash tool.                                                                                                    |
+
+Shell shortcuts use the configured user shell:
+
+- Enter bare `!` to leave the OMP interface temporarily and open the full interactive shell. The shell owns the terminal, so its native line editor and Tab completion work normally.
+- Enter `! command` to run one quick shell command and include its result in the session context.
+- Enter `!! command` to run one quick shell command and exclude its result from the session context.
+- While editing `! command` or `!! command`, press Tab to show executable or filesystem-path candidates. Press Tab again to apply the selected candidate.
+
+`shellPath` has priority. If it is unset, OMP uses an executable path from `$SHELL`, then the existing supported-shell fallback. Zsh starts as an interactive login shell with `-il`, so login files such as `.zprofile` and `.zlogin` are part of the session. Fish and other supported shells keep their established interactive startup policy.
+
+When a zsh interactive shell exits, OMP adopts its final working directory if the shell reports a bounded, absolute path that still exists and is a directory. OMP then reloads directory-scoped settings, skills, slash commands, todos, and related session state. A missing or invalid directory record leaves the prior OMP working directory unchanged. Bash, fish, and other shells do not currently synchronize their final working directory back to OMP. OMP does not modify shell startup files to provide zsh synchronization.
 
 ### Files: editing and reading
 

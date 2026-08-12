@@ -674,7 +674,7 @@ export class Settings {
 	/**
 	 * Get shell configuration based on settings.
 	 */
-	getShellConfig() {
+	getShellConfig(env?: Record<string, string | undefined>) {
 		const shell = this.get("shellPath");
 		let configSource = this.#configPath ?? path.join(this.#agentDir, MAIN_CONFIG_FILENAMES[0]);
 		if (Object.hasOwn(this.#project, "shellPath")) {
@@ -686,7 +686,7 @@ export class Settings {
 		if (Object.hasOwn(this.#overrides, "shellPath")) {
 			configSource = "the runtime settings override";
 		}
-		return procmgr.getShellConfig(shell, { configSource });
+		return procmgr.getShellConfig(shell, { configSource, env });
 	}
 
 	/**

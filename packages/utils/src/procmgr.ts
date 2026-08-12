@@ -17,6 +17,8 @@ export interface ShellConfig {
 export interface ShellConfigOptions {
 	/** File path or runtime layer that supplied the active shell setting. */
 	configSource?: string;
+	/** Environment used for shell selection and the spawned shell. Supplying it bypasses the process-global cache. */
+	env?: Record<string, string | undefined>;
 }
 let cachedShellConfig: ShellConfig | null = null;
 
@@ -31,14 +33,20 @@ export function isExecutable(path: string): boolean {
 		return false;
 	}
 }
+const SHELL_ENV_CONTROL_RE = /[\u0000-\u001f\u007f-\u009f]/;
+
+/** Whether a shell-selection environment value is safe to use as a path or PATH list. */
+export function isSafeShellEnvValue(value: string | undefined): value is string {
+	return value !== undefined && !SHELL_ENV_CONTROL_RE.test(value);
+}
 
 /**
  * Build the spawn environment (cached).
  */
-function buildSpawnEnv(shell: string): Record<string, string> {
-	const noCI = $env.PI_BASH_NO_CI || $env.CLAUDE_BASH_NO_CI;
+function buildSpawnEnv(shell: string, env: Record<string, string | undefined> = Bun.env): Record<string, string> {
+	const noCI = env.PI_BASH_NO_CI || env.CLAUDE_BASH_NO_CI;
 	return {
-		...filterChildShellEnv(Bun.env),
+		...filterChildShellEnv(env),
 		SHELL: shell,
 		GIT_EDITOR: "true",
 		GPG_TTY: "not a tty",
@@ -85,28 +93,33 @@ export function isPowerShell(shell: string): boolean {
 /**
  * Get shell prefix for wrapping commands (profilers, strace, etc.).
  */
-function getShellPrefix(): string | undefined {
-	return $env.PI_SHELL_PREFIX || $env.CLAUDE_CODE_SHELL_PREFIX;
+function getShellPrefix(env: Record<string, string | undefined> = Bun.env): string | undefined {
+	return env.PI_SHELL_PREFIX || env.CLAUDE_CODE_SHELL_PREFIX;
 }
 
 /**
  * Build full shell config from a shell path.
  */
-function buildConfig(shell: string): ShellConfig {
+function buildConfig(shell: string, env: Record<string, string | undefined> = Bun.env): ShellConfig {
 	return {
 		shell,
-		args: getShellArgs(shell),
-		env: buildSpawnEnv(shell),
-		prefix: getShellPrefix(),
+		args: getShellArgs(shell, env),
+		env: buildSpawnEnv(shell, env),
+		prefix: getShellPrefix(env),
 	};
 }
 
 /**
  * Resolve a basic shell (bash or sh) as fallback.
  */
-export function resolveBasicShell(): string | undefined {
+export function resolveBasicShell(searchPath?: string): string | undefined {
 	for (const name of ["bash", "bash.exe", "sh", "sh.exe"]) {
-		const resolved = $which(name);
+		const resolved =
+			searchPath === undefined
+				? $which(name)
+				: searchPath.length > 0 && isSafeShellEnvValue(searchPath)
+					? $which(name, { PATH: searchPath })
+					: null;
 		if (resolved) return resolved;
 	}
 
@@ -155,21 +168,22 @@ export function resolveWindowsShell(env: Record<string, string | undefined> = Bu
 		env.USERPROFILE && path.join(env.USERPROFILE, "scoop", "apps", "git", "current"),
 	];
 	for (const root of gitRoots) {
-		if (!root) continue;
+		if (!root || !isSafeShellEnvValue(root)) continue;
 		const candidate = path.join(root, "bin", "bash.exe");
 		if (fs.existsSync(candidate)) return candidate;
 	}
-
-	const bashOnPath = $which("bash.exe");
+	const trustedPath = isSafeShellEnvValue(env.PATH) ? env.PATH : "";
+	const bashOnPath = trustedPath.length > 0 ? $which("bash.exe", { PATH: trustedPath }) : null;
 	if (bashOnPath) return bashOnPath;
 
-	const shOnPath = $which("sh.exe");
+	const shOnPath = trustedPath.length > 0 ? $which("sh.exe", { PATH: trustedPath }) : null;
 	if (shOnPath) {
 		const siblingBash = path.join(path.dirname(shOnPath), "bash.exe");
 		return fs.existsSync(siblingBash) ? siblingBash : shOnPath;
 	}
 
-	return env.ComSpec || env.COMSPEC || "C:\\Windows\\System32\\cmd.exe";
+	const commandShell = env.ComSpec || env.COMSPEC;
+	return isSafeShellEnvValue(commandShell) ? commandShell : "C:\\Windows\\System32\\cmd.exe";
 }
 
 /**
@@ -182,44 +196,55 @@ export function resolveWindowsShell(env: Record<string, string | undefined> = Bu
  * 4. Fallback: sh
  */
 export function getShellConfig(customShellPath?: string, options: ShellConfigOptions = {}): ShellConfig {
+	const env = options.env ?? Bun.env;
+	const cacheable = options.env === undefined;
 	const configSource = options.configSource ?? path.join(getAgentDir(), MAIN_CONFIG_FILENAMES[0]);
 	// 1. Check user-specified shell path. Validated even on the cached path so a
 	// broken shellPath surfaces its guidance error instead of being masked by an
 	// earlier successful resolution in the same process.
 	if (customShellPath) {
+		if (!isSafeShellEnvValue(customShellPath)) {
+			throw new Error(
+				"Custom shell path contains control characters. Please update shellPath in your OMP settings.",
+			);
+		}
 		if (!fs.existsSync(customShellPath)) {
 			throw new Error(`Custom shell path not found: ${customShellPath}\nPlease update shellPath in ${configSource}`);
 		}
+		if (!cacheable) return buildConfig(customShellPath, env);
 		if (cachedShellConfig?.shell !== customShellPath) {
-			cachedShellConfig = buildConfig(customShellPath);
+			cachedShellConfig = buildConfig(customShellPath, env);
 		}
 		return cachedShellConfig;
 	}
-	if (cachedShellConfig) {
+	if (cacheable && cachedShellConfig) {
 		return cachedShellConfig;
 	}
 
 	if (process.platform === "win32") {
-		cachedShellConfig = buildConfig(resolveWindowsShell());
-		return cachedShellConfig;
+		const config = buildConfig(resolveWindowsShell(env), env);
+		if (cacheable) cachedShellConfig = config;
+		return config;
 	}
 
-	// Unix: prefer user's shell from $SHELL if it's bash/zsh and executable
-	const userShell = Bun.env.SHELL;
-	const isValidShell = userShell && (userShell.includes("bash") || userShell.includes("zsh"));
+	// Unix: prefer the user's absolute bash/zsh path from $SHELL.
+	const userShell = env.SHELL;
+	const shellName = userShell ? path.basename(userShell).toLowerCase() : "";
+	const isValidShell =
+		isSafeShellEnvValue(userShell) &&
+		path.isAbsolute(userShell) &&
+		(shellName.includes("bash") || shellName.includes("zsh"));
 	if (isValidShell && isExecutable(userShell)) {
-		cachedShellConfig = buildConfig(userShell);
-		return cachedShellConfig;
+		const config = buildConfig(userShell, env);
+		if (cacheable) cachedShellConfig = config;
+		return config;
 	}
 
-	// 4. Fallback: use basic shell
-	const basicShell = resolveBasicShell();
-	if (basicShell) {
-		cachedShellConfig = buildConfig(basicShell);
-		return cachedShellConfig;
-	}
-	cachedShellConfig = buildConfig("sh");
-	return cachedShellConfig;
+	// 4. Fallback: use a basic shell from the selected environment.
+	const basicShell = resolveBasicShell(options.env === undefined ? undefined : (env.PATH ?? ""));
+	const config = buildConfig(basicShell ?? "sh", env);
+	if (cacheable) cachedShellConfig = config;
+	return config;
 }
 
 /**

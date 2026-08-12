@@ -196,4 +196,19 @@ describe("postmortem expected cleanup errors", () => {
 		expect(result.stdout).toContain("cleanup deadline released");
 		expect(result.stderr).not.toContain("cleanup stayed pending after the deadline");
 	});
+
+	it("can scope SIGINT cleanup to an inherited-console child", async () => {
+		const result = await runPostmortemProbe(`
+			import { postmortem } from "${postmortemModuleUrl}";
+
+			const resume = postmortem.suspendSigintCleanup();
+			process.emit("SIGINT");
+			resume();
+			resume();
+			console.log("survived delegated SIGINT");
+		`);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stdout).toContain("survived delegated SIGINT");
+	});
 });

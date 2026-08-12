@@ -5,7 +5,8 @@
  */
 import { ExponentialYield } from "@oh-my-pi/pi-agent-core/utils/yield";
 import { type MinimizerOptions, Shell, type ShellRunResult } from "@oh-my-pi/pi-natives";
-import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
+import { filterChildShellEnv } from "@oh-my-pi/pi-utils/env";
+import { isCmdShell, isExecutable, isSafeShellEnvValue, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
 import { Settings, type ShellMinimizerSettings } from "../config/settings";
 import { OutputSink } from "../session/streaming-output";
 import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "../tools/output-meta";
@@ -61,6 +62,7 @@ export interface BashResult {
  *  command line, so a hostile `.envrc` can't smuggle shell syntax through
  *  `unset`. `.envrc` never produces non-identifier names in practice. */
 const SAFE_ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const BASH_EXECUTOR_LAUNCH_CWD = process.cwd();
 
 export interface DirenvPreflightOptions {
 	/** Caller-supplied env overlay; these values win over direnv-provided ones. */
@@ -320,13 +322,17 @@ function buildUserShellCommand(shell: string, args: string[], command: string): 
 	return [shell, ...ensureInteractiveShellArgs(shell, args), command].map(quoteShellArg).join(" ");
 }
 
-function resolveUserShellConfig(settings: Settings, baseConfig: ShellConfig): ShellConfig {
+function resolveUserShellConfig(
+	settings: Settings,
+	baseConfig: ShellConfig,
+	env: Record<string, string | undefined>,
+): ShellConfig {
 	const customShellPath = settings.get("shellPath");
-	const envShell = Bun.env.SHELL;
+	const envShell = env.SHELL;
 	if (customShellPath || process.platform === "win32" || !envShell || envShell === baseConfig.shell) {
 		return baseConfig;
 	}
-	if (!supportsAutoUserShell(envShell) || !isExecutable(envShell)) {
+	if (!isSafeShellEnvValue(envShell) || !supportsAutoUserShell(envShell) || !isExecutable(envShell)) {
 		return baseConfig;
 	}
 
@@ -342,9 +348,10 @@ function resolveUserShellConfig(settings: Settings, baseConfig: ShellConfig): Sh
 
 export async function executeBash(command: string, options?: BashExecutorOptions): Promise<BashResult> {
 	const settings = await Settings.init();
-	const baseShellConfig = settings.getShellConfig();
+	const trustedEnv = filterChildShellEnv(Bun.env, BASH_EXECUTOR_LAUNCH_CWD);
+	const baseShellConfig = settings.getShellConfig(trustedEnv);
 	const shellConfig =
-		options?.useUserShell === true ? resolveUserShellConfig(settings, baseShellConfig) : baseShellConfig;
+		options?.useUserShell === true ? resolveUserShellConfig(settings, baseShellConfig, trustedEnv) : baseShellConfig;
 	const { shell, args, env: shellEnv, prefix } = shellConfig;
 	const bashShell = isBashShell(shell);
 	const snapshotPath = bashShell ? await getOrCreateSnapshot(shell, shellEnv) : null;

@@ -154,6 +154,7 @@ export class WelcomeComponent implements Component {
 		private providerName: string,
 		private recentSessions: RecentSession[] = [],
 		private lspServers: LspServerInfo[] = [],
+		private readonly shellName = "shell",
 	) {}
 	get tip(): string | undefined {
 		if (this.#selectedTip === undefined) {
@@ -330,7 +331,7 @@ export class WelcomeComponent implements Component {
 			` ${theme.bold(theme.fg("accent", "Tips"))}`,
 			` ${theme.fg("dim", "#")}${theme.fg("muted", " for prompt actions")}`,
 			` ${theme.fg("dim", "/")}${theme.fg("muted", " for commands")}`,
-			` ${theme.fg("dim", "!")}${theme.fg("muted", " to run bash")}`,
+			` ${theme.fg("dim", "!")}${theme.fg("muted", ` for shell (${this.shellName})`)}`,
 			` ${theme.fg("dim", "$")}${theme.fg("muted", " to run python")}`,
 			separator,
 			` ${theme.bold(theme.fg("accent", "LSP Servers"))}`,

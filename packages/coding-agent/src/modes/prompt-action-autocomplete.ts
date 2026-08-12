@@ -1,3 +1,5 @@
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import {
 	type AutocompleteItem,
 	type AutocompleteProvider,
@@ -6,6 +8,8 @@ import {
 	getKeybindings,
 	type SlashCommand,
 } from "@oh-my-pi/pi-tui";
+import { filterChildShellEnv } from "@oh-my-pi/pi-utils/env";
+import { isSafeShellEnvValue } from "@oh-my-pi/pi-utils/procmgr";
 import { formatKeyHints, type KeybindingsManager } from "../config/keybindings";
 import { isSettingsInitialized, settings } from "../config/settings";
 import { applyEmojiCompletion, getEmojiSuggestions, isEmojiPrefix, tryEmojiInlineReplace } from "./emoji-autocomplete";
@@ -15,6 +19,107 @@ import {
 	getInternalUrlSuggestions,
 	isInternalUrlPrefix,
 } from "./internal-url-autocomplete";
+
+interface ExecutableCandidateCache {
+	key: string;
+	candidates: Promise<AutocompleteItem[]>;
+}
+
+interface BangCommandCompletionContext {
+	commandPrefix: string | null;
+}
+
+let executableCandidateCache: ExecutableCandidateCache | undefined;
+const SAFE_EXECUTABLE_NAME_RE = /^[A-Za-z0-9_+.,:@%=-]+$(?![\s\S])/;
+const PROMPT_ACTION_LAUNCH_CWD = process.cwd();
+
+function getBangCommandCompletionContext(
+	lines: string[],
+	cursorLine: number,
+	cursorCol: number,
+): BangCommandCompletionContext | null {
+	if (cursorLine !== 0) return null;
+	const textBeforeCursor = (lines[0] || "").slice(0, cursorCol);
+	let index = 0;
+	while (textBeforeCursor[index] === " " || textBeforeCursor[index] === "\t") index += 1;
+	if (textBeforeCursor[index] !== "!") return null;
+	index += textBeforeCursor[index + 1] === "!" ? 2 : 1;
+	while (textBeforeCursor[index] === " " || textBeforeCursor[index] === "\t") index += 1;
+	const commandStart = index;
+	let quote: "'" | '"' | null = null;
+	let escaped = false;
+
+	for (; index < textBeforeCursor.length; index += 1) {
+		const char = textBeforeCursor[index] ?? "";
+		if (escaped) {
+			escaped = false;
+			continue;
+		}
+		if (char === "\\" && quote !== "'") {
+			escaped = true;
+			continue;
+		}
+		if (quote) {
+			if (char === quote) quote = null;
+			continue;
+		}
+		if (char === "'" || char === '"') {
+			quote = char;
+			continue;
+		}
+		if (char === " " || char === "\t") return { commandPrefix: null };
+	}
+
+	return { commandPrefix: textBeforeCursor.slice(commandStart) };
+}
+
+async function discoverExecutableCandidates(searchPath: string, pathExt: string): Promise<AutocompleteItem[]> {
+	const executableNames = new Set<string>();
+	const windowsExtensions = new Set(
+		(pathExt || ".COM;.EXE;.BAT;.CMD")
+			.split(";")
+			.filter(Boolean)
+			.map(extension => extension.toLowerCase()),
+	);
+	const directories = [...new Set(searchPath.split(path.delimiter).map(directory => directory || "."))];
+
+	await Promise.all(
+		directories.map(async directory => {
+			const entries = await fs.readdir(directory, { withFileTypes: true }).catch(() => null);
+			if (!entries) return;
+			await Promise.all(
+				entries.map(async entry => {
+					if (!SAFE_EXECUTABLE_NAME_RE.test(entry.name)) return;
+					if (!entry.isFile() && !entry.isSymbolicLink()) return;
+					if (process.platform === "win32") {
+						if (windowsExtensions.has(path.extname(entry.name).toLowerCase())) executableNames.add(entry.name);
+						return;
+					}
+					try {
+						const stats = await fs.stat(path.join(directory, entry.name));
+						if (stats.isFile() && (stats.mode & 0o111) !== 0) executableNames.add(entry.name);
+					} catch {
+						// Ignore entries that disappear or become inaccessible during discovery.
+					}
+				}),
+			);
+		}),
+	);
+
+	return [...executableNames].sort().map(value => ({ value, label: value }));
+}
+
+function getExecutableCandidates(): Promise<AutocompleteItem[]> {
+	const trustedEnv = filterChildShellEnv(process.env, PROMPT_ACTION_LAUNCH_CWD);
+	const searchPath = trustedEnv.PATH;
+	if (!isSafeShellEnvValue(searchPath) || searchPath.length === 0) return Promise.resolve([]);
+	const pathExt = trustedEnv.PATHEXT ?? "";
+	const key = `${process.platform}\0${searchPath}\0${pathExt}`;
+	if (executableCandidateCache?.key === key) return executableCandidateCache.candidates;
+	const candidates = discoverExecutableCandidates(searchPath, pathExt);
+	executableCandidateCache = { key, candidates };
+	return candidates;
+}
 
 interface PromptActionDefinition {
 	id: string;
@@ -145,6 +250,19 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 	): Promise<{ items: AutocompleteItem[]; prefix: string } | null> {
 		const currentLine = lines[cursorLine] || "";
 		const textBeforeCursor = currentLine.slice(0, cursorCol);
+		const bangContext = getBangCommandCompletionContext(lines, cursorLine, cursorCol);
+		if (bangContext) {
+			if (bangContext.commandPrefix === null) {
+				return this.#baseProvider.getSuggestions(lines, cursorLine, cursorCol);
+			}
+			const commandPrefix = bangContext.commandPrefix;
+			const items = (await getExecutableCandidates()).filter(item =>
+				process.platform === "win32"
+					? item.value.toLowerCase().startsWith(commandPrefix.toLowerCase())
+					: item.value.startsWith(commandPrefix),
+			);
+			return items.length > 0 ? { items, prefix: commandPrefix } : null;
+		}
 		const leadingSlashStart = findLeadingSlashCommandStart(textBeforeCursor);
 		const hasPromptTextBeforeCursorLine = lines.slice(0, cursorLine).some(line => (line || "").trim() !== "");
 		const commandText =
@@ -248,6 +366,28 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 			return applyEmojiCompletion(lines, cursorLine, cursorCol, item, prefix);
 		}
 		return this.#baseProvider.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
+	}
+
+	async getForceFileSuggestions(
+		lines: string[],
+		cursorLine: number,
+		cursorCol: number,
+	): Promise<{ items: AutocompleteItem[]; prefix: string } | null> {
+		const bangContext = getBangCommandCompletionContext(lines, cursorLine, cursorCol);
+		if (bangContext && bangContext.commandPrefix !== null) {
+			const commandPrefix = bangContext.commandPrefix;
+			const isPathLike =
+				commandPrefix.startsWith('"') ||
+				commandPrefix.startsWith("'") ||
+				commandPrefix.includes("/") ||
+				commandPrefix.includes("\\");
+			if (!isPathLike) return this.getSuggestions(lines, cursorLine, cursorCol);
+		}
+		return this.#baseProvider.getForceFileSuggestions(lines, cursorLine, cursorCol);
+	}
+
+	shouldTriggerFileCompletion(lines: string[], cursorLine: number, cursorCol: number): boolean {
+		return this.#baseProvider.shouldTriggerFileCompletion(lines, cursorLine, cursorCol);
 	}
 
 	getInlineHint(lines: string[], cursorLine: number, cursorCol: number): string | null {
