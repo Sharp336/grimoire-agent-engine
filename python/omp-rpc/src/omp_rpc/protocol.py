@@ -922,6 +922,7 @@ class ExtensionUiRequest:
     method: ExtensionUiMethod
     title: str | None = None
     options: tuple[str, ...] | None = None
+    help_text: str | None = field(default=None, kw_only=True)
     message: str | None = None
     placeholder: str | None = None
     prefill: str | None = None
@@ -1540,6 +1541,7 @@ def parse_extension_ui_request(payload: JsonObject) -> ExtensionUiRequest:
         options=_tuple_of_strings(
             payload.get("options"), field="extension_ui_request.options"
         ),
+        help_text=_optional_str(payload, "helpText"),
         message=_optional_str(payload, "message"),
         placeholder=_optional_str(payload, "placeholder"),
         prefill=_optional_str(payload, "prefill"),

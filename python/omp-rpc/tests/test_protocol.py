@@ -229,6 +229,40 @@ class ProtocolParsingTests(unittest.TestCase):
         self.assertTrue(notification.requires_response())
         self.assertFalse(notification.is_passive())
 
+    def test_parse_select_request_preserves_optional_help_text(self) -> None:
+        notification = parse_notification(
+            {
+                "type": "extension_ui_request",
+                "id": "ui-plan-first",
+                "method": "select",
+                "title": "How would you like me to continue?",
+                "options": ["Research first", "Proceed directly"],
+                "helpText": (
+                    "Turn off Plan-First Suggestions in /settings → Tasks → Modes."
+                ),
+            }
+        )
+
+        self.assertIsInstance(notification, ExtensionUiRequest)
+        self.assertEqual(
+            notification.help_text,
+            "Turn off Plan-First Suggestions in /settings → Tasks → Modes.",
+        )
+
+    def test_parse_select_request_defaults_missing_help_text_to_none(self) -> None:
+        notification = parse_notification(
+            {
+                "type": "extension_ui_request",
+                "id": "ui-select",
+                "method": "select",
+                "title": "Continue?",
+                "options": ["Yes", "No"],
+            }
+        )
+
+        self.assertIsInstance(notification, ExtensionUiRequest)
+        self.assertIsNone(notification.help_text)
+
     def test_parse_open_url_request(self) -> None:
         notification = parse_notification(
             {

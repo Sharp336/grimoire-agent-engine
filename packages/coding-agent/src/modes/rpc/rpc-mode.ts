@@ -655,6 +655,27 @@ export function requestRpcDialog<T>(
 	output({ type: "extension_ui_request", id, ...request } as RpcExtensionUIRequest);
 	return promise;
 }
+
+/** Sends an RPC selector request with the serializable dialog options supported by the client. */
+export function requestRpcSelect(
+	pendingRequests: Map<string, PendingExtensionRequest>,
+	output: RpcOutput,
+	title: string,
+	options: ExtensionUISelectItem[],
+	dialogOptions?: ExtensionUIDialogOptions,
+): Promise<string | undefined> {
+	const request: Omit<Extract<RpcExtensionUIRequest, { method: "select" }>, "type" | "id"> = {
+		method: "select",
+		title,
+		options: options.map(getExtensionUISelectOptionLabel),
+		...(dialogOptions?.timeout === undefined ? {} : { timeout: dialogOptions.timeout }),
+		...(dialogOptions?.helpText === undefined ? {} : { helpText: dialogOptions.helpText }),
+	};
+	return requestRpcDialog(pendingRequests, output, dialogOptions, undefined, request, response =>
+		parseValueDialogResponse(response, dialogOptions),
+	);
+}
+
 /**
  * Run in RPC mode.
  * Listens for JSON commands on stdin, outputs events and responses on stdout.
@@ -742,19 +763,7 @@ export async function runRpcMode(
 			options: ExtensionUISelectItem[],
 			dialogOptions?: ExtensionUIDialogOptions,
 		): Promise<string | undefined> {
-			return requestRpcDialog(
-				this.pendingRequests,
-				this.output,
-				dialogOptions,
-				undefined,
-				{
-					method: "select",
-					title,
-					options: options.map(getExtensionUISelectOptionLabel),
-					timeout: dialogOptions?.timeout,
-				},
-				response => parseValueDialogResponse(response, dialogOptions),
-			);
+			return requestRpcSelect(this.pendingRequests, this.output, title, options, dialogOptions);
 		}
 
 		confirm(title: string, message: string, dialogOptions?: ExtensionUIDialogOptions): Promise<boolean> {
