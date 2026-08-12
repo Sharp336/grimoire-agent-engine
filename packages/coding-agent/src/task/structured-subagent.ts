@@ -385,21 +385,11 @@ function buildExecutorOptions(
 	};
 	const restrictToolNames = policy.planMode || session.restrictToolNames === true;
 	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
-	const parentMountedHostToolNames = session.getMountedXdevToolNames?.() ?? [];
-	const parentHostTools = new Map(
-		(session.getRpcHostTools?.() ?? [])
-			.filter(tool => enableMCP || !isMCPToolName(tool.name))
-			.map(tool => [tool.name, tool]),
-	);
-	if (!restrictToolNames) {
-		for (const name of parentMountedHostToolNames) {
-			if ((!enableMCP && isMCPToolName(name)) || session.hasBuiltInTool?.(name) || parentHostTools.has(name)) {
-				continue;
-			}
-			const tool = session.getToolByName?.(name);
-			if (tool) parentHostTools.set(name, tool);
-		}
-	}
+	const parentHostTools = (session.getRpcHostTools?.() ?? []).filter(tool => enableMCP || !isMCPToolName(tool.name));
+	const parentHostToolNames = new Set(parentHostTools.map(tool => tool.name));
+	const parentMountedHostToolNames = restrictToolNames
+		? []
+		: (session.getMountedXdevToolNames?.() ?? []).filter(name => parentHostToolNames.has(name));
 	return {
 		cwd: session.cwd,
 		additionalDirectories: session.additionalDirectories,
@@ -454,14 +444,14 @@ function buildExecutorOptions(
 		rules: session.rules,
 		preloadedExtensionPaths: restrictToolNames ? [] : session.extensionPaths,
 		preloadedCustomToolPaths: restrictToolNames ? [] : session.customToolPaths,
-		parentHostTools: restrictToolNames ? [] : [...parentHostTools.values()],
+		parentHostTools: restrictToolNames ? [] : parentHostTools,
 		localProtocolOptions,
 		parentArtifactManager: session.getArtifactManager?.() ?? undefined,
 		parentHindsightSessionState: session.getHindsightSessionState?.(),
 		parentMnemopiSessionState: session.getMnemopiSessionState?.(),
 		parentTelemetry: session.getTelemetry?.(),
 		parentEvalSessionId: request.shareEvalSession === false ? undefined : (session.getEvalSessionId?.() ?? undefined),
-		parentMountedHostToolNames: parentMountedHostToolNames.filter(name => parentHostTools.has(name)),
+		parentMountedHostToolNames,
 		parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
 		parentServiceTier: session.getServiceTierByFamily ? (session.getServiceTierByFamily() ?? null) : undefined,
 	};

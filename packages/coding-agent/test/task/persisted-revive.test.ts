@@ -228,6 +228,36 @@ describe("persisted subagent revival", () => {
 		expect(mountedToolNames).toEqual([["ida_execute_python", "browser"]]);
 	});
 
+	it("does not cold-forward parent-bound mounted custom tools", async () => {
+		const cwd = makeTempDir("@pi-parent-bound-custom-revive-");
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, [
+			"ida_execute_python",
+			"inline_parent_custom",
+		]);
+		const rpcHostTool = { name: "ida_execute_python" } as AgentTool;
+		const parentBoundCustomTool = { name: "inline_parent_custom" } as AgentTool;
+		const activeToolNames: string[][] = [];
+		const mountedToolNames: string[][] = [];
+		const refreshedHostTools: string[][] = [];
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return {
+				session: createRevivedSession(activeToolNames, refreshedHostTools, mountedToolNames).session,
+			} as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd, undefined, [rpcHostTool, parentBoundCustomTool], [rpcHostTool])(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(capturedOptions?.toolNames).toEqual(["read", "yield", "ida_execute_python", "inline_parent_custom"]);
+		expect(refreshedHostTools).toEqual([["ida_execute_python"]]);
+		expect(activeToolNames).toEqual([["read", "yield", "ida_execute_python", "inline_parent_custom"]]);
+		expect(mountedToolNames).toEqual([["ida_execute_python", "inline_parent_custom"]]);
+	});
+
 	it("keeps MCP disabled while restoring non-MCP mounted tools", async () => {
 		const cwd = makeTempDir("@pi-mcp-disabled-revive-");
 		const sessionFile = await createPersistedSession(

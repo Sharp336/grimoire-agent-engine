@@ -154,18 +154,7 @@ export function createPersistedSubagentReviverFactory(
 					: {}),
 			});
 			if (!restrictToolNames) {
-				const inheritedHostTools = [
-					...new Map(
-						[
-							...parentRpcHostTools.filter(tool => persistedToolNames.has(tool.name)),
-							...persistedMountedTools.flatMap(name => {
-								if (!parentMountedTools.has(name) || ctx.session.hasBuiltInTool(name)) return [];
-								const tool = ctx.session.getToolByName(name);
-								return tool ? [tool] : [];
-							}),
-						].map(tool => [tool.name, tool]),
-					).values(),
-				].filter(tool => persistedToolNames.has(tool.name));
+				const inheritedHostTools = parentRpcHostTools.filter(tool => persistedToolNames.has(tool.name));
 				if (inheritedHostTools.length > 0) await session.refreshRpcHostTools(inheritedHostTools);
 			}
 			// Restore the child's exact top-level versus mounted snapshot.
