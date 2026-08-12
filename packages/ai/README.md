@@ -54,6 +54,7 @@ Unified LLM API with automatic model discovery, provider configuration, token an
 - **Mistral**
 - **Groq**
 - **Cerebras**
+- **DeepInfra** (requires `DEEPINFRA_API_KEY` or `/login deepinfra`)
 - **Together**
 - **Moonshot** (requires `MOONSHOT_API_KEY`)
 - **Qianfan** (requires `QIANFAN_API_KEY`)
@@ -936,6 +937,7 @@ In Node.js environments, you can set environment variables to avoid passing API 
 | Mistral        | `MISTRAL_API_KEY`                                                            |
 | Groq           | `GROQ_API_KEY`                                                               |
 | Cerebras       | `CEREBRAS_API_KEY`                                                           |
+| DeepInfra      | `DEEPINFRA_API_KEY`                                                          |
 | Together       | `TOGETHER_API_KEY`                                                           |
 | Qianfan        | `QIANFAN_API_KEY`                                                            |
 | Hugging Face   | `HUGGINGFACE_HUB_TOKEN` or `HF_TOKEN`                                        |
