@@ -87,7 +87,7 @@ async function resolveGoWorkspaceDiagnosticsCommand(cwd: string, signal?: AbortS
  */
 async function hasMesonValaBuild(cwd: string): Promise<boolean> {
 	try {
-		const content = await fs.promises.readFile(path.join(cwd, "meson.build"), "utf-8");
+		const content = await Bun.file(path.join(cwd, "meson.build")).text();
 		const start = content.indexOf("project(");
 		if (start === -1) return false;
 		// Walk forward matching parens to find the closing paren of project().
