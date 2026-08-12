@@ -4639,12 +4639,13 @@ export class AgentSession {
 			// Wait for (and persist) this turn's messages so shake() sees the
 			// tool result that crossed the interval in the session branch.
 			await this.#messageEndPersistenceTail;
-			// Bail if this turn's messages are out of order on the branch —
-			// shake() would read an unsafe branch and the splice could drop the
-			// turn the next model call must see (same guard as
-			// maintainContextMidRun). The sync flag stays set so the agent_end
-			// sync path runs the shake once persistence is safe.
-			if (!(await this.#persistTurnMessagesForMidRunCompaction(context))) return;
+			// If the just-finished turn is out of order on the branch, bail without
+			// shaking: the next agent_end would otherwise re-enter #runPeriodicShake
+			// with the same unsafe branch and rebuild from stale tool results.
+			if (!(await this.#persistTurnMessagesForMidRunCompaction(context))) {
+				this.#shakeNeedsAgentSync = false;
+				return;
+			}
 			const result = await this.shake("elide", {
 				config: DEFAULT_SHAKE_CONFIG,
 				skipAgentUpdate: true,

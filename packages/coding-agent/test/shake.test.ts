@@ -1173,9 +1173,15 @@ describe("AgentSession shake", () => {
 			await settle(session);
 
 			expect(skippedAssistantAppends).toBe(1);
-			// Mid-run shake bailed (out-of-order persistence); only the agent_end
-			// sync shake fired, once persistence settled.
-			expect(shakeSpy).toHaveBeenCalledTimes(1);
+			// Mid-run shake bailed (out-of-order persistence), and the stale sync
+			// flag must be cleared so the next agent_end does not re-enter the
+			// same unsafe branch.
+			expect(shakeSpy).toHaveBeenCalledTimes(0);
+
+			scripted.push({ stopReason: "stop", text: "again" });
+			await session.prompt("again");
+			await settle(session);
+			expect(shakeSpy).toHaveBeenCalledTimes(0);
 
 			// The live loop array was not spliced: the next model call still sees
 			// the full assistant turn with its raw tool result.
