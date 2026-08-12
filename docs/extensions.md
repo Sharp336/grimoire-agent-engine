@@ -183,14 +183,55 @@ Also exposed:
 
 ### Message delivery semantics
 
-`pi.sendMessage(message, options)` supports:
+`pi.sendMessage(message, options)` delivers custom messages (`customType`, `content`, optional `display`). Choose `deliverAs` based on **when** the message should land and whether it may interrupt in-flight work.
 
-- `deliverAs: "steer"` (default) — interrupts current run
-- `deliverAs: "followUp"` — queued to run after current run
-- `deliverAs: "nextTurn"` — stored and injected on the next user prompt
-- `triggerTurn: true` — starts a turn when idle (also honored with `deliverAs: "nextTurn"`: idle prompts immediately; while streaming the queued message schedules an internal continuation)
+Omitting `deliverAs` while the agent is streaming is equivalent to `"steer"`. While idle, a message without `triggerTurn` appends to context and persists without starting a turn.
 
-`pi.sendUserMessage(content, { deliverAs })` always goes through prompt flow. Omit `deliverAs` to start a normal prompt when idle; while streaming, omitted `deliverAs` queues the message as a steer. Set `deliverAs: "followUp"` to wait until the current run finishes.
+#### `deliverAs` modes
+
+| Mode | While streaming | Idle (no `triggerTurn`) | Idle + `triggerTurn: true` | Interrupts tools? | Wakes on strand? |
+| --- | --- | --- | --- | --- | --- |
+| `steer` (default mid-stream) | Steer queue (abortive) | Queue / start per existing rules | — | **Yes** | N/A (steer path) |
+| `followUp` | End-of-**run** queue | Queue | — | No | N/A |
+| `nextTurn` | Hidden until next **user prompt** | Append / optional trigger | Starts turn | No | N/A |
+| `aside` | Next **agent step** boundary | Append + persist | Starts turn | No | **No** |
+
+- **`steer`** — Aborts the current stream and in-flight tools, then injects the message. Use when the user (or an extension) must redirect the agent immediately.
+- **`followUp`** — Waits until the current **run** finishes (no more tool calls in this turn). The message is processed as a continuation after the run ends. Does not fold in mid-turn.
+- **`nextTurn`** — Held until the **user** sends the next prompt. Not the same as the next model step or tool round — it survives across idle gaps and is injected only when a new user message arrives (unless `triggerTurn` starts a turn while idle).
+- **`aside`** — Folds hidden context at the next **agent step boundary** (after tool results, before the next model call) without canceling tools or aborting the stream. While streaming, `triggerTurn` is ignored — the message is queued for step-boundary delivery. While idle without `triggerTurn`, the message appends and persists like other passive context; in plan mode this is the same — append and persist with no autonomous wake. **Does not wake** when stranded (queued near end-of-turn but missed the last step-boundary poll): content is flushed into context only, with no surprise model call. Use `triggerTurn: true` while idle, or `followUp` / `steer`, when a reaction is required.
+
+Set `display: false` on aside payloads when the content is machine/context-only (background jobs, peer notifications, diagnostics) and should not appear as a visible chat card.
+
+#### Streaming vs idle
+
+| State | `steer` | `followUp` | `nextTurn` | `aside` |
+| --- | --- | --- | --- | --- |
+| **Streaming** | Interrupt + steer queue | End-of-run queue | Hidden next-turn queue | Step-boundary aside queue; `triggerTurn` ignored |
+| **Idle** | Append or queue per steer rules | Queue for next continuation | Append; optional `triggerTurn` starts turn | Append + persist; optional `triggerTurn` starts turn |
+| **Stranded** (turn ended before drain) | Per steer/followUp rules | Per followUp rules | Persists for next user prompt | Context-only flush; **no wake** |
+| **Compacting / disconnected** | Queue | Queue | Queue | Queue; flush after reconnect |
+
+Session switch, `newSession`, and `fork` drop pending aside queues — they are not carried into the new session.
+
+#### `triggerTurn`
+
+`triggerTurn: true` starts a turn when idle. It is also honored with `deliverAs: "nextTurn"`: idle prompts immediately; while streaming, the queued message schedules an internal continuation.
+
+`triggerTurn` is **ignored** for `deliverAs: "aside"` while streaming — the aside is always queued for the next step boundary.
+
+#### Anti-patterns
+
+- **`followUp` is not mid-turn inject.** It waits until the entire run completes (no further tool calls). For step-boundary context while tools are still running, use `aside`.
+- **`nextTurn` is not the next model step.** It is held until the **user** sends the next prompt. For context that should fold before the next model call within the current turn, use `aside`.
+- **Do not use `followUp` for background notifications during a busy turn** when you only need the agent to see the note on its next step — that piles up until end-of-run. Use `aside` instead.
+- **Do not expect `aside` to wake a stranded session.** If the agent has gone idle with a queued aside that missed the last poll, the content is persisted but no model call is started. Use `triggerTurn: true` while idle, or `followUp` / `steer`, when a response is required.
+
+See `packages/coding-agent/examples/extensions/aside-delivery.ts` for a minimal busy-path aside pattern.
+
+#### `sendUserMessage`
+
+`pi.sendUserMessage(content, { deliverAs })` always goes through prompt flow. Supported values are `"steer"` and `"followUp"` only. Omit `deliverAs` to start a normal prompt when idle; while streaming, omitted `deliverAs` queues the message as a steer. Set `deliverAs: "followUp"` to wait until the current run finishes. For custom mid-turn aside injection, use `pi.sendMessage` with `deliverAs: "aside"`.
 
 ## 2) Handler context (`ExtensionContext`)
 
