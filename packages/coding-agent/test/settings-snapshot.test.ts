@@ -187,7 +187,7 @@ describe("settings snapshot", () => {
 		for (const entry of buildSettingsSnapshot(Settings.isolated()).settings) {
 			if (entry.redacted === true) continue;
 			expect(entry.ui).toBeDefined();
-			expect(["appearance", "model"]).toContain(entry.ui?.tab ?? "");
+			expect(["appearance", "model"]).toContain(entry.ui?.tab);
 			expect(entry.ui?.secret).not.toBe(true);
 			expect(["boolean", "enum"]).toContain(entry.type);
 		}

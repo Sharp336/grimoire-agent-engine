@@ -17,11 +17,9 @@ import { type Message, serviceTierFamily } from "@oh-my-pi/pi-ai";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import type { EditorTheme, TUI } from "@oh-my-pi/pi-tui";
 import { isEnoent, isRecord, readLines, Snowflake } from "@oh-my-pi/pi-utils";
-import { expandEmoticons } from "../emoji-autocomplete";
 import { JobProjectionService } from "../../async";
 import { reset as resetCapabilities } from "../../capability";
 import type { KeybindingsManager } from "../../config/keybindings";
-import { resolveLocalRoot } from "../../internal-urls";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import type { EvalToolDetails } from "../../eval/types";
 import {
@@ -85,16 +83,12 @@ import { SessionQueueEntryNotFoundError, SessionQueueInvalidPositionError } from
 import { FileSessionStorage } from "../../session/session-storage";
 import { ToolInventoryUnavailableError } from "../../session/session-tools";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
-import { lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
-import { parseSlashCommand } from "../../slash-commands/helpers/parse";
 import { buildAvailableSlashCommands } from "../../slash-commands/available-commands";
-import { buildArgumentCompletions, buildDirectoryArgumentCompletions, buildSubcommandInlineHint } from "../../slash-commands/builtin-completions";
 import { getSelectableThinkingLevels } from "../../thinking";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { EvalTool } from "../../tools/eval";
 import type { EventBus } from "../../utils/event-bus";
 import { calculateTokensPerSecond } from "../../utils/token-rate";
-import { ComposerInputRouter } from "../controllers/composer-input-router";
 import {
  ProviderAuthController,
  ProviderAuthError,
@@ -1415,12 +1409,6 @@ export async function runRpcMode(
   getAuthority: () => sessionAuthority.captureLifecycleAuthority(),
   getSessionName: () => session.sessionName,
   getCwd: () => session.sessionManager.getCwd(),
-  getPasteLocalRoot: () =>
-   resolveLocalRoot({
-    getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
-    getSessionId: () => session.sessionManager.getSessionId(),
-   }),
-  getLargePasteThreshold: () => session.settings.get("paste.largeMenuThreshold"),
  });
  const unsubscribeSessionNameChanged = session.sessionManager.onSessionNameChanged(() =>
   interactiveSurface.sessionNameChanged(),
@@ -1837,24 +1825,12 @@ export async function runRpcMode(
   },
   uiContext: rpcUiContext,
  });
- const availableCommands = await buildAvailableSlashCommands(session);
- const autocompleteCommands = availableCommands.map(command => {
-  const argumentCompletions =
-   command.name === "move"
-    ? buildDirectoryArgumentCompletions()
-    : command.subcommands
-     ? buildArgumentCompletions(command.subcommands)
-     : undefined;
-  return {
-   name: command.name,
-   aliases: command.aliases,
-   description: command.description,
-   argumentHint: command.input?.hint,
-   allowArgs: command.allowArgs,
-   ...(argumentCompletions ? { getArgumentCompletions: argumentCompletions } : {}),
-   ...(command.subcommands ? { getInlineHint: buildSubcommandInlineHint(command.subcommands) } : {}),
-  };
- });
+ const autocompleteCommands = (await buildAvailableSlashCommands(session)).map(command => ({
+  name: command.name,
+  aliases: command.aliases,
+  description: command.description,
+  argumentHint: command.input?.hint,
+ }));
  interactiveSurface.configureAutocomplete(autocompleteCommands, session.sessionManager.getCwd());
  const semanticRendering = new RpcSemanticRenderingManager(output);
  const provenanceSource: RpcProvenanceSource = {
@@ -2910,208 +2886,6 @@ export async function runRpcMode(
       command.text,
      ),
     );
-   case "ui_editor_paste_resolve":
-    return success(
-     id,
-     "ui_editor_paste_resolve",
-     await interactiveSurface.resolvePasteChoice(
-      command.channelId,
-      command.generation,
-      command.expectedRevision,
-      command.pendingId,
-      command.choice,
-     ),
-    );
-   case "ui_editor_submit": {
-    let editor = interactiveSurface.prepareEditorSubmit(
-     command.channelId,
-     command.generation,
-     command.expectedRevision,
-    );
-    const images = command.images && command.images.length > 0 ? [...command.images] : undefined;
-    const submitText = interactiveSurface.expandEditorText(editor.text);
-    const router = new ComposerInputRouter({
-     isStreaming: session.isStreaming,
-     queuedMessageCount: session.queuedMessageCount,
-     isCompacting: session.isCompacting,
-     expandEmoticons: session.settings.get("emojiAutocomplete") ?? true,
-     expandText: expandEmoticons,
-     isKnownSkillCommand: text => {
-      if (!session.skillsSettings?.enableSkillCommands) return false;
-      const invocation = parseSkillInvocation(text);
-      return invocation !== undefined && session.skills.some(skill => skill.name === invocation.name);
-     },
-     builtin: async text => {
-      const result = await executeAcpBuiltinSlashCommand(text, {
-       session,
-       sessionManager: session.sessionManager,
-       settings: session.settings,
-       cwd: session.sessionManager.getCwd(),
-       output: text => {
-        if (sessionAuthority.isCurrent(commandAuthority)) output({ type: "command_output", text });
-       },
-       refreshCommands: () => {
-        if (sessionAuthority.isCurrent(commandAuthority)) void emitAvailableCommandsUpdate(commandAuthority);
-       },
-       reloadPlugins: async () => {
-        sessionAuthority.assertCurrent(commandAuthority);
-        await reloadPluginState(commandAuthority);
-        sessionAuthority.assertCurrent(commandAuthority);
-       },
-      });
-      if (result !== false) return "prompt" in result ? result : { consumed: true };
-      const parsed = parseSlashCommand(text);
-      const builtin = parsed ? lookupBuiltinSlashCommand(parsed.name) : undefined;
-      if (builtin?.handleTui) {
-       if (sessionAuthority.isCurrent(commandAuthority)) {
-        output({ type: "command_output", text: `/${builtin.name} requires an interactive UI presentation.` });
-       }
-       return { consumed: true };
-      }
-      return undefined;
-     },
-    });
-    const routed = await router.route(submitText, images, command.mode);
-    const reject = (): RpcResponse =>
-     success(id, "ui_editor_submit", {
-      accepted: false,
-      disposition: "rejected",
-      editor,
-     });
-    const accept = (disposition: Extract<typeof routed, { kind: string }>["kind"], operationId?: string): RpcResponse => {
-     editor = interactiveSurface.acceptEditorSubmit(
-      command.channelId,
-      command.generation,
-      command.expectedRevision,
-     );
-     return success(id, "ui_editor_submit", {
-      accepted: true,
-      disposition,
-      editor,
-      ...(operationId === undefined ? {} : { operationId }),
-     });
-    };
-    if (routed.kind === "noop") return success(id, "ui_editor_submit", { accepted: false, disposition: "noop", editor });
-    if (routed.kind === "abort-on-empty-running-input") {
-     try {
-      await session.abort({ reason: USER_INTERRUPT_LABEL });
-      return accept(routed.kind);
-     } catch {
-      return reject();
-     }
-    }
-    if (routed.kind === "collaboration") return success(id, "ui_editor_submit", { accepted: false, disposition: routed.kind, editor });
-    if (routed.kind === "builtin" && routed.consumed) return accept(routed.kind);
-    const startOperation = (
-     start: () => Promise<boolean>,
-     disposition: Extract<typeof routed, { kind: string }>["kind"],
-    ): RpcResponse => {
-     const operation = operationManager.start(id, "prompt");
-     editor = interactiveSurface.acceptEditorSubmit(
-      command.channelId,
-      command.generation,
-      command.expectedRevision,
-     );
-     setImmediate(() => {
-      if (!operationManager.begin(operation)) return;
-      const tracked = watchAndReportLocalOnlyPromptResult({
-       id,
-       startPrompt: start,
-       output,
-       onError: () => { },
-       extensionUserMessageTracker,
-       isAuthorityCurrent: () => sessionAuthority.isCurrent(commandAuthority),
-       operation: {
-        handle: operation,
-        manager: operationManager,
-        waitForAgentCompletion: () => waitForQueuedRpcPrompt(session),
-       },
-      });
-      void tracked.lifecycle;
-      void tracked.scheduling;
-     });
-     return success(id, "ui_editor_submit", {
-      accepted: true,
-      disposition,
-      editor,
-      operationId: operation.operationId,
-     });
-    };
-    if (routed.kind === "continue") {
-     return startOperation(
-      () => startRpcPrompt(routed.text, {
-       synthetic: true,
-       userInitiated: true,
-       messageTag: id,
-      }),
-      routed.kind,
-     );
-    }
-    if (routed.kind === "skill") {
-     return startOperation(
-      async () => Boolean(await tryRunRpcSkillCommand(session, routed.text, routed.streamingBehavior, id)),
-      routed.kind,
-     );
-    }
-    if (routed.kind === "bash") {
-     const operation = operationManager.start(id, "prompt");
-     editor = interactiveSurface.acceptEditorSubmit(command.channelId, command.generation, command.expectedRevision);
-     setImmediate(() => {
-      if (!operationManager.begin(operation)) return;
-      void session.executeBash(routed.command, undefined, { excludeFromContext: routed.excludeFromContext })
-       .then(() => operationManager.complete(operation, false))
-       .catch(error => operationManager.fail(operation, error instanceof Error ? error : new Error(String(error)), "bash_failed"));
-     });
-     return success(id, "ui_editor_submit", { accepted: true, disposition: routed.kind, editor, operationId: operation.operationId });
-    }
-    if (routed.kind === "python") {
-     const operation = operationManager.start(id, "prompt");
-     editor = interactiveSurface.acceptEditorSubmit(command.channelId, command.generation, command.expectedRevision);
-     setImmediate(() => {
-      if (!operationManager.begin(operation)) return;
-      void session.executePython(routed.code, undefined, { excludeFromContext: routed.excludeFromContext })
-       .then(() => operationManager.complete(operation, false))
-       .catch(error => operationManager.fail(operation, error instanceof Error ? error : new Error(String(error)), "python_failed"));
-     });
-     return success(id, "ui_editor_submit", { accepted: true, disposition: routed.kind, editor, operationId: operation.operationId });
-    }
-    if (routed.kind === "queued-messages") {
-     return startOperation(async () => {
-      const first = routed.messages[0] ?? "";
-      const firstPrompt = startRpcPrompt(first, {
-       images,
-       streamingBehavior: "followUp",
-       messageTag: id,
-      });
-      for (const message of routed.messages.slice(1)) await session.followUp(message);
-      return firstPrompt;
-     }, routed.kind);
-    }
-    if (routed.kind === "compaction") {
-     return startOperation(
-      () => startRpcPrompt(routed.text, { streamingBehavior: routed.streamingBehavior, messageTag: id }),
-      routed.kind,
-     );
-    }
-    if (routed.kind === "builtin") {
-     return success(id, "ui_editor_submit", { accepted: false, disposition: "builtin", editor });
-    }
-    const promptText = routed.kind === "extension" || routed.kind === "steer" || routed.kind === "follow-up" || routed.kind === "prompt"
-     ? routed.text
-     : submitText;
-    const promptDisposition =
-     routed.kind === "extension" || routed.kind === "steer" || routed.kind === "follow-up" || routed.kind === "prompt"
-      ? routed.kind
-      : "prompt";
-    const streamingBehavior =
-     routed.kind === "steer" || routed.kind === "follow-up" || routed.kind === "extension"
-      ? routed.kind === "follow-up" ? "followUp" : "steer"
-      : undefined;
-    return startOperation(
-     () => startRpcUserPrompt(promptText, { ...(images ? { images } : {}), ...(streamingBehavior ? { streamingBehavior } : {}), messageTag: id }),
-     promptDisposition,
-    );
-   }
    case "ui_autocomplete_suggest":
     return success(
      id,
@@ -4969,7 +4743,7 @@ export async function runRpcMode(
       "get_transcript_page",
       pageRpcTranscript(
        transcript.messages,
-       transcript.cacheMissExplainedAt ?? [],
+       transcript.cacheMissExplainedAt,
        {
         sessionId: session.sessionId,
         leafId: session.sessionManager.getLeafId(),

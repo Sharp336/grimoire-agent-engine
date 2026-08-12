@@ -166,7 +166,7 @@ describe("RpcClient lifecycle (issue #4079 B)", () => {
 		await client.start();
 
 		const newest = await client.getTranscriptPage({ limit: 1, collapseCompactedHistory: true });
-		expect(newest as unknown).toEqual({
+		expect(newest).toEqual({
 			messages: [{ role: "assistant", content: [{ type: "text", text: "newest" }], timestamp: 2 }],
 			cacheMissExplainedAt: [true],
 			startIndex: 1,
