@@ -17,6 +17,13 @@ import { isToolActivityComponent } from "./tool-activity";
 interface FinalizableBlock {
 	isTranscriptBlockFinalized?(): boolean;
 	/**
+	 * Blocks may opt out of native scrollback commit promotion even when their
+	 * current frame is otherwise eligible. Replacement thinking renderers own
+	 * previously rendered rows and can re-layout them after async state changes,
+	 * so those rows must stay in the repaintable live region.
+	 */
+	isTranscriptBlockAppendOnly?(): boolean;
+	/**
 	 * Monotonic content version for blocks that can still mutate *after*
 	 * reporting finalized (e.g. `AssistantMessageComponent`: the inline error
 	 * restored at the next turn's `agent_start`, late tool-result images). The
@@ -63,6 +70,13 @@ function isBlockFinalized(child: Component): boolean {
 function getBlockVersion(child: Component): number | undefined {
 	const fn = (child as Component & FinalizableBlock).getTranscriptBlockVersion;
 	return fn ? fn.call(child) : undefined;
+}
+function canCommitLiveBlock(child: Component): boolean {
+	const fn = (child as Component & FinalizableBlock).isTranscriptBlockAppendOnly;
+	return fn ? fn.call(child) : true;
+}
+function isLiveRegionBoundary(child: Component): boolean {
+	return !isBlockFinalized(child) || !canCommitLiveBlock(child);
 }
 
 /** Clamped read of a block's declared settled rows (see {@link FinalizableBlock}). */
@@ -282,12 +296,13 @@ export class TranscriptContainer
 		const index = children.indexOf(component);
 		if (index < 0) return false;
 		for (let i = 0; i <= index; i++) {
-			if (!isBlockFinalized(children[i]!)) return true;
+			if (isLiveRegionBoundary(children[i]!)) return true;
 		}
-		// Every block at/before `index` finalized: the live region starts at the
-		// first unfinalized block below it, or at the last child when none exists.
+		// Every block at/before `index` finalized and can commit: the live region
+		// starts at the first live/non-committable block below it, or at the last
+		// child when none exists.
 		for (let i = index + 1; i < children.length; i++) {
-			if (!isBlockFinalized(children[i]!)) return false;
+			if (isLiveRegionBoundary(children[i]!)) return false;
 		}
 		return index === children.length - 1;
 	}
@@ -358,22 +373,25 @@ export class TranscriptContainer
 			sealCommittedSnapshot(previous.component);
 		}
 
-		// The commit boundary stops at the earliest still-mutating block. A
-		// block that has not finalized must gate it: out-of-band inserts
-		// (TTSR/todo cards) can append a finalized block *below* a tool that is
-		// still awaiting its result, and committing rows there would strand the
-		// tool's history rows on a mid-stream preview the late result never
-		// reaches.
+		// The commit boundary stops at the earliest still-mutating or explicitly
+		// non-committable block. A block that has not finalized must gate it:
+		// out-of-band inserts (TTSR/todo cards) can append a finalized block
+		// *below* a tool that is still awaiting its result, and committing rows
+		// there would strand the tool's history rows on a mid-stream preview the
+		// late result never reaches. A finalized block may also opt out when it can
+		// still repaint prior rows through async renderer state, e.g. replacement-
+		// capable assistant thinking.
 		let liveStartIndex = -1;
 		let hasLiveBlock = false;
 		for (let i = 0; i < count; i++) {
-			if (!isBlockFinalized(this.children[i]!)) {
+			const child = this.children[i]!;
+			if (isLiveRegionBoundary(child)) {
 				liveStartIndex = i;
 				hasLiveBlock = true;
 				this.#nativeScrollbackLiveRegionPinned =
-					(
-						this.children[i] as Component & Partial<NativeScrollbackLiveRegion>
-					).isNativeScrollbackLiveRegionPinned?.() === true;
+					!canCommitLiveBlock(child) ||
+					(child as Component & Partial<NativeScrollbackLiveRegion>).isNativeScrollbackLiveRegionPinned?.() ===
+						true;
 				break;
 			}
 		}
@@ -414,6 +432,7 @@ export class TranscriptContainer
 			// post-finalize re-layouts, and expand toggles remain visible.
 			const previous = previousSegments[i];
 			const finalized = isBlockFinalized(child);
+			const commitAllowed = canCommitLiveBlock(child);
 			const version = getBlockVersion(child);
 			const committedReusable =
 				previous !== undefined &&
@@ -480,17 +499,20 @@ export class TranscriptContainer
 			const sep = row > 0 && !isPlainBlank(lines[row - 1]!) ? 1 : 0;
 
 			// The separator before the first live block stays in the committed
-			// prefix (it is deterministic once the prior block's body is
-			// settled); the boundary then extends through the live block's
-			// declared settled rows, mapped from its raw render into the
-			// stripped contribution.
+			// prefix (it is deterministic once the prior block's body is settled).
+			// Append-only live blocks may extend the exactness boundary through
+			// declared settled rows, mapped from raw render into stripped
+			// contribution; non-committable blocks keep the boundary at their first
+			// content row so replacement-capable renderers stay in the live region.
 			if (hasLiveBlock && i === liveStartIndex) {
 				let settled = 0;
-				const settledRaw = getBlockSettledRows(child);
-				if (settledRaw > 0) {
-					let lead = 0;
-					while (lead < raw.length && isPlainBlank(raw[lead]!)) lead++;
-					settled = Math.max(0, Math.min(contribution.length, settledRaw - lead));
+				if (commitAllowed) {
+					const settledRaw = getBlockSettledRows(child);
+					if (settledRaw > 0) {
+						let lead = 0;
+						while (lead < raw.length && isPlainBlank(raw[lead]!)) lead++;
+						settled = Math.max(0, Math.min(contribution.length, settledRaw - lead));
+					}
 				}
 				this.#nativeScrollbackLiveRegionStart = row + sep + settled;
 			}
