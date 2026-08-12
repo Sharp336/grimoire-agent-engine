@@ -251,7 +251,7 @@ export interface ToolSession {
 	getAgentId?: () => string | null;
 	/** Look up a registered tool by name (used by the eval js backend's tool bridge). */
 	getToolByName?: (name: string) => AgentTool | undefined;
-	/** Host-provided RPC tools that child sessions must inherit. */
+	/** Enabled host-provided RPC tools that child sessions must inherit. */
 	getRpcHostTools?: () => AgentTool[];
 	/** Names of dynamic tools mounted under `xd://`. */
 	getMountedXdevToolNames?: () => string[];

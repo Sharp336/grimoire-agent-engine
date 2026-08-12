@@ -4295,7 +4295,7 @@ export class AgentSession {
 		return this.#tools.getMountedXdevToolNames();
 	}
 
-	/** Current host-owned RPC tools, for child-session reconstruction. */
+	/** Enabled host-owned RPC tools, for child-session reconstruction. */
 	getRpcHostTools(): AgentTool[] {
 		return this.#tools.getRpcHostTools();
 	}

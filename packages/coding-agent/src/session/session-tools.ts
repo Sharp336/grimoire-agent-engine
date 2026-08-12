@@ -398,11 +398,12 @@ export class SessionTools {
 		return this.#rpcHostToolNames.has(name);
 	}
 
-	/** Current host-owned RPC tools, for child-session reconstruction. */
+	/** Enabled host-owned RPC tools, for child-session reconstruction. */
 	getRpcHostTools(): AgentTool[] {
+		const enabledToolNames = new Set(this.getEnabledToolNames());
 		return [...this.#rpcHostToolNames].flatMap(name => {
 			const tool = this.#toolRegistry.get(name);
-			return tool ? [tool] : [];
+			return tool && enabledToolNames.has(name) ? [tool] : [];
 		});
 	}
 
