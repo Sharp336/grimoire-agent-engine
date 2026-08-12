@@ -5,6 +5,7 @@
  * provider, and flush stranded content without waking (unlike peer IRC).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool, type AsideMessage } from "@oh-my-pi/pi-agent-core";
 import type { ToolCall } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
@@ -17,7 +18,6 @@ import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { Snowflake, TempDir } from "@oh-my-pi/pi-utils";
-import { type } from "arktype";
 
 const ASIDE_TYPE = "extension-aside-test";
 
@@ -29,8 +29,8 @@ interface ParkedHarness {
 }
 
 const mockYieldParameters = type({
-	result: "unknown",
-	"type?": "unknown",
+	result: type("unknown"),
+	"type?": type("unknown"),
 });
 
 interface MockYieldDetails {
