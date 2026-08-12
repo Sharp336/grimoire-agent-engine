@@ -263,6 +263,7 @@ describe("ACP lazy startup", () => {
 			"memory.backend": "local",
 			"memories.enabled": true,
 			"advisor.enabled": true,
+			"advisor.autoEnableFor": "pi/smol:low",
 			"advisor.subagents": true,
 			"advisor.syncBacklog": "5",
 			"advisor.immuneTurns": 7,

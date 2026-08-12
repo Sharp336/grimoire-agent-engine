@@ -439,7 +439,7 @@ export class SelectorController {
 				this.ctx.statusLine.setAutoCompactEnabled(value as boolean);
 				break;
 			case "advisor.enabled":
-				this.ctx.session.setAdvisorEnabled(value as boolean);
+			case "advisor.autoEnableFor":
 				this.ctx.statusLine.invalidate();
 				this.ctx.ui.requestRender();
 				break;

@@ -53,6 +53,8 @@ export interface ModelControlsHost {
 	promptGeneration(): number;
 	resolveActiveEditMode(): EditMode;
 	syncAfterModelChange(previousEditMode: EditMode): Promise<void>;
+	/** Reconcile session features after the final effective thinking level has been applied. */
+	syncAfterThinkingLevelApplied(): void;
 	setModelWithProviderSessionReset(model: Model): Promise<void>;
 	clearActiveRetryFallback(): void;
 	clearInheritedProviderPromptCacheKey(): void;
@@ -516,6 +518,7 @@ export class ModelControls {
 				this.#host.sessionManager.appendThinkingLevelChange(provisional, AUTO_THINKING);
 				this.#host.emit({ type: "thinking_level_changed", thinkingLevel: provisional, configured: AUTO_THINKING });
 			}
+			this.#host.syncAfterThinkingLevelApplied();
 			return;
 		}
 
@@ -542,6 +545,7 @@ export class ModelControls {
 			}
 			this.#host.emit({ type: "thinking_level_changed", thinkingLevel: effectiveLevel });
 		}
+		this.#host.syncAfterThinkingLevelApplied();
 	}
 
 	/**
