@@ -479,6 +479,12 @@ export interface StreamOptions {
 	 */
 	statefulResponses?: boolean;
 	/**
+	 * Disable native reasoning when the caller supplies an external scratchpad.
+	 * OpenAI Responses emits `reasoning: { effort: "none" }`; Anthropic and
+	 * Google transports use their native thinking-off controls.
+	 */
+	forceReasoningOff?: boolean;
+	/**
 	 * Provider-scoped mutable state store for this agent session.
 	 * Providers can use this to persist transport/session state between turns.
 	 */

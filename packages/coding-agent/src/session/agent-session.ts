@@ -199,6 +199,7 @@ import {
 	PROPOSE_DEVICE_NAME,
 	writeDeviceDispatch,
 } from "../tools/resolve";
+import { supportsExternalThinking } from "../tools/think";
 import type { TodoPhase } from "../tools/todo";
 import { ToolError } from "../tools/tool-errors";
 import { parseCommandArgs } from "../utils/command-args";
@@ -1241,6 +1242,7 @@ export class AgentSession {
 			toolRegistry: config.toolRegistry,
 			createVibeTools: config.createVibeTools,
 			createComputerTool: config.createComputerTool,
+			createThinkTool: config.createThinkTool,
 			createInspectImageTool: config.createInspectImageTool,
 			builtInToolNames: config.builtInToolNames,
 			mcpManagerToolNames: config.mcpManagerToolNames,
@@ -4419,6 +4421,11 @@ export class AgentSession {
 		return this.#tools.setComputerToolEnabled(enabled);
 	}
 
+	/** Applies the external-thinking setting to the private scratchpad tool immediately. */
+	setThinkToolEnabled(enabled: boolean): Promise<boolean> {
+		return this.#tools.setThinkToolEnabled(enabled);
+	}
+
 	/**
 	 * Session-scoped inspect_image mode (`/vision`). `auto` clears the override
 	 * and returns to the persisted `inspect_image.mode` setting; `on`/`off`
@@ -5176,6 +5183,15 @@ export class AgentSession {
 
 		// Skip eager preludes when the user has already queued a directive
 		const hasPendingUserDirective = this.#toolChoiceQueue.inspect().includes("user-force");
+		const activeModel = this.agent.state.model;
+		const externalThinkingToolChoice =
+			!options?.synthetic &&
+			!hasPendingUserDirective &&
+			this.settings.get("externalThinking") &&
+			this.getEnabledToolNames().includes("think") &&
+			supportsExternalThinking(activeModel)
+				? buildNamedToolChoice("think", activeModel)
+				: undefined;
 		const eagerTodoPrelude =
 			!options?.synthetic && !hasPendingUserDirective ? this.#todo.createEagerTodoPrelude(expandedText) : undefined;
 		const eagerTaskPrelude =
@@ -5193,6 +5209,12 @@ export class AgentSession {
 			: undefined;
 
 		const promptAttribution = options?.attribution ?? (options?.synthetic ? "agent" : "user");
+		if (externalThinkingToolChoice) {
+			this.#toolChoiceQueue.pushOnce(externalThinkingToolChoice, {
+				label: "external-thinking",
+				now: true,
+			});
+		}
 		const message = options?.synthetic
 			? { role: "developer" as const, content: userContent, attribution: promptAttribution, timestamp: Date.now() }
 			: { role: "user" as const, content: userContent, attribution: promptAttribution, timestamp: Date.now() };
@@ -5223,6 +5245,7 @@ export class AgentSession {
 			// Clean up residual eager-todo directive if the prompt never consumed it
 			// (e.g., compaction aborted, validation failed).
 			this.#toolChoiceQueue.removeByLabel("eager-todo");
+			this.#toolChoiceQueue.removeByLabel("external-thinking");
 		}
 		return true;
 	}
@@ -7042,6 +7065,11 @@ export class AgentSession {
 			await this.#tools.reconcileInspectImageAfterModelChange();
 		} catch (error) {
 			logger.warn("inspect_image reconcile after model change failed", { error: String(error) });
+		}
+		try {
+			await this.#tools.reconcileThinkTool();
+		} catch (error) {
+			logger.warn("think tool reconcile after model change failed", { error: String(error) });
 		}
 	}
 
