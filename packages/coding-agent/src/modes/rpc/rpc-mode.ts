@@ -2962,6 +2962,14 @@ export async function runRpcMode(
        }
        return true;
       },
+      bash: async draft => {
+       if (!draft.text.startsWith("!")) return false;
+       const isExcluded = draft.text.startsWith("!!");
+       const bash = draft.text.slice(isExcluded ? 2 : 1).trim();
+       if (!bash) return false;
+       await session.executeBash(bash, undefined, { excludeFromContext: isExcluded, useUserShell: true });
+       return true;
+      },
       dispatch: async (draft, mode) => {
        const accepted = await invokePrompt(draft.text, mode === "followUp" ? "followUp" : "steer");
        if (!accepted) throw new Error("Prompt dispatch was rejected");

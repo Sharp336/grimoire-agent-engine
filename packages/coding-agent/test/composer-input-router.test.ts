@@ -95,6 +95,41 @@ describe("ComposerInputRouter", () => {
 		expect(parsePythonCommandInput("!! printf")).toBeUndefined();
 	});
 
+	it("executes ! and !! in the local bash lane instead of dispatching an agent prompt", async () => {
+		const calls: Array<{ command: string; excluded: boolean }> = [];
+		const instance = new ComposerInputRouter<never>(
+			{
+				isFocusedAgent: false,
+				isStreaming: false,
+				queuedMessageCount: 0,
+				isCompacting: false,
+				isCollabGuest: false,
+				isCollabReadOnly: false,
+				expandEmoticons: false,
+			},
+			{
+				bash: async draft => {
+					if (!draft.text.startsWith("!")) return false;
+					const excluded = draft.text.startsWith("!!");
+					const command = draft.text.slice(excluded ? 2 : 1).trim();
+					if (!command) return false;
+					calls.push({ command, excluded });
+					return true;
+				},
+				dispatch: async () => {
+					expect.unreachable("local bash must not dispatch an agent prompt");
+				},
+			},
+		);
+
+		expect((await instance.submit({ text: "!ls" })).disposition).toBe("bash");
+		expect((await instance.submit({ text: "!! pwd" })).disposition).toBe("bash");
+		expect(calls).toEqual([
+			{ command: "ls", excluded: false },
+			{ command: "pwd", excluded: true },
+		]);
+	});
+
 	it("preserves the explicit follow-up lane", async () => {
 		const { instance, calls } = router();
 		const result = await instance.submit({ text: "next" }, "followUp");
