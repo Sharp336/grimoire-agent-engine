@@ -363,6 +363,7 @@ export class StatusLineComponent implements Component {
 
 	// Git status caching (1s TTL)
 	#cachedGitStatus: { staged: number; unstaged: number; untracked: number } | null = null;
+	#cachedGitRemote: { ahead: number; behind: number } | null = null;
 	#cachedGitStatusCwd: string | undefined = undefined;
 	#gitStatusLastFetch = 0;
 	#gitStatusInFlightCwd: string | undefined = undefined;
@@ -919,18 +920,32 @@ export class StatusLineComponent implements Component {
 
 		(async () => {
 			let nextStatus: { staged: number; unstaged: number; untracked: number } | null = null;
+			let nextRemote: { ahead: number; behind: number } | null = null;
 			try {
 				nextStatus = await git.status.summary(gitCwd);
+				// Upstream divergence is only meaningful where git itself found a
+				// repository, and only worth computing if the segment option is
+				// enabled; skip the subprocess otherwise.
+				const showRemote = this.#resolveSettings().segmentOptions?.git?.showRemote ?? true;
+				nextRemote = nextStatus !== null && showRemote ? await git.status.divergence(gitCwd) : null;
 			} catch {
 				nextStatus = null;
+				nextRemote = null;
 			} finally {
 				if (this.#gitStatusInFlightCwd === gitCwd) {
 					const prev = this.#cachedGitStatusCwd === gitCwd ? this.#cachedGitStatus : null;
+					const prevRemote = this.#cachedGitStatusCwd === gitCwd ? this.#cachedGitRemote : null;
 					this.#cachedGitStatus = nextStatus;
+					this.#cachedGitRemote = nextRemote;
 					this.#cachedGitStatusCwd = gitCwd;
 					this.#gitStatusLastFetch = Date.now();
 					this.#gitStatusInFlightCwd = undefined;
-					if (!this.#disposed && this.#onBranchChange && JSON.stringify(prev) !== JSON.stringify(nextStatus)) {
+					if (
+						!this.#disposed &&
+						this.#onBranchChange &&
+						(JSON.stringify(prev) !== JSON.stringify(nextStatus) ||
+							JSON.stringify(prevRemote) !== JSON.stringify(nextRemote))
+					) {
 						this.#onBranchChange();
 					}
 				}
@@ -938,6 +953,17 @@ export class StatusLineComponent implements Component {
 		})();
 
 		return this.#cachedGitStatusCwd === gitCwd ? this.#cachedGitStatus : null;
+	}
+
+	/**
+	 * Upstream divergence for the effective git cwd, from the same throttled
+	 * fetch as {@link #getGitStatus} (never spawns its own subprocess; returns
+	 * the cached value once the status refresh has resolved it).
+	 */
+	#getGitRemote(effectiveGitCwd?: string): { ahead: number; behind: number } | null {
+		if (!this.#gitEnabled()) return null;
+		const gitCwd = effectiveGitCwd ?? this.#resolveActiveRepoCache().effectiveGitCwd;
+		return this.#cachedGitStatusCwd === gitCwd ? this.#cachedGitRemote : null;
 	}
 
 	// Resolve (and cache per cwd) the jj workspace root, resetting both jj caches
@@ -1604,6 +1630,9 @@ export class StatusLineComponent implements Component {
 			? ((gitHeadIsJjLike ? this.#getJjStatus(activeRepoCache.effectiveGitCwd) : null) ??
 				this.#getGitStatus(activeRepoCache.effectiveGitCwd))
 			: null;
+		// Upstream divergence rides the git-status refresh; jj workspaces have no
+		// tracking branch to compare against, so they report null.
+		const gitRemote = includeGit && !gitHeadIsJjLike ? this.#getGitRemote(activeRepoCache.effectiveGitCwd) : null;
 		const gitPr = includePr ? this.#lookupPr(activeRepoCache.effectiveGitCwd) : null;
 		return {
 			session: this.session,
@@ -1632,6 +1661,7 @@ export class StatusLineComponent implements Component {
 			git: {
 				branch: gitBranch,
 				status: gitStatus,
+				remote: gitRemote,
 				pr: gitPr,
 			},
 			worktree: activeRepoCache.worktree,
