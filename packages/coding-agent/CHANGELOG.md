@@ -330,6 +330,9 @@
 - Fixed retry-fallback selection switching to a fallback model with a context window too small to hold the current session context.
 - Fixed OpenCode discovery ignoring `opencode.jsonc` files and rejecting comments in `opencode.json`.
 - Fixed WSL2 startup hanging forever when the Windows interop pipe is wedged: the WSL host-home discovery probes (`cmd.exe`, `wslpath`) now run under a 500ms hard timeout and fall back to the Linux `$HOME`/`~/.omp` candidates ([#8402](https://github.com/can1357/oh-my-pi/issues/8402)).
+### Added
+
+- Added `deliverAs: "aside"` to extension `pi.sendMessage` for mid-turn custom message injection at the next agent step boundary without interrupting tools or aborting the stream; idle appends unless `triggerTurn`, stranded content persists with no wake. See `examples/extensions/aside-delivery.ts`.
 
 ## [17.2.15] - 2026-08-12
 
@@ -1375,9 +1378,6 @@
 - Fixed the Cursor-backed advisor losing entire turns when it selected server-native tools (`bash`, `grep`, etc.) outside its grant: exec-resolved native blocks are already rejected in-band by the advisor-scoped bridge, so they no longer trip the unavailable-tool quarantine and discard the `advise` emitted in the same turn ([#5900](https://github.com/can1357/oh-my-pi/issues/5900)).
 - Fixed custom `anthropic-messages` OAuth providers being unable to opt into configured Claude Code fingerprint header overrides. ([#5888](https://github.com/can1357/oh-my-pi/issues/5888))
 - Fixed authoritative providers (e.g. `openai-codex`) keeping unsupported bundled models selectable when a fresh model cache and an expired OAuth token coincided: built-in discovery now forces the OAuth refresh so the provider's model manager is constructed and prunes stale bundled entries (e.g. `gpt-5.4-nano`) instead of waiting out the cache TTL. ([#5364](https://github.com/can1357/oh-my-pi/issues/5364))
-### Added
-
-- Added `deliverAs: "aside"` to extension `pi.sendMessage` for mid-turn custom message injection at the next agent step boundary without interrupting tools or aborting the stream; idle appends unless `triggerTurn`, stranded content persists with no wake. See `examples/extensions/aside-delivery.ts`.
 
 ## [17.0.5] - 2026-07-18
 
