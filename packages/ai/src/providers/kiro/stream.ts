@@ -33,18 +33,6 @@ import type { KiroNormalizedEvent, KiroOptions, KiroStreamCredential, KiroUsageM
 const KIRO_RUNTIME_TARGET = "KiroRuntimeService.GenerateAssistantResponse";
 const KIRO_USER_AGENT = "oh-my-pi/kiro-api";
 const MAX_PRE_OUTPUT_RECOVERY_ATTEMPTS = 1;
-/**
- * Kiro can spend well over OMP's shared 100s first-event floor on prompt
- * processing plus adaptive-thinking warm-up before the first semantic frame.
- * Supplied as the shared helper's per-provider fallback, so
- * `PI_STREAM_FIRST_EVENT_TIMEOUT_MS` and per-call overrides still win.
- */
-const KIRO_FIRST_EVENT_TIMEOUT_MS = 90_000;
-/**
- * Long reasoning runs go quiet between semantic frames for far longer than the
- * shared 120s idle floor. Same precedence rules as the first-event fallback.
- */
-const KIRO_STREAM_IDLE_TIMEOUT_MS = 300_000;
 
 function mergeHeaders(...headerSources: (Record<string, string> | undefined)[]): Record<string, string> {
 	const merged: Record<string, string> = {};
@@ -420,10 +408,9 @@ export function streamKiro(model: Model, context: Context, options: KiroOptions 
 			const credential = parseCredential(typeof options.apiKey === "string" ? options.apiKey : undefined);
 			const runtimeBaseUrl = resolveKiroRuntimeBaseUrl(model, credential);
 			let recoveryAttempt = 0;
-			// Resolved once per request: caller option → env override → Kiro fallback.
-			const firstEventTimeoutMs =
-				options.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(undefined, KIRO_FIRST_EVENT_TIMEOUT_MS);
-			const idleTimeoutMs = options.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs(KIRO_STREAM_IDLE_TIMEOUT_MS);
+			// Resolved once per request: caller option → environment override → shared helper default.
+			const idleTimeoutMs = options.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs();
+			const firstEventTimeoutMs = options.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(idleTimeoutMs);
 			while (true) {
 				state = createAttempt(model, stream, timestamp);
 				let payload = transformKiroRequest(model, context, {
