@@ -7270,8 +7270,10 @@ export class AgentSession {
 	 * @param options Handoff execution options
 	 * @returns The handoff document text, or undefined if cancelled/failed
 	 */
-	handoff(customInstructions?: string, options?: SessionHandoffOptions): Promise<HandoffResult | undefined> {
-		return this.#maintenance.handoff(customInstructions, options);
+	async handoff(customInstructions?: string, options?: SessionHandoffOptions): Promise<HandoffResult | undefined> {
+		const result = await this.#maintenance.handoff(customInstructions, options);
+		if (result) this.#clearPendingExtensionAsides();
+		return result;
 	}
 
 	#isTerminalYieldToolResult(event: { toolName: string; isError?: boolean; result?: { details?: unknown } }): boolean {

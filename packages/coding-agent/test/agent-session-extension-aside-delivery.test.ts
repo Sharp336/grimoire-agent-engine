@@ -7,6 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool, type AsideMessage } from "@oh-my-pi/pi-agent-core";
+import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import type { ToolCall } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -651,6 +652,47 @@ describe("AgentSession extension deliverAs aside", () => {
 		expect(active.agent.state.messages.filter(isExtensionAside)).toEqual([]);
 		const drained = await drainExtensionAsides();
 		expect(drained.map(message => asideContent(message))).toEqual(["survive rollback"]);
+	});
+
+	function seedHandoffMessages(sessionManager: SessionManager): void {
+		sessionManager.appendMessage({ role: "user", content: "seed", timestamp: 1 });
+		sessionManager.appendMessage({ role: "user", content: "seed-2", timestamp: 2 });
+	}
+
+	it("drops pending asides on successful handoff without flushing into the replacement transcript (case 9g)", async () => {
+		const { session: active, sessionManager } = await createIdleSession();
+		seedHandoffMessages(sessionManager);
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue("## Goal\nContinue");
+
+		Object.defineProperty(active, "isCompacting", { value: true, configurable: true });
+		await active.sendCustomMessage(asidePayload("must not leak on handoff"), { deliverAs: "aside" });
+		expect(active.agent.state.messages.filter(isExtensionAside)).toEqual([]);
+
+		const result = await active.handoff();
+		expect(result?.document).toBe("## Goal\nContinue");
+
+		expect(active.agent.state.messages.filter(isExtensionAside)).toEqual([]);
+		expect(await drainExtensionAsides()).toEqual([]);
+		expect(
+			sessionManager.getEntries().some(entry => entry.type === "custom_message" && entry.customType === ASIDE_TYPE),
+		).toBe(false);
+	});
+
+	it("preserves pending asides when handoff is cancelled before the replacement session commits (case 9h)", async () => {
+		const { session: active, sessionManager } = await createIdleSession();
+		seedHandoffMessages(sessionManager);
+
+		Object.defineProperty(active, "isCompacting", { value: true, configurable: true });
+		await active.sendCustomMessage(asidePayload("survive cancelled handoff"), { deliverAs: "aside" });
+		expect(active.agent.state.messages.filter(isExtensionAside)).toEqual([]);
+
+		const controller = new AbortController();
+		controller.abort();
+		await expect(active.handoff(undefined, { signal: controller.signal })).rejects.toThrow("Handoff cancelled");
+
+		expect(active.agent.state.messages.filter(isExtensionAside)).toEqual([]);
+		const drained = await drainExtensionAsides();
+		expect(drained.map(message => asideContent(message))).toEqual(["survive cancelled handoff"]);
 	});
 
 	it("flushes a pending aside on beginDispose instead of dropping it (case 10)", async () => {
