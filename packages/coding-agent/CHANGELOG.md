@@ -45,7 +45,7 @@
 - Fixed WSL2 startup hanging forever when the Windows interop pipe is wedged: the WSL host-home discovery probes (`cmd.exe`, `wslpath`) now run under a 500ms hard timeout and fall back to the Linux `$HOME`/`~/.omp` candidates ([#8402](https://github.com/can1357/oh-my-pi/issues/8402)).
 ### Added
 
-- Added default-on plan-first suggestions before substantial work in fresh interactive main-agent sessions.
+- Added default-on plan-first suggestions with research-first, immediate-questionnaire, and direct-work paths before substantial work in fresh interactive main-agent sessions.
 
 ## [17.2.15] - 2026-08-12
 
