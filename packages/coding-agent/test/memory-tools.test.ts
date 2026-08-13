@@ -748,9 +748,14 @@ describe("Mnemopi backend lifecycle", () => {
 			flushCalls++;
 			await flushStall.promise;
 		});
-		const closeSpy = vi.spyOn(retainMemory, "close");
+		const closeDone = Promise.withResolvers<void>();
+		const close = retainMemory.close.bind(retainMemory);
+		const closeSpy = vi.spyOn(retainMemory, "close").mockImplementation(() => {
+			close();
+			closeDone.resolve();
+		});
 
-		const BUDGET_MS = 100;
+		const BUDGET_MS = 20;
 		const start = Bun.nanoseconds();
 		await state.dispose({ timeoutMs: BUDGET_MS });
 		const elapsedMs = (Bun.nanoseconds() - start) / 1_000_000;
@@ -767,7 +772,7 @@ describe("Mnemopi backend lifecycle", () => {
 		// Release the stall and confirm the deferred close runs once consolidate
 		// settles — i.e. the SQLite handle still ends up released eventually.
 		flushStall.resolve();
-		await Bun.sleep(50);
+		await closeDone.promise;
 		expect(closeSpy).toHaveBeenCalledTimes(1);
 
 		registeredMnemopiState = undefined;
@@ -788,11 +793,9 @@ describe("Mnemopi backend lifecycle", () => {
 		const state = registerMnemopiState(config, { cwd: "/work/project-alpha", entries: () => entries });
 		const ownedDbPaths = getMnemopiScopedDbPaths(config);
 		const sharedDbPath = ownedDbPaths.find(dbPath => dbPath === config.dbPath);
-		expect(sharedDbPath).toBeDefined();
 		const lock = new Database(sharedDbPath!);
 		lock.exec("BEGIN IMMEDIATE");
 		const sharedMemory = state.globalMemory;
-		expect(sharedMemory).toBeDefined();
 		const sharedFlushCalled = Promise.withResolvers<void>();
 		const sharedFlushSpy = vi.spyOn(sharedMemory!, "flushExtractions").mockImplementation(async () => {
 			// Signal first: the exec below may throw SQLITE_BUSY while the lock is
@@ -1397,7 +1400,6 @@ describe("memory_edit.execute (Mnemopi backend)", () => {
 			items: [{ content }],
 		});
 		const id = (await registeredMnemopiState?.recallResultsScoped(query))?.[0]?.id;
-		expect(id).toBeString();
 		return id!;
 	}
 

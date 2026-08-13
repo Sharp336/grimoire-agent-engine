@@ -2,13 +2,15 @@
 
 ## [Unreleased]
 
+## [17.3.0] - 2026-08-13
+
 ### Added
 
-- Added cost-weighted `cacheSavings` alongside `cacheRate`, including cache-read discounts and 5-minute/1-hour write premiums against the equivalent uncached prompt cost.
+- Added cost-weighted `cacheSavings` metric alongside `cacheRate`, accounting for cache-read discounts and write premiums against equivalent uncached prompt costs.
 
 ### Fixed
 
-- Made the embedded dashboard archive byte-reproducible by sorting entries and zeroing tar and gzip timestamps before it is compiled into OMP.
+- Ensured the embedded dashboard archive is byte-reproducible by sorting entries and zeroing tar and gzip timestamps during compilation.
 
 ## [17.2.10] - 2026-08-06
 

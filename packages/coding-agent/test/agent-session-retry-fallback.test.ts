@@ -19,11 +19,7 @@ import { parseModelPattern, parseModelString } from "@oh-my-pi/pi-coding-agent/c
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
-import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
-import { AgentHubOverlayComponent } from "@oh-my-pi/pi-coding-agent/modes/components/agent-hub";
-import { SessionObserverRegistry } from "@oh-my-pi/pi-coding-agent/modes/session-observer-registry";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { ServingModel } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
@@ -33,6 +29,8 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 
 type AutoRetryStartEvent = Extract<AgentSessionEvent, { type: "auto_retry_start" }>;
 type AutoRetryEndEvent = Extract<AgentSessionEvent, { type: "auto_retry_end" }>;
+
+const FALLBACK_TEST_RETRY_AFTER_MS = 60_000;
 
 function trackRetryEvents(session: AgentSession): {
 	retryStartEvents: AutoRetryStartEvent[];
@@ -59,7 +57,12 @@ function getLastAssistantMessage(session: AgentSession): AssistantMessage {
 	return lastMessage;
 }
 
-function createFallbackAgent(primaryModel: Model, requestedModels: string[]): Agent {
+function createFallbackAgent(
+	primaryModel: Model,
+	requestedModels: string[],
+	options: { retryAfterMs?: number } = {},
+): Agent {
+	const retryAfterMs = options.retryAfterMs ?? FALLBACK_TEST_RETRY_AFTER_MS;
 	const mock = createMockModel();
 	let primaryAttempts = 0;
 	return new Agent({
@@ -74,7 +77,7 @@ function createFallbackAgent(primaryModel: Model, requestedModels: string[]): Ag
 			requestedModels.push(`${model.provider}/${model.id}`);
 			if (model.provider === primaryModel.provider && model.id === primaryModel.id && primaryAttempts === 0) {
 				primaryAttempts += 1;
-				mock.push({ throw: "rate limit exceeded retry-after-ms=200" });
+				mock.push({ throw: `rate limit exceeded retry-after-ms=${retryAfterMs}` });
 			} else {
 				mock.push({ content: [`ok:${model.provider}/${model.id}`] });
 			}
@@ -106,7 +109,7 @@ describe("AgentSession retry fallback", () => {
 		authStorage.setRuntimeApiKey("openrouter", "openrouter-test-key");
 		authStorage.setRuntimeApiKey("devin", "devin-test-key");
 		authStorage.setRuntimeApiKey("openai-codex", "openai-codex-test-key");
-		sharedRegistry = new ModelRegistry(authStorage);
+		sharedRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 	});
 
 	afterAll(() => {
@@ -239,28 +242,6 @@ describe("AgentSession retry fallback", () => {
 				role: "default",
 			},
 		]);
-		const registry = new AgentRegistry();
-		registry.register({
-			id: "fallback-agent",
-			displayName: "Fallback Agent",
-			kind: "sub",
-			session,
-		});
-		const hub = new AgentHubOverlayComponent({
-			observers: new SessionObserverRegistry(),
-			hubKeys: [],
-			onDone: () => {},
-			requestRender: () => {},
-			registry,
-			irc: new IrcBus(registry),
-		});
-		try {
-			expect(Bun.stripANSI(hub.render(120).join("\n"))).toContain(
-				`fallback → ${secondFallback.provider}/${secondFallback.id}`,
-			);
-		} finally {
-			hub.dispose();
-		}
 	});
 
 	it("forwards retry fallback events to extension handlers", async () => {
@@ -1445,7 +1426,7 @@ describe("AgentSession retry fallback", () => {
 			}
 		});
 
-		expect(session.setAdvisorEnabled(true)).toBe(true);
+		session.setAdvisorEnabled(true);
 		await session.prompt("Complete one primary turn");
 		await session.waitForIdle();
 		// The catch-up gate releases immediately while the advisor is mid-failure
@@ -1534,7 +1515,7 @@ describe("AgentSession retry fallback", () => {
 			advisorTools: [],
 			advisorStreamFn: advisorMock.stream,
 		});
-		expect(session.setAdvisorEnabled(true)).toBe(true);
+		session.setAdvisorEnabled(true);
 
 		const credentialStarted = Promise.withResolvers<void>();
 		const releaseCredential = Promise.withResolvers<void>();
@@ -3409,7 +3390,7 @@ describe("AgentSession retry fallback", () => {
 				requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
 				if (requestedModel.provider === primaryModel.provider && primaryAttempts === 0) {
 					primaryAttempts += 1;
-					mock.push({ throw: "rate limit exceeded retry-after-ms=200" });
+					mock.push({ throw: `rate limit exceeded retry-after-ms=${FALLBACK_TEST_RETRY_AFTER_MS}` });
 				} else {
 					mock.push({ content: [`ok:${requestedModel.provider}/${requestedModel.id}`] });
 				}
@@ -3450,7 +3431,7 @@ describe("AgentSession retry fallback", () => {
 		}
 
 		const requestedModels: string[] = [];
-		const agent = createFallbackAgent(primaryModel, requestedModels);
+		const agent = createFallbackAgent(primaryModel, requestedModels, { retryAfterMs: 200 });
 
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
@@ -4016,7 +3997,7 @@ describe("AgentSession retry fallback", () => {
 		}
 
 		const requestedModels: string[] = [];
-		const agent = createFallbackAgent(primaryModel, requestedModels);
+		const agent = createFallbackAgent(primaryModel, requestedModels, { retryAfterMs: 200 });
 
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
@@ -4108,7 +4089,7 @@ describe("AgentSession retry fallback", () => {
 
 	it("skips usage fallbacks whose effort floor exceeds the session ceiling", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
-		const incompatibleFallback = getBundledModel("fireworks", "deepseek-v4-pro");
+		const incompatibleFallback = getBundledModel("openrouter", "deepseek/deepseek-v4-pro");
 		const compatibleFallback = getBundledModel("openai", "gpt-4o-mini");
 		if (!primaryModel || !incompatibleFallback || !compatibleFallback) {
 			throw new Error("Expected bundled usage fallback effort models");

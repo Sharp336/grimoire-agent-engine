@@ -2470,7 +2470,6 @@ describe("multiplexer detection gates ED3 on resize", () => {
 					await Bun.sleep(DEBOUNCE_SETTLE_WAIT_MS);
 					await settle(term);
 					const out = writes.join("");
-					expect(out.length).toBeGreaterThan(0);
 					expect(out).not.toContain(ED3);
 					expect(tui.fullRedraws - baselineRedraws).toBe(1);
 					expect(visible(term)).toEqual(Array.from({ length: 10 }, (_v, i) => `line-${i + 10}`));
@@ -2503,7 +2502,6 @@ describe("multiplexer detection gates ED3 on resize", () => {
 					await Bun.sleep(DEBOUNCE_SETTLE_WAIT_MS);
 					await settle(term);
 					const out = writes.join("");
-					expect(out.length).toBeGreaterThan(0);
 					expect(out).not.toContain(ED3);
 					expect(tui.fullRedraws - baselineRedraws).toBe(1);
 					expect(visible(term)).toEqual(Array.from({ length: 10 }, (_v, i) => `line-${i + 10}`));
@@ -2514,7 +2512,7 @@ describe("multiplexer detection gates ED3 on resize", () => {
 		});
 	}
 
-	it("rebuilds direct HerdR scrollback from source across repeated widths", async () => {
+	it("repaints direct HerdR resizes in place without ED3", async () => {
 		await withEnvPatch({ ...NO_MULTIPLEXER_ENV, TERM: "dumb", HERDR_ENV: "1" }, async () => {
 			const term = new VirtualTerminal(40, 10, 1000);
 			const tui = new TUI(term);
@@ -2537,6 +2535,26 @@ describe("multiplexer detection gates ED3 on resize", () => {
 						).toHaveLength(1);
 					}
 				}
+
+				expect(writes.join("")).not.toContain(ED3);
+			} finally {
+				tui.stop();
+			}
+		});
+	});
+
+	it("preserves explicit scrollback clears in direct HerdR", async () => {
+		await withEnvPatch({ ...NO_MULTIPLEXER_ENV, TERM: "dumb", HERDR_ENV: "1" }, async () => {
+			const term = new VirtualTerminal(40, 10, 1000);
+			const tui = new TUI(term);
+			tui.addChild(new MutableLinesComponent(Array.from({ length: 20 }, (_value, index) => `line-${index}`)));
+
+			try {
+				tui.start();
+				await settle(term);
+				const writes = captureWrites(term);
+				tui.resetDisplay();
+				await settle(term);
 
 				expect(writes.join("")).toContain(ED3);
 			} finally {

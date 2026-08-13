@@ -2,10 +2,18 @@
 
 ## [Unreleased]
 
+## [17.3.1] - 2026-08-13
+
 ### Fixed
 
-- Fixed repeated pane-width changes corrupting native scrollback: direct HerdR panes now use the same ED3 source replay as direct terminals, preventing settled viewport paints from hardening host-reflowed soft wraps, while ED3-unsafe multiplexers retain opaque logical width epochs that append only source output queued during resize ([#6147](https://github.com/can1357/oh-my-pi/issues/6147), [#7026](https://github.com/can1357/oh-my-pi/issues/7026)).
-- Fixed scaled OSC 66 Markdown headings ("Large Headings" on Kitty) rendering as an invisible placeholder after a redraw or terminal resize: the blank row a `s`-scaled heading flows into was rewritten with an erase, which cleared the multicell glyph's lower half. The renderer now treats those reserved rows as untouchable across every repaint path — full replay, incremental diff, and the resize viewport — and covers all `s - 1` rows of scale ≥ 3 headings ([#8318](https://github.com/can1357/oh-my-pi/issues/8318)).
+- Fixed screen flashing in Herdr panes during transcript streaming.
+
+## [17.3.0] - 2026-08-13
+
+### Fixed
+
+- Fixed an issue where repeated pane-width adjustments or terminal resizing could corrupt native scrollback and soft-wrap behavior.
+- Fixed an issue where scaled OSC 66 Markdown headings (such as "Large Headings" on Kitty) would render as invisible placeholders or get partially cleared after a redraw or terminal resize.
 
 ## [17.2.13] - 2026-08-11
 

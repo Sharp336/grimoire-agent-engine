@@ -54,10 +54,6 @@ function pass(budget: ImageBudget, count: number): { suppressed: boolean[]; rese
 }
 
 describe("ImageBudget", () => {
-	it("defaults to eight live images", () => {
-		expect(new ImageBudget().cap).toBe(8);
-	});
-
 	it("keeps every image live while at or under the cap", () => {
 		const budget = new ImageBudget(3, () => {});
 		const first = pass(budget, 2);

@@ -23,7 +23,12 @@ in
     settings = lib.mkOption {
       type = lib.types.nullOr yaml.type;
       default = null;
-      description = "Settings written declaratively to ~/.omp/agent/config.yml.";
+      description = ''
+        Settings written declaratively to {file}`~/.omp/agent/config.yml`.
+        The file is a read-only store symlink: changes made from inside OMP
+        (`/settings`, onboarding) replace it but revert on the next
+        `home-manager switch`.
+      '';
       example = {
         theme.dark = "titanium";
         startup.quiet = true;
