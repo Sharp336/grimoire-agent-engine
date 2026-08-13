@@ -30,6 +30,8 @@ export interface LoadMCPConfigsResult {
 	exaApiKeys: string[];
 	/** Source metadata for each server */
 	sources: Record<string, SourceMeta>;
+	/** Redactable discovery warnings from native configuration providers. */
+	warnings: string[];
 }
 
 /**
@@ -154,7 +156,7 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 		sources = browserResult.sources;
 	}
 
-	return { configs, exaApiKeys, sources };
+	return { configs, exaApiKeys, sources, warnings: result.warnings };
 }
 
 /** Pattern to match Exa MCP servers */

@@ -174,6 +174,8 @@ export interface MCPDiscoverOptions {
 	filterBrowser?: boolean;
 	/** Called when MCP server connection state changes. */
 	onStatus?: (event: McpConnectionStatusEvent) => void;
+	/** Called for each warning produced by native MCP configuration discovery. */
+	onConfigWarning?: (warning: string) => void;
 }
 
 /** Handles an MCP `WWW-Authenticate` challenge and returns refreshed config. */
@@ -410,7 +412,8 @@ export class MCPManager {
 			options?.onStatus?.({ type: "failed", serverName: ".mcp.json", error: message });
 			throw error;
 		}
-		const { configs, exaApiKeys, sources } = loadedConfigs;
+		const { configs, exaApiKeys, sources, warnings } = loadedConfigs;
+		for (const warning of warnings) options?.onConfigWarning?.(warning);
 		const result = await this.connectServers(configs, sources, options?.onStatus);
 		result.exaApiKeys = exaApiKeys;
 		return result;
