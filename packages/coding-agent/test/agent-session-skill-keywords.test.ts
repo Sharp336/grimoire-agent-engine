@@ -128,4 +128,35 @@ describe("AgentSession skill prompt keyword steering", () => {
 		expect(observedTurn.texts).toContain(WORKFLOW_NOTICE);
 		expect(session.sessionManager.getTurnBudget()).toEqual({ total: 500_000, spent: 0, hard: true });
 	});
+	it("exports an Auto reasoning resolution for user-authored skill prompts", async () => {
+		session.setThinkingLevel("auto");
+		const resolutions: Array<{ configured?: string; resolved?: string }> = [];
+		const unsubscribe = session.subscribe(event => {
+			if (event.type === "thinking_level_changed" && event.resolved !== undefined) {
+				resolutions.push({ configured: event.configured, resolved: event.resolved });
+			}
+		});
+		const skillPath = path.join(tempDir.path(), "reasoning.md");
+
+		try {
+			await session.promptCustomMessage({
+				customType: SKILL_PROMPT_MESSAGE_TYPE,
+				content: `Skill body\n\n---\n\nSkill: ${skillPath}\nUser: ultrathink reply done`,
+				display: true,
+				details: {
+					name: "reasoning",
+					path: skillPath,
+					args: "ultrathink reply done",
+					lineCount: 1,
+				},
+				attribution: "user",
+			});
+		} finally {
+			unsubscribe();
+		}
+
+		expect(resolutions).toHaveLength(1);
+		expect(resolutions[0]?.configured).toBe("auto");
+		expect(resolutions[0]?.resolved).toBeTruthy();
+	});
 });
