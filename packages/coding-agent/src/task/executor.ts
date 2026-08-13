@@ -2753,19 +2753,18 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// Isolated runs must not expose roots outside the worktree.
 			...(worktree !== undefined ? { "workspace.additionalDirectories": [] } : undefined),
 			// A restricted tool surface is a complete capability boundary by default: no
-			// independently-tooled/modelled side agents. An explicit `advisor` opt-in re-enables one
-			// (both keys are required for a non-main session), and `createAgentSession` clamps its
-			// tools to this child's own allowlist so the boundary still holds transitively.
+			// independently-tooled/modelled side agents. An explicit `advisor` opt-in re-enables one,
+			// and `createAgentSession` clamps its tools to this child's own allowlist so the boundary
+			// still holds transitively.
 			...(options.restrictToolNames
 				? options.advisor === true
-					? { "advisor.enabled": true, "advisor.subagents": true }
+					? { "advisor.enabled": true }
 					: { "advisor.enabled": false }
 				: advisorSelection
 					? { "advisor.enabled": true }
 					: undefined),
 			...(advisorSelection?.model && !options.restrictToolNames
 				? { modelRoles: { ...settings.getModelRoles(), advisor: advisorSelection.model } }
-				: undefined),
 				: undefined),
 		},
 		options.parentServiceTier,

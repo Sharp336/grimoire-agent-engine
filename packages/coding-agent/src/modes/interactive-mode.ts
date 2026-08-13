@@ -19,6 +19,7 @@ import type {
 	Component,
 	EditorTheme,
 	LoaderMessageColorFn,
+	NativeScrollbackLiveRegion,
 	OverlayHandle,
 	SlashCommand,
 } from "@oh-my-pi/pi-tui";

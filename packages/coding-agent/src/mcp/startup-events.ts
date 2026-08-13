@@ -1,5 +1,11 @@
 import { sanitizeText } from "@oh-my-pi/pi-utils";
-import { replaceTabs, shortenEmbeddedPaths, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
+import {
+	replaceTabs,
+	shortenEmbeddedPaths,
+	shortenPath,
+	TRUNCATE_LENGTHS,
+	truncateToWidth,
+} from "../tools/render-utils";
 
 export const MCP_CONNECTION_STATUS_EVENT_CHANNEL = "mcp:connection-status";
 

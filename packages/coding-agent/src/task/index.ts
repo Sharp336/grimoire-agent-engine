@@ -624,7 +624,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const planMode = this.#session.getPlanModeState?.()?.enabled === true;
 		const isolationMode = this.#session.settings.get("task.isolation.mode");
 		return renderDescription({
-			agents: discoverySnapshots.get(path.resolve(this.session.cwd)) ?? this.#discoveredAgents,
+			agents: discoverySnapshots.get(path.resolve(this.#session.cwd)) ?? this.#discoveredAgents,
 			isolationEnabled: !planMode && isolationMode !== "none",
 			applyIsolatedChanges: this.#session.settings.get("task.isolation.apply"),
 			disabledAgents,

@@ -225,7 +225,7 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		];
 		const getTools = vi.fn(() => [{ name: "read", label: "hostile/read" }]);
 		const mcpManager = { getTools } as unknown as MCPManager;
-		const restrictedSettings = Settings.isolated({ "advisor.enabled": true, "advisor.subagents": true });
+		const restrictedSettings = Settings.isolated({ "advisor.enabled": true });
 
 		const result = await runSubprocess({
 			...baseOptions,
@@ -254,14 +254,13 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(persistedInits[0]).toMatchObject({ restrictToolNames: true, tools: ["read", "yield"] });
 	});
 
-	it("opts a restricted child into an advisor with both keys the runtime requires", async () => {
+	it("opts a restricted child into an advisor", async () => {
 		const session = yieldEmittingSession();
 		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
-		// The parent has no advisor of its own: the opt-in must supply the whole
-		// pair itself. `advisor.subagents` is not decoration: `SessionAdvisors`
-		// refuses to build a runtime for a non-main session without it, so an
-		// `advisor.enabled`-only override would be a silent no-op.
-		const parentSettings = Settings.isolated({ "advisor.enabled": false, "advisor.subagents": false });
+		// The parent has no advisor of its own: the explicit opt-in must supply
+		// the whole switch, since `advisor.enabled` is forced off for restricted
+		// children unless the caller opts in.
+		const parentSettings = Settings.isolated({ "advisor.enabled": false });
 
 		const result = await runSubprocess({
 			...baseOptions,
@@ -275,7 +274,6 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		const forwarded = spy.mock.calls[0]?.[0];
 		expect(forwarded?.restrictToolNames).toBe(true);
 		expect(forwarded?.settings?.get("advisor.enabled")).toBe(true);
-		expect(forwarded?.settings?.get("advisor.subagents")).toBe(true);
 		// The opt-in is per-child; the parent's own settings object is untouched.
 		expect(parentSettings.get("advisor.enabled")).toBe(false);
 	});
@@ -285,7 +283,7 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
 		// An advisor-enabled parent must not leak its advisor into a restricted
 		// child by inheritance: the boundary is closed unless `advisor` is passed.
-		const parentSettings = Settings.isolated({ "advisor.enabled": true, "advisor.subagents": true });
+		const parentSettings = Settings.isolated({ "advisor.enabled": true });
 
 		const result = await runSubprocess({
 			...baseOptions,
@@ -301,7 +299,7 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 	it("leaves an unrestricted child's advisor settings to the inherited configuration", async () => {
 		const session = yieldEmittingSession();
 		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
-		const parentSettings = Settings.isolated({ "advisor.enabled": false, "advisor.subagents": true });
+		const parentSettings = Settings.isolated({ "advisor.enabled": false });
 
 		const result = await runSubprocess({
 			...baseOptions,
@@ -359,7 +357,7 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		const mcpManager = {
 			getTools: () => [{ name: "mcp__private_read", label: "private/read" }],
 		} as unknown as MCPManager;
-		const ordinarySettings = Settings.isolated({ "advisor.enabled": true, "advisor.subagents": true });
+		const ordinarySettings = Settings.isolated({ "advisor.enabled": true });
 
 		const result = await runSubprocess({
 			...baseOptions,
