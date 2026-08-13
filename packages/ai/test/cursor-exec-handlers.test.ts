@@ -552,6 +552,36 @@ describe("Cursor request action encoding", () => {
 		}
 		expect(Array.from(selectedImage.dataOrBlobId.value)).toEqual(Array.from(Buffer.from(imageData, "base64")));
 	});
+
+	it("uses a user message action for a trailing custom-role injection", async () => {
+		const payload = await captureCursorPayload({
+			messages: [
+				{ role: "user", content: "What is my name?", timestamp: 0 },
+				// before_agent_start injections land after the user message
+				{ role: "custom", content: "User is Doctor.", timestamp: 1 },
+			] as unknown as Context["messages"],
+		});
+
+		expect(payload.action?.action.case).toBe("userMessageAction");
+		const userMessage = payload.action?.action.case === "userMessageAction" ? payload.action.action.value.userMessage : undefined;
+		expect(userMessage?.text).toBe("User is Doctor.");
+	});
+
+	it("carries prior custom-role injections into root prompt history", async () => {
+		const messages: Context["messages"] = [
+			{ role: "user", content: "First turn", timestamp: 0 },
+			{ role: "assistant", content: "First answer", timestamp: 1 },
+			// previous turn's injection is now history
+			{ role: "custom", content: "User is Doctor.", timestamp: 2 },
+			{ role: "user", content: "Second turn", timestamp: 3 },
+		] as unknown as Context["messages"];
+
+		const payload = await captureCursorPayload({ messages });
+		expect(payload.action?.action.case).toBe("userMessageAction");
+
+		const history = buildCursorHistoryForTest(messages);
+		expect(history.rootPromptMessagesJson.some(entry => JSON.stringify(entry).includes("User is Doctor."))).toBe(true);
+	});
 });
 
 describe("Cursor history encoding", () => {
