@@ -16,7 +16,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1048576,
+			"contextWindow": 1000000,
 			"maxTokens": 393216,
 			"thinking": {
 				"mode": "effort",
@@ -25,8 +25,7 @@
 					"high",
 					"max"
 				]
-			},
-			"supportsComputerUse": false
+			}
 		},
 		"deepseek-ai/deepseek-v4-pro": {
 			"id": "deepseek-ai/deepseek-v4-pro",
@@ -44,16 +43,16 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1048576,
+			"contextWindow": 1000000,
 			"maxTokens": 393216,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"low",
 					"high",
 					"max"
 				]
-			},
-			"supportsComputerUse": false
+			}
 		},
 		"google/gemma-4-31b-it": {
 			"id": "google/gemma-4-31b-it",
@@ -83,8 +82,37 @@
 					"high",
 					"xhigh"
 				]
+			}
+		},
+		"moonshotai/kimi-k2.6": {
+			"id": "moonshotai/kimi-k2.6",
+			"name": "Kimi K2.6",
+			"api": "openai-completions",
+			"provider": "aiand",
+			"baseUrl": "https://api.aiand.com/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0.85,
+				"output": 3.5,
+				"cacheRead": 0,
+				"cacheWrite": 0
 			},
-			"supportsComputerUse": false
+			"contextWindow": 262144,
+			"maxTokens": 262144,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			}
 		},
 		"moonshotai/kimi-k2.7-code": {
 			"id": "moonshotai/kimi-k2.7-code",
@@ -114,8 +142,7 @@
 					"high",
 					"xhigh"
 				]
-			},
-			"supportsComputerUse": false
+			}
 		},
 		"moonshotai/kimi-k3": {
 			"id": "moonshotai/kimi-k3",
@@ -206,8 +233,7 @@
 					"medium",
 					"high"
 				]
-			},
-			"supportsComputerUse": false
+			}
 		},
 		"qwen/qwen3.6-27b": {
 			"id": "qwen/qwen3.6-27b",
@@ -221,8 +247,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0.32,
-				"output": 3.2,
+				"input": 0,
+				"output": 0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -236,8 +262,36 @@
 					"medium",
 					"high"
 				]
+			}
+		},
+		"zai-org/glm-5.1": {
+			"id": "zai-org/glm-5.1",
+			"name": "GLM 5.1",
+			"api": "openai-completions",
+			"provider": "aiand",
+			"baseUrl": "https://api.aiand.com/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 1.4,
+				"output": 4.4,
+				"cacheRead": 0,
+				"cacheWrite": 0
 			},
-			"supportsComputerUse": false
+			"contextWindow": 202752,
+			"maxTokens": 131072,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			}
 		},
 		"zai-org/glm-5.2": {
 			"id": "zai-org/glm-5.2",
@@ -255,7 +309,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1048576,
+			"contextWindow": 1000000,
 			"maxTokens": 131072,
 			"thinking": {
 				"mode": "effort",
@@ -266,8 +320,7 @@
 					"high",
 					"max"
 				]
-			},
-			"supportsComputerUse": false
+			}
 		}
 	},
 	"aimlapi": {
@@ -2697,6 +2750,7 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"low",
 					"high",
 					"max"
 				]
@@ -7849,6 +7903,7 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"low",
 					"high",
 					"max"
 				]
@@ -12003,9 +12058,7 @@
 					"max"
 				],
 				"supportsDisplay": true
-			},
-			"supportsComputerUse": false,
-			"supportsComputerUseConfig": false
+			}
 		},
 		"claude-opus-4-0": {
 			"id": "claude-opus-4-0",
@@ -13575,6 +13628,7 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"low",
 					"high",
 					"max"
 				]
@@ -15525,6 +15579,7 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"low",
 					"high",
 					"max"
 				]
@@ -21223,6 +21278,7 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"low",
 					"high",
 					"max"
 				]
@@ -21367,6 +21423,7 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"low",
 					"high",
 					"max"
 				]
@@ -27465,6 +27522,7 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"low",
 					"high",
 					"max"
 				]
@@ -31474,6 +31532,7 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"low",
 					"high",
 					"max"
 				]
@@ -31500,6 +31559,7 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"low",
 					"high",
 					"max"
 				]
@@ -31526,6 +31586,7 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"low",
 					"high",
 					"max"
 				]
@@ -35469,7 +35530,7 @@
 		},
 		"nvidia/nemotron-3.5-lightning": {
 			"id": "nvidia/nemotron-3.5-lightning",
-			"name": "Nvidia Nemotron 3.5 Lightning",
+			"name": "Nemotron 3.5 Lightning 30B A3B",
 			"api": "openai-completions",
 			"provider": "kilo",
 			"baseUrl": "https://api.kilo.ai/api/gateway",
@@ -35478,13 +35539,13 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 0.05,
+				"output": 0.2,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1000000,
-			"maxTokens": 65536,
+			"contextWindow": 262144,
+			"maxTokens": 262144,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -35494,8 +35555,7 @@
 					"high",
 					"xhigh"
 				]
-			},
-			"supportsComputerUse": false
+			}
 		},
 		"nvidia/nemotron-3.5-lightning:free": {
 			"id": "nvidia/nemotron-3.5-lightning:free",
@@ -36519,7 +36579,8 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 16384,
-			"supportsComputerUse": false
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false
 		},
 		"openai/gpt-5.3-codex": {
 			"id": "openai/gpt-5.3-codex",
@@ -39045,7 +39106,7 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
-			"maxTokens": 262144,
+			"maxTokens": 65536,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -41286,7 +41347,7 @@
 				"cacheRead": 0.11,
 				"cacheWrite": 0
 			},
-			"contextWindow": 204800,
+			"contextWindow": 202752,
 			"maxTokens": 131072,
 			"thinking": {
 				"mode": "effort",
@@ -47680,6 +47741,7 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"low",
 					"high",
 					"max"
 				]
@@ -47706,6 +47768,7 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"low",
 					"high",
 					"max"
 				]
@@ -47732,6 +47795,7 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"low",
 					"high",
 					"max"
 				]
@@ -47758,6 +47822,7 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"low",
 					"high",
 					"max"
 				]
@@ -47784,6 +47849,7 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"low",
 					"high",
 					"max"
 				]
@@ -47810,6 +47876,7 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"low",
 					"high",
 					"max"
 				]
@@ -61099,6 +61166,7 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"low",
 					"high",
 					"max"
 				]
@@ -61127,6 +61195,7 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"low",
 					"high",
 					"max"
 				]
@@ -65088,6 +65157,7 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"low",
 					"high",
 					"max"
 				]
@@ -67958,6 +68028,7 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"low",
 					"high",
 					"max"
 				]
@@ -71387,6 +71458,7 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"low",
 					"high",
 					"max"
 				]
@@ -74588,6 +74660,7 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"low",
 					"high",
 					"max"
 				]
@@ -75740,6 +75813,7 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"low",
 					"high",
 					"max"
 				]
@@ -79670,7 +79744,8 @@
 					"high"
 				]
 			},
-			"supportsComputerUse": false
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false
 		},
 		"bytedance-seed/seed-2.0-code": {
 			"id": "bytedance-seed/seed-2.0-code",
@@ -79700,7 +79775,8 @@
 					"high"
 				]
 			},
-			"supportsComputerUse": false
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false
 		},
 		"bytedance-seed/seed-2.0-lite": {
 			"id": "bytedance-seed/seed-2.0-lite",
@@ -80165,13 +80241,13 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.435,
-				"output": 0.87,
-				"cacheRead": 0.003625,
+				"input": 1.1680000000000001,
+				"output": 2.3360000000000003,
+				"cacheRead": 0.09855000000000001,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
-			"maxTokens": 384000,
+			"maxTokens": 393216,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -80205,7 +80281,8 @@
 					"high"
 				]
 			},
-			"supportsComputerUse": false
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false
 		},
 		"essentialai/rnj-1-instruct": {
 			"id": "essentialai/rnj-1-instruct",
@@ -81737,7 +81814,8 @@
 					"high"
 				]
 			},
-			"supportsComputerUse": false
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false
 		},
 		"meituan/longcat-2.0": {
 			"id": "meituan/longcat-2.0",
@@ -81988,7 +82066,8 @@
 					"high"
 				]
 			},
-			"supportsComputerUse": false
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false
 		},
 		"meta/muse-spark-1.1": {
 			"id": "meta/muse-spark-1.1",
@@ -83624,6 +83703,35 @@
 			"supportsComputerUse": false,
 			"supportsComputerUseConfig": false
 		},
+		"nvidia/nemotron-3.5-lightning": {
+			"id": "nvidia/nemotron-3.5-lightning",
+			"name": "Nvidia Nemotron 3.5 Lightning",
+			"api": "openrouter",
+			"provider": "openrouter",
+			"baseUrl": "https://openrouter.ai/api/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.09999999999999999,
+				"output": 0.25,
+				"cacheRead": 0.049999999999999996,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 262144,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high"
+				]
+			},
+			"supportsComputerUse": false
+		},
 		"nvidia/nemotron-3.5-lightning:free": {
 			"id": "nvidia/nemotron-3.5-lightning:free",
 			"name": "Nemotron 3.5 Lightning (free)",
@@ -83651,7 +83759,8 @@
 					"high"
 				]
 			},
-			"supportsComputerUse": false
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false
 		},
 		"nvidia/nemotron-nano-12b-v2-vl:free": {
 			"id": "nvidia/nemotron-nano-12b-v2-vl:free",
@@ -88128,9 +88237,9 @@
 				"image"
 			],
 			"cost": {
-				"input": 0.14,
-				"output": 1,
-				"cacheRead": 0.049999999999999996,
+				"input": 0.25,
+				"output": 1.25,
+				"cacheRead": 0.25,
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
@@ -88159,13 +88268,13 @@
 				"image"
 			],
 			"cost": {
-				"input": 0.5,
-				"output": 3.5999999999999996,
-				"cacheRead": 0.3,
+				"input": 0.44999999999999996,
+				"output": 3,
+				"cacheRead": 0.045,
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
-			"maxTokens": 262144,
+			"maxTokens": 65536,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -88625,7 +88734,7 @@
 				"cacheRead": 0.19999999999999998,
 				"cacheWrite": 0
 			},
-			"contextWindow": 262144,
+			"contextWindow": 1000000,
 			"maxTokens": 52429,
 			"thinking": {
 				"mode": "effort",
@@ -88636,7 +88745,8 @@
 					"high"
 				]
 			},
-			"supportsComputerUse": false
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false
 		},
 		"qwen/qwen3.8-max": {
 			"id": "qwen/qwen3.8-max",
@@ -88823,7 +88933,8 @@
 					"high"
 				]
 			},
-			"supportsComputerUse": false
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false
 		},
 		"sao10k/l3-euryale-70b": {
 			"id": "sao10k/l3-euryale-70b",
@@ -89366,7 +89477,8 @@
 					"high"
 				]
 			},
-			"supportsComputerUse": false
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false
 		},
 		"x-ai/grok-3": {
 			"id": "x-ai/grok-3",
@@ -89715,7 +89827,8 @@
 					"high"
 				]
 			},
-			"supportsComputerUse": false
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false
 		},
 		"x-ai/grok-build-0.1": {
 			"id": "x-ai/grok-build-0.1",
@@ -90546,9 +90659,69 @@
 		}
 	},
 	"synthetic": {
+		"hf:MiniMaxAI/MiniMax-M3": {
+			"id": "hf:MiniMaxAI/MiniMax-M3",
+			"name": "MiniMax-M3",
+			"api": "openai-completions",
+			"provider": "synthetic",
+			"baseUrl": "https://api.synthetic.new/openai/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0.6,
+				"output": 1.2,
+				"cacheRead": 0.6,
+				"cacheWrite": 0
+			},
+			"contextWindow": 524288,
+			"maxTokens": 65536,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			}
+		},
+		"hf:moonshotai/Kimi-K2.7-Code": {
+			"id": "hf:moonshotai/Kimi-K2.7-Code",
+			"name": "Kimi K2.7 Code",
+			"api": "openai-completions",
+			"provider": "synthetic",
+			"baseUrl": "https://api.synthetic.new/openai/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0.95,
+				"output": 4,
+				"cacheRead": 0.95,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 65536,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			}
+		},
 		"hf:moonshotai/Kimi-K3": {
 			"id": "hf:moonshotai/Kimi-K3",
-			"name": "moonshotai/Kimi-K3",
+			"name": "Kimi K3",
 			"api": "openai-completions",
 			"provider": "synthetic",
 			"baseUrl": "https://api.synthetic.new/openai/v1",
@@ -90577,13 +90750,11 @@
 					"max": "max"
 				},
 				"requiresEffort": true
-			},
-			"supportsComputerUse": false,
-			"supportsComputerUseConfig": false
+			}
 		},
 		"hf:nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4": {
 			"id": "hf:nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
-			"name": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
+			"name": "Nemotron 3 Super 120B A12B",
 			"api": "openai-completions",
 			"provider": "synthetic",
 			"baseUrl": "https://api.synthetic.new/openai/v1",
@@ -90594,7 +90765,7 @@
 			"cost": {
 				"input": 0.3,
 				"output": 1,
-				"cacheRead": 0.06,
+				"cacheRead": 0.3,
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
@@ -90608,13 +90779,11 @@
 					"high",
 					"xhigh"
 				]
-			},
-			"supportsComputerUse": false,
-			"supportsComputerUseConfig": false
+			}
 		},
 		"hf:openai/gpt-oss-120b": {
 			"id": "hf:openai/gpt-oss-120b",
-			"name": "openai/gpt-oss-120b",
+			"name": "GPT OSS 120B",
 			"api": "openai-completions",
 			"provider": "synthetic",
 			"baseUrl": "https://api.synthetic.new/openai/v1",
@@ -90625,11 +90794,11 @@
 			"cost": {
 				"input": 0.1,
 				"output": 0.1,
-				"cacheRead": 0.02,
+				"cacheRead": 0.1,
 				"cacheWrite": 0
 			},
 			"contextWindow": 131072,
-			"maxTokens": 65536,
+			"maxTokens": 32768,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -90637,13 +90806,11 @@
 					"medium",
 					"high"
 				]
-			},
-			"supportsComputerUse": false,
-			"supportsComputerUseConfig": false
+			}
 		},
 		"hf:Qwen/Qwen3.6-27B": {
 			"id": "hf:Qwen/Qwen3.6-27B",
-			"name": "Qwen/Qwen3.6-27B",
+			"name": "Qwen3.6 27B",
 			"api": "openai-completions",
 			"provider": "synthetic",
 			"baseUrl": "https://api.synthetic.new/openai/v1",
@@ -90654,8 +90821,8 @@
 			],
 			"cost": {
 				"input": 0.45,
-				"output": 2.2,
-				"cacheRead": 0.09,
+				"output": 3.6,
+				"cacheRead": 0.45,
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
@@ -90668,13 +90835,11 @@
 					"medium",
 					"high"
 				]
-			},
-			"supportsComputerUse": false,
-			"supportsComputerUseConfig": false
+			}
 		},
 		"hf:zai-org/GLM-4.7-Flash": {
 			"id": "hf:zai-org/GLM-4.7-Flash",
-			"name": "zai-org/GLM-4.7-Flash",
+			"name": "GLM-4.7-Flash",
 			"api": "openai-completions",
 			"provider": "synthetic",
 			"baseUrl": "https://api.synthetic.new/openai/v1",
@@ -90685,7 +90850,7 @@
 			"cost": {
 				"input": 0.1,
 				"output": 0.5,
-				"cacheRead": 0.02,
+				"cacheRead": 0.1,
 				"cacheWrite": 0
 			},
 			"contextWindow": 196608,
@@ -90699,13 +90864,11 @@
 					"high",
 					"xhigh"
 				]
-			},
-			"supportsComputerUse": false,
-			"supportsComputerUseConfig": false
+			}
 		},
 		"hf:zai-org/GLM-5.2": {
 			"id": "hf:zai-org/GLM-5.2",
-			"name": "zai-org/GLM-5.2",
+			"name": "GLM-5.2",
 			"api": "openai-completions",
 			"provider": "synthetic",
 			"baseUrl": "https://api.synthetic.new/openai/v1",
@@ -90714,9 +90877,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 1,
-				"output": 3,
-				"cacheRead": 0.16,
+				"input": 1.4,
+				"output": 4.4,
+				"cacheRead": 1.4,
 				"cacheWrite": 0
 			},
 			"contextWindow": 524288,
@@ -90730,9 +90893,7 @@
 					"high",
 					"max"
 				]
-			},
-			"supportsComputerUse": false,
-			"supportsComputerUseConfig": false
+			}
 		},
 		"syn:large:text": {
 			"id": "syn:large:text",
@@ -91000,6 +91161,7 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"low",
 					"high",
 					"max"
 				]
@@ -91852,6 +92014,7 @@
 			"contextWindow": 1048576,
 			"maxTokens": 393215,
 			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false,
 			"compat": {
 				"escapeBuiltinToolNames": true
 			}
@@ -92760,6 +92923,7 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"low",
 					"high",
 					"max"
 				]
@@ -95090,6 +95254,29 @@
 					"medium",
 					"high"
 				]
+			}
+		},
+		"qwen-3-8-2-4t-a95b": {
+			"id": "qwen-3-8-2-4t-a95b",
+			"name": "qwen-3-8-2-4t-a95b",
+			"api": "openai-completions",
+			"provider": "venice",
+			"baseUrl": "https://api.venice.ai/api/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": null,
+			"maxTokens": null,
+			"supportsComputerUse": false,
+			"compat": {
+				"supportsUsageInStreaming": false
 			}
 		},
 		"qwen-3-8-max": {
@@ -102758,6 +102945,7 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"low",
 					"high",
 					"max"
 				]
@@ -102786,6 +102974,7 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"low",
 					"high",
 					"max"
 				]
@@ -103976,8 +104165,6 @@
 			},
 			"contextWindow": 2000000,
 			"maxTokens": 2000000,
-			"supportsComputerUse": false,
-			"supportsComputerUseConfig": false,
 			"compat": {
 				"reasoningEffortMap": {
 					"minimal": "low"
@@ -104008,8 +104195,6 @@
 			},
 			"contextWindow": 2000000,
 			"maxTokens": 2000000,
-			"supportsComputerUse": false,
-			"supportsComputerUseConfig": false,
 			"compat": {
 				"reasoningEffortMap": {
 					"minimal": "low"
@@ -104039,6 +104224,16 @@
 			},
 			"contextWindow": 2000000,
 			"maxTokens": 2000000,
+			"compat": {
+				"reasoningEffortMap": {
+					"minimal": "low"
+				},
+				"includeEncryptedReasoning": false,
+				"filterReasoningHistory": true,
+				"supportsImageDetailOriginal": false,
+				"omitReasoningEffort": false,
+				"supportsReasoningEffort": true
+			},
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -104051,18 +104246,6 @@
 				"effortMap": {
 					"minimal": "low"
 				}
-			},
-			"supportsComputerUse": false,
-			"supportsComputerUseConfig": false,
-			"compat": {
-				"reasoningEffortMap": {
-					"minimal": "low"
-				},
-				"includeEncryptedReasoning": false,
-				"filterReasoningHistory": true,
-				"supportsImageDetailOriginal": false,
-				"omitReasoningEffort": false,
-				"supportsReasoningEffort": true
 			}
 		},
 		"grok-4.3": {
@@ -104084,6 +104267,16 @@
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 1000000,
+			"compat": {
+				"reasoningEffortMap": {
+					"minimal": "low"
+				},
+				"includeEncryptedReasoning": false,
+				"filterReasoningHistory": true,
+				"supportsImageDetailOriginal": false,
+				"omitReasoningEffort": false,
+				"supportsReasoningEffort": true
+			},
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -104096,18 +104289,6 @@
 				"effortMap": {
 					"minimal": "low"
 				}
-			},
-			"supportsComputerUse": false,
-			"supportsComputerUseConfig": false,
-			"compat": {
-				"reasoningEffortMap": {
-					"minimal": "low"
-				},
-				"includeEncryptedReasoning": false,
-				"filterReasoningHistory": true,
-				"supportsImageDetailOriginal": false,
-				"omitReasoningEffort": false,
-				"supportsReasoningEffort": true
 			}
 		},
 		"grok-4.5": {
@@ -104129,6 +104310,16 @@
 			},
 			"contextWindow": 500000,
 			"maxTokens": 500000,
+			"compat": {
+				"reasoningEffortMap": {
+					"minimal": "low"
+				},
+				"includeEncryptedReasoning": false,
+				"filterReasoningHistory": true,
+				"supportsImageDetailOriginal": false,
+				"omitReasoningEffort": false,
+				"supportsReasoningEffort": true
+			},
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -104141,18 +104332,6 @@
 				"effortMap": {
 					"minimal": "low"
 				}
-			},
-			"supportsComputerUse": false,
-			"supportsComputerUseConfig": false,
-			"compat": {
-				"reasoningEffortMap": {
-					"minimal": "low"
-				},
-				"includeEncryptedReasoning": false,
-				"filterReasoningHistory": true,
-				"supportsImageDetailOriginal": false,
-				"omitReasoningEffort": false,
-				"supportsReasoningEffort": true
 			}
 		},
 		"grok-4.6": {
@@ -104201,8 +104380,6 @@
 			},
 			"contextWindow": 512000,
 			"maxTokens": 512000,
-			"supportsComputerUse": false,
-			"supportsComputerUseConfig": false,
 			"compat": {
 				"reasoningEffortMap": {
 					"minimal": "low"
@@ -104233,8 +104410,6 @@
 			},
 			"contextWindow": 256000,
 			"maxTokens": 256000,
-			"supportsComputerUse": false,
-			"supportsComputerUseConfig": false,
 			"compat": {
 				"reasoningEffortMap": {
 					"minimal": "low"
@@ -104264,8 +104439,6 @@
 			},
 			"contextWindow": 200000,
 			"maxTokens": 200000,
-			"supportsComputerUse": false,
-			"supportsComputerUseConfig": false,
 			"compat": {
 				"reasoningEffortMap": {
 					"minimal": "low"
@@ -105268,7 +105441,8 @@
 			},
 			"contextWindow": 200000,
 			"maxTokens": 64000,
-			"supportsComputerUse": false
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false
 		},
 		"anthropic/claude-3.5-sonnet": {
 			"id": "anthropic/claude-3.5-sonnet",
@@ -105321,7 +105495,8 @@
 					"xhigh"
 				]
 			},
-			"supportsComputerUse": false
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false
 		},
 		"anthropic/claude-fable-5": {
 			"id": "anthropic/claude-fable-5",
@@ -106189,7 +106364,8 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 64000,
-			"supportsComputerUse": false
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false
 		},
 		"deepseek/deepseek-chat-v3.1": {
 			"id": "deepseek/deepseek-chat-v3.1",
@@ -106402,6 +106578,7 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"low",
 					"high",
 					"max"
 				]
@@ -106428,6 +106605,7 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"low",
 					"high",
 					"max"
 				]
@@ -106941,7 +107119,8 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 64000,
-			"supportsComputerUse": false
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false
 		},
 		"inclusionai/ling-2.6-1t": {
 			"id": "inclusionai/ling-2.6-1t",
@@ -107166,7 +107345,8 @@
 					"xhigh"
 				]
 			},
-			"supportsComputerUse": false
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false
 		},
 		"inclusionai/ring-2.6-1t": {
 			"id": "inclusionai/ring-2.6-1t",
@@ -107771,7 +107951,8 @@
 			},
 			"contextWindow": 262000,
 			"maxTokens": 64000,
-			"supportsComputerUse": false
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false
 		},
 		"moonshotai/kimi-k2-thinking": {
 			"id": "moonshotai/kimi-k2-thinking",
@@ -107802,7 +107983,8 @@
 				],
 				"requiresEffort": true
 			},
-			"supportsComputerUse": false
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false
 		},
 		"moonshotai/kimi-k2-thinking-turbo": {
 			"id": "moonshotai/kimi-k2-thinking-turbo",
@@ -107833,7 +108015,8 @@
 				],
 				"requiresEffort": true
 			},
-			"supportsComputerUse": false
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false
 		},
 		"moonshotai/kimi-k2.5": {
 			"id": "moonshotai/kimi-k2.5",
@@ -109708,7 +109891,8 @@
 					"xhigh"
 				]
 			},
-			"supportsComputerUse": false
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false
 		},
 		"stepfun/step-3.5-flash": {
 			"id": "stepfun/step-3.5-flash",
@@ -110111,7 +110295,8 @@
 					"xhigh"
 				]
 			},
-			"supportsComputerUse": false
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false
 		},
 		"x-ai/grok-4": {
 			"id": "x-ai/grok-4",
@@ -110142,7 +110327,8 @@
 					"xhigh"
 				]
 			},
-			"supportsComputerUse": false
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false
 		},
 		"x-ai/grok-4-fast": {
 			"id": "x-ai/grok-4-fast",
@@ -110173,7 +110359,8 @@
 					"xhigh"
 				]
 			},
-			"supportsComputerUse": false
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false
 		},
 		"x-ai/grok-4-fast-non-reasoning": {
 			"id": "x-ai/grok-4-fast-non-reasoning",
@@ -110226,7 +110413,8 @@
 					"xhigh"
 				]
 			},
-			"supportsComputerUse": false
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false
 		},
 		"x-ai/grok-4.1-fast-non-reasoning": {
 			"id": "x-ai/grok-4.1-fast-non-reasoning",
@@ -110247,7 +110435,8 @@
 			},
 			"contextWindow": 2000000,
 			"maxTokens": 64000,
-			"supportsComputerUse": false
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false
 		},
 		"x-ai/grok-4.2-fast": {
 			"id": "x-ai/grok-4.2-fast",
@@ -110480,7 +110669,8 @@
 					"xhigh"
 				]
 			},
-			"supportsComputerUse": false
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false
 		},
 		"xiaomi/mimo-v2-flash": {
 			"id": "xiaomi/mimo-v2-flash",
