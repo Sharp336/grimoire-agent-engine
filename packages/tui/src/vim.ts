@@ -91,6 +91,169 @@ function wordEnd(text: string, col: number): number {
 	return Math.max(col, prevGraphemeStart(text, end));
 }
 
+/** End-exclusive span an `iw`/`a(`-style text object resolves to. */
+interface TextObjectRange {
+	from: VimPosition;
+	to: VimPosition;
+	linewise: boolean;
+}
+
+/** `0` whitespace, `1` keyword, `2` punctuation — the classes `w` groups by (`W` folds 2 into 1). */
+function charClass(ch: string, big: boolean): 0 | 1 | 2 {
+	if (/\s/.test(ch)) return 0;
+	if (big || /[\p{L}\p{N}_]/u.test(ch)) return 1;
+	return 2;
+}
+
+interface Chunk {
+	start: number;
+	end: number;
+	space: boolean;
+}
+
+/** Split a line into maximal same-class runs — the atoms a counted `iw`/`aw` walks over. */
+function chunkLine(text: string, big: boolean): Chunk[] {
+	const chunks: Chunk[] = [];
+	let i = 0;
+	while (i < text.length) {
+		const cls = charClass(text.charAt(i), big);
+		let j = i + 1;
+		while (j < text.length && charClass(text.charAt(j), big) === cls) j++;
+		chunks.push({ start: i, end: j, space: cls === 0 });
+		i = j;
+	}
+	return chunks;
+}
+
+/**
+ * `iw`/`aw`/`iW`/`aW`, line-local like Vim's. `aw` takes the trailing whitespace run, or the
+ * leading one when the word ends the line; starting on whitespace instead takes it plus the
+ * following word.
+ */
+function wordObject(text: string, col: number, around: boolean, big: boolean, count: number): [number, number] | null {
+	const chunks = chunkLine(text, big);
+	if (chunks.length === 0) return null;
+	const last = chunks.length - 1;
+	let first = chunks.findIndex(chunk => col < chunk.end);
+	if (first < 0) first = last;
+	let end = first;
+	if (!around) {
+		end = Math.min(first + count - 1, last);
+	} else if (chunks[first]!.space) {
+		end = Math.min(first + 2 * count - 1, last);
+	} else {
+		for (let n = 0; n < count; n++) {
+			if (n > 0 && end < last) end++;
+			if (end < last && chunks[end + 1]!.space) end++;
+		}
+		if (!chunks[end]!.space && first > 0 && chunks[first - 1]!.space) first--;
+	}
+	return [chunks[first]!.start, chunks[end]!.end];
+}
+
+/**
+ * `i"`/`a"` and friends, line-local like Vim's: quotes pair off left to right, and the cursor
+ * selects the first pair that ends at or after it. `a` swallows the trailing whitespace, or the
+ * leading run when there is none.
+ */
+function quoteObject(text: string, col: number, quote: string, around: boolean): [number, number] | null {
+	const marks: number[] = [];
+	for (let i = 0; i < text.length; i++) {
+		if (text.charAt(i) === "\\") i++;
+		else if (text.charAt(i) === quote) marks.push(i);
+	}
+	for (let p = 0; p + 1 < marks.length; p += 2) {
+		const open = marks[p]!;
+		const close = marks[p + 1]!;
+		if (col > close) continue;
+		if (!around) return [open + 1, close];
+		let end = close + 1;
+		let start = open;
+		while (end < text.length && /\s/.test(text.charAt(end))) end++;
+		if (end === close + 1) while (start > 0 && /\s/.test(text.charAt(start - 1))) start--;
+		return [start, end];
+	}
+	return null;
+}
+
+/** Buffer flattened to one string plus the cursor's offset in it, so scans can cross lines. */
+function flatten(buf: VimBuffer): { text: string; cursor: number } {
+	let cursor = buf.cursorCol;
+	for (let i = 0; i < buf.cursorLine; i++) cursor += (buf.lines[i] ?? "").length + 1;
+	return { text: buf.lines.join("\n"), cursor };
+}
+
+function offsetToPos(lines: readonly string[], offset: number): VimPosition {
+	let remaining = offset;
+	for (let line = 0; line < lines.length; line++) {
+		const width = (lines[line] ?? "").length;
+		if (remaining <= width) return { line, col: remaining };
+		remaining -= width + 1;
+	}
+	const line = Math.max(0, lines.length - 1);
+	return { line, col: (lines[line] ?? "").length };
+}
+
+/**
+ * `i(`/`a{`… — the innermost pair enclosing the cursor, counting nesting and spanning lines. A
+ * cursor sitting on either delimiter counts as being on that pair. Charwise in both variants;
+ * Vim's linewise-ish `i{` reshaping is deliberately not reproduced.
+ */
+function bracketObject(buf: VimBuffer, open: string, close: string, around: boolean): TextObjectRange | null {
+	const { text, cursor } = flatten(buf);
+	let depth = 0;
+	let openAt = -1;
+	for (let i = Math.min(cursor, text.length - 1); i >= 0; i--) {
+		const ch = text.charAt(i);
+		if (ch === close && i !== cursor) depth++;
+		else if (ch === open) {
+			if (depth === 0) {
+				openAt = i;
+				break;
+			}
+			depth--;
+		}
+	}
+	if (openAt < 0) return null;
+	depth = 0;
+	let closeAt = -1;
+	for (let i = openAt + 1; i < text.length; i++) {
+		const ch = text.charAt(i);
+		if (ch === open) depth++;
+		else if (ch === close) {
+			if (depth === 0) {
+				closeAt = i;
+				break;
+			}
+			depth--;
+		}
+	}
+	if (closeAt < 0) return null;
+	const from = offsetToPos(buf.lines, around ? openAt : openAt + 1);
+	const to = offsetToPos(buf.lines, around ? closeAt + 1 : closeAt);
+	return { from, to, linewise: false };
+}
+
+/**
+ * `ip`/`ap`: the run of lines matching the cursor line's blankness. `ap` also takes the run that
+ * follows, or the one before it when the paragraph ends the buffer. Always linewise.
+ */
+function paragraphObject(buf: VimBuffer, around: boolean): TextObjectRange {
+	const last = buf.lines.length - 1;
+	const blank = (line: number): boolean => (buf.lines[line] ?? "").trim() === "";
+	const target = blank(buf.cursorLine);
+	let first = buf.cursorLine;
+	let end = buf.cursorLine;
+	while (first > 0 && blank(first - 1) === target) first--;
+	while (end < last && blank(end + 1) === target) end++;
+	if (around) {
+		const stop = end;
+		while (end < last && blank(end + 1) !== target) end++;
+		if (end === stop) while (first > 0 && blank(first - 1) !== target) first--;
+	}
+	return { from: { line: first, col: 0 }, to: { line: end, col: (buf.lines[end] ?? "").length }, linewise: true };
+}
+
 interface Motion {
 	to: VimPosition;
 	/** Inclusive motions cover the grapheme under `to` when used with an operator. */
@@ -106,6 +269,8 @@ export class VimState {
 	#count = "";
 	#operator: VimOperator | null = null;
 	#pendingG = false;
+	/** `i` or `a` typed after an operator or in Visual mode — waiting for the object key. */
+	#textObject: "i" | "a" | null = null;
 	/**
 	 * Vim's "desired column": `j`/`k` remember the column you started from, so descending through a
 	 * short line and back out returns to it instead of collapsing permanently. `null` means the
@@ -114,18 +279,18 @@ export class VimState {
 	 */
 	#desiredCol: number | null = null;
 
-	/** True while a count, operator, or `g` prefix is half-typed — Escape cancels that first. */
+	/** True while a count, operator, `g`, or text-object prefix is half-typed — Escape cancels it. */
 	get pending(): boolean {
-		return this.#count.length > 0 || this.#operator !== null || this.#pendingG;
+		return this.#count.length > 0 || this.#operator !== null || this.#pendingG || this.#textObject !== null;
 	}
 
 	/**
-	 * The half-typed command as Vim would echo it (`"2"`, `"d"`, `"2d"`, `"g"`) — empty when
+	 * The half-typed command as Vim would echo it (`"2"`, `"d"`, `"2d"`, `"di"`) — empty when
 	 * nothing is pending. Hosts render this next to the mode so a partially entered operator is
 	 * visible instead of silently swallowing the next keystroke.
 	 */
 	get pendingText(): string {
-		return `${this.#count}${this.#operator ?? ""}${this.#pendingG ? "g" : ""}`;
+		return `${this.#count}${this.#operator ?? ""}${this.#pendingG ? "g" : ""}${this.#textObject ?? ""}`;
 	}
 
 	get visual(): boolean {
@@ -143,6 +308,7 @@ export class VimState {
 		this.#count = "";
 		this.#operator = null;
 		this.#pendingG = false;
+		this.#textObject = null;
 	}
 
 	#takeCount(): number {
@@ -185,6 +351,18 @@ export class VimState {
 			this.#desiredCol = null;
 			const line = Math.min(this.#takeCount() - 1, buf.lines.length - 1);
 			return this.#applyMotion(buf, { to: { line, col: 0 }, inclusive: false, linewise: true });
+		}
+
+		if (this.#textObject !== null) {
+			this.#desiredCol = null;
+			return this.#applyTextObject(key, buf);
+		}
+
+		// `i`/`a` only introduce a text object where they cannot mean "insert": after an operator,
+		// or in Visual mode. Bare `i` in Normal mode still enters Insert.
+		if ((key === "i" || key === "a") && (this.#operator !== null || this.visual)) {
+			this.#textObject = key;
+			return [];
 		}
 
 		// Only consecutive `j`/`k` carry the desired column; anything else re-anchors it. Counts and
@@ -257,6 +435,12 @@ export class VimState {
 				return { to: at(line.length), inclusive: false, linewise: false };
 			case "w": {
 				let col = buf.cursorCol;
+				// Vim's `cw` quirk: standing on a non-blank, it changes to the end of the word like
+				// `ce` rather than swallowing the whitespace that follows it.
+				if (this.#operator === "c" && !/\s/.test(line.charAt(col))) {
+					for (let i = 0; i < count; i++) col = wordEnd(line, col);
+					return { to: at(col), inclusive: true, linewise: false };
+				}
 				for (let i = 0; i < count; i++) col = wordForward(line, col);
 				return { to: at(col), inclusive: false, linewise: false };
 			}
@@ -316,9 +500,89 @@ export class VimState {
 				{ kind: "move", to: from },
 			];
 		}
-		const insert = operator === "c";
+		if (operator !== "c") {
+			return [{ kind: "delete", from, to, linewise, insert: false }];
+		}
+		// `c` always lands in Insert mode. The leading move matters when the range is empty
+		// (`ci"` between bare quotes): the delete is a no-op, so nothing else would park the cursor.
 		// `cc`/`cj` clear the lines but keep them, so a linewise change stays linewise-shaped.
-		return [{ kind: "delete", from, to, linewise: linewise && !insert, insert }];
+		this.mode = "insert";
+		return [
+			{ kind: "move", to: from },
+			{ kind: "delete", from, to, linewise: false, insert: true },
+			{ kind: "mode", mode: "insert" },
+		];
+	}
+
+	/** `iw`, `a(`, `i"`, `ap`, … — resolved around the cursor rather than from a motion endpoint. */
+	#resolveTextObject(key: string, around: boolean, buf: VimBuffer, count: number): TextObjectRange | null {
+		const line = buf.lines[buf.cursorLine] ?? "";
+		const onLine = (range: [number, number] | null): TextObjectRange | null =>
+			range === null
+				? null
+				: {
+						from: { line: buf.cursorLine, col: range[0] },
+						to: { line: buf.cursorLine, col: range[1] },
+						linewise: false,
+					};
+
+		switch (key) {
+			case "w":
+			case "W":
+				return onLine(wordObject(line, buf.cursorCol, around, key === "W", count));
+			case '"':
+			case "'":
+			case "`":
+				return onLine(quoteObject(line, buf.cursorCol, key, around));
+			case "(":
+			case ")":
+			case "b":
+				return bracketObject(buf, "(", ")", around);
+			case "[":
+			case "]":
+				return bracketObject(buf, "[", "]", around);
+			case "{":
+			case "}":
+			case "B":
+				return bracketObject(buf, "{", "}", around);
+			case "<":
+			case ">":
+				return bracketObject(buf, "<", ">", around);
+			case "p":
+				return paragraphObject(buf, around);
+			default:
+				return null;
+		}
+	}
+
+	/**
+	 * Consume the object key that follows a pending `i`/`a`. Under an operator the object becomes
+	 * the operated range (`diw`); in Visual mode it becomes the selection instead (`viw`).
+	 */
+	#applyTextObject(key: string, buf: VimBuffer): VimCommand[] {
+		const around = this.#textObject === "a";
+		const operator = this.#operator;
+		this.#textObject = null;
+		this.#operator = null;
+		const range = this.#resolveTextObject(key, around, buf, this.#takeCount());
+		if (range === null) return [];
+		if (operator !== null) return this.#operate(operator, range.from, range.to, range.linewise);
+
+		this.anchor = range.from;
+		const commands: VimCommand[] = [];
+		// A linewise object in charwise Visual mode promotes the selection, as Vim's `vip` does.
+		if (range.linewise && this.mode === "visual") {
+			this.mode = "visual-line";
+			commands.push({ kind: "mode", mode: this.mode });
+		}
+		// The selection's moving end sits *on* the object's last grapheme, not one past it.
+		let to = range.to;
+		if (to.col > 0) to = { line: to.line, col: prevGraphemeStart(buf.lines[to.line] ?? "", to.col) };
+		else if (to.line > range.from.line)
+			to = { line: to.line - 1, col: lastGraphemeStart(buf.lines[to.line - 1] ?? "") };
+		else to = range.from;
+		commands.push({ kind: "move", to });
+		return commands;
 	}
 
 	#handleNormalKey(key: string, buf: VimBuffer): VimCommand[] | null {
@@ -386,16 +650,12 @@ export class VimState {
 			case "D":
 			case "C": {
 				this.#takeCount();
-				this.mode = key === "C" ? "insert" : this.mode;
-				return [
-					{
-						kind: "delete",
-						from: { line: buf.cursorLine, col: buf.cursorCol },
-						to: { line: buf.cursorLine, col: line.length },
-						linewise: false,
-						insert: key === "C",
-					},
-				];
+				return this.#operate(
+					key === "C" ? "c" : "d",
+					{ line: buf.cursorLine, col: buf.cursorCol },
+					{ line: buf.cursorLine, col: line.length },
+					false,
+				);
 			}
 			case "d":
 			case "y":
@@ -458,9 +718,11 @@ export class VimState {
 				const operator: VimOperator = key === "y" ? "y" : key === "c" || key === "s" ? "c" : "d";
 				const { from, to } = visualRange(buf, anchor, linewise);
 				this.#clearPending();
-				this.mode = operator === "c" ? "insert" : "normal";
 				this.anchor = null;
-				return [...this.#operate(operator, from, to, linewise), { kind: "mode", mode: this.mode }];
+				// `#operate` switches to Insert itself for `c`; everything else drops back to Normal.
+				if (operator !== "c") this.mode = "normal";
+				const commands = this.#operate(operator, from, to, linewise);
+				return operator === "c" ? commands : [...commands, { kind: "mode", mode: "normal" }];
 			}
 			default:
 				this.#clearPending();

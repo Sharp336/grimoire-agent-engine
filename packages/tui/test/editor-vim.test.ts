@@ -231,6 +231,25 @@ describe("Editor vim mode", () => {
 			expect(editor.getText()).toBe("second line");
 		});
 
+		it("cw changes to the end of the word and enters insert mode", () => {
+			const editor = vimEditor("alfa beta");
+			editor.handleInput("c");
+			editor.handleInput("w");
+			expect(editor.vimMode).toBe("insert");
+			editor.handleInput("new");
+			// `cw` on a non-blank behaves like `ce`, so the separating space survives.
+			expect(editor.getText()).toBe("new beta");
+		});
+
+		it("cc clears the line and enters insert mode", () => {
+			const editor = vimEditor("alfa beta\nsecond");
+			editor.handleInput("c");
+			editor.handleInput("c");
+			expect(editor.vimMode).toBe("insert");
+			editor.handleInput("fresh");
+			expect(editor.getText()).toBe("fresh\nsecond");
+		});
+
 		it("u undoes the previous edit", () => {
 			const editor = vimEditor("alfa beta");
 			editor.handleInput("d");
@@ -246,6 +265,105 @@ describe("Editor vim mode", () => {
 			editor.handleInput("y");
 			editor.handleInput("p");
 			expect(editor.getText()).toBe("alfa\nalfa\nbeta");
+		});
+	});
+
+	describe("text objects", () => {
+		it("diw deletes the word under the cursor instead of entering insert mode", () => {
+			const editor = vimEditor("alfa beta gamma");
+			editor.handleInput("w");
+			editor.handleInput("d");
+			editor.handleInput("i");
+			expect(editor.vimMode).toBe("normal");
+			editor.handleInput("w");
+			expect(editor.getText()).toBe("alfa  gamma");
+			expect(editor.vimMode).toBe("normal");
+		});
+
+		it("daw takes the trailing whitespace with the word", () => {
+			const editor = vimEditor("alfa beta gamma");
+			editor.handleInput("w");
+			for (const key of "daw") editor.handleInput(key);
+			expect(editor.getText()).toBe("alfa gamma");
+		});
+
+		it("daw falls back to the leading whitespace at the end of a line", () => {
+			const editor = vimEditor("alfa beta");
+			editor.handleInput("w");
+			for (const key of "daw") editor.handleInput(key);
+			expect(editor.getText()).toBe("alfa");
+		});
+
+		it("a counted aw takes that many words", () => {
+			const editor = vimEditor("alfa beta gamma");
+			for (const key of "d2aw") editor.handleInput(key);
+			expect(editor.getText()).toBe("gamma");
+		});
+
+		it("ciw replaces the word and enters insert mode", () => {
+			const editor = vimEditor("alfa beta");
+			for (const key of "ciw") editor.handleInput(key);
+			expect(editor.vimMode).toBe("insert");
+			editor.handleInput("x");
+			expect(editor.getText()).toBe("x beta");
+		});
+
+		it("iw and aw over quoted spans", () => {
+			const inner = vimEditor('say "hello there" now');
+			for (const key of 'di"') inner.handleInput(key);
+			expect(inner.getText()).toBe('say "" now');
+
+			const around = vimEditor('say "hello there" now');
+			for (const key of 'da"') around.handleInput(key);
+			expect(around.getText()).toBe("say now");
+		});
+
+		it('ci" parks the cursor between empty quotes', () => {
+			const editor = vimEditor('say "" now');
+			for (const key of 'ci"') editor.handleInput(key);
+			expect(editor.vimMode).toBe("insert");
+			editor.handleInput("hi");
+			expect(editor.getText()).toBe('say "hi" now');
+		});
+
+		it("di( takes the innermost pair around the cursor", () => {
+			const editor = vimEditor("call(one, nest(two), three)");
+			for (let i = 0; i < 15; i++) editor.handleInput("l");
+			for (const key of "di(") editor.handleInput(key);
+			expect(editor.getText()).toBe("call(one, nest(), three)");
+		});
+
+		it("da{ spans the lines the block covers", () => {
+			const editor = vimEditor("fn {\n  body\n}\ntail");
+			editor.handleInput("j");
+			for (const key of "da{") editor.handleInput(key);
+			expect(editor.getText()).toBe("fn \ntail");
+		});
+
+		it("dip deletes the paragraph under the cursor linewise", () => {
+			const editor = vimEditor("one\ntwo\n\nthree");
+			for (const key of "dip") editor.handleInput(key);
+			expect(editor.getText()).toBe("\nthree");
+		});
+
+		it("viw selects the word so the next operator applies to it", () => {
+			const editor = vimEditor("alfa beta");
+			for (const key of "viw") editor.handleInput(key);
+			expect(editor.vimMode).toBe("visual");
+			editor.handleInput("d");
+			expect(editor.getText()).toBe(" beta");
+		});
+
+		it("echoes the half-typed object and cancels it with Escape", () => {
+			const editor = vimEditor("alfa beta");
+			editor.handleInput("d");
+			editor.handleInput("i");
+			expect(editor.vimPending).toBe("di");
+			expect(editor.vimConsumesEscape()).toBe(true);
+			editor.handleInput(ESC);
+			expect(editor.vimPending).toBe("");
+			editor.handleInput("w");
+			expect(editor.getText()).toBe("alfa beta");
 		});
 	});
 

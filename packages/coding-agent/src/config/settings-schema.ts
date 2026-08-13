@@ -1957,7 +1957,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Input",
 			label: "Vim Editing Mode",
 			description:
-				"Modal prompt editing. Escape leaves Insert mode; Normal mode has hjkl, 0, $, ^, w, b, e, gg, G, counts, x/D/C, dd/yy, p and u; v/V start a Visual selection that y copies and d deletes",
+				"Modal prompt editing. Escape leaves Insert mode; Normal mode has hjkl, 0, $, ^, w, b, e, gg, G, counts, x/D/C, dd/yy, p and u; operators take motions or text objects (diw, ca(, dap); v/V start a Visual selection that y copies and d deletes",
 		},
 	},
 

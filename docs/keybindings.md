@@ -86,8 +86,22 @@ The prompt then starts in Insert mode and behaves exactly as it always has. `Esc
 | `x` `D` `C`                   | Delete character, delete to line end, change to line end       |
 | `d` `y` `c` + motion          | Operate over a motion, e.g. `dw`, `d$`, `yb`, `cw`             |
 | `dd` `yy` `cc`                | Linewise delete / yank / change                                |
+| `d` `y` `c` + text object     | Operate over a text object, e.g. `diw`, `ca(`, `ci"`, `dap`    |
 | `p` `P`                       | Put the last yank or delete after / before the cursor          |
 | `u`                           | Undo                                                            |
+
+### Text objects
+
+A text object follows an operator (`diw`) or extends a Visual selection (`viw`). `i` takes the inside, `a` takes the surroundings; counts apply, e.g. `d2aw`.
+
+| Object            | Covers                                                                     |
+| ----------------- | -------------------------------------------------------------------------- |
+| `iw` `aw`         | Word; `aw` also takes the adjoining whitespace                             |
+| `iW` `aW`         | Whitespace-delimited WORD                                                  |
+| `i"` `i'` `` i` `` | Inside the quotes on the current line (`a"` takes the quotes too)          |
+| `i(` `i[` `i{` `i<` | Inside the innermost matching pair, nesting-aware and across lines         |
+| `a(` `a[` `a{` `a<` | The same pair including its delimiters (`b` and `B` alias `(` and `{`)     |
+| `ip` `ap`         | Paragraph — the run of non-blank (or blank) lines, linewise                |
 
 ### Visual mode
 
