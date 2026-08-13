@@ -2,16 +2,10 @@ import type { Usage } from "@oh-my-pi/pi-ai";
 import { Container, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { formatNumber } from "@oh-my-pi/pi-utils";
 import { theme } from "../../modes/theme/theme";
+import { formatCost } from "./agent-hub-renderer";
 
 /** Below this the rate is nonsense (cached/instant responses yield absurd tok/s). */
 const MIN_DURATION_MS = 100;
-
-/** USD cost tiers shared with the other CLI/TUI cost readouts (bench, stats, agent hub). */
-function formatCost(cost: number): string {
-	if (cost < 0.01) return `$${cost.toFixed(4)}`;
-	if (cost < 1) return `$${cost.toFixed(3)}`;
-	return `$${cost.toFixed(2)}`;
-}
 
 /** Local `YYYY-MM-DD HH:mm:ss` stamp for the per-turn usage row. */
 function formatUsageTimestamp(ms: number): string {
