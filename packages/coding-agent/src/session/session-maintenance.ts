@@ -1501,7 +1501,8 @@ export class SessionMaintenance {
 
 	/**
 	 * Returns the head of the actual compaction candidate chain when the user
-	 * opted into provider-native precedence and that candidate supports it.
+	 * opted into provider-native precedence and the active model can replay the
+	 * payload that candidate will produce.
 	 */
 	#preferredNativeCompactionTarget(
 		candidates: Model[],
@@ -1509,7 +1510,10 @@ export class SessionMaintenance {
 	): Model | undefined {
 		if (settings.preferProviderNative !== true) return undefined;
 		const target = candidates[0] ?? this.#model;
-		return target && shouldUseProviderNativeCompaction(target, settings) ? target : undefined;
+		const activeModel = this.#model;
+		if (!target || !activeModel || target.provider !== activeModel.provider) return undefined;
+		if (!shouldUseProviderNativeCompaction(target, settings)) return undefined;
+		return shouldUseProviderNativeCompaction(activeModel, settings) ? target : undefined;
 	}
 
 	resolveCompactionModelCandidates(

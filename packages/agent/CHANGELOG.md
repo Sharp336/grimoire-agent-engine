@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `CompactionSettings.preferProviderNative` so hosts can prefer replay-compatible provider-native compaction when selecting a compaction strategy.
+
 ## [17.3.0] - 2026-08-13
 
 ### Fixed

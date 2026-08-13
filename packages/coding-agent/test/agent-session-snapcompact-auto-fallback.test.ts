@@ -273,4 +273,26 @@ describe("AgentSession auto snapcompact routing", () => {
 			harness.notices.some(message => message.includes("provider-native compaction instead of snapcompact")),
 		).toBe(false);
 	});
+
+	it("keeps snapcompact when the active model cannot replay a native compaction model payload", async () => {
+		const harness = await createHarness(modelRegistry, authStorage, {
+			activeModel: { provider: "aimlapi", id: "claude-sonnet-4-5-20250929" },
+			compactionModel: { provider: "openai-codex", id: "gpt-5.5" },
+			preferProviderNative: true,
+			seedMessages: [{ role: "user", content: UNRENDERABLE_SNAPCOMPACT_TEXT.repeat(10), timestamp: Date.now() }],
+		});
+		session = harness.session;
+		harness.triggerThreshold();
+
+		const result = await harness.awaitCompactionEnd();
+		expect(result.action).toBe("context-full");
+		expect(
+			harness.notices.find(message =>
+				message.startsWith("snapcompact disabled: unsupported characters for selected snapcompact font"),
+			),
+		).toBeDefined();
+		expect(
+			harness.notices.some(message => message.includes("provider-native compaction instead of snapcompact")),
+		).toBe(false);
+	});
 });
