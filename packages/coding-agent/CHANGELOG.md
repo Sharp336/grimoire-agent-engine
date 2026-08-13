@@ -182,6 +182,10 @@
 - Fixed automatic `agent.continue()` paths failing to run context-fit maintenance when reverting to a smaller-context model after a cooldown expiry.
 - Fixed `/handoff` reporting "Handoff cancelled" for actual generation or stream timeout errors, ensuring the real error is surfaced.
 
+### Changed
+
+- Auto-compaction and a bare `/compact` now use provider-native compaction instead of a local snapcompact archive when the active model supports it. The backend compacts server-side and keeps the encrypted history it replays into later turns, which a local image archive cannot preserve. An explicit `/compact snapcompact` still produces a local archive, and `compaction.remoteEnabled: false` opts out.
+
 ## [17.2.10] - 2026-08-06
 
 ### Breaking Changes

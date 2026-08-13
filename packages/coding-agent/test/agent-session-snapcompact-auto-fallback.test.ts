@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import type { Message } from "@oh-my-pi/pi-ai";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -23,13 +24,29 @@ interface Harness {
 
 interface HarnessOptions {
 	activeModel: { provider: GeneratedProvider; id: string };
+	/** Configured `compactionModel` for the active model, as `provider/id`. */
+	compactionModel?: { provider: GeneratedProvider; id: string };
 	seedMessages?: Message[];
 }
 
 async function createHarness(tempDir: TempDir, authStorage: AuthStorage, options: HarnessOptions): Promise<Harness> {
-	const activeModel = getBundledModel(options.activeModel.provider, options.activeModel.id);
-	if (!activeModel) throw new Error(`Missing bundled model ${options.activeModel.provider}/${options.activeModel.id}`);
+	const bundledModel = getBundledModel(options.activeModel.provider, options.activeModel.id);
+	if (!bundledModel)
+		throw new Error(`Missing bundled model ${options.activeModel.provider}/${options.activeModel.id}`);
 	authStorage.setRuntimeApiKey(options.activeModel.provider, "test-key");
+	let activeModel = bundledModel;
+	if (options.compactionModel) {
+		const target = getBundledModel(options.compactionModel.provider, options.compactionModel.id);
+		if (!target) {
+			throw new Error(`Missing bundled model ${options.compactionModel.provider}/${options.compactionModel.id}`);
+		}
+		authStorage.setRuntimeApiKey(target.provider, "test-key");
+		activeModel = buildModel({
+			...bundledModel,
+			compactionModel: `${target.provider}/${target.id}`,
+			compat: bundledModel.compatConfig,
+		});
+	}
 
 	const modelRegistry = new ModelRegistry(authStorage);
 	const agent = new Agent({
@@ -172,9 +189,76 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 		);
 		expect(unsupportedGlyphNotice).toBeDefined();
 		expect(unsupportedGlyphNotice).toContain("using context-full auto-compaction instead.");
+		expect(harness.notices).not.toContain(
+			"aimlapi compacts server-side; using provider-native compaction instead of snapcompact.",
+		);
 		expect(harness.sessionManager.getBranch().find(entry => entry.type === "compaction")).toMatchObject({
 			type: "compaction",
 			summary: "compacted",
 		});
+	});
+});
+
+describe("AgentSession auto-compaction provider-native override", () => {
+	let session: AgentSession | undefined;
+	let authStorage: AuthStorage | undefined;
+	let tempDir: TempDir | undefined;
+
+	afterEach(async () => {
+		try {
+			await session?.dispose();
+		} finally {
+			authStorage?.close();
+			await tempDir?.remove();
+			vi.restoreAllMocks();
+			session = undefined;
+			authStorage = undefined;
+			tempDir = undefined;
+		}
+	});
+
+	it("routes a codex session to provider-native compaction instead of snapcompact", async () => {
+		tempDir = TempDir.createSync("@pi-codex-native-compaction-");
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		const harness = await createHarness(tempDir, authStorage, {
+			activeModel: { provider: "openai-codex", id: "gpt-5.5" },
+		});
+		session = harness.session;
+		harness.triggerThreshold();
+
+		const result = await harness.awaitCompactionEnd();
+		expect(result.action).toBe("context-full");
+		expect(harness.notices).toContain(
+			"openai-codex compacts server-side; using provider-native compaction instead of snapcompact.",
+		);
+	});
+
+	it("keeps snapcompact when a configured compactionModel is not provider-native", async () => {
+		tempDir = TempDir.createSync("@pi-codex-native-compaction-model-");
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		// The summary runs on the head of the candidate chain, which is the
+		// configured compactionModel — not the codex active model. Announcing
+		// provider-native replay here would skip snapcompact and then hand the
+		// work to an ordinary LLM summary, losing both.
+		const harness = await createHarness(tempDir, authStorage, {
+			activeModel: { provider: "openai-codex", id: "gpt-5.5" },
+			compactionModel: { provider: "aimlapi", id: "claude-sonnet-4-5-20250929" },
+			seedMessages: [{ role: "user", content: UNRENDERABLE_SNAPCOMPACT_TEXT.repeat(10), timestamp: Date.now() }],
+		});
+		session = harness.session;
+		harness.triggerThreshold();
+
+		const result = await harness.awaitCompactionEnd();
+		expect(harness.notices).not.toContain(
+			"openai-codex compacts server-side; using provider-native compaction instead of snapcompact.",
+		);
+		// snapcompact was still attempted: it is the unrenderable-glyph preflight,
+		// not the native guard, that produced the context-full downgrade.
+		expect(
+			harness.notices.find(message =>
+				message.startsWith("snapcompact disabled: unsupported characters for selected snapcompact font"),
+			),
+		).toBeDefined();
+		expect(result.action).toBe("context-full");
 	});
 });
