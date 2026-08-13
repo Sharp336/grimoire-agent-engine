@@ -16754,6 +16754,44 @@
 				"requiresEffort": true
 			}
 		},
+		"gemini-3.7-flash": {
+			"id": "gemini-3.7-flash",
+			"name": "Gemini 3.7 Flash",
+			"api": "google-gemini-cli",
+			"provider": "google-antigravity",
+			"baseUrl": "https://daily-cloudcode-pa.sandbox.googleapis.com",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 65536,
+			"thinking": {
+				"mode": "google-level",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high"
+				],
+				"effortRouting": {
+					"off": "gemini-3.7-flash-extra-low",
+					"minimal": "gemini-3.7-flash-agent",
+					"low": "gemini-3.7-flash-extra-low",
+					"medium": "gemini-3.7-flash-extra-low",
+					"high": "gemini-3.7-flash-low"
+				},
+				"suppressWhenOff": true
+			},
+			"requestModelId": "gemini-3.7-flash-extra-low"
+		},
 		"gemini-3-pro": {
 			"id": "gemini-3-pro",
 			"name": "Gemini 3 Pro",

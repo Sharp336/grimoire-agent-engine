@@ -113,6 +113,26 @@ const GEMINI_3_PRO_FAMILY_EFFORTS: readonly Effort[] = [Effort.Low, Effort.High]
 export const ANTIGRAVITY_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
 	families: [
 		{
+			id: "gemini-3.7-flash",
+			name: "Gemini 3.7 Flash",
+			members: [
+				"gemini-3.7-flash-extra-low",
+				"gemini-3.7-flash-low",
+				"gemini-3.7-flash-agent",
+				"gemini-3.7-flash-thinking",
+			],
+			routing: {
+				off: "gemini-3.7-flash-extra-low",
+				[Effort.Minimal]: "gemini-3.7-flash-agent",
+				[Effort.Low]: "gemini-3.7-flash-extra-low",
+				[Effort.Medium]: "gemini-3.7-flash-extra-low",
+				[Effort.High]: "gemini-3.7-flash-low",
+			},
+			thinking: { mode: "google-level", efforts: GEMINI_3_FLASH_FAMILY_EFFORTS },
+			suppressWhenOff: true,
+			extraAliases: ["gemini-3.7-flash-preview"],
+		},
+		{
 			id: "gemini-3.5-flash",
 			name: "Gemini 3.5 Flash",
 			members: ["gemini-3.5-flash-extra-low", "gemini-3.5-flash-low", "gemini-3-flash-agent"],

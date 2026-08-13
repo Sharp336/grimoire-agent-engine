@@ -50,6 +50,34 @@ function collapsedFlashModel(): Model<"google-gemini-cli"> {
 	} satisfies ModelSpec<"google-gemini-cli">);
 }
 
+function collapsedGemini37FlashModel(): Model<"google-gemini-cli"> {
+	return buildModel({
+		id: "gemini-3.7-flash",
+		requestModelId: "gemini-3.7-flash-extra-low",
+		name: "Gemini 3.7 Flash",
+		api: "google-gemini-cli",
+		provider: "google-antigravity",
+		baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+		reasoning: true,
+		thinking: {
+			mode: "google-level",
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+			effortRouting: {
+				off: "gemini-3.7-flash-extra-low",
+				[Effort.Minimal]: "gemini-3.7-flash-agent",
+				[Effort.Low]: "gemini-3.7-flash-extra-low",
+				[Effort.Medium]: "gemini-3.7-flash-extra-low",
+				[Effort.High]: "gemini-3.7-flash-low",
+			},
+			suppressWhenOff: true,
+		},
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1_048_576,
+		maxTokens: 65_535,
+	} satisfies ModelSpec<"google-gemini-cli">);
+}
+
 function collapsedClaudeModel(): Model<"google-gemini-cli"> {
 	return buildModel({
 		id: "claude-sonnet-4-6",
@@ -125,6 +153,15 @@ describe("google-gemini-cli effort-tier variant routing", () => {
 		const minimal = await captureRequest(collapsedFlashModel(), Effort.Minimal);
 		expect(minimal.body.model).toBe("gemini-3-flash-agent");
 		expect(minimal.body.request?.generationConfig?.thinkingConfig?.thinkingLevel).toBe("MINIMAL");
+	});
+
+	it("routes gemini-3.7-flash to backing wire ids per effort", async () => {
+		const high = await captureRequest(collapsedGemini37FlashModel(), Effort.High);
+		expect(high.body.model).toBe("gemini-3.7-flash-low");
+		expect(high.attributedModel).toBe("gemini-3.7-flash");
+
+		const minimal = await captureRequest(collapsedGemini37FlashModel(), Effort.Minimal);
+		expect(minimal.body.model).toBe("gemini-3.7-flash-agent");
 	});
 
 	it("suppresses thinking explicitly on the wire when off and suppressWhenOff is set", async () => {
