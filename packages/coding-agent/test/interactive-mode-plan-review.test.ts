@@ -636,7 +636,8 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(call).toBeDefined();
 		expect(call?.[0] as string).not.toContain("edited body");
 		expect(call?.[0] as string).not.toContain("original body");
-		// onPlanEdited mirrored the edit to the plan file.
+		// onPlanEdited mirrored the edit to the plan file — the source of truth
+		// the synthetic prompt instructs the agent to read.
 		expect(await Bun.file(resolvedPlanPath).text()).toContain("edited body");
 	});
 

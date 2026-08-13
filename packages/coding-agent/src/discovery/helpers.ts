@@ -19,6 +19,7 @@ import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import type { MCPRequestIdFormat } from "../mcp/types";
 import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "../thinking";
 import { normalizeToolNames } from "../tools/builtin-names";
+import { tryText } from "../utils/git";
 
 import { realpathIfExists, resolveContainedPath } from "./contained-path";
 import { buildPluginDirRoot } from "./plugin-dir-roots";
@@ -177,6 +178,14 @@ export function parseArrayOrCSV(value: unknown): string[] | undefined {
 	return undefined;
 }
 
+function parseRuleGlobs(value: unknown): string[] | undefined {
+	if (Array.isArray(value)) {
+		const filtered = value.filter((item): item is string => typeof item === "string");
+		return filtered.length > 0 ? filtered : undefined;
+	}
+	return typeof value === "string" ? [value] : undefined;
+}
+
 /**
  * Build a canonical rule item from a markdown/markdown-frontmatter document.
  */
@@ -193,12 +202,7 @@ export function buildRuleFromMarkdown(
 	const { frontmatter, body } = parseFrontmatter(content, { source: filePath });
 	const { condition, astCondition, scope } = parseRuleConditionAndScope(frontmatter as RuleFrontmatter);
 
-	let globs: string[] | undefined;
-	if (Array.isArray(frontmatter.globs)) {
-		globs = frontmatter.globs.filter((item): item is string => typeof item === "string");
-	} else if (typeof frontmatter.globs === "string") {
-		globs = [frontmatter.globs];
-	}
+	const globs = parseRuleGlobs(frontmatter.globs) ?? parseRuleGlobs(frontmatter.paths);
 
 	const resolvedName = options?.ruleName ?? name.replace(options?.stripNamePattern ?? /\.(md|mdc)$/, "");
 	const rawMode = frontmatter.interruptMode;
@@ -211,7 +215,7 @@ export function buildRuleFromMarkdown(
 		path: filePath,
 		content: body,
 		globs,
-		alwaysApply: frontmatter.alwaysApply === true,
+		alwaysApply: parseBoolean(frontmatter.alwaysApply),
 		description: typeof frontmatter.description === "string" ? frontmatter.description : undefined,
 		condition,
 		astCondition,
@@ -472,12 +476,895 @@ export function expandEnvVarsDeep<T>(obj: T, extraEnv?: Record<string, string>):
 	return obj;
 }
 
+function matchesExtension(filePath: string, extensions: string[] | undefined): boolean {
+	if (!extensions || extensions.length === 0) return true;
+	const extension = path.extname(filePath).slice(1);
+	return extensions.includes(extension);
+}
+
+async function isDirectoryPath(filePath: string): Promise<boolean> {
+	const stat = await fs.promises.stat(filePath).catch(() => null);
+	return stat?.isDirectory() ?? false;
+}
+
+interface GitignoreRule {
+	baseDir: string;
+	pattern: string;
+	negated: boolean;
+	ignoreCase: boolean;
+}
+
+interface GitignoreMatch {
+	matchedPath: boolean;
+	matchedAncestors: string[];
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+	return (await fs.promises.lstat(filePath).catch(() => null)) !== null;
+}
+
+function normalizedRelativePath(from: string, to: string): string {
+	return path.relative(from, to).split(path.sep).join("/");
+}
+
+async function findGitignoreRoot(dir: string, base?: string): Promise<{ root: string; isGitRoot: boolean }> {
+	const startDir = path.resolve(dir);
+	// Where to begin the upward search. A symlinked rules dir — or, when the workspace
+	// `base` is known, any symlinked ancestor strictly below it (e.g. a symlinked
+	// `.claude`) — resolves into a target checkout whose .git/ignore files git never
+	// follows. Start at the project-side parent of the highest such symlink so the
+	// target's metadata neither anchors the gitignore root nor records target-side ignore
+	// files. A symlink AT or above the base (a checkout reached through a symlinked path)
+	// stays authoritative, so it is left in the search. Without a `base`, only the start
+	// dir itself is checked, preserving the original single-component behavior.
+	let walkStart = startDir;
+	const boundary = base !== undefined ? path.resolve(base) : undefined;
+	let probe = startDir;
+	while (true) {
+		const probeStat = await fs.promises.lstat(probe).catch(() => null);
+		if (probeStat?.isSymbolicLink() === true) {
+			walkStart = path.dirname(probe);
+		}
+		if (boundary === undefined) break;
+		const probeParent = path.dirname(probe);
+		if (probeParent === probe || probeParent === boundary) break;
+		probe = probeParent;
+	}
+	let current = walkStart;
+	let highestIgnoreDir: string | undefined;
+	while (true) {
+		if (await pathExists(path.join(current, ".git"))) {
+			return { root: current, isGitRoot: true };
+		}
+		if (
+			(await Bun.file(path.join(current, ".gitignore")).exists()) ||
+			(await Bun.file(path.join(current, ".ignore")).exists())
+		) {
+			highestIgnoreDir = current;
+		}
+		const parent = path.dirname(current);
+		if (parent === current || current === boundary) return { root: highestIgnoreDir ?? walkStart, isGitRoot: false };
+		current = parent;
+	}
+}
+
+// Bun.Glob metacharacters: outside a bracket expression a gitignore `\X` of one of
+// these must STAY escaped so Bun.Glob keeps it literal. Git lets a backslash escape
+// ANY character, so every other `\X` outside brackets is a plain literal — drop the
+// backslash (e.g. `foo\bar.md` is the logical file `foobar.md`, and leaving `\b` in
+// the glob would match nothing).
+const GLOB_METACHARACTERS: Record<string, true> = {
+	"\\": true,
+	"*": true,
+	"?": true,
+	"[": true,
+	"]": true,
+	"{": true,
+	"}": true,
+	"(": true,
+	")": true,
+	"!": true,
+	"+": true,
+	"@": true,
+	"|": true,
+};
+function unescapeGitignorePattern(pattern: string): string {
+	let result = "";
+	let inBracket = false;
+	// `]` closes a class only when not in the leading slot; right after `[`, or right
+	// after a `[!`/`[^` negation prefix, it is a literal member (e.g. `[]...]`,
+	// `[!]...]`), so the class keeps parsing past it.
+	let atBracketStart = false;
+	let negationSeen = false;
+	for (let i = 0; i < pattern.length; i++) {
+		const ch = pattern[i];
+		if (ch === "\\" && i + 1 < pattern.length) {
+			const next = pattern[i + 1] as string;
+			// Inside a `[...]` class, backslash escapes carry bracket-local meaning
+			// (e.g. `[a\-z]` is the literals a, -, z — not the range a-z), so keep them
+			// verbatim for Bun.Glob's class parser. Outside brackets, keep the escape
+			// only for glob metacharacters; otherwise drop it.
+			result += inBracket || GLOB_METACHARACTERS[next] ? `\\${next}` : next;
+			i++;
+			if (inBracket) atBracketStart = false;
+			continue;
+		}
+		if (!inBracket) {
+			if (ch === "[") {
+				inBracket = true;
+				atBracketStart = true;
+				negationSeen = false;
+			}
+			result += ch;
+			continue;
+		}
+		if (ch === "]" && !atBracketStart) {
+			inBracket = false;
+			result += ch;
+			continue;
+		}
+		// Only the first `!`/`^` right after `[` is the negation prefix; it keeps the
+		// leading slot (where `]` stays literal) open across exactly one such char.
+		if (atBracketStart && !negationSeen && (ch === "!" || ch === "^")) {
+			negationSeen = true;
+			result += ch;
+			continue;
+		}
+		result += ch;
+		atBracketStart = false;
+	}
+	return result;
+}
+
+function trimGitignoreTrailingSpaces(pattern: string): string {
+	let end = pattern.length;
+	while (end > 0 && pattern[end - 1] === " ") {
+		let backslashCount = 0;
+		for (let i = end - 2; i >= 0 && pattern[i] === "\\"; i--) {
+			backslashCount++;
+		}
+		if (backslashCount % 2 === 1) break;
+		end--;
+	}
+	return pattern.slice(0, end);
+}
+async function loadIgnoreFile(
+	rules: GitignoreRule[],
+	filePath: string,
+	baseDir: string,
+	ignoreCase: boolean,
+	skipSymlink = false,
+): Promise<void> {
+	// Git never follows a symlinked working-tree .gitignore/.ignore file
+	// (https://git-scm.com/docs/gitignore#_notes); skip it so a linked rule tree filtered
+	// by a symlinked ignore file keeps the rules git would leave visible. Configured
+	// ignore sources (core.excludesFile, .git/info/exclude) are read by path and remain
+	// followed.
+	const stat = await (skipSymlink ? fs.promises.lstat(filePath) : fs.promises.stat(filePath)).catch(() => null);
+	if (!stat) return;
+	if (skipSymlink && stat.isSymbolicLink()) return;
+	if (!stat.isFile()) return;
+	const text = await Bun.file(filePath)
+		.text()
+		.catch(() => null);
+	if (text === null) return;
+	const lines = text.split(/\r?\n/);
+	for (const line of lines) {
+		if (line.trim().length === 0 || line.startsWith("#")) continue;
+		const negated = line.startsWith("!");
+		const pattern = unescapeGitignorePattern(trimGitignoreTrailingSpaces(negated ? line.slice(1) : line));
+		if (pattern) rules.push({ baseDir, pattern, negated, ignoreCase });
+	}
+}
+
+async function resolveGitDir(rootDir: string): Promise<string | undefined> {
+	const dotGitPath = path.join(rootDir, ".git");
+	const stat = await fs.promises.lstat(dotGitPath).catch(() => null);
+	if (stat?.isDirectory()) return dotGitPath;
+	if (!stat?.isFile()) return undefined;
+	const text = await Bun.file(dotGitPath)
+		.text()
+		.catch(() => null);
+	const match = text ? /^gitdir:\s*(.+)\s*$/im.exec(text) : null;
+	if (!match?.[1]) return undefined;
+	return path.resolve(rootDir, match[1].trim());
+}
+
+// tryText rejects when `git` is not on PATH at all (distinct from a git command
+// exiting non-zero, which it already reports as `undefined`); rule discovery
+// runs on arbitrary directories that may not have git installed, so that case
+// degrades the same way as a failed git invocation instead of throwing.
+async function safeTryText(rootDir: string, args: readonly string[]): Promise<string | undefined> {
+	try {
+		return await tryText(rootDir, args, { readOnly: true });
+	} catch {
+		return undefined;
+	}
+}
+
+async function resolveGitExcludeFile(rootDir: string): Promise<string | undefined> {
+	const text = await safeTryText(rootDir, ["rev-parse", "--git-path", "info/exclude"]);
+	const gitPath = text?.trim();
+	if (gitPath) return path.isAbsolute(gitPath) ? gitPath : path.resolve(rootDir, gitPath);
+	const gitDir = await resolveGitDir(rootDir);
+	return gitDir ? path.join(gitDir, "info", "exclude") : undefined;
+}
+
+function expandHomePath(filePath: string): string {
+	if (filePath === "~") return os.homedir();
+	if (filePath.startsWith("~/")) return path.join(os.homedir(), filePath.slice(2));
+	return filePath;
+}
+
+async function configuredGlobalGitignorePath(): Promise<string | undefined> {
+	const configCandidates = [
+		path.join(os.homedir(), ".gitconfig"),
+		path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "git", "config"),
+	];
+	for (const configPath of configCandidates) {
+		const text = await Bun.file(configPath)
+			.text()
+			.catch(() => null);
+		if (!text) continue;
+		let inCore = false;
+		for (const rawLine of text.split(/\r?\n/)) {
+			const line = rawLine.trim();
+			if (!line || line.startsWith("#") || line.startsWith(";")) continue;
+			const sectionMatch = /^\[(.+)\]$/.exec(line);
+			if (sectionMatch) {
+				inCore = sectionMatch[1]?.trim().toLowerCase() === "core";
+				continue;
+			}
+			if (!inCore) continue;
+			const match = /^excludesFile\s*=\s*(.+)$/.exec(line);
+			if (match?.[1]) return expandHomePath(match[1].trim());
+		}
+	}
+	return undefined;
+}
+async function gitignorePath(rootDir: string): Promise<string | null> {
+	const text = await safeTryText(rootDir, ["config", "--path", "core.excludesFile"]);
+	if (text !== undefined) {
+		const configured = text.trim();
+		if (!configured) return null;
+		const expanded = expandHomePath(configured);
+		return path.isAbsolute(expanded) ? expanded : path.resolve(rootDir, expanded);
+	}
+	const configured = await configuredGlobalGitignorePath();
+	if (configured) return configured;
+	const configHome = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config");
+	return path.join(configHome, "git", "ignore");
+}
+
+async function resolveGitIgnoreCase(rootDir: string): Promise<boolean> {
+	const text = await safeTryText(rootDir, ["config", "--bool", "core.ignoreCase"]);
+	if (text === undefined) return false;
+	const normalized = text.trim().toLowerCase();
+	return normalized === "true" || normalized === "yes" || normalized === "on" || normalized === "1";
+}
+
+type GitignoreRulesCache = Map<string, Promise<GitignoreRule[]>>;
+
+async function loadGitignoreRules(
+	rootDir: string,
+	targetDir: string,
+	isGitRoot: boolean,
+	cache?: GitignoreRulesCache,
+): Promise<GitignoreRule[]> {
+	if (!cache) return computeGitignoreRules(rootDir, targetDir, isGitRoot);
+	const key = `${path.resolve(rootDir)}\u0000${path.resolve(targetDir)}`;
+	const existing = cache.get(key);
+	if (existing) return existing;
+	const promise = computeGitignoreRules(rootDir, targetDir, isGitRoot);
+	cache.set(key, promise);
+	return promise;
+}
+
+async function computeGitignoreRules(rootDir: string, targetDir: string, isGitRoot: boolean): Promise<GitignoreRule[]> {
+	const rules: GitignoreRule[] = [];
+	const ignoreCase = await resolveGitIgnoreCase(rootDir);
+	// core.excludesFile (and its ~/.config/git/ignore default) is only authoritative inside a
+	// real Git worktree; applying it to a non-repo directory tree (e.g. `~/.claude/rules`
+	// itself, or a scratch project with no `.git` anywhere in its ancestry) would silently
+	// suppress rules based on the user's unrelated global Git config.
+	if (isGitRoot) {
+		const globalIgnore = await gitignorePath(rootDir);
+		if (globalIgnore) await loadIgnoreFile(rules, globalIgnore, rootDir, ignoreCase);
+	}
+	const gitExcludeFile = await resolveGitExcludeFile(rootDir);
+	if (gitExcludeFile) await loadIgnoreFile(rules, gitExcludeFile, rootDir, ignoreCase);
+	const directories: string[] = [];
+	let current = rootDir;
+	while (true) {
+		directories.push(current);
+		if (path.resolve(current) === path.resolve(targetDir)) break;
+		const nextSegment = path.relative(current, targetDir).split(path.sep)[0] ?? "";
+		const next = path.join(current, nextSegment);
+		if (next === current || !path.relative(current, targetDir)) break;
+		current = next;
+	}
+	// Git does not follow symbolic links when reading .gitignore/.ignore files
+	// (https://git-scm.com/docs/gitignore#_notes). A per-directory ignore file below a
+	// symlinked directory is only reachable through that symlink, so stop the walk
+	// there to match native ignore semantics for linked rule directories. The ignore
+	// root itself may legitimately be reached through a symlinked checkout path
+	// (e.g. /tmp/link -> /real/repo); its own ignore files are still authoritative.
+	const realDirectories: string[] = [];
+	for (let i = 0; i < directories.length; i++) {
+		const dir = directories[i];
+		if (i > 0) {
+			const stat = await fs.promises.lstat(dir).catch(() => null);
+			if (stat?.isSymbolicLink()) break;
+		}
+		realDirectories.push(dir);
+	}
+	for (const dir of realDirectories) {
+		await loadIgnoreFile(rules, path.join(dir, ".gitignore"), dir, ignoreCase, true);
+	}
+	for (const dir of realDirectories) {
+		await loadIgnoreFile(rules, path.join(dir, ".ignore"), dir, ignoreCase, true);
+	}
+	return rules;
+}
+
+const POSIX_CHARACTER_CLASS_MAP: Record<string, string> = {
+	alnum: "A-Za-z0-9",
+	alpha: "A-Za-z",
+	blank: " \t",
+	digit: "0-9",
+	graph: "!-~",
+	lower: "a-z",
+	print: " -~",
+	punct: "][\\\\!\"#$%&'()*+,./:;<=>?@\\[^_`{|}~-",
+	// POSIX space = space, tab, newline, vertical tab, form feed, carriage return; Git's
+	// [[:space:]] matches all of them in filenames, so emit the full set (not just space/tab).
+	space: " \t\n\u000b\f\r",
+	upper: "A-Z",
+	cntrl: "\u0000-\u001F\u007F",
+	xdigit: "A-Fa-f0-9",
+};
+
+const SLASH_CODE_POINT = "/".codePointAt(0) as number;
+
+/**
+ * Stage 1 of `normalizePosixCharacterClasses`: expand `[:posix:]` tokens into their
+ * literal member/range text. POSIX bracket classes are only meaningful inside a bracket
+ * expression, e.g. `[[:upper:]]`. A bare `[:upper:]` is an ordinary bracket expression
+ * matching one of the literal characters `:uper`, so it must be left untranslated to
+ * match git/fnmatch semantics. `/`-exclusion (stage 2, `excludeSlashFromBrackets`) runs
+ * separately on the result, so this stage does not need to special-case `/` itself —
+ * only the position-sensitive bracket metacharacters (`]`, `!`, `^`, trailing `-`) that
+ * stage 2's generic range tokenizer cannot disambiguate without this context.
+ */
+function expandPosixCharacterClasses(pattern: string): string {
+	let result = "";
+	let inBracket = false;
+	// Track the bracket leading slot: `]` is a literal member right after `[`, or right
+	// after a `[!`/`[^` negation prefix (`atBracketStart`), while `!`/`^` negate only as
+	// the very first character before any negation prefix (`atBracketStart && !negationSeen`).
+	// A class expansion's leading char may need escaping depending on which slot it lands in.
+	let atBracketStart = false;
+	let negationSeen = false;
+	for (let i = 0; i < pattern.length; i++) {
+		const ch = pattern[i];
+		if (ch === "\\" && i + 1 < pattern.length) {
+			result += ch + pattern[i + 1];
+			i++;
+			if (inBracket) atBracketStart = false;
+			continue;
+		}
+		if (!inBracket) {
+			if (ch === "[") {
+				inBracket = true;
+				atBracketStart = true;
+				negationSeen = false;
+			}
+			result += ch;
+			continue;
+		}
+		if (ch === "[" && pattern[i + 1] === ":") {
+			const end = pattern.indexOf(":]", i + 2);
+			if (end !== -1) {
+				const className = pattern.slice(i + 2, end);
+				const replacement = POSIX_CHARACTER_CLASS_MAP[className];
+				if (replacement !== undefined) {
+					// Position-sensitive bracket metacharacters: `]` is a literal only in the leading
+					// slot (elsewhere it closes the class), while `!`/`^` negate only before any
+					// negation prefix. Escape a class expansion's leading char when its slot would
+					// make it special so Bun.Glob keeps it literal (e.g. `[[:graph:]]` -> `\!-~`,
+					// `[a[:punct:]]` -> `\]...`, but `[![:punct:]]` keeps a leading `]` literal).
+					const firstChar = replacement[0];
+					const needsLeadingEscape =
+						firstChar === "]"
+							? !atBracketStart
+							: (firstChar === "!" || firstChar === "^") && atBracketStart && !negationSeen;
+					let expansion = needsLeadingEscape ? `\\${replacement}` : replacement;
+					// `punct`'s expansion ends in a literal trailing `-` (only safe unescaped
+					// right before the bracket closes, per fnmatch/Bun.Glob range rules). If
+					// another member follows before `]` (e.g. `[[:punct:]a]`), that `-` sits
+					// mid-bracket — escape it so stage 2's range tokenizer reads it as a literal
+					// member rather than a range operator against whatever follows.
+					if (expansion.endsWith("-") && pattern[end + 2] !== "]") {
+						expansion = `${expansion.slice(0, -1)}\\-`;
+					}
+					result += expansion;
+					atBracketStart = false;
+					i = end + 1;
+					continue;
+				}
+			}
+			result += ch;
+			atBracketStart = false;
+			continue;
+		}
+		// A `]` is the class close only when it is NOT in the leading slot; right after
+		// `[`, or right after a `[!`/`[^` negation prefix, it is a literal member
+		// (e.g. `[]...]`, `[!]...]`), so the class — and any later `[:posix:]` token —
+		// keeps parsing.
+		if (ch === "]" && !atBracketStart) {
+			inBracket = false;
+			result += ch;
+			continue;
+		}
+		// Only the first `!`/`^` right after `[` is the negation prefix; it keeps the
+		// leading slot (where `]` stays literal) open across exactly one such char.
+		if (atBracketStart && !negationSeen && (ch === "!" || ch === "^")) {
+			negationSeen = true;
+			result += ch;
+			continue;
+		}
+		result += ch;
+		atBracketStart = false;
+	}
+	return result;
+}
+
+interface BracketSpan {
+	/** Index of the first content character (after `[`/negation prefix). */
+	contentStart: number;
+	/** Index of the closing `]`. */
+	contentEnd: number;
+	negated: boolean;
+}
+
+/** Locate top-level bracket expressions in an already POSIX-class-expanded pattern. */
+function findBracketSpans(pattern: string): BracketSpan[] {
+	const spans: BracketSpan[] = [];
+	let i = 0;
+	while (i < pattern.length) {
+		const ch = pattern[i];
+		if (ch === "\\" && i + 1 < pattern.length) {
+			i += 2;
+			continue;
+		}
+		if (ch !== "[") {
+			i++;
+			continue;
+		}
+		let j = i + 1;
+		let negated = false;
+		if (pattern[j] === "!" || pattern[j] === "^") {
+			negated = true;
+			j++;
+		}
+		const contentStart = j;
+		if (pattern[j] === "]") j++; // leading `]` is a literal member, not the close
+		while (j < pattern.length) {
+			if (pattern[j] === "\\" && j + 1 < pattern.length) {
+				j += 2;
+				continue;
+			}
+			if (pattern[j] === "]") break;
+			j++;
+		}
+		if (j < pattern.length && pattern[j] === "]") {
+			spans.push({ contentStart, contentEnd: j, negated });
+			i = j + 1;
+			continue;
+		}
+		i++; // unterminated `[` — treat as a literal, keep scanning
+	}
+	return spans;
+}
+
+type BracketToken =
+	| { kind: "literal"; raw: string; code: number }
+	| { kind: "range"; fromRaw: string; toRaw: string; fromCode: number; toCode: number };
+
+function codePointOfUnit(unit: string): number {
+	const ch = unit.length === 2 && unit[0] === "\\" ? unit[1] : unit;
+	return ch.codePointAt(0) as number;
+}
+
+/**
+ * Tokenize bracket content into literal members and `from-to` ranges. A `-` is a range
+ * operator only when it has a member on both sides within the content (a leading `-`,
+ * e.g. `[-abc]`, or trailing `-`, e.g. `[abc-]`, is always literal per fnmatch/git
+ * semantics — `readUnit` naturally treats those as plain literals since there is no
+ * second operand to pair with).
+ */
+function tokenizeBracketContent(content: string): BracketToken[] {
+	const tokens: BracketToken[] = [];
+	let i = 0;
+	const readUnit = (): string => {
+		if (content[i] === "\\" && i + 1 < content.length) {
+			const unit = content.slice(i, i + 2);
+			i += 2;
+			return unit;
+		}
+		const unit = content[i];
+		i += 1;
+		return unit;
+	};
+	while (i < content.length) {
+		const first = readUnit();
+		if (content[i] === "-" && i + 1 < content.length) {
+			i += 1; // consume "-"
+			const second = readUnit();
+			tokens.push({
+				kind: "range",
+				fromRaw: first,
+				toRaw: second,
+				fromCode: codePointOfUnit(first),
+				toCode: codePointOfUnit(second),
+			});
+			continue;
+		}
+		tokens.push({ kind: "literal", raw: first, code: codePointOfUnit(first) });
+	}
+	return tokens;
+}
+
+/**
+ * Exclude `/` from a bracket's matched set: gitignore matches with FNM_PATHNAME
+ * semantics, so a bracket expression — negated or not, a literal member or a range
+ * (POSIX-class-derived or hand-written, e.g. `[.-0]` numerically spans `/`) — never
+ * matches `/`. `Bun.Glob` has no such notion, so:
+ *  - a literal `/` member is dropped from a positive class (git treats it as absent);
+ *  - a range spanning `/` is split around it (`[.-0]` -> `[.0]`, `[!-~]` -> `[!-.0-~]`);
+ *  - a negated class gets an explicit `/` exclusion added if it doesn't already have one
+ *    (`Bun.Glob`'s negation otherwise implicitly allows `/` through, unlike git).
+ */
+function neutralizeSlashInTokens(tokens: BracketToken[], negated: boolean): BracketToken[] {
+	const out: BracketToken[] = [];
+	let slashExcluded = false;
+	for (const token of tokens) {
+		if (token.kind === "literal") {
+			if (token.code === SLASH_CODE_POINT) {
+				slashExcluded = true;
+				if (negated) out.push(token);
+				continue;
+			}
+			out.push(token);
+			continue;
+		}
+		if (token.fromCode <= SLASH_CODE_POINT && SLASH_CODE_POINT <= token.toCode) {
+			slashExcluded = true;
+			if (token.fromCode <= SLASH_CODE_POINT - 1) {
+				out.push(
+					token.fromCode === SLASH_CODE_POINT - 1
+						? { kind: "literal", raw: token.fromRaw, code: token.fromCode }
+						: {
+								kind: "range",
+								fromRaw: token.fromRaw,
+								toRaw: String.fromCodePoint(SLASH_CODE_POINT - 1),
+								fromCode: token.fromCode,
+								toCode: SLASH_CODE_POINT - 1,
+							},
+				);
+			}
+			if (SLASH_CODE_POINT + 1 <= token.toCode) {
+				out.push(
+					SLASH_CODE_POINT + 1 === token.toCode
+						? { kind: "literal", raw: token.toRaw, code: token.toCode }
+						: {
+								kind: "range",
+								fromRaw: String.fromCodePoint(SLASH_CODE_POINT + 1),
+								toRaw: token.toRaw,
+								fromCode: SLASH_CODE_POINT + 1,
+								toCode: token.toCode,
+							},
+				);
+			}
+			if (negated) out.push({ kind: "literal", raw: "/", code: SLASH_CODE_POINT });
+			continue;
+		}
+		out.push(token);
+	}
+	if (negated && !slashExcluded) {
+		out.push({ kind: "literal", raw: "/", code: SLASH_CODE_POINT });
+	}
+	return out;
+}
+
+function renderBracketTokens(tokens: BracketToken[]): string {
+	return tokens.map(token => (token.kind === "literal" ? token.raw : `${token.fromRaw}-${token.toRaw}`)).join("");
+}
+
+/** Stage 2 of `normalizePosixCharacterClasses`: exclude `/` from every bracket's matched set. */
+function excludeSlashFromBrackets(pattern: string): string {
+	const spans = findBracketSpans(pattern);
+	if (spans.length === 0) return pattern;
+	let result = "";
+	let cursor = 0;
+	for (const span of spans) {
+		result += pattern.slice(cursor, span.contentStart);
+		const content = pattern.slice(span.contentStart, span.contentEnd);
+		const tokens = tokenizeBracketContent(content);
+		result += renderBracketTokens(neutralizeSlashInTokens(tokens, span.negated));
+		cursor = span.contentEnd;
+	}
+	result += pattern.slice(cursor);
+	return result;
+}
+
+function normalizePosixCharacterClasses(pattern: string): string {
+	return excludeSlashFromBrackets(expandPosixCharacterClasses(pattern));
+}
+
+function escapeGitignoreLiteralBraces(pattern: string): string {
+	let escaped = "";
+	let inCharacterClass = false;
+	// A `]` closes the class only when it is NOT in the leading slot: right after
+	// `[`, or right after a `[!`/`[^` negation prefix, it is a literal class member
+	// (git/fnmatch semantics, e.g. `[]{}]` is the class of `]`, `{`, `}`). Closing
+	// the class on that leading `]` would expose later `{`/`}` to brace escaping and
+	// break the glob, letting symlinked rules git suppresses leak into the prompt.
+	// At most one leading `!`/`^` negation prefix keeps the leading slot open.
+	let atClassStart = false;
+	let negationSeen = false;
+	for (let i = 0; i < pattern.length; i++) {
+		const ch = pattern[i];
+		if (ch === "\\" && i + 1 < pattern.length) {
+			escaped += ch + pattern[i + 1];
+			i++;
+			if (inCharacterClass) atClassStart = false;
+			continue;
+		}
+		if (!inCharacterClass) {
+			if (ch === "{") {
+				escaped += "[{]";
+				continue;
+			}
+			if (ch === "}") {
+				escaped += "[}]";
+				continue;
+			}
+			if (ch === "[") {
+				inCharacterClass = true;
+				atClassStart = true;
+				negationSeen = false;
+			}
+			escaped += ch;
+			continue;
+		}
+		if (ch === "]" && !atClassStart) {
+			inCharacterClass = false;
+			escaped += ch;
+			continue;
+		}
+		// Only the first `!`/`^` right after `[` is the negation prefix; it keeps the
+		// leading slot (where `]` stays literal) open across exactly one such char. A
+		// second `!`/`^` is an ordinary member, so the slot closes and a following `]`
+		// ends the class (git/fnmatch, e.g. `[!!]` is the class "not `!`").
+		if (atClassStart && !negationSeen && (ch === "!" || ch === "^")) {
+			negationSeen = true;
+			escaped += ch;
+			continue;
+		}
+		escaped += ch;
+		atClassStart = false;
+	}
+	return escaped;
+}
+
+// A leading `!` in a gitignore pattern is the negation prefix, consumed at parse
+// time into `GitignoreRule.negated`. Any `!` that survives into the glob is a
+// literal path character — an anchored `/!name`, an escaped `\!name`, or a
+// slash-bearing `!dir/x` — but `Bun.Glob` treats a leading `!` as negation and
+// would then match every unrelated path. Escape it so the glob stays literal. A
+// `!` after a `**/` prefix (or anywhere but the start) is already literal to
+// `Bun.Glob` and is left untouched.
+function escapeGlobLeadingBang(pattern: string): string {
+	return pattern.startsWith("!") ? `\\${pattern}` : pattern;
+}
+
+function gitignoreRuleMatch(
+	rule: GitignoreRule,
+	filePath: string,
+	options?: { treatAsDirectory?: boolean },
+): GitignoreMatch | undefined {
+	const relativePath = normalizedRelativePath(rule.baseDir, filePath);
+	if (!relativePath || relativePath.startsWith("../")) return undefined;
+
+	const anchored = rule.pattern.startsWith("/");
+	const rawPattern = anchored ? rule.pattern.slice(1) : rule.pattern;
+	const directoryOnly = rawPattern.endsWith("/");
+	const normalizedPattern = rawPattern.replace(/\/+$/, "");
+	const basePattern = escapeGlobLeadingBang(
+		escapeGitignoreLiteralBraces(
+			normalizePosixCharacterClasses(
+				normalizedPattern.includes("/") || anchored ? normalizedPattern : `**/${normalizedPattern}`,
+			),
+		),
+	);
+	const globPattern = rule.ignoreCase ? basePattern.toLowerCase() : basePattern;
+	const candidatePath = rule.ignoreCase ? relativePath.toLowerCase() : relativePath;
+	const pathGlob = new Bun.Glob(globPattern);
+	const ancestorGlob = new Bun.Glob(globPattern);
+	const parts = candidatePath.split("/");
+	const matchedAncestors: string[] = [];
+	for (let i = 1; i < parts.length; i++) {
+		const ancestor = parts.slice(0, i).join("/");
+		if (ancestorGlob.match(ancestor)) {
+			matchedAncestors.push(path.resolve(rule.baseDir, ancestor));
+		}
+	}
+	const matchedPath = (options?.treatAsDirectory ? true : !directoryOnly) && pathGlob.match(candidatePath);
+	if (matchedPath || matchedAncestors.length > 0) return { matchedPath, matchedAncestors };
+	return undefined;
+}
+async function getGitignoreState(
+	dir: string,
+	relativePath: string,
+	options?: { treatAsDirectory?: boolean },
+	cache?: GitignoreRulesCache,
+	base?: string,
+): Promise<{ ignoredPath: boolean; ignoredAncestors: Set<string> }> {
+	const filePath = path.join(dir, relativePath);
+	const { root: rootDir, isGitRoot } = await findGitignoreRoot(dir, base);
+	const rules = await loadGitignoreRules(rootDir, path.dirname(filePath), isGitRoot, cache);
+	let ignoredPath = false;
+	const ignoredAncestors = new Set<string>();
+	for (const rule of rules) {
+		const match = gitignoreRuleMatch(rule, filePath, options);
+		if (!match) continue;
+		if (rule.negated) {
+			for (const ancestor of match.matchedAncestors) {
+				ignoredAncestors.delete(ancestor);
+			}
+			if (match.matchedPath) {
+				ignoredPath = false;
+			}
+		} else {
+			if (match.matchedPath) {
+				ignoredPath = true;
+			}
+			for (const ancestor of match.matchedAncestors) {
+				ignoredAncestors.add(ancestor);
+			}
+		}
+	}
+	return { ignoredPath, ignoredAncestors };
+}
+
+async function isGitignoredPath(
+	dir: string,
+	relativePath: string,
+	cache?: GitignoreRulesCache,
+	base?: string,
+): Promise<boolean> {
+	const { ignoredPath, ignoredAncestors } = await getGitignoreState(dir, relativePath, undefined, cache, base);
+	return ignoredPath || ignoredAncestors.size > 0;
+}
+
+async function isGitignoredDirectoryPath(
+	dir: string,
+	relativePath: string,
+	cache?: GitignoreRulesCache,
+	base?: string,
+): Promise<boolean> {
+	const { ignoredPath, ignoredAncestors } = await getGitignoreState(
+		dir,
+		relativePath,
+		{ treatAsDirectory: true },
+		cache,
+		base,
+	);
+	return ignoredPath || ignoredAncestors.size > 0;
+}
+
+async function discoverLinkedFilesFromDir(
+	dir: string,
+	extensions: string[] | undefined,
+	cache?: GitignoreRulesCache,
+	base?: string,
+	respectGitignore = true,
+): Promise<Array<{ path: string }>> {
+	const matches: Array<{ path: string }> = [];
+	async function collectLinkedDir(
+		currentDir: string,
+		relativeDir: string,
+		activeRealDirs: ReadonlySet<string>,
+	): Promise<void> {
+		if (respectGitignore && relativeDir && (await isGitignoredDirectoryPath(dir, relativeDir, cache, base))) return;
+		const realDir = await fs.promises.realpath(currentDir).catch(() => currentDir);
+		if (activeRealDirs.has(realDir)) return;
+		const nextActiveRealDirs = new Set(activeRealDirs);
+		nextActiveRealDirs.add(realDir);
+
+		const entries = await readDirEntries(currentDir);
+		await Promise.all(
+			entries.map(async entry => {
+				if (entry.name.startsWith(".") || entry.name === "node_modules") return;
+				const entryPath = path.join(currentDir, entry.name);
+				const relativePath = path.join(relativeDir, entry.name);
+				if (await isDirectoryPath(entryPath)) {
+					await collectLinkedDir(entryPath, relativePath, nextActiveRealDirs);
+					return;
+				}
+				if (matchesExtension(entry.name, extensions)) {
+					matches.push({ path: relativePath });
+				}
+			}),
+		);
+	}
+
+	async function scanForLinkedDirs(currentDir: string, relativeDir: string): Promise<void> {
+		const entries = await readDirEntries(currentDir);
+		await Promise.all(
+			entries.map(async entry => {
+				if (entry.name.startsWith(".") || entry.name === "node_modules") return;
+				const entryPath = path.join(currentDir, entry.name);
+				const relativePath = path.join(relativeDir, entry.name);
+				if (!(await isDirectoryPath(entryPath))) return;
+				if (respectGitignore && (await isGitignoredDirectoryPath(dir, relativePath, cache, base))) return;
+				if (entry.isSymbolicLink()) {
+					await collectLinkedDir(entryPath, relativePath, new Set<string>());
+					return;
+				}
+				await scanForLinkedDirs(entryPath, relativePath);
+			}),
+		);
+	}
+
+	await scanForLinkedDirs(dir, "");
+
+	return matches;
+}
+
+// The workspace boundary for symlink-aware ignore handling of `dir`: the deepest
+// directory shared by `dir` and the cwd/home anchor. When `dir` is an ancestor rule
+// directory — or cwd is nested below a symlinked checkout — `dir` is not under cwd, so
+// using cwd directly would walk past the checkout root and mistake the checkout symlink
+// for a symlinked rules ancestor. The common ancestor is the project/repo root that
+// contains `dir`, keeping a checkout-level symlink authoritative.
+function workspaceBoundaryFor(dir: string, anchor: string): string {
+	const dirParts = path.resolve(dir).split(path.sep);
+	const anchorParts = path.resolve(anchor).split(path.sep);
+	const common: string[] = [];
+	for (let i = 0; i < Math.min(dirParts.length, anchorParts.length); i++) {
+		if (dirParts[i] !== anchorParts[i]) break;
+		common.push(dirParts[i]);
+	}
+	return common.join(path.sep) || path.sep;
+}
+
+// True when `dir` itself or any ancestor up to (but excluding) `base` is a symlink.
+// The native glob canonicalizes a symlinked search root and applies the target's own
+// ignores; that happens whether the link is the rules dir itself or a parent (e.g. a
+// symlinked `.claude`), so both must trigger the unignored rescan + project-logical
+// re-filter. `base` (cwd/home) bounds the walk so system links above the workspace
+// (e.g. a symlinked /tmp) never count.
+async function pathHasSymlinkedAncestor(dir: string, base: string): Promise<boolean> {
+	const boundary = path.resolve(base);
+	let current = path.resolve(dir);
+	while (current !== boundary) {
+		const stat = await fs.promises.lstat(current).catch(() => null);
+		if (stat?.isSymbolicLink()) return true;
+		const parent = path.dirname(current);
+		if (parent === current) break; // reached filesystem root without hitting base
+		current = parent;
+	}
+	return false;
+}
+
 /**
  * Load files from a directory matching extensions.
  * Uses native glob for fast filesystem scanning with gitignore support.
  */
 export async function loadFilesFromDir<T>(
-	_ctx: LoadContext,
+	ctx: LoadContext,
 	dir: string,
 	provider: string,
 	level: "user" | "project",
@@ -488,12 +1375,24 @@ export async function loadFilesFromDir<T>(
 		transform: (name: string, content: string, path: string, source: SourceMeta) => T | null;
 		/** Whether to recurse into subdirectories (default: false) */
 		recursive?: boolean;
+		/** Also traverse symlinked directories; native glob intentionally skips them. */
+		followSymlinkDirectories?: boolean;
+		/** Skip files whose absolute path matches a caller-defined exclusion. */
+		excludePath?: (path: string) => boolean | Promise<boolean>;
+		/** Whether to apply Git ignore rules (default: true). */
+		respectGitignore?: boolean;
 	},
 ): Promise<LoadResult<T>> {
 	const items: T[] = [];
 	const warnings: string[] = [];
 	// Build glob pattern based on extensions and recursion
-	const { extensions, recursive = false } = options;
+	const {
+		extensions,
+		recursive = false,
+		followSymlinkDirectories = false,
+		excludePath,
+		respectGitignore = true,
+	} = options;
 
 	let pattern: string;
 	if (extensions && extensions.length > 0) {
@@ -509,7 +1408,7 @@ export async function loadFilesFromDir<T>(
 		const result = await glob({
 			pattern,
 			path: dir,
-			gitignore: true,
+			gitignore: respectGitignore,
 			hidden: false,
 			fileType: FileType.File,
 		});
@@ -517,6 +1416,61 @@ export async function loadFilesFromDir<T>(
 	} catch {
 		// Directory doesn't exist or isn't readable
 		return { items, warnings };
+	}
+
+	if (followSymlinkDirectories && recursive) {
+		const ignoreCache: GitignoreRulesCache = new Map();
+		const base = workspaceBoundaryFor(dir, level === "user" ? ctx.home : (ctx.repoRoot ?? ctx.cwd));
+		if (respectGitignore && (await pathHasSymlinkedAncestor(dir, base))) {
+			// The native scanner canonicalizes a symlinked search root and applies the
+			// target checkout's own .gitignore, which git does not follow for a symlinked
+			// rules directory. Re-scan without ignore handling so target-side ignores
+			// cannot drop root-level rules; the project-level re-filter below then applies
+			// only the project logical filter.
+			try {
+				const unfiltered = await glob({
+					pattern,
+					path: dir,
+					gitignore: false,
+					hidden: false,
+					fileType: FileType.File,
+				});
+				matches = unfiltered.matches;
+			} catch {
+				// Keep the gitignore-filtered matches if the rescan fails.
+			}
+		}
+		// When enabled, re-filter every match with the Git-compatible matcher — not only
+		// a symlinked ancestor forced a rescan above. The native glob's own gitignore
+		// handling does not cover syntax this matcher explicitly normalizes (e.g. POSIX
+		// character classes like `[[:upper:]]`), so an ordinary, unsymlinked rules
+		// directory can still load a file `git check-ignore` would drop.
+		const filteredNativeMatches = respectGitignore
+			? await Promise.all(
+					matches.map(async match =>
+						(await isGitignoredPath(dir, match.path, ignoreCache, base)) ? null : match,
+					),
+				)
+			: matches;
+		matches = filteredNativeMatches.filter((match): match is { path: string } => match !== null);
+		const linkedMatches = await Promise.all(
+			(await discoverLinkedFilesFromDir(dir, extensions, ignoreCache, base, respectGitignore)).map(async match =>
+				respectGitignore && (await isGitignoredPath(dir, match.path, ignoreCache, base)) ? null : match,
+			),
+		);
+		const seen = new Set(matches.map(match => match.path));
+		for (const match of linkedMatches) {
+			if (!match || seen.has(match.path)) continue;
+			seen.add(match.path);
+			matches.push(match);
+		}
+	}
+
+	if (excludePath) {
+		const filteredMatches = await Promise.all(
+			matches.map(async match => ((await excludePath(path.join(dir, match.path))) ? null : match)),
+		);
+		matches = filteredMatches.filter((match): match is { path: string } => match !== null);
 	}
 
 	// Read all matching files in parallel

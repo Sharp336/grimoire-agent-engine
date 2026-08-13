@@ -511,7 +511,6 @@ export class StatusLineComponent implements Component {
 	 * The status line now intentionally shows only the active count.
 	 */
 	setSubagentHubHint(_hint: string | undefined): void {}
-
 	/** Active subagent count as currently displayed (collab state mirroring). */
 	get subagentCount(): number {
 		return this.#subagentCount;

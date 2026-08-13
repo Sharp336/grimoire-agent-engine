@@ -4,6 +4,7 @@
  * Loads configuration from .claude directories.
  * Priority: 80 (tool-specific, below builtin but above shared standards)
  */
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { hasFsCode, tryParseJson } from "@oh-my-pi/pi-utils";
 import { registerProvider } from "../capability";
@@ -12,14 +13,16 @@ import { type ExtensionModule, extensionModuleCapability } from "../capability/e
 import { readFile } from "../capability/fs";
 import { type Hook, hookCapability } from "../capability/hook";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
+import { type Rule, ruleCapability } from "../capability/rule";
 import { type Settings, settingsCapability } from "../capability/settings";
 import { type Skill, skillCapability } from "../capability/skill";
 import { type SlashCommand, slashCommandCapability } from "../capability/slash-command";
 import { type SystemPrompt, systemPromptCapability } from "../capability/system-prompt";
 import { type CustomTool, toolCapability } from "../capability/tool";
-import type { LoadContext, LoadResult } from "../capability/types";
+import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import { settings } from "../config/settings";
 import {
+	buildRuleFromMarkdown,
 	calculateDepth,
 	createSourceMeta,
 	discoverExtensionModulePaths,
@@ -38,7 +41,7 @@ const CONFIG_DIR = ".claude";
  * Get user-level .claude path.
  */
 function getUserClaude(ctx: LoadContext): string {
-	return path.join(ctx.home, CONFIG_DIR);
+	return process.env.CLAUDE_CONFIG_DIR || path.join(ctx.home, CONFIG_DIR);
 }
 
 /**
@@ -46,6 +49,38 @@ function getUserClaude(ctx: LoadContext): string {
  */
 function getProjectClaude(ctx: LoadContext): string {
 	return path.join(ctx.cwd, CONFIG_DIR);
+}
+
+// The ancestor walk climbs from cwd toward a stopping anchor: the git repo root when
+// known, else the home directory when cwd is under it. When cwd has neither anchor —
+// no git repo, and outside $HOME (e.g. a scratch checkout under /tmp or /workspaces) —
+// there is no safe upper bound; continuing to the filesystem root would load every
+// ancestor .claude/rules directory it finds, leaking unrelated parent-directory rules
+// into the prompt. Anchor at cwd itself in that case so only the project directory
+// (not its ancestors) is scanned.
+function getProjectClaudeAnchor(ctx: LoadContext): string {
+	if (ctx.repoRoot) return ctx.repoRoot;
+	const homeRelative = path.relative(ctx.home, ctx.cwd);
+	const cwdUnderHome = homeRelative === "" || (!homeRelative.startsWith("..") && !path.isAbsolute(homeRelative));
+	return cwdUnderHome ? ctx.home : ctx.cwd;
+}
+
+function getProjectClaudePathCandidates(ctx: LoadContext, ...segments: string[]): string[] {
+	const paths: string[] = [];
+	const userClaude = path.resolve(getUserClaude(ctx));
+	const anchor = path.resolve(getProjectClaudeAnchor(ctx));
+	let current = path.resolve(ctx.cwd);
+	while (true) {
+		const candidateClaude = path.join(current, CONFIG_DIR);
+		if (candidateClaude !== userClaude) {
+			paths.push(path.join(candidateClaude, ...segments));
+		}
+		if (current === anchor) break;
+		const parent = path.dirname(current);
+		if (parent === current) break;
+		current = parent;
+	}
+	return paths.reverse();
 }
 
 function isMissingDirectoryError(error: unknown): boolean {
@@ -61,7 +96,11 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 	const warnings: string[] = [];
 
 	const userBase = getUserClaude(ctx);
-	const userClaudeJson = path.join(ctx.home, ".claude.json");
+	// `.claude.json` lives beside `~/.claude/` by default (a home-dir sibling, not
+	// inside it), but Claude moves it under the override root — alongside settings.json
+	// — when CLAUDE_CONFIG_DIR is set. `userBase` already carries the trailing `.claude`
+	// segment in the unset case, so join `.claude.json` onto the config root instead.
+	const userClaudeJson = path.join(process.env.CLAUDE_CONFIG_DIR || ctx.home, ".claude.json");
 	const userMcpJson = path.join(userBase, "mcp.json");
 
 	const projectBase = path.join(ctx.cwd, CONFIG_DIR);
@@ -135,8 +174,11 @@ async function loadContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFil
 
 	const userBase = getUserClaude(ctx);
 	const userClaudeMd = path.join(userBase, "CLAUDE.md");
+	const claudeMdExcludes = await getClaudeMdExcludes(ctx);
 
-	const userContent = await readFile(userClaudeMd);
+	const userContent = shouldExcludeClaudeRule(userClaudeMd, claudeMdExcludes, ctx.home)
+		? null
+		: await readFile(userClaudeMd);
 	if (userContent !== null) {
 		items.push({
 			path: userClaudeMd,
@@ -148,7 +190,9 @@ async function loadContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFil
 
 	const projectBase = getProjectClaude(ctx);
 	const projectClaudeMd = path.join(projectBase, "CLAUDE.md");
-	const projectContent = await readFile(projectClaudeMd);
+	const projectContent = shouldExcludeClaudeRule(projectClaudeMd, claudeMdExcludes, ctx.home)
+		? null
+		: await readFile(projectClaudeMd);
 	if (projectContent !== null) {
 		const depth = calculateDepth(ctx.cwd, path.dirname(projectBase), path.sep);
 		items.push({
@@ -159,6 +203,200 @@ async function loadContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFil
 			_source: createSourceMeta(PROVIDER_ID, projectClaudeMd, "project"),
 		});
 	}
+
+	return { items, warnings };
+}
+
+// =============================================================================
+// Rules
+// =============================================================================
+
+// Only a condition/astCondition makes a rule an actual TTSR rule (TtsrManager.addRule
+// rejects rules without one). Modifier-only metadata (scope/interruptMode) must not
+// suppress the default launch behavior, or such a rule is neither launched nor
+// registered as TTSR and silently disappears.
+function isConditionalTtsrRule(rule: Rule): boolean {
+	return Boolean((rule.condition && rule.condition.length > 0) || (rule.astCondition && rule.astCondition.length > 0));
+}
+
+function scopedClaudeRuleDescription(globs: string[]): string {
+	return `Claude Code rule scoped to ${globs.join(", ")}`;
+}
+
+// Rule identity must stay a human-readable path, never a URL-encoded one: the
+// capability layer dedupes rules by exact `rule.name` (see ruleCapability's `key`),
+// so an encoded segment (e.g. "C#" -> "C%23") could collide with another provider's
+// literal filename ("C%23.md" -> "C%23") and silently shadow it. Escape only the
+// characters that would otherwise be ambiguous with the ":" path-segment separator
+// this function introduces; URL-safety is applied later, only when building a
+// rule:// URL, via encodeRuleUrlHost.
+function claudeRuleNameFromPath(rulesDir: string, filePath: string): string {
+	const relativePath = path.relative(rulesDir, filePath);
+	const withoutExtension = relativePath.replace(/\.(md|mdc)$/, "");
+	return withoutExtension
+		.split(path.sep)
+		.map(segment => segment.replace(/\\/g, "\\\\").replace(/:/g, "\\:"))
+		.join(":");
+}
+
+function transformClaudeRule(rulesDir: string, content: string, filePath: string, source: SourceMeta): Rule {
+	const ruleName = claudeRuleNameFromPath(rulesDir, filePath);
+	const rule = buildRuleFromMarkdown(ruleName, content, filePath, source, { ruleName });
+	if (rule.globs && rule.globs.length > 0) {
+		// A rule scoped via Claude's `paths:` or Cursor-style `globs:` (buildRuleFromMarkdown's
+		// shared `globs ?? paths` precedence) is path-specific. A stray `alwaysApply: true`
+		// sitting alongside it must not override that scoping — bucketRules checks
+		// `alwaysApply` before `description`, so it would otherwise still launch the rule
+		// globally instead of scoping it to its globs.
+		const scoped = rule.alwaysApply === true ? { ...rule, alwaysApply: false } : rule;
+		return scoped.description ? scoped : { ...scoped, description: scopedClaudeRuleDescription(rule.globs) };
+	}
+	if (rule.alwaysApply === true) return rule;
+	if (isConditionalTtsrRule(rule)) return rule;
+	// A pathless, non-TTSR rule always launches. A Cursor-style `alwaysApply: false`
+	// only stands when a `description` routes the rule to the on-demand rulebook
+	// bucket instead — without one it would match neither bucket in bucketRules
+	// (no condition, not always-apply, no description) and silently disappear.
+	if (rule.alwaysApply === false && rule.description) return rule;
+	return { ...rule, alwaysApply: true };
+}
+
+interface ClaudeMdExclude {
+	pattern: string;
+}
+
+function normalizeClaudeExcludePattern(pattern: string, home: string): string {
+	const expandedHome = pattern === "~" ? home : pattern.startsWith("~/") ? path.join(home, pattern.slice(2)) : pattern;
+	return expandedHome.split(path.sep).join("/");
+}
+
+function normalizePathForGlob(filePath: string): string {
+	return filePath.split(path.sep).join("/");
+}
+
+function matchesClaudeMdExclude(filePath: string, excludes: ClaudeMdExclude[], home: string): boolean {
+	const normalizedFilePath = normalizePathForGlob(path.resolve(filePath));
+	return excludes.some(({ pattern }) => {
+		const normalizedPattern = normalizeClaudeExcludePattern(pattern, home);
+
+		// Check exact absolute-path equality before treating any metacharacters as a
+		// glob — a pattern's brackets/braces may be literal filename content (e.g.
+		// `/tmp/repo[1]/.claude/rules/private.md`), and Bun.Glob would otherwise
+		// treat `[1]` as a character class and miss the literal self-match.
+		if (
+			path.isAbsolute(normalizedPattern) &&
+			normalizedFilePath === normalizePathForGlob(path.resolve(normalizedPattern))
+		) {
+			return true;
+		}
+
+		// Claude Code documents every claudeMdExcludes entry as matching only
+		// absolute file paths, so a pattern with no glob syntax that didn't match
+		// exactly above never matches — no baseDir-relative fallback.
+		if (!/[*?[\]{}]/.test(normalizedPattern)) return false;
+
+		return new Bun.Glob(normalizedPattern).match(normalizedFilePath);
+	});
+}
+
+async function readClaudeMdExcludesFromFile(filePath: string): Promise<ClaudeMdExclude[]> {
+	const content = await readFile(filePath);
+	if (!content) return [];
+	const data = tryParseJson<Record<string, unknown>>(content);
+	const excludes = data?.claudeMdExcludes;
+	if (!Array.isArray(excludes)) return [];
+	return excludes.filter((value): value is string => typeof value === "string").map(pattern => ({ pattern }));
+}
+
+// File-based managed settings only. Claude Code also honors OS-managed policy delivery —
+// the `com.anthropic.claudecode` macOS managed-preferences domain and the
+// `HKLM\SOFTWARE\Policies\ClaudeCode` / `HKCU\...` Windows registry keys (see
+// https://code.claude.com/docs/en/settings#settings-files) — which this discovery layer
+// does not read. An organization delivering `claudeMdExcludes` exclusively through MDM
+// or Group Policy, with no `managed-settings.json` on disk, will not have that exclusion
+// honored here, and OMP can load a CLAUDE.md/rule that Claude Code itself would suppress.
+function getManagedClaudeSettingsDir(): string {
+	switch (process.platform) {
+		case "darwin":
+			return "/Library/Application Support/ClaudeCode";
+		case "win32":
+			return path.join(process.env.ProgramFiles || "C:\\Program Files", "ClaudeCode");
+		default:
+			return "/etc/claude-code";
+	}
+}
+
+async function listManagedClaudeSettingsFiles(): Promise<string[]> {
+	const managedDir = getManagedClaudeSettingsDir();
+	const files = [path.join(managedDir, "managed-settings.json")];
+	const dropInDir = path.join(managedDir, "managed-settings.d");
+	try {
+		const entries = await fs.readdir(dropInDir, { withFileTypes: true });
+		files.push(
+			...entries
+				.filter(
+					entry =>
+						!entry.name.startsWith(".") &&
+						entry.name.endsWith(".json") &&
+						(entry.isFile() || entry.isSymbolicLink()),
+				)
+				.map(entry => path.join(dropInDir, entry.name))
+				.sort((left, right) => left.localeCompare(right)),
+		);
+	} catch {}
+	return files;
+}
+
+async function getClaudeMdExcludes(ctx: LoadContext): Promise<ClaudeMdExclude[]> {
+	const userBase = getUserClaude(ctx);
+	const managedSettings = await listManagedClaudeSettingsFiles();
+	const projectSettings = getProjectClaudePathCandidates(ctx, "settings.json");
+	const projectLocalSettings = getProjectClaudePathCandidates(ctx, "settings.local.json");
+	const projectSettingPaths = [...projectSettings, ...projectLocalSettings];
+	const [managed, user, ...project] = await Promise.all([
+		Promise.all(managedSettings.map(readClaudeMdExcludesFromFile)),
+		readClaudeMdExcludesFromFile(path.join(userBase, "settings.json")),
+		...projectSettingPaths.map(readClaudeMdExcludesFromFile),
+	]);
+	return [...managed.flat(), ...user, ...project.flat()];
+}
+
+function shouldExcludeClaudeRule(filePath: string, excludes: ClaudeMdExclude[], home: string): boolean {
+	return excludes.length > 0 && matchesClaudeMdExclude(filePath, excludes, home);
+}
+
+async function loadClaudeRulesFromDir(
+	ctx: LoadContext,
+	rulesDir: string,
+	level: "user" | "project",
+	excludes: ClaudeMdExclude[],
+): Promise<LoadResult<Rule>> {
+	return loadFilesFromDir<Rule>(ctx, rulesDir, PROVIDER_ID, level, {
+		extensions: ["md", "mdc"],
+		recursive: true,
+		followSymlinkDirectories: true,
+		respectGitignore: level === "project",
+		excludePath: filePath => shouldExcludeClaudeRule(filePath, excludes, ctx.home),
+		transform: (_name, content, filePath, source) => transformClaudeRule(rulesDir, content, filePath, source),
+	});
+}
+async function loadRules(ctx: LoadContext): Promise<LoadResult<Rule>> {
+	const items: Rule[] = [];
+	const warnings: string[] = [];
+	const userRulesDir = path.join(getUserClaude(ctx), "rules");
+	const projectRuleDirs = getProjectClaudePathCandidates(ctx, "rules");
+	const claudeMdExcludes = await getClaudeMdExcludes(ctx);
+	const [userResult, ...projectResults] = await Promise.all([
+		loadClaudeRulesFromDir(ctx, userRulesDir, "user", claudeMdExcludes),
+		...projectRuleDirs.map(rulesDir => loadClaudeRulesFromDir(ctx, rulesDir, "project", claudeMdExcludes)),
+	]);
+
+	const projectItemsFlat = projectResults.flatMap(result => result.items);
+	const lastProjectRuleByName = new Map(projectItemsFlat.map(rule => [rule.name, rule]));
+	const projectItems = projectItemsFlat.filter(rule => lastProjectRuleByName.get(rule.name) === rule);
+	const projectNames = new Set(projectItems.map(rule => rule.name));
+	items.push(...userResult.items.filter(rule => !projectNames.has(rule.name)), ...projectItems);
+	warnings.push(...(userResult.warnings ?? []), ...projectResults.flatMap(result => result.warnings ?? []));
 
 	return { items, warnings };
 }
@@ -540,6 +778,14 @@ registerProvider<Skill>(skillCapability.id, {
 	description: "Load skills from .claude/skills/*/SKILL.md",
 	priority: PRIORITY,
 	load: loadSkills,
+});
+
+registerProvider<Rule>(ruleCapability.id, {
+	id: PROVIDER_ID,
+	displayName: DISPLAY_NAME,
+	description: "Load rules from .claude/rules/**/*.{md,mdc}",
+	priority: PRIORITY,
+	load: loadRules,
 });
 
 registerProvider<ExtensionModule>(extensionModuleCapability.id, {

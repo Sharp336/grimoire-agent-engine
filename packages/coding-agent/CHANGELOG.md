@@ -1410,6 +1410,17 @@
 
 ### Fixed
 
+- Fixed compiled appserver startup deadlocking before socket creation when any user extension was present ([#5568](https://github.com/can1357/oh-my-pi/issues/5568)).
+- Fixed Bash internal URLs remaining unresolved when used as unquoted arguments inside command substitutions ([#5535](https://github.com/can1357/oh-my-pi/issues/5535)).
+- Fixed `--tools` silently dropping hidden tool names (`xdev`, `yield`, ...); hidden built-ins are now addressable per the `hidden` tool contract.
+- Fixed the built-in `fd` printing `fd: Broken pipe (os error 32)` when a downstream pipeline reader exited early (e.g. `fd … | head`); it now exits silently with 141 (128+SIGPIPE), matching real fd.
+- Fixed prewalk repeatedly continuing after a bash-only task such as `commit` had already completed ([#5551](https://github.com/can1357/oh-my-pi/issues/5551)).
+- Fixed the Bash tool hanging when in-process commands read process substitution operands such as `<(cmd)` ([#5557](https://github.com/can1357/oh-my-pi/issues/5557)).
+- Fixed `/share` and `/export` web views rendering inline Markdown inside list items as literal text ([#5567](https://github.com/can1357/oh-my-pi/issues/5567)).
+- Fixed Claude rule discovery applying parent-directory ignore files outside a Git worktree.
+- Fixed plan-mode re-entry dropping a new plan request when a prior plan artifact existed: the re-entry prompt led with the old plan and contradicted the plan-file guidance, so weak models only reconciled the incomplete previous plan. Re-entry now anchors on the new request and folds any old-plan corrections into it ([#5576](https://github.com/can1357/oh-my-pi/issues/5576)).
+- Fixed ACP clients rendering `xd://` device dispatches as file edits: a `write xd://<tool>` now maps to an `execute`-kind tool call titled with the device URL, and scheme-qualified subjects (`xd://`, `skill://`, …) no longer fabricate editor locations like `/repo/xd:/github`.
+- Fixed non-yolo approval modes double-prompting for `xd://` device dispatches: the write tool's outer gate resolves approval at the mounted tool's tier, and the inner per-tool gate no longer re-prompts for the same action (explicit `tools.approval.<tool>` prompt/deny policies still apply).
 - Fixed a bug where a nested configuration value (like `dev.autoqa.consent` / `dev.autoqaConsent`) would incorrectly satisfy a parent key lookup (like `dev.autoqa`), causing Auto QA to be enabled and prompt for consent by default when it should have been disabled.
 - Fixed compiled appserver startup deadlocking before socket creation when user extensions were present.
 - Fixed Bash internal URLs remaining unresolved when used as unquoted arguments inside command substitutions.
@@ -1805,6 +1816,10 @@
 - Fixed extension `sendUserMessage()` without `deliverAs` surfacing `AgentBusyError` during active streams; omitted `deliverAs` now queues a steer through the normal prompt flow, and ACP/RPC skill-command prompts queue while streaming (RPC honors the prompt command's `streamingBehavior`, defaulting to steer) ([#4923](https://github.com/can1357/oh-my-pi/issues/4923)).
 
 ## [16.3.12] - 2026-07-08
+
+### Added
+
+- Added Claude Code rule discovery so `.claude/rules/**/*.md` and `.claude/rules/**/*.mdc` files load through the standard rules capability with frontmatter metadata preserved ([#2613](https://github.com/can1357/oh-my-pi/issues/2613)).
 
 ### Added
 

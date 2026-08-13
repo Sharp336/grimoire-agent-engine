@@ -4,8 +4,10 @@ import * as path from "node:path";
 import * as url from "node:url";
 import { glob } from "@oh-my-pi/pi-natives";
 import { hasFsCode, isEnoent, isEnotdir, stripWindowsExtendedLengthPathPrefix, untilAborted } from "@oh-my-pi/pi-utils";
+import { getActiveRules, type Rule } from "../capability/rule";
 import type { Skill } from "../extensibility/skills";
-import { InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
+import { InternalUrlRouter, type LocalProtocolOptions, parseInternalUrl } from "../internal-urls";
+import { encodeRuleUrlHost } from "../internal-urls/rule-protocol";
 import { ToolAbortError, ToolError } from "./tool-errors";
 
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
@@ -395,7 +397,10 @@ export async function splitPathAndSelPreferringLiteral(
  * Falls back to the input unchanged when nothing matches.
  */
 
-export function splitInternalUrlSel(rawPath: string): { path: string; sel?: string } {
+export function splitInternalUrlSel(
+	rawPath: string,
+	rules: readonly Rule[] = getActiveRules(),
+): { path: string; sel?: string } {
 	const schemeMatch = rawPath.match(INTERNAL_URL_SCHEME_RE);
 	if (!schemeMatch) return { path: rawPath };
 	const scheme = schemeMatch[1].toLowerCase();
@@ -403,6 +408,50 @@ export function splitInternalUrlSel(rawPath: string): { path: string; sel?: stri
 	// legitimately end in selector-shaped tails. Forward verbatim — see
 	// OPAQUE_RESOURCE_SCHEMES.
 	if (OPAQUE_RESOURCE_SCHEMES.has(scheme)) return { path: rawPath };
+
+	if (scheme === "rule") {
+		try {
+			const parsed = parseInternalUrl(rawPath);
+			const activeRuleNames = new Set(rules.map(rule => rule.name));
+			// Exact matches take precedence over every peeled candidate, mirroring
+			// RuleProtocolHandler.resolve's own priority (rawHost, then rawEncodedHost,
+			// then hostname) with no selector peeling at all. Checking each candidate's
+			// exact match interleaved with its own peeling — instead of checking all
+			// exact matches first — let a lower-priority peeled match win over a
+			// higher-priority exact match under percent-decoding collisions. E.g. with
+			// active rules `C#` and `C%23`, bare `rule://C%23` resolves to `C#` (rawHost
+			// wins) since decoding `%23` yields `C#`; but with active rules `C#` and
+			// `C%23:raw`, `rule://C%23:raw` has rawEncodedHost `C%23:raw` — an exact
+			// match — while rawHost `C#:raw` is not a rule but peels down to the also-
+			// active `C#`. Peeling `rawHost` first (candidate by candidate) would rewrite
+			// the URL to target `C#` with selector `raw`, when the exact `rawEncodedHost`
+			// match should win and keep the read scoped to the literal `C%23:raw` rule.
+			const candidates = [parsed.rawHost, parsed.rawEncodedHost, parsed.hostname].filter(
+				(name, index, names): name is string => Boolean(name) && names.indexOf(name) === index,
+			);
+			const exactCandidates = parsed.port
+				? candidates.filter(candidate => candidate !== parsed.hostname)
+				: candidates;
+			if (exactCandidates.some(candidate => activeRuleNames.has(candidate))) return { path: rawPath };
+			for (const initialCandidate of candidates) {
+				const chunks: string[] = [];
+				let candidateMatch = initialCandidate;
+				while (true) {
+					const colon = candidateMatch.lastIndexOf(":");
+					if (colon < 0) break;
+					const tail = candidateMatch.slice(colon + 1);
+					if (!INTERNAL_URL_SELECTOR_PART_RE.test(tail)) break;
+					chunks.unshift(tail);
+					candidateMatch = candidateMatch.slice(0, colon);
+					if (activeRuleNames.has(candidateMatch)) {
+						return { path: `${scheme}://${encodeRuleUrlHost(candidateMatch)}`, sel: chunks.join(":") };
+					}
+				}
+			}
+		} catch {
+			// Fall through to selector peeling.
+		}
+	}
 	if (!INTERNAL_SCHEMES_WITH_SELECTORS[scheme]) return { path: rawPath };
 
 	const schemeEnd = schemeMatch[0].length;

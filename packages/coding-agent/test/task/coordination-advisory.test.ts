@@ -2,8 +2,9 @@ import { describe, expect, it } from "bun:test";
 import { buildCoordinationAdvisory, composeSpawnAdvisory } from "@oh-my-pi/pi-coding-agent/task";
 import type { TaskItem } from "@oh-my-pi/pi-coding-agent/task/types";
 
-// Contract: a multi-sibling spawn with spawn capacity and IRC available draws
-// a proactive coordinate-via-irc suggestion.
+// Contract: a multi-sibling spawn with capacity and hub messaging available
+// draws a proactive coordination suggestion.
+
 const item = (): TaskItem => ({ task: "do the thing" });
 
 describe("buildCoordinationAdvisory", () => {

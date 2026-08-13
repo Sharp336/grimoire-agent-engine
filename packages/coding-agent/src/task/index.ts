@@ -170,6 +170,7 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		scoutAvailable,
 		spawningDisabled,
 		defaultAgent: spawnPolicy.defaultAgent,
+		allowedPromptText: spawnPolicy.allowedPromptText,
 		isolationEnabled: options.isolationEnabled,
 		applyIsolatedChanges: options.applyIsolatedChanges,
 		batchEnabled: options.batchEnabled,

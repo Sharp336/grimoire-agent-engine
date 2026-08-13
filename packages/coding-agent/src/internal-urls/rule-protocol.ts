@@ -5,21 +5,33 @@
  * - rule://<name> - Reads rule content
  */
 import { getActiveRules } from "../capability/rule";
-import type { InternalResource, InternalUrl, ProtocolHandler, UrlCompletion } from "./types";
+import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, UrlCompletion } from "./types";
+
+export function encodeRuleUrlHost(name: string): string {
+	return name
+		.split(":")
+		.map(segment => encodeURIComponent(segment))
+		.join(":");
+}
 
 export class RuleProtocolHandler implements ProtocolHandler {
 	readonly scheme = "rule";
 	readonly immutable = true;
 
-	async resolve(url: InternalUrl): Promise<InternalResource> {
-		const rules = getActiveRules();
+	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
+		const rules = context?.rules ?? getActiveRules();
 
 		const ruleName = url.rawHost || url.hostname;
 		if (!ruleName) {
 			throw new Error("rule:// URL requires a rule name: rule://<name>");
 		}
 
-		const rule = rules.find(r => r.name === ruleName);
+		const exactNames = [url.rawHost, url.rawEncodedHost, ...(url.port ? [] : [url.hostname])].filter(
+			(name, index, names): name is string => Boolean(name) && names.indexOf(name) === index,
+		);
+		const rule = exactNames
+			.map(name => rules.find(r => r.name === name))
+			.find((candidate): candidate is (typeof rules)[number] => Boolean(candidate));
 		if (!rule) {
 			const available = rules.map(r => r.name);
 			const availableStr = available.length > 0 ? available.join(", ") : "none";
@@ -36,10 +48,14 @@ export class RuleProtocolHandler implements ProtocolHandler {
 		};
 	}
 
-	async complete(): Promise<UrlCompletion[]> {
-		return getActiveRules().map(rule => ({
-			value: rule.name,
-			...(rule.description ? { description: rule.description } : {}),
-		}));
+	async complete(_query?: string, context?: ResolveContext): Promise<UrlCompletion[]> {
+		return (context?.rules ?? getActiveRules()).map(rule => {
+			const value = encodeRuleUrlHost(rule.name);
+			return {
+				value,
+				...(rule.name !== value ? { label: rule.name } : {}),
+				...(rule.description ? { description: rule.description } : {}),
+			};
+		});
 	}
 }

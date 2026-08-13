@@ -15,6 +15,7 @@ import type { Personality, SkillsSettings } from "./config/settings";
 import { type ContextFile, loadCapability, type SystemPrompt as SystemPromptFile } from "./discovery";
 import { expandAtImports } from "./discovery/at-imports";
 import { loadSkills, type Skill } from "./extensibility/skills";
+import { encodeRuleUrlHost } from "./internal-urls/rule-protocol";
 import { hasObsidian } from "./internal-urls/vault-protocol";
 import activeRepoContextTemplate from "./prompts/system/active-repo-context.md" with { type: "text" };
 import computerSafetyPrompt from "./prompts/system/computer-safety.md" with { type: "text" };
@@ -513,7 +514,7 @@ export interface BuildSystemPromptOptions {
 	/** Skills provided directly to system prompt construction. */
 	skills?: readonly Skill[];
 	/** Pre-loaded rulebook rules (descriptions, excluding TTSR and always-apply). */
-	rules?: Array<{ name: string; description?: string; path: string; globs?: string[] }>;
+	rules?: Array<{ name: string; urlName?: string; description?: string; path: string; globs?: string[] }>;
 	/** Intent field name injected into every tool schema. If set, explains the field in the prompt. */
 	intentField?: string;
 	/** Encourage the agent to delegate via tasks unless changes are trivial. */
@@ -868,7 +869,10 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		agentsMdSearch: { files: agentsMdFiles },
 		workspaceTree,
 		skills: filteredSkills,
-		rules: rules ?? [],
+		rules: (rules ?? []).map(rule => ({
+			...rule,
+			urlName: rule.urlName ?? encodeRuleUrlHost(rule.name),
+		})),
 		alwaysApplyRules: injectedAlwaysApplyRules,
 		date,
 		dateTime,

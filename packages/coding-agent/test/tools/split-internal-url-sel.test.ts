@@ -1,7 +1,17 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { resetActiveRulesForTests, setActiveRules } from "@oh-my-pi/pi-coding-agent/capability/rule";
+import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
+import { RuleProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/rule-protocol";
 import { pathTargetsSsh, peelWriteUrlSelector, splitInternalUrlSel } from "@oh-my-pi/pi-coding-agent/tools/path-utils";
 
 describe("splitInternalUrlSel", () => {
+	beforeEach(() => {
+		resetActiveRulesForTests();
+	});
+
+	afterEach(() => {
+		resetActiveRulesForTests();
+	});
 	it("returns the input unchanged when there is no selector tail", () => {
 		expect(splitInternalUrlSel("artifact://3")).toEqual({ path: "artifact://3" });
 		expect(splitInternalUrlSel("agent://reviewer_0")).toEqual({ path: "agent://reviewer_0" });
@@ -47,6 +57,139 @@ describe("splitInternalUrlSel", () => {
 	it("does not peel chunks that are not selector-shaped", () => {
 		// `name` is part of the host, not a selector.
 		expect(splitInternalUrlSel("skill://plugin:name")).toEqual({ path: "skill://plugin:name" });
+	});
+
+	it("does not peel selector-shaped tails from active rule names", () => {
+		setActiveRules([
+			{
+				name: "frontend:raw",
+				path: "/tmp/frontend/raw.md",
+				content: "body",
+				_source: { provider: "test", providerName: "test", path: "/tmp/frontend/raw.md", level: "project" },
+			},
+		]);
+		expect(splitInternalUrlSel("rule://frontend:raw")).toEqual({ path: "rule://frontend:raw" });
+		expect(splitInternalUrlSel("rule://frontend:raw:1-10")).toEqual({ path: "rule://frontend:raw", sel: "1-10" });
+	});
+
+	it("peels numeric selector tails from active rule names", () => {
+		setActiveRules([
+			{
+				name: "frontend",
+				path: "/tmp/frontend.md",
+				content: "body",
+				_source: { provider: "test", providerName: "test", path: "/tmp/frontend.md", level: "project" },
+			},
+		]);
+		expect(splitInternalUrlSel("rule://frontend:80")).toEqual({ path: "rule://frontend", sel: "80" });
+		expect(splitInternalUrlSel("rule://frontend:80:raw")).toEqual({ path: "rule://frontend", sel: "80:raw" });
+	});
+
+	it("keeps completion values and selector peeling unique for encoded rule names", async () => {
+		setActiveRules([
+			{
+				name: "C#",
+				path: "/tmp/C#.md",
+				content: "decoded",
+				_source: { provider: "claude", providerName: "claude", path: "/tmp/C#.md", level: "project" },
+			},
+			{
+				name: "C%23",
+				path: "/tmp/C%23.md",
+				content: "literal-percent",
+				_source: { provider: "claude", providerName: "claude", path: "/tmp/C%23.md", level: "project" },
+			},
+		]);
+		const completions = await new RuleProtocolHandler().complete();
+		expect(completions.map(completion => completion.value)).toEqual(["C%23", "C%2523"]);
+		expect(completions.map(completion => completion.label ?? null)).toEqual(["C#", "C%23"]);
+		expect(splitInternalUrlSel("rule://C%2523:raw")).toEqual({ path: "rule://C%2523", sel: "raw" });
+	});
+
+	it("keeps encoded rule URLs when selector peeling matches a decoded rule name", () => {
+		setActiveRules([
+			{
+				name: "C#",
+				path: "/tmp/C#.md",
+				content: "decoded",
+				_source: { provider: "test", providerName: "test", path: "/tmp/C#.md", level: "project" },
+			},
+		]);
+		expect(splitInternalUrlSel("rule://C%23:raw")).toEqual({ path: "rule://C%23", sel: "raw" });
+	});
+
+	it("peels rule selectors using the resolver's host priority under decoding collisions", async () => {
+		// Active rules collide under percent-decoding: `C#` (rawHost wins) and the
+		// literal-percent `C%23`. The resolver's exact-match order is rawHost,
+		// rawEncodedHost, hostname — so bare `rule://C%23` resolves to `C#`. Selector
+		// peeling must use the same order: peeling rawEncodedHost first would rewrite
+		// `rule://C%23:raw` to `rule://C%2523` and silently retarget the `C%23` rule.
+		setActiveRules([
+			{
+				name: "C#",
+				path: "/tmp/C#.md",
+				content: "decoded",
+				_source: { provider: "test", providerName: "test", path: "/tmp/C#.md", level: "project" },
+			},
+			{
+				name: "C%23",
+				path: "/tmp/C%23.md",
+				content: "literal-percent",
+				_source: { provider: "test", providerName: "test", path: "/tmp/C%23.md", level: "project" },
+			},
+		]);
+		// Peeling rewrites to the rawHost-encoded form, which resolves back to the
+		// same rule the bare URL targets (`C#`), not the literal-percent `C%23`.
+		const peeled = splitInternalUrlSel("rule://C%23:raw");
+		expect(peeled).toEqual({ path: "rule://C%23", sel: "raw" });
+		const bareTarget = await new RuleProtocolHandler().resolve(parseInternalUrl("rule://C%23"));
+		const peeledTarget = await new RuleProtocolHandler().resolve(parseInternalUrl(peeled.path));
+		expect(bareTarget.content).toBe("decoded");
+		expect(peeledTarget.content).toBe(bareTarget.content);
+	});
+
+	it("checks exact rule-host matches across all candidates before peeling any selector", async () => {
+		// Unlike the sibling test above, this scenario's second active rule name
+		// literally contains a colon (`C%23:raw`), so its raw-encoded-host form is
+		// itself an exact active-rule match. That exact match must win over peeling
+		// the higher-priority rawHost candidate (`C#:raw` -> peels to `C#`).
+		setActiveRules([
+			{
+				name: "C#",
+				path: "/tmp/C#.md",
+				content: "decoded",
+				_source: { provider: "test", providerName: "test", path: "/tmp/C#.md", level: "project" },
+			},
+			{
+				name: "C%23:raw",
+				path: "/tmp/C%2523raw.md",
+				content: "literal-percent-with-colon",
+				_source: { provider: "test", providerName: "test", path: "/tmp/C%2523raw.md", level: "project" },
+			},
+		]);
+		expect(splitInternalUrlSel("rule://C%23:raw")).toEqual({ path: "rule://C%23:raw" });
+		const resolved = await new RuleProtocolHandler().resolve(parseInternalUrl("rule://C%23:raw"));
+		expect(resolved.content).toBe("literal-percent-with-colon");
+	});
+
+	it("keeps completion values unique for raw rule names containing percent encodings", async () => {
+		setActiveRules([
+			{
+				name: "C#",
+				path: "/tmp/C#.md",
+				content: "decoded",
+				_source: { provider: "test", providerName: "test", path: "/tmp/C#.md", level: "project" },
+			},
+			{
+				name: "C%23",
+				path: "/tmp/C%23.md",
+				content: "literal-percent",
+				_source: { provider: "test", providerName: "test", path: "/tmp/C%23.md", level: "project" },
+			},
+		]);
+		const completions = await new RuleProtocolHandler().complete();
+		expect(completions.map(completion => completion.value)).toEqual(["C%23", "C%2523"]);
+		expect(completions.map(completion => completion.label ?? null)).toEqual(["C#", "C%23"]);
 	});
 
 	it("stops at the scheme separator `://`", () => {

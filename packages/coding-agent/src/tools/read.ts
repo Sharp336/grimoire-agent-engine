@@ -856,7 +856,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		// Peel malformed selectors through the internal-URL-aware parser before routing.
 		let promotedSelector: string | undefined;
 		if (internalRouter.canResolve(readPath)) {
-			const internalTarget = splitInternalUrlSel(readPath);
+			const internalTarget = splitInternalUrlSel(readPath, this.session.rules);
 			const parsed = parseSel(internalTarget.sel);
 			if (internalTarget.sel !== undefined && parsed.kind === "none") {
 				throw new ToolError(
@@ -1865,6 +1865,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			signal,
 			localProtocolOptions: this.session.localProtocolOptions,
 			skills: this.session.skills,
+			rules: this.session.rules,
 			xd: {
 				read: async name => {
 					if (name === REPORT_ISSUE_DEVICE_NAME) return reportIssueDeviceUsage();

@@ -5,6 +5,7 @@
  * providing access to agent outputs and server resources without exposing filesystem paths.
  */
 
+import type { Rule } from "../capability/rule";
 import type { Skill } from "../extensibility/skills";
 import type { LocalProtocolOptions } from "./local-protocol";
 
@@ -67,6 +68,10 @@ export interface InternalUrl extends URL {
 	 */
 	rawHost: string;
 	/**
+	 * Raw host segment extracted from input before percent-decoding, preserving case.
+	 */
+	rawEncodedHost?: string;
+	/**
 	 * Raw pathname extracted from input, preserving traversal markers before URL normalization.
 	 */
 	rawPathname?: string;
@@ -106,6 +111,8 @@ export interface ResolveContext {
 	localProtocolOptions?: LocalProtocolOptions;
 	/** Calling session's loaded skills. Prefer this over process-global skill state. */
 	skills?: readonly Skill[];
+	/** Calling session's loaded rules. Prefer this over process-global rule state. */
+	rules?: readonly Rule[];
 	/** Session-bound `xd://` documentation resolver. */
 	xd?: {
 		read(name: string | null): Promise<string>;
