@@ -31,7 +31,8 @@ export function getExtraHelpText(): string {
   UMANS_WEBSEARCH_PROVIDER    - Umans gateway web search backend (native or exa)
   MINIMAX_API_KEY            - MiniMax models
   OPENCODE_API_KEY           - OpenCode Zen/OpenCode Go models
-  CURSOR_ACCESS_TOKEN        - Cursor AI models
+  CURSOR_ACCESS_TOKEN        - Cursor AI models (session token)
+  CURSOR_API_KEY             - Cursor AI models (dashboard key, auto-exchanged)
   AI_GATEWAY_API_KEY         - Vercel AI Gateway
   WAFER_SERVERLESS_API_KEY   - Wafer Serverless (pay-as-you-go)
 

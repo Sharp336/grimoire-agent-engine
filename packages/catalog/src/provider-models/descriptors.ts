@@ -146,7 +146,11 @@ export const CATALOG_PROVIDERS = [
 	{
 		id: "cursor",
 		defaultModel: "claude-4.6-opus-high",
-		envVars: ["CURSOR_ACCESS_TOKEN"],
+		// CURSOR_ACCESS_TOKEN is an already-exchanged session JWT (from `/login`
+		// or another Cursor client) and is used as-is. CURSOR_API_KEY is a
+		// long-lived dashboard key (`crsr_...` / `cursor_...`) that the
+		// cursor-agent provider and GetUsableModels discovery exchange first.
+		envVars: ["CURSOR_ACCESS_TOKEN", "CURSOR_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => cursorModelManagerOptions(config),
 		catalogDiscovery: { label: "Cursor", envVars: ["CURSOR_API_KEY"], oauthProvider: "cursor" },
 	},

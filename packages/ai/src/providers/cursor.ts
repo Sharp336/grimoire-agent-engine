@@ -588,10 +588,19 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 		};
 
 		try {
-			const apiKey = options?.apiKey;
-			if (!apiKey) {
+			const rawApiKey = options?.apiKey;
+			if (!rawApiKey) {
 				throw new AIError.MissingApiKeyError(undefined, "Cursor API key (access token) is required");
 			}
+			// Dashboard keys (`crsr_...` / `cursor_...`) cannot authenticate
+			// AgentService/Run. Exchange them for a session JWT first, matching
+			// the official CLI's CURSOR_API_KEY path. Session tokens pass
+			// through. Dynamic import keeps the common already-a-token path
+			// out of the eager registry graph.
+			const apiKey =
+				rawApiKey.startsWith("crsr_") || rawApiKey.startsWith("cursor_")
+					? await (await import("../registry/oauth/cursor")).resolveCursorAccessToken(rawApiKey)
+					: rawApiKey;
 
 			const conversationId = options?.conversationId ?? options?.sessionId ?? crypto.randomUUID();
 			const blobStore = conversationBlobStores.get(conversationId) ?? new Map<string, Uint8Array>();
@@ -3214,7 +3223,7 @@ function isExecOwnedToolCall(toolCall: { tool?: { case?: string } } | undefined)
  * synthesizes no placeholder for them and only their `toolCallCompleted` frame
  * pairs a result. A transport that closes before that frame would leave the
  * call unpaired, and `buildSessionContext` strips a dangling call from every
- * rebuilt transcript — the interaction disappears. An interrupted result is
+ * rebuilt transcript ��� the interaction disappears. An interrupted result is
  * emitted instead.
  *
  * MCP blocks are excluded even when resolved: the exec dispatch that marked
@@ -3262,7 +3271,7 @@ function retainStreamedCall(state: BlockState, block: ToolCallState, envelopeId:
  *
  * Cursor interleaves calls: `start A, start B, complete A` is legal, so the
  * update must reach block A even though B opened last. An id naming no open
- * block is ignored rather than misapplied — settling the wrong block would pair
+ * block is ignored rather than misapplied �� settling the wrong block would pair
  * it with another call's result.
  *
  * A missing id falls back to the current block: the correlation key is
@@ -3582,7 +3591,7 @@ function buildMcpErrorResult(error: string) {
  * Merge the decoded completion-frame `McpArgs` map into the args assembled
  * from streamed `args_text_delta` snapshots.
  *
- * The completion frame is authoritative for the scalars it carries — but it
+ * The completion frame is authoritative for the scalars it carries �� but it
  * can omit oversized parameters entirely and can downgrade a structured value
  * to its raw string fallback when `decodeMcpArgValue` cannot parse it as
  * JSON. Overwriting the streamed args wholesale therefore loses data (e.g.
