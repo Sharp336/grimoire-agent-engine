@@ -566,6 +566,31 @@ describe("AgentSession extension deliverAs aside", () => {
 		).toBe(false);
 	});
 
+	it("drops pending asides on resetSessionContext without flushing into the cleared transcript (case 9i)", async () => {
+		const {
+			session: idleSession,
+			sessionManager,
+			mock,
+		} = await createMockSession([{ content: ["fresh after clear"] }]);
+		Object.defineProperty(idleSession, "isStreaming", { value: true, configurable: true });
+		await idleSession.sendCustomMessage(asidePayload("must not survive /clear"), { deliverAs: "aside" });
+		expect(idleSession.agent.state.messages.filter(isExtensionAside)).toEqual([]);
+		delete (idleSession as { isStreaming?: boolean }).isStreaming;
+
+		const result = await idleSession.resetSessionContext();
+		expect(result).toBeDefined();
+		expect(await drainExtensionAsides()).toEqual([]);
+		expect(idleSession.agent.state.messages.filter(isExtensionAside)).toEqual([]);
+		expect(
+			sessionManager.getEntries().some(entry => entry.type === "custom_message" && entry.customType === ASIDE_TYPE),
+		).toBe(false);
+
+		await idleSession.prompt("fresh");
+		await idleSession.waitForIdle();
+		expect(idleSession.agent.state.messages.filter(isExtensionAside)).toEqual([]);
+		expect(mock.calls.length).toBe(1);
+	});
+
 	it("queues an idle aside while compacting instead of appending immediately", async () => {
 		const { session: idleSession } = await createIdleSession();
 		let compacting = true;

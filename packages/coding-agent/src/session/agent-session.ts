@@ -4304,6 +4304,7 @@ export class AgentSession {
 		this.agent.reset();
 		this.#pendingNextTurnMessages = [];
 		this.#scheduledHiddenNextTurnGeneration = undefined;
+		this.#clearPendingExtensionAsides();
 		// Reset the session_stop continuation chain: the queued continuation
 		// message is gone with the conversation, but the counters would otherwise
 		// carry over, so the next post-reset turn is reported to hooks as part of
@@ -8499,6 +8500,7 @@ export class AgentSession {
 
 		this.#pendingNextTurnMessages = [];
 		this.#scheduledHiddenNextTurnGeneration = undefined;
+		this.#clearPendingExtensionAsides();
 		this.agent.replaceQueues([], []);
 		this.#queuedMessageDrainBlocked = false;
 		this.#usagePreflightReadyForNextModelCall = false;
