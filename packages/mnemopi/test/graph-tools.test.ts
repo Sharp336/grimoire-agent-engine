@@ -48,6 +48,23 @@ describe("EpisodicGraph CRUD", () => {
 			});
 		});
 	});
+	it("requires capitalization for proper-place extraction", () => {
+		withGraph(graph => {
+			expect(
+				graph.extractGist("The agent should reason in your loaded context plus before lunch", "lowercase").location,
+			).toBeNull();
+			expect(
+				graph.extractGist("The agent should reason at your loaded context plus before lunch", "lowercase-at")
+					.location,
+			).toBeNull();
+			expect(
+				graph.extractGist("The agent should reason from your loaded context plus before lunch", "lowercase-from")
+					.location,
+			).toBeNull();
+			expect(graph.extractGist("Alice waited at the office.", "generic").location).toBe("office");
+			expect(graph.extractGist("Alice arrived in Paris yesterday.", "proper").location).toBe("Paris");
+		});
+	});
 });
 
 describe("EpisodicGraph links and traversal", () => {

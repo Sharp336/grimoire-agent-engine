@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed episodic gist extraction treating lowercase prose after `at`, `in`, or `from` as a proper location by preserving the capitalization check. ([#7917](https://github.com/can1357/oh-my-pi/issues/7917))
+
 ## [17.2.11] - 2026-08-07
 
 ### Fixed

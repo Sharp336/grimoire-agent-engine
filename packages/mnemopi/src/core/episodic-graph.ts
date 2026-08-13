@@ -590,7 +590,7 @@ export class EpisodicGraph {
 
 	private extractLocation(content: string): string | null {
 		const properPlace =
-			/\b(?:at|in|from)\s+([A-Z][a-zA-Z\s]+?)(?:\s+(?:yesterday|today|tomorrow|now|last|next|on|at)\b|$)/i.exec(
+			/\b(?:at|in|from)\s+([A-Z][a-zA-Z\s]+?)(?:\s+(?:yesterday|today|tomorrow|now|last|next|on|at)\b|$)/.exec(
 				content,
 			);
 		if (properPlace?.[1] !== undefined) return properPlace[1].trim();
