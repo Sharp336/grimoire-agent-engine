@@ -152,7 +152,7 @@ export const CATALOG_PROVIDERS = [
 	},
 	{
 		id: "deepseek",
-		defaultModel: "deepseek-v4-flash",
+		defaultModel: "deepseek-v4-pro",
 		envVars: ["DEEPSEEK_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => deepseekModelManagerOptions(config),
 		catalogDiscovery: { label: "DeepSeek" },

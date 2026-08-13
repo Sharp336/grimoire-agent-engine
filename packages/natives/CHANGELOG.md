@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+## [17.3.1] - 2026-08-13
+
+### Fixed
+
+- Fixed `omp` failing to start on a clean Windows install with `Failed to load pi_natives native addon for win32-x64 ... The specified module could not be found` (LoadLibrary error 126). The shipped win32-x64 addon linked the dynamic MSVC CRT (`/MD`) and imported `VCRUNTIME140.dll` from the Visual C++ Redistributable, which is absent on a fresh Windows install. The addon now statically links the CRT (`+crt-static` for rustc plus the `static_link_msvcrt` cc feature for its C dependencies), so the `.node` imports only core Windows system DLLs ([#8439](https://github.com/can1357/oh-my-pi/issues/8439)).
+
+## [17.3.0] - 2026-08-13
+
+### Fixed
+
+- Fixed an issue where shell-internal background jobs (such as `yes >/dev/null &`) could survive a one-shot shell session and consume CPU indefinitely after the command returned.
+
+## [17.2.12] - 2026-08-08
+
+### Changed
+
+- Consolidated every shell builtin into one crate, `crates/pi-builtins` (the renamed and de-vendored `brush-builtins` fork), with one module per command. The 46 `crates/vendor/uu-*` crates, `crates/vendor/jaq`, `crates/pi-uu-grep`, `crates/pi-uu-diff`, and everything that had accumulated inline in `pi-shell` (`fd`, `cmp`, `which`, the moreutils set, and the `ps`/`top`/`pgrep`/`pkill`/`pidwait`/`kill`/`sleep`/`timeout`/`nohup` process builtins) now live beside the bash builtins they sit next to at runtime, and register through `pi_builtins::utility_builtins()` and `pi_builtins::process_builtins()`. `pi-shell/src/shell.rs` shrank by ~4,200 lines.
+
+### Fixed
+
+- Fixed `sort --compress-program` spawning its compressor and decompressor without the shell's working directory or exported environment, so a program installed only on the shell's `PATH` was not found, and with stderr inherited from the host process, where its diagnostics could corrupt the TUI. Both children now launch through the shell's child context and their stderr is forwarded to the command's own file descriptor.
+- Fixed `realpath -q` exiting 0 after a failed operand; it suppresses the diagnostic but now reports failure, matching GNU.
+
+### Removed
+
+- Removed `crates/pi-uutils-ctx`. Utility builtins previously reached their stdio, working directory, and environment through a thread-local context installed around each invocation; they now receive an explicit `Host` value (`pi-builtins/src/host.rs`) carrying the command's file descriptors, the shell working directory, the exported environment, cancellation, and the accumulated exit status. The uutils entry-point plumbing (`uumain`, `UResult`/`UError`, `set_exit_code`, `crate_version!`) went with it; each utility is now an ordinary brush builtin implementing `host::Utility`.
+
 ## [17.2.11] - 2026-08-07
 
 ### Added
