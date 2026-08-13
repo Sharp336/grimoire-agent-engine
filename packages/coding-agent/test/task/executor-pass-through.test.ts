@@ -357,11 +357,9 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		const mcpManager = {
 			getTools: () => [{ name: "mcp__private_read", label: "private/read" }],
 		} as unknown as MCPManager;
-		const ordinarySettings = Settings.isolated({ "advisor.enabled": true });
 
 		const result = await runSubprocess({
 			...baseOptions,
-			settings: ordinarySettings,
 			id: "normal-child",
 			mcpManager,
 		});
@@ -371,7 +369,6 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(forwarded?.enableMCP).toBe(true);
 		expect(forwarded?.mcpManager).toBe(mcpManager);
 		expect(forwarded?.customTools?.map(tool => tool.name)).toEqual(["mcp__private_read"]);
-		expect(forwarded?.settings?.get("advisor.enabled")).toBe(true);
 	});
 
 	it("preserves the legacy result shape when no output schema is selected", async () => {

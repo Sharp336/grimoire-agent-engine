@@ -43,7 +43,9 @@ function createYieldingSession(fallback: "served" | "unproven" | false = "served
 		agent: { state: { systemPrompt: ["test"] } },
 		state: { messages: [] },
 		model: model("primary", "bad-runtime-model"),
-		servingModel: { selector: "primary/bad-runtime-model", isFallback: false } as ServingModel | undefined,
+		servingModel: (fallback === false ? undefined : { selector: "primary/bad-runtime-model", isFallback: false }) as
+			| ServingModel
+			| undefined,
 		extensionRunner: undefined,
 		sessionManager: { appendSessionInit: () => {} },
 		getActiveToolNames: () => ["yield"],
@@ -661,7 +663,13 @@ describe("subagent runtime model resolution", () => {
 		expect(authFallback).toBeUndefined();
 		expect(fallbackRole).toBeUndefined();
 		expect(defaultFallbackChain).toBeUndefined();
-		expect(retryFallbackChains).toEqual({ default: ["parent/authenticated-model"] });
+		// Upstream's inherited-chain design installs a `subagent:<id>` runtime
+		// chain for every child; a pinned spawn keeps inheriting `default` (the
+		// pin gates auth fallback, not the runtime recovery chain).
+		expect(retryFallbackChains).toEqual({
+			default: ["parent/authenticated-model"],
+			"subagent:pinned-model": ["parent/authenticated-model"],
+		});
 		expect(retryModelFallback).toBe(true);
 		expect(prewalk).toBeUndefined();
 		expect(result.resolvedModel).toBe("primary/requested-model");
