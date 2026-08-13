@@ -66,9 +66,8 @@ export function reduceTasks(state: TaskListState, action: TaskListAction): TaskL
 // View
 // ---------------------------------------------------------------------------
 
-/** Whether a task still needs attention rather than being settled history. */
+/** Whether a task still needs attention rather than being settled history. `TERMINAL_TASK_STATES`'s inverse — there is no "queued": `POST /v1/tasks` calls `Supervisor.prompt` synchronously and a task starts life at `running`, per CoworkSurface. */
 const IN_FLIGHT: Record<TaskState, boolean> = {
-  queued: true,
   running: true,
   waiting: true,
   done: false,
@@ -79,19 +78,18 @@ const IN_FLIGHT: Record<TaskState, boolean> = {
 /**
  * Rank within the in-flight list, lowest first. `waiting` outranks `running`:
  * a task blocked on a person is more actionable than one that is merely
- * moving, the same call `AgentStrip`'s clearance emphasis already makes.
+ * moving, the same reasoning `AgentStrip`'s clearance emphasis already uses.
  */
 const IN_FLIGHT_RANK: Record<TaskState, number> = {
   waiting: 0,
   running: 1,
-  queued: 2,
-  done: 3,
-  failed: 3,
-  canceled: 3,
+  done: 2,
+  failed: 2,
+  canceled: 2,
 };
 
 export interface TaskListView {
-  /** queued, running, or waiting — most actionable first, then most recently updated. */
+  /** running or waiting — most actionable first, then most recently updated. */
   inFlight: Task[];
   /** done, failed, or canceled — most recently updated first. */
   recent: Task[];
@@ -117,7 +115,6 @@ export function taskListView(state: TaskListState): TaskListView {
 export type SignalName = "amber" | "sage" | "ochre" | "oxide" | "slate" | "violet";
 
 export const TASK_STATE_SIGNALS: Record<TaskState, SignalName> = {
-  queued: "slate",
   running: "amber",
   waiting: "ochre",
   done: "sage",
@@ -126,7 +123,6 @@ export const TASK_STATE_SIGNALS: Record<TaskState, SignalName> = {
 };
 
 export const TASK_STATE_LABELS: Record<TaskState, string> = {
-  queued: "Queued",
   running: "Running",
   waiting: "Waiting",
   done: "Done",

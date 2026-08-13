@@ -8,7 +8,7 @@
  * byte-identical output.
  */
 
-import type { ConnectorConnectionState, ConnectorSummary, SkillSummary } from "./types.ts";
+import type { ConnectorStatus, ConnectorSummary, SkillSummary } from "./types.ts";
 
 /** Decoupled from `design/tokens.ts` on purpose — see `tasks.ts` for why. */
 export type SignalName = "amber" | "sage" | "ochre" | "oxide" | "slate" | "violet";
@@ -133,13 +133,13 @@ export function filterSkills(skills: readonly SkillSummary[], query: string): Sk
 // Connectors: health and credential safety
 // ---------------------------------------------------------------------------
 
-export const CONNECTOR_STATUS_SIGNALS: Record<ConnectorConnectionState, SignalName> = {
+export const CONNECTOR_STATUS_SIGNALS: Record<ConnectorStatus, SignalName> = {
   connected: "sage",
   connecting: "amber",
   disconnected: "oxide",
 };
 
-export const CONNECTOR_STATUS_LABELS: Record<ConnectorConnectionState, string> = {
+export const CONNECTOR_STATUS_LABELS: Record<ConnectorStatus, string> = {
   connected: "Connected",
   connecting: "Connecting",
   disconnected: "Disconnected",

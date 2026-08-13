@@ -19,7 +19,7 @@ function task(id: string, overrides: Partial<Task> = {}): Task {
     title: `task ${id}`,
     prompt: "do the thing",
     agentId: `agt_${id}`,
-    state: "queued",
+    state: "running",
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
     labels: {},
@@ -44,12 +44,12 @@ describe("reduceTasks", () => {
   });
 
   test("upsert adds a new task and overwrites an existing one by id", () => {
-    const created = drive([{ t: "upsert", task: task("a", { state: "queued" }) }]);
-    expect(created.tasks.get("a")?.state).toBe("queued");
+    const created = drive([{ t: "upsert", task: task("a", { state: "running" }) }]);
+    expect(created.tasks.get("a")?.state).toBe("running");
 
-    const advanced = reduceTasks(created, { t: "upsert", task: task("a", { state: "running" }) });
+    const advanced = reduceTasks(created, { t: "upsert", task: task("a", { state: "done" }) });
     expect(advanced.tasks.size).toBe(1);
-    expect(advanced.tasks.get("a")?.state).toBe("running");
+    expect(advanced.tasks.get("a")?.state).toBe("done");
   });
 
   test("remove drops a task and is a no-op for an id that was never there", () => {
@@ -65,26 +65,25 @@ describe("reduceTasks", () => {
 describe("taskListView", () => {
   test("splits in-flight from settled tasks", () => {
     const state = drive([
-      { t: "load", tasks: [task("queued", { state: "queued" }), task("done", { state: "done" })] },
+      { t: "load", tasks: [task("running", { state: "running" }), task("done", { state: "done" })] },
     ]);
     const view = taskListView(state);
-    expect(view.inFlight.map((t) => t.id)).toEqual(["queued"]);
+    expect(view.inFlight.map((t) => t.id)).toEqual(["running"]);
     expect(view.recent.map((t) => t.id)).toEqual(["done"]);
   });
 
-  test("a task waiting on a person ranks ahead of one merely running, ahead of one merely queued", () => {
+  test("a task waiting on a person ranks ahead of one merely running", () => {
     const state = drive([
       {
         t: "load",
         tasks: [
-          task("q", { state: "queued", updatedAt: "2026-01-01T00:03:00.000Z" }),
           task("r", { state: "running", updatedAt: "2026-01-01T00:02:00.000Z" }),
           task("w", { state: "waiting", updatedAt: "2026-01-01T00:01:00.000Z" }),
         ],
       },
     ]);
     const view = taskListView(state);
-    expect(view.inFlight.map((t) => t.id)).toEqual(["w", "r", "q"]);
+    expect(view.inFlight.map((t) => t.id)).toEqual(["w", "r"]);
   });
 
   test("within the same urgency tier, the most recently updated task sorts first", () => {
@@ -123,7 +122,7 @@ describe("taskListView", () => {
 
 describe("task state vocabulary", () => {
   test("every TaskState literal has a signal and a label — the mapping is total, not best-effort", () => {
-    const states: TaskState[] = ["queued", "running", "waiting", "done", "failed", "canceled"];
+    const states: TaskState[] = ["running", "waiting", "done", "failed", "canceled"];
     for (const state of states) {
       expect(TASK_STATE_SIGNALS[state]).toBeDefined();
       expect(TASK_STATE_LABELS[state]).toBeDefined();

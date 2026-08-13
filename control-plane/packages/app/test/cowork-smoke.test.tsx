@@ -125,7 +125,7 @@ function task(id: string, overrides: Partial<Task> = {}): Task {
     title: `task ${id}`,
     prompt: "do the thing",
     agentId: `agt_${id}`,
-    state: "queued",
+    state: "running",
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
     labels: {},
