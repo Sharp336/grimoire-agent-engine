@@ -61,7 +61,7 @@ Marketplace installs add registry and cache state alongside those runtime entrie
 - user plugins data root `installed_plugins.json` (`~/.omp/plugins/installed_plugins.json` by default) — user-scoped marketplace installs
 - `<anchor>/.omp/plugins/installed_plugins.json` — project-scoped marketplace installs
 - user plugins data root `cache/{marketplaces,plugins}/` — cached catalogs and plugin directories
-- `<scope>/plugins/node_modules/<package>` — symlink to the cached plugin, allowing its `package.json` `omp.extensions` and tools to load
+- `<scope>/plugins/node_modules/<package>` — symlink to the cached plugin, allowing its `package.json` `omp.extensions`, `omp.advisors`, and tools to load
 - `<scope>/plugins/omp-plugins.lock.json` — enablement and feature state shared with the runtime plugin loader
 
 ## Plugin spec parsing and metadata interpretation
@@ -94,6 +94,7 @@ Implications:
 - A package missing `omp`/`pi` is still installable and listable.
 - Runtime plugin loading (`getEnabledPlugins`) skips packages without `omp`/`pi` manifest.
 - `manifest.version` is always overwritten from package `version`.
+- `omp.advisors` entries are contained regular-file paths. Enabled plugins contribute those advisor rows below user/project `WATCHDOG.yml` precedence; plugin disable or removal takes effect when plugin state reloads.
 
 Malformed `package.json` JSON is a hard failure at read time; malformed manifest shape may fail later only when specific fields are consumed.
 

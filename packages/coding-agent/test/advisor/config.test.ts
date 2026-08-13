@@ -41,7 +41,7 @@ describe("discoverAdvisorConfigs", () => {
 		].join("\n");
 		await Bun.write(path.join(tmp, "WATCHDOG.yml"), yaml);
 
-		const { advisors, sharedInstructions } = await discoverAdvisorConfigs(tmp, agentDir);
+		const { advisors, sharedInstructions } = await discoverAdvisorConfigs(tmp, agentDir, []);
 		expect(advisors).toHaveLength(2);
 		const [arch, sec] = advisors;
 		expect(arch.name).toBe("Architecture");
@@ -67,7 +67,7 @@ describe("discoverAdvisorConfigs", () => {
 		].join("\n");
 		await Bun.write(path.join(tmp, "WATCHDOG.yml"), yaml);
 
-		const { advisors } = await discoverAdvisorConfigs(tmp, agentDir);
+		const { advisors } = await discoverAdvisorConfigs(tmp, agentDir, []);
 		const noTools = advisors.find(a => a.name === "No Tools");
 		const defaultTools = advisors.find(a => a.name === "Default Tools");
 		const invalidOnly = advisors.find(a => a.name === "Invalid Only");
@@ -79,21 +79,67 @@ describe("discoverAdvisorConfigs", () => {
 
 	it("ignores a malformed YAML file without throwing", async () => {
 		await Bun.write(path.join(tmp, "WATCHDOG.yml"), "advisors: [unclosed bracket");
-		const result = await discoverAdvisorConfigs(tmp, agentDir);
+		const result = await discoverAdvisorConfigs(tmp, agentDir, []);
 		expect(result.advisors).toEqual([]);
 		expect(result.sharedInstructions).toBeUndefined();
 	});
 
 	it("skips a file whose shape fails the schema (advisors must be a list)", async () => {
 		await Bun.write(path.join(tmp, "WATCHDOG.yml"), "advisors: not-an-array");
-		const result = await discoverAdvisorConfigs(tmp, agentDir);
+		const result = await discoverAdvisorConfigs(tmp, agentDir, []);
 		expect(result.advisors).toEqual([]);
 	});
 
 	it("returns an empty roster when no config file exists", async () => {
-		const result = await discoverAdvisorConfigs(tmp, agentDir);
+		const result = await discoverAdvisorConfigs(tmp, agentDir, []);
 		expect(result.advisors).toEqual([]);
 		expect(result.sharedInstructions).toBeUndefined();
+	});
+
+	it("merges plugin advisors below project configs without importing plugin text or granting mutating tools", async () => {
+		const pluginDir = path.join(tmp, "plugin");
+		const pluginConfig = path.join(pluginDir, "WATCHDOG.yml");
+		await fsp.mkdir(pluginDir, { recursive: true });
+		await Bun.write(path.join(pluginDir, "plugin-extra.md"), "EXPANDED_PLUGIN_TEXT");
+		await Bun.write(
+			pluginConfig,
+			[
+				"instructions: Plugin-wide instructions must not enter the shared baseline.",
+				"advisors:",
+				"  - name: Plugin Grok",
+				"    model: cursor/cursor-grok-4.6-high-fast",
+				"    tools: [read, bash, write, glob]",
+				"    instructions: '@plugin-extra.md'",
+				"    enabled: true",
+				"  - name: Architecture",
+				"    model: plugin/model",
+			].join("\n"),
+		);
+		await Bun.write(
+			path.join(tmp, "WATCHDOG.yml"),
+			[
+				"instructions: Project shared baseline.",
+				"advisors:",
+				"  - name: Architecture",
+				"    model: project/model",
+			].join("\n"),
+		);
+
+		const result = await discoverAdvisorConfigs(tmp, agentDir, [pluginConfig]);
+		const pluginAdvisor = result.advisors.find(advisor => advisor.name === "Plugin Grok");
+		const architecture = result.advisors.find(advisor => advisor.name === "Architecture");
+
+		expect(pluginAdvisor).toEqual({
+			name: "Plugin Grok",
+			model: "cursor/cursor-grok-4.6-high-fast",
+			tools: ["read", "glob"],
+			instructions: "@plugin-extra.md",
+			enabled: true,
+		});
+		expect(pluginAdvisor?.instructions).not.toContain("EXPANDED_PLUGIN_TEXT");
+		expect(architecture?.model).toBe("project/model");
+		expect(result.sharedInstructions).toBe("Project shared baseline.");
+		expect(result.sharedInstructions).not.toContain("Plugin-wide instructions");
 	});
 });
 
@@ -229,7 +275,7 @@ describe("WATCHDOG.yml file round-trip", () => {
 		expect(text).toContain('instructions: |2-\n  Shared baseline.\n  \n  Second line with: a colon and "quotes".');
 		expect(text).toContain("    instructions: |2-\n      Watch module boundaries.\n      Report coupling.");
 		expect(text).not.toContain("\\n");
-		const { advisors, sharedInstructions } = await discoverAdvisorConfigs(tmp, tmp);
+		const { advisors, sharedInstructions } = await discoverAdvisorConfigs(tmp, tmp, []);
 		expect(advisors.map(a => a.name)).toEqual(["Architecture", "Security"]);
 		expect(sharedInstructions).toContain("Shared baseline.");
 	});
@@ -255,7 +301,7 @@ describe("WATCHDOG.yml file round-trip", () => {
 		const serializedDoc = await loadWatchdogConfigFile(file);
 		expect(serializedDoc).toEqual(explicitNoToolsDoc);
 
-		const { advisors } = await discoverAdvisorConfigs(tmp, tmp);
+		const { advisors } = await discoverAdvisorConfigs(tmp, tmp, []);
 		expect(advisors.find(a => a.name === "No Tools")?.tools).toEqual([]);
 		expect(advisors.find(a => a.name === "Default Tools")?.tools).toBeUndefined();
 	});
@@ -327,7 +373,7 @@ describe("per-advisor enabled field", () => {
 			const loaded = await loadWatchdogConfigFile(file);
 			expect(loaded.advisors.map(advisor => advisor.enabled)).toEqual([true, false, undefined]);
 
-			const { advisors } = await discoverAdvisorConfigs(tmp, tmp);
+			const { advisors } = await discoverAdvisorConfigs(tmp, tmp, []);
 			expect(advisors.map(advisor => advisor.enabled)).toEqual([true, false, undefined]);
 		} finally {
 			await fsp.rm(tmp, { recursive: true, force: true });

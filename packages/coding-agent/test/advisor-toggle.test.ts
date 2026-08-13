@@ -391,6 +391,26 @@ describe("AgentSession advisor toggle", () => {
 		expect(session.getAdvisorCost()).toBeCloseTo(0.5, 8);
 		expect(session.formatAdvisorStatus()).toContain("$0.5000");
 	});
+	it("keeps the live advisor runtime when reapplying an unchanged roster", () => {
+		const advisors = [{ name: "Security", model: `${model.provider}/${model.id}` }];
+		expect(session.applyAdvisorConfigs(advisors, "Shared baseline")).toBe(0);
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		const advisor = session.getAdvisorAgent();
+		expect(advisor).toBeDefined();
+
+		expect(session.applyAdvisorConfigs([{ ...advisors[0] }], "Shared baseline")).toBe(1);
+		expect(session.getAdvisorAgent()).toBe(advisor);
+	});
+	it("rebuilds the live advisor runtime when shared instructions change", () => {
+		const advisors = [{ name: "Security", model: `${model.provider}/${model.id}` }];
+		expect(session.applyAdvisorConfigs(advisors, "Initial baseline")).toBe(0);
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		const advisor = session.getAdvisorAgent();
+		expect(advisor).toBeDefined();
+
+		expect(session.applyAdvisorConfigs([{ ...advisors[0] }], "Updated baseline")).toBe(1);
+		expect(session.getAdvisorAgent()).not.toBe(advisor);
+	});
 	it("retains cumulative advisor cost after an in-session history rewrite", async () => {
 		const advisor = enableAdvisor();
 		appendAdvisorCost(advisor, 0.5, 1);

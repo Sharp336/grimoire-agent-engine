@@ -1586,16 +1586,18 @@ export class SessionAdvisors {
 
 	/**
 	 * Replace the live advisor roster from an edited `WATCHDOG.yml` (the `/advisor
-	 * configure` save path). Swaps the configs + shared baseline, then rebuilds the
-	 * runtimes in place so the change applies without a restart. When the advisor is
-	 * disabled the new configs are simply stored for the next enable.
+	 * configure` save path). Swaps the configs + shared baseline, then rebuilds
+	 * runtimes only when their resolved inputs changed. When the advisor is disabled,
+	 * the new configs are simply stored for the next enable.
 	 *
 	 * @returns the number of advisors active after the rebuild.
 	 */
 	applyAdvisorConfigs(advisors: AdvisorConfig[], sharedInstructions: string | undefined): number {
+		const sharedInstructionsChanged = sharedInstructions !== this.#advisorSharedInstructions;
 		this.#advisorConfigs = advisors;
 		this.#advisorSharedInstructions = sharedInstructions;
 		if (!this.#advisorEnabled) return 0;
+		if (!sharedInstructionsChanged && this.#advisorRuntimeMatchesCurrentConfig()) return this.#advisors.length;
 		this.#stopAdvisorRuntime();
 		this.#buildAdvisorRuntime(true);
 		return this.#advisors.length;

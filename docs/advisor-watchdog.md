@@ -43,6 +43,32 @@ Model selectors use normal role/model resolution, including provider-prefixed id
 
 `tier.advisor` controls service tier for all advisors. It defaults to `none` (standard processing); `inherit` follows the primary's live per-family tier, including `/fast` changes. Concrete values (`auto`, `default`, `flex`, `scale`, `priority`) are applied only when the advisor model's provider family supports them.
 
+### Plugin-provided rosters
+
+An enabled plugin may declare advisor config files in `package.json`:
+
+```json
+{
+  "name": "review-council",
+  "version": "1.0.0",
+  "omp": {
+    "advisors": ["./WATCHDOG.yml"]
+  }
+}
+```
+
+Plugin files contribute advisor rows at the lowest precedence. User and project
+`WATCHDOG.yml` entries replace a plugin row with the same slug. Plugin top-level
+`instructions` are ignored, per-advisor `@import` references are not expanded,
+and plugin tool grants are restricted to `read`, `grep`, and `glob`. Declared
+paths must resolve to regular files inside the installed package; traversal and
+escaping symlinks are rejected.
+
+Installing a plugin never changes `advisor.enabled`. `/reload-plugins` rebuilds
+the live roster after install, upgrade, enable, disable, or uninstall, including
+ACP sessions. `/advisor configure` edits only user/project files but preserves
+plugin rows in the merged live roster.
+
 ### Headless runs
 
 Use `--advisor` to enable the advisor for one print-mode process without

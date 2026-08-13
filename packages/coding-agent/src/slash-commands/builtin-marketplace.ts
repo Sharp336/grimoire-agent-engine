@@ -1,9 +1,4 @@
-import { reset as resetCapabilities } from "../capability";
-import {
-	clearPluginRootsAndCaches,
-	resolveActiveProjectRegistryPath,
-	resolveOrDefaultProjectRegistryPath,
-} from "../discovery/helpers.js";
+import { clearPluginRootsAndCaches, resolveOrDefaultProjectRegistryPath } from "../discovery/helpers.js";
 import { PluginManager } from "../extensibility/plugins";
 import {
 	getInstalledPluginsRegistryPath,
@@ -12,32 +7,11 @@ import {
 	getPluginsCacheDir,
 	MarketplaceManager,
 } from "../extensibility/plugins/marketplace";
-import { MCPCommandController } from "../modes/controllers/mcp-command-controller";
-import type { InteractiveModeContext } from "../modes/types";
-import { refreshAgentDiscovery } from "../task";
+import { reloadTuiPluginState } from "../modes/tui-plugin-reload";
 import { createMarketplaceManager } from "./helpers/marketplace-manager";
 import { commandConsumed, errorMessage, parseSubcommand, usage } from "./helpers/parse";
 import { parseMarketplaceInstallArgs, parsePluginScopeArgs } from "./marketplace-install-parser";
 import type { SlashCommandSpec } from "./types";
-
-/**
- * Reload the interactive session's plugin runtime: invalidate fs/plugin-root
- * caches, rediscover skills, file slash commands, and task agents, reset the
- * capability cache, and reconnect MCP servers (rebinding the session's MCP
- * tools). Shared by `/reload-plugins`'s TUI handler and the `handle`-adapter's
- * `reloadPlugins` hook so both honor the command's documented reload scope.
- */
-export async function reloadTuiPluginState(ctx: InteractiveModeContext): Promise<void> {
-	const projectPath = await resolveActiveProjectRegistryPath(ctx.sessionManager.getCwd());
-	clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
-	await refreshAgentDiscovery(ctx.sessionManager.getCwd());
-	await ctx.refreshSkillState();
-	await ctx.refreshSlashCommandState();
-	resetCapabilities();
-	if (ctx.mcpManager) {
-		await new MCPCommandController(ctx).reloadServers();
-	}
-}
 
 export const BUILTIN_MARKETPLACE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
@@ -320,6 +294,7 @@ export const BUILTIN_MARKETPLACE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec>
 						const name = parsed.installSpec.slice(0, atIdx);
 						const marketplace = parsed.installSpec.slice(atIdx + 1);
 						await mgr.installPlugin(name, marketplace, { force: parsed.force, scope: parsed.scope });
+						await reloadTuiPluginState(runtime.ctx);
 						runtime.ctx.showStatus(`Installed ${name} from ${marketplace}`);
 						break;
 					}
@@ -338,6 +313,7 @@ export const BUILTIN_MARKETPLACE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec>
 							return;
 						}
 						await mgr.uninstallPlugin(uninstArgs.pluginId, uninstArgs.scope);
+						await reloadTuiPluginState(runtime.ctx);
 						runtime.ctx.showStatus(`Uninstalled ${uninstArgs.pluginId}`);
 						break;
 					}
@@ -364,12 +340,14 @@ export const BUILTIN_MARKETPLACE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec>
 								return;
 							}
 							const result = await mgr.upgradePlugin(upArgs.pluginId, upArgs.scope);
+							await reloadTuiPluginState(runtime.ctx);
 							runtime.ctx.showStatus(`Upgraded ${upArgs.pluginId} to ${result.version}`);
 						} else {
 							const results = await mgr.upgradeAllPlugins();
 							if (results.length === 0) {
 								runtime.ctx.showStatus("All marketplace plugins are up to date");
 							} else {
+								await reloadTuiPluginState(runtime.ctx);
 								const lines = results.map(r => `  ${r.pluginId}: ${r.from} -> ${r.to}`);
 								runtime.ctx.showStatus(`Upgraded ${results.length} plugin(s):\n${lines.join("\n")}`);
 							}
@@ -508,6 +486,7 @@ export const BUILTIN_MARKETPLACE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec>
 						}
 						const isEnable = sub === "enable";
 						await mgr.setPluginEnabled(parsed.pluginId, isEnable, parsed.scope);
+						await reloadTuiPluginState(runtime.ctx);
 						runtime.ctx.showStatus(`${isEnable ? "Enabled" : "Disabled"} ${parsed.pluginId}`);
 						break;
 					}
@@ -551,7 +530,7 @@ export const BUILTIN_MARKETPLACE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec>
 	},
 	{
 		name: "reload-plugins",
-		description: "Reload all plugins (skills, commands, hooks, tools, agents, MCP)",
+		description: "Reload all plugins (skills, commands, hooks, tools, agents, advisors, MCP)",
 		acpDescription: "Reload all plugins",
 		handle: async (_command, runtime) => {
 			await runtime.reloadPlugins();

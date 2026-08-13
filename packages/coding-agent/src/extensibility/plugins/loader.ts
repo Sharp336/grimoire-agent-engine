@@ -6,7 +6,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getPluginsDir, getPluginsLockfile, isEnoent } from "@oh-my-pi/pi-utils";
+import { getPluginsDir, getPluginsLockfile, isEnoent, logger, pathIsWithin } from "@oh-my-pi/pi-utils";
 import { getConfigDirPaths } from "../../config";
 import { registerPluginCacheInvalidator, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import { installLegacyPiSpecifierShim } from "./legacy-pi-compat";
@@ -460,6 +460,58 @@ export function resolvePluginExtensionPaths(plugin: InstalledPlugin): string[] {
 	return resolvePluginPaths(plugin, "extensions");
 }
 
+/**
+ * Resolve every declared advisor configuration entry while preserving failures
+ * for install-time validation. Advisor entries are data files rather than
+ * executable modules, so directories are rejected. Both lexical and real paths
+ * must remain inside the plugin root.
+ */
+export function resolvePluginAdvisorManifestEntries(
+	plugin: InstalledPlugin,
+): Array<{ entry: unknown; resolvedPath: string | null }> {
+	const entries = plugin.manifest.advisors;
+	if (!Array.isArray(entries)) return [];
+
+	const pluginRoot = path.resolve(plugin.path);
+	let realPluginRoot: string;
+	try {
+		realPluginRoot = fs.realpathSync(pluginRoot);
+	} catch {
+		return entries.map(entry => ({ entry, resolvedPath: null }));
+	}
+
+	return entries.map(entry => {
+		if (typeof entry !== "string") return { entry, resolvedPath: null };
+		const candidate = path.resolve(pluginRoot, entry);
+		if (!pathIsWithin(pluginRoot, candidate)) return { entry, resolvedPath: null };
+		try {
+			const realCandidate = fs.realpathSync(candidate);
+			if (!pathIsWithin(realPluginRoot, realCandidate) || !fs.statSync(realCandidate).isFile()) {
+				return { entry, resolvedPath: null };
+			}
+			return { entry, resolvedPath: realCandidate };
+		} catch {
+			return { entry, resolvedPath: null };
+		}
+	});
+}
+
+/** Resolve loadable advisor configuration files declared by a plugin. */
+export function resolvePluginAdvisorPaths(plugin: InstalledPlugin): string[] {
+	const resolved: string[] = [];
+	for (const { entry, resolvedPath } of resolvePluginAdvisorManifestEntries(plugin)) {
+		if (resolvedPath) {
+			resolved.push(resolvedPath);
+		} else {
+			logger.warn("Plugin advisor entry is missing, unreadable, or outside the plugin root; skipping", {
+				plugin: plugin.name,
+				entry,
+			});
+		}
+	}
+	return resolved;
+}
+
 // =============================================================================
 // Aggregated Discovery
 // =============================================================================
@@ -515,6 +567,20 @@ export async function getAllPluginExtensionPaths(cwd: string): Promise<string[]>
 
 	for (const plugin of plugins) {
 		paths.push(...resolvePluginExtensionPaths(plugin));
+	}
+
+	return paths;
+}
+
+/**
+ * Get all advisor configuration paths from enabled plugins.
+ */
+export async function getAllPluginAdvisorPaths(cwd: string, opts: { home?: string } = {}): Promise<string[]> {
+	const plugins = await getEnabledPlugins(cwd, opts);
+	const paths: string[] = [];
+
+	for (const plugin of plugins) {
+		paths.push(...resolvePluginAdvisorPaths(plugin));
 	}
 
 	return paths;

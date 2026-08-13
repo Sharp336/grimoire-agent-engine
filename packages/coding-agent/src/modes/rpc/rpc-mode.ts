@@ -14,6 +14,7 @@ import { once } from "node:events";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { $env, isRecord, readLines, Snowflake } from "@oh-my-pi/pi-utils";
+import { discoverAdvisorConfigs } from "../../advisor";
 import { reset as resetCapabilities } from "../../capability";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
@@ -655,6 +656,27 @@ export function requestRpcDialog<T>(
 	output({ type: "extension_ui_request", id, ...request } as RpcExtensionUIRequest);
 	return promise;
 }
+
+export type RpcPluginReloadSession = Pick<
+	AgentSession,
+	"applyAdvisorConfigs" | "refreshSkills" | "sessionManager" | "setSlashCommands" | "settings"
+>;
+
+/** Refresh every plugin-provided surface owned directly by an RPC session. */
+export async function refreshRpcPluginState(
+	session: RpcPluginReloadSession,
+	emitAvailableCommandsUpdate: () => Promise<void>,
+): Promise<void> {
+	const cwd = session.sessionManager.getCwd();
+	const projectPath = await resolveActiveProjectRegistryPath(cwd);
+	clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
+	resetCapabilities();
+	const discovered = await discoverAdvisorConfigs(cwd, session.settings.getAgentDir());
+	session.applyAdvisorConfigs(discovered.advisors, discovered.sharedInstructions);
+	await session.refreshSkills();
+	session.setSlashCommands(await loadSlashCommands({ cwd }));
+	await emitAvailableCommandsUpdate();
+}
 /**
  * Run in RPC mode.
  * Listens for JSON commands on stdin, outputs events and responses on stdout.
@@ -954,18 +976,10 @@ export async function runRpcMode(
 	});
 
 	const getAvailableCommands = async () => buildAvailableSlashCommands(session);
-	const reloadPluginState = async () => {
-		const cwd = session.sessionManager.getCwd();
-		const projectPath = await resolveActiveProjectRegistryPath(cwd);
-		clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
-		resetCapabilities();
-		await session.refreshSkills();
-		session.setSlashCommands(await loadSlashCommands({ cwd }));
-		await emitAvailableCommandsUpdate();
-	};
 	const emitAvailableCommandsUpdate = async () => {
 		output({ type: "available_commands_update", commands: await getAvailableCommands() });
 	};
+	const reloadPluginState = () => refreshRpcPluginState(session, emitAvailableCommandsUpdate);
 	session.subscribeCommandMetadataChanged(() => {
 		void emitAvailableCommandsUpdate();
 	});

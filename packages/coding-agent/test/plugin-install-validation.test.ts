@@ -393,6 +393,55 @@ describe("PluginManager.install load validation", () => {
 		expect(await Bun.file(path.join(tmpRoot, "omp-plugins.lock.json")).exists()).toBe(false);
 	});
 
+	test("rejects an install whose manifest declares a missing advisor file", async () => {
+		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
+			expect(cmd).toEqual(["bun", "install", "advisor-plugin"]);
+
+			const prepare = (async () => {
+				await Bun.write(
+					pluginsPkgJson,
+					JSON.stringify(
+						{ name: "omp-plugins", private: true, dependencies: { "advisor-plugin": "1.0.0" } },
+						null,
+						2,
+					),
+				);
+				const installedDir = path.join(pluginsNodeModules, "advisor-plugin");
+				await fs.mkdir(path.join(installedDir, "dist"), { recursive: true });
+				await Bun.write(
+					path.join(installedDir, "package.json"),
+					JSON.stringify(
+						{
+							name: "advisor-plugin",
+							version: "1.0.0",
+							omp: { extensions: ["./dist/valid.ts"], advisors: ["./WATCHDOG.yml"] },
+						},
+						null,
+						2,
+					),
+				);
+				await Bun.write(
+					path.join(installedDir, "dist", "valid.ts"),
+					'export default function(pi) { pi.registerCommand("valid-ext", { handler: async () => {} }); }\n',
+				);
+			})();
+
+			return {
+				pid: 1,
+				stdout: emptyStream(),
+				stderr: emptyStream(),
+				exited: prepare.then(() => 0),
+			} as Subprocess;
+		}) as typeof Bun.spawn);
+
+		await expect(new PluginManager(tmpRoot).install("advisor-plugin")).rejects.toThrow(/WATCHDOG\.yml/);
+
+		const pluginsPackage = await Bun.file(pluginsPkgJson).json();
+		expect(pluginsPackage.dependencies ?? {}).toEqual({});
+		expect(await Bun.file(path.join(pluginsNodeModules, "advisor-plugin", "package.json")).exists()).toBe(false);
+		expect(await Bun.file(path.join(tmpRoot, "omp-plugins.lock.json")).exists()).toBe(false);
+	});
+
 	test("restores bun.lock when a git reinstall fails validation (#3069 follow-up)", async () => {
 		// Pre-existing valid v1 install plus a populated bun.lock pinning the
 		// original commit. The mock simulates `bun install` rewriting the lock

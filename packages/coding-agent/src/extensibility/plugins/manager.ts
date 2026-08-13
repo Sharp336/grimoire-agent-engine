@@ -14,7 +14,7 @@ import {
 import { loadExtensions } from "../extensions/loader";
 import { refreshBunGitCache } from "./bun-git-cache";
 import { type GitSource, parseGitUrl } from "./git-url";
-import { resolvePluginManifestEntries } from "./loader";
+import { resolvePluginAdvisorManifestEntries, resolvePluginManifestEntries } from "./loader";
 import { getInstalledPluginsRegistryPath, readInstalledPluginsRegistry } from "./marketplace/registry";
 import { parsePluginId } from "./marketplace/types";
 import { extractPackageName, parsePluginSpec } from "./parser";
@@ -346,31 +346,33 @@ export class PluginManager {
 		await fs.promises.cp(snapshot.backupPath, snapshot.packagePath, { recursive: true, verbatimSymlinks: true });
 	}
 
-	async #validateInstalledExtensions(plugin: InstalledPlugin): Promise<void> {
-		const declaredEntries = resolvePluginManifestEntries(plugin, "extensions");
-		if (declaredEntries.length === 0) {
-			return;
-		}
+	async #validateInstalledPlugin(plugin: InstalledPlugin): Promise<void> {
+		const extensionEntries = resolvePluginManifestEntries(plugin, "extensions");
+		const advisorEntries = resolvePluginAdvisorManifestEntries(plugin);
+		if (extensionEntries.length === 0 && advisorEntries.length === 0) return;
 
 		const errors: string[] = [];
-		const loadable: string[] = [];
-		for (const { entry, resolvedPath } of declaredEntries) {
+		const loadableExtensions: string[] = [];
+		for (const { entry, resolvedPath } of extensionEntries) {
 			if (resolvedPath === null) {
 				errors.push(`${entry}: declared extension entry not found on disk`);
 			} else {
-				loadable.push(resolvedPath);
+				loadableExtensions.push(resolvedPath);
 			}
 		}
+		for (const { entry, resolvedPath } of advisorEntries) {
+			if (resolvedPath === null) errors.push(`${entry}: declared advisor entry not found inside the plugin`);
+		}
 
-		if (loadable.length > 0) {
-			const result = await loadExtensions(loadable, this.#cwd);
+		if (loadableExtensions.length > 0) {
+			const result = await loadExtensions(loadableExtensions, this.#cwd);
 			for (const failure of result.errors) {
 				errors.push(`${failure.path}: ${failure.error}`);
 			}
 		}
 
 		if (errors.length > 0) {
-			throw new Error(`Plugin ${plugin.name} extension validation failed:\n${errors.join("\n")}`);
+			throw new Error(`Plugin ${plugin.name} validation failed:\n${errors.join("\n")}`);
 		}
 	}
 
@@ -577,7 +579,7 @@ export class PluginManager {
 				enabled: true,
 			};
 
-			await this.#validateInstalledExtensions(installedPlugin);
+			await this.#validateInstalledPlugin(installedPlugin);
 
 			// Update runtime config
 			const config = await this.#ensureConfigLoaded();

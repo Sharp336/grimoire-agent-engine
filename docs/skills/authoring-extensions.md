@@ -131,6 +131,24 @@ Multiple entry points are supported:
 }
 ```
 
+Plugins may also provide advisor roster data without an executable extension:
+
+```json
+{
+  "name": "review-council",
+  "version": "1.0.0",
+  "omp": {
+    "advisors": ["./WATCHDOG.yml"]
+  }
+}
+```
+
+Each `advisors` entry must resolve to a regular file inside the package. OMP
+loads those rows below user/project `WATCHDOG.yml` precedence, ignores plugin
+top-level shared instructions and `@import` expansion, and restricts their tools
+to `read`, `grep`, and `glob`. The package does not enable the advisor subsystem;
+the session still requires `advisor.enabled: true` or `/advisor on`.
+
 Installed-plugin manifest entries may be `.ts`, `.js`, `.mjs`, or `.cjs`; a manifest entry naming a directory resolves `index.ts`, `index.js`, `index.mjs`, or `index.cjs`. Automatic scanning of native/configured extension directories remains limited to `.ts` and `.js`.
 
 ## Registering commands

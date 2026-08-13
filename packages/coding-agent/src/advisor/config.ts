@@ -4,6 +4,7 @@ import { type } from "@oh-my-pi/omptype";
 import { isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { expandAtImports } from "../discovery/at-imports";
+import { getAllPluginAdvisorPaths } from "../extensibility/plugins/loader";
 import { BUILTIN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
 import { collectConfigCandidates } from "./watchdog";
 
@@ -107,6 +108,13 @@ export function getOrCreateAdvisorProviderSessionId(
 /** Built tool names, for validating an advisor's `tools` list. */
 const KNOWN_TOOL_NAMES = new Set<string>(BUILTIN_TOOL_NAMES);
 
+/** Plugin-provided advisors are always read-only, regardless of their YAML. */
+const PLUGIN_ADVISOR_TOOL_NAMES: Readonly<Record<string, true>> = {
+	read: true,
+	grep: true,
+	glob: true,
+};
+
 /**
  * Keep only valid tool names from an advisor's `tools` list, dropping unknowns
  * with a warning. The advisor is a full agent, so any built tool may be granted;
@@ -114,63 +122,104 @@ const KNOWN_TOOL_NAMES = new Set<string>(BUILTIN_TOOL_NAMES);
  * `undefined` means "use the default subset" (read/grep/glob); only an explicit
  * raw empty list means "no tools".
  */
-function filterAdvisorTools(tools: string[] | undefined, sourcePath: string): string[] | undefined {
+function filterAdvisorTools(
+	tools: string[] | undefined,
+	sourcePath: string,
+	pluginSource = false,
+): string[] | undefined {
 	if (tools === undefined) return undefined;
 	if (tools.length === 0) return [];
 	// Normalize legacy aliases (search→grep, find→glob) and dedupe before validating.
 	const filtered = normalizeToolNames(tools).filter(name => {
-		if (KNOWN_TOOL_NAMES.has(name)) return true;
-		logger.warn("Advisor config: dropping unknown tool", { path: sourcePath, tool: name });
+		if (KNOWN_TOOL_NAMES.has(name) && (!pluginSource || Object.hasOwn(PLUGIN_ADVISOR_TOOL_NAMES, name))) {
+			return true;
+		}
+		logger.warn(pluginSource ? "Advisor plugin: dropping disallowed tool" : "Advisor config: dropping unknown tool", {
+			path: sourcePath,
+			tool: name,
+		});
 		return false;
 	});
 	return filtered.length > 0 ? filtered : undefined;
 }
 
 /**
- * Discover advisor configs from `WATCHDOG.yml`/`WATCHDOG.yaml` files on the same
- * user + project search path as `WATCHDOG.md`. Advisors are keyed by slug; a
- * more-specific file (project leaf > project ancestor > user) replaces an earlier
- * entry with the same slug. Top-level `instructions` across all files concatenate
- * into the shared baseline. A malformed file is logged and skipped — never
- * thrown — so a bad project config can't kill the session.
+ * Discover advisor configs from enabled plugin manifests and
+ * `WATCHDOG.yml`/`WATCHDOG.yaml` files. Plugin files have lowest precedence
+ * and contribute advisor rows only: their top-level shared instructions are
+ * ignored, `@import` is not expanded, and tools are clamped to
+ * `read`/`grep`/`glob`. User and project files retain the existing search order,
+ * may grant any built-in tool, and replace plugin rows with the same slug.
+ *
+ * Pass `pluginAdvisorPaths` explicitly in isolated tests. Omitted paths are
+ * discovered from enabled plugins. Malformed or unreadable sources are logged
+ * and skipped so a broken plugin cannot kill session startup.
  */
-export async function discoverAdvisorConfigs(cwd: string, agentDir?: string): Promise<DiscoveredAdvisors> {
-	const items = await collectConfigCandidates(cwd, agentDir, ["WATCHDOG.yml", "WATCHDOG.yaml"]);
+export async function discoverAdvisorConfigs(
+	cwd: string,
+	agentDir?: string,
+	pluginAdvisorPaths?: readonly string[],
+): Promise<DiscoveredAdvisors> {
+	const pluginPathsPromise: Promise<readonly string[]> =
+		pluginAdvisorPaths === undefined
+			? getAllPluginAdvisorPaths(cwd).catch(err => {
+					logger.warn("Advisor config: failed to discover plugin sources", { error: String(err) });
+					return [];
+				})
+			: Promise.resolve(pluginAdvisorPaths);
+	const [items, pluginPaths] = await Promise.all([
+		collectConfigCandidates(cwd, agentDir, ["WATCHDOG.yml", "WATCHDOG.yaml"]),
+		pluginPathsPromise,
+	]);
+	const sources: Array<{ path: string; content: string; plugin: boolean }> = [];
+	for (const filePath of pluginPaths) {
+		try {
+			sources.push({ path: filePath, content: await fs.readFile(filePath, "utf8"), plugin: true });
+		} catch (err) {
+			logger.warn("Advisor config: failed to read plugin source", { path: filePath, error: String(err) });
+		}
+	}
+	for (const item of items) {
+		sources.push({ ...item, plugin: false });
+	}
+
 	const advisors = new Map<string, AdvisorConfig>();
 	const sharedParts: string[] = [];
-
-	for (const item of items) {
+	for (const source of sources) {
 		let parsed: unknown;
 		try {
-			parsed = YAML.parse(item.content);
+			parsed = YAML.parse(source.content);
 		} catch (err) {
-			logger.warn("Advisor config: failed to parse YAML", { path: item.path, error: String(err) });
+			logger.warn("Advisor config: failed to parse YAML", { path: source.path, error: String(err) });
 			continue;
 		}
 		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-			logger.warn("Advisor config: expected a YAML mapping", { path: item.path });
+			logger.warn("Advisor config: expected a YAML mapping", { path: source.path });
 			continue;
 		}
 		const result = watchdogYamlSchema(parsed);
 		if (result instanceof type.errors) {
-			logger.warn("Advisor config: invalid schema", { path: item.path, error: result.summary });
+			logger.warn("Advisor config: invalid schema", { path: source.path, error: result.summary });
 			continue;
 		}
 
-		if (result.instructions?.trim()) {
-			const expanded = (await expandAtImports(result.instructions, item.path)).trim();
+		if (!source.plugin && result.instructions?.trim()) {
+			const expanded = (await expandAtImports(result.instructions, source.path)).trim();
 			if (expanded) sharedParts.push(expanded);
 		}
 
 		for (const entry of result.advisors ?? []) {
 			const slug = slugifyAdvisorName(entry.name);
-			const instructions = entry.instructions?.trim()
-				? (await expandAtImports(entry.instructions, item.path)).trim() || undefined
+			const rawInstructions = entry.instructions?.trim();
+			const instructions = rawInstructions
+				? source.plugin
+					? rawInstructions
+					: (await expandAtImports(rawInstructions, source.path)).trim() || undefined
 				: undefined;
 			advisors.set(slug, {
 				name: entry.name,
 				model: entry.model?.trim() || undefined,
-				tools: filterAdvisorTools(entry.tools, item.path),
+				tools: filterAdvisorTools(entry.tools, source.path, source.plugin),
 				instructions,
 				enabled: entry.enabled,
 			});

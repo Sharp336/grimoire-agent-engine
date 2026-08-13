@@ -53,7 +53,6 @@ import {
 	setProjectDir,
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import { reset as resetCapabilities } from "../capability";
 import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
 import { KeybindingsManager } from "../config/keybindings";
@@ -66,7 +65,6 @@ import {
 	Settings,
 	settings,
 } from "../config/settings";
-import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import type {
 	AutocompleteProviderFactory,
 	ContextUsage,
@@ -213,6 +211,7 @@ import {
 	startMacOSAppearanceReprobeFallback,
 	theme,
 } from "./theme/theme";
+import { reloadTuiPluginState } from "./tui-plugin-reload";
 import type {
 	CompactionQueuedMessage,
 	InteractiveModeContext,
@@ -1381,13 +1380,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			// exclusions leak and newly-excluded providers are still used.
 			applyProviderGlobalsFromSettings(settings);
 		}
-		// Re-warm plugin roots, capabilities, slash commands, and the ssh tool so
-		// the next prompt sees everything scoped to the new project directory.
-		clearClaudePluginRootsCache();
+		// Refresh the destination project's title prompt and every plugin-provided
+		// runtime surface before accepting another turn.
 		await this.refreshTitleSystemPrompt(newCwd);
-		resetCapabilities();
-		await this.refreshSkillState();
-		await this.refreshSlashCommandState(newCwd);
+		await reloadTuiPluginState(this);
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 		this.statusLine.applyCwdChange();
 	}

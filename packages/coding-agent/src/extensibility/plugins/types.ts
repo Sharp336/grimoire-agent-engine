@@ -41,6 +41,9 @@ export interface PluginManifest {
 	/** Command files (relative paths from package root) */
 	commands?: string[];
 
+	/** Advisor configuration files (relative paths from package root) */
+	advisors?: string[];
+
 	/** Feature definitions for selective installation */
 	features?: Record<string, PluginFeature>;
 

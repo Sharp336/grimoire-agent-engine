@@ -103,6 +103,7 @@ import { TranscriptBlock } from "../components/transcript-container";
 import { TreeSelectorComponent } from "../components/tree-selector";
 import { UserMessageSelectorComponent } from "../components/user-message-selector";
 import type { SessionObserverRegistry } from "../session-observer-registry";
+import { reloadTuiPluginState } from "../tui-plugin-reload";
 import { buildCopyTargets } from "../utils/copy-targets";
 
 const MANUAL_LOGIN_PROMPT = "Paste the authorization code (or full redirect URL), then press Enter:";
@@ -1085,6 +1086,7 @@ export class SelectorController {
 						this.ctx.ui.requestRender();
 						try {
 							await mgr.uninstallPlugin(pluginId, scope);
+							await reloadTuiPluginState(this.ctx);
 							this.ctx.showStatus(`Uninstalled ${pluginId}`);
 						} catch (err) {
 							this.ctx.showStatus(`Uninstall failed: ${err}`);
@@ -1122,6 +1124,7 @@ export class SelectorController {
 					try {
 						const force = installedIds.has(`${name}@${marketplace}`);
 						await mgr.installPlugin(name, marketplace, { force });
+						await reloadTuiPluginState(this.ctx);
 						this.ctx.showStatus(`Installed ${name} from ${marketplace}`);
 					} catch (err) {
 						this.ctx.showStatus(`Install failed: ${err}`);

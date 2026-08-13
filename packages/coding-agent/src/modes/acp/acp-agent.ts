@@ -43,6 +43,7 @@ import {
 	type SetSessionModeResponse,
 	type Usage,
 } from "@oh-my-pi/pi-utils/acp";
+import { discoverAdvisorConfigs } from "../../advisor";
 import { disableProvider, enableProvider, reset as resetCapabilities } from "../../capability";
 import { Settings } from "../../config/settings";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
@@ -1930,10 +1931,10 @@ export class AcpAgent implements Agent {
 
 	/**
 	 * Reload plugin/registry state for an ACP session. Mirrors the interactive
-	 * `/reload-plugins` and `/move` flows: invalidates the plugin-roots cache,
-	 * refreshes task agents, resets the capability cache, refreshes the
-	 * session's slash-command state, then re-advertises commands so the client
-	 * sees newly installed/disabled plugins.
+	 * `/reload-plugins` and `/move` flows: invalidates plugin caches; refreshes
+	 * task agents, advisors, skills, capabilities, and slash commands; then
+	 * re-advertises commands so the client sees newly installed or disabled
+	 * plugins.
 	 */
 	async #reloadPluginState(record: ManagedSessionRecord): Promise<void> {
 		const cwd = record.session.sessionManager.getCwd();
@@ -1941,6 +1942,8 @@ export class AcpAgent implements Agent {
 		clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
 		await refreshAgentDiscovery(cwd);
 		resetCapabilities();
+		const discovered = await discoverAdvisorConfigs(cwd, record.session.settings.getAgentDir());
+		record.session.applyAdvisorConfigs(discovered.advisors, discovered.sharedInstructions);
 		await record.session.refreshSkills();
 		const fileCommands = await loadSlashCommands({ cwd });
 		record.session.setSlashCommands(fileCommands);

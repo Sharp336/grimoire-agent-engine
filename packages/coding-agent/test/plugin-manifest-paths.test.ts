@@ -3,6 +3,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+	getAllPluginAdvisorPaths,
+	resolvePluginAdvisorPaths,
 	resolvePluginExtensionPaths,
 	resolvePluginToolPaths,
 } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/loader";
@@ -45,6 +47,64 @@ describe("plugin manifest path resolution", () => {
 			expect(resolvePluginExtensionPaths(plugin)).toEqual([path.join(dir, "ext.ts")]);
 		} finally {
 			removeSyncWithRetries(dir);
+		}
+	});
+
+	it("resolves only advisor files contained by the plugin root", () => {
+		// macOS exposes os.tmpdir() through /var, while realpath resolves it under /private/var.
+		const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "omp-manifest-advisors-")));
+		const pluginDir = path.join(root, "plugin");
+		try {
+			fs.mkdirSync(pluginDir);
+			const advisorFile = path.join(pluginDir, "WATCHDOG.yml");
+			const outsideFile = path.join(root, "outside.yml");
+			fs.writeFileSync(advisorFile, "advisors: []\n");
+			fs.writeFileSync(outsideFile, "advisors: []\n");
+			const advisorEntries = ["./WATCHDOG.yml", "../outside.yml"];
+			if (process.platform !== "win32") {
+				fs.symlinkSync(outsideFile, path.join(pluginDir, "linked.yml"));
+				advisorEntries.push("./linked.yml");
+			}
+			advisorEntries.push(42 as never);
+			const plugin = makePlugin(pluginDir, {
+				name: "fixture-plugin",
+				version: "1.0.0",
+				advisors: advisorEntries,
+			});
+
+			expect(resolvePluginAdvisorPaths(plugin)).toEqual([advisorFile]);
+		} finally {
+			removeSyncWithRetries(root);
+		}
+	});
+
+	it("discovers advisor files from enabled plugins without reading the process home", async () => {
+		const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "omp-installed-advisors-")));
+		try {
+			const home = path.join(root, "home");
+			const cwd = path.join(root, "project");
+			const pluginsDir = path.join(home, ".omp", "plugins");
+			const pluginDir = path.join(pluginsDir, "node_modules", "fixture-plugin");
+			fs.mkdirSync(pluginDir, { recursive: true });
+			fs.mkdirSync(cwd, { recursive: true });
+			fs.writeFileSync(
+				path.join(pluginsDir, "package.json"),
+				JSON.stringify({ name: "omp-plugins", dependencies: { "fixture-plugin": "1.0.0" } }),
+			);
+			fs.writeFileSync(
+				path.join(pluginDir, "package.json"),
+				JSON.stringify({
+					name: "fixture-plugin",
+					version: "1.0.0",
+					omp: { advisors: ["./WATCHDOG.yml"] },
+				}),
+			);
+			const advisorFile = path.join(pluginDir, "WATCHDOG.yml");
+			fs.writeFileSync(advisorFile, "advisors: []\n");
+
+			expect(await getAllPluginAdvisorPaths(cwd, { home })).toEqual([advisorFile]);
+		} finally {
+			removeSyncWithRetries(root);
 		}
 	});
 });
