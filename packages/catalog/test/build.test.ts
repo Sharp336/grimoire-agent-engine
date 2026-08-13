@@ -10,8 +10,12 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { openrouterModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
-import type { Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
+import {
+	buildXaiOAuthStaticSeed,
+	openrouterModelManagerOptions,
+	xaiOAuthModelManagerOptions,
+} from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import type { FetchImpl, Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
 function completionsSpec(overrides: Partial<ModelSpec<"openai-completions">> = {}): ModelSpec<"openai-completions"> {
 	return {
@@ -235,6 +239,80 @@ describe("xAI-OAuth Responses reasoning-effort suppression", () => {
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 512_000,
 		maxTokens: 512_000,
+	});
+
+	it("curates a dynamically discovered grok-4.6 ahead of uncurated models", async () => {
+		const fetchMock: FetchImpl = async () =>
+			new Response(
+				JSON.stringify({
+					data: [
+						{ id: "grok-future-unlisted", object: "model" },
+						{ id: "grok-4.6", object: "model" },
+					],
+				}),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+
+		const discovered = await xaiOAuthModelManagerOptions({
+			apiKey: "xai-oauth-test-token",
+			fetch: fetchMock,
+		}).fetchDynamicModels?.();
+
+		expect(discovered?.[0]).toMatchObject({
+			id: "grok-4.6",
+			name: "Grok 4.6",
+			contextWindow: 500_000,
+			maxTokens: 500_000,
+			reasoning: true,
+			input: ["text", "image"],
+			compat: {
+				supportsReasoningEffort: true,
+				omitReasoningEffort: false,
+			},
+		});
+		expect(discovered?.find(model => model.id === "grok-future-unlisted")?.compat?.omitReasoningEffort).toBe(true);
+	});
+
+	it("pins Grok 4.5 and 4.6 OAuth metadata and reasoning contracts", () => {
+		const seed = buildXaiOAuthStaticSeed();
+		const grok45 = seed.find(model => model.id === "grok-4.5");
+		const grok46 = seed.find(model => model.id === "grok-4.6");
+		if (!grok45 || !grok46) {
+			throw new Error("Grok 4.5 and 4.6 must be in the xAI OAuth curated seed");
+		}
+
+		const thinking45 = {
+			mode: "effort",
+			efforts: [Effort.Low, Effort.Medium, Effort.High],
+			defaultLevel: Effort.High,
+			requiresEffort: true,
+		} as const;
+		const thinking46 = {
+			mode: "effort",
+			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+			defaultLevel: Effort.High,
+			requiresEffort: true,
+		} as const;
+
+		expect(seed[0]?.id).toBe("grok-4.6");
+		expect(grok46).toMatchObject({
+			name: "Grok 4.6",
+			contextWindow: 500_000,
+			maxTokens: 500_000,
+			reasoning: true,
+			input: ["text", "image"],
+		});
+		expect(buildModel(grok45).thinking).toEqual(thinking45);
+		expect(buildModel(grok46).thinking).toEqual(thinking46);
+		expect(getBundledModel("xai-oauth", "grok-4.5")?.thinking).toEqual(thinking45);
+		expect(getBundledModel("xai-oauth", "grok-4.6")).toMatchObject({
+			name: "Grok 4.6",
+			contextWindow: 500_000,
+			maxTokens: 500_000,
+			reasoning: true,
+			input: ["text", "image"],
+			thinking: thinking46,
+		});
 	});
 
 	it("omits the effort dial for a custom grok-build spec (off the allowlist)", () => {

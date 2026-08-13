@@ -50,6 +50,9 @@
 - Bounded OpenAI-compatible model discovery with a default request timeout so a stalled provider `/models` endpoint can no longer hang startup indefinitely in `resolveModelDiscoveryFallback` ([#8315](https://github.com/can1357/oh-my-pi/issues/8315)).
 - Fixed Codex-discovered `gpt-daybreak-*` aliases being treated as unknown models, restoring the GPT-5.6 `low`/`medium`/`high`/`xhigh`/`max` effort ladder and its 372K fallback only when the Codex registry omits `context_window`.
 - Fixed first-party OpenAI GPT-5.6 aliases to preserve wire-level `off` through generated pro aliases and to price requests above 272K input at each SKU's documented long-context rates.
+### Fixed
+
+- Fixed xAI OAuth support for `grok-4.6` with its 500K context window, text-and-image input, and reasoning-effort controls. `grok-4.5` and `grok-4.6` now expose only their documented effort ladders, default to `high`, and cannot disable reasoning ([#8369](https://github.com/can1357/oh-my-pi/pull/8369) by [@dendritic](https://github.com/dendritic)).
 
 ## [17.2.15] - 2026-08-12
 
