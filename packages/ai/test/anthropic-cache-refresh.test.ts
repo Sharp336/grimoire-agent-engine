@@ -173,6 +173,7 @@ async function finishRequest(
 	const requestModel = options.model ?? model;
 	const stream = streamSimple(requestModel, context, {
 		fetch,
+		apiKey: "test-anthropic-key",
 		anthropicCacheRefresh: options.anthropicCacheRefresh ?? true,
 		providerSessionState,
 		sessionId: options.sessionId ?? "cache-refresh-test-session",

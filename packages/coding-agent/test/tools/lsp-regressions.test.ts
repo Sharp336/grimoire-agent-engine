@@ -337,7 +337,6 @@ describe("lsp regressions", () => {
 			});
 			const config = loadConfig(tempDir.path());
 			const serverConfig = getServersForFile(config, filePath)[0]?.[1];
-			expect(serverConfig).toBeDefined();
 			if (!serverConfig) throw new Error("Custom GDScript server was not loaded");
 
 			const client = await lspClient.getOrCreateClient(serverConfig, tempDir.path(), 1_000);
@@ -1373,7 +1372,6 @@ describe("lsp regressions", () => {
 
 	it("sanitizes symbol metadata in renderer output", async () => {
 		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
 		const uiTheme = theme!;
 		const renderOptions: RenderResultOptions = { expanded: false, isPartial: false };
 
@@ -1411,7 +1409,6 @@ describe("lsp regressions", () => {
 
 	it("sanitizes tabs in rendered diagnostic output", async () => {
 		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
 		const uiTheme = theme!;
 		const renderOptions: RenderResultOptions = { expanded: false, isPartial: false };
 
@@ -1435,7 +1432,6 @@ describe("lsp regressions", () => {
 
 	it("sanitizes expanded generic error output (#7041)", async () => {
 		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
 		const result = renderLocalResult(
 			{
 				content: [{ type: "text", text: `Error:\nserver\tstderr ${"x".repeat(200)}` }],

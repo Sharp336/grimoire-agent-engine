@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [17.3.0] - 2026-08-13
+
 ### Breaking Changes
 
 - Removed `OpenAICompat.enableGeminiThinkingLoopGuard`; thinking-loop eligibility is derived solely from the `model.id` family.

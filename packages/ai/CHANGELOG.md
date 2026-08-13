@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [17.3.0] - 2026-08-13
+
 ### Breaking Changes
 
 - Renamed `withGeminiThinkingLoopGuard` to `withThinkingLoopGuard`; the guard applies to Gemini, DeepSeek, and Grok model-id families.

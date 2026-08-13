@@ -412,7 +412,6 @@ describe("Anthropic request fingerprint alignment", () => {
 		// preceding real user turn gets the fallback breakpoint. The synthetic
 		// trailing Continue. pad must never consume it.
 		const assistant = payload.messages?.find(message => message.role === "assistant");
-		expect(assistant).toBeDefined();
 		const assistantContent = assistant?.content;
 		expect(Array.isArray(assistantContent)).toBe(true);
 		for (const block of (assistantContent ?? []) as Array<{ type: string; cache_control?: unknown }>) {
@@ -2066,7 +2065,6 @@ describe("Anthropic request fingerprint alignment", () => {
 				  }
 				| undefined
 		)?.tls;
-		expect(tlsOptions).toBeDefined();
 		expect(tlsOptions?.rejectUnauthorized).toBe(true);
 		expect(tlsOptions?.serverName).toBe("api.anthropic.com");
 		expect(tlsOptions?.ciphers).toBe(tls.DEFAULT_CIPHERS);

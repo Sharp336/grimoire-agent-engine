@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [17.3.0] - 2026-08-13
+
 ### Fixed
 
 - Improved the manual `/shake` command to retain a small history of recent tool results, preventing the agent from losing its active working context.

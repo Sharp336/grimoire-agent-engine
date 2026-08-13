@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [17.3.0] - 2026-08-13
+
 ### Fixed
 
 - Fixed an issue where shell-internal background jobs (such as `yes >/dev/null &`) could survive a one-shot shell session and consume CPU indefinitely after the command returned.

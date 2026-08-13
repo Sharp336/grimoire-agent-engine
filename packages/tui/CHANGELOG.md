@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [17.3.0] - 2026-08-13
+
 ### Fixed
 
 - Fixed an issue where repeated pane-width adjustments or terminal resizing could corrupt native scrollback and soft-wrap behavior.

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [17.3.0] - 2026-08-13
+
 ### Added
 
 - Added cost-weighted `cacheSavings` metric alongside `cacheRate`, accounting for cache-read discounts and write premiums against equivalent uncached prompt costs.

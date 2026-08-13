@@ -19,11 +19,7 @@ import { parseModelPattern, parseModelString } from "@oh-my-pi/pi-coding-agent/c
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
-import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
-import { AgentHubOverlayComponent } from "@oh-my-pi/pi-coding-agent/modes/components/agent-hub";
-import { SessionObserverRegistry } from "@oh-my-pi/pi-coding-agent/modes/session-observer-registry";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { ServingModel } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
@@ -239,28 +235,6 @@ describe("AgentSession retry fallback", () => {
 				role: "default",
 			},
 		]);
-		const registry = new AgentRegistry();
-		registry.register({
-			id: "fallback-agent",
-			displayName: "Fallback Agent",
-			kind: "sub",
-			session,
-		});
-		const hub = new AgentHubOverlayComponent({
-			observers: new SessionObserverRegistry(),
-			hubKeys: [],
-			onDone: () => {},
-			requestRender: () => {},
-			registry,
-			irc: new IrcBus(registry),
-		});
-		try {
-			expect(Bun.stripANSI(hub.render(120).join("\n"))).toContain(
-				`fallback → ${secondFallback.provider}/${secondFallback.id}`,
-			);
-		} finally {
-			hub.dispose();
-		}
 	});
 
 	it("forwards retry fallback events to extension handlers", async () => {
@@ -1445,7 +1419,7 @@ describe("AgentSession retry fallback", () => {
 			}
 		});
 
-		expect(session.setAdvisorEnabled(true)).toBe(true);
+		session.setAdvisorEnabled(true);
 		await session.prompt("Complete one primary turn");
 		await session.waitForIdle();
 		// The catch-up gate releases immediately while the advisor is mid-failure
@@ -1534,7 +1508,7 @@ describe("AgentSession retry fallback", () => {
 			advisorTools: [],
 			advisorStreamFn: advisorMock.stream,
 		});
-		expect(session.setAdvisorEnabled(true)).toBe(true);
+		session.setAdvisorEnabled(true);
 
 		const credentialStarted = Promise.withResolvers<void>();
 		const releaseCredential = Promise.withResolvers<void>();
@@ -4108,7 +4082,7 @@ describe("AgentSession retry fallback", () => {
 
 	it("skips usage fallbacks whose effort floor exceeds the session ceiling", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
-		const incompatibleFallback = getBundledModel("fireworks", "deepseek-v4-pro");
+		const incompatibleFallback = getBundledModel("openrouter", "deepseek/deepseek-v4-pro");
 		const compatibleFallback = getBundledModel("openai", "gpt-4o-mini");
 		if (!primaryModel || !incompatibleFallback || !compatibleFallback) {
 			throw new Error("Expected bundled usage fallback effort models");

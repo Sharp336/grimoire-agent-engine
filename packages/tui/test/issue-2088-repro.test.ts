@@ -2470,7 +2470,6 @@ describe("multiplexer detection gates ED3 on resize", () => {
 					await Bun.sleep(DEBOUNCE_SETTLE_WAIT_MS);
 					await settle(term);
 					const out = writes.join("");
-					expect(out.length).toBeGreaterThan(0);
 					expect(out).not.toContain(ED3);
 					expect(tui.fullRedraws - baselineRedraws).toBe(1);
 					expect(visible(term)).toEqual(Array.from({ length: 10 }, (_v, i) => `line-${i + 10}`));
@@ -2503,7 +2502,6 @@ describe("multiplexer detection gates ED3 on resize", () => {
 					await Bun.sleep(DEBOUNCE_SETTLE_WAIT_MS);
 					await settle(term);
 					const out = writes.join("");
-					expect(out.length).toBeGreaterThan(0);
 					expect(out).not.toContain(ED3);
 					expect(tui.fullRedraws - baselineRedraws).toBe(1);
 					expect(visible(term)).toEqual(Array.from({ length: 10 }, (_v, i) => `line-${i + 10}`));

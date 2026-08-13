@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [17.3.0] - 2026-08-13
+
 ### Fixed
 
 - Optimized performance of partial JSON parsing for long streaming tool-call arguments.
