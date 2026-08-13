@@ -363,6 +363,12 @@ export interface OpenAICompat {
 	 * model id. Default: true. Issue #5606.
 	 */
 	supportsSamplingParams?: boolean;
+	/**
+	 * Whether the endpoint accepts `presence_penalty` when other sampling
+	 * parameters remain supported. Defaults to true; xAI reasoning models
+	 * reject this field while still accepting controls such as `temperature`.
+	 */
+	supportsPresencePenalty?: boolean;
 	/** Always send a max-token field when the caller did not provide one. Default: auto-detected (Kimi-family models derive TPM limits from max_tokens). */
 	alwaysSendMaxTokens?: boolean;
 	/** Whether Responses-API tool-call/result history must be strictly paired. Default: auto-detected (Azure OpenAI, GitHub Copilot). */
@@ -578,6 +584,7 @@ export interface ResolvedOpenAISharedCompat {
 	reasoningEffortMap: Partial<Record<Effort, string>>;
 	supportsReasoningParams: boolean;
 	supportsSamplingParams: boolean;
+	supportsPresencePenalty?: boolean;
 	thinkingFormat: OpenAIReasoningFormat;
 	/** Kimi Code transport selected by live per-model protocol metadata. */
 	kimiApiFormat?: OpenAICompat["kimiApiFormat"];
@@ -643,6 +650,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "reasoningEffortMap"
 			| "supportsReasoningParams"
 			| "supportsSamplingParams"
+			| "supportsPresencePenalty"
 			| "thinkingFormat"
 			| "kimiApiFormat"
 			| "reasoningDisableMode"

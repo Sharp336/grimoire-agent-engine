@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { buildParams } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
-import type { Context, Model } from "@oh-my-pi/pi-ai/types";
+import type { Context, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai/types";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -52,6 +52,9 @@ const singleUserContext: Context = {
 
 interface ResponsesPayload {
 	reasoning?: { effort?: string };
+	temperature?: number;
+	top_p?: number;
+	presence_penalty?: number;
 }
 
 function createAbortedSignal(): AbortSignal {
@@ -60,9 +63,15 @@ function createAbortedSignal(): AbortSignal {
 	return controller.signal;
 }
 
-function captureSimpleResponsesPayload(model: Model<"openai-responses">): Promise<ResponsesPayload> {
+type CapturedStreamOptions = Pick<SimpleStreamOptions, "reasoning" | "temperature" | "topP" | "presencePenalty">;
+
+function captureSimpleResponsesPayload(
+	model: Model<"openai-responses">,
+	options?: CapturedStreamOptions,
+): Promise<ResponsesPayload> {
 	const { promise, resolve } = Promise.withResolvers<ResponsesPayload>();
 	streamSimple(model, singleUserContext, {
+		...options,
 		apiKey: "test-key",
 		signal: createAbortedSignal(),
 		onPayload: payload => resolve(payload as ResponsesPayload),
@@ -100,6 +109,15 @@ describe("xAI OAuth Responses reasoning payload (regression)", () => {
 		expect(params.reasoning).toEqual({ effort: "high" });
 	});
 
+	test("xai-oauth/grok-4.5 maps programmatic xhigh requests to high", async () => {
+		const grok45 = getBundledModel<"openai-responses">("xai-oauth", "grok-4.5");
+		if (!grok45) throw new Error("xai-oauth/grok-4.5 must be in bundled models.json");
+
+		const payload = await captureSimpleResponsesPayload(grok45, { reasoning: Effort.XHigh });
+
+		expect(payload.reasoning).toEqual({ effort: "high" });
+	});
+
 	test("xai-oauth/grok-4.6 clamps minimal to low and sends xhigh verbatim", () => {
 		const grok46 = getBundledModel<"openai-responses">("xai-oauth", "grok-4.6");
 		if (!grok46) throw new Error("xai-oauth/grok-4.6 must be in bundled models.json");
@@ -109,5 +127,23 @@ describe("xAI OAuth Responses reasoning payload (regression)", () => {
 
 		expect(minimal.params.reasoning).toEqual({ effort: "low" });
 		expect(xhigh.params.reasoning).toEqual({ effort: "xhigh" });
+	});
+
+	test("xai-oauth Grok reasoning omits presence penalty without dropping supported sampling controls", async () => {
+		for (const modelId of ["grok-4.5", "grok-4.6"] as const) {
+			const model = getBundledModel<"openai-responses">("xai-oauth", modelId);
+			if (!model) throw new Error(`xai-oauth/${modelId} must be in bundled models.json`);
+
+			const payload = await captureSimpleResponsesPayload(model, {
+				reasoning: Effort.High,
+				temperature: 0.25,
+				topP: 0.75,
+				presencePenalty: 0.5,
+			});
+
+			expect(payload).not.toHaveProperty("presence_penalty");
+			expect(payload.temperature).toBe(0.25);
+			expect(payload.top_p).toBe(0.75);
+		}
 	});
 });

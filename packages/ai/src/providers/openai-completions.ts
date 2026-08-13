@@ -1575,7 +1575,7 @@ function buildParams(
 		if (options?.minP !== undefined) {
 			params.min_p = options.minP;
 		}
-		if (options?.presencePenalty !== undefined) {
+		if (initialCompat.supportsPresencePenalty !== false && options?.presencePenalty !== undefined) {
 			params.presence_penalty = options.presencePenalty;
 		}
 		if (options?.repetitionPenalty !== undefined) {

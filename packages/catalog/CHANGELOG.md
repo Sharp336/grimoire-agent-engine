@@ -52,7 +52,7 @@
 - Fixed first-party OpenAI GPT-5.6 aliases to preserve wire-level `off` through generated pro aliases and to price requests above 272K input at each SKU's documented long-context rates.
 ### Fixed
 
-- Fixed xAI OAuth support for `grok-4.6` with its 500K context window, text-and-image input, and reasoning-effort controls. `grok-4.5` and `grok-4.6` now expose only their documented effort ladders, default to `high`, and cannot disable reasoning ([#8369](https://github.com/can1357/oh-my-pi/pull/8369) by [@dendritic](https://github.com/dendritic)).
+- Fixed xAI OAuth support for `grok-4.6` with its 500K context window, text-and-image input, and reasoning-effort controls. `grok-4.5` and `grok-4.6` now expose only their documented effort ladders, default to `high`, cannot disable reasoning, normalize Grok 4.5 `xhigh` requests to `high`, and omit unsupported presence penalties ([#8369](https://github.com/can1357/oh-my-pi/pull/8369) by [@dendritic](https://github.com/dendritic)).
 
 ## [17.2.15] - 2026-08-12
 

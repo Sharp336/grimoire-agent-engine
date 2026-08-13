@@ -268,6 +268,7 @@ describe("xAI-OAuth Responses reasoning-effort suppression", () => {
 			compat: {
 				supportsReasoningEffort: true,
 				omitReasoningEffort: false,
+				supportsPresencePenalty: false,
 			},
 		});
 		expect(discovered?.find(model => model.id === "grok-future-unlisted")?.compat?.omitReasoningEffort).toBe(true);
@@ -301,6 +302,14 @@ describe("xAI-OAuth Responses reasoning-effort suppression", () => {
 			maxTokens: 500_000,
 			reasoning: true,
 			input: ["text", "image"],
+		});
+		expect(grok45.compat).toMatchObject({
+			reasoningEffortMap: { minimal: "low", xhigh: "high" },
+			supportsPresencePenalty: false,
+		});
+		expect(grok46.compat).toMatchObject({
+			reasoningEffortMap: { minimal: "low" },
+			supportsPresencePenalty: false,
 		});
 		expect(buildModel(grok45).thinking).toEqual(thinking45);
 		expect(buildModel(grok46).thinking).toEqual(thinking46);

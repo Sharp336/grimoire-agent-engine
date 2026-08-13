@@ -104644,13 +104644,15 @@
 			"supportsComputerUseConfig": false,
 			"compat": {
 				"reasoningEffortMap": {
-					"minimal": "low"
+					"minimal": "low",
+					"xhigh": "high"
 				},
 				"includeEncryptedReasoning": false,
 				"filterReasoningHistory": true,
 				"supportsImageDetailOriginal": false,
 				"omitReasoningEffort": false,
-				"supportsReasoningEffort": true
+				"supportsReasoningEffort": true,
+				"supportsPresencePenalty": false
 			}
 		},
 		"grok-4.6": {
@@ -104693,7 +104695,8 @@
 				"filterReasoningHistory": true,
 				"supportsImageDetailOriginal": false,
 				"omitReasoningEffort": false,
-				"supportsReasoningEffort": true
+				"supportsReasoningEffort": true,
+				"supportsPresencePenalty": false
 			}
 		},
 		"grok-build": {

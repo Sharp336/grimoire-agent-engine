@@ -1279,6 +1279,10 @@ interface XAICuratedModel {
 	 * single allowlist shared by this curated layer and the compat builder.
 	 */
 	supportsReasoningEffort?: boolean;
+	/** Model-specific wire aliases layered over the shared `minimal -> low` clamp. */
+	reasoningEffortMap?: OpenAICompat["reasoningEffortMap"];
+	/** Whether reasoning requests accept `presence_penalty`. Defaults to true. */
+	supportsPresencePenalty?: boolean;
 	/**
 	 * Input modalities this model accepts. Defaults to `["text"]` when absent.
 	 * Vision-capable Grok models MUST list `"image"` here so the curated layer
@@ -1299,7 +1303,13 @@ interface XAICuratedModel {
 // omit/include/history replay defaults live in catalog compat so every
 // OpenAI-family endpoint consumes the same constraint.
 export const XAI_OAUTH_CURATED_MODELS: readonly XAICuratedModel[] = [
-	{ id: "grok-4.6", contextWindow: 500_000, name: "Grok 4.6", input: ["text", "image"] },
+	{
+		id: "grok-4.6",
+		contextWindow: 500_000,
+		name: "Grok 4.6",
+		input: ["text", "image"],
+		supportsPresencePenalty: false,
+	},
 	{
 		id: "grok-build",
 		contextWindow: 512_000,
@@ -1315,7 +1325,14 @@ export const XAI_OAUTH_CURATED_MODELS: readonly XAICuratedModel[] = [
 		input: ["text", "image"],
 	},
 	{ id: "grok-4.3", contextWindow: 1_000_000, name: "Grok 4.3", input: ["text", "image"] },
-	{ id: "grok-4.5", contextWindow: 500_000, name: "Grok 4.5", input: ["text", "image"] },
+	{
+		id: "grok-4.5",
+		contextWindow: 500_000,
+		name: "Grok 4.5",
+		input: ["text", "image"],
+		reasoningEffortMap: { xhigh: "high" },
+		supportsPresencePenalty: false,
+	},
 	// grok-4.20-multi-agent-0309 is text-only per the bundled catalog; omit `input` for the default.
 	{ id: "grok-4.20-multi-agent-0309", contextWindow: 2_000_000, name: "Grok 4.20 (Multi-Agent)" },
 	{
@@ -1360,12 +1377,12 @@ function withXaiOAuthCompatDefaults(model: ModelSpec<"openai-responses">): Model
 	return { ...model, compat };
 }
 
-// Hermes-agent parity: only the `minimal -> low` clamp is applied (see
-// hermes-agent/agent/transports/codex.py:92 `_effort_clamp = {"minimal":
-// "low"}`). Hermes sends `xhigh` to xAI verbatim and we match that contract
-// — let xAI decide if the level is valid for the specific Grok model.
-// `resolveModelThinking` folds this into `model.thinking.effortMap`, downstream
-// of the omitReasoningEffort gate in pi-ai's stream.ts.
+// xAI does not expose `minimal`, so clamp it to `low` for every curated
+// reasoning model. Curated entries layer model-specific compatibility aliases:
+// xAI documents `xhigh` on Grok 4.5 as equivalent to `high`, while Grok 4.6
+// accepts `xhigh` verbatim.
+// `resolveModelThinking` folds visible mappings into `model.thinking.effortMap`;
+// hidden aliases remain in compat for stream-level request normalization.
 const XAI_REASONING_EFFORT_MAP = { minimal: "low" } as const;
 
 // xai-oauth's /v1/models exposes no per-request output limit on the OAuth
@@ -1394,12 +1411,17 @@ function mergeCuratedIntoModel(
 	const effortCapable = curated.supportsReasoningEffort ?? isGrokReasoningEffortCapable(curated.id);
 	const compat = {
 		...(base.compat ?? {}),
-		reasoningEffortMap: { ...XAI_REASONING_EFFORT_MAP, ...(base.compat?.reasoningEffortMap ?? {}) },
+		reasoningEffortMap: {
+			...XAI_REASONING_EFFORT_MAP,
+			...curated.reasoningEffortMap,
+			...(base.compat?.reasoningEffortMap ?? {}),
+		},
 		includeEncryptedReasoning: base.compat?.includeEncryptedReasoning ?? false,
 		filterReasoningHistory: base.compat?.filterReasoningHistory ?? true,
 		supportsImageDetailOriginal: base.compat?.supportsImageDetailOriginal ?? false,
 		omitReasoningEffort: !effortCapable,
 		supportsReasoningEffort: effortCapable,
+		supportsPresencePenalty: curated.supportsPresencePenalty ?? base.compat?.supportsPresencePenalty,
 	};
 	return {
 		...base,

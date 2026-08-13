@@ -471,6 +471,7 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		// OpenAI proprietary reasoning models (o-series, gpt-5+) reject explicit
 		// temperature/top_p/… with a 400 on every serving host (#5606).
 		supportsSamplingParams: !isOpenAISamplingRestrictedModelId(spec.id),
+		supportsPresencePenalty: spec.compat?.supportsPresencePenalty,
 		reasoningEffortMap: {},
 		supportsUsageInStreaming: !isCerebras,
 		// Kimi (including via OpenRouter and Fireworks router-form IDs such as
@@ -707,6 +708,7 @@ export function buildOpenAIResponsesCompat(spec: OpenAIResponsesSpecLike): Resol
 		// OpenAI proprietary reasoning models (o-series, gpt-5+) reject explicit
 		// temperature/top_p/… with a 400 on every serving host (#5606).
 		supportsSamplingParams: !isOpenAISamplingRestrictedModelId(id),
+		supportsPresencePenalty: spec.compat?.supportsPresencePenalty,
 		thinkingFormat,
 		reasoningDisableMode: resolveReasoningDisableMode(thinkingFormat),
 		omitReasoningEffort: false,
