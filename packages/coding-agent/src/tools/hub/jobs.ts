@@ -13,7 +13,15 @@ import type { RenderResultOptions } from "../../extensibility/custom-tools/types
 import { shimmerEnabled, shimmerText } from "../../modes/theme/shimmer";
 import type { Theme } from "../../modes/theme/theme";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
-import { Ellipsis, Hasher, type RenderCache, renderStatusLine, renderTreeList, truncateToWidth } from "../../tui";
+import {
+	Ellipsis,
+	fileHyperlink,
+	Hasher,
+	type RenderCache,
+	renderStatusLine,
+	renderTreeList,
+	truncateToWidth,
+} from "../../tui";
 import type { ToolSession } from "..";
 import {
 	formatBadge,
@@ -136,6 +144,7 @@ interface TrackedJobLike {
 	status: string;
 	label: string;
 	startTime: number;
+	linkPath?: string;
 	latestDetails?: Record<string, unknown>;
 	resultText?: string;
 	errorText?: string;
@@ -173,6 +182,7 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 			status: latest.status as JobSnapshot["status"],
 			label: latest.label,
 			durationMs: Math.max(0, now - latest.startTime),
+			...(latest.linkPath ? { linkPath: latest.linkPath } : {}),
 			...(resolvedModel ? { resolvedModel } : {}),
 			...(latest.resultText ? { resultText: latest.resultText } : {}),
 			...(latest.errorText ? { errorText: latest.errorText } : {}),
@@ -617,8 +627,10 @@ export function jobsRenderResult(
 						);
 						const typeBadge = formatBadge(job.type, statusToColor(job.status), uiTheme);
 						// Task jobs label themselves with their agent id, which is also
-						// the job id — drop the id column instead of stuttering it twice.
-						const idPart = job.label.trim() === job.id ? "" : ` ${uiTheme.fg("muted", job.id)}`;
+						// the job id — link the label instead of rendering the id twice.
+						const idIsLabel = job.label.trim() === job.id;
+						const displayId = job.linkPath ? fileHyperlink(job.linkPath, job.id) : job.id;
+						const idPart = idIsLabel ? "" : ` ${uiTheme.fg("muted", displayId)}`;
 						const rawLabelLines = (job.label || "(no label)").split(/\r?\n/);
 						const maxLabelLines = expanded ? LABEL_LINES_EXPANDED : LABEL_LINES_COLLAPSED;
 						const visibleLabelLines = rawLabelLines
@@ -649,11 +661,13 @@ export function jobsRenderResult(
 						// shimmer band.
 						const live = job.status === "running" && options.spinnerFrame !== undefined;
 						const headRaw = visibleLabelLines[0] ?? "";
-						const headLabel = live
+						const styledHeadLabel = live
 							? shimmerEnabled()
 								? shimmerText(headRaw, uiTheme)
 								: uiTheme.fg("accent", headRaw)
 							: uiTheme.fg("toolOutput", headRaw);
+						const headLabel =
+							idIsLabel && job.linkPath ? fileHyperlink(job.linkPath, styledHeadLabel) : styledHeadLabel;
 						lines.push(
 							`${icon}${idPart} ${typeBadge} ${headLabel}${modelText}${modelText ? uiTheme.sep.dot : " "}${durationText}`,
 						);

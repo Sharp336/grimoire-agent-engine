@@ -340,6 +340,76 @@ describe("AgentSession concurrent prompt guard", () => {
 		).toBe(true);
 	});
 
+	it("rebases a queued background tan breadcrumb when the session moves", async () => {
+		const cwdA = path.join(tempDir, "cwd-a");
+		const cwdB = path.join(tempDir, "cwd-b");
+		fs.mkdirSync(cwdA, { recursive: true });
+		fs.mkdirSync(cwdB, { recursive: true });
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		let firstStream: AssistantMessageEventStream | undefined;
+		const callMessages: Message[][] = [];
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: (_model, context) => {
+				callMessages.push([...context.messages]);
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					stream.push({ type: "start", partial: createAssistantMessage("") });
+					if (callMessages.length > 1) {
+						stream.push({ type: "done", reason: "stop", message: createAssistantMessage("Moved") });
+					}
+				});
+				firstStream = stream;
+				return stream;
+			},
+		});
+		const sessionManager = SessionManager.create(cwdA, path.join(tempDir, "sessions-a"));
+		const oldArtifactsDir = sessionManager.getArtifactsDir();
+		if (!oldArtifactsDir) throw new Error("Expected source artifact directory");
+		const cloneFile = path.join(oldArtifactsDir, "TanClone.jsonl");
+		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage, path.join(tempDir, "models.yml")),
+		});
+
+		const firstPrompt = session.prompt("First message");
+		await waitFor(() => session.isStreaming && firstStream !== undefined && callMessages.length === 1);
+		await session.sendCustomMessage(
+			{
+				customType: "background-tan-dispatch",
+				content: "Background tan dispatched",
+				display: true,
+				attribution: "user",
+				details: { jobId: "tan-1", work: "review", sessionFile: cloneFile },
+			},
+			{ deliverAs: "nextTurn", triggerTurn: false },
+		);
+		firstStream?.push({ type: "done", reason: "stop", message: createAssistantMessage("Done") });
+		await firstPrompt;
+		await session.waitForIdle();
+
+		await session.moveSession(cwdB, path.join(tempDir, "sessions-b"));
+		await session.prompt("Second message");
+		await session.waitForIdle();
+
+		const queuedTan = session.agent.state.messages.find(
+			message => message.role === "custom" && message.customType === "background-tan-dispatch",
+		);
+		if (queuedTan?.role !== "custom") throw new Error("Expected queued background tan message");
+		const movedArtifactsDir = sessionManager.getArtifactsDir();
+		if (!movedArtifactsDir) throw new Error("Expected moved artifact directory");
+		expect((queuedTan.details as { sessionFile?: string } | undefined)?.sessionFile).toBe(
+			path.join(movedArtifactsDir, "TanClone.jsonl"),
+		);
+	});
+
 	it("continues a main session from session_stop feedback before settling", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const mock = createMockModel({

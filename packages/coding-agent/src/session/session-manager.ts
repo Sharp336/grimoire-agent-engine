@@ -64,6 +64,8 @@ import { generateId, migrateToCurrentVersion } from "./session-migrations";
 import {
 	computeDefaultSessionDir,
 	readTerminalBreadcrumbEntry,
+	rebasePathWithinRoot,
+	rebaseResourcePathMetadata,
 	resolveManagedSessionRoot,
 	writeTerminalBreadcrumb,
 } from "./session-paths";
@@ -378,6 +380,14 @@ interface AtomicEntryBatch {
 	preBatchLeafId: string | null;
 	externalLeafChanged: boolean;
 	externalLeafId: string | null;
+}
+
+export interface SessionMoveOptions {
+	/**
+	 * Rebase live artifact metadata, including writer destinations, immediately
+	 * before the tree is renamed. Invoked with reversed roots if the rename fails.
+	 */
+	rebaseLiveArtifactResources?: (oldRoot: string, newRoot: string) => void;
 }
 
 /**
@@ -1400,10 +1410,22 @@ export class SessionManager {
 	}
 
 	/**
+	 * Adopt a session file that moved because an ancestor artifact directory
+	 * was relocated. `moveTo` closes any live writer before switching paths, so
+	 * a later append cannot recreate the old tree.
+	 */
+	async rebaseMovedSessionFile(oldRoot: string, newRoot: string): Promise<void> {
+		if (!this.#sessionFile) return;
+		const rebasedFile = rebasePathWithinRoot(this.#sessionFile, oldRoot, newRoot);
+		if (rebasedFile === this.#sessionFile) return;
+		await this.moveTo(this.#cwd, path.dirname(rebasedFile));
+	}
+
+	/**
 	 * Move the session to a new working directory: relocate the session file and
 	 * artifacts on disk, update internal references, and rewrite the header cwd.
 	 */
-	async moveTo(newCwd: string, targetSessionDir?: string): Promise<void> {
+	async moveTo(newCwd: string, targetSessionDir?: string, options?: SessionMoveOptions): Promise<void> {
 		const resolvedCwd = path.resolve(newCwd);
 		const resolvedTargetDir = targetSessionDir ? path.resolve(targetSessionDir) : undefined;
 		if (
@@ -1448,6 +1470,7 @@ export class SessionManager {
 
 				let sessionMoved = false;
 				let artifactsMoved = false;
+				let artifactWritersRebased = false;
 
 				try {
 					if (sessionFileExisted && sessionPathChanged) {
@@ -1456,25 +1479,42 @@ export class SessionManager {
 					}
 
 					if (artifactPathChanged) {
+						let artifactStat: fs.Stats | undefined;
 						try {
-							const artifactStat = await fs.promises.stat(oldArtifactsDir);
-							if (artifactStat.isDirectory()) {
-								await fs.promises.rename(oldArtifactsDir, newArtifactsDir);
-								artifactsMoved = true;
-							}
+							artifactStat = fs.statSync(oldArtifactsDir);
 						} catch (err) {
 							if (!isEnoent(err)) throw err;
+						}
+						options?.rebaseLiveArtifactResources?.(oldArtifactsDir, newArtifactsDir);
+						this.#artifactManager?.rebaseDirectory(oldArtifactsDir, newArtifactsDir);
+						this.#adoptedArtifactManager?.rebaseDirectory(oldArtifactsDir, newArtifactsDir);
+						artifactWritersRebased = true;
+						if (artifactStat?.isDirectory()) {
+							// Keep the destination switch and directory rename in one
+							// synchronous turn so a running sink cannot open either
+							// stale root in between them.
+							fs.renameSync(oldArtifactsDir, newArtifactsDir);
+							artifactsMoved = true;
 						}
 					}
 				} catch (err) {
 					if (artifactsMoved) {
 						try {
-							await fs.promises.rename(newArtifactsDir, oldArtifactsDir);
+							fs.renameSync(newArtifactsDir, oldArtifactsDir);
+							options?.rebaseLiveArtifactResources?.(newArtifactsDir, oldArtifactsDir);
+							this.#artifactManager?.rebaseDirectory(newArtifactsDir, oldArtifactsDir);
+							this.#adoptedArtifactManager?.rebaseDirectory(newArtifactsDir, oldArtifactsDir);
+							artifactWritersRebased = false;
 						} catch (rollbackErr) {
 							throw new Error(
 								`Failed to move artifacts and rollback: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`,
 							);
 						}
+					} else if (artifactWritersRebased) {
+						options?.rebaseLiveArtifactResources?.(newArtifactsDir, oldArtifactsDir);
+						this.#artifactManager?.rebaseDirectory(newArtifactsDir, oldArtifactsDir);
+						this.#adoptedArtifactManager?.rebaseDirectory(newArtifactsDir, oldArtifactsDir);
+						artifactWritersRebased = false;
 					}
 
 					if (sessionMoved) {
@@ -1496,9 +1536,9 @@ export class SessionManager {
 					];
 				}
 
+				rebaseResourcePathMetadata(this.#entries, oldArtifactsDir, newArtifactsDir);
 				this.#sessionFile = newSessionFile;
-				this.#artifactManager = null;
-				this.#artifactManagerSessionFile = null;
+				if (this.#artifactManager) this.#artifactManagerSessionFile = newSessionFile;
 				// Path is repointed; hot-path appends may use `#sessionFile` again.
 				this.#sessionFileRelocating = null;
 			}

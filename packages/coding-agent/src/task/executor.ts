@@ -1023,6 +1023,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	const progress: AgentProgress = {
 		index,
 		id,
+		sessionFile: args.sessionFile,
 		agent: agent.name,
 		agentSource: agent.source,
 		status: "running",
@@ -2189,9 +2190,10 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	let outputMeta: { lineCount: number; charCount: number } | undefined;
 	let outputPath: string | undefined;
 	if (args.artifactsDir) {
-		outputPath = path.join(args.artifactsDir, `${id}.md`);
+		const candidateOutputPath = path.join(args.artifactsDir, `${id}.md`);
 		try {
-			await Bun.write(outputPath, rawOutput);
+			await Bun.write(candidateOutputPath, rawOutput);
+			outputPath = candidateOutputPath;
 			outputMeta = {
 				lineCount: rawOutput.split("\n").length,
 				charCount: rawOutput.length,
@@ -3165,7 +3167,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				// (createAgentSession → agent.replaceMessages). Isolated runs are not
 				// resumable (worktree is merged + cleaned) and never get a reviver.
 				reviveSession = async expectedAgentRef => {
-					const reopened = await SessionManager.open(sessionFile, undefined, undefined, {
+					const revivedSessionFile = expectedAgentRef.sessionFile ?? sessionFile;
+					const reopened = await SessionManager.open(revivedSessionFile, undefined, undefined, {
 						suppressBreadcrumb: true,
 					});
 					if (options.parentArtifactManager) {

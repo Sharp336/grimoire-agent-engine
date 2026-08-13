@@ -129,6 +129,15 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		expect(session?.getActiveToolNames()).toContain("read");
 	});
 
+	it("leaves a fresh unwritten plan target unlinked", async () => {
+		const created = createHarness(Settings.isolated({ "plan.defaultOnStartup": true, "compaction.enabled": false }));
+		const status = vi.spyOn(created, "showStatus");
+
+		await created.init({ suppressWelcomeIntro: true });
+
+		expect(status).toHaveBeenCalledWith("Plan mode enabled. Plan file: local://PLAN.md");
+	});
+
 	it("activates write when entering plan mode even if it was hidden by discoveryMode (issue #3165)", async () => {
 		// `plan-mode-active.md` instructs the agent to draft the plan file with
 		// `write` and refine it with `edit`. Under `tools.discoveryMode === "all"`
