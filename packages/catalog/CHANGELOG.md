@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `google-antigravity` bundled model spec for Gemini 3.7 Flash (`gemini-3.7-flash`).
+
 ## [17.3.2] - 2026-08-13
 
 ### Added
