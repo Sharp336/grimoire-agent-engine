@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Antigravity discovery and inference now use current official desktop Hub 2.8.0, allowing server-enabled models without CLI impersonation.
+
 ## [17.3.1] - 2026-08-13
 
 ### Added

@@ -21,13 +21,14 @@ export const ANTIGRAVITY_SYSTEM_INSTRUCTION =
 	"**Absolute paths only**" +
 	"**Proactiveness**";
 /**
- * Antigravity / Cloud Code Assist user agent. Lives in its own file so discovery
- * and usage code can read it without pulling the heavy google-gemini-cli provider
- * (and its @google/genai → google-auth-library dependency chain) into the startup
- * parse graph.
+ * Antigravity / Cloud Code Assist user agent for current official desktop Hub 2.8.0.
+ * Lives in its own file so discovery and usage code can read it without pulling
+ * the heavy google-gemini-cli provider (and its @google/genai → google-auth-library
+ * dependency chain) into the startup parse graph.
  */
+export const DEFAULT_ANTIGRAVITY_VERSION = "2.8.0";
+
 export let getAntigravityUserAgent = () => {
-	const DEFAULT_ANTIGRAVITY_VERSION = "2.1.4";
 	const version = process.env.PI_AI_ANTIGRAVITY_VERSION || DEFAULT_ANTIGRAVITY_VERSION;
 	// Map Node.js platform/arch to Antigravity's expected format.
 	// Verified against Antigravity source: _qn() and wqn() in main.js.

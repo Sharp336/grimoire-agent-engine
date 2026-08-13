@@ -25,6 +25,7 @@ import {
 	resolveBareVariantAlias,
 	resolveVariantAlias,
 } from "@oh-my-pi/pi-catalog/variant-collapse";
+import { DEFAULT_ANTIGRAVITY_VERSION } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 
 function memberSpec(
 	id: string,
@@ -907,9 +908,11 @@ describe("antigravity discovery collapsing", () => {
 
 	it("uses the primary daily endpoint by default", async () => {
 		const requestedUrls: string[] = [];
+		const requestedUserAgents: Array<string | null> = [];
 		const defaultFetcher = Object.assign(
-			(input: string | URL | Request, _init?: RequestInit) => {
+			(input: string | URL | Request, init?: RequestInit) => {
 				requestedUrls.push(String(input));
+				requestedUserAgents.push(new Headers(init?.headers).get("User-Agent"));
 				return Promise.resolve(new Response(JSON.stringify(payload), { status: 200 }));
 			},
 			{ preconnect: fetch.preconnect },
@@ -921,6 +924,11 @@ describe("antigravity discovery collapsing", () => {
 		});
 
 		expect(requestedUrls[0]).toContain(ANTIGRAVITY_PRIMARY_ENDPOINT);
+		expect(DEFAULT_ANTIGRAVITY_VERSION).toBe("2.8.0");
+		const os = process.platform === "win32" ? "windows" : process.platform;
+		const arch = process.arch === "x64" ? "amd64" : process.arch === "ia32" ? "386" : process.arch;
+		const version = process.env.PI_AI_ANTIGRAVITY_VERSION || DEFAULT_ANTIGRAVITY_VERSION;
+		expect(requestedUserAgents[0]).toBe(`antigravity/hub/${version} ${os}/${arch}`);
 		expect(models?.[0]?.baseUrl).toBe(ANTIGRAVITY_PRIMARY_ENDPOINT);
 	});
 });

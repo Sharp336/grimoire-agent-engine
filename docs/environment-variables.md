@@ -246,7 +246,7 @@ OAuth host chain: `KIMI_CODE_OAUTH_HOST` → `KIMI_OAUTH_HOST` → `https://auth
 | Variable                    | Default / behavior                                              |
 | --------------------------- | --------------------------------------------------------------- |
 | `PI_AI_GEMINI_CLI_VERSION`  | Overrides Gemini CLI user-agent version tag (`0.46.0` if unset) |
-| `PI_AI_ANTIGRAVITY_VERSION` | Overrides Antigravity hub user-agent version (`2.1.4` if unset) |
+| `PI_AI_ANTIGRAVITY_VERSION` | Overrides Antigravity hub user-agent version (`2.8.0` if unset) |
 
 ### GitLab Duo
 
