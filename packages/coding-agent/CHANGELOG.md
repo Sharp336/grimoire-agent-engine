@@ -173,6 +173,7 @@
 - A run is now attributed to the model that actually produced its output, not whichever model the session was last pointed at. A retry fallback that errored on its first request — an exhausted quota, a hard provider error — was credited with the whole run in the Agent Hub row and the settled task result, even when the previous model did every turn. Sessions expose the serving model directly, holding the last model that produced output while a candidate is armed but unproven, and transcript-derived history stops at the newest turn that produced output.
 ### Changed
 
+- The default interactive status line now uses three deterministic rows: provider/model/effort + OMP identity, provider- and model-scoped quota usage + active task time + context tokens, and the current directory. Provider-native quota windows are preserved, and narrow terminals drop secondary metrics before these required fields.
 - The `time_spent` status-line segment now shows elapsed wall-clock for the current top-level agent turn instead of cumulative session active time. The timer hides when the turn ends, so idle time between prompts is not displayed as active work.
 
 ### Fixed

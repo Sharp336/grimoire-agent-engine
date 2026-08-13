@@ -21,11 +21,15 @@ function withIcon(icon: string, text: string): string {
 	return icon ? `${icon} ${text}` : text;
 }
 
-/** Left-truncate a path/label to `maxLen`, prefixing an ellipsis when clipped. */
+/** Middle-truncate a path/label to `maxLen`, preserving both root context and the leaf. */
 function clampPathLength(pwd: string, maxLen: number): string {
 	if (pwd.length <= maxLen) return pwd;
-	const ellipsis = "…";
-	return `${ellipsis}${pwd.slice(-Math.max(0, maxLen - ellipsis.length))}`;
+	if (maxLen <= 0) return "";
+	if (maxLen === 1) return "…";
+	const remaining = maxLen - 1;
+	const headLength = Math.max(1, Math.floor(remaining * 0.4));
+	const tailLength = Math.max(0, remaining - headLength);
+	return `${pwd.slice(0, headLength)}…${pwd.slice(-tailLength)}`;
 }
 
 /**
@@ -287,7 +291,7 @@ const piSegment: StatusLineSegment = {
 			const icon = theme.icon.ghost ? `${theme.icon.ghost} ` : "";
 			return { content: theme.fg("warning", `${icon}${ctx.focusedAgentId} `), visible: true };
 		}
-		const content = theme.icon.pi ? `${theme.icon.pi} ` : "";
+		const content = withIcon(theme.icon.pi, "OMP");
 		return { content: theme.fg("accent", content), visible: true };
 	},
 };
@@ -832,15 +836,45 @@ function formatUsageReset(value: number, unit: "m" | "h"): string {
 	return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
 }
 
+function formatUsageResetMs(resetMs: number): string {
+	const minutes = Math.max(0, Math.round(resetMs / 60_000));
+	if (minutes < 60) return `${minutes}m`;
+	const hours = Math.floor(minutes / 60);
+	if (hours < 24) {
+		const mins = minutes % 60;
+		return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
+	}
+	const days = Math.floor(hours / 24);
+	const extraHours = hours % 24;
+	return extraHours > 0 ? `${days}d ${extraHours}h` : `${days}d`;
+}
+
 const usageSegment: StatusLineSegment = {
 	id: "usage",
 	render(ctx) {
 		const u = ctx.usage;
-		if (!u || (!u.fiveHour && !u.sevenDay && !u.monthly)) {
+		if (!u || ((!u.windows || u.windows.length === 0) && !u.fiveHour && !u.sevenDay && !u.monthly)) {
 			return { content: "", visible: false };
 		}
 		const compact = typeof ctx.width === "number" && ctx.width > 0 && ctx.width <= 160;
 		const parts: string[] = [];
+		if (u.windows && u.windows.length > 0) {
+			if (u.tier && !compact) {
+				const tier = truncateToWidth(sanitizeStatusText(u.tier), TRUNCATE_LENGTHS.SHORT);
+				if (tier) parts.push(theme.fg("accent", tier));
+			}
+			for (const window of u.windows.slice(0, 2)) {
+				const label = truncateToWidth(sanitizeStatusText(window.label), compact ? 16 : TRUNCATE_LENGTHS.SHORT);
+				const pctText = theme.fg(pickUsageColor(window.percent), `${Math.round(window.percent)}%`);
+				const reset =
+					!compact && window.resetMs !== undefined
+						? theme.fg("muted", ` (${formatUsageResetMs(window.resetMs)})`)
+						: "";
+				parts.push(`${label} ${pctText}${reset}`);
+			}
+			const joined = parts.join(theme.sep.dot);
+			return { content: compact ? joined : withIcon(theme.icon.time, joined), visible: true };
+		}
 		if (u.tier && !compact) {
 			const tier = truncateToWidth(sanitizeStatusText(u.tier), TRUNCATE_LENGTHS.SHORT);
 			if (tier) parts.push(theme.fg("accent", tier));

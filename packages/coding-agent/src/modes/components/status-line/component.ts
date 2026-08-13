@@ -1,6 +1,12 @@
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
+import {
+	type AssistantMessage,
+	antigravityRankingStrategy,
+	claudeRankingStrategy,
+	type UsageLimit,
+	type UsageReport,
+} from "@oh-my-pi/pi-ai";
 import { type Component, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 import { getProjectDir } from "@oh-my-pi/pi-utils";
 import { settings } from "../../../config/settings";
@@ -452,6 +458,7 @@ export class StatusLineComponent implements Component {
 	// Provider usage caching (5-min TTL, OAuth/sub only)
 	#cachedUsage: {
 		tier?: string;
+		windows?: Array<{ label: string; percent: number; resetMs?: number }>;
 		fiveHour?: { percent: number; resetMinutes?: number };
 		sevenDay?: { percent: number; resetHours?: number };
 		monthly?: { percent: number; resetHours?: number };
@@ -1350,7 +1357,12 @@ export class StatusLineComponent implements Component {
 			activeProvider && session.modelRegistry?.authStorage
 				? session.modelRegistry.authStorage.getOAuthAccountIdentity(activeProvider, session.sessionId)
 				: undefined;
-		const normalized = this.#normalizeUsageReports(reports, activeProvider, activeIdentity);
+		const normalized = this.#normalizeUsageReports(
+			reports,
+			activeProvider,
+			this.session.state.model?.id,
+			activeIdentity,
+		);
 		const resetSnapshot =
 			activeProvider === "openai-codex" ? this.#normalizeCodexResetSnapshot(reports, activeIdentity) : null;
 		const usageChanged = this.#cachedUsage !== normalized;
@@ -1462,9 +1474,11 @@ export class StatusLineComponent implements Component {
 	#normalizeUsageReports(
 		reports: unknown,
 		activeProvider?: string,
+		activeModelId?: string,
 		activeIdentity?: OAuthAccountIdentity,
 	): {
 		tier?: string;
+		windows?: Array<{ label: string; percent: number; resetMs?: number }>;
 		fiveHour?: { percent: number; resetMinutes?: number };
 		sevenDay?: { percent: number; resetHours?: number };
 		monthly?: { percent: number; resetHours?: number };
@@ -1477,6 +1491,7 @@ export class StatusLineComponent implements Component {
 		let sevenDayTier: string | undefined;
 		let monthlyTier: string | undefined;
 		let monthlyPriority = Number.POSITIVE_INFINITY;
+		const windows = new Map<string, { label: string; percent: number; resetMs?: number; tier?: string }>();
 		const now = Date.now();
 		const cursorMonthlyPriority = (limitId: unknown): number => {
 			// When /auth/usage and /api/usage-summary are merged, prefer the personal
@@ -1493,26 +1508,34 @@ export class StatusLineComponent implements Component {
 			const limits = (report as { limits?: unknown }).limits;
 			if (!Array.isArray(limits)) continue;
 			const usageReport = report as UsageReport;
-			for (const limit of limits) {
+			let relevantLimits = limits as UsageLimit[];
+			const rankingContext = activeModelId ? { modelId: activeModelId } : undefined;
+			if (provider === "google-antigravity") {
+				relevantLimits = antigravityRankingStrategy.scopeLimits?.(usageReport, rankingContext) ?? relevantLimits;
+			} else if (provider === "anthropic") {
+				const { primary, secondary } = claudeRankingStrategy.findWindowLimits(usageReport, rankingContext);
+				relevantLimits = [primary, secondary].filter((limit): limit is UsageLimit => limit !== undefined);
+			}
+			for (const limit of relevantLimits) {
 				if (!limit || typeof limit !== "object") continue;
 				if (activeIdentity && !limitMatchesActiveAccount(usageReport, limit as UsageLimit, activeIdentity)) {
 					continue;
 				}
-				const l = limit as {
-					id?: string;
-					scope?: { windowId?: string; tier?: string };
-					window?: { resetsAt?: number; durationMs?: number };
-					amount?: { usedFraction?: number };
-				};
-				const fraction = l.amount?.usedFraction;
-				if (typeof fraction !== "number") continue;
+				const l = limit as UsageLimit;
+				const amount = l.amount;
+				const fraction =
+					amount?.usedFraction ??
+					(amount?.used !== undefined && amount.limit !== undefined && amount.limit > 0
+						? amount.used / amount.limit
+						: amount?.unit === "percent" && amount.used !== undefined
+							? amount.used / 100
+							: amount?.remainingFraction !== undefined
+								? Math.max(0, 1 - amount.remainingFraction)
+								: undefined);
+				if (typeof fraction !== "number" || !Number.isFinite(fraction)) continue;
 				const windowId = l.scope?.windowId;
 				const tier = l.scope?.tier;
 				const resetsAt = l.window?.resetsAt;
-				// Canonical window ids win. Fall back to the reported span (same
-				// tolerance as the 5h priority-boost check) so providers that emit
-				// non-canonical ids, and cache rows written before a provider was
-				// canonicalized, still map onto the two subscription windows.
 				const durationMs = l.window?.durationMs;
 				const windowClass =
 					windowId === "5h" || windowId === "7d"
@@ -1522,6 +1545,18 @@ export class StatusLineComponent implements Component {
 							: durationMs !== undefined && Math.abs(durationMs - 7 * 86_400_000) <= 60_000
 								? "7d"
 								: undefined;
+				const windowKey = windowId === "5h" || windowId === "7d" ? windowId : l.id;
+				const genericWindowLabel = l.window?.label && l.window.label !== "Default" ? l.window.label : l.label;
+				const label = windowId === "5h" || windowId === "7d" ? windowId : genericWindowLabel;
+				const existingWindow = windows.get(windowKey);
+				if (!existingWindow || (existingWindow.tier !== undefined && !tier)) {
+					windows.set(windowKey, {
+						label,
+						percent: fraction * 100,
+						resetMs: typeof resetsAt === "number" ? Math.max(0, resetsAt - now) : undefined,
+						tier: tier || undefined,
+					});
+				}
 				// Accept tiered limits, but prefer untiered (backward compat with Anthropic).
 				// An untiered limit always replaces a tiered one; among same-tieredness, first wins.
 				if (windowClass === "5h" && (!fiveHour || (fiveHourTier !== undefined && !tier))) {
@@ -1568,10 +1603,15 @@ export class StatusLineComponent implements Component {
 				}
 			}
 		}
-		if (!fiveHour && !sevenDay && !monthly) return null;
+		if (windows.size === 0 && !fiveHour && !sevenDay && !monthly) return null;
 		// Single compact label; prefer the five-hour tier if displayed windows ever disagree.
 		const effectiveTier = fiveHourTier ?? sevenDayTier ?? monthlyTier;
-		return { tier: effectiveTier, fiveHour, sevenDay, monthly };
+		const usageWindows = Array.from(windows.values(), value => ({
+			label: value.label,
+			percent: value.percent,
+			resetMs: value.resetMs,
+		}));
+		return { tier: effectiveTier, windows: usageWindows, fiveHour, sevenDay, monthly };
 	}
 
 	/**
@@ -2087,6 +2127,65 @@ export class StatusLineComponent implements Component {
 			const contentWidth = row.reduce((sum, item) => sum + visibleWidth(item.content), 0);
 			return contentWidth + Math.max(0, row.length - 1) * (sepWidth + 2) + 2 + capWidth;
 		};
+
+		if ((effectiveSettings.preset ?? "default") === "default") {
+			const itemFor = (id: StatusLineSegmentId): WrappedStatusItem | undefined => items.find(item => item.id === id);
+			const row1 = [itemFor("pi"), itemFor("model")].filter((item): item is WrappedStatusItem => item !== undefined);
+			const row2 = [itemFor("usage"), itemFor("time_spent"), itemFor("context_pct")].filter(
+				(item): item is WrappedStatusItem => item !== undefined,
+			);
+
+			const appendIfFits = (row: WrappedStatusItem[], item: WrappedStatusItem | undefined): void => {
+				if (!item || row.includes(item)) return;
+				if (rowWidth([...row, item]) <= width) row.push(item);
+			};
+			for (const id of ["mode", "collab", "git", "pr", "subagents"] as const) appendIfFits(row1, itemFor(id));
+			for (const item of items.filter(item => item.id === undefined)) appendIfFits(row1, item);
+			for (const id of [
+				"cache_hit",
+				"cache_read",
+				"token_total",
+				"token_rate",
+				"cost",
+				"time",
+				"session_name",
+			] as const) {
+				appendIfFits(row2, itemFor(id));
+			}
+
+			const constrain = (row: WrappedStatusItem[], flexibleId: StatusLineSegmentId): void => {
+				if (rowWidth(row) <= width) return;
+				const index = row.findIndex(item => item.id === flexibleId);
+				if (index < 0) return;
+				const overflow = rowWidth(row) - width;
+				const currentWidth = visibleWidth(row[index]!.content);
+				row[index] = {
+					...row[index],
+					content: truncateToWidth(row[index]!.content, Math.max(1, currentWidth - overflow)),
+				};
+			};
+			constrain(row1, "model");
+			constrain(row2, "usage");
+
+			const pathRendered = renderSegment("path", {
+				...ctx,
+				options: {
+					...ctx.options,
+					path: {
+						...ctx.options.path,
+						abbreviate: true,
+						stripWorkPrefix: false,
+						maxLength: Math.max(4, maxItemWidth - 2),
+					},
+				},
+			});
+			const row3: WrappedStatusItem[] =
+				pathRendered.visible && pathRendered.content ? [{ id: "path", content: pathRendered.content }] : [];
+			constrain(row3, "path");
+
+			const rows = [row1, row2, row3].filter(row => row.length > 0);
+			return rows.map(row => this.#buildWrappedRow(row, width));
+		}
 
 		const pack = (source: readonly WrappedStatusItem[]): WrappedStatusItem[][] => {
 			const rows: WrappedStatusItem[][] = [];

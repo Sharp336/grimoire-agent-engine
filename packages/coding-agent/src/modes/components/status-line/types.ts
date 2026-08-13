@@ -119,6 +119,7 @@ export interface SegmentContext {
 	worktree: { projectName: string; worktreeName: string } | null;
 	usage: {
 		tier?: string;
+		windows?: Array<{ label: string; percent: number; resetMs?: number }>;
 		fiveHour?: { percent: number; resetMinutes?: number };
 		sevenDay?: { percent: number; resetHours?: number };
 		monthly?: { percent: number; resetHours?: number };

@@ -245,6 +245,20 @@ describe("path segment truncation at varying maxLength", () => {
 		expect(rendered.visible).toBe(true);
 		expect(visibleWidth(rendered.content)).toBeGreaterThan(0);
 	});
+
+	it("preserves both path root context and the leaf when truncated", () => {
+		const leaf = path.join(tmpDir, "leaf-directory");
+		fs.mkdirSync(leaf);
+		setProjectDir(leaf);
+		try {
+			const rendered = stripAnsi(renderSegment("path", createCtx({ pathMaxLength: 24 })).content);
+			expect(rendered).toContain("/tmp/");
+			expect(rendered).toContain("leaf-directory");
+			expect(rendered).toContain("…");
+		} finally {
+			setProjectDir(tmpDir);
+		}
+	});
 });
 
 describe("overflow: path shrinks before git is dropped", () => {
@@ -415,6 +429,27 @@ describe("overflow: path shrinks before git is dropped", () => {
 			expect(shrunkPathVW).toBeLessThan(pathVW);
 		} finally {
 			setProjectDir(tmpDir);
+		}
+	});
+});
+
+describe("default status line three-row contract", () => {
+	it("keeps identity, context tokens, and cwd on separate rows at phone width", () => {
+		const prior = getProjectDir();
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "omp-three-row-dir-"));
+		setProjectDir(cwd);
+		try {
+			const component = new StatusLineComponent(createStatusLineSession("three row", "Claude Opus 5"));
+			component.updateSettings({ preset: "default", transparent: true, sessionAccent: false });
+			const rows = component.getTopBorderRows(72).map(row => stripAnsi(row.content));
+
+			expect(rows).toHaveLength(3);
+			expect(rows[0]).toContain("OMP");
+			expect(rows[0]).toContain("Opus 5");
+			expect(rows[1]).toContain("0/128K");
+			expect(rows[2]).toContain("omp-three-row-dir-");
+		} finally {
+			setProjectDir(prior);
 		}
 	});
 });
