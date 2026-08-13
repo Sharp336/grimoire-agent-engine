@@ -7,7 +7,7 @@
  */
 
 import { basename, resolve } from "node:path";
-import type { Agent } from "@ompd/core";
+import type { Agent, HostSpec } from "@ompd/core";
 import type { Command } from "../args.ts";
 import { api, type CliContext } from "../client.ts";
 import { age, table } from "../format.ts";
@@ -50,9 +50,12 @@ export async function newCommand(
   // Resolved here, against the shell's cwd. A relative path means nothing to a
   // daemon that may have been started from anywhere, or by launchd from `/`.
   const cwd = resolve(ctx.cwd, cmd.cwd);
+  const host: HostSpec | undefined = cmd.container
+    ? { kind: "container", image: cmd.image, mounts: cmd.mounts }
+    : undefined;
   const response = await api<CreateAgentResponse>(ctx, "/v1/agents", {
     method: "POST",
-    body: { name: cmd.name ?? basename(cwd), cwd },
+    body: { name: cmd.name ?? basename(cwd), cwd, host },
   });
 
   const agent = response.agent;
@@ -64,6 +67,14 @@ export async function newCommand(
   ctx.out(`${agent.id}  ${agent.state}  ${agent.name}`);
   ctx.out(`  cwd     ${agent.cwd}`);
   ctx.out(`  host    ${agent.host.kind} ${agent.host.id}`);
+  // The effective mount set, not merely what was typed: the daemon fills in
+  // the default mode, and this is the one place an operator can see what a
+  // sandbox they just created can actually reach.
+  const mounts = agent.host.spec.mounts ?? [];
+  if (mounts.length > 0) {
+    ctx.out("  mounts:");
+    for (const mount of mounts) ctx.out(`    ${mount.hostPath} (${mount.mode ?? "ro"})`);
+  }
   return 0;
 }
 

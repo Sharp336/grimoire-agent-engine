@@ -391,6 +391,9 @@ describe("argv parsing", () => {
       kind: "new",
       cwd: "/tmp/repo",
       name: undefined,
+      container: false,
+      image: undefined,
+      mounts: undefined,
     });
     expect(parseCommand(["new", "/tmp/repo", "--name", "build"])).toMatchObject({ name: "build" });
     expect(parseCommand(["stop-agent", "agt_1"])).toEqual({ kind: "stop-agent", agentId: "agt_1" });
@@ -408,6 +411,51 @@ describe("argv parsing", () => {
     expect(parseCommand(["prompt", "agt_1", "ship it"])).toMatchObject({ text: "ship it" });
     expect(() => parseCommand(["prompt", "agt_1"])).toThrow(/needs text/);
     expect(() => parseCommand(["prompt"])).toThrow(/missing <agentId>/);
+  });
+
+  test("new --container opts into a container host, --image and --mounts along with it", () => {
+    expect(parseCommand(["new", "/tmp/repo", "--container"])).toEqual({
+      kind: "new",
+      cwd: "/tmp/repo",
+      name: undefined,
+      container: true,
+      image: undefined,
+      mounts: undefined,
+    });
+    expect(
+      parseCommand([
+        "new",
+        "/tmp/repo",
+        "--container",
+        "--image",
+        "ghcr.io/example/omp:1",
+        "--mounts",
+        "/data,/tools:rw",
+      ]),
+    ).toEqual({
+      kind: "new",
+      cwd: "/tmp/repo",
+      name: undefined,
+      container: true,
+      image: "ghcr.io/example/omp:1",
+      mounts: [{ hostPath: "/data" }, { hostPath: "/tools", mode: "rw" }],
+    });
+  });
+
+  test("--image and --mounts require --container: naming a mount on a local agent is a usage error, not a silent no-op", () => {
+    expect(() => parseCommand(["new", "/tmp/repo", "--image", "x"])).toThrow(/--image needs --container/);
+    expect(() => parseCommand(["new", "/tmp/repo", "--mounts", "/data"])).toThrow(
+      /--mounts needs --container/,
+    );
+  });
+
+  test("parseMounts rejects an unknown mode instead of guessing", () => {
+    expect(() => parseCommand(["new", "/tmp/repo", "--container", "--mounts", "/data:rx"])).toThrow(
+      /unknown mode/,
+    );
+    expect(() => parseCommand(["new", "/tmp/repo", "--container", "--mounts", ""])).toThrow(
+      /--mounts was empty/,
+    );
   });
 
   test("rotate defaults to the caller's own credential", () => {
@@ -860,6 +908,65 @@ describe("reads and writes over the API", () => {
     // A daemon started by launchd runs from `/`; a relative path would land
     // somewhere nobody meant.
     expect(h.calls[0]?.body).toEqual({ name: "sub", cwd: join(h.home, "sub") });
+  });
+
+  test("new --container sends the host spec, and prints the effective mounts back", async () => {
+    const h = harness({
+      routes: {
+        "POST /v1/agents": {
+          status: 201,
+          body: {
+            agent: {
+              id: "agt_3",
+              name: "sandboxed",
+              state: "provisioning",
+              cwd: "/tmp/repo",
+              createdAt: "",
+              lastActiveAt: "",
+              host: {
+                kind: "container",
+                id: "cnt_1",
+                spec: {
+                  kind: "container",
+                  image: "ghcr.io/example/omp:1",
+                  // The daemon fills in the default mode before handing this back.
+                  mounts: [{ hostPath: "/data", mode: "ro" }, { hostPath: "/tools", mode: "rw" }],
+                },
+              },
+              labels: {},
+            },
+          },
+        },
+      },
+    });
+
+    const code = await run(
+      [
+        "new",
+        "/tmp/repo",
+        "--name",
+        "sandboxed",
+        "--container",
+        "--image",
+        "ghcr.io/example/omp:1",
+        "--mounts",
+        "/data,/tools:rw",
+      ],
+      h.ctx,
+    );
+    expect(code).toBe(0);
+    expect(h.calls[0]?.body).toEqual({
+      name: "sandboxed",
+      cwd: "/tmp/repo",
+      host: {
+        kind: "container",
+        image: "ghcr.io/example/omp:1",
+        mounts: [{ hostPath: "/data" }, { hostPath: "/tools", mode: "rw" }],
+      },
+    });
+    expect(h.stdout()).toContain("host    container cnt_1");
+    expect(h.stdout()).toContain("/data (ro)");
+    expect(h.stdout()).toContain("/tools (rw)");
   });
 
   test("status without a daemon exits non-zero and says how to start one", async () => {

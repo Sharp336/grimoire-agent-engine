@@ -8,7 +8,7 @@
  * it configures.
  */
 
-import { SCOPE_APPROVE, SCOPE_MANAGE, SCOPE_PROMPT, SCOPE_READ } from "@ompd/core";
+import { SCOPE_APPROVE, SCOPE_MANAGE, SCOPE_PROMPT, SCOPE_READ, type HostMount } from "@ompd/core";
 
 /** Raised for anything the user could fix by retyping the line. */
 export class UsageError extends Error {
@@ -26,6 +26,7 @@ const BOOLEAN_FLAGS: Record<string, true> = {
   help: true,
   version: true,
   "allow-source-path": true,
+  container: true,
 };
 
 export type Command =
@@ -39,7 +40,14 @@ export type Command =
   | { kind: "revoke"; deviceId: string }
   | { kind: "rotate"; deviceId?: string }
   | { kind: "agents" }
-  | { kind: "new"; cwd: string; name?: string }
+  | {
+      kind: "new";
+      cwd: string;
+      name?: string;
+      container: boolean;
+      image?: string;
+      mounts?: HostMount[];
+    }
   | { kind: "stop-agent"; agentId: string }
   | { kind: "prompt"; agentId: string; text: string }
   | { kind: "routines" }
@@ -79,7 +87,8 @@ devices
 
 agents
   agents                  list agents
-  new <cwd> [--name N]    create an agent
+  new <cwd> [--name N] [--container [--image I] [--mounts P[:ro|rw],...]]
+                          create an agent; --mounts only with --container
   stop-agent <id>         stop an agent
   prompt <id> <text>      send a prompt and wait for the turn to settle
 
@@ -174,6 +183,29 @@ export function parseScopes(raw: string): string[] {
   return [...new Set(parts)];
 }
 
+/**
+ * `/data:ro,/tools:rw` to a validated mount list. A bare path with no suffix
+ * defaults to read-only downstream; the mode is only ever written here when
+ * the operator actually typed one, so "default" stays one decision in one
+ * place rather than two that could drift apart.
+ */
+export function parseMounts(raw: string): HostMount[] {
+  const parts = raw
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+  if (parts.length === 0) throw new UsageError("--mounts was empty");
+
+  return parts.map((part) => {
+    const match = /^(.+):(ro|rw)$/.exec(part);
+    if (match !== null) return { hostPath: match[1] as string, mode: match[2] as "ro" | "rw" };
+    if (part.includes(":")) {
+      throw new UsageError(`--mounts entry ${JSON.stringify(part)} has an unknown mode; use :ro or :rw`);
+    }
+    return { hostPath: part };
+  });
+}
+
 function requirePositional(positional: string[], index: number, label: string): string {
   const value = positional[index];
   if (value === undefined) throw new UsageError(`missing <${label}>`);
@@ -262,13 +294,22 @@ export function parseCommand(argv: string[]): Command {
       rejectExtra(rest, 0, "agents");
       return { kind: "agents" };
 
-    case "new":
+    case "new": {
       rejectExtra(rest, 1, "new");
+      const container = flags.get("container") === true;
+      const image = stringFlag(flags, "image");
+      const mountsRaw = stringFlag(flags, "mounts");
+      if (!container && image !== undefined) throw new UsageError("--image needs --container");
+      if (!container && mountsRaw !== undefined) throw new UsageError("--mounts needs --container");
       return {
         kind: "new",
         cwd: requirePositional(rest, 0, "cwd"),
         name: stringFlag(flags, "name"),
+        container,
+        image,
+        mounts: mountsRaw === undefined ? undefined : parseMounts(mountsRaw),
       };
+    }
 
     case "stop-agent":
       rejectExtra(rest, 1, "stop-agent");

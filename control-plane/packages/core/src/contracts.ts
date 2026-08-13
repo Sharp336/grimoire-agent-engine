@@ -52,6 +52,24 @@ export interface HostSpec {
   ref?: string;
   /** JIT hosts self-destruct after this long idle. Omit for no expiry. */
   ttlSeconds?: number;
+  /**
+   * Extra host directories a container host can see, beyond the workspace.
+   * Each lands at the identical absolute path inside, the same property that
+   * makes the workspace mount work: a path named in a transcript means the
+   * same thing on both sides of the boundary.
+   */
+  mounts?: HostMount[];
+}
+
+export interface HostMount {
+  /** Absolute host path. Relative paths are refused: there is no cwd to resolve them against on the far side. */
+  hostPath: string;
+  /**
+   * "ro" is the default. A folder the agent should merely see does not need
+   * write access, and a writable mount is a deliberate act an operator opts
+   * into per path rather than something that falls out of naming a folder.
+   */
+  mode?: "ro" | "rw";
 }
 
 export interface HostRef {

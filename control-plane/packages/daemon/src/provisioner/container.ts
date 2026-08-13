@@ -3,8 +3,10 @@
  *
  * A detached container is started from a published image with the workspace
  * mounted at the same absolute path it has on the host, so a cwd the daemon
- * hands to `session/new` means the same thing on both sides. The ACP transport
- * is `<runtime> exec -i <id> omp acp`: a duplex byte stream, exactly like the
+ * hands to `session/new` means the same thing on both sides. An operator may
+ * name further host directories in `spec.mounts`; each lands at that same
+ * identical absolute path inside, for the same reason. The ACP transport is
+ * `<runtime> exec -i <id> omp acp`: a duplex byte stream, exactly like the
  * local pipe, which is why the supervisor needs to know nothing about this.
  *
  * The approval gate is preserved, not reimplemented. `spawn` delegates to
@@ -13,12 +15,22 @@
  * `--config`; the wrapper copies that file into the container, verifies it,
  * and rewrites the flag. See `gate-wrapper.ts`. ompd never passes `--config`
  * and never authors the overlay.
+ *
+ * The run command is built per runtime, not assumed docker-shaped. Apple's
+ * `container` CLI (0.4.1) has no flag for `--cap-drop`, `--security-opt`,
+ * `--read-only`, or `--pids-limit`, and exits on an unknown flag rather than
+ * ignoring it, so a docker-shaped command never provisions on it at all. See
+ * `RUNTIME_FLAG_SUPPORT` below and `docs/running.md`'s per-runtime table for
+ * what that means for confinement, which is not the same on every runtime and
+ * is never silently rounded up to "the same as docker".
  */
 
 import type { LocalHost, SpawnLocalHostOptions } from "@ompd/acp";
 import { spawnLocalHost } from "@ompd/acp";
-import type { HostKind, HostSpec } from "@ompd/core";
+import { dangerousMountReason, isInside, type HostKind, type HostMount, type HostSpec } from "@ompd/core";
 import { rmSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { execCommand } from "./exec.ts";
 import { writeGateWrapper, type GateWrapper } from "./gate-wrapper.ts";
 import {
@@ -83,6 +95,14 @@ export interface ContainerBackendOptions {
   scratchRoot?: string;
   /** Path to omp inside the image. */
   remoteOmpPath?: string;
+  /**
+   * The daemon's own state directory. Never mountable: it holds the pairing
+   * token and the audit trail an operator relies on to catch a sandbox doing
+   * something it should not, so handing it to the sandbox defeats the point
+   * of having one. Defaults to `~/.ompd`, the same default the daemon itself
+   * uses when nothing overrides it.
+   */
+  home?: string;
   run?: CommandRunner;
   spawn?: SpawnHost;
 }
@@ -111,6 +131,76 @@ function userArgs(): string[] {
   return ["--user", `${uid}:${gid}`];
 }
 
+/**
+ * Which of the four confinement flags a runtime's CLI actually accepts.
+ *
+ * Verified against real installs, not assumed: docker, podman, and orbctl all
+ * present the docker CLI's flag grammar (podman is a drop-in; OrbStack backs
+ * `docker` itself and `orbctl` talks to the same daemon), so `run` shapes the
+ * same command for all three today. Apple's `container` 0.4.1 is a different
+ * CLI -- it accepts `--user`, `--tmpfs`, `--volume`, `--network`, `--workdir`,
+ * `--detach`, and `--rm`, but exits on `--cap-drop`, `--security-opt`,
+ * `--read-only`, or `--pids-limit` as an unknown flag, so a docker-shaped
+ * command never provisions on it. This table is what stands between "provision
+ * fails on the first unknown flag" and "provision silently claims a
+ * confinement guarantee it never asked the runtime for": every new runtime
+ * added to `CONTAINER_RUNTIMES` needs an entry here before it can be trusted.
+ *
+ * The four flags this table gates are not one thing. `--cap-drop`,
+ * `--security-opt no-new-privileges`, and `--pids-limit` mitigate a
+ * shared-kernel escape: a capability, a regained privilege, or a fork bomb
+ * reaching past the container into the host's own kernel. Apple's `container`
+ * gives each container its own lightweight VM, so there is no shared kernel
+ * for any of those three to escape into in the first place -- their absence
+ * there is a different boundary, not a hole in this one. `--read-only` is not
+ * that: it is whether the image itself can be rewritten from inside, and
+ * losing it is a real loss regardless of which kernel the container has.
+ * `docs/running.md` reports it as one rather than folding it into the same
+ * "different trade" story as the other three.
+ */
+interface RuntimeFlagSupport {
+  capDrop: boolean;
+  securityOpt: boolean;
+  readOnly: boolean;
+  pidsLimit: boolean;
+}
+
+const DOCKER_SHAPED_FLAGS: RuntimeFlagSupport = {
+  capDrop: true,
+  securityOpt: true,
+  readOnly: true,
+  pidsLimit: true,
+};
+
+const APPLE_CONTAINER_FLAGS: RuntimeFlagSupport = {
+  capDrop: false,
+  securityOpt: false,
+  readOnly: false,
+  pidsLimit: false,
+};
+
+/**
+ * Refuse a mount that would hand the sandbox the credentials that make it a
+ * sandbox, rather than trusting an operator never to name one by mistake.
+ *
+ * Reuses `dangerousMountReason`, the project's one list of paths a mount must
+ * never name, and adds only what that list cannot know: the daemon's own
+ * `home`, which moves with `OMPD_HOME` and cannot be a static pattern.
+ */
+function refuseIfDangerous(hostPath: string, home: string): void {
+  if (!hostPath.startsWith("/")) {
+    throw new ProvisionError(
+      `mount path must be absolute, got ${JSON.stringify(hostPath)}`,
+      "container",
+    );
+  }
+  const reason = dangerousMountReason(hostPath) ??
+    (isInside(home, hostPath) ? `inside the daemon's own state directory ${home}` : null);
+  if (reason !== null) {
+    throw new ProvisionError(`refusing to mount ${hostPath}: ${reason}`, "container");
+  }
+}
+
 export class ContainerBackend implements ProvisionerBackend {
   readonly kind: HostKind = "container";
 
@@ -119,6 +209,7 @@ export class ContainerBackend implements ProvisionerBackend {
   #workspace: string;
   #scratchRoot: string;
   #remoteOmpPath: string;
+  #home: string;
   #run: CommandRunner;
   #spawn: SpawnHost;
   #live = new Map<string, ContainerRecord>();
@@ -129,6 +220,7 @@ export class ContainerBackend implements ProvisionerBackend {
     this.#workspace = opts.workspace ?? process.cwd();
     this.#scratchRoot = opts.scratchRoot ?? DEFAULT_SCRATCH_ROOT;
     this.#remoteOmpPath = opts.remoteOmpPath ?? "omp";
+    this.#home = opts.home ?? join(homedir(), ".ompd");
     this.#run = opts.run ?? execCommand;
     this.#spawn = opts.spawn ?? spawnLocalHost;
   }
@@ -137,6 +229,16 @@ export class ContainerBackend implements ProvisionerBackend {
     if (spec.kind !== "container") {
       throw new ProvisionError(`container backend cannot serve a ${spec.kind} host`, spec.kind);
     }
+
+    // Validated before anything is created, so a refused mount costs nothing
+    // to clean up. The reason lands on the same "host.provision" audit entry
+    // `HostProvisioner` already writes for any provision failure -- nothing
+    // new to wire, because a thrown `ProvisionError` is already audited there.
+    const mounts: HostMount[] = (spec.mounts ?? []).map((mount) => {
+      refuseIfDangerous(mount.hostPath, this.#home);
+      return { hostPath: mount.hostPath, mode: mount.mode ?? "ro" };
+    });
+
     const runtime = this.#runtime ?? (await detectContainerRuntime(this.#run));
     if (runtime === null) {
       throw new ProvisionError(
@@ -144,6 +246,7 @@ export class ContainerBackend implements ProvisionerBackend {
         "container",
       );
     }
+    const flags = runtime === "container" ? APPLE_CONTAINER_FLAGS : DOCKER_SHAPED_FLAGS;
 
     const image = spec.image ?? this.#image;
     const env: string[] = [];
@@ -168,6 +271,26 @@ export class ContainerBackend implements ProvisionerBackend {
       );
     }
 
+    // Confinement flags this runtime's CLI actually accepts, per
+    // `RuntimeFlagSupport` above. Nothing an ACP host does needs a capability;
+    // none of these can be regained afterwards because no-new-privileges
+    // blocks setuid; a fork bomb in a sandbox should not take the operator's
+    // machine with it -- on a runtime that can express all three. An empty
+    // entry here means the flag was never sent, not that it silently held.
+    const confineArgs: string[] = [];
+    if (flags.capDrop) confineArgs.push("--cap-drop", "ALL");
+    if (flags.securityOpt) confineArgs.push("--security-opt", "no-new-privileges:true");
+    if (flags.readOnly) confineArgs.push("--read-only");
+    if (flags.pidsLimit) confineArgs.push("--pids-limit", "1024");
+
+    // Each named mount lands at the identical absolute path inside, the same
+    // property `--volume workspace:workspace` already relies on. Read-only
+    // unless the operator opted a path into "rw" explicitly.
+    const mountArgs: string[] = [];
+    for (const mount of mounts) {
+      mountArgs.push("--volume", `${mount.hostPath}:${mount.hostPath}:${mount.mode}`);
+    }
+
     // `tail -f /dev/null` keeps the container alive so exec has something to
     // attach to. The ACP host is not the container's main process: one
     // container serves however many connections the supervisor opens.
@@ -182,26 +305,17 @@ export class ContainerBackend implements ProvisionerBackend {
       // a file it creates in the workspace belongs to the operator rather than
       // to root, and a bug in the runtime lands as an unprivileged user.
       ...userArgs(),
-      // Nothing an ACP host does needs a capability, and none of these can be
-      // regained afterwards because no-new-privileges blocks setuid.
-      "--cap-drop",
-      "ALL",
-      "--security-opt",
-      "no-new-privileges:true",
-      // The image is a read-only artifact. Everything the host writes goes to
-      // the workspace, which is mounted, or to scratch, which is tmpfs and
-      // dies with the container. `exec` is on because omp unpacks and runs
-      // native helpers out of its own scratch; withholding it would break the
-      // binary without bounding anything, since the agent can already run
-      // commands from the workspace by design.
-      "--read-only",
+      ...confineArgs,
+      // The one writable filesystem besides the mounts, and it dies with the
+      // container. `exec` is on because omp unpacks and runs native helpers
+      // out of its own scratch; withholding it would break the binary without
+      // bounding anything, since the agent can already run commands from the
+      // workspace by design.
       "--tmpfs",
       `${this.#scratchRoot}:rw,exec,nosuid,nodev,size=1g,mode=1777`,
-      // A fork bomb in a sandbox should not take the operator's machine with it.
-      "--pids-limit",
-      "1024",
       "--volume",
       `${this.#workspace}:${this.#workspace}`,
+      ...mountArgs,
       "--workdir",
       this.#workspace,
       ...env,
@@ -256,7 +370,10 @@ export class ContainerBackend implements ProvisionerBackend {
     this.#live.set(containerId, { runtime, containerId, network, wrapper });
     const spawn = this.#spawn;
     return {
-      ref: { kind: "container", id: containerId, spec },
+      // Mounts are normalized (default mode filled in) so an operator reading
+      // this ref back sees exactly what the container can see, not merely
+      // what they happened to type.
+      ref: { kind: "container", id: containerId, spec: { ...spec, mounts } },
       // `ompPath` is overridden rather than merged: the caller's omp path is a
       // path on the daemon's machine and means nothing inside the container.
       spawn: (opts: SpawnLocalHostOptions): LocalHost => spawn({ ...opts, ompPath: wrapper.path }),

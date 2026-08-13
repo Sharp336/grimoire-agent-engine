@@ -64,6 +64,40 @@ const SECRET_PATH_PATTERNS: RegExp[] = [
 ];
 
 /**
+ * Roots a container mount must never name, layered on top of
+ * `SECRET_PATH_PATTERNS` rather than restating any of it.
+ *
+ * A mount is a much bigger door than a single gated tool call: everything
+ * under it is visible to every tool at once, for as long as the container
+ * runs, unfiltered by any decision `DefaultPolicy` makes afterward. So beyond
+ * the credential files a read/write is denied from touching, a mount also
+ * refuses filesystem and home-directory roots outright, and the whole `.omp`
+ * state tree rather than only the credential DB inside it -- `agent.db` is
+ * enough to gate one read, but not enough to hand the directory over whole.
+ */
+const DANGEROUS_MOUNT_ROOT_PATTERNS: RegExp[] = [
+  /^\/$/,
+  /^\/root\/?$/,
+  /^\/(Users|home)\/[^/]+\/?$/,
+  /(^|\/)\.omp(\/|$)/,
+];
+
+/**
+ * Why `hostPath` must never be mounted whole into a container, or null when
+ * it may be. `hostPath` is expected already resolved to absolute; a relative
+ * path is the caller's bug, not something this function normalizes.
+ */
+export function dangerousMountReason(hostPath: string): string | null {
+  const norm = hostPath.replace(/\\/g, "/").replace(/(.)\/+$/, "$1");
+  for (const pattern of DANGEROUS_MOUNT_ROOT_PATTERNS) {
+    if (pattern.test(norm)) return `matches protected root ${pattern.source}`;
+  }
+  const secret = matchSecret(norm);
+  if (secret !== null) return `matches secret path pattern ${secret}`;
+  return null;
+}
+
+/**
  * Commands that are never auto-allowed regardless of mode, because a mistake is
  * unrecoverable or exfiltrates credentials.
  */

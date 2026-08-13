@@ -31,6 +31,8 @@ export interface ProvisionerOptions {
   cloudDriver?: CloudDriver;
   /** Host directory mounted into container hosts. */
   workspace?: string;
+  /** The daemon's own state directory. Passed through so a container host refuses to mount it. */
+  home?: string;
   /** How often TTLs are checked. */
   sweepIntervalMs?: number;
   /** Clock seam, so TTL is testable without waiting. */
@@ -74,7 +76,7 @@ export class HostProvisioner implements Provisioner {
     const supplied = opts.backends;
     if (supplied === undefined) {
       this.#backends.set("local", new LocalBackend());
-      this.#backends.set("container", new ContainerBackend({ workspace: opts.workspace }));
+      this.#backends.set("container", new ContainerBackend({ workspace: opts.workspace, home: opts.home }));
       if (opts.cloudDriver !== undefined) {
         this.#backends.set("cloud", new CloudBackend({ driver: opts.cloudDriver }));
       }

@@ -20,7 +20,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { readFileSync, rmSync, statSync } from "node:fs";
 import { AcpClient, type LocalHost, type SpawnLocalHostOptions } from "@ompd/acp";
-import { Store, type HostKind, type HostSpec } from "@ompd/core";
+import { Store, type HostKind, type HostMount, type HostSpec } from "@ompd/core";
 import {
   CloudBackend,
   ContainerBackend,
@@ -588,5 +588,178 @@ describe("container hosts keep the approval gate", () => {
         kind: "cloud",
       }),
     ).toThrow(ProvisionError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Runtime-shaped confinement flags
+// ---------------------------------------------------------------------------
+
+describe("the run command is shaped per runtime, not assumed docker", () => {
+  function runArgvFor(runtime: string): Promise<string[]> {
+    const runner = containerRunner("cnt000000001");
+    const backend = new ContainerBackend({ runtime, run: runner.run });
+    return backend.provision({ kind: "container" }).then(() => {
+      const run = runner.calls.find((argv) => argv[1] === "run");
+      if (run === undefined) throw new Error("no run call recorded");
+      return run;
+    });
+  }
+
+  test("docker gets every one of the four confinement flags", async () => {
+    const argv = await runArgvFor("docker");
+    expect(argv).toContain("--cap-drop");
+    expect(argv).toContain("--security-opt");
+    expect(argv).toContain("no-new-privileges:true");
+    expect(argv).toContain("--read-only");
+    expect(argv).toContain("--pids-limit");
+  });
+
+  test("podman and orbctl are docker-shaped too", async () => {
+    for (const runtime of ["podman", "orbctl"]) {
+      const argv = await runArgvFor(runtime);
+      expect(argv).toContain("--cap-drop");
+      expect(argv).toContain("--security-opt");
+      expect(argv).toContain("--read-only");
+      expect(argv).toContain("--pids-limit");
+    }
+  });
+
+  test("Apple `container` never receives a flag its CLI rejects", async () => {
+    const argv = await runArgvFor("container");
+    expect(argv).not.toContain("--cap-drop");
+    expect(argv).not.toContain("--security-opt");
+    expect(argv).not.toContain("no-new-privileges:true");
+    expect(argv).not.toContain("--read-only");
+    expect(argv).not.toContain("--pids-limit");
+    // What it does still receive: the flags verified to work against a real
+    // 0.4.1 install.
+    expect(argv).toContain("--tmpfs");
+    expect(argv).toContain("--volume");
+    expect(argv).toContain("--network");
+    expect(argv).toContain("--workdir");
+    expect(argv).toContain("--detach");
+    expect(argv).toContain("--rm");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Mounts
+// ---------------------------------------------------------------------------
+
+describe("extra mounts", () => {
+  function harnessWithMounts(home = "/home/operator/.ompd") {
+    const runner = containerRunner("cnt000000001");
+    return {
+      runner,
+      backend: new ContainerBackend({
+        runtime: "docker",
+        workspace: "/work/repo",
+        home,
+        run: runner.run,
+      }),
+    };
+  }
+
+  test("each mount lands at the identical absolute path inside, workspace included", async () => {
+    const { backend, runner } = harnessWithMounts();
+    await backend.provision({
+      kind: "container",
+      mounts: [{ hostPath: "/data/shared" }, { hostPath: "/opt/tools", mode: "rw" }],
+    });
+    const run = runner.calls.find((argv) => argv[1] === "run") ?? [];
+    expect(run).toContain("--volume");
+    expect(run).toContain("/work/repo:/work/repo");
+    expect(run).toContain("/data/shared:/data/shared:ro");
+    expect(run).toContain("/opt/tools:/opt/tools:rw");
+  });
+
+  test("read-only is the default; only an explicit mode opts into rw", async () => {
+    const { backend, runner } = harnessWithMounts();
+    const handle = await backend.provision({
+      kind: "container",
+      mounts: [{ hostPath: "/data/shared" }],
+    });
+    const run = runner.calls.find((argv) => argv[1] === "run") ?? [];
+    expect(run).toContain("/data/shared:/data/shared:ro");
+    expect(run).not.toContain("/data/shared:/data/shared:rw");
+    // The effective set an operator reads back has the default filled in,
+    // not merely what they typed.
+    const mounts = handle.ref.spec.mounts ?? [];
+    expect(mounts).toEqual([{ hostPath: "/data/shared", mode: "ro" }]);
+  });
+
+  test("omitting mounts leaves the workspace volume exactly as it was", async () => {
+    const { backend, runner } = harnessWithMounts();
+    await backend.provision({ kind: "container" });
+    const run = runner.calls.find((argv) => argv[1] === "run") ?? [];
+    // Same two tokens, same lack of a mode suffix, as every caller that never
+    // asked for an extra mount relied on before this feature existed.
+    const volIndex = run.indexOf("--volume");
+    expect(run[volIndex + 1]).toBe("/work/repo:/work/repo");
+  });
+
+  interface RefusalCase {
+    label: string;
+    hostPath: string;
+    /** Only the last case needs a home that does not itself match a static pattern. */
+    home?: string;
+  }
+
+  const REFUSED: RefusalCase[] = [
+    { label: "the filesystem root", hostPath: "/" },
+    { label: "a home directory root", hostPath: "/Users/someoperator" },
+    { label: "~/.ssh", hostPath: "/Users/someoperator/.ssh" },
+    { label: "~/.omp", hostPath: "/Users/someoperator/.omp" },
+    { label: "~/.ompd", hostPath: "/Users/someoperator/.ompd" },
+    {
+      // A custom OMPD_HOME that names neither `.omp` nor `.ompd`, so this can
+      // only be caught by comparing against the daemon's actual configured
+      // home, never by a static pattern -- proving that check runs at all.
+      label: "the daemon's own configured state directory, wherever OMPD_HOME points",
+      hostPath: "/opt/ompd-state/token",
+      home: "/opt/ompd-state",
+    },
+  ];
+
+  for (const { label, hostPath, home } of REFUSED) {
+    test(`refuses to mount ${label}, and audits the refusal`, async () => {
+      const store = tempStore();
+      const runner = containerRunner("cnt000000001");
+      const backend = new ContainerBackend({
+        runtime: "docker",
+        workspace: "/work/repo",
+        home: home ?? "/home/operator/.ompd",
+        run: runner.run,
+      });
+      const prov = new HostProvisioner({ store, backends: { container: backend } });
+      closables.push(prov);
+
+      await expect(
+        prov.provision({ kind: "container", mounts: [{ hostPath }] }),
+      ).rejects.toThrow(ProvisionError);
+
+      // Refused before anything was created: no network or run call at all.
+      expect(runner.calls).toHaveLength(0);
+
+      const failures = store.listAudit().filter((e) => e.action === "host.provision");
+      expect(failures).toHaveLength(1);
+      expect(failures[0]?.outcome).toBe("error");
+      expect(String(failures[0]?.detail.reason)).toContain(hostPath);
+    });
+  }
+
+  test("a relative mount path is refused rather than guessed at", async () => {
+    const { backend } = harnessWithMounts();
+    await expect(
+      backend.provision({ kind: "container", mounts: [{ hostPath: "relative/dir" }] }),
+    ).rejects.toThrow(/must be absolute/);
+  });
+
+  test("a mount outside every protected root is accepted as written", async () => {
+    const mounts: HostMount[] = [{ hostPath: "/srv/build-cache", mode: "rw" }];
+    const { backend } = harnessWithMounts();
+    const handle = await backend.provision({ kind: "container", mounts });
+    expect(handle.ref.spec.mounts).toEqual([{ hostPath: "/srv/build-cache", mode: "rw" }]);
   });
 });

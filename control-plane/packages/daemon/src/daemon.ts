@@ -395,6 +395,7 @@ export class Ompd {
         local: new LocalBackend({ ompPath: this.#config.ompPath, spawn: this.#hosts.spawn }),
         container: new ContainerBackend({
           workspace: opts.repoRoot ?? process.cwd(),
+          home: this.#home,
           spawn: this.#hosts.spawn,
         }),
       },

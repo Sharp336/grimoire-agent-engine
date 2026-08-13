@@ -474,10 +474,20 @@ curl -sS -X POST http://127.0.0.1:7777/v1/agents \
   -d '{"name":"sandboxed","cwd":"'"$PWD"'","host":{"kind":"container","image":"your/omp:tag"}}'
 ```
 
-The daemon starts a detached container from that image, mounts the workspace at
-the same absolute path it has here so a cwd means the same thing on both sides,
-and speaks ACP over `docker exec -i <id> omp acp`. Stopping the last agent on a
-host removes the container and the network it was given.
+or from the CLI, which can also name further directories the container gets
+to see:
+
+```bash
+ompd new ~/dev/some-repo --container --image your/omp:tag \
+  --mounts ~/dev/shared-lib:ro,~/dev/scratch:rw
+```
+
+The daemon probes `docker`, `podman`, `container` (Apple's), and `orbctl` in
+that order unless a runtime is pinned, starts a detached container from the
+named image, mounts the workspace at the same absolute path it has here so a
+cwd means the same thing on both sides, and speaks ACP over
+`<runtime> exec -i <id> omp acp`. Stopping the last agent on a host removes
+the container and the network it was given.
 
 ompd does not build or publish the image; `scripts/container-host.Dockerfile`
 is the minimal one the end-to-end check builds, and it is a reference rather
@@ -487,43 +497,79 @@ root certificate store.
 `bun run scripts/check-container-host.ts` proves the whole path against a real
 container, including that a denied bash call does not run, that an allowed one
 does, and that each of the escapes below fails. It cleans up everything it
-makes.
+makes. It runs against `docker`; the run command itself is exercised per
+runtime by the unit tests in `packages/daemon/test/provisioner.test.ts`.
+
+### Extra mounts
+
+`mounts` in the host spec (`--mounts` on the CLI) names further host
+directories, beyond the workspace, that the container gets to see. Each lands
+at the identical absolute path inside, the same property that makes the
+workspace mount work: a path a transcript names means the same thing on both
+sides. Read-only is the default -- a folder the agent should merely reference
+does not need write access, and a writable mount (`:rw`) is a decision an
+operator opts into per path, not something that falls out of naming a folder.
+
+A mount naming `/`, a home directory root, `~/.ssh`, `~/.omp`, `~/.ompd`, or
+the daemon's own configured state directory (wherever `OMPD_HOME` actually
+points) is refused before the container is even created, because any of those
+would hand the sandbox the credentials that make it a sandbox. The refusal is
+audited like any other failed provision (`ompd audit`); nothing about it is a
+silent no-op.
 
 ### How it is confined
 
-None of this is configurable, because a sandbox with a switch on it is a
-sandbox someone turns off:
+None of the flags below are configurable, because a sandbox with a switch on
+it is a sandbox someone turns off. Which flags exist to turn on, though,
+genuinely differs by runtime -- Apple's `container` CLI (verified against
+0.4.1) has no `--cap-drop`, `--security-opt`, `--read-only`, or `--pids-limit`,
+and exits on an unknown flag rather than ignoring it, so provisioning against
+it never sends a flag it does not accept:
 
-| Flag | Why |
-| ---- | ---- |
-| `--user <uid>:<gid>` | the daemon's own ids, never root, so a file it writes in your repo belongs to you |
-| `--cap-drop ALL` | no capability is needed to speak ACP |
-| `--security-opt no-new-privileges` | a setuid binary in the image cannot win them back |
-| `--read-only` | the image is an artifact, not scratch space |
-| `--tmpfs /tmp` | the one writable filesystem, and it dies with the container |
-| `--pids-limit 1024` | a fork bomb in a sandbox stays in the sandbox |
-| a bridge network per host | the default bridge is shared, so an agent on it could reach your database |
+| Guarantee | docker / podman / orbctl | Apple `container` |
+| --- | --- | --- |
+| Runs as your uid/gid, never root | yes -- `--user` | yes -- `--user` |
+| No Linux capability is granted | yes -- `--cap-drop ALL` | not expressible, and arguably not needed: each container gets its own lightweight VM, so there is no shared kernel for a capability to escape into |
+| A setuid binary cannot regain privilege | yes -- `--security-opt no-new-privileges` | same as above -- the VM boundary, not this flag, is what would stop it |
+| **Image is read-only** | yes -- `--read-only` | **no.** This flag does not exist on this CLI. The image is writable from inside the container, which is a real loss of confinement, not a reframed one |
+| A fork bomb stays inside the sandbox | yes -- `--pids-limit 1024` | not expressible; the VM's own resource limits are the boundary instead of a pid cap enforced by a shared kernel |
+| Scratch is tmpfs and dies with the container | yes -- `--tmpfs` | yes -- `--tmpfs` |
+| A bridge network per host | yes | yes |
+
+The three flags Apple's CLI lacks that are folded into "a different trade, not
+a hole" -- `--cap-drop`, `--security-opt no-new-privileges`, `--pids-limit` --
+all mitigate a shared-kernel escape. A VM-per-container runtime has no shared
+kernel for any of them to escape into, so their absence there is not the same
+claim as their absence on docker. `--read-only` is not that: it is whether the
+image can be rewritten from inside, and that is lost outright on Apple
+`container` today, which is why it gets its own row instead of being grouped
+with the rest.
 
 ### The threat model, which is the part worth reading
 
 Assume the agent inside has gone wrong: a prompt injection out of a file it
 read, a model doing something stupid, a hostile dependency it just installed.
 
-**What it cannot reach.** The rest of your filesystem. Nothing outside the
-workspace is mounted, so `~/.ssh`, `~/.aws`, your other repositories and
-`~/.ompd` are not merely unreadable, they are not there. It cannot write the
-image, gain a capability, become root, or reach your other containers.
+**What it cannot reach.** The rest of your filesystem, unless you name it as
+an extra mount, and even then not the paths listed under "Extra mounts" above:
+`~/.ssh`, `~/.omp`, `~/.ompd`, a home directory root, and `/` are refused
+outright, not merely left off by default. Nothing outside the workspace and
+whatever you explicitly named is mounted, so `~/.aws` and your other
+repositories are not merely unreadable, they are not there. It cannot write
+the image, gain a capability, become root, or reach your other containers.
 
 **What it can reach, which is the honest part.**
 
 - **The whole workspace, read-write.** There is no read-only option and no
-  subpath option. Anything under the `cwd` you name, `.git` and any `.env`
-  included, can be read, rewritten, or destroyed. Point a container host at a
-  directory you would be willing to hand over whole.
+  subpath option for the workspace itself. Anything under the `cwd` you name,
+  `.git` and any `.env` included, can be read, rewritten, or destroyed. Point
+  a container host at a directory you would be willing to hand over whole. An
+  extra mount is different: it defaults to read-only, and a subpath is exactly
+  what naming one directory instead of another already is.
 - **One live model credential.** omp inside the container needs one, and the
-  workspace mount is the only channel the backend has: it injects the image,
-  the workspace, and `OMPD_REPO` / `OMPD_REF`, and nothing else. The check
-  script narrows that to a single provider's OAuth row copied out of
+  backend injects only the image, the workspace, any mounts an operator
+  explicitly named, and `OMPD_REPO` / `OMPD_REF`. The check script narrows
+  that to a single provider's OAuth row copied out of
   `~/.omp/agent/agent.db` into a snapshot it deletes afterwards, with every
   other credential and the usage and cache tables emptied out of the copy, and
   the image's shim copies that seed to a container-local path so a refresh is
