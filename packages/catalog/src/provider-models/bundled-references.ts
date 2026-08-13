@@ -1,4 +1,4 @@
-import { isZeroCostXaiOAuthReference } from "../identity/reference";
+import { isCrossProviderReferenceEligible } from "../identity/reference";
 import { getBundledModels, getBundledProviders } from "../models";
 import type { Api, Model, ModelSpec } from "../types";
 
@@ -45,7 +45,7 @@ function getGlobalReferences(): Map<string, Model<Api>> {
 	for (const provider of getBundledProviders()) {
 		for (const model of getBundledModels(provider as Parameters<typeof getBundledModels>[0])) {
 			const candidate = model as Model<Api>;
-			if (isZeroCostXaiOAuthReference(candidate)) {
+			if (!isCrossProviderReferenceEligible(candidate)) {
 				continue;
 			}
 			const existing = references.get(candidate.id);
