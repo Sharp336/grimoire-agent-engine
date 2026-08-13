@@ -55,6 +55,7 @@ import { HostRegistry } from "./hosts.ts";
 import { ContainerBackend, HostProvisioner, LocalBackend } from "./provisioner/index.ts";
 import { Scheduler } from "./routines/index.ts";
 import { Supervisor } from "./supervisor.ts";
+import { listConnectorCatalog, listSkillCatalog, TaskManager } from "./workspace/index.ts";
 import {
   speakableSegments,
   selectSttEngine,
@@ -311,6 +312,7 @@ export class Ompd {
   #supervisor: Supervisor;
   #provisioner: HostProvisioner;
   #scheduler: Scheduler;
+  #tasks: TaskManager;
   #evolution: EvolutionEngine;
   #gateway: Gateway;
   #sleepGuard: SleepGuard;
@@ -427,6 +429,8 @@ export class Ompd {
       repoRoot: opts.repoRoot ?? process.cwd(),
     });
 
+    this.#tasks = new TaskManager({ store: this.#store, supervisor: this.#supervisor });
+
     this.#gateway = new Gateway({
       supervisor: this.#supervisor,
       store: this.#store,
@@ -440,6 +444,9 @@ export class Ompd {
       routines: this.#scheduler,
       sessions: this.#hosts,
       staticRoot: opts.staticRoot ?? defaultStaticRoot(),
+      skills: { list: listSkillCatalog },
+      connectors: { list: listConnectorCatalog },
+      tasks: this.#tasks,
       // A rotation can be driven from any device, including a phone. The one
       // credential that also lives on disk has to follow, or `ompd rotate`
       // from the console leaves the CLI on this machine holding a token the

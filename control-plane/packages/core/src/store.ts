@@ -7,7 +7,7 @@
  */
 
 import { Database } from "bun:sqlite";
-import { redact } from "./redact.ts";
+import { redact, redactString } from "./redact.ts";
 import type {
   Agent,
   AgentId,
@@ -18,6 +18,8 @@ import type {
   Device,
   Routine,
   Run,
+  Task,
+  TaskState,
 } from "./contracts.ts";
 
 const SCHEMA = `
@@ -73,6 +75,18 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 CREATE INDEX IF NOT EXISTS runs_routine ON runs(routine_id, started_at DESC);
 
+-- One row per named unit of work started from a sidebar. agent_id points at
+-- an existing agents row; a task never provisions a host of its own, so this
+-- table has no host/cwd columns to go stale when a session moves.
+CREATE TABLE IF NOT EXISTS tasks (
+  id TEXT PRIMARY KEY, title TEXT NOT NULL, prompt TEXT NOT NULL,
+  skill_name TEXT, agent_id TEXT NOT NULL, state TEXT NOT NULL,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  result TEXT, labels TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS tasks_agent ON tasks(agent_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS tasks_created ON tasks(created_at DESC);
+
 CREATE TABLE IF NOT EXISTS audit (
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, action TEXT NOT NULL,
   actor_device_id TEXT, agent_id TEXT, detail TEXT NOT NULL, outcome TEXT NOT NULL
@@ -90,6 +104,19 @@ interface AgentRow {
   created_at: string;
   last_active_at: string;
   routine_id: string | null;
+  labels: string;
+}
+
+interface TaskRow {
+  id: string;
+  title: string;
+  prompt: string;
+  skill_name: string | null;
+  agent_id: string;
+  state: string;
+  created_at: string;
+  updated_at: string;
+  result: string | null;
   labels: string;
 }
 
@@ -529,6 +556,63 @@ export class Store {
     }));
   }
 
+  // -- tasks -----------------------------------------------------------------
+
+  /**
+   * `prompt` and `title` pass through `redactString`, the same defence
+   * `updates`/`approvals`/`audit` apply to arbitrary text: it only replaces
+   * recognisable secret shapes, so an ordinary prompt is untouched, and a
+   * pasted credential does not sit in the database in the clear.
+   */
+  createTask(t: Task): void {
+    this.#db
+      .query(
+        `INSERT INTO tasks (id,title,prompt,skill_name,agent_id,state,created_at,updated_at,result,labels)
+         VALUES (?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        t.id,
+        redactString(t.title),
+        redactString(t.prompt),
+        t.skillName ?? null,
+        t.agentId,
+        t.state,
+        t.createdAt,
+        t.updatedAt,
+        t.result === undefined ? null : redactString(t.result),
+        JSON.stringify(t.labels),
+      );
+  }
+
+  /**
+   * Move a task to its next state. `updatedAt` is the store's own clock, not
+   * the caller's, so two racing settlements cannot leave a row stamped with
+   * whichever finished computing its timestamp first rather than whichever
+   * write actually landed last.
+   */
+  updateTaskState(id: string, state: TaskState, result?: string): void {
+    this.#db
+      .query(`UPDATE tasks SET state=?, updated_at=?, result=? WHERE id=?`)
+      .run(state, new Date().toISOString(), result === undefined ? null : redactString(result), id);
+  }
+
+  getTask(id: string): Task | null {
+    const row = this.#db.query(`SELECT * FROM tasks WHERE id=?`).get(id) as TaskRow | null;
+    return row ? rowToTask(row) : null;
+  }
+
+  /** Every task, or one agent's, newest first. */
+  listTasks(agentId?: string): Task[] {
+    const rows = (
+      agentId === undefined
+        ? this.#db.query(`SELECT * FROM tasks ORDER BY created_at DESC`).all()
+        : this.#db
+            .query(`SELECT * FROM tasks WHERE agent_id=? ORDER BY created_at DESC`)
+            .all(agentId)
+    ) as TaskRow[];
+    return rows.map(rowToTask);
+  }
+
   // -- audit ---------------------------------------------------------------
 
   audit(entry: AuditInput): void {
@@ -590,4 +674,19 @@ function rowToAuthToken(row: Record<string, string | null>): AuthTokenRecord {
   }
   if (row.revoked_at !== null && row.revoked_at !== undefined) record.revokedAt = row.revoked_at;
   return record;
+}
+
+function rowToTask(row: TaskRow): Task {
+  return {
+    id: row.id,
+    title: row.title,
+    prompt: row.prompt,
+    skillName: row.skill_name ?? undefined,
+    agentId: row.agent_id,
+    state: row.state as TaskState,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    result: row.result ?? undefined,
+    labels: JSON.parse(row.labels),
+  };
 }

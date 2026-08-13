@@ -27,16 +27,20 @@ import {
   type Actor,
   type AgentId,
   type ClientFrame,
+  type ConnectorSummary,
   type HostSpec,
   type Run,
   type ServerFrame,
+  type SkillSummary,
   type Store,
+  type Task,
 } from "@ompd/core";
 import { WEB_ASSETS, WEB_ASSETS_BUILT } from "../web-assets.ts";
 import { Supervisor, UnauthorizedError, type PendingApproval } from "../supervisor.ts";
 import { DeviceAuth, PairingBacklogError, PairingError } from "./auth.ts";
 import type { GatewayEvents } from "./events.ts";
 import { MODE_OPTION_ID, type SessionConfig } from "../hosts.ts";
+import type { CreateTaskInput } from "../workspace/tasks.ts";
 import { TokenBucket } from "./ratelimit.ts";
 
 /**
@@ -117,6 +121,34 @@ export interface RoutineRunner {
   runNow(routineId: string, actor: Actor): Promise<Run>;
 }
 
+/**
+ * The slice of the workspace skills catalogue the gateway needs, declared
+ * structurally like `RoutineRunner`: `../workspace/skills.ts` does not know
+ * this file exists.
+ */
+export interface SkillCatalog {
+  list(cwd?: string): Promise<SkillSummary[]>;
+}
+
+/** The connector counterpart to `SkillCatalog`. */
+export interface ConnectorCatalog {
+  list(cwd?: string): Promise<ConnectorSummary[]>;
+}
+
+/**
+ * The slice of task lifecycle the gateway needs. `create` and `cancel` take
+ * the resolved `Actor` and are expected to authorize it themselves -- see
+ * `TaskManager` in `../workspace/tasks.ts` -- so the scope checks below are
+ * the same defence-in-depth `/v1/agents/:id/prompt` already has, not the only
+ * ones.
+ */
+export interface TaskCatalog {
+  get(id: string): Task | null;
+  list(agentId?: string): Task[];
+  create(input: CreateTaskInput, actor: Actor): Promise<Task>;
+  cancel(id: string, actor: Actor): Promise<Task>;
+}
+
 export interface GatewayOptions {
   supervisor: Supervisor;
   store: Store;
@@ -180,6 +212,21 @@ export interface GatewayOptions {
    * answer can say which file moved rather than guessing.
    */
   onTokenRotated?: (deviceId: string, token: string) => string | undefined;
+  /**
+   * The skills-and-commands catalogue. Absent, `GET /v1/skills` reports the
+   * feature off rather than an empty catalogue, which a client would read as
+   * "this workspace has no skills" instead of "this daemon build has no
+   * catalogue wired in".
+   */
+  skills?: SkillCatalog;
+  /** The connector counterpart to `skills`. Absent, `GET /v1/connectors` reports the feature off the same way. */
+  connectors?: ConnectorCatalog;
+  /**
+   * Task lifecycle. Absent, every `/v1/tasks*` route reports the feature off
+   * rather than 404ing, so a client can tell "no such task" from "this
+   * daemon build has no task tracking".
+   */
+  tasks?: TaskCatalog;
 }
 
 interface SocketState {
@@ -272,6 +319,9 @@ export class Gateway {
   #routines: RoutineRunner | undefined;
   #sessions: SessionConfig | undefined;
   #onTokenRotated: ((deviceId: string, token: string) => string | undefined) | undefined;
+  #skills: SkillCatalog | undefined;
+  #connectors: ConnectorCatalog | undefined;
+  #tasks: TaskCatalog | undefined;
   #staticRoot: string | undefined;
   /** Set by `listen`, so uptime measures serving rather than construction. */
   #startedAtMs: number | undefined;
@@ -296,6 +346,9 @@ export class Gateway {
     this.#routines = opts.routines;
     this.#sessions = opts.sessions;
     this.#onTokenRotated = opts.onTokenRotated;
+    this.#skills = opts.skills;
+    this.#connectors = opts.connectors;
+    this.#tasks = opts.tasks;
     // Resolved once so the traversal check below compares two absolute paths.
     this.#staticRoot = opts.staticRoot === undefined ? undefined : resolve(opts.staticRoot);
 
@@ -932,7 +985,148 @@ export class Gateway {
       }
     }
 
+    if (path === "/v1/skills" && req.method === "GET") {
+      if (!scopes.has(SCOPE_READ)) return Response.json({ error: "forbidden" }, { status: 403 });
+      const catalog = this.#skills;
+      if (!catalog) return Response.json({ error: "skills_unavailable" }, { status: 503 });
+      const resolved = this.#resolveCatalogCwd(url);
+      if ("notFound" in resolved) return Response.json({ error: "not_found" }, { status: 404 });
+      try {
+        return Response.json({ skills: await catalog.list(resolved.cwd) });
+      } catch (err) {
+        return Response.json(
+          { error: err instanceof Error ? err.message : "skill discovery failed" },
+          { status: 502 },
+        );
+      }
+    }
+
+    if (path === "/v1/connectors" && req.method === "GET") {
+      if (!scopes.has(SCOPE_READ)) return Response.json({ error: "forbidden" }, { status: 403 });
+      const catalog = this.#connectors;
+      if (!catalog) return Response.json({ error: "connectors_unavailable" }, { status: 503 });
+      const resolved = this.#resolveCatalogCwd(url);
+      if ("notFound" in resolved) return Response.json({ error: "not_found" }, { status: 404 });
+      try {
+        return Response.json({ connectors: await catalog.list(resolved.cwd) });
+      } catch (err) {
+        return Response.json(
+          { error: err instanceof Error ? err.message : "connector discovery failed" },
+          { status: 502 },
+        );
+      }
+    }
+
+    if (path === "/v1/tasks" && req.method === "GET") {
+      if (!scopes.has(SCOPE_READ)) return Response.json({ error: "forbidden" }, { status: 403 });
+      const catalog = this.#tasks;
+      if (!catalog) return Response.json({ error: "tasks_unavailable" }, { status: 503 });
+      return Response.json({ tasks: catalog.list(url.searchParams.get("agentId") ?? undefined) });
+    }
+
+    const taskRoute = /^\/v1\/tasks\/([^/]+)$/.exec(path);
+    if (taskRoute && req.method === "GET") {
+      if (!scopes.has(SCOPE_READ)) return Response.json({ error: "forbidden" }, { status: 403 });
+      const catalog = this.#tasks;
+      if (!catalog) return Response.json({ error: "tasks_unavailable" }, { status: 503 });
+      const task = catalog.get(taskRoute[1] ?? "");
+      if (!task) return Response.json({ error: "not_found" }, { status: 404 });
+      return Response.json({ task });
+    }
+
+    if (path === "/v1/tasks" && req.method === "POST") {
+      // The same gate a plain prompt needs: a task is a named, tracked
+      // prompt against a session that already exists, not a session-spawner.
+      // Creating that session is `manage`'s job via `POST /v1/agents`.
+      if (!scopes.has(SCOPE_PROMPT)) return Response.json({ error: "forbidden" }, { status: 403 });
+      const catalog = this.#tasks;
+      if (!catalog) return Response.json({ error: "tasks_unavailable" }, { status: 503 });
+      let body: {
+        title?: unknown;
+        prompt?: unknown;
+        agentId?: unknown;
+        skillName?: unknown;
+        labels?: Record<string, string>;
+      };
+      try {
+        body = (await req.json()) as typeof body;
+      } catch {
+        return Response.json({ error: "bad_json" }, { status: 400 });
+      }
+      if (
+        typeof body.title !== "string" ||
+        typeof body.prompt !== "string" ||
+        typeof body.agentId !== "string"
+      ) {
+        return Response.json({ error: "title, prompt, and agentId are required" }, { status: 400 });
+      }
+      if (body.skillName !== undefined && typeof body.skillName !== "string") {
+        return Response.json({ error: "skillName must be a string" }, { status: 400 });
+      }
+      try {
+        const task = await catalog.create(
+          {
+            title: body.title,
+            prompt: body.prompt,
+            agentId: body.agentId,
+            ...(body.skillName === undefined ? {} : { skillName: body.skillName }),
+            ...(body.labels === undefined ? {} : { labels: body.labels }),
+          },
+          actor,
+        );
+        return Response.json({ task }, { status: 201 });
+      } catch (err) {
+        if (err instanceof UnauthorizedError) {
+          return Response.json({ error: "forbidden" }, { status: 403 });
+        }
+        return Response.json(
+          { error: err instanceof Error ? err.message : "task creation failed" },
+          { status: 404 },
+        );
+      }
+    }
+
+    const taskCancel = /^\/v1\/tasks\/([^/]+)\/cancel$/.exec(path);
+    if (taskCancel && req.method === "POST") {
+      // The same gate `cancel` takes on the websocket frame and on
+      // `Supervisor.cancel` itself; this call re-authorizes from the device
+      // row regardless.
+      if (!scopes.has(SCOPE_PROMPT)) return Response.json({ error: "forbidden" }, { status: 403 });
+      const catalog = this.#tasks;
+      if (!catalog) return Response.json({ error: "tasks_unavailable" }, { status: 503 });
+      try {
+        const task = await catalog.cancel(taskCancel[1] ?? "", actor);
+        return Response.json({ task });
+      } catch (err) {
+        if (err instanceof UnauthorizedError) {
+          return Response.json({ error: "forbidden" }, { status: 403 });
+        }
+        return Response.json(
+          { error: err instanceof Error ? err.message : "cancel failed" },
+          { status: 404 },
+        );
+      }
+    }
+
     return Response.json({ error: "not_found" }, { status: 404 });
+  }
+
+  /**
+   * Which directory a skills/connectors catalogue query is scoped to.
+   *
+   * `cwd` wins when both are given. `agentId` resolves through this daemon's
+   * own agent rows rather than being handed to discovery as a raw path,
+   * because an operator asking "what does agent X have" who mistypes the id
+   * must get a 404, not a silent fall-through to the daemon's own default
+   * project directory and a catalogue for the wrong workspace.
+   */
+  #resolveCatalogCwd(url: URL): { cwd: string | undefined } | { notFound: true } {
+    const cwd = url.searchParams.get("cwd");
+    if (cwd !== null) return { cwd };
+    const agentId = url.searchParams.get("agentId");
+    if (agentId === null) return { cwd: undefined };
+    const agent = this.#store.getAgent(agentId);
+    return agent ? { cwd: agent.cwd } : { notFound: true };
   }
 
   /**
