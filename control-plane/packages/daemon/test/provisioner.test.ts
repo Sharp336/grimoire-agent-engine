@@ -426,7 +426,7 @@ describe("detectContainerRuntime", () => {
     };
 
     expect(await detectContainerRuntime(run)).toBeNull();
-    expect(probed).toEqual(["docker", "podman", "container", "orbctl"]);
+    expect(probed).toEqual(["docker", "podman", "container"]);
   });
 
   test("returns the first runtime that answers, in probe order", async () => {
@@ -615,14 +615,22 @@ describe("the run command is shaped per runtime, not assumed docker", () => {
     expect(argv).toContain("--pids-limit");
   });
 
-  test("podman and orbctl are docker-shaped too", async () => {
-    for (const runtime of ["podman", "orbctl"]) {
-      const argv = await runArgvFor(runtime);
-      expect(argv).toContain("--cap-drop");
-      expect(argv).toContain("--security-opt");
-      expect(argv).toContain("--read-only");
-      expect(argv).toContain("--pids-limit");
-    }
+  test("podman is docker-shaped too, verified against podman 4.8.2 on this machine", async () => {
+    // orbctl used to be asserted here and should never have been: it manages
+    // OrbStack Linux machines rather than containers, its `run` takes none of
+    // these flags, and OrbStack's actual container surface is `docker`.
+    const argv = await runArgvFor("podman");
+    expect(argv).toContain("--cap-drop");
+    expect(argv).toContain("--security-opt");
+    expect(argv).toContain("--read-only");
+    expect(argv).toContain("--pids-limit");
+  });
+
+  test("a runtime with no capability entry is refused rather than guessed at", async () => {
+    // The property that makes the table trustworthy: an unknown runtime must not
+    // silently inherit docker's shape, because that is how a confinement
+    // guarantee gets claimed without ever being asked for.
+    await expect(runArgvFor("orbctl")).rejects.toThrow();
   });
 
   test("Apple `container` never receives a flag its CLI rejects", async () => {

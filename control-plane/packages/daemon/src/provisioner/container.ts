@@ -42,10 +42,18 @@ import {
 } from "./types.ts";
 
 /**
- * Probe order. Docker first because OrbStack, Colima, and Rancher all present
- * a docker CLI, so it is the most likely to be both present and wired up.
+ * Probe order. Docker first because OrbStack, Colima, and Rancher all present a
+ * docker CLI, so it is the most likely to be both present and wired up.
+ *
+ * `orbctl` is deliberately absent. It was listed here and described as verified,
+ * and it is neither: OrbStack's container surface IS `docker`, while `orbctl`
+ * manages OrbStack Linux machines. Its `run` means "run a command on Linux", it
+ * takes none of `--volume`, `--cap-drop`, or `--network`, and it rejects
+ * `--version`. The probe only ever skipped it by that accident; pinning it
+ * through `ContainerBackendOptions.runtime` would have produced a command that
+ * looks like a container and is not one.
  */
-export const CONTAINER_RUNTIMES: readonly string[] = ["docker", "podman", "container", "orbctl"];
+export const CONTAINER_RUNTIMES: readonly string[] = ["docker", "podman", "container"];
 
 /**
  * Used when `spec.image` is absent. ompd does not build an image: the operator
@@ -134,17 +142,19 @@ function userArgs(): string[] {
 /**
  * Which of the four confinement flags a runtime's CLI actually accepts.
  *
- * Verified against real installs, not assumed: docker, podman, and orbctl all
- * present the docker CLI's flag grammar (podman is a drop-in; OrbStack backs
- * `docker` itself and `orbctl` talks to the same daemon), so `run` shapes the
- * same command for all three today. Apple's `container` 0.4.1 is a different
- * CLI -- it accepts `--user`, `--tmpfs`, `--volume`, `--network`, `--workdir`,
- * `--detach`, and `--rm`, but exits on `--cap-drop`, `--security-opt`,
- * `--read-only`, or `--pids-limit` as an unknown flag, so a docker-shaped
- * command never provisions on it. This table is what stands between "provision
- * fails on the first unknown flag" and "provision silently claims a
- * confinement guarantee it never asked the runtime for": every new runtime
- * added to `CONTAINER_RUNTIMES` needs an entry here before it can be trusted.
+ * What was actually verified on this machine, and what was not, because an
+ * unearned "verified" is worse than an admitted assumption. Confirmed by
+ * reading each CLI's own `run --help`: docker, podman 4.8.2 (a drop-in, all
+ * nine flags present), and Apple's `container` 0.4.1. That last one is a
+ * different CLI: it accepts `--user`, `--tmpfs`, `--volume`, `--network`,
+ * `--workdir`, `--detach`, and `--rm`, but exits on `--cap-drop`,
+ * `--security-opt`, `--read-only`, or `--pids-limit` as an unknown flag, so a
+ * docker-shaped command never provisions on it.
+ *
+ * This table is what stands between "provision fails on the first unknown flag"
+ * and "provision silently claims a confinement guarantee it never asked the
+ * runtime for": every new runtime added to `CONTAINER_RUNTIMES` needs an entry
+ * here, and a real `run --help` behind it, before it can be trusted.
  *
  * The four flags this table gates are not one thing. `--cap-drop`,
  * `--security-opt no-new-privileges`, and `--pids-limit` mitigate a
@@ -177,6 +187,23 @@ const APPLE_CONTAINER_FLAGS: RuntimeFlagSupport = {
   securityOpt: false,
   readOnly: false,
   pidsLimit: false,
+};
+
+/**
+ * Runtime to verified capability. Keys match `CONTAINER_RUNTIMES` exactly.
+ *
+ * A lookup rather than a conditional, because the conditional it replaced read
+ * `runtime === "container" ? APPLE : DOCKER_SHAPED`, which handed docker's shape
+ * to every runtime that was not Apple's, including any added later and any
+ * pinned by an operator. That is the behaviour this file's own header promises
+ * never happens. An absent entry is now a refusal: a runtime nobody has held a
+ * `run --help` against cannot be trusted to have accepted the confinement we
+ * asked for, and failing to provision is the safe direction.
+ */
+const RUNTIME_FLAG_SUPPORT: Record<string, RuntimeFlagSupport> = {
+  docker: DOCKER_SHAPED_FLAGS,
+  podman: DOCKER_SHAPED_FLAGS,
+  container: APPLE_CONTAINER_FLAGS,
 };
 
 /**
@@ -246,7 +273,14 @@ export class ContainerBackend implements ProvisionerBackend {
         "container",
       );
     }
-    const flags = runtime === "container" ? APPLE_CONTAINER_FLAGS : DOCKER_SHAPED_FLAGS;
+    const flags = RUNTIME_FLAG_SUPPORT[runtime];
+    if (flags === undefined) {
+      throw new ProvisionError(
+        `runtime ${runtime} has no verified confinement capability entry; ` +
+          `add one to RUNTIME_FLAG_SUPPORT backed by its own \`run --help\` before using it`,
+        "container",
+      );
+    }
 
     const image = spec.image ?? this.#image;
     const env: string[] = [];

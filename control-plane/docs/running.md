@@ -482,12 +482,19 @@ ompd new ~/dev/some-repo --container --image your/omp:tag \
   --mounts ~/dev/shared-lib:ro,~/dev/scratch:rw
 ```
 
-The daemon probes `docker`, `podman`, `container` (Apple's), and `orbctl` in
-that order unless a runtime is pinned, starts a detached container from the
-named image, mounts the workspace at the same absolute path it has here so a
-cwd means the same thing on both sides, and speaks ACP over
-`<runtime> exec -i <id> omp acp`. Stopping the last agent on a host removes
-the container and the network it was given.
+The daemon probes `docker`, `podman`, and `container` (Apple's) in that order
+unless a runtime is pinned, starts a detached container from the named image,
+mounts the workspace at the same absolute path it has here so a cwd means the
+same thing on both sides, and speaks ACP over `<runtime> exec -i <id> omp acp`.
+Stopping the last agent on a host removes the container and the network it was
+given.
+
+A runtime outside that list is refused rather than assumed to behave like
+docker, because a runtime nobody has held a `run --help` against cannot be
+trusted to have accepted the confinement it was asked for. `orbctl` was on this
+list and should not have been: OrbStack's container surface is `docker`, while
+`orbctl` manages OrbStack Linux machines and its `run` means "run a command on
+Linux", taking none of `--volume`, `--cap-drop`, or `--network`.
 
 ompd does not build or publish the image; `scripts/container-host.Dockerfile`
 is the minimal one the end-to-end check builds, and it is a reference rather
@@ -526,7 +533,7 @@ genuinely differs by runtime -- Apple's `container` CLI (verified against
 and exits on an unknown flag rather than ignoring it, so provisioning against
 it never sends a flag it does not accept:
 
-| Guarantee | docker / podman / orbctl | Apple `container` |
+| Guarantee | docker / podman | Apple `container` |
 | --- | --- | --- |
 | Runs as your uid/gid, never root | yes -- `--user` | yes -- `--user` |
 | No Linux capability is granted | yes -- `--cap-drop ALL` | not expressible, and arguably not needed: each container gets its own lightweight VM, so there is no shared kernel for a capability to escape into |
