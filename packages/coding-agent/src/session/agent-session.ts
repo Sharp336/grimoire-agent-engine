@@ -6634,6 +6634,8 @@ export class AgentSession {
 		let bashTransition: BashSessionTransition | undefined;
 		let sessionTransitioned = false;
 		let committedPlanYoloResetError: unknown;
+		let committedReconcileError: unknown;
+		let committedReconcileFailed = false;
 		let previousAgentMessages: AgentMessage[] | undefined;
 		let reconciliationAttempted = false;
 		const reconcileNewSessionTransition = async (committed: boolean): Promise<void> => {
@@ -6719,6 +6721,12 @@ export class AgentSession {
 			// The workspace-roots block must reflect the new session's directory set,
 			// not the previous session's — refresh before the next turn goes out.
 			await this.refreshBaseSystemPrompt();
+			try {
+				await reconcileNewSessionTransition(true);
+			} catch (error) {
+				committedReconcileError = error;
+				committedReconcileFailed = true;
+			}
 
 			// Emit session_switch event with reason "new" to hooks
 			if (this.#extensionRunner) {
@@ -6728,7 +6736,7 @@ export class AgentSession {
 					previousSessionFile,
 				});
 			}
-			await reconcileNewSessionTransition(true);
+			if (committedReconcileFailed) throw committedReconcileError;
 			if (committedPlanYoloResetError) throw committedPlanYoloResetError;
 			return true;
 		} catch (error) {

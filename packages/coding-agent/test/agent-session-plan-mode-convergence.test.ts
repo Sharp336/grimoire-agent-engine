@@ -104,6 +104,7 @@ describe("AgentSession plan-mode convergence", () => {
 			planYoloGuidance?: boolean;
 			rebuildGate?: { fail: boolean };
 			activeToolApplyGate?: { fail: boolean };
+			onSessionSwitch?: () => void;
 		},
 	): Promise<PlanHarness> {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -179,6 +180,15 @@ describe("AgentSession plan-mode convergence", () => {
 							};
 						}
 					: undefined,
+			extensionRunner: options?.onSessionSwitch
+				? ({
+						hasHandlers: () => true,
+						emitBeforeAgentStart: async () => undefined,
+						emit: async (event: { type: string }) => {
+							if (event.type === "session_switch") options.onSessionSwitch?.();
+						},
+					} as never)
+				: undefined,
 		});
 		if (options?.activeToolApplyGate) {
 			const setActiveToolsByName = created.setActiveToolsByName.bind(created);
@@ -370,6 +380,41 @@ describe("AgentSession plan-mode convergence", () => {
 
 		expect(harness.session.getPlanModeState()).toBeUndefined();
 		expect(harness.session.getActiveToolNames()).toEqual(["read"]);
+	});
+
+	it("reconciles a committed new session before session_switch hooks run", async () => {
+		let reconciled = false;
+		let hookObservedReconciliation = false;
+		const harness = await createPlanSession([], {
+			onSessionSwitch: () => {
+				hookObservedReconciliation = reconciled;
+			},
+		});
+		harness.session.setNewSessionTransitionReconciler(async ({ committed }) => {
+			expect(committed).toBe(true);
+			reconciled = true;
+		});
+
+		expect(await harness.session.newSession()).toBe(true);
+		expect(hookObservedReconciliation).toBe(true);
+	});
+
+	it("emits session_switch before reporting a committed reconciliation failure", async () => {
+		const failure = new Error("reconciliation failed");
+		let hookRuns = 0;
+		const harness = await createPlanSession([], {
+			onSessionSwitch: () => {
+				hookRuns++;
+			},
+		});
+		harness.session.setNewSessionTransitionReconciler(async () => {
+			throw failure;
+		});
+
+		await expect(harness.session.newSession()).rejects.toThrow(
+			"New session committed, but post-commit transition work failed: reconciliation failed",
+		);
+		expect(hookRuns).toBe(1);
 	});
 
 	it("tears down and rearms PlanYolo across a committed new session", async () => {
