@@ -80,8 +80,9 @@ function renderUsageReports(
 		lines.push("", formatProviderName(provider));
 		const reportingModels = usageModelSelectors.filter(selector => selector.startsWith(`${provider}/`));
 		if (reportingModels.length > 0) {
-			lines.push("  Models with usage data");
-			for (const selector of reportingModels) lines.push(`    ${sanitizeText(selector)}`);
+			lines.push(
+				`  ${reportingModels.length} model${reportingModels.length === 1 ? "" : "s"} with usage data (/usage models)`,
+			);
 		}
 		const activeAccount = resolveActiveAccount?.(provider);
 		// Provider-wide disclaimers render once per provider, not per limit.
@@ -195,4 +196,33 @@ export async function buildUsageReportText(runtime: SlashCommandRuntime): Promis
 		`Premium requests: ${stats.premiumRequests}`,
 		`Cost: $${stats.cost.toFixed(6)}`,
 	].join("\n");
+}
+
+/**
+ * Build the `/usage models` ACP-mode text: the full roster of model selectors
+ * backed by a live usage report, grouped by provider. The default `/usage`
+ * view only carries the per-provider count.
+ */
+export async function buildUsageModelRosterText(runtime: SlashCommandRuntime): Promise<string> {
+	const provider = runtime.session as SlashCommandRuntime["session"] & {
+		fetchUsageReports?: () => Promise<UsageReport[] | null>;
+		getUsageReportingModelSelectors?: (reports: readonly UsageReport[]) => string[];
+	};
+	const reports = (await provider.fetchUsageReports?.()) ?? [];
+	const selectors = provider.getUsageReportingModelSelectors?.(reports) ?? [];
+	if (selectors.length === 0) return "No models are mapped to a live usage report.";
+	const byProvider = new Map<string, string[]>();
+	for (const selector of selectors) {
+		const slash = selector.indexOf("/");
+		const providerId = slash > 0 ? selector.slice(0, slash) : selector;
+		const models = byProvider.get(providerId) ?? [];
+		models.push(slash > 0 ? selector.slice(slash + 1) : selector);
+		byProvider.set(providerId, models);
+	}
+	const lines = [`Models with usage data (${selectors.length})`];
+	for (const [providerId, models] of [...byProvider.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+		lines.push("", `${formatProviderName(providerId)} (${models.length})`);
+		for (const model of models) lines.push(`  ${sanitizeText(model)}`);
+	}
+	return ["```", ...lines, "```"].join("\n");
 }

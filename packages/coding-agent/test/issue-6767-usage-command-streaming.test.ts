@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { UsageReport } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -97,7 +98,25 @@ describe("issue #6767 /usage output during streaming", () => {
 
 		// streamedReply + the deferred usage panel (Spacer + Text).
 		expect(mode.chatContainer.children).toHaveLength(3);
+		const transcript = stripVTControlCharacters(mode.chatContainer.render(80).join("\n"));
+		expect(transcript.match(/Usage ·/g)).toHaveLength(1);
+	});
+
+	it("defers the usage model roster until the active turn ends, mounting it once", async () => {
+		vi.spyOn(session, "fetchUsageReports").mockResolvedValue(usageReports);
+		vi.spyOn(session, "getUsageReportingModelSelectors").mockReturnValue(["openai-codex/gpt-5.6"]);
+		const streamedReply = new Text("agent is streaming", 0, 0);
+		mode.chatContainer.addChild(streamedReply);
+
+		await mode.handleUsageModelsCommand();
+
+		expect(mode.chatContainer.children).toEqual([streamedReply]);
+
+		streaming = false;
+		await mode.eventController.handleEvent({ type: "agent_end", messages: [] } as AgentSessionEvent);
+
+		expect(mode.chatContainer.children).toHaveLength(3);
 		const transcript = mode.chatContainer.render(80).join("\n");
-		expect(transcript.match(/Usage \(/g)).toHaveLength(1);
+		expect(transcript.match(/Models with usage data/g)).toHaveLength(1);
 	});
 });

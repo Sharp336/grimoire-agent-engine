@@ -384,6 +384,13 @@
 - Fixed heavily branched conversation trees shifting linear continuations into disconnected columns.
 - Fixed plugin installation validation failures for legacy compatibility shims.
 - Removed hard-coded references to disabled or absent agents in system and tool prompts.
+### Added
+
+- Added `/usage models`, which lists every model backed by a live usage report grouped by provider. The default `/usage` view now shows only a per-provider model count, so the quota bars are no longer buried under a full model roster.
+
+### Changed
+
+- Rewrote the `/usage` TUI layout: each quota window is now one row, the account legend renders once per provider instead of once per window, and every account cell carries its own remaining percentage beside its bar. A window group previously spent three or four lines on a title row, a label row, a bar row and a reset line, and showed a single unlabelled cross-account average where a per-account reader expects the active account's headroom ([#5770](https://github.com/can1357/oh-my-pi/issues/5770)). Bars still fill with used quota and percentages still report free quota, with a one-line legend stating both. Accounts that report no limits no longer occupy an empty bar column, and cells are keyed to the owning report so a provider where one account is missing a window keeps its bars under the right legend entry. Narrow terminals shrink the label column, then drop the reset column, then drop the bar glyphs, so the percentage survives longest.
 
 ## [17.2.4] - 2026-08-01
 

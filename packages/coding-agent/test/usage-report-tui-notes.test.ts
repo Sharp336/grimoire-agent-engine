@@ -16,7 +16,10 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import type { UsageReport } from "@oh-my-pi/pi-ai";
-import { renderUsageReports } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
+import {
+	renderUsageModelRoster,
+	renderUsageReports,
+} from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 
 const HOUR = 3_600_000;
@@ -69,15 +72,40 @@ describe("renderUsageReports (#3268 TUI aggregate)", () => {
 		expect(occurrences).toBe(1);
 	});
 
-	it("lists every model mapped to the provider's live usage data", () => {
+	it("summarizes the provider's usage-reporting models instead of listing them inline", () => {
 		const reports = [
 			report("github-copilot", "acct@example.test", [limit("Copilot", "monthly", 30 * 24 * HOUR, 0.4)]),
 		];
 		const models = ["github-copilot/gpt-5.6", "github-copilot/claude-sonnet-4.6"];
 		const text = stripVTControlCharacters(renderUsageReports(reports, theme, Date.now(), 120, undefined, models));
+		// The roster moved behind `/usage models`; the default view keeps the count
+		// so the quota bars are not buried under it.
+		expect(text).toContain("2 models");
+		expect(text).not.toContain(models[0]);
+		expect(text).not.toContain(models[1]);
+	});
+
+	it("groups the full model roster by provider for /usage models", () => {
+		const models = ["github-copilot/gpt-5.6", "github-copilot/claude-sonnet-4.6", "anthropic/claude-opus-4-6"];
+		const text = stripVTControlCharacters(renderUsageModelRoster(theme, models, 120));
 		expect(text).toContain("Models with usage data");
-		expect(text).toContain(models[0]);
-		expect(text).toContain(models[1]);
+		expect(text).toContain("github-copilot");
+		expect(text).toContain("gpt-5.6");
+		expect(text).toContain("claude-sonnet-4.6");
+		expect(text).toContain("claude-opus-4-6");
+	});
+
+	it("sanitizes roster identifiers before enforcing the width cap", () => {
+		const width = 24;
+		const models = [
+			"custom-provider-with-a-very-long-name/model\twith-tabs",
+			"custom-provider-with-a-very-long-name/model\x1b]0;hidden\x07-safe",
+		];
+		const text = stripVTControlCharacters(renderUsageModelRoster(theme, models, width));
+
+		expect(text).not.toContain("\t");
+		expect(text).not.toContain("hidden");
+		for (const line of text.split("\n")) expect(Bun.stringWidth(line)).toBeLessThanOrEqual(width);
 	});
 
 	it("deduplicates identical per-limit notes when accounts share one window group", () => {
@@ -119,6 +147,70 @@ describe("renderUsageReports (#3268 TUI aggregate)", () => {
 		expect(text).toContain("rae@example.com (Team Org)");
 	});
 
+	it("shows a scoped account identity for a single report with empty metadata", () => {
+		const baseLimit = limit("Daily", "daily", 24 * HOUR, 0.3);
+		const scopedLimit = { ...baseLimit, scope: { ...baseLimit.scope, accountId: "scoped-account" } };
+		const reports: UsageReport[] = [report("test-provider", "", [scopedLimit])];
+
+		const text = stripVTControlCharacters(renderUsageReports(reports, theme, Date.now(), 120));
+
+		expect(text).toContain("scoped-account");
+		expect(text).not.toContain("account 1");
+	});
+
+	it("numbers saved-reset footnotes by their owning report", () => {
+		const resetCredits = { availableCount: 1, credits: [] };
+		const reports: UsageReport[] = [
+			{ provider: "openai-codex", fetchedAt: Date.now(), limits: [], resetCredits },
+			{ provider: "openai-codex", fetchedAt: Date.now(), limits: [], resetCredits },
+		];
+
+		const text = stripVTControlCharacters(renderUsageReports(reports, theme, Date.now(), 120));
+
+		expect(text).toContain("account 1: 1 saved reset");
+		expect(text).toContain("account 2: 1 saved reset");
+	});
+
+	it("sanitizes provider-supplied reset and unmetered account text", () => {
+		const reports: UsageReport[] = [
+			{
+				provider: "test-provider",
+				fetchedAt: Date.now(),
+				limits: [],
+				metadata: { email: "acct\tname\x1b]0;hidden\x07@example.test", planType: "business\tplan" },
+				resetCredits: { availableCount: 1, credits: [] },
+			},
+		];
+
+		const text = stripVTControlCharacters(renderUsageReports(reports, theme, Date.now(), 120));
+
+		expect(text).not.toContain("\t");
+		expect(text).not.toContain("hidden");
+		expect(text).toContain("business");
+		expect(text).toContain("plan");
+	});
+
+	it("clamps finite provider fractions and rejects non-finite values", () => {
+		const reports: UsageReport[] = [
+			report("test-provider", "acct@example.test", [
+				limit("Overage", "over", HOUR, 1.25),
+				limit("Negative", "negative", HOUR, -0.25),
+				limit("Not a number", "nan", HOUR, Number.NaN),
+				limit("Infinite", "infinite", HOUR, Number.POSITIVE_INFINITY),
+			]),
+		];
+
+		const text = stripVTControlCharacters(renderUsageReports(reports, theme, Date.now(), 120));
+		const lines = text.split("\n");
+
+		expect(lines.find(line => line.includes("Overage"))).toContain("0%");
+		expect(lines.find(line => line.includes("Negative"))).toContain("100%");
+		expect(lines.find(line => line.includes("Not a number"))).toContain("—");
+		expect(lines.find(line => line.includes("Infinite"))).toContain("—");
+		expect(text).not.toContain("NaN%");
+		expect(text).not.toContain("Infinity%");
+	});
+
 	it("renders used-only absolute amounts with neutral status and no account summary", () => {
 		const reports: UsageReport[] = [
 			report("anthropic", "spend@example.test", [
@@ -139,7 +231,7 @@ describe("renderUsageReports (#3268 TUI aggregate)", () => {
 		expect(text).not.toContain("1 accts");
 	});
 
-	it("preserves capped aggregate status when a group mixes capped and used-only amounts", () => {
+	it("keeps a per-account cell for every account when a group mixes capped and used-only amounts", () => {
 		const reports: UsageReport[] = [
 			report("anthropic", "capped@example.test", [
 				{
@@ -170,17 +262,23 @@ describe("renderUsageReports (#3268 TUI aggregate)", () => {
 		const text = stripVTControlCharacters(renderUsageReports(reports, theme, Date.now(), 160));
 
 		expect(text).toContain(theme.status.success);
+		// The capped account resolves to a percentage; the used-only sibling keeps
+		// its absolute amount. Both occupy their own column on the same row.
+		expect(text).toContain("50%");
 		expect(text).toContain("$123.45 used");
-		expect(text).toContain("2 accts");
+		const row = text.split("\n").find(line => line.includes("$123.45 used"));
+		expect(row).toContain("50%");
 	});
 });
 
 describe("renderUsageReports session marker (#5691 org-qualified identity)", () => {
-	it("suffixes the active org so same-email multi-org accounts are tellable apart", () => {
+	it("names the org-qualified session identity when no reported account matches it", () => {
 		const email = "dev@example.test";
 		const reports: UsageReport[] = [
 			report("anthropic", email, [limit("Claude 7 Day", "weekly", 7 * 24 * HOUR, 0.4)]),
 		];
+		// The identity carries an org; the report metadata does not, so the org
+		// gate rejects the match and the session must still be attributed.
 		const text = stripVTControlCharacters(
 			renderUsageReports(reports, theme, Date.now(), 120, provider =>
 				provider === "anthropic" ? { email, orgId: "uuid-A", orgName: "Team Org" } : undefined,
@@ -190,7 +288,7 @@ describe("renderUsageReports session marker (#5691 org-qualified identity)", () 
 		expect(marker).toContain(`${email} (Team Org)`);
 	});
 
-	it("falls back to the bare base when the active identity carries no org", () => {
+	it("marks the matching account column instead of repeating the session identity", () => {
 		const email = "solo@example.test";
 		const reports: UsageReport[] = [
 			report("anthropic", email, [limit("Claude 7 Day", "weekly", 7 * 24 * HOUR, 0.4)]),
@@ -200,8 +298,10 @@ describe("renderUsageReports session marker (#5691 org-qualified identity)", () 
 				provider === "anthropic" ? { email } : undefined,
 			),
 		);
-		const marker = text.split("\n").find(line => line.includes("in use by this session"));
-		expect(marker).toContain(email);
-		expect(marker).not.toContain("(");
+		const heading = text.split("\n").find(line => line.includes("anthropic"));
+		expect(heading).toContain(theme.status.enabled);
+		expect(heading).toContain(email);
+		expect(heading).not.toContain("(");
+		expect(text).not.toContain("in use by this session");
 	});
 });
