@@ -51,8 +51,7 @@ const PROVIDER_LABELS: Readonly<Record<string, string>> = {
 	zai: "Z",
 };
 
-function compactProviderLabel(provider: string | undefined): string {
-	if (!provider) return "?";
+function compactProviderLabel(provider: string): string {
 	const known = PROVIDER_LABELS[provider];
 	if (known) return known;
 	const initials = provider
@@ -63,32 +62,179 @@ function compactProviderLabel(provider: string | undefined): string {
 	return initials.slice(0, 3) || provider.slice(0, 2).toUpperCase();
 }
 
+const MODEL_FILLER_TOKENS = new Set(["preview", "experimental", "contributor", "edition", "ultra", "extended"]);
+
+const MODEL_EFFORT_TOKENS = new Set(["high", "low", "medium", "max", "xhigh", "fast", "none", "minimal", "default"]);
+
+const MODEL_QUALIFIER_LETTERS: Readonly<Record<string, string>> = {
+	contributor: "C",
+	preview: "P",
+	experimental: "X",
+};
+
+const MODEL_VERSION_TOKEN = /^\d+(?:\.\d+){0,2}$/;
+
+interface CompactModelIdentity {
+	providerLabel: string;
+	pre: string[];
+	version: string | undefined;
+	post: string[];
+	letter: string;
+	hyphenateFamilyVersion: boolean;
+}
+
+function tokenizeModelLabel(text: string): string[] {
+	const trimmed = text.trim();
+	if (!trimmed) return [];
+	const parts = /\s/.test(trimmed) ? trimmed.split(/\s+/) : trimmed.split(/[-_]+/).filter(Boolean);
+	const tokens: string[] = [];
+	for (const part of parts) {
+		const split = /^([A-Za-z]+)-(\d+(?:\.\d+){0,2})$/.exec(part);
+		if (split?.[1] && split[2]) {
+			tokens.push(split[1], split[2]);
+		} else {
+			tokens.push(part);
+		}
+	}
+	return tokens;
+}
+
+function parseCompactModelIdentity(
+	name: string,
+	id: string | undefined,
+	provider: string | undefined,
+): CompactModelIdentity {
+	const providerLabel = provider ? compactProviderLabel(provider) : "";
+	const source = name.trim() || id?.trim() || "no-model";
+	const identity = `${name} ${id ?? ""}`.toLowerCase();
+	let letter = "";
+	for (const [word, abbrev] of Object.entries(MODEL_QUALIFIER_LETTERS)) {
+		if (identity.includes(word)) {
+			letter = abbrev;
+			break;
+		}
+	}
+
+	let text = source.replace(/^Claude\s+/i, "");
+	text = text.replace(/\s+(Contributor|Preview|Experimental)\b/gi, "");
+	let tokens = tokenizeModelLabel(text);
+
+	if (provider) {
+		const providerTokens = new Set(
+			provider
+				.split(/[-_/]+/)
+				.filter(part => part.length > 1)
+				.map(part => part.toLowerCase()),
+		);
+		tokens = tokens.filter(token => !providerTokens.has(token.toLowerCase()));
+	}
+
+	tokens = tokens.filter(token => {
+		const lower = token.toLowerCase();
+		if (MODEL_VERSION_TOKEN.test(token)) return true;
+		return !MODEL_FILLER_TOKENS.has(lower) && !MODEL_EFFORT_TOKENS.has(lower);
+	});
+
+	const versionIdx = tokens.findIndex(token => MODEL_VERSION_TOKEN.test(token));
+	const pre = versionIdx >= 0 ? tokens.slice(0, versionIdx) : tokens;
+	const version = versionIdx >= 0 ? tokens[versionIdx] : undefined;
+	const post = versionIdx >= 0 ? tokens.slice(versionIdx + 1) : [];
+	const family = pre[pre.length - 1];
+	const haystack = `${name} ${id ?? ""}`;
+	const escapedFamily = family ? family.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : "";
+	const escapedVersion = version ? version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : "";
+	const hyphenateFamilyVersion = Boolean(
+		family && version && new RegExp(`${escapedFamily}-${escapedVersion}`, "i").test(haystack),
+	);
+
+	return { providerLabel, pre, version, post, letter, hyphenateFamilyVersion };
+}
+
+function formatCompactModelLabel(
+	identity: CompactModelIdentity,
+	pre: string[],
+	post: string[],
+	includeProvider: boolean,
+	includeLetter: boolean,
+	mode: "spaced" | "glue-post" | "tight",
+): string {
+	const parts: string[] = [];
+	if (identity.hyphenateFamilyVersion && identity.version && pre.length > 0 && mode !== "tight") {
+		parts.push(...pre.slice(0, -1), `${pre[pre.length - 1]}-${identity.version}`);
+	} else {
+		parts.push(...pre);
+		if (identity.version) parts.push(identity.version);
+	}
+	if (mode === "glue-post" && post.length > 0) {
+		const head = parts.join(" ");
+		const glued = `${head}${post.join("")}`;
+		const prefix = includeProvider && identity.providerLabel ? `${identity.providerLabel}·` : "";
+		return `${prefix}${glued}${includeLetter ? identity.letter : ""}`;
+	}
+	parts.push(...post);
+	const body = parts.filter(Boolean).join(mode === "tight" ? "" : " ");
+	const prefix = includeProvider && identity.providerLabel ? `${identity.providerLabel}·` : "";
+	return `${prefix}${body}${includeLetter ? identity.letter : ""}`;
+}
+
+/**
+ * Compact provider + family/version/qualifier under a cell budget. Drops redundant
+ * provider words, filler, and effort suffixes before ever slicing a token. Never
+ * returns a mid-version fragment when a shorter semantically complete label fits.
+ */
 function compactModelLabel(
 	name: string,
 	id: string | undefined,
 	provider: string | undefined,
 	maxLength: number,
 ): string {
-	let modelName = name.replace(/^Claude\s+/i, "");
-	const identity = `${name} ${id ?? ""}`.toLowerCase();
-	let qualifier = "";
-	if (identity.includes("contributor")) {
-		modelName = modelName.replace(/\s+Contributor$/i, "");
-		qualifier = "C";
-	} else if (identity.includes("preview")) {
-		modelName = modelName.replace(/\s+Preview$/i, "");
-		qualifier = "P";
-	} else if (identity.includes("experimental")) {
-		modelName = modelName.replace(/\s+Experimental$/i, "");
-		qualifier = "X";
-	}
+	const identity = parseCompactModelIdentity(name, id, provider);
+	const seen = new Set<string>();
+	const candidates: string[] = [];
+	const push = (label: string) => {
+		if (!label || seen.has(label)) return;
+		seen.add(label);
+		candidates.push(label);
+	};
+	const emit = (nextPre: string[], nextPost: string[], includeProvider: boolean, includeLetter: boolean) => {
+		push(formatCompactModelLabel(identity, nextPre, nextPost, includeProvider, includeLetter, "spaced"));
+		push(formatCompactModelLabel(identity, nextPre, nextPost, includeProvider, includeLetter, "glue-post"));
+		push(formatCompactModelLabel(identity, nextPre, nextPost, includeProvider, includeLetter, "tight"));
+	};
 
-	const providerLabel = compactProviderLabel(provider);
-	const prefix = `${providerLabel}·${modelName}`;
-	const full = `${prefix}${qualifier}`;
-	if (Bun.stringWidth(full) <= maxLength) return full;
-	if (!qualifier) return truncateToWidth(full, maxLength);
-	return `${truncateToWidth(prefix, Math.max(1, maxLength - Bun.stringWidth(qualifier)))}${qualifier}`;
+	let pre = [...identity.pre];
+	let post = [...identity.post];
+	emit(pre, post, true, true);
+	while (pre.length > 1) {
+		pre = pre.slice(1);
+		emit(pre, post, true, true);
+	}
+	if (pre.length === 1) {
+		pre = [];
+		emit(pre, post, true, true);
+	}
+	while (post.length > 0) {
+		post = post.slice(0, -1);
+		emit(pre, post, true, true);
+	}
+	emit([], [], true, true);
+	emit([], [], true, false);
+	emit([], [], false, true);
+	emit([], [], false, false);
+	if (identity.letter) push(identity.letter);
+	if (identity.providerLabel) push(identity.providerLabel);
+	for (const token of identity.pre) push(token);
+
+	for (const candidate of candidates) {
+		if (Bun.stringWidth(candidate) <= maxLength) return candidate;
+	}
+	const fallback = identity.version ?? identity.pre[0] ?? identity.providerLabel ?? name;
+	if (Bun.stringWidth(fallback) <= maxLength) return fallback;
+	const truncated = truncateToWidth(fallback, maxLength);
+	if (identity.version && !truncated.includes(identity.version) && Bun.stringWidth(identity.version) <= maxLength) {
+		return identity.version;
+	}
+	return truncated;
 }
 
 function stripDisplayRoot(pwd: string): string {
@@ -153,12 +299,7 @@ const modelSegment: StatusLineSegment = {
 		const opts = ctx.options.model ?? {};
 
 		const rawModelName = state.model?.name || state.model?.id || "no-model";
-		const modelName = compactModelLabel(
-			rawModelName,
-			state.model?.id,
-			state.model?.provider,
-			opts.maxLength ?? 18,
-		);
+		const modelName = compactModelLabel(rawModelName, state.model?.id, state.model?.provider, opts.maxLength ?? 18);
 
 		// Resolve the current thinking-level display ("◉ xhigh", "⟳ auto", …)
 		// when the model supports thinking and the segment isn't hiding it.
@@ -537,12 +678,11 @@ const contextTotalSegment: StatusLineSegment = {
 };
 
 /**
- * Total time the agent was actively processing this session — the union of
- * every `agent_start`→`agent_end` window plus the currently-running window,
- * sourced from {@link SegmentContext.activeMs}. Idle wall-clock between turns
- * never accumulates, so the displayed total reflects how long the agent has
- * been working for the user, not how long the session has been open. Hidden
- * before the first second of activity to avoid flashing `0s` at session start.
+ * Elapsed wall-clock of the current top-level agent turn, sourced from
+ * {@link SegmentContext.activeMs}. Starts at `agent_start`, keeps advancing
+ * while the parent waits on background jobs or subagents, and hides when the
+ * turn ends so idle time is not shown as active work. Hidden before the first
+ * second of activity to avoid flashing `0s` at session start.
  */
 const timeSpentSegment: StatusLineSegment = {
 	id: "time_spent",

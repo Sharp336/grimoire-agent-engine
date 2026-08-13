@@ -171,6 +171,14 @@
 
 - Removed the `resolveAgentModelSource` model-resolver export, whose only use was being fed to `resolveExplicitModelRole`. Replaced by `resolveAgentModelSelection`, which returns the expanded `patterns` and the pre-expansion `role` together so a spawn path cannot derive one without the other ([#7910](https://github.com/can1357/oh-my-pi/pull/7910) by [@enieuwy](https://github.com/enieuwy)).
 - A run is now attributed to the model that actually produced its output, not whichever model the session was last pointed at. A retry fallback that errored on its first request — an exhausted quota, a hard provider error — was credited with the whole run in the Agent Hub row and the settled task result, even when the previous model did every turn. Sessions expose the serving model directly, holding the last model that produced output while a candidate is armed but unproven, and transcript-derived history stops at the newest turn that produced output.
+### Changed
+
+- The `time_spent` status-line segment now shows elapsed wall-clock for the current top-level agent turn instead of cumulative session active time. The timer hides when the turn ends, so idle time between prompts is not displayed as active work.
+
+### Fixed
+
+- Fixed the default status line dropping the elapsed-time metric on narrow phone/tmux terminals: wrap priority now keeps `time_spent` with model and context instead of clipping it behind cache, cost, and other secondary segments. Throughput (`token_rate` / tok/s) is dropped first under zoom so it no longer crowds out elapsed time.
+- Fixed the status-line model label cutting version/name fragments with an ellipsis at narrow widths; it now compresses redundant provider words and filler first and keeps provider + version + distinguishing qualifier when those pieces can physically fit.
 
 ## [17.2.12] - 2026-08-08
 

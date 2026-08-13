@@ -1260,6 +1260,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.statusLine.watchBranch(() => {
 			this.ui.requestRender();
 		});
+		this.statusLine.watchActivityTick(() => {
+			this.ui.requestRender();
+		});
 	}
 
 	/** Reload the title-generation system prompt override for the provided working

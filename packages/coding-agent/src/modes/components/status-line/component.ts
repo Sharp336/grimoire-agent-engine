@@ -33,6 +33,7 @@ import type {
 
 const JJ_REFRESH_TTL_MS = 5000;
 const WATCHER_FAILURE_POLL_TTL_MS = 5000;
+const TIME_SPENT_TICK_MS = 1000;
 
 function normalizeCodexIdentityValue(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim() ? value.trim().toLowerCase() : undefined;
@@ -242,10 +243,10 @@ function resolveWorktreeContext(cwd: string): WorktreeContext | null {
 }
 
 /**
- * Per-{@link AgentSession} active-processing meter for the `time_spent`
- * segment. `activeMs` is the union of every completed `agent_start`→
- * `agent_end` window; `activeStartedAt` is the start timestamp of the
- * currently-running window, or `null` when idle.
+ * Per-{@link AgentSession} current-turn elapsed meter for the `time_spent`
+ * segment. `activeStartedAt` is the start timestamp of the currently-running
+ * top-level `agent_start` window, or `null` when idle. Elapsed time is only
+ * the open window — previous turns and idle gaps are not included.
  *
  * `sessionFile` snapshots the loaded session-file path at meter-creation
  * time. `AgentSession.switchSession` (/resume, /move, ACP fork, RPC
@@ -254,12 +255,10 @@ function resolveWorktreeContext(cwd: string): WorktreeContext | null {
  * cannot tell two conversations apart. `#meter()` compares this snapshot
  * against the live `session.sessionFile`, and a real-to-real change
  * starts the meter fresh instead of crediting the new conversation with
- * the previous one's accumulated active time. The undefined → real
- * first-save transition does not reset, since the session identity has
- * not changed.
+ * the previous one's elapsed window. The undefined → real first-save
+ * transition does not reset, since the session identity has not changed.
  */
 interface ActiveMeter {
-	activeMs: number;
 	activeStartedAt: number | null;
 	sessionFile: string | undefined;
 }
@@ -299,6 +298,8 @@ function wrappedStatusPriority(id: StatusLineSegmentId | undefined): number {
 			return 95;
 		case "path":
 			return 90;
+		case "time_spent":
+			return 93;
 		case "git":
 			return 85;
 		case "cache_hit":
@@ -311,8 +312,6 @@ function wrappedStatusPriority(id: StatusLineSegmentId | undefined): number {
 			return 72;
 		case "usage":
 			return 82;
-		case "token_rate":
-			return 68;
 		case "subagents":
 			return 65;
 		case "pr":
@@ -321,8 +320,6 @@ function wrappedStatusPriority(id: StatusLineSegmentId | undefined): number {
 			return 55;
 		case "collab":
 			return 50;
-		case "time_spent":
-			return 45;
 		case "pi":
 			return 40;
 		case "token_in":
@@ -338,6 +335,8 @@ function wrappedStatusPriority(id: StatusLineSegmentId | undefined): number {
 			return 15;
 		case "hostname":
 			return 10;
+		case "token_rate":
+			return 8; // drop tok/s first on zoom; keep elapsed/model/context
 		case "time":
 			return 5;
 		default:
@@ -386,24 +385,24 @@ export class StatusLineComponent implements Component {
 	#hookStatuses: Map<string, string> = new Map();
 	#subagentCount: number = 0;
 	/**
-	 * Active-processing accounting for the `time_spent` segment, keyed per
+	 * Current-turn elapsed accounting for the `time_spent` segment, keyed per
 	 * {@link AgentSession} so the focus-controller mid-turn attach path
 	 * cannot leak an unmatched synthesized `agent_start` from a subagent
 	 * into the main session's meter.
 	 *
-	 * Each meter is `{ activeMs, activeStartedAt }`: `activeMs` is the union
-	 * of every completed `agent_start`→`agent_end` window since
-	 * {@link resetActiveTime} last reset it; `activeStartedAt` is the start
-	 * timestamp of the currently-running window (or `null` when idle).
-	 * `getActiveMs()` returns `activeMs + (now - activeStartedAt)` for the
-	 * currently-attached session, so the counter ticks live during a turn
-	 * and freezes the instant the agent yields.
+	 * Each meter tracks `activeStartedAt` for the currently-running
+	 * `agent_start` window (or `null` when idle). `getActiveMs()` returns
+	 * `now - activeStartedAt` while the window is open and `0` when idle, so
+	 * the counter ticks live during a turn — including waits on background
+	 * jobs — and hides the instant the agent yields.
 	 *
 	 * WeakMap so meters die with their session (e.g. a parked subagent
 	 * dropped from the registry); the main session's meter survives focus
 	 * round-trips because the same {@link AgentSession} ref is reused.
 	 */
 	#activeMeters: WeakMap<AgentSession, ActiveMeter> = new WeakMap();
+	#onActivityTick: (() => void) | null = null;
+	#activityTick: Timer | null = null;
 	#planModeStatus: { enabled: boolean; paused: boolean } | null = null;
 	#loopModeStatus: SegmentContext["loopMode"] = null;
 	#goalModeStatus: { enabled: boolean; paused: boolean } | null = null;
@@ -534,21 +533,23 @@ export class StatusLineComponent implements Component {
 	 * synthesized an `agent_start` on a mid-turn attach but the matching
 	 * real `agent_end` never reached us — the user detached before it
 	 * fired, and re-focusing later (after the agent finished) would
-	 * otherwise tick over the entire detached gap. Crediting that gap to
-	 * `activeMs` would be wrong (the agent finished at some point we never
-	 * observed), so the window is dropped rather than folded in.
+	 * otherwise tick over the entire detached gap. Crediting that gap as
+	 * current-turn elapsed would be wrong (the agent finished at some point
+	 * we never observed), so the window is dropped.
 	 */
 	#closeStaleActiveWindow(): void {
 		const meter = this.#meter();
 		if (meter.activeStartedAt === null) return;
 		if (this.session.isStreaming) return;
 		meter.activeStartedAt = null;
+		this.#syncActivityTick();
 	}
 
 	updateSettings(settings: StatusLineSettings): void {
 		this.#settings = settings;
 		this.#effectiveSettings = undefined;
 		if (this.#onBranchChange) this.#setupGitWatcher();
+		this.#syncActivityTick();
 	}
 
 	getEffectiveSettingsForTest(): EffectiveStatusLineSettings {
@@ -575,17 +576,16 @@ export class StatusLineComponent implements Component {
 	}
 
 	/**
-	 * Reset the currently-attached session's active-time accumulators so
+	 * Reset the currently-attached session's current-turn elapsed window so
 	 * the `time_spent` segment starts from zero. Called from `/clear`,
-	 * fresh-session, and joined-collab paths; both the completed
-	 * accumulator and any in-flight window are dropped, so a reset
-	 * mid-turn ignores the running window (the matching `markActivityEnd`
-	 * will see an idle meter and no-op).
+	 * fresh-session, and joined-collab paths; any in-flight window is
+	 * dropped, so a reset mid-turn ignores the running window (the matching
+	 * `markActivityEnd` will see an idle meter and no-op).
 	 */
 	resetActiveTime(): void {
 		const meter = this.#meter();
-		meter.activeMs = 0;
 		meter.activeStartedAt = null;
+		this.#syncActivityTick();
 	}
 
 	/**
@@ -599,30 +599,74 @@ export class StatusLineComponent implements Component {
 		const meter = this.#meter();
 		if (meter.activeStartedAt !== null) return;
 		meter.activeStartedAt = Date.now();
+		this.#syncActivityTick();
 	}
 
 	/**
-	 * Close the currently-attached session's open active-processing
-	 * window, folding its elapsed time into the accumulator. Idempotent
-	 * when the meter is already idle so callers can fire it on every
-	 * `agent_end` without guarding.
+	 * Close the currently-attached session's open current-turn window.
+	 * Idempotent when the meter is already idle so callers can fire it on
+	 * every `agent_end` without guarding. Non-terminal settles that leave
+	 * background work running must not call this, so elapsed time keeps
+	 * advancing until the terminal `agent_end`.
 	 */
 	markActivityEnd(): void {
 		const meter = this.#meter();
 		if (meter.activeStartedAt === null) return;
-		meter.activeMs += Math.max(0, Date.now() - meter.activeStartedAt);
 		meter.activeStartedAt = null;
+		this.#syncActivityTick();
 	}
 
 	/**
-	 * Snapshot of total active-processing time for the currently-attached
-	 * session, including any in-flight window. Exposed for the segment
-	 * context builder; tests assert against this too.
+	 * Snapshot of current-turn elapsed time for the currently-attached
+	 * session. `0` when idle. Exposed for the segment context builder;
+	 * tests assert against this too.
 	 */
 	getActiveMs(): number {
 		const meter = this.#meter();
-		if (meter.activeStartedAt === null) return meter.activeMs;
-		return meter.activeMs + Math.max(0, Date.now() - meter.activeStartedAt);
+		if (meter.activeStartedAt === null) return 0;
+		return Math.max(0, Date.now() - meter.activeStartedAt);
+	}
+
+	/**
+	 * Register a ~1 Hz callback used to repaint the status line while a
+	 * current-turn window is open. Interactive mode wires this to
+	 * `ui.requestRender`. No-ops when `time_spent` is not in the layout.
+	 */
+	watchActivityTick(onTick: () => void): void {
+		this.#onActivityTick = onTick;
+		this.#syncActivityTick();
+	}
+
+	#hasTimeSpentSegment(): boolean {
+		const settings = this.#resolveSettings();
+		return settings.leftSegments.includes("time_spent") || settings.rightSegments.includes("time_spent");
+	}
+
+	#clearActivityTick(): void {
+		if (!this.#activityTick) return;
+		clearInterval(this.#activityTick);
+		this.#activityTick = null;
+	}
+
+	#syncActivityTick(): void {
+		const shouldTick =
+			!this.#disposed &&
+			this.#onActivityTick !== null &&
+			this.#meter().activeStartedAt !== null &&
+			this.#hasTimeSpentSegment();
+		if (!shouldTick) {
+			this.#clearActivityTick();
+			return;
+		}
+		if (this.#activityTick) return;
+		this.#activityTick = setInterval(() => {
+			if (this.#disposed || this.#meter().activeStartedAt === null || !this.#hasTimeSpentSegment()) {
+				this.#clearActivityTick();
+				return;
+			}
+			this.#onActivityTick?.();
+		}, TIME_SPENT_TICK_MS);
+		this.#activityTick.unref?.();
 	}
 
 	/**
@@ -631,8 +675,8 @@ export class StatusLineComponent implements Component {
 	 * {@link AgentSession} ref (`switchSession` paths: `/resume`, `/move`,
 	 * ACP fork/load, RPC `switch_session`, extension `switchSession`):
 	 * a real-to-real change starts the meter fresh so the new
-	 * conversation does not inherit the previous one's accumulated active
-	 * time. The undefined → real first-save transition only refreshes the
+	 * conversation does not inherit the previous one's elapsed window.
+	 * The undefined → real first-save transition only refreshes the
 	 * snapshot — the conversation identity has not changed.
 	 */
 	#meter(): ActiveMeter {
@@ -648,7 +692,7 @@ export class StatusLineComponent implements Component {
 			}
 		}
 		if (!meter) {
-			meter = { activeMs: 0, activeStartedAt: null, sessionFile: currentFile };
+			meter = { activeStartedAt: null, sessionFile: currentFile };
 			this.#activeMeters.set(this.session, meter);
 		}
 		return meter;
@@ -753,6 +797,8 @@ export class StatusLineComponent implements Component {
 		this.#branchResolveActive = undefined;
 		this.#resetJjRequests();
 		this.#onBranchChange = null;
+		this.#onActivityTick = null;
+		this.#clearActivityTick();
 		this.#clearUsageStartTimer();
 		this.#onCodexResetFireworks = undefined;
 		this.#codexResetSnapshots.clear();
@@ -2012,7 +2058,29 @@ export class StatusLineComponent implements Component {
 		const sepWidth = visibleWidth(separatorDef.left);
 		const capWidth = separatorDef.endCaps && !transparentBg ? visibleWidth(separatorDef.endCaps.right) : 0;
 		const maxItemWidth = Math.max(1, width - 2 - capWidth);
-		items = items.map(item => ({ ...item, content: truncateToWidth(item.content, maxItemWidth) }));
+		const fitWrappedItem = (item: WrappedStatusItem): WrappedStatusItem => {
+			if (item.id === "model") {
+				if (visibleWidth(item.content) <= maxItemWidth) return item;
+				const tryRender = (maxLength: number, showThinkingLevel: boolean) =>
+					renderSegment("model", {
+						...ctx,
+						options: {
+							...ctx.options,
+							model: { ...ctx.options.model, maxLength, showThinkingLevel },
+						},
+					});
+				for (const showThinkingLevel of [true, false]) {
+					for (let cap = Math.min(ctx.options.model?.maxLength ?? 18, maxItemWidth); cap >= 3; cap--) {
+						const rendered = tryRender(cap, showThinkingLevel);
+						if (rendered.visible && visibleWidth(rendered.content) <= maxItemWidth) {
+							return { ...item, content: rendered.content };
+						}
+					}
+				}
+			}
+			return { ...item, content: truncateToWidth(item.content, maxItemWidth) };
+		};
+		items = items.map(fitWrappedItem);
 
 		const rowWidth = (row: readonly WrappedStatusItem[]): number => {
 			if (row.length === 0) return 0;
