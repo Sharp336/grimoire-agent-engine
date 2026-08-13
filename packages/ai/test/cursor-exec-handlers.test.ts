@@ -554,6 +554,9 @@ describe("Cursor request action encoding", () => {
 	});
 
 	it("uses a user message action for a trailing custom-role injection", async () => {
+		// Direct streamCursor path: the coding-agent pipeline converts custom →
+		// developer in convertToLlm before the provider, but this package is a
+		// standalone library whose direct consumers may pass custom-role messages.
 		const payload = await captureCursorPayload({
 			messages: [
 				{ role: "user", content: "What is my name?", timestamp: 0 },

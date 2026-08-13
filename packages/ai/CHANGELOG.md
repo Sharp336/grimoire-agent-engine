@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Cursor provider dropping trailing `custom`-role messages: `buildGrpcRequest` now treats `custom` as an active user turn (previously degraded to `resumeAction`, dropping the real user message), and history builders (`buildRootPromptMessagesJson`, `buildConversationTurns`) include `custom` messages. Defensive for the coding-agent pipeline (which converts `custom` → `developer` upstream) and required for direct `streamCursor` consumers of this package.
+
 ## [17.3.0] - 2026-08-13
 
 ### Breaking Changes
