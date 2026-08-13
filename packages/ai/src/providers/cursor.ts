@@ -4301,7 +4301,7 @@ function buildRootPromptMessagesJson(
 	for (let i = 0; i < messages.length; i++) {
 		if (i === activeUserMessageIndex) break;
 		const msg = messages[i];
-		if (msg.role === "user" || msg.role === "developer") {
+		if (msg.role === "user" || msg.role === "developer" || (msg.role as string) === "custom") {
 			const content = buildCursorRootPromptContent(msg.content);
 			if (content.length === 0) continue;
 			pushJson({ role: "user", content });
@@ -4448,7 +4448,7 @@ function buildConversationTurns(
 	let i = 0;
 	while (i < messages.length) {
 		const msg = messages[i];
-		if (msg.role !== "user" && msg.role !== "developer") {
+		if (msg.role !== "user" && msg.role !== "developer" && (msg.role as string) !== "custom") {
 			i++;
 			continue;
 		}
@@ -4469,7 +4469,7 @@ function buildConversationTurns(
 		const stepBlobIds: Uint8Array[] = [];
 		i++;
 
-		while (i < messages.length && messages[i].role !== "user" && messages[i].role !== "developer") {
+		while (i < messages.length && messages[i].role !== "user" && messages[i].role !== "developer" && (messages[i].role as string) !== "custom") {
 			const stepMsg = messages[i];
 			if (stepMsg.role === "assistant") {
 				for (const item of stepMsg.content) {
@@ -4624,12 +4624,22 @@ function buildGrpcRequest(
 
 	const activeUserMessageIndex = context.messages.length - 1;
 	const activeMessage = context.messages[activeUserMessageIndex];
+	// Injections (before_agent_start custom messages, e.g. MEMORY context) land
+	// as trailing `custom`-role messages; treat them as the active user turn so
+	// they are actually sent via userMessageAction instead of silently dropping
+	// the real user message behind a resumeAction.
 	const activeUserMessage =
-		activeMessage?.role === "user" || activeMessage?.role === "developer" ? activeMessage : undefined;
+		activeMessage?.role === "user" || activeMessage?.role === "developer" || (activeMessage?.role as string) === "custom"
+			? activeMessage
+			: undefined;
 	let userContent: string | (TextContent | ImageContent)[] | undefined;
 	let userText = "";
 	let hasUserImages = false;
-	if (activeUserMessage?.role === "user" || activeUserMessage?.role === "developer") {
+	if (
+		activeUserMessage?.role === "user" ||
+		activeUserMessage?.role === "developer" ||
+		(activeUserMessage?.role as string) === "custom"
+	) {
 		userContent = activeUserMessage.content;
 		if (typeof userContent === "string") {
 			userText = userContent.trim();
