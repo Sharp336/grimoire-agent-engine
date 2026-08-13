@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added transcript-native observability envelopes (`customType: "observability"`), an append-only routing audit log, and an immutable `stats://` protocol for Session and Run inspection.
+
 ## [17.2.15] - 2026-08-12
 
 ### Added
