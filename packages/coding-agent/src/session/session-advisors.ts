@@ -1572,6 +1572,9 @@ export class SessionAdvisors {
 			return this.#buildAdvisorRuntime(true);
 		}
 		this.#stopAdvisorRuntime();
+		for (const [slug, advisor] of this.#advisorStatuses) {
+			this.#advisorStatuses.set(slug, { name: advisor.name, status: "paused" });
+		}
 		return false;
 	}
 

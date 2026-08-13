@@ -165,6 +165,11 @@ describe("AgentSession advisor toggle", () => {
 		expect(session.isAdvisorActive()).toBe(true);
 		expect(session.isAdvisorEnabled()).toBe(true);
 		expect(session.formatAdvisorStatus()).toContain("Advisor is enabled (anthropic/claude-sonnet-4-5)");
+		expect(session.getAdvisorStateOverview()).toMatchObject({
+			configured: true,
+			active: true,
+			advisors: [{ status: "running" }],
+		});
 	});
 
 	it("explicit enable rebuilds the runtime when the advisor role changes", () => {
@@ -302,6 +307,10 @@ describe("AgentSession advisor toggle", () => {
 		expect(active).toBe(false);
 		expect(session.isAdvisorActive()).toBe(false);
 		expect(session.isAdvisorEnabled()).toBe(false);
+		const advisorState = session.getAdvisorStateOverview();
+		expect(advisorState).toMatchObject({ configured: false, active: false });
+		expect(advisorState.advisors.length).toBeGreaterThan(0);
+		expect(advisorState.advisors.every(advisor => advisor.status === "paused")).toBe(true);
 	});
 
 	it("setAdvisorEnabled reports inactive when the advisor role resolves to no model", () => {
@@ -316,6 +325,11 @@ describe("AgentSession advisor toggle", () => {
 		expect(session.formatAdvisorStatus()).toBe(
 			"Advisor setting is enabled, but no model is assigned to the 'advisor' role.",
 		);
+		expect(session.getAdvisorStateOverview()).toMatchObject({
+			configured: true,
+			active: false,
+			advisors: [{ status: "no_model" }],
+		});
 	});
 
 	it("keeps sessions isolated when sharing a Settings instance", async () => {
