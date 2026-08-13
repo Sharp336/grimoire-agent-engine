@@ -1,4 +1,4 @@
-import { VERSION } from "@oh-my-pi/pi-utils";
+import { logger, VERSION } from "@oh-my-pi/pi-utils";
 import { InteractiveMode } from "../modes/interactive-mode";
 import type { AgentSession } from "../session/agent-session";
 import type { EventBus } from "../utils/event-bus";
@@ -46,6 +46,10 @@ export async function startRpcAttachView(
 				mode.finishPendingSubmission(input);
 			}
 		}
-	})();
+	})().catch(error => {
+		// `getUserInput` rejects once the attach view is torn down; an escaping rejection here would
+		// take down the RPC host, whose own stdin protocol loop is unaffected by it.
+		logger.debug("Live attach input loop ended", { error: String(error) });
+	});
 	return { host, mode };
 }

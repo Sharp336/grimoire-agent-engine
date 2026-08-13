@@ -237,6 +237,111 @@ describe("live terminal attachment", () => {
 		await waitFor(() => host.ownershipSnapshot.controlState === "available");
 	});
 
+	test("a force takeover aimed at a claim awaiting a safe boundary uses the published epoch", async () => {
+		const streamingSession = { streaming: true };
+		const sessionId = crypto.randomUUID();
+		const terminal = new SwitchableTerminal();
+		terminal.start(
+			() => {},
+			() => {},
+		);
+		const host = new LiveAttachHost({
+			session: {
+				sessionId,
+				get isStreaming() {
+					return streamingSession.streaming;
+				},
+				subscribe: () => () => {},
+			} as unknown as AgentSession,
+			terminal,
+			hostMode: "rpc",
+			project: process.cwd(),
+			forceTimeoutMs: 30,
+		});
+		hosts.push(host);
+		await host.start();
+		const record = (await readLiveSessionRecords()).find(candidate => candidate.metadata.sessionId === sessionId);
+		if (!record) throw new Error("live attach test host was not published");
+
+		// The first claimant cannot be granted control: the session is mid-turn.
+		const watcher = await connect(record, { action: "attach", columns: 100, rows: 30 });
+		expect(await watcher.next("accepted")).toMatchObject({ type: "accepted", state: "control_pending" });
+		expect(host.ownershipSnapshot.controlState).toBe("control_pending");
+
+		// A claimant that read the published epoch must be accepted rather than rejected as stale.
+		const replacement = await connect(record, {
+			action: "force",
+			expectedEpoch: host.ownershipSnapshot.epoch,
+			columns: 80,
+			rows: 24,
+		});
+		expect(await replacement.next("accepted")).toMatchObject({ type: "accepted", state: "control_pending" });
+		expect(await watcher.next("revoked")).toMatchObject({ type: "revoked" });
+
+		streamingSession.streaming = false;
+		expect(await replacement.next("control", 500)).toMatchObject({ type: "control" });
+	});
+
+	test("a claim dropped before its safe boundary keeps its reconnect grace", async () => {
+		const streamingSession = { streaming: true };
+		const sessionId = crypto.randomUUID();
+		const terminal = new SwitchableTerminal();
+		const input: string[] = [];
+		terminal.start(
+			data => input.push(data),
+			() => {},
+		);
+		const listeners: Array<() => void> = [];
+		const host = new LiveAttachHost({
+			session: {
+				sessionId,
+				get isStreaming() {
+					return streamingSession.streaming;
+				},
+				subscribe: (listener: () => void) => {
+					listeners.push(listener);
+					return () => {};
+				},
+			} as unknown as AgentSession,
+			terminal,
+			hostMode: "rpc",
+			project: process.cwd(),
+			reconnectGraceMs: 5_000,
+		});
+		hosts.push(host);
+		await host.start();
+		const record = (await readLiveSessionRecords()).find(candidate => candidate.metadata.sessionId === sessionId);
+		if (!record) throw new Error("live attach test host was not published");
+
+		const watcher = await connect(record, { action: "attach", columns: 100, rows: 30 });
+		const accepted = await watcher.next("accepted");
+		if (accepted.type !== "accepted") throw new Error("expected accepted frame");
+		watcher.socket.destroy();
+		await waitFor(() => host.ownershipSnapshot.controller?.state === "reconnecting");
+
+		const resumed = await connect(record, {
+			action: "reconnect",
+			attachmentId: accepted.attachmentId,
+			resumeToken: accepted.resumeToken,
+			columns: 90,
+			rows: 25,
+		});
+		expect(await resumed.next("accepted")).toMatchObject({ type: "accepted", state: "control_pending" });
+
+		// Reaching the safe boundary now promotes the resumed claim instead of expiring it.
+		streamingSession.streaming = false;
+		for (const listener of listeners) listener();
+		const control = await resumed.next("control", 500);
+		if (control.type !== "control") throw new Error("expected control frame");
+		resumed.send({
+			type: "input",
+			epoch: control.epoch,
+			sequence: 1,
+			data: Buffer.from("resumed").toString("base64"),
+		});
+		await waitFor(() => input.join("") === "resumed");
+	});
+
 	test("the displaced interactive frontend parks and resumes after detach", async () => {
 		const localOutput: string[] = [];
 		const local = new AttachedSocketTerminal(80, 24, data => localOutput.push(data));

@@ -97,6 +97,7 @@ export class LiveAttachHost {
 	#localDisplaced = false;
 	#unsubscribeSession: (() => void) | undefined;
 	#cancelPostmortem: (() => void) | undefined;
+	#publishing: Promise<void> | undefined;
 	#closed = false;
 
 	constructor(options: LiveAttachHostOptions) {
@@ -134,7 +135,12 @@ export class LiveAttachHost {
 			);
 		}
 		const endpoint = attachEndpoint(this.#hostId);
-		await fs.mkdir(attachHostDir(this.#hostId), { recursive: true, mode: 0o700 });
+		const hostDir = attachHostDir(this.#hostId);
+		await fs.mkdir(hostDir, { recursive: true, mode: 0o700 });
+		// `mkdir` mode is masked by umask, and `listen` creates the socket world-connectable under a
+		// typical umask. Tighten the directory before binding so the socket is never reachable by
+		// another user, not even for the moment between `listen` and the socket's own chmod.
+		await fs.chmod(hostDir, 0o700);
 		await fs.rm(endpoint, { force: true });
 		const server = net.createServer(socket => this.#accept(socket));
 		this.#server = server;
@@ -159,8 +165,14 @@ export class LiveAttachHost {
 		this.#cancelPostmortem?.();
 		this.#cancelPostmortem = undefined;
 		if (this.#replacement) clearTimeout(this.#replacement.timer);
-		for (const claim of [this.#remoteController(), this.#pending, this.#replacement?.claim]) {
-			if (claim?.expiryTimer) clearTimeout(claim.expiryTimer);
+		const displaced = this.#replacement?.displaced === "local" ? undefined : this.#replacement?.displaced;
+		// A surviving expiry timer would fire after shutdown and republish the endpoint directory —
+		// resurrecting a token for a host that no longer listens.
+		for (const claim of [this.#remoteController(), this.#pending, this.#replacement?.claim, displaced]) {
+			if (claim?.expiryTimer) {
+				clearTimeout(claim.expiryTimer);
+				claim.expiryTimer = undefined;
+			}
 		}
 		for (const state of this.#sockets) state.socket.destroy();
 		this.#sockets.clear();
@@ -170,6 +182,8 @@ export class LiveAttachHost {
 			await promise;
 			this.#server = undefined;
 		}
+		// Let in-flight publishes settle first, or they would rewrite the directory after removal.
+		await this.#publishing;
 		await removeLiveSession(this.#hostId);
 	}
 
@@ -215,10 +229,13 @@ export class LiveAttachHost {
 	}
 
 	#handleHello(state: AuthenticatedSocket, frame: AttachHelloFrame): void {
+		// Frames arrive as untrusted JSON, so the credential fields are type-checked before any
+		// comparison: `safeEqual` on a non-string would throw or compare against a coerced buffer.
 		if (
 			frame.protocolVersion !== ATTACH_PROTOCOL_VERSION ||
-			!safeEqual(frame.token, this.#token) ||
-			frame.sessionId !== this.#session.sessionId
+			typeof frame.token !== "string" ||
+			frame.sessionId !== this.#session.sessionId ||
+			!safeEqual(frame.token, this.#token)
 		) {
 			state.socket.destroy();
 			return;
@@ -258,6 +275,16 @@ export class LiveAttachHost {
 		this.#grantPending("safe_boundary");
 	}
 
+	/**
+	 * `expectedEpoch` is the epoch the claimant read from a status snapshot, which always reports the
+	 * host's current epoch. Comparing it against a claim's own `epoch` would reject every takeover
+	 * aimed at a claim that has not reached a safe boundary yet, because such a claim still carries a
+	 * placeholder epoch.
+	 */
+	#staleExpectation(frame: AttachHelloFrame): boolean {
+		return frame.expectedEpoch !== undefined && frame.expectedEpoch !== this.#epoch;
+	}
+
 	#force(state: AuthenticatedSocket, frame: AttachHelloFrame): void {
 		if (this.#replacement) {
 			this.#send(state, {
@@ -274,7 +301,7 @@ export class LiveAttachHost {
 			return;
 		}
 		if (this.#controller === "local") {
-			if (frame.expectedEpoch !== undefined && frame.expectedEpoch !== this.#epoch) {
+			if (this.#staleExpectation(frame)) {
 				this.#staleForce(state);
 				return;
 			}
@@ -289,7 +316,7 @@ export class LiveAttachHost {
 			return;
 		}
 		const displaced = this.#remoteController() ?? this.#pending;
-		if (!displaced || (frame.expectedEpoch !== undefined && frame.expectedEpoch !== displaced.epoch)) {
+		if (!displaced || this.#staleExpectation(frame)) {
 			this.#staleForce(state);
 			return;
 		}
@@ -371,12 +398,27 @@ export class LiveAttachHost {
 		this.#emitOwnership(reason);
 	}
 
+	/**
+	 * A claim retains its grace window whether it already holds control, is still waiting for a safe
+	 * boundary, or is being displaced by a pending force takeover — all three drop to `reconnecting`
+	 * when their socket goes away.
+	 */
+	#reconnectableClaim(attachmentId: string | undefined): RemoteClaim | undefined {
+		if (attachmentId === undefined) return undefined;
+		const displaced = this.#replacement?.displaced === "local" ? undefined : this.#replacement?.displaced;
+		for (const claim of [this.#remoteController(), this.#pending, displaced]) {
+			if (claim && claim.attachmentId === attachmentId && claim.phase === "reconnecting" && !claim.socketState) {
+				return claim;
+			}
+		}
+		return undefined;
+	}
+
 	#reconnect(state: AuthenticatedSocket, frame: AttachHelloFrame): void {
-		const claim = this.#remoteController();
+		const claim = this.#reconnectableClaim(frame.attachmentId);
 		if (
-			claim?.phase !== "reconnecting" ||
-			frame.attachmentId !== claim.attachmentId ||
-			frame.resumeToken === undefined ||
+			!claim ||
+			typeof frame.resumeToken !== "string" ||
 			!safeEqual(frame.resumeToken, claim.resumeToken) ||
 			Date.now() >= claim.deadline
 		) {
@@ -389,15 +431,28 @@ export class LiveAttachHost {
 			state.socket.end();
 			return;
 		}
+		const beingDisplaced = this.#replacement?.displaced === claim;
 		claim.socketState = state;
 		state.attachmentId = claim.attachmentId;
-		claim.phase = "connected";
+		claim.phase = beingDisplaced ? "revocation_pending" : "connected";
 		claim.deadline = Date.now() + this.#reconnectGraceMs;
-		if (claim.expiryTimer) clearTimeout(claim.expiryTimer);
+		if (claim.expiryTimer) {
+			clearTimeout(claim.expiryTimer);
+			claim.expiryTimer = undefined;
+		}
 		claim.terminal = this.#createSocketTerminal(claim, frame);
 		this.#terminal.activateAttached(claim.terminal);
-		this.#sendAccepted(claim, "control");
+		this.#sendAccepted(claim, this.#controller === claim && !beingDisplaced ? "control" : "control_pending");
+		if (beingDisplaced) {
+			// Revocation is best-effort visible: a claimant that missed the notice while disconnected gets it now.
+			this.#send(state, {
+				type: "revoked",
+				message:
+					"This terminal was displaced by an authorized force takeover. Accepted agent work continues; input is fenced.",
+			});
+		}
 		this.#emitOwnership("reconnected");
+		if (!beingDisplaced) this.#grantPending("reconnected");
 	}
 
 	#createClaim(state: AuthenticatedSocket, frame: AttachHelloFrame): RemoteClaim {
@@ -408,7 +463,8 @@ export class LiveAttachHost {
 			label: `Terminal ${attachmentId.slice(0, 6)}`,
 			connectedAt: Date.now(),
 			phase: "connected",
-			epoch: this.#epoch + 1,
+			// Placeholder until the claim reaches a safe boundary; `#grantPending` assigns the real epoch.
+			epoch: this.#epoch,
 			deadline: Date.now() + this.#reconnectGraceMs,
 			socketState: state,
 			outputSequence: 0,
@@ -632,10 +688,13 @@ export class LiveAttachHost {
 	#emitOwnership(reason: string): void {
 		const snapshot = this.#snapshot();
 		this.#onOwnershipChanged?.(snapshot, reason);
-		void this.#publish();
+		// Serialize publishes: concurrent writers would interleave in the metadata file, and `close`
+		// needs a single handle to wait on before it removes the directory.
+		this.#publishing = (this.#publishing ?? Promise.resolve()).then(() => this.#publish()).catch(() => {});
 	}
 
 	async #publish(): Promise<void> {
+		if (this.#closed) return;
 		const metadata: LiveSessionMetadata = {
 			schemaVersion: 1,
 			hostId: this.#hostId,

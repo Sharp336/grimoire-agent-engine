@@ -60,7 +60,6 @@ export type AttachServerFrame =
 	  }
 	| { type: "control"; epoch: number }
 	| { type: "output"; sequence: number; data: string }
-	| { type: "parked"; message: string }
 	| { type: "revoked"; message: string }
 	| { type: "detached"; message: string }
 	| { type: "heartbeat"; reconnectDeadlineMs: number }

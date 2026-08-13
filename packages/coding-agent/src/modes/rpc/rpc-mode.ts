@@ -13,7 +13,7 @@
 import { once } from "node:events";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
-import { $env, isRecord, readLines, Snowflake } from "@oh-my-pi/pi-utils";
+import { $env, isRecord, logger, readLines, Snowflake } from "@oh-my-pi/pi-utils";
 import { startRpcAttachView } from "../../attach/rpc-view";
 import { reset as resetCapabilities } from "../../capability";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
@@ -37,7 +37,7 @@ import { calculateTokensPerSecond } from "../../utils/token-rate";
 import { initializeExtensions } from "../runtime-init";
 import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./host-tools";
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
-import { rpcCommandMutatesSession } from "./mutation-fence";
+import { rpcCommandFencedDuringHandoff, rpcCommandMutatesSession } from "./mutation-fence";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameEncoder } from "./rpc-frame";
 import { claimRpcInput } from "./rpc-input";
 import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
@@ -735,11 +735,16 @@ export async function runRpcMode(
 		};
 	};
 
+	// Terminal attachment is an additive capability: a host that cannot publish its endpoint (locked
+	// down runtime dir, exhausted socket path budget) must still serve RPC.
 	const attachView =
 		process.platform === "win32"
 			? undefined
 			: await startRpcAttachView(session, hostMode, eventBus, (snapshot, reason) => {
 					output({ type: "control_state_changed", reason, ...snapshot });
+				}).catch(error => {
+					logger.warn("Live terminal attachment unavailable for this RPC host", { error: String(error) });
+					return undefined;
 				});
 
 	const extensionUserMessageTracker = new RpcExtensionUserMessageTracker();
@@ -998,17 +1003,21 @@ export async function runRpcMode(
 	// Handle a single command
 	const handleCommand = async (command: RpcCommand): Promise<RpcResponse> => {
 		const id = command.id;
-		if (attachView?.host.mutationFenced && rpcCommandMutatesSession(command)) {
+		if (attachView?.host.mutationFenced) {
 			const ownership = attachView.host.ownershipSnapshot;
-			return error(
-				id,
-				command.type,
-				ownership.controlState === "control_pending"
-					? "A terminal handoff is pending"
-					: `Session is controlled by ${ownership.controller?.label ?? "an attached terminal"}`,
-				ownership.controlState === "control_pending" ? "handoff_pending" : "session_hijacked",
-				ownership,
-			);
+			const handoffPending = ownership.controlState === "control_pending";
+			const fenced = handoffPending ? rpcCommandFencedDuringHandoff(command) : rpcCommandMutatesSession(command);
+			if (fenced) {
+				return error(
+					id,
+					command.type,
+					handoffPending
+						? "A terminal handoff is pending"
+						: `Session is controlled by ${ownership.controller?.label ?? "an attached terminal"}`,
+					handoffPending ? "handoff_pending" : "session_hijacked",
+					ownership,
+				);
+			}
 		}
 
 		switch (command.type) {

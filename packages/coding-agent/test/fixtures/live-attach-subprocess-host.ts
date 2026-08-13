@@ -16,7 +16,7 @@ let received = "";
 terminal.start(
 	data => {
 		received += data;
-		terminal.write(`PTY_ECHO:${data}`);
+		terminal.write(`HOST_ECHO:${data}`);
 	},
 	() => {},
 );
@@ -26,7 +26,7 @@ const host = new LiveAttachHost({
 	hostMode: "rpc",
 	project: process.cwd(),
 	onOwnershipChanged: snapshot => {
-		if (snapshot.controlState === "controlled") terminal.write("PTY_READY\r\n");
+		if (snapshot.controlState === "controlled") terminal.write("HOST_CONTROLLED\r\n");
 	},
 });
 
@@ -34,9 +34,9 @@ await host.start();
 process.stdout.write(`${sessionId}\n`);
 
 const deadline = Date.now() + 15_000;
-while ((received !== "pty-smoke" || host.ownershipSnapshot.controlState !== "available") && Date.now() < deadline) {
+while ((received !== "attach-smoke" || host.ownershipSnapshot.controlState !== "available") && Date.now() < deadline) {
 	await Bun.sleep(10);
 }
 await Bun.write(evidencePath, `${JSON.stringify({ received, controlState: host.ownershipSnapshot.controlState })}\n`);
 await host.close();
-if (received !== "pty-smoke") process.exitCode = 1;
+if (received !== "attach-smoke") process.exitCode = 1;

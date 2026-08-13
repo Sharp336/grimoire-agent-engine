@@ -519,7 +519,13 @@ async function runInteractiveMode(
 	// follows the same clean-cutover path instead of preserving a previous run's
 	// transcript above the fresh one.
 	mode.renderInitialMessages({ preserveExistingChat: true, clearTerminalHistory: true });
-	if (process.platform !== "win32") await mode.startLiveAttachHost("interactive");
+	// Publishing the attach endpoint is additive: never let a locked-down runtime directory or an
+	// exhausted socket path budget stop an otherwise healthy interactive session from starting.
+	if (process.platform !== "win32") {
+		await mode.startLiveAttachHost("interactive").catch(error => {
+			logger.warn("Live terminal attachment unavailable for this session", { error: String(error) });
+		});
+	}
 
 	for (const notify of notifs) {
 		if (!notify) {

@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import { createInterface } from "node:readline/promises";
 import { ProcessTerminal } from "@oh-my-pi/pi-tui";
-import { APP_NAME } from "@oh-my-pi/pi-utils";
+import { APP_NAME, isRecord } from "@oh-my-pi/pi-utils";
 import { shortenPath } from "../tools/render-utils";
 import {
 	ATTACH_PROTOCOL_VERSION,
@@ -13,7 +13,7 @@ import {
 	type AttachServerFrame,
 	encodeAttachFrame,
 } from "./protocol";
-import { type LiveSessionRecord, readLiveSessionRecords } from "./registry";
+import { type LiveSessionRecord, readLiveSessionRecords, removeLiveSession } from "./registry";
 
 export interface AttachCommandOptions {
 	target?: string;
@@ -63,6 +63,16 @@ function hello(record: LiveSessionRecord, action: AttachHelloFrame["action"]): A
 	};
 }
 
+/**
+ * A host killed without running its shutdown path leaves its endpoint directory — including the
+ * shared secret — behind. Discovery is the only routine that learns the endpoint is gone, so it
+ * reclaims the directory. A probe that merely timed out is left alone: that host may just be busy.
+ */
+function isDeadEndpoint(error: unknown): boolean {
+	const code = isRecord(error) ? error.code : undefined;
+	return code === "ENOENT" || code === "ECONNREFUSED";
+}
+
 export async function discoverLiveSessions(): Promise<LiveSessionRecord[]> {
 	const records = await readLiveSessionRecords();
 	const live = await Promise.all(
@@ -71,7 +81,10 @@ export async function discoverLiveSessions(): Promise<LiveSessionRecord[]> {
 				const frame = await socketRequest(record, hello(record, "status"));
 				if (frame.type !== "status") return null;
 				return { ...record, snapshot: frame.snapshot };
-			} catch {
+			} catch (error) {
+				if (isDeadEndpoint(error)) {
+					await removeLiveSession(record.metadata.hostId).catch(() => {});
+				}
 				return null;
 			}
 		}),
