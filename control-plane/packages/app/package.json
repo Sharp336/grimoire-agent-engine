@@ -24,6 +24,7 @@
     "react-native-macos": "0.81.9",
     "react-native-svg": "15.15.5",
     "react-native-web": "0.21.2",
+    "react-native-webview": "14.0.1",
     "react-native-windows": "0.81.32"
   },
   "devDependencies": {

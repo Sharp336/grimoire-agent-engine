@@ -26,8 +26,7 @@ import type { ConsoleEvent, ConsoleState } from "../src/console/state.ts";
 // Dynamic on purpose: bun loads a file's whole static import graph before any
 // module body runs, so a static import here would pull the real `react-native`
 // in before `./rnw.ts` could substitute it.
-const { allStats, apply, emptyConsole, fleetClearances, sessionFor } = await import("../src/console/state.ts");
-const { FleetScreen } = await import("../src/screens/FleetScreen.tsx");
+const { apply, emptyConsole, fleetClearances, sessionFor } = await import("../src/console/state.ts");
 const { SessionScreen } = await import("../src/screens/SessionScreen.tsx");
 const { ApprovalCard } = await import("../src/components/ApprovalCard.tsx");
 
@@ -96,71 +95,12 @@ const OPEN = FLEET[0] as Agent;
 // ---------------------------------------------------------------------------
 // The bay
 // ---------------------------------------------------------------------------
-
-describe("the fleet list renders from canned frames", () => {
-  const html = renderToStaticMarkup(
-    <FleetScreen
-      agents={STATE.agents}
-      stats={allStats(STATE)}
-      selected={STATE.selected}
-      onSelect={() => {}}
-      now={NOW}
-    />,
-  );
-
-  test("every agent on the roster gets a strip", () => {
-    for (const member of FLEET) expect(html).toContain(member.name);
-    expect(html).toContain("3 strips");
-  });
-
-  test("each strip states what its agent is doing", () => {
-    // Upper-cased by the kicker style, so the source text is what is asserted.
-    for (const state of ["busy", "waiting", "failed"]) expect(html).toContain(state);
-  });
-
-  test("state is carried in colour, not only in words", () => {
-    // amber working, ochre holding, oxide failed: the bar an operator scans.
-    expect(html).toContain("rgba(224,163,58,1.00)");
-    expect(html).toContain("rgba(193,102,47,1.00)");
-    expect(html).toContain("rgba(180,70,47,1.00)");
-  });
-
-  test("the open strip shows the readings the turn produced", () => {
-    const stats = allStats(STATE).get(OPEN.id);
-    expect(stats?.tools).toBe(4);
-    // The captured usage frame: 68406 of 1000000 tokens, $1.4408195 spent.
-    expect(stats?.contextFraction).toBeCloseTo(0.068406, 6);
-    expect(html).toContain("7%");
-    // Four decimals, because sub-cent turns are normal and $0.00 looks broken.
-    expect(html).toContain("$1.4408");
-    // One clearance outstanding on this strip.
-    expect(html).toContain("data-testid=\"strip-clearances-" + OPEN.id + "\"");
-  });
-
-  test("a long path is shortened from the left, where the noise is", () => {
-    expect(html).toContain("jwaldrip/oh-my-pi");
-    expect(html).not.toContain("/Users/someone/dev/src/github.com");
-  });
-
-  test("the clock is elapsed time, not a timestamp", () => {
-    // One minute since lastActiveAt, at the pinned now.
-    expect(html).toContain("1:00");
-  });
-
-  test("nothing renders an emoji where an icon belongs", () => {
-    expect(html).toContain("<svg");
-    expect(html).toContain("<path");
-    expect(/\p{Extended_Pictographic}/u.test(html)).toBe(false);
-  });
-
-  test("an empty bay says so rather than showing nothing", () => {
-    const empty = renderToStaticMarkup(
-      <FleetScreen agents={[]} stats={new Map()} selected={null} onSelect={() => {}} now={NOW} />,
-    );
-    expect(empty).toContain("No agents.");
-    expect(empty).toContain("0 strips");
-  });
-});
+//
+// FleetScreen's own render tests live in fleet-screen.test.tsx: its prop
+// contract (a controlled `BrowserState` over every session, not just this
+// device's live roster) is unrelated to the canned-frame stream this file
+// drives, and a realistic corpus for it does not belong beside a three-agent
+// fixture built for the transcript and approval tests below.
 
 // ---------------------------------------------------------------------------
 // The log

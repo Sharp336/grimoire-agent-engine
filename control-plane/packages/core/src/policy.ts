@@ -23,6 +23,13 @@ import {
  * Tools that only read. Cheap to allow so a phone is not a nag machine -- but
  * "read-only" is about the *filesystem*, not about secrecy. A read of
  * `~/.ssh/id_ed25519` is exfiltration, so these still pass the path checks.
+ *
+ * `webview_observe`/`webview_screenshot` join this table for the same reason
+ * `read` does: neither mutates the page or anything on disk, so gating them
+ * like a shell command would make a phone a nag machine for the one thing an
+ * agent should be doing constantly -- looking. `webview_navigate`,
+ * `webview_click`, and `webview_type` are deliberately absent: those are the
+ * side effects `docs/browser.md` says must reach a human.
  */
 const READ_ONLY_TOOLS: Record<string, true> = {
   read: true,
@@ -35,6 +42,8 @@ const READ_ONLY_TOOLS: Record<string, true> = {
   web_search: true,
   recall: true,
   reflect: true,
+  webview_observe: true,
+  webview_screenshot: true,
 };
 
 /** Tools with no filesystem reach at all; a path check is meaningless for them. */
@@ -43,6 +52,8 @@ const NON_FILESYSTEM_TOOLS: Record<string, true> = {
   web_search: true,
   recall: true,
   reflect: true,
+  webview_observe: true,
+  webview_screenshot: true,
 };
 
 /**

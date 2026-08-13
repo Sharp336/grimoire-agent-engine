@@ -25,9 +25,24 @@ import type {
   UpdateEvent,
   ConnectionState,
 } from "../client.ts";
-import type { StripStats } from "../components/AgentStrip.tsx";
+import type { BrowserSession } from "../session/browser.ts";
 import type { SessionState } from "../session/model.ts";
 import { EMPTY_SESSION, appendApproval, appendPrompt, endTurn, reduce, resolveApproval } from "../session/model.ts";
+
+/**
+ * What a strip shows. Kept here rather than beside a component, because the
+ * component that rendered it is gone and this is a pure derived shape a
+ * future readout can reuse without pulling in a view.
+ */
+export interface StripStats {
+  /** Fraction of the context window consumed, in `[0, 1]`. Null when unknown. */
+  contextFraction: number | null;
+  costAmount: number | null;
+  costCurrency: string;
+  tools: number;
+  running: number;
+  clearances: number;
+}
 
 /**
  * Error codes that mean the daemon overruled this device, not that the link
@@ -272,4 +287,32 @@ export function fleetClearances(state: ConsoleState): number {
   let total = 0;
   for (const session of state.sessions.values()) total += session.pendingApprovals.length;
   return total;
+}
+
+/**
+ * Adapts this device's live ACP roster into browser rows.
+ *
+ * Temporary: `session/list` caps at 50 and only ever describes agents this
+ * client is attached to, so every row it can produce is `live-ompd`. The
+ * moment the daemon index ships a route over the full on-disk session store,
+ * this is the seam that gets replaced: swap the call site in `Console.tsx`
+ * for a fetch against that route, which will also be the first source able to
+ * report `live-tui`, `dormant`, `archived`, message counts, and sizes for
+ * sessions this device has never attached to.
+ */
+export function browserSessionsOf(state: ConsoleState): BrowserSession[] {
+  return state.agents.map((agent) => {
+    const session = state.sessions.get(agent.id) ?? EMPTY_SESSION;
+    return {
+      id: agent.id,
+      title: agent.name,
+      cwd: agent.cwd,
+      status: "live-ompd",
+      createdAt: agent.createdAt,
+      lastActiveAt: agent.lastActiveAt,
+      messageCount: session.entries.length,
+      // Not knowable from a live ACP stream; the disk-backed index owns this.
+      sizeBytes: 0,
+    };
+  });
 }

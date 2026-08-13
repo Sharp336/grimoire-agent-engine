@@ -21,16 +21,21 @@
 import { FontAwesomeIcon } from "@fortawesome/react-native-fontawesome";
 import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
 import {
+  faArrowRightToBracket,
+  faBoxArchive,
   faBrain,
+  faBuilding,
   faCheck,
   faChevronDown,
   faChevronLeft,
   faCircleNodes,
   faCircleQuestion,
   faCircleStop,
+  faClockRotateLeft,
   faCoins,
   faDiagramProject,
   faFileLines,
+  faFolder,
   faGaugeHigh,
   faGlobe,
   faHand,
@@ -39,11 +44,18 @@ import {
   faMagnifyingGlass,
   faPaperPlane,
   faPen,
+  faPlay,
+  faPlug,
   faPlugCircleXmark,
+  faPlus,
+  faPuzzlePiece,
   faSignal,
   faSlash,
+  faStore,
   faTerminal,
   faTrashCan,
+  faTriangleExclamation,
+  faWandMagicSparkles,
   faXmark,
 } from "@fortawesome/free-solid-svg-icons";
 import type { JSX } from "react";
@@ -74,6 +86,19 @@ export type GlyphName =
   | "chevron"
   | "link"
   | "bay"
+  | "archive"
+  | "restore"
+  | "resume"
+  | "attach"
+  | "folder"
+  | "tasks"
+  | "newTask"
+  | "skill"
+  | "connector"
+  | "plugin"
+  | "native"
+  | "marketplace"
+  | "warning"
   | "unknown";
 
 export const GLYPHS: Record<GlyphName, IconDefinition> = {
@@ -109,6 +134,28 @@ export const GLYPHS: Record<GlyphName, IconDefinition> = {
   // Pro's `fa-signal-bars` is the link strength meter; free's signal is it.
   link: faSignal,
   bay: faLayerGroup,
+  archive: faBoxArchive,
+  restore: faClockRotateLeft,
+  // A dormant session is picked back up; play is the universal resume glyph.
+  resume: faPlay,
+  // A live-tui session is joined rather than resumed; a sign-in arrow reads as
+  // stepping into something already running, distinct from starting it.
+  attach: faArrowRightToBracket,
+  folder: faFolder,
+  // A checklist doubles for "the fleet's work plan" and "the task sidebar":
+  // both are a list of items with a state, and share the glyph on purpose.
+  tasks: faListCheck,
+  newTask: faPlus,
+  // Pro's `fa-wand-sparkles` variant differs only in spacing; free's is the
+  // same shape and is what a skill invocation actually is: casting a workflow.
+  skill: faWandMagicSparkles,
+  connector: faPlug,
+  plugin: faPuzzlePiece,
+  // First-party: OMP itself is the org that built this. A building reads as
+  // "the org's own", distinct from a store for anything installed from one.
+  native: faBuilding,
+  marketplace: faStore,
+  warning: faTriangleExclamation,
   unknown: faCircleQuestion,
 };
 
