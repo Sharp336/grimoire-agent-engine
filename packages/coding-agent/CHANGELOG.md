@@ -90,7 +90,7 @@
 
 ### Fixed
 
-- Fixed unnecessary compaction triggered by `response.incomplete` (output `stopReason === "length"`) when context was below the compaction threshold. Previously, the incomplete-output recovery path ran compaction unconditionally whenever compaction was enabled, even though the truncation was caused by the model's output-token budget — not context pressure. Now gates on `shouldCompact(...)` (using the stored-conversation floor via `compactionContextTokens`, matching the threshold path) and retries directly when context is below threshold. Direct retries are bounded at 3 consecutive below-threshold length stops; the 4th falls back to compaction to break the loop.
+- Fixed unnecessary compaction triggered by `response.incomplete` (output `stopReason === "length"`) when context was below the compaction threshold. Previously, the incomplete-output recovery path ran compaction unconditionally whenever compaction was enabled, even though the truncation was caused by the model's output-token budget — not context pressure. Now gates on `shouldCompact(...)` using `calculatePromptTokens` (input + cache, excluding discarded output tokens) with the stored-conversation floor via `compactionContextTokens`, matching the threshold path. Below threshold, the dead turn is dropped and the agent retries directly — but only when `autoContinue` is true, avoiding races with pending prompts. Direct retries are bounded at 3 consecutive below-threshold length stops; after that, compaction runs once as a fallback. If the model still hits output limits after the fallback, recovery terminates with a user-visible warning instead of looping. The retry counter and fallback flag reset on any non-length stop or new user prompt.
 
 ## [17.2.14] - 2026-08-11
 

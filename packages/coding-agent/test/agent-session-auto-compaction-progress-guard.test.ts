@@ -790,6 +790,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 
 	it("does not restore a length stop after handoff recovery commits", async () => {
 		session.settings.set("compaction.strategy", "handoff");
+		session.settings.set("compaction.thresholdTokens", 5_000);
 		session.settings.set("contextPromotion.enabled", false);
 		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
 		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();

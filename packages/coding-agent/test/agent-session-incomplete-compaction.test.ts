@@ -189,4 +189,37 @@ describe("response.incomplete recovery — compaction threshold gating", () => {
 		expect(compactionStartEventsOf(events)).toBe(1);
 		await session.dispose();
 	});
+
+	it("does NOT compact when output tokens inflate totalTokens but prompt tokens are below threshold", async () => {
+		// 10k input reads as 85k with calculateContextTokens and would compact
+		// even though the retry replays ~10k. calculatePromptTokens excludes
+		// the discarded output tokens.
+		const { session, events } = createSession({ contextWindow: 100_000, thresholdTokens: 80_000 });
+
+		const incompleteMsg: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "thinking", thinking: "" }],
+			api: bundledModel.api,
+			provider: bundledModel.provider,
+			model: bundledModel.id,
+			usage: {
+				input: 10_000,
+				output: 75_000,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 85_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "length",
+			timestamp: Date.now(),
+		};
+		session.agent.emitExternalEvent({ type: "message_end", message: incompleteMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [incompleteMsg] });
+
+		await settle(session);
+
+		// 85k totalTokens but only 10k prompt tokens — below 80k threshold.
+		expect(compactionStartEventsOf(events)).toBe(0);
+		await session.dispose();
+	});
 });

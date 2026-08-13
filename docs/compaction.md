@@ -116,9 +116,9 @@ The automatic paths are intentionally different:
   - Trigger: same-model assistant message ends with `stopReason === "length"` and the message is not older than the latest compaction.
   - The incomplete assistant message is removed from active agent state before recovery.
   - Context promotion is tried first.
-  - If promotion is unavailable and compaction is enabled, auto maintenance runs with `reason: "incomplete"` and `willRetry: true`.
-  - Unlike overflow, `compaction.strategy: "handoff"` is allowed for incomplete-output recovery because the input context is still usable.
-  - On context-full success, `agent.continue()` is scheduled to retry the turn.
+  - If promotion is unavailable and compaction is enabled, the recovery path checks whether context is genuinely above the compaction threshold using `calculatePromptTokens` (input + cache, excluding the discarded output tokens) with the same stored-context floor as the threshold path. A turn that burned 75k output tokens with 10k input reads as 10k, not 85k.
+  - **Above threshold**: auto maintenance runs with `reason: "incomplete"` and `willRetry: true`. Unlike overflow, `compaction.strategy: "handoff"` is allowed because the input context is still usable. On context-full success, `agent.continue()` is scheduled to retry the turn.
+  - **Below threshold**: the dead turn is dropped and the agent retries directly on the same context — the output truncation was caused by the model's output-token budget, not by context pressure, so compaction would not help. Only scheduled when `autoContinue` is true (pre-prompt recovery passes `false` to avoid racing the pending prompt). Consecutive below-threshold retries are bounded at 3; after that, compaction runs once as a fallback. If the model still hits output limits after the fallback, recovery terminates with a user-visible warning instead of looping. The retry counter and fallback flag reset on any non-length stop or new user prompt.
 
 - **Threshold maintenance**
   - Trigger: successful, non-error assistant message whose adjusted context tokens exceed `resolveThresholdTokens(...)`.
