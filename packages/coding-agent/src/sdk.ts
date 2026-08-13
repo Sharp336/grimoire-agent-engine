@@ -3352,6 +3352,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// A resumed session already has advisor turns on disk; without this the status
 		// line would restart its `(adv)` total at zero for the rest of the session.
 		const initialAdvisorCosts = await loadAdvisorTranscriptCosts(sessionManager.getSessionFile());
+		const sessionFileAtAttach = sessionManager.getSessionFile();
+		const attachesExistingTranscript =
+			sessionFileAtAttach !== undefined && (await Bun.file(sessionFileAtAttach).exists());
 		session = new AgentSession({
 			advisorWatchdogPrompt,
 			advisorContextPrompt,
@@ -3465,6 +3468,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			titleSystemPrompt: options.titleSystemPrompt,
 		});
 		hasSession = true;
+		if (attachesExistingTranscript) {
+			await session.recordProcessAttach();
+		}
 		// Extension factories normally register tools before session construction,
 		// but Pi-compatible extensions may discover them asynchronously from a
 		// session_start handler. Install those late registrations into the live

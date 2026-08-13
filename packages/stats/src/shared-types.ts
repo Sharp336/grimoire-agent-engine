@@ -430,3 +430,137 @@ export interface ProviderDashboardStats {
 	usageSeries: UsageWindowSeries[];
 	windowInsights: ProviderWindowInsight[];
 }
+
+export interface HardRedaction {
+	redacted: "hard";
+	reason: "credential";
+}
+
+export type OutcomeAxis = "unknown" | string;
+
+export interface ObservabilityOutcome {
+	execution: OutcomeAxis;
+	contract: OutcomeAxis;
+	verification: OutcomeAxis;
+	humanAcceptance: OutcomeAxis;
+}
+
+export interface ObservabilityFreshness {
+	indexedAt: number;
+	indexedThrough: number;
+	sourceModifiedAt: number;
+	sourceSize: number;
+	generation: number;
+}
+
+export interface ObservabilityPage<T> extends ObservabilityFreshness {
+	items: T[];
+	truncated: boolean;
+	nextCursor?: string;
+	previousCursor?: string;
+	softAvailable: string[];
+}
+
+export interface SessionSummary extends ObservabilityFreshness {
+	sessionId: string;
+	executionId: string;
+	folder: string;
+	title: string | null;
+	status: string;
+	startedAt: number;
+	endedAt: number | null;
+	outcome: ObservabilityOutcome;
+	softAvailable: string[];
+}
+
+export interface RelatedExecution {
+	executionId: string;
+	kind: string;
+}
+
+export interface SessionDetail extends SessionSummary {
+	truncated: boolean;
+	runIds: string[];
+	relatedExecutions: RelatedExecution[];
+	usage: SessionUsageSummary;
+}
+
+export interface RunSummary extends ObservabilityFreshness {
+	runId: string;
+	startedAt: number;
+	sessionIds: string[];
+	executionIds: string[];
+	status: string;
+	outcome: ObservabilityOutcome;
+	softAvailable: string[];
+}
+
+export interface RunDetail extends RunSummary {
+	truncated: boolean;
+	usage: SessionUsageSummary;
+}
+
+export interface TimelineItem {
+	entryId: string;
+	parentId: string | null;
+	timestamp: number;
+	kind: string;
+	runId: string | null;
+	decisionId: string | null;
+	executionId: string;
+	payload: unknown;
+	softAvailable: string[];
+}
+
+export interface ObservabilityRequest {
+	/** SQLite row id for the existing request drawer. */
+	id?: number;
+	requestId: string;
+	entryId: string;
+	folder: string;
+	model: string;
+	provider: string;
+	api: string;
+	timestamp: number;
+	duration: number | null;
+	ttft: number | null;
+	stopReason: string;
+	errorMessage: unknown;
+	usage: unknown;
+	agentType: AgentType;
+	softAvailable: string[];
+	/** Client compatibility only. HTTP serializers never include these fields. */
+	messages?: unknown[];
+	/** Client compatibility only. HTTP serializers never include these fields. */
+	output?: unknown;
+}
+
+export interface SessionUsageModel {
+	model: string;
+	provider: string;
+	requests: number;
+	errors: number;
+	totalTokens: number;
+	cost: number;
+}
+
+export interface SessionUsageSummary {
+	requests: number;
+	errors: number;
+	tools: number;
+	totalTokens: number;
+	inputTokens: number;
+	outputTokens: number;
+	cacheReadTokens: number;
+	cacheWriteTokens: number;
+	cost: number;
+	byModel: SessionUsageModel[];
+}
+
+export interface RoutingDecision {
+	decisionId: string;
+	kind: string;
+	timestamp: number;
+	payload: unknown;
+	softAvailable: string[];
+}

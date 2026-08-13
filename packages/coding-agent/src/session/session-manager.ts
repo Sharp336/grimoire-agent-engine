@@ -44,6 +44,7 @@ import {
 	type ModeChangeEntry,
 	type ModelChangeEntry,
 	type NewSessionOptions,
+	type ObservabilityPayload,
 	type ResetBoundaryEntry,
 	type ServiceTierChangeEntry,
 	type SessionEntry,
@@ -454,6 +455,8 @@ export class SessionManager {
 	 * ensureOnDisk() callers (ACP session/new, handoff) must survive close().
 	 */
 	#draftOnlySessionCleanupArmed = false;
+	/** Shared by concurrent first observability writes; reset whenever the owning transcript changes. */
+	#observabilityDiskReady: Promise<void> | undefined;
 
 	/**
 	 * Collab replication tap: invoked for every appended entry with the
@@ -1059,6 +1062,7 @@ export class SessionManager {
 		this.#rewriteRequired = false;
 		this.#forceFileCreation = false;
 		this.#draftOnlySessionCleanupArmed = false;
+		this.#observabilityDiskReady = undefined;
 		this.#turnBudgetTotal = null;
 		this.#turnBudgetHard = false;
 		this.#turnOutputBaseline = 0;
@@ -1270,6 +1274,7 @@ export class SessionManager {
 		this.#rewriteRequired = snapshot.needsRewrite;
 		this.#forceFileCreation = snapshot.onDisk;
 		this.#draftOnlySessionCleanupArmed = snapshot.draftOnlySessionCleanupArmed;
+		this.#observabilityDiskReady = undefined;
 		this.#applyEntries(snapshot.header, [...snapshot.entries]);
 		this.#additionalDirectories = snapshot.header.additionalDirectories ?? [];
 		this.#sessionName = snapshot.sessionName;
@@ -1292,6 +1297,7 @@ export class SessionManager {
 		await this.#drainAndCloseWriter();
 		this.#clearDiskError();
 		this.#draftOnlySessionCleanupArmed = false;
+		this.#observabilityDiskReady = undefined;
 
 		const resolvedSessionFile = path.resolve(sessionFile);
 		this.#sessionFile = resolvedSessionFile;
@@ -2191,6 +2197,17 @@ export class SessionManager {
 	}
 
 	/**
+	 * Append a runtime observability fact and cross the lazy-persistence gate on
+	 * the first such append for the currently owned transcript.
+	 */
+	async appendObservability(payload: ObservabilityPayload): Promise<string> {
+		const entryId = this.appendCustomEntry("observability", payload);
+		this.#observabilityDiskReady ??= this.ensureOnDisk();
+		await this.#observabilityDiskReady;
+		return entryId;
+	}
+
+	/**
 	 * Rewrite the session file after in-place entry updates (e.g. pruning old tool
 	 * outputs). Use sparingly.
 	 */
@@ -2369,6 +2386,11 @@ export class SessionManager {
 	/** All session entries (excludes header). Returns a shallow copy. */
 	getEntries(): SessionEntry[] {
 		return [...this.#entries];
+	}
+
+	/** Number of entries without allocating the defensive copy returned by getEntries(). */
+	getEntryCount(): number {
+		return this.#entries.length;
 	}
 
 	/**

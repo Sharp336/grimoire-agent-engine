@@ -57,8 +57,8 @@ export interface MessageStats {
 }
 
 export interface RequestDetails extends MessageStats {
-	messages: unknown[];
-	output: unknown;
+	messages?: unknown[];
+	output?: unknown;
 }
 
 export type TimeRange = "1h" | "24h" | "7d" | "30d" | "90d" | "all";

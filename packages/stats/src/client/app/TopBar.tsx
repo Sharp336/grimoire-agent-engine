@@ -10,6 +10,7 @@ export interface TopBarProps {
 	activeSection: DashboardSection;
 	range: TimeRange;
 	onRangeChange: (range: TimeRange) => void;
+	rangeDisabled?: boolean;
 	updatedAt: number | null;
 	onSyncStart?: () => void;
 	onSyncComplete?: (result: { success: boolean }) => void;
@@ -21,6 +22,7 @@ export function TopBar({
 	activeSection,
 	range,
 	onRangeChange,
+	rangeDisabled = false,
 	updatedAt,
 	onSyncStart,
 	onSyncComplete,
@@ -62,7 +64,7 @@ export function TopBar({
 					</span>
 				</div>
 
-				<RangeControl value={range} onChange={onRangeChange} />
+				<RangeControl value={range} onChange={onRangeChange} disabled={rangeDisabled} />
 
 				<ThemeToggle />
 

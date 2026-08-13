@@ -709,6 +709,11 @@ export function getStatsDbPath(): string {
 	return dirs.rootSubdir("stats.db", "data");
 }
 
+/** Get the global routing audit log path (~/.omp/routing-audit.jsonl). */
+export function getRoutingAuditLogPath(): string {
+	return dirs.rootSubdir("routing-audit.jsonl", "data");
+}
+
 /** Get the autoresearch state directory (~/.omp/autoresearch). */
 export function getAutoresearchDir(): string {
 	return dirs.rootSubdir("autoresearch", "state");

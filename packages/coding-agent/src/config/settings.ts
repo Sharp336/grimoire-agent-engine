@@ -22,6 +22,7 @@ import {
 	getAgentDir,
 	getLastChangelogVersionPath,
 	getProjectDir,
+	getRoutingAuditLogPath,
 	hasFsCode,
 	isEnoent,
 	logger,
@@ -42,6 +43,11 @@ import { AUTO_IMAGE_PROVIDER_ORDER, isImageProviderId } from "../tools/image-pro
 import { type EditMode, normalizeEditMode } from "../utils/edit-mode";
 import { INSPECT_IMAGE_MODES } from "../utils/inspect-image-mode";
 import { isSearchProviderId, SEARCH_PROVIDER_ORDER } from "../web/search/types";
+import {
+	appendExternalRouteChange,
+	normalizeRouteSnapshot,
+	type RouteSnapshot,
+} from "./routing-audit";
 import {
 	type BashInterceptorRule,
 	type GroupPrefix,
@@ -84,6 +90,8 @@ export interface SettingsOptions {
 	overrides?: Partial<Record<SettingPath, unknown>>;
 	/** Extra config.yml-style overlays loaded after global/project settings */
 	configFiles?: string[];
+	/** Override the global routing audit destination (primarily for isolated embedders and tests). */
+	routingAuditLogPath?: string;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -373,6 +381,9 @@ export class Settings {
 
 	/** Whether to persist changes */
 	#persist: boolean;
+	/** Optional audit destination and the last normalized route state observed by this instance. */
+	#routingAuditLogPath?: string;
+	#routeSnapshot?: RouteSnapshot;
 
 	private constructor(options: SettingsOptions = {}) {
 		this.#cwd = path.normalize(options.cwd ?? getProjectDir());
@@ -382,6 +393,7 @@ export class Settings {
 		if (options.configFiles) configFiles.push(...options.configFiles);
 		this.#configFiles = configFiles.map(file => path.resolve(this.#cwd, expandTilde(file)));
 		this.#persist = !options.inMemory && options.readOnly !== true;
+		this.#routingAuditLogPath = options.routingAuditLogPath;
 		liveSettingsInstances.add(new WeakRef(this));
 
 		if (options.overrides) {
@@ -649,6 +661,7 @@ export class Settings {
 		this.#rebuildMerged();
 		this.#fireEffectiveSettingChanged("modelRoles", this.get("modelRoles"), prevModelRoles);
 		this.#fireAllHooks();
+		await this.#observeRouteSnapshot("settings.reloadForCwd");
 	}
 
 	// ─────────────────────────────────────────────────────────────────────────
@@ -1033,6 +1046,33 @@ export class Settings {
 		this.set("disabledProviders", ids);
 	}
 
+	#currentRouteSnapshot(): RouteSnapshot {
+		return normalizeRouteSnapshot({
+			modelRoles: { ...this.getModelRoles() },
+			enabledModels: [...this.get("enabledModels")],
+			disabledProviders: [...this.get("disabledProviders")],
+			cycleOrder: [...this.get("cycleOrder")],
+			retry: {
+				modelFallback: this.get("retry.modelFallback"),
+				usageAwareFallback: this.get("retry.usageAwareFallback"),
+				usageReservePct: this.get("retry.usageReservePct"),
+			},
+		});
+	}
+
+	async #observeRouteSnapshot(source: string): Promise<void> {
+		const next = this.#currentRouteSnapshot();
+		const previousForInstance = this.#routeSnapshot;
+		this.#routeSnapshot = next;
+		if (!this.#persist && !this.#routingAuditLogPath) return;
+
+		const logPath = this.#routingAuditLogPath ?? getRoutingAuditLogPath();
+		const previous = previousForInstance ?? lastRouteSnapshotByLogPath.get(logPath);
+		lastRouteSnapshotByLogPath.set(logPath, next);
+		if (!previous) return;
+		await appendExternalRouteChange(previous, next, source, { logPath });
+	}
+
 	// ─────────────────────────────────────────────────────────────────────────
 	// Loading
 	// ─────────────────────────────────────────────────────────────────────────
@@ -1055,6 +1095,7 @@ export class Settings {
 		// Build merged view (global → project → overrides; project wins over global)
 		this.#rebuildMerged();
 		this.#fireAllHooks();
+		await this.#observeRouteSnapshot("settings.initialLoad");
 		return this;
 	}
 	async #loadGlobalSettings(): Promise<void> {
@@ -2379,6 +2420,7 @@ export const onHindsightScopeChanged = (cb: () => void) => hindsightScopeSignal.
  * retain instances; the set is cleared on every test reset.
  */
 const liveSettingsInstances = new Set<WeakRef<Settings>>();
+const lastRouteSnapshotByLogPath = new Map<string, RouteSnapshot>();
 
 let globalInstance: Settings | null = null;
 let globalInstancePromise: Promise<Settings> | null = null;
@@ -2407,6 +2449,7 @@ export function resetSettingsForTest(): void {
 		ref.deref()?.cancelPendingSaves();
 	}
 	liveSettingsInstances.clear();
+	lastRouteSnapshotByLogPath.clear();
 	globalInstance = null;
 	globalInstancePromise = null;
 	clearBoundSettingsMethods();

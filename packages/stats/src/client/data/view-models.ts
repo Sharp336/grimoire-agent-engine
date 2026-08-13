@@ -10,6 +10,7 @@ import type {
 	TimeRange,
 	ToolUsageStats,
 } from "../types";
+import type { ObservabilityOutcome, TimelineItem } from "../../shared-types";
 
 /** Fixed display order for the agent-token-share breakdown. */
 const AGENT_TYPE_ORDER: AgentType[] = ["main", "subagent", "advisor"];
@@ -256,4 +257,50 @@ export function buildToolRows(tools: ToolUsageStats[]): ToolRowView[] {
 		errorRate: t.calls > 0 ? t.errors / t.calls : 0,
 		callsPercentage: maxCalls > 0 ? (t.calls / maxCalls) * 100 : 0,
 	}));
+}
+
+export interface ObservabilityOutcomeView {
+	execution: string;
+	contract: string;
+	verification: string;
+	humanAcceptance: string;
+}
+
+export const OBSERVABILITY_OUTCOME_AXIS_LABELS: Record<keyof ObservabilityOutcomeView, string> = {
+	execution: "Execution",
+	contract: "Contract",
+	verification: "Verification",
+	humanAcceptance: "Human acceptance",
+};
+
+export function displaySessionTitle(title: string | null | undefined): string {
+	const trimmed = title?.trim();
+	return trimmed ? trimmed : "Untitled session";
+}
+
+function outcomeAxis(value: unknown): string {
+	return typeof value === "string" && value !== "" && value.toLowerCase() !== "unknown" ? value : "Unknown";
+}
+
+export function normalizeObservabilityOutcome(
+	outcome: Partial<ObservabilityOutcome> | null | undefined,
+): ObservabilityOutcomeView {
+	return {
+		execution: outcomeAxis(outcome?.execution),
+		contract: outcomeAxis(outcome?.contract),
+		verification: outcomeAxis(outcome?.verification),
+		humanAcceptance: outcomeAxis(outcome?.humanAcceptance),
+	};
+}
+
+export function observabilityResourceUri(
+	kind: "sessions" | "runs",
+	id: string,
+	_tab?: string,
+): string {
+	return `stats://${kind}/${encodeURIComponent(id)}`;
+}
+
+export function behaviorTimelineItems(items: TimelineItem[]): TimelineItem[] {
+	return items.filter(item => item.kind === "segment" || item.kind === "progress");
 }

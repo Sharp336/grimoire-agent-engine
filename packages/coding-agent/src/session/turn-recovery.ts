@@ -548,10 +548,10 @@ export class TurnRecovery {
 		message: AssistantMessage,
 		id: number,
 		options: { switchedCredential: boolean; switchedModel: boolean; delayMs: number },
-	): Promise<void> {
+	): Promise<string | undefined> {
 		await this.persistTerminalEmptyErrorTurn(message);
 		const persistenceKey = sessionMessagePersistenceKey(message);
-		if (!persistenceKey) return;
+		if (!persistenceKey) return undefined;
 		let branchEntry: SessionEntry | undefined;
 		for (const entry of this.#host.sessionManager.getBranch().slice().reverse()) {
 			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
@@ -562,8 +562,8 @@ export class TurnRecovery {
 			branchEntry = entry;
 			break;
 		}
-		if (!branchEntry) return;
-		if (this.#pendingRetryErrors.some(error => error.entryId === branchEntry.id)) return;
+		if (!branchEntry) return undefined;
+		if (this.#pendingRetryErrors.some(error => error.entryId === branchEntry.id)) return branchEntry.id;
 		const rateLimited = AIError.is(id, AIError.Flag.UsageLimit);
 		const recovery = this.#retryRecoveryKind(id, options.switchedCredential, options.switchedModel, options.delayMs);
 		const note = this.#retryRecoveryNote(recovery, rateLimited);
@@ -574,6 +574,7 @@ export class TurnRecovery {
 			attempt: this.#retryAttempt,
 			note,
 		});
+		return branchEntry.id;
 	}
 
 	async #markPendingRetryErrors(
@@ -1975,7 +1976,25 @@ export class TurnRecovery {
 			return false;
 		}
 
-		await this.#recordPendingRetryError(message, id, { switchedCredential, switchedModel, delayMs });
+		const failedEntryId = await this.#recordPendingRetryError(message, id, {
+			switchedCredential,
+			switchedModel,
+			delayMs,
+		});
+		const recovery = switchedCredential
+			? "credential"
+			: switchedModel
+				? "model"
+				: AIError.is(id, AIError.Flag.Transient)
+					? "transport"
+					: "provider";
+		await this.#host.sessionManager.appendObservability({
+			v: 1,
+			kind: "model_attempt",
+			attempt: this.#retryAttempt,
+			recovery,
+			...(failedEntryId === undefined ? {} : { entryId: failedEntryId }),
+		});
 
 		await this.#host.emitSessionEvent({
 			type: "auto_retry_start",
@@ -2135,11 +2154,28 @@ export class TurnRecovery {
 	async #promptAgentWithIdleRetry(messages: AgentMessage[], options?: { toolChoice?: ToolChoice }): Promise<void> {
 		const deadline = Date.now() + 30_000;
 		for (;;) {
+			const entryCountBeforeRequest = this.#host.sessionManager.getEntryCount();
 			try {
 				await this.#host.agent.prompt(messages, options);
 				return;
 			} catch (err) {
 				if (!(err instanceof AgentBusyError)) {
+					const assistantPersisted = this.#host.sessionManager
+						.getEntries()
+						.some(
+							(entry, index) =>
+								index >= entryCountBeforeRequest &&
+								entry.type === "message" &&
+								entry.message.role === "assistant",
+						);
+					if (!assistantPersisted) {
+						await this.#host.sessionManager.appendObservability({
+							v: 1,
+							kind: "model_request",
+							outcome: "failed",
+							...(this.#retryAttempt === 0 ? {} : { attempt: this.#retryAttempt }),
+						});
+					}
 					throw err;
 				}
 				if (Date.now() >= deadline) {

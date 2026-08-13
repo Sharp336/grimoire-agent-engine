@@ -8,12 +8,16 @@ import {
 	Plug,
 	Smile,
 	TrendingUp,
+	SquareStack,
 	Wrench,
+	Workflow,
 } from "lucide-react";
 import type React from "react";
 
 export type DashboardSection =
 	| "overview"
+	| "sessions"
+	| "runs"
 	| "requests"
 	| "errors"
 	| "models"
@@ -36,6 +40,16 @@ export const routes: DashboardRoute[] = [
 		id: "overview",
 		label: "Overview",
 		icon: LayoutDashboard,
+	},
+	{
+		id: "sessions",
+		label: "Sessions",
+		icon: SquareStack,
+	},
+	{
+		id: "runs",
+		label: "Runs",
+		icon: Workflow,
 	},
 	{
 		id: "requests",

@@ -14,6 +14,10 @@ import { getSessionsDir, isEnoent, readLines } from "@oh-my-pi/pi-utils";
 import type {
 	AgentType,
 	MessageStats,
+	ParsedObservabilityEntry,
+	ParsedSessionExit,
+	ParsedSessionHeader,
+	SessionCustomEntry,
 	SessionEntry,
 	SessionMessageEntry,
 	SessionServiceTierChangeEntry,
@@ -96,6 +100,70 @@ function isServiceTierChange(entry: SessionEntry): entry is SessionServiceTierCh
 function isToolResultMessage(entry: SessionEntry): entry is SessionMessageEntry {
 	if (entry.type !== "message") return false;
 	return (entry as SessionMessageEntry).message?.role === "toolResult";
+}
+
+function isCustomEntry(entry: SessionEntry): entry is SessionCustomEntry {
+	return (
+		entry.type === "custom" &&
+		"id" in entry &&
+		typeof entry.id === "string" &&
+		"customType" in entry &&
+		typeof entry.customType === "string"
+	);
+}
+
+
+function parseSessionHeader(entry: SessionEntry): ParsedSessionHeader | undefined {
+	if (
+		entry.type !== "session" ||
+		!("id" in entry) ||
+		typeof entry.id !== "string" ||
+		!("timestamp" in entry) ||
+		typeof entry.timestamp !== "string" ||
+		!("cwd" in entry) ||
+		typeof entry.cwd !== "string"
+	) {
+		return undefined;
+	}
+	return {
+		id: entry.id,
+		version: "version" in entry && typeof entry.version === "number" ? entry.version : 1,
+		timestamp: entry.timestamp,
+		cwd: entry.cwd,
+		...("title" in entry && typeof entry.title === "string" ? { title: entry.title } : {}),
+	};
+}
+
+function parseSessionExit(entry: SessionCustomEntry): ParsedSessionExit | undefined {
+	if (
+		entry.customType !== "session_exit" ||
+		typeof entry.data !== "object" ||
+		entry.data === null ||
+		!("kind" in entry.data) ||
+		typeof entry.data.kind !== "string" ||
+		!("recordedAt" in entry.data) ||
+		typeof entry.data.recordedAt !== "string"
+	) {
+		return undefined;
+	}
+	return { kind: entry.data.kind, recordedAt: entry.data.recordedAt, entryId: entry.id };
+}
+
+function parseObservabilityEntry(entry: SessionCustomEntry): ParsedObservabilityEntry | undefined {
+	if (
+		entry.customType !== "observability" ||
+		typeof entry.data !== "object" ||
+		entry.data === null ||
+		Array.isArray(entry.data)
+	) {
+		return undefined;
+	}
+	return {
+		entryId: entry.id,
+		parentId: typeof entry.parentId === "string" ? entry.parentId : null,
+		timestamp: entry.timestamp,
+		payload: entry.data as Record<string, unknown>,
+	};
 }
 
 /**
@@ -344,6 +412,17 @@ function scanLastServiceTier(bytes: Uint8Array): ServiceTierByFamily | undefined
 	});
 	return currentServiceTier;
 }
+
+function scanSessionMetadata(bytes: Uint8Array): { header?: ParsedSessionHeader; title?: string } {
+	let header: ParsedSessionHeader | undefined;
+	let title: string | undefined;
+	visitSessionEntriesLenient(bytes, entry => {
+		const parsedHeader = parseSessionHeader(entry);
+		if (parsedHeader) header = parsedHeader;
+		if (entry.type === "title" && "title" in entry && typeof entry.title === "string") title = entry.title;
+	});
+	return { header, title };
+}
 /**
  * Parse a session file and extract all assistant message stats.
  * Uses incremental reading with offset tracking.
@@ -366,6 +445,9 @@ export interface ParseSessionResult {
 	userLinks: UserMessageLink[];
 	toolCalls: ToolCallStats[];
 	toolResults: ToolResultLink[];
+	header?: ParsedSessionHeader;
+	sessionExit?: ParsedSessionExit;
+	observability: ParsedObservabilityEntry[];
 	newOffset: number;
 }
 export async function parseSessionFile(sessionPath: string, fromOffset = 0): Promise<ParseSessionResult> {
@@ -374,7 +456,15 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 		bytes = await Bun.file(sessionPath).bytes();
 	} catch (err) {
 		if (isEnoent(err))
-			return { stats: [], userStats: [], userLinks: [], toolCalls: [], toolResults: [], newOffset: fromOffset };
+			return {
+				stats: [],
+				userStats: [],
+				userLinks: [],
+				toolCalls: [],
+				toolResults: [],
+				observability: [],
+				newOffset: fromOffset,
+			};
 		throw err;
 	}
 
@@ -385,6 +475,12 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 	const userLinks: UserMessageLink[] = [];
 	const toolCalls: ToolCallStats[] = [];
 	const toolResults: ToolResultLink[] = [];
+	const observability: ParsedObservabilityEntry[] = [];
+	let sessionExit: ParsedSessionExit | undefined;
+	const metadata = scanSessionMetadata(bytes);
+	const header = metadata.header
+		? { ...metadata.header, ...(metadata.title !== undefined ? { title: metadata.title } : {}) }
+		: undefined;
 	const userByEntryId = new Map<string, UserMessageStats>();
 	const start = Math.max(0, Math.min(fromOffset, bytes.length));
 	const unprocessed = bytes.subarray(start);
@@ -394,6 +490,13 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 		currentServiceTier = scanLastServiceTier(bytes.subarray(0, start));
 	}
 	for (const entry of entries) {
+		if (isCustomEntry(entry)) {
+			const parsedExit = parseSessionExit(entry);
+			if (parsedExit) sessionExit = parsedExit;
+			const parsedObservability = parseObservabilityEntry(entry);
+			if (parsedObservability) observability.push(parsedObservability);
+			continue;
+		}
 		if (isServiceTierChange(entry)) {
 			currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
 			continue;
@@ -437,7 +540,17 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 		}
 	}
 
-	return { stats, userStats, userLinks, toolCalls, toolResults, newOffset: start + read };
+	return {
+		stats,
+		userStats,
+		userLinks,
+		toolCalls,
+		toolResults,
+		header,
+		sessionExit,
+		observability,
+		newOffset: start + read,
+	};
 }
 
 /**

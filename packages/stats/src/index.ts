@@ -18,11 +18,39 @@ export {
 export { closeDb } from "./db";
 export { getGainDashboardStats } from "./gain-aggregator";
 export { startServer } from "./server";
+export {
+	getDecision,
+	getRequest,
+	getRequestBySqliteId,
+	getRun,
+	getSession,
+	hardRedact,
+	listEvents,
+	listLogs,
+	listRuns,
+	listSessions,
+	listTimeline,
+	reveal,
+	toJsonSafe,
+} from "./query";
 export type {
 	GainDashboardStats,
 	GainSource,
 	GainSourceTotals,
 	GainTimeSeriesPoint,
+} from "./shared-types";
+export type {
+	HardRedaction,
+	ObservabilityFreshness,
+	ObservabilityOutcome,
+	ObservabilityPage,
+	ObservabilityRequest,
+	RelatedExecution,
+	RunDetail,
+	RunSummary,
+	SessionDetail,
+	SessionSummary,
+	TimelineItem,
 } from "./shared-types";
 export type {
 	AggregatedStats,

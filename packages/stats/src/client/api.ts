@@ -11,6 +11,17 @@ import type {
 	TimeRange,
 	ToolDashboardStats,
 } from "./types";
+import type {
+	ObservabilityPage,
+	ObservabilityRequest,
+	RunDetail,
+	RunSummary,
+	SessionDetail,
+	SessionSummary,
+	SessionUsageSummary,
+	TimelineItem,
+	ToolUsageStats,
+} from "../shared-types";
 
 const API_BASE = "/api";
 
@@ -75,7 +86,10 @@ export async function getRequestDetails(id: number, signal?: AbortSignal): Promi
 }
 
 export async function sync(signal?: AbortSignal): Promise<{ processed: number; files: number; totalMessages: number }> {
-	return fetchJson<{ processed: number; files: number; totalMessages: number }>(`${API_BASE}/sync`, { signal });
+	return fetchJson<{ processed: number; files: number; totalMessages: number }>(`${API_BASE}/sync`, {
+		signal,
+		method: "POST",
+	});
 }
 
 export async function getBehaviorDashboardStats(
@@ -115,4 +129,100 @@ export async function getProviderDashboardStats(
 	return fetchJson<ProviderDashboardStats>(`${API_BASE}/stats/providers?range=${encodeURIComponent(range)}`, {
 		signal,
 	});
+}
+
+export interface ObservabilityListFilters {
+	range?: TimeRange;
+	status?: string | null;
+	project?: string | null;
+	failure?: boolean;
+	q?: string | null;
+	after?: string | null;
+	limit?: number;
+}
+
+function observabilityListParams(filters: ObservabilityListFilters): URLSearchParams {
+	const params = new URLSearchParams();
+	if (filters.range) params.set("range", filters.range);
+	if (filters.status) params.set("status", filters.status);
+	if (filters.project) params.set("project", filters.project);
+	if (filters.failure) params.set("failure", "true");
+	if (filters.q) params.set("q", filters.q);
+	if (filters.after) params.set("after", filters.after);
+	if (filters.limit) params.set("limit", String(filters.limit));
+	return params;
+}
+
+export async function getSessions(
+	filters: ObservabilityListFilters,
+	signal?: AbortSignal,
+): Promise<ObservabilityPage<SessionSummary>> {
+	return fetchJson(`${API_BASE}/sessions?${observabilityListParams(filters)}`, { signal });
+}
+
+export async function getSession(id: string, signal?: AbortSignal): Promise<SessionDetail> {
+	return fetchJson(`${API_BASE}/sessions/${encodeURIComponent(id)}`, { signal });
+}
+
+export async function getRuns(
+	filters: ObservabilityListFilters,
+	signal?: AbortSignal,
+): Promise<ObservabilityPage<RunSummary>> {
+	return fetchJson(`${API_BASE}/runs?${observabilityListParams(filters)}`, { signal });
+}
+
+export async function getRun(id: string, signal?: AbortSignal): Promise<RunDetail> {
+	return fetchJson(`${API_BASE}/runs/${encodeURIComponent(id)}`, { signal });
+}
+
+export async function getObservabilityTimeline(
+	kind: "sessions" | "runs",
+	id: string,
+	after?: string | null,
+	signal?: AbortSignal,
+): Promise<ObservabilityPage<TimelineItem>> {
+	const params = new URLSearchParams({ limit: "100" });
+	if (after) params.set("after", after);
+	return fetchJson(`${API_BASE}/${kind}/${encodeURIComponent(id)}/timeline?${params}`, { signal });
+}
+
+export async function revealObservabilityFields(
+	kind: "sessions" | "runs",
+	id: string,
+	fields: string[],
+	signal?: AbortSignal,
+): Promise<unknown> {
+	return fetchJson(`${API_BASE}/${kind}/${encodeURIComponent(id)}/reveal`, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ fields }),
+		signal,
+	});
+}
+
+export async function getResourceRequests(
+	kind: "sessions" | "runs",
+	id: string,
+	options: { errorsOnly?: boolean; limit?: number } = {},
+	signal?: AbortSignal,
+): Promise<ObservabilityPage<ObservabilityRequest>> {
+	const params = new URLSearchParams({ limit: String(options.limit ?? 100) });
+	if (options.errorsOnly) params.set("errors", "true");
+	return fetchJson(`${API_BASE}/${kind}/${encodeURIComponent(id)}/requests?${params}`, { signal });
+}
+
+export async function getResourceTools(
+	kind: "sessions" | "runs",
+	id: string,
+	signal?: AbortSignal,
+): Promise<ObservabilityPage<ToolUsageStats> & { usage: SessionUsageSummary }> {
+	return fetchJson(`${API_BASE}/${kind}/${encodeURIComponent(id)}/tools`, { signal });
+}
+
+export async function getResourceUsage(
+	kind: "sessions" | "runs",
+	id: string,
+	signal?: AbortSignal,
+): Promise<SessionUsageSummary> {
+	return fetchJson(`${API_BASE}/${kind}/${encodeURIComponent(id)}/usage`, { signal });
 }

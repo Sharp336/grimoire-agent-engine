@@ -1,8 +1,11 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getStatsDbPath, workerHostEntry } from "@oh-my-pi/pi-utils";
+import { getRoutingAuditLogPath, getSessionsDir, getStatsDbPath, workerHostEntry } from "@oh-my-pi/pi-utils";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import {
+	applyObservabilityProjection,
+	applyRoutingAuditRecords,
+	getAuditOffset,
 	getRecentErrors as dbGetRecentErrors,
 	getRecentRequests as dbGetRecentRequests,
 	getBehaviorByModel,
@@ -10,10 +13,11 @@ import {
 	getBehaviorTimeSeries,
 	getCostTimeSeries,
 	getFileOffset,
-	getMessageById,
 	getMessageCount,
 	getModelPerformanceSeries,
 	getModelTimeSeries,
+	getObservabilitySessionIdByFile,
+	getObservabilitySessionSnapshot,
 	getOverallStats,
 	getProviderHourlyBurn,
 	getProviderTimeSeries,
@@ -25,16 +29,21 @@ import {
 	getToolStats,
 	getToolStatsByModel,
 	getToolTimeSeries,
+	hasPendingObservabilityBackfill,
 	initDb,
 	insertMessageStats,
 	insertToolCalls,
 	insertUserMessageStats,
 	markSessionBackfillsComplete,
+	runStatsTransaction,
 	setFileOffset,
 	updateToolResults,
 	updateUserMessageLinks,
+	type FileOffset,
+	type FileOffsetIdentity,
+	type ObservabilitySessionSnapshot,
 } from "./db";
-import { getSessionEntry, listAllSessionFiles, type ParseSessionResult, parseSessionFile } from "./parser";
+import { listAllSessionFiles, listSessionFiles, type ParseSessionResult, parseSessionFile } from "./parser";
 import type { SyncWorkerRequest, SyncWorkerResponse } from "./sync-worker";
 // Coding-agent binary/bundle workers route through the CLI entrypoint with a
 // hidden argv mode, so the compiled binary and npm bundle only need one
@@ -45,10 +54,10 @@ import type {
 	DashboardStats,
 	MessageStats,
 	ProviderDashboardStats,
-	RequestDetails,
 	ToolDashboardStats,
 } from "./types";
 import { computeUsageWindowStats, fetchUsageSnapshots } from "./usage-windows";
+import { getRequestBySqliteId } from "./query";
 
 const STATS_SYNC_LOCK_RETRY_MS = 25;
 const STATS_SYNC_LOCK_WAIT_MS = 60 * 60 * 1000;
@@ -68,18 +77,116 @@ export async function withStatsSyncLock<T>(dbPath: string, fn: () => Promise<T>)
 	});
 }
 
+export async function tryWithStatsSyncLock<T>(dbPath: string, fn: () => Promise<T>): Promise<T | null> {
+	await fs.promises.mkdir(path.dirname(dbPath), { recursive: true });
+	let acquired = false;
+	try {
+		return await withFileLock(
+			`${dbPath}.sync`,
+			async () => {
+				acquired = true;
+				return await fn();
+			},
+			{ retries: 1 },
+		);
+	} catch (error) {
+		if (!acquired) return null;
+		throw error;
+	}
+}
+
+interface SourcePlan {
+	stat: fs.Stats;
+	fromOffset: number;
+	identity: FileOffsetIdentity;
+	unchanged: boolean;
+}
+
+async function planSourceRead(sessionFile: string, stored: FileOffset | null): Promise<SourcePlan> {
+	const stat = await fs.promises.stat(sessionFile);
+	let generation = stored?.generation ?? 0;
+	let fromOffset = stored?.offset ?? 0;
+	const inodeChanged =
+		stored !== null &&
+		stored.inode !== null &&
+		stored.dev !== null &&
+		(stored.inode !== stat.ino || stored.dev !== stat.dev);
+	let boundaryBroken = false;
+	if (stored && stored.offset > 0 && stored.offset <= stat.size) {
+		const boundary = new Uint8Array(await Bun.file(sessionFile).slice(stored.offset - 1, stored.offset).arrayBuffer());
+		boundaryBroken = boundary[0] !== 0x0a;
+	}
+	if (stored && (stat.size < stored.offset || inodeChanged || boundaryBroken)) {
+		generation++;
+		fromOffset = 0;
+	}
+	const identity = { inode: stat.ino, dev: stat.dev, size: stat.size, generation };
+	const unchanged =
+		stored !== null &&
+		fromOffset === stored.offset &&
+		stored.lastModified >= stat.mtimeMs &&
+		stored.size === stat.size &&
+		!inodeChanged &&
+		!boundaryBroken;
+	return { stat, fromOffset, identity, unchanged };
+}
+
+function transcriptRelation(sessionFile: string): {
+	relatedKind?: "nested" | "advisor";
+	leadFile?: string;
+} {
+	const basename = path.basename(sessionFile);
+	const advisor = basename === "__advisor.jsonl" || (basename.startsWith("__advisor.") && basename.endsWith(".jsonl"));
+	const relative = path.relative(getSessionsDir(), sessionFile).split(path.sep);
+	if (relative.length > 2) {
+		return {
+			relatedKind: advisor ? "advisor" : "nested",
+			leadFile: path.join(getSessionsDir(), relative[0], `${relative[1]}.jsonl`),
+		};
+	}
+	return advisor ? { relatedKind: "advisor" } : {};
+}
+
+function statsFolder(sessionFile: string): string {
+	const project = path.relative(getSessionsDir(), sessionFile).split(path.sep)[0] ?? "";
+	return project.replace(/^--/, "/").replace(/--/g, "/");
+}
+
 /**
- * Apply a freshly parsed result to the database. Runs entirely on the
- * main thread so the single SQLite handle owns every write.
+ * Commit all projections for one parsed file together with its source cursor.
  */
-function applyParseResult(sessionFile: string, lastModified: number, result: ParseSessionResult): number {
-	if (result.stats.length > 0) insertMessageStats(result.stats);
-	if (result.userStats.length > 0) insertUserMessageStats(result.userStats);
-	if (result.userLinks.length > 0) updateUserMessageLinks(result.userLinks);
-	if (result.toolCalls.length > 0) insertToolCalls(result.toolCalls);
-	if (result.toolResults.length > 0) updateToolResults(result.toolResults);
-	setFileOffset(sessionFile, result.newOffset, lastModified);
-	return result.stats.length + result.userStats.length;
+function applyParseResult(
+	sessionFile: string,
+	result: ParseSessionResult,
+	source: SourcePlan,
+	leadSessionId?: string,
+	persistOffset = true,
+): number {
+	const relation = transcriptRelation(sessionFile);
+	return runStatsTransaction(() => {
+		if (result.stats.length > 0) insertMessageStats(result.stats);
+		if (result.userStats.length > 0) insertUserMessageStats(result.userStats);
+		if (result.userLinks.length > 0) updateUserMessageLinks(result.userLinks);
+		if (result.toolCalls.length > 0) insertToolCalls(result.toolCalls);
+		if (result.toolResults.length > 0) updateToolResults(result.toolResults);
+		applyObservabilityProjection({
+			sessionFile,
+			folder: statsFolder(sessionFile),
+			leadSessionId,
+			relatedKind: relation.relatedKind,
+			header: result.header,
+			sessionExit: result.sessionExit,
+			observability: result.observability,
+			indexedThrough: result.newOffset,
+			sourceMtime: source.stat.mtimeMs,
+			sourceSize: source.stat.size,
+			generation: source.identity.generation,
+		});
+		if (persistOffset) {
+			setFileOffset(sessionFile, result.newOffset, source.stat.mtimeMs, source.identity);
+		}
+		return result.stats.length + result.userStats.length;
+	});
 }
 
 /**
@@ -228,6 +335,90 @@ export async function smokeTestSyncWorker({ timeoutMs = 5_000 }: { timeoutMs?: n
 	}
 }
 
+interface ParsedAuditTail {
+	records: Array<{ decisionId: string; kind: string; timestamp: string; payload: unknown }>;
+	newOffset: number;
+}
+
+async function parseRoutingAuditTail(logPath: string, fromOffset: number): Promise<ParsedAuditTail> {
+	let bytes: Uint8Array;
+	try {
+		bytes = await Bun.file(logPath).bytes();
+	} catch {
+		return { records: [], newOffset: fromOffset };
+	}
+	const start = Math.max(0, Math.min(fromOffset, bytes.length));
+	const records: ParsedAuditTail["records"] = [];
+	let cursor = start;
+	let read = 0;
+	while (cursor < bytes.length) {
+		const newline = bytes.indexOf(0x0a, cursor);
+		if (newline === -1) break;
+		try {
+			const payload: unknown = JSON.parse(new TextDecoder().decode(bytes.subarray(cursor, newline)));
+			if (
+				typeof payload === "object" &&
+				payload !== null &&
+				"decisionId" in payload &&
+				typeof payload.decisionId === "string" &&
+				"kind" in payload &&
+				typeof payload.kind === "string" &&
+				"timestamp" in payload &&
+				typeof payload.timestamp === "string"
+			) {
+				records.push({
+					decisionId: payload.decisionId,
+					kind: payload.kind,
+					timestamp: payload.timestamp,
+					payload,
+				});
+			}
+		} catch {
+			// A malformed complete line is skipped; later lines remain readable.
+		}
+		read = newline + 1 - start;
+		cursor = newline + 1;
+	}
+	return { records, newOffset: start + read };
+}
+
+async function ingestRoutingAudit(persist: boolean): Promise<void> {
+	const logPath = getRoutingAuditLogPath();
+	let stat: fs.Stats;
+	try {
+		stat = await fs.promises.stat(logPath);
+	} catch {
+		return;
+	}
+	const stored = getAuditOffset(logPath);
+	let fromOffset = stored?.offset ?? 0;
+	let generation = stored?.generation ?? 0;
+	if (stored && stat.size < stored.offset) {
+		fromOffset = 0;
+		generation++;
+	} else if (stored && stored.offset > 0) {
+		const boundary = new Uint8Array(await Bun.file(logPath).slice(stored.offset - 1, stored.offset).arrayBuffer());
+		if (boundary[0] !== 0x0a) {
+			fromOffset = 0;
+			generation++;
+		}
+	}
+	if (stored && stored.lastModified >= stat.mtimeMs && fromOffset === stored.offset) return;
+	const parsed = await parseRoutingAuditTail(logPath, fromOffset);
+	if (!persist) return;
+	runStatsTransaction(() => {
+		applyRoutingAuditRecords(logPath, parsed.records, parsed.newOffset, stat.mtimeMs, generation);
+	});
+}
+
+async function relatedLeadId(sessionFile: string): Promise<string | undefined> {
+	const leadFile = transcriptRelation(sessionFile).leadFile;
+	if (!leadFile) return undefined;
+	const indexed = getObservabilitySessionIdByFile(leadFile);
+	if (indexed) return indexed;
+	return (await parseSessionFile(leadFile, 0)).header?.id;
+}
+
 /**
  * Sync all session files to the database.
  *
@@ -244,16 +435,22 @@ export async function syncAllSessions(opts?: SyncOptions): Promise<{ processed: 
 async function syncAllSessionsLocked(opts?: SyncOptions): Promise<{ processed: number; files: number }> {
 	await initDb();
 
-	const files = await listAllSessionFiles();
+	const pendingObservability = hasPendingObservabilityBackfill();
+	const files = (await listAllSessionFiles()).sort((left, right) => {
+		const leftDepth = path.relative(getSessionsDir(), left).split(path.sep).length;
+		const rightDepth = path.relative(getSessionsDir(), right).split(path.sep).length;
+		return leftDepth - rightDepth || left.localeCompare(right);
+	});
 	let totalProcessed = 0;
 	let filesProcessed = 0;
 	let completed = 0;
 	let cursor = 0;
-	const finish = () => {
+	const finish = async () => {
+		await ingestRoutingAudit(true);
 		markSessionBackfillsComplete();
 		return { processed: totalProcessed, files: filesProcessed };
 	};
-	if (files.length === 0) return finish();
+	if (files.length === 0) return await finish();
 
 	const report = (sessionFile: string) => {
 		completed++;
@@ -269,23 +466,20 @@ async function syncAllSessionsLocked(opts?: SyncOptions): Promise<{ processed: n
 		sessionFile: string,
 		parse: (sessionFile: string, fromOffset: number) => Promise<ParseSessionResult>,
 	): Promise<void> => {
-		let fileStats: fs.Stats;
+		let source: SourcePlan;
 		try {
-			fileStats = await fs.promises.stat(sessionFile);
+			source = await planSourceRead(sessionFile, pendingObservability ? null : getFileOffset(sessionFile));
 		} catch {
 			report(sessionFile);
 			return;
 		}
-		const lastModified = fileStats.mtimeMs;
-		const stored = getFileOffset(sessionFile);
-		if (stored && stored.lastModified >= lastModified) {
+		if (source.unchanged) {
 			report(sessionFile);
 			return;
 		}
 
-		const fromOffset = stored?.offset ?? 0;
-		const result = await parse(sessionFile, fromOffset);
-		const inserted = applyParseResult(sessionFile, lastModified, result);
+		const result = await parse(sessionFile, source.fromOffset);
+		const inserted = applyParseResult(sessionFile, result, source, await relatedLeadId(sessionFile));
 		if (inserted > 0) {
 			totalProcessed += inserted;
 			filesProcessed++;
@@ -298,11 +492,10 @@ async function syncAllSessionsLocked(opts?: SyncOptions): Promise<{ processed: n
 		for (const sessionFile of files) {
 			await processFile(sessionFile, parseSessionFile);
 		}
-		return finish();
+		return await finish();
 	}
 
 	const poolSize = Math.min(files.length, requestedWorkers);
-
 	const handles: WorkerHandle[] = [];
 	for (let i = 0; i < poolSize; i++) handles.push(spawnWorker());
 
@@ -321,7 +514,89 @@ async function syncAllSessionsLocked(opts?: SyncOptions): Promise<{ processed: n
 		for (const handle of handles) handle.worker.terminate();
 	}
 
-	return finish();
+	return await finish();
+}
+
+export async function resolveLeadSessionFile(sessionId: string): Promise<string | null> {
+	await initDb();
+	const indexed = getObservabilitySessionSnapshot(sessionId)?.sessionFile;
+	if (indexed) {
+		try {
+			if ((await fs.promises.stat(indexed)).isFile()) return indexed;
+		} catch {
+			// The locator moved; fall through to the bounded project-folder scan.
+		}
+	}
+	let projects: fs.Dirent[];
+	try {
+		projects = await fs.promises.readdir(getSessionsDir(), { withFileTypes: true });
+	} catch {
+		return null;
+	}
+	const suffix = `_${sessionId}.jsonl`;
+	for (const project of projects) {
+		if (!project.isDirectory()) continue;
+		const projectPath = path.join(getSessionsDir(), project.name);
+		let entries: fs.Dirent[];
+		try {
+			entries = await fs.promises.readdir(projectPath, { withFileTypes: true });
+		} catch {
+			continue;
+		}
+		const match = entries.find(entry => entry.isFile() && entry.name.endsWith(suffix));
+		if (match) return path.join(projectPath, match.name);
+	}
+	return null;
+}
+
+export type IngestDetailResult =
+	| {
+			ok: true;
+			sessionFile: string;
+			snapshot: ObservabilitySessionSnapshot | null;
+			observability: ParseSessionResult["observability"];
+	  }
+	| {
+			ok: false;
+			reason: "not_found" | "lock_busy";
+			snapshot?: ObservabilitySessionSnapshot | null;
+	  };
+
+export async function ingestSessionDetail(sessionId: string): Promise<IngestDetailResult> {
+	const resolved = await resolveLeadSessionFile(sessionId);
+	if (!resolved) return { ok: false, reason: "not_found" };
+	const priorSnapshot = getObservabilitySessionSnapshot(sessionId);
+	const result = await tryWithStatsSyncLock(getStatsDbPath(), async (): Promise<IngestDetailResult> => {
+		const leadFile = await resolveLeadSessionFile(sessionId);
+		if (!leadFile) return { ok: false, reason: "not_found" };
+		const pending = hasPendingObservabilityBackfill();
+		const stemDirectory = leadFile.slice(0, -".jsonl".length);
+		const related = await listSessionFiles(stemDirectory);
+		const files = [leadFile, ...related.filter(file => path.resolve(file) !== path.resolve(leadFile))];
+		const parsedObservability: ParseSessionResult["observability"] = [];
+		let leadId = sessionId;
+		for (const sessionFile of files) {
+			let source: SourcePlan;
+			try {
+				source = await planSourceRead(sessionFile, pending ? null : getFileOffset(sessionFile));
+			} catch {
+				continue;
+			}
+			if (source.unchanged) continue;
+			const parsed = await parseSessionFile(sessionFile, source.fromOffset);
+			if (sessionFile === leadFile && parsed.header) leadId = parsed.header.id;
+			parsedObservability.push(...parsed.observability);
+			applyParseResult(sessionFile, parsed, source, sessionFile === leadFile ? undefined : leadId, !pending);
+		}
+		await ingestRoutingAudit(!pending);
+		return {
+			ok: true,
+			sessionFile: leadFile,
+			snapshot: getObservabilitySessionSnapshot(sessionId),
+			observability: parsedObservability,
+		};
+	});
+	return result ?? { ok: false, reason: "lock_busy", snapshot: priorSnapshot };
 }
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -489,23 +764,8 @@ export async function getRecentErrors(range?: string | null, limit?: number): Pr
 	return dbGetRecentErrors(limit, cutoff);
 }
 
-export async function getRequestDetails(id: number): Promise<RequestDetails | null> {
-	await initDb();
-	const msg = getMessageById(id);
-	if (!msg) return null;
-
-	const entry = await getSessionEntry(msg.sessionFile, msg.entryId);
-	if (entry?.type !== "message") return null;
-
-	// TODO: Get parent/context messages?
-	// For now we return the single entry which contains the assistant response.
-	// The user prompt is likely the parent.
-
-	return {
-		...msg,
-		messages: [entry],
-		output: (entry as any).message,
-	};
+export async function getRequestDetails(id: number) {
+	return getRequestBySqliteId(id);
 }
 
 /**

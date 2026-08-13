@@ -619,14 +619,31 @@ async function cleanupHistoryRowsForArchivedSessions(
 	}
 }
 
-const STATS_SESSION_TABLES = ["messages", "user_messages", "tool_calls", "file_offsets"] as const;
-const STATS_ENTRY_TABLES = ["messages", "user_messages", "tool_calls"] as const;
+export const STATS_SESSION_TABLES = [
+	"messages",
+	"user_messages",
+	"tool_calls",
+	"file_offsets",
+	"obs_sessions",
+	"obs_related_transcripts",
+	"obs_run_assignments",
+	"obs_timeline",
+] as const;
+export const STATS_ENTRY_TABLES = [
+	"messages",
+	"user_messages",
+	"tool_calls",
+	"obs_run_assignments",
+	"obs_timeline",
+] as const;
 type StatsEntryTable = (typeof STATS_ENTRY_TABLES)[number];
 
 const STATS_IDENTITY_COLUMNS: Record<StatsEntryTable, readonly string[]> = {
 	messages: ["entry_id", "timestamp"],
 	user_messages: ["entry_id", "timestamp"],
 	tool_calls: ["entry_id", "timestamp", "tool_call_id"],
+	obs_run_assignments: ["entry_id", "timestamp"],
+	obs_timeline: ["entry_id", "timestamp"],
 };
 
 interface StatsSession {
@@ -671,6 +688,8 @@ function createStatsIdentities(): Record<StatsEntryTable, StatsEntryIdentity[]> 
 		messages: [],
 		user_messages: [],
 		tool_calls: [],
+		obs_run_assignments: [],
+		obs_timeline: [],
 	};
 }
 
@@ -913,24 +932,39 @@ function addSessionStatsIdentity(line: string, identities: Record<StatsEntryTabl
 			!record ||
 			typeof record !== "object" ||
 			!("type" in record) ||
-			record.type !== "message" ||
 			!("id" in record) ||
 			typeof record.id !== "string" ||
-			record.id.length === 0 ||
-			!("message" in record) ||
-			!record.message ||
-			typeof record.message !== "object"
+			record.id.length === 0
 		) {
+			return;
+		}
+		const parsedEntryTimestamp =
+			"timestamp" in record && typeof record.timestamp === "string" ? Date.parse(record.timestamp) : Number.NaN;
+		const entryTimestamp = Number.isFinite(parsedEntryTimestamp) ? parsedEntryTimestamp : 0;
+		if (
+			record.type === "custom" &&
+			"customType" in record &&
+			record.customType === "observability" &&
+			"data" in record &&
+			record.data &&
+			typeof record.data === "object"
+		) {
+			const identity = { entryId: record.id, timestamp: entryTimestamp, toolCallId: "" };
+			identities.obs_timeline.push(identity);
+			if ("kind" in record.data && record.data.kind === "run_assignment") {
+				identities.obs_run_assignments.push(identity);
+			}
+			return;
+		}
+		if (record.type !== "message" || !("message" in record) || !record.message || typeof record.message !== "object") {
 			return;
 		}
 		const message = record.message;
 		if (!("role" in message)) return;
-		const parsedEntryTimestamp =
-			"timestamp" in record && typeof record.timestamp === "string" ? Date.parse(record.timestamp) : Number.NaN;
 		if (message.role === "user") {
 			identities.user_messages.push({
 				entryId: record.id,
-				timestamp: Number.isFinite(parsedEntryTimestamp) ? parsedEntryTimestamp : 0,
+				timestamp: entryTimestamp,
 				toolCallId: "",
 			});
 			return;
@@ -939,9 +973,7 @@ function addSessionStatsIdentity(line: string, identities: Record<StatsEntryTabl
 		const timestamp =
 			"timestamp" in message && typeof message.timestamp === "number" && Number.isFinite(message.timestamp)
 				? message.timestamp
-				: Number.isFinite(parsedEntryTimestamp)
-					? parsedEntryTimestamp
-					: 0;
+				: entryTimestamp;
 		identities.messages.push({ entryId: record.id, timestamp, toolCallId: "" });
 		if (!("content" in message) || !Array.isArray(message.content)) return;
 		for (const block of message.content) {
@@ -1100,6 +1132,8 @@ function reconcileStatsRowsForSessions(dbPath: string, plans: StatsCleanupPlan[]
 						const requiresTransfer =
 							plan.retainedSessions.length > 0 &&
 							table !== "file_offsets" &&
+							table !== "obs_sessions" &&
+							table !== "obs_related_transcripts" &&
 							!entryTables.some(entryTable => entryTable === table);
 						if (requiresTransfer) continue;
 						const result = statement.run(sessionPath, nestedPrefix) as SqliteRunResult;

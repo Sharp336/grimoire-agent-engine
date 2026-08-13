@@ -3,6 +3,7 @@ import type { TimeRange } from "../types";
 export interface RangeControlProps {
 	value: TimeRange;
 	onChange: (value: TimeRange) => void;
+	disabled?: boolean;
 	className?: string;
 }
 
@@ -15,9 +16,15 @@ const RANGE_OPTIONS: { value: TimeRange; label: string }[] = [
 	{ value: "all", label: "All" },
 ];
 
-export function RangeControl({ value, onChange, className = "" }: RangeControlProps) {
+export function RangeControl({ value, onChange, disabled = false, className = "" }: RangeControlProps) {
 	return (
-		<div className={`stats-range-control ${className}`} role="radiogroup" aria-label="Select time range">
+		<div
+			className={`stats-range-control ${className}`}
+			role="radiogroup"
+			aria-label="Select time range"
+			aria-disabled={disabled}
+			title={disabled ? "Range filters the session list, not this detail" : undefined}
+		>
 			{RANGE_OPTIONS.map(opt => {
 				const isActive = opt.value === value;
 				return (
@@ -28,6 +35,7 @@ export function RangeControl({ value, onChange, className = "" }: RangeControlPr
 						aria-checked={isActive}
 						data-active={isActive ? "true" : "false"}
 						className="stats-range-control-btn"
+						disabled={disabled}
 						onClick={() => onChange(opt.value)}
 					>
 						{opt.label}

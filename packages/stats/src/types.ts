@@ -75,7 +75,42 @@ export interface SessionServiceTierChangeEntry {
 	serviceTier: ServiceTierByFamily | ServiceTier | null;
 }
 
-export type SessionEntry = SessionHeader | SessionMessageEntry | SessionServiceTierChangeEntry | { type: string };
+export interface SessionCustomEntry {
+	type: "custom";
+	id: string;
+	parentId: string | null;
+	timestamp: string;
+	customType: string;
+	data?: unknown;
+}
+
+export interface ParsedSessionHeader {
+	id: string;
+	version: number;
+	timestamp: string;
+	cwd: string;
+	title?: string;
+}
+
+export interface ParsedSessionExit {
+	kind: string;
+	recordedAt: string;
+	entryId: string;
+}
+
+export interface ParsedObservabilityEntry {
+	entryId: string;
+	parentId: string | null;
+	timestamp: string;
+	payload: Record<string, unknown>;
+}
+
+export type SessionEntry =
+	| SessionHeader
+	| SessionMessageEntry
+	| SessionServiceTierChangeEntry
+	| SessionCustomEntry
+	| { type: string };
 
 /**
  * Behavioral stats extracted from a single user message.

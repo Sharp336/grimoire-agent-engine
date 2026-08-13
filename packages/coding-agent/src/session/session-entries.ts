@@ -135,6 +135,87 @@ export interface ResetBoundaryEntry extends SessionEntryBase {
 	type: "reset_boundary";
 }
 
+export type SessionBoundaryReason = "resume" | "attach";
+
+interface ObservabilityPayloadBase {
+	v: 1;
+	/** Event name. Unknown future names remain loadable as ordinary CustomEntry data. */
+	kind:
+		| "session_boundary"
+		| "run_assignment"
+		| "segment"
+		| "verification"
+		| "human_verdict"
+		| "outcome"
+		| "model_request"
+		| "model_attempt";
+}
+
+export interface SessionBoundaryObservabilityPayload extends ObservabilityPayloadBase {
+	kind: "session_boundary";
+	reason: SessionBoundaryReason;
+}
+
+export interface RunAssignmentObservabilityPayload extends ObservabilityPayloadBase {
+	kind: "run_assignment";
+	runId: string;
+}
+
+export interface SegmentObservabilityPayload extends ObservabilityPayloadBase {
+	kind: "segment";
+	segmentId: string;
+	entryId?: string;
+}
+
+export interface VerificationObservabilityPayload extends ObservabilityPayloadBase {
+	kind: "verification";
+	entryId?: string;
+	toolCallId?: string;
+}
+
+export interface HumanVerdictObservabilityPayload extends ObservabilityPayloadBase {
+	kind: "human_verdict";
+	entryId?: string;
+}
+
+/** Durable `obs.outcome`; each axis is independent and omitted axes remain unknown. */
+export interface OutcomeObservabilityPayload extends ObservabilityPayloadBase {
+	kind: "outcome";
+	execution?: string;
+	contract?: string;
+	verification?: string;
+	humanAcceptance?: string;
+}
+
+export interface ModelRequestObservabilityPayload extends ObservabilityPayloadBase {
+	kind: "model_request";
+	outcome: "failed";
+	attempt?: number;
+	decisionId?: string;
+}
+
+export interface ModelAttemptObservabilityPayload extends ObservabilityPayloadBase {
+	kind: "model_attempt";
+	attempt: number;
+	recovery: "credential" | "model" | "transport" | "provider";
+	entryId?: string;
+	decisionId?: string;
+}
+
+export type ObservabilityPayload =
+	| SessionBoundaryObservabilityPayload
+	| RunAssignmentObservabilityPayload
+	| SegmentObservabilityPayload
+	| VerificationObservabilityPayload
+	| HumanVerdictObservabilityPayload
+	| OutcomeObservabilityPayload
+	| ModelRequestObservabilityPayload
+	| ModelAttemptObservabilityPayload;
+
+export type ObservabilityCustomEntry = CustomEntry<ObservabilityPayload> & {
+	customType: "observability";
+};
+
 /**
  * Custom entry for extensions to store extension-specific data in the session.
  * Use customType to identify your extension's entries.

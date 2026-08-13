@@ -14,6 +14,9 @@ import type {
 	BehaviorTimeSeriesPoint,
 	CostTimeSeriesPoint,
 	FolderStats,
+	ParsedObservabilityEntry,
+	ParsedSessionExit,
+	ParsedSessionHeader,
 	MessageStats,
 	ModelPerformancePoint,
 	ModelStats,
@@ -21,6 +24,7 @@ import type {
 	ProviderAggregate,
 	ProviderHourlyPoint,
 	ProviderTimeSeriesPoint,
+	SessionUsageSummary,
 	TimeSeriesPoint,
 	ToolCallStats,
 	ToolModelStats,
@@ -63,6 +67,7 @@ const PRIORITY_PREMIUM_REQUESTS_BACKFILL_KEY = "premium_requests_priority_v1";
 const AGENT_TYPE_BACKFILL_KEY = "agent_type_v1";
 const FORK_DEDUPE_KEY = "fork_dedupe_v1";
 const TOOL_CALLS_BACKFILL_KEY = "tool_calls_v1";
+const OBSERVABILITY_BACKFILL_KEY = "observability_v1";
 function shouldResetBackfill(value: string | undefined): boolean {
 	return value !== BACKFILL_COMPLETE && value !== BACKFILL_PENDING;
 }
@@ -81,8 +86,6 @@ export async function initDb(): Promise<Database> {
 	db.run("PRAGMA busy_timeout = 5000");
 	db.run("PRAGMA journal_mode = WAL");
 
-	// Whether `messages` predates this init — drives the one-time agent_type
-	// backfill below, so it must be sampled before CREATE TABLE adds the table.
 	const messagesTableExisted =
 		db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages'").get() !== undefined;
 
@@ -127,7 +130,11 @@ export async function initDb(): Promise<Database> {
 		CREATE TABLE IF NOT EXISTS file_offsets (
 			session_file TEXT PRIMARY KEY,
 			offset INTEGER NOT NULL,
-			last_modified INTEGER NOT NULL
+			last_modified INTEGER NOT NULL,
+			inode INTEGER,
+			dev INTEGER,
+			size INTEGER,
+			generation INTEGER NOT NULL DEFAULT 0
 		);
 
 		CREATE TABLE IF NOT EXISTS user_messages (
@@ -177,7 +184,99 @@ export async function initDb(): Promise<Database> {
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL
 		);
+
+		CREATE TABLE IF NOT EXISTS obs_sessions (
+			id TEXT PRIMARY KEY,
+			session_file TEXT NOT NULL,
+			folder TEXT NOT NULL,
+			cwd TEXT NOT NULL,
+			title TEXT,
+			status TEXT NOT NULL,
+			started_at INTEGER NOT NULL,
+			ended_at INTEGER,
+			indexed_at INTEGER NOT NULL,
+			indexed_through INTEGER NOT NULL,
+			source_mtime INTEGER NOT NULL,
+			source_size INTEGER NOT NULL,
+			generation INTEGER NOT NULL DEFAULT 0
+		);
+		CREATE INDEX IF NOT EXISTS idx_obs_sessions_file ON obs_sessions(session_file);
+		CREATE INDEX IF NOT EXISTS idx_obs_sessions_started ON obs_sessions(started_at);
+
+		CREATE TABLE IF NOT EXISTS obs_related_transcripts (
+			id TEXT PRIMARY KEY,
+			lead_session_id TEXT NOT NULL,
+			session_file TEXT NOT NULL,
+			kind TEXT NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_obs_related_lead ON obs_related_transcripts(lead_session_id);
+		CREATE INDEX IF NOT EXISTS idx_obs_related_file ON obs_related_transcripts(session_file);
+
+		CREATE TABLE IF NOT EXISTS obs_runs (
+			run_id TEXT PRIMARY KEY,
+			started_at INTEGER NOT NULL,
+			indexed_at INTEGER NOT NULL
+		);
+
+		CREATE TABLE IF NOT EXISTS obs_run_assignments (
+			run_id TEXT NOT NULL,
+			session_id TEXT NOT NULL,
+			session_file TEXT NOT NULL,
+			entry_id TEXT NOT NULL,
+			timestamp INTEGER NOT NULL,
+			PRIMARY KEY (run_id, session_id, entry_id),
+			UNIQUE(entry_id, timestamp)
+		);
+		CREATE INDEX IF NOT EXISTS idx_obs_run_assignments_session ON obs_run_assignments(session_id);
+
+		CREATE TABLE IF NOT EXISTS obs_timeline (
+			session_id TEXT NOT NULL,
+			session_file TEXT NOT NULL,
+			entry_id TEXT NOT NULL,
+			parent_id TEXT,
+			timestamp INTEGER NOT NULL,
+			kind TEXT NOT NULL,
+			run_id TEXT,
+			decision_id TEXT,
+			payload_json TEXT NOT NULL,
+			UNIQUE(entry_id, timestamp)
+		);
+		CREATE INDEX IF NOT EXISTS idx_obs_timeline_session ON obs_timeline(session_id, timestamp, entry_id);
+		CREATE INDEX IF NOT EXISTS idx_obs_timeline_run ON obs_timeline(run_id, timestamp, entry_id);
+
+		CREATE TABLE IF NOT EXISTS obs_routing_audit (
+			decision_id TEXT PRIMARY KEY,
+			kind TEXT NOT NULL,
+			timestamp INTEGER NOT NULL,
+			payload_json TEXT NOT NULL
+		);
+
+		CREATE TABLE IF NOT EXISTS obs_audit_offsets (
+			path TEXT PRIMARY KEY,
+			offset INTEGER NOT NULL,
+			last_modified INTEGER NOT NULL,
+			generation INTEGER NOT NULL DEFAULT 0
+		);
 	`);
+
+	const fileOffsetColumns = db.prepare("PRAGMA table_info(file_offsets)").all() as { name: string }[];
+	for (const [name, definition] of [
+		["inode", "INTEGER"],
+		["dev", "INTEGER"],
+		["size", "INTEGER"],
+		["generation", "INTEGER NOT NULL DEFAULT 0"],
+	] as const) {
+		if (!fileOffsetColumns.some(column => column.name === name)) {
+			db.run(`ALTER TABLE file_offsets ADD COLUMN ${name} ${definition}`);
+		}
+	}
+	const observabilityBackfillRow = db.prepare("SELECT value FROM meta WHERE key = ?").get(
+		OBSERVABILITY_BACKFILL_KEY,
+	) as { value: string } | undefined;
+	db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)").run(
+		OBSERVABILITY_BACKFILL_KEY,
+		BACKFILL_PENDING,
+	);
 
 	const messageColumns = db.prepare("PRAGMA table_info(messages)").all() as { name: string }[];
 	if (!messageColumns.some(column => column.name === "premium_requests")) {
@@ -260,6 +359,7 @@ export async function initDb(): Promise<Database> {
 		`);
 	}
 	backfillUserMessages(db);
+	backfillObservability(db, messagesTableExisted, observabilityBackfillRow?.value);
 	backfillToolCalls(db);
 	repairUserMessageLinks(db);
 	backfillPriorityPremiumRequests(db);
@@ -361,26 +461,575 @@ function backfillMissingCatalogCosts(database: Database): void {
 /**
  * Get the stored offset for a session file.
  */
-export function getFileOffset(sessionFile: string): { offset: number; lastModified: number } | null {
-	if (!db) return null;
-
-	const stmt = db.prepare("SELECT offset, last_modified FROM file_offsets WHERE session_file = ?");
-	const row = stmt.get(sessionFile) as { offset: number; last_modified: number } | undefined;
-
-	return row ? { offset: row.offset, lastModified: row.last_modified } : null;
+export interface FileOffset {
+	offset: number;
+	lastModified: number;
+	inode: number | null;
+	dev: number | null;
+	size: number | null;
+	generation: number;
 }
 
-/**
- * Update the stored offset for a session file.
- */
-export function setFileOffset(sessionFile: string, offset: number, lastModified: number): void {
+export interface FileOffsetIdentity {
+	inode: number;
+	dev: number;
+	size: number;
+	generation: number;
+}
+
+export function getFileOffset(sessionFile: string): FileOffset | null {
+	if (!db) return null;
+
+	const row = db
+		.prepare(
+			"SELECT offset, last_modified, inode, dev, size, generation FROM file_offsets WHERE session_file = ?",
+		)
+		.get(sessionFile) as
+		| {
+				offset: number;
+				last_modified: number;
+				inode: number | null;
+				dev: number | null;
+				size: number | null;
+				generation: number;
+		  }
+		| undefined;
+
+	return row
+		? {
+				offset: row.offset,
+				lastModified: row.last_modified,
+				inode: row.inode,
+				dev: row.dev,
+				size: row.size,
+				generation: row.generation,
+			}
+		: null;
+}
+
+export function setFileOffset(
+	sessionFile: string,
+	offset: number,
+	lastModified: number,
+	identity: FileOffsetIdentity = { inode: 0, dev: 0, size: offset, generation: 0 },
+): void {
 	if (!db) return;
 
-	const stmt = db.prepare(`
-		INSERT OR REPLACE INTO file_offsets (session_file, offset, last_modified)
-		VALUES (?, ?, ?)
+	db.prepare(`
+		INSERT INTO file_offsets (session_file, offset, last_modified, inode, dev, size, generation)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(session_file) DO UPDATE SET
+			offset = excluded.offset,
+			last_modified = excluded.last_modified,
+			inode = excluded.inode,
+			dev = excluded.dev,
+			size = excluded.size,
+			generation = excluded.generation
+	`).run(
+		sessionFile,
+		offset,
+		lastModified,
+		identity.inode,
+		identity.dev,
+		identity.size,
+		identity.generation,
+	);
+}
+
+export function runStatsTransaction<T>(fn: () => T): T {
+	if (!db) throw new Error("Stats database is not initialized");
+	return db.transaction(fn)();
+}
+
+export interface ObservabilityProjectionInput {
+	sessionFile: string;
+	folder: string;
+	leadSessionId?: string;
+	relatedKind?: "nested" | "advisor";
+	header?: ParsedSessionHeader;
+	sessionExit?: ParsedSessionExit;
+	observability: ParsedObservabilityEntry[];
+	indexedThrough: number;
+	sourceMtime: number;
+	sourceSize: number;
+	generation: number;
+}
+
+function finiteTimestamp(value: string): number {
+	const timestamp = Date.parse(value);
+	return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+export function applyObservabilityProjection(input: ObservabilityProjectionInput): void {
+	if (!db || !input.header) return;
+	const now = Date.now();
+	const executionId = input.header.id;
+	const sessionId = input.leadSessionId ?? executionId;
+
+	if (input.relatedKind) {
+		db.prepare(`
+			INSERT INTO obs_related_transcripts (id, lead_session_id, session_file, kind)
+			VALUES (?, ?, ?, ?)
+			ON CONFLICT(id) DO UPDATE SET
+				lead_session_id = excluded.lead_session_id,
+				session_file = excluded.session_file,
+				kind = excluded.kind
+		`).run(executionId, sessionId, input.sessionFile, input.relatedKind);
+	} else {
+		let lifecycleTimestamp = -1;
+		let status: string | undefined;
+		let endedAt: number | null = null;
+		if (input.sessionExit) {
+			lifecycleTimestamp = finiteTimestamp(input.sessionExit.recordedAt);
+			status = input.sessionExit.kind === "normal" ? "completed" : "interrupted";
+			endedAt = lifecycleTimestamp;
+		}
+		for (const event of input.observability) {
+			if (event.payload.kind !== "session_boundary") continue;
+			const timestamp = finiteTimestamp(event.timestamp);
+			if (timestamp >= lifecycleTimestamp) {
+				lifecycleTimestamp = timestamp;
+				status = "active";
+				endedAt = null;
+			}
+		}
+		const existing = db.prepare("SELECT status, ended_at FROM obs_sessions WHERE id = ?").get(executionId) as
+			| { status: string; ended_at: number | null }
+			| undefined;
+		db.prepare(`
+			INSERT INTO obs_sessions (
+				id, session_file, folder, cwd, title, status, started_at, ended_at,
+				indexed_at, indexed_through, source_mtime, source_size, generation
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(id) DO UPDATE SET
+				session_file = excluded.session_file,
+				folder = excluded.folder,
+				cwd = excluded.cwd,
+				title = excluded.title,
+				status = excluded.status,
+				ended_at = excluded.ended_at,
+				indexed_at = excluded.indexed_at,
+				indexed_through = excluded.indexed_through,
+				source_mtime = excluded.source_mtime,
+				source_size = excluded.source_size,
+				generation = excluded.generation
+		`).run(
+			executionId,
+			input.sessionFile,
+			input.folder,
+			input.header.cwd,
+			input.header.title ?? null,
+			status ?? existing?.status ?? "active",
+			finiteTimestamp(input.header.timestamp),
+			status === undefined ? (existing?.ended_at ?? null) : endedAt,
+			now,
+			input.indexedThrough,
+			input.sourceMtime,
+			input.sourceSize,
+			input.generation,
+		);
+	}
+
+	const insertTimeline = db.prepare(`
+		INSERT OR IGNORE INTO obs_timeline (
+			session_id, session_file, entry_id, parent_id, timestamp, kind,
+			run_id, decision_id, payload_json
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`);
-	stmt.run(sessionFile, offset, lastModified);
+	const insertRun = db.prepare(
+		"INSERT OR IGNORE INTO obs_runs (run_id, started_at, indexed_at) VALUES (?, ?, ?)",
+	);
+	const insertAssignment = db.prepare(`
+		INSERT OR IGNORE INTO obs_run_assignments (
+			run_id, session_id, session_file, entry_id, timestamp
+		) VALUES (?, ?, ?, ?, ?)
+	`);
+	for (const event of input.observability) {
+		const kind = typeof event.payload.kind === "string" ? event.payload.kind : "unknown";
+		const runId = typeof event.payload.runId === "string" ? event.payload.runId : null;
+		const decisionId = typeof event.payload.decisionId === "string" ? event.payload.decisionId : null;
+		const timestamp = finiteTimestamp(event.timestamp);
+		insertTimeline.run(
+			sessionId,
+			input.sessionFile,
+			event.entryId,
+			event.parentId,
+			timestamp,
+			kind,
+			runId,
+			decisionId,
+			JSON.stringify(event.payload),
+		);
+		if (kind === "run_assignment" && runId) {
+			insertRun.run(runId, timestamp, now);
+			insertAssignment.run(runId, sessionId, input.sessionFile, event.entryId, timestamp);
+		}
+	}
+}
+
+export interface ObservabilitySessionSnapshot {
+	id: string;
+	sessionFile: string;
+	status: string;
+	indexedAt: number;
+	indexedThrough: number;
+	sourceMtime: number;
+	sourceSize: number;
+	generation: number;
+}
+
+export function getObservabilitySessionSnapshot(sessionId: string): ObservabilitySessionSnapshot | null {
+	if (!db) return null;
+	const row = db.prepare(`
+		SELECT id, session_file, status, indexed_at, indexed_through,
+			source_mtime, source_size, generation
+		FROM obs_sessions WHERE id = ?
+	`).get(sessionId) as
+		| {
+				id: string;
+				session_file: string;
+				status: string;
+				indexed_at: number;
+				indexed_through: number;
+				source_mtime: number;
+				source_size: number;
+				generation: number;
+		  }
+		| undefined;
+	return row
+		? {
+				id: row.id,
+				sessionFile: row.session_file,
+				status: row.status,
+				indexedAt: row.indexed_at,
+				indexedThrough: row.indexed_through,
+				sourceMtime: row.source_mtime,
+				sourceSize: row.source_size,
+				generation: row.generation,
+			}
+		: null;
+}
+
+export interface ObservabilitySessionRow {
+	id: string;
+	sessionFile: string;
+	folder: string;
+	cwd: string;
+	title: string | null;
+	status: string;
+	startedAt: number;
+	endedAt: number | null;
+	indexedAt: number;
+	indexedThrough: number;
+	sourceMtime: number;
+	sourceSize: number;
+	generation: number;
+}
+
+export interface ObservabilityTimelineRow {
+	sessionId: string;
+	sessionFile: string;
+	executionId: string;
+	entryId: string;
+	parentId: string | null;
+	timestamp: number;
+	kind: string;
+	runId: string | null;
+	decisionId: string | null;
+	payloadJson: string;
+}
+
+export interface ObservabilityRunRow {
+	runId: string;
+	startedAt: number;
+	indexedAt: number;
+	sessionIds: string[];
+}
+
+export interface ObservabilityDecisionRow {
+	decisionId: string;
+	kind: string;
+	timestamp: number;
+	payloadJson: string;
+}
+
+interface ObservabilitySessionDbRow {
+	id: string;
+	session_file: string;
+	folder: string;
+	cwd: string;
+	title: string | null;
+	status: string;
+	started_at: number;
+	ended_at: number | null;
+	indexed_at: number;
+	indexed_through: number;
+	source_mtime: number;
+	source_size: number;
+	generation: number;
+}
+
+interface ObservabilityRunDbRow {
+	run_id: string;
+	started_at: number;
+	indexed_at: number;
+	session_ids: string | null;
+}
+
+interface ObservabilityTimelineDbRow {
+	session_id: string;
+	session_file: string;
+	execution_id: string;
+	entry_id: string;
+	parent_id: string | null;
+	timestamp: number;
+	kind: string;
+	run_id: string | null;
+	decision_id: string | null;
+	payload_json: string;
+}
+
+interface ObservabilityDecisionDbRow {
+	decision_id: string;
+	kind: string;
+	timestamp: number;
+	payload_json: string;
+}
+
+
+function rowToObservabilitySession(row: ObservabilitySessionDbRow): ObservabilitySessionRow {
+	return {
+		id: row.id,
+		sessionFile: row.session_file,
+		folder: row.folder,
+		cwd: row.cwd,
+		title: row.title,
+		status: row.status,
+		startedAt: row.started_at,
+		endedAt: row.ended_at,
+		indexedAt: row.indexed_at,
+		indexedThrough: row.indexed_through,
+		sourceMtime: row.source_mtime,
+		sourceSize: row.source_size,
+		generation: row.generation,
+	};
+}
+
+export interface ObservabilitySessionFilters {
+	status?: string;
+	project?: string;
+	q?: string;
+	failure?: boolean;
+	since?: number;
+}
+
+export function listObservabilitySessions(filters: ObservabilitySessionFilters = {}): ObservabilitySessionRow[] {
+	if (!db) return [];
+	const clauses: string[] = [];
+	const values: Array<string | number> = [];
+	if (filters.status) {
+		clauses.push("s.status = ?");
+		values.push(filters.status);
+	}
+	if (filters.project) {
+		clauses.push("s.folder = ?");
+		values.push(filters.project);
+	}
+	if (filters.q) {
+		clauses.push("(s.id LIKE ? OR s.title LIKE ? OR s.folder LIKE ?)");
+		const q = `%${filters.q}%`;
+		values.push(q, q, q);
+	}
+	if (filters.failure) {
+		clauses.push(
+			"EXISTS (SELECT 1 FROM obs_timeline t WHERE t.session_id = s.id AND t.kind IN ('failure', 'model_attempt', 'verification'))",
+		);
+	}
+	if (filters.since !== undefined) {
+		clauses.push("s.started_at >= ?");
+		values.push(filters.since);
+	}
+	const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
+	const rows = db
+		.prepare(`SELECT s.* FROM obs_sessions s ${where} ORDER BY s.started_at DESC, s.id DESC`)
+		.all(...values) as unknown as ObservabilitySessionDbRow[];
+	return rows.map(rowToObservabilitySession);
+}
+
+export function getObservabilitySession(sessionId: string): ObservabilitySessionRow | null {
+	if (!db) return null;
+	const row = db.prepare("SELECT * FROM obs_sessions WHERE id = ?").get(sessionId) as
+		| ObservabilitySessionDbRow
+		| undefined;
+	return row ? rowToObservabilitySession(row) : null;
+}
+
+export interface ObservabilityRelatedTranscript {
+	executionId: string;
+	kind: string;
+}
+
+export function listObservabilityRelatedTranscripts(leadSessionId: string): ObservabilityRelatedTranscript[] {
+	if (!db) return [];
+	const rows = db
+		.prepare(
+			"SELECT id, kind FROM obs_related_transcripts WHERE lead_session_id = ? ORDER BY kind, id",
+		)
+		.all(leadSessionId) as Array<{ id: string; kind: string }>;
+	return rows.map(row => ({ executionId: row.id, kind: row.kind }));
+}
+
+
+export function listObservabilityRuns(): ObservabilityRunRow[] {
+	if (!db) return [];
+	const rows = db.prepare(`
+		SELECT r.run_id, r.started_at, r.indexed_at,
+			GROUP_CONCAT(DISTINCT a.session_id) AS session_ids
+		FROM obs_runs r
+		LEFT JOIN obs_run_assignments a ON a.run_id = r.run_id
+		GROUP BY r.run_id
+		ORDER BY r.started_at DESC, r.run_id DESC
+	`).all() as unknown as ObservabilityRunDbRow[];
+	return rows.map(row => ({
+		runId: row.run_id,
+		startedAt: row.started_at,
+		indexedAt: row.indexed_at,
+		sessionIds: row.session_ids ? String(row.session_ids).split(",") : [],
+	}));
+}
+
+export function getObservabilityRun(runId: string): ObservabilityRunRow | null {
+	return listObservabilityRuns().find(run => run.runId === runId) ?? null;
+}
+
+export function getObservabilityRunIdsForSession(sessionId: string): string[] {
+	if (!db) return [];
+	return (
+		db.prepare("SELECT DISTINCT run_id FROM obs_run_assignments WHERE session_id = ? ORDER BY timestamp").all(sessionId) as Array<{
+			run_id: string;
+		}>
+	).map(row => row.run_id);
+}
+
+export function listObservabilityTimeline(input: {
+	sessionId?: string;
+	runId?: string;
+	kinds?: string[];
+}): ObservabilityTimelineRow[] {
+	if (!db) return [];
+	const clauses: string[] = [];
+	const values: string[] = [];
+	if (input.sessionId) {
+		clauses.push("t.session_id = ?");
+		values.push(input.sessionId);
+	}
+	if (input.runId) {
+		clauses.push("t.run_id = ?");
+		values.push(input.runId);
+	}
+	if (input.kinds && input.kinds.length > 0) {
+		clauses.push(`t.kind IN (${input.kinds.map(() => "?").join(", ")})`);
+		values.push(...input.kinds);
+	}
+	if (clauses.length === 0) return [];
+	const rows = db.prepare(`
+		SELECT t.*, COALESCE(rt.id, s.id, t.session_id) AS execution_id
+		FROM obs_timeline t
+		LEFT JOIN obs_related_transcripts rt ON rt.session_file = t.session_file
+		LEFT JOIN obs_sessions s ON s.session_file = t.session_file
+		WHERE ${clauses.join(" AND ")}
+		ORDER BY t.timestamp ASC, t.entry_id ASC
+	`).all(...values) as unknown as ObservabilityTimelineDbRow[];
+	return rows.map(row => ({
+		sessionId: row.session_id,
+		sessionFile: row.session_file,
+		executionId: row.execution_id,
+		entryId: row.entry_id,
+		parentId: row.parent_id,
+		timestamp: row.timestamp,
+		kind: row.kind,
+		runId: row.run_id,
+		decisionId: row.decision_id,
+		payloadJson: row.payload_json,
+	}));
+}
+
+export function getObservabilityDecision(decisionId: string): ObservabilityDecisionRow | null {
+	if (!db) return null;
+	const row = db.prepare(
+		"SELECT decision_id, kind, timestamp, payload_json FROM obs_routing_audit WHERE decision_id = ?",
+	).get(decisionId) as ObservabilityDecisionDbRow | undefined;
+	return row
+		? {
+				decisionId: row.decision_id,
+				kind: row.kind,
+				timestamp: row.timestamp,
+				payloadJson: row.payload_json,
+			}
+		: null;
+}
+
+export function getMessageByEntryId(entryId: string): MessageStats | null {
+	if (!db) return null;
+	const row = db.prepare("SELECT * FROM messages WHERE entry_id = ? ORDER BY timestamp DESC LIMIT 1").get(entryId);
+	return row ? rowToMessageStats(row) : null;
+}
+
+export function hasPendingObservabilityBackfill(): boolean {
+	if (!db) return true;
+	const row = db.prepare("SELECT value FROM meta WHERE key = ?").get(OBSERVABILITY_BACKFILL_KEY) as
+		| { value: string }
+		| undefined;
+	return row?.value !== BACKFILL_COMPLETE;
+}
+
+export interface AuditOffset {
+	offset: number;
+	lastModified: number;
+	generation: number;
+}
+
+export function getAuditOffset(logPath: string): AuditOffset | null {
+	if (!db) return null;
+	const row = db
+		.prepare("SELECT offset, last_modified, generation FROM obs_audit_offsets WHERE path = ?")
+		.get(logPath) as { offset: number; last_modified: number; generation: number } | undefined;
+	return row
+		? { offset: row.offset, lastModified: row.last_modified, generation: row.generation }
+		: null;
+}
+
+export function applyRoutingAuditRecords(
+	logPath: string,
+	records: Array<{ decisionId: string; kind: string; timestamp: string; payload: unknown }>,
+	offset: number,
+	lastModified: number,
+	generation: number,
+): void {
+	if (!db) return;
+	const insert = db.prepare(`
+		INSERT OR IGNORE INTO obs_routing_audit (decision_id, kind, timestamp, payload_json)
+		VALUES (?, ?, ?, ?)
+	`);
+	for (const record of records) {
+		insert.run(record.decisionId, record.kind, finiteTimestamp(record.timestamp), JSON.stringify(record.payload));
+	}
+	db.prepare(`
+		INSERT INTO obs_audit_offsets (path, offset, last_modified, generation)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(path) DO UPDATE SET
+			offset = excluded.offset,
+			last_modified = excluded.last_modified,
+			generation = excluded.generation
+	`).run(logPath, offset, lastModified, generation);
+}
+
+export function getObservabilitySessionIdByFile(sessionFile: string): string | null {
+	if (!db) return null;
+	const row = db.prepare("SELECT id FROM obs_sessions WHERE session_file = ?").get(sessionFile) as
+		| { id: string }
+		| undefined;
+	return row?.id ?? null;
 }
 
 /**
@@ -994,6 +1643,138 @@ export function getMessageById(id: number): MessageStats | null {
 	return row ? rowToMessageStats(row) : null;
 }
 
+function sessionFileInClause(sessionFiles: string[]): { sql: string; params: string[] } | null {
+	if (sessionFiles.length === 0) return null;
+	return { sql: sessionFiles.map(() => "?").join(", "), params: sessionFiles };
+}
+
+const MESSAGE_ERROR_SQL =
+	"(stop_reason = 'error' OR (error_message IS NOT NULL AND error_message <> ''))";
+
+export function listMessagesForSessionFiles(
+	sessionFiles: string[],
+	options: { limit?: number; errorsOnly?: boolean } = {},
+): MessageStats[] {
+	if (!db) return [];
+	const clause = sessionFileInClause(sessionFiles);
+	if (!clause) return [];
+	const limit = Math.min(Math.max(options.limit ?? 100, 1), 200);
+	const errorFilter = options.errorsOnly ? `AND ${MESSAGE_ERROR_SQL}` : "";
+	const stmt = db.prepare(`
+		SELECT * FROM messages
+		WHERE session_file IN (${clause.sql})
+		${errorFilter}
+		ORDER BY timestamp DESC
+		LIMIT ?
+	`);
+	return (stmt.all(...clause.params, limit) as any[]).map(rowToMessageStats);
+}
+
+export function summarizeMessagesForSessionFiles(sessionFiles: string[]): SessionUsageSummary {
+	const empty: SessionUsageSummary = {
+		requests: 0,
+		errors: 0,
+		tools: 0,
+		totalTokens: 0,
+		inputTokens: 0,
+		outputTokens: 0,
+		cacheReadTokens: 0,
+		cacheWriteTokens: 0,
+		cost: 0,
+		byModel: [],
+	};
+	if (!db) return empty;
+	const clause = sessionFileInClause(sessionFiles);
+	if (!clause) return empty;
+	const totals = db
+		.prepare(
+			`
+		SELECT
+			COUNT(*) as requests,
+			SUM(CASE WHEN ${MESSAGE_ERROR_SQL} THEN 1 ELSE 0 END) as errors,
+			SUM(input_tokens) as input_tokens,
+			SUM(output_tokens) as output_tokens,
+			SUM(cache_read_tokens) as cache_read_tokens,
+			SUM(cache_write_tokens) as cache_write_tokens,
+			SUM(total_tokens) as total_tokens,
+			SUM(cost_total) as cost
+		FROM messages
+		WHERE session_file IN (${clause.sql})
+	`,
+		)
+		.get(...clause.params) as {
+		requests: number;
+		errors: number | null;
+		input_tokens: number | null;
+		output_tokens: number | null;
+		cache_read_tokens: number | null;
+		cache_write_tokens: number | null;
+		total_tokens: number | null;
+		cost: number | null;
+	};
+	const tools = db
+		.prepare(`SELECT COUNT(*) as tools FROM tool_calls WHERE session_file IN (${clause.sql})`)
+		.get(...clause.params) as { tools: number };
+	const models = db
+		.prepare(
+			`
+		SELECT
+			model,
+			provider,
+			COUNT(*) as requests,
+			SUM(CASE WHEN ${MESSAGE_ERROR_SQL} THEN 1 ELSE 0 END) as errors,
+			SUM(total_tokens) as total_tokens,
+			SUM(cost_total) as cost
+		FROM messages
+		WHERE session_file IN (${clause.sql})
+		GROUP BY model, provider
+		ORDER BY requests DESC, cost DESC
+	`,
+		)
+		.all(...clause.params) as Array<{
+		model: string;
+		provider: string;
+		requests: number;
+		errors: number | null;
+		total_tokens: number | null;
+		cost: number | null;
+	}>;
+	return {
+		requests: totals.requests,
+		errors: totals.errors ?? 0,
+		tools: tools.tools,
+		totalTokens: totals.total_tokens ?? 0,
+		inputTokens: totals.input_tokens ?? 0,
+		outputTokens: totals.output_tokens ?? 0,
+		cacheReadTokens: totals.cache_read_tokens ?? 0,
+		cacheWriteTokens: totals.cache_write_tokens ?? 0,
+		cost: totals.cost ?? 0,
+		byModel: models.map(row => ({
+			model: row.model,
+			provider: row.provider,
+			requests: row.requests,
+			errors: row.errors ?? 0,
+			totalTokens: row.total_tokens ?? 0,
+			cost: row.cost ?? 0,
+		})),
+	};
+}
+
+export function getToolStatsForSessionFiles(sessionFiles: string[]): ToolUsageStats[] {
+	if (!db) return [];
+	const clause = sessionFileInClause(sessionFiles);
+	if (!clause) return [];
+	const stmt = db.prepare(`
+		SELECT t.tool_name, ${TOOL_AGGREGATE_COLUMNS}
+		FROM tool_calls t
+		LEFT JOIN messages m ON m.session_file = t.session_file AND m.entry_id = t.entry_id
+		WHERE t.session_file IN (${clause.sql})
+		GROUP BY t.tool_name
+		ORDER BY calls DESC
+	`);
+	return (stmt.all(...clause.params) as ToolAggregateRow[]).map(rowToToolUsage);
+}
+
 /**
  * Get daily cost time series data for the last N days, broken down by model.
  */
@@ -1073,6 +1854,28 @@ export function getCostTimeSeries(days = 90, cutoff?: number | null): CostTimeSe
  *
  * Existing `messages` rows are unaffected - `INSERT OR IGNORE` keeps them.
  */
+function backfillObservability(database: Database, tableExisted: boolean, priorValue: string | undefined): void {
+	if (!tableExisted || !shouldResetBackfill(priorValue)) return;
+	const reset = database.transaction(() => {
+		for (const table of [
+			"obs_sessions",
+			"obs_related_transcripts",
+			"obs_runs",
+			"obs_run_assignments",
+			"obs_timeline",
+			"obs_routing_audit",
+			"obs_audit_offsets",
+		]) {
+			database.run(`DELETE FROM ${table}`);
+		}
+		database.run("DELETE FROM file_offsets");
+		database
+			.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
+			.run(OBSERVABILITY_BACKFILL_KEY, BACKFILL_PENDING);
+	});
+	reset();
+}
+
 function backfillUserMessages(database: Database): void {
 	const row = database.prepare("SELECT value FROM meta WHERE key = ?").get(USER_MESSAGES_BACKFILL_KEY) as
 		| { value: string }
@@ -1232,6 +2035,7 @@ export function markSessionBackfillsComplete(): void {
 			TOOL_CALLS_BACKFILL_KEY,
 			USER_MESSAGE_LINKS_REPAIR_KEY,
 			PRIORITY_PREMIUM_REQUESTS_BACKFILL_KEY,
+			OBSERVABILITY_BACKFILL_KEY,
 		]) {
 			markComplete.run(key, BACKFILL_COMPLETE);
 		}

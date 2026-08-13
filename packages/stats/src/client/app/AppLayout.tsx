@@ -11,6 +11,7 @@ export interface AppLayoutProps {
 	onSectionChange: (section: DashboardSection) => void;
 	range: TimeRange;
 	onRangeChange: (range: TimeRange) => void;
+	rangeDisabled?: boolean;
 	updatedAt: number | null;
 	onSyncStart?: () => void;
 	onSyncComplete?: (result: { success: boolean }) => void;
@@ -22,6 +23,7 @@ export function AppLayout({
 	onSectionChange,
 	range,
 	onRangeChange,
+	rangeDisabled = false,
 	updatedAt,
 	onSyncStart,
 	onSyncComplete,
@@ -78,6 +80,7 @@ export function AppLayout({
 					activeSection={activeSection}
 					range={range}
 					onRangeChange={onRangeChange}
+					rangeDisabled={rangeDisabled}
 					updatedAt={updatedAt}
 					onSyncStart={onSyncStart}
 					onSyncComplete={onSyncComplete}

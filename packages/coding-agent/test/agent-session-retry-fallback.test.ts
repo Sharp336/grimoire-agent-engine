@@ -237,6 +237,20 @@ describe("AgentSession retry fallback", () => {
 				role: "default",
 			},
 		]);
+		const observability = session.sessionManager
+			.getEntries()
+			.filter(entry => entry.type === "custom" && entry.customType === "observability")
+			.map(entry => entry.data);
+		expect(observability).toHaveLength(2);
+		expect(observability).toEqual([
+			expect.objectContaining({ v: 1, kind: "model_attempt", attempt: 1, recovery: "model" }),
+			expect.objectContaining({ v: 1, kind: "model_attempt", attempt: 2, recovery: "model" }),
+		]);
+		expect(observability).not.toContainEqual(expect.objectContaining({ kind: "model_request" }));
+		for (const payload of observability) {
+			expect(payload).not.toHaveProperty("prompt");
+			expect(payload).not.toHaveProperty("usage");
+		}
 		const registry = new AgentRegistry();
 		registry.register({
 			id: "fallback-agent",

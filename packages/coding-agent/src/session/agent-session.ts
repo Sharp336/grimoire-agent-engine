@@ -4638,6 +4638,21 @@ export class AgentSession {
 		return this.#eval.getKernelOwnerId();
 	}
 
+	/** Record that a new process has attached to this existing actor transcript. */
+	async recordProcessAttach(): Promise<string> {
+		return await this.sessionManager.appendObservability({
+			v: 1,
+			kind: "session_boundary",
+			reason: "attach",
+		});
+	}
+
+	/** Assign this actor transcript to a caller-owned Run; absence remains unassigned. */
+	async assignRun(runId?: string): Promise<string | undefined> {
+		if (runId === undefined) return undefined;
+		return await this.sessionManager.appendObservability({ v: 1, kind: "run_assignment", runId });
+	}
+
 	/** Current session display name, if set */
 	get sessionName(): string | undefined {
 		return this.sessionManager.getSessionName();
@@ -7741,6 +7756,7 @@ export class AgentSession {
 			if (previousSessionState.sessionId !== this.sessionManager.getSessionId()) {
 				this.#notifySessionChangeCallbacks();
 			}
+			await this.sessionManager.appendObservability({ v: 1, kind: "session_boundary", reason: "resume" });
 			return true;
 		} catch (error) {
 			this.sessionManager.restoreState(previousSessionState);

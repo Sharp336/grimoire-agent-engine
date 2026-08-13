@@ -13,9 +13,9 @@ import {
 	getProviderDashboardStats,
 	getRecentErrors,
 	getRecentRequests,
-	getRequestDetails,
 	getToolDashboardStats,
 	getTotalMessageCount,
+	ingestSessionDetail,
 	syncAllSessions,
 } from "./aggregator";
 import { decodeEmbeddedClientArchive } from "./embedded-client";
@@ -28,6 +28,25 @@ import {
 	STATS_DASHBOARD_HOSTNAME,
 	STATS_DASHBOARD_SECURITY_VERSION,
 } from "./port-conflict";
+import {
+	getDecision,
+	getRequest,
+	getRequestBySqliteId,
+	getResourceUsage,
+	getRun,
+	getSession,
+	hardRedact,
+	listEvents,
+	listLogs,
+	listResourceRequests,
+	listResourceTools,
+	listRuns,
+	listSessions,
+	listTimeline,
+	ObservabilityQueryError,
+	reveal,
+	toJsonSafe,
+} from "./query";
 
 const EMBEDDED_CLIENT_ARCHIVE = decodeEmbeddedClientArchive(embeddedClientArchiveTxt);
 
@@ -189,13 +208,169 @@ const ensureClientBuild = async () => {
 	await Bun.write(path.join(STATIC_DIR, "index.html"), indexHtml);
 };
 
+function methodNotAllowed(allow: "GET" | "POST"): Response {
+	return Response.json({ error: "Method Not Allowed" }, { status: 405, headers: { Allow: allow } });
+}
+
+function jsonResponse(value: unknown, init?: ResponseInit): Response {
+	return Response.json(toJsonSafe(value), init);
+}
+
+function parseLimit(url: URL): number | undefined {
+	const raw = url.searchParams.get("limit");
+	if (raw === null) return undefined;
+	if (!/^-?\d+$/.test(raw)) throw new ObservabilityQueryError("limit must be an integer");
+	return Number(raw);
+}
+
+function pageOptions(url: URL) {
+	return {
+		limit: parseLimit(url),
+		after: url.searchParams.get("after") ?? undefined,
+		before: url.searchParams.get("before") ?? undefined,
+	};
+}
+
+async function requestFields(req: Request): Promise<string[]> {
+	let body: unknown;
+	try {
+		body = await req.json();
+	} catch {
+		throw new ObservabilityQueryError("Invalid JSON body");
+	}
+	if (!body || typeof body !== "object" || !("fields" in body) || !Array.isArray(body.fields)) {
+		throw new ObservabilityQueryError("fields must be an array");
+	}
+	return body.fields as unknown as string[];
+}
+
 /**
  * Handle API requests.
  */
-export async function handleApi(req: Request): Promise<Response> {
+async function handleApiRequest(req: Request): Promise<Response> {
 	const url = new URL(req.url);
 	const path = url.pathname;
 
+
+	if (path.startsWith("/api/stats/") || path === "/api/stats") {
+		if (req.method !== "GET") return methodNotAllowed("GET");
+	}
+
+	if (path === "/api/sync") {
+		if (req.method !== "POST") return methodNotAllowed("POST");
+		const result = await syncAllSessions();
+		const count = await getTotalMessageCount();
+		return jsonResponse({ ...result, totalMessages: count });
+	}
+
+	if (path === "/api/sessions") {
+		if (req.method !== "GET") return methodNotAllowed("GET");
+		return jsonResponse(
+			await listSessions({
+				...pageOptions(url),
+				range: url.searchParams.get("range"),
+				status: url.searchParams.get("status"),
+				project: url.searchParams.get("project"),
+				failure: url.searchParams.get("failure") === "true",
+				q: url.searchParams.get("q"),
+			}),
+		);
+	}
+
+	if (path === "/api/runs") {
+		if (req.method !== "GET") return methodNotAllowed("GET");
+		return jsonResponse(
+			await listRuns({
+				...pageOptions(url),
+				range: url.searchParams.get("range"),
+				status: url.searchParams.get("status"),
+				project: url.searchParams.get("project"),
+				failure: url.searchParams.get("failure") === "true",
+				q: url.searchParams.get("q"),
+			}),
+		);
+	}
+
+	const sessionMatch = /^\/api\/sessions\/([^/]+)(?:\/(timeline|events|logs|reveal|requests|tools|usage))?$/.exec(path);
+	if (sessionMatch) {
+		const sessionId = decodeURIComponent(sessionMatch[1]);
+		const child = sessionMatch[2];
+		if (child === "reveal") {
+			if (req.method !== "POST") return methodNotAllowed("POST");
+			const result = await reveal("session", sessionId, await requestFields(req));
+			return result ? jsonResponse(result, { headers: { "Cache-Control": "no-store" } }) : new Response("Not Found", { status: 404 });
+		}
+		if (req.method !== "GET") return methodNotAllowed("GET");
+		// Requests/tools/usage read the already-indexed messages table. Ingest
+		// stays on timeline/events/logs so a 40MB transcript is not re-parsed
+		// just to open the default Requests tab.
+		if (child === "timeline" || child === "events" || child === "logs") {
+			const ingest = await ingestSessionDetail(sessionId);
+			if (!ingest.ok && ingest.reason === "not_found") return new Response("Not Found", { status: 404 });
+			if (!ingest.ok && !ingest.snapshot) return new Response("Not Found", { status: 404 });
+		}
+		if (child === "requests") {
+			const result = await listResourceRequests("sessions", sessionId, { ...pageOptions(url), errorsOnly: url.searchParams.get("errors") === "true" });
+			return result ? jsonResponse(result) : new Response("Not Found", { status: 404 });
+		}
+		if (child === "tools") {
+			const result = await listResourceTools("sessions", sessionId);
+			return result ? jsonResponse(result) : new Response("Not Found", { status: 404 });
+		}
+		if (child === "usage") {
+			const result = await getResourceUsage("sessions", sessionId);
+			return result ? jsonResponse(result) : new Response("Not Found", { status: 404 });
+		}
+		const options = { ...pageOptions(url), sessionId };
+		const result = child === "timeline" ? await listTimeline(options) : child === "events" ? await listEvents(options) : child === "logs" ? await listLogs(options) : await getSession(sessionId);
+		return result ? jsonResponse(result) : new Response("Not Found", { status: 404 });
+	}
+
+	const runMatch = /^\/api\/runs\/([^/]+)(?:\/(timeline|events|logs|reveal|requests|tools|usage))?$/.exec(path);
+	if (runMatch) {
+		const runId = decodeURIComponent(runMatch[1]);
+		const child = runMatch[2];
+		if (child === "reveal") {
+			if (req.method !== "POST") return methodNotAllowed("POST");
+			const result = await reveal("run", runId, await requestFields(req));
+			return result ? jsonResponse(result, { headers: { "Cache-Control": "no-store" } }) : new Response("Not Found", { status: 404 });
+		}
+		if (req.method !== "GET") return methodNotAllowed("GET");
+		const before = await getRun(runId);
+		if (!before) return new Response("Not Found", { status: 404 });
+		if (child === "timeline" || child === "events" || child === "logs") {
+			for (const sessionId of before.sessionIds) await ingestSessionDetail(sessionId);
+		}
+		if (child === "requests") {
+			const result = await listResourceRequests("runs", runId, { ...pageOptions(url), errorsOnly: url.searchParams.get("errors") === "true" });
+			return result ? jsonResponse(result) : new Response("Not Found", { status: 404 });
+		}
+		if (child === "tools") {
+			const result = await listResourceTools("runs", runId);
+			return result ? jsonResponse(result) : new Response("Not Found", { status: 404 });
+		}
+		if (child === "usage") {
+			const result = await getResourceUsage("runs", runId);
+			return result ? jsonResponse(result) : new Response("Not Found", { status: 404 });
+		}
+		const options = { ...pageOptions(url), runId };
+		const result = child === "timeline" ? await listTimeline(options) : child === "events" ? await listEvents(options) : child === "logs" ? await listLogs(options) : await getRun(runId);
+		return result ? jsonResponse(result) : new Response("Not Found", { status: 404 });
+	}
+
+	const requestMatch = /^\/api\/requests\/([^/]+)$/.exec(path);
+	if (requestMatch) {
+		if (req.method !== "GET") return methodNotAllowed("GET");
+		const result = await getRequest(decodeURIComponent(requestMatch[1]));
+		return result ? jsonResponse(result) : new Response("Not Found", { status: 404 });
+	}
+
+	const decisionMatch = /^\/api\/decisions\/([^/]+)$/.exec(path);
+	if (decisionMatch) {
+		if (req.method !== "GET") return methodNotAllowed("GET");
+		const result = await getDecision(decodeURIComponent(decisionMatch[1]));
+		return result ? jsonResponse(result) : new Response("Not Found", { status: 404 });
+	}
 	// Stats reads are DB-only; explicit /api/sync does the expensive session scan.
 	const range = url.searchParams.get("range");
 
@@ -262,18 +437,15 @@ export async function handleApi(req: Request): Promise<Response> {
 	}
 
 	if (path.startsWith("/api/request/")) {
-		const id = path.split("/").pop();
-		if (!id) return new Response("Bad Request", { status: 400 });
-		const details = await getRequestDetails(parseInt(id, 10));
+		if (req.method !== "GET") return methodNotAllowed("GET");
+		const id = path.slice("/api/request/".length);
+		if (!/^[1-9]\d*$/.test(id)) return new Response("Not Found", { status: 404 });
+		const details = await getRequestBySqliteId(Number(id));
 		if (!details) return new Response("Not Found", { status: 404 });
-		return Response.json(details);
+		return jsonResponse(details);
 	}
 
-	if (path === "/api/sync") {
-		const result = await syncAllSessions();
-		const count = await getTotalMessageCount();
-		return Response.json({ ...result, totalMessages: count });
-	}
+	
 
 	if (path === "/api/stats/gain") {
 		const project = url.searchParams.get("project");
@@ -282,6 +454,15 @@ export async function handleApi(req: Request): Promise<Response> {
 	}
 
 	return new Response("Not Found", { status: 404 });
+}
+
+export async function handleApi(req: Request): Promise<Response> {
+	try {
+		return await handleApiRequest(req);
+	} catch (error) {
+		if (error instanceof ObservabilityQueryError) return jsonResponse({ error: error.message }, { status: error.status });
+		throw error;
+	}
 }
 
 /**
@@ -345,8 +526,9 @@ function createDashboardServer(port: number) {
 				});
 			} catch (error) {
 				console.error("Server error:", error);
-				return Response.json(
-					{ error: error instanceof Error ? error.message : "Unknown error" },
+				const redacted = hardRedact(error instanceof Error ? error.message : error);
+				return jsonResponse(
+					{ error: typeof redacted === "string" ? "Internal error" : redacted },
 					{ status: 500, headers: dashboardHeaders },
 				);
 			}

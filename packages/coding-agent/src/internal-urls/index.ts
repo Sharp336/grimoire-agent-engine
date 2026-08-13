@@ -23,6 +23,7 @@ export * from "./rule-protocol";
 export * from "./security-protocol";
 export * from "./skill-protocol";
 export * from "./ssh-protocol";
+export * from "./stats-protocol";
 export type * from "./types";
 export * from "./vault-protocol";
 export * from "./xd-protocol";
