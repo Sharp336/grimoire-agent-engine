@@ -1392,7 +1392,7 @@ export class SessionMaintenance {
 				// path calls checkCompaction with autoContinue=false, and
 				// scheduling a continuation there races with the caller's
 				// pending prompt (AgentBusyError).
-				this.#incompleteBelowThresholdRetries++;
+				if (autoContinue) this.#incompleteBelowThresholdRetries++;
 				if (this.#incompleteBelowThresholdRetries > 3) {
 					// Bound reached. If we haven't used the compaction fallback
 					// yet, try it once. With strategy "shake" the fallback may
@@ -1424,7 +1424,7 @@ export class SessionMaintenance {
 					});
 					this.#incompleteBelowThresholdRetries = 0;
 					this.#incompleteCompactionFallbackUsed = false;
-					return COMPACTION_CHECK_NONE;
+					return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
 				}
 				logger.debug("response.incomplete (length stop) below compaction threshold — retrying without compaction", {
 					model: `${assistantMessage.provider}/${assistantMessage.model}`,
