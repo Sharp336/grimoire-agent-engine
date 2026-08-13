@@ -608,7 +608,8 @@ export interface SessionSummary {
   createdAt: string;
   /** ISO timestamp, from the session file's mtime. */
   lastActivityAt: string;
-  messageCount: number;
+  /** Null when the file exceeds the index build's size ceiling -- see `MESSAGE_COUNT_SIZE_CEILING_BYTES` in `@ompd/daemon`'s scanner.ts -- so one pathological transcript reports "unknown" instead of stalling the whole list. */
+  messageCount: number | null;
   byteSize: number;
   status: SessionLiveStatus;
   archived: boolean;

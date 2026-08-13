@@ -87,6 +87,27 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS tasks_agent ON tasks(agent_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS tasks_created ON tasks(created_at DESC);
 
+-- Every OMP session ever written to ~/.omp/agent/sessions/, keyed by the
+-- session uuid parsed from its jsonl filename -- deliberately not by
+-- agent_id, since most sessions on a real machine were never touched by
+-- ompd. Archiving is the one durable fact about a session this store owns:
+-- everything else (cwd, title, counts, liveness) is derived fresh from the
+-- filesystem on every query, so it cannot go stale under an operator's feet.
+-- Archiving must survive a restart and must never delete a session file.
+CREATE TABLE IF NOT EXISTS session_archive (
+  session_id TEXT PRIMARY KEY, archived_at TEXT NOT NULL
+);
+
+-- A cache, not durable state: safe to delete wholesale at any time, in which
+-- case the next index build simply recomputes every row and repopulates it.
+-- Keyed by (mtime,size) rather than just session_id so a session appended to
+-- since the last build invalidates its own row automatically -- a growing
+-- file changes both halves of the key.
+CREATE TABLE IF NOT EXISTS session_scan_cache (
+  session_id TEXT PRIMARY KEY, mtime_ms INTEGER NOT NULL,
+  size_bytes INTEGER NOT NULL, message_count INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS audit (
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, action TEXT NOT NULL,
   actor_device_id TEXT, agent_id TEXT, detail TEXT NOT NULL, outcome TEXT NOT NULL
@@ -140,6 +161,13 @@ export interface AuditInput {
   agentId?: AgentId;
   detail?: Record<string, unknown>;
   outcome: "ok" | "denied" | "error";
+}
+
+/** A cached message count, valid only while the file's mtime and size match what produced it. */
+export interface SessionScanCacheEntry {
+  mtimeMs: number;
+  sizeBytes: number;
+  messageCount: number;
 }
 
 /**
@@ -611,6 +639,59 @@ export class Store {
             .all(agentId)
     ) as TaskRow[];
     return rows.map(rowToTask);
+  }
+
+  // -- sessions --------------------------------------------------------------
+  //
+  // `SessionIndex` in @ompd/daemon owns building the full session catalog
+  // from the filesystem; these methods are only the two facts this store
+  // keeps about a session that the filesystem cannot answer on its own.
+
+  /** Mark a session archived. Idempotent, and re-archiving updates `archivedAt` to the latest decision. */
+  archiveSession(sessionId: string): void {
+    this.#db
+      .query(
+        `INSERT INTO session_archive (session_id,archived_at) VALUES (?,?)
+         ON CONFLICT(session_id) DO UPDATE SET archived_at=excluded.archived_at`,
+      )
+      .run(sessionId, new Date().toISOString());
+  }
+
+  /** Clear an archive mark. A session with no archive row was never archived; this is also how "never archived" is represented, so it is not an error to unarchive one. */
+  unarchiveSession(sessionId: string): void {
+    this.#db.query(`DELETE FROM session_archive WHERE session_id=?`).run(sessionId);
+  }
+
+  /**
+   * Every archived session id, in one query, so an index build checks
+   * membership in a `Set` instead of issuing one `SELECT` per session in the
+   * catalog.
+   */
+  listArchivedSessionIds(): Set<string> {
+    const rows = this.#db.query(`SELECT session_id FROM session_archive`).all() as Array<{
+      session_id: string;
+    }>;
+    return new Set(rows.map((r) => r.session_id));
+  }
+
+  /** The cached message count for a session, or null on a cache miss -- an empty table (deleted wholesale, or never populated) is exactly that: every session simply misses. */
+  getSessionScanCache(sessionId: string): SessionScanCacheEntry | null {
+    const row = this.#db
+      .query(`SELECT mtime_ms,size_bytes,message_count FROM session_scan_cache WHERE session_id=?`)
+      .get(sessionId) as { mtime_ms: number; size_bytes: number; message_count: number } | null;
+    return row
+      ? { mtimeMs: row.mtime_ms, sizeBytes: row.size_bytes, messageCount: row.message_count }
+      : null;
+  }
+
+  setSessionScanCache(sessionId: string, entry: SessionScanCacheEntry): void {
+    this.#db
+      .query(
+        `INSERT INTO session_scan_cache (session_id,mtime_ms,size_bytes,message_count) VALUES (?,?,?,?)
+         ON CONFLICT(session_id) DO UPDATE SET
+           mtime_ms=excluded.mtime_ms, size_bytes=excluded.size_bytes, message_count=excluded.message_count`,
+      )
+      .run(sessionId, entry.mtimeMs, entry.sizeBytes, entry.messageCount);
   }
 
   // -- audit ---------------------------------------------------------------

@@ -95,6 +95,10 @@ const LOSS_IS_VISIBLE: Record<ClientFrame["t"], boolean> = {
   prompt: true,
   cancel: true,
   decide: true,
+  // A lost result is a lost answer: the agent never learns whether the
+  // navigate/click/type it dispatched actually happened, which is the same
+  // "silently believed something occurred" failure a lost `decide` is.
+  webview_result: true,
 };
 
 // ---------------------------------------------------------------------------

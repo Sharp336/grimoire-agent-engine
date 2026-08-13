@@ -54,6 +54,7 @@ import { homeIdFor } from "./home-id.ts";
 import { HostRegistry } from "./hosts.ts";
 import { ContainerBackend, HostProvisioner, LocalBackend } from "./provisioner/index.ts";
 import { Scheduler } from "./routines/index.ts";
+import { SessionIndex } from "./sessions/index.ts";
 import { Supervisor } from "./supervisor.ts";
 import { listConnectorCatalog, listSkillCatalog, TaskManager } from "./workspace/index.ts";
 import {
@@ -313,6 +314,7 @@ export class Ompd {
   #provisioner: HostProvisioner;
   #scheduler: Scheduler;
   #tasks: TaskManager;
+  #sessionIndex: SessionIndex;
   #evolution: EvolutionEngine;
   #gateway: Gateway;
   #sleepGuard: SleepGuard;
@@ -430,6 +432,7 @@ export class Ompd {
     });
 
     this.#tasks = new TaskManager({ store: this.#store, supervisor: this.#supervisor });
+    this.#sessionIndex = new SessionIndex({ store: this.#store });
 
     this.#gateway = new Gateway({
       supervisor: this.#supervisor,
@@ -443,6 +446,7 @@ export class Ompd {
       homeId: homeIdFor(this.#home),
       routines: this.#scheduler,
       sessions: this.#hosts,
+      sessionIndex: this.#sessionIndex,
       staticRoot: opts.staticRoot ?? defaultStaticRoot(),
       skills: { list: listSkillCatalog },
       connectors: { list: listConnectorCatalog },

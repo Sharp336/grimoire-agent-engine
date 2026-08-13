@@ -96,6 +96,18 @@ export interface SupervisorOptions {
    * has no way to tell.
    */
   provisioner?: Provisioner;
+  /**
+   * Per-agent ACP `mcpServers` entries, mounted on `session/new`. `undefined`
+   * (the default) mounts nothing extra -- most daemons have nothing to add.
+   *
+   * `@ompd/daemon/src/browser`'s webview MCP server is the first, and so far
+   * only, consumer: `mcpServerDescriptor(webViewMcpServer, agentId)` wrapped
+   * in an array. Resumed and loaded sessions do not currently receive this
+   * (`AcpClient.loadSession` hardcodes `mcpServers: []`; see `@ompd/acp`) --
+   * a stated gap, not an oversight, left for a change that also touches the
+   * resume path deliberately rather than in passing.
+   */
+  mcpServersFor?: (agentId: AgentId) => unknown[];
 }
 
 export interface CreateAgentInput {
@@ -192,6 +204,7 @@ export class Supervisor {
   #onLog: ((line: string) => void) | undefined;
   #spawnHost: (opts: SpawnLocalHostOptions) => LocalHost;
   #provisioner: Provisioner | undefined;
+  #mcpServersFor: ((agentId: AgentId) => unknown[]) | undefined;
 
   /** Keyed by `HostEntry.key`. One `omp acp` process serves many agents. */
   #hosts = new Map<string, HostEntry>();
@@ -217,7 +230,7 @@ export class Supervisor {
     this.#ompPath = opts.ompPath;
     this.#spawnHost = opts.spawnHost ?? spawnLocalHost;
     this.#provisioner = opts.provisioner;
-    this.#onLog = opts.onLog;
+    this.#mcpServersFor = opts.mcpServersFor;
   }
 
   listAgents(): Agent[] {
@@ -278,8 +291,8 @@ export class Supervisor {
       throw new Error(`host kind ${spec.kind} requires the provisioner`);
     }
     const entry = await this.#hostFor(spec, input.cwd, who);
-    return await this.#bindAgentToSession(input, spec, entry, who, {}, sessionEntry =>
-      sessionEntry.host.client.newSession(input.cwd),
+    return await this.#bindAgentToSession(input, spec, entry, who, {}, (sessionEntry, agentId) =>
+      sessionEntry.host.client.newSession(input.cwd, this.#mcpServersFor?.(agentId) ?? []),
     );
   }
 
@@ -314,6 +327,10 @@ export class Supervisor {
     }
     const entry = await this.#hostFor(spec, input.cwd, who);
     return await this.#bindAgentToSession(input, spec, entry, who, { resumed: true }, async sessionEntry => {
+      // `AcpClient.loadSession` does not yet accept `mcpServers` (see
+      // `@ompd/acp`), so a resumed agent does not get this daemon's webview
+      // MCP server remounted. Stated in `SupervisorOptions.mcpServersFor`'s
+      // doc, not silently dropped here.
       await sessionEntry.host.client.loadSession(input.sessionId, input.cwd);
       return input.sessionId;
     });
@@ -333,7 +350,7 @@ export class Supervisor {
     entry: HostEntry,
     who: Actor,
     auditDetail: Record<string, unknown>,
-    openSession: (entry: HostEntry) => Promise<string>,
+    openSession: (entry: HostEntry, agentId: AgentId) => Promise<string>,
   ): Promise<Agent> {
     const id: AgentId = `agt_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
     const now = new Date().toISOString();
@@ -353,7 +370,7 @@ export class Supervisor {
 
     let sessionId: string;
     try {
-      sessionId = await openSession(entry);
+      sessionId = await openSession(entry, id);
     } catch (err) {
       // The host answered `initialize` but cannot serve this session. Release
       // it if it serves nobody else: a provisioned container that no handle

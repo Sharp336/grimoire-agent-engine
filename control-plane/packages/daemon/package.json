@@ -9,6 +9,7 @@
     "@ompd/acp": "workspace:*",
     "@ompd/core": "workspace:*",
     "@ompd/tunnel": "workspace:*",
-    "@oh-my-pi/pi-coding-agent": "catalog:"
+    "@oh-my-pi/pi-coding-agent": "catalog:",
+    "@oh-my-pi/pi-utils": "catalog:"
   }
 }

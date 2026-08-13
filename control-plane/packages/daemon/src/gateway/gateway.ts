@@ -31,10 +31,15 @@ import {
   type HostSpec,
   type Run,
   type ServerFrame,
+  type SessionLiveStatus,
+  type SessionQuery,
+  type SessionSortDir,
+  type SessionSortKey,
   type SkillSummary,
   type Store,
   type Task,
 } from "@ompd/core";
+import type { SessionIndex } from "../sessions/session-index.ts";
 import { WEB_ASSETS, WEB_ASSETS_BUILT } from "../web-assets.ts";
 import { Supervisor, UnauthorizedError, type PendingApproval } from "../supervisor.ts";
 import { DeviceAuth, PairingBacklogError, PairingError } from "./auth.ts";
@@ -70,6 +75,68 @@ function embeddedResponse(base64: string, key: string): Response {
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   return new Response(bytes, { headers: { "content-type": contentTypeFor(key) } });
+}
+
+const SESSION_STATUSES: readonly SessionLiveStatus[] = ["live-tui", "live-ompd", "dormant", "archived"];
+const SESSION_SORT_KEYS: readonly SessionSortKey[] = [
+  "status",
+  "age",
+  "lastActivity",
+  "messageCount",
+  "size",
+];
+const SESSION_SORT_DIRS: readonly SessionSortDir[] = ["asc", "desc"];
+
+/**
+ * Parses and validates `/v1/sessions*` query parameters into a
+ * `SessionQuery`, doing the grouping/sorting/filtering decisions
+ * server-side rather than handing a client 305 rows to sort itself -- the
+ * whole point of running this behind a phone's pull-to-refresh.
+ */
+function parseSessionQuery(url: URL): { query: SessionQuery } | { error: string } {
+  const query: SessionQuery = {};
+
+  const statusParam = url.searchParams.get("status");
+  if (statusParam) {
+    const requested = statusParam
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    for (const s of requested) {
+      if (!SESSION_STATUSES.includes(s as SessionLiveStatus)) {
+        return { error: `unknown status "${s}", expected one of ${SESSION_STATUSES.join(", ")}` };
+      }
+    }
+    query.status = requested as SessionLiveStatus[];
+  }
+
+  const cwdParam = url.searchParams.get("cwd");
+  if (cwdParam) query.cwd = cwdParam;
+
+  const includeArchivedParam = url.searchParams.get("includeArchived");
+  if (includeArchivedParam !== null) {
+    query.includeArchived = includeArchivedParam === "true" || includeArchivedParam === "1";
+  }
+
+  const sortParam = url.searchParams.get("sort");
+  if (sortParam) {
+    if (!SESSION_SORT_KEYS.includes(sortParam as SessionSortKey)) {
+      return { error: `unknown sort "${sortParam}", expected one of ${SESSION_SORT_KEYS.join(", ")}` };
+    }
+    query.sort = sortParam as SessionSortKey;
+  }
+
+  const sortDirParam = url.searchParams.get("sortDir");
+  if (sortDirParam) {
+    if (!SESSION_SORT_DIRS.includes(sortDirParam as SessionSortDir)) {
+      return {
+        error: `unknown sortDir "${sortDirParam}", expected one of ${SESSION_SORT_DIRS.join(", ")}`,
+      };
+    }
+    query.sortDir = sortDirParam as SessionSortDir;
+  }
+
+  return { query };
 }
 
 /**
@@ -227,6 +294,13 @@ export interface GatewayOptions {
    * daemon build has no task tracking".
    */
   tasks?: TaskCatalog;
+  /**
+   * The filesystem-derived session catalog. Absent, every `/v1/sessions*`
+   * route reports the feature off rather than an empty list, the same
+   * distinction `skills`/`connectors`/`tasks` already draw between "nothing
+   * here" and "this daemon build has no catalogue wired in".
+   */
+  sessionIndex?: SessionIndex;
 }
 
 interface SocketState {
@@ -322,6 +396,7 @@ export class Gateway {
   #skills: SkillCatalog | undefined;
   #connectors: ConnectorCatalog | undefined;
   #tasks: TaskCatalog | undefined;
+  #sessionIndex: SessionIndex | undefined;
   #staticRoot: string | undefined;
   /** Set by `listen`, so uptime measures serving rather than construction. */
   #startedAtMs: number | undefined;
@@ -349,6 +424,7 @@ export class Gateway {
     this.#skills = opts.skills;
     this.#connectors = opts.connectors;
     this.#tasks = opts.tasks;
+    this.#sessionIndex = opts.sessionIndex;
     // Resolved once so the traversal check below compares two absolute paths.
     this.#staticRoot = opts.staticRoot === undefined ? undefined : resolve(opts.staticRoot);
 
@@ -1106,6 +1182,50 @@ export class Gateway {
           { status: 404 },
         );
       }
+    }
+
+    // -- sessions ------------------------------------------------------------
+    //
+    // `read` lists and groups; `manage` archives, the same split every other
+    // catalogue-vs-mutation pair in this route table uses (skills/connectors
+    // read vs agent create/stop). Grouping and sorting happen inside
+    // `SessionIndex`, not here, so a phone never downloads the full catalog
+    // to sort it locally.
+
+    if (path === "/v1/sessions" && req.method === "GET") {
+      if (!scopes.has(SCOPE_READ)) return Response.json({ error: "forbidden" }, { status: 403 });
+      const index = this.#sessionIndex;
+      if (!index) return Response.json({ error: "sessions_unavailable" }, { status: 503 });
+      const parsed = parseSessionQuery(url);
+      if ("error" in parsed) return Response.json({ error: parsed.error }, { status: 400 });
+      return Response.json({ sessions: index.query(parsed.query) });
+    }
+
+    if (path === "/v1/sessions/grouped" && req.method === "GET") {
+      if (!scopes.has(SCOPE_READ)) return Response.json({ error: "forbidden" }, { status: 403 });
+      const index = this.#sessionIndex;
+      if (!index) return Response.json({ error: "sessions_unavailable" }, { status: 503 });
+      const parsed = parseSessionQuery(url);
+      if ("error" in parsed) return Response.json({ error: parsed.error }, { status: 400 });
+      return Response.json({ groups: index.grouped(parsed.query) });
+    }
+
+    const sessionArchiveRoute = /^\/v1\/sessions\/([^/]+)\/archive$/.exec(path);
+    if (sessionArchiveRoute && req.method === "POST") {
+      if (!scopes.has(SCOPE_MANAGE)) return Response.json({ error: "forbidden" }, { status: 403 });
+      const index = this.#sessionIndex;
+      if (!index) return Response.json({ error: "sessions_unavailable" }, { status: 503 });
+      index.archive(sessionArchiveRoute[1] ?? "");
+      return Response.json({ ok: true });
+    }
+
+    const sessionUnarchiveRoute = /^\/v1\/sessions\/([^/]+)\/unarchive$/.exec(path);
+    if (sessionUnarchiveRoute && req.method === "POST") {
+      if (!scopes.has(SCOPE_MANAGE)) return Response.json({ error: "forbidden" }, { status: 403 });
+      const index = this.#sessionIndex;
+      if (!index) return Response.json({ error: "sessions_unavailable" }, { status: 503 });
+      index.unarchive(sessionUnarchiveRoute[1] ?? "");
+      return Response.json({ ok: true });
     }
 
     return Response.json({ error: "not_found" }, { status: 404 });
