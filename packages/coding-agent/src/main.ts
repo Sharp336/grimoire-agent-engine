@@ -103,6 +103,7 @@ type RunRpcMode = (
 	setToolUIContext?: (uiContext: ExtensionUIContext, hasUI: boolean) => void,
 	eventBus?: EventBus,
 	input?: ReadableStream<Uint8Array>,
+	hostMode?: "rpc" | "rpc-ui",
 ) => Promise<never>;
 
 export function writeStartupNotice(parsedArgs: Pick<Args, "mode">, text: string): void {
@@ -518,6 +519,7 @@ async function runInteractiveMode(
 	// follows the same clean-cutover path instead of preserving a previous run's
 	// transcript above the fresh one.
 	mode.renderInitialMessages({ preserveExistingChat: true, clearTerminalHistory: true });
+	if (process.platform !== "win32") await mode.startLiveAttachHost("interactive");
 
 	for (const notify of notifs) {
 		if (!notify) {
@@ -1730,7 +1732,13 @@ export async function runRootCommand(
 			// Branch-only protocol runner: keep RPC host code out of normal interactive startup.
 			const runRpcMode: RunRpcMode = (await import("./modes/rpc/rpc-mode")).runRpcMode;
 			stopStartupWatchdog();
-			await runRpcMode(session, mode === "rpc-ui" ? setToolUIContext : undefined, eventBus, rpcInput);
+			await runRpcMode(
+				session,
+				mode === "rpc-ui" ? setToolUIContext : undefined,
+				eventBus,
+				rpcInput,
+				mode === "rpc-ui" ? "rpc-ui" : "rpc",
+			);
 		} else if (isInteractive) {
 			const versionCheckPromise = checkForNewVersion(VERSION).catch(() => undefined);
 			const startupChangelog = await startupChangelogPromise;

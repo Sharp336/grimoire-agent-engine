@@ -37,7 +37,7 @@ import {
 	TUI,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
-import type { TerminalAppearanceRequestToken } from "@oh-my-pi/pi-tui/terminal";
+import type { Terminal, TerminalAppearanceRequestToken } from "@oh-my-pi/pi-tui/terminal";
 import { isInsideTerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import {
 	$env,
@@ -53,6 +53,8 @@ import {
 	setProjectDir,
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import { LiveAttachHost } from "../attach/host";
+import { SwitchableTerminal } from "../attach/terminal";
 import { reset as resetCapabilities } from "../capability";
 import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
@@ -669,6 +671,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#mcpFailedServers = new Map<string, string>();
 	#welcomeComponent?: WelcomeComponent;
 	readonly #chatHost: ChatBlockHost = { requestRender: () => this.ui.requestRender() };
+	readonly #attachTerminal: SwitchableTerminal;
+	#liveAttachHost: LiveAttachHost | undefined;
 
 	constructor(
 		session: AgentSession,
@@ -678,6 +682,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		lspServers: LspStartupServerInfo[] | undefined = undefined,
 		mcpManager?: MCPManager,
 		eventBus?: EventBus,
+		terminal?: Terminal,
 	) {
 		this.session = session;
 		this.sessionManager = session.sessionManager;
@@ -713,7 +718,13 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		setTuiTight(settings.get("tui.tight"));
 		setMarkdownMermaidRendering(settings.get("tui.renderMermaid"));
-		this.ui = new TUI(new ProcessTerminal(), settings.get("showHardwareCursor"));
+		this.#attachTerminal =
+			terminal instanceof SwitchableTerminal ? terminal : new SwitchableTerminal(terminal ?? new ProcessTerminal());
+		this.ui = new TUI(this.#attachTerminal, settings.get("showHardwareCursor"));
+		this.#attachTerminal.setRedrawRequester(() => {
+			this.ui.invalidate();
+			this.ui.requestRender(true, { clearScrollback: true });
+		});
 		this.ui.setMaxInlineImages(settings.get("tui.maxInlineImages"));
 		this.ui.setScrollbackRebuild(settings.get("tui.scrollbackRebuild"));
 		// OSC 66 text-sizing is Kitty-only; resolve the setting against the terminal's
@@ -1052,7 +1063,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		});
 
 		// Initialize hooks with TUI-based UI context
-		await this.initHooksAndCustomTools();
+		if (!options.skipExtensionInitialization) await this.initHooksAndCustomTools();
 
 		// Restore mode from session (e.g. plan mode on resume)
 		this.session.setSessionBeforeSwitchReconciler?.(async () => {
@@ -3969,6 +3980,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	stop(): void {
+		void this.#liveAttachHost?.close();
+		this.#liveAttachHost = undefined;
 		this.#appearanceRefreshRequest = undefined;
 		if (this.loadingAnimation) {
 			this.#stopLoadingAnimation(false);
@@ -4012,6 +4025,19 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.ui.stop();
 			this.isInitialized = false;
 		}
+	}
+
+	async startLiveAttachHost(hostMode: "interactive" | "rpc" | "rpc-ui"): Promise<LiveAttachHost> {
+		if (this.#liveAttachHost) return this.#liveAttachHost;
+		const host = new LiveAttachHost({
+			session: this.session,
+			terminal: this.#attachTerminal,
+			hostMode,
+			project: this.sessionManager.getCwd(),
+		});
+		await host.start();
+		this.#liveAttachHost = host;
+		return host;
 	}
 
 	async shutdown(): Promise<void> {

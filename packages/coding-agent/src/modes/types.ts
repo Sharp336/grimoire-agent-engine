@@ -89,6 +89,8 @@ export type TodoPhase = {
 export interface InteractiveModeInitOptions {
 	suppressWelcomeIntro?: boolean;
 	clearInitialTerminalHistory?: boolean;
+	/** Build a render/input view without initializing extension UI a second time. */
+	skipExtensionInitialization?: boolean;
 }
 
 export type InteractiveSelectorDialogOptions = ExtensionUIDialogOptions & Pick<HookSelectorOptions, "disabledIndices">;

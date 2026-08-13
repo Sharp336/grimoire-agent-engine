@@ -14,6 +14,7 @@ import { once } from "node:events";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { $env, isRecord, readLines, Snowflake } from "@oh-my-pi/pi-utils";
+import { startRpcAttachView } from "../../attach/rpc-view";
 import { reset as resetCapabilities } from "../../capability";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
@@ -36,6 +37,7 @@ import { calculateTokensPerSecond } from "../../utils/token-rate";
 import { initializeExtensions } from "../runtime-init";
 import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./host-tools";
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
+import { rpcCommandMutatesSession } from "./mutation-fence";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameEncoder } from "./rpc-frame";
 import { claimRpcInput } from "./rpc-input";
 import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
@@ -664,6 +666,7 @@ export async function runRpcMode(
 	setToolUIContext?: (uiContext: ExtensionUIContext, hasUI: boolean) => void,
 	eventBus?: EventBus,
 	input: ReadableStream<Uint8Array> = claimRpcInput(),
+	hostMode: "rpc" | "rpc-ui" = "rpc",
 ): Promise<never> {
 	// Signal to RPC clients that the server is ready to accept commands
 	// Suppress terminal notifications: they write \x07 (BEL) or OSC sequences directly to
@@ -714,9 +717,30 @@ export async function runRpcMode(
 		return { id, type: "response", command, success: true, data } as RpcResponse;
 	};
 
-	const error = (id: string | undefined, command: string, message: string, code?: string): RpcResponse => {
-		return { id, type: "response", command, success: false, error: message, ...(code ? { code } : {}) };
+	const error = (
+		id: string | undefined,
+		command: string,
+		message: string,
+		code?: string,
+		details?: object,
+	): RpcResponse => {
+		return {
+			id,
+			type: "response",
+			command,
+			success: false,
+			error: message,
+			...(code ? { code } : {}),
+			...(details ? { details } : {}),
+		};
 	};
+
+	const attachView =
+		process.platform === "win32"
+			? undefined
+			: await startRpcAttachView(session, hostMode, eventBus, (snapshot, reason) => {
+					output({ type: "control_state_changed", reason, ...snapshot });
+				});
 
 	const extensionUserMessageTracker = new RpcExtensionUserMessageTracker();
 
@@ -974,6 +998,18 @@ export async function runRpcMode(
 	// Handle a single command
 	const handleCommand = async (command: RpcCommand): Promise<RpcResponse> => {
 		const id = command.id;
+		if (attachView?.host.mutationFenced && rpcCommandMutatesSession(command)) {
+			const ownership = attachView.host.ownershipSnapshot;
+			return error(
+				id,
+				command.type,
+				ownership.controlState === "control_pending"
+					? "A terminal handoff is pending"
+					: `Session is controlled by ${ownership.controller?.label ?? "an attached terminal"}`,
+				ownership.controlState === "control_pending" ? "handoff_pending" : "session_hijacked",
+				ownership,
+			);
+		}
 
 		switch (command.type) {
 			case "negotiate_protocol": {
