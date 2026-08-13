@@ -33,6 +33,7 @@ import {
 	createSyntheticToolResultMessage,
 	normalizeMessagesForProvider,
 	normalizeTools,
+	resolveAsides,
 	resolveOwnedDialectFromEnv,
 } from "./agent-loop";
 import type { AppendOnlyContextManager } from "./append-only-context";
@@ -1212,6 +1213,39 @@ export class Agent {
 		return signals.length === 1 ? signals[0] : AbortSignal.any(signals);
 	}
 
+	/**
+	 * After a successful steer/follow-up dequeue, fold pending asides into the
+	 * same continuation so settle resume matches in-loop yield drain. Follow-up
+	 * mode is one-at-a-time by default, so asides must not go on that queue.
+	 * Re-enqueue the dequeued batch if aside resolution throws.
+	 */
+	async #runQueuedContinuation(
+		queued: AgentMessage[],
+		kind: "steering" | "followUp",
+		options: (AgentPromptOptions & { skipInitialSteeringPoll?: boolean }) | undefined,
+		runSignal: AbortSignal | undefined,
+		dequeueSignal: AbortSignal | undefined,
+	): Promise<void> {
+		let initial = queued;
+		if (!dequeueSignal?.aborted && !runSignal?.aborted) {
+			try {
+				const asides = resolveAsides(await this.#asideMessageProvider?.());
+				if (asides.length > 0) {
+					// Match yield drain: steering, then asides, then follow-up.
+					initial = kind === "steering" ? [...queued, ...asides] : [...asides, ...queued];
+				}
+			} catch (error) {
+				if (kind === "steering") {
+					this.#steeringQueue = [...queued, ...this.#steeringQueue];
+				} else {
+					this.#followUpQueue = [...queued, ...this.#followUpQueue];
+				}
+				throw error;
+			}
+		}
+		await this.#runLoop(initial, options, runSignal, true);
+	}
+
 	async continue(signal?: AbortSignal) {
 		if (this.#state.isStreaming) {
 			throw new AgentBusyError();
@@ -1238,12 +1272,18 @@ export class Agent {
 				// allocation loop until OOM (issue #6344).
 				const queuedSteering = await this.#dequeueSteeringMessagesAfterHooks(dequeueSignal);
 				if (queuedSteering.length > 0) {
-					await this.#runLoop(queuedSteering, { skipInitialSteeringPoll: true }, signal, true);
+					await this.#runQueuedContinuation(
+						queuedSteering,
+						"steering",
+						{ skipInitialSteeringPoll: true },
+						signal,
+						dequeueSignal,
+					);
 					return;
 				}
 				const queuedFollowUp = await this.#dequeueFollowUpMessagesAfterHooks(dequeueSignal);
 				if (queuedFollowUp.length > 0) {
-					await this.#runLoop(queuedFollowUp, undefined, signal, true);
+					await this.#runQueuedContinuation(queuedFollowUp, "followUp", undefined, signal, dequeueSignal);
 					return;
 				}
 				throw new Error("No messages to continue from");
@@ -1251,13 +1291,19 @@ export class Agent {
 			if (messages[messages.length - 1].role === "assistant") {
 				const queuedSteering = await this.#dequeueSteeringMessagesAfterHooks(dequeueSignal);
 				if (queuedSteering.length > 0) {
-					await this.#runLoop(queuedSteering, { skipInitialSteeringPoll: true }, signal, true);
+					await this.#runQueuedContinuation(
+						queuedSteering,
+						"steering",
+						{ skipInitialSteeringPoll: true },
+						signal,
+						dequeueSignal,
+					);
 					return;
 				}
 
 				const queuedFollowUp = await this.#dequeueFollowUpMessagesAfterHooks(dequeueSignal);
 				if (queuedFollowUp.length > 0) {
-					await this.#runLoop(queuedFollowUp, undefined, signal, true);
+					await this.#runQueuedContinuation(queuedFollowUp, "followUp", undefined, signal, dequeueSignal);
 					return;
 				}
 

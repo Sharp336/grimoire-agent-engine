@@ -48,6 +48,13 @@
 ### Fixed
 
 - Fixed Codex-compatible V2 remote compaction with an explicit `v2Endpoint` by sending the required feature-negotiation header ([#8524](https://github.com/can1357/oh-my-pi/issues/8524)).
+### Added
+
+- Exported `resolveAsides` for evaluating aside thunks at injection boundaries.
+
+### Fixed
+
+- Fixed `continue()` sending a queued follow-up or steer without pending asides, so stranded asides arrived one model call later than the in-loop yield drain.
 
 ## [17.3.0] - 2026-08-13
 

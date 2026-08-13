@@ -794,6 +794,7 @@ export class AgentSession {
 		}
 		// Skip flush when a queued steer/follow-up will resume — a custom tail
 		// blocks follow-up-only auto-continue. Same gate as #resumeStrandedIrcAsides.
+		// Agent.continue() prefixes pending asides onto that queued continuation.
 		if (!this.#isDisposed && !(this.#canAutoContinueForFollowUp() && this.agent.hasQueuedMessages())) {
 			this.#flushPendingExtensionAsides();
 		}

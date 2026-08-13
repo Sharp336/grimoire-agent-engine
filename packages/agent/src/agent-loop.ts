@@ -963,7 +963,7 @@ function emitInputMessages(stream: EventStream<AgentEvent, AgentMessage[]>, mess
  * up-to-the-injection state — e.g. dropping late diagnostics a newer edit
  * superseded. Kept sync so it can never stall the loop.
  */
-function resolveAsides(entries: AsideMessage[] | undefined): AgentMessage[] {
+export function resolveAsides(entries: AsideMessage[] | undefined): AgentMessage[] {
 	if (!entries || entries.length === 0) return [];
 	const out: AgentMessage[] = [];
 	try {

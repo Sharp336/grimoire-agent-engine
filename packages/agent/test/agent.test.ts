@@ -484,6 +484,45 @@ describe("Agent", () => {
 		expect(agent.state.messages[agent.state.messages.length - 1].role).toBe("assistant");
 	});
 
+	it("continue() batches pending asides into the first queued follow-up request", async () => {
+		const mock = createMockModel({ responses: [{ content: ["Processed both"] }] });
+		const agent = new Agent({ streamFn: mock.stream });
+
+		agent.replaceMessages([
+			{
+				role: "user",
+				content: [{ type: "text", text: "Initial" }],
+				timestamp: Date.now() - 10,
+			},
+			createAssistantMessage([{ type: "text", text: "Initial response" }]),
+		]);
+
+		let drained = false;
+		agent.setAsideMessageProvider(() => {
+			if (drained) return [];
+			drained = true;
+			return [
+				{
+					role: "user",
+					content: [{ type: "text", text: "stranded aside" }],
+					timestamp: Date.now(),
+				},
+			];
+		});
+		agent.followUp({
+			role: "user",
+			content: [{ type: "text", text: "Queued follow-up" }],
+			timestamp: Date.now(),
+		});
+
+		await expect(agent.continue()).resolves.toBeUndefined();
+
+		expect(mock.calls.length).toBe(1);
+		const firstCallText = JSON.stringify(mock.calls[0].context.messages);
+		expect(firstCallText).toContain("stranded aside");
+		expect(firstCallText).toContain("Queued follow-up");
+	});
+
 	it("continue() should keep one-at-a-time steering semantics from assistant tail", async () => {
 		const mock = createMockModel({
 			responses: [{ content: ["Processed 1"] }, { content: ["Processed 2"] }],

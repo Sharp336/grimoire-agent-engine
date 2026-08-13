@@ -295,6 +295,7 @@
 ### Fixed
 
 - Fixed stranded extension asides flushed at settle blocking queued follow-up auto-resume by poisoning the transcript tail before the follow-up drain.
+- Fixed stranded extension asides arriving one model call after a queued follow-up resume instead of in the same continuation request.
 - Fixed `/clear` and `/btw` leaving stranded extension asides that could re-enter the rewritten conversation on the next prompt.
 
 ## [17.3.0] - 2026-08-13

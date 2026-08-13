@@ -22,8 +22,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
-import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { type CustomMessage, convertToLlm, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { Snowflake, TempDir } from "@oh-my-pi/pi-utils";
 
@@ -139,6 +138,7 @@ describe("AgentSession extension deliverAs aside", () => {
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools: [] },
 			streamFn: mock.stream,
+			convertToLlm,
 		});
 		captureAsideProvider(agent);
 		const sessionManager = SessionManager.inMemory();
@@ -481,22 +481,18 @@ describe("AgentSession extension deliverAs aside", () => {
 		const { session: stopSession, mock } = await createMockSession([
 			{ content: ["first answer"], stopReason: "stop" },
 			{ content: ["continued after follow-up"] },
-			{ content: ["folded aside"] },
 		]);
 
 		let injected = false;
+		let allowAsideDrain = false;
 		stopSession.agent.setOnBeforeYield(async () => {
 			if (injected) return;
 			injected = true;
 			await stopSession.sendCustomMessage(asidePayload("settle aside"), { deliverAs: "aside" });
 			const inner = asideProvider;
 			if (!inner) throw new Error("aside provider was never captured");
-			let skippedYieldPoll = false;
 			stopSession.agent.setAsideMessageProvider(() => {
-				if (!skippedYieldPoll) {
-					skippedYieldPoll = true;
-					return [];
-				}
+				if (!allowAsideDrain) return [];
 				return inner();
 			});
 		});
@@ -507,6 +503,7 @@ describe("AgentSession extension deliverAs aside", () => {
 			if (event.type !== "agent_end") return;
 			agentEnds += 1;
 			if (agentEnds === 1) {
+				allowAsideDrain = true;
 				stopSession.agent.followUp({
 					role: "user",
 					content: [{ type: "text", text: "then add the test" }],
@@ -522,12 +519,21 @@ describe("AgentSession extension deliverAs aside", () => {
 		await resumed.promise;
 		await stopSession.waitForIdle();
 
-		expect(mock.calls.length).toBeGreaterThanOrEqual(2);
-		expect(userMessageText(stopSession.agent.state.messages)).toContain("then add the test");
+		expect(mock.calls.length).toBe(2);
+		const continuationText = JSON.stringify(mock.calls[1].context.messages);
+		expect(continuationText).toContain("settle aside");
+		expect(continuationText).toContain("then add the test");
+		const messages = stopSession.agent.state.messages;
+		const asideIndex = messages.findIndex(message => asideContent(message) === "settle aside");
+		const followUpIndex = messages.findIndex(message => {
+			if (message.role !== "user") return false;
+			const content = message.content;
+			if (typeof content === "string") return content === "then add the test";
+			return content.some(part => part.type === "text" && part.text === "then add the test");
+		});
+		expect(asideIndex).toBeGreaterThanOrEqual(0);
+		expect(followUpIndex).toBeGreaterThan(asideIndex);
 		expect(userMessageText([...stopSession.agent.peekFollowUpQueue()])).not.toContain("then add the test");
-		expect(stopSession.agent.state.messages.filter(isExtensionAside).map(message => asideContent(message))).toContain(
-			"settle aside",
-		);
 	});
 
 	it("still flushes a stranded aside when a follow-up is queued (case 8)", async () => {
