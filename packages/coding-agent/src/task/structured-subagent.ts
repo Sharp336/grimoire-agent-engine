@@ -9,7 +9,7 @@ import * as os from "node:os";
 import path from "node:path";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import type { Rule } from "../capability/rule";
-import { resolveAgentModelPatterns, resolveAgentModelSource, resolveExplicitModelRole } from "../config/model-resolver";
+import { resolveAgentModelSelection } from "../config/model-resolver";
 import type { Skill } from "../extensibility/skills";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
@@ -341,10 +341,10 @@ export async function resolveEffectiveSubagentPolicy(
 		activeModelPattern: parentActiveModelPattern,
 		fallbackModelPattern: request.session.getModelString?.(),
 	};
-	// Keep role identity from the same effective non-empty source that supplies
-	// model selection: caller request, settings override, then agent definition.
-	const modelRole = resolveExplicitModelRole(resolveAgentModelSource(modelResolution), request.session.settings);
-	const modelOverride = resolveAgentModelPatterns(modelResolution);
+	// Role identity and patterns come from one call so they cannot be derived
+	// from different sources: the expansion below discards the alias, and the
+	// child's inherited retry-fallback chain is keyed off the role.
+	const { patterns: modelOverride, role: modelRole } = resolveAgentModelSelection(modelResolution);
 	const isolationMode = request.session.settings.get("task.isolation.mode");
 	const isIsolated = request.isolation?.requested === true;
 	if (isIsolated && isolationMode === "none") {

@@ -66,6 +66,7 @@ async function createPersistedSession(
 	cwd: string,
 	restrictToolNames?: boolean,
 	modelRole?: string,
+	advisor?: string,
 	pinModel?: boolean,
 	tools: string[] = ["read", "yield"],
 	resolvedModel = modelRole ? "anthropic/claude-sonnet-4-5" : undefined,
@@ -81,6 +82,7 @@ async function createPersistedSession(
 		modelRole,
 		resolvedModel,
 		pinModel,
+		advisor,
 	});
 	manager.appendMessage({
 		role: "assistant",
@@ -167,7 +169,7 @@ describe("persisted subagent revival", () => {
 
 	it("preserves an explicitly selected read-only LSP in a restricted revive while honoring the host prohibition", async () => {
 		const enabledCwd = makeTempDir("@pi-restricted-lsp-revive-");
-		const enabledFile = await createPersistedSession(enabledCwd, true, undefined, undefined, [
+		const enabledFile = await createPersistedSession(enabledCwd, true, undefined, undefined, undefined, [
 			"read",
 			"lsp",
 			"yield",
@@ -184,7 +186,7 @@ describe("persisted subagent revival", () => {
 		await enabledReviver(enabledRef);
 
 		const prohibitedCwd = makeTempDir("@pi-restricted-lsp-prohibited-");
-		const prohibitedFile = await createPersistedSession(prohibitedCwd, true, undefined, undefined, [
+		const prohibitedFile = await createPersistedSession(prohibitedCwd, true, undefined, undefined, undefined, [
 			"read",
 			"lsp",
 			"yield",
@@ -235,6 +237,32 @@ describe("persisted subagent revival", () => {
 		expect(capturedOptions?.mcpManager).toBe(hostileMcp);
 		expect(capturedOptions?.customTools?.map(tool => tool.name)).toEqual(["mcp__server_read"]);
 	});
+	it("restores the persisted per-agent advisor opt-in on cold revival", async () => {
+		const cwd = makeTempDir("@pi-advisor-revive-");
+		const advisedFile = await createPersistedSession(cwd, undefined, undefined, "moonshot/k3");
+		const roleAdvisedFile = await createPersistedSession(cwd, undefined, undefined, "on");
+		const unadvisedFile = await createPersistedSession(cwd);
+		const captured: Settings[] = [];
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			if (options?.settings) captured.push(options.settings);
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const factory = createFactory(cwd);
+		for (const sessionFile of [advisedFile, roleAdvisedFile, unadvisedFile]) {
+			const ref = createRef(sessionFile);
+			const reviver = await factory(ref);
+			if (!reviver) throw new Error("Expected a persisted reviver");
+			await reviver(ref);
+		}
+
+		const [advised, roleAdvised, unadvised] = captured;
+		expect(advised.get("advisor.enabled")).toBe(true);
+		expect(advised.getModelRole("advisor")).toBe("moonshot/k3");
+		expect(roleAdvised.get("advisor.enabled")).toBe(true);
+		expect(roleAdvised.getModelRole("advisor")).toBeUndefined();
+		expect(unadvised.get("advisor.enabled")).toBe(false);
+	});
 
 	it("restores the persisted custom model role before reopening the session", async () => {
 		const cwd = makeTempDir("@pi-custom-role-revive-");
@@ -274,7 +302,7 @@ describe("persisted subagent revival", () => {
 
 	it("preserves pinned model policy across a cold revive", async () => {
 		const cwd = makeTempDir("@pi-pinned-model-revive-");
-		const sessionFile = await createPersistedSession(cwd, false, "review-fast", true);
+		const sessionFile = await createPersistedSession(cwd, false, "review-fast", undefined, true);
 		let capturedOptions: CreateAgentSessionOptions | undefined;
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
 			capturedOptions = options;
@@ -298,6 +326,7 @@ describe("persisted subagent revival", () => {
 		const sessionFile = await createPersistedSession(
 			cwd,
 			false,
+			undefined,
 			undefined,
 			true,
 			["read", "yield"],

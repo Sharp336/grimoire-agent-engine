@@ -171,6 +171,61 @@ afterEach(async () => {
 });
 
 describe("daemon broker", () => {
+	it("keeps a valid RPC response authoritative after a malformed completion", async () => {
+		const projectDir = await tempDir("omp-daemon-malformed-completion-project-");
+		const runtimeDir = await tempDir("omp-daemon-malformed-completion-runtime-");
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const server = net.createServer(socket => {
+			let buffer = "";
+			socket.setEncoding("utf8");
+			socket.on("data", chunk => {
+				buffer += chunk;
+				const newline = buffer.indexOf("\n");
+				if (newline < 0) return;
+				const request: unknown = JSON.parse(buffer.slice(0, newline));
+				if (
+					typeof request !== "object" ||
+					request === null ||
+					!("id" in request) ||
+					typeof request.id !== "string"
+				) {
+					socket.destroy(new Error("request id missing"));
+					return;
+				}
+				socket.write(
+					`${JSON.stringify({
+						event: "daemon-completed",
+						completionId: "malformed-completion",
+						owner: "completion-owner",
+						daemon: null,
+					})}\n`,
+				);
+				socket.write(
+					`${JSON.stringify({
+						id: request.id,
+						ok: true,
+						result: { projectDir },
+					})}\n`,
+				);
+			});
+		});
+		const listening = Promise.withResolvers<void>();
+		server.once("error", listening.reject);
+		server.listen(daemonBrokerEndpoint(projectDir, runtimeDir), listening.resolve);
+		await listening.promise;
+		try {
+			expect(await client.request({ op: "ping" })).toEqual({ op: "ping", projectDir });
+		} finally {
+			client.close();
+			const closed = Promise.withResolvers<void>();
+			server.close(error => {
+				if (error) closed.reject(error);
+				else closed.resolve();
+			});
+			await closed.promise;
+		}
+	});
+
 	it("shares PTY output and input across project clients", async () => {
 		const projectDir = await tempDir("omp-daemon-project-");
 		const runtimeDir = await tempDir("omp-daemon-runtime-");
@@ -203,13 +258,11 @@ setInterval(() => {}, 1000);
 				detached: false,
 			};
 			const started = await first.request({ op: "start", spec, owner: "first-client" });
-			expect(started.op).toBe("start");
 			if (started.op !== "start") throw new Error("unexpected start result");
 			expect(started.readyTimedOut).toBeFalse();
 			expect(started.daemon.state).toBe("ready");
 
 			const listed = await second.request({ op: "list" });
-			expect(listed.op).toBe("list");
 			if (listed.op !== "list") throw new Error("unexpected list result");
 			expect(listed.daemons.map(daemon => daemon.name)).toEqual(["debugger"]);
 
@@ -221,7 +274,6 @@ setInterval(() => {}, 1000);
 				pattern: "INPUT",
 				timeoutMs: 3_000,
 			});
-			expect(waited.op).toBe("wait");
 			if (waited.op !== "wait") throw new Error("unexpected wait result");
 			expect(waited.timedOut).toBeFalse();
 			expect(waited.matched).toBe("INPUT");
@@ -235,7 +287,6 @@ setInterval(() => {}, 1000);
 				timeoutMs: 1_000,
 				renderTerminalRows: true,
 			} as DaemonOperation);
-			expect(logs.op).toBe("logs");
 			if (logs.op !== "logs") throw new Error("unexpected logs result");
 			expect(logs.text).toContain("READY");
 			expect(logs.text).not.toContain("\x1b");
@@ -274,7 +325,6 @@ setInterval(() => {}, 1000);
 			expect(grepped.terminalRows).toBeUndefined();
 
 			const stopped = await first.request({ op: "stop", name: "debugger", timeoutMs: 2_000 });
-			expect(stopped.op).toBe("stop");
 			if (stopped.op !== "stop") throw new Error("unexpected stop result");
 			expect(stopped.daemon.state).toBe("exited");
 		} finally {
@@ -756,6 +806,89 @@ esac
 		}
 	}, 12_000);
 
+	it("replays a zero-width completion without poisoning the next start", async () => {
+		const projectDir = await tempDir("omp-daemon-empty-ready-project-");
+		const runtimeDir = await tempDir("omp-daemon-empty-ready-runtime-");
+		const markerPath = path.join(projectDir, "victim-ran");
+		const owner = "empty-ready-owner";
+		const first = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		let recovered: DaemonBrokerClient | undefined;
+		let victimError: Error | undefined;
+		try {
+			first.onCompletion(owner, () => {
+				throw new Error("leave completion pending for reconnect");
+			});
+			await first.request({ op: "ping" });
+			await first
+				.request({
+					op: "start",
+					spec: {
+						name: "empty-ready-poison",
+						application: process.execPath,
+						args: ["-e", 'console.log("READY")'],
+						env: {},
+						cwd: projectDir,
+						pty: false,
+						ready: { log: "^", timeoutMs: 5_000 },
+						restart: "no",
+						persist: false,
+						detached: false,
+					},
+					owner,
+				})
+				.catch(() => undefined);
+			const metaPath = path.join(runtimeDir, "daemons", "empty-ready-poison", "meta.json");
+			expect(
+				await waitUntil(async () => {
+					const metadata: unknown = await Bun.file(metaPath).json();
+					return (
+						typeof metadata === "object" &&
+						metadata !== null &&
+						"completionPending" in metadata &&
+						metadata.completionPending === true
+					);
+				}, 3_000),
+			).toBeTrue();
+			first.close();
+
+			const completions: DaemonSnapshot[] = [];
+			recovered = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+			recovered.onCompletion(owner, notification => {
+				completions.push(notification.daemon);
+			});
+			const victim = await recovered
+				.request({
+					op: "start",
+					spec: {
+						name: "empty-ready-victim",
+						application: process.execPath,
+						args: ["-e", `await Bun.write(${JSON.stringify(markerPath)}, "yes"); console.log("SECOND")`],
+						env: {},
+						cwd: projectDir,
+						pty: false,
+						ready: { log: "SECOND", timeoutMs: 5_000 },
+						restart: "no",
+						persist: false,
+						detached: false,
+					},
+				})
+				.catch(error => {
+					victimError = error instanceof Error ? error : new Error(String(error));
+					return undefined;
+				});
+
+			expect(await waitUntil(() => Bun.file(markerPath).exists(), 3_000)).toBeTrue();
+			expect(victimError).toBeUndefined();
+			if (victim?.op !== "start") throw new Error("victim start result missing");
+			expect(victim.daemon).toMatchObject({ name: "empty-ready-victim", readyMatch: "SECOND" });
+			expect(await waitUntil(() => completions.length === 1, 2_000)).toBeTrue();
+			expect(completions[0]).toMatchObject({ name: "empty-ready-poison", readyMatch: "", state: "exited" });
+		} finally {
+			first.close();
+			if (recovered) await shutdown(recovered);
+		}
+	}, 12_000);
+
 	it("replays a recovered non-detached daemon exit", async () => {
 		if (process.platform === "win32") return;
 		const projectDir = await tempDir("omp-daemon-attached-recovery-project-");
@@ -833,7 +966,6 @@ esac
 				detached: false,
 			};
 			const started = await client.request({ op: "start", spec });
-			expect(started.op).toBe("start");
 			if (started.op !== "start") throw new Error("unexpected start result");
 			expect(started.readyTimedOut).toBeTrue();
 			expect(started.daemon.state).toBe("starting");
@@ -875,7 +1007,6 @@ esac
 			const t0 = Date.now();
 			const started = await client.request({ op: "start", spec });
 			const elapsed = Date.now() - t0;
-			expect(started.op).toBe("start");
 			if (started.op !== "start") throw new Error("unexpected start result");
 			// Woke on readyAt/terminal, not the full 60s timeout.
 			expect(elapsed).toBeLessThan(10_000);
@@ -890,7 +1021,6 @@ esac
 				for: "ready",
 				timeoutMs: 60_000,
 			});
-			expect(waited.op).toBe("wait");
 			if (waited.op !== "wait") throw new Error("unexpected wait result");
 			expect(waited.timedOut).toBeFalse();
 			expect(waited.daemon.readyAt).toBeDefined();
@@ -925,7 +1055,6 @@ esac
 			const t0 = Date.now();
 			const started = await client.request({ op: "start", spec });
 			const startElapsed = Date.now() - t0;
-			expect(started.op).toBe("start");
 			if (started.op !== "start") throw new Error("unexpected start result");
 			expect(startElapsed).toBeLessThan(10_000);
 			// Woke on the terminal exit rather than timing out; the readyAt marker is
@@ -945,7 +1074,6 @@ esac
 				timeoutMs: 60_000,
 			});
 			const waitElapsed = Date.now() - t1;
-			expect(waited.op).toBe("wait");
 			if (waited.op !== "wait") throw new Error("unexpected wait result");
 			expect(waitElapsed).toBeLessThan(10_000);
 			expect(waited.timedOut).toBeTrue();
@@ -980,7 +1108,6 @@ esac
 				detached: false,
 			};
 			const started = await client.request({ op: "start", spec });
-			expect(started.op).toBe("start");
 			if (started.op !== "start") throw new Error("unexpected start result");
 			expect(started.daemon.readyAt).toBeDefined();
 

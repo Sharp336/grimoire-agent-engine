@@ -14,7 +14,7 @@ import type {
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
-import { withGeminiThinkingLoopGuard } from "@oh-my-pi/pi-ai/utils/thinking-loop";
+import { withThinkingLoopGuard } from "@oh-my-pi/pi-ai/utils/thinking-loop";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -65,7 +65,7 @@ function chunkedThinkingLoopStream(model: Model<Api>, options?: SimpleStreamOpti
 		inner.push({ type: "thinking_end", contentIndex: 0, content: thinking.thinking, partial });
 		inner.push({ type: "done", reason: "stop", message: partial });
 	});
-	return withGeminiThinkingLoopGuard(model, options, () => inner);
+	return withThinkingLoopGuard(model, options, () => inner);
 }
 
 function successStream(model: Model<Api>): AssistantMessageEventStream {
@@ -183,7 +183,7 @@ describe("AgentSession thinking-loop retry", () => {
 		expect(AIError.is(retryStartEvents[0].errorId, AIError.Flag.ThinkingLoop)).toBe(true);
 		expect(retryEndEvents).toHaveLength(1);
 		expect(retryEndEvents[0]).toMatchObject({ type: "auto_retry_end", success: true, attempt: 1 });
-		expect(retryEndEvents[0].recoveredErrors).toBeArray();
+		expect(retryEndEvents[0].retryErrors).toBeArray();
 		const assistants = session.agent.state.messages.filter(
 			(message): message is AssistantMessage => message.role === "assistant",
 		);

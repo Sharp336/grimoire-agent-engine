@@ -68,11 +68,12 @@ describe("InputController tool activity visibility", () => {
 		const resetDisplay = vi.fn();
 		const showStatus = vi.fn();
 		const setCouncilPaneExpanded = vi.fn();
+		const setToolActivityVisible = vi.fn();
 		const ctx = {
 			hideToolActivity: false,
 			toolOutputExpanded: true,
 			settings: { set },
-			chatContainer: { children, clear, addChild },
+			chatContainer: { children, clear, addChild, setToolActivityVisible },
 			rebuildChatFromMessages,
 			showStatus,
 			ui: { clearInlineImages, resetDisplay },
@@ -96,6 +97,7 @@ describe("InputController tool activity visibility", () => {
 		expect(clearInlineImages.mock.invocationCallOrder[0]).toBeLessThan(resetDisplay.mock.invocationCallOrder[0]);
 		expect(showStatus).toHaveBeenLastCalledWith("Tool activity: hidden");
 		expect(setToolResultImagesVisible).toHaveBeenLastCalledWith(false);
+		expect(setToolActivityVisible).toHaveBeenLastCalledWith(false);
 
 		controller.toggleToolActivityVisibility();
 
@@ -113,5 +115,6 @@ describe("InputController tool activity visibility", () => {
 		expect(resetDisplay).toHaveBeenCalledTimes(2);
 		expect(showStatus).toHaveBeenLastCalledWith("Tool activity: visible");
 		expect(setToolResultImagesVisible).toHaveBeenLastCalledWith(true);
+		expect(setToolActivityVisible).toHaveBeenLastCalledWith(true);
 	});
 });

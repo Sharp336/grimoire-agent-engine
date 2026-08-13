@@ -220,6 +220,10 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	},
 	"--extension": setExtension,
 	"-e": setExtension,
+	"--trusted-extension": (result, value) => {
+		result.trustedExtensions = result.trustedExtensions ?? [];
+		result.trustedExtensions.push(value);
+	},
 	"--plugin-dir": (result, value) => {
 		result.pluginDirs = result.pluginDirs ?? [];
 		result.pluginDirs.push(value);
@@ -307,6 +311,7 @@ export const VALUELESS_FLAGS: ReadonlySet<string> = new Set([
 	"--no-pty",
 	"--hide-thinking",
 	"--advisor",
+	"--external-thinking",
 	"--prewalk",
 	"--no-prewalk",
 	"--plan-yolo",
