@@ -187,6 +187,44 @@ describe("update-cli install target detection", () => {
 		expect(method).toBe("npm");
 	});
 
+	it("uses binary update when the npm global bin entry is a foreign alias symlink to a standalone binary", () => {
+		// Regression: a user-created alias (`~/.npm-global/bin/omp` ->
+		// `~/.local/bin/omp`) was classified as npm-managed by directory
+		// containment, so `npm install -g` failed with EEXIST refusing to
+		// clobber a bin entry it does not own.
+		const method = resolveUpdateMethodForTest("/home/u/.npm-global/bin/omp", undefined, {
+			npmBinDir: "/home/u/.npm-global/bin",
+			ompRealpath: "/home/u/.local/bin/omp",
+		});
+
+		expect(method).toBe("binary");
+	});
+
+	it("uses npm update when the bin symlink resolves into the npm global install tree", () => {
+		const method = resolveUpdateMethodForTest("/home/u/.npm-global/bin/omp", undefined, {
+			npmBinDir: "/home/u/.npm-global/bin",
+			ompRealpath: "/home/u/.npm-global/lib/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js",
+		});
+
+		expect(method).toBe("npm");
+	});
+
+	it("uses binary update when the bun global bin entry is a foreign alias symlink", () => {
+		const method = resolveUpdateMethodForTest("/home/u/.bun/bin/omp", "/home/u/.bun/bin", {
+			ompRealpath: "/home/u/.local/bin/omp",
+		});
+
+		expect(method).toBe("binary");
+	});
+
+	it("uses bun update when the bin symlink resolves into the bun global install tree", () => {
+		const method = resolveUpdateMethodForTest("/home/u/.bun/bin/omp", "/home/u/.bun/bin", {
+			ompRealpath: "/home/u/.bun/install/global/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js",
+		});
+
+		expect(method).toBe("bun");
+	});
+
 	it("uses binary update when prioritized omp is outside bun global bin", () => {
 		const method = resolveUpdateMethodForTest("/Users/test/.local/bin/omp", "/Users/test/.bun/bin");
 

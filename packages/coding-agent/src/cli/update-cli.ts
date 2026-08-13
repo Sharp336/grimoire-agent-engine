@@ -481,6 +481,14 @@ interface UpdateMethodResolutionOptions {
 	 * target directory.
 	 */
 	ompIsRegularFile?: boolean;
+	/**
+	 * Realpath of the resolved omp path when it is a symlink. npm/bun global
+	 * installs link the bin entry into their own install tree (node_modules
+	 * under the manager root); a symlink whose target lives outside that root
+	 * is a foreign alias (e.g. a user-created link into another bin dir) that
+	 * the manager will refuse to clobber (npm EEXIST).
+	 */
+	ompRealpath?: string;
 }
 
 type UpdateTarget =
@@ -491,12 +499,26 @@ type UpdateTarget =
 	| { method: "npm"; path?: string }
 	| { method: "binary"; path: string; replacesSymlink: boolean };
 
+/**
+ * Whether a symlinked bin entry belongs to the package manager whose global
+ * bin dir is {@link binDir}. Manager-owned links on POSIX resolve into the
+ * manager's install tree (node_modules under the manager root); anything else
+ * is a foreign alias the manager did not create and will not overwrite.
+ * Without a realpath (not a symlink, or unresolvable) ownership is assumed so
+ * legacy detection is unchanged.
+ */
+function managerOwnsBinEntry(realpath: string | undefined, binDir: string): boolean {
+	if (!realpath) return true;
+	const managerRoot = tryRealpath(path.dirname(binDir)) ?? path.dirname(path.resolve(binDir));
+	return isPathInDirectoryLexical(realpath, managerRoot);
+}
+
 function resolveUpdateMethod(
 	ompPath: string,
 	bunBinDir: string | undefined,
 	options: UpdateMethodResolutionOptions = {},
 ): UpdateMethod {
-	const { homebrewPrefix, miseBinDirs = [], miseDataDir, npmBinDir, ompIsRegularFile = false } = options;
+	const { homebrewPrefix, miseBinDirs = [], miseDataDir, npmBinDir, ompIsRegularFile = false, ompRealpath } = options;
 	const launcherExtension = path.extname(ompPath).toLowerCase();
 	const isWindowsScriptLauncher =
 		launcherExtension === ".cmd" || launcherExtension === ".ps1" || launcherExtension === ".bat";
@@ -514,9 +536,19 @@ function resolveUpdateMethod(
 	// (bun's .exe launcher, npm's .cmd/.ps1), so a regular file is NOT evidence
 	// of a standalone install and the override would hijack managed installs.
 	const isStandaloneRegularFile = ompIsRegularFile && process.platform !== "win32";
-	if (bunBinDir && isPathInDirectory(ompPath, bunBinDir) && !isStandaloneRegularFile) return "bun";
-	if ((npmBinDir && isPathInDirectory(ompPath, npmBinDir) && !isStandaloneRegularFile) || isWindowsScriptLauncher)
+	// A symlinked bin entry only counts as manager-managed when its target
+	// lives under that manager's root. A foreign alias (user-created link to a
+	// standalone binary elsewhere) must fall through to binary replacement:
+	// routing it through npm/bun makes their install collide with the alias
+	// (npm EEXIST) and would replace the link instead of the real binary.
+	if (bunBinDir && isPathInDirectory(ompPath, bunBinDir) && !isStandaloneRegularFile) {
+		if (managerOwnsBinEntry(ompRealpath, bunBinDir)) return "bun";
+	}
+	if (npmBinDir && isPathInDirectory(ompPath, npmBinDir) && !isStandaloneRegularFile) {
+		if (managerOwnsBinEntry(ompRealpath, npmBinDir)) return "npm";
+	} else if (isWindowsScriptLauncher) {
 		return "npm";
+	}
 	return "binary";
 }
 
@@ -552,10 +584,14 @@ async function resolveUpdateTarget(options: { allowPackageManagers: boolean }): 
 		// directory containment — distinguishes a binary install from npm/bun.
 		let ompIsRegularFile = false;
 		let ompIsSymlink = false;
+		let ompRealpath: string | undefined;
 		try {
 			const stat = fs.lstatSync(ompPath);
 			ompIsRegularFile = stat.isFile() && !stat.isSymbolicLink();
 			ompIsSymlink = stat.isSymbolicLink();
+			if (ompIsSymlink) {
+				ompRealpath = tryRealpath(ompPath);
+			}
 		} catch {}
 		const method = resolveUpdateMethod(ompPath, bunBinDir, {
 			homebrewPrefix,
@@ -563,8 +599,18 @@ async function resolveUpdateTarget(options: { allowPackageManagers: boolean }): 
 			miseDataDir,
 			npmBinDir,
 			ompIsRegularFile,
+			ompRealpath,
 		});
-		if (method === "binary") return { method, path: ompPath, replacesSymlink: ompIsSymlink };
+		// A binary install reached through an alias symlink replaces the
+		// resolved binary, not the link: writing to the alias path would strand
+		// the real binary at the old version and drop a second copy at the
+		// alias path. When package managers are off the table (binary-only
+		// release) the launcher itself is replaced in place instead, keeping
+		// the same PATH entry live.
+		if (method === "binary") {
+			const binaryPath = options.allowPackageManagers ? (ompRealpath ?? ompPath) : ompPath;
+			return { method, path: binaryPath, replacesSymlink: ompIsSymlink && binaryPath === ompPath };
+		}
 		if (method === "bun" || method === "npm") return { method, path: ompPath };
 		return { method };
 	}

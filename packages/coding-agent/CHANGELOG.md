@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `omp update` failing with npm EEXIST when the npm global bin directory contains a foreign alias symlink named `omp` (for example a user-created link to a standalone binary in `~/.local/bin`): the alias was misclassified as an npm-managed install, and `npm install -g` refused to clobber it. Symlinked bin entries now count as manager-managed only when their target resolves under that manager's root; foreign aliases fall through to a binary update of the resolved target ([#8468](https://github.com/can1357/oh-my-pi/issues/8468)).
+
 ## [17.3.1] - 2026-08-13
 
 ### Fixed
