@@ -1,6 +1,11 @@
 import { beforeAll, describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { hasMagicKeyword, highlightMagicKeywords } from "@oh-my-pi/pi-coding-agent/modes/magic-keywords";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+
+const magicKeywordsPath = path.resolve(import.meta.dir, "../../src/modes/magic-keywords.ts");
 
 beforeAll(async () => {
 	// Gradient palettes read the active theme's color mode.
@@ -71,6 +76,31 @@ describe("highlightMagicKeywords", () => {
 		expect(highlightMagicKeywords(text, undefined, 1)).toBe(highlightMagicKeywords(text, undefined, 0));
 		// Negative phase wraps too — -0.25 ≡ 0.75.
 		expect(highlightMagicKeywords(text, undefined, -0.25)).toBe(highlightMagicKeywords(text, undefined, 0.75));
+	});
+
+	it("paints keywords when the module-level theme is uninitialized", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-magic-keywords-"));
+		try {
+			const script = [
+				`import { highlightMagicKeywords } from ${JSON.stringify(magicKeywordsPath)};`,
+				'const input = "please ultrathink this";',
+				"const out = highlightMagicKeywords(input);",
+				"if (Bun.stripANSI(out) !== input) process.exit(1);",
+				'if (!out.includes("\\x1b[38")) process.exit(2);',
+				"",
+			].join("\n");
+			const file = path.join(dir, "uninitialized-theme.ts");
+			await Bun.write(file, script);
+			const proc = Bun.spawn(["bun", file], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+			const [exitCode, stderr] = await Promise.all([
+				proc.exited,
+				new Response(proc.stderr as ReadableStream<Uint8Array>).text(),
+			]);
+			expect(stderr).toBe("");
+			expect(exitCode).toBe(0);
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
 	});
 });
 

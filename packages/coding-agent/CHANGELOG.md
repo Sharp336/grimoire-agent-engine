@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a crash (`TypeError: undefined is not an object (evaluating 'theme.getColorMode')`) when a magic keyword (`ultrathink`, `orchestrate`, `workflowz`) was painted in the editor before the theme finished initializing; the gradient palette now falls back to the detected color mode until the theme is ready.
+
 ## [17.3.0] - 2026-08-13
 
 ### Breaking Changes
