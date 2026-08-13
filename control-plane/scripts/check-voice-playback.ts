@@ -18,11 +18,15 @@
  * It prints one JSON line, then serves until killed.
  */
 
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Ompd } from "../packages/daemon/src/daemon.ts";
-import { pcmToBase64, selectTtsEngine } from "../packages/daemon/src/voice/index.ts";
+import {
+  pcmToBase64,
+  selectTtsEngine,
+  speakableSegments,
+} from "../packages/daemon/src/voice/index.ts";
 
 /**
  * Short, unambiguous, and nothing like a hallucination. The agent's reply is
@@ -34,20 +38,9 @@ const home = mkdtempSync(join(tmpdir(), "ompd-playback-"));
 const dist = resolve(import.meta.dir, "../packages/web/dist");
 const promptFile = join(dist, "spoken-prompt.b64");
 
-/**
- * Whisper needs a model path and there is no useful default: without one the
- * daemon selects the null engine and says so, which is honest but means this
- * script proves nothing. Fail here instead, where the reason is obvious.
- */
-const whisperModel = process.env.WHISPER_MODEL ?? join(homedir(), ".cache/whisper/ggml-base.en.bin");
-if (!existsSync(whisperModel)) {
-  console.error(`no whisper model at ${whisperModel}; set WHISPER_MODEL to one`);
-  process.exit(1);
-}
-
 const daemon = new Ompd({
   home,
-  overrides: { port: 0, whisperModel },
+  overrides: { port: 0 },
   repoRoot: home,
   onLog: (line) => console.error(`[daemon] ${line}`),
 });
@@ -59,11 +52,27 @@ const token = (await Bun.file(join(home, "token")).text()).trim();
 // browser sends up is real speech from this machine rather than a fixture
 // recorded somewhere else.
 const tts = await selectTtsEngine();
-const spoken = await tts.synthesize(SPOKEN_PROMPT);
+if (tts.name === "null") {
+  console.error("no text-to-speech engine; run `omp setup speech` to download the voice model");
+  process.exit(1);
+}
+// Drained into one payload because the browser sends it up as a single
+// utterance. The daemon's own reply is where streaming matters, and that leg
+// is what this script is here to watch.
+const chunks: Int16Array[] = [];
+for await (const chunk of tts.stream(speakableSegments(SPOKEN_PROMPT))) chunks.push(chunk.pcm);
+let total = 0;
+for (const chunk of chunks) total += chunk.length;
+const spokenPcm = new Int16Array(total);
+let offset = 0;
+for (const chunk of chunks) {
+  spokenPcm.set(chunk, offset);
+  offset += chunk.length;
+}
 
 // Served from the web root because the page has to fetch it: a base64 payload
 // this size does not belong inlined in an evaluate call.
-writeFileSync(promptFile, pcmToBase64(spoken.pcm));
+writeFileSync(promptFile, pcmToBase64(spokenPcm));
 
 const created = await fetch(`${info.url}/v1/agents`, {
   method: "POST",
@@ -82,7 +91,7 @@ console.log(
     token,
     agentId: agent.id,
     ttsEngine: tts.name,
-    promptSamples: spoken.pcm.length,
+    promptSamples: spokenPcm.length,
     home,
   }),
 );

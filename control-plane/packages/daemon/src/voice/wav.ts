@@ -1,11 +1,9 @@
 /**
  * WAV framing and PCM16 wire helpers.
  *
- * Every speech binary on this machine speaks WAV on disk, not raw PCM on a
- * pipe: `omp say --out x.wav`, `say --data-format=LEI16@22050 -o x.wav`,
- * `whisper-cli -f x.wav`. The wire protocol, meanwhile, is base64 PCM16. This
- * module is the only place that conversion lives, so the engines stay about
- * process invocation and nothing else.
+ * The macOS `say` fallback speaks WAV on disk rather than raw PCM on a pipe,
+ * and the wire protocol is base64 PCM16. This module is the only place those
+ * conversions live, so the engines stay about synthesis and nothing else.
  *
  * Byte order is written and read explicitly rather than by reinterpreting the
  * `Int16Array` backing buffer. PCM16 is little-endian by definition, and a
@@ -182,4 +180,65 @@ export function resamplePcm(audio: PcmAudio, target: number): PcmAudio {
     out[i] = Math.round(a + (b - a) * weight);
   }
   return { pcm: out, sampleRate: target };
+}
+
+/**
+ * PCM16 to the normalised float samples OMP's speech workers exchange.
+ *
+ * Divided by 32768 rather than 32767: the signed 16-bit range is asymmetric,
+ * and scaling by the magnitude of the most negative value is what keeps -32768
+ * at exactly -1.0 instead of just past it.
+ */
+export function pcmToFloat32(pcm: Int16Array): Float32Array {
+  const out = new Float32Array(pcm.length);
+  for (let i = 0; i < pcm.length; i++) out[i] = (pcm[i] ?? 0) / 32_768;
+  return out;
+}
+
+/**
+ * Inverse of `pcmToFloat32`, clamping rather than wrapping.
+ *
+ * Scaled by the same 32768, so the pair round-trips every Int16 value exactly.
+ * Scaling back by 32767 instead would land full scale a fraction short and
+ * make a round trip lossy at the one amplitude most likely to be tested.
+ *
+ * Clamped because a vocoder overshoots past full scale on transients. Wrapping
+ * turns that into a click at maximum amplitude, far more audible than the
+ * clipping it came from.
+ */
+export function float32ToPcm(samples: Float32Array): Int16Array {
+  const out = new Int16Array(samples.length);
+  for (let i = 0; i < samples.length; i++) {
+    const scaled = Math.round((samples[i] ?? 0) * 32_768);
+    out[i] = scaled > 32_767 ? 32_767 : scaled < -32_768 ? -32_768 : scaled;
+  }
+  return out;
+}
+
+/**
+ * Resample normalised float samples, for the ASR path.
+ *
+ * Separate from `resamplePcm` rather than a conversion around it: quantising to
+ * PCM16 in the middle of a float pipeline is a rounding loss taken for nothing,
+ * and the interpolation is the only part worth sharing.
+ */
+export function resampleFloat32(samples: Float32Array, from: number, to: number): Float32Array {
+  if (from < 1 || to < 1) throw new WavFormatError(`unsupported resample ${from} to ${to}`);
+  if (from === to || samples.length === 0) return samples;
+
+  const ratio = from / to;
+  const length = Math.max(1, Math.round(samples.length / ratio));
+  const out = new Float32Array(length);
+  const last = samples.length - 1;
+
+  for (let i = 0; i < length; i++) {
+    const position = i * ratio;
+    const left = Math.floor(position);
+    const right = Math.min(left + 1, last);
+    const weight = position - left;
+    const a = samples[left] ?? 0;
+    const b = samples[right] ?? 0;
+    out[i] = a + (b - a) * weight;
+  }
+  return out;
 }

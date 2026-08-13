@@ -1,29 +1,50 @@
 /**
  * Text to speech.
  *
- * Same posture as `stt.ts`: omp already runs Kokoro-82M on device through the
- * bundled ONNX runtime and exposes it as `omp say --out <wav>`, so this module
- * is process invocation plus WAV decoding, not synthesis.
+ * OMP runs Kokoro-82M on device through a warm worker, and now that the control
+ * plane lives inside the fork it can drive that worker directly instead of
+ * shelling out to `omp say` and waiting for a file to appear.
  *
- * The part worth attention is `sanitizeForSpeech`. An assistant turn is
- * markdown, and markdown read aloud is unbearable: a fenced diff becomes two
- * minutes of punctuation, a URL becomes a spelled-out slug. Anything visual is
- * removed before a single sample is generated, both because it is unlistenable
- * and because synthesis is charged by the character.
+ * The interface is a stream, not a call. A spoken reply is segmented before
+ * anything is synthesised, and each segment's audio is handed back the moment
+ * it is rendered, so the first words leave for the client while the rest of the
+ * sentence is still in the vocoder. One-shot synthesis makes a phone wait for
+ * the slowest part of a paragraph before it hears the fastest.
+ *
+ * Turning markdown into speakable prose is not done here either. OMP's
+ * `SpeakableStream` is the real implementation of that and it is the same one
+ * the TUI speaks through, so the daemon and the terminal say the same words.
  */
 
+// Only the segmenter and the model registry are imported eagerly: both are pure
+// TypeScript. Everything that reaches the native speech runtime goes through
+// `loadSpeechRuntime`, which explains why.
+import {
+  DEFAULT_TTS_LOCAL_MODEL_KEY,
+  type TtsLocalModelKey,
+} from "@oh-my-pi/pi-coding-agent/tts/models";
+import { SpeakableStream } from "@oh-my-pi/pi-coding-agent/tts/speakable";
+import { loadSpeechRuntime, type TtsSynthesizer } from "./speech-runtime.ts";
 import {
   BunCommandRunner,
   withScratchDir,
   type CommandRunner,
   type EngineAvailability,
 } from "./exec.ts";
-import { decodeWav, type PcmAudio } from "./wav.ts";
+import { decodeWav, float32ToPcm, type PcmAudio } from "./wav.ts";
 
+/**
+ * Speakable segments in, rendered audio out, in emission order.
+ *
+ * An async iterable rather than a promise of the whole utterance: that shape is
+ * the entire reason a reply can start playing before it is finished. An engine
+ * that can only render one shot at a time still satisfies it by yielding once
+ * per segment, which is already a real improvement over one blob per turn.
+ */
 export interface TtsEngine {
   /** Selection slot, one of `TTS_ENGINE_ORDER`. */
   readonly name: string;
-  synthesize(text: string): Promise<PcmAudio>;
+  stream(segments: Iterable<string>): AsyncIterable<PcmAudio>;
 }
 
 export class TtsUnavailableError extends Error {
@@ -39,94 +60,79 @@ export const TTS_ENGINE_ORDER: readonly string[] = ["omp", "say", "null"];
 const DEFAULT_TTS_TIMEOUT_MS = 120_000;
 
 // ---------------------------------------------------------------------------
-// sanitising
+// speakable
 // ---------------------------------------------------------------------------
 
-/** Fenced blocks, both fence styles, including an unterminated trailing fence. */
-const FENCED_CODE = /(^|\n)[ \t]*(```|~~~)[^\n]*\n[\s\S]*?(?:\n[ \t]*\2[^\n]*(?=\n|$)|$)/g;
-const HTML_COMMENT = /<!--[\s\S]*?-->/g;
-const HORIZONTAL_RULE = /^[ \t]*(?:[-*_][ \t]*){3,}$/gm;
-const HEADING = /^[ \t]{0,3}#{1,6}[ \t]+/gm;
-const BLOCKQUOTE = /^[ \t]*>+[ \t]?/gm;
-const LIST_MARKER = /^[ \t]*(?:[-*+]|\d+[.)])[ \t]+/gm;
-const TABLE_RULE = /^[ \t]*\|?[ \t]*:?-{2,}:?[ \t]*(?:\|[ \t]*:?-{2,}:?[ \t]*)*\|?[ \t]*$/gm;
-const TABLE_PIPE = /[ \t]*\|[ \t]*/g;
-const IMAGE = /!\[[^\]]*\]\([^)]*\)/g;
-const LINK = /\[([^\]]*)\]\([^)]*\)/g;
-const AUTOLINK = /<(?:https?|ftp|mailto):[^>\s]*>/gi;
-const BARE_URL = /\b(?:https?:\/\/|ftp:\/\/|www\.|mailto:)\S+/gi;
-const INLINE_CODE = /`+([^`]*)`+/g;
-const BOLD_OR_STRIKE = /(\*\*|__|~~)(.+?)\1/g;
-const EMPHASIS = /(^|[\s(])[*_]([^*_\n]+)[*_](?=[\s).,;:!?]|$)/g;
-const HTML_TAG = /<\/?[a-zA-Z][^>]*>/g;
-const WHITESPACE = /\s+/g;
-
 /**
- * Strip everything that only means something on a screen.
+ * Run OMP's markdown-to-speech transform over a finished turn.
  *
- * Fences go first: their contents are frequently full of characters that would
- * otherwise be read as markdown, and removing the block wholesale avoids
- * having to reason about that at all. Line-anchored structure (headings,
- * quotes, bullets, table rules) is removed next, while newlines still exist to
- * anchor against. Inline constructs come last, and whitespace is collapsed
- * once at the end.
+ * `SpeakableStream` is built for deltas arriving from a live generation; a
+ * completed turn is the degenerate case of one delta followed by a flush. The
+ * result is the same segment list the TUI would speak, which is the point:
+ * there is now one definition of what an assistant turn sounds like.
  *
- * Links keep their label and lose their target. A spoken "see the docs" is
- * useful; a spoken "h t t p s colon slash slash" is not.
+ * An empty array means nothing in the turn was worth vocalizing. That is a
+ * real answer, not a failure, and callers are expected to stay silent on it.
  */
-export function sanitizeForSpeech(text: string): string {
-  let out = text.replace(FENCED_CODE, "$1");
-  out = out.replace(HTML_COMMENT, " ");
-  out = out.replace(HORIZONTAL_RULE, " ");
-  out = out.replace(TABLE_RULE, " ");
-  out = out.replace(HEADING, "");
-  out = out.replace(BLOCKQUOTE, "");
-  out = out.replace(LIST_MARKER, "");
-  out = out.replace(IMAGE, " ");
-  out = out.replace(LINK, "$1");
-  out = out.replace(AUTOLINK, " ");
-  out = out.replace(BARE_URL, " ");
-  out = out.replace(INLINE_CODE, "$1");
-  out = out.replace(BOLD_OR_STRIKE, "$2");
-  out = out.replace(EMPHASIS, "$1$2");
-  out = out.replace(HTML_TAG, " ");
-  out = out.replace(TABLE_PIPE, ", ");
-  return out.replace(WHITESPACE, " ").trim();
+export function speakableSegments(text: string): string[] {
+  const stream = new SpeakableStream();
+  const segments = stream.push(text);
+  segments.push(...stream.flush());
+  return segments;
 }
 
 // ---------------------------------------------------------------------------
 // omp
 // ---------------------------------------------------------------------------
 
-/** The key `omp setup speech --check --json` reports the synthesis model under. */
-const OMP_TTS_REPORT_KEY = "Text-to-Speech model";
+/**
+ * A structural type rather than OMP's class, so a test can substitute a fake
+ * without spawning the worker subprocess. `TtsClient` satisfies it as written.
+ */
+export type { TtsSynthesizer };
 
 export interface OmpTtsOptions {
-  runner?: CommandRunner;
-  ompPath?: string;
-  /** Kokoro voice id. Omitted means the machine's `tts.localVoice`. */
+  /** Defaults to OMP's process-wide warm client. */
+  client?: TtsSynthesizer;
+  /** Kokoro voice id. Omitted means the model's default voice. */
   voice?: string;
-  /** Local TTS model key. Omitted means the machine's `tts.localModel`. */
-  model?: string;
-  timeoutMs?: number;
+  /** Local TTS model key. Defaults to `kokoro`. */
+  modelKey?: TtsLocalModelKey;
+  /**
+   * Whether the model weights are on disk. Defaults to OMP's own cache check;
+   * injectable so a probe test does not depend on what this machine downloaded.
+   */
+  isModelCached?: (key: string) => Promise<boolean>;
+  /**
+   * Whether the Kokoro runtime is installed. Separate from the weights because
+   * they fail independently and the operator fixes them with different commands.
+   */
+  isRuntimeCached?: () => Promise<boolean>;
 }
 
+/**
+ * Streaming synthesis on OMP's warm Kokoro worker.
+ *
+ * Segments are pushed as fast as they are available and audio is consumed as it
+ * is produced, so the worker is rendering segment two while segment one is
+ * already on its way to the client.
+ */
 export class OmpTtsEngine implements TtsEngine {
   readonly name = "omp";
 
-  #runner: CommandRunner;
-  #ompPath: string;
+  #client: TtsSynthesizer | undefined;
   #voice: string | undefined;
-  #model: string | undefined;
-  #timeoutMs: number;
+  #modelKey: TtsLocalModelKey;
+  #isModelCached: ((key: string) => Promise<boolean>) | undefined;
+  #isRuntimeCached: (() => Promise<boolean>) | undefined;
   #probed: EngineAvailability | null = null;
 
   constructor(opts: OmpTtsOptions = {}) {
-    this.#runner = opts.runner ?? new BunCommandRunner();
-    this.#ompPath = opts.ompPath ?? "omp";
+    this.#client = opts.client;
     this.#voice = opts.voice;
-    this.#model = opts.model;
-    this.#timeoutMs = opts.timeoutMs ?? DEFAULT_TTS_TIMEOUT_MS;
+    this.#modelKey = opts.modelKey ?? DEFAULT_TTS_LOCAL_MODEL_KEY;
+    this.#isModelCached = opts.isModelCached;
+    this.#isRuntimeCached = opts.isRuntimeCached;
   }
 
   async probe(): Promise<EngineAvailability> {
@@ -136,67 +142,55 @@ export class OmpTtsEngine implements TtsEngine {
   }
 
   async #runProbe(): Promise<EngineAvailability> {
-    if (!this.#runner.which(this.#ompPath)) {
-      return { available: false, reason: `${this.#ompPath} is not on PATH` };
-    }
-    const check = await this.#runner.run(this.#ompPath, ["setup", "speech", "--check", "--json"], {
-      timeoutMs: 30_000,
-    });
-    // `--check` exits 1 when any component is missing and still prints the
-    // full report; see the matching note in stt.ts. Gating on the exit code
-    // here is what wrongly demoted a ready Kokoro to the OS voice.
-    let parsed: unknown;
     try {
-      parsed = JSON.parse(check.stdout);
-    } catch {
-      return {
-        available: false,
-        reason: `omp setup speech --check printed no report (exit ${check.code})`,
-      };
+      // The runtime is loaded only when something is still missing, so a fully
+      // injected engine never touches the native stack, and a real one shares
+      // the single load the STT engine also reports from.
+      let runtimeReady = this.#isRuntimeCached;
+      let modelReady = this.#isModelCached;
+      if (runtimeReady === undefined || modelReady === undefined) {
+        const runtime = await loadSpeechRuntime();
+        runtimeReady ??= runtime.isTtsRuntimeCached;
+        modelReady ??= runtime.isTtsModelCached;
+      }
+
+      if (!(await runtimeReady())) {
+        return {
+          available: false,
+          reason: "omp kokoro runtime is not installed; run `omp setup speech`",
+        };
+      }
+      if (!(await modelReady(this.#modelKey))) {
+        return {
+          available: false,
+          reason: `omp text-to-speech model ${this.#modelKey} is not downloaded; run \`omp setup speech\``,
+        };
+      }
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      return { available: false, reason: `omp could not reach its speech runtime: ${detail}` };
     }
-    if (typeof parsed !== "object" || parsed === null) {
-      return { available: false, reason: "omp speech report was not an object" };
-    }
-    // Dynamic-key JSON from a subprocess: guarded by the typeof checks around it.
-    const report = parsed as Record<string, unknown>;
-    const entry = report[OMP_TTS_REPORT_KEY];
-    if (typeof entry !== "object" || entry === null) {
-      return { available: false, reason: `omp speech report has no "${OMP_TTS_REPORT_KEY}" entry` };
-    }
-    const status = entry as Record<string, unknown>;
-    if (status.ready !== true) {
-      const detail = typeof status.status === "string" ? status.status : "not ready";
-      return { available: false, reason: `omp text-to-speech model is ${detail}` };
-    }
-    const model = typeof status.status === "string" ? status.status : "local";
-    return { available: true, reason: `omp say (${model})` };
+    return { available: true, reason: `omp ${this.#modelKey} on the local TTS worker` };
   }
 
-  async synthesize(text: string): Promise<PcmAudio> {
+  async *stream(segments: Iterable<string>): AsyncIterable<PcmAudio> {
     const probe = await this.probe();
     if (!probe.available) throw new TtsUnavailableError(probe.reason);
 
-    return withScratchDir("ompd-tts-", async (dir) => {
-      // `--file` rather than a positional argument: an assistant turn can run
-      // to thousands of characters and argv has a hard limit.
-      const source = `${dir}/say.txt`;
-      const out = `${dir}/say.wav`;
-      await Bun.write(source, text);
+    this.#client ??= (await loadSpeechRuntime()).ttsClient;
+    const handle = this.#client.synthesizeStream(
+      this.#modelKey,
+      this.#voice === undefined ? {} : { voice: this.#voice },
+    );
+    // Pushed before the first chunk is awaited, so the worker has the whole
+    // queue and never idles between segments waiting to be fed.
+    for (const segment of segments) handle.push(segment);
+    handle.end();
 
-      const args = ["say", "--file", source, "--out", out];
-      if (this.#voice) args.push("--voice", this.#voice);
-      if (this.#model) args.push("--model", this.#model);
-      const result = await this.#runner.run(this.#ompPath, args, { timeoutMs: this.#timeoutMs });
-      if (result.code !== 0) {
-        throw new Error(`omp say exited ${result.code}: ${result.stderr.trim() || "no stderr"}`);
-      }
-
-      const wav = Bun.file(out);
-      if (!(await wav.exists())) throw new Error(`omp say wrote no audio to ${out}`);
-      const audio = decodeWav(new Uint8Array(await wav.arrayBuffer()));
-      if (audio.pcm.length === 0) throw new Error("omp say produced an empty waveform");
-      return audio;
-    });
+    for await (const chunk of handle.chunks) {
+      if (chunk.pcm.length === 0) continue;
+      yield { pcm: float32ToPcm(chunk.pcm), sampleRate: chunk.sampleRate };
+    }
   }
 }
 
@@ -221,6 +215,13 @@ export interface SayTtsOptions {
   timeoutMs?: number;
 }
 
+/**
+ * The OS voice, one invocation per segment.
+ *
+ * `say` has no streaming mode, so this is a loop rather than a pipeline. It
+ * still satisfies the streaming contract in the way that matters: the first
+ * sentence reaches the client while the second is still being rendered.
+ */
 export class SayTtsEngine implements TtsEngine {
   readonly name = "say";
 
@@ -248,7 +249,10 @@ export class SayTtsEngine implements TtsEngine {
   #runProbe(): EngineAvailability {
     // Linux has unrelated binaries named `say`; the flags below are Apple's.
     if (this.#platform !== "darwin") {
-      return { available: false, reason: `${this.#binary} is macOS only, platform is ${this.#platform}` };
+      return {
+        available: false,
+        reason: `${this.#binary} is macOS only, platform is ${this.#platform}`,
+      };
     }
     if (!this.#runner.which(this.#binary)) {
       return { available: false, reason: `${this.#binary} is not on PATH` };
@@ -256,10 +260,17 @@ export class SayTtsEngine implements TtsEngine {
     return { available: true, reason: `macOS ${this.#binary}` };
   }
 
-  async synthesize(text: string): Promise<PcmAudio> {
+  async *stream(segments: Iterable<string>): AsyncIterable<PcmAudio> {
     const probe = await this.probe();
     if (!probe.available) throw new TtsUnavailableError(probe.reason);
 
+    for (const segment of segments) {
+      const audio = await this.#render(segment);
+      if (audio.pcm.length > 0) yield audio;
+    }
+  }
+
+  async #render(text: string): Promise<PcmAudio> {
     return withScratchDir("ompd-say-", async (dir) => {
       const source = `${dir}/say.txt`;
       const out = `${dir}/say.wav`;
@@ -269,14 +280,14 @@ export class SayTtsEngine implements TtsEngine {
       if (this.#voice) args.push("-v", this.#voice);
       const result = await this.#runner.run(this.#binary, args, { timeoutMs: this.#timeoutMs });
       if (result.code !== 0) {
-        throw new Error(`${this.#binary} exited ${result.code}: ${result.stderr.trim() || "no stderr"}`);
+        throw new Error(
+          `${this.#binary} exited ${result.code}: ${result.stderr.trim() || "no stderr"}`,
+        );
       }
 
       const wav = Bun.file(out);
       if (!(await wav.exists())) throw new Error(`${this.#binary} wrote no audio to ${out}`);
-      const audio = decodeWav(new Uint8Array(await wav.arrayBuffer()));
-      if (audio.pcm.length === 0) throw new Error(`${this.#binary} produced an empty waveform`);
-      return audio;
+      return decodeWav(new Uint8Array(await wav.arrayBuffer()));
     });
   }
 }
@@ -308,7 +319,8 @@ export class NullTtsEngine implements TtsEngine {
     return `no text-to-speech engine is available: ${this.#reasons.join("; ")}`;
   }
 
-  async synthesize(_text: string): Promise<PcmAudio> {
+  /** Fails on the first pull rather than yielding silence that looks like success. */
+  async *stream(_segments: Iterable<string>): AsyncIterable<PcmAudio> {
     throw new TtsUnavailableError(this.#describe());
   }
 }
@@ -326,10 +338,9 @@ export interface TtsSelectionOptions {
 
 /** First engine whose probe passes, in `TTS_ENGINE_ORDER`. Never returns null. */
 export async function selectTtsEngine(opts: TtsSelectionOptions = {}): Promise<TtsEngine> {
-  const runner = opts.runner;
   const candidates: Array<OmpTtsEngine | SayTtsEngine> = [
-    new OmpTtsEngine({ runner, ...opts.omp }),
-    new SayTtsEngine({ runner, ...opts.say }),
+    new OmpTtsEngine(opts.omp),
+    new SayTtsEngine({ runner: opts.runner, ...opts.say }),
   ];
 
   const reasons: string[] = [];

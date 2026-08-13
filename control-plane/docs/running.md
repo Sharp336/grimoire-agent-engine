@@ -130,8 +130,7 @@ Every field is optional, and every default is the conservative one.
   "port": 7777,
   "policyMode": "standard",
   "ompPath": "omp",
-  "keepAwake": true,
-  "whisperModel": ""
+  "keepAwake": true
 }
 ```
 
@@ -144,35 +143,26 @@ reads of secret paths.
 `keepAwake` holds a macOS idle-sleep assertion while any agent is working, so
 the machine does not sleep through a turn. See "The Mac has to be awake".
 
-`whisperModel` is a path to ggml weights for `whisper-cli`, and it is what
-makes voice input work at all on a machine where OMP cannot be reached for
-transcription. OMP 17.2.12 runs Parakeet on device but exposes no one-shot
-transcription subcommand, so `selectSttEngine` falls through to whisper, and
-whisper.cpp ships no default weights. With neither this field nor
-`WHISPER_MODEL` set, the daemon has no ears and says so.
+Speech needs no configuration. The daemon calls OMP's own speech libraries in
+process: Parakeet TDT v3 through sherpa-onnx for recognition, Kokoro-82M for
+synthesis, both on device and both the same models the TUI uses. There is no
+separate binary to install and no weights to fetch by hand.
+
+What it does need is for those models to have been downloaded once:
 
 ```sh
-brew install whisper-cpp
-mkdir -p ~/.cache/whisper
-curl -fL -o ~/.cache/whisper/ggml-base.en.bin \
-  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
+omp setup speech
 ```
 
-That is 141MB of weights plus about 12MB of Homebrew. Then set
-`"whisperModel": "/Users/you/.cache/whisper/ggml-base.en.bin"`. A path that
-does not exist is an error at startup, not a silent fallback, because the
-engine probe cannot tell a typo from a machine that simply has no model, and
-both end as "no speech-to-text engine" at the first utterance.
+Until then the daemon reports that it has no ears rather than pretending, and
+the reason names the engine and the model: `omp speech-to-text model parakeet
+is not downloaded`. Synthesis reports the runtime and the weights separately,
+because they fail independently and the same command fixes both.
 
-`WHISPER_MODEL` in the environment is the fallback, used only when
-`whisperModel` is empty; a non-empty config field wins over it. Prefer the
-config field: a daemon started by launchd inherits almost none of your shell
-environment, so a login-agent daemon configured only by the env var comes up
-deaf.
+`bun scripts/check-voice-loop.ts` proves the whole path with real audio: it
+synthesises a sentence, streams it back as PCM16 frames, and reports the
+transcript from both the bridge and a live websocket.
 
-`bun scripts/check-voice-loop.ts --model=<path>` proves the whole path with
-real audio: it synthesises a sentence, streams it back as PCM16 frames, and
-reports the transcript from both the bridge and a live websocket.
 ### The local operator token
 
 Every API call needs a paired device, and the operator of this machine cannot

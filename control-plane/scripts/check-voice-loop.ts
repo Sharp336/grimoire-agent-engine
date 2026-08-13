@@ -26,14 +26,20 @@
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DEFAULT_STT_MODEL_KEY } from "@oh-my-pi/pi-coding-agent/stt/models";
+import { DEFAULT_TTS_LOCAL_MODEL_KEY } from "@oh-my-pi/pi-coding-agent/tts/models";
 import { Ompd } from "../packages/daemon/src/daemon.ts";
 import {
   BunCommandRunner,
   encodeWav,
+  OmpSttEngine,
+  OmpTtsEngine,
   pcmToBase64,
   selectSttEngine,
   selectTtsEngine,
+  speakableSegments,
   VoiceBridge,
+  type EngineAvailability,
   type PcmAudio,
   type SttEngine,
   type TtsEngine,
@@ -46,7 +52,7 @@ import type { Actor, ServerFrame } from "@ompd/core";
  */
 const DEFAULT_SENTENCE = "The quick brown fox jumps over the lazy dog.";
 
-/** The wire format the bridge and whisper both expect. */
+/** The wire format the bridge and OMP's ASR worker both expect. */
 const WIRE_RATE = 16_000;
 
 /**
@@ -130,7 +136,7 @@ function unproven(name: string, detail: string): void {
  * Linear resampling to the wire rate.
  *
  * Kokoro synthesises at 24kHz and both the bridge's endpointer thresholds and
- * whisper's frontend are specified at 16kHz, so the rate has to be converted
+ * the ASR frontend are specified at 16kHz, so the rate has to be converted
  * somewhere. Linear interpolation is enough: the signal is speech that has
  * already been through a vocoder, and the alternative is a windowed-sinc
  * kernel whose only observable effect here would be a slightly different WER.
@@ -154,6 +160,36 @@ function withTrailingSilence(pcm: Int16Array, rate: number, ms: number): Int16Ar
   const out = new Int16Array(pcm.length + Math.floor((rate * ms) / 1000));
   out.set(pcm, 0);
   return out;
+}
+
+/**
+ * Drain a streaming engine into one utterance.
+ *
+ * The engine emits a chunk per speakable segment. This script needs a single
+ * waveform to write as a wav and to feed back in as one utterance, so the
+ * chunks are concatenated here rather than the engine being asked for a shape
+ * it deliberately no longer has. Segment count is returned so stage 3 can
+ * report that streaming actually happened.
+ */
+async function renderUtterance(
+  engine: TtsEngine,
+  text: string,
+): Promise<PcmAudio & { segments: number }> {
+  const chunks: PcmAudio[] = [];
+  for await (const chunk of engine.stream(speakableSegments(text))) chunks.push(chunk);
+  if (chunks.length === 0) throw new Error(`${engine.name} produced no audio for ${text}`);
+
+  // Every chunk comes from one engine in one session, so the rate is constant.
+  const sampleRate = chunks[0]?.sampleRate ?? WIRE_RATE;
+  let total = 0;
+  for (const chunk of chunks) total += chunk.pcm.length;
+  const pcm = new Int16Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    pcm.set(chunk.pcm, offset);
+    offset += chunk.pcm.length;
+  }
+  return { pcm, sampleRate, segments: chunks.length };
 }
 
 /**
@@ -197,39 +233,33 @@ function wordErrorRate(reference: string, hypothesis: string): number {
 
 interface MachineFacts {
   ompPresent: boolean;
-  ompTranscribeVerbs: string[];
-  speechReport: string;
-  whisperCli: string | null;
-  whisperModel: string | null;
+  sttModel: string;
+  stt: EngineAvailability;
+  ttsModel: string;
+  tts: EngineAvailability;
 }
 
-async function describeMachine(modelPath: string | null): Promise<MachineFacts> {
-  const runner = new BunCommandRunner();
-  const ompPresent = runner.which("omp") !== null;
-
-  let speechReport = "omp is not on PATH";
-  const verbs: string[] = [];
-  if (ompPresent) {
-    const check = await runner.run("omp", ["setup", "speech", "--check", "--json"], {
-      timeoutMs: 30_000,
-    });
-    speechReport = check.stdout.trim() || `exit ${check.code} with no report`;
-
-    // Read the binary's own command list rather than trusting a comment about
-    // what version 17 shipped. If omp ever grows a one-shot verb this lights
-    // up on its own.
-    const help = await runner.run("omp", ["--help"], { timeoutMs: 30_000 });
-    for (const candidate of ["transcribe", "stt", "listen"]) {
-      if (new RegExp(`^ {2}${candidate}\\s{2,}\\S`, "m").test(help.stdout)) verbs.push(candidate);
-    }
-  }
+/**
+ * What the host actually provides, measured rather than assumed.
+ *
+ * Asked through the engines' own probes rather than of the model cache
+ * directly. A script that answered the question a different way could pass on
+ * a machine whose daemon comes up deaf, which is the rigged green this check
+ * exists to refuse. It also means a speech runtime that will not load at all
+ * is reported here as the reason, rather than crashing the diagnostic.
+ */
+async function describeMachine(): Promise<MachineFacts> {
+  const [stt, tts] = await Promise.all([
+    new OmpSttEngine().probe(),
+    new OmpTtsEngine().probe(),
+  ]);
 
   return {
-    ompPresent,
-    ompTranscribeVerbs: verbs,
-    speechReport,
-    whisperCli: runner.which("whisper-cli"),
-    whisperModel: modelPath !== null && existsSync(modelPath) ? modelPath : null,
+    ompPresent: new BunCommandRunner().which("omp") !== null,
+    sttModel: DEFAULT_STT_MODEL_KEY,
+    stt,
+    ttsModel: DEFAULT_TTS_LOCAL_MODEL_KEY,
+    tts,
   };
 }
 
@@ -325,11 +355,11 @@ interface SocketOutcome {
  * diagnostic script. The failure it logs instead is printed below, so the
  * boundary is visible rather than hidden.
  */
-async function driveSocket(home: string, modelPath: string, spoken: string): Promise<SocketOutcome> {
+async function driveSocket(home: string, spoken: string): Promise<SocketOutcome> {
   const logs: string[] = [];
   const daemon = new Ompd({
     home,
-    overrides: { port: 0, whisperModel: modelPath },
+    overrides: { port: 0 },
     voice: true,
     onLog: (line) => logs.push(line),
   });
@@ -355,7 +385,7 @@ async function driveSocket(home: string, modelPath: string, spoken: string): Pro
     // Synthesised fresh through the daemon's own engines rather than reusing
     // stage 3's samples, so this leg stands on its own.
     const tts = await selectTtsEngine();
-    const audio = await tts.synthesize(spoken);
+    const audio = await renderUtterance(tts, spoken);
     const pcm = withTrailingSilence(
       resamplePcm16(audio.pcm, audio.sampleRate, WIRE_RATE),
       WIRE_RATE,
@@ -400,52 +430,25 @@ const flag = (name: string): string | null => {
 };
 
 const sentence = flag("sentence") ?? DEFAULT_SENTENCE;
-const modelPath = flag("model") ?? process.env.WHISPER_MODEL ?? null;
 
 console.log(`ompd voice loop check
-sentence: ${JSON.stringify(sentence)}
-model:    ${modelPath ?? "(none configured)"}`);
+sentence: ${JSON.stringify(sentence)}`);
 
 let scratch: string | null = null;
 
 try {
   // -- stage 1 --------------------------------------------------------------
   heading("stage 1: machine");
-  const facts = await describeMachine(modelPath);
+  const facts = await describeMachine();
   console.log(`omp on PATH:            ${facts.ompPresent}`);
-  console.log(`omp transcribe verbs:   ${facts.ompTranscribeVerbs.join(", ") || "(none)"}`);
-  console.log(`omp speech report:      ${facts.speechReport.replace(/\n/g, "\n                        ")}`);
-  console.log(`whisper-cli:            ${facts.whisperCli ?? "(not on PATH)"}`);
-  console.log(`whisper model:          ${facts.whisperModel ?? "(missing or unset)"}`);
-  // Deliberately no search of a conventional path. `selectSttEngine` resolves
-  // the model from config or `WHISPER_MODEL` and nothing else, so a script
-  // that discovered weights on its own would pass on a machine whose daemon
-  // comes up deaf, which is the exact rigged green this check exists to
-  // refuse. Unconfigured is reported as unconfigured.
-  const ompCanHear = facts.ompTranscribeVerbs.length > 0;
-  const whisperCanHear = facts.whisperCli !== null && facts.whisperModel !== null;
-  const why = (): string => {
-    if (ompCanHear) return `omp exposes ${facts.ompTranscribeVerbs.join(", ")}`;
-    if (whisperCanHear) return "whisper-cli with ggml weights";
-    if (facts.whisperCli === null) {
-      return "no transcription verb on omp and no whisper-cli; run `brew install whisper-cpp`";
-    }
-    return (
-      "whisper-cli is installed but no model is configured, which is a config " +
-      "gap and not a broken machine; pass --model=<path to ggml weights>, or " +
-      "set WHISPER_MODEL, or put whisperModel in the daemon config. See the " +
-      "whisperModel section of docs/running.md for the download"
-    );
-  };
-  record("machine has a usable ASR path", ompCanHear || whisperCanHear, why());
+  console.log(`stt (${facts.sttModel}):${" ".repeat(Math.max(1, 16 - facts.sttModel.length))}${facts.stt.reason}`);
+  console.log(`tts (${facts.ttsModel}):${" ".repeat(Math.max(1, 18 - facts.ttsModel.length))}${facts.tts.reason}`);
+  record("machine has a usable ASR path", facts.stt.available, facts.stt.reason);
 
   // -- stage 2 --------------------------------------------------------------
   heading("stage 2: engine selection");
   const selectionLog: string[] = [];
-  const stt = await selectSttEngine({
-    onLog: (line) => selectionLog.push(line),
-    whisper: modelPath === null ? {} : { model: modelPath },
-  });
+  const stt = await selectSttEngine({ onLog: (line) => selectionLog.push(line) });
   const tts = await selectTtsEngine({ onLog: (line) => selectionLog.push(line) });
   for (const line of selectionLog) console.log(line);
   record(
@@ -463,12 +466,13 @@ try {
   // -- stage 3 --------------------------------------------------------------
   heading("stage 3: synthesis");
   scratch = mkdtempSync(join(tmpdir(), "ompd-voice-check-"));
-  const spoken: PcmAudio = await tts.synthesize(sentence);
+  const spoken = await renderUtterance(tts, sentence);
   const wire = resamplePcm16(spoken.pcm, spoken.sampleRate, WIRE_RATE);
   const utterance = withTrailingSilence(wire, WIRE_RATE, TRAILING_SILENCE_MS);
   const wavPath = join(scratch, "utterance.wav");
   await Bun.write(wavPath, encodeWav({ pcm: utterance, sampleRate: WIRE_RATE }));
   console.log(`engine:      ${tts.name}`);
+  console.log(`segments:    ${spoken.segments}`);
   console.log(`native rate: ${spoken.sampleRate}Hz, ${spoken.pcm.length} samples`);
   console.log(`wire rate:   ${WIRE_RATE}Hz, ${wire.length} samples`);
   console.log(`utterance:   ${(utterance.length / WIRE_RATE).toFixed(2)}s including ${TRAILING_SILENCE_MS}ms of trailing silence`);
@@ -476,7 +480,7 @@ try {
   record(
     "tts produced real audio",
     spoken.pcm.length > WIRE_RATE / 4,
-    `${(spoken.pcm.length / spoken.sampleRate).toFixed(2)}s from ${tts.name}`,
+    `${(spoken.pcm.length / spoken.sampleRate).toFixed(2)}s from ${tts.name} in ${spoken.segments} segment(s)`,
   );
 
   // -- stage 4 --------------------------------------------------------------
@@ -511,36 +515,31 @@ try {
 
   // -- stage 5 --------------------------------------------------------------
   heading("stage 5: socket, against a live daemon");
-  if (modelPath === null) {
-    record("socket leg", false, "no whisper model to configure the daemon with");
-  } else {
-    const home = mkdtempSync(join(tmpdir(), "ompd-voice-home-"));
-    try {
-      const socket = await driveSocket(home, modelPath, sentence);
-      for (const line of socket.logs) console.log(`daemon: ${line}`);
-      console.log(`\nport:       ${socket.port} (ephemeral)`);
-      console.log(`home:       ${socket.home}`);
-      console.log(`transcript: ${JSON.stringify(socket.transcript)}`);
-      for (const err of socket.errors) console.log(`error frame: ${err}`);
+  const home = mkdtempSync(join(tmpdir(), "ompd-voice-home-"));
+  try {
+    const socket = await driveSocket(home, sentence);
+    for (const line of socket.logs) console.log(`daemon: ${line}`);
+    console.log(`\nport:       ${socket.port} (ephemeral)`);
+    console.log(`home:       ${socket.home}`);
+    console.log(`transcript: ${JSON.stringify(socket.transcript)}`);
+    for (const err of socket.errors) console.log(`error frame: ${err}`);
 
-      const socketWer =
-        socket.transcript === null ? 1 : wordErrorRate(sentence, socket.transcript);
-      console.log(`word error rate: ${socketWer.toFixed(3)}`);
-      record(
-        "a transcript came back over a real websocket",
-        socketWer <= MAX_WORD_ERROR_RATE,
-        `wer ${socketWer.toFixed(3)} over ws://127.0.0.1:${socket.port}/v1/socket`,
-      );
-      unproven(
-        "the daemon's own Supervisor.prompt handoff",
-        "this run used a synthetic agent id, so the daemon logged " +
-          "voice_prompt_failed instead of starting a turn; proving it needs a " +
-          "live agent, which spawns omp acp and bills a model turn",
-      );
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-      console.log(`removed ${home}: ${!existsSync(home)}`);
-    }
+    const socketWer = socket.transcript === null ? 1 : wordErrorRate(sentence, socket.transcript);
+    console.log(`word error rate: ${socketWer.toFixed(3)}`);
+    record(
+      "a transcript came back over a real websocket",
+      socketWer <= MAX_WORD_ERROR_RATE,
+      `wer ${socketWer.toFixed(3)} over ws://127.0.0.1:${socket.port}/v1/socket`,
+    );
+    unproven(
+      "the daemon's own Supervisor.prompt handoff",
+      "this run used a synthetic agent id, so the daemon logged " +
+        "voice_prompt_failed instead of starting a turn; proving it needs a " +
+        "live agent, which spawns omp acp and bills a model turn",
+    );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    console.log(`removed ${home}: ${!existsSync(home)}`);
   }
 } catch (err) {
   failed = true;

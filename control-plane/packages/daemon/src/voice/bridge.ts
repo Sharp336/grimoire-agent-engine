@@ -22,7 +22,7 @@
 import { SCOPE_PROMPT, type Actor, type AgentId, type ClientFrame, type ServerFrame } from "@ompd/core";
 import { UnauthorizedError } from "../supervisor.ts";
 import { NullSttEngine, type SttEngine } from "./stt.ts";
-import { NullTtsEngine, sanitizeForSpeech, type TtsEngine } from "./tts.ts";
+import { NullTtsEngine, speakableSegments, type TtsEngine } from "./tts.ts";
 import { detectUtteranceEndFromEnergies, frameEnergy, resolveVadOptions, type VadOptions } from "./vad.ts";
 import { base64ToPcm, pcmToBase64, resamplePcm } from "./wav.ts";
 
@@ -200,27 +200,39 @@ export class VoiceBridge {
   /**
    * Speak text back to the client.
    *
+   * Segmented first, then synthesised segment by segment, and each segment's
+   * audio goes out as its own `speech` frame the moment it is rendered. That is
+   * the difference between a phone that starts talking on the first clause and
+   * one that waits for the whole paragraph to come out of the vocoder.
+   *
    * Returns false when there was nothing worth saying: a turn that was only a
-   * code fence sanitises to nothing, and silence is the right answer there.
+   * code fence has no speakable segments, and silence is the right answer there.
    */
   async speak(agentId: AgentId, text: string): Promise<boolean> {
     if (this.#closed) return false;
-    const spoken = sanitizeForSpeech(text);
-    if (!spoken) return false;
+    const segments = speakableSegments(text);
+    if (segments.length === 0) return false;
 
+    let sent = 0;
     try {
-      const audio = await this.#tts.synthesize(spoken);
-      // The wire says 16kHz and the engines disagree: `say` emits 22050 and
-      // `omp` returns whatever its WAV carried. Sending those bytes unchanged
-      // does not fail, it just plays slowly and an octave down, which sounds
-      // like a bad model rather than a bad conversion.
-      const wire = resamplePcm(audio, this.#sampleRate);
-      this.#send({ t: "speech", agentId, pcm: pcmToBase64(wire.pcm) });
-      return true;
+      for await (const audio of this.#tts.stream(segments)) {
+        // The wire says 16kHz and the engines disagree: Kokoro renders at 24k
+        // and `say` at 22.05k. Sending those samples unchanged does not fail,
+        // it just plays slowly and an octave down, which sounds like a bad
+        // model rather than a bad conversion.
+        const wire = resamplePcm(audio, this.#sampleRate);
+        if (wire.pcm.length === 0) continue;
+        this.#send({ t: "speech", agentId, pcm: pcmToBase64(wire.pcm) });
+        sent++;
+        // A client that disconnects mid-utterance closes the bridge; stop
+        // pulling from the engine rather than rendering audio for nobody.
+        if (this.#closed) break;
+      }
     } catch (err) {
       this.#fail(agentId, err, "tts_failed");
       return false;
     }
+    return sent > 0;
   }
 
   /** Discard an agent's buffered audio without transcribing it. */

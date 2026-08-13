@@ -27,14 +27,18 @@ import {
   decodeWav,
   detectUtteranceEnd,
   encodeWav,
+  float32ToPcm,
   frameEnergy,
+  loadSpeechRuntime,
   NullSttEngine,
   NullTtsEngine,
   OmpSttEngine,
+  OmpTtsEngine,
   pcmToBase64,
-  sanitizeForSpeech,
+  pcmToFloat32,
   selectSttEngine,
   selectTtsEngine,
+  speakableSegments,
   STT_ENGINE_ORDER,
   SttUnavailableError,
   TTS_ENGINE_ORDER,
@@ -42,6 +46,7 @@ import {
   VAD_DEFAULTS,
   VoiceBridge,
   VoiceBufferOverflowError,
+  resamplePcm,
   WavFormatError,
   WIRE_SAMPLE_RATE,
   type CommandResult,
@@ -115,50 +120,90 @@ class FakeRunner implements CommandRunner {
   }
 }
 
-interface OmpFakeOptions {
-  sttReady?: boolean;
-  ttsReady?: boolean;
-  /** Whether `omp --help` advertises a one-shot transcription verb. */
-  transcribeVerb?: boolean;
-  transcript?: string;
+/**
+ * A stand-in for OMP's `SttClient`.
+ *
+ * Structural, so the engine's real dependency is exercised without spawning
+ * the ASR worker. Records what the engine actually handed the library, which
+ * is where the Int16-to-float and resampling contract is observable.
+ */
+class FakeSttClient {
+  readonly calls: Array<{ modelKey: string; samples: number; peak: number }> = [];
+  #reply: string | Error;
+
+  constructor(reply: string | Error) {
+    this.#reply = reply;
+  }
+
+  async transcribe(modelKey: string, audio: Float32Array): Promise<string> {
+    let peak = 0;
+    for (const sample of audio) peak = Math.max(peak, Math.abs(sample));
+    this.calls.push({ modelKey, samples: audio.length, peak });
+    if (this.#reply instanceof Error) throw this.#reply;
+    return this.#reply;
+  }
 }
 
-function ompProgram(opts: OmpFakeOptions): FakeProgram {
-  const help = [
-    "omp v17.2.12",
-    "",
-    "COMMANDS",
-    "  acp            Run Oh My Pi as an ACP server over stdio",
-    "  config         Manage configuration settings",
-    ...(opts.transcribeVerb ? ["  transcribe     Transcribe an audio file with the local model"] : []),
-    "  say            Synthesize text with the local TTS engine",
-    "",
-    "Environment Variables:",
-    "  ANTHROPIC_API_KEY          - Anthropic Claude models",
-  ].join("\n");
+/**
+ * A stand-in for OMP's `TtsClient`, rendering one chunk per pushed segment.
+ *
+ * `nativeRate` is a parameter because the wire-rate contract is only worth
+ * anything if a test can drive an engine whose rate disagrees with the wire.
+ */
+class FakeTtsClient {
+  readonly pushed: string[] = [];
+  #nativeRate: number;
 
-  const report = {
-    "Speech-to-Text model": opts.sttReady
-      ? { ready: true, status: "parakeet" }
-      : { ready: false, status: "parakeet \u2014 not downloaded" },
-    "Text-to-Speech model": opts.ttsReady
-      ? { ready: true, status: "kokoro" }
-      : { ready: false, status: "kokoro \u2014 not downloaded" },
-  };
-  // Measured against omp 17.2.12: `--check` exits 1 whenever any component is
-  // missing, and prints the full report regardless. A fake that always exits 0
-  // would let a probe that gates on the exit code pass here and reject a
-  // perfectly good engine on the real machine, which is exactly what happened.
-  const allReady = opts.sttReady === true && opts.ttsReady === true;
+  constructor(nativeRate = 24_000) {
+    this.#nativeRate = nativeRate;
+  }
 
-  return (args) => {
-    if (args[0] === "--help") return { code: 0, stdout: help, stderr: "" };
-    if (args[0] === "setup") {
-      return { code: allReady ? 0 : 1, stdout: JSON.stringify(report), stderr: "" };
+  synthesizeStream(_modelKey: string): {
+    push: (text: string) => void;
+    end: () => void;
+    chunks: AsyncIterableIterator<{
+      index: number;
+      text: string;
+      pcm: Float32Array;
+      sampleRate: number;
+    }>;
+  } {
+    const pushed = this.pushed;
+    const rate = this.#nativeRate;
+    const queue: string[] = [];
+    let ended = false;
+
+    async function* drain(): AsyncIterableIterator<{
+      index: number;
+      text: string;
+      pcm: Float32Array;
+      sampleRate: number;
+    }> {
+      let index = 0;
+      while (queue.length > 0 || !ended) {
+        const text = queue.shift();
+        if (text === undefined) return;
+        yield {
+          index: index++,
+          text,
+          // 40ms of tone per segment, at the engine's own rate.
+          pcm: pcmToFloat32(sine(40, 0.5, 440, rate)),
+          sampleRate: rate,
+        };
+      }
     }
-    if (args[0] === "transcribe") return { code: 0, stdout: `${opts.transcript ?? "hello"}\n`, stderr: "" };
-    return { code: 1, stdout: "", stderr: `unknown command ${args[0] ?? ""}` };
-  };
+
+    return {
+      push: (text: string) => {
+        pushed.push(text);
+        queue.push(text);
+      },
+      end: () => {
+        ended = true;
+      },
+      chunks: drain(),
+    };
+  }
 }
 
 class ScriptedStt implements SttEngine {
@@ -177,14 +222,27 @@ class ScriptedStt implements SttEngine {
   }
 }
 
+/**
+ * A bridge-level fake engine: one audio chunk per segment, at a rate that
+ * deliberately disagrees with the wire so resampling stays observable.
+ */
 class RecordingTts implements TtsEngine {
   readonly name = "recording";
   readonly received: string[] = [];
-  readonly audio: PcmAudio = { pcm: sine(40, 0.5, 440, 24_000), sampleRate: 24_000 };
+  readonly nativeRate: number;
+  /** Samples emitted per segment, before the bridge resamples. */
+  readonly chunkSamples: number;
 
-  async synthesize(text: string): Promise<PcmAudio> {
-    this.received.push(text);
-    return this.audio;
+  constructor(nativeRate = 24_000) {
+    this.nativeRate = nativeRate;
+    this.chunkSamples = Math.floor((nativeRate * 40) / 1000);
+  }
+
+  async *stream(segments: Iterable<string>): AsyncIterable<PcmAudio> {
+    for (const segment of segments) {
+      this.received.push(segment);
+      yield { pcm: sine(40, 0.5, 440, this.nativeRate), sampleRate: this.nativeRate };
+    }
   }
 }
 
@@ -196,11 +254,13 @@ interface Harness {
   tts: RecordingTts;
 }
 
-function harness(opts: { stt?: ScriptedStt; maxBufferedSeconds?: number } = {}): Harness {
+function harness(
+  opts: { stt?: ScriptedStt; maxBufferedSeconds?: number; nativeRate?: number } = {},
+): Harness {
   const frames: ServerFrame[] = [];
   const transcripts: string[] = [];
   const stt = opts.stt ?? new ScriptedStt("run the tests");
-  const tts = new RecordingTts();
+  const tts = new RecordingTts(opts.nativeRate);
   const bridge = new VoiceBridge({
     send: (frame) => frames.push(frame),
     stt,
@@ -372,16 +432,21 @@ const ASSISTANT_TURN = [
   "> Quoted advice here.",
 ].join("\n");
 
-describe("sanitizeForSpeech", () => {
-  test("removes code fences, their contents, urls, and markdown syntax", () => {
-    const spoken = sanitizeForSpeech(ASSISTANT_TURN);
+describe("speakableSegments", () => {
+  test("removes code fences, their contents, url targets, and markdown syntax", () => {
+    const spoken = speakableSegments(ASSISTANT_TURN).join(" ");
 
     expect(spoken).not.toContain("```");
     expect(spoken).not.toContain("computeTheAnswer");
     expect(spoken).not.toContain("console.log");
+    // No scheme, no path, no query: a URL must never be read out as a slug.
+    // The host survives as a spoken word, which is OMP's deliberate choice and
+    // a change from the sanitiser this replaced. "see the docs at
+    // ci.example.com" is useful; "h t t p s colon slash slash" is not.
     expect(spoken).not.toContain("http");
-    expect(spoken).not.toContain("ci.example.com");
-    expect(spoken).not.toContain("docs.example.com");
+    expect(spoken).not.toContain("://");
+    expect(spoken).not.toContain("/runs/91");
+    expect(spoken).not.toContain("/raw");
     expect(spoken).not.toContain("](");
     expect(spoken).not.toContain("**");
     expect(spoken).not.toContain("#");
@@ -395,30 +460,46 @@ describe("sanitizeForSpeech", () => {
     expect(spoken).toContain("Quoted advice here.");
   });
 
-  test("a turn that is only a code fence sanitises to nothing", () => {
+  test("a turn that is only a code fence has nothing to say", () => {
     const only = ["```bash", "rm -rf /tmp/x", "```"].join("\n");
-    expect(sanitizeForSpeech(only)).toBe("");
+    expect(speakableSegments(only)).toEqual([]);
   });
 
-  test("collapses table pipes and rules into speakable clauses", () => {
+  test("a markdown table is not spoken", () => {
+    // A behaviour change, not a bug fix. The sanitiser this replaced flattened
+    // a table into "host, state, local, idle"; OMP's pipeline swallows any
+    // line that starts with a pipe, on the grounds that a table read aloud is
+    // noise. Adopting OMP's transform means adopting that judgement, so the
+    // assertion says what actually happens rather than being deleted.
     const table = ["| host | state |", "| --- | --- |", "| local | idle |"].join("\n");
-    const spoken = sanitizeForSpeech(table);
-    expect(spoken).not.toContain("|");
-    expect(spoken).not.toContain("---");
-    expect(spoken).toContain("host");
-    expect(spoken).toContain("idle");
+    expect(speakableSegments(table)).toEqual([]);
   });
 
-  test("the bridge sanitises before the engine is called", () => {
+  test("a multi-sentence reply becomes more than one segment", () => {
+    // Load-bearing for streaming synthesis: an engine can only start speaking
+    // early if there is an early segment to start on.
+    const segments = speakableSegments(
+      "The suite is green. Twelve tests passed on the first run. Nothing regressed.",
+    );
+    expect(segments.length).toBeGreaterThan(1);
+    expect(segments.join(" ")).toContain("Twelve tests passed");
+  });
+
+  test("the bridge segments before the engine is called", () => {
     // The point of the whole exercise: the synthesiser must never see markdown.
     const { bridge, tts } = harness();
     return bridge.speak(AGENT, ASSISTANT_TURN).then((spoke) => {
       expect(spoke).toBe(true);
-      expect(tts.received).toHaveLength(1);
-      expect(tts.received[0]).not.toContain("```");
-      expect(tts.received[0]).not.toContain("console.log");
-      expect(tts.received[0]).not.toContain("https://");
-      expect(tts.received[0]).toContain("42 passing");
+      // One segment per speakable unit, not one blob per turn. The old
+      // assertion here was `toHaveLength(1)`, which encoded the one-shot
+      // synthesis this change removes.
+      expect(tts.received.length).toBeGreaterThan(1);
+      for (const segment of tts.received) {
+        expect(segment).not.toContain("```");
+        expect(segment).not.toContain("console.log");
+        expect(segment).not.toContain("https://");
+      }
+      expect(tts.received.join(" ")).toContain("42 passing");
     });
   });
 });
@@ -552,11 +633,100 @@ describe("VoiceBridge", () => {
     expect(speech).toBeDefined();
 
     const pcm = base64ToPcm(speech && "pcm" in speech ? speech.pcm : "");
-    const expected = Math.round((tts.audio.pcm.length * WIRE_SAMPLE_RATE) / tts.audio.sampleRate);
+    const expected = Math.round((tts.chunkSamples * WIRE_SAMPLE_RATE) / tts.nativeRate);
     // Within a sample: resampling rounds, and pinning an exact count would
     // make this test about the interpolator rather than the contract.
     expect(Math.abs(pcm.length - expected)).toBeLessThanOrEqual(1);
     expect(pcm.length).toBeGreaterThan(0);
+  });
+
+  test.each([16_000, 22_050, 24_000, 48_000])(
+    "an engine rendering at %iHz still puts 16kHz on the wire",
+    async (nativeRate) => {
+      // The rate is not carried in the frame, so a client decodes at 16kHz
+      // whatever arrives. Length alone would pass for a resampler that dropped
+      // samples, so the tone itself is measured: a 440Hz sine read at the wrong
+      // rate reads back as a different pitch, which is exactly the "sounds like
+      // a bad model" failure this guards.
+      const { bridge, frames } = harness({ nativeRate });
+      expect(await bridge.speak(AGENT, "Twelve tests passing.")).toBe(true);
+
+      const speech = frames.find((f) => f.t === "speech");
+      const pcm = base64ToPcm(speech && "pcm" in speech ? speech.pcm : "");
+
+      // 40ms of audio at the wire rate, regardless of what the engine rendered.
+      expect(Math.abs(pcm.length - 0.04 * WIRE_SAMPLE_RATE)).toBeLessThanOrEqual(1);
+
+      let crossings = 0;
+      for (let i = 1; i < pcm.length; i++) {
+        if ((pcm[i - 1] ?? 0) < 0 !== ((pcm[i] ?? 0) < 0)) crossings++;
+      }
+      // Two zero crossings per cycle, interpreted at the wire rate.
+      const hz = (crossings * WIRE_SAMPLE_RATE) / (2 * pcm.length);
+      expect(hz).toBeGreaterThan(400);
+      expect(hz).toBeLessThan(480);
+    },
+  );
+
+  test("a multi-sentence reply is streamed as several speech frames", async () => {
+    // The whole point of streaming synthesis: the client can start playing the
+    // first clause while the rest is still being rendered. One frame per turn
+    // would satisfy the wire contract and defeat the purpose.
+    const { bridge, frames, tts } = harness();
+    const reply = "The suite is green. Twelve tests passed on the first run. Nothing regressed.";
+    expect(await bridge.speak(AGENT, reply)).toBe(true);
+
+    const speech = frames.filter((f) => f.t === "speech");
+    expect(speech.length).toBeGreaterThan(1);
+    expect(speech.length).toBe(tts.received.length);
+    // Every frame carries real audio; a stream of empties would also be
+    // "several frames".
+    for (const frame of speech) {
+      expect(base64ToPcm("pcm" in frame ? frame.pcm : "").length).toBeGreaterThan(0);
+    }
+  });
+
+  test("a synthesis failure part way through a reply becomes an error frame", async () => {
+    // A stream can fail after it has already emitted, which a one-shot call
+    // could not. The client must be told rather than left with half an answer
+    // and no explanation.
+    const frames: ServerFrame[] = [];
+    const failing: TtsEngine = {
+      name: "half-broken",
+      async *stream(segments: Iterable<string>): AsyncIterable<PcmAudio> {
+        let emitted = 0;
+        for (const _segment of segments) {
+          if (emitted === 1) throw new Error("vocoder died");
+          emitted++;
+          yield { pcm: sine(40, 0.5, 440, WIRE_SAMPLE_RATE), sampleRate: WIRE_SAMPLE_RATE };
+        }
+      },
+    };
+    const bridge = new VoiceBridge({
+      send: (frame) => frames.push(frame),
+      tts: failing,
+      sampleRate: RATE,
+    });
+
+    expect(await bridge.speak(AGENT, "First sentence. Second sentence here.")).toBe(false);
+    expect(frames.filter((f) => f.t === "speech")).toHaveLength(1);
+    expect(frames.at(-1)).toMatchObject({ t: "error", agentId: AGENT, code: "tts_failed" });
+  });
+
+  test("a null tts engine reports rather than emitting silence", async () => {
+    const frames: ServerFrame[] = [];
+    const bridge = new VoiceBridge({
+      send: (frame) => frames.push(frame),
+      tts: new NullTtsEngine(["omp: text-to-speech model kokoro is not downloaded"]),
+      sampleRate: RATE,
+    });
+
+    expect(await bridge.speak(AGENT, "Twelve tests passing.")).toBe(false);
+    expect(frames.filter((f) => f.t === "speech")).toHaveLength(0);
+    const error = frames.find((f) => f.t === "error");
+    expect(error).toMatchObject({ t: "error", code: "tts_failed" });
+    // Names the engine and the reason, so the operator knows what to fix.
+    expect(error && "message" in error ? error.message : "").toContain("kokoro is not downloaded");
   });
 
   test("nothing is spoken and nothing is sent when a turn sanitises away", async () => {
@@ -659,7 +829,7 @@ describe("VoiceBridge", () => {
 
 describe("null engines", () => {
   test("NullSttEngine throws instead of returning empty text", async () => {
-    const engine = new NullSttEngine(["omp: model not downloaded", "whisper-cli: not on PATH"]);
+    const engine = new NullSttEngine(["omp: model not downloaded"]);
     const attempt = engine.transcribe(sine(200, 0.3), RATE);
 
     await expect(attempt).rejects.toThrow(SttUnavailableError);
@@ -687,9 +857,11 @@ describe("null engines", () => {
   });
 
   test("NullTtsEngine throws rather than emitting empty audio", async () => {
-    await expect(new NullTtsEngine(["omp: not on PATH"]).synthesize("hello")).rejects.toThrow(
-      TtsUnavailableError,
-    );
+    const engine = new NullTtsEngine(["omp: kokoro is not downloaded"]);
+    const pull = async (): Promise<void> => {
+      for await (const _chunk of engine.stream(["hello"])) break;
+    };
+    await expect(pull()).rejects.toThrow(TtsUnavailableError);
   });
 });
 
@@ -698,116 +870,202 @@ describe("null engines", () => {
 // ---------------------------------------------------------------------------
 
 describe("engine selection", () => {
-  test("stt prefers omp when its model and a verb are both present", async () => {
-    // whisper is also installed here, so this fails if the order is reversed.
-    const runner = new FakeRunner({
-      omp: ompProgram({ sttReady: true, ttsReady: true, transcribeVerb: true }),
-      "whisper-cli": () => ({ code: 0, stdout: "", stderr: "" }),
-    });
-    const engine = await selectSttEngine({
-      runner,
-      whisper: { env: { WHISPER_MODEL: "/models/ggml-base.bin" } },
-    });
+  test("stt takes omp when the ASR weights are on disk", async () => {
+    const engine = await selectSttEngine({ omp: { isModelCached: async () => true } });
     expect(engine.name).toBe("omp");
     expect(STT_ENGINE_ORDER.indexOf(engine.name)).toBe(0);
   });
 
-  test("stt falls back to whisper when omp has no ASR model downloaded", async () => {
-    // This is the real state of the machine ompd was built on: kokoro ready,
-    // parakeet absent, and `--check` exiting 1 because of the second fact.
-    const runner = new FakeRunner({
-      omp: ompProgram({ sttReady: false, ttsReady: true, transcribeVerb: true }),
-      "whisper-cli": () => ({ code: 0, stdout: "", stderr: "" }),
-    });
-    const stt = new OmpSttEngine({ runner });
-    // Declined for the model, not for the exit code. Those are different bugs
-    // and only one of them is the machine's fault.
-    expect((await stt.probe()).reason).toContain("not downloaded");
-
-    const engine = await selectSttEngine({
-      runner,
-      whisper: { env: { WHISPER_MODEL: "/models/ggml-base.bin" } },
-    });
-    expect(engine.name).toBe("whisper-cli");
-    expect(STT_ENGINE_ORDER.indexOf(engine.name)).toBe(1);
-  });
-
-  test("stt declines omp when the binary exposes no transcription verb", async () => {
-    // omp 17.2.12: the model can be ready and still be unreachable from a CLI.
-    const runner = new FakeRunner({ omp: ompProgram({ sttReady: true, transcribeVerb: false }) });
-    const engine = await selectSttEngine({ runner, whisper: { env: {} } });
-
-    expect(engine.name).toBe("null");
-    expect(engine).toBeInstanceOf(NullSttEngine);
-    const reasons = (engine as NullSttEngine).reasons().join(" ");
-    expect(reasons).toContain("one-shot transcription subcommand");
-  });
-
-  test("stt declines whisper.cpp with no ggml model rather than failing at call time", async () => {
-    const runner = new FakeRunner({ "whisper-cli": () => ({ code: 0, stdout: "", stderr: "" }) });
-    const engine = await selectSttEngine({ runner, whisper: { env: {} } });
-
-    expect(engine.name).toBe("null");
-    expect((engine as NullSttEngine).reasons().join(" ")).toContain("needs a ggml model");
-  });
-
-  test("stt takes the python whisper, which needs no model file", async () => {
-    const runner = new FakeRunner({ whisper: () => ({ code: 0, stdout: "", stderr: "" }) });
-    const engine = await selectSttEngine({ runner, whisper: { env: {} } });
-    expect(engine.name).toBe("whisper-cli");
-  });
-
-  test("stt ends at the null engine when the machine has nothing, with reasons", async () => {
-    const engine = await selectSttEngine({ runner: new FakeRunner({}), whisper: { env: {} } });
+  test("stt declines, naming the engine and the model, when the weights are absent", async () => {
+    // The honest failure. An operator reading this has to be able to tell
+    // "not downloaded" from "broken", and to know which command fixes it.
+    const engine = await selectSttEngine({ omp: { isModelCached: async () => false } });
 
     expect(engine.name).toBe("null");
     expect(STT_ENGINE_ORDER.indexOf(engine.name)).toBe(STT_ENGINE_ORDER.length - 1);
-    expect((engine as NullSttEngine).reasons()).toEqual([
-      "omp: omp is not on PATH",
-      "whisper-cli: none of whisper-cli, whisper is on PATH",
-    ]);
+    const reasons = (engine as NullSttEngine).reasons().join(" ");
+    expect(reasons).toContain("omp");
+    expect(reasons).toContain("parakeet");
+    expect(reasons).toContain("not downloaded");
+    expect(reasons).toContain("omp setup speech");
   });
 
-  test("a resolved omp stt engine actually invokes the discovered verb", async () => {
-    const runner = new FakeRunner({
-      omp: ompProgram({ sttReady: true, transcribeVerb: true, transcript: "open the pod bay doors" }),
+  test("a cache check that throws is reported, not treated as a missing model", async () => {
+    // A permission error on the cache directory is a different problem from an
+    // undownloaded model, and telling the operator to run a download that will
+    // also fail wastes their time.
+    const engine = await selectSttEngine({
+      omp: {
+        isModelCached: async () => {
+          throw new Error("EACCES: permission denied");
+        },
+      },
     });
-    const engine = new OmpSttEngine({ runner });
+    expect((engine as NullSttEngine).reasons().join(" ")).toContain("EACCES");
+  });
 
-    expect(await engine.transcribe(sine(200, 0.3), RATE)).toBe("open the pod bay doors");
-    const invocation = runner.calls.find((c) => c.args[0] === "transcribe");
-    expect(invocation?.args[1]).toMatch(/\.wav$/);
+  test("the omp stt engine hands the library normalised 16kHz float audio", async () => {
+    // The conversion contract with OMP's worker: Int16 in, Float32 at 16kHz
+    // out. Getting the scale wrong transcribes silence; getting the rate wrong
+    // transcribes a chipmunk.
+    const client = new FakeSttClient("open the pod bay doors");
+    const engine = new OmpSttEngine({ client, isModelCached: async () => true });
+
+    expect(await engine.transcribe(sine(200, 0.5, 220, RATE), RATE)).toBe(
+      "open the pod bay doors",
+    );
+    const call = client.calls[0];
+    expect(call?.modelKey).toBe("parakeet");
+    expect(call?.samples).toBe(Math.floor(RATE * 0.2));
+    // A 0.5 amplitude sine peaks at half of full scale once normalised.
+    expect(call?.peak).toBeGreaterThan(0.45);
+    expect(call?.peak).toBeLessThanOrEqual(1);
+  });
+
+  test("audio recorded off the wire rate is resampled before the library sees it", async () => {
+    const client = new FakeSttClient("hello");
+    const engine = new OmpSttEngine({ client, isModelCached: async () => true });
+
+    await engine.transcribe(sine(200, 0.5, 220, 48_000), 48_000);
+    // 200ms at 16kHz, not the 9600 samples that arrived.
+    expect(client.calls[0]?.samples).toBe(3_200);
+  });
+
+  test("a worker failure names the engine rather than leaking its own vocabulary", async () => {
+    const client = new FakeSttClient(new Error("worker exited with code 1"));
+    const engine = new OmpSttEngine({ client, isModelCached: async () => true });
+
+    const attempt = engine.transcribe(sine(200, 0.3), RATE);
+    await expect(attempt).rejects.toThrow(SttUnavailableError);
+    await expect(attempt).rejects.toThrow(/omp parakeet could not transcribe/);
+    await expect(attempt).rejects.toThrow(/worker exited with code 1/);
   });
 
   test("tts prefers omp over the OS voice", async () => {
-    // sttReady is deliberately false, so `omp setup speech --check` exits 1
-    // here exactly as it does on the machine this was built on. A probe that
-    // reads the exit code instead of the report demotes a ready Kokoro to the
-    // system voice, which is the bug this test was written after finding.
-    const runner = new FakeRunner({
-      omp: ompProgram({ sttReady: false, ttsReady: true }),
-      say: () => ({ code: 0, stdout: "", stderr: "" }),
+    const engine = await selectTtsEngine({
+      omp: { isModelCached: async () => true, isRuntimeCached: async () => true },
+      say: { platform: "darwin" },
+      runner: new FakeRunner({ say: () => ({ code: 0, stdout: "", stderr: "" }) }),
     });
-    const engine = await selectTtsEngine({ runner, say: { platform: "darwin" } });
     expect(engine.name).toBe("omp");
     expect(TTS_ENGINE_ORDER.indexOf(engine.name)).toBe(0);
   });
 
   test("tts falls back to macOS say when omp has no voice model", async () => {
-    const runner = new FakeRunner({
-      omp: ompProgram({ ttsReady: false }),
-      say: () => ({ code: 0, stdout: "", stderr: "" }),
+    const engine = await selectTtsEngine({
+      omp: { isModelCached: async () => false, isRuntimeCached: async () => true },
+      say: { platform: "darwin" },
+      runner: new FakeRunner({ say: () => ({ code: 0, stdout: "", stderr: "" }) }),
     });
-    const engine = await selectTtsEngine({ runner, say: { platform: "darwin" } });
     expect(engine.name).toBe("say");
     expect(TTS_ENGINE_ORDER.indexOf(engine.name)).toBe(1);
   });
 
+  test("tts reports a missing runtime separately from missing weights", async () => {
+    // Two independent failures with the same remedy but different diagnoses.
+    // Collapsing them sends the operator looking for a model that is present.
+    const engine = await selectTtsEngine({
+      omp: { isModelCached: async () => true, isRuntimeCached: async () => false },
+      say: { platform: "linux" },
+      runner: new FakeRunner({}),
+    });
+    expect(engine.name).toBe("null");
+    expect((engine as NullTtsEngine).reasons().join(" ")).toContain("kokoro runtime is not installed");
+  });
+
   test("tts does not take a non-Apple binary that happens to be called say", async () => {
-    const runner = new FakeRunner({ say: () => ({ code: 0, stdout: "", stderr: "" }) });
-    const engine = await selectTtsEngine({ runner, say: { platform: "linux" } });
+    const engine = await selectTtsEngine({
+      omp: { isModelCached: async () => false, isRuntimeCached: async () => false },
+      say: { platform: "linux" },
+      runner: new FakeRunner({ say: () => ({ code: 0, stdout: "", stderr: "" }) }),
+    });
     expect(engine.name).toBe("null");
     expect(TTS_ENGINE_ORDER.indexOf(engine.name)).toBe(TTS_ENGINE_ORDER.length - 1);
+  });
+
+  test("the omp tts engine pushes every segment and yields a chunk for each", async () => {
+    const client = new FakeTtsClient(24_000);
+    const engine = new OmpTtsEngine({
+      client,
+      isModelCached: async () => true,
+      isRuntimeCached: async () => true,
+    });
+
+    const chunks: PcmAudio[] = [];
+    for await (const chunk of engine.stream(["First sentence.", "Second one."])) {
+      chunks.push(chunk);
+    }
+
+    expect(client.pushed).toEqual(["First sentence.", "Second one."]);
+    expect(chunks).toHaveLength(2);
+    // Float back to PCM16 without losing the waveform.
+    expect(chunks[0]?.sampleRate).toBe(24_000);
+    expect(chunks[0]?.pcm.length).toBe(Math.floor(24_000 * 0.04));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// pcm conversion
+// ---------------------------------------------------------------------------
+
+describe("float and pcm conversion", () => {
+  test("round trips every extreme of the Int16 range exactly", () => {
+    // The two scales have to be the same, or full scale drifts by a sample on
+    // every pass through the speech stack.
+    const pcm = new Int16Array([-32_768, -32_767, -1, 0, 1, 32_766, 32_767]);
+    expect(Array.from(float32ToPcm(pcmToFloat32(pcm)))).toEqual(Array.from(pcm));
+  });
+
+  test("clamps a vocoder overshoot instead of wrapping it", () => {
+    // Wrapping turns an overshoot into a full-scale click, which is far more
+    // audible than the clipping it came from.
+    const out = float32ToPcm(new Float32Array([1.5, -1.5]));
+    expect(out[0]).toBe(32_767);
+    expect(out[1]).toBe(-32_768);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// speech runtime
+// ---------------------------------------------------------------------------
+
+describe("speech runtime loading", () => {
+  test("both engines get one shared outcome rather than a different one each", async () => {
+    // Regression. The engines used to import OMP's speech modules
+    // independently, and when that graph fails to initialise the half-evaluated
+    // modules stay in the loader cache: whichever engine imported second got a
+    // temporal-dead-zone artifact from inside upstream instead of the real
+    // cause. Measured on a machine with no native addon built, the first engine
+    // reported "Failed to load pi_natives native addon" and the second reported
+    // "Cannot access 'compiledTemplateCache' before initialization", which is
+    // an error an operator cannot act on and cannot trace back to the truth.
+    //
+    // Memoising the load is what makes the answer the same for both. Asserting
+    // identity rather than an error string keeps this meaningful on a machine
+    // where the runtime does load.
+    const first = loadSpeechRuntime();
+    const second = loadSpeechRuntime();
+    expect(first).toBe(second);
+
+    const settle = async (p: Promise<unknown>): Promise<string> => {
+      try {
+        return `ok:${typeof (await p)}`;
+      } catch (err) {
+        return `err:${err instanceof Error ? err.message : String(err)}`;
+      }
+    };
+    expect(await settle(first)).toBe(await settle(second));
+  });
+
+  test("engine probes agree on whether the runtime is reachable", async () => {
+    // The observable consequence of the above: two engines asked in sequence
+    // must not disagree about the machine they are both running on.
+    const stt = await new OmpSttEngine().probe();
+    const tts = await new OmpTtsEngine().probe();
+
+    const unreachable = (reason: string): boolean =>
+      reason.includes("could not reach its speech runtime");
+    expect(unreachable(stt.reason)).toBe(unreachable(tts.reason));
   });
 });
 
@@ -816,9 +1074,9 @@ describe("engine selection", () => {
 // ---------------------------------------------------------------------------
 
 /**
- * Against the real binaries on this machine. Gated because the answer depends
- * on what is installed, which is exactly what makes it worth running by hand
- * before trusting a deployment.
+ * Against the real models on this machine. Gated because the answer depends on
+ * what has been downloaded, which is exactly what makes it worth running by
+ * hand before trusting a deployment.
  */
 const live = process.env.OMPD_LIVE === "1" ? describe : describe.skip;
 
@@ -833,16 +1091,40 @@ live("live engines", () => {
     expect(log).toHaveLength(2);
   });
 
-  test("the resolved tts engine produces real audio the wire can carry", async () => {
+  test("the resolved tts engine streams real audio the wire can carry", async () => {
     const engine = await selectTtsEngine();
+    const segments = speakableSegments("Twelve **tests** passing. Nothing regressed.");
     if (engine.name === "null") {
-      await expect(engine.synthesize("hello")).rejects.toThrow(TtsUnavailableError);
+      const pull = async (): Promise<void> => {
+        for await (const _chunk of engine.stream(segments)) break;
+      };
+      await expect(pull()).rejects.toThrow(TtsUnavailableError);
       return;
     }
 
-    const audio = await engine.synthesize(sanitizeForSpeech("Twelve **tests** passing."));
-    expect(audio.pcm.length).toBeGreaterThan(audio.sampleRate / 10);
-    expect(audio.sampleRate).toBeGreaterThan(8_000);
-    expect(base64ToPcm(pcmToBase64(audio.pcm)).length).toBe(audio.pcm.length);
-  }, 120_000);
+    const chunks: PcmAudio[] = [];
+    for await (const chunk of engine.stream(segments)) chunks.push(chunk);
+
+    // More than one segment in, more than one chunk out: streaming for real.
+    expect(segments.length).toBeGreaterThan(1);
+    expect(chunks.length).toBe(segments.length);
+    for (const chunk of chunks) {
+      expect(chunk.pcm.length).toBeGreaterThan(0);
+      expect(chunk.sampleRate).toBeGreaterThan(8_000);
+      expect(base64ToPcm(pcmToBase64(chunk.pcm)).length).toBe(chunk.pcm.length);
+    }
+  }, 180_000);
+
+  test("the resolved stt engine transcribes what the tts engine just said", async () => {
+    const stt = await selectSttEngine();
+    const tts = await selectTtsEngine();
+    if (stt.name === "null" || tts.name === "null") return;
+
+    const parts: Int16Array[] = [];
+    for await (const chunk of tts.stream(["The quick brown fox jumps over the lazy dog."])) {
+      parts.push(resamplePcm(chunk, RATE).pcm);
+    }
+    const transcript = await stt.transcribe(concat(...parts), RATE);
+    expect(transcript.toLowerCase()).toContain("quick brown fox");
+  }, 300_000);
 });
