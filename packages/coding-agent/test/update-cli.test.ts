@@ -26,6 +26,7 @@ import {
 	resolveReleaseDist,
 	resolveReleaseRename,
 	resolveUpdateMethodForTest,
+	resolveUpdateTargetFromPathForTest,
 	shouldForceBinaryUpdate,
 	sweepStaleUpdateArtifacts,
 	updateViaBinaryAt,
@@ -185,6 +186,50 @@ describe("update-cli install target detection", () => {
 		});
 
 		expect(method).toBe("npm");
+	});
+
+	it("updates the resolved standalone binary behind a foreign npm-bin alias", async () => {
+		const dir = await makeTempDir();
+		const npmBinDir = path.join(dir, ".npm-global", "bin");
+		const standalonePath = path.join(dir, ".local", "bin", "omp");
+		const aliasPath = path.join(npmBinDir, "omp");
+		await fs.mkdir(npmBinDir, { recursive: true });
+		await fs.mkdir(path.dirname(standalonePath), { recursive: true });
+		await Bun.write(standalonePath, "binary");
+		await fs.symlink(standalonePath, aliasPath);
+
+		const target = resolveUpdateTargetFromPathForTest(aliasPath, undefined, {
+			allowPackageManagers: true,
+			npmBinDir,
+		});
+
+		expect(target).toEqual({ method: "binary", path: standalonePath, replacesSymlink: false });
+		expect(await fs.readlink(aliasPath)).toBe(standalonePath);
+	});
+
+	it("uses npm update when the bin symlink resolves into npm's global install tree", () => {
+		const method = resolveUpdateMethodForTest("/home/u/.npm-global/bin/omp", undefined, {
+			npmBinDir: "/home/u/.npm-global/bin",
+			ompRealpath: "/home/u/.npm-global/lib/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js",
+		});
+
+		expect(method).toBe("npm");
+	});
+
+	it("uses binary update when the bun global bin entry is a foreign alias symlink", () => {
+		const method = resolveUpdateMethodForTest("/home/u/.bun/bin/omp", "/home/u/.bun/bin", {
+			ompRealpath: "/home/u/.local/bin/omp",
+		});
+
+		expect(method).toBe("binary");
+	});
+
+	it("uses bun update when the bin symlink resolves into bun's global install tree", () => {
+		const method = resolveUpdateMethodForTest("/home/u/.bun/bin/omp", "/home/u/.bun/bin", {
+			ompRealpath: "/home/u/.bun/install/global/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js",
+		});
+
+		expect(method).toBe("bun");
 	});
 
 	it("uses binary update when prioritized omp is outside bun global bin", () => {

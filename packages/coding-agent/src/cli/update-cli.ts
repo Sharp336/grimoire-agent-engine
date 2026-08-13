@@ -481,6 +481,11 @@ interface UpdateMethodResolutionOptions {
 	 * target directory.
 	 */
 	ompIsRegularFile?: boolean;
+	/**
+	 * Resolved symlink target. npm/bun own links into their manager root;
+	 * targets elsewhere are foreign aliases that must update as binaries.
+	 */
+	ompRealpath?: string;
 }
 
 type UpdateTarget =
@@ -496,7 +501,7 @@ function resolveUpdateMethod(
 	bunBinDir: string | undefined,
 	options: UpdateMethodResolutionOptions = {},
 ): UpdateMethod {
-	const { homebrewPrefix, miseBinDirs = [], miseDataDir, npmBinDir, ompIsRegularFile = false } = options;
+	const { homebrewPrefix, miseBinDirs = [], miseDataDir, npmBinDir, ompIsRegularFile = false, ompRealpath } = options;
 	const launcherExtension = path.extname(ompPath).toLowerCase();
 	const isWindowsScriptLauncher =
 		launcherExtension === ".cmd" || launcherExtension === ".ps1" || launcherExtension === ".bat";
@@ -514,9 +519,31 @@ function resolveUpdateMethod(
 	// (bun's .exe launcher, npm's .cmd/.ps1), so a regular file is NOT evidence
 	// of a standalone install and the override would hijack managed installs.
 	const isStandaloneRegularFile = ompIsRegularFile && process.platform !== "win32";
-	if (bunBinDir && isPathInDirectory(ompPath, bunBinDir) && !isStandaloneRegularFile) return "bun";
-	if ((npmBinDir && isPathInDirectory(ompPath, npmBinDir) && !isStandaloneRegularFile) || isWindowsScriptLauncher)
+	if (
+		bunBinDir &&
+		isPathInDirectory(ompPath, bunBinDir) &&
+		!isStandaloneRegularFile &&
+		(!ompRealpath ||
+			isPathInDirectoryLexical(
+				ompRealpath,
+				tryRealpath(path.dirname(bunBinDir)) ?? path.dirname(path.resolve(bunBinDir)),
+			))
+	) {
+		return "bun";
+	}
+	if (
+		npmBinDir &&
+		isPathInDirectory(ompPath, npmBinDir) &&
+		!isStandaloneRegularFile &&
+		(!ompRealpath ||
+			isPathInDirectoryLexical(
+				ompRealpath,
+				tryRealpath(path.dirname(npmBinDir)) ?? path.dirname(path.resolve(npmBinDir)),
+			))
+	) {
 		return "npm";
+	}
+	if (isWindowsScriptLauncher) return "npm";
 	return "binary";
 }
 
@@ -526,6 +553,33 @@ export function resolveUpdateMethodForTest(
 	options: UpdateMethodResolutionOptions = {},
 ): UpdateMethod {
 	return resolveUpdateMethod(ompPath, bunBinDir, options);
+}
+
+/** Resolve an install target from a concrete PATH entry without probing package managers. */
+export function resolveUpdateTargetFromPathForTest(
+	ompPath: string,
+	bunBinDir: string | undefined,
+	options: UpdateMethodResolutionOptions & { allowPackageManagers: boolean },
+): UpdateTarget {
+	let ompIsRegularFile = false;
+	let ompIsSymlink = false;
+	let ompRealpath: string | undefined;
+	try {
+		const stat = fs.lstatSync(ompPath);
+		ompIsRegularFile = stat.isFile() && !stat.isSymbolicLink();
+		ompIsSymlink = stat.isSymbolicLink();
+		if (ompIsSymlink) ompRealpath = tryRealpath(ompPath);
+	} catch {}
+	const method = resolveUpdateMethod(ompPath, bunBinDir, { ...options, ompIsRegularFile, ompRealpath });
+	if (method === "binary") {
+		// Preserve a foreign alias and replace the standalone binary it
+		// resolves to. Binary-only releases still replace manager launchers
+		// in place because package-manager detection is intentionally off.
+		const binaryPath = options.allowPackageManagers ? (ompRealpath ?? ompPath) : ompPath;
+		return { method, path: binaryPath, replacesSymlink: ompIsSymlink && binaryPath === ompPath };
+	}
+	if (method === "bun" || method === "npm") return { method, path: ompPath };
+	return { method };
 }
 /**
  * Resolve how the running install should be updated.
@@ -546,27 +600,13 @@ async function resolveUpdateTarget(options: { allowPackageManagers: boolean }): 
 	const ompPath = resolveOmpPath();
 
 	if (ompPath) {
-		// Package-manager installs symlink the bin entry into node_modules; the
-		// standalone installer writes a plain executable. When the global bin dir
-		// overlaps the installer's default (~/.local/bin), that file type — not
-		// directory containment — distinguishes a binary install from npm/bun.
-		let ompIsRegularFile = false;
-		let ompIsSymlink = false;
-		try {
-			const stat = fs.lstatSync(ompPath);
-			ompIsRegularFile = stat.isFile() && !stat.isSymbolicLink();
-			ompIsSymlink = stat.isSymbolicLink();
-		} catch {}
-		const method = resolveUpdateMethod(ompPath, bunBinDir, {
+		return resolveUpdateTargetFromPathForTest(ompPath, bunBinDir, {
+			allowPackageManagers: options.allowPackageManagers,
 			homebrewPrefix,
 			miseBinDirs,
 			miseDataDir,
 			npmBinDir,
-			ompIsRegularFile,
 		});
-		if (method === "binary") return { method, path: ompPath, replacesSymlink: ompIsSymlink };
-		if (method === "bun" || method === "npm") return { method, path: ompPath };
-		return { method };
 	}
 
 	if (bunBinDir) return { method: "bun" };

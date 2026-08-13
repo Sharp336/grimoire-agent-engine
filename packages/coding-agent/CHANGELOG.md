@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `omp update` routing foreign npm/bun bin-directory alias symlinks through the package manager, causing npm EEXIST instead of updating the aliased standalone binary ([#8468](https://github.com/can1357/oh-my-pi/issues/8468)).
+
 ## [17.3.1] - 2026-08-13
 
 ### Fixed
