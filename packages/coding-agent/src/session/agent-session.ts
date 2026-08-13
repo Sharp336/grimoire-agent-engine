@@ -356,6 +356,7 @@ import { TtsrCoordinator, type TtsrCoordinatorHost } from "./ttsr-coordinator";
 
 const PLAN_MODE_REMINDER_MAX = 3;
 const POST_PROMPT_DRAIN_TIMEOUT_MS = 5_000;
+const NEVER_ABORTED_EXTENSION_SIGNAL = new AbortController().signal;
 
 /** Internal marker for hook messages queued through the agent loop */
 // ============================================================================
@@ -5823,6 +5824,7 @@ export class AgentSession {
 		return {
 			ui: noOpUIContext,
 			mode: "print",
+			signal: NEVER_ABORTED_EXTENSION_SIGNAL,
 			hasUI: false,
 			cwd: this.sessionManager.getCwd(),
 			sessionManager: this.sessionManager,
