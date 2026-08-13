@@ -2858,6 +2858,38 @@ describe("ACP agent MCP server configuration (late-connecting servers)", () => {
 		}
 	}, 15_000);
 
+	it("keeps ambient tools when a client server is added", async () => {
+		const harness = await createHarness();
+		const refreshSpy = spyOn(FakeAgentSession.prototype, "refreshMCPTools");
+		const namesOf = (tools: unknown[]) => (tools as Array<{ name: string }>).map(tool => tool.name);
+		const fixturePath = path.join(import.meta.dir, "fixtures", "instructions-mcp.ts");
+		await fs.promises.mkdir(path.join(harness.cwdA, ".omp"), { recursive: true });
+		await fs.promises.writeFile(
+			path.join(harness.cwdA, ".omp", "mcp.json"),
+			JSON.stringify({
+				mcpServers: {
+					ambient: { command: BUN_EXEC, args: [fixturePath] },
+				},
+			}),
+		);
+
+		try {
+			await harness.agent.newSession({
+				cwd: harness.cwdA,
+				mcpServers: [{ name: "client", command: BUN_EXEC, args: [fixturePath], env: [] }],
+				_meta: {
+					"omp.sh/ambient-mcp-discovery": { enabled: true, reservedServerNames: ["t3-code"] },
+				},
+			});
+			const latestTools = namesOf(refreshSpy.mock.calls.at(-1)?.[0] ?? []);
+			expect(latestTools).toContain("mcp__ambient_do_thing");
+			expect(latestTools).toContain("mcp__client_do_thing");
+		} finally {
+			await harness.agent.dispose();
+			refreshSpy.mockRestore();
+		}
+	}, 15_000);
+
 	it("lets a client server replace a failing ambient server with the same name", async () => {
 		const harness = await createHarness();
 		const refreshSpy = spyOn(FakeAgentSession.prototype, "refreshMCPTools");

@@ -437,7 +437,7 @@ export class MCPManager {
 
 		const errors = new Map<string, string>();
 		const connectedServers = new Set<string>();
-		const allTools: CustomTool<TSchema, MCPToolDetails>[] = [];
+		const allTools: CustomTool<TSchema, MCPToolDetails>[] = [...this.#tools];
 		const reportedErrors = new Set<string>();
 		let allowBackgroundLogging = false;
 		const statusServerNames: string[] = [];
