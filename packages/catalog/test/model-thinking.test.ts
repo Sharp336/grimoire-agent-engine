@@ -322,9 +322,10 @@ describe("model thinking derivation", () => {
 		expect(getSupportedEfforts(flash)).toEqual([Effort.Low, Effort.High, Effort.Max]);
 		expect(getSupportedEfforts(flashDated)).toEqual([Effort.Low, Effort.High, Effort.Max]);
 		expect(flash.thinking?.effortMap).toBeUndefined();
-		// V4 Pro and the older reasoners top out at high/max, matching the
-		// direct DeepSeek API and every aggregator route.
-		expect(getSupportedEfforts(pro)).toEqual([Effort.High, Effort.Max]);
+		// V4 Pro shares Flash's low/high/max ladder on the direct API and every
+		// aggregator route (DeepSeek's docs advertise `low` for both V4 SKUs);
+		// the older V3.x reasoners still top out at high/max.
+		expect(getSupportedEfforts(pro)).toEqual([Effort.Low, Effort.High, Effort.Max]);
 		expect(getSupportedEfforts(v32)).toEqual([Effort.High, Effort.Max]);
 	});
 
