@@ -60,6 +60,7 @@
 - Fixed below-threshold tool turns waiting for asynchronous session persistence when no mid-run compaction will run, while preserving journal writes when a `message_end` listener fails and isolating notification-only handler payloads from late context mutations ([#8283](https://github.com/can1357/oh-my-pi/pull/8283) by [@ethancawse](https://github.com/ethancawse)).
 - Manual `/shake` now keeps a small recent tail of tool results instead of stripping every eligible result, so the agent does not lose the context it is currently working from ([#7776](https://github.com/can1357/oh-my-pi/issues/7776)).
 - Fixed Hindsight `per-project` and `per-project-tagged` scoping splitting one repository across two memory scopes when the checkout directory carries capitals: the project label is now lowercased, so a checkout at `~/code/General` writes and recalls under `project:general` like every other client of the same bank instead of opening a private `project:General` scope. **Migration note:** mixed-case checkouts previously stored memories under the case-preserving label (`per-project` bank id, `per-project-tagged` `project:<Name>` tags); after upgrading, those sessions read and write the lowercased scope, so memories retained under the old capitalized scope stay in the old bank/tag until re-retained there ([#8158](https://github.com/can1357/oh-my-pi/issues/8158)).
+- Added per-turn cost display to the assistant usage row (shown when the provider reports a nonzero cost).
 
 ## [17.2.15] - 2026-08-12
 

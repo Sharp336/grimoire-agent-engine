@@ -6,6 +6,13 @@ import { theme } from "../../modes/theme/theme";
 /** Below this the rate is nonsense (cached/instant responses yield absurd tok/s). */
 const MIN_DURATION_MS = 100;
 
+/** USD cost tiers shared with the other CLI/TUI cost readouts (bench, stats, agent hub). */
+function formatCost(cost: number): string {
+	if (cost < 0.01) return `$${cost.toFixed(4)}`;
+	if (cost < 1) return `$${cost.toFixed(3)}`;
+	return `$${cost.toFixed(2)}`;
+}
+
 /** Local `YYYY-MM-DD HH:mm:ss` stamp for the per-turn usage row. */
 function formatUsageTimestamp(ms: number): string {
 	const d = new Date(ms);
@@ -27,6 +34,10 @@ export function formatUsageRow(usage: Usage, durationMs?: number, ttftMs?: numbe
 	parts.push(`${theme.icon.output} ${formatNumber(usage.output)}`);
 	if (usage.cacheRead > 0) {
 		parts.push(`${theme.icon.cache} ${formatNumber(usage.cacheRead)}`);
+	}
+	// Providers without catalog pricing report 0 cost; showing $0.00 every row is noise.
+	if (usage.cost.total > 0) {
+		parts.push(formatCost(usage.cost.total));
 	}
 	if (ttftMs && ttftMs > 0) {
 		parts.push(`${theme.icon.time} ${(ttftMs / 1000).toFixed(1)}s`);
