@@ -10,6 +10,10 @@
 - Fixed `omp update` misclassifying foreign npm/bun bin aliases while preserving package-manager ownership for globally linked checkouts ([#8468](https://github.com/can1357/oh-my-pi/issues/8468)).
 - Fixed `read` hashline headers collapsing nested in-workspace paths to the bare basename, which let a same-basename file at the session cwd capture a verbatim follow-up `edit` and deterministically reject it with `hash is not from this session`. Headers now retain the workspace-relative path (e.g. `[src/settings.json#0063]`) ([#8482](https://github.com/can1357/oh-my-pi/issues/8482)).
 
+### Fixed
+
+- Fixed unnecessary compaction triggered by `response.incomplete` (output `stopReason === "length"`) when context was below the compaction threshold. Previously, the incomplete-output recovery path ran compaction unconditionally whenever compaction was enabled, even though the truncation was caused by the model's output-token budget — not context pressure. Now gates on `shouldCompact(...)` using `calculatePromptTokens` (input + cache, excluding discarded output tokens) with the stored-conversation floor via `compactionContextTokens`, matching the threshold path. Below threshold, the dead turn is dropped and the agent retries directly — but only when `autoContinue` is true, avoiding races with pending prompts. Direct retries are bounded at 3 consecutive below-threshold length stops; after that, compaction runs once as a fallback. If the model still hits output limits after the fallback, recovery terminates with a user-visible warning instead of looping. The retry counter and fallback flag reset on any non-length stop or new user prompt.
+
 ## [17.3.1] - 2026-08-13
 
 ### Fixed
@@ -87,10 +91,6 @@
 - Fixed `/handoff` losing local artifacts (plans, scratch files, research notes) by copying them across the handoff session boundary.
 - Replaced libarchive-based tar parsing with a hardened, in-process tar reader to prevent crashes and safely handle complex archive structures, symlinks, and sparse metadata.
 - Fixed `Ctrl+O` tool-output expansion failing to reach launch-completion messages wrapped in the hidden tool activity container.
-
-### Fixed
-
-- Fixed unnecessary compaction triggered by `response.incomplete` (output `stopReason === "length"`) when context was below the compaction threshold. Previously, the incomplete-output recovery path ran compaction unconditionally whenever compaction was enabled, even though the truncation was caused by the model's output-token budget — not context pressure. Now gates on `shouldCompact(...)` using `calculatePromptTokens` (input + cache, excluding discarded output tokens) with the stored-conversation floor via `compactionContextTokens`, matching the threshold path. Below threshold, the dead turn is dropped and the agent retries directly — but only when `autoContinue` is true, avoiding races with pending prompts. Direct retries are bounded at 3 consecutive below-threshold length stops; after that, compaction runs once as a fallback. If the model still hits output limits after the fallback, recovery terminates with a user-visible warning instead of looping. The retry counter and fallback flag reset on any non-length stop or new user prompt.
 
 ## [17.2.14] - 2026-08-11
 
