@@ -37,6 +37,8 @@ export interface FakeHostController {
   emitUpdate(sessionId: string, update: unknown): void;
   /** Session ids handed out by `session/new`, in order. */
   sessions: string[];
+  /** Full `session/new` params, used to prove daemon-provided MCP mounts. */
+  newRequests: Array<{ cwd: string; mcpServers: unknown[] }>;
   /**
    * Session ids the peer was asked to load via `session/load`, in order.
    * Kept separate from `sessions` on purpose: a resume that mistakenly
@@ -45,6 +47,8 @@ export interface FakeHostController {
    * proven at the wire level.
    */
   loads: string[];
+  /** Full `session/load` params, used to prove restored tool mounts. */
+  loadRequests: Array<{ sessionId: string; cwd: string; mcpServers: unknown[] }>;
   /** Every `session/prompt` the supervisor sent. */
   prompts: Array<{ sessionId: string; text: string }>;
   /** Session ids the peer was told to cancel, in order. */
@@ -72,7 +76,9 @@ export function createFakeHost(): FakeHostController {
   let nextPid = 424_242;
   let latest: AcpClient | null = null;
   const sessions: string[] = [];
+  const newRequests: Array<{ cwd: string; mcpServers: unknown[] }> = [];
   const loads: string[] = [];
+  const loadRequests: Array<{ sessionId: string; cwd: string; mcpServers: unknown[] }> = [];
   const prompts: Array<{ sessionId: string; text: string }> = [];
   const waiters = new Map<number | string, (result: unknown) => void>();
   /** Which host serves each session, so a frame reaches the right transport. */
@@ -159,6 +165,10 @@ export function createFakeHost(): FakeHostController {
     }
 
     if (msg.method === "session/new") {
+      newRequests.push({
+        cwd: String(msg.params?.cwd),
+        mcpServers: Array.isArray(msg.params?.mcpServers) ? msg.params.mcpServers : [],
+      });
       const sessionId = `sess_${nextSession++}`;
       sessions.push(sessionId);
       sessionClients.set(sessionId, client);
@@ -182,6 +192,11 @@ export function createFakeHost(): FakeHostController {
       // the thing a "resume, don't restart" test asserts on.
       const sessionId = String(msg.params?.sessionId);
       loads.push(sessionId);
+      loadRequests.push({
+        sessionId,
+        cwd: String(msg.params?.cwd),
+        mcpServers: Array.isArray(msg.params?.mcpServers) ? msg.params.mcpServers : [],
+      });
       sessionClients.set(sessionId, client);
       if (!modes.has(sessionId)) modes.set(sessionId, "default");
       toClient(client, {
@@ -273,7 +288,9 @@ export function createFakeHost(): FakeHostController {
   return {
     factory,
     sessions,
+    newRequests,
     loads,
+    loadRequests,
     prompts,
     cancels,
     modeOf: (sessionId) => modes.get(sessionId) ?? "default",
