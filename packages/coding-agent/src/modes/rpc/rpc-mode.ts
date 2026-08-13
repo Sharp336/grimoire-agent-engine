@@ -11,6 +11,8 @@
  * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
  */
 import { once } from "node:events";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { serviceTierFamily } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { $env, isRecord, readLines, Snowflake } from "@oh-my-pi/pi-utils";
@@ -36,11 +38,14 @@ import { calculateTokensPerSecond } from "../../utils/token-rate";
 import { initializeExtensions } from "../runtime-init";
 import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./host-tools";
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
+import { getRpcCapabilityManifest, validateRpcCommand } from "./rpc-command-registry";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameEncoder } from "./rpc-frame";
 import { claimRpcInput } from "./rpc-input";
 import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
+import { type RpcOperationHandle, RpcOperationManager } from "./rpc-operations";
 import { RpcSubagentRegistry, readRpcSubagentTranscript } from "./rpc-subagents";
 import type {
+	RpcCancelOperationResult,
 	RpcCommand,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
@@ -118,6 +123,7 @@ export async function tryRunRpcSkillCommand(
 	session: RpcSkillCommandSession,
 	text: string,
 	streamingBehavior: "steer" | "followUp" = "steer",
+	messageTag?: string,
 ): Promise<RpcSkillCommandResult | false> {
 	if (!session.skillsSettings?.enableSkillCommands) return false;
 	const parsed = parseSkillInvocation(text);
@@ -133,7 +139,7 @@ export async function tryRunRpcSkillCommand(
 			details: built.details,
 			attribution: "user",
 		},
-		{ streamingBehavior },
+		{ streamingBehavior, messageTag },
 	);
 	return { agentInvoked: true };
 }
@@ -145,23 +151,52 @@ export function reportLocalOnlyPromptResult(input: {
 	onError: (error: Error) => void;
 	hasExtensionAgentMessageTask?: () => boolean;
 	waitForExtensionAgentMessageTasks?: () => Promise<void>;
+	operation?: {
+		handle: RpcOperationHandle;
+		manager: RpcOperationManager;
+		waitForAgentCompletion?: () => Promise<void>;
+	};
 }): void {
 	void input.prompt
 		.then(async agentInvoked => {
-			if (agentInvoked) return;
 			await input.waitForExtensionAgentMessageTasks?.();
-			if (!input.hasExtensionAgentMessageTask?.()) {
-				input.output({ type: "prompt_result", id: input.id, agentInvoked: false });
+			const resolvedAgentInvoked = agentInvoked || Boolean(input.hasExtensionAgentMessageTask?.());
+			if (resolvedAgentInvoked) {
+				await input.operation?.waitForAgentCompletion?.();
+			}
+			const operation = input.operation;
+			if (operation) {
+				setImmediate(() => {
+					if (!resolvedAgentInvoked) {
+						input.output({
+							type: "prompt_result",
+							id: input.id,
+							operationId: operation.handle.operationId,
+							agentInvoked: false,
+						});
+					}
+					operation.manager.complete(operation.handle, resolvedAgentInvoked);
+				});
+			} else if (!resolvedAgentInvoked) {
+				input.output({
+					type: "prompt_result",
+					id: input.id,
+					agentInvoked: false,
+				});
 			}
 		})
 		.catch(error => {
-			input.onError(error instanceof Error ? error : new Error(String(error)));
+			const promptError = error instanceof Error ? error : new Error(String(error));
+			const operation = input.operation;
+			if (operation) {
+				setImmediate(() => operation.manager.fail(operation.handle, promptError, "prompt_scheduling_failed"));
+			}
+			input.onError(promptError);
 		});
 }
 
 type RpcExtensionUserMessageScope = {
-	hasAgentMessageTask: boolean;
-	pendingAgentMessageTasks: Set<Promise<void>>;
+	agentMessageTasks: Promise<unknown>[];
 };
 
 /**
@@ -175,32 +210,22 @@ export class RpcExtensionUserMessageTracker {
 
 	markAgentMessageTask(): void {
 		for (const scope of this.#activePromptScopes) {
-			scope.hasAgentMessageTask = true;
+			scope.agentMessageTasks.push(Promise.resolve());
 		}
 	}
 
 	trackAgentMessageTask(task: Promise<unknown>): void {
 		for (const scope of this.#activePromptScopes) {
-			this.#trackAgentMessageTaskForScope(scope, task);
+			scope.agentMessageTasks.push(task);
 		}
 	}
 
-	#trackAgentMessageTaskForScope(scope: RpcExtensionUserMessageScope, task: Promise<unknown>): void {
-		const scopedTask = task.then(
-			() => {
-				scope.hasAgentMessageTask = true;
-			},
-			() => {},
-		);
-		scope.pendingAgentMessageTasks.add(scopedTask);
-		void scopedTask.finally(() => {
-			scope.pendingAgentMessageTasks.delete(scopedTask);
-		});
-	}
-
 	async #waitForAgentMessageTasks(scope: RpcExtensionUserMessageScope): Promise<void> {
-		while (scope.pendingAgentMessageTasks.size > 0) {
-			await Promise.allSettled(Array.from(scope.pendingAgentMessageTasks));
+		let observedCount = 0;
+		while (observedCount < scope.agentMessageTasks.length) {
+			const tasks = scope.agentMessageTasks.slice(observedCount);
+			observedCount = scope.agentMessageTasks.length;
+			await Promise.all(tasks);
 		}
 	}
 
@@ -210,8 +235,7 @@ export class RpcExtensionUserMessageTracker {
 		waitForAgentMessageTasks: () => Promise<void>;
 	} {
 		const scope: RpcExtensionUserMessageScope = {
-			hasAgentMessageTask: false,
-			pendingAgentMessageTasks: new Set(),
+			agentMessageTasks: [],
 		};
 		this.#activePromptScopes.add(scope);
 		let prompt: Promise<T>;
@@ -225,7 +249,7 @@ export class RpcExtensionUserMessageTracker {
 			prompt: prompt.finally(() => {
 				this.#activePromptScopes.delete(scope);
 			}),
-			hasAgentMessageTask: () => scope.hasAgentMessageTask,
+			hasAgentMessageTask: () => scope.agentMessageTasks.length > 0,
 			waitForAgentMessageTasks: () => this.#waitForAgentMessageTasks(scope),
 		};
 	}
@@ -237,6 +261,11 @@ export function watchAndReportLocalOnlyPromptResult(input: {
 	output: (obj: object) => void;
 	onError: (error: Error) => void;
 	extensionUserMessageTracker: RpcExtensionUserMessageTracker;
+	operation?: {
+		handle: RpcOperationHandle;
+		manager: RpcOperationManager;
+		waitForAgentCompletion?: () => Promise<void>;
+	};
 }): void {
 	const trackedPrompt = input.extensionUserMessageTracker.watchPrompt(input.startPrompt);
 	reportLocalOnlyPromptResult({
@@ -246,7 +275,48 @@ export function watchAndReportLocalOnlyPromptResult(input: {
 		onError: input.onError,
 		hasExtensionAgentMessageTask: trackedPrompt.hasAgentMessageTask,
 		waitForExtensionAgentMessageTasks: trackedPrompt.waitForAgentMessageTasks,
+		operation: input.operation,
 	});
+}
+
+async function waitForQueuedRpcPrompt(
+	session: Pick<AgentSession, "isStreaming" | "queuedMessageCount" | "waitForIdle">,
+) {
+	while (true) {
+		await session.waitForIdle();
+		const nextTurn = Promise.withResolvers<void>();
+		setImmediate(nextTurn.resolve);
+		await nextTurn.promise;
+		if (!session.isStreaming && session.queuedMessageCount === 0) return;
+	}
+}
+type RpcOperationMessageSession = Pick<AgentSession, "abort" | "getMessageTag" | "removeQueuedMessagesByTag">;
+
+/** Correlates accepted operations with the exact AgentSession message that owns the active turn. */
+export class RpcOperationMessageOwnership {
+	#activeOperationId: string | undefined;
+
+	constructor(readonly session: RpcOperationMessageSession) {}
+
+	observeMessageStart(message: AgentMessage): void {
+		this.#activeOperationId = this.session.getMessageTag(message);
+	}
+
+	settle(operationId: string): void {
+		if (this.#activeOperationId === operationId) this.#activeOperationId = undefined;
+	}
+
+	async cancel(manager: RpcOperationManager, operationId: string): Promise<RpcCancelOperationResult> {
+		const ownsActiveMessage = this.#activeOperationId === operationId;
+		const cancellation = manager.cancel(operationId);
+		if (!cancellation.wasStarted) return cancellation.result;
+		if (ownsActiveMessage) {
+			await this.session.abort({ reason: USER_INTERRUPT_LABEL });
+		} else {
+			this.session.removeQueuedMessagesByTag(operationId);
+		}
+		return cancellation.result;
+	}
 }
 
 /**
@@ -256,7 +326,7 @@ export function watchAndReportLocalOnlyPromptResult(input: {
 export interface RpcInputFrameDeps {
 	handleCommand: (command: RpcCommand) => Promise<RpcResponse>;
 	output: RpcOutput;
-	errorResponse: (id: string | undefined, command: string, message: string) => RpcResponse;
+	errorResponse: (id: string | undefined, command: string, message: string, code?: string) => RpcResponse;
 	trackBackgroundTask?: (task: Promise<void>) => void;
 	pendingExtensionRequests: Map<string, PendingExtensionRequest>;
 	onHostToolResult: (frame: RpcHostToolResult) => void;
@@ -304,37 +374,34 @@ export function dispatchRpcControlFrame(parsed: unknown, deps: RpcInputFrameDeps
 /**
  * Dispatch a single parsed frame from the RPC input stream.
  *
- * Bash commands are dispatched in the background so the caller can keep reading
- * subsequent frames while a shell command is still running. This lets a client
- * send `abort_bash` while a long-running `bash` is in flight. Response
- * correlation is preserved via each command's `id`; ordering across concurrent
- * commands is not guaranteed and clients MUST match on `id`.
+ * Concurrent and control commands are dispatched in the background so the
+ * caller can keep reading while a long-running serial command is in flight.
+ * This lets abort, steering, and cancellation commands preempt queued work.
+ * Response correlation is preserved via each command's `id`; ordering across
+ * concurrent commands is not guaranteed and clients MUST match on `id`.
  *
  * @returns `undefined` when the frame was routed to a side-channel handler
  *   (extension UI response, host tool/URI frames) or dispatched in the
- *   background (`bash`). Otherwise a promise that resolves once the response
+ *   background (`concurrent` or `control`). Otherwise a promise that resolves once the response
  *   for the command has been emitted via `output`. Errors from `handleCommand`
- *   on non-`bash` commands propagate; the caller is expected to wrap them.
+ *   on serial commands propagate; the caller is expected to wrap them.
  */
 export function dispatchRpcInputFrame(parsed: unknown, deps: RpcInputFrameDeps): Promise<void> | undefined {
 	if (dispatchRpcControlFrame(parsed, deps)) return undefined;
-	// Regular RPC command. The transport contract states each remaining frame
-	// is an {@link RpcCommand}; `handleCommand`'s `default` arm surfaces
-	// unknown discriminants as an error response, so we do not shape-check
-	// the union here.
-	const command = parsed as RpcCommand;
+	const validation = validateRpcCommand(parsed);
+	if (!validation.ok) {
+		deps.output(deps.errorResponse(validation.id, validation.command, validation.error, validation.code));
+		return undefined;
+	}
+	const command = validation.command;
 
-	// `bash` can run for a long time. Dispatch it in the background so a
-	// subsequent `abort_bash` frame can be read and handled without waiting
-	// for the shell command to finish on its own. The response is emitted
-	// when `handleCommand` resolves; clients correlate via `command.id`.
-	if (command.type === "bash") {
+	if (validation.scheduling !== "serial") {
 		const task = (async () => {
 			try {
 				deps.output(await deps.handleCommand(command));
 			} catch (err: unknown) {
 				const message = err instanceof Error ? err.message : String(err);
-				deps.output(deps.errorResponse(command.id, "bash", message));
+				deps.output(deps.errorResponse(command.id, command.type, message));
 			}
 		})();
 		deps.trackBackgroundTask?.(task);
@@ -363,15 +430,21 @@ export class RpcInputDispatcher {
 		try {
 			if (dispatchRpcControlFrame(parsed, this.#deps)) return;
 
-			const command = parsed as RpcCommand;
-			if (command.type === "bash") {
-				dispatchRpcInputFrame(command, this.#deps);
+			const validation = validateRpcCommand(parsed);
+			if (!validation.ok) {
+				this.#deps.output(
+					this.#deps.errorResponse(validation.id, validation.command, validation.error, validation.code),
+				);
+				return;
+			}
+			if (validation.scheduling !== "serial") {
+				dispatchRpcInputFrame(validation.command, this.#deps);
 				return;
 			}
 
 			const task = this.#tail.then(
-				() => this.#dispatchSerialCommand(command),
-				() => this.#dispatchSerialCommand(command),
+				() => this.#dispatchSerialCommand(validation.command),
+				() => this.#dispatchSerialCommand(validation.command),
 			);
 			this.#tail = task.catch(() => {});
 			this.#tasks.add(task);
@@ -380,7 +453,8 @@ export class RpcInputDispatcher {
 			});
 		} catch (err: unknown) {
 			const message = err instanceof Error ? err.message : String(err);
-			this.#deps.output(this.#deps.errorResponse(undefined, "parse", `Failed to parse command: ${message}`));
+			const id = isRecord(parsed) && typeof parsed.id === "string" ? parsed.id : undefined;
+			this.#deps.output(this.#deps.errorResponse(id, "parse", `Failed to parse command: ${message}`));
 		}
 	}
 
@@ -408,7 +482,7 @@ export class RpcInputDispatcher {
  * Coordinates deferred shutdown with in-flight background input tasks.
  *
  * `pi.shutdown()` from an extension only *requests* shutdown; the process must
- * not exit while a background-dispatched command (`bash`, see
+ * not exit while a background-dispatched command (see
  * {@link dispatchRpcInputFrame}) still owes the client a response frame. The
  * coordinator tracks those tasks, re-checks the shutdown request whenever one
  * settles (covering a shutdown requested mid-bash with no follow-up client
@@ -673,6 +747,13 @@ export async function runRpcMode(
 	process.env.PI_NOTIFICATIONS = "off";
 
 	const frameEncoder = new RpcFrameEncoder();
+	const getCapabilityManifest = () => {
+		const features = new Set<string>();
+		if (eventBus) features.add("subagent-event-bus");
+		if (session.model && serviceTierFamily(session.model)) features.add("model.fast-mode");
+		return getRpcCapabilityManifest({ features });
+	};
+	const capabilityManifest = getCapabilityManifest();
 	// Ordered stdout writer honoring backpressure: chunked v2 frames are produced
 	// lazily by the encoder and written one physical line at a time, so a near-limit
 	// logical frame never materializes its full base64 transport in memory.
@@ -694,6 +775,7 @@ export async function runRpcMode(
 			supportedProtocolVersions: [1, 2],
 			maxFrameBytes: MAX_RPC_FRAME_BYTES,
 			maxReassembledFrameBytes: MAX_RPC_REASSEMBLED_BYTES,
+			capabilities: capabilityManifest,
 		}),
 	);
 	const output = (obj: RpcResponse | RpcExtensionUIRequest | object) => {
@@ -717,6 +799,11 @@ export async function runRpcMode(
 	const error = (id: string | undefined, command: string, message: string, code?: string): RpcResponse => {
 		return { id, type: "response", command, success: false, error: message, ...(code ? { code } : {}) };
 	};
+	const operationOwnership = new RpcOperationMessageOwnership(session);
+	const operationManager = new RpcOperationManager(frame => {
+		if (frame.type === "operation_completed") operationOwnership.settle(frame.operationId);
+		output(frame);
+	});
 
 	const extensionUserMessageTracker = new RpcExtensionUserMessageTracker();
 
@@ -950,6 +1037,7 @@ export async function runRpcMode(
 
 	// Output all agent events as JSON
 	session.subscribe(event => {
+		if (event.type === "message_start") operationOwnership.observeMessageStart(event.message);
 		output(event);
 	});
 
@@ -982,59 +1070,110 @@ export async function runRpcMode(
 				return success(id, "negotiate_protocol", { protocolVersion: 2 });
 			}
 
+			case "get_capabilities":
+				return success(id, "get_capabilities", getCapabilityManifest());
+
 			// =================================================================
 			// Prompting
 			// =================================================================
 
 			case "prompt": {
-				const skillResult = await tryRunRpcSkillCommand(session, command.message, command.streamingBehavior);
-				if (skillResult) {
-					return success(id, "prompt", skillResult);
-				}
-				const builtinResult = await executeAcpBuiltinSlashCommand(command.message, {
-					session,
-					sessionManager: session.sessionManager,
-					settings: session.settings,
-					cwd: session.sessionManager.getCwd(),
-					output: text => output({ type: "command_output", text }),
-					refreshCommands: emitAvailableCommandsUpdate,
-					reloadPlugins: reloadPluginState,
-					notifyTitleChanged: async () => {
-						output({ type: "session_info_update", title: session.sessionName, sessionId: session.sessionId });
-					},
-					notifyConfigChanged: async () => {
-						output({ type: "config_update", model: session.model, thinkingLevel: session.thinkingLevel });
-					},
-				});
-				if (builtinResult !== false) {
-					if ("prompt" in builtinResult) {
+				const operation = operationManager.start(id, "prompt");
+				setImmediate(() => {
+					if (!operationManager.begin(operation)) return;
+					void (async () => {
+						const skillResult = await tryRunRpcSkillCommand(
+							session,
+							command.message,
+							command.streamingBehavior,
+							operation.operationId,
+						);
+						if (!operationManager.isActive(operation)) return;
+						if (skillResult) {
+							reportLocalOnlyPromptResult({
+								id,
+								prompt: Promise.resolve(true),
+								output,
+								onError: () => {},
+								operation: {
+									handle: operation,
+									manager: operationManager,
+									waitForAgentCompletion: () => waitForQueuedRpcPrompt(session),
+								},
+							});
+							return;
+						}
+						const builtinResult = await executeAcpBuiltinSlashCommand(command.message, {
+							session,
+							sessionManager: session.sessionManager,
+							settings: session.settings,
+							cwd: session.sessionManager.getCwd(),
+							output: text => output({ type: "command_output", text }),
+							refreshCommands: emitAvailableCommandsUpdate,
+							reloadPlugins: reloadPluginState,
+							notifyTitleChanged: async () => {
+								output({
+									type: "session_info_update",
+									title: session.sessionName,
+									sessionId: session.sessionId,
+								});
+							},
+							notifyConfigChanged: async () => {
+								output({ type: "config_update", model: session.model, thinkingLevel: session.thinkingLevel });
+							},
+						});
+						if (!operationManager.isActive(operation)) return;
+						if (builtinResult !== false) {
+							if ("prompt" in builtinResult) {
+								watchAndReportLocalOnlyPromptResult({
+									id,
+									startPrompt: () =>
+										session.prompt(builtinResult.prompt, {
+											images: command.images,
+											messageTag: operation.operationId,
+										}),
+									output,
+									onError: () => {},
+									extensionUserMessageTracker,
+									operation: {
+										handle: operation,
+										manager: operationManager,
+										waitForAgentCompletion: () => waitForQueuedRpcPrompt(session),
+									},
+								});
+								return;
+							}
+							output({ type: "prompt_result", id, operationId: operation.operationId, agentInvoked: false });
+							operationManager.complete(operation, false);
+							return;
+						}
+
 						watchAndReportLocalOnlyPromptResult({
 							id,
-							startPrompt: () => session.prompt(builtinResult.prompt, { images: command.images }),
+							startPrompt: () =>
+								session.prompt(command.message, {
+									images: command.images,
+									streamingBehavior: command.streamingBehavior,
+									messageTag: operation.operationId,
+								}),
 							output,
-							onError: promptError => output(error(id, "prompt", promptError.message)),
+							onError: () => {},
 							extensionUserMessageTracker,
+							operation: {
+								handle: operation,
+								manager: operationManager,
+								waitForAgentCompletion: () => waitForQueuedRpcPrompt(session),
+							},
 						});
-						return success(id, "prompt");
-					}
-					return success(id, "prompt", { agentInvoked: false });
-				}
-
-				// Don't await - events will stream
-				// Extension commands are executed immediately, file prompt templates are expanded
-				// If streaming and streamingBehavior specified, queues via steer/followUp
-				watchAndReportLocalOnlyPromptResult({
-					id,
-					startPrompt: () =>
-						session.prompt(command.message, {
-							images: command.images,
-							streamingBehavior: command.streamingBehavior,
-						}),
-					output,
-					onError: promptError => output(error(id, "prompt", promptError.message)),
-					extensionUserMessageTracker,
+					})().catch(promptError => {
+						operationManager.fail(
+							operation,
+							promptError instanceof Error ? promptError : new Error(String(promptError)),
+							"prompt_scheduling_failed",
+						);
+					});
 				});
-				return success(id, "prompt");
+				return success(id, "prompt", { operationId: operation.operationId, accepted: true });
 			}
 
 			case "steer": {
@@ -1048,35 +1187,75 @@ export async function runRpcMode(
 			}
 
 			case "abort": {
+				operationManager.cancelAll("user", "cancelled_by_client");
 				await session.abort({ reason: USER_INTERRUPT_LABEL });
 				return success(id, "abort");
 			}
 
 			case "abort_and_prompt": {
-				await session.abort({ reason: USER_INTERRUPT_LABEL });
-				session
-					.prompt(command.message, { images: command.images })
-					.catch(e => output(error(id, "abort_and_prompt", e.message)));
-				return success(id, "abort_and_prompt");
+				operationManager.cancelAll("replaced", "replaced_by_prompt");
+				const operation = operationManager.start(id, "abort_and_prompt");
+				setImmediate(() => {
+					if (!operationManager.begin(operation)) return;
+					void (async () => {
+						await session.abort({ reason: USER_INTERRUPT_LABEL });
+						if (!operationManager.isActive(operation)) return;
+						watchAndReportLocalOnlyPromptResult({
+							id,
+							startPrompt: () =>
+								session.prompt(command.message, {
+									images: command.images,
+									messageTag: operation.operationId,
+								}),
+							output,
+							onError: () => {},
+							extensionUserMessageTracker,
+							operation: {
+								handle: operation,
+								manager: operationManager,
+								waitForAgentCompletion: () => waitForQueuedRpcPrompt(session),
+							},
+						});
+					})().catch(promptError => {
+						operationManager.fail(
+							operation,
+							promptError instanceof Error ? promptError : new Error(String(promptError)),
+							"prompt_scheduling_failed",
+						);
+					});
+				});
+				return success(id, "abort_and_prompt", { operationId: operation.operationId, accepted: true });
+			}
+
+			case "cancel_operation": {
+				const cancellation = await operationOwnership.cancel(operationManager, command.operationId);
+				return success(id, "cancel_operation", cancellation);
 			}
 
 			case "new_session":
 			case "switch_session":
 			case "branch": {
 				const result = await handleRpcSessionChange(session, command, subagentRegistry);
-				if (!result.data.cancelled) await emitAvailableCommandsUpdate();
+				if (!result.data.cancelled) {
+					operationManager.cancelAll("session_transition", "session_changed");
+					await emitAvailableCommandsUpdate();
+				}
 				return success(id, result.type, result.data);
 			}
 
 			// =================================================================
 			// State
 			// =================================================================
+			case "get_operations": {
+				return success(id, "get_operations", operationManager.snapshot());
+			}
 
 			case "get_state": {
 				const state: RpcSessionState = {
 					model: session.model,
 					thinkingLevel: session.thinkingLevel,
 					isStreaming: session.isStreaming,
+					activityPhase: session.activityPhase,
 					isCompacting: session.isCompacting,
 					steeringMode: session.steeringMode,
 					followUpMode: session.followUpMode,
@@ -1442,14 +1621,14 @@ export async function runRpcMode(
 			}
 
 			default: {
-				const unknownCommand = command as { type: string };
-				return error(undefined, unknownCommand.type, `Unknown command: ${unknownCommand.type}`);
+				const exhaustiveCommand: never = command;
+				return exhaustiveCommand;
 			}
 		}
 	};
 
 	// Deferred shutdown (pi.shutdown() from an extension) must not kill the
-	// process while a background-dispatched bash still owes the client its
+	// process while a background-dispatched command still owes the client its
 	// response frame. The coordinator drains tracked tasks before exiting and
 	// re-checks the request as each task settles.
 	const shutdownCoordinator = new RpcShutdownCoordinator({
@@ -1482,8 +1661,8 @@ export async function runRpcMode(
 	});
 
 	// Keep the stdin reader moving: side-channel frames dispatch immediately,
-	// ordinary commands serialize through inputDispatcher, and bash remains
-	// background-dispatched so abort_bash can overtake it. Frames are read
+	// ordinary commands serialize through inputDispatcher, while concurrent
+	// and control commands can overtake them. Frames are read
 	// line-by-line and parsed here (not via readJsonl) so a single malformed
 	// line is reported as an error frame and the loop keeps running instead of
 	// throwing out of the generator and killing the whole process (issue #5194).
@@ -1502,13 +1681,14 @@ export async function runRpcMode(
 		inputDispatcher.dispatch(parsed);
 	}
 
-	// stdin closed — RPC client is gone. Fail pending side-channel requests
-	// first so active/queued commands can settle, then drain accepted work.
+	// stdin closed — stop accepting side-channel work, drain every command that
+	// already owes a response, then settle any operation still running.
 	pendingExtensionRequests.rejectAll("RPC client disconnected before extension UI response completed");
 	hostToolBridge.close("RPC client disconnected before host tool execution completed");
 	hostUriBridge.clear("RPC client disconnected before host URI request completed");
 	await inputDispatcher.drain();
 	await shutdownCoordinator.drain();
+	operationManager.cancelAll("client_disconnected", "client_disconnected");
 	subagentRegistry?.dispose();
 	// Dispose the main session before exiting so the browser reaper and other
 	// bounded teardown run on the stdin-EOF path too (#5643). Idempotent: a

@@ -28,6 +28,7 @@ import type { RpcMessagesPage } from "./rpc-messages";
 export type RpcCommand =
 	// Protocol
 	| { id?: string; type: "negotiate_protocol"; protocolVersion: number }
+	| { id?: string; type: "get_capabilities" }
 
 	// Prompting
 	| { id?: string; type: "prompt"; message: string; images?: ImageContent[]; streamingBehavior?: "steer" | "followUp" }
@@ -35,10 +36,12 @@ export type RpcCommand =
 	| { id?: string; type: "follow_up"; message: string; images?: ImageContent[] }
 	| { id?: string; type: "abort" }
 	| { id?: string; type: "abort_and_prompt"; message: string; images?: ImageContent[] }
+	| { id?: string; type: "cancel_operation"; operationId: string }
 	| { id?: string; type: "new_session"; parentSession?: string }
 
 	// State
 	| { id?: string; type: "get_state" }
+	| { id?: string; type: "get_operations" }
 	| { id?: string; type: "set_fast_mode"; enabled: boolean }
 	| { id?: string; type: "get_available_commands" }
 	| { id?: string; type: "set_todos"; phases: TodoPhase[] }
@@ -96,10 +99,14 @@ export type RpcCommand =
 // RPC State
 // ============================================================================
 
+export type RpcSessionActivityPhase = "provider" | "maintenance" | "idle";
+
 export interface RpcSessionState {
 	model?: Model;
 	thinkingLevel: ThinkingLevel | undefined;
 	isStreaming: boolean;
+	/** Provider generation, post-turn maintenance, or terminal idle. */
+	activityPhase: RpcSessionActivityPhase;
 	isCompacting: boolean;
 	steeringMode: "all" | "one-at-a-time";
 	followUpMode: "all" | "one-at-a-time";
@@ -138,7 +145,138 @@ export interface RpcAvailableCommandsUpdateFrame {
 export interface RpcPromptResultFrame {
 	type: "prompt_result";
 	id?: string;
+	operationId?: string;
 	agentInvoked: boolean;
+}
+
+export type RpcOperationCommand = "prompt" | "abort_and_prompt";
+export type RpcOperationCancellationReason = "user" | "replaced" | "session_transition" | "client_disconnected";
+export type RpcOperationCancellationCode =
+	| "cancelled_by_client"
+	| "replaced_by_prompt"
+	| "session_changed"
+	| "client_disconnected";
+
+interface RpcOperationFrameBase {
+	operationId: string;
+	requestId?: string;
+	command: RpcOperationCommand;
+}
+
+export interface RpcOperationStartedFrame extends RpcOperationFrameBase {
+	type: "operation_started";
+	startedAt: number;
+}
+
+export type RpcOperationTerminalFrame =
+	| (RpcOperationFrameBase & {
+			type: "operation_completed";
+			agentInvoked: boolean;
+			settledAt: number;
+	  })
+	| (RpcOperationFrameBase & {
+			type: "operation_failed";
+			error: string;
+			code?: string;
+			settledAt: number;
+	  })
+	| (RpcOperationFrameBase & {
+			type: "operation_cancelled";
+			reason: RpcOperationCancellationReason;
+			code: RpcOperationCancellationCode;
+			settledAt: number;
+	  });
+
+export interface RpcOperationAccepted {
+	operationId: string;
+	accepted: true;
+}
+
+export interface RpcActiveOperation extends RpcOperationFrameBase {
+	status: "accepted" | "started";
+	acceptedAt: number;
+	startedAt?: number;
+}
+
+export interface RpcOperationsSnapshot {
+	active: RpcActiveOperation[];
+	recent: RpcOperationTerminalFrame[];
+}
+
+export type RpcCancelOperationResult =
+	| {
+			operationId: string;
+			status: "cancelled" | "completed" | "failed";
+			terminal: RpcOperationTerminalFrame;
+	  }
+	| { operationId: string; status: "not_found" };
+export interface RpcCommandOutputFrame {
+	type: "command_output";
+	text: string;
+}
+
+export interface RpcSessionInfoUpdateFrame {
+	type: "session_info_update";
+	title?: string;
+	sessionId: string;
+}
+
+export interface RpcConfigUpdateFrame {
+	type: "config_update";
+	model?: Model;
+	thinkingLevel?: ThinkingLevel;
+}
+
+export interface RpcExtensionErrorFrame {
+	type: "extension_error";
+	extensionPath: string;
+	event: string;
+	error: string;
+}
+
+export type RpcCommandSchedulingClass = "serial" | "concurrent" | "control";
+export type RpcCommandScope = "host" | "session" | "turn" | "agent";
+export type RpcCommandExecution = "sync" | "operation" | "host-only" | "unavailable";
+export type RpcCommandAvailability = "available" | "conditional" | "unavailable";
+export type RpcCommandConcurrencyClass = RpcCommandSchedulingClass;
+
+export interface RpcCapabilityDisabledReason {
+	code: string;
+	message: string;
+}
+
+export interface RpcInputSchema {
+	type: "object";
+	properties: Record<string, Record<string, unknown>>;
+	required: string[];
+	additionalProperties: false;
+}
+
+interface RpcCommandCapabilityBase {
+	/** Stable protocol identity. Unlike the display name, this must never be repurposed. */
+	id: string;
+	name: RpcCommandType;
+	version: number;
+	scope: RpcCommandScope;
+	execution: RpcCommandExecution;
+	inputSchema?: RpcInputSchema;
+	outputSchema?: Record<string, unknown>;
+	concurrencyClass?: RpcCommandConcurrencyClass;
+	requiredFeatures: string[];
+}
+
+export type RpcCommandCapability = RpcCommandCapabilityBase &
+	(
+		| { availability: "available" | "conditional"; disabledReason?: never }
+		| { availability: "unavailable"; disabledReason: RpcCapabilityDisabledReason }
+	);
+
+export interface RpcCapabilityManifest {
+	applicationApiVersion: number;
+	commands: RpcCommandCapability[];
+	events: RpcEventType[];
+	extensionUiMethods: RpcExtensionUIMethod[];
+	hostProtocols: string[];
 }
 
 export interface RpcReadyFrame {
@@ -147,6 +285,8 @@ export interface RpcReadyFrame {
 	supportedProtocolVersions: [1, 2];
 	maxFrameBytes: number;
 	maxReassembledFrameBytes: number;
+	/** Present on servers with application-level capability discovery. */
+	capabilities?: RpcCapabilityManifest;
 }
 
 export interface RpcChunkFrame {
@@ -202,17 +342,32 @@ export type RpcResponse =
 			success: true;
 			data: { protocolVersion: 2 };
 	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "get_capabilities";
+			success: true;
+			data: RpcCapabilityManifest;
+	  }
 
 	// Prompting (async - events follow)
-	| { id?: string; type: "response"; command: "prompt"; success: true; data?: { agentInvoked: boolean } }
+	| { id?: string; type: "response"; command: "prompt"; success: true; data: RpcOperationAccepted }
 	| { id?: string; type: "response"; command: "steer"; success: true }
 	| { id?: string; type: "response"; command: "follow_up"; success: true }
 	| { id?: string; type: "response"; command: "abort"; success: true }
-	| { id?: string; type: "response"; command: "abort_and_prompt"; success: true }
+	| { id?: string; type: "response"; command: "abort_and_prompt"; success: true; data: RpcOperationAccepted }
+	| {
+			id?: string;
+			type: "response";
+			command: "cancel_operation";
+			success: true;
+			data: RpcCancelOperationResult;
+	  }
 	| { id?: string; type: "response"; command: "new_session"; success: true; data: { cancelled: boolean } }
 
 	// State
 	| { id?: string; type: "response"; command: "get_state"; success: true; data: RpcSessionState }
+	| { id?: string; type: "response"; command: "get_operations"; success: true; data: RpcOperationsSnapshot }
 	| {
 			id?: string;
 			type: "response";
@@ -537,6 +692,104 @@ export type RpcExtensionUIResponse =
 	| { type: "extension_ui_response"; id: string; confirmed: boolean }
 	| { type: "extension_ui_response"; id: string; cancelled: true; timedOut?: boolean };
 
+type RpcManifestEvent =
+	| RpcReadyFrame
+	| RpcPromptResultFrame
+	| RpcAvailableCommandsUpdateFrame
+	| RpcOperationStartedFrame
+	| RpcOperationTerminalFrame
+	| RpcSessionEventFrame
+	| RpcExtensionUIRequest
+	| RpcHostToolCallRequest
+	| RpcHostToolCancelRequest
+	| RpcHostUriRequest
+	| RpcHostUriCancelRequest
+	| {
+			type:
+				| "command_output"
+				| "session_info_update"
+				| "config_update"
+				| "extension_error"
+				| "notice"
+				| "goal_updated";
+	  };
+
+function eventInventory<const T extends readonly RpcManifestEvent["type"][]>(
+	events: T & (Exclude<RpcManifestEvent["type"], T[number]> extends never ? unknown : never),
+): T {
+	return events;
+}
+
+/** Event names advertised by capability discovery, exhaustively linked to RPC output event discriminants. */
+export const RPC_EVENT_TYPES = eventInventory([
+	"ready",
+	"prompt_result",
+	"available_commands_update",
+	"operation_started",
+	"operation_completed",
+	"operation_failed",
+	"operation_cancelled",
+	"command_output",
+	"session_info_update",
+	"config_update",
+	"extension_ui_request",
+	"extension_error",
+	"host_tool_call",
+	"host_tool_cancel",
+	"host_uri_request",
+	"host_uri_cancel",
+	"subagent_lifecycle",
+	"subagent_progress",
+	"subagent_event",
+	"agent_start",
+	"agent_end",
+	"turn_start",
+	"turn_end",
+	"message_start",
+	"message_update",
+	"message_end",
+	"tool_execution_start",
+	"tool_execution_update",
+	"tool_execution_end",
+	"auto_compaction_start",
+	"auto_compaction_end",
+	"auto_retry_start",
+	"auto_retry_end",
+	"retry_fallback_applied",
+	"retry_fallback_succeeded",
+	"model_changed",
+	"ttsr_triggered",
+	"todo_reminder",
+	"todo_auto_clear",
+	"irc_message",
+	"notice",
+	"thinking_level_changed",
+	"goal_updated",
+] as const);
+
+export type RpcEventType = (typeof RPC_EVENT_TYPES)[number];
+export type RpcExtensionUIMethod = RpcExtensionUIRequest["method"];
+
+function extensionUiMethodInventory<const T extends readonly RpcExtensionUIMethod[]>(
+	methods: T & (Exclude<RpcExtensionUIMethod, T[number]> extends never ? unknown : never),
+): T {
+	return methods;
+}
+
+/** Extension UI method inventory, exhaustively linked to RpcExtensionUIRequest. */
+export const RPC_EXTENSION_UI_METHODS = extensionUiMethodInventory([
+	"select",
+	"confirm",
+	"input",
+	"editor",
+	"cancel",
+	"notify",
+	"setStatus",
+	"setWidget",
+	"setTitle",
+	"set_editor_text",
+	"open_url",
+] as const);
 // ============================================================================
 // Helper type for extracting command types
 // ============================================================================

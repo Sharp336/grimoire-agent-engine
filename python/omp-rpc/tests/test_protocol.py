@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import json
 import unittest
+from pathlib import Path
 
 from omp_rpc import (
     AgentEndEvent,
     AutoCompactionEndEvent,
     AutoCompactionStartEvent,
     ExtensionUiRequest,
+    OperationCancelledEvent,
+    OperationCompletedEvent,
+    OperationFailedEvent,
+    OperationStartedEvent,
+    ReadyEvent,
     SessionState,
     TodoReminderEvent,
     assistant_text,
@@ -17,6 +24,115 @@ from omp_rpc import (
 
 
 class ProtocolParsingTests(unittest.TestCase):
+    def test_parse_operation_lifecycle_notifications(self) -> None:
+        started = parse_notification(
+            {
+                "type": "operation_started",
+                "operationId": "operation-1",
+                "requestId": "request-1",
+                "command": "prompt",
+                "startedAt": 10,
+                "futureField": True,
+            }
+        )
+        completed = parse_notification(
+            {
+                "type": "operation_completed",
+                "operationId": "operation-1",
+                "requestId": "request-1",
+                "command": "prompt",
+                "agentInvoked": True,
+                "settledAt": 11,
+            }
+        )
+        failed = parse_notification(
+            {
+                "type": "operation_failed",
+                "operationId": "operation-2",
+                "command": "prompt",
+                "error": "no model",
+                "code": "prompt_scheduling_failed",
+                "settledAt": 12,
+            }
+        )
+        cancelled = parse_notification(
+            {
+                "type": "operation_cancelled",
+                "operationId": "operation-3",
+                "command": "abort_and_prompt",
+                "reason": "user",
+                "code": "cancelled_by_client",
+                "settledAt": 13,
+            }
+        )
+
+        self.assertIsInstance(started, OperationStartedEvent)
+        self.assertIsInstance(completed, OperationCompletedEvent)
+        self.assertTrue(completed.agent_invoked)
+        self.assertEqual(completed.request_id, "request-1")
+        self.assertIsInstance(failed, OperationFailedEvent)
+        self.assertEqual(failed.code, "prompt_scheduling_failed")
+        self.assertIsInstance(cancelled, OperationCancelledEvent)
+        self.assertEqual(cancelled.reason, "user")
+
+    def test_parse_ready_capability_manifest(self) -> None:
+        manifest = json.loads(
+            (
+                Path(__file__).parent / "fixtures" / "rpc-capability-manifest.json"
+            ).read_text(encoding="utf-8")
+        )
+        notification = parse_notification(
+            {
+                "type": "ready",
+                "protocolVersion": 1,
+                "capabilities": manifest,
+            }
+        )
+
+        self.assertIsInstance(notification, ReadyEvent)
+        self.assertIsNotNone(notification.capabilities)
+        assert notification.capabilities is not None
+        capability = notification.capabilities.commands[0]
+        self.assertEqual(notification.capabilities.application_api_version, 1)
+        self.assertEqual(capability.id, "rpc.command.get_capabilities")
+        self.assertEqual(capability.name, "get_capabilities")
+        self.assertEqual(capability.scope, "host")
+        self.assertEqual(capability.execution, "sync")
+        self.assertEqual(capability.availability, "available")
+        self.assertEqual(capability.concurrency_class, "serial")
+        self.assertEqual(capability.required_features, ())
+        self.assertEqual(capability.input_schema["type"], "object")
+        self.assertIn("future_event", notification.capabilities.events)
+
+    def test_parse_ready_preserves_future_capability_classifiers(self) -> None:
+        manifest = json.loads(
+            (
+                Path(__file__).parent / "fixtures" / "rpc-capability-manifest.json"
+            ).read_text(encoding="utf-8")
+        )
+        capability = manifest["commands"][0]
+        capability["scope"] = "future-scope"
+        capability["execution"] = "future-execution"
+        capability["availability"] = "future-availability"
+        capability["concurrencyClass"] = "future-concurrency"
+
+        notification = parse_notification(
+            {
+                "type": "ready",
+                "protocolVersion": 1,
+                "capabilities": manifest,
+            }
+        )
+
+        self.assertIsInstance(notification, ReadyEvent)
+        assert isinstance(notification, ReadyEvent)
+        assert notification.capabilities is not None
+        parsed = notification.capabilities.commands[0]
+        self.assertEqual(parsed.scope, "future-scope")
+        self.assertEqual(parsed.execution, "future-execution")
+        self.assertEqual(parsed.availability, "future-availability")
+        self.assertEqual(parsed.concurrency_class, "future-concurrency")
+
     def test_parse_session_state(self) -> None:
         state = parse_session_state(
             {
@@ -46,6 +162,7 @@ class ProtocolParsingTests(unittest.TestCase):
                 },
                 "thinkingLevel": "medium",
                 "isStreaming": False,
+                "activityPhase": "maintenance",
                 "isCompacting": False,
                 "steeringMode": "one-at-a-time",
                 "followUpMode": "all",
@@ -92,6 +209,7 @@ class ProtocolParsingTests(unittest.TestCase):
         self.assertIsInstance(state, SessionState)
         self.assertEqual(state.session_id, "session-123")
         self.assertEqual(state.follow_up_mode, "all")
+        self.assertEqual(state.activity_phase, "maintenance")
         self.assertEqual(state.model.id if state.model else None, "claude-sonnet-4-5")
         self.assertEqual(state.todo_phases[0].tasks[0].status, "in_progress")
         # Legacy bare-string systemPrompt is accepted and wrapped to a tuple.
@@ -321,6 +439,34 @@ class ProtocolParsingTests(unittest.TestCase):
                     "interruptMode": "immediate",
                 }
             )
+
+    def test_parse_session_state_activity_phases_are_forward_compatible(self) -> None:
+        base_state = {
+            "sessionId": "session-123",
+            "steeringMode": "one-at-a-time",
+            "followUpMode": "one-at-a-time",
+            "interruptMode": "immediate",
+        }
+        for activity_phase in ("provider", "maintenance", "idle"):
+            with self.subTest(activity_phase=activity_phase):
+                state = parse_session_state(
+                    {**base_state, "activityPhase": activity_phase}
+                )
+                self.assertEqual(state.activity_phase, activity_phase)
+
+        future = parse_session_state(
+            {**base_state, "activityPhase": "future-settlement-phase"}
+        )
+        self.assertEqual(future.activity_phase, "maintenance")
+        explicit_null = parse_session_state(
+            {**base_state, "activityPhase": None, "isStreaming": False}
+        )
+        self.assertEqual(explicit_null.activity_phase, "maintenance")
+
+        legacy_streaming = parse_session_state({**base_state, "isStreaming": True})
+        legacy_idle = parse_session_state(base_state)
+        self.assertEqual(legacy_streaming.activity_phase, "maintenance")
+        self.assertEqual(legacy_idle.activity_phase, "idle")
 
     def test_parse_model_info_rejects_unknown_effort(self) -> None:
         with self.assertRaises(ValueError):
