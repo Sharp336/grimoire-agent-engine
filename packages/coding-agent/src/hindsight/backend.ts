@@ -17,6 +17,7 @@ import { createHindsightClient } from "./client";
 import { isHindsightConfigured, loadHindsightConfig } from "./config";
 import { type HindsightMessage, hasSubstantiveContent } from "./content";
 import { HindsightSessionState } from "./state";
+import { extractMessages } from "./transcript";
 
 const STATIC_INSTRUCTIONS = [
 	"# Memory",
@@ -236,7 +237,9 @@ async function installPrimaryState(
 		config,
 		session,
 		banksSet,
-		lastRetainedTurn: 0,
+		lastRetainedTurn:
+			previous?.lastRetainedTurn ??
+			extractMessages(session.sessionManager).filter(message => message.role === "user").length,
 		hasRecalledForFirstTurn: false,
 	});
 

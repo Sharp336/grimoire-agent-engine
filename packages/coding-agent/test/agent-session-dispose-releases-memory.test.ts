@@ -9,6 +9,8 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { hindsightBackend } from "@oh-my-pi/pi-coding-agent/hindsight/backend";
+import { HindsightApi } from "@oh-my-pi/pi-coding-agent/hindsight/client";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -268,6 +270,101 @@ describe("AgentSession dispose releases retained memory", () => {
 		expect(closeSpy).toHaveBeenCalledTimes(1);
 		expect(current.sessionManager.getEntries()).toHaveLength(0);
 		expect(current.agent.state.messages).toHaveLength(0);
+	});
+
+	it("retains the terminal assistant message after draining its persistence handler", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("expected bundled model");
+		const mock = createMockModel({ handler: () => ({ content: ["ok"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["test"], tools: [] },
+			streamFn: mock.stream,
+		});
+		const sessionManager = SessionManager.inMemory(tempDir.path());
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+		const settings = Settings.isolated({
+			"memory.backend": "hindsight",
+			"hindsight.apiUrl": "http://localhost:8888",
+			"hindsight.autoRetain": true,
+			"hindsight.retainEveryNTurns": 2,
+		});
+		const reached = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const runtime = new ExtensionRuntime();
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("message_end", async () => {
+					reached.resolve();
+					await release.promise;
+				});
+			},
+			tempDir.path(),
+			new EventBus(),
+			runtime,
+			"block-terminal-message-persistence",
+		);
+		const extensionRunner = new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry);
+		const current = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+			agentId: "Main",
+			extensionRunner,
+		});
+		session = current;
+
+		const retainSpy = vi.spyOn(HindsightApi.prototype, "retain").mockResolvedValue({} as never);
+		vi.spyOn(HindsightApi.prototype, "createBank").mockResolvedValue({} as never);
+		await hindsightBackend.start({
+			session: current,
+			settings,
+			modelRegistry,
+			agentDir: tempDir.path(),
+			taskDepth: 0,
+		});
+		current.sessionManager.appendMessage({
+			role: "user",
+			content: "retain this final interrupted turn",
+			timestamp: Date.now(),
+		});
+		const assistantMessage: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "terminal assistant content persisted during disposal" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "aborted",
+			timestamp: Date.now(),
+		};
+		current.agent.emitExternalEvent({ type: "message_end", message: assistantMessage });
+		await reached.promise;
+
+		const drainStarted = Promise.withResolvers<void>();
+		const detach = current.agent.setProviderResponseInterceptor.bind(current.agent);
+		vi.spyOn(current.agent, "setProviderResponseInterceptor").mockImplementation(interceptor => {
+			detach(interceptor);
+			if (interceptor === undefined) drainStarted.resolve();
+		});
+		const disposeP = current.dispose();
+		await drainStarted.promise;
+		expect(retainSpy).not.toHaveBeenCalled();
+
+		release.resolve();
+		await disposeP;
+		session = undefined;
+
+		expect(retainSpy).toHaveBeenCalledTimes(1);
+		expect(retainSpy.mock.calls[0]?.[1]).toContain("terminal assistant content persisted during disposal");
 	});
 
 	it("re-finalizes after the drain deadline so a late persist cannot repopulate the session", async () => {

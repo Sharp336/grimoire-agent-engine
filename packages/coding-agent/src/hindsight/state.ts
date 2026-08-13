@@ -369,12 +369,14 @@ export class HindsightSessionState {
 	}
 
 	/**
-	 * Wait for any turn-boundary retain, then persist the final partial cadence
-	 * window before the session state is detached during disposal.
+	 * Serialize the final partial-window retain with turn-boundary retains.
+	 * Disposal calls this only after the agent/event pipeline has drained, so
+	 * the snapshot includes the terminal assistant message.
 	 */
-	async flushAutoRetainOnDispose(): Promise<void> {
-		await this.#autoRetainTail;
-		await this.#retainIfDue(true);
+	flushAutoRetainOnDispose(): Promise<void> {
+		const run = this.#autoRetainTail.then(() => this.#retainIfDue(true));
+		this.#autoRetainTail = run;
+		return run;
 	}
 
 	async #retainIfDue(flushPartialWindow: boolean): Promise<void> {

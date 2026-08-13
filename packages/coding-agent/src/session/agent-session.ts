@@ -3922,8 +3922,6 @@ export class AgentSession {
 			shutdownTinyTitleClient(),
 			this.#disconnectOwnedMcp(),
 			advisorRecorderClosed,
-			hindsightState?.flushAutoRetainOnDispose() ?? Promise.resolve(),
-			hindsightState?.flushRetainQueue() ?? Promise.resolve(),
 			this.#disposeMnemopi(mnemopiState, options.mnemopiConsolidateTimeoutMs),
 		]);
 		for (const result of results) {
@@ -3938,8 +3936,6 @@ export class AgentSession {
 		await cleanupEmptyMoveSession(this.sessionManager, this.#movedFromEmptySessionFile);
 		this.#movedFromEmptySessionFile = undefined;
 		this.#closeAllProviderSessions("dispose");
-		this.setHindsightSessionState(undefined);
-		hindsightState?.dispose();
 		this.#disconnectFromAgent();
 		if (this.#unsubscribeAppendOnly) {
 			this.#unsubscribeAppendOnly();
@@ -3977,6 +3973,19 @@ export class AgentSession {
 		} catch (error) {
 			logger.warn("Active agent run still settling at dispose deadline", { error: String(error) });
 		}
+		const hindsightResults = await Promise.allSettled([
+			hindsightState?.flushAutoRetainOnDispose() ?? Promise.resolve(),
+			hindsightState?.flushRetainQueue() ?? Promise.resolve(),
+		]);
+		for (const result of hindsightResults) {
+			if (result.status === "rejected") {
+				logger.warn("Hindsight session finalization failed during dispose", {
+					error: String(result.reason),
+				});
+			}
+		}
+		this.setHindsightSessionState(undefined);
+		hindsightState?.dispose();
 
 		// Event handlers can reopen the append writer while they persist their
 		// terminal message; that pipeline has drained (or hit the deadline).

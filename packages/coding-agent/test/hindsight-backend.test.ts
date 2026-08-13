@@ -761,10 +761,7 @@ describe("hindsightBackend live bank routing", () => {
 		});
 		settings.set("hindsight.bankId", "omp");
 		settings.set("hindsight.scoping", "global");
-		const entries = [
-			{ role: "user" as const, text: "remember this routing coalesce fact" },
-			{ role: "assistant" as const, text: "acknowledged routing coalesce fact" },
-		];
+		const entries: Array<{ role: "user" | "assistant"; text: string }> = [];
 		const session = makeFakeSession({ sessionId: "s-coalesce", cwd: "/work/proj", entries, settings });
 
 		await hindsightBackend.start({
@@ -787,6 +784,10 @@ describe("hindsightBackend live bank routing", () => {
 		const next = session.getHindsightSessionState();
 		expect(next?.bankId).toBe("live-Minigames-proj");
 		expect(session.listenerCount()).toBe(1);
+		entries.push(
+			{ role: "user", text: "remember this routing coalesce fact" },
+			{ role: "assistant", text: "acknowledged routing coalesce fact" },
+		);
 
 		session.emit({ type: "agent_end", messages: [] });
 		await Bun.sleep(0);
@@ -875,10 +876,7 @@ describe("hindsightBackend retain queue flush on session teardown", () => {
 			"hindsight.apiUrl": "http://localhost:8888",
 			"hindsight.retainEveryNTurns": 2,
 		});
-		const entries = [
-			{ role: "user" as const, text: "one-turn sessions must still be retained on exit" },
-			{ role: "assistant" as const, text: "the partial cadence window is durable" },
-		];
+		const entries: Array<{ role: "user" | "assistant"; text: string }> = [];
 		const session = makeFakeSession({ sessionId: "s-dispose-auto-retain", settings, entries });
 
 		await hindsightBackend.start({
@@ -889,6 +887,10 @@ describe("hindsightBackend retain queue flush on session teardown", () => {
 			taskDepth: 0,
 		});
 		const state = session.getHindsightSessionState();
+		entries.push(
+			{ role: "user", text: "one-turn sessions must still be retained on exit" },
+			{ role: "assistant", text: "the partial cadence window is durable" },
+		);
 
 		session.emit({ type: "agent_end", messages: [] });
 		await state!.flushAutoRetainOnDispose();
@@ -897,6 +899,82 @@ describe("hindsightBackend retain queue flush on session teardown", () => {
 		expect(retainSpy.mock.calls[0]?.[0]).toBe(state!.bankId);
 		expect(retainSpy.mock.calls[0]?.[1]).toContain("one-turn sessions must still be retained on exit");
 		expect(state!.lastRetainedTurn).toBe(1);
+	});
+
+	it("does not re-retain a resumed transcript until a new user turn arrives", async () => {
+		const retainSpy = vi.spyOn(HindsightApi.prototype, "retain").mockResolvedValue({} as never);
+		vi.spyOn(HindsightApi.prototype, "createBank").mockResolvedValue({} as never);
+
+		const settings = Settings.isolated({
+			"memory.backend": "hindsight",
+			"hindsight.apiUrl": "http://localhost:8888",
+			"hindsight.retainEveryNTurns": 2,
+		});
+		const entries = [
+			{ role: "user" as const, text: "historical user turn" },
+			{ role: "assistant" as const, text: "historical assistant reply" },
+		];
+		const session = makeFakeSession({ sessionId: "s-resumed-auto-retain", settings, entries });
+
+		await hindsightBackend.start({
+			session: session as never,
+			settings,
+			modelRegistry: {} as never,
+			agentDir: "/tmp",
+			taskDepth: 0,
+		});
+		const state = session.getHindsightSessionState();
+
+		await state!.flushAutoRetainOnDispose();
+		expect(retainSpy).not.toHaveBeenCalled();
+
+		entries.push({ role: "user", text: "new user turn after resume" });
+		entries.push({ role: "assistant", text: "new assistant reply after resume" });
+		await state!.flushAutoRetainOnDispose();
+
+		expect(retainSpy).toHaveBeenCalledTimes(1);
+		expect(retainSpy.mock.calls[0]?.[1]).toContain("new assistant reply after resume");
+	});
+
+	it("serializes a disposal flush with a concurrently queued agent-end retain", async () => {
+		const retainStarted = Promise.withResolvers<void>();
+		const releaseRetain = Promise.withResolvers<void>();
+		const retainSpy = vi.spyOn(HindsightApi.prototype, "retain").mockImplementation(async () => {
+			retainStarted.resolve();
+			await releaseRetain.promise;
+			return {} as never;
+		});
+		vi.spyOn(HindsightApi.prototype, "createBank").mockResolvedValue({} as never);
+
+		const settings = Settings.isolated({
+			"memory.backend": "hindsight",
+			"hindsight.apiUrl": "http://localhost:8888",
+			"hindsight.retainEveryNTurns": 2,
+		});
+		const entries: Array<{ role: "user" | "assistant"; text: string }> = [];
+		const session = makeFakeSession({ sessionId: "s-concurrent-auto-retain", settings, entries });
+		await hindsightBackend.start({
+			session: session as never,
+			settings,
+			modelRegistry: {} as never,
+			agentDir: "/tmp",
+			taskDepth: 0,
+		});
+		const state = session.getHindsightSessionState();
+		entries.push(
+			{ role: "user", text: "first user turn" },
+			{ role: "assistant", text: "first assistant reply" },
+			{ role: "user", text: "second user turn" },
+			{ role: "assistant", text: "second assistant reply" },
+		);
+
+		const flushing = state!.flushAutoRetainOnDispose();
+		const cadence = state!.maybeRetainOnAgentEnd();
+		await retainStarted.promise;
+		expect(retainSpy).toHaveBeenCalledTimes(1);
+		releaseRetain.resolve();
+		await Promise.all([flushing, cadence]);
+		expect(retainSpy).toHaveBeenCalledTimes(1);
 	});
 
 	it("flushes the retain queue to the server before the session pointer clears", async () => {
