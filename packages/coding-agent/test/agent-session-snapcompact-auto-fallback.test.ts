@@ -1,7 +1,8 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
-import type { Message } from "@oh-my-pi/pi-ai";
+import type { Message, Model } from "@oh-my-pi/pi-ai";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -14,6 +15,7 @@ const UNRENDERABLE_SNAPCOMPACT_TEXT = "\uE000\uE001\uE002\uE003\uE004\uE005\uE00
 interface Harness {
 	session: AgentSession;
 	sessionManager: SessionManager;
+	activeModel: Model;
 	notices: string[];
 	awaitCompactionEnd: () => Promise<{ action: string; errorMessage?: string }>;
 	triggerThreshold: () => void;
@@ -21,12 +23,33 @@ interface Harness {
 
 interface HarnessOptions {
 	activeModel: { provider: GeneratedProvider; id: string };
+	compactionModel?: { provider: GeneratedProvider; id: string };
+	preferProviderNative?: boolean;
 	seedMessages?: Message[];
 }
 
-async function createHarness(modelRegistry: ModelRegistry, options: HarnessOptions): Promise<Harness> {
-	const activeModel = getBundledModel(options.activeModel.provider, options.activeModel.id);
-	if (!activeModel) throw new Error(`Missing bundled model ${options.activeModel.provider}/${options.activeModel.id}`);
+async function createHarness(
+	modelRegistry: ModelRegistry,
+	authStorage: AuthStorage,
+	options: HarnessOptions,
+): Promise<Harness> {
+	const bundledModel = getBundledModel(options.activeModel.provider, options.activeModel.id);
+	if (!bundledModel)
+		throw new Error(`Missing bundled model ${options.activeModel.provider}/${options.activeModel.id}`);
+	authStorage.setRuntimeApiKey(options.activeModel.provider, "test-key");
+	let activeModel = bundledModel;
+	if (options.compactionModel) {
+		const target = getBundledModel(options.compactionModel.provider, options.compactionModel.id);
+		if (!target) {
+			throw new Error(`Missing bundled model ${options.compactionModel.provider}/${options.compactionModel.id}`);
+		}
+		authStorage.setRuntimeApiKey(target.provider, "test-key");
+		activeModel = buildModel({
+			...bundledModel,
+			compactionModel: `${target.provider}/${target.id}`,
+			compat: bundledModel.compatConfig,
+		});
+	}
 	const agent = new Agent({
 		initialState: { model: activeModel, systemPrompt: ["Test"], tools: [], messages: [] },
 	});
@@ -45,6 +68,9 @@ async function createHarness(modelRegistry: ModelRegistry, options: HarnessOptio
 		"compaction.keepRecentTokens": 1,
 		modelRoles: { vision: "aimlapi/claude-sonnet-4-5-20250929" },
 	});
+	if (options.preferProviderNative !== undefined) {
+		settings.set("compaction.preferProviderNative", options.preferProviderNative);
+	}
 	const session = new AgentSession({
 		agent,
 		sessionManager,
@@ -100,10 +126,10 @@ async function createHarness(modelRegistry: ModelRegistry, options: HarnessOptio
 		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
 	};
 
-	return { session, sessionManager, notices, awaitCompactionEnd: () => end.promise, triggerThreshold };
+	return { session, sessionManager, activeModel, notices, awaitCompactionEnd: () => end.promise, triggerThreshold };
 }
 
-describe("AgentSession auto-snapcompact local-blocker fallback", () => {
+describe("AgentSession auto snapcompact routing", () => {
 	let session: AgentSession | undefined;
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
@@ -125,7 +151,7 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 	});
 
 	it("downgrades to context-full when the active model cannot read snapcompact frames", async () => {
-		const harness = await createHarness(modelRegistry, {
+		const harness = await createHarness(modelRegistry, authStorage, {
 			activeModel: { provider: "aimlapi", id: "alibaba/qwen3-coder-480b-a35b-instruct" },
 		});
 		session = harness.session;
@@ -144,7 +170,7 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 	});
 
 	it("downgrades to context-full when unsupported glyphs make snapcompact unsafe", async () => {
-		const harness = await createHarness(modelRegistry, {
+		const harness = await createHarness(modelRegistry, authStorage, {
 			activeModel: { provider: "aimlapi", id: "claude-sonnet-4-5-20250929" },
 			seedMessages: [
 				{
@@ -170,5 +196,81 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 			type: "compaction",
 			summary: "compacted",
 		});
+	});
+
+	it("uses context-full compaction for text-only DSV4 Pro even when native compaction is preferred", async () => {
+		const harness = await createHarness(modelRegistry, authStorage, {
+			activeModel: { provider: "zenmux", id: "deepseek/deepseek-v4-pro" },
+			preferProviderNative: true,
+		});
+		session = harness.session;
+		expect(harness.activeModel.input).toEqual(["text"]);
+		harness.triggerThreshold();
+
+		const result = await harness.awaitCompactionEnd();
+		expect(result).toEqual({ action: "context-full", errorMessage: undefined });
+		expect(harness.notices).toContain(
+			"snapcompact needs a vision-capable active model (deepseek/deepseek-v4-pro is text-only); using context-full auto-compaction instead.",
+		);
+		expect(
+			harness.notices.some(message => message.includes("provider-native compaction instead of snapcompact")),
+		).toBe(false);
+	});
+
+	it("keeps snapcompact ahead of provider-native compaction by default", async () => {
+		const harness = await createHarness(modelRegistry, authStorage, {
+			activeModel: { provider: "openai-codex", id: "gpt-5.5" },
+			seedMessages: [{ role: "user", content: UNRENDERABLE_SNAPCOMPACT_TEXT.repeat(10), timestamp: Date.now() }],
+		});
+		session = harness.session;
+		harness.triggerThreshold();
+
+		const result = await harness.awaitCompactionEnd();
+		expect(result.action).toBe("context-full");
+		expect(
+			harness.notices.find(message =>
+				message.startsWith("snapcompact disabled: unsupported characters for selected snapcompact font"),
+			),
+		).toBeDefined();
+		expect(
+			harness.notices.some(message => message.includes("provider-native compaction instead of snapcompact")),
+		).toBe(false);
+	});
+
+	it("uses provider-native compaction instead of snapcompact when preferred", async () => {
+		const harness = await createHarness(modelRegistry, authStorage, {
+			activeModel: { provider: "openai-codex", id: "gpt-5.5" },
+			preferProviderNative: true,
+		});
+		session = harness.session;
+		harness.triggerThreshold();
+
+		const result = await harness.awaitCompactionEnd();
+		expect(result).toEqual({ action: "context-full", errorMessage: undefined });
+		expect(harness.notices).toContain(
+			"openai-codex compacts server-side; using provider-native compaction instead of snapcompact.",
+		);
+	});
+
+	it("keeps snapcompact when the configured compaction model is not provider-native", async () => {
+		const harness = await createHarness(modelRegistry, authStorage, {
+			activeModel: { provider: "openai-codex", id: "gpt-5.5" },
+			compactionModel: { provider: "aimlapi", id: "claude-sonnet-4-5-20250929" },
+			preferProviderNative: true,
+			seedMessages: [{ role: "user", content: UNRENDERABLE_SNAPCOMPACT_TEXT.repeat(10), timestamp: Date.now() }],
+		});
+		session = harness.session;
+		harness.triggerThreshold();
+
+		const result = await harness.awaitCompactionEnd();
+		expect(result.action).toBe("context-full");
+		expect(
+			harness.notices.find(message =>
+				message.startsWith("snapcompact disabled: unsupported characters for selected snapcompact font"),
+			),
+		).toBeDefined();
+		expect(
+			harness.notices.some(message => message.includes("provider-native compaction instead of snapcompact")),
+		).toBe(false);
 	});
 });

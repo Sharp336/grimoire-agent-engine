@@ -3,13 +3,18 @@ import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import type { Message, Model } from "@oh-my-pi/pi-ai";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+
+interface HarnessOptions {
+	activeModel?: { provider: GeneratedProvider; id: string };
+	preferProviderNative?: boolean;
+}
 
 /**
  * Regression for issue #5064.
@@ -43,19 +48,22 @@ describe("AgentSession manual snapcompact text-only fallback", () => {
 		}
 	});
 
-	async function createHarness(): Promise<{
+	async function createHarness(options: HarnessOptions = {}): Promise<{
 		session: AgentSession;
 		sessionManager: SessionManager;
 		activeModel: Model;
 		notices: string[];
 	}> {
-		const activeModel = getBundledModel("aimlapi", "alibaba/qwen3-coder-480b-a35b-instruct");
-		if (!activeModel) throw new Error("Expected bundled text-only model");
-		expect(activeModel.input).not.toContain("image");
+		const modelRef = options.activeModel ?? {
+			provider: "aimlapi",
+			id: "alibaba/qwen3-coder-480b-a35b-instruct",
+		};
+		const activeModel = getBundledModel(modelRef.provider, modelRef.id);
+		if (!activeModel) throw new Error(`Missing bundled model ${modelRef.provider}/${modelRef.id}`);
 
-		tempDir = TempDir.createSync("@pi-manual-snapcompact-text-only-");
+		tempDir = TempDir.createSync("@pi-manual-snapcompact-");
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
-		authStorage.setRuntimeApiKey("aimlapi", "test-key");
+		authStorage.setRuntimeApiKey(modelRef.provider, "test-key");
 		const modelRegistry = new ModelRegistry(authStorage);
 
 		const agent = new Agent({
@@ -90,6 +98,9 @@ describe("AgentSession manual snapcompact text-only fallback", () => {
 			"compaction.strategy": "snapcompact",
 			"compaction.keepRecentTokens": 1,
 		});
+		if (options.preferProviderNative !== undefined) {
+			settings.set("compaction.preferProviderNative", options.preferProviderNative);
+		}
 		session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
 		const notices: string[] = [];
 		session.subscribe(event => {
@@ -143,5 +154,44 @@ describe("AgentSession manual snapcompact text-only fallback", () => {
 			`snapcompact needs a vision-capable model (${harness.activeModel.id} is text-only)`,
 		);
 		expect(harness.sessionManager.getBranch().find(entry => entry.type === "compaction")).toBeUndefined();
+	});
+
+	it("uses provider-native compaction for a bare /compact when preferred", async () => {
+		const harness = await createHarness({
+			activeModel: { provider: "openai-codex", id: "gpt-5.5" },
+			preferProviderNative: true,
+		});
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => ({
+			summary: "native summary",
+			shortSummary: "native",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: 42,
+			details: { provider: model.provider, model: model.id },
+		}));
+
+		const result = await harness.session.compact();
+
+		expect(result.summary).toBe("native summary");
+		expect(compactSpy).toHaveBeenCalled();
+		expect(harness.notices).toContain(
+			"openai-codex compacts server-side; using provider-native compaction instead of snapcompact.",
+		);
+	});
+
+	it("keeps explicit /compact snapcompact local when native compaction is preferred", async () => {
+		const harness = await createHarness({
+			activeModel: { provider: "openai-codex", id: "gpt-5.3-codex-spark" },
+			preferProviderNative: true,
+		});
+		expect(harness.activeModel.input).not.toContain("image");
+		const compactSpy = vi.spyOn(compactionModule, "compact");
+
+		await expect(harness.session.compact(undefined, { mode: "snapcompact" })).rejects.toThrow(
+			"snapcompact cannot run locally: gpt-5.3-codex-spark is text-only.",
+		);
+		expect(compactSpy).not.toHaveBeenCalled();
+		expect(
+			harness.notices.some(message => message.includes("provider-native compaction instead of snapcompact")),
+		).toBe(false);
 	});
 });

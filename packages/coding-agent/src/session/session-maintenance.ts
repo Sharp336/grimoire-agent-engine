@@ -165,6 +165,14 @@ const PRUNE_IDLE_FLUSH_MS = 90 * 60_000;
  */
 const COMPACTION_RECOVERY_BAND = 0.8;
 
+/**
+ * Provider-native compaction preserves the backend history that later turns
+ * replay, while a local snapcompact archive replaces that history with images.
+ */
+function nativeOverSnapcompactNotice(provider: string): string {
+	return `${provider} compacts server-side; using provider-native compaction instead of snapcompact.`;
+}
+
 function mergeLlmCompactionPreserveData(
 	hookPreserveData: Record<string, unknown> | undefined,
 	resultPreserveData: Record<string, unknown> | undefined,
@@ -665,7 +673,7 @@ export class SessionMaintenance {
 			// Strategy honored on manual /compact too. Custom instructions (public
 			// user focus OR internal plan-mode guidance) imply a directed LLM
 			// summary; a text-only model cannot read snapcompact frames.
-			const wantsSnapcompact =
+			let wantsSnapcompact =
 				compactionPrep.kind !== "fromHook" &&
 				effectiveSettings.strategy === "snapcompact" &&
 				!customInstructions &&
@@ -677,6 +685,14 @@ export class SessionMaintenance {
 			// auto-compaction path) so a routine /compact still completes on a
 			// text-only model (issue #5064).
 			const explicitSnapcompact = compactMode?.name === "snapcompact";
+			const manualNativeTarget =
+				wantsSnapcompact && !explicitSnapcompact
+					? this.#preferredNativeCompactionTarget(compactionCandidates, effectiveSettings)
+					: undefined;
+			if (manualNativeTarget) {
+				this.#host.emitNotice("info", nativeOverSnapcompactNotice(manualNativeTarget.provider), "compaction");
+				wantsSnapcompact = false;
+			}
 			let snapcompactReady = wantsSnapcompact;
 			const snapcompactShapeSetting = this.#host.settings.get("snapcompact.shape");
 			let snapcompactShape: snapcompact.Shape | undefined;
@@ -1483,6 +1499,19 @@ export class SessionMaintenance {
 		return this.resolveCompactionModelCandidates(this.#model, availableModels, filter);
 	}
 
+	/**
+	 * Returns the head of the actual compaction candidate chain when the user
+	 * opted into provider-native precedence and that candidate supports it.
+	 */
+	#preferredNativeCompactionTarget(
+		candidates: Model[],
+		settings: Pick<CompactionSettings, "preferProviderNative" | "remoteEnabled" | "remoteStreamingV2Enabled">,
+	): Model | undefined {
+		if (settings.preferProviderNative !== true) return undefined;
+		const target = candidates[0] ?? this.#model;
+		return target && shouldUseProviderNativeCompaction(target, settings) ? target : undefined;
+	}
+
 	resolveCompactionModelCandidates(
 		preferredModel: Model | null | undefined,
 		availableModels: Model[],
@@ -2233,6 +2262,17 @@ export class SessionMaintenance {
 				: compactionSettings.strategy === "handoff" && reason !== "overflow" && !suppressHandoff
 					? "handoff"
 					: "context-full";
+		const autoNativeTarget =
+			action === "snapcompact"
+				? this.#preferredNativeCompactionTarget(
+						this.#getCompactionModelCandidates(this.#host.modelRegistry.getAvailable()),
+						compactionSettings,
+					)
+				: undefined;
+		if (autoNativeTarget) {
+			this.#host.emitNotice("info", nativeOverSnapcompactNotice(autoNativeTarget.provider), "compaction");
+			action = "context-full";
+		}
 		if (action === "snapcompact" && this.#model && !this.#model.input.includes("image")) {
 			this.#host.emitNotice(
 				"warning",

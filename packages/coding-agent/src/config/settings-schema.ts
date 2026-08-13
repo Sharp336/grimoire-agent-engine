@@ -2267,6 +2267,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"compaction.preferProviderNative": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "context",
+			group: "Compaction",
+			label: "Prefer Provider-Native",
+			description:
+				"When snapcompact is configured, prefer provider-native compaction for compatible models; explicit /compact snapcompact stays local",
+		},
+	},
+
 	"compaction.remoteStreamingV2Enabled": {
 		type: "boolean",
 		default: true,
@@ -5677,6 +5689,7 @@ export interface CompactionSettings {
 	handoffSaveToDisk: boolean;
 	autoContinue: boolean;
 	remoteEnabled: boolean;
+	preferProviderNative: boolean;
 	remoteEndpoint: string | undefined;
 	remoteStreamingV2Enabled: boolean;
 	v2RetainedMessageBudget: number;
