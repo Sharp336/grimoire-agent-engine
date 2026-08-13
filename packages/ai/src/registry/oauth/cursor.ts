@@ -228,28 +228,29 @@ export async function resolveCursorAccessToken(
 	apiKeyOrAccessToken: string,
 	fetchImpl?: typeof fetch,
 ): Promise<string> {
-	if (!isRawCursorApiKey(apiKeyOrAccessToken)) {
-		return apiKeyOrAccessToken;
+	const credential = apiKeyOrAccessToken.trim();
+	if (!isRawCursorApiKey(credential)) {
+		return credential;
 	}
-	const cached = rawApiKeyAccessTokenCache.get(apiKeyOrAccessToken);
+	const cached = rawApiKeyAccessTokenCache.get(credential);
 	if (cached && cached.expires > Date.now()) {
 		return cached.access;
 	}
-	const existing = pendingRawApiKeyExchanges.get(apiKeyOrAccessToken);
+	const existing = pendingRawApiKeyExchanges.get(credential);
 	if (existing) {
 		return existing;
 	}
-	const pending = refreshCursorToken(apiKeyOrAccessToken, fetchImpl)
+	const pending = refreshCursorToken(credential, fetchImpl)
 		.then(credentials => {
-			rawApiKeyAccessTokenCache.set(apiKeyOrAccessToken, {
+			rawApiKeyAccessTokenCache.set(credential, {
 				access: credentials.access,
 				expires: credentials.expires,
 			});
 			return credentials.access;
 		})
 		.finally(() => {
-			pendingRawApiKeyExchanges.delete(apiKeyOrAccessToken);
+			pendingRawApiKeyExchanges.delete(credential);
 		});
-	pendingRawApiKeyExchanges.set(apiKeyOrAccessToken, pending);
+	pendingRawApiKeyExchanges.set(credential, pending);
 	return pending;
 }

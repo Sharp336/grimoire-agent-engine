@@ -47,4 +47,32 @@ describe("catalog Cursor dashboard API key exchange", () => {
 		expect(second).toBe(access);
 		expect(fetchImpl).toHaveBeenCalledTimes(1);
 	});
+
+	test("trims dashboard keys before exchanging them", async () => {
+		const access = jwtWithExp(Math.floor(Date.now() / 1000) + 3600);
+		const fetchImpl = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+			const headers = new Headers(init?.headers);
+			expect(headers.get("authorization")).toBe("Bearer crsr_testkey");
+			return new Response(JSON.stringify({ accessToken: access }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		});
+
+		await expect(resolveCursorBearerToken("  crsr_testkey\n", { fetch: fetchImpl })).resolves.toBe(access);
+	});
+
+	test("aborts a hung exchange when timeoutMs elapses", async () => {
+		const fetchImpl = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+			const { promise, reject } = Promise.withResolvers<Response>();
+			init?.signal?.addEventListener("abort", () => {
+				reject(init.signal?.reason ?? new Error("aborted"));
+			});
+			return promise;
+		});
+
+		await expect(
+			resolveCursorBearerToken("crsr_testkey", { fetch: fetchImpl, timeoutMs: 20 }),
+		).rejects.toBeTruthy();
+	});
 });

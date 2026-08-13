@@ -151,6 +151,7 @@ import {
 	sanitizeText,
 } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
+import { resolveCursorAccessToken } from "../registry/oauth/cursor";
 import type {
 	Api,
 	AssistantMessage,
@@ -592,15 +593,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			if (!rawApiKey) {
 				throw new AIError.MissingApiKeyError(undefined, "Cursor API key (access token) is required");
 			}
-			// Dashboard keys (`crsr_...` / `cursor_...`) cannot authenticate
-			// AgentService/Run. Exchange them for a session JWT first, matching
-			// the official CLI's CURSOR_API_KEY path. Session tokens pass
-			// through. Dynamic import keeps the common already-a-token path
-			// out of the eager registry graph.
-			const apiKey =
-				rawApiKey.startsWith("crsr_") || rawApiKey.startsWith("cursor_")
-					? await (await import("../registry/oauth/cursor")).resolveCursorAccessToken(rawApiKey)
-					: rawApiKey;
+			const apiKey = await resolveCursorAccessToken(rawApiKey);
 
 			const conversationId = options?.conversationId ?? options?.sessionId ?? crypto.randomUUID();
 			const blobStore = conversationBlobStores.get(conversationId) ?? new Map<string, Uint8Array>();

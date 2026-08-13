@@ -56,23 +56,34 @@ describe("resolveCursorAccessToken", () => {
 		expect(calls).toBe(1);
 	});
 
+	it("exchanges a whitespace-padded dashboard key instead of sending it raw", async () => {
+		const access = jwtWithExp(Math.floor(Date.now() / 1000) + 3600);
+		const fetchImpl = mock(async (_input, init) => {
+			const headers = new Headers(init?.headers);
+			expect(headers.get("Authorization")).toBe("Bearer crsr_testkey");
+			return new Response(JSON.stringify({ accessToken: access }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		}) as unknown as typeof fetch;
+
+		await expect(resolveCursorAccessToken("  crsr_testkey\n", fetchImpl)).resolves.toBe(access);
+	});
+
 	it("single-flights concurrent exchanges for the same key", async () => {
 		const access = jwtWithExp(Math.floor(Date.now() / 1000) + 3600);
 		let calls = 0;
-		let release!: (value: Response) => void;
-		const gate = new Promise<Response>(resolve => {
-			release = resolve;
-		});
+		const { promise, resolve } = Promise.withResolvers<Response>();
 		const fetchImpl = mock(() => {
 			calls += 1;
-			return gate;
+			return promise;
 		}) as unknown as typeof fetch;
 
 		const pending = [
 			resolveCursorAccessToken("crsr_parallel", fetchImpl),
 			resolveCursorAccessToken("crsr_parallel", fetchImpl),
 		];
-		release(
+		resolve(
 			new Response(JSON.stringify({ accessToken: access }), {
 				status: 200,
 				headers: { "content-type": "application/json" },

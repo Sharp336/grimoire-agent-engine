@@ -125,24 +125,17 @@ function decodeCursorAccessTokenExpiry(accessToken: string): number {
 	return Date.now() + 3600 * 1000;
 }
 
-function cursorExchangeFetch(): typeof fetch {
-	const env = typeof Bun !== "undefined" ? Bun.env : process.env;
-	const proxy = env.PI_PROXY_CURSOR || env.PI_PROXY;
-	if (!proxy) {
-		return fetch;
-	}
-	return (input, init) => fetch(input, { ...init, proxy } as RequestInit);
-}
-
 async function exchangeCursorApiKey(
 	apiKey: string,
 	baseUrl: string,
 	fetchImpl: typeof fetch,
+	signal?: AbortSignal,
 ): Promise<ExchangedCursorToken> {
 	const response = await fetchImpl(`${baseUrl}${CURSOR_API_KEY_EXCHANGE_PATH}`, {
 		method: "POST",
 		headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
 		body: "{}",
+		signal,
 	});
 	if (!response.ok) {
 		const errorText = await response.text().catch(() => "");
@@ -162,14 +155,15 @@ async function exchangeCursorApiKey(
  */
 export async function resolveCursorBearerToken(
 	apiKey: string,
-	options?: { baseUrl?: string; fetch?: typeof fetch },
+	options?: { baseUrl?: string; fetch?: typeof fetch; timeoutMs?: number },
 ): Promise<string> {
-	if (!isRawCursorApiKey(apiKey)) {
-		return apiKey;
+	const credential = apiKey.trim();
+	if (!isRawCursorApiKey(credential)) {
+		return credential;
 	}
 	const baseUrl = (options?.baseUrl ?? CURSOR_DEFAULT_BASE_URL).replace(/\/+$/, "");
-	const fetchImpl = options?.fetch ?? cursorExchangeFetch();
-	const cacheKey = `${baseUrl}\u0000${apiKey}`;
+	const fetchImpl = options?.fetch ?? fetch;
+	const cacheKey = `${baseUrl}\u0000${credential}`;
 	const cached = exchangedTokenCache.get(cacheKey);
 	if (cached && cached.expiresAt > Date.now()) {
 		return cached.accessToken;
@@ -178,7 +172,12 @@ export async function resolveCursorBearerToken(
 	if (existing) {
 		return existing;
 	}
-	const pending = exchangeCursorApiKey(apiKey, baseUrl, fetchImpl)
+	const timeoutMs = options?.timeoutMs;
+	const signal =
+		timeoutMs !== undefined && Number.isFinite(timeoutMs) && timeoutMs > 0
+			? AbortSignal.timeout(timeoutMs)
+			: undefined;
+	const pending = exchangeCursorApiKey(credential, baseUrl, fetchImpl, signal)
 		.then(result => {
 			exchangedTokenCache.set(cacheKey, result);
 			return result.accessToken;
@@ -202,7 +201,7 @@ export async function fetchCursorUsableModels(
 	const timeoutMs = options.timeoutMs ?? 5_000;
 	try {
 		const baseUrl = (options.baseUrl ?? CURSOR_DEFAULT_BASE_URL).replace(/\/+$/, "");
-		const bearerToken = await resolveCursorBearerToken(options.apiKey, { baseUrl });
+		const bearerToken = await resolveCursorBearerToken(options.apiKey, { baseUrl, timeoutMs });
 		const requestPayload = create(GetUsableModelsRequestSchema, {
 			customModelIds: normalizeCustomModelIds(options.customModelIds),
 		});
