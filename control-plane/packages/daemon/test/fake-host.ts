@@ -37,6 +37,14 @@ export interface FakeHostController {
   emitUpdate(sessionId: string, update: unknown): void;
   /** Session ids handed out by `session/new`, in order. */
   sessions: string[];
+  /**
+   * Session ids the peer was asked to load via `session/load`, in order.
+   * Kept separate from `sessions` on purpose: a resume that mistakenly
+   * minted a fresh session would show up in `sessions`, not here, and a test
+   * asserting `sessions` stayed empty is how "resumed, not restarted" is
+   * proven at the wire level.
+   */
+  loads: string[];
   /** Every `session/prompt` the supervisor sent. */
   prompts: Array<{ sessionId: string; text: string }>;
   /** Session ids the peer was told to cancel, in order. */
@@ -64,6 +72,7 @@ export function createFakeHost(): FakeHostController {
   let nextPid = 424_242;
   let latest: AcpClient | null = null;
   const sessions: string[] = [];
+  const loads: string[] = [];
   const prompts: Array<{ sessionId: string; text: string }> = [];
   const waiters = new Map<number | string, (result: unknown) => void>();
   /** Which host serves each session, so a frame reaches the right transport. */
@@ -165,6 +174,24 @@ export function createFakeHost(): FakeHostController {
       return;
     }
 
+    if (msg.method === "session/load") {
+      // Real `omp acp` resolves this against an on-disk session file matching
+      // `sessionId` and replays its transcript as `session/update` frames
+      // before answering; `sessionId` is never minted here the way
+      // `session/new` mints one. That distinction (`loads` vs `sessions`) is
+      // the thing a "resume, don't restart" test asserts on.
+      const sessionId = String(msg.params?.sessionId);
+      loads.push(sessionId);
+      sessionClients.set(sessionId, client);
+      if (!modes.has(sessionId)) modes.set(sessionId, "default");
+      toClient(client, {
+        jsonrpc: "2.0",
+        id: msg.id,
+        result: { configOptions: configFor(sessionId), modes: [] },
+      });
+      return;
+    }
+
     if (msg.method === "session/set_mode") {
       const sessionId = String(msg.params?.sessionId);
       const modeId = String(msg.params?.modeId);
@@ -246,6 +273,7 @@ export function createFakeHost(): FakeHostController {
   return {
     factory,
     sessions,
+    loads,
     prompts,
     cancels,
     modeOf: (sessionId) => modes.get(sessionId) ?? "default",

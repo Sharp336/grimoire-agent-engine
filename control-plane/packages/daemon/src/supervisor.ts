@@ -106,6 +106,28 @@ export interface CreateAgentInput {
   labels?: Record<string, string>;
 }
 
+/**
+ * Resume an existing on-disk session under a daemon-owned agent.
+ *
+ * `sessionId` identifies the session, never a machine (see
+ * control-plane/docs/portability.md#the-constraint-this-document-exists-to-impose,
+ * point 1): it is only ever looked up on the host this call runs against,
+ * through that host's own on-disk session store, exactly like `newSession`'s
+ * cwd is. Nothing here assumes the session was created by, or previously
+ * served by, this daemon -- only that a `.jsonl` matching `sessionId` is
+ * resolvable from `cwd` on the machine the spawned `omp acp` runs on. A
+ * caller resuming a session teleported from elsewhere re-roots `cwd` first;
+ * this method does not know or care where the session came from.
+ */
+export interface ResumeAgentInput {
+  name: string;
+  cwd: string;
+  sessionId: string;
+  host?: HostSpec;
+  routineId?: string;
+  labels?: Record<string, string>;
+}
+
 interface HostEntry {
   /**
    * Key into `#hosts`. A pid for a local host, and `<kind>:<id>` for a
@@ -255,10 +277,66 @@ export class Supervisor {
       // beats silently running a "cloud" agent on the operator's laptop.
       throw new Error(`host kind ${spec.kind} requires the provisioner`);
     }
+    const entry = await this.#hostFor(spec, input.cwd, who);
+    return await this.#bindAgentToSession(input, spec, entry, who, {}, sessionEntry =>
+      sessionEntry.host.client.newSession(input.cwd),
+    );
+  }
 
+  /**
+   * Resume an existing on-disk session under a new daemon-owned agent, via
+   * ACP `session/load`. See {@link ResumeAgentInput} for what "existing"
+   * means here: `sessionId` is looked up on whichever host `cwd` resolves to
+   * when the spawned `omp acp` opens it, not against anything this daemon
+   * remembers creating.
+   *
+   * Refuses a session id this daemon already has an agent holding: loading it
+   * twice would point two ACP hosts at the same session file with no lock
+   * between them (upstream `SessionManager` has none -- see session-manager.ts),
+   * and the second writer would corrupt the first one's transcript instead of
+   * observing it. A session that is `live-tui` in some other, unmanaged OMP
+   * process is the identical hazard from the other direction, and this
+   * daemon has no lock file to detect it from here. That is a real,
+   * un-hidden constraint, not an oversight: resuming a session this daemon
+   * does not already know is idle is the caller's responsibility (informed by
+   * the session index's live/dormant status), the same "opt-in, not forced"
+   * shape `/collab` has for taking over a session live in a terminal.
+   */
+  async resumeAgent(input: ResumeAgentInput, actor: Actor): Promise<Agent> {
+    const who = this.#authorize(actor, SCOPE_MANAGE, "agent.resume");
+    const heldBy = this.#sessionAgent.get(input.sessionId);
+    if (heldBy) {
+      throw new Error(`session ${input.sessionId} is already held by agent ${heldBy}`);
+    }
+    const spec: HostSpec = input.host ?? { kind: "local" };
+    if (spec.kind !== "local" && this.#provisioner === undefined) {
+      throw new Error(`host kind ${spec.kind} requires the provisioner`);
+    }
+    const entry = await this.#hostFor(spec, input.cwd, who);
+    return await this.#bindAgentToSession(input, spec, entry, who, { resumed: true }, async sessionEntry => {
+      await sessionEntry.host.client.loadSession(input.sessionId, input.cwd);
+      return input.sessionId;
+    });
+  }
+
+  /**
+   * Shared tail of `createAgent`/`resumeAgent`: allocate the agent row,
+   * obtain an ACP session id through `openSession` (new or loaded), and wire
+   * it into the same routing tables and `#hostFor`-installed permission/
+   * elicitation callbacks either caller goes through. There is exactly one
+   * path from an ACP session id to the policy gate; this is what keeps it
+   * that way as a second creation path is added.
+   */
+  async #bindAgentToSession(
+    input: CreateAgentInput | ResumeAgentInput,
+    spec: HostSpec,
+    entry: HostEntry,
+    who: Actor,
+    auditDetail: Record<string, unknown>,
+    openSession: (entry: HostEntry) => Promise<string>,
+  ): Promise<Agent> {
     const id: AgentId = `agt_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
     const now = new Date().toISOString();
-    const entry = await this.#hostFor(spec, input.cwd, who);
 
     const agent: Agent = {
       id,
@@ -275,10 +353,10 @@ export class Supervisor {
 
     let sessionId: string;
     try {
-      sessionId = await entry.host.client.newSession(input.cwd);
+      sessionId = await openSession(entry);
     } catch (err) {
-      // The host answered `initialize` but cannot serve a session. Release it
-      // if it serves nobody else: a provisioned container that no handle
+      // The host answered `initialize` but cannot serve this session. Release
+      // it if it serves nobody else: a provisioned container that no handle
       // points at is never reclaimed, and the agent row must not be left
       // claiming a host that is gone.
       if (entry.agents.size === 0) await this.#releaseHost(entry);
@@ -298,7 +376,7 @@ export class Supervisor {
       agentId: id,
       actorDeviceId: who.deviceId,
       outcome: "ok",
-      detail: { cwd: input.cwd, host: spec.kind },
+      detail: { cwd: input.cwd, host: spec.kind, sessionId, ...auditDetail },
     });
     this.#events.onAgentsChanged?.(this.listAgents());
     return agent;
