@@ -42,12 +42,14 @@ import {
   type Actor,
   type AgentId,
   type Device,
+  type EndpointOffer,
   type ServerFrame,
 } from "@ompd/core";
 import type { TunnelDaemon } from "@ompd/tunnel";
 import { SleepGuard, type AwakeProcess } from "./awake.ts";
 import { createTunnelDialer } from "./tunnel/dial.ts";
-import { loadIdentity } from "./tunnel/identity.ts";
+import { identityPath, loadIdentity } from "./tunnel/identity.ts";
+import { reachableEndpoints } from "./endpoints.ts";
 import { EvolutionEngine, ProposalStore } from "./evolution/index.ts";
 import { Gateway, GatewayEvents, type VoiceHandler } from "./gateway/index.ts";
 import { homeIdFor } from "./home-id.ts";
@@ -330,6 +332,14 @@ export class Ompd {
   #sessionIndex: SessionIndex;
   #evolution: EvolutionEngine;
   #gateway: Gateway;
+  /**
+   * The port the gateway actually bound, read back from `listen()`.
+   *
+   * `#config.port` may be `0`, a request for whatever the OS hands back, so
+   * anything that has to name this daemon's real address, `/v1/endpoints`
+   * included, reads this instead of the config value.
+   */
+  #boundPort: number | undefined;
   #sleepGuard: SleepGuard;
   /** The outbound leg, when a hub is configured. */
   #tunnel: TunnelDaemon | undefined;
@@ -485,6 +495,7 @@ export class Ompd {
       routines: this.#scheduler,
       sessions: this.#hosts,
       sessionIndex: this.#sessionIndex,
+      endpoints: () => this.#reachableEndpoints(),
       onWebViewResult: (agentId, requestId, result) =>
         this.#webViewBridge.resolveResult(agentId, requestId, result),
       onWebViewUnavailable: (agentId) => this.#webViewBridge.cancelAgent(agentId, NO_TARGET),
@@ -511,6 +522,26 @@ export class Ompd {
     });
     sendWebViewAction = (agentId, requestId, action) =>
       this.#gateway.sendWebViewAction(agentId, requestId, action);
+  }
+
+  /**
+   * Every way a device can reach this daemon right now, recomputed per
+   * request rather than cached at construction so a hub dialed after boot is
+   * reflected without a restart.
+   *
+   * Identity is read here, never created: minting one as a side effect of
+   * listing endpoints would hand a hub-less daemon a daemon id nobody asked
+   * for. `loadIdentity` only runs when `hubUrl` is set, and only once the
+   * identity file is confirmed to already exist.
+   */
+  #reachableEndpoints(): EndpointOffer[] {
+    const { host, hubUrl } = this.#config;
+    // `#config.port` may be `0`, a request for whatever the OS hands back;
+    // the seam has to name the address the gateway actually bound.
+    const port = this.#boundPort ?? this.#config.port;
+    const daemonId =
+      hubUrl !== "" && existsSync(identityPath(this.#home)) ? loadIdentity(this.#home).daemonId : undefined;
+    return reachableEndpoints({ host, port, hubUrl, daemonId });
   }
 
   /**
@@ -694,6 +725,7 @@ export class Ompd {
 
     const bootstrap = this.#bootstrapLocalOperator();
     const port = await this.#gateway.listen();
+    this.#boundPort = port;
     const url = `http://${this.#config.host}:${port}`;
     // Published only once the port is real, so nothing can read an address
     // that was never bound. This is what lets the CLI find a daemon started

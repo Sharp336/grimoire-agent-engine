@@ -83,7 +83,7 @@ export function App(): JSX.Element {
     <Console
       // A new pairing is a new client, a new socket, and a clean session map.
       // Without this key the old console would keep its state across an unpair.
-      key={`${boot.connection.url}:${boot.connection.token.length}`}
+      key={`${boot.connection.transport === "direct" ? boot.connection.url : `${boot.connection.hubUrl}:${boot.connection.daemonId}`}:${boot.connection.token.length}`}
       connection={boot.connection}
       onUnpair={unpair}
     />

@@ -2796,13 +2796,12 @@ describe("ACP agent MCP server configuration (late-connecting servers)", () => {
 	}
 
 	/**
-	 * Regression test: an MCP server that finishes connecting after
-	 * `MCPManager`'s 250ms startup race window used to have its tools
-	 * silently discarded — `#configureMcpServers` only called
-	 * `session.refreshMCPTools` once, synchronously, with whatever
-	 * `connectServers` returned inside the race window. The background
-	 * `onToolsChanged` -> `refreshMCPTools` follow-up now runs through a
-	 * `refreshChain` queue so late connections still land in the session.
+	 * An ACP client can mark a mounted MCP server pre-approved via
+	 * `_meta["omp.toolApproval"]`, delegating the generic wrapper approval to
+	 * whatever gate the client itself already ran (e.g. the WebView bridge's
+	 * own approval). Only that trusted, non-serializable connection field may
+	 * grant this; a server that merely claims `approval: "allow"` in its own
+	 * config must not self-authorize.
 	 */
 	it("marks only an ACP client-authorized MCP connection as pre-approved", async () => {
 		const harness = await createHarness();
@@ -2837,6 +2836,15 @@ describe("ACP agent MCP server configuration (late-connecting servers)", () => {
 		}
 	}, 15_000);
 
+	/**
+	 * Regression test: an MCP server that finishes connecting after
+	 * `MCPManager`'s 250ms startup race window used to have its tools
+	 * silently discarded — `#configureMcpServers` only called
+	 * `session.refreshMCPTools` once, synchronously, with whatever
+	 * `connectServers` returned inside the race window. The background
+	 * `onToolsChanged` -> `refreshMCPTools` follow-up now runs through a
+	 * `refreshChain` queue so late connections still land in the session.
+	 */
 	it("delivers a late-connecting server's tools via a queued refreshMCPTools call", async () => {
 		const harness = await createHarness();
 		const refreshSpy = spyOn(FakeAgentSession.prototype, "refreshMCPTools");

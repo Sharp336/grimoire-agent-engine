@@ -28,6 +28,7 @@ import {
   type AgentId,
   type ClientFrame,
   type ConnectorSummary,
+  type EndpointOffer,
   type HostSpec,
   type Run,
   type ServerFrame,
@@ -333,6 +334,13 @@ export interface GatewayOptions {
    */
   sessionIndex?: SessionIndex;
   /**
+   * Reads live endpoint offers from config and identity. Absent, `GET
+   * /v1/endpoints` reports an empty offer list rather than an error: unlike
+   * `skills`/`connectors`/`tasks`, "nothing reachable" is itself a real
+   * answer this route can give, so there is no separate off-signal to draw.
+   */
+  endpoints?: () => EndpointOffer[];
+  /**
    * Settles one action previously dispatched to a registered client WebView.
    * Returning false means the request is stale, unknown, or belongs elsewhere.
    */
@@ -433,6 +441,7 @@ export class Gateway {
   #connectors: ConnectorCatalog | undefined;
   #tasks: TaskCatalog | undefined;
   #sessionIndex: SessionIndex | undefined;
+  #endpoints: (() => EndpointOffer[]) | undefined;
   #onWebViewResult: GatewayOptions["onWebViewResult"];
   #onWebViewUnavailable: GatewayOptions["onWebViewUnavailable"];
   #staticRoot: string | undefined;
@@ -465,6 +474,7 @@ export class Gateway {
     this.#connectors = opts.connectors;
     this.#tasks = opts.tasks;
     this.#sessionIndex = opts.sessionIndex;
+    this.#endpoints = opts.endpoints;
     this.#onWebViewResult = opts.onWebViewResult;
     this.#onWebViewUnavailable = opts.onWebViewUnavailable;
     // Resolved once so the traversal check below compares two absolute paths.
@@ -1026,6 +1036,12 @@ export class Gateway {
     if (path === "/v1/devices" && req.method === "GET") {
       if (!scopes.has(SCOPE_READ)) return Response.json({ error: "forbidden" }, { status: 403 });
       return Response.json({ devices: this.#store.listDevices() });
+    }
+
+    if (path === "/v1/endpoints" && req.method === "GET") {
+      if (!scopes.has(SCOPE_READ)) return Response.json({ error: "forbidden" }, { status: 403 });
+      const offers = this.#endpoints?.() ?? [];
+      return Response.json({ offers });
     }
 
     const deviceRoute = /^\/v1\/devices\/([^/]+)$/.exec(path);
