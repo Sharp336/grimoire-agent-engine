@@ -866,6 +866,11 @@ class CancellationResult:
 
 
 @dataclass(slots=True, frozen=True)
+class NewSessionResult(CancellationResult):
+    post_commit_error: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
 class BranchMessage:
     entry_id: str
     text: str
@@ -1467,6 +1472,14 @@ def parse_thinking_level_cycle_result(
 
 def parse_cancellation_result(payload: JsonObject | None) -> CancellationResult:
     return CancellationResult(cancelled=bool((payload or {}).get("cancelled", False)))
+
+
+def parse_new_session_result(payload: JsonObject | None) -> NewSessionResult:
+    payload = payload or {}
+    return NewSessionResult(
+        cancelled=bool(payload.get("cancelled", False)),
+        post_commit_error=_optional_str(payload, "postCommitError"),
+    )
 
 
 def parse_branch_result(payload: JsonObject | None) -> BranchResult:
