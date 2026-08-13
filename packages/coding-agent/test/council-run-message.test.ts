@@ -1,4 +1,5 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { COUNCIL_RUN_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/council/events";
 import type { CouncilManifest } from "@oh-my-pi/pi-coding-agent/council/state";
 import { type CouncilRunStats, summarizeCouncilRun } from "@oh-my-pi/pi-coding-agent/council/stats";
@@ -15,7 +16,12 @@ import type { SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/sess
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import type { TUI } from "@oh-my-pi/pi-tui";
 
-beforeAll(() => initTheme());
+beforeAll(async () => {
+	initTheme();
+	await Settings.init({ inMemory: true, cwd: process.cwd() });
+});
+
+afterAll(() => resetSettingsForTest());
 
 const NOW = "2026-08-08T12:00:00.000Z";
 

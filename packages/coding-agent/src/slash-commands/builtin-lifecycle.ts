@@ -2,12 +2,14 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { setProjectDir } from "@oh-my-pi/pi-utils";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
+import { getCouncilCoordinator } from "../council/coordinator";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-backend";
 import type { FreshSessionResult } from "../session/agent-session";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { resolveResumableSession } from "../session/session-listing";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
 import { resolveToCwd } from "../tools/path-utils";
+import { councilMoveBlockMessage } from "./helpers/council";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSshAcp } from "./helpers/ssh";
 import type {
@@ -393,6 +395,16 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		allowArgs: true,
 		handle: async (command, runtime) => {
 			if (runtime.session.isStreaming) return usage("Cannot move while streaming.", runtime);
+			const councilBlock = councilMoveBlockMessage(
+				getCouncilCoordinator({
+					session: runtime.session,
+					toolSession: runtime.session.getToolSession(),
+					sessionManager: runtime.sessionManager,
+					settings: runtime.settings,
+					modelRegistry: runtime.session.modelRegistry,
+				}),
+			);
+			if (councilBlock) return usage(councilBlock, runtime);
 			if (!command.args) return usage("Usage: /move <path>", runtime);
 			const resolvedPath = resolveToCwd(command.args, runtime.cwd);
 			try {
@@ -425,6 +437,21 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			return commandConsumed();
 		},
 		handleTui: async (command, runtime) => {
+			const ctx = runtime.ctx;
+			const councilBlock = councilMoveBlockMessage(
+				getCouncilCoordinator({
+					session: ctx.session,
+					toolSession: ctx.session.getToolSession(),
+					sessionManager: ctx.sessionManager,
+					settings: ctx.settings,
+					modelRegistry: ctx.session.modelRegistry,
+				}),
+			);
+			if (councilBlock) {
+				ctx.showError(councilBlock);
+				ctx.editor.setText("");
+				return;
+			}
 			runtime.ctx.editor.addToHistory(command.text);
 			runtime.ctx.editor.setText("");
 			await runtime.ctx.handleMoveCommand(command.args || undefined);

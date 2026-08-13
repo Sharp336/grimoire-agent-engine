@@ -1,5 +1,6 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import * as os from "node:os";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { COUNCIL_SUMMARY_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/council/events";
 import type { CouncilManifest } from "@oh-my-pi/pi-coding-agent/council/state";
 import { CouncilStorageError } from "@oh-my-pi/pi-coding-agent/council/storage";
@@ -18,7 +19,12 @@ import type { TUI } from "@oh-my-pi/pi-tui";
 import { prompt } from "@oh-my-pi/pi-utils";
 import councilSummaryTemplate from "../src/prompts/council/summary.md" with { type: "text" };
 
-beforeAll(() => initTheme());
+beforeAll(async () => {
+	initTheme();
+	await Settings.init({ inMemory: true, cwd: process.cwd() });
+});
+
+afterAll(() => resetSettingsForTest());
 
 function manifest(runId = "run-1", sessionId = "session-1"): CouncilManifest {
 	const now = "2026-08-05T12:00:00.000Z";

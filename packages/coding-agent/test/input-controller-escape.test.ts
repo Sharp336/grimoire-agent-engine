@@ -845,11 +845,11 @@ describe("InputController Council expansion behavior", () => {
 		const controller = new InputController(ctx);
 		controller.setupKeyHandlers();
 
-		editor.onExpandTools?.();
+		controller.toggleToolOutputExpansion();
 		expect(ctx.toolOutputExpanded).toBeTrue();
 		expect(spies.setCouncilPaneExpanded).toHaveBeenLastCalledWith(true);
 
-		editor.onExpandTools?.();
+		controller.toggleToolOutputExpansion();
 		expect(ctx.toolOutputExpanded).toBeFalse();
 		expect(spies.setCouncilPaneExpanded).toHaveBeenLastCalledWith(false);
 	});
@@ -862,7 +862,7 @@ describe("InputController Council expansion behavior", () => {
 		const controller = new InputController(ctx);
 		controller.setupKeyHandlers();
 
-		editor.onExpandTools?.();
+		controller.toggleToolOutputExpansion();
 
 		expect(spies.toggleCouncilPaneExpansion).toHaveBeenCalledTimes(1);
 		expect(spies.showStatus).not.toHaveBeenCalledWith(expect.stringContaining("Tool activity is hidden"));
@@ -875,7 +875,7 @@ describe("InputController Council expansion behavior", () => {
 		const controller = new InputController(ctx);
 		controller.setupKeyHandlers();
 
-		editor.onExpandTools?.();
+		controller.toggleToolOutputExpansion();
 
 		expect(spies.toggleCouncilPaneExpansion).not.toHaveBeenCalled();
 		expect(spies.setCouncilPaneExpanded).toHaveBeenCalledWith(true);
