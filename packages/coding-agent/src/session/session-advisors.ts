@@ -636,15 +636,15 @@ export class SessionAdvisors {
 	}
 
 	#advisorRuntimeSignature(config: AdvisorConfig, slug: string, model: Model, thinkingLevel: ThinkingLevel): string {
-		const tools = config.tools?.length ? config.tools.join("\u001e") : "";
+		const tools = config.tools === undefined ? "default" : `explicit:${config.tools.join("\u001e")}`;
 		const instructions = config.instructions?.trim() ?? "";
 		return [config.name, slug, formatModelStringWithRouting(model), thinkingLevel, tools, instructions].join(
 			"\u001f",
 		);
 	}
 
-	#advisorRuntimeMatchesCurrentConfig(): boolean {
-		const descriptors = this.#resolveAdvisorRuntimeDescriptors(false);
+	#advisorRuntimeMatchesCurrentConfig(emitWarnings = false): boolean {
+		const descriptors = this.#resolveAdvisorRuntimeDescriptors(emitWarnings);
 		if (descriptors.length !== this.#advisors.length) return false;
 		for (let i = 0; i < descriptors.length; i++) {
 			if (descriptors[i].signature !== this.#advisors[i].signature) return false;
@@ -1597,7 +1597,8 @@ export class SessionAdvisors {
 		this.#advisorConfigs = advisors;
 		this.#advisorSharedInstructions = sharedInstructions;
 		if (!this.#advisorEnabled) return 0;
-		if (!sharedInstructionsChanged && this.#advisorRuntimeMatchesCurrentConfig()) return this.#advisors.length;
+		this.#advisorStatuses.clear();
+		if (!sharedInstructionsChanged && this.#advisorRuntimeMatchesCurrentConfig(true)) return this.#advisors.length;
 		this.#stopAdvisorRuntime();
 		this.#buildAdvisorRuntime(true);
 		return this.#advisors.length;

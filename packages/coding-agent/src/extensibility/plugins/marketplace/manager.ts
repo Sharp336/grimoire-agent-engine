@@ -11,8 +11,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { isEnoent, logger, pathIsWithin } from "@oh-my-pi/pi-utils";
+import { resolvePluginAdvisorManifestEntries } from "../loader";
 import { normalizePluginRuntimeConfig } from "../runtime-config";
-import type { PluginRuntimeConfig } from "../types";
+import type { InstalledPlugin, PluginManifest, PluginRuntimeConfig } from "../types";
 
 import { cachePlugin } from "./cache";
 import { classifySource, fetchMarketplace, parseMarketplaceCatalog, promoteCloneToCache } from "./fetcher";
@@ -312,6 +313,7 @@ export class MarketplaceManager {
 		}
 
 		const packageName = await this.#resolvePluginPackageName(cachePath, name);
+		await this.#validateAdvisorManifest(cachePath, packageName, version);
 		const previousPackageNames = await this.#resolveInstalledPackageNames(existing ?? [], name);
 
 		// Only now clean up old entries — new cache succeeded, so it is safe to remove old ones.
@@ -788,6 +790,34 @@ export class MarketplaceManager {
 
 	async #writeRuntimeConfig(scope: "user" | "project", config: PluginRuntimeConfig): Promise<void> {
 		await Bun.write(this.#runtimeLockPath(scope), JSON.stringify(config, null, 2));
+	}
+
+	async #validateAdvisorManifest(installPath: string, packageName: string, fallbackVersion: string): Promise<void> {
+		let pkg: { version?: unknown; omp?: PluginManifest; pi?: PluginManifest };
+		try {
+			pkg = await Bun.file(path.join(installPath, "package.json")).json();
+		} catch (err) {
+			if (isEnoent(err)) return;
+			throw err;
+		}
+
+		const declaredManifest = pkg.omp ?? pkg.pi;
+		if (!declaredManifest) return;
+		const version = typeof pkg.version === "string" ? pkg.version : fallbackVersion;
+		const plugin: InstalledPlugin = {
+			name: packageName,
+			version,
+			path: installPath,
+			manifest: { ...declaredManifest, version },
+			enabledFeatures: null,
+			enabled: true,
+		};
+		const errors = resolvePluginAdvisorManifestEntries(plugin)
+			.filter(({ resolvedPath }) => resolvedPath === null)
+			.map(({ entry }) => `${entry}: declared advisor entry not found inside the plugin`);
+		if (errors.length > 0) {
+			throw new Error(`Plugin ${plugin.name} validation failed:\n${errors.join("\n")}`);
+		}
 	}
 
 	async #resolvePluginPackageName(installPath: string, fallbackName: string): Promise<string> {

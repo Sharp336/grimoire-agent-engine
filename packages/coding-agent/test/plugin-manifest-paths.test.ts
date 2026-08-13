@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	getAllPluginAdvisorPaths,
+	resolvePluginAdvisorManifestEntries,
 	resolvePluginAdvisorPaths,
 	resolvePluginExtensionPaths,
 	resolvePluginToolPaths,
@@ -76,6 +77,15 @@ describe("plugin manifest path resolution", () => {
 		} finally {
 			removeSyncWithRetries(root);
 		}
+	});
+	it("marks a non-array advisor manifest as invalid instead of silently ignoring it", () => {
+		const plugin = makePlugin(process.cwd(), {
+			name: "fixture-plugin",
+			version: "1.0.0",
+			advisors: "./WATCHDOG.yml" as never,
+		});
+
+		expect(resolvePluginAdvisorManifestEntries(plugin)).toEqual([{ entry: "./WATCHDOG.yml", resolvedPath: null }]);
 	});
 
 	it("discovers advisor files from enabled plugins without reading the process home", async () => {

@@ -13,7 +13,6 @@ import {
 	resolveAdvisorConfigEditPath,
 	saveWatchdogConfigFile,
 } from "../../advisor";
-import { reset as resetCapabilities } from "../../capability";
 import {
 	formatModelSelectorValue,
 	resolveAdvisorRoleSelection,
@@ -235,11 +234,7 @@ export class SelectorController {
 						return this.ctx.statusLine.getTopBorder(availableWidth).content;
 					},
 					onPluginsChanged: async () => {
-						const projectPath = await resolveActiveProjectRegistryPath(this.ctx.sessionManager.getCwd());
-						clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
-						await this.ctx.refreshSkillState();
-						await this.ctx.refreshSlashCommandState();
-						resetCapabilities();
+						await reloadTuiPluginState(this.ctx);
 						this.ctx.ui.requestRender();
 					},
 					onCancel: () => {

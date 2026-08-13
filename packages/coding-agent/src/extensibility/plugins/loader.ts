@@ -470,7 +470,8 @@ export function resolvePluginAdvisorManifestEntries(
 	plugin: InstalledPlugin,
 ): Array<{ entry: unknown; resolvedPath: string | null }> {
 	const entries = plugin.manifest.advisors;
-	if (!Array.isArray(entries)) return [];
+	if (entries === undefined) return [];
+	if (!Array.isArray(entries)) return [{ entry: entries, resolvedPath: null }];
 
 	const pluginRoot = path.resolve(plugin.path);
 	let realPluginRoot: string;

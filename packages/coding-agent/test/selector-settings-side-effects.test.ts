@@ -13,6 +13,7 @@ import { ReadToolGroupComponent } from "@oh-my-pi/pi-coding-agent/modes/componen
 import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import * as tuiPluginReload from "@oh-my-pi/pi-coding-agent/modes/tui-plugin-reload";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { ResolvedRoleModel } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
@@ -93,6 +94,45 @@ describe("selector setting side effects", () => {
 		expect(setAdvisorEnabled).toHaveBeenCalledWith(false);
 		expect(invalidate).toHaveBeenCalledTimes(1);
 		expect(requestRender).toHaveBeenCalledTimes(1);
+	});
+	it("reloads every live plugin surface after a Plugins settings mutation", async () => {
+		const testTheme = await getThemeByName("dark");
+		if (!testTheme) throw new Error("Failed to load dark theme for plugin settings test");
+		setThemeInstance(testTheme);
+		const reload = vi.spyOn(tuiPluginReload, "reloadTuiPluginState").mockResolvedValue();
+		const overlayShown = Promise.withResolvers<void>();
+		const showOverlay = vi.fn((_component: unknown) => {
+			overlayShown.resolve();
+			return { hide: vi.fn() };
+		});
+		const ctx = {
+			session: {
+				getAvailableThinkingLevels: () => [],
+				getAvailableModels: () => [],
+				thinkingLevel: undefined,
+				model: undefined,
+			},
+			sessionManager: { getCwd: () => process.cwd() },
+			refreshSkillState: vi.fn(async () => {}),
+			refreshSlashCommandState: vi.fn(async () => {}),
+			ui: {
+				imageBudget: undefined,
+				showOverlay,
+				setFocus: vi.fn(),
+				requestRender: vi.fn(),
+			},
+		} as unknown as InteractiveModeContext;
+		const controller = new SelectorController(ctx);
+
+		controller.showSettingsSelector();
+		await overlayShown.promise;
+		const selector = showOverlay.mock.calls[0][0] as unknown as {
+			callbacks: { onPluginsChanged?: () => void | Promise<void> };
+		};
+		await selector.callbacks.onPluginsChanged?.();
+
+		expect(reload).toHaveBeenCalledWith(ctx);
+		reload.mockRestore();
 	});
 
 	for (const id of ["terminal.showImages", "showImages"]) {

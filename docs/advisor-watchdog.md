@@ -25,7 +25,7 @@ An advisor does not approve actions or mutate primary session state directly. It
 
 The subsystem requires `advisor.enabled: true`. Model selection then depends on the roster:
 
-- Without any discovered `WATCHDOG.yml` advisor entries, OMP creates the legacy/default advisor and resolves its model from `modelRoles.advisor`.
+- Without any discovered user, project, or plugin `WATCHDOG.yml` advisor entries, OMP creates the legacy/default advisor and resolves its model from `modelRoles.advisor`. Any discovered roster replaces that fallback, so installing a plugin-only roster does not add a fifth legacy advisor.
 - With a roster, each enabled entry uses its explicit `model` when present, otherwise `modelRoles.advisor`. An unresolvable entry is reported as `no_model` without preventing other entries from running.
 - `advisors[].enabled: false` keeps an entry visible as paused but does not build its runtime.
 

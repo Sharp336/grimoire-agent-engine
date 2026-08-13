@@ -217,6 +217,40 @@ describe("MarketplaceManager", () => {
 		expect(installed).toHaveLength(1);
 		expect(installed[0].id).toBe("hello-plugin@test-marketplace");
 	});
+	it("installPlugin rejects a marketplace package whose manifest declares a missing advisor file", async () => {
+		const marketplaceDir = path.join(ctx.tmpDir, "bad-advisor-marketplace");
+		const pluginDir = path.join(marketplaceDir, "plugins", "bad-advisor");
+		fs.mkdirSync(path.join(marketplaceDir, ".claude-plugin"), { recursive: true });
+		fs.mkdirSync(pluginDir, { recursive: true });
+		await Bun.write(
+			path.join(marketplaceDir, ".claude-plugin", "marketplace.json"),
+			`${JSON.stringify(
+				{
+					name: "bad-advisor-marketplace",
+					owner: { name: "Test Author" },
+					plugins: [{ name: "bad-advisor", source: "./plugins/bad-advisor", version: "1.0.0" }],
+				},
+				null,
+				2,
+			)}\n`,
+		);
+		await Bun.write(
+			path.join(pluginDir, "package.json"),
+			`${JSON.stringify({
+				name: "bad-advisor",
+				version: "1.0.0",
+				omp: { advisors: ["./missing-WATCHDOG.yml"] },
+			})}\n`,
+		);
+
+		await ctx.manager.addMarketplace(marketplaceDir);
+		await expect(ctx.manager.installPlugin("bad-advisor", "bad-advisor-marketplace")).rejects.toThrow(
+			/missing-WATCHDOG\.yml: declared advisor entry not found inside the plugin/,
+		);
+
+		expect(await ctx.manager.listInstalledPlugins()).toEqual([]);
+		expect(fs.existsSync(path.join(ctx.tmpDir, "node_modules", "bad-advisor"))).toBe(false);
+	});
 
 	it("installPlugin rejects package names that escape node_modules", async () => {
 		const marketplaceDir = path.join(ctx.tmpDir, "bad-package-marketplace");

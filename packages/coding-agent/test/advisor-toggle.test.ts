@@ -401,6 +401,35 @@ describe("AgentSession advisor toggle", () => {
 		expect(session.applyAdvisorConfigs([{ ...advisors[0] }], "Shared baseline")).toBe(1);
 		expect(session.getAdvisorAgent()).toBe(advisor);
 	});
+	it("drops removed paused advisor statuses without restarting an unchanged live advisor", () => {
+		const active = { name: "Security", model: `${model.provider}/${model.id}` };
+		const paused = { name: "Dormant", model: `${model.provider}/${model.id}`, enabled: false };
+		expect(session.applyAdvisorConfigs([active, paused], "Shared baseline")).toBe(0);
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		const advisor = session.getAdvisorAgent();
+		expect(advisor).toBeDefined();
+		expect(session.getAdvisorStatusOverview().advisors.map(entry => entry.name)).toEqual(["Security", "Dormant"]);
+
+		expect(session.applyAdvisorConfigs([{ ...active }], "Shared baseline")).toBe(1);
+		expect(session.getAdvisorAgent()).toBe(advisor);
+		expect(session.getAdvisorStatusOverview().advisors.map(entry => entry.name)).toEqual(["Security"]);
+		expect(session.getAdvisorStats().advisors.map(entry => entry.name)).toEqual(["Security"]);
+	});
+	it("rebuilds the live advisor runtime when tool permissions change between default and none", () => {
+		const base = { name: "Security", model: `${model.provider}/${model.id}` };
+		expect(session.applyAdvisorConfigs([base], "Shared baseline")).toBe(0);
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		const defaultToolsAdvisor = session.getAdvisorAgent();
+		expect(defaultToolsAdvisor).toBeDefined();
+
+		expect(session.applyAdvisorConfigs([{ ...base, tools: [] }], "Shared baseline")).toBe(1);
+		const noToolsAdvisor = session.getAdvisorAgent();
+		expect(noToolsAdvisor).toBeDefined();
+		expect(noToolsAdvisor).not.toBe(defaultToolsAdvisor);
+
+		expect(session.applyAdvisorConfigs([{ ...base }], "Shared baseline")).toBe(1);
+		expect(session.getAdvisorAgent()).not.toBe(noToolsAdvisor);
+	});
 	it("rebuilds the live advisor runtime when shared instructions change", () => {
 		const advisors = [{ name: "Security", model: `${model.provider}/${model.id}` }];
 		expect(session.applyAdvisorConfigs(advisors, "Initial baseline")).toBe(0);
