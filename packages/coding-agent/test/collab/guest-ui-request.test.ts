@@ -221,7 +221,7 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 			markActivityStart: () => {},
 			markActivityEnd: () => {},
 		},
-		ui: { requestRender: () => {} },
+		ui: { requestRender: () => {}, terminal: { columns: 50, rows: 24 } },
 		chatContainer: { clear: () => {} },
 		resetObserverRegistry: () => {},
 		renderInitialMessages: () => {},
@@ -328,6 +328,27 @@ describe("collab TUI guest ui-request handling (#4049)", () => {
 
 		dialog.settle("Yes");
 		expect(await h.nextUiResponse()).toEqual({ reqId: 1, value: "Yes" });
+	});
+
+	it("normalizes and truncates supplementary selector help to the guest viewport", async () => {
+		const h = await openHarness();
+		h.hostSocket.send({
+			t: "ui-request",
+			request: {
+				reqId: 11,
+				kind: "select",
+				title: "Plan workflow?",
+				options: ["Research first", "Ask now", "Go direct"],
+				helpText: `up/down navigate  enter select  esc cancel\n\t Plan\n first   setting ${"x".repeat(80)}`,
+			},
+		});
+
+		const dialog = await h.nextDialog();
+		expect(dialog.dialogOptions?.helpText).toBe(
+			`up/down navigate  enter select  esc cancel\nPlan first setting ${"x".repeat(28)}…`,
+		);
+		dialog.settle("Ask now");
+		expect(await h.nextUiResponse()).toEqual({ reqId: 11, value: "Ask now" });
 	});
 
 	it("presents an editor ui-request and sends an explicit cancel as ui-response without a value", async () => {

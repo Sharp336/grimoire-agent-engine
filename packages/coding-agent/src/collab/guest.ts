@@ -18,6 +18,7 @@
 import * as path from "node:path";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import { Ellipsis, replaceTabs, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 import { getConfigRootDir, logger } from "@oh-my-pi/pi-utils";
 import type { AgentHubRemote, AgentHubRemoteTranscript } from "../modes/components/agent-hub";
 import type { InteractiveModeContext } from "../modes/types";
@@ -67,6 +68,17 @@ const WELCOME_TIMEOUT_MS = 30_000;
  * in under two seconds with comfortable headroom.
  */
 const SNAPSHOT_PROGRESS_TIMEOUT_MS = 30_000;
+function guestUiSelectHelpText(helpText: string | undefined, terminalColumns: number): string | undefined {
+	if (helpText === undefined) return undefined;
+	const [controls = "", ...supplementaryParts] = helpText.split(/\r?\n/);
+	const width = Math.max(1, terminalColumns - 2);
+	const truncate = (text: string): string =>
+		visibleWidth(text) <= width ? text : truncateToWidth(text, width, Ellipsis.Unicode);
+	if (supplementaryParts.length === 0) return truncate(controls);
+	const supplementary = replaceTabs(supplementaryParts.join(" ")).replace(/\s+/g, " ").trim();
+	return supplementary ? `${truncate(controls)}\n${truncate(supplementary)}` : truncate(controls);
+}
+
 const TRANSCRIPT_TIMEOUT_MS = 20_000;
 
 type WelcomeFrame = Extract<CollabFrame, { t: "welcome" }>;
@@ -669,6 +681,8 @@ export class CollabGuestLink {
 		if (this.#readOnly || this.#pendingUiRequests.has(request.reqId)) return;
 		const abort = new AbortController();
 		this.#pendingUiRequests.set(request.reqId, abort);
+		const helpText =
+			request.kind === "select" ? guestUiSelectHelpText(request.helpText, this.#ctx.ui.terminal.columns) : undefined;
 		const dialog =
 			request.kind === "select"
 				? this.#ctx.showHookSelector(request.title, request.options, {
@@ -677,7 +691,7 @@ export class CollabGuestLink {
 						selectionMarker: request.selectionMarker,
 						checkedIndices: request.checkedIndices,
 						markableCount: request.markableCount,
-						helpText: request.helpText,
+						helpText,
 					})
 				: this.#ctx.showHookEditor(request.title, request.prefill, { signal: abort.signal });
 		dialog
