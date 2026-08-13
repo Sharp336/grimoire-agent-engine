@@ -258,7 +258,7 @@ export type Unsubscribe = () => void;
 // ---------------------------------------------------------------------------
 
 export interface OmpdClientOptions {
-  /** Socket endpoint, e.g. `ws://127.0.0.1:7717/v1/socket`. */
+  /** Socket endpoint, e.g. `ws://127.0.0.1:7777/v1/socket`. */
   url: string;
   /** Device token issued at pairing. Appended as the `token` query parameter. */
   token: string;

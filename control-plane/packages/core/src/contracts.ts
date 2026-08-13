@@ -184,6 +184,17 @@ export const SCOPE_READ = "read";
 /** Scope required to send prompts. */
 export const SCOPE_PROMPT = "prompt";
 
+/**
+ * Loopback port the daemon binds when config says nothing.
+ *
+ * Lives here because two very different things need the same number and got it
+ * wrong: the daemon defaulted to 7777 while the client suggested 7717, so a
+ * first pairing failed for a reason neither side could report. A client cannot
+ * import the daemon to ask, since that pulls `bun:sqlite` into a phone bundle,
+ * so the contract owns it and both read it from here.
+ */
+export const DEFAULT_DAEMON_PORT = 7777;
+
 // ---------------------------------------------------------------------------
 // Client wire protocol
 // ---------------------------------------------------------------------------

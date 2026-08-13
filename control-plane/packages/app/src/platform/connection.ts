@@ -15,11 +15,12 @@
  */
 
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { DEFAULT_DAEMON_PORT } from "@ompd/core/contracts";
 
 const STORAGE_KEY = "ompd.connection";
 
 export interface Connection {
-  /** Socket endpoint without the token, e.g. `ws://127.0.0.1:7717/v1/socket`. */
+  /** Socket endpoint without the token, e.g. `ws://127.0.0.1:7777/v1/socket`. */
   url: string;
   token: string;
   /**
@@ -70,5 +71,9 @@ export function coerce(value: unknown): Connection | null {
  * The daemon binds loopback, so there is no address a phone can guess. This is
  * the one a desktop or a tunnel on the same machine will answer on, offered as
  * a starting point in the field rather than as a default that silently works.
+ *
+ * Built from the shared port rather than typed again: this constant said 7717
+ * while the daemon bound 7777, so the first pairing anyone attempted failed on
+ * a suggestion the app itself supplied.
  */
-export const SUGGESTED_SOCKET_URL = "ws://127.0.0.1:7717/v1/socket";
+export const SUGGESTED_SOCKET_URL = `ws://127.0.0.1:${DEFAULT_DAEMON_PORT}/v1/socket`;

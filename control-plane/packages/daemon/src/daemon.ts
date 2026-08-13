@@ -32,6 +32,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { joinAssistantText, type LocalHost, type SpawnLocalHostOptions } from "@ompd/acp";
 import {
+  DEFAULT_DAEMON_PORT,
   DefaultPolicy,
   SCOPE_APPROVE,
   SCOPE_MANAGE,
@@ -150,7 +151,7 @@ export interface OmpdConfig {
 
 export const DEFAULT_CONFIG: OmpdConfig = {
   host: "127.0.0.1",
-  port: 7777,
+  port: DEFAULT_DAEMON_PORT,
   policyMode: "standard",
   ompPath: "omp",
   keepAwake: true,
