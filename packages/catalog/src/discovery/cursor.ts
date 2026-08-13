@@ -11,6 +11,7 @@ import { GetUsableModelsRequestSchema, GetUsableModelsResponseSchema } from "./c
 const CURSOR_DEFAULT_BASE_URL = "https://api2.cursor.sh";
 const CURSOR_DEFAULT_CLIENT_VERSION = "cli-2026.02.13-41ac335";
 const CURSOR_GET_USABLE_MODELS_PATH = "/agent.v1.AgentService/GetUsableModels";
+const CURSOR_API_KEY_EXCHANGE_PATH = "/auth/exchange_user_api_key";
 
 const DEFAULT_CONTEXT_WINDOW = 200_000;
 const DEFAULT_MAX_TOKENS = 64_000;
@@ -82,6 +83,113 @@ export interface CursorModelDiscoveryOptions {
 }
 
 /**
+ * Cursor dashboard API keys (`crsr_...` / `cursor_...`) cannot authenticate
+ * `GetUsableModels` / `Run` directly. Session JWTs from `/login` or
+ * `CURSOR_ACCESS_TOKEN` never carry these prefixes.
+ *
+ * Duplicated from `@oh-my-pi/pi-ai` oauth/cursor: catalog cannot import pi-ai
+ * (pi-ai depends on catalog).
+ */
+export function isRawCursorApiKey(value: string): boolean {
+	const trimmed = value.trim();
+	return trimmed.startsWith("crsr_") || trimmed.startsWith("cursor_");
+}
+
+interface ExchangedCursorToken {
+	accessToken: string;
+	expiresAt: number;
+}
+
+const exchangedTokenCache = new Map<string, ExchangedCursorToken>();
+const pendingCursorExchanges = new Map<string, Promise<string>>();
+
+/** Test seam: drop in-memory dashboard-key exchange cache. */
+export function __resetCursorApiKeyCache(): void {
+	exchangedTokenCache.clear();
+	pendingCursorExchanges.clear();
+}
+
+function decodeCursorAccessTokenExpiry(accessToken: string): number {
+	try {
+		const parts = accessToken.split(".");
+		if (parts.length !== 3 || !parts[1]) {
+			return Date.now() + 3600 * 1000;
+		}
+		const decoded = JSON.parse(atob(parts[1].replace(/-/g, "+").replace(/_/g, "/")));
+		if (decoded && typeof decoded === "object" && typeof decoded.exp === "number") {
+			return decoded.exp * 1000 - 5 * 60 * 1000;
+		}
+	} catch {
+		// Fall through to the conservative default below.
+	}
+	return Date.now() + 3600 * 1000;
+}
+
+async function exchangeCursorApiKey(
+	apiKey: string,
+	baseUrl: string,
+	fetchImpl: typeof fetch,
+	signal?: AbortSignal,
+): Promise<ExchangedCursorToken> {
+	const response = await fetchImpl(`${baseUrl}${CURSOR_API_KEY_EXCHANGE_PATH}`, {
+		method: "POST",
+		headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+		body: "{}",
+		signal,
+	});
+	if (!response.ok) {
+		const errorText = await response.text().catch(() => "");
+		throw new Error(`Cursor API key exchange failed: ${response.status} ${errorText}`);
+	}
+	const data = (await response.json()) as { accessToken?: string };
+	if (!data.accessToken) {
+		throw new Error("Cursor API key exchange response missing accessToken");
+	}
+	return { accessToken: data.accessToken, expiresAt: decodeCursorAccessTokenExpiry(data.accessToken) };
+}
+
+/**
+ * Resolves a Cursor credential to a bearer usable against the agent RPCs.
+ * Session access tokens pass through; a raw dashboard API key is exchanged
+ * once and cached until shortly before its JWT `exp`.
+ */
+export async function resolveCursorBearerToken(
+	apiKey: string,
+	options?: { baseUrl?: string; fetch?: typeof fetch; timeoutMs?: number },
+): Promise<string> {
+	const credential = apiKey.trim();
+	if (!isRawCursorApiKey(credential)) {
+		return credential;
+	}
+	const baseUrl = (options?.baseUrl ?? CURSOR_DEFAULT_BASE_URL).replace(/\/+$/, "");
+	const fetchImpl = options?.fetch ?? fetch;
+	const cacheKey = `${baseUrl}\u0000${credential}`;
+	const cached = exchangedTokenCache.get(cacheKey);
+	if (cached && cached.expiresAt > Date.now()) {
+		return cached.accessToken;
+	}
+	const existing = pendingCursorExchanges.get(cacheKey);
+	if (existing) {
+		return existing;
+	}
+	const timeoutMs = options?.timeoutMs;
+	const signal =
+		timeoutMs !== undefined && Number.isFinite(timeoutMs) && timeoutMs > 0
+			? AbortSignal.timeout(timeoutMs)
+			: undefined;
+	const pending = exchangeCursorApiKey(credential, baseUrl, fetchImpl, signal)
+		.then(result => {
+			exchangedTokenCache.set(cacheKey, result);
+			return result.accessToken;
+		})
+		.finally(() => {
+			pendingCursorExchanges.delete(cacheKey);
+		});
+	pendingCursorExchanges.set(cacheKey, pending);
+	return pending;
+}
+
+/**
  * Fetches Cursor models through `GetUsableModels` and normalizes them into canonical model entries.
  *
  * Returns `null` on request/decode failures.
@@ -92,13 +200,14 @@ export async function fetchCursorUsableModels(
 ): Promise<ModelSpec<"cursor-agent">[] | null> {
 	const timeoutMs = options.timeoutMs ?? 5_000;
 	try {
+		const baseUrl = (options.baseUrl ?? CURSOR_DEFAULT_BASE_URL).replace(/\/+$/, "");
+		const bearerToken = await resolveCursorBearerToken(options.apiKey, { baseUrl, timeoutMs });
 		const requestPayload = create(GetUsableModelsRequestSchema, {
 			customModelIds: normalizeCustomModelIds(options.customModelIds),
 		});
 		const body = toBinary(GetUsableModelsRequestSchema, requestPayload);
-		const baseUrl = (options.baseUrl ?? CURSOR_DEFAULT_BASE_URL).replace(/\/+$/, "");
 
-		const responseBuffer = await fetchViaHttp2(baseUrl, body, options, timeoutMs);
+		const responseBuffer = await fetchViaHttp2(baseUrl, body, { ...options, apiKey: bearerToken }, timeoutMs);
 
 		if (!responseBuffer) {
 			return null;

@@ -1,4 +1,5 @@
 import * as AIError from "../../error";
+import { wrapFetchForProxy } from "../../utils/proxy";
 import { generatePKCE } from "./pkce";
 import type { OAuthCredentials } from "./types";
 
@@ -106,8 +107,11 @@ export async function loginCursor(
 	};
 }
 
-export async function refreshCursorToken(apiKeyOrRefreshToken: string): Promise<OAuthCredentials> {
-	const response = await fetch(CURSOR_REFRESH_URL, {
+export async function refreshCursorToken(
+	apiKeyOrRefreshToken: string,
+	fetchImpl: typeof fetch = wrapFetchForProxy(globalThis.fetch.bind(globalThis), "cursor"),
+): Promise<OAuthCredentials> {
+	const response = await fetchImpl(CURSOR_REFRESH_URL, {
 		method: "POST",
 		headers: {
 			Authorization: `Bearer ${apiKeyOrRefreshToken}`,
@@ -184,4 +188,69 @@ export function isCursorTokenExpiringSoon(token: string, thresholdSeconds = 300)
 	} catch {
 		return true;
 	}
+}
+
+/**
+ * Cursor dashboard API keys (Settings → API Keys, `crsr_...` / `cursor_...`)
+ * cannot authenticate AgentService RPCs directly. The official Cursor CLI
+ * exchanges them for a short-lived session JWT via `exchange_user_api_key`
+ * first. Session tokens from `/login` or `CURSOR_ACCESS_TOKEN` are JWTs and
+ * never carry these prefixes, so the prefix alone disambiguates the two
+ * credential shapes.
+ */
+export function isRawCursorApiKey(value: string): boolean {
+	const trimmed = value.trim();
+	return trimmed.startsWith("crsr_") || trimmed.startsWith("cursor_");
+}
+
+interface CachedCursorAccessToken {
+	access: string;
+	expires: number;
+}
+
+const rawApiKeyAccessTokenCache = new Map<string, CachedCursorAccessToken>();
+const pendingRawApiKeyExchanges = new Map<string, Promise<string>>();
+
+/** Test seam: drop in-memory dashboard-key exchange cache. */
+export function __resetCursorApiKeyCache(): void {
+	rawApiKeyAccessTokenCache.clear();
+	pendingRawApiKeyExchanges.clear();
+}
+
+/**
+ * Resolves any Cursor credential to a bearer usable against the agent RPCs.
+ * Session access tokens pass through unchanged. A raw dashboard API key is
+ * exchanged once via {@link refreshCursorToken} and cached until shortly
+ * before its JWT `exp`, so a long TUI session refreshes on the next turn
+ * instead of 401-ing until restart.
+ */
+export async function resolveCursorAccessToken(
+	apiKeyOrAccessToken: string,
+	fetchImpl?: typeof fetch,
+): Promise<string> {
+	const credential = apiKeyOrAccessToken.trim();
+	if (!isRawCursorApiKey(credential)) {
+		return credential;
+	}
+	const cached = rawApiKeyAccessTokenCache.get(credential);
+	if (cached && cached.expires > Date.now()) {
+		return cached.access;
+	}
+	const existing = pendingRawApiKeyExchanges.get(credential);
+	if (existing) {
+		return existing;
+	}
+	const pending = refreshCursorToken(credential, fetchImpl)
+		.then(credentials => {
+			rawApiKeyAccessTokenCache.set(credential, {
+				access: credentials.access,
+				expires: credentials.expires,
+			});
+			return credentials.access;
+		})
+		.finally(() => {
+			pendingRawApiKeyExchanges.delete(credential);
+		});
+	pendingRawApiKeyExchanges.set(credential, pending);
+	return pending;
 }

@@ -151,6 +151,7 @@ import {
 	sanitizeText,
 } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
+import { resolveCursorAccessToken } from "../registry/oauth/cursor";
 import type {
 	Api,
 	AssistantMessage,
@@ -588,10 +589,11 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 		};
 
 		try {
-			const apiKey = options?.apiKey;
-			if (!apiKey) {
+			const rawApiKey = options?.apiKey;
+			if (!rawApiKey) {
 				throw new AIError.MissingApiKeyError(undefined, "Cursor API key (access token) is required");
 			}
+			const apiKey = await resolveCursorAccessToken(rawApiKey);
 
 			const conversationId = options?.conversationId ?? options?.sessionId ?? crypto.randomUUID();
 			const blobStore = conversationBlobStores.get(conversationId) ?? new Map<string, Uint8Array>();

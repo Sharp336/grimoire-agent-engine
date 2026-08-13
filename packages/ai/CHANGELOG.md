@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added support for Cursor dashboard API keys (`CURSOR_API_KEY`, `crsr_...` / `cursor_...`) in the `cursor-agent` provider. The raw key is exchanged for a session access token before agent RPCs, matching the official Cursor CLI; `CURSOR_ACCESS_TOKEN` session tokens continue to be used as-is.
+
 ## [17.2.15] - 2026-08-12
 
 ### Fixed
