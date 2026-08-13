@@ -176,6 +176,7 @@
         "@oh-my-pi/pi-utils": "catalog:",
         "@oh-my-pi/pi-wire": "catalog:",
         "@oh-my-pi/snapcompact": "catalog:",
+        "@ompd/core": "workspace:*",
         "@opentelemetry/api": "catalog:",
         "@opentelemetry/api-logs": "catalog:",
         "@opentelemetry/context-async-hooks": "catalog:",
