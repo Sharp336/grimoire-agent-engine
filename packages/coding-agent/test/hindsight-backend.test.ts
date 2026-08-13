@@ -866,6 +866,39 @@ describe("hindsightBackend retain queue flush on session teardown", () => {
 	// state. We defend the contract end-to-end by enqueuing a tool-initiated
 	// retain, then calling `flushRetainQueue` in the order
 	// `AgentSession.dispose` uses (flush → clear → state.dispose).
+	it("retains the final partial cadence window before session teardown", async () => {
+		const retainSpy = vi.spyOn(HindsightApi.prototype, "retain").mockResolvedValue({} as never);
+		vi.spyOn(HindsightApi.prototype, "createBank").mockResolvedValue({} as never);
+
+		const settings = Settings.isolated({
+			"memory.backend": "hindsight",
+			"hindsight.apiUrl": "http://localhost:8888",
+			"hindsight.retainEveryNTurns": 2,
+		});
+		const entries = [
+			{ role: "user" as const, text: "one-turn sessions must still be retained on exit" },
+			{ role: "assistant" as const, text: "the partial cadence window is durable" },
+		];
+		const session = makeFakeSession({ sessionId: "s-dispose-auto-retain", settings, entries });
+
+		await hindsightBackend.start({
+			session: session as never,
+			settings,
+			modelRegistry: {} as never,
+			agentDir: "/tmp",
+			taskDepth: 0,
+		});
+		const state = session.getHindsightSessionState();
+
+		session.emit({ type: "agent_end", messages: [] });
+		await state!.flushAutoRetainOnDispose();
+
+		expect(retainSpy).toHaveBeenCalledTimes(1);
+		expect(retainSpy.mock.calls[0]?.[0]).toBe(state!.bankId);
+		expect(retainSpy.mock.calls[0]?.[1]).toContain("one-turn sessions must still be retained on exit");
+		expect(state!.lastRetainedTurn).toBe(1);
+	});
+
 	it("flushes the retain queue to the server before the session pointer clears", async () => {
 		const retainBatchSpy = vi.spyOn(HindsightApi.prototype, "retainBatch").mockResolvedValue({} as never);
 		vi.spyOn(HindsightApi.prototype, "createBank").mockResolvedValue({} as never);

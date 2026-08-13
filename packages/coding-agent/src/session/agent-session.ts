@@ -3922,6 +3922,7 @@ export class AgentSession {
 			shutdownTinyTitleClient(),
 			this.#disconnectOwnedMcp(),
 			advisorRecorderClosed,
+			hindsightState?.flushAutoRetainOnDispose() ?? Promise.resolve(),
 			hindsightState?.flushRetainQueue() ?? Promise.resolve(),
 			this.#disposeMnemopi(mnemopiState, options.mnemopiConsolidateTimeoutMs),
 		]);

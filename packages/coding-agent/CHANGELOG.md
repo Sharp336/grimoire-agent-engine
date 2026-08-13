@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Hindsight auto-retention dropping the final partial turn window when a session exits before reaching its configured retention cadence.
+
 ## [17.3.1] - 2026-08-13
 
 ### Fixed

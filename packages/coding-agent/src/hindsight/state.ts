@@ -246,6 +246,7 @@ export class HindsightSessionState {
 	/** Alias states delegate persistence config to a primary parent state. */
 	aliasOf?: HindsightSessionState;
 	readonly retainQueue: HindsightRetainQueue;
+	#autoRetainTail: Promise<void> = Promise.resolve();
 
 	constructor(options: HindsightSessionStateOptions) {
 		this.sessionId = options.sessionId;
@@ -361,12 +362,28 @@ export class HindsightSessionState {
 		}
 	}
 
-	async maybeRetainOnAgentEnd(): Promise<void> {
-		if (!this.config.autoRetain) return;
+	maybeRetainOnAgentEnd(): Promise<void> {
+		const run = this.#autoRetainTail.then(() => this.#retainIfDue(false));
+		this.#autoRetainTail = run;
+		return run;
+	}
+
+	/**
+	 * Wait for any turn-boundary retain, then persist the final partial cadence
+	 * window before the session state is detached during disposal.
+	 */
+	async flushAutoRetainOnDispose(): Promise<void> {
+		await this.#autoRetainTail;
+		await this.#retainIfDue(true);
+	}
+
+	async #retainIfDue(flushPartialWindow: boolean): Promise<void> {
+		if (!this.config.autoRetain || this.aliasOf) return;
 		const messages = extractMessages(this.session.sessionManager);
 		if (messages.length === 0) return;
 		const userTurns = messages.filter(m => m.role === "user").length;
-		if (userTurns - this.lastRetainedTurn < this.config.retainEveryNTurns) return;
+		const pendingTurns = userTurns - this.lastRetainedTurn;
+		if (pendingTurns <= 0 || (!flushPartialWindow && pendingTurns < this.config.retainEveryNTurns)) return;
 
 		try {
 			await this.retainSession(messages);
@@ -377,6 +394,7 @@ export class HindsightSessionState {
 					bankId: this.bankId,
 					userTurns,
 					messages: messages.length,
+					flushPartialWindow,
 				});
 			}
 		} catch (err) {
