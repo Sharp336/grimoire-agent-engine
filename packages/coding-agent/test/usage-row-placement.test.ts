@@ -72,6 +72,7 @@ function makeHarness(showTokenUsage: boolean): { ctx: InteractiveModeContext; he
 		session: {
 			retryAttempt: 0,
 			getToolByName: () => undefined,
+			hasBuiltInTool: () => true,
 			sessionManager: { getCwd: () => process.cwd() },
 		},
 		get viewSession() {

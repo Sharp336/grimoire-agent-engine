@@ -1375,10 +1375,22 @@ export class ModelRegistry {
 					this.#providerOverrides.has(descriptor.providerId) ||
 					this.#keylessProviders.has(descriptor.providerId));
 			if (isAuthenticated(apiKey) || descriptor.allowUnauthenticated || hasExplicitVllmConfig) {
+				// Thread ambient AWS identity into Bedrock discovery so the control-plane
+				// list matches the profile/region the CLI is running under (GovCloud SSO
+				// profiles, AWS_REGION, …). prepareModelDiscovery falls back if omitted.
+				const awsDiscoveryHints =
+					descriptor.providerId === "amazon-bedrock" || descriptor.providerId === "bedrock-mantle"
+						? {
+								region: process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION,
+								profile: process.env.AWS_PROFILE || process.env.AWS_DEFAULT_PROFILE,
+							}
+						: undefined;
 				const discoveryConfig = {
 					apiKey: isDiscoveryBearerApiKey(apiKey) ? apiKey : undefined,
 					baseUrl: this.#descriptorBaseUrl(descriptor.providerId),
 					fetch: this.#fetch,
+					...(awsDiscoveryHints?.region ? { region: awsDiscoveryHints.region } : {}),
+					...(awsDiscoveryHints?.profile ? { profile: awsDiscoveryHints.profile } : {}),
 				};
 				const preparedConfig =
 					getProviderDefinition(descriptor.providerId)?.prepareModelDiscovery?.(discoveryConfig) ??

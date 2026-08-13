@@ -120,7 +120,7 @@ describe("InputController thinking visibility", () => {
 			effectiveHideThinkingBlock: true,
 			settings: { set },
 			session: { agent: { hideThinkingSummary: false }, thinkingLevel: "high" },
-			viewSession: { thinkingLevel: "off" },
+			viewSession: { thinkingLevel: "off", hasBuiltInTool: () => true },
 			chatContainer: { children: [assistant], clear: vi.fn(), addChild: vi.fn() },
 			streamingComponent: undefined,
 			streamingMessage: undefined,

@@ -36,6 +36,14 @@ export interface ProviderModelDiscoveryConfig {
 	readonly baseUrl?: string;
 	readonly fetch?: FetchImpl;
 	readonly authenticated?: boolean;
+	/**
+	 * Optional cloud region for discovery endpoints / SigV4 scope. Callers that
+	 * select a non-ambient Bedrock region (e.g. GovCloud via provider options or
+	 * AWS_REGION) should pass it so discovery matches runtime routing.
+	 */
+	readonly region?: string;
+	/** Optional named credentials profile (e.g. AWS shared-config profile). */
+	readonly profile?: string;
 }
 
 export type ProviderModelDiscoveryPreparer = (config: ProviderModelDiscoveryConfig) => ProviderModelDiscoveryConfig;

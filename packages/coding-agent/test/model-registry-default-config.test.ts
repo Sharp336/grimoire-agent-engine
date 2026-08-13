@@ -65,6 +65,9 @@ describe("ModelRegistry default custom models config", () => {
 			modelId: "us.anthropic.claude-opus-4-8",
 		});
 
+		// streamIdleTimeoutMs is applied by catalog policy for Bedrock reasoning
+		// models (long quiet ConverseStream thinking; see #7892) and must be
+		// preserved through models.yml overrides.
 		expect(model?.compat).toEqual({
 			promptCacheMode: "explicit",
 			supportsLongPromptCacheRetention: false,
@@ -72,7 +75,7 @@ describe("ModelRegistry default custom models config", () => {
 			promptCacheMaximumCheckpoints: 4,
 			// Reasoning-tier Bedrock stream-stall watchdog widening applies to
 			// overrides too (model compat generation).
-			streamIdleTimeoutMs: 900000,
+			streamIdleTimeoutMs: 900_000,
 		});
 	});
 
@@ -147,6 +150,7 @@ interface ModelSnapshot {
 		supportsLongPromptCacheRetention: boolean;
 		promptCacheMinimumTokens: number;
 		promptCacheMaximumCheckpoints: number;
+		/** Catalog policy for Bedrock reasoning models; see #7892. */
 		streamIdleTimeoutMs?: number;
 	};
 }

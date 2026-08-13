@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Amazon Bedrock control-plane authentication for model discovery (`prepareModelDiscovery` on `amazon-bedrock`), honoring explicit `region`/`profile` discovery hints and signing multi-region `ListInferenceProfiles` / `ListFoundationModels` requests with SigV4 (region taken from the request host) or a Bedrock API key.
+- Added Cursor personal monthly USD quota and remaining-balance reporting with verified profile email account labels.
+
+### Breaking Changes
+
+- Fixed GitHub Copilot's permanent `model_not_available_for_integrator` response being retried and replaced with transient fleet-skew guidance, preserving the provider's actionable `Available models` list instead ([#7819](https://github.com/can1357/oh-my-pi/issues/7819)).
 ## [17.3.2] - 2026-08-13
 
 ### Fixed

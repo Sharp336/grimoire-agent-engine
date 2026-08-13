@@ -125,7 +125,7 @@ describe("UserMessageComponent magic-keyword highlighting", () => {
 			chatContainer,
 			getUserMessageText: () => "please inspect [Image #1]",
 			sessionManager: sessionManagerMock,
-			viewSession: { sessionManager: sessionManagerMock },
+			viewSession: { sessionManager: sessionManagerMock, hasBuiltInTool: () => true },
 			transcriptMessageComponents: new WeakMap(),
 		} as unknown as InteractiveModeContext);
 		const message: AgentMessage = {

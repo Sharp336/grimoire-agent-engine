@@ -65,7 +65,7 @@ describe("EventController plan-approval dispatch", () => {
 					return () => {};
 				},
 			},
-			viewSession: { isStreaming: false },
+			viewSession: { isStreaming: false, hasBuiltInTool: () => true },
 			pendingTools: new Map(),
 			ui: { requestRender: vi.fn() },
 			handlePlanApproval,

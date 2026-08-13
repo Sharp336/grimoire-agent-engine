@@ -12,6 +12,7 @@ function createContext() {
 	const pendingTools = new Map<string, unknown>();
 	const session = {
 		getToolByName: () => undefined,
+		hasBuiltInTool: () => true,
 		isAborting: false,
 	};
 	const ctx = {

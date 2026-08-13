@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Amazon Bedrock Converse Stream runtime discovery via the Bedrock control plane (`ListInferenceProfiles` / `ListFoundationModels`) across the ambient partition's regions (GovCloud east+west, common commercial regions) so authenticated AWS profiles surface the inference profiles and on-demand text models available in the account instead of relying only on the static catalog. Discovery fails closed (retains the static catalog) on incomplete control-plane results, inherits metadata from underlying model ARNs for application profiles, and only emits models that match the shared Bedrock eligibility policy plus a bundled reference.
 ## [17.3.2] - 2026-08-13
 
 ### Added

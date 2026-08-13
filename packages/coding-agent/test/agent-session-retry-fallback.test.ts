@@ -2697,6 +2697,8 @@ describe("AgentSession retry fallback", () => {
 			`${primaryModel.provider}/${primaryModel.id}`,
 		]);
 		expect(retryStartEvents).toHaveLength(1);
+		// Explicit retry-after-ms from the provider error is honored when
+		// model fallback is disabled (same-model retry on the primary).
 		expect(retryStartEvents[0]).toMatchObject({
 			attempt: 1,
 			maxAttempts: 1,
