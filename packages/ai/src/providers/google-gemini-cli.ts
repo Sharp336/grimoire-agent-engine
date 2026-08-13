@@ -635,6 +635,11 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			const isFlashLeakModel = model.id.includes("flash");
 
 			let started = false;
+			// Tracks whether *visible* content (text delta or tool call) has been
+			// pushed downstream. `started` alone is a poor failover guard because a
+			// hidden thought part also flips it (via `ensureStarted`); a thinking-only
+			// STOP must still fail over to the alternate Antigravity endpoint (#8480).
+			let emittedVisibleContent = false;
 			let sawFinishReason = false;
 			let lastResponseId: string | undefined;
 			const ensureStarted = () => {
@@ -713,6 +718,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 
 				const emitVisibleText = (delta: string, thoughtSignature?: string): void => {
 					if (!delta) return;
+					emittedVisibleContent = true;
 					const block = startTextBlock();
 					block.text += delta;
 					block.textSignature = retainThoughtSignature(block.textSignature, thoughtSignature);
@@ -871,6 +877,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 								};
 
 								output.content.push(toolCall);
+								emittedVisibleContent = true;
 								ensureStarted();
 								pushToolCallEvents(toolCall, blockIndex(), output, stream);
 							}
@@ -944,6 +951,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 				const isLastEndpoint = i === endpoints.length - 1;
 				try {
 					started = false;
+					emittedVisibleContent = false;
 					resetOutput();
 
 					// Per attempt: arm a pre-response (TTFT) timer, cleared the instant
@@ -1086,7 +1094,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					const status = extractHttpStatusFromError(error);
 					if (
 						!isLastEndpoint &&
-						!started &&
+						!emittedVisibleContent &&
 						(AIError.isTransientStatus(status) ||
 							(status === undefined &&
 								!(error instanceof AIError.ProviderResponseError && error.kind === "output") &&
