@@ -85,6 +85,7 @@ import { createAcpClientBridge } from "./acp-client-bridge";
 import {
 	extractAssistantMessageText,
 	mapAgentSessionEventToAcpSessionUpdates,
+	mapThinkingLevelChangeToAcpConfigUpdate,
 	normalizeReplayToolArguments,
 } from "./acp-event-mapper";
 import { ACP_TERMINAL_AUTH_FLAG } from "./terminal-auth";
@@ -112,6 +113,16 @@ export const ACP_BOOTSTRAP_RACE_GUARD_MS = 50;
 const ACP_CANCEL_CLEANUP_TIMEOUT_MS = 5_000;
 const ACP_ASYNC_DELIVERY_DRAIN_TIMEOUT_MS = 250;
 const ACP_ASYNC_DELIVERY_DRAIN_MAX_PASSES = 3;
+
+type ThinkingLevelChangedEvent = Extract<AgentSessionEvent, { type: "thinking_level_changed" }>;
+type AutoThinkingResolutionEvent = ThinkingLevelChangedEvent & {
+	configured: typeof AUTO_THINKING;
+	resolved: NonNullable<ThinkingLevelChangedEvent["resolved"]>;
+};
+
+function isAutoThinkingResolutionEvent(event: AgentSessionEvent): event is AutoThinkingResolutionEvent {
+	return event.type === "thinking_level_changed" && event.configured === AUTO_THINKING && event.resolved !== undefined;
+}
 
 type AgentImageContent = {
 	type: "image";
@@ -1170,8 +1181,13 @@ export class AcpAgent implements Agent {
 		if (event.type !== "thinking_level_changed" && event.type !== "model_changed") {
 			return;
 		}
+		// Resolutions belong to the active top-level prompt subscription. It is
+		// installed before prompt execution, unlike this bootstrap-delayed listener.
+		if (isAutoThinkingResolutionEvent(event)) {
+			return;
+		}
 		try {
-			await this.#pushConfigOptionUpdate(record);
+			await this.#pushConfigOptionUpdate(record, event.type === "thinking_level_changed" ? event : undefined);
 		} catch (error) {
 			logger.warn("Failed to push config_option_update after a lifetime event", {
 				sessionId: record.session.sessionId,
@@ -1221,6 +1237,11 @@ export class AcpAgent implements Agent {
 	async #handlePromptEvent(record: ManagedSessionRecord, event: AgentSessionEvent): Promise<void> {
 		const promptTurn = record.promptTurn;
 		if (!promptTurn || promptTurn.settled || promptTurn.cancelRequested) {
+			return;
+		}
+
+		if (isAutoThinkingResolutionEvent(event)) {
+			await this.#pushConfigOptionUpdate(record, event);
 			return;
 		}
 
@@ -1528,18 +1549,16 @@ export class AcpAgent implements Agent {
 		};
 	}
 
-	async #pushConfigOptionUpdate(record: ManagedSessionRecord): Promise<void> {
-		await this.#pushConfigOptionUpdateForSession(record.session);
+	async #pushConfigOptionUpdate(record: ManagedSessionRecord, event?: ThinkingLevelChangedEvent): Promise<void> {
+		await this.#pushConfigOptionUpdateForSession(record.session, event);
 	}
 
-	async #pushConfigOptionUpdateForSession(session: AgentSession): Promise<void> {
-		await this.#connection.sessionUpdate({
-			sessionId: session.sessionId,
-			update: {
-				sessionUpdate: "config_option_update",
-				configOptions: this.#buildConfigOptions(session),
-			},
-		});
+	async #pushConfigOptionUpdateForSession(session: AgentSession, event?: ThinkingLevelChangedEvent): Promise<void> {
+		const configOptions = this.#buildConfigOptions(session);
+		const update: SessionUpdate = event
+			? mapThinkingLevelChangeToAcpConfigUpdate(event, configOptions)
+			: { sessionUpdate: "config_option_update", configOptions };
+		await this.#connection.sessionUpdate({ sessionId: session.sessionId, update });
 	}
 
 	#buildConfigOptions(session: AgentSession): SessionConfigOption[] {

@@ -1,4 +1,5 @@
 import type {
+	SessionConfigOption,
 	SessionNotification,
 	SessionUpdate,
 	ToolCall,
@@ -128,6 +129,7 @@ interface TextMessageLike {
 }
 
 const ACP_TEXT_LIMIT = 4_000;
+const OMP_REASONING_META_KEY = "omp.sh/reasoning";
 
 /**
  * Device name when the call is an `xd://` device dispatch riding the
@@ -206,6 +208,17 @@ export function mapToolKind(toolName: string, args?: unknown): ToolKind {
 		default:
 			return "other";
 	}
+}
+
+export function mapThinkingLevelChangeToAcpConfigUpdate(
+	event: Extract<AgentSessionEvent, { type: "thinking_level_changed" }>,
+	configOptions: SessionConfigOption[],
+): SessionUpdate {
+	const update: SessionUpdate = { sessionUpdate: "config_option_update", configOptions };
+	if (event.configured === "auto" && event.resolved !== undefined) {
+		update._meta = { [OMP_REASONING_META_KEY]: { configured: event.configured, resolved: event.resolved } };
+	}
+	return update;
 }
 
 export function mapAgentSessionEventToAcpSessionUpdates(
