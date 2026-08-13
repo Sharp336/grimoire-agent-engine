@@ -367,10 +367,12 @@ See [Models](./models.md) for the `models.yml` schema and custom-provider defini
 
 ### Council
 
-Council runs an independent, ordered model roster over a task, adjudicates the reviews, and publishes one plan at `plans/<slug>.md` when successful. Configure the roster in the global settings file and assign each roster role exactly one model selector through `modelRoles`:
+Council runs an independent, ordered model roster over a task, adjudicates the reviews, and publishes one plan to `local://council-<slug>-plan.md` when successful. It creates no file in your working tree. Configure the roster in the global settings file and assign each roster role exactly one model selector through `modelRoles`:
 
 ```yaml
 modelRoles:
+  planner: anthropic/claude-opus-4-5
+  adjudicator: openai/gpt-5.5:high
   council1: anthropic/claude-opus-4-5
   council2: openai/gpt-5.5:high
   council3: google/gemini-3.1-pro-preview
@@ -380,37 +382,43 @@ council:
   members:
     - role: council1
       enabled: true
+      round: 1
     - role: council2
       enabled: true
+      round: 1
     - role: council3
       enabled: true
+      round: 2
     - role: council4
       enabled: true
-  rounds: 1
+  rounds: 2
+  mirrorTranscript: true
+  advisor:
+    planner: false
+    reviewers: false
+    adjudicator: false
 ```
 
-| Key               | Type   | Default                                    | Notes                                                                                                                                                           |
-| ----------------- | ------ | ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `council.members` | array  | `council1` through `council4`, all enabled | Global-only ordered roster of `{ role, enabled }` entries. Project configuration is rejected. Every enabled role must resolve through `modelRoles` to one model. |
-| `council.rounds`  | number | `1`                                        | Number of independent review rounds: `1` or `2`.                                                                                                                |
+| Key                           | Type    | Default                                    | Notes                                                                                                                                                                                                                                              |
+| ----------------------------- | ------- | ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `council.members`             | array   | `council1` through `council4`, all enabled | Global-only ordered roster of `{ role, enabled, round? }` entries. Project configuration is rejected. Every enabled, active role must resolve through `modelRoles` to one model. `planner` and `adjudicator` are reserved and cannot be roster ids. At most 64 members may be active at once. |
+| `council.rounds`              | number  | `1`                                        | Number of independent review rounds: `1` or `2`.                                                                                                                                                                                                   |
+| `council.mirrorTranscript`    | boolean | `true`                                     | Live-mirror the turns of a council child that is running alone in its phase into the main transcript. This controls only the live mirror: the blocks write no session entry and are not replayed by a durable transcript rebuild. Use `history://<agent-id>` for the child's own transcript. |
+| `council.advisor.planner`     | boolean | `false`                                    | Attach a live advisor (the `advisor` model role) to the planner. Its tools are clamped to the planner's read-only allowlist and its spend is billed to the planner.                                                                                 |
+| `council.advisor.reviewers`   | boolean | `false`                                    | Same, for every reviewer.                                                                                                                                                                                                                          |
+| `council.advisor.adjudicator` | boolean | `false`                                    | Same, for a delegated adjudicator only. A main-session adjudicator follows the global `advisor.enabled`.                                                                                                                                           |
 
-The Model Hub **Roles** view includes a **Council** section for assigning each member's model, enabling or disabling members, changing their order, and editing the roster. `/council config` opens that section.
+A member's optional `round` pins it to that review round; omitting it runs the member in every configured round. A member pinned above `council.rounds` is kept in the roster and shown in the Model Hub, but it never runs, is never credential-checked, and never marks a run degraded. Every configured round must have at least one enabled member, or the run refuses before spend.
 
-Command forms:
+`modelRoles.planner` and `modelRoles.adjudicator` are the two council leads. An unassigned `planner` falls back to the `slow` model role; an unassigned `adjudicator` keeps adjudication in your main session, which is the historical behaviour for both.
 
-- `/council <task>` starts a run.
-- `/council status` reports the current run or configured idle roster.
-- `/council cancel` cancels the active run.
-- `/council resume [run-id]` explicitly resumes an interrupted run belonging to the current session; without an id, it selects that session's latest run.
-- `/council config` opens the Model Hub Council roster.
+The Model Hub **Roles** view includes a **Roles & Council** section for assigning the two lead models, assigning each member's model, enabling or disabling members, changing their order, setting a member's round with `r`, toggling the three advisors, and editing the roster. `/council config` opens that section.
 
-`/council <task>` dispatches immediately without a confirmation step. Any unavailable enabled member blocks the entire run before model spend rather than silently shrinking the roster. A live Council pane stays docked below the transcript while work runs; ordinary user turns remain available, and the pane can be collapsed without cancelling the run.
+`/council <task>` starts a run, `/council status`, `/council cancel`, and `/council resume [run-id]` manage it, and `/council config` opens the roster editor. A run dispatches immediately without a confirmation step, and any unavailable enabled member blocks the whole dispatch before model spend rather than silently shrinking the roster.
 
-A successful run writes exactly one published plan to `plans/<slug>.md`.
+A successful run publishes exactly one plan, at `local://council-<slug>-plan.md`, and creates nothing in your working tree. The slug is derived deterministically from the task text (a word-aligned 48-character slug), not from a title model.
 
-Reviewer read-only and repository-root confinement are a prompt contract plus a restricted tool-name set, not data-source or OS-level enforcement. Retained read tools can address internal URLs, absolute paths, and HTTP sources where supported.
-
-Resume is limited to the same session: after reloading or restarting that session, use `/council resume` explicitly. Runs belonging to another session cannot be resumed.
+See [Council](./council.md) for the run lifecycle, the twelve run states, dispatch refusals, the 64-active-reviewer limit, reviewer confinement, durable artifacts and resume rules, the legacy `outputPath` compatibility caveat, adjudication modes, HUD controls, and ACP/RPC behaviour.
 
 ### Advisor
 

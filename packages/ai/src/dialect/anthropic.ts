@@ -90,6 +90,14 @@ export class AnthropicInbandScanner implements InbandScanner {
 	#paramTruncated = false;
 	#paramClosePrefixes: readonly string[] = [];
 	#rawBlock = "";
+	/**
+	 * Raw bytes consumed since the current wrapper tag opened, replayed as text if
+	 * the wrapper closes without producing a single tool call. Without this, any
+	 * stray `<tool_calls>` — including a model imitating its own mangled leak —
+	 * silently deletes the rest of the turn.
+	 */
+	#sectionRaw = "";
+	#sectionProduced = false;
 	#thinking = "";
 	#thinkingTag = "";
 	#thinkingClosePrefixes: readonly string[] = [];
@@ -167,6 +175,8 @@ export class AnthropicInbandScanner implements InbandScanner {
 
 		if (!tag.closing && this.#wrapperTags[tag.localName] === true) {
 			this.#buffer = this.#buffer.slice(tag.raw.length);
+			this.#sectionRaw = tag.raw;
+			this.#sectionProduced = false;
 			this.#state = "section";
 			return true;
 		}
@@ -193,10 +203,12 @@ export class AnthropicInbandScanner implements InbandScanner {
 	#consumeSection(final: boolean, events: InbandScanEvent[]): boolean {
 		const tagStart = this.#buffer.indexOf("<");
 		if (tagStart === -1) {
+			this.#sectionRaw += this.#buffer;
 			this.#buffer = "";
 			return false;
 		}
 		if (tagStart > 0) {
+			this.#sectionRaw += this.#buffer.slice(0, tagStart);
 			this.#buffer = this.#buffer.slice(tagStart);
 			return true;
 		}
@@ -204,13 +216,15 @@ export class AnthropicInbandScanner implements InbandScanner {
 		const tag = this.#peekTag(final, this.#relevantPrefixes());
 		if (tag === "partial") return false;
 		if (!tag) {
+			this.#sectionRaw += this.#buffer[0]!;
 			this.#buffer = this.#buffer.slice(1);
 			return true;
 		}
 
 		this.#buffer = this.#buffer.slice(tag.raw.length);
+		this.#sectionRaw += tag.raw;
 		if (tag.closing && this.#wrapperTags[tag.localName] === true) {
-			this.#state = "outside";
+			this.#closeSection(events);
 			return true;
 		}
 		if (!tag.closing && tag.localName === "invoke") {
@@ -221,6 +235,18 @@ export class AnthropicInbandScanner implements InbandScanner {
 			this.#startThinking(tag, "section", events);
 		}
 		return true;
+	}
+
+	/**
+	 * Leave a wrapper section. A section that produced no tool call was never
+	 * tool-call markup, so its bytes are replayed verbatim as text rather than
+	 * dropped — otherwise a stray wrapper deletes everything it encloses.
+	 */
+	#closeSection(events: InbandScanEvent[]): void {
+		if (!this.#sectionProduced) this.#emitText(this.#sectionRaw, events);
+		this.#sectionRaw = "";
+		this.#sectionProduced = false;
+		this.#state = "outside";
 	}
 
 	#consumeInvoke(final: boolean, events: InbandScanEvent[]): boolean {
@@ -253,6 +279,7 @@ export class AnthropicInbandScanner implements InbandScanner {
 		this.#buffer = this.#buffer.slice(tag.raw.length);
 		if (tag.closing && tag.localName === "invoke") {
 			if (this.#started) {
+				this.#sectionProduced = true;
 				events.push({
 					type: "toolEnd",
 					id: this.#id,
@@ -354,6 +381,10 @@ export class AnthropicInbandScanner implements InbandScanner {
 		if (this.#state === "outside") return;
 		if (this.#state === "thinking") this.#finishThinking(events);
 		else this.#resetCall(this.#returnState);
+		// A wrapper that never closed and never produced a call was not tool-call
+		// markup; replay it instead of deleting the tail of the turn. A partial
+		// `<invoke>` still drops — that is a truncated call, not stray prose.
+		if (this.#sectionRaw.length > 0) this.#closeSection(events);
 		this.#state = "outside";
 		this.#buffer = "";
 	}

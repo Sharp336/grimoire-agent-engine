@@ -13,6 +13,8 @@ describe("InputController tool output expansion", () => {
 			toolOutputExpanded: false,
 			chatContainer: { children: [expandable, inert] },
 			ui: { requestRender, resetDisplay },
+			hasActiveCouncil: () => false,
+			setCouncilPaneExpanded: vi.fn(),
 		} as unknown as InteractiveModeContext;
 
 		new InputController(ctx).toggleToolOutputExpansion();
@@ -37,6 +39,8 @@ describe("InputController tool output expansion", () => {
 			keybindings: { getDisplayString: vi.fn(() => "Alt+H") },
 			showStatus,
 			ui: { resetDisplay },
+			hasActiveCouncil: () => false,
+			setCouncilPaneExpanded: vi.fn(),
 		} as unknown as InteractiveModeContext;
 
 		new InputController(ctx).toggleToolOutputExpansion();
@@ -63,6 +67,7 @@ describe("InputController tool activity visibility", () => {
 		const clearInlineImages = vi.fn();
 		const resetDisplay = vi.fn();
 		const showStatus = vi.fn();
+		const setCouncilPaneExpanded = vi.fn();
 		const ctx = {
 			hideToolActivity: false,
 			toolOutputExpanded: true,
@@ -71,6 +76,8 @@ describe("InputController tool activity visibility", () => {
 			rebuildChatFromMessages,
 			showStatus,
 			ui: { clearInlineImages, resetDisplay },
+			hasActiveCouncil: () => false,
+			setCouncilPaneExpanded,
 		};
 		const controller = new InputController(ctx as unknown as InteractiveModeContext) as unknown as InputController & {
 			toggleToolActivityVisibility(): void;
@@ -94,6 +101,9 @@ describe("InputController tool activity visibility", () => {
 
 		expect(ctx.hideToolActivity).toBe(false);
 		expect(ctx.toolOutputExpanded).toBe(false);
+		// Revealing tool activity collapses the council pane with it, so the pane cannot stay expanded
+		// against a collapsed transcript.
+		expect(setCouncilPaneExpanded).toHaveBeenCalledWith(false);
 		expect(set).toHaveBeenLastCalledWith("display.hideToolActivity", false);
 		expect(ctx.chatContainer.children).toEqual(children);
 		expect(clear).not.toHaveBeenCalled();

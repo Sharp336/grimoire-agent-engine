@@ -43,6 +43,7 @@ import {
 	bottomBorder,
 	divider,
 	dividerSplit,
+	dividerSplitOpen,
 	fit,
 	row,
 	splitBodyWidth,
@@ -152,6 +153,14 @@ export interface PlanReviewOverlayOptions {
 	externalEditorLabel?: string;
 	/** Serializable annotations restored into this overlay instance. */
 	annotationState?: PlanReviewAnnotationState;
+	/** Pre-sanitized, width-bounded rows rendered full-width above the plan body. */
+	header?: readonly string[];
+	/**
+	 * Rows to fall back to when `header` does not fit the terminal's header budget. Defaults to
+	 * `header`'s first row, which by convention is its headline; supply this explicitly when the
+	 * collapsed form is not simply a prefix.
+	 */
+	headerCollapsed?: readonly string[];
 }
 
 /** Default trailing footer hint when the caller supplies none. */
@@ -176,6 +185,8 @@ export class PlanReviewOverlay implements Component {
 	#helpSuffix: string;
 	#externalEditorLabel: string | undefined;
 	#promptTitle: string | undefined;
+	#header: readonly string[];
+	#headerCollapsed: readonly string[];
 	#selectedIndex: number;
 	#slider: HookSelectorSlider | undefined;
 	#sliderIndex: number;
@@ -229,6 +240,8 @@ export class PlanReviewOverlay implements Component {
 		this.#helpSuffix = options.helpText ?? DEFAULT_HELP_SUFFIX;
 		this.#externalEditorLabel = options.externalEditorLabel;
 		this.#promptTitle = options.promptTitle;
+		this.#header = options.header ?? [];
+		this.#headerCollapsed = options.headerCollapsed ?? this.#header.slice(0, 1);
 		this.#selectedIndex = this.#coerceIndex(options.initialIndex ?? 0);
 		if (options.slider && options.slider.segments.length > 0) {
 			this.#slider = options.slider;
@@ -1176,7 +1189,16 @@ export class PlanReviewOverlay implements Component {
 
 		// Chrome rows: top border, two dividers, bottom border, plus the
 		// prompt/slider/option/footer rows between them.
-		const chrome = 4 + promptLines.length + sliderLines.length + optionLines.length + footerLines.length;
+		const baseChrome = 4 + promptLines.length + sliderLines.length + optionLines.length + footerLines.length;
+		// The header costs its own rows plus the rule that closes it. `regionRows` clamps upward, so a
+		// short terminal cannot shed those rows implicitly. Try the full block, fall back to the
+		// collapsed one, and only then drop the header whole rather than squeeze the body below the
+		// minimum — losing the run's outcome entirely is a worse trade than losing its detail rows.
+		const headerRows =
+			[this.#header, this.#headerCollapsed].find(
+				candidate => candidate.length > 0 && termHeight - (baseChrome + candidate.length + 1) >= MIN_BODY_ROWS,
+			) ?? [];
+		const chrome = headerRows.length > 0 ? baseChrome + headerRows.length + 1 : baseChrome;
 		const regionRows = Math.max(MIN_BODY_ROWS, termHeight - chrome);
 
 		const bodyLines = this.#buildBody(bodyContentWidth);
@@ -1196,7 +1218,15 @@ export class PlanReviewOverlay implements Component {
 		const out: string[] = [];
 		if (sidebarShown) {
 			const { lines: sidebar, posForRow } = this.#renderSidebarLines(regionRows, sidebarWidth);
-			out.push(topBorderSplit(width, OVERLAY_TITLE, sidebarWidth));
+			// The header spans the full width, so with one present the columns are
+			// opened by its closing rule rather than by the top border.
+			if (headerRows.length > 0) {
+				out.push(topBorder(width, OVERLAY_TITLE));
+				for (const line of headerRows) out.push(row(line, width));
+				out.push(dividerSplitOpen(width, sidebarWidth));
+			} else {
+				out.push(topBorderSplit(width, OVERLAY_TITLE, sidebarWidth));
+			}
 			for (let i = 0; i < regionRows; i++) {
 				const pos = posForRow[i];
 				if (pos !== undefined) this.#tocClickRows.set(out.length, pos);
@@ -1206,6 +1236,10 @@ export class PlanReviewOverlay implements Component {
 			out.push(dividerSplit(width, sidebarWidth));
 		} else {
 			out.push(topBorder(width, OVERLAY_TITLE));
+			if (headerRows.length > 0) {
+				for (const line of headerRows) out.push(row(line, width));
+				out.push(divider(width));
+			}
 			for (const line of body) {
 				this.#bodyClickRows.add(out.length);
 				out.push(row(line, width));

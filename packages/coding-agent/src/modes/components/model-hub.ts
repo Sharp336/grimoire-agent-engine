@@ -27,13 +27,24 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../../config/model-registry";
 import { type ModelRoleLookup, type ResolvedModelRoleValue, resolveModelRoleValue } from "../../config/model-resolver";
-import { getKnownRoleIds, getRoleInfo } from "../../config/model-roles";
+import { councilRoleLabel, getKnownRoleIds, getRoleInfo } from "../../config/model-roles";
 import type { Settings } from "../../config/settings";
-import { CouncilConfigError, type CouncilMemberSetting, parseCouncilConfig } from "../../council/config";
+import {
+	COUNCIL_LEAD_ROLES,
+	COUNCIL_MAX_ACTIVE_REVIEWERS,
+	COUNCIL_ROLE_ID,
+	type CouncilMemberSetting,
+	councilMemberRounds,
+	countActiveCouncilMembers,
+	isProjectScopedCouncilRoster,
+	parseCouncilConfig,
+	resolveCouncilMemberSelector,
+} from "../../council/config";
 import { AUTO_THINKING, type ConfiguredThinkingLevel, getConfiguredThinkingLevelMetadata } from "../../thinking";
+import { shortenPath } from "../../tools/render-utils";
 import { theme } from "../theme/theme";
 import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../utils/keybinding-matchers";
 import {
@@ -48,10 +59,15 @@ import {
 import { bottomBorder, dividerSplit, row, splitBodyWidth, splitRow, topBorderSplit } from "./overlay-box";
 import { renderSegmentTrack } from "./segment-track";
 
+/** Which reviewer group a `councilRole` row renders under. */
+type CouncilRoundGroup = 1 | 2 | "every";
+/** Per-role advisor toggles surfaced beside the Council roster. */
+type CouncilAdvisorScope = "planner" | "reviewers" | "adjudicator";
+
 /**
  * A row of the Roles view: a generic role, a model/wildcard chain-key
- * header, a fallback entry, or one of the council roster controls.
- * `sectionHeader` rows are presentation-only and never receive focus.
+ * header, a fallback entry, or one of the council controls.
+ * `sectionHeader` and `councilRoundHeader` rows are presentation-only and never receive focus.
  */
 type RolesRow =
 	| { kind: "role"; role: string }
@@ -60,10 +76,32 @@ type RolesRow =
 	| { kind: "separator" }
 	| { kind: "newFallback" }
 	| { kind: "newRole" }
-	| { kind: "sectionHeader"; section: "council"; label: string; meta: string; error?: string }
-	| { kind: "councilError" }
-	| { kind: "councilRole"; member: CouncilMemberSetting }
+	| { kind: "sectionHeader"; section: "council"; label: string; segments: readonly HeaderSegment[] }
+	| { kind: "councilNotice"; severity: "error" | "warning"; text: string; action?: "moveToGlobal" }
+	| { kind: "councilLead"; role: string; label: string; fallbackText: string }
+	| { kind: "councilAdvisor"; scope: CouncilAdvisorScope; label: string; enabled: boolean }
+	| { kind: "councilRoundHeader"; group: CouncilRoundGroup; inactive: boolean; empty: boolean }
+	| { kind: "councilRole"; member: CouncilMemberSetting; group: CouncilRoundGroup; roundFault: boolean }
+	| { kind: "councilRounds"; rounds: 1 | 2; invalid: boolean }
 	| { kind: "newCouncilMember" };
+
+/** One status segment of a Roles section header, joined by dim separators. */
+interface HeaderSegment {
+	text: string;
+	tone: "dim" | "warning";
+}
+
+/**
+ * How an invalid council roster is presented. `salvaged` keeps the rows editable
+ * because editing them is the repair; `projectScope` needs the roster relocated,
+ * which no row edit can do (roster writes always target global settings);
+ * `blocked` withholds the rows because `council.members` is not a list of
+ * records at all.
+ */
+type CouncilFaultKind = "salvaged" | "projectScope" | "blocked";
+
+/** What the footer name input is naming. */
+type RoleNameMode = "newRole" | "newCouncilMember" | "councilDisplayName";
 
 /**
  * What the model browser is currently picking for: a role's model, a slot in
@@ -102,6 +140,18 @@ export interface ModelHubCallbacks {
 	onCycleOrderChange?: (order: string[]) => void;
 	/** Persist the ordered council roster. Model assignments continue through onAssign/onUnassign. */
 	onCouncilRosterChange?: (members: CouncilMemberSetting[]) => void;
+	/** Persist `council.rounds`. */
+	onCouncilRoundsChange?: (rounds: 1 | 2) => void;
+	/** Persist one `council.advisor.*` toggle. */
+	onCouncilAdvisorChange?: (scope: CouncilAdvisorScope, enabled: boolean) => void;
+	/** Persist a role's user-facing display name in `modelTags`; `undefined` clears it back to the role id. */
+	onRoleDisplayNameChange?: (role: string, name: string | undefined) => void;
+	/**
+	 * Drop a project-scoped `council.members` key. The hub calls this only after
+	 * it has observed the global roster write land, so a failed destination write
+	 * leaves the project roster untouched.
+	 */
+	onCouncilRosterProjectClear?: () => Promise<void>;
 	onCancel: () => void;
 }
 
@@ -129,7 +179,17 @@ interface StripChip {
 	/** Pre-styled label body (without selection decoration). */
 	styled: string;
 	role?: string;
-	action: "assign" | "unassign" | "fallback" | "fallbackModel" | "fallbackProvider" | "scope" | "thinking";
+	action:
+		| "assign"
+		| "unassign"
+		| "fallback"
+		| "fallbackModel"
+		| "fallbackProvider"
+		| "scope"
+		| "thinking"
+		| "councilRound";
+	/** Round a `councilRound` chip commits; `"every"` leaves the member unpinned. */
+	councilRound?: CouncilRoundGroup;
 	thinkingLevel?: ConfiguredThinkingLevel;
 	scope?: ModelRoleSelectionScope;
 }
@@ -146,9 +206,21 @@ type StripState =
 			returnToRoles: boolean;
 	  }
 	| {
-			/** Footer text input naming a new custom role. */
+			/** Footer text input naming a role or a council member's display name. */
 			kind: "roleName";
+			mode: RoleNameMode;
+			/** Target council role when `mode` is `councilDisplayName`. */
+			role?: string;
 			input: Input;
+	  }
+	| {
+			/**
+			 * Round chooser shown before a new reviewer is named. Deliberately its own variant with no
+			 * `item`: nothing is being assigned yet, so every model-item strip field would be a lie.
+			 */
+			kind: "councilRound";
+			chips: StripChip[];
+			index: number;
 	  };
 
 /** Recorded chip hit-range on the footer row (columns relative to frame col 0). */
@@ -168,7 +240,12 @@ interface RoleRowPresentation {
 const PROVIDER_REFRESH_DEBOUNCE_MS = 120;
 const RECENT_LIMIT = 15;
 const SIDEBAR_MIN_WIDTH = 18;
-const COUNCIL_ERROR_MAX_LENGTH = 160;
+const COUNCIL_ERROR_MAX_LENGTH = 320;
+/** New generic role ids: the historical `/models` role-name grammar. */
+const ROLE_NAME_PATTERN = /^[a-zA-Z][\w-]*$/;
+/** Council display names: the role-name grammar plus interior spaces for multi-word labels. */
+const COUNCIL_DISPLAY_NAME_PATTERN = /^[A-Za-z][\w-]*(?: [\w-]+)*$/;
+const COUNCIL_DISPLAY_NAME_MAX_LENGTH = 48;
 const SIDEBAR_MAX_WIDTH = 26;
 const ROLE_LABEL_COLUMN_DIVISOR = 3;
 
@@ -210,8 +287,36 @@ export class ModelHubComponent implements Component {
 	#configError: string | undefined;
 	#councilMembers: CouncilMemberSetting[] = [];
 	#councilRosterRoleIds = new Set<string>();
-	#councilConfigError: string | undefined;
+	#councilFault: { kind: CouncilFaultKind; message: string } | undefined;
 	#councilRounds: 1 | 2 = 1;
+	/** `council.rounds` holds a value outside 1|2; the rounds row says so. */
+	#councilRoundsInvalid = false;
+	/**
+	 * Raw `round` values a salvaged row carried that are not `1 | 2`, keyed by role. Held apart from
+	 * {@link #councilMembers} — which stays the validated view the grouping and rendering read — and
+	 * re-attached on every roster write, so an unrelated edit cannot erase a pin the user still has
+	 * to repair.
+	 */
+	#councilMalformedRounds = new Map<string, unknown>();
+	/**
+	 * The salvaged rows are not a faithful copy of `council.members`: at least one entry was dropped
+	 * or could not be read at all. Relocating the roster in that state would write the reduced copy
+	 * to global and then drop the project key, destroying the unreadable entries, so the move is
+	 * refused while this is set.
+	 */
+	#councilRosterSalvageLossy = false;
+	/**
+	 * Enabled roster roles that would actually run and whose model role does not resolve to exactly
+	 * one selector. An inert member — disabled, or pinned past `council.rounds` — never runs, so its
+	 * missing assignment blocks nothing and is not counted.
+	 */
+	#councilUnassignedCount = 0;
+	/** `council.advisor.*`, read with the same tolerance as `council.rounds`. */
+	#councilAdvisor: Record<CouncilAdvisorScope, boolean> = { planner: false, reviewers: false, adjudicator: false };
+	/** Round chosen in the add-reviewer chooser, consumed by the name strip that follows it. */
+	#pendingCouncilRound: CouncilRoundGroup = "every";
+	/** Transient council notice on the status row: a scope warning or a failed roster move. */
+	#councilStatusNotice: { text: string; tone: "warning" | "error" } | undefined;
 
 	#entries: SidebarEntry[] = [];
 	// Sidebar sections from the last registry sync; #composeEntries assembles
@@ -294,20 +399,20 @@ export class ModelHubComponent implements Component {
 		if (options.initialSection === "council") {
 			this.#setActiveEntry("roles");
 			this.#focus = "list";
+			// Prefer a repair action, then the first editable roster control.
 			const councilIndex = this.#rolesRows.findIndex(
-				row => row.kind === "councilError" || row.kind === "councilRole" || row.kind === "newCouncilMember",
+				row => row.kind === "councilNotice" && row.action !== undefined,
 			);
-			if (councilIndex >= 0) {
-				this.#setRoleIndex(councilIndex);
-			} else {
-				const headerIndex = this.#rolesRows.findIndex(
-					row => row.kind === "sectionHeader" && row.section === "council",
-				);
-				if (headerIndex >= 0) {
-					this.#rolesScroll = headerIndex;
-					this.#rolesFollowActive = false;
-				}
-			}
+			const fallbackIndex = this.#rolesRows.findIndex(
+				row =>
+					row.kind === "councilNotice" ||
+					row.kind === "councilLead" ||
+					row.kind === "councilRole" ||
+					row.kind === "councilRounds" ||
+					row.kind === "councilAdvisor" ||
+					row.kind === "newCouncilMember",
+			);
+			this.#setCouncilInitialFocus(councilIndex >= 0 ? councilIndex : fallbackIndex);
 		} else if (initialProvider && this.#entries.some(entry => entry.providerId === initialProvider)) {
 			this.#setActiveEntry(`provider:${initialProvider}`);
 		} else {
@@ -350,46 +455,185 @@ export class ModelHubComponent implements Component {
 	}
 
 	#genericRoleIds(): string[] {
-		return this.#visibleRoleIds().filter(role => !this.#councilRosterRoleIds.has(role));
+		// Council leads are rendered as their own rows in the Council section, so they must not also
+		// appear in the generic list or in the model-item role strip.
+		return this.#visibleRoleIds().filter(
+			role => !this.#councilRosterRoleIds.has(role) && !COUNCIL_LEAD_ROLES.includes(role),
+		);
 	}
 
-	/** Strictly validate the roster before exposing it. Invalid config never falls back to defaults. */
+	/**
+	 * Validate the roster strictly, then classify any failure so a broken config
+	 * does not lock the editor. Invalid config never falls back to defaults; it
+	 * falls back to the rows the user actually configured.
+	 */
 	#reloadCouncilConfig(): void {
 		this.#councilRosterRoleIds.clear();
+		this.#councilRoundsInvalid = false;
+		this.#councilMalformedRounds.clear();
+		this.#councilRosterSalvageLossy = false;
 		try {
 			const config = parseCouncilConfig(this.#settings);
+			// `round` must survive: every roster mutation re-persists this whole array from these
+			// records, so a field dropped here is durably erased on the next Space/[/]/Delete.
 			this.#councilMembers = config.members.map(member => ({
 				role: member.role,
 				enabled: member.enabled,
+				...(member.round === undefined ? {} : { round: member.round }),
 			}));
 			this.#councilRounds = config.rounds;
+			this.#councilAdvisor = { ...config.advisor };
 			for (const member of config.members) this.#councilRosterRoleIds.add(member.role);
-			this.#councilConfigError = undefined;
+			this.#councilFault = undefined;
 		} catch (error) {
-			this.#councilMembers = [];
-			this.#councilRounds = 1;
+			const salvaged = this.#salvageCouncilMembers();
+			const kind: CouncilFaultKind = isProjectScopedCouncilRoster(this.#settings)
+				? "projectScope"
+				: salvaged === null
+					? "blocked"
+					: "salvaged";
+			this.#councilMembers = salvaged ?? [];
+			for (const member of this.#councilMembers) this.#councilRosterRoleIds.add(member.role);
+			let rawRounds: unknown;
 			try {
-				const rawMembers: unknown = this.#settings.get("council.members");
-				if (Array.isArray(rawMembers)) {
-					for (const member of rawMembers) {
-						if (
-							typeof member === "object" &&
-							member !== null &&
-							"role" in member &&
-							typeof member.role === "string"
-						) {
-							this.#councilRosterRoleIds.add(member.role);
-						}
-					}
-				}
+				rawRounds = this.#settings.get("council.rounds");
 			} catch {}
-			const message =
-				error instanceof CouncilConfigError
-					? error.message
-					: error instanceof Error
-						? error.message
-						: String(error);
-			this.#councilConfigError = sanitizeInline(message).slice(0, COUNCIL_ERROR_MAX_LENGTH);
+			this.#councilRounds = rawRounds === 2 ? 2 : 1;
+			this.#councilRoundsInvalid = rawRounds !== 1 && rawRounds !== 2;
+			this.#councilAdvisor = {
+				planner: this.#rawCouncilAdvisorFlag("planner"),
+				reviewers: this.#rawCouncilAdvisorFlag("reviewers"),
+				adjudicator: this.#rawCouncilAdvisorFlag("adjudicator"),
+			};
+			const message = error instanceof Error ? error.message : String(error);
+			this.#councilFault = { kind, message: sanitizeInline(message).slice(0, COUNCIL_ERROR_MAX_LENGTH) };
+		}
+		// An unassigned lead is not unassigned work: it falls back to a documented default. Only a
+		// lead that resolves to several selectors — which preflight refuses — is worth warning about.
+		const invalidLeads = COUNCIL_LEAD_ROLES.reduce(
+			(count, role) => count + (resolveCouncilMemberSelector(this.#settings, role).kind === "invalid" ? 1 : 0),
+			0,
+		);
+		this.#councilUnassignedCount =
+			invalidLeads +
+			this.#councilMembers.reduce(
+				(count, member) =>
+					count +
+					(member.enabled &&
+					councilMemberRounds(member, this.#councilRounds).length > 0 &&
+					resolveCouncilMemberSelector(this.#settings, member.role).kind !== "resolved"
+						? 1
+						: 0),
+				0,
+			);
+	}
+
+	/** Read one advisor toggle tolerantly, so an unrelated config fault still renders the switches. */
+	#rawCouncilAdvisorFlag(scope: CouncilAdvisorScope): boolean {
+		try {
+			return this.#settings.get(`council.advisor.${scope}`) === true;
+		} catch {
+			return false;
+		}
+	}
+
+	/**
+	 * Recover roster rows from a roster {@link parseCouncilConfig} rejected, so a
+	 * per-member or rounds error stays repairable by editing the rows. Returns
+	 * `null` only when `council.members` is not a list of records — the one fault
+	 * no row edit can express. Recovered rows keep their configured `enabled`
+	 * flag so a salvaged toggle round-trips instead of silently re-enabling.
+	 *
+	 * Every exit that loses an entry — an unreadable roster, an unreadable row, a
+	 * row with no usable role — sets {@link #councilRosterSalvageLossy}, because the
+	 * recovered rows are then a reduced copy the relocation must never treat as the
+	 * whole roster.
+	 */
+	#salvageCouncilMembers(): CouncilMemberSetting[] | null {
+		let raw: unknown;
+		try {
+			raw = this.#settings.get("council.members");
+		} catch {
+			return this.#lossySalvage();
+		}
+		if (!Array.isArray(raw)) return this.#lossySalvage();
+		const members: CouncilMemberSetting[] = [];
+		const seen = new Set<string>();
+		for (const entry of raw) {
+			// Mid-loop: earlier iterations may already have recorded malformed pins, and those must
+			// not outlive the members array they were keyed against.
+			if (!isRecord(entry)) return this.#lossySalvage();
+			if (typeof entry.role !== "string" || entry.role.length === 0 || seen.has(entry.role)) {
+				this.#councilRosterSalvageLossy = true;
+				continue;
+			}
+			seen.add(entry.role);
+			// A malformed `round` is recorded rather than dropped: the validated view below leaves it
+			// off so grouping stays honest, while `#persistCouncilMembers` writes the raw value back so
+			// an unrelated edit cannot silently widen this member to every round.
+			const round = entry.round === 1 || entry.round === 2 ? entry.round : undefined;
+			if (round === undefined && entry.round !== undefined) {
+				this.#councilMalformedRounds.set(entry.role, entry.round);
+			}
+			members.push({
+				role: entry.role,
+				enabled: entry.enabled !== false,
+				...(round === undefined ? {} : { round }),
+			});
+		}
+		return members;
+	}
+
+	/**
+	 * Abandon the salvage: no rows survive, so drop any malformed pins recorded so far to keep
+	 * `keys(#councilMalformedRounds) ⊆ roles(#councilMembers)` true, and mark the result lossy.
+	 */
+	#lossySalvage(): null {
+		this.#councilMalformedRounds.clear();
+		this.#councilRosterSalvageLossy = true;
+		return null;
+	}
+
+	/**
+	 * True while the roster is project-scoped: roster rows render, but editing them would write the
+	 * wrong file. Scoped to roster rows only — lead assignments write `modelRoles` and advisor
+	 * toggles write `council.advisor.*`, neither of which the misplaced key affects.
+	 */
+	get #councilRowsLocked(): boolean {
+		return this.#councilFault?.kind === "projectScope";
+	}
+
+	/**
+	 * Where to fix the roster. `council.members` carries no `/settings` UI
+	 * metadata, so the remedy names files rather than a settings screen.
+	 */
+	#councilRemedyLines(kind: CouncilFaultKind): { text: string; action?: "moveToGlobal" }[] {
+		const globalPath = shortenPath(this.#settings.getGlobalConfigPath());
+		if (kind === "salvaged") {
+			return [{ text: `Fix it in the rows below, or edit council.members in ${globalPath}` }];
+		}
+		if (kind === "blocked") {
+			return [{ text: `Council configuration is invalid; edit council.members in ${globalPath}` }];
+		}
+		const projectPath = shortenPath(
+			this.#settings.getProjectSettingSource("council.members") ?? "the project configuration",
+		);
+		return [
+			{ text: `Project roster: ${projectPath}` },
+			{ text: `Move roster to global config: ${globalPath}`, action: "moveToGlobal" },
+		];
+	}
+
+	/** Land the initial council focus on `index`, or scroll the section header into view when nothing is selectable. */
+	#setCouncilInitialFocus(index: number): void {
+		if (index >= 0) {
+			this.#setRoleIndex(index);
+			return;
+		}
+		const headerIndex = this.#rolesRows.findIndex(row => row.kind === "sectionHeader" && row.section === "council");
+		if (headerIndex >= 0) {
+			this.#rolesScroll = headerIndex;
+			this.#rolesFollowActive = false;
 		}
 	}
 
@@ -507,7 +751,7 @@ export class ModelHubComponent implements Component {
 			{
 				id: "roles",
 				kind: "roles",
-				label: "Roles",
+				label: "Roles & Council",
 				annotation: `${assignedCount}/${visibleRoles.length}`,
 			},
 			{ id: "all", kind: "all", label: "All models", annotation: String(availableModels.length) },
@@ -634,6 +878,38 @@ export class ModelHubComponent implements Component {
 		}
 	}
 
+	/** The reviewer group a member renders under; a pin outside `council.rounds` keeps its own group. */
+	#councilMemberGroup(member: CouncilMemberSetting): CouncilRoundGroup {
+		return member.round ?? "every";
+	}
+
+	/**
+	 * Groups to render, in reading order. A round pinned beyond `council.rounds` still gets a muted
+	 * group so the parked member stays visible and editable instead of vanishing from the hub.
+	 */
+	#councilRoundGroups(): CouncilRoundGroup[] {
+		const groups: CouncilRoundGroup[] = ["every"];
+		for (const round of [1, 2] as const) {
+			if (round <= this.#councilRounds || this.#councilMembers.some(member => member.round === round)) {
+				groups.push(round);
+			}
+		}
+		return groups;
+	}
+
+	/**
+	 * What an unassigned lead falls back to. Rendered in place of `unassigned` so a Planner or
+	 * Adjudicator nobody pinned reads as configured — which it is — rather than broken.
+	 */
+	#leadFallbackText(role: string): string {
+		if (role === "adjudicator") {
+			const model = this.#roles.default?.model ?? this.#roles.slow?.model;
+			return model ? `main session model (${model.provider}/${model.id})` : "main session model";
+		}
+		const slow = this.#roles.slow?.model;
+		return slow ? `slow role (${slow.provider}/${slow.id})` : "slow role";
+	}
+
 	/** Rebuild generic roles, the council roster, then model-oriented fallback chains. */
 	#buildRolesRows(): void {
 		const rows: RolesRow[] = [];
@@ -648,21 +924,83 @@ export class ModelHubComponent implements Component {
 		rows.push({ kind: "newRole" });
 		rows.push({ kind: "separator" });
 
+		const fault = this.#councilFault;
 		const enabledCount = this.#councilMembers.reduce((count, member) => count + (member.enabled ? 1 : 0), 0);
-		rows.push({
-			kind: "sectionHeader",
-			section: "council",
-			label: "Council",
-			meta: this.#councilConfigError
-				? "config error"
-				: `${enabledCount}/${this.#councilMembers.length} enabled · rounds ${this.#councilRounds}`,
-			error: this.#councilConfigError,
-		});
-		if (this.#councilConfigError) {
-			rows.push({ kind: "councilError" });
-		} else {
-			for (const member of this.#councilMembers) rows.push({ kind: "councilRole", member });
-			rows.push({ kind: "newCouncilMember" });
+		// The header reports assignment, not health: preflight still checks
+		// availability, tool support, and credentials before a run spends.
+		const segments: HeaderSegment[] =
+			fault?.kind === "blocked"
+				? [{ text: "config error", tone: "dim" }]
+				: [
+						{ text: `${enabledCount}/${this.#councilMembers.length} enabled`, tone: "dim" },
+						...(this.#councilUnassignedCount > 0
+							? [{ text: `${this.#councilUnassignedCount} unassigned`, tone: "warning" as const }]
+							: []),
+						...(fault?.kind === "projectScope" ? [{ text: "project scope", tone: "warning" as const }] : []),
+						{ text: `rounds ${this.#councilRounds}`, tone: "dim" },
+					];
+		rows.push({ kind: "sectionHeader", section: "council", label: "Council", segments });
+		if (fault) {
+			rows.push({
+				kind: "councilNotice",
+				severity: fault.kind === "salvaged" ? "warning" : "error",
+				text: fault.message,
+			});
+			for (const remedy of this.#councilRemedyLines(fault.kind)) {
+				rows.push({ kind: "councilNotice", severity: "warning", text: remedy.text, action: remedy.action });
+			}
+		}
+		if (fault?.kind !== "blocked") {
+			rows.push(
+				{
+					kind: "councilLead",
+					role: "planner",
+					label: "Planner",
+					fallbackText: this.#leadFallbackText("planner"),
+				},
+				{
+					kind: "councilLead",
+					role: "adjudicator",
+					label: "Adjudicator",
+					fallbackText: this.#leadFallbackText("adjudicator"),
+				},
+				{ kind: "councilRounds", rounds: this.#councilRounds, invalid: this.#councilRoundsInvalid },
+				{
+					kind: "councilAdvisor",
+					scope: "planner",
+					label: "Planner advisor",
+					enabled: this.#councilAdvisor.planner,
+				},
+				{
+					kind: "councilAdvisor",
+					scope: "reviewers",
+					label: "Reviewer advisor",
+					enabled: this.#councilAdvisor.reviewers,
+				},
+				{
+					kind: "councilAdvisor",
+					scope: "adjudicator",
+					label: "Adjudicator advisor",
+					enabled: this.#councilAdvisor.adjudicator,
+				},
+			);
+			for (const group of this.#councilRoundGroups()) {
+				const members = this.#councilMembers.filter(member => this.#councilMemberGroup(member) === group);
+				// `Every round` only earns a header when something is in it; a configured round always
+				// gets one, empty or not, because an empty round is the `COUNCIL_ROUND_UNSTAFFED` refusal.
+				if (group === "every" && members.length === 0) continue;
+				const inactive = typeof group === "number" && group > this.#councilRounds;
+				rows.push({ kind: "councilRoundHeader", group, inactive, empty: members.length === 0 });
+				for (const member of members) {
+					rows.push({
+						kind: "councilRole",
+						member,
+						group,
+						roundFault: this.#councilMalformedRounds.has(member.role),
+					});
+				}
+			}
+			if (!this.#councilRowsLocked) rows.push({ kind: "newCouncilMember" });
 		}
 
 		rows.push({ kind: "separator" });
@@ -915,6 +1253,17 @@ export class ModelHubComponent implements Component {
 		}
 		const supported = this.#thinkingOptionsFor(item.model);
 		if (!supported.includes(level)) level = ThinkingLevel.Inherit;
+		// The roster itself is global-only, so a project-scoped model for a council
+		// role silently applies to this repository alone.
+		this.#councilStatusNotice =
+			scope === "project" &&
+			(this.#councilRosterRoleIds.has(role) || COUNCIL_LEAD_ROLES.includes(role)) &&
+			!isProjectScopedCouncilRoster(this.#settings)
+				? {
+						text: `${role} model saved to project scope — the council roster is global, so other repositories keep their own model for this role`,
+						tone: "warning",
+					}
+				: undefined;
 		this.#callbacks.onAssign(item.model, role, level, item.selector, scope);
 		this.#refreshAfterMutation();
 		this.#openThinkingStrip(item, role, returnToRoles, scope);
@@ -1035,6 +1384,15 @@ export class ModelHubComponent implements Component {
 		if (!strip || strip.kind === "roleName") return;
 		const chip = strip.chips[strip.index];
 		if (!chip) return;
+		if (strip.kind === "councilRound") {
+			// The chooser has no `item`; it only stashes the round the name strip will apply.
+			if (chip.action !== "councilRound" || chip.councilRound === undefined) return;
+			this.#pendingCouncilRound = chip.councilRound;
+			this.#strip = null;
+			this.#chipRanges = [];
+			this.#openRoleNameStrip("newCouncilMember");
+			return;
+		}
 		switch (chip.action) {
 			case "assign":
 				if (chip.role) {
@@ -1083,6 +1441,9 @@ export class ModelHubComponent implements Component {
 					this.#refreshAfterMutation();
 				}
 				this.#closeStrip();
+				return;
+			case "councilRound":
+				// Only reachable from the chooser, which is handled above.
 				return;
 		}
 	}
@@ -1194,9 +1555,55 @@ export class ModelHubComponent implements Component {
 		this.#setRoleIndex(this.#roleIndex + delta);
 	}
 
-	/** Persist a roster edit, then restore focus to the edited member in the rebuilt row list. */
+	/**
+	 * The roster exactly as it must be written back to `council.members`: the validated rows plus any
+	 * malformed pin a salvaged row still carries.
+	 *
+	 * Every writer goes through this. A second, ad hoc projection of `#councilMembers` is precisely
+	 * how the relocation path silently dropped a broken `round` the row editor was preserving. Rows
+	 * are always cloned so a caller can never hand a live `#councilMembers` object to a callback.
+	 */
+	#councilRosterWrite(members: readonly CouncilMemberSetting[] = this.#councilMembers): CouncilMemberSetting[] {
+		return members.map(member => {
+			if (member.round !== undefined || !this.#councilMalformedRounds.has(member.role)) return { ...member };
+			// The one place a `round` outside `1 | 2` is produced. It is the malformed value the config
+			// still carries, written back verbatim so an unrelated edit cannot silently repair — and so
+			// destroy — a pin the user has yet to fix. The setting itself is an unvalidated array, and
+			// the next reload re-classifies this row as faulty, so nothing downstream trusts the type.
+			return { ...member, round: this.#councilMalformedRounds.get(member.role) } as CouncilMemberSetting;
+		});
+	}
+
+	/**
+	 * Refuse, before anything is persisted, a roster mutation that would run more reviewers in a
+	 * configured round than the adjudication grade schema can address. The notice lands on the
+	 * status row, so the roster rows and the cursor stay exactly where the user left them.
+	 *
+	 * A roster loaded from disk can already be over the limit, and the salvage rows are the repair.
+	 * Only a mutation that makes an over-limit roster *worse* is refused, so 66 -> 65 -> 64 walks
+	 * back down while 64 -> 65 is still turned away.
+	 */
+	#refusesCouncilCap(members: readonly CouncilMemberSetting[], rounds: 1 | 2, mutation: string): boolean {
+		const active = countActiveCouncilMembers(members, rounds);
+		if (active <= COUNCIL_MAX_ACTIVE_REVIEWERS) return false;
+		if (active <= countActiveCouncilMembers(this.#councilMembers, this.#councilRounds)) return false;
+		this.#councilStatusNotice = {
+			text: `${mutation} refused: ${active} reviewers would run, over the ${COUNCIL_MAX_ACTIVE_REVIEWERS} active-reviewer limit. Disable a reviewer, or pin one past round ${rounds}, first`,
+			tone: "error",
+		};
+		this.#tui.requestRender();
+		return true;
+	}
+
+	/**
+	 * Persist a roster edit, then restore focus to the edited member in the rebuilt row list.
+	 *
+	 * A malformed pin recorded during salvage is written back verbatim unless this very edit
+	 * supplied a real round for that role, so an unrelated toggle, reorder, or delete leaves a
+	 * broken `round` exactly as the user left it instead of silently repairing it to every round.
+	 */
 	#persistCouncilMembers(members: CouncilMemberSetting[], focusRole?: string): void {
-		this.#callbacks.onCouncilRosterChange?.(members);
+		this.#callbacks.onCouncilRosterChange?.(this.#councilRosterWrite(members));
 		this.#refreshAfterMutation();
 		if (focusRole) {
 			const index = this.#rolesRows.findIndex(row => row.kind === "councilRole" && row.member.role === focusRole);
@@ -1210,6 +1617,9 @@ export class ModelHubComponent implements Component {
 		const members = this.#councilMembers.map(candidate =>
 			candidate.role === role ? { ...candidate, enabled: !candidate.enabled } : { ...candidate },
 		);
+		if (this.#refusesCouncilCap(members, this.#councilRounds, `Enabling ${this.#roleDisplayLabel(role, true)}`)) {
+			return;
+		}
 		this.#persistCouncilMembers(members, role);
 	}
 
@@ -1237,16 +1647,188 @@ export class ModelHubComponent implements Component {
 		}
 	}
 
-	#addCouncilMember(): void {
+	/**
+	 * Create a roster slot from the collected name, pinned to `group`. A name matching the durable
+	 * role grammar becomes the role id; anything else is kept as a display name
+	 * over the auto-generated id, because renaming a role id would orphan
+	 * project-scoped `modelRoles` assignments in every other repository. Empty
+	 * input takes the auto id with no display name. Returns the new role id, or
+	 * `undefined` when the name is unusable.
+	 */
+	#createCouncilMember(name: string, group: CouncilRoundGroup): string | undefined {
 		const used = new Set(this.#councilMembers.map(member => member.role));
 		let suffix = 1;
 		while (used.has(`council${suffix}`)) suffix++;
-		const role = `council${suffix}`;
+		let role = `council${suffix}`;
+		let displayName: string | undefined;
+		if (name.length > 0) {
+			if (COUNCIL_ROLE_ID.test(name)) {
+				// `planner`/`adjudicator` are the council leads, not roster ids.
+				if (used.has(name) || this.#visibleRoleIds().includes(name) || COUNCIL_LEAD_ROLES.includes(name)) {
+					return undefined;
+				}
+				role = name;
+			} else {
+				if (name.length > COUNCIL_DISPLAY_NAME_MAX_LENGTH || !COUNCIL_DISPLAY_NAME_PATTERN.test(name)) {
+					return undefined;
+				}
+				displayName = name;
+			}
+		}
+		const round = group === "every" ? undefined : group;
 		this.#persistCouncilMembers(
-			[...this.#councilMembers.map(member => ({ ...member })), { role, enabled: true }],
+			[
+				...this.#councilMembers.map(member => ({ ...member })),
+				{ role, enabled: true, ...(round === undefined ? {} : { round }) },
+			],
 			role,
 		);
-		this.#startAssign(role);
+		if (displayName !== undefined) this.#setCouncilDisplayName(role, displayName);
+		return role;
+	}
+
+	/** Cycle one member through `every → 1 → 2 → every`, bounded by the configured round count. */
+	#cycleCouncilMemberRound(role: string): void {
+		const current = this.#councilMembers.find(candidate => candidate.role === role);
+		if (!current) return;
+		const order: CouncilRoundGroup[] = [
+			"every",
+			...(Array.from({ length: this.#councilRounds }, (_v, i) => i + 1) as (1 | 2)[]),
+		];
+		const next = order[(order.indexOf(current.round ?? "every") + 1) % order.length] ?? "every";
+		const round = next === "every" ? undefined : next;
+		const members = this.#councilMembers.map(candidate =>
+			candidate.role === role
+				? { role: candidate.role, enabled: candidate.enabled, ...(round === undefined ? {} : { round }) }
+				: { ...candidate },
+		);
+		// A pin beyond `council.rounds` is inert, so cycling it back into range is the one round edit
+		// that can add an active reviewer.
+		if (this.#refusesCouncilCap(members, this.#councilRounds, `Unparking ${this.#roleDisplayLabel(role, true)}`)) {
+			return;
+		}
+		this.#persistCouncilMembers(members, role);
+	}
+
+	/**
+	 * Persist a council member's user-facing name in `modelTags`. The durable role
+	 * id is never touched, so project-scoped model assignments keep resolving.
+	 */
+	#setCouncilDisplayName(role: string, name: string | undefined): void {
+		const index = this.#roleIndex;
+		this.#callbacks.onRoleDisplayNameChange?.(role, name);
+		this.#refreshAfterMutation();
+		this.#setRoleIndex(index);
+	}
+
+	#setCouncilRounds(rounds: 1 | 2): void {
+		if (rounds === this.#councilRounds && !this.#councilRoundsInvalid) return;
+		// Raising the round count activates every member pinned to the round being opened.
+		if (
+			this.#refusesCouncilCap(
+				this.#councilMembers,
+				rounds,
+				`Setting ${rounds} review round${rounds === 1 ? "" : "s"}`,
+			)
+		) {
+			return;
+		}
+		const index = this.#roleIndex;
+		this.#callbacks.onCouncilRoundsChange?.(rounds);
+		this.#refreshAfterMutation();
+		this.#setRoleIndex(index);
+	}
+
+	#toggleCouncilAdvisor(scope: CouncilAdvisorScope): void {
+		const index = this.#roleIndex;
+		this.#callbacks.onCouncilAdvisorChange?.(scope, !this.#councilAdvisor[scope]);
+		this.#refreshAfterMutation();
+		this.#setRoleIndex(index);
+	}
+
+	/**
+	 * First step of "+ Add reviewer…" while two rounds are configured: choose the round before
+	 * naming the member, so the new row lands in the group the user meant. Escape aborts the whole
+	 * add rather than falling back to an unpinned member nobody asked for.
+	 */
+	#openCouncilRoundStrip(): void {
+		const chips: StripChip[] = [
+			{ label: "round 1", styled: theme.fg("accent", "round 1"), action: "councilRound", councilRound: 1 },
+			{ label: "round 2", styled: theme.fg("muted", "round 2"), action: "councilRound", councilRound: 2 },
+			{
+				label: "every round",
+				styled: theme.fg("muted", "every round"),
+				action: "councilRound",
+				councilRound: "every",
+			},
+		];
+		this.#strip = { kind: "councilRound", chips, index: 0 };
+	}
+
+	/**
+	 * Relocate a project-scoped roster: write the global destination, confirm it
+	 * landed there, and only then drop the project key. A destination write that
+	 * does not land leaves the project roster exactly as it was.
+	 *
+	 * Refused outright when the rows are a lossy salvage: relocation may only ever move a roster
+	 * this editor can reproduce faithfully, otherwise the reduced copy would be written to global
+	 * and the project key — still holding the entries that were dropped — deleted behind it.
+	 */
+	async #moveCouncilRosterToGlobal(): Promise<void> {
+		const clearProjectRoster = this.#callbacks.onCouncilRosterProjectClear;
+		if (!clearProjectRoster) return;
+		if (this.#councilRosterSalvageLossy) {
+			const projectPath = shortenPath(
+				this.#settings.getProjectSettingSource("council.members") ?? "the project configuration",
+			);
+			this.#councilStatusNotice = {
+				text: `Roster has entries this editor cannot read; move refused. Fix council.members in ${projectPath} first`,
+				tone: "error",
+			};
+			this.#tui.requestRender();
+			return;
+		}
+		// The same serializer the row editor uses: relocating a roster must not be the one write that
+		// silently repairs (and so loses) a malformed pin the user still has to fix.
+		const members = this.#councilRosterWrite();
+		try {
+			this.#callbacks.onCouncilRosterChange?.(members);
+		} catch (error) {
+			this.#councilStatusNotice = {
+				text: `Global roster write failed: ${error instanceof Error ? error.message : String(error)}; project roster kept`,
+				tone: "error",
+			};
+			this.#tui.requestRender();
+			return;
+		}
+		const landed = this.#settings.getRawSetting("council.members", "global");
+		const wroteRoster =
+			landed.configured &&
+			landed.blockedByParent !== true &&
+			Array.isArray(landed.value) &&
+			landed.value.length === members.length &&
+			landed.value.every(
+				(entry, index) =>
+					isRecord(entry) && entry.role === members[index]?.role && entry.round === members[index]?.round,
+			);
+		if (!wroteRoster) {
+			this.#councilStatusNotice = {
+				text: "Global roster write did not land; project roster kept",
+				tone: "error",
+			};
+			this.#tui.requestRender();
+			return;
+		}
+		try {
+			await clearProjectRoster();
+			this.#councilStatusNotice = { text: "Council roster moved to global config", tone: "warning" };
+		} catch (error) {
+			this.#councilStatusNotice = {
+				text: `Global roster written, but the project key remains: ${error instanceof Error ? error.message : String(error)}`,
+				tone: "error",
+			};
+		}
+		this.#refreshAfterMutation();
 	}
 
 	#cancelAssign(): void {
@@ -1292,21 +1874,54 @@ export class ModelHubComponent implements Component {
 		this.#refreshAfterMutation();
 	}
 
-	/** Open the footer name input that creates a new custom role. */
-	#openRoleNameStrip(): void {
-		this.#strip = { kind: "roleName", input: new Input() };
+	/**
+	 * Open the footer name input. `councilDisplayName` prefills the current label
+	 * so an edit reads as a rename rather than a blank prompt.
+	 */
+	#openRoleNameStrip(mode: RoleNameMode, role?: string): void {
+		const input = new Input();
+		if (mode === "councilDisplayName" && role !== undefined) input.setValue(this.#roleDisplayLabel(role, true));
+		this.#strip = { kind: "roleName", mode, role, input };
 	}
 
-	/** Validate and commit the new-role name: jump straight into assigning it. */
+	/** Validate and commit the collected name. Invalid input keeps the strip open. */
 	#submitRoleName(): void {
 		const strip = this.#strip;
 		if (strip?.kind !== "roleName") return;
 		const name = strip.input.getValue().trim();
-		if (!/^[a-zA-Z][\w-]*$/.test(name)) return;
-		if (this.#visibleRoleIds().includes(name) || this.#councilRosterRoleIds.has(name)) return;
-		this.#strip = null;
-		this.#chipRanges = [];
-		this.#startAssign(name);
+		switch (strip.mode) {
+			case "newRole": {
+				if (!ROLE_NAME_PATTERN.test(name)) return;
+				if (this.#visibleRoleIds().includes(name) || this.#councilRosterRoleIds.has(name)) return;
+				if (COUNCIL_LEAD_ROLES.includes(name)) return;
+				this.#strip = null;
+				this.#chipRanges = [];
+				this.#startAssign(name);
+				return;
+			}
+			case "newCouncilMember": {
+				const role = this.#createCouncilMember(name, this.#pendingCouncilRound);
+				if (role === undefined) return;
+				this.#strip = null;
+				this.#chipRanges = [];
+				this.#startAssign(role);
+				return;
+			}
+			case "councilDisplayName": {
+				const role = strip.role;
+				if (role === undefined) return;
+				if (
+					name.length > 0 &&
+					(name.length > COUNCIL_DISPLAY_NAME_MAX_LENGTH || !COUNCIL_DISPLAY_NAME_PATTERN.test(name))
+				) {
+					return;
+				}
+				this.#strip = null;
+				this.#chipRanges = [];
+				this.#setCouncilDisplayName(role, name.length > 0 ? name : undefined);
+				return;
+			}
+		}
 	}
 
 	// ═══════════════════════════════════════════════════════════════════════
@@ -1451,7 +2066,12 @@ export class ModelHubComponent implements Component {
 	}
 
 	#isSelectableRolesRow(row: RolesRow | undefined): boolean {
-		return row !== undefined && row.kind !== "separator" && row.kind !== "sectionHeader";
+		return (
+			row !== undefined &&
+			row.kind !== "separator" &&
+			row.kind !== "sectionHeader" &&
+			row.kind !== "councilRoundHeader"
+		);
 	}
 
 	#setRoleIndex(index: number): void {
@@ -1466,7 +2086,19 @@ export class ModelHubComponent implements Component {
 				this.#startAssign(row.role);
 				return;
 			case "councilRole":
-				this.#startAssign(row.member.role);
+				if (!this.#councilRowsLocked) this.#startAssign(row.member.role);
+				return;
+			case "councilLead":
+				this.#startAssign(row.role);
+				return;
+			case "councilAdvisor":
+				this.#toggleCouncilAdvisor(row.scope);
+				return;
+			case "councilRounds":
+				if (!this.#councilRowsLocked) this.#setCouncilRounds(row.rounds === 1 ? 2 : 1);
+				return;
+			case "councilNotice":
+				if (row.action === "moveToGlobal") void this.#moveCouncilRosterToGlobal();
 				return;
 			case "chainKey":
 				this.#startAssignFallback(row.role, null);
@@ -1478,14 +2110,24 @@ export class ModelHubComponent implements Component {
 				this.#startAssignFallbackKey();
 				return;
 			case "newRole":
-				this.#openRoleNameStrip();
+				this.#openRoleNameStrip("newRole");
 				return;
-			case "newCouncilMember":
-				this.#addCouncilMember();
+			case "newCouncilMember": {
+				// Every round a new reviewer can be pinned to is a configured one, so it always joins the
+				// active set. Refuse before the naming prompt rather than after the user has typed a name.
+				const prospective = [...this.#councilMembers, { role: "", enabled: true }];
+				if (this.#refusesCouncilCap(prospective, this.#councilRounds, "Adding a reviewer")) return;
+				// With two rounds configured the group is ambiguous, so it is chosen before naming.
+				if (this.#councilRounds === 2) this.#openCouncilRoundStrip();
+				else {
+					this.#pendingCouncilRound = "every";
+					this.#openRoleNameStrip("newCouncilMember");
+				}
 				return;
-			case "councilError":
+			}
 			case "separator":
 			case "sectionHeader":
+			case "councilRoundHeader":
 				return;
 		}
 	}
@@ -1519,19 +2161,34 @@ export class ModelHubComponent implements Component {
 			return;
 		}
 		if (matchesSelectUp(data)) {
+			this.#councilStatusNotice = undefined;
 			this.#setRoleIndex(this.#stepRoleIndex(this.#roleIndex, -1));
 			return;
 		}
 		if (matchesSelectDown(data)) {
+			this.#councilStatusNotice = undefined;
 			this.#setRoleIndex(this.#stepRoleIndex(this.#roleIndex, 1));
 			return;
 		}
 		const row = this.#rolesRows[this.#roleIndex];
-		if (row?.kind === "councilError") return;
 		const role = row?.kind === "role" ? row.role : undefined;
-		const councilRole = row?.kind === "councilRole" ? row.member.role : undefined;
+		// A project-scoped roster renders read-only: every roster edit writes the global key, which is
+		// not the file the refusal is about. Lead rows write `modelRoles` and advisor rows write
+		// `council.advisor.*`, so neither is locked by a misplaced roster.
+		const councilRole = row?.kind === "councilRole" && !this.#councilRowsLocked ? row.member.role : undefined;
+		const roundsRow = row?.kind === "councilRounds" && !this.#councilRowsLocked ? row : undefined;
+		const leadRole = row?.kind === "councilLead" ? row.role : undefined;
+		const advisorScope = row?.kind === "councilAdvisor" ? row.scope : undefined;
 		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
 			if (row) this.#activateRolesRow(row);
+			return;
+		}
+		if (advisorScope && matchesKey(data, "space")) {
+			this.#toggleCouncilAdvisor(advisorScope);
+			return;
+		}
+		if (roundsRow && matchesKey(data, "space")) {
+			this.#setCouncilRounds(roundsRow.rounds === 1 ? 2 : 1);
 			return;
 		}
 		if (councilRole && matchesKey(data, "space")) {
@@ -1551,27 +2208,35 @@ export class ModelHubComponent implements Component {
 		// Reordering: [ / shift+↑ moves the row earlier, ] / shift+↓ later —
 		// cycle order on a role row, chain order on a fallback row.
 		if (matchesKey(data, "shift+up")) {
-			if (councilRole) return;
-			if (role) this.#moveCycleMembership(role, -1);
+			if (councilRole) this.#moveCouncilMember(councilRole, -1);
+			else if (roundsRow) this.#setCouncilRounds(1);
+			else if (role) this.#moveCycleMembership(role, -1);
 			else if (row?.kind === "fallback") this.#moveFallback(row, -1);
 			return;
 		}
 		if (matchesKey(data, "shift+down")) {
-			if (councilRole) return;
-			if (role) this.#moveCycleMembership(role, 1);
+			if (councilRole) this.#moveCouncilMember(councilRole, 1);
+			else if (roundsRow) this.#setCouncilRounds(2);
+			else if (role) this.#moveCycleMembership(role, 1);
 			else if (row?.kind === "fallback") this.#moveFallback(row, 1);
 			return;
 		}
 		const printable = extractPrintableText(data);
-		if (printable === " " && councilRole) {
-			this.#toggleCouncilMember(councilRole);
+		if (printable === " ") {
+			if (councilRole) this.#toggleCouncilMember(councilRole);
+			else if (advisorScope) this.#toggleCouncilAdvisor(advisorScope);
 			return;
 		}
 		if (printable === "x") {
-			if (councilRole) this.#unassignRole(councilRole, true);
+			if (leadRole) this.#unassignRole(leadRole, true);
+			else if (councilRole) this.#unassignRole(councilRole, true);
 			else if (role) this.#unassignRole(role);
 			else if (row?.kind === "fallback") this.#removeFallback(row);
 			else if (row?.kind === "chainKey") this.#setFallbackChain(row.role, []);
+			return;
+		}
+		if (printable === "r" && councilRole) {
+			this.#cycleCouncilMemberRound(councilRole);
 			return;
 		}
 		if (printable === "f") {
@@ -1587,18 +2252,28 @@ export class ModelHubComponent implements Component {
 		}
 		if (printable === "[") {
 			if (councilRole) this.#moveCouncilMember(councilRole, -1);
+			else if (roundsRow) this.#setCouncilRounds(1);
 			else if (role) this.#moveCycleMembership(role, -1);
 			else if (row?.kind === "fallback") this.#moveFallback(row, -1);
 			return;
 		}
 		if (printable === "]") {
 			if (councilRole) this.#moveCouncilMember(councilRole, 1);
+			else if (roundsRow) this.#setCouncilRounds(2);
 			else if (role) this.#moveCycleMembership(role, 1);
 			else if (row?.kind === "fallback") this.#moveFallback(row, 1);
 			return;
 		}
 		if (printable === "n") {
-			if (!councilRole && row?.kind !== "newCouncilMember") this.#openRoleNameStrip();
+			// A lead rename writes `modelTags[role].name` only: `planner`/`adjudicator` are reserved as
+			// roster ids, and the durable role id — which `modelRoles` and every refusal remedy name —
+			// is never touched, exactly as for a reviewer row.
+			if (leadRole) this.#openRoleNameStrip("councilDisplayName", leadRole);
+			else if (councilRole) this.#openRoleNameStrip("councilDisplayName", councilRole);
+			else if (row?.kind === "newCouncilMember") this.#activateRolesRow(row);
+			else if (role || row?.kind === "newRole" || row?.kind === "fallback" || row?.kind === "chainKey") {
+				this.#openRoleNameStrip("newRole");
+			}
 			return;
 		}
 		if (printable === "t") {
@@ -1753,13 +2428,18 @@ export class ModelHubComponent implements Component {
 	// Rendering
 	// ═══════════════════════════════════════════════════════════════════════
 
-	#sidebarWidth(): number {
+	/**
+	 * Sidebar width from its widest entry, clamped so a long fixed label never
+	 * starves the body pane on a narrow terminal.
+	 */
+	#sidebarWidth(frameWidth: number): number {
 		let longest = 0;
 		for (const entry of this.#entries) {
 			const annotation = entry.annotation ?? "";
 			longest = Math.max(longest, visibleWidth(entry.label) + visibleWidth(annotation) + 5);
 		}
-		return Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, longest));
+		const frameShare = Math.floor(frameWidth / 3);
+		return Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, frameShare, longest));
 	}
 
 	#renderSidebar(width: number, rows: number): string[] {
@@ -1851,6 +2531,12 @@ export class ModelHubComponent implements Component {
 	}
 
 	#statusRow(width: number): string {
+		// A council notice reports a durable write the user cannot otherwise see,
+		// so it outranks the transient assign/browse text until they navigate away.
+		const notice = this.#councilStatusNotice;
+		if (notice) {
+			return truncateToWidth(theme.fg(notice.tone, ` ${sanitizeInline(notice.text)}`), width);
+		}
 		if (this.#assigning !== null) {
 			if (this.#assigning.kind === "fallbackKey") {
 				return truncateToWidth(
@@ -1885,15 +2571,34 @@ export class ModelHubComponent implements Component {
 			case "roles": {
 				const selectedRow = this.#rolesRows[this.#roleIndex];
 				const councilSelected =
-					selectedRow?.kind === "councilError" ||
+					selectedRow?.kind === "councilNotice" ||
 					selectedRow?.kind === "councilRole" ||
+					selectedRow?.kind === "councilRounds" ||
+					selectedRow?.kind === "councilLead" ||
+					selectedRow?.kind === "councilAdvisor" ||
+					selectedRow?.kind === "councilRoundHeader" ||
 					selectedRow?.kind === "newCouncilMember" ||
 					selectedRow?.kind === "sectionHeader";
-				text = councilSelected
-					? selectedRow?.kind === "councilError"
-						? "Council roster — configuration must be fixed in settings before editing"
-						: "Council roster — Enter assigns models; disabled slots remain configured"
-					: "Model roles — f adds a retry fallback, cleared roles fall back to auto-selection";
+				if (!councilSelected) {
+					text = "Model roles — f adds a retry fallback, cleared roles fall back to auto-selection";
+				} else if (selectedRow?.kind === "councilNotice" && selectedRow.action === "moveToGlobal") {
+					text = "Council roster — Enter rewrites the roster to global config, then drops the project key";
+				} else if (selectedRow?.kind === "councilNotice") {
+					text = "Council roster — this row explains what to fix; it changes nothing";
+				} else if (selectedRow?.kind === "councilLead") {
+					text =
+						selectedRow.role === "adjudicator"
+							? "Council adjudicator — assign a model to delegate judging, or clear it to adjudicate in this session"
+							: "Council planner — assign a model, or clear it to fall back to the slow role";
+				} else if (selectedRow?.kind === "councilAdvisor") {
+					text = "Council advisors — an advisor watches that role's turns and is billed to it";
+				} else if (this.#councilRowsLocked) {
+					text = "Council roster — read-only until the roster moves to global config";
+				} else if (selectedRow?.kind === "councilRounds") {
+					text = "Council roster — Enter toggles review rounds";
+				} else {
+					text = "Council roster — Enter assigns models; r sets the round; disabled slots remain configured";
+				}
 				break;
 			}
 			case "provider":
@@ -1929,18 +2634,12 @@ export class ModelHubComponent implements Component {
 	#roleDisplayLabel(role: string, council: boolean): string {
 		const info = getRoleInfo(role, this.#settings);
 		const modelTags = this.#settings.get("modelTags");
-		let label = info.tag ?? info.name ?? role;
-		if (council && !Object.hasOwn(modelTags, role) && !info.tag) {
-			label = role
-				.replace(/([a-z\d])([A-Z])/g, "$1 $2")
-				.replace(/([A-Za-z])(\d)/g, "$1 $2")
-				.replace(/[-_]+/g, " ")
-				.split(/\s+/)
-				.filter(Boolean)
-				.map(part => `${part.charAt(0).toUpperCase()}${part.slice(1)}`)
-				.join(" ");
-		}
-		return sanitizeInline(label);
+		// The Model Hub is the one Council surface that honours a configured `modelTags` name: it is
+		// where that name is authored. With no name and no built-in tag the row falls back to the same
+		// stable label every other Council surface shows — `Reviewer N`, `Planner`/`Adjudicator`, or a
+		// custom (possibly salvaged) id humanized from its own words.
+		if (council && !Object.hasOwn(modelTags, role) && !info.tag) return sanitizeInline(councilRoleLabel(role));
+		return sanitizeInline(info.tag ?? info.name ?? role);
 	}
 
 	#roleRowPresentation(
@@ -1949,6 +2648,8 @@ export class ModelHubComponent implements Component {
 		selected: boolean,
 		labelWidth: number,
 		requiresExplicitSelector: boolean,
+		/** What an unassigned row shows instead of `unassigned`, when the role has a real fallback. */
+		unassignedText?: string,
 	): RoleRowPresentation {
 		const info = getRoleInfo(role, this.#settings);
 		const assignment = this.#roles[role];
@@ -1982,7 +2683,8 @@ export class ModelHubComponent implements Component {
 		} else {
 			dot = theme.fg("dim", theme.status.shadowed);
 			label = theme.fg("dim", cleanLabel);
-			value = theme.fg("dim", requiresExplicitSelector ? "unassigned" : "—");
+			// A lead with a documented fallback is configured, not broken, so it never reads `unassigned`.
+			value = theme.fg("dim", unassignedText ?? (requiresExplicitSelector ? "unassigned" : "—"));
 		}
 		return { dot, label, value, effort, provenance };
 	}
@@ -1996,9 +2698,19 @@ export class ModelHubComponent implements Component {
 		labelWidth: number,
 		cycleOrder: readonly string[],
 		enabled?: boolean,
+		unassignedText?: string,
+		/** Inline per-row fault, rendered beside the value so the broken row explains itself. */
+		fault?: string,
 	): string {
 		const cursor = selected && this.#focus === "list" ? theme.fg("accent", theme.nav.cursor) : " ";
-		const presentation = this.#roleRowPresentation(role, displayLabel, selected, labelWidth, enabled !== undefined);
+		const presentation = this.#roleRowPresentation(
+			role,
+			displayLabel,
+			selected,
+			labelWidth,
+			enabled !== undefined || unassignedText !== undefined,
+			unassignedText,
+		);
 		const cycleIndex = cycleOrder.indexOf(role);
 		const cycleBadge = cycleIndex >= 0 ? theme.fg("accent", `${theme.icon.loop}${cycleIndex + 1}`) : "";
 		const rosterBadge =
@@ -2006,7 +2718,8 @@ export class ModelHubComponent implements Component {
 		const right = [presentation.effort, presentation.provenance, cycleBadge]
 			.filter(part => part.length > 0)
 			.join("  ");
-		let line = ` ${cursor} ${rosterBadge}${presentation.dot} ${presentation.label}  ${presentation.value}`;
+		const faultSuffix = fault ? ` ${theme.fg("warning", fault)}` : "";
+		let line = ` ${cursor} ${rosterBadge}${presentation.dot} ${presentation.label}  ${presentation.value}${faultSuffix}`;
 		const rightWidth = visibleWidth(right);
 		const lineWidth = visibleWidth(line);
 		if (rightWidth > 0 && lineWidth + rightWidth + 2 <= width) {
@@ -2047,6 +2760,8 @@ export class ModelHubComponent implements Component {
 					labelWidthLimit,
 					Math.max(labelWidth, visibleWidth(this.#roleDisplayLabel(rowDef.member.role, true))),
 				);
+			} else if (rowDef.kind === "councilLead" || rowDef.kind === "councilAdvisor") {
+				labelWidth = Math.min(labelWidthLimit, Math.max(labelWidth, visibleWidth(rowDef.label)));
 			}
 		}
 
@@ -2066,15 +2781,72 @@ export class ModelHubComponent implements Component {
 			}
 			if (rowDef.kind === "sectionHeader") {
 				const label = theme.bold(theme.fg("accent", sanitizeInline(rowDef.label)));
-				const meta = theme.fg("dim", sanitizeInline(rowDef.meta));
-				const error = rowDef.error ? ` ${theme.fg("error", `— ${sanitizeInline(rowDef.error)}`)}` : "";
-				lines.push(truncateToWidth(`   ${label}  ${meta}${error}`, width));
+				const meta = rowDef.segments
+					.map(segment => theme.fg(segment.tone, sanitizeInline(segment.text)))
+					.join(theme.fg("dim", " · "));
+				lines.push(truncateToWidth(`   ${label}  ${meta}`, width));
 				continue;
 			}
-			if (rowDef.kind === "councilError") {
-				const label = "Council configuration is invalid; edit settings to continue";
+			if (rowDef.kind === "councilRoundHeader") {
+				const label = rowDef.group === "every" ? "Every round" : rowDef.group === 1 ? "Round 1" : "Round 2";
+				const suffix = rowDef.inactive
+					? theme.fg("dim", " · inactive")
+					: rowDef.empty
+						? theme.fg("warning", " · no reviewer assigned; a council run will refuse")
+						: "";
+				lines.push(truncateToWidth(`     ${theme.fg("dim", label)}${suffix}`, width));
+				continue;
+			}
+			if (rowDef.kind === "councilAdvisor") {
+				const shownLabel = truncateToWidth(rowDef.label, labelWidth);
+				const padded = `${shownLabel}${" ".repeat(Math.max(0, labelWidth - visibleWidth(shownLabel)))}`;
+				const choices = ([true, false] as const)
+					.map(value =>
+						value === rowDef.enabled
+							? theme.fg("accent", `${theme.status.enabled}${value ? "on" : "off"}`)
+							: theme.fg("dim", `${theme.status.shadowed}${value ? "on" : "off"}`),
+					)
+					.join(theme.fg("dim", " | "));
 				lines.push(
-					this.#finishRolesRow(` ${cursor} ${theme.fg(selected ? "error" : "dim", label)}`, width, hovered),
+					this.#finishRolesRow(
+						` ${cursor} ${theme.fg("dim", theme.status.enabled)} ${theme.fg(selected ? "accent" : "muted", padded)}  ${choices}`,
+						width,
+						hovered,
+					),
+				);
+				continue;
+			}
+			if (rowDef.kind === "councilNotice") {
+				// A configuration fault stays coloured whether or not the cursor is on
+				// it; only the action row brightens to read as activatable.
+				const tone = rowDef.action !== undefined && selected ? "accent" : rowDef.severity;
+				const prefix = rowDef.action !== undefined ? "Enter: " : "";
+				lines.push(
+					this.#finishRolesRow(
+						` ${cursor} ${theme.fg(tone, `${prefix}${sanitizeInline(rowDef.text)}`)}`,
+						width,
+						hovered,
+					),
+				);
+				continue;
+			}
+			if (rowDef.kind === "councilRounds") {
+				const shownLabel = truncateToWidth("Rounds", labelWidth);
+				const padded = `${shownLabel}${" ".repeat(Math.max(0, labelWidth - visibleWidth(shownLabel)))}`;
+				const choices = ([1, 2] as const)
+					.map(value =>
+						value === rowDef.rounds
+							? theme.fg("accent", `${theme.status.enabled}${value}`)
+							: theme.fg("dim", `${theme.status.shadowed}${value}`),
+					)
+					.join(theme.fg("dim", " | "));
+				const suffix = rowDef.invalid ? ` ${theme.fg("warning", "invalid council.rounds; using 1")}` : "";
+				lines.push(
+					this.#finishRolesRow(
+						` ${cursor} ${theme.fg("dim", theme.status.enabled)} ${theme.fg(selected ? "accent" : "muted", padded)}  ${choices}${suffix}`,
+						width,
+						hovered,
+					),
 				);
 				continue;
 			}
@@ -2084,7 +2856,7 @@ export class ModelHubComponent implements Component {
 						? "+ New role…"
 						: rowDef.kind === "newFallback"
 							? "+ New fallback…"
-							: "+ Add council member…";
+							: "+ Add reviewer…";
 				lines.push(
 					this.#finishRolesRow(` ${cursor} ${theme.fg(selected ? "accent" : "dim", label)}`, width, hovered),
 				);
@@ -2111,6 +2883,22 @@ export class ModelHubComponent implements Component {
 				lines.push(this.#finishRolesRow(` ${cursor} ${branch} ${selector}`, width, hovered));
 				continue;
 			}
+			if (rowDef.kind === "councilLead") {
+				lines.push(
+					this.#renderRoleRow(
+						rowDef.role,
+						this.#roleDisplayLabel(rowDef.role, true),
+						selected,
+						hovered,
+						width,
+						labelWidth,
+						cycleOrder,
+						undefined,
+						rowDef.fallbackText,
+					),
+				);
+				continue;
+			}
 			if (rowDef.kind === "councilRole") {
 				lines.push(
 					this.#renderRoleRow(
@@ -2122,6 +2910,8 @@ export class ModelHubComponent implements Component {
 						labelWidth,
 						cycleOrder,
 						rowDef.member.enabled,
+						undefined,
+						rowDef.roundFault ? "invalid round; fix it or press r" : undefined,
 					),
 				);
 				continue;
@@ -2202,8 +2992,11 @@ export class ModelHubComponent implements Component {
 		const strip = this.#strip;
 		if (strip) {
 			if (strip.kind === "roleName") {
-				return "Enter create + pick model · Esc cancel";
+				return strip.mode === "councilDisplayName"
+					? "Enter rename · empty restores the role id · Esc cancel"
+					: "Enter create + pick model · Esc cancel";
 			}
+			if (strip.kind === "councilRound") return "←/→ choose round · Enter name the reviewer · Esc cancel";
 			if (strip.kind === "role") return "←/→ choose · Enter assign/clear · Esc cancel";
 			if (strip.kind === "scope") return "←/→ save scope · Enter choose · Esc cancel";
 			return "←/→ thinking level · Enter apply · Esc keep";
@@ -2224,14 +3017,28 @@ export class ModelHubComponent implements Component {
 				return "↑/↓ providers · → roles · Esc close";
 			}
 			const row = this.#rolesRows[this.#roleIndex];
-			if (row?.kind === "councilError") {
-				return "↑/↓ rows · Fix council configuration in settings · ← providers";
+			if (row?.kind === "councilNotice") {
+				return row.action === "moveToGlobal"
+					? "↑/↓ rows · Enter move roster to global config · ← providers"
+					: "↑/↓ rows · Council configuration needs fixing · ← providers";
+			}
+			if (this.#councilRowsLocked && (row?.kind === "councilRole" || row?.kind === "councilRounds")) {
+				return "↑/↓ rows · Read-only until the roster moves to global config · ← providers";
+			}
+			if (row?.kind === "councilLead") {
+				return "↑/↓ rows · Enter model · n rename · x clear to the default · ← providers";
+			}
+			if (row?.kind === "councilAdvisor") {
+				return "↑/↓ rows · Enter/Space toggle the advisor for this role · ← providers";
 			}
 			if (row?.kind === "councilRole") {
-				return "↑/↓ rows · Enter model · Space toggle · [/] reorder · x unassign · Del remove · ← providers";
+				return "↑/↓ rows · Enter model · Space toggle · r round · [/] reorder · n rename · x unassign · Del remove";
+			}
+			if (row?.kind === "councilRounds") {
+				return "↑/↓ rows · Enter/Space toggle · [/] set 1 or 2 rounds · ← providers";
 			}
 			if (row?.kind === "newCouncilMember") {
-				return "↑/↓ rows · Enter add + assign council member · ← providers";
+				return "↑/↓ rows · Enter name + add reviewer · ← providers";
 			}
 			if (row?.kind === "fallback") {
 				return "↑/↓ rows · Enter replace · f add another · x remove · [/] reorder · ← providers";
@@ -2261,16 +3068,37 @@ export class ModelHubComponent implements Component {
 		}
 
 		if (strip.kind === "roleName") {
-			const label = theme.fg("accent", "New role name:");
-			const inputWidth = Math.max(8, Math.min(32, width - visibleWidth("New role name:") - 24));
+			const prompt =
+				strip.mode === "councilDisplayName"
+					? "Display name:"
+					: strip.mode === "newCouncilMember"
+						? "Reviewer:"
+						: "New role name:";
+			const hint =
+				strip.mode === "newRole"
+					? "(letters, digits, - and _)"
+					: strip.mode === "newCouncilMember"
+						? "(blank auto-names it; a lowercase word becomes the role id)"
+						: "(display name only; the role id never changes)";
+			const label = theme.fg("accent", prompt);
+			const inputWidth = Math.max(8, Math.min(32, width - visibleWidth(prompt) - 24));
 			const inputLine = strip.input.render(inputWidth)[0] ?? "";
-			return truncateToWidth(`${label} ${inputLine} ${theme.fg("dim", "(letters, digits, - and _)")}`, width);
+			return truncateToWidth(`${label} ${inputLine} ${theme.fg("dim", hint)}`, width);
 		}
 
-		const prefix =
-			strip.kind === "role"
-				? `${theme.fg("accent", strip.item.id)}${theme.fg("dim", " →")} `
-				: `${theme.fg(getRoleInfo(strip.role ?? "", this.#settings).color ?? "muted", (getRoleInfo(strip.role ?? "", this.#settings).tag ?? strip.role ?? "").toLowerCase())}${theme.fg("dim", ` · ${strip.item.id} →`)} `;
+		let prefix: string;
+		if (strip.kind === "councilRound") {
+			// No `item`: nothing is being assigned yet, so the prefix names the step, not a model.
+			prefix = `${theme.fg("accent", "new reviewer")}${theme.fg("dim", " · round →")} `;
+		} else if (strip.kind === "role") {
+			prefix = `${theme.fg("accent", strip.item.id)}${theme.fg("dim", " →")} `;
+		} else {
+			const role = strip.role ?? "";
+			const info = getRoleInfo(role, this.#settings);
+			// `tag` is built-ins only, so a council slot falls through to its `Reviewer N` name.
+			const label = (info.tag ?? info.name ?? role).toLowerCase();
+			prefix = `${theme.fg(info.color ?? "muted", label)}${theme.fg("dim", ` · ${strip.item.id} →`)} `;
+		}
 
 		// Horizontal window: once the strip overflows, drop leading chips behind
 		// a dim ellipsis so the selected chip (plus one chip of lookahead when it
@@ -2323,7 +3151,7 @@ export class ModelHubComponent implements Component {
 
 	render(width: number): string[] {
 		const height = Math.max(16, this.#tui.terminal?.rows || process.stdout.rows || 40);
-		const sidebarWidth = this.#sidebarWidth();
+		const sidebarWidth = this.#sidebarWidth(width);
 		this.#sidebarWidthLast = sidebarWidth;
 		const bodyWidth = splitBodyWidth(width, sidebarWidth);
 		const contentRows = Math.max(10, height - 4);

@@ -98,6 +98,12 @@ export interface StructuredSubagentRequest {
 	tools?: readonly string[];
 	/** Suppress every tool source except the explicit host tool list and required yield tool. */
 	restrictToolNames?: boolean;
+	/**
+	 * Opt a restricted child into a live advisor. Ignored when `restrictToolNames` is unset: an
+	 * unrestricted child already follows the ambient `advisor.*` settings. The advisor's tools are
+	 * clamped to this child's own allowlist, so re-enabling it never widens the capability surface.
+	 */
+	advisor?: boolean;
 	/** Pass inherited AGENTS.md entries instead of the default filtered context. */
 	inheritContextFiles?: boolean;
 	/** Context entries appended to this child's snapshot without mutating the parent session. */
@@ -489,6 +495,7 @@ function buildExecutorOptions(
 		enableIrc: policy.enableIrc,
 		maxRuntimeMs: request.maxRuntimeMs,
 		restrictToolNames,
+		advisor: request.advisor,
 		keepAlive: request.keepAlive,
 		inspectOnly: request.identity?.inspectOnly,
 		signal: request.signal,

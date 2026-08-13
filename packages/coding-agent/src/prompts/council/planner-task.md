@@ -10,12 +10,6 @@ Create an evidence-grounded, decision-complete implementation plan for the autho
 {{task}}
 </user-task>
 
-# Constraints
-- You MUST remain read-only and root-confined.
-- You MUST follow repository instructions and established patterns.
-- You MUST inspect only evidence needed for the plan.
-- You MUST resolve choices from repository evidence whenever possible.
-
 # Result
 Terminal-yield exactly `result.data` containing only:
 - `plan`: a Markdown string with exactly the five required ordered H2 sections

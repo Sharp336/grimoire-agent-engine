@@ -233,6 +233,10 @@
       "types": "./src/config/*.ts",
       "import": "./src/config/*.ts"
     },
+    "./council/*": {
+      "types": "./src/council/*.ts",
+      "import": "./src/council/*.ts"
+    },
     "./dap": {
       "types": "./src/dap/index.ts",
       "import": "./src/dap/index.ts"

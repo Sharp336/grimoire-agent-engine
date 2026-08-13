@@ -19,6 +19,41 @@ export function formatModelRoleAlias(role: string): string {
 	return `${MODEL_ROLE_ALIAS_PREFIX}${role}`;
 }
 
+/**
+ * `Reviewer N` for a positional council roster slot id (`council1`…), `undefined` for any other
+ * role. The durable role id stays `councilN` (it keys `modelRoles`, `council.members`, and the
+ * `@councilN` selector), so this is the one place that turns it into the name every surface shows.
+ */
+export function councilSlotLabel(role: string): string | undefined {
+	const slot = /^council(\d+)$/.exec(role);
+	return slot ? `Reviewer ${slot[1]}` : undefined;
+}
+
+/**
+ * Display name for any Council role: `Reviewer N` for a positional roster slot, `Planner` and
+ * `Adjudicator` for the two leads, and a humanized form of any custom id (`judge2` reads as
+ * `Judge 2`, `deep_dive` as `Deep Dive`) so it sits beside the leads without looking like a raw
+ * setting value.
+ *
+ * `modelTags` is deliberately not consulted. A manifest snapshots the durable role *id*, never the
+ * mutable display name, so a rename must not retroactively relabel a historical run card. The
+ * Model Hub is the one surface that layers a configured `modelTags` name on top of this.
+ */
+export function councilRoleLabel(role: string): string {
+	const slot = councilSlotLabel(role);
+	if (slot) return slot;
+	const words = role
+		.replace(/([a-z\d])([A-Z])/g, "$1 $2")
+		.replace(/([A-Za-z])(\d)/g, "$1 $2")
+		.replace(/[-_]+/g, " ")
+		.split(/\s+/)
+		.filter(Boolean)
+		.map(word => `${word.charAt(0).toUpperCase()}${word.slice(1)}`);
+	// A role of only separators (a salvaged row may hold anything) humanizes to nothing; the raw id
+	// is still more useful to the operator than an empty cell.
+	return words.length > 0 ? words.join(" ") : role;
+}
+
 export type ModelRole =
 	| "default"
 	| "smol"
@@ -92,7 +127,8 @@ export function getKnownRoleIds(settings: Settings): string[] {
 
 /**
  * Get role info for a role name (built-in or custom).
- * Configured metadata overrides built-in defaults when present.
+ * Configured metadata overrides built-in defaults when present; a council roster slot with no
+ * configured name reads as `Reviewer N` rather than as its raw `councilN` id.
  */
 export function getRoleInfo(role: string, settings: Settings): RoleInfo {
 	const builtIn = role in MODEL_ROLES ? MODEL_ROLES[role as ModelRole] : undefined;
@@ -101,7 +137,7 @@ export function getRoleInfo(role: string, settings: Settings): RoleInfo {
 	if (configured) {
 		return {
 			tag: builtIn?.tag,
-			name: configured.name || builtIn?.name || role,
+			name: configured.name || builtIn?.name || councilSlotLabel(role) || role,
 			color: configured.color && isValidThemeColor(configured.color) ? configured.color : builtIn?.color,
 			hidden: configured.hidden ?? builtIn?.hidden,
 		};
@@ -109,5 +145,5 @@ export function getRoleInfo(role: string, settings: Settings): RoleInfo {
 
 	if (builtIn) return builtIn;
 
-	return { name: role, color: "muted" };
+	return { name: councilSlotLabel(role) ?? role, color: "muted" };
 }

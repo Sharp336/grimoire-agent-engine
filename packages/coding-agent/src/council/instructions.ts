@@ -1,11 +1,11 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { hasFsCode } from "@oh-my-pi/pi-utils";
 import type { ContextFileEntry, ToolSession } from "../tools";
 import * as workspaceTree from "../workspace-tree";
+import { COUNCIL_READ_FLAGS, isContained } from "./durable-fs";
 import { sha256CouncilContent } from "./hash";
 import type { CouncilInstructionSnapshot } from "./state";
-
-export { sha256CouncilContent as sha256Text } from "./hash";
 
 export const DEFAULT_COUNCIL_INSTRUCTION_BYTES = 512 * 1024;
 
@@ -19,16 +19,60 @@ export class CouncilInstructionSnapshotError extends Error {
 	}
 }
 
-function isContained(root: string, candidate: string): boolean {
-	const relative = path.relative(root, candidate);
-	return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+/**
+ * Canonicalizes every ancestor of `target` but never its final component.
+ *
+ * A symlinked ancestor is ordinary - macOS resolves `/var` to `/private/var`, and checkouts are
+ * routinely reached through a symlinked home or project directory - so comparing a full `realpath`
+ * against the lexical path misreports those as symlinked instruction files. Leaving the basename
+ * unresolved keeps the `lstat`/`O_NOFOLLOW` pair as the sole symlink gate while still giving
+ * containment a canonical directory prefix to judge.
+ */
+async function canonicalizeAncestors(target: string): Promise<string> {
+	return path.join(await fs.realpath(path.dirname(target)), path.basename(target));
 }
 
-async function canonicalInstructionPath(repoRoot: string, candidate: string): Promise<string> {
+/**
+ * Identity key for an inherited context entry.
+ *
+ * These arrive with their content already loaded by the parent session, so nothing is read from
+ * disk here and the path is only a dedupe key. User-level instruction files legitimately live
+ * outside the repository (`~/.claude/CLAUDE.md`, `~/.omp/AGENTS.md`, …), so containment and symlink
+ * hardening apply only to the nested files this module opens itself. Canonicalization is a
+ * best-effort dedupe aid: a path that no longer resolves must not abort a snapshot whose content is
+ * already in hand.
+ */
+async function inheritedInstructionPath(repoRoot: string, candidate: string): Promise<string> {
+	if (candidate.trim() === "") {
+		throw new CouncilInstructionSnapshotError("Council instruction file path is empty");
+	}
 	const lexical = path.resolve(repoRoot, candidate);
 	try {
-		const [info, canonical] = await Promise.all([fs.lstat(lexical), fs.realpath(lexical)]);
-		if (info.isSymbolicLink() || canonical !== lexical) {
+		return await canonicalizeAncestors(lexical);
+	} catch {
+		return lexical;
+	}
+}
+
+/** Sort weight: out-of-repo user-level instructions lead so repository files override them. */
+function instructionOrderDepth(root: string, filePath: string): number {
+	if (!isContained(root, filePath)) return 0;
+	return path.relative(root, filePath).split(path.sep).length;
+}
+
+async function readInstructionFile(
+	repoRoot: string,
+	candidate: string,
+	remainingBytes: number,
+	byteLimit: number,
+): Promise<{ path: string; content: string }> {
+	let canonical: string;
+	let expectedDevice = -1;
+	let expectedInode = -1;
+	try {
+		canonical = await canonicalizeAncestors(path.resolve(repoRoot, candidate));
+		const info = await fs.lstat(canonical);
+		if (info.isSymbolicLink()) {
 			throw new CouncilInstructionSnapshotError(
 				`Council instruction file ${JSON.stringify(candidate)} uses a symlink`,
 			);
@@ -43,45 +87,8 @@ async function canonicalInstructionPath(repoRoot: string, candidate: string): Pr
 				`Council instruction file ${JSON.stringify(candidate)} resolves outside repository root ${JSON.stringify(repoRoot)}`,
 			);
 		}
-		return canonical;
-	} catch (error) {
-		if (error instanceof CouncilInstructionSnapshotError) throw error;
-		throw new CouncilInstructionSnapshotError(
-			`Council instruction file ${JSON.stringify(candidate)} is unreadable: ${error instanceof Error ? error.message : String(error)}`,
-		);
-	}
-}
-
-async function readInstructionFile(
-	repoRoot: string,
-	candidate: string,
-	remainingBytes: number,
-	byteLimit: number,
-): Promise<{ path: string; content: string }> {
-	const lexical = path.resolve(repoRoot, candidate);
-	let canonical: string;
-	let expectedDevice = -1;
-	let expectedInode = -1;
-	try {
-		const [canonicalPath, lexicalInfo] = await Promise.all([fs.realpath(lexical), fs.lstat(lexical)]);
-		canonical = canonicalPath;
-		if (lexicalInfo.isSymbolicLink() || canonical !== lexical) {
-			throw new CouncilInstructionSnapshotError(
-				`Council instruction file ${JSON.stringify(candidate)} uses a symlink`,
-			);
-		}
-		if (!lexicalInfo.isFile()) {
-			throw new CouncilInstructionSnapshotError(
-				`Council instruction path ${JSON.stringify(candidate)} is not a regular file`,
-			);
-		}
-		if (!isContained(repoRoot, canonical)) {
-			throw new CouncilInstructionSnapshotError(
-				`Council instruction file ${JSON.stringify(candidate)} resolves outside repository root ${JSON.stringify(repoRoot)}`,
-			);
-		}
-		expectedDevice = lexicalInfo.dev;
-		expectedInode = lexicalInfo.ino;
+		expectedDevice = info.dev;
+		expectedInode = info.ino;
 	} catch (error) {
 		if (error instanceof CouncilInstructionSnapshotError) throw error;
 		throw new CouncilInstructionSnapshotError(
@@ -91,9 +98,9 @@ async function readInstructionFile(
 
 	let handle: fs.FileHandle;
 	try {
-		handle = await fs.open(lexical, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+		handle = await fs.open(canonical, COUNCIL_READ_FLAGS);
 	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ELOOP") {
+		if (hasFsCode(error, "ELOOP")) {
 			throw new CouncilInstructionSnapshotError(
 				`Council instruction file ${JSON.stringify(candidate)} uses a symlink`,
 			);
@@ -182,11 +189,14 @@ export async function captureCouncilInstructionSnapshot(
 	const discoveredNested = discovered.agentsMdFiles.map(candidate =>
 		path.isAbsolute(candidate) ? candidate : path.resolve(canonicalRoot, candidate),
 	);
-	const nested = [...inheritedNested, ...discoveredNested];
+	// One pass per distinct path: reading the same file twice would count its bytes twice.
+	const nested = new Set(
+		[...inheritedNested, ...discoveredNested].map(candidate => path.resolve(canonicalRoot, candidate)),
+	);
 	const captured = new Map<string, ContextFileEntry>();
 	let totalBytes = 0;
 	for (const entry of inherited) {
-		const canonical = await canonicalInstructionPath(canonicalRoot, entry.path);
+		const canonical = await inheritedInstructionPath(canonicalRoot, entry.path);
 		if (captured.has(canonical)) continue;
 		const bytes = Buffer.byteLength(entry.content);
 		if (bytes > maxBytes - totalBytes) {
@@ -198,18 +208,21 @@ export async function captureCouncilInstructionSnapshot(
 		totalBytes += bytes;
 	}
 	for (const candidate of nested) {
-		const lexical = path.resolve(canonicalRoot, candidate);
-		if (captured.has(lexical)) continue;
+		if (captured.has(candidate)) continue;
 		const entry = await readInstructionFile(canonicalRoot, candidate, maxBytes - totalBytes, maxBytes);
-		const bytes = Buffer.byteLength(entry.content);
+		// Distinct candidates can canonicalize onto one file, so recheck after the read resolves it.
+		if (captured.has(entry.path)) continue;
 		captured.set(entry.path, entry);
-		totalBytes += bytes;
+		totalBytes += Buffer.byteLength(entry.content);
 	}
 
+	// Codepoint order, not `localeCompare`: this list is hashed into `instructions.json` and compared
+	// on resume, so the ordering must not shift with the host's locale or ICU version.
 	const contextFiles = [...captured.values()].sort((left, right) => {
-		const leftDepth = path.relative(canonicalRoot, left.path).split(path.sep).length;
-		const rightDepth = path.relative(canonicalRoot, right.path).split(path.sep).length;
-		return leftDepth - rightDepth || left.path.localeCompare(right.path);
+		const depthDelta =
+			instructionOrderDepth(canonicalRoot, left.path) - instructionOrderDepth(canonicalRoot, right.path);
+		if (depthDelta !== 0) return depthDelta;
+		return left.path < right.path ? -1 : left.path > right.path ? 1 : 0;
 	});
 
 	return {

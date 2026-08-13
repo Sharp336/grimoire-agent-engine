@@ -160,7 +160,7 @@ describe("inspect-only AgentRef capability", () => {
 		await Bun.write(mainFile, "");
 		await Bun.write(
 			childFile,
-			[
+			`${[
 				JSON.stringify({
 					type: "session",
 					version: 3,
@@ -178,7 +178,7 @@ describe("inspect-only AgentRef capability", () => {
 					tools: [],
 					inspectOnly: true,
 				}),
-			].join("\n") + "\n",
+			].join("\n")}\n`,
 		);
 		const parkedRegistry = new AgentRegistry();
 		await registerPersistedSubagents(parkedRegistry, mainFile);

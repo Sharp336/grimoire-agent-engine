@@ -5,6 +5,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	buildBrowserItems,
 	ModelBrowser,
+	resolveRoleAssignments,
 	sortModelItems,
 } from "@oh-my-pi/pi-coding-agent/modes/components/model-browser";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -102,5 +103,27 @@ describe("ModelBrowser perf display", () => {
 		browser.setItems(buildBrowserItems([makeModel("openai", "gpt-5")]));
 
 		expect(renderPlain(browser, 120)[2]).not.toContain("t/s");
+	});
+});
+
+describe("ModelBrowser role chips", () => {
+	beforeAll(async () => {
+		await initTheme(false);
+	});
+
+	test("a council roster slot is chipped as its reviewer name, a plain custom role as its id", () => {
+		const model = makeModel("test", "model-a");
+		const settings = Settings.isolated({
+			modelRoles: { council2: "test/model-a", ds: "test/model-a" },
+		});
+		const browser = new ModelBrowser(settings);
+		browser.setItems(buildBrowserItems([model]));
+		browser.setRoles(resolveRoleAssignments(settings, [model], []));
+
+		const lines = browser.render(120).map(line => Bun.stripANSI(line));
+		const chipLine = lines[lines.length - 1] ?? "";
+		expect(chipLine).toContain("reviewer 2");
+		expect(chipLine).not.toContain("council2");
+		expect(chipLine).toContain("ds");
 	});
 });

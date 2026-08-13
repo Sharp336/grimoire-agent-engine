@@ -20,6 +20,12 @@ import {
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { CouncilCoordinatorHost } from "@oh-my-pi/pi-coding-agent/council/coordinator";
+import {
+	getCouncilCoordinator,
+	peekCouncilCoordinatorForSession,
+	resetCouncilCoordinatorsForTests,
+} from "@oh-my-pi/pi-coding-agent/council/coordinator";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import {
 	ACP_BOOTSTRAP_RACE_GUARD_MS,
@@ -143,6 +149,15 @@ class FakeAgentSession {
 	asyncJobDrain: ((options?: { timeoutMs?: number }) => Promise<boolean>) | undefined;
 	usageFallbackConfirmer: ((confirmation: UsageFallbackConfirmation) => Promise<boolean>) | undefined;
 	#listeners = new Set<(event: AgentSessionEvent) => void>();
+	/**
+	 * Mirrors `AgentSession`'s single-slot transition seam, including the
+	 * dispose-time contract: the reconciler runs first, its failure is captured,
+	 * teardown still completes, and only then is the failure rethrown.
+	 */
+	sessionTransitionReconciler: (() => Promise<void>) | undefined;
+	setSessionTransitionReconciler(reconciler: (() => Promise<void>) | null): void {
+		this.sessionTransitionReconciler = reconciler ?? undefined;
+	}
 
 	constructor(
 		cwd: string,
@@ -292,6 +307,7 @@ class FakeAgentSession {
 	}
 
 	async switchSession(sessionPath: string): Promise<boolean> {
+		await this.sessionTransitionReconciler?.();
 		await this.sessionManager.setSessionFile(sessionPath);
 		this.sessionId = this.sessionManager.getSessionId();
 		this.agent.sessionId = this.sessionId;
@@ -299,13 +315,23 @@ class FakeAgentSession {
 	}
 
 	async dispose(): Promise<void> {
+		let reconcilerFailed = false;
+		let reconcilerFailure: unknown;
+		try {
+			await this.sessionTransitionReconciler?.();
+		} catch (error) {
+			reconcilerFailed = true;
+			reconcilerFailure = error;
+		}
 		this.disposed = true;
 		await this.sessionManager.close();
+		if (reconcilerFailed) throw reconcilerFailure;
 	}
 
 	async reload(): Promise<void> {}
 
 	async newSession(): Promise<boolean> {
+		await this.sessionTransitionReconciler?.();
 		await this.sessionManager.newSession();
 		this.sessionId = this.sessionManager.getSessionId();
 		this.agent.sessionId = this.sessionId;
@@ -385,6 +411,7 @@ class FakeAgentSession {
 	async compact(_instructions?: string, _options?: unknown): Promise<void> {}
 
 	async fork(): Promise<boolean> {
+		await this.sessionTransitionReconciler?.();
 		await this.sessionManager.flush();
 		const forked = await this.sessionManager.fork();
 		if (!forked) {
@@ -2845,8 +2872,8 @@ describe("ACP council turn ownership", () => {
 					}
 					return { consumed: true };
 				},
-				getCouncilCoordinator: (() => coordinator) as unknown as NonNullable<
-					AcpAgentDependencies["getCouncilCoordinator"]
+				peekCouncilCoordinator: (() => coordinator) as unknown as NonNullable<
+					AcpAgentDependencies["peekCouncilCoordinator"]
 				>,
 			},
 		});
@@ -2905,8 +2932,8 @@ describe("ACP council turn ownership", () => {
 					}
 					return { consumed: true };
 				},
-				getCouncilCoordinator: (() => coordinator) as unknown as NonNullable<
-					AcpAgentDependencies["getCouncilCoordinator"]
+				peekCouncilCoordinator: (() => coordinator) as unknown as NonNullable<
+					AcpAgentDependencies["peekCouncilCoordinator"]
 				>,
 			},
 		});
@@ -2968,8 +2995,8 @@ describe("ACP council turn ownership", () => {
 					holdInstalled.resolve();
 					return { consumed: true };
 				},
-				getCouncilCoordinator: (() => coordinator) as unknown as NonNullable<
-					AcpAgentDependencies["getCouncilCoordinator"]
+				peekCouncilCoordinator: (() => coordinator) as unknown as NonNullable<
+					AcpAgentDependencies["peekCouncilCoordinator"]
 				>,
 			},
 		});
@@ -2989,6 +3016,129 @@ describe("ACP council turn ownership", () => {
 			}),
 		).rejects.toThrow("Unsupported ACP session");
 		expect(builtinCalls).toBe(1);
+	});
+});
+
+describe("ACP Council lifecycle ownership", () => {
+	afterEach(() => {
+		resetCouncilCoordinatorsForTests();
+	});
+
+	/** Register a coordinator bound to a managed ACP session under its current id. */
+	function bindCoordinator(session: FakeAgentSession): { sessionId: string } {
+		const sessionId = session.sessionManager.getSessionId();
+		getCouncilCoordinator({
+			session: session as unknown as AgentSession,
+			toolSession: { marker: "acp-tool-session" },
+			sessionManager: session.sessionManager,
+			settings: session.settings,
+			modelRegistry: session.modelRegistry,
+		} as unknown as CouncilCoordinatorHost);
+		expect(peekCouncilCoordinatorForSession(session as unknown as AgentSession, sessionId)).toBeDefined();
+		return { sessionId };
+	}
+
+	it("installs the transition reconciler on new, loaded, resumed, and forked sessions", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const createdSession = harness.findSession(created.sessionId)!;
+		expect(createdSession.sessionTransitionReconciler).toBeDefined();
+		createdSession.sessionManager.appendMessage({ role: "user", content: "seed", timestamp: Date.now() });
+		await createdSession.sessionManager.flush();
+
+		// A still-managed id short-circuits to its existing record, so load and
+		// resume only reach the registration seam from a closed session.
+		await harness.agent.closeSession({ sessionId: created.sessionId });
+		const loaded = await harness.agent.loadSession({
+			sessionId: created.sessionId,
+			cwd: harness.cwdA,
+			mcpServers: [],
+		});
+		expectAcpStructure(zLoadSessionResponse, loaded);
+		const loadedSession = harness.sessions.at(-1)!;
+		expect(loadedSession).not.toBe(createdSession);
+		expect(loadedSession.sessionTransitionReconciler).toBeDefined();
+
+		await harness.agent.closeSession({ sessionId: created.sessionId });
+		await harness.agent.resumeSession({ sessionId: created.sessionId, cwd: harness.cwdA, mcpServers: [] });
+		const resumedSession = harness.sessions.at(-1)!;
+		expect(resumedSession).not.toBe(loadedSession);
+		expect(resumedSession.sessionTransitionReconciler).toBeDefined();
+
+		const forked = await harness.agent.unstable_forkSession({
+			sessionId: created.sessionId,
+			cwd: harness.cwdA,
+			mcpServers: [],
+		});
+		// Every managed record funnels through the same registration seam, so each
+		// owns exactly one Council reconciler before extensions or MCP can run.
+		expect(harness.findSession(forked.sessionId)?.sessionTransitionReconciler).toBeDefined();
+	});
+
+	it("releases the retired coordinator when an extension drives an in-place new session", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const { sessionId } = bindCoordinator(session);
+
+		// Not an ACP request: an extension calling `pi.newSession()` mutates the
+		// managed session in place, and the installed callback has to cover it.
+		expect(await session.newSession()).toBe(true);
+
+		const nextSessionId = session.sessionManager.getSessionId();
+		expect(nextSessionId).not.toBe(sessionId);
+		expect(peekCouncilCoordinatorForSession(session as unknown as AgentSession, sessionId)).toBeUndefined();
+		expect(peekCouncilCoordinatorForSession(session as unknown as AgentSession, nextSessionId)).toBeUndefined();
+	});
+
+	it("releases a forked session's coordinator when it is closed", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const createdSession = harness.findSession(created.sessionId)!;
+		createdSession.sessionManager.appendMessage({ role: "user", content: "fork me", timestamp: Date.now() });
+		await createdSession.sessionManager.flush();
+		const forked = await harness.agent.unstable_forkSession({
+			sessionId: created.sessionId,
+			cwd: harness.cwdA,
+			mcpServers: [],
+		});
+		const forkedSession = harness.findSession(forked.sessionId)!;
+		const { sessionId } = bindCoordinator(forkedSession);
+
+		await harness.agent.closeSession({ sessionId: forked.sessionId });
+
+		expect(forkedSession.disposed).toBe(true);
+		expect(peekCouncilCoordinatorForSession(forkedSession as unknown as AgentSession, sessionId)).toBeUndefined();
+	});
+
+	it("cancels a prompt without constructing a coordinator for a Council-free session", async () => {
+		const held = Promise.withResolvers<void>();
+		const holdInstalled = Promise.withResolvers<void>();
+		const harness = await createHarness({
+			dependencies: {
+				executeBuiltinSlashCommand: async (_text, runtime) => {
+					runtime.holdTurn?.(held.promise);
+					holdInstalled.resolve();
+					return { consumed: true };
+				},
+			},
+		});
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const sessionId = session.sessionManager.getSessionId();
+		const prompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "/council status" }],
+		});
+		await holdInstalled.promise;
+
+		await harness.agent.cancel({ sessionId: created.sessionId });
+
+		expect(await prompt).toEqual(expect.objectContaining({ stopReason: "cancelled" }));
+		// The lookup-only path is the point: a session that never ran Council must
+		// not gain an owner just because a turn was cancelled.
+		expect(peekCouncilCoordinatorForSession(session as unknown as AgentSession, sessionId)).toBeUndefined();
+		held.resolve();
 	});
 });
 

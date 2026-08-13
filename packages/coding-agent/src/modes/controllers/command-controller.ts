@@ -582,7 +582,10 @@ export class CommandController {
 	}
 
 	handleHotkeysCommand(): void {
-		const hotkeys = buildHotkeysMarkdown({ keybindings: this.ctx.keybindings });
+		const hotkeys = buildHotkeysMarkdown({
+			keybindings: this.ctx.keybindings,
+			councilActive: this.ctx.hasActiveCouncil(),
+		});
 		showMarkdownPanel(this.ctx, "Keyboard Shortcuts", hotkeys);
 	}
 

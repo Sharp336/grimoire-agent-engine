@@ -304,7 +304,7 @@ Slash commands shift how a whole session runs:
 
 - `/vibe` — enter [Vibe mode](docs/vibe-mode.md): act as a director driving persistent `fast`/`good` worker sessions with a `read`-only toolset.
 - `/fresh` — reset the provider stream state (stale prompt cache, wedged stream) without changing the local transcript. See [Session operations](docs/session-operations-export-share-fork-resume.md#fresh).
-- `/council <task>` — have an ordered roster of configured models independently review a task and publish one adjudicated plan under `plans/`; use `/council status`, `/council cancel`, `/council resume`, or `/council config` to manage the run.
+- `/council <task>` — have an ordered roster of configured models independently review a task and publish one adjudicated plan to `local://council-<slug>-plan.md`, leaving your working tree untouched; use `/council status`, `/council cancel`, `/council resume`, or `/council config` to manage the run. See [Council](docs/council.md).
 
 ## Sixty-plus providers, a thousand models, _one /model away_.
 

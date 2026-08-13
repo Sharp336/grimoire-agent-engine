@@ -71,6 +71,13 @@ export function shouldSkipHistory(slashText: string): boolean {
 	return false;
 }
 
+/**
+ * Editor notice for a submission that Council's owned adjudication turn pushed
+ * behind itself. Steering would splice the text into the judging turn.
+ */
+const COUNCIL_ADJUDICATION_DEFERRAL_NOTICE =
+	"Council is judging findings; your message will be delivered after this turn";
+
 interface Expandable {
 	setExpanded(expanded: boolean): void;
 }
@@ -748,17 +755,28 @@ export class InputController {
 				return;
 			}
 
-			// Handle skill commands (/skill:name [args]). Enter ⇒ steer (matches the
-			// free-text Enter semantics below); Ctrl+Enter routes through `handleFollowUp`.
+			// Council owns Main's streaming turn while it adjudicates findings, and a
+			// steer splices user text straight into that judging turn. Resolve the
+			// delivery behavior once here so every Main-bound path below (skill
+			// commands, free text, image-bearing prompts, and the idle-to-streaming
+			// race inside startPendingSubmission) agrees, including a submission that
+			// races Council's turn acquisition. Local-only bash, python, and
+			// extension commands run immediately and keep their current semantics.
+			const mainStreamingBehavior: "steer" | "followUp" = this.ctx.isCouncilAdjudicating() ? "followUp" : "steer";
+
+			// Handle skill commands (/skill:name [args]). Enter matches the free-text
+			// Enter semantics below; Ctrl+Enter routes through `handleFollowUp`.
 			// During compaction, queue immediately so bash/python/loop-mode branches do
 			// not consume the skill before the compaction-resume path re-parses it.
 			if (text && isKnownSkillCommand(this.ctx, text)) {
 				if (this.ctx.session.isCompacting) {
 					const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
-					this.ctx.queueCompactionMessage(text, "steer", images);
+					this.#noteCouncilAdjudicationDeferral(mainStreamingBehavior);
+					this.ctx.queueCompactionMessage(text, mainStreamingBehavior, images);
 					return;
 				}
-				if (await this.#invokeSkillCommand(text, "steer", inputImages, inputImageLinks)) {
+				if (await this.#invokeSkillCommand(text, mainStreamingBehavior, inputImages, inputImageLinks)) {
+					this.#noteCouncilAdjudicationDeferral(mainStreamingBehavior);
 					return;
 				}
 			}
@@ -809,7 +827,8 @@ export class InputController {
 			// Queue input during compaction
 			if (this.ctx.session.isCompacting) {
 				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
-				this.ctx.queueCompactionMessage(text, "steer", images);
+				this.#noteCouncilAdjudicationDeferral(mainStreamingBehavior);
+				this.ctx.queueCompactionMessage(text, mainStreamingBehavior, images);
 				return;
 			}
 			// Extension commands are local actions. Execute them before the normal
@@ -826,7 +845,8 @@ export class InputController {
 				return;
 			}
 
-			// If streaming, use prompt() with steer behavior
+			// If streaming, use prompt() with the resolved streaming behavior (steer
+			// normally, follow-up while Council owns Main's adjudication turn).
 			// This handles extension commands (execute immediately), prompt template expansion, and queueing
 			if (this.ctx.session.isStreaming) {
 				this.ctx.editor.addToHistory(text);
@@ -839,10 +859,11 @@ export class InputController {
 				// (a user-role `message_start` event) leaves any draft the user has
 				// typed since queuing intact. Same protection as #783, applied to
 				// the streaming/queue path.
+				this.#noteCouncilAdjudicationDeferral(mainStreamingBehavior);
 				try {
 					await this.ctx.withLocalSubmission(
 						text,
-						() => this.ctx.session.prompt(text, { streamingBehavior: "steer", images }),
+						() => this.ctx.session.prompt(text, { streamingBehavior: mainStreamingBehavior, images }),
 						{ imageCount: images?.length ?? 0 },
 					);
 				} catch (error) {
@@ -879,12 +900,15 @@ export class InputController {
 				// believed was idle, but a background turn can start in the gap before
 				// `submitInteractiveInput` dispatches it. Steering matches the
 				// streaming-branch Enter (above) and keeps the message from throwing
-				// AgentBusyError on that race.
+				// AgentBusyError on that race. The one background turn that must not be
+				// steered is Council's adjudication, so that race resolves to follow-up
+				// instead.
+				this.#noteCouncilAdjudicationDeferral(mainStreamingBehavior);
 				const submission = this.ctx.startPendingSubmission({
 					text,
 					images,
 					imageLinks: inputImageLinks,
-					streamingBehavior: "steer",
+					streamingBehavior: mainStreamingBehavior,
 				});
 				// Start titling only after the optimistic row painted, so the local
 				// tiny-title worker's subprocess spawn never blocks the first frame.
@@ -897,17 +921,19 @@ export class InputController {
 				// momentarily idle. The editor already cleared itself on Enter, so
 				// falling through here would silently swallow the message. Submit a
 				// real prompt directly; if a background turn starts in the gap,
-				// `streamingBehavior: "steer"` preserves the typed-message queueing
-				// semantics instead of throwing AgentBusyError.
+				// `streamingBehavior` preserves the typed-message queueing semantics
+				// instead of throwing AgentBusyError: steering normally, follow-up while
+				// Council owns Main's adjudication turn.
 				this.ctx.editor.imageLinks = undefined;
 				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
 				this.ctx.editor.pendingImages = [];
 				this.ctx.editor.pendingImageLinks = [];
 				this.#maybeStartTitleGeneration(text);
+				this.#noteCouncilAdjudicationDeferral(mainStreamingBehavior);
 				try {
 					await this.ctx.withLocalSubmission(
 						text,
-						() => this.ctx.session.prompt(text, { streamingBehavior: "steer", images }),
+						() => this.ctx.session.prompt(text, { streamingBehavior: mainStreamingBehavior, images }),
 						{
 							imageCount: images?.length ?? 0,
 						},
@@ -946,6 +972,16 @@ export class InputController {
 				extensionCommandSpace === -1 ? text.slice(1) : text.slice(1, extensionCommandSpace),
 			) !== undefined
 		);
+	}
+
+	/**
+	 * One-line editor notice for a submission deferred behind Council's owned
+	 * adjudication turn. Called only from the paths that actually queue, so
+	 * local-only bash, python, and extension commands stay silent.
+	 */
+	#noteCouncilAdjudicationDeferral(behavior: "steer" | "followUp"): void {
+		if (behavior === "steer") return;
+		this.ctx.showStatus(COUNCIL_ADJUDICATION_DEFERRAL_NOTICE);
 	}
 
 	#maybeStartTitleGeneration(text: string): void {
@@ -1881,6 +1917,14 @@ export class InputController {
 	}
 
 	toggleToolOutputExpansion(): void {
+		// While a council run is live and its pane is on screen, the expand key
+		// belongs to the pane alone: resizing every transcript block underneath a
+		// HUD the user is trying to read is not what the keystroke meant. Global
+		// behavior is unchanged whenever no council pane is showing.
+		if (this.ctx.hasActiveCouncil() && this.ctx.councilPane.isActive()) {
+			this.ctx.toggleCouncilPaneExpansion();
+			return;
+		}
 		if (this.ctx.hideToolActivity && !this.ctx.hasActiveCouncil()) {
 			const visibilityKey = this.ctx.keybindings.getDisplayString("app.tools.toggleVisibility");
 			const visibilityHint = visibilityKey ? `${visibilityKey} or /settings` : "/settings";

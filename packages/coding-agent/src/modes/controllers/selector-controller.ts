@@ -1029,12 +1029,59 @@ export class SelectorController {
 				},
 				onCouncilRosterChange: members => {
 					try {
+						// Written through verbatim: a salvaged row may still carry the raw malformed `round`
+						// the config has, and normalizing it here would silently repair a pin the user has
+						// not fixed yet.
 						this.ctx.settings.set("council.members", members);
 						const enabled = members.reduce((count, member) => count + (member.enabled ? 1 : 0), 0);
 						this.ctx.showStatus(`Council roster: ${enabled}/${members.length} enabled`);
 					} catch (error) {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
 					}
+				},
+				onCouncilRoundsChange: rounds => {
+					try {
+						this.ctx.settings.set("council.rounds", rounds);
+						this.ctx.showStatus(`Council review rounds: ${rounds}`);
+					} catch (error) {
+						this.ctx.showError(error instanceof Error ? error.message : String(error));
+					}
+				},
+				onCouncilAdvisorChange: (scope, enabled) => {
+					try {
+						this.ctx.settings.set(`council.advisor.${scope}`, enabled);
+						this.ctx.showStatus(`Council ${scope} advisor: ${enabled ? "on" : "off"}`);
+					} catch (error) {
+						this.ctx.showError(error instanceof Error ? error.message : String(error));
+					}
+				},
+				// Display names live in `modelTags` so the durable role id — and every
+				// project-scoped `modelRoles` assignment keyed by it — stays valid.
+				// Clearing the name drops the whole tag entry: this input is its only writer.
+				onRoleDisplayNameChange: (role, name) => {
+					try {
+						const tags = { ...this.ctx.settings.get("modelTags") };
+						if (name === undefined) {
+							if (!Object.hasOwn(tags, role)) return;
+							delete tags[role];
+						} else {
+							tags[role] = { ...tags[role], name };
+						}
+						this.ctx.settings.set("modelTags", tags);
+						this.ctx.showStatus(name === undefined ? `${role} shown by its id` : `${role} shown as ${name}`);
+					} catch (error) {
+						this.ctx.showError(error instanceof Error ? error.message : String(error));
+					}
+				},
+				// Flush before removing: the project key must not disappear until the
+				// global roster replacing it is durably on disk. A failed flush throws,
+				// leaving the project roster in place.
+				onCouncilRosterProjectClear: async () => {
+					await this.ctx.settings.flush();
+					const removed = await this.ctx.settings.removeProjectSetting("council.members");
+					this.ctx.showStatus(
+						removed ? "Council roster moved to global config" : "No project-scoped council roster to remove",
+					);
 				},
 				onCancel: () => done(),
 			},

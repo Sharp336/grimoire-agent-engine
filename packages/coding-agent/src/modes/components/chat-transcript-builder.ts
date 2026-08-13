@@ -17,6 +17,7 @@ import type { TUI } from "@oh-my-pi/pi-tui";
 import type { AdvisorMessageDetails } from "../../advisor";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "../../collab/protocol";
 import { settings } from "../../config/settings";
+import { COUNCIL_RUN_MESSAGE_TYPE, COUNCIL_SUMMARY_MESSAGE_TYPE } from "../../council/events";
 import type { MessageRenderer } from "../../extensibility/extensions/types";
 import {
 	BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE,
@@ -48,8 +49,8 @@ import {
 	CompactionSummaryMessageComponent,
 	createHandoffSummaryMessageComponent,
 } from "./compaction-summary-message";
+import { CouncilRunEventComponent, type CouncilRunEventDetails } from "./council-run-message";
 import {
-	COUNCIL_SUMMARY_MESSAGE_TYPE,
 	CouncilSummaryComponent,
 	type CouncilSummaryDetails,
 	type CouncilSummaryManifestLoader,
@@ -486,6 +487,18 @@ export class ChatTranscriptBuilder {
 				new CouncilSummaryComponent(
 					message as CustomMessage<CouncilSummaryDetails>,
 					loader,
+					this.deps.requestRender,
+				),
+			);
+			return;
+		}
+		if (message.customType === COUNCIL_RUN_MESSAGE_TYPE) {
+			// No stats loader here: this builder renders another agent's transcript, where council
+			// storage need not resolve. The persisted `details.stats` projection is self-sufficient.
+			this.container.addChild(
+				new CouncilRunEventComponent(
+					message as CustomMessage<CouncilRunEventDetails>,
+					undefined,
 					this.deps.requestRender,
 				),
 			);

@@ -1,17 +1,33 @@
-import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { hasFsCode } from "@oh-my-pi/pi-utils";
+import {
+	COUNCIL_READ_FLAGS,
+	COUNCIL_STAGE_FLAGS,
+	COUNCIL_STAGE_MODE,
+	canonicalizeLocalRoot,
+	councilTempPath,
+	isContained,
+	linkExclusive,
+	syncDirectory,
+} from "./durable-fs";
 import { sha256CouncilContent } from "./hash";
-import { type CouncilPublishedArtifact, isValidCouncilOutputPath } from "./state";
+import { type CouncilPublishedArtifact, isLegacyCouncilOutputPath, isValidCouncilOutputPath } from "./state";
 
-export { sha256CouncilContent as hashCouncilContent } from "./hash";
-
-export const COUNCIL_SLUG_MAX_LENGTH = 80;
+/**
+ * Ceiling for a freshly minted slug. Deliberately far below the 80-character bound
+ * {@link isValidCouncilOutputPath} enforces: that bound stays wide so a run minted before this cap
+ * tightened (and every legacy `plans/<slug>.md` manifest) remains readable and resumable, while
+ * new names stay short enough to read in a `local://` listing and in the plan-approval header.
+ */
+export const COUNCIL_SLUG_MAX_LENGTH = 48;
 
 export interface CouncilPublicationTarget {
-	repoRoot: string;
-	plansDirectory: string;
+	/** Canonical session-local root every council artifact and the published plan share. */
+	planRoot: string;
 	slug: string;
+	fileName: string;
+	/** Manifest `outputPath`: the bare file name, or a legacy `plans/<slug>.md`. */
 	relativePath: string;
 	absolutePath: string;
 }
@@ -64,128 +80,129 @@ export class CouncilPublicationError extends Error {
 	}
 }
 
-/** Lowercase kebab slug, bounded for suffixes and prohibited from ending in the ambiguous `-plan`. */
-export function councilPublicationSlug(task: string): string {
-	let slug = task
+/**
+ * Lowercase kebab slug, prohibited from ending in the ambiguous `-plan`. Truncation is
+ * word-aligned: a character slice of a sentence-length council task ends mid-word
+ * (`…-depending-on-th`), which reads like corruption in the published file name.
+ *
+ * `maxLength` is narrowed by {@link resolveCouncilPublicationTarget} to leave room for a collision
+ * suffix, so the shortened name stays word-aligned too.
+ */
+export function councilPublicationSlug(text: string, maxLength: number = COUNCIL_SLUG_MAX_LENGTH): string {
+	const words = text
 		.normalize("NFKD")
 		.replace(/[\u0300-\u036f]/g, "")
 		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+|-+$/g, "")
-		.slice(0, COUNCIL_SLUG_MAX_LENGTH)
-		.replace(/-+$/g, "");
+		.split(/[^a-z0-9]+/)
+		.filter(word => word.length > 0);
+	let slug = "";
+	for (const word of words) {
+		const candidate = slug === "" ? word : `${slug}-${word}`;
+		if (candidate.length > maxLength) break;
+		slug = candidate;
+	}
+	// A first word longer than the whole budget still has to yield a name; only then is a hard cut
+	// the lesser evil.
+	if (slug === "" && words.length > 0) slug = words[0]!.slice(0, maxLength);
 	while (slug.endsWith("-plan")) slug = slug.slice(0, -5).replace(/-+$/g, "");
 	if (slug === "" || slug === "plan") slug = "council";
 	return slug;
 }
 
-function isContained(root: string, candidate: string): boolean {
-	const relative = path.relative(root, candidate);
-	return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
-}
-
-function isErrorCode(error: unknown, code: string): boolean {
-	return error instanceof Error && "code" in error && error.code === code;
-}
-
-async function syncDirectory(
-	filesystem: CouncilPublicationFileSystem,
-	directory: string,
-	onOperation?: CouncilPublicationDurabilityOptions["onDurabilityOperation"],
-): Promise<void> {
-	const handle = await filesystem.open(directory, "r");
-	try {
-		await handle.sync();
-		onOperation?.("directory-sync", directory);
-	} finally {
-		await handle.close();
-	}
-}
-
-export async function ensureCouncilPlansDirectory(
-	repoRoot: string,
+/**
+ * Canonicalize — creating when absent — the session-local directory council plans are published into.
+ * This never appends a path segment and never touches the repository: a council run must create
+ * nothing in the working tree.
+ */
+export async function ensureCouncilPlanRoot(
+	planRoot: string,
 	options: CouncilPublicationDurabilityOptions = {},
-): Promise<{ repoRoot: string; plansDirectory: string }> {
-	const filesystem = options.filesystem ?? fs;
-	const lexicalRoot = path.resolve(repoRoot);
-	let canonicalRoot: string;
+): Promise<string> {
 	try {
-		const rootInfo = await filesystem.lstat(lexicalRoot);
-		if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory()) {
-			throw new CouncilPublicationError(
-				"INVALID_TARGET",
-				`Council repository root ${lexicalRoot} is not a real directory`,
-			);
-		}
-		canonicalRoot = await filesystem.realpath(lexicalRoot);
+		return await canonicalizeLocalRoot(planRoot, options.filesystem ?? fs, {
+			create: true,
+			onDurabilityOperation: options.onDurabilityOperation,
+		});
 	} catch (error) {
-		if (error instanceof CouncilPublicationError) throw error;
-		throw new CouncilPublicationError("INVALID_TARGET", `Council repository root is unusable: ${String(error)}`, {
+		throw new CouncilPublicationError("INVALID_TARGET", `Council plan root is unusable: ${String(error)}`, {
 			cause: error,
 		});
 	}
-	const plansDirectory = path.join(canonicalRoot, "plans");
+}
+
+/**
+ * Directory that actually holds the final plan. New runs publish directly into the plan root; a
+ * manifest written before the retarget keeps its `plans/` subdirectory, resolved under that same
+ * session-local plan root, so an in-flight run stays resumable.
+ */
+function publicationDirectory(canonicalPlanRoot: string, outputPath: string): string {
+	return isLegacyCouncilOutputPath(outputPath) ? path.join(canonicalPlanRoot, "plans") : canonicalPlanRoot;
+}
+
+/** Create the legacy `plans/` subdirectory on demand; the plan root itself is already canonical. */
+async function ensurePublicationDirectory(
+	canonicalPlanRoot: string,
+	outputPath: string,
+	options: CouncilPublicationDurabilityOptions,
+): Promise<string> {
+	const directory = publicationDirectory(canonicalPlanRoot, outputPath);
+	if (directory === canonicalPlanRoot) return directory;
+	const filesystem = options.filesystem ?? fs;
 	let created = false;
 	try {
-		await filesystem.mkdir(plansDirectory);
+		await filesystem.mkdir(directory);
 		created = true;
 	} catch (error) {
-		if (!isErrorCode(error, "EEXIST")) {
-			throw new CouncilPublicationError("IO", `Could not create council plans directory: ${String(error)}`, {
+		if (!hasFsCode(error, "EEXIST")) {
+			throw new CouncilPublicationError("IO", `Could not create legacy council plans directory: ${String(error)}`, {
 				cause: error,
 			});
 		}
 	}
 	try {
-		const info = await filesystem.lstat(plansDirectory);
+		const info = await filesystem.lstat(directory);
 		if (info.isSymbolicLink() || !info.isDirectory()) {
 			throw new CouncilPublicationError(
 				"INVALID_TARGET",
-				`Council publication path ${plansDirectory} is not a real directory`,
+				`Council publication path ${directory} is not a real directory`,
 			);
 		}
-		const canonicalPlans = await filesystem.realpath(plansDirectory);
-		if (canonicalPlans !== plansDirectory || !isContained(canonicalRoot, canonicalPlans)) {
-			throw new CouncilPublicationError(
-				"INVALID_TARGET",
-				`Council publication path ${plansDirectory} escapes the repository`,
-			);
-		}
-		if (created) await syncDirectory(filesystem, canonicalRoot, options.onDurabilityOperation);
+		if (created) await syncDirectory(filesystem, canonicalPlanRoot, options.onDurabilityOperation);
 	} catch (error) {
 		if (error instanceof CouncilPublicationError) throw error;
 		throw new CouncilPublicationError("INVALID_TARGET", `Council plans directory is unusable: ${String(error)}`, {
 			cause: error,
 		});
 	}
-	return { repoRoot: canonicalRoot, plansDirectory };
+	return directory;
 }
 
-/** Resolve and promise a collision-free target once, before any child model is launched. */
+/**
+ * Resolve and promise a collision-free target once, before any child model is launched.
+ * `name` is the model-generated plan title when one is available and the raw task otherwise; both
+ * are slugified identically.
+ */
 export async function resolveCouncilPublicationTarget(
-	repoRoot: string,
-	task: string,
+	planRoot: string,
+	name: string,
 	options: CouncilPublicationDurabilityOptions = {},
 ): Promise<CouncilPublicationTarget> {
 	const filesystem = options.filesystem ?? fs;
-	const canonical = await ensureCouncilPlansDirectory(repoRoot, options);
-	const baseSlug = councilPublicationSlug(task);
+	const canonicalPlanRoot = await ensureCouncilPlanRoot(planRoot, options);
 	for (let suffix = 1; suffix < Number.MAX_SAFE_INTEGER; suffix++) {
 		const suffixText = suffix === 1 ? "" : `-${suffix}`;
-		const stem = baseSlug.slice(0, COUNCIL_SLUG_MAX_LENGTH - suffixText.length).replace(/-+$/g, "");
-		const slug = `${stem}${suffixText}`;
-		const absolutePath = path.join(canonical.plansDirectory, `${slug}.md`);
+		const slug = `${councilPublicationSlug(name, COUNCIL_SLUG_MAX_LENGTH - suffixText.length)}${suffixText}`;
+		// Namespacing is load-bearing, not cosmetic: user plan-mode plans are `local://<slug>-plan.md`
+		// in this same root and `listPlanFiles` has no provenance check, so an un-namespaced council
+		// plan could both be mistaken for "the" plan and collide with a same-slug user plan — and a
+		// publication collision is a terminal, non-resumable council failure.
+		const fileName = `council-${slug}-plan.md`;
+		const absolutePath = path.join(canonicalPlanRoot, fileName);
 		try {
 			await filesystem.lstat(absolutePath);
 		} catch (error) {
-			if (isErrorCode(error, "ENOENT")) {
-				return {
-					repoRoot: canonical.repoRoot,
-					plansDirectory: canonical.plansDirectory,
-					slug,
-					relativePath: path.posix.join("plans", `${slug}.md`),
-					absolutePath,
-				};
+			if (hasFsCode(error, "ENOENT")) {
+				return { planRoot: canonicalPlanRoot, slug, fileName, relativePath: fileName, absolutePath };
 			}
 			throw new CouncilPublicationError("IO", `Could not inspect council publication target: ${String(error)}`, {
 				cause: error,
@@ -197,29 +214,33 @@ export async function resolveCouncilPublicationTarget(
 
 /** Revalidate a manifest's already-promised target without allocating a collision suffix. */
 export async function resolvePromisedCouncilPublicationTarget(
-	repoRoot: string,
+	planRoot: string,
 	outputPath: string,
 	options: CouncilPublicationDurabilityOptions = {},
 ): Promise<CouncilPublicationTarget> {
-	const canonical = await ensureCouncilPlansDirectory(repoRoot, options);
-	const absolutePath = resolvePromisedTarget(canonical.repoRoot, outputPath);
-	if (
-		!isContained(canonical.plansDirectory, absolutePath) ||
-		path.dirname(absolutePath) !== canonical.plansDirectory
-	) {
-		throw new CouncilPublicationError("INVALID_TARGET", `Council outputPath escapes plans/: ${outputPath}`);
-	}
-	const slug = path.basename(absolutePath, ".md");
+	const canonicalPlanRoot = await ensureCouncilPlanRoot(planRoot, options);
+	const absolutePath = resolvePromisedTarget(canonicalPlanRoot, outputPath);
+	const fileName = path.basename(absolutePath);
 	return {
-		repoRoot: canonical.repoRoot,
-		plansDirectory: canonical.plansDirectory,
-		slug,
+		planRoot: canonicalPlanRoot,
+		slug: fileName
+			.replace(/^council-/, "")
+			.replace(/-plan\.md$/, "")
+			.replace(/\.md$/, ""),
+		fileName,
 		relativePath: outputPath,
 		absolutePath,
 	};
 }
 
-function resolvePromisedTarget(repoRoot: string, outputPath: string): string {
+/**
+ * Absolute final path for a promised `outputPath`, gated against escape.
+ *
+ * Containment is asserted against the *canonical* plan root, never against a `realpath === resolve`
+ * equality: a session root routinely sits behind a symlinked ancestor (macOS `/var`, a symlinked
+ * home, the `os.tmpdir()` fallback), and demanding lexical equality would refuse a healthy session.
+ */
+function resolvePromisedTarget(canonicalPlanRoot: string, outputPath: string): string {
 	if (
 		path.isAbsolute(outputPath) ||
 		outputPath.split(/[\\/]/).includes("..") ||
@@ -227,12 +248,32 @@ function resolvePromisedTarget(repoRoot: string, outputPath: string): string {
 	) {
 		throw new CouncilPublicationError(
 			"INVALID_TARGET",
-			`Council outputPath must be a valid repo-relative promised plan path under plans/: ${outputPath}`,
+			`Council outputPath must be a promised council plan file name: ${outputPath}`,
 		);
 	}
-	return path.resolve(repoRoot, ...outputPath.split("/"));
+	const finalPath = path.resolve(canonicalPlanRoot, ...outputPath.split("/"));
+	if (
+		!isContained(canonicalPlanRoot, finalPath) ||
+		path.dirname(finalPath) !== publicationDirectory(canonicalPlanRoot, outputPath)
+	) {
+		throw new CouncilPublicationError("INVALID_TARGET", `Council outputPath escapes the plan root: ${outputPath}`);
+	}
+	return finalPath;
 }
 
+/**
+ * Does the published plan still hold the content this run committed?
+ *
+ * Every plan this checks lives under the session-local plan root: a new run publishes its file
+ * directly into that root, and a legacy `plans/<slug>.md` manifest resolves into the root's
+ * `plans/` subdirectory. Neither case consults the working tree.
+ *
+ * An exact digest over the bytes on disk is therefore the normal answer. The single tolerated
+ * divergence is line endings: content carrying CRLF still matches when its LF-normalized form has
+ * the promised digest and byte count, so a run whose plan was stored with CRLF resumes instead of
+ * being reported as a foreign collision. CRLF at most doubles the size, which bounds how much is
+ * worth reading.
+ */
 async function fileMatches(
 	filesystem: CouncilPublicationFileSystem,
 	finalPath: string,
@@ -240,33 +281,39 @@ async function fileMatches(
 ): Promise<boolean> {
 	try {
 		const info = await filesystem.lstat(finalPath);
-		if (info.isSymbolicLink() || !info.isFile() || info.size !== expected.bytes) return false;
-		const handle = await filesystem.open(finalPath, nodeFs.constants.O_RDONLY | nodeFs.constants.O_NOFOLLOW);
+		if (info.isSymbolicLink() || !info.isFile()) return false;
+		if (info.size < expected.bytes || info.size > expected.bytes * 2) return false;
+		const handle = await filesystem.open(finalPath, COUNCIL_READ_FLAGS);
 		try {
 			const openedInfo = await handle.stat();
-			if (!openedInfo.isFile() || openedInfo.size !== expected.bytes) return false;
-			return sha256CouncilContent(await handle.readFile()) === expected.sha256;
+			if (!openedInfo.isFile() || openedInfo.size !== info.size) return false;
+			// `O_NOFOLLOW` is a no-op on Windows, where reparse points still exist, so identity of the
+			// opened file against the `lstat` above is what actually closes the check-then-open race.
+			if (openedInfo.dev !== info.dev || openedInfo.ino !== info.ino) return false;
+			const content = await handle.readFile();
+			if (openedInfo.size === expected.bytes && sha256CouncilContent(content) === expected.sha256) return true;
+			if (!content.includes("\r\n")) return false;
+			const normalized = content.toString("utf8").replaceAll("\r\n", "\n");
+			return (
+				Buffer.byteLength(normalized) === expected.bytes && sha256CouncilContent(normalized) === expected.sha256
+			);
 		} finally {
 			await handle.close();
 		}
 	} catch (error) {
-		if (isErrorCode(error, "ENOENT")) return false;
+		if (hasFsCode(error, "ENOENT")) return false;
 		throw error;
 	}
 }
 
 export async function publishedCouncilPlanMatches(
-	repoRoot: string,
+	planRoot: string,
 	outputPath: string,
 	published: Pick<CouncilPublishedArtifact, "sha256" | "bytes">,
 	options: CouncilPublicationDurabilityOptions = {},
 ): Promise<boolean> {
 	const filesystem = options.filesystem ?? fs;
-	const canonical = await ensureCouncilPlansDirectory(repoRoot, options);
-	const finalPath = resolvePromisedTarget(canonical.repoRoot, outputPath);
-	if (!isContained(canonical.plansDirectory, finalPath)) {
-		throw new CouncilPublicationError("INVALID_TARGET", `Council outputPath escapes plans/: ${outputPath}`);
-	}
+	const finalPath = resolvePromisedTarget(await ensureCouncilPlanRoot(planRoot, options), outputPath);
 	try {
 		return await fileMatches(filesystem, finalPath, published);
 	} catch (error) {
@@ -282,21 +329,17 @@ export type CouncilPromisedPublicationStatus = "missing" | "matches" | "collisio
  * An existing entry matches only when an expected final content reference is supplied.
  */
 export async function inspectPromisedCouncilPublication(
-	repoRoot: string,
+	planRoot: string,
 	outputPath: string,
 	expected?: Pick<CouncilPublishedArtifact, "sha256" | "bytes">,
 	options: CouncilPublicationDurabilityOptions = {},
 ): Promise<CouncilPromisedPublicationStatus> {
 	const filesystem = options.filesystem ?? fs;
-	const canonical = await ensureCouncilPlansDirectory(repoRoot, options);
-	const finalPath = resolvePromisedTarget(canonical.repoRoot, outputPath);
-	if (!isContained(canonical.plansDirectory, finalPath)) {
-		throw new CouncilPublicationError("INVALID_TARGET", `Council outputPath escapes plans/: ${outputPath}`);
-	}
+	const finalPath = resolvePromisedTarget(await ensureCouncilPlanRoot(planRoot, options), outputPath);
 	try {
 		await filesystem.lstat(finalPath);
 	} catch (error) {
-		if (isErrorCode(error, "ENOENT")) return "missing";
+		if (hasFsCode(error, "ENOENT")) return "missing";
 		throw new CouncilPublicationError("IO", `Could not inspect promised council plan: ${String(error)}`, {
 			cause: error,
 		});
@@ -313,36 +356,39 @@ export async function inspectPromisedCouncilPublication(
 
 /** FileHandle-based durable staging. Merely staging can never expose a partial final plan. */
 export async function stageCouncilPublication(
-	plansDirectory: string,
+	targetDirectory: string,
 	content: string,
 	options: CouncilPublicationDurabilityOptions = {},
 ): Promise<StagedCouncilPublication> {
 	const filesystem = options.filesystem ?? fs;
-	const info = await filesystem.lstat(plansDirectory).catch(error => {
-		throw new CouncilPublicationError("INVALID_TARGET", `Council plans directory is unusable: ${String(error)}`, {
+	const info = await filesystem.lstat(targetDirectory).catch(error => {
+		throw new CouncilPublicationError("INVALID_TARGET", `Council plan directory is unusable: ${String(error)}`, {
 			cause: error,
 		});
 	});
 	if (info.isSymbolicLink() || !info.isDirectory()) {
 		throw new CouncilPublicationError(
 			"INVALID_TARGET",
-			`Council publication path ${plansDirectory} is not a real directory`,
+			`Council publication path ${targetDirectory} is not a real directory`,
 		);
 	}
-	const canonicalPlans = await filesystem.realpath(plansDirectory);
-	if (canonicalPlans !== path.resolve(plansDirectory)) {
-		throw new CouncilPublicationError("INVALID_TARGET", `Council plans directory ${plansDirectory} is not canonical`);
-	}
+	// Ancestors may legitimately be symlinks - macOS resolves `/var` to `/private/var`, and the session
+	// cache is routinely reached through a symlinked home or the `os.tmpdir()` fallback - so requiring
+	// the whole path to equal its own realpath would reject a healthy session. The `lstat` gate above
+	// already rejects a symlinked final component, which is the guarantee that matters; staging then
+	// works from the canonical directory so the committed temp file and the final plan are provably
+	// siblings.
+	const canonicalDirectory = await filesystem.realpath(targetDirectory);
 	const bytes = Buffer.byteLength(content);
 	const sha256 = sha256CouncilContent(content);
-	const tempPath = path.join(canonicalPlans, `.council-${(options.randomUUID ?? (() => Bun.randomUUIDv7()))()}.tmp`);
+	const tempPath = councilTempPath(
+		canonicalDirectory,
+		"council",
+		(options.randomUUID ?? (() => Bun.randomUUIDv7()))(),
+	);
 	let handle: fs.FileHandle | undefined;
 	try {
-		handle = await filesystem.open(
-			tempPath,
-			nodeFs.constants.O_CREAT | nodeFs.constants.O_EXCL | nodeFs.constants.O_WRONLY | nodeFs.constants.O_NOFOLLOW,
-			0o600,
-		);
+		handle = await filesystem.open(tempPath, COUNCIL_STAGE_FLAGS, COUNCIL_STAGE_MODE);
 		await handle.writeFile(content, "utf8");
 		await handle.sync();
 		options.onDurabilityOperation?.("file-sync", tempPath);
@@ -363,26 +409,26 @@ export async function commitStagedCouncilPublication(
 	options: CouncilPublicationCommitOptions = {},
 ): Promise<void> {
 	const filesystem = options.filesystem ?? fs;
-	const plansDirectory = path.dirname(finalPath);
+	const targetDirectory = path.dirname(finalPath);
 	let failure: unknown;
 	try {
 		options.signal?.throwIfAborted();
-		if ((await filesystem.realpath(path.dirname(staged.tempPath))) !== (await filesystem.realpath(plansDirectory))) {
+		if ((await filesystem.realpath(path.dirname(staged.tempPath))) !== (await filesystem.realpath(targetDirectory))) {
 			throw new CouncilPublicationError("INVALID_TARGET", "Staged and final council plans must share one directory");
 		}
 		options.signal?.throwIfAborted();
-		await filesystem.link(staged.tempPath, finalPath);
+		await linkExclusive(filesystem, staged.tempPath, finalPath);
 		options.onDurabilityOperation?.("link", finalPath);
-		await syncDirectory(filesystem, plansDirectory, options.onDurabilityOperation);
+		await syncDirectory(filesystem, targetDirectory, options.onDurabilityOperation);
 	} catch (error) {
 		if (options.signal?.aborted) {
 			failure = options.signal.reason ?? new DOMException("This operation was aborted", "AbortError");
-		} else if (isErrorCode(error, "EEXIST")) {
+		} else if (hasFsCode(error, "EEXIST")) {
 			let adopt = false;
 			if (options.adoptExisting) {
 				try {
 					adopt = await fileMatches(filesystem, finalPath, options.adoptExisting);
-					if (adopt) await syncDirectory(filesystem, plansDirectory, options.onDurabilityOperation);
+					if (adopt) await syncDirectory(filesystem, targetDirectory, options.onDurabilityOperation);
 				} catch {
 					adopt = false;
 				}
@@ -416,7 +462,8 @@ export async function commitStagedCouncilPublication(
 }
 
 export async function publishCouncilPlan(options: {
-	repoRoot: string;
+	/** Session-local plan root; a council run publishes nothing into the working tree. */
+	planRoot: string;
 	outputPath: string;
 	content: string;
 	published?: CouncilPublishedArtifact;
@@ -429,14 +476,12 @@ export async function publishCouncilPlan(options: {
 }): Promise<CouncilPublicationResult> {
 	const durability = options.durability ?? {};
 	options.signal?.throwIfAborted();
-	const canonical = await ensureCouncilPlansDirectory(options.repoRoot, durability);
-	const finalPath = resolvePromisedTarget(canonical.repoRoot, options.outputPath);
-	if (!isContained(canonical.plansDirectory, finalPath)) {
-		throw new CouncilPublicationError("INVALID_TARGET", `Council outputPath escapes plans/: ${options.outputPath}`);
-	}
+	const canonicalPlanRoot = await ensureCouncilPlanRoot(options.planRoot, durability);
+	const finalPath = resolvePromisedTarget(canonicalPlanRoot, options.outputPath);
 	if (options.published && options.published.path !== options.outputPath) {
 		throw new CouncilPublicationError("INVALID_TARGET", "Recovered publication reference does not match outputPath");
 	}
+	const targetDirectory = await ensurePublicationDirectory(canonicalPlanRoot, options.outputPath, durability);
 	const contentReference = {
 		sha256: sha256CouncilContent(options.content),
 		bytes: Buffer.byteLength(options.content),
@@ -445,9 +490,9 @@ export async function publishCouncilPlan(options: {
 	const mayAdopt = options.resume === true || options.adoptExisting === true;
 	if (
 		mayAdopt &&
-		(await publishedCouncilPlanMatches(canonical.repoRoot, options.outputPath, adoptionReference, durability))
+		(await publishedCouncilPlanMatches(canonicalPlanRoot, options.outputPath, adoptionReference, durability))
 	) {
-		await syncDirectory(durability.filesystem ?? fs, canonical.plansDirectory, durability.onDurabilityOperation);
+		await syncDirectory(durability.filesystem ?? fs, targetDirectory, durability.onDurabilityOperation);
 		return {
 			...(options.published ?? {
 				...contentReference,
@@ -458,7 +503,7 @@ export async function publishCouncilPlan(options: {
 		};
 	}
 	options.signal?.throwIfAborted();
-	const staged = await stageCouncilPublication(canonical.plansDirectory, options.content, durability);
+	const staged = await stageCouncilPublication(targetDirectory, options.content, durability);
 	await commitStagedCouncilPublication(staged, finalPath, {
 		...durability,
 		signal: options.signal,

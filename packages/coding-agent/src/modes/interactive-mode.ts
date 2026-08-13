@@ -65,6 +65,7 @@ import {
 	Settings,
 	settings,
 } from "../config/settings";
+import type { CouncilSummaryDelivery } from "../council/coordinator";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import type {
 	AutocompleteProviderFactory,
@@ -650,6 +651,16 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.streamingMessage = undefined;
 		this.lastAssistantUsage = undefined;
 		this.pendingTools.clear();
+		// `/new` is the one session-identity change that never fires the switch reconciler:
+		// `AgentSession.newSession()` fires only `#sessionTransitionReconciler`, which merely quiesces
+		// Council, while `#sessionSwitchReconciler` (the hook wired to `#reconcileModeFromSession` and
+		// therefore to `CouncilController.rebindForSession`) is deliberately left unfired so `/new`
+		// cannot be dragged back into a restored plan/goal mode. Without a rebind here the controller
+		// stays bound to the retired session id while `/council` mints a coordinator under the new one:
+		// nothing subscribes and the Council area never appears. Every other TUI identity change already
+		// routes through this choke point *after* the id changed, and `rebindForSession()` early-returns
+		// when the id is unchanged, so the pre-switch callers are free no-ops.
+		this.#councilController.rebindForSession();
 	}
 	readonly #uiHelpers: UiHelpers;
 	#sttController: STTController | undefined;
@@ -2572,6 +2583,25 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
+	/**
+	 * Enter plan mode for the Council plan-approval handoff, or explain precisely why it cannot.
+	 *
+	 * Idempotent and one-way: unlike `handlePlanModeCommand` this never toggles plan mode *off*, so a
+	 * council run that finishes while the operator is already planning does not eject them. The
+	 * `plan.enabled` check is mandatory here because `#enterPlanMode` deliberately omits it — the
+	 * startup-default path wants to bypass the setting, the council handoff must respect it.
+	 */
+	async ensureCouncilPlanMode(): Promise<{ ok: true } | { ok: false; reason: string }> {
+		if (this.planModeEnabled) return { ok: true };
+		if (this.goalModeEnabled || this.goalModePaused) return { ok: false, reason: "goal mode is active" };
+		if (this.vibeModeEnabled) return { ok: false, reason: "vibe mode is active" };
+		if (!this.settings.get("plan.enabled")) {
+			return { ok: false, reason: "plan mode is disabled in settings (plan.enabled)" };
+		}
+		await this.#enterPlanMode();
+		return this.planModeEnabled ? { ok: true } : { ok: false, reason: "plan mode could not be entered" };
+	}
+
 	async #enterPlanMode(options?: {
 		planFilePath?: string;
 		workflow?: "parallel" | "iterative";
@@ -2872,6 +2902,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			annotationState?: PlanReviewAnnotationState;
 			onAnnotationStateChange?: (state: PlanReviewAnnotationState) => void;
 			initialIndex?: number;
+			/** Pre-sanitized, width-bounded rows rendered full-width above the plan body. */
+			header?: readonly string[];
 		},
 		extra?: { slider?: HookSelectorSlider },
 	): Promise<string | undefined> {
@@ -2895,6 +2927,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				slider: extra?.slider,
 				externalEditorLabel: this.keybindings.getDisplayString("app.editor.external") || undefined,
 				annotationState: dialogOptions?.annotationState,
+				header: dialogOptions?.header,
 			},
 			{
 				onPick: choice => finish(choice),
@@ -3744,7 +3777,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.handlePlanApproval({ planFilePath, title, planExists: true });
 	}
 
-	async handlePlanApproval(details: PlanApprovalDetails): Promise<void> {
+	async handlePlanApproval(details: PlanApprovalDetails, options?: { header?: readonly string[] }): Promise<void> {
 		if (!this.planModeEnabled) {
 			this.showWarning("Plan mode is not active.");
 			return;
@@ -3834,6 +3867,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					else this.#planReviewAnnotationState.delete(annotationStateKey);
 				},
 				disabledIndices: keepContextDisabled ? [PLAN_KEEP_CONTEXT_OPTION_INDEX] : undefined,
+				header: options?.header,
 			},
 			{ slider },
 		);
@@ -4190,6 +4224,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
 		this.chatContainer.dispose();
 		this.chatContainer.clear();
+		this.#councilController.notifyTranscriptReset();
 	}
 
 	showStatus(message: string, options?: { dim?: boolean }): void {
@@ -4421,6 +4456,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		},
 	): Component[] {
 		return this.#uiHelpers.addMessageToChat(message, options);
+	}
+
+	presentCouncilSummaryDelivery(delivery: CouncilSummaryDelivery): void {
+		this.#uiHelpers.presentCouncilSummaryDelivery(delivery);
 	}
 
 	renderSessionContext(sessionContext: SessionContext, options?: RenderSessionContextOptions): void {

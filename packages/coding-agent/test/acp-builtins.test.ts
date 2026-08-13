@@ -1224,7 +1224,7 @@ describe("/move preflight flush", () => {
 			const result = await executeAcpBuiltinSlashCommand(`/move ${targetDir}`, runtime);
 			expect(result).toEqual({ consumed: true });
 			expect(output).toEqual([
-				"Cannot move while council run council-active is reviewing; use /council cancel first.",
+				"Cannot move while council run council-active is under review; use /council cancel first.",
 			]);
 			expect(fakeSessionManager!._movedTo).toBeUndefined();
 		} finally {

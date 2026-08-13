@@ -497,6 +497,17 @@ describe("openai-completions wire-quirk compat detection", () => {
 				completionsSpec({ provider: "moonshot", id: "kimi-k2", baseUrl: "https://api.moonshot.ai/v1" }),
 			).streamMarkupHealingPattern,
 		).toBe("kimi");
+		// A DeepSeek model keeps the DSML grammar behind an unfamiliar proxy id: the
+		// serving stack decides whether the envelope leaks, not the configured name.
+		expect(
+			buildOpenAICompat(
+				completionsSpec({
+					provider: "litellm",
+					id: "opencode-go/deepseek-v4-pro",
+					baseUrl: "https://llm.example/",
+				}),
+			).streamMarkupHealingPattern,
+		).toBe("dsml");
 	});
 
 	it("derives Responses obfuscation opt-out and wire mode per surface", () => {

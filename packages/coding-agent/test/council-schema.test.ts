@@ -1,12 +1,14 @@
 import { describe, expect, it } from "bun:test";
-import { getCouncilLens } from "@oh-my-pi/pi-coding-agent/council/lenses";
+import { COUNCIL_MAX_ACTIVE_REVIEWERS } from "@oh-my-pi/pi-coding-agent/council/config";
 import {
+	COUNCIL_PLAN_CHAR_LIMIT,
 	COUNCIL_PLANNER_SCHEMA,
 	COUNCIL_REPORT_SCHEMA,
 	type CouncilAdjudication,
 	type CouncilFindingAdjudication,
 	type CouncilPlannerOutput,
 	CouncilSchemaValidationError,
+	councilSlotPrefix,
 	validateCouncilAdjudication,
 	validateCouncilPlannerOutput,
 	validateIncomingCouncilReport,
@@ -73,7 +75,7 @@ describe("council schemas", () => {
 		);
 		expectSchemaRejects(COUNCIL_REPORT_SCHEMA, report({ strengths: ["x".repeat(1501)] }));
 		expectSchemaRejects(COUNCIL_PLANNER_SCHEMA, {
-			plan: "x".repeat(60_001),
+			plan: "x".repeat(COUNCIL_PLAN_CHAR_LIMIT + 1),
 			assumptions: [],
 			blockers: [],
 			evidenceVersion: "1.0.0",
@@ -230,12 +232,40 @@ ${PLAN}`;
 			dispositions: [duplicate("B1", "A2")],
 		});
 	});
-});
 
-describe("council lenses", () => {
-	it("selects lenses by enabled-roster position and becomes generic from the fifth", () => {
-		expect(getCouncilLens(0)).not.toBe(getCouncilLens(1));
-		expect(getCouncilLens(4)).toBe(getCouncilLens(5));
-		expect(() => getCouncilLens(-1)).toThrow(RangeError);
+	it("grades reviewer slot 64 and rejects slot 65", () => {
+		// Literals, not the constant: the point is that the adjudication schema can represent exactly
+		// 64 reviewers. Following COUNCIL_MAX_ACTIVE_REVIEWERS here would keep passing if the cap were
+		// widened past what a grade slot can express, which is the defect this guards.
+		expect(COUNCIL_MAX_ACTIVE_REVIEWERS).toBe(64);
+
+		const accepted: CouncilFindingAdjudication = {
+			id: "A1",
+			disposition: "accepted",
+			reason: "Verified.",
+			step: "1",
+		};
+		const graded = (slot: number): CouncilAdjudication => ({
+			plan: PLAN,
+			dispositions: [accepted],
+			grades: [{ slot, grade: "A", reason: "Surfaced the critical defect." }],
+		});
+
+		const atCap = graded(64);
+		expect(validateCouncilAdjudication(atCap, ["A1"], [], [64])).toEqual(atCap);
+
+		expect(() => validateCouncilAdjudication(graded(65), ["A1"])).toThrow(CouncilSchemaValidationError);
+		expect(() => validateCouncilAdjudication(graded(0), ["A1"])).toThrow(CouncilSchemaValidationError);
+	});
+
+	it("shares one finding-id prefix contract between reviewer instructions and validation", () => {
+		expect(councilSlotPrefix(0)).toBe("A");
+		expect(councilSlotPrefix(25)).toBe("Z");
+		expect(councilSlotPrefix(26)).toBe("AA");
+		expect(() => councilSlotPrefix(-1)).toThrow(CouncilSchemaValidationError);
+
+		// Slot index 63 is the 64th and last representable reviewer.
+		expect(councilSlotPrefix(63)).toBe("BL");
+		expect(validateIncomingCouncilReport(report(), 63).findings[0]!.id).toBe("BL1");
 	});
 });

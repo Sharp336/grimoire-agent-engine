@@ -127,6 +127,7 @@ function createContext(sessionOverride?: InteractiveModeContext["session"]) {
 		showError,
 		isBashMode: false,
 		isPythonMode: false,
+		isCouncilAdjudicating: () => false,
 	} as unknown as InteractiveModeContext;
 
 	return {

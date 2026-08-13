@@ -3385,8 +3385,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// bridge both run these instances directly, so a raw one would execute a
 		// `bash`/`write` the user configured as `ask` or `deny`. Meta-notice
 		// first, matching the registry's wrap order.
+		//
+		// A restricted session's allowlist is a hard ceiling on this slate: the advisor roster is
+		// user configuration (`advisor.tools` may name `write`/`edit`/`bash`), so without the clamp
+		// an opt-in advisor would smuggle capabilities past the restriction it runs inside. `advise`
+		// is added by the advisor runtime itself and always survives.
+		const advisorToolCeiling = restrictToolNames
+			? new Set(options.toolNames ? normalizeToolNames(options.toolNames) : [])
+			: undefined;
 		const advisorTools: Tool[] = built
 			.filter((tool): tool is Tool => tool != null)
+			.filter(tool => advisorToolCeiling === undefined || advisorToolCeiling.has(tool.name))
 			.map(tool => new ExtensionToolWrapper(wrapToolWithMetaNotice(tool), extensionRunner) as Tool);
 
 		const advisorWatchdogPrompts = [...watchdogFiles];

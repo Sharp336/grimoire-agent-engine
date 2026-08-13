@@ -98,6 +98,8 @@ class ReplayTestSession {
 
 	setClientBridge(_bridge: unknown): void {}
 
+	setSessionTransitionReconciler(_reconciler: (() => Promise<void>) | null): void {}
+
 	subscribe(_listener: (event: AgentSessionEvent) => void): () => void {
 		return () => {};
 	}

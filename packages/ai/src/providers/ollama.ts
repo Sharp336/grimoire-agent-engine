@@ -462,7 +462,7 @@ const streamOllamaOnce = (
 		const activeToolIndices = new Set<number>();
 		const streamMarkupHealingPattern = getStreamMarkupHealingPattern(model.provider, model.id);
 		const streamMarkupHealing = streamMarkupHealingPattern
-			? new StreamMarkupHealing({ pattern: streamMarkupHealingPattern })
+			? new StreamMarkupHealing({ pattern: streamMarkupHealingPattern, tools: context.tools })
 			: undefined;
 		let healedToolCallEmitted = false;
 		// Once the provider streams native reasoning (`message.thinking`), drop any

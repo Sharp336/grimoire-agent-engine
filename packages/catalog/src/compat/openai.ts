@@ -63,17 +63,6 @@ const ALIBABA_CODING_PLAN_STREAM_IDLE_TIMEOUT_MS = 600_000;
 /** Local OpenAI-compatible backends can spend minutes cold-loading a model before the first SSE event. */
 const LOCAL_OPENAI_COMPAT_STREAM_IDLE_TIMEOUT_MS = 300_000;
 const MINIMAX_PROVIDER_OR_ID_PATTERN = /minimax/i;
-const DSML_HEALING_PROVIDERS = new Set([
-	"ollama",
-	"ollama-cloud",
-	"nvidia",
-	"deepseek",
-	"fireworks",
-	"nanogpt",
-	"opencode-go",
-	"openrouter",
-]);
-
 // Ollama's OpenAI-compatible `reasoning.effort` accepts `high|medium|low|max|none`;
 // `ollama`-provider reasoning models carry the wire-exact `low..max` effort
 // ladder (see getModelDefinedEfforts), so no compat-level remapping is needed.
@@ -107,6 +96,13 @@ function resolveReasoningDisableMode(
  * OpenAI endpoint (`provider: "openai"` + `api.openai.com`), which returns
  * structured reasoning and never leaks, so it heals nothing (returns
  * `undefined`) to avoid misfiring on legitimate fenced content.
+ *
+ * DSML selection keys off the model id alone rather than a provider allowlist:
+ * whether the envelope leaks is decided by the serving stack behind the host,
+ * not by the provider id a user happens to configure. A LiteLLM/OpenRouter-style
+ * proxy in front of the same upstream leaks identically while carrying an
+ * arbitrary provider id (`litellm`, `my-gateway`, …), so an allowlist can only
+ * ever cover the hosts already reported.
  */
 function detectStreamMarkupHealingPattern(
 	provider: string,
@@ -116,10 +112,8 @@ function detectStreamMarkupHealingPattern(
 	if (provider === "kimi-code" || provider === "moonshot" || /kimi[-/_.]?k2/i.test(modelId)) {
 		return "kimi";
 	}
-	if (isDeepseekModelIdOrName(modelId) && DSML_HEALING_PROVIDERS.has(provider)) {
-		return "dsml";
-	}
 	if (isOfficialOpenAIEndpoint(provider, baseUrl)) return undefined;
+	if (isDeepseekModelIdOrName(modelId)) return "dsml";
 	return "thinking";
 }
 

@@ -1,7 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { hashCouncilContent } from "@oh-my-pi/pi-coding-agent/council/publication";
+import { councilTempPath } from "@oh-my-pi/pi-coding-agent/council/durable-fs";
+import { sha256CouncilContent } from "@oh-my-pi/pi-coding-agent/council/hash";
 import {
 	COUNCIL_RUN_STATES,
 	type CouncilArtifactReference,
@@ -16,9 +17,11 @@ import {
 	type CouncilStorageFileSystem,
 	councilArtifactFilename,
 	councilArtifactUrl,
+	councilPlanRoot,
 } from "@oh-my-pi/pi-coding-agent/council/storage";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { directorySymlinkType, durableOps, symlinksSupported } from "./helpers/platform";
 
 interface JournalEntry {
 	type: string;
@@ -67,7 +70,7 @@ function instructionSnapshotReference(runId: string, repoRoot: string): CouncilM
 	const content = instructionSnapshotContent(repoRoot);
 	const artifact = {
 		url: councilArtifactUrl(runId, "instructions.json"),
-		sha256: hashCouncilContent(content),
+		sha256: sha256CouncilContent(content),
 		bytes: Buffer.byteLength(content),
 	};
 	return { artifact, sha256: artifact.sha256 };
@@ -77,7 +80,7 @@ async function stageInstructions(storage: CouncilStorage, value: CouncilManifest
 	const content = instructionSnapshotContent(value.repoRoot);
 	const artifact = await storage.createArtifact(value.runId, "instructions.json", content);
 	value.instructionSnapshot = { artifact, sha256: artifact.sha256 };
-	value.mainSnapshot.instructionSha256 = artifact.sha256;
+	value.adjudicator.instructionSha256 = artifact.sha256;
 }
 
 async function createRun(storage: CouncilStorage, value: CouncilManifest): Promise<CouncilManifest> {
@@ -93,6 +96,8 @@ function manifest(repoRoot: string, state: CouncilManifest["state"] = "dispatchi
 			role: "council1",
 			enabled: true,
 			order: 0,
+			rounds: [1],
+			advisor: false,
 			requestedSelector: "openai/gpt-5",
 			resolvedModel: "openai/gpt-5",
 			effort: "high",
@@ -100,19 +105,32 @@ function manifest(repoRoot: string, state: CouncilManifest["state"] = "dispatchi
 		},
 	];
 	return {
-		version: 1,
+		version: 2,
 		runId: "run-1",
 		sessionId: "parent-session",
 		mainAgentId: "Main",
 		state,
 		task: "Review the implementation",
 		repoRoot,
-		outputPath: "plans/review-the-implementation.md",
+		outputPath: "council-review-the-implementation-plan.md",
 		timestamps: { createdAt: now, updatedAt: now, startedAt: now },
-		config: { rounds: 1, members: configMembers },
+		config: { rounds: 1, members: configMembers, advisor: { planner: false, reviewers: false, adjudicator: false } },
 		roster,
-		planner: { requestedSelector: "openai/gpt-5", resolvedModel: "openai/gpt-5", effort: "high" },
-		mainSnapshot: { model: "openai/gpt-5", effort: "high", capturedAt: now },
+		planner: {
+			role: "slow",
+			requestedSelector: "openai/gpt-5",
+			resolvedModel: "openai/gpt-5",
+			effort: "high",
+			advisor: false,
+		},
+		adjudicator: {
+			mode: "main",
+			requestedSelector: "@main",
+			resolvedModel: "openai/gpt-5",
+			effort: "high",
+			advisor: false,
+			capturedAt: now,
+		},
 		instructionSnapshot: instructionSnapshotReference("run-1", repoRoot),
 		rounds: [
 			{
@@ -155,6 +173,8 @@ function addSecondSettledMember(
 		role: "council2",
 		enabled: true,
 		order: 1,
+		rounds: Array.from({ length: value.config.rounds }, (_unused, index) => index + 1),
+		advisor: false,
 		requestedSelector: "openai/gpt-5",
 		resolvedModel: "openai/gpt-5",
 		effort: "high",
@@ -245,6 +265,7 @@ async function createTwoRoundAdjudicated(
 	]);
 	addSecondSettledMember(value, roundOneArtifacts);
 	value.config.rounds = 2;
+	for (const member of value.roster) member.rounds = [1, 2];
 	const roundTwoArtifacts = await Promise.all([
 		storage.writeArtifact("run-1", "council1-r2.json", persistedReport("C1")),
 		storage.writeArtifact("run-1", "council2-r2.json", persistedReport("D1")),
@@ -321,7 +342,7 @@ describe("council artifact naming", () => {
 		expect(() => councilArtifactFilename("run-1", name)).toThrow();
 	});
 
-	it("accepts 64-character role artifacts, rejects 65, and stays below NAME_MAX with a maximal run id", () => {
+	it("accepts 64-character role artifacts, rejects 65, and keeps its temp decoration bounded", () => {
 		const acceptedRole = `a${"1".repeat(63)}`;
 		const rejectedRole = `a${"1".repeat(64)}`;
 		const acceptedArtifact = `${acceptedRole}-r1.json`;
@@ -331,7 +352,9 @@ describe("council artifact naming", () => {
 		expect(COUNCIL_ARTIFACT_NAME_PATTERN.test(rejectedArtifact)).toBeFalse();
 		const filename = councilArtifactFilename(`r${"1".repeat(127)}`, acceptedArtifact);
 		expect(filename).toHaveLength(209);
-		expect(`.${filename}.00000000-0000-4000-8000-000000000000.tmp`).toHaveLength(251);
+		// A staged temp file adds exactly 18 characters: `.` + name + `.` + 12 hex + `.tmp`. The full
+		// 36-character UUID this replaced added 42 and pushed ordinary runs past the Windows path ceiling.
+		expect(councilTempPath("", filename, "00000000-0000-4000-8000-000000000000")).toHaveLength(227);
 		expect(() => councilArtifactFilename("run-1", rejectedArtifact)).toThrow();
 	});
 
@@ -375,14 +398,8 @@ describe("durable council storage", () => {
 		const value = manifest(repoRoot);
 		const created = await createRun(storage, value);
 
-		expect(operations.slice(-6)).toEqual([
-			"file-sync",
-			"link",
-			"directory-sync",
-			"unlink",
-			"directory-sync",
-			"journal",
-		]);
+		const createSequence = durableOps("file-sync", "link", "directory-sync", "unlink", "directory-sync", "journal");
+		expect(operations.slice(-createSequence.length)).toEqual(createSequence);
 		expect(value.timestamps.updatedAt).toBe("2026-08-05T12:00:00.000Z");
 		expect((journal[0]!.data as CouncilManifest).timestamps.updatedAt).toBe(checkpointTime);
 		expect(fs.existsSync(path.join(temp.path(), "artifacts", "local", "council-run-1-manifest.json"))).toBeTrue();
@@ -390,7 +407,7 @@ describe("durable council storage", () => {
 
 		operations.length = 0;
 		await storage.checkpoint(created);
-		expect(operations).toEqual(["file-sync", "rename", "directory-sync", "journal"]);
+		expect(operations).toEqual(durableOps("file-sync", "rename", "directory-sync", "journal"));
 	});
 
 	it("allows exactly one concurrent creator without replacing the winning manifest", async () => {
@@ -405,7 +422,7 @@ describe("durable council storage", () => {
 		second.task = "second contender";
 		await stageInstructions(storage, first);
 		second.instructionSnapshot = structuredClone(first.instructionSnapshot);
-		second.mainSnapshot.instructionSha256 = first.mainSnapshot.instructionSha256;
+		second.adjudicator.instructionSha256 = first.adjudicator.instructionSha256;
 
 		const results = await Promise.allSettled([storage.create(first), storage.create(second)]);
 		const successes = results.flatMap(result => (result.status === "fulfilled" ? [result.value] : []));
@@ -502,6 +519,37 @@ describe("durable council storage", () => {
 		expect(persisted).toMatchObject({ task: "late old-session checkpoint" });
 	});
 
+	it("creates a run on a filesystem that refuses hard links, and keeps a collision terminal", async () => {
+		using temp = TempDir.createSync("@omp-council-no-hardlink-");
+		const repoRoot = temp.join("repo");
+		fs.mkdirSync(repoRoot);
+		const artifactsRoot = temp.join("artifacts");
+		// What FAT/exFAT volumes, most SMB shares, and non-NTFS Windows targets return for CreateHardLinkW.
+		const filesystem: CouncilStorageFileSystem = {
+			open: fs.promises.open,
+			lstat: fs.promises.lstat,
+			realpath: fs.promises.realpath,
+			mkdir: fs.promises.mkdir,
+			link: async () => {
+				throw Object.assign(new Error("operation not permitted"), { code: "EPERM" });
+			},
+			rename: fs.promises.rename,
+			unlink: fs.promises.unlink,
+			readdir: fs.promises.readdir,
+		};
+		const { session } = storageSession(artifactsRoot);
+		const storage = new CouncilStorage(session, { filesystem, now: () => checkpointTime });
+		const created = await createRun(storage, manifest(repoRoot));
+
+		expect(created.runId).toBe("run-1");
+		const manifestPath = path.join(artifactsRoot, "local", "council-run-1-manifest.json");
+		expect(JSON.parse(fs.readFileSync(manifestPath, "utf8"))).toMatchObject({ runId: "run-1" });
+		expect(fs.readdirSync(path.join(artifactsRoot, "local")).filter(name => name.endsWith(".tmp"))).toEqual([]);
+
+		await expect(storage.create(manifest(repoRoot))).rejects.toMatchObject({ code: "COUNCIL_RUN_EXISTS" });
+		expect(JSON.parse(fs.readFileSync(manifestPath, "utf8"))).toMatchObject({ runId: "run-1" });
+	});
+
 	it("rejects manifest identity mismatch before filesystem writes or journal entries", async () => {
 		using temp = TempDir.createSync("@omp-council-manifest-identity-");
 		const repoRoot = temp.join("repo");
@@ -574,11 +622,11 @@ describe("durable council storage", () => {
 				fs.writeFileSync(instructionPath, malformed);
 				const artifact = {
 					url: councilArtifactUrl("run-1", "instructions.json"),
-					sha256: hashCouncilContent(malformed),
+					sha256: sha256CouncilContent(malformed),
 					bytes: Buffer.byteLength(malformed),
 				};
 				value.instructionSnapshot = { artifact, sha256: artifact.sha256 };
-				value.mainSnapshot.instructionSha256 = artifact.sha256;
+				value.adjudicator.instructionSha256 = artifact.sha256;
 				await storage.checkpoint(value);
 			}
 
@@ -599,13 +647,13 @@ describe("durable council storage", () => {
 		const snapshot = {
 			repoRoot,
 			contextFiles: [{ path: path.join(repoRoot, "AGENTS.md"), content: instructions, depth: 0 }],
-			files: [{ path: path.join(repoRoot, "AGENTS.md"), sha256: hashCouncilContent(instructions) }],
+			files: [{ path: path.join(repoRoot, "AGENTS.md"), sha256: sha256CouncilContent(instructions) }],
 			totalBytes: Buffer.byteLength(instructions),
 		};
 		const content = `${JSON.stringify(snapshot)}\n`;
 		const artifact = await storage.createArtifact("run-1", "instructions.json", content);
 		value.instructionSnapshot = { artifact, sha256: artifact.sha256 };
-		value.mainSnapshot.instructionSha256 = artifact.sha256;
+		value.adjudicator.instructionSha256 = artifact.sha256;
 		await storage.create(value);
 
 		const manifestPath = path.join(artifactsRoot, "local", "council-run-1-manifest.json");
@@ -733,7 +781,7 @@ describe("durable council storage", () => {
 		);
 	});
 
-	it("rejects symlink roots and never replaces an occupied final path", async () => {
+	it.skipIf(!symlinksSupported())("rejects symlink roots and never replaces an occupied final path", async () => {
 		using temp = TempDir.createSync("@omp-council-symlink-");
 		const repoRoot = temp.join("repo");
 		fs.mkdirSync(repoRoot);
@@ -741,7 +789,7 @@ describe("durable council storage", () => {
 		fs.mkdirSync(artifacts);
 		const outside = temp.join("outside");
 		fs.mkdirSync(outside);
-		fs.symlinkSync(outside, path.join(artifacts, "local"));
+		fs.symlinkSync(outside, path.join(artifacts, "local"), directorySymlinkType);
 		const { storage } = storageHarness(artifacts);
 		await expect(createRun(storage, manifest(repoRoot))).rejects.toThrow("local root is not a real directory");
 
@@ -1000,8 +1048,8 @@ describe("durable council storage", () => {
 		const { storage } = storageHarness(artifactsRoot);
 		const value = await createRun(storage, manifest(repoRoot));
 		const originalPlan = validPlan;
-		const outputPath = path.join(repoRoot, value.outputPath);
-		fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+		const planRoot = await storage.canonicalPlanRoot();
+		const outputPath = path.join(planRoot, value.outputPath);
 		fs.writeFileSync(outputPath, originalPlan);
 		const round = value.rounds[0]!;
 		const member = round.members[0]!;
@@ -1028,7 +1076,7 @@ describe("durable council storage", () => {
 		value.timestamps.finishedAt = checkpointTime;
 		value.published = {
 			path: value.outputPath,
-			sha256: hashCouncilContent(originalPlan),
+			sha256: sha256CouncilContent(originalPlan),
 			bytes: Buffer.byteLength(originalPlan),
 			publishedAt: checkpointTime,
 		};
@@ -1044,6 +1092,7 @@ describe("durable council storage", () => {
 		await createRun(storage, incomplete);
 		await expect(storage.load("run-2")).rejects.toMatchObject({ code: "COUNCIL_ARTIFACT_HASH_MISMATCH" });
 		expect((await storage.list()).map(entry => entry.runId)).toEqual(["run-1"]);
+		expect(fs.readdirSync(repoRoot)).toEqual([]);
 	});
 
 	it("keeps foreign references and structurally invalid planner identity as whole-run corruption", async () => {
@@ -1075,6 +1124,89 @@ describe("durable council storage", () => {
 			expect(error).toBeInstanceOf(CouncilStorageError);
 			expect(error).toMatchObject({ code: "COUNCIL_RECOVERY_CORRUPT", spending: false });
 			expect((error as Error).message).toContain("planner");
+		}
+	});
+
+	it("resolves one canonical session plan root through both entry points", async () => {
+		using temp = TempDir.createSync("@omp-council-plan-root-");
+		const artifactsRoot = temp.join("artifacts");
+		const { session } = storageSession(artifactsRoot);
+		const storage = new CouncilStorage(session, { now: () => checkpointTime });
+
+		const planRoot = await storage.canonicalPlanRoot();
+		expect(planRoot).toBe(fs.realpathSync(path.join(artifactsRoot, "local")));
+		expect(await councilPlanRoot(session)).toBe(planRoot);
+	});
+
+	it("verifies a legacy plans/<slug>.md publication inside the session cache, never the repository", async () => {
+		using temp = TempDir.createSync("@omp-council-legacy-output-");
+		const repoRoot = temp.join("repo");
+		fs.mkdirSync(repoRoot);
+		const artifactsRoot = temp.join("artifacts");
+		const { storage } = storageHarness(artifactsRoot);
+		const legacy = manifest(repoRoot);
+		legacy.outputPath = "plans/review-the-implementation.md";
+		const value = await createRun(storage, legacy);
+
+		const legacyDirectory = path.join(await storage.canonicalPlanRoot(), "plans");
+		fs.mkdirSync(legacyDirectory, { recursive: true });
+		fs.writeFileSync(path.join(legacyDirectory, "review-the-implementation.md"), validPlan);
+		value.published = {
+			path: value.outputPath,
+			sha256: sha256CouncilContent(validPlan),
+			bytes: Buffer.byteLength(validPlan),
+			publishedAt: checkpointTime,
+		};
+		await storage.checkpoint(value);
+
+		const recovered = await storage.load("run-1");
+		expect(recovered.outputPath).toBe("plans/review-the-implementation.md");
+		expect(recovered.published).toEqual(value.published);
+		expect((await storage.list()).map(entry => entry.runId)).toEqual(["run-1"]);
+		expect(fs.readdirSync(repoRoot)).toEqual([]);
+
+		// The verified copy is the one in the session cache: damaging it, and nothing in the
+		// repository, is what turns the run hash-strict.
+		fs.writeFileSync(path.join(legacyDirectory, "review-the-implementation.md"), "user revised the legacy plan\n");
+		await expect(storage.load("run-1")).rejects.toMatchObject({ code: "COUNCIL_ARTIFACT_HASH_MISMATCH" });
+	});
+
+	it("reads one adjudication per round, each carrying only that round's dispositions", async () => {
+		using temp = TempDir.createSync("@omp-council-adjudications-");
+		const repoRoot = temp.join("repo");
+		fs.mkdirSync(repoRoot);
+		const { storage } = storageHarness(temp.join("artifacts"));
+		const value = await createTwoRoundAdjudicated(storage, repoRoot);
+
+		const adjudications = await storage.readAdjudications(value);
+		expect([...adjudications.keys()]).toEqual([1, 2]);
+		expect(adjudications.get(1)!.dispositions.map(entry => entry.id)).toEqual(["A1", "B1"]);
+		expect(adjudications.get(2)!.dispositions.map(entry => entry.id)).toEqual(["C1", "D1"]);
+		expect(adjudications.get(1)!.plan).toBe(validPlan);
+	});
+
+	it("rejects an adjudication whose disposition ids do not match its own round's findings", async () => {
+		using temp = TempDir.createSync("@omp-council-adjudication-ids-");
+		const repoRoot = temp.join("repo");
+		fs.mkdirSync(repoRoot);
+		const artifactsRoot = temp.join("artifacts");
+		const { storage } = storageHarness(artifactsRoot);
+		const value = await createTwoRoundAdjudicated(storage, repoRoot);
+		const foreign = persistedAdjudication(["Z9"]);
+		fs.writeFileSync(path.join(artifactsRoot, "local", "council-run-1-round2.md"), foreign);
+		value.planVersions[2]!.artifact = {
+			url: councilArtifactUrl("run-1", "round2.md"),
+			sha256: sha256CouncilContent(foreign),
+			bytes: Buffer.byteLength(foreign),
+		};
+
+		try {
+			await storage.readAdjudications(value);
+			expect.unreachable();
+		} catch (error) {
+			expect(error).toBeInstanceOf(CouncilStorageError);
+			expect(error).toMatchObject({ code: "COUNCIL_RECOVERY_CORRUPT" });
+			expect((error as Error).message).toContain("council-run-1-round2.md");
 		}
 	});
 });

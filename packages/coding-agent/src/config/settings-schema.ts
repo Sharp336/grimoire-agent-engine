@@ -315,6 +315,12 @@ export interface ModelTagsSettings {
 export interface CouncilMemberSetting {
 	role: string;
 	enabled: boolean;
+	/**
+	 * Review round this reviewer serves. Omitted means every configured round, which is the
+	 * historical behaviour, so existing rosters keep working untouched. A round above
+	 * `council.rounds` parks the member: it stays configured but never runs.
+	 */
+	round?: 1 | 2;
 }
 
 // Typed defaults for array/record settings — named constants avoid `as` casts
@@ -599,6 +605,54 @@ export const SETTINGS_SCHEMA = {
 				{ value: "1", label: "1", description: "One review round" },
 				{ value: "2", label: "2", description: "Two review rounds" },
 			],
+		},
+	},
+
+	"council.advisor.planner": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Council",
+			label: "Advisor for Planner",
+			description:
+				"Attach a live advisor to the council planner. The advisor's tools are clamped to the planner's own read-only allowlist, and its spend is charged to the planner.",
+		},
+	},
+
+	"council.advisor.reviewers": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Council",
+			label: "Advisor for Reviewers",
+			description:
+				"Attach a live advisor to every council reviewer. The advisor's tools are clamped to each reviewer's own read-only allowlist, and its spend is charged to that reviewer.",
+		},
+	},
+
+	"council.advisor.adjudicator": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Council",
+			label: "Advisor for Adjudicator",
+			description:
+				"Attach a live advisor to a delegated council adjudicator (a model assigned to the `adjudicator` role). Ignored when the adjudicator is your main session, which follows the global advisor setting.",
+		},
+	},
+
+	"council.mirrorTranscript": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tasks",
+			group: "Council",
+			label: "Mirror Solo Agent Transcript",
+			description:
+				"Live-mirror the planner's (or a single reviewer's) turns into the main transcript while the rest of the council is idle. Not replayed after a transcript rebuild; use history://<agent-id> for the full child transcript.",
 		},
 	},
 

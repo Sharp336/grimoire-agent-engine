@@ -13,8 +13,9 @@
 import { once } from "node:events";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { isZodSchema, zodToWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
-import { $env, isRecord, readLines, Snowflake } from "@oh-my-pi/pi-utils";
+import { $env, isRecord, logger, readLines, Snowflake } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../../capability";
+import { quiesceAndReleaseCouncilForSessionTransition } from "../../council/coordinator";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
 	type ExtensionUIContext,
@@ -257,6 +258,13 @@ export interface RpcInputFrameDeps {
 	handleCommand: (command: RpcCommand) => Promise<RpcResponse>;
 	output: RpcOutput;
 	errorResponse: (id: string | undefined, command: string, message: string) => RpcResponse;
+	/**
+	 * Optional per-response barrier consulted once `handleCommand` resolves.
+	 * Returns `true` when it took ownership of emitting `response` on a
+	 * background operation (a held `/council` turn), in which case the
+	 * dispatcher must not write the frame itself. See {@link RpcResponseBarrier}.
+	 */
+	deferResponse?: (response: RpcResponse) => boolean;
 	trackBackgroundTask?: (task: Promise<void>) => void;
 	pendingExtensionRequests: Map<string, PendingExtensionRequest>;
 	onHostToolResult: (frame: RpcHostToolResult) => void;
@@ -310,11 +318,17 @@ export function dispatchRpcControlFrame(parsed: unknown, deps: RpcInputFrameDeps
  * correlation is preserved via each command's `id`; ordering across concurrent
  * commands is not guaranteed and clients MUST match on `id`.
  *
+ * A command may also hand its response to {@link RpcInputFrameDeps.deferResponse}
+ * because a `/council` prompt owes its response only once the paid run settles, and
+ * parking the serial queue on that would stall every later frame. When the
+ * barrier takes ownership the frame is written later, out of request order.
+ *
  * @returns `undefined` when the frame was routed to a side-channel handler
  *   (extension UI response, host tool/URI frames) or dispatched in the
  *   background (`bash`). Otherwise a promise that resolves once the response
- *   for the command has been emitted via `output`. Errors from `handleCommand`
- *   on non-`bash` commands propagate; the caller is expected to wrap them.
+ *   for the command has been emitted via `output` or handed to the response
+ *   barrier. Errors from `handleCommand` on non-`bash` commands propagate; the
+ *   caller is expected to wrap them.
  */
 export function dispatchRpcInputFrame(parsed: unknown, deps: RpcInputFrameDeps): Promise<void> | undefined {
 	if (dispatchRpcControlFrame(parsed, deps)) return undefined;
@@ -328,10 +342,15 @@ export function dispatchRpcInputFrame(parsed: unknown, deps: RpcInputFrameDeps):
 	// subsequent `abort_bash` frame can be read and handled without waiting
 	// for the shell command to finish on its own. The response is emitted
 	// when `handleCommand` resolves; clients correlate via `command.id`.
+	const emit = (response: RpcResponse): void => {
+		if (deps.deferResponse?.(response)) return;
+		deps.output(response);
+	};
+
 	if (command.type === "bash") {
 		const task = (async () => {
 			try {
-				deps.output(await deps.handleCommand(command));
+				emit(await deps.handleCommand(command));
 			} catch (err: unknown) {
 				const message = err instanceof Error ? err.message : String(err);
 				deps.output(deps.errorResponse(command.id, "bash", message));
@@ -342,7 +361,7 @@ export function dispatchRpcInputFrame(parsed: unknown, deps: RpcInputFrameDeps):
 	}
 
 	return (async () => {
-		deps.output(await deps.handleCommand(command));
+		emit(await deps.handleCommand(command));
 	})();
 }
 
@@ -405,6 +424,94 @@ export class RpcInputDispatcher {
 }
 
 /**
+ * Per-prompt response barrier for slash commands that hold the transport turn.
+ *
+ * `/council` starts a paid multi-model run and hands the command handler a
+ * completion promise. Awaiting that promise inside {@link RpcInputDispatcher}'s
+ * serial tail would park the entire command queue behind it, so `abort`,
+ * `/council cancel`, `new_session`, `switch_session`, `branch`, `handoff`, and
+ * stdin EOF could not be processed until the run finished, making a paid run
+ * uncancellable over the protocol.
+ *
+ * Instead the correlated response is deferred. `handleCommand` registers the
+ * held task against the response object it produced, the serial dispatcher
+ * hands that response to {@link defer} and returns immediately, and a
+ * background operation emits the frame once the hold settles. The held
+ * completion already carries the command's terminal output, so normal
+ * settlement writes that output before the response. Clients MUST correlate by
+ * `id`: a later command's response can and will overtake a held one.
+ */
+export class RpcResponseBarrier {
+	// Keyed by response identity so a concurrently settling `bash` frame can
+	// never claim (or clear) the prompt's registration.
+	readonly #holds = new WeakMap<RpcResponse, Promise<void>>();
+	readonly #abandoned = Promise.withResolvers<void>();
+	readonly #emit: (response: RpcResponse) => void;
+	readonly #flushOutput: () => Promise<void>;
+	readonly #track: (operation: Promise<void>) => void;
+
+	constructor(options: {
+		/** Write the response frame. */
+		emit: (response: RpcResponse) => void;
+		/** Resolve once the ordered stdout queue has drained through the last written frame. */
+		flushOutput: () => Promise<void>;
+		/** Register the whole response operation with the shutdown coordinator. */
+		track: (operation: Promise<void>) => void;
+	}) {
+		this.#emit = options.emit;
+		this.#flushOutput = options.flushOutput;
+		this.#track = options.track;
+	}
+
+	/**
+	 * Owe `response` until `task` settles.
+	 *
+	 * Callers neutralize the task at `holdTurn` time, while the prompt still owns
+	 * registration, so no raw promise is ever left unhandled. The guard here is
+	 * the second half of that contract: whatever happens to the run, the client
+	 * still gets its correlated response rather than a silently dropped frame. A
+	 * failed run is logged, never turned into a protocol error, because the
+	 * command already reported its own outcome through command output.
+	 */
+	hold(response: RpcResponse, task: Promise<void>): void {
+		this.#holds.set(
+			response,
+			task.catch((error: unknown) => {
+				logger.warn("RPC council run failed", { error: String(error) });
+			}),
+		);
+	}
+
+	/**
+	 * Take ownership of a held response, emitting it on a tracked background
+	 * operation. Returns `false` for every ordinary response so the dispatcher
+	 * writes it inline.
+	 */
+	defer(response: RpcResponse): boolean {
+		const held = this.#holds.get(response);
+		if (!held) return false;
+		this.#holds.delete(response);
+		const operation = (async () => {
+			await Promise.race([held, this.#abandoned.promise]);
+			this.#emit(response);
+			await this.#flushOutput();
+		})();
+		this.#track(operation);
+		return true;
+	}
+
+	/**
+	 * Release every pending and future barrier without waiting for its hold.
+	 * Terminal teardown uses this when Council quiescence misses its bounded
+	 * deadline: the client still receives its correlated response and shutdown
+	 * cannot deadlock behind a run that refuses to stop.
+	 */
+	abandon(): void {
+		this.#abandoned.resolve();
+	}
+}
+
+/**
  * Coordinates deferred shutdown with in-flight background input tasks.
  *
  * `pi.shutdown()` from an extension only *requests* shutdown; the process must
@@ -415,16 +522,34 @@ export class RpcInputDispatcher {
  * frame), and drains every tracked task before invoking `performShutdown`.
  * The shutdown sequence is latched so concurrent triggers (input loop and
  * settling tasks) run it exactly once.
+ *
+ * `prepareShutdown` runs *before* the drain. A deferred `/council` response
+ * operation (see {@link RpcResponseBarrier}) only settles once the run stops,
+ * so bounded Council quiescence has to be requested first or the drain would
+ * wait forever on the very run it is trying to end.
  */
 export class RpcShutdownCoordinator {
 	#tasks = new Set<Promise<void>>();
 	#shutdown: Promise<void> | undefined;
 	readonly #isShutdownRequested: () => boolean;
+	readonly #prepareShutdown: (() => Promise<void>) | undefined;
 	readonly #performShutdown: () => Promise<void>;
+	readonly #onShutdownError: (error: unknown) => void;
 
-	constructor(options: { isShutdownRequested: () => boolean; performShutdown: () => Promise<void> }) {
+	constructor(options: {
+		isShutdownRequested: () => boolean;
+		performShutdown: () => Promise<void>;
+		/** Bounded pre-drain work, e.g. Council quiescence plus barrier release. */
+		prepareShutdown?: () => Promise<void>;
+		/** Observe a shutdown-sequence failure that no caller is awaiting. */
+		onShutdownError?: (error: unknown) => void;
+	}) {
 		this.#isShutdownRequested = options.isShutdownRequested;
 		this.#performShutdown = options.performShutdown;
+		this.#prepareShutdown = options.prepareShutdown;
+		this.#onShutdownError =
+			options.onShutdownError ??
+			((error: unknown) => logger.error("RPC shutdown sequence failed", { error: String(error) }));
 	}
 
 	/**
@@ -436,9 +561,10 @@ export class RpcShutdownCoordinator {
 		this.#tasks.add(task);
 		void task.finally(() => {
 			this.#tasks.delete(task);
-			// Fire-and-forget: performShutdown ends the process. Rejections are
-			// not expected — hook errors are caught inside extensionRunner.emit,
-			// and background tasks catch their own dispatch errors.
+			// Nothing awaits this settlement-triggered check, so the sequence must
+			// swallow nothing silently: `#runShutdown` routes any failure, including a
+			// rejected disposal carrying a captured transition error, to
+			// `onShutdownError` instead of leaking a rejected promise.
 			void this.checkShutdownRequested();
 		});
 	}
@@ -451,15 +577,110 @@ export class RpcShutdownCoordinator {
 	}
 
 	/**
-	 * If shutdown was requested, drain background tasks (so every owed
-	 * response frame is written) before running the shutdown sequence.
+	 * If shutdown was requested, run the latched sequence: bounded preparation,
+	 * then a drain of tracked tasks (so every owed response frame is written),
+	 * then the shutdown itself. The returned promise never rejects; failures are
+	 * reported through `onShutdownError`.
 	 */
 	checkShutdownRequested(): Promise<void> {
 		if (!this.#shutdown) {
 			if (!this.#isShutdownRequested()) return Promise.resolve();
-			this.#shutdown = this.drain().then(() => this.#performShutdown());
+			this.#shutdown = this.#runShutdown();
 		}
 		return this.#shutdown;
+	}
+
+	async #runShutdown(): Promise<void> {
+		try {
+			await this.#prepareShutdown?.();
+			await this.drain();
+			await this.#performShutdown();
+		} catch (error) {
+			this.#onShutdownError(error);
+		}
+	}
+}
+
+/**
+ * Terminal RPC teardown, shared by `pi.shutdown()` and stdin EOF.
+ *
+ * Split in two because ordering is load-bearing. {@link quiesce} runs before
+ * owed response operations are drained: a held `/council` response only settles
+ * once the run stops, so draining first would wait on the very run teardown is
+ * ending. If quiescence misses its bounded deadline the failure is recorded and
+ * the held responses are abandoned, so the client still gets its correlated
+ * frames and shutdown cannot deadlock. {@link finish} then disposes the session
+ * (whose rejection carries a captured transition failure through completed
+ * teardown), writes owed protocol output exactly once, and exits, nonzero when
+ * either half failed.
+ *
+ * Both halves are latched: EOF after a `pi.shutdown()` must not re-drain or
+ * re-exit.
+ */
+export class RpcTerminalTeardown {
+	#failed = false;
+	#quiesceCall: Promise<void> | undefined;
+	#finishCall: Promise<never> | undefined;
+	readonly #quiesceCouncil: () => Promise<void>;
+	readonly #abandonHeldResponses: () => void;
+	readonly #dispose: () => Promise<void>;
+	readonly #flushOutput: () => Promise<void>;
+	readonly #exit: (code: number) => never;
+
+	constructor(options: {
+		/** Bounded Council quiescence for the owning session. */
+		quiesceCouncil: () => Promise<void>;
+		/** Release deferred prompt responses that would otherwise never settle. */
+		abandonHeldResponses: () => void;
+		/** Terminal session disposal; rejects with a captured transition failure. */
+		dispose: () => Promise<void>;
+		/** Resolve once the ordered stdout queue has drained. */
+		flushOutput: () => Promise<void>;
+		exit: (code: number) => never;
+	}) {
+		this.#quiesceCouncil = options.quiesceCouncil;
+		this.#abandonHeldResponses = options.abandonHeldResponses;
+		this.#dispose = options.dispose;
+		this.#flushOutput = options.flushOutput;
+		this.#exit = options.exit;
+	}
+
+	/** Whether either half recorded a failure; drives the fatal exit code. */
+	get failed(): boolean {
+		return this.#failed;
+	}
+
+	quiesce(): Promise<void> {
+		this.#quiesceCall ??= this.#runQuiesce();
+		return this.#quiesceCall;
+	}
+
+	async #runQuiesce(): Promise<void> {
+		try {
+			await this.#quiesceCouncil();
+		} catch (error) {
+			this.#failed = true;
+			logger.error("Council did not settle before RPC teardown deadline", { error: String(error) });
+			// Only on failure: a run that stopped cleanly still owes its terminal
+			// command output ahead of the response, and abandoning would race it.
+			this.#abandonHeldResponses();
+		}
+	}
+
+	finish(): Promise<never> {
+		this.#finishCall ??= this.#runFinish();
+		return this.#finishCall;
+	}
+
+	async #runFinish(): Promise<never> {
+		try {
+			await this.#dispose();
+		} catch (error) {
+			this.#failed = true;
+			logger.error("RPC session disposal failed", { error: String(error) });
+		}
+		await this.#flushOutput();
+		return this.#exit(this.#failed ? 1 : 0);
 	}
 }
 
@@ -672,6 +893,13 @@ export async function runRpcMode(
 	// may write there.
 	process.env.PI_NOTIFICATIONS = "off";
 
+	// Own the Council lifecycle before anything can start a run. Installed first,
+	// ahead of the ready frame and extension initialization, so no `new_session`,
+	// `switch_session`, `branch`, `handoff`, or disposal can change the session
+	// identity while a coordinator is still bound to the old one. Single-slot by
+	// contract: RPC installs exactly this callback, once.
+	session.setSessionTransitionReconciler(() => quiesceAndReleaseCouncilForSessionTransition(session));
+
 	const frameEncoder = new RpcFrameEncoder();
 	// Ordered stdout writer honoring backpressure: chunked v2 frames are produced
 	// lazily by the encoder and written one physical line at a time, so a near-limit
@@ -701,6 +929,10 @@ export async function runRpcMode(
 		if (isRecord(obj) && obj.type === "response" && obj.command === "negotiate_protocol" && obj.success === true)
 			frameEncoder.setProtocolVersion(2);
 	};
+	// Resolves once every frame written so far has reached stdout. `writeFrames`
+	// replaces the queue synchronously, so reading it after `output` covers that
+	// frame.
+	const flushOutput = (): Promise<void> => stdoutQueue;
 	const emitRpcTitles = shouldEmitRpcTitles();
 
 	const success = <T extends RpcCommand["type"]>(
@@ -971,6 +1203,14 @@ export async function runRpcMode(
 	});
 	await emitAvailableCommandsUpdate();
 
+	// Held prompt responses (currently only `/council`) are emitted from tracked
+	// background operations so the serial command queue never parks on a paid run.
+	const responseBarrier = new RpcResponseBarrier({
+		emit: output,
+		flushOutput,
+		track: operation => shutdownCoordinator.track(operation),
+	});
+
 	// Handle a single command
 	const handleCommand = async (command: RpcCommand): Promise<RpcResponse> => {
 		const id = command.id;
@@ -991,6 +1231,16 @@ export async function runRpcMode(
 				if (skillResult) {
 					return success(id, "prompt", skillResult);
 				}
+				// A `/council` run holds this response. Register the hold against the
+				// response object; the dispatcher hands it to the barrier, which emits
+				// the frame once the run settles. Keeping the await out of the serial
+				// tail is what lets `abort`, `/council cancel`, session changes, and EOF
+				// still be processed while the run is live.
+				let heldCouncilRun: Promise<void> | undefined;
+				const respond = (response: RpcResponse): RpcResponse => {
+					if (heldCouncilRun) responseBarrier.hold(response, heldCouncilRun);
+					return response;
+				};
 				const builtinResult = await executeAcpBuiltinSlashCommand(command.message, {
 					session,
 					sessionManager: session.sessionManager,
@@ -999,6 +1249,15 @@ export async function runRpcMode(
 					output: text => output({ type: "command_output", text }),
 					refreshCommands: emitAvailableCommandsUpdate,
 					reloadPlugins: reloadPluginState,
+					holdTurn: task => {
+						// Neutralize while this prompt still owns registration: the raw
+						// promise must never sit unhandled between `holdTurn` and the
+						// response barrier. A failed run already reported itself through
+						// command output, so it is logged, not turned into an error frame.
+						heldCouncilRun = task.catch((error: unknown) => {
+							logger.warn("RPC council run failed", { error: String(error) });
+						});
+					},
 					notifyTitleChanged: async () => {
 						output({ type: "session_info_update", title: session.sessionName, sessionId: session.sessionId });
 					},
@@ -1015,9 +1274,9 @@ export async function runRpcMode(
 							onError: promptError => output(error(id, "prompt", promptError.message)),
 							extensionUserMessageTracker,
 						});
-						return success(id, "prompt");
+						return respond(success(id, "prompt"));
 					}
-					return success(id, "prompt", { agentInvoked: false });
+					return respond(success(id, "prompt", { agentInvoked: false }));
 				}
 
 				// Don't await - events will stream
@@ -1448,27 +1707,35 @@ export async function runRpcMode(
 		}
 	};
 
+	// Terminal teardown, shared by `pi.shutdown()` and stdin EOF. Disposal routes
+	// through the idempotent session.dispose() so the browser reaper
+	// (releaseTabsForOwner) and other bounded teardown run before the process
+	// exits; dispose() also emits `session_shutdown`, so we must NOT emit it
+	// separately or the event fires twice (#5643).
+	const teardown = new RpcTerminalTeardown({
+		quiesceCouncil: () => quiesceAndReleaseCouncilForSessionTransition(session),
+		abandonHeldResponses: () => responseBarrier.abandon(),
+		dispose: () => session.dispose(),
+		flushOutput,
+		exit: code => process.exit(code),
+	});
+
 	// Deferred shutdown (pi.shutdown() from an extension) must not kill the
-	// process while a background-dispatched bash still owes the client its
-	// response frame. The coordinator drains tracked tasks before exiting and
-	// re-checks the request as each task settles.
+	// process while a background-dispatched bash or a held `/council` response
+	// still owes the client a frame. Council quiescence is requested before the
+	// drain so a held response can settle at all; the drain then writes every
+	// owed frame before disposal.
 	const shutdownCoordinator = new RpcShutdownCoordinator({
 		isShutdownRequested: () => shutdownState.requested,
-		performShutdown: async () => {
-			// Route through the idempotent session.dispose() so the browser
-			// reaper (releaseTabsForOwner) and other bounded teardown run before
-			// the process exits. dispose() also emits `session_shutdown`, so we
-			// must NOT emit it separately here or the event fires twice. Skipping
-			// dispose left OMP-owned Chromium alive after RPC shutdown (#5643).
-			await session.dispose();
-			process.exit(0);
-		},
+		prepareShutdown: () => teardown.quiesce(),
+		performShutdown: () => teardown.finish(),
 	});
 
 	const dispatchFrameDeps: RpcInputFrameDeps = {
 		handleCommand,
 		output,
 		errorResponse: error,
+		deferResponse: response => responseBarrier.defer(response),
 		trackBackgroundTask: task => shutdownCoordinator.track(task),
 		pendingExtensionRequests,
 		onHostToolResult: frame => hostToolBridge.handleResult(frame),
@@ -1502,18 +1769,20 @@ export async function runRpcMode(
 		inputDispatcher.dispatch(parsed);
 	}
 
-	// stdin closed — RPC client is gone. Fail pending side-channel requests
-	// first so active/queued commands can settle, then drain accepted work.
+	// stdin closed: the RPC client is gone and owes us nothing further. Fail pending
+	// side-channel requests first so active/queued commands can settle, then drain the
+	// accepted serial queue *before* quiescing Council. A `/council` frame can still be
+	// queued behind a slow accepted command at EOF; quiescing first would find no
+	// coordinator, latch, and let the drained frame start a run whose held response
+	// nothing would ever release. Serial drain is bounded — a `/council` prompt responds
+	// as soon as it schedules its barrier — so nothing new can start after it returns.
+	// Only then stop Council and drain the response operations waiting on it.
 	pendingExtensionRequests.rejectAll("RPC client disconnected before extension UI response completed");
 	hostToolBridge.close("RPC client disconnected before host tool execution completed");
 	hostUriBridge.clear("RPC client disconnected before host URI request completed");
 	await inputDispatcher.drain();
+	await teardown.quiesce();
 	await shutdownCoordinator.drain();
 	subagentRegistry?.dispose();
-	// Dispose the main session before exiting so the browser reaper and other
-	// bounded teardown run on the stdin-EOF path too (#5643). Idempotent: a
-	// prior pi.shutdown() through the coordinator makes this await settle
-	// immediately.
-	await session.dispose();
-	process.exit(0);
+	return await teardown.finish();
 }

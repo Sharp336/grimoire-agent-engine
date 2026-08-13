@@ -409,9 +409,22 @@ accept exact selectors, globs, and fuzzy matches.
 
 ### Council roles in Model Hub
 
-The **Roles** view in Model Hub has a **Council** section. Its ordered roster defaults to enabled `council1` through `council4`; each member gets one model selector through the corresponding `modelRoles` entry. From this section you can assign a model, enable or disable a member, reorder members, or edit the roster. `/council config` opens the section directly.
+The **Roles** view in Model Hub has a **Roles & Council** section. Its ordered roster defaults to enabled `council1` through `council4`; each member gets one model selector through the corresponding `modelRoles` entry. Roster slots display as `Reviewer 1`…`Reviewer N` (a `modelTags[role].name` overrides that in this editor only); the durable ids stay `councilN`, so `modelRoles`, `council.members`, and `@councilN` selectors are unaffected. From this section you can assign a model, enable or disable a member, reorder members, set a member's review round with `r`, or edit the roster. `/council config` opens the section directly.
 
-The roster itself is stored only in global `council.members`; `council.rounds` selects one or two review rounds. Before `/council <task>` dispatches any model, every enabled member must have exactly one resolvable, available selector. A missing or unavailable enabled member blocks the whole dispatch before spend rather than silently shrinking the roster.
+Two reserved lead roles sit above the roster and are assigned the same way:
+
+- `modelRoles.planner` drives the planning child. Unassigned, it falls back to the `slow` role, which is the historical behaviour.
+- `modelRoles.adjudicator` delegates judging to a pinned child agent. Unassigned, your main session adjudicates in-session, which is the historical behaviour.
+
+`planner` and `adjudicator` are reserved: neither can be used as a `council.members` role id.
+
+The roster itself is stored only in global `council.members`; `council.rounds` selects one or two review rounds. Each member may carry an optional `round: 1 | 2`; omitting it runs that member in every configured round. A member pinned above the configured round count is preserved and shown in the Hub under a muted group, but it never runs, is never credential-checked, and never marks a run degraded. Every configured round must have at least one enabled member, or the dispatch refuses before spend. At most 64 members may be active (enabled and serving a configured round) at once; the Hub refuses a mutation that would cross that line.
+
+Before `/council <task>` dispatches any model, every enabled, active member must have exactly one resolvable, available selector. A missing or unavailable member blocks the whole dispatch before spend rather than silently shrinking the roster.
+
+Three per-role advisor toggles (`council.advisor.planner`, `council.advisor.reviewers`, `council.advisor.adjudicator`) attach a live advisor, on the `advisor` model role, to that role's turns. Council children run under a read-only tool surface, and an advisor inside one is clamped to that same allowlist — an advisor configured with `write`, `edit`, or `bash` gets none of them there. Advisor spend is charged to the role it watches, so the pre-spend line and the final stats table stay reconciled. `council.advisor.adjudicator` applies only to a delegated adjudicator; a main-session adjudicator follows the global `advisor.enabled`.
+
+See [Council](./council.md) for what a run actually does with these assignments: the run lifecycle, preflight refusals, adjudication modes, artifacts, and resume rules.
 
 Global `enabledModels` and `disabledProviders` entries may also be scoped to a path prefix:
 

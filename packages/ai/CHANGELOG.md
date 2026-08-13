@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed DeepSeek V4 turns arriving as raw tag soup with zero tool calls when the serving stack detokenizes with `skip_special_tokens`. Dropping DeepSeek's `｜DSML｜` special tokens leaves the ordinary text around them intact, so `<｜DSML｜invoke name="glob">` reaches the client as `<invoke name="glob">`; the exact-token DSML grammar cannot match that, the whole envelope was forwarded as visible text, and the model then imitated its own broken output on the following turn. The DSML healer now runs a second-stage Anthropic-tagset grammar over whatever the exact-token grammar leaves in the visible channel, recovering the stripped envelope into structured tool calls.
+- Fixed the Anthropic/XML in-band tool-call grammar deleting every byte inside a `<tool_calls>` / `<function_calls>` wrapper that produced no tool call, including the wrapper that never closed before the stream ended. A wrapper with no usable `<invoke>` was never tool-call markup, so its bytes are now replayed verbatim as text; a truncated `<invoke>` still drops, since that is a cut-off call rather than prose.
+- Fixed the DSML healer being gated on a provider-id allowlist, so a DeepSeek model behind a user-configured proxy (LiteLLM, a private gateway, any id outside the eight hard-coded hosts) got no tool-call grammar at all. Whether the envelope leaks is decided by the serving stack behind the host, not by the provider id, so selection now keys off the model id alone.
+- Fixed healed tool calls carrying wrong argument types, which made recovered DeepSeek V4 calls fail argument validation even after the envelope parsed. The plain skeleton the model actually leaks has no `string="true|false"` attribute, so the only remaining type information is the request's tool schemas, and the healer was constructed without them, JSON-decoding every value that happened to parse. A `write` whose `content` was a JSON document arrived as an object; a `bash` whose `command` was `42` arrived as a number. Both chat-completions and Ollama streams now pass `context.tools` to the healer, so parameters declared string-only are read verbatim and everything else still decodes.
+- Fixed the DeepSeek DSML grammar deleting the remainder of a turn when a `<｜DSML｜tool_calls>` (or `<｜tool▁calls▁begin｜>`) envelope produced no tool call, the same hole the Anthropic tagset was hardened against. DeepSeek V4 leaks half-degenerate envelopes whose body is the plain tagset, and the section scanner dropped every byte it could not match. An envelope body that yields no call is now replayed as text so the plain-tagset stage can still recover the calls; the unambiguous envelope tokens themselves are not replayed.
+
+### Removed
+
+- Removed `StreamMarkupHealing.sectionClosed` and `modelMayLeakDsmlToolCalls`. The getter had no consumers and could not be correct by construction (it substring-matched each chunk, so any envelope close split across chunk boundaries never registered); the gate degenerated to a rename of `isDeepseekModelIdOrName` once the provider allowlist was dropped.
+
 ## [17.2.9] - 2026-08-05
 
 ### Fixed

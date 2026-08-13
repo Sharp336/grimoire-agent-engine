@@ -85,6 +85,26 @@ const REPORTED_DSML_LEAK =
 	" </｜DSML｜invoke>\n" +
 	" </｜DSML｜tool_calls>";
 
+/**
+ * The same envelope after an upstream detokenizer dropped the `｜DSML｜` special
+ * tokens and forwarded the ordinary text around them — reported against
+ * `deepseek-v4-pro` behind a LiteLLM proxy, where the tag skeleton survives but
+ * the exact-token grammar sees nothing but prose.
+ */
+const REPORTED_STRIPPED_DSML_LEAK =
+	"First, scout: confirm the files and anchors exist.\n\n" +
+	"<tool_calls>\n" +
+	'<invoke name="glob">\n' +
+	'<parameter name="i">map Raptor.Physics tree</parameter>\n' +
+	'<parameter name="path">Raptor.Server/Raptor.Physics/**/*.cs</parameter>\n' +
+	"</invoke>\n" +
+	'<invoke name="bash">\n' +
+	'<parameter name="i">locate DotRecast</parameter>\n' +
+	'<parameter name="command">git ls-files | head -50</parameter>\n' +
+	'<parameter name="timeout">15</parameter>\n' +
+	"</invoke>\n" +
+	"</tool_calls>";
+
 const bashTool: Tool = {
 	name: "bash",
 	description: "Run a shell command",
@@ -169,8 +189,9 @@ describe("StreamMarkupHealing pattern selection", () => {
 		expect(getStreamMarkupHealingPattern("opencode-zen", "minimax-m3")).toBe("thinking");
 		expect(getStreamMarkupHealingPattern("openrouter", "google/gemini-3.5-flash")).toBe("thinking");
 		expect(getStreamMarkupHealingPattern("ollama-cloud", "gpt-oss:120b")).toBe("thinking");
-		// A DeepSeek id on a non-DSML provider falls back to thinking, not the envelope grammar.
-		expect(getStreamMarkupHealingPattern("openai", "deepseek-v4-pro")).toBe("thinking");
+		// A DeepSeek id keeps the envelope grammar behind an unfamiliar proxy id — the
+		// serving stack decides whether DSML leaks, not the configured provider name.
+		expect(getStreamMarkupHealingPattern("litellm", "opencode-go/deepseek-v4-pro")).toBe("dsml");
 	});
 });
 
@@ -272,6 +293,51 @@ describe("official OpenAI leaked thinking healing exemption", () => {
 		expect(result.content.map(b => b.type)).toEqual(["text"]);
 		expect(result.content.filter((b): b is ThinkingContent => b.type === "thinking")).toHaveLength(0);
 		expect(result.content.map(b => (b.type === "text" ? b.text : "")).join("")).toBe(leaked);
+	});
+});
+
+// End-to-end shape from the report: DeepSeek V4 Pro streams the whole tool call
+// as `delta.content` in the plain (special-token-free) skeleton, stops with
+// `finish_reason: "stop"`, and never closes the wrapper. The turn must arrive as
+// a real tool call whose arguments obey the request's tool schemas.
+describe("deepseek chat-completions tool-call leak recovery", () => {
+	const deepseekModel: Model<"openai-completions"> = getBundledModel("deepseek", "deepseek-v4-pro");
+
+	it("recovers an unterminated plain-skeleton leak as a schema-typed tool call", async () => {
+		const writeTool: Tool = {
+			name: "write",
+			description: "Write a file",
+			parameters: {
+				type: "object",
+				properties: { path: { type: "string" }, content: { type: "string" } },
+				required: ["path", "content"],
+				additionalProperties: false,
+			},
+		};
+		const leak =
+			"<tool_calls>\n" +
+			'<invoke name="write">\n' +
+			'<parameter name="path">config.json</parameter>\n' +
+			'<parameter name="content">{"port": 8080}</parameter>\n' +
+			"</invoke>\n";
+		const chunks: unknown[] = [];
+		for (let i = 0; i < leak.length; i += 9) {
+			chunks.push(chunk(deepseekModel.id, { content: leak.slice(i, i + 9) }));
+		}
+		chunks.push(chunk(deepseekModel.id, {}, "stop"), "[DONE]");
+
+		const result = await streamOpenAICompletions(
+			deepseekModel,
+			{ ...baseContext(), tools: [writeTool] },
+			{ apiKey: "test", fetch: mockFetch(chunks) },
+		).result();
+
+		const calls = result.content.filter((block): block is ToolCall => block.type === "toolCall");
+		expect(calls).toHaveLength(1);
+		expect(calls[0]?.name).toBe("write");
+		expect(calls[0]?.arguments).toEqual({ path: "config.json", content: '{"port": 8080}' });
+		expect(result.content.filter(block => block.type === "text")).toHaveLength(0);
+		expect(result.stopReason).toBe("toolUse");
 	});
 });
 
@@ -412,6 +478,67 @@ describe("StreamMarkupHealing DSML envelope pattern", () => {
 		expect(JSON.parse(calls[0].arguments)).toEqual({ cmd: "ls -la" });
 	});
 
+	it("recovers an envelope whose ｜DSML｜ special tokens were stripped upstream", () => {
+		const healing = new StreamMarkupHealing({ pattern: "dsml" });
+		const events = healing.feedEvents(REPORTED_STRIPPED_DSML_LEAK);
+		expect(events.map(event => event.type)).toEqual(["text", "toolCall", "toolCall"]);
+
+		const [prose, first, second] = events;
+		if (prose?.type !== "text" || first?.type !== "toolCall" || second?.type !== "toolCall") {
+			throw new Error("stripped DSML healing emitted unexpected event order");
+		}
+		expect(prose.text).toBe("First, scout: confirm the files and anchors exist.\n\n");
+		expect(first.call.name).toBe("glob");
+		expect(JSON.parse(first.call.arguments)).toEqual({
+			[INTENT_FIELD]: "map Raptor.Physics tree",
+			path: "Raptor.Server/Raptor.Physics/**/*.cs",
+		});
+		expect(second.call.name).toBe("bash");
+		expect(JSON.parse(second.call.arguments)).toEqual({
+			[INTENT_FIELD]: "locate DotRecast",
+			command: "git ls-files | head -50",
+			timeout: 15,
+		});
+	});
+
+	it("reconstructs a stripped envelope split across chunk boundaries", () => {
+		const healing = new StreamMarkupHealing({ pattern: "dsml" });
+		let visible = "";
+		for (let i = 0; i < REPORTED_STRIPPED_DSML_LEAK.length; i += 7) {
+			visible += healing.feed(REPORTED_STRIPPED_DSML_LEAK.slice(i, i + 7));
+		}
+		visible += healing.flushPending();
+		expect(visible).toBe("First, scout: confirm the files and anchors exist.\n\n");
+		expect(healing.drainCompleted().map(call => call.name)).toEqual(["glob", "bash"]);
+	});
+
+	// The wrapper grammar must never delete text it did not turn into a call. This
+	// is the turn-2 shape from the report: after the first leak reached the model as
+	// visible text, it imitated its own broken output with marker names that match
+	// no tag at all.
+	it("replays a wrapper that produced no tool call instead of swallowing it", () => {
+		const degenerate =
+			"<tool_calls>\n" +
+			"<tool_calls begin>\n" +
+			"<tool_calls call begin>\n" +
+			'read i="map layout" path="Raptor.Server/"\n' +
+			"<tool_calls end>\n" +
+			"</tool_calls>";
+		const healing = new StreamMarkupHealing({ pattern: "dsml" });
+		let visible = "";
+		for (let i = 0; i < degenerate.length; i += 5) visible += healing.feed(degenerate.slice(i, i + 5));
+		visible += healing.flushPending();
+		expect(visible).toBe(degenerate);
+		expect(healing.drainCompleted()).toHaveLength(0);
+	});
+
+	it("replays an unterminated wrapper when the stream ends", () => {
+		const healing = new StreamMarkupHealing({ pattern: "dsml" });
+		expect(healing.feed("thinking out loud <tool_calls>\nno invoke here")).toBe("thinking out loud ");
+		expect(healing.flushPending()).toBe("<tool_calls>\nno invoke here");
+		expect(healing.drainCompleted()).toHaveLength(0);
+	});
+
 	it("passes a bare '<' in idle prose through without holding it back", () => {
 		const healing = new StreamMarkupHealing({ pattern: "dsml" });
 		// No '>' anywhere in the tail — the old any-'<' hold-back froze display here.
@@ -447,6 +574,80 @@ describe("StreamMarkupHealing DSML envelope pattern", () => {
 		expect(thinking).toBe("plan\n");
 		expect(text).toBe("before  after");
 		expect(calls).toHaveLength(1);
+	});
+
+	// The degenerate skeleton DeepSeek V4 actually leaks carries no `string="…"`
+	// attribute, so the only type information left is the request's own tool
+	// schemas. Without them a `write` whose content is a JSON document arrives as
+	// an object and a `bash` whose command is `42` arrives as a number, and the
+	// call fails argument validation before it ever runs.
+	it("types healed arguments from the request tool schemas", () => {
+		const writeTool: Tool = {
+			name: "write",
+			description: "Write a file",
+			parameters: {
+				type: "object",
+				properties: { path: { type: "string" }, content: { type: "string" } },
+				required: ["path", "content"],
+				additionalProperties: false,
+			},
+		};
+		const leak =
+			"<tool_calls>\n" +
+			'<invoke name="write">\n' +
+			'<parameter name="path">config.json</parameter>\n' +
+			'<parameter name="content">{"port": 8080, "debug": true}</parameter>\n' +
+			"</invoke>\n" +
+			'<invoke name="bash">\n' +
+			'<parameter name="command">42</parameter>\n' +
+			'<parameter name="timeout">15</parameter>\n' +
+			"</invoke>\n" +
+			"</tool_calls>";
+
+		const healing = new StreamMarkupHealing({ pattern: "dsml", tools: [writeTool, bashTool] });
+		expect(healing.feed(leak)).toBe("");
+		const calls = healing.drainCompleted();
+		expect(calls.map(call => call.name)).toEqual(["write", "bash"]);
+		expect(JSON.parse(calls[0].arguments)).toEqual({
+			path: "config.json",
+			content: '{"port": 8080, "debug": true}',
+		});
+		// `timeout` is declared numeric, so it still decodes as a number.
+		expect(JSON.parse(calls[1].arguments)).toEqual({ command: "42", timeout: 15 });
+	});
+
+	// A `<｜DSML｜tool_calls>` wrapper whose body degenerated to the plain tagset
+	// used to make the DSML section scanner drop every byte it could not match,
+	// deleting the rest of the turn. The body must survive to the plain-tagset
+	// stage, which still recovers the call.
+	it("recovers a DSML wrapper whose invoke tags lost their special tokens", () => {
+		const leak =
+			"<｜DSML｜tool_calls>\n" +
+			'<invoke name="bash">\n' +
+			'<parameter name="command">ls -la</parameter>\n' +
+			"</invoke>\n" +
+			"</｜DSML｜tool_calls>";
+		const healing = new StreamMarkupHealing({ pattern: "dsml", tools: [bashTool] });
+		let visible = "";
+		for (let i = 0; i < leak.length; i += 5) visible += healing.feed(leak.slice(i, i + 5));
+		visible += healing.flushPending();
+		expect(visible.trim()).toBe("");
+		const calls = healing.drainCompleted();
+		expect(calls).toHaveLength(1);
+		expect(calls[0].name).toBe("bash");
+		expect(JSON.parse(calls[0].arguments)).toEqual({ command: "ls -la" });
+	});
+
+	// Same deletion hole with no recoverable call in the body: the prose the model
+	// wrapped must come back as text rather than vanish.
+	it("replays a DSML wrapper body that produced no tool call", () => {
+		const leak = "<｜DSML｜tool_calls>\nI could not decide which tool to use.\n</｜DSML｜tool_calls>";
+		const healing = new StreamMarkupHealing({ pattern: "dsml" });
+		let visible = "";
+		for (let i = 0; i < leak.length; i += 5) visible += healing.feed(leak.slice(i, i + 5));
+		visible += healing.flushPending();
+		expect(visible).toBe("\nI could not decide which tool to use.\n");
+		expect(healing.drainCompleted()).toHaveLength(0);
 	});
 });
 
@@ -1071,6 +1272,52 @@ describe("OpenAI completions provider DSML envelope healing", () => {
 		expect(toolCalls[0].name).toBe("bash");
 		expect(toolCalls[0].arguments).toMatchObject({
 			[INTENT_FIELD]: "Check Fedora 42 available packages",
+			timeout: 15,
+		});
+		expect(result.stopReason).toBe("toolUse");
+	});
+
+	// Reported configuration: a LiteLLM proxy (arbitrary provider id, unfamiliar
+	// baseUrl) in front of DeepSeek V4 Pro. The serving stack detokenized the
+	// `｜DSML｜` pieces away and reported `finish_reason: stop`, so the turn used to
+	// land as visible tag soup with zero tool calls — which the model then imitated
+	// on the next turn.
+	it("heals a special-token-stripped envelope behind an unfamiliar proxy id", async () => {
+		const model: Model<"openai-completions"> = buildModel({
+			id: "opencode-go/deepseek-v4-pro",
+			name: "DeepSeek V4 Pro",
+			api: "openai-completions",
+			provider: "litellm",
+			baseUrl: "https://llm.example/",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1_000_000,
+			maxTokens: 384_000,
+		});
+		const fetchMock = mockFetch([
+			chunk(model.id, { content: REPORTED_STRIPPED_DSML_LEAK }),
+			chunk(model.id, {}, "stop"),
+			"[DONE]",
+		]);
+
+		const result = await streamOpenAICompletions(
+			model,
+			{ messages: [{ role: "user", content: "Scout the physics tree", timestamp: Date.now() }], tools: [bashTool] },
+			{ apiKey: "test-key", fetch: fetchMock },
+		).result();
+
+		const text = result.content
+			.filter((b): b is TextContent => b.type === "text")
+			.map(b => b.text)
+			.join("");
+		expect(text).toBe("First, scout: confirm the files and anchors exist.\n\n");
+
+		const toolCalls = result.content.filter((b): b is ToolCall => b.type === "toolCall");
+		expect(toolCalls.map(call => call.name)).toEqual(["glob", "bash"]);
+		expect(toolCalls[1].arguments).toMatchObject({
+			[INTENT_FIELD]: "locate DotRecast",
+			command: "git ls-files | head -50",
 			timeout: 15,
 		});
 		expect(result.stopReason).toBe("toolUse");

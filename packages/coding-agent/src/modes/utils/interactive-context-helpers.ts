@@ -4,8 +4,26 @@
  * construct components and reset editor state identically.
  */
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import type { TUI } from "@oh-my-pi/pi-tui";
+import type { Settings } from "../../config/settings";
+import type { AgentSession } from "../../session/agent-session";
 import { AssistantMessageComponent } from "../components/assistant-message";
-import type { InteractiveModeContext } from "../types";
+
+/**
+ * The {@link InteractiveModeContext} slice an assistant card is built from.
+ * Named separately so a surface that renders a *foreign* agent's turns into the
+ * live transcript — the council transcript mirror — produces cards identical to
+ * Main's without depending on the whole interactive context.
+ */
+export interface AssistantMessageComponentContext {
+	readonly ui: TUI;
+	readonly settings: Settings;
+	readonly viewSession: AgentSession;
+	readonly effectiveHideThinkingBlock: boolean;
+	readonly proseOnlyThinking: boolean;
+	readonly toolOutputExpanded: boolean;
+	readonly hideToolActivity: boolean;
+}
 
 /**
  * Construct an {@link AssistantMessageComponent} wired to the live context's
@@ -13,7 +31,7 @@ import type { InteractiveModeContext } from "../types";
  * component and supplied when rendering a persisted turn.
  */
 export function createAssistantMessageComponent(
-	ctx: InteractiveModeContext,
+	ctx: AssistantMessageComponentContext,
 	message?: AssistantMessage,
 ): AssistantMessageComponent {
 	const component = new AssistantMessageComponent(

@@ -8,6 +8,7 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { councilRoleLabel } from "@oh-my-pi/pi-coding-agent/config/model-roles";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CouncilMemberSetting } from "@oh-my-pi/pi-coding-agent/council/config";
 import {
@@ -83,6 +84,9 @@ interface HubHarness {
 	onCancel: ReturnType<typeof vi.fn>;
 	onFallbackChainChange: Mock<(role: string, chain: string[]) => void>;
 	onCouncilRosterChange: Mock<(members: CouncilMemberSetting[]) => void>;
+	onCouncilRoundsChange: Mock<(rounds: 1 | 2) => void>;
+	onCouncilAdvisorChange: Mock<(scope: "planner" | "reviewers" | "adjudicator", enabled: boolean) => void>;
+	onRoleDisplayNameChange: Mock<(role: string, name: string | undefined) => void>;
 }
 
 const openHubs: ModelHubComponent[] = [];
@@ -118,6 +122,23 @@ function createHub(options: {
 	const onCouncilRosterChange = vi.fn((members: CouncilMemberSetting[]) => {
 		settings.override("council.members", members);
 	});
+	const onCouncilRoundsChange = vi.fn((rounds: 1 | 2) => {
+		settings.set("council.rounds", rounds);
+	});
+	// Mirror the controller: advisor toggles land in global settings so the hub re-reads them.
+	const onCouncilAdvisorChange = vi.fn((scope: "planner" | "reviewers" | "adjudicator", enabled: boolean) => {
+		settings.set(`council.advisor.${scope}`, enabled);
+	});
+	// Mirror the controller: display names live in modelTags, never in the role id.
+	const onRoleDisplayNameChange = vi.fn((role: string, name: string | undefined) => {
+		const tags = { ...settings.get("modelTags") };
+		if (name === undefined) {
+			delete tags[role];
+		} else {
+			tags[role] = { ...tags[role], name };
+		}
+		settings.override("modelTags", tags);
+	});
 	const hub = new ModelHubComponent(
 		ui,
 		settings,
@@ -130,6 +151,10 @@ function createHub(options: {
 			onCycleOrderChange: options.callbacks?.onCycleOrderChange,
 			onFallbackChainChange: options.callbacks?.onFallbackChainChange ?? onFallbackChainChange,
 			onCouncilRosterChange: options.callbacks?.onCouncilRosterChange ?? onCouncilRosterChange,
+			onCouncilRoundsChange: options.callbacks?.onCouncilRoundsChange ?? onCouncilRoundsChange,
+			onCouncilAdvisorChange: options.callbacks?.onCouncilAdvisorChange ?? onCouncilAdvisorChange,
+			onRoleDisplayNameChange: options.callbacks?.onRoleDisplayNameChange ?? onRoleDisplayNameChange,
+			onCouncilRosterProjectClear: options.callbacks?.onCouncilRosterProjectClear,
 			onCancel: options.callbacks?.onCancel ?? onCancel,
 		},
 		options.hub,
@@ -143,6 +168,9 @@ function createHub(options: {
 		onCancel,
 		onFallbackChainChange,
 		onCouncilRosterChange,
+		onCouncilRoundsChange,
+		onCouncilAdvisorChange,
+		onRoleDisplayNameChange,
 	};
 }
 
@@ -150,6 +178,28 @@ const DOWN = "\x1b[B";
 const UP = "\x1b[A";
 const LEFT = "\x1b[D";
 const ESC = "\x1b";
+
+/**
+ * Down-presses from the Council section's initial focus (the Planner lead row) to the first
+ * reviewer row: Adjudicator, Rounds, and the three advisor toggles sit between them.
+ */
+const COUNCIL_DOWN_TO_FIRST_REVIEWER = 6;
+
+function pressDown(hub: ModelHubComponent, times: number): void {
+	for (let index = 0; index < times; index++) hub.handleInput(DOWN);
+}
+
+/**
+ * Walk the cursor down to the first reviewer row. Unlike {@link COUNCIL_DOWN_TO_FIRST_REVIEWER} this
+ * survives a salvaged roster, where repair notices sit above the leads and shift every index.
+ */
+function focusFirstCouncilReviewer(hub: ModelHubComponent): void {
+	for (let index = 0; index < 40; index++) {
+		if (footerLine(hub.render(200)).includes("Space toggle · r round")) return;
+		hub.handleInput(DOWN);
+	}
+	throw new Error("no council reviewer row was reachable");
+}
 
 describe("ModelHub", () => {
 	beforeAll(async () => {
@@ -843,8 +893,11 @@ describe("ModelHub", () => {
 
 			const rendered = normalize(hub.render(220));
 			expect(rendered).toContain("Council 1/2 enabled · rounds 2");
-			expect(rendered).toContain("Council 1 test/council-model");
+			expect(rendered).toContain("Reviewer 1 test/council-model");
 			expect(rendered).toContain("Safety Judge");
+			// The section opens on the Planner lead; the roster rows sit below the leads and toggles.
+			expect(footerLine(hub.render(220))).toContain("clear to the default");
+			pressDown(hub, COUNCIL_DOWN_TO_FIRST_REVIEWER);
 			expect(footerLine(hub.render(220))).toContain("Space toggle");
 			expect(rendered.match(/test\/council-model/g)).toHaveLength(1);
 		});
@@ -878,6 +931,7 @@ describe("ModelHub", () => {
 			hub.refreshAfterExternalMutation();
 			expect(councilRow()).toContain("test/gpt-5.1-codex");
 
+			pressDown(hub, COUNCIL_DOWN_TO_FIRST_REVIEWER);
 			hub.handleInput("x");
 			expect(settings.getModelRole("slow")).toBeUndefined();
 			expect(councilRow()).toContain("unassigned");
@@ -921,7 +975,7 @@ describe("ModelHub", () => {
 			const lines = hub.render(width);
 			const plain = lines.map(line => stripVTControlCharacters(line));
 			expect(plain.find(line => line.includes("DEFAULT"))).toContain("test/model-a");
-			expect(plain.some(line => line.includes("Council 1") && line.includes("test/model-b"))).toBeTrue();
+			expect(plain.some(line => line.includes("Reviewer 1") && line.includes("test/model-b"))).toBeTrue();
 			expect(
 				plain.some(line => line.includes("Councilx") && line.includes("…") && line.includes("unassigned")),
 			).toBeTrue();
@@ -935,6 +989,7 @@ describe("ModelHub", () => {
 				hub: { initialSection: "council" },
 			});
 
+			pressDown(hub, COUNCIL_DOWN_TO_FIRST_REVIEWER);
 			hub.handleInput(" ");
 			expect(onCouncilRosterChange.mock.lastCall?.[0][0]).toEqual({ role: "council1", enabled: false });
 
@@ -963,6 +1018,7 @@ describe("ModelHub", () => {
 				hub: { initialSection: "council" },
 			});
 
+			pressDown(hub, COUNCIL_DOWN_TO_FIRST_REVIEWER);
 			hub.handleInput(" ");
 			expect(onCouncilRosterChange).toHaveBeenLastCalledWith([{ role: "onlymember", enabled: false }]);
 			expect(normalize(hub.render(160))).toContain("Council 0/1 enabled · rounds 1");
@@ -972,11 +1028,9 @@ describe("ModelHub", () => {
 			expect(normalize(hub.render(160))).toContain("Council 0/0 enabled · rounds 1");
 		});
 
-		test("invalid council config focuses a bounded non-mutating error row", () => {
-			const settings = Settings.isolated({
-				"council.members": [{ role: "not a valid role", enabled: true }],
-				modelRoles: { "not a valid role": "test/model-a" },
-			});
+		test("unparseable council.members withholds the rows and names the file to edit", () => {
+			// A non-record entry is the one fault no row edit can express.
+			const settings = Settings.isolated({ "council.members": [["council1"]] });
 			const { hub, onAssign, onUnassign, onCouncilRosterChange } = createHub({
 				models: [makeModel("test", "model-a")],
 				scoped: true,
@@ -986,17 +1040,520 @@ describe("ModelHub", () => {
 
 			const rendered = normalize(hub.render(160));
 			expect(rendered).toContain("Council config error");
-			expect(rendered).toContain("Council configuration is invalid");
-			expect(rendered).toContain("must match");
-			expect(rendered).not.toContain("Council 1/1 enabled");
-			expect(rendered).not.toContain("test/model-a");
-			expect(footerLine(hub.render(160))).toContain("Fix council configuration");
+			expect(rendered).toContain("Council configuration is invalid; edit council.members in");
+			expect(rendered).not.toContain("Add reviewer");
+			expect(rendered).not.toContain("Rounds");
 
 			hub.handleInput("\n");
+			hub.handleInput(" ");
+			hub.handleInput("\x1b[3~");
 			expect(onAssign).not.toHaveBeenCalled();
 			expect(onUnassign).not.toHaveBeenCalled();
 			expect(onCouncilRosterChange).not.toHaveBeenCalled();
 			expect(normalize(hub.render(160))).not.toContain("Assigning");
+		});
+
+		test("a per-member config error keeps the roster rows editable so the row edit is the repair", () => {
+			const settings = Settings.isolated({
+				"council.members": [
+					{ role: "not a valid role", enabled: true },
+					{ role: "council2", enabled: false },
+				],
+				modelRoles: { "not a valid role": "test/model-a" },
+			});
+			const { hub, onCouncilRosterChange } = createHub({
+				models: [makeModel("test", "model-a")],
+				scoped: true,
+				settings,
+				hub: { initialSection: "council" },
+			});
+
+			const broken = normalize(hub.render(200));
+			expect(broken).toContain("must match");
+			expect(broken).toContain("edit council.members in");
+			// The salvaged rows are present, with their configured enabled flags.
+			expect(broken).toContain("Council 1/2 enabled");
+			expect(broken).toContain("[on] ● Not A Valid Role test/model-a");
+			expect(broken).toContain("[off]");
+
+			// The cursor starts on the explanation; the rows below still take edits.
+			hub.handleInput(DOWN); // remedy notice
+			hub.handleInput(DOWN); // Planner lead
+			pressDown(hub, COUNCIL_DOWN_TO_FIRST_REVIEWER); // through the leads/toggles to the first member
+			hub.handleInput("\x1b[3~");
+			expect(onCouncilRosterChange).toHaveBeenLastCalledWith([{ role: "council2", enabled: false }]);
+
+			const repaired = normalize(hub.render(200));
+			expect(repaired).not.toContain("must match");
+			expect(repaired).toContain("Council 0/1 enabled");
+		});
+
+		test("the council header counts enabled roles that resolve to no single model", () => {
+			const settings = Settings.isolated({
+				"council.members": [
+					{ role: "council1", enabled: true },
+					{ role: "council2", enabled: true },
+					{ role: "council3", enabled: false },
+				],
+				modelRoles: { council1: "test/model-a" },
+			});
+			const { hub } = createHub({
+				models: [makeModel("test", "model-a")],
+				scoped: true,
+				settings,
+				hub: { initialSection: "council" },
+			});
+
+			// council3 is unassigned too, but disabled roles cannot block a run.
+			expect(normalize(hub.render(200))).toContain("Council 2/3 enabled · 1 unassigned · rounds 1");
+
+			settings.override("modelRoles", { council1: "test/model-a", council2: "test/model-a" });
+			hub.refreshAfterExternalMutation();
+			const cleared = normalize(hub.render(200));
+			expect(cleared).toContain("Council 2/3 enabled · rounds 1");
+			expect(cleared).not.toContain("1 unassigned");
+		});
+
+		test("a project-scoped roster drops the project key only after the global write lands", async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-model-hub-council-"));
+			const cwd = path.join(root, "project");
+			const agentDir = path.join(root, "agent");
+			try {
+				await Bun.write(path.join(agentDir, "config.yml"), "modelRoles:\n  council1: test/model-a\n");
+				await Bun.write(
+					path.join(cwd, ".omp", "config.yml"),
+					"council:\n  members:\n    - role: council1\n      enabled: true\n",
+				);
+				const settings = await Settings.loadReadOnly({ cwd, agentDir });
+				expect(settings.getRawSetting("council.members", "project").configured).toBeTrue();
+
+				const cleared = Promise.withResolvers<void>();
+				const onCouncilRosterProjectClear = vi.fn(async () => {
+					await settings.removeProjectSetting("council.members");
+					cleared.resolve();
+				});
+
+				// Destination write fails: the project roster must survive untouched.
+				const failing = createHub({
+					models: [makeModel("test", "model-a")],
+					scoped: true,
+					settings,
+					hub: { initialSection: "council" },
+					callbacks: {
+						onCouncilRosterChange: () => {
+							throw new Error("destination is read-only");
+						},
+						onCouncilRosterProjectClear,
+					},
+				});
+				const offered = normalize(failing.hub.render(200));
+				expect(offered).toContain("Move roster to global config");
+				expect(offered).toContain(".omp/config.yml");
+				failing.hub.handleInput("\n");
+				// The failing path returns before its first await, so the refusal is already recorded.
+				expect(onCouncilRosterProjectClear).not.toHaveBeenCalled();
+				expect(settings.getRawSetting("council.members", "project").configured).toBeTrue();
+				expect(normalize(failing.hub.render(200))).toContain("destination is read-only");
+
+				// Destination write lands: only now does the project key go.
+				const moving = createHub({
+					models: [makeModel("test", "model-a")],
+					scoped: true,
+					settings,
+					hub: { initialSection: "council" },
+					callbacks: {
+						onCouncilRosterChange: members => settings.set("council.members", members),
+						onCouncilRosterProjectClear,
+					},
+				});
+				moving.hub.handleInput("\n");
+				await cleared.promise;
+				expect(onCouncilRosterProjectClear).toHaveBeenCalledTimes(1);
+				expect(settings.getRawSetting("council.members", "project").configured).toBeFalse();
+				const globalRoster = settings.getRawSetting("council.members", "global");
+				expect(globalRoster.configured ? globalRoster.value : undefined).toEqual([
+					{ role: "council1", enabled: true },
+				]);
+				moving.hub.refreshAfterExternalMutation();
+				expect(normalize(moving.hub.render(200))).not.toContain("Move roster to global config");
+			} finally {
+				await fs.rm(root, { recursive: true, force: true });
+			}
+		});
+
+		test("relocating a project roster carries a malformed round pin to global before clearing it", async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-hub-council-move-pin-"));
+			const cwd = path.join(root, "project");
+			const agentDir = path.join(root, "agent");
+			try {
+				await Bun.write(path.join(agentDir, "config.yml"), "modelRoles:\n  council1: test/model-a\n");
+				// Project scope *and* a malformed pin: the relocation must not quietly repair the pin.
+				await Bun.write(
+					path.join(cwd, ".omp", "config.yml"),
+					"council:\n  members:\n    - role: council1\n      enabled: true\n      round: 3\n",
+				);
+				const settings = await Settings.loadReadOnly({ cwd, agentDir });
+				const cleared = Promise.withResolvers<void>();
+				const onCouncilRosterProjectClear = vi.fn(async () => {
+					// The global copy must already carry the raw pin at the moment the project key goes,
+					// otherwise the only surviving record of it is destroyed here.
+					const landed = settings.getRawSetting("council.members", "global");
+					expect(landed.configured ? landed.value : undefined).toEqual([
+						{ role: "council1", enabled: true, round: 3 },
+					]);
+					await settings.removeProjectSetting("council.members");
+					cleared.resolve();
+				});
+				const { hub } = createHub({
+					models: [makeModel("test", "model-a")],
+					scoped: true,
+					settings,
+					hub: { initialSection: "council" },
+					callbacks: {
+						onCouncilRosterChange: members => settings.set("council.members", members),
+						onCouncilRosterProjectClear,
+					},
+				});
+
+				hub.handleInput("\n"); // the repair notice is the initial focus
+				await cleared.promise;
+				expect(onCouncilRosterProjectClear).toHaveBeenCalledTimes(1);
+				const globalRoster = settings.getRawSetting("council.members", "global");
+				expect(globalRoster.configured ? globalRoster.value : undefined).toEqual([
+					{ role: "council1", enabled: true, round: 3 },
+				]);
+			} finally {
+				await fs.rm(root, { recursive: true, force: true });
+			}
+		});
+
+		test("a project roster holding an unreadable entry refuses to relocate", async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-hub-council-move-bogus-"));
+			const cwd = path.join(root, "project");
+			const agentDir = path.join(root, "agent");
+			try {
+				await Bun.write(path.join(agentDir, "config.yml"), "modelRoles:\n  council1: test/model-a\n");
+				// `- bogus` is not a record, so salvage cannot reproduce the roster. Relocating the
+				// reduced copy would write it to global and then delete the only file holding `bogus`.
+				await Bun.write(
+					path.join(cwd, ".omp", "config.yml"),
+					"council:\n  members:\n    - role: council1\n      enabled: true\n    - bogus\n",
+				);
+				const settings = await Settings.loadReadOnly({ cwd, agentDir });
+				const onCouncilRosterProjectClear = vi.fn(async () => {
+					await settings.removeProjectSetting("council.members");
+				});
+				const { hub, onCouncilRosterChange } = createHub({
+					models: [makeModel("test", "model-a")],
+					scoped: true,
+					settings,
+					hub: { initialSection: "council" },
+					callbacks: { onCouncilRosterProjectClear },
+				});
+
+				expect(normalize(hub.render(200))).toContain("Move roster to global config");
+				hub.handleInput("\n");
+
+				expect(onCouncilRosterProjectClear).not.toHaveBeenCalled();
+				expect(onCouncilRosterChange).not.toHaveBeenCalled();
+				expect(settings.getRawSetting("council.members", "project").configured).toBeTrue();
+				expect(settings.getRawSetting("council.members", "global").configured).toBeFalse();
+				expect(normalize(hub.render(200))).toContain("entries this editor cannot read");
+			} finally {
+				await fs.rm(root, { recursive: true, force: true });
+			}
+		});
+
+		test("a project roster holding a roleless entry refuses to relocate", async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-hub-council-move-roleless-"));
+			const cwd = path.join(root, "project");
+			const agentDir = path.join(root, "agent");
+			try {
+				await Bun.write(path.join(agentDir, "config.yml"), "modelRoles:\n  council1: test/model-a\n");
+				// The empty-role entry is dropped by salvage, so the surviving rows are one member short.
+				await Bun.write(
+					path.join(cwd, ".omp", "config.yml"),
+					'council:\n  members:\n    - role: ""\n      enabled: true\n    - role: council1\n      enabled: true\n      round: 3\n',
+				);
+				const settings = await Settings.loadReadOnly({ cwd, agentDir });
+				const onCouncilRosterProjectClear = vi.fn(async () => {
+					await settings.removeProjectSetting("council.members");
+				});
+				const { hub, onCouncilRosterChange } = createHub({
+					models: [makeModel("test", "model-a")],
+					scoped: true,
+					settings,
+					hub: { initialSection: "council" },
+					callbacks: { onCouncilRosterProjectClear },
+				});
+
+				expect(normalize(hub.render(200))).toContain("Move roster to global config");
+				hub.handleInput("\n");
+
+				expect(onCouncilRosterProjectClear).not.toHaveBeenCalled();
+				expect(onCouncilRosterChange).not.toHaveBeenCalled();
+				expect(settings.getRawSetting("council.members", "project").configured).toBeTrue();
+				expect(settings.getRawSetting("council.members", "global").configured).toBeFalse();
+				expect(normalize(hub.render(200))).toContain("entries this editor cannot read");
+			} finally {
+				await fs.rm(root, { recursive: true, force: true });
+			}
+		});
+
+		test("the rounds row persists the exact value and the header follows", () => {
+			const settings = Settings.isolated({ "council.members": [{ role: "council1", enabled: true }] });
+			const { hub, onCouncilRoundsChange } = createHub({
+				models: [makeModel("test", "model-a")],
+				scoped: true,
+				settings,
+				hub: { initialSection: "council" },
+			});
+
+			hub.handleInput(DOWN); // Planner → Adjudicator
+			hub.handleInput(DOWN); // Adjudicator → Rounds
+			expect(footerLine(hub.render(200))).toContain("set 1 or 2 rounds");
+
+			hub.handleInput("\n");
+			expect(onCouncilRoundsChange).toHaveBeenLastCalledWith(2);
+			expect(settings.get("council.rounds")).toBe(2);
+			expect(normalize(hub.render(200))).toContain("rounds 2");
+
+			hub.handleInput("[");
+			expect(onCouncilRoundsChange).toHaveBeenLastCalledWith(1);
+			expect(settings.get("council.rounds")).toBe(1);
+
+			hub.handleInput("\x1b[1;2B"); // shift+down is the ] alias
+			expect(onCouncilRoundsChange).toHaveBeenLastCalledWith(2);
+			expect(normalize(hub.render(200))).toContain("rounds 2");
+		});
+
+		test("renaming a council member writes modelTags and leaves the role id and its assignment alone", () => {
+			const settings = Settings.isolated({
+				"council.members": [{ role: "council1", enabled: true }],
+				modelRoles: { council1: "test/model-a" },
+			});
+			const { hub, onCouncilRosterChange, onRoleDisplayNameChange } = createHub({
+				models: [makeModel("test", "model-a")],
+				scoped: true,
+				settings,
+				hub: { initialSection: "council" },
+			});
+
+			pressDown(hub, COUNCIL_DOWN_TO_FIRST_REVIEWER);
+			hub.handleInput("n");
+			expect(footerLine(hub.render(200))).toContain("Display name:");
+			for (let index = 0; index < 24; index++) hub.handleInput("\x7f");
+			for (const char of "Safety Judge") hub.handleInput(char);
+			hub.handleInput("\n");
+
+			expect(onRoleDisplayNameChange).toHaveBeenLastCalledWith("council1", "Safety Judge");
+			expect(settings.get("modelTags").council1?.name).toBe("Safety Judge");
+			// The durable identifier and the assignment keyed by it are untouched.
+			expect(settings.getModelRole("council1")).toBe("test/model-a");
+			expect(settings.get("council.members")).toEqual([{ role: "council1", enabled: true }]);
+			expect(onCouncilRosterChange).not.toHaveBeenCalled();
+
+			const renamed = normalize(hub.render(200));
+			expect(renamed).toContain("Safety Judge test/model-a");
+			expect(renamed).not.toContain("Reviewer 1 test/model-a");
+
+			// Clearing the name restores the label derived from the role id.
+			hub.handleInput("n");
+			for (let index = 0; index < 24; index++) hub.handleInput("\x7f");
+			hub.handleInput("\n");
+			expect(onRoleDisplayNameChange).toHaveBeenLastCalledWith("council1", undefined);
+			expect(settings.get("modelTags").council1).toBeUndefined();
+			expect(normalize(hub.render(200))).toContain("Reviewer 1 test/model-a");
+		});
+
+		test("renaming a lead row retitles it without touching the reserved role id or its assignment", () => {
+			const settings = Settings.isolated({
+				"council.members": [{ role: "council1", enabled: true }],
+				modelRoles: { planner: "test/model-a" },
+			});
+			const { hub, onRoleDisplayNameChange, onCouncilRosterChange } = createHub({
+				models: [makeModel("test", "model-a")],
+				scoped: true,
+				settings,
+				hub: { initialSection: "council" },
+			});
+
+			// The section opens on the Planner lead.
+			expect(footerLine(hub.render(200))).toContain("n rename");
+			hub.handleInput("n");
+			expect(footerLine(hub.render(200))).toContain("Display name:");
+			for (let index = 0; index < 24; index++) hub.handleInput("\x7f");
+			for (const char of "Architect") hub.handleInput(char);
+			hub.handleInput("\n");
+
+			expect(onRoleDisplayNameChange).toHaveBeenLastCalledWith("planner", "Architect");
+			expect(settings.get("modelTags").planner?.name).toBe("Architect");
+			// A lead rename is display-only: the reserved role id, the assignment keyed by it, and the
+			// roster are all untouched, so `modelRoles.planner` keeps resolving the council planner.
+			expect(settings.getModelRole("planner")).toBe("test/model-a");
+			expect(settings.get("council.members")).toEqual([{ role: "council1", enabled: true }]);
+			expect(onCouncilRosterChange).not.toHaveBeenCalled();
+			// The renamed lead still renders as a lead, never as a roster row.
+			const renamed = normalize(hub.render(200));
+			expect(renamed).toContain("Architect test/model-a");
+			expect(renamed).not.toContain("[on] ● Architect");
+
+			// Clearing the name restores the label derived from the reserved id.
+			hub.handleInput("n");
+			for (let index = 0; index < 24; index++) hub.handleInput("\x7f");
+			hub.handleInput("\n");
+			expect(onRoleDisplayNameChange).toHaveBeenLastCalledWith("planner", undefined);
+			expect(normalize(hub.render(200))).toContain("Planner test/model-a");
+		});
+
+		test("x on a lead clears only its model and leaves the reserved row in place", () => {
+			const settings = Settings.isolated({
+				"council.members": [{ role: "council1", enabled: true }],
+				modelRoles: { adjudicator: "test/model-a", slow: "test/model-a" },
+			});
+			const { hub } = createHub({
+				models: [makeModel("test", "model-a")],
+				scoped: true,
+				settings,
+				hub: { initialSection: "council" },
+				callbacks: { onUnassign: role => settings.setModelRole(role, undefined) },
+			});
+
+			hub.handleInput(DOWN); // Planner → Adjudicator
+			expect(normalize(hub.render(200))).toContain("Adjudicator test/model-a");
+			hub.handleInput("x");
+
+			// The custom `onUnassign` above is the writer, so the persisted role is the observable proof.
+			expect(settings.getModelRole("adjudicator")).toBeUndefined();
+			// The row survives and falls back to the documented default rather than reading `unassigned`.
+			const cleared = normalize(hub.render(200));
+			expect(cleared).toContain("Adjudicator main session model");
+			expect(cleared).not.toContain("Adjudicator unassigned");
+		});
+
+		test("a malformed round pin survives an unrelated roster write and is repaired by r", () => {
+			const settings = Settings.isolated({
+				"council.members": [
+					{ role: "healthy", enabled: true, round: 1 },
+					// `3` is not a valid pin, so the whole roster lands in the salvage path.
+					{ role: "broken", enabled: true, round: 3 },
+				],
+				"council.rounds": 2,
+			});
+			const { hub, onCouncilRosterChange } = createHub({
+				models: [makeModel("test", "model-a")],
+				scoped: true,
+				settings,
+				hub: { initialSection: "council" },
+			});
+
+			// The salvaged rows stay editable and the broken pin is called out on its own row.
+			const salvaged = normalize(hub.render(220));
+			expect(salvaged).toContain("expected 1 or 2");
+			expect(salvaged).toContain("invalid round");
+
+			// `broken` has no valid pin, so it renders under `Every round`, above `healthy` in `Round 1`.
+			const focusedRow = (): string =>
+				hub
+					.render(220)
+					.map(line => stripVTControlCharacters(line))
+					.find(line => line.includes("❯")) ?? "";
+			const focus = (label: string): void => {
+				for (let step = 0; step < 40; step++) {
+					if (focusedRow().includes(label)) return;
+					hub.handleInput(DOWN);
+				}
+				throw new Error(`never focused a row containing ${JSON.stringify(label)}`);
+			};
+
+			// Toggling a *different* member must not rewrite the broken member's pin away.
+			focus("Healthy");
+			hub.handleInput(" ");
+			// The expected `round: 3` is deliberately outside `1 | 2`: that is the whole point, so the
+			// literal is compared as raw data rather than as a validated setting.
+			expect(onCouncilRosterChange.mock.lastCall?.[0]).toEqual([
+				{ role: "healthy", enabled: false, round: 1 },
+				{ role: "broken", enabled: true, round: 3 },
+			] as unknown as CouncilMemberSetting[]);
+
+			// `r` on the broken row is the repair: it replaces the raw pin with a real round.
+			focus("Broken");
+			hub.handleInput("r");
+			expect(onCouncilRosterChange.mock.lastCall?.[0]).toEqual([
+				{ role: "healthy", enabled: false, round: 1 },
+				{ role: "broken", enabled: true, round: 1 },
+			]);
+			// Repaired: the roster parses again, so the fault notice and the row marker are gone.
+			const repaired = normalize(hub.render(220));
+			expect(repaired).not.toContain("expected 1 or 2");
+			expect(repaired).not.toContain("invalid round");
+		});
+
+		test("shift+arrows reorder council rows as aliases for [ and ]", () => {
+			const { hub, onCouncilRosterChange } = createHub({
+				models: [makeModel("test", "model-a")],
+				scoped: true,
+				hub: { initialSection: "council" },
+			});
+
+			pressDown(hub, COUNCIL_DOWN_TO_FIRST_REVIEWER);
+			hub.handleInput("\x1b[1;2B");
+			expect(onCouncilRosterChange.mock.lastCall?.[0].slice(0, 2).map(member => member.role)).toEqual([
+				"council2",
+				"council1",
+			]);
+
+			hub.handleInput("\x1b[1;2A");
+			expect(onCouncilRosterChange.mock.lastCall?.[0].slice(0, 2).map(member => member.role)).toEqual([
+				"council1",
+				"council2",
+			]);
+		});
+
+		test("a project-scoped council assignment warns once and keeps the provenance label", () => {
+			const settings = Settings.isolated({
+				modelRoleStorage: "project",
+				"council.members": [{ role: "council1", enabled: true }],
+			});
+			const { hub } = createHub({
+				models: [makeModel("test", "model-a")],
+				scoped: true,
+				settings,
+				hub: { initialSection: "council" },
+				callbacks: {
+					onAssign: (_model, role, _thinking, selector, scope) => {
+						if (scope === "project") settings.setProjectModelRole(role, selector);
+						else settings.setModelRole(role, selector);
+					},
+				},
+			});
+
+			pressDown(hub, COUNCIL_DOWN_TO_FIRST_REVIEWER);
+			const councilRow = (): string =>
+				hub
+					.render(200)
+					.map(line => stripVTControlCharacters(line))
+					.find(line => line.includes("[on]")) ?? "";
+
+			hub.handleInput("\n"); // council row → model browser
+			hub.handleInput("\n"); // pick the model → scope strip
+			hub.handleInput("\n"); // project scope
+			const warned = normalize(hub.render(200));
+			expect(warned.match(/saved to project scope/g)).toHaveLength(1);
+
+			// The warning survives closing the thinking strip, then navigation dismisses it.
+			hub.handleInput(ESC);
+			expect(normalize(hub.render(200))).toContain("saved to project scope");
+			hub.handleInput(DOWN);
+			expect(normalize(hub.render(200))).not.toContain("saved to project scope");
+
+			// The shared provenance label still renders, exactly once, on the row itself.
+			expect(councilRow().match(/project/g)).toHaveLength(1);
+
+			settings.clearProjectModelRole("council1");
+			settings.setModelRole("council1", "test/model-a");
+			hub.refreshAfterExternalMutation();
+			expect(councilRow().match(/global/g)).toHaveLength(1);
 		});
 
 		test("council viewport follows initial focus while wheel panning leaves the cursor unchanged", () => {
@@ -1013,14 +1570,452 @@ describe("ModelHub", () => {
 				terminalRows: 16,
 			});
 
+			// Focus opens on the Planner lead; step down to the first reviewer so the viewport has to
+			// scroll to reveal it, which is the behaviour under test.
+			pressDown(hub, COUNCIL_DOWN_TO_FIRST_REVIEWER);
 			const initial = normalize(hub.render(120));
 			expect(initial).toContain("▲");
-			expect(initial).toContain("Council 1");
+			expect(initial).toContain("Reviewer 1");
 			expect(initial).toContain("▼");
 			for (let index = 0; index < 8; index++) hub.handleInput("\x1b[<65;100;10M");
 			hub.render(120);
 			hub.handleInput("\n");
-			expect(normalize(hub.render(120))).toContain("Assigning Council 1");
+			expect(normalize(hub.render(120))).toContain("Assigning Reviewer 1");
+		});
+
+		test("groups reviewers under their round headers and keeps every other member's round on a write", () => {
+			const settings = Settings.isolated({
+				"council.members": [
+					{ role: "everyone", enabled: true },
+					{ role: "firstonly", enabled: true, round: 1 },
+					{ role: "secondonly", enabled: true, round: 2 },
+				],
+				"council.rounds": 2,
+			});
+			const { hub, onCouncilRosterChange } = createHub({
+				models: [makeModel("test", "model-a")],
+				scoped: true,
+				settings,
+				hub: { initialSection: "council" },
+			});
+
+			const rendered = normalize(hub.render(200));
+			expect(rendered).toContain("Every round");
+			expect(rendered).toContain("Round 1");
+			expect(rendered).toContain("Round 2");
+			// Reading order is Every round, then Round 1, then Round 2, with each member under its own.
+			expect(rendered.indexOf("Everyone")).toBeGreaterThan(rendered.indexOf("Every round"));
+			expect(rendered.indexOf("Firstonly")).toBeGreaterThan(rendered.indexOf("Round 1"));
+			expect(rendered.indexOf("Secondonly")).toBeGreaterThan(rendered.indexOf("Round 2"));
+
+			// Toggling the unpinned member must not erase anyone else's pin: every roster mutation
+			// re-persists the whole array from the hub's own records.
+			pressDown(hub, COUNCIL_DOWN_TO_FIRST_REVIEWER);
+			hub.handleInput(" ");
+			expect(onCouncilRosterChange.mock.lastCall?.[0]).toEqual([
+				{ role: "everyone", enabled: false },
+				{ role: "firstonly", enabled: true, round: 1 },
+				{ role: "secondonly", enabled: true, round: 2 },
+			]);
+		});
+
+		test("a round pinned beyond council.rounds stays configured under a muted inactive group", () => {
+			const settings = Settings.isolated({
+				"council.members": [
+					{ role: "active", enabled: true, round: 1 },
+					{ role: "parked", enabled: true, round: 2 },
+				],
+				"council.rounds": 1,
+			});
+			const { hub } = createHub({
+				models: [makeModel("test", "model-a")],
+				scoped: true,
+				settings,
+				hub: { initialSection: "council" },
+			});
+
+			const rendered = normalize(hub.render(200));
+			expect(rendered).toContain("Round 2 · inactive");
+			expect(rendered).toContain("Parked");
+		});
+
+		test("an empty configured round is called out inline instead of blocking the roster", () => {
+			const settings = Settings.isolated({
+				"council.members": [{ role: "onlyfirst", enabled: true, round: 1 }],
+				"council.rounds": 2,
+			});
+			const { hub } = createHub({
+				models: [makeModel("test", "model-a")],
+				scoped: true,
+				settings,
+				hub: { initialSection: "council" },
+			});
+
+			const rendered = normalize(hub.render(220));
+			expect(rendered).toContain("no reviewer assigned");
+			// The rows stay editable: this is a warning, not the parse fault that withholds them.
+			expect(rendered).toContain("+ Add reviewer…");
+		});
+
+		test("r cycles a reviewer's round within the configured round count", () => {
+			const settings = Settings.isolated({
+				"council.members": [{ role: "reviewer", enabled: true }],
+				"council.rounds": 2,
+			});
+			const { hub, onCouncilRosterChange } = createHub({
+				models: [makeModel("test", "model-a")],
+				scoped: true,
+				settings,
+				hub: { initialSection: "council" },
+			});
+
+			pressDown(hub, COUNCIL_DOWN_TO_FIRST_REVIEWER);
+			hub.handleInput("r");
+			expect(onCouncilRosterChange).toHaveBeenLastCalledWith([{ role: "reviewer", enabled: true, round: 1 }]);
+			hub.handleInput("r");
+			expect(onCouncilRosterChange).toHaveBeenLastCalledWith([{ role: "reviewer", enabled: true, round: 2 }]);
+			hub.handleInput("r");
+			expect(onCouncilRosterChange).toHaveBeenLastCalledWith([{ role: "reviewer", enabled: true }]);
+		});
+
+		test("the add flow chooses a round first and Escape at the chooser adds nothing", () => {
+			const settings = Settings.isolated({
+				"council.members": [{ role: "reviewer", enabled: true }],
+				"council.rounds": 2,
+			});
+			const { hub, onCouncilRosterChange } = createHub({
+				models: [makeModel("test", "model-a")],
+				scoped: true,
+				settings,
+				hub: { initialSection: "council" },
+			});
+
+			const toAddRow = (): void => {
+				pressDown(hub, COUNCIL_DOWN_TO_FIRST_REVIEWER + 1);
+			};
+			toAddRow();
+			hub.handleInput("\n");
+			expect(footerLine(hub.render(200))).toContain("round 1");
+
+			// Escape aborts the add outright rather than creating a round-less member.
+			hub.handleInput(ESC);
+			expect(onCouncilRosterChange).not.toHaveBeenCalled();
+
+			hub.handleInput("\n");
+			hub.handleInput("\x1b[C"); // right → round 2
+			hub.handleInput("\n"); // commit the round, opening the name strip
+			expect(footerLine(hub.render(200))).toContain("Reviewer:");
+			hub.handleInput("\n"); // blank name → auto id
+			expect(onCouncilRosterChange.mock.lastCall?.[0].at(-1)).toEqual({
+				role: "council1",
+				enabled: true,
+				round: 2,
+			});
+		});
+
+		test("the lead and advisor rows stay editable while a project-scoped roster locks the reviewer rows", async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-hub-council-leads-"));
+			const cwd = path.join(root, "project");
+			const agentDir = path.join(root, "agent");
+			try {
+				await Bun.write(path.join(agentDir, "config.yml"), "modelRoles:\n  slow: test/model-a\n");
+				// A project-scoped roster is the one fault no row edit can repair, so roster rows lock.
+				await Bun.write(
+					path.join(cwd, ".omp", "config.yml"),
+					"council:\n  members:\n    - role: council1\n      enabled: true\n",
+				);
+				const settings = await Settings.loadReadOnly({ cwd, agentDir });
+				const { hub, onAssign, onCouncilAdvisorChange, onCouncilRosterChange } = createHub({
+					models: [makeModel("test", "model-a")],
+					scoped: true,
+					settings,
+					hub: { initialSection: "council" },
+				});
+
+				const rendered = normalize(hub.render(220));
+				expect(rendered).toContain("project scope");
+				// An unassigned lead names what it falls back to, never `unassigned`.
+				expect(rendered).toContain("slow role (test/model-a)");
+				expect(rendered).toContain("main session model");
+
+				// The cursor opens on the `Move roster to global config` repair notice; the Planner lead
+				// is the next selectable row below it.
+				hub.handleInput(DOWN);
+				expect(footerLine(hub.render(220))).toContain("clear to the default");
+				hub.handleInput("\n"); // Planner → model browser
+				hub.handleInput("\n"); // pick the model
+				expect(onAssign.mock.lastCall?.[1]).toBe("planner");
+				hub.handleInput(ESC); // close the thinking strip the assignment opened
+
+				// Advisor toggles write `council.advisor.*`, which the misplaced roster key cannot block.
+				pressDown(hub, 3); // Planner → Adjudicator → Rounds → Planner advisor
+				expect(footerLine(hub.render(220))).toContain("toggle the advisor");
+				hub.handleInput(" ");
+				expect(onCouncilAdvisorChange).toHaveBeenLastCalledWith("planner", true);
+				// The locked roster itself was never rewritten.
+				expect(onCouncilRosterChange).not.toHaveBeenCalled();
+			} finally {
+				await fs.rm(root, { recursive: true, force: true });
+			}
+		});
+
+		test("the advisor rows persist their own setting from either activation key", () => {
+			const settings = Settings.isolated({ "council.members": [{ role: "council1", enabled: true }] });
+			const { hub, onCouncilAdvisorChange } = createHub({
+				models: [makeModel("test", "model-a")],
+				scoped: true,
+				settings,
+				hub: { initialSection: "council" },
+			});
+
+			pressDown(hub, 3); // Planner → Adjudicator → Rounds → Planner advisor
+			expect(footerLine(hub.render(200))).toContain("toggle the advisor");
+			hub.handleInput(" ");
+			expect(onCouncilAdvisorChange).toHaveBeenLastCalledWith("planner", true);
+			expect(settings.get("council.advisor.planner")).toBeTrue();
+
+			hub.handleInput(DOWN);
+			hub.handleInput("\n");
+			expect(onCouncilAdvisorChange).toHaveBeenLastCalledWith("reviewers", true);
+			expect(settings.get("council.advisor.reviewers")).toBeTrue();
+		});
+
+		test("an enabled reviewer parked past council.rounds is not a blocking assignment", () => {
+			const settings = Settings.isolated({
+				"council.members": [
+					{ role: "council1", enabled: true, round: 1 },
+					{ role: "council2", enabled: true, round: 2 },
+				],
+				"council.rounds": 1,
+				modelRoles: { council1: "test/model-a" },
+			});
+			const { hub } = createHub({
+				models: [makeModel("test", "model-a")],
+				scoped: true,
+				settings,
+				hub: { initialSection: "council" },
+			});
+
+			// council2 has no model, but it is pinned past the configured round, so it never runs and
+			// therefore cannot block one.
+			expect(normalize(hub.render(200))).toContain("Council 2/2 enabled · rounds 1");
+
+			// `Settings.isolated` seeds the override layer, so the test mutates that same layer.
+			settings.override("council.rounds", 2);
+			hub.refreshAfterExternalMutation();
+			expect(normalize(hub.render(200))).toContain("Council 2/2 enabled · 1 unassigned · rounds 2");
+		});
+
+		test("roster mutations that would cross the 64 active-reviewer limit are refused before persisting", () => {
+			const settings = Settings.isolated({
+				"council.members": [
+					{ role: "spare", enabled: false },
+					...Array.from({ length: 63 }, (_unused, index) => ({ role: `council${index + 1}`, enabled: true })),
+					{ role: "parked", enabled: true, round: 2 },
+				],
+				"council.rounds": 2,
+			});
+			// `Settings.isolated` seeds the override layer, which a plain `set` cannot beat.
+			const onCouncilRoundsChange = vi.fn((rounds: 1 | 2) => settings.override("council.rounds", rounds));
+			const { hub, onCouncilRosterChange } = createHub({
+				models: [makeModel("test", "model-a")],
+				scoped: true,
+				settings,
+				hub: { initialSection: "council" },
+				callbacks: { onCouncilRoundsChange },
+			});
+			const pressUp = (times: number): void => {
+				for (let index = 0; index < times; index++) hub.handleInput(UP);
+			};
+
+			// 63 unpinned reviewers plus the round-2 pin are already the full 64.
+			pressDown(hub, COUNCIL_DOWN_TO_FIRST_REVIEWER);
+			hub.handleInput(" ");
+			const refused = normalize(hub.render(200));
+			expect(refused).toContain("Enabling Spare refused: 65 reviewers would run");
+			expect(refused).toContain("64 active-reviewer limit");
+			expect(onCouncilRosterChange).not.toHaveBeenCalled();
+			expect(settings.get("council.members")[0]).toEqual({ role: "spare", enabled: false });
+			// The refusal is a status-row notice: the cursor is still on the reviewer it refused.
+			expect(footerLine(hub.render(200))).toContain("Space toggle");
+
+			// Dropping to one round parks the round-2 reviewer, which frees its slot.
+			pressUp(4);
+			hub.handleInput("[");
+			expect(onCouncilRoundsChange).toHaveBeenLastCalledWith(1);
+
+			pressDown(hub, 4);
+			hub.handleInput(" ");
+			expect(onCouncilRosterChange).toHaveBeenLastCalledWith([
+				{ role: "spare", enabled: true },
+				...Array.from({ length: 63 }, (_unused, index) => ({ role: `council${index + 1}`, enabled: true })),
+				{ role: "parked", enabled: true, round: 2 },
+			]);
+
+			// Re-opening round 2 would un-park the pinned reviewer on top of the new 64.
+			pressUp(4);
+			hub.handleInput("]");
+			expect(onCouncilRoundsChange).toHaveBeenLastCalledWith(1);
+			expect(normalize(hub.render(200))).toContain("Setting 2 review rounds refused: 65 reviewers would run");
+			expect(settings.get("council.rounds")).toBe(1);
+		});
+
+		test("adding a 65th active reviewer is refused before the naming prompt opens", () => {
+			const settings = Settings.isolated({
+				"council.members": Array.from({ length: 64 }, (_unused, index) => ({
+					role: `council${index + 1}`,
+					enabled: true,
+				})),
+			});
+			const { hub, onCouncilRosterChange } = createHub({
+				models: [makeModel("test", "model-a")],
+				scoped: true,
+				settings,
+				hub: { initialSection: "council" },
+			});
+
+			pressDown(hub, COUNCIL_DOWN_TO_FIRST_REVIEWER + 64);
+			hub.handleInput("\n");
+			const refused = normalize(hub.render(200));
+			expect(refused).toContain("Adding a reviewer refused");
+			expect(refused).toContain("64 active-reviewer limit");
+			expect(onCouncilRosterChange).not.toHaveBeenCalled();
+			expect(settings.get("council.members")).toHaveLength(64);
+			// No name strip opened, so the add row is still the activatable row under the cursor.
+			expect(footerLine(hub.render(200))).not.toContain("Reviewer:");
+			expect(footerLine(hub.render(200))).toContain("name + add reviewer");
+		});
+
+		test("an oversized on-disk roster loads into the salvage view and recovers by disabling one row", () => {
+			const settings = Settings.isolated({
+				"council.members": Array.from({ length: 65 }, (_unused, index) => ({
+					role: `council${index + 1}`,
+					enabled: true,
+				})),
+			});
+			const { hub, onCouncilRosterChange } = createHub({
+				models: [makeModel("test", "model-a")],
+				scoped: true,
+				settings,
+				hub: { initialSection: "council" },
+			});
+
+			// Lossless salvage, not a hard failure: the rows are the repair.
+			const broken = normalize(hub.render(200));
+			expect(broken).toContain("Council 65/65 enabled");
+			expect(broken).toContain("Fix it in the rows below");
+			expect(broken).toContain("65");
+
+			focusFirstCouncilReviewer(hub);
+			hub.handleInput(" ");
+			const persisted = onCouncilRosterChange.mock.lastCall?.[0] ?? [];
+			expect(persisted).toHaveLength(65);
+			expect(persisted.map(member => member.role)).toEqual(
+				Array.from({ length: 65 }, (_unused, index) => `council${index + 1}`),
+			);
+			expect(persisted[0]).toEqual({ role: "council1", enabled: false });
+
+			hub.refreshAfterExternalMutation();
+			const repaired = normalize(hub.render(200));
+			expect(repaired).toContain("Council 64/65 enabled");
+			expect(repaired).not.toContain("Fix it in the rows below");
+		});
+
+		test("a roster over the limit by two walks back down one row at a time", () => {
+			const settings = Settings.isolated({
+				"council.members": Array.from({ length: 66 }, (_unused, index) => ({
+					role: `council${index + 1}`,
+					enabled: true,
+				})),
+			});
+			const { hub, onCouncilRosterChange } = createHub({
+				models: [makeModel("test", "model-a")],
+				scoped: true,
+				settings,
+				hub: { initialSection: "council" },
+			});
+
+			// 66 -> 65 is still over the limit, but it is progress, so refusing it would strand the
+			// roster in a state the editor could never repair.
+			focusFirstCouncilReviewer(hub);
+			hub.handleInput(" ");
+			expect(onCouncilRosterChange).toHaveBeenCalledTimes(1);
+			expect(normalize(hub.render(200))).toContain("Council 65/66 enabled");
+
+			focusFirstCouncilReviewer(hub);
+			hub.handleInput(DOWN);
+			hub.handleInput(" ");
+			expect(onCouncilRosterChange).toHaveBeenCalledTimes(2);
+			const persisted = onCouncilRosterChange.mock.lastCall?.[0] ?? [];
+			expect(persisted.filter(member => member.enabled)).toHaveLength(64);
+			hub.refreshAfterExternalMutation();
+			const repaired = normalize(hub.render(200));
+			expect(repaired).toContain("Council 64/66 enabled");
+			expect(repaired).not.toContain("Fix it in the rows below");
+		});
+
+		test("recovering an oversized roster keeps assignments, display names, order, and a malformed pin", () => {
+			const settings = Settings.isolated({
+				"council.members": [
+					...Array.from({ length: 64 }, (_unused, index) => ({ role: `council${index + 1}`, enabled: true })),
+					{ role: "judge2", enabled: true, round: 3 },
+				],
+				modelRoles: { council1: "test/model-a" },
+				modelTags: { council2: { name: "Safety Judge" } },
+			});
+			const { hub, onCouncilRosterChange } = createHub({
+				models: [makeModel("test", "model-a")],
+				scoped: true,
+				settings,
+				hub: { initialSection: "council" },
+			});
+
+			focusFirstCouncilReviewer(hub);
+			hub.handleInput(" ");
+			const persisted = onCouncilRosterChange.mock.lastCall?.[0] ?? [];
+			expect(persisted).toHaveLength(65);
+			expect(persisted[0]).toEqual({ role: "council1", enabled: false });
+			// The unrelated edit must not silently repair — and so destroy — the pin still to be fixed.
+			// `3` is outside `1 | 2` by construction, so the expectation is compared as raw data.
+			expect(persisted.at(-1) as unknown).toEqual({ role: "judge2", enabled: true, round: 3 });
+			expect(settings.getModelRole("council1")).toBe("test/model-a");
+			expect(settings.get("modelTags").council2?.name).toBe("Safety Judge");
+		});
+
+		test("a custom roster id renders as a stable humanized label", () => {
+			const settings = Settings.isolated({
+				"council.members": [{ role: "judge2", enabled: true }],
+				modelRoles: { judge2: "test/model-a" },
+			});
+			const { hub } = createHub({
+				models: [makeModel("test", "model-a")],
+				scoped: true,
+				settings,
+				hub: { initialSection: "council" },
+			});
+
+			expect(normalize(hub.render(200))).toContain("Judge 2 test/model-a");
+			expect(councilRoleLabel("judge2")).toBe("Judge 2");
+			expect(councilRoleLabel("deep_dive")).toBe("Deep Dive");
+		});
+
+		test("a modelTags name renames only the Model Hub row, never the durable label", () => {
+			const settings = Settings.isolated({
+				"council.members": [{ role: "council1", enabled: true }],
+				modelTags: { council1: { name: "Safety Judge" } },
+			});
+			const { hub } = createHub({
+				models: [makeModel("test", "model-a")],
+				scoped: true,
+				settings,
+				hub: { initialSection: "council" },
+			});
+
+			const rendered = normalize(hub.render(200));
+			expect(rendered).toContain("Safety Judge");
+			expect(rendered).not.toContain("Reviewer 1");
+			// A manifest snapshots the role id, so a rename must not relabel a historical run card.
+			expect(councilRoleLabel("council1")).toBe("Reviewer 1");
 		});
 	});
 

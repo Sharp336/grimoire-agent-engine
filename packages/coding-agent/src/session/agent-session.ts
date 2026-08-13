@@ -3786,7 +3786,18 @@ export class AgentSession {
 
 	async #doDispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
 		this.beginDispose();
-		await this.#sessionTransitionReconciler?.();
+		// An identity-transition reconciler rejection (bounded Council quiescence missing its
+		// deadline) is a *transition* failure, not a reason to abandon terminal teardown: session
+		// exit recording, prompt/agent abort, memory, jobs, providers, files, and listeners must all
+		// still run. Capture it, finish disposal, then rethrow so the host logs it and exits nonzero.
+		let reconcilerFailed = false;
+		let reconcilerFailure: unknown;
+		try {
+			await this.#sessionTransitionReconciler?.();
+		} catch (error) {
+			reconcilerFailed = true;
+			reconcilerFailure = error;
+		}
 		this.#recordSessionExit(options.reason ?? "dispose");
 		this.#cancelExitRecorder?.();
 		this.#cancelExitRecorder = undefined;
@@ -3857,6 +3868,7 @@ export class AgentSession {
 		}
 		this.#eventListeners = [];
 		this.#sessionChangeCallbacks.clear();
+		if (reconcilerFailed) throw reconcilerFailure;
 	}
 
 	#closeAllProviderSessions(reason: string): void {
@@ -6173,8 +6185,13 @@ export class AgentSession {
 	 * Generate an automatic session title tied to this session's lifecycle.
 	 * Input and replan callers share the signal so disposal cancels provider and
 	 * local-worker requests instead of leaving background inference alive.
+	 *
+	 * A caller that supplies its own `signal` has it unioned with the session's, so whichever fires
+	 * first cancels the provider request rather than leaving it to bill against a result nobody
+	 * will read.
 	 */
-	generateTitle(firstMessage: string): Promise<string | null> {
+	generateTitle(firstMessage: string, signal?: AbortSignal): Promise<string | null> {
+		const sessionSignal = this.#titleGenerationAbortController.signal;
 		return generateSessionTitle(
 			firstMessage,
 			this.#modelRegistry,
@@ -6183,7 +6200,7 @@ export class AgentSession {
 			this.model,
 			provider => this.agent.metadataForProvider(provider),
 			this.#titleSystemPrompt,
-			this.#titleGenerationAbortController.signal,
+			signal ? AbortSignal.any([sessionSignal, signal]) : sessionSignal,
 		);
 	}
 

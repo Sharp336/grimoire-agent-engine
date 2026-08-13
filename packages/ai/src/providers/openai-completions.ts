@@ -974,7 +974,7 @@ const streamOpenAICompletionsOnce = (
 			};
 			const streamMarkupHealingPattern = policy.stream.markupHealingPattern;
 			const streamMarkupHealing = streamMarkupHealingPattern
-				? new StreamMarkupHealing({ pattern: streamMarkupHealingPattern })
+				? new StreamMarkupHealing({ pattern: streamMarkupHealingPattern, tools: context.tools })
 				: undefined;
 			const explicitReasoningDeltasMayBeCumulative = policy.stream.reasoningDeltasMayBeCumulative;
 			let suppressHealedThinking = false;

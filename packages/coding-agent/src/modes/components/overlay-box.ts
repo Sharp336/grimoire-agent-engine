@@ -100,6 +100,17 @@ export function dividerSplit(width: number, sidebarWidth: number): string {
 	);
 }
 
+/** Section rule that OPENS the split columns with a `┬` over the divider. */
+export function dividerSplitOpen(width: number, sidebarWidth: number): string {
+	const box = theme.boxRound;
+	const dividerCol = splitDividerCol(sidebarWidth);
+	const leftLen = Math.max(0, dividerCol - 1);
+	const rightLen = Math.max(0, width - 2 - dividerCol);
+	return paint(
+		box.teeRight + box.horizontal.repeat(leftLen) + box.teeDown + box.horizontal.repeat(rightLen) + box.teeLeft,
+	);
+}
+
 /** A two-column content row: `│ sidebar │ body │`, each inset by one column. */
 export function splitRow(sidebar: string, body: string, width: number, sidebarWidth: number): string {
 	const box = theme.boxRound;

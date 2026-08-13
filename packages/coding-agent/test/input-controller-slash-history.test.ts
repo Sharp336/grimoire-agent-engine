@@ -67,6 +67,7 @@ function makeCtx(isStreaming = false) {
 		updatePendingMessagesDisplay: vi.fn(),
 		showWarning: vi.fn(),
 		showError: vi.fn(),
+		isCouncilAdjudicating: () => false,
 	} as unknown as InteractiveModeContext;
 	return {
 		ctx,

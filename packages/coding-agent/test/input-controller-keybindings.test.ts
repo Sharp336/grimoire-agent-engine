@@ -111,6 +111,10 @@ async function createContext() {
 	const canCopyBtw = vi.fn(() => false);
 	const hasActiveBtw = vi.fn(() => false);
 	const handlesBtwBranchKey = vi.fn(() => false);
+	const hasActiveCouncil = vi.fn(() => false);
+	const councilPaneActive = vi.fn(() => false);
+	const toggleCouncilPaneExpansion = vi.fn(() => true);
+	const setCouncilPaneExpanded = vi.fn();
 	const editor: FakeEditor = {
 		setText(text: string) {
 			editorText = text;
@@ -220,6 +224,11 @@ async function createContext() {
 		handleBtwCopyKey,
 		showError,
 		showStatus: vi.fn(),
+		hasActiveCouncil,
+		isCouncilAdjudicating: () => false,
+		toggleCouncilPaneExpansion,
+		setCouncilPaneExpanded,
+		councilPane: { isActive: councilPaneActive } as unknown as InteractiveModeContext["councilPane"],
 	} as unknown as InteractiveModeContext;
 
 	return {
@@ -250,6 +259,10 @@ async function createContext() {
 			handleBtwCopyKey,
 			canCopyBtw,
 			showError,
+			hasActiveCouncil,
+			councilPaneActive,
+			toggleCouncilPaneExpansion,
+			setCouncilPaneExpanded,
 		},
 	};
 }
@@ -293,6 +306,48 @@ describe("InputController keybinding setup", () => {
 		expect(ctx.settings.set).toHaveBeenCalledWith("display.hideToolActivity", true);
 		expect(spies.clearInlineImages).toHaveBeenCalledTimes(1);
 		expect(spies.resetDisplay).toHaveBeenCalledTimes(1);
+	});
+
+	it("routes the expand key to the council pane alone while a run is live", async () => {
+		const { InputController, ctx, spies } = await createContext();
+		const controller = new InputController(ctx);
+		const block = {
+			expanded: false,
+			setExpanded(expanded: boolean) {
+				this.expanded = expanded;
+			},
+		};
+		(ctx.chatContainer.children as unknown[]).push(block);
+		spies.hasActiveCouncil.mockReturnValue(true);
+		spies.councilPaneActive.mockReturnValue(true);
+
+		controller.toggleToolOutputExpansion();
+
+		expect(spies.toggleCouncilPaneExpansion).toHaveBeenCalledTimes(1);
+		expect(spies.setCouncilPaneExpanded).not.toHaveBeenCalled();
+		expect(ctx.toolOutputExpanded).toBe(false);
+		expect(block.expanded).toBe(false);
+	});
+
+	it("expands the whole transcript when no council pane is showing", async () => {
+		const { InputController, ctx, spies } = await createContext();
+		const controller = new InputController(ctx);
+		const block = {
+			expanded: false,
+			setExpanded(expanded: boolean) {
+				this.expanded = expanded;
+			},
+		};
+		(ctx.chatContainer.children as unknown[]).push(block);
+		spies.hasActiveCouncil.mockReturnValue(true);
+		spies.councilPaneActive.mockReturnValue(false);
+
+		controller.toggleToolOutputExpansion();
+
+		expect(spies.toggleCouncilPaneExpansion).not.toHaveBeenCalled();
+		expect(spies.setCouncilPaneExpanded).toHaveBeenCalledWith(true);
+		expect(ctx.toolOutputExpanded).toBe(true);
+		expect(block.expanded).toBe(true);
 	});
 
 	it("does not mark pasted shell prompts as Python mode while editing", async () => {

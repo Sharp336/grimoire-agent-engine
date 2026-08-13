@@ -102,6 +102,18 @@ export class DeepSeekInbandScanner implements InbandScanner {
 	#dsmlParamRaw = "";
 	#rawBlock = "";
 	#stripLeadingWhitespace = false;
+	/**
+	 * Body bytes consumed since the current tool-call envelope opened, replayed as
+	 * text when the envelope closes without producing a single call. DeepSeek V4
+	 * leaks half-degenerate envelopes (a `<｜DSML｜tool_calls>` wrapper around
+	 * plain `<invoke>` tags, or a stray wrapper in prose), and without the replay
+	 * the section scanner drops every unmatched byte, deleting the rest of the
+	 * turn. Replayed text flows on to the plain-tagset healer, which can still
+	 * recover the calls. The envelope tokens themselves are never replayed: they
+	 * are unambiguous chat-template markup, not prose.
+	 */
+	#sectionRaw = "";
+	#sectionProduced = false;
 
 	constructor(options: InbandScannerOptions = {}) {
 		this.#parseThinking = options.parseThinking ?? true;
@@ -131,7 +143,7 @@ export class DeepSeekInbandScanner implements InbandScanner {
 				continue;
 			}
 			if (this.#state === "section") {
-				if (!this.#consumeSection(final)) break;
+				if (!this.#consumeSection(final, events)) break;
 				continue;
 			}
 			if (this.#state === "header") {
@@ -157,6 +169,10 @@ export class DeepSeekInbandScanner implements InbandScanner {
 			if (!this.#consumeDsmlParam(final, events)) break;
 		}
 		if (final && this.#state === "thinking") this.#endThinking(events);
+		// An envelope that never closed and never produced a call was not tool-call
+		// markup; replay it instead of deleting the tail of the turn. A truncated
+		// invoke still drops, since that is a cut-off call rather than prose.
+		if (final && this.#sectionRaw.length > 0) this.#closeSection(events);
 		if (final && this.#buffer.length === 0 && this.#rawBlock.length > 0) this.#rawBlock = "";
 		return events;
 	}
@@ -188,7 +204,7 @@ export class DeepSeekInbandScanner implements InbandScanner {
 			if (this.#buffer.startsWith(DEEPSEEK_TOOL_CALLS_BEGIN)) {
 				this.#buffer = this.#buffer.slice(DEEPSEEK_TOOL_CALLS_BEGIN.length);
 				this.#inToolSection = true;
-				this.#state = "section";
+				this.#openSection("section");
 				return;
 			}
 			if (this.#buffer.startsWith(DEEPSEEK_TOOL_CALL_BEGIN)) {
@@ -213,7 +229,7 @@ export class DeepSeekInbandScanner implements InbandScanner {
 					? DSML_TOOL_CALLS_OPEN_FULLWIDTH
 					: DSML_TOOL_CALLS_OPEN_ASCII;
 				this.#buffer = this.#buffer.slice(openToken.length);
-				this.#state = "dsmlSection";
+				this.#openSection("dsmlSection");
 				return;
 			}
 			const control = this.#matchingControlToken();
@@ -240,13 +256,13 @@ export class DeepSeekInbandScanner implements InbandScanner {
 		this.#endThinking(events);
 	}
 
-	#consumeSection(final: boolean): boolean {
+	#consumeSection(final: boolean, events: InbandScanEvent[]): boolean {
 		while (this.#buffer.length > 0) {
-			this.#skipWhitespace();
+			this.#sectionRaw += this.#skipWhitespace();
 			if (this.#buffer.startsWith(DEEPSEEK_TOOL_CALLS_END)) {
 				this.#buffer = this.#buffer.slice(DEEPSEEK_TOOL_CALLS_END.length);
 				this.#inToolSection = false;
-				this.#state = "outside";
+				this.#closeSection(events);
 				return true;
 			}
 			if (this.#buffer.startsWith(DEEPSEEK_TOOL_CALL_BEGIN)) {
@@ -257,6 +273,7 @@ export class DeepSeekInbandScanner implements InbandScanner {
 			}
 			if (!final && partialSuffixOverlapAny(this.#buffer, SECTION_TOKENS) === this.#buffer.length) return false;
 			if (this.#buffer.length === 0) return false;
+			this.#sectionRaw += this.#buffer[0]!;
 			this.#buffer = this.#buffer.slice(1);
 		}
 		return final;
@@ -310,6 +327,7 @@ export class DeepSeekInbandScanner implements InbandScanner {
 		}
 		const rawTail = this.#buffer.slice(0, end + DEEPSEEK_TOOL_CALL_END.length);
 		this.#rawBlock += rawTail;
+		this.#sectionProduced = true;
 		events.push({
 			type: "toolEnd",
 			id: this.#id,
@@ -324,11 +342,11 @@ export class DeepSeekInbandScanner implements InbandScanner {
 
 	#consumeDsmlSection(final: boolean, events: InbandScanEvent[]): boolean {
 		while (this.#buffer.length > 0) {
-			this.#skipWhitespace();
+			this.#sectionRaw += this.#skipWhitespace();
 			const close = this.#matchingDsmlClose(DSML_TOOL_CALLS_CLOSE_FULLWIDTH, DSML_TOOL_CALLS_CLOSE_ASCII);
 			if (close) {
 				this.#buffer = this.#buffer.slice(close.length);
-				this.#state = "outside";
+				this.#closeSection(events);
 				return true;
 			}
 			const invoke = this.#matchDsmlOpen("invoke");
@@ -350,6 +368,7 @@ export class DeepSeekInbandScanner implements InbandScanner {
 				if (partialSuffixOverlapAny(this.#buffer, DSML_SECTION_TOKENS) === this.#buffer.length) return false;
 			}
 			if (this.#buffer.length === 0) return false;
+			this.#sectionRaw += this.#buffer[0]!;
 			this.#buffer = this.#buffer.slice(1);
 		}
 		return final;
@@ -363,6 +382,7 @@ export class DeepSeekInbandScanner implements InbandScanner {
 			if (close) {
 				this.#rawBlock += close;
 				this.#buffer = this.#buffer.slice(close.length);
+				this.#sectionProduced = true;
 				events.push({
 					type: "toolEnd",
 					id: this.#id,
@@ -416,6 +436,26 @@ export class DeepSeekInbandScanner implements InbandScanner {
 		this.#dsmlParamRaw = "";
 		this.#state = "dsmlInvoke";
 		return true;
+	}
+
+	#openSection(next: State): void {
+		this.#sectionRaw = "";
+		this.#sectionProduced = false;
+		this.#state = next;
+	}
+
+	/**
+	 * Leave a tool-call envelope. One that produced no call was never tool-call
+	 * markup, so its body is replayed verbatim as text rather than dropped. A
+	 * whitespace-only body is template padding, not content, and stays dropped.
+	 */
+	#closeSection(events: InbandScanEvent[]): void {
+		if (!this.#sectionProduced && this.#sectionRaw.trim().length > 0) {
+			events.push({ type: "text", text: this.#sectionRaw });
+		}
+		this.#sectionRaw = "";
+		this.#sectionProduced = false;
+		this.#state = "outside";
 	}
 
 	#startTool(name: string, events: InbandScanEvent[]): void {

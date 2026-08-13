@@ -11,11 +11,7 @@ import { isDeepseekModelIdOrName } from "@oh-my-pi/pi-catalog/identity";
 
 import { createInbandScanner } from "../dialect/factory";
 import { ThinkingInbandScanner } from "../dialect/thinking";
-import type { InbandScanEvent, InbandScanner } from "../dialect/types";
-
-const KIMI_SECTION_END = "<|tool_calls_section_end|>";
-const DSML_TOOL_CALLS_CLOSE_FULLWIDTH = "</｜DSML｜tool_calls>";
-const DSML_TOOL_CALLS_CLOSE_ASCII = "</|DSML|tool_calls>";
+import type { InbandScanEvent, InbandScanner, InbandTool } from "../dialect/types";
 
 export interface HealedToolCall {
 	readonly id: string;
@@ -27,6 +23,15 @@ export type StreamMarkupHealingPattern = "kimi" | "dsml" | "thinking";
 
 export interface StreamMarkupHealingOptions {
 	readonly pattern: StreamMarkupHealingPattern;
+	/**
+	 * Tool schemas for the current request. The XML/DSML tagset carries no type
+	 * information on `<parameter>` unless the model emits `string="…"`, so
+	 * without the schemas every value that happens to parse as JSON is decoded:
+	 * a `write` whose `content` is a JSON document arrives as an object, a
+	 * `bash` whose `command` is `42` arrives as a number, and the call fails
+	 * argument validation. Declared string-only parameters are read verbatim.
+	 */
+	readonly tools?: readonly InbandTool[];
 }
 
 export type StreamMarkupHealingEvent =
@@ -41,7 +46,8 @@ export type StreamMarkupHealingEvent =
  * A {@link ThinkingInbandScanner} always heals leaked reasoning idioms
  * (`<think>`, `<thinking>`, ` ```thinking `, Gemma/Harmony channels, …) out of
  * the visible channel. For Kimi / DeepSeek-DSML the provider tool-call grammar
- * runs first and its cleaned text is piped through that thinking healer, so a
+ * runs first, its cleaned text is piped through the stripped-DSML grammar (DSML
+ * only), and whatever survives is piped through that thinking healer — so a
  * model can leak tool-call markup and reasoning in the same stream.
  *
  * Feed only one stream channel (usually `delta.content` / `message.content`).
@@ -52,19 +58,28 @@ export class StreamMarkupHealing {
 	readonly #pattern: StreamMarkupHealingPattern;
 	/** Provider tool-call grammar (Kimi tokens / DSML envelope); absent for plain text streams. */
 	readonly #toolScanner: InbandScanner | undefined;
+	/**
+	 * Second-stage grammar for DSML envelopes whose `｜DSML｜` special tokens were
+	 * stripped upstream, leaving the bare `<tool_calls>` / `<invoke name="…">` /
+	 * `<parameter name="…">` skeleton the Anthropic tagset already parses. The
+	 * exact-token DSML grammar cannot match those, so they would otherwise reach
+	 * the user as visible text and the turn would carry no tool calls at all.
+	 */
+	readonly #strippedToolScanner: InbandScanner | undefined;
 	/** Always-on healer for leaked reasoning idioms in the visible text channel. */
 	readonly #thinkingScanner = new ThinkingInbandScanner();
-	#sectionTerminated = false;
 	readonly #completed: HealedToolCall[] = [];
 
 	constructor(options: StreamMarkupHealingOptions) {
+		const tools = options.tools;
 		this.#pattern = options.pattern;
 		this.#toolScanner =
 			options.pattern === "kimi"
-				? createInbandScanner("kimi")
+				? createInbandScanner("kimi", { tools })
 				: options.pattern === "dsml"
-					? createInbandScanner("xml", { xmlTagset: "dsml" })
+					? createInbandScanner("xml", { tools, xmlTagset: "dsml" })
 					: undefined;
+		this.#strippedToolScanner = options.pattern === "dsml" ? createInbandScanner("xml", { tools }) : undefined;
 	}
 
 	get pattern(): StreamMarkupHealingPattern {
@@ -92,9 +107,10 @@ export class StreamMarkupHealing {
 	/** Feed a chunk and return cleaned text/thinking/tool-call events in stream order. */
 	feedEvents(text: string): StreamMarkupHealingEvent[] {
 		if (text.length === 0) return [];
-		this.#markSectionClosed(text);
 		if (!this.#toolScanner) return this.#convertScannerEvents(this.#thinkingScanner.feed(text));
-		return this.#convertScannerEvents(this.#healThinking(this.#toolScanner.feed(text)));
+		let events = this.#toolScanner.feed(text);
+		if (this.#strippedToolScanner) events = this.#pipeText(events, this.#strippedToolScanner);
+		return this.#convertScannerEvents(this.#pipeText(events, this.#thinkingScanner));
 	}
 
 	/**
@@ -130,7 +146,12 @@ export class StreamMarkupHealing {
 	 * behavior.
 	 */
 	flushEvents(): StreamMarkupHealingEvent[] {
-		const tail = this.#toolScanner ? this.#healThinking(this.#toolScanner.flush()) : [];
+		let tail: InbandScanEvent[] = this.#toolScanner ? this.#toolScanner.flush() : [];
+		if (this.#strippedToolScanner) {
+			tail = this.#pipeText(tail, this.#strippedToolScanner);
+			tail.push(...this.#strippedToolScanner.flush());
+		}
+		tail = this.#pipeText(tail, this.#thinkingScanner);
 		tail.push(...this.#thinkingScanner.flush());
 		return this.#convertScannerEvents(tail);
 	}
@@ -148,30 +169,15 @@ export class StreamMarkupHealing {
 		return clean;
 	}
 
-	/** True once any configured tool-call section/envelope has fully closed. */
-	get sectionClosed(): boolean {
-		return this.#sectionTerminated;
-	}
-
-	#markSectionClosed(text: string): void {
-		if (this.#sectionTerminated || !this.#toolScanner) return;
-		if (this.#pattern === "kimi") {
-			this.#sectionTerminated = text.includes(KIMI_SECTION_END);
-			return;
-		}
-		this.#sectionTerminated =
-			text.includes(DSML_TOOL_CALLS_CLOSE_FULLWIDTH) || text.includes(DSML_TOOL_CALLS_CLOSE_ASCII);
-	}
-
 	/**
-	 * Re-scan the tool scanner's visible text through the always-on thinking
-	 * healer: `text` events are healed for leaked reasoning idioms, while the tool
-	 * scanner's own thinking / tool-call events pass through in stream order.
+	 * Re-scan one stage's visible text through the next healer: `text` events are
+	 * fed to `scanner`, while everything the upstream stage already resolved
+	 * (thinking / tool-call events) passes through in stream order.
 	 */
-	#healThinking(toolEvents: readonly InbandScanEvent[]): InbandScanEvent[] {
+	#pipeText(events: readonly InbandScanEvent[], scanner: InbandScanner): InbandScanEvent[] {
 		const out: InbandScanEvent[] = [];
-		for (const event of toolEvents) {
-			if (event.type === "text") out.push(...this.#thinkingScanner.feed(event.text));
+		for (const event of events) {
+			if (event.type === "text") out.push(...scanner.feed(event.text));
 			else out.push(event);
 		}
 		return out;
@@ -218,30 +224,20 @@ export function modelMayLeakKimiToolCalls(provider: string, modelId: string): bo
 	return /kimi[-/_.]?k2/i.test(modelId);
 }
 
-/** Cheap model/provider gate for DeepSeek DSML envelope leaks. */
-export function modelMayLeakDsmlToolCalls(provider: string, modelId: string): boolean {
-	if (!isDeepseekModelIdOrName(modelId)) return false;
-	return (
-		provider === "ollama" ||
-		provider === "ollama-cloud" ||
-		provider === "nvidia" ||
-		provider === "deepseek" ||
-		provider === "fireworks" ||
-		provider === "nanogpt" ||
-		provider === "opencode-go" ||
-		provider === "openrouter"
-	);
-}
-
 /**
  * Pick the leaked-markup healer for an OpenAI-compatible / Ollama visible-text
  * stream. Kimi chat-template tokens and DeepSeek DSML envelopes need their
  * dedicated tool-call grammars; every other model uses `"thinking"`. All three
  * patterns run the generic {@link ThinkingInbandScanner}, so leaked reasoning
  * idioms (e.g. a Gemini ` ```thinking ` fence on OpenRouter) are always healed.
+ *
+ * DSML selection keys off the model id alone rather than a provider allowlist:
+ * whether the envelope leaks is decided by the serving stack behind the host,
+ * not by the provider id a user configures, and a proxy in front of a leaking
+ * upstream carries an arbitrary id (`litellm`, `my-gateway`, …).
  */
 export function getStreamMarkupHealingPattern(provider: string, modelId: string): StreamMarkupHealingPattern {
 	if (modelMayLeakKimiToolCalls(provider, modelId)) return "kimi";
-	if (modelMayLeakDsmlToolCalls(provider, modelId)) return "dsml";
+	if (isDeepseekModelIdOrName(modelId)) return "dsml";
 	return "thinking";
 }

@@ -5,6 +5,8 @@ import { type Component, Spacer, Text, TruncatedText } from "@oh-my-pi/pi-tui";
 import type { AdvisorMessageDetails } from "../../advisor";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "../../collab/protocol";
 import { settings } from "../../config/settings";
+import type { CouncilSummaryDelivery } from "../../council/coordinator";
+import { COUNCIL_RUN_MESSAGE_TYPE, COUNCIL_SUMMARY_MESSAGE_TYPE } from "../../council/events";
 import { getEditClipboard } from "../../edit/edit-clipboard";
 import { getFileSnapshotStore } from "../../edit/file-snapshot-store";
 import { createAdvisorMessageCard } from "../../modes/components/advisor-message";
@@ -19,7 +21,11 @@ import {
 	createHandoffSummaryMessageComponent,
 } from "../../modes/components/compaction-summary-message";
 import {
-	COUNCIL_SUMMARY_MESSAGE_TYPE,
+	CouncilRunEventComponent,
+	type CouncilRunEventDetails,
+	createCouncilRunStatsLoader,
+} from "../../modes/components/council-run-message";
+import {
 	CouncilSummaryComponent,
 	type CouncilSummaryDetails,
 	createCouncilSummaryManifestLoader,
@@ -97,12 +103,54 @@ function imageLinksForMessage(
 }
 
 export class UiHelpers {
-	readonly #councilSummaryComponents = new Set<CouncilSummaryComponent>();
+	readonly #councilCards = new Set<CouncilSummaryComponent | CouncilRunEventComponent>();
+	/**
+	 * Live-only council summary cards, keyed by run id.
+	 *
+	 * A council that settles while Main is streaming keeps `deliverAs: "nextTurn"` for its durable
+	 * provider-context copy, which does not paint until that copy drains. This map holds the
+	 * present-only card mounted in the meantime; when the durable copy finally arrives, its render is
+	 * suppressed rather than the live card removed, because the live card's rows may already have
+	 * committed to native scrollback. A rebuild clears the map and replays the durable copy, so
+	 * exactly one card is visible at every point.
+	 */
+	readonly #liveCouncilSummaryCards = new Map<string, CouncilSummaryComponent>();
 	constructor(private ctx: InteractiveModeContext) {}
-	/** Invalidate detached summary hydration before a non-preserving transcript rebuild. */
+	/** Invalidate detached council-card hydration before a non-preserving transcript rebuild. */
 	disposeCouncilSummaries(): void {
-		for (const component of this.#councilSummaryComponents) component.dispose();
-		this.#councilSummaryComponents.clear();
+		for (const component of this.#councilCards) component.dispose();
+		this.#councilCards.clear();
+		this.#liveCouncilSummaryCards.clear();
+	}
+
+	/**
+	 * Paint a council summary the coordinator delivered outside any render path.
+	 *
+	 * `sendCustomMessage` neither repaints on the idle append (`agent.appendMessage` emits nothing)
+	 * nor on the streaming queue (the copy is held for the next turn), so without this the card is
+	 * invisible until unrelated input forces a repaint.
+	 */
+	presentCouncilSummaryDelivery(delivery: CouncilSummaryDelivery): void {
+		if (!delivery.deferred) {
+			if (this.ctx.initialChatRendered) this.ctx.rebuildChatFromMessages();
+			return;
+		}
+		if (this.#liveCouncilSummaryCards.has(delivery.runId)) return;
+		const component = new CouncilSummaryComponent(
+			{
+				role: "custom",
+				customType: COUNCIL_SUMMARY_MESSAGE_TYPE,
+				content: delivery.content,
+				display: true,
+				details: delivery.details,
+				timestamp: Date.now(),
+			},
+			createCouncilSummaryManifestLoader(this.ctx.viewSession),
+			() => this.ctx.ui.requestRender(),
+		);
+		this.#liveCouncilSummaryCards.set(delivery.runId, component);
+		this.#councilCards.add(component);
+		this.ctx.present(component);
 	}
 
 	/** Extract text content from a user message */
@@ -176,12 +224,32 @@ export class UiHelpers {
 						break;
 					}
 					if (message.customType === COUNCIL_SUMMARY_MESSAGE_TYPE) {
+						const summary = message as CustomMessage<CouncilSummaryDetails>;
+						const runId = typeof summary.details?.runId === "string" ? summary.details.runId : undefined;
+						// The live-only card for this run is already on screen; rendering the durable copy
+						// beside it would double the card. Re-hydrate the live one instead so it reflects
+						// the manifest as of now.
+						const live = runId ? this.#liveCouncilSummaryCards.get(runId) : undefined;
+						if (live) {
+							live.hydrate();
+							break;
+						}
 						const component = new CouncilSummaryComponent(
-							message as CustomMessage<CouncilSummaryDetails>,
+							summary,
 							createCouncilSummaryManifestLoader(this.ctx.viewSession),
 							() => this.ctx.ui.requestRender(),
 						);
-						this.#councilSummaryComponents.add(component);
+						this.#councilCards.add(component);
+						this.ctx.chatContainer.addChild(component);
+						break;
+					}
+					if (message.customType === COUNCIL_RUN_MESSAGE_TYPE) {
+						const component = new CouncilRunEventComponent(
+							message as CustomMessage<CouncilRunEventDetails>,
+							createCouncilRunStatsLoader(this.ctx.viewSession),
+							() => this.ctx.ui.requestRender(),
+						);
+						this.#councilCards.add(component);
 						this.ctx.chatContainer.addChild(component);
 						break;
 					}

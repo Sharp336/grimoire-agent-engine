@@ -94,6 +94,34 @@ it("reports overlay provenance for a null tombstone that blocks the global fallb
 	}
 });
 
+it("removes a project setting from the file that declared it, leaving its siblings intact", async () => {
+	const testDir = path.join(os.tmpdir(), `project-remove-${Snowflake.next()}`);
+	const projectDir = path.join(testDir, "project");
+	const projectConfig = path.join(projectDir, ".omp", "config.yml");
+	fs.mkdirSync(path.dirname(projectConfig), { recursive: true });
+	fs.writeFileSync(
+		projectConfig,
+		"permissions:\n  mode: default\ncouncil:\n  members:\n    - role: council1\n      enabled: true\n  rounds: 2\n",
+	);
+	try {
+		const settings = await Settings.loadIsolated({ cwd: projectDir, agentDir: testDir });
+		expect(settings.getProjectSettingSource("council.members")).toBe(projectConfig);
+
+		expect(await settings.removeProjectSetting("council.members")).toBeTrue();
+		// Idempotent: callers may order a destination write before this and re-run it.
+		expect(await settings.removeProjectSetting("council.members")).toBeFalse();
+		expect(settings.getRawSetting("council.members", "project").configured).toBeFalse();
+		expect(settings.getProjectSettingSource("council.members")).toBeUndefined();
+
+		// Only the requested key leaves the file; its siblings and parent survive.
+		const remaining = YAML.parse(fs.readFileSync(projectConfig, "utf8")) as Record<string, unknown>;
+		expect(remaining).toEqual({ permissions: { mode: "default" }, council: { rounds: 2 } });
+		expect(settings.get("council.rounds")).toBe(2);
+	} finally {
+		if (fs.existsSync(testDir)) removeSyncWithRetries(testDir);
+	}
+});
+
 describe("Settings.reloadForCwd", () => {
 	let settingsState: SettingsTestState | undefined;
 

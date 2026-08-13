@@ -512,6 +512,12 @@ export interface SingleResult {
 	abortReason?: string;
 	/** Aggregated usage from the subprocess, accumulated incrementally from message_end events. */
 	usage?: Usage;
+	/**
+	 * Spend of the live advisor attached to this child, when one was attached. Reported apart from
+	 * {@link usage} because the advisor runs its own model on its own ledger; a caller that pre-named
+	 * the advisor model folds this into the same role bucket so the totals stay reconciled.
+	 */
+	advisorUsage?: { requests: number; tokens: number; cost: number };
 	/** Output path for the task result */
 	outputPath?: string;
 	/** Patch path for isolated worktree output */

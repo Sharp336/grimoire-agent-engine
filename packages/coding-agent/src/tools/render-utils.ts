@@ -10,7 +10,7 @@ import * as path from "node:path";
 import type { ToolCallContext } from "@oh-my-pi/pi-agent-core";
 import type { Ellipsis } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
-import { getKeybindings, replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
+import { getKeybindings, replaceTabs, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 import { pluralize } from "@oh-my-pi/pi-utils";
 import { formatKeyHints, type KeyId } from "../config/keybindings";
 import { isSettingsInitialized, settings } from "../config/settings";
@@ -120,6 +120,44 @@ export function getPreviewLines(text: string, maxLines: number, maxLineLen: numb
  */
 export function previewLine(text: string, maxWidth: number, ellipsis?: Ellipsis): string {
 	return truncateToWidth(text.replace(/\s+/g, " ").trim(), maxWidth, ellipsis);
+}
+
+/**
+ * Truncate to `maxWidth` display cells while keeping both ends, e.g.
+ * `anthropic/cl…-sonnet-4-5`. Prefer this over {@link truncateToWidth} when the
+ * tail carries identity a trailing ellipsis would eat (model ids, versions,
+ * hashes). Input must be plain text: escape sequences are iterated as ordinary
+ * code points, so sanitize (or {@link previewLine}) before calling.
+ */
+export function truncateMiddleToWidth(text: string, maxWidth: number): string {
+	const limit = Number.isFinite(maxWidth) ? Math.max(0, Math.trunc(maxWidth)) : 0;
+	if (limit === 0) return "";
+	if (visibleWidth(text) <= limit) return text;
+	const marker = "…";
+	const budget = limit - visibleWidth(marker);
+	// Too narrow for head + marker + tail: a plain head clip is the only honest option.
+	if (budget <= 0) return truncateToWidth(text, limit);
+	const headBudget = Math.ceil(budget / 2);
+	const chars = Array.from(text);
+	let head = "";
+	let headWidth = 0;
+	for (const char of chars) {
+		const charWidth = visibleWidth(char);
+		if (headWidth + charWidth > headBudget) break;
+		head += char;
+		headWidth += charWidth;
+	}
+	let tail = "";
+	let tailWidth = 0;
+	const tailBudget = budget - headWidth;
+	for (let index = chars.length - 1; index >= 0; index--) {
+		const char = chars[index] ?? "";
+		const charWidth = visibleWidth(char);
+		if (tailWidth + charWidth > tailBudget) break;
+		tail = `${char}${tail}`;
+		tailWidth += charWidth;
+	}
+	return `${head}${marker}${tail}`;
 }
 
 // =============================================================================

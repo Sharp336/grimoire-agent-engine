@@ -17,6 +17,7 @@ import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AdvisorStats } from "@oh-my-pi/pi-coding-agent/session/session-advisors";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
@@ -67,6 +68,36 @@ function yieldEmittingSession(): AgentSession {
 			isError: false,
 		});
 	});
+}
+
+/**
+ * Advisor ledger stub matching the shape {@link runSubprocess} reads at teardown.
+ * Only the fields the executor projects onto `advisorUsage` carry meaning here.
+ */
+function advisorStats(overrides: {
+	assistant: number;
+	input: number;
+	output: number;
+	cacheWrite: number;
+	cost: number;
+}): AdvisorStats {
+	return {
+		configured: true,
+		active: true,
+		contextWindow: 0,
+		contextTokens: 0,
+		tokens: {
+			input: overrides.input,
+			output: overrides.output,
+			reasoning: 0,
+			cacheRead: 0,
+			cacheWrite: overrides.cacheWrite,
+			total: overrides.input + overrides.output + overrides.cacheWrite,
+		},
+		cost: overrides.cost,
+		messages: { user: overrides.assistant, assistant: overrides.assistant, total: overrides.assistant * 2 },
+		advisors: [],
+	};
 }
 
 function createSessionResult(session: AgentSession): CreateAgentSessionResult {
@@ -221,6 +252,105 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(forwarded?.outputSchemaMode).toBe("strict");
 		expect(persistedInits).toHaveLength(1);
 		expect(persistedInits[0]).toMatchObject({ restrictToolNames: true, tools: ["read", "yield"] });
+	});
+
+	it("opts a restricted child into an advisor with both keys the runtime requires", async () => {
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+		// The parent has no advisor of its own: the opt-in must supply the whole
+		// pair itself. `advisor.subagents` is not decoration: `SessionAdvisors`
+		// refuses to build a runtime for a non-main session without it, so an
+		// `advisor.enabled`-only override would be a silent no-op.
+		const parentSettings = Settings.isolated({ "advisor.enabled": false, "advisor.subagents": false });
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "restricted-advisor-child",
+			settings: parentSettings,
+			restrictToolNames: true,
+			advisor: true,
+		});
+
+		expect(result.exitCode).toBe(0);
+		const forwarded = spy.mock.calls[0]?.[0];
+		expect(forwarded?.restrictToolNames).toBe(true);
+		expect(forwarded?.settings?.get("advisor.enabled")).toBe(true);
+		expect(forwarded?.settings?.get("advisor.subagents")).toBe(true);
+		// The opt-in is per-child; the parent's own settings object is untouched.
+		expect(parentSettings.get("advisor.enabled")).toBe(false);
+	});
+
+	it("keeps a restricted child advisor-free when the caller does not opt in", async () => {
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+		// An advisor-enabled parent must not leak its advisor into a restricted
+		// child by inheritance: the boundary is closed unless `advisor` is passed.
+		const parentSettings = Settings.isolated({ "advisor.enabled": true, "advisor.subagents": true });
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "restricted-advisor-default-child",
+			settings: parentSettings,
+			restrictToolNames: true,
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(spy.mock.calls[0]?.[0]?.settings?.get("advisor.enabled")).toBe(false);
+	});
+
+	it("leaves an unrestricted child's advisor settings to the inherited configuration", async () => {
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+		const parentSettings = Settings.isolated({ "advisor.enabled": false, "advisor.subagents": true });
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "unrestricted-advisor-child",
+			settings: parentSettings,
+			advisor: true,
+		});
+
+		expect(result.exitCode).toBe(0);
+		// No restriction means no capability boundary to re-open: the override
+		// exists only to undo the restricted default.
+		expect(spy.mock.calls[0]?.[0]?.settings?.get("advisor.enabled")).toBe(false);
+	});
+
+	it("reports advisor spend on the result when the child's advisor actually ran", async () => {
+		const session = yieldEmittingSession();
+		Object.assign(session, {
+			getAdvisorStats: () => advisorStats({ assistant: 3, input: 500, output: 40, cacheWrite: 60, cost: 0.25 }),
+		});
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "advisor-usage-child",
+			restrictToolNames: true,
+			advisor: true,
+		});
+
+		expect(result.exitCode).toBe(0);
+		// Advisor spend rides its own ledger, invisible to `progress`; without this
+		// projection an opted-in caller bills an invisible model. cacheRead is
+		// excluded, matching the principal usage convention.
+		expect(result.advisorUsage).toEqual({ requests: 3, tokens: 600, cost: 0.25 });
+		// Separate line item, never folded into the principal token count.
+		expect(result.tokens).toBe(0);
+	});
+
+	it("omits advisorUsage when no advisor ran", async () => {
+		const session = yieldEmittingSession();
+		Object.assign(session, {
+			getAdvisorStats: () => advisorStats({ assistant: 0, input: 0, output: 0, cacheWrite: 0, cost: 0 }),
+		});
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		const result = await runSubprocess({ ...baseOptions, id: "advisor-idle-child" });
+
+		expect(result.exitCode).toBe(0);
+		// A configured-but-silent advisor is not a zero-valued line item.
+		expect(result.advisorUsage).toBeUndefined();
 	});
 
 	it("retains inherited MCP proxy tools for normal children", async () => {

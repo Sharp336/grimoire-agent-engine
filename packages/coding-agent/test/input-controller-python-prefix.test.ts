@@ -72,6 +72,7 @@ function createContext() {
 		handlePythonCommand,
 		handleBashCommand,
 		withLocalSubmission: async (_text: string, fn: () => Promise<unknown>) => fn(),
+		isCouncilAdjudicating: () => false,
 	} as unknown as InteractiveModeContext;
 
 	return {

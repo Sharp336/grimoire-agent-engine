@@ -1,8 +1,11 @@
 import * as fs from "node:fs/promises";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
+import { logger } from "@oh-my-pi/pi-utils";
 import { isAuthenticated, kNoAuth, type ModelRegistry } from "../config/model-registry";
 import * as modelResolver from "../config/model-resolver";
+import { councilRoleLabel } from "../config/model-roles";
 import type { Settings } from "../config/settings";
+import reviewLens from "../prompts/council/lens.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
 import type { SessionManager } from "../session/session-manager";
 import type { StructuredSubagentRequest } from "../task/structured-subagent";
@@ -11,23 +14,37 @@ import type { ConfiguredThinkingLevel } from "../thinking";
 import * as thinking from "../thinking";
 import type { ToolSession } from "../tools";
 import * as git from "../utils/git";
-import { type CouncilConfig, type CouncilMember, parseCouncilConfig, resolveCouncilMemberSelector } from "./config";
+import {
+	COUNCIL_ADJUDICATOR_ROLE,
+	COUNCIL_PLANNER_ROLE,
+	type CouncilConfig,
+	type CouncilMember,
+	councilMemberRounds,
+	parseCouncilConfig,
+	resolveCouncilMemberSelector,
+} from "./config";
 import * as instructions from "./instructions";
-import { getCouncilLens } from "./lenses";
 import type { CouncilPublicationTarget } from "./publication";
 import * as publication from "./publication";
-import { COUNCIL_PLANNER_SCHEMA, COUNCIL_REPORT_SCHEMA } from "./schema";
-import type { CouncilInstructionSnapshot } from "./state";
+import {
+	COUNCIL_ADJUDICATION_SCHEMA,
+	COUNCIL_PLANNER_SCHEMA,
+	COUNCIL_REPORT_SCHEMA,
+	COUNCIL_TASK_CHAR_LIMIT,
+} from "./schema";
+import { type CouncilInstructionSnapshot, type CouncilManifest, councilResumeRosterLimitRefusal } from "./state";
+import { councilPlanRoot } from "./storage";
 
 export const COUNCIL_AGENT_TOOLS = ["read", "grep", "glob", "lsp", "ast_grep"] as const;
-export const COUNCIL_TASK_CHAR_LIMIT = 40_000;
 
 export type CouncilDispatchErrorCode =
 	| "COUNCIL_CONFIG_INVALID"
 	| "COUNCIL_TASK_INVALID"
 	| "COUNCIL_NO_ENABLED_MEMBERS"
+	| "COUNCIL_ROUND_UNSTAFFED"
 	| "COUNCIL_MEMBER_MODEL_INVALID"
 	| "COUNCIL_PLANNER_MODEL_INVALID"
+	| "COUNCIL_ADJUDICATOR_MODEL_INVALID"
 	| "COUNCIL_MAIN_MODEL_INVALID"
 	| "COUNCIL_WRITE_TOOL_REQUIRED"
 	| "COUNCIL_REPOSITORY_INVALID"
@@ -63,16 +80,39 @@ export interface CouncilResolvedMember extends CouncilMember {
 	resolvedSelector: string;
 	model: Model<Api>;
 	effort: ConfiguredThinkingLevel | undefined;
+	/** The shared review brief. Identical for every reviewer; the assigned model supplies the difference. */
 	lens: string;
+	/** Configured rounds this reviewer serves; never empty (an inert member never reaches here). */
+	rounds: readonly number[];
+	/** Whether a live advisor watches this reviewer's turns. */
+	advisor: boolean;
 }
 
 export interface CouncilResolvedPlanner {
-	role: "slow";
+	/** `planner` when the lead role is assigned, `slow` when it falls back. */
+	role: string;
 	requestedSelector: string;
 	resolvedSelector: string;
 	model: Model<Api>;
 	effort: ConfiguredThinkingLevel | undefined;
+	advisor: boolean;
 }
+
+/**
+ * Who judges the findings. `main` is the live session driving `xd://council` — the historical
+ * behaviour, and still the default for anyone who has not assigned `modelRoles.adjudicator`.
+ * `delegated` is a pinned child agent that terminal-yields its adjudication instead.
+ */
+export type CouncilResolvedAdjudicator =
+	| { mode: "main"; selector: string; model: Model<Api>; effort: ConfiguredThinkingLevel | undefined }
+	| {
+			mode: "delegated";
+			requestedSelector: string;
+			resolvedSelector: string;
+			model: Model<Api>;
+			effort: ConfiguredThinkingLevel | undefined;
+			advisor: boolean;
+	  };
 
 export interface CouncilMainDispatchSnapshot {
 	selector: string;
@@ -93,19 +133,46 @@ export interface CouncilDispatchPlan {
 	config: CouncilConfig;
 	rounds: CouncilConfig["rounds"];
 	roster: CouncilConfig["members"];
+	/** Enabled members with a non-empty round set, in roster order. Inert members are absent. */
 	members: CouncilResolvedMember[];
+	/** Enabled members parked above the configured round count: configured, never dispatched. */
+	inert: CouncilMember[];
 	planner: CouncilResolvedPlanner;
-	/** Informational only; resume compatibility must not compare this snapshot. */
-	main: CouncilMainDispatchSnapshot;
+	adjudicator: CouncilResolvedAdjudicator;
+	/**
+	 * `provider/id` an attached advisor will run on, resolved from the `advisor` model role. Absent
+	 * when no `council.advisor.*` toggle applies to this run, or when the role resolves to nothing —
+	 * in which case the toggle is a silent no-op at runtime and preflight warns instead.
+	 */
+	advisorModel?: string;
 	instructions: CouncilInstructionSnapshot;
+	/** Everything worth telling the operator: degrading collisions plus advisory notes. */
 	warnings: string[];
+	/**
+	 * Whether {@link warnings} contains a real degradation of the run being executed. Parked
+	 * configuration and an unattachable advisor are reported without degrading the run.
+	 */
+	degraded: boolean;
 	plannerRequest: StructuredSubagentRequest & { agent: "council-planner" };
 	memberRequests: CouncilMemberRequestPolicy[];
+	/** Delegated adjudication only; absent in `main` mode. */
+	adjudicatorRequest?: StructuredSubagentRequest & { agent: "council-adjudicator" };
 }
 
 function dispatchError(code: CouncilDispatchErrorCode, message: string, cause?: unknown): CouncilDispatchError {
 	return new CouncilDispatchError(code, message, cause === undefined ? undefined : { cause });
 }
+
+/** Remedy for a roster slot that resolves to zero or several models: the assignment lives in the roster UI. */
+const COUNCIL_ROSTER_REMEDY = "Assign models with /council config (Model Hub -> Roles & Council).";
+/** The planner lead is assigned through `modelRoles.planner`, beside the roster in the same UI. */
+const COUNCIL_PLANNER_REMEDY =
+	"Assign the Council Planner row with /council config (Model Hub -> Roles & Council); it falls back to the `slow` model role when unassigned.";
+/** The adjudicator lead is optional: unassigned means the live Main session judges, as before. */
+const COUNCIL_ADJUDICATOR_REMEDY =
+	"Assign the Council Adjudicator row with /council config (Model Hub -> Roles & Council), or clear it to let your main session adjudicate.";
+/** Credentials are never fixed by editing the roster, so these refusals point at the login flow instead. */
+const COUNCIL_CREDENTIAL_REMEDY = "Sign in to that provider with /login, then start the council again.";
 
 function resolvedEffort(
 	model: Model<Api>,
@@ -139,28 +206,32 @@ async function assertUsableModelAuth(
 	return apiKey === kNoAuth || isAuthenticated(apiKey);
 }
 
+/**
+ * Resolve, validate, and credential-check one pinned council model.
+ *
+ * The caller resolves the selector first and passes it in: the resolution strategy is never
+ * inferred from the error code, so adding a code can no longer silently re-enable a role-default
+ * fallback for a lead that is supposed to be an explicit pin.
+ *
+ * `label` is the operator-facing name from {@link councilRoleLabel}, never the durable role id.
+ * Ids belong in selectors, manifests, and config paths; refusal prose gets `Reviewer 3`.
+ */
 async function resolvePinnedRole(
 	host: CouncilPreflightHost,
-	role: string,
-	code: "COUNCIL_MEMBER_MODEL_INVALID" | "COUNCIL_PLANNER_MODEL_INVALID",
-	sessionId: string,
+	options: {
+		label: string;
+		requestedSelector: string;
+		code: CouncilDispatchErrorCode;
+		remedy: string;
+		sessionId: string;
+	},
 ): Promise<{
 	requestedSelector: string;
 	resolvedSelector: string;
 	model: Model<Api>;
 	effort: ConfiguredThinkingLevel | undefined;
 }> {
-	const memberResolution =
-		code === "COUNCIL_MEMBER_MODEL_INVALID" ? resolveCouncilMemberSelector(host.settings, role) : undefined;
-	if (memberResolution && memberResolution.kind !== "resolved") {
-		throw dispatchError(
-			code,
-			memberResolution.kind === "unassigned"
-				? `Council role ${role} has no configured model selector.`
-				: `Council role ${role} must configure exactly one model selector.`,
-		);
-	}
-	const requestedSelector = memberResolution?.kind === "resolved" ? memberResolution.selector : `@${role}`;
+	const { label, requestedSelector, code, remedy, sessionId } = options;
 	const resolved = modelResolver.resolveCliModel({
 		cliModel: requestedSelector,
 		modelRegistry: host.modelRegistry,
@@ -168,12 +239,15 @@ async function resolvePinnedRole(
 		preferences: modelResolver.getModelMatchPreferences(host.settings),
 	});
 	if (!resolved.model) {
-		throw dispatchError(code, `Council role ${role} model is unavailable: ${resolved.error ?? requestedSelector}`);
+		throw dispatchError(
+			code,
+			`Council ${label} model is unavailable: ${resolved.error ?? requestedSelector}. ${remedy}`,
+		);
 	}
 	if (resolved.model.supportsTools === false) {
 		throw dispatchError(
 			code,
-			`Council role ${role} model ${resolved.model.provider}/${resolved.model.id} does not support tools.`,
+			`Council ${label} model ${resolved.model.provider}/${resolved.model.id} does not support tools. ${remedy}`,
 		);
 	}
 	let usable: boolean;
@@ -182,14 +256,14 @@ async function resolvePinnedRole(
 	} catch (error) {
 		throw dispatchError(
 			code,
-			`Council role ${role} model credentials could not be resolved: ${error instanceof Error ? error.message : String(error)}`,
+			`Council ${label} model credentials could not be resolved: ${error instanceof Error ? error.message : String(error)}. ${COUNCIL_CREDENTIAL_REMEDY}`,
 			error,
 		);
 	}
 	if (!usable) {
 		throw dispatchError(
 			code,
-			`Council role ${role} model ${resolved.model.provider}/${resolved.model.id} has no usable credentials.`,
+			`Council ${label} model ${resolved.model.provider}/${resolved.model.id} has no usable credentials. ${COUNCIL_CREDENTIAL_REMEDY}`,
 		);
 	}
 	const effort = resolvedEffort(resolved.model, resolved.thinkingLevel, host.settings);
@@ -204,39 +278,69 @@ function modelIdentity(model: Model<Api>): string {
 	return `${model.provider}/${model.id}`;
 }
 
-export function councilDispatchWarnings(
-	members: readonly CouncilResolvedMember[],
-	main: CouncilMainDispatchSnapshot,
-): string[] {
-	const warnings: string[] = [];
-	const rolesByModel = new Map<string, string[]>();
-	for (const member of members) {
-		const identity = modelIdentity(member.model);
-		const roles = rolesByModel.get(identity);
-		if (roles) roles.push(member.role);
-		else rolesByModel.set(identity, [member.role]);
-	}
-	for (const [identity, roles] of rolesByModel) {
-		if (roles.length > 1) {
-			warnings.push(`Council roles ${roles.join(", ")} resolve to the same model ${identity}.`);
+export interface CouncilDispatchWarningInputs {
+	members: readonly CouncilResolvedMember[];
+	/** Enabled-but-parked members, reported so a pinned round nobody configured is not silent. */
+	inert: readonly CouncilMember[];
+	rounds: number;
+}
+
+export interface CouncilDispatchWarnings {
+	/** Collisions inside the run that actually executes: these mark the run degraded. */
+	degrading: string[];
+	/** Parked configuration: reported so it is not silent, never a degradation of this run. */
+	advisory: string[];
+}
+
+/**
+ * Advisory notes, never refusals. The duplicate-model check is per round: two reviewers on the
+ * same model in *different* rounds is a deliberate second opinion, not an accidental collision.
+ *
+ * Every row names reviewers by their stable label, matching the kickoff preview and the durable
+ * run cards; the raw role id stays in the manifest these warnings are written beside.
+ */
+export function councilDispatchWarnings(inputs: CouncilDispatchWarningInputs): CouncilDispatchWarnings {
+	const degrading: string[] = [];
+	for (let round = 1; round <= inputs.rounds; round++) {
+		const labelsByModel = new Map<string, string[]>();
+		for (const member of inputs.members) {
+			if (!member.rounds.includes(round)) continue;
+			const identity = modelIdentity(member.model);
+			const label = councilRoleLabel(member.role);
+			const labels = labelsByModel.get(identity);
+			if (labels) labels.push(label);
+			else labelsByModel.set(identity, [label]);
 		}
-		if (identity === modelIdentity(main.model)) {
-			warnings.push(`Council roles ${roles.join(", ")} resolve to the Main model ${identity}.`);
+		for (const [identity, labels] of labelsByModel) {
+			if (labels.length > 1) {
+				degrading.push(
+					inputs.rounds > 1
+						? `Council reviewers ${labels.join(", ")} resolve to the same model ${identity} in round ${round}.`
+						: `Council reviewers ${labels.join(", ")} resolve to the same model ${identity}.`,
+				);
+			}
 		}
 	}
-	return warnings;
+	const advisory = inputs.inert.map(
+		member =>
+			`Council ${councilRoleLabel(member.role)} is pinned to round ${member.round} but only ${inputs.rounds} round(s) are configured; it will not run.`,
+	);
+	return { degrading, advisory };
 }
 
 /** Revalidate the live Main surface immediately before an adjudication turn. */
 export async function preflightCouncilMainDispatch(host: CouncilPreflightHost): Promise<CouncilMainDispatchSnapshot> {
 	const mainModel = host.session.model;
 	if (!mainModel) {
-		throw dispatchError("COUNCIL_MAIN_MODEL_INVALID", "Council dispatch requires an active Main model.");
+		throw dispatchError(
+			"COUNCIL_MAIN_MODEL_INVALID",
+			"Council dispatch requires an active Main model. Pick one with /model.",
+		);
 	}
 	if (mainModel.supportsTools === false) {
 		throw dispatchError(
 			"COUNCIL_MAIN_MODEL_INVALID",
-			`Council Main model ${mainModel.provider}/${mainModel.id} does not support tools.`,
+			`Council Main model ${mainModel.provider}/${mainModel.id} does not support tools. Pick a tool-capable Main model with /model.`,
 		);
 	}
 	let mainUsable: boolean;
@@ -245,20 +349,20 @@ export async function preflightCouncilMainDispatch(host: CouncilPreflightHost): 
 	} catch (error) {
 		throw dispatchError(
 			"COUNCIL_MAIN_MODEL_INVALID",
-			`Council Main model credentials could not be resolved: ${error instanceof Error ? error.message : String(error)}`,
+			`Council Main model credentials could not be resolved: ${error instanceof Error ? error.message : String(error)}. ${COUNCIL_CREDENTIAL_REMEDY}`,
 			error,
 		);
 	}
 	if (!mainUsable) {
 		throw dispatchError(
 			"COUNCIL_MAIN_MODEL_INVALID",
-			`Council Main model ${mainModel.provider}/${mainModel.id} has no usable credentials.`,
+			`Council Main model ${mainModel.provider}/${mainModel.id} has no usable credentials. ${COUNCIL_CREDENTIAL_REMEDY}`,
 		);
 	}
 	if (!host.session.getActiveToolNames().includes("write")) {
 		throw dispatchError(
 			"COUNCIL_WRITE_TOOL_REQUIRED",
-			"Council dispatch requires Main's write tool for xd://council.",
+			"Council dispatch requires Main's write tool for xd://council, but write is not in the active tool set. Run /tools to inspect it and restore write before starting a council.",
 		);
 	}
 	const effort = resolveCouncilMainEffort(mainModel, host.session.thinkingLevel);
@@ -269,7 +373,7 @@ export async function preflightCouncilMainDispatch(host: CouncilPreflightHost): 
 	};
 }
 
-function requestPolicy<TAgent extends "council-planner" | "council-member">(
+function requestPolicy<TAgent extends "council-planner" | "council-member" | "council-adjudicator">(
 	host: CouncilPreflightHost,
 	task: string,
 	cwd: string,
@@ -277,6 +381,7 @@ function requestPolicy<TAgent extends "council-planner" | "council-member">(
 	selector: string,
 	outputSchema: unknown,
 	instructionSnapshot: CouncilInstructionSnapshot,
+	advisor: boolean,
 ): StructuredSubagentRequest & { agent: TAgent } {
 	return {
 		session: host.toolSession,
@@ -287,6 +392,7 @@ function requestPolicy<TAgent extends "council-planner" | "council-member">(
 		model: selector,
 		tools: COUNCIL_AGENT_TOOLS,
 		restrictToolNames: true,
+		advisor,
 		inheritContextFiles: true,
 		additionalContextFiles: instructionSnapshot.contextFiles,
 		skills: [],
@@ -302,17 +408,44 @@ function requestPolicy<TAgent extends "council-planner" | "council-member">(
 export interface CouncilPreflightOptions {
 	/** Resume-only: revalidate this immutable promised path instead of allocating a new collision suffix. */
 	promisedOutputPath?: string;
+	/**
+	 * Run cancellation. Preflight reaches no model, but it still awaits credential lookups, git
+	 * discovery, instruction capture, subagent policy resolution, and filesystem probes, so it
+	 * re-checks this signal before it starts and between every awaited stage.
+	 *
+	 * These are cooperative checkpoints, not propagation: the APIs behind those stages do not all
+	 * accept an AbortSignal, so an operation already in flight still runs to completion and a
+	 * pathological one still falls to the caller's bounded transition timeout. What the checkpoints
+	 * guarantee is that no *later* stage starts once the run is cancelled.
+	 */
+	signal?: AbortSignal;
 }
 
 /**
- * Resolve every deterministic dispatch input and child policy before model spend.
+ * Resolve every dispatch input and child policy before council model spend.
  * This function neither constructs a ToolSession nor allocates council storage/manifest state.
+ *
+ * Nothing here reaches a completion API. The published plan is named from the task by the same
+ * word-aligned slugger the roster preview uses, so the kickoff line is guaranteed to precede every
+ * council request and `CouncilDispatchError.spending = false` is literally true.
+ *
+ * Refusals are deterministic and ordered cheapest-first: task bounds; strict config (shape, role
+ * grammar, reserved and duplicate ids, configured multi-selectors, rounds, active cap); enabled-round
+ * staffing; one aggregate missing-assignment refusal; sequential per-reviewer availability,
+ * tool-support, and credential checks in roster order; the planner lead; the adjudicator lead;
+ * repository root and instruction capture; subagent policy; and finally publication allocation. New
+ * refusals belong above the publication block, whose probe can still fail on an I/O fault or a root
+ * swapped between canonicalization and allocation; that residue is inherent.
  */
 export async function preflightCouncilDispatch(
 	host: CouncilPreflightHost,
 	task: string,
 	options: CouncilPreflightOptions = {},
 ): Promise<CouncilDispatchPlan> {
+	// Cooperative cancellation checkpoint: cheap enough to sit in front of every awaited stage, and
+	// the only thing standing between a cancelled run and the next credential or filesystem probe.
+	const checkpoint = (): void => options.signal?.throwIfAborted();
+	checkpoint();
 	if (task.trim().length === 0) {
 		throw dispatchError("COUNCIL_TASK_INVALID", "Council task must contain non-whitespace content.");
 	}
@@ -327,55 +460,190 @@ export async function preflightCouncilDispatch(
 		config = parseCouncilConfig(host.settings);
 	} catch (error) {
 		if (error instanceof CouncilDispatchError) throw error;
-		throw dispatchError("COUNCIL_CONFIG_INVALID", error instanceof Error ? error.message : String(error), error);
+		const message = error instanceof Error ? error.message : String(error);
+		const globalPath = host.settings.getGlobalConfigPath();
+		throw dispatchError(
+			"COUNCIL_CONFIG_INVALID",
+			message.includes(globalPath) ? message : `${message}. Fix council configuration in ${globalPath}.`,
+			error,
+		);
 	}
 	const enabled = config.members.filter(member => member.enabled);
 	if (enabled.length === 0) {
-		throw dispatchError("COUNCIL_NO_ENABLED_MEMBERS", "No enabled council members are configured.");
+		throw dispatchError(
+			"COUNCIL_NO_ENABLED_MEMBERS",
+			"No enabled council members are configured. Enable a role and assign its model with /council config (Model Hub -> Roles & Council).",
+		);
+	}
+	// An inert member is configuration parked for later: it is never resolved, never
+	// credential-checked, and never reaches the dispatch or the manifest roster, so a stale pin
+	// cannot fail a run for a model the user is not actually about to spend on.
+	const active: Array<{ member: CouncilMember; rounds: number[] }> = [];
+	const inert: CouncilMember[] = [];
+	for (const member of enabled) {
+		const rounds = councilMemberRounds(member, config.rounds);
+		if (rounds.length === 0) inert.push(member);
+		else active.push({ member, rounds });
+	}
+	for (let round = 1; round <= config.rounds; round++) {
+		if (active.some(entry => entry.rounds.includes(round))) continue;
+		throw dispatchError(
+			"COUNCIL_ROUND_UNSTAFFED",
+			`Council round ${round} has no enabled reviewer. Assign one with /council config (Model Hub -> Roles & Council), or reduce the review rounds.`,
+		);
 	}
 	const sessionId = host.sessionManager.getSessionId();
 	const sourceCwd = host.sessionManager.getCwd();
 
-	const members: CouncilResolvedMember[] = [];
-	for (const member of enabled) {
-		const resolved = await resolvePinnedRole(host, member.role, "COUNCIL_MEMBER_MODEL_INVALID", sessionId);
-		members.push({ ...member, ...resolved, lens: getCouncilLens(members.length) });
+	// One aggregate refusal ahead of every credential lookup. An operator who has enabled a roster
+	// but assigned only part of it should see the whole missing list once, not discover it one
+	// reviewer per dispatch attempt. Inert members are excluded: they are not about to run.
+	const assigned: Array<{ member: CouncilMember; rounds: number[]; selector: string }> = [];
+	const unassigned: string[] = [];
+	for (const entry of active) {
+		const resolution = resolveCouncilMemberSelector(host.settings, entry.member.role);
+		if (resolution.kind === "resolved") {
+			assigned.push({ ...entry, selector: resolution.selector });
+		} else if (resolution.kind === "unassigned") {
+			unassigned.push(councilRoleLabel(entry.member.role));
+		} else {
+			// Unreachable through `parseCouncilConfig`, which refuses a multi-selector roster role for
+			// the whole roster above. Kept total so a parser change cannot silently dispatch an
+			// ambiguous pin, and kept a member error rather than a config error because it names a slot.
+			throw dispatchError(
+				"COUNCIL_MEMBER_MODEL_INVALID",
+				`Council ${councilRoleLabel(entry.member.role)} must configure exactly one model selector. ${COUNCIL_ROSTER_REMEDY}`,
+			);
+		}
 	}
-	const planner = {
-		role: "slow" as const,
-		...(await resolvePinnedRole(host, "slow", "COUNCIL_PLANNER_MODEL_INVALID", sessionId)),
+	if (unassigned.length > 0) {
+		throw dispatchError(
+			"COUNCIL_MEMBER_MODEL_INVALID",
+			`Council has ${assigned.length} of ${active.length} active reviewers assigned; no model selector is configured for ${unassigned.join(", ")}. ${COUNCIL_ROSTER_REMEDY}`,
+		);
+	}
+
+	const members: CouncilResolvedMember[] = [];
+	for (const entry of assigned) {
+		checkpoint();
+		const resolved = await resolvePinnedRole(host, {
+			label: councilRoleLabel(entry.member.role),
+			requestedSelector: entry.selector,
+			code: "COUNCIL_MEMBER_MODEL_INVALID",
+			remedy: COUNCIL_ROSTER_REMEDY,
+			sessionId,
+		});
+		members.push({
+			...entry.member,
+			...resolved,
+			lens: reviewLens,
+			rounds: entry.rounds,
+			advisor: config.advisor.reviewers,
+		});
+	}
+
+	// An assigned `planner` role pins that model; unassigned keeps the historical `@slow` fallback,
+	// which is the one council selector allowed to go through a role alias. Either way the operator
+	// sees `Planner`: which alias carried it is already visible in the selector the message quotes.
+	const plannerResolution = resolveCouncilMemberSelector(host.settings, COUNCIL_PLANNER_ROLE);
+	if (plannerResolution.kind === "invalid") {
+		throw dispatchError(
+			"COUNCIL_PLANNER_MODEL_INVALID",
+			`Council ${councilRoleLabel(COUNCIL_PLANNER_ROLE)} must configure exactly one model selector. ${COUNCIL_PLANNER_REMEDY}`,
+		);
+	}
+	checkpoint();
+	const planner: CouncilResolvedPlanner = {
+		role: plannerResolution.kind === "resolved" ? COUNCIL_PLANNER_ROLE : "slow",
+		...(await resolvePinnedRole(host, {
+			label: councilRoleLabel(COUNCIL_PLANNER_ROLE),
+			requestedSelector: plannerResolution.kind === "resolved" ? plannerResolution.selector : "@slow",
+			code: "COUNCIL_PLANNER_MODEL_INVALID",
+			remedy: COUNCIL_PLANNER_REMEDY,
+			sessionId,
+		})),
+		advisor: config.advisor.planner,
 	};
 
-	const main = await preflightCouncilMainDispatch(host);
-
-	let cwd: string;
-	let repoRoot: string;
-	try {
-		cwd = await fs.realpath(sourceCwd);
-		const discoveredRoot = await git.repo.root(cwd);
-		repoRoot = await fs.realpath(discoveredRoot ?? cwd);
-	} catch (error) {
+	// Unassigned adjudicator ⇒ the live Main session judges, exactly as before. Only that mode
+	// depends on Main's model, credentials, and `write` tool, so only that mode revalidates them.
+	const adjudicatorResolution = resolveCouncilMemberSelector(host.settings, COUNCIL_ADJUDICATOR_ROLE);
+	if (adjudicatorResolution.kind === "invalid") {
 		throw dispatchError(
-			"COUNCIL_REPOSITORY_INVALID",
-			`Council repository root is unusable: ${error instanceof Error ? error.message : String(error)}`,
-			error,
+			"COUNCIL_ADJUDICATOR_MODEL_INVALID",
+			`Council ${councilRoleLabel(COUNCIL_ADJUDICATOR_ROLE)} must configure exactly one model selector. ${COUNCIL_ADJUDICATOR_REMEDY}`,
 		);
 	}
+	checkpoint();
+	const adjudicator: CouncilResolvedAdjudicator =
+		adjudicatorResolution.kind === "resolved"
+			? {
+					mode: "delegated",
+					...(await resolvePinnedRole(host, {
+						label: councilRoleLabel(COUNCIL_ADJUDICATOR_ROLE),
+						requestedSelector: adjudicatorResolution.selector,
+						code: "COUNCIL_ADJUDICATOR_MODEL_INVALID",
+						remedy: COUNCIL_ADJUDICATOR_REMEDY,
+						sessionId,
+					})),
+					advisor: config.advisor.adjudicator,
+				}
+			: { mode: "main", ...(await preflightCouncilMainDispatch(host)) };
 
-	let publicationTarget: CouncilPublicationTarget;
-	try {
-		publicationTarget = options.promisedOutputPath
-			? await publication.resolvePromisedCouncilPublicationTarget(repoRoot, options.promisedOutputPath)
-			: await publication.resolveCouncilPublicationTarget(repoRoot, task);
-	} catch (error) {
-		throw dispatchError("COUNCIL_PUBLICATION_INVALID", error instanceof Error ? error.message : String(error), error);
+	// The advisor a toggle would attach. Resolved once so the pre-spend line can name it and so an
+	// unresolvable `advisor` role is reported rather than silently doing nothing at runtime.
+	const advisorRequested =
+		config.advisor.planner ||
+		config.advisor.reviewers ||
+		(adjudicator.mode === "delegated" && config.advisor.adjudicator);
+	let advisorModel: string | undefined;
+	const advisorWarnings: string[] = [];
+	if (advisorRequested) {
+		let selection: { model: Model<Api> } | undefined;
+		try {
+			selection = modelResolver.resolveAdvisorRoleSelection(host.settings, host.modelRegistry.getAvailable());
+		} catch (error) {
+			logger.debug("council: advisor role resolution failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+		if (selection) advisorModel = modelIdentity(selection.model);
+		else {
+			advisorWarnings.push(
+				"A council advisor is enabled but no model is assigned to the `advisor` role; the advisor will not attach.",
+			);
+		}
 	}
+
+	checkpoint();
+	// Three separate probes, not one stage: `git rev-parse` spawns a subprocess, so a cancellation
+	// arriving mid-discovery must not be allowed to start the next filesystem call. The checkpoints
+	// sit outside the mapping helper so an abort propagates as an abort, never as
+	// `COUNCIL_REPOSITORY_INVALID`.
+	const repositoryProbe = async <T>(operation: () => Promise<T>): Promise<T> => {
+		try {
+			return await operation();
+		} catch (error) {
+			throw dispatchError(
+				"COUNCIL_REPOSITORY_INVALID",
+				`Council repository root is unusable: ${error instanceof Error ? error.message : String(error)}`,
+				error,
+			);
+		}
+	};
+	const cwd = await repositoryProbe(() => fs.realpath(sourceCwd));
+	checkpoint();
+	const discoveredRoot = await repositoryProbe(() => git.repo.root(cwd));
+	checkpoint();
+	// `realpath` is load-bearing, not a redundant canonicalization: `git rev-parse --show-toplevel`
+	// emits forward slashes even on Windows (`C:/Users/foo/repo`), and every downstream containment
+	// check compares against `path`-built native separators.
+	const repoRoot = await repositoryProbe(() => fs.realpath(discoveredRoot ?? cwd));
+
+	checkpoint();
 	let instructionSnapshot: CouncilInstructionSnapshot;
 	try {
-		instructionSnapshot = await instructions.captureCouncilInstructionSnapshot(
-			host.toolSession,
-			publicationTarget.repoRoot,
-		);
+		instructionSnapshot = await instructions.captureCouncilInstructionSnapshot(host.toolSession, repoRoot);
 	} catch (error) {
 		throw dispatchError(
 			"COUNCIL_INSTRUCTIONS_INVALID",
@@ -392,7 +660,9 @@ export async function preflightCouncilDispatch(
 		planner.resolvedSelector,
 		COUNCIL_PLANNER_SCHEMA,
 		instructionSnapshot,
+		planner.advisor,
 	);
+	checkpoint();
 	try {
 		await subagents.resolveEffectiveSubagentPolicy(plannerRequest);
 	} catch (error) {
@@ -413,34 +683,114 @@ export async function preflightCouncilDispatch(
 			member.resolvedSelector,
 			COUNCIL_REPORT_SCHEMA,
 			instructionSnapshot,
+			member.advisor,
 		);
+		checkpoint();
 		try {
 			await subagents.resolveEffectiveSubagentPolicy(request);
 			memberRequests.push(request);
 		} catch (error) {
 			throw dispatchError(
 				"COUNCIL_SUBAGENT_POLICY_INVALID",
-				`Council role ${member.role} cannot dispatch: ${error instanceof Error ? error.message : String(error)}`,
+				`Council ${councilRoleLabel(member.role)} cannot dispatch: ${error instanceof Error ? error.message : String(error)}`,
 				error,
 			);
 		}
 	}
 
+	let adjudicatorRequest: (StructuredSubagentRequest & { agent: "council-adjudicator" }) | undefined;
+	if (adjudicator.mode === "delegated") {
+		adjudicatorRequest = requestPolicy(
+			host,
+			task,
+			repoRoot,
+			"council-adjudicator",
+			adjudicator.resolvedSelector,
+			COUNCIL_ADJUDICATION_SCHEMA,
+			instructionSnapshot,
+			adjudicator.advisor,
+		);
+		checkpoint();
+		try {
+			await subagents.resolveEffectiveSubagentPolicy(adjudicatorRequest);
+		} catch (error) {
+			throw dispatchError(
+				"COUNCIL_SUBAGENT_POLICY_INVALID",
+				`Council ${councilRoleLabel(COUNCIL_ADJUDICATOR_ROLE)} cannot dispatch: ${error instanceof Error ? error.message : String(error)}`,
+				error,
+			);
+		}
+	}
+
+	// The plan root is the session `local://` cache, deliberately NOT the repository: a council run
+	// creates nothing in the working tree. `repoRoot` stays the git discovery above because it is the
+	// immutable identity `#assertResumeIdentity` compares and the root instruction capture is relative
+	// to. A resume revalidates its promised path, which is immutable, so it is never renamed.
+	//
+	// Allocation is last because it is the only step that can leave something behind; the name it
+	// needs comes from the task, so nothing above it is waiting on a model.
+	const promisedOutputPath = options.promisedOutputPath;
+	checkpoint();
+	// Resolving the session cache root and creating the plan directory are two distinct filesystem
+	// stages, so they are unnested: an abort between them must not create the directory.
+	let cacheRoot: string;
+	try {
+		cacheRoot = await councilPlanRoot(host.toolSession);
+	} catch (error) {
+		throw dispatchError("COUNCIL_PUBLICATION_INVALID", error instanceof Error ? error.message : String(error), error);
+	}
+	checkpoint();
+	let planRoot: string;
+	try {
+		planRoot = await publication.ensureCouncilPlanRoot(cacheRoot);
+	} catch (error) {
+		throw dispatchError("COUNCIL_PUBLICATION_INVALID", error instanceof Error ? error.message : String(error), error);
+	}
+	checkpoint();
+	let publicationTarget: CouncilPublicationTarget;
+	try {
+		publicationTarget = promisedOutputPath
+			? await publication.resolvePromisedCouncilPublicationTarget(planRoot, promisedOutputPath)
+			: await publication.resolveCouncilPublicationTarget(planRoot, task);
+	} catch (error) {
+		throw dispatchError("COUNCIL_PUBLICATION_INVALID", error instanceof Error ? error.message : String(error), error);
+	}
+
+	const dispatchWarnings = councilDispatchWarnings({ members, inert, rounds: config.rounds });
 	return {
 		task,
 		cwd,
-		repoRoot: publicationTarget.repoRoot,
+		repoRoot,
 		sessionId,
 		publicationTarget,
 		config,
 		rounds: config.rounds,
 		roster: config.members,
 		members,
+		inert,
 		planner,
-		main,
+		adjudicator,
+		...(advisorModel === undefined ? {} : { advisorModel }),
 		instructions: instructionSnapshot,
-		warnings: councilDispatchWarnings(members, main),
+		warnings: [...dispatchWarnings.degrading, ...dispatchWarnings.advisory, ...advisorWarnings],
+		degraded: dispatchWarnings.degrading.length > 0,
 		plannerRequest,
 		memberRequests,
+		...(adjudicatorRequest ? { adjudicatorRequest } : {}),
 	};
+}
+
+/**
+ * Refuse to continue a run whose persisted roster is larger than an adjudication can grade.
+ *
+ * Kept out of {@link preflightCouncilDispatch} because it is a property of the artifact, not of the
+ * current configuration: the run is readable, its cards and stats still render, and nothing about it
+ * is corrupt. Only continuing it is blocked, and only when it would otherwise have been resumable —
+ * a completed or terminally failed run keeps the refusal it already had.
+ */
+export function assertCouncilResumeRosterWithinLimit(
+	manifest: Pick<CouncilManifest, "runId" | "state" | "failure" | "roster">,
+): void {
+	const refusal = councilResumeRosterLimitRefusal(manifest);
+	if (refusal !== undefined) throw dispatchError("COUNCIL_CONFIG_INVALID", refusal);
 }

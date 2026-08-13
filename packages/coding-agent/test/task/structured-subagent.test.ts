@@ -307,6 +307,27 @@ describe("structured subagent primitive", () => {
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 
+	it("threads the advisor opt-in to the executor and defaults it off", async () => {
+		mockDiscovery();
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+
+		const optedIn = await runStructuredSubagent(
+			request({ restrictToolNames: true, advisor: true, retainArtifacts: true }),
+		);
+		const defaulted = await runStructuredSubagent(request({ restrictToolNames: true, retainArtifacts: true }));
+
+		// The executor turns this flag into the child's `advisor.*` settings; if it
+		// were dropped here the opt-in would silently never reach the boundary.
+		expect(dispatched[0]?.advisor).toBe(true);
+		expect(dispatched[1]?.advisor).toBeUndefined();
+		await fs.rm(optedIn.artifactsDir, { recursive: true, force: true });
+		await fs.rm(defaulted.artifactsDir, { recursive: true, force: true });
+	});
+
 	it("propagates a custom thinking-suffixed role alias through policy, dispatch, and settlement", async () => {
 		const customAgent = { ...AGENT, model: ["@reviewer:high"] };
 		mockDiscovery(customAgent);

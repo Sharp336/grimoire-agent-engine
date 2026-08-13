@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `hasAnyFsCode(err, ...codes)` (`@oh-my-pi/pi-utils`), the multi-code sibling of `hasFsCode`, for syscalls whose failure mode varies by platform or filesystem.
+
 ## [17.2.9] - 2026-08-05
 
 ### Added

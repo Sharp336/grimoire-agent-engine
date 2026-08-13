@@ -54,3 +54,8 @@ export function isEnotempty(err: unknown): err is FsError {
 export function hasFsCode(err: unknown, code: string): err is FsError {
 	return isFsError(err) && err.code === code;
 }
+
+/** `hasFsCode` for a set of acceptable codes, for syscalls whose failure mode varies by platform or filesystem. */
+export function hasAnyFsCode(err: unknown, ...codes: string[]): err is FsError {
+	return isFsError(err) && codes.includes(err.code);
+}

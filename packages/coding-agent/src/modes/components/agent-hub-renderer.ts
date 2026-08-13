@@ -126,11 +126,16 @@ export function formatMetricDuration(metrics: AgentMetrics): string | undefined 
 	return `${formatDuration(durationMs)} ${label}`;
 }
 
-export function formatCost(cost: number): string {
+/**
+ * Cost with magnitude-scaled precision: sub-cent amounts keep four decimals so a real charge never
+ * reads as free. `maxFractionDigits` caps that for surfaces whose columns only budget two — the
+ * council tables render `$0.00` rather than `$0.0000`.
+ */
+export function formatCost(cost: number, options: { maxFractionDigits?: number } = {}): string {
 	const amount = metricNumber(cost);
-	if (amount < 0.01) return `$${amount.toFixed(4)}`;
-	if (amount < 1) return `$${amount.toFixed(3)}`;
-	return `$${amount.toFixed(2)}`;
+	const scaled = amount < 0.01 ? 4 : amount < 1 ? 3 : 2;
+	const cap = options.maxFractionDigits;
+	return `$${amount.toFixed(cap === undefined ? scaled : Math.min(scaled, Math.max(0, Math.trunc(cap))))}`;
 }
 
 export function formatMetrics(metrics: AgentMetrics): string {

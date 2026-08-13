@@ -1,11 +1,27 @@
-import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { logger } from "@oh-my-pi/pi-utils";
+import { hasFsCode, logger } from "@oh-my-pi/pi-utils";
 import { resolveLocalUrlToPath } from "../internal-urls";
 import type { ToolSession } from "../tools";
-import { hashCouncilContent, publishedCouncilPlanMatches } from "./publication";
-import { validateCouncilAdjudication, validateCouncilPlannerOutput, validatePersistedCouncilReport } from "./schema";
+import {
+	COUNCIL_READ_FLAGS,
+	COUNCIL_STAGE_FLAGS,
+	COUNCIL_STAGE_MODE,
+	canonicalizeLocalRoot,
+	councilTempPath,
+	linkExclusive,
+	renameReplacing,
+	syncDirectory,
+} from "./durable-fs";
+import { COUNCIL_RUN_MESSAGE_TYPE } from "./events";
+import { sha256CouncilContent } from "./hash";
+import { publishedCouncilPlanMatches } from "./publication";
+import {
+	type CouncilAdjudication,
+	validateCouncilAdjudication,
+	validateCouncilPlannerOutput,
+	validatePersistedCouncilReport,
+} from "./schema";
 import {
 	type CouncilArtifactReference,
 	type CouncilManifest,
@@ -68,10 +84,6 @@ export interface CouncilStorageOptions {
 	now?: () => string;
 	randomUUID?: () => string;
 	onDurabilityOperation?: (operation: CouncilStorageDurabilityOperation, targetPath: string) => void;
-}
-
-function isErrorCode(error: unknown, code: string): boolean {
-	return error instanceof Error && "code" in error && error.code === code;
 }
 
 function assertRunId(runId: string): void {
@@ -153,26 +165,12 @@ function requireStorageSession(
 	};
 }
 
-async function syncDirectory(
-	filesystem: CouncilStorageFileSystem,
-	directory: string,
-	onOperation: CouncilStorageOptions["onDurabilityOperation"],
-): Promise<void> {
-	const handle = await filesystem.open(directory, "r");
-	try {
-		await handle.sync();
-		onOperation?.("directory-sync", directory);
-	} finally {
-		await handle.close();
-	}
-}
-
 async function assertFinalNotSymlink(filesystem: CouncilStorageFileSystem, targetPath: string): Promise<void> {
 	try {
 		const info = await filesystem.lstat(targetPath);
 		if (info.isSymbolicLink() || !info.isFile()) throw new Error("target is not a real file");
 	} catch (error) {
-		if (!isErrorCode(error, "ENOENT")) throw error;
+		if (!hasFsCode(error, "ENOENT")) throw error;
 	}
 }
 
@@ -183,7 +181,7 @@ async function durableReplace(
 	canonicalRoot: string,
 	options: Required<Pick<CouncilStorageOptions, "randomUUID">> & Pick<CouncilStorageOptions, "onDurabilityOperation">,
 ): Promise<void> {
-	const tempPath = path.join(canonicalRoot, `.${path.basename(targetPath)}.${options.randomUUID()}.tmp`);
+	const tempPath = councilTempPath(canonicalRoot, path.basename(targetPath), options.randomUUID());
 	let handle: fs.FileHandle | undefined;
 	try {
 		if (
@@ -193,11 +191,7 @@ async function durableReplace(
 			throw new Error("council artifact parent escapes canonical local root");
 		}
 		await assertFinalNotSymlink(filesystem, targetPath);
-		handle = await filesystem.open(
-			tempPath,
-			nodeFs.constants.O_CREAT | nodeFs.constants.O_EXCL | nodeFs.constants.O_WRONLY | nodeFs.constants.O_NOFOLLOW,
-			0o600,
-		);
+		handle = await filesystem.open(tempPath, COUNCIL_STAGE_FLAGS, COUNCIL_STAGE_MODE);
 		await handle.writeFile(content, "utf8");
 		await handle.sync();
 		options.onDurabilityOperation?.("file-sync", tempPath);
@@ -207,7 +201,7 @@ async function durableReplace(
 			throw new Error("council artifact parent changed before rename");
 		}
 		await assertFinalNotSymlink(filesystem, targetPath);
-		await filesystem.rename(tempPath, targetPath);
+		await renameReplacing(filesystem, tempPath, targetPath);
 		options.onDurabilityOperation?.("rename", targetPath);
 		if ((await filesystem.realpath(path.dirname(targetPath))) !== canonicalRoot) {
 			throw new Error("council artifact parent changed after rename");
@@ -228,7 +222,7 @@ async function durableCreate(
 	canonicalRoot: string,
 	options: Required<Pick<CouncilStorageOptions, "randomUUID">> & Pick<CouncilStorageOptions, "onDurabilityOperation">,
 ): Promise<void> {
-	const tempPath = path.join(canonicalRoot, `.${path.basename(targetPath)}.${options.randomUUID()}.tmp`);
+	const tempPath = councilTempPath(canonicalRoot, path.basename(targetPath), options.randomUUID());
 	let handle: fs.FileHandle | undefined;
 	let staged = false;
 	try {
@@ -238,11 +232,7 @@ async function durableCreate(
 		) {
 			throw new Error("council artifact parent escapes canonical local root");
 		}
-		handle = await filesystem.open(
-			tempPath,
-			nodeFs.constants.O_CREAT | nodeFs.constants.O_EXCL | nodeFs.constants.O_WRONLY | nodeFs.constants.O_NOFOLLOW,
-			0o600,
-		);
+		handle = await filesystem.open(tempPath, COUNCIL_STAGE_FLAGS, COUNCIL_STAGE_MODE);
 		staged = true;
 		await handle.writeFile(content, "utf8");
 		await handle.sync();
@@ -253,9 +243,9 @@ async function durableCreate(
 			throw new Error("council artifact parent changed before install");
 		}
 		try {
-			await filesystem.link(tempPath, targetPath);
+			await linkExclusive(filesystem, tempPath, targetPath);
 		} catch (error) {
-			if (isErrorCode(error, "EEXIST")) {
+			if (hasFsCode(error, "EEXIST")) {
 				throw new CouncilStorageError("COUNCIL_RUN_EXISTS", "Council run manifest already exists", {
 					cause: error,
 				});
@@ -280,7 +270,11 @@ async function durableCreate(
 				options.onDurabilityOperation?.("unlink", tempPath);
 				await syncDirectory(filesystem, canonicalRoot, options.onDurabilityOperation);
 			} catch (cleanupError) {
-				throw new Error("Could not durably remove staged council artifact", { cause: cleanupError });
+				// The target was already installed, so the original failure is what the operator must
+				// see; the cleanup failure only explains the leftover temp file.
+				throw new Error(`Could not durably remove staged council artifact: ${String(cleanupError)}`, {
+					cause: error,
+				});
 			}
 		}
 		throw error;
@@ -416,6 +410,14 @@ export class CouncilStorage {
 		return councilArtifactUrl(runId, name);
 	}
 
+	/**
+	 * Canonical directory council plans are published into — the same session `local://` root the
+	 * run's artifacts already live in, so a council run creates nothing in the working tree.
+	 */
+	async canonicalPlanRoot(): Promise<string> {
+		return this.#canonicalRoot(true);
+	}
+
 	async create(manifest: CouncilManifest): Promise<CouncilManifest> {
 		let snapshot = parseCouncilManifest(structuredClone(manifest));
 		this.#assertManifestIdentity(snapshot);
@@ -430,7 +432,7 @@ export class CouncilStorage {
 			});
 			const journalSnapshot = structuredClone(snapshot);
 			this.#assertCurrentSessionIdentity();
-			this.#session.sessionManager.appendCustomEntry("council-run", journalSnapshot);
+			this.#session.sessionManager.appendCustomEntry(COUNCIL_RUN_MESSAGE_TYPE, journalSnapshot);
 			this.#onDurabilityOperation?.("journal", manifestPath);
 		} catch (error) {
 			if (error instanceof CouncilStorageError) {
@@ -472,7 +474,7 @@ export class CouncilStorage {
 		}
 		return {
 			url: councilArtifactUrl(runId, name),
-			sha256: hashCouncilContent(content),
+			sha256: sha256CouncilContent(content),
 			bytes: Buffer.byteLength(content),
 		};
 	}
@@ -505,7 +507,7 @@ export class CouncilStorage {
 		}
 		return {
 			url: councilArtifactUrl(runId, name),
-			sha256: hashCouncilContent(content),
+			sha256: sha256CouncilContent(content),
 			bytes: Buffer.byteLength(content),
 		};
 	}
@@ -525,7 +527,7 @@ export class CouncilStorage {
 	async load(runId: string): Promise<CouncilManifest> {
 		assertRunId(runId);
 		const canonicalRoot = await this.#canonicalRoot(false).catch(error => {
-			if (isErrorCode(error, "ENOENT")) {
+			if (hasFsCode(error, "ENOENT")) {
 				throw new CouncilStorageError("COUNCIL_RUN_NOT_FOUND", `Council run ${runId} has no manifest`, {
 					cause: error,
 				});
@@ -537,7 +539,7 @@ export class CouncilStorage {
 		try {
 			raw = await this.#readFileNoFollow(manifestPath, canonicalRoot);
 		} catch (error) {
-			if (isErrorCode(error, "ENOENT")) {
+			if (hasFsCode(error, "ENOENT")) {
 				throw new CouncilStorageError("COUNCIL_RUN_NOT_FOUND", `Council run ${runId} has no manifest`, {
 					cause: error,
 				});
@@ -609,7 +611,7 @@ export class CouncilStorage {
 			} catch (error) {
 				if (!(error instanceof CouncilStorageError)) throw error;
 				if (owner.kind === "instructions") throw error;
-				if (error.code !== "COUNCIL_RECOVERY_CORRUPT" || !isErrorCode(error.cause, "ENOENT")) throw error;
+				if (error.code !== "COUNCIL_RECOVERY_CORRUPT" || !hasFsCode(error.cause, "ENOENT")) throw error;
 				problems.push({ owner, reason: error.message, code: error.code });
 				if (owner.kind === "plan") planValidationBlocked = true;
 			}
@@ -630,7 +632,9 @@ export class CouncilStorage {
 		if (manifest.published && manifest.state !== "completed" && manifest.state !== "completed-degraded") {
 			let matches: boolean;
 			try {
-				matches = await publishedCouncilPlanMatches(manifest.repoRoot, manifest.outputPath, manifest.published);
+				matches = await publishedCouncilPlanMatches(canonicalRoot, manifest.outputPath, manifest.published, {
+					filesystem: this.#filesystem,
+				});
 			} catch (error) {
 				throw new CouncilStorageError(
 					"COUNCIL_RECOVERY_CORRUPT",
@@ -656,7 +660,7 @@ export class CouncilStorage {
 		try {
 			canonicalRoot = await this.#canonicalRoot(false);
 		} catch (error) {
-			if (isErrorCode(error, "ENOENT")) return [];
+			if (hasFsCode(error, "ENOENT")) return [];
 			if (error instanceof CouncilStorageError) throw error;
 			throw new CouncilStorageError("COUNCIL_STORAGE_IO", "Could not list council runs", { cause: error });
 		}
@@ -671,7 +675,11 @@ export class CouncilStorage {
 			.filter(name => name.startsWith("council-") && name.endsWith(suffix))
 			.map(name => name.slice("council-".length, -suffix.length))
 			.filter(runId => COUNCIL_RUN_ID_PATTERN.test(runId))
-			.sort((a, b) => a.localeCompare(b));
+			// Codepoint order, not `localeCompare`. `sort` is stable and both callers re-sort by
+			// `createdAt` and take the head, so this is the tie-break when two runs share a millisecond:
+			// under ICU collation `-`, `_`, and `.` are variable-weighted, which would make
+			// `/council resume` pick a different run on a different host locale or ICU build.
+			.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 		const manifests: CouncilManifest[] = [];
 		for (const id of runIds) {
 			try {
@@ -688,6 +696,56 @@ export class CouncilStorage {
 		return manifests;
 	}
 
+	/**
+	 * Decode every persisted adjudication, keyed by the round it settled.
+	 *
+	 * Keyed by round rather than exposed one version at a time because a `CouncilPlanVersion` carries
+	 * no finding ids, and a round-two adjudication legitimately contains **only** round-two
+	 * dispositions: validating every member's `findingIds` against the final adjudication alone would
+	 * drop or mis-flag every round-one disposition. Each version is therefore validated against its
+	 * own round's expected ids and the previous round's canonical duplicate targets, exactly as
+	 * `load()` does while verifying artifact content.
+	 */
+	async readAdjudications(manifest: CouncilManifest): Promise<Map<number, CouncilAdjudication>> {
+		const adjudications = new Map<number, CouncilAdjudication>();
+		let priorCanonicalIds: readonly string[] = [];
+		const ordered = [...manifest.planVersions].sort((left, right) => left.version - right.version);
+		for (const version of ordered) {
+			if (version.kind !== "round" && version.kind !== "final") continue;
+			const round = manifest.rounds[version.round - 1];
+			if (!round) {
+				throw new CouncilStorageError(
+					"COUNCIL_RECOVERY_CORRUPT",
+					`Council plan version ${version.version} has no owning round`,
+				);
+			}
+			const content = await this.readArtifact(version.artifact);
+			let adjudication: CouncilAdjudication;
+			try {
+				const { metadata } = decodeCouncilMetadata(content, ADJUDICATION_METADATA_MARKER);
+				if (!isUnknownRecord(metadata)) throw new Error("Council adjudication metadata is not an object");
+				adjudication = validateCouncilAdjudication(
+					metadata.adjudication,
+					round.members.flatMap(member => member.findingIds),
+					priorCanonicalIds,
+				);
+			} catch (error) {
+				throw new CouncilStorageError(
+					"COUNCIL_RECOVERY_CORRUPT",
+					`Council artifact ${version.artifact.url} is semantically invalid: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+					{ cause: error },
+				);
+			}
+			adjudications.set(version.round, adjudication);
+			priorCanonicalIds = adjudication.dispositions
+				.filter(disposition => disposition.disposition !== "duplicate")
+				.map(disposition => disposition.id);
+		}
+		return adjudications;
+	}
+
 	async #persistCheckpoint(manifest: CouncilManifest, updatedAt: string): Promise<CouncilManifest> {
 		let snapshot = parseCouncilManifest(structuredClone(manifest));
 		this.#assertManifestIdentity(snapshot);
@@ -702,7 +760,7 @@ export class CouncilStorage {
 			});
 			const journalSnapshot = structuredClone(snapshot);
 			this.#assertCurrentSessionIdentity();
-			this.#session.sessionManager.appendCustomEntry("council-run", journalSnapshot);
+			this.#session.sessionManager.appendCustomEntry(COUNCIL_RUN_MESSAGE_TYPE, journalSnapshot);
 			this.#onDurabilityOperation?.("journal", targetPath);
 		} catch (error) {
 			if (error instanceof CouncilStorageError) throw error;
@@ -739,23 +797,10 @@ export class CouncilStorage {
 	}
 
 	async #canonicalRoot(create: boolean): Promise<string> {
-		const lexicalRoot = path.resolve(this.rootPath);
-		let created = false;
-		try {
-			const info = await this.#filesystem.lstat(lexicalRoot);
-			if (info.isSymbolicLink() || !info.isDirectory()) throw new Error("local root is not a real directory");
-		} catch (error) {
-			if (!create || !isErrorCode(error, "ENOENT")) throw error;
-			await this.#filesystem.mkdir(lexicalRoot, { recursive: true });
-			created = true;
-			const info = await this.#filesystem.lstat(lexicalRoot);
-			if (info.isSymbolicLink() || !info.isDirectory()) throw new Error("local root is not a real directory");
-		}
-		const canonicalRoot = await this.#filesystem.realpath(lexicalRoot);
-		const rootInfo = await this.#filesystem.lstat(lexicalRoot);
-		if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory()) throw new Error("local root is not a real directory");
-		if (created) await syncDirectory(this.#filesystem, path.dirname(lexicalRoot), this.#onDurabilityOperation);
-		return canonicalRoot;
+		return canonicalizeLocalRoot(this.rootPath, this.#filesystem, {
+			create,
+			onDurabilityOperation: this.#onDurabilityOperation,
+		});
 	}
 
 	async #readFileNoFollow(targetPath: string, canonicalRoot: string, maxBytes?: number): Promise<string> {
@@ -767,10 +812,15 @@ export class CouncilStorage {
 		}
 		const info = await this.#filesystem.lstat(targetPath);
 		if (info.isSymbolicLink() || !info.isFile()) throw new Error("council artifact is not a real file");
-		const handle = await this.#filesystem.open(targetPath, nodeFs.constants.O_RDONLY | nodeFs.constants.O_NOFOLLOW);
+		const handle = await this.#filesystem.open(targetPath, COUNCIL_READ_FLAGS);
 		try {
 			const openedInfo = await handle.stat();
 			if (!openedInfo.isFile()) throw new Error("council artifact is not a regular file");
+			// `O_NOFOLLOW` is a no-op on Windows, where reparse points still exist, so identity of the
+			// opened file against the `lstat` above is what actually closes the check-then-open race.
+			if (openedInfo.dev !== info.dev || openedInfo.ino !== info.ino) {
+				throw new Error("council artifact changed during read");
+			}
 			if (maxBytes !== undefined && openedInfo.size > maxBytes) {
 				throw new Error(`council artifact exceeds ${maxBytes} byte read limit`);
 			}
@@ -797,12 +847,12 @@ export class CouncilStorage {
 			const raw = await this.#readFileNoFollow(artifactPath, canonicalRoot, maxBytes);
 			content = Buffer.from(raw, "utf8");
 		} catch (error) {
-			const condition = isErrorCode(error, "ENOENT") ? "is missing" : "is unreadable";
+			const condition = hasFsCode(error, "ENOENT") ? "is missing" : "is unreadable";
 			throw new CouncilStorageError("COUNCIL_RECOVERY_CORRUPT", `Council artifact ${reference.url} ${condition}`, {
 				cause: error,
 			});
 		}
-		const actualHash = hashCouncilContent(content);
+		const actualHash = sha256CouncilContent(content);
 		if (actualHash !== reference.sha256 || content.byteLength !== reference.bytes) {
 			throw new CouncilStorageError(
 				"COUNCIL_ARTIFACT_HASH_MISMATCH",
@@ -818,7 +868,7 @@ export class CouncilStorage {
 		try {
 			content = await this.#readFileNoFollow(targetPath, canonicalRoot);
 		} catch (error) {
-			if (isErrorCode(error, "ENOENT")) return undefined;
+			if (hasFsCode(error, "ENOENT")) return undefined;
 			throw new CouncilStorageError(
 				"COUNCIL_RECOVERY_CORRUPT",
 				`Council orphan artifact ${councilArtifactUrl(runId, name)} is unreadable`,
@@ -828,7 +878,7 @@ export class CouncilStorage {
 		return {
 			reference: {
 				url: councilArtifactUrl(runId, name),
-				sha256: hashCouncilContent(content),
+				sha256: sha256CouncilContent(content),
 				bytes: Buffer.byteLength(content),
 			},
 			content,
@@ -1098,4 +1148,15 @@ export function createCouncilStorage(
 	options?: CouncilStorageOptions,
 ): CouncilStorage {
 	return new CouncilStorage(session, options);
+}
+
+/**
+ * Canonical council publication root for a session, resolvable before any manifest or storage
+ * instance exists — preflight needs it to promise an output path before model spend.
+ */
+export async function councilPlanRoot(
+	session: Pick<ToolSession, "localProtocolOptions" | "sessionManager">,
+	options?: CouncilStorageOptions,
+): Promise<string> {
+	return new CouncilStorage(session, options).canonicalPlanRoot();
 }

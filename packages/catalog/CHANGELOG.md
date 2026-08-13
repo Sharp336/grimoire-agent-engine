@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `streamMarkupHealingPattern` gating DeepSeek DSML healing on a provider-id allowlist, which left DeepSeek models behind user-configured proxies (LiteLLM, private gateways) with no tool-call grammar. Whether the envelope leaks is decided by the serving stack behind the host, not the provider id, so any DeepSeek model on a non-official-OpenAI endpoint now selects `"dsml"`.
+
 ## [17.2.9] - 2026-08-05
 
 ### Fixed

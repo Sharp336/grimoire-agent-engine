@@ -81,6 +81,8 @@ function createContext(): {
 		requestRender: Spy;
 		resetDisplay: Spy;
 		setCouncilPaneExpanded: Spy;
+		councilPaneActive: Spy;
+		toggleCouncilPaneExpansion: Spy;
 		shutdown: Spy;
 		showStatus: Spy;
 		startPendingSubmission: StartPendingSubmissionSpy;
@@ -111,6 +113,8 @@ function createContext(): {
 	const isCouncilAdjudicating = vi.fn(() => false);
 	const hasActiveBtw = vi.fn(() => false);
 	const setCouncilPaneExpanded = vi.fn();
+	const councilPaneActive = vi.fn(() => false);
+	const toggleCouncilPaneExpansion = vi.fn(() => false);
 	const handleOmfgEscape = vi.fn(() => true);
 	const hasActiveOmfg = vi.fn(() => false);
 	const updatePendingMessagesDisplay = vi.fn();
@@ -222,7 +226,8 @@ function createContext(): {
 		hasActiveCouncil,
 		isCouncilAdjudicating,
 		setCouncilPaneExpanded,
-		toggleCouncilPaneExpansion: vi.fn(() => false),
+		toggleCouncilPaneExpansion,
+		councilPane: { isActive: councilPaneActive } as unknown as InteractiveModeContext["councilPane"],
 		handleBtwEscape,
 		handleBtwCommand,
 		hasActiveBtw,
@@ -267,6 +272,8 @@ function createContext(): {
 			shutdown: ctx.shutdown as Spy,
 			startPendingSubmission,
 			setCouncilPaneExpanded,
+			councilPaneActive,
+			toggleCouncilPaneExpansion,
 			updatePendingMessagesDisplay,
 		},
 		inputListeners,
@@ -851,13 +858,28 @@ describe("InputController Council expansion behavior", () => {
 		const { ctx, editor, spies } = createContext();
 		ctx.hideToolActivity = true;
 		spies.hasActiveCouncil.mockReturnValue(true);
+		spies.councilPaneActive.mockReturnValue(true);
 		const controller = new InputController(ctx);
 		controller.setupKeyHandlers();
 
 		editor.onExpandTools?.();
 
-		expect(spies.setCouncilPaneExpanded).toHaveBeenCalledWith(true);
+		expect(spies.toggleCouncilPaneExpansion).toHaveBeenCalledTimes(1);
 		expect(spies.showStatus).not.toHaveBeenCalledWith(expect.stringContaining("Tool activity is hidden"));
+	});
+
+	it("keeps the shared lifecycle for an active Council whose pane is not on screen", () => {
+		const { ctx, editor, spies } = createContext();
+		spies.hasActiveCouncil.mockReturnValue(true);
+		spies.councilPaneActive.mockReturnValue(false);
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+
+		editor.onExpandTools?.();
+
+		expect(spies.toggleCouncilPaneExpansion).not.toHaveBeenCalled();
+		expect(spies.setCouncilPaneExpanded).toHaveBeenCalledWith(true);
+		expect(ctx.toolOutputExpanded).toBeTrue();
 	});
 });
 

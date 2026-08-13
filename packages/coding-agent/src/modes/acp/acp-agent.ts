@@ -45,7 +45,10 @@ import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import { getBlobsDir, isEnoent, logger, type postmortem, VERSION } from "@oh-my-pi/pi-utils";
 import { disableProvider, enableProvider, reset as resetCapabilities } from "../../capability";
 import { Settings } from "../../config/settings";
-import { getCouncilCoordinator } from "../../council/coordinator";
+import {
+	peekCouncilCoordinatorForSession,
+	quiesceAndReleaseCouncilForSessionTransition,
+} from "../../council/coordinator";
 import { isCouncilTerminalState } from "../../council/state";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
@@ -224,7 +227,7 @@ type MCPSourceMap = {
 type CreateAcpSession = (cwd: string) => Promise<AgentSession>;
 export interface AcpAgentDependencies {
 	executeBuiltinSlashCommand?: typeof executeAcpBuiltinSlashCommand;
-	getCouncilCoordinator?: typeof getCouncilCoordinator;
+	peekCouncilCoordinator?: typeof peekCouncilCoordinatorForSession;
 }
 
 type AcpSpeechOption = {
@@ -484,7 +487,7 @@ export class AcpAgent implements Agent {
 	#initialSession: AgentSession | undefined;
 	#createSession: CreateAcpSession;
 	#executeBuiltinSlashCommand: typeof executeAcpBuiltinSlashCommand;
-	#getCouncilCoordinator: typeof getCouncilCoordinator;
+	#peekCouncilCoordinator: typeof peekCouncilCoordinatorForSession;
 	#sessions = new Map<string, ManagedSessionRecord>();
 	#disposePromise: Promise<void> | undefined;
 	#cleanupRegistered = false;
@@ -502,7 +505,7 @@ export class AcpAgent implements Agent {
 		this.#initialSession = initialSession;
 		this.#createSession = createSession;
 		this.#executeBuiltinSlashCommand = dependencies.executeBuiltinSlashCommand ?? executeAcpBuiltinSlashCommand;
-		this.#getCouncilCoordinator = dependencies.getCouncilCoordinator ?? getCouncilCoordinator;
+		this.#peekCouncilCoordinator = dependencies.peekCouncilCoordinator ?? peekCouncilCoordinatorForSession;
 	}
 
 	setCancelCleanupTimeoutForTesting(timeoutMs: number): void {
@@ -963,18 +966,17 @@ export class AcpAgent implements Agent {
 		promptTurn.cancelRequested = true;
 		promptTurn.councilHoldCancellation.resolve();
 		promptTurn.unsubscribe?.();
-		const coordinator = this.#getCouncilCoordinator({
-			session: record.session,
-			toolSession: record.session.getToolSession(),
-			sessionManager: record.session.sessionManager,
-			settings: record.session.settings,
-			modelRegistry: record.session.modelRegistry,
-		});
-		const councilCleanup = coordinator.executionInFlight
-			? coordinator.cancelForSessionTransition()
-			: coordinator.snapshot && !isCouncilTerminalState(coordinator.snapshot.state)
-				? coordinator.cancel().then(() => undefined)
-				: Promise.resolve();
+		// Lookup-only: cancelling a turn must never *construct* a coordinator. A
+		// session that never ran Council has nothing to cancel, and building an
+		// idle one here would register a binding that outlives the cancelled turn.
+		const coordinator = this.#peekCouncilCoordinator(record.session, record.session.sessionManager.getSessionId());
+		const councilCleanup = !coordinator
+			? Promise.resolve()
+			: coordinator.executionInFlight
+				? coordinator.cancelForSessionTransition()
+				: coordinator.snapshot && !isCouncilTerminalState(coordinator.snapshot.state)
+					? coordinator.cancel().then(() => undefined)
+					: Promise.resolve();
 		void councilCleanup.catch((error: unknown) => {
 			logger.warn("ACP council cancel failed", { error });
 		});
@@ -1200,6 +1202,13 @@ export class AcpAgent implements Agent {
 	async #registerPreparedSession(session: AgentSession, mcpServers: McpServer[]): Promise<ManagedSessionRecord> {
 		const record = this.#createManagedSessionRecord(session);
 		session.setClientBridge(createAcpClientBridge(this.#connection, session.sessionId, this.#clientCapabilities));
+		// Own the Council lifecycle for every managed session (new, loaded, resumed,
+		// and forked all funnel through here) synchronously, before
+		// extensions or MCP servers can start a run. Installed on the AgentSession
+		// rather than the record, so an extension-driven in-place
+		// `record.session.newSession()` is covered by the same callback.
+		// `setSessionTransitionReconciler` is single-slot; this is the only install.
+		session.setSessionTransitionReconciler(() => quiesceAndReleaseCouncilForSessionTransition(session));
 		// `record.lifetimeUnsubscribe` is installed in `#scheduleBootstrapUpdates`
 		// so it shares the bootstrap race guard — see that comment for why.
 		try {

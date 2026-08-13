@@ -401,6 +401,12 @@ export interface ExecutorOptions {
 	 * tool, suppressing discovered and always-included capabilities.
 	 */
 	restrictToolNames?: boolean;
+	/**
+	 * Opt a {@link restrictToolNames} child into a live advisor. Without it a restricted child
+	 * forces `advisor.enabled: false`. Either way the advisor's tool slate is clamped to the
+	 * child's own allowlist, so the restriction stays a complete capability boundary.
+	 */
+	advisor?: boolean;
 	signal?: AbortSignal;
 	onProgress?: (progress: AgentProgress) => void;
 	/**
@@ -970,9 +976,15 @@ interface SubagentRunMonitor {
 	takeActiveSession(): AgentSession | null;
 	/** Subscribe the monitor to a session's events. Returns the unsubscribe function. */
 	attach(session: AgentSession): () => void;
-	/** Best-effort capture of the last assistant text for cancelled-run salvage. */
+	/**
+	 * Best-effort capture of the last assistant text for cancelled-run salvage, plus the child's
+	 * advisor spend. Called with the live session at teardown on every settle path, which is the
+	 * last point the advisor ledger is readable.
+	 */
 	captureSalvage(session: AgentSession): void;
 	lastAssistantSalvageText(): string | undefined;
+	/** Advisor spend captured by {@link captureSalvage}; absent when no advisor ever ran. */
+	advisorUsage(): SingleResult["advisorUsage"];
 	/** Final raw output: end-of-run assistant text when available, else accumulated chunks. */
 	rawOutput(): string;
 	scheduleProgress(flush?: boolean): void;
@@ -1064,6 +1076,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	let terminalError: string | undefined;
 	let consecutiveYieldToolErrors = 0;
 	let lastAssistantSalvageText: string | undefined;
+	let advisorUsage: SingleResult["advisorUsage"];
 	let activeSessionAbortPromise: Promise<void> | undefined;
 
 	const abortActiveSession = (): Promise<void> => {
@@ -1734,6 +1747,20 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		} catch {
 			// Salvage is best-effort; partial sessions may not implement it
 		}
+		// The advisor keeps its own ledger, which `progress` never sees. Read it here — the last
+		// point the session is alive on every settle path — so a caller that opted the child into
+		// an advisor can reconcile what it actually spent instead of billing an invisible model.
+		try {
+			const stats = session.getAdvisorStats?.();
+			if (!stats || (stats.messages.assistant === 0 && stats.tokens.total === 0 && stats.cost === 0)) return;
+			advisorUsage = {
+				requests: stats.messages.assistant,
+				tokens: stats.tokens.input + stats.tokens.output + stats.tokens.cacheWrite,
+				cost: stats.cost,
+			};
+		} catch {
+			// Advisor accounting is best-effort; a disposed or advisor-less session reports nothing.
+		}
 	};
 
 	return {
@@ -1789,6 +1816,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		attach,
 		captureSalvage,
 		lastAssistantSalvageText: () => lastAssistantSalvageText,
+		advisorUsage: () => advisorUsage,
 		rawOutput: () => (finalOutputChunks.length > 0 ? finalOutputChunks.join("") : outputChunks.join("")),
 		scheduleProgress,
 		finish: () => {
@@ -2230,6 +2258,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		aborted: wasAborted,
 		abortReason: finalAbortReason,
 		usage: monitor.hasUsage() ? monitor.accumulatedUsage : undefined,
+		advisorUsage: monitor.advisorUsage(),
 		outputPath,
 		extractedToolData: progress.extractedToolData,
 		retryFailure: progress.retryFailure,
@@ -2648,8 +2677,15 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			...(agent.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
 			// Isolated runs must not expose roots outside the worktree.
 			...(worktree !== undefined ? { "workspace.additionalDirectories": [] } : undefined),
-			// A restricted tool surface is a complete capability boundary: no independently-tooled/modelled side agents.
-			...(options.restrictToolNames ? { "advisor.enabled": false } : undefined),
+			// A restricted tool surface is a complete capability boundary by default: no
+			// independently-tooled/modelled side agents. An explicit `advisor` opt-in re-enables one
+			// (both keys are required for a non-main session), and `createAgentSession` clamps its
+			// tools to this child's own allowlist so the boundary still holds transitively.
+			...(options.restrictToolNames
+				? options.advisor === true
+					? { "advisor.enabled": true, "advisor.subagents": true }
+					: { "advisor.enabled": false }
+				: undefined),
 		},
 		options.parentServiceTier,
 	);

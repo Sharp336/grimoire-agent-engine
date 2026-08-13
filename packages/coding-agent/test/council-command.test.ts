@@ -1,6 +1,6 @@
 import { describe, expect, it, mock } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { CouncilCoordinator } from "@oh-my-pi/pi-coding-agent/council/coordinator";
+import type { CouncilCoordinator, CouncilRunOptions } from "@oh-my-pi/pi-coding-agent/council/coordinator";
 import type { CouncilManifest } from "@oh-my-pi/pi-coding-agent/council/state";
 import {
 	ACP_BUILTIN_RESERVED_NAMES,
@@ -12,14 +12,16 @@ import {
 	handleCouncilCommand,
 	parseCouncilCommandArgs,
 } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/council";
+import { COUNCIL_GRAMMAR, COUNCIL_USAGE } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/council-grammar";
 import type { ParsedSlashCommand, SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
 
 function manifest(overrides: Partial<CouncilManifest> = {}): CouncilManifest {
 	return {
 		runId: "run-123",
 		state: "reviewing",
-		outputPath: "plans/council-run-123.md",
+		outputPath: "council-run-123-plan.md",
 		warnings: [],
+		config: { members: [], rounds: 2 },
 		rounds: [
 			{
 				round: 2,
@@ -28,6 +30,14 @@ function manifest(overrides: Partial<CouncilManifest> = {}): CouncilManifest {
 		],
 		...overrides,
 	} as CouncilManifest;
+}
+
+/**
+ * Run-snapshot lines only. Start and resume also emit transient pre-flight and kickoff lines, so
+ * index-based assertions on `output` would pin someone else's contract.
+ */
+function snapshots(output: readonly string[]): string[] {
+	return output.filter(text => text.startsWith("Council run-123 "));
 }
 
 function command(args: string): ParsedSlashCommand {
@@ -71,8 +81,9 @@ describe("council builtin metadata", () => {
 		const definitions = BUILTIN_SLASH_COMMAND_DEFS.filter(item => item.name === "council");
 		expect(definitions).toHaveLength(1);
 		expect(definitions[0]).toMatchObject({
-			description: "Run a multi-model planning council",
+			description: "Run a multi-model planning council (spends on every configured council role)",
 			allowArgs: true,
+			inlineHint: COUNCIL_GRAMMAR,
 			subcommands: [
 				{ name: "status" },
 				{ name: "cancel" },
@@ -82,13 +93,26 @@ describe("council builtin metadata", () => {
 		});
 		expect(ACP_BUILTIN_RESERVED_NAMES.has("council")).toBe(true);
 		expect(ACP_BUILTIN_SLASH_COMMANDS.filter(item => item.name === "council")).toEqual([
-			expect.objectContaining({ name: "council", description: "Run a multi-model planning council" }),
+			expect.objectContaining({
+				name: "council",
+				description: "Run a multi-model planning council (spends on every configured council role)",
+			}),
 		]);
+	});
+
+	it("derives every published copy of the grammar from one constant", () => {
+		const definition = BUILTIN_SLASH_COMMAND_DEFS.find(item => item.name === "council");
+		const acp = ACP_BUILTIN_SLASH_COMMANDS.find(item => item.name === "council");
+		expect(COUNCIL_USAGE.split("\n")[0]).toBe(`Usage: /council [--] ${COUNCIL_GRAMMAR}`);
+		expect(definition?.inlineHint).toBe(COUNCIL_GRAMMAR);
+		expect(acp?.input?.hint).toBe(COUNCIL_GRAMMAR);
+		expect(COUNCIL_USAGE.split("\n")[1]).toContain("resume");
+		expect(COUNCIL_USAGE.split("\n")[1]).toContain("/council config");
 	});
 
 	it("blocks moving while a council is nonterminal and permits terminal snapshots", () => {
 		expect(councilMoveBlockMessage({ snapshot: manifest({ state: "planning" }) } as CouncilCoordinator)).toBe(
-			"Cannot move while council run run-123 is planning; use /council cancel first.",
+			"Cannot move while council run run-123 is drafting the plan; use /council cancel first.",
 		);
 		expect(
 			councilMoveBlockMessage({ snapshot: manifest({ state: "completed" }) } as CouncilCoordinator),
@@ -98,22 +122,124 @@ describe("council builtin metadata", () => {
 });
 
 describe("council argument parsing", () => {
-	it("recognizes only exact leading subcommand tokens", () => {
+	it("recognizes leading subcommand tokens case-insensitively", () => {
 		expect(parseCouncilCommandArgs("status")).toEqual({ kind: "status" });
-		expect(parseCouncilCommandArgs("status report exactly")).toEqual({
-			kind: "error",
-			message: "Usage: /council status",
-		});
+		expect(parseCouncilCommandArgs("Status")).toEqual({ kind: "status" });
+		expect(parseCouncilCommandArgs("STATUS")).toEqual({ kind: "status" });
+		expect(parseCouncilCommandArgs("Resume run-1")).toEqual({ kind: "resume", runId: "run-1" });
+		expect(parseCouncilCommandArgs("resume run-1")).toEqual({ kind: "resume", runId: "run-1" });
 		expect(parseCouncilCommandArgs("status-report exactly")).toEqual({
 			kind: "task",
 			task: "status-report exactly",
 		});
-		expect(parseCouncilCommandArgs("Resume run-1")).toEqual({ kind: "task", task: "Resume run-1" });
-		expect(parseCouncilCommandArgs("resume run-1")).toEqual({ kind: "resume", runId: "run-1" });
-		expect(parseCouncilCommandArgs("resume run-1 extra")).toEqual({
-			kind: "error",
-			message: "Usage: /council resume [run-id]",
+	});
+
+	it("refuses subcommand arguments and always points at the -- escape", () => {
+		for (const [args, message] of [
+			["status report exactly", "Usage: /council status"],
+			["status of the auth migration", "Usage: /council status"],
+			["Status page redesign", "Usage: /council status"],
+			["Cancel the retry logic", "Usage: /council cancel"],
+			["Config schema cleanup", "Usage: /council config"],
+			["resume run-1 extra", "Usage: /council resume [run-id]"],
+		] as const) {
+			expect(parseCouncilCommandArgs(args)).toEqual({
+				kind: "error",
+				message: `${message} (prefix with -- if your task starts with a subcommand word)`,
+			});
+		}
+		expect(parseCouncilCommandArgs("-- Status page redesign")).toEqual({
+			kind: "task",
+			task: "Status page redesign",
 		});
+	});
+
+	it("refuses a lone near-miss token and names the subcommand it meant", () => {
+		for (const [token, subcommand] of [
+			["statsu", "status"],
+			["cnacel", "cancel"],
+			["statuss", "status"],
+			["cancl", "cancel"],
+			["confug", "config"],
+			["resmue", "resume"],
+		] as const) {
+			expect(parseCouncilCommandArgs(token)).toEqual({
+				kind: "error",
+				message: `Unknown council subcommand "${token}". Did you mean /council ${subcommand}? Run /council -- ${token} to use it as a task.`,
+			});
+		}
+	});
+
+	it("still dispatches a task that merely opens with a mistyped subcommand", () => {
+		expect(parseCouncilCommandArgs("statsu page for the dashboard")).toEqual({
+			kind: "task",
+			task: "statsu page for the dashboard",
+		});
+		expect(parseCouncilCommandArgs("cnacel the retry logic")).toEqual({
+			kind: "task",
+			task: "cnacel the retry logic",
+		});
+	});
+
+	it("resolves near misses in declared subcommand order", () => {
+		const declared = BUILTIN_SLASH_COMMAND_DEFS.find(item => item.name === "council")?.subcommands?.map(
+			sub => sub.name,
+		);
+		expect(declared).toEqual(["status", "cancel", "resume", "config"]);
+
+		// Optimal string alignment distance, computed independently of the parser.
+		const distance = (a: string, b: string): number => {
+			const table = Array.from({ length: a.length + 1 }, (_, row) =>
+				Array.from({ length: b.length + 1 }, (_, column) => (row === 0 ? column : column === 0 ? row : 0)),
+			);
+			for (let row = 1; row <= a.length; row++) {
+				for (let column = 1; column <= b.length; column++) {
+					const cost = a[row - 1] === b[column - 1] ? 0 : 1;
+					let best = Math.min(
+						table[row]![column - 1]! + 1,
+						table[row - 1]![column]! + 1,
+						table[row - 1]![column - 1]! + cost,
+					);
+					if (row > 1 && column > 1 && a[row - 1] === b[column - 2] && a[row - 2] === b[column - 1]) {
+						best = Math.min(best, table[row - 2]![column - 2]! + 1);
+					}
+					table[row]![column] = best;
+				}
+			}
+			return table[a.length]![b.length]!;
+		};
+
+		const alphabet = "abcdefghijklmnopqrstuvwxyz";
+		const variants = new Set<string>();
+		for (const name of declared!) {
+			for (let index = 0; index < name.length; index++) {
+				variants.add(name.slice(0, index) + name.slice(index + 1));
+				if (index + 1 < name.length) {
+					variants.add(name.slice(0, index) + name[index + 1] + name[index] + name.slice(index + 2));
+				}
+				for (const letter of alphabet) {
+					variants.add(name.slice(0, index) + letter + name.slice(index + 1));
+					variants.add(name.slice(0, index) + letter + name.slice(index));
+				}
+			}
+		}
+
+		let refusals = 0;
+		for (const variant of variants) {
+			if (declared!.includes(variant)) continue;
+			const expected = declared!.find(name => distance(variant, name) === 1);
+			const parsed = parseCouncilCommandArgs(variant);
+			if (expected === undefined) {
+				expect(parsed).toEqual({ kind: "task", task: variant });
+				continue;
+			}
+			refusals++;
+			expect(parsed).toEqual({
+				kind: "error",
+				message: `Unknown council subcommand "${variant}". Did you mean /council ${expected}? Run /council -- ${variant} to use it as a task.`,
+			});
+		}
+		expect(refusals).toBeGreaterThan(0);
 	});
 
 	it("strips a leading literal marker and otherwise preserves task bytes", () => {
@@ -137,15 +263,15 @@ describe("council shared handler", () => {
 		const start = mock(async (_task: string) => manifest());
 		const h = harness({ start, completion: completion.promise });
 		const result = await handleCouncilCommand(command("design  this exactly"), h.runtime, h.dependencies);
-		expect(start).toHaveBeenCalledWith("design  this exactly");
+		expect(start.mock.calls[0]?.[0]).toBe("design  this exactly");
 		expect(result).toEqual({ consumed: true });
-		expect(h.output).toEqual([
-			"Council run-123: state=reviewing; round=2; roster=1/3 succeeded, 1 running, 1 failed; warnings=0; output=plans/council-run-123.md",
+		expect(snapshots(h.output)).toEqual([
+			"Council run-123 under review (round 2/2): 1 of 3 members done, 1 running, 1 failed; plan: local://council-run-123-plan.md",
 		]);
 		expect(h.held).toHaveLength(1);
 	});
 
-	it("reports only the count of untrusted preflight warnings in snapshots", async () => {
+	it("surfaces the first sanitized preflight warning and counts the rest", async () => {
 		const h = harness({
 			status: mock(async () =>
 				manifest({
@@ -157,8 +283,8 @@ describe("council shared handler", () => {
 		await handleCouncilCommand(command("status"), h.runtime, h.dependencies);
 
 		expect(h.output).toHaveLength(1);
-		expect(h.output[0]).toContain("warnings=2");
-		expect(h.output[0]).not.toContain("provider/example");
+		expect(h.output[0]).toContain("; warning: provider/example overlaps Main (+1 more)");
+		expect(h.output[0]).not.toContain("model unavailable");
 		expect(h.output[0]).not.toContain("\u001b");
 		expect(h.output[0]).not.toContain("\u0007");
 	});
@@ -178,7 +304,7 @@ describe("council shared handler", () => {
 		startResult.resolve(manifest());
 		await invocation;
 
-		expect(h.output).toEqual([]);
+		expect(snapshots(h.output)).toEqual([]);
 		expect(h.held).toEqual([]);
 
 		const failureEntered = Promise.withResolvers<void>();
@@ -195,7 +321,7 @@ describe("council shared handler", () => {
 		failureResult.reject(new Error("stale council failure"));
 		await failedInvocation;
 
-		expect(failed.output).toEqual([]);
+		expect(failed.output.filter(text => text.includes("stale council failure"))).toEqual([]);
 		expect(failed.held).toEqual([]);
 	});
 
@@ -214,23 +340,24 @@ describe("council shared handler", () => {
 		completion.resolve();
 		await h.held[0];
 
-		expect(h.output).toHaveLength(1);
-		expect(h.output[0]).toContain("state=reviewing");
-		expect(h.output[0]).not.toContain("state=completed");
+		expect(snapshots(h.output)).toHaveLength(1);
+		expect(snapshots(h.output)[0]).toContain("run-123 under review");
+		expect(h.output.join("\n")).not.toContain("run-123 completed");
 	});
 
 	it("holds coordinator completion before reporting a start output failure", async () => {
 		const completion = Promise.withResolvers<void>();
 		const h = harness({ start: mock(async () => manifest()), completion: completion.promise });
-		let outputCalls = 0;
-		h.runtime.output = async () => {
-			outputCalls++;
-			if (outputCalls === 1) throw new Error("ACP output failed");
+		let attemptedKickoff = false;
+		h.runtime.output = async text => {
+			if (!text.startsWith("Council run-123 ")) return;
+			attemptedKickoff = true;
+			throw new Error("ACP output failed");
 		};
 
 		await handleCouncilCommand(command("plan despite output failure"), h.runtime, h.dependencies);
 
-		expect(outputCalls).toBe(2);
+		expect(attemptedKickoff).toBe(true);
 		expect(h.held).toHaveLength(1);
 	});
 
@@ -246,7 +373,7 @@ describe("council shared handler", () => {
 		const h = harness(coordinator);
 		h.runtime.output = async text => {
 			h.output.push(text);
-			if (text.includes("state=failed")) {
+			if (text.includes("run-123 failed")) {
 				terminalOutputStarted.resolve(text);
 				await releaseTerminalOutput.promise;
 			}
@@ -264,8 +391,8 @@ describe("council shared handler", () => {
 		completion.resolve();
 		const terminalOutput = await terminalOutputStarted.promise;
 		expect(heldSettled).toBe(false);
-		expect(terminalOutput).toContain("state=failed");
-		expect(terminalOutput).toContain("output=plans/council-run-123.md; failure=failure ");
+		expect(terminalOutput).toContain("run-123 failed");
+		expect(terminalOutput).toContain("plan: local://council-run-123-plan.md; failure=failure ");
 		expect(terminalOutput.length).toBeLessThan(450);
 		expect(terminalOutput).not.toContain("\u001b");
 		expect(terminalOutput).not.toContain("\u0007");
@@ -273,7 +400,7 @@ describe("council shared handler", () => {
 		releaseTerminalOutput.resolve();
 		await h.held[0];
 		expect(heldSettled).toBe(true);
-		expect(h.output.filter(text => text.includes("state=failed"))).toHaveLength(1);
+		expect(h.output.filter(text => text.includes("run-123 failed"))).toHaveLength(1);
 	});
 
 	it("keeps a successful coordinator outcome when terminal output delivery fails", async () => {
@@ -284,17 +411,18 @@ describe("council shared handler", () => {
 			snapshot: manifest(),
 		};
 		const h = harness(coordinator);
-		let outputCalls = 0;
-		h.runtime.output = async () => {
-			outputCalls++;
-			if (outputCalls === 2) throw new Error("terminal ACP output failed");
+		let terminalDeliveries = 0;
+		h.runtime.output = async text => {
+			if (!text.startsWith("Council run-123 completed")) return;
+			terminalDeliveries++;
+			throw new Error("terminal ACP output failed");
 		};
 		await handleCouncilCommand(command("terminal output failure"), h.runtime, h.dependencies);
 		coordinator.snapshot = manifest({ state: "completed" });
 
 		completion.resolve();
 		await expect(h.held[0]).resolves.toBeUndefined();
-		expect(outputCalls).toBe(2);
+		expect(terminalDeliveries).toBe(1);
 	});
 
 	it("reports kickoff before an already-settled completion's terminal output", async () => {
@@ -308,7 +436,10 @@ describe("council shared handler", () => {
 		await handleCouncilCommand(command("fast completion"), h.runtime, h.dependencies);
 		await h.held[0];
 
-		expect(h.output.map(text => /state=([^;]+)/.exec(text)?.[1])).toEqual(["reviewing", "completed"]);
+		expect(snapshots(h.output).map(text => /^Council run-123 ([a-z ]+) \(round/.exec(text)?.[1])).toEqual([
+			"under review",
+			"completed",
+		]);
 	});
 
 	it("does not attach stale completion to an already-completed resume", async () => {
@@ -322,18 +453,22 @@ describe("council shared handler", () => {
 		await handleCouncilCommand(command("resume finished-run"), h.runtime, h.dependencies);
 
 		expect(h.held).toEqual([]);
-		expect(h.output).toHaveLength(1);
-		expect(h.output[0]).toContain("state=completed");
+		expect(snapshots(h.output)).toHaveLength(1);
+		expect(snapshots(h.output)[0]).toContain("run-123 completed");
 	});
 
 	it("surfaces a duplicate-start diagnostic without queuing another task", async () => {
 		const start = mock(async () => {
-			throw new Error("Council run run-123 is already reviewing; use /council status or /council cancel.");
+			throw new Error(
+				"Council run run-123 is already active for this session; use /council status or /council cancel.",
+			);
 		});
 		const h = harness({ start });
 		await handleCouncilCommand(command("another task"), h.runtime, h.dependencies);
 		expect(start).toHaveBeenCalledTimes(1);
-		expect(h.output).toEqual(["Council run run-123 is already reviewing; use /council status or /council cancel."]);
+		expect(h.output.at(-1)).toBe(
+			"Council run run-123 is already active for this session; use /council status or /council cancel.",
+		);
 		expect(h.held).toEqual([]);
 	});
 
@@ -375,7 +510,7 @@ describe("council shared handler", () => {
 		expect(h.output).toContain("Council setup cancelled before dispatch.");
 	});
 
-	it("reports snapshotless deferred preflight as zero-spend setup in progress", async () => {
+	it("reports snapshotless deferred preflight as setup in progress", async () => {
 		const status = mock(async () => undefined);
 		const h = harness({
 			executionInFlight: true,
@@ -387,7 +522,7 @@ describe("council shared handler", () => {
 		await handleCouncilCommand(command("status"), h.runtime, h.dependencies);
 
 		expect(status).not.toHaveBeenCalled();
-		expect(h.output).toEqual(["Council setup/preflight is in progress; cost=$0."]);
+		expect(h.output).toEqual(["Council setup/preflight is in progress."]);
 	});
 
 	it("reports an existing terminal snapshot instead of misclassifying summary delivery as setup", async () => {
@@ -408,7 +543,7 @@ describe("council shared handler", () => {
 		expect(cancelForSessionTransition).not.toHaveBeenCalled();
 		expect(cancel).not.toHaveBeenCalled();
 		expect(h.output).toHaveLength(1);
-		expect(h.output[0]).toContain("state=completed");
+		expect(h.output[0]).toContain("run-123 completed");
 	});
 
 	it("reports no active run when cancel sees only an already-settled terminal snapshot", async () => {
@@ -441,18 +576,19 @@ describe("council shared handler", () => {
 		await handleCouncilCommand(command("cancel"), h.runtime, h.dependencies);
 		await handleCouncilCommand(command("resume run-old"), h.runtime, h.dependencies);
 		expect(coordinator.cancel).toHaveBeenCalledTimes(1);
-		expect(coordinator.resume).toHaveBeenCalledWith("run-old");
-		expect(h.output).toHaveLength(3);
-		expect(h.output[0]).toContain("state=reviewing");
-		expect(h.output[1]).toContain("state=interrupted");
-		expect(h.output[2]).toContain("state=dispatching");
+		expect(coordinator.resume.mock.calls[0]?.[0]).toBe("run-old");
+		expect(snapshots(h.output)).toEqual([
+			"Council run-123 under review (round 2/2): 1 of 3 members done, 1 running, 1 failed; plan: local://council-run-123-plan.md",
+			"Council run-123 interrupted (round 2/2): 1 of 3 members done, 1 running, 1 failed; plan: local://council-run-123-plan.md",
+			"Council run-123 starting (round 2/2): 1 of 3 members done, 1 running, 1 failed; plan: local://council-run-123-plan.md",
+		]);
 		expect(h.held).toHaveLength(1);
 
 		const empty = harness({ status: mock(async () => undefined), cancel: mock(async () => manifest()) });
 		await handleCouncilCommand(command("status"), empty.runtime, empty.dependencies);
 		await handleCouncilCommand(command("cancel"), empty.runtime, empty.dependencies);
 		expect(empty.output[0]).toBe(
-			"No active council run. rounds=1; task.maxConcurrency=32; roster=4/4 enabled [council1=unassigned, council2=unassigned, council3=unassigned, council4=unassigned]; cost=$0.",
+			"No active council run. planner=slow model role, adjudicator=main session (in-session adjudication); 4 roles enabled (Reviewer 1=unassigned, Reviewer 2=unassigned, Reviewer 3=unassigned, Reviewer 4=unassigned); 1 round(s) per run. Fix the roster with /council config.",
 		);
 		expect(empty.output[1]).toBe("No active council run.");
 
@@ -462,7 +598,7 @@ describe("council shared handler", () => {
 		});
 		await handleCouncilCommand(command("status"), builtIn.runtime, builtIn.dependencies);
 		expect(builtIn.output).toEqual([
-			"No active council run. rounds=1; task.maxConcurrency=32; roster=1/1 enabled [slow=unassigned]; cost=$0.",
+			"No active council run. planner=slow model role, adjudicator=main session (in-session adjudication); 1 role enabled (Slow=unassigned); 1 round(s) per run. Fix the roster with /council config.",
 		]);
 	});
 
@@ -475,7 +611,18 @@ describe("council shared handler", () => {
 		const acp = harness({});
 		acp.runtime.openCouncilConfig = undefined;
 		await handleCouncilCommand(command("config"), acp.runtime, acp.dependencies);
-		expect(acp.output).toEqual(["Council configuration requires the Model Hub Roles view."]);
+		expect(acp.output).toHaveLength(1);
+		const guidance = acp.output[0]!;
+		// Operator prose reads `Reviewer N`; the YAML below it keeps the durable `councilN` ids.
+		expect(guidance).toContain("4 roles enabled (Reviewer 1=unassigned");
+		expect(guidance).toContain(acp.runtime.settings.getGlobalConfigPath());
+		expect(guidance).toContain("council:\n  members:\n    - role: council1\n      enabled: true");
+		expect(guidance).toContain("modelRoles:\n  council1: provider/model");
+		expect(guidance).toContain("  planner: provider/model");
+		expect(guidance).toContain("  adjudicator: provider/model");
+		expect(guidance).toContain("  advisor:\n    planner: false\n    reviewers: false\n    adjudicator: false");
+		expect(guidance).toContain("An unassigned `planner` role falls back to the `slow` model role");
+		expect(guidance).toContain("an unassigned `adjudicator` role keeps adjudication in your main session.");
 	});
 
 	it("prints usage for empty input and rejects invalid subcommand arguments", async () => {
@@ -483,8 +630,68 @@ describe("council shared handler", () => {
 		await handleCouncilCommand(command(""), h.runtime, h.dependencies);
 		await handleCouncilCommand(command("cancel trailing"), h.runtime, h.dependencies);
 		expect(h.output).toEqual([
-			"Usage: /council <task> | status | cancel | resume [run-id] | config",
-			"Usage: /council cancel",
+			COUNCIL_USAGE,
+			"Usage: /council cancel (prefix with -- if your task starts with a subcommand word)",
 		]);
+	});
+
+	it("names the roster it is about to spend on before the first child launches", async () => {
+		const h = harness({
+			start: async (_task: string, options?: CouncilRunOptions) => {
+				await options?.onKickoff?.({
+					runId: "run-123",
+					resumed: false,
+					plannerModel: "planner/fixed",
+					adjudicator: { mode: "main", model: "main/active" },
+					members: [
+						{ role: "council1", model: "member/one", rounds: [1, 2] },
+						{ role: "council2", model: "member/two", rounds: [1, 2] },
+					],
+					rounds: 2,
+				});
+				return manifest();
+			},
+		});
+
+		await handleCouncilCommand(command("do the thing"), h.runtime, h.dependencies);
+
+		// Roster resolution can block on the keychain, so the wait is announced before it starts.
+		expect(h.output.slice(0, 2)).toEqual([
+			"Resolving council roster…",
+			"Starting run-123: planner=planner/fixed, adjudicator=main/active (main), round 1: [Reviewer 1=member/one, Reviewer 2=member/two], round 2: [Reviewer 1=member/one, Reviewer 2=member/two].",
+		]);
+	});
+
+	it("announces the storage read and the roster before a resume, and marks it resumed", async () => {
+		const h = harness({
+			resume: async (_runId?: string, options?: CouncilRunOptions) => {
+				await options?.onKickoff?.({
+					runId: "run-123",
+					resumed: true,
+					plannerModel: "planner/fixed",
+					adjudicator: { mode: "main", model: "main/active" },
+					members: [{ role: "council1", model: "member/one", rounds: [1] }],
+					rounds: 1,
+				});
+				return manifest();
+			},
+		});
+
+		await handleCouncilCommand(command("resume run-123"), h.runtime, h.dependencies);
+
+		expect(h.output.slice(0, 3)).toEqual([
+			"Loading council run…",
+			"Resolving council roster…",
+			"Resuming run-123: planner=planner/fixed, adjudicator=main/active (main), round 1: [Reviewer 1=member/one].",
+		]);
+	});
+
+	it("says a completed run has nothing to resume", async () => {
+		const h = harness({ resume: async () => manifest({ state: "completed" }) });
+
+		await handleCouncilCommand(command("resume run-123"), h.runtime, h.dependencies);
+
+		expect(h.output).toContain("Run run-123 already completed; nothing to resume.");
+		expect(snapshots(h.output)).toHaveLength(1);
 	});
 });

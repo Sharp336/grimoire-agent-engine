@@ -150,6 +150,44 @@ function setByPath(obj: RawSettings, segments: string[], value: unknown): void {
 	current[segments[segments.length - 1]] = value;
 }
 
+/**
+ * Delete a nested value by path segments, pruning ancestor records the
+ * deletion leaves empty. Returns whether anything was removed.
+ */
+function deleteByPath(obj: RawSettings, segments: readonly string[]): boolean {
+	const owners: RawSettings[] = [];
+	let current: RawSettings = obj;
+	for (let i = 0; i < segments.length - 1; i++) {
+		const next = current[segments[i]];
+		if (!isRecord(next)) return false;
+		owners.push(current);
+		current = next;
+	}
+	const leaf = segments[segments.length - 1];
+	if (!Object.hasOwn(current, leaf)) return false;
+	delete current[leaf];
+	for (let i = owners.length - 1; i >= 0; i--) {
+		const child = owners[i][segments[i]];
+		if (!isRecord(child) || Object.keys(child).length > 0) break;
+		delete owners[i][segments[i]];
+	}
+	return true;
+}
+
+/**
+ * Record which file declared every path in a project settings layer. Later
+ * files overwrite earlier ones so the recorded source matches merge
+ * precedence: the file whose value actually survived into `#project`.
+ */
+function recordSettingSources(data: RawSettings, prefix: string, filePath: string, sink: Map<string, string>): void {
+	for (const key of Object.keys(data)) {
+		const dotted = prefix ? `${prefix}.${key}` : key;
+		sink.set(dotted, filePath);
+		const value = data[key];
+		if (isRecord(value)) recordSettingSources(value, dotted, filePath, sink);
+	}
+}
+
 export function normalizeProviderMaxInFlightRequests(value: unknown): Record<string, number> {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return {};
 	const normalized: Record<string, number> = {};
@@ -357,6 +395,13 @@ export class Settings {
 	#project: RawSettings = {};
 	/** Last successfully loaded native .omp/config.yml contents. */
 	#projectFileSettings: RawSettings = {};
+	/**
+	 * Dotted setting path → the project config file that declared it, recorded
+	 * in merge order so the winning file is the one reported. Only paths from
+	 * discovered project settings files appear; the native `.omp/config.yml`
+	 * `modelRoles` merge has its own dedicated accessors.
+	 */
+	#projectSettingSources = new Map<string, string>();
 	/** Logical config paths whose malformed targets were moved aside. */
 	#quarantinedYamlTargets = new Map<string, string>();
 	/** Extra config.yml-style overlays passed by CLI */
@@ -525,6 +570,71 @@ export class Settings {
 	getRawSetting(path: SettingPath, layer: RawSettingLayer = "effective"): RawSettingInspection {
 		const source = layer === "global" ? this.#global : layer === "project" ? this.#project : this.#merged;
 		return inspectByPath(source, SETTING_PATH_SEGMENTS[path]);
+	}
+
+	/**
+	 * Absolute path of the project config file whose value for `path` survived
+	 * into the project layer, or `undefined` when no discovered project file
+	 * declares it. Use this to name the offending file when a project-scoped
+	 * override has to be relocated or removed by hand.
+	 */
+	getProjectSettingSource(path: SettingPath): string | undefined {
+		return this.#projectSettingSources.get(path);
+	}
+
+	/**
+	 * Remove `path` from the project layer and from the file that declared it.
+	 * Returns `false` — without touching anything — when the project layer does
+	 * not define `path`, so callers may safely order a destination write before
+	 * this removal and re-run it idempotently.
+	 *
+	 * Non-persisting instances prune only the in-memory layer, matching {@link set}.
+	 * A project file in a format this instance does not own (foreign providers,
+	 * Codex TOML) throws instead of silently diverging from disk.
+	 */
+	async removeProjectSetting(path: SettingPath): Promise<boolean> {
+		const segments = SETTING_PATH_SEGMENTS[path];
+		if (!inspectByPath(this.#project, segments).configured) return false;
+		const source = this.#projectSettingSources.get(path);
+		if (this.#persist && source) {
+			await this.#removeSettingFromProjectFile(source, segments);
+		}
+		const prev = this.get(path);
+		deleteByPath(this.#project, segments);
+		this.#projectSettingSources.delete(path);
+		this.#rebuildMerged();
+		this.#fireEffectiveSettingChanged(path, this.get(path), prev);
+		return true;
+	}
+
+	/**
+	 * Delete `segments` from one project settings file in place. YAML goes
+	 * through the shared write lock and atomic replace; JSON is rewritten with a
+	 * stable two-space indent.
+	 */
+	async #removeSettingFromProjectFile(filePath: string, segments: readonly string[]): Promise<void> {
+		const extension = path.extname(filePath).toLowerCase();
+		if (extension === ".yml" || extension === ".yaml") {
+			await this.#withYamlWriteLock(filePath, async writePath => {
+				const loaded = await this.#loadYamlIfPresentForWriteLocked(filePath, writePath);
+				if (!loaded || !deleteByPath(loaded, segments)) return;
+				await this.#writeYamlAtomically(writePath, loaded);
+				this.#quarantinedYamlTargets.delete(filePath);
+				if (filePath === path.join(this.#cwd, ".omp", "config.yml")) {
+					this.#projectFileSettings = structuredClone(loaded);
+				}
+			});
+			invalidateCapabilityFsCache(filePath);
+			return;
+		}
+		if (extension === ".json") {
+			const parsed: unknown = JSONC.parse(await Bun.file(filePath).text());
+			if (!isRecord(parsed) || !deleteByPath(parsed, segments)) return;
+			await Bun.write(filePath, `${JSON.stringify(parsed, null, 2)}\n`);
+			invalidateCapabilityFsCache(filePath);
+			return;
+		}
+		throw new Error(`Cannot edit ${filePath} automatically; remove ${segments.join(".")} from it by hand`);
 	}
 
 	/**
@@ -1268,17 +1378,20 @@ export class Settings {
 
 	async #loadProjectSettings(): Promise<RawSettings> {
 		this.#projectShellPathSource = undefined;
+		this.#projectSettingSources.clear();
 		let merged: RawSettings = {};
 		try {
 			const result = await loadCapability(settingsCapability.id, { cwd: this.#cwd });
 			for (const item of result.items as SettingsCapabilityItem[]) {
 				if (item.level === "project") {
 					merged = this.#deepMerge(merged, item.data as RawSettings);
+					recordSettingSources(item.data as RawSettings, "", item.path, this.#projectSettingSources);
 					if (Object.hasOwn(item.data, "shellPath")) this.#projectShellPathSource = item.path;
 				}
 			}
 		} catch {
 			this.#projectShellPathSource = undefined;
+			this.#projectSettingSources.clear();
 			// Capability discovery is best-effort; the native project config below
 			// remains authoritative for its model-role layer and must not be hidden.
 		}

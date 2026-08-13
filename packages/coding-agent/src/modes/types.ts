@@ -6,6 +6,7 @@ import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
 import type { KeybindingsManager } from "../config/keybindings";
 import type { Settings } from "../config/settings";
+import type { CouncilSummaryDelivery } from "../council/coordinator";
 import type {
 	AutocompleteProviderFactory,
 	ExtensionUIContext,
@@ -261,6 +262,11 @@ export interface InteractiveModeContext {
 	/** Mount command output deferred by {@link presentCommandOutput}. */
 	flushPendingCommandOutput(): void;
 	/**
+	 * Paint a council summary card the coordinator delivered outside any render path: a live-only
+	 * mount while Main streams, or a transcript rebuild after the idle append.
+	 */
+	presentCouncilSummaryDelivery(delivery: CouncilSummaryDelivery): void;
+	/**
 	 * Dispose every live block in the transcript (stopping timers/subscriptions)
 	 * and clear it. Used before a full rebuild so animated/streaming blocks do not
 	 * leak.
@@ -453,7 +459,12 @@ export interface InteractiveModeContext {
 	setLoopPrompt(prompt: string): void;
 	disableLoopMode(): void;
 	pauseLoop(): void;
-	handlePlanApproval(details: PlanApprovalDetails): Promise<void>;
+	handlePlanApproval(details: PlanApprovalDetails, options?: { header?: readonly string[] }): Promise<void>;
+	/**
+	 * Idempotently enter plan mode for the Council plan-approval handoff, or report the precise reason
+	 * it cannot (goal mode, vibe mode, or `plan.enabled` off). Never toggles plan mode off.
+	 */
+	ensureCouncilPlanMode(): Promise<{ ok: true } | { ok: false; reason: string }>;
 	openPlanReview(): Promise<void>;
 
 	// Hook UI methods

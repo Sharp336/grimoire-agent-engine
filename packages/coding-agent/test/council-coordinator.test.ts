@@ -1,22 +1,40 @@
 import { afterEach, describe, expect, it, mock, spyOn, vi } from "bun:test";
+import { realpathSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { AgentBusyError } from "@oh-my-pi/pi-agent-core";
-import type { Api, Model } from "@oh-my-pi/pi-ai";
+import { AgentBusyError, type AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { Api, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
-	COUNCIL_ADJUDICATION_INJECTION_CAP,
 	CouncilCoordinator,
 	type CouncilCoordinatorHost,
 	type CouncilCoordinatorSnapshot,
+	type CouncilKickoffPreview,
 	getCouncilCoordinator,
+	peekCouncilCoordinatorForSession,
+	quiesceAndReleaseCouncilForSessionTransition,
+	releaseCouncilCoordinator,
 	resetCouncilCoordinatorsForTests,
 } from "@oh-my-pi/pi-coding-agent/council/coordinator";
+import {
+	COUNCIL_RUN_MESSAGE_TYPE,
+	COUNCIL_SUMMARY_MESSAGE_TYPE,
+	type CouncilRunEventKind,
+} from "@oh-my-pi/pi-coding-agent/council/events";
 import { sha256CouncilContent } from "@oh-my-pi/pi-coding-agent/council/hash";
 import type { CouncilDispatchPlan } from "@oh-my-pi/pi-coding-agent/council/preflight";
 import * as preflight from "@oh-my-pi/pi-coding-agent/council/preflight";
 import * as publication from "@oh-my-pi/pi-coding-agent/council/publication";
-import { type CouncilManifest, parseCouncilManifest } from "@oh-my-pi/pi-coding-agent/council/state";
+import {
+	COUNCIL_ADJUDICATION_INJECTION_CAP,
+	councilSlotPrefix,
+	validateIncomingCouncilReport,
+} from "@oh-my-pi/pi-coding-agent/council/schema";
+import {
+	COUNCIL_MANIFEST_VERSION,
+	type CouncilManifest,
+	parseCouncilManifest,
+} from "@oh-my-pi/pi-coding-agent/council/state";
 import { CouncilStorage } from "@oh-my-pi/pi-coding-agent/council/storage";
 import type {
 	StructuredSubagentRequest,
@@ -63,11 +81,28 @@ interface SummaryTestState {
 	onAttempt?: () => void;
 }
 
+/** Shape of one durable custom message as the coordinator hands it to the session. */
+interface DeliveredCustomMessage {
+	customType: string;
+	content: string;
+	details?: Record<string, unknown>;
+}
+
 interface Harness {
 	host: CouncilCoordinatorHost;
 	dispatch: CouncilDispatchPlan;
 	toolSession: ToolSession;
-	summaries: unknown[];
+	/** Canonical session `local://` root every council artifact and the published plan share. */
+	planRoot: string;
+	summaries: DeliveredCustomMessage[];
+	/** Durable `council-run` lifecycle events, in delivery order. */
+	lifecycleEvents: DeliveredCustomMessage[];
+	/** `sendCustomMessage` options recorded for each accepted `council-summary` delivery. */
+	summaryOptions: { deliverAs?: string }[];
+	/** `CouncilCoordinatorHost.presentCouncilSummary` calls, in order. */
+	presentations: { runId: string; deferred: boolean; content: string; details: Record<string, unknown> }[];
+	/** Flip the session's streaming flag the way an in-flight user turn would. */
+	setStreaming: (value: boolean) => void;
 	prompts: string[];
 	summaryState: SummaryTestState;
 	adjudicationState: AdjudicationTestState;
@@ -90,6 +125,9 @@ function makeHarness(rounds: 1 | 2 = 1, roles = ["correctness", "architecture"])
 	const temp = TempDir.createSync("@pi-council-coordinator-");
 	temporaryDirectories.push(temp);
 	const repoRoot = temp.path();
+	// The published plan now lands in the session `local://` cache, never the working tree, and every
+	// containment check downstream compares against the canonical (realpath) form of that root.
+	const planRoot = path.join(realpathSync(repoRoot), "artifacts", "local");
 	const settings = Settings.isolated({ "task.maxConcurrency": 2 });
 	const journal: CouncilManifest[] = [];
 	let handler: CouncilAdjudicationHandler | undefined;
@@ -112,7 +150,10 @@ function makeHarness(rounds: 1 | 2 = 1, roles = ["correctness", "architecture"])
 			handler = value ?? undefined;
 		},
 	} as unknown as ToolSession;
-	const summaries: unknown[] = [];
+	const summaries: DeliveredCustomMessage[] = [];
+	const lifecycleEvents: DeliveredCustomMessage[] = [];
+	const summaryOptions: { deliverAs?: string }[] = [];
+	const presentations: { runId: string; deferred: boolean; content: string; details: Record<string, unknown> }[] = [];
 	const prompts: string[] = [];
 	const summaryState: SummaryTestState = { failures: 0, attempts: 0 };
 	const adjudicationState: AdjudicationTestState = { skipHandler: false };
@@ -120,7 +161,7 @@ function makeHarness(rounds: 1 | 2 = 1, roles = ["correctness", "architecture"])
 		model: mainModel,
 		thinkingLevel: undefined,
 		isStreaming: false,
-		messages: [],
+		messages: [] as AgentMessage[],
 		getActiveToolNames: () => ["read", "write"],
 		waitForIdle: mock(async () => {}),
 		abort: mock(async () => adjudicationState.onAbort?.()),
@@ -139,10 +180,13 @@ function makeHarness(rounds: 1 | 2 = 1, roles = ["correctness", "architecture"])
 			const active = toolSession.peekCouncilHandler?.();
 			if (!active) throw new Error("Expected an adjudication handler");
 			const ids = [...message.content.matchAll(/"id":"([A-Z]+\d+)"/g)].map(match => match[1]!);
+			// Every reporting slot owes a grade; the slots are the ones the assignment injected.
+			const slots = [...new Set([...message.content.matchAll(/"slot":(\d+)/g)].map(match => Number(match[1])))];
 			const result = await active(
 				JSON.stringify({
 					plan: adjudicationState.plan ?? PLAN,
 					dispositions: ids.map(id => ({ id, disposition: "accepted", reason: "Supported", step: "Approach 1" })),
+					grades: slots.map(slot => ({ slot, grade: "A", reason: "Verified high-severity findings" })),
 				}),
 			);
 			if (result.isError) throw new Error("Test adjudication was rejected");
@@ -150,9 +194,19 @@ function makeHarness(rounds: 1 | 2 = 1, roles = ["correctness", "architecture"])
 		}),
 		sendCustomMessage: mock(
 			async (
-				message: unknown,
-				options?: { expectedSessionId?: string; deliveryReceipt?: { delivered: boolean } },
+				message: DeliveredCustomMessage,
+				options?: { deliverAs?: string; expectedSessionId?: string; deliveryReceipt?: { delivered: boolean } },
 			) => {
+				// Lifecycle events ride the same sink as the summary card but are a separate durable
+				// stream: they must not consume the card's retry/decline fixtures.
+				if (message.customType === COUNCIL_RUN_MESSAGE_TYPE) {
+					if (options?.expectedSessionId && sessionManager.getSessionId() !== options.expectedSessionId) {
+						return false;
+					}
+					lifecycleEvents.push(message);
+					if (options?.deliveryReceipt) options.deliveryReceipt.delivered = true;
+					return false;
+				}
 				summaryState.attempts++;
 				summaryState.onAttempt?.();
 				if (summaryState.pending) await summaryState.pending;
@@ -166,16 +220,21 @@ function makeHarness(rounds: 1 | 2 = 1, roles = ["correctness", "architecture"])
 					throw new Error("transient summary failure");
 				}
 				summaries.push(message);
+				summaryOptions.push({ deliverAs: options?.deliverAs });
 				if (options?.deliveryReceipt) options.deliveryReceipt.delivered = true;
 				return false;
 			},
 		),
+		get sessionManager() {
+			return sessionManager;
+		},
 	};
 	const sessionManager = {
 		getSessionId: () => "session-one",
 		getCwd: () => repoRoot,
 	};
 	const configMembers = roles.map((role, order) => ({ role, enabled: true, order }));
+	const memberRounds = Array.from({ length: rounds }, (_, index) => index + 1);
 	const members = configMembers.map(member => ({
 		...member,
 		requestedSelector: `member/${member.role}`,
@@ -183,6 +242,8 @@ function makeHarness(rounds: 1 | 2 = 1, roles = ["correctness", "architecture"])
 		model: memberModel(member.role),
 		effort: undefined,
 		lens: `Inspect ${member.role}`,
+		rounds: memberRounds,
+		advisor: false,
 	}));
 	const instructions = { repoRoot, contextFiles: [], files: [], totalBytes: 0 };
 	const dispatch = {
@@ -191,26 +252,29 @@ function makeHarness(rounds: 1 | 2 = 1, roles = ["correctness", "architecture"])
 		repoRoot,
 		sessionId: "session-one",
 		publicationTarget: {
-			repoRoot,
-			plansDirectory: temp.join("plans"),
+			planRoot,
 			slug: "implement-council-coordination",
-			relativePath: "plans/implement-council-coordination.md",
-			absolutePath: temp.join("plans", "implement-council-coordination.md"),
+			fileName: "council-implement-council-coordination-plan.md",
+			relativePath: "council-implement-council-coordination-plan.md",
+			absolutePath: path.join(planRoot, "council-implement-council-coordination-plan.md"),
 		},
-		config: { rounds, members: configMembers },
+		config: { rounds, members: configMembers, advisor: { planner: false, reviewers: false, adjudicator: false } },
 		rounds,
 		roster: configMembers,
 		members,
+		inert: [],
 		planner: {
 			role: "slow",
 			requestedSelector: "planner/fixed",
 			resolvedSelector: "planner/fixed",
 			model: plannerModel,
 			effort: undefined,
+			advisor: false,
 		},
-		main: { selector: "main/fixed", model: mainModel, effort: undefined },
+		adjudicator: { mode: "main" as const, selector: "main/fixed", model: mainModel, effort: undefined },
 		instructions,
 		warnings: [],
+		degraded: false,
 		plannerRequest: {
 			session: toolSession,
 			invocationKind: "task",
@@ -255,9 +319,33 @@ function makeHarness(rounds: 1 | 2 = 1, roles = ["correctness", "architecture"])
 		settings,
 		modelRegistry: { getApiKey: mock(async () => "test-key") },
 		now: () => new Date().toISOString(),
+		presentCouncilSummary: (delivery: {
+			runId: string;
+			deferred: boolean;
+			content: string;
+			details: Record<string, unknown>;
+		}) => {
+			presentations.push(delivery);
+		},
 		runId: "run-one",
 	} as unknown as CouncilCoordinatorHost;
-	return { host, dispatch, toolSession, summaries, summaryState, adjudicationState, prompts, journal };
+	return {
+		host,
+		dispatch,
+		toolSession,
+		planRoot,
+		summaries,
+		lifecycleEvents,
+		summaryOptions,
+		presentations,
+		setStreaming: (value: boolean) => {
+			session.isStreaming = value;
+		},
+		summaryState,
+		adjudicationState,
+		prompts,
+		journal,
+	};
 }
 
 function structuredResult(
@@ -296,7 +384,7 @@ function structuredResult(
 function installDispatch(harness: Harness): void {
 	spyOn(preflight, "preflightCouncilDispatch").mockResolvedValue(harness.dispatch);
 	spyOn(publication, "publishCouncilPlan").mockImplementation(async options => {
-		const target = path.join(options.repoRoot, ...options.outputPath.split("/"));
+		const target = path.join(options.planRoot, ...options.outputPath.split("/"));
 		await fs.mkdir(path.dirname(target), { recursive: true });
 		await Bun.write(target, options.content);
 		return {
@@ -307,6 +395,128 @@ function installDispatch(harness: Harness): void {
 			idempotent: false,
 		};
 	});
+}
+
+function modelIdentity(model: Model<Api>): string {
+	return `${model.provider}/${model.id}`;
+}
+
+/**
+ * Persist a durable manifest the coordinator never ran, so no-id resume selection can be exercised
+ * against exact `createdAt`/`state`/`failure` combinations. Roster, planner, config, task, root, and
+ * instruction snapshot are mirrored from the harness dispatch so `#assertResumeIdentity` accepts it.
+ */
+async function seedCouncilManifest(
+	harness: Harness,
+	options: {
+		runId: string;
+		createdAt: string;
+		state: CouncilManifest["state"];
+		outputPath: string;
+		failure?: NonNullable<CouncilManifest["failure"]>;
+	},
+): Promise<CouncilManifest> {
+	const storage = new CouncilStorage(harness.toolSession);
+	const artifact = await storage.createArtifact(
+		options.runId,
+		"instructions.json",
+		`${JSON.stringify(harness.dispatch.instructions)}\n`,
+	);
+	const terminal = options.state === "interrupted" || options.state === "failed";
+	return storage.create(
+		parseCouncilManifest({
+			version: COUNCIL_MANIFEST_VERSION,
+			runId: options.runId,
+			sessionId: harness.dispatch.sessionId,
+			mainAgentId: "main",
+			state: options.state,
+			task: harness.dispatch.task,
+			repoRoot: harness.dispatch.repoRoot,
+			outputPath: options.outputPath,
+			timestamps: {
+				createdAt: options.createdAt,
+				updatedAt: options.createdAt,
+				startedAt: options.createdAt,
+				...(terminal ? { finishedAt: options.createdAt } : {}),
+				...(options.state === "interrupted" ? { interruptedAt: options.createdAt } : {}),
+			},
+			config: structuredClone(harness.dispatch.config),
+			roster: harness.dispatch.members.map(member => ({
+				role: member.role,
+				enabled: true,
+				order: member.order,
+				requestedSelector: member.requestedSelector,
+				resolvedModel: modelIdentity(member.model),
+				effort: member.effort ?? null,
+				lens: member.lens,
+				rounds: [...member.rounds],
+				advisor: member.advisor,
+			})),
+			planner: {
+				role: harness.dispatch.planner.role,
+				requestedSelector: harness.dispatch.planner.requestedSelector,
+				resolvedModel: modelIdentity(harness.dispatch.planner.model),
+				effort: harness.dispatch.planner.effort ?? null,
+				advisor: harness.dispatch.planner.advisor,
+			},
+			adjudicator: {
+				mode: "main",
+				requestedSelector: "@main",
+				resolvedModel: modelIdentity(mainModel),
+				effort: null,
+				advisor: false,
+				capturedAt: options.createdAt,
+				instructionSha256: artifact.sha256,
+			},
+			instructionSnapshot: { artifact, sha256: artifact.sha256 },
+			rounds: Array.from({ length: harness.dispatch.rounds }, (_unused, index) => ({
+				round: index + 1,
+				status: "pending",
+				startedAt: null,
+				finishedAt: null,
+				members: harness.dispatch.members.map(member => ({
+					role: member.role,
+					order: member.order,
+					status: "pending",
+					attempts: 0,
+					startedAt: null,
+					finishedAt: null,
+					artifact: null,
+					resolvedModel: null,
+					authFallbackUsed: false,
+					failureReason: null,
+					findingIds: [],
+				})),
+			})),
+			planVersions: [],
+			usage: { requests: 0, tokens: 0, cost: 0 },
+			adjudicationBudget: { injectedChars: 0, cap: COUNCIL_ADJUDICATION_INJECTION_CAP },
+			warnings: [],
+			degraded: false,
+			...(options.failure ? { failure: options.failure } : {}),
+		}),
+	);
+}
+
+/** One assistant message of Main spend, shaped exactly as `#chargeMainTurn` reads it. */
+function adjudicationTurn(): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [{ type: "text", text: "council adjudication turn" }],
+		api: "anthropic-messages",
+		provider: "anthropic",
+		model: "fixed",
+		usage: {
+			input: 100,
+			output: 20,
+			cacheRead: 7,
+			cacheWrite: 3,
+			totalTokens: 130,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.25 },
+		},
+		stopReason: "stop",
+		timestamp: 1,
+	};
 }
 
 describe("CouncilCoordinator", () => {
@@ -359,7 +569,7 @@ describe("CouncilCoordinator", () => {
 		await coordinator.completion;
 	});
 
-	it("refreshes Main identity and overlap warnings from the model that owns adjudication", async () => {
+	it("refreshes Main identity from the model that owns adjudication", async () => {
 		const harness = makeHarness(1, ["correctness"]);
 		installDispatch(harness);
 		const switchedMain = memberModel("correctness");
@@ -375,11 +585,9 @@ describe("CouncilCoordinator", () => {
 		await coordinator.start(harness.dispatch.task);
 		await coordinator.completion;
 
-		expect(coordinator.snapshot?.mainSnapshot.model).toBe("member/correctness");
-		expect(coordinator.snapshot?.warnings).toContain(
-			"Council roles correctness resolve to the Main model member/correctness.",
-		);
-		expect(coordinator.snapshot?.state).toBe("completed-degraded");
+		expect(coordinator.snapshot?.adjudicator.resolvedModel).toBe("member/correctness");
+		expect(coordinator.snapshot?.warnings).toEqual([]);
+		expect(coordinator.snapshot?.state).toBe("completed");
 	});
 	it("retries Main acquisition when effective effort changes before ownership", async () => {
 		const harness = makeHarness(1, ["correctness"]);
@@ -411,8 +619,8 @@ describe("CouncilCoordinator", () => {
 		await coordinator.completion;
 
 		expect(harness.prompts).toHaveLength(2);
-		expect(coordinator.snapshot?.mainSnapshot).toMatchObject({
-			model: "main/reasoning",
+		expect(coordinator.snapshot?.adjudicator).toMatchObject({
+			resolvedModel: "main/reasoning",
 			effort: "high",
 		});
 		expect(coordinator.snapshot?.state).toBe("completed");
@@ -680,7 +888,11 @@ describe("CouncilCoordinator", () => {
 				return structuredResult(request, { readiness: "ready", findings: [], strengths: [], missingContext: [] });
 			}
 			return structuredResult(request, {
-				plan: `${PLAN}\n${`"\\`.repeat(25_000)}`,
+				// The plan must stay inside COUNCIL_PLAN_CHAR_LIMIT (so the schema accepts
+				// it) while its JSON-escaped form blows COUNCIL_ADJUDICATION_INJECTION_CAP.
+				// `"\` only doubles under escaping, which can no longer span that gap;
+				// control characters expand 6x (`\u0001`), the true worst case.
+				plan: `${PLAN}\n${"\u0001".repeat(100_000)}`,
 				assumptions: [],
 				blockers: [],
 				evidenceVersion: "1.0.0",
@@ -835,6 +1047,9 @@ describe("CouncilCoordinator", () => {
 		expect(
 			harness.prompts.every(value => value.includes(`# Canonical repository root\n${harness.dispatch.repoRoot}`)),
 		).toBe(true);
+		// Round two carries the eligible duplicate targets from round one, and nothing else about
+		// how they were judged: a delegated adjudicator never saw the prior turn.
+		expect(harness.prompts[1]).toContain('"priorCanonicalFindingIds":["A1"]');
 		expect(harness.prompts[1]).not.toContain('"reason":"Supported"');
 		expect(plannerCalls).toBe(1);
 
@@ -911,10 +1126,13 @@ describe("CouncilCoordinator", () => {
 		});
 		let roundOneAccepted = false;
 		const rejectionMessages: string[] = [];
-		spyOn(harness.host.session, "promptCustomMessage").mockImplementation(async (_message, options) => {
+		spyOn(harness.host.session, "promptCustomMessage").mockImplementation(async (message, options) => {
+			if (typeof message.content !== "string") throw new Error("Expected a plain-text adjudication prompt");
+			harness.prompts.push(message.content);
 			options?.onPromptStart?.();
 			const active = harness.toolSession.peekCouncilHandler?.();
 			if (!active) throw new Error("Expected an adjudication handler");
+			const grades = [{ slot: 1, grade: "A", reason: "Verified high-severity findings" }];
 			const payload = roundOneAccepted
 				? {
 						plan: PLAN,
@@ -927,6 +1145,7 @@ describe("CouncilCoordinator", () => {
 								duplicateOf: "A1",
 							},
 						],
+						grades,
 					}
 				: {
 						plan: PLAN,
@@ -940,6 +1159,7 @@ describe("CouncilCoordinator", () => {
 							},
 							{ id: "A2", disposition: "accepted", reason: "Supported", step: "Approach 1" },
 						],
+						grades,
 					};
 			const result = await active(JSON.stringify(payload));
 			if (result.isError) rejectionMessages.push(JSON.stringify(result.content));
@@ -955,6 +1175,9 @@ describe("CouncilCoordinator", () => {
 			expect.stringContaining("unknown duplicate target A1"),
 			expect.stringContaining("unknown duplicate target A1"),
 		]);
+		// `A1` was itself dispositioned `duplicate`, so it never enters the eligible target list the
+		// round-two assignment publishes; only the canonical `A2` does.
+		expect(harness.prompts[1]).toContain('"priorCanonicalFindingIds":["A2"]');
 		expect(coordinator.snapshot?.state).toBe("failed");
 		expect(publication.publishCouncilPlan).not.toHaveBeenCalled();
 	});
@@ -1206,7 +1429,12 @@ describe("CouncilCoordinator", () => {
 		await idleEntered.promise;
 		const installed = harness.toolSession.peekCouncilHandler?.();
 		if (!installed) throw new Error("Expected installed Council handler");
-		const payload = JSON.stringify({ plan: PLAN, dispositions: [] });
+		// The reviewer reported (`ready`, no findings), so its slot still owes a grade.
+		const payload = JSON.stringify({
+			plan: PLAN,
+			dispositions: [],
+			grades: [{ slot: 1, grade: "B", reason: "No defects found and none missed" }],
+		});
 
 		const beforeOwnership = await installed(payload);
 		expect(beforeOwnership.isError).toBeTrue();
@@ -1549,7 +1777,7 @@ describe("CouncilCoordinator", () => {
 		await memberStarted.promise;
 		const interrupted = await coordinator.cancel();
 		expect(interrupted.planVersions.map(version => version.kind)).toEqual(["draft"]);
-		const target = path.join(interrupted.repoRoot, ...interrupted.outputPath.split("/"));
+		const target = path.join(harness.planRoot, ...interrupted.outputPath.split("/"));
 		await fs.mkdir(path.dirname(target), { recursive: true });
 		await Bun.write(target, "external collision");
 
@@ -1588,7 +1816,7 @@ describe("CouncilCoordinator", () => {
 		expect(interrupted.state).toBe("interrupted");
 		const childCalls = run.mock.calls.length;
 		const promisedPath = interrupted.outputPath;
-		const absolutePromisedPath = path.join(interrupted.repoRoot, ...promisedPath.split("/"));
+		const absolutePromisedPath = path.join(harness.planRoot, ...promisedPath.split("/"));
 		await fs.mkdir(path.dirname(absolutePromisedPath), { recursive: true });
 		await Bun.write(absolutePromisedPath, "unrelated occupant");
 
@@ -1598,7 +1826,12 @@ describe("CouncilCoordinator", () => {
 		expect(coordinator.snapshot?.failure?.code).toBe("EEXIST");
 		expect(coordinator.snapshot?.outputPath).toBe(promisedPath);
 		expect(run).toHaveBeenCalledTimes(childCalls);
-		expect(preflightSpy.mock.calls[1]?.[2]).toEqual({ promisedOutputPath: promisedPath });
+		// Resume revalidates the same immutable path, and hands preflight the run signal so a cancel
+		// during setup reaches whatever preflight is waiting on.
+		expect(preflightSpy.mock.calls[1]?.[2]).toEqual({
+			promisedOutputPath: promisedPath,
+			signal: expect.any(AbortSignal),
+		});
 	});
 
 	it("preserves a final trailing newline through publication crash identity recovery", async () => {
@@ -1610,7 +1843,7 @@ describe("CouncilCoordinator", () => {
 		let crashAfterPublish = true;
 		spyOn(publication, "publishCouncilPlan").mockImplementation(async options => {
 			publishedContents.push(options.content);
-			const target = path.join(options.repoRoot, ...options.outputPath.split("/"));
+			const target = path.join(options.planRoot, ...options.outputPath.split("/"));
 			await fs.mkdir(path.dirname(target), { recursive: true });
 			await Bun.write(target, options.content);
 			if (crashAfterPublish) {
@@ -1639,8 +1872,9 @@ describe("CouncilCoordinator", () => {
 		harness.dispatch.publicationTarget = {
 			...harness.dispatch.publicationTarget,
 			slug: "different-fresh-target",
-			relativePath: "plans/different-fresh-target.md",
-			absolutePath: path.join(harness.dispatch.repoRoot, "plans", "different-fresh-target.md"),
+			fileName: "council-different-fresh-target-plan.md",
+			relativePath: "council-different-fresh-target-plan.md",
+			absolutePath: path.join(harness.planRoot, "council-different-fresh-target-plan.md"),
 		};
 		await coordinator.resume("run-one");
 		await coordinator.completion;
@@ -1669,5 +1903,1177 @@ describe("CouncilCoordinator", () => {
 		unsubscribe();
 		await coordinator.completion;
 		expect(snapshots).toHaveLength(1);
+	});
+
+	it("resumes the newest resumable run instead of a newer completed one", async () => {
+		const harness = makeHarness(1, ["correctness"]);
+		installDispatch(harness);
+		spyOn(subagents, "runStructuredSubagent").mockImplementation(async request =>
+			request.agent === "council-planner"
+				? structuredResult(request, { plan: PLAN, assumptions: [], blockers: [], evidenceVersion: "1.0.0" })
+				: structuredResult(request, { readiness: "ready", findings: [], strengths: [], missingContext: [] }),
+		);
+		const stale = await seedCouncilManifest(harness, {
+			runId: "stale-interrupted",
+			createdAt: "2026-01-01T00:00:00.000Z",
+			state: "interrupted",
+			outputPath: "council-stale-interrupted-plan.md",
+		});
+		const coordinator = new CouncilCoordinator(harness.host);
+		await coordinator.start(harness.dispatch.task);
+		await coordinator.completion;
+		expect(coordinator.snapshot?.runId).toBe("run-one");
+		expect(coordinator.snapshot?.state).toBe("completed");
+
+		const resumed = await coordinator.resume();
+
+		expect(resumed.runId).toBe(stale.runId);
+		await coordinator.completion;
+		expect(coordinator.snapshot?.runId).toBe("stale-interrupted");
+		expect(coordinator.snapshot?.state).toBe("completed");
+	});
+
+	it.each([
+		["a structurally invalid planner result", { phase: "planner-schema", reason: "planner schema violation" }],
+		["a publication collision", { phase: "publication", reason: "target occupied", code: "EEXIST" }],
+	] as ReadonlyArray<[string, NonNullable<CouncilManifest["failure"]>]>)(
+		"resumes an older interrupted run instead of %s that failed later",
+		async (_label, failure) => {
+			const harness = makeHarness(1, ["correctness"]);
+			installDispatch(harness);
+			spyOn(subagents, "runStructuredSubagent").mockImplementation(async request =>
+				request.agent === "council-planner"
+					? structuredResult(request, { plan: PLAN, assumptions: [], blockers: [], evidenceVersion: "1.0.0" })
+					: structuredResult(request, { readiness: "ready", findings: [], strengths: [], missingContext: [] }),
+			);
+			await seedCouncilManifest(harness, {
+				runId: "older-interrupted",
+				createdAt: "2026-01-01T00:00:00.000Z",
+				state: "interrupted",
+				outputPath: "council-older-interrupted-plan.md",
+			});
+			await seedCouncilManifest(harness, {
+				runId: "newer-terminal",
+				createdAt: "2026-02-01T00:00:00.000Z",
+				state: "failed",
+				outputPath: "council-newer-terminal-plan.md",
+				failure,
+			});
+			const coordinator = new CouncilCoordinator(harness.host);
+
+			const resumed = await coordinator.resume();
+
+			expect(resumed.runId).toBe("older-interrupted");
+			await coordinator.completion;
+			expect(coordinator.snapshot?.state).toBe("completed");
+			expect(coordinator.snapshot?.outputPath).toBe("council-older-interrupted-plan.md");
+		},
+	);
+
+	it("refuses an explicit planner-schema runId before any preflight or child spend", async () => {
+		const harness = makeHarness(1, ["correctness"]);
+		const preflightSpy = spyOn(preflight, "preflightCouncilDispatch").mockResolvedValue(harness.dispatch);
+		const run = spyOn(subagents, "runStructuredSubagent");
+		await seedCouncilManifest(harness, {
+			runId: "schema-terminal",
+			createdAt: "2026-01-01T00:00:00.000Z",
+			state: "failed",
+			outputPath: "council-schema-terminal-plan.md",
+			failure: { phase: "planner-schema", reason: "planner schema violation" },
+		});
+		const coordinator = new CouncilCoordinator(harness.host);
+
+		await expect(coordinator.resume("schema-terminal")).rejects.toThrow(
+			"A structurally invalid council planner result is terminal and cannot be resumed",
+		);
+		expect(preflightSpy).not.toHaveBeenCalled();
+		expect(run).not.toHaveBeenCalled();
+		expect(coordinator.executionInFlight).toBe(false);
+	});
+
+	it("refuses an explicit EEXIST runId before any preflight or child spend", async () => {
+		const harness = makeHarness(1, ["correctness"]);
+		const preflightSpy = spyOn(preflight, "preflightCouncilDispatch").mockResolvedValue(harness.dispatch);
+		const run = spyOn(subagents, "runStructuredSubagent");
+		await seedCouncilManifest(harness, {
+			runId: "collision-terminal",
+			createdAt: "2026-01-01T00:00:00.000Z",
+			state: "failed",
+			outputPath: "council-collision-terminal-plan.md",
+			failure: { phase: "publication", reason: "target occupied", code: "EEXIST" },
+		});
+		const coordinator = new CouncilCoordinator(harness.host);
+
+		await expect(coordinator.resume("collision-terminal")).rejects.toThrow(
+			"A council publication collision is terminal and cannot be resumed",
+		);
+		expect(preflightSpy).not.toHaveBeenCalled();
+		expect(run).not.toHaveBeenCalled();
+		expect(coordinator.executionInFlight).toBe(false);
+	});
+
+	it("early-returns a completed manifest for an explicit runId without starting execution", async () => {
+		const harness = makeHarness(1, ["correctness"]);
+		installDispatch(harness);
+		const run = spyOn(subagents, "runStructuredSubagent").mockImplementation(async request =>
+			request.agent === "council-planner"
+				? structuredResult(request, { plan: PLAN, assumptions: [], blockers: [], evidenceVersion: "1.0.0" })
+				: structuredResult(request, { readiness: "ready", findings: [], strengths: [], missingContext: [] }),
+		);
+		const coordinator = new CouncilCoordinator(harness.host);
+		await coordinator.start(harness.dispatch.task);
+		await coordinator.completion;
+		const completed = coordinator.snapshot;
+		expect(completed).toBeDefined();
+		if (!completed) throw new Error("Expected a completed council snapshot");
+		const completedSnapshot = structuredClone(completed);
+		const childCalls = run.mock.calls.length;
+		const journalLength = harness.journal.length;
+
+		const returned = await coordinator.resume("run-one");
+
+		expect(returned).toEqual(completedSnapshot);
+		expect(run).toHaveBeenCalledTimes(childCalls);
+		expect(harness.journal).toHaveLength(journalLength);
+		expect(coordinator.executionInFlight).toBe(false);
+	});
+
+	it("charges both attempts of a forced Main repair turn to adjudicatorUsage and the run aggregate", async () => {
+		const harness = makeHarness(1, ["correctness"]);
+		installDispatch(harness);
+		spyOn(subagents, "runStructuredSubagent").mockImplementation(async request =>
+			request.agent === "council-planner"
+				? structuredResult(request, { plan: PLAN, assumptions: [], blockers: [], evidenceVersion: "1.0.0" })
+				: structuredResult(request, { readiness: "ready", findings: [], strengths: [], missingContext: [] }),
+		);
+		let attempts = 0;
+		spyOn(harness.host.session, "promptCustomMessage").mockImplementation(async (_message, options) => {
+			options?.onPromptStart?.();
+			harness.host.session.messages.push(adjudicationTurn());
+			attempts++;
+			// The first turn ends without writing a payload, which is exactly what the repair turn exists
+			// for; both turns still appended an assistant message and must both be billed.
+			if (attempts === 1) return;
+			const active = harness.toolSession.peekCouncilHandler?.();
+			if (!active) throw new Error("Expected an adjudication handler");
+			const result = await active(
+				JSON.stringify({
+					plan: PLAN,
+					dispositions: [],
+					grades: [{ slot: 1, grade: "B", reason: "No defects found and none missed" }],
+				}),
+			);
+			if (result.isError) throw new Error("Test adjudication was rejected");
+		});
+		const coordinator = new CouncilCoordinator(harness.host);
+
+		await coordinator.start(harness.dispatch.task);
+		await coordinator.completion;
+
+		expect(attempts).toBe(2);
+		expect(coordinator.snapshot?.state).toBe("completed");
+		expect(coordinator.snapshot?.adjudicatorUsage).toEqual({ requests: 2, tokens: 246, cost: 0.5 });
+		// One planner request plus one member request, plus both adjudication turns.
+		expect(coordinator.snapshot?.usage.requests).toBe(4);
+	});
+
+	it("accumulates both member attempts in the slot bucket and records planner usage", async () => {
+		const harness = makeHarness(1, ["correctness"]);
+		installDispatch(harness);
+		let memberCalls = 0;
+		spyOn(subagents, "runStructuredSubagent").mockImplementation(async request => {
+			if (request.agent === "council-planner") {
+				const planner = structuredResult(request, {
+					plan: PLAN,
+					assumptions: [],
+					blockers: [],
+					evidenceVersion: "1.0.0",
+				});
+				planner.result.requests = 3;
+				planner.result.tokens = 30;
+				return planner;
+			}
+			memberCalls++;
+			if (memberCalls === 1) {
+				const malformed = structuredResult(request, {}, { exitCode: 1 });
+				malformed.result.requests = 2;
+				malformed.result.tokens = 20;
+				return malformed;
+			}
+			const report = structuredResult(request, {
+				readiness: "ready",
+				findings: [],
+				strengths: [],
+				missingContext: [],
+			});
+			report.result.requests = 5;
+			report.result.tokens = 50;
+			return report;
+		});
+		const coordinator = new CouncilCoordinator(harness.host);
+
+		await coordinator.start(harness.dispatch.task);
+		await coordinator.completion;
+
+		expect(memberCalls).toBe(2);
+		expect(coordinator.snapshot?.state).toBe("completed");
+		expect(coordinator.snapshot?.rounds[0]?.members[0]).toMatchObject({ attempts: 2, status: "succeeded" });
+		expect(coordinator.snapshot?.rounds[0]?.members[0]?.usage).toEqual({ requests: 7, tokens: 70, cost: 0 });
+		expect(coordinator.snapshot?.plannerUsage).toEqual({ requests: 3, tokens: 30, cost: 0 });
+		expect(coordinator.snapshot?.usage).toMatchObject({ requests: 10, tokens: 100 });
+	});
+
+	it("releases an idle cached coordinator and leaves an executing one bound", async () => {
+		const harness = makeHarness(1, ["correctness"]);
+		installDispatch(harness);
+		const idle = getCouncilCoordinator(harness.host);
+		releaseCouncilCoordinator("session-one");
+		const replacement = getCouncilCoordinator(harness.host);
+		expect(replacement).not.toBe(idle);
+
+		const memberStarted = Promise.withResolvers<void>();
+		spyOn(subagents, "runStructuredSubagent").mockImplementation(async request => {
+			if (request.agent === "council-planner") {
+				return structuredResult(request, { plan: PLAN, assumptions: [], blockers: [], evidenceVersion: "1.0.0" });
+			}
+			memberStarted.resolve();
+			const pending = Promise.withResolvers<StructuredSubagentResult>();
+			request.signal?.addEventListener(
+				"abort",
+				() => {
+					const error = new Error("cancelled member");
+					error.name = "AbortError";
+					pending.reject(error);
+				},
+				{ once: true },
+			);
+			return pending.promise;
+		});
+		await replacement.start(harness.dispatch.task);
+		await memberStarted.promise;
+		expect(replacement.executionInFlight).toBe(true);
+
+		releaseCouncilCoordinator("session-one");
+
+		expect(getCouncilCoordinator(harness.host)).toBe(replacement);
+		expect((await replacement.cancel()).state).toBe("interrupted");
+	});
+
+	it("hands presentation the run id and roster before the first child launches", async () => {
+		const harness = makeHarness(2, ["correctness", "architecture"]);
+		installDispatch(harness);
+		const previewed = Promise.withResolvers<void>();
+		const releasePreview = Promise.withResolvers<void>();
+		const previews: CouncilKickoffPreview[] = [];
+		harness.host.onKickoff = async preview => {
+			previews.push(preview);
+			previewed.resolve();
+			await releasePreview.promise;
+		};
+		const run = spyOn(subagents, "runStructuredSubagent").mockImplementation(async request =>
+			request.agent === "council-planner"
+				? structuredResult(request, { plan: PLAN, assumptions: [], blockers: [], evidenceVersion: "1.0.0" })
+				: structuredResult(request, { readiness: "ready", findings: [], strengths: [], missingContext: [] }),
+		);
+		const coordinator = new CouncilCoordinator(harness.host);
+
+		const started = coordinator.start(harness.dispatch.task);
+		await previewed.promise;
+
+		expect(previews).toEqual([
+			{
+				runId: "run-one",
+				resumed: false,
+				plannerModel: "planner/fixed",
+				adjudicator: { mode: "main", model: "main/fixed" },
+				members: [
+					{ role: "correctness", model: "member/correctness", rounds: [1, 2] },
+					{ role: "architecture", model: "member/architecture", rounds: [1, 2] },
+				],
+				rounds: 2,
+			},
+		]);
+		// The manifest is already durable, but nothing has been paid for yet.
+		expect(run).not.toHaveBeenCalled();
+
+		releasePreview.resolve();
+		await started;
+		await coordinator.completion;
+		expect(run).toHaveBeenCalled();
+	});
+
+	it("starts the run exactly once when the kickoff preview rejects", async () => {
+		const harness = makeHarness(1, ["correctness"]);
+		installDispatch(harness);
+		harness.host.onKickoff = async () => {
+			throw new Error("presentation is unavailable");
+		};
+		const run = spyOn(subagents, "runStructuredSubagent").mockImplementation(async request =>
+			request.agent === "council-planner"
+				? structuredResult(request, { plan: PLAN, assumptions: [], blockers: [], evidenceVersion: "1.0.0" })
+				: structuredResult(request, { readiness: "ready", findings: [], strengths: [], missingContext: [] }),
+		);
+		const coordinator = new CouncilCoordinator(harness.host);
+
+		const started = await coordinator.start(harness.dispatch.task);
+		await coordinator.completion;
+
+		expect(started.runId).toBe("run-one");
+		expect(coordinator.snapshot?.state).toBe("completed");
+		expect(run.mock.calls.filter(([request]) => request.agent === "council-planner")).toHaveLength(1);
+	});
+
+	it("marks the kickoff preview as resumed when continuing an interrupted run", async () => {
+		const harness = makeHarness(1, ["correctness"]);
+		installDispatch(harness);
+		spyOn(subagents, "runStructuredSubagent").mockImplementation(async request =>
+			request.agent === "council-planner"
+				? structuredResult(request, { plan: PLAN, assumptions: [], blockers: [], evidenceVersion: "1.0.0" })
+				: structuredResult(request, { readiness: "ready", findings: [], strengths: [], missingContext: [] }),
+		);
+		await seedCouncilManifest(harness, {
+			runId: "interrupted-run",
+			createdAt: "2026-01-01T00:00:00.000Z",
+			state: "interrupted",
+			outputPath: "council-interrupted-run-plan.md",
+		});
+		const previews: CouncilKickoffPreview[] = [];
+		const coordinator = new CouncilCoordinator(harness.host);
+
+		await coordinator.resume("interrupted-run", { onKickoff: preview => void previews.push(preview) });
+		await coordinator.completion;
+
+		expect(previews).toEqual([
+			{
+				runId: "interrupted-run",
+				resumed: true,
+				plannerModel: "planner/fixed",
+				adjudicator: { mode: "main", model: "main/fixed" },
+				members: [{ role: "correctness", model: "member/correctness", rounds: [1] }],
+				rounds: 1,
+			},
+		]);
+	});
+
+	it("lists recent runs when an explicit resume id has no manifest", async () => {
+		const harness = makeHarness(1, ["correctness"]);
+		installDispatch(harness);
+		await seedCouncilManifest(harness, {
+			runId: "older-completed",
+			createdAt: "2026-01-01T00:00:00.000Z",
+			state: "interrupted",
+			outputPath: "council-older-completed-plan.md",
+		});
+		await seedCouncilManifest(harness, {
+			runId: "newer-terminal",
+			createdAt: "2026-02-01T00:00:00.000Z",
+			state: "failed",
+			outputPath: "council-newer-terminal-plan.md",
+			failure: { phase: "planner-schema", reason: "planner schema violation" },
+		});
+		const coordinator = new CouncilCoordinator(harness.host);
+
+		await expect(coordinator.resume("missing-run")).rejects.toThrow(
+			"Recent: newer-terminal (failed), older-completed (interrupted, resumable).",
+		);
+	});
+
+	it("refuses a resume in plain language and names the recovery command", async () => {
+		const harness = makeHarness(1, ["correctness"]);
+		installDispatch(harness);
+		await seedCouncilManifest(harness, {
+			runId: "drifted-run",
+			createdAt: "2026-01-01T00:00:00.000Z",
+			state: "interrupted",
+			outputPath: "council-drifted-run-plan.md",
+		});
+		harness.dispatch.task = "A different task entirely";
+		const coordinator = new CouncilCoordinator(harness.host);
+
+		await expect(coordinator.resume("drifted-run")).rejects.toThrow(
+			"Council resume refused: the task text differs. Start a new run with /council <task>.",
+		);
+	});
+
+	it("publishes Main's in-flight adjudication spend and charges it exactly once", async () => {
+		vi.useFakeTimers();
+		const harness = makeHarness(1, ["correctness"]);
+		installDispatch(harness);
+		spyOn(subagents, "runStructuredSubagent").mockImplementation(async request =>
+			request.agent === "council-planner"
+				? structuredResult(request, { plan: PLAN, assumptions: [], blockers: [], evidenceVersion: "1.0.0" })
+				: structuredResult(request, { readiness: "ready", findings: [], strengths: [], missingContext: [] }),
+		);
+		const turnEntered = Promise.withResolvers<void>();
+		const releaseTurn = Promise.withResolvers<void>();
+		spyOn(harness.host.session, "promptCustomMessage").mockImplementation(async (_message, options) => {
+			options?.onPromptStart?.();
+			// Assistant messages land at `message_end`, so the slice grows *during* the turn.
+			harness.host.session.messages.push(adjudicationTurn());
+			turnEntered.resolve();
+			await releaseTurn.promise;
+			const active = harness.toolSession.peekCouncilHandler?.();
+			if (!active) throw new Error("Expected an adjudication handler");
+			const result = await active(JSON.stringify({ plan: PLAN, dispositions: [] }));
+			if (result.isError) throw new Error("Test adjudication was rejected");
+		});
+		const coordinator = new CouncilCoordinator(harness.host);
+
+		await coordinator.start(harness.dispatch.task);
+		await turnEntered.promise;
+		vi.advanceTimersByTime(500);
+		for (let flush = 0; flush < 10; flush++) await Promise.resolve();
+
+		// Reserved Main coordinates: round 0, order -2, one below the planner's -1.
+		const live = coordinator.coordinatorSnapshot?.members.find(member => member.order === -2);
+		expect(live).toMatchObject({ round: 0, role: "main", status: "running", requests: 1, tokens: 123, cost: 0.25 });
+		// Live only: the durable aggregate still holds just the planner and the one reviewer.
+		expect(coordinator.snapshot?.usage.requests).toBe(2);
+
+		releaseTurn.resolve();
+		await coordinator.completion;
+
+		expect(coordinator.snapshot?.adjudicatorUsage).toEqual({ requests: 1, tokens: 123, cost: 0.25 });
+		expect(coordinator.snapshot?.usage.requests).toBe(3);
+		expect(coordinator.coordinatorSnapshot?.members.some(member => member.order === -2)).toBe(false);
+	});
+
+	it("never emits an adjudication snapshot that has neither live nor durable spend", async () => {
+		vi.useFakeTimers();
+		const harness = makeHarness(1, ["correctness"]);
+		installDispatch(harness);
+		spyOn(subagents, "runStructuredSubagent").mockImplementation(async request =>
+			request.agent === "council-planner"
+				? structuredResult(request, { plan: PLAN, assumptions: [], blockers: [], evidenceVersion: "1.0.0" })
+				: structuredResult(request, { readiness: "ready", findings: [], strengths: [], missingContext: [] }),
+		);
+		const turnEntered = Promise.withResolvers<void>();
+		const releaseTurn = Promise.withResolvers<void>();
+		spyOn(harness.host.session, "promptCustomMessage").mockImplementation(async (_message, options) => {
+			options?.onPromptStart?.();
+			harness.host.session.messages.push(adjudicationTurn());
+			turnEntered.resolve();
+			await releaseTurn.promise;
+			const active = harness.toolSession.peekCouncilHandler?.();
+			if (!active) throw new Error("Expected an adjudication handler");
+			const result = await active(JSON.stringify({ plan: PLAN, dispositions: [] }));
+			if (result.isError) throw new Error("Test adjudication was rejected");
+		});
+		const coordinator = new CouncilCoordinator(harness.host);
+		// The pane reads the adjudicator's spend from the live row plus the durable bucket. Once the
+		// turn has been sampled, every later emission must carry at least one of them: an emission
+		// with neither is the blank frame the operator sees at the moment adjudication settles.
+		const blanksAfterSpend: string[] = [];
+		let spendSeen = false;
+		const unsubscribe = coordinator.subscribe(snapshot => {
+			const live = snapshot.members.find(member => member.order === -2);
+			const durable = snapshot.manifest.adjudicatorUsage;
+			const total = (live?.requests ?? 0) + (durable?.requests ?? 0);
+			if (total > 0) spendSeen = true;
+			else if (spendSeen) blanksAfterSpend.push(snapshot.manifest.state);
+		});
+
+		await coordinator.start(harness.dispatch.task);
+		await turnEntered.promise;
+		vi.advanceTimersByTime(500);
+		for (let flush = 0; flush < 10; flush++) await Promise.resolve();
+		expect(spendSeen).toBeTrue();
+
+		releaseTurn.resolve();
+		await coordinator.completion;
+		unsubscribe();
+
+		expect(blanksAfterSpend).toEqual([]);
+		expect(coordinator.snapshot?.adjudicatorUsage).toEqual({ requests: 1, tokens: 123, cost: 0.25 });
+		expect(coordinator.coordinatorSnapshot?.members.some(member => member.order === -2)).toBe(false);
+	});
+
+	it("scopes live Main telemetry to one adjudication turn across a forced repair", async () => {
+		vi.useFakeTimers();
+		const harness = makeHarness(1, ["correctness"]);
+		installDispatch(harness);
+		spyOn(subagents, "runStructuredSubagent").mockImplementation(async request =>
+			request.agent === "council-planner"
+				? structuredResult(request, { plan: PLAN, assumptions: [], blockers: [], evidenceVersion: "1.0.0" })
+				: structuredResult(request, { readiness: "ready", findings: [], strengths: [], missingContext: [] }),
+		);
+		const entered = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+		const release = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+		let attempt = 0;
+		spyOn(harness.host.session, "promptCustomMessage").mockImplementation(async (_message, options) => {
+			const index = attempt++;
+			options?.onPromptStart?.();
+			harness.host.session.messages.push(adjudicationTurn());
+			entered[index]!.resolve();
+			await release[index]!.promise;
+			// The first turn ends without a payload, which is what the repair turn exists for.
+			if (index === 0) return;
+			const active = harness.toolSession.peekCouncilHandler?.();
+			if (!active) throw new Error("Expected an adjudication handler");
+			const result = await active(JSON.stringify({ plan: PLAN, dispositions: [] }));
+			if (result.isError) throw new Error("Test adjudication was rejected");
+		});
+		const coordinator = new CouncilCoordinator(harness.host);
+
+		await coordinator.start(harness.dispatch.task);
+		await entered[0]!.promise;
+		vi.advanceTimersByTime(500);
+		for (let flush = 0; flush < 10; flush++) await Promise.resolve();
+		expect(coordinator.coordinatorSnapshot?.members.find(member => member.order === -2)).toMatchObject({
+			requests: 1,
+		});
+		release[0]!.resolve();
+
+		await entered[1]!.promise;
+		vi.advanceTimersByTime(500);
+		for (let flush = 0; flush < 10; flush++) await Promise.resolve();
+		// The repair turn samples its own message slice under a new generation, so the live row shows
+		// one request — not both turns, whose first half the durable charge already booked.
+		expect(coordinator.coordinatorSnapshot?.members.find(member => member.order === -2)).toMatchObject({
+			requests: 1,
+		});
+		release[1]!.resolve();
+
+		await coordinator.completion;
+		expect(attempt).toBe(2);
+		expect(coordinator.snapshot?.adjudicatorUsage).toEqual({ requests: 2, tokens: 246, cost: 0.5 });
+		expect(coordinator.coordinatorSnapshot?.members.some(member => member.order === -2)).toBe(false);
+	});
+
+	it("drops the live Main row when adjudication is cancelled", async () => {
+		vi.useFakeTimers();
+		const harness = makeHarness(1, ["correctness"]);
+		installDispatch(harness);
+		spyOn(subagents, "runStructuredSubagent").mockImplementation(async request =>
+			request.agent === "council-planner"
+				? structuredResult(request, { plan: PLAN, assumptions: [], blockers: [], evidenceVersion: "1.0.0" })
+				: structuredResult(request, { readiness: "ready", findings: [], strengths: [], missingContext: [] }),
+		);
+		const turnEntered = Promise.withResolvers<void>();
+		const releaseTurn = Promise.withResolvers<void>();
+		spyOn(harness.host.session, "abort").mockImplementation(async () => {
+			releaseTurn.resolve();
+		});
+		spyOn(harness.host.session, "promptCustomMessage").mockImplementation(async (_message, options) => {
+			options?.onPromptStart?.();
+			harness.host.session.messages.push(adjudicationTurn());
+			turnEntered.resolve();
+			await releaseTurn.promise;
+			const aborted = new Error("Council run cancelled");
+			aborted.name = "AbortError";
+			throw aborted;
+		});
+		const coordinator = new CouncilCoordinator(harness.host);
+
+		await coordinator.start(harness.dispatch.task);
+		await turnEntered.promise;
+		vi.advanceTimersByTime(500);
+		for (let flush = 0; flush < 10; flush++) await Promise.resolve();
+		expect(coordinator.coordinatorSnapshot?.members.find(member => member.order === -2)).toBeDefined();
+
+		const cancellation = coordinator.cancel();
+		for (let flush = 0; flush < 20; flush++) await Promise.resolve();
+		vi.advanceTimersByTime(5_001);
+		for (let flush = 0; flush < 20; flush++) await Promise.resolve();
+		const cancelled = await cancellation;
+
+		expect(cancelled.state).toBe("interrupted");
+		expect(coordinator.coordinatorSnapshot?.members).toEqual([]);
+	});
+
+	it("persists one durable lifecycle event per key across kickoff, both rounds, and the terminal exit", async () => {
+		// Two reviewers per round is the case that suppresses the transcript mirror, so the durable
+		// round events are the only record that the round happened.
+		const harness = makeHarness(2, ["correctness", "architecture"]);
+		installDispatch(harness);
+		spyOn(subagents, "runStructuredSubagent").mockImplementation(async request =>
+			request.agent === "council-planner"
+				? structuredResult(request, { plan: PLAN, assumptions: [], blockers: [], evidenceVersion: "1.0.0" })
+				: structuredResult(request, { readiness: "ready", findings: [], strengths: [], missingContext: [] }),
+		);
+		const coordinator = new CouncilCoordinator(harness.host);
+
+		await coordinator.start(harness.dispatch.task);
+		await coordinator.completion;
+		// Repeated hydration re-enters the terminal path; the idempotency key must absorb it.
+		await Promise.all([coordinator.status(), coordinator.status()]);
+
+		const keys = harness.lifecycleEvents.map(event => `${event.details?.eventKind}:${event.details?.round ?? ""}`);
+		expect(keys).toEqual([
+			"kickoff:",
+			"round-start:1",
+			"round-settle:1",
+			"round-start:2",
+			"round-settle:2",
+			"terminal:",
+		]);
+		expect(new Set(keys).size).toBe(keys.length);
+		expect(harness.lifecycleEvents.every(event => event.details?.runId === coordinator.snapshot?.runId)).toBe(true);
+
+		const settle = harness.lifecycleEvents[2]!;
+		expect(settle.content).toBe("Council round 1 settled: 2/2 reviewers succeeded, 0 findings.");
+		const terminal = harness.lifecycleEvents[5]!;
+		expect(terminal.content).toContain("terminal, start a new run");
+		expect(terminal.content).toContain("Final: local://");
+		// The projection rides as JSON data, not rendered rows, so the card lays it out at the live
+		// frame width and a round trip through the session file changes nothing.
+		const stats = terminal.details?.stats;
+		expect(stats).toMatchObject({
+			runId: coordinator.snapshot!.runId,
+			state: "completed",
+			reviewersTotal: 2,
+			reviewersSucceeded: 2,
+		});
+		expect(JSON.parse(JSON.stringify(stats))).toEqual(stats);
+	});
+
+	it("orders a cancellation ahead of exactly one terminal event naming the resume command", async () => {
+		const harness = makeHarness(1, ["correctness"]);
+		installDispatch(harness);
+		const memberStarted = Promise.withResolvers<void>();
+		spyOn(subagents, "runStructuredSubagent").mockImplementation(async request => {
+			if (request.agent === "council-planner") {
+				return structuredResult(request, { plan: PLAN, assumptions: [], blockers: [], evidenceVersion: "1.0.0" });
+			}
+			memberStarted.resolve();
+			return await new Promise<StructuredSubagentResult>((_resolve, reject) => {
+				request.signal?.addEventListener(
+					"abort",
+					() => {
+						const error = new Error("cancelled reviewer");
+						error.name = "AbortError";
+						reject(error);
+					},
+					{ once: true },
+				);
+			});
+		});
+		const coordinator = new CouncilCoordinator(harness.host);
+
+		await coordinator.start(harness.dispatch.task);
+		await memberStarted.promise;
+		const cancelled = await coordinator.cancel();
+		await Promise.all([coordinator.status(), coordinator.status()]);
+
+		expect(cancelled.state).toBe("interrupted");
+		const kinds = harness.lifecycleEvents.map(event => event.details?.eventKind);
+		expect(kinds.filter(kind => kind === "terminal")).toHaveLength(1);
+		expect(kinds.indexOf("cancel")).toBeLessThan(kinds.indexOf("terminal"));
+		const terminal = harness.lifecycleEvents.at(-1)!;
+		expect(terminal.content).toContain(`resumable: /council resume ${cancelled.runId}`);
+		expect(terminal.content).toContain("interrupted");
+	});
+
+	it("mirrors the summary card live when the run settles while Main streams, without queueing it twice", async () => {
+		const harness = makeHarness(1, ["correctness"]);
+		installDispatch(harness);
+		spyOn(subagents, "runStructuredSubagent").mockImplementation(async request =>
+			request.agent === "council-planner"
+				? structuredResult(request, { plan: PLAN, assumptions: [], blockers: [], evidenceVersion: "1.0.0" })
+				: structuredResult(request, { readiness: "ready", findings: [], strengths: [], missingContext: [] }),
+		);
+		const coordinator = new CouncilCoordinator(harness.host);
+
+		await coordinator.start(harness.dispatch.task);
+		// A user turn opens while the council is still running, so the durable copy is held for the
+		// next turn and nothing paints unless the coordinator asks for a live-only mirror.
+		harness.setStreaming(true);
+		await coordinator.completion;
+
+		expect(harness.summaries).toHaveLength(1);
+		// Never a steer and never a follow-up: both would splice the card into the streaming turn.
+		expect(harness.summaryOptions).toEqual([{ deliverAs: "nextTurn" }]);
+		expect(harness.presentations).toHaveLength(1);
+		expect(harness.presentations[0]?.deferred).toBe(true);
+		expect(harness.presentations[0]?.runId).toBe(coordinator.snapshot!.runId);
+		expect(harness.presentations[0]?.content).toBe(harness.summaries[0]!.content);
+
+		// The queued copy lands at the next turn and is scanned by `alreadyPersisted`, so a coordinator
+		// rebuilt over the same session emits no second card.
+		harness.setStreaming(false);
+		harness.host.session.messages.push({
+			role: "custom",
+			customType: "council-summary",
+			content: harness.summaries[0]!.content,
+			display: true,
+			details: { runId: coordinator.snapshot!.runId },
+			timestamp: 1,
+		});
+		const reloaded = new CouncilCoordinator(harness.host);
+		await reloaded.status();
+		await reloaded.status();
+
+		expect(harness.summaries).toHaveLength(1);
+		expect(harness.presentations).toHaveLength(1);
+	});
+
+	it("paints an idle summary delivery rather than leaving it invisible until the next repaint", async () => {
+		const harness = makeHarness(1, ["correctness"]);
+		installDispatch(harness);
+		spyOn(subagents, "runStructuredSubagent").mockImplementation(async request =>
+			request.agent === "council-planner"
+				? structuredResult(request, { plan: PLAN, assumptions: [], blockers: [], evidenceVersion: "1.0.0" })
+				: structuredResult(request, { readiness: "ready", findings: [], strengths: [], missingContext: [] }),
+		);
+		const coordinator = new CouncilCoordinator(harness.host);
+
+		await coordinator.start(harness.dispatch.task);
+		await coordinator.completion;
+
+		expect(harness.presentations).toEqual([
+			{
+				runId: coordinator.snapshot!.runId,
+				deferred: false,
+				content: harness.summaries[0]?.content,
+				details: expect.objectContaining({ runId: coordinator.snapshot!.runId }),
+			},
+		]);
+	});
+
+	it("launches only the reviewers a round is staffed with and never files a record for the others", async () => {
+		const harness = makeHarness(2, ["firstonly", "secondonly"]);
+		installDispatch(harness);
+		// Disjoint rounds: the first member serves round 1, the second serves round 2.
+		harness.dispatch.config.members[0]!.round = 1;
+		harness.dispatch.config.members[1]!.round = 2;
+		harness.dispatch.roster[0]!.round = 1;
+		harness.dispatch.roster[1]!.round = 2;
+		harness.dispatch.members[0]!.rounds = [1];
+		harness.dispatch.members[1]!.rounds = [2];
+		const launches: { round: number; role: string }[] = [];
+		spyOn(subagents, "runStructuredSubagent").mockImplementation(async request => {
+			if (request.agent === "council-planner") {
+				return structuredResult(request, { plan: PLAN, assumptions: [], blockers: [], evidenceVersion: "1.0.0" });
+			}
+			const label = request.identity?.label ?? "";
+			launches.push({ round: Number(label.slice(-1)), role: label.split(" ")[1]! });
+			return structuredResult(request, {
+				readiness: "ready",
+				findings: [],
+				strengths: [],
+				missingContext: [],
+			});
+		});
+		const coordinator = new CouncilCoordinator(harness.host);
+
+		await coordinator.start(harness.dispatch.task);
+		await coordinator.completion;
+
+		expect(coordinator.snapshot?.state).toBe("completed");
+		// The child label carries the stable operator label; the durable record below keeps the raw id.
+		expect(launches).toEqual([
+			{ round: 1, role: "Firstonly" },
+			{ round: 2, role: "Secondonly" },
+		]);
+		// A reviewer pinned to the other round is absent from the record entirely, so it can never sit
+		// permanently `pending` in the HUD or be counted as a reviewer that did not deliver.
+		expect(coordinator.snapshot?.rounds[0]?.members.map(member => member.role)).toEqual(["firstonly"]);
+		expect(coordinator.snapshot?.rounds[1]?.members.map(member => member.role)).toEqual(["secondonly"]);
+	});
+
+	it("labels a reviewer with its roster index everywhere, even behind a disabled config slot", async () => {
+		const harness = makeHarness(1, ["skipped", "reporter", "failer"]);
+		installDispatch(harness);
+		// The first config slot is disabled, so `order` and roster index diverge from here on.
+		harness.dispatch.config.members[0]!.enabled = false;
+		harness.dispatch.roster[0]!.enabled = false;
+		harness.dispatch.members = harness.dispatch.members.slice(1);
+		harness.dispatch.memberRequests = harness.dispatch.memberRequests.slice(1);
+		spyOn(subagents, "runStructuredSubagent").mockImplementation(async request => {
+			if (request.agent === "council-planner") {
+				return structuredResult(request, { plan: PLAN, assumptions: [], blockers: [], evidenceVersion: "1.0.0" });
+			}
+			if (request.identity?.label?.includes("Failer")) {
+				const failed = structuredResult(request, {}, { exitCode: 1 });
+				failed.result.error = "provider unavailable";
+				return failed;
+			}
+			return structuredResult(request, {
+				readiness: "revise",
+				findings: [
+					{
+						classification: "must-fix",
+						severity: "high",
+						confidence: "high",
+						evidence: [{ path: "src/example.ts", observation: "The plan drops the established invariant." }],
+						impact: "Correctness",
+						required: true,
+						recommendation: "Restore the invariant",
+						rejectedAssumptions: [],
+						verification: ["Read the final plan"],
+					},
+				],
+				strengths: [],
+				missingContext: [],
+			});
+		});
+		const coordinator = new CouncilCoordinator(harness.host);
+
+		await coordinator.start(harness.dispatch.task);
+		await coordinator.completion;
+
+		const assignment = harness.prompts[0]!;
+		// One slot definition: `reporter` is roster index 0 (slot 1), `failer` is roster index 1
+		// (slot 2). Its config `order` is 1 and 2, so an order-derived slot would say 2 and 3.
+		expect(assignment).toContain("Member failer (slot 2) failed:");
+		expect(assignment).toContain('"slot":1,"readiness":"revise"');
+		expect(assignment).toContain('"slot":1,"readiness":"revise","finding"');
+		expect(assignment).not.toContain('"slot":3');
+		// The finding-id prefix is derived from the same roster index: slot 1 owns the `A` namespace.
+		expect(coordinator.snapshot?.rounds[0]?.members[0]?.findingIds).toEqual(["A1"]);
+	});
+
+	it("settles a delegated adjudication from a child yield without taking a Main turn", async () => {
+		const harness = makeHarness(1, ["correctness"]);
+		const adjudicatorModel = { provider: "judge", id: "opus" } as Model<Api>;
+		harness.dispatch.adjudicator = {
+			mode: "delegated",
+			requestedSelector: "judge/opus",
+			resolvedSelector: "judge/opus",
+			model: adjudicatorModel,
+			effort: undefined,
+			advisor: false,
+		};
+		harness.dispatch.adjudicatorRequest = {
+			...harness.dispatch.plannerRequest,
+			agent: "council-adjudicator",
+			model: "judge/opus",
+		};
+		installDispatch(harness);
+		const adjudicatorCalls: string[] = [];
+		spyOn(subagents, "runStructuredSubagent").mockImplementation(async request => {
+			if (request.agent === "council-planner") {
+				return structuredResult(request, { plan: PLAN, assumptions: [], blockers: [], evidenceVersion: "1.0.0" });
+			}
+			if (request.agent === "council-adjudicator") {
+				adjudicatorCalls.push(request.assignment);
+				const ids = [...request.assignment.matchAll(/"id":"([A-Z]+\d+)"/g)].map(match => match[1]!);
+				const slots = [
+					...new Set([...request.assignment.matchAll(/"slot":(\d+)/g)].map(match => Number(match[1]))),
+				];
+				const result = structuredResult(request, {
+					plan: PLAN,
+					dispositions: ids.map(id => ({
+						id,
+						disposition: "accepted",
+						reason: "Supported",
+						step: "Approach 1",
+					})),
+					grades: slots.map(slot => ({ slot, grade: "A", reason: "Verified high-severity findings" })),
+				});
+				result.result.requests = 4;
+				result.result.tokens = 900;
+				return result;
+			}
+			return structuredResult(request, {
+				readiness: "ready",
+				findings: [],
+				strengths: [],
+				missingContext: [],
+			});
+		});
+		const coordinator = new CouncilCoordinator(harness.host);
+
+		await coordinator.start(harness.dispatch.task);
+		await coordinator.completion;
+
+		expect(coordinator.snapshot?.state).toBe("completed");
+		expect(adjudicatorCalls).toHaveLength(1);
+		// Main is never prompted and the `xd://council` surface is never installed.
+		expect(harness.prompts).toEqual([]);
+		expect(harness.toolSession.peekCouncilHandler?.()).toBeUndefined();
+		// The run never passes through `awaiting-main`; the delegated child is charged instead.
+		expect(harness.journal.some(entry => entry.state === "awaiting-main")).toBeFalse();
+		expect(harness.journal.some(entry => entry.state === "adjudicating")).toBeTrue();
+		expect(coordinator.snapshot?.adjudicatorUsage).toEqual({ requests: 4, tokens: 900, cost: 0 });
+		expect(coordinator.snapshot?.adjudicator).toMatchObject({
+			mode: "delegated",
+			requestedSelector: "judge/opus",
+			resolvedModel: "judge/opus",
+		});
+		// Its transcript pointer is durable, and its live row is cleared once it settles.
+		expect(coordinator.snapshot?.adjudicator.agentIds).toHaveLength(1);
+		expect(coordinator.coordinatorSnapshot?.members).toEqual([]);
+		expect(coordinator.coordinatorSnapshot?.soloChild).toBeUndefined();
+	});
+
+	it("refuses a delegated adjudication that never yields a valid payload, after exactly one repair", async () => {
+		const harness = makeHarness(1, ["correctness"]);
+		harness.dispatch.adjudicator = {
+			mode: "delegated",
+			requestedSelector: "judge/opus",
+			resolvedSelector: "judge/opus",
+			model: { provider: "judge", id: "opus" } as Model<Api>,
+			effort: undefined,
+			advisor: false,
+		};
+		harness.dispatch.adjudicatorRequest = {
+			...harness.dispatch.plannerRequest,
+			agent: "council-adjudicator",
+			model: "judge/opus",
+		};
+		installDispatch(harness);
+		const adjudicatorAssignments: string[] = [];
+		spyOn(subagents, "runStructuredSubagent").mockImplementation(async request => {
+			if (request.agent === "council-planner") {
+				return structuredResult(request, { plan: PLAN, assumptions: [], blockers: [], evidenceVersion: "1.0.0" });
+			}
+			if (request.agent === "council-adjudicator") {
+				adjudicatorAssignments.push(request.assignment);
+				return structuredResult(request, { plan: PLAN }, { exitCode: 1 });
+			}
+			return structuredResult(request, {
+				readiness: "ready",
+				findings: [],
+				strengths: [],
+				missingContext: [],
+			});
+		});
+		const coordinator = new CouncilCoordinator(harness.host);
+
+		await coordinator.start(harness.dispatch.task);
+		await coordinator.completion;
+
+		expect(adjudicatorAssignments).toHaveLength(2);
+		expect(adjudicatorAssignments[1]).toContain("You MUST terminal-yield exactly one corrected JSON adjudication");
+		expect(coordinator.snapshot?.state).toBe("failed");
+		expect(coordinator.snapshot?.failure?.code).toBe("COUNCIL_ADJUDICATION_MISSING");
+	});
+
+	it("prefixes finding ids with the same slot namespace the report validator enforces", async () => {
+		const harness = makeHarness(2, ["correctness", "architecture"]);
+		installDispatch(harness);
+		const report = {
+			readiness: "revise",
+			findings: [
+				{
+					classification: "must-fix",
+					severity: "high",
+					confidence: "high",
+					evidence: [{ path: "src/example.ts", observation: "The plan drops the established invariant." }],
+					impact: "Correctness",
+					required: true,
+					recommendation: "Restore the invariant",
+					rejectedAssumptions: [],
+					verification: ["Read the final plan"],
+				},
+			],
+			strengths: [],
+			missingContext: [],
+		};
+		const promptPrefixes = new Map<string, string>();
+		spyOn(subagents, "runStructuredSubagent").mockImplementation(async request => {
+			if (request.agent === "council-planner") {
+				return structuredResult(request, { plan: PLAN, assumptions: [], blockers: [], evidenceVersion: "1.0.0" });
+			}
+			promptPrefixes.set(
+				request.identity?.label ?? "",
+				/# Coordinator finding ID prefix\n(\S+)\n/.exec(request.assignment)?.[1] ?? "",
+			);
+			return structuredResult(request, report);
+		});
+		const coordinator = new CouncilCoordinator(harness.host);
+
+		await coordinator.start(harness.dispatch.task);
+		await coordinator.completion;
+
+		// Global slot is `(round - 1) * roster.length + rosterIndex`, so round 2's second reviewer owns
+		// slot index 3. The prompt tells the child which namespace to expect; the validator renumbers
+		// what comes back. Both must derive it from `councilSlotPrefix` or a reviewer's findings become
+		// unaddressable in adjudication.
+		expect(promptPrefixes.get("Council Correctness r1")).toBe(councilSlotPrefix(0));
+		expect(promptPrefixes.get("Council Architecture r2")).toBe(councilSlotPrefix(3));
+		expect(validateIncomingCouncilReport(report, 3).findings[0]?.id).toBe(
+			`${promptPrefixes.get("Council Architecture r2")}1`,
+		);
+		expect(coordinator.snapshot?.rounds[1]?.members[1]?.findingIds).toEqual(["D1"]);
+		expect(coordinator.snapshot?.rounds[0]?.members[0]?.findingIds).toEqual(["A1"]);
+	});
+
+	it("stamps the shared durable message types on live cards and on the rebuilt duplicate scan", async () => {
+		const harness = makeHarness(1, ["correctness"]);
+		installDispatch(harness);
+		spyOn(subagents, "runStructuredSubagent").mockImplementation(async request =>
+			request.agent === "council-planner"
+				? structuredResult(request, { plan: PLAN, assumptions: [], blockers: [], evidenceVersion: "1.0.0" })
+				: structuredResult(request, { readiness: "ready", findings: [], strengths: [], missingContext: [] }),
+		);
+		const coordinator = new CouncilCoordinator(harness.host);
+
+		await coordinator.start(harness.dispatch.task);
+		await coordinator.completion;
+
+		// The harness sorts the two durable streams by `customType` alone, so a run event stamped with
+		// anything but the shared constant would be counted as a summary card instead.
+		expect(harness.lifecycleEvents.map(event => event.customType)).toEqual(
+			harness.lifecycleEvents.map(() => COUNCIL_RUN_MESSAGE_TYPE),
+		);
+		expect(harness.summaries.map(summary => summary.customType)).toEqual([COUNCIL_SUMMARY_MESSAGE_TYPE]);
+		const expectedKinds: CouncilRunEventKind[] = ["kickoff", "round-start", "round-settle", "terminal"];
+		expect(harness.lifecycleEvents.map(event => event.details?.eventKind)).toEqual(expectedKinds);
+		expect(harness.summaries[0]?.details).toEqual({
+			runId: coordinator.snapshot!.runId,
+			manifestUrl: expect.stringContaining("manifest.json"),
+			finalUrl: `local://${coordinator.snapshot!.outputPath}`,
+		});
+
+		// Rebuilt path: the persisted card is recognised by the same constant, so hydration adds none.
+		harness.host.session.messages.push({
+			role: "custom",
+			customType: COUNCIL_SUMMARY_MESSAGE_TYPE,
+			content: harness.summaries[0]!.content,
+			display: true,
+			details: { runId: coordinator.snapshot!.runId },
+			timestamp: 1,
+		});
+		const reloaded = new CouncilCoordinator(harness.host);
+		await reloaded.status();
+
+		expect(harness.summaries).toHaveLength(1);
+	});
+
+	it("renders stable reviewer labels on durable cards and children while keeping raw role ids durable", async () => {
+		const harness = makeHarness(1, ["council1", "council2"]);
+		installDispatch(harness);
+		const childLabels: string[] = [];
+		spyOn(subagents, "runStructuredSubagent").mockImplementation(async request => {
+			if (request.agent === "council-planner") {
+				return structuredResult(request, { plan: PLAN, assumptions: [], blockers: [], evidenceVersion: "1.0.0" });
+			}
+			childLabels.push(request.identity?.label ?? "");
+			return structuredResult(request, { readiness: "ready", findings: [], strengths: [], missingContext: [] });
+		});
+		const coordinator = new CouncilCoordinator(harness.host);
+
+		await coordinator.start(harness.dispatch.task);
+		await coordinator.completion;
+
+		const kickoff = harness.lifecycleEvents[0]!;
+		expect(kickoff.content).toContain("[Reviewer 1=member/council1, Reviewer 2=member/council2]");
+		expect(childLabels.toSorted()).toEqual(["Council Reviewer 1 r1", "Council Reviewer 2 r1"]);
+		// No later card names a reviewer, and none of them leaks the durable id into operator prose.
+		expect(harness.lifecycleEvents.slice(1).some(event => event.content.includes("council1"))).toBeFalse();
+		// Durable identity stays raw: manifest roster, round records, and per-reviewer artifact names.
+		expect(coordinator.snapshot?.roster.map(member => member.role)).toEqual(["council1", "council2"]);
+		expect(coordinator.snapshot?.rounds[0]?.members.map(member => member.role)).toEqual(["council1", "council2"]);
+		const artifactsDirectory = harness.toolSession.localProtocolOptions!.getArtifactsDir!();
+		const artifact = path.join(
+			artifactsDirectory!,
+			"local",
+			`council-${coordinator.snapshot!.runId}-council1-r1.json`,
+		);
+		expect(await Bun.file(artifact).exists()).toBeTrue();
+	});
+
+	it("peeks only a matching binding and never constructs a coordinator", () => {
+		const harness = makeHarness(1, ["correctness"]);
+		const other = makeHarness(1, ["correctness"]);
+
+		expect(peekCouncilCoordinatorForSession(harness.host.session, "session-one")).toBeUndefined();
+		const coordinator = getCouncilCoordinator(harness.host);
+		expect(peekCouncilCoordinatorForSession(harness.host.session, "session-one")).toBe(coordinator);
+		// A different `AgentSession` under the same id is a miss: that entry belongs to another binding,
+		// and handing it over would let a stale host cancel or release someone else's run.
+		expect(peekCouncilCoordinatorForSession(other.host.session, "session-one")).toBeUndefined();
+		expect(peekCouncilCoordinatorForSession(harness.host.session, "session-two")).toBeUndefined();
+		// Neither miss registered anything: the bound id still resolves to the original instance.
+		expect(getCouncilCoordinator(harness.host)).toBe(coordinator);
+		releaseCouncilCoordinator("session-one");
+		expect(peekCouncilCoordinatorForSession(harness.host.session, "session-one")).toBeUndefined();
+	});
+
+	it("makes a council-free session transition a no-op that leaves the registry empty", async () => {
+		const harness = makeHarness(1, ["correctness"]);
+
+		await quiesceAndReleaseCouncilForSessionTransition(harness.host.session);
+
+		expect(peekCouncilCoordinatorForSession(harness.host.session, "session-one")).toBeUndefined();
+	});
+
+	it("releases the registry key a coordinator is bound to even after the session id has moved on", async () => {
+		const harness = makeHarness(1, ["correctness"]);
+		let reportedId = "old-id";
+		const sessionManager = { getSessionId: () => reportedId, getCwd: () => harness.dispatch.cwd };
+		const session = { ...harness.host.session, sessionManager } as unknown as typeof harness.host.session;
+		const coordinator = getCouncilCoordinator({
+			...harness.host,
+			session,
+			sessionManager,
+		} as unknown as CouncilCoordinatorHost);
+		expect(peekCouncilCoordinatorForSession(session, "old-id")).toBe(coordinator);
+		// A host that advances its own id before running the reconciler: keying the release off the
+		// current id would silently no-op and leave `old-id` holding this council forever.
+		reportedId = "new-id";
+
+		await quiesceAndReleaseCouncilForSessionTransition(session);
+
+		expect(peekCouncilCoordinatorForSession(session, "old-id")).toBeUndefined();
+		expect(peekCouncilCoordinatorForSession(session, "new-id")).toBeUndefined();
+	});
+
+	it("holds the registry entry through cancellation and releases it once the run settles", async () => {
+		const harness = makeHarness(1, ["correctness"]);
+		installDispatch(harness);
+		const memberStarted = Promise.withResolvers<void>();
+		const releaseMember = Promise.withResolvers<void>();
+		spyOn(subagents, "runStructuredSubagent").mockImplementation(async request => {
+			if (request.agent === "council-planner") {
+				return structuredResult(request, { plan: PLAN, assumptions: [], blockers: [], evidenceVersion: "1.0.0" });
+			}
+			memberStarted.resolve();
+			await releaseMember.promise;
+			const cancelled = new Error("cancelled reviewer");
+			cancelled.name = "AbortError";
+			throw cancelled;
+		});
+		const coordinator = getCouncilCoordinator(harness.host);
+		await coordinator.start(harness.dispatch.task);
+		await memberStarted.promise;
+
+		const transition = quiesceAndReleaseCouncilForSessionTransition(harness.host.session);
+		for (let flush = 0; flush < 20; flush++) await Promise.resolve();
+		// Still executing: releasing here would strand a live run with no owner for its own session.
+		expect(peekCouncilCoordinatorForSession(harness.host.session, "session-one")).toBe(coordinator);
+		releaseMember.resolve();
+		await transition;
+
+		expect(coordinator.executionInFlight).toBeFalse();
+		expect(coordinator.snapshot?.state).toBe("interrupted");
+		expect(peekCouncilCoordinatorForSession(harness.host.session, "session-one")).toBeUndefined();
+	});
+
+	it("retains and rethrows on a cancellation timeout, then releases once the run finally settles", async () => {
+		const harness = makeHarness(1, ["correctness"]);
+		installDispatch(harness);
+		const memberStarted = Promise.withResolvers<void>();
+		const releaseMember = Promise.withResolvers<void>();
+		spyOn(subagents, "runStructuredSubagent").mockImplementation(async request => {
+			if (request.agent === "council-planner") {
+				return structuredResult(request, { plan: PLAN, assumptions: [], blockers: [], evidenceVersion: "1.0.0" });
+			}
+			memberStarted.resolve();
+			await releaseMember.promise;
+			return structuredResult(request, { readiness: "ready", findings: [], strengths: [], missingContext: [] });
+		});
+		const coordinator = getCouncilCoordinator(harness.host);
+		await coordinator.start(harness.dispatch.task);
+		await memberStarted.promise;
+		spyOn(coordinator, "cancelForSessionTransition").mockRejectedValue(
+			new Error("Council cancellation timed out after 5000ms"),
+		);
+
+		await expect(quiesceAndReleaseCouncilForSessionTransition(harness.host.session)).rejects.toThrow(
+			"Council cancellation timed out after 5000ms",
+		);
+		// The old identity keeps its owner, so a transition that refuses cannot orphan a running council.
+		expect(peekCouncilCoordinatorForSession(harness.host.session, "session-one")).toBe(coordinator);
+
+		releaseMember.resolve();
+		await coordinator.completion;
+		await coordinator.settled();
+		for (let flush = 0; flush < 20; flush++) await Promise.resolve();
+
+		expect(coordinator.snapshot?.state).toBe("completed");
+		expect(peekCouncilCoordinatorForSession(harness.host.session, "session-one")).toBeUndefined();
 	});
 });

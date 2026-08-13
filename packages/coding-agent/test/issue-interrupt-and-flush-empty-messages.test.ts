@@ -55,6 +55,7 @@ function createContext(options?: {
 		hasActiveBtw: () => false,
 		withLocalSubmission: async (_text: string, fn: () => Promise<unknown>) => fn(),
 		hasActiveOmfg: () => false,
+		isCouncilAdjudicating: () => false,
 	} as unknown as InteractiveModeContext;
 	return { ctx, abort, prompt, updatePendingMessagesDisplay, requestRender, showError };
 }

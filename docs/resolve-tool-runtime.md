@@ -1,12 +1,13 @@
 # Resolution devices runtime
 
-Pending previews and plan approval do not use a `resolve` tool. They finalize through plain-text `write` calls to virtual `xd://` devices implemented in `packages/coding-agent/src/tools/resolve.ts`:
+Pending previews, plan approval, and Council adjudication do not use a `resolve` tool. They finalize through plain-text `write` calls to virtual `xd://` devices implemented in `packages/coding-agent/src/tools/resolve.ts`:
 
 - `xd://resolve` — apply the pending staged preview; body = a one-sentence reason
 - `xd://reject` — discard the pending staged preview; body = a one-sentence reason
 - `xd://propose` — submit a plan for approval while plan mode is active; body = the plan slug (`<slug>` for `local://<slug>-plan.md`)
+- `xd://council` — submit the JSON adjudication for the active [Council](./council.md) run; body = the raw JSON object
 
-These are internal URLs, not filesystem paths. `read xd://resolve`, `read xd://reject`, and `read xd://propose` return a one-line usage hint. Completed device writes carry `details.xdev` metadata; consumers recover the inner result through `writeDeviceDispatch()` and `resolveDispatchDetails()`.
+These are internal URLs, not filesystem paths. `read xd://resolve`, `read xd://reject`, `read xd://propose`, and `read xd://council` return a one-line usage hint. Completed device writes carry `details.xdev` metadata; consumers recover the inner result through `writeDeviceDispatch()` and `resolveDispatchDetails()`.
 
 ## Preview flows
 
@@ -37,6 +38,36 @@ Plan mode installs a separate proposal handler through `setPlanProposalHandler(.
 - PlanYolo auto-approves and switches to the execution target.
 
 `xd://propose` dispatches the written slug to the installed plan proposal handler and is valid only while plan mode is active.
+
+## `xd://council`
+
+`xd://council` carries a Council run's adjudication back to the coordinator. `read xd://council` returns its usage hint, unconditionally and regardless of whether a run is active:
+
+```
+Write the JSON adjudication as plain text to xd://council for the active council run.
+```
+
+The body is the raw JSON adjudication, dispatched **unchanged** to the active run's handler — unlike the other devices, it is not trimmed:
+
+```json
+{
+  "plan": "## Context\n…",
+  "dispositions": [{ "id": "A1", "disposition": "accepted", "reason": "…", "step": "…" }],
+  "grades": [{ "slot": 1, "grade": "A", "reason": "…" }]
+}
+```
+
+`plan` and `dispositions` are required and `grades` is optional; no other keys are accepted. The plan must carry Council's exact H2 headings, dispositions must match the round's finding ids exactly, `duplicateOf` is valid only on a `duplicate` disposition, and grades must cover exactly the reviewer slots that reported, each at most once.
+
+The handler answers in the same turn so the model can correct itself: `Council adjudication accepted.` on success, `Invalid council adjudication: …` on a rejected payload, `Council adjudication was already accepted.` on a second submission, and `Council adjudication is no longer active.` for a stale generation.
+
+**Availability is Main-adjudication only.** The handler is installed solely by an in-session (`main`-mode) adjudication turn and is cleared as soon as that turn ends. A delegated adjudicator terminal-yields its verdict instead and never installs the handler, so the device is never live for that mode. Because the device rides `write`, Council refuses to dispatch a Main-mode run when `write` is missing from the active tool set (`COUNCIL_WRITE_TOOL_REQUIRED`).
+
+Writing with no handler installed fails with exactly:
+
+```
+No council run is awaiting adjudication.
+```
 
 ## Why `write` is guaranteed
 

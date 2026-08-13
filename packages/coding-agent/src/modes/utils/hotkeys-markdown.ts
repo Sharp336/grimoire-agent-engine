@@ -2,6 +2,8 @@ import type { AppKeybinding, KeybindingsManager } from "../../config/keybindings
 
 export interface HotkeysMarkdownBindings {
 	keybindings: Pick<KeybindingsManager, "getDisplayString">;
+	/** A council run is live and its pane is on screen, which overloads the expand and scroll chords. */
+	councilActive?: boolean;
 }
 
 function appKey(bindings: HotkeysMarkdownBindings, action: AppKeybinding): string {
@@ -46,6 +48,11 @@ export function buildHotkeysMarkdown(bindings: HotkeysMarkdownBindings): string 
 		`| \`${appKey(bindings, "app.plan.toggle")}\` | Toggle plan mode |`,
 		`| \`${appKey(bindings, "app.history.search")}\` | Search prompt history |`,
 		`| \`${appKey(bindings, "app.tools.expand")}\` | Toggle tool output expansion |`,
+		...(bindings.councilActive
+			? [
+					`| \`${appKey(bindings, "app.tools.expand")}\` / \`PgUp\` / \`PgDn\` / \`Shift+Up\` / \`Shift+Down\` / \`Esc\` | Council pane (live run): expand or collapse, scroll while expanded, cancel the run |`,
+				]
+			: []),
 		`| \`${appKey(bindings, "app.tools.toggleVisibility")}\` | Toggle tool activity visibility |`,
 		`| \`${appKey(bindings, "app.thinking.toggle")}\` | Toggle thinking block visibility |`,
 		`| \`${appKey(bindings, "app.editor.external")}\` | Edit message in external editor |`,

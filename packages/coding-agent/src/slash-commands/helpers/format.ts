@@ -13,6 +13,20 @@ export function formatDuration(ms: number): string {
 	return `${days}d`;
 }
 
+/**
+ * Format a millisecond duration as a clock: `mm:ss` below one hour, `h:mm:ss` at
+ * or above it. Live HUDs need second resolution; {@link formatDuration} is
+ * deliberately coarse and stays that way.
+ */
+export function formatElapsedClock(ms: number): string {
+	const total = Math.max(0, Math.floor((Number.isFinite(ms) ? ms : 0) / 1000));
+	const seconds = total % 60;
+	const minutes = Math.floor(total / 60) % 60;
+	const hours = Math.floor(total / 3600);
+	const pad = (value: number) => String(value).padStart(2, "0");
+	return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${pad(minutes)}:${pad(seconds)}`;
+}
+
 type ProgressBarTheme = Pick<Theme, "bold" | "fg" | "getFgAnsi">;
 
 const unstyledProgressBarTheme: ProgressBarTheme = {

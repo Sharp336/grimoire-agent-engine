@@ -590,6 +590,66 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	// The advisor roster (`advisors[].tools`) is user configuration that may name
+	// `write`/`edit`/`bash`, and the runtime intersects it with the session's built
+	// advisor pool. Clamping that pool to the restricted child's own allowlist is
+	// what keeps the capability boundary transitive: a roster entry can only ever
+	// select from what is reported here.
+	it("clamps the advisor tool pool to a restricted session's allowlist", async () => {
+		const readOnlyDir = makeTempDir();
+		const writeGrantedDir = makeTempDir();
+		const normalDir = makeTempDir();
+
+		const { session: readOnly } = await createAgentSession({
+			...baseOptions(readOnlyDir),
+			toolNames: ["read", "grep"],
+			restrictToolNames: true,
+		});
+
+		try {
+			const advisorTools = readOnly.getAdvisorAvailableToolNames();
+			expect(advisorTools.length).toBeGreaterThan(0);
+			for (const name of advisorTools) {
+				expect(["read", "grep"]).toContain(name);
+			}
+			for (const name of ["write", "edit", "bash", "eval", "task"]) {
+				expect(advisorTools).not.toContain(name);
+			}
+		} finally {
+			await readOnly.dispose();
+		}
+
+		// The ceiling is the allowlist itself, not a blanket read-only rule: a
+		// restricted caller that does grant `write` keeps it for its advisor too.
+		const { session: writeGranted } = await createAgentSession({
+			...baseOptions(writeGrantedDir),
+			toolNames: ["read", "write"],
+			restrictToolNames: true,
+		});
+
+		try {
+			const advisorTools = writeGranted.getAdvisorAvailableToolNames();
+			expect(advisorTools).toContain("write");
+			expect(advisorTools).not.toContain("bash");
+		} finally {
+			await writeGranted.dispose();
+		}
+
+		// Without a restriction the advisor keeps the full slate it has always had.
+		const { session: normal } = await createAgentSession({
+			...baseOptions(normalDir),
+			toolNames: ["read"],
+		});
+
+		try {
+			expect(normal.getAdvisorAvailableToolNames()).toEqual(
+				expect.arrayContaining(["read", "grep", "glob", "write", "edit", "bash"]),
+			);
+		} finally {
+			await normal.dispose();
+		}
+	});
+
 	it("permits only explicitly named SDK custom tools when a restricted caller opts in", async () => {
 		const tempDir = makeTempDir();
 		const { session } = await createAgentSession({

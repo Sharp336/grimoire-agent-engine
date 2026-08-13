@@ -60,6 +60,7 @@ function createStubInputControllerContext(opts: {
 	skillCommands: Map<string, Skill>;
 	isStreaming: boolean;
 	isCompacting?: boolean;
+	isCouncilAdjudicating?: boolean;
 }) {
 	let editorText = "";
 	const editor: StubEditor = {
@@ -90,6 +91,19 @@ function createStubInputControllerContext(opts: {
 	const requestRender = vi.fn();
 	const showError = vi.fn();
 	const queueCompactionMessage = vi.fn((_text: string, _mode: "steer" | "followUp", _images?: ImageContent[]) => {});
+	const showStatus = vi.fn();
+	const onInputCallback = vi.fn();
+	const flushPendingBashComponents = vi.fn();
+	const maybeStartTitleGeneration = vi.fn();
+	const handleBashCommand = vi.fn(async (_command: string, _isExcluded: boolean) => {});
+	const startPendingSubmission = vi.fn(
+		(input: {
+			text: string;
+			images?: ImageContent[];
+			imageLinks?: (string | undefined)[];
+			streamingBehavior?: "steer" | "followUp";
+		}) => input,
+	);
 	const ctx = {
 		editor,
 		ui: { requestRender },
@@ -102,6 +116,7 @@ function createStubInputControllerContext(opts: {
 			extensionRunner: undefined,
 			prompt,
 			promptCustomMessage,
+			maybeStartTitleGeneration,
 		},
 		get viewSession() {
 			return (this as typeof ctx).session;
@@ -117,6 +132,13 @@ function createStubInputControllerContext(opts: {
 		locallySubmittedUserSignatures: new Set<string>(),
 		withLocalSubmission: async (_text: string, fn: () => unknown) => fn(),
 		queueCompactionMessage,
+		isCouncilAdjudicating: () => opts.isCouncilAdjudicating ?? false,
+		showStatus,
+		onInputCallback,
+		startPendingSubmission,
+		flushPendingBashComponents,
+		handleBashCommand,
+		updateEditorBorderColor: vi.fn(),
 	} as unknown as InteractiveModeContext;
 
 	return {
@@ -128,6 +150,10 @@ function createStubInputControllerContext(opts: {
 		updatePendingMessagesDisplay,
 		requestRender,
 		queueCompactionMessage,
+		showStatus,
+		onInputCallback,
+		startPendingSubmission,
+		handleBashCommand,
 	};
 }
 
@@ -256,6 +282,115 @@ describe("InputController skill queue chip metadata", () => {
 		expect(editor.pendingImages).toEqual([]);
 		expect(editor.pendingImageLinks).toEqual([]);
 		expect(editor.imageLinks).toBeUndefined();
+	});
+});
+
+describe("InputController council adjudication routing", () => {
+	let tempDir: TempDir;
+	let skillCommands: Map<string, Skill>;
+
+	beforeEach(async () => {
+		tempDir = TempDir.createSync("@pi-council-routing-stub-");
+		const skill = await writeSkillFile(tempDir.path(), "test-skill", "Do the thing.");
+		skillCommands = new Map<string, Skill>([["skill:test-skill", skill]]);
+	});
+
+	afterEach(() => {
+		tempDir.removeSync();
+		vi.restoreAllMocks();
+	});
+
+	it("queues a skill command behind the adjudication turn instead of steering it", async () => {
+		const { ctx, editor, promptCustomMessage, showStatus } = createStubInputControllerContext({
+			skillCommands,
+			isStreaming: true,
+			isCouncilAdjudicating: true,
+		});
+		const controller = new InputController(ctx);
+
+		controller.setupEditorSubmitHandler();
+		editor.setText("/skill:test-skill arg1");
+		await editor.onSubmit?.("/skill:test-skill arg1");
+
+		expect(promptCustomMessage.mock.calls[0]?.[1]).toEqual({
+			streamingBehavior: "followUp",
+			queueChipText: "/skill:test-skill arg1",
+		});
+		expect(showStatus).toHaveBeenCalledTimes(1);
+	});
+
+	it("queues streaming free text as a follow-up during adjudication", async () => {
+		const { ctx, editor, prompt, showStatus } = createStubInputControllerContext({
+			skillCommands,
+			isStreaming: true,
+			isCouncilAdjudicating: true,
+		});
+		const controller = new InputController(ctx);
+
+		controller.setupEditorSubmitHandler();
+		await editor.onSubmit?.("what about the auth path");
+
+		expect(prompt).toHaveBeenCalledWith("what about the auth path", {
+			streamingBehavior: "followUp",
+			images: undefined,
+		});
+		expect(showStatus).toHaveBeenCalledTimes(1);
+	});
+
+	it("still steers free text during an unrelated stream", async () => {
+		const { ctx, editor, prompt, showStatus } = createStubInputControllerContext({
+			skillCommands,
+			isStreaming: true,
+		});
+		const controller = new InputController(ctx);
+
+		controller.setupEditorSubmitHandler();
+		await editor.onSubmit?.("what about the auth path");
+
+		expect(prompt).toHaveBeenCalledWith("what about the auth path", {
+			streamingBehavior: "steer",
+			images: undefined,
+		});
+		expect(showStatus).not.toHaveBeenCalled();
+	});
+
+	it("keeps follow-up semantics for an image-bearing prompt racing turn acquisition", async () => {
+		const image: ImageContent = { type: "image", data: "aGVsbG8=", mimeType: "image/png" };
+		const { ctx, editor, startPendingSubmission } = createStubInputControllerContext({
+			skillCommands,
+			isStreaming: false,
+			isCouncilAdjudicating: true,
+		});
+		const controller = new InputController(ctx);
+
+		controller.setupEditorSubmitHandler();
+		editor.pendingImages = [image];
+		editor.pendingImageLinks = ["file:///tmp/council-image.png"];
+		editor.imageLinks = editor.pendingImageLinks;
+		await editor.onSubmit?.("look at this diff");
+
+		expect(startPendingSubmission).toHaveBeenCalledWith({
+			text: "look at this diff",
+			images: [image],
+			imageLinks: ["file:///tmp/council-image.png"],
+			streamingBehavior: "followUp",
+		});
+	});
+
+	it("leaves local bash commands untouched during adjudication", async () => {
+		const { ctx, editor, prompt, handleBashCommand, showStatus } = createStubInputControllerContext({
+			skillCommands,
+			isStreaming: false,
+			isCouncilAdjudicating: true,
+		});
+		const controller = new InputController(ctx);
+
+		controller.setupEditorSubmitHandler();
+		await editor.onSubmit?.("!ls");
+
+		expect(handleBashCommand).toHaveBeenCalledWith("ls", false);
+		expect(prompt).not.toHaveBeenCalled();
+		expect(showStatus).not.toHaveBeenCalled();
 	});
 });
 

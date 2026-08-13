@@ -60,6 +60,7 @@ import type { InspectImageMode } from "../utils/inspect-image-mode";
 import { CollabQrCodeComponent } from "./helpers/collab-qrcode";
 import { buildContextReportText } from "./helpers/context-report";
 import { councilMoveBlockMessage, handleCouncilCommand } from "./helpers/council";
+import { COUNCIL_GRAMMAR } from "./helpers/council-grammar";
 import { formatDuration } from "./helpers/format";
 import { createMarketplaceManager } from "./helpers/marketplace-manager";
 import { handleMcpAcp } from "./helpers/mcp";
@@ -402,8 +403,9 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "council",
-		description: "Run a multi-model planning council",
-		acpInputHint: "<task>|status|cancel|resume [run-id]|config",
+		description: "Run a multi-model planning council (spends on every configured council role)",
+		acpInputHint: COUNCIL_GRAMMAR,
+		inlineHint: COUNCIL_GRAMMAR,
 		allowArgs: true,
 		subcommands: [
 			{ name: "status", description: "Show the active council run" },
@@ -3073,7 +3075,14 @@ function materializeTuiBuiltinSlashCommand(
 			cmd.name === "mcp" && runtime
 				? buildMcpArgumentCompletions(cmd.subcommands, runtime)
 				: buildArgumentCompletions(cmd.subcommands);
-		materialized.getInlineHint = buildSubcommandInlineHint(cmd.subcommands);
+		// A command may carry both: the subcommand hint owns every prefix that names a subcommand and
+		// returns `null` for the empty/no-match case, which is exactly where a bare-argument command
+		// like `/council <task>` needs its static hint. Composition, not preference.
+		const subcommandHint = buildSubcommandInlineHint(cmd.subcommands);
+		const staticHint = cmd.inlineHint ? buildStaticInlineHint(cmd.inlineHint) : undefined;
+		materialized.getInlineHint = staticHint
+			? argumentText => subcommandHint(argumentText) ?? staticHint(argumentText)
+			: subcommandHint;
 	} else if (cmd.name === "move") {
 		materialized.getArgumentCompletions = buildDirectoryArgumentCompletions();
 		if (cmd.inlineHint) materialized.getInlineHint = buildStaticInlineHint(cmd.inlineHint);
