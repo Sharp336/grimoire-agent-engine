@@ -1422,6 +1422,14 @@ export class SessionMaintenance {
 						contextTokens: incompleteContextTokens,
 						contextWindow: incompleteContextWindow,
 					});
+					// Surface to the TUI/RPC so the user understands why the
+					// hidden recovery loop stopped — logger.warn is log-file only.
+					await this.#host.emitSessionEvent({
+						type: "notice",
+						level: "warning",
+						message: `The model repeatedly hit its output-token limit. Recovery stopped after ${this.#incompleteBelowThresholdRetries} retries and one compaction fallback. The last truncated response is shown above — try simplifying the task or increasing the model's output budget.`,
+						source: "compaction",
+					});
 					this.#incompleteBelowThresholdRetries = 0;
 					this.#incompleteCompactionFallbackUsed = false;
 					return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
