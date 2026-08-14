@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed DeepInfra model discovery accepting standard OpenAI-compatible `/models` records without nested catalog metadata, preventing an authenticated refresh from replacing its bundled models with an empty list.
+
+
 ## [17.3.2] - 2026-08-13
 
 ### Added

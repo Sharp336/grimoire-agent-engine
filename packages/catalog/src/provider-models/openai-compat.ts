@@ -1145,9 +1145,15 @@ export function deepinfraModelManagerOptions(
 		config,
 		dynamicModelsAuthoritative: true,
 		requireApiKey: true,
-		filterModel: entry => {
+		filterModel: (entry, model, references) => {
 			const metadata = entry.metadata;
-			return isRecord(metadata) && Array.isArray(metadata.tags) && metadata.tags.includes("chat");
+			if (isRecord(metadata)) {
+				return Array.isArray(metadata.tags) && metadata.tags.includes("chat");
+			}
+			// DeepInfra's OpenAI-compatible endpoint omits its catalog metadata.
+			// Keep standard model records, plus bundled IDs if the endpoint omits
+			// the standard object marker.
+			return entry.object === "model" || references.has(model.id);
 		},
 		mapModel: (entry, defaults, reference) => {
 			const model = mapWithBundledReference(entry, defaults, reference);

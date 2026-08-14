@@ -53,4 +53,28 @@ describe("DeepInfra provider discovery", () => {
 			maxTokens: 32768,
 		});
 	});
+	test("accepts standard OpenAI model records without nested metadata", async () => {
+		const fetchMock: FetchImpl = async () =>
+			new Response(
+				JSON.stringify({
+					data: [
+						{ id: "deepseek-ai/DeepSeek-V3", object: "model", owned_by: "deepinfra" },
+						{ id: "unknown/model-without-standard-marker" },
+					],
+				}),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+
+		const options = deepinfraModelManagerOptions({ apiKey: "deepinfra-test-key", fetch: fetchMock });
+		const models = await options.fetchDynamicModels?.();
+
+		expect(options.dynamicModelsAuthoritative).toBe(true);
+		expect(models?.map(model => model.id)).toEqual(["deepseek-ai/DeepSeek-V3"]);
+		expect(models?.[0]).toMatchObject({
+			id: "deepseek-ai/DeepSeek-V3",
+			provider: "deepinfra",
+			api: "openai-completions",
+			baseUrl: "https://api.deepinfra.com/v1/openai",
+		});
+	});
 });
