@@ -804,9 +804,13 @@ describe("ACP agent", () => {
 
 	it("exports one Auto resolution before assistant output with both listeners active", async () => {
 		const harness = await createHarness();
+		vi.useFakeTimers();
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
-		await waitForBootstrapGuard();
+		// Install the session-lifetime subscription, then hand the turn back to
+		// real timers: the prompt path below awaits genuine async work.
+		await advanceBootstrapGuard();
+		vi.useRealTimers();
 		session.prompt = async (prompt: string): Promise<boolean> => {
 			session.promptCalls.push(prompt);
 			session.isStreaming = true;
@@ -903,9 +907,13 @@ describe("ACP agent", () => {
 
 	it("pushes settled async task metadata after the owning prompt has ended", async () => {
 		const harness = await createHarness();
+		vi.useFakeTimers();
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
-		await waitForBootstrapGuard();
+		// The lifetime subscription is the only path left once the prompt turn
+		// has settled, so install it before dispatching the async-result event.
+		await advanceBootstrapGuard();
+		vi.useRealTimers();
 
 		const asyncMessage = buildAsyncResultBatchMessage([
 			{
