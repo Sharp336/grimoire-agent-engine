@@ -111,3 +111,14 @@ export function pluralize(label: string, count: number): string {
 export function formatPercent(ratio: number): string {
 	return `${(ratio * 100).toFixed(1)}%`;
 }
+
+/**
+ * Format a USD cost with magnitude-based precision: under $0.01 shows four decimals,
+ * under $1 three, anything larger two. Non-finite or missing input collapses to $0.
+ */
+export function formatCost(cost: number | null | undefined): string {
+	const amount = typeof cost === "number" && Number.isFinite(cost) ? cost : 0;
+	if (amount < 0.01) return `$${amount.toFixed(4)}`;
+	if (amount < 1) return `$${amount.toFixed(3)}`;
+	return `$${amount.toFixed(2)}`;
+}

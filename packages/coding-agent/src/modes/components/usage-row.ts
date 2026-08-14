@@ -1,6 +1,6 @@
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { Container, Spacer, Text } from "@oh-my-pi/pi-tui";
-import { formatNumber } from "@oh-my-pi/pi-utils";
+import { formatCost, formatNumber } from "@oh-my-pi/pi-utils";
 import { theme } from "../../modes/theme/theme";
 
 /** Below this the rate is nonsense (cached/instant responses yield absurd tok/s). */
@@ -27,6 +27,10 @@ export function formatUsageRow(usage: Usage, durationMs?: number, ttftMs?: numbe
 	parts.push(`${theme.icon.output} ${formatNumber(usage.output)}`);
 	if (usage.cacheRead > 0) {
 		parts.push(`${theme.icon.cache} ${formatNumber(usage.cacheRead)}`);
+	}
+	// Providers without catalog pricing report 0 cost; showing $0.00 every row is noise.
+	if (usage.cost.total > 0) {
+		parts.push(formatCost(usage.cost.total));
 	}
 	if (ttftMs && ttftMs > 0) {
 		parts.push(`${theme.icon.time} ${(ttftMs / 1000).toFixed(1)}s`);

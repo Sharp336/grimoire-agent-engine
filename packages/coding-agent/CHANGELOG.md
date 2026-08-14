@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added per-turn cost display to the assistant usage row (shown when the provider reports a nonzero cost).
+
 ## [17.3.2] - 2026-08-13
 
 ### Fixed
