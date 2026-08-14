@@ -17,6 +17,7 @@ import { useState } from "react";
 import { Pressable, StyleSheet, TextInput, View } from "react-native";
 import { parseEndpoint } from "@ompd/core/pairing";
 import { Glyph } from "../design/icons.tsx";
+import { SafeScreen } from "../design/SafeScreen.tsx";
 import { Body, Display, Kicker, Label } from "../design/text.tsx";
 import type { Connection } from "../platform/connection.ts";
 import { ground, ink, signal, signalWash, space, stroke, TOUCH_TARGET, type } from "../design/tokens.ts";
@@ -34,7 +35,7 @@ export function PairScreen({
   const ready = endpoint !== null && token.trim().length > 0;
 
   return (
-    <View style={styles.screen} testID="pair">
+    <SafeScreen style={styles.screen} testID="pair">
       <View style={styles.form}>
         <Kicker color={ink.muted}>ompd</Kicker>
         <Display heading>Take the position</Display>
@@ -92,7 +93,7 @@ export function PairScreen({
           <Label color={ready ? signal.sage : ink.faint}>Connect</Label>
         </Pressable>
       </View>
-    </View>
+    </SafeScreen>
   );
 }
 
@@ -128,7 +129,7 @@ function Field({
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: ground.base, justifyContent: "center", padding: space.loose },
+  screen: { justifyContent: "center", padding: space.loose },
   form: { gap: space.step, maxWidth: 480, width: "100%", alignSelf: "center" },
   notice: {
     flexDirection: "row",

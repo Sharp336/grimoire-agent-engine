@@ -14,11 +14,7 @@
 
 import "./rnw.ts";
 
-import { GlobalRegistrator } from "@happy-dom/global-registrator";
-
-GlobalRegistrator.register();
-
-import { afterAll, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import type { Connection } from "../src/platform/connection.ts";
@@ -38,10 +34,6 @@ declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean | undefined;
 }
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-
-afterAll(() => {
-  GlobalRegistrator.unregister();
-});
 
 /**
  * Type into a rendered `TextInput` by invoking the change handler React

@@ -220,6 +220,16 @@ export interface LocalOperatorBootstrap {
 export interface OmpdStartInfo {
   port: number;
   url: string;
+  /**
+   * Where a device can actually reach this daemon, as of this start.
+   *
+   * Returned rather than looked up afterward because `url` is the bind
+   * address, and `0.0.0.0` is a sentinel meaning "every interface" rather than
+   * a destination anything can open. A caller printing a banner needs the real
+   * set, and asking the daemon over HTTP for it would mean resolving an
+   * endpoint file that a foreground start has only just written.
+   */
+  endpoints: EndpointOffer[];
   /** Null when the local operator device exists but has been revoked. */
   bootstrap: LocalOperatorBootstrap | null;
 }
@@ -486,6 +496,7 @@ export class Ompd {
       supervisor: this.#supervisor,
       store: this.#store,
       events: this.#events,
+      onError: (err) => this.#onLog(`unhandled request error: ${err.stack ?? err.message}`),
       host: this.#config.host,
       port: this.#config.port,
       version: OMPD_VERSION,
@@ -760,7 +771,7 @@ export class Ompd {
     }
     this.#scheduler.start();
 
-    return { port, url, bootstrap };
+    return { port, url, endpoints: this.#reachableEndpoints(), bootstrap };
   }
 
   /**

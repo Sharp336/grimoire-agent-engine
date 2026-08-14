@@ -52,7 +52,7 @@ const REACH_ORDER: readonly EndpointReach[] = ["same-machine", "same-network", "
  * reported, never thrown: whatever it returns, the caller still has to print
  * the token, which is the half of this output that cannot be produced again.
  */
-async function fetchEndpointOffers(ctx: CliContext): Promise<EndpointOffer[] | null> {
+export async function fetchEndpointOffers(ctx: CliContext): Promise<EndpointOffer[] | null> {
   try {
     const response = await api<EndpointsResponse>(ctx, "/v1/endpoints");
     return response.offers ?? [];

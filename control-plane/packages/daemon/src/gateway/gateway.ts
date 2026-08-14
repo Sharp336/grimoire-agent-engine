@@ -255,6 +255,14 @@ export interface GatewayOptions {
    * frames, but nothing is pushed.
    */
   events?: GatewayEvents;
+  /**
+   * Where a bug in a request handler is reported.
+   *
+   * Server side only, and deliberately not part of the response: a stack from
+   * this process names filesystem paths and internals that a remote client has
+   * no business reading.
+   */
+  onError?: (err: Error) => void;
   host?: string;
   /** 0 asks the OS for a free port; read the real one back from `listen()`. */
   port?: number;
@@ -445,6 +453,7 @@ export class Gateway {
   #onWebViewResult: GatewayOptions["onWebViewResult"];
   #onWebViewUnavailable: GatewayOptions["onWebViewUnavailable"];
   #staticRoot: string | undefined;
+  #onError: GatewayOptions["onError"];
   /** Set by `listen`, so uptime measures serving rather than construction. */
   #startedAtMs: number | undefined;
 
@@ -479,6 +488,7 @@ export class Gateway {
     this.#onWebViewUnavailable = opts.onWebViewUnavailable;
     // Resolved once so the traversal check below compares two absolute paths.
     this.#staticRoot = opts.staticRoot === undefined ? undefined : resolve(opts.staticRoot);
+    this.#onError = opts.onError;
 
     this.#unsubscribe = this.#events?.add({
       onUpdate: (agentId, seq, update) => {
@@ -543,6 +553,16 @@ export class Gateway {
       hostname: this.#host,
       port: this.#port,
       fetch: (req, server) => this.#fetch(req, server),
+      /**
+       * A request handler that throws is a bug in this daemon, and Bun's own
+       * 500 body says only "Internal error" with the stack going nowhere. That
+       * is indistinguishable from a route that deliberately answered 500,
+       * which has already cost real time to tell apart.
+       */
+      error: (err: Error) => {
+        this.#onError?.(err);
+        return Response.json({ error: "internal_error" }, { status: 500 });
+      },
       websocket: {
         open: (ws: ServerWebSocket<SocketState>) => this.#open(ws),
         message: (ws: ServerWebSocket<SocketState>, message: string | Buffer) =>
