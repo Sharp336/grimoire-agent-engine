@@ -42,6 +42,7 @@ export interface AsyncResultEntry {
 type AsyncResultJobDetails = {
 	jobId: string;
 	type?: "bash" | "task";
+	status?: AsyncJob["status"];
 	label?: string;
 	durationMs?: number;
 };
@@ -56,6 +57,7 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 		jobId: entry.jobId,
 		result: entry.result,
 		type: entry.job?.type,
+		status: entry.job?.status,
 		label: entry.job?.label,
 		durationMs: entry.durationMs,
 	}));
@@ -63,6 +65,7 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 		jobs: jobs.map(job => ({
 			jobId: job.jobId,
 			type: job.type,
+			status: job.status,
 			label: job.label,
 			durationMs: job.durationMs,
 		})),

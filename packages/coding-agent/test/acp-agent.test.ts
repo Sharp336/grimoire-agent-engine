@@ -17,6 +17,7 @@ import type {
 	AgentSessionEvent,
 	UsageFallbackConfirmation,
 } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { buildAsyncResultBatchMessage } from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
 import { SILENT_ABORT_MARKER } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS } from "@oh-my-pi/pi-coding-agent/stt/models";
@@ -896,6 +897,63 @@ describe("ACP agent", () => {
 		expect(harness.updates.length).toBe(updatesBeforeRedundant);
 
 		vi.useRealTimers();
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("pushes settled async task metadata after the owning prompt has ended", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		await waitForBootstrapGuard();
+
+		const asyncMessage = buildAsyncResultBatchMessage([
+			{
+				jobId: "BoutiqueRefreshFacts",
+				result: "done",
+				job: {
+					id: "BoutiqueRefreshFacts",
+					type: "task",
+					status: "completed",
+					startTime: Date.now() - 114_551,
+					label: "Retry Banner for Boutique Refresh",
+					abortController: new AbortController(),
+					promise: Promise.resolve(),
+				},
+				durationMs: 114_551,
+				epoch: 0,
+			},
+		]);
+		if (!asyncMessage) throw new Error("expected async result message");
+
+		const updatesBefore = harness.updates.length;
+		for (const listener of session.listeners()) {
+			listener({ type: "message_start", message: asyncMessage });
+		}
+		await Bun.sleep(0);
+
+		const asyncUpdate = harness.updates
+			.slice(updatesBefore)
+			.find(
+				notification =>
+					notification.sessionId === created.sessionId &&
+					notification.update.sessionUpdate === "agent_message_chunk" &&
+					notification.update._meta?.["omp.sh/async-result"] !== undefined,
+			);
+		expect(asyncUpdate).toBeDefined();
+		expect(asyncUpdate?.update._meta?.["omp.sh/async-result"]).toEqual({
+			jobs: [
+				{
+					id: "BoutiqueRefreshFacts",
+					type: "task",
+					status: "completed",
+					label: "Retry Banner for Boutique Refresh",
+					durationMs: 114_551,
+				},
+			],
+		});
+		if (asyncUpdate) expectAcpNotifications([asyncUpdate]);
+
 		harness.abortController.abort();
 		await Bun.sleep(0);
 	});

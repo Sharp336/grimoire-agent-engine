@@ -32,6 +32,8 @@
 ### Added
 
 - Added namespaced `omp.sh/reasoning` ACP metadata that reports the concrete effort selected for an Auto-classified top-level turn while preserving Auto as the configured thinking option.
+- Added namespaced `omp.sh/async-result` ACP metadata on settled background jobs, so a client can render task/bash completions (id, type, terminal status, label, duration) even when the owning prompt turn has already ended.
+- Added opt-in ambient MCP discovery for ACP sessions via `omp.sh/ambient-mcp-discovery`, letting a client mount host-configured MCP servers alongside its own while reserving bridge server names.
 
 ## [17.3.0] - 2026-08-13
 

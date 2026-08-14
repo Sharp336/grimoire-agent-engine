@@ -195,6 +195,7 @@ type ManagedSessionRecord = {
 
 type ReplayableMessage = {
 	role: string;
+	customType?: string;
 	content?: unknown;
 	errorMessage?: string;
 	toolCallId?: string;
@@ -1178,6 +1179,26 @@ export class AcpAgent implements Agent {
 	}
 
 	async #handleLifetimeEvent(record: ManagedSessionRecord, event: AgentSessionEvent): Promise<void> {
+		if (event.type === "message_start") {
+			// The active prompt subscription owns in-turn events. Once it has
+			// settled, the lifetime subscription is the only ACP path left for an
+			// agent-initiated async-result follow-up.
+			if (isPromptTurnInFlight(record.promptTurn)) return;
+			try {
+				for (const notification of mapAgentSessionEventToAcpSessionUpdates(event, record.session.sessionId, {
+					cwd: record.session.sessionManager.getCwd(),
+				})) {
+					await this.#connection.sessionUpdate(notification);
+				}
+			} catch (error) {
+				logger.warn("Failed to push async-result metadata after a lifetime event", {
+					sessionId: record.session.sessionId,
+					eventType: event.type,
+					error,
+				});
+			}
+			return;
+		}
 		if (event.type !== "thinking_level_changed" && event.type !== "model_changed") {
 			return;
 		}
@@ -2094,6 +2115,24 @@ export class AcpAgent implements Agent {
 	): SessionNotification[] {
 		if (message.role === "assistant") {
 			return this.#replayAssistantMessage(sessionId, message, cwd, replayedToolCallIds, replayedToolCallArgs);
+		}
+		if (message.role === "custom" && message.customType === "async-result" && typeof message.content === "string") {
+			return mapAgentSessionEventToAcpSessionUpdates(
+				{
+					type: "message_start",
+					message: {
+						role: "custom",
+						customType: message.customType,
+						content: message.content,
+						display: true,
+						attribution: "agent",
+						details: message.details,
+						timestamp: Date.now(),
+					},
+				},
+				sessionId,
+				{ cwd },
+			);
 		}
 		if (
 			message.role === "user" ||

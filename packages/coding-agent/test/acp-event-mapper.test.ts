@@ -1248,4 +1248,45 @@ describe("ACP event mapper", () => {
 		});
 		expectAcpStructureRejects(arkSessionNotification, { ...notification, sessionId: 42 });
 	});
+	it("recovers terminal status from persisted async-result task tags", () => {
+		const updates = mapAgentSessionEventToAcpSessionUpdates(
+			{
+				type: "message_start",
+				message: {
+					role: "custom",
+					customType: "async-result",
+					content:
+						'<system-notice><task-result id="BoutiqueRefreshFacts" agent="scout" status="completed">done</task-result></system-notice>',
+					display: true,
+					attribution: "agent",
+					details: {
+						jobs: [
+							{
+								jobId: "BoutiqueRefreshFacts",
+								type: "task",
+								label: "Retry Banner for Boutique Refresh",
+								durationMs: 114_551,
+							},
+						],
+					},
+					timestamp: Date.now(),
+				},
+			} as AgentSessionEvent,
+			"session-1",
+		);
+
+		expect(updates).toHaveLength(1);
+		expect(updates[0]?.update._meta?.["omp.sh/async-result"]).toEqual({
+			jobs: [
+				{
+					id: "BoutiqueRefreshFacts",
+					type: "task",
+					status: "completed",
+					label: "Retry Banner for Boutique Refresh",
+					durationMs: 114_551,
+				},
+			],
+		});
+		expectAcpNotifications(updates);
+	});
 });
