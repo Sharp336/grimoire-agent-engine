@@ -21,7 +21,11 @@ import type { ModelManagerOptions } from "../model-manager";
 import { type GeneratedProvider, getBundledModels } from "../models";
 import type { Api, FetchImpl, Model, ModelSpec, OpenAICompat, Provider, ThinkingConfig } from "../types";
 import { discoveryFetch, isAnthropicOAuthToken, isRecord, toBoolean, toNumber, toPositiveNumber } from "../utils";
-import { ALIBABA_TOKEN_PLAN_BASE_URL, parseAlibabaTokenPlanCredential } from "../wire/alibaba-token-plan";
+import {
+	ALIBABA_TOKEN_PLAN_BASE_URL,
+	ALIBABA_TOKEN_PLAN_CN_BASE_URL,
+	parseAlibabaTokenPlanCredential,
+} from "../wire/alibaba-token-plan";
 import { coreWeaveProjectHeaders } from "../wire/coreweave";
 import {
 	COPILOT_API_HEADERS,
@@ -2762,7 +2766,7 @@ export function alibabaCodingPlanModelManagerOptions(
 // Alibaba Token Plan
 // ---------------------------------------------------------------------------
 
-export { ALIBABA_TOKEN_PLAN_BASE_URL };
+export { ALIBABA_TOKEN_PLAN_BASE_URL, ALIBABA_TOKEN_PLAN_CN_BASE_URL };
 
 const ALIBABA_TOKEN_PLAN_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const;
 const ALIBABA_TOKEN_PLAN_COMPAT: OpenAICompat = {
@@ -2980,6 +2984,8 @@ export interface AlibabaTokenPlanModelManagerConfig {
 	apiKey?: string;
 	baseUrl?: string;
 	fetch?: FetchImpl;
+	/** Provider id override; `bailian-token-plan-cn` defaults to the China endpoint. */
+	providerId?: Provider;
 }
 
 export function alibabaTokenPlanModelManagerOptions(
@@ -2987,19 +2993,27 @@ export function alibabaTokenPlanModelManagerOptions(
 ): ModelManagerOptions<"openai-completions"> {
 	const credential = config?.apiKey ? parseAlibabaTokenPlanCredential(config.apiKey) : undefined;
 	const apiKey = credential?.token;
+	const providerId = config?.providerId ?? "alibaba-token-plan";
+	const isBailianCn = providerId === "bailian-token-plan-cn";
+	const defaultBaseUrl = isBailianCn ? ALIBABA_TOKEN_PLAN_CN_BASE_URL : ALIBABA_TOKEN_PLAN_BASE_URL;
 	// A region-locked credential (China/custom) dictates the discovery endpoint:
 	// its key only authenticates against its own region, so fetching /models from
 	// any other base URL would 401 (#6682).
-	const baseUrl = credential?.baseUrl ?? config?.baseUrl ?? ALIBABA_TOKEN_PLAN_BASE_URL;
+	const baseUrl = credential?.baseUrl ?? config?.baseUrl ?? defaultBaseUrl;
 	return {
-		providerId: "alibaba-token-plan",
+		providerId,
 		dynamicModelsAuthoritative: true,
-		staticModels: ALIBABA_TOKEN_PLAN_STATIC_MODELS,
+		// The shared static fallback describes the international provider; the
+		// dedicated China entry re-brands it so offline rows carry their own
+		// provider id and China base URL.
+		staticModels: isBailianCn
+			? ALIBABA_TOKEN_PLAN_STATIC_MODELS.map(model => ({ ...model, provider: providerId, baseUrl: defaultBaseUrl }))
+			: ALIBABA_TOKEN_PLAN_STATIC_MODELS,
 		...(apiKey && {
 			fetchDynamicModels: () =>
 				fetchOpenAICompatibleModels({
 					api: "openai-completions",
-					provider: "alibaba-token-plan",
+					provider: providerId,
 					baseUrl,
 					apiKey,
 					filterModel: (_entry, model) => isAlibabaTokenPlanChatModelId(model.id),

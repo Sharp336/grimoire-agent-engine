@@ -93,10 +93,23 @@ export const CATALOG_PROVIDERS = [
 	{
 		id: "alibaba-token-plan",
 		defaultModel: "qwen3.7-plus",
-		envVars: ["ALIBABA_TOKEN_PLAN_API_KEY", "BAILIAN_TOKEN_PLAN_API_KEY"],
+		// `BAILIAN_TOKEN_PLAN_API_KEY` moved to the dedicated China entry: Bailian
+		// is the China (Beijing) product, and its keys are region-locked, so a
+		// Bailian key resolved here would silently 401 against the international
+		// default endpoint (#6682).
+		envVars: ["ALIBABA_TOKEN_PLAN_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => alibabaTokenPlanModelManagerOptions(config),
 		dynamicModelsAuthoritative: true,
 		catalogDiscovery: { label: "QwenCloud Token Plan" },
+	},
+	{
+		id: "bailian-token-plan-cn",
+		defaultModel: "qwen3.7-plus",
+		envVars: ["BAILIAN_TOKEN_PLAN_API_KEY", "BAILIAN_TOKEN_PLAN_CN_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) =>
+			alibabaTokenPlanModelManagerOptions({ ...config, providerId: "bailian-token-plan-cn" }),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "Bailian-Token-Plan-CN" },
 	},
 	{
 		id: "baseten",
