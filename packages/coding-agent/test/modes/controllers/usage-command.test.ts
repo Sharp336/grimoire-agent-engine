@@ -21,7 +21,7 @@ function renderPresentedBlocks(value: unknown): string {
 }
 
 function createUsageSessionDouble() {
-	return { getUsageReportingModelSelectors: () => [] };
+	return { getUsageReportingModelCoverage: () => new Map() };
 }
 
 describe("CommandController /usage", () => {

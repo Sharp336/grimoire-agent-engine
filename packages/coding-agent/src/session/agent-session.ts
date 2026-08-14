@@ -234,6 +234,7 @@ import type {
 	SessionOAuthAccountList,
 	SessionStats,
 	UsageFallbackConfirmer,
+	UsageModelCoverage,
 } from "./agent-session-types";
 import {
 	ASYNC_INLINE_RESULT_MAX_CHARS,
@@ -8643,24 +8644,28 @@ export class AgentSession {
 		return reports;
 	}
 
-	/** Models whose live `/usage` reports map to a quantitative provider scope. */
-	getUsageReportingModelSelectors(reports: readonly UsageReport[]): string[] {
-		const modelsByProvider = new Map<string, Model[]>();
+	/** Per-provider coverage of available models by live quantitative `/usage` scopes. */
+	getUsageReportingModelCoverage(reports: readonly UsageReport[]): Map<string, UsageModelCoverage> {
+		const modelIdsByProvider = new Map<string, Set<string>>();
 		for (const model of this.#modelRegistry.getAvailable()) {
-			const models = modelsByProvider.get(model.provider) ?? [];
-			models.push(model);
-			modelsByProvider.set(model.provider, models);
+			const modelIds = modelIdsByProvider.get(model.provider) ?? new Set<string>();
+			modelIds.add(model.id);
+			modelIdsByProvider.set(model.provider, modelIds);
 		}
-		const selectors = new Set<string>();
-		for (const [provider, models] of modelsByProvider) {
-			const modelIds = this.#modelRegistry.authStorage.getUsageReportingModelIds(
+		const coverage = new Map<string, UsageModelCoverage>();
+		for (const [provider, modelIds] of modelIdsByProvider) {
+			const reportingIds = this.#modelRegistry.authStorage.getUsageReportingModelIds(
 				provider,
-				models.map(model => model.id),
+				[...modelIds],
 				reports,
 			);
-			for (const modelId of modelIds) selectors.add(`${provider}/${modelId}`);
+			if (reportingIds.length === 0) continue;
+			const reporting = [...new Set(reportingIds)]
+				.map(modelId => `${provider}/${modelId}`)
+				.sort((left, right) => left.localeCompare(right));
+			coverage.set(provider, { reporting, availableCount: modelIds.size });
 		}
-		return [...selectors].sort((left, right) => left.localeCompare(right));
+		return coverage;
 	}
 
 	/** List stored OAuth accounts for the current model provider and mark this session's active account. */

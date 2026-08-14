@@ -14,6 +14,9 @@
 - Fixed Streamable HTTP MCP sessions being invalidated by opening the optional GET SSE stream before sending `notifications/initialized`, which prevented Figma Dev Mode MCP from connecting ([#8514](https://github.com/can1357/oh-my-pi/issues/8514)).
 - Fixed the `/hotkeys` table describing Ctrl+D (`app.exit`) as "Exit (when editor is empty)" when it actually exits unconditionally and saves the current prompt as a resumable draft ([#8530](https://github.com/can1357/oh-my-pi/issues/8530)).
 - Fixed Ctrl+G external editors failing to launch on Windows because Bun re-quoted the embedded `cmd.exe /c` command line ([#8544](https://github.com/can1357/oh-my-pi/issues/8544)).
+### Changed
+
+- `/usage` now collapses the per-provider "Models with usage data" list into a one-line summary when usage data covers every available model — the common case for account-wide coding-plan quotas — so the quota bars stay visible in the height-capped mid-turn preview. The explicit per-model list still renders when only a subset of available models reports usage data.
 
 ## [17.3.3] - 2026-08-14
 

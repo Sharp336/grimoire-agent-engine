@@ -106,6 +106,14 @@ export interface UsageFallbackConfirmation {
  */
 export type UsageFallbackConfirmer = (confirmation: UsageFallbackConfirmation, signal: AbortSignal) => Promise<boolean>;
 
+/** Per-provider coverage of available models by live quantitative usage data. */
+export interface UsageModelCoverage {
+	/** Sorted `provider/modelId` selectors whose usage maps to a quantitative scope. */
+	reporting: string[];
+	/** Distinct available models for the provider in the model registry. */
+	availableCount: number;
+}
+
 /** Identifies a retry fallback chain already entered during startup model resolution. */
 export interface InitialRetryFallbackState {
 	/** Role whose configured primary was unavailable. */

@@ -21,7 +21,8 @@ describe("PR 3318 repro", () => {
 			session: {
 				model: undefined,
 				fetchUsageReports: async () => [report],
-				getUsageReportingModelSelectors: () => ["test-provider/coding-plan-model"],
+				getUsageReportingModelCoverage: () =>
+					new Map([["test-provider", { reporting: ["test-provider/coding-plan-model"], availableCount: 2 }]]),
 			},
 		} as never);
 
