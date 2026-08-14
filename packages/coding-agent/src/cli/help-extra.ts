@@ -22,6 +22,7 @@ export function getExtraHelpText(): string {
   AZURE_OPENAI_API_KEY       - Azure OpenAI models
   GROQ_API_KEY               - Groq models
   CEREBRAS_API_KEY           - Cerebras models
+  DEEPINFRA_API_KEY          - DeepInfra models
   XAI_API_KEY                - xAI Grok models
   OPENROUTER_API_KEY         - OpenRouter aggregated models
   KILO_API_KEY               - Kilo Gateway models

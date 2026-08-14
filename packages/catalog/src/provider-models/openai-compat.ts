@@ -1126,6 +1126,60 @@ export function cerebrasModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 3.1. DeepInfra
+// ---------------------------------------------------------------------------
+
+export interface DeepInfraModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function deepinfraModelManagerOptions(
+	config?: DeepInfraModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return createOpenAICompatibleModelManagerOptions({
+		api: "openai-completions",
+		providerId: "deepinfra",
+		defaultBaseUrl: "https://api.deepinfra.com/v1/openai",
+		config,
+		dynamicModelsAuthoritative: true,
+		requireApiKey: true,
+		filterModel: (entry, model, references) => {
+			const metadata = entry.metadata;
+			if (isRecord(metadata)) {
+				return Array.isArray(metadata.tags) && metadata.tags.includes("chat");
+			}
+			// DeepInfra's OpenAI-compatible endpoint omits its catalog metadata.
+			// Without a capability signal, only bundled chat-capable IDs are safe.
+			return references.has(model.id);
+		},
+		mapModel: (entry, defaults, reference) => {
+			const model = mapWithBundledReference(entry, defaults, reference);
+			const metadata = isRecord(entry.metadata) ? entry.metadata : undefined;
+			const tags = Array.isArray(metadata?.tags) ? metadata.tags : [];
+			const pricing = isRecord(metadata?.pricing) ? metadata.pricing : undefined;
+			const input = toNumber(pricing?.input_tokens);
+			const output = toNumber(pricing?.output_tokens);
+			const cacheRead = toNumber(pricing?.cache_read_tokens);
+			return {
+				...model,
+				reasoning: tags.includes("reasoning") ? true : model.reasoning,
+				input: tags.includes("vision") ? ["text", "image"] : model.input,
+				cost: {
+					...model.cost,
+					...(input !== undefined ? { input } : {}),
+					...(output !== undefined ? { output } : {}),
+					...(cacheRead !== undefined ? { cacheRead } : {}),
+				},
+				contextWindow: toPositiveNumber(metadata?.context_length, model.contextWindow),
+				maxTokens: toPositiveNumber(metadata?.max_tokens, model.maxTokens),
+			};
+		},
+	});
+}
+
+// ---------------------------------------------------------------------------
 // 4. Hugging Face
 // ---------------------------------------------------------------------------
 
@@ -5808,6 +5862,7 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_CORE: readonly ModelsDevProviderDescriptor
 	openAiCompletionsDescriptor("groq", "groq", "https://api.groq.com/openai/v1"),
 	// --- Cerebras ---
 	openAiCompletionsDescriptor("cerebras", "cerebras", "https://api.cerebras.ai/v1"),
+	openAiCompletionsDescriptor("deepinfra", "deepinfra", "https://api.deepinfra.com/v1/openai"),
 	// --- Together ---
 	openAiCompletionsDescriptor("togetherai", "together", "https://api.together.xyz/v1"),
 	// --- CoreWeave Serverless Inference ---

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed DeepInfra model discovery accepting standard OpenAI-compatible `/models` records without nested catalog metadata, preventing an authenticated refresh from replacing its bundled models with an empty list.
+
+
 ## [17.3.2] - 2026-08-13
 
 ### Added
@@ -56,6 +61,9 @@
 ### Fixed
 
 - Fixed classification of model IDs with large minor versions (e.g., `claude-opus-5-11`) or three-part versions, ensuring they no longer fall back to stale default configurations.
+### Added
+
+- Added DeepInfra as an authenticated OpenAI-compatible provider with dynamic chat-model discovery and bundled model metadata.
 
 ## [17.2.13] - 2026-08-11
 

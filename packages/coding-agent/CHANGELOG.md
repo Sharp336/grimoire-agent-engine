@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added DeepInfra to the interactive provider login and model-selection flows.
+
 ## [17.3.3] - 2026-08-14
 
 ### Fixed

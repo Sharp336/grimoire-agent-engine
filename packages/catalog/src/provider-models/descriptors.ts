@@ -19,6 +19,7 @@ import {
 	cerebrasModelManagerOptions,
 	cloudflareAiGatewayModelManagerOptions,
 	coreWeaveModelManagerOptions,
+	deepinfraModelManagerOptions,
 	deepseekModelManagerOptions,
 	firepassModelManagerOptions,
 	fireworksModelManagerOptions,
@@ -135,6 +136,14 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["CEREBRAS_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => cerebrasModelManagerOptions(config),
 		catalogDiscovery: { label: "Cerebras" },
+	},
+	{
+		id: "deepinfra",
+		defaultModel: "deepseek-ai/DeepSeek-V3",
+		envVars: ["DEEPINFRA_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => deepinfraModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "DeepInfra" },
 	},
 	{
 		id: "cloudflare-ai-gateway",
