@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it, type Mock, vi } from "bun:test";
-import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import * as ai from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
@@ -9,21 +8,17 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
 let session: AgentSession | undefined;
 let authStorage: AuthStorage | undefined;
-let tempDir: TempDir | undefined;
 
 afterEach(async () => {
 	vi.restoreAllMocks();
 	await session?.dispose();
 	authStorage?.close();
-	tempDir?.removeSync();
 	session = undefined;
 	authStorage = undefined;
-	tempDir = undefined;
 });
 
 interface TitleHarness {
@@ -42,13 +37,11 @@ interface TitleHarness {
  * aborts, so a test can prove cancellation reaches the provider rather than merely abandoning it.
  */
 async function titleHarness(): Promise<TitleHarness> {
-	tempDir = TempDir.createSync("@pi-title-dispose-");
-	authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+	authStorage = await AuthStorage.create(":memory:");
 	authStorage.setRuntimeApiKey("anthropic", "test-key");
 	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 	if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
 	const providerSessionId = "provider-session";
-
 	const settings = Settings.isolated({
 		"compaction.enabled": false,
 		"providers.tinyModel": "online",

@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [17.3.3] - 2026-08-14
+
+### Fixed
+
+- Fixed Gemini reports rendering their final headings and tables as one raw code block when the model emitted a lone closing Markdown fence without its opener.
+
+## [17.3.1] - 2026-08-13
+
+### Fixed
+
+- Fixed screen flashing in Herdr panes during transcript streaming.
+
 ## [17.3.0] - 2026-08-13
 
 ### Fixed
