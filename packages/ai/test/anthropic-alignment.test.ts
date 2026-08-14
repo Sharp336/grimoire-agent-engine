@@ -698,6 +698,34 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(capturedBody?.fallbacks).toEqual([{ model: "claude-sonnet-4-6@20260101", max_tokens: 4_096 }]);
 	});
 
+	it("omits the legacy mid-conversation system beta on supported Vertex models", async () => {
+		let capturedBeta: string | undefined;
+		const fetchMock = (async (_input: string | URL | Request, init?: RequestInit) => {
+			capturedBeta = (init?.headers as Record<string, string> | undefined)?.["anthropic-beta"];
+			return new Response(
+				JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "captured" } }),
+				{ status: 400, headers: { "Content-Type": "application/json" } },
+			);
+		}) as typeof fetch;
+		const vertexModel: Model<"anthropic-messages"> = buildModel({
+			...ANTHROPIC_MODEL_SPEC,
+			id: "claude-opus-4-8@20260528",
+			name: "Claude Opus 4.8 via Vertex",
+			provider: "google-vertex",
+			baseUrl:
+				"https://us-east5-aiplatform.googleapis.com/v1/projects/p/locations/us-east5/publishers/anthropic/models/claude-opus-4-8@20260528:rawPredict",
+		});
+		expect(vertexModel.compat.supportsMidConversationSystem).toBe(true);
+
+		await streamAnthropic(
+			vertexModel,
+			{ systemPrompt: ["Stay concise."], messages: [{ role: "user", content: "Hi", timestamp: Date.now() }] },
+			{ apiKey: "vertex-adc", fetch: fetchMock },
+		).result();
+
+		expect(capturedBeta ?? "").not.toContain("mid-conversation-system-2026-04-07");
+	});
+
 	it("adds the context-management beta to API-key thinking requests", async () => {
 		let capturedBeta: string | undefined;
 		const fetchMock = (async (_input: string | URL | Request, init?: RequestInit) => {
