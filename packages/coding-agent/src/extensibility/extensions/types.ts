@@ -493,8 +493,10 @@ export interface ExtensionContext {
 	/** Clear a timer scheduled via {@link setInterval} or {@link setTimeout}. */
 	clearTimer(timer: Timer): void;
 	/**
-	 * Attach passive model-visible context to the next provider request. Present
-	 * only while a registered tool is executing.
+	 * Attach trusted, extension-authored instructions to the next provider
+	 * request with developer/system priority where supported. Present only while
+	 * a registered tool is executing. Raw tool output and other untrusted data
+	 * must stay in the ordinary tool result.
 	 */
 	addAdditionalContext?(context: string): void;
 	/**

@@ -755,8 +755,11 @@ export type ToolApproval = ToolApprovalDecision | ((args: unknown) => ToolApprov
  */
 export interface AgentToolContext {
 	/**
-	 * Attach passive model-visible context to the next provider request. The
-	 * host preserves call order and emits the context only after tool results.
+	 * Attach trusted, agent-authored instructions to the next provider request.
+	 * The host emits them after tool results with developer/system priority where
+	 * the selected transport supports it. Do not use this channel for raw tool
+	 * output, retrieved documents, web content, or other untrusted data; return
+	 * those through the ordinary tool result instead.
 	 */
 	addAdditionalContext?(context: string): void;
 }

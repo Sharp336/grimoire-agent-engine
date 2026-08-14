@@ -313,9 +313,11 @@ export interface ToolCallEventResult {
 	/** Reason for blocking (returned to LLM as error) */
 	reason?: string;
 	/**
-	 * Passive model-visible context for the next provider request. Non-empty
-	 * values from every non-blocking handler are preserved in registration order.
-	 * Ignored when this or a later handler blocks the call.
+	 * Trusted handler-authored instructions for the next provider request. The
+	 * host emits them after tool results with developer/system priority where
+	 * supported. Raw tool output and other untrusted data must stay in the tool
+	 * result. Non-empty values from every non-blocking handler are preserved in
+	 * registration order; ignored when this or a later handler blocks the call.
 	 */
 	additionalContext?: string;
 	/**
