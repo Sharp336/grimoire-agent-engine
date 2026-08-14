@@ -1,6 +1,6 @@
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { Ellipsis, visibleWidth } from "@oh-my-pi/pi-tui";
-import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatCost, formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
 import { getRoleInfo } from "../../config/model-roles";
 import type { Settings } from "../../config/settings";
 import { type AgentRef, MAIN_AGENT_ID } from "../../registry/agent-registry";
@@ -126,13 +126,6 @@ export function formatMetricDuration(metrics: AgentMetrics): string | undefined 
 	if (durationMs <= 0) return undefined;
 	const label = metrics.durationKind === "active" ? "active" : metrics.durationKind === "span" ? "span" : "duration";
 	return `${formatDuration(durationMs)} ${label}`;
-}
-
-export function formatCost(cost: number): string {
-	const amount = metricNumber(cost);
-	if (amount < 0.01) return `$${amount.toFixed(4)}`;
-	if (amount < 1) return `$${amount.toFixed(3)}`;
-	return `$${amount.toFixed(2)}`;
 }
 
 export function formatMetrics(metrics: AgentMetrics): string {

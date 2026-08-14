@@ -1,8 +1,7 @@
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { Container, Spacer, Text } from "@oh-my-pi/pi-tui";
-import { formatNumber } from "@oh-my-pi/pi-utils";
+import { formatCost, formatNumber } from "@oh-my-pi/pi-utils";
 import { theme } from "../../modes/theme/theme";
-import { formatCost } from "./agent-hub-renderer";
 
 /** Below this the rate is nonsense (cached/instant responses yield absurd tok/s). */
 const MIN_DURATION_MS = 100;

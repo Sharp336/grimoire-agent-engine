@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `formatCost()` USD cost formatter with magnitude-based precision (four decimals under $0.01, three under $1, otherwise two), shared by the CLI and TUI cost readouts.
+
 ## [17.3.2] - 2026-08-13
 
 ### Fixed

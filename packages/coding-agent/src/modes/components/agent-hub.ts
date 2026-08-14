@@ -26,7 +26,7 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
-import { formatAge, formatNumber, getProjectDir, logger } from "@oh-my-pi/pi-utils";
+import { formatAge, formatCost, formatNumber, getProjectDir, logger } from "@oh-my-pi/pi-utils";
 import type { KeyId } from "../../config/keybindings";
 import type { Settings } from "../../config/settings";
 import type { MessageRenderer } from "../../extensibility/extensions/types";
@@ -52,7 +52,6 @@ import {
 	clampHubLine,
 	contextGauge,
 	formatChildIds,
-	formatCost,
 	formatMetricDuration,
 	formatMetrics,
 	formatRoleBadge,
