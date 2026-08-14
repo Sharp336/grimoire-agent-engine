@@ -335,6 +335,8 @@ export interface ExecutorOptions {
 	cwd: string;
 	/** Cost gate controller inherited from the parent session tree. */
 	costGate?: CostGateController;
+	/** Record detached subagent spend on the parent session's cost total (#7978). */
+	recordSubagentCost?: (cost: number) => void;
 	/** Additional workspace directories to seed on the subagent session (multi-root). */
 	additionalDirectories?: string[];
 	/** Exact provider credential resolver inherited from the parent session. */
@@ -3430,6 +3432,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		sessionFile: subtaskSessionFile,
 		startTime,
 	});
+	// Detached subagents deliver their result as an async-result message, which
+	// never rolls usage into the parent's stats; record the spend on the parent
+	// so the shared cost gate keeps counting it after this session disposes.
+	if (options.detached && options.recordSubagentCost && result.usage) {
+		options.recordSubagentCost(result.usage.cost.total);
+	}
 	AgentRegistry.global().setHistory(id, { outputPath: result.outputPath });
 	return result;
 }

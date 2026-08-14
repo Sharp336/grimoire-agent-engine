@@ -323,6 +323,8 @@ export interface ToolSession {
 	getTurnBudget?: () => { total: number | null; spent: number; hard: boolean };
 	/** Record output tokens consumed by an eval-spawned subagent toward the current turn budget. */
 	recordEvalSubagentUsage?: (output: number) => void;
+	/** Record detached subagent spend on the parent session's cost total (#7978). */
+	recordSubagentCost?: (cost: number) => void;
 	/** Bridge to the connected client (e.g. ACP editor host). Tools should route fs/terminal/permission requests through this when available. */
 	getClientBridge?: () => ClientBridge | undefined;
 	/** Get cached todo phases for this session. */

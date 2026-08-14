@@ -106,7 +106,10 @@ export class SessionStatsTracker {
 				cacheWrite: totalCacheWrite,
 				total: totalTokens,
 			},
-			cost: totalCost,
+			// Detached subagent spend never rolls into message stats; the parent
+			// records it explicitly so the shared cost gate keeps counting it
+			// after the child session disposes (#7978 review).
+			cost: totalCost + this.#host.sessionManager.getRecordedSubagentCost(),
 			premiumRequests: totalPremiumRequests,
 			contextUsage: this.getContextUsage(),
 		};
