@@ -179,6 +179,7 @@ export interface CompactionSettings {
 	reserveTokens?: number;
 	keepRecentTokens: number;
 	autoContinue?: boolean;
+	preferProviderNative?: boolean;
 	remoteEnabled?: boolean;
 	remoteEndpoint?: string;
 	remoteStreamingV2Enabled?: boolean;
@@ -211,6 +212,7 @@ export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
 	midTurnEnabled: true,
 	keepRecentTokens: 20000,
 	autoContinue: true,
+	preferProviderNative: false,
 	remoteEnabled: true,
 	remoteStreamingV2Enabled: true,
 	v2RetainedMessageBudget: V2_RETAINED_MESSAGE_TOKEN_BUDGET,

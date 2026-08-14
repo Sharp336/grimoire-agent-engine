@@ -148,6 +148,7 @@ Threshold, incomplete-output, and overflow recovery fall through to context-full
 - The snapcompact archive persists under `CompactionEntry.preserveData.snapcompact` as bounded source text plus rendered frames. On each context rebuild it is reconstructed into ordered compaction blocks: plain text at the oldest edge, an imaged middle, then plain text at the newest edge. The entry's `summary` is just the short resume lead-in plus the usual file-operation list.
 - Later compactions re-render from that bounded source text (`Archive.text`), not by carrying old PNGs forward blindly. `maxFrames` now defaults to `MAX_FRAMES_DEFAULT` (80) and acts only as an upper limit; when the imaged middle is large it foveates internally (HQ/LQ/HQ), while both chronological edges stay verbatim text.
 - No model, API key, or network is involved, so snapcompact is also safe for overflow recovery. It requires a vision-capable current model (`model.input` includes `"image"`); otherwise the run falls back to context-full and emits a warning notice (auto and manual paths). Manual `/compact` honors the strategy unless custom instructions are given (those imply a directed LLM summary).
+- `compaction.preferProviderNative: true` gives compatible provider-native compaction precedence over snapcompact for automatic maintenance and a bare `/compact`. Eligibility follows the head of the effective compaction candidate chain, including a configured `compactionModel`, and requires the active model to share that provider and support replaying its native payload. Explicit `/compact snapcompact`, `compaction.remoteEnabled: false`, cross-provider compaction targets, and non-native candidates retain the existing snapcompact path. Text-only models such as ZenMux DeepSeek V4 Pro cannot read bitmap frames and continue through context-full fallback unless their provider exposes native compaction.
 - Rationale: the shape table comes from the snapcompact 200k-token evals in `packages/snapcompact`, where bitmap frames preserved QA recall at lower billed-token cost than raw text for vision-capable models.
 
 ### Display transcript
@@ -425,6 +426,7 @@ From `settings-schema.ts`:
 - `compaction.midTurnEnabled` = `true`
 - `compaction.handoffSaveToDisk` = `false`
 - `compaction.remoteEnabled` = `true`
+- `compaction.preferProviderNative` = `false`
 - `compaction.remoteEndpoint` = `undefined`
 - `compaction.remoteStreamingV2Enabled` = `true`
 - `compaction.v2RetainedMessageBudget` = `64000`
