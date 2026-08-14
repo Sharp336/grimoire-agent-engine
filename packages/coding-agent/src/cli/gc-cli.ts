@@ -4,7 +4,6 @@ import * as path from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { withStatsSyncLock } from "@oh-my-pi/omp-stats/aggregator";
 import {
-	formatDuration,
 	getAgentDir,
 	getBlobsDir,
 	getHistoryDbPath,
@@ -19,8 +18,14 @@ import { getDefault } from "../config/settings-schema";
 import { BLOB_HASH_RE } from "../session/blob-store";
 import type { FileEntry, SessionHeader } from "../session/session-entries";
 import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
+import {
+	inspectSessionLiveness,
+	type LivenessHolder,
+	type LivenessSignal,
+	type SessionLiveness,
+} from "../session/session-liveness";
 import { loadEntriesFromFile } from "../session/session-loader";
-import { planSessionMerge, type SessionMergeConflict } from "../session/session-merge";
+import { planSessionMerge, type SessionMergeConflict, type SessionMergePlan } from "../session/session-merge";
 import { resolveManagedSessionRoot } from "../session/session-paths";
 import { FileSessionStorage } from "../session/session-storage";
 import { parseTitleSlotFromContent, serializeTitleSlot, titleUpdateFromSlot } from "../session/session-title-slot";
@@ -31,6 +36,7 @@ const BLOB_REF_RE = /\bblob:sha256:([a-f0-9]{64})\b/gi;
 const JSONL_GLOB = new Bun.Glob("**/*.jsonl");
 const JSONL_GZ_GLOB = new Bun.Glob("**/*.jsonl.gz");
 const JSONL_BACKUP_GLOB = new Bun.Glob("**/*.jsonl.*.bak");
+const BAK_GLOB = new Bun.Glob("**/*.bak");
 const ACTIVE_STATUSES: ReadonlySet<SessionStatus> = new Set(["pending", "interrupted", "unknown"]);
 const DAY_MS = 86_400_000;
 const GC_WRITE_GRACE_MS = 5 * 60_000;
@@ -47,6 +53,7 @@ export interface GcCommandFlags {
 	archive?: boolean;
 	wal?: boolean;
 	mergeDuplicates?: boolean;
+	mergeForks?: boolean;
 	coldArchiveAfterDays?: number;
 	retainNewestGlobal?: number;
 	retainNewestPerCwd?: number;
@@ -99,11 +106,13 @@ export interface MergeDuplicateConflict extends SessionMergeConflict {
 	sessionId: string;
 }
 
-/** A duplicate-group file the write grace excluded because a live writer may still hold it. */
+/** A duplicate-group file excluded because a live process still holds it. */
 export interface MergeSkippedFile {
 	sessionId: string;
 	path: string;
-	secondsSinceWrite: number;
+	secondsSinceWrite: number | undefined;
+	signals: LivenessSignal[];
+	holders: LivenessHolder[];
 }
 
 export interface MergeDuplicateCandidate {
@@ -125,6 +134,41 @@ export interface MergeGcResult {
 	conflicts: MergeDuplicateConflict[];
 	candidates: MergeDuplicateCandidate[];
 	errors: string[];
+	livenessDegraded: string[];
+}
+
+/** A fork-lineage file this pass declined to touch, with the reason it was left alone. */
+export interface ForkMergeSkippedFile {
+	path: string;
+	reason: string;
+	secondsSinceWrite?: number;
+	signals?: LivenessSignal[];
+	holders?: LivenessHolder[];
+}
+
+export interface ForkMergeCandidate {
+	parent: string;
+	fork: string;
+	sharedEntries: number;
+	forkOnlyEntries: number;
+	/** Distinct destination entries that the fork-only subtrees hang from. */
+	attachmentPoints: number;
+}
+
+export interface ForkMergeGcResult {
+	scanned: number;
+	pairs: number;
+	skippedActive: number;
+	skipped: ForkMergeSkippedFile[];
+	wouldMerge: number;
+	merged: number;
+	archivedForks: number;
+	addedEntries: number;
+	skippedEntries: number;
+	conflicts: SessionMergeConflict[];
+	candidates: ForkMergeCandidate[];
+	errors: string[];
+	livenessDegraded: string[];
 }
 
 export interface GcResult {
@@ -134,7 +178,9 @@ export interface GcResult {
 	archive?: ArchiveGcResult;
 	wal?: WalGcResult;
 	mergeDuplicates?: MergeGcResult;
+	mergeForks?: ForkMergeGcResult;
 	lockPath: string;
+	livenessDegraded: string[];
 }
 
 interface BlobCandidate {
@@ -164,6 +210,21 @@ interface DuplicateSessionGroup {
 	sources: DuplicateSessionFile[];
 }
 
+interface ForkLineageFile {
+	path: string;
+	id: string;
+	entries: FileEntry[];
+}
+
+interface ForkLineagePair {
+	parent: ForkLineageFile;
+	plan: SessionMergePlan;
+	fork: ForkLineageFile;
+	sharedEntries: number;
+	forkOnlyEntries: number;
+	attachmentPoints: number;
+}
+
 interface ResolvedGcOptions {
 	apply: boolean;
 	json: boolean;
@@ -172,6 +233,7 @@ interface ResolvedGcOptions {
 	runArchive: boolean;
 	runWal: boolean;
 	runMergeDuplicates: boolean;
+	runMergeForks: boolean;
 	coldArchiveAfterDays: number;
 	retainNewestGlobal: number;
 	retainNewestPerCwd: number;
@@ -209,7 +271,11 @@ function numberSetting(value: number | undefined, fallback: unknown, defaultValu
 async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions> {
 	const agentDir = path.resolve(flags.agentDir ?? getAgentDir());
 	const selected =
-		flags.blobs === true || flags.archive === true || flags.wal === true || flags.mergeDuplicates === true;
+		flags.blobs === true ||
+		flags.archive === true ||
+		flags.wal === true ||
+		flags.mergeDuplicates === true ||
+		flags.mergeForks === true;
 	const archiveSelected = selected && flags.archive === true;
 	const needsArchiveSettings =
 		archiveSelected &&
@@ -233,6 +299,7 @@ async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions>
 		runArchive: selected ? flags.archive === true : getBoolean("gc.archive"),
 		runWal: selected ? flags.wal === true : getBoolean("gc.wal"),
 		runMergeDuplicates: flags.mergeDuplicates === true,
+		runMergeForks: flags.mergeForks === true,
 		coldArchiveAfterDays: numberSetting(
 			flags.coldArchiveAfterDays,
 			getNumber("gc.coldArchiveAfterDays"),
@@ -256,6 +323,7 @@ export function collectGcErrors(result: GcResult): string[] {
 		...(result.blobs?.errors ?? []).map(error => `blobs: ${error}`),
 		...(result.archive?.errors ?? []).map(error => `archive: ${error}`),
 		...(result.mergeDuplicates?.errors ?? []).map(error => `merge: ${error}`),
+		...(result.mergeForks?.errors ?? []).map(error => `fork merge: ${error}`),
 	];
 }
 
@@ -265,6 +333,12 @@ function getArchivedSessionsDir(agentDir: string): string {
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+async function inspectGcLiveness(file: string, degraded: Set<string>): Promise<SessionLiveness> {
+	const liveness = await inspectSessionLiveness(file);
+	for (const reason of liveness.degraded) degraded.add(reason);
+	return liveness;
 }
 
 function codeOf(error: unknown): string | undefined {
@@ -329,6 +403,17 @@ async function collectCompressedJsonlFiles(root: string): Promise<string[]> {
 async function collectBackupJsonlFiles(root: string): Promise<string[]> {
 	try {
 		const files = await Array.fromAsync(JSONL_BACKUP_GLOB.scan(root), name => path.join(root, name));
+		files.sort();
+		return files;
+	} catch (error) {
+		if (codeOf(error) === "ENOENT") return [];
+		throw error;
+	}
+}
+
+async function collectBakFiles(root: string): Promise<string[]> {
+	try {
+		const files = await Array.fromAsync(BAK_GLOB.scan(root), name => path.join(root, name));
 		files.sort();
 		return files;
 	} catch (error) {
@@ -568,7 +653,7 @@ async function loadDuplicateSessionFile(
 ): Promise<DuplicateSessionFile> {
 	const entries = await loadEntriesFromFile(file, storage);
 	const header = entries[0];
-	if (!header || header.type !== "session" || header.id !== sessionId) {
+	if (header?.type !== "session" || header.id !== sessionId) {
 		throw new Error("session header changed during duplicate scan");
 	}
 	return {
@@ -592,17 +677,17 @@ function chooseDuplicateDestination(files: DuplicateSessionFile[]): DuplicateSes
 async function collectDuplicateSessionGroups(
 	sessionsRoot: string,
 	result: MergeGcResult,
+	degraded: Set<string>,
 ): Promise<DuplicateSessionGroup[]> {
 	const files = (await collectJsonlFiles(sessionsRoot)).filter(file => isTopLevelSessionFile(sessionsRoot, file));
 	result.scanned = files.length;
-	const byId = new Map<string, Array<{ path: string; mtimeMs: number }>>();
+	const byId = new Map<string, Array<{ path: string }>>();
 	for (const file of files) {
 		try {
 			const lineage = await readSessionLineageHeader(file);
 			if (!lineage || !sessionPathEncodesId(file, lineage.id)) continue;
-			const stat = await fs.stat(file);
 			const group = byId.get(lineage.id) ?? [];
-			group.push({ path: file, mtimeMs: stat.mtimeMs });
+			group.push({ path: file });
 			byId.set(lineage.id, group);
 		} catch (error) {
 			result.errors.push(`${file}: ${errorMessage(error)}`);
@@ -611,18 +696,21 @@ async function collectDuplicateSessionGroups(
 
 	const storage = new FileSessionStorage();
 	const groups: DuplicateSessionGroup[] = [];
-	const now = Date.now();
-	const archiveBeforeMs = now - GC_WRITE_GRACE_MS;
 	for (const [sessionId, members] of byId) {
 		if (members.length < 2 || new Set(members.map(member => path.dirname(member.path))).size < 2) continue;
-		const writing = members.filter(member => member.mtimeMs > archiveBeforeMs);
-		if (writing.length > 0) {
+		const live = (await Promise.all(members.map(member => inspectGcLiveness(member.path, degraded)))).filter(
+			liveness => liveness.live,
+		);
+		if (live.length > 0) {
+			// One live member makes rewriting any member of the group unsafe.
 			result.skippedActive += members.length;
-			for (const member of writing) {
+			for (const liveness of live) {
 				result.skipped.push({
 					sessionId,
-					path: member.path,
-					secondsSinceWrite: Math.max(0, Math.round((now - member.mtimeMs) / 1000)),
+					path: liveness.path,
+					secondsSinceWrite: liveness.secondsSinceWrite,
+					signals: liveness.signals,
+					holders: liveness.holders,
 				});
 			}
 			continue;
@@ -647,6 +735,215 @@ async function collectDuplicateSessionGroups(
 	}
 	groups.sort((left, right) => left.sessionId.localeCompare(right.sessionId));
 	return groups;
+}
+
+function forkDiscoveryExclusion(sessionsRoot: string, file: string): string | undefined {
+	const relative = path.relative(sessionsRoot, file);
+	const segments = relative.split(path.sep);
+	if (segments.some(segment => segment.includes(".backup-"))) return "path is under a session backup directory";
+	if (file.endsWith(COMPRESSED_SESSION_SUFFIX)) return "compressed session file";
+	if (file.endsWith(BROKEN_SESSION_SUFFIX)) return "broken session file";
+	if (file.endsWith(".bak")) return "session backup file";
+	if (relative.startsWith("..") || path.isAbsolute(relative) || segments.length !== 2) {
+		return "nested subagent session file";
+	}
+	return undefined;
+}
+
+/**
+ * A `parentSession` header value, which real sessions write in two forms.
+ *
+ * `SessionManager.forkFrom` records the parent's session id, but sessions on
+ * disk also carry an absolute or sessions-root-relative JSONL path. Matching a
+ * path against header ids finds nothing, so treating every value as an id drops
+ * the pair and — worse — reports a file that plainly exists as missing.
+ */
+type ForkParentReference =
+	| { kind: "file"; path: string }
+	| { kind: "id"; id: string }
+	| { kind: "self" }
+	| { kind: "skip"; reason: string };
+
+function resolveForkParentReference(
+	sessionsRoot: string,
+	forkPath: string,
+	parentSession: string,
+): ForkParentReference {
+	const reference = parentSession.trim();
+	if (reference.length === 0) {
+		return {
+			kind: "skip",
+			reason: `parent session reference ${JSON.stringify(parentSession)} could not be resolved`,
+		};
+	}
+	if (!reference.includes("/") && !reference.includes(path.sep) && !reference.endsWith(SESSION_SUFFIX)) {
+		return { kind: "id", id: reference };
+	}
+	const resolved = path.isAbsolute(reference) ? path.resolve(reference) : path.resolve(sessionsRoot, reference);
+	if (resolved === path.resolve(forkPath)) return { kind: "self" };
+	const relative = path.relative(sessionsRoot, resolved);
+	if (relative.startsWith("..") || path.isAbsolute(relative)) {
+		return { kind: "skip", reason: `parent session path ${reference} is outside the sessions root` };
+	}
+	return { kind: "file", path: resolved };
+}
+
+async function collectForkLineageGroups(sessionsRoot: string, result: ForkMergeGcResult): Promise<ForkLineagePair[]> {
+	const files = [
+		...(await collectJsonlFiles(sessionsRoot)),
+		...(await collectCompressedJsonlFiles(sessionsRoot)),
+		...(await collectBakFiles(sessionsRoot)),
+	].toSorted();
+	result.scanned = files.length;
+
+	const lineages: Array<{ path: string; header: SessionLineageHeader }> = [];
+	const byId = new Map<string, Array<{ path: string; header: SessionLineageHeader }>>();
+	for (const file of files) {
+		const exclusion = forkDiscoveryExclusion(sessionsRoot, file);
+		if (exclusion) {
+			result.skipped.push({ path: file, reason: exclusion });
+			continue;
+		}
+		try {
+			const header = await readSessionLineageHeader(file);
+			if (!header) continue;
+			const lineage = { path: file, header };
+			lineages.push(lineage);
+			const matches = byId.get(header.id) ?? [];
+			matches.push(lineage);
+			byId.set(header.id, matches);
+		} catch (error) {
+			result.errors.push(`${file}: ${errorMessage(error)}`);
+		}
+	}
+
+	const storage = new FileSessionStorage();
+	const pairs: ForkLineagePair[] = [];
+	const degraded = new Set<string>();
+	for (const forkLineage of lineages) {
+		const parentSession = forkLineage.header.parentSession;
+		if (parentSession === undefined) continue;
+		const resolution = resolveForkParentReference(sessionsRoot, forkLineage.path, parentSession);
+		if (resolution.kind === "self" || (resolution.kind === "id" && resolution.id === forkLineage.header.id)) {
+			result.skipped.push({ path: forkLineage.path, reason: "parentSession self-reference" });
+			continue;
+		}
+		if (resolution.kind === "skip") {
+			result.skipped.push({ path: forkLineage.path, reason: resolution.reason });
+			continue;
+		}
+
+		let parentLineage: { path: string; header: SessionLineageHeader };
+		if (resolution.kind === "id") {
+			const parentMatches = byId.get(resolution.id);
+			if (!parentMatches || parentMatches.length === 0) {
+				result.skipped.push({
+					path: forkLineage.path,
+					reason: `parent session id ${resolution.id} not found among scanned sessions`,
+				});
+				continue;
+			}
+			if (parentMatches.length > 1) {
+				result.skipped.push({
+					path: forkLineage.path,
+					reason: `parent session id ${resolution.id} is ambiguous`,
+				});
+				continue;
+			}
+			parentLineage = parentMatches[0]!;
+		} else {
+			const exclusion = forkDiscoveryExclusion(sessionsRoot, resolution.path);
+			if (exclusion) {
+				result.skipped.push({
+					path: forkLineage.path,
+					reason: `parent session file ${resolution.path} is excluded: ${exclusion}`,
+				});
+				continue;
+			}
+			let parentExists = false;
+			try {
+				parentExists = (await statIfPresent(resolution.path)) !== null;
+			} catch {
+				result.skipped.push({
+					path: forkLineage.path,
+					reason: `parent session file ${resolution.path} is unreadable`,
+				});
+				continue;
+			}
+			if (!parentExists) {
+				result.skipped.push({
+					path: forkLineage.path,
+					reason: `parent session file ${resolution.path} not found on disk`,
+				});
+				continue;
+			}
+			let parentHeader: SessionLineageHeader | undefined;
+			try {
+				parentHeader = await readSessionLineageHeader(resolution.path);
+			} catch {
+				// Report the path as unreadable below; a parse/read failure is not absence.
+			}
+			if (!parentHeader || !sessionPathEncodesId(resolution.path, parentHeader.id)) {
+				result.skipped.push({
+					path: forkLineage.path,
+					reason: `parent session file ${resolution.path} is unreadable`,
+				});
+				continue;
+			}
+			parentLineage = { path: resolution.path, header: parentHeader };
+		}
+		try {
+			const paths = [parentLineage.path, forkLineage.path];
+			const live = (await Promise.all(paths.map(file => inspectGcLiveness(file, degraded)))).filter(
+				liveness => liveness.live,
+			);
+			if (live.length > 0) {
+				result.skippedActive += live.length;
+				for (const liveness of live) {
+					result.skipped.push({
+						path: liveness.path,
+						reason: "held by a live process",
+						secondsSinceWrite: liveness.secondsSinceWrite,
+						signals: liveness.signals,
+						holders: liveness.holders,
+					});
+				}
+				continue;
+			}
+
+			const [parentEntries, forkEntries] = await Promise.all([
+				loadEntriesFromFile(parentLineage.path, storage),
+				loadEntriesFromFile(forkLineage.path, storage),
+			]);
+			const plan = planSessionMerge(parentEntries, forkEntries);
+			if (plan.addedEntries === 0) {
+				result.skipped.push({ path: forkLineage.path, reason: "fork contributes no unique entries" });
+				continue;
+			}
+			const destinationIds = new Set(parentEntries.filter(entry => entry.type !== "session").map(entry => entry.id));
+			const sourceEntries = forkEntries.filter(entry => entry.type !== "session");
+			const attachmentParents = new Set(
+				sourceEntries.flatMap(entry =>
+					!destinationIds.has(entry.id) && entry.parentId !== null && destinationIds.has(entry.parentId)
+						? [entry.parentId]
+						: [],
+				),
+			);
+			pairs.push({
+				parent: { path: parentLineage.path, id: parentLineage.header.id, entries: parentEntries },
+				fork: { path: forkLineage.path, id: forkLineage.header.id, entries: forkEntries },
+				plan,
+				sharedEntries: sourceEntries.filter(entry => destinationIds.has(entry.id)).length,
+				forkOnlyEntries: plan.addedEntries,
+				attachmentPoints: attachmentParents.size,
+			});
+		} catch (error) {
+			result.errors.push(`${forkLineage.path}: ${errorMessage(error)}`);
+		}
+	}
+	pairs.sort((left, right) => left.fork.path.localeCompare(right.fork.path));
+	result.livenessDegraded = [...degraded];
+	return pairs;
 }
 
 function serializeMergedSession(originalContent: string, entries: FileEntry[]): string {
@@ -1504,8 +1801,11 @@ async function runMergeGc(options: ResolvedGcOptions, archiveRoot: string): Prom
 		conflicts: [],
 		candidates: [],
 		errors: [],
+		livenessDegraded: [],
 	};
-	const groups = await collectDuplicateSessionGroups(sessionsRoot, result);
+	const degraded = new Set<string>();
+	const groups = await collectDuplicateSessionGroups(sessionsRoot, result, degraded);
+	result.livenessDegraded = [...degraded];
 	result.groups = groups.length;
 	result.wouldMerge = groups.reduce((count, group) => count + group.sources.length, 0);
 	result.candidates = groups.map(group => ({
@@ -1552,6 +1852,72 @@ async function runMergeGc(options: ResolvedGcOptions, archiveRoot: string): Prom
 			} catch (error) {
 				result.errors.push(`${source.path}: ${errorMessage(error)}`);
 			}
+		}
+	}
+	return result;
+}
+
+async function runForkMergeGc(options: ResolvedGcOptions, archiveRoot: string): Promise<ForkMergeGcResult> {
+	const sessionsRoot = getSessionsDir(options.agentDir);
+	const result: ForkMergeGcResult = {
+		scanned: 0,
+		pairs: 0,
+		skippedActive: 0,
+		skipped: [],
+		wouldMerge: 0,
+		merged: 0,
+		archivedForks: 0,
+		addedEntries: 0,
+		skippedEntries: 0,
+		conflicts: [],
+		candidates: [],
+		errors: [],
+		livenessDegraded: [],
+	};
+	const pairs = await collectForkLineageGroups(sessionsRoot, result);
+	result.pairs = pairs.length;
+	result.wouldMerge = pairs.length;
+	result.addedEntries = pairs.reduce((sum, pair) => sum + pair.plan.addedEntries, 0);
+	result.skippedEntries = pairs.reduce((sum, pair) => sum + pair.plan.skippedEntries, 0);
+	result.conflicts = pairs.flatMap(pair => pair.plan.conflicts);
+	result.candidates = pairs.map(pair => ({
+		parent: pair.parent.path,
+		fork: pair.fork.path,
+		sharedEntries: pair.sharedEntries,
+		forkOnlyEntries: pair.forkOnlyEntries,
+		attachmentPoints: pair.attachmentPoints,
+	}));
+	if (!options.apply) return result;
+
+	const storage = new FileSessionStorage();
+	for (const pair of pairs) {
+		let parentContent: string;
+		try {
+			parentContent = await Bun.file(pair.parent.path).text();
+			const backupTimestamp = new Date().toISOString().replaceAll(":", "-");
+			await Bun.write(`${pair.parent.path}.${backupTimestamp}.bak`, parentContent);
+			await storage.writeTextAtomic(pair.parent.path, serializeMergedSession(parentContent, pair.plan.merged));
+		} catch (error) {
+			result.errors.push(`${pair.parent.path}: ${errorMessage(error)}`);
+			continue;
+		}
+
+		try {
+			// A successfully consumed fork is archived, never unlinked: its session and
+			// artifacts remain recoverable while no longer cluttering the active list.
+			await moveDuplicateSourceToArchive(pair.fork.path, sessionsRoot, archiveRoot);
+			result.archivedForks += 1;
+			result.merged += 1;
+		} catch (error) {
+			try {
+				await storage.writeTextAtomic(pair.parent.path, parentContent);
+			} catch (rollbackError) {
+				result.errors.push(
+					`${pair.fork.path}: ${errorMessage(error)}; parent rollback failed: ${errorMessage(rollbackError)}`,
+				);
+				continue;
+			}
+			result.errors.push(`${pair.fork.path}: ${errorMessage(error)}`);
 		}
 	}
 	return result;
@@ -1799,7 +2165,20 @@ function formatBytes(bytes: number): string {
 	return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GiB`;
 }
 
-function renderText(result: GcResult): string {
+function formatLivenessHolder(holder: LivenessHolder): string {
+	return `pid ${holder.pid}${holder.command ? ` (${holder.command})` : ""}`;
+}
+
+function formatLivenessReason(signals: readonly LivenessSignal[], holders: readonly LivenessHolder[]): string {
+	const owner = holders.length > 0 ? holders.map(formatLivenessHolder).join(", ") : "an unidentified process";
+	const reasons: string[] = [];
+	if (signals.includes("open-handle")) reasons.push(`held open by ${owner}`);
+	if (signals.includes("advisory-lock")) reasons.push("advisory lock held");
+	if (signals.includes("posix-lock")) reasons.push(`POSIX lock held by ${owner}`);
+	return reasons.join("; ");
+}
+
+function renderText(result: GcResult, options: ResolvedGcOptions): string {
 	const lines = [`GC ${result.apply ? "applied" : "dry-run"} (${result.agentDir})`];
 	if (result.blobs) {
 		lines.push(
@@ -1825,23 +2204,41 @@ function renderText(result: GcResult): string {
 				? `duplicates: ${merge.archivedSources}/${merge.wouldMerge} ${pluralize("file", merge.wouldMerge)} merged across ${merge.groups} ${pluralize("group", merge.groups)}, ${merge.addedEntries} ${pluralize("entry", merge.addedEntries)} added${conflicts}`
 				: `duplicates: would merge ${merge.wouldMerge} ${pluralize("file", merge.wouldMerge)} into ${merge.groups} ${pluralize("session", merge.groups)}, adding ${merge.addedEntries} ${pluralize("entry", merge.addedEntries)}${conflicts}`,
 		);
-		if (merge.skipped.length > 0) {
-			for (const skipped of merge.skipped) {
-				const sinceMs = skipped.secondsSinceWrite * 1000;
-				lines.push(
-					`duplicates skipped active: ${shortenPath(skipped.path)} written ${formatDuration(sinceMs)} ago, eligible in ${formatDuration(GC_WRITE_GRACE_MS - sinceMs)}`,
-				);
-			}
-		} else if (merge.skippedActive > 0) {
-			lines.push(`duplicates skipped active: ${merge.skippedActive}`);
+		for (const skipped of merge.skipped) {
+			lines.push(
+				`duplicates skipped: ${shortenPath(skipped.path)} ${formatLivenessReason(skipped.signals, skipped.holders)}`,
+			);
 		}
 		if (merge.errors.length > 0) {
 			lines.push(`duplicate merge errors: ${merge.errors.length}`);
 		}
 	}
+	if (result.mergeForks) {
+		const merge = result.mergeForks;
+		const attachmentPoints = merge.candidates.reduce((sum, candidate) => sum + candidate.attachmentPoints, 0);
+		const conflicts =
+			merge.conflicts.length > 0
+				? `, ${merge.conflicts.length} ${pluralize("conflict", merge.conflicts.length)} (parent kept)`
+				: "";
+		lines.push(
+			result.apply
+				? `forks: grafted ${merge.addedEntries} ${pluralize("entry", merge.addedEntries)} at ${attachmentPoints} attachment ${pluralize("point", attachmentPoints)} from ${merge.merged}/${merge.wouldMerge} ${pluralize("fork", merge.wouldMerge)} into their parents; archived ${merge.archivedForks} to ${shortenPath(getArchivedSessionsDir(options.agentDir))}${conflicts}`
+				: `forks: would graft ${merge.addedEntries} ${pluralize("entry", merge.addedEntries)} at ${attachmentPoints} attachment ${pluralize("point", attachmentPoints)} from ${merge.wouldMerge} ${pluralize("fork", merge.wouldMerge)} into their parents${conflicts}`,
+		);
+		for (const skipped of merge.skipped) {
+			if (!skipped.signals || !skipped.holders) continue;
+			lines.push(
+				`forks skipped: ${shortenPath(skipped.path)} ${formatLivenessReason(skipped.signals, skipped.holders)}`,
+			);
+		}
+		if (merge.errors.length > 0) lines.push(`fork merge errors: ${merge.errors.length}`);
+	}
 	if (result.wal) {
 		const state = result.wal.checkpointed ? "checkpointed" : "checkpoint dry-run";
 		lines.push(`wal: ${state}, ${formatBytes(result.wal.walBytes)} across ${result.wal.databases.length} dbs`);
+	}
+	if (result.livenessDegraded.length > 0) {
+		lines.push(`liveness checks degraded: ${result.livenessDegraded.join("; ")}`);
 	}
 	return `${lines.join("\n")}\n`;
 }
@@ -1850,15 +2247,24 @@ export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 	const options = await resolveOptions(args.flags);
 	const archiveRoot = getArchivedSessionsDir(options.agentDir);
 	const result = await withGcLock(options.agentDir, async lockPath => {
-		const next: GcResult = { agentDir: options.agentDir, apply: options.apply, lockPath };
+		const next: GcResult = {
+			agentDir: options.agentDir,
+			apply: options.apply,
+			lockPath,
+			livenessDegraded: [],
+		};
 		if (options.runBlobs) next.blobs = await runBlobGc(options, archiveRoot);
 		if (options.runMergeDuplicates) next.mergeDuplicates = await runMergeGc(options, archiveRoot);
+		if (options.runMergeForks) next.mergeForks = await runForkMergeGc(options, archiveRoot);
 		if (options.runArchive) next.archive = await runArchiveGc(options, archiveRoot);
 		if (options.runWal) next.wal = await runWalGc(options);
+		next.livenessDegraded = [
+			...new Set([...(next.mergeDuplicates?.livenessDegraded ?? []), ...(next.mergeForks?.livenessDegraded ?? [])]),
+		];
 		return next;
 	});
 
-	const output = options.json ? `${JSON.stringify(result, null, 2)}\n` : renderText(result);
+	const output = options.json ? `${JSON.stringify(result, null, 2)}\n` : renderText(result, options);
 	process.stdout.write(output);
 	return result;
 }
