@@ -25,6 +25,8 @@ type FakeEditor = {
 	onExpandTools?: () => void;
 	onToggleToolActivity?: () => void;
 	onToggleThinking?: () => void;
+	onToggleFastMode?: () => void;
+	onToggleAdvisor?: () => void;
 	onExternalEditor?: () => void;
 	onRetry?: () => void;
 	onChange?: (text: string) => void;
@@ -68,6 +70,8 @@ async function createContext() {
 		"app.clipboard.pasteImage": ["ctrl+v"],
 		"app.tools.toggleVisibility": ["ctrl+shift+o"],
 		"app.tools.expand": ["ctrl+o"],
+		"app.fast.toggle": ["alt+shift+f"],
+		"app.advisor.toggle": ["alt+shift+a"],
 	};
 	const customHandlers = new Map<string, () => void>();
 	const setActionKeys = vi.fn();
@@ -108,6 +112,9 @@ async function createContext() {
 		queuedMessageCount: 0,
 		abort,
 		retry,
+		toggleFastMode: vi.fn(() => true),
+		toggleAdvisorEnabled: vi.fn(() => true),
+		isAdvisorEnabled: vi.fn(() => true),
 	};
 	const updatePendingMessagesDisplay = vi.fn();
 	const handleBtwBranchKey = vi.fn(async () => true);
@@ -205,6 +212,7 @@ async function createContext() {
 		hideToolActivity: false,
 		toolOutputExpanded: false,
 		settings: { set: vi.fn() },
+		statusLine: { invalidate: vi.fn() },
 		chatContainer: { children: [], setToolActivityVisible: vi.fn() },
 		handleHotkeysCommand: vi.fn(),
 		handlePlanModeCommand: vi.fn(),
@@ -232,6 +240,7 @@ async function createContext() {
 		InputController,
 		ctx,
 		editor,
+		session,
 		customHandlers,
 		setFocused(target: unknown) {
 			focused = target;
@@ -262,6 +271,7 @@ async function createContext() {
 			handleBtwCopyKey,
 			canCopyBtw,
 			showError,
+			showStatus: ctx.showStatus,
 		},
 	};
 }
@@ -306,6 +316,28 @@ describe("InputController keybinding setup", () => {
 		expect(spies.clearInlineImages).toHaveBeenCalledTimes(1);
 		expect(spies.resetDisplay).toHaveBeenCalledTimes(1);
 		expect(ctx.chatContainer.setToolActivityVisible).toHaveBeenCalledWith(false);
+	});
+
+	it("registers fast mode and advisor toggle actions", async () => {
+		const { InputController, ctx, editor, spies, session } = await createContext();
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+
+		expect(spies.setActionKeys).toHaveBeenCalledWith("app.fast.toggle", ["alt+shift+f"]);
+		expect(spies.setActionKeys).toHaveBeenCalledWith("app.advisor.toggle", ["alt+shift+a"]);
+		expect(editor.onToggleFastMode).toBeDefined();
+		expect(editor.onToggleAdvisor).toBeDefined();
+
+		editor.onToggleFastMode?.();
+		expect(session.toggleFastMode).toHaveBeenCalledTimes(1);
+		expect(ctx.statusLine.invalidate).toHaveBeenCalledTimes(1);
+		expect(spies.showStatus).toHaveBeenCalledWith("Fast mode enabled.");
+
+		editor.onToggleAdvisor?.();
+		expect(session.toggleAdvisorEnabled).toHaveBeenCalledTimes(1);
+		expect(ctx.statusLine.invalidate).toHaveBeenCalledTimes(2);
+		expect(spies.showStatus).toHaveBeenCalledWith("Advisor enabled.");
 	});
 
 	it("does not mark pasted shell prompts as Python mode while editing", async () => {

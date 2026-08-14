@@ -55,6 +55,8 @@ interface AppKeybindings {
 	"app.history.search": true;
 	"app.stt.toggle": true;
 	"app.live.toggle": true;
+	"app.fast.toggle": true;
+	"app.advisor.toggle": true;
 }
 
 export type AppKeybinding = keyof AppKeybindings;
@@ -234,6 +236,14 @@ export const KEYBINDINGS = {
 		defaultKeys: "ctrl+l",
 		description: "Start or stop live voice mode (/live)",
 	},
+	"app.fast.toggle": {
+		defaultKeys: "alt+shift+f",
+		description: "Toggle fast mode",
+	},
+	"app.advisor.toggle": {
+		defaultKeys: "alt+shift+a",
+		description: "Toggle advisor",
+	},
 } as const satisfies KeybindingDefinitions;
 
 /**
@@ -269,6 +279,8 @@ const KEYBINDING_NAME_MIGRATIONS = {
 	resume: "app.session.resume",
 	observeSessions: "app.session.observe",
 	toggleSTT: "app.stt.toggle",
+	toggleFastMode: "app.fast.toggle",
+	toggleAdvisor: "app.advisor.toggle",
 	// TUI editor (old names for backward compatibility)
 	cursorUp: "tui.editor.cursorUp",
 	cursorDown: "tui.editor.cursorDown",

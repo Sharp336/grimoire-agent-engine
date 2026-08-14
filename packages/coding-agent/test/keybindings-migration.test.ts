@@ -279,12 +279,14 @@ describe("KeybindingsManager.create", () => {
 		}
 	});
 
-	it("defaults model selection to Alt+M, display reset to Alt+L, and live toggle to Ctrl+L", () => {
+	it("defaults model selection to Alt+M, display reset to Alt+L, live toggle to Ctrl+L, fast toggle to Alt+Shift+F, and advisor toggle to Alt+Shift+A", () => {
 		const manager = KeybindingsManager.inMemory();
 
 		expect(manager.getKeys("app.model.select")).toEqual(["alt+m"]);
 		expect(manager.getKeys("app.display.reset")).toEqual(["alt+l"]);
 		expect(manager.getKeys("app.live.toggle")).toEqual(["ctrl+l"]);
+		expect(manager.getKeys("app.fast.toggle")).toEqual(["alt+shift+f"]);
+		expect(manager.getKeys("app.advisor.toggle")).toEqual(["alt+shift+a"]);
 	});
 
 	it("keeps the Ctrl+L live toggle default when an old model remap still claims Ctrl+L", () => {

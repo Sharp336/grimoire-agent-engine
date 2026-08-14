@@ -30,6 +30,27 @@ describe("CustomEditor keybindings", () => {
 		expect(onToggleToolActivity).toHaveBeenCalledTimes(1);
 	});
 
+	it("routes the fast mode toggle chord (Alt+Shift+F) to onToggleFastMode", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const onToggleFastMode = vi.fn();
+
+		editor.onToggleFastMode = onToggleFastMode;
+		editor.handleInput("\x1b[102;4u"); // Alt+Shift+F (CSI u format)
+
+		expect(onToggleFastMode).toHaveBeenCalledTimes(1);
+	});
+
+	it("routes the advisor toggle chord (Alt+Shift+A) to onToggleAdvisor", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const onToggleAdvisor = vi.fn();
+
+		editor.onToggleAdvisor = onToggleAdvisor;
+		editor.handleInput("\x1bA"); // Alt+Shift+A (legacy ESC + uppercase)
+		editor.handleInput("\x1b[97;4u"); // Alt+Shift+A (CSI u format)
+
+		expect(onToggleAdvisor).toHaveBeenCalledTimes(2);
+	});
+
 	it("lets custom handlers keep precedence over the default retry chord", () => {
 		const editor = new CustomEditor(getEditorTheme());
 		const onRetry = vi.fn();

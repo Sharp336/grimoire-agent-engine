@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `Alt+Shift+F` (`app.fast.toggle`) and `Alt+Shift+A` (`app.advisor.toggle`) keyboard shortcuts to toggle fast mode (`/fast`) and advisor (`/advisor`) without losing active prompt input.
+
 ## [17.3.4] - 2026-08-14
 
 ### Changed

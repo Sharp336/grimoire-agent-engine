@@ -29,6 +29,8 @@ describe("buildHotkeysMarkdown", () => {
 			"app.clipboard.pasteImage": "Ctrl+V",
 			"app.stt.toggle": "Alt+H",
 			"app.live.toggle": "Ctrl+L",
+			"app.fast.toggle": "Alt+Shift+F",
+			"app.advisor.toggle": "Alt+Shift+A",
 		};
 		const markdown = buildHotkeysMarkdown({
 			keybindings: {
@@ -48,6 +50,8 @@ describe("buildHotkeysMarkdown", () => {
 		expect(markdown).toContain("| `Alt+R` | Retry last failed assistant turn |");
 		expect(markdown).toContain("| `Alt+Shift+P` | Toggle plan mode |");
 		expect(markdown).toContain("| `Ctrl+Shift+O` | Toggle tool activity visibility |");
+		expect(markdown).toContain("| `Alt+Shift+F` | Toggle fast mode (/fast) |");
+		expect(markdown).toContain("| `Alt+Shift+A` | Toggle advisor (/advisor) |");
 		expect(markdown).toContain("| `#<number>` | GitHub issue/PR reference");
 		expect(markdown).toContain("| `#` / `#<text>` | Prompt actions");
 		for (const line of lines) {

@@ -39,6 +39,8 @@ type ConfigurableEditorAction = Extract<
 	| "app.clipboard.pasteImage"
 	| "app.clipboard.pasteTextRaw"
 	| "app.clipboard.copyPrompt"
+	| "app.fast.toggle"
+	| "app.advisor.toggle"
 >;
 
 const DEFAULT_ACTION_KEYS: Record<ConfigurableEditorAction, KeyId[]> = {
@@ -61,6 +63,8 @@ const DEFAULT_ACTION_KEYS: Record<ConfigurableEditorAction, KeyId[]> = {
 	"app.clipboard.pasteImage": ["ctrl+v"],
 	"app.clipboard.pasteTextRaw": ["ctrl+shift+v", "alt+shift+v"],
 	"app.clipboard.copyPrompt": ["alt+shift+c"],
+	"app.fast.toggle": ["alt+shift+f"],
+	"app.advisor.toggle": ["alt+shift+a"],
 };
 
 function buildMatchKeys(keys: readonly KeyId[]): Set<string> {
@@ -551,6 +555,8 @@ export class CustomEditor extends Editor {
 	onSelectModel?: () => void;
 	onToggleToolActivity?: () => void;
 	onToggleThinking?: () => void;
+	onToggleFastMode?: () => void;
+	onToggleAdvisor?: () => void;
 	onExternalEditor?: () => void;
 	onHistorySearch?: () => void;
 	onSuspend?: () => void;
@@ -907,6 +913,17 @@ export class CustomEditor extends Editor {
 			// Intercept configured tool activity visibility toggle
 			if (this.#matchesAction(canonical, "app.tools.toggleVisibility") && this.onToggleToolActivity) {
 				this.onToggleToolActivity();
+				return;
+			}
+			// Intercept configured fast mode toggle
+			if (this.#matchesAction(canonical, "app.fast.toggle") && this.onToggleFastMode) {
+				this.onToggleFastMode();
+				return;
+			}
+
+			// Intercept configured advisor toggle
+			if (this.#matchesAction(canonical, "app.advisor.toggle") && this.onToggleAdvisor) {
+				this.onToggleAdvisor();
 				return;
 			}
 
