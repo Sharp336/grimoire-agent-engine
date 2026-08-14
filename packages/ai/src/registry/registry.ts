@@ -75,6 +75,8 @@ import { xiaomiTokenPlanSgpProvider } from "./xiaomi-token-plan-sgp";
 import { zaiCodingPlanProvider, zaiProvider } from "./zai";
 import { zenmuxProvider } from "./zenmux";
 import { zhipuCodingPlanProvider } from "./zhipu-coding-plan";
+import {volcengineCodingPlanProvider} from "./volcengine-coding-plan";
+import {volcengineAgentPlanProvider} from "./volcengine-agent-plan";
 
 /**
  * The single per-provider list. Adding a provider = create `./providers/<id>.ts`
@@ -160,6 +162,8 @@ const ALL = [
 	amazonBedrockProvider,
 	bedrockMantleProvider,
 	gmiCloudProvider,
+    volcengineAgentPlanProvider,
+    volcengineCodingPlanProvider,
 ];
 
 export type RegistryDef = (typeof ALL)[number];
