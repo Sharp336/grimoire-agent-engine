@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the dedicated `bailian-token-plan-cn` provider: China-issued Bailian (百炼) Token Plan keys now authenticate against the Beijing endpoint by default, with `BAILIAN_TOKEN_PLAN_CN_API_KEY` as the provider-specific environment variable.
+
 ### Fixed
 
 - Fixed `omp usage invalidate` to discard stale OAuth and API-key usage snapshots, then force a cache-bypassing, per-provider serialized refresh so upgraded subscriptions do not silently retain pre-change quota data.

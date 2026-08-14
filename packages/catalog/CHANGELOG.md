@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added catalog support for the dedicated `bailian-token-plan-cn` provider (China Beijing Token Plan endpoint), reusing the QwenCloud discovery pipeline with the static fallback re-branded to the China provider id and base URL.
+
 ## [17.3.2] - 2026-08-13
 
 ### Added
