@@ -41,7 +41,11 @@ function stubStdoutGeometry(cols: number): { restore(): void } {
 	Object.defineProperty(process.stdout, "rows", { configurable: true, get: () => rows, set: () => {} });
 	Object.defineProperty(process.stdout, "columns", { configurable: true, get: () => cols, set: () => {} });
 	const restoreOne = (key: "rows" | "columns", desc: PropertyDescriptor | undefined) => {
+		// An absent descriptor (non-TTY test environments) means the property
+		// was invented by the stub; delete it so later tests see the original
+		// state instead of a leaked 40x120 stub (#8271 review).
 		if (desc) Object.defineProperty(process.stdout, key, desc);
+		else Reflect.deleteProperty(process.stdout, key);
 	};
 	return {
 		restore() {

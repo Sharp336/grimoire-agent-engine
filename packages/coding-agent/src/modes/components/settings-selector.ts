@@ -27,6 +27,7 @@ import {
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import type { ShapeTarget } from "@oh-my-pi/snapcompact";
+import { logger } from "@oh-my-pi/pi-utils";
 import {
 	getDefault,
 	getType,
@@ -256,7 +257,11 @@ class ThresholdInputSubmenu extends Container {
 							// Presets are static schema data, so a failure here means the
 							// schema drifted out of bounds — log instead of letting it crash
 							// the key handler (the text-input path shows errors inline).
-							console.error(`settings: preset ${JSON.stringify(value)} for "${title}" rejected:`, error);
+							// The centralized logger keeps TUI stderr free of overlay
+							// corruption (#8271 review).
+							logger.error(`settings: preset ${JSON.stringify(value)} for "${title}" rejected`, {
+								error: error instanceof Error ? error.message : String(error),
+							});
 						}
 					},
 					onCancel,
