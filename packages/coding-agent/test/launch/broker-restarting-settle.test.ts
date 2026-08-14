@@ -127,6 +127,61 @@ describe("daemon broker restart settling", () => {
 		}
 	}, 20_000);
 
+	it("clears stale readiness while an on-failure daemon restarts", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-ready-restart-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+
+		const scriptPath = path.join(projectDir, "flap.ts");
+		const releasePath = path.join(projectDir, "release");
+		await Bun.write(
+			scriptPath,
+			`process.stdout.write("READY\\n");
+while (!(await Bun.file(${JSON.stringify(releasePath)}).exists())) {
+	await Bun.sleep(10);
+}
+process.exit(1);
+`,
+		);
+
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const broker = startBroker(projectDir, runtimeDir, {
+			restartBackoffBaseMs: RESTART_BACKOFF_BASE_MS,
+		});
+		const name = "ready-flap";
+		try {
+			const started = await client.request({
+				op: "start",
+				spec: {
+					name,
+					application: process.execPath,
+					args: [scriptPath],
+					env: {},
+					cwd: projectDir,
+					pty: false,
+					ready: { log: "READY", timeoutMs: 20_000 },
+					restart: "on-failure",
+					persist: false,
+					detached: true,
+				},
+			});
+			if (started.op !== "start") throw new Error(`unexpected result: ${started.op}`);
+			expect(started.daemon.readyAt).toBeDefined();
+
+			await Bun.write(releasePath, "release");
+
+			const restarting = await waitForState(client, name, "restarting", 5_000);
+			expect(restarting.readyAt).toBeUndefined();
+			expect(restarting.readyMatch).toBeUndefined();
+		} finally {
+			await client.request({ op: "stop", name, timeoutMs: 2_000 }).catch(() => undefined);
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
+			await broker;
+		}
+	}, 20_000);
+
 	it("settles a recovered detached daemon once across concurrent refreshes", async () => {
 		using tempDir = TempDir.createSync("@omp-launch-recovered-restart-");
 		const projectDir = path.join(tempDir.path(), "project");

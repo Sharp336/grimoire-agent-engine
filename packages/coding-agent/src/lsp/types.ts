@@ -1,4 +1,5 @@
 import { type } from "@oh-my-pi/omptype";
+import type { Settings } from "../config/settings";
 import { TOOL_TIMEOUTS } from "../tools/tool-timeouts";
 
 // =============================================================================
@@ -410,6 +411,14 @@ export interface PendingRequest {
 	resolve: (result: unknown) => void;
 	reject: (error: Error) => void;
 	method: string;
+	/**
+	 * The permission context of the session whose `sendRequest` call this
+	 * pending request belongs to. A server-initiated `workspace/applyEdit`
+	 * pushed while this request is outstanding is checked against this
+	 * context instead of {@link LspClient.permissionContext} — the shared
+	 * client's mutable, most-recently-touched-by-any-session default.
+	 */
+	permissionContext?: LspClient["permissionContext"];
 }
 
 export interface LspServerCapabilities {
@@ -450,6 +459,26 @@ export interface LspClient {
 	projectLoaded: Promise<void>;
 	/** Call to signal that project loading has completed */
 	resolveProjectLoaded: () => void;
+	/**
+	 * The calling session's live resource-permission context, (re)stamped on
+	 * every `getOrCreateClient` call.
+	 *
+	 * A server-initiated `workspace/applyEdit` (`client.ts`'s
+	 * `handleApplyEditRequest`) has no per-call session handle of its own —
+	 * this is the fallback that push path measures against when no pending
+	 * request on the client carries its own {@link PendingRequest.permissionContext}.
+	 * `getAdditionalDirectories` is a live accessor bound to the session, not a
+	 * copied array: `/remove-dir` takes effect on the *next* push even if it
+	 * lands between two tool calls, so a client that goes untouched for a
+	 * while cannot keep guarding against roots the session no longer allows.
+	 * Shared by cwd across sessions and mutated on every `getOrCreateClient`
+	 * call, so it reflects whichever session most recently touched the
+	 * client, not a single source of truth per client — a request in flight
+	 * when a push arrives is checked against the requesting session via
+	 * `PendingRequest.permissionContext` instead, so a concurrent session that
+	 * merely shares the same client cannot steal control of that push.
+	 */
+	permissionContext?: { readonly settings: Settings; readonly getAdditionalDirectories: () => readonly string[] };
 }
 
 // =============================================================================

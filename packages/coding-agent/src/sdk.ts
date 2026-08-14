@@ -215,6 +215,9 @@ import { ToolContextStore } from "./tools/context";
 import { isIrcEnabled } from "./tools/hub";
 import { getImageGenTools } from "./tools/image-gen";
 import { wrapToolWithMetaNotice } from "./tools/output-meta";
+import { loadPermissionsConfig } from "./tools/permissions/config";
+import { decideTarget } from "./tools/permissions/resolve";
+import type { PermissionRoots } from "./tools/permissions/types";
 import { isAutoQaEnabled } from "./tools/report-tool-issue";
 import { queueResolveHandler } from "./tools/resolve";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "./tools/todo";
@@ -772,10 +775,12 @@ export async function discoverSkills(
 	cwd?: string,
 	_agentDir?: string,
 	settings?: SkillsSettings,
+	canReadSkill?: (skillPath: string) => boolean,
 ): Promise<{ skills: Skill[]; warnings: SkillWarning[] }> {
 	return await loadSkillsInternal({
 		...settings,
 		cwd: cwd ?? getProjectDir(),
+		...(canReadSkill && { canReadSkill }),
 	});
 }
 
@@ -787,10 +792,12 @@ export async function discoverContextFiles(
 	cwd?: string,
 	_agentDir?: string,
 	disabledExtensions?: string[],
+	canReadContextFile?: (contextFilePath: string) => boolean,
 ): Promise<Array<{ path: string; content: string; depth?: number }>> {
 	return await loadContextFilesInternal({
 		cwd: cwd ?? getProjectDir(),
 		disabledExtensions,
+		canReadContextFile,
 	});
 }
 
@@ -1278,21 +1285,82 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// both the rendered-tree input and the AGENTS.md directory-context index, so
 	// startup does not perform a second recursive filesystem search. Subagents
 	// inherit the parent's resolved values via options.
+	//
+	// Derived before the scan starts (not reused from a later closure) so a
+	// denied file is omitted from the tree instead of having its name, size,
+	// and mtime rendered into the system prompt (finding under review) — the
+	// same policy `canReadSkill`/`canReadContextFile` below already enforce for
+	// their own capabilities. Mirrors session-tools.ts's skillReadPermission:
+	// sessionManager doesn't exist yet at this point in startup, so roots are
+	// derived straight from settings/options rather than the (possibly
+	// session-header-merged) sessionManager.getAdditionalDirectories().
+	const startupPermissionPolicy = loadPermissionsConfig(settings);
+	const startupPermissionRoots: PermissionRoots = {
+		cwd,
+		additionalDirectories: options.additionalDirectories ?? settings.get("workspace.additionalDirectories"),
+	};
+	const canReadWorkspacePath = startupPermissionPolicy
+		? (absolutePath: string) =>
+				decideTarget(
+					{ raw: absolutePath, access: "read", field: "workspace tree" },
+					startupPermissionPolicy,
+					startupPermissionRoots,
+				).kind !== "deny"
+		: undefined;
 	const STARTUP_SCAN_DEADLINE_MS = 5000;
 	const includeWorkspaceTree = settings.get("includeWorkspaceTree") ?? false;
 	const workspaceTreePromise: Promise<WorkspaceTree> = options.workspaceTree
 		? Promise.resolve(options.workspaceTree)
 		: includeWorkspaceTree
-			? logger.time("buildWorkspaceTree", () => buildWorkspaceTree(cwd, { timeoutMs: STARTUP_SCAN_DEADLINE_MS }))
+			? logger.time("buildWorkspaceTree", () =>
+					buildWorkspaceTree(cwd, { timeoutMs: STARTUP_SCAN_DEADLINE_MS, includePath: canReadWorkspacePath }),
+				)
 			: Promise.resolve({ rootPath: cwd, rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] });
 	workspaceTreePromise.catch(() => {});
 
 	// Independent discoveries that depend only on cwd/agentDir — kicked off in parallel and awaited
 	// at their respective consumer sites. Their work can overlap with model resolution, secret loading,
 	// session-context build, tool creation, MCP discovery, and extension discovery.
+	//
+	// Mirrors session-tools.ts's skillReadPermission: sessionManager doesn't exist yet at this
+	// point in startup, so roots are derived straight from settings/options rather than the
+	// (possibly session-header-merged) sessionManager.getAdditionalDirectories(). Derived before
+	// `contextFilesPromise` is kicked off below so a denied AGENTS.md/CLAUDE.md file is rejected
+	// the same way a denied SKILL.md already is, instead of being read unconditionally into the
+	// system prompt (finding under review).
+	const skillPermissionPolicy = startupPermissionPolicy;
+	const skillPermissionRoots: PermissionRoots = startupPermissionRoots;
+	const canReadSkill = skillPermissionPolicy
+		? (skillPath: string) =>
+				decideTarget(
+					{ raw: skillPath, access: "read", field: "skill" },
+					skillPermissionPolicy,
+					skillPermissionRoots,
+				).kind !== "deny"
+		: undefined;
+	// `deriveCanReadContextFile` is called again, live, inside `rebuildSystemPrompt`
+	// below rather than reused from this closure: a mid-session `/perm` switch
+	// (`session.settings.override("permissions.profile", …)`) mutates `settings`
+	// after this point, and `refreshSkills` (session-tools.ts) re-derives
+	// `canReadSkill` fresh from current settings on every call through
+	// `skillReadPermission` — this snapshot alone would otherwise keep gating
+	// context-file re-discovery on the profile active at session start
+	// (finding under review).
+	const deriveCanReadContextFile = (
+		forSettings: Settings,
+		forCwd: string,
+		additionalDirectories: readonly string[],
+	): ((contextFilePath: string) => boolean) | undefined => {
+		const policy = loadPermissionsConfig(forSettings);
+		if (!policy) return undefined;
+		const roots: PermissionRoots = { cwd: forCwd, additionalDirectories: [...additionalDirectories] };
+		return contextFilePath =>
+			decideTarget({ raw: contextFilePath, access: "read", field: "context file" }, policy, roots).kind !== "deny";
+	};
+	const canReadContextFile = deriveCanReadContextFile(settings, cwd, skillPermissionRoots.additionalDirectories);
 	const contextFilesPromise = options.contextFiles
 		? Promise.resolve(options.contextFiles)
-		: logger.time("discoverContextFiles", discoverContextFiles, cwd, agentDir);
+		: logger.time("discoverContextFiles", discoverContextFiles, cwd, agentDir, undefined, canReadContextFile);
 	contextFilesPromise.catch(() => {});
 	const resolveRepoContext = async (repoCwd: string) => {
 		try {
@@ -1320,10 +1388,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const disabledExtensionIds = settings.get("disabledExtensions") ?? [];
 	const discoveredSkillsPromise =
 		options.skills === undefined
-			? logger.time("discoverSkills", discoverSkills, cwd, agentDir, {
-					...skillsSettings,
-					disabledExtensions: disabledExtensionIds,
-				})
+			? logger.time(
+					"discoverSkills",
+					discoverSkills,
+					cwd,
+					agentDir,
+					{
+						...skillsSettings,
+						disabledExtensions: disabledExtensionIds,
+					},
+					canReadSkill,
+				)
 			: undefined;
 	discoveredSkillsPromise?.catch(() => {});
 
@@ -2579,6 +2654,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			settings,
 			localProtocolOptions,
 			autoApprove: options.autoApprove ?? false,
+			pendingPreviews: {
+				headId: () => session.toolChoiceQueue.peekPendingHead()?.id,
+				removeSince: (id: string | undefined) => session.toolChoiceQueue.removePendingInvokersSince(id),
+			},
+			getMnemopiSessionState: () => session.getMnemopiSessionState(),
 		});
 		const toolContextStore = new ToolContextStore(getSessionContext);
 		const setSessionActiveToolNames = (names: Iterable<string>): void => {
@@ -2815,9 +2895,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				? await logger.time("resolveActiveRepoContext", resolveRepoContext, promptCwd)
 				: initialActiveRepoContext;
 			if (hasSession && options.contextFiles === undefined) {
-				contextFiles = await logger.time("discoverContextFiles", discoverContextFiles, promptCwd, agentDir, [
-					...(settings.get("disabledExtensions") ?? []),
-				]);
+				contextFiles = await logger.time(
+					"discoverContextFiles",
+					discoverContextFiles,
+					promptCwd,
+					agentDir,
+					[...(settings.get("disabledExtensions") ?? [])],
+					deriveCanReadContextFile(settings, promptCwd, sessionManager.getAdditionalDirectories()),
+				);
 				toolSession.contextFiles = contextFiles;
 				session.setAdvisorContextPrompt(formatAdvisorContextPrompt(contextFiles));
 			}

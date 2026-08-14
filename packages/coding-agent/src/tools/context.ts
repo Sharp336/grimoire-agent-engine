@@ -1,6 +1,7 @@
 import type { AgentToolContext, ToolCallContext } from "@oh-my-pi/pi-agent-core";
 import type { CustomToolContext } from "../extensibility/custom-tools/types";
 import type { ExtensionUIContext } from "../extensibility/extensions/types";
+import type { MnemopiSessionState } from "../mnemopi/state";
 
 declare module "@oh-my-pi/pi-agent-core" {
 	interface AgentToolContext extends CustomToolContext {
@@ -8,6 +9,17 @@ declare module "@oh-my-pi/pi-agent-core" {
 		hasUI?: boolean;
 		toolNames?: string[];
 		toolCall?: ToolCallContext;
+		/**
+		 * The calling session's already-initialized Mnemopi state, when the
+		 * `mnemopi` memory backend is running. Path-target extraction for
+		 * `retain`/`memory_edit` (`permissions/tool-path-targets.ts`) must derive
+		 * the gated database from this initialized state rather than re-deriving
+		 * it from live settings: `MnemopiSessionState.config` is captured once at
+		 * backend startup and does not track later `mnemopi.dbPath`/scoping
+		 * changes, so the gate has to authorize the same frozen config the
+		 * session's open SQLite handles actually use.
+		 */
+		getMnemopiSessionState?: () => MnemopiSessionState | undefined;
 		/** Set on `xd://` device dispatches: the write tool's outer approval gate
 		 *  already resolved this call at the mounted tool's tier, so the inner
 		 *  wrapper must not re-prompt for the same action (explicit per-tool
@@ -18,7 +30,22 @@ declare module "@oh-my-pi/pi-agent-core" {
 		xdevTierResolved?(tier: "read" | "write" | "exec"): void;
 		/** Set only after an interactive prompt approves provider computer safety checks. */
 		providerSafetyApproved?: boolean;
+		/**
+		 * Rollback handle for staged previews (`queueResolveHandler`), so a
+		 * post-execution denial can drop an apply closure the denied call
+		 * registered mid-execution. Absent outside a live session, where there is
+		 * no tool-choice queue and so nothing to stage.
+		 */
+		pendingPreviews?: PendingPreviewRollback;
 	}
+}
+
+/** Narrow view of the tool-choice queue's staged-preview registry. See `AgentToolContext.pendingPreviews`. */
+export interface PendingPreviewRollback {
+	/** Id of the currently staged head, or `undefined` when nothing is staged. */
+	headId(): string | undefined;
+	/** Drop every preview staged after `id` — see `ToolChoiceQueue.removePendingInvokersSince`. */
+	removeSince(id: string | undefined): void;
 }
 
 export class ToolContextStore {
@@ -26,7 +53,9 @@ export class ToolContextStore {
 	#hasUI = false;
 	#toolNames: string[] = [];
 
-	constructor(private readonly getBaseContext: () => CustomToolContext) {}
+	constructor(
+		private readonly getBaseContext: () => CustomToolContext & { pendingPreviews?: PendingPreviewRollback },
+	) {}
 
 	getContext(toolCall?: ToolCallContext): AgentToolContext {
 		return {

@@ -1,7 +1,8 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as capabilityFs from "@oh-my-pi/pi-coding-agent/capability/fs";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { getActiveSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
@@ -296,6 +297,121 @@ This skill is added after session creation.
 		} finally {
 			await session.dispose();
 			unsubscribeCommandMetadata();
+			setAgentDir(originalAgentDir);
+		}
+	});
+
+	it("manage_skill refresh drops a skill denied by permissions.deny.read from session state", async () => {
+		const originalAgentDir = getAgentDir();
+		const managedAgentDir = path.join(tempHomeDir, ".omp", "agent");
+		setAgentDir(managedAgentDir);
+
+		const secretSkillDir = path.join(tempDir, ".omp", "skills", "secret-skill");
+		fs.mkdirSync(secretSkillDir, { recursive: true });
+		const secretSkillFile = path.join(secretSkillDir, "SKILL.md");
+		fs.writeFileSync(
+			secretSkillFile,
+			"---\nname: secret-skill\ndescription: Should never survive a denied refresh.\n---\n\nSecret body.\n",
+		);
+
+		const settings = createIsolatedSkillsSettings();
+		settings.set("autolearn.enabled", true);
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: managedAgentDir,
+			sessionManager: SessionManager.inMemory(tempDir),
+			modelRegistry: sharedModelRegistry,
+			settings,
+		});
+
+		try {
+			// Discovered normally before any deny rule exists.
+			expect(session.skills.some(skill => skill.name === "secret-skill")).toBe(true);
+
+			settings.set("permissions.profile", "workspace");
+			settings.set("permissions.deny.read", [secretSkillFile]);
+
+			const originalReadFile = capabilityFs.readFile;
+			const readSkillFile = vi.spyOn(capabilityFs, "readFile").mockImplementation(async filePath => {
+				if (filePath === secretSkillFile) {
+					throw new Error("A denied skill must not be read during refresh");
+				}
+				return await originalReadFile(filePath);
+			});
+
+			try {
+				const manageSkill = session.getToolByName("manage_skill");
+				expect(manageSkill).toBeDefined();
+				await manageSkill!.execute("manage-skill-create-denied-sibling", {
+					action: "create",
+					name: "runtime-managed-skill-2",
+					description: "Created while a sibling skill is denied.",
+					body: "# Runtime Managed Skill 2\n\nUse this immediately.",
+				});
+				expect(readSkillFile).not.toHaveBeenCalledWith(secretSkillFile);
+			} finally {
+				readSkillFile.mockRestore();
+			}
+
+			// The write this call declared is still allowed and discoverable...
+			expect(session.skills.some(skill => skill.name === "runtime-managed-skill-2")).toBe(true);
+			// ...but the refresh's rescan of every enabled SKILL.md must not let a
+			// denied sibling's frontmatter back into session state.
+			expect(session.skills.some(skill => skill.name === "secret-skill")).toBe(false);
+			expect(getActiveSkills().some(skill => skill.name === "secret-skill")).toBe(false);
+			expect(session.agent.state.systemPrompt.join("\n")).not.toContain("secret-skill");
+		} finally {
+			await session.dispose();
+			setAgentDir(originalAgentDir);
+		}
+	});
+
+	it("initial discovery drops a skill denied by permissions.deny.read but keeps an authorized sibling", async () => {
+		const originalAgentDir = getAgentDir();
+		const managedAgentDir = path.join(tempHomeDir, ".omp", "agent");
+		setAgentDir(managedAgentDir);
+
+		const deniedSkillDir = path.join(tempDir, ".omp", "skills", "denied-skill");
+		fs.mkdirSync(deniedSkillDir, { recursive: true });
+		const deniedSkillFile = path.join(deniedSkillDir, "SKILL.md");
+		fs.writeFileSync(
+			deniedSkillFile,
+			"---\nname: denied-skill\ndescription: Should never be loaded at session start.\n---\n\nDenied body.\n",
+		);
+
+		const settings = createIsolatedSkillsSettings();
+		settings.set("permissions.profile", "workspace");
+		settings.set("permissions.deny.read", [deniedSkillFile]);
+
+		const originalReadFile = capabilityFs.readFile;
+		const readSkillFile = vi.spyOn(capabilityFs, "readFile").mockImplementation(async filePath => {
+			if (filePath === deniedSkillFile) {
+				throw new Error("A skill denied by permissions.deny.read must not be read during initial discovery");
+			}
+			return await originalReadFile(filePath);
+		});
+
+		let session: AgentSession | undefined;
+		try {
+			({ session } = await createAgentSession({
+				cwd: tempDir,
+				agentDir: managedAgentDir,
+				sessionManager: SessionManager.inMemory(tempDir),
+				modelRegistry: sharedModelRegistry,
+				settings,
+			}));
+
+			expect(readSkillFile).not.toHaveBeenCalledWith(deniedSkillFile);
+			expect(session.skills.some(skill => skill.name === "denied-skill")).toBe(false);
+			expect(session.agent.state.systemPrompt.join("\n")).not.toContain("denied-skill");
+
+			// The unrelated, unauthorized-by-nothing sibling skill created in beforeEach is
+			// still discovered and injected: the deny rule must not collateral-deny the rest.
+			expect(session.skills.some(skill => skill.name === "test-skill")).toBe(true);
+			expect(session.agent.state.systemPrompt.join("\n")).toContain("test-skill");
+		} finally {
+			readSkillFile.mockRestore();
+			await session?.dispose();
 			setAgentDir(originalAgentDir);
 		}
 	});

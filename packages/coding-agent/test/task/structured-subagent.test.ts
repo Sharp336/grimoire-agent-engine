@@ -19,6 +19,7 @@ import {
 	type StructuredSubagentRequest,
 } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import type { AgentDefinition, SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
+import * as worktreeModule from "@oh-my-pi/pi-coding-agent/task/worktree";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 const AGENT: AgentDefinition = {
@@ -369,7 +370,7 @@ describe("structured subagent primitive", () => {
 
 	it("cleans ephemeral artifacts when isolation setup fails without recovery", async () => {
 		mockDiscovery();
-		vi.spyOn(isolationRunner, "prepareIsolationContext").mockRejectedValue(new Error("not a repository"));
+		vi.spyOn(worktreeModule, "getRepoRoot").mockRejectedValue(new Error("not a repository"));
 
 		await expect(
 			runStructuredSubagent(
@@ -467,7 +468,13 @@ describe("structured subagent primitive", () => {
 		await fs.rm(restrictedRun.artifactsDir, { recursive: true, force: true });
 	});
 
-	it("unregisters and removes a temporary lease when output ID allocation fails", async () => {
+	it("does not lease or clean up an artifacts directory when output ID allocation fails before one is created", async () => {
+		// Id allocation now runs before `leaseArtifacts` — the artifacts
+		// directory reuses that id (see `leaseArtifacts`'s doc comment) rather
+		// than minting its own random suffix, so a permission gate over the
+		// resulting path can authorize it before creation. An allocation
+		// failure here means the directory was never created, so there is
+		// nothing to unregister or remove.
 		mockDiscovery();
 		const failingSession = session();
 		failingSession.agentOutputManager = {
@@ -481,10 +488,8 @@ describe("structured subagent primitive", () => {
 			"Subagent execution failed: allocate failed",
 		);
 
-		const artifactsDir = remove.mock.calls[0]?.[0];
-		expect(typeof artifactsDir).toBe("string");
+		expect(remove).not.toHaveBeenCalled();
 		expect(artifactsDirsFromRegistry()).toEqual([]);
-		await expect(fs.stat(artifactsDir as string)).rejects.toThrow();
 	});
 
 	it("unregisters and removes a temporary lease when plan reference loading fails", async () => {
@@ -517,7 +522,8 @@ describe("structured subagent primitive", () => {
 	it("retains isolated failure artifacts needed for recovery", async () => {
 		mockDiscovery();
 		let artifactsDir: string | undefined;
-		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot: "/tmp" } as never);
+		vi.spyOn(worktreeModule, "getRepoRoot").mockResolvedValue("/tmp");
+		vi.spyOn(worktreeModule, "captureBaseline").mockResolvedValue({} as never);
 		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async ({ baseOptions }) => {
 			artifactsDir = baseOptions.artifactsDir;
 			return { ...result(), exitCode: 1, error: "agent failed", patchPath: "/recovery/Worker.patch" };
@@ -560,7 +566,8 @@ describe("structured subagent primitive", () => {
 	it("retains successful isolated task artifacts when auto-apply is disabled", async () => {
 		mockDiscovery();
 		let artifactsDir: string | undefined;
-		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot: "/tmp" } as never);
+		vi.spyOn(worktreeModule, "getRepoRoot").mockResolvedValue("/tmp");
+		vi.spyOn(worktreeModule, "captureBaseline").mockResolvedValue({} as never);
 		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async ({ baseOptions }) => {
 			artifactsDir = baseOptions.artifactsDir;
 			return { ...result(), patchPath: "/recovery/Worker.patch" };

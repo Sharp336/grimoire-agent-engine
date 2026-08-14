@@ -1,8 +1,11 @@
 import * as path from "node:path";
 import { isEnoent, logger, postmortem, ptree, untilAborted } from "@oh-my-pi/pi-utils";
 import { MessageFramer } from "../jsonrpc/message-framing";
+import { loadPermissionsConfig } from "../tools/permissions/config";
+import { checkStructuredTargets } from "../tools/permissions/gate";
+import type { PermissionRoots } from "../tools/permissions/types";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
-import { applyWorkspaceEdit, type ExecutedWorkspaceChange } from "./edits";
+import { applyWorkspaceEdit, type ExecutedWorkspaceChange, workspaceEditPathTargets } from "./edits";
 import { getLspmuxCommand, isLspmuxSupported } from "./lspmux";
 import { connectSharedLspTransport } from "./mux/daemon";
 import type {
@@ -466,6 +469,67 @@ async function handleConfigurationRequest(client: LspClient, message: LspJsonRpc
 }
 
 /**
+ * Refuse a server-pushed `WorkspaceEdit` that names a path any candidate
+ * requesting session's resource permission policy denies, or `null` when it
+ * clears every candidate.
+ *
+ * This is the server-initiated counterpart to `lsp/tool.ts`'s
+ * `applyGuardedWorkspaceEdit`: same target extraction
+ * ({@link workspaceEditTargetPaths}), same decision procedure
+ * ({@link checkStructuredTargets}) — but a push arrives with no
+ * `AgentToolContext` of its own, and the LSP protocol carries no
+ * correlation between a push and the request that provoked it. A single
+ * "which pending request caused this" heuristic (oldest, newest, …) is
+ * always guessable-wrong when two sessions with different policies share
+ * one client: a push meant for a strict session could get checked against
+ * a concurrent permissive session's context instead. Checking *every*
+ * candidate context and denying if any one of them would deny it is
+ * fail-safe regardless of which request actually caused the push — a
+ * permissive session's long-running request can never let a push bypass a
+ * concurrent strict session's policy.
+ *
+ * No settings recorded on a candidate reads as "no policy configured"
+ * (`off`), the same reading `loadPermissionsConfig(undefined)` gives every
+ * other caller — not a weaker default invented for this path.
+ */
+export async function guardedApplyEditDenial(client: LspClient, edit: WorkspaceEdit): Promise<string | null> {
+	const targets = await workspaceEditPathTargets(edit);
+	for (const permissionContext of applyEditPermissionContextCandidates(client)) {
+		const policy = loadPermissionsConfig(permissionContext?.settings);
+		if (!policy) continue;
+		const roots: PermissionRoots = {
+			cwd: client.cwd,
+			additionalDirectories: permissionContext?.getAdditionalDirectories() ?? [],
+		};
+		const denial = checkStructuredTargets(targets, policy, roots);
+		if (denial) return denial.reason;
+	}
+	return null;
+}
+
+/**
+ * Every distinct permission context that could plausibly be the one that
+ * provoked this push: every still-outstanding request's own context, plus
+ * the client's shared, mutable, most-recently-touched-by-any-session
+ * default (the fallback every request without its own context effectively
+ * uses). Deduplicated by reference so a client whose every pending request
+ * shares one session's context — the common single-session case — checks
+ * it exactly once.
+ */
+function applyEditPermissionContextCandidates(client: LspClient): Array<LspClient["permissionContext"]> {
+	const seen = new Set<LspClient["permissionContext"]>();
+	const candidates: Array<LspClient["permissionContext"]> = [];
+	for (const pending of client.pendingRequests?.values() ?? []) {
+		if (pending.permissionContext && !seen.has(pending.permissionContext)) {
+			seen.add(pending.permissionContext);
+			candidates.push(pending.permissionContext);
+		}
+	}
+	if (!seen.has(client.permissionContext)) candidates.push(client.permissionContext);
+	return candidates;
+}
+
+/**
  * Handle workspace/applyEdit requests from the server.
  */
 async function handleApplyEditRequest(client: LspClient, message: LspJsonRpcRequest): Promise<void> {
@@ -477,6 +541,12 @@ async function handleApplyEditRequest(client: LspClient, message: LspJsonRpcRequ
 			{ applied: false, failureReason: "No edit provided" },
 			"workspace/applyEdit",
 		);
+		return;
+	}
+
+	const denial = await guardedApplyEditDenial(client, params.edit);
+	if (denial) {
+		await sendResponse(client, message.id, { applied: false, failureReason: denial }, "workspace/applyEdit");
 		return;
 	}
 
@@ -816,12 +886,18 @@ export function clearInitializationFailure(config: ServerConfig, cwd: string): v
  * @param signal - Optional caller abort signal. Threaded into the initialize `sendRequest`
  *   and the `initialized` notification so a wedged server surfaces the caller's
  *   timeout/cancel instead of falling back to the internal 30s default.
+ * @param permissionContext - The calling session's live resource-permission
+ *   settings and `workspace.additionalDirectories`, stamped onto the client so
+ *   a later server-initiated `workspace/applyEdit` can still be guarded (see
+ *   {@link LspClient.permissionContext}). Every caller that owns a session
+ *   should pass this; omitted only by callers with no session (warmup).
  */
 export async function getOrCreateClient(
 	config: ServerConfig,
 	cwd: string,
 	initTimeoutMs?: number,
 	signal?: AbortSignal,
+	permissionContext?: LspClient["permissionContext"],
 ): Promise<LspClient> {
 	const key = clientKey(config, cwd);
 
@@ -829,13 +905,16 @@ export async function getOrCreateClient(
 	const existingClient = clients.get(key);
 	if (existingClient) {
 		existingClient.lastActivity = Date.now();
+		if (permissionContext) existingClient.permissionContext = permissionContext;
 		return existingClient;
 	}
 
 	// Check if another coroutine is already creating this client
 	const existingLock = clientLocks.get(key);
 	if (existingLock) {
-		return existingLock;
+		const client = await existingLock;
+		if (permissionContext) client.permissionContext = permissionContext;
+		return client;
 	}
 
 	// Fail fast on a recent deterministic init failure instead of re-spawning
@@ -902,6 +981,7 @@ export async function getOrCreateClient(
 			activeProgressTokens: new Set(),
 			projectLoaded,
 			resolveProjectLoaded,
+			permissionContext,
 		};
 
 		// Register crash recovery - remove client on process exit
@@ -1394,6 +1474,12 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 30000;
  *   `timeout: 60`.
  * - Else (no signal, no explicit timeout), fall back to `DEFAULT_REQUEST_TIMEOUT_MS`
  *   to avoid leaking pending requests forever.
+ *
+ * @param permissionContext - The requesting session's permission context.
+ *   Stored on the pending request so a `workspace/applyEdit` the server
+ *   pushes while this request is outstanding is checked against it (see
+ *   {@link guardedApplyEditDenial}) instead of the client's shared, mutable
+ *   default. Callers with no session (warmup, internal polling) omit it.
  */
 export async function sendRequest(
 	client: LspClient,
@@ -1401,6 +1487,7 @@ export async function sendRequest(
 	params: unknown,
 	signal?: AbortSignal,
 	timeoutMs?: number,
+	permissionContext?: LspClient["permissionContext"],
 ): Promise<unknown> {
 	// Atomically increment and capture request ID
 	const id = ++client.requestId;
@@ -1469,6 +1556,7 @@ export async function sendRequest(
 			reject(err);
 		},
 		method,
+		permissionContext,
 	});
 
 	// Write request. `queueWriteMessage(..., signal)` bounds the sink flush

@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:te
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import type { ToolCall } from "@oh-my-pi/pi-ai";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
@@ -17,7 +18,15 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/gh";
 import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
 import * as piUtils from "@oh-my-pi/pi-utils";
-import { $which, getAgentDir, hashPath, removeWithRetries, setAgentDir, WhichCachePolicy } from "@oh-my-pi/pi-utils";
+import {
+	$which,
+	getAgentDir,
+	getWorktreeDir,
+	hashPath,
+	removeWithRetries,
+	setAgentDir,
+	WhichCachePolicy,
+} from "@oh-my-pi/pi-utils";
 
 // Isolate every `git` invocation in this file from the developer's host
 // configuration. The fixture spawns dozens of git subprocesses against tiny
@@ -501,8 +510,8 @@ describe("github tool", () => {
 		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 
 		// gh pr create invocation: must pass --repo, --title, --base, --head,
-		// --draft, --reviewer, --label, and route the body through --body-file
-		// (not --body, to keep multi-KB bodies clear of argv-length limits).
+		// --draft, --reviewer, --label, and preserve the supplied body without
+		// creating an out-of-workspace temporary file.
 		expect(textSpy).toHaveBeenCalledTimes(1);
 		const createArgs = textCalls[0];
 		expect(createArgs.slice(0, 2)).toEqual(["pr", "create"]);
@@ -513,11 +522,8 @@ describe("github tool", () => {
 		expect(createArgs).toContain("--draft");
 		expect(createArgs).toEqual(expect.arrayContaining(["--reviewer", "reviewer1"]));
 		expect(createArgs).toEqual(expect.arrayContaining(["--label", "enhancement"]));
-		const bodyFlagIndex = createArgs.indexOf("--body-file");
-		expect(bodyFlagIndex).toBeGreaterThanOrEqual(0);
-		const bodyFilePath = createArgs[bodyFlagIndex + 1];
-		expect(bodyFilePath).toMatch(/gh-pr-body-/);
-		expect(createArgs).not.toContain("--body");
+		expect(createArgs).toEqual(expect.arrayContaining(["--body", "Adds a gizmo."]));
+		expect(createArgs).not.toContain("--body-file");
 
 		// Follow-up summary fetch must target the parsed PR number/repo.
 		expect(jsonSpy).toHaveBeenCalledTimes(1);
@@ -533,6 +539,42 @@ describe("github tool", () => {
 		expect(text).toContain("Head: feature/gizmo");
 		expect(text).toContain("Labels: enhancement");
 		expect(text).toContain("Adds a gizmo.");
+	});
+
+	it("creates a pull request body without an out-of-workspace temporary file under strict permissions", async () => {
+		const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "gh-pr-permission-"));
+		try {
+			const settings = Settings.isolated({ "github.enabled": true, "permissions.profile": "strict" });
+			const tool = new GithubTool(createSession(workspace, settings));
+			const mkdtempSpy = vi.spyOn(fs, "mkdtemp");
+			const githubSpy = vi.spyOn(git.github, "text").mockResolvedValue("https://github.com/owner/repo/pull/77\n");
+			const context = {
+				settings,
+				sessionManager: {
+					getCwd: () => workspace,
+					getAdditionalDirectories: () => [],
+				},
+			} as unknown as AgentToolContext;
+
+			await expect(
+				tool.execute(
+					"pr-create-permission",
+					{ op: "pr_create", repo: "owner/repo", title: "Add gizmo", body: "restricted" },
+					undefined,
+					undefined,
+					context,
+				),
+			).resolves.toBeDefined();
+			expect(mkdtempSpy).not.toHaveBeenCalled();
+			expect(githubSpy).toHaveBeenCalledWith(
+				workspace,
+				expect.arrayContaining(["--body", "restricted"]),
+				undefined,
+				{ repoProvided: true },
+			);
+		} finally {
+			await fs.rm(workspace, { recursive: true, force: true });
+		}
 	});
 
 	it("rejects pr_create when neither title nor fill is supplied", async () => {
@@ -1333,6 +1375,208 @@ echo ok
 					originMainBefore,
 				);
 			});
+		});
+	});
+
+	describe("pr_checkout authorizes the repository and worktree it mutates", () => {
+		// `pr_checkout` is classified `pathless` (`tool-path-targets.ts`) because
+		// most `github` ops carry no filesystem path — but the checkout fetches
+		// into and rewrites branch config under the repository root and, for a
+		// not-yet-checked-out PR, materializes a brand-new worktree beneath
+		// `getWorktreeDir(...)`, which normally sits outside every workspace
+		// root. Before `checkoutPullRequest` authorized both, a confining
+		// profile (`workspace`/`strict`) could not stop either mutation (finding
+		// under review).
+		let fixture: PrFixture;
+		let tempHome: TempHome;
+		beforeAll(async () => {
+			fixture = await createPrFixture();
+			tempHome = await setupTempHome();
+		});
+		afterAll(async () => {
+			await tempHome.cleanup();
+			await removeWithRetries(fixture.baseDir);
+		});
+
+		function contextOf(overrides: Record<string, unknown>): AgentToolContext {
+			return {
+				sessionManager: {
+					getCwd: () => fixture.repoRoot,
+					getAdditionalDirectories: () => [],
+					getSessionId: () => "test-session",
+				},
+				settings: Settings.isolated({ "github.enabled": true, ...overrides }),
+			} as unknown as AgentToolContext;
+		}
+
+		it("refuses to check out a new PR worktree under a confining profile with no escape hatch", async () => {
+			vi.spyOn(git.github, "json").mockResolvedValueOnce({
+				number: 321,
+				title: "Confined checkout",
+				url: "https://github.com/owner/repo/pull/321",
+				baseRefName: "main",
+				headRefName: fixture.headRefName,
+				headRefOid: fixture.headRefOid,
+				isCrossRepository: false,
+				maintainerCanModify: true,
+			});
+
+			const tool = new GithubTool(createSession(fixture.repoRoot));
+			await expect(
+				tool.execute(
+					"pr-checkout",
+					{ op: "pr_checkout", pr: "321" },
+					undefined,
+					undefined,
+					contextOf({ "permissions.profile": "workspace" }),
+				),
+			).rejects.toThrow(/permissions\.confineWrites/);
+
+			// The refusal happened before any git mutation: no worktree, no branch.
+			expect(runGit(fixture.repoRoot, ["worktree", "list", "--porcelain"])).not.toContain("pr-321");
+			expect(runGit(fixture.repoRoot, ["branch", "--list", "pr-321"])).toBe("");
+		});
+
+		it("still checks out the PR when the worktree root is granted via an explicit allow rule", async () => {
+			vi.spyOn(git.github, "json").mockResolvedValueOnce({
+				number: 322,
+				title: "Allowed checkout",
+				url: "https://github.com/owner/repo/pull/322",
+				baseRefName: "main",
+				headRefName: fixture.headRefName,
+				headRefOid: fixture.headRefOid,
+				isCrossRepository: false,
+				maintainerCanModify: true,
+			});
+
+			const tool = new GithubTool(createSession(fixture.repoRoot));
+			const result = await tool.execute(
+				"pr-checkout",
+				{ op: "pr_checkout", pr: "322" },
+				undefined,
+				undefined,
+				contextOf({
+					"permissions.profile": "workspace",
+					"permissions.allow.write": [path.join(tempHome.home, "**")],
+				}),
+			);
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+			expect(text).toContain("Checked Out Pull Request #322");
+			expect(runGit(fixture.repoRoot, ["branch", "--list", "pr-322"])).toContain("pr-322");
+		});
+
+		it("re-gates the disambiguated worktree path when the nominal path is already occupied", async () => {
+			// The pre-lock gate above only ever sees the *nominal* `worktreePath`.
+			// `resolveAvailableWorktreePath` walks past it to a `-2`, `-3`, …
+			// sibling when the nominal path is already registered or present on
+			// disk (finding under review). Grant write access to the exact nominal
+			// path — no glob — then occupy it before checkout runs, forcing
+			// resolution onto the unauthorized `-2` sibling. That sibling must be
+			// refused, not silently created.
+			vi.spyOn(git.github, "json").mockResolvedValueOnce({
+				number: 324,
+				title: "Disambiguated checkout",
+				url: "https://github.com/owner/repo/pull/324",
+				baseRefName: "main",
+				headRefName: fixture.headRefName,
+				headRefOid: fixture.headRefOid,
+				isCrossRepository: false,
+				maintainerCanModify: true,
+			});
+
+			const repoRoot = await git.repo.root(fixture.repoRoot, undefined);
+			if (!repoRoot) throw new Error("repo root unavailable");
+			const primaryRepoRoot = await git.repo.primaryRoot(repoRoot, undefined);
+			if (!primaryRepoRoot) throw new Error("primary repo root unavailable");
+			const basePath = getWorktreeDir(`324-${hashPath(primaryRepoRoot)}`);
+			await fs.mkdir(basePath, { recursive: true });
+
+			const tool = new GithubTool(createSession(fixture.repoRoot));
+			await expect(
+				tool.execute(
+					"pr-checkout",
+					{ op: "pr_checkout", pr: "324" },
+					undefined,
+					undefined,
+					contextOf({
+						"permissions.profile": "workspace",
+						"permissions.allow.write": [basePath],
+					}),
+				),
+			).rejects.toThrow(/permissions\.confineWrites/);
+
+			// The unauthorized `-2` sibling must never be materialized: the deny
+			// fires before `fs.mkdir`/`git.worktree.add` run against it, so no
+			// worktree registration for the PR exists either. (Branch creation
+			// under `repoRoot` is a separate, already-authorized write target —
+			// unaffected by this check.)
+			await expect(fs.stat(`${basePath}-2`)).rejects.toThrow();
+			expect(runGit(fixture.repoRoot, ["worktree", "list", "--porcelain"])).not.toContain("pr-324");
+		});
+
+		it("refuses a checkout from a linked worktree whose primary git directory falls outside workspace roots", async () => {
+			// `repoRoot` (the session's own checkout) can be a *linked* worktree of
+			// a separate primary checkout — `git.config.setBranch`/`git.branch.create`/
+			// `git.fetch` run with cwd = `repoRoot`, but for a linked worktree they
+			// actually mutate the shared `config`/refs living under the primary
+			// checkout's `.git`, never authorized on its own (finding under
+			// review). Confine the session to the linked worktree only; the
+			// primary checkout elsewhere must still gate the mutation.
+			vi.spyOn(git.github, "json").mockResolvedValueOnce({
+				number: 401,
+				title: "Linked worktree checkout",
+				url: "https://github.com/owner/repo/pull/401",
+				baseRefName: "main",
+				headRefName: fixture.headRefName,
+				headRefOid: fixture.headRefOid,
+				isCrossRepository: false,
+				maintainerCanModify: true,
+			});
+
+			const linkedWorktreeDir = path.join(fixture.baseDir, "linked-worktree-401");
+			runGit(fixture.repoRoot, ["worktree", "add", linkedWorktreeDir, "-b", "linked-checkout-401"]);
+			expect(await git.repo.primaryRoot(linkedWorktreeDir, undefined)).toBe(await fs.realpath(fixture.repoRoot));
+
+			const tool = new GithubTool(createSession(linkedWorktreeDir));
+			await expect(
+				tool.execute("pr-checkout", { op: "pr_checkout", pr: "401" }, undefined, undefined, {
+					sessionManager: {
+						getCwd: () => linkedWorktreeDir,
+						getAdditionalDirectories: () => [],
+						getSessionId: () => "test-session",
+					},
+					settings: Settings.isolated({ "github.enabled": true, "permissions.profile": "workspace" }),
+				} as unknown as AgentToolContext),
+			).rejects.toThrow(/permissions\.confineWrites/);
+
+			// The refusal happened before any mutation against the primary
+			// checkout: no fetch-derived local branch, no worktree registration.
+			expect(runGit(fixture.repoRoot, ["branch", "--list", "pr-401"])).toBe("");
+			expect(runGit(fixture.repoRoot, ["worktree", "list", "--porcelain"])).not.toContain("pr-401");
+		});
+
+		it("leaves pr_checkout unaffected when the permission profile is off (the default)", async () => {
+			vi.spyOn(git.github, "json").mockResolvedValueOnce({
+				number: 323,
+				title: "Default checkout",
+				url: "https://github.com/owner/repo/pull/323",
+				baseRefName: "main",
+				headRefName: fixture.headRefName,
+				headRefOid: fixture.headRefOid,
+				isCrossRepository: false,
+				maintainerCanModify: true,
+			});
+
+			const tool = new GithubTool(createSession(fixture.repoRoot));
+			const result = await tool.execute(
+				"pr-checkout",
+				{ op: "pr_checkout", pr: "323" },
+				undefined,
+				undefined,
+				contextOf({}),
+			);
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+			expect(text).toContain("Checked Out Pull Request #323");
 		});
 	});
 

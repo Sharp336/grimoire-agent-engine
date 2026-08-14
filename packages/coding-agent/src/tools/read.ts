@@ -72,6 +72,7 @@ import {
 	splitPathAndSel,
 	splitPathAndSelPreferringLiteral,
 } from "./path-utils";
+import { enforceResourcePathTargets, isResourcePathPermitted } from "./permissions/gate";
 import { readArchive, resolveArchiveReadPath } from "./read-archive";
 import {
 	BRACKET_CONTEXT_ELLIPSIS,
@@ -501,10 +502,22 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	async #tryReadDelimitedPaths(
 		readPath: string,
 		signal?: AbortSignal,
+		toolContext?: AgentToolContext,
 		routedUrlPredicate?: (entry: string) => boolean,
 	): Promise<AgentToolResult<ReadToolDetails> | null> {
 		const parts = await splitDelimitedPathEntry(readPath, this.session.cwd, { routedUrlPredicate });
 		if (!parts) return null;
+
+		// The permission gate saw one combined literal — `README.md;.env` matches
+		// no secret glob — and the recursive reads below re-enter `execute`, not
+		// the wrapper, so this is the only point at which the paths actually
+		// opened are known. Checked with the same splitter the read performs, so
+		// the guard and the tool cannot disagree about what gets opened.
+		enforceResourcePathTargets(
+			"read",
+			parts.map(part => ({ raw: part, access: "read" as const, field: "path" })),
+			toolContext,
+		);
 
 		const notice = `Note: interpreted as ${parts.length} paths: ${parts.join(", ")}`;
 		const notes = [notice];
@@ -849,7 +862,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		// Handle native OMP URLs and custom-scheme resources advertised by MCP servers.
 		const internalRouter = InternalUrlRouter.instance();
 		const delimitedInternalResult = internalRouter.canResolve(readPath)
-			? await this.#tryReadDelimitedPaths(readPath, signal, entry => internalRouter.canResolve(entry))
+			? await this.#tryReadDelimitedPaths(readPath, signal, _toolContext, entry => internalRouter.canResolve(entry))
 			: null;
 		if (delimitedInternalResult) return delimitedInternalResult;
 
@@ -904,7 +917,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				: literalSplit.sel === undefined && splitPathAndSel(readPath).sel !== undefined;
 
 		if (!rawPathIsLiteral) {
-			const archivePath = await resolveArchiveReadPath(this.session, readPath, suffixCache, signal);
+			const archivePath = await resolveArchiveReadPath(this.session, readPath, suffixCache, signal, _toolContext);
 			if (archivePath) {
 				const archiveSubPath =
 					promotedSelector === undefined
@@ -920,7 +933,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				);
 			}
 
-			const sqlitePath = await resolveSqliteReadPath(this.session, readPath, suffixCache, signal);
+			const sqlitePath = await resolveSqliteReadPath(this.session, readPath, suffixCache, signal, _toolContext);
 			if (sqlitePath) {
 				return readSqlite(sqlitePath, signal);
 			}
@@ -929,6 +942,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			if (pdfImageMemberPath) {
 				let absolutePdfPath = resolveReadPath(pdfImageMemberPath.pdfPath, this.session.cwd);
 				let suffixResolution: { from: string; to: string } | undefined;
+				enforceResourcePathTargets("read", [{ raw: absolutePdfPath, access: "read", field: "path" }], _toolContext);
 				try {
 					const stat = await Bun.file(absolutePdfPath).stat();
 					if (stat.isDirectory())
@@ -943,6 +957,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					);
 					if (!suffixMatch) throw new ToolError(`Path '${pdfImageMemberPath.pdfPath}' not found`);
 					absolutePdfPath = suffixMatch.absolutePath;
+					enforceResourcePathTargets(
+						"read",
+						[{ raw: absolutePdfPath, access: "read", field: "path" }],
+						_toolContext,
+					);
 					suffixResolution = { from: pdfImageMemberPath.pdfPath, to: suffixMatch.displayPath };
 				}
 				return readPdfImageMember(
@@ -952,6 +971,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					pdfImageMemberPath.pdfPath,
 					pdfImageMemberPath.member,
 					suffixResolution,
+					_toolContext,
 					signal,
 				);
 			}
@@ -966,6 +986,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 		let isDirectory = false;
 		let fileSize = 0;
+		enforceResourcePathTargets("read", [{ raw: absolutePath, access: "read", field: "path" }], _toolContext);
 		try {
 			const stat = await Bun.file(absolutePath).stat();
 			fileSize = stat.size;
@@ -977,6 +998,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				if (!isRemoteMountPath(absolutePath)) {
 					const suffixMatch = await findSuffixMatchCached(this.session, suffixCache, localReadPath, signal);
 					if (suffixMatch) {
+						enforceResourcePathTargets(
+							"read",
+							[{ raw: suffixMatch.absolutePath, access: "read", field: "path" }],
+							_toolContext,
+						);
 						try {
 							const retryStat = await Bun.file(suffixMatch.absolutePath).stat();
 							absolutePath = suffixMatch.absolutePath;
@@ -994,6 +1020,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				if (!suffixResolution) {
 					const approvedPlanPath = this.#approvedPlanAlias(absolutePath);
 					if (approvedPlanPath) {
+						enforceResourcePathTargets(
+							"read",
+							[{ raw: approvedPlanPath, access: "read", field: "path" }],
+							_toolContext,
+						);
 						try {
 							const approvedPlanStat = await Bun.file(approvedPlanPath).stat();
 							absolutePath = approvedPlanPath;
@@ -1008,7 +1039,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				}
 
 				if (!recoveredApprovedPlan && !suffixResolution) {
-					const delimitedResult = await this.#tryReadDelimitedPaths(readPath, signal);
+					const delimitedResult = await this.#tryReadDelimitedPaths(readPath, signal, _toolContext);
 					if (delimitedResult) return delimitedResult;
 					throw new ToolError(`Path '${localReadPath}' not found`);
 				}
@@ -1024,7 +1055,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			const { offset, limit } = selToOffsetLimit(parsed);
 			// Directory listings are deterministic and fast; never abort them mid-scan
 			// (an interrupt would otherwise surface a misleading "Operation aborted").
-			const dirResult = await this.#readDirectory(absolutePath, offset, limit, undefined);
+			const dirResult = await this.#readDirectory(absolutePath, offset, limit, undefined, _toolContext);
 			if (suffixResolution) {
 				dirResult.details ??= {};
 				dirResult.details.suffixResolution = suffixResolution;
@@ -1955,6 +1986,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		offset: number | undefined,
 		limit: number | undefined,
 		signal?: AbortSignal,
+		context?: AgentToolContext,
 	): Promise<AgentToolResult<ReadToolDetails>> {
 		const READ_DIRECTORY_MAX_DEPTH = 2;
 		const READ_DIRECTORY_CHILD_LIMIT = 12;
@@ -1969,6 +2001,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				// `lineCap` truncates the rendered tree itself, so apply it only when the caller
 				// did not request an offset — otherwise we'd cap the first N lines before slicing.
 				lineCap: offset === undefined && limit !== undefined ? limit : null,
+				includePath: candidatePath =>
+					isResourcePathPermitted({ raw: candidatePath, access: "read", field: "path" }, context),
 			});
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);

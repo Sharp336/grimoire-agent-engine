@@ -789,6 +789,11 @@ export function getMnemopiScopedDbPaths(config: MnemopiBackendConfig): readonly 
 	return getMnemopiScopedBanks(config).map(bank => resolveBankDbPath(config, bank));
 }
 
+/** The single bank `retain`/`rememberScoped` writes to — see {@link MnemopiSessionState.rememberScoped}. */
+export function getMnemopiRetainDbPath(config: MnemopiBackendConfig): string {
+	return resolveBankDbPath(config, resolveScopedBanks(config).retainBank);
+}
+
 export function getMnemopiScopedBanks(config: MnemopiBackendConfig): readonly string[] {
 	const banks = resolveScopedBanks(config);
 	return uniqueBanks([banks.retainBank, banks.globalBank, ...banks.recallBanks]);
@@ -879,8 +884,7 @@ function createMemory(config: MnemopiBackendConfig, bank: string): Mnemopi {
 function resolveBankDbPath(config: MnemopiBackendConfig, bank: string): string {
 	const sharedBank = config.globalBank ?? config.baseBank ?? "default";
 	if (bank === sharedBank) return config.dbPath;
-	const { BankManager } = requireMnemopiCore();
-	return new BankManager(dirname(config.dbPath)).getBankDbPath(bank);
+	return requireMnemopiCore().bankDbPath(bank, dirname(config.dbPath));
 }
 
 function mergeRecallResult(

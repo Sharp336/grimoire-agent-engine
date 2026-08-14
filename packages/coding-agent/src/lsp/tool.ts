@@ -13,6 +13,8 @@ import lspDescription from "../prompts/tools/lsp.md" with { type: "text" };
 import type { ToolSession } from "../tools";
 import { truncateForPrompt } from "../tools/approval";
 import { formatPathRelativeToCwd, resolveToCwd } from "../tools/path-utils";
+import { loadPermissionsConfig } from "../tools/permissions/config";
+import { enforceResourcePathTargets, isResourcePathPermitted, PermissionDeniedError } from "../tools/permissions/gate";
 import { ToolAbortError, ToolError, throwIfAborted } from "../tools/tool-errors";
 import { clampTimeout } from "../tools/tool-timeouts";
 import {
@@ -50,6 +52,7 @@ import {
 	type RenameReferenceEdit,
 	rangesOverlap,
 	sortAndValidateTextEdits,
+	workspaceEditPathTargets,
 } from "./edits";
 import { detectLspmux } from "./lspmux";
 import {
@@ -146,6 +149,59 @@ async function enumerateRenamePairs(
 }
 
 /**
+ * Check every location a server returned before its source lines are read.
+ *
+ * `definition`, `type_definition`, `implementation`, and `references` are
+ * gated on the *initiating* `file`, but the locations that come back are
+ * chosen by the language server and routinely land in other files — a
+ * dependency, a generated file, something outside every workspace root. Each
+ * one is then handed to `formatLocationWithContext`, which opens it and puts
+ * the surrounding source lines in front of the model, so a `deny.read` rule or
+ * `confineReads` has to be applied here or not at all.
+ */
+export function guardLocationReads(locations: readonly Location[], context: AgentToolContext | undefined): void {
+	enforceResourcePathTargets(
+		"lsp",
+		locations.map(location => ({
+			raw: uriToFile(location.uri),
+			access: "read" as const,
+			field: "result location",
+		})),
+		context,
+	);
+}
+
+/**
+ * Apply a server-supplied `WorkspaceEdit` only after every path it names has
+ * cleared the resource permission layer.
+ *
+ * The permission gate classifies `lsp` by its declared arguments, and for
+ * `rename`/`code_actions` those are just the *initiating* file. The edit that
+ * comes back is chosen by the language server and can rename into, create, or
+ * delete any path it likes — including one outside every workspace root, or one
+ * a `permissions.deny.write` rule protects. Checking here, before
+ * `applyWorkspaceEdit` touches the disk, is what makes the declared-argument
+ * gate's guarantee true for this tool rather than merely advertised.
+ *
+ * Covered separately: `workspace/applyEdit`, which a server can push
+ * unsolicited (`lsp/client.ts`'s `handleApplyEditRequest`). That path has no
+ * `AgentToolContext` of its own, so it measures against
+ * {@link LspClient.permissionContext} instead — this session's settings and
+ * `workspace.additionalDirectories`, stamped onto the client by every
+ * `getOrCreateClient` call this tool makes (see `permissionContext()` below).
+ */
+export async function applyGuardedWorkspaceEdit(
+	edit: WorkspaceEdit,
+	cwd: string,
+	context: AgentToolContext | undefined,
+	signal?: AbortSignal,
+): Promise<string[]> {
+	const targets = await workspaceEditPathTargets(edit);
+	enforceResourcePathTargets("lsp", targets, context);
+	return applyWorkspaceEditWithLsp(edit, cwd, signal);
+}
+
+/**
  * LSP tool for language server protocol operations.
  */
 export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Theme> {
@@ -178,12 +234,37 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		return session.enableLsp === false ? null : new LspTool(session);
 	}
 
+	/**
+	 * This session's live resource-permission settings and workspace roots,
+	 * stamped onto every LSP client this tool touches so a later
+	 * server-initiated `workspace/applyEdit` push can still be guarded — see
+	 * {@link applyGuardedWorkspaceEdit}.
+	 *
+	 * `getAdditionalDirectories` closes over `this.session` rather than
+	 * reading it into an array here: `session.additionalDirectories` is
+	 * itself a live getter onto the session manager, so a root removed by
+	 * `/remove-dir` after this context was stamped is still reflected the
+	 * next time a pushed edit is checked, not just the next time this tool
+	 * runs.
+	 */
+	#permissionContext(): {
+		settings: ToolSession["settings"];
+		getAdditionalDirectories: () => readonly string[];
+	} {
+		return {
+			settings: this.session.settings,
+			getAdditionalDirectories: () => this.session.additionalDirectories ?? [],
+		};
+	}
+
 	async execute(
 		_toolCallId: string,
 		params: LspParams,
 		signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<LspToolDetails>,
-		_context?: AgentToolContext,
+		// Not `context`: the `code_actions` branch below binds that name to an
+		// LSP `CodeActionContext`.
+		toolContext?: AgentToolContext,
 	): Promise<AgentToolResult<LspToolDetails>> {
 		const { action, file, line, symbol, query, new_name, apply, timeout } = params;
 		if (this.session.lspReadOnly && !LSP_READONLY_ACTIONS.has(action)) {
@@ -195,7 +276,9 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		signal = callerSignal ? AbortSignal.any([callerSignal, timeoutSignal]) : timeoutSignal;
 		throwIfAborted(signal);
 
-		const config = getConfig(this.session.cwd);
+		const authorizeConfigRead = (filePath: string) =>
+			enforceResourcePathTargets("lsp", [{ raw: filePath, access: "read", field: "configuration" }], toolContext);
+		const config = getConfig(this.session.cwd, authorizeConfigRead);
 
 		// Status action doesn't need a file
 		if (action === "status") {
@@ -248,6 +331,23 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		// Diagnostics can be batch or single-file - queries all applicable servers
 		if (action === "diagnostics") {
 			if (file === "*") {
+				// `runWorkspaceDiagnostics` starts a whole-project compiler subprocess
+				// with no filesystem scope this gate can enforce — every source file
+				// and project config the compiler chooses to open is opaque to us.
+				// Under an active `permissions.deny.read`/`confineReads` restriction
+				// that unconstrained scope could bypass rules a targeted glob request
+				// (below) enforces per file, so refuse rather than run it unchecked
+				// (finding under review).
+				const workspacePolicy = loadPermissionsConfig(toolContext?.settings);
+				if (workspacePolicy && (workspacePolicy.confineReads || workspacePolicy.deny.read.length > 0)) {
+					throw new PermissionDeniedError(
+						"lsp",
+						"permissions.deny.read",
+						'Workspace-wide diagnostics (file: "*") run an unconstrained whole-project subprocess whose ' +
+							"filesystem scope cannot be checked against the active resource permission policy. Request " +
+							"diagnostics for a specific file or glob instead, or set permissions.profile: off.",
+					);
+				}
 				// `*` => run workspace diagnostics across all configured servers
 				const result = await runWorkspaceDiagnostics(this.session.cwd, signal);
 				return {
@@ -285,6 +385,21 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					details: { action, success: true, request: params },
 				};
 			}
+			// The pre-execution gate only ever authorized the declared literal
+			// spelling (`file`, e.g. a glob root). Everything the glob actually
+			// expanded to is opened, refreshed, and read for diagnostics below
+			// without ever reauthorizing it - a `permissions.deny.read`/
+			// `confineReads` rule on a source file or project config bypassed by
+			// requesting the same content through a glob (finding under review).
+			enforceResourcePathTargets(
+				"lsp",
+				targets.map(target => ({
+					raw: resolveToCwd(target, this.session.cwd),
+					access: "read" as const,
+					field: "diagnostics target",
+				})),
+				toolContext,
+			);
 
 			const detailed = targets.length > 1 || truncatedGlobTargets;
 			const diagnosticsWaitTimeoutMs = detailed
@@ -329,7 +444,13 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 							totalServerSuccesses++;
 							continue;
 						}
-						const client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
+						const client = await getOrCreateClient(
+							serverConfig,
+							this.session.cwd,
+							undefined,
+							signal,
+							this.#permissionContext(),
+						);
 						if (isProjectAwareLspServer(serverConfig)) {
 							await waitForProjectLoaded(client, signal);
 							throwIfAborted(signal);
@@ -510,6 +631,14 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				};
 			}
 			const { pairs } = enumerated;
+			enforceResourcePathTargets(
+				"lsp",
+				pairs.flatMap(pair => [
+					{ raw: uriToFile(pair.oldUri), access: "write" as const, field: "rename_file source" },
+					{ raw: uriToFile(pair.newUri), access: "write" as const, field: "rename_file destination" },
+				]),
+				toolContext,
+			);
 			if (pairs.length === 0) {
 				return {
 					content: [{ type: "text", text: "Error: no files to rename" }],
@@ -552,7 +681,13 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				throwIfAborted(signal);
 				let client: LspClient;
 				try {
-					client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
+					client = await getOrCreateClient(
+						serverConfig,
+						this.session.cwd,
+						undefined,
+						signal,
+						this.#permissionContext(),
+					);
 					if (isProjectAwareLspServer(serverConfig)) {
 						await waitForProjectLoaded(client, signal);
 					}
@@ -712,6 +847,25 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				}
 			}
 
+			// `willRenameFiles` answers with edits for whatever URIs the server
+			// chooses, which need not be `file` or `new_name` — the only two paths
+			// the permission gate saw. Same surface `applyGuardedWorkspaceEdit`
+			// covers for `rename`/`code_actions`, so it faces the same check here
+			// before any of it is written. `applyTextEdits` below reads each file's
+			// current content before writing the patched result, so both accesses
+			// are declared — write-only would miss a `deny.read` rule with no
+			// matching `deny.write`.
+			enforceResourcePathTargets(
+				"lsp",
+				[...acceptedByUri.keys()].flatMap(uri => {
+					const filePath = uriToFile(uri);
+					return [
+						{ raw: filePath, access: "read" as const, field: "willRenameFiles edit" },
+						{ raw: filePath, access: "write" as const, field: "willRenameFiles edit" },
+					];
+				}),
+				toolContext,
+			);
 			// Validate every accepted bucket (overlap + snippet-format rejection)
 			// before writing any file, so a snippet edit in a later URI cannot
 			// leave earlier files half-applied.
@@ -744,7 +898,13 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 
 			for (const [serverName, serverConfig] of servers) {
 				try {
-					const client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
+					const client = await getOrCreateClient(
+						serverConfig,
+						this.session.cwd,
+						undefined,
+						signal,
+						this.#permissionContext(),
+					);
 					for (const { oldUri } of pairs) {
 						if (client.openFiles.has(oldUri)) {
 							await sendNotification(client, "textDocument/didClose", { textDocument: { uri: oldUri } }, signal);
@@ -805,7 +965,13 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			for (const [serverName, serverConfig] of serverList) {
 				throwIfAborted(signal);
 				try {
-					const client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
+					const client = await getOrCreateClient(
+						serverConfig,
+						this.session.cwd,
+						undefined,
+						signal,
+						this.#permissionContext(),
+					);
 					respondingServers.add(serverName);
 					const caps = client.serverCapabilities ?? {};
 					sections.push(`${serverName}:`);
@@ -891,7 +1057,13 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			}
 
 			try {
-				const client = await getOrCreateClient(chosenConfig, this.session.cwd, undefined, signal);
+				const client = await getOrCreateClient(
+					chosenConfig,
+					this.session.cwd,
+					undefined,
+					signal,
+					this.#permissionContext(),
+				);
 				if (resolvedTarget) {
 					await ensureFileOpen(client, resolvedTarget, signal);
 				}
@@ -967,6 +1139,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						this.session.cwd,
 						undefined,
 						signal,
+						this.#permissionContext(),
 					);
 					const workspaceResult = (await sendRequest(
 						workspaceClient,
@@ -978,7 +1151,14 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						continue;
 					}
 					respondingServers.add(workspaceServerName);
-					aggregatedSymbols.push(...filterWorkspaceSymbols(workspaceResult, normalizedQuery));
+					aggregatedSymbols.push(
+						...filterWorkspaceSymbols(workspaceResult, normalizedQuery).filter(symbol =>
+							isResourcePathPermitted(
+								{ raw: uriToFile(symbol.location.uri), access: "read", field: "workspace symbol" },
+								toolContext,
+							),
+						),
+					);
 				} catch (err) {
 					if (err instanceof ToolAbortError || signal?.aborted) {
 						throw err;
@@ -1026,7 +1206,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			// otherwise `getConfig` returns the first observation for the rest of
 			// the process lifetime (#3546).
 			configCache.delete(this.session.cwd);
-			const refreshedConfig = getConfig(this.session.cwd);
+			const refreshedConfig = getConfig(this.session.cwd, authorizeConfigRead);
 			const servers = getLspServers(refreshedConfig);
 			if (servers.length === 0) {
 				return {
@@ -1044,6 +1224,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						this.session.cwd,
 						undefined,
 						signal,
+						this.#permissionContext(),
 					);
 					outputs.push(await reloadServer(workspaceClient, workspaceServerName, signal));
 				} catch (err) {
@@ -1073,7 +1254,13 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		if (action === "reload") clearInitializationFailure(serverConfig, this.session.cwd);
 
 		try {
-			const client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
+			const client = await getOrCreateClient(
+				serverConfig,
+				this.session.cwd,
+				undefined,
+				signal,
+				this.#permissionContext(),
+			);
 			const targetFile = resolvedFile;
 			const isRustAnalyzerServer =
 				serverName === "rust-analyzer" ||
@@ -1145,6 +1332,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						output = "No definition found";
 						useless = true;
 					} else {
+						guardLocationReads(locations, toolContext);
 						const lines = await Promise.all(
 							locations.map(location => formatLocationWithContext(location, this.session.cwd)),
 						);
@@ -1170,6 +1358,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						output = "No type definition found";
 						useless = true;
 					} else {
+						guardLocationReads(locations, toolContext);
 						const lines = await Promise.all(
 							locations.map(location => formatLocationWithContext(location, this.session.cwd)),
 						);
@@ -1195,6 +1384,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						output = "No implementation found";
 						useless = true;
 					} else {
+						guardLocationReads(locations, toolContext);
 						const lines = await Promise.all(
 							locations.map(location => formatLocationWithContext(location, this.session.cwd)),
 						);
@@ -1234,7 +1424,22 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						useless = true;
 					} else {
 						const contextualReferences = result.slice(0, REFERENCE_CONTEXT_LIMIT);
-						const plainReferences = result.slice(REFERENCE_CONTEXT_LIMIT);
+						// The contextual slice is opened, so a denial there fails the
+						// whole call loud — the same all-or-nothing guard `definition` and
+						// `implementation` use. The remainder past the limit names no
+						// contents (just `path:line`), so a denied entry is filtered out
+						// instead of thrown on — the same read-then-drop treatment glob
+						// results get — rather than losing the whole response, or worse,
+						// rendering the denied path and line number unfiltered.
+						guardLocationReads(contextualReferences, toolContext);
+						const plainReferences = result
+							.slice(REFERENCE_CONTEXT_LIMIT)
+							.filter(location =>
+								isResourcePathPermitted(
+									{ raw: uriToFile(location.uri), access: "read", field: "result location" },
+									toolContext,
+								),
+							);
 						const contextualLines = await Promise.all(
 							contextualReferences.map(location => formatLocationWithContext(location, this.session.cwd)),
 						);
@@ -1316,9 +1521,23 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 
 						const appliedAction = await applyCodeAction(selectedAction, {
 							resolveCodeAction: async actionItem =>
-								(await sendRequest(client, "codeAction/resolve", actionItem, signal)) as CodeAction,
-							applyWorkspaceEdit: async edit => applyWorkspaceEditWithLsp(edit, this.session.cwd, signal),
+								(await sendRequest(
+									client,
+									"codeAction/resolve",
+									actionItem,
+									signal,
+									undefined,
+									this.#permissionContext(),
+								)) as CodeAction,
+							applyWorkspaceEdit: async edit =>
+								applyGuardedWorkspaceEdit(edit, this.session.cwd, toolContext, signal),
 							executeCommand: async commandItem => {
+								// Resolving or executing a command is the request the server is
+								// mid-handling when it pushes `workspace/applyEdit` — stamping this
+								// session's permission context onto it (see `sendRequest`'s
+								// `permissionContext` param) is what lets `guardedApplyEditDenial`
+								// check that push against this session, not a concurrent one that
+								// merely shares the same client (finding under review).
 								await sendRequest(
 									client,
 									"workspace/executeCommand",
@@ -1327,6 +1546,8 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 										arguments: commandItem.arguments ?? [],
 									},
 									signal,
+									undefined,
+									this.#permissionContext(),
 								);
 							},
 						});
@@ -1413,7 +1634,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					} else {
 						const shouldApply = apply !== false;
 						if (shouldApply) {
-							const applied = await applyWorkspaceEditWithLsp(result, this.session.cwd, signal);
+							const applied = await applyGuardedWorkspaceEdit(result, this.session.cwd, toolContext, signal);
 							output = `Applied rename:\n${applied.map(a => `  ${a}`).join("\n")}`;
 						} else {
 							const preview = formatWorkspaceEdit(result, this.session.cwd);

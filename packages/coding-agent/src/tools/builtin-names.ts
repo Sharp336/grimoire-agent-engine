@@ -36,6 +36,20 @@ export const HIDDEN_TOOL_NAMES = ["yield", "goal", "think"] as const;
 
 export type HiddenToolName = (typeof HIDDEN_TOOL_NAMES)[number];
 
+/**
+ * Custom tools loaded dynamically outside the synchronous `BUILTIN_TOOLS`/
+ * `HIDDEN_TOOLS` factory maps — `generate_image` needs an async
+ * `ModelRegistry`/`Model` resolution (`getImageGenTools`), not just a
+ * `ToolSession`, so it cannot satisfy those maps' exhaustive `ToolFactory`
+ * signature; `tts` is a plain `CustomTool` pushed directly onto
+ * `customTools` (`sdk.ts`, gated by `speechgen.enabled`), never registered
+ * through either factory map at all. Both are still real,
+ * permission-relevant tool names, so they belong in the resource-permission
+ * classification's exhaustiveness set (`CLASSIFIED_TOOL_NAMES`,
+ * `tool-path-targets.ts`) without also being required in either factory map.
+ */
+export const DYNAMIC_TOOL_NAMES = ["generate_image", "tts"] as const;
+
 const LEGACY_BUILTIN_TOOL_NAME_ALIASES: ReadonlyMap<string, BuiltinToolName> = new Map([
 	["search", "grep"],
 	["find", "glob"],

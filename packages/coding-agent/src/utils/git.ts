@@ -1280,15 +1280,29 @@ export const diff = Object.assign(
 			cwd: string,
 			base: string,
 			headRef: string,
-			options: { binary?: boolean; signal?: AbortSignal; allowFailure?: boolean } = {},
+			options: Pick<DiffOptions, "allowFailure" | "binary" | "files" | "signal"> = {},
 		): Promise<string> {
 			const args = ["diff-tree", "-r", "-p"];
 			if (options.binary) args.push("--binary");
 			args.push(base, headRef);
+			if (options.files?.length) args.push("--", ...options.files);
 			if (options.allowFailure) {
 				return (await git(cwd, args, { readOnly: true, signal: options.signal })).stdout;
 			}
 			return runText(cwd, args, { readOnly: true, signal: options.signal });
+		},
+		/** Paths changed between two tree-ish objects (`git diff-tree --name-only`). */
+		async treeNames(
+			cwd: string,
+			base: string,
+			headRef: string,
+			options: Pick<DiffOptions, "files" | "signal"> = {},
+		): Promise<string[]> {
+			const args = ["diff-tree", "-r", "--name-only", "-z", base, headRef];
+			if (options.files?.length) args.push("--", ...options.files);
+			return (await runText(cwd, args, { readOnly: true, signal: options.signal }))
+				.split("\0")
+				.filter(candidate => candidate.length > 0);
 		},
 		/** Parse raw diff text into per-file diffs. */
 		parseFiles(text: string): FileDiff[] {
@@ -2223,12 +2237,13 @@ export async function clean(
 // ════════════════════════════════════════════════════════════════════════════
 
 export const ls = {
-	/** List files tracked or untracked by git. */
+	/** List tracked and/or non-ignored untracked files. */
 	async files(
 		cwd: string,
-		options: { others?: boolean; excludeStandard?: boolean; signal?: AbortSignal } = {},
+		options: { cached?: boolean; others?: boolean; excludeStandard?: boolean; signal?: AbortSignal } = {},
 	): Promise<string[]> {
 		const args = ["ls-files"];
+		if (options.cached) args.push("--cached");
 		if (options.others) args.push("--others");
 		if (options.excludeStandard) args.push("--exclude-standard");
 		return splitLines(await runText(cwd, args, { readOnly: true, signal: options.signal }));

@@ -1,7 +1,6 @@
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import type { AgentToolContext, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { getWorktreeDir, hashPath, isEnoent } from "@oh-my-pi/pi-utils";
 import * as git from "../utils/git";
 import type { ToolSession } from ".";
@@ -23,6 +22,7 @@ import { formatShortSha } from "./gh-format";
 import type { GhPrViewData, GhRepoViewData, GithubInput } from "./gh-types";
 import { GH_PR_FIELDS_NO_COMMENTS } from "./gh-view";
 import { invalidateAllForNumber } from "./github-cache";
+import { enforceResourcePathTargets } from "./permissions/gate";
 import { ToolError, throwIfAborted } from "./tool-errors";
 
 export const GH_REPO_CLONE_FIELDS = ["nameWithOwner", "sshUrl", "url"];
@@ -288,6 +288,7 @@ export async function executePrCheckout(
 	session: ToolSession,
 	params: GithubInput,
 	signal: AbortSignal | undefined,
+	context: AgentToolContext | undefined,
 ): Promise<AgentToolResult<GhToolDetails>> {
 	const repo = normalizeOptionalString(params.repo);
 	const force = params.force ?? false;
@@ -296,7 +297,7 @@ export async function executePrCheckout(
 	const isMulti = prRefs.length > 1;
 
 	const settled = await Promise.allSettled(
-		prRefs.map(prRef => checkoutPullRequest(session, signal, { prRef, repo, force })),
+		prRefs.map(prRef => checkoutPullRequest(session, signal, { prRef, repo, force }, context)),
 	);
 	const outcomes: PrCheckoutOutcome[] = [];
 	const failures: Array<{ prRef: string | undefined; reason: unknown }> = [];
@@ -372,6 +373,7 @@ export async function checkoutPullRequest(
 	session: ToolSession,
 	signal: AbortSignal | undefined,
 	options: PrCheckoutOptions,
+	context: AgentToolContext | undefined,
 ): Promise<PrCheckoutOutcome> {
 	const { prRef, repo, force } = options;
 	if (prRef?.startsWith("-")) {
@@ -396,6 +398,32 @@ export async function checkoutPullRequest(
 	const primaryRepoRoot = await requirePrimaryGitRepoRoot(repoRoot, signal);
 	const localBranch = `pr-${prNumber}`;
 	const worktreePath = getWorktreeDir(`${prNumber}-${hashPath(primaryRepoRoot)}`);
+
+	// `github` is classified pathless (`tool-path-targets.ts`) because most of
+	// its ops genuinely carry no path — but `pr_checkout` fetches into and
+	// rewrites branch config under `repoRoot`, and (for a not-yet-checked-out
+	// PR) materializes a new worktree beneath `getWorktreeDir(...)`, which
+	// normally sits outside every workspace root. All three are authorized
+	// here, before any git mutation runs, the same way `task`'s isolation
+	// directory is (`structured-subagent.ts`): `repoRoot` as a read+write
+	// target — the checkout reads existing branch/ref state before rewriting
+	// it — `primaryRepoRoot` the same way, since when `repoRoot` is itself a
+	// linked worktree, `git.config.setBranch`/`git.branch.create`/`git.fetch`
+	// against `repoRoot` actually mutate the *shared* `config`/refs living
+	// under the primary checkout (or the bare-repo common dir), never
+	// authorized on its own before (finding under review) — and the worktree
+	// path as a write target, since it is materialized fresh.
+	enforceResourcePathTargets(
+		"github",
+		[
+			{ raw: repoRoot, access: "read", field: "pr_checkout.repository" },
+			{ raw: repoRoot, access: "write", field: "pr_checkout.repository" },
+			{ raw: primaryRepoRoot, access: "read", field: "pr_checkout.repository" },
+			{ raw: primaryRepoRoot, access: "write", field: "pr_checkout.repository" },
+			{ raw: worktreePath, access: "write", field: "pr_checkout.worktree" },
+		],
+		context,
+	);
 
 	// Every git mutation against `repoRoot` from here on must run under the
 	// per-repo lock. Worktrees of the same primary repo share `.git/config`,
@@ -462,6 +490,20 @@ export async function checkoutPullRequest(
 			let finalWorktreePath = existingWorktree?.path ?? worktreePath;
 			if (!existingWorktree) {
 				finalWorktreePath = await resolveAvailableWorktreePath(worktreePath, existingWorktrees);
+				// `resolveAvailableWorktreePath` can walk past `worktreePath` to a
+				// `-2`, `-3`, … sibling when the nominal path is already registered
+				// or present on disk. The pre-lock gate above only authorized the
+				// nominal path, so a confining profile that allows exactly
+				// `worktreePath` and nothing else must not let the disambiguated
+				// sibling slip through unchecked — re-gate the effective path before
+				// it is created.
+				if (finalWorktreePath !== worktreePath) {
+					enforceResourcePathTargets(
+						"github",
+						[{ raw: finalWorktreePath, access: "write", field: "pr_checkout.worktree" }],
+						context,
+					);
+				}
 				await fs.mkdir(path.dirname(finalWorktreePath), { recursive: true });
 				await git.worktree.add(repoRoot, finalWorktreePath, localBranch, { signal });
 			}
@@ -546,6 +588,7 @@ export async function executePrCreate(
 	session: ToolSession,
 	params: GithubInput,
 	signal: AbortSignal | undefined,
+	_context?: AgentToolContext,
 ): Promise<AgentToolResult<GhToolDetails>> {
 	const repo = normalizeOptionalString(params.repo);
 	const title = normalizeOptionalString(params.title);
@@ -576,70 +619,56 @@ export async function executePrCreate(
 	for (const assignee of assignees) args.push("--assignee", assignee);
 	for (const label of labels) args.push("--label", label);
 
-	let bodyDir: string | undefined;
-	try {
-		if (!fill) {
-			if (body !== undefined && body.length > 0) {
-				// Route through a temp file so multi-KB bodies stay clear of any
-				// argv-length limits and shell-quoting hazards on uncommon platforms.
-				bodyDir = await fs.mkdtemp(path.join(os.tmpdir(), "gh-pr-body-"));
-				const bodyFile = path.join(bodyDir, "body.md");
-				await Bun.write(bodyFile, body);
-				args.push("--body-file", bodyFile);
-			} else {
-				// Avoid gh dropping into an interactive editor when no body is given.
-				args.push("--body", "");
-			}
-		}
+	if (!fill) {
+		// Keep the body in the GitHub CLI invocation. A private temp file would
+		// require broad write access outside the requested workspace even though
+		// PR creation itself has no agent-directed filesystem side effect.
+		args.push("--body", body ?? "");
+	}
 
-		const output = await git.github.text(session.cwd, args, signal, {
-			repoProvided: Boolean(repo),
-		});
-		const url =
-			output
-				.split("\n")
-				.map(line => line.trim())
-				.find(line => line.startsWith("https://github.com/")) ?? output.trim();
-		const parsed = parsePullRequestUrl(url);
-		const resolvedRepo = repo ?? parsed.repo;
+	const output = await git.github.text(session.cwd, args, signal, {
+		repoProvided: Boolean(repo),
+	});
+	const url =
+		output
+			.split("\n")
+			.map(line => line.trim())
+			.find(line => line.startsWith("https://github.com/")) ?? output.trim();
+	const parsed = parsePullRequestUrl(url);
+	const resolvedRepo = repo ?? parsed.repo;
 
-		let prView: GhPrViewData | undefined;
-		if (resolvedRepo && parsed.prNumber !== undefined) {
-			try {
-				prView = await git.github.json<GhPrViewData>(
-					session.cwd,
-					[
-						"pr",
-						"view",
-						String(parsed.prNumber),
-						"--repo",
-						resolvedRepo,
-						"--json",
-						GH_PR_FIELDS_NO_COMMENTS.join(","),
-					],
-					signal,
-					{ repoProvided: true },
-				);
-			} catch {
-				// Best-effort summary; PR creation already succeeded.
-			}
-		}
-
-		const text = formatPrCreateResult({
-			url,
-			prNumber: parsed.prNumber,
-			data: prView,
-			title,
-			base,
-			head,
-			draft,
-		});
-		return buildTextResult(text, url || prView?.url);
-	} finally {
-		if (bodyDir) {
-			await fs.rm(bodyDir, { recursive: true, force: true }).catch(() => {});
+	let prView: GhPrViewData | undefined;
+	if (resolvedRepo && parsed.prNumber !== undefined) {
+		try {
+			prView = await git.github.json<GhPrViewData>(
+				session.cwd,
+				[
+					"pr",
+					"view",
+					String(parsed.prNumber),
+					"--repo",
+					resolvedRepo,
+					"--json",
+					GH_PR_FIELDS_NO_COMMENTS.join(","),
+				],
+				signal,
+				{ repoProvided: true },
+			);
+		} catch {
+			// Best-effort summary; PR creation already succeeded.
 		}
 	}
+
+	const text = formatPrCreateResult({
+		url,
+		prNumber: parsed.prNumber,
+		data: prView,
+		title,
+		base,
+		head,
+		draft,
+	});
+	return buildTextResult(text, url || prView?.url);
 }
 
 export function formatPrCreateResult(options: {

@@ -1,5 +1,12 @@
+import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import type { AgentTool, AgentToolResult, ToolTier } from "@oh-my-pi/pi-agent-core";
+import type {
+	AgentTool,
+	AgentToolContext,
+	AgentToolResult,
+	AgentToolUpdateCallback,
+	ToolTier,
+} from "@oh-my-pi/pi-agent-core";
 import securityScanDescription from "../prompts/tools/security-scan.md" with { type: "text" };
 import { selectSecurityAccount } from "../security/auth";
 import {
@@ -11,9 +18,10 @@ import {
 import { createSecurityEvidenceId, type SecurityEvidence, type SecurityValidationStatus } from "../security/contracts";
 import type { SecurityOperationSnapshot } from "../security/coordinator";
 import { getSecurityCoordinator } from "../security/coordinator";
-import type { SecurityTargetRequest } from "../security/preflight";
-import { SecurityStore } from "../security/store";
+import type { SecurityScanGuard, SecurityTargetRequest } from "../security/preflight";
+import { resolveSecurityProjectDirectoryForCwd, SecurityStore } from "../security/store";
 import type { ToolSession } from "./index";
+import { enforceResourcePathTargets } from "./permissions/gate";
 import { ToolError } from "./tool-errors";
 
 const securityScanSchema = type({
@@ -54,6 +62,83 @@ export interface SecurityScanToolDetails {
 	cloudStats?: CodexSecurityCloudStats;
 	cloudScan?: { id: string; repositoryUrl: string };
 	importedScan?: { id: string; findingCount: number };
+}
+
+/**
+ * Resource-permission hooks for the scan surfaces the tool's own arguments
+ * never name.
+ *
+ * `TOOL_PATH_CLASSES.security_scan` can only extract what the call declares —
+ * `include_paths`, `knowledge_base_paths`, `output_root`. A default
+ * `target_kind: "repository"` scan declares no read path at all yet hashes and
+ * reviews every tracked and untracked in-scope file, and an omitted
+ * `output_root` is defaulted deep inside the coordinator. The `SecurityStore`
+ * project directory is never named at all — it is derived from `cwd` and
+ * opened (creating state on disk) before the plan is built. All three are
+ * resolved mid-preflight, so this is the only layer that holds the session
+ * context *and* runs late enough to see the effective values.
+ *
+ * Returns `undefined` when there is no context to measure against, matching how
+ * every other gate entry point behaves outside a live session.
+ */
+function resourcePermissionGuard(context: AgentToolContext | undefined): SecurityScanGuard | undefined {
+	if (!context) return undefined;
+	return {
+		scope: (relativePaths, repositoryRoot) => {
+			enforceResourcePathTargets(
+				"security_scan",
+				relativePaths.map(relativePath => ({
+					raw: path.resolve(repositoryRoot, relativePath),
+					access: "read" as const,
+					field: "scan scope",
+				})),
+				context,
+			);
+		},
+		knowledgeBase: absolutePath => {
+			enforceResourcePathTargets(
+				"security_scan",
+				[{ raw: absolutePath, access: "read", field: "knowledge_base_paths" }],
+				context,
+			);
+		},
+		outputRoot: absolutePath => {
+			enforceResourcePathTargets(
+				"security_scan",
+				[{ raw: absolutePath, access: "write" as const, field: "output_root" }],
+				context,
+			);
+		},
+		stateDirectory: absolutePath => {
+			enforceResourcePathTargets(
+				"security_scan",
+				[
+					{ raw: absolutePath, access: "read" as const, field: "state directory" },
+					{ raw: absolutePath, access: "write" as const, field: "state directory" },
+				],
+				context,
+			);
+		},
+	};
+}
+
+/**
+ * Open the `SecurityStore` for `cwd`, authorizing the resolved project state
+ * directory first. `cloud_pull` and `validate` open the store directly
+ * (there is no `SecurityCoordinator` action for either), so each needs this
+ * same pre-open gate `SecurityCoordinator#gateStateDirectory` runs for
+ * `preflight`/`start` — otherwise a plan saved while permissions were off,
+ * then `workspace` enabled before one of these actions, would mutate the
+ * state store unauthorized.
+ */
+async function openGatedSecurityStore(
+	cwd: string,
+	guard: SecurityScanGuard | undefined,
+	signal?: AbortSignal,
+): Promise<SecurityStore> {
+	const { projectDirectory } = await resolveSecurityProjectDirectoryForCwd(cwd, { signal });
+	guard?.stateDirectory?.(projectDirectory);
+	return SecurityStore.openForCwd(cwd, { signal });
 }
 
 function targetFromParams(params: SecurityScanParams): SecurityTargetRequest {
@@ -118,6 +203,8 @@ export class SecurityScanTool implements AgentTool<typeof securityScanSchema, Se
 		_toolCallId: string,
 		params: SecurityScanParams,
 		signal?: AbortSignal,
+		_onUpdate?: AgentToolUpdateCallback<SecurityScanToolDetails>,
+		context?: AgentToolContext,
 	): Promise<AgentToolResult<SecurityScanToolDetails>> {
 		if (!this.session.settings.get("security.enabled")) {
 			throw new ToolError("Security is disabled. Enable security.enabled before using security_scan.");
@@ -148,6 +235,7 @@ export class SecurityScanTool implements AgentTool<typeof securityScanSchema, Se
 					credentialId: params.credential_id,
 					model,
 					signal,
+					guard: resourcePermissionGuard(context),
 				});
 				return textResult(
 					[
@@ -161,6 +249,7 @@ export class SecurityScanTool implements AgentTool<typeof securityScanSchema, Se
 			case "start": {
 				const operation = await coordinatorForSession().start({
 					planId: requireValue(params.plan_id, "plan_id"),
+					guard: resourcePermissionGuard(context),
 				});
 				return textResult(`Security scan ${operation.scanId} started as ${operation.operationId}.`, {
 					action: params.action,
@@ -169,7 +258,7 @@ export class SecurityScanTool implements AgentTool<typeof securityScanSchema, Se
 			}
 			case "status": {
 				const operationId = requireValue(params.operation_id, "operation_id");
-				const operation = await coordinatorForSession().status(operationId);
+				const operation = await coordinatorForSession().status(operationId, resourcePermissionGuard(context));
 				if (!operation) throw new ToolError(`Unknown security operation: ${operationId}`);
 				return textResult(
 					`Security scan ${operation.scanId}: ${operation.phase}; ${operation.findingCount} finding(s).`,
@@ -178,13 +267,14 @@ export class SecurityScanTool implements AgentTool<typeof securityScanSchema, Se
 			}
 			case "cancel": {
 				const operationId = requireValue(params.operation_id, "operation_id");
-				const cancelled = await coordinatorForSession().cancel(operationId);
+				const guard = resourcePermissionGuard(context);
+				const cancelled = await coordinatorForSession().cancel(operationId, guard);
 				return textResult(
 					cancelled ? `Cancellation requested for ${operationId}.` : `No running operation ${operationId}.`,
 					{
 						action: params.action,
 						cancelled,
-						operation: (await coordinatorForSession().status(operationId)) ?? undefined,
+						operation: (await coordinatorForSession().status(operationId, guard)) ?? undefined,
 					},
 				);
 			}
@@ -232,7 +322,7 @@ export class SecurityScanTool implements AgentTool<typeof securityScanSchema, Se
 				);
 			}
 			case "cloud_pull": {
-				const store = await SecurityStore.openForCwd(this.session.cwd, { signal });
+				const store = await openGatedSecurityStore(this.session.cwd, resourcePermissionGuard(context), signal);
 				const bundle = await pullCodexSecurityCloudResults({
 					client: cloudClientForSession(this.session, params.credential_id),
 					configurationId: requireValue(params.cloud_configuration_id, "cloud_configuration_id"),
@@ -253,7 +343,7 @@ export class SecurityScanTool implements AgentTool<typeof securityScanSchema, Se
 				const status = params.validation_status;
 				if (!status) throw new ToolError("validation_status is required for this action");
 				const summary = requireValue(params.validation_summary, "validation_summary");
-				const store = await SecurityStore.openForCwd(this.session.cwd, { signal });
+				const store = await openGatedSecurityStore(this.session.cwd, resourcePermissionGuard(context), signal);
 				const finding = await store.getFinding(scanId, findingId);
 				if (!finding) throw new ToolError(`Unknown security finding: ${findingId}`);
 				const evidence: SecurityEvidence[] = (params.validation_evidence ?? []).map((item, index) => ({

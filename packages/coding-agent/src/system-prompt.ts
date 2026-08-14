@@ -334,6 +334,8 @@ export interface LoadContextFilesOptions {
 	cwd?: string;
 	/** Disabled extension IDs to honor instead of the process-global settings. */
 	disabledExtensions?: string[];
+	/** Reject a discovered context file before its backing file is read. */
+	canReadContextFile?: (contextFilePath: string) => boolean;
 }
 
 function dedupeExactContextFiles(
@@ -361,6 +363,7 @@ export async function loadProjectContextFiles(
 	const result = await loadCapability(contextFileCapability.id, {
 		cwd: resolvedCwd,
 		disabledExtensions: options.disabledExtensions,
+		canReadContextFile: options.canReadContextFile,
 	});
 
 	// Materialize ContextFile items, expanding any `@path/to/file` includes
@@ -372,7 +375,9 @@ export async function loadProjectContextFiles(
 			const contextFile = item as ContextFile;
 			return {
 				path: contextFile.path,
-				content: await expandAtImports(contextFile.content, contextFile.path),
+				content: await expandAtImports(contextFile.content, contextFile.path, {
+					canReadImport: options.canReadContextFile,
+				}),
 				depth: contextFile.depth,
 			};
 		}),

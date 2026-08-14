@@ -25,12 +25,13 @@ import type {
 	SecurityTargetKind,
 } from "./contracts";
 import { createSecurityScanId } from "./contracts";
-import type { SecurityGitAdapter, SecurityTargetRequest } from "./preflight";
+import type { SecurityGitAdapter, SecurityScanGuard, SecurityTargetRequest } from "./preflight";
 import {
 	assertSecurityScanPlanFresh,
 	createSecurityScanPlan,
 	DEFAULT_SECURITY_GIT_ADAPTER,
 	prepareSecurityOutputDirectory,
+	securityRefDiffPathspecs,
 } from "./preflight";
 import {
 	createNativeSecurityProducer,
@@ -38,7 +39,7 @@ import {
 	createSecurityWorkflowFingerprint,
 } from "./provenance";
 import { createSecurityPublicationTool } from "./publication";
-import { SecurityStore, writeSecurityBundleToDirectory } from "./store";
+import { resolveSecurityProjectDirectoryForCwd, SecurityStore, writeSecurityBundleToDirectory } from "./store";
 
 const SECURITY_SESSION_TOOLS = ["read", "grep", "glob", "lsp", "ast_grep", "task", "security_publish"];
 const SECURITY_WORKFLOW_FINGERPRINT = createSecurityWorkflowFingerprint([
@@ -91,10 +92,14 @@ export interface SecurityPreflightInput {
 	model?: Model;
 	thinkingLevel?: string;
 	signal?: AbortSignal;
+	/** Resource-permission hooks for the scan's implicit read scope and effective output root. */
+	guard?: SecurityScanGuard;
 }
 
 export interface SecurityStartInput {
 	planId: string;
+	/** Rechecks the saved plan's live filesystem surface before execution. */
+	guard?: SecurityScanGuard;
 }
 
 export interface SecurityScanSession {
@@ -135,6 +140,14 @@ export type SecurityScanSessionFactory = (input: SecurityScanSessionFactoryInput
 export interface SecurityCoordinatorDependencies {
 	createSession?: SecurityScanSessionFactory;
 	openStore?: (repositoryRoot: string) => Promise<SecurityStore>;
+	/**
+	 * Resolve the `SecurityStore` project directory `openStore` will use, without
+	 * opening or creating it. Kept alongside `openStore` (rather than derived
+	 * independently) so a caller overriding one keeps the other consistent —
+	 * `preflight`'s pre-open gate must see the same path `openStore` actually
+	 * commits to disk.
+	 */
+	resolveProjectDirectory?: (cwd: string) => Promise<string>;
 	gitAdapter?: SecurityGitAdapter;
 	now?: () => Date;
 	createOperationId?: () => string;
@@ -322,6 +335,7 @@ async function prepareSecurityExecutionTarget(
 	scanId: string,
 	adapter: SecurityGitAdapter,
 	signal: AbortSignal,
+	guard?: SecurityScanGuard,
 ): Promise<PreparedSecurityExecutionTarget> {
 	if (plan.target.kind !== "ref_diff") {
 		return { cwd: plan.repositoryRoot, cleanup: async () => undefined };
@@ -337,7 +351,14 @@ async function prepareSecurityExecutionTarget(
 	try {
 		await git.worktree.add(plan.repositoryRoot, cwd, headRevision, { detach: true, signal });
 		added = true;
-		const diffText = await adapter.diffTree(plan.repositoryRoot, baseRevision, headRevision, signal);
+		const paths = securityRefDiffPathspecs(plan.target.includePaths, plan.target.excludePaths);
+		const changedFiles = [
+			...new Set(await adapter.diffTreeFiles(plan.repositoryRoot, baseRevision, headRevision, { paths, signal })),
+		]
+			.map(file => file.replaceAll("\\", "/"))
+			.sort();
+		guard?.scope?.(changedFiles, plan.repositoryRoot);
+		const diffText = await adapter.diffTree(plan.repositoryRoot, baseRevision, headRevision, { paths, signal });
 		return {
 			cwd,
 			diffText,
@@ -357,6 +378,7 @@ export class SecurityCoordinator {
 	readonly #host: SecurityCoordinatorHost;
 	readonly #createSession: SecurityScanSessionFactory;
 	readonly #openStore: (repositoryRoot: string) => Promise<SecurityStore>;
+	readonly #resolveProjectDirectory: (cwd: string) => Promise<string>;
 	readonly #gitAdapter: SecurityGitAdapter;
 	readonly #now: () => Date;
 	readonly #createOperationId: () => string;
@@ -367,6 +389,9 @@ export class SecurityCoordinator {
 		this.#host = host;
 		this.#createSession = dependencies.createSession ?? createDefaultSecuritySession;
 		this.#openStore = dependencies.openStore ?? (cwd => SecurityStore.openForCwd(cwd));
+		this.#resolveProjectDirectory =
+			dependencies.resolveProjectDirectory ??
+			(async cwd => (await resolveSecurityProjectDirectoryForCwd(cwd)).projectDirectory);
 		this.#gitAdapter = dependencies.gitAdapter ?? DEFAULT_SECURITY_GIT_ADAPTER;
 		this.#now = dependencies.now ?? (() => new Date());
 		this.#createOperationId = dependencies.createOperationId ?? createOperationId;
@@ -374,6 +399,19 @@ export class SecurityCoordinator {
 	async #ensureRecovered(): Promise<void> {
 		this.#recovery ??= this.#recoverInterruptedOperations();
 		await this.#recovery;
+	}
+
+	/**
+	 * Authorize the resolved `SecurityStore` project directory before an
+	 * action opens or mutates it. Re-resolves and re-checks on every call —
+	 * unlike `#ensureRecovered`'s memoized promise, this must never cache an
+	 * authorization decision, since permissions can change between calls
+	 * (e.g. a plan saved while permissions were off, then `start` called
+	 * after `workspace` confinement is enabled).
+	 */
+	async #gateStateDirectory(guard: SecurityScanGuard | undefined): Promise<void> {
+		const projectDirectory = await this.#resolveProjectDirectory(this.#host.cwd);
+		guard?.stateDirectory?.(projectDirectory);
 	}
 
 	async #recoverInterruptedOperations(): Promise<void> {
@@ -421,6 +459,8 @@ export class SecurityCoordinator {
 			input.credentialId,
 			this.#host.sessionId,
 		);
+		const projectDirectory = await this.#resolveProjectDirectory(this.#host.cwd);
+		input.guard?.stateDirectory?.(projectDirectory);
 		const store = await this.#openStore(this.#host.cwd);
 		const workRoot = path.join(store.projectDirectory, "work");
 		await fs.mkdir(workRoot, { recursive: true, mode: 0o700 });
@@ -439,6 +479,7 @@ export class SecurityCoordinator {
 				config: securityConfigSnapshot(this.#host.settings),
 				workflowFingerprint: SECURITY_WORKFLOW_FINGERPRINT,
 				signal: input.signal,
+				...(input.guard ? { guard: input.guard } : {}),
 			},
 			this.#gitAdapter,
 		);
@@ -450,6 +491,7 @@ export class SecurityCoordinator {
 		if (!this.#host.settings.get("security.enabled")) {
 			throw new Error("Security is disabled; enable security.enabled before starting a scan");
 		}
+		await this.#gateStateDirectory(input.guard);
 		await this.#ensureRecovered();
 		const store = await this.#openStore(this.#host.cwd);
 		const plan = await store.getPlan(input.planId);
@@ -459,6 +501,7 @@ export class SecurityCoordinator {
 			{
 				config: securityConfigSnapshot(this.#host.settings),
 				workflowFingerprint: SECURITY_WORKFLOW_FINGERPRINT,
+				guard: input.guard,
 			},
 			this.#gitAdapter,
 		);
@@ -478,7 +521,7 @@ export class SecurityCoordinator {
 		this.#operations.set(operationId, record);
 		ACTIVE_SECURITY_OPERATIONS.add(operationId);
 		const run = async (signal: AbortSignal, reportProgress?: (text: string) => Promise<void>): Promise<void> => {
-			await this.#run(record, plan, store, signal, reportProgress);
+			await this.#run(record, plan, store, signal, reportProgress, input.guard);
 		};
 		const manager = this.#host.asyncJobManager;
 		if (manager) {
@@ -501,7 +544,8 @@ export class SecurityCoordinator {
 		return { ...record.snapshot };
 	}
 
-	async status(operationId: string): Promise<SecurityOperationSnapshot | null> {
+	async status(operationId: string, guard?: SecurityScanGuard): Promise<SecurityOperationSnapshot | null> {
+		await this.#gateStateDirectory(guard);
 		await this.#ensureRecovered();
 		let record = this.#operations.get(operationId);
 		if (!record && !ACTIVE_SECURITY_OPERATIONS.has(operationId)) {
@@ -520,7 +564,8 @@ export class SecurityCoordinator {
 			.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
 	}
 
-	async cancel(operationId: string): Promise<boolean> {
+	async cancel(operationId: string, guard?: SecurityScanGuard): Promise<boolean> {
+		await this.#gateStateDirectory(guard);
 		await this.#ensureRecovered();
 		const record = this.#operations.get(operationId);
 		if (!record) return false;
@@ -552,6 +597,7 @@ export class SecurityCoordinator {
 		store: SecurityStore,
 		signal: AbortSignal,
 		reportProgress?: (text: string) => Promise<void>,
+		guard?: SecurityScanGuard,
 	): Promise<void> {
 		const startedAt = toIsoTimestamp(this.#now);
 		let session: SecurityScanSession | undefined;
@@ -571,6 +617,7 @@ export class SecurityCoordinator {
 				record.snapshot.scanId,
 				this.#gitAdapter,
 				signal,
+				guard,
 			);
 			const activeModel = this.#host.activeModel;
 			const model =
@@ -595,6 +642,7 @@ export class SecurityCoordinator {
 					this.#update(record, "publishing");
 				},
 			});
+			if (signal.aborted) throw signal.reason ?? new Error("Security scan cancelled");
 			session = await this.#createSession({
 				host: this.#host,
 				plan,

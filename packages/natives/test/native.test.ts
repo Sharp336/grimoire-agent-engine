@@ -5,6 +5,7 @@ import * as path from "node:path";
 import {
 	AstMatchStrictness,
 	astEdit,
+	astGrep,
 	astMatch,
 	blockRangeAt,
 	executeShell,
@@ -31,6 +32,25 @@ import {
 } from "../native/index.js";
 
 const addonUrl = new URL("../native/index.js", import.meta.url).href;
+// PR CI intentionally runs native TypeScript tests against the released
+// addon. Probe that binary's actual allowlist capability before registering
+// source-only assertions; post-merge/release builds run them against the
+// newly built addon.
+async function supportsAllowedPaths(): Promise<boolean> {
+	const directory = await fs.mkdtemp(path.join(os.tmpdir(), "natives-allowlist-probe-"));
+	try {
+		await Promise.all([
+			fs.writeFile(path.join(directory, "allowed.ts"), "needle\n"),
+			fs.writeFile(path.join(directory, "denied.ts"), "needle\n"),
+		]);
+		const result = await grep({ pattern: "needle", path: directory, allowedPaths: ["allowed.ts"] });
+		return result.matches.length === 1 && result.matches[0]?.path === "allowed.ts";
+	} finally {
+		await fs.rm(directory, { recursive: true, force: true });
+	}
+}
+
+const nativeSupportsAllowedPaths = await supportsAllowedPaths();
 
 let testDir: string;
 
@@ -251,6 +271,17 @@ describe("pi-natives", () => {
 			expect(result.totalMatches).toBe(1);
 			expect(result.matches.length).toBe(1);
 			expect(result.matches[0].line).toContain("TODO");
+		});
+
+		it.skipIf(!nativeSupportsAllowedPaths)("opens only explicitly allowlisted candidates", async () => {
+			const result = await grep({
+				pattern: "TODO|FIXME",
+				path: testDir,
+				allowedPaths: ["file1.ts"],
+			});
+
+			expect(result.matches).toHaveLength(1);
+			expect(result.matches[0]?.path).toBe("file1.ts");
 		});
 
 		it("should handle literal function-call text with parentheses", async () => {
@@ -970,6 +1001,19 @@ console.log("ok");
 
 		it("rejects an empty language", async () => {
 			await expect(astMatch({ source: "const a = 1;", lang: "  ", patterns: ["const $A = $B"] })).rejects.toThrow();
+		});
+	});
+
+	describe("astGrep", () => {
+		it.skipIf(!nativeSupportsAllowedPaths)("opens only explicitly allowlisted candidates", async () => {
+			const result = await astGrep({
+				patterns: ["export function $NAME() { $$$BODY }"],
+				path: testDir,
+				allowedPaths: ["file1.ts"],
+			});
+
+			expect(result.filesSearched).toBe(1);
+			expect(result.matches[0]?.path).toBe("file1.ts");
 		});
 	});
 });

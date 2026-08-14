@@ -1,0 +1,173 @@
+import { describe, expect, it, vi } from "bun:test";
+import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
+import { BUILTIN_MODE_SLASH_COMMANDS } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-modes";
+import type {
+	ParsedSlashCommand,
+	SlashCommandRuntime,
+	TuiSlashCommandRuntime,
+} from "@oh-my-pi/pi-coding-agent/slash-commands/types";
+
+type Store = Record<string, unknown>;
+
+function acpRuntime(initial?: Store) {
+	const store: Store = { "permissions.profile": "off", ...initial };
+	const get = vi.fn((path: string) => store[path]);
+	const override = vi.fn((path: string, value: unknown) => {
+		store[path] = value;
+	});
+	const set = vi.fn();
+	const output = vi.fn();
+	const refreshSkills = vi.fn(async () => {});
+	const runtime = {
+		session: { settings: { get, override, set }, refreshSkills },
+		output,
+	} as unknown as SlashCommandRuntime;
+	return { get, override, set, output, refreshSkills, runtime, store };
+}
+
+describe("/perm slash command", () => {
+	it("reports the off profile and the tool classes it cannot guard", async () => {
+		const h = acpRuntime();
+
+		const result = await executeAcpBuiltinSlashCommand("/perm", h.runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(h.override).not.toHaveBeenCalled();
+		const text = String(h.output.mock.calls.at(-1)?.[0] ?? "");
+		expect(text).toContain("Permission profile: off");
+		// The honesty surface: Class B tools are named, and — since the gate
+		// short-circuits before the opaque scan ever runs when the profile is
+		// off — the report says they are not checked at all rather than
+		// implying the (never-invoked) literal scan covers them.
+		expect(text).toContain("not checked at all, permission profile is off");
+		expect(text).not.toContain("never a sandbox");
+		expect(text).toContain("bash, browser, computer, eval, hub");
+		expect(text).toContain("MCP, extension, and any other tool absent from the table is treated as Class B.");
+		expect(text).toContain("permissions.profile");
+	});
+
+	it("reports debug and lsp as action-dependent rather than exactly enforced", async () => {
+		// `classifyTool` downgrades `debug launch` and `lsp request` to the
+		// Class B scan per call. A report that listed those tools under "declared
+		// paths enforced exactly" would promise the opposite of what runs.
+		const h = acpRuntime();
+
+		await executeAcpBuiltinSlashCommand("/perm", h.runtime);
+
+		const text = String(h.output.mock.calls.at(-1)?.[0] ?? "");
+		expect(text).toContain("Class A/B (2) — declared paths enforced except these actions");
+		expect(text).toContain("debug (attach, custom_request, evaluate, launch, write_memory)");
+		expect(text).toContain("lsp (request)");
+		const classA = text.split("\n").find(line => line.trimStart().startsWith("Class A ("));
+		expect(classA).not.toContain("debug");
+		expect(classA).not.toContain("lsp");
+	});
+
+	it("switches the profile for the session only, never persisting it", async () => {
+		const h = acpRuntime();
+
+		const result = await executeAcpBuiltinSlashCommand("/perm strict", h.runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(h.override).toHaveBeenCalledWith("permissions.profile", "strict");
+		expect(h.set).not.toHaveBeenCalled();
+		const text = String(h.output.mock.calls.at(-1)?.[0] ?? "");
+		expect(text).toContain("Permission profile: strict.");
+		expect(text).toContain("Switched for this session only.");
+	});
+
+	it("refreshes cached skills before confirming profile switches in ACP and TUI", async () => {
+		const h = acpRuntime();
+		const pending = Promise.withResolvers<void>();
+		h.refreshSkills.mockReturnValueOnce(pending.promise);
+
+		const acpResult = executeAcpBuiltinSlashCommand("/perm strict", h.runtime);
+
+		await Promise.resolve();
+		expect(h.output).not.toHaveBeenCalled();
+		pending.resolve();
+		await expect(acpResult).resolves.toEqual({ consumed: true });
+		expect(h.refreshSkills).toHaveBeenCalledTimes(1);
+
+		const showStatus = vi.fn();
+		const perm = BUILTIN_MODE_SLASH_COMMANDS.find(command => command.name === "perm");
+		expect(perm?.handleTui).toBeDefined();
+		const tuiCommand: ParsedSlashCommand = { name: "perm", args: "workspace", text: "/perm workspace" };
+		const tuiRuntime = {
+			ctx: {
+				session: h.runtime.session,
+				editor: { setText: vi.fn() },
+				showStatus,
+				statusLine: { invalidate: vi.fn() },
+				ui: { requestRender: vi.fn() },
+			},
+		} as unknown as TuiSlashCommandRuntime;
+
+		await perm?.handleTui?.(tuiCommand, tuiRuntime);
+
+		expect(h.refreshSkills).toHaveBeenCalledTimes(2);
+		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining("Permission profile: workspace."));
+	});
+
+	it("resolves the strict profile's effective rules in the report", async () => {
+		const h = acpRuntime({ "permissions.profile": "strict" });
+
+		await executeAcpBuiltinSlashCommand("/perm", h.runtime);
+
+		const text = String(h.output.mock.calls.at(-1)?.[0] ?? "");
+		expect(text).toContain("Confine writes to workspace: yes");
+		expect(text).toContain("Confine reads to workspace: no");
+		expect(text).toContain("Deny read: **/.env");
+		// `.env.example` is carved out of the secret globs; a report that omitted
+		// it would misdescribe what strict actually denies. It is reported under
+		// its own label rather than as an allow rule, because unlike a user's
+		// `permissions.allow.*` entry it does NOT relax workspace confinement.
+		expect(text).toContain("Deny carve-out read (still confined): **/.env.example, **/.env.sample");
+		expect(text).not.toContain("Allow read:");
+	});
+
+	it("reports a user's allow rules apart from the profile's carve-outs", async () => {
+		const h = acpRuntime({ "permissions.profile": "strict", "permissions.allow.write": ["/tmp/**"] });
+
+		await executeAcpBuiltinSlashCommand("/perm", h.runtime);
+
+		const text = String(h.output.mock.calls.at(-1)?.[0] ?? "");
+		expect(text).toContain("Allow write: /tmp/**");
+		expect(text).toContain("Deny carve-out write (still confined): **/.env.example, **/.env.sample");
+	});
+
+	it("bounds the joined rule line to the display-width limit regardless of how many globs are configured", async () => {
+		// Individually-truncated globs used to be joined with no cap on the
+		// combined line - short entries still add up past TRUNCATE_LENGTHS.LINE
+		// once there are enough of them.
+		const manyGlobs = Array.from({ length: 100 }, (_, i) => `**/secret-${i}.env`);
+		const h = acpRuntime({ "permissions.profile": "workspace", "permissions.deny.read": manyGlobs });
+
+		await executeAcpBuiltinSlashCommand("/perm", h.runtime);
+
+		const text = String(h.output.mock.calls.at(-1)?.[0] ?? "");
+		const denyLine = text.split("\n").find(line => line.trimStart().startsWith("Deny read:"));
+		expect(denyLine).toBeDefined();
+		expect(Bun.stringWidth(denyLine ?? "")).toBeLessThanOrEqual(110);
+	});
+
+	it("says Class B is unchecked when the opaque scan is disabled", async () => {
+		const h = acpRuntime({ "permissions.profile": "workspace", "permissions.opaqueToolScan": "off" });
+
+		await executeAcpBuiltinSlashCommand("/perm", h.runtime);
+
+		const text = String(h.output.mock.calls.at(-1)?.[0] ?? "");
+		expect(text).toContain("not checked at all, permissions.opaqueToolScan is off");
+		expect(text).not.toContain("never a sandbox");
+	});
+
+	it("rejects an unknown profile without touching settings", async () => {
+		const h = acpRuntime();
+
+		const result = await executeAcpBuiltinSlashCommand("/perm bogus", h.runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(h.override).not.toHaveBeenCalled();
+		expect(h.output).toHaveBeenCalledWith("Usage: /perm [off|workspace|strict]");
+	});
+});

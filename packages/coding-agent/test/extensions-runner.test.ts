@@ -1973,7 +1973,7 @@ describe("ExtensionRunner", () => {
 				isIdle: () => true,
 				hasQueuedMessages: () => false,
 				abort: () => {},
-				settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) } as never,
+				settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : undefined) } as never,
 			});
 
 			expect(events).toEqual([
@@ -2021,7 +2021,7 @@ describe("ExtensionRunner", () => {
 				hasQueuedMessages: () => false,
 				abort: () => {},
 				settings: {
-					get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}),
+					get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : undefined),
 				} as never,
 				toolCall: {
 					batchId: "batch-preview",
@@ -2077,7 +2077,7 @@ describe("ExtensionRunner", () => {
 					isIdle: () => true,
 					hasQueuedMessages: () => false,
 					abort: () => {},
-					settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) } as never,
+					settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : undefined) } as never,
 				}),
 			).rejects.toThrow("Tool call denied by user: dangerous_tool");
 
@@ -2128,7 +2128,7 @@ describe("ExtensionRunner", () => {
 					isIdle: () => true,
 					hasQueuedMessages: () => false,
 					abort: () => {},
-					settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) } as never,
+					settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : undefined) } as never,
 				}),
 			).rejects.toThrow("dialog aborted");
 
@@ -2175,7 +2175,7 @@ describe("ExtensionRunner", () => {
 			const wrapper = new ExtensionToolWrapper(approvalTool, runner);
 			await expect(
 				(wrapper as ExtensionToolWrapper<any>).execute("call-partial-context", {}, undefined, undefined, {
-					settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) },
+					settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : undefined) },
 				} as never),
 			).rejects.toThrow('Tool "dangerous_tool" requires approval but no interactive UI available.');
 
@@ -2471,7 +2471,7 @@ describe("ExtensionRunner", () => {
 		}
 
 		const yoloContext = {
-			settings: { get: (key: string) => (key === "tools.approvalMode" ? "yolo" : {}) },
+			settings: { get: (key: string) => (key === "tools.approvalMode" ? "yolo" : undefined) },
 		} as never;
 
 		// Minimal runtime init so the approval gate's interactive `select` is wired for prompt-path tests.
@@ -2516,7 +2516,7 @@ describe("ExtensionRunner", () => {
 			isIdle: () => true,
 			hasQueuedMessages: () => false,
 			abort: () => {},
-			settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) },
+			settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : undefined) },
 		} as never;
 
 		it("blocks a revised input that resolves to a deny policy (approval gates the revised args)", async () => {
@@ -2749,7 +2749,7 @@ describe("ExtensionRunner", () => {
 			);
 			const wrapped = new ExtensionToolWrapper(createRecordingTool(recordPath), runner);
 			const xdevContext = {
-				settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) },
+				settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : undefined) },
 				xdevApproved: true,
 			} as never;
 
@@ -2791,7 +2791,7 @@ describe("ExtensionRunner", () => {
 			const wrapped = new ExtensionToolWrapper(tool, runner);
 			let effectiveTier: string | undefined;
 			const xdevContext = {
-				settings: { get: (key: string) => (key === "tools.approvalMode" ? "yolo" : {}) },
+				settings: { get: (key: string) => (key === "tools.approvalMode" ? "yolo" : undefined) },
 				xdevApproved: true,
 				xdevTierResolved: (tier: string) => {
 					effectiveTier = tier;

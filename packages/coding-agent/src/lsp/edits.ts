@@ -1,7 +1,8 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { isEexist, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { hashPath, isEexist, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { formatPathRelativeToCwd } from "../tools/path-utils";
+import type { PathTarget } from "../tools/permissions/types";
 import { ToolError } from "../tools/tool-errors";
 import type {
 	CreateFile,
@@ -289,6 +290,148 @@ function planDocumentChanges(documentChanges: NonNullable<WorkspaceEdit["documen
 	return ops;
 }
 
+/** Every existing entry under `dirPath`, recursively, as absolute paths. */
+async function listDescendantPaths(dirPath: string): Promise<string[]> {
+	const entries = await fs.readdir(dirPath, { recursive: true, withFileTypes: true });
+	return entries.map(entry => path.join(entry.parentPath ?? dirPath, entry.name));
+}
+
+async function statIsDirectory(target: string): Promise<boolean> {
+	try {
+		return (await fs.stat(target)).isDirectory();
+	} catch {
+		// Missing, or a stat error the caller has no better way to react to here:
+		// treat as "not a directory" and fall through to the single-path case,
+		// same as a file rename/delete would.
+		return false;
+	}
+}
+
+function displacementPaths(newPath: string): { dir: string; file: string } {
+	const dir = path.join(path.dirname(newPath), `.omp-displaced-${hashPath(newPath)}`);
+	return { dir, file: path.join(dir, path.basename(newPath)) };
+}
+
+async function renameDisplacementTargets(
+	oldPath: string,
+	newPath: string,
+	overwrite: boolean | undefined,
+): Promise<PathTarget[]> {
+	if (!overwrite) return [];
+	try {
+		const [sourceStat, targetStat] = await Promise.all([fs.lstat(oldPath), fs.lstat(newPath)]);
+		if (sourceStat.dev === targetStat.dev && sourceStat.ino === targetStat.ino) return [];
+		const displaced = displacementPaths(newPath);
+		const targets: PathTarget[] = [
+			{ raw: displaced.dir, access: "write", field: "workspace edit rename displacement" },
+			{ raw: displaced.file, access: "write", field: "workspace edit rename displacement" },
+		];
+		if (!(await statIsDirectory(newPath))) return targets;
+		for (const absolute of await listDescendantPaths(newPath)) {
+			const relative = path.relative(newPath, absolute);
+			targets.push({ raw: absolute, access: "write", field: "workspace edit rename overwritten destination" });
+			targets.push({
+				raw: path.join(displaced.file, relative),
+				access: "write",
+				field: "workspace edit rename displacement",
+			});
+		}
+		return targets;
+	} catch (error) {
+		if (isEnoent(error)) return [];
+		throw error;
+	}
+}
+
+/**
+ * Path targets a `rename` op would touch, expanded to every existing
+ * descendant when `oldUri` names a directory.
+ *
+ * A directory-scoped `RenameFile`/`DeleteFile` is valid per LSP §3.16
+ * (`ResourceOperationKind`), and {@link applyWorkspaceEdit} applies it as one
+ * atomic `fs.rename` on the directory — but the resource gate must still see
+ * every entry that move relocates, not just the two root paths. A server that
+ * only lists the directory root would otherwise smuggle a protected
+ * descendant past a rule scoped to an individual path (finding under review).
+ * Both endpoints of every pair are checked: the source is removed and the
+ * destination is written, mirroring `lsp/tool.ts`'s `enumerateRenamePairs`
+ * for the tool-initiated `rename_file` action.
+ */
+async function renameTargets(oldPath: string, newPath: string, overwrite: boolean | undefined): Promise<PathTarget[]> {
+	const targets: PathTarget[] = [
+		{ raw: oldPath, access: "write", field: "workspace edit rename source" },
+		{ raw: newPath, access: "write", field: "workspace edit rename destination" },
+		...(await renameDisplacementTargets(oldPath, newPath, overwrite)),
+	];
+	if (!(await statIsDirectory(oldPath))) return targets;
+	for (const absolute of await listDescendantPaths(oldPath)) {
+		const relative = path.relative(oldPath, absolute);
+		targets.push({ raw: absolute, access: "write", field: "workspace edit rename source" });
+		targets.push({ raw: path.join(newPath, relative), access: "write", field: "workspace edit rename destination" });
+	}
+	return targets;
+}
+
+async function deleteTargets(target: string): Promise<PathTarget[]> {
+	const targets: PathTarget[] = [{ raw: target, access: "write", field: "workspace edit delete" }];
+	if (!(await statIsDirectory(target))) return targets;
+	for (const absolute of await listDescendantPaths(target)) {
+		targets.push({ raw: absolute, access: "write", field: "workspace edit delete" });
+	}
+	return targets;
+}
+
+/**
+ * Every path target applying `edit` would touch, with the access it would
+ * take on each — for the resource permission gate.
+ *
+ * A `WorkspaceEdit` is *server*-supplied: a rename initiated inside an allowed
+ * file can name any destination the language server chooses, including one
+ * outside every workspace root. The initiating `file` argument is therefore not
+ * the write surface, so callers run this through the resource permission gate
+ * before applying anything (`lsp/tool.ts`'s `applyGuardedWorkspaceEdit`,
+ * `lsp/client.ts`'s `guardedApplyEditDenial`).
+ *
+ * A `text` op is read-then-write: {@link applyTextEdits} loads the current
+ * content before writing the patched result, so a rule that only sees `write`
+ * (e.g. `permissions.deny.read` without a matching `deny.write`) would not
+ * apply to the read half. `create`/`rename`/`delete` never read existing
+ * content — a directory rename/delete moves or removes whatever is there
+ * without inspecting it — so those stay write-only, expanded to every
+ * existing descendant via {@link renameTargets}/{@link deleteTargets}.
+ *
+ * Derived from the same `planDocumentChanges`/`uriToFile` pair
+ * {@link applyWorkspaceEdit} uses, so the set checked and the set written
+ * cannot diverge.
+ */
+export async function workspaceEditPathTargets(edit: WorkspaceEdit): Promise<PathTarget[]> {
+	const targets: PathTarget[] = [];
+	if (edit.documentChanges) {
+		for (const op of planDocumentChanges(edit.documentChanges)) {
+			if (op.kind === "text") {
+				const filePath = uriToFile(op.uri);
+				targets.push({ raw: filePath, access: "read", field: "workspace edit text" });
+				targets.push({ raw: filePath, access: "write", field: "workspace edit text" });
+			} else if (op.kind === "create") {
+				targets.push({ raw: uriToFile(op.uri), access: "write", field: "workspace edit create" });
+			} else if (op.kind === "rename") {
+				targets.push(...(await renameTargets(uriToFile(op.oldUri), uriToFile(op.newUri), op.options?.overwrite)));
+			} else {
+				targets.push(...(await deleteTargets(uriToFile(op.uri))));
+			}
+		}
+	}
+	if (edit.changes) {
+		for (const uri in edit.changes) {
+			if (edit.changes[uri].length === 0) continue;
+			const filePath = uriToFile(uri);
+			targets.push({ raw: filePath, access: "read", field: "workspace edit text" });
+			targets.push({ raw: filePath, access: "write", field: "workspace edit text" });
+		}
+	}
+	return targets;
+}
+
 /** One filesystem mutation actually performed by {@link applyWorkspaceEdit}. */
 export type ExecutedWorkspaceChange =
 	| { kind: "edit"; uri: string }
@@ -302,7 +445,6 @@ export interface WorkspaceEditResult {
 	/** Ops that mutated the filesystem — skipped `ignoreIfExists`/`ignoreIfNotExists` ops are excluded. */
 	executed: ExecutedWorkspaceChange[];
 }
-
 /**
  * Apply a workspace edit (collection of file changes).
  * All text-edit batches are overlap-validated before anything is written so a
@@ -359,10 +501,9 @@ export async function applyWorkspaceEdit(
 				const newPath = uriToFile(op.newUri);
 				await fs.mkdir(path.dirname(newPath), { recursive: true });
 				if (oldPath !== newPath) {
-					// Displace an overwritten destination into a kernel-reserved sibling
-					// temp dir (same filesystem, so the moves stay atomic) instead of
-					// deleting it, so a failed rename (EXDEV, permissions) can restore
-					// it and leave the workspace exactly as it was.
+					// Displace an overwritten destination into a pre-authorized,
+					// same-filesystem sibling instead of deleting it, so a failed
+					// rename (EXDEV, permissions) can restore the workspace.
 					let displaced: { dir: string; file: string } | undefined;
 					try {
 						const targetStat = await fs.lstat(newPath);
@@ -376,15 +517,20 @@ export async function applyWorkspaceEdit(
 						// source, so let fs.rename change the case in place instead.
 						const sourceStat = await fs.lstat(oldPath);
 						if (sourceStat.dev !== targetStat.dev || sourceStat.ino !== targetStat.ino) {
-							const holdDir = await fs.mkdtemp(path.join(path.dirname(newPath), ".omp-displaced-"));
-							const holdFile = path.join(holdDir, path.basename(newPath));
+							const hold = displacementPaths(newPath);
+							// A cancelled previous rename can leave its internal hold
+							// directory behind. This name is reserved scratch space, so
+							// clear it before retrying rather than turning that cleanup
+							// failure into a permanent rename failure.
+							await fs.rm(hold.dir, { recursive: true, force: true });
+							await fs.mkdir(hold.dir);
 							try {
-								await fs.rename(newPath, holdFile);
+								await fs.rename(newPath, hold.file);
 							} catch (error) {
-								await fs.rm(holdDir, { recursive: true, force: true }).catch(() => {});
+								await fs.rm(hold.dir, { recursive: true, force: true }).catch(() => {});
 								throw error;
 							}
-							displaced = { dir: holdDir, file: holdFile };
+							displaced = hold;
 						}
 					} catch (error) {
 						if (!isEnoent(error)) throw error;

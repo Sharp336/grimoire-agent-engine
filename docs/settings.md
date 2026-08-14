@@ -506,6 +506,31 @@ tools:
 
 Individual built-in tools are toggled by their own keys, e.g. `bash.enabled`, `launch.enabled`, `eval.py`, `eval.js`, `glob.enabled`, `grep.enabled`, `fetch.enabled`, `browser.enabled`, `computer.enabled`, `astEdit.enabled`, `astGrep.enabled`, and `web_search.enabled`. The `inspect_image` tool is controlled by the tri-state `inspect_image.mode` (`auto`|`on`|`off`, default `auto`): `auto` exposes it only when the active model lacks native image input, and the `/vision` slash command overrides the mode per session.
 
+### Resource permissions
+
+`permissions.*` is a path-scoped deny layer, orthogonal to the approval keys above and off by default. It can only subtract: a path it allows still faces `tools.approvalMode` and `tools.approval.<tool>`. See [Resource permissions](./permissions.md) for the full model, including which tools it can and cannot enforce soundly.
+
+```yaml
+permissions:
+  profile: strict
+  allow:
+    read:
+      - "config/.env.ci"
+```
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `permissions.profile` | enum | `off` | `off` (no enforcement), `workspace` (writes confined to workspace roots), `strict` (adds built-in secret deny rules). |
+| `permissions.confineWrites` | boolean | profile-derived | Writes must land under `cwd` or a `workspace.additionalDirectories` root. |
+| `permissions.confineReads` | boolean | `false` | Same for reads; off in every profile by default. |
+| `permissions.deny.read` | array | `[]` | `Bun.Glob` path patterns, merged onto the profile's rules. |
+| `permissions.deny.write` | array | `[]` | Same, for writes. |
+| `permissions.allow.read` | array | `[]` | Carve-outs evaluated before any deny rule or confinement check. |
+| `permissions.allow.write` | array | `[]` | Same, for writes. |
+| `permissions.opaqueToolScan` | enum | `deny` | What to do when `bash`, `eval`, or an MCP tool names a denied path literally: `deny`, `prompt`, or `off`. |
+
+Path patterns are `Bun.Glob`, where `*` does **not** cross `/`. A secrets rule is `**/.env`, never `*.env` — a different dialect from `bash.patterns` command globs on purpose.
+
 ### Window-scoped computer use
 
 The disabled-by-default `computer` essential tool captures and controls one real host window through native OS APIs. Numeric targets isolate an application without focusing it or moving the real pointer; the synthetic `desktop` target preserves the previous selected-display composite and global input behavior. It remains separate from `browser`, which manages Chromium/CDP tabs and structured page automation.

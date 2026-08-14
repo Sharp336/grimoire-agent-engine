@@ -57,6 +57,8 @@ import {
 	probeLiteralPathExists,
 	splitPathAndSel,
 } from "./path-utils";
+import { enforceResourcePathTargets, isResourcePathPermitted } from "./permissions/gate";
+import type { PathTarget } from "./permissions/types";
 import { enforcePlanModeWrite, resolvePlanPath, unwrapHashlineHeaderPath } from "./plan-mode-guard";
 import {
 	cachedRenderedString,
@@ -439,6 +441,22 @@ interface ResolvedSqliteWritePath {
 	exists: boolean;
 }
 
+/**
+ * SQLite's rollback-journal and WAL sibling files. A writable open can create
+ * or mutate any of these next to the database itself, depending on the
+ * journal mode persisted in the file, so they need authorizing alongside the
+ * database path itself rather than after the fact.
+ */
+const SQLITE_AUXILIARY_SUFFIXES = ["-journal", "-wal", "-shm"] as const;
+
+function sqliteAuxiliaryPathTargets(sqlitePath: string): PathTarget[] {
+	return SQLITE_AUXILIARY_SUFFIXES.map(suffix => ({
+		raw: `${sqlitePath}${suffix}`,
+		access: "write" as const,
+		field: "path",
+	}));
+}
+
 function isArchivePathNotFound(error: unknown): boolean {
 	if (isEnoent(error)) return true;
 	return typeof error === "object" && error !== null && "code" in error && error.code === "ENOTDIR";
@@ -595,7 +613,10 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		this.description = prompt.render(writeDescription);
 	}
 
-	async #resolveArchiveWritePath(writePath: string): Promise<ResolvedArchiveWritePath | null> {
+	async #resolveArchiveWritePath(
+		writePath: string,
+		context: AgentToolContext | undefined,
+	): Promise<ResolvedArchiveWritePath | null> {
 		const candidates = parseArchivePathCandidates(writePath).filter(candidate => candidate.archivePath !== writePath);
 		if (candidates.length === 0) {
 			return null;
@@ -611,6 +632,17 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 
 		for (const candidate of candidates) {
 			const absolutePath = resolvePlanPath(this.session, candidate.archivePath);
+			// A nested-archive-shaped path (`a.zip:b.tar:c.txt`) yields one
+			// candidate per archive-extension boundary, longest first, and each
+			// one is stat'd here to find which is the real archive — before the
+			// resource gate below ever runs against the winning candidate. Skip
+			// the stat for a candidate the caller has no read access to instead
+			// of probing it: otherwise the presence/absence of a file at an
+			// off-limits path leaks through the exists/not-found branch this
+			// loop takes, independent of whether the call is ultimately allowed.
+			if (!isResourcePathPermitted({ raw: absolutePath, access: "read", field: "path" }, context)) {
+				continue;
+			}
 			try {
 				const stat = await Bun.file(absolutePath).stat();
 				if (stat.isDirectory()) {
@@ -636,6 +668,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 	async #writeArchiveEntry(
 		content: string,
 		resolvedArchivePath: ResolvedArchiveWritePath,
+		context: AgentToolContext | undefined,
 	): Promise<AgentToolResult<WriteToolDetails>> {
 		// Resolve symlinks before the tmp+rename swap: renaming over a symlink
 		// replaces the link itself with a regular file instead of writing
@@ -650,6 +683,25 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		// Rewrites are whole-archive: write to a temp file and rename so a
 		// crash/disk-full mid-write can't destroy the original archive.
 		const tmpPath = `${finalPath}.tmp-${process.pid}`;
+		// `resolvedArchivePath.archivePath` cleared the resource gate above, but
+		// that check ran against the archive's *own* (pre-realpath) spelling —
+		// not `finalPath`, which is what `readArchiveEntries` actually reads and
+		// what `fs.rename` actually overwrites below, nor `tmpPath`, the sibling
+		// the rewrite's bytes land at first. realpath can move `finalPath` off
+		// the string the caller authorized when the archive is a symlink, so
+		// both are re-checked in full rather than assumed to inherit the
+		// archive's grant. Read is only required when an existing archive is
+		// actually read; write covers both the temp file and the rename
+		// destination, which is written to unconditionally (create or update).
+		enforceResourcePathTargets(
+			"write",
+			[
+				...(resolvedArchivePath.exists ? [{ raw: finalPath, access: "read" as const, field: "path" }] : []),
+				{ raw: finalPath, access: "write", field: "path" },
+				{ raw: tmpPath, access: "write", field: "path" },
+			],
+			context,
+		);
 
 		const parentDir = path.dirname(resolvedArchivePath.absolutePath);
 		if (parentDir && parentDir !== ".") {
@@ -692,7 +744,10 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		};
 	}
 
-	async #resolveSqliteWritePath(writePath: string): Promise<ResolvedSqliteWritePath | null> {
+	async #resolveSqliteWritePath(
+		writePath: string,
+		context: AgentToolContext | undefined,
+	): Promise<ResolvedSqliteWritePath | null> {
 		const candidates = parseSqlitePathCandidates(writePath).filter(candidate => candidate.sqlitePath !== writePath);
 		if (candidates.length === 0) {
 			return null;
@@ -712,6 +767,13 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		for (const candidate of candidates) {
 			const target = parseSqliteWriteTarget(candidate.subPath, candidate.queryString);
 			const absolutePath = resolvePlanPath(this.session, candidate.sqlitePath);
+			// As with the archive resolver above, skip the stat/header-sniff for a
+			// candidate the caller has no read access to instead of probing it —
+			// otherwise a deny.read/confineReads rule is bypassed by the mere act
+			// of resolving which candidate is the real sqlite file.
+			if (!isResourcePathPermitted({ raw: absolutePath, access: "read", field: "path" }, context)) {
+				continue;
+			}
 			try {
 				const stat = await Bun.file(absolutePath).stat();
 				if (stat.isDirectory()) {
@@ -891,6 +953,17 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			content: [{ type: "text", text: resultText }],
 			details: { resolvedPath: absolutePath },
 		};
+	}
+
+	#enforceConflictResourcePermissions(entries: readonly ConflictEntry[], context: AgentToolContext | undefined): void {
+		enforceResourcePathTargets(
+			"write",
+			entries.flatMap(entry => [
+				{ raw: entry.absolutePath, access: "read" as const, field: "conflict" },
+				{ raw: entry.absolutePath, access: "write" as const, field: "conflict" },
+			]),
+			context,
+		);
 	}
 
 	/**
@@ -1198,6 +1271,12 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 						`Conflict URI scope '/${conflictUri.scope}' is read-only — read \`conflict://${conflictUri.id}/${conflictUri.scope}\` to inspect that side. To write, drop the scope (\`conflict://${conflictUri.id}\`) and put the chosen content (or shorthand like \`@${conflictUri.scope}\`) in \`content\`.`,
 					);
 				}
+				const history = getConflictHistory(this.session);
+				const entries =
+					conflictUri.id === "*"
+						? history.entries()
+						: [history.get(conflictUri.id)].filter((entry): entry is ConflictEntry => entry !== undefined);
+				this.#enforceConflictResourcePermissions(entries, context);
 				emitWriteProgress(onUpdate, cleanContent, path);
 				const result =
 					conflictUri.id === "*"
@@ -1211,12 +1290,21 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				}
 				return result;
 			}
-			const resolvedArchivePath = await this.#resolveArchiveWritePath(path);
+			const resolvedArchivePath = await this.#resolveArchiveWritePath(path, context);
 			if (resolvedArchivePath) {
 				enforcePlanModeWrite(this.session, resolvedArchivePath.archivePath, {
 					op: resolvedArchivePath.exists ? "update" : "create",
 				});
-
+				enforceResourcePathTargets(
+					"write",
+					[
+						{ raw: resolvedArchivePath.archivePath, access: "write", field: "path" },
+						...(resolvedArchivePath.exists
+							? [{ raw: resolvedArchivePath.archivePath, access: "read" as const, field: "path" }]
+							: []),
+					],
+					context,
+				);
 				emitWriteProgress(
 					onUpdate,
 					cleanContent,
@@ -1225,7 +1313,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					}`,
 					resolvedArchivePath.absolutePath,
 				);
-				const archiveResult = await this.#writeArchiveEntry(cleanContent, resolvedArchivePath);
+				const archiveResult = await this.#writeArchiveEntry(cleanContent, resolvedArchivePath, context);
 				if (stripped) {
 					const firstText = archiveResult.content.find(
 						(block): block is { type: "text"; text: string } =>
@@ -1238,9 +1326,20 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				return archiveResult;
 			}
 
-			const resolvedSqlitePath = await this.#resolveSqliteWritePath(path);
+			const resolvedSqlitePath = await this.#resolveSqliteWritePath(path, context);
 			if (resolvedSqlitePath) {
 				enforcePlanModeWrite(this.session, resolvedSqlitePath.sqlitePath, { op: "update" });
+				enforceResourcePathTargets(
+					"write",
+					[
+						{ raw: resolvedSqlitePath.sqlitePath, access: "write", field: "path" },
+						...(resolvedSqlitePath.exists
+							? [{ raw: resolvedSqlitePath.sqlitePath, access: "read" as const, field: "path" }]
+							: []),
+						...sqliteAuxiliaryPathTargets(resolvedSqlitePath.sqlitePath),
+					],
+					context,
+				);
 
 				emitWriteProgress(onUpdate, cleanContent, path, resolvedSqlitePath.absolutePath);
 				const sqliteResult = await this.#writeSqliteRow(path, cleanContent, resolvedSqlitePath);
@@ -1263,6 +1362,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 
 			// Check if file exists and is auto-generated before overwriting
 			if (await fs.exists(absolutePath)) {
+				enforceResourcePathTargets("write", [{ raw: path, access: "read", field: "path" }], context);
 				await assertEditableFile(absolutePath, path, this.session.settings);
 			}
 

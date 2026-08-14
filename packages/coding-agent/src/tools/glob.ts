@@ -30,6 +30,7 @@ import {
 	resolveToCwd,
 	toPathList,
 } from "./path-utils";
+import { isResourcePathPermitted } from "./permissions/gate";
 import {
 	createCachedComponent,
 	formatCount,
@@ -54,6 +55,8 @@ export type GlobToolInput = typeof findSchema.infer;
 const DEFAULT_LIMIT = 200;
 const MAX_LIMIT = 200;
 const DEFAULT_GLOB_TIMEOUT_MS = 5000;
+/** Bounded second-pass capacity for permission-filtered mtime-ranked scans. */
+const MAX_PERMISSION_FALLBACK_RESULTS = MAX_LIMIT * 16;
 
 export interface GlobToolDetails {
 	truncation?: TruncationResult;
@@ -153,7 +156,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 		params: typeof findSchema.infer,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<GlobToolDetails>,
-		_context?: AgentToolContext,
+		toolContext?: AgentToolContext,
 	): Promise<AgentToolResult<GlobToolDetails>> {
 		const { path: pathInput, limit, hidden, gitignore } = params;
 
@@ -279,6 +282,15 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 					trailingSlash: fileType === natives.FileType.Dir || hadTrailingSlash,
 				});
 			};
+			const isPermittedMatch = (matchPath: string, base: string): boolean =>
+				isResourcePathPermitted(
+					{
+						raw: path.isAbsolute(matchPath) ? matchPath : path.resolve(base, matchPath),
+						access: "read",
+						field: "match",
+					},
+					toolContext,
+				);
 
 			const missingPathsNote =
 				missingPaths.length > 0 ? `Skipped missing paths: ${missingPaths.join(", ")}` : undefined;
@@ -298,10 +310,9 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 						cwd: this.session.cwd,
 						missingPaths: missingPaths.length > 0 ? missingPaths : undefined,
 					};
-					// A timed-out empty result is an incomplete scan, not a verified
-					// absence — never emit the definitive "No files found" claim next
-					// to a timeout notice (the two statements contradict each other).
-					const parts = opts?.timedOut ? [] : ["No files found matching pattern"];
+					// An empty partial scan is not verified absence — never emit
+					// "No files found" beside an incompleteness notice.
+					const parts = forceTruncated ? [] : ["No files found matching pattern"];
 					if (notice) parts.push(notice);
 					if (missingPathsNote) parts.push(missingPathsNote);
 					// Zero results is useless regardless of notices: the follow-up
@@ -354,13 +365,19 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 						}
 						if (!target.hasGlob && customOps.stat) {
 							const stat = await customOps.stat(target.searchPath);
-							if (stat.isFile()) return [formatScopePath(target.searchPath)];
+							if (stat.isFile()) {
+								return isPermittedMatch(target.searchPath, target.searchPath)
+									? [formatScopePath(target.searchPath)]
+									: [];
+							}
 						}
 						const results = await customOps.glob(target.globPattern, target.searchPath, {
 							ignore: ["**/node_modules/**", "**/.git/**"],
 							limit: effectiveLimit,
 						});
-						return results.map(matchPath => formatMatchPath(matchPath, target.searchPath));
+						return results
+							.filter(matchPath => isPermittedMatch(matchPath, target.searchPath))
+							.map(matchPath => formatMatchPath(matchPath, target.searchPath));
 					}),
 				);
 				const seen = new Set<string>();
@@ -400,6 +417,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 				(base: string) =>
 				(err: Error | null, match: natives.GlobMatch | null): void => {
 					if (err || combinedSignal.aborted || !match?.path) return;
+					if (!isPermittedMatch(match.path, base)) return;
 					const relativePath = formatMatchPath(match.path, base, match.fileType);
 					if (streamed.has(relativePath)) return;
 					streamed.add(relativePath);
@@ -409,7 +427,9 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 				};
 
 			let timedOut = false;
-			const runTarget = async (target: GlobTarget): Promise<Array<{ path: string; mtime: number }>> => {
+			const runTarget = async (
+				target: GlobTarget,
+			): Promise<{ matches: Array<{ path: string; mtime: number }>; permissionFallbackTruncated: boolean }> => {
 				throwIfAborted(signal);
 				let stat: fs.Stats;
 				try {
@@ -419,25 +439,32 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 					// "Path not found" instead of leaking the raw errno (issue #7597).
 					if (isEnoent(err) || hasFsCode(err, "ENAMETOOLONG")) {
 						if (isSingle) throw new ToolError(`Path not found: ${scopePath}`);
-						return [];
+						return { matches: [], permissionFallbackTruncated: false };
 					}
 					throw err;
 				}
 				if (!target.hasGlob && stat.isFile()) {
-					return [{ path: formatScopePath(target.searchPath), mtime: stat.mtimeMs }];
+					return isPermittedMatch(target.searchPath, target.searchPath)
+						? {
+								matches: [{ path: formatScopePath(target.searchPath), mtime: stat.mtimeMs }],
+								permissionFallbackTruncated: false,
+							}
+						: { matches: [], permissionFallbackTruncated: false };
 				}
 				if (!stat.isDirectory()) {
 					if (isSingle) throw new ToolError(`Path is not a directory: ${target.searchPath}`);
-					return [];
+					return { matches: [], permissionFallbackTruncated: false };
 				}
-				try {
+				const collectMatches = async (
+					nativeMaxResults: number | undefined,
+				): Promise<{ matches: Array<{ path: string; mtime: number }>; nativeCount: number }> => {
 					const result = await untilAborted(combinedSignal, () =>
 						natives.glob(
 							{
 								pattern: target.globPattern,
 								path: target.searchPath,
 								hidden: includeHidden,
-								maxResults: effectiveLimit,
+								maxResults: nativeMaxResults,
 								sortByMtime: true,
 								gitignore: useGitignore,
 								// parseFindPattern explicitly prepends "**/" when the user's
@@ -455,18 +482,43 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 					throwIfAborted(signal);
 					const out: Array<{ path: string; mtime: number }> = [];
 					for (const match of result.matches) {
-						if (!match.path) continue;
+						if (!match.path || !isPermittedMatch(match.path, target.searchPath)) continue;
 						out.push({
 							path: formatMatchPath(match.path, target.searchPath, match.fileType),
 							mtime: match.mtime ?? 0,
 						});
 					}
-					return out;
+					return { matches: out, nativeCount: result.matches.length };
+				};
+				try {
+					let { matches: permitted, nativeCount } = await collectMatches(effectiveLimit);
+					// natives.glob ranks by mtime and truncates before permission
+					// filtering. Widen the page geometrically when denied entries
+					// fill it, stopping as soon as enough permitted matches exist,
+					// the native result is exhausted, or the bounded fallback cap is
+					// reached. Passing `undefined` here maps to `usize::MAX` and
+					// retains/streams the entire tree for a small caller limit.
+					let nativeLimit = effectiveLimit;
+					while (
+						permitted.length < effectiveLimit &&
+						nativeCount >= nativeLimit &&
+						nativeLimit < MAX_PERMISSION_FALLBACK_RESULTS
+					) {
+						nativeLimit = Math.min(nativeLimit * 2, MAX_PERMISSION_FALLBACK_RESULTS);
+						({ matches: permitted, nativeCount } = await collectMatches(nativeLimit));
+					}
+					return {
+						matches: permitted,
+						permissionFallbackTruncated:
+							permitted.length < effectiveLimit &&
+							nativeCount >= nativeLimit &&
+							nativeLimit >= MAX_PERMISSION_FALLBACK_RESULTS,
+					};
 				} catch (error) {
 					if (error instanceof Error && error.name === "AbortError") {
 						if (timeoutSignal.aborted && !signal?.aborted) {
 							timedOut = true;
-							return [];
+							return { matches: [], permissionFallbackTruncated: false };
 						}
 						throw new ToolAbortError();
 					}
@@ -500,15 +552,20 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			// plus dedup yields the correct top-N across all roots.
 			const seen = new Set<string>();
 			const merged: Array<{ path: string; mtime: number }> = [];
-			for (const group of perTarget) {
-				for (const entry of group) {
+			for (const { matches } of perTarget) {
+				for (const entry of matches) {
 					if (seen.has(entry.path)) continue;
 					seen.add(entry.path);
 					merged.push(entry);
 				}
 			}
 			merged.sort((a, b) => b.mtime - a.mtime);
-			return buildResult(merged.map(entry => entry.path));
+			const permissionFallbackTruncated = perTarget.some(result => result.permissionFallbackTruncated);
+			const permittedPaths = merged.map(entry => entry.path);
+			const fallbackNotice = permissionFallbackTruncated
+				? `Glob reached the ${MAX_PERMISSION_FALLBACK_RESULTS}-match permission scan cap; returning ${permittedPaths.length} permitted matches — results are incomplete, scope the search to a deeper directory instead of retrying blindly`
+				: undefined;
+			return buildResult(permittedPaths, { notice: fallbackNotice, forceTruncated: permissionFallbackTruncated });
 		});
 	}
 }

@@ -8,7 +8,7 @@ export {
 	LSP_READONLY_ACTIONS,
 	warmupLspServers,
 } from "./servers";
-export { LspTool } from "./tool";
+export { applyGuardedWorkspaceEdit, guardLocationReads, LspTool } from "./tool";
 export type { LspToolDetails } from "./types";
 export type {
 	WritethroughCallback,

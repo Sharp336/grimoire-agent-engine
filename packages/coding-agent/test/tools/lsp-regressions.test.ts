@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentToolResult, RenderResultOptions } from "@oh-my-pi/pi-agent-core";
+import type { AgentToolContext, AgentToolResult, RenderResultOptions } from "@oh-my-pi/pi-agent-core";
 import { arkToWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { preloadPluginRoots } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
@@ -24,6 +24,7 @@ import {
 	type CreateFile,
 	type DeleteFile,
 	type Diagnostic,
+	type Location,
 	type LspClient,
 	type LspToolDetails,
 	lspSchema,
@@ -59,8 +60,8 @@ import { getLanguageFromPath } from "../../src/utils/lang-from-path";
 const lspTestSettings = Settings.isolated();
 
 /** Minimal LSP tool session: production always supplies `settings`; these tests only need cwd + a default settings stub. */
-function makeLspSession(cwd: string): ToolSession {
-	return { cwd, settings: lspTestSettings } as ToolSession;
+function makeLspSession(cwd: string, settings = lspTestSettings): ToolSession {
+	return { cwd, settings } as ToolSession;
 }
 
 interface RpcMessage {
@@ -466,6 +467,130 @@ describe("lsp regressions", () => {
 			expect(server.received.filter(message => message.method === "initialize")).toHaveLength(1);
 		} finally {
 			initialize.resolve();
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
+	it("stamps the latest caller's permission context onto a client still initializing under another session's lock", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-pending-context-");
+		const initialize = Promise.withResolvers<void>();
+		try {
+			const server = installFakeLsp(async (message, srv) => {
+				if (message.method === "initialize") {
+					await initialize.promise;
+					srv.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
+				} else if (message.method === "shutdown") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					srv.exit(0);
+				}
+			});
+			const config: ServerConfig = {
+				command: "fake-pending-context-lsp",
+				fileTypes: ["ts"],
+				rootMarkers: [],
+			};
+
+			const firstContext = { settings: Settings.isolated(), getAdditionalDirectories: () => [] };
+			const secondContext = { settings: Settings.isolated(), getAdditionalDirectories: () => [] };
+
+			const startingClient = lspClient.getOrCreateClient(config, tempDir.path(), 1_000, undefined, firstContext);
+			await server.waitFor(message => message.method === "initialize");
+			// Second session overlaps during init and takes the existingLock branch.
+			const overlappingClient = lspClient.getOrCreateClient(config, tempDir.path(), 1_000, undefined, secondContext);
+
+			initialize.resolve();
+			const [first, second] = await Promise.all([startingClient, overlappingClient]);
+			expect(second).toBe(first);
+			// The client the second session receives must be checked against its own
+			// context on the next server-pushed workspace/applyEdit, not the first
+			// session's — otherwise a stricter session inherits a laxer one's grants.
+			expect(first.permissionContext).toBe(secondContext);
+		} finally {
+			initialize.resolve();
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
+	it("checks a server-pushed workspace/applyEdit against the session whose in-flight request provoked it, not a session that merely shares the client", async () => {
+		// Stamping `client.permissionContext` on every `getOrCreateClient` call
+		// (the mechanism the previous two tests exercise) is a single mutable
+		// slot shared by every session that touches this command+cwd client. A
+		// session B that calls `getOrCreateClient` while session A's own
+		// `workspace/executeCommand` is still outstanding must not steal control
+		// of the `workspace/applyEdit` push A's request provokes — that push is
+		// checked against `PendingRequest.permissionContext`, recorded when
+		// `sendRequest` sent A's still-pending request, not the client-wide
+		// default B just overwrote (finding under review).
+		const tempDir = TempDir.createSync("@omp-lsp-applyedit-context-");
+		try {
+			const server = installFakeLsp(async (message, srv) => {
+				if (message.method === "initialize") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
+				} else if (message.method === "shutdown") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					srv.exit(0);
+				}
+			});
+			const config: ServerConfig = {
+				command: "fake-applyedit-context-lsp",
+				fileTypes: ["ts"],
+				rootMarkers: [],
+			};
+
+			const strictContext = {
+				settings: Settings.isolated({ "permissions.profile": "strict" }),
+				getAdditionalDirectories: () => [],
+			};
+			const offContext = { settings: Settings.isolated(), getAdditionalDirectories: () => [] };
+
+			const client = await lspClient.getOrCreateClient(config, tempDir.path(), 1_000, undefined, strictContext);
+
+			// Session A's `workspace/executeCommand` is the request the server is
+			// mid-handling when it pushes the edit below.
+			const executeCommandPromise = lspClient.sendRequest(
+				client,
+				"workspace/executeCommand",
+				{ command: "test.command", arguments: [] },
+				undefined,
+				undefined,
+				strictContext,
+			);
+			const executeCommandMessage = await server.waitFor(message => message.method === "workspace/executeCommand");
+
+			// Session B shares the same server + cwd and calls `getOrCreateClient`
+			// while A's executeCommand is still outstanding, overwriting the
+			// client-wide default with its own laxer context.
+			await lspClient.getOrCreateClient(config, tempDir.path(), 1_000, undefined, offContext);
+			expect(client.permissionContext).toBe(offContext);
+
+			const deniedPath = path.join(tempDir.path(), ".env");
+			server.send({
+				jsonrpc: "2.0",
+				id: "push-1",
+				method: "workspace/applyEdit",
+				params: {
+					edit: {
+						changes: {
+							[fileToUri(deniedPath)]: [
+								{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }, newText: "x" },
+							],
+						},
+					},
+				},
+			});
+
+			const response = await server.waitFor(message => message.id === "push-1");
+			const result = response.result as { applied: boolean; failureReason?: string };
+			expect(result.applied).toBe(false);
+			expect(result.failureReason).toContain("**/.env");
+
+			server.send({ jsonrpc: "2.0", id: executeCommandMessage.id, result: null });
+			await executeCommandPromise;
+		} finally {
 			await lspClient.shutdownAll();
 			tempDir.removeSync();
 		}
@@ -3530,7 +3655,13 @@ describe("lsp regressions", () => {
 			expect(loadConfigSpy).toHaveBeenCalledTimes(3);
 			expect(starOutput).toContain("Reloaded test-lsp");
 			expect(omittedOutput).toContain("Reloaded test-lsp");
-			expect(lspClient.getOrCreateClient).toHaveBeenCalledWith(server, tempDir.path(), undefined, expect.anything());
+			expect(lspClient.getOrCreateClient).toHaveBeenCalledWith(
+				server,
+				tempDir.path(),
+				undefined,
+				expect.anything(),
+				expect.anything(),
+			);
 		} finally {
 			vi.restoreAllMocks();
 			tempDir.removeSync();
@@ -4205,6 +4336,243 @@ describe("lsp regressions", () => {
 				tempDir.removeSync();
 			}
 		});
+	});
+});
+
+describe("references beyond REFERENCE_CONTEXT_LIMIT respect resource permissions", () => {
+	it("filters a denied plain reference instead of leaking its path and line", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-references-perm-");
+		try {
+			const cwd = tempDir.path();
+			const mainFile = path.join(cwd, "src", "main.ts");
+			await Bun.write(mainFile, "export const value = 1;\n".repeat(60));
+			const secretFile = path.join(cwd, ".env");
+			await Bun.write(secretFile, "SECRET=1\n");
+			const otherFile = path.join(cwd, "src", "other.ts");
+			await Bun.write(otherFile, "export const other = 2;\n");
+
+			const server: ServerConfig = { command: "test-lsp", fileTypes: ["ts"], rootMarkers: [] };
+			const client: LspClient = {
+				name: "test-lsp",
+				cwd,
+				config: server,
+				proc: {
+					stdin: { write() {}, flush: async () => {} },
+				} as unknown as LspClient["proc"],
+				requestId: 0,
+				diagnostics: new Map(),
+				diagnosticsVersion: 0,
+				openFiles: new Map(),
+				pendingRequests: new Map(),
+				messageBuffer: new Uint8Array(),
+				isReading: false,
+				status: "ready",
+				lastActivity: Date.now(),
+				writeQueue: Promise.resolve(),
+				activeProgressTokens: new Set(),
+				projectLoaded: Promise.resolve(),
+				resolveProjectLoaded: () => {},
+			};
+
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+				servers: { "test-lsp": server },
+				idleTimeoutMs: undefined,
+			});
+			vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["test-lsp", server]]);
+			vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
+			vi.spyOn(lspClient, "ensureFileOpen").mockResolvedValue();
+			vi.spyOn(lspClient, "sendNotification").mockResolvedValue();
+
+			// 50 contextual (opened) references, all in the permitted `mainFile`, plus
+			// two references past REFERENCE_CONTEXT_LIMIT: one in a `strict`-denied
+			// `.env`, one in another permitted file.
+			const contextualLocations: Location[] = Array.from({ length: 50 }, (_, i) => ({
+				uri: fileToUri(mainFile),
+				range: { start: { line: i, character: 0 }, end: { line: i, character: 5 } },
+			}));
+			const deniedPlainLocation: Location = {
+				uri: fileToUri(secretFile),
+				range: { start: { line: 0, character: 0 }, end: { line: 0, character: 6 } },
+			};
+			const permittedPlainLocation: Location = {
+				uri: fileToUri(otherFile),
+				range: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } },
+			};
+			vi.spyOn(lspClient, "sendRequest").mockResolvedValue([
+				...contextualLocations,
+				deniedPlainLocation,
+				permittedPlainLocation,
+			]);
+
+			const toolContext = {
+				sessionManager: {
+					getCwd: () => cwd,
+					getAdditionalDirectories: () => [],
+					getSessionId: () => "test-session",
+				},
+				settings: Settings.isolated({ "permissions.profile": "strict" }),
+			} as unknown as AgentToolContext;
+
+			const tool = new LspTool(makeLspSession(cwd));
+			const result = await tool.execute(
+				"references-perm-test",
+				{ action: "references", file: mainFile, line: 1, symbol: "value", timeout: 5 },
+				undefined,
+				undefined,
+				toolContext,
+			);
+
+			const output = result.content
+				.filter(block => block.type === "text")
+				.map(block => block.text)
+				.join("\n");
+
+			expect(output).toContain("Found 52 reference(s)");
+			expect(output).toContain("other.ts");
+			expect(output).toContain("... 1 additional reference(s) shown without context");
+			expect(output).not.toContain(".env");
+		} finally {
+			vi.restoreAllMocks();
+			tempDir.removeSync();
+		}
+	});
+});
+
+describe("LSP configuration permissions", () => {
+	it("rejects an existing denied configuration file before loading it for a pathless status request", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-config-permissions-");
+		const cwd = tempDir.path();
+		const configPath = path.join(cwd, ".omp", "lsp.json");
+		const settings = Settings.isolated({
+			"permissions.profile": "workspace",
+			"permissions.deny.read": [configPath],
+		});
+		try {
+			fs.mkdirSync(path.dirname(configPath), { recursive: true });
+			fs.writeFileSync(configPath, JSON.stringify({ servers: {} }));
+			const toolContext = {
+				sessionManager: {
+					getCwd: () => cwd,
+					getAdditionalDirectories: () => [],
+					getSessionId: () => "lsp-config-permissions",
+				},
+				settings,
+			} as unknown as AgentToolContext;
+			const tool = new LspTool(makeLspSession(cwd, settings));
+
+			await expect(
+				tool.execute("lsp-config-permissions", { action: "status" }, undefined, undefined, toolContext),
+			).rejects.toThrow(configPath);
+		} finally {
+			configCache.delete(cwd);
+			tempDir.removeSync();
+		}
+	});
+});
+
+describe("LSP diagnostics permissions", () => {
+	// The finding: the pre-execution gate only ever authorized the declared
+	// literal `file` spelling (a glob root), but every concrete file the glob
+	// actually expands to is opened, refreshed, and read for diagnostics
+	// without ever reauthorizing it.
+	it("denies a diagnostics glob target a deny.read rule matches, before opening it", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-diagnostics-permissions-");
+		const cwd = tempDir.path();
+		const targetFile = path.join(cwd, "secret.ts");
+		try {
+			fs.writeFileSync(targetFile, "export const secret = 1;\n");
+			const settings = Settings.isolated({
+				"permissions.profile": "workspace",
+				"permissions.deny.read": ["**/secret.ts"],
+			});
+			const toolContext = {
+				sessionManager: {
+					getCwd: () => cwd,
+					getAdditionalDirectories: () => [],
+					getSessionId: () => "lsp-diagnostics-permissions",
+				},
+				settings,
+			} as unknown as AgentToolContext;
+			const tool = new LspTool(makeLspSession(cwd, settings));
+
+			await expect(
+				tool.execute(
+					"lsp-diagnostics-glob-denied",
+					{ action: "diagnostics", file: targetFile, timeout: 5 },
+					undefined,
+					undefined,
+					toolContext,
+				),
+			).rejects.toThrow("**/secret.ts");
+		} finally {
+			configCache.delete(cwd);
+			tempDir.removeSync();
+		}
+	});
+
+	// The finding: `runWorkspaceDiagnostics` starts an unconstrained
+	// whole-project compiler subprocess with no filesystem scope the gate can
+	// enforce, so a `file: "*"` request bypassed any active read restriction
+	// entirely.
+	it("refuses workspace-wide diagnostics under an active read restriction", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-workspace-diagnostics-permissions-");
+		const cwd = tempDir.path();
+		try {
+			const settings = Settings.isolated({
+				"permissions.profile": "workspace",
+				"permissions.deny.read": ["**/*.env"],
+			});
+			const toolContext = {
+				sessionManager: {
+					getCwd: () => cwd,
+					getAdditionalDirectories: () => [],
+					getSessionId: () => "lsp-workspace-diagnostics-permissions",
+				},
+				settings,
+			} as unknown as AgentToolContext;
+			const tool = new LspTool(makeLspSession(cwd, settings));
+
+			await expect(
+				tool.execute(
+					"lsp-workspace-diagnostics-denied",
+					{ action: "diagnostics", file: "*" },
+					undefined,
+					undefined,
+					toolContext,
+				),
+			).rejects.toThrow(/permissions\.deny\.read|unconstrained/);
+		} finally {
+			configCache.delete(cwd);
+			tempDir.removeSync();
+		}
+	});
+
+	it("still permits workspace-wide diagnostics when the permission profile is off (the default)", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-workspace-diagnostics-off-");
+		const cwd = tempDir.path();
+		try {
+			const toolContext = {
+				sessionManager: {
+					getCwd: () => cwd,
+					getAdditionalDirectories: () => [],
+					getSessionId: () => "lsp-workspace-diagnostics-off",
+				},
+				settings: Settings.isolated(),
+			} as unknown as AgentToolContext;
+			const tool = new LspTool(makeLspSession(cwd));
+
+			const result = await tool.execute(
+				"lsp-workspace-diagnostics-off",
+				{ action: "diagnostics", file: "*" },
+				undefined,
+				undefined,
+				toolContext,
+			);
+			expect(result.details).toMatchObject({ success: true });
+		} finally {
+			configCache.delete(cwd);
+			tempDir.removeSync();
+		}
 	});
 });
 

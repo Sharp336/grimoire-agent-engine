@@ -7,7 +7,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
-import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
+import { $env, prompt } from "@oh-my-pi/pi-utils";
 import { resolveAgentModelSelection } from "../config/model-resolver";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
@@ -20,6 +20,11 @@ import type { TaskEffort } from "../thinking";
 import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../tools/hub";
 import { buildOutputValidator } from "../tools/output-schema-validator";
+import { loadPermissionsConfig } from "../tools/permissions/config";
+import { checkStructuredTargets, PermissionDeniedError } from "../tools/permissions/gate";
+import { decideTarget } from "../tools/permissions/resolve";
+import type { PathTarget, PermissionRoots } from "../tools/permissions/types";
+import * as git from "../utils/git";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
 import { type ExecutorOptions, runSubprocess } from "./executor";
@@ -28,7 +33,6 @@ import {
 	type IsolationContext,
 	makeIsolationCommitMessage,
 	mergeIsolatedChanges,
-	prepareIsolationContext,
 	runIsolatedSubprocess,
 } from "./isolation-runner";
 import { generateTaskName } from "./name-generator";
@@ -41,7 +45,14 @@ import {
 	type SingleResult,
 	type StructuredSubagentOutput,
 } from "./types";
-import { type NestedRepoPatch, parseIsolationMode } from "./worktree";
+import {
+	captureBaseline,
+	discoverNestedRepos,
+	getRepoRoot,
+	getTaskIsolationBaseDir,
+	type NestedRepoPatch,
+	parseIsolationMode,
+} from "./worktree";
 
 /** Validation behavior requested for an effective output schema. */
 export type StructuredSubagentSchemaMode = "permissive" | "strict";
@@ -173,6 +184,107 @@ function sanitizeAgentId(value: string | undefined): string | undefined {
 	return sanitized || undefined;
 }
 
+/**
+ * Authorize the source repo and the isolation directory `ensureIsolation` is
+ * about to materialize, against the same resource permission policy every
+ * other tool call faces.
+ *
+ * `task` is classified pathless (`tool-path-targets.ts`) because its own
+ * free-text prompt carries no path — the subagent's later tool calls are
+ * normally where enforcement belongs. Isolated execution breaks that: before
+ * `ensureIsolation` materializes the Git-tracked and non-ignored untracked
+ * paths from `repoRoot` into a directory under the agent-managed worktree root
+ * (normally `~/.omp/wt`), which sits outside the session's workspace roots.
+ * Both sides of that operation — the root plus each source file the Git
+ * worktree backend can materialize — are declared as ordinary read/write
+ * targets and run through the unmodified decision procedure, so
+ * `permissions.confineWrites`, `permissions.deny.read`/`.write`, and the
+ * user's own `permissions.allow.*` escape hatch all apply exactly as they
+ * would to a declared tool argument.
+ *
+ * `git ls-files` at `repoRoot` alone under-enumerates: a nested git repo
+ * (untracked `.git` directory, not a submodule) is invisible to it exactly
+ * like a submodule is, whether or not the nested repo's directory is itself
+ * gitignored. `captureBaseline` ({@link discoverNestedRepos}) walks the real
+ * filesystem to find these and reads their working trees too, so this must
+ * enumerate the identical set of nested repos and their own tracked/untracked
+ * files as additional read targets — otherwise a denied source inside one is
+ * captured (and its bytes read off disk) before the gate ever sees it.
+ *
+ * A no-op under `permissions.profile: off` (the default), like every other
+ * entry point into this layer.
+ */
+async function authorizeIsolationTargets(session: ToolSession, repoRoot: string, isolationDir: string): Promise<void> {
+	const policy = loadPermissionsConfig(session.settings);
+	if (!policy) return;
+	const roots: PermissionRoots = {
+		cwd: session.cwd,
+		additionalDirectories: [...(session.additionalDirectories ?? [])],
+	};
+	const [sourcePaths, nestedRepoPaths] = await Promise.all([
+		git.ls.files(repoRoot, { cached: true, others: true, excludeStandard: true }),
+		discoverNestedRepos(repoRoot),
+	]);
+	const nestedTargets = await Promise.all(
+		nestedRepoPaths.map(async nestedRelativePath => {
+			const nestedRoot = path.join(repoRoot, nestedRelativePath);
+			const nestedSourcePaths = await git.ls.files(nestedRoot, {
+				cached: true,
+				others: true,
+				excludeStandard: true,
+			});
+			return [
+				{ raw: nestedRoot, access: "read" as const, field: "task.isolation.source" },
+				...nestedSourcePaths.map(sourcePath => ({
+					raw: path.join(nestedRoot, sourcePath),
+					access: "read" as const,
+					field: "task.isolation.source",
+				})),
+			];
+		}),
+	);
+	const targets: PathTarget[] = [
+		{ raw: repoRoot, access: "read", field: "task.isolation.source" },
+		...sourcePaths.map(sourcePath => ({
+			raw: path.join(repoRoot, sourcePath),
+			access: "read" as const,
+			field: "task.isolation.source",
+		})),
+		...nestedTargets.flat(),
+		{ raw: isolationDir, access: "write", field: "task.isolation.directory" },
+	];
+	const denial = checkStructuredTargets(targets, policy, roots);
+	if (denial) throw new PermissionDeniedError("task", denial.rule, denial.reason);
+}
+
+/**
+ * Build the resource-permission read predicate `discoverAgents` should apply
+ * before reading each candidate agent-definition `.md` file, or `undefined`
+ * when no policy is configured — the task-discovery counterpart to
+ * `canReadSkill`/`canReadContextFile` in `sdk.ts`.
+ *
+ * `task`/`eval` are classified pathless (`tool-path-targets.ts`) because
+ * their free-text prompt carries no path, on the theory that enforcement
+ * belongs to the subagent's own later tool calls. That theory doesn't hold
+ * here: `resolveEffectiveSubagentPolicy` always calls `discoverAgents`
+ * before a subagent runs any tool of its own, and `loadAgentsFromDir` reads
+ * and parses every candidate definition — including ones never selected —
+ * before `getAgent` picks the requested one. A denied definition's content
+ * (its `systemPrompt`) would otherwise become the subagent's own
+ * instructions without ever passing through the wrapper gate (finding under
+ * review).
+ */
+function canReadAgentDefinitionFor(session: ToolSession): ((definitionPath: string) => boolean) | undefined {
+	const policy = loadPermissionsConfig(session.settings);
+	if (!policy) return undefined;
+	const roots: PermissionRoots = {
+		cwd: session.cwd,
+		additionalDirectories: [...(session.additionalDirectories ?? [])],
+	};
+	return definitionPath =>
+		decideTarget({ raw: definitionPath, access: "read", field: "agent" }, policy, roots).kind !== "deny";
+}
+
 function resolveSchema(request: StructuredSubagentRequest, agent: AgentDefinition): StructuredSubagentSchemaResolution {
 	const mode = request.schemaMode ?? request.session.outputSchemaMode ?? "permissive";
 	if (Object.hasOwn(request, "outputSchema")) {
@@ -251,7 +363,7 @@ export async function resolveEffectiveSubagentPolicy(
 	assertPlanControlsAllowed(request, planMode);
 	assertDepthAndSpawnAllowed(request, agentName);
 
-	const discovery = await discoverAgents(request.session.cwd);
+	const discovery = await discoverAgents(request.session.cwd, undefined, canReadAgentDefinitionFor(request.session));
 	const agent = getAgent(discovery.agents, agentName);
 	if (!agent) {
 		const available = discovery.agents.map(candidate => candidate.name).join(", ") || "none";
@@ -344,22 +456,56 @@ interface ArtifactLease {
 	unregister: (() => void) | undefined;
 }
 
+/**
+ * Authorize the artifact-lease directory {@link leaseArtifacts} is about to
+ * materialize, against the same resource permission policy every other tool
+ * call faces — the artifact-directory sibling of {@link authorizeIsolationTargets}.
+ *
+ * `task`/`eval` are classified pathless (`tool-path-targets.ts`) because their
+ * free-text prompt carries no path, on the theory that enforcement belongs to
+ * the subagent's own later tool calls. That theory doesn't hold for this
+ * directory: `leaseArtifacts` creates it — a session-artifacts sibling when a
+ * session file exists, otherwise a fresh directory under `os.tmpdir()` —
+ * before the isolation gate above ever runs and for every invocation,
+ * isolated or not, so a later tool call never gets a chance to authorize it.
+ * Checked here, before `fs.mkdir` runs, closes that gap for both cases
+ * (finding under review).
+ */
+function authorizeArtifactsDirectory(session: ToolSession, artifactsDir: string): void {
+	const policy = loadPermissionsConfig(session.settings);
+	if (!policy) return;
+	const roots: PermissionRoots = {
+		cwd: session.cwd,
+		additionalDirectories: [...(session.additionalDirectories ?? [])],
+	};
+	const denial = checkStructuredTargets(
+		[{ raw: artifactsDir, access: "write", field: "task.artifacts.directory" }],
+		policy,
+		roots,
+	);
+	if (denial) throw new PermissionDeniedError("task", denial.rule, denial.reason);
+}
+
+/**
+ * `id` is the same id {@link reserveStructuredSubagentId} already allocated for
+ * this run, reused (rather than minting a fresh random suffix here) so the
+ * directory this authorizes and creates is the exact one the caller reads
+ * back from the returned lease — not an approximation of it.
+ */
 async function leaseArtifacts(
 	session: ToolSession,
 	invocationKind: StructuredSubagentRequest["invocationKind"],
+	id: string,
 ): Promise<ArtifactLease> {
 	const sessionFile = session.getSessionFile();
-	if (sessionFile) {
-		const artifactsDir = sessionFile.slice(0, -6);
-		await fs.mkdir(artifactsDir, { recursive: true });
-		return { sessionFile, artifactsDir, temporary: false, unregister: undefined };
-	}
-	const artifactsDir = path.join(
-		os.tmpdir(),
-		`${invocationKind === "eval" ? "omp-eval-agent" : "omp-task"}-${Snowflake.next()}`,
-	);
+	const artifactsDir = sessionFile
+		? sessionFile.slice(0, -6)
+		: path.join(os.tmpdir(), `${invocationKind === "eval" ? "omp-eval-agent" : "omp-task"}-${id}`);
+	authorizeArtifactsDirectory(session, artifactsDir);
 	await fs.mkdir(artifactsDir, { recursive: true });
-	return { sessionFile: null, artifactsDir, temporary: true, unregister: registerArtifactsDir(artifactsDir) };
+	return sessionFile
+		? { sessionFile, artifactsDir, temporary: false, unregister: undefined }
+		: { sessionFile: null, artifactsDir, temporary: true, unregister: registerArtifactsDir(artifactsDir) };
 }
 
 function resolveAutoloadSkills(session: ToolSession, agent: AgentDefinition) {
@@ -546,7 +692,7 @@ function attachStructuredOutputMetadata(result: SingleResult, schema: Structured
  */
 export async function runStructuredSubagent(request: StructuredSubagentRequest): Promise<StructuredSubagentResult> {
 	const policy = await resolveEffectiveSubagentPolicy(request);
-	const lease = await leaseArtifacts(request.session, request.invocationKind);
+	let lease: ArtifactLease | undefined;
 	let changesApplied: boolean | null = null;
 	let mergeSummary = "";
 	let requiresRecoveryArtifacts = false;
@@ -557,6 +703,16 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			...request.identity,
 			label: request.identity?.label ?? (request.invocationKind === "eval" ? "EvalAgent" : undefined),
 		});
+		// Reuses `id` (see `leaseArtifacts`'s doc comment) and authorizes the
+		// resulting directory before creating it, ahead of the isolation gate
+		// below and regardless of whether this run is isolated.
+		try {
+			lease = await leaseArtifacts(request.session, request.invocationKind, id);
+		} catch (error) {
+			throw new StructuredSubagentError("preflight", error instanceof Error ? error.message : String(error), {
+				cause: error,
+			});
+		}
 		const baseOptions = buildExecutorOptions(request, policy, lease, id);
 		baseOptions.onCleanupDeferred = completion => {
 			deferredCleanup = completion;
@@ -564,8 +720,31 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 		baseOptions.planReference = await loadPlanReference(request, policy);
 		let isolationContext: IsolationContext | null = null;
 		if (policy.isIsolated) {
+			let repoRoot: string;
 			try {
-				isolationContext = await prepareIsolationContext(request.session.cwd);
+				repoRoot = await getRepoRoot(request.session.cwd);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				throw new StructuredSubagentError(
+					"isolation",
+					`Isolated subagent execution requires a git repository. ${message}`,
+					{ cause: error },
+				);
+			}
+			try {
+				await authorizeIsolationTargets(request.session, repoRoot, getTaskIsolationBaseDir(repoRoot, id));
+			} catch (error) {
+				throw new StructuredSubagentError("isolation", error instanceof Error ? error.message : String(error), {
+					cause: error,
+				});
+			}
+			// Baseline capture reads the working tree (staged/unstaged diffs, and
+			// untracked file *contents* via `git diff --no-index`) — it must run
+			// only after the read authorization above, never before, or a denied
+			// untracked source's bytes are already read into the baseline patch
+			// by the time the denial throws (finding under review).
+			try {
+				isolationContext = { repoRoot, baseline: await captureBaseline(repoRoot) };
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				throw new StructuredSubagentError(
@@ -649,22 +828,28 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			{ cause: error },
 		);
 	} finally {
-		const shouldRetainArtifacts =
-			(request.retainArtifacts && completedSuccessfully) ||
-			(policy.isIsolated && (!policy.applyChanges || changesApplied === false || requiresRecoveryArtifacts));
-		const shouldCleanup = lease.temporary && !shouldRetainArtifacts;
-		if (shouldCleanup) {
-			const cleanupArtifacts = async (): Promise<void> => {
-				await fs.rm(lease.artifactsDir, { recursive: true, force: true });
-				lease.unregister?.();
-			};
-			if (deferredCleanup) {
-				trackLateCleanup(deferredCleanup.then(cleanupArtifacts), {
-					resource: "artifacts",
-					artifactsDir: lease.artifactsDir,
-				});
-			} else {
-				await cleanupArtifacts();
+		// `lease` is unset when `reserveStructuredSubagentId`/`leaseArtifacts`
+		// itself threw (including an artifacts-directory permission denial) —
+		// nothing was created, so there is nothing to clean up.
+		if (lease) {
+			const activeLease = lease;
+			const shouldRetainArtifacts =
+				(request.retainArtifacts && completedSuccessfully) ||
+				(policy.isIsolated && (!policy.applyChanges || changesApplied === false || requiresRecoveryArtifacts));
+			const shouldCleanup = activeLease.temporary && !shouldRetainArtifacts;
+			if (shouldCleanup) {
+				const cleanupArtifacts = async (): Promise<void> => {
+					await fs.rm(activeLease.artifactsDir, { recursive: true, force: true });
+					activeLease.unregister?.();
+				};
+				if (deferredCleanup) {
+					trackLateCleanup(deferredCleanup.then(cleanupArtifacts), {
+						resource: "artifacts",
+						artifactsDir: activeLease.artifactsDir,
+					});
+				} else {
+					await cleanupArtifacts();
+				}
 			}
 		}
 	}
