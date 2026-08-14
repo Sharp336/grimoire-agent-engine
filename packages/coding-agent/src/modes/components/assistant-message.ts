@@ -190,6 +190,12 @@ export class AssistantMessageComponent extends Container {
 	#transcriptBlockFinalized: boolean;
 	#hasToolTimeline = false;
 	/**
+	 * Rows of this block's latest render already committed to native scrollback
+	 * (fed by the transcript container). Finalize restyling consults it: rows on
+	 * the tape are immutable, so only SGR-equivalent changes are safe there.
+	 */
+	#blockCommittedRows = 0;
+	/**
 	 * True while any rendered item carries a ` ```mermaid ` fence. Mermaid's
 	 * ASCII form resolves asynchronously and can re-layout rows that already
 	 * looked settled, so settling defers until the message finalizes. See
@@ -342,6 +348,14 @@ export class AssistantMessageComponent extends Container {
 			this.#fastPathItems = undefined;
 			this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
 		}
+	}
+
+	override setNativeScrollbackCommittedRows(rows: number): void {
+		this.#blockCommittedRows = Number.isFinite(rows) ? Math.max(0, Math.trunc(rows)) : 0;
+		// Keep the Container split alive: nested Markdown children freeze their
+		// streamed table layouts from this signal, without which a later render
+		// retroactively widens committed rows.
+		super.setNativeScrollbackCommittedRows(rows);
 	}
 
 	override dispose(): void {
@@ -513,14 +527,22 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	markTranscriptBlockFinalized(): void {
+		const alreadyFinalized = this.#transcriptBlockFinalized;
 		this.#transcriptBlockFinalized = true;
 		this.#stopThinkingAnimation();
-		// Force rebuild when this block has visible text (to apply the verb
-		// visual marker) or when the live thinking pulse was on screen.
-		const hasText = this.#lastMessage?.content.some(
-			c => c.type === "text" && canonicalizeMessage(c.text),
-		);
-		if (this.#thinkingDots || hasText) {
+		// Rebuild only on the transition into finalized (to apply the verb visual
+		// marker or drop the live thinking pulse). #handleMessageUpdate re-invokes
+		// this on every tool-arg delta once the message carries a toolCall, and
+		// repeated rebuilds of the already-sealed preamble would tear down the
+		// fast path and bump the block version on every delta.
+		if (alreadyFinalized) return;
+		const hasText = this.#lastMessage?.content.some(c => c.type === "text" && canonicalizeMessage(c.text));
+		// A rebuild re-renders the markdown from scratch, which re-lays-out rows
+		// the engine already committed to native scrollback (streamed renders are
+		// incremental; GFM column widths can grow) — the committed-prefix audit
+		// then re-anchors and duplicates history. Once any row of this block is
+		// on the tape, keep the streamed render and skip the marker restyle.
+		if (this.#thinkingDots || (hasText && this.#blockCommittedRows === 0)) {
 			this.#fastPathKey = undefined;
 			this.#fastPathItems = undefined;
 			if (this.#lastMessage) this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
@@ -896,14 +918,25 @@ export class AssistantMessageComponent extends Container {
 					!this.#textColorTransform &&
 					this.#transcriptBlockFinalized &&
 					(this.#lastMessage?.stopReason === "stop" || this.#lastMessage?.stopReason === undefined);
-				if (isVerbReply) {
+				// Rows already committed to native scrollback are immutable: the
+				// streamed markdown renders incrementally, so a finalize-time rebuild
+				// re-lays-out the full text from scratch (GFM column widths, bg
+				// padding, marker glyphs) and diverges the committed prefix — the
+				// engine then re-commits and duplicates history. Only restyle blocks
+				// whose rows have not entered scrollback yet.
+				if (isVerbReply && this.#blockCommittedRows === 0) {
 					const isFinal = !this.#hasToolTimeline && !message.content.some(c => c.type === "toolCall");
-					const verbBg = (value: string) => theme.bg("finalAnswerBg", value);
-					const verbFg = (value: string) => theme.fg("finalAnswerText", value);
-					const md = new Markdown(trimmed, 3, 1, getMarkdownTheme(), {
-						bgColor: verbBg,
-						color: verbFg,
-					}, 0);
+					const md = new Markdown(
+						trimmed,
+						3,
+						1,
+						getMarkdownTheme(),
+						{
+							bgColor: (value: string) => theme.bg("finalAnswerBg", value),
+							color: (value: string) => theme.fg("finalAnswerText", value),
+						},
+						0,
+					);
 					md.setIgnoreTight(true);
 					const origRender = md.render.bind(md);
 					const bgPrefix = theme.getBgAnsi("finalAnswerBg");
@@ -924,7 +957,7 @@ export class AssistantMessageComponent extends Container {
 						const lastBg = bgLineIndices[bgLineIndices.length - 1] ?? -1;
 						cachedResult = lines.map((line, idx) => {
 							if (!bgPrefix || !line.startsWith(bgPrefix)) return line;
-							const stripped = line.replace(/\x1b\[[0-9;]*m/g, "");
+							const stripped = line.replace(/\x1b[[0-9;]*m/g, "");
 							if (stripped.includes("```")) {
 								return line.replace(bgPrefix, "").replace(bgReset, "");
 							}
@@ -938,9 +971,7 @@ export class AssistantMessageComponent extends Container {
 				} else {
 					// Streaming / error / aborted: same paddingX so layout doesn't
 					// shift when the block finalizes (avoids scrollback mismatch).
-					const mdOptions = this.#textColorTransform
-						? { color: this.#textColorTransform }
-						: undefined;
+					const mdOptions = this.#textColorTransform ? { color: this.#textColorTransform } : undefined;
 					const md = new Markdown(trimmed, 3, 0, getMarkdownTheme(), mdOptions, 0);
 					this.#contentContainer.addChild(md);
 					captureItems?.push({ md, contentIndex: i, blockType: "text", lastText: trimmed });
