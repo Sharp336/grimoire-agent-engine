@@ -2065,8 +2065,12 @@ export class AgentSession {
 
 	async #emitSessionEvent(event: AgentSessionEvent): Promise<void> {
 		if (event.type === "message_update") {
-			this.#emit(event);
-			void this.#queueExtensionEvent(event);
+			const timestampedEvent =
+				typeof event.timestamp === "number" && Number.isFinite(event.timestamp)
+					? event
+					: { ...event, timestamp: Date.now() };
+			this.#emit(timestampedEvent);
+			void this.#queueExtensionEvent(timestampedEvent);
 			return;
 		}
 		// Take a FIFO ticket before the extension emit: extension deliveries for
@@ -3478,6 +3482,7 @@ export class AgentSession {
 				type: "message_update",
 				message: event.message,
 				assistantMessageEvent: event.assistantMessageEvent,
+				timestamp: event.timestamp,
 			};
 			await this.#extensionRunner.emit(extensionEvent);
 		} else if (event.type === "message_end") {

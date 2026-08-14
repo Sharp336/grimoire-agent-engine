@@ -10,7 +10,11 @@ import type { CustomMessage } from "./messages";
 
 /** Session-specific events that extend the core AgentEvent. */
 export type AgentSessionEvent =
-	| Exclude<AgentEvent, { type: "agent_end" }>
+	| Exclude<AgentEvent, { type: "agent_end" | "message_update" }>
+	| (Extract<AgentEvent, { type: "message_update" }> & {
+			/** Epoch milliseconds captured before asynchronous extension delivery. */
+			timestamp?: number;
+	  })
 	| (Extract<AgentEvent, { type: "agent_end" }> & {
 			/** False when an async delivery will resume the session before its true final settle. */
 			isTerminal?: boolean;

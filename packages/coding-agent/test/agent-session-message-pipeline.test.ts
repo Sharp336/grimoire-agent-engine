@@ -775,9 +775,9 @@ describe("AgentSession message pipeline", () => {
 		);
 	});
 
-	it("emits message_update to session listeners before slow extension handlers finish", async () => {
+	it("preserves source timestamps and emits message_update before slow extension handlers finish", async () => {
 		const { promise, resolve } = Promise.withResolvers<void>();
-		const extensionEmit = vi.fn(async (event: { type: string }) => {
+		const extensionEmit = vi.fn(async (event: { type: string; timestamp?: number }) => {
 			if (event.type === "message_update") {
 				await promise;
 			}
@@ -824,8 +824,10 @@ describe("AgentSession message pipeline", () => {
 			timestamp: Date.now(),
 		} as const;
 
+		const sourceTimestamp = 1_700_000_000_123;
 		session.agent.emitExternalEvent({
 			type: "message_update",
+			timestamp: sourceTimestamp,
 			message: assistantMessage as never,
 			assistantMessageEvent: {
 				type: "toolcall_delta",
@@ -838,6 +840,9 @@ describe("AgentSession message pipeline", () => {
 
 		expect(events.some(event => event.type === "message_update")).toBe(true);
 		expect(extensionEmit).toHaveBeenCalledTimes(1);
+		const sessionUpdate = events.find(event => event.type === "message_update");
+		expect(sessionUpdate?.timestamp).toBe(sourceTimestamp);
+		expect(extensionEmit.mock.calls[0]?.[0].timestamp).toBe(sourceTimestamp);
 
 		resolve();
 		await Bun.sleep(0);

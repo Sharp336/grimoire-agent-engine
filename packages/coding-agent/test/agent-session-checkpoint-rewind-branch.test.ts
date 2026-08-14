@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, setSystemTime } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
@@ -103,11 +103,18 @@ afterEach(async () => {
 function signedThinking(thinking: string, thinkingSignature: string): MockContent {
 	return { type: "thinking", thinking, thinkingSignature } as unknown as MockContent;
 }
+type CapturedMessageUpdateEvent = {
+	timestamp?: number;
+	assistantMessageEvent: { type: string };
+};
 
 async function createHarness(
 	responses: MockResponse[],
 	tools: AgentTool[] = [checkpointTool as AgentTool, rewindTool as AgentTool],
-	options?: { onAgentEnd?: (willContinue: boolean | undefined) => void },
+	options?: {
+		onAgentEnd?: (willContinue: boolean | undefined) => void;
+		onMessageUpdate?: (event: CapturedMessageUpdateEvent) => void | Promise<void>;
+	},
 ): Promise<Harness & { mock: MockModel }> {
 	const tempDir = TempDir.createSync("@pi-checkpoint-rewind-branch-");
 	const authStorage = await AuthStorage.create(":memory:");
@@ -137,16 +144,21 @@ async function createHarness(
 
 	const sessionManager = SessionManager.inMemory(tempDir.path());
 	let extensionRunner: ExtensionRunner | undefined;
-	if (options?.onAgentEnd) {
+	if (options?.onAgentEnd || options?.onMessageUpdate) {
 		const runtime = new ExtensionRuntime();
 		const extension = await loadExtensionFromFactory(
 			pi => {
-				pi.on("agent_end", event => options.onAgentEnd?.(event.willContinue));
+				if (options.onAgentEnd) {
+					pi.on("agent_end", event => options.onAgentEnd?.(event.willContinue));
+				}
+				if (options.onMessageUpdate) {
+					pi.on("message_update", event => options.onMessageUpdate?.(event));
+				}
 			},
 			tempDir.path(),
 			new EventBus(),
 			runtime,
-			"capture-agent-end",
+			"capture-session-events",
 		);
 		extensionRunner = new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry);
 	}
@@ -203,6 +215,88 @@ async function expectNoActiveCheckpointError(session: AgentSession): Promise<voi
 }
 
 describe("AgentSession checkpoint rewind branch context", () => {
+	it("timestamps queued thinking updates at emission rather than extension receipt", async () => {
+		const emissionAt = 1_700_000_000_000;
+		const delayedReceiptAt = emissionAt + 5_000;
+		const releaseExtensionQueue = Promise.withResolvers<void>();
+		const thinkingQueued = Promise.withResolvers<void>();
+		const thinkingDelivered = Promise.withResolvers<void>();
+		const updates: Array<{
+			type: "thinking_start" | "thinking_delta" | "thinking_end";
+			timestamp: number | undefined;
+			receivedAt: number;
+		}> = [];
+		let unsubscribe: (() => void) | undefined;
+
+		setSystemTime(emissionAt);
+		try {
+			const { session } = await createHarness(
+				[
+					{
+						content: ["queue extension delivery", signedThinking("measure this block", "sig_timing")],
+						stopReason: "stop",
+					},
+				],
+				[],
+				{
+					onMessageUpdate: async event => {
+						const eventType = event.assistantMessageEvent.type;
+						if (eventType === "text_start") {
+							await releaseExtensionQueue.promise;
+							return;
+						}
+						if (
+							eventType !== "thinking_start" &&
+							eventType !== "thinking_delta" &&
+							eventType !== "thinking_end"
+						) {
+							return;
+						}
+						updates.push({ type: eventType, timestamp: event.timestamp, receivedAt: Date.now() });
+						if (eventType === "thinking_end") thinkingDelivered.resolve();
+					},
+				},
+			);
+			unsubscribe = session.subscribe(event => {
+				if (event.type === "message_update" && event.assistantMessageEvent.type === "thinking_end") {
+					thinkingQueued.resolve();
+				}
+			});
+
+			const prompt = session.prompt("think before answering");
+			await Promise.race([
+				thinkingQueued.promise,
+				prompt.then(() => {
+					throw new Error("Prompt completed before the thinking stream was observed");
+				}),
+			]);
+			setSystemTime(delayedReceiptAt);
+			releaseExtensionQueue.resolve();
+			await thinkingDelivered.promise;
+			await prompt;
+
+			expect(updates.map(update => update.type)).toEqual(["thinking_start", "thinking_delta", "thinking_end"]);
+			for (const update of updates) {
+				expect(Number.isFinite(update.timestamp)).toBe(true);
+				expect(update.timestamp).toBe(emissionAt);
+				expect(update.receivedAt).toBe(delayedReceiptAt);
+				expect(update.timestamp).toBeLessThan(update.receivedAt);
+			}
+			const startAt = updates[0]?.timestamp;
+			const endAt = updates[2]?.timestamp;
+			expect(typeof startAt).toBe("number");
+			expect(typeof endAt).toBe("number");
+			if (typeof startAt !== "number" || typeof endAt !== "number") {
+				throw new Error("Expected finite thinking boundary timestamps");
+			}
+			expect(endAt - startAt).toBeGreaterThanOrEqual(0);
+		} finally {
+			unsubscribe?.();
+			releaseExtensionQueue.resolve();
+			setSystemTime();
+		}
+	});
+
 	it("rebuilds active history through branch_summary before the post-rewind assistant turn", async () => {
 		const report = "findings: kept checkpoint; risks: stale signed thinking";
 		const { session, mock } = await createHarness([

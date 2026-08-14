@@ -25,12 +25,14 @@ describe("printableEvent", () => {
 	it("emits only the incremental delta for message_update", () => {
 		const event: AgentSessionEvent = {
 			type: "message_update",
+			timestamp: 1_700_000_000_123,
 			message: assistant,
 			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "hel", partial: assistant },
 		};
 		const printed = JSON.parse(JSON.stringify(printableEvent(event)));
 		expect(printed).toEqual({
 			type: "message_update",
+			timestamp: 1_700_000_000_123,
 			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "hel" },
 		});
 	});
@@ -38,11 +40,16 @@ describe("printableEvent", () => {
 	it("drops the done-variant message snapshot from message_update", () => {
 		const event: AgentSessionEvent = {
 			type: "message_update",
+			timestamp: 1_700_000_000_456,
 			message: assistant,
 			assistantMessageEvent: { type: "done", reason: "stop", message: assistant },
 		};
 		const printed = JSON.parse(JSON.stringify(printableEvent(event)));
-		expect(printed).toEqual({ type: "message_update", assistantMessageEvent: { type: "done", reason: "stop" } });
+		expect(printed).toEqual({
+			type: "message_update",
+			timestamp: 1_700_000_000_456,
+			assistantMessageEvent: { type: "done", reason: "stop" },
+		});
 	});
 
 	it("strips providerPayload from message_end but keeps the message content", () => {
