@@ -4,19 +4,27 @@ import * as path from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { withStatsSyncLock } from "@oh-my-pi/omp-stats/aggregator";
 import {
+	formatDuration,
 	getAgentDir,
 	getBlobsDir,
 	getHistoryDbPath,
 	getModelDbPath,
 	getSessionsDir,
 	getStatsDbPath,
+	pluralize,
 	readLines,
 } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
 import { getDefault } from "../config/settings-schema";
 import { BLOB_HASH_RE } from "../session/blob-store";
+import type { FileEntry, SessionHeader } from "../session/session-entries";
 import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
+import { loadEntriesFromFile } from "../session/session-loader";
+import { planSessionMerge, type SessionMergeConflict } from "../session/session-merge";
+import { resolveManagedSessionRoot } from "../session/session-paths";
 import { FileSessionStorage } from "../session/session-storage";
+import { parseTitleSlotFromContent, serializeTitleSlot, titleUpdateFromSlot } from "../session/session-title-slot";
+import { shortenPath } from "../tools/render-utils";
 
 const BLOB_FILE_RE = /^([a-f0-9]{64})(?:\.[A-Za-z0-9][A-Za-z0-9._-]{0,31})?$/;
 const BLOB_REF_RE = /\bblob:sha256:([a-f0-9]{64})\b/gi;
@@ -28,6 +36,7 @@ const DAY_MS = 86_400_000;
 const GC_WRITE_GRACE_MS = 5 * 60_000;
 const SESSION_SUFFIX = ".jsonl";
 const COMPRESSED_SESSION_SUFFIX = ".jsonl.gz";
+const BROKEN_SESSION_SUFFIX = ".broken.jsonl";
 const GC_LOCK_BREAKER_SUFFIX = ".break";
 
 export interface GcCommandFlags {
@@ -37,6 +46,7 @@ export interface GcCommandFlags {
 	blobs?: boolean;
 	archive?: boolean;
 	wal?: boolean;
+	mergeDuplicates?: boolean;
 	coldArchiveAfterDays?: number;
 	retainNewestGlobal?: number;
 	retainNewestPerCwd?: number;
@@ -85,12 +95,45 @@ export interface WalGcResult {
 	checkpointed: boolean;
 }
 
+export interface MergeDuplicateConflict extends SessionMergeConflict {
+	sessionId: string;
+}
+
+/** A duplicate-group file the write grace excluded because a live writer may still hold it. */
+export interface MergeSkippedFile {
+	sessionId: string;
+	path: string;
+	secondsSinceWrite: number;
+}
+
+export interface MergeDuplicateCandidate {
+	sessionId: string;
+	destination: string;
+	sources: string[];
+}
+
+export interface MergeGcResult {
+	scanned: number;
+	groups: number;
+	skippedActive: number;
+	skipped: MergeSkippedFile[];
+	wouldMerge: number;
+	merged: number;
+	archivedSources: number;
+	addedEntries: number;
+	skippedEntries: number;
+	conflicts: MergeDuplicateConflict[];
+	candidates: MergeDuplicateCandidate[];
+	errors: string[];
+}
+
 export interface GcResult {
 	agentDir: string;
 	apply: boolean;
 	blobs?: BlobGcResult;
 	archive?: ArchiveGcResult;
 	wal?: WalGcResult;
+	mergeDuplicates?: MergeGcResult;
 	lockPath: string;
 }
 
@@ -107,6 +150,20 @@ interface ArchiveCandidate {
 	destinationPath: string;
 }
 
+interface DuplicateSessionFile {
+	path: string;
+	header: SessionHeader;
+	entries: FileEntry[];
+	entryCount: number;
+	cwdDirectoryMatch: boolean;
+}
+
+interface DuplicateSessionGroup {
+	sessionId: string;
+	destination: DuplicateSessionFile;
+	sources: DuplicateSessionFile[];
+}
+
 interface ResolvedGcOptions {
 	apply: boolean;
 	json: boolean;
@@ -114,6 +171,7 @@ interface ResolvedGcOptions {
 	runBlobs: boolean;
 	runArchive: boolean;
 	runWal: boolean;
+	runMergeDuplicates: boolean;
 	coldArchiveAfterDays: number;
 	retainNewestGlobal: number;
 	retainNewestPerCwd: number;
@@ -150,7 +208,8 @@ function numberSetting(value: number | undefined, fallback: unknown, defaultValu
 
 async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions> {
 	const agentDir = path.resolve(flags.agentDir ?? getAgentDir());
-	const selected = flags.blobs === true || flags.archive === true || flags.wal === true;
+	const selected =
+		flags.blobs === true || flags.archive === true || flags.wal === true || flags.mergeDuplicates === true;
 	const archiveSelected = selected && flags.archive === true;
 	const needsArchiveSettings =
 		archiveSelected &&
@@ -173,6 +232,7 @@ async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions>
 		runBlobs: selected ? flags.blobs === true : getBoolean("gc.blobs"),
 		runArchive: selected ? flags.archive === true : getBoolean("gc.archive"),
 		runWal: selected ? flags.wal === true : getBoolean("gc.wal"),
+		runMergeDuplicates: flags.mergeDuplicates === true,
 		coldArchiveAfterDays: numberSetting(
 			flags.coldArchiveAfterDays,
 			getNumber("gc.coldArchiveAfterDays"),
@@ -195,6 +255,7 @@ export function collectGcErrors(result: GcResult): string[] {
 	return [
 		...(result.blobs?.errors ?? []).map(error => `blobs: ${error}`),
 		...(result.archive?.errors ?? []).map(error => `archive: ${error}`),
+		...(result.mergeDuplicates?.errors ?? []).map(error => `merge: ${error}`),
 	];
 }
 
@@ -491,6 +552,139 @@ async function readSessionLineageHeader(file: string): Promise<SessionLineageHea
 		if (header || lines.length >= 2) return header;
 	}
 	return undefined;
+}
+
+function isTopLevelSessionFile(sessionsRoot: string, file: string): boolean {
+	const relative = path.relative(sessionsRoot, file);
+	if (relative.startsWith("..") || path.isAbsolute(relative) || relative.endsWith(BROKEN_SESSION_SUFFIX)) return false;
+	return relative.split(path.sep).length === 2;
+}
+
+async function loadDuplicateSessionFile(
+	file: string,
+	sessionId: string,
+	sessionsRoot: string,
+	storage: FileSessionStorage,
+): Promise<DuplicateSessionFile> {
+	const entries = await loadEntriesFromFile(file, storage);
+	const header = entries[0];
+	if (!header || header.type !== "session" || header.id !== sessionId) {
+		throw new Error("session header changed during duplicate scan");
+	}
+	return {
+		path: file,
+		header,
+		entries,
+		entryCount: entries.length,
+		cwdDirectoryMatch: resolveManagedSessionRoot(path.dirname(file), header.cwd) === path.resolve(sessionsRoot),
+	};
+}
+
+function chooseDuplicateDestination(files: DuplicateSessionFile[]): DuplicateSessionFile {
+	return files.toSorted(
+		(left, right) =>
+			Number(right.cwdDirectoryMatch) - Number(left.cwdDirectoryMatch) ||
+			right.entryCount - left.entryCount ||
+			left.path.localeCompare(right.path),
+	)[0]!;
+}
+
+async function collectDuplicateSessionGroups(
+	sessionsRoot: string,
+	result: MergeGcResult,
+): Promise<DuplicateSessionGroup[]> {
+	const files = (await collectJsonlFiles(sessionsRoot)).filter(file => isTopLevelSessionFile(sessionsRoot, file));
+	result.scanned = files.length;
+	const byId = new Map<string, Array<{ path: string; mtimeMs: number }>>();
+	for (const file of files) {
+		try {
+			const lineage = await readSessionLineageHeader(file);
+			if (!lineage || !sessionPathEncodesId(file, lineage.id)) continue;
+			const stat = await fs.stat(file);
+			const group = byId.get(lineage.id) ?? [];
+			group.push({ path: file, mtimeMs: stat.mtimeMs });
+			byId.set(lineage.id, group);
+		} catch (error) {
+			result.errors.push(`${file}: ${errorMessage(error)}`);
+		}
+	}
+
+	const storage = new FileSessionStorage();
+	const groups: DuplicateSessionGroup[] = [];
+	const now = Date.now();
+	const archiveBeforeMs = now - GC_WRITE_GRACE_MS;
+	for (const [sessionId, members] of byId) {
+		if (members.length < 2 || new Set(members.map(member => path.dirname(member.path))).size < 2) continue;
+		const writing = members.filter(member => member.mtimeMs > archiveBeforeMs);
+		if (writing.length > 0) {
+			result.skippedActive += members.length;
+			for (const member of writing) {
+				result.skipped.push({
+					sessionId,
+					path: member.path,
+					secondsSinceWrite: Math.max(0, Math.round((now - member.mtimeMs) / 1000)),
+				});
+			}
+			continue;
+		}
+		const loaded: DuplicateSessionFile[] = [];
+		let failed = false;
+		for (const member of members) {
+			try {
+				loaded.push(await loadDuplicateSessionFile(member.path, sessionId, sessionsRoot, storage));
+			} catch (error) {
+				result.errors.push(`${member.path}: ${errorMessage(error)}`);
+				failed = true;
+			}
+		}
+		if (failed) continue;
+		const destination = chooseDuplicateDestination(loaded);
+		groups.push({
+			sessionId,
+			destination,
+			sources: loaded.filter(file => file !== destination).sort((a, b) => a.path.localeCompare(b.path)),
+		});
+	}
+	groups.sort((left, right) => left.sessionId.localeCompare(right.sessionId));
+	return groups;
+}
+
+function serializeMergedSession(originalContent: string, entries: FileEntry[]): string {
+	const titleSlot = parseTitleSlotFromContent(originalContent);
+	const titleUpdate = titleUpdateFromSlot(titleSlot);
+	let physicalEntries = entries;
+	const logicalHeader = entries[0];
+	if (titleUpdate && logicalHeader?.type === "session") {
+		const { title: _title, titleSource: _titleSource, ...physicalHeader } = logicalHeader;
+		physicalEntries = [physicalHeader, ...entries.slice(1)];
+	}
+	const body = `${physicalEntries.map(entry => JSON.stringify(entry)).join("\n")}\n`;
+	return titleUpdate ? `${serializeTitleSlot(titleUpdate)}${body}` : body;
+}
+
+async function moveDuplicateSourceToArchive(source: string, sessionsRoot: string, archiveRoot: string): Promise<void> {
+	const relativePath = path.relative(sessionsRoot, source);
+	if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
+		throw new Error("duplicate source is outside the sessions root");
+	}
+	const destination = path.join(archiveRoot, relativePath);
+	const sourceArtifacts = sessionArtifactsPath(source);
+	const destinationArtifacts = sessionArtifactsPath(destination);
+	if (await pathExists(destination)) throw new Error(`archive destination exists: ${destination}`);
+	if ((await pathExists(sourceArtifacts)) && (await pathExists(destinationArtifacts))) {
+		throw new Error(`archive artifacts destination exists: ${destinationArtifacts}`);
+	}
+	await movePath(source, destination);
+	try {
+		if (await pathExists(sourceArtifacts)) await movePath(sourceArtifacts, destinationArtifacts);
+	} catch (error) {
+		try {
+			await movePath(destination, source);
+		} catch {
+			// Preserve the original failure; the archived source remains recoverable.
+		}
+		throw error;
+	}
 }
 
 async function gzipSessionFile(source: string, destination: string): Promise<void> {
@@ -1295,6 +1489,74 @@ async function runArchiveGc(options: ResolvedGcOptions, archiveRoot: string): Pr
 	return result;
 }
 
+async function runMergeGc(options: ResolvedGcOptions, archiveRoot: string): Promise<MergeGcResult> {
+	const sessionsRoot = getSessionsDir(options.agentDir);
+	const result: MergeGcResult = {
+		scanned: 0,
+		groups: 0,
+		skippedActive: 0,
+		skipped: [],
+		wouldMerge: 0,
+		merged: 0,
+		archivedSources: 0,
+		addedEntries: 0,
+		skippedEntries: 0,
+		conflicts: [],
+		candidates: [],
+		errors: [],
+	};
+	const groups = await collectDuplicateSessionGroups(sessionsRoot, result);
+	result.groups = groups.length;
+	result.wouldMerge = groups.reduce((count, group) => count + group.sources.length, 0);
+	result.candidates = groups.map(group => ({
+		sessionId: group.sessionId,
+		destination: group.destination.path,
+		sources: group.sources.map(source => source.path),
+	}));
+
+	const storage = new FileSessionStorage();
+	for (const group of groups) {
+		let mergedEntries = group.destination.entries;
+		for (const source of group.sources) {
+			const plan = planSessionMerge(mergedEntries, source.entries);
+			mergedEntries = plan.merged;
+			result.addedEntries += plan.addedEntries;
+			result.skippedEntries += plan.skippedEntries;
+			result.conflicts.push(
+				...plan.conflicts.map(conflict => ({
+					sessionId: group.sessionId,
+					...conflict,
+				})),
+			);
+		}
+		if (!options.apply) continue;
+
+		try {
+			const destinationContent = await Bun.file(group.destination.path).text();
+			const backupTimestamp = new Date().toISOString().replaceAll(":", "-");
+			await Bun.write(`${group.destination.path}.${backupTimestamp}.bak`, destinationContent);
+			await storage.writeTextAtomic(
+				group.destination.path,
+				serializeMergedSession(destinationContent, mergedEntries),
+			);
+			result.merged += 1;
+		} catch (error) {
+			result.errors.push(`${group.destination.path}: ${errorMessage(error)}`);
+			continue;
+		}
+
+		for (const source of group.sources) {
+			try {
+				await moveDuplicateSourceToArchive(source.path, sessionsRoot, archiveRoot);
+				result.archivedSources += 1;
+			} catch (error) {
+				result.errors.push(`${source.path}: ${errorMessage(error)}`);
+			}
+		}
+	}
+	return result;
+}
+
 async function checkpointWal(dbPath: string, apply: boolean): Promise<WalCheckpointResult> {
 	const walPath = `${dbPath}-wal`;
 	let walBytes = 0;
@@ -1552,6 +1814,31 @@ function renderText(result: GcResult): string {
 		if (result.archive.skippedActive > 0) lines.push(`sessions skipped active: ${result.archive.skippedActive}`);
 		if (result.archive.errors.length > 0) lines.push(`session errors: ${result.archive.errors.length}`);
 	}
+	if (result.mergeDuplicates) {
+		const merge = result.mergeDuplicates;
+		const conflicts =
+			merge.conflicts.length > 0
+				? `, ${merge.conflicts.length} ${pluralize("conflict", merge.conflicts.length)} (destination kept)`
+				: "";
+		lines.push(
+			result.apply
+				? `duplicates: ${merge.archivedSources}/${merge.wouldMerge} ${pluralize("file", merge.wouldMerge)} merged across ${merge.groups} ${pluralize("group", merge.groups)}, ${merge.addedEntries} ${pluralize("entry", merge.addedEntries)} added${conflicts}`
+				: `duplicates: would merge ${merge.wouldMerge} ${pluralize("file", merge.wouldMerge)} into ${merge.groups} ${pluralize("session", merge.groups)}, adding ${merge.addedEntries} ${pluralize("entry", merge.addedEntries)}${conflicts}`,
+		);
+		if (merge.skipped.length > 0) {
+			for (const skipped of merge.skipped) {
+				const sinceMs = skipped.secondsSinceWrite * 1000;
+				lines.push(
+					`duplicates skipped active: ${shortenPath(skipped.path)} written ${formatDuration(sinceMs)} ago, eligible in ${formatDuration(GC_WRITE_GRACE_MS - sinceMs)}`,
+				);
+			}
+		} else if (merge.skippedActive > 0) {
+			lines.push(`duplicates skipped active: ${merge.skippedActive}`);
+		}
+		if (merge.errors.length > 0) {
+			lines.push(`duplicate merge errors: ${merge.errors.length}`);
+		}
+	}
 	if (result.wal) {
 		const state = result.wal.checkpointed ? "checkpointed" : "checkpoint dry-run";
 		lines.push(`wal: ${state}, ${formatBytes(result.wal.walBytes)} across ${result.wal.databases.length} dbs`);
@@ -1565,6 +1852,7 @@ export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 	const result = await withGcLock(options.agentDir, async lockPath => {
 		const next: GcResult = { agentDir: options.agentDir, apply: options.apply, lockPath };
 		if (options.runBlobs) next.blobs = await runBlobGc(options, archiveRoot);
+		if (options.runMergeDuplicates) next.mergeDuplicates = await runMergeGc(options, archiveRoot);
 		if (options.runArchive) next.archive = await runArchiveGc(options, archiveRoot);
 		if (options.runWal) next.wal = await runWalGc(options);
 		return next;

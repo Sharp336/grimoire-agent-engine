@@ -48,7 +48,9 @@ export const galleryHelp = {
 	description: "Preview tool renderers across streaming, in-progress, success, and failure states",
 } satisfies CommandMetadata;
 
-export const gcHelp = { description: "Run storage garbage collection" } satisfies CommandMetadata;
+export const gcHelp = {
+	description: "Run storage garbage collection, including duplicate-session merges",
+} satisfies CommandMetadata;
 
 export const grepHelp = { description: "Test grep tool" } satisfies CommandMetadata;
 
