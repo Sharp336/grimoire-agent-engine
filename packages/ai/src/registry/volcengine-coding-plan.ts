@@ -1,6 +1,6 @@
-import {createApiKeyLogin} from "./api-key-login";
-import type {OAuthLoginCallbacks} from "./oauth/types";
-import type {ProviderDefinition} from "./types";
+import { createApiKeyLogin } from "./api-key-login";
+import type { OAuthLoginCallbacks } from "./oauth/types";
+import type { ProviderDefinition } from "./types";
 
 const loginVolcengineCodingPlan = createApiKeyLogin({
 	providerLabel: "Volcengine Coding Plan",
@@ -15,7 +15,6 @@ const loginVolcengineCodingPlan = createApiKeyLogin({
 		model: "ark-code-latest",
 	},
 });
-
 
 export const volcengineCodingPlanProvider = {
 	id: "volcengine-coding-plan",
