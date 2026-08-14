@@ -17,6 +17,7 @@ import { Toast } from "../components/Toast.tsx";
 import { useSplitLayout } from "../design/layout.ts";
 import { browserReduce, EMPTY_BROWSER } from "../session/browser.ts";
 import { ground, stroke } from "../design/tokens.ts";
+import type { Agent, AgentId } from "@ompd/core/contracts";
 import type { Connection } from "../platform/connection.ts";
 import { FleetScreen } from "../screens/FleetScreen.tsx";
 import { SessionScreen } from "../screens/SessionScreen.tsx";
@@ -26,9 +27,15 @@ import { useConsole } from "./useConsole.ts";
 export function Console({
   connection,
   onUnpair,
+  onSelectedAgentChange,
+  requestedAgentId,
 }: {
   connection: Connection;
   onUnpair: (notice?: string) => void;
+  /** Lets the app shell target a new Cowork task at the selected session without duplicating Console's roster reducer. */
+  onSelectedAgentChange?: (agent: Agent | null) => void;
+  /** A Cowork task links back to its session by opaque agent id, never by a host-local path. */
+  requestedAgentId?: AgentId | null;
 }): JSX.Element {
   const [state, actions] = useConsole(connection);
   const split = useSplitLayout();
@@ -45,6 +52,16 @@ export function Console({
 
   const clearances = useMemo(() => fleetClearances(state), [state]);
   const agent = state.agents.find((candidate) => candidate.id === state.selected) ?? null;
+  useEffect(() => {
+    onSelectedAgentChange?.(agent);
+  }, [agent, onSelectedAgentChange]);
+  useEffect(() => {
+    if (requestedAgentId !== null && requestedAgentId !== undefined && state.agents.some((candidate) => candidate.id === requestedAgentId)) {
+      actions.select(requestedAgentId);
+    }
+  }, [requestedAgentId, state.agents, actions]);
+
+
 
   // Wide enough for both and nothing open is a hole rather than a choice, so
   // the top strip is taken. On a phone, opening a log is a deliberate act.
