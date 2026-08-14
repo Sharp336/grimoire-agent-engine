@@ -423,10 +423,10 @@ export interface AnthropicCompat {
 	supportsLongCacheRetention?: boolean;
 	/**
 	 * Whether mid-conversation `role: "system"` messages are accepted in the
-	 * `messages` array (Claude Opus 4.8+ and Claude Fable/Mythos 5 on the
-	 * first-party Claude API and Claude Platform on AWS). When unset,
-	 * auto-detected from the model id and base URL. Not available on Bedrock,
-	 * Vertex AI, or Microsoft Foundry.
+	 * `messages` array. When unset, supported Claude families are enabled on the
+	 * canonical Claude API and Vertex's native `publishers/anthropic` route.
+	 * Other Anthropic-compatible gateways remain explicit opt-ins; Bedrock
+	 * Converse uses the corresponding {@link BedrockCompat} capability.
 	 */
 	supportsMidConversationSystem?: boolean;
 	/**
@@ -493,14 +493,19 @@ export interface AnthropicCompat {
 }
 
 /**
- * Compatibility settings for Bedrock Converse prompt caching. Cache pricing is
- * deliberately not used to infer these request-shape capabilities.
+ * Compatibility settings for Bedrock Converse request shapes and stream
+ * behavior. Cache pricing is deliberately not used to infer capabilities.
  */
 export interface BedrockCompat {
 	/** Whether this endpoint accepts no checkpoints, automatic caching, or explicit cachePoint blocks. */
 	promptCacheMode?: "none" | "automatic" | "explicit";
 	/** Whether explicit cachePoint blocks accept `ttl: "1h"`; omitted TTL means Bedrock's 5-minute default. */
 	supportsLongPromptCacheRetention?: boolean;
+	/**
+	 * Whether supported Claude models accept `role: "system"` inside the Converse
+	 * `messages` array. Auto-detected from the model id when unset.
+	 */
+	supportsMidConversationSystem?: boolean;
 	/**
 	 * Bedrock-enforced minimum prompt-prefix tokens for an effective checkpoint.
 	 * Capability metadata only: emitters must not estimate local token counts.
@@ -520,10 +525,11 @@ export interface BedrockCompat {
 	streamIdleTimeoutMs?: number;
 }
 
-/** Fully-resolved Bedrock Converse prompt-cache capabilities, materialized once by `buildModel`. */
+/** Fully resolved Bedrock Converse capabilities, materialized once by `buildModel`. */
 export interface ResolvedBedrockCompat {
 	promptCacheMode: NonNullable<BedrockCompat["promptCacheMode"]>;
 	supportsLongPromptCacheRetention: boolean;
+	supportsMidConversationSystem: boolean;
 	promptCacheMinimumTokens: number;
 	promptCacheMaximumCheckpoints: number;
 	/**

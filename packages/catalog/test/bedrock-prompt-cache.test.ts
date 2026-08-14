@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { supportsAdaptiveThinkingDisplay } from "@oh-my-pi/pi-catalog/identity";
+import { supportsAdaptiveThinkingDisplay, supportsMidConversationSystemMessages } from "@oh-my-pi/pi-catalog/identity";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
@@ -89,6 +89,7 @@ describe("Bedrock prompt-cache compat", () => {
 			expect(buildModel(bedrockSpec({ id })).compat).toEqual({
 				promptCacheMode: minimumTokens === 0 ? "none" : "explicit",
 				supportsLongPromptCacheRetention: supportsLongRetention,
+				supportsMidConversationSystem: supportsMidConversationSystemMessages(id),
 				promptCacheMinimumTokens: minimumTokens,
 				promptCacheMaximumCheckpoints: minimumTokens === 0 ? 0 : 4,
 				// bedrockSpec is reasoning:true → keepalive-free idle floor applies
@@ -102,6 +103,7 @@ describe("Bedrock prompt-cache compat", () => {
 		const expected = {
 			promptCacheMode: "explicit",
 			supportsLongPromptCacheRetention: false,
+			supportsMidConversationSystem: false,
 			promptCacheMinimumTokens: 1024,
 			promptCacheMaximumCheckpoints: 4,
 		} as const;
@@ -133,7 +135,10 @@ describe("Bedrock prompt-cache compat", () => {
 			"jp.amazon.nova-2-lite-v1:0",
 			"global.amazon.nova-2-lite-v1:0",
 		] as const) {
-			expect(buildModel(bedrockSpec({ id })).compat).toEqual({ ...expected, streamIdleTimeoutMs: 600_000 });
+			expect(buildModel(bedrockSpec({ id })).compat).toEqual({
+				...expected,
+				streamIdleTimeoutMs: 600_000,
+			});
 		}
 	});
 

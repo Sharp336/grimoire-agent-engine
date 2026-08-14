@@ -1917,13 +1917,6 @@ const streamAnthropicOnce = (
 				) {
 					extraBetas.push(effortBeta);
 				}
-				if (model.compat.supportsMidConversationSystem && !extraBetas.includes(midConversationSystemBeta)) {
-					// convertAnthropicMessages may upgrade developer turns to the
-					// mid-conversation `system` role on these models; API-key requests
-					// need the beta alongside the role (OAuth agent requests already
-					// carry it in the Claude Code list).
-					extraBetas.push(midConversationSystemBeta);
-				}
 				// `context_management.clear_thinking_20251015` requires this beta. OAuth
 				// requests carry it in `claudeCodeAgentBetaDefaults`; API-key requests
 				// need it added explicitly so the field is honored instead of rejected
@@ -3795,22 +3788,21 @@ export function convertAnthropicMessages(
 	}
 
 	// Upgrade developer-origin params to mid-conversation `system` messages where
-	// Anthropic's placement rules allow it (Opus 4.8+ / Fable/Mythos 5 on first-party API).
-	// Rules: a system message must immediately follow a `user` turn and must be
-	// the last entry or be followed by an `assistant` turn — never first, and
-	// never consecutive. Requiring the next param to be `assistant` (or absent)
-	// covers both the "followed by assistant / last" and "no consecutive system"
-	// constraints. Anything that does not qualify stays a `user` message.
+	// the endpoint and model support them. A system section must immediately
+	// follow a `user` turn and be the final section or precede an `assistant`
+	// turn. Consecutive system messages form one section.
 	if (developerParamIndices.length > 0 && model.compat.supportsMidConversationSystem) {
-		for (const idx of developerParamIndices) {
+		for (let developerIndex = developerParamIndices.length - 1; developerIndex >= 0; developerIndex--) {
+			const idx = developerParamIndices[developerIndex];
 			const followsUser = idx > 0 && params[idx - 1]?.role === "user";
 			const next = params[idx + 1];
-			const lastOrBeforeAssistant = idx === params.length - 1 || next?.role === "assistant";
+			const endsOrContinuesSystemSection =
+				idx === params.length - 1 || next?.role === "assistant" || next?.role === "system";
 			// System content is text-only on the wire; a developer turn carrying
 			// image blocks must stay a `user` message or the API rejects it.
 			const content = params[idx].content;
 			const textOnly = typeof content === "string" || content.every(block => block.type === "text");
-			if (followsUser && lastOrBeforeAssistant && textOnly) {
+			if (followsUser && endsOrContinuesSystemSection && textOnly) {
 				params[idx] = { role: "system", content };
 			}
 		}
