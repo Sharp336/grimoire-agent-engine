@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added DeepInfra to the interactive provider login and model-selection flows.
+
 ## [17.3.3] - 2026-08-14
 
 ### Fixed
@@ -95,9 +99,6 @@
 - Fixed `/handoff` losing local artifacts (plans, scratch files, research notes) by copying them across the handoff session boundary.
 - Replaced libarchive-based tar parsing with a hardened, in-process tar reader to prevent crashes and safely handle complex archive structures, symlinks, and sparse metadata.
 - Fixed `Ctrl+O` tool-output expansion failing to reach launch-completion messages wrapped in the hidden tool activity container.
-### Added
-
-- Added DeepInfra to the interactive provider login and model-selection flows.
 
 ## [17.2.14] - 2026-08-11
 
