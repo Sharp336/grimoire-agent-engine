@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Stopped mixed-case plugin tool names from being lowercased during tool-set refresh, which unmounted them from `xd://` whenever MCP tools connected.
+
 ## [17.3.3] - 2026-08-14
 
 ### Fixed

@@ -1323,4 +1323,21 @@ These tools became available:
 		expect(session.getToolByName(newTool.name)).toBeDefined();
 		expect(session.getMountedXdevToolNames()).toContain(newTool.name);
 	});
+
+	it("keeps mixed-case plugin devices mounted when MCP tools refresh", async () => {
+		const xdevState = createTestXdevState();
+		const { session, toolRegistry } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {
+			xdev: xdevState,
+		});
+		const pluginTool = { ...createBasicTool("CaseAdd", "Case Add"), loadMode: "discoverable" as const };
+		toolRegistry.set(pluginTool.name, pluginTool);
+		xdevState.mountedNames.add(pluginTool.name);
+
+		await session.refreshMCPTools([
+			createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus"),
+		]);
+
+		expect(session.getMountedXdevToolNames()).toContain("CaseAdd");
+		expect(session.getToolByName("CaseAdd")).toBeDefined();
+	});
 });
