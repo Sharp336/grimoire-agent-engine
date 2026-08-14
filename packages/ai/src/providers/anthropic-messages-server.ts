@@ -334,6 +334,13 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	for (const message of data.messages as AnthropicMessage[]) {
 		if (message.role === "user") {
 			for (const m of walkUserContent(message.content, now)) messages.push(m);
+		} else if (message.role === "system") {
+			// The validated schema permits only text system blocks, while the shared
+			// message type conservatively uses the broader content union for every role.
+			const content = buildSystemPrompt(message.content as Exclude<AnthropicSystem, undefined>)?.[0];
+			if (content !== undefined) {
+				messages.push({ role: "developer", content, timestamp: now });
+			}
 		} else {
 			const assistant: AssistantMessage = {
 				role: "assistant",

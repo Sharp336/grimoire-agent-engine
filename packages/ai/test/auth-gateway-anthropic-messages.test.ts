@@ -173,6 +173,30 @@ describe("anthropic-messages parseRequest", () => {
 		expect(msgs[4]).toMatchObject({ role: "user", content: "and another result coming" });
 	});
 
+	it("preserves mid-conversation system sections as developer messages", () => {
+		const parsed = parseRequest({
+			model: "claude-opus-4-8",
+			max_tokens: 128,
+			messages: [
+				{ role: "user", content: "Inspect the repository." },
+				{
+					role: "system",
+					content: [
+						{ type: "text", text: "Prefer indexed retrieval." },
+						{ type: "text", text: "Do not repeat the same search." },
+					],
+				},
+			],
+		});
+
+		expect(parsed.context.messages).toHaveLength(2);
+		expect(parsed.context.messages[0]).toMatchObject({ role: "user", content: "Inspect the repository." });
+		expect(parsed.context.messages[1]).toMatchObject({
+			role: "developer",
+			content: "Prefer indexed retrieval.\n\nDo not repeat the same search.",
+		});
+	});
+
 	it("maps tool_choice variants and suppresses user wrappers that hold only tool_result", () => {
 		const auto = parseRequest({
 			model: "m",

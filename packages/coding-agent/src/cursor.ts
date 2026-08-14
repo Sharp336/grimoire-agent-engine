@@ -236,15 +236,23 @@ function createToolContext(options: CursorExecBridgeOptions): {
 	additionalContext: string[];
 } {
 	const additionalContext: string[] = [];
-	return {
-		context: {
-			...options.getToolContext?.(),
-			addAdditionalContext: (context: string) => {
-				if (context.trim().length > 0) additionalContext.push(context);
-			},
-		} as AgentToolContext,
-		additionalContext,
+	const addAdditionalContext = (context: string): void => {
+		if (context.trim().length > 0) additionalContext.push(context);
 	};
+	const baseToolContext = options.getToolContext?.();
+	const context =
+		baseToolContext === undefined
+			? ({ addAdditionalContext } as AgentToolContext)
+			: (Object.create(Object.getPrototypeOf(baseToolContext), {
+					...Object.getOwnPropertyDescriptors(baseToolContext),
+					addAdditionalContext: {
+						configurable: true,
+						enumerable: true,
+						value: addAdditionalContext,
+						writable: true,
+					},
+				}) as AgentToolContext);
+	return { context, additionalContext };
 }
 
 async function executeTool(

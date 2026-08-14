@@ -846,6 +846,61 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 		expect(getToolResultAdditionalContext(result)).toEqual(["mounted context"]);
 	});
 
+	it("preserves custom tool context prototypes and property descriptors", async () => {
+		class CustomToolContext {
+			declare readonly hiddenValue: string;
+
+			readHiddenValue(): string {
+				return this.hiddenValue;
+			}
+		}
+		const baseToolContext = new CustomToolContext();
+		Object.defineProperty(baseToolContext, "hiddenValue", {
+			configurable: false,
+			enumerable: false,
+			value: "preserved",
+			writable: false,
+		});
+		let receivedToolContext: (CustomToolContext & AgentToolContext) | undefined;
+		const mountedTool: AgentTool = {
+			name: "mcp__fixture_custom_context",
+			label: "Fixture Custom Context",
+			description: "reports context through a custom tool context",
+			parameters: type({}),
+			async execute(_toolCallId, _params, _signal, _onUpdate, context) {
+				receivedToolContext = context as CustomToolContext & AgentToolContext;
+				context?.addAdditionalContext?.("context from custom Cursor tool context");
+				return { content: [{ type: "text", text: "reported" }], details: {} };
+			},
+		};
+		const handlers = new CursorExecHandlers({
+			cwd: ".",
+			tools: new Map([[mountedTool.name, mountedTool]]),
+			getExecutableTool: name => (name === mountedTool.name ? mountedTool : undefined),
+			getToolContext: () => baseToolContext as unknown as AgentToolContext,
+		});
+
+		const result = await handlers.mcp({
+			name: mountedTool.name,
+			providerIdentifier: "pi-agent",
+			toolName: mountedTool.name,
+			toolCallId: "call-mounted-custom-context",
+			args: {},
+			rawArgs: {},
+		});
+
+		expect(Object.getPrototypeOf(receivedToolContext)).toBe(CustomToolContext.prototype);
+		expect(receivedToolContext?.readHiddenValue()).toBe("preserved");
+		expect(Object.getOwnPropertyDescriptor(receivedToolContext, "hiddenValue")).toEqual({
+			configurable: false,
+			enumerable: false,
+			value: "preserved",
+			writable: false,
+		});
+		expect(baseToolContext).not.toHaveProperty("addAdditionalContext");
+		expect(getToolResultAdditionalContext(result)).toEqual(["context from custom Cursor tool context"]);
+	});
+
 	it("routes wrapped mounted devices through the approval gate", async () => {
 		let executed = false;
 		const device: AgentTool = {

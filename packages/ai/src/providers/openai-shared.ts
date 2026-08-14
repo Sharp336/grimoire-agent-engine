@@ -1798,8 +1798,12 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 				options.developerStringContent && msg.role === "developer" && typeof msg.content === "string"
 					? msg.content.toWellFormed()
 					: undefined;
+			const useDeveloperRole =
+				msg.role === "developer" &&
+				options.supportsDeveloperRole === true &&
+				(typeof msg.content === "string" || msg.content.every(item => item.type === "text"));
 			messages.push({
-				role: msg.role === "developer" && options.supportsDeveloperRole ? "developer" : "user",
+				role: useDeveloperRole ? "developer" : "user",
 				content:
 					developerText !== undefined
 						? escapeControlTokens

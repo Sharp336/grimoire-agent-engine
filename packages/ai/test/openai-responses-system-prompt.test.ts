@@ -178,6 +178,31 @@ describe("openai-responses system prompt routing", () => {
 				{ role: "developer", content: [{ type: "input_text", text: "Prefer indexed retrieval." }] },
 			]);
 		});
+
+		it("keeps image-bearing developer messages on the user role", async () => {
+			const body = await captureRequestBody(o4MiniModel, {
+				messages: [
+					{ role: "user", content: "hi", timestamp: Date.now() },
+					{
+						role: "developer",
+						content: [
+							{ type: "text", text: "Match this reference." },
+							{ type: "image", data: "aGVsbG8=", mimeType: "image/png" },
+						],
+						attribution: "agent",
+						timestamp: Date.now(),
+					},
+				],
+			});
+
+			expect((body.input as Array<{ role: string; content: unknown }>).at(-1)).toEqual({
+				role: "user",
+				content: [
+					{ type: "input_text", text: "Match this reference." },
+					{ type: "input_image", image_url: "data:image/png;base64,aGVsbG8=", detail: "auto" },
+				],
+			});
+		});
 	});
 
 	describe("reasoning model on custom proxy (instructions path)", () => {

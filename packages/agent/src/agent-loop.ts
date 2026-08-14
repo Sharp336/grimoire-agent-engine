@@ -2561,9 +2561,9 @@ async function executeToolCalls(
 				// not pass through `beforeToolCall` themselves. They inherit this
 				// context and report passive hook context through the callback, so
 				// it joins the root call's prepared context at the batch boundary.
-				const toolContext =
+				const toolContext: AgentToolContext =
 					baseToolContext === undefined
-						? { addAdditionalContext }
+						? ({ addAdditionalContext } as AgentToolContext)
 						: (Object.create(Object.getPrototypeOf(baseToolContext), {
 								...Object.getOwnPropertyDescriptors(baseToolContext),
 								addAdditionalContext: {
