@@ -736,6 +736,8 @@ export interface MessageUpdateEvent {
 	type: "message_update";
 	message: AgentMessage;
 	assistantMessageEvent: AssistantMessageEvent;
+	/** Epoch milliseconds captured when the session observed this update, before the extension delivery queue. */
+	timestamp?: number;
 }
 
 /**

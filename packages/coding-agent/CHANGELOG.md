@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added emission timestamps to streaming `message_update` session and extension events, including `--mode json` output, so consumers can measure thinking, text, and tool-call block timing without asynchronous listener delay.
+
 ## [17.3.2] - 2026-08-13
 
 ### Fixed

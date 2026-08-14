@@ -62,11 +62,16 @@ export function printableEvent(event: AgentSessionEvent): unknown {
 			if (streamEvent.type === "done" || streamEvent.type === "error") {
 				return {
 					type: "message_update",
+					timestamp: event.timestamp,
 					assistantMessageEvent: { type: streamEvent.type, reason: streamEvent.reason },
 				};
 			}
 			const { partial: _partial, ...rest } = streamEvent;
-			return { type: "message_update", assistantMessageEvent: rest };
+			return {
+				type: "message_update",
+				timestamp: event.timestamp,
+				assistantMessageEvent: rest,
+			};
 		}
 		case "message_start":
 		case "message_end":
