@@ -333,4 +333,29 @@ describe("OpenCode MCP discovery", () => {
 			delete Bun.env.OMP_TEST_MCP_PATH;
 		}
 	});
+
+	test("imports OpenCode oauth.scope as the canonical oauth.scopes override", async () => {
+		await fs.writeFile(
+			path.join(tempDir, "opencode.json"),
+			JSON.stringify({
+				mcp: {
+					gateway: {
+						type: "remote",
+						url: "https://gateway.example.com/mcp",
+						oauth: { clientId: "gateway-client", scope: "https://gateway.example.com/mcp/mcp.invoke openid" },
+					},
+					// `oauth: false` disables OpenCode's auto-detection and carries no
+					// scope, so there is nothing to import.
+					noauth: { type: "remote", url: "https://plain.example.com/mcp", oauth: false },
+				},
+			}),
+		);
+
+		const servers = await loadOpenCodeMcpConfig(tempDir);
+
+		expect(servers.find(item => item.name === "gateway")?.oauth).toEqual({
+			scopes: "https://gateway.example.com/mcp/mcp.invoke openid",
+		});
+		expect(servers.find(item => item.name === "noauth")?.oauth).toBeUndefined();
+	});
 });
