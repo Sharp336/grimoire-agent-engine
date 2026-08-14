@@ -12,6 +12,9 @@ import type { TaskParams } from "../../../task/types";
 import type { ToolSession } from "../../../tools";
 import { getFilePriority } from "./git-file-diff";
 
+/** Skipped paths listed in the cap warning before it degrades to a count. */
+const SKIPPED_PREVIEW_MAX = 10;
+
 const analyzeFileSchema = type({
 	files: type("string").describe("file path").array().atLeastLength(1),
 	"goal?": type("string").describe("analysis focus"),
@@ -101,9 +104,14 @@ export function createAnalyzeFileTool(options: {
 				.map(analysis => analysis.content.find(part => part.type === "text")?.text ?? "")
 				.filter(Boolean)
 				.join("\n\n");
+			// Keep the skipped list out of the commit-agent context for large
+			// changes: report the count with a bounded preview instead of
+			// serializing every path (#7977 review).
+			const skippedPreview = skipped.slice(0, SKIPPED_PREVIEW_MAX).join(", ");
+			const skippedSuffix = skipped.length > SKIPPED_PREVIEW_MAX ? `, … ${skipped.length - SKIPPED_PREVIEW_MAX} more` : "";
 			const capWarning =
 				skipped.length > 0
-					? `\n\nwarning: analyze_files capped at ${files.length} file${files.length === 1 ? "" : "s"}; skipped: ${skipped.join(", ")}`
+					? `\n\nwarning: analyze_files capped at ${files.length} file${files.length === 1 ? "" : "s"}; skipped ${skipped.length}: ${skippedPreview}${skippedSuffix}`
 					: "";
 			return {
 				content: [{ type: "text", text: (text || "(no output)") + capWarning }],

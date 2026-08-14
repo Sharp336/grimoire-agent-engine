@@ -104,7 +104,7 @@ describe("analyze_files cap behavior (issue #7833)", () => {
 		expect(execute).toHaveBeenCalledTimes(5);
 		const text = result.content.find(p => p.type === "text")?.text ?? "";
 		expect(text).toContain("warning: analyze_files capped at 5 files");
-		expect(text).toContain("skipped: f.ts");
+		expect(text).toContain("skipped 1: f.ts");
 	});
 
 	it("limits related-file context to the capped set", async () => {
@@ -145,7 +145,7 @@ describe("analyze_files cap behavior (issue #7833)", () => {
 
 		expect(execute).toHaveBeenCalledTimes(0);
 		const text = result.content.find(p => p.type === "text")?.text ?? "";
-		expect(text).toContain("skipped: a.ts, b.ts");
+		expect(text).toContain("skipped 2: a.ts, b.ts");
 	});
 
 	it("treats a negative maxFiles as zero instead of slicing from the tail", async () => {
@@ -157,6 +157,20 @@ describe("analyze_files cap behavior (issue #7833)", () => {
 
 		expect(execute).toHaveBeenCalledTimes(0);
 		const text = result.content.find(p => p.type === "text")?.text ?? "";
-		expect(text).toContain("skipped: a.ts, b.ts, c.ts");
+		expect(text).toContain("skipped 3: a.ts, b.ts, c.ts");
+	});
+
+	it("bounds the skipped-path preview so large changes stay out of context", async () => {
+		const execute = mockTaskTool();
+		const tool = await makeTool(5);
+		const files = Array.from({ length: 25 }, (_, index) => `f${index}.ts`);
+
+		const result = await tool.execute("tc1", { files }, () => {}, makeContext(), new AbortController().signal);
+
+		expect(execute).toHaveBeenCalledTimes(5);
+		const text = result.content.find(p => p.type === "text")?.text ?? "";
+		expect(text).toContain("skipped 20: f5.ts, f6.ts, f7.ts, f8.ts, f9.ts, f10.ts, f11.ts, f12.ts, f13.ts, f14.ts");
+		expect(text).toContain("10 more");
+		expect(text).not.toContain("f15.ts");
 	});
 });
