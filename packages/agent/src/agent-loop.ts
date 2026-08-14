@@ -2543,6 +2543,11 @@ async function executeToolCalls(
 					? transformToolCallArguments(effectiveArgs, toolCall.name)
 					: effectiveArgs;
 				record.args = executionArgs;
+				const addAdditionalContext = (context: string): void => {
+					if (typeof context === "string" && context.trim().length > 0) {
+						record.additionalContext.push(context);
+					}
+				};
 
 				const baseToolContext = getToolContext?.({
 					batchId,
@@ -2556,14 +2561,18 @@ async function executeToolCalls(
 				// not pass through `beforeToolCall` themselves. They inherit this
 				// context and report passive hook context through the callback, so
 				// it joins the root call's prepared context at the batch boundary.
-				const toolContext = {
-					...baseToolContext,
-					addAdditionalContext: (context: string) => {
-						if (typeof context === "string" && context.trim().length > 0) {
-							record.additionalContext.push(context);
-						}
-					},
-				} as AgentToolContext;
+				const toolContext =
+					baseToolContext === undefined
+						? { addAdditionalContext }
+						: (Object.create(Object.getPrototypeOf(baseToolContext), {
+								...Object.getOwnPropertyDescriptors(baseToolContext),
+								addAdditionalContext: {
+									configurable: true,
+									enumerable: true,
+									value: addAdditionalContext,
+									writable: true,
+								},
+							}) as AgentToolContext);
 				executionStarted = true;
 				const rawResult = await tool.execute(
 					toolCall.id,

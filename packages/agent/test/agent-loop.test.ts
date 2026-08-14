@@ -4214,6 +4214,75 @@ describe("agentLoopContinue with AgentMessage", () => {
 		expect(contextEventIndex).toBeGreaterThan(Math.max(...resultEventIndices));
 	});
 
+	it("preserves custom tool context prototypes and property descriptors", async () => {
+		const toolSchema = type({ value: "string" });
+		class CustomToolContext {
+			declare readonly hiddenValue: string;
+
+			readHiddenValue(): string {
+				return this.hiddenValue;
+			}
+		}
+		const baseToolContext = new CustomToolContext();
+		Object.defineProperty(baseToolContext, "hiddenValue", {
+			configurable: false,
+			enumerable: false,
+			value: "preserved",
+			writable: false,
+		});
+		let receivedToolContext: (CustomToolContext & AgentToolContext) | undefined;
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params, _signal, _onUpdate, toolContext) {
+				receivedToolContext = toolContext as CustomToolContext & AgentToolContext;
+				toolContext?.addAdditionalContext?.("context from custom tool context");
+				return {
+					content: [{ type: "text", text: `echoed: ${params.value}` }],
+					details: { value: params.value },
+				};
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: messages =>
+				messages.filter(
+					message =>
+						message.role === "user" ||
+						message.role === "developer" ||
+						message.role === "assistant" ||
+						message.role === "toolResult",
+				) as Message[],
+			getToolContext: () => baseToolContext as AgentToolContext,
+		};
+
+		const stream = agentLoop([createUserMessage("echo something")], context, config, undefined, mock.stream);
+		for await (const _ of stream) {
+			// drain
+		}
+
+		expect(Object.getPrototypeOf(receivedToolContext)).toBe(CustomToolContext.prototype);
+		expect(receivedToolContext?.readHiddenValue()).toBe("preserved");
+		expect(Object.getOwnPropertyDescriptor(receivedToolContext, "hiddenValue")).toEqual({
+			configurable: false,
+			enumerable: false,
+			value: "preserved",
+			writable: false,
+		});
+		expect(baseToolContext).not.toHaveProperty("addAdditionalContext");
+		const developer = mock.calls[1]?.context.messages.find(message => message.role === "developer");
+		expect(developer?.content).toEqual([{ type: "text", text: "context from custom tool context" }]);
+	});
+
 	it("does not inject beforeToolCall context from blocked calls", async () => {
 		const toolSchema = type({ value: "string" });
 		const tool: AgentTool<typeof toolSchema, { value: string }> = {
