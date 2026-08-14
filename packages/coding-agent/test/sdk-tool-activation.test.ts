@@ -1248,12 +1248,12 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			const unsubscribe = runner.onError(error => {
 				errors.push(error.error);
 			});
-			testSetExtensionHandlerTimeoutMs(10);
+			testSetExtensionHandlerTimeoutMs(200);
 
 			await runner.emit({ type: "session_start" });
 			unsubscribe();
 
-			expect(errors).toContain("handler timed out after 10ms");
+			expect(errors).toContain("handler timed out after 200ms");
 			expect(session.getToolByName("stalled_registration_tool")).toBeUndefined();
 			expect(session.getToolByName("recovered_registration_tool")?.label).toBe("recovered_registration_tool");
 			expect(session.getEnabledToolNames()).toContain("recovered_registration_tool");
@@ -1454,6 +1454,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 
 			releaseStalledRegistration.resolve();
 			const failure = await detachedFailure.promise;
+			testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
 			releaseRecoveredRegistration.resolve();
 			await recoveredActivation.promise;
 

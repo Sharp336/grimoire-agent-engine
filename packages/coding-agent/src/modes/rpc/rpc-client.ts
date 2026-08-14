@@ -354,6 +354,7 @@ export class RpcClient {
 			// workers are reaped here so pending requests cannot hang indefinitely.
 			if (!readySettled) {
 				readySettled = true;
+				await Promise.race([child.exited.catch(() => undefined), Bun.sleep(100)]);
 				readyReject(new Error(`Agent output stream ended before ready. Stderr: ${child.peekStderr()}`));
 				return;
 			}

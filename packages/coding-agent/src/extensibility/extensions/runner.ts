@@ -212,12 +212,14 @@ async function raceHandlerWithTimeout<T>(
 		const workPromise = Promise.resolve(work(handlerSignal));
 		const result = await Promise.race([workPromise, interruptPromise]);
 		if (result === EXTENSION_HANDLER_TIMEOUT) {
+			// Wait for the aborted work to release shared queues (tool
+			// registration) before the next sequential handler starts.
 			await Promise.race([
 				workPromise.then(
 					() => undefined,
 					() => undefined,
 				),
-				Bun.sleep(0),
+				Bun.sleep(Math.max(timeoutMs, 50)),
 			]);
 		}
 		return result;
