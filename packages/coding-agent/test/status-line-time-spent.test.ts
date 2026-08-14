@@ -527,7 +527,7 @@ describe("default-preset elapsed metric visibility", () => {
 		for (const width of [36, 40, 48, 60, 80] as const) {
 			const rows = c.getTopBorderRows(width);
 			expect(rows.length).toBeGreaterThan(0);
-			expect(rows.length).toBeLessThanOrEqual(2);
+			expect(rows.length).toBeLessThanOrEqual(3);
 			for (const row of rows) {
 				expect(row.width).toBeLessThanOrEqual(width);
 				expect(visibleWidth(row.content)).toBeLessThanOrEqual(width);

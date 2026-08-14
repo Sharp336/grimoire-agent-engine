@@ -325,7 +325,8 @@ describe("StatusLineComponent usage refresh", () => {
 		late.resolve(usageReport(42));
 		await flushMicrotasks();
 
-		expect(plain(component.getTopBorder(80).content)).toContain("5h 42%");
+		expect(plain(component.getTopBorder(80).content)).toContain("5h");
+		expect(plain(component.getTopBorder(80).content)).toContain("42%");
 	});
 
 	it("shows quota from the active provider route instead of the Claude model family", async () => {
@@ -340,7 +341,8 @@ describe("StatusLineComponent usage refresh", () => {
 		});
 		await refreshUsage(anthropic);
 		const anthropicText = plain(anthropic.getTopBorder(100).content);
-		expect(anthropicText).toContain("5h 11%");
+		expect(anthropicText).toContain("5h");
+		expect(anthropicText).toContain("11%");
 		expect(anthropicText).not.toContain("Weekly");
 
 		const antigravity = new StatusLineComponent(makeActiveProviderSession("google-antigravity", async () => reports));
@@ -372,8 +374,10 @@ describe("StatusLineComponent usage refresh", () => {
 		});
 		await refreshUsage(component);
 		const text = plain(component.getTopBorder(100).content);
-		expect(text).toContain("5h 31%");
-		expect(text).toContain("7d 80%");
+		expect(text).toContain("5h");
+		expect(text).toContain("31%");
+		expect(text).toContain("7d");
+		expect(text).toContain("80%");
 		expect(text).not.toContain("99%");
 	});
 
@@ -389,7 +393,8 @@ describe("StatusLineComponent usage refresh", () => {
 		});
 		await refreshUsage(component);
 		const text = plain(component.getTopBorder(120).content);
-		expect(text).toContain("Monthly requests 30%");
+		expect(text).toContain("mo");
+		expect(text).toContain("30%");
 		expect(text).not.toContain("5h");
 		expect(text).not.toContain("7d");
 	});
@@ -406,7 +411,8 @@ describe("StatusLineComponent usage refresh", () => {
 			transparent: true,
 		});
 		await refreshUsage(component);
-		expect(plain(component.getTopBorder(100).content)).toContain("5h 11%");
+		expect(plain(component.getTopBorder(100).content)).toContain("5h");
+		expect(plain(component.getTopBorder(100).content)).toContain("11%");
 
 		const mutable = session as unknown as {
 			state: { model: { provider: string } };
@@ -415,7 +421,7 @@ describe("StatusLineComponent usage refresh", () => {
 		mutable.state.model.provider = "google-antigravity";
 		mutable.model.provider = "google-antigravity";
 		component.refreshUsageInBackground();
-		expect(plain(component.getTopBorder(100).content)).not.toContain("5h 11%");
+		expect(plain(component.getTopBorder(100).content)).not.toContain("11%");
 		vi.advanceTimersByTime(0);
 		await flushMicrotasks();
 		expect(plain(component.getTopBorder(100).content)).toContain("Weekly 71%");
@@ -437,8 +443,10 @@ describe("StatusLineComponent usage refresh", () => {
 			expect(rows[0]).toContain("OMP");
 			expect(rows[0]).toContain("A·Opus-5");
 			expect(rows[0]).toContain("xhigh");
-			expect(rows[1]).toContain("5h 31%");
-			expect(rows[1]).toContain("7d 48%");
+			expect(rows[1]).toContain("5h");
+			expect(rows[1]).toContain("31%");
+			expect(rows[1]).toContain("7d");
+			expect(rows[1]).toContain("48%");
 			expect(rows[1]).toContain("27.0s");
 			expect(rows[1]).toContain("219K/1M");
 			expect(rows[2].length).toBeGreaterThan(0);

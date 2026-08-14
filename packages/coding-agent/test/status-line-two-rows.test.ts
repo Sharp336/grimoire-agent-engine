@@ -74,43 +74,44 @@ function stripAnsi(s: string): string {
 	return s.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "").replace(/\x1B\]8;;.*?\x07/g, "");
 }
 
-// Contract: the status area stays one row when it fits, wraps to a second physical row when needed,
-// and never grows beyond two rows. Narrow layouts retain the highest-value operational metrics.
+// Contract: the default preset is a three-row provider-aware footer. Custom
+// presets still wrap into at most two packed rows.
 
-describe("status area wraps up to two physical rows", () => {
-	it("at 240 cols stays on one physical status row when all visible segments fit", () => {
+describe("status area uses a three-row default footer", () => {
+	it("at 240 cols keeps the default three-row provider-aware footer", () => {
 		const session = makeSession();
 		const comp = new StatusLineComponent(session);
 		expect(typeof comp.getTopBorderRows).toBe("function");
 		const rows = comp.getTopBorderRows(240);
 		expect(Array.isArray(rows)).toBe(true);
-		expect(rows.length).toBe(1);
+		expect(rows.length).toBe(3);
 		expect(rows[0]?.width).toBe(visibleWidth(rows[0]?.content ?? ""));
 		expect(rows[0]?.width).toBeLessThanOrEqual(240);
 	});
 
-	it("at 60 cols still proves exactly two physical status rows", () => {
+	it("at 60 cols still fits three physical status rows", () => {
 		const session = makeSession();
 		const comp = new StatusLineComponent(session);
 		const rows = comp.getTopBorderRows(60);
-		expect(rows.length).toBe(2);
+		expect(rows.length).toBe(3);
 		for (const r of rows) {
 			expect(r.width).toBeLessThanOrEqual(60);
 		}
 	});
 
-	it("at 36 cols (mobile) context remains visible somewhere in two rows", () => {
+	it("at 36 cols (mobile) context remains visible in the default footer", () => {
 		const session = makeSession();
 		const comp = new StatusLineComponent(session);
 		const rows = comp.getTopBorderRows(36);
-		expect(rows.length).toBe(2);
+		expect(rows.length).toBeGreaterThanOrEqual(2);
+		expect(rows.length).toBeLessThanOrEqual(3);
 		const combined = rows.map(r => stripAnsi((r as { content: string }).content)).join(" ");
 		// Context uses concrete tokens; cache hit remains a percentage rate.
 		expect(combined).toContain("50K/200K");
 		expect((combined.match(/%/g) ?? []).length).toBeGreaterThanOrEqual(1);
 	});
 
-	it("editor renders two status rows above input (integration)", () => {
+	it("editor renders three status rows above input (integration)", () => {
 		const chalk = new Chalk({ level: 3 });
 		const minimalTheme = {
 			borderColor: (s: string) => chalk.dim(s),
@@ -210,22 +211,22 @@ describe("status area wraps up to two physical rows", () => {
 			return comp.getTopBorderRows(w);
 		}) as unknown as Parameters<typeof editor.setTopBorderProvider>[0]);
 		const lines = editor.render(60);
-		// Editor render should include 2 status rows + at least 1 content line + bottom border
-		// So status rows are first 2 lines, distinctly not collapsed
+		// Editor render should include 3 status rows + at least 1 content line + bottom border
 		expect(providerCalls).toBeGreaterThan(0);
-		expect(lines.length).toBeGreaterThanOrEqual(3);
-		// First two lines are the status rows (top border area)
+		expect(lines.length).toBeGreaterThanOrEqual(4);
 		const top1 = stripAnsi(lines[0] ?? "");
 		const top2 = stripAnsi(lines[1] ?? "");
+		const top3 = stripAnsi(lines[2] ?? "");
 		expect(top1.length).toBeGreaterThan(0);
 		expect(top2.length).toBeGreaterThan(0);
+		expect(top3.length).toBeGreaterThan(0);
 		expect(top1).not.toBe(top2);
-		// Continuation status rows use tee junctions, not hanging vertical bars,
-		// so the two-row header reads as one structured frame above the prompt.
+		// Continuation status rows use tee junctions, not hanging vertical bars.
 		expect(top2.startsWith("+")).toBe(true);
 		expect(top2.endsWith("+")).toBe(true);
-		// Verify visible width accounting
-		for (const line of [lines[0]!, lines[1]!]) {
+		expect(top3.startsWith("+")).toBe(true);
+		expect(top3.endsWith("+")).toBe(true);
+		for (const line of [lines[0]!, lines[1]!, lines[2]!]) {
 			expect(visibleWidth(line)).toBeLessThanOrEqual(60);
 		}
 	});

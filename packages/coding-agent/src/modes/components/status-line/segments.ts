@@ -858,12 +858,16 @@ const usageSegment: StatusLineSegment = {
 		}
 		const compact = typeof ctx.width === "number" && ctx.width > 0 && ctx.width <= 160;
 		const parts: string[] = [];
-		if (u.windows && u.windows.length > 0) {
+		const hasCanonical = Boolean(u.fiveHour || u.sevenDay || u.monthly);
+		const labeledWindows = (u.windows ?? []).filter(
+			window => typeof window.label === "string" && window.label.length > 0,
+		);
+		if (!hasCanonical && labeledWindows.length > 0) {
 			if (u.tier && !compact) {
 				const tier = truncateToWidth(sanitizeStatusText(u.tier), TRUNCATE_LENGTHS.SHORT);
 				if (tier) parts.push(theme.fg("accent", tier));
 			}
-			for (const window of u.windows.slice(0, 2)) {
+			for (const window of labeledWindows.slice(0, 2)) {
 				const label = truncateToWidth(sanitizeStatusText(window.label), compact ? 16 : TRUNCATE_LENGTHS.SHORT);
 				const pctText = theme.fg(pickUsageColor(window.percent), `${Math.round(window.percent)}%`);
 				const reset =

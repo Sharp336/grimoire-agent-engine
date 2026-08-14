@@ -1511,10 +1511,12 @@ export class StatusLineComponent implements Component {
 			let relevantLimits = limits as UsageLimit[];
 			const rankingContext = activeModelId ? { modelId: activeModelId } : undefined;
 			if (provider === "google-antigravity") {
-				relevantLimits = antigravityRankingStrategy.scopeLimits?.(usageReport, rankingContext) ?? relevantLimits;
+				const scoped = antigravityRankingStrategy.scopeLimits?.(usageReport, rankingContext);
+				if (scoped && scoped.length > 0) relevantLimits = scoped;
 			} else if (provider === "anthropic") {
 				const { primary, secondary } = claudeRankingStrategy.findWindowLimits(usageReport, rankingContext);
-				relevantLimits = [primary, secondary].filter((limit): limit is UsageLimit => limit !== undefined);
+				const ranked = [primary, secondary].filter((limit): limit is UsageLimit => limit !== undefined);
+				if (ranked.length > 0) relevantLimits = ranked;
 			}
 			for (const limit of relevantLimits) {
 				if (!limit || typeof limit !== "object") continue;
@@ -1548,14 +1550,16 @@ export class StatusLineComponent implements Component {
 				const windowKey = windowId === "5h" || windowId === "7d" ? windowId : l.id;
 				const genericWindowLabel = l.window?.label && l.window.label !== "Default" ? l.window.label : l.label;
 				const label = windowId === "5h" || windowId === "7d" ? windowId : genericWindowLabel;
-				const existingWindow = windows.get(windowKey);
-				if (!existingWindow || (existingWindow.tier !== undefined && !tier)) {
-					windows.set(windowKey, {
-						label,
-						percent: fraction * 100,
-						resetMs: typeof resetsAt === "number" ? Math.max(0, resetsAt - now) : undefined,
-						tier: tier || undefined,
-					});
+				if (typeof windowKey === "string" && typeof label === "string" && label.length > 0) {
+					const existingWindow = windows.get(windowKey);
+					if (!existingWindow || (existingWindow.tier !== undefined && !tier)) {
+						windows.set(windowKey, {
+							label,
+							percent: fraction * 100,
+							resetMs: typeof resetsAt === "number" ? Math.max(0, resetsAt - now) : undefined,
+							tier: tier || undefined,
+						});
+					}
 				}
 				// Accept tiered limits, but prefer untiered (backward compat with Anthropic).
 				// An untiered limit always replaces a tiered one; among same-tieredness, first wins.
@@ -2141,15 +2145,11 @@ export class StatusLineComponent implements Component {
 			};
 			for (const id of ["mode", "collab", "git", "pr", "subagents"] as const) appendIfFits(row1, itemFor(id));
 			for (const item of items.filter(item => item.id === undefined)) appendIfFits(row1, item);
-			for (const id of [
-				"cache_hit",
-				"cache_read",
-				"token_total",
-				"token_rate",
-				"cost",
-				"time",
-				"session_name",
-			] as const) {
+			const secondaryRow2 =
+				width <= 80
+					? (["cache_hit", "cache_read", "token_total", "cost", "time", "session_name"] as const)
+					: (["cache_hit", "cache_read", "token_total", "token_rate", "cost", "time", "session_name"] as const);
+			for (const id of secondaryRow2) {
 				appendIfFits(row2, itemFor(id));
 			}
 
