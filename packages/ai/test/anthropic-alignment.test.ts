@@ -468,7 +468,7 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(pad?.content).toBe("Continue.");
 	});
 
-	it("adds the effort beta but omits the retired mid-conversation beta on API-key requests", async () => {
+	it("adds effort and mid-conversation betas to API-key requests that use those features", async () => {
 		let capturedBeta: string | undefined;
 		const fetchMock = (async (_input: string | URL | Request, init?: RequestInit) => {
 			capturedBeta = (init?.headers as Record<string, string> | undefined)?.["anthropic-beta"];
@@ -493,8 +493,11 @@ describe("Anthropic request fingerprint alignment", () => {
 			{ apiKey: "sk-ant-api-test", thinkingEnabled: false, fetch: fetchMock },
 		).result();
 
+		// Thinking-off on an adaptive-only model still pins output_config.effort,
+		// and the converter may emit mid-conversation system turns on Opus 4.8 —
+		// both fields need their betas on API-key requests too.
 		expect(capturedBeta).toContain("effort-2025-11-24");
-		expect(capturedBeta).not.toContain("mid-conversation-system-2026-04-07");
+		expect(capturedBeta).toContain("mid-conversation-system-2026-04-07");
 	});
 
 	it("adds the effort beta when a direct forced tool choice creates an adaptive effort pin", async () => {

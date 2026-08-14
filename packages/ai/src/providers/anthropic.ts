@@ -1917,6 +1917,13 @@ const streamAnthropicOnce = (
 				) {
 					extraBetas.push(effortBeta);
 				}
+				if (model.compat.supportsMidConversationSystem && !extraBetas.includes(midConversationSystemBeta)) {
+					// convertAnthropicMessages may upgrade developer turns to the
+					// mid-conversation `system` role on these models; API-key requests
+					// need the beta alongside the role (OAuth agent requests already
+					// carry it in the Claude Code list).
+					extraBetas.push(midConversationSystemBeta);
+				}
 				// `context_management.clear_thinking_20251015` requires this beta. OAuth
 				// requests carry it in `claudeCodeAgentBetaDefaults`; API-key requests
 				// need it added explicitly so the field is honored instead of rejected
