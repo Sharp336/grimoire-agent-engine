@@ -77,16 +77,16 @@ pub enum ChatError {
 	},
 	/// Durable transcript state failed to open, create, or project.
 	#[error(transparent)]
-	Journal(#[source] Box<omp_agent::JournalError>),
+	Journal(Box<omp_agent::JournalError>),
 	/// A durable transcript could not be projected into canonical replay items.
 	#[error(transparent)]
-	Projection(#[source] Box<omp_agent::ProjectionError>),
+	Projection(Box<omp_agent::ProjectionError>),
 	/// The project environment authority failed to start or connect.
 	#[error(transparent)]
-	Environment(#[source] Box<crate::envd::EnvdError>),
+	Environment(Box<crate::envd::EnvdError>),
 	/// The in-process turn authority could not be constructed.
 	#[error(transparent)]
-	TurnClient(#[source] Box<omp_agent::Error>),
+	TurnClient(Box<omp_agent::Error>),
 	/// A live tool declaration could not be represented on the turn protocol.
 	#[error("tool {0} uses a grammar input unsupported by the turn protocol")]
 	GrammarTool(Str),
