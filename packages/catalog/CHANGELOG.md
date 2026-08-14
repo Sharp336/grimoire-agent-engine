@@ -9,6 +9,9 @@
 - Added support for the `deepseek-v4-pro:preview` model
 - Added support for the `gemini-3.7-flash` model
 - Added dynamic Antigravity client-version discovery from the official update manifest (darwin/arm64 channel), so version-gated models appear without a code change; `PI_AI_ANTIGRAVITY_VERSION` remains available as an override.
+- Added first-party OpenAI Daybreak Blue, Daybreak Red, and GPT-5.6 Cyber models with their documented API pricing, token limits, tools, and full `off`/`low`/`medium`/`high`/`xhigh`/`max` reasoning controls.
+- Added `calculateUncachedInputCost()` for pricing a prompt against its active context-length tier without prompt caching.
+- Added mid-conversation `system`-message capability detection for supported Claude model identities across the direct Anthropic API, Vertex AI, and Amazon Bedrock.
 
 ### Fixed
 

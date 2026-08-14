@@ -3,6 +3,26 @@
 ## [Unreleased]
 
 ## [17.3.3] - 2026-08-14
+### Added
+
+- Added Astral `ty` as a built-in Python primary LSP server (`ty server`), ordered behind `pyright`/`basedpyright`/`pylsp` so it becomes the primary Python LSP only when the existing servers are unavailable. `ruff` remains the Python linter and coexists alongside `ty` ([#4617](https://github.com/can1357/oh-my-pi/issues/4617)).
+- Added first-party Nix support with reproducible source builds for Linux and macOS on x86-64 and ARM64, a pinned development shell, an overlay, NixOS and Home Manager modules, offline Bun dependencies, and lightweight flake evaluation in CI. Nix-managed installs now direct updates back through Nix instead of replacing store-managed executables.
+- `omp update` and the startup version check now follow an `omp.rename` pointer in the published npm manifest, preparing existing installs for the upcoming npm package rename. Migration is transactional: the renamed agent/natives packages are installed first (npm uses `--force` to take over the `omp` bin), so an install failure leaves the old install untouched; the old-name globals are removed only afterwards, and a broken bin link is restored by re-running the idempotent install before verification decides the outcome.
+- Added per-agent advisors: agent definitions accept an `advisor` frontmatter field (`true` = advise with the `advisor`-role model, `"<pattern>"` = an explicit advisor model with optional `:level` suffix), overridable via the `task.agentAdvisor` settings record. An explicit pattern lands on the spawned session's `modelRoles.advisor`, so different agents can be advised by different models; the effective opt-in is persisted in `session_init` and restored on cold revival, and each subagent advisor keeps its own `<session>/<SubId>/__advisor[.<slug>].jsonl` transcript.
+- Redesigned `/agents` as a fullscreen hub in the `/models` idiom: a scope sidebar (All / Project / User / Bundled / New agent), type-to-filter agent rows with effective model/prewalk/advisor annotations, a pinned detail pane, and mouse support. Enter on an agent opens a property chip strip (enable, model, prewalk, advisor); each property is picked — on/off chips, the real model browser, or a raw pattern input — replacing the old `P`/`A`/`N` letter hotkeys.
+- Added trusted `additionalContext` instructions to `tool_call` extension and hook results, with ordered delivery after tool results across built-in, extension, nested `xd://`, and Cursor-native execution paths.
+
+### Breaking Changes
+
+- Removed the `advisor.subagents` setting; subagent advisors are now configured per agent (frontmatter `advisor` / `task.agentAdvisor`). An existing `advisor.subagents: true` migrates to `task.agentAdvisor: { task: "on" }` — the bundled generic `task` agent keeps its advisor, other agents start unadvised.
+
+### Changed
+
+- `/usage`, `omp usage`, and the status line now show authoritative OpenCode Go quota from the official `GET /zen/go/v1/usage` endpoint — including usage made outside OMP — instead of dollar estimates summed from OMP-observed request costs. The status line renders all three windows (`5h` / `7d` / `mo`), and the per-turn cost recording special case for `opencode-go` sessions is gone along with the "OMP-observed spend only" disclaimer ([#8337](https://github.com/can1357/oh-my-pi/pull/8337) by [@will-bogusz](https://github.com/will-bogusz)).
+- Clarified that the production collab relay source and binaries are not currently published, and documented the source-available local protocol relay ([#8165](https://github.com/can1357/oh-my-pi/issues/8165)).
+- Enabled bounded Anthropic prompt-cache refreshes for the main agent loop while keeping advisor and side-channel requests from taking over the shared refresh timer.
+- Fixed snapcompact compaction shipping its redundant frame archive out of `SessionMaintenance.compact()` on both the manual RPC response (which hard-failed protocol v1 with a transport error after the compaction had already persisted) and the `auto_compaction_end` event payload (which forced the shrink ladder on every unattended pass); the archive is now stripped from both exits while the persisted compaction entry keeps it ([#8168](https://github.com/can1357/oh-my-pi/issues/8168)).
+- Fixed the edit tool showing no diff preview in `apply_patch` mode: the built-in `edit` tool presents on the wire as `apply_patch`, but the renderer-provenance gate did not resolve that alias to its built-in owner, so the edit renderer was skipped ([#8184](https://github.com/can1357/oh-my-pi/issues/8184)).
 
 ### Fixed
 
@@ -107,7 +127,6 @@
 - Fixed below-threshold tool turns waiting for asynchronous session persistence when no mid-run compaction will run, while preserving journal writes when a `message_end` listener fails and isolating notification-only handler payloads from late context mutations ([#8283](https://github.com/can1357/oh-my-pi/pull/8283) by [@ethancawse](https://github.com/ethancawse)).
 - Manual `/shake` now keeps a small recent tail of tool results instead of stripping every eligible result, so the agent does not lose the context it is currently working from ([#7776](https://github.com/can1357/oh-my-pi/issues/7776)).
 - Fixed Hindsight `per-project` and `per-project-tagged` scoping splitting one repository across two memory scopes when the checkout directory carries capitals: the project label is now lowercased, so a checkout at `~/code/General` writes and recalls under `project:general` like every other client of the same bank instead of opening a private `project:General` scope. **Migration note:** mixed-case checkouts previously stored memories under the case-preserving label (`per-project` bank id, `per-project-tagged` `project:<Name>` tags); after upgrading, those sessions read and write the lowercased scope, so memories retained under the old capitalized scope stay in the old bank/tag until re-retained there ([#8158](https://github.com/can1357/oh-my-pi/issues/8158)).
-- Added `additionalContext` to `tool_call` extension and hook results, with ordered delivery after tool results across built-in, extension, nested `xd://`, and Cursor-native execution paths.
 
 ## [17.2.15] - 2026-08-12
 

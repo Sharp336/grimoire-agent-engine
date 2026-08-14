@@ -50,7 +50,7 @@
 - Removed the observed-request-cost machinery that existed only to power the OpenCode Go estimate: `AuthStorage.recordUsageCost`, the store `recordUsageCosts`/`listUsageCosts` hooks, `UsageFetchContext.listUsageCosts`, the `UsageCostHistoryEntry`/`UsageCostHistoryQuery` types, and the `usage_cost_history` schema and statements. Existing unused tables are left intact rather than deleting local data during startup ([#8337](https://github.com/can1357/oh-my-pi/pull/8337) by [@will-bogusz](https://github.com/will-bogusz)).
 ### Added
 
-- Added a non-serializing side channel for provider-native tool results to carry passive context into the next provider request without changing persisted result payloads.
+- Added a non-serializing side channel for provider-native tool results to carry trusted extension-authored instructions into the next provider request without changing persisted result payloads. Capable OpenAI Chat, OpenAI Responses, and Azure endpoints retain `developer` priority; supported Claude API, Vertex, and Bedrock models emit chronological mid-conversation `system` turns; unsupported transports keep the conservative `user` fallback.
 
 ## [17.2.15] - 2026-08-12
 
