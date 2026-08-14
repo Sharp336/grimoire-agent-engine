@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added an explicit affordance to the rewind report prompt that a new `checkpoint` may be started after a completed rewind, so agents don't over-read the "do not rewind again" guard as a ban on further checkpoint cycles ([#8499](https://github.com/can1357/oh-my-pi/issues/8499)).
 - Added `--agent <name>` CLI flag, `/agent <name>`, and `/switch-agent` slash commands to apply a discovered agent definition's frontmatter (tools, model, thinking, spawns, system prompt) as the main-session persona; explicit `--model`/`--tools`/`--thinking` flags take precedence. Persona identity persists via `mode_change` and is re-applied from the current agent definition on resume, falling back to model+thinking with a warning when the agent is unavailable. OpenCode `mode: primary|subagent|all` and Copilot `user-invocable`/`disable-model-invocation` frontmatter control availability. Closes [#6836](https://github.com/can1357/oh-my-pi/issues/6836), [#5306](https://github.com/can1357/oh-my-pi/issues/5306), [#7056](https://github.com/can1357/oh-my-pi/issues/7056), [#2694](https://github.com/can1357/oh-my-pi/issues/2694).
 
 ## [17.2.12] - 2026-08-08
