@@ -53,13 +53,13 @@ describe("DeepInfra provider discovery", () => {
 			maxTokens: 32768,
 		});
 	});
-	test("accepts standard OpenAI model records without nested metadata", async () => {
+	test("accepts bundled chat IDs when standard records omit nested metadata", async () => {
 		const fetchMock: FetchImpl = async () =>
 			new Response(
 				JSON.stringify({
 					data: [
 						{ id: "deepseek-ai/DeepSeek-V3", object: "model", owned_by: "deepinfra" },
-						{ id: "unknown/model-without-standard-marker" },
+						{ id: "sentence-transformers/all-MiniLM-L6-v2", object: "model", owned_by: "deepinfra" },
 					],
 				}),
 				{ status: 200, headers: { "content-type": "application/json" } },

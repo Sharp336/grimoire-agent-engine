@@ -1151,9 +1151,8 @@ export function deepinfraModelManagerOptions(
 				return Array.isArray(metadata.tags) && metadata.tags.includes("chat");
 			}
 			// DeepInfra's OpenAI-compatible endpoint omits its catalog metadata.
-			// Keep standard model records, plus bundled IDs if the endpoint omits
-			// the standard object marker.
-			return entry.object === "model" || references.has(model.id);
+			// Without a capability signal, only bundled chat-capable IDs are safe.
+			return references.has(model.id);
 		},
 		mapModel: (entry, defaults, reference) => {
 			const model = mapWithBundledReference(entry, defaults, reference);
