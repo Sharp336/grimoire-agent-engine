@@ -4,6 +4,7 @@ import type { Effort } from "@oh-my-pi/pi-ai";
 import type { Rule } from "../capability/rule";
 import type { RetryErrorUpdate } from "../extensibility/shared-events";
 import type { Goal, GoalModeState } from "../goals/state";
+import type { DaemonSnapshot } from "../launch/protocol";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { TodoItem } from "../tools/todo";
 import type { CustomMessage } from "./messages";
@@ -52,6 +53,22 @@ export type AgentSessionEvent =
 	| { type: "todo_reminder"; todos: TodoItem[]; attempt: number; maxAttempts: number }
 	| { type: "todo_auto_clear" }
 	| { type: "irc_message"; message: CustomMessage }
+	| {
+			type: "omp_advisor_note";
+			advisorId: string;
+			severity: "nit" | "concern" | "blocker";
+			delivery: "aside" | "steer" | "preserve";
+			content: string;
+			turn: number;
+	  }
+	| {
+			type: "omp_autolearn_lifecycle";
+			event: "started" | "completed" | "failed" | "cancelled";
+			captureGeneration: number;
+			turn: number;
+			failure?: string;
+	  }
+	| { type: "omp_launch_lifecycle"; event: "completed"; daemon: DaemonSnapshot }
 	| { type: "notice"; level: "info" | "warning" | "error"; message: string; source?: string }
 	| {
 			type: "thinking_level_changed";

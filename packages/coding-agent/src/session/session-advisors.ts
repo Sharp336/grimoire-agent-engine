@@ -129,6 +129,8 @@ export interface AdvisorStats {
 export interface PerAdvisorStat {
 	name: string;
 	status: AdvisorRuntimeStatus;
+	backlog: number;
+	inFlight: boolean;
 	model?: Model;
 	contextWindow: number;
 	contextTokens: number;
@@ -248,6 +250,12 @@ export interface SessionAdvisorsHost {
 	planModeState(): PlanModeState | undefined;
 	clientBridge(): ClientBridge | undefined;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
+	emitOmpObservation(
+		event: Extract<
+			AgentSessionEvent,
+			{ type: "omp_advisor_note" | "omp_autolearn_lifecycle" | "omp_launch_lifecycle" }
+		>,
+	): void;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 	sendCustomMessage(message: CustomMessagePayload, options?: AdvisorMessageDeliveryOptions): Promise<boolean>;
 	extractQueuedAdvisorCards(): CustomMessage[];
@@ -449,7 +457,7 @@ export class SessionAdvisors {
 		this.#advisorAutoResumeSuppressed = value;
 	}
 
-	/** Tracks persistence of a visible advisor card emitted outside the primary loop. */
+	/** Tracks visible-card persistence outside the primary loop. */
 	trackCardEvent(processing: Promise<void>): void {
 		this.#pendingAdvisorCardEvents.add(processing);
 		void processing.finally(() => this.#pendingAdvisorCardEvents.delete(processing)).catch(() => {});
@@ -1018,6 +1026,18 @@ export class SessionAdvisors {
 			aborting: this.#host.abortInProgress(),
 			terminalAnswerNoQueuedWork: this.#hasTerminalTextAnswerWithoutQueuedWork(),
 			interruptImmuneTurnActive: interrupting && this.#isAdvisorInterruptImmuneTurnActive(),
+		});
+		// Typed OMP observations bypass extension hooks and the general subscriber
+		// FIFO. Advisor notes can be produced while a long-running turn_end plugin
+		// still owns that FIFO; routing through it would let ACP drain time out and
+		// close the transport before the already-accepted note reached the client.
+		this.#host.emitOmpObservation({
+			type: "omp_advisor_note",
+				advisorId: advisor.slug || "default",
+				severity: severity ?? "nit",
+				delivery: channel,
+			content: note,
+			turn: this.#advisorPrimaryTurnsCompleted,
 		});
 		if (channel === "aside") {
 			this.#host.yieldQueue.enqueue("advisor", { note, severity, advisor: source });
@@ -1699,9 +1719,11 @@ export class SessionAdvisors {
 			if (live) {
 				roster.push(live);
 			} else {
-				roster.push({
-					name: entry.name,
-					status: entry.status,
+					roster.push({
+						name: entry.name,
+						status: entry.status,
+						backlog: 0,
+						inFlight: false,
 					contextWindow: 0,
 					contextTokens: 0,
 					tokens: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
@@ -1780,13 +1802,15 @@ export class SessionAdvisors {
 				totalTokens += assistantMsg.usage.totalTokens;
 			}
 		}
-		return {
-			name: advisor.name,
+			return {
+				name: advisor.name,
 			status: advisor.runtime.quotaExhausted
 				? "quota_exhausted"
 				: advisor.runtime.failureNotified
-					? "error"
-					: "running",
+						? "error"
+						: "running",
+				backlog: advisor.runtime.backlog,
+				inFlight: advisor.runtime.inFlight,
 			model,
 			contextWindow: model.contextWindow ?? 0,
 			contextTokens,

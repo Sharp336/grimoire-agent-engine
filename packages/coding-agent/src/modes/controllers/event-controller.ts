@@ -251,6 +251,9 @@ export class EventController {
 			todo_reminder: e => this.#handleTodoReminder(e),
 			todo_auto_clear: e => this.#handleTodoAutoClear(e),
 			irc_message: e => this.#handleIrcMessage(e),
+			omp_advisor_note: async () => {},
+			omp_autolearn_lifecycle: async () => {},
+			omp_launch_lifecycle: async () => {},
 			notice: e => this.#handleNotice(e),
 			model_changed: async () => {
 				this.ctx.statusLine.invalidate();

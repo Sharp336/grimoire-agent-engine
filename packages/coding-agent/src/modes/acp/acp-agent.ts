@@ -87,6 +87,8 @@ import {
 	mapAgentSessionEventToAcpSessionUpdates,
 	normalizeReplayToolArguments,
 } from "./acp-event-mapper";
+import { isOmpTypedExtensionMethod } from "./omp-extension-protocol";
+import { OmpAcpExtensionRuntime } from "./omp-extension-runtime";
 import { ACP_TERMINAL_AUTH_FLAG } from "./terminal-auth";
 
 const ACP_DEFAULT_MODE_ID = "default";
@@ -474,6 +476,7 @@ export class AcpAgent implements Agent {
 	#initialSession: AgentSession | undefined;
 	#createSession: CreateAcpSession;
 	#sessions = new Map<string, ManagedSessionRecord>();
+	#ompExtensions: OmpAcpExtensionRuntime;
 	#disposePromise: Promise<void> | undefined;
 	#cleanupRegistered = false;
 	#clientCapabilities: ClientCapabilities | undefined;
@@ -484,6 +487,10 @@ export class AcpAgent implements Agent {
 		this.#connection = connection;
 		this.#initialSession = initialSession;
 		this.#createSession = createSession;
+		this.#ompExtensions = new OmpAcpExtensionRuntime({
+			connection,
+			getSession: sessionId => this.#sessions.get(sessionId)?.session,
+		});
 	}
 
 	setCancelCleanupTimeoutForTesting(timeoutMs: number): void {
@@ -950,6 +957,7 @@ export class AcpAgent implements Agent {
 	}
 
 	async extMethod(method: string, params: { [key: string]: unknown }): Promise<{ [key: string]: unknown }> {
+		if (isOmpTypedExtensionMethod(method)) return await this.#ompExtensions.handleMethod(method, params);
 		switch (method) {
 			case SPEECH_MODELS_LIST_METHOD:
 				return buildAcpSpeechModelsCatalog();
@@ -1141,6 +1149,7 @@ export class AcpAgent implements Agent {
 			await this.#configureExtensions(record);
 			await this.#configureMcpServers(record, mcpServers);
 			this.#sessions.set(session.sessionId, record);
+			this.#ompExtensions.attachSession(session);
 			return record;
 		} catch (error) {
 			await this.#disposeSessionRecord(record);
@@ -2529,6 +2538,7 @@ export class AcpAgent implements Agent {
 	async #closeManagedSession(sessionId: string, record: ManagedSessionRecord): Promise<void> {
 		record.closedError ??= this.#createPromptLifecycleError("ACP session closed before queued prompt could run");
 		this.#sessions.delete(sessionId);
+		this.#ompExtensions.detachSession(sessionId);
 		await this.#cancelPromptForClose(record);
 		await this.#disposeSessionRecord(record);
 	}
@@ -2581,6 +2591,7 @@ export class AcpAgent implements Agent {
 		this.#disposePromise = (async () => {
 			const records = Array.from(this.#sessions.entries());
 			this.#sessions.clear();
+			this.#ompExtensions.detachAll();
 			await Promise.all(
 				records.map(async ([sessionId, record]) => {
 					try {

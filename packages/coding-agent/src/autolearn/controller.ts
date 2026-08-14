@@ -58,9 +58,6 @@ export class AutoLearnController {
 	#turnStartedInGoalMode = false;
 	/** Prevent overlapping private capture runs while real primary turns continue. */
 	#captureInFlight = false;
-	/** One newer eligible primary stop arrived while capture was running. */
-	#capturePending = false;
-
 	constructor(options: AutoLearnControllerOptions) {
 		this.#session = options.session;
 		this.#settings = options.settings;
@@ -130,7 +127,7 @@ export class AutoLearnController {
 		if (!autoContinue) return;
 
 		if (this.#captureInFlight) {
-			this.#capturePending = true;
+			this.#session.setAutolearnCapturePending(true);
 			return;
 		}
 		this.#startCapture();
@@ -144,8 +141,7 @@ export class AutoLearnController {
 			})
 			.finally(() => {
 				this.#captureInFlight = false;
-				if (!this.#capturePending) return;
-				this.#capturePending = false;
+				if (!this.#session.consumeAutolearnCapturePending()) return;
 				this.#startCapture();
 			});
 	}

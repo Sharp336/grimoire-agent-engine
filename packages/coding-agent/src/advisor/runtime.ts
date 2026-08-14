@@ -379,6 +379,10 @@ export class AdvisorRuntime {
 	get backlog(): number {
 		return this.#backlog;
 	}
+	/** True only while this runtime is actively draining or awaiting an advisor prompt. */
+	get inFlight(): boolean {
+		return this.#busy || this.#promptInFlight !== undefined;
+	}
 	get quotaExhausted(): boolean {
 		return this.#quotaExhausted;
 	}

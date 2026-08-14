@@ -18,6 +18,7 @@ class FakeSession {
 	goalEnabled = false;
 	captureGate: Promise<void> | undefined;
 	captureError: Error | undefined;
+	autolearnCapturePending = false;
 
 	subscribe(listener: (event: AgentSessionEvent) => void): () => void {
 		this.listeners.push(listener);
@@ -38,6 +39,16 @@ class FakeSession {
 
 	getGoalModeState(): { enabled: boolean } | undefined {
 		return this.goalEnabled ? { enabled: true } : undefined;
+	}
+
+	setAutolearnCapturePending(pending: boolean): void {
+		this.autolearnCapturePending = pending;
+	}
+
+	consumeAutolearnCapturePending(): boolean {
+		const pending = this.autolearnCapturePending;
+		this.autolearnCapturePending = false;
+		return pending;
 	}
 
 	emit(event: AgentSessionEvent): void {

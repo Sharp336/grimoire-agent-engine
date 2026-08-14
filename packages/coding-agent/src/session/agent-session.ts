@@ -344,6 +344,17 @@ export * from "./agent-session-events";
 export * from "./agent-session-types";
 export type { AdvisorStats, PerAdvisorStat } from "./session-advisors";
 
+export interface AutolearnRuntimeStatus extends Record<string, unknown> {
+	enabled: boolean;
+	autoContinue: boolean;
+	state: "idle" | "running" | "pending" | "completed" | "failed" | "cancelled";
+	captureGeneration: number;
+	turn?: number;
+	pending: boolean;
+	lastResult?: "completed" | "failed" | "cancelled";
+	lastFailure?: string;
+}
+
 const SESSION_STOP_CONTINUATION_CAP = 8;
 
 import { LoopGuards, type StreamGuardsHost, StreamingEditGuard } from "./stream-guards";
@@ -571,6 +582,11 @@ export class AgentSession {
 	#inheritedProviderPromptCacheKey: string | undefined;
 	#autolearnCaptureAbortController: AbortController | undefined;
 	#autolearnCaptureTask: Promise<void> | undefined;
+	#autolearnCaptureGeneration = 0;
+	#autolearnCaptureTurn: number | undefined;
+	#autolearnCapturePending = false;
+	#autolearnLastResult: "completed" | "failed" | "cancelled" | undefined;
+	#autolearnLastFailure: string | undefined;
 	#isDisposed = false;
 	/** Process-wide by default (double-spend safety across sessions); injectable for tests. */
 	#codexResetCoordinator: CodexAutoRedeemCoordinator;
@@ -1456,6 +1472,7 @@ export class AgentSession {
 			planModeState: () => this.#planModeState,
 			clientBridge: () => this.#clientBridge,
 			emitSessionEvent: event => this.#emitSessionEvent(event),
+			emitOmpObservation: event => this.emitOmpObservation(event),
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
 			sendCustomMessage: (message, options) => this.sendCustomMessage(message, options),
 			extractQueuedAdvisorCards: () => this.#extractQueuedAdvisorCards(),
@@ -1979,6 +1996,20 @@ export class AgentSession {
 	 */
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void {
 		this.#emit({ type: "notice", level, message, source });
+	}
+
+	/**
+	 * Publish an internal, typed OMP observation directly to session subscribers.
+	 * These events are not extension hooks and must not queue behind potentially
+	 * long-running plugin handlers before the ACP owner can serialize them.
+	 */
+	emitOmpObservation(
+		event: Extract<
+			AgentSessionEvent,
+			{ type: "omp_advisor_note" | "omp_autolearn_lifecycle" | "omp_launch_lifecycle" }
+		>,
+	): void {
+		this.#emit(event);
 	}
 
 	#recordToolExecutionStart(event: Extract<AgentEvent, { type: "tool_execution_start" }>): void {
@@ -3731,12 +3762,54 @@ export class AgentSession {
 	async runAutolearnCapture(capture: (signal: AbortSignal) => Promise<void>): Promise<void> {
 		if (this.#autolearnCaptureTask || this.#isDisposed) return;
 		const controller = new AbortController();
+		const captureGeneration = ++this.#autolearnCaptureGeneration;
+		const turn = Math.max(0, this.#turnIndex - 1);
+		this.#autolearnCaptureTurn = turn;
 		this.#autolearnCaptureAbortController = controller;
 		const task = (async () => {
+			await this.#emitSessionEvent({ type: "omp_autolearn_lifecycle", event: "started", captureGeneration, turn });
 			try {
 				await capture(controller.signal);
+				if (controller.signal.aborted) {
+					this.#autolearnLastResult = "cancelled";
+					await this.#emitSessionEvent({
+						type: "omp_autolearn_lifecycle",
+						event: "cancelled",
+						captureGeneration,
+						turn,
+					});
+				} else {
+					this.#autolearnLastResult = "completed";
+					this.#autolearnLastFailure = undefined;
+					await this.#emitSessionEvent({
+						type: "omp_autolearn_lifecycle",
+						event: "completed",
+						captureGeneration,
+						turn,
+					});
+				}
 			} catch (error) {
-				if (!controller.signal.aborted) throw error;
+				if (controller.signal.aborted) {
+					this.#autolearnLastResult = "cancelled";
+					await this.#emitSessionEvent({
+						type: "omp_autolearn_lifecycle",
+						event: "cancelled",
+						captureGeneration,
+						turn,
+					});
+					return;
+				}
+				const failure = error instanceof Error ? error.message : String(error);
+				this.#autolearnLastResult = "failed";
+				this.#autolearnLastFailure = failure;
+				await this.#emitSessionEvent({
+					type: "omp_autolearn_lifecycle",
+					event: "failed",
+					captureGeneration,
+					turn,
+					failure,
+				});
+				throw error;
 			} finally {
 				if (this.#autolearnCaptureAbortController === controller) {
 					this.#autolearnCaptureAbortController = undefined;
@@ -3748,6 +3821,71 @@ export class AgentSession {
 			await task;
 		} finally {
 			if (this.#autolearnCaptureTask === task) this.#autolearnCaptureTask = undefined;
+		}
+	}
+
+	/** Mark whether the auto-learn controller has coalesced one newer eligible capture. */
+	setAutolearnCapturePending(pending: boolean): void {
+		this.#autolearnCapturePending = pending;
+	}
+
+	/** Atomically consume the controller's coalesced capture marker. */
+	consumeAutolearnCapturePending(): boolean {
+		const pending = this.#autolearnCapturePending;
+		this.#autolearnCapturePending = false;
+		return pending;
+	}
+
+	/** Typed auto-learn state for ACP clients; no transcript inference is involved. */
+	getAutolearnStatus(): AutolearnRuntimeStatus {
+		const running = this.#autolearnCaptureTask !== undefined;
+		return {
+			enabled: this.settings.get("autolearn.enabled") === true,
+			autoContinue: this.settings.get("autolearn.autoContinue") === true,
+			state: running
+				? this.#autolearnCapturePending
+					? "pending"
+					: "running"
+				: (this.#autolearnLastResult ?? "idle"),
+			captureGeneration: this.#autolearnCaptureGeneration,
+			turn: this.#autolearnCaptureTurn,
+			pending: this.#autolearnCapturePending,
+			lastResult: this.#autolearnLastResult,
+			lastFailure: this.#autolearnLastFailure,
+		};
+	}
+
+	/** Bounded ACP drain/control surface for the real capture task owner. */
+	async drainAutolearnCaptureForAcp(options: {
+		timeoutMs: number;
+		cancel: boolean;
+	}): Promise<Record<string, unknown>> {
+		const deadline = Date.now() + options.timeoutMs;
+		if (options.cancel) {
+			this.#autolearnCapturePending = false;
+			this.#abortAutolearnCapture();
+		}
+		try {
+			while (true) {
+				const task = this.#autolearnCaptureTask;
+				if (!task && !this.#autolearnCapturePending) {
+					return { settled: true, cancelled: options.cancel, status: this.getAutolearnStatus() };
+				}
+				if (!task) {
+					await new Promise(resolve => setTimeout(resolve, 0));
+					continue;
+				}
+				const remainingMs = deadline - Date.now();
+				if (remainingMs <= 0) throw new Error("Timed out draining auto-learn capture for ACP");
+				await withTimeout(task, remainingMs, "Timed out draining auto-learn capture for ACP");
+			}
+		} catch (error) {
+			return {
+				settled: false,
+				cancelled: options.cancel,
+				failure: error instanceof Error ? error.message : String(error),
+				status: this.getAutolearnStatus(),
+			};
 		}
 	}
 
@@ -5939,6 +6077,7 @@ export class AgentSession {
 
 	queueLaunchCompletion(notification: DaemonCompletionNotification): Promise<void> {
 		if (this.#isDisposed) return Promise.reject(new Error("Session disposed before launch completion delivery"));
+		void this.#emitSessionEvent({ type: "omp_launch_lifecycle", event: "completed", daemon: notification.daemon });
 		const delivered = this.yieldQueue.enqueueWithReceipt<LaunchCompletionEntry>(
 			LAUNCH_COMPLETION_MESSAGE_TYPE,
 			notification,
