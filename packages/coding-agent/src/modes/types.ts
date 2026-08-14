@@ -444,8 +444,6 @@ export interface InteractiveModeContext {
 	toggleToolOutputExpansion(): void;
 	setToolsExpanded(expanded: boolean): void;
 	toggleThinkingBlockVisibility(): void;
-	toggleFastMode(): void;
-	toggleAdvisor(): void;
 	handlePlanModeCommand(
 		initialPrompt?: string,
 		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,

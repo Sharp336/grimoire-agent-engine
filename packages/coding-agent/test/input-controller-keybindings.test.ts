@@ -340,6 +340,22 @@ describe("InputController keybinding setup", () => {
 		expect(spies.showStatus).toHaveBeenCalledWith("Advisor enabled.");
 	});
 
+	it("guards fast mode and advisor toggles when a subagent session is focused", async () => {
+		const { InputController, ctx, editor, spies, session } = await createContext();
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		ctx.focusedAgentId = "subagent-1";
+
+		editor.onToggleFastMode?.();
+		expect(session.toggleFastMode).not.toHaveBeenCalled();
+		expect(spies.showStatus).toHaveBeenCalledWith("Fast mode applies to the main session — press ←← to return first");
+
+		editor.onToggleAdvisor?.();
+		expect(session.toggleAdvisorEnabled).not.toHaveBeenCalled();
+		expect(spies.showStatus).toHaveBeenCalledWith("Advisor applies to the main session — press ←← to return first");
+	});
+
 	it("does not mark pasted shell prompts as Python mode while editing", async () => {
 		const { InputController, ctx, editor } = await createContext();
 		const controller = new InputController(ctx);

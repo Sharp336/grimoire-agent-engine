@@ -5123,14 +5123,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	toggleThinkingBlockVisibility(): void {
 		this.#inputController.toggleThinkingBlockVisibility();
 	}
-	toggleFastMode(): void {
-		this.#inputController.toggleFastMode();
-	}
-
-	toggleAdvisor(): void {
-		this.#inputController.toggleAdvisor();
-	}
-
 	toggleTodoExpansion(): void {
 		this.todoExpanded = !this.todoExpanded;
 		this.#renderTodoList();

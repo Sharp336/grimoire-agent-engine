@@ -30,14 +30,27 @@ describe("CustomEditor keybindings", () => {
 		expect(onToggleToolActivity).toHaveBeenCalledTimes(1);
 	});
 
-	it("routes the fast mode toggle chord (Alt+Shift+F) to onToggleFastMode", () => {
+	it("routes the fast mode toggle chord (Alt+Shift+F) across CSI u, modifyOtherKeys, and legacy \\x1bF", () => {
 		const editor = new CustomEditor(getEditorTheme());
 		const onToggleFastMode = vi.fn();
 
 		editor.onToggleFastMode = onToggleFastMode;
-		editor.handleInput("\x1b[102;4u"); // Alt+Shift+F (CSI u format)
+		editor.handleInput("\x1b[102;4u"); // CSI u (Kitty)
+		editor.handleInput("\x1b[27;4;102~"); // modifyOtherKeys (xterm)
+		editor.handleInput("\x1bF"); // Legacy ESC + uppercase F
 
-		expect(onToggleFastMode).toHaveBeenCalledTimes(1);
+		expect(onToggleFastMode).toHaveBeenCalledTimes(3);
+	});
+
+	it("does not steal \\x1bf (Alt+F word right) when Alt+Shift+F is configured", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const onToggleFastMode = vi.fn();
+
+		editor.onToggleFastMode = onToggleFastMode;
+		editor.setText("hello world");
+		editor.handleInput("\x1bf"); // Alt+F (lowercase f)
+
+		expect(onToggleFastMode).not.toHaveBeenCalled();
 	});
 
 	it("routes the advisor toggle chord (Alt+Shift+A) to onToggleAdvisor", () => {

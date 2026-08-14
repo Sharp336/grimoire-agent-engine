@@ -850,6 +850,17 @@ export class CustomEditor extends Editor {
 		// Space-hold push-to-talk: a sustained space bar starts/stops STT instead of typing spaces.
 		if (this.#handleSpaceHold(data, canonical)) return;
 
+		// Route legacy ESC+uppercase F (\x1bF) for Alt+Shift+F on non-Kitty terminals
+		// without stealing \x1bf (lowercase, Alt+F word-right navigation).
+		if (
+			data === "\x1bF" &&
+			this.onToggleFastMode &&
+			this.#actionKeys.get("app.fast.toggle")?.some(k => k === "alt+shift+f" || k === "shift+alt+f")
+		) {
+			this.onToggleFastMode();
+			return;
+		}
+
 		// One union probe decides whether any per-action interception below can
 		// match — plain typing then skips the ~20 per-action set lookups per key.
 		if (
