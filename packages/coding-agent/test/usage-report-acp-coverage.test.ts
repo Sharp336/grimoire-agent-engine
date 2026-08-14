@@ -23,7 +23,10 @@ describe("buildUsageReportText model coverage", () => {
 				fetchUsageReports: async () => [report],
 				getUsageReportingModelCoverage: () =>
 					new Map([
-						["test-provider", { reporting: ["test-provider/model-a", "test-provider/model-b"], availableCount: 2 }],
+						[
+							"test-provider",
+							{ reporting: ["test-provider/model-a", "test-provider/model-b"], availableCount: 2 },
+						],
 					]),
 			},
 		} as never);

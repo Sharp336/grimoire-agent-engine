@@ -339,6 +339,7 @@ import type { ShakeMode, ShakeResult } from "./shake-types";
 import { ToolChoiceQueue } from "./tool-choice-queue";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 import { TurnRecovery, type TurnRecoveryHost } from "./turn-recovery";
+import { buildUsageModelCoverage } from "./usage-model-coverage";
 import { YieldQueue } from "./yield-queue";
 
 export * from "./agent-session-events";
@@ -8646,26 +8647,9 @@ export class AgentSession {
 
 	/** Per-provider coverage of available models by live quantitative `/usage` scopes. */
 	getUsageReportingModelCoverage(reports: readonly UsageReport[]): Map<string, UsageModelCoverage> {
-		const modelIdsByProvider = new Map<string, Set<string>>();
-		for (const model of this.#modelRegistry.getAvailable()) {
-			const modelIds = modelIdsByProvider.get(model.provider) ?? new Set<string>();
-			modelIds.add(model.id);
-			modelIdsByProvider.set(model.provider, modelIds);
-		}
-		const coverage = new Map<string, UsageModelCoverage>();
-		for (const [provider, modelIds] of modelIdsByProvider) {
-			const reportingIds = this.#modelRegistry.authStorage.getUsageReportingModelIds(
-				provider,
-				[...modelIds],
-				reports,
-			);
-			if (reportingIds.length === 0) continue;
-			const reporting = [...new Set(reportingIds)]
-				.map(modelId => `${provider}/${modelId}`)
-				.sort((left, right) => left.localeCompare(right));
-			coverage.set(provider, { reporting, availableCount: modelIds.size });
-		}
-		return coverage;
+		return buildUsageModelCoverage(this.#modelRegistry.getAvailable(), (provider, modelIds) =>
+			this.#modelRegistry.authStorage.getUsageReportingModelIds(provider, modelIds, reports),
+		);
 	}
 
 	/** List stored OAuth accounts for the current model provider and mark this session's active account. */
