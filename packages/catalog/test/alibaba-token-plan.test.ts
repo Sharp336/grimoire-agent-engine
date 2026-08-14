@@ -4,6 +4,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { CATALOG_PROVIDERS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import {
 	ALIBABA_TOKEN_PLAN_BASE_URL,
+	ALIBABA_TOKEN_PLAN_CN_BASE_URL,
 	ALIBABA_TOKEN_PLAN_STATIC_MODELS,
 	alibabaTokenPlanModelManagerOptions,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
@@ -218,9 +219,33 @@ describe("QwenCloud Token Plan provider", () => {
 		const descriptor = CATALOG_PROVIDERS.find(provider => provider.id === "alibaba-token-plan");
 		expect(descriptor).toMatchObject({
 			defaultModel: "qwen3.7-plus",
-			envVars: ["ALIBABA_TOKEN_PLAN_API_KEY", "BAILIAN_TOKEN_PLAN_API_KEY"],
+			// BAILIAN_TOKEN_PLAN_API_KEY intentionally moved to the China entry:
+			// Bailian keys are region-locked and 401 against this international
+			// default endpoint.
+			envVars: ["ALIBABA_TOKEN_PLAN_API_KEY"],
 			dynamicModelsAuthoritative: true,
 			catalogDiscovery: { label: "QwenCloud Token Plan" },
 		});
+	});
+
+	test("exposes the dedicated China (Bailian) entry with its own env keys", () => {
+		const descriptor = CATALOG_PROVIDERS.find(provider => provider.id === "bailian-token-plan-cn");
+		expect(descriptor).toMatchObject({
+			defaultModel: "qwen3.7-plus",
+			envVars: ["BAILIAN_TOKEN_PLAN_API_KEY", "BAILIAN_TOKEN_PLAN_CN_API_KEY"],
+			dynamicModelsAuthoritative: true,
+			catalogDiscovery: { label: "Bailian-Token-Plan-CN" },
+		});
+	});
+
+	test("routes the China provider to the Beijing endpoint with re-branded static fallback", () => {
+		const options = alibabaTokenPlanModelManagerOptions({ providerId: "bailian-token-plan-cn" });
+		expect(options.providerId).toBe("bailian-token-plan-cn");
+		const staticModels = options.staticModels ?? [];
+		expect(staticModels.length).toBe(ALIBABA_TOKEN_PLAN_STATIC_MODELS.length);
+		for (const model of staticModels) {
+			expect(model.provider).toBe("bailian-token-plan-cn");
+			expect(model.baseUrl).toBe(ALIBABA_TOKEN_PLAN_CN_BASE_URL);
+		}
 	});
 });

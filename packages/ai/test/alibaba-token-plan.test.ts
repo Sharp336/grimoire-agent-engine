@@ -3,6 +3,7 @@ import { resolveOpenAIRequestSetup } from "@oh-my-pi/pi-ai/providers/openai-shar
 import { loginAlibabaTokenPlan } from "@oh-my-pi/pi-ai/registry/alibaba-token-plan";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { ALIBABA_TOKEN_PLAN_CN_BASE_URL } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
 
 describe("QwenCloud Token Plan login", () => {
 	test("International (default) region opens Individual page and validates without inference", async () => {
@@ -128,7 +129,7 @@ describe("QwenCloud Token Plan login", () => {
 			'"token":"sk-sp-test","cookie":"session=secret"}',
 		]) {
 			expect(() => resolveOpenAIRequestSetup(model, { apiKey, messages: [] })).toThrow(
-				"Invalid QwenCloud Token Plan credential",
+				"Invalid Alibaba Token Plan credential",
 			);
 		}
 	});
@@ -142,6 +143,32 @@ describe("QwenCloud Token Plan login", () => {
 		try {
 			expect(() => resolveOpenAIRequestSetup(model, { messages: [] })).toThrow(
 				"No API key for provider: alibaba-token-plan",
+			);
+		} finally {
+			if (previous === undefined) delete Bun.env.OPENAI_API_KEY;
+			else Bun.env.OPENAI_API_KEY = previous;
+		}
+	});
+
+	test("routes the dedicated China provider's bearer to the Beijing endpoint", () => {
+		const model = getBundledModel<"openai-completions">("bailian-token-plan-cn", "qwen3.7-plus");
+		if (!model) throw new Error("expected bundled Bailian Token Plan model");
+
+		expect(model.baseUrl).toBe(ALIBABA_TOKEN_PLAN_CN_BASE_URL);
+		const setup = resolveOpenAIRequestSetup(model, { apiKey: "sk-sp-cn-test", messages: [] });
+		expect(setup.headers.Authorization).toBe("Bearer sk-sp-cn-test");
+		expect(setup.baseUrl).toContain("token-plan.cn-beijing.maas.aliyuncs.com");
+	});
+
+	test("never falls back to the generic OPENAI_API_KEY as the Bailian bearer", () => {
+		const model = getBundledModel<"openai-completions">("bailian-token-plan-cn", "qwen3.7-plus");
+		if (!model) throw new Error("expected bundled Bailian Token Plan model");
+
+		const previous = Bun.env.OPENAI_API_KEY;
+		Bun.env.OPENAI_API_KEY = "sk-generic-openai-secret";
+		try {
+			expect(() => resolveOpenAIRequestSetup(model, { messages: [] })).toThrow(
+				"No API key for provider: bailian-token-plan-cn",
 			);
 		} finally {
 			if (previous === undefined) delete Bun.env.OPENAI_API_KEY;

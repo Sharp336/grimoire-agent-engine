@@ -651,12 +651,12 @@ Alibaba Coding Plan provides coding-oriented model endpoints hosted on Alibaba C
 QwenCloud Token Plan provides model subscription access to Alibaba Cloud's Qwen and DeepSeek model suites. It operates using the OpenAI Chat Completions transport (`openai-completions` API schema) over HTTP POST JSON and Server-Sent Events (SSE) streaming (`packages/ai/src/providers/openai-shared.ts`).
 
 ### Special casings
-- **Explicit Credential Isolation**: `resolveOpenAIRequestSetup` (`packages/ai/src/providers/openai-shared.ts`) requires an explicit `ALIBABA_TOKEN_PLAN_API_KEY` or `BAILIAN_TOKEN_PLAN_API_KEY` credential and explicitly disables the generic `$env.OPENAI_API_KEY` fallback to prevent key leakage to QwenCloud endpoints.
+- **Explicit Credential Isolation**: `resolveOpenAIRequestSetup` (`packages/ai/src/providers/openai-shared.ts`) requires an explicitly resolved Token Plan credential (also enforced for `bailian-token-plan-cn`) and explicitly disables the generic `$env.OPENAI_API_KEY` fallback to prevent key leakage to QwenCloud endpoints.
 - **Region Base URL Routing**: Credentials support region-locked endpoints: International Singapore (`ALIBABA_TOKEN_PLAN_BASE_URL` = `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1`) and China Beijing (`ALIBABA_TOKEN_PLAN_CN_BASE_URL` = `https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1`). Region keys are non-interchangeable; stored `baseUrl` overrides catalog defaults for inference and model discovery (`packages/catalog/src/provider-models/openai-compat.ts`).
 - **Store Deduplication**: `hasAuthCredentialForProvider` (`packages/ai/src/auth/sqlite-credential-store.ts`) parses JSON compound credentials (`parseAlibabaTokenPlanCredential`) to compare inner `token` strings rather than raw JSON text.
 
 ### Auth & usage
-- **Environment & Wire Credential**: Resolves `ALIBABA_TOKEN_PLAN_API_KEY` then `BAILIAN_TOKEN_PLAN_API_KEY`. Supports plain bearer keys (`sk-sp-...`) or serialized JSON strings (`{ token, cookie?, baseUrl? }`) parsed via `parseAlibabaTokenPlanCredential` and formatted via `serializeAlibabaTokenPlanCredential` (`packages/catalog/src/wire/alibaba-token-plan.ts`).
+- **Environment & Wire Credential**: Resolves `ALIBABA_TOKEN_PLAN_API_KEY` (the historical `BAILIAN_TOKEN_PLAN_API_KEY` moved to the dedicated `bailian-token-plan-cn` entry). Supports plain bearer keys (`sk-sp-...`) or serialized JSON strings (`{ token, cookie?, baseUrl? }`) parsed via `parseAlibabaTokenPlanCredential` and formatted via `serializeAlibabaTokenPlanCredential` (`packages/catalog/src/wire/alibaba-token-plan.ts`).
 - **Interactive Login**: `loginAlibabaTokenPlan` (`packages/ai/src/registry/alibaba-token-plan.ts`) prompts for region (1=International, 2=China Beijing, 3=Custom URL), validates the API key via `${baseUrl}/models` (`validateApiKeyAgainstModelsEndpoint`), and accepts an optional `cs-data.qwencloud.com` browser `Cookie` header for quota reporting.
 - **Console Quota Scraping**: `alibabaTokenPlanUsageProvider` (`packages/ai/src/usage/alibaba-token-plan.ts`) uses the stored `Cookie` header to fetch `secToken` from `https://home.qwencloud.com/tool/user/info.json` and issues a POST to `https://cs-data.qwencloud.com/data/api.json?product=sfm_bailian&action=IntlBroadScopeAspnGateway&api=zeldaHttp.apikeyMgr./tokenplan/personal/api/v2/usage` with URL-encoded parameters.
 - **Quota Windows & Ranking**: Parses `per5HourPercentage`/`per5HourResetTime` (5-hour window, `credits:5h`) and `per1WeekPercentage`/`per1WeekResetTime` (7-day window, `credits:7d`). `alibabaTokenPlanRankingStrategy` configures `credits:5h` as primary limit (5h window) and `credits:7d` as secondary limit (7d window).
@@ -665,6 +665,21 @@ QwenCloud Token Plan provides model subscription access to Alibaba Cloud's Qwen 
 - **Authoritative Discovery**: Configured with `dynamicModelsAuthoritative: true` (`packages/catalog/src/provider-models/descriptors.ts`). `/models` discovery is subscription-scoped; a successful endpoint response is authoritative and overrides static fallback catalogs even if empty (`packages/catalog/scripts/generate-models.ts`).
 - **Discovery Filtering & Overrides**: `isAlibabaTokenPlanChatModelId` (`packages/catalog/src/provider-models/openai-compat.ts`) filters non-chat prefixes (`qwen-audio-`, `qwen-image-`, `text-embedding-`, `wan2.7-`). Discovered `deepseek-v4*` models are mapped with `reasoning: true` and effort thinking (`[Effort.High, Effort.Max]`).
 - **Static Catalog Fallback**: `ALIBABA_TOKEN_PLAN_STATIC_MODELS` provides static catalog seed fallback when uncredentialed or when discovery fails (`packages/catalog/scripts/generate-models.ts`).
+
+## Bailian Token Plan China (`bailian-token-plan-cn`)
+The dedicated China (Beijing) entry for Alibaba Cloud's 百炼 Token Plan. Region keys are non-interchangeable with the international product (#6682), so China-issued keys previously required interactive region selection or a JSON compound credential against `alibaba-token-plan`; this entry defaults to `ALIBABA_TOKEN_PLAN_CN_BASE_URL` (`https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1`) so a bare key works directly.
+
+### Special casings
+- **Explicit Credential Isolation**: Shares the `alibaba-token-plan` guard in `resolveOpenAIRequestSetup` (`packages/ai/src/providers/openai-shared.ts`) — the generic `$env.OPENAI_API_KEY` fallback is disabled, and JSON compound credentials are unwrapped to their inner token.
+- **Store Deduplication**: Same token-level deduplication as `alibaba-token-plan` in `hasAuthCredentialForProvider` (`packages/ai/src/auth/sqlite-credential-store.ts`).
+
+### Auth & usage
+- **Environment & Wire Credential**: Resolves `BAILIAN_TOKEN_PLAN_API_KEY` then `BAILIAN_TOKEN_PLAN_CN_API_KEY`. Plain bearer keys (`sk-sp-...`) target the Beijing endpoint by default; JSON compound credentials (`{ token, baseUrl? }`) still override the base URL.
+- **Interactive Login**: `loginBailianTokenPlanCn` (`packages/ai/src/registry/bailian-token-plan-cn.ts`) skips the region prompt, points at the 百炼 subscription page, and validates the key against the Beijing `/models` endpoint. No QwenCloud cookie quota reporting — usage tracking for the China product lives in the Aliyun console.
+
+### Catalog model handling
+- **Shared Discovery Pipeline**: `alibabaTokenPlanModelManagerOptions` (`packages/catalog/src/provider-models/openai-compat.ts`) takes a `providerId` override; the China entry reuses the same chat-model filtering, curated limits, and `deepseek-v4*` reasoning enrichment, with the static fallback re-branded to the China provider id and base URL.
+- **Bundled Catalog**: `bailian-token-plan-cn` rows in `models.json` are generated from credentialed `/models` discovery and are `dynamicModelsAuthoritative`.
 
 ## Baseten (`baseten`)
 Baseten provides high-performance infrastructure for hosting open-weight LLMs (including Moonshot Kimi, DeepSeek, Zhipu GLM, and gpt-oss series). Requests execute over the OpenAI Chat Completions transport (`openai-completions` API) targeting default base URL `https://inference.baseten.co/v1`.

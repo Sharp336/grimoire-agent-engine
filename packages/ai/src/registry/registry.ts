@@ -6,6 +6,7 @@ import { alibabaTokenPlanProvider } from "./alibaba-token-plan";
 import { amazonBedrockProvider } from "./amazon-bedrock";
 import { anthropicProvider } from "./anthropic";
 import { azureProvider } from "./azure";
+import { bailianTokenPlanCnProvider } from "./bailian-token-plan-cn";
 import { basetenProvider } from "./baseten";
 import { bedrockMantleProvider } from "./bedrock-mantle";
 import { cerebrasProvider } from "./cerebras";
@@ -103,6 +104,7 @@ const ALL = [
 	gitLabDuoWorkflowProvider,
 	alibabaCodingPlanProvider,
 	alibabaTokenPlanProvider,
+	bailianTokenPlanCnProvider,
 	aiandProvider,
 	aimlApiProvider,
 	zhipuCodingPlanProvider,

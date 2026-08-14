@@ -228,7 +228,7 @@ function matchesReplacementCredential(
 	if (incoming.type === "api_key") {
 		if (existing.type !== "api_key") return false;
 		if (existing.key === incoming.key) return true;
-		if (provider !== "alibaba-token-plan") return false;
+		if (provider !== "alibaba-token-plan" && provider !== "bailian-token-plan-cn") return false;
 		const existingToken = parseAlibabaTokenPlanCredential(existing.key)?.token;
 		const incomingToken = parseAlibabaTokenPlanCredential(incoming.key)?.token;
 		return existingToken !== undefined && existingToken === incomingToken;

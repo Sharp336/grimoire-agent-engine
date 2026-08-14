@@ -269,15 +269,15 @@ export function resolveOpenAIRequestSetup(
 		baseUrl = resolveGitHubCopilotBaseUrl(model.baseUrl, rawApiKey) ?? model.baseUrl;
 	}
 
-	if (model.provider === "alibaba-token-plan") {
+	if (model.provider === "alibaba-token-plan" || model.provider === "bailian-token-plan-cn") {
 		// Require an explicitly resolved Token Plan credential. The generic
 		// `$env.OPENAI_API_KEY` fallback above matches the broad `sk-*` token
 		// grammar and would otherwise be sent to QwenCloud as bearer material.
 		if (!options.apiKey) {
-			throw new AIError.MissingApiKeyError("alibaba-token-plan");
+			throw new AIError.MissingApiKeyError(model.provider);
 		}
 		const credential = parseAlibabaTokenPlanCredential(rawApiKey);
-		if (!credential) throw new AIError.ConfigurationError("Invalid QwenCloud Token Plan credential");
+		if (!credential) throw new AIError.ConfigurationError("Invalid Alibaba Token Plan credential");
 		apiKey = credential.token;
 		if (credential.baseUrl) baseUrl = credential.baseUrl;
 	}
