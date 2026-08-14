@@ -15,6 +15,7 @@ import type {
 	TextContent,
 	ThinkingContent,
 } from "../../types";
+import { hasVisibleAssistantContent } from "../../utils/empty-completion-retry";
 import { AssistantMessageEventStream as MessageEventStream } from "../../utils/event-stream";
 import {
 	armPreResponseTimeout,
@@ -541,6 +542,12 @@ export function streamKiro(model: Model, context: Context, options: KiroOptions 
 					throw new KiroStreamError("Kiro stream ended without visible output", {
 						code: "EMPTY_STREAM",
 						kind: "incomplete-stream",
+					});
+				}
+				if (!hasVisibleAssistantContent(state.output) && options.acceptEmptyResponse !== true) {
+					throw new KiroStreamError("Kiro stream ended with reasoning but without final output", {
+						code: "EMPTY_OUTPUT",
+						kind: "empty-output",
 					});
 				}
 				finalizeUsage(state, model);

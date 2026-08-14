@@ -61,6 +61,8 @@
 
 - Fixed `omp usage invalidate` to discard stale OAuth and API-key usage snapshots, then force a cache-bypassing, per-provider serialized refresh with a broker request budget sized for the full unfiltered account batch, so upgraded subscriptions do not silently retain pre-change quota data.
 - Fixed quota reporting and Cookie capture guidance for China (Beijing) Alibaba Token Plan credentials ([#8509](https://github.com/can1357/oh-my-pi/issues/8509)).
+- Fixed Kiro streams that ended after reasoning-only output by surfacing a recoverable empty response for session-level final-answer recovery.
+- Fixed `omp usage invalidate` to discard stale OAuth and API-key usage snapshots, then force a cache-bypassing, per-provider serialized refresh so upgraded subscriptions do not silently retain pre-change quota data.
 
 ## [17.3.3] - 2026-08-14
 

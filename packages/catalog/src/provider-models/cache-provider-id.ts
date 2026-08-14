@@ -1,6 +1,6 @@
 import { isRecord } from "@oh-my-pi/pi-utils";
-import { PERSONAL_GITHUB_COPILOT_BASE_URL } from "../wire/github-copilot";
 import type { KiroDiscoveryCredential } from "../discovery/kiro";
+import { PERSONAL_GITHUB_COPILOT_BASE_URL } from "../wire/github-copilot";
 
 export interface ModelCacheProviderIdOptions {
 	apiKey?: string;

@@ -574,6 +574,31 @@ describe("Kiro stream transport", () => {
 		expect(result.errorMessage).toContain("ended without visible output");
 	});
 
+	test("classifies a reasoning-only terminal response without replaying it", async () => {
+		let attempts = 0;
+		const waits: number[] = [];
+		const result = await streamKiro(createModel(), TEST_CONTEXT, {
+			apiKey: "kiro-token",
+			fetch: async () => {
+				attempts++;
+				return responseForEvents([
+					["reasoningContentEvent", { text: "thinking only", signature: "sig-only" }],
+					["metadataEvent", { stopReason: "STOP" }],
+				]);
+			},
+			providerRetryWait: async delay => {
+				waits.push(delay);
+			},
+		}).result();
+
+		expect(attempts).toBe(1);
+		expect(waits).toEqual([]);
+		expect(result.stopReason).toBe("error");
+		expect(result.content).toEqual([{ type: "thinking", thinking: "thinking only", thinkingSignature: "sig-only" }]);
+		expect(result.errorMessage).toContain("without final output");
+		expect(AIError.is(result.errorId, AIError.Flag.EmptyResponse)).toBe(true);
+	});
+
 	test("does not replay a stream failure after visible output", async () => {
 		let attempts = 0;
 		const waits: number[] = [];
