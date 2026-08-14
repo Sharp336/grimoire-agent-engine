@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Deemphasized the `rewind` guard in the rewind report prompt: "NEVER call `rewind` again" → "Do not call `rewind` again for THIS checkpoint", and made the new-checkpoint affordance explicit ("Need explore again → new `checkpoint`") so agents don't over-read the guard as a ban on further checkpoint cycles ([#8499](https://github.com/can1357/oh-my-pi/issues/8499)).
+
 ## [17.3.2] - 2026-08-13
 
 ### Fixed
