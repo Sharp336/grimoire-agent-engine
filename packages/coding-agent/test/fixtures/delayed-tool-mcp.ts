@@ -2,7 +2,8 @@
 /**
  * Test fixture: a well-behaved stdio MCP server that answers `initialize`
  * only after a deliberate delay exceeding `MCPManager`'s `STARTUP_TIMEOUT_MS`
- * (250 ms), then responds normally to `tools/list`.
+ * (250 ms), then responds to `tools/list`. Set
+ * `MCP_TEST_TOOLS_LIST_FAILURE=1` to fail that request after initialization.
  *
  * Models a server that eventually connects successfully but not within the
  * manager's startup race window (`Promise.race([Promise.allSettled(...),
@@ -68,7 +69,14 @@ function startServer(): void {
 			if (msg.method === "initialize") {
 				await Bun.sleep(INITIALIZE_DELAY_MS);
 			}
-			const response = { jsonrpc: "2.0" as const, id: msg.id, result: buildResult(msg.method) };
+			const response =
+				msg.method === "tools/list" && process.env.MCP_TEST_TOOLS_LIST_FAILURE === "1"
+					? {
+							jsonrpc: "2.0" as const,
+							id: msg.id,
+							error: { code: -32603, message: "Fixture tools/list failure" },
+						}
+					: { jsonrpc: "2.0" as const, id: msg.id, result: buildResult(msg.method) };
 			process.stdout.write(`${JSON.stringify(response)}\n`);
 		})();
 	});

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in ambient MCP discovery for ACP sessions via the `omp.sh/ambient-mcp-discovery` capability: a client that requests it gets the host's configured MCP servers mounted alongside its own (client entries overlay same-named ambient ones), reserved bridge server names stay client-owned, and configuration or connection failures are recorded as redacted durable session diagnostics.
+
 ## [17.3.3] - 2026-08-14
 
 ### Fixed
