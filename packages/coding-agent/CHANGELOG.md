@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a privacy-bounded `live:activity` extension event exposing the built-in `/live` session's semantic phase and normalized microphone and speaker RMS levels.
+
 ## [17.3.4] - 2026-08-14
 
 ### Changed
