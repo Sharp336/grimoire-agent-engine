@@ -27,6 +27,8 @@ bun run build   # static site in dist/
 
 The room key never leaves the URL fragment — it is not sent to the relay or any server.
 
+For a verified single-origin deployment that keeps Open WebUI at `/` and mounts this client at `/omp/` through Tailscale Serve, see [Serve beside Open WebUI with Tailscale Serve](../../docs/collab.md#serve-beside-open-webui-with-tailscale-serve).
+
 ## Architecture
 
 - `src/lib/` — vendored wire codec (`codec.ts` AES-256-GCM, `link.ts` envelope + link grammar), `socket.ts` reconnecting relay socket, `client.ts` guest session store (`GuestClient` + immutable snapshots for `useSyncExternalStore`). Shared protocol shapes come from `@oh-my-pi/pi-wire`.

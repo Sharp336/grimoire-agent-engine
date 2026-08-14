@@ -100,6 +100,44 @@ When a guest joins during an assistant turn, that in-flight turn appears on the 
 
 Set `collab.webUrl` when the browser UI is hosted separately from the websocket relay. When empty, `/collab` derives `http(s)://host[:port]` from `collab.relayUrl`; explicit web UI URLs must use `https://` except for `http://localhost` development origins. The generated browser URL still carries the relay-specific collab link in the fragment.
 
+### Serve beside Open WebUI with Tailscale Serve
+
+The static client can share one HTTPS origin with an existing Open WebUI installation. This example keeps Open WebUI on its local HTTP listener at port `8080`, exposes both surfaces through Tailscale HTTPS port `10000`, and mounts the OMP client at `/omp/`. The browser client needs no additional public port or long-running web process:
+
+```sh
+# From the oh-my-pi repository root.
+bun install --frozen-lockfile
+bun run collab:web:build
+
+# Inspect existing handlers before changing them.
+tailscale serve status
+
+# Preserve Open WebUI at the root and add the static OMP client at /omp/.
+tailscale serve --https=10000 --set-path / --bg --yes http://127.0.0.1:8080
+tailscale serve --https=10000 --set-path /omp --bg --yes "$PWD/packages/collab-web/dist"
+
+# Use the actual HTTPS hostname printed by `tailscale serve status`.
+omp config set collab.webUrl https://<tailnet-host>:10000/omp/
+```
+
+The resulting routes are:
+
+- `https://<tailnet-host>:10000/` — Open WebUI
+- `https://<tailnet-host>:10000/omp/` — OMP collab browser client
+
+Use the upstream scheme Open WebUI actually listens on. A normal container published as `8080:8080` is usually plain `http://127.0.0.1:8080`; configuring `https+insecure://` for a plain-HTTP backend produces a `502`. Tailscale persists both path handlers, but the static `dist/` directory must remain at the configured path and should be rebuilt after updating the checkout.
+
+Verify both routes before sharing a session:
+
+```sh
+tailscale serve status
+curl -fsS https://<tailnet-host>:10000/health
+curl -fsSI https://<tailnet-host>:10000/omp/
+omp config get collab.webUrl
+```
+
+Run `/collab` after setting `collab.webUrl`; the generated browser link will target `/omp/` while its URL fragment continues to carry the encrypted room key. Treat the complete link as a secret, and use `/collab view` when guests should not be able to prompt or interrupt the host.
+
 ## Settings
 
 | Setting               | Default               | Meaning                                                                                                        |

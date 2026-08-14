@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Documented how to serve the browser client beside Open WebUI on one Tailscale HTTPS origin without adding another public port.
+
 ## [17.2.10] - 2026-08-06
 
 ### Changed
