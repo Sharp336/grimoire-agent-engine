@@ -155,6 +155,25 @@ describe("azure openai responses streaming", () => {
 		]);
 	});
 
+	it("preserves dynamic developer messages on Azure Responses", async () => {
+		const payload = await captureAzurePayload({
+			messages: [
+				{ role: "user", content: "Say hello", timestamp: Date.now() },
+				{
+					role: "developer",
+					content: [{ type: "text", text: "Prefer indexed retrieval." }],
+					attribution: "agent",
+					timestamp: Date.now(),
+				},
+			],
+		});
+
+		expect(payload.input).toEqual([
+			{ role: "user", content: [{ type: "input_text", text: "Say hello" }] },
+			{ role: "developer", content: [{ type: "input_text", text: "Prefer indexed retrieval." }] },
+		]);
+	});
+
 	it("keeps Azure Responses prompt_cache_key separate from Anthropic cache controls", async () => {
 		const payload = await captureAzurePayload(
 			{

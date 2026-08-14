@@ -158,6 +158,26 @@ describe("openai-responses system prompt routing", () => {
 				{ role: "developer", content: "Second." },
 			]);
 		});
+
+		it("preserves dynamic developer messages on capable Responses endpoints", async () => {
+			const context: Context = {
+				messages: [
+					{ role: "user", content: "hi", timestamp: Date.now() },
+					{
+						role: "developer",
+						content: [{ type: "text", text: "Prefer indexed retrieval." }],
+						attribution: "agent",
+						timestamp: Date.now(),
+					},
+				],
+			};
+			const body = await captureRequestBody(o4MiniModel, context);
+
+			expect(body.input).toEqual([
+				{ role: "user", content: [{ type: "input_text", text: "hi" }] },
+				{ role: "developer", content: [{ type: "input_text", text: "Prefer indexed retrieval." }] },
+			]);
+		});
 	});
 
 	describe("reasoning model on custom proxy (instructions path)", () => {
@@ -177,6 +197,31 @@ describe("openai-responses system prompt routing", () => {
 			expect(body.instructions).toBe("Proxy reasoning prompt.");
 			const input = body.input as Array<{ role: string }>;
 			expect(input.every(m => m.role !== "developer" && m.role !== "system")).toBe(true);
+		});
+
+		it("keeps dynamic developer messages on user for unsupported Responses endpoints", async () => {
+			const proxyModel: Model<"openai-responses"> = buildModel({
+				...o4MiniModel,
+				api: "openai-responses",
+				baseUrl: "https://proxy.example.com/v1",
+				compat: o4MiniModel.compatConfig,
+			} as ModelSpec<"openai-responses">);
+			const body = await captureRequestBody(proxyModel, {
+				messages: [
+					{ role: "user", content: "hi", timestamp: Date.now() },
+					{
+						role: "developer",
+						content: [{ type: "text", text: "Prefer indexed retrieval." }],
+						attribution: "agent",
+						timestamp: Date.now(),
+					},
+				],
+			});
+
+			expect(body.input).toEqual([
+				{ role: "user", content: [{ type: "input_text", text: "hi" }] },
+				{ role: "user", content: [{ type: "input_text", text: "Prefer indexed retrieval." }] },
+			]);
 		});
 	});
 });
