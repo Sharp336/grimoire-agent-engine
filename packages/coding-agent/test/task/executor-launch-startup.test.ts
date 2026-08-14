@@ -102,5 +102,8 @@ it("overlaps registry refresh with session-file opening and session setup", asyn
 	expect(sessionCreated).toBe(true);
 
 	refreshGate.resolve();
-	expect((await run).exitCode).toBe(0);
+	const result = await run;
+	expect(result.exitCode).toBe(0);
+	expect(result.outputPath).toBe(tempDir.join("task-launch-overlap.md"));
+	expect(await Bun.file(tempDir.join("task-launch-overlap.md")).exists()).toBe(true);
 });

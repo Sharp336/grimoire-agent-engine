@@ -106,6 +106,7 @@ function createFactory(cwd: string, eventBus?: EventBus) {
 		sessionManager: {
 			getCwd: () => cwd,
 			getArtifactManager: () => undefined,
+			appendCustomEntry: vi.fn(),
 		},
 		get sessionFile() {
 			return path.join(cwd, "parent.jsonl");

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added versioned start and terminal lifecycle boundaries for each initial, follow-up, and IRC-wake subagent run, including unique run IDs and monotonic durations, with task runs persisted in the live parent session independently of retained child-session lifetime. ([#7334](https://github.com/can1357/oh-my-pi/pull/7334) by [@usr-bin-roygbiv](https://github.com/usr-bin-roygbiv))
+
 ## [17.3.2] - 2026-08-13
 
 ### Fixed

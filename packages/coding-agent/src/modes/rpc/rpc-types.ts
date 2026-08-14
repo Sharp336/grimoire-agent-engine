@@ -166,6 +166,7 @@ export type RpcSubagentSubscriptionLevel = "off" | "progress" | "events";
 
 export interface RpcSubagentSnapshot {
 	id: string;
+	runId: string;
 	index: number;
 	agent: string;
 	agentSource: AgentProgress["agentSource"];
