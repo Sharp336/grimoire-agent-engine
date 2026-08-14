@@ -39,5 +39,13 @@ fn main() {
 		}
 	}
 
-	println!("cargo::rustc-link-arg=-Wl,-export_dynamic");
+	// ld64 spells the flag `-export_dynamic`; ELF linkers (GNU ld, lld, mold)
+	// spell it `--export-dynamic`. Feeding the ld64 spelling to an ELF linker
+	// parses as `-e xport_dynamic`, zeroing the entry point of the produced
+	// binary. PE has no equivalent; exports resolve via the import table.
+	match std::env::var("CARGO_CFG_TARGET_OS").as_deref() {
+		Ok("macos") => println!("cargo::rustc-link-arg=-Wl,-export_dynamic"),
+		Ok("windows") => {},
+		_ => println!("cargo::rustc-link-arg=-Wl,--export-dynamic"),
+	}
 }

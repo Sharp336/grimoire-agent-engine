@@ -112,7 +112,15 @@ fn main() {
 	// Wheels' native extensions (.so) resolve CPython symbols from this
 	// executable at dlopen; keep every global (code AND data like PyExc_*)
 	// through dead-strip so the full C-API surface stays exported.
-	println!("cargo::rustc-link-arg=-Wl,-export_dynamic");
+	// ld64 spells the flag `-export_dynamic`; ELF linkers (GNU ld, lld, mold)
+	// spell it `--export-dynamic`. Feeding the ld64 spelling to an ELF linker
+	// parses as `-e xport_dynamic`, zeroing the entry point of the produced
+	// binary. PE has no equivalent; extensions resolve via the python DLL.
+	match std::env::var("CARGO_CFG_TARGET_OS").as_deref() {
+		Ok("macos") => println!("cargo::rustc-link-arg=-Wl,-export_dynamic"),
+		Ok("windows") => {},
+		_ => println!("cargo::rustc-link-arg=-Wl,--export-dynamic"),
+	}
 
 	// Static archives propagate transitively: they bundle into this crate's
 	// rlib and reach any downstream binary. Unreferenced members cost
