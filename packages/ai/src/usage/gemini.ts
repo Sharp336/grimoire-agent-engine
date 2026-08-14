@@ -17,7 +17,7 @@ const DEFAULT_ENDPOINT = "https://cloudcode-pa.googleapis.com";
 const GEMINI_TIER_MAP: Array<{ tier: string; models: string[] }> = [
 	{
 		tier: "3-Flash",
-		models: ["gemini-3-flash-preview", "gemini-3-flash", "gemini-3.5-flash"],
+		models: ["gemini-3-flash-preview", "gemini-3-flash", "gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.7-flash"],
 	},
 	{
 		tier: "Flash",
@@ -61,7 +61,7 @@ function getProjectId(payload: LoadCodeAssistResponse | undefined): string | und
 	return undefined;
 }
 
-function getModelTier(modelId: string): string | undefined {
+export function getModelTier(modelId: string): string | undefined {
 	for (const entry of GEMINI_TIER_MAP) {
 		if (entry.models.includes(modelId)) {
 			return entry.tier;

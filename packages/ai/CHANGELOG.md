@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `gemini-3.7-flash` and `gemini-3.6-flash` to the `3-Flash` Gemini usage tier (`GEMINI_TIER_MAP`).
+
 ## [17.3.2] - 2026-08-13
 
 ### Fixed

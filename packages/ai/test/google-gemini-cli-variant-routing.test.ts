@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { Effort, type FetchImpl } from "@oh-my-pi/pi-ai";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
+import { getModelTier } from "@oh-my-pi/pi-ai/usage/gemini";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
@@ -49,6 +50,33 @@ function collapsedFlashModel(): Model<"google-gemini-cli"> {
 				[Effort.High]: "gemini-3-flash-agent",
 			},
 			suppressWhenOff: true,
+		},
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1_048_576,
+		maxTokens: 65_536,
+	} satisfies ModelSpec<"google-gemini-cli">);
+}
+
+function collapsedGemini37FlashModel(): Model<"google-gemini-cli"> {
+	return buildModel({
+		id: "gemini-3.7-flash",
+		requestModelId: "gemini-3.7-flash-low",
+		name: "Gemini 3.7 Flash",
+		api: "google-gemini-cli",
+		provider: "google-antigravity",
+		baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+		reasoning: true,
+		thinking: {
+			mode: "google-level",
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+			requiresEffort: true,
+			effortRouting: {
+				[Effort.Minimal]: "gemini-3.7-flash-low",
+				[Effort.Low]: "gemini-3.7-flash-low",
+				[Effort.Medium]: "gemini-3.7-flash-medium",
+				[Effort.High]: "gemini-3.7-flash-high",
+			},
 		},
 		input: ["text", "image"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -140,7 +168,19 @@ describe("google-gemini-cli effort-tier variant routing", () => {
 		expect(low.body.model).toBe("gemini-3.5-flash-extra-low");
 		expect(low.body.request?.generationConfig?.thinkingConfig?.thinkingBudget).toBe(1000);
 	});
+	it("routes gemini-3.7-flash to per-effort backing wire ids using level mode", async () => {
+		const high = await captureRequest(collapsedGemini37FlashModel(), Effort.High);
+		expect(high.body.model).toBe("gemini-3.7-flash-high");
+		expect(high.attributedModel).toBe("gemini-3.7-flash");
 
+		const medium = await captureRequest(collapsedGemini37FlashModel(), Effort.Medium);
+		expect(medium.body.model).toBe("gemini-3.7-flash-medium");
+	});
+
+	it("maps gemini-3.7-flash and gemini-3.6-flash to the 3-Flash tier in getModelTier", () => {
+		expect(getModelTier("gemini-3.7-flash")).toBe("3-Flash");
+		expect(getModelTier("gemini-3.6-flash")).toBe("3-Flash");
+	});
 	it("suppresses thinking with a zero budget on the wire when off and suppressWhenOff is set", async () => {
 		const off = await captureRequest(collapsedFlashModel(), undefined);
 		expect(off.body.model).toBe("gemini-3.5-flash-extra-low");

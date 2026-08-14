@@ -659,6 +659,7 @@ describe("Devin tier routing", () => {
 describe("variant aliases", () => {
 	it("resolves members and recycled ids per provider", () => {
 		expect(resolveVariantAlias("google-antigravity", "gemini-3.5-flash-low")).toBe("gemini-3.5-flash");
+		expect(resolveVariantAlias("google-antigravity", "gemini-3.7-flash-low")).toBe("gemini-3.7-flash");
 		expect(resolveVariantAlias("google-gemini-cli", "gemini-pro-agent")).toBe("gemini-3.1-pro");
 		expect(resolveVariantAlias("google-antigravity", "gemini-3-flash")).toBe("gemini-3.5-flash");
 		expect(resolveVariantAlias("google-antigravity", "gemini-2.5-flash-thinking")).toBe("gemini-2.5-flash");
@@ -679,9 +680,10 @@ describe("variant aliases", () => {
 		expect(sources).toContain("gemini-3.5-flash-extra-low");
 		expect(sources).toContain("gemini-3.5-flash-low");
 		expect(sources).toContain("gemini-3-flash");
+		const gemini37Sources = getVariantAliasSources("google-antigravity", "gemini-3.7-flash");
+		expect(gemini37Sources).toEqual(["gemini-3.7-flash-low", "gemini-3.7-flash-medium", "gemini-3.7-flash-high"]);
 		expect(getVariantAliasSources("openai", "gpt-4o")).toEqual([]);
 	});
-
 	it("scopes collapsed-spec detection to routing and hand-table families", () => {
 		const collapsed = collapseEffortVariants(
 			[memberSpec("gemini-3.5-flash-low")],
