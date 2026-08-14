@@ -634,7 +634,8 @@ memory:
 | `memory.backend`              | enum    | `off`         | `off`, `local`, `hindsight`, `mnemopi`. Each backend has its own `hindsight.*` / `mnemopi.*` / `memories.*` tuning keys.                                                                                                                  |
 | `autolearn.enabled`           | boolean | `false`       | Experimental: after the agent stops, nudge it to capture lessons to memory and create/enhance isolated managed skills under `~/.omp/agent/managed-skills`. Enables the `manage_skill` tool (and `learn` when a memory backend is active). |
 | `autolearn.autoContinue`      | boolean | `false`       | When `autolearn.enabled`, auto-run one capture turn at stop (uses extra tokens). Off = a passive reminder rides your next turn.                                                                                                           |
-| `autolearn.minToolCalls`      | number  | `5`           | Only nudge after a turn that used at least this many tools.                                                                                                                                                                               |
+| `autolearn.minToolCalls`      | number  | `5`           | Only nudge after a turn that used at least this many tools.
+| `autolearn.skillLocation`     | enum    | `global`      | Where `learn`/`manage_skill` write skills: `global` (`~/.omp/agent/managed-skills`, loads everywhere) or `project` (`<repo>/.omp/skills` at the primary checkout — only sessions in that repo, including linked worktrees, load them). |                                                                                                                                                                               |
 
 `compaction` has additional tuning keys (idle compaction, supersede/drop heuristics) visible in `omp config list`. See [Compaction](./compaction.md) for the full strategy reference.
 
