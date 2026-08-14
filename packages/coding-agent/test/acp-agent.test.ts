@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { Model } from "@oh-my-pi/pi-ai";
+import { Effort, type Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
@@ -17,6 +17,7 @@ import type {
 	AgentSessionEvent,
 	UsageFallbackConfirmation,
 } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { buildAsyncResultBatchMessage } from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
 import { SILENT_ABORT_MARKER } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS } from "@oh-my-pi/pi-coding-agent/stt/models";
@@ -122,6 +123,7 @@ class FakeAgentSession {
 	agent: { sessionId: string; waitForIdle: () => Promise<void> };
 	model: Model | undefined;
 	thinkingLevel: string | undefined;
+	configuredThinking: string | undefined;
 	customCommands: [] = [];
 	extensionRunner = undefined;
 	isStreaming = false;
@@ -182,8 +184,13 @@ class FakeAgentSession {
 		return ["low", "medium", "high"];
 	}
 
+	configuredThinkingLevel(): string | undefined {
+		return this.configuredThinking ?? this.thinkingLevel;
+	}
+
 	setThinkingLevel(level: string | undefined): void {
 		const isChanging = this.thinkingLevel !== level;
+		this.configuredThinking = level;
 		this.thinkingLevel = level;
 		if (isChanging) {
 			for (const listener of this.#listeners) {
@@ -192,6 +199,19 @@ class FakeAgentSession {
 					thinkingLevel: level,
 				} as AgentSessionEvent);
 			}
+		}
+	}
+
+	emitAutoResolution(effort: Effort): void {
+		this.configuredThinking = "auto";
+		this.thinkingLevel = effort;
+		for (const listener of this.#listeners) {
+			listener({
+				type: "thinking_level_changed",
+				thinkingLevel: effort,
+				configured: "auto",
+				resolved: effort,
+			});
 		}
 	}
 
@@ -782,6 +802,64 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
+	it("exports one Auto resolution before assistant output with both listeners active", async () => {
+		const harness = await createHarness();
+		vi.useFakeTimers();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		// Install the session-lifetime subscription, then hand the turn back to
+		// real timers: the prompt path below awaits genuine async work.
+		await advanceBootstrapGuard();
+		vi.useRealTimers();
+		session.prompt = async (prompt: string): Promise<boolean> => {
+			session.promptCalls.push(prompt);
+			session.isStreaming = true;
+			session.emitAutoResolution(Effort.High);
+			const assistantMessage = makeAssistantMessage("pong");
+			for (const listener of session.listeners()) {
+				listener({
+					type: "message_update",
+					message: assistantMessage,
+					assistantMessageEvent: { type: "text_delta", delta: "pong" },
+				} as AgentSessionEvent);
+			}
+			for (const listener of session.listeners()) {
+				listener({ type: "agent_end", messages: [assistantMessage] } as AgentSessionEvent);
+			}
+			session.isStreaming = false;
+			return true;
+		};
+
+		const updatesBefore = harness.updates.length;
+		await harness.agent.prompt({ sessionId: created.sessionId, prompt: [{ type: "text", text: "think" }] });
+
+		const turnUpdates = harness.updates.slice(updatesBefore);
+		const resolutionIndexes = turnUpdates.flatMap((notification, index) =>
+			notification.sessionId === created.sessionId &&
+			notification.update.sessionUpdate === "config_option_update" &&
+			notification.update._meta?.["omp.sh/reasoning"] !== undefined
+				? [index]
+				: [],
+		);
+		expect(resolutionIndexes).toHaveLength(1);
+		const assistantIndex = turnUpdates.findIndex(
+			notification => notification.update.sessionUpdate === "agent_message_chunk",
+		);
+		expect(assistantIndex).toBeGreaterThan(resolutionIndexes[0]!);
+		expectAcpNotifications(turnUpdates);
+		const resolutionUpdate = turnUpdates[resolutionIndexes[0]!]!.update;
+		if (resolutionUpdate.sessionUpdate !== "config_option_update") {
+			throw new Error("expected config_option_update");
+		}
+		expect(resolutionUpdate.configOptions.find(option => option.id === "thinking")?.currentValue).toBe("auto");
+		expect(resolutionUpdate._meta).toEqual({
+			"omp.sh/reasoning": { configured: "auto", resolved: "high" },
+		});
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
 	it("pushes config_option_update when thinking level changes internally", async () => {
 		// Internal callers (slash commands, model auto-adjust, extension UI) call
 		// AgentSession.setThinkingLevel directly without going through the ACP
@@ -823,6 +901,67 @@ describe("ACP agent", () => {
 		expect(harness.updates.length).toBe(updatesBeforeRedundant);
 
 		vi.useRealTimers();
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("pushes settled async task metadata after the owning prompt has ended", async () => {
+		const harness = await createHarness();
+		vi.useFakeTimers();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		// The lifetime subscription is the only path left once the prompt turn
+		// has settled, so install it before dispatching the async-result event.
+		await advanceBootstrapGuard();
+		vi.useRealTimers();
+
+		const asyncMessage = buildAsyncResultBatchMessage([
+			{
+				jobId: "BoutiqueRefreshFacts",
+				result: "done",
+				job: {
+					id: "BoutiqueRefreshFacts",
+					type: "task",
+					status: "completed",
+					startTime: Date.now() - 114_551,
+					label: "Retry Banner for Boutique Refresh",
+					abortController: new AbortController(),
+					promise: Promise.resolve(),
+				},
+				durationMs: 114_551,
+				epoch: 0,
+			},
+		]);
+		if (!asyncMessage) throw new Error("expected async result message");
+
+		const updatesBefore = harness.updates.length;
+		for (const listener of session.listeners()) {
+			listener({ type: "message_start", message: asyncMessage });
+		}
+		await Bun.sleep(0);
+
+		const asyncUpdate = harness.updates
+			.slice(updatesBefore)
+			.find(
+				notification =>
+					notification.sessionId === created.sessionId &&
+					notification.update.sessionUpdate === "agent_message_chunk" &&
+					notification.update._meta?.["omp.sh/async-result"] !== undefined,
+			);
+		expect(asyncUpdate).toBeDefined();
+		expect(asyncUpdate?.update._meta?.["omp.sh/async-result"]).toEqual({
+			jobs: [
+				{
+					id: "BoutiqueRefreshFacts",
+					type: "task",
+					status: "completed",
+					label: "Retry Banner for Boutique Refresh",
+					durationMs: 114_551,
+				},
+			],
+		});
+		if (asyncUpdate) expectAcpNotifications([asyncUpdate]);
+
 		harness.abortController.abort();
 		await Bun.sleep(0);
 	});

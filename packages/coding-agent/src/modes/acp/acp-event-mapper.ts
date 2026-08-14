@@ -1,4 +1,5 @@
 import type {
+	SessionConfigOption,
 	SessionNotification,
 	SessionUpdate,
 	ToolCall,
@@ -128,6 +129,8 @@ interface TextMessageLike {
 }
 
 const ACP_TEXT_LIMIT = 4_000;
+const OMP_REASONING_META_KEY = "omp.sh/reasoning";
+const OMP_ASYNC_RESULT_META_KEY = "omp.sh/async-result";
 
 /**
  * Device name when the call is an `xd://` device dispatch riding the
@@ -208,12 +211,86 @@ export function mapToolKind(toolName: string, args?: unknown): ToolKind {
 	}
 }
 
+export function mapThinkingLevelChangeToAcpConfigUpdate(
+	event: Extract<AgentSessionEvent, { type: "thinking_level_changed" }>,
+	configOptions: SessionConfigOption[],
+): SessionUpdate {
+	const update: SessionUpdate = { sessionUpdate: "config_option_update", configOptions };
+	if (event.configured === "auto" && event.resolved !== undefined) {
+		update._meta = { [OMP_REASONING_META_KEY]: { configured: event.configured, resolved: event.resolved } };
+	}
+	return update;
+}
+
+function legacyAsyncResultStatus(content: unknown, jobId: string): "completed" | "failed" | "cancelled" | undefined {
+	if (typeof content !== "string") return undefined;
+	for (const match of content.matchAll(/<task-result\b[^>]*>/g)) {
+		const tag = match[0];
+		if (!tag.includes(`id="${jobId}"`)) continue;
+		const status = /\bstatus="(completed|failed|cancelled)"/.exec(tag)?.[1];
+		if (status === "completed" || status === "failed" || status === "cancelled") return status;
+	}
+	return undefined;
+}
+
+function mapAsyncResultMessageToAcpUpdate(event: AgentSessionEvent): SessionUpdate | undefined {
+	if (event.type !== "message_start") return undefined;
+	const message = event.message;
+	if (message.role !== "custom" || !("customType" in message) || message.customType !== "async-result") {
+		return undefined;
+	}
+	if (!("details" in message) || typeof message.details !== "object" || message.details === null) {
+		return undefined;
+	}
+	if (!("jobs" in message.details) || !Array.isArray(message.details.jobs)) return undefined;
+
+	const jobs: Array<{
+		id: string;
+		type: "bash" | "task";
+		status: "completed" | "failed" | "cancelled";
+		label?: string;
+		durationMs?: number;
+	}> = [];
+	for (const job of message.details.jobs) {
+		if (typeof job !== "object" || job === null || !("jobId" in job) || typeof job.jobId !== "string") {
+			continue;
+		}
+		if (!("type" in job) || (job.type !== "bash" && job.type !== "task")) continue;
+		const explicitStatus = "status" in job ? job.status : undefined;
+		const status =
+			explicitStatus === "completed" || explicitStatus === "failed" || explicitStatus === "cancelled"
+				? explicitStatus
+				: legacyAsyncResultStatus(message.content, job.jobId);
+		if (!status) continue;
+		const label = "label" in job && typeof job.label === "string" ? job.label : undefined;
+		const durationMs = "durationMs" in job && typeof job.durationMs === "number" ? job.durationMs : undefined;
+		jobs.push({
+			id: job.jobId,
+			type: job.type,
+			status,
+			...(label ? { label } : {}),
+			...(durationMs !== undefined ? { durationMs } : {}),
+		});
+	}
+	if (jobs.length === 0) return undefined;
+
+	return {
+		sessionUpdate: "agent_message_chunk",
+		content: { type: "text", text: "" },
+		_meta: { [OMP_ASYNC_RESULT_META_KEY]: { jobs } },
+	};
+}
+
 export function mapAgentSessionEventToAcpSessionUpdates(
 	event: AgentSessionEvent,
 	sessionId: string,
 	options: AcpEventMapperOptions = {},
 ): SessionNotification[] {
 	switch (event.type) {
+		case "message_start": {
+			const update = mapAsyncResultMessageToAcpUpdate(event);
+			return update ? [toSessionNotification(sessionId, update)] : [];
+		}
 		case "message_update":
 			return mapAssistantMessageUpdate(event, sessionId, options);
 		case "message_end":

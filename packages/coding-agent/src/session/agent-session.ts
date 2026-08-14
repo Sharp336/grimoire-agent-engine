@@ -5567,11 +5567,17 @@ export class AgentSession {
 				return;
 			}
 
-			// Auto thinking: classify this real user turn and set the effective level
-			// before the model request. Synthetic/tool-continuation turns (developer/
-			// custom roles) and non-auto sessions are skipped. Never blocks the turn —
+			// Auto thinking: classify real user turns before the model request. Skill
+			// prompts keep their user attribution in a custom message; other custom and
+			// developer/tool-continuation turns remain excluded. Never blocks the turn —
 			// failures fall back to a concrete level inside the helper.
-			if (this.isAutoThinking && message.role === "user") {
+			if (
+				this.isAutoThinking &&
+				(message.role === "user" ||
+					(message.role === "custom" &&
+						message.customType === SKILL_PROMPT_MESSAGE_TYPE &&
+						message.attribution === "user"))
+			) {
 				await this.#models.applyAutoThinkingLevel(expandedText, generation);
 				if (this.#promptGeneration !== generation) {
 					return;

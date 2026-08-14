@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import type { AgentSideConnection, SessionNotification } from "@oh-my-pi/pi-utils/acp";
+import type { AgentSideConnection, SessionConfigOption, SessionNotification } from "@oh-my-pi/pi-utils/acp";
 
 const arkSessionNotification = type({
 	sessionId: "string",
@@ -13,12 +13,14 @@ const arkSessionNotification = type({
 	},
 });
 
-import type { Model } from "@oh-my-pi/pi-ai";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { Effort, type Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { AcpAgent } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
 import {
 	buildToolCallStartUpdate,
 	mapAgentSessionEventToAcpSessionUpdates,
+	mapThinkingLevelChangeToAcpConfigUpdate,
 	normalizeReplayToolArguments,
 } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-event-mapper";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -105,7 +107,67 @@ class ReplayTestSession {
 	async refreshMCPTools(_tools: unknown): Promise<void> {}
 }
 
+function thinkingConfigOptions(currentValue: string): SessionConfigOption[] {
+	return [
+		{
+			id: "thinking",
+			name: "Thinking",
+			category: "thought_level",
+			type: "select",
+			currentValue,
+			options: [
+				{ value: "auto", name: "Auto" },
+				{ value: "high", name: "high" },
+			],
+		},
+	];
+}
+
 describe("ACP event mapper", () => {
+	it("does not claim an Auto resolution for explicit or incomplete changes", () => {
+		const cases = [
+			{
+				event: { type: "thinking_level_changed", thinkingLevel: ThinkingLevel.High },
+				currentValue: "high",
+			},
+			{
+				event: { type: "thinking_level_changed", thinkingLevel: ThinkingLevel.Medium, configured: "auto" },
+				currentValue: "auto",
+			},
+		] satisfies Array<{ event: AgentSessionEvent; currentValue: string }>;
+
+		for (const { event, currentValue } of cases) {
+			const configOptions = thinkingConfigOptions(currentValue);
+
+			const update = mapThinkingLevelChangeToAcpConfigUpdate(event, configOptions);
+
+			expect(update).toEqual({ sessionUpdate: "config_option_update", configOptions });
+			expectAcpNotifications([{ sessionId: "session-1", update }]);
+		}
+	});
+
+	it("preserves Auto while exporting its resolved effort through ACP metadata", () => {
+		const configOptions = thinkingConfigOptions("auto");
+		const update = mapThinkingLevelChangeToAcpConfigUpdate(
+			{
+				type: "thinking_level_changed",
+				thinkingLevel: ThinkingLevel.High,
+				configured: "auto",
+				resolved: Effort.High,
+			},
+			configOptions,
+		);
+
+		expect(update).toEqual({
+			sessionUpdate: "config_option_update",
+			configOptions,
+			_meta: {
+				"omp.sh/reasoning": { configured: "auto", resolved: "high" },
+			},
+		});
+		expectAcpNotifications([{ sessionId: "session-1", update }]);
+	});
+
 	it("attaches a stable messageId to live assistant chunks", () => {
 		const assistantMessage = makeAssistantMessage("chunk");
 		const getMessageId = (message: unknown): string | undefined =>
@@ -1185,5 +1247,46 @@ describe("ACP event mapper", () => {
 			update: { ...notification!.update, sessionUpdate: "tool_call_updates" },
 		});
 		expectAcpStructureRejects(arkSessionNotification, { ...notification, sessionId: 42 });
+	});
+	it("recovers terminal status from persisted async-result task tags", () => {
+		const updates = mapAgentSessionEventToAcpSessionUpdates(
+			{
+				type: "message_start",
+				message: {
+					role: "custom",
+					customType: "async-result",
+					content:
+						'<system-notice><task-result id="BoutiqueRefreshFacts" agent="scout" status="completed">done</task-result></system-notice>',
+					display: true,
+					attribution: "agent",
+					details: {
+						jobs: [
+							{
+								jobId: "BoutiqueRefreshFacts",
+								type: "task",
+								label: "Retry Banner for Boutique Refresh",
+								durationMs: 114_551,
+							},
+						],
+					},
+					timestamp: Date.now(),
+				},
+			} as AgentSessionEvent,
+			"session-1",
+		);
+
+		expect(updates).toHaveLength(1);
+		expect(updates[0]?.update._meta?.["omp.sh/async-result"]).toEqual({
+			jobs: [
+				{
+					id: "BoutiqueRefreshFacts",
+					type: "task",
+					status: "completed",
+					label: "Retry Banner for Boutique Refresh",
+					durationMs: 114_551,
+				},
+			],
+		});
+		expectAcpNotifications(updates);
 	});
 });
