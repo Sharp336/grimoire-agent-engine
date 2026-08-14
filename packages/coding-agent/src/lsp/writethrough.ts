@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { isEnoent, logger, once, untilAborted } from "@oh-my-pi/pi-utils";
 import type { BunFile } from "bun";
 import { FileChangeType, notifyWorkspaceWatchedFiles } from "./client";
@@ -55,6 +56,7 @@ export type WritethroughCallback = (
 	file?: BunFile,
 	batch?: LspWritethroughBatchRequest,
 	getDeferred?: (dst: string) => WritethroughDeferredHandle | undefined,
+	context?: AgentToolContext,
 ) => Promise<FileDiagnosticsResult | undefined>;
 
 /** No-op writethrough callback */
@@ -65,6 +67,7 @@ export async function writethroughNoop(
 	file?: BunFile,
 	_batch?: LspWritethroughBatchRequest,
 	_getDeferred?: (dst: string) => WritethroughDeferredHandle | undefined,
+	_context?: AgentToolContext,
 ): Promise<FileDiagnosticsResult | undefined> {
 	if (file) {
 		await file.write(content);
@@ -82,6 +85,7 @@ interface PendingWritethrough {
 
 interface RunLspWritethroughOptions {
 	contentAlreadyWritten?: boolean;
+	context?: AgentToolContext;
 }
 
 interface LspWritethroughBatchRequest {
@@ -89,24 +93,37 @@ interface LspWritethroughBatchRequest {
 	flush: boolean;
 }
 
+/**
+ * One in-flight batch of queued writes sharing an id (one turn/session).
+ * `context` is the active tool context of whichever call first created the
+ * batch — every entry in it belongs to the same caller, so one context is
+ * stamped on every client the eventual flush lazily creates.
+ */
 interface LspWritethroughBatchState {
 	entries: Map<string, PendingWritethrough>;
 	options: ResolvedWritethroughOptions;
+	context?: AgentToolContext;
 }
 
 const writethroughBatches = new Map<string, LspWritethroughBatchState>();
 
-function getOrCreateWritethroughBatch(id: string, options: ResolvedWritethroughOptions): LspWritethroughBatchState {
+function getOrCreateWritethroughBatch(
+	id: string,
+	options: ResolvedWritethroughOptions,
+	context?: AgentToolContext,
+): LspWritethroughBatchState {
 	const existing = writethroughBatches.get(id);
 	if (existing) {
 		existing.options.enableFormat ||= options.enableFormat;
 		existing.options.enableDiagnostics ||= options.enableDiagnostics;
 		existing.options.transformDiagnostics ??= options.transformDiagnostics;
+		existing.context ??= context;
 		return existing;
 	}
 	const batch: LspWritethroughBatchState = {
 		entries: new Map<string, PendingWritethrough>(),
 		options: { ...options },
+		context,
 	};
 	writethroughBatches.set(id, batch);
 	return batch;
@@ -122,7 +139,14 @@ export async function flushLspWritethroughBatch(
 		return undefined;
 	}
 	writethroughBatches.delete(id);
-	return flushWritethroughBatch(Array.from(state.entries.values()), cwd, state.options, signal);
+	return flushWritethroughBatch(
+		Array.from(state.entries.values()),
+		cwd,
+		state.options,
+		signal,
+		undefined,
+		state.context,
+	);
 }
 
 function mergeDiagnostics(
@@ -189,6 +213,7 @@ async function scheduleDeferredDiagnosticsFetch(args: {
 	expectedDocumentVersions: ServerVersionMap | undefined;
 	signal: AbortSignal;
 	callback: (diagnostics: FileDiagnosticsResult) => void;
+	context?: AgentToolContext;
 }): Promise<void> {
 	try {
 		const deferredTimeout = AbortSignal.timeout(25_000);
@@ -198,6 +223,7 @@ async function scheduleDeferredDiagnosticsFetch(args: {
 			minVersions: args.minVersions,
 			expectedDocumentVersions: args.expectedDocumentVersions,
 			timeoutMs: DEFERRED_DIAGNOSTICS_WAIT_TIMEOUT_MS,
+			context: args.context,
 		});
 		if (args.signal.aborted || diagnostics === undefined) return;
 		args.callback(diagnostics);
@@ -229,8 +255,10 @@ async function fetchDiagnosticsWithDeferral(args: {
 	transformDiagnostics?: ResolvedWritethroughOptions["transformDiagnostics"];
 	deferred?: { onDeferredDiagnostics: (diagnostics: FileDiagnosticsResult) => void; signal: AbortSignal };
 	signal?: AbortSignal;
+	context?: AgentToolContext;
 }): Promise<FileDiagnosticsResult | undefined> {
-	const { dst, cwd, servers, minVersions, expectedDocumentVersions, transformDiagnostics, deferred, signal } = args;
+	const { dst, cwd, servers, minVersions, expectedDocumentVersions, transformDiagnostics, deferred, signal, context } =
+		args;
 	const apply = (d: FileDiagnosticsResult | undefined) =>
 		d && transformDiagnostics ? transformDiagnostics(dst, d) : d;
 
@@ -241,6 +269,7 @@ async function fetchDiagnosticsWithDeferral(args: {
 				signal,
 				minVersions,
 				expectedDocumentVersions,
+				context,
 			}),
 		);
 	}
@@ -251,6 +280,7 @@ async function fetchDiagnosticsWithDeferral(args: {
 		minVersions,
 		expectedDocumentVersions,
 		timeoutMs: DEFERRED_DIAGNOSTICS_WAIT_TIMEOUT_MS,
+		context,
 	});
 	const INLINE_TIMEOUT = Symbol("inline-diagnostics-timeout");
 	const raced = await Promise.race([
@@ -286,6 +316,7 @@ async function runLspWritethrough(
 ): Promise<FileDiagnosticsResult | undefined> {
 	const { enableFormat, enableDiagnostics } = options;
 	const contentAlreadyWritten = runOptions?.contentAlreadyWritten ?? false;
+	const context = runOptions?.context;
 
 	let finalContent = content;
 	const writeContent = async (value: string) => (file ? file.write(value) : Bun.write(dst, value));
@@ -329,7 +360,9 @@ async function runLspWritethrough(
 	// Capture diagnostic versions BEFORE syncing to detect stale diagnostics
 	// Bound client creation by the writethrough budget: a hung/broken server
 	// must not add its full init wait (30s default) to every edit.
-	const minVersionsPromise = enableDiagnostics ? captureDiagnosticVersions(cwd, servers, 5_000, signal) : undefined;
+	const minVersionsPromise = enableDiagnostics
+		? captureDiagnosticVersions(cwd, servers, 5_000, signal, context)
+		: undefined;
 	let minVersions = useCustomFormatter ? undefined : await minVersionsPromise;
 	let expectedDocumentVersions: ServerVersionMap | undefined;
 
@@ -354,7 +387,7 @@ async function runLspWritethrough(
 				// supports implementations that inspect the file before formatting.
 				if (!contentAlreadyWritten) await writeContent(content);
 				const [formattedContent, capturedVersions] = await Promise.all([
-					formatContent(dst, content, cwd, customLinterServers, operationSignal),
+					formatContent(dst, content, cwd, customLinterServers, operationSignal, context),
 					minVersionsPromise,
 				]);
 				finalContent = formattedContent;
@@ -362,20 +395,20 @@ async function runLspWritethrough(
 				formatter = finalContent !== content ? FileFormatResult.FORMATTED : FileFormatResult.UNCHANGED;
 				if (!contentAlreadyWritten || finalContent !== content) await writeContent(finalContent);
 				await notifyWriteCommitted(operationSignal);
-				await syncFileContent(dst, finalContent, cwd, lspServers, operationSignal, enableDiagnostics);
+				await syncFileContent(dst, finalContent, cwd, lspServers, operationSignal, enableDiagnostics, context);
 			} else {
 				// 1. Sync original content to LSP servers
-				await syncFileContent(dst, content, cwd, lspServers, operationSignal);
+				await syncFileContent(dst, content, cwd, lspServers, operationSignal, true, context);
 
 				// 2. Format in-memory via LSP
 				if (enableFormat) {
-					finalContent = await formatContent(dst, content, cwd, lspServers, operationSignal);
+					finalContent = await formatContent(dst, content, cwd, lspServers, operationSignal, context);
 					formatter = finalContent !== content ? FileFormatResult.FORMATTED : FileFormatResult.UNCHANGED;
 				}
 
 				// 3. If formatted, sync formatted content to LSP servers
 				if (finalContent !== content) {
-					await syncFileContent(dst, finalContent, cwd, lspServers, operationSignal);
+					await syncFileContent(dst, finalContent, cwd, lspServers, operationSignal, true, context);
 				}
 
 				// 4. Write to disk
@@ -384,11 +417,18 @@ async function runLspWritethrough(
 			}
 
 			if (enableDiagnostics) {
-				expectedDocumentVersions = await captureOpenFileVersions(dst, cwd, lspServers, operationSignal);
+				expectedDocumentVersions = await captureOpenFileVersions(dst, cwd, lspServers, operationSignal, context);
 			}
 
 			// 5. Notify saved to LSP servers
-			await notifyFileSaved(dst, cwd, lspServers, operationSignal, !useCustomFormatter || enableDiagnostics);
+			await notifyFileSaved(
+				dst,
+				cwd,
+				lspServers,
+				operationSignal,
+				!useCustomFormatter || enableDiagnostics,
+				context,
+			);
 		});
 		synced = true;
 	} catch {
@@ -405,6 +445,7 @@ async function runLspWritethrough(
 					expectedDocumentVersions,
 					signal: deferred.signal,
 					callback: deferred.onDeferredDiagnostics,
+					context,
 				});
 			}
 		}
@@ -425,6 +466,7 @@ async function runLspWritethrough(
 			transformDiagnostics: options.transformDiagnostics,
 			deferred,
 			signal,
+			context,
 		});
 	}
 
@@ -447,6 +489,7 @@ async function flushWritethroughBatch(
 	options: ResolvedWritethroughOptions,
 	signal?: AbortSignal,
 	getDeferred?: (dst: string) => WritethroughDeferredHandle | undefined,
+	context?: AgentToolContext,
 ): Promise<FileDiagnosticsResult | undefined> {
 	if (batch.length === 0) {
 		return undefined;
@@ -477,7 +520,7 @@ async function flushWritethroughBatch(
 			signal,
 			entry.file,
 			deferredInner,
-			{ contentAlreadyWritten: true },
+			{ contentAlreadyWritten: true, context },
 		);
 		bundle?.finalize(diag);
 		results.push(diag);
@@ -499,6 +542,7 @@ export function createLspWritethrough(cwd: string, options?: WritethroughOptions
 		file?: BunFile,
 		batch?: LspWritethroughBatchRequest,
 		getDeferred?: (dst: string) => WritethroughDeferredHandle | undefined,
+		context?: AgentToolContext,
 	) => {
 		const changeType = (await Bun.file(dst).exists()) ? FileChangeType.Changed : FileChangeType.Created;
 		if (!batch) {
@@ -518,6 +562,7 @@ export function createLspWritethrough(cwd: string, options?: WritethroughOptions
 				signal,
 				file,
 				deferredInner,
+				{ context },
 			);
 			bundle?.finalize(diagnostics);
 			return diagnostics;
@@ -539,6 +584,7 @@ export function createLspWritethrough(cwd: string, options?: WritethroughOptions
 							pending.options,
 							signal,
 							getDeferred,
+							context,
 						);
 					} catch (flushError) {
 						logger.warn("Failed to flush pending LSP batch after final write failure", {
@@ -551,11 +597,18 @@ export function createLspWritethrough(cwd: string, options?: WritethroughOptions
 			throw error;
 		}
 
-		const state = getOrCreateWritethroughBatch(batch.id, resolvedOptions);
+		const state = getOrCreateWritethroughBatch(batch.id, resolvedOptions, context);
 		state.entries.set(dst, { dst, file, changeType });
 		if (!batch.flush) return undefined;
 
 		writethroughBatches.delete(batch.id);
-		return flushWritethroughBatch(Array.from(state.entries.values()), cwd, state.options, signal, getDeferred);
+		return flushWritethroughBatch(
+			Array.from(state.entries.values()),
+			cwd,
+			state.options,
+			signal,
+			getDeferred,
+			context,
+		);
 	};
 }

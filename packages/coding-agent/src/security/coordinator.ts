@@ -1,7 +1,8 @@
+import { mkdirSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { Model } from "@oh-my-pi/pi-ai";
-import { logger, prompt } from "@oh-my-pi/pi-utils";
+import { getSecurityDir, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { AsyncJobManager } from "../async/job-manager";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
@@ -14,6 +15,10 @@ import { createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
 import type { AuthStorage } from "../session/auth-storage";
 import { SessionManager } from "../session/session-manager";
+import { loadPermissionsConfig } from "../tools/permissions/config";
+import { checkStructuredTargets, PermissionDeniedError } from "../tools/permissions/gate";
+import { decideTarget } from "../tools/permissions/resolve";
+import type { PathTarget, PermissionRoots } from "../tools/permissions/types";
 import * as git from "../utils/git";
 import { createExactSecurityOAuthResolver, selectSecurityAccount } from "./auth";
 import type {
@@ -25,12 +30,14 @@ import type {
 	SecurityTargetKind,
 } from "./contracts";
 import { createSecurityScanId } from "./contracts";
-import type { SecurityGitAdapter, SecurityTargetRequest } from "./preflight";
+import type { SecurityGitAdapter, SecurityPathPolicy, SecurityTargetRequest } from "./preflight";
 import {
 	assertSecurityScanPlanFresh,
 	createSecurityScanPlan,
 	DEFAULT_SECURITY_GIT_ADAPTER,
+	filterDiffByPermissionPolicy,
 	prepareSecurityOutputDirectory,
+	securityArchivePath,
 } from "./preflight";
 import {
 	createNativeSecurityProducer,
@@ -73,6 +80,8 @@ export interface SecurityOperationSnapshot {
 
 export interface SecurityCoordinatorHost {
 	cwd: string;
+	/** `workspace.additionalDirectories`, absolute - approved output locations beyond `cwd` for `confineWrites`. */
+	additionalDirectories?: readonly string[];
 	settings: Settings;
 	authStorage: AuthStorage;
 	modelRegistry: ModelRegistry;
@@ -135,6 +144,18 @@ export type SecurityScanSessionFactory = (input: SecurityScanSessionFactoryInput
 export interface SecurityCoordinatorDependencies {
 	createSession?: SecurityScanSessionFactory;
 	openStore?: (repositoryRoot: string) => Promise<SecurityStore>;
+	/**
+	 * Derive the default output work directory for `cwd` without opening the
+	 * store (no `ensurePrivateDirectory`/index-initialization side effects) -
+	 * used to authorize `preflight`'s effective output path before `openStore`
+	 * runs. Defaults to the same derivation `openStore`'s default
+	 * (`SecurityStore.openForCwd`) uses, so the two agree in production; a
+	 * caller injecting a custom `openStore` (e.g. a test-scoped `stateRoot`)
+	 * SHOULD inject a matching `deriveOutputWorkRoot` too, or this check
+	 * authorizes a path that can diverge from where the opened store actually
+	 * lands.
+	 */
+	deriveOutputWorkRoot?: (cwd: string) => Promise<string>;
 	gitAdapter?: SecurityGitAdapter;
 	now?: () => Date;
 	createOperationId?: () => string;
@@ -152,6 +173,184 @@ function toIsoTimestamp(now: () => Date): string {
 
 function securityConfigSnapshot(settings: Settings): Record<string, boolean> {
 	return { securityEnabled: settings.get("security.enabled") };
+}
+
+/**
+ * The resource-permission policy's read axis (`permissions.deny.read` /
+ * `permissions.allow.read`), live from settings — `digestWorkingTree` and
+ * `filterDiffByPermissionPolicy` (`preflight.ts`) exclude any file that
+ * matches `deny` and is not separately carved back out by `allow`, so a
+ * `strict`-profile secret (`.env`, `id_rsa`, …) never contributes to what a
+ * preflight/start pair fingerprints, nor to the diff text a `ref_diff`
+ * review session actually reads. `{ deny: [], allow: [] }` under
+ * `permissions.profile: off`, matching the gate's own short-circuit.
+ *
+ * `explicitDeny`/`explicitAllow` carry the user-supplied globs apart from
+ * the profile-merged `deny`/`allow` above, so `isPathExcludedBySecurityPolicy`
+ * can give the user's own `permissions.deny.read` entry the same precedence
+ * over a profile's built-in allow carve-out that an ordinary `read` gets
+ * from `decidePathTarget` — see {@link SecurityPathPolicy}.
+ */
+function securityPathPolicy(settings: Settings): SecurityPathPolicy {
+	const policy = loadPermissionsConfig(settings);
+	return {
+		deny: policy?.deny.read ?? [],
+		allow: policy?.allow.read ?? [],
+		explicitDeny: policy?.explicitDeny.read ?? [],
+		explicitAllow: policy?.explicitAllow.read ?? [],
+	};
+}
+
+/**
+ * Authorize the *effective* security-scan output path — whether it was
+ * given explicitly or defaulted (`preflight()` below) — as a write target.
+ * `output_root` is checked as a declared write argument at the tool gate
+ * (`extractSecurityScanPaths`, `tool-path-targets.ts`) only when the model
+ * supplies it; an omitted `output_root` is defaulted to a path under the
+ * store's own work directory, which `normalizeOutput` (`preflight.ts`)
+ * always requires to sit *outside* the scanned repository — exactly the
+ * shape `permissions.confineWrites` exists to catch. `additionalDirectories`
+ * (`workspace.additionalDirectories`, when the caller supplies it) lets an
+ * approved external report directory pass the same confinement check the
+ * tool gate itself evaluates against; when the caller has none to give
+ * (e.g. a sessionless coordinator), this still fails closed for anything
+ * outside `cwd` rather than risk under-checking.
+ */
+function assertSecurityWriteAllowed(absolutePath: string, host: SecurityCoordinatorHost, field: string): void {
+	const policy = loadPermissionsConfig(host.settings);
+	if (!policy) return;
+	const roots: PermissionRoots = { cwd: host.cwd, additionalDirectories: host.additionalDirectories ?? [] };
+	const decision = decideTarget({ raw: absolutePath, access: "write", field }, policy, roots);
+	if (decision.kind === "deny") {
+		throw new PermissionDeniedError("security_scan", decision.rule, decision.reason);
+	}
+}
+
+/** Every filename {@link writeSecurityBundleToDirectory} (`store.ts`) can place directly under the output root. */
+const SECURITY_BUNDLE_FILENAMES = [
+	"findings.json",
+	"report.md",
+	"results.sarif",
+	"provenance.json",
+	"scan.json",
+] as const;
+
+/**
+ * `assertSecurityWriteAllowed` above only clears `output_root` itself; a
+ * `deny.write` rule matching a descendant glob (e.g. `**\/*.json`) still
+ * fires on the exact files `writeSecurityBundleToDirectory` (`store.ts`)
+ * places under that root — every name in {@link SECURITY_BUNDLE_FILENAMES},
+ * written (or `fs.rm`'d, when the bundle carries no report/sarif) through
+ * `writeSecurityFileAtomic`'s `<file>.<pid>.<uuid>.tmp`-then-rename dance.
+ * Authorize both the final path and a representative temp sibling for each —
+ * the pid/uuid are placeholders since glob rules match on shape, not the
+ * literal random suffix — before either `security_publish` (`publication.ts`)
+ * or this coordinator's own re-write (`#run` below) can create them.
+ */
+function assertSecurityBundleWriteAllowed(root: string, host: SecurityCoordinatorHost): void {
+	const policy = loadPermissionsConfig(host.settings);
+	if (!policy) return;
+	const roots: PermissionRoots = { cwd: host.cwd, additionalDirectories: host.additionalDirectories ?? [] };
+	const resolvedRoot = path.resolve(root);
+	const targets: PathTarget[] = SECURITY_BUNDLE_FILENAMES.flatMap(filename => {
+		const filePath = path.join(resolvedRoot, filename);
+		const field = "output_root";
+		return [
+			{ raw: filePath, access: "write", field },
+			{ raw: `${filePath}.0.00000000-0000-0000-0000-000000000000.tmp`, access: "write", field },
+		];
+	});
+	const denial = checkStructuredTargets(targets, policy, roots);
+	if (denial) throw new PermissionDeniedError("security_scan", denial.rule, denial.reason);
+}
+
+/**
+ * Roots for authorizing writes under the security store's own persistence
+ * directory (`~/.omp/security/<project-key>`, {@link getSecurityDir}) —
+ * distinct from {@link assertSecurityWriteAllowed}'s workspace-relative
+ * `roots`. The store directory is agent-internal bookkeeping (scan index,
+ * plan queue), never a workspace artifact the user asked for, so it is
+ * always added as an allowed root here: `permissions.confineWrites` exists
+ * to catch a scan's *output* landing somewhere the user did not approve
+ * (`assertSecurityWriteAllowed`, `assertSecurityBundleWriteAllowed`), not to
+ * gate the tool's own state file the same way a session's log directory or
+ * model cache never routes through this permission layer at all. A `deny.write`
+ * glob the user authored still fires against these targets normally — only
+ * confinement is widened, not the deny-list check `checkStructuredTargets`
+ * also runs.
+ *
+ * `confineToRoots` realpath-resolves every root and silently drops one that
+ * does not exist yet (an unresolvable root "contributes nothing" rather than
+ * failing open) - on a machine that has never run a security scan,
+ * `getSecurityDir()` itself is absent, which would drop this exemption right
+ * when it is first needed. Create it (state-root only, not the deeper
+ * project directory `ensurePrivateDirectory` still owns) before it is handed
+ * to the confinement check.
+ */
+function securityStoreRoots(host: SecurityCoordinatorHost): PermissionRoots {
+	const securityDir = getSecurityDir();
+	// Best-effort: a create failure here (e.g. EACCES) must not crash the
+	// authorization check itself - the exemption just does not apply, and
+	// confineWrites falls back to denying the way it did before this fix.
+	try {
+		mkdirSync(securityDir, { recursive: true, mode: 0o700 });
+	} catch {
+		// ignore; see comment above.
+	}
+	return { cwd: host.cwd, additionalDirectories: [...(host.additionalDirectories ?? []), securityDir] };
+}
+
+/**
+ * Authorize the security store's own persistence directory, distinct from
+ * `assertSecurityWriteAllowed`'s `output_root` (the scan's report
+ * destination): `SecurityStore.open` creates `projectDirectory` and writes
+ * `index.json` (`ensurePrivateDirectory` + `#ensureIndex`, `store.ts`) the
+ * moment it opens, under the agent state directory - unrelated to, and
+ * unauthorized by, any `output_root` check. Every `#openStore` call site
+ * (`#recoverInterruptedOperations`, `preflight`, `start`) must clear this
+ * first, or a denied call has already created store state on disk before
+ * anything else in this coordinator has authorized it. `projectDirectory`
+ * is the caller's responsibility to derive — through the injected
+ * `#deriveOutputWorkRoot` dependency, not the bare `SecurityStore` static —
+ * so a test-scoped `stateRoot` and this check agree on where the store
+ * actually lands, the same reasoning `#deriveOutputWorkRoot`'s own call
+ * sites already follow.
+ */
+function assertSecurityStoreWriteAllowed(projectDirectory: string, host: SecurityCoordinatorHost): void {
+	const policy = loadPermissionsConfig(host.settings);
+	if (!policy) return;
+	const roots = securityStoreRoots(host);
+	const indexPath = path.join(projectDirectory, "index.json");
+	const field = "security_store";
+	const targets: PathTarget[] = [
+		{ raw: projectDirectory, access: "write", field },
+		{ raw: indexPath, access: "write", field },
+		{ raw: `${indexPath}.${process.pid}.00000000-0000-0000-0000-000000000000.tmp`, access: "write", field },
+	];
+	const denial = checkStructuredTargets(targets, policy, roots);
+	if (denial) throw new PermissionDeniedError("security_scan", denial.rule, denial.reason);
+}
+
+/**
+ * Authorize the specific plan file `putPlan` (`store.ts`) is about to write
+ * under the store's `plans/` directory, mirroring
+ * {@link assertSecurityBundleWriteAllowed}'s per-file authorization for
+ * bundle writes rather than treating the project directory's root
+ * authorization as covering every descendant a `deny.write` glob can still
+ * name.
+ */
+function assertSecurityPlanWriteAllowed(projectDirectory: string, planId: string, host: SecurityCoordinatorHost): void {
+	const policy = loadPermissionsConfig(host.settings);
+	if (!policy) return;
+	const roots = securityStoreRoots(host);
+	const planPath = path.join(projectDirectory, "plans", `${planId}.json`);
+	const field = "security_store";
+	const targets: PathTarget[] = [
+		{ raw: planPath, access: "write", field },
+		{ raw: `${planPath}.${process.pid}.00000000-0000-0000-0000-000000000000.tmp`, access: "write", field },
+	];
+	const denial = checkStructuredTargets(targets, policy, roots);
+	if (denial) throw new PermissionDeniedError("security_scan", denial.rule, denial.reason);
 }
 
 function createOperationId(): string {
@@ -322,6 +521,7 @@ async function prepareSecurityExecutionTarget(
 	scanId: string,
 	adapter: SecurityGitAdapter,
 	signal: AbortSignal,
+	policy: SecurityPathPolicy,
 ): Promise<PreparedSecurityExecutionTarget> {
 	if (plan.target.kind !== "ref_diff") {
 		return { cwd: plan.repositoryRoot, cleanup: async () => undefined };
@@ -337,7 +537,15 @@ async function prepareSecurityExecutionTarget(
 	try {
 		await git.worktree.add(plan.repositoryRoot, cwd, headRevision, { detach: true, signal });
 		added = true;
-		const diffText = await adapter.diffTree(plan.repositoryRoot, baseRevision, headRevision, signal);
+		// Filtered the same way `normalizeTarget` filtered it for the plan's own
+		// fingerprint (`preflight.ts`) — a denied file's diff must never reach
+		// this prompt-construction step, or the digest and what the model
+		// actually reads would silently diverge.
+		const diffText = filterDiffByPermissionPolicy(
+			await adapter.diffTree(plan.repositoryRoot, baseRevision, headRevision, signal),
+			plan.repositoryRoot,
+			policy,
+		);
 		return {
 			cwd,
 			diffText,
@@ -354,9 +562,10 @@ async function prepareSecurityExecutionTarget(
 }
 
 export class SecurityCoordinator {
-	readonly #host: SecurityCoordinatorHost;
+	#host: SecurityCoordinatorHost;
 	readonly #createSession: SecurityScanSessionFactory;
 	readonly #openStore: (repositoryRoot: string) => Promise<SecurityStore>;
+	readonly #deriveOutputWorkRoot: (cwd: string) => Promise<string>;
 	readonly #gitAdapter: SecurityGitAdapter;
 	readonly #now: () => Date;
 	readonly #createOperationId: () => string;
@@ -367,16 +576,36 @@ export class SecurityCoordinator {
 		this.#host = host;
 		this.#createSession = dependencies.createSession ?? createDefaultSecuritySession;
 		this.#openStore = dependencies.openStore ?? (cwd => SecurityStore.openForCwd(cwd));
+		this.#deriveOutputWorkRoot =
+			dependencies.deriveOutputWorkRoot ??
+			(async cwd => path.join(await SecurityStore.deriveProjectDirectoryForCwd(cwd), "work"));
 		this.#gitAdapter = dependencies.gitAdapter ?? DEFAULT_SECURITY_GIT_ADAPTER;
 		this.#now = dependencies.now ?? (() => new Date());
 		this.#createOperationId = dependencies.createOperationId ?? createOperationId;
 	}
+
+	/**
+	 * Replace the host every field on this coordinator reads through,
+	 * including `additionalDirectories` and `settings`. `getSecurityCoordinator`
+	 * calls this on every cache hit: without it, a session that adds or removes
+	 * a workspace directory (or rotates credentials, or swaps its active model)
+	 * after the first `security_scan` call would keep authorizing writes
+	 * against the directory list captured when the coordinator was first
+	 * constructed, forever — `assertSecurityWriteAllowed` reads `this.#host`
+	 * fresh on every call, so this is the only place that host goes stale.
+	 */
+	updateHost(host: SecurityCoordinatorHost): void {
+		this.#host = host;
+	}
+
 	async #ensureRecovered(): Promise<void> {
 		this.#recovery ??= this.#recoverInterruptedOperations();
 		await this.#recovery;
 	}
 
 	async #recoverInterruptedOperations(): Promise<void> {
+		const projectDirectory = path.dirname(await this.#deriveOutputWorkRoot(this.#host.cwd));
+		assertSecurityStoreWriteAllowed(projectDirectory, this.#host);
 		const store = await this.#openStore(this.#host.cwd);
 		for (const summary of await store.listScans()) {
 			const bundle = await store.getBundle(summary.id);
@@ -421,18 +650,37 @@ export class SecurityCoordinator {
 			input.credentialId,
 			this.#host.sessionId,
 		);
-		const store = await this.#openStore(this.#host.cwd);
-		const workRoot = path.join(store.projectDirectory, "work");
-		await fs.mkdir(workRoot, { recursive: true, mode: 0o700 });
-		if (process.platform !== "win32") await fs.chmod(workRoot, 0o700);
+		// Derive the work root without opening the store - `open`'s
+		// `ensurePrivateDirectory`/index-write side effects must not run
+		// before `outputRoot` is authorized below, or a denied call has
+		// already created store state on disk. Goes through the injected
+		// dependency (not the static method directly) so a test-scoped
+		// `openStore` and this derivation agree on where the store lands.
+		const workRoot = await this.#deriveOutputWorkRoot(this.#host.cwd);
 		const modelRef: SecurityModelRef = { provider: model.provider, modelId: model.id };
 		if (input.thinkingLevel !== undefined) modelRef.thinkingLevel = input.thinkingLevel;
+		// Resolved once, against the session's cwd (which can differ from
+		// `process.cwd()` for an SDK-created session) - authorize this exact
+		// absolute value and pass it through unchanged. `normalizeOutput`
+		// (`preflight.ts`) later calls the bare `path.resolve(outputRoot)` with
+		// no cwd argument, so re-passing the original relative `outputRoot`
+		// here would let it land somewhere else entirely, one `confineWrites`
+		// never re-checked.
+		const resolvedOutputRoot = path.resolve(
+			this.#host.cwd,
+			input.outputRoot ?? path.join(workRoot, Bun.randomUUIDv7()),
+		);
+		assertSecurityWriteAllowed(resolvedOutputRoot, this.#host, "output_root");
+		assertSecurityStoreWriteAllowed(path.dirname(workRoot), this.#host);
+		const store = await this.#openStore(this.#host.cwd);
+		await fs.mkdir(workRoot, { recursive: true, mode: 0o700 });
+		if (process.platform !== "win32") await fs.chmod(workRoot, 0o700);
 		const plan = await createSecurityScanPlan(
 			{
 				cwd: this.#host.cwd,
 				target: input.target ?? { kind: "repository" },
 				knowledgeBasePaths: input.knowledgeBasePaths,
-				outputRoot: input.outputRoot ?? path.join(workRoot, Bun.randomUUIDv7()),
+				outputRoot: resolvedOutputRoot,
 				archiveExisting: input.archiveExisting,
 				model: modelRef,
 				account,
@@ -441,7 +689,9 @@ export class SecurityCoordinator {
 				signal: input.signal,
 			},
 			this.#gitAdapter,
+			securityPathPolicy(this.#host.settings),
 		);
+		assertSecurityPlanWriteAllowed(store.projectDirectory, plan.id, this.#host);
 		await store.putPlan(plan);
 		return plan;
 	}
@@ -451,9 +701,17 @@ export class SecurityCoordinator {
 			throw new Error("Security is disabled; enable security.enabled before starting a scan");
 		}
 		await this.#ensureRecovered();
+		const projectDirectory = path.dirname(await this.#deriveOutputWorkRoot(this.#host.cwd));
+		assertSecurityStoreWriteAllowed(projectDirectory, this.#host);
 		const store = await this.#openStore(this.#host.cwd);
 		const plan = await store.getPlan(input.planId);
 		if (!plan) throw new Error(`Unknown security scan plan: ${input.planId}`);
+		// `plan.output.root` was authorized once at `preflight()`, against
+		// whatever `permissions.profile` was live then - a plan created while
+		// permissions were off (or looser) and started later under a
+		// confining profile must not run on the strength of that stale check.
+		assertSecurityWriteAllowed(path.resolve(this.#host.cwd, plan.output.root), this.#host, "output_root");
+		assertSecurityBundleWriteAllowed(plan.output.root, this.#host);
 		await assertSecurityScanPlanFresh(
 			plan,
 			{
@@ -461,6 +719,7 @@ export class SecurityCoordinator {
 				workflowFingerprint: SECURITY_WORKFLOW_FINGERPRINT,
 			},
 			this.#gitAdapter,
+			securityPathPolicy(this.#host.settings),
 		);
 		const operationId = this.#createOperationId();
 		const scanId = createSecurityScanId();
@@ -562,6 +821,18 @@ export class SecurityCoordinator {
 				initialBundle(store, plan, record.snapshot.scanId, record.snapshot.operationId, startedAt),
 			);
 			if (signal.aborted) throw signal.reason ?? new Error("Security scan cancelled");
+			// `plan.output.root` was authorized at preflight time, but a
+			// nonempty root with `archiveExisting` renames it to this generated
+			// sibling below — a write-deny glob can match the sibling suffix
+			// while allowing the root itself, and the rename would still create
+			// it unless this is checked first.
+			if (plan.output.archiveExisting) {
+				assertSecurityWriteAllowed(
+					securityArchivePath(plan.output.root, record.snapshot.scanId),
+					this.#host,
+					"output_root",
+				);
+			}
 			await prepareSecurityOutputDirectory(plan.output, record.snapshot.scanId);
 			this.#update(record, "preparing");
 			await reportProgress?.("Preparing OMP-native security scan");
@@ -571,6 +842,7 @@ export class SecurityCoordinator {
 				record.snapshot.scanId,
 				this.#gitAdapter,
 				signal,
+				securityPathPolicy(this.#host.settings),
 			);
 			const activeModel = this.#host.activeModel;
 			const model =
@@ -582,6 +854,18 @@ export class SecurityCoordinator {
 			const sessionsDirectory = path.join(store.projectDirectory, "sessions");
 			await fs.mkdir(sessionsDirectory, { recursive: true, mode: 0o700 });
 			const sessionManager = SessionManager.create(executionTarget.cwd, sessionsDirectory);
+			// `/add-dir` mutates the live session manager, not settings
+			// (`permissionRoots` reads `context.sessionManager.getAdditionalDirectories()`
+			// directly — see gate.ts), so a knowledge-base path added that way
+			// during the host session is invisible to `cloneForCwd`-derived
+			// settings. Seed the review session's brand-new manager from the
+			// host's live roots here, before it runs any tool call, so
+			// `confineReads`/`confineWrites` see the same roots the outer
+			// `security_scan` gate already accepted the target against.
+			for (const directory of this.#host.additionalDirectories ?? []) {
+				if (path.resolve(directory) === path.resolve(executionTarget.cwd)) continue;
+				await sessionManager.addWorkspaceDirectory(directory);
+			}
 			const publicationTool = createSecurityPublicationTool({
 				plan,
 				scanId: record.snapshot.scanId,
@@ -589,6 +873,11 @@ export class SecurityCoordinator {
 				startedAt,
 				sessionId: `security:${record.snapshot.scanId}`,
 				operationId: record.snapshot.operationId,
+				// `security_publish` is a session-local tool with no declared path
+				// argument, so it never passes through the standard tool-call gate
+				// (`classifyTool`, `tool-path-targets.ts`) - this is the only check
+				// standing between it and `writeSecurityBundleToDirectory`.
+				assertBundleWriteAllowed: root => assertSecurityBundleWriteAllowed(root, this.#host),
 				onPublished: async bundle => {
 					publishedBundle = bundle;
 					record.snapshot.findingCount = bundle.findings.length;
@@ -634,6 +923,11 @@ export class SecurityCoordinator {
 								}
 							: {}),
 					};
+					// Re-check before this coordinator's own re-write for the same
+					// reason `start()` re-checks `output_root` itself: the policy
+					// live in settings can have changed since `security_publish`'s
+					// own write passed this same check.
+					assertSecurityBundleWriteAllowed(plan.output.root, this.#host);
 					await writeSecurityBundleToDirectory(plan.output.root, publishedBundle);
 					await store.putBundle(publishedBundle);
 				}
@@ -697,7 +991,10 @@ const COORDINATORS = new Map<string, SecurityCoordinator>();
 export function getSecurityCoordinator(host: SecurityCoordinatorHost): SecurityCoordinator {
 	const key = `${path.resolve(host.cwd)}\u0000${host.sessionId ?? "sessionless"}`;
 	const existing = COORDINATORS.get(key);
-	if (existing) return existing;
+	if (existing) {
+		existing.updateHost(host);
+		return existing;
+	}
 	const coordinator = new SecurityCoordinator(host);
 	COORDINATORS.set(key, coordinator);
 	return coordinator;

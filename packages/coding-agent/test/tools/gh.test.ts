@@ -1021,6 +1021,155 @@ describe("github tool", () => {
 			expect(runGit(worktreePath, ["branch", "--show-current"])).toBe("pr-123");
 		});
 
+		it("denies the worktree write when the resource permission policy confines writes to the session roots", async () => {
+			vi.spyOn(git.github, "json")
+				.mockResolvedValueOnce({
+					number: 456,
+					title: "Denied checkout",
+					url: "https://github.com/base/repo/pull/456",
+					baseRefName: "main",
+					headRefName: fixture.headRefName,
+					headRefOid: fixture.headRefOid,
+					headRepository: { nameWithOwner: "contrib/repo" },
+					headRepositoryOwner: { login: "contrib" },
+					isCrossRepository: true,
+					maintainerCanModify: true,
+				})
+				.mockResolvedValueOnce({
+					nameWithOwner: "contrib/repo",
+					sshUrl: fixture.forkBare,
+					url: fixture.forkBare,
+				});
+
+			const tool = new GithubTool(createSession(fixture.repoRoot));
+			const context = {
+				sessionManager: {
+					getCwd: () => fixture.repoRoot,
+					getAdditionalDirectories: () => [],
+					getSessionId: () => "test-session",
+				},
+				settings: Settings.isolated({ "permissions.profile": "workspace" }),
+			} as unknown as Parameters<typeof tool.execute>[4];
+
+			// The worktree always lands under `getWorktreeDir` (`~/.omp/wt/...`,
+			// isolated to `tempHome.home` here), outside `fixture.repoRoot` -
+			// `permissions.confineWrites` (on by default under `workspace`) must
+			// refuse it even though `github` declares no path argument at all.
+			const promise = tool.execute(
+				"pr-checkout-denied",
+				{ op: "pr_checkout", pr: "456" },
+				undefined,
+				undefined,
+				context,
+			);
+			await expect(promise).rejects.toThrow(/blocked by permissions\.confineWrites/);
+			// Only the worktree destination (outside `repoRoot`) is what
+			// `permissions.confineWrites` denies - the local branch ref inside
+			// `repoRoot` is created earlier in the same call and stays, same as
+			// any other in-workspace git.config write this tool already does.
+			expect(runGit(fixture.repoRoot, ["worktree", "list", "--porcelain"])).not.toContain("pr-456");
+		});
+
+		it("blocks checkout before Git metadata mutations under a descendant deny rule", async () => {
+			vi.spyOn(git.github, "json").mockResolvedValueOnce({
+				number: 789,
+				title: "Metadata denied checkout",
+				url: "https://github.com/base/repo/pull/789",
+				baseRefName: "main",
+				headRefName: fixture.headRefName,
+				headRefOid: fixture.headRefOid,
+				headRepository: { nameWithOwner: "contrib/repo" },
+				headRepositoryOwner: { login: "contrib" },
+				isCrossRepository: true,
+				maintainerCanModify: true,
+			});
+			const tool = new GithubTool(createSession(fixture.repoRoot));
+			const context = {
+				sessionManager: {
+					getCwd: () => fixture.repoRoot,
+					getAdditionalDirectories: () => [],
+					getSessionId: () => "test-session",
+				},
+				settings: Settings.isolated({
+					"permissions.profile": "workspace",
+					"permissions.deny.write": ["**/.git/**"],
+				}),
+			} as unknown as Parameters<typeof tool.execute>[4];
+
+			await expect(
+				tool.execute(
+					"pr-checkout-metadata-denied",
+					{ op: "pr_checkout", pr: "789" },
+					undefined,
+					undefined,
+					context,
+				),
+			).rejects.toThrow(/blocked by the resource permission rule "\*\*\/\.git\/\*\*"/);
+			expect(runGit(fixture.repoRoot, ["branch", "--list", "pr-789"])).toBe("");
+		});
+
+		it("blocks checkout before it can create a transient Git lock file under a deny.write lock rule", async () => {
+			// The clone URL must be genuinely new - a URL matching the fixture's
+			// pre-configured `forksrc` remote would let `ensurePrRemote`'s own
+			// idempotency check (see `git.remote.add idempotency` below) reuse
+			// that remote and skip `git remote add` entirely, never exercising
+			// the mutation this test targets. `git remote add` never dials the
+			// URL, so this fake path never needs to resolve.
+			const newForkUrl = path.join(fixture.baseDir, "contrib-fork.git");
+			vi.spyOn(git.github, "json")
+				.mockResolvedValueOnce({
+					number: 999,
+					title: "Lock denied checkout",
+					url: "https://github.com/base/repo/pull/999",
+					baseRefName: "main",
+					headRefName: fixture.headRefName,
+					headRefOid: fixture.headRefOid,
+					headRepository: { nameWithOwner: "contrib/repo" },
+					headRepositoryOwner: { login: "contrib" },
+					isCrossRepository: true,
+					maintainerCanModify: true,
+				})
+				.mockResolvedValueOnce({
+					nameWithOwner: "contrib/repo",
+					sshUrl: newForkUrl,
+					url: newForkUrl,
+				});
+			const tool = new GithubTool(createSession(fixture.repoRoot));
+			const context = {
+				sessionManager: {
+					getCwd: () => fixture.repoRoot,
+					getAdditionalDirectories: () => [],
+					getSessionId: () => "test-session",
+				},
+				settings: Settings.isolated({
+					"permissions.profile": "workspace",
+					// Confinement is irrelevant to this rule and would otherwise deny
+					// the worktree destination first (it always lands outside
+					// `fixture.repoRoot`, same as the confinement test above) - turned
+					// off so only the `deny.write` lock rule is under test.
+					"permissions.confineWrites": false,
+					"permissions.deny.write": ["**/*.lock"],
+				}),
+			} as unknown as Parameters<typeof tool.execute>[4];
+
+			// `.git/config.lock` (and the ref/log lock siblings alongside it) do not
+			// exist yet, so this must be denied from the *prospective* target list,
+			// not the existing-tree scan — reproducing the finding in review thread
+			// PRRT_kwDOQxs0bc6YnDHD: `git.config.setBranch` invokes `git config`,
+			// which stages every write through that lock file.
+			const remotesBefore = runGit(fixture.repoRoot, ["remote"]);
+			await expect(
+				tool.execute("pr-checkout-lock-denied", { op: "pr_checkout", pr: "999" }, undefined, undefined, context),
+			).rejects.toThrow(/blocked by the resource permission rule "\*\*\/\*\.lock"/);
+			expect(runGit(fixture.repoRoot, ["branch", "--list", "pr-999"])).toBe("");
+			// `ensurePrRemote`'s own `git remote add` must not have run either:
+			// authorizing `config`/`config.lock` only *after* that first mutation
+			// (the ordering the review finding names) would let this fresh
+			// cross-repository fork remote get added before this check ever fires -
+			// the remote set must be unchanged, not just missing one guessed name.
+			expect(runGit(fixture.repoRoot, ["remote"])).toBe(remotesBefore);
+		});
+
 		// These assertions are non-mutating (a no-op add and rejected adds), so
 		// reuse the checkout fixture instead of cloning another repository.
 		describe("git.remote.add idempotency", () => {

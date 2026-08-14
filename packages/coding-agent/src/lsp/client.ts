@@ -1,10 +1,12 @@
 import * as path from "node:path";
+import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { isEnoent, logger, postmortem, ptree, untilAborted } from "@oh-my-pi/pi-utils";
 import { MessageFramer } from "../jsonrpc/message-framing";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { applyWorkspaceEdit, type ExecutedWorkspaceChange } from "./edits";
 import { getLspmuxCommand, isLspmuxSupported } from "./lspmux";
 import { connectSharedLspTransport } from "./mux/daemon";
+import { assertWorkspaceEditAllowed } from "./permission-guard";
 import type {
 	LspClient,
 	LspJsonRpcId,
@@ -466,6 +468,28 @@ async function handleConfigurationRequest(client: LspClient, message: LspJsonRpc
 }
 
 /**
+ * Check a server-pushed `WorkspaceEdit` against every session currently
+ * tracked on `client.permissionsContexts`, not just one. A shared client has
+ * no session of its own to attribute a push to, so the conservative choice is
+ * to deny if ANY tracked session's policy would deny it — a client only ever
+ * gets stricter as more sessions attach, never laxer because the latest
+ * caller happened to be more permissive. Falls back to the pre-session
+ * `undefined`-context behavior (a no-op, since `assertWorkspaceEditAllowed`
+ * treats a missing context as permissions being off) when no session has
+ * attached a context yet, matching every other call site that can run before
+ * a session exists.
+ */
+async function assertWorkspaceEditAllowedForClient(client: LspClient, edit: WorkspaceEdit): Promise<void> {
+	if (client.permissionsContexts.size === 0) {
+		await assertWorkspaceEditAllowed(edit, undefined, client.name);
+		return;
+	}
+	for (const context of client.permissionsContexts.values()) {
+		await assertWorkspaceEditAllowed(edit, context, client.name);
+	}
+}
+
+/**
  * Handle workspace/applyEdit requests from the server.
  */
 async function handleApplyEditRequest(client: LspClient, message: LspJsonRpcRequest): Promise<void> {
@@ -481,6 +505,16 @@ async function handleApplyEditRequest(client: LspClient, message: LspJsonRpcRequ
 	}
 
 	try {
+		// A server-initiated push, unlike our own outbound rename/code_actions
+		// apply, carries no tool-call context — `client.permissionsContexts`
+		// (stamped by `LspTool.execute` on every call, one entry per distinct
+		// session) stands in for it, so a command with no literal denied path
+		// in its own arguments still cannot make the server create, rename,
+		// delete, or write outside the workspace or at a denied path via this
+		// path. Checked against every tracked session, not just whichever one
+		// called most recently — a client shared by two sessions must stay as
+		// strict as the stricter one for a push with no session of its own.
+		await assertWorkspaceEditAllowedForClient(client, params.edit);
 		await applyWorkspaceEditWithLsp(params.edit, client.cwd);
 		await sendResponse(client, message.id, { applied: true }, "workspace/applyEdit");
 	} catch (err) {
@@ -816,12 +850,19 @@ export function clearInitializationFailure(config: ServerConfig, cwd: string): v
  * @param signal - Optional caller abort signal. Threaded into the initialize `sendRequest`
  *   and the `initialized` notification so a wedged server surfaces the caller's
  *   timeout/cancel instead of falling back to the internal 30s default.
+ * @param context - The calling tool's permission context, attached to the client BEFORE
+ *   its message reader starts. A server can push `workspace/applyEdit` at any point once
+ *   the reader is live, including mid-handshake before `initialize` resolves — stamping
+ *   this only after the whole creation promise settles (the prior fix) left that entire
+ *   window checking against `undefined`, which `assertWorkspaceEditAllowed` treats as
+ *   permissions being off.
  */
 export async function getOrCreateClient(
 	config: ServerConfig,
 	cwd: string,
 	initTimeoutMs?: number,
 	signal?: AbortSignal,
+	context?: AgentToolContext,
 ): Promise<LspClient> {
 	const key = clientKey(config, cwd);
 
@@ -829,6 +870,17 @@ export async function getOrCreateClient(
 	const existingClient = clients.get(key);
 	if (existingClient) {
 		existingClient.lastActivity = Date.now();
+		// A caller that omits `context` (an internal helper call, not a direct
+		// tool dispatch) must not clear an already-tracked session's stamp - a
+		// server push arriving right after such a call would then have one
+		// fewer session's policy to check against. Only a caller that actually
+		// supplies a context updates that session's entry; every call site that
+		// dispatches on behalf of a tool call is expected to pass its own. Keyed
+		// by `sessionManager` (stable for the session's lifetime) rather than
+		// overwriting a single latest-wins field, so a second session sharing
+		// this client's cwd/command adds its own entry instead of replacing the
+		// first session's.
+		if (context !== undefined) existingClient.permissionsContexts.set(context.sessionManager, context);
 		return existingClient;
 	}
 
@@ -902,6 +954,13 @@ export async function getOrCreateClient(
 			activeProgressTokens: new Set(),
 			projectLoaded,
 			resolveProjectLoaded,
+			// Set before `startMessageReader` runs below, so a server push
+			// arriving mid-handshake (before `initialize` even resolves) still
+			// has a context to check against. Keyed by `sessionManager` so a
+			// second session that later shares this client (same cwd/command)
+			// adds its own entry rather than overwriting this one — see the
+			// field doc on `LspClient.permissionsContexts`.
+			permissionsContexts: context !== undefined ? new Map([[context.sessionManager, context]]) : new Map(),
 		};
 
 		// Register crash recovery - remove client on process exit

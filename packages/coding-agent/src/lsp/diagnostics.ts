@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import path from "node:path";
+import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import { formatPathRelativeToCwd } from "../tools/path-utils";
 import { throwIfAborted } from "../tools/tool-errors";
@@ -8,6 +9,7 @@ import { getLinterClient } from "./clients";
 import { hasRootMarkerAncestor } from "./config";
 import { applyTextEditsToString } from "./edits";
 import { resolveFormatOptions } from "./format-options";
+import { isLspReadRestricted } from "./permission-guard";
 import { isProjectAwareLspServer } from "./servers";
 import type {
 	Diagnostic,
@@ -296,6 +298,7 @@ interface GetDiagnosticsForFileOptions {
 	expectedDocumentVersions?: ServerVersionMap;
 	/** Per-server wait budget (ms). Defaults to {@link SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS}. */
 	timeoutMs?: number;
+	context?: AgentToolContext;
 }
 
 /**
@@ -307,12 +310,15 @@ export async function captureDiagnosticVersions(
 	servers: Array<[string, ServerConfig]>,
 	initTimeoutMs?: number,
 	signal?: AbortSignal,
+	context?: AgentToolContext,
 ): Promise<ServerVersionMap> {
 	const versions = new Map<string, number>();
+	const readsRestricted = isLspReadRestricted(context);
 	await Promise.allSettled(
 		servers.map(async ([serverName, serverConfig]) => {
 			if (serverConfig.createClient) return;
-			const client = await getOrCreateClient(serverConfig, cwd, initTimeoutMs, signal);
+			if (readsRestricted && isProjectAwareLspServer(serverConfig)) return;
+			const client = await getOrCreateClient(serverConfig, cwd, initTimeoutMs, signal, context);
 			versions.set(serverName, client.diagnosticsVersion);
 		}),
 	);
@@ -324,12 +330,15 @@ export async function captureOpenFileVersions(
 	cwd: string,
 	servers: Array<[string, ServerConfig]>,
 	signal?: AbortSignal,
+	context?: AgentToolContext,
 ): Promise<ServerVersionMap> {
 	const uri = fileToUri(absolutePath);
 	const versions = new Map<string, number>();
+	const readsRestricted = isLspReadRestricted(context);
 	await Promise.allSettled(
 		servers.map(async ([serverName, serverConfig]) => {
-			const client = await getOrCreateClient(serverConfig, cwd, undefined, signal);
+			if (readsRestricted && isProjectAwareLspServer(serverConfig)) return;
+			const client = await getOrCreateClient(serverConfig, cwd, undefined, signal, context);
 			const version = client.openFiles.get(uri)?.version;
 			if (version !== undefined) {
 				versions.set(serverName, version);
@@ -354,7 +363,7 @@ export async function getDiagnosticsForFile(
 	servers: Array<[string, ServerConfig]>,
 	options: GetDiagnosticsForFileOptions = {},
 ): Promise<FileDiagnosticsResult | undefined> {
-	const { signal, minVersions, expectedDocumentVersions, timeoutMs } = options;
+	const { signal, minVersions, expectedDocumentVersions, timeoutMs, context } = options;
 	if (servers.length === 0) {
 		return undefined;
 	}
@@ -376,7 +385,8 @@ export async function getDiagnosticsForFile(
 			}
 
 			// Default: use LSP
-			const client = await getOrCreateClient(serverConfig, cwd, undefined, signal);
+			if (isLspReadRestricted(context) && isProjectAwareLspServer(serverConfig)) return undefined;
+			const client = await getOrCreateClient(serverConfig, cwd, undefined, signal, context);
 			throwIfAborted(signal);
 			if (isProjectAwareLspServer(serverConfig)) {
 				await waitForProjectLoaded(client, signal);
@@ -396,7 +406,7 @@ export async function getDiagnosticsForFile(
 	);
 
 	for (const result of results) {
-		if (result.status === "fulfilled") {
+		if (result.status === "fulfilled" && result.value) {
 			serverNames.push(result.value.serverName);
 			allDiagnostics.push(
 				...filterOrphanProjectDiagnostics(
@@ -467,6 +477,7 @@ export async function formatContent(
 	cwd: string,
 	servers: Array<[string, ServerConfig]>,
 	signal?: AbortSignal,
+	context?: AgentToolContext,
 ): Promise<string> {
 	if (servers.length === 0) {
 		return content;
@@ -484,7 +495,8 @@ export async function formatContent(
 			}
 
 			// Default: use LSP
-			const client = await getOrCreateClient(serverConfig, cwd, undefined, signal);
+			if (isLspReadRestricted(context) && isProjectAwareLspServer(serverConfig)) continue;
+			const client = await getOrCreateClient(serverConfig, cwd, undefined, signal, context);
 			throwIfAborted(signal);
 
 			const caps = client.serverCapabilities;

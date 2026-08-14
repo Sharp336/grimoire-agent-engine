@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentToolResult, RenderResultOptions } from "@oh-my-pi/pi-agent-core";
+import type { AgentToolContext, AgentToolResult, RenderResultOptions } from "@oh-my-pi/pi-agent-core";
 import { arkToWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { preloadPluginRoots } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
@@ -46,6 +46,7 @@ import {
 	uriToFile,
 } from "@oh-my-pi/pi-coding-agent/lsp/utils";
 import { getThemeByName, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import type { ReadonlySessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { clampTimeout } from "@oh-my-pi/pi-coding-agent/tools/tool-timeouts";
@@ -407,6 +408,66 @@ describe("lsp regressions", () => {
 				await shutdownProbe.exited;
 			}
 			expect(probeExit).toBe(0);
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
+	it("checks a server-pushed workspace/applyEdit against every session sharing the client, not just the latest caller", async () => {
+		// Two sessions in the same cwd share one client (`clientKey` is
+		// `command:cwd`, with no session identity in it), so this reproduces
+		// the exact scenario the fix targets: session A's stricter policy must
+		// still deny a push that arrives after session B's laxer policy took
+		// over the same client.
+		const tempDir = TempDir.createSync("@omp-lsp-shared-client-permissions-");
+		try {
+			const server = installFakeLsp((message, srv) => {
+				if (message.method === "initialize") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
+				} else if (message.method === "shutdown") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					srv.exit(0);
+				}
+			});
+			const config: ServerConfig = { command: "fake-lsp", fileTypes: ["ts"], rootMarkers: [] };
+
+			const settingsOf = (overrides: Record<string, unknown>) =>
+				({
+					get: (key: string) => (Object.hasOwn(overrides, key) ? overrides[key] : undefined),
+				}) as unknown as Settings;
+			const contextOf = (overrides: Record<string, unknown>): AgentToolContext =>
+				({
+					sessionManager: {
+						getCwd: () => tempDir.path(),
+						getAdditionalDirectories: () => [],
+					} as unknown as ReadonlySessionManager,
+					settings: settingsOf(overrides),
+				}) as unknown as AgentToolContext;
+
+			const strictSession = contextOf({
+				"permissions.profile": "workspace",
+				"permissions.deny.write": ["secret.ts"],
+			});
+			const permissiveSession = contextOf({ "permissions.profile": "off" });
+
+			await lspClient.getOrCreateClient(config, tempDir.path(), 1_000, undefined, strictSession);
+			// Session B reuses the same cached client (same command + cwd) —
+			// pre-fix, this would overwrite the client's single permissions
+			// stamp and the strict session's policy would never be checked
+			// again for a push with no session of its own.
+			await lspClient.getOrCreateClient(config, tempDir.path(), 1_000, undefined, permissiveSession);
+
+			server.send({
+				jsonrpc: "2.0",
+				id: "push-1",
+				method: "workspace/applyEdit",
+				params: { edit: { changes: { [fileToUri(path.join(tempDir.path(), "secret.ts"))]: [] } } },
+			});
+			const response = await server.waitFor(message => message.id === "push-1");
+			expect(response.result).toMatchObject({ applied: false });
+			expect((response.result as { failureReason?: string }).failureReason).toContain("secret.ts");
 		} finally {
 			await lspClient.shutdownAll();
 			tempDir.removeSync();
@@ -1594,6 +1655,7 @@ describe("lsp regressions", () => {
 				activeProgressTokens: new Set(),
 				projectLoaded: Promise.resolve(),
 				resolveProjectLoaded: () => {},
+				permissionsContexts: new Map(),
 			};
 
 			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
@@ -2018,6 +2080,7 @@ describe("lsp regressions", () => {
 				activeProgressTokens: new Set(),
 				projectLoaded: Promise.resolve(),
 				resolveProjectLoaded: () => {},
+				permissionsContexts: new Map(),
 			};
 
 			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
@@ -2127,6 +2190,7 @@ describe("lsp regressions", () => {
 				activeProgressTokens: new Set(),
 				projectLoaded: Promise.resolve(),
 				resolveProjectLoaded: () => {},
+				permissionsContexts: new Map(),
 			};
 
 			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
@@ -2210,6 +2274,7 @@ describe("lsp regressions", () => {
 				activeProgressTokens: new Set(),
 				projectLoaded: Promise.resolve(),
 				resolveProjectLoaded: () => {},
+				permissionsContexts: new Map(),
 			};
 
 			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
@@ -2283,6 +2348,7 @@ describe("lsp regressions", () => {
 				activeProgressTokens: new Set(),
 				projectLoaded: Promise.resolve(),
 				resolveProjectLoaded: () => {},
+				permissionsContexts: new Map(),
 			};
 
 			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
@@ -2344,6 +2410,7 @@ describe("lsp regressions", () => {
 				activeProgressTokens: new Set(),
 				projectLoaded: Promise.resolve(),
 				resolveProjectLoaded: () => {},
+				permissionsContexts: new Map(),
 			};
 
 			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
@@ -2405,6 +2472,7 @@ describe("lsp regressions", () => {
 				activeProgressTokens: new Set(),
 				projectLoaded: Promise.resolve(),
 				resolveProjectLoaded: () => {},
+				permissionsContexts: new Map(),
 			};
 
 			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
@@ -2475,6 +2543,7 @@ describe("lsp regressions", () => {
 				activeProgressTokens: new Set(),
 				projectLoaded: Promise.resolve(),
 				resolveProjectLoaded: () => {},
+				permissionsContexts: new Map(),
 			};
 
 			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
@@ -2545,6 +2614,7 @@ describe("lsp regressions", () => {
 				activeProgressTokens: new Set(),
 				projectLoaded: Promise.resolve(),
 				resolveProjectLoaded: () => {},
+				permissionsContexts: new Map(),
 			};
 
 			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
@@ -2603,6 +2673,7 @@ describe("lsp regressions", () => {
 				activeProgressTokens: new Set(),
 				projectLoaded: Promise.resolve(),
 				resolveProjectLoaded: () => {},
+				permissionsContexts: new Map(),
 				serverCapabilities: {
 					hoverProvider: true,
 					definitionProvider: true,
@@ -3406,6 +3477,7 @@ describe("lsp regressions", () => {
 			activeProgressTokens: new Set(),
 			projectLoaded: Promise.resolve(),
 			resolveProjectLoaded: () => {},
+			permissionsContexts: new Map(),
 		};
 		vi.useFakeTimers();
 		try {
@@ -3436,6 +3508,7 @@ describe("lsp regressions", () => {
 			activeProgressTokens: new Set(),
 			projectLoaded: Promise.resolve(),
 			resolveProjectLoaded: () => {},
+			permissionsContexts: new Map(),
 		};
 		const controller = new AbortController();
 		const reason = new Error("caller deadline");
@@ -3530,7 +3603,13 @@ describe("lsp regressions", () => {
 			expect(loadConfigSpy).toHaveBeenCalledTimes(3);
 			expect(starOutput).toContain("Reloaded test-lsp");
 			expect(omittedOutput).toContain("Reloaded test-lsp");
-			expect(lspClient.getOrCreateClient).toHaveBeenCalledWith(server, tempDir.path(), undefined, expect.anything());
+			expect(lspClient.getOrCreateClient).toHaveBeenCalledWith(
+				server,
+				tempDir.path(),
+				undefined,
+				expect.anything(),
+				undefined,
+			);
 		} finally {
 			vi.restoreAllMocks();
 			tempDir.removeSync();
@@ -4017,6 +4096,7 @@ describe("lsp regressions", () => {
 				activeProgressTokens: new Set(),
 				projectLoaded: Promise.resolve(),
 				resolveProjectLoaded: () => {},
+				permissionsContexts: new Map(),
 			};
 
 			const first = lspClient.sendNotification(client, "workspace/didChangeConfiguration", { settings: {} });
@@ -4068,6 +4148,7 @@ describe("lsp regressions", () => {
 				activeProgressTokens: new Set(),
 				projectLoaded: Promise.resolve(),
 				resolveProjectLoaded: () => {},
+				permissionsContexts: new Map(),
 			};
 
 			await expect(

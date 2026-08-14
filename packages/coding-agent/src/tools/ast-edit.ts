@@ -27,7 +27,16 @@ import { parseReadUrlTarget } from "./fetch";
 import { createFileRecorder, formatResultPath } from "./file-recorder";
 import { classifyGroupedLines, formatGroupedFiles, groupLineIndicesByBlank } from "./grouped-file-output";
 import type { OutputMeta } from "./output-meta";
-import { isInternalUrlPath, resolveToolSearchScope } from "./path-utils";
+import { isInternalUrlPath, type ResolvedSearchTarget, resolveToolSearchScope } from "./path-utils";
+import {
+	checkStructuredTargets,
+	excludeDenyReadSearchTargets,
+	loadPermissionsConfig,
+	type PathTarget,
+	PermissionDeniedError,
+	permissionRoots,
+} from "./permissions";
+import { isExemptPathArgument } from "./permissions/resolve";
 import {
 	appendParseErrorsBulletList,
 	capParseErrors,
@@ -77,7 +86,7 @@ interface AstEditAggregatedResult {
 }
 
 async function runAstEditTargets(
-	targets: Array<{ basePath: string; glob?: string }>,
+	targets: ResolvedSearchTarget[],
 	commonBasePath: string,
 	options: AstEditCallOptions,
 ): Promise<AstEditAggregatedResult> {
@@ -88,28 +97,34 @@ async function runAstEditTargets(
 	let filesSearched = 0;
 	let limitReached = false;
 	let applied = !options.dryRun;
+	let remainingFiles = options.maxFiles;
 	for (const target of targets) {
+		if (remainingFiles <= 0) {
+			limitReached = true;
+			break;
+		}
 		const targetResult = await astEdit({
 			rewrites: options.rewrites,
 			path: target.basePath,
 			glob: target.glob,
 			dryRun: options.dryRun,
-			maxFiles: options.maxFiles,
+			maxFiles: remainingFiles,
 			failOnParseError: options.failOnParseError,
 			signal: options.signal,
 		});
 		totalReplacements += targetResult.totalReplacements;
 		filesSearched += targetResult.filesSearched;
+		remainingFiles -= targetResult.filesSearched;
 		limitReached = limitReached || targetResult.limitReached;
 		applied = applied && targetResult.applied;
 		if (targetResult.parseErrors) parseErrors.push(...targetResult.parseErrors);
 		for (const change of targetResult.changes) {
-			const absolute = path.resolve(target.basePath, change.path);
+			const absolute = target.pathIsFile ? target.basePath : path.resolve(target.basePath, change.path);
 			const rebased = path.relative(commonBasePath, absolute).replace(/\\/g, "/");
 			aggregatedChanges.push({ ...change, path: rebased });
 		}
 		for (const fileChange of targetResult.fileChanges) {
-			const absolute = path.resolve(target.basePath, fileChange.path);
+			const absolute = target.pathIsFile ? target.basePath : path.resolve(target.basePath, fileChange.path);
 			const rebased = path.relative(commonBasePath, absolute).replace(/\\/g, "/");
 			fileCounts.set(rebased, (fileCounts.get(rebased) ?? 0) + fileChange.count);
 		}
@@ -131,7 +146,7 @@ async function runAstEditTargets(
 }
 
 function runAstEditOnce(
-	targets: Array<{ basePath: string; glob?: string }> | undefined,
+	targets: ResolvedSearchTarget[] | undefined,
 	resolvedSearchPath: string,
 	globFilter: string | undefined,
 	options: AstEditCallOptions,
@@ -175,6 +190,48 @@ export interface AstEditToolDetails {
 }
 
 type AstEditSchemaInfer = typeof astEditSchema.infer;
+
+/**
+ * Both the read and write targets `fileList` represents. The queue-time and
+ * apply-time checks previously authorized only `access: "write"`, but the
+ * dry-run preview (queue time) and the real rewrite (apply time) both READ
+ * every matched file first to render the diff/apply the change - under a
+ * policy whose read and write deny rules differ (e.g. `deny.read` without a
+ * matching `deny.write`), a file denied only for reading would still pass
+ * this check and its original content would reach the model in the preview.
+ */
+function astEditFileTargets(fileList: readonly string[]): PathTarget[] {
+	return fileList.flatMap(filePath => [
+		{ raw: filePath, access: "read" as const, field: "files" },
+		{ raw: filePath, access: "write" as const, field: "files" },
+	]);
+}
+
+/**
+ * Whether `absoluteFilePath` sits under one of `exemptRoots` — the same
+ * exempt-source roots {@link resolveToolSearchScope} resolves for a `local://`/
+ * `memory://` scope input. `astEditFileTargets` below checks concrete on-disk
+ * paths with `decideTarget`, which only recognizes an exempt *raw argument*
+ * shape (`local://…`) — a resolved backing path never matches it, so without
+ * this a `deny.read: ["**\/*"]` policy would deny every file this per-file
+ * recheck sees even when the scope itself was exempt.
+ */
+function isUnderExemptRoot(absoluteFilePath: string, exemptRoots: ReadonlySet<string>): boolean {
+	for (const root of exemptRoots) {
+		if (absoluteFilePath === root || absoluteFilePath.startsWith(`${root}${path.sep}`)) return true;
+	}
+	return false;
+}
+
+/** {@link astEditFileTargets}, excluding files under an exempt scope root. */
+function nonExemptFileTargets(
+	fileList: readonly string[],
+	cwd: string,
+	exemptRoots: ReadonlySet<string>,
+): PathTarget[] {
+	if (exemptRoots.size === 0) return astEditFileTargets(fileList);
+	return astEditFileTargets(fileList.filter(filePath => !isUnderExemptRoot(path.resolve(cwd, filePath), exemptRoots)));
+}
 
 export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolDetails> {
 	readonly name = "ast_edit";
@@ -262,7 +319,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 		params: AstEditSchemaInfer,
 		signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<AstEditToolDetails>,
-		_context?: AgentToolContext,
+		context?: AgentToolContext,
 	): Promise<AgentToolResult<AstEditToolDetails>> {
 		return untilAborted(signal, async () => {
 			const ops = params.ops.map((entry, index) => {
@@ -292,6 +349,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 				signal,
 				localProtocolOptions: this.session.localProtocolOptions,
 				skills: this.session.skills,
+				isExemptSourceInput: isExemptPathArgument,
 				resolveExternalUrl: async rawPath => {
 					if (!parseReadUrlTarget(rawPath)) return undefined;
 					throw new ToolError(
@@ -300,8 +358,39 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 				},
 			});
 			const { searchPath: resolvedSearchPath, scopePath, isDirectory, multiTargets, globFilter } = scope;
+			let effectiveTargets = multiTargets;
+			const searchPolicy = loadPermissionsConfig(this.session.settings);
+			const recursiveTargets =
+				multiTargets ??
+				(isDirectory ? [{ basePath: resolvedSearchPath, glob: globFilter, pathIsFile: false }] : undefined);
+			// `resolveToolSearchScope` replaces an exempt internal/external URL
+			// (e.g. `memory://root`) with its backing filesystem path before this
+			// filter runs; that backing path can legitimately sit outside every
+			// workspace root. Splitting exempt targets out before the deny-read
+			// filter — mirroring `ast_grep`'s own filtering site — keeps their
+			// original exemption from being lost the moment the URL becomes a
+			// concrete path, instead of rejecting every descendant under an
+			// active `deny.read` rule.
+			if (searchPolicy && recursiveTargets) {
+				const roots = {
+					cwd: this.session.cwd,
+					additionalDirectories: this.session.additionalDirectories ?? [],
+				};
+				const exemptTargets = recursiveTargets.filter(target =>
+					scope.exemptSourcePaths.has(path.resolve(target.basePath)),
+				);
+				const targetsToFilter =
+					exemptTargets.length > 0
+						? recursiveTargets.filter(target => !scope.exemptSourcePaths.has(path.resolve(target.basePath)))
+						: recursiveTargets;
+				const filteredTargets =
+					targetsToFilter.length > 0
+						? await excludeDenyReadSearchTargets(targetsToFilter, searchPolicy, roots)
+						: [];
+				if (filteredTargets) effectiveTargets = [...exemptTargets, ...filteredTargets];
+			}
 
-			const result = await runAstEditOnce(multiTargets, resolvedSearchPath, globFilter, {
+			const result = await runAstEditOnce(effectiveTargets, resolvedSearchPath, globFilter, {
 				rewrites: normalizedRewrites,
 				dryRun: true,
 				maxFiles,
@@ -436,15 +525,110 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 				outputLines.push("", ...formatParseErrors(cappedParseErrors, parseErrorsTotal));
 			}
 
-			// Register pending action so `resolve` can apply or discard these previewed changes
+			// Register pending action so `resolve` can apply or discard these previewed changes.
+			// Authorize the previewed files *before* queueing: this call's own
+			// post-execution recheck (`enforcePostExecutionResourcePermissions`,
+			// `wrapper.ts`) only guards this tool call's own result — the queued
+			// `apply` callback below runs later, from a *different* tool call
+			// (`write xd://resolve`) whose args never name these paths, so it
+			// would otherwise write a denied file with no check at all.
 			if (!result.applied && result.totalReplacements > 0) {
+				const permissionsPolicy = loadPermissionsConfig(context?.settings);
+				if (permissionsPolicy) {
+					const permissionsRoots = permissionRoots(context);
+					const denial = permissionsRoots
+						? checkStructuredTargets(
+								nonExemptFileTargets(fileList, this.session.cwd, scope.exemptSourcePaths),
+								permissionsPolicy,
+								permissionsRoots,
+							)
+						: {
+								rule: "permissions.profile",
+								reason:
+									`Tool "${this.name}" is blocked: permissions.profile is "${permissionsPolicy.profile}" but this ` +
+									`call has no session, so the workspace roots the rules are measured against cannot be ` +
+									`determined.\nTo allow it: set permissions.profile: off.`,
+							};
+					if (denial) throw new PermissionDeniedError(this.name, denial.rule, denial.reason);
+				}
 				const previewReplacementPlural = result.totalReplacements !== 1 ? "s" : "";
 				const previewFilePlural = result.filesTouched !== 1 ? "s" : "";
 				queueResolveHandler(this.session, {
 					label: `AST Edit: ${result.totalReplacements} replacement${previewReplacementPlural} in ${result.filesTouched} file${previewFilePlural}`,
 					sourceToolName: this.name,
 					apply: async (_reason: string) => {
-						const applyResult = await runAstEditOnce(multiTargets, resolvedSearchPath, globFilter, {
+						// Recheck against *live* settings, not the policy captured at
+						// queue time: `permissions.profile` (or the deny/allow globs) can
+						// change between this call's preview and the later `write
+						// xd://resolve` call that invokes this callback - a session that
+						// was `off` when queued but `strict` by resolve time must not let
+						// a stale authorization slip through.
+						let applyTargets = effectiveTargets;
+						const livePolicy = loadPermissionsConfig(context?.settings);
+						if (livePolicy) {
+							const liveRoots = permissionRoots(context);
+							const liveDenial = liveRoots
+								? checkStructuredTargets(
+										nonExemptFileTargets(fileList, this.session.cwd, scope.exemptSourcePaths),
+										livePolicy,
+										liveRoots,
+									)
+								: {
+										rule: "permissions.profile",
+										reason:
+											`Tool "${this.name}" is blocked: permissions.profile is "${livePolicy.profile}" but this ` +
+											`call has no session, so the workspace roots the rules are measured against cannot be ` +
+											`determined.\nTo allow it: set permissions.profile: off.`,
+									};
+							if (liveDenial) throw new PermissionDeniedError(this.name, liveDenial.rule, liveDenial.reason);
+
+							if (liveRoots && recursiveTargets) {
+								// Same exempt-target carry-through as the dry-run pass above:
+								// `scope.exemptSourcePaths` is resolved once against the
+								// original raw inputs and stays valid for this re-check.
+								const exemptTargets = recursiveTargets.filter(target =>
+									scope.exemptSourcePaths.has(path.resolve(target.basePath)),
+								);
+								const targetsToFilter =
+									exemptTargets.length > 0
+										? recursiveTargets.filter(
+												target => !scope.exemptSourcePaths.has(path.resolve(target.basePath)),
+											)
+										: recursiveTargets;
+								const filteredTargets =
+									targetsToFilter.length > 0
+										? await excludeDenyReadSearchTargets(targetsToFilter, livePolicy, liveRoots)
+										: [];
+								if (filteredTargets) applyTargets = [...exemptTargets, ...filteredTargets];
+							}
+
+							// `fileList` is the preview-time discovery; the real (non-dry-run)
+							// pass below re-runs the recursive glob/path search independently
+							// and can therefore match a file created or renamed into scope
+							// since the preview — one `checkStructuredTargets(fileList, ...)`
+							// above never saw. Re-discover (dry-run, non-mutating) right before
+							// applying and authorize that concrete, current set too, so a
+							// denied file that only now matches the scope is caught before the
+							// real pass ever opens it.
+							const freshPreview = await runAstEditOnce(applyTargets, resolvedSearchPath, globFilter, {
+								rewrites: normalizedRewrites,
+								dryRun: true,
+								maxFiles,
+								failOnParseError: false,
+							});
+							const { record: recordFreshFile, list: freshFileList } = createFileRecorder();
+							for (const fileChange of freshPreview.fileChanges) recordFreshFile(formatPath(fileChange.path));
+							for (const change of freshPreview.changes) recordFreshFile(formatPath(change.path));
+							const freshDenial = liveRoots
+								? checkStructuredTargets(
+										nonExemptFileTargets(freshFileList, this.session.cwd, scope.exemptSourcePaths),
+										livePolicy,
+										liveRoots,
+									)
+								: undefined;
+							if (freshDenial) throw new PermissionDeniedError(this.name, freshDenial.rule, freshDenial.reason);
+						}
+						const applyResult = await runAstEditOnce(applyTargets, resolvedSearchPath, globFilter, {
 							rewrites: normalizedRewrites,
 							dryRun: false,
 							maxFiles,

@@ -13,6 +13,7 @@ import lspDescription from "../prompts/tools/lsp.md" with { type: "text" };
 import type { ToolSession } from "../tools";
 import { truncateForPrompt } from "../tools/approval";
 import { formatPathRelativeToCwd, resolveToCwd } from "../tools/path-utils";
+import { PermissionDeniedError } from "../tools/permissions/gate";
 import { ToolAbortError, ToolError, throwIfAborted } from "../tools/tool-errors";
 import { clampTimeout } from "../tools/tool-timeouts";
 import {
@@ -52,6 +53,17 @@ import {
 	sortAndValidateTextEdits,
 } from "./edits";
 import { detectLspmux } from "./lspmux";
+import {
+	assertDiagnosticTargetsAllowed,
+	assertLspCommandAllowed,
+	assertLspStartupAllowed,
+	assertWorkspaceDiagnosticsAllowed,
+	assertWorkspaceEditAllowed,
+	filterAuthorizedLocations,
+	filterAuthorizedSymbols,
+	filterAuthorizedWorkspaceEditForPreview,
+	isLspReadRestricted,
+} from "./permission-guard";
 import {
 	configCache,
 	getConfig,
@@ -178,12 +190,51 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		return session.enableLsp === false ? null : new LspTool(session);
 	}
 
+	/**
+	 * Fetch (or create) a client for this call's permission context.
+	 * `getOrCreateClient` attaches `context` to a new client's object
+	 * literal before its message reader starts, and re-stamps it on an
+	 * already-cached one - clients are cached and shared across calls, so a
+	 * server-initiated `workspace/applyEdit` push (received asynchronously,
+	 * outside any specific request/response) needs the *latest* call's
+	 * context, not the one from whichever earlier action first created the
+	 * client. Every `execute()` branch that touches a client MUST go
+	 * through this instead of calling `getOrCreateClient` directly.
+	 *
+	 * Also the single choke point for the project-aware-under-read-restriction
+	 * check: an ordinary scoped call (`definition`, `hover`, single-file
+	 * `diagnostics`, …) authorizes its declared `file` argument, but starting
+	 * a project-aware server for it still indexes the whole project - the
+	 * same unsound-to-scope surface `warmupLspServers`/`syncFileContent`
+	 * already refuse to touch under an active `permissions.deny.read` rule
+	 * or `permissions.confineReads`. Authorizing one file never authorizes
+	 * that.
+	 */
+	async #resolveClient(
+		config: ServerConfig,
+		initTimeoutMs: number | undefined,
+		signal: AbortSignal | undefined,
+		context: AgentToolContext | undefined,
+	): Promise<LspClient> {
+		if (isLspReadRestricted(context) && isProjectAwareLspServer(config)) {
+			throw new PermissionDeniedError(
+				this.name,
+				"permissions.deny.read",
+				`Tool "${this.name}" is blocked: this action starts a project-aware server, whose real read ` +
+					`surface (workspace indexing via project references) cannot be limited to authorized paths, and ` +
+					`an active permissions.deny.read rule or permissions.confineReads is set.\n` +
+					`To allow it: set permissions.profile: off.`,
+			);
+		}
+		return getOrCreateClient(config, this.session.cwd, initTimeoutMs, signal, context);
+	}
+
 	async execute(
 		_toolCallId: string,
 		params: LspParams,
 		signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<LspToolDetails>,
-		_context?: AgentToolContext,
+		context?: AgentToolContext,
 	): Promise<AgentToolResult<LspToolDetails>> {
 		const { action, file, line, symbol, query, new_name, apply, timeout } = params;
 		if (this.session.lspReadOnly && !LSP_READONLY_ACTIONS.has(action)) {
@@ -248,6 +299,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		// Diagnostics can be batch or single-file - queries all applicable servers
 		if (action === "diagnostics") {
 			if (file === "*") {
+				assertWorkspaceDiagnosticsAllowed(context, this.name);
 				// `*` => run workspace diagnostics across all configured servers
 				const result = await runWorkspaceDiagnostics(this.session.cwd, signal);
 				return {
@@ -285,6 +337,8 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					details: { action, success: true, request: params },
 				};
 			}
+
+			assertDiagnosticTargetsAllowed(targets, context, this.name);
 
 			const detailed = targets.length > 1 || truncatedGlobTargets;
 			const diagnosticsWaitTimeoutMs = detailed
@@ -329,7 +383,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 							totalServerSuccesses++;
 							continue;
 						}
-						const client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
+						const client = await this.#resolveClient(serverConfig, undefined, signal, context);
 						if (isProjectAwareLspServer(serverConfig)) {
 							await waitForProjectLoaded(client, signal);
 							throwIfAborted(signal);
@@ -552,7 +606,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				throwIfAborted(signal);
 				let client: LspClient;
 				try {
-					client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
+					client = await this.#resolveClient(serverConfig, undefined, signal, context);
 					if (isProjectAwareLspServer(serverConfig)) {
 						await waitForProjectLoaded(client, signal);
 					}
@@ -606,7 +660,8 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					lines.push("  No LSP edits would be applied");
 				} else {
 					for (const { serverName, edit } of perServerEdits) {
-						const edits = formatWorkspaceEdit(edit, this.session.cwd);
+						const previewEdit = filterAuthorizedWorkspaceEditForPreview(edit, context, this.name);
+						const edits = formatWorkspaceEdit(previewEdit, this.session.cwd);
 						if (edits.length === 0) continue;
 						lines.push(`  ${serverName}:`);
 						for (const e of edits) {
@@ -719,6 +774,16 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				sortAndValidateTextEdits(bucket.edits);
 			}
 
+			// `acceptedByUri` is server-computed (`workspace/willRenameFiles`),
+			// not the declared `file`/`new_name` args the pre-execution gate
+			// checked - a server can return edits for unrelated URIs. Reuse the
+			// WorkspaceEdit check via a synthetic edit naming every accepted URI.
+			await assertWorkspaceEditAllowed(
+				{ changes: Object.fromEntries([...acceptedByUri.keys()].map(uri => [uri, []])) },
+				context,
+				this.name,
+			);
+
 			const referenceEdits: RenameReferenceEdit[] = [];
 			for (const [uri, bucket] of acceptedByUri) {
 				const filePath = uriToFile(uri);
@@ -736,6 +801,17 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				}
 			}
 
+			// The pre-execution gate only ever checked the declared `file`/
+			// `new_name` (the directory itself); a directory rename moves every
+			// descendant, and `pairs` (from `enumerateRenamePairs`) is the
+			// concrete list of what actually moves. Reuse the same rename-op
+			// shape `assertWorkspaceEditAllowed` already authorizes write-only
+			// for the LSP-computed edits above.
+			await assertWorkspaceEditAllowed(
+				{ documentChanges: pairs.map(pair => ({ kind: "rename", oldUri: pair.oldUri, newUri: pair.newUri })) },
+				context,
+				this.name,
+			);
 			// Apply the reference edits and move as one unit: a failed move rolls
 			// the reference edits back so the source, destination, and every
 			// reference file are left unchanged.
@@ -744,7 +820,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 
 			for (const [serverName, serverConfig] of servers) {
 				try {
-					const client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
+					const client = await this.#resolveClient(serverConfig, undefined, signal, context);
 					for (const { oldUri } of pairs) {
 						if (client.openFiles.has(oldUri)) {
 							await sendNotification(client, "textDocument/didClose", { textDocument: { uri: oldUri } }, signal);
@@ -790,6 +866,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					};
 				}
 			} else {
+				assertLspStartupAllowed(context, this.name);
 				serverList = getLspServers(config);
 			}
 
@@ -805,7 +882,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			for (const [serverName, serverConfig] of serverList) {
 				throwIfAborted(signal);
 				try {
-					const client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
+					const client = await this.#resolveClient(serverConfig, undefined, signal, context);
 					respondingServers.add(serverName);
 					const caps = client.serverCapabilities ?? {};
 					sections.push(`${serverName}:`);
@@ -856,6 +933,11 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					};
 				}
 			} else {
+				// No declared `file` for the opaque scan to check against a denied
+				// literal, yet this still starts (and, for a project-aware server,
+				// indexes) the first configured server exactly like the already-guarded
+				// targetless `capabilities`/`reload *` paths — same fail-closed check.
+				assertLspStartupAllowed(context, this.name);
 				const all = getLspServers(config);
 				if (all.length === 0) {
 					return {
@@ -891,7 +973,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			}
 
 			try {
-				const client = await getOrCreateClient(chosenConfig, this.session.cwd, undefined, signal);
+				const client = await this.#resolveClient(chosenConfig, undefined, signal, context);
 				if (resolvedTarget) {
 					await ensureFileOpen(client, resolvedTarget, signal);
 				}
@@ -962,12 +1044,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			for (const [workspaceServerName, workspaceServerConfig] of servers) {
 				throwIfAborted(signal);
 				try {
-					const workspaceClient = await getOrCreateClient(
-						workspaceServerConfig,
-						this.session.cwd,
-						undefined,
-						signal,
-					);
+					const workspaceClient = await this.#resolveClient(workspaceServerConfig, undefined, signal, context);
 					const workspaceResult = (await sendRequest(
 						workspaceClient,
 						"workspace/symbol",
@@ -985,7 +1062,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					}
 				}
 			}
-			const dedupedSymbols = dedupeWorkspaceSymbols(aggregatedSymbols);
+			const dedupedSymbols = filterAuthorizedSymbols(dedupeWorkspaceSymbols(aggregatedSymbols), context, this.name);
 			if (dedupedSymbols.length === 0) {
 				return {
 					content: [{ type: "text", text: `No symbols matching "${normalizedQuery}"` }],
@@ -1020,6 +1097,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		}
 
 		if (action === "reload" && (isWorkspace || !resolvedFile)) {
+			assertLspStartupAllowed(context, this.name);
 			// `reload *` is the user's explicit request to re-read config from
 			// disk. Drop the per-cwd cache entry so `.omp/lsp.json`, root markers,
 			// and plugin configs added after the first LSP call become visible —
@@ -1039,12 +1117,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				throwIfAborted(signal);
 				clearInitializationFailure(workspaceServerConfig, this.session.cwd);
 				try {
-					const workspaceClient = await getOrCreateClient(
-						workspaceServerConfig,
-						this.session.cwd,
-						undefined,
-						signal,
-					);
+					const workspaceClient = await this.#resolveClient(workspaceServerConfig, undefined, signal, context);
 					outputs.push(await reloadServer(workspaceClient, workspaceServerName, signal));
 				} catch (err) {
 					if (err instanceof ToolAbortError || signal?.aborted) {
@@ -1073,7 +1146,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		if (action === "reload") clearInitializationFailure(serverConfig, this.session.cwd);
 
 		try {
-			const client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
+			const client = await this.#resolveClient(serverConfig, undefined, signal, context);
 			const targetFile = resolvedFile;
 			const isRustAnalyzerServer =
 				serverName === "rust-analyzer" ||
@@ -1139,7 +1212,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						signal,
 					)) as Location | Location[] | LocationLink | LocationLink[] | null;
 
-					const locations = normalizeLocationResult(result);
+					const locations = filterAuthorizedLocations(normalizeLocationResult(result), context, this.name);
 
 					if (locations.length === 0) {
 						output = "No definition found";
@@ -1164,7 +1237,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						signal,
 					)) as Location | Location[] | LocationLink | LocationLink[] | null;
 
-					const locations = normalizeLocationResult(result);
+					const locations = filterAuthorizedLocations(normalizeLocationResult(result), context, this.name);
 
 					if (locations.length === 0) {
 						output = "No type definition found";
@@ -1189,7 +1262,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						signal,
 					)) as Location | Location[] | LocationLink | LocationLink[] | null;
 
-					const locations = normalizeLocationResult(result);
+					const locations = filterAuthorizedLocations(normalizeLocationResult(result), context, this.name);
 
 					if (locations.length === 0) {
 						output = "No implementation found";
@@ -1229,12 +1302,13 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						await untilAborted(signal, () => Bun.sleep(REFERENCES_RETRY_DELAY_MS));
 					}
 
-					if (!result || result.length === 0) {
+					const references = result ? filterAuthorizedLocations(result, context, this.name) : [];
+					if (references.length === 0) {
 						output = "No references found";
 						useless = true;
 					} else {
-						const contextualReferences = result.slice(0, REFERENCE_CONTEXT_LIMIT);
-						const plainReferences = result.slice(REFERENCE_CONTEXT_LIMIT);
+						const contextualReferences = references.slice(0, REFERENCE_CONTEXT_LIMIT);
+						const plainReferences = references.slice(REFERENCE_CONTEXT_LIMIT);
 						const contextualLines = await Promise.all(
 							contextualReferences.map(location => formatLocationWithContext(location, this.session.cwd)),
 						);
@@ -1246,7 +1320,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 									...plainLines,
 								]
 							: contextualLines;
-						output = `Found ${result.length} reference(s):\n${lines.join("\n")}`;
+						output = `Found ${references.length} reference(s):\n${lines.join("\n")}`;
 					}
 					break;
 				}
@@ -1272,7 +1346,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 
 				case "code_actions": {
 					const diagnostics = client.diagnostics.get(uri)?.diagnostics ?? [];
-					const context: CodeActionContext = {
+					const codeActionContext: CodeActionContext = {
 						diagnostics,
 						only: !apply && query ? [query] : undefined,
 						triggerKind: 1,
@@ -1284,7 +1358,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						{
 							textDocument: { uri },
 							range: { start: position, end: position },
-							context,
+							context: codeActionContext,
 						},
 						signal,
 					)) as (CodeAction | Command)[] | null;
@@ -1317,8 +1391,12 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						const appliedAction = await applyCodeAction(selectedAction, {
 							resolveCodeAction: async actionItem =>
 								(await sendRequest(client, "codeAction/resolve", actionItem, signal)) as CodeAction,
-							applyWorkspaceEdit: async edit => applyWorkspaceEditWithLsp(edit, this.session.cwd, signal),
+							applyWorkspaceEdit: async edit => {
+								await assertWorkspaceEditAllowed(edit, context, this.name);
+								return applyWorkspaceEditWithLsp(edit, this.session.cwd, signal);
+							},
 							executeCommand: async commandItem => {
+								await assertLspCommandAllowed(commandItem, context, this.name);
 								await sendRequest(
 									client,
 									"workspace/executeCommand",
@@ -1413,10 +1491,12 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					} else {
 						const shouldApply = apply !== false;
 						if (shouldApply) {
+							await assertWorkspaceEditAllowed(result, context, this.name);
 							const applied = await applyWorkspaceEditWithLsp(result, this.session.cwd, signal);
 							output = `Applied rename:\n${applied.map(a => `  ${a}`).join("\n")}`;
 						} else {
-							const preview = formatWorkspaceEdit(result, this.session.cwd);
+							const previewResult = filterAuthorizedWorkspaceEditForPreview(result, context, this.name);
+							const preview = formatWorkspaceEdit(previewResult, this.session.cwd);
 							output = `Rename preview:\n${preview.map(p => `  ${p}`).join("\n")}`;
 						}
 					}
@@ -1438,7 +1518,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				...(useless ? { useless: true } : {}),
 			};
 		} catch (err) {
-			if (err instanceof ToolError) throw err;
+			if (err instanceof ToolError || err instanceof PermissionDeniedError) throw err;
 			if (err instanceof ToolAbortError || signal?.aborted) {
 				// Distinguish a wall-clock timeout from a caller cancel:
 				// callerSignal aborting → real cancel (re-throw ToolAbortError);

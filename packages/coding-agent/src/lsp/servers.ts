@@ -1,3 +1,4 @@
+import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import { throwIfAborted } from "../tools/tool-errors";
 import {
@@ -15,6 +16,7 @@ import {
 } from "./client";
 import { getServersForFile, type LspConfig, loadConfig } from "./config";
 import { MUX_RESTART_METHOD } from "./mux/protocol";
+import { isLspReadRestricted } from "./permission-guard";
 import type { LspClient, ServerConfig } from "./types";
 
 /**
@@ -50,6 +52,14 @@ export interface LspWarmupResult {
 export interface LspWarmupOptions {
 	/** Called when starting to connect to servers */
 	onConnecting?: (serverNames: string[]) => void;
+	/**
+	 * The session's permission context, stamped on every client warmup
+	 * creates. Without this, a client that receives a server-initiated
+	 * `workspace/applyEdit` before any tool call ever touches it has no
+	 * context to check against, and `assertWorkspaceEditAllowed` no-ops as
+	 * though permissions were off even under a strict/workspace session.
+	 */
+	context?: AgentToolContext;
 }
 
 export function discoverStartupLspServers(
@@ -83,11 +93,41 @@ export async function warmupLspServers(cwd: string, options?: LspWarmupOptions):
 		options.onConnecting(lspServers.map(([name]) => name));
 	}
 
+	// A read-restricting permissions policy (deny.read rules or
+	// confineReads) means a project-aware server (tsserver, rust-analyzer,
+	// …) must not be eagerly started here: initializing it indexes the
+	// whole project — including files a deny rule or confinement would
+	// refuse to `read` — via project references before any gated `lsp`
+	// call has a chance to check anything. Fails closed the same way
+	// `assertWorkspaceDiagnosticsAllowed` does for workspace-wide
+	// diagnostics; the server still starts lazily on its first real
+	// (permission-gated) tool call, just not during warmup.
+	const readsRestricted = isLspReadRestricted(options?.context);
+
 	// Start all detected servers in parallel with a short timeout
 	// Servers that don't respond quickly will be initialized lazily on first use
 	const results = await Promise.allSettled(
 		lspServers.map(async ([name, serverConfig]) => {
-			const client = await getOrCreateClient(serverConfig, cwd, serverConfig.warmupTimeoutMs ?? WARMUP_TIMEOUT_MS);
+			if (readsRestricted && isProjectAwareLspServer(serverConfig)) {
+				throw new Error(
+					"Warmup skipped: a resource permission policy with active read restrictions " +
+						"(permissions.deny.read or permissions.confineReads) is set, and this project-aware server " +
+						"would index the whole project before any gated read. It starts lazily on its first " +
+						"authorized `lsp` call instead.",
+				);
+			}
+			// Passed through to getOrCreateClient so a brand-new client's
+			// permissionsContexts is populated before its message reader starts —
+			// see the parameter doc on getOrCreateClient. A post-hoc stamp here
+			// would leave the whole init-handshake window checking against
+			// `undefined`.
+			const client = await getOrCreateClient(
+				serverConfig,
+				cwd,
+				serverConfig.warmupTimeoutMs ?? WARMUP_TIMEOUT_MS,
+				undefined,
+				options?.context,
+			);
 			return { name, client, fileTypes: serverConfig.fileTypes };
 		}),
 	);
@@ -139,16 +179,25 @@ export async function syncFileContent(
 	servers: Array<[string, ServerConfig]>,
 	signal?: AbortSignal,
 	createMissing = true,
+	context?: AgentToolContext,
 ): Promise<void> {
 	throwIfAborted(signal);
+	const readsRestricted = isLspReadRestricted(context);
 	await Promise.allSettled(
 		servers.map(async ([_serverName, serverConfig]) => {
 			throwIfAborted(signal);
 			if (serverConfig.createClient) {
 				return;
 			}
+			// A lazy create (`createMissing`) for a project-aware server under an
+			// active read restriction would index the whole project mid-write —
+			// see `isLspReadRestricted`. Reusing an already-active client is
+			// still fine either way, so only the create branch is skipped.
+			if (createMissing && readsRestricted && isProjectAwareLspServer(serverConfig)) {
+				return;
+			}
 			const client = createMissing
-				? await getOrCreateClient(serverConfig, cwd, undefined, signal)
+				? await getOrCreateClient(serverConfig, cwd, undefined, signal, context)
 				: await getActiveOrPendingClient(serverConfig, cwd, signal);
 			if (!client) return;
 			throwIfAborted(signal);
@@ -172,16 +221,21 @@ export async function notifyFileSaved(
 	servers: Array<[string, ServerConfig]>,
 	signal?: AbortSignal,
 	createMissing = true,
+	context?: AgentToolContext,
 ): Promise<void> {
 	throwIfAborted(signal);
+	const readsRestricted = isLspReadRestricted(context);
 	await Promise.allSettled(
 		servers.map(async ([_serverName, serverConfig]) => {
 			throwIfAborted(signal);
 			if (serverConfig.createClient) {
 				return;
 			}
+			if (createMissing && readsRestricted && isProjectAwareLspServer(serverConfig)) {
+				return;
+			}
 			const client = createMissing
-				? await getOrCreateClient(serverConfig, cwd, undefined, signal)
+				? await getOrCreateClient(serverConfig, cwd, undefined, signal, context)
 				: await getActiveOrPendingClient(serverConfig, cwd, signal);
 			if (!client) return;
 			await notifySaved(client, absolutePath, signal);

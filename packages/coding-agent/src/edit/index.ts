@@ -13,6 +13,7 @@ import replaceDescription from "../prompts/tools/replace.md" with { type: "text"
 import type { ToolSession } from "../tools";
 import { truncateForPrompt } from "../tools/approval";
 import { findUniqueWorkspaceSuffix, isInternalUrlPath } from "../tools/path-utils";
+import { decideTarget, loadPermissionsConfig, PermissionDeniedError, permissionRoots } from "../tools/permissions";
 import { resolvePlanPath } from "../tools/plan-mode-guard";
 import { type EditMode, normalizeEditMode, resolveEditMode } from "../utils/edit-mode";
 import { executeHashlineSingle, hashlineEditParamsSchema } from "./hashline";
@@ -58,6 +59,7 @@ type EditModeDefinition = {
 		signal: AbortSignal | undefined,
 		batchRequest: LspBatchRequest | undefined,
 		onUpdate?: (partialResult: AgentToolResult<EditToolDetails, TInput>) => void,
+		context?: AgentToolContext,
 	) => Promise<AgentToolResult<EditToolDetails, TInput>>;
 };
 
@@ -74,10 +76,43 @@ function resolveConfiguredEditMode(rawEditMode: string): EditMode | undefined {
 	return editMode;
 }
 
+/**
+ * Authorize a suffix-recovery match for both read and write. The
+ * pre-execution gate (`tool-path-targets.ts`) only ever sees and authorizes
+ * `authoredPath` — the argument the model actually declared — but a missing
+ * path recovers to a *different* real file here, one the gate never
+ * checked, and the edit result has no post-execution target extractor to
+ * catch it either. A match only ever comes from `mustExist: true`, so the
+ * recovered target is always an existing file the edit reads before
+ * rewriting; checked as both access modes rather than trying to infer which
+ * one the caller's `op` needs.
+ */
+function assertSuffixMatchAllowed(absolutePath: string, context: AgentToolContext | undefined): void {
+	const policy = loadPermissionsConfig(context?.settings);
+	if (!policy) return;
+	const roots = permissionRoots(context);
+	if (!roots) {
+		throw new PermissionDeniedError(
+			"edit",
+			"permissions.profile",
+			`Tool "edit" is blocked: permissions.profile is "${policy.profile}" but this call has no session, ` +
+				`so the workspace roots the rules are measured against cannot be determined.\n` +
+				`To allow it: set permissions.profile: off.`,
+		);
+	}
+	for (const access of ["read", "write"] as const) {
+		const decision = decideTarget({ raw: absolutePath, access, field: "path" }, policy, roots);
+		if (decision.kind === "deny") {
+			throw new PermissionDeniedError("edit", decision.rule, decision.reason);
+		}
+	}
+}
+
 async function resolveEditPath(
 	session: ToolSession,
 	authoredPath: string,
 	options: { mustExist: boolean; signal?: AbortSignal },
+	context?: AgentToolContext,
 ): Promise<string> {
 	if (!options.mustExist || isInternalUrlPath(authoredPath)) return authoredPath;
 
@@ -89,7 +124,9 @@ async function resolveEditPath(
 	}
 
 	const match = await findUniqueWorkspaceSuffix(authoredPath, session.cwd, options.signal);
-	return match?.displayPath ?? authoredPath;
+	if (!match) return authoredPath;
+	assertSuffixMatchAllowed(match.absolutePath, context);
+	return match.displayPath;
 }
 
 function resolveAllowFuzzy(session: ToolSession, rawValue: string): boolean {
@@ -505,7 +542,7 @@ export class EditTool implements AgentTool<TInput> {
 		context?: AgentToolContext,
 	): Promise<AgentToolResult<EditToolDetails, TInput>> {
 		const modeDefinition = this.#getModeDefinition();
-		return modeDefinition.execute(this, params, signal, getLspBatchRequest(context?.toolCall), onUpdate);
+		return modeDefinition.execute(this, params, signal, getLspBatchRequest(context?.toolCall), onUpdate, context);
 	}
 
 	#getModeDefinition(): EditModeDefinition {
@@ -552,12 +589,18 @@ export class EditTool implements AgentTool<TInput> {
 					signal: AbortSignal | undefined,
 					batchRequest: LspBatchRequest | undefined,
 					onUpdate?: (partialResult: AgentToolResult<EditToolDetails, TInput>) => void,
+					context?: AgentToolContext,
 				) => {
 					const { edits, path } = params as PatchParams;
-					const targetPath = await resolveEditPath(tool.session, path, {
-						mustExist: (edits[0]?.op ?? "update") !== "create",
-						signal,
-					});
+					const targetPath = await resolveEditPath(
+						tool.session,
+						path,
+						{
+							mustExist: (edits[0]?.op ?? "update") !== "create",
+							signal,
+						},
+						context,
+					);
 					const runs = (edits as PatchEditEntry[]).map(
 						entry => (br: LspBatchRequest | undefined) =>
 							executePatchSingle({
@@ -573,6 +616,7 @@ export class EditTool implements AgentTool<TInput> {
 								allowCreateOverwrite: true,
 								writethrough: tool.#writethrough,
 								beginDeferredDiagnosticsForPath: p => tool.#deferredDiagnostics.begin(p),
+								context,
 							}),
 					);
 					return executeSinglePathEntries(targetPath, runs, batchRequest, onUpdate, tool.session.cwd, signal);
@@ -595,6 +639,7 @@ export class EditTool implements AgentTool<TInput> {
 					signal: AbortSignal | undefined,
 					batchRequest: LspBatchRequest | undefined,
 					onUpdate?: (partialResult: AgentToolResult<EditToolDetails, TInput>) => void,
+					context?: AgentToolContext,
 				) => {
 					const entries = expandApplyPatchToEntries(params as ApplyPatchParams);
 					// Resolve each authored path once per patch so paired hunks (e.g. delete
@@ -603,7 +648,7 @@ export class EditTool implements AgentTool<TInput> {
 					const resolveOnce = (path: string, mustExist: boolean): Promise<string> => {
 						let pending = resolvedTargets.get(path);
 						if (!pending) {
-							pending = resolveEditPath(tool.session, path, { mustExist, signal });
+							pending = resolveEditPath(tool.session, path, { mustExist, signal }, context);
 							resolvedTargets.set(path, pending);
 						}
 						return pending;
@@ -624,6 +669,7 @@ export class EditTool implements AgentTool<TInput> {
 									fuzzyThreshold: tool.#fuzzyThreshold,
 									writethrough: tool.#writethrough,
 									beginDeferredDiagnosticsForPath: p => tool.#deferredDiagnostics.begin(p),
+									context,
 								});
 							},
 						};
@@ -640,6 +686,7 @@ export class EditTool implements AgentTool<TInput> {
 					signal: AbortSignal | undefined,
 					batchRequest: LspBatchRequest | undefined,
 					_onUpdate?: (partialResult: AgentToolResult<EditToolDetails, TInput>) => void,
+					context?: AgentToolContext,
 				) => {
 					const { input } = params as HashlineParams;
 					return executeHashlineSingle({
@@ -649,6 +696,7 @@ export class EditTool implements AgentTool<TInput> {
 						batchRequest,
 						writethrough: tool.#writethrough,
 						beginDeferredDiagnosticsForPath: p => tool.#deferredDiagnostics.begin(p),
+						context,
 					});
 				},
 			},
@@ -661,6 +709,7 @@ export class EditTool implements AgentTool<TInput> {
 					signal: AbortSignal | undefined,
 					batchRequest: LspBatchRequest | undefined,
 					onUpdate?: (partialResult: AgentToolResult<EditToolDetails, TInput>) => void,
+					context?: AgentToolContext,
 				) => {
 					// `edits` is the internal `ReplaceBatchParams` form only the Cursor
 					// exec bridge produces (multi-replacement `pi_edit` frames run as one
@@ -676,7 +725,12 @@ export class EditTool implements AgentTool<TInput> {
 										replace_all: replaceParams.replace_all,
 									},
 								];
-					const targetPath = await resolveEditPath(tool.session, replaceParams.path, { mustExist: true, signal });
+					const targetPath = await resolveEditPath(
+						tool.session,
+						replaceParams.path,
+						{ mustExist: true, signal },
+						context,
+					);
 					const runs = entries.map(
 						entry => (br: LspBatchRequest | undefined) =>
 							executeReplace({
@@ -689,6 +743,7 @@ export class EditTool implements AgentTool<TInput> {
 								fuzzyThreshold: tool.#fuzzyThreshold,
 								writethrough: tool.#writethrough,
 								beginDeferredDiagnosticsForPath: p => tool.#deferredDiagnostics.begin(p),
+								context,
 							}),
 					);
 					return executeSinglePathEntries(targetPath, runs, batchRequest, onUpdate, tool.session.cwd, signal);

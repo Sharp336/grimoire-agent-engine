@@ -1,0 +1,465 @@
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { Patch } from "@oh-my-pi/hashline";
+import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { getMemoryRoot } from "@oh-my-pi/pi-coding-agent/memories";
+import type { PermissionRoots } from "@oh-my-pi/pi-coding-agent/tools/permissions";
+import {
+	CLASSIFIED_TOOL_NAMES,
+	classifyTool,
+	extractEmbeddedEditPaths,
+	TOOL_PATH_CLASSES,
+} from "@oh-my-pi/pi-coding-agent/tools/permissions/tool-path-targets";
+
+function settingsOf(overrides: Record<string, unknown>): Settings {
+	return {
+		get(key: string): unknown {
+			return Object.hasOwn(overrides, key) ? overrides[key] : undefined;
+		},
+	} as unknown as Settings;
+}
+
+// A real, non-repository cwd — `git.repo.resolveSync` must not find a `.git`
+// anywhere above it, or `security_scan`'s repo-root resolution would change
+// the raw/relative expectations every other extractor test in this file
+// relies on.
+let nonRepoWorkspace: string;
+
+beforeAll(() => {
+	nonRepoWorkspace = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "omp-tool-classes-")));
+});
+
+afterAll(() => {
+	fs.rmSync(nonRepoWorkspace, { recursive: true, force: true });
+});
+
+describe("classification coverage", () => {
+	it("classifies every built-in and hidden tool", () => {
+		expect(CLASSIFIED_TOOL_NAMES.filter(name => !Object.hasOwn(TOOL_PATH_CLASSES, name))).toEqual([]);
+	});
+
+	it("classifies nothing that is not a real tool", () => {
+		const known = new Set<string>(CLASSIFIED_TOOL_NAMES);
+		expect(Object.keys(TOOL_PATH_CLASSES).filter(name => !known.has(name))).toEqual([]);
+	});
+
+	it("treats an unknown MCP tool as opaque rather than pathless", () => {
+		expect(classifyTool("mcp__filesystem_read_file").kind).toBe("opaque");
+	});
+
+	it("resolves the legacy tool aliases to their structured classification", () => {
+		expect(classifyTool("search")).toBe(TOOL_PATH_CLASSES.grep);
+		expect(classifyTool("find")).toBe(TOOL_PATH_CLASSES.glob);
+	});
+});
+
+describe("debug action-aware classification", () => {
+	it("classifies exec/evaluate-shaped debug actions as opaque", () => {
+		for (const action of ["launch", "attach", "evaluate", "write_memory", "custom_request"]) {
+			expect(classifyTool("debug", { action }).kind).toBe("opaque");
+		}
+	});
+
+	it("keeps breakpoint and inspection debug actions structured", () => {
+		for (const action of ["set_breakpoint", "remove_breakpoint", "stack_trace", "variables"]) {
+			expect(classifyTool("debug", { action }).kind).toBe("structured");
+		}
+	});
+
+	it("falls back to structured when no action is known", () => {
+		expect(classifyTool("debug").kind).toBe("structured");
+	});
+
+	it("leaves the base TOOL_PATH_CLASSES.debug entry structured for direct use", () => {
+		expect(TOOL_PATH_CLASSES.debug?.kind).toBe("structured");
+	});
+});
+
+describe("lsp action-aware classification", () => {
+	it("classifies action: request as opaque, since a caller-chosen method/payload has no declared path", () => {
+		expect(classifyTool("lsp", { action: "request", query: "workspace/executeCommand", payload: "{}" }).kind).toBe(
+			"opaque",
+		);
+	});
+
+	it("keeps every other lsp action structured", () => {
+		for (const action of ["rename", "rename_file", "code_actions", "diagnostics", "reload", "hover"]) {
+			expect(classifyTool("lsp", { action }).kind).toBe("structured");
+		}
+	});
+
+	it("falls back to structured when no action is known", () => {
+		expect(classifyTool("lsp").kind).toBe("structured");
+	});
+
+	it("leaves the base TOOL_PATH_CLASSES.lsp entry structured for direct use", () => {
+		expect(TOOL_PATH_CLASSES.lsp?.kind).toBe("structured");
+	});
+});
+
+describe("structured extraction", () => {
+	function extract(tool: string, args: Record<string, unknown>, roots?: PermissionRoots) {
+		const cls = TOOL_PATH_CLASSES[tool];
+		if (cls?.kind !== "structured") throw new Error(`${tool} is not structured`);
+		return cls.extract(args, roots ?? { cwd: nonRepoWorkspace, additionalDirectories: [] });
+	}
+
+	it("reads read/write single path arguments with the right access", () => {
+		expect(extract("read", { path: "a.ts" })).toEqual([{ raw: "a.ts", access: "read", field: "path" }]);
+		expect(extract("write", { path: "a.ts" })).toEqual([{ raw: "a.ts", access: "write", field: "path" }]);
+	});
+
+	it("splits the semicolon-delimited search roots grep and glob accept", () => {
+		expect(extract("grep", { path: "src; test" }).map(t => t.raw)).toEqual(["src", "test"]);
+	});
+
+	it("read/write-classifies a top-level edit target based on whether every edit is a pure create", () => {
+		// No `op` on any entry (the `replace` mode shape, and a `patch` entry
+		// that omits `op`) - defaults to "update", which reads the file.
+		const updateTargets = extract("edit", { path: "a.ts", edits: [{ rename: "b.ts" }, { diff: "x" }] });
+		expect(updateTargets.map(t => `${t.access}:${t.raw}`)).toEqual(["write:a.ts", "read:a.ts", "write:b.ts"]);
+
+		// Every entry explicitly `op: "create"` - no pre-existing content to read.
+		const createTargets = extract("edit", { path: "new.ts", edits: [{ op: "create", diff: "x" }] });
+		expect(createTargets).toEqual([{ raw: "new.ts", access: "write", field: "path" }]);
+
+		// One `create` plus one `update` in the same call - still needs `read`,
+		// since the `update` entry reads the file the `create` entry wrote.
+		const mixedTargets = extract("edit", {
+			path: "mixed.ts",
+			edits: [
+				{ op: "create", diff: "x" },
+				{ op: "update", diff: "y" },
+			],
+		});
+		expect(mixedTargets.map(t => `${t.access}:${t.raw}`)).toEqual(["write:mixed.ts", "read:mixed.ts"]);
+
+		// An explicit `op: "delete"` also read the file's prior content
+		// (`modes/patch.ts` populates `oldContent` for delete too).
+		const deleteTargets = extract("edit", { path: "gone.ts", edits: [{ op: "delete" }] });
+		expect(deleteTargets.map(t => `${t.access}:${t.raw}`)).toEqual(["write:gone.ts", "read:gone.ts"]);
+	});
+
+	// The access map inverts the tool's own LSP_READONLY_ACTIONS, so a
+	// write-tier action the tool knows about cannot be missed here.
+	it("classifies lsp navigation as a read and every write-tier action as a write", () => {
+		for (const action of ["references", "hover", "definition", "diagnostics", "symbols", "status"]) {
+			expect(extract("lsp", { action, file: "a.ts" })[0]?.access).toBe("read");
+		}
+		for (const action of ["rename", "rename_file", "code_actions", "request", "reload"]) {
+			expect(extract("lsp", { action, file: "a.ts" })[0]?.access).toBe("write");
+		}
+	});
+
+	it("ignores absent, blank, and wrongly typed arguments", () => {
+		expect(extract("read", {})).toEqual([]);
+		expect(extract("read", { path: "   " })).toEqual([]);
+		expect(extract("read", { path: 42 })).toEqual([]);
+		expect(extract("ast_edit", { paths: "not-an-array" })).toEqual([]);
+	});
+
+	it("authorizes learn's backend-specific persistence target", () => {
+		const agentDir = path.join(nonRepoWorkspace, "agent");
+		const localRoots: PermissionRoots = {
+			cwd: nonRepoWorkspace,
+			additionalDirectories: [],
+			agentDir,
+			settings: settingsOf({ "memory.backend": "local" }),
+		};
+		expect(extract("learn", { memory: "Remember this." }, localRoots)).toEqual([
+			{ raw: path.join(getMemoryRoot(agentDir, nonRepoWorkspace), "learned.md"), access: "write", field: "memory" },
+		]);
+
+		const dbPath = path.join(nonRepoWorkspace, "mnemopi.db");
+		const mnemopiRoots: PermissionRoots = {
+			cwd: nonRepoWorkspace,
+			additionalDirectories: [],
+			agentDir,
+			settings: settingsOf({ "memory.backend": "mnemopi", "mnemopi.dbPath": dbPath }),
+		};
+		expect(
+			extract("learn", { memory: "Remember this." }, mnemopiRoots).map(target => `${target.access}:${target.raw}`),
+		).toEqual([
+			`read:${dbPath}`,
+			`write:${dbPath}`,
+			`read:${dbPath}-wal`,
+			`write:${dbPath}-wal`,
+			`read:${dbPath}-shm`,
+			`write:${dbPath}-shm`,
+		]);
+
+		const hindsightRoots: PermissionRoots = {
+			...localRoots,
+			settings: settingsOf({ "memory.backend": "hindsight" }),
+		};
+		expect(extract("learn", { memory: "Remember this." }, hindsightRoots)).toEqual([]);
+	});
+
+	it("authorizes the temporary directory github pr_create uses for a body file", () => {
+		expect(extract("github", { op: "pr_create", body: "Add release notes." })).toEqual([
+			{ raw: os.tmpdir(), access: "write", field: "body" },
+		]);
+		expect(extract("github", { op: "pr_create", body: "" })).toEqual([]);
+	});
+
+	describe("mnemopi persistence targets", () => {
+		it("authorizes the configured mnemopi db path plus its WAL/SHM sidecars, for both memory_edit and retain", () => {
+			const dbPath = path.join(nonRepoWorkspace, "custom", "mnemopi.db");
+			const roots: PermissionRoots = {
+				cwd: nonRepoWorkspace,
+				additionalDirectories: [],
+				settings: settingsOf({ "memory.backend": "mnemopi", "mnemopi.dbPath": dbPath }),
+			};
+			for (const tool of ["memory_edit", "retain"]) {
+				expect(extract(tool, {}, roots).map(t => `${t.access}:${t.raw}`)).toEqual([
+					`read:${dbPath}`,
+					`write:${dbPath}`,
+					`read:${dbPath}-wal`,
+					`write:${dbPath}-wal`,
+					`read:${dbPath}-shm`,
+					`write:${dbPath}-shm`,
+				]);
+			}
+			expect(
+				extract(
+					"retain",
+					{},
+					{
+						...roots,
+						settings: settingsOf({ "memory.backend": "hindsight", "mnemopi.dbPath": dbPath }),
+					},
+				),
+			).toEqual([]);
+		});
+
+		it("falls back to the default memories-dir path when no mnemopi.dbPath override is configured", () => {
+			const roots: PermissionRoots = {
+				cwd: nonRepoWorkspace,
+				additionalDirectories: [],
+				agentDir: nonRepoWorkspace,
+				settings: settingsOf({}),
+			};
+			const expectedPath = path.join(nonRepoWorkspace, "memories", "mnemopi", "mnemopi.db");
+			expect(extract("memory_edit", {}, roots)[0]?.raw).toBe(expectedPath);
+			expect(
+				extract("retain", {}, { ...roots, settings: settingsOf({ "memory.backend": "mnemopi" }) })[0]?.raw,
+			).toBe(expectedPath);
+		});
+
+		it("still authorizes the default path when the roots carry no settings at all", () => {
+			// `roots.settings` is only populated from a live session
+			// (`permissionRoots`, `gate.ts`); a sessionless caller must still get
+			// a real path to check rather than an empty target list.
+			const roots: PermissionRoots = {
+				cwd: nonRepoWorkspace,
+				additionalDirectories: [],
+				agentDir: nonRepoWorkspace,
+			};
+			const targets = extract("memory_edit", {}, roots);
+			expect(targets[0]?.raw).toBe(path.join(nonRepoWorkspace, "memories", "mnemopi", "mnemopi.db"));
+		});
+	});
+
+	it("keeps security_scan exclude_paths out — a filter is never opened", () => {
+		const targets = extract("security_scan", { include_paths: ["src"], exclude_paths: [".env"], output_root: "out" });
+		expect(targets.map(t => `${t.access}:${t.raw}`)).toEqual(["read:src", "write:out"]);
+	});
+
+	it("leaves security_scan include/knowledge-base paths relative when the session cwd is not a repository", () => {
+		// `nonRepoWorkspace` has no `.git` anywhere above it, matching what
+		// `createSecurityScanPlan` itself would see — the scan can never
+		// happen either way, so the raw relative spelling passes through.
+		const targets = extract("security_scan", { include_paths: ["src"], knowledge_base_paths: ["docs/kb.md"] });
+		expect(targets.map(t => `${t.access}:${t.raw}`)).toEqual(["read:src", "read:docs/kb.md"]);
+	});
+
+	describe("security_scan repository-root resolution", () => {
+		let repoRoot: string;
+		let nestedCwd: string;
+
+		beforeAll(() => {
+			repoRoot = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "omp-scan-repo-")));
+			fs.mkdirSync(path.join(repoRoot, ".git"), { recursive: true });
+			nestedCwd = path.join(repoRoot, "packages", "app");
+			fs.mkdirSync(nestedCwd, { recursive: true });
+		});
+
+		afterAll(() => {
+			fs.rmSync(repoRoot, { recursive: true, force: true });
+		});
+
+		it("authorizes include_paths/knowledge_base_paths against the repository root, not the session cwd", () => {
+			const roots: PermissionRoots = { cwd: nestedCwd, additionalDirectories: [] };
+			const targets = extract(
+				"security_scan",
+				{ include_paths: ["private"], knowledge_base_paths: ["docs/kb.md"] },
+				roots,
+			);
+			expect(targets.map(t => `${t.access}:${t.raw}`)).toEqual([
+				`read:${path.join(repoRoot, "private")}`,
+				`read:${path.join(repoRoot, "docs/kb.md")}`,
+			]);
+		});
+
+		it("adds the repository root as a read target when a default scan carries no include_paths", () => {
+			// No `target_kind`/`include_paths` at all — the scan defaults to
+			// scanning the whole repository, not just `nestedCwd`, so the gate
+			// must see `repoRoot` itself or `permissions.confineReads` would never
+			// catch the read once the scan actually walks the tree.
+			const roots: PermissionRoots = { cwd: nestedCwd, additionalDirectories: [] };
+			const targets = extract("security_scan", { output_root: "out" }, roots);
+			expect(targets.map(t => `${t.access}:${t.raw}`)).toEqual([`read:${repoRoot}`, "write:out"]);
+		});
+
+		it("omits the repository-root fallback once include_paths narrows the scan", () => {
+			const roots: PermissionRoots = { cwd: nestedCwd, additionalDirectories: [] };
+			const targets = extract("security_scan", { include_paths: ["private"], output_root: "out" }, roots);
+			expect(targets.map(t => `${t.access}:${t.raw}`)).toEqual([
+				`read:${path.join(repoRoot, "private")}`,
+				"write:out",
+			]);
+		});
+
+		it("omits the repository-root fallback for a scoped_path scan, which already requires include_paths", () => {
+			const roots: PermissionRoots = { cwd: nestedCwd, additionalDirectories: [] };
+			const targets = extract(
+				"security_scan",
+				{ target_kind: "scoped_path", include_paths: ["private"], output_root: "out" },
+				roots,
+			);
+			expect(targets.map(t => `${t.access}:${t.raw}`)).toEqual([
+				`read:${path.join(repoRoot, "private")}`,
+				"write:out",
+			]);
+		});
+	});
+});
+
+describe("embedded edit payload paths", () => {
+	let embeddedEditWorkspace: string;
+	let embeddedEditRoots: PermissionRoots;
+
+	beforeEach(() => {
+		embeddedEditWorkspace = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "omp-embedded-edit-")));
+		embeddedEditRoots = { cwd: embeddedEditWorkspace, additionalDirectories: [] };
+	});
+
+	afterEach(() => {
+		fs.rmSync(embeddedEditWorkspace, { recursive: true, force: true });
+	});
+
+	it("extracts a hashline section header as both a read and a write target", () => {
+		// Every hashline section requires a `#TAG` snapshot hash from a prior
+		// read (`assertSectionHashPresent`) - hashline has no "create" op, so
+		// the section always needs `read` in addition to `write`.
+		expect(
+			extractEmbeddedEditPaths("[src/a.ts#1A2B]\nPUT 1.=1:\n+x", embeddedEditRoots).map(t => `${t.access}:${t.raw}`),
+		).toEqual(["write:src/a.ts", "read:src/a.ts"]);
+	});
+
+	it("extracts apply_patch file and move markers, read+write for Update and write-only for Add", () => {
+		const input = [
+			"*** Begin Patch",
+			"*** Add File: src/new.ts",
+			"*** Update File: src/a.ts",
+			"*** Move to: src/b.ts",
+			"*** Delete File: src/old.ts",
+			"*** End Patch",
+		].join("\n");
+		expect(extractEmbeddedEditPaths(input, embeddedEditRoots).map(t => `${t.access}:${t.raw}`)).toEqual([
+			"write:src/new.ts",
+			`write:${path.join(embeddedEditWorkspace, "src")}`,
+			"write:src/a.ts",
+			"read:src/a.ts",
+			"write:src/b.ts",
+			`write:${path.join(embeddedEditWorkspace, "src")}`,
+			"write:src/old.ts",
+			"read:src/old.ts",
+		]);
+	});
+
+	it("extracts only missing ancestors of an absolute apply_patch create", () => {
+		const cls = TOOL_PATH_CLASSES.edit;
+		if (cls?.kind !== "structured") throw new Error("edit is not structured");
+		const parent = path.join(embeddedEditWorkspace, "created");
+		const target = path.join(parent, "nested", "file.txt");
+		const targets = cls.extract(
+			{ input: `*** Begin Patch\n*** Add File: ${target}\n+secret\n*** End Patch` },
+			embeddedEditRoots,
+		);
+		expect(targets.map(t => `${t.access}:${t.raw}`)).toEqual([
+			`write:${target}`,
+			`write:${path.join(parent, "nested")}`,
+			`write:${parent}`,
+		]);
+	});
+
+	it("extracts every missing ancestor of a relative apply_patch create", () => {
+		const cls = TOOL_PATH_CLASSES.edit;
+		if (cls?.kind !== "structured") throw new Error("edit is not structured");
+		const targets = cls.extract(
+			{ input: "*** Begin Patch\n*** Add File: blocked/nested/file.txt\n+secret\n*** End Patch" },
+			embeddedEditRoots,
+		);
+		expect(targets.map(t => `${t.access}:${t.raw}`)).toEqual([
+			"write:blocked/nested/file.txt",
+			`write:${path.join(embeddedEditWorkspace, "blocked", "nested")}`,
+			`write:${path.join(embeddedEditWorkspace, "blocked")}`,
+		]);
+	});
+
+	it("does not mistake a bracketed body line for a header", () => {
+		expect(extractEmbeddedEditPaths("[not a header#zz]", embeddedEditRoots)).toEqual([]);
+	});
+
+	it("finds a secret target hidden in a hashline payload with no top-level path", () => {
+		const cls = TOOL_PATH_CLASSES.edit;
+		if (cls?.kind !== "structured") throw new Error("edit is not structured");
+		expect(
+			cls
+				.extract({ input: "[.env#00FF]\nPUT 1.=1:\n+LEAK=1" }, { cwd: nonRepoWorkspace, additionalDirectories: [] })
+				.map(t => `${t.access}:${t.raw}`),
+		).toEqual(["write:.env", "read:.env"]);
+	});
+
+	it("extracts a hashline MV destination, which is a write the section performs", () => {
+		const input = "[src/a.ts#1A2B]\nCUT 1.=1\nMV created/escaped.ts";
+		expect(extractEmbeddedEditPaths(input, embeddedEditRoots).map(t => t.raw)).toEqual([
+			"src/a.ts",
+			"src/a.ts",
+			"created/escaped.ts",
+			path.join(embeddedEditWorkspace, "created"),
+		]);
+	});
+
+	it("unquotes an MV destination containing spaces", () => {
+		expect(extractEmbeddedEditPaths('MV "dir with spaces/a.ts"', embeddedEditRoots).map(t => t.raw)).toEqual([
+			"dir with spaces/a.ts",
+			path.join(embeddedEditWorkspace, "dir with spaces"),
+		]);
+	});
+
+	// A hand-rolled `[.+]` header regex could disagree with the real hashline
+	// grammar about how a header is interpreted; deriving the target through
+	// `Patch.parse` (the same section splitter `Patcher.apply` uses) rules
+	// that divergence out by construction, including for a `..` traversal
+	// path inside the header.
+	it("extracts a `..` traversal path from a header exactly as the real parser resolves it", () => {
+		const input = "[../../outside/escaped.ts#1A2B]\nPUT 1.=1:\n+x";
+		expect(extractEmbeddedEditPaths(input, embeddedEditRoots).map(t => t.raw)).toEqual([
+			"../../outside/escaped.ts",
+			"../../outside/escaped.ts",
+		]);
+	});
+
+	it("matches the real hashline Patch.parse section set exactly, including a multi-section input", () => {
+		const input = "[a/one.ts#1A2B]\nPUT 1.=1:\n+x\n[b/two.ts#3C4D]\nPUT 1.=1:\n+y";
+		const patch = Patch.parse(input);
+		expect(patch.sections.map(s => s.path)).toEqual(["a/one.ts", "b/two.ts"]);
+		// Each section yields a write and a read target, in that order.
+		const expected = patch.sections.flatMap(s => [s.path, s.path]);
+		expect(extractEmbeddedEditPaths(input, embeddedEditRoots).map(t => t.raw)).toEqual(expected);
+	});
+});

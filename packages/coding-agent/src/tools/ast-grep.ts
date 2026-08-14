@@ -20,7 +20,10 @@ import { createFileRecorder, formatResultPath } from "./file-recorder";
 import { classifyGroupedLines, formatGroupedFiles, groupLineIndicesByBlank } from "./grouped-file-output";
 import { formatMatchLine } from "./match-line-format";
 import type { OutputMeta } from "./output-meta";
-import { resolveToolSearchScope, toPathList } from "./path-utils";
+import { type ResolvedSearchTarget, resolveToolSearchScope, toPathList } from "./path-utils";
+import { loadPermissionsConfig } from "./permissions/config";
+import { isExemptPathArgument } from "./permissions/resolve";
+import { excludeDenyReadSearchTargets } from "./permissions/tool-path-targets";
 import {
 	appendParseErrorsBulletList,
 	capParseErrors,
@@ -72,7 +75,7 @@ function retainAstFindMatch(matches: AstFindMatch[], capacity: number, candidate
 }
 
 async function runMultiTargetAstGrep(
-	targets: Array<{ basePath: string; glob?: string }>,
+	targets: ResolvedSearchTarget[],
 	options: { patterns: string[]; commonBasePath: string; skip: number; limit: number; signal?: AbortSignal },
 ): Promise<{
 	matches: AstFindMatch[];
@@ -105,7 +108,7 @@ async function runMultiTargetAstGrep(
 		limitReached = limitReached || targetResult.limitReached;
 		if (targetResult.parseErrors) parseErrors.push(...targetResult.parseErrors);
 		for (const match of targetResult.matches) {
-			const absolute = path.resolve(target.basePath, match.path);
+			const absolute = target.pathIsFile ? target.basePath : path.resolve(target.basePath, match.path);
 			const rebased = path.relative(options.commonBasePath, absolute).replace(/\\/g, "/");
 			retainAstFindMatch(retainedMatches, retainedCapacity, { ...match, path: rebased });
 		}
@@ -215,6 +218,7 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 				signal,
 				localProtocolOptions: this.session.localProtocolOptions,
 				skills: this.session.skills,
+				isExemptSourceInput: isExemptPathArgument,
 				resolveExternalUrl: async rawPath => {
 					const target = parseReadUrlTarget(rawPath);
 					if (!target) return undefined;
@@ -227,10 +231,32 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 				},
 			});
 			const { searchPath: resolvedSearchPath, scopePath, isDirectory, multiTargets, globFilter } = scope;
+			let effectiveTargets = multiTargets;
+			// Native AST search only supports inclusive globbing. Convert every
+			// recursive target to permitted files while deny.read is active so a
+			// denied descendant is never parsed merely because it has no match.
+			const policy = loadPermissionsConfig(this.session.settings);
+			if (policy && (isDirectory || multiTargets)) {
+				const permissionRoots = {
+					cwd: this.session.cwd,
+					additionalDirectories: this.session.additionalDirectories ?? [],
+				};
+				const targets = multiTargets ?? [{ basePath: resolvedSearchPath, glob: globFilter, pathIsFile: false }];
+				const exemptTargets = targets.filter(target => scope.exemptSourcePaths.has(path.resolve(target.basePath)));
+				const targetsToFilter =
+					exemptTargets.length > 0
+						? targets.filter(target => !scope.exemptSourcePaths.has(path.resolve(target.basePath)))
+						: targets;
+				const filteredTargets =
+					targetsToFilter.length > 0
+						? await excludeDenyReadSearchTargets(targetsToFilter, policy, permissionRoots)
+						: [];
+				if (filteredTargets) effectiveTargets = [...exemptTargets, ...filteredTargets];
+			}
 
 			const DEFAULT_AST_LIMIT = 50;
-			const result = multiTargets
-				? await runMultiTargetAstGrep(multiTargets, {
+			const result = effectiveTargets
+				? await runMultiTargetAstGrep(effectiveTargets, {
 						patterns,
 						commonBasePath: resolvedSearchPath,
 						skip,

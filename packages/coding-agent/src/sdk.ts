@@ -5,6 +5,7 @@ import {
 	type AgentOptions,
 	type AgentTelemetryConfig,
 	type AgentTool,
+	type AgentToolContext,
 	AppendOnlyContextManager,
 	filterProviderReplayMessages,
 	type ThinkingLevel,
@@ -3709,7 +3710,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (lspServers.length > 0) {
 				void (async () => {
 					try {
-						const result = await logger.time("warmupLspServers", warmupLspServers, cwd);
+						const result = await logger.time("warmupLspServers", warmupLspServers, cwd, {
+							// Only `sessionManager`/`settings` are ever read (permissionRoots +
+							// loadPermissionsConfig), so a minimal stub is safe here.
+							context: { sessionManager, settings } as unknown as AgentToolContext,
+						});
 						const serversByName = new Map(result.servers.map(server => [server.name, server] as const));
 						for (const server of lspServers ?? []) {
 							const next = serversByName.get(server.name);

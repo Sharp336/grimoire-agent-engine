@@ -1,4 +1,6 @@
 import { type } from "@oh-my-pi/omptype";
+import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import type { ReadonlySessionManager } from "../session/session-manager";
 import { TOOL_TIMEOUTS } from "../tools/tool-timeouts";
 
 // =============================================================================
@@ -450,6 +452,23 @@ export interface LspClient {
 	projectLoaded: Promise<void>;
 	/** Call to signal that project loading has completed */
 	resolveProjectLoaded: () => void;
+	/**
+	 * The `AgentToolContext` (settings, session roots) of every distinct
+	 * session that has used this client, keyed by its `sessionManager` —
+	 * stable for the session's lifetime, unlike `AgentToolContext` itself
+	 * (`ToolContextStore.getContext` builds a fresh object per call). Clients
+	 * are cached and shared across calls, including across sessions that
+	 * happen to share a cwd and server command (`clientKey` in `client.ts`),
+	 * so stamping only the latest caller's context here would let a delayed
+	 * server push land after a more permissive session took over the same
+	 * client and get checked against the wrong settings. Consulted by
+	 * `handleApplyEditRequest` (server-initiated `workspace/applyEdit`) to run
+	 * the same resource-permission check an outbound `rename`/`code_actions`
+	 * apply already gets, since a server-pushed request has no tool-call
+	 * context of its own to check against — every tracked session's context
+	 * gets a say, and any one of them denying the edit denies it.
+	 */
+	permissionsContexts: Map<ReadonlySessionManager, AgentToolContext>;
 }
 
 // =============================================================================

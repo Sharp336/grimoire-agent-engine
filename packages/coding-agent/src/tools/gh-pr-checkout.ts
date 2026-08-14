@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import type { AgentToolContext, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { getWorktreeDir, hashPath, isEnoent } from "@oh-my-pi/pi-utils";
 import * as git from "../utils/git";
 import type { ToolSession } from ".";
@@ -23,7 +23,125 @@ import { formatShortSha } from "./gh-format";
 import type { GhPrViewData, GhRepoViewData, GithubInput } from "./gh-types";
 import { GH_PR_FIELDS_NO_COMMENTS } from "./gh-view";
 import { invalidateAllForNumber } from "./github-cache";
+import {
+	checkStructuredTargets,
+	decideTarget,
+	loadPermissionsConfig,
+	type PathTarget,
+	PermissionDeniedError,
+	permissionRoots,
+} from "./permissions";
 import { ToolError, throwIfAborted } from "./tool-errors";
+
+/**
+ * Authorize a filesystem target `pr_checkout` is about to write. `github` is
+ * classified `pathless` in the resource permission layer - a `pr_checkout`
+ * call names no path argument the gate can act on - but it writes two
+ * targets outside anything the gate saw: `repoRoot` (the `.git` metadata a
+ * remote add, fetch, branch create/force, and every `config.setBranch` all
+ * mutate, even when reusing an existing worktree) and, when creating a new
+ * worktree, the worktree path itself, which always lands under
+ * `getWorktreeDir` (`~/.omp/wt/...`), outside every session root. Both must
+ * be checked before the first Git mutation runs, or `permissions.confineWrites`
+ * silently never applies to either.
+ */
+function assertGitWriteAllowed(targetPath: string, context: AgentToolContext | undefined): void {
+	const policy = loadPermissionsConfig(context?.settings);
+	if (!policy) return;
+	const roots = permissionRoots(context);
+	if (!roots) {
+		throw new PermissionDeniedError(
+			"github",
+			"permissions.profile",
+			`Tool "github" is blocked: permissions.profile is "${policy.profile}" but this call has no session, ` +
+				`so the workspace roots the rules are measured against cannot be determined.\n` +
+				`To allow it: set permissions.profile: off.`,
+		);
+	}
+	const decision = decideTarget({ raw: targetPath, access: "write", field: "op" }, policy, roots);
+	if (decision.kind === "deny") throw new PermissionDeniedError("github", decision.rule, decision.reason);
+}
+
+/**
+ * A Git directory is a mutable tree, so authorizing only its root misses
+ * descendant rules. Walk the existing metadata tree and run every path through
+ * the same structured-target matcher as normal writes. The caller also passes
+ * paths that a checkout creates after the scan, before the corresponding Git
+ * command can create them.
+ */
+async function assertGitMetadataWriteAllowed(
+	gitDir: string,
+	commonDir: string,
+	context: AgentToolContext | undefined,
+	prospectivePaths: readonly string[] = [],
+): Promise<void> {
+	const policy = loadPermissionsConfig(context?.settings);
+	if (!policy) return;
+	const roots = permissionRoots(context);
+	if (!roots) {
+		throw new PermissionDeniedError(
+			"github",
+			"permissions.profile",
+			`Tool "github" is blocked: permissions.profile is "${policy.profile}" but this call has no session, ` +
+				`so the workspace roots the rules are measured against cannot be determined.\n` +
+				`To allow it: set permissions.profile: off.`,
+		);
+	}
+	const targets: PathTarget[] = prospectivePaths.map(raw => ({ raw, access: "write", field: "op" }));
+	for (const metadataRoot of new Set([gitDir, commonDir])) {
+		targets.push({ raw: metadataRoot, access: "write", field: "op" });
+		for await (const metadataPath of new Bun.Glob("**/*").scan({
+			cwd: metadataRoot,
+			absolute: true,
+			dot: true,
+			onlyFiles: false,
+		})) {
+			targets.push({ raw: metadataPath, access: "write", field: "op" });
+		}
+	}
+	const denial = checkStructuredTargets(targets, policy, roots);
+	if (denial) throw new PermissionDeniedError("github", denial.rule, denial.reason);
+}
+
+/**
+ * Authorize every file `git.worktree.add` is about to materialize under a
+ * *new* worktree. `assertGitWriteAllowed` only ever checked the worktree
+ * root itself - sound for confinement (the root either lands under an
+ * approved directory or it doesn't), but not for a descendant `deny.write`
+ * glob (`strict` with `confineWrites: false`, or the worktree root itself
+ * added as a workspace root): the root passing says nothing about whether
+ * `.env` or `id_rsa` inside the PR's tree does. Enumerated straight from the
+ * fetched remote ref (`git.ls.tree`), so nothing is materialized on disk
+ * before every path in it clears the policy.
+ */
+async function assertGitWorktreeTreeWriteAllowed(
+	repoRoot: string,
+	ref: string,
+	worktreePath: string,
+	context: AgentToolContext | undefined,
+	signal?: AbortSignal,
+): Promise<void> {
+	const policy = loadPermissionsConfig(context?.settings);
+	if (!policy) return;
+	const roots = permissionRoots(context);
+	if (!roots) {
+		throw new PermissionDeniedError(
+			"github",
+			"permissions.profile",
+			`Tool "github" is blocked: permissions.profile is "${policy.profile}" but this call has no session, ` +
+				`so the workspace roots the rules are measured against cannot be determined.\n` +
+				`To allow it: set permissions.profile: off.`,
+		);
+	}
+	const files = await git.ls.tree(repoRoot, ref, [], signal);
+	const targets: PathTarget[] = files.map(file => ({
+		raw: path.join(worktreePath, file),
+		access: "write",
+		field: "op",
+	}));
+	const denial = checkStructuredTargets(targets, policy, roots);
+	if (denial) throw new PermissionDeniedError("github", denial.rule, denial.reason);
+}
 
 export const GH_REPO_CLONE_FIELDS = ["nameWithOwner", "sshUrl", "url"];
 export const GH_PR_CHECKOUT_FIELDS = [
@@ -288,6 +406,7 @@ export async function executePrCheckout(
 	session: ToolSession,
 	params: GithubInput,
 	signal: AbortSignal | undefined,
+	context: AgentToolContext | undefined,
 ): Promise<AgentToolResult<GhToolDetails>> {
 	const repo = normalizeOptionalString(params.repo);
 	const force = params.force ?? false;
@@ -296,7 +415,7 @@ export async function executePrCheckout(
 	const isMulti = prRefs.length > 1;
 
 	const settled = await Promise.allSettled(
-		prRefs.map(prRef => checkoutPullRequest(session, signal, { prRef, repo, force })),
+		prRefs.map(prRef => checkoutPullRequest(session, signal, { prRef, repo, force }, context)),
 	);
 	const outcomes: PrCheckoutOutcome[] = [];
 	const failures: Array<{ prRef: string | undefined; reason: unknown }> = [];
@@ -372,6 +491,7 @@ export async function checkoutPullRequest(
 	session: ToolSession,
 	signal: AbortSignal | undefined,
 	options: PrCheckoutOptions,
+	context: AgentToolContext | undefined,
 ): Promise<PrCheckoutOutcome> {
 	const { prRef, repo, force } = options;
 	if (prRef?.startsWith("-")) {
@@ -411,7 +531,65 @@ export async function checkoutPullRequest(
 			const existingWorktrees = await git.worktree.list(repoRoot, signal);
 			const existingWorktree = existingWorktrees.find(entry => entry.branch === toLocalBranchRef(localBranch));
 
+			// Authorize before the first Git mutation below: `ensurePrRemote` can
+			// call `git.remote.add`, and `git.fetch`/`git.branch.*`/every
+			// `git.config.setBranch` write into metadata regardless of whether a
+			// new worktree is created. Root authorization only proves confinement;
+			// descendant deny rules must be checked against every metadata family
+			// the checkout can mutate.
+			assertGitWriteAllowed(repoRoot, context);
+			const repository = await git.repo.resolve(repoRoot);
+			if (repository) {
+				// `ensurePrRemote` below can call `git.remote.add`, which stages its
+				// write through an O_EXCL `commonDir/config.lock` before this scan's
+				// caller-supplied prospective paths were previously checked only
+				// after `ensurePrRemote` already ran — a cross-repository PR whose
+				// fork remote is not yet configured would violate
+				// `deny.write: ["**\/*.lock"]` via that first `git remote add` before
+				// any check that names the transient lock path had run. Authorize
+				// `config` and `config.lock` here, before the first Git mutation.
+				await assertGitMetadataWriteAllowed(repository.gitDir, repository.commonDir, context, [
+					path.join(repository.commonDir, "config"),
+					path.join(repository.commonDir, "config.lock"),
+				]);
+			}
+			const finalWorktreePath = existingWorktree
+				? existingWorktree.path
+				: await resolveAvailableWorktreePath(worktreePath, existingWorktrees);
+			if (!existingWorktree) assertGitWriteAllowed(finalWorktreePath, context);
+
 			const remote = await ensurePrRemote(repoRoot, data, signal);
+			if (repository) {
+				const commonDir = repository.commonDir;
+				const localRef = path.join("refs", "heads", localBranch);
+				const remoteRef = path.join("refs", "remotes", remote.name, headRefName);
+				const worktreeMetadataPath = path.join(commonDir, "worktrees", path.basename(finalWorktreePath));
+				// Every one of these is a `git config`/`update-ref` target the
+				// checkout is about to write, and Git stages every such write
+				// through an `O_EXCL` `<path>.lock` file it creates, writes, then
+				// renames over the real path - `commonDir/config` for the six
+				// `config.setBranch` calls below, the branch/remote-tracking refs
+				// for `branch.create`/`branch.force`/`fetch`. A `deny.write`
+				// rule matching `**/*.lock` must see that transient path too, or
+				// it silently never fires and Git's own `could not lock config
+				// file ...: File exists` is the only signal the write happened.
+				const lockManaged = [
+					path.join(commonDir, "config"),
+					path.join(commonDir, localRef),
+					path.join(commonDir, "logs", localRef),
+					path.join(commonDir, remoteRef),
+					path.join(commonDir, "logs", remoteRef),
+				];
+				await assertGitMetadataWriteAllowed(repository.gitDir, commonDir, context, [
+					path.join(commonDir, "FETCH_HEAD"),
+					path.join(commonDir, "ORIG_HEAD"),
+					...lockManaged,
+					...lockManaged.map(p => `${p}.lock`),
+					path.join(commonDir, "objects", headRefOid.slice(0, 2), headRefOid.slice(2)),
+					path.join(worktreeMetadataPath, "HEAD"),
+					path.join(worktreeMetadataPath, "index"),
+				]);
+			}
 			await git.fetch(
 				repoRoot,
 				remote.name,
@@ -459,9 +637,14 @@ export async function checkoutPullRequest(
 				signal,
 			);
 
-			let finalWorktreePath = existingWorktree?.path ?? worktreePath;
 			if (!existingWorktree) {
-				finalWorktreePath = await resolveAvailableWorktreePath(worktreePath, existingWorktrees);
+				await assertGitWorktreeTreeWriteAllowed(
+					repoRoot,
+					`refs/remotes/${remote.name}/${headRefName}`,
+					finalWorktreePath,
+					context,
+					signal,
+				);
 				await fs.mkdir(path.dirname(finalWorktreePath), { recursive: true });
 				await git.worktree.add(repoRoot, finalWorktreePath, localBranch, { signal });
 			}

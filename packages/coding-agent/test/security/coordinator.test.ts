@@ -17,6 +17,7 @@ import {
 	SecurityStore,
 } from "../../src/security";
 import { SessionManager } from "../../src/session/session-manager";
+import { PermissionDeniedError } from "../../src/tools/permissions/gate";
 
 const MOCK_SOURCE_ID = "security-coordinator-test";
 let temporaryRoot = "";
@@ -88,6 +89,16 @@ function storeFactory(): Promise<SecurityStore> {
 	return SecurityStore.open(repositoryRoot, { stateRoot });
 }
 
+// Mirrors storeFactory's { repositoryRoot, stateRoot } scoping exactly, but
+// without SecurityStore.open's ensurePrivateDirectory/index-write side
+// effects - preflight authorizes the derived work root before opening the
+// store, so a mismatched derivation here would authorize a path the actually
+// opened (test-scoped) store never lands at.
+async function deriveOutputWorkRoot(): Promise<string> {
+	const { projectDirectory } = await SecurityStore.deriveProjectDirectory(repositoryRoot, { stateRoot });
+	return path.join(projectDirectory, "work");
+}
+
 function coordinatorWithMockSession(responses: MockResponseSource) {
 	const mock = createMockModel({
 		id: "security-mock",
@@ -104,7 +115,7 @@ function coordinatorWithMockSession(responses: MockResponseSource) {
 			sessionId: "parent-session",
 			agentId: "Main",
 		},
-		{ openStore: storeFactory, gitAdapter },
+		{ openStore: storeFactory, gitAdapter, deriveOutputWorkRoot },
 	);
 	return { coordinator, mock };
 }
@@ -170,6 +181,7 @@ describe("native security coordinator", () => {
 			{
 				openStore: async () => store,
 				gitAdapter,
+				deriveOutputWorkRoot,
 				createSession: async () => {
 					throw new Error("session must not launch when persistence fails");
 				},
@@ -183,6 +195,203 @@ describe("native security coordinator", () => {
 			phase: "failed",
 			error: "security store unavailable",
 		});
+	});
+
+	test("denies preflight when the defaulted output directory is outside every workspace root", async () => {
+		const restrictiveSettings = Settings.isolated({ "security.enabled": true, "permissions.profile": "workspace" });
+		const mock = createMockModel({ id: "security-mock", provider: "openai-codex" });
+		const coordinator = new SecurityCoordinator(
+			{
+				cwd: repositoryRoot,
+				settings: restrictiveSettings,
+				authStorage,
+				modelRegistry: new ModelRegistry(authStorage, path.join(temporaryRoot, "models.yml")),
+				activeModel: mock.model,
+			},
+			{ openStore: storeFactory, gitAdapter, deriveOutputWorkRoot },
+		);
+		// No `outputRoot` supplied - the coordinator defaults it to a directory
+		// beneath `SecurityStore.projectDirectory`, which lives outside every
+		// workspace root the `workspace` profile confines writes to.
+		await expect(coordinator.preflight({ credentialId, model: mock.model })).rejects.toThrow(PermissionDeniedError);
+	});
+
+	test("permits preflight's defaulted output directory when permissions are off", async () => {
+		const openSettings = Settings.isolated({ "security.enabled": true, "permissions.profile": "off" });
+		const mock = createMockModel({ id: "security-mock", provider: "openai-codex" });
+		const coordinator = new SecurityCoordinator(
+			{
+				cwd: repositoryRoot,
+				settings: openSettings,
+				authStorage,
+				modelRegistry: new ModelRegistry(authStorage, path.join(temporaryRoot, "models.yml")),
+				activeModel: mock.model,
+			},
+			{ openStore: storeFactory, gitAdapter, deriveOutputWorkRoot },
+		);
+		const plan = await coordinator.preflight({ credentialId, model: mock.model });
+		expect(plan.output.root).toBeTruthy();
+	});
+
+	test("does not create the default output's work directory when preflight is denied", async () => {
+		const restrictiveSettings = Settings.isolated({ "security.enabled": true, "permissions.profile": "workspace" });
+		const mock = createMockModel({ id: "security-mock", provider: "openai-codex" });
+		const coordinator = new SecurityCoordinator(
+			{
+				cwd: repositoryRoot,
+				settings: restrictiveSettings,
+				authStorage,
+				modelRegistry: new ModelRegistry(authStorage, path.join(temporaryRoot, "models.yml")),
+				activeModel: mock.model,
+			},
+			{ openStore: storeFactory, gitAdapter, deriveOutputWorkRoot },
+		);
+		const store = await storeFactory();
+		const workRoot = path.join(store.projectDirectory, "work");
+		await expect(coordinator.preflight({ credentialId, model: mock.model })).rejects.toThrow(PermissionDeniedError);
+		// The denied call must not have created (or chmod'd) the default
+		// output's parent directory as a side effect before the check ran.
+		await expect(fs.stat(workRoot)).rejects.toThrow();
+	});
+
+	test("never opens the store (no index/state files) when the defaulted output is denied", async () => {
+		const restrictiveSettings = Settings.isolated({ "security.enabled": true, "permissions.profile": "workspace" });
+		const mock = createMockModel({ id: "security-mock", provider: "openai-codex" });
+		let openStoreCalls = 0;
+		const coordinator = new SecurityCoordinator(
+			{
+				cwd: repositoryRoot,
+				settings: restrictiveSettings,
+				authStorage,
+				modelRegistry: new ModelRegistry(authStorage, path.join(temporaryRoot, "models.yml")),
+				activeModel: mock.model,
+			},
+			{
+				openStore: async () => {
+					openStoreCalls++;
+					return storeFactory();
+				},
+				gitAdapter,
+				deriveOutputWorkRoot,
+			},
+		);
+		await expect(coordinator.preflight({ credentialId, model: mock.model })).rejects.toThrow(PermissionDeniedError);
+		// `SecurityStore.open` (behind `openStore`) is what creates the
+		// project directory and writes its index - a denied preflight must
+		// never reach it at all, not just skip the later work-root mkdir.
+		expect(openStoreCalls).toBe(0);
+	});
+
+	test("reauthorizes a stored plan's output root at start against live permissions", async () => {
+		// `permissions.profile` starts unset (defaults to "off") - anything
+		// passed to `Settings.isolated()`'s own overrides pins that key
+		// permanently, so a later `.set()` below could never change it.
+		const liveSettings = Settings.isolated({ "security.enabled": true });
+		const mock = createMockModel({ id: "security-mock", provider: "openai-codex" });
+		const coordinator = new SecurityCoordinator(
+			{
+				cwd: repositoryRoot,
+				settings: liveSettings,
+				authStorage,
+				modelRegistry: new ModelRegistry(authStorage, path.join(temporaryRoot, "models.yml")),
+				activeModel: mock.model,
+			},
+			{ openStore: storeFactory, gitAdapter, deriveOutputWorkRoot },
+		);
+		// Created while permissions are off - the defaulted (outside-workspace)
+		// output root is authorized without objection.
+		const plan = await coordinator.preflight({ credentialId, model: mock.model });
+		// Tightened between preflight and start - e.g. a mid-session `/set`.
+		liveSettings.set("permissions.profile", "workspace");
+		await expect(coordinator.start({ planId: plan.id })).rejects.toThrow(PermissionDeniedError);
+	});
+
+	test("authorizes an explicit output_root under an approved additional directory", async () => {
+		const approvedOutputDir = path.join(temporaryRoot, "approved-reports");
+		await fs.mkdir(approvedOutputDir, { recursive: true });
+		// `confineToRoots` drops an unresolvable (not-yet-created) root rather
+		// than trusting it, so the store's own state directory must already
+		// exist before it can act as an approved root, same as any other
+		// approved directory below.
+		await fs.mkdir(stateRoot, { recursive: true });
+		const restrictiveSettings = Settings.isolated({ "security.enabled": true, "permissions.profile": "workspace" });
+		const mock = createMockModel({ id: "security-mock", provider: "openai-codex" });
+		const coordinator = new SecurityCoordinator(
+			{
+				cwd: repositoryRoot,
+				additionalDirectories: [approvedOutputDir, stateRoot],
+				settings: restrictiveSettings,
+				authStorage,
+				modelRegistry: new ModelRegistry(authStorage, path.join(temporaryRoot, "models.yml")),
+				activeModel: mock.model,
+			},
+			{ openStore: storeFactory, gitAdapter, deriveOutputWorkRoot },
+		);
+		// `normalizeOutput` requires the output to sit outside the scanned
+		// repository - `additionalDirectories` is the only way for a
+		// confining profile to have anywhere valid to put it.
+		const outputRoot = path.join(approvedOutputDir, "scan-output");
+		const plan = await coordinator.preflight({ credentialId, model: mock.model, outputRoot });
+		expect(plan.output.root).toBe(path.join(await fs.realpath(approvedOutputDir), "scan-output"));
+	});
+
+	test("still denies an output_root outside cwd and every additional directory", async () => {
+		const approvedOutputDir = path.join(temporaryRoot, "approved-reports-2");
+		const outsideDir = path.join(temporaryRoot, "unapproved-reports");
+		await fs.mkdir(approvedOutputDir, { recursive: true });
+		await fs.mkdir(outsideDir, { recursive: true });
+		const restrictiveSettings = Settings.isolated({ "security.enabled": true, "permissions.profile": "workspace" });
+		const mock = createMockModel({ id: "security-mock", provider: "openai-codex" });
+		const coordinator = new SecurityCoordinator(
+			{
+				cwd: repositoryRoot,
+				additionalDirectories: [approvedOutputDir],
+				settings: restrictiveSettings,
+				authStorage,
+				modelRegistry: new ModelRegistry(authStorage, path.join(temporaryRoot, "models.yml")),
+				activeModel: mock.model,
+			},
+			{ openStore: storeFactory, gitAdapter, deriveOutputWorkRoot },
+		);
+		const outputRoot = path.join(outsideDir, "scan-output");
+		await expect(coordinator.preflight({ credentialId, model: mock.model, outputRoot })).rejects.toThrow(
+			PermissionDeniedError,
+		);
+	});
+
+	test("denies start() when a descendant deny rule matches a generated bundle file, even though output_root itself is approved", async () => {
+		const approvedOutputDir = path.join(temporaryRoot, "approved-reports-3");
+		await fs.mkdir(approvedOutputDir, { recursive: true });
+		await fs.mkdir(stateRoot, { recursive: true });
+		const restrictiveSettings = Settings.isolated({
+			"security.enabled": true,
+			"permissions.profile": "workspace",
+			// Scoped to the output directory rather than a blanket `**/*.json`:
+			// the store's own `index.json`/plan file now also clear the same
+			// resource-permission gate (`assertSecurityStoreWriteAllowed`), so
+			// an unscoped pattern would deny `preflight()` itself instead of
+			// isolating this test's actual target - the bundle writer's
+			// descendant files under an already-approved `output_root`.
+			"permissions.deny.write": ["**/scan-output/*.json"],
+		});
+		const mock = createMockModel({ id: "security-mock", provider: "openai-codex" });
+		const coordinator = new SecurityCoordinator(
+			{
+				cwd: repositoryRoot,
+				additionalDirectories: [approvedOutputDir, stateRoot],
+				settings: restrictiveSettings,
+				authStorage,
+				modelRegistry: new ModelRegistry(authStorage, path.join(temporaryRoot, "models.yml")),
+				activeModel: mock.model,
+			},
+			{ openStore: storeFactory, gitAdapter, deriveOutputWorkRoot },
+		);
+		const outputRoot = path.join(approvedOutputDir, "scan-output");
+		// `output_root` itself passes: it is not a `.json` file. The bundle
+		// writer places `findings.json`/`provenance.json`/`scan.json` directly
+		// under it, and those must still be checked against the same deny rule.
+		const plan = await coordinator.preflight({ credentialId, model: mock.model, outputRoot });
+		await expect(coordinator.start({ planId: plan.id })).rejects.toThrow(PermissionDeniedError);
 	});
 
 	test("cancellation before session launch has no inference side effects", async () => {
@@ -200,6 +409,7 @@ describe("native security coordinator", () => {
 			{
 				openStore: storeFactory,
 				gitAdapter,
+				deriveOutputWorkRoot,
 				createSession: async () => {
 					sessionCreations++;
 					throw new Error("session must not launch after cancellation");
@@ -234,6 +444,7 @@ describe("native security coordinator", () => {
 			{
 				openStore: storeFactory,
 				gitAdapter,
+				deriveOutputWorkRoot,
 				createSession: async () => ({
 					prompt: async () => {
 						promptStarted.resolve();
@@ -286,6 +497,7 @@ describe("native security coordinator", () => {
 			{
 				openStore: storeFactory,
 				gitAdapter: DEFAULT_SECURITY_GIT_ADAPTER,
+				deriveOutputWorkRoot,
 				createSession: async input => {
 					executionRoot = input.executionRoot;
 					return {
@@ -365,7 +577,7 @@ describe("native security coordinator", () => {
 				modelRegistry,
 				activeModel: mock.model,
 			},
-			{ openStore: storeFactory, gitAdapter },
+			{ openStore: storeFactory, gitAdapter, deriveOutputWorkRoot },
 		);
 		expect(await restarted.status(operationId)).toMatchObject({
 			operationId,

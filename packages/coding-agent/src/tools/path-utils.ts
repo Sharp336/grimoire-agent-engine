@@ -595,13 +595,22 @@ export function confineToWorkspace(filePath: string, cwd: string): string | null
 	}
 }
 
-/** Whether `target` is a strict descendant of `root`, ignoring symlinks. */
-function isUnderRootLexical(target: string, root: string): boolean {
+/**
+ * Whether `target` sits under `root`, ignoring symlinks.
+ *
+ * `includeRoot` decides whether `root` itself counts. {@link confineToWorkspace}
+ * needs a strict descendant — it guards a download, which always names a file,
+ * never the directory — while a general path guard must accept a target that
+ * *is* a workspace root (`glob path: "."`).
+ */
+export function isUnderRootLexical(target: string, root: string, options: { includeRoot?: boolean } = {}): boolean {
 	const relative = path.relative(root, target);
-	return !!relative && !relative.startsWith("..") && !path.isAbsolute(relative);
+	if (!relative) return options.includeRoot === true;
+	return !relative.startsWith("..") && !path.isAbsolute(relative);
 }
 
-function tryRealpath(target: string): string | null {
+/** `fs.realpathSync.native`, or `null` when the path cannot be resolved. */
+export function tryRealpath(target: string): string | null {
 	try {
 		return fs.realpathSync.native(target);
 	} catch {
@@ -878,6 +887,7 @@ export interface ParsedFindPattern {
 export interface ResolvedSearchTarget {
 	basePath: string;
 	glob?: string;
+	pathIsFile?: boolean;
 }
 
 export interface ResolvedMultiSearchPath {
@@ -1091,6 +1101,7 @@ async function resolveSearchPathItems(
 			? parsedItems.map(item => ({
 					basePath: item.absoluteBasePath,
 					glob: item.parsedPath.glob ? combineSearchGlobs(item.parsedPath.glob, suffixGlob) : suffixGlob,
+					pathIsFile: item.stat.isFile(),
 				}))
 			: undefined;
 
@@ -1306,6 +1317,8 @@ export interface ToolScopeOptions {
 	internalUrlAction: string;
 	/** Collect absolute paths flagged immutable by their internal-URL handler. */
 	trackImmutableSources?: boolean;
+	/** Mark backing files resolved from exempt raw inputs so callers retain the pre-gate exemption during recursive filtering. */
+	isExemptSourceInput?: (rawPath: string) => boolean;
 	/** Honor `exactFilePaths` from {@link resolveExplicitSearchPaths} (search-only). */
 	surfaceExactFilePaths?: boolean;
 	/** Fan plain-file entries out into per-target scans instead of folding them
@@ -1335,6 +1348,7 @@ export interface ToolScopeResolution {
 	exactFilePaths?: string[];
 	missingPaths: string[];
 	immutableSourcePaths: Set<string>;
+	exemptSourcePaths: Set<string>;
 }
 
 /**
@@ -1362,6 +1376,7 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 	const internalRouter = InternalUrlRouter.instance();
 	const resolvedPathInputs: string[] = [];
 	const immutableSourcePaths = new Set<string>();
+	const exemptSourcePaths = new Set<string>();
 	for (const rawPath of rawPaths) {
 		let externalUrl = strictExternalUrlRe.test(rawPath);
 		if (!externalUrl && isReadableUrlPath(rawPath) && !hasGlobPathChars(rawPath)) {
@@ -1383,6 +1398,9 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 				resolvedPathInputs.push(resolved.sourcePath);
 				if (opts.trackImmutableSources && resolved.immutable) {
 					immutableSourcePaths.add(path.resolve(resolved.sourcePath));
+				}
+				if (opts.isExemptSourceInput?.(rawPath)) {
+					exemptSourcePaths.add(path.resolve(resolved.sourcePath));
 				}
 				continue;
 			}
@@ -1421,6 +1439,9 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 		}
 		if (opts.trackImmutableSources && resource.immutable) {
 			immutableSourcePaths.add(path.resolve(resource.sourcePath));
+		}
+		if (opts.isExemptSourceInput?.(rawPath)) {
+			exemptSourcePaths.add(path.resolve(resource.sourcePath));
 		}
 		resolvedPathInputs.push(resource.sourcePath);
 	}
@@ -1485,5 +1506,6 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 		exactFilePaths,
 		missingPaths,
 		immutableSourcePaths,
+		exemptSourcePaths,
 	};
 }

@@ -1,8 +1,9 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
+import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { AuthStorage, type completeSimple, Effort, type ImageContent, type Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -91,6 +92,17 @@ function createSession(
 		session.getImageAttachments = () => options.imageAttachments ?? [];
 	}
 	return session;
+}
+
+function permissionContext(cwd: string, settings: Settings): AgentToolContext {
+	return {
+		settings,
+		sessionManager: {
+			getCwd: () => cwd,
+			getAdditionalDirectories: () => [],
+			getSessionId: () => "inspect-image-permissions",
+		},
+	} as unknown as AgentToolContext;
 }
 
 function createCompleteSimpleSuccessStub(text: string): CompleteSimpleStub {
@@ -495,5 +507,71 @@ describe("InspectImageTool", () => {
 		expect(stub.calls).toHaveLength(1);
 		const passed = stub.calls[0]?.[2] as { signal?: AbortSignal } | undefined;
 		expect(passed?.signal).toBeUndefined();
+	});
+});
+
+describe("InspectImageTool permissions", () => {
+	let testDir: string;
+
+	beforeEach(() => {
+		testDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-inspect-image-permissions-"));
+	});
+
+	afterEach(() => {
+		removeSyncWithRetries(testDir);
+	});
+
+	it("rejects a resolved image path before submitting its bytes", async () => {
+		fs.writeFileSync(path.join(testDir, "private image.png"), Buffer.from(TINY_PNG_BASE64, "base64"));
+		const settings = Settings.isolated({
+			"permissions.profile": "workspace",
+			"permissions.deny.read": ["**/private image.png"],
+		});
+		const stub = createCompleteSimpleForbiddenStub();
+		const tool = new InspectImageTool(createSession(testDir, visionModel, "test-key", settings), stub.fn);
+
+		await expect(
+			tool.execute(
+				"inspect-image-permissions",
+				{ path: "private\\ image.png", question: "Describe this image." },
+				undefined,
+				undefined,
+				permissionContext(testDir, settings),
+			),
+		).rejects.toThrow('resource permission rule "**/private image.png"');
+		expect(stub.calls).toHaveLength(0);
+	});
+
+	// The finding: `loadImageInput` reads metadata, stats, and fully reads a
+	// file's bytes before the post-load resource-permission check ever runs.
+	// A denied file that fails the format/size probes for a reason *other*
+	// than the permission denial would surface *that* error instead (e.g.
+	// "only supports PNG, JPEG, GIF, and WEBP") - a direct oracle over a
+	// path `deny.read` was meant to prevent touching at all, since the two
+	// error shapes let a caller distinguish "denied" from "denied and not a
+	// real image" without ever legitimately reading the file. The resolved
+	// path must be authorized before any metadata/byte read, so a denied
+	// non-image file surfaces the same PermissionDeniedError as a denied
+	// real image, not the "unsupported format" ToolError.
+	it("denies a non-image file before probing its format, not after", async () => {
+		const garbagePath = path.join(testDir, "denied-not-an-image.png");
+		fs.writeFileSync(garbagePath, Buffer.from("this is not image data, just garbage bytes"));
+		const settings = Settings.isolated({
+			"permissions.profile": "workspace",
+			"permissions.deny.read": ["**/denied-not-an-image.png"],
+		});
+		const stub = createCompleteSimpleForbiddenStub();
+		const tool = new InspectImageTool(createSession(testDir, visionModel, "test-key", settings), stub.fn);
+
+		await expect(
+			tool.execute(
+				"inspect-image-format-oracle",
+				{ path: garbagePath, question: "Describe this image." },
+				undefined,
+				undefined,
+				permissionContext(testDir, settings),
+			),
+		).rejects.toThrow('resource permission rule "**/denied-not-an-image.png"');
+		expect(stub.calls).toHaveLength(0);
 	});
 });

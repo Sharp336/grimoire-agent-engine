@@ -57,6 +57,7 @@ import {
 	probeLiteralPathExists,
 	splitPathAndSel,
 } from "./path-utils";
+import { decideTarget, loadPermissionsConfig, PermissionDeniedError, permissionRoots } from "./permissions";
 import { enforcePlanModeWrite, resolvePlanPath, unwrapHashlineHeaderPath } from "./plan-mode-guard";
 import {
 	cachedRenderedString,
@@ -636,6 +637,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 	async #writeArchiveEntry(
 		content: string,
 		resolvedArchivePath: ResolvedArchiveWritePath,
+		context: AgentToolContext | undefined,
 	): Promise<AgentToolResult<WriteToolDetails>> {
 		// Resolve symlinks before the tmp+rename swap: renaming over a symlink
 		// replaces the link itself with a regular file instead of writing
@@ -643,6 +645,16 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		const finalPath = resolvedArchivePath.exists
 			? await fs.realpath(resolvedArchivePath.absolutePath).catch(() => resolvedArchivePath.absolutePath)
 			: resolvedArchivePath.absolutePath;
+		// `write({ path: "safe.zip:entry" })` authorizes the logical
+		// `safe.zip:entry` spelling through the pre-execution gate, but a
+		// symlinked archive can realpath to a target outside every workspace
+		// root — authorize the real backing file here, before any archive
+		// I/O, not after (a post-execution recheck would run after the
+		// rewrite already landed). A rewrite reads the complete existing
+		// archive below (to preserve every unrelated entry), so this target
+		// needs `read` authorized too, not just `write`.
+		this.#assertResolvedWriteAllowed(finalPath, context);
+		if (resolvedArchivePath.exists) this.#assertResolvedReadAllowed(finalPath, context);
 		// A realpath swap can land on a name without an archive extension; a
 		// whole-archive rewrite then defaults to an uncompressed tar, matching the
 		// previous `isZip`/`isGzip`/else fallthrough.
@@ -650,6 +662,11 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		// Rewrites are whole-archive: write to a temp file and rename so a
 		// crash/disk-full mid-write can't destroy the original archive.
 		const tmpPath = `${finalPath}.tmp-${process.pid}`;
+		// `tmpPath` is a distinct path from `finalPath` — a deny rule that
+		// matches generated temp files (`**/*.tmp-*`) but permits the archive
+		// itself would otherwise never see this create+rename, letting
+		// `writeArchive` below create and then remove a denied path unchecked.
+		this.#assertResolvedWriteAllowed(tmpPath, context);
 
 		const parentDir = path.dirname(resolvedArchivePath.absolutePath);
 		if (parentDir && parentDir !== ".") {
@@ -692,7 +709,10 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		};
 	}
 
-	async #resolveSqliteWritePath(writePath: string): Promise<ResolvedSqliteWritePath | null> {
+	async #resolveSqliteWritePath(
+		writePath: string,
+		context: AgentToolContext | undefined,
+	): Promise<ResolvedSqliteWritePath | null> {
 		const candidates = parseSqlitePathCandidates(writePath).filter(candidate => candidate.sqlitePath !== writePath);
 		if (candidates.length === 0) {
 			return null;
@@ -717,6 +737,11 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				if (stat.isDirectory()) {
 					continue;
 				}
+				// `isSqliteFile` reads the file's magic bytes to probe its format —
+				// authorize the candidate for read before that probe, not only the
+				// eventual write target `#writeSqliteRow` checks once resolution
+				// picks this candidate.
+				this.#assertResolvedReadAllowed(absolutePath, context);
 				if (!(await isSqliteFile(absolutePath))) {
 					sawExistingNonSqlite = true;
 					continue;
@@ -747,6 +772,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		displayPath: string,
 		content: string,
 		resolvedSqlitePath: ResolvedSqliteWritePath,
+		context: AgentToolContext | undefined,
 	): Promise<AgentToolResult<WriteToolDetails>> {
 		let db: Database | null = null;
 		try {
@@ -754,6 +780,15 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				throw new ToolError(`SQLite database '${displayPath}' not found`);
 			}
 
+			// `write({ path: "db.sqlite:table:key" })` authorizes the logical
+			// compound spelling through the pre-execution gate; authorize the
+			// real backing database file here too, before opening it, not after
+			// a post-execution recheck would run once the row is already mutated.
+			// Opening it queries its schema and looks up the target row before
+			// updating or deleting, so `read` is required too, not just `write`.
+			this.#assertResolvedWriteAllowed(resolvedSqlitePath.absolutePath, context);
+			this.#assertResolvedReadAllowed(resolvedSqlitePath.absolutePath, context);
+			this.#assertSqliteSidecarPathsAllowed(resolvedSqlitePath.absolutePath, context);
 			db = new Database(resolvedSqlitePath.absolutePath, { create: false, strict: true });
 			db.run("PRAGMA busy_timeout = 3000");
 
@@ -822,6 +857,75 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 	}
 
 	/**
+	 * Authorize a resolved filesystem target as a write, for a call whose
+	 * declared `path` names something other than the real backing file: a
+	 * conflict entry (`path: "conflict://<id>"` resolves through the
+	 * pre-execution gate as the synthetic URI, not `entry.absolutePath`),
+	 * or an archive/SQLite compound path (`safe.zip:entry` authorizes the
+	 * logical spelling, but the real mutation lands on the archive/database's
+	 * resolved backing file, which can differ from the logical path's own
+	 * containment when the archive itself is a symlink pointing outside
+	 * every workspace root). Must run *before* the mutation, not after —
+	 * unlike a post-execution content-exposure recheck, a write's damage is
+	 * already done by the time a post-hoc check could throw.
+	 */
+	#assertResolvedWriteAllowed(absolutePath: string, context: AgentToolContext | undefined): void {
+		this.#assertResolvedAccessAllowed(absolutePath, "write", context);
+	}
+
+	/**
+	 * Authorize a resolved filesystem target as a read, for a write call that
+	 * reads the target's *existing* content before overwriting it: a plain
+	 * overwrite's `assertEditableFile` reads the file prefix to detect a
+	 * generated header, and an archive/conflict rewrite reads the complete
+	 * backing file (to preserve unrelated entries or splice a marker block)
+	 * before writing it back. `write`'s pre-execution gate only ever
+	 * authorizes the declared target as a write — a `deny.read` rule with no
+	 * matching `deny.write` would otherwise let its content leak through
+	 * either read path even though `write` itself never surfaces it back to
+	 * the model on success.
+	 */
+	#assertResolvedReadAllowed(absolutePath: string, context: AgentToolContext | undefined): void {
+		this.#assertResolvedAccessAllowed(absolutePath, "read", context);
+	}
+
+	#assertResolvedAccessAllowed(
+		absolutePath: string,
+		access: "read" | "write",
+		context: AgentToolContext | undefined,
+	): void {
+		const policy = loadPermissionsConfig(context?.settings);
+		if (!policy) return;
+		const roots = permissionRoots(context);
+		if (!roots) {
+			throw new PermissionDeniedError(
+				"write",
+				"permissions.profile",
+				`Tool "write" is blocked: permissions.profile is "${policy.profile}" but this call has no session, ` +
+					`so the workspace roots the rules are measured against cannot be determined.\n` +
+					`To allow it: set permissions.profile: off.`,
+			);
+		}
+		const decision = decideTarget({ raw: absolutePath, access, field: "path" }, policy, roots);
+		if (decision.kind === "deny") {
+			throw new PermissionDeniedError("write", decision.rule, decision.reason);
+		}
+	}
+
+	/**
+	 * Authorize every file SQLite may create beside a mutating database before
+	 * opening its read-write connection. Reading `PRAGMA journal_mode` through a
+	 * read-only connection is not reliable for a WAL database whose transient
+	 * sidecars do not exist yet, and opening a writable connection first can
+	 * create them. This conservative preflight prevents either bypass.
+	 */
+	#assertSqliteSidecarPathsAllowed(absolutePath: string, context: AgentToolContext | undefined): void {
+		this.#assertResolvedWriteAllowed(`${absolutePath}-wal`, context);
+		this.#assertResolvedWriteAllowed(`${absolutePath}-shm`, context);
+		this.#assertResolvedWriteAllowed(`${absolutePath}-journal`, context);
+	}
+
+	/**
 	 * Resolve a single `conflict://<N>` write by splicing the recorded
 	 * marker region in the registered file with `replacementContent`.
 	 * The write deliberately bypasses the LSP writethrough: the file may
@@ -838,11 +942,19 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		replacementContent: string,
 		stripped: boolean,
 		signal: AbortSignal | undefined,
+		context: AgentToolContext | undefined,
 	): Promise<AgentToolResult<WriteToolDetails>> {
 		const absolutePath = entry.absolutePath;
 		if (!(await fs.exists(absolutePath))) {
 			throw new ToolError(`Conflict #${entry.id} target '${entry.displayPath}' no longer exists.`);
 		}
+		// `path: "conflict://<id>"` resolves through the pre-execution gate as
+		// the synthetic URI string, not the registered entry's real
+		// filesystem target — authorize the actual target here, where it is
+		// known. Splicing a marker block reads the whole file first, so this
+		// target needs `read` authorized too, not just `write`.
+		this.#assertResolvedWriteAllowed(absolutePath, context);
+		this.#assertResolvedReadAllowed(absolutePath, context);
 
 		const expanded = expandContentTokens(replacementContent, entry);
 		const originalText = await Bun.file(absolutePath).text();
@@ -902,6 +1014,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		replacementContent: string,
 		stripped: boolean,
 		signal: AbortSignal | undefined,
+		context: AgentToolContext | undefined,
 	): Promise<AgentToolResult<WriteToolDetails>> {
 		const entry = getConflictHistory(this.session).get(id);
 		if (!entry) {
@@ -909,7 +1022,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				`Conflict #${id} not found. Conflict ids are registered when \`read\` surfaces a marker block; re-read the file to get a current id.`,
 			);
 		}
-		return this.#resolveConflict(entry, replacementContent, stripped, signal);
+		return this.#resolveConflict(entry, replacementContent, stripped, signal, context);
 	}
 
 	/**
@@ -932,6 +1045,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		stripped: boolean,
 		signal: AbortSignal | undefined,
 		rawContent: string = replacementContent,
+		context: AgentToolContext | undefined = undefined,
 	): Promise<AgentToolResult<WriteToolDetails>> {
 		const history = getConflictHistory(this.session);
 		const allEntries = history.entries();
@@ -980,6 +1094,22 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					displayPath: sample.displayPath,
 					count: fileEntries.length,
 					error: "file no longer exists",
+				});
+				continue;
+			}
+			// `conflict://*` resolves through the pre-execution gate as a single
+			// synthetic URI, not the real per-file targets it splices — authorize
+			// each one here, where the registered entries' real paths are known.
+			// Splicing reads the whole file below, so `read` is required too,
+			// not just `write`.
+			try {
+				this.#assertResolvedWriteAllowed(absolutePath, context);
+				this.#assertResolvedReadAllowed(absolutePath, context);
+			} catch (error) {
+				failedFiles.push({
+					displayPath: sample.displayPath,
+					count: fileEntries.length,
+					error: error instanceof Error ? error.message : String(error),
 				});
 				continue;
 			}
@@ -1201,8 +1331,8 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				emitWriteProgress(onUpdate, cleanContent, path);
 				const result =
 					conflictUri.id === "*"
-						? await this.#resolveAllConflicts(cleanContent, stripped, signal, content)
-						: await this.#resolveSingleConflictById(conflictUri.id, cleanContent, stripped, signal);
+						? await this.#resolveAllConflicts(cleanContent, stripped, signal, content, context)
+						: await this.#resolveSingleConflictById(conflictUri.id, cleanContent, stripped, signal, context);
 				if (conflictUri.recoveredPrefix !== undefined) {
 					appendNoteToResult(
 						result,
@@ -1225,7 +1355,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					}`,
 					resolvedArchivePath.absolutePath,
 				);
-				const archiveResult = await this.#writeArchiveEntry(cleanContent, resolvedArchivePath);
+				const archiveResult = await this.#writeArchiveEntry(cleanContent, resolvedArchivePath, context);
 				if (stripped) {
 					const firstText = archiveResult.content.find(
 						(block): block is { type: "text"; text: string } =>
@@ -1238,12 +1368,12 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				return archiveResult;
 			}
 
-			const resolvedSqlitePath = await this.#resolveSqliteWritePath(path);
+			const resolvedSqlitePath = await this.#resolveSqliteWritePath(path, context);
 			if (resolvedSqlitePath) {
 				enforcePlanModeWrite(this.session, resolvedSqlitePath.sqlitePath, { op: "update" });
 
 				emitWriteProgress(onUpdate, cleanContent, path, resolvedSqlitePath.absolutePath);
-				const sqliteResult = await this.#writeSqliteRow(path, cleanContent, resolvedSqlitePath);
+				const sqliteResult = await this.#writeSqliteRow(path, cleanContent, resolvedSqlitePath, context);
 				if (stripped) {
 					const firstText = sqliteResult.content.find(
 						(block): block is { type: "text"; text: string } =>
@@ -1261,8 +1391,12 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			const absolutePath = resolvePlanPath(this.session, path);
 			const batchRequest = getLspBatchRequest(context?.toolCall);
 
-			// Check if file exists and is auto-generated before overwriting
+			// Check if file exists and is auto-generated before overwriting.
+			// `assertEditableFile` reads the file's prefix to detect a generated
+			// header — the pre-execution gate only ever authorized `path` as a
+			// write, so an existing target needs `read` authorized here too.
 			if (await fs.exists(absolutePath)) {
+				this.#assertResolvedReadAllowed(absolutePath, context);
 				await assertEditableFile(absolutePath, path, this.session.settings);
 			}
 
@@ -1301,6 +1435,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				undefined,
 				batchRequest,
 				dst => this.#deferredDiagnostics?.begin(dst),
+				context,
 			);
 			invalidateFsScanAfterWrite(absolutePath);
 			if (!this.#deferredDiagnostics || batchRequest?.flush === false) {
