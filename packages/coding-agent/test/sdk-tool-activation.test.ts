@@ -1944,6 +1944,104 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("excludes unlisted custom, extension, and MCP tools when the allowlist is enforced", async () => {
+		const tempDir = makeTempDir();
+		const mcpProxy: CustomTool = {
+			name: "mcp__db_query",
+			label: "DB Query",
+			description: "MCP proxy tool",
+			parameters: type({}),
+			mcpServerName: "db",
+			mcpToolName: "query",
+			async execute() {
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		};
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			extensions: [toolActivationExtension],
+			customTools: [mcpProxy, sdkCustomTool],
+			toolNames: ["read", "yield"],
+			requireYieldTool: true,
+			enforceToolAllowlist: true,
+		});
+
+		try {
+			const active = session.getActiveToolNames();
+			expect(active).toEqual(expect.arrayContaining(["read", "yield"]));
+			expect(active).not.toContain("mcp__db_query");
+			expect(active).not.toContain("default_active_tool");
+			expect(active).not.toContain("sdk_custom_tool");
+			// Unlisted tools are not mounted under xd:// either.
+			expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain("mcp__db_query");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("excludes MCP tools matching a disallow pattern without an allowlist", async () => {
+		const tempDir = makeTempDir();
+		const mcpProxy = (name: string, server: string, tool: string): CustomTool => ({
+			name,
+			label: name,
+			description: `MCP proxy tool from ${server}`,
+			parameters: type({}),
+			mcpServerName: server,
+			mcpToolName: tool,
+			async execute() {
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		});
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			customTools: [mcpProxy("mcp__foo_bar", "foo", "bar"), mcpProxy("mcp__baz_qux", "baz", "qux")],
+			// No write tool: custom tools surface top-level instead of mounting under xd://.
+			toolNames: ["read", "yield"],
+			disallowedTools: ["mcp__foo_*"],
+		});
+
+		try {
+			const active = session.getActiveToolNames();
+			expect(active).not.toContain("mcp__foo_bar");
+			expect(active).toContain("mcp__baz_qux");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("keeps extension tools when only MCP tools are disallowed", async () => {
+		const tempDir = makeTempDir();
+		const mcpProxy: CustomTool = {
+			name: "mcp__db_query",
+			label: "DB Query",
+			description: "MCP proxy tool",
+			parameters: type({}),
+			mcpServerName: "db",
+			mcpToolName: "query",
+			async execute() {
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		};
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			extensions: [toolActivationExtension],
+			customTools: [mcpProxy],
+			disallowedTools: ["mcp__*"],
+		});
+
+		try {
+			const active = session.getActiveToolNames();
+			expect(active).not.toContain("mcp__db_query");
+			// Extension tools survive the MCP-only disallow; discoverable ones mount under xd://.
+			expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("default_active_tool");
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("renders report-issue guidance only for unrestricted sessions", async () => {
 		const normalDir = makeTempDir();
 		const restrictedDir = makeTempDir();

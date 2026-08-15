@@ -126,6 +126,8 @@ export function createPersistedSubagentReviverFactory(
 				expectedAgentRef: expectedRef,
 				taskDepth,
 				toolNames: init.tools,
+				enforceToolAllowlist: init.enforceToolAllowlist || undefined,
+				disallowedTools: init.disallowedTools,
 				outputSchema: init.outputSchema,
 				outputSchemaMode: init.outputSchemaMode,
 				restrictToolNames: restrictToolNames || undefined,

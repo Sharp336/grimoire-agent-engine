@@ -2749,6 +2749,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			toolNames = [...toolNames, "task"];
 		}
 	}
+	// A declared `tools:` list is a hard allowlist for custom/extension/MCP tools
+	// too (not just built-ins); `disallowedTools:` removes matching names after.
+	const enforceToolAllowlist = !!(agent.tools && agent.tools.length > 0);
+	const disallowedTools = agent.disallowedTools?.length ? agent.disallowedTools : undefined;
 
 	if (atMaxDepth && toolNames?.includes("task")) {
 		toolNames = toolNames.filter(name => name !== "task");
@@ -3089,6 +3093,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				thinkingLevel: effectiveThinkingLevel,
 				thinkingLevelCeiling: spawnEffortCeiling,
 				toolNames,
+				enforceToolAllowlist,
+				disallowedTools,
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,
 				restrictToolNames: options.restrictToolNames,
@@ -3223,6 +3229,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,
 				restrictToolNames: restrictToolNames || undefined,
+				enforceToolAllowlist: enforceToolAllowlist || undefined,
+				disallowedTools,
 			});
 
 			abortSignal.addEventListener(

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added per-subagent MCP and extension tool scoping: an agent definition's `tools:` list is now a hard allowlist for custom, extension, and MCP proxy tools, and a new `disallowedTools:` frontmatter field removes tools by name or `mcp__*` / `mcp__<server>_*` wildcard. Subagents that do not declare `tools:` are unaffected; top-level sessions are unchanged ([#8599](https://github.com/can1357/oh-my-pi/issues/8599)).
+
 ## [17.3.4] - 2026-08-14
 
 ### Changed

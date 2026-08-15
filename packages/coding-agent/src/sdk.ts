@@ -210,7 +210,7 @@ import {
 	xdevDocsAll,
 	xdevEntries,
 } from "./tools";
-import { isMCPToolName, normalizeToolNames } from "./tools/builtin-names";
+import { isMCPToolName, isToolDisallowed, normalizeToolNames } from "./tools/builtin-names";
 import { ToolContextStore } from "./tools/context";
 import { isIrcEnabled } from "./tools/hub";
 import { getImageGenTools } from "./tools/image-gen";
@@ -497,6 +497,18 @@ export interface CreateAgentSessionOptions {
 	toolNames?: string[];
 	/** Limit the session to explicitly supplied tool names, without discovered extras. */
 	restrictToolNames?: boolean;
+	/**
+	 * Treat {@link toolNames} as a hard allowlist for custom, extension, and MCP
+	 * proxy tools too (not just built-ins). Set by the subagent executor when an
+	 * agent definition declares `tools:`; top-level sessions never set it.
+	 */
+	enforceToolAllowlist?: boolean;
+	/**
+	 * Tool-name patterns removed from the active set: trailing `*` is a prefix
+	 * wildcard (`mcp__*` = all MCP tools, `mcp__<server>_*` = one server), any
+	 * other pattern matches the exact name.
+	 */
+	disallowedTools?: string[];
 	/**
 	 * Permit only caller-supplied SDK custom tools inside a restricted session.
 	 * They must still be named in {@link toolNames}; discovered extensions, MCP,
@@ -1591,6 +1603,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	let hasSession = false;
 	let hasRegistered = false;
 	const restrictToolNames = options.restrictToolNames === true;
+	const enforceToolAllowlist = options.enforceToolAllowlist === true;
+	const disallowedPatterns = options.disallowedTools ? normalizeToolNames(options.disallowedTools) : [];
 	const enableLsp = options.enableLsp ?? !restrictToolNames;
 	const lspReadOnly = options.lspReadOnly ?? restrictToolNames;
 	const asyncMaxJobs = Math.min(100, Math.max(1, settings.get("async.maxJobs") ?? 100));
@@ -3005,16 +3019,23 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		// Custom tools and extension-registered tools are always included regardless of toolNames filter.
 		// Restricted callers own the list, so never widen it with registered tools.
+		// When the caller enforces a tool allowlist (subagent `tools:` frontmatter),
+		// custom/extension/MCP tools not named in the list are excluded too.
 		const alwaysInclude: string[] = restrictToolNames
 			? []
 			: [
 					...sdkCustomTools.map(t => (isCustomTool(t) ? t.name : t.name)),
 					...registeredTools.filter(t => !t.definition.defaultInactive).map(t => t.definition.name),
-				];
+				].filter(name => !enforceToolAllowlist || explicitlyRequestedToolNameSet?.has(name) === true);
 		for (const name of alwaysInclude) {
 			if (toolRegistry.has(name) && !initialToolNames.includes(name)) {
 				initialToolNames.push(name);
 			}
+		}
+		// Disallow patterns remove tools from the active set after the allowlist is
+		// applied (covers built-ins and any custom/extension/MCP tool not caught above).
+		if (disallowedPatterns.length > 0) {
+			initialToolNames = initialToolNames.filter(name => !isToolDisallowed(name, disallowedPatterns));
 		}
 
 		// Pre-register in the global agent registry BEFORE building the system prompt,
@@ -3517,7 +3538,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				session.setToolBuiltIn(name, false);
 				session.setExtensionMCPTool(name, liveTool);
 				try {
-					if (registered.definition.defaultInactive && !explicitlyRequested) {
+					// Subagent tool scoping: a tool outside the enforced allowlist or
+					// matching a disallow pattern stays registered but is never activated.
+					const scopedOut =
+						(enforceToolAllowlist && explicitlyRequestedToolNameSet?.has(name) === false) ||
+						isToolDisallowed(name, disallowedPatterns);
+					if ((registered.definition.defaultInactive && !explicitlyRequested) || scopedOut) {
 						if (!alreadyEnabled) return;
 						await session.setActiveToolPresentation(
 							enabled.filter(enabledName => enabledName !== name),

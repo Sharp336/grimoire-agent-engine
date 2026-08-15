@@ -64,3 +64,19 @@ export function normalizeToolNames(names: Iterable<string>): string[] {
 export function isMCPToolName(name: string): boolean {
 	return name.startsWith("mcp__");
 }
+
+/**
+ * Match a tool name against disallow patterns: a trailing `*` is a prefix
+ * wildcard (`mcp__*` = all MCP tools, `mcp__<server>_*` = one server), any
+ * other pattern matches the exact name.
+ */
+export function isToolDisallowed(name: string, patterns: readonly string[]): boolean {
+	for (const pattern of patterns) {
+		if (pattern.endsWith("*")) {
+			if (name.startsWith(pattern.slice(0, -1))) return true;
+		} else if (name === pattern) {
+			return true;
+		}
+	}
+	return false;
+}
