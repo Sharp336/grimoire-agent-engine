@@ -226,10 +226,12 @@ describe("task renderer: nested live rendering", () => {
 			}),
 		);
 
-		// Context now matches the status line gauge: 58000/272000 → 21.3%/272K.
+		// Context now matches the status line gauge: 58K/272K (concrete token count, not percent).
 		// Cost is separated by the theme dot separator, not a literal ".".
-		const expectedStats = `${formatNumber(19)} ${theme.icon.extensionTool}${theme.sep.dot}21.3%/272K${theme.sep.dot}$2.10`;
+		const expectedStats = `${formatNumber(19)} ${theme.icon.extensionTool}${theme.sep.dot}58K/272K${theme.sep.dot}$2.10`;
 		expect(text).toContain(expectedStats);
+		expect(text).not.toContain("21.3%");
+		expect(text).not.toContain("0/272K");
 		expect(text).not.toContain("tools");
 		expect(text).not.toContain("ctx");
 		expect(text).not.toContain("Σ");

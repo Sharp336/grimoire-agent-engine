@@ -2,6 +2,41 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the editor exceeding its configured `maxHeight` when the status provider returns a multi-row top border. On terminals of six rows or fewer the two-row header previously rendered four total rows against a cap of three, eating the transcript space the small-terminal calculation reserves; header rows are now bounded so the cap holds while at least one content row stays visible ([#8170](https://github.com/can1357/oh-my-pi/pull/8170)).
+
+## [17.3.4] - 2026-08-14
+
+### Fixed
+
+- Fixed a terminal Device-Attributes reply leaking into the composer as literal text (e.g. `1;22;…;52c`) when it arrived after the startup capability-probe sentinel FIFO drained, a race made observable by the added latency of an SSH/zmx PTY chain. DA1 replies (`CSI ? … c`) and split private-CSI responses are now consumed for the whole session lifetime, not only while a probe sentinel is outstanding ([#8542](https://github.com/can1357/oh-my-pi/issues/8542)).
+
+## [17.3.3] - 2026-08-14
+
+### Fixed
+
+- Fixed Gemini reports rendering their final headings and tables as one raw code block when the model emitted a lone closing Markdown fence without its opener.
+
+## [17.3.1] - 2026-08-13
+
+### Fixed
+
+- Fixed screen flashing in Herdr panes during transcript streaming.
+
+## [17.3.0] - 2026-08-13
+
+### Fixed
+
+- Fixed an issue where repeated pane-width adjustments or terminal resizing could corrupt native scrollback and soft-wrap behavior.
+- Fixed an issue where scaled OSC 66 Markdown headings (such as "Large Headings" on Kitty) would render as invisible placeholders or get partially cleared after a redraw or terminal resize.
+
+## [17.2.13] - 2026-08-11
+
+### Fixed
+
+- Fixed inline images rendering permanently cropped on Kitty direct-placement terminals (WezTerm, Warp) when an image block straddled the viewport top during streaming: placements are now clipped to the visible slice at write time, and a placement id whose cells reached native scrollback is never re-used ([#8070](https://github.com/can1357/oh-my-pi/pull/8070) by [@voonfoo](https://github.com/voonfoo))
+
 ## [17.2.12] - 2026-08-08
 
 ### Fixed

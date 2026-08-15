@@ -2,8 +2,19 @@ import type { PresetDef, StatusLinePreset } from "./types";
 
 export const STATUS_LINE_PRESETS: Record<StatusLinePreset, PresetDef> = {
 	default: {
-		leftSegments: ["pi", "model", "mode", "collab", "path", "git", "pr", "context_pct", "cost"],
-		rightSegments: ["session_name"],
+		leftSegments: ["pi", "model", "mode", "collab", "path", "git", "pr", "subagents"],
+		rightSegments: [
+			"context_pct",
+			"time_spent",
+			"cache_hit",
+			"cache_read",
+			"token_total",
+			"token_rate",
+			"usage",
+			"cost",
+			"time",
+			"session_name",
+		],
 		separator: "powerline-thin",
 		segmentOptions: {
 			model: { showThinkingLevel: true },
@@ -67,8 +78,8 @@ export const STATUS_LINE_PRESETS: Record<StatusLinePreset, PresetDef> = {
 			"token_rate",
 			"cost",
 			"context_pct",
-			"context_total",
 			"time_spent",
+			"context_total",
 			"time",
 		],
 		separator: "powerline",

@@ -1,17 +1,23 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { Agent, type AgentMessage, type CompactionSummaryMessage, countTokens } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
-import { calculateContextTokens, estimateTokens, resolveThresholdTokens } from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import {
+	calculateContextTokens,
+	effectiveContextWindow,
+	estimateTokens,
+	resolveThresholdTokens,
+} from "@oh-my-pi/pi-agent-core/compaction";
+import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { estimateToolSchemaTokens } from "@oh-my-pi/pi-coding-agent/modes/utils/context-usage";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 const CONTEXT_WINDOW = 372_000;
 const CACHE_READ_TOKENS = 371_200;
@@ -34,15 +40,18 @@ describe("AgentSession advisor context maintenance", () => {
 	let authStorage: AuthStorage;
 	let session: AgentSession;
 
-	beforeEach(async () => {
+	beforeAll(() => {
 		tempDir = TempDir.createSync("@pi-advisor-context-maintenance-");
-		authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+		authStorage = createInMemoryAuthStorage();
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 	});
 
 	afterEach(async () => {
 		vi.restoreAllMocks();
 		await session?.dispose();
+	});
+
+	afterAll(async () => {
 		authStorage.close();
 		await tempDir.remove();
 	});
@@ -237,8 +246,6 @@ describe("AgentSession advisor context maintenance", () => {
 		releaseCredential.resolve();
 		await credentialReturned.promise;
 		await prompt;
-		await Bun.sleep(0);
-
 		expect(credentialSignal?.aborted).toBe(true);
 		expect(session.getAdvisorAgent()?.state.model).toBe(advisorMock);
 	});
@@ -551,5 +558,82 @@ describe("AgentSession advisor context maintenance", () => {
 			`${crossProviderModel.provider}/${crossProviderModel.id}`,
 		]);
 		expect(JSON.stringify(advisor.state.messages)).toContain("authenticated fallback summary");
+	});
+
+	// Finding I: advisor with missing/null metadata must use effectiveContextWindow helper
+	function createMuseHarnessWithModel(advisorMock: MockModel) {
+		authStorage.setRuntimeApiKey("meta", "test-key");
+		const primaryMock = createMockModel({
+			provider: "anthropic",
+			responses: [{ content: ["primary complete"] }],
+		});
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join(`models-${Math.random()}.yml`));
+		const settings = Settings.isolated({
+			"advisor.syncBacklog": "1",
+			"compaction.enabled": true,
+			"compaction.strategy": "context-full",
+			"contextPromotion.enabled": false,
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: primaryMock, systemPrompt: [], tools: [] },
+			streamFn: primaryMock.stream,
+		});
+		const museSession = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			advisorTools: [],
+			advisorStreamFn: advisorMock.stream,
+		} as never);
+		settings.setModelRole("advisor", `${advisorMock.provider}/${advisorMock.id}`);
+		const enabled = museSession.setAdvisorEnabled(true);
+		if (!enabled) throw new Error("advisor not enabled");
+		const advisor = museSession.getAdvisorAgent();
+		if (!advisor) throw new Error("advisor agent missing");
+		advisor.setModel(advisorMock as never);
+		vi.spyOn(modelRegistry, "getApiKey").mockImplementation(async model =>
+			model === primaryMock ? "test-key" : undefined,
+		);
+		return { session: museSession, advisor, advisorMock, settings, primaryMock, modelRegistry };
+	}
+
+	it("maintains Muse advisor with null contextWindow via effective window (not silently skipped)", async () => {
+		const museNull = createMockModel({
+			id: "muse-spark-1.1",
+			provider: "meta",
+			contextWindow: null as unknown as number,
+			responses: [{ content: ["advisor reviewed"] }],
+		});
+		(museNull as unknown as Record<string, unknown>).contextWindow = null;
+		const { session: museSession, advisor, advisorMock, settings } = createMuseHarnessWithModel(museNull);
+		settings.set("compaction.thresholdTokens", 1000);
+		const anchor: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "prior advisor output" }],
+			api: advisorMock.api,
+			provider: advisorMock.provider,
+			model: advisorMock.id,
+			usage: {
+				input: INPUT_TOKENS,
+				output: OUTPUT_TOKENS,
+				cacheRead: CACHE_READ_TOKENS,
+				cacheWrite: 0,
+				total: CACHE_READ_TOKENS + INPUT_TOKENS + OUTPUT_TOKENS,
+			},
+			stopReason: "stop",
+			timestamp: Date.now() - 1000,
+		} as unknown as AssistantMessage;
+		advisor.emitExternalEvent({ type: "message_end", message: anchor });
+		await museSession.prompt("small current update");
+		expect(JSON.stringify(advisor.state.messages).includes("prior advisor output")).toBe(false);
+	});
+
+	it("effectiveContextWindow for advisor custom muse-lookalike stays disabled", () => {
+		const fakeMuse = { id: "not-muse-spark", provider: "custom", contextWindow: null } as unknown as Model;
+		expect(effectiveContextWindow(fakeMuse)).toBe(0);
+		const genuine = { id: "muse-spark-1.1", provider: "meta", contextWindow: null } as unknown as Model;
+		expect(effectiveContextWindow(genuine)).toBe(1_048_576);
 	});
 });

@@ -24,6 +24,7 @@ import {
 	compactionContextTokens,
 	createCompactionSummaryMessage,
 	DEFAULT_SHAKE_CONFIG,
+	effectiveContextWindow,
 	effectiveReserveTokens,
 	estimateTokens,
 	hasContextTokenUsage,
@@ -235,7 +236,7 @@ export interface SessionMaintenanceHost {
 	resetCodexProviderAfterCompaction(compaction: CodexCompactionContext): void;
 	resetPlanReference(): void;
 	syncTodoPhasesFromBranch(): void;
-	resetAdvisorRuntimes(): void;
+	resetAdvisorRuntimes(reason?: string): void;
 	rebaseAfterCompaction(): void;
 	recordAnchoredHistoryRewrite(tokensRemoved: number): void;
 	getContextBreakdown(options?: {
@@ -345,7 +346,7 @@ export class SessionMaintenance {
 		await this.#host.sessionManager.rewriteEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
-		this.#host.resetAdvisorRuntimes();
+		this.#host.resetAdvisorRuntimes("prune-tool-outputs");
 		this.#host.syncTodoPhasesFromBranch();
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
 		return result;
@@ -388,7 +389,7 @@ export class SessionMaintenance {
 		await this.#host.sessionManager.rewriteEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
-		this.#host.resetAdvisorRuntimes();
+		this.#host.resetAdvisorRuntimes("prune-stale-tool-results");
 		this.#host.syncTodoPhasesFromBranch();
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
 		return result;
@@ -439,7 +440,7 @@ export class SessionMaintenance {
 		await this.#host.sessionManager.rewriteEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
-		this.#host.resetAdvisorRuntimes();
+		this.#host.resetAdvisorRuntimes("drop-images");
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
 		return { removed };
 	}
@@ -527,7 +528,7 @@ export class SessionMaintenance {
 		await this.#host.sessionManager.rewriteEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
-		this.#host.resetAdvisorRuntimes();
+		this.#host.resetAdvisorRuntimes("shake");
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
 
 		return {
@@ -777,7 +778,7 @@ export class SessionMaintenance {
 							"snapcompact cannot run locally: standing image payload exceeds the per-request budget.",
 						);
 					}
-					const ctxWindow = this.#model?.contextWindow ?? 0;
+					const ctxWindow = effectiveContextWindow(this.#model);
 					const budget =
 						ctxWindow > 0
 							? ctxWindow - effectiveReserveTokens(ctxWindow, effectiveSettings)
@@ -879,7 +880,7 @@ export class SessionMaintenance {
 			// plan reference. Clear the sent-flag so #buildPlanReferenceMessage re-reads
 			// the plan from disk and re-injects it on the next turn (issue #1246).
 			this.#host.resetPlanReference();
-			this.#host.resetAdvisorRuntimes();
+			this.#host.resetAdvisorRuntimes("compact");
 			this.#host.syncTodoPhasesFromBranch();
 			if (codexCompaction) {
 				this.#host.resetCodexProviderAfterCompaction(codexCompaction);
@@ -906,7 +907,7 @@ export class SessionMaintenance {
 				firstKeptEntryId,
 				tokensBefore,
 				details,
-				preserveData,
+				preserveData: snapcompact.stripPreservedArchive(preserveData),
 			};
 			options?.onComplete?.(compactionResult);
 			return compactionResult;
@@ -1012,7 +1013,7 @@ export class SessionMaintenance {
 	async runPrePromptCompactionIfNeeded(messages: AgentMessage[]): Promise<void> {
 		const model = this.#model;
 		if (!model) return;
-		const contextWindow = model.contextWindow ?? 0;
+		const contextWindow = effectiveContextWindow(model);
 		if (contextWindow <= 0) return;
 		const compactionSettings = this.#host.settings.getGroup("compaction");
 		const contextTokens = this.#estimatePrePromptContextTokens(messages, contextWindow);
@@ -1080,7 +1081,7 @@ export class SessionMaintenance {
 			return;
 
 		const model = this.#model;
-		const contextWindow = model?.contextWindow ?? 0;
+		const contextWindow = effectiveContextWindow(model);
 		if (contextWindow <= 0) return;
 
 		const compactionSettings = this.#host.settings.getGroup("compaction");
@@ -1096,6 +1097,16 @@ export class SessionMaintenance {
 			.reverse()
 			.find((message): message is AssistantMessage => message.role === "assistant");
 		if (!lastAssistant || lastAssistant.stopReason === "aborted" || lastAssistant.stopReason === "error") return;
+
+		// Decide from the live agent context before waiting for the asynchronous
+		// session journal. The persistence barrier is required only when maintenance
+		// will actually rewrite history; awaiting it on every ordinary tool turn lets
+		// a slow message_end listener leave the TUI "generating" with no provider
+		// request or tool running.
+		const billedContextTokens = calculateContextTokens(lastAssistant.usage);
+		const storedContextTokens = this.#estimateStoredContextTokens();
+		const contextTokens = compactionContextTokens(billedContextTokens, storedContextTokens);
+		if (!shouldCompact(contextTokens, contextWindow, compactionSettings)) return;
 
 		if (!(await this.#host.persistTurnMessagesForMidRunCompaction(context))) return;
 		if (this.#midTurnCompactionDeadEnds.has(activeMessages)) {
@@ -1117,11 +1128,6 @@ export class SessionMaintenance {
 			this.#midTurnCompactionDeadEnds.delete(activeMessages);
 			this.#midTurnDeadEndPendingPrePrompt = false;
 		}
-
-		const billedContextTokens = calculateContextTokens(lastAssistant.usage);
-		const storedContextTokens = this.#estimateStoredContextTokens();
-		const contextTokens = compactionContextTokens(billedContextTokens, storedContextTokens);
-		if (!shouldCompact(contextTokens, contextWindow, compactionSettings)) return;
 
 		// Promote to a larger-context sibling before compacting, mirroring the
 		// pre-prompt (runPrePromptCompactionIfNeeded) and post-turn threshold
@@ -1199,7 +1205,7 @@ export class SessionMaintenance {
 	): Promise<CompactionCheckResult> {
 		// Skip if message was aborted (user cancelled) - unless skipAbortedCheck is false
 		if (skipAbortedCheck && assistantMessage.stopReason === "aborted") return COMPACTION_CHECK_NONE;
-		const contextWindow = this.#model?.contextWindow ?? 0;
+		const contextWindow = effectiveContextWindow(this.#model);
 		const generation = this.#host.promptGeneration();
 		// Skip overflow check if the message came from a different model.
 		// This handles the case where user switched from a smaller-context model (e.g. opus)
@@ -1261,7 +1267,7 @@ export class SessionMaintenance {
 			this.#host.settings.getGroup("contextPromotion").enabled
 		) {
 			const failedModel = this.#host.modelRegistry.find(assistantMessage.provider, assistantMessage.model);
-			const failedWindow = failedModel?.contextWindow ?? 0;
+			const failedWindow = effectiveContextWindow(failedModel);
 			const promotionTarget = failedModel
 				? resolveContextPromotionConfiguredTarget(failedModel, this.#host.modelRegistry.getAvailable())
 				: undefined;
@@ -1435,7 +1441,7 @@ export class SessionMaintenance {
 		if (!promotionSettings.enabled) return false;
 		const currentModel = this.#model;
 		if (!currentModel) return false;
-		const contextWindow = currentModel.contextWindow ?? 0;
+		const contextWindow = effectiveContextWindow(currentModel);
 		if (contextWindow <= 0) return false;
 		const targetModel = await this.resolveContextPromotionTarget(currentModel, contextWindow);
 		if (!targetModel) return false;
@@ -1697,7 +1703,7 @@ export class SessionMaintenance {
 	 * (issue #3247).
 	 */
 	#computeSnapcompactMaxFrames(preparation: CompactionPreparation, settings: CompactionSettings): number {
-		const ctxWindow = this.#model?.contextWindow ?? 0;
+		const ctxWindow = effectiveContextWindow(this.#model);
 		if (ctxWindow <= 0) return Math.min(snapcompact.MAX_FRAMES_DEFAULT, snapcompact.maxFramesForDataBudget());
 		const reserve = effectiveReserveTokens(ctxWindow, settings);
 		let baseTokens = computeNonMessageTokens(this.#host.nonMessageTokenSource());
@@ -1796,7 +1802,7 @@ export class SessionMaintenance {
 	 * optimistically allow the continuation (preserving prior behavior).
 	 */
 	#compactionCreatedHeadroom(): boolean {
-		const contextWindow = this.#model?.contextWindow ?? 0;
+		const contextWindow = effectiveContextWindow(this.#model);
 		if (contextWindow <= 0) return true;
 		const compactionSettings = this.#host.settings.getGroup("compaction");
 		const residualTokens = compactionContextTokens(
@@ -1817,38 +1823,57 @@ export class SessionMaintenance {
 	}
 
 	/**
-	 * Retry-side counterpart to {@link #compactionCreatedHeadroom}. An
-	 * overflow/incomplete recovery only needs the rebuilt prompt to *fit* the
-	 * window again — it does not have to land under the compaction threshold, let
-	 * alone the stricter `COMPACTION_RECOVERY_BAND × threshold` hysteresis the
-	 * auto-continue thrash guard uses. Reusing the band here turned recoverable
-	 * overflows into manual dead-ends: a 200k-window prompt compacted from
-	 * overflow down to ~150k is comfortably retryable, but sits above
-	 * `0.8 × 170k = 136k` and was wrongly refused (PR #3412 review).
+	 * Whether the current stored context fits `model`'s usable window
+	 * (`contextWindow - reserve`), using the same reserve resolution as
+	 * compaction. This is deliberately independent of `compaction.enabled`: an
+	 * oversized request overflows the provider whether or not compaction would
+	 * have run, so a fit check must judge the raw budget.
 	 *
-	 * Measures residual context against the usable budget (`contextWindow - reserve`).
 	 * The default absolute reserve can exceed bundled small-context windows, or
 	 * nearly consume a 16k-class window; those known-impossible defaults fall
 	 * back to the proportional 15% reserve. Explicit valid reserves still define
-	 * the usable prompt budget so retries do not enter headroom the user
-	 * intentionally reserved. Callers MUST
-	 * invoke this AFTER dropping the failed assistant from `this.#host.messages()`, so
-	 * the just-failed turn (which the retry prompt will not include) is excluded
-	 * from the estimate.
+	 * the usable prompt budget so callers do not enter headroom the user
+	 * intentionally reserved.
 	 *
-	 * When the model/window is unknown we cannot evaluate the budget, so we
-	 * optimistically allow the retry (preserving prior behavior).
+	 * Used by the retry-fallback selector to skip a candidate whose window cannot
+	 * hold the retry context before switching onto it, and (via
+	 * {@link #compactionCreatedRetryFit}) to decide whether an overflow recovery
+	 * produced a retryable prompt. `excludedMessage` identifies a failed assistant
+	 * turn that will be removed before retrying; subtracting it makes the selector
+	 * judge the request that will actually be sent. When the window is unknown we
+	 * cannot evaluate the budget, so we optimistically report a fit (preserving
+	 * prior behavior).
 	 */
-	#compactionCreatedRetryFit(): boolean {
-		const contextWindow = this.#model?.contextWindow ?? 0;
+	contextFitsModel(model: Model, excludedMessage?: AssistantMessage): boolean {
+		const contextWindow = effectiveContextWindow(model);
 		if (contextWindow <= 0) return true;
+		const activeExcludedMessage =
+			excludedMessage && this.#host.messages().includes(excludedMessage) ? excludedMessage : undefined;
+		const providerExcludedTokens = activeExcludedMessage ? estimateTokens(activeExcludedMessage) : 0;
+		const storedExcludedTokens = activeExcludedMessage
+			? estimateTokens(activeExcludedMessage, { excludeEncryptedReasoning: true })
+			: 0;
 		const compactionSettings = this.#host.settings.getGroup("compaction");
 		const residualTokens = compactionContextTokens(
-			this.#host.getContextUsage({ contextWindow })?.tokens ?? 0,
-			this.#estimateStoredContextTokens(),
+			Math.max(0, (this.#host.getContextUsage({ contextWindow })?.tokens ?? 0) - providerExcludedTokens),
+			Math.max(0, this.#estimateStoredContextTokens() - storedExcludedTokens),
 		);
 		const fitBudget = Math.max(0, contextWindow - resolveBudgetReserveTokens(contextWindow, compactionSettings));
 		return residualTokens <= fitBudget;
+	}
+
+	/**
+	 * Retry-side check: whether an overflow/incomplete recovery rebuilt a prompt
+	 * that fits the active model's window again. Callers MUST invoke this AFTER
+	 * dropping the failed assistant from `this.#host.messages()` so the just-failed
+	 * turn (absent from the retry prompt) is excluded from the estimate. Unlike
+	 * the `COMPACTION_RECOVERY_BAND × threshold` hysteresis the auto-continue
+	 * thrash guard uses, a retry only needs to *fit* — a 200k-window prompt
+	 * compacted from overflow down to ~150k is retryable even though it sits above
+	 * `0.8 × 170k` (PR #3412 review).
+	 */
+	#compactionCreatedRetryFit(): boolean {
+		return this.#model ? this.contextFitsModel(this.#model) : true;
 	}
 
 	/**
@@ -1958,7 +1983,7 @@ export class SessionMaintenance {
 	 * never create headroom, so the caller must not append it.
 	 */
 	#computeSnapcompactRescueMaxFrames(settings: CompactionSettings, keptTailTokens: number): number {
-		const ctxWindow = this.#model?.contextWindow ?? 0;
+		const ctxWindow = effectiveContextWindow(this.#model);
 		if (ctxWindow <= 0) return Math.min(snapcompact.MAX_FRAMES_DEFAULT, snapcompact.maxFramesForDataBudget());
 		const thresholdTokens = resolveThresholdTokens(ctxWindow, settings);
 		const recoveryBandTokens = Math.floor(thresholdTokens * COMPACTION_RECOVERY_BAND);
@@ -2094,7 +2119,7 @@ export class SessionMaintenance {
 		// and advisor cursors / todo phases were derived from the replaced
 		// history.
 		this.#host.resetPlanReference();
-		this.#host.resetAdvisorRuntimes();
+		this.#host.resetAdvisorRuntimes("compaction-rescue");
 		this.#host.syncTodoPhasesFromBranch();
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
 		// Extensions must see the entry that is now active, not (only) the one
@@ -2390,7 +2415,10 @@ export class SessionMaintenance {
 					await this.#host.emitSessionEvent({
 						type: "auto_compaction_end",
 						action,
-						result: frameRescueResult,
+						result: frameRescueResult && {
+							...frameRescueResult,
+							preserveData: snapcompact.stripPreservedArchive(frameRescueResult.preserveData),
+						},
 						aborted: false,
 						willRetry: false,
 						skipped: frameRescueResult === undefined,
@@ -2530,7 +2558,7 @@ export class SessionMaintenance {
 							snapcompactResult = undefined;
 						}
 						if (snapcompactResult) {
-							const ctxWindow = this.#model?.contextWindow ?? 0;
+							const ctxWindow = effectiveContextWindow(this.#model);
 							const budget =
 								ctxWindow > 0
 									? ctxWindow - effectiveReserveTokens(ctxWindow, compactionSettings)
@@ -2763,7 +2791,7 @@ export class SessionMaintenance {
 			// plan reference. Clear the sent-flag so #buildPlanReferenceMessage re-reads
 			// the plan from disk and re-injects it on the next turn (issue #1246).
 			this.#host.resetPlanReference();
-			this.#host.resetAdvisorRuntimes();
+			this.#host.resetAdvisorRuntimes("auto-compaction");
 			this.#host.syncTodoPhasesFromBranch();
 			if (codexCompaction) {
 				this.#host.resetCodexProviderAfterCompaction(codexCompaction);
@@ -2790,7 +2818,7 @@ export class SessionMaintenance {
 				firstKeptEntryId,
 				tokensBefore,
 				details,
-				preserveData,
+				preserveData: snapcompact.stripPreservedArchive(preserveData),
 			};
 			// Post-maintenance progress guard — evaluated BEFORE emitting
 			// auto_compaction_end so the TUI rebuild triggered by that event
@@ -2993,7 +3021,7 @@ export class SessionMaintenance {
 			// any supersede/drop-useless pruning that already rewrote the next prompt;
 			// without that pre-shake savings, shake can fall through to context-full
 			// even though the post-prune history is already inside the recovery band.
-			const contextWindow = this.#model?.contextWindow ?? 0;
+			const contextWindow = effectiveContextWindow(this.#model);
 			const compactionSettings = this.#host.settings.getGroup("compaction");
 			let stillOverThreshold = false;
 			if (contextWindow > 0) {

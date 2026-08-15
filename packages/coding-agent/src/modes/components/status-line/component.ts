@@ -1,7 +1,12 @@
-import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
+import {
+	type AssistantMessage,
+	antigravityRankingStrategy,
+	claudeRankingStrategy,
+	type UsageLimit,
+	type UsageReport,
+} from "@oh-my-pi/pi-ai";
 import { type Component, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 import { getProjectDir } from "@oh-my-pi/pi-utils";
 import { settings } from "../../../config/settings";
@@ -34,6 +39,7 @@ import type {
 
 const JJ_REFRESH_TTL_MS = 5000;
 const WATCHER_FAILURE_POLL_TTL_MS = 5000;
+const TIME_SPENT_TICK_MS = 1000;
 
 function normalizeCodexIdentityValue(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim() ? value.trim().toLowerCase() : undefined;
@@ -243,10 +249,10 @@ function resolveWorktreeContext(cwd: string): WorktreeContext | null {
 }
 
 /**
- * Per-{@link AgentSession} active-processing meter for the `time_spent`
- * segment. `activeMs` is the union of every completed `agent_start`→
- * `agent_end` window; `activeStartedAt` is the start timestamp of the
- * currently-running window, or `null` when idle.
+ * Per-{@link AgentSession} current-turn elapsed meter for the `time_spent`
+ * segment. `activeStartedAt` is the start timestamp of the currently-running
+ * top-level `agent_start` window, or `null` when idle. Elapsed time is only
+ * the open window — previous turns and idle gaps are not included.
  *
  * `sessionFile` snapshots the loaded session-file path at meter-creation
  * time. `AgentSession.switchSession` (/resume, /move, ACP fork, RPC
@@ -255,12 +261,10 @@ function resolveWorktreeContext(cwd: string): WorktreeContext | null {
  * cannot tell two conversations apart. `#meter()` compares this snapshot
  * against the live `session.sessionFile`, and a real-to-real change
  * starts the meter fresh instead of crediting the new conversation with
- * the previous one's accumulated active time. The undefined → real
- * first-save transition does not reset, since the session identity has
- * not changed.
+ * the previous one's elapsed window. The undefined → real first-save
+ * transition does not reset, since the session identity has not changed.
  */
 interface ActiveMeter {
-	activeMs: number;
 	activeStartedAt: number | null;
 	sessionFile: string | undefined;
 }
@@ -287,11 +291,71 @@ function hasGitBackedSegment(segments: readonly StatusLineSegmentId[]): boolean 
 	return hasGitSegment(segments) || hasPrSegment(segments);
 }
 
+interface WrappedStatusItem {
+	id?: StatusLineSegmentId;
+	content: string;
+}
+
+function wrappedStatusPriority(id: StatusLineSegmentId | undefined): number {
+	switch (id) {
+		case "context_pct":
+			return 100;
+		case "model":
+			return 95;
+		case "path":
+			return 90;
+		case "time_spent":
+			return 93;
+		case "git":
+			return 85;
+		case "cache_hit":
+			return 80;
+		case "cache_read":
+			return 78;
+		case "token_total":
+			return 75;
+		case "mode":
+			return 72;
+		case "usage":
+			return 82;
+		case "subagents":
+			return 65;
+		case "pr":
+			return 60;
+		case "cost":
+			return 55;
+		case "collab":
+			return 50;
+		case "pi":
+			return 40;
+		case "token_in":
+		case "token_out":
+			return 35;
+		case "cache_write":
+			return 30;
+		case "context_total":
+			return 25;
+		case "session_name":
+			return 20;
+		case "session":
+			return 15;
+		case "hostname":
+			return 10;
+		case "token_rate":
+			return 8; // drop tok/s first on zoom; keep elapsed/model/context
+		case "time":
+			return 5;
+		default:
+			return 55; // synthetic runtime badges (for example background jobs)
+	}
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // StatusLineComponent
 // ═══════════════════════════════════════════════════════════════════════════
 
 export class StatusLineComponent implements Component {
+	#widthEpochRevision = 0;
 	#settings: StatusLineSettings = {};
 	#effectiveSettings: EffectiveStatusLineSettings | undefined;
 	#cachedBranch: string | null | undefined = undefined;
@@ -319,8 +383,7 @@ export class StatusLineComponent implements Component {
 	// dropped rather than overwrite the value the newer resolve committed.
 	// Mirrors #jjCacheGeneration / #getJjBranch in this file.
 	#branchCacheGeneration = 0;
-	#gitWatcher: fs.FSWatcher | null = null;
-	#gitWatcherErrorListener: (() => void) | undefined = undefined;
+	#gitUnwatch: (() => void) | null = null;
 	#gitWatcherUnavailable = false;
 	#onBranchChange: (() => void) | null = null;
 	#disposed = false;
@@ -328,24 +391,24 @@ export class StatusLineComponent implements Component {
 	#hookStatuses: Map<string, string> = new Map();
 	#subagentCount: number = 0;
 	/**
-	 * Active-processing accounting for the `time_spent` segment, keyed per
+	 * Current-turn elapsed accounting for the `time_spent` segment, keyed per
 	 * {@link AgentSession} so the focus-controller mid-turn attach path
 	 * cannot leak an unmatched synthesized `agent_start` from a subagent
 	 * into the main session's meter.
 	 *
-	 * Each meter is `{ activeMs, activeStartedAt }`: `activeMs` is the union
-	 * of every completed `agent_start`→`agent_end` window since
-	 * {@link resetActiveTime} last reset it; `activeStartedAt` is the start
-	 * timestamp of the currently-running window (or `null` when idle).
-	 * `getActiveMs()` returns `activeMs + (now - activeStartedAt)` for the
-	 * currently-attached session, so the counter ticks live during a turn
-	 * and freezes the instant the agent yields.
+	 * Each meter tracks `activeStartedAt` for the currently-running
+	 * `agent_start` window (or `null` when idle). `getActiveMs()` returns
+	 * `now - activeStartedAt` while the window is open and `0` when idle, so
+	 * the counter ticks live during a turn — including waits on background
+	 * jobs — and hides the instant the agent yields.
 	 *
 	 * WeakMap so meters die with their session (e.g. a parked subagent
 	 * dropped from the registry); the main session's meter survives focus
 	 * round-trips because the same {@link AgentSession} ref is reused.
 	 */
 	#activeMeters: WeakMap<AgentSession, ActiveMeter> = new WeakMap();
+	#onActivityTick: (() => void) | null = null;
+	#activityTick: Timer | null = null;
 	#planModeStatus: { enabled: boolean; paused: boolean } | null = null;
 	#loopModeStatus: SegmentContext["loopMode"] = null;
 	#goalModeStatus: { enabled: boolean; paused: boolean } | null = null;
@@ -395,8 +458,10 @@ export class StatusLineComponent implements Component {
 	// Provider usage caching (5-min TTL, OAuth/sub only)
 	#cachedUsage: {
 		tier?: string;
+		windows?: Array<{ label: string; percent: number; resetMs?: number }>;
 		fiveHour?: { percent: number; resetMinutes?: number };
 		sevenDay?: { percent: number; resetHours?: number };
+		monthly?: { percent: number; resetHours?: number };
 	} | null = null;
 	#cachedUsageContextKey: string | null = null;
 	#usageFetchedAt = 0;
@@ -428,8 +493,22 @@ export class StatusLineComponent implements Component {
 			compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
 		};
 	}
+	/**
+	 * Fail closed when the global settings proxy is not initialized.
+	 *
+	 * The async PR-lookup continuation in `setCachedPr` reaches
+	 * `#getCurrentBranch` -> here, and can land after the owning session (or a
+	 * test file) has torn `Settings` down, where the proxy throws "Settings not
+	 * initialized". Treating that as "git disabled" keeps a late background
+	 * refresh from raising an unhandled error; it is never hit on the
+	 * interactive path, which always initializes settings before rendering.
+	 */
 	#gitEnabled(): boolean {
-		return settings.get("git.enabled");
+		try {
+			return settings.get("git.enabled");
+		} catch {
+			return false;
+		}
 	}
 	#hasGitBackedSegment(): boolean {
 		const effectiveSettings = this.#resolveSettings();
@@ -475,21 +554,23 @@ export class StatusLineComponent implements Component {
 	 * synthesized an `agent_start` on a mid-turn attach but the matching
 	 * real `agent_end` never reached us — the user detached before it
 	 * fired, and re-focusing later (after the agent finished) would
-	 * otherwise tick over the entire detached gap. Crediting that gap to
-	 * `activeMs` would be wrong (the agent finished at some point we never
-	 * observed), so the window is dropped rather than folded in.
+	 * otherwise tick over the entire detached gap. Crediting that gap as
+	 * current-turn elapsed would be wrong (the agent finished at some point
+	 * we never observed), so the window is dropped.
 	 */
 	#closeStaleActiveWindow(): void {
 		const meter = this.#meter();
 		if (meter.activeStartedAt === null) return;
 		if (this.session.isStreaming) return;
 		meter.activeStartedAt = null;
+		this.#syncActivityTick();
 	}
 
 	updateSettings(settings: StatusLineSettings): void {
 		this.#settings = settings;
 		this.#effectiveSettings = undefined;
 		if (this.#onBranchChange) this.#setupGitWatcher();
+		this.#syncActivityTick();
 	}
 
 	getEffectiveSettingsForTest(): EffectiveStatusLineSettings {
@@ -516,17 +597,16 @@ export class StatusLineComponent implements Component {
 	}
 
 	/**
-	 * Reset the currently-attached session's active-time accumulators so
+	 * Reset the currently-attached session's current-turn elapsed window so
 	 * the `time_spent` segment starts from zero. Called from `/clear`,
-	 * fresh-session, and joined-collab paths; both the completed
-	 * accumulator and any in-flight window are dropped, so a reset
-	 * mid-turn ignores the running window (the matching `markActivityEnd`
-	 * will see an idle meter and no-op).
+	 * fresh-session, and joined-collab paths; any in-flight window is
+	 * dropped, so a reset mid-turn ignores the running window (the matching
+	 * `markActivityEnd` will see an idle meter and no-op).
 	 */
 	resetActiveTime(): void {
 		const meter = this.#meter();
-		meter.activeMs = 0;
 		meter.activeStartedAt = null;
+		this.#syncActivityTick();
 	}
 
 	/**
@@ -540,30 +620,74 @@ export class StatusLineComponent implements Component {
 		const meter = this.#meter();
 		if (meter.activeStartedAt !== null) return;
 		meter.activeStartedAt = Date.now();
+		this.#syncActivityTick();
 	}
 
 	/**
-	 * Close the currently-attached session's open active-processing
-	 * window, folding its elapsed time into the accumulator. Idempotent
-	 * when the meter is already idle so callers can fire it on every
-	 * `agent_end` without guarding.
+	 * Close the currently-attached session's open current-turn window.
+	 * Idempotent when the meter is already idle so callers can fire it on
+	 * every `agent_end` without guarding. Non-terminal settles that leave
+	 * background work running must not call this, so elapsed time keeps
+	 * advancing until the terminal `agent_end`.
 	 */
 	markActivityEnd(): void {
 		const meter = this.#meter();
 		if (meter.activeStartedAt === null) return;
-		meter.activeMs += Math.max(0, Date.now() - meter.activeStartedAt);
 		meter.activeStartedAt = null;
+		this.#syncActivityTick();
 	}
 
 	/**
-	 * Snapshot of total active-processing time for the currently-attached
-	 * session, including any in-flight window. Exposed for the segment
-	 * context builder; tests assert against this too.
+	 * Snapshot of current-turn elapsed time for the currently-attached
+	 * session. `0` when idle. Exposed for the segment context builder;
+	 * tests assert against this too.
 	 */
 	getActiveMs(): number {
 		const meter = this.#meter();
-		if (meter.activeStartedAt === null) return meter.activeMs;
-		return meter.activeMs + Math.max(0, Date.now() - meter.activeStartedAt);
+		if (meter.activeStartedAt === null) return 0;
+		return Math.max(0, Date.now() - meter.activeStartedAt);
+	}
+
+	/**
+	 * Register a ~1 Hz callback used to repaint the status line while a
+	 * current-turn window is open. Interactive mode wires this to
+	 * `ui.requestRender`. No-ops when `time_spent` is not in the layout.
+	 */
+	watchActivityTick(onTick: () => void): void {
+		this.#onActivityTick = onTick;
+		this.#syncActivityTick();
+	}
+
+	#hasTimeSpentSegment(): boolean {
+		const settings = this.#resolveSettings();
+		return settings.leftSegments.includes("time_spent") || settings.rightSegments.includes("time_spent");
+	}
+
+	#clearActivityTick(): void {
+		if (!this.#activityTick) return;
+		clearInterval(this.#activityTick);
+		this.#activityTick = null;
+	}
+
+	#syncActivityTick(): void {
+		const shouldTick =
+			!this.#disposed &&
+			this.#onActivityTick !== null &&
+			this.#meter().activeStartedAt !== null &&
+			this.#hasTimeSpentSegment();
+		if (!shouldTick) {
+			this.#clearActivityTick();
+			return;
+		}
+		if (this.#activityTick) return;
+		this.#activityTick = setInterval(() => {
+			if (this.#disposed || this.#meter().activeStartedAt === null || !this.#hasTimeSpentSegment()) {
+				this.#clearActivityTick();
+				return;
+			}
+			this.#onActivityTick?.();
+		}, TIME_SPENT_TICK_MS);
+		this.#activityTick.unref?.();
 	}
 
 	/**
@@ -572,8 +696,8 @@ export class StatusLineComponent implements Component {
 	 * {@link AgentSession} ref (`switchSession` paths: `/resume`, `/move`,
 	 * ACP fork/load, RPC `switch_session`, extension `switchSession`):
 	 * a real-to-real change starts the meter fresh so the new
-	 * conversation does not inherit the previous one's accumulated active
-	 * time. The undefined → real first-save transition only refreshes the
+	 * conversation does not inherit the previous one's elapsed window.
+	 * The undefined → real first-save transition only refreshes the
 	 * snapshot — the conversation identity has not changed.
 	 */
 	#meter(): ActiveMeter {
@@ -589,7 +713,7 @@ export class StatusLineComponent implements Component {
 			}
 		}
 		if (!meter) {
-			meter = { activeMs: 0, activeStartedAt: null, sessionFile: currentFile };
+			meter = { activeStartedAt: null, sessionFile: currentFile };
 			this.#activeMeters.set(this.session, meter);
 		}
 		return meter;
@@ -663,40 +787,29 @@ export class StatusLineComponent implements Component {
 			return;
 		}
 
-		const watchPath = git.repo.isReftableSync(repository)
-			? path.join(repository.gitDir, "reftable")
-			: repository.headPath;
-
+		// git swaps HEAD via `HEAD.lock` + atomic rename. That both unlinks the
+		// HEAD inode (freezing a file-bound `fs.watch` after the first switch —
+		// issue #8412) and, on Bun/Linux, permanently wedges an inotify-backed
+		// directory watch after the first rename event (oven-sh/bun#24875).
+		// `git.head.watch` stat-polls the HEAD path (or the reftable dir), which
+		// survives inode swaps on every platform. A vanished repo surfaces as a
+		// stat change too, so there is no separate watcher error path.
 		try {
-			const watcher = fs.watch(watchPath, () => {
-				if (this.#disposed || this.#gitWatcher !== watcher) return;
+			const unwatch = git.head.watch(repository, () => {
+				if (this.#disposed || this.#gitUnwatch !== unwatch) return;
 				this.invalidateGitCaches();
 				this.#onBranchChange?.();
 			});
-			const onError = () => {
-				if (this.#gitWatcher !== watcher) return;
-				this.#retireGitWatcher();
-				this.#gitWatcherUnavailable = true;
-				if (this.#disposed) return;
-				this.invalidateGitCaches();
-				this.#onBranchChange?.();
-			};
-			this.#gitWatcher = watcher;
-			this.#gitWatcherErrorListener = onError;
-			watcher.on("error", onError);
+			this.#gitUnwatch = unwatch;
 		} catch {
 			this.#gitWatcherUnavailable = true;
 		}
 	}
 
 	#retireGitWatcher(): void {
-		const watcher = this.#gitWatcher;
-		const onError = this.#gitWatcherErrorListener;
-		this.#gitWatcher = null;
-		this.#gitWatcherErrorListener = undefined;
-		if (!watcher) return;
-		if (onError) watcher.off("error", onError);
-		watcher.close();
+		const unwatch = this.#gitUnwatch;
+		this.#gitUnwatch = null;
+		unwatch?.();
 	}
 
 	dispose(): void {
@@ -705,6 +818,8 @@ export class StatusLineComponent implements Component {
 		this.#branchResolveActive = undefined;
 		this.#resetJjRequests();
 		this.#onBranchChange = null;
+		this.#onActivityTick = null;
+		this.#clearActivityTick();
 		this.#clearUsageStartTimer();
 		this.#onCodexResetFireworks = undefined;
 		this.#codexResetSnapshots.clear();
@@ -718,6 +833,7 @@ export class StatusLineComponent implements Component {
 	}
 
 	invalidate(): void {
+		this.#widthEpochRevision++;
 		// Generic repaint invalidation (theme change, message event, model
 		// switch, …). Must NOT abort or restart a live reftable HEAD/PR resolve:
 		// the render path self-invalidates via cwd/context cache-miss checks, so
@@ -1173,13 +1289,18 @@ export class StatusLineComponent implements Component {
 		return this.#vibeWorkerTokenRate?.() ?? null;
 	}
 
-	#formatUsageContextKey(activeProvider: string | undefined, identity: OAuthAccountIdentity | undefined): string {
+	#formatUsageContextKey(
+		activeProvider: string | undefined,
+		identity: OAuthAccountIdentity | undefined,
+		activeModelId?: string,
+	): string {
 		if (!activeProvider) return "";
-		// orgId is part of the key: rotating between two same-email Anthropic
-		// subscriptions must invalidate the cached usage immediately instead of
-		// showing the previous org's quota for the rest of the cache TTL.
+		// Model is part of the key: Anthropic Opus/Fable and Antigravity counters are
+		// model-scoped, so switching models on the same provider/account must
+		// invalidate the 5-min cached usage and re-normalize quota windows.
 		return [
 			activeProvider,
+			activeModelId ?? "",
 			identity?.accountId ?? "",
 			identity?.email ?? "",
 			identity?.projectId ?? "",
@@ -1189,10 +1310,11 @@ export class StatusLineComponent implements Component {
 
 	#getUsageContextKey(session: AgentSession): string {
 		const activeProvider = session.state.model?.provider ?? session.model?.provider;
+		const activeModelId = session.state.model?.id ?? session.model?.id;
 		const identity = activeProvider
 			? session.modelRegistry?.authStorage?.getOAuthAccountIdentity(activeProvider, session.sessionId)
 			: undefined;
-		return this.#formatUsageContextKey(activeProvider, identity);
+		return this.#formatUsageContextKey(activeProvider, identity, activeModelId);
 	}
 
 	/**
@@ -1255,11 +1377,20 @@ export class StatusLineComponent implements Component {
 			activeProvider && session.modelRegistry?.authStorage
 				? session.modelRegistry.authStorage.getOAuthAccountIdentity(activeProvider, session.sessionId)
 				: undefined;
-		const normalized = this.#normalizeUsageReports(reports, activeProvider, activeIdentity);
+		const normalized = this.#normalizeUsageReports(
+			reports,
+			activeProvider,
+			this.session.state.model?.id,
+			activeIdentity,
+		);
 		const resetSnapshot =
 			activeProvider === "openai-codex" ? this.#normalizeCodexResetSnapshot(reports, activeIdentity) : null;
+		const usageChanged = this.#cachedUsage !== normalized;
 		this.#cachedUsage = normalized;
 		this.#usageFetchedAt = Date.now();
+		// Usage fetch is async; without a repaint the top border stays blank until
+		// some unrelated event (git resolve, keystroke, …) rebuilds it.
+		if (usageChanged) this.#onBranchChange?.();
 		if (!resetSnapshot) return;
 		const contextKey = this.#formatUsageContextKey(activeProvider, activeIdentity);
 		const previous = this.#codexResetSnapshots.get(contextKey);
@@ -1363,18 +1494,33 @@ export class StatusLineComponent implements Component {
 	#normalizeUsageReports(
 		reports: unknown,
 		activeProvider?: string,
+		activeModelId?: string,
 		activeIdentity?: OAuthAccountIdentity,
 	): {
 		tier?: string;
+		windows?: Array<{ label: string; percent: number; resetMs?: number }>;
 		fiveHour?: { percent: number; resetMinutes?: number };
 		sevenDay?: { percent: number; resetHours?: number };
+		monthly?: { percent: number; resetHours?: number };
 	} | null {
 		if (!Array.isArray(reports)) return null;
 		let fiveHour: { percent: number; resetMinutes?: number } | undefined;
 		let sevenDay: { percent: number; resetHours?: number } | undefined;
+		let monthly: { percent: number; resetHours?: number } | undefined;
 		let fiveHourTier: string | undefined;
 		let sevenDayTier: string | undefined;
+		let monthlyTier: string | undefined;
+		let monthlyPriority = Number.POSITIVE_INFINITY;
+		const windows = new Map<string, { label: string; percent: number; resetMs?: number; tier?: string }>();
 		const now = Date.now();
+		const cursorMonthlyPriority = (limitId: unknown): number => {
+			// When /auth/usage and /api/usage-summary are merged, prefer the personal
+			// dashboard rails over legacy per-model request fractions.
+			if (limitId === "cursor:usd:individual-auto") return 0;
+			if (limitId === "cursor:usd:individual-plan" || limitId === "cursor:usd:individual-overall") return 1;
+			if (typeof limitId === "string" && limitId.startsWith("cursor:usd:individual-")) return 2;
+			return 3;
+		};
 		for (const report of reports) {
 			if (!report || typeof report !== "object") continue;
 			const provider = (report as { provider?: unknown }).provider;
@@ -1382,24 +1528,62 @@ export class StatusLineComponent implements Component {
 			const limits = (report as { limits?: unknown }).limits;
 			if (!Array.isArray(limits)) continue;
 			const usageReport = report as UsageReport;
-			for (const limit of limits) {
+			let relevantLimits = limits as UsageLimit[];
+			const rankingContext = activeModelId ? { modelId: activeModelId } : undefined;
+			if (provider === "google-antigravity") {
+				const scoped = antigravityRankingStrategy.scopeLimits?.(usageReport, rankingContext);
+				if (scoped && scoped.length > 0) relevantLimits = scoped;
+			} else if (provider === "anthropic") {
+				const { primary, secondary } = claudeRankingStrategy.findWindowLimits(usageReport, rankingContext);
+				const ranked = [primary, secondary].filter((limit): limit is UsageLimit => limit !== undefined);
+				if (ranked.length > 0) relevantLimits = ranked;
+			}
+			for (const limit of relevantLimits) {
 				if (!limit || typeof limit !== "object") continue;
 				if (activeIdentity && !limitMatchesActiveAccount(usageReport, limit as UsageLimit, activeIdentity)) {
 					continue;
 				}
-				const l = limit as {
-					scope?: { windowId?: string; tier?: string };
-					window?: { resetsAt?: number };
-					amount?: { usedFraction?: number };
-				};
-				const fraction = l.amount?.usedFraction;
-				if (typeof fraction !== "number") continue;
+				const l = limit as UsageLimit;
+				const amount = l.amount;
+				const fraction =
+					amount?.usedFraction ??
+					(amount?.used !== undefined && amount.limit !== undefined && amount.limit > 0
+						? amount.used / amount.limit
+						: amount?.unit === "percent" && amount.used !== undefined
+							? amount.used / 100
+							: amount?.remainingFraction !== undefined
+								? Math.max(0, 1 - amount.remainingFraction)
+								: undefined);
+				if (typeof fraction !== "number" || !Number.isFinite(fraction)) continue;
 				const windowId = l.scope?.windowId;
 				const tier = l.scope?.tier;
 				const resetsAt = l.window?.resetsAt;
+				const durationMs = l.window?.durationMs;
+				const windowClass =
+					windowId === "5h" || windowId === "7d"
+						? windowId
+						: durationMs !== undefined && Math.abs(durationMs - 5 * 3_600_000) <= 60_000
+							? "5h"
+							: durationMs !== undefined && Math.abs(durationMs - 7 * 86_400_000) <= 60_000
+								? "7d"
+								: undefined;
+				const windowKey = windowId === "5h" || windowId === "7d" ? windowId : l.id;
+				const genericWindowLabel = l.window?.label && l.window.label !== "Default" ? l.window.label : l.label;
+				const label = windowId === "5h" || windowId === "7d" ? windowId : genericWindowLabel;
+				if (typeof windowKey === "string" && typeof label === "string" && label.length > 0) {
+					const existingWindow = windows.get(windowKey);
+					if (!existingWindow || (existingWindow.tier !== undefined && !tier)) {
+						windows.set(windowKey, {
+							label,
+							percent: fraction * 100,
+							resetMs: typeof resetsAt === "number" ? Math.max(0, resetsAt - now) : undefined,
+							tier: tier || undefined,
+						});
+					}
+				}
 				// Accept tiered limits, but prefer untiered (backward compat with Anthropic).
 				// An untiered limit always replaces a tiered one; among same-tieredness, first wins.
-				if (windowId === "5h" && (!fiveHour || (fiveHourTier !== undefined && !tier))) {
+				if (windowClass === "5h" && (!fiveHour || (fiveHourTier !== undefined && !tier))) {
 					fiveHour = {
 						percent: fraction * 100,
 						resetMinutes:
@@ -1407,7 +1591,7 @@ export class StatusLineComponent implements Component {
 					};
 					fiveHourTier = tier || undefined;
 				}
-				if (windowId === "7d" && (!sevenDay || (sevenDayTier !== undefined && !tier))) {
+				if (windowClass === "7d" && (!sevenDay || (sevenDayTier !== undefined && !tier))) {
 					sevenDay = {
 						percent: fraction * 100,
 						resetHours:
@@ -1415,12 +1599,43 @@ export class StatusLineComponent implements Component {
 					};
 					sevenDayTier = tier || undefined;
 				}
+				// Monthly rendering is gated to providers with a single monthly
+				// bucket (Cursor's priority selector picks its personal rail;
+				// OpenCode Go emits exactly one). Copilot also emits monthly
+				// windows, but its multi-bucket shape needs a dedicated selector
+				// before we surface `mo N%` for it.
+				if (
+					(activeProvider === "cursor" || activeProvider === "opencode-go") &&
+					(windowId === "monthly" || windowId === "30d")
+				) {
+					const priority = cursorMonthlyPriority(l.id);
+					const shouldReplace =
+						!monthly ||
+						priority < monthlyPriority ||
+						(priority === monthlyPriority && monthlyTier !== undefined && !tier);
+					if (shouldReplace) {
+						monthly = {
+							percent: fraction * 100,
+							resetHours:
+								typeof resetsAt === "number"
+									? Math.max(0, Math.round((resetsAt - now) / 3_600_000))
+									: undefined,
+						};
+						monthlyTier = tier || undefined;
+						monthlyPriority = priority;
+					}
+				}
 			}
 		}
-		if (!fiveHour && !sevenDay) return null;
+		if (windows.size === 0 && !fiveHour && !sevenDay && !monthly) return null;
 		// Single compact label; prefer the five-hour tier if displayed windows ever disagree.
-		const effectiveTier = fiveHourTier ?? sevenDayTier;
-		return { tier: effectiveTier, fiveHour, sevenDay };
+		const effectiveTier = fiveHourTier ?? sevenDayTier ?? monthlyTier;
+		const usageWindows = Array.from(windows.values(), value => ({
+			label: value.label,
+			percent: value.percent,
+			resetMs: value.resetMs,
+		}));
+		return { tier: effectiveTier, windows: usageWindows, fiveHour, sevenDay, monthly };
 	}
 
 	/**
@@ -1682,24 +1897,29 @@ export class StatusLineComponent implements Component {
 		}
 
 		const rightParts: string[] = [];
+		const rightSegIds: (StatusLineSegmentId | undefined)[] = [];
 		for (const segId of effectiveSettings.rightSegments) {
 			if (subagentBadge && segId === "subagents") continue;
 			const rendered = renderSegment(segId, ctx);
 			if (rendered.visible && rendered.content) {
 				rightParts.push(rendered.content);
+				rightSegIds.push(segId);
 			}
 		}
 
 		const runningBackgroundJobs = this.session.getAsyncJobSnapshot()?.running.length ?? 0;
 		if (runningBackgroundJobs > 0) {
 			rightParts.unshift(theme.fg("statusLineSubagents", `${theme.icon.job} ${runningBackgroundJobs}`));
+			rightSegIds.unshift(undefined);
 		}
 		if (subagentBadge) {
 			rightParts.unshift(subagentBadge);
+			rightSegIds.unshift(undefined);
 		}
 		const topFillWidth = Math.max(0, width);
 		const left = [...leftParts];
 		const right = [...rightParts];
+		const rightIds = [...rightSegIds];
 
 		const leftSepWidth = visibleWidth(separatorDef.left);
 		const rightSepWidth = visibleWidth(separatorDef.right);
@@ -1720,15 +1940,11 @@ export class StatusLineComponent implements Component {
 		const totalWidth = () => leftWidth + rightWidth + (left.length > 0 && right.length > 0 ? 1 : 0);
 
 		if (topFillWidth > 0) {
-			while (totalWidth() > topFillWidth && right.length > 0) {
-				right.pop();
-				rightWidth = groupWidth(right, rightCapWidth, rightSepWidth);
-			}
-			// Shrink path before dropping left segments — path is the only elastic segment
+			// Shrink path before dropping other segments — path is the only elastic segment
 			const pathIdx = leftSegIds.indexOf("path");
 			if (pathIdx >= 0 && totalWidth() > topFillWidth) {
 				const overflow = totalWidth() - topFillWidth;
-				const currentPathVW = visibleWidth(left[pathIdx]);
+				const currentPathVW = visibleWidth(left[pathIdx]!);
 				const minPathVW = 8; // icon + ellipsis + a few chars
 				const shrinkable = currentPathVW - minPathVW;
 				if (shrinkable > 0) {
@@ -1770,9 +1986,42 @@ export class StatusLineComponent implements Component {
 
 			while (totalWidth() > topFillWidth && left.length > 0) {
 				const dropIdx = leftOverflowDropIndex();
+				// Preserve at least pi+model+path if possible; but if we must drop for width, drop git/pr/mode first.
+				// If the next left item to drop is more important than the rightmost right item, prefer dropping right instead.
+				// For now, drop left only if left item is not more important than cost/context.
+				// Simple heuristic: if right still has low-priority items (time/session), drop those first.
+				const hasLowPriorityRight = rightIds.some(
+					id => id === "time" || id === "session_name" || id === "session" || id === "token_rate",
+				);
+				if (hasLowPriorityRight) break;
 				left.splice(dropIdx, 1);
 				leftSegIds.splice(dropIdx, 1);
 				leftWidth = groupWidth(left, leftCapWidth, leftSepWidth);
+			}
+
+			// Drop low-priority right segments (time, session_name, token_rate) before touching cost/context
+			while (totalWidth() > topFillWidth && right.length > 0) {
+				const lastId = rightIds[rightIds.length - 1];
+				if (lastId !== "time" && lastId !== "session_name" && lastId !== "session" && lastId !== "token_rate")
+					break;
+				right.pop();
+				rightIds.pop();
+				rightWidth = groupWidth(right, rightCapWidth, rightSepWidth);
+			}
+
+			// If still overflow, drop remaining left segments (git etc.) before dropping cost
+			while (totalWidth() > topFillWidth && left.length > 0) {
+				const dropIdx = leftOverflowDropIndex();
+				left.splice(dropIdx, 1);
+				leftSegIds.splice(dropIdx, 1);
+				leftWidth = groupWidth(left, leftCapWidth, leftSepWidth);
+			}
+
+			// Finally, drop any remaining right segments (cost, context, etc.) if still overflow
+			while (totalWidth() > topFillWidth && right.length > 0) {
+				right.pop();
+				rightIds.pop();
+				rightWidth = groupWidth(right, rightCapWidth, rightSepWidth);
 			}
 		}
 
@@ -1817,7 +2066,349 @@ export class StatusLineComponent implements Component {
 		return leftGroup + gapFill + rightGroup;
 	}
 
-	getTopBorder(width: number): { content: string; width: number } {
+	#buildWrappedRow(items: readonly WrappedStatusItem[], width: number): { content: string; width: number } {
+		if (width <= 0 || items.length === 0) return { content: "", width: 0 };
+
+		const effectiveSettings = this.#resolveSettings();
+		const separatorDef = getSeparator(effectiveSettings.separator ?? "powerline-thin", theme);
+		const TRANSPARENT_BG_ANSI = "\x1b[49m";
+		const themeBgAnsi = theme.getBgAnsi("statusLineBg");
+		const bgAnsi = effectiveSettings.transparent ? TRANSPARENT_BG_ANSI : themeBgAnsi;
+		const transparentBg = bgAnsi === TRANSPARENT_BG_ANSI;
+		const fgAnsi = theme.getFgAnsi("text");
+		const sepAnsi = theme.getFgAnsi("statusLineSep");
+		const sep = separatorDef.left;
+		const sepWidth = visibleWidth(sep);
+		const cap = separatorDef.endCaps && !transparentBg ? separatorDef.endCaps.right : "";
+		const capWidth = visibleWidth(cap);
+		const maxPartWidth = Math.max(1, width - 2 - capWidth);
+		const parts = items.map(item => truncateToWidth(item.content, maxPartWidth));
+		const partsWidth = parts.reduce((sum, part) => sum + visibleWidth(part), 0);
+		const rowWidth = Math.min(width, partsWidth + Math.max(0, parts.length - 1) * (sepWidth + 2) + 2 + capWidth);
+		const capPrefix = separatorDef.endCaps?.useBgAsFg ? bgAnsi.replace("\x1b[48;", "\x1b[38;") : bgAnsi + sepAnsi;
+		const capText = cap ? `${capPrefix}${this.#focusedAgentId ? "\x1b[22m" : ""}${cap}\x1b[0m` : "";
+
+		let content = bgAnsi + fgAnsi;
+		content += ` ${parts.join(` ${sepAnsi}${sep}${fgAnsi} `)} `;
+		content += "\x1b[0m";
+		if (capText) content += capText;
+
+		const gapWidth = Math.max(0, width - rowWidth);
+		if (gapWidth > 0) {
+			const sessionName =
+				effectiveSettings.sessionAccent !== false ? this.session.sessionManager?.getSessionName() : undefined;
+			const accentHex = sessionName
+				? getSessionAccentHex(sessionName, theme.getMajorThemeColorHexes(), theme.accentSurfaceLuminance)
+				: undefined;
+			const gapColor = getSessionAccentAnsi(accentHex) ?? theme.getFgAnsi("border");
+			content += `${gapColor}${theme.boxRound.horizontal.repeat(gapWidth)}\x1b[39m`;
+		}
+
+		if (this.#focusedAgentId && content) {
+			content = `\x1b[2m${content.replaceAll("\x1b[0m", "\x1b[0m\x1b[2m")}\x1b[22m`;
+		}
+		return { content, width: visibleWidth(content) };
+	}
+
+	getTopBorderRows(width: number): readonly { content: string; width: number }[] {
+		if (width <= 0) return [{ content: "", width: 0 }];
+
+		const effectiveSettings = this.#resolveSettings();
+		const allSegmentIds: StatusLineSegmentId[] = [];
+		const seen = new Set<StatusLineSegmentId>();
+		for (const id of [...effectiveSettings.leftSegments, ...effectiveSettings.rightSegments]) {
+			if (seen.has(id)) continue;
+			seen.add(id);
+			allSegmentIds.push(id);
+		}
+
+		const includePath = hasPathSegment(allSegmentIds);
+		const includeContext = hasContextSegment(allSegmentIds);
+		const gitEnabled = this.#gitEnabled();
+		const includeGit = gitEnabled && hasGitSegment(allSegmentIds);
+		const includePr = gitEnabled && hasPrSegment(allSegmentIds);
+		const ctx = this.#buildSegmentContext(
+			width,
+			effectiveSettings.segmentOptions,
+			includePath,
+			includeContext,
+			includeGit,
+			includePr,
+		);
+
+		let items: WrappedStatusItem[] = [];
+		for (const id of allSegmentIds) {
+			const rendered = renderSegment(id, ctx);
+			if (rendered.visible && rendered.content) items.push({ id, content: rendered.content });
+		}
+
+		const runningBackgroundJobs = this.session.getAsyncJobSnapshot()?.running.length ?? 0;
+		if (runningBackgroundJobs > 0) {
+			const jobItem: WrappedStatusItem = {
+				content: theme.fg("statusLineSubagents", `${theme.icon.job} ${runningBackgroundJobs}`),
+			};
+			const metricsStart = items.findIndex(item => item.id === "context_pct");
+			items.splice(metricsStart >= 0 ? metricsStart : items.length, 0, jobItem);
+		}
+
+		const separatorDef = getSeparator(effectiveSettings.separator ?? "powerline-thin", theme);
+		const transparentBg = effectiveSettings.transparent || theme.getBgAnsi("statusLineBg") === "\x1b[49m";
+		const sepWidth = visibleWidth(separatorDef.left);
+		const capWidth = separatorDef.endCaps && !transparentBg ? visibleWidth(separatorDef.endCaps.right) : 0;
+		const maxItemWidth = Math.max(1, width - 2 - capWidth);
+		const fitWrappedItem = (item: WrappedStatusItem): WrappedStatusItem => {
+			if (item.id === "model") {
+				if (visibleWidth(item.content) <= maxItemWidth) return item;
+				const tryRender = (maxLength: number, showThinkingLevel: boolean) =>
+					renderSegment("model", {
+						...ctx,
+						options: {
+							...ctx.options,
+							model: { ...ctx.options.model, maxLength, showThinkingLevel },
+						},
+					});
+				for (const showThinkingLevel of [true, false]) {
+					for (let cap = Math.min(ctx.options.model?.maxLength ?? 18, maxItemWidth); cap >= 3; cap--) {
+						const rendered = tryRender(cap, showThinkingLevel);
+						if (rendered.visible && visibleWidth(rendered.content) <= maxItemWidth) {
+							return { ...item, content: rendered.content };
+						}
+					}
+				}
+			}
+			return { ...item, content: truncateToWidth(item.content, maxItemWidth) };
+		};
+		items = items.map(fitWrappedItem);
+
+		const rowWidth = (row: readonly WrappedStatusItem[]): number => {
+			if (row.length === 0) return 0;
+			const contentWidth = row.reduce((sum, item) => sum + visibleWidth(item.content), 0);
+			return contentWidth + Math.max(0, row.length - 1) * (sepWidth + 2) + 2 + capWidth;
+		};
+
+		if ((effectiveSettings.preset ?? "default") === "default") {
+			const itemFor = (id: StatusLineSegmentId): WrappedStatusItem | undefined => items.find(item => item.id === id);
+			const row1 = [itemFor("pi"), itemFor("model")].filter((item): item is WrappedStatusItem => item !== undefined);
+			const row2 = [itemFor("usage"), itemFor("time_spent"), itemFor("context_pct")].filter(
+				(item): item is WrappedStatusItem => item !== undefined,
+			);
+
+			const appendIfFits = (row: WrappedStatusItem[], item: WrappedStatusItem | undefined): void => {
+				if (!item || row.includes(item)) return;
+				if (rowWidth([...row, item]) <= width) row.push(item);
+			};
+			for (const id of ["mode", "collab", "git", "pr", "subagents"] as const) appendIfFits(row1, itemFor(id));
+			for (const item of items.filter(item => item.id === undefined)) appendIfFits(row1, item);
+			const secondaryRow2 =
+				width <= 80
+					? (["cache_hit", "cache_read", "token_total", "cost", "time", "session_name"] as const)
+					: (["cache_hit", "cache_read", "token_total", "token_rate", "cost", "time", "session_name"] as const);
+			for (const id of secondaryRow2) {
+				appendIfFits(row2, itemFor(id));
+			}
+
+			const constrain = (row: WrappedStatusItem[], flexibleId: StatusLineSegmentId): void => {
+				if (rowWidth(row) <= width) return;
+				const index = row.findIndex(item => item.id === flexibleId);
+				if (index < 0) return;
+				if (flexibleId === "model") {
+					const original = row[index]!;
+					const tryRender = (maxLength: number, showThinkingLevel: boolean) =>
+						renderSegment("model", {
+							...ctx,
+							options: {
+								...ctx.options,
+								model: { ...ctx.options.model, maxLength, showThinkingLevel },
+							},
+						});
+					for (const showThinkingLevel of [true, false]) {
+						for (let cap = Math.min(ctx.options.model?.maxLength ?? 18, maxItemWidth); cap >= 3; cap--) {
+							const rendered = tryRender(cap, showThinkingLevel);
+							if (!rendered.visible || !rendered.content) continue;
+							if (visibleWidth(rendered.content) > maxItemWidth) continue;
+							const candidateRow = [...row];
+							candidateRow[index] = { ...original, content: rendered.content };
+							if (rowWidth(candidateRow) <= width) {
+								row[index] = candidateRow[index]!;
+								return;
+							}
+						}
+					}
+					// Also try without provider prefix if still overflow (fallback to minimal)
+					for (const showThinkingLevel of [false, true]) {
+						const minimal = renderSegment("model", {
+							...ctx,
+							options: {
+								...ctx.options,
+								model: { ...ctx.options.model, maxLength: 6, showThinkingLevel },
+							},
+						});
+						if (minimal.visible && minimal.content && visibleWidth(minimal.content) <= maxItemWidth) {
+							const candidateRow = [...row];
+							candidateRow[index] = { ...original, content: minimal.content };
+							if (rowWidth(candidateRow) <= width) {
+								row[index] = candidateRow[index]!;
+								return;
+							}
+						}
+					}
+				}
+				const overflow = rowWidth(row) - width;
+				const currentWidth = visibleWidth(row[index]!.content);
+				row[index] = {
+					...row[index]!,
+					content: truncateToWidth(row[index]!.content, Math.max(1, currentWidth - overflow)),
+				};
+			};
+			constrain(row1, "model");
+			constrain(row2, "usage");
+			const pathRendered = renderSegment("path", {
+				...ctx,
+				options: {
+					...ctx.options,
+					path: {
+						...ctx.options.path,
+						abbreviate: true,
+						stripWorkPrefix: false,
+						maxLength: Math.max(4, maxItemWidth - 2),
+					},
+				},
+			});
+			const row3: WrappedStatusItem[] =
+				pathRendered.visible && pathRendered.content ? [{ id: "path", content: pathRendered.content }] : [];
+			constrain(row3, "path");
+
+			const rows = [row1, row2, row3].filter(row => row.length > 0);
+			return rows.map(row => this.#buildWrappedRow(row, width));
+		}
+
+		// ── Non-default presets: preserve left/right grouping when a single row fits,
+		//    only redistributing when wrapping is genuinely required (K).
+		const leftSet = new Set(effectiveSettings.leftSegments);
+		const leftItemsForGroup = items.filter(item => item.id !== undefined && leftSet.has(item.id));
+		const rightItemsForGroup = items.filter(item => item.id === undefined || !leftSet.has(item.id));
+
+		if (leftItemsForGroup.length > 0 && rightItemsForGroup.length > 0) {
+			const leftSepWidthG = visibleWidth(separatorDef.left);
+			const rightSepWidthG = visibleWidth(separatorDef.right);
+			const leftCapWidthG = separatorDef.endCaps && !transparentBg ? visibleWidth(separatorDef.endCaps.right) : 0;
+			const rightCapWidthG = separatorDef.endCaps && !transparentBg ? visibleWidth(separatorDef.endCaps.left) : 0;
+			const groupWidthG = (parts: string[], capW: number, sepW: number): number => {
+				if (parts.length === 0) return 0;
+				const pw = parts.reduce((sum, part) => sum + visibleWidth(part), 0);
+				return pw + Math.max(0, parts.length - 1) * (sepW + 2) + 2 + capW;
+			};
+			const leftWidthG = groupWidthG(
+				leftItemsForGroup.map(item => item.content),
+				leftCapWidthG,
+				leftSepWidthG,
+			);
+			const rightWidthG = groupWidthG(
+				rightItemsForGroup.map(item => item.content),
+				rightCapWidthG,
+				rightSepWidthG,
+			);
+			const totalGroupedWidth = leftWidthG + rightWidthG + 1;
+			if (totalGroupedWidth <= width) {
+				const TRANSPARENT_BG_ANSI = "\x1b[49m";
+				const themeBgAnsi2 = theme.getBgAnsi("statusLineBg");
+				const bgAnsi2 = effectiveSettings.transparent ? TRANSPARENT_BG_ANSI : themeBgAnsi2;
+				const fgAnsi2 = theme.getFgAnsi("text");
+				const sepAnsi2 = theme.getFgAnsi("statusLineSep");
+				const renderGroup = (parts: string[], direction: "left" | "right"): string => {
+					if (parts.length === 0) return "";
+					const sep = direction === "left" ? separatorDef.left : separatorDef.right;
+					const cap =
+						separatorDef.endCaps && !transparentBg
+							? direction === "left"
+								? separatorDef.endCaps.right
+								: separatorDef.endCaps.left
+							: "";
+					const capPrefix = separatorDef.endCaps?.useBgAsFg
+						? bgAnsi2.replace("\x1b[48;", "\x1b[38;")
+						: bgAnsi2 + sepAnsi2;
+					const capText = cap ? `${capPrefix}${this.#focusedAgentId ? "\x1b[22m" : ""}${cap}\x1b[0m` : "";
+					let content = bgAnsi2 + fgAnsi2;
+					content += ` ${parts.join(` ${sepAnsi2}${sep}${fgAnsi2} `)} `;
+					content += "\x1b[0m";
+					if (capText) return direction === "right" ? capText + content : content + capText;
+					return content;
+				};
+				const leftGroup = renderGroup(
+					leftItemsForGroup.map(item => item.content),
+					"left",
+				);
+				const rightGroup = renderGroup(
+					rightItemsForGroup.map(item => item.content),
+					"right",
+				);
+				if (leftGroup || rightGroup) {
+					const gapWidth = Math.max(1, width - leftWidthG - rightWidthG);
+					const sessionName =
+						effectiveSettings.sessionAccent !== false ? this.session.sessionManager?.getSessionName() : undefined;
+					const accentHex = sessionName
+						? getSessionAccentHex(sessionName, theme.getMajorThemeColorHexes(), theme.accentSurfaceLuminance)
+						: undefined;
+					const gapColor = getSessionAccentAnsi(accentHex) ?? theme.getFgAnsi("border");
+					const gapFill = `${gapColor}${theme.boxRound.horizontal.repeat(gapWidth)}\x1b[39m`;
+					let groupedContent = leftGroup + gapFill + rightGroup;
+					if (this.#focusedAgentId && groupedContent) {
+						groupedContent = `\x1b[2m${groupedContent.replaceAll("\x1b[0m", "\x1b[0m\x1b[2m")}\x1b[22m`;
+					}
+					return [{ content: groupedContent, width: visibleWidth(groupedContent) }];
+				}
+			}
+		} else if (items.length > 0 && rowWidth(items) <= width) {
+			return [this.#buildWrappedRow(items, width)];
+		}
+
+		const pack = (source: readonly WrappedStatusItem[]): WrappedStatusItem[][] => {
+			const rows: WrappedStatusItem[][] = [];
+			let current: WrappedStatusItem[] = [];
+			for (const item of source) {
+				if (current.length === 0 || rowWidth([...current, item]) <= width) {
+					current.push(item);
+					continue;
+				}
+				rows.push(current);
+				current = [item];
+			}
+			if (current.length > 0) rows.push(current);
+			return rows;
+		};
+
+		const layoutRows = (): WrappedStatusItem[][] => {
+			// Gate the two-row metrics split on actually needing a second row (G).
+			if (width <= 160) {
+				const metricsStart = items.findIndex(item => item.id === "context_pct");
+				if (metricsStart > 0 && metricsStart < items.length && rowWidth(items) > width) {
+					return [items.slice(0, metricsStart), items.slice(metricsStart)];
+				}
+			}
+			return pack(items);
+		};
+
+		let rows = layoutRows();
+		while ((rows.length > 2 || rows.some(row => rowWidth(row) > width)) && items.length > 2) {
+			let dropIndex = -1;
+			let dropPriority = Number.POSITIVE_INFINITY;
+			for (let index = items.length - 1; index >= 0; index--) {
+				const priority = wrappedStatusPriority(items[index]?.id);
+				if (priority < dropPriority) {
+					dropPriority = priority;
+					dropIndex = index;
+				}
+			}
+			if (dropIndex < 0) break;
+			items.splice(dropIndex, 1);
+			rows = layoutRows();
+		}
+
+		if (rows.length === 0) return [{ content: "", width: 0 }];
+		return rows.slice(0, 2).map(row => this.#buildWrappedRow(row, width));
+	}
+
+	getTopBorder(width: number): { content: string; width: number; revision: number } {
 		let content = this.#buildStatusLine(width);
 		if (this.#focusedAgentId && content) {
 			// Dim the whole bar while focus-proxied. Group/cap terminators emit full
@@ -1827,6 +2418,7 @@ export class StatusLineComponent implements Component {
 		return {
 			content,
 			width: visibleWidth(content),
+			revision: this.#widthEpochRevision,
 		};
 	}
 

@@ -623,7 +623,7 @@ export class AgentTranscriptViewer implements Component {
 		if (progress.contextTokens && progress.contextTokens > 0) {
 			stats.push(
 				progress.contextWindow && progress.contextWindow > 0
-					? formatContextUsage((progress.contextTokens / progress.contextWindow) * 100, progress.contextWindow)
+					? formatContextUsage(undefined, progress.contextWindow, progress.contextTokens)
 					: formatNumber(progress.contextTokens),
 			);
 		}

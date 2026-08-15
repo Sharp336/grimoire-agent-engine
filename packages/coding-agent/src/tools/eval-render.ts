@@ -153,9 +153,7 @@ function formatAgentStats(event: EvalStatusEvent, theme: Theme): string {
 	if (contextTokens > 0) {
 		const contextWindow = eventNumber(event.contextWindow);
 		const ctx =
-			contextWindow > 0
-				? formatContextUsage((contextTokens / contextWindow) * 100, contextWindow)
-				: formatNumber(contextTokens);
+			contextWindow > 0 ? formatContextUsage(undefined, contextWindow, contextTokens) : formatNumber(contextTokens);
 		line += `${theme.sep.dot}${theme.fg("dim", ctx)}`;
 	}
 	const cost = eventNumber(event.cost);

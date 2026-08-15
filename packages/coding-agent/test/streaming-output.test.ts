@@ -2,7 +2,9 @@ import { afterEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { createSecurityResource } from "@oh-my-pi/pi-coding-agent/security/resource-output";
 import {
+	DEFAULT_MAX_BYTES,
 	enforceInlineByteCap,
 	formatHeadTruncationNotice,
 	formatMiddleElisionMarker,
@@ -805,5 +807,41 @@ describe("OutputSink maxColumns (per-line cap)", () => {
 		expect(dropped).toBeGreaterThan(0);
 		// elided + dropped + kept ≤ totalBytes (with a small slack for the marker/newlines).
 		expect(elided + dropped).toBeLessThan(dumped.totalBytes);
+	});
+});
+
+describe("DEFAULT_MAX_BYTES (finding A) — non-Bash consumers keep 50KB", () => {
+	test("shared constant is 50KB, not the Bash 12KB inline budget", () => {
+		expect(DEFAULT_MAX_BYTES).toBe(50 * 1024);
+	});
+
+	test("security resource truncates at 50KB via truncateHead (not 12KB)", () => {
+		const thirtyKB = "x".repeat(30 * 1024);
+		const res30 = createSecurityResource({ url: "test://a", content: thirtyKB, contentType: "text/plain" });
+		// 30KB < 50KB => not truncated (would be truncated at 12KB)
+		expect(res30.notes).toBeUndefined();
+		expect(res30.content).toBe(thirtyKB);
+
+		const sixtyKB = "y".repeat(60 * 1024);
+		const res60 = createSecurityResource({ url: "test://b", content: sixtyKB, contentType: "text/plain" });
+		expect(res60.notes).toBeDefined();
+	});
+
+	test("OutputSink default spillThreshold is 50KB (not 12KB)", async () => {
+		// A 30KB payload should not be truncated with the default sink.
+		const sink30 = new OutputSink();
+		sink30.push("z".repeat(30 * 1024));
+		const dump30 = await sink30.dump();
+		expect(dump30.truncated).toBe(false);
+		expect(dump30.outputBytes).toBe(30 * 1024);
+
+		const sink60 = new OutputSink();
+		sink60.push("z".repeat(60 * 1024));
+		const dump60 = await sink60.dump();
+		expect(dump60.truncated).toBe(true);
+		// Default threshold 50KB, so 60KB is truncated to ~50KB tail
+		expect(dump60.outputBytes).toBeLessThan(60 * 1024);
+		expect(dump60.outputBytes).toBeGreaterThan(40 * 1024);
+		expect(DEFAULT_MAX_BYTES).toBe(50 * 1024);
 	});
 });

@@ -15,7 +15,7 @@ export interface CollabStatus {
 }
 
 export interface StatusLineSegmentOptions {
-	model?: { showThinkingLevel?: boolean };
+	model?: { showThinkingLevel?: boolean; maxLength?: number };
 	path?: { abbreviate?: boolean; maxLength?: number; stripWorkPrefix?: boolean };
 	git?: { showBranch?: boolean; showStaged?: boolean; showUnstaged?: boolean; showUntracked?: boolean };
 	time?: { format?: "12h" | "24h"; showSeconds?: boolean };
@@ -99,11 +99,10 @@ export interface SegmentContext {
 	autoCompactEnabled: boolean;
 	subagentCount: number;
 	/**
-	 * Active processing time accumulated this session, in ms — the union of
-	 * every `agent_start`→`agent_end` window plus the currently-streaming
-	 * window if the agent is running. Idle wall-clock never contributes, so
-	 * this is what {@link StatusLineSegmentId.time_spent} renders instead of
-	 * `Date.now() - sessionStart`.
+	 * Elapsed wall-clock of the current top-level agent turn, in ms. `0` when
+	 * idle. Idle gaps and previous turns never contribute, so this is what
+	 * {@link StatusLineSegmentId.time_spent} renders instead of cumulative
+	 * session time or `Date.now() - sessionStart`.
 	 */
 	activeMs: number;
 	git: {
@@ -120,8 +119,10 @@ export interface SegmentContext {
 	worktree: { projectName: string; worktreeName: string } | null;
 	usage: {
 		tier?: string;
+		windows?: Array<{ label: string; percent: number; resetMs?: number }>;
 		fiveHour?: { percent: number; resetMinutes?: number };
 		sevenDay?: { percent: number; resetHours?: number };
+		monthly?: { percent: number; resetHours?: number };
 	} | null;
 }
 
