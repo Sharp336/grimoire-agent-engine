@@ -82,6 +82,8 @@ describe("edit response confirmations (issue #8603)", () => {
 		it("reports a positive shift for a hunk that grows the file", async () => {
 			const text = await editResponse("PUT 3-3:\n+A\n+B");
 			expect(text).toContain("Renumber: lines >3 shifted +1");
+			// A single hunk already says it all — no net line.
+			expect(text).not.toContain("Renumber: net");
 		});
 
 		it("reports a negative shift for a hunk that shrinks the file", async () => {
@@ -119,8 +121,9 @@ describe("edit response confirmations (issue #8603)", () => {
 
 		it("echoes a single-line range once", async () => {
 			const text = await editResponse("PUT 4-4:\n+A");
-			expect(text).toContain('PUT 4.=4: replaced "line 4"');
-			expect(text).not.toMatch(/PUT 4\.=4: replaced ".*…"…"(.*)"/);
+			// Exact-line assertion: the two-side form would render
+			// `PUT 4.=4: replaced "line 4"…"line 4"` and fail.
+			expect(text.split("\n")).toContain('PUT 4.=4: replaced "line 4"');
 		});
 
 		it("truncates each echoed side to ~40 chars with an ellipsis", async () => {
@@ -137,6 +140,17 @@ describe("edit response confirmations (issue #8603)", () => {
 			const content = ['say "hi"', "plain", 'end "quote"'].join("\n") + "\n";
 			const text = await editResponse("PUT 1-3:\n+A\n+B\n+C", content);
 			expect(text).toContain('PUT 1.=3: replaced "say \\"hi\\""…"end \\"quote\\""');
+		});
+
+		it("does not split an escape pair or surrogate pair at the truncation boundary", async () => {
+			// 38 a's + a quote: the 40-unit cut lands on the quote, which must
+			// arrive escaped (not as a dangling backslash before the ellipsis).
+			const content =
+				[`${"a".repeat(38)}"${"b".repeat(25)}`, "mid", `${"x".repeat(36)}${"😀".repeat(5)}`].join("\n") + "\n";
+			const text = await editResponse("PUT 1-3:\n+A\n+B\n+C", content);
+			expect(text).toContain(`PUT 1.=3: replaced "${"a".repeat(38)}\\"…"`);
+			// 36 x's + emoji: the cut must fall between emoji, never inside one.
+			expect(text).toContain(`"${"x".repeat(36)}😀😀😀…"`);
 		});
 	});
 

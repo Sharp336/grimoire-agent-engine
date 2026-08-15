@@ -99,8 +99,9 @@ export function buildCompactDiffPreview(diff: string, options: CompactDiffOption
 	// pre-edit number of the context row immediately BEFORE the run, or the
 	// row immediately AFTER minus 1, whichever the diff exposes. A pure-add
 	// run with neither (diff produced no context at all) has no original
-	// anchor and is skipped — the net shift still surfaces via
-	// `addedLines - removedLines`.
+	// anchor and is skipped — its shift still counts toward `addedLines -
+	// removedLines`, and the renderer's `net` line fires whenever that total
+	// disagrees with the sum of the emitted per-hunk deltas.
 	const renumbers: RenumberDelta[] = [];
 	let runAdded = 0;
 	let runRemoved = 0;

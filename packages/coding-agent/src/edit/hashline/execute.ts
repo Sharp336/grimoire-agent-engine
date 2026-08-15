@@ -131,15 +131,27 @@ function formatBlockResolution(resolution: BlockResolution): string {
  * Per-hunk renumber confirmation (issue #8603): every hunk whose line count
  * changed shifts the original lines below it. Emitted against ORIGINAL
  * numbering so the per-hunk deltas are independent and composable — an edit
- * below every hunk uses the `net` line, an edit between two hunks applies
- * only the deltas of hunks above its anchor. The `net` line is emitted only
- * when more than one hunk shifted (a single hunk already says it all).
+ * below every hunk uses the `net` line, an edit strictly between two hunks
+ * applies only the deltas of hunks above its anchor.
+ *
+ * The `net` line covers the whole file: emitted when more than one hunk
+ * shifted (a single hunk already says it all), and additionally whenever the
+ * net disagrees with the sum of the emitted per-hunk deltas — a hunk with no
+ * original anchor (a contextless pure-add run from an external diff producer)
+ * is dropped from `renumbers` but still counts toward `net`.
+ *
+ * Coordinate note: `fromLine` is diff-aligned, not hunk-header-aligned. When a
+ * replaced range's trailing line is kept as diff context (its new content is
+ * identical), the renumber line anchors below that line while the boundary
+ * echo still names the full authored range. Both statements are true in their
+ * own coordinates; the shifted content is identical either way.
  */
 function formatRenumberLines(renumbers: readonly RenumberDelta[], netDelta: number): string[] {
 	const lines = renumbers.map(
 		renumber => `Renumber: lines >${renumber.fromLine} shifted ${formatSigned(renumber.delta)}`,
 	);
-	if (renumbers.length > 1 && netDelta !== 0) {
+	const emittedSum = renumbers.reduce((sum, renumber) => sum + renumber.delta, 0);
+	if (netDelta !== 0 && (renumbers.length > 1 || netDelta !== emittedSum)) {
 		lines.push(`Renumber: net ${formatSigned(netDelta)}`);
 	}
 	return lines;
@@ -153,8 +165,12 @@ function formatSigned(delta: number): string {
 const ECHO_MAX_CHARS = 40;
 
 function formatEchoSide(text: string): string {
-	const escaped = text.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-	return `"${escaped.length > ECHO_MAX_CHARS ? `${escaped.slice(0, ECHO_MAX_CHARS - 1)}…` : escaped}"`;
+	// Truncate on code points BEFORE escaping: slicing the escaped string
+	// could split an escape pair (dangling backslash) or a surrogate pair.
+	const chars = Array.from(text);
+	const truncated = chars.length > ECHO_MAX_CHARS ? `${chars.slice(0, ECHO_MAX_CHARS - 1).join("")}…` : text;
+	const escaped = truncated.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+	return `"${escaped}"`;
 }
 
 /**
