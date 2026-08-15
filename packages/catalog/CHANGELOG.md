@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added support for the `glm-5.3` model on the `zai` and `zhipu-coding-plan` (GLM Coding Plan) catalogs with the published 1M context / 131,072 output limits, pinned at catalog generation so discovery cannot regress them to 200k. GLM-5.3's official `low`/`high`/`max` reasoning-effort ladder is exposed on the official Z.ai/Zhipu endpoints only; reseller routes that mirror the zai dialect second-hand (Ollama Cloud, Baseten) keep the verified `high`/`max` pair until their 5.3 ladders are confirmed. ([#8518](https://github.com/can1357/oh-my-pi/issues/8518))
+
 ## [17.3.4] - 2026-08-14
 
 ### Added

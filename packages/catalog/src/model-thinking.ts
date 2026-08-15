@@ -26,6 +26,7 @@ import {
 	isDeepseekModelIdOrName,
 	isDeepseekV4FlashModelId,
 	isGlm52ReasoningEffortModelId,
+	isGlm53ModelId,
 	isKimiK3ModelId,
 	isMimoModelIdOrName,
 	isMinimaxM2FamilyModelId,
@@ -63,9 +64,9 @@ const GEMINI_3_FLASH_EFFORTS: readonly Effort[] = [Effort.Minimal, Effort.Low, E
 const GPT_5_2_PLUS_EFFORTS: readonly Effort[] = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh];
 const GPT_5_1_CODEX_MINI_EFFORTS: readonly Effort[] = [Effort.Medium, Effort.High];
 const LOW_MEDIUM_HIGH_REASONING_EFFORTS: readonly Effort[] = [Effort.Low, Effort.Medium, Effort.High];
-/** Wire-exact `low`/`high`/`max` scale used by Kimi K3 and DeepSeek V4 (Flash and Pro, direct API and aggregators). */
+/** Wire-exact `low`/`high`/`max` scale used by Kimi K3, DeepSeek V4 (Flash and Pro, direct API and aggregators), and GLM-5.3+ on the zai dialect. */
 const LOW_HIGH_MAX_REASONING_EFFORTS: readonly Effort[] = [Effort.Low, Effort.High, Effort.Max];
-/** Wire-exact two-tier scale (`high`/`max`): GLM-5.2 on Z.ai/Umans/Ollama Cloud/Baseten, Sakana Fugu, older DeepSeek reasoners (V3.x/R1). */
+/** Wire-exact two-tier scale (`high`/`max`): GLM-5.2 on Z.ai/Umans/Ollama Cloud/Baseten, Sakana Fugu, older DeepSeek reasoners (V3.x/R1). GLM-5.3+ moves to the `low`/`high`/`max` scale above. */
 const HIGH_MAX_REASONING_EFFORTS: readonly Effort[] = [Effort.High, Effort.Max];
 /** OpenRouter's DeepSeek route accepts only `high`. */
 const HIGH_ONLY_REASONING_EFFORTS: readonly Effort[] = [Effort.High];
@@ -327,12 +328,23 @@ function getModelDefinedEfforts<TApi extends Api>(
 		if (isOpenRouterThinkingFormat(compat)) {
 			return DEFAULT_REASONING_EFFORTS_WITH_XHIGH;
 		}
+		// GLM-5.3 adds a genuine `low` tier beneath the pair, but only on the
+		// official endpoints (Zhipu docs + models.dev: low/high/max, default
+		// max). Reseller routes (Umans, Ollama Cloud, Baseten) mirror the
+		// zai dialect second-hand; keep them at the verified high/max pair
+		// until their 5.3 ladders are confirmed.
 		if (
 			isZaiThinkingFormat(compat) ||
 			isAnthropicMessagesGlm52ReasoningEffortModel(spec) ||
 			isOllamaCloudGlm52ReasoningEffortModel(spec) ||
 			spec.provider === "baseten"
 		) {
+			if (
+				isGlm53ModelId(spec.id) &&
+				(isZaiThinkingFormat(compat) || (spec.provider === "zai" && spec.api === "anthropic-messages"))
+			) {
+				return LOW_HIGH_MAX_REASONING_EFFORTS;
+			}
 			return HIGH_MAX_REASONING_EFFORTS;
 		}
 		if (isOpenAICompatReasoningApi(spec.api)) {

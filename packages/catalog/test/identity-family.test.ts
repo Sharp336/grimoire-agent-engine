@@ -3,6 +3,7 @@ import {
 	hasOpus47ApiRestrictions,
 	isClaudeModelId,
 	isGeminiModelId,
+	isGlm53ModelId,
 	isGlmVisionModelId,
 	isGrokModelId,
 	isGrokReasoningEffortCapable,
@@ -244,7 +245,6 @@ describe("isReasoningGlmModelId", () => {
 		expect(isReasoningGlmModelId("glm-4.5v")).toBe(false);
 		expect(isReasoningGlmModelId("qwen3.5")).toBe(false);
 	});
-
 	test("matches uppercase provider-prefixed GLM ids", () => {
 		// Baseten, CoreWeave, HuggingFace, etc. serve GLM under uppercase ids.
 		expect(isReasoningGlmModelId("zai-org/GLM-5.2")).toBe(true);
@@ -254,6 +254,23 @@ describe("isReasoningGlmModelId", () => {
 		expect(isReasoningGlmModelId("zai-org/GLM-5-Turbo")).toBe(true);
 		// Vision SKUs are still excluded even in uppercase.
 		expect(isReasoningGlmModelId("zai-org/GLM-4.5V")).toBe(false);
+	});
+});
+
+describe("isGlm53ModelId", () => {
+	test("matches glm-5.3 and later integers on the reasoning lines", () => {
+		expect(isGlm53ModelId("glm-5.3")).toBe(true);
+		expect(isGlm53ModelId("glm-5.3-air")).toBe(true);
+		// Version floor: future integers inherit the low/high/max ladder.
+		expect(isGlm53ModelId("glm-6")).toBe(true);
+		expect(isGlm53ModelId("z-ai/glm-5.3")).toBe(true);
+	});
+
+	test("excludes GLM-5.2 and the non-reasoning or vision SKUs", () => {
+		expect(isGlm53ModelId("glm-5.2")).toBe(false);
+		expect(isGlm53ModelId("glm-5.3-flash")).toBe(false);
+		expect(isGlm53ModelId("glm-5.3v")).toBe(false);
+		expect(isGlm53ModelId("glm-5-preview")).toBe(false);
 	});
 });
 

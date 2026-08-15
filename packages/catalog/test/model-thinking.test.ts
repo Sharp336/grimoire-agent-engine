@@ -275,6 +275,55 @@ describe("model thinking derivation", () => {
 		expect(openRouter.thinking?.effortMap).toBeUndefined();
 	});
 
+	it("maps GLM-5.3 to the low/high/max ladder on the official endpoints only", () => {
+		// GLM-5.3 adds a genuine `low` effort tier beneath 5.2's high/max pair
+		// (official docs: low/high/max, default max) on the official Z.ai and
+		// Zhipu coding-plan endpoints. Resellers that mirror the zai dialect
+		// second-hand (Ollama Cloud, Baseten, Umans) keep the verified high/max
+		// pair until their 5.3 ladders are confirmed. The anthropic-messages
+		// coding proxy stays budget-effort mode; only the ladder widens.
+		const zaiCompletions = createModel({
+			id: "glm-5.3",
+			api: "openai-completions",
+			provider: "zai",
+			baseUrl: "https://api.z.ai/api/paas/v4",
+		});
+		const zhipuCompletions = createModel({
+			id: "glm-5.3",
+			api: "openai-completions",
+			provider: "zhipu-coding-plan",
+			baseUrl: "https://open.bigmodel.cn/api/coding/paas/v4",
+		});
+		const zaiAnthropic = createModel({
+			id: "glm-5.3",
+			api: "anthropic-messages",
+			provider: "zai",
+			baseUrl: "https://api.z.ai/api/anthropic",
+		});
+		const ollamaCloud = createModel({
+			id: "glm-5.3",
+			api: "ollama-chat",
+			provider: "ollama-cloud",
+			baseUrl: "https://ollama.com",
+		});
+		const baseten = createModel({
+			id: "glm-5.3",
+			api: "openai-completions",
+			provider: "baseten",
+			baseUrl: "https://api.baseten.co/v1",
+		});
+
+		expect(getSupportedEfforts(zaiCompletions)).toEqual([Effort.Low, Effort.High, Effort.Max]);
+		expect(getSupportedEfforts(zhipuCompletions)).toEqual([Effort.Low, Effort.High, Effort.Max]);
+		expect(zaiAnthropic.thinking?.mode).toBe("anthropic-budget-effort");
+		expect(getSupportedEfforts(zaiAnthropic)).toEqual([Effort.Low, Effort.High, Effort.Max]);
+		expect(getSupportedEfforts(ollamaCloud)).toEqual([Effort.High, Effort.Max]);
+		expect(getSupportedEfforts(baseten)).toEqual([Effort.High, Effort.Max]);
+		for (const model of [zaiCompletions, zhipuCompletions, zaiAnthropic, ollamaCloud, baseten]) {
+			expect(model.thinking?.effortMap).toBeUndefined();
+		}
+	});
+
 	it("applies the DeepSeek effort contract to Ollama Cloud ollama-chat models (issue #8334)", () => {
 		const flash = createModel({
 			id: "deepseek-v4-flash",
