@@ -610,6 +610,7 @@ export class AgentSession {
 	#preferWebsockets: boolean | undefined;
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	#disconnectOwnedMcpManager: (() => Promise<void>) | undefined;
+	#getConnectedMcpServers: () => string[];
 
 	readonly #ttsr: TtsrCoordinator;
 	readonly #stats: SessionStatsTracker;
@@ -1306,6 +1307,7 @@ export class AgentSession {
 			skillsReloadable: config.skillsReloadable,
 		});
 		this.#disconnectOwnedMcpManager = config.disconnectOwnedMcpManager;
+		this.#getConnectedMcpServers = config.getConnectedMcpServers ?? (() => []);
 		const ttsrHost: TtsrCoordinatorHost = {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
@@ -6333,6 +6335,11 @@ export class AgentSession {
 	/** Skill loading warnings captured by SDK */
 	get skillWarnings(): readonly SkillWarning[] {
 		return this.#tools.skillWarnings;
+	}
+
+	/** MCP server names currently connected to this session. */
+	get connectedMcpServers(): readonly string[] {
+		return this.#getConnectedMcpServers();
 	}
 
 	getTodoPhases(): TodoPhase[] {

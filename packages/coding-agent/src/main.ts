@@ -906,6 +906,7 @@ export async function buildSessionOptions(
 	const options: CreateAgentSessionOptions = {
 		cwd: parsed.cwd ?? getProjectDir(),
 		autoApprove: parsed.autoApprove ?? false,
+		mcpServerNames: parsed.mcpServers,
 	};
 	const restoringSession = Boolean(parsed.continue || parsed.resume || isForeignSessionImport(parsed));
 	if (parsed.serviceTier !== undefined) {
@@ -949,7 +950,8 @@ export async function buildSessionOptions(
 			parsed.systemPrompt !== undefined ||
 			parsed.appendSystemPrompt !== undefined ||
 			parsed.tools !== undefined ||
-			parsed.noTools === true;
+			parsed.noTools === true ||
+			parsed.mcpServers !== undefined;
 		if (!forkCacheShapeChanged && header?.providerPromptCacheKey) {
 			options.providerPromptCacheKey = header.providerPromptCacheKey;
 			options.providerPromptCacheKeySource = "fork";

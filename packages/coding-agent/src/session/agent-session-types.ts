@@ -221,6 +221,8 @@ export interface AgentSessionConfig {
 	presentationPinnedToolNames?: ReadonlySet<string>;
 	/** Accessor for live MCP server instructions. */
 	getMcpServerInstructions?: () => Map<string, string> | undefined;
+	/** Accessor for the names of MCP servers currently connected to this session. */
+	getConnectedMcpServers?: () => string[];
 	/** Time-traveling stream-rule manager. */
 	ttsrManager?: TtsrManager;
 	/** Secret obfuscator for provider and edit content. */

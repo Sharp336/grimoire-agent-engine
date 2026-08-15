@@ -223,6 +223,12 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--skills": (result, value) => {
 		result.skills = value.split(",").map(s => s.trim());
 	},
+	"--mcp-servers": (result, value) => {
+		result.mcpServers = value
+			.split(",")
+			.map(name => name.trim())
+			.filter(Boolean);
+	},
 	"--approval-mode": (result, value, deps) => {
 		if (value === "always-ask" || value === "write" || value === "yolo") {
 			result.approvalMode = value;

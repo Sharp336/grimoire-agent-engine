@@ -484,6 +484,12 @@ export interface CreateAgentSessionOptions {
 	enableMCP?: boolean;
 	/** Existing MCP manager to reuse when MCP is enabled (skips discovery, propagates to toolSession). */
 	mcpManager?: MCPManager;
+	/**
+	 * Exact discovered MCP server names to connect. `undefined` preserves
+	 * normal discovery; an empty list connects no discovered servers.
+	 * Ignored when an existing `mcpManager` is supplied.
+	 */
+	mcpServerNames?: readonly string[];
 
 	/** Enable LSP integration (tool, formatting, diagnostics, warmup). Default: true */
 	enableLsp?: boolean;
@@ -1844,11 +1850,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			filterExa: true,
 			// Filter browser MCP servers when builtin browser tool is active
 			filterBrowser: settings.get("browser.enabled") ?? false,
+			serverNames: options.mcpServerNames,
 		};
 		if (enableMCP && !mcpManager) {
 			if (deferMCPDiscoveryForUI) {
 				const cacheStorage = settings.getStorage();
-				mcpManager = new MCPManager(cwd, cacheStorage ? new MCPToolCache(cacheStorage) : null);
+				mcpManager = new MCPManager(
+					cwd,
+					cacheStorage ? new MCPToolCache(cacheStorage) : null,
+					options.mcpServerNames,
+				);
 				mcpManager.setAuthStorage(authStorage);
 				toolSession.mcpManager = mcpManager;
 
@@ -3443,6 +3454,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						return out;
 					}
 				: undefined,
+			getConnectedMcpServers: () => mcpManager?.getConnectedServers() ?? [],
 			disconnectOwnedMcpManager: ownedMcpManager ? () => ownedMcpManager.disconnectAll() : undefined,
 			ttsrManager,
 			obfuscator,

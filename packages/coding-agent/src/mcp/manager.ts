@@ -172,6 +172,11 @@ export interface MCPDiscoverOptions {
 	filterExa?: boolean;
 	/** Whether to filter out browser MCP servers when builtin browser tool is enabled (default: false) */
 	filterBrowser?: boolean;
+	/**
+	 * Exact discovered server names to connect. `undefined` preserves normal
+	 * discovery; an empty list connects no discovered servers.
+	 */
+	serverNames?: readonly string[];
 	/** Called when MCP server connection state changes. */
 	onStatus?: (event: McpConnectionStatusEvent) => void;
 }
@@ -210,6 +215,7 @@ export class MCPManager {
 	#authStorage: AuthStorage | null = null;
 	#authHandler?: MCPAuthHandler;
 	#notificationListeners = new Set<(serverName: string, method: string, params: unknown) => void>();
+	readonly #serverNames: ReadonlySet<string> | undefined;
 	/**
 	 * Notifications received before any listener attached, to be drained on
 	 * the first {@link addNotificationListener} call. Bounded by
@@ -237,7 +243,10 @@ export class MCPManager {
 	constructor(
 		private cwd: string,
 		private toolCache: MCPToolCache | null = null,
-	) {}
+		serverNames?: readonly string[],
+	) {
+		this.#serverNames = serverNames === undefined ? undefined : new Set(serverNames);
+	}
 
 	/**
 	 * Register a listener for server-initiated MCP notifications.
@@ -411,7 +420,23 @@ export class MCPManager {
 			throw error;
 		}
 		const { configs, exaApiKeys, sources } = loadedConfigs;
-		const result = await this.connectServers(configs, sources, options?.onStatus);
+		const requestedNames = options?.serverNames;
+		const effectiveNames =
+			this.#serverNames === undefined
+				? requestedNames
+				: requestedNames === undefined
+					? this.#serverNames
+					: requestedNames.filter(name => this.#serverNames?.has(name));
+		const allowedNames = effectiveNames === undefined ? undefined : new Set(effectiveNames);
+		const selectedConfigs =
+			allowedNames === undefined
+				? configs
+				: Object.fromEntries(Object.entries(configs).filter(([name]) => allowedNames.has(name)));
+		const selectedSources =
+			allowedNames === undefined
+				? sources
+				: Object.fromEntries(Object.entries(sources).filter(([name]) => allowedNames.has(name)));
+		const result = await this.connectServers(selectedConfigs, selectedSources, options?.onStatus);
 		result.exaApiKeys = exaApiKeys;
 		return result;
 	}

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a per-session `--mcp-servers` allowlist for exact discovered MCP connector names, including an explicit empty selection, and exposed the currently connected server names through RPC `get_state`.
+
 ## [17.3.4] - 2026-08-14
 
 ### Changed

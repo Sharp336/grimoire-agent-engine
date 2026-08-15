@@ -117,6 +117,8 @@ export interface RpcSessionState {
 	/** For session dump / export (plain-text parity with /dump). */
 	systemPrompt?: string[];
 	dumpTools?: Array<{ name: string; description: string; parameters: unknown; examples?: readonly ToolExample[] }>;
+	/** Names of MCP servers currently connected to this session. */
+	mcpServers: string[];
 	/** Current context window usage. */
 	contextUsage?: ContextUsage;
 }

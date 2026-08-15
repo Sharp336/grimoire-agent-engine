@@ -78,6 +78,11 @@ export interface Args {
 	export?: string;
 	noSkills?: boolean;
 	skills?: string[];
+	/**
+	 * Exact discovered MCP server names to connect. Present and empty means
+	 * connect no discovered MCP servers.
+	 */
+	mcpServers?: string[];
 	noRules?: boolean;
 	noTitle?: boolean;
 	autoApprove?: boolean;

@@ -171,6 +171,19 @@ describe("parseArgs @file parsing with quotes", () => {
 	});
 });
 
+describe("--mcp-servers", () => {
+	it("parses, trims, and preserves exact connector names", () => {
+		const result = parseArgs(["--mcp-servers", " alpha, beta ,,alpha ", "prompt"]);
+
+		expect(result.mcpServers).toEqual(["alpha", "beta", "alpha"]);
+		expect(result.messages).toEqual(["prompt"]);
+	});
+
+	it("preserves an explicit empty selection", () => {
+		expect(parseArgs(["--mcp-servers="]).mcpServers).toEqual([]);
+	});
+});
+
 describe("foreign session import flags", () => {
 	it("parses each source flag without consuming the initial message", () => {
 		const claude = parseArgs(["--from-claude", "continue this session"]);

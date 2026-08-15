@@ -35,6 +35,11 @@ export interface MCPToolsLoadOptions {
 	filterExa?: boolean;
 	/** Whether to filter out browser MCP servers when builtin browser tool is enabled (default: false) */
 	filterBrowser?: boolean;
+	/**
+	 * Exact discovered server names to connect. `undefined` preserves normal
+	 * discovery; an empty list connects no discovered servers.
+	 */
+	serverNames?: readonly string[];
 	/** SQLite storage for MCP tool cache (null disables cache) */
 	cacheStorage?: AgentStorage | null;
 	/** Auth storage used to resolve OAuth credentials before initial MCP connect */
@@ -61,7 +66,7 @@ async function resolveToolCache(storage: AgentStorage | null | undefined): Promi
  */
 export async function discoverAndLoadMCPTools(cwd: string, options?: MCPToolsLoadOptions): Promise<MCPToolsLoadResult> {
 	const toolCache = await resolveToolCache(options?.cacheStorage);
-	const manager = new MCPManager(cwd, toolCache);
+	const manager = new MCPManager(cwd, toolCache, options?.serverNames);
 	if (options?.authStorage) {
 		manager.setAuthStorage(options.authStorage);
 	}
@@ -73,6 +78,7 @@ export async function discoverAndLoadMCPTools(cwd: string, options?: MCPToolsLoa
 			enableProjectConfig: options?.enableProjectConfig,
 			filterExa: options?.filterExa,
 			filterBrowser: options?.filterBrowser,
+			serverNames: options?.serverNames,
 		});
 	} catch (error) {
 		// If discovery fails entirely, return empty result

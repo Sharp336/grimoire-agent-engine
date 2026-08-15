@@ -1092,6 +1092,7 @@ export async function runRpcMode(
 					tokensPerSecond: calculateTokensPerSecond(session.messages, session.isStreaming),
 					fastModeActive: session.isFastModeActive(),
 					messageCount: session.messages.length,
+					mcpServers: [...session.connectedMcpServers],
 					systemPrompt: session.systemPrompt,
 					dumpTools: session.agent.state.tools.map(tool => ({
 						name: tool.name,
