@@ -16,11 +16,14 @@ import {
 	type Clipboard,
 	commitClipboard,
 	forkClipboard,
+	formatReplaceHeader,
 	MismatchError as HashlineMismatchError,
 	Patch,
 	Patcher,
 	type PatchSectionResult,
 	type PreparedSection,
+	type RenumberDelta,
+	type ReplacementEcho,
 	startClipboardBatch,
 } from "@oh-my-pi/hashline";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
@@ -124,6 +127,48 @@ function formatBlockResolution(resolution: BlockResolution): string {
 	return `${op} → resolved ${span} (${lines} line${lines === 1 ? "" : "s"})${suffix}`;
 }
 
+/**
+ * Per-hunk renumber confirmation (issue #8603): every hunk whose line count
+ * changed shifts the original lines below it. Emitted against ORIGINAL
+ * numbering so the per-hunk deltas are independent and composable — an edit
+ * below every hunk uses the `net` line, an edit between two hunks applies
+ * only the deltas of hunks above its anchor. The `net` line is emitted only
+ * when more than one hunk shifted (a single hunk already says it all).
+ */
+function formatRenumberLines(renumbers: readonly RenumberDelta[], netDelta: number): string[] {
+	const lines = renumbers.map(
+		renumber => `Renumber: lines >${renumber.fromLine} shifted ${formatSigned(renumber.delta)}`,
+	);
+	if (renumbers.length > 1 && netDelta !== 0) {
+		lines.push(`Renumber: net ${formatSigned(netDelta)}`);
+	}
+	return lines;
+}
+
+function formatSigned(delta: number): string {
+	return `${delta >= 0 ? "+" : "-"}${Math.abs(delta)}`;
+}
+
+/** Truncation cap for each side of a boundary echo (~40 chars + ellipsis). */
+const ECHO_MAX_CHARS = 40;
+
+function formatEchoSide(text: string): string {
+	const escaped = text.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+	return `"${escaped.length > ECHO_MAX_CHARS ? `${escaped.slice(0, ECHO_MAX_CHARS - 1)}…` : escaped}"`;
+}
+
+/**
+ * Boundary echo for one concrete `PUT N.=M` replacement: the first and last
+ * ORIGINAL line the range covered, so the model can cross-check the scope
+ * before the compiler does. Single-line ranges echo once (first === last).
+ */
+function formatReplacementEcho(echo: ReplacementEcho): string {
+	const header = formatReplaceHeader(echo.start, echo.end);
+	return echo.start === echo.end
+		? `${header} replaced ${formatEchoSide(echo.first)}`
+		: `${header} replaced ${formatEchoSide(echo.first)}…${formatEchoSide(echo.last)}`;
+}
+
 function renderSection(
 	result: PatchSectionResult,
 	diagnostics: FileDiagnosticsResult | undefined,
@@ -174,6 +219,12 @@ function renderSection(
 		result.blockResolutions && result.blockResolutions.length > 0
 			? `\n${result.blockResolutions.map(formatBlockResolution).join("\n")}`
 			: "";
+	const echoBlock =
+		result.replacementEchoes && result.replacementEchoes.length > 0
+			? `\n${result.replacementEchoes.map(formatReplacementEcho).join("\n")}`
+			: "";
+	const renumberLines = formatRenumberLines(preview.renumbers, preview.addedLines - preview.removedLines);
+	const renumberBlock = renumberLines.length > 0 ? `\n${renumberLines.join("\n")}` : "";
 	const moveBlock = result.moveDest ? `\nMoved to ${result.moveDest}` : "";
 	const firstChangedLine = result.firstChangedLine ?? diff.firstChangedLine;
 	return {
@@ -181,7 +232,7 @@ function renderSection(
 			content: [
 				{
 					type: "text",
-					text: `${result.header}${blockBlock}${moveBlock}${previewBlock}${warningsBlock}`,
+					text: `${result.header}${blockBlock}${echoBlock}${previewBlock}${renumberBlock}${moveBlock}${warningsBlock}`,
 				},
 			],
 			details: pruneOversizedEditSnapshots({
