@@ -894,14 +894,18 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#observerRegistry = new SessionObserverRegistry();
 		this.statusLine.setSubagentCostProvider(focusedAgentId => {
 			const registry = getRunningSubagentBadgeRegistry(this.collabGuest);
-			const ownerSessionFile = focusedAgentId
-				? (registry.get(focusedAgentId)?.sessionFile ?? undefined)
-				: this.sessionManager.getSessionFile();
+			const isCollabGuest = this.collabGuest !== undefined;
+			const ownerSessionFile = isCollabGuest
+				? undefined
+				: focusedAgentId
+					? (registry.get(focusedAgentId)?.sessionFile ?? undefined)
+					: this.sessionManager.getSessionFile();
 			const observedById = new Map<string, ObservableSession>();
 			for (const observed of this.#observerRegistry.getSessions()) observedById.set(observed.id, observed);
 			return aggregateSubagentCost({
 				ownerId: focusedAgentId ?? MAIN_AGENT_ID,
 				ownerSessionFile,
+				allowUnscoped: isCollabGuest,
 				rows: registry.list(),
 				observedById,
 			});

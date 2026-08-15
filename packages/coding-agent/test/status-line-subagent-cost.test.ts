@@ -6,7 +6,7 @@ import type { AgentRef } from "../src/registry/agent-registry";
 function makeRef(
 	id: string,
 	parentId: string | undefined,
-	options: { sessionFile: string; historyCost?: number; session?: unknown },
+	options: { sessionFile: string | null; historyCost?: number; session?: unknown },
 ): AgentRef {
 	return {
 		id,
@@ -101,5 +101,30 @@ describe("aggregateSubagentCost", () => {
 				observedById,
 			}),
 		).toBeCloseTo(0.5, 8);
+	});
+	it("includes mirrored descendants without host session paths", () => {
+		const rows = [makeRef("Remote", "Main", { sessionFile: null })];
+		const observedById = new Map<string, ObservableSession>([
+			[
+				"Remote",
+				{
+					id: "Remote",
+					kind: "subagent",
+					label: "Remote",
+					status: "active",
+					lastUpdate: 0,
+					progress: { cost: 0.6 } as never,
+				},
+			],
+		]);
+
+		expect(
+			aggregateSubagentCost({
+				ownerId: "Main",
+				allowUnscoped: true,
+				rows,
+				observedById,
+			}),
+		).toBeCloseTo(0.6, 8);
 	});
 });

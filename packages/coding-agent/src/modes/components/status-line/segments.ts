@@ -432,7 +432,7 @@ const tokenRateSegment: StatusLineSegment = {
 const costSegment: StatusLineSegment = {
 	id: "cost",
 	render(ctx) {
-		const { cost, premiumRequests, subagentCost = 0 } = ctx.usageStats;
+		const { cost, premiumRequests, subagentCost } = ctx.usageStats;
 		const advisorCost = ctx.session.getAdvisorCost?.() ?? 0;
 		const normalizedPremiumRequests = normalizePremiumRequests(premiumRequests);
 		const state = ctx.session.state;

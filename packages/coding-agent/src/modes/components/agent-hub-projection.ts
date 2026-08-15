@@ -34,8 +34,13 @@ function isDescendantOf(ownerId: string, ref: AgentRef, refsById: ReadonlyMap<st
 	return false;
 }
 
-function isCurrentSessionDescendant(ownerSessionFile: string | undefined, sessionFile: string | null): boolean {
-	if (!ownerSessionFile || !sessionFile) return false;
+function isCurrentSessionDescendant(
+	ownerSessionFile: string | undefined,
+	sessionFile: string | null,
+	allowUnscoped: boolean,
+): boolean {
+	if (!ownerSessionFile) return allowUnscoped && sessionFile === null;
+	if (!sessionFile) return false;
 	const ownerArtifactsDir = ownerSessionFile.endsWith(".jsonl")
 		? ownerSessionFile.slice(0, -".jsonl".length)
 		: ownerSessionFile;
@@ -50,6 +55,7 @@ function directCostForRef(ref: AgentRef): number | undefined {
 export function aggregateSubagentCost(args: {
 	ownerId: string;
 	ownerSessionFile?: string;
+	allowUnscoped?: boolean;
 	rows: readonly AgentRef[];
 	observedById: ReadonlyMap<string, ObservableSession>;
 }): number {
@@ -59,7 +65,7 @@ export function aggregateSubagentCost(args: {
 		if (
 			ref.kind !== "sub" ||
 			!isDescendantOf(args.ownerId, ref, refsById) ||
-			!isCurrentSessionDescendant(args.ownerSessionFile, ref.sessionFile)
+			!isCurrentSessionDescendant(args.ownerSessionFile, ref.sessionFile, args.allowUnscoped === true)
 		)
 			continue;
 		const durableCost = directCostForRef(ref);
