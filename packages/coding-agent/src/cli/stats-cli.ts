@@ -4,6 +4,14 @@
  * Handles `omp stats` subcommand for viewing AI usage statistics.
  */
 
+import {
+	closeDb,
+	getDashboardStats,
+	getToolDashboardStats,
+	getTotalMessageCount,
+	startServer,
+	syncAllSessions,
+} from "@oh-my-pi/omp-stats";
 import { truncateToWidth } from "@oh-my-pi/pi-tui/utils";
 import { APP_NAME, formatDuration, formatNumber, formatPercent } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
@@ -111,11 +119,6 @@ function normalizePremiumRequests(n: number): number {
 // =============================================================================
 
 export async function runStatsCommand(cmd: StatsCommandArgs): Promise<void> {
-	// Lazy import to avoid loading stats module when not needed
-	const { getDashboardStats, syncAllSessions, getTotalMessageCount, startServer, closeDb } = await import(
-		"@oh-my-pi/omp-stats"
-	);
-
 	// Sync session files first
 	const progress = createSyncProgressReporter();
 	process.stderr.write("Syncing session files...\n");
@@ -126,7 +129,17 @@ export async function runStatsCommand(cmd: StatsCommandArgs): Promise<void> {
 
 	if (cmd.json) {
 		const stats = await getDashboardStats();
-		console.log(JSON.stringify(stats, null, 2));
+		const toolStats = await getToolDashboardStats();
+		console.log(
+			JSON.stringify(
+				{
+					...stats,
+					tooling: { byTool: toolStats.byTool },
+				},
+				null,
+				2,
+			),
+		);
 		return;
 	}
 
@@ -157,7 +170,6 @@ export async function runStatsCommand(cmd: StatsCommandArgs): Promise<void> {
 }
 
 async function printStatsSummary(): Promise<void> {
-	const { getDashboardStats } = await import("@oh-my-pi/omp-stats");
 	const stats = await getDashboardStats();
 	const { overall, byModel, byFolder } = stats;
 
