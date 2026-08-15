@@ -464,7 +464,13 @@ describe("OMP ACP extension runtime", () => {
 			});
 			expect(response.error).toBeUndefined();
 		}
-		expect(notifications.filter(item => item.method === "_omp/launch/lifecycle")).toHaveLength(3);
+		const lifecycle = notifications.filter(item => item.method === "_omp/launch/lifecycle");
+		expect(lifecycle).toHaveLength(3);
+		expect(lifecycle.map(item => (item.params.data as { event: string }).event)).toEqual([
+			"sent",
+			"stopped",
+			"restarted",
+		]);
 
 		const denied = await runtime.handleMethod(OMP_EXTENSION_METHODS.launchStop, {
 			sessionId: session.sessionId,
@@ -473,7 +479,7 @@ describe("OMP ACP extension runtime", () => {
 		expect((denied.error as Record<string, unknown>).code).toBe("PERMISSION_DENIED");
 	});
 
-	it("returns structured recoverable errors for bounded handler timeouts", async () => {
+	it("returns bounded non-retryable errors when a memory mutation may continue after timeout", async () => {
 		const session = new FakeExtensionSession();
 		const runtime = new OmpAcpExtensionRuntime({
 			connection: { extNotification: async () => {} } as unknown as AgentSideConnection,
@@ -491,9 +497,27 @@ describe("OMP ACP extension runtime", () => {
 			sessionId: session.sessionId,
 			timeoutMs: 1,
 		});
-		expect(response.error).toMatchObject({ code: "TIMEOUT", recoverable: true });
+		expect(response.error).toMatchObject({ code: "TIMEOUT", recoverable: false });
 		expect((response.error as Record<string, unknown>).detail).toEqual({
 			method: OMP_EXTENSION_METHODS.memoryEnqueue,
+			operationMayContinue: true,
+		});
+	});
+
+	it("returns a bounded typed error when request parameters are malformed", async () => {
+		const runtime = new OmpAcpExtensionRuntime({
+			connection: { extNotification: async () => {} } as unknown as AgentSideConnection,
+			getSession: () => undefined,
+		});
+		const response = await runtime.handleMethod(OMP_EXTENSION_METHODS.capabilities, {
+			sessionId: "",
+			timeoutMs: "slow",
+		});
+		expect(response).toMatchObject({
+			schemaVersion: 1,
+			sessionId: "_omp/invalid-request",
+			sequence: 1,
+			error: { code: "INVALID_REQUEST", recoverable: false },
 		});
 	});
 });

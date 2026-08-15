@@ -16,9 +16,11 @@ import {
 	OMP_EXTENSION_MAX_TEXT_BYTES,
 	OMP_EXTENSION_METHODS,
 	OMP_EXTENSION_SCHEMA_VERSION,
+	OMP_LAUNCH_LIFECYCLE_EVENTS,
 	type OmpExtensionEnvelope,
 	type OmpExtensionRequestContext,
 	type OmpExtensionSequenceState,
+	type OmpLaunchLifecycleEvent,
 	optionalBoolean,
 	optionalString,
 	parseOmpExtensionRequest,
@@ -141,6 +143,11 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): 
 	return Promise.race([promise, timeout.promise]).finally(() => clearTimeout(timer));
 }
 
+function safeRequestString(value: unknown, maxBytes = 512): string | undefined {
+	if (typeof value !== "string" || value.length === 0) return undefined;
+	return Buffer.byteLength(value, "utf8") <= maxBytes ? value : undefined;
+}
+
 export class OmpAcpExtensionRuntime {
 	readonly #connection: ExtensionConnection;
 	readonly #getSession: SessionResolver;
@@ -199,9 +206,11 @@ export class OmpAcpExtensionRuntime {
 	}
 
 	async handleMethod(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
-		const context = parseOmpExtensionRequest(params);
-		const state = this.#resolveState(context.sessionId);
+		let context: OmpExtensionRequestContext | undefined;
+		let state: ManagedExtensionState | undefined;
 		try {
+			context = parseOmpExtensionRequest(params);
+			state = this.#resolveState(context.sessionId);
 			const data = await withTimeout(
 				this.#handleMethodData(method, params, context, state),
 				context.timeoutMs,
@@ -210,20 +219,26 @@ export class OmpAcpExtensionRuntime {
 			if (method === OMP_EXTENSION_METHODS.capabilities) state.negotiated = true;
 			return asRecord(createOmpExtensionEnvelope(state, context, data));
 		} catch (error) {
-			state.sequence += 1;
+			const sessionId = context?.sessionId ?? safeRequestString(params.sessionId) ?? "_omp/invalid-request";
+			const correlationId = context?.correlationId ?? safeRequestString(params.correlationId);
+			const errorState = state ?? this.#states.get(sessionId);
+			if (errorState) errorState.sequence += 1;
+			const operationMayContinue = this.#operationMayContinue(method, error);
 			return {
 				schemaVersion: OMP_EXTENSION_SCHEMA_VERSION,
 				ompVersion: VERSION,
-				sessionId: context.sessionId,
-				generation: state.generation,
-				sequence: state.sequence,
+				sessionId,
+				generation: errorState?.generation ?? crypto.randomUUID(),
+				sequence: errorState?.sequence ?? 1,
 				timestamp: new Date().toISOString(),
-				...(context.correlationId === undefined ? {} : { correlationId: context.correlationId }),
+				...(correlationId === undefined ? {} : { correlationId }),
 				error: {
 					code: this.#errorCode(error),
-					message: redactText(state.session, sanitizeError(error), 2_000),
-					recoverable: this.#isRecoverable(error),
-					detail: { method },
+					message: errorState
+						? redactText(errorState.session, sanitizeError(error), 2_000)
+						: sanitizeError(error).slice(0, 2_000),
+					recoverable: operationMayContinue ? false : this.#isRecoverable(error),
+					detail: { method, ...(operationMayContinue ? { operationMayContinue: true } : {}) },
 				},
 			};
 		}
@@ -486,8 +501,14 @@ export class OmpAcpExtensionRuntime {
 					method === OMP_EXTENSION_METHODS.launchStop ||
 					method === OMP_EXTENSION_METHODS.launchRestart)
 			) {
+				const event: OmpLaunchLifecycleEvent =
+					method === OMP_EXTENSION_METHODS.launchSend
+						? OMP_LAUNCH_LIFECYCLE_EVENTS.sent
+						: method === OMP_EXTENSION_METHODS.launchStop
+							? OMP_LAUNCH_LIFECYCLE_EVENTS.stopped
+							: OMP_LAUNCH_LIFECYCLE_EVENTS.restarted;
 				await this.#enqueueNotification(state, OMP_EXTENSION_EVENTS.launchLifecycle, {
-					event: method.slice(method.lastIndexOf("/") + 1),
+					event,
 					service: publicDaemonSnapshot(result.daemon),
 				});
 			}
@@ -682,7 +703,14 @@ export class OmpAcpExtensionRuntime {
 		if (message.includes("timed out") || message.includes("aborted")) return "TIMEOUT";
 		if (message.includes("owned by") || message.includes("confirmation")) return "PERMISSION_DENIED";
 		if (message.includes("unsupported") || message.includes("unknown")) return "UNSUPPORTED";
+		if (message.includes("must be") || message.includes("exceeds") || message.includes("required"))
+			return "INVALID_REQUEST";
 		return "OPERATION_FAILED";
+	}
+
+	#operationMayContinue(method: string, error: unknown): boolean {
+		if (this.#errorCode(error) !== "TIMEOUT") return false;
+		return method === OMP_EXTENSION_METHODS.memoryEnqueue || method === OMP_EXTENSION_METHODS.memoryClear;
 	}
 
 	#isRecoverable(error: unknown): boolean {

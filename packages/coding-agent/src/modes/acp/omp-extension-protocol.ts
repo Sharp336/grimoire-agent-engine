@@ -30,6 +30,15 @@ export const OMP_EXTENSION_EVENTS = {
 	launchLifecycle: "_omp/launch/lifecycle",
 } as const;
 
+export const OMP_LAUNCH_LIFECYCLE_EVENTS = {
+	completed: "completed",
+	sent: "sent",
+	stopped: "stopped",
+	restarted: "restarted",
+} as const;
+
+export type OmpLaunchLifecycleEvent = (typeof OMP_LAUNCH_LIFECYCLE_EVENTS)[keyof typeof OMP_LAUNCH_LIFECYCLE_EVENTS];
+
 const METHOD_SET = new Set<string>(Object.values(OMP_EXTENSION_METHODS));
 
 export type OmpExtensionFeatureName = "advisor" | "autolearn" | "memory" | "launch" | "managedSkills";
