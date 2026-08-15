@@ -53,8 +53,8 @@ export const gcHelp = {
 	examples: [
 		"omp gc --merge-duplicates             # Merge split copies of the same session (dry-run by default)",
 		"omp gc --merge-forks                  # Graft forked sessions into their parents (dry-run by default)",
-		"omp gc --prune-empty-sessions archive  # Recommended: archive sessions where the model never spoke or completed a turn",
-		"omp gc --prune-empty-sessions delete   # Permanently delete those sessions (only with --apply)",
+		"omp gc --prune-empty-sessions         # Archive sessions where the model never spoke or completed a turn",
+		"omp gc --prune-empty-sessions delete  # Permanently delete those sessions instead (only with --apply)",
 	],
 } satisfies CommandMetadata;
 

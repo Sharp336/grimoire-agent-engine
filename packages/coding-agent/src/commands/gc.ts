@@ -17,8 +17,9 @@ export default class Gc extends Command {
 		"merge-duplicates": Flags.boolean({ description: "Merge duplicate session files that share a session id" }),
 		"merge-forks": Flags.boolean({ description: "Graft forked sessions back into their parent as branches" }),
 		"prune-empty-sessions": Flags.string({
-			description: "Prune sessions where the model never spoke or completed a turn: archive (recommended) or delete",
+			description: "Prune sessions where the model never spoke or completed a turn: archive (default) or delete",
 			options: ["archive", "delete"],
+			optionalValue: "archive",
 		}),
 		wal: Flags.boolean({ description: "Checkpoint history/model database WAL files" }),
 		"cold-archive-after-days": Flags.integer({ description: "Minimum session age before archiving" }),
