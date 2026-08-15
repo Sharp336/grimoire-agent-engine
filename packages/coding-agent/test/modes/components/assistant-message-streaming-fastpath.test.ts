@@ -122,6 +122,27 @@ Average Latency: 1,240 ms
 		expect(finalized).toContain("1/1 Running");
 	});
 
+	it("applies assistant text transformers only to the display copy", () => {
+		const message = msg([{ type: "text", text: "original" }]);
+		const finality: boolean[] = [];
+		const component = new AssistantMessageComponent(undefined, false, undefined, [], undefined, true, [
+			(text, context) => {
+				finality.push(context.isStreaming);
+				return context.isStreaming ? text : "[linked](https://example.com)";
+			},
+		]);
+
+		component.updateContent(message, { transient: true });
+		expect(Bun.stripANSI(component.render(W).join("\n"))).toContain("original");
+
+		component.updateContent(message);
+		const finalized = Bun.stripANSI(component.render(W).join("\n"));
+		expect(finalized).toContain("linked");
+		expect(finalized).not.toContain("original");
+		expect(message.content[0]).toEqual({ type: "text", text: "original" });
+		expect(finality).toEqual([true, false]);
+	});
+
 	// Regression: theme/symbol changes reach the component via invalidate()
 	// (InteractiveMode clears the markdown render cache and invalidates the
 	// tree). Reused fast-path children captured getMarkdownTheme() at

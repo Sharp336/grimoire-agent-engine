@@ -24,6 +24,7 @@ import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
 import type {
 	AfterProviderResponseEvent,
+	AssistantTextTransformer,
 	AssistantThinkingRenderer,
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
@@ -896,6 +897,10 @@ export class ExtensionRunner {
 
 	getAssistantThinkingRenderers(): AssistantThinkingRenderer[] {
 		return this.extensions.flatMap(ext => ext.assistantThinkingRenderers);
+	}
+
+	getAssistantTextTransformers(): AssistantTextTransformer[] {
+		return this.extensions.flatMap(ext => ext.assistantTextTransformers);
 	}
 
 	getRegisteredCommands(reserved?: ReadonlySet<string>): RegisteredCommand[] {

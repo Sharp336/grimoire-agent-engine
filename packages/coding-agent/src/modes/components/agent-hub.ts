@@ -29,7 +29,7 @@ import {
 import { formatAge, formatNumber, getProjectDir, logger } from "@oh-my-pi/pi-utils";
 import type { KeyId } from "../../config/keybindings";
 import type { Settings } from "../../config/settings";
-import type { MessageRenderer } from "../../extensibility/extensions/types";
+import type { AssistantTextTransformer, MessageRenderer } from "../../extensibility/extensions/types";
 import { IrcBus } from "../../irc/bus";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, type AgentStatus, MAIN_AGENT_ID } from "../../registry/agent-registry";
@@ -128,6 +128,7 @@ export interface AgentHubDeps {
 	isBuiltInTool?: (name: string) => boolean;
 	/** Extension message renderers for custom messages in the transcript. */
 	getMessageRenderer?: (customType: string) => MessageRenderer | undefined;
+	getAssistantTextTransformers?: () => readonly AssistantTextTransformer[];
 	/** Cwd used by tool renderers for path shortening; defaults to the project dir. */
 	cwd?: string;
 	/** Mirrors the main transcript's thinking-block visibility. */
@@ -211,6 +212,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	#getTool: ((name: string) => AgentTool | undefined) | undefined;
 	#isBuiltInTool: ((name: string) => boolean) | undefined;
 	#getMessageRenderer: ((customType: string) => MessageRenderer | undefined) | undefined;
+	#getAssistantTextTransformers: (() => readonly AssistantTextTransformer[]) | undefined;
 	#cwd: string;
 	#hideThinkingBlock: (() => boolean) | undefined;
 	#proseOnlyThinking: (() => boolean) | undefined;
@@ -244,6 +246,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		this.#getTool = deps.getTool;
 		this.#isBuiltInTool = deps.isBuiltInTool;
 		this.#getMessageRenderer = deps.getMessageRenderer;
+		this.#getAssistantTextTransformers = deps.getAssistantTextTransformers;
 		this.#cwd = deps.cwd ?? getProjectDir();
 		this.#hideThinkingBlock = deps.hideThinkingBlock;
 		this.#proseOnlyThinking = deps.proseOnlyThinking;
@@ -371,6 +374,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			getTool: this.#getTool,
 			isBuiltInTool: this.#isBuiltInTool,
 			getMessageRenderer: this.#getMessageRenderer,
+			getAssistantTextTransformers: this.#getAssistantTextTransformers,
 			cwd: this.#cwd,
 			hideThinkingBlock: this.#hideThinkingBlock,
 			proseOnlyThinking: this.#proseOnlyThinking,

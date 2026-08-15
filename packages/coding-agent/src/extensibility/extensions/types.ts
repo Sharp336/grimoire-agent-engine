@@ -1134,6 +1134,18 @@ export type AssistantThinkingRenderer = (
 	theme: Theme,
 ) => Component | undefined;
 
+export interface AssistantTextTransformContext {
+	/** Whether the assistant message is still streaming. */
+	isStreaming: boolean;
+}
+
+/**
+ * Transform assistant Markdown for display only.
+ *
+ * The returned text is never written to the session or provider context.
+ */
+export type AssistantTextTransformer = (text: string, context: AssistantTextTransformContext) => string;
+
 // ============================================================================
 // Command Registration
 // ============================================================================
@@ -1302,6 +1314,9 @@ export interface ExtensionAPI {
 
 	/** Register a renderer for assistant thinking blocks. Rendered after the original thinking text. */
 	registerAssistantThinkingRenderer(renderer: AssistantThinkingRenderer): void;
+
+	/** Register a display-only transformer for assistant Markdown. Transformers run in extension load order. */
+	registerAssistantTextTransformer(transformer: AssistantTextTransformer): void;
 
 	// =========================================================================
 	// Actions
@@ -1630,6 +1645,7 @@ export interface Extension {
 	tools: Map<string, RegisteredTool<any, any>>;
 	toolRegistrationListeners?: Set<ToolRegistrationListener>;
 	assistantThinkingRenderers: AssistantThinkingRenderer[];
+	assistantTextTransformers: AssistantTextTransformer[];
 	messageRenderers: Map<string, MessageRenderer>;
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;

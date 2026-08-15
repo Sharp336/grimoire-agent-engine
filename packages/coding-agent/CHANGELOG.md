@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added display-only assistant text transformers for extensions, composed in extension load order without mutating persisted messages or model context.
+
 ## [17.3.4] - 2026-08-14
 
 ### Changed

@@ -488,6 +488,31 @@ describe("ExtensionRunner", () => {
 
 			expect(runner.getAssistantThinkingRenderers().length).toBe(1);
 		});
+
+		it("collects assistant text transformers in extension load order", async () => {
+			fs.writeFileSync(
+				path.join(extensionsDir, "a-text-transformer.ts"),
+				`export default pi => pi.registerAssistantTextTransformer(text => text + "A");`,
+			);
+			fs.writeFileSync(
+				path.join(extensionsDir, "b-text-transformer.ts"),
+				`export default pi => pi.registerAssistantTextTransformer(text => text + "B");`,
+			);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			const transformed = runner
+				.getAssistantTextTransformers()
+				.reduce((text, transformer) => transformer(text, { isStreaming: false }), "");
+			expect(transformed).toBe("AB");
+		});
 	});
 
 	describe("flags", () => {
@@ -3484,6 +3509,7 @@ describe("ExtensionRunner", () => {
 				handlers: new Map([["input", [async (...args: unknown[]) => handler(args[0] as InputEvent)]]]),
 				tools: new Map(),
 				assistantThinkingRenderers: [],
+				assistantTextTransformers: [],
 				messageRenderers: new Map(),
 				commands: new Map(),
 				flags: new Map(),

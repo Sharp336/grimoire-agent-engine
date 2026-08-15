@@ -35,6 +35,7 @@ import { getAllPluginExtensionPaths } from "../plugins/loader";
 
 import { resolvePath, withHostGuard } from "../utils";
 import type {
+	AssistantTextTransformer,
 	AssistantThinkingRenderer,
 	Extension,
 	ExtensionAPI,
@@ -226,6 +227,28 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		this.extension.assistantThinkingRenderers.push(renderer);
 	}
 
+	registerAssistantTextTransformer(transformer: AssistantTextTransformer): void {
+		let reportedFailure = false;
+		this.extension.assistantTextTransformers.push((text, context) => {
+			try {
+				const transformed = transformer(text, context);
+				if (typeof transformed !== "string") {
+					throw new TypeError("Assistant text transformer must return a string");
+				}
+				return transformed;
+			} catch (error) {
+				if (!reportedFailure) {
+					reportedFailure = true;
+					logger.warn("Assistant text transformer failed; preserving prior display text", {
+						extension: this.extension.path,
+						error: String(error),
+					});
+				}
+				return text;
+			}
+		});
+	}
+
 	getFlag(name: string): boolean | string | undefined {
 		if (!this.extension.flags.has(name)) return undefined;
 		return this.runtime.flagValues.get(name);
@@ -320,6 +343,7 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		tools: new Map(),
 		toolRegistrationListeners: new Set(),
 		assistantThinkingRenderers: [],
+		assistantTextTransformers: [],
 		messageRenderers: new Map(),
 		commands: new Map(),
 		flags: new Map(),

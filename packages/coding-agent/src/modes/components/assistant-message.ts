@@ -12,7 +12,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { formatNumber } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import type { AssistantThinkingRenderer } from "../../extensibility/extensions/types";
+import type { AssistantTextTransformer, AssistantThinkingRenderer } from "../../extensibility/extensions/types";
 import { getMarkdownTheme, theme } from "../../modes/theme/theme";
 import { expandKeyHint, getPreviewLines, resolveImageOptions, TRUNCATE_LENGTHS } from "../../tools/render-utils";
 import { convertImageToPng } from "../../utils/image-loading";
@@ -31,6 +31,8 @@ const MAX_TRANSCRIPT_ERROR_LINES = 8;
 
 /** Opening or closing fence of a code block: ≥3 backticks/tildes plus info string. */
 const CODE_FENCE_LINE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+const STREAMING_ASSISTANT_TEXT_CONTEXT = { isStreaming: true } as const;
+const FINAL_ASSISTANT_TEXT_CONTEXT = { isStreaming: false } as const;
 
 type ThinkingContentBlock = Extract<AssistantMessage["content"][number], { type: "thinking" }>;
 type DisplayThinkingContentBlock = ThinkingContentBlock & { rawThinking?: string };
@@ -275,6 +277,7 @@ export class AssistantMessageComponent extends Container {
 		private readonly thinkingRenderers: readonly AssistantThinkingRenderer[] = [],
 		private readonly imageBudget?: ImageBudget,
 		private proseOnlyThinking = true,
+		private readonly textTransformers: readonly AssistantTextTransformer[] = [],
 	) {
 		super();
 		this.#transcriptBlockFinalized = message !== undefined;
@@ -736,6 +739,22 @@ export class AssistantMessageComponent extends Container {
 		return true;
 	}
 
+	#transformAssistantText(text: string): string {
+		if (this.textTransformers.length === 0) return text;
+		let transformed = text;
+		const context = this.#lastUpdateTransient ? STREAMING_ASSISTANT_TEXT_CONTEXT : FINAL_ASSISTANT_TEXT_CONTEXT;
+		for (const transformer of this.textTransformers) {
+			try {
+				const next = transformer(transformed, context);
+				if (typeof next === "string") transformed = next;
+			} catch {
+				// Extension registration normally wraps failures. Keep direct
+				// construction equally safe for SDK hosts and tests.
+			}
+		}
+		return transformed;
+	}
+
 	#tryFastPathUpdate(message: AssistantMessage, opts?: { transient?: boolean }): boolean {
 		if (!this.#fastPathKey || !this.#fastPathItems) return false;
 		if (!this.#canFastPath(message)) {
@@ -761,7 +780,7 @@ export class AssistantMessageComponent extends Container {
 			}
 			let newText: string;
 			if (item.blockType === "text" && content.type === "text") {
-				newText = content.text.trim();
+				newText = this.#transformAssistantText(content.text).trim();
 			} else if (item.blockType === "thinking" && content.type === "thinking") {
 				newText = resolveThinkingDisplay(content, this.proseOnlyThinking).text;
 			} else {
@@ -875,7 +894,7 @@ export class AssistantMessageComponent extends Container {
 			const content = message.content[i];
 			if (content.type === "text" && canonicalizeMessage(content.text)) {
 				// Set paddingY=0 to avoid extra spacing before tool executions
-				const trimmed = content.text.trim();
+				const trimmed = this.#transformAssistantText(content.text).trim();
 				const mdOptions = this.#textColorTransform ? { color: this.#textColorTransform } : undefined;
 				const md = new Markdown(trimmed, 1, 0, getMarkdownTheme(), mdOptions, 0);
 				this.#contentContainer.addChild(md);

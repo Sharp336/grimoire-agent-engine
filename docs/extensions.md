@@ -470,6 +470,17 @@ pi.registerAssistantThinkingRenderer((context, theme) => {
 
 Used by interactive rendering to add display-only supplemental UI below each visible assistant thinking block. The renderer receives the already-visible thinking text, content/thinking indexes, theme, and a `requestRender()` callback for async renderers. All registered renderers that return a component are appended in registration order. Renderers must not mutate messages; the original thinking block remains the provider/session source of truth.
 
+## Assistant text transformer
+
+```ts
+pi.registerAssistantTextTransformer((text, { isStreaming }) => {
+  return isStreaming ? text : transformFinalMarkdownForDisplay(text);
+});
+```
+
+Assistant text transformers run in extension load order immediately before Markdown rendering. Each receives the prior transformer's output and whether the message is still streaming. Returned text is display-only: OMP never writes it to the session, provider context, exports, or subsequent turns. A transformer failure preserves the prior display text and is logged once for that extension.
+
+
 ## Tool call/result renderer
 
 Provide `renderCall` / `renderResult` on `registerTool` definitions for custom tool visualization in TUI.
