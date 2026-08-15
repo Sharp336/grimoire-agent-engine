@@ -69,8 +69,16 @@ export function isMCPToolName(name: string): boolean {
  * Match a tool name against disallow patterns: a trailing `*` is a prefix
  * wildcard (`mcp__*` = all MCP tools, `mcp__<server>_*` = one server), any
  * other pattern matches the exact name.
+ *
+ * Hidden protocol tools (`yield`, `goal`, `think`) are never disallowable:
+ * stripping the subagent terminator would leave a `requireYieldTool` session
+ * unable to yield. The `<server>` in an `mcp__<server>_*` pattern is the
+ * sanitized tool-name prefix (`createMCPToolName` lowercases and collapses
+ * non-`[a-z_]` characters), not the raw config server name — a server named
+ * `db2` mints `mcp__db_query`, so the pattern is `mcp__db_*`.
  */
 export function isToolDisallowed(name: string, patterns: readonly string[]): boolean {
+	if (HIDDEN_TOOL_NAMES.includes(name as HiddenToolName)) return false;
 	for (const pattern of patterns) {
 		if (pattern.endsWith("*")) {
 			if (name.startsWith(pattern.slice(0, -1))) return true;

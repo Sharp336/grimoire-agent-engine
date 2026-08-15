@@ -30,4 +30,11 @@ describe("isToolDisallowed", () => {
 		expect(isToolDisallowed("mcp__foo_bar", ["bash", "mcp__foo_*"])).toBe(true);
 		expect(isToolDisallowed("bash", ["mcp__*", "bash"])).toBe(true);
 	});
+
+	test("never disallows hidden protocol tools", () => {
+		expect(isToolDisallowed("yield", ["yield"])).toBe(false);
+		expect(isToolDisallowed("yield", ["*"])).toBe(false);
+		expect(isToolDisallowed("goal", ["goal"])).toBe(false);
+		expect(isToolDisallowed("think", ["think"])).toBe(false);
+	});
 });
