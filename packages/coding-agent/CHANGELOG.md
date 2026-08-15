@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Shared each local embedding model worker across concurrent OMP sessions through an authenticated machine-global broker, while retaining private-worker fallback both when broker acquisition fails and when an established broker connection is lost.
+
 ## [17.3.4] - 2026-08-14
 
 ### Changed

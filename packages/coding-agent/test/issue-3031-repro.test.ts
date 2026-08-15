@@ -8,12 +8,12 @@
  *     session start, before any prompt rendered.
  *   - NPM install: NAPI finalizer segfault at process teardown.
  *
- * The fix relocates the embeddings stack into a Bun.spawn child process. The
- * agent's main process hands `mnemopi.setLocalModelInitializer` a wrapper that
- * round-trips through `__omp_worker_mnemopi_embed`, and `SIGKILL`s the child
- * on dispose so the destructor never runs in either address space. These tests
- * pin the three pieces of that contract so a future refactor cannot quietly
- * re-introduce the crash.
+ * The fix keeps the embeddings stack in a Bun.spawn child process and now
+ * places that child behind an authenticated machine-global broker. Concurrent
+ * OMP sessions share one child per (model, cacheDir) key; the agent process
+ * retains a private subprocess fallback if broker startup fails. The broker
+ * still SIGKILLs children on disposal so the native destructor never runs in
+ * an agent or broker address space. These tests pin the client/subprocess seam.
  */
 import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
@@ -163,5 +163,177 @@ describe("issue #3031 — mnemopi embeddings live in an isolated subprocess", ()
 		}
 
 		await client.terminate();
+	});
+	it("accepts asynchronous worker acquisition for shared-daemon startup", async () => {
+		let messageHandler: ((message: MnemopiEmbedWorkerOutbound) => void) | undefined;
+		let acquisitions = 0;
+		const client = new MnemopiEmbedClient(async () => {
+			acquisitions += 1;
+			return {
+				send(message) {
+					queueMicrotask(() => {
+						if (message.type === "init") messageHandler?.({ type: "ready", id: message.id });
+						else if (message.type === "embed") {
+							messageHandler?.({ type: "vectors", id: message.id, vectors: [[1, 2, 3]] });
+						}
+					});
+				},
+				onMessage(handler) {
+					messageHandler = handler;
+					return () => {
+						if (messageHandler === handler) messageHandler = undefined;
+					};
+				},
+				onError() {
+					return () => {};
+				},
+				async terminate() {
+					messageHandler = undefined;
+				},
+			};
+		});
+		try {
+			const model = await client.initialize("fast-bge-base-en-v1.5", "/tmp/cache");
+			expect(model).not.toBeNull();
+			const batches: number[][][] = [];
+			for await (const batch of model!.embed(["hello"])) batches.push(batch);
+			expect(batches).toEqual([[[1, 2, 3]]]);
+			expect(acquisitions).toBe(1);
+		} finally {
+			await client.terminate();
+		}
+	});
+	it("reaps a shared worker acquired after client termination", async () => {
+		const acquired = Promise.withResolvers<MnemopiEmbedWorkerHandle>();
+		const sent: MnemopiEmbedWorkerInbound[] = [];
+		let terminations = 0;
+		const worker: MnemopiEmbedWorkerHandle = {
+			send(message) {
+				sent.push(message);
+			},
+			onMessage() {
+				return () => {};
+			},
+			onError() {
+				return () => {};
+			},
+			async terminate() {
+				terminations += 1;
+			},
+		};
+		const client = new MnemopiEmbedClient(() => acquired.promise);
+		const initializing = client.initialize("fast-bge-base-en-v1.5", "/tmp/cache");
+
+		await client.terminate();
+		acquired.resolve(worker);
+
+		expect(await initializing).toBeNull();
+		expect(terminations).toBe(1);
+		expect(sent).toEqual([]);
+	});
+
+	it("settles operations terminated after reusing an established worker", async () => {
+		let messageHandler: ((message: MnemopiEmbedWorkerOutbound) => void) | undefined;
+		let terminated = false;
+		const worker: MnemopiEmbedWorkerHandle = {
+			send(message) {
+				if (terminated) return;
+				queueMicrotask(() => {
+					if (message.type === "init") messageHandler?.({ type: "ready", id: message.id });
+					else if (message.type === "embed") {
+						messageHandler?.({ type: "vectors", id: message.id, vectors: [[1, 2, 3]] });
+					}
+				});
+			},
+			onMessage(handler) {
+				messageHandler = handler;
+				return () => {
+					if (messageHandler === handler) messageHandler = undefined;
+				};
+			},
+			onError() {
+				return () => {};
+			},
+			async terminate() {
+				terminated = true;
+				messageHandler = undefined;
+			},
+		};
+		const client = new MnemopiEmbedClient(() => worker, 20);
+		const model = await client.initialize("fast-test", undefined);
+		expect(model).not.toBeNull();
+
+		const initializing = client.initialize("fast-test", undefined);
+		await client.terminate();
+		expect(await Promise.race([initializing, Bun.sleep(100).then(() => "hung")])).toBeNull();
+
+		terminated = false;
+		const replacement = await client.initialize("fast-test", undefined);
+		expect(replacement).not.toBeNull();
+		const embedding = replacement!.embed(["hello"])[Symbol.asyncIterator]().next();
+		await client.terminate();
+		await expect(embedding).rejects.toThrow("terminated");
+	});
+
+	it("resolves response-kind mismatches instead of stranding requests", async () => {
+		let messageHandler: ((message: MnemopiEmbedWorkerOutbound) => void) | undefined;
+		const client = new MnemopiEmbedClient(
+			() => ({
+				send(message) {
+					queueMicrotask(() => {
+						if (message.type === "init") messageHandler?.({ type: "vectors", id: message.id, vectors: [[1]] });
+						else if (message.type === "embed") messageHandler?.({ type: "ready", id: message.id });
+					});
+				},
+				onMessage(handler) {
+					messageHandler = handler;
+					return () => {
+						if (messageHandler === handler) messageHandler = undefined;
+					};
+				},
+				onError() {
+					return () => {};
+				},
+				async terminate() {},
+			}),
+			50,
+		);
+		try {
+			expect(await client.initialize("fast-test", undefined)).toBeNull();
+
+			messageHandler = undefined;
+			const validClient = new MnemopiEmbedClient(
+				() => ({
+					send(message) {
+						queueMicrotask(() => {
+							if (message.type === "init") messageHandler?.({ type: "ready", id: message.id });
+							else if (message.type === "embed") messageHandler?.({ type: "ready", id: message.id });
+						});
+					},
+					onMessage(handler) {
+						messageHandler = handler;
+						return () => {};
+					},
+					onError() {
+						return () => {};
+					},
+					async terminate() {},
+				}),
+				50,
+			);
+			try {
+				const model = await validClient.initialize("fast-test", undefined);
+				expect(model).not.toBeNull();
+				await expect(async () => {
+					for await (const _ of model!.embed(["hello"])) {
+						/* drain */
+					}
+				}).toThrow("unexpected ready response");
+			} finally {
+				await validClient.terminate();
+			}
+		} finally {
+			await client.terminate();
+		}
 	});
 });

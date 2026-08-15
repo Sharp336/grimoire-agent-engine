@@ -34,6 +34,7 @@ import type { WorkerInbound as JsWorkerInbound, WorkerOutbound as JsWorkerOutbou
 import { DAEMON_BROKER_WORKER_ARG } from "./launch/protocol";
 import { TERMINAL_OUTPUT_WORKER_ARG } from "./launch/terminal-output-worker-protocol";
 import { LSP_MUX_WORKER_ARG } from "./lsp/mux/protocol";
+import { MNEMOPI_EMBED_BROKER_WORKER_ARG } from "./mnemopi/embed-broker";
 import { COMPUTER_WORKER_ARG } from "./tools/computer/protocol";
 import { smokeTestComputerWorker } from "./tools/computer/supervisor";
 import { startComputerWorker } from "./tools/computer/worker-entry";
@@ -203,6 +204,12 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 	if (arg === MNEMOPI_EMBED_WORKER_ARG) {
 		const { startMnemopiEmbedWorker } = await import("./mnemopi/embed-worker");
 		await runIpcSubprocessWorker(startMnemopiEmbedWorker);
+		return true;
+	}
+	if (arg === MNEMOPI_EMBED_BROKER_WORKER_ARG) {
+		// The broker owns the native embedding workers, so load it only after hidden-worker dispatch.
+		const { startMnemopiEmbedBrokerFromEnvironment } = await import("./mnemopi/embed-broker-server");
+		await startMnemopiEmbedBrokerFromEnvironment();
 		return true;
 	}
 	if (arg === TERMINAL_OUTPUT_WORKER_ARG) {
