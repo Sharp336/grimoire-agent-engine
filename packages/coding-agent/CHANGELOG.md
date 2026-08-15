@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added an RPC `cancel_subagent` command to stop a running background subagent ([#8666](https://github.com/can1357/oh-my-pi/pull/8666) by [@13kparkin](https://github.com/13kparkin)).
+- Added an RPC `cancel_subagent` command (and the `RpcClient.cancelSubagent()` client method) to stop a running background subagent ([#8666](https://github.com/can1357/oh-my-pi/pull/8666) by [@13kparkin](https://github.com/13kparkin)).
 
 ## [17.3.4] - 2026-08-14
 
