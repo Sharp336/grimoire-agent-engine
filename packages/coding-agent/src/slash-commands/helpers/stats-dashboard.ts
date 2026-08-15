@@ -50,13 +50,9 @@ export function parseStatsDashboardArgs(args: string): StatsDashboardArgs | { er
 			port = parsed;
 			continue;
 		}
-		if (token === "--host") {
-			host = tokens[++i];
-			if (!host) return { error: `Missing host. ${STATS_DASHBOARD_USAGE}` };
-			continue;
-		}
-		if (token.startsWith("--host=")) {
+		if (token.startsWith("--host")) {
 			host = token.slice("--host=".length);
+			if (!host) return { error: `Missing host. ${STATS_DASHBOARD_USAGE}` };
 			continue;
 		}
 		return { error: `Unknown option: ${token}. ${STATS_DASHBOARD_USAGE}` };
