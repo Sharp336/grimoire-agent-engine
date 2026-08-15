@@ -1051,11 +1051,32 @@ function resolveConfiguredRolePattern(
 	const configured = settings?.getModelRole(role)?.trim();
 	const configuredDefault = settings?.getModelRole(DEFAULT_MODEL_ROLE)?.trim();
 	const roleDefaults = isModelRole(role) ? rolePriorityDefaults(role) : [];
-	const resolved = configured
-		? normalizeModelPatternList(configured)
-		: isModelRole(role)
-			? resolveDefaultInheritedPatterns(role, configuredDefault, roleDefaults, settings, visited)
-			: roleDefaults;
+	const resolved: string[] = [];
+	if (configured) {
+		// A configured cross-role alias (e.g. `modelRoles.advisor = "@slow"`)
+		// resolves to the target role's patterns instead of being matched as a
+		// literal selector; self-aliases and unknown aliases stay literal.
+		for (const pattern of normalizeModelPatternList(configured)) {
+			const { base: aliasCandidate } = splitThinkingSuffix(
+				pattern,
+				modelRoleAliasPrefixLength(pattern) ?? LEGACY_MODEL_ROLE_ALIAS_PREFIX.length,
+				MAX_THINKING_SUFFIX_OPTIONS,
+			);
+			const aliasRole = getModelRoleAlias(aliasCandidate, settings);
+			if (aliasRole && !visited.has(aliasRole)) {
+				const recursed = resolveConfiguredRolePattern(pattern, settings, new Set(visited));
+				if (recursed && recursed.length > 0) {
+					resolved.push(...recursed);
+					continue;
+				}
+			}
+			resolved.push(pattern);
+		}
+	} else if (isModelRole(role)) {
+		resolved.push(...resolveDefaultInheritedPatterns(role, configuredDefault, roleDefaults, settings, visited));
+	} else {
+		resolved.push(...roleDefaults);
+	}
 	if (resolved.length === 0) {
 		resolved.push(...roleDefaults);
 	}
