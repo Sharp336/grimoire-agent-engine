@@ -42,8 +42,8 @@ function installLocalModelInitializer(setInitializer: (initializer: LocalModelIn
 
 /**
  * Lazily load `@oh-my-pi/pi-mnemopi` (memoized) and route fastembed loads
- * through the dedicated embeddings subprocess. The override is installed once
- * — before any consumer gets the chance to call `embed()` — so
+ * through the shared embedding broker, with a private subprocess fallback.
+ * The override is installed before any consumer can call `embed()`, so
  * `onnxruntime-node`'s NAPI constructor + finalizer never run inside the
  * agent's address space (issue #3031). Test seams that swap the initializer
  * with `setLocalModelInitializerForTests` still win because both go through

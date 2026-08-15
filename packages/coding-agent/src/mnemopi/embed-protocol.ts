@@ -1,12 +1,12 @@
 /**
- * Wire types between the parent (`MnemopiEmbedClient`) and the local
- * embeddings subprocess. The parent owns the subprocess lifecycle (graceful
- * work, hard `SIGKILL` on shutdown); the protocol carries no explicit close
- * handshake — once the parent decides to terminate, it signals the OS to reap
- * the child so `onnxruntime-node`'s NAPI finalizer never runs in the main
- * agent address space (it crashes Bun on Windows shutdown — issue #3031, the
- * mnemopi sibling of the tiny-model fix from #1606/#1607). See
- * `embed-client.ts` for the spawn/kill glue.
+ * Wire types between a parent handle and the local embeddings subprocess.
+ * The machine-global broker normally owns that subprocess; an agent owns it
+ * only when broker acquisition falls back to a private worker. The protocol
+ * carries no explicit close handshake: either parent hard-reaps the child so
+ * `onnxruntime-node`'s NAPI finalizer never runs in the parent address space
+ * (it crashes Bun on Windows shutdown, issue #3031, the mnemopi sibling of
+ * the tiny-model fix from #1606/#1607). See `embed-client.ts` for the
+ * spawn/kill glue.
  */
 
 /** Identifier of the fastembed model the worker should load (e.g. `fast-bge-base-en-v1.5`). */

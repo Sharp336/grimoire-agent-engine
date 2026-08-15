@@ -13,14 +13,16 @@ import {
 	workerEnvFromParent,
 } from "../subprocess/worker-client";
 import type { MnemopiEmbedModelId, MnemopiEmbedWorkerInbound, MnemopiEmbedWorkerOutbound } from "./embed-protocol";
+import { connectSharedMnemopiEmbedWorker } from "./embed-shared-client";
+import { acquireGlobalMnemopiEmbedWorker } from "./embed-shared-daemon";
 
 /**
- * Parent-side handle for the mnemopi embeddings subprocess. The runtime
- * implementation is a Bun child process so `onnxruntime-node`'s NAPI
- * constructor + finalizer never run inside the main agent address space —
- * those destructors segfault Bun on Windows when mnemopi's local embedding
- * provider loads fastembed in the main process (issue #3031; the mnemopi
- * sibling of the tiny-model fix from #1606 / #1607).
+ * Client-side handle for the mnemopi embedding transport. Production uses a
+ * machine-global broker that owns one Bun child per model/cache key; broker
+ * failure falls back to a private child owned by this process. Both paths keep
+ * `onnxruntime-node`'s NAPI constructor + finalizer outside the main agent
+ * address space, whose Windows shutdown path otherwise segfaults Bun (issue
+ * #3031; the mnemopi sibling of the tiny-model fix from #1606 / #1607).
  */
 export type MnemopiEmbedWorkerHandle = WorkerHandle<MnemopiEmbedWorkerInbound, MnemopiEmbedWorkerOutbound>;
 
@@ -65,7 +67,7 @@ function wrapSubprocess(spawned: SpawnedSubprocess<MnemopiEmbedWorkerOutbound>):
 	});
 }
 
-function spawnMnemopiEmbedWorker(): MnemopiEmbedWorkerHandle {
+export function spawnMnemopiEmbedWorker(): MnemopiEmbedWorkerHandle {
 	return spawnWorkerOrUnavailable(
 		() => wrapSubprocess(createMnemopiEmbedSubprocess()),
 		createUnavailableWorker<MnemopiEmbedWorkerInbound, MnemopiEmbedWorkerOutbound>,
@@ -73,12 +75,14 @@ function spawnMnemopiEmbedWorker(): MnemopiEmbedWorkerHandle {
 	);
 }
 
+type MnemopiEmbedWorkerFactory = () => MnemopiEmbedWorkerHandle | Promise<MnemopiEmbedWorkerHandle>;
+
 /**
  * Per-model wrapper produced by {@link MnemopiEmbedClient.initialize}.
- * `embed()` round-trips one batch of texts through the worker subprocess and
- * yields the resulting vectors in a single asynchronous batch — fastembed's
- * own iterator was emitting batches that we collect on the child side anyway,
- * and serializing per-batch over IPC would not improve throughput.
+ * `embed()` round-trips one batch through the selected transport and yields
+ * the resulting vectors in one asynchronous batch. Fastembed's iterator is
+ * already collected on the child side, so serializing each native batch over
+ * the broker or private IPC path would not improve throughput.
  */
 export interface MnemopiSubprocessEmbeddingModel {
 	embed(texts: string[], batchSize?: number): AsyncIterable<number[][]>;
@@ -102,15 +106,17 @@ const REQUEST_TIMED_OUT = Symbol("mnemopi.embed.timedOut");
 
 export class MnemopiEmbedClient {
 	#worker: MnemopiEmbedWorkerHandle | null = null;
+	#workerPromise: Promise<MnemopiEmbedWorkerHandle> | null = null;
 	#unsubscribeMessage: (() => void) | null = null;
 	#unsubscribeError: (() => void) | null = null;
 	#pending = new Map<string, PendingRequest>();
 	#nextRequestId = 0;
-	#spawnWorker: () => MnemopiEmbedWorkerHandle;
+	#workerGeneration = 0;
+	#spawnWorker: MnemopiEmbedWorkerFactory;
 	#requestTimeoutMs: number;
 
 	constructor(
-		spawnWorker: () => MnemopiEmbedWorkerHandle = spawnMnemopiEmbedWorker,
+		spawnWorker: MnemopiEmbedWorkerFactory = spawnMnemopiEmbedWorker,
 		requestTimeoutMs: number = EMBED_REQUEST_TIMEOUT_MS,
 	) {
 		this.#spawnWorker = spawnWorker;
@@ -118,19 +124,22 @@ export class MnemopiEmbedClient {
 	}
 
 	/**
-	 * Load the named fastembed model inside the subprocess. Resolves to a
-	 * thin wrapper whose `embed()` round-trips through the same worker, or
-	 * `null` when the worker cannot init the model (missing peer, native
-	 * load failure, etc.). Multiple calls with the same model reuse the
-	 * single in-flight worker; calling with a different model loads it on
-	 * the child without restarting the process.
+	 * Load the named fastembed model through the selected transport. Resolves to
+	 * a thin wrapper whose `embed()` uses the same broker connection or private
+	 * worker, or `null` when model initialization fails. One client reuses its
+	 * transport; the broker independently keys native children by resolved
+	 * (model, cacheDir).
 	 */
 	async initialize(
 		model: MnemopiEmbedModelId,
 		cacheDir: string | undefined,
 	): Promise<MnemopiSubprocessEmbeddingModel | null> {
 		try {
-			const worker = this.#ensureWorker();
+			const generation = this.#workerGeneration;
+			const worker = await this.#ensureWorker();
+			if (generation !== this.#workerGeneration || worker !== this.#worker) {
+				throw new Error("mnemopi embed worker terminated during startup");
+			}
 			const id = String(++this.#nextRequestId);
 			const { promise, resolve } = Promise.withResolvers<boolean>();
 			this.#pending.set(id, { kind: "init", model, resolve });
@@ -152,8 +161,10 @@ export class MnemopiEmbedClient {
 	}
 
 	async terminate(): Promise<void> {
+		this.#workerGeneration += 1;
 		const worker = this.#worker;
 		this.#worker = null;
+		this.#workerPromise = null;
 		this.#unsubscribeMessage?.();
 		this.#unsubscribeMessage = null;
 		this.#unsubscribeError?.();
@@ -176,7 +187,11 @@ export class MnemopiEmbedClient {
 		texts: string[],
 		batchSize: number | undefined,
 	): Promise<number[][]> {
-		const worker = this.#ensureWorker();
+		const generation = this.#workerGeneration;
+		const worker = await this.#ensureWorker();
+		if (generation !== this.#workerGeneration || worker !== this.#worker) {
+			throw new Error("mnemopi embed worker terminated during startup");
+		}
 		const id = String(++this.#nextRequestId);
 		const { promise, resolve } = Promise.withResolvers<number[][] | Error>();
 		this.#pending.set(id, { kind: "embed", model, resolve });
@@ -235,13 +250,26 @@ export class MnemopiEmbedClient {
 		yield vectors;
 	}
 
-	#ensureWorker(): MnemopiEmbedWorkerHandle {
+	async #ensureWorker(): Promise<MnemopiEmbedWorkerHandle> {
 		if (this.#worker) return this.#worker;
-		const worker = this.#spawnWorker();
-		this.#worker = worker;
-		this.#unsubscribeMessage = worker.onMessage(message => this.#handleMessage(message));
-		this.#unsubscribeError = worker.onError(error => this.#handleWorkerError(error));
-		return worker;
+		if (this.#workerPromise) return this.#workerPromise;
+		const generation = this.#workerGeneration;
+		const pending = Promise.resolve(this.#spawnWorker()).then(async worker => {
+			if (generation !== this.#workerGeneration) {
+				await worker.terminate().catch(() => {});
+				throw new Error("mnemopi embed worker terminated during startup");
+			}
+			this.#worker = worker;
+			this.#unsubscribeMessage = worker.onMessage(message => this.#handleMessage(message));
+			this.#unsubscribeError = worker.onError(error => this.#handleWorkerError(error));
+			return worker;
+		});
+		this.#workerPromise = pending;
+		try {
+			return await pending;
+		} finally {
+			if (this.#workerPromise === pending) this.#workerPromise = null;
+		}
 	}
 
 	#handleMessage(message: MnemopiEmbedWorkerOutbound): void {
@@ -249,22 +277,25 @@ export class MnemopiEmbedClient {
 			logWorkerMessage(message);
 			return;
 		}
-		if (message.type === "pong") return;
 
 		const pending = this.#pending.get(message.id);
 		if (!pending) return;
 		this.#pending.delete(message.id);
-		if (message.type === "ready") {
-			if (pending.kind === "init") pending.resolve(true);
+		if (pending.kind === "init") {
+			if (message.type === "ready") pending.resolve(true);
+			else {
+				if (message.type === "error")
+					logger.debug("mnemopi-embed: worker returned error", { error: message.error });
+				else logger.debug("mnemopi-embed: unexpected response to init", { response: message.type });
+				pending.resolve(false);
+			}
 			return;
 		}
-		if (message.type === "vectors") {
-			if (pending.kind === "embed") pending.resolve(message.vectors);
-			return;
-		}
-		logger.debug("mnemopi-embed: worker returned error", { error: message.error });
-		if (pending.kind === "init") pending.resolve(false);
-		else pending.resolve(new Error(message.error));
+		if (message.type === "vectors") pending.resolve(message.vectors);
+		else if (message.type === "error") {
+			logger.debug("mnemopi-embed: worker returned error", { error: message.error });
+			pending.resolve(new Error(message.error));
+		} else pending.resolve(new Error(`mnemopi embed worker returned unexpected ${message.type} response`));
 	}
 
 	#handleWorkerError(error: Error): void {
@@ -278,7 +309,9 @@ export class MnemopiEmbedClient {
 	}
 }
 
-export const mnemopiEmbedClient = new MnemopiEmbedClient();
+export const mnemopiEmbedClient = new MnemopiEmbedClient(() =>
+	connectSharedMnemopiEmbedWorker(spawnMnemopiEmbedWorker, acquireGlobalMnemopiEmbedWorker),
+);
 
 export async function shutdownMnemopiEmbedClient(): Promise<void> {
 	await mnemopiEmbedClient.terminate();
