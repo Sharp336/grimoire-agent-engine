@@ -11,6 +11,19 @@
 - The error→toolUse salvage in the agent loop (`recoverTransientErrorToolTurn`) now recognizes Anthropic stream-envelope truncation errors, so a turn cut after streaming complete tool calls runs those calls instead of ending the run with an error.
 - Shake no longer elides artifact recovery reads; the compaction dead-end rescue uses a dedicated `RESCUE_SHAKE_CONFIG`.
 - Fixed the proxy transport dropping `thinkingMode` and `disableReasoning`, so proxied agents ignored a requested thinking-off.
+
+## [17.3.4] - 2026-08-14
+
+### Fixed
+
+- Fixed Codex-compatible V2 remote compaction with an explicit `v2Endpoint` by sending the required feature-negotiation header ([#8524](https://github.com/can1357/oh-my-pi/issues/8524)).
+
+## [17.3.0] - 2026-08-13
+
+### Fixed
+
+- Improved the manual `/shake` command to retain a small history of recent tool results, preventing the agent from losing its active working context.
+
 ## [17.2.13] - 2026-08-11
 
 ### Fixed

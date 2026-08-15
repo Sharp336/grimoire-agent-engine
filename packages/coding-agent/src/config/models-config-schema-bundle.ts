@@ -175,6 +175,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"reasoning?": "boolean",
 		"thinking?": ModelThinkingSchema,
 		"input?": '("text" | "image")[]',
+		"imageInputDecoder?": '"stb"',
 		"supportsTools?": "boolean",
 		"cost?": {
 			input: "number",
@@ -224,6 +225,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"reasoning?": "boolean",
 		"thinking?": ModelThinkingSchema,
 		"input?": '("text" | "image")[]',
+		"imageInputDecoder?": '"stb"',
 		"supportsTools?": "boolean",
 		"cost?": {
 			"input?": "number",

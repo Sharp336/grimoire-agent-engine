@@ -51,7 +51,12 @@ function openRouterResponsesModel(thinking: ThinkingConfig): Model<"openai-respo
 
 async function captureBody(
 	model: Model<"openai-completions" | "openai-responses">,
-	options: { reasoning?: Effort; disableReasoning?: boolean; thinkingMode?: "off" },
+	options: {
+		reasoning?: Effort;
+		disableReasoning?: boolean;
+		thinkingMode?: "off";
+		forceReasoningOff?: boolean;
+	},
 ): Promise<CapturedBody> {
 	let requestBody: string | undefined;
 	const fetchMock: FetchImpl = (_input, init) => {
@@ -90,6 +95,14 @@ describe("thinking.requiresEffort clamping", () => {
 			const modeOff = await captureBody(model, { reasoning: Effort.High, thinkingMode: "off" });
 			expect(modeOff.reasoning).toMatchObject({ effort: "minimal" });
 		}
+	});
+
+	it("clamps forceReasoningOff when the endpoint cannot disable reasoning", async () => {
+		const body = await captureBody(openRouterModel(MANDATORY_THINKING), {
+			reasoning: Effort.High,
+			forceReasoningOff: true,
+		});
+		expect(body.reasoning).toEqual({ effort: "minimal" });
 	});
 
 	it("keeps explicit efforts untouched", async () => {

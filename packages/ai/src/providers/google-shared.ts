@@ -238,6 +238,8 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 			const parts: Part[] = [];
 			// Check if message is from same provider and model - only then keep thinking blocks
 			const isSameProviderAndModel = msg.provider === model.provider && msg.model === model.id;
+			const dropsUnsignedThinking =
+				model.provider === "google-antigravity" && model.id.toLowerCase().includes("claude");
 
 			for (const block of msg.content) {
 				if (block.type === "text") {
@@ -252,6 +254,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 					// Skip empty thinking blocks
 					if (!block.thinking || block.thinking.trim() === "") continue;
 					const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.thinkingSignature);
+					if (dropsUnsignedThinking && !thoughtSignature) continue;
 					if (thoughtSignature) {
 						parts.push({
 							thought: true,
@@ -863,19 +866,18 @@ export function buildGoogleGenerateContentParams<T extends "google-generative-ai
 		config.toolConfig = undefined;
 	}
 
-	if (options.thinking && model.reasoning && (options.thinking.enabled || options.thinking.suppress)) {
-		const cfg: ThinkingConfig = { includeThoughts: options.thinking.enabled && !options.hideThinkingSummary };
-		if (options.thinking.enabled && options.thinking.level !== undefined) {
-			// GoogleThinkingLevel mirrors the SDK's `ThinkingLevel` string enum values 1:1.
-			cfg.thinkingLevel = options.thinking.level as ThinkingLevel;
-		} else if (options.thinking.enabled && options.thinking.budgetTokens !== undefined) {
-			cfg.thinkingBudget = options.thinking.budgetTokens;
-		} else if (!options.thinking.enabled && options.thinking.suppress) {
-			if ("level" in options.thinking.suppress) {
-				cfg.thinkingLevel = options.thinking.suppress.level as ThinkingLevel;
-			} else {
-				cfg.thinkingBudget = options.thinking.suppress.budget;
-			}
+	const thinking = options.thinking;
+	if (
+		thinking &&
+		model.reasoning &&
+		(thinking.enabled || thinking.level !== undefined || thinking.budgetTokens !== undefined)
+	) {
+		const cfg: ThinkingConfig = { includeThoughts: thinking.enabled && !options.hideThinkingSummary };
+		if (thinking.level !== undefined) {
+			// GoogleThinkingLevel mirrors the SDK's ThinkingLevel string enum values 1:1.
+			cfg.thinkingLevel = thinking.level as ThinkingLevel;
+		} else if (thinking.budgetTokens !== undefined) {
+			cfg.thinkingBudget = thinking.budgetTokens;
 		}
 		config.thinkingConfig = cfg;
 	}

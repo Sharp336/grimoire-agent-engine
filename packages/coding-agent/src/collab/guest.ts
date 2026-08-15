@@ -52,12 +52,14 @@ export const COLLAB_GUEST_ALLOWED_COMMANDS: Record<string, true> = {
 	exit: true,
 	quit: true,
 };
+
 /**
  * How long the guest waits for the host's small `welcome` frame before giving
  * up on the join. The welcome carries metadata only (`entryCount`, header,
  * state, agents), so it lands well under one second on any working relay.
  */
 const WELCOME_TIMEOUT_MS = 30_000;
+
 /**
  * How long the guest waits between `snapshot-chunk` frames during the initial
  * sync. Resets on each chunk arrival, so a multi-MB snapshot only fails when
@@ -66,9 +68,11 @@ const WELCOME_TIMEOUT_MS = 30_000;
  * in under two seconds with comfortable headroom.
  */
 const SNAPSHOT_PROGRESS_TIMEOUT_MS = 30_000;
+
 const TRANSCRIPT_TIMEOUT_MS = 20_000;
 
 type WelcomeFrame = Extract<CollabFrame, { t: "welcome" }>;
+
 type SnapshotChunkFrame = Extract<CollabFrame, { t: "snapshot-chunk" }>;
 
 /** Accumulator for an in-flight chunked welcome — see {@link CollabGuestLink}. */
@@ -452,7 +456,7 @@ export class CollabGuestLink {
 		this.#assistantStreamSynced = false;
 		setSessionTerminalTitle(pending.state.sessionName ?? pending.header.title, pending.state.cwd);
 		this.#ctx.chatContainer.clear();
-		this.#ctx.renderInitialMessages({ clearTerminalHistory: true });
+		await this.#ctx.renderInitialMessages({ clearTerminalHistory: true });
 		await this.#ctx.reloadTodos();
 		this.#updateStatusSegment();
 		this.#readOnly = pending.readOnly;
@@ -752,7 +756,7 @@ export class CollabGuestLink {
 		this.#ctx.statusLine.resetActiveTime();
 		this.#ctx.ui.requestRender();
 		this.#ctx.updateEditorBorderColor();
-		this.#ctx.renderInitialMessages({ clearTerminalHistory: true });
+		await this.#ctx.renderInitialMessages({ clearTerminalHistory: true });
 		await this.#ctx.reloadTodos();
 		this.#ctx.ui.requestRender(true, { clearScrollback: true });
 	}

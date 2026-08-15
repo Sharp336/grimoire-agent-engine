@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [17.3.2] - 2026-08-13
+
+### Fixed
+
+- Fixed `fetchWithRetry()` aborts during retry backoff to preserve the documented `"Request was aborted"` error contract ([#8450](https://github.com/can1357/oh-my-pi/issues/8450)).
+
+## [17.3.0] - 2026-08-13
+
+### Fixed
+
+- Optimized performance of partial JSON parsing for long streaming tool-call arguments.
+- Fixed Mermaid ASCII multi-word edge labels where routed lines would show through spaces.
+
+## [17.2.15] - 2026-08-12
+
+### Changed
+
+- Extended parsed Server-Sent Events (SSE) to include optional id and retry fields, enabling reconnecting transports to retain stream cursors and respect server-requested retry intervals.
+
 ## [17.2.13] - 2026-08-11
 
 ### Changed

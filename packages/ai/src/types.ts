@@ -64,6 +64,7 @@ import type { kStreamingPartialJson } from "./utils/block-symbols";
 import type { AssistantMessageEventStream } from "./utils/event-stream";
 
 export type { StopDetails } from "./providers/anthropic-wire";
+
 export type { AssistantMessageEventStream } from "./utils/event-stream";
 
 /**
@@ -388,6 +389,7 @@ export interface OpenAIPromptCacheOptions {
 	/** By default, mark one existing block from stable history; `none` suppresses that marker. */
 	breakpoint?: "latest-stable-message" | "none";
 }
+
 export type OpenAIResponseInclude =
 	| "file_search_call.results"
 	| "web_search_call.results"
@@ -421,6 +423,16 @@ export interface StreamOptions {
 	signal?: AbortSignal;
 	apiKey?: string;
 	cacheRetention?: CacheRetention;
+	/**
+	 * Keep Anthropic's 5-minute prompt cache warm across bounded idle gaps.
+	 *
+	 * This is an ownership flag, not a general provider default: exactly one
+	 * primary agent loop sharing `providerSessionState` should enable it.
+	 * Side-channel and advisor requests must leave it unset.
+	 */
+	anthropicCacheRefresh?: boolean;
+	/** @internal Marks a replay-only Anthropic request that must use non-streaming `max_tokens: 0`. */
+	anthropicCacheRefreshRequest?: boolean;
 	/**
 	 * Additional headers to include in provider requests.
 	 * These are merged on top of model-defined headers.
@@ -488,8 +500,9 @@ export interface StreamOptions {
 	 */
 	statefulResponses?: boolean;
 	/**
-	 * Emit `reasoning: { effort: "none" }` for OpenAI Responses and Codex requests.
-	 * Used when a caller supplies an external reasoning scratchpad; other transports ignore it.
+	 * Disable native reasoning when the caller supplies an external scratchpad.
+	 * OpenAI Responses emits `reasoning: { effort: "none" }`; Anthropic and
+	 * Google transports use their native thinking-off controls.
 	 */
 	forceReasoningOff?: boolean;
 	/**
@@ -567,10 +580,10 @@ export interface StreamOptions {
 	 */
 	providerRetryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
 	/**
-	 * Accept a Google `STOP` response with no visible text or tool call as a
-	 * successful completion. Passive callers such as advisors use this because
-	 * silence is a valid result; interactive agent turns retain empty-response
-	 * retries by default. Ignored by non-Google providers.
+	 * Accept a normal provider stop with no visible text or tool call as a
+	 * successful completion. Passive callers and zero-output cache refreshes use
+	 * this because silence is their expected result; interactive agent turns
+	 * retain empty-response retries by default.
 	 */
 	acceptEmptyResponse?: boolean;
 	/**
@@ -1197,15 +1210,18 @@ export interface ToolCallExample<TArgs = Record<string, unknown>> {
 	caption?: string;
 	call: TArgs;
 }
+
 export interface ToolCompareExample<TArgs = Record<string, unknown>> {
 	caption?: string;
 	bad: TArgs;
 	good: TArgs;
 }
+
 export interface ToolNoteExample {
 	caption: string;
 	note?: string;
 }
+
 export type ToolExample<TArgs = Record<string, unknown>> =
 	| ToolCallExample<TArgs>
 	| ToolCompareExample<TArgs>
