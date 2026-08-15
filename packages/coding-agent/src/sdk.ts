@@ -43,6 +43,7 @@ import { createAutoresearchExtension } from "./autoresearch";
 import { loadCapability } from "./capability";
 import { type Rule, ruleCapability, setActiveRules } from "./capability/rule";
 import { bucketRules } from "./capability/rule-buckets";
+import { createCommentCheckerExtension } from "./comment-checker";
 import { shouldEnableAppendOnlyContext } from "./config/append-only-context-mode";
 import { shouldInlineToolDescriptors } from "./config/inline-tool-descriptors-mode";
 import { isAuthenticated, kNoAuth, ModelRegistry } from "./config/model-registry";
@@ -1962,6 +1963,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 			inlineExtensions.push(...(options.extensions ?? []));
 			inlineExtensions.push(createAutoresearchExtension);
+			inlineExtensions.push(createCommentCheckerExtension);
 			if (customTools.length > 0) {
 				inlineExtensions.push(createCustomToolsExtension(customTools));
 			}

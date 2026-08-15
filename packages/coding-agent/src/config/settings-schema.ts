@@ -152,6 +152,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Output Limits",
 		"Execution",
 		"Discovery & MCP",
+		"Comment Checker",
 		"Developer",
 	],
 	tasks: ["Modes", "Subagents", "Isolation", "Commands & Skills"],
@@ -5563,8 +5564,31 @@ export const SETTINGS_SCHEMA = {
 	"thinkingBudgets.high": { type: "number", default: 16384 },
 
 	"thinkingBudgets.xhigh": { type: "number", default: 32768 },
-
 	"thinkingBudgets.max": { type: "number", default: 32768 },
+
+	"commentChecker.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			group: "Comment Checker",
+			label: "Comment Checker",
+			description:
+				"Run @code-yeongyu/comment-checker after write/edit/multiedit/apply_patch and surface warnings back to the agent. Requires the @code-yeongyu/comment-checker binary (npm optional dependency).",
+		},
+	},
+	"commentChecker.prompt": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "tools",
+			group: "Comment Checker",
+			label: "Comment Checker Prompt",
+			description:
+				"Optional custom prompt passed to the comment-checker binary (--prompt). Leave empty for the default.",
+			condition: "commentCheckerActive",
+		},
+	},
 } as const;
 
 // ═══════════════════════════════════════════════════════════════════════════

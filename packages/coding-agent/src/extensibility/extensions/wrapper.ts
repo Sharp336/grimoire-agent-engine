@@ -354,6 +354,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 
 		// Emit tool_result event - extensions can modify the result and error status
 		if (this.runner.hasHandlers("tool_result")) {
+			const isError = result.isError === true || !!executionError;
 			const resultResult = await this.runner.emitToolResult({
 				type: "tool_result",
 				toolName: this.tool.name,
@@ -364,7 +365,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				),
 				content: result.content,
 				details: result.details,
-				isError: !!executionError,
+				isError,
 			});
 
 			if (resultResult) {
@@ -375,7 +376,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				// original execution outcome stands. This lets a handler rewrite a failed
 				// call's model-visible content/details while keeping it an error, flip a
 				// failure to success, or flag a success as an error.
-				const effectiveError = resultResult.isError ?? !!executionError;
+				const effectiveError = resultResult.isError ?? isError;
 
 				// Return the (possibly modified) result carrying the error flag rather than
 				// rethrowing the original exception. The agent loop honors
