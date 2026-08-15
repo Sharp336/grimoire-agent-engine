@@ -320,7 +320,7 @@ function mapWithBundledReference<TApi extends Api>(
 	};
 }
 
-function normalizeAnthropicBaseUrl(baseUrl: string | undefined, fallback: string): string {
+function normalizeProviderBaseUrl(baseUrl: string | undefined, fallback: string): string {
 	const value = baseUrl?.trim();
 	if (!value) {
 		return fallback;
@@ -664,7 +664,7 @@ function createSimpleAnthropicProviderOptions(
 	config?: SimpleProviderConfig,
 ): ModelManagerOptions<"anthropic-messages"> {
 	const apiKey = config?.apiKey;
-	const baseUrl = normalizeAnthropicBaseUrl(config?.baseUrl, defaultBaseUrlFallback);
+	const baseUrl = normalizeProviderBaseUrl(config?.baseUrl, defaultBaseUrlFallback);
 	const discoveryBaseUrl = toAnthropicDiscoveryBaseUrl(baseUrl);
 	const references = createBundledReferenceMap<"anthropic-messages">(providerId);
 	return {
@@ -721,7 +721,7 @@ interface UmansModelInfo {
 }
 
 function normalizeUmansBaseUrl(baseUrl: string | undefined): string {
-	const normalized = normalizeAnthropicBaseUrl(baseUrl, UMANS_BASE_URL);
+	const normalized = normalizeProviderBaseUrl(baseUrl, UMANS_BASE_URL);
 	return normalized.endsWith("/v1") ? normalized.slice(0, -3) : normalized;
 }
 
@@ -1764,6 +1764,9 @@ export function siliconflowCnModelManagerOptions(
 // 6.7 GLM Coding Plans
 // ---------------------------------------------------------------------------
 
+const ZAI_CODING_PLAN_BASE_URL = "https://api.z.ai/api/anthropic";
+const ZHIPU_CODING_PLAN_BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4";
+
 /**
  * GLM-5.3 is live for Z.AI Coding Plan subscribers before the general Z.AI
  * API catalog advertises it. Keep a generated-catalog fallback so the model is
@@ -1778,7 +1781,7 @@ export const ZAI_CODING_PLAN_STATIC_MODELS: readonly ModelSpec<"anthropic-messag
 		name: "GLM-5.3",
 		api: "anthropic-messages",
 		provider: "zai",
-		baseUrl: "https://api.z.ai/api/anthropic",
+		baseUrl: ZAI_CODING_PLAN_BASE_URL,
 		reasoning: true,
 		input: ["text"],
 		cost: { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 },
@@ -1814,7 +1817,7 @@ function buildZhipuCodingPlanGlm53(baseUrl: string): ModelSpec<"openai-completio
 }
 
 export const ZHIPU_CODING_PLAN_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
-	buildZhipuCodingPlanGlm53("https://open.bigmodel.cn/api/coding/paas/v4"),
+	buildZhipuCodingPlanGlm53(ZHIPU_CODING_PLAN_BASE_URL),
 ];
 
 export interface ZhipuCodingPlanModelManagerConfig {
@@ -1827,7 +1830,7 @@ export function zhipuCodingPlanModelManagerOptions(
 	config?: ZhipuCodingPlanModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
 	const apiKey = config?.apiKey;
-	const baseUrl = normalizeAnthropicBaseUrl(config?.baseUrl, "https://open.bigmodel.cn/api/coding/paas/v4");
+	const baseUrl = normalizeProviderBaseUrl(config?.baseUrl, ZHIPU_CODING_PLAN_BASE_URL);
 	return {
 		providerId: "zhipu-coding-plan",
 		dynamicModelsAuthoritative: true,
@@ -2441,7 +2444,7 @@ export interface OpenCodeModelManagerConfig {
 }
 
 function normalizeOpenCodeBasePath(baseUrl: string | undefined, fallbackBasePath: string): string {
-	const value = normalizeAnthropicBaseUrl(baseUrl, fallbackBasePath);
+	const value = normalizeProviderBaseUrl(baseUrl, fallbackBasePath);
 	return value.endsWith("/v1") ? value.slice(0, -3) : value;
 }
 
@@ -5446,7 +5449,7 @@ export function anthropicModelManagerOptions(
 	// bundled Anthropic rows use both `https://api.anthropic.com` and `.../v1`.
 	// Discovery must always hit `/v1/models`, so the `/v1` suffix is enforced on
 	// the discovery URL while model rows keep the provider base (#6563).
-	const baseUrl = normalizeAnthropicBaseUrl(config?.baseUrl, ANTHROPIC_BASE_URL);
+	const baseUrl = normalizeProviderBaseUrl(config?.baseUrl, ANTHROPIC_BASE_URL);
 	const discoveryBaseUrl = toAnthropicDiscoveryBaseUrl(baseUrl);
 	return {
 		providerId: "anthropic",
@@ -5931,7 +5934,7 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_CODING_PLANS: readonly ModelsDevProviderDe
 	// SKU as "Free" in `/models`. The PAYG key carries the real per-token rates for
 	// the identical model ids, so the enumerated token costs line up with the other
 	// subscription providers for comparison (issue #5598).
-	anthropicMessagesDescriptor("zai", "zai", "https://api.z.ai/api/anthropic"),
+	anthropicMessagesDescriptor("zai", "zai", ZAI_CODING_PLAN_BASE_URL),
 	// --- Umans AI ---
 	// Source the pay-as-you-go catalog: the coding-plan key publishes subscription
 	// costs as zero, while `/models/info` omits pricing entirely. The generator
@@ -5978,18 +5981,13 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_CODING_PLANS: readonly ModelsDevProviderDe
 		},
 	),
 	// --- Zhipu Coding Plan ---
-	openAiCompletionsDescriptor(
-		"zhipuai-coding-plan",
-		"zhipu-coding-plan",
-		"https://open.bigmodel.cn/api/coding/paas/v4",
-		{
-			compat: {
-				thinkingFormat: "zai",
-				reasoningContentField: "reasoning_content",
-				supportsDeveloperRole: false,
-			},
+	openAiCompletionsDescriptor("zhipuai-coding-plan", "zhipu-coding-plan", ZHIPU_CODING_PLAN_BASE_URL, {
+		compat: {
+			thinkingFormat: "zai",
+			reasoningContentField: "reasoning_content",
+			supportsDeveloperRole: false,
 		},
-	),
+	}),
 ];
 
 const filterActiveToolCallModels = (_id: string, m: ModelsDevModel): boolean => {

@@ -221,6 +221,17 @@ export const isOpenAISamplingRestrictedModelId = memo((modelId: string): boolean
 	return isOpenAIWireGen5Plus(modelId) || O_SERIES_REASONING_RE.test(bare);
 });
 
+function isReasoningGlmModelAtLeast(modelId: string, minimumVersion: string): boolean {
+	const glm = parseGlmModel(bareModelId(modelId));
+	if (!glm || glm.vision) {
+		return false;
+	}
+	if (glm.variant !== "base" && glm.variant !== "air" && glm.variant !== "turbo") {
+		return false;
+	}
+	return semverGte(glm.version, minimumVersion);
+}
+
 /**
  * Reasoning-capable GLM coding SKUs: glm-4.5 and up on the base / `-air` /
  * `-turbo` lines. Excludes the vision (`…v`) shape, the non-reasoning
@@ -229,26 +240,12 @@ export const isOpenAISamplingRestrictedModelId = memo((modelId: string): boolean
  * allowlist.
  */
 export const isReasoningGlmModelId = memo((modelId: string): boolean => {
-	const glm = parseGlmModel(bareModelId(modelId));
-	if (!glm || glm.vision) {
-		return false;
-	}
-	if (glm.variant !== "base" && glm.variant !== "air" && glm.variant !== "turbo") {
-		return false;
-	}
-	return semverGte(glm.version, "4.5");
+	return isReasoningGlmModelAtLeast(modelId, "4.5");
 });
 
 /** GLM-5.2+ coding SKUs accept `reasoning_effort` in addition to binary thinking. */
 export const isGlm52ReasoningEffortModelId = memo((modelId: string): boolean => {
-	const glm = parseGlmModel(bareModelId(modelId));
-	if (!glm || glm.vision) {
-		return false;
-	}
-	if (glm.variant !== "base" && glm.variant !== "air" && glm.variant !== "turbo") {
-		return false;
-	}
-	return semverGte(glm.version, "5.2");
+	return isReasoningGlmModelAtLeast(modelId, "5.2");
 });
 
 /**
@@ -257,14 +254,7 @@ export const isGlm52ReasoningEffortModelId = memo((modelId: string): boolean => 
  * is resolved in model-thinking rather than assumed for every reseller.
  */
 export const isGlm53ReasoningEffortModelId = memo((modelId: string): boolean => {
-	const glm = parseGlmModel(bareModelId(modelId));
-	if (!glm || glm.vision) {
-		return false;
-	}
-	if (glm.variant !== "base" && glm.variant !== "air" && glm.variant !== "turbo") {
-		return false;
-	}
-	return semverGte(glm.version, "5.3");
+	return isReasoningGlmModelAtLeast(modelId, "5.3");
 });
 
 /** GLM vision SKUs — the `v` that attaches to the version (`glm-4v`, `glm-4.5v`). */
