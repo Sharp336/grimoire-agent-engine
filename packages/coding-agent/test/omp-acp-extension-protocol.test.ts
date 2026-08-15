@@ -1,5 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { DaemonBrokerClient } from "@oh-my-pi/pi-coding-agent/launch/client";
+import type { DaemonSnapshot } from "@oh-my-pi/pi-coding-agent/launch/protocol";
+import type { MemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/types";
 import {
 	createOmpExtensionCapabilities,
 	createOmpExtensionEnvelope,
@@ -8,10 +10,8 @@ import {
 	parseOmpExtensionRequest,
 } from "@oh-my-pi/pi-coding-agent/modes/acp/omp-extension-protocol";
 import { OmpAcpExtensionRuntime } from "@oh-my-pi/pi-coding-agent/modes/acp/omp-extension-runtime";
+import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AgentSideConnection } from "@oh-my-pi/pi-utils/acp";
-import type { MemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/types";
-import type { DaemonBrokerClient } from "@oh-my-pi/pi-coding-agent/launch/client";
-import type { DaemonSnapshot } from "@oh-my-pi/pi-coding-agent/launch/protocol";
 
 describe("OMP ACP extension protocol", () => {
 	it("bounds requests and emits monotonic versioned envelopes", () => {
@@ -87,19 +87,19 @@ class FakeExtensionSession {
 			tokens: { input: 1, output: 1, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 2 },
 			cost: 0,
 			messages: { user: 1, assistant: 1, total: 2 },
-				advisors: [
-					{
-						name: "reviewer",
-						status: "running",
-						contextWindow: 10,
-						contextTokens: 2,
-						tokens: { input: 1, output: 1, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 2 },
-						cost: 0,
-						messages: { user: 1, assistant: 1, total: 2 },
-						backlog: 0,
-						inFlight: false,
-					},
-				],
+			advisors: [
+				{
+					name: "reviewer",
+					status: "running",
+					contextWindow: 10,
+					contextTokens: 2,
+					tokens: { input: 1, output: 1, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 2 },
+					cost: 0,
+					messages: { user: 1, assistant: 1, total: 2 },
+					backlog: 0,
+					inFlight: false,
+				},
+			],
 		};
 	}
 
@@ -174,7 +174,9 @@ describe("OMP ACP extension runtime", () => {
 		const event = notifications[0]?.params;
 		expect(event?.generation).toBe(negotiated.generation);
 		expect(event?.sequence).toBe((negotiated.sequence as number) + 1);
-		expect((event?.data as Record<string, unknown>).content).toBe("typed note");
+		const eventData = event?.data;
+		expect(eventData).toBeDefined();
+		expect((eventData as Record<string, unknown>).content).toBe("typed note");
 
 		session.changeSession("session-2");
 		session.emit({
@@ -237,10 +239,10 @@ describe("OMP ACP extension runtime", () => {
 			sessionId: session.sessionId,
 			cancel: true,
 		});
-			expect((advisorSet.data as Record<string, unknown>).active).toBe(true);
-			expect((advisorDrain.data as Record<string, unknown>).settled).toBe(true);
-			expect(((advisorDrain.data as Record<string, unknown>).status as Record<string, unknown>).backlog).toBe(0);
-			expect(((advisorDrain.data as Record<string, unknown>).status as Record<string, unknown>).inFlight).toBe(false);
+		expect((advisorSet.data as Record<string, unknown>).active).toBe(true);
+		expect((advisorDrain.data as Record<string, unknown>).settled).toBe(true);
+		expect(((advisorDrain.data as Record<string, unknown>).status as Record<string, unknown>).backlog).toBe(0);
+		expect(((advisorDrain.data as Record<string, unknown>).status as Record<string, unknown>).inFlight).toBe(false);
 		expect((autolearnStatus.data as Record<string, unknown>).state).toBe("idle");
 		expect((autolearnDrain.data as Record<string, unknown>).settled).toBe(true);
 
@@ -251,8 +253,11 @@ describe("OMP ACP extension runtime", () => {
 			turn: 3,
 		} as AgentSessionEvent);
 		await Promise.resolve();
-		expect(notifications.at(-1)?.method).toBe("_omp/autolearn/lifecycle");
-		expect((notifications.at(-1)?.params.data as Record<string, unknown>).captureGeneration).toBe(2);
+		const notification = notifications.at(-1);
+		expect(notification?.method).toBe("_omp/autolearn/lifecycle");
+		const notificationData = notification?.params.data;
+		expect(notificationData).toBeDefined();
+		expect((notificationData as Record<string, unknown>).captureGeneration).toBe(2);
 	});
 
 	it("does not report Advisor drain settled before an accepted typed note reaches the ACP connection", async () => {
@@ -345,8 +350,12 @@ describe("OMP ACP extension runtime", () => {
 			}),
 			stats: async () => "two memories",
 			diagnose: async () => "healthy",
-			enqueue: async () => void (enqueued += 1),
-			clear: async () => void (cleared += 1),
+			enqueue: async () => {
+				enqueued += 1;
+			},
+			clear: async () => {
+				cleared += 1;
+			},
 		};
 		const session = new FakeExtensionSession();
 		const runtime = new OmpAcpExtensionRuntime({

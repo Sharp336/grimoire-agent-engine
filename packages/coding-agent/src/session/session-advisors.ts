@@ -1033,9 +1033,9 @@ export class SessionAdvisors {
 		// close the transport before the already-accepted note reached the client.
 		this.#host.emitOmpObservation({
 			type: "omp_advisor_note",
-				advisorId: advisor.slug || "default",
-				severity: severity ?? "nit",
-				delivery: channel,
+			advisorId: advisor.slug || "default",
+			severity: severity ?? "nit",
+			delivery: channel,
 			content: note,
 			turn: this.#advisorPrimaryTurnsCompleted,
 		});
@@ -1719,11 +1719,11 @@ export class SessionAdvisors {
 			if (live) {
 				roster.push(live);
 			} else {
-					roster.push({
-						name: entry.name,
-						status: entry.status,
-						backlog: 0,
-						inFlight: false,
+				roster.push({
+					name: entry.name,
+					status: entry.status,
+					backlog: 0,
+					inFlight: false,
 					contextWindow: 0,
 					contextTokens: 0,
 					tokens: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
@@ -1802,15 +1802,15 @@ export class SessionAdvisors {
 				totalTokens += assistantMsg.usage.totalTokens;
 			}
 		}
-			return {
-				name: advisor.name,
+		return {
+			name: advisor.name,
 			status: advisor.runtime.quotaExhausted
 				? "quota_exhausted"
 				: advisor.runtime.failureNotified
-						? "error"
-						: "running",
-				backlog: advisor.runtime.backlog,
-				inFlight: advisor.runtime.inFlight,
+					? "error"
+					: "running",
+			backlog: advisor.runtime.backlog,
+			inFlight: advisor.runtime.inFlight,
 			model,
 			contextWindow: model.contextWindow ?? 0,
 			contextTokens,

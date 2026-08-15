@@ -2,7 +2,7 @@ import * as path from "node:path";
 import { getAgentDir, logger, VERSION } from "@oh-my-pi/pi-utils";
 import type { AgentSideConnection } from "@oh-my-pi/pi-utils/acp";
 import type { Settings } from "../../config/settings";
-import { daemonClientForProject, type DaemonBrokerClient } from "../../launch/client";
+import { type DaemonBrokerClient, daemonClientForProject } from "../../launch/client";
 import type { DaemonOperation, DaemonRpcResult, DaemonSnapshot } from "../../launch/protocol";
 import { resolveMemoryBackend } from "../../memory-backend/resolve";
 import type { MemoryBackend, MemoryBackendStatus } from "../../memory-backend/types";
@@ -16,14 +16,14 @@ import {
 	OMP_EXTENSION_MAX_TEXT_BYTES,
 	OMP_EXTENSION_METHODS,
 	OMP_EXTENSION_SCHEMA_VERSION,
+	type OmpExtensionEnvelope,
+	type OmpExtensionRequestContext,
+	type OmpExtensionSequenceState,
 	optionalBoolean,
 	optionalString,
 	parseOmpExtensionRequest,
 	requiredBoolean,
 	requiredString,
-	type OmpExtensionEnvelope,
-	type OmpExtensionRequestContext,
-	type OmpExtensionSequenceState,
 } from "./omp-extension-protocol";
 
 type ExtensionConnection = Pick<AgentSideConnection, "extNotification">;
@@ -316,11 +316,11 @@ export class OmpAcpExtensionRuntime {
 			enabled: stats.configured,
 			active: stats.active,
 			model: formatModel(stats.model),
-				advisors: advisors.map(advisor => ({
-					id: advisor.name,
-					status: advisor.status,
-					backlog: advisor.backlog,
-					inFlight: advisor.inFlight,
+			advisors: advisors.map(advisor => ({
+				id: advisor.name,
+				status: advisor.status,
+				backlog: advisor.backlog,
+				inFlight: advisor.inFlight,
 				model: formatModel(advisor.model),
 				usage: advisor.tokens,
 				cost: advisor.cost,
@@ -329,8 +329,8 @@ export class OmpAcpExtensionRuntime {
 			advisorsTruncated: stats.advisors.length > advisors.length,
 			usage: stats.tokens,
 			cost: stats.cost,
-				backlog: stats.advisors.reduce((sum, advisor) => sum + advisor.backlog, 0),
-				inFlight: stats.advisors.some(advisor => advisor.inFlight),
+			backlog: stats.advisors.reduce((sum, advisor) => sum + advisor.backlog, 0),
+			inFlight: stats.advisors.some(advisor => advisor.inFlight),
 			lastFailure: stats.advisors.some(advisor => advisor.status === "error")
 				? { available: true, message: "One or more advisors report an error." }
 				: { available: false },
