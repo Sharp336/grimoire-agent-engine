@@ -16,6 +16,7 @@ import { execCommand } from "../../exec/exec";
 import * as PiCodingAgent from "../../index";
 import * as typebox from "../legacy-typebox";
 import { GreenCommand } from "./bundled/ci-green";
+import { SessionCommitCommand } from "./bundled/commit";
 import { ReviewCommand } from "./bundled/review";
 import type {
 	CustomCommand,
@@ -159,6 +160,12 @@ function loadBundledCommands(sharedApi: CustomCommandAPI): LoadedCustomCommand[]
 		path: "bundled:green",
 		resolvedPath: "bundled:green",
 		command: new GreenCommand(sharedApi),
+		source: "bundled",
+	});
+	bundled.push({
+		path: "bundled:commit",
+		resolvedPath: "bundled:commit",
+		command: new SessionCommitCommand(),
 		source: "bundled",
 	});
 	bundled.push({

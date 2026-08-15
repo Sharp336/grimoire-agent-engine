@@ -19,6 +19,72 @@ export function parseNumstat(output: string): NumstatEntry[] {
 	return entries;
 }
 
+// Matches both the common unquoted header (`diff --git a/PATH b/PATH`) and
+// the C-quoted form Git falls back to for paths containing a literal quote,
+// backslash, tab, or newline (`diff --git "a/PATH" "b/PATH"`, with those
+// bytes backslash- or octal-escaped) regardless of `core.quotepath`.
+const DIFF_HEADER_RE = /^diff --git (?:"a\/((?:[^"\\]|\\.)*)"|a\/(.+?)) (?:"b\/((?:[^"\\]|\\.)*)"|b\/(.+))$/;
+
+/**
+ * Decode a Git C-quoted path (`"foo\tbar"`) back to its literal text. Only
+ * `\NNN` octal escapes represent raw bytes needing UTF-8 reassembly (Git
+ * emits them for non-ASCII bytes when `core.quotepath` is left at its
+ * default, or the odd byte forcing quoting isn't valid ASCII); everything
+ * else in the quoted string is already a correctly-decoded JS character
+ * (including multi-byte UTF-8 text left unescaped under
+ * `core.quotepath=false`) and must be copied through as-is rather than
+ * reinterpreted one UTF-16 code unit at a time as a single byte, which
+ * would corrupt any non-ASCII character outside an octal run.
+ */
+function unquoteGitPath(quoted: string): string {
+	const inner = quoted.slice(1, -1);
+	let result = "";
+	let octalRun: number[] = [];
+	const flushOctal = () => {
+		if (octalRun.length > 0) {
+			result += Buffer.from(octalRun).toString("utf8");
+			octalRun = [];
+		}
+	};
+	for (let i = 0; i < inner.length; i += 1) {
+		if (inner[i] !== "\\") {
+			flushOctal();
+			result += inner[i];
+			continue;
+		}
+		const next = inner[i + 1];
+		if (next === "n") {
+			flushOctal();
+			result += "\n";
+			i += 1;
+		} else if (next === "t") {
+			flushOctal();
+			result += "\t";
+			i += 1;
+		} else if (next === "r") {
+			flushOctal();
+			result += "\r";
+			i += 1;
+		} else if (next === '"') {
+			flushOctal();
+			result += '"';
+			i += 1;
+		} else if (next === "\\") {
+			flushOctal();
+			result += "\\";
+			i += 1;
+		} else if (next >= "0" && next <= "7") {
+			octalRun.push(Number.parseInt(inner.slice(i + 1, i + 4), 8));
+			i += 3;
+		} else {
+			flushOctal();
+			result += "\\";
+		}
+	}
+	flushOctal();
+	return result;
+}
+
 export function parseFileDiffs(diff: string): FileDiff[] {
 	const sections: FileDiff[] = [];
 	const parts = diff.split("\ndiff --git ");
@@ -27,9 +93,9 @@ export function parseFileDiffs(diff: string): FileDiff[] {
 		if (!part.trim()) continue;
 		const lines = part.split("\n");
 		const header = lines[0] ?? "";
-		const match = header.match(/diff --git a\/(.+?) b\/(.+)$/);
+		const match = header.match(DIFF_HEADER_RE);
 		if (!match) continue;
-		const filename = match[2];
+		const filename = match[3] !== undefined ? unquoteGitPath(`"${match[3]}"`) : (match[4] ?? "");
 		const content = part;
 		const isBinary = lines.some(line => line.startsWith("Binary files "));
 		let additions = 0;

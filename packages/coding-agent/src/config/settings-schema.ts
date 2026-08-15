@@ -5494,6 +5494,80 @@ export const SETTINGS_SCHEMA = {
 
 	"commit.changelogMaxDiffChars": { type: "number", default: 120000 },
 
+	"commit.mainBranchProtection": {
+		type: "enum",
+		values: ["on", "off", "ask"] as const,
+		default: "ask",
+		ui: {
+			tab: "interaction",
+			group: "Git",
+			label: "Main Branch Protection",
+			description:
+				"Choose whether /commit creates a feature branch when run from the default branch, main, or master.",
+			options: [
+				{ value: "on", label: "On", description: "Always create a feature branch before committing." },
+				{ value: "off", label: "Off", description: "Allow commits directly on protected branches." },
+				{ value: "ask", label: "Ask", description: "Choose whether to create a feature branch each time." },
+			],
+		},
+	},
+
+	"commit.splitMode": {
+		type: "enum",
+		values: ["on", "off", "auto"] as const,
+		default: "auto",
+		ui: {
+			tab: "interaction",
+			group: "Git",
+			label: "Split Commits",
+			description: "Control whether /commit creates one commit or groups whole files into multiple commits.",
+			options: [
+				{ value: "on", label: "On", description: "Split unrelated whole-file changes when possible." },
+				{ value: "off", label: "Off", description: "Create one commit for all staged changes." },
+				{ value: "auto", label: "Auto", description: "Let the commit planner choose the clearest grouping." },
+			],
+		},
+	},
+
+	"commit.messageFormat": {
+		type: "enum",
+		values: ["conventional", "freeform", "user-submitted"] as const,
+		default: "conventional",
+		ui: {
+			tab: "interaction",
+			group: "Git",
+			label: "Commit Message Format",
+			description: "Choose conventional commits, model-selected free form, or your formatting instructions.",
+			options: [
+				{ value: "conventional", label: "Conventional", description: "Use Conventional Commits syntax." },
+				{ value: "freeform", label: "Free form", description: "Let the model choose the message format." },
+				{ value: "user-submitted", label: "User-submitted", description: "Follow Commit Message Instructions." },
+			],
+		},
+	},
+
+	"commit.messageInstructions": {
+		type: "string",
+		default: "",
+		ui: {
+			tab: "interaction",
+			group: "Git",
+			label: "Commit Message Instructions",
+			description: "Formatting instructions used only when Commit Message Format is User-submitted.",
+		},
+	},
+
+	"commit.branchNameTemplate": {
+		type: "string",
+		default: "{type}/{slug}",
+		ui: {
+			tab: "interaction",
+			group: "Git",
+			label: "Feature Branch Template",
+			description: "Template for protected-branch commits. Supports {type}, {scope}, and {slug}.",
+		},
+	},
+
 	"dev.autoqa": {
 		type: "boolean",
 		default: true,
@@ -5761,6 +5835,11 @@ export interface CommitSettings {
 	mapReduceTimeoutMs: number;
 	mapReduceMaxConcurrency: number;
 	changelogMaxDiffChars: number;
+	mainBranchProtection: "on" | "off" | "ask";
+	splitMode: "on" | "off" | "auto";
+	messageFormat: "conventional" | "freeform" | "user-submitted";
+	messageInstructions: string;
+	branchNameTemplate: string;
 }
 
 export interface TtsrSettings {

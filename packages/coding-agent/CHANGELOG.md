@@ -679,10 +679,15 @@
 - Added a `/vision [on|off|auto|status]` slash command for session-scoped control of the `inspect_image` vision-delegation tool, modeled on `/computer`: `on`/`off` force the tool for the current session only, `auto` returns to the persisted setting, and `status` reports the effective mode, session override, tool state, and active-model image capability.
 - Replaced the `inspect_image.enabled` boolean with the tri-state `inspect_image.mode` (`auto`|`on`|`off`, default `auto`). In `auto` the tool is registered only when the active model lacks native image input, so vision-capable models (e.g. `kimi-code/k3`) read images inline with their own capabilities instead of delegating to a separate vision model; the tool set is re-evaluated on every model switch with a status notice when it flips. The `read` tool now follows the effective state dynamically rather than the raw setting, so it returns decoded image blocks again whenever `inspect_image` is hidden. Existing `inspect_image.enabled: true/false` configs migrate to `inspect_image.mode: on/off`.
 
+### Fixed
+
+- Fixed `/commit` split-commit execution silently dropping non-ASCII-named staged files (Git C-quotes diff headers for them) and losing not-yet-committed groups when a pre-commit hook or signing step failed partway through a split; fixed `/commit` rejecting comma-separated Conventional Commit scopes (`feat(catalog,ai): ...`) and failing outright on a repository's first commit (`git log` on an unborn `HEAD`); and gated `/commit` on the session going idle, used the live session cwd instead of one captured at load time, revalidated staged files after switching to an existing protected branch, and derived the commit-planner's output token budget from the staged file count instead of a fixed cap that truncated large plans.
+
 ## [17.1.6] - 2026-07-27
 
 ### Added
 
+- Added `/commit`, a fast in-session commit workflow with configurable main-branch protection, whole-file split planning, commit-message formatting, and feature-branch templates ([#6801](https://github.com/can1357/oh-my-pi/pull/6801) by [@LarryGF](https://github.com/LarryGF)).
 - Added separate Advisor cost visibility to the status line, rendering primary and Advisor spend as `$2.67 (sub) + $0.41 (adv)` while keeping already-incurred Advisor cost across runtime disablement and same-session history rewrites.
 
 ### Changed
@@ -715,6 +720,13 @@
 ### Added
 
 - Added a configurable per-request timeout for the `inspect_image` tool (`inspect_image.timeoutMs`, default 5 minutes; set to 0 to disable) so a stalled vision-model provider fails fast with a clear error instead of blocking until manual abort ([#4165](https://github.com/can1357/oh-my-pi/issues/4165)).
+- Added `--downshift` / `--downshift-into <model>` / `--no-downshift`: start on a strong model, then hand off to a fast/cheap one (default the `smol` role) at the first edit/write tool call *after* the todo list has been initialized. The starting model handles all planning and todo initialization, and begins implementation, before handing off; the fast model includes a verify checklist before finishing. Enable per-user with the `downshift.enabled` setting; force it mid-session with the new `/downshift` slash command, which arms the switch.
+- Added display setting to toggle between collapsing or keeping compacted history inline, now applied to live session displays
+- Added a compact session-only model picker (Alt+P) for quick model switching without changing roles
+- Added `@` search to the Alt+P / `/switch` picker: it lists configured Ctrl+P quick roles in matching segment colors and applies the selected role's model and thinking for the current session.
+- Redesigned Agent Hub entries as two-line cards: identity (status glyph, name, agent type, parent when nested) on the left, active model + reasoning level and age right-aligned, with the task description on its own line; dropped the redundant `sub · of Main` noise
+- Added a project-scoped `launch` tool for shared long-running services and debuggers, with readiness probes, bounded logs, PTY input, restart policies, and automatic teardown after the last omp instance exits. Gated behind the `launch.enabled` setting (default on); when disabled the tool is withdrawn and the bash prompt drops its "use launch" guidance.
+- Added `detached` `launch` starts for standalone services that survive every omp instance and broker shutdown, then reconnect to the next broker for logs and explicit stop.
 
 ### Changed
 
