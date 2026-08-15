@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
-import { getBlobsDir, isEnoent, logger, type postmortem, VERSION } from "@oh-my-pi/pi-utils";
+import { getBlobsDir, isEnoent, logger, type postmortem, VERSION, withTimeout } from "@oh-my-pi/pi-utils";
 import {
 	type Agent,
 	type AgentSideConnection,
@@ -58,6 +58,7 @@ import { loadSlashCommands } from "../../extensibility/slash-commands";
 import { resolveLocalUrlToPath } from "../../internal-urls";
 import { discoverAndLoadMCPTools } from "../../mcp/loader";
 import { MCPManager } from "../../mcp/manager";
+import { describeMCPTimeout, isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "../../mcp/timeout";
 import type { MCPServerConfig } from "../../mcp/types";
 import { loadAllExtensions } from "../../modes/components/extensions/state-manager";
 import { theme } from "../../modes/theme/theme";
@@ -2486,10 +2487,15 @@ export class AcpAgent implements Agent {
 		record.extensionsConfigured = true;
 	}
 
-	#recordAmbientMcpDiagnostic(record: ManagedSessionRecord, failedName: string): void {
-		const phase = failedName === ".mcp.json" ? "configuration" : "connection";
-		const serverName =
-			failedName === ".mcp.json" ? undefined : failedName.replace(/[^a-zA-Z0-9_.:-]/g, "?").slice(0, 128);
+	/**
+	 * `failedName === undefined` means the `.mcp.json` config itself failed to
+	 * parse (phase "configuration"); a string is the server whose connection
+	 * failed. A dedicated undefined case — not a name sentinel — because dots
+	 * pass the sanitizer, so ".mcp.json" is a legal server name.
+	 */
+	#recordAmbientMcpDiagnostic(record: ManagedSessionRecord, failedName: string | undefined): void {
+		const phase = failedName === undefined ? "configuration" : "connection";
+		const serverName = failedName?.replace(/[^a-zA-Z0-9_.:-]/g, "?").slice(0, 128);
 		const details = {
 			scope: "ambient",
 			phase,
@@ -2525,7 +2531,7 @@ export class AcpAgent implements Agent {
 				onStatus: event => {
 					if (event.type === "failed") this.#recordAmbientMcpDiagnostic(record, event.serverName);
 				},
-				onConfigWarning: () => this.#recordAmbientMcpDiagnostic(record, ".mcp.json"),
+				onConfigWarning: () => this.#recordAmbientMcpDiagnostic(record, undefined),
 			});
 			manager = ambient.manager;
 		} else {
@@ -2573,7 +2579,7 @@ export class AcpAgent implements Agent {
 		}
 
 		if (servers.length > 0) {
-			const requiredReadiness = new Map<string, ReturnType<typeof Promise.withResolvers<boolean>>>();
+			const requiredReadiness = new Map<string, PromiseWithResolvers<boolean>>();
 			for (const server of servers) {
 				if (ambientDiscovery?.reservedServerNames.has(server.name)) {
 					requiredReadiness.set(server.name, Promise.withResolvers<boolean>());
@@ -2591,8 +2597,24 @@ export class AcpAgent implements Agent {
 						.join("; "),
 				);
 			}
+			// Readiness settles from the manager's background tools-load chain
+			// (`onStatus` fires "connected" or a startup failure only once
+			// `toolsPromise` settles). Each request in that chain is bounded by
+			// the per-request MCP timeout, but that guarantee is config-dependent
+			// (`OMP_MCP_TIMEOUT_MS=0` disables it), so bound the wait here: a
+			// hung reserved bridge must fail session start, not hang `newSession`.
+			// The explicit `0` opt-out stays unbounded, matching the rest of the
+			// MCP client stack.
+			const readinessTimeoutMs = resolveMCPTimeoutMs();
 			for (const [name, readiness] of requiredReadiness) {
-				if (!(await readiness.promise)) {
+				const ready = isMCPTimeoutEnabled(readinessTimeoutMs)
+					? await withTimeout(
+							readiness.promise,
+							readinessTimeoutMs,
+							`Required client MCP server "${name}" did not report readiness within ${describeMCPTimeout(readinessTimeoutMs)}`,
+						)
+					: await readiness.promise;
+				if (!ready) {
 					throw new Error(`Required client MCP server "${name}" failed to load tools`);
 				}
 			}
