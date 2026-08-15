@@ -488,6 +488,7 @@ if "__omp_prelude_loaded__" not in globals():
         prompt,
         *,
         agent="task",
+        model=None,
         label=None,
         schema=None,
         schema_mode=None,
@@ -498,6 +499,8 @@ if "__omp_prelude_loaded__" not in globals():
     ):
         """Run a subagent and return its final output or structured data.
 
+        `agent` selects the subagent capability; `model` selects its model and
+        overrides configured agent/role model defaults for this invocation.
         `schema` overrides agent and session schemas. `schema_mode` is
         `"permissive"` or `"strict"`. `handle=True` returns the child output
         reference and metadata, with parsed data under `"data"` when available.
@@ -505,6 +508,8 @@ if "__omp_prelude_loaded__" not in globals():
         args = {"prompt": prompt}
         if agent is not None:
             args["agent"] = agent
+        if model is not None:
+            args["model"] = model
         if label is not None:
             args["label"] = label
         if schema is not None:

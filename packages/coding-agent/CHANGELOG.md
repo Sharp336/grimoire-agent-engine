@@ -11,6 +11,7 @@
 
 ### Fixed
 
+- Fixed eval `agent()` treating an explicitly requested model as if it had to be an agent name: callers can now select a discovered agent capability and independently provide a model selector resolved through the live model registry, with the explicit model taking precedence over configured agent/role defaults.
 - Fixed the default status line dropping the elapsed-time metric on narrow phone/tmux terminals: wrap priority now keeps `time_spent` with model and context instead of clipping it behind cache, cost, and other secondary segments. Throughput (`token_rate` / tok/s) is dropped first under zoom so it no longer crowds out elapsed time.
 - Fixed the status-line model label cutting version/name fragments with an ellipsis at narrow widths; it now compresses redundant provider words and filler first and keeps provider + version + distinguishing qualifier when those pieces can physically fit.
 - Fixed Bash output truncation ignoring a configured `tools.artifactSpillThreshold` and discarding failure diagnostics. The shared `DEFAULT_MAX_BYTES` is back to 50 KB so non-Bash consumers (JS eval, fetch formatting, security resource output, autoresearch) keep their documented default, and Bash now carries its own budgets — the executor sink is sized for the 20 KB failure-retention budget so diagnostics still exist once the exit status is known, while successful results are final-capped to 12 KB. A configured threshold overrides both, and the full raw stream remains reachable via `artifact://` ([#8170](https://github.com/can1357/oh-my-pi/pull/8170)).

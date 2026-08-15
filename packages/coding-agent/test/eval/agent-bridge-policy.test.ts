@@ -1,14 +1,16 @@
 import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { $which, TempDir } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../src/config/settings";
 import { runEvalAgent } from "../../src/eval/agent-bridge";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../../src/eval/bridge-timeout";
 import { IdleTimeout } from "../../src/eval/idle-timeout";
+import { disposeAllJuliaKernelSessions, executeJulia } from "../../src/eval/jl/executor";
 import { disposeAllVmContexts } from "../../src/eval/js/context-manager";
 import { executeJs } from "../../src/eval/js/executor";
 import { disposeAllKernelSessions, executePython } from "../../src/eval/py/executor";
+import { disposeAllRubyKernelSessions, executeRuby } from "../../src/eval/rb/executor";
 import { AgentProtocolHandler } from "../../src/internal-urls/agent-protocol";
 import { resetRegisteredArtifactDirsForTests } from "../../src/internal-urls/registry-helpers";
 import type { PlanModeState } from "../../src/plan-mode/state";
@@ -309,19 +311,27 @@ describe("runEvalAgent", () => {
 		expect(secondOptions.outputSchemaOverridesAgent).toBeUndefined();
 	});
 
-	it("drops a per-call model argument on agent() (removed, issue #6438)", async () => {
+	it("lets an explicit per-call model override the configured reviewer model", async () => {
 		mockAgents();
 		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
+		const settings = Settings.isolated({
+			"async.enabled": false,
+			"task.isolation.mode": "none",
+			"task.enableLsp": true,
+		});
+		settings.override("task.agentModelOverrides", { reviewer: "anthropic/claude-sonnet-5" });
+		const session = makeSession({ settings });
 
-		// The schema strips unknown keys; a legacy `model` argument is silently
-		// discarded so resolution is identical to omitting it — the agent's own
-		// frontmatter model applies (issue #6438).
-		await runEvalAgent({ prompt: "work", model: "default" }, { session: makeSession() });
-		await runEvalAgent({ prompt: "work" }, { session: makeSession() });
+		await runEvalAgent(
+			{ prompt: "work", agent: "reviewer", model: "google-antigravity/gemini-3.1-pro:high" },
+			{ session },
+		);
+		await runEvalAgent({ prompt: "work", agent: "reviewer" }, { session });
 
 		const withModel = runSpy.mock.calls[0]?.[0];
 		const withoutModel = runSpy.mock.calls[1]?.[0];
-		expect(withModel?.modelOverride).toEqual(withoutModel?.modelOverride);
+		expect(withModel?.modelOverride).toEqual(["google-antigravity/gemini-3.1-pro:high"]);
+		expect(withoutModel?.modelOverride).toEqual(["anthropic/claude-sonnet-5"]);
 	});
 	it("returns host-parsed data for caller, agent, and inherited schemas", async () => {
 		const agentSchema = { type: "object" };
@@ -518,6 +528,8 @@ describe("runEvalAgent", () => {
 });
 
 describe("agent() through eval runtimes", () => {
+	const hasRuby = Boolean($which("ruby"));
+	const hasJulia = Boolean($which("julia"));
 	// One shared JS worker backs every agent() JavaScript test below. Spawning a
 	// worker (thread + module-graph import) is fixed infrastructure cost, not
 	// behavior under test; reusing it keeps the suite fast. Each run still threads
@@ -534,6 +546,8 @@ describe("agent() through eval runtimes", () => {
 	afterAll(async () => {
 		await disposeAllVmContexts();
 		await disposeAllKernelSessions();
+		if (hasRuby) await disposeAllRubyKernelSessions();
+		if (hasJulia) await disposeAllJuliaKernelSessions();
 	});
 
 	it("exposes agent() in JavaScript and parses structured output", async () => {
@@ -618,7 +632,7 @@ describe("agent() through eval runtimes", () => {
 		using tempDir = TempDir.createSync("@omp-eval-agent-py-");
 		const { session, sessionFile, sessionId } = makeEvalSession(tempDir, "py-agent");
 		mockAgents();
-		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options =>
+		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options =>
 			singleResult(options, {
 				output: options.outputSchema ? "not JSON" : "hello from python",
 				...(options.outputSchema
@@ -634,8 +648,9 @@ describe("agent() through eval runtimes", () => {
 			}),
 		);
 
+		const explicitModel = "google-antigravity/gemini-3.1-pro:high";
 		const result = await executePython(
-			'import json\nprint(agent("hi"))\nprint(json.dumps(agent("structured", schema={"type": "object"})))\nnode = agent("handle", schema={"type": "object"}, handle=True)\nprint(json.dumps({"data": node["data"], "handle": node["handle"], "id": node["id"]}))',
+			`import json\nprint(agent("hi", agent="reviewer", model="${explicitModel}"))\nprint(json.dumps(agent("structured", schema={"type": "object"})))\nnode = agent("handle", schema={"type": "object"}, handle=True)\nprint(json.dumps({"data": node["data"], "handle": node["handle"], "id": node["id"]}))`,
 			{
 				cwd: tempDir.path(),
 				sessionId,
@@ -656,6 +671,52 @@ describe("agent() through eval runtimes", () => {
 		const node = JSON.parse(lines[2] ?? "");
 		expect(node.data).toEqual({ ok: true });
 		expect(node.handle).toBe(`agent://${node.id}`);
+		expect(runSpy.mock.calls[0]?.[0].agent.name).toBe("reviewer");
+		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual([explicitModel]);
+	});
+
+	it.skipIf(!hasRuby)("forwards an explicit model through the Ruby agent() helper", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-agent-rb-model-");
+		const { session, sessionFile, sessionId } = makeEvalSession(tempDir, "rb-agent-model");
+		mockAgents();
+		const runSpy = vi
+			.spyOn(taskExecutor, "runSubprocess")
+			.mockImplementation(async options => singleResult(options, { output: "hello from ruby" }));
+		const explicitModel = "google-antigravity/gemini-3.1-pro:high";
+
+		const result = await executeRuby(`puts agent("review", agent: "reviewer", model: "${explicitModel}")`, {
+			cwd: tempDir.path(),
+			sessionId,
+			sessionFile,
+			toolSession: session,
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toContain("hello from ruby");
+		expect(runSpy.mock.calls[0]?.[0].agent.name).toBe("reviewer");
+		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual([explicitModel]);
+	});
+
+	it.skipIf(!hasJulia)("forwards an explicit model through the Julia agent() helper", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-agent-jl-model-");
+		const { session, sessionFile, sessionId } = makeEvalSession(tempDir, "jl-agent-model");
+		mockAgents();
+		const runSpy = vi
+			.spyOn(taskExecutor, "runSubprocess")
+			.mockImplementation(async options => singleResult(options, { output: "hello from julia" }));
+		const explicitModel = "google-antigravity/gemini-3.1-pro:high";
+
+		const result = await executeJulia(`println(agent("review"; agent="reviewer", model="${explicitModel}"))`, {
+			cwd: tempDir.path(),
+			sessionId,
+			sessionFile,
+			toolSession: session,
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toContain("hello from julia");
+		expect(runSpy.mock.calls[0]?.[0].agent.name).toBe("reviewer");
+		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual([explicitModel]);
 	});
 
 	it("bounds Python parallel() by the task.maxConcurrency setting while preserving order", async () => {

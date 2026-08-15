@@ -53,6 +53,26 @@ describe("eval js agent() handle", () => {
 		expect(out).toBe("hello world");
 	});
 
+	it("keeps agent capability separate from an explicit model selector", async () => {
+		let seenArgs: Record<string, unknown> | undefined;
+		const sandbox = loadPrelude(async (_name, args) => {
+			seenArgs = args as Record<string, unknown>;
+			return { text: "reviewed", details: { agent: "reviewer", id: "review-1", structured: false } };
+		});
+
+		await (sandbox.agent as AgentHelper)("review", {
+			agent: "reviewer",
+			model: "google-antigravity/gemini-3.1-pro:high",
+		});
+
+		expect(seenArgs).toEqual({
+			prompt: "review",
+			agent: "reviewer",
+			model: "google-antigravity/gemini-3.1-pro:high",
+			handle: false,
+		});
+	});
+
 	it("keeps positional isolation controls stable while appending schemaMode", async () => {
 		let seenArgs: Record<string, unknown> | undefined;
 		const sandbox = loadPrelude(async (_name, args) => {

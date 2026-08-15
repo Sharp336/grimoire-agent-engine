@@ -255,7 +255,14 @@ export async function resolveEffectiveSubagentPolicy(
 	const agent = getAgent(discovery.agents, agentName);
 	if (!agent) {
 		const available = discovery.agents.map(candidate => candidate.name).join(", ") || "none";
-		throw new StructuredSubagentError("preflight", `Unknown agent "${agentName}". Available: ${available}`);
+		const evalModelHint =
+			request.invocationKind === "eval"
+				? " In eval agent(), `agent` selects a capability. If this looks like a model selector, use `model: <selector>` alongside a valid agent."
+				: "";
+		throw new StructuredSubagentError(
+			"preflight",
+			`Unknown agent "${agentName}". Available: ${available}.${evalModelHint}`,
+		);
 	}
 	const disabledAgents = request.session.settings.get("task.disabledAgents") as string[];
 	if (disabledAgents.includes(agentName)) {
