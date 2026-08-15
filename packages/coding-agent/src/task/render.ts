@@ -108,11 +108,11 @@ function appendAgentStats(
 	if (opts.requests) {
 		line += `${theme.sep.dot}${theme.fg("dim", `${formatNumber(opts.requests)} req`)}`;
 	}
-	// Current per-turn context — match the status line's `<pct>%/<window>` gauge (e.g. `5.1%/1M`).
+	// Current per-turn context — match the status line's `<tokens>/<window>` gauge (e.g. `5K/272K`).
 	if (opts.contextTokens && opts.contextTokens > 0) {
 		const ctx =
 			opts.contextWindow && opts.contextWindow > 0
-				? formatContextUsage((opts.contextTokens / opts.contextWindow) * 100, opts.contextWindow)
+				? formatContextUsage(undefined, opts.contextWindow, opts.contextTokens)
 				: `${formatNumber(opts.contextTokens)}`;
 		line += `${theme.sep.dot}${theme.fg("dim", ctx)}`;
 	}

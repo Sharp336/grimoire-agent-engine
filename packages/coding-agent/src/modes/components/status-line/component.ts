@@ -493,8 +493,22 @@ export class StatusLineComponent implements Component {
 			compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
 		};
 	}
+	/**
+	 * Fail closed when the global settings proxy is not initialized.
+	 *
+	 * The async PR-lookup continuation in `setCachedPr` reaches
+	 * `#getCurrentBranch` -> here, and can land after the owning session (or a
+	 * test file) has torn `Settings` down, where the proxy throws "Settings not
+	 * initialized". Treating that as "git disabled" keeps a late background
+	 * refresh from raising an unhandled error; it is never hit on the
+	 * interactive path, which always initializes settings before rendering.
+	 */
 	#gitEnabled(): boolean {
-		return settings.get("git.enabled");
+		try {
+			return settings.get("git.enabled");
+		} catch {
+			return false;
+		}
 	}
 	#hasGitBackedSegment(): boolean {
 		const effectiveSettings = this.#resolveSettings();
@@ -1275,13 +1289,18 @@ export class StatusLineComponent implements Component {
 		return this.#vibeWorkerTokenRate?.() ?? null;
 	}
 
-	#formatUsageContextKey(activeProvider: string | undefined, identity: OAuthAccountIdentity | undefined): string {
+	#formatUsageContextKey(
+		activeProvider: string | undefined,
+		identity: OAuthAccountIdentity | undefined,
+		activeModelId?: string,
+	): string {
 		if (!activeProvider) return "";
-		// orgId is part of the key: rotating between two same-email Anthropic
-		// subscriptions must invalidate the cached usage immediately instead of
-		// showing the previous org's quota for the rest of the cache TTL.
+		// Model is part of the key: Anthropic Opus/Fable and Antigravity counters are
+		// model-scoped, so switching models on the same provider/account must
+		// invalidate the 5-min cached usage and re-normalize quota windows.
 		return [
 			activeProvider,
+			activeModelId ?? "",
 			identity?.accountId ?? "",
 			identity?.email ?? "",
 			identity?.projectId ?? "",
@@ -1291,10 +1310,11 @@ export class StatusLineComponent implements Component {
 
 	#getUsageContextKey(session: AgentSession): string {
 		const activeProvider = session.state.model?.provider ?? session.model?.provider;
+		const activeModelId = session.state.model?.id ?? session.model?.id;
 		const identity = activeProvider
 			? session.modelRegistry?.authStorage?.getOAuthAccountIdentity(activeProvider, session.sessionId)
 			: undefined;
-		return this.#formatUsageContextKey(activeProvider, identity);
+		return this.#formatUsageContextKey(activeProvider, identity, activeModelId);
 	}
 
 	/**
@@ -1877,24 +1897,29 @@ export class StatusLineComponent implements Component {
 		}
 
 		const rightParts: string[] = [];
+		const rightSegIds: (StatusLineSegmentId | undefined)[] = [];
 		for (const segId of effectiveSettings.rightSegments) {
 			if (subagentBadge && segId === "subagents") continue;
 			const rendered = renderSegment(segId, ctx);
 			if (rendered.visible && rendered.content) {
 				rightParts.push(rendered.content);
+				rightSegIds.push(segId);
 			}
 		}
 
 		const runningBackgroundJobs = this.session.getAsyncJobSnapshot()?.running.length ?? 0;
 		if (runningBackgroundJobs > 0) {
 			rightParts.unshift(theme.fg("statusLineSubagents", `${theme.icon.job} ${runningBackgroundJobs}`));
+			rightSegIds.unshift(undefined);
 		}
 		if (subagentBadge) {
 			rightParts.unshift(subagentBadge);
+			rightSegIds.unshift(undefined);
 		}
 		const topFillWidth = Math.max(0, width);
 		const left = [...leftParts];
 		const right = [...rightParts];
+		const rightIds = [...rightSegIds];
 
 		const leftSepWidth = visibleWidth(separatorDef.left);
 		const rightSepWidth = visibleWidth(separatorDef.right);
@@ -1915,15 +1940,11 @@ export class StatusLineComponent implements Component {
 		const totalWidth = () => leftWidth + rightWidth + (left.length > 0 && right.length > 0 ? 1 : 0);
 
 		if (topFillWidth > 0) {
-			while (totalWidth() > topFillWidth && right.length > 0) {
-				right.pop();
-				rightWidth = groupWidth(right, rightCapWidth, rightSepWidth);
-			}
-			// Shrink path before dropping left segments — path is the only elastic segment
+			// Shrink path before dropping other segments — path is the only elastic segment
 			const pathIdx = leftSegIds.indexOf("path");
 			if (pathIdx >= 0 && totalWidth() > topFillWidth) {
 				const overflow = totalWidth() - topFillWidth;
-				const currentPathVW = visibleWidth(left[pathIdx]);
+				const currentPathVW = visibleWidth(left[pathIdx]!);
 				const minPathVW = 8; // icon + ellipsis + a few chars
 				const shrinkable = currentPathVW - minPathVW;
 				if (shrinkable > 0) {
@@ -1965,9 +1986,42 @@ export class StatusLineComponent implements Component {
 
 			while (totalWidth() > topFillWidth && left.length > 0) {
 				const dropIdx = leftOverflowDropIndex();
+				// Preserve at least pi+model+path if possible; but if we must drop for width, drop git/pr/mode first.
+				// If the next left item to drop is more important than the rightmost right item, prefer dropping right instead.
+				// For now, drop left only if left item is not more important than cost/context.
+				// Simple heuristic: if right still has low-priority items (time/session), drop those first.
+				const hasLowPriorityRight = rightIds.some(
+					id => id === "time" || id === "session_name" || id === "session" || id === "token_rate",
+				);
+				if (hasLowPriorityRight) break;
 				left.splice(dropIdx, 1);
 				leftSegIds.splice(dropIdx, 1);
 				leftWidth = groupWidth(left, leftCapWidth, leftSepWidth);
+			}
+
+			// Drop low-priority right segments (time, session_name, token_rate) before touching cost/context
+			while (totalWidth() > topFillWidth && right.length > 0) {
+				const lastId = rightIds[rightIds.length - 1];
+				if (lastId !== "time" && lastId !== "session_name" && lastId !== "session" && lastId !== "token_rate")
+					break;
+				right.pop();
+				rightIds.pop();
+				rightWidth = groupWidth(right, rightCapWidth, rightSepWidth);
+			}
+
+			// If still overflow, drop remaining left segments (git etc.) before dropping cost
+			while (totalWidth() > topFillWidth && left.length > 0) {
+				const dropIdx = leftOverflowDropIndex();
+				left.splice(dropIdx, 1);
+				leftSegIds.splice(dropIdx, 1);
+				leftWidth = groupWidth(left, leftCapWidth, leftSepWidth);
+			}
+
+			// Finally, drop any remaining right segments (cost, context, etc.) if still overflow
+			while (totalWidth() > topFillWidth && right.length > 0) {
+				right.pop();
+				rightIds.pop();
+				rightWidth = groupWidth(right, rightCapWidth, rightSepWidth);
 			}
 		}
 
@@ -2157,16 +2211,57 @@ export class StatusLineComponent implements Component {
 				if (rowWidth(row) <= width) return;
 				const index = row.findIndex(item => item.id === flexibleId);
 				if (index < 0) return;
+				if (flexibleId === "model") {
+					const original = row[index]!;
+					const tryRender = (maxLength: number, showThinkingLevel: boolean) =>
+						renderSegment("model", {
+							...ctx,
+							options: {
+								...ctx.options,
+								model: { ...ctx.options.model, maxLength, showThinkingLevel },
+							},
+						});
+					for (const showThinkingLevel of [true, false]) {
+						for (let cap = Math.min(ctx.options.model?.maxLength ?? 18, maxItemWidth); cap >= 3; cap--) {
+							const rendered = tryRender(cap, showThinkingLevel);
+							if (!rendered.visible || !rendered.content) continue;
+							if (visibleWidth(rendered.content) > maxItemWidth) continue;
+							const candidateRow = [...row];
+							candidateRow[index] = { ...original, content: rendered.content };
+							if (rowWidth(candidateRow) <= width) {
+								row[index] = candidateRow[index]!;
+								return;
+							}
+						}
+					}
+					// Also try without provider prefix if still overflow (fallback to minimal)
+					for (const showThinkingLevel of [false, true]) {
+						const minimal = renderSegment("model", {
+							...ctx,
+							options: {
+								...ctx.options,
+								model: { ...ctx.options.model, maxLength: 6, showThinkingLevel },
+							},
+						});
+						if (minimal.visible && minimal.content && visibleWidth(minimal.content) <= maxItemWidth) {
+							const candidateRow = [...row];
+							candidateRow[index] = { ...original, content: minimal.content };
+							if (rowWidth(candidateRow) <= width) {
+								row[index] = candidateRow[index]!;
+								return;
+							}
+						}
+					}
+				}
 				const overflow = rowWidth(row) - width;
 				const currentWidth = visibleWidth(row[index]!.content);
 				row[index] = {
-					...row[index],
+					...row[index]!,
 					content: truncateToWidth(row[index]!.content, Math.max(1, currentWidth - overflow)),
 				};
 			};
 			constrain(row1, "model");
 			constrain(row2, "usage");
-
 			const pathRendered = renderSegment("path", {
 				...ctx,
 				options: {
@@ -2187,6 +2282,86 @@ export class StatusLineComponent implements Component {
 			return rows.map(row => this.#buildWrappedRow(row, width));
 		}
 
+		// ── Non-default presets: preserve left/right grouping when a single row fits,
+		//    only redistributing when wrapping is genuinely required (K).
+		const leftSet = new Set(effectiveSettings.leftSegments);
+		const leftItemsForGroup = items.filter(item => item.id !== undefined && leftSet.has(item.id));
+		const rightItemsForGroup = items.filter(item => item.id === undefined || !leftSet.has(item.id));
+
+		if (leftItemsForGroup.length > 0 && rightItemsForGroup.length > 0) {
+			const leftSepWidthG = visibleWidth(separatorDef.left);
+			const rightSepWidthG = visibleWidth(separatorDef.right);
+			const leftCapWidthG = separatorDef.endCaps && !transparentBg ? visibleWidth(separatorDef.endCaps.right) : 0;
+			const rightCapWidthG = separatorDef.endCaps && !transparentBg ? visibleWidth(separatorDef.endCaps.left) : 0;
+			const groupWidthG = (parts: string[], capW: number, sepW: number): number => {
+				if (parts.length === 0) return 0;
+				const pw = parts.reduce((sum, part) => sum + visibleWidth(part), 0);
+				return pw + Math.max(0, parts.length - 1) * (sepW + 2) + 2 + capW;
+			};
+			const leftWidthG = groupWidthG(
+				leftItemsForGroup.map(item => item.content),
+				leftCapWidthG,
+				leftSepWidthG,
+			);
+			const rightWidthG = groupWidthG(
+				rightItemsForGroup.map(item => item.content),
+				rightCapWidthG,
+				rightSepWidthG,
+			);
+			const totalGroupedWidth = leftWidthG + rightWidthG + 1;
+			if (totalGroupedWidth <= width) {
+				const TRANSPARENT_BG_ANSI = "\x1b[49m";
+				const themeBgAnsi2 = theme.getBgAnsi("statusLineBg");
+				const bgAnsi2 = effectiveSettings.transparent ? TRANSPARENT_BG_ANSI : themeBgAnsi2;
+				const fgAnsi2 = theme.getFgAnsi("text");
+				const sepAnsi2 = theme.getFgAnsi("statusLineSep");
+				const renderGroup = (parts: string[], direction: "left" | "right"): string => {
+					if (parts.length === 0) return "";
+					const sep = direction === "left" ? separatorDef.left : separatorDef.right;
+					const cap =
+						separatorDef.endCaps && !transparentBg
+							? direction === "left"
+								? separatorDef.endCaps.right
+								: separatorDef.endCaps.left
+							: "";
+					const capPrefix = separatorDef.endCaps?.useBgAsFg
+						? bgAnsi2.replace("\x1b[48;", "\x1b[38;")
+						: bgAnsi2 + sepAnsi2;
+					const capText = cap ? `${capPrefix}${this.#focusedAgentId ? "\x1b[22m" : ""}${cap}\x1b[0m` : "";
+					let content = bgAnsi2 + fgAnsi2;
+					content += ` ${parts.join(` ${sepAnsi2}${sep}${fgAnsi2} `)} `;
+					content += "\x1b[0m";
+					if (capText) return direction === "right" ? capText + content : content + capText;
+					return content;
+				};
+				const leftGroup = renderGroup(
+					leftItemsForGroup.map(item => item.content),
+					"left",
+				);
+				const rightGroup = renderGroup(
+					rightItemsForGroup.map(item => item.content),
+					"right",
+				);
+				if (leftGroup || rightGroup) {
+					const gapWidth = Math.max(1, width - leftWidthG - rightWidthG);
+					const sessionName =
+						effectiveSettings.sessionAccent !== false ? this.session.sessionManager?.getSessionName() : undefined;
+					const accentHex = sessionName
+						? getSessionAccentHex(sessionName, theme.getMajorThemeColorHexes(), theme.accentSurfaceLuminance)
+						: undefined;
+					const gapColor = getSessionAccentAnsi(accentHex) ?? theme.getFgAnsi("border");
+					const gapFill = `${gapColor}${theme.boxRound.horizontal.repeat(gapWidth)}\x1b[39m`;
+					let groupedContent = leftGroup + gapFill + rightGroup;
+					if (this.#focusedAgentId && groupedContent) {
+						groupedContent = `\x1b[2m${groupedContent.replaceAll("\x1b[0m", "\x1b[0m\x1b[2m")}\x1b[22m`;
+					}
+					return [{ content: groupedContent, width: visibleWidth(groupedContent) }];
+				}
+			}
+		} else if (items.length > 0 && rowWidth(items) <= width) {
+			return [this.#buildWrappedRow(items, width)];
+		}
+
 		const pack = (source: readonly WrappedStatusItem[]): WrappedStatusItem[][] => {
 			const rows: WrappedStatusItem[][] = [];
 			let current: WrappedStatusItem[] = [];
@@ -2203,11 +2378,10 @@ export class StatusLineComponent implements Component {
 		};
 
 		const layoutRows = (): WrappedStatusItem[][] => {
-			// On narrow terminals, reserve row 2 for operational metrics even when
-			// normal packing would put one metric on row 1 and leave row 2 sparse.
+			// Gate the two-row metrics split on actually needing a second row (G).
 			if (width <= 160) {
 				const metricsStart = items.findIndex(item => item.id === "context_pct");
-				if (metricsStart > 0 && metricsStart < items.length) {
+				if (metricsStart > 0 && metricsStart < items.length && rowWidth(items) > width) {
 					return [items.slice(0, metricsStart), items.slice(metricsStart)];
 				}
 			}

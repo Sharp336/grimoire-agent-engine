@@ -331,6 +331,8 @@ describe("status line model segment smart identity", () => {
 });
 
 describe("default-preset model identity at phone/tmux width", () => {
+	// Default preset is a deterministic three-row footer (provider/model, quota/time/context, directory).
+	// At 36 cols (phone/tmux) it must remain exactly 3 rows, each within the width, with no ellipsis.
 	it.each(SMART_MODEL_CASES)("$label stays identifiable at 36 cols without overflowing", ({ model, mustInclude }) => {
 		const component = new StatusLineComponent(
 			makeLayoutSession({
@@ -342,7 +344,7 @@ describe("default-preset model identity at phone/tmux width", () => {
 		);
 		const rows = component.getTopBorderRows(PHONE_WIDTH);
 		expect(rows.length).toBeGreaterThan(0);
-		expect(rows.length).toBeLessThanOrEqual(2);
+		expect(rows.length).toBe(3);
 		const combined = rows.map(row => stripVTControlCharacters(row.content)).join(" ");
 		expect(combined).not.toContain("…");
 		for (const piece of mustInclude) {
@@ -351,6 +353,7 @@ describe("default-preset model identity at phone/tmux width", () => {
 		for (const row of rows) {
 			expect(row.width).toBeLessThanOrEqual(PHONE_WIDTH);
 			expect(visibleWidth(row.content)).toBeLessThanOrEqual(PHONE_WIDTH);
+			expect(Bun.stringWidth(stripVTControlCharacters(row.content))).toBeLessThanOrEqual(PHONE_WIDTH);
 		}
 		component.dispose();
 	});

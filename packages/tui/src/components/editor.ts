@@ -932,11 +932,22 @@ export class Editor implements Component, Focusable {
 				rawTopBorder = this.#topBorderContent;
 			}
 		}
-		const topBorders: readonly EditorTopBorder[] | undefined = rawTopBorder
+		let topBorders: readonly EditorTopBorder[] | undefined = rawTopBorder
 			? Array.isArray(rawTopBorder)
 				? rawTopBorder
 				: [rawTopBorder]
 			: undefined;
+		// ponytail: tiny terminals (maxHeight <=3) cannot show two status rows plus a
+		// content row and the bottom border within the cap — clamp would otherwise
+		// blow the cap (2 header +1 content +1 bottom =4 >3) and steal a transcript
+		// row. Prefer keeping the transcript: drop secondary header rows and keep at
+		// least one content row visible. Roomy terminals (maxHeight >=4) keep all rows.
+		if (borderVisible && this.#maxHeight !== undefined) {
+			const maxHeaderRows = Math.max(1, this.#maxHeight - 2); // 1 content +1 bottom reserved
+			if (topBorders && topBorders.length > maxHeaderRows) {
+				topBorders = topBorders.slice(0, maxHeaderRows);
+			}
+		}
 		this.#topBorderRowCount = borderVisible ? Math.max(1, topBorders?.length ?? 1) : 0;
 
 		// Layout the text

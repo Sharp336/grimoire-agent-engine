@@ -441,7 +441,7 @@ describe("StatusLineComponent usage refresh", () => {
 			const rows = component.getTopBorderRows(width).map(row => plain(row.content));
 			expect(rows).toHaveLength(3);
 			expect(rows[0]).toContain("OMP");
-			expect(rows[0]).toContain("A·Opus-5");
+			expect(rows[0]).toContain("A·Opus 5");
 			expect(rows[0]).toContain("xhigh");
 			expect(rows[1]).toContain("5h");
 			expect(rows[1]).toContain("31%");
@@ -786,5 +786,66 @@ describe("StatusLineComponent usage refresh", () => {
 		expect(calls).toBe(3);
 		expect(events).toEqual([]);
 		component.dispose();
+	});
+	it("re-fetches usage when the active model switches within the same provider and account", async () => {
+		let calls = 0;
+		const session = makeActiveProviderSession("anthropic", async () => {
+			calls++;
+			return [anthropicModelScopedUsageReport()];
+		});
+		// Start as Opus — should surface the opus weekly cap (80%).
+		const mutable = session as unknown as {
+			state: { model: { provider: string; id: string } };
+			model: { provider: string; id: string };
+		};
+		mutable.state.model.id = "claude-opus-4";
+		mutable.model.id = "claude-opus-4";
+		const component = new StatusLineComponent(session);
+		component.updateSettings({
+			preset: "custom",
+			leftSegments: ["usage"],
+			rightSegments: [],
+			separator: "none",
+			transparent: true,
+		});
+		await refreshUsage(component);
+		expect(calls).toBe(1);
+		expect(plain(component.getTopBorder(100).content)).toContain("80%");
+		expect(plain(component.getTopBorder(100).content)).not.toContain("99%");
+
+		// Same provider/account, different model (Fable) inside TTL must invalidate.
+		mutable.state.model.id = "claude-fable-5";
+		mutable.model.id = "claude-fable-5";
+		component.refreshUsageInBackground();
+		// Stale quota cleared immediately even before the new fetch lands.
+		expect(plain(component.getTopBorder(100).content)).not.toContain("80%");
+		vi.advanceTimersByTime(0);
+		await flushMicrotasks();
+		expect(calls).toBe(2);
+		expect(plain(component.getTopBorder(100).content)).toContain("99%");
+		expect(plain(component.getTopBorder(100).content)).not.toContain("80%");
+	});
+
+	it("does not re-fetch usage when the active model stays the same inside the TTL", async () => {
+		let calls = 0;
+		const component = new StatusLineComponent(
+			makeActiveProviderSession("anthropic", async () => {
+				calls++;
+				return [anthropicModelScopedUsageReport()];
+			}),
+		);
+		component.updateSettings({
+			preset: "custom",
+			leftSegments: ["usage"],
+			rightSegments: [],
+			separator: "none",
+			transparent: true,
+		});
+		await refreshUsage(component);
+		expect(calls).toBe(1);
+		component.refreshUsageInBackground();
+		vi.advanceTimersByTime(0);
+		await flushMicrotasks();
+		expect(calls).toBe(1);
 	});
 });

@@ -1441,7 +1441,7 @@ export class SessionMaintenance {
 		if (!promotionSettings.enabled) return false;
 		const currentModel = this.#model;
 		if (!currentModel) return false;
-		const contextWindow = currentModel.contextWindow ?? 0;
+		const contextWindow = effectiveContextWindow(currentModel);
 		if (contextWindow <= 0) return false;
 		const targetModel = await this.resolveContextPromotionTarget(currentModel, contextWindow);
 		if (!targetModel) return false;

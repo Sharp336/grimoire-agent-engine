@@ -49,9 +49,18 @@ describe("cache_hit status-line segment", () => {
 		expect(plain(result.content)).toContain("60.00%");
 	});
 
-	it("is hidden until there is a cache read, even with uncached input", () => {
-		const result = renderSegment("cache_hit", ctxWith({ cacheRead: 0, cacheWrite: 0, input: 5_000 }));
-		expect(result.visible).toBe(false);
-		expect(result.content).toBe("");
+	it("renders 0.00% when prompt usage exists but no cache read, and is hidden only when total prompt usage is zero", () => {
+		// PR changed cacheHitSegment from `if (!cacheRead) hidden` to `if (total <= 0) hidden`,
+		// where total = cacheRead + cacheWrite + input. Once any prompt tokens exist,
+		// the segment is visible even on a 0% miss, matching the deliberate comment
+		// "Once prompt usage exists, render 0% misses too instead of hiding the cache metric entirely."
+		const miss = renderSegment("cache_hit", ctxWith({ cacheRead: 0, cacheWrite: 0, input: 5_000 }));
+		expect(miss.visible).toBe(true);
+		expect(plain(miss.content)).toContain("0.00%");
+
+		// Total prompt usage zero → hidden (no data to compute a hit rate).
+		const empty = renderSegment("cache_hit", ctxWith({ cacheRead: 0, cacheWrite: 0, input: 0 }));
+		expect(empty.visible).toBe(false);
+		expect(empty.content).toBe("");
 	});
 });

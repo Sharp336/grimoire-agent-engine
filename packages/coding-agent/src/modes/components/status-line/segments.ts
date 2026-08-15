@@ -21,15 +21,21 @@ function withIcon(icon: string, text: string): string {
 	return icon ? `${icon} ${text}` : text;
 }
 
-/** Middle-truncate a path/label to `maxLen`, preserving both root context and the leaf. */
+/** Truncate `pwd` to `maxLen`. Absolute paths preserve both root and leaf via
+ * middle truncation; relative labels (e.g. worktree `project/branch`) preserve
+ * the leaf via left truncation so the worktree name remains fully visible. */
 function clampPathLength(pwd: string, maxLen: number): string {
 	if (pwd.length <= maxLen) return pwd;
 	if (maxLen <= 0) return "";
 	if (maxLen === 1) return "…";
-	const remaining = maxLen - 1;
-	const headLength = Math.max(1, Math.floor(remaining * 0.4));
-	const tailLength = Math.max(0, remaining - headLength);
-	return `${pwd.slice(0, headLength)}…${pwd.slice(-tailLength)}`;
+	if (pwd.startsWith("/")) {
+		const remaining = maxLen - 1;
+		const headLength = Math.max(1, Math.floor(remaining * 0.4));
+		const tailLength = Math.max(0, remaining - headLength);
+		return `${pwd.slice(0, headLength)}…${pwd.slice(-tailLength)}`;
+	}
+	const ellipsis = "…";
+	return `${ellipsis}${pwd.slice(-Math.max(0, maxLen - ellipsis.length))}`;
 }
 
 /**
@@ -163,7 +169,7 @@ function formatCompactModelLabel(
 	mode: "spaced" | "glue-post" | "tight",
 ): string {
 	const parts: string[] = [];
-	if (identity.hyphenateFamilyVersion && identity.version && pre.length > 0 && mode !== "tight") {
+	if (identity.hyphenateFamilyVersion && identity.version && pre.length > 0 && mode !== "spaced" && mode !== "tight") {
 		parts.push(...pre.slice(0, -1), `${pre[pre.length - 1]}-${identity.version}`);
 	} else {
 		parts.push(...pre);
@@ -776,7 +782,6 @@ const cacheHitSegment: StatusLineSegment = {
 		// exists, render 0% misses too instead of hiding the cache metric entirely.
 		const total = cacheRead + cacheWrite + input;
 		if (total <= 0) return { content: "", visible: false };
-
 		const rate = (cacheRead / total) * 100;
 		const rateStr = rate.toFixed(2);
 

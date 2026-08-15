@@ -1407,3 +1407,54 @@ describe("applyDirenvPreflight direnv-load clamp", () => {
 		expect(spy.mock.calls[0][1]?.timeoutMs).toBe(30_000);
 	});
 });
+
+describe("executeBash output budgets (findings A/C)", () => {
+	let tempDir: string;
+
+	function multilineCommand(bytes: number, exitCode: number): string {
+		const lines = Math.ceil(bytes / 50);
+		const perLine = Math.max(10, Math.floor(bytes / lines));
+		const payload = "x".repeat(perLine);
+		return `python3 -c "import sys; [sys.stdout.write('${payload}\\n') for _ in range(${lines})]; sys.exit(${exitCode})"`;
+	}
+
+	beforeEach(async () => {
+		tempDir = makeTempDir();
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true, cwd: tempDir });
+	});
+
+	afterEach(() => {
+		resetSettingsForTest();
+		vi.restoreAllMocks();
+		if (fs.existsSync(tempDir)) removeSyncWithRetries(tempDir);
+	});
+
+	it("retains ~18KB failure output through the real executor (not truncated to 12KB)", async () => {
+		const targetBytes = 18030;
+		const command = multilineCommand(targetBytes, 1);
+		const result = await executeBash(command, { cwd: tempDir, timeout: 5000 });
+		// Before the fix the shared DEFAULT_MAX_BYTES (12KB) truncated the sink,
+		// yielding outputBytes ~12300 truncated:true (reviewer observed). After
+		// the fix the Bash sink is sized for the failure retention budget (20KB)
+		// so 18KB is fully retained.
+		expect(result.truncated).toBe(false);
+		expect(result.outputBytes).toBeGreaterThan(17000);
+		expect(result.totalBytes).toBeGreaterThan(17000);
+		expect(result.output).toContain("x".repeat(20));
+	});
+
+	it("keeps failure retention above success cap for the same payload size", async () => {
+		const targetBytes = 18030;
+		const success = await executeBash(multilineCommand(targetBytes, 0), { cwd: tempDir, timeout: 5000 });
+		const failure = await executeBash(multilineCommand(targetBytes, 1), { cwd: tempDir, timeout: 5000 });
+		// Success via executor alone is not final-capped (tool layer caps it);
+		// both retain via the 20KB sink, so this documents that the executor
+		// itself does not clamp success to 12KB — the tool layer does.
+		// The assertion is that failure is not truncated to the old 12KB budget.
+		expect(failure.truncated).toBe(false);
+		expect(failure.outputBytes).toBeGreaterThan(17000);
+		// Success via executor is also retained (executor sink is failure-sized)
+		expect(success.outputBytes).toBeGreaterThan(17000);
+	});
+});

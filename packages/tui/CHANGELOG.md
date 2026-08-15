@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the editor exceeding its configured `maxHeight` when the status provider returns a multi-row top border. On terminals of six rows or fewer the two-row header previously rendered four total rows against a cap of three, eating the transcript space the small-terminal calculation reserves; header rows are now bounded so the cap holds while at least one content row stays visible ([#8170](https://github.com/can1357/oh-my-pi/pull/8170)).
+
 ## [17.3.4] - 2026-08-14
 
 ### Fixed

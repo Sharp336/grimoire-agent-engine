@@ -8,7 +8,7 @@ import { sanitizeWithOptionalSixelPassthrough } from "../utils/sixel";
 // =============================================================================
 
 export const DEFAULT_MAX_LINES = 3000;
-export const DEFAULT_MAX_BYTES = 12 * 1024; // 12KB bounded inline — full raw in artifact://
+export const DEFAULT_MAX_BYTES = 50 * 1024; // 50KB — documented default for `tools.artifactSpillThreshold`; Bash uses its own smaller inline budget
 export const DEFAULT_MAX_COLUMN = 512; // Max chars per grep match line
 
 /**

@@ -11,7 +11,13 @@ import type { Component } from "@oh-my-pi/pi-tui";
 import { ImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
 import { getProjectDir, isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
-import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash-executor";
+import {
+	applyDirenvPreflight,
+	type BashResult,
+	executeBash,
+	resolveBashInlineCapBudget,
+	resolveBashSinkSpillThreshold,
+} from "../exec/bash-executor";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { InternalUrlRouter } from "../internal-urls";
 import { truncateToVisualLines } from "../modes/components/visual-truncate";
@@ -22,7 +28,7 @@ import type {
 	ClientBridgeTerminalHandle,
 	ClientBridgeTerminalOutput,
 } from "../session/client-bridge";
-import { DEFAULT_MAX_BYTES, enforceInlineByteCap, streamTailUpdates, TailBuffer } from "../session/streaming-output";
+import { enforceInlineByteCap, streamTailUpdates, TailBuffer } from "../session/streaming-output";
 import { renderStatusLine } from "../tui";
 import { CachedOutputBlock, markFramedBlockComponent, outputBlockContentWidth } from "../tui/output-block";
 import { getSixelLineMask } from "../utils/sixel";
@@ -37,7 +43,6 @@ import { invalidateGithubCacheForBashCommand } from "./gh-cache-invalidation";
 import {
 	formatStyledTruncationWarning,
 	type OutputMeta,
-	resolveInlineByteCapBudget,
 	stripOutputNotice,
 	stripRawOutputArtifactNotice,
 } from "./output-meta";
@@ -713,21 +718,17 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		if (failedExit) {
 			details.exitCode = exitCode;
 		}
-
-		// Final-defense inline cap config, shared by the timeout and normal
-		// completion paths. The sink already bounds inline bodies to the spill
-		// threshold, so with the notice slack this only fires on paths that
-		// bypass the sink (client-bridge terminals, minimizer misses). When the
-		// sink spilled, its artifact already holds the full raw stream — reuse
-		// that id instead of saving a second (already-truncated) copy, so the
-		// `[raw output: artifact://N]` footer and the truncation notice agree.
-		const baseBudget = resolveInlineByteCapBudget(this.session.settings);
-		// Success ~12KB inline (sink), failure up to 20KB where possible; full always in artifact://
+		// Final-defense inline cap — Bash uses its own smaller budgets (12KB
+		// success, 20KB failure) so non-Bash consumers can keep the documented
+		// 50KB `DEFAULT_MAX_BYTES`. The executor's sink is sized for the
+		// failure budget, so success can be final-capped here without losing
+		// bytes that were already dropped. An explicitly configured
+		// `tools.artifactSpillThreshold` is authoritative and overrides the Bash
+		// defaults (via `resolveBashInlineCapBudget`).
 		const inlineCap = {
-			maxBytes: failedExit ? Math.max(baseBudget, 20 * 1024) : baseBudget,
+			maxBytes: resolveBashInlineCapBudget(this.session.settings, failedExit),
 			saveArtifact: (full: string) => result.artifactId ?? saveBashOriginalArtifact(this.session, full),
 		};
-
 		if (isTimeout) {
 			details.timedOut = true;
 			const message =
@@ -821,7 +822,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			label,
 			async ({ jobId, signal: runSignal, reportProgress }) => {
 				const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.("bash")) ?? {};
-				const tailBuffer = new TailBuffer(DEFAULT_MAX_BYTES);
+				const tailBuffer = new TailBuffer(resolveBashSinkSpillThreshold(this.session.settings));
 				const wallTimeStart = performance.now();
 				try {
 					const result = await executeBash(options.command, {
@@ -832,6 +833,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 						env: options.resolvedEnv,
 						artifactPath,
 						artifactId,
+						spillThreshold: resolveBashSinkSpillThreshold(this.session.settings),
 						onChunk: chunk => {
 							tailBuffer.append(chunk);
 							latestText = tailBuffer.text();
@@ -1244,7 +1246,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					env: bridgeEnv
 						? Object.entries(bridgeEnv).map(([name, value]) => ({ name, value: value as string }))
 						: undefined,
-					outputByteLimit: DEFAULT_MAX_BYTES,
+					outputByteLimit: resolveBashSinkSpillThreshold(this.session.settings),
 				});
 				const createRaced = await Promise.race([
 					createP.then(createdHandle => ({ kind: "created" as const, handle: createdHandle })),
@@ -1424,8 +1426,10 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			}
 		}
 
-		// Track output for streaming updates (tail only)
-		const tailBuffer = new TailBuffer(DEFAULT_MAX_BYTES);
+		// Track output for streaming updates (tail only) — sized for the
+		// failure budget so failure diagnostics aren't dropped from the live
+		// preview before the exit status is known.
+		const tailBuffer = new TailBuffer(resolveBashSinkSpillThreshold(this.session.settings));
 
 		// Allocate artifact for truncated output storage
 		const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.("bash")) ?? {};
@@ -1459,6 +1463,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					env: resolvedEnv,
 					artifactPath,
 					artifactId,
+					spillThreshold: resolveBashSinkSpillThreshold(this.session.settings),
 					onChunk: streamTailUpdates(tailBuffer, onUpdate),
 					onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
 				});

@@ -91,3 +91,50 @@ describe("Editor lazy top-border provider (#4145)", () => {
 		expect(widths[1]).toBe(editor.getTopBorderAvailableWidth(120));
 	});
 });
+describe("Editor header height cap (#8170 finding H)", () => {
+	it("honours setMaxHeight(3) with a two-row header — total height never exceeds cap", () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.setMaxHeight(3);
+		editor.setTopBorderProvider(() => [stubTopBorder("row1"), stubTopBorder("row2")]);
+		editor.setText("hello");
+
+		const rows = editor.render(80);
+		// 2 header rows +1 content +1 bottom would be 4 >3, so the editor must
+		// drop a secondary header row rather than blow the cap and steal a
+		// transcript row. At least one content row stays visible.
+		expect(rows.length).toBeLessThanOrEqual(3);
+		expect(rows.join("\n")).toContain("hello");
+		// Only one header row should survive the cap
+		const headerRows = rows.filter(line => line.includes("row")).length;
+		expect(headerRows).toBe(1);
+	});
+
+	it("never exceeds very small caps even with three header rows", () => {
+		for (const maxHeight of [2, 3]) {
+			for (const headerCount of [2, 3]) {
+				const editor = new Editor(defaultEditorTheme);
+				editor.setMaxHeight(maxHeight);
+				const rows = Array.from({ length: headerCount }, (_, i) => stubTopBorder(`r${i + 1}`));
+				editor.setTopBorderProvider(() => rows);
+				editor.setText("x");
+				expect(editor.render(80).length).toBeLessThanOrEqual(maxHeight);
+			}
+		}
+	});
+
+	it("keeps full header on roomy terminals (one- and two-row headers)", () => {
+		for (const maxHeight of [6, 10, 18]) {
+			for (const headerCount of [1, 2]) {
+				const editor = new Editor(defaultEditorTheme);
+				editor.setMaxHeight(maxHeight);
+				const rows = Array.from({ length: headerCount }, (_, i) => stubTopBorder(`HDR${i + 1}`));
+				editor.setTopBorderProvider(() => rows);
+				editor.setText("hello");
+				const rendered = editor.render(80);
+				expect(rendered.length).toBeLessThanOrEqual(maxHeight);
+				const headerRows = rendered.filter(line => line.includes("HDR")).length;
+				expect(headerRows).toBe(headerCount);
+			}
+		}
+	});
+});
