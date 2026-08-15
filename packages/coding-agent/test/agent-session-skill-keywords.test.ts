@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { Effort } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -157,6 +158,10 @@ describe("AgentSession skill prompt keyword steering", () => {
 
 		expect(resolutions).toHaveLength(1);
 		expect(resolutions[0]?.configured).toBe("auto");
-		expect(resolutions[0]?.resolved).toBeTruthy();
+		// The fixture args contain `ultrathink`, which classifies to the model's
+		// highest supported effort (xhigh for claude-sonnet-4-5); if the
+		// user-authored skill args stop reaching Auto classification, the
+		// fallback effort surfaces here instead.
+		expect(resolutions[0]?.resolved).toBe(Effort.XHigh);
 	});
 });

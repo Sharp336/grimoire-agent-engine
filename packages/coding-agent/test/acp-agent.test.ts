@@ -613,6 +613,23 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
+	it("advertises the omp.sh extensions from initialize", async () => {
+		// A client can only feature-detect `omp.sh/reasoning` /
+		// `omp.sh/async-result` from the handshake — the keys otherwise appear
+		// only once an event happens to carry them.
+		const harness = await createHarness();
+		const response = await harness.agent.initialize({
+			protocolVersion: 1,
+			clientCapabilities: {},
+		} as Parameters<typeof harness.agent.initialize>[0]);
+		expect(response.agentCapabilities?._meta).toEqual({
+			"omp.sh/reasoning": { version: 1 },
+			"omp.sh/async-result": { version: 1 },
+		});
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
 	it("advertises plan mode and emits schema-valid mode updates", async () => {
 		const harness = await createHarness();
 		Settings.instance.set("plan.enabled", true);
@@ -961,6 +978,74 @@ describe("ACP agent", () => {
 			],
 		});
 		if (asyncUpdate) expectAcpNotifications([asyncUpdate]);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("forwards an in-turn async result exactly once with both subscriptions active", async () => {
+		// Regression guard for `#handleLifetimeEvent`'s isPromptTurnInFlight
+		// check: when a background job settles while a prompt turn is still in
+		// flight, both the session-lifetime and the prompt subscriptions see
+		// the `message_start` — only the prompt subscription may forward it,
+		// or one job completion duplicates on the wire.
+		const harness = await createHarness();
+		vi.useFakeTimers();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		// Install the session-lifetime subscription, then hand back to real
+		// timers: the prompt path below awaits genuine async work.
+		await advanceBootstrapGuard();
+		vi.useRealTimers();
+
+		const asyncMessage = buildAsyncResultBatchMessage([
+			{
+				jobId: "InFlightJob",
+				result: "done",
+				job: {
+					id: "InFlightJob",
+					type: "bash",
+					status: "completed",
+					label: "sleep 1",
+					startTime: Date.now() - 1_000,
+					abortController: new AbortController(),
+					promise: Promise.resolve(),
+				},
+				durationMs: 1_000,
+				epoch: 0,
+			},
+		]);
+		if (!asyncMessage) throw new Error("expected async result message");
+
+		session.prompt = async (prompt: string): Promise<boolean> => {
+			session.promptCalls.push(prompt);
+			session.isStreaming = true;
+			// The job settles mid-turn: every listener — lifetime AND prompt
+			// subscription — receives the same event.
+			for (const listener of session.listeners()) {
+				listener({ type: "message_start", message: asyncMessage });
+			}
+			const assistantMessage = makeAssistantMessage("pong");
+			for (const listener of session.listeners()) {
+				listener({ type: "agent_end", messages: [assistantMessage] } as AgentSessionEvent);
+			}
+			session.isStreaming = false;
+			return true;
+		};
+
+		const updatesBefore = harness.updates.length;
+		await harness.agent.prompt({ sessionId: created.sessionId, prompt: [{ type: "text", text: "run" }] });
+
+		const asyncUpdates = harness.updates
+			.slice(updatesBefore)
+			.filter(
+				notification =>
+					notification.sessionId === created.sessionId &&
+					notification.update.sessionUpdate === "agent_message_chunk" &&
+					notification.update._meta?.["omp.sh/async-result"] !== undefined,
+			);
+		expect(asyncUpdates).toHaveLength(1);
+		expectAcpNotifications(asyncUpdates);
 
 		harness.abortController.abort();
 		await Bun.sleep(0);

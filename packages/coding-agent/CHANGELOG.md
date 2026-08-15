@@ -6,6 +6,7 @@
 
 - Added namespaced `omp.sh/reasoning` ACP metadata that reports the concrete effort selected for an Auto-classified top-level turn while preserving Auto as the configured thinking option.
 - Added namespaced `omp.sh/async-result` ACP metadata on settled background jobs, so a client can render task/bash completions (id, type, terminal status, label, duration) even when the owning prompt turn has already ended.
+- Both `omp.sh` ACP extensions are advertised from `initialize.agentCapabilities._meta`, so clients can feature-detect them at handshake time instead of waiting for an event to carry the keys.
 
 ## [17.3.3] - 2026-08-14
 

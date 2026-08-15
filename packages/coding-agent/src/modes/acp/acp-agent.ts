@@ -87,6 +87,9 @@ import {
 	mapAgentSessionEventToAcpSessionUpdates,
 	mapThinkingLevelChangeToAcpConfigUpdate,
 	normalizeReplayToolArguments,
+	OMP_ACP_EXTENSION_VERSION,
+	OMP_ASYNC_RESULT_META_KEY,
+	OMP_REASONING_META_KEY,
 } from "./acp-event-mapper";
 import { ACP_TERMINAL_AUTH_FLAG } from "./terminal-auth";
 
@@ -530,6 +533,10 @@ export class AcpAgent implements Agent {
 			},
 			authMethods,
 			agentCapabilities: {
+				_meta: {
+					[OMP_REASONING_META_KEY]: { version: OMP_ACP_EXTENSION_VERSION },
+					[OMP_ASYNC_RESULT_META_KEY]: { version: OMP_ACP_EXTENSION_VERSION },
+				},
 				loadSession: true,
 				mcpCapabilities: {
 					http: true,

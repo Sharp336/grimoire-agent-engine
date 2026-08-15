@@ -129,8 +129,10 @@ interface TextMessageLike {
 }
 
 const ACP_TEXT_LIMIT = 4_000;
-const OMP_REASONING_META_KEY = "omp.sh/reasoning";
-const OMP_ASYNC_RESULT_META_KEY = "omp.sh/async-result";
+export const OMP_REASONING_META_KEY = "omp.sh/reasoning";
+export const OMP_ASYNC_RESULT_META_KEY = "omp.sh/async-result";
+/** Version advertised for both `omp.sh/*` extensions in `initialize.agentCapabilities._meta`. */
+export const OMP_ACP_EXTENSION_VERSION = 1;
 
 /**
  * Device name when the call is an `xd://` device dispatch riding the
