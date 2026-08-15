@@ -48,7 +48,15 @@ export const galleryHelp = {
 	description: "Preview tool renderers across streaming, in-progress, success, and failure states",
 } satisfies CommandMetadata;
 
-export const gcHelp = { description: "Run storage garbage collection" } satisfies CommandMetadata;
+export const gcHelp = {
+	description: "Run storage garbage collection, including duplicate merges and dead-session pruning",
+	examples: [
+		"omp gc --merge-duplicates  # Merge split copies of the same session (dry-run by default)",
+		"omp gc --merge-forks       # Graft forked sessions into their parents (dry-run by default)",
+		"omp gc --prune             # Archive conversations nobody asked for and nobody answered",
+		"omp gc --prune delete      # Permanently delete those sessions instead (only with --apply)",
+	],
+} satisfies CommandMetadata;
 
 export const grepHelp = { description: "Test grep tool" } satisfies CommandMetadata;
 
