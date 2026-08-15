@@ -522,7 +522,7 @@ export const CATALOG_PROVIDERS = [
 	},
 	{
 		id: "zai",
-		defaultModel: "glm-5.2",
+		defaultModel: "glm-5.3",
 		envVars: ["ZAI_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => zaiModelManagerOptions(config),
 		catalogDiscovery: { label: "zAI" },
@@ -537,7 +537,7 @@ export const CATALOG_PROVIDERS = [
 	},
 	{
 		id: "zhipu-coding-plan",
-		defaultModel: "glm-5.1",
+		defaultModel: "glm-5.3",
 		envVars: ["ZHIPU_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => zhipuCodingPlanModelManagerOptions(config),
 		dynamicModelsAuthoritative: true,
