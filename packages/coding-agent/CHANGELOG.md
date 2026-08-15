@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Added `ctx.ui.getEditorComponent()` so extensions can wrap the active editor factory without constructing an incompatible editor implementation.
+
 ## [17.3.4] - 2026-08-14
 
 ### Changed
