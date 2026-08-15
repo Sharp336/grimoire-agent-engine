@@ -8548,6 +8548,7 @@ export class AgentSession {
 		return {
 			sessionManager: this.sessionManager,
 			modelRegistry: this.#modelRegistry,
+			metadataForProvider: (provider: string) => this.agent.metadataForProvider(provider),
 			model: this.model,
 			isIdle: () => !this.isStreaming,
 			hasQueuedMessages: () => this.queuedMessageCount > 0,
