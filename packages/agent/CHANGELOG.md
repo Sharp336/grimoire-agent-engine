@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added agent-loop forwarding for thinking mode independently from reasoning effort.
+
+### Fixed
+
+- The error→toolUse salvage in the agent loop (`recoverTransientErrorToolTurn`) now recognizes Anthropic stream-envelope truncation errors, so a turn cut after streaming complete tool calls runs those calls instead of ending the run with an error.
+- Shake no longer elides artifact recovery reads; the compaction dead-end rescue uses a dedicated `RESCUE_SHAKE_CONFIG`.
+- Fixed the proxy transport dropping `thinkingMode` and `disableReasoning`, so proxied agents ignored a requested thinking-off.
+
 ## [17.3.4] - 2026-08-14
 
 ### Fixed

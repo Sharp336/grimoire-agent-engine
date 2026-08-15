@@ -45,6 +45,7 @@ class ProtocolParsingTests(unittest.TestCase):
                     },
                 },
                 "thinkingLevel": "medium",
+                "thinkingMode": "adaptive",
                 "isStreaming": False,
                 "isCompacting": False,
                 "steeringMode": "one-at-a-time",
@@ -93,6 +94,7 @@ class ProtocolParsingTests(unittest.TestCase):
         self.assertEqual(state.session_id, "session-123")
         self.assertEqual(state.follow_up_mode, "all")
         self.assertEqual(state.model.id if state.model else None, "claude-sonnet-4-5")
+        self.assertEqual(state.thinking_mode, "adaptive")
         self.assertEqual(state.todo_phases[0].tasks[0].status, "in_progress")
         # Legacy bare-string systemPrompt is accepted and wrapped to a tuple.
         self.assertEqual(state.system_prompt, ("You are useful.",))
@@ -141,6 +143,27 @@ class ProtocolParsingTests(unittest.TestCase):
                     ),
                     (False, False, expected),
                 )
+
+    def test_session_state_constructor_keeps_existing_positional_shape(self) -> None:
+        state = SessionState(
+            None,
+            "medium",
+            False,
+            False,
+            "one-at-a-time",
+            "all",
+            "immediate",
+            None,
+            "session-123",
+            "Scratchpad",
+            True,
+            4,
+            1,
+        )
+
+        self.assertEqual(state.thinking_level, "medium")
+        self.assertIsNone(state.thinking_mode)
+        self.assertEqual(state.session_id, "session-123")
 
     def test_parse_agent_end_notification(self) -> None:
         notification = parse_notification(
@@ -319,6 +342,21 @@ class ProtocolParsingTests(unittest.TestCase):
                     "steeringMode": "one-at-a-time",
                     "followUpMode": "one-at-a-time",
                     "interruptMode": "immediate",
+                }
+            )
+
+    def test_parse_session_state_rejects_invalid_thinking_mode(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_session_state(
+                {
+                    "sessionId": "session-123",
+                    "thinkingMode": "off",
+                    "steeringMode": "one-at-a-time",
+                    "followUpMode": "one-at-a-time",
+                    "interruptMode": "wait",
+                    "autoCompactionEnabled": False,
+                    "messageCount": 0,
+                    "queuedMessageCount": 0,
                 }
             )
 

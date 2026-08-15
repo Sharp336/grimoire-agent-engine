@@ -1821,17 +1821,25 @@ function normalizeMandatoryReasoningOptions<TApi extends Api>(
 	model: Model<TApi>,
 	options?: SimpleStreamOptions,
 ): SimpleStreamOptions | undefined {
+	const requestedThinkingOff =
+		options?.thinkingMode === "off" || options?.disableReasoning === true || options?.forceReasoningOff === true;
 	if (
 		!model.reasoning ||
 		!model.thinking?.requiresEffort ||
 		model.thinking.suppressWhenOff ||
-		(options?.reasoning !== undefined && !options.disableReasoning && !options.forceReasoningOff)
+		(options?.reasoning !== undefined && !requestedThinkingOff)
 	) {
 		return options;
 	}
 	const floor = minimumSupportedEffort(model);
 	if (floor === undefined) return options;
-	return { ...options, reasoning: floor, disableReasoning: undefined, forceReasoningOff: undefined };
+	return {
+		...options,
+		reasoning: requestedThinkingOff ? floor : (options?.reasoning ?? floor),
+		disableReasoning: undefined,
+		thinkingMode: undefined,
+		forceReasoningOff: undefined,
+	};
 }
 
 function supportsExplicitOpenAIResponsesPromptCache(compat: unknown): boolean {
@@ -1875,6 +1883,9 @@ function mapOptionsForApi<TApi extends Api>(
 	apiKey?: string,
 ): OptionsForApi<TApi> {
 	const options = normalizeMandatoryReasoningOptions(model, rawOptions);
+	const explicitThinkingOff = options?.thinkingMode === "off" || options?.disableReasoning === true;
+	const forceReasoningOff = options?.forceReasoningOff === true;
+	const openAiDisableReasoning = explicitThinkingOff ? true : options?.disableReasoning;
 	const simpleProviderOptions = getProviderDefinition(model.provider)?.mapSimpleOptions?.(options ?? {});
 	const base = {
 		temperature: options?.temperature,
@@ -1912,17 +1923,48 @@ function mapOptionsForApi<TApi extends Api>(
 
 	switch (model.api) {
 		case "anthropic-messages": {
-			// Explicitly disable thinking when reasoning is not specified, the caller
-			// disabled it, an external scratchpad replaces it, or the model doesn't
-			// support it. These SimpleStreamOptions flags never reach AnthropicOptions
-			// on their own, so fold them into thinkingEnabled here (mandatory-reasoning
-			// models already clamp them away in normalizeMandatoryReasoningOptions).
+			// Thinking mode is independent from effort: `reasoning` controls
+			// Anthropic output_config.effort while `thinkingMode`/legacy
+			// `disableReasoning` controls the Claude thinking block. External
+			// scratchpad mode suppresses both native thinking and provider effort.
 			const reasoning = options?.reasoning;
-			if (!reasoning || !model.reasoning || options?.disableReasoning || options?.forceReasoningOff) {
+			const adaptiveThinkingMode =
+				!explicitThinkingOff &&
+				!forceReasoningOff &&
+				(options?.anthropicThinkingMode === "adaptive" ||
+					(options?.thinkingMode === "adaptive" && model.thinking?.mode === "anthropic-adaptive"));
+			if ((!reasoning && !adaptiveThinkingMode) || !model.reasoning || forceReasoningOff) {
 				return castApi<"anthropic-messages">({
 					...base,
 					requestModelId: resolveWireModelId(model, undefined),
 					thinkingEnabled: false,
+					toolChoice: mapAnthropicToolChoice(options?.toolChoice),
+					thinkingDisplay: options?.hideThinkingSummary ? "omitted" : undefined,
+					serviceTier: options?.serviceTier,
+					reasoning: forceReasoningOff ? undefined : reasoning,
+					anthropicThinkingMode:
+						explicitThinkingOff || forceReasoningOff ? undefined : options?.anthropicThinkingMode,
+				});
+			}
+
+			if (explicitThinkingOff) {
+				return castApi<"anthropic-messages">({
+					...base,
+					requestModelId: resolveWireModelId(model, undefined),
+					thinkingEnabled: false,
+					reasoning,
+					toolChoice: mapAnthropicToolChoice(options?.toolChoice),
+					thinkingDisplay: options?.hideThinkingSummary ? "omitted" : undefined,
+					serviceTier: options?.serviceTier,
+				});
+			}
+
+			if (!reasoning) {
+				return castApi<"anthropic-messages">({
+					...base,
+					requestModelId: resolveWireModelId(model, undefined),
+					thinkingEnabled: true,
+					anthropicThinkingMode: "adaptive",
 					toolChoice: mapAnthropicToolChoice(options?.toolChoice),
 					thinkingDisplay: options?.hideThinkingSummary ? "omitted" : undefined,
 					serviceTier: options?.serviceTier,
@@ -2010,7 +2052,13 @@ function mapOptionsForApi<TApi extends Api>(
 		case "bedrock-converse-stream": {
 			const bedrockBase: BedrockOptions = {
 				...base,
-				reasoning: options?.reasoning,
+				reasoning: explicitThinkingOff ? undefined : options?.reasoning,
+				anthropicThinkingMode: explicitThinkingOff
+					? undefined
+					: (options?.anthropicThinkingMode ??
+						(options?.thinkingMode === "adaptive" && model.thinking?.mode === "anthropic-adaptive"
+							? "adaptive"
+							: undefined)),
 				thinkingBudgets: options?.thinkingBudgets,
 				toolChoice: mapAnthropicToolChoice(options?.toolChoice),
 				thinkingDisplay: options?.hideThinkingSummary ? "omitted" : undefined,
@@ -2041,16 +2089,17 @@ function mapOptionsForApi<TApi extends Api>(
 
 		case "openrouter": {
 			const useResponses = $env.PI_OPENROUTER_RESPONSES !== "0";
+			const openAiReasoning = explicitThinkingOff ? undefined : resolveOpenAiReasoningEffort(model, options);
 			if (useResponses) {
 				return castApi<"openai-responses">({
 					...base,
-					reasoning: resolveOpenAiReasoningEffort(model, options),
+					reasoning: openAiReasoning,
 					toolChoice: mapOpenAiToolChoice(options?.toolChoice),
 					serviceTier: options?.serviceTier,
 					reasoningSummary: options?.hideThinkingSummary ? null : undefined,
 					openrouterVariant: options?.openrouterVariant,
 					maxTokensExplicit: rawOptions?.maxTokens !== undefined,
-					disableReasoning: options?.disableReasoning,
+					disableReasoning: openAiDisableReasoning,
 					textVerbosity: options?.textVerbosity,
 					promptCache: options?.promptCache,
 					statefulResponses: options?.statefulResponses,
@@ -2058,8 +2107,8 @@ function mapOptionsForApi<TApi extends Api>(
 			}
 			return castApi<"openai-completions">({
 				...base,
-				reasoning: resolveOpenAiReasoningEffort(model, options),
-				disableReasoning: options?.disableReasoning,
+				reasoning: openAiReasoning,
+				disableReasoning: openAiDisableReasoning,
 				toolChoice: mapOpenAiToolChoice(options?.toolChoice),
 				serviceTier: options?.serviceTier,
 				openrouterVariant: options?.openrouterVariant,
@@ -2068,51 +2117,58 @@ function mapOptionsForApi<TApi extends Api>(
 			});
 		}
 
-		case "openai-completions":
+		case "openai-completions": {
+			const openAiReasoning = explicitThinkingOff ? undefined : resolveOpenAiReasoningEffort(model, options);
 			return castApi<"openai-completions">({
 				...base,
-				reasoning: resolveOpenAiReasoningEffort(model, options),
-				disableReasoning: options?.disableReasoning,
+				reasoning: openAiReasoning,
+				disableReasoning: openAiDisableReasoning,
 				toolChoice: mapOpenAiToolChoice(options?.toolChoice),
 				serviceTier: options?.serviceTier,
 				openrouterVariant: options?.openrouterVariant,
 				maxTokensExplicit: rawOptions?.maxTokens !== undefined,
 				promptCache: options?.promptCache,
 			});
+		}
 
-		case "openai-responses":
+		case "openai-responses": {
+			const openAiReasoning = explicitThinkingOff ? undefined : resolveOpenAiReasoningEffort(model, options);
 			return castApi<"openai-responses">({
 				...base,
-				reasoning: resolveOpenAiReasoningEffort(model, options),
+				reasoning: openAiReasoning,
 				toolChoice: mapOpenAiToolChoice(options?.toolChoice),
 				serviceTier: options?.serviceTier,
 				reasoningSummary: options?.hideThinkingSummary ? null : undefined,
 				openrouterVariant: options?.openrouterVariant,
 				maxTokensExplicit: rawOptions?.maxTokens !== undefined,
-				disableReasoning: options?.disableReasoning,
+				disableReasoning: openAiDisableReasoning,
 				forceReasoningOff: options?.forceReasoningOff,
 				textVerbosity: options?.textVerbosity,
 				promptCache: options?.promptCache,
 				statefulResponses: options?.statefulResponses,
 			});
+		}
 
-		case "azure-openai-responses":
+		case "azure-openai-responses": {
+			const openAiReasoning = explicitThinkingOff ? undefined : resolveOpenAiReasoningEffort(model, options);
 			return castApi<"azure-openai-responses">({
 				...base,
-				reasoning: resolveOpenAiReasoningEffort(model, options),
+				reasoning: openAiReasoning,
 				toolChoice: mapOpenAiToolChoice(options?.toolChoice),
 				serviceTier: options?.serviceTier,
 				reasoningSummary: options?.hideThinkingSummary ? null : undefined,
 				promptCache: options?.promptCache,
 				statefulResponses: options?.statefulResponses,
-				disableReasoning: options?.disableReasoning || options?.forceReasoningOff,
+				disableReasoning: openAiDisableReasoning || options?.forceReasoningOff,
 				forceReasoningOff: options?.forceReasoningOff,
 			});
+		}
 
-		case "openai-codex-responses":
+		case "openai-codex-responses": {
+			const openAiReasoning = explicitThinkingOff ? undefined : resolveOpenAiReasoningEffort(model, options);
 			return castApi<"openai-codex-responses">({
 				...base,
-				reasoning: resolveOpenAiReasoningEffort(model, options),
+				reasoning: explicitThinkingOff ? "none" : openAiReasoning,
 				toolChoice: mapOpenAiToolChoice(options?.toolChoice),
 				serviceTier: options?.serviceTier,
 				preferWebsockets: options?.preferWebsockets,
@@ -2121,12 +2177,13 @@ function mapOptionsForApi<TApi extends Api>(
 				textVerbosity: options?.textVerbosity,
 				forceReasoningOff: options?.forceReasoningOff,
 			});
+		}
 
 		case "google-generative-ai": {
-			// Explicitly disable thinking when reasoning is absent, unsupported, or
-			// replaced by the caller's external scratchpad. Gemini defaults thinking on.
+			// Gemini defaults thinking on, so every off signal must produce an
+			// explicit provider-specific suppression shape.
 			const reasoning = options?.reasoning;
-			if (!reasoning || !model.reasoning || options?.disableReasoning || options?.forceReasoningOff) {
+			if (!reasoning || !model.reasoning || explicitThinkingOff || forceReasoningOff) {
 				return castApi<"google-generative-ai">({
 					...base,
 					serviceTier: options?.serviceTier,
@@ -2157,6 +2214,7 @@ function mapOptionsForApi<TApi extends Api>(
 
 			return castApi<"google-generative-ai">({
 				...base,
+				serviceTier: options?.serviceTier,
 				thinking: {
 					enabled: true,
 					budgetTokens: getGoogleBudget(googleModel, effort, options?.thinkingBudgets),
@@ -2170,7 +2228,7 @@ function mapOptionsForApi<TApi extends Api>(
 		case "google-gemini-cli": {
 			const reasoning = options?.reasoning;
 			const toolChoice = mapGoogleToolChoice(options?.toolChoice);
-			if (reasoning && model.reasoning && !options?.disableReasoning && !options?.forceReasoningOff) {
+			if (reasoning && model.reasoning && !explicitThinkingOff && !forceReasoningOff) {
 				const effort = requireSupportedEffort(model, reasoning);
 
 				// Gemini 3+ models use thinkingLevel instead of thinkingBudget
@@ -2214,9 +2272,7 @@ function mapOptionsForApi<TApi extends Api>(
 			}
 
 			const thinking: GoogleGeminiCliOptions["thinking"] = { enabled: false };
-			if (model.reasoning && model.thinking?.suppressWhenOff) {
-				// CCA re-applies the per-id baked server default when the config
-				// is omitted; suppression must be explicit on the wire.
+			if (model.reasoning && model.thinking) {
 				thinking.suppress = model.thinking.mode === "google-level" ? { level: "MINIMAL" } : { budget: 0 };
 			}
 			return castApi<"google-gemini-cli">({
@@ -2229,10 +2285,8 @@ function mapOptionsForApi<TApi extends Api>(
 		}
 
 		case "google-vertex": {
-			// Explicitly disable thinking when reasoning is absent, unsupported, or
-			// replaced by the caller's external scratchpad.
 			const reasoning = options?.reasoning;
-			if (!reasoning || !model.reasoning || options?.disableReasoning || options?.forceReasoningOff) {
+			if (!reasoning || !model.reasoning || explicitThinkingOff || forceReasoningOff) {
 				return castApi<"google-vertex">({
 					...base,
 					serviceTier: options?.serviceTier,
@@ -2276,8 +2330,8 @@ function mapOptionsForApi<TApi extends Api>(
 		case "ollama-chat":
 			return castApi<"ollama-chat">({
 				...base,
-				reasoning: resolveOpenAiReasoningEffort(model, options),
-				disableReasoning: options?.disableReasoning,
+				reasoning: explicitThinkingOff ? undefined : resolveOpenAiReasoningEffort(model, options),
+				disableReasoning: openAiDisableReasoning,
 				toolChoice: options?.toolChoice,
 			});
 
@@ -2300,7 +2354,7 @@ function mapOptionsForApi<TApi extends Api>(
 		case "devin-agent": {
 			const devinModel = model as Model<"devin-agent">;
 			const effort =
-				options?.reasoning && !options.disableReasoning
+				options?.reasoning && !explicitThinkingOff
 					? requireSupportedEffort(devinModel, options.reasoning)
 					: undefined;
 			return castApi<"devin-agent">({

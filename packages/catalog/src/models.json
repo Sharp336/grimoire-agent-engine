@@ -12297,7 +12297,9 @@
 					"xhigh",
 					"max"
 				],
-				"supportsDisplay": true
+				"supportsDisplay": true,
+				"supportsDisabledThinking": true,
+				"disabledThinkingMaxEffort": "high"
 			}
 		},
 		"claude-sonnet-4-0": {
@@ -12470,7 +12472,8 @@
 					"xhigh",
 					"max"
 				],
-				"supportsDisplay": true
+				"supportsDisplay": true,
+				"supportsDisabledThinking": true
 			}
 		}
 	},
@@ -80546,7 +80549,9 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"high"
+					"low",
+					"high",
+					"max"
 				]
 			},
 			"supportsComputerUse": false,

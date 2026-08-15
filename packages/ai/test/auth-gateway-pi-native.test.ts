@@ -164,7 +164,7 @@ describe("pi-native parseRequest", () => {
 		expect(parsed.options.statefulResponses).toBe(false);
 	});
 
-	it("preserves headers, metadata, sessionId, thinkingBudgets", () => {
+	it("preserves headers, metadata, sessionId, thinkingBudgets, Anthropic thinking mode", () => {
 		const parsed = parseRequest({
 			modelId: "x",
 			context: baseContext,
@@ -173,6 +173,7 @@ describe("pi-native parseRequest", () => {
 				metadata: { user_id: "u" },
 				sessionId: "explicit-session",
 				thinkingBudgets: { high: 8192 },
+				anthropicThinkingMode: "adaptive",
 				stopSequences: ["\n\n"],
 				toolChoice: "required",
 				serviceTier: "priority",
@@ -183,6 +184,7 @@ describe("pi-native parseRequest", () => {
 		expect(parsed.options.metadata).toEqual({ user_id: "u" });
 		expect(parsed.options.sessionId).toBe("explicit-session");
 		expect(parsed.options.thinkingBudgets).toEqual({ high: 8192 });
+		expect(parsed.options.anthropicThinkingMode).toBe("adaptive");
 		expect(parsed.options.stopSequences).toEqual(["\n\n"]);
 		expect(parsed.options.toolChoice).toBe("required");
 		expect(parsed.options.serviceTier).toBe("priority");

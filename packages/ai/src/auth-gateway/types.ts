@@ -6,6 +6,7 @@ import type {
 	Context,
 	OpenAIResponseInclude,
 	ServiceTier,
+	ThinkingMode,
 	TokenTaskBudget,
 } from "../types";
 
@@ -57,8 +58,20 @@ export interface AuthGatewayParsedRequestOptions {
 	// ── Reasoning ─────────────────────────────────────────────────────────
 	/** Effort-level reasoning request (OpenAI Responses / Chat `reasoning_effort`). */
 	reasoning?: Effort;
-	/** Force-disable reasoning (Anthropic `thinking: { type: "disabled" }`). */
+	/**
+	 * Thinking-mode selector, separate from effort intensity. Thinking-aware
+	 * transports honor supported modes directly; generic disablement also carries
+	 * through {@link disableReasoning}.
+	 */
+	thinkingMode?: ThinkingMode;
+	/** Legacy compatibility flag for generic thinking/reasoning disablement. */
 	disableReasoning?: boolean;
+	/**
+	 * Anthropic `thinking.type` when it is independent from `output_config.effort`.
+	 * Currently only `adaptive` needs preservation; disabled maps to
+	 * `thinkingMode: "off"` and enabled carries `explicitThinkingBudgetTokens`.
+	 */
+	anthropicThinkingMode?: "adaptive";
 	/**
 	 * Explicit Anthropic `thinking.budget_tokens`. Mirrors Rust's
 	 * `resolve_thinking_budget`: pins onto whichever effort the client

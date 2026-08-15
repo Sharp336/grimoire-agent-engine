@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `--effort <off|minimal|low|medium|high|xhigh|max|auto>` as the universal reasoning-intensity flag, and `--thinking <adaptive|default>` as an additive provider thinking-mode selector for models that advertise it (Claude 4.6+/5). Both flags accept unambiguous abbreviations (`--effort xhi`, `--thinking ad`).
+
+### Changed
+
+- `--thinking` now selects a thinking *mode*; reasoning intensity moved to `--effort`. Effort values passed to `--thinking` (e.g. `--thinking high`, `--thinking off`) still work and are routed to `--effort` with a deprecation warning on stderr. Invalid `--thinking`/`--effort` values now fail fast instead of silently falling back to the default.
+- Thinking-off session state now keeps the last supported reasoning effort available for providers that separate thinking mode from effort.
+
+### Fixed
+
+- Fixed `--thinking off` being ignored by Google (Generative AI, Gemini CLI, Vertex), Ollama, Devin, GitLab Duo OpenAI-format, and OpenAI/Anthropic shim OpenAI-format requests.
+- Fixed the thinking selector, RPC, ACP, and extension paths being unable to re-enable thinking after it had been turned off.
+- Fixed thinking state not reaching collab guests, RPC clients, and proxied agents, which showed stale or wrong thinking status.
+
 ## [17.3.4] - 2026-08-14
 
 ### Changed

@@ -52,12 +52,14 @@ export const COLLAB_GUEST_ALLOWED_COMMANDS: Record<string, true> = {
 	exit: true,
 	quit: true,
 };
+
 /**
  * How long the guest waits for the host's small `welcome` frame before giving
  * up on the join. The welcome carries metadata only (`entryCount`, header,
  * state, agents), so it lands well under one second on any working relay.
  */
 const WELCOME_TIMEOUT_MS = 30_000;
+
 /**
  * How long the guest waits between `snapshot-chunk` frames during the initial
  * sync. Resets on each chunk arrival, so a multi-MB snapshot only fails when
@@ -66,9 +68,11 @@ const WELCOME_TIMEOUT_MS = 30_000;
  * in under two seconds with comfortable headroom.
  */
 const SNAPSHOT_PROGRESS_TIMEOUT_MS = 30_000;
+
 const TRANSCRIPT_TIMEOUT_MS = 20_000;
 
 type WelcomeFrame = Extract<CollabFrame, { t: "welcome" }>;
+
 type SnapshotChunkFrame = Extract<CollabFrame, { t: "snapshot-chunk" }>;
 
 /** Accumulator for an in-flight chunked welcome — see {@link CollabGuestLink}. */
@@ -593,6 +597,9 @@ export class CollabGuestLink {
 		}
 		const level = state.thinkingLevel as ThinkingLevel | undefined;
 		session.agent.setThinkingLevel(toReasoningEffort(level));
+		// Additive modes only: a pre-split host may still send `off`, which belongs
+		// to the effort axis and would otherwise latch thinking off on the guest.
+		session.agent.setThinkingMode(state.thinkingMode === "adaptive" ? "adaptive" : undefined);
 		session.agent.setDisableReasoning(shouldDisableReasoning(level));
 	}
 

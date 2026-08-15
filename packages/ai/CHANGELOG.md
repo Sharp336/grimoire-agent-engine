@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added provider-neutral `thinkingMode` request options so Claude thinking mode can be selected independently from reasoning effort.
+
+### Fixed
+
+- Fixed Claude Opus 5 and Sonnet 5 thinking-off requests falling back to low effort instead of sending an explicit `thinking.type: "disabled"` with the caller's effort. Opus 5 rejects that combination above `high` with a 400, so its effort is clamped to `high` rather than dropped; Sonnet 5 has no such ceiling.
+- Fixed `thinkingMode: "off"` being ignored by the Google (Generative AI, Gemini CLI, Vertex), Ollama, and Devin request mappings, which kept sending reasoning-enabled requests whenever an effort was also set.
+- Fixed the GitLab Duo and OpenAI/Anthropic shim providers dropping the explicit thinking-off signal on their OpenAI-format transports.
+- Fixed Anthropic Messages gateway requests that set `thinking.type: "adaptive"` without `output_config.effort` being translated as thinking-off. The gateway, direct Anthropic provider, Bedrock Claude, GitLab Duo Anthropic proxy, OpenAI/Anthropic shim providers, and pi-native forwarding path now preserve Claude adaptive thinking mode separately from effort.
+- Fixed neutral `thinkingMode: "adaptive"` incorrectly enabling thinking on budget Claude models when no effort was set.
+
 ## [17.3.4] - 2026-08-14
 
 ### Fixed

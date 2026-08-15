@@ -39,11 +39,21 @@ import type {
 	CompatOf,
 	Model,
 	ModelSpec,
+	ResolvedAnthropicCompat,
 	ResolvedDevinCompat,
 	ResolvedOpenAICompat,
 	ResolvedOpenAIResponsesCompat,
 	ThinkingConfig,
 } from "./types";
+
+/**
+ * Thinking metadata: build-time derivation and runtime field-read helpers.
+ *
+ * Derivation (`resolveModelThinking`) runs exactly once per model — from
+ * `buildModel` for dynamic specs and from the catalog generator for bundled
+ * entries. Everything below the "runtime helpers" divider reads baked fields
+ * only: no id parsing, no host matching, no compat detection per request.
+ */
 
 /**
  * Runtime helpers read baked metadata only, so they accept both pre-build
@@ -179,9 +189,33 @@ function fillThinkingWireDefaults<TApi extends Api>(
 		(spec.api === "anthropic-messages" || spec.api === "bedrock-converse-stream") &&
 		supportsAdaptiveThinkingDisplay(spec.id);
 	const needsRequiresEffort = thinking.requiresEffort === undefined && impliesMandatoryReasoning(parsed, spec.id);
+	// Explicit thinking metadata wins outright; the wire fact below is the only
+	// value backfilled from identity.
+	const supportsDisabledThinking =
+		thinking.supportsDisabledThinking === undefined
+			? inferSupportsDisabledThinking(spec, compat, thinking.mode)
+			: undefined;
+	const effectiveSupportsDisabledThinking = thinking.supportsDisabledThinking ?? supportsDisabledThinking;
+	const needsSupportsDisabledThinking = supportsDisabledThinking !== undefined;
+	const disabledThinkingMaxEffort =
+		effectiveSupportsDisabledThinking === true && thinking.disabledThinkingMaxEffort === undefined
+			? inferDisabledThinkingMaxEffort(spec, compat, thinking.mode)
+			: undefined;
+	const needsDisabledThinkingMaxEffort = disabledThinkingMaxEffort !== undefined;
+	const shouldRemoveDisabledThinkingMaxEffort =
+		effectiveSupportsDisabledThinking !== true && thinking.disabledThinkingMaxEffort !== undefined;
 	const needsDefaultLevel =
 		thinking.defaultLevel === undefined && (isKimiK3ModelId(spec.id) || isGlm53ReasoningEffortModelId(spec.id));
-	if (!effortsChanged && !shouldReplaceEffortMap && !needsDisplay && !needsRequiresEffort && !needsDefaultLevel) {
+	if (
+		!effortsChanged &&
+		!shouldReplaceEffortMap &&
+		!needsDisplay &&
+		!needsRequiresEffort &&
+		!needsDefaultLevel &&
+		!needsSupportsDisabledThinking &&
+		!needsDisabledThinkingMaxEffort &&
+		!shouldRemoveDisabledThinkingMaxEffort
+	) {
 		return thinking;
 	}
 	const filled: ThinkingConfig = { ...thinking };
@@ -203,6 +237,15 @@ function fillThinkingWireDefaults<TApi extends Api>(
 	}
 	if (needsRequiresEffort) {
 		filled.requiresEffort = true;
+	}
+	if (needsSupportsDisabledThinking) {
+		filled.supportsDisabledThinking = true;
+	}
+	if (needsDisabledThinkingMaxEffort) {
+		filled.disabledThinkingMaxEffort = disabledThinkingMaxEffort;
+	}
+	if (shouldRemoveDisabledThinkingMaxEffort) {
+		delete filled.disabledThinkingMaxEffort;
 	}
 	return filled;
 }
@@ -230,6 +273,13 @@ export function deriveThinking<TApi extends Api>(spec: ModelSpec<TApi>, compat: 
 		supportsAdaptiveThinkingDisplay(spec.id)
 	) {
 		config.supportsDisplay = true;
+	}
+	if (inferSupportsDisabledThinking(spec, compat, config.mode) !== undefined) {
+		config.supportsDisabledThinking = true;
+		const disabledCeiling = inferDisabledThinkingMaxEffort(spec, compat, config.mode);
+		if (disabledCeiling !== undefined) {
+			config.disabledThinkingMaxEffort = disabledCeiling;
+		}
 	}
 	if (impliesMandatoryReasoning(parsed, spec.id)) {
 		config.requiresEffort = true;
@@ -431,6 +481,39 @@ function getAnthropicAdaptiveEfforts<TApi extends Api>(spec: ModelSpec<TApi>): r
 		return isAnthropicAdaptiveGenAtLeast(parsed, "4.7") ? FIVE_TIER_EFFORTS_LOW_TO_MAX : FOUR_TIER_EFFORTS_LOW_TO_MAX;
 	}
 	return undefined;
+}
+
+/**
+ * Opus 5 and Sonnet 5 on the native Messages API accept an explicit
+ * `thinking.type: "disabled"`. Fable 5 / Mythos 5 reject it outright, and
+ * older adaptive Claude models need the legacy low-effort fallback.
+ */
+function inferSupportsDisabledThinking<TApi extends Api>(
+	spec: ModelSpec<TApi>,
+	compat: CompatOf<TApi>,
+	mode: ThinkingConfig["mode"],
+): boolean | undefined {
+	if (mode !== "anthropic-adaptive" || spec.api !== "anthropic-messages") return undefined;
+	const anthropicCompat = compat as ResolvedAnthropicCompat;
+	if (!anthropicCompat.officialEndpoint) return undefined;
+	const parsed = parseAnthropicModel(bareModelId(spec.id));
+	if (parsed === null) return undefined;
+	if (parsed.kind !== "opus" && parsed.kind !== "sonnet") return undefined;
+	return semverGte(parsed.version, "5") ? true : undefined;
+}
+
+/**
+ * Opus 5+ rejects `thinking.type: "disabled"` above `high` effort with a 400,
+ * enforced per request. Sonnet 5 documents no such ceiling.
+ */
+function inferDisabledThinkingMaxEffort<TApi extends Api>(
+	spec: ModelSpec<TApi>,
+	compat: CompatOf<TApi>,
+	mode: ThinkingConfig["mode"],
+): Effort | undefined {
+	if (inferSupportsDisabledThinking(spec, compat, mode) === undefined) return undefined;
+	const parsed = parseAnthropicModel(bareModelId(spec.id));
+	return parsed?.kind === "opus" ? Effort.High : undefined;
 }
 
 function isOllamaCloudGlm52ReasoningEffortModel<TApi extends Api>(spec: ModelSpec<TApi>): boolean {

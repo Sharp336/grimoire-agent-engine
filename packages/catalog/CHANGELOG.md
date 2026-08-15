@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added `thinking.supportsDisabledThinking`, marking adaptive Claude models that accept an explicit `thinking.type: "disabled"` request instead of the legacy low-effort fallback. Claude Opus 5 and Sonnet 5 are marked; older adaptive Claude models keep the fallback.
+- Added `thinking.disabledThinkingMaxEffort`, the highest effort that may accompany `thinking.type: "disabled"`. Claude Opus 5 rejects that combination above `high` with a 400, so requests are clamped instead of dropping the caller's effort.
 - Added support for GLM-5.3 on the z.AI provider. GLM-5.3 introduces a uniform wire-exact `low`/`high`/`max` reasoning-effort ladder on every host (replacing GLM-5.2's host-specific dialects), makes thinking mandatory (`thinking.type` must always be `enabled`; disabling is no longer supported), and defaults to `max` effort. The model is pinned to 1M context and set as the z.AI provider default.
 ## [17.3.4] - 2026-08-14
 

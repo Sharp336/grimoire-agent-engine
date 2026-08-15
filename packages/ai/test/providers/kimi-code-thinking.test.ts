@@ -261,6 +261,33 @@ describe("Kimi K3 thinking transport", () => {
 		expect(payload).not.toHaveProperty("thinking.budget_tokens");
 	});
 
+	it("preserves adaptive thinking mode without fabricating effort through the Anthropic shim", async () => {
+		vi.spyOn(kimiOauth, "getKimiCommonHeaders").mockReturnValue(KIMI_HEADERS);
+
+		let payload: unknown;
+		const stream = streamKimi(
+			K3_MODEL,
+			{
+				systemPrompt: [],
+				messages: [{ role: "user", content: "Reply OK", timestamp: 0 }],
+				tools: [],
+			},
+			{
+				apiKey: "test-key",
+				format: "anthropic",
+				anthropicThinkingMode: "adaptive",
+				onPayload: body => {
+					payload = body;
+					throw new Error("stop after payload capture");
+				},
+			},
+		);
+		await stream.result();
+
+		expect(payload).toMatchObject({ thinking: { type: "adaptive" } });
+		expect(payload).not.toHaveProperty("output_config.effort");
+	});
+
 	it("keeps the legacy K2 default on the Anthropic transport", async () => {
 		vi.spyOn(kimiOauth, "getKimiCommonHeaders").mockReturnValue(KIMI_HEADERS);
 		const model = getBundledModel<"openai-completions">("kimi-code", "kimi-for-coding");

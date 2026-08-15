@@ -561,6 +561,9 @@ class OmpLocal(BaseInstalledAgent):
         if self._auto_approve:
             parts.append("--auto-approve")
         if self._thinking:
+            # `--thinking <effort>` is the only spelling accepted by both pre- and
+            # post-split omp builds; the benchmark installs arbitrary published
+            # versions, and an unknown flag exits 2 before the trial starts.
             parts.append(f"--thinking {shlex.quote(self._thinking)}")
         parts.extend(shlex.quote(arg) for arg in self._agent_args)
         # POSIX positional separator: some task prompts start with "-" (e.g. a

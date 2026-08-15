@@ -70,6 +70,8 @@ export interface BedrockOptions extends StreamOptions {
 	toolChoice?: "auto" | "any" | "none" | { type: "tool"; name: string };
 	/* See https://docs.aws.amazon.com/bedrock/latest/userguide/inference-reasoning.html for supported models. */
 	reasoning?: Effort;
+	/** Preserve Claude adaptive `thinking.type` when no effort was supplied. */
+	anthropicThinkingMode?: "adaptive";
 	/* Custom token budgets per thinking level. Overrides default budgets. */
 	thinkingBudgets?: ThinkingBudgets;
 	/* Only supported by Claude 4.x models, see https://docs.aws.amazon.com/bedrock/latest/userguide/claude-messages-extended-thinking.html#claude-messages-extended-thinking-tool-use-interleaved */
@@ -1029,11 +1031,11 @@ function buildAdditionalModelRequestFields(
 	options: BedrockOptions,
 ): Record<string, unknown> | undefined {
 	const reasoning = options.reasoning;
-	if (!reasoning || !model.reasoning) return undefined;
+	if (!model.reasoning) return undefined;
 
 	const mode = model.thinking?.mode;
-	if (mode === "anthropic-adaptive") {
-		const effort = mapEffortToAnthropicAdaptiveEffort(model, reasoning);
+	if (mode === "anthropic-adaptive" && (reasoning || options.anthropicThinkingMode === "adaptive")) {
+		const effort = reasoning ? mapEffortToAnthropicAdaptiveEffort(model, reasoning) : undefined;
 		// Starting with Claude Opus 4.7 and Claude Fable/Mythos 5, Anthropic switched
 		// the adaptive-thinking default to "omitted", which silently suppresses
 		// streamed reasoning and can read as a stalled stream during long reasoning
@@ -1043,11 +1045,15 @@ function buildAdditionalModelRequestFields(
 		if (model.thinking?.supportsDisplay) {
 			adaptive.display = options.thinkingDisplay ?? "summarized";
 		}
-		return {
-			thinking: adaptive,
-			output_config: { effort },
-		};
+		return effort
+			? {
+					thinking: adaptive,
+					output_config: { effort },
+				}
+			: { thinking: adaptive };
 	}
+
+	if (!reasoning) return undefined;
 
 	const level = requireSupportedEffort(model, reasoning);
 	const defaultBudgets: Record<Effort, number> = {

@@ -98,7 +98,9 @@ import { getChangelogPath, resolveStartupChangelogForDisplay, type StartupChange
 import { EventBus } from "./utils/event-bus";
 
 type RunAcpMode = (createSession: AcpSessionFactory) => Promise<never>;
+
 type RunPrintMode = (session: AgentSession, options: PrintModeOptions) => Promise<void>;
+
 type RunRpcMode = (
 	session: AgentSession,
 	setToolUIContext?: (uiContext: ExtensionUIContext, hasUI: boolean) => void,
@@ -210,8 +212,11 @@ export async function readPipedInput(): Promise<string | undefined> {
 // PI_DEBUG_STARTUP markers for the synchronous-hang counterpart).
 
 const STARTUP_WATCHDOG_INTERVAL_MS = 10_000;
+
 let startupWatchdogTimer: NodeJS.Timeout | undefined;
+
 let startupWatchdogActive = false;
+
 let startupWatchdogStartedAt = 0;
 
 function armStartupWatchdog(): void {
@@ -277,6 +282,7 @@ export function buildModelScopeNotification(
 		.join(", ");
 	return { kind: "info", message: `Model scope: ${modelList} (Ctrl+P to cycle)` };
 }
+
 export async function submitInteractiveInput(
 	mode: Pick<
 		InteractiveMode,
@@ -945,7 +951,8 @@ export async function buildSessionOptions(
 		const forkCacheShapeChanged =
 			scopedModelOverride ||
 			parsed.model !== undefined ||
-			parsed.thinking !== undefined ||
+			parsed.thinkingMode !== undefined ||
+			parsed.effort !== undefined ||
 			parsed.systemPrompt !== undefined ||
 			parsed.appendSystemPrompt !== undefined ||
 			parsed.tools !== undefined ||
@@ -994,7 +1001,7 @@ export async function buildSessionOptions(
 			activeSettings.overrideModelRoles({
 				default: resolved.selector ?? `${resolved.model.provider}/${resolved.model.id}`,
 			});
-			if (!parsed.thinking && resolved.thinkingLevel) {
+			if (!parsed.effort && resolved.thinkingLevel) {
 				options.thinkingLevel = resolved.thinkingLevel;
 			}
 		}
@@ -1019,8 +1026,7 @@ export async function buildSessionOptions(
 				: scopedModels.find(scopedModel => scopedModel.model.id.toLowerCase() === remembered.toLowerCase());
 			if (rememberedModel) {
 				options.model = rememberedModel.model;
-				// Apply explicit thinking level from remembered role value
-				if (!parsed.thinking && rememberedSpec.explicitThinkingLevel && rememberedSpec.thinkingLevel) {
+				if (!parsed.effort && rememberedSpec.explicitThinkingLevel && rememberedSpec.thinkingLevel) {
 					options.thinkingLevel = rememberedSpec.thinkingLevel;
 				}
 			}
@@ -1092,14 +1098,17 @@ export async function buildSessionOptions(
 		options.planYolo = { target: resolved.model, thinkingLevel: resolved.thinkingLevel };
 	}
 
-	// Thinking level
-	if (parsed.thinking) {
-		options.thinkingLevel = parsed.thinking;
+	// Thinking mode and effort
+	if (parsed.thinkingMode) {
+		options.thinkingMode = parsed.thinkingMode;
+	}
+	if (parsed.effort) {
+		options.thinkingLevel = parsed.effort;
 	} else if (
 		scopedModels.length > 0 &&
 		scopedModels[0].explicitThinkingLevel === true &&
 		// A deferred default role resolves its own model (and any explicit
-		// thinking suffix) after extensions register; seeding the fallback
+		// effort suffix) after extensions register; seeding the fallback
 		// scoped model's level here would override it in createAgentSession.
 		!deferredDefaultRole &&
 		!restoringSession
@@ -1201,6 +1210,7 @@ interface RunRootCommandDependencies {
 	settings?: Settings;
 	forceSetupWizard?: boolean;
 }
+
 const DEFAULT_RUN_ROOT_DEPENDENCIES: RunRootCommandDependencies = {};
 
 export async function runRootCommand(
