@@ -27,14 +27,15 @@ It covers runtime behavior as implemented today, including precedence, invalid-d
 Task agents normalize into `AgentDefinition` (`src/task/types.ts`):
 
 - required `name`, `description`, and `systemPrompt`
-- optional `tools`, `spawns`, prioritized `model` list, `thinkingLevel`, `output`, `blocking`, `autoloadSkills`, `readSummarize`, `prewalk`, `advisor`
+- optional `tools`, `disallowedTools`, `spawns`, prioritized `model` list, `thinkingLevel`, `output`, `blocking`, `autoloadSkills`, `readSummarize`, `prewalk`, `advisor`
 - `source`: `"bundled" | "user" | "project"` (extension agents are tagged with their extension root's project/user level)
 - optional `filePath`
 
 Parsing comes from frontmatter via `parseAgentFields()` (`src/discovery/helpers.ts`):
 
 - missing `name` or `description` => invalid (`null`), caller treats as parse failure
-- `tools` accepts CSV or array; if provided, `yield` is auto-added
+- `tools` accepts CSV or array; if provided, `yield` is auto-added. A declared `tools` list is a **hard allowlist** for the subagent: custom, extension, and MCP proxy tools not named in it are excluded from the active set and the `xd://` catalog (built-ins are filtered as before). Subagents that do not declare `tools` inherit the full parent tool set; top-level sessions are unaffected. This matches Claude Code's subagent frontmatter contract — agent definitions written for `.claude/agents/*.md` port without changes.
+- `disallowedTools` accepts CSV or array of exact tool names or `mcp__*` / `mcp__<server>_*` wildcards (trailing `*` = prefix match), removed from the subagent's active set after the allowlist. `disallowedTools: [mcp__*]` drops all MCP tools; `disallowedTools: [mcp__db_*]` drops one server. Works with or without a `tools` allowlist. Mirrors Claude Code's `disallowedTools` semantics with omp's `mcp__<server>_<tool>` naming.
 - `spawns` accepts `*`, CSV, or array
 - backward-compat behavior: if `spawns` missing but `tools` includes `task`, `spawns` becomes `*`
 - `output` is passed through as opaque schema data

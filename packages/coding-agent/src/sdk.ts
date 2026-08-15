@@ -3080,7 +3080,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			toolSession.xdev.mountedNames.clear();
 			for (const name of mountedNames) toolSession.xdev.mountedNames.add(name);
 			initialToolNames = topLevelToolNames;
-			if (mountedNames.length > 0 && !initialToolNames.includes("write")) initialToolNames.push("write");
+			if (
+				mountedNames.length > 0 &&
+				!initialToolNames.includes("write") &&
+				!isToolDisallowed("write", disallowedPatterns)
+			)
+				initialToolNames.push("write");
 		}
 
 		setSessionActiveToolNames(initialToolNames);
