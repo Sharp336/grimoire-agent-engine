@@ -541,6 +541,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	#loopAutoSubmitTimer: NodeJS.Timeout | undefined;
 	#todoAutoClearTimer: NodeJS.Timeout | undefined;
 	#modelCycleClearTimer: NodeJS.Timeout | undefined;
+	#editorComponentFactory:
+		| ((tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => CustomEditor)
+		| undefined;
 	#nextAppearanceRequestToken = 1;
 	#appearanceRefreshRequest: { token: TerminalAppearanceRequestToken; deadline: number } | undefined;
 	todoPhases: TodoPhase[] = [];
@@ -4241,6 +4244,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const nextEditor = factory
 			? factory(this.ui, getEditorTheme(), this.keybindings)
 			: new CustomEditor(getEditorTheme());
+		this.#editorComponentFactory = factory;
 		if (!factory) this.ui.enableScopedInputRender(nextEditor);
 
 		nextEditor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
@@ -4274,6 +4278,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		this.updateEditorBorderColor();
 		this.ui.requestRender();
+	}
+
+	getEditorComponent(): ((tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => CustomEditor) | undefined {
+		return this.#editorComponentFactory;
 	}
 
 	// UI helpers

@@ -73,4 +73,25 @@ describe("InteractiveMode.setEditorComponent", () => {
 		expect(mode.editor.onEscape).toBeDefined();
 		expect(refreshSpy).toHaveBeenCalled();
 	});
+
+	it("exposes the active editor factory while replacing the editor", () => {
+		const firstFactory = (_tui: unknown, editorTheme: ConstructorParameters<typeof TestModalEditor>[0]) =>
+			new TestModalEditor(editorTheme);
+		mode.setEditorComponent(firstFactory);
+
+		expect(mode.getEditorComponent()).toBe(firstFactory);
+
+		let previousFactory: unknown;
+		const secondFactory = (_tui: unknown, editorTheme: ConstructorParameters<typeof TestModalEditor>[0]) => {
+			previousFactory = mode.getEditorComponent();
+			return new TestModalEditor(editorTheme);
+		};
+		mode.setEditorComponent(secondFactory);
+
+		expect(previousFactory).toBe(firstFactory);
+		expect(mode.getEditorComponent()).toBe(secondFactory);
+
+		mode.setEditorComponent(undefined);
+		expect(mode.getEditorComponent()).toBeUndefined();
+	});
 });
