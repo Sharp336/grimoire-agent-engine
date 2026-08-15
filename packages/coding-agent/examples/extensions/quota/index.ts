@@ -1,24 +1,5 @@
-// /quota — OMP Quota Dashboard extension entry point.
-//
-// Registers `/quota`, an interactive, theme-aware TUI dashboard rendering
-// every authenticated provider's quota data:
-//
-//   Provider
-//     Account
-//       Quota Pool (Antigravity Google/Anthropic/OpenAI backend counters)
-//         Window
-//
-// Features:
-//   - Theme-aware semantic colors (accent, success, warning, error, dim, muted)
-//   - 12-cell health-colored remaining quota bars
-//   - ATTENTION section for low/critical/exhausted quotas
-//   - Keyboard navigation (↑/↓, Enter expand/collapse, a attention, h healthy, r refresh, q/Esc close)
-//   - Clean organization names without redundant email prefixes
-//   - Non-interactive snapshot mode: `/quota snapshot` (also headless fallback)
-//
-// Reuses OMP's existing AuthStorage/UsageReport infrastructure. Never modifies core.
-
 import type { ExtensionAPI, ExtensionCommandContext } from "@oh-my-pi/pi-coding-agent";
+
 import { QuotaDashboardComponent } from "./src/dashboard-component";
 import {
 	buildQuotaDashboardModel,
@@ -28,8 +9,13 @@ import {
 } from "./src/hierarchy";
 import { renderQuotaSnapshot } from "./src/render-plain";
 
-async function fetchModel(ctx: ExtensionCommandContext): Promise<QuotaDashboardModel | null> {
+async function fetchModel(ctx: ExtensionCommandContext, forceRefresh = false): Promise<QuotaDashboardModel | null> {
 	const authStorage = ctx.modelRegistry.authStorage;
+
+	if (forceRefresh) {
+		await authStorage.invalidateUsageCache();
+	}
+
 	const reports = (await authStorage.fetchUsageReports({
 		baseUrlResolver: provider => ctx.modelRegistry.getProviderBaseUrl(provider),
 	})) as LocalUsageReport[] | null;
@@ -76,14 +62,13 @@ export default function quotaExtension(pi: ExtensionAPI): void {
 				return;
 			}
 
-			// Interactive TUI Dashboard via ctx.ui.custom
 			await ctx.ui.custom((tui, theme, _keybindings, done) => {
 				return new QuotaDashboardComponent({
 					model: initialModel!,
 					theme,
 					requestRender: () => tui.requestRender(),
 					onRefresh: async () => {
-						return await fetchModel(ctx);
+						return await fetchModel(ctx, true);
 					},
 					onClose: () => {
 						done(undefined);

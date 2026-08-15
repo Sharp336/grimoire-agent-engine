@@ -1,6 +1,3 @@
-// Quota hierarchy data model, grouping, health aggregation, and organization cleanup.
-// Zero external dependencies so it remains 100% testable standalone.
-
 import { classifyHealth, formatDuration, type HealthInfo } from "./format";
 
 export interface LocalUsageWindow {
@@ -356,12 +353,10 @@ export function buildQuotaDashboardModel(
 	activeIdentityByProvider: Map<string, LocalActiveIdentity>,
 ): QuotaDashboardModel {
 	const byProvider = new Map<string, LocalUsageReport[]>();
-	let latestFetchedAt = nowMs;
+	const reportsFetched = reports.map(r => r.fetchedAt).filter((t): t is number => typeof t === "number" && t > 0);
+	const latestFetchedAt = reportsFetched.length > 0 ? Math.max(...reportsFetched) : nowMs;
 
 	for (const report of reports) {
-		if (report.fetchedAt && report.fetchedAt > 0) {
-			latestFetchedAt = Math.max(latestFetchedAt, report.fetchedAt);
-		}
 		let bucket = byProvider.get(report.provider);
 		if (!bucket) {
 			bucket = [];
@@ -477,8 +472,12 @@ export function buildQuotaDashboardModel(
 				summaryText = "no limits";
 			}
 
+			const orgId = typeof metadata.orgId === "string" ? metadata.orgId : undefined;
+			const projectId = typeof metadata.projectId === "string" ? metadata.projectId : undefined;
+			const uniqueAccountId = `${provider}:${accountLabel}:${orgId ?? projectId ?? index}`;
+
 			return {
-				id: `${provider}:${accountLabel}`,
+				id: uniqueAccountId,
 				label: accountLabel,
 				cleanOrgName: cleanOrg,
 				planBadge,
@@ -515,11 +514,11 @@ export function buildQuotaDashboardModel(
 			exhaustedCount: totalExhausted,
 			unknownCount: totalUnknown,
 			totalCount,
-			allHealthy: totalCount > 0 && totalLow === 0 && totalCritical === 0 && totalExhausted === 0,
+			allHealthy:
+				totalHealthy > 0 && totalUnknown === 0 && totalLow === 0 && totalCritical === 0 && totalExhausted === 0,
 		},
 		attentionItems,
 	};
 }
 
-// Backwards compatibility re-export
 export { buildQuotaDashboardModel as buildQuotaHierarchy };

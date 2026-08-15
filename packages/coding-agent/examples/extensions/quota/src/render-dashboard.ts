@@ -1,12 +1,11 @@
-// Theme-aware TUI dashboard renderer for /quota.
-// Implements full semantic coloring, attention section, collapsible hierarchy, and responsive layout.
-
 import {
 	formatDuration,
 	formatPercent,
 	type MinimalTheme,
 	padEndVisible,
 	renderRemainingBarStyled,
+	replaceTabs,
+	sanitizeText,
 	visibleWidth,
 } from "./format";
 import type {
@@ -32,7 +31,7 @@ export type SelectableKind = "account" | "pool";
 export interface SelectableTarget {
 	index: number;
 	kind: SelectableKind;
-	id: string; // account.id or pool.id
+	id: string;
 }
 
 const DEFAULT_WIDTH = 80;
@@ -95,7 +94,6 @@ function renderHeader(
 	const spaceBetween = Math.max(2, width - titleLen - timeLen);
 	lines.push(`${title}${" ".repeat(spaceBetween)}${timeFormatted}`);
 
-	// Summary counts line
 	const { healthyCount, lowCount, criticalCount, exhaustedCount, allHealthy } = model.summary;
 	if (allHealthy) {
 		lines.push(theme.fg("success", "✓ All reported quotas healthy"));
@@ -119,7 +117,8 @@ function renderHeader(
 	if (viewState.isRefreshing) {
 		lines.push(theme.fg("accent", "↻ Refreshing quota data…"));
 	} else if (viewState.refreshError) {
-		lines.push(theme.fg("error", `Refresh failed: ${viewState.refreshError}`));
+		const sanitizedError = sanitizeText(replaceTabs(viewState.refreshError));
+		lines.push(theme.fg("error", `Refresh failed: ${sanitizedError}`));
 	}
 
 	if (viewState.attentionOnly) {
@@ -141,36 +140,43 @@ function renderAttentionSection(items: AttentionItem[], theme: MinimalTheme, wid
 
 	for (const item of items) {
 		const symbolStr = theme.fg(item.health.color, item.health.symbol);
-		const itemPath = `${item.providerLabel} · ${item.accountLabel}${item.poolLabel ? ` · ${item.poolLabel}` : ""} · ${item.windowLabel}`;
+		const sanitizedProvider = sanitizeText(replaceTabs(item.providerLabel));
+		const sanitizedAccount = sanitizeText(replaceTabs(item.accountLabel));
+		const sanitizedPool = item.poolLabel ? ` · ${sanitizeText(replaceTabs(item.poolLabel))}` : "";
+		const sanitizedWindow = sanitizeText(replaceTabs(item.windowLabel));
+		const itemPath = `${sanitizedProvider} · ${sanitizedAccount}${sanitizedPool} · ${sanitizedWindow}`;
 		lines.push(`${symbolStr} ${theme.fg("text", itemPath)}`);
 
 		const pctStr = item.remainingFraction !== undefined ? formatPercent(item.remainingFraction) : "0%";
 		const pctStyled = theme.fg(item.health.color, padEndVisible(pctStr, 6));
 		const resetStr = item.resetCountdown ? theme.fg("dim", `↻ ${item.resetCountdown}`) : "";
 
-		lines.push(`  ${pctStyled}                                        ${resetStr}`.trimEnd());
+		const detailLine = `  ${pctStyled}                                        ${resetStr}`.trimEnd();
+		lines.push(detailLine);
 		lines.push("");
 	}
 
 	return lines;
 }
 
-function renderWindowRow(
+function renderWindowRows(
 	row: QuotaWindowRow,
 	theme: MinimalTheme,
 	indent: string,
 	labelColWidth: number,
 	isNarrow: boolean,
-): string {
-	const label = padEndVisible(row.label, labelColWidth);
+): string[] {
+	const sanitizedLabel = sanitizeText(replaceTabs(row.label));
+	const paddedLabel = padEndVisible(sanitizedLabel, labelColWidth);
 
 	if (row.health.status === "neutral") {
-		return `${indent}${label}  ${theme.fg("dim", row.usedText ?? "")}`;
+		const usedText = row.usedText ? sanitizeText(replaceTabs(row.usedText)) : "";
+		return [`${indent}${paddedLabel}  ${theme.fg("dim", usedText)}`];
 	}
 
 	if (row.health.status === "unknown") {
 		const bar = renderRemainingBarStyled(undefined, row.health, theme);
-		return `${indent}${label}  ${bar}   ?   ${theme.fg("muted", "unknown")}`;
+		return [`${indent}${paddedLabel}  ${bar}   ?   ${theme.fg("muted", "unknown")}`];
 	}
 
 	const bar = renderRemainingBarStyled(row.remainingFraction, row.health, theme);
@@ -179,11 +185,10 @@ function renderWindowRow(
 	const resetStr = row.resetCountdown ? `   ${theme.fg("dim", `↻ ${row.resetCountdown}`)}` : "";
 
 	if (isNarrow) {
-		// Narrow layout: label on top, bar below
-		return `${indent}${row.label}\n${indent}  ${bar}  ${pctStr}  ${symbol}${resetStr}`;
+		return [`${indent}${sanitizedLabel}`, `${indent}  ${bar}  ${pctStr}  ${symbol}${resetStr}`];
 	}
 
-	return `${indent}${label}  ${bar}  ${pctStr}   ${symbol}${resetStr}`;
+	return [`${indent}${paddedLabel}  ${bar}  ${pctStr}   ${symbol}${resetStr}`];
 }
 
 function renderAccountBlock(
@@ -203,18 +208,19 @@ function renderAccountBlock(
 	const cursor = isSelected ? theme.fg("accent", "❯ ") : "  ";
 	const disclosure = isCollapsed ? theme.fg("dim", "▸ ") : theme.fg("dim", "▾ ");
 
-	let accountLabel = account.label;
+	const sanitizedAccountLabel = sanitizeText(replaceTabs(account.label));
+	let styledAccountLabel = "";
 	if (account.isActive) {
-		accountLabel = `${theme.fg("accent", "● ")}${theme.bold(account.label)}`;
+		styledAccountLabel = `${theme.fg("accent", "● ")}${theme.bold(sanitizedAccountLabel)}`;
 	} else {
-		accountLabel = theme.bold(account.label);
+		styledAccountLabel = theme.bold(sanitizedAccountLabel);
 	}
 
 	let rightTag = "";
 	if (account.isActive) {
 		rightTag = theme.fg("accent", theme.bold("ACTIVE"));
 	} else if (account.planBadge) {
-		rightTag = theme.fg("muted", account.planBadge);
+		rightTag = theme.fg("muted", sanitizeText(replaceTabs(account.planBadge)));
 	}
 
 	if (isCollapsed) {
@@ -230,7 +236,7 @@ function renderAccountBlock(
 		rightTag = rightTag ? `${rightTag}   ${summaryStyled}` : summaryStyled;
 	}
 
-	const leftPart = `${cursor}${disclosure}${accountLabel}`;
+	const leftPart = `${cursor}${disclosure}${styledAccountLabel}`;
 	const leftW = visibleWidth(leftPart);
 	const rightW = visibleWidth(rightTag);
 	const gap = Math.max(2, width - leftW - rightW);
@@ -238,7 +244,8 @@ function renderAccountBlock(
 	lines.push(`${leftPart}${" ".repeat(gap)}${rightTag}`.trimEnd());
 
 	if (account.cleanOrgName) {
-		lines.push(`    ${theme.fg("muted", account.cleanOrgName)}`);
+		const sanitizedOrg = sanitizeText(replaceTabs(account.cleanOrgName));
+		lines.push(`    ${theme.fg("muted", sanitizedOrg)}`);
 	}
 
 	if (isCollapsed) {
@@ -267,7 +274,8 @@ function renderAccountBlock(
 		if (pool.label !== undefined) {
 			const poolCursor = isPoolSelected ? theme.fg("accent", "❯ ") : "  ";
 			const poolDisclosure = isPoolCollapsed ? theme.fg("dim", "▸ ") : theme.fg("dim", "▾ ");
-			lines.push(`  ${poolCursor}${poolDisclosure}${theme.fg("text", theme.bold(pool.label))}`);
+			const sanitizedPoolLabel = sanitizeText(replaceTabs(pool.label));
+			lines.push(`  ${poolCursor}${poolDisclosure}${theme.fg("text", theme.bold(sanitizedPoolLabel))}`);
 		}
 
 		if (isPoolCollapsed && pool.label !== undefined) {
@@ -276,7 +284,7 @@ function renderAccountBlock(
 
 		const rowIndent = pool.label !== undefined ? "      " : "    ";
 		for (const row of visibleRows) {
-			lines.push(renderWindowRow(row, theme, rowIndent, labelColWidth, isNarrow));
+			lines.push(...renderWindowRows(row, theme, rowIndent, labelColWidth, isNarrow));
 		}
 	}
 
@@ -286,7 +294,8 @@ function renderAccountBlock(
 			`    ${theme.fg("accent", "✦")} ${theme.fg("dim", `${count} saved rate-limit reset${count === 1 ? "" : "s"} available`)}`,
 		);
 		for (const detail of detailLines) {
-			lines.push(`        ${theme.fg("dim", detail)}`);
+			const sanitizedDetail = sanitizeText(replaceTabs(detail));
+			lines.push(`        ${theme.fg("dim", sanitizedDetail)}`);
 		}
 	}
 
@@ -308,11 +317,12 @@ function renderProviderSection(
 		if (visibleAccounts.length === 0) return [];
 	}
 
-	const titleLeft = theme.bold(theme.fg("accent", provider.label.toUpperCase()));
+	const sanitizedProviderLabel = sanitizeText(replaceTabs(provider.label.toUpperCase()));
+	const titleLeft = theme.bold(theme.fg("accent", sanitizedProviderLabel));
 	const acctCountStr = `${provider.accounts.length} ${provider.accounts.length === 1 ? "account" : "accounts"}`;
 	const acctCountStyled = theme.fg("muted", acctCountStr);
 
-	const leftW = visibleWidth(provider.label.toUpperCase());
+	const leftW = visibleWidth(sanitizedProviderLabel);
 	const rightW = visibleWidth(acctCountStr);
 	const gap = Math.max(2, width - leftW - rightW);
 
@@ -337,20 +347,17 @@ export function renderDashboard(
 	theme: MinimalTheme,
 	width = DEFAULT_WIDTH,
 ): string[] {
-	const safeWidth = Math.max(40, width);
+	const safeWidth = width;
 	const selectables = collectSelectables(model, viewState);
 
 	const lines: string[] = [];
 
-	// Header
 	lines.push(...renderHeader(model, viewState, theme, safeWidth));
 
-	// Attention Section (only if not empty)
 	if (!viewState.attentionOnly) {
 		lines.push(...renderAttentionSection(model.attentionItems, theme, safeWidth));
 	}
 
-	// Provider Sections
 	for (const provider of model.providers) {
 		const providerLines = renderProviderSection(provider, viewState, selectables, theme, safeWidth);
 		if (providerLines.length > 0) {
@@ -359,7 +366,6 @@ export function renderDashboard(
 		}
 	}
 
-	// Footer
 	lines.push("");
 	lines.push(renderFooter(theme));
 

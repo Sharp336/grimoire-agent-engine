@@ -1,6 +1,3 @@
-// Formatting and presentational helpers for the Quota Dashboard.
-// Zero external dependencies so it works identically in tests and runtime.
-
 export type HealthStatus = "healthy" | "low" | "critical" | "exhausted" | "unknown" | "neutral";
 
 export interface HealthInfo {
@@ -21,9 +18,8 @@ export function classifyHealth(remainingFraction: number | undefined, isExhauste
 	}
 
 	const clamped = Math.min(Math.max(remainingFraction, 0), 1);
-	const pct = Math.round(clamped * 100);
 
-	if (isExhaustedFlag || clamped <= 0 || pct === 0) {
+	if (isExhaustedFlag || clamped <= 0) {
 		return {
 			status: "exhausted",
 			symbol: "✕",
@@ -31,7 +27,7 @@ export function classifyHealth(remainingFraction: number | undefined, isExhauste
 			label: "exhausted",
 		};
 	}
-	if (pct <= 20) {
+	if (clamped <= 0.2) {
 		return {
 			status: "critical",
 			symbol: "!",
@@ -39,7 +35,7 @@ export function classifyHealth(remainingFraction: number | undefined, isExhauste
 			label: "critical",
 		};
 	}
-	if (pct <= 50) {
+	if (clamped <= 0.5) {
 		return {
 			status: "low",
 			symbol: "⚠",
@@ -67,7 +63,7 @@ export function formatDuration(ms: number): string {
 	return `${days}d`;
 }
 
-/** Percent string: e.g. "100%", "93%", "29%", "0%". */
+/** Percent string: e.g. "100%", "93%", "29%", "0.4%". */
 export function formatPercent(fraction: number): string {
 	const pct = Math.min(Math.max(fraction, 0), 1) * 100;
 	return `${pct.toFixed(1).replace(/\.0$/, "")}%`;
@@ -116,13 +112,15 @@ export function renderRemainingBarStyled(
 	return `${filledStr}${emptyStr}`;
 }
 
+const ANSI_REGEX = /\x1b\[[0-9;]*[a-zA-Z]/g;
+
 export function stripAnsi(text: string): string {
-	return text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
+	return text.replace(ANSI_REGEX, "");
 }
 
 export function visibleWidth(text: string): number {
-	if (typeof Bun !== "undefined" && typeof (Bun as any).stringWidth === "function") {
-		return (Bun as any).stringWidth(text);
+	if (typeof Bun !== "undefined" && typeof Bun.stringWidth === "function") {
+		return Bun.stringWidth(text);
 	}
 	return stripAnsi(text).length;
 }
@@ -133,7 +131,15 @@ export function padEndVisible(text: string, targetWidth: number): string {
 	return text + " ".repeat(targetWidth - current);
 }
 
-export function truncateVisible(text: string, maxWidth: number, ellipsis = "…"): string {
+export function replaceTabs(text: string): string {
+	return text.replaceAll("\t", "   ");
+}
+
+export function sanitizeText(text: string): string {
+	return text.replace(/[\x00-\x1f\x7f-\x9f]/g, " ");
+}
+
+export function truncateToWidth(text: string, maxWidth: number, ellipsis = "…"): string {
 	const current = visibleWidth(text);
 	if (current <= maxWidth) return text;
 	const ellipsisW = visibleWidth(ellipsis);

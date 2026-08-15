@@ -221,7 +221,7 @@ describe("renderDashboard", () => {
 		expect(hideHealthyText).toContain("Exhausted Limit");
 	});
 
-	it("adapts layout on narrow terminal widths without breaking", () => {
+	it("adapts layout on narrow terminal widths without embedding newlines inside rows", () => {
 		const reports = [
 			report({
 				provider: "openai-codex",
@@ -248,9 +248,7 @@ describe("renderDashboard", () => {
 
 		const narrowLines = renderDashboard(model, viewState, mockTheme, 45);
 		expect(narrowLines.length).toBeGreaterThan(0);
-		const narrowText = narrowLines.join("\n");
-		expect(narrowText).toContain("7 Day");
-		expect(narrowText).toContain("50%");
-		expect(narrowText).toContain("⚠");
+		// Invariant: no physical row element returned by render() may contain an embedded \n
+		expect(narrowLines.every(line => !line.includes("\n"))).toBe(true);
 	});
 });

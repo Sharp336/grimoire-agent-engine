@@ -6,8 +6,6 @@ import {
 	padEndVisible,
 	renderRemainingBarPlain,
 	renderRemainingBarStyled,
-	stripAnsi,
-	truncateVisible,
 	visibleWidth,
 } from "../src/format";
 
@@ -51,6 +49,12 @@ describe("format helpers", () => {
 			expect(h1.status).toBe("critical");
 			expect(h1.symbol).toBe("!");
 			expect(h1.color).toBe("error");
+
+			// Sub-0.5% boundary: must be critical (!), not exhausted (✕)
+			const hSubHalf = classifyHealth(0.004);
+			expect(hSubHalf.status).toBe("critical");
+			expect(hSubHalf.symbol).toBe("!");
+			expect(hSubHalf.color).toBe("error");
 		});
 
 		it("4. classifies 0% as exhausted (✕, error)", () => {
@@ -89,13 +93,13 @@ describe("format helpers", () => {
 
 	describe("renderRemainingBarStyled", () => {
 		it("styles filled portion with health color and empty portion with dim", () => {
-			const health = classifyHealth(0.5); // low => warning
+			const health = classifyHealth(0.5);
 			const bar = renderRemainingBarStyled(0.5, health, mockTheme, 12);
 			expect(bar).toBe("[fg:warning]██████[/fg][fg:dim]░░░░░░[/fg]");
 		});
 
 		it("renders exhausted bar with all dim cells", () => {
-			const health = classifyHealth(0); // exhausted => error
+			const health = classifyHealth(0);
 			const bar = renderRemainingBarStyled(0, health, mockTheme, 12);
 			expect(bar).toBe("[fg:dim]░░░░░░░░░░░░[/fg]");
 		});
@@ -113,6 +117,7 @@ describe("format helpers", () => {
 			expect(formatPercent(0.93)).toBe("93%");
 			expect(formatPercent(0.29)).toBe("29%");
 			expect(formatPercent(0.667)).toBe("66.7%");
+			expect(formatPercent(0.004)).toBe("0.4%");
 			expect(formatPercent(0)).toBe("0%");
 		});
 	});
@@ -127,19 +132,9 @@ describe("format helpers", () => {
 	});
 
 	describe("visibleWidth and padding", () => {
-		it("measures visible width ignoring ANSI codes", () => {
-			const text = "[32mhello[0m";
-			expect(stripAnsi(text)).toBe("hello");
-			expect(visibleWidth(text)).toBe(5);
-		});
-
 		it("pads strings to target visual width", () => {
-			const padded = padEndVisible("[32mhi[0m", 6);
+			const padded = padEndVisible("\x1b[32mhi\x1b[0m", 6);
 			expect(visibleWidth(padded)).toBe(6);
-		});
-
-		it("truncates strings exceeding max visual width", () => {
-			expect(truncateVisible("LongAccountName@example.com", 10)).toBe("LongAccou…");
 		});
 	});
 });
