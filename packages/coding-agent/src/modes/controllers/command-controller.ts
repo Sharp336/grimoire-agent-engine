@@ -40,7 +40,7 @@ import type { InteractiveModeContext } from "../../modes/types";
 import { computeContextBreakdown, renderContextUsage } from "../../modes/utils/context-usage";
 import { buildHotkeysMarkdown } from "../../modes/utils/hotkeys-markdown";
 import { buildToolsMarkdown } from "../../modes/utils/tools-markdown";
-import type { AsyncJobSnapshotItem } from "../../session/agent-session";
+import type { AsyncJobSnapshotItem, UsageModelCoverage } from "../../session/agent-session";
 import type { AuthStorage, OAuthAccountIdentity } from "../../session/auth-storage";
 import type { CompactMode } from "../../session/compact-modes";
 import type { NewSessionOptions } from "../../session/session-entries";
@@ -549,14 +549,14 @@ export class CommandController {
 					this.ctx.session.sessionId,
 				)
 			: undefined;
-		const usageModelSelectors = this.ctx.session.getUsageReportingModelSelectors(usageReports);
+		const usageModelCoverage = this.ctx.session.getUsageReportingModelCoverage(usageReports);
 		const output = renderUsageReports(
 			usageReports,
 			theme,
 			Date.now(),
 			availableWidth,
 			provider => (provider === currentProvider ? activeAccount : undefined),
-			usageModelSelectors,
+			usageModelCoverage,
 		);
 		this.ctx.presentCommandOutput([new Spacer(1), new Text(output, 1, 0)]);
 	}
@@ -1829,7 +1829,7 @@ export function renderUsageReports(
 	nowMs: number,
 	availableWidth: number,
 	resolveActiveAccount?: (provider: string) => OAuthAccountIdentity | undefined,
-	usageModelSelectors: readonly string[] = [],
+	usageModelCoverage: ReadonlyMap<string, UsageModelCoverage> = new Map(),
 ): string {
 	const lines: string[] = [];
 	const latestFetchedAt = Math.max(...reports.map(report => report.fetchedAt ?? 0));
@@ -1883,11 +1883,17 @@ export function renderUsageReports(
 		if (activeAccountLabel) {
 			lines.push(`  ${uiTheme.fg("accent", "in use by this session:")} ${activeAccountLabel}`);
 		}
-		const reportingModels = usageModelSelectors.filter(selector => selector.startsWith(`${provider}/`));
-		if (reportingModels.length > 0) {
-			lines.push(`  ${uiTheme.fg("accent", "Models with usage data")}`);
-			for (const selector of reportingModels) {
-				lines.push(`    ${replaceTabs(truncateToWidth(sanitizeText(selector), availableWidth - 4))}`);
+		const coverage = usageModelCoverage.get(provider);
+		if (coverage && coverage.reporting.length > 0) {
+			if (coverage.reporting.length >= coverage.availableCount) {
+				const count = coverage.availableCount;
+				const summary = `Usage data covers all ${count} available model${count === 1 ? "" : "s"}`;
+				lines.push(`  ${uiTheme.fg("dim", truncateToWidth(summary, availableWidth - 2))}`);
+			} else {
+				lines.push(`  ${uiTheme.fg("accent", "Models with usage data")}`);
+				for (const selector of coverage.reporting) {
+					lines.push(`    ${replaceTabs(truncateToWidth(sanitizeText(selector), availableWidth - 4))}`);
+				}
 			}
 		}
 

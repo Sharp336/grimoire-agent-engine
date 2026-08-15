@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `/usage` now collapses the per-provider "Models with usage data" list into a one-line summary when usage data covers every available model — the common case for account-wide coding-plan quotas — so the quota bars stay visible in the height-capped mid-turn preview. The explicit per-model list still renders when only a subset of available models reports usage data.
+
 ## [17.3.4] - 2026-08-14
 
 ### Changed

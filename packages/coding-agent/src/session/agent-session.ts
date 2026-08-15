@@ -234,6 +234,7 @@ import type {
 	SessionOAuthAccountList,
 	SessionStats,
 	UsageFallbackConfirmer,
+	UsageModelCoverage,
 } from "./agent-session-types";
 import {
 	ASYNC_INLINE_RESULT_MAX_CHARS,
@@ -338,6 +339,7 @@ import type { ShakeMode, ShakeResult } from "./shake-types";
 import { ToolChoiceQueue } from "./tool-choice-queue";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 import { TurnRecovery, type TurnRecoveryHost } from "./turn-recovery";
+import { buildUsageModelCoverage } from "./usage-model-coverage";
 import { YieldQueue } from "./yield-queue";
 
 export * from "./agent-session-events";
@@ -8643,24 +8645,11 @@ export class AgentSession {
 		return reports;
 	}
 
-	/** Models whose live `/usage` reports map to a quantitative provider scope. */
-	getUsageReportingModelSelectors(reports: readonly UsageReport[]): string[] {
-		const modelsByProvider = new Map<string, Model[]>();
-		for (const model of this.#modelRegistry.getAvailable()) {
-			const models = modelsByProvider.get(model.provider) ?? [];
-			models.push(model);
-			modelsByProvider.set(model.provider, models);
-		}
-		const selectors = new Set<string>();
-		for (const [provider, models] of modelsByProvider) {
-			const modelIds = this.#modelRegistry.authStorage.getUsageReportingModelIds(
-				provider,
-				models.map(model => model.id),
-				reports,
-			);
-			for (const modelId of modelIds) selectors.add(`${provider}/${modelId}`);
-		}
-		return [...selectors].sort((left, right) => left.localeCompare(right));
+	/** Per-provider coverage of available models by live quantitative `/usage` scopes. */
+	getUsageReportingModelCoverage(reports: readonly UsageReport[]): Map<string, UsageModelCoverage> {
+		return buildUsageModelCoverage(this.#modelRegistry.getAvailable(), (provider, modelIds) =>
+			this.#modelRegistry.authStorage.getUsageReportingModelIds(provider, modelIds, reports),
+		);
 	}
 
 	/** List stored OAuth accounts for the current model provider and mark this session's active account. */

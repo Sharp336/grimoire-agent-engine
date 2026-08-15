@@ -1,5 +1,6 @@
 import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
+import type { UsageModelCoverage } from "../../session/agent-session-types";
 import type { OAuthAccountIdentity } from "../../session/auth-storage";
 import type { SlashCommandRuntime } from "../types";
 import { reportMatchesActiveAccount } from "./active-oauth-account";
@@ -63,7 +64,7 @@ function renderUsageReports(
 	reports: UsageReport[],
 	nowMs: number,
 	resolveActiveAccount?: (provider: string) => OAuthAccountIdentity | undefined,
-	usageModelSelectors: readonly string[] = [],
+	usageModelCoverage: ReadonlyMap<string, UsageModelCoverage> = new Map(),
 ): string {
 	const latestFetchedAt = Math.max(...reports.map(report => report.fetchedAt ?? 0));
 	const lines = [`Usage${latestFetchedAt ? ` (${formatDuration(nowMs - latestFetchedAt)} ago)` : ""}`];
@@ -78,10 +79,15 @@ function renderUsageReports(
 		left.localeCompare(right),
 	)) {
 		lines.push("", formatProviderName(provider));
-		const reportingModels = usageModelSelectors.filter(selector => selector.startsWith(`${provider}/`));
-		if (reportingModels.length > 0) {
-			lines.push("  Models with usage data");
-			for (const selector of reportingModels) lines.push(`    ${sanitizeText(selector)}`);
+		const coverage = usageModelCoverage.get(provider);
+		if (coverage && coverage.reporting.length > 0) {
+			if (coverage.reporting.length >= coverage.availableCount) {
+				const count = coverage.availableCount;
+				lines.push(`  Usage data covers all ${count} available model${count === 1 ? "" : "s"}`);
+			} else {
+				lines.push("  Models with usage data");
+				for (const selector of coverage.reporting) lines.push(`    ${sanitizeText(selector)}`);
+			}
 		}
 		const activeAccount = resolveActiveAccount?.(provider);
 		// Provider-wide disclaimers render once per provider, not per limit.
@@ -160,7 +166,7 @@ function renderUsageReports(
 export async function buildUsageReportText(runtime: SlashCommandRuntime): Promise<string> {
 	const provider = runtime.session as SlashCommandRuntime["session"] & {
 		fetchUsageReports?: () => Promise<UsageReport[] | null>;
-		getUsageReportingModelSelectors?: (reports: readonly UsageReport[]) => string[];
+		getUsageReportingModelCoverage?: (reports: readonly UsageReport[]) => Map<string, UsageModelCoverage>;
 	};
 	if (provider.fetchUsageReports) {
 		const reports = await provider.fetchUsageReports();
@@ -172,12 +178,13 @@ export async function buildUsageReportText(runtime: SlashCommandRuntime): Promis
 						runtime.session.sessionId,
 					)
 				: undefined;
-			const usageModelSelectors = provider.getUsageReportingModelSelectors?.(reports) ?? [];
+			const usageModelCoverage =
+				provider.getUsageReportingModelCoverage?.(reports) ?? new Map<string, UsageModelCoverage>();
 			return renderUsageReports(
 				reports,
 				Date.now(),
 				providerId => (providerId === currentProvider ? activeAccount : undefined),
-				usageModelSelectors,
+				usageModelCoverage,
 			);
 		}
 	}
