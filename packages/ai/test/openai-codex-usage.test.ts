@@ -8,7 +8,10 @@
  */
 import { describe, expect, it } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+import type { CredentialRankingContext, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import { codexRankingStrategy, openaiCodexUsageProvider } from "@oh-my-pi/pi-ai/usage/openai-codex";
+
+const HOUR_MS = 60 * 60 * 1000;
 
 const accessTokenFixture = (() => {
 	const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
@@ -388,5 +391,84 @@ describe("openai-codex usage parser", () => {
 		expect(codexRankingStrategy.blockScopes?.({ modelId: "gpt-5.3-codex-spark" })).toEqual(["spark", "shared"]);
 		// Reconciliation runs with no request context and must heal every scope.
 		expect(codexRankingStrategy.blockScopes?.()).toEqual(["chat", "spark", "shared"]);
+	});
+
+	describe("codexRankingStrategy.getResetCreditExpiryBoostMs (#8342)", () => {
+		const now = Date.parse("2026-08-15T12:00:00Z");
+		const inHours = (hours: number): string => new Date(now + hours * HOUR_MS).toISOString();
+		const baseReport = (): UsageReport => ({
+			provider: "openai-codex",
+			fetchedAt: now,
+			limits: [],
+			metadata: { accountId: "acct-1" },
+		});
+		const context = (salvageHorizonMs: number): CredentialRankingContext => ({
+			salvageHorizonMs,
+		});
+
+		it("returns the soonest expiry of an available credit inside the horizon", () => {
+			const report: UsageReport = {
+				...baseReport(),
+				resetCredits: {
+					availableCount: 2,
+					credits: [
+						{ expiresAt: inHours(8), status: "available" },
+						{ expiresAt: inHours(3), status: "available" },
+					],
+				},
+			};
+			const boost = codexRankingStrategy.getResetCreditExpiryBoostMs?.(report, context(12 * HOUR_MS), now);
+			expect(boost).toBe(now + 3 * HOUR_MS);
+		});
+
+		it("ignores redeemed or missing-expiry credits", () => {
+			const report: UsageReport = {
+				...baseReport(),
+				resetCredits: {
+					availableCount: 2,
+					credits: [{ expiresAt: inHours(3), status: "redeemed" }, { expiresAt: undefined }],
+				},
+			};
+			const boost = codexRankingStrategy.getResetCreditExpiryBoostMs?.(report, context(12 * HOUR_MS), now);
+			expect(boost).toBeUndefined();
+		});
+
+		it("skips expired credits and credits outside the horizon", () => {
+			const report: UsageReport = {
+				...baseReport(),
+				resetCredits: {
+					availableCount: 3,
+					credits: [
+						{ expiresAt: new Date(now - HOUR_MS).toISOString(), status: "available" },
+						{ expiresAt: inHours(3 * 24), status: "available" },
+						{ expiresAt: inHours(6), status: "available" },
+					],
+				},
+			};
+			const boost = codexRankingStrategy.getResetCreditExpiryBoostMs?.(report, context(12 * HOUR_MS), now);
+			expect(boost).toBe(now + 6 * HOUR_MS);
+		});
+
+		it("returns undefined without credits, a count of zero, or a disabled horizon", () => {
+			const noCredits: UsageReport = { ...baseReport(), resetCredits: { availableCount: 1 } };
+			expect(
+				codexRankingStrategy.getResetCreditExpiryBoostMs?.(noCredits, context(12 * HOUR_MS), now),
+			).toBeUndefined();
+
+			const zeroCount: UsageReport = {
+				...baseReport(),
+				resetCredits: { availableCount: 0, credits: [{ expiresAt: inHours(3), status: "available" }] },
+			};
+			expect(
+				codexRankingStrategy.getResetCreditExpiryBoostMs?.(zeroCount, context(12 * HOUR_MS), now),
+			).toBeUndefined();
+
+			const withCredit: UsageReport = {
+				...baseReport(),
+				resetCredits: { availableCount: 1, credits: [{ expiresAt: inHours(3), status: "available" }] },
+			};
+			expect(codexRankingStrategy.getResetCreditExpiryBoostMs?.(withCredit, context(0), now)).toBeUndefined();
+			expect(codexRankingStrategy.getResetCreditExpiryBoostMs?.(withCredit, undefined, now)).toBeUndefined();
+		});
 	});
 });

@@ -808,6 +808,12 @@ type AuthApiKeyOptions = {
 	baseUrl?: string;
 	modelId?: string;
 	/**
+	 * Saved-reset salvage horizon (ms) for ranking. Providers that boost
+	 * credentials with expiring saved resets read this from the ranking
+	 * context; `<= 0` (or unset) disables the boost.
+	 */
+	salvageHorizonMs?: number;
+	/**
 	 * Caller's cancel signal. Threaded into any broker-bound OAuth refresh so
 	 * `ESC` / request abort actually kills a hung broker fetch instead of
 	 * stranding the caller for `timeoutMs * (maxRetries + 1)`.
@@ -1242,6 +1248,8 @@ type UsageRankedCandidate<T extends AuthCredential> = UsageCandidate<T> & {
 	blockedUntil?: number;
 	hasPriorityBoost: boolean;
 	planPriority: number;
+	/** Soonest saved-reset expiry within the salvage horizon (epoch ms), when the provider boosts such credits. */
+	resetCreditExpiryBoostMs?: number;
 	secondaryUsed: number;
 	secondaryRequiredDrain: number;
 	primaryUsed: number;
@@ -2166,7 +2174,10 @@ export class AuthStorage {
 			return fallback;
 		}
 
-		const rankingContext: CredentialRankingContext = { modelId: options?.modelId };
+		const rankingContext: CredentialRankingContext = {
+			modelId: options?.modelId,
+			salvageHorizonMs: options?.salvageHorizonMs,
+		};
 		const blockScope = strategy.blockScope?.(rankingContext);
 		const blockScopes = strategy.blockScopes?.(rankingContext) ?? (blockScope ? [blockScope] : []);
 		const candidates = await this.#rankApiKeySelections({
@@ -4347,10 +4358,11 @@ export class AuthStorage {
 		provider: string,
 		credentialType: AuthCredential["type"],
 		modelId: string | undefined,
+		options?: AuthApiKeyOptions,
 	): CredentialBlockRouting {
 		const providerKey = this.#getProviderTypeKey(provider, credentialType);
 		const strategy = this.#rankingStrategyResolver?.(provider);
-		const rankingContext: CredentialRankingContext = { modelId };
+		const rankingContext: CredentialRankingContext = { modelId, salvageHorizonMs: options?.salvageHorizonMs };
 		const blockScope = strategy?.blockScope?.(rankingContext);
 		return {
 			providerKey,
@@ -4437,7 +4449,7 @@ export class AuthStorage {
 		const credentialType = sessionCredential.type;
 		const targetCredentialId = target.id;
 
-		const routing = this.#credentialBlockRouting(provider, credentialType, options?.modelId);
+		const routing = this.#credentialBlockRouting(provider, credentialType, options?.modelId, options);
 		const now = Date.now();
 		let blockedUntil = now + (options?.retryAfterMs ?? AuthStorage.#defaultBackoffMs);
 
@@ -4521,6 +4533,18 @@ export class AuthStorage {
 			return left.planPriority - right.planPriority;
 		}
 		if (left.hasPriorityBoost !== right.hasPriorityBoost) return left.hasPriorityBoost ? -1 : 1;
+		// Expiring saved-reset boost: an account whose reset would otherwise die
+		// inside the salvage horizon outranks siblings without one; among boosted
+		// candidates the soonest expiry wins, so work steers to the credit that
+		// is about to be lost. Blocked/exhausted/plan-ineligible filtering above
+		// still gates, so the boost never resurrects an unusable account.
+		const leftReset = left.resetCreditExpiryBoostMs;
+		const rightReset = right.resetCreditExpiryBoostMs;
+		if (leftReset !== rightReset) {
+			if (leftReset === undefined) return 1;
+			if (rightReset === undefined) return -1;
+			return leftReset - rightReset;
+		}
 		// Short-window guard: candidates whose primary (e.g. 5h) window is
 		// nearly exhausted rank behind cool ones regardless of drain urgency —
 		// overflow lands on the next-most-urgent cool account instead.
@@ -4674,6 +4698,9 @@ export class AuthStorage {
 				blocked,
 				blockedUntil,
 				hasPriorityBoost: strategy.hasPriorityBoost?.(primary) ?? false,
+				resetCreditExpiryBoostMs: usage
+					? strategy.getResetCreditExpiryBoostMs?.(usage, args.rankingContext, nowMs)
+					: undefined,
 				planPriority: getOpenAICodexPlanPriority(usage, args.planRequirement),
 				secondaryUsed: this.#normalizeUsageFraction(secondary),
 				secondaryRequiredDrain: this.#computeWindowRequiredDrain(
@@ -4721,7 +4748,10 @@ export class AuthStorage {
 		const providerKey = this.#getProviderTypeKey(provider, "oauth");
 		const order = this.#getCredentialOrder(providerKey, sessionId, credentials.length);
 		const strategy = this.#rankingStrategyResolver?.(provider);
-		const rankingContext: CredentialRankingContext = { modelId: options?.modelId };
+		const rankingContext: CredentialRankingContext = {
+			modelId: options?.modelId,
+			salvageHorizonMs: options?.salvageHorizonMs,
+		};
 		const blockScope = strategy?.blockScope?.(rankingContext);
 		// Reads honour every scope that applies; the scalar above is for args that persist.
 		const blockScopes = strategy?.blockScopes?.(rankingContext) ?? (blockScope ? [blockScope] : []);
@@ -6213,7 +6243,7 @@ export class AuthStorage {
 		if (!sessionCredential) return false;
 
 		if (AIError.isAccountPolicyError(error)) {
-			const routing = this.#credentialBlockRouting(provider, sessionCredential.type, options?.modelId);
+			const routing = this.#credentialBlockRouting(provider, sessionCredential.type, options?.modelId, options);
 			return this.#blockCredentialForRotation(
 				provider,
 				sessionCredential.type,

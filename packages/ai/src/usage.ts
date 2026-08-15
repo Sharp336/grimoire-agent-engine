@@ -347,6 +347,12 @@ export interface UsageProvider {
 export interface CredentialRankingContext {
 	/** Provider model id, when the caller is selecting a credential for one model. */
 	modelId?: string;
+	/**
+	 * Saved-reset salvage horizon (ms) for providers that boost credentials
+	 * with use-it-or-lose-it resets (OpenAI Codex). Mirrors the expiry-salvage
+	 * horizon so routing and auto-redeem never disagree; `<= 0` disables the boost.
+	 */
+	salvageHorizonMs?: number;
 }
 
 /** Strategy for usage-based credential ranking. Providers implement this to opt into smart credential selection. */
@@ -388,4 +394,15 @@ export interface CredentialRankingStrategy {
 	};
 	/** Optional: priority boost for specific credential states (e.g., fresh 5h ticker start). */
 	hasPriorityBoost?(primary: UsageLimit | undefined): boolean;
+	/**
+	 * Optional: soonest epoch-ms expiry of a saved reset within the salvage
+	 * horizon, or undefined when no such credit exists. Smaller values rank
+	 * earlier, so an account whose reset would otherwise die is preferred for
+	 * new work before the credit expires.
+	 */
+	getResetCreditExpiryBoostMs?(
+		report: UsageReport,
+		context?: CredentialRankingContext,
+		nowMs?: number,
+	): number | undefined;
 }

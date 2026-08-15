@@ -582,6 +582,31 @@ function isCodexSparkRequest(context?: CredentialRankingContext): boolean {
 	return (context?.modelId ?? "").toLowerCase().includes("-spark");
 }
 
+/**
+ * Soonest saved-reset expiry (epoch ms) within the salvage horizon, or
+ * undefined when the account has no such credit. Credit details are consumed
+ * conservatively: aggregate-only, missing, invalid, or already-expired
+ * entries never produce a boost (#8342).
+ */
+function getCodexResetCreditExpiryBoostMs(
+	report: UsageReport,
+	context: CredentialRankingContext | undefined,
+	nowMs: number,
+): number | undefined {
+	const horizonMs = context?.salvageHorizonMs;
+	if (horizonMs === undefined || horizonMs <= 0) return undefined;
+	const credits = report.resetCredits;
+	if (!credits || credits.availableCount <= 0 || !credits.credits?.length) return undefined;
+	let soonestMs: number | undefined;
+	for (const credit of credits.credits) {
+		if ((credit.status ?? "available") !== "available" || !credit.expiresAt) continue;
+		const expiryMs = Date.parse(credit.expiresAt);
+		if (Number.isNaN(expiryMs) || expiryMs <= nowMs || expiryMs - nowMs > horizonMs) continue;
+		if (soonestMs === undefined || expiryMs < soonestMs) soonestMs = expiryMs;
+	}
+	return soonestMs;
+}
+
 export const codexRankingStrategy: CredentialRankingStrategy = {
 	scopeLimits: scopeCodexLimitsForRequest,
 	// A `usage_limit_reached` from a Spark request means the Spark meter is
@@ -623,5 +648,8 @@ export const codexRankingStrategy: CredentialRankingStrategy = {
 		if (!isFiveHourWindow) return false;
 		const usedFraction = primary.amount.usedFraction;
 		return typeof usedFraction === "number" && Number.isFinite(usedFraction) && usedFraction === 0;
+	},
+	getResetCreditExpiryBoostMs(report, context, nowMs = Date.now()) {
+		return getCodexResetCreditExpiryBoostMs(report, context, nowMs);
 	},
 };

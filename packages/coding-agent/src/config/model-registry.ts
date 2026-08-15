@@ -130,6 +130,20 @@ interface CustomModelsResult {
  */
 type ModifyModelsHook = (models: Model<Api>[], credentials: OAuthCredentials) => Model<Api>[];
 
+/**
+ * Saved-reset salvage horizon (ms) shared with the expiry-salvage planner
+ * (`codex-auto-reset`), so credential ranking and auto-redeem never disagree
+ * about which credits are worth routing work toward (#8342).
+ */
+function codexResetSalvageHorizonMs(): number | undefined {
+	try {
+		const hours = settings.get("codexResets.salvageHorizonHours");
+		return typeof hours === "number" && hours > 0 ? hours * 3_600_000 : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 function getDisabledProviderIdsFromSettings(): Set<string> {
 	try {
 		return new Set(settings.get("disabledProviders"));
@@ -1761,6 +1775,7 @@ export class ModelRegistry {
 		return this.authStorage.getApiKey(model.provider, sessionId, {
 			baseUrl: model.baseUrl,
 			modelId: model.id,
+			salvageHorizonMs: codexResetSalvageHorizonMs(),
 			signal: options?.signal,
 		});
 	}
@@ -1803,6 +1818,7 @@ export class ModelRegistry {
 			baseUrl: options?.baseUrl,
 			modelId: options?.modelId,
 			forceRefresh: options?.forceRefresh,
+			salvageHorizonMs: codexResetSalvageHorizonMs(),
 			signal: options?.signal,
 		});
 	}

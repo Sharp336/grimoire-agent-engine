@@ -13,7 +13,7 @@ import {
 import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
-import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
+import type { UsageLimit, UsageProvider, UsageReport, UsageResetCredits } from "@oh-my-pi/pi-ai/usage";
 import { removeWithRetries } from "../../utils/src/temp";
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
@@ -125,6 +125,7 @@ function createCodexUsageReport(args: {
 	primaryWindow?: UsageWindowConfig;
 	secondaryWindow?: UsageWindowConfig;
 	metadata?: CodexUsageMetadata;
+	resetCredits?: UsageResetCredits;
 }): UsageReport {
 	const primaryWindow = args.primaryWindow ?? { windowId: "1h", windowLabel: "1 Hour", durationMs: HOUR_MS };
 	const secondaryWindow = args.secondaryWindow ?? { windowId: "7d", windowLabel: "7 Day", durationMs: WEEK_MS };
@@ -149,6 +150,7 @@ function createCodexUsageReport(args: {
 				resetInMs: args.secondary.resetInMs,
 			}),
 		],
+		...(args.resetCredits ? { resetCredits: args.resetCredits } : {}),
 		metadata: { accountId: args.accountId, ...args.metadata },
 	};
 }
@@ -217,10 +219,11 @@ async function countApiKeySelections(
 	provider: string,
 	sessionPrefix: string,
 	samples = 150,
+	options?: { salvageHorizonMs?: number },
 ): Promise<Map<string, number>> {
 	const counts = new Map<string, number>();
 	for (let index = 0; index < samples; index += 1) {
-		const apiKey = await authStorage.getApiKey(provider, `${sessionPrefix}-${index}`);
+		const apiKey = await authStorage.getApiKey(provider, `${sessionPrefix}-${index}`, options);
 		if (!apiKey) continue;
 		counts.set(apiKey, (counts.get(apiKey) ?? 0) + 1);
 	}
@@ -389,6 +392,168 @@ describe("AuthStorage codex oauth ranking", () => {
 		const counts = await countApiKeySelections(authStorage, "openai-codex", "weighted-codex-zero");
 		expectExclusivePreference(counts, "api-acct-zero", "api-acct-progress");
 	});
+
+	// ── #8342: saved-reset expiry boost ─────────────────────────────────────────
+
+	function expiringResetCredits(expiresInMs: number): UsageResetCredits {
+		return {
+			availableCount: 1,
+			credits: [{ expiresAt: new Date(Date.now() + expiresInMs).toISOString(), status: "available" }],
+		};
+	}
+
+	test("prefers an account whose saved reset expires within the salvage horizon", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		// The #8342 fixture: A has little weekly quota left but a reset credit
+		// expiring in ~4h; B/C have more headroom and no saved resets. Pure
+		// required-drain ranks C first (0.46/160h), so the boost must steer
+		// new sessions to A before the credit dies.
+		await authStorage.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-a", "a@example.com") },
+			{ type: "oauth", ...createCredential("acct-b", "b@example.com") },
+			{ type: "oauth", ...createCredential("acct-c", "c@example.com") },
+		]);
+
+		usageByAccount.set(
+			"acct-a",
+			createCodexUsageReport({
+				accountId: "acct-a",
+				primary: { usedFraction: 0.5, resetInMs: 3 * HOUR_MS },
+				secondary: { usedFraction: 0.8, resetInMs: 141 * HOUR_MS }, // 20% left, 5d21h
+				resetCredits: expiringResetCredits(4 * HOUR_MS),
+			}),
+		);
+		usageByAccount.set(
+			"acct-b",
+			createCodexUsageReport({
+				accountId: "acct-b",
+				primary: { usedFraction: 0.5, resetInMs: 3 * HOUR_MS },
+				secondary: { usedFraction: 0.56, resetInMs: 161 * HOUR_MS }, // 44% left, 6d17h
+			}),
+		);
+		usageByAccount.set(
+			"acct-c",
+			createCodexUsageReport({
+				accountId: "acct-c",
+				primary: { usedFraction: 0.5, resetInMs: 3 * HOUR_MS },
+				secondary: { usedFraction: 0.54, resetInMs: 160 * HOUR_MS }, // 46% left, 6d16h
+			}),
+		);
+
+		const counts = await countApiKeySelections(authStorage, "openai-codex", "weighted-codex-reset", 20, {
+			salvageHorizonMs: 12 * HOUR_MS,
+		});
+		expect(countFor(counts, "api-acct-a")).toBeGreaterThan(0);
+		expect(countFor(counts, "api-acct-c")).toBe(0);
+	});
+
+	test("falls back to required-drain ranking when no reset credit is expiring", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		await authStorage.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-a", "a@example.com") },
+			{ type: "oauth", ...createCredential("acct-b", "b@example.com") },
+			{ type: "oauth", ...createCredential("acct-c", "c@example.com") },
+		]);
+
+		usageByAccount.set(
+			"acct-a",
+			createCodexUsageReport({
+				accountId: "acct-a",
+				primary: { usedFraction: 0.5, resetInMs: 3 * HOUR_MS },
+				secondary: { usedFraction: 0.8, resetInMs: 141 * HOUR_MS },
+			}),
+		);
+		usageByAccount.set(
+			"acct-b",
+			createCodexUsageReport({
+				accountId: "acct-b",
+				primary: { usedFraction: 0.5, resetInMs: 3 * HOUR_MS },
+				secondary: { usedFraction: 0.56, resetInMs: 161 * HOUR_MS },
+			}),
+		);
+		usageByAccount.set(
+			"acct-c",
+			createCodexUsageReport({
+				accountId: "acct-c",
+				primary: { usedFraction: 0.5, resetInMs: 3 * HOUR_MS },
+				secondary: { usedFraction: 0.54, resetInMs: 160 * HOUR_MS },
+			}),
+		);
+
+		const counts = await countApiKeySelections(authStorage, "openai-codex", "weighted-codex-no-reset", 20, {
+			salvageHorizonMs: 12 * HOUR_MS,
+		});
+		expect(countFor(counts, "api-acct-a")).toBe(0);
+		expect(countFor(counts, "api-acct-c")).toBeGreaterThan(0);
+	});
+
+	test("does not boost past a blocked account even with an expiring reset", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		await authStorage.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-a", "a@example.com") },
+			{ type: "oauth", ...createCredential("acct-b", "b@example.com") },
+		]);
+
+		usageByAccount.set(
+			"acct-a",
+			createCodexUsageReport({
+				accountId: "acct-a",
+				primary: { usedFraction: 1, resetInMs: 30 * 60 * 1000 }, // exhausted
+				secondary: { usedFraction: 1, resetInMs: 30 * 60 * 1000 },
+				resetCredits: expiringResetCredits(4 * HOUR_MS),
+			}),
+		);
+		usageByAccount.set(
+			"acct-b",
+			createCodexUsageReport({
+				accountId: "acct-b",
+				primary: { usedFraction: 0.5, resetInMs: 20 * 60 * 1000 },
+				secondary: { usedFraction: 0.4, resetInMs: 3 * 24 * HOUR_MS },
+			}),
+		);
+
+		const apiKey = await authStorage.getApiKey("openai-codex", "session-blocked-reset", {
+			salvageHorizonMs: 12 * HOUR_MS,
+		});
+		expect(apiKey).toBe("api-acct-b");
+	});
+
+	test("ignores reset credits expiring outside the salvage horizon", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		await authStorage.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-a", "a@example.com") },
+			{ type: "oauth", ...createCredential("acct-c", "c@example.com") },
+		]);
+
+		usageByAccount.set(
+			"acct-a",
+			createCodexUsageReport({
+				accountId: "acct-a",
+				primary: { usedFraction: 0.5, resetInMs: 3 * HOUR_MS },
+				secondary: { usedFraction: 0.8, resetInMs: 141 * HOUR_MS },
+				resetCredits: expiringResetCredits(3 * 24 * HOUR_MS), // 3d > 12h horizon
+			}),
+		);
+		usageByAccount.set(
+			"acct-c",
+			createCodexUsageReport({
+				accountId: "acct-c",
+				primary: { usedFraction: 0.5, resetInMs: 3 * HOUR_MS },
+				secondary: { usedFraction: 0.54, resetInMs: 160 * HOUR_MS },
+			}),
+		);
+
+		const counts = await countApiKeySelections(authStorage, "openai-codex", "weighted-codex-far-reset", 20, {
+			salvageHorizonMs: 12 * HOUR_MS,
+		});
+		expect(countFor(counts, "api-acct-a")).toBe(0);
+		expect(countFor(counts, "api-acct-c")).toBeGreaterThan(0);
+	});
+
 	test("skips exhausted weekly account even when reset is near", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 
