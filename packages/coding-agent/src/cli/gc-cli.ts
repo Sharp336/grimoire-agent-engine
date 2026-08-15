@@ -52,8 +52,7 @@ export interface GcCommandFlags {
 	blobs?: boolean;
 	archive?: boolean;
 	wal?: boolean;
-	mergeDuplicates?: boolean;
-	mergeForks?: boolean;
+	mergeSessions?: boolean;
 	coldArchiveAfterDays?: number;
 	retainNewestGlobal?: number;
 	retainNewestPerCwd?: number;
@@ -102,71 +101,60 @@ export interface WalGcResult {
 	checkpointed: boolean;
 }
 
-export interface MergeDuplicateConflict extends SessionMergeConflict {
+/** A merge disagreement, tagged with the session whose file kept its own version. */
+export interface SessionMergeGcConflict extends SessionMergeConflict {
 	sessionId: string;
 }
 
-/** A duplicate-group file excluded because a live process still holds it. */
-export interface MergeSkippedFile {
-	sessionId: string;
+/** A session file this pass declined to touch, with the reason it was left alone. */
+export interface SessionMergeSkippedFile {
 	path: string;
-	secondsSinceWrite: number | undefined;
-	signals: LivenessSignal[];
-	holders: LivenessHolder[];
-}
-
-export interface MergeDuplicateCandidate {
-	sessionId: string;
-	destination: string;
-	sources: string[];
-}
-
-export interface MergeGcResult {
-	scanned: number;
-	groups: number;
-	skippedActive: number;
-	skipped: MergeSkippedFile[];
-	wouldMerge: number;
-	merged: number;
-	archivedSources: number;
-	addedEntries: number;
-	skippedEntries: number;
-	conflicts: MergeDuplicateConflict[];
-	candidates: MergeDuplicateCandidate[];
-	errors: string[];
-	livenessDegraded: string[];
-}
-
-/** A fork-lineage file this pass declined to touch, with the reason it was left alone. */
-export interface ForkMergeSkippedFile {
-	path: string;
-	reason: string;
+	sessionId?: string;
+	reason?: string;
 	secondsSinceWrite?: number;
 	signals?: LivenessSignal[];
 	holders?: LivenessHolder[];
 }
 
-export interface ForkMergeCandidate {
-	parent: string;
-	fork: string;
-	sharedEntries: number;
-	forkOnlyEntries: number;
-	/** Distinct destination entries that the fork-only subtrees hang from. */
-	attachmentPoints: number;
-}
+/**
+ * One split session the pass can reunite.
+ *
+ * The two kinds arrive by different routes — duplicates share a session id
+ * across project directories, forks carry a `parentSession` header pointing at
+ * a different id — so they name their files differently and are reported
+ * separately even though a single flag finds both.
+ */
+export type SessionMergeCandidate =
+	| { kind: "duplicate"; sessionId: string; destination: string; sources: string[] }
+	| {
+			kind: "fork";
+			sessionId: string;
+			parent: string;
+			fork: string;
+			sharedEntries: number;
+			forkOnlyEntries: number;
+			/** Distinct destination entries that the fork-only subtrees hang from. */
+			attachmentPoints: number;
+	  };
 
-export interface ForkMergeGcResult {
+export interface SessionMergeGcResult {
+	/** Top-level session files examined for duplicate ids. */
 	scanned: number;
-	pairs: number;
+	/** Fork discovery reads a wider set — backups and compressed sessions too. */
+	forkScanned: number;
+	duplicateGroups: number;
+	forkPairs: number;
 	skippedActive: number;
-	skipped: ForkMergeSkippedFile[];
+	skipped: SessionMergeSkippedFile[];
+	/** Files that would be folded into another session and archived. */
 	wouldMerge: number;
+	/** Destination sessions actually rewritten. */
 	merged: number;
-	archivedForks: number;
+	archivedSources: number;
 	addedEntries: number;
 	skippedEntries: number;
-	conflicts: SessionMergeConflict[];
-	candidates: ForkMergeCandidate[];
+	conflicts: SessionMergeGcConflict[];
+	candidates: SessionMergeCandidate[];
 	errors: string[];
 	livenessDegraded: string[];
 }
@@ -177,8 +165,7 @@ export interface GcResult {
 	blobs?: BlobGcResult;
 	archive?: ArchiveGcResult;
 	wal?: WalGcResult;
-	mergeDuplicates?: MergeGcResult;
-	mergeForks?: ForkMergeGcResult;
+	mergeSessions?: SessionMergeGcResult;
 	lockPath: string;
 	livenessDegraded: string[];
 }
@@ -232,8 +219,7 @@ interface ResolvedGcOptions {
 	runBlobs: boolean;
 	runArchive: boolean;
 	runWal: boolean;
-	runMergeDuplicates: boolean;
-	runMergeForks: boolean;
+	runMergeSessions: boolean;
 	coldArchiveAfterDays: number;
 	retainNewestGlobal: number;
 	retainNewestPerCwd: number;
@@ -271,11 +257,7 @@ function numberSetting(value: number | undefined, fallback: unknown, defaultValu
 async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions> {
 	const agentDir = path.resolve(flags.agentDir ?? getAgentDir());
 	const selected =
-		flags.blobs === true ||
-		flags.archive === true ||
-		flags.wal === true ||
-		flags.mergeDuplicates === true ||
-		flags.mergeForks === true;
+		flags.blobs === true || flags.archive === true || flags.wal === true || flags.mergeSessions === true;
 	const archiveSelected = selected && flags.archive === true;
 	const needsArchiveSettings =
 		archiveSelected &&
@@ -298,8 +280,7 @@ async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions>
 		runBlobs: selected ? flags.blobs === true : getBoolean("gc.blobs"),
 		runArchive: selected ? flags.archive === true : getBoolean("gc.archive"),
 		runWal: selected ? flags.wal === true : getBoolean("gc.wal"),
-		runMergeDuplicates: flags.mergeDuplicates === true,
-		runMergeForks: flags.mergeForks === true,
+		runMergeSessions: flags.mergeSessions === true,
 		coldArchiveAfterDays: numberSetting(
 			flags.coldArchiveAfterDays,
 			getNumber("gc.coldArchiveAfterDays"),
@@ -322,8 +303,7 @@ export function collectGcErrors(result: GcResult): string[] {
 	return [
 		...(result.blobs?.errors ?? []).map(error => `blobs: ${error}`),
 		...(result.archive?.errors ?? []).map(error => `archive: ${error}`),
-		...(result.mergeDuplicates?.errors ?? []).map(error => `merge: ${error}`),
-		...(result.mergeForks?.errors ?? []).map(error => `fork merge: ${error}`),
+		...(result.mergeSessions?.errors ?? []).map(error => `merge: ${error}`),
 	];
 }
 
@@ -676,7 +656,7 @@ function chooseDuplicateDestination(files: DuplicateSessionFile[]): DuplicateSes
 
 async function collectDuplicateSessionGroups(
 	sessionsRoot: string,
-	result: MergeGcResult,
+	result: SessionMergeGcResult,
 	degraded: Set<string>,
 ): Promise<DuplicateSessionGroup[]> {
 	const files = (await collectJsonlFiles(sessionsRoot)).filter(file => isTopLevelSessionFile(sessionsRoot, file));
@@ -788,13 +768,18 @@ function resolveForkParentReference(
 	return { kind: "file", path: resolved };
 }
 
-async function collectForkLineageGroups(sessionsRoot: string, result: ForkMergeGcResult): Promise<ForkLineagePair[]> {
+async function collectForkLineageGroups(
+	sessionsRoot: string,
+	result: SessionMergeGcResult,
+): Promise<ForkLineagePair[]> {
 	const files = [
 		...(await collectJsonlFiles(sessionsRoot)),
 		...(await collectCompressedJsonlFiles(sessionsRoot)),
 		...(await collectBakFiles(sessionsRoot)),
 	].toSorted();
-	result.scanned = files.length;
+	// Deliberately not `result.scanned`: this set is wider than the duplicate scan's
+	// (backups and compressed sessions), so folding the two would inflate it.
+	result.forkScanned = files.length;
 
 	const lineages: Array<{ path: string; header: SessionLineageHeader }> = [];
 	const byId = new Map<string, Array<{ path: string; header: SessionLineageHeader }>>();
@@ -1786,11 +1771,20 @@ async function runArchiveGc(options: ResolvedGcOptions, archiveRoot: string): Pr
 	return result;
 }
 
-async function runMergeGc(options: ResolvedGcOptions, archiveRoot: string): Promise<MergeGcResult> {
-	const sessionsRoot = getSessionsDir(options.agentDir);
-	const result: MergeGcResult = {
+/**
+ * Reunites sessions that live in more than one file: duplicate copies sharing a
+ * session id, and forks that `/fork` wrote as separate sessions.
+ *
+ * Duplicates go first. A duplicate merge rewrites its destination, and that
+ * destination can itself be some fork's parent, so the fork phase re-reads from
+ * disk afterwards and grafts onto the reunited file rather than a stale copy.
+ */
+async function runSessionMergeGc(options: ResolvedGcOptions, archiveRoot: string): Promise<SessionMergeGcResult> {
+	const result: SessionMergeGcResult = {
 		scanned: 0,
-		groups: 0,
+		forkScanned: 0,
+		duplicateGroups: 0,
+		forkPairs: 0,
 		skippedActive: 0,
 		skipped: [],
 		wouldMerge: 0,
@@ -1804,15 +1798,30 @@ async function runMergeGc(options: ResolvedGcOptions, archiveRoot: string): Prom
 		livenessDegraded: [],
 	};
 	const degraded = new Set<string>();
+	await mergeDuplicatePhase(options, archiveRoot, result, degraded);
+	await mergeForkPhase(options, archiveRoot, result);
+	result.livenessDegraded = [...new Set([...result.livenessDegraded, ...degraded])];
+	return result;
+}
+
+async function mergeDuplicatePhase(
+	options: ResolvedGcOptions,
+	archiveRoot: string,
+	result: SessionMergeGcResult,
+	degraded: Set<string>,
+): Promise<void> {
+	const sessionsRoot = getSessionsDir(options.agentDir);
 	const groups = await collectDuplicateSessionGroups(sessionsRoot, result, degraded);
-	result.livenessDegraded = [...degraded];
-	result.groups = groups.length;
-	result.wouldMerge = groups.reduce((count, group) => count + group.sources.length, 0);
-	result.candidates = groups.map(group => ({
-		sessionId: group.sessionId,
-		destination: group.destination.path,
-		sources: group.sources.map(source => source.path),
-	}));
+	result.duplicateGroups = groups.length;
+	result.wouldMerge += groups.reduce((count, group) => count + group.sources.length, 0);
+	result.candidates.push(
+		...groups.map(group => ({
+			kind: "duplicate" as const,
+			sessionId: group.sessionId,
+			destination: group.destination.path,
+			sources: group.sources.map(source => source.path),
+		})),
+	);
 
 	const storage = new FileSessionStorage();
 	for (const group of groups) {
@@ -1854,40 +1863,34 @@ async function runMergeGc(options: ResolvedGcOptions, archiveRoot: string): Prom
 			}
 		}
 	}
-	return result;
 }
 
-async function runForkMergeGc(options: ResolvedGcOptions, archiveRoot: string): Promise<ForkMergeGcResult> {
+async function mergeForkPhase(
+	options: ResolvedGcOptions,
+	archiveRoot: string,
+	result: SessionMergeGcResult,
+): Promise<void> {
 	const sessionsRoot = getSessionsDir(options.agentDir);
-	const result: ForkMergeGcResult = {
-		scanned: 0,
-		pairs: 0,
-		skippedActive: 0,
-		skipped: [],
-		wouldMerge: 0,
-		merged: 0,
-		archivedForks: 0,
-		addedEntries: 0,
-		skippedEntries: 0,
-		conflicts: [],
-		candidates: [],
-		errors: [],
-		livenessDegraded: [],
-	};
 	const pairs = await collectForkLineageGroups(sessionsRoot, result);
-	result.pairs = pairs.length;
-	result.wouldMerge = pairs.length;
-	result.addedEntries = pairs.reduce((sum, pair) => sum + pair.plan.addedEntries, 0);
-	result.skippedEntries = pairs.reduce((sum, pair) => sum + pair.plan.skippedEntries, 0);
-	result.conflicts = pairs.flatMap(pair => pair.plan.conflicts);
-	result.candidates = pairs.map(pair => ({
-		parent: pair.parent.path,
-		fork: pair.fork.path,
-		sharedEntries: pair.sharedEntries,
-		forkOnlyEntries: pair.forkOnlyEntries,
-		attachmentPoints: pair.attachmentPoints,
-	}));
-	if (!options.apply) return result;
+	result.forkPairs = pairs.length;
+	result.wouldMerge += pairs.length;
+	result.addedEntries += pairs.reduce((sum, pair) => sum + pair.plan.addedEntries, 0);
+	result.skippedEntries += pairs.reduce((sum, pair) => sum + pair.plan.skippedEntries, 0);
+	result.conflicts.push(
+		...pairs.flatMap(pair => pair.plan.conflicts.map(conflict => ({ sessionId: pair.parent.id, ...conflict }))),
+	);
+	result.candidates.push(
+		...pairs.map(pair => ({
+			kind: "fork" as const,
+			sessionId: pair.fork.id,
+			parent: pair.parent.path,
+			fork: pair.fork.path,
+			sharedEntries: pair.sharedEntries,
+			forkOnlyEntries: pair.forkOnlyEntries,
+			attachmentPoints: pair.attachmentPoints,
+		})),
+	);
+	if (!options.apply) return;
 
 	const storage = new FileSessionStorage();
 	for (const pair of pairs) {
@@ -1906,7 +1909,7 @@ async function runForkMergeGc(options: ResolvedGcOptions, archiveRoot: string): 
 			// A successfully consumed fork is archived, never unlinked: its session and
 			// artifacts remain recoverable while no longer cluttering the active list.
 			await moveDuplicateSourceToArchive(pair.fork.path, sessionsRoot, archiveRoot);
-			result.archivedForks += 1;
+			result.archivedSources += 1;
 			result.merged += 1;
 		} catch (error) {
 			try {
@@ -1920,7 +1923,6 @@ async function runForkMergeGc(options: ResolvedGcOptions, archiveRoot: string): 
 			result.errors.push(`${pair.fork.path}: ${errorMessage(error)}`);
 		}
 	}
-	return result;
 }
 
 async function checkpointWal(dbPath: string, apply: boolean): Promise<WalCheckpointResult> {
@@ -2193,45 +2195,47 @@ function renderText(result: GcResult, options: ResolvedGcOptions): string {
 		if (result.archive.skippedActive > 0) lines.push(`sessions skipped active: ${result.archive.skippedActive}`);
 		if (result.archive.errors.length > 0) lines.push(`session errors: ${result.archive.errors.length}`);
 	}
-	if (result.mergeDuplicates) {
-		const merge = result.mergeDuplicates;
+	if (result.mergeSessions) {
+		const merge = result.mergeSessions;
+		const duplicateCopies = merge.candidates.reduce(
+			(sum, candidate) => (candidate.kind === "duplicate" ? sum + candidate.sources.length : sum),
+			0,
+		);
+		const attachmentPoints = merge.candidates.reduce(
+			(sum, candidate) => (candidate.kind === "fork" ? sum + candidate.attachmentPoints : sum),
+			0,
+		);
+		const detail = [
+			merge.duplicateGroups > 0
+				? `${duplicateCopies} duplicate ${pluralize("copy", duplicateCopies)} of ${merge.duplicateGroups} ${pluralize("session", merge.duplicateGroups)}`
+				: undefined,
+			merge.forkPairs > 0
+				? `${merge.forkPairs} ${pluralize("fork", merge.forkPairs)} at ${attachmentPoints} attachment ${pluralize("point", attachmentPoints)}`
+				: undefined,
+		].filter((part): part is string => part !== undefined);
+		const breakdown = detail.length > 0 ? ` (${detail.join("; ")})` : "";
 		const conflicts =
 			merge.conflicts.length > 0
 				? `, ${merge.conflicts.length} ${pluralize("conflict", merge.conflicts.length)} (destination kept)`
 				: "";
-		lines.push(
-			result.apply
-				? `duplicates: ${merge.archivedSources}/${merge.wouldMerge} ${pluralize("file", merge.wouldMerge)} merged across ${merge.groups} ${pluralize("group", merge.groups)}, ${merge.addedEntries} ${pluralize("entry", merge.addedEntries)} added${conflicts}`
-				: `duplicates: would merge ${merge.wouldMerge} ${pluralize("file", merge.wouldMerge)} into ${merge.groups} ${pluralize("session", merge.groups)}, adding ${merge.addedEntries} ${pluralize("entry", merge.addedEntries)}${conflicts}`,
-		);
-		for (const skipped of merge.skipped) {
+		if (merge.wouldMerge === 0) {
+			lines.push(`merge: nothing to reunite across ${merge.scanned} ${pluralize("session", merge.scanned)}`);
+		} else {
 			lines.push(
-				`duplicates skipped: ${shortenPath(skipped.path)} ${formatLivenessReason(skipped.signals, skipped.holders)}`,
+				result.apply
+					? `merge: folded ${merge.archivedSources}/${merge.wouldMerge} ${pluralize("file", merge.wouldMerge)} into ${merge.merged} ${pluralize("session", merge.merged)}, ${merge.addedEntries} ${pluralize("entry", merge.addedEntries)} added${breakdown}; consumed files archived to ${shortenPath(getArchivedSessionsDir(options.agentDir))}${conflicts}`
+					: `merge: would fold ${merge.wouldMerge} ${pluralize("file", merge.wouldMerge)} back into ${merge.wouldMerge === 1 ? "its session" : "their sessions"}, adding ${merge.addedEntries} ${pluralize("entry", merge.addedEntries)}${breakdown}${conflicts}`,
 			);
 		}
-		if (merge.errors.length > 0) {
-			lines.push(`duplicate merge errors: ${merge.errors.length}`);
-		}
-	}
-	if (result.mergeForks) {
-		const merge = result.mergeForks;
-		const attachmentPoints = merge.candidates.reduce((sum, candidate) => sum + candidate.attachmentPoints, 0);
-		const conflicts =
-			merge.conflicts.length > 0
-				? `, ${merge.conflicts.length} ${pluralize("conflict", merge.conflicts.length)} (parent kept)`
-				: "";
-		lines.push(
-			result.apply
-				? `forks: grafted ${merge.addedEntries} ${pluralize("entry", merge.addedEntries)} at ${attachmentPoints} attachment ${pluralize("point", attachmentPoints)} from ${merge.merged}/${merge.wouldMerge} ${pluralize("fork", merge.wouldMerge)} into their parents; archived ${merge.archivedForks} to ${shortenPath(getArchivedSessionsDir(options.agentDir))}${conflicts}`
-				: `forks: would graft ${merge.addedEntries} ${pluralize("entry", merge.addedEntries)} at ${attachmentPoints} attachment ${pluralize("point", attachmentPoints)} from ${merge.wouldMerge} ${pluralize("fork", merge.wouldMerge)} into their parents${conflicts}`,
-		);
 		for (const skipped of merge.skipped) {
+			// Liveness skips name the holding process; discovery exclusions carry a reason
+			// string instead, and there are hundreds of those on a real sessions tree.
 			if (!skipped.signals || !skipped.holders) continue;
 			lines.push(
-				`forks skipped: ${shortenPath(skipped.path)} ${formatLivenessReason(skipped.signals, skipped.holders)}`,
+				`merge skipped: ${shortenPath(skipped.path)} ${formatLivenessReason(skipped.signals, skipped.holders)}`,
 			);
 		}
-		if (merge.errors.length > 0) lines.push(`fork merge errors: ${merge.errors.length}`);
+		if (merge.errors.length > 0) lines.push(`merge errors: ${merge.errors.length}`);
 	}
 	if (result.wal) {
 		const state = result.wal.checkpointed ? "checkpointed" : "checkpoint dry-run";
@@ -2254,13 +2258,10 @@ export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 			livenessDegraded: [],
 		};
 		if (options.runBlobs) next.blobs = await runBlobGc(options, archiveRoot);
-		if (options.runMergeDuplicates) next.mergeDuplicates = await runMergeGc(options, archiveRoot);
-		if (options.runMergeForks) next.mergeForks = await runForkMergeGc(options, archiveRoot);
+		if (options.runMergeSessions) next.mergeSessions = await runSessionMergeGc(options, archiveRoot);
 		if (options.runArchive) next.archive = await runArchiveGc(options, archiveRoot);
 		if (options.runWal) next.wal = await runWalGc(options);
-		next.livenessDegraded = [
-			...new Set([...(next.mergeDuplicates?.livenessDegraded ?? []), ...(next.mergeForks?.livenessDegraded ?? [])]),
-		];
+		next.livenessDegraded = [...new Set([...(next.mergeSessions?.livenessDegraded ?? [])])];
 		return next;
 	});
 

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { SessionMergeCandidate } from "@oh-my-pi/pi-coding-agent/cli/gc-cli";
 import { runGcCommand } from "@oh-my-pi/pi-coding-agent/cli/gc-cli";
 import type { FileEntry, SessionEntry, SessionHeader } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { loadEntriesFromFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
@@ -15,6 +16,15 @@ const FORK_ID = "01a0017c-4aee-7000-a3ab-3b62adc9b303";
 const MISSING_ID = "01dead00-4aee-7000-a3ab-3b62adc9b304";
 const OLD_DATE = new Date("2026-01-01T00:00:00.000Z");
 const TIMESTAMP = "2026-07-16T23-59-49-486Z";
+
+/** One flag finds both kinds, so fork assertions have to narrow the union. */
+function forkCandidates(
+	candidates: SessionMergeCandidate[] | undefined,
+): Array<Extract<SessionMergeCandidate, { kind: "fork" }>> {
+	return (candidates ?? []).filter(
+		(candidate): candidate is Extract<SessionMergeCandidate, { kind: "fork" }> => candidate.kind === "fork",
+	);
+}
 
 let root: string;
 let stdoutSpy: { mockRestore(): void } | undefined;
@@ -132,13 +142,15 @@ describe("omp gc fork-session merge", () => {
 		const parentBefore = await Bun.file(pair.parent).text();
 		const forkBefore = await Bun.file(pair.fork).text();
 
-		const result = await runGcCommand({ flags: { agentDir, mergeForks: true } });
+		const result = await runGcCommand({ flags: { agentDir, mergeSessions: true } });
 
-		expect(result.mergeForks?.pairs).toBe(1);
-		expect(result.mergeForks?.wouldMerge).toBe(1);
-		expect(result.mergeForks?.addedEntries).toBe(2);
-		expect(result.mergeForks?.candidates).toEqual([
+		expect(result.mergeSessions?.forkPairs).toBe(1);
+		expect(result.mergeSessions?.wouldMerge).toBe(1);
+		expect(result.mergeSessions?.addedEntries).toBe(2);
+		expect(result.mergeSessions?.candidates).toEqual([
 			{
+				kind: "fork",
+				sessionId: FORK_ID,
 				parent: pair.parent,
 				fork: pair.fork,
 				sharedEntries: 2,
@@ -150,34 +162,36 @@ describe("omp gc fork-session merge", () => {
 		expect(await Bun.file(pair.fork).text()).toBe(forkBefore);
 		expect(await Bun.file(pair.forkArtifact).text()).toBe("fork artifact");
 		expect(await backupFiles(pair.parent)).toEqual([]);
-		expect(stdout).toContain("forks: would graft 2 entries at 1 attachment point from 1 fork into their parents");
+		expect(stdout).toContain(
+			"merge: would fold 1 file back into its session, adding 2 entries (1 fork at 1 attachment point)",
+		);
 	});
 
 	test("discovers and applies an absolute parentSession path", async () => {
 		const agentDir = path.join(root, "agent");
 		const pair = await createForkPair(agentDir, parent => parent);
 
-		const result = await runGcCommand({ flags: { agentDir, mergeForks: true, apply: true } });
+		const result = await runGcCommand({ flags: { agentDir, mergeSessions: true, apply: true } });
 
-		expect(result.mergeForks?.pairs).toBe(1);
-		expect(result.mergeForks?.merged).toBe(1);
-		expect(result.mergeForks?.candidates[0]?.parent).toBe(pair.parent);
+		expect(result.mergeSessions?.forkPairs).toBe(1);
+		expect(result.mergeSessions?.merged).toBe(1);
+		expect(forkCandidates(result.mergeSessions?.candidates)[0]?.parent).toBe(pair.parent);
 		expect(await Bun.file(pair.fork).exists()).toBe(false);
 		expect(
 			logicalEntries(await loadEntriesFromFile(pair.parent, new FileSessionStorage())).map(value => value.id),
 		).toContain("fork-branch");
-		expect(result.mergeForks?.skipped.map(value => value.reason).join("\n")).not.toContain("not found on disk");
+		expect(result.mergeSessions?.skipped.map(value => value.reason).join("\n")).not.toContain("not found on disk");
 	});
 
 	test("discovers and applies a parentSession path relative to the sessions root", async () => {
 		const agentDir = path.join(root, "agent");
 		const pair = await createForkPair(agentDir, (parent, sessionsRoot) => path.relative(sessionsRoot, parent));
 
-		const result = await runGcCommand({ flags: { agentDir, mergeForks: true, apply: true } });
+		const result = await runGcCommand({ flags: { agentDir, mergeSessions: true, apply: true } });
 
-		expect(result.mergeForks?.pairs).toBe(1);
-		expect(result.mergeForks?.merged).toBe(1);
-		expect(result.mergeForks?.candidates[0]?.parent).toBe(pair.parent);
+		expect(result.mergeSessions?.forkPairs).toBe(1);
+		expect(result.mergeSessions?.merged).toBe(1);
+		expect(forkCandidates(result.mergeSessions?.candidates)[0]?.parent).toBe(pair.parent);
 		expect(await Bun.file(pair.fork).exists()).toBe(false);
 	});
 
@@ -192,10 +206,10 @@ describe("omp gc fork-session merge", () => {
 			[entry("fork-only", null, "fork")],
 		);
 
-		const result = await runGcCommand({ flags: { agentDir, mergeForks: true } });
+		const result = await runGcCommand({ flags: { agentDir, mergeSessions: true } });
 
-		expect(result.mergeForks?.pairs).toBe(0);
-		expect(result.mergeForks?.skipped).toContainEqual({
+		expect(result.mergeSessions?.forkPairs).toBe(0);
+		expect(result.mergeSessions?.skipped).toContainEqual({
 			path: fork,
 			reason: `parent session file ${missingParent} not found on disk`,
 		});
@@ -215,10 +229,10 @@ describe("omp gc fork-session merge", () => {
 			[entry("fork-only", null, "fork")],
 		);
 
-		const result = await runGcCommand({ flags: { agentDir, mergeForks: true } });
+		const result = await runGcCommand({ flags: { agentDir, mergeSessions: true } });
 
-		expect(result.mergeForks?.pairs).toBe(0);
-		expect(result.mergeForks?.skipped).toContainEqual({
+		expect(result.mergeSessions?.forkPairs).toBe(0);
+		expect(result.mergeSessions?.skipped).toContainEqual({
 			path: fork,
 			reason: `parent session file ${invalidParent} is unreadable`,
 		});
@@ -231,10 +245,10 @@ describe("omp gc fork-session merge", () => {
 			entry("fork-only", null, "fork"),
 		]);
 
-		const result = await runGcCommand({ flags: { agentDir, mergeForks: true } });
+		const result = await runGcCommand({ flags: { agentDir, mergeSessions: true } });
 
-		expect(result.mergeForks?.pairs).toBe(0);
-		expect(result.mergeForks?.skipped).toContainEqual({
+		expect(result.mergeSessions?.forkPairs).toBe(0);
+		expect(result.mergeSessions?.skipped).toContainEqual({
 			path: fork,
 			reason: 'parent session reference "" could not be resolved',
 		});
@@ -248,10 +262,10 @@ describe("omp gc fork-session merge", () => {
 			entry("fork-only", null, "fork"),
 		]);
 
-		const result = await runGcCommand({ flags: { agentDir, mergeForks: true } });
+		const result = await runGcCommand({ flags: { agentDir, mergeSessions: true } });
 
-		expect(result.mergeForks?.pairs).toBe(0);
-		expect(result.mergeForks?.skipped).toContainEqual({ path: fork, reason: "parentSession self-reference" });
+		expect(result.mergeSessions?.forkPairs).toBe(0);
+		expect(result.mergeSessions?.skipped).toContainEqual({ path: fork, reason: "parentSession self-reference" });
 	});
 
 	test("rejects a parentSession path outside the sessions root", async () => {
@@ -263,10 +277,10 @@ describe("omp gc fork-session merge", () => {
 			entry("fork-only", null, "fork"),
 		]);
 
-		const result = await runGcCommand({ flags: { agentDir, mergeForks: true } });
+		const result = await runGcCommand({ flags: { agentDir, mergeSessions: true } });
 
-		expect(result.mergeForks?.pairs).toBe(0);
-		expect(result.mergeForks?.skipped).toContainEqual({
+		expect(result.mergeSessions?.forkPairs).toBe(0);
+		expect(result.mergeSessions?.skipped).toContainEqual({
 			path: fork,
 			reason: `parent session path ${outside} is outside the sessions root`,
 		});
@@ -278,10 +292,10 @@ describe("omp gc fork-session merge", () => {
 		const forkBefore = await Bun.file(pair.fork).text();
 		const forkEntryCount = (await loadEntriesFromFile(pair.fork, new FileSessionStorage())).length;
 
-		const result = await runGcCommand({ flags: { agentDir, mergeForks: true, apply: true } });
+		const result = await runGcCommand({ flags: { agentDir, mergeSessions: true, apply: true } });
 
-		expect(result.mergeForks?.merged).toBe(1);
-		expect(result.mergeForks?.archivedForks).toBe(1);
+		expect(result.mergeSessions?.merged).toBe(1);
+		expect(result.mergeSessions?.archivedSources).toBe(1);
 		expect(await Bun.file(pair.fork).exists()).toBe(false);
 		expect(await Bun.file(pair.forkArtifact).exists()).toBe(false);
 		const archiveRoot = path.join(agentDir, "archive", "sessions");
@@ -307,21 +321,21 @@ describe("omp gc fork-session merge", () => {
 			"parent-branch",
 		]);
 		expect(stdout).toContain(
-			`forks: grafted 2 entries at 1 attachment point from 1/1 fork into their parents; archived 1 to ${archiveRoot}`,
+			`merge: folded 1/1 file into 1 session, 2 entries added (1 fork at 1 attachment point); consumed files archived to ${archiveRoot}`,
 		);
 	});
 
 	test("a second apply finds no candidate after the fork was archived", async () => {
 		const agentDir = path.join(root, "agent");
 		await createForkPair(agentDir);
-		await runGcCommand({ flags: { agentDir, mergeForks: true, apply: true } });
+		await runGcCommand({ flags: { agentDir, mergeSessions: true, apply: true } });
 
-		const second = await runGcCommand({ flags: { agentDir, mergeForks: true, apply: true } });
+		const second = await runGcCommand({ flags: { agentDir, mergeSessions: true, apply: true } });
 
-		expect(second.mergeForks?.pairs).toBe(0);
-		expect(second.mergeForks?.wouldMerge).toBe(0);
-		expect(second.mergeForks?.candidates).toEqual([]);
-		expect(second.mergeForks?.merged).toBe(0);
+		expect(second.mergeSessions?.forkPairs).toBe(0);
+		expect(second.mergeSessions?.wouldMerge).toBe(0);
+		expect(second.mergeSessions?.candidates).toEqual([]);
+		expect(second.mergeSessions?.merged).toBe(0);
 	});
 
 	test("does not nominate a fork whose entries are all shared", async () => {
@@ -335,11 +349,14 @@ describe("omp gc fork-session merge", () => {
 			shared,
 		]);
 
-		const result = await runGcCommand({ flags: { agentDir, mergeForks: true } });
+		const result = await runGcCommand({ flags: { agentDir, mergeSessions: true } });
 
-		expect(result.mergeForks?.pairs).toBe(0);
-		expect(result.mergeForks?.candidates).toEqual([]);
-		expect(result.mergeForks?.skipped).toContainEqual({ path: fork, reason: "fork contributes no unique entries" });
+		expect(result.mergeSessions?.forkPairs).toBe(0);
+		expect(result.mergeSessions?.candidates).toEqual([]);
+		expect(result.mergeSessions?.skipped).toContainEqual({
+			path: fork,
+			reason: "fork contributes no unique entries",
+		});
 	});
 
 	test("skips a fork under a backup directory with a reason", async () => {
@@ -351,10 +368,10 @@ describe("omp gc fork-session merge", () => {
 			entry("fork-only", null, "fork"),
 		]);
 
-		const result = await runGcCommand({ flags: { agentDir, mergeForks: true } });
+		const result = await runGcCommand({ flags: { agentDir, mergeSessions: true } });
 
-		expect(result.mergeForks?.pairs).toBe(0);
-		expect(result.mergeForks?.skipped).toContainEqual({
+		expect(result.mergeSessions?.forkPairs).toBe(0);
+		expect(result.mergeSessions?.skipped).toContainEqual({
 			path: fork,
 			reason: "path is under a session backup directory",
 		});
@@ -367,10 +384,10 @@ describe("omp gc fork-session merge", () => {
 			entry("fork-only", null, "fork"),
 		]);
 
-		const result = await runGcCommand({ flags: { agentDir, mergeForks: true } });
+		const result = await runGcCommand({ flags: { agentDir, mergeSessions: true } });
 
-		expect(result.mergeForks?.pairs).toBe(0);
-		expect(result.mergeForks?.skipped).toContainEqual({ path: fork, reason: "parentSession self-reference" });
+		expect(result.mergeSessions?.forkPairs).toBe(0);
+		expect(result.mergeSessions?.skipped).toContainEqual({ path: fork, reason: "parentSession self-reference" });
 	});
 
 	test("skips a fork whose parent file is absent", async () => {
@@ -380,10 +397,10 @@ describe("omp gc fork-session merge", () => {
 			entry("fork-only", null, "fork"),
 		]);
 
-		const result = await runGcCommand({ flags: { agentDir, mergeForks: true } });
+		const result = await runGcCommand({ flags: { agentDir, mergeSessions: true } });
 
-		expect(result.mergeForks?.pairs).toBe(0);
-		expect(result.mergeForks?.skipped).toContainEqual({
+		expect(result.mergeSessions?.forkPairs).toBe(0);
+		expect(result.mergeSessions?.skipped).toContainEqual({
 			path: fork,
 			reason: `parent session id ${MISSING_ID} not found among scanned sessions`,
 		});
@@ -396,10 +413,10 @@ describe("omp gc fork-session merge", () => {
 		await fs.utimes(pair.parent, OLD_DATE, OLD_DATE);
 		await fs.utimes(pair.fork, now, now);
 
-		const result = await runGcCommand({ flags: { agentDir, mergeForks: true, apply: true } });
+		const result = await runGcCommand({ flags: { agentDir, mergeSessions: true, apply: true } });
 
-		expect(result.mergeForks?.merged).toBe(1);
-		expect(result.mergeForks?.skippedActive).toBe(0);
+		expect(result.mergeSessions?.merged).toBe(1);
+		expect(result.mergeSessions?.skippedActive).toBe(0);
 	});
 
 	test("skips and names a fork held open by another process", async () => {
@@ -407,18 +424,55 @@ describe("omp gc fork-session merge", () => {
 		const pair = await createForkPair(agentDir);
 		const holder = await holdFileOpen(pair.fork);
 		try {
-			const result = await runGcCommand({ flags: { agentDir, mergeForks: true, apply: true } });
+			const result = await runGcCommand({ flags: { agentDir, mergeSessions: true, apply: true } });
 
-			expect(result.mergeForks?.pairs).toBe(0);
-			expect(result.mergeForks?.skippedActive).toBe(1);
-			const skipped = result.mergeForks?.skipped.find(value => value.path === pair.fork);
+			expect(result.mergeSessions?.forkPairs).toBe(0);
+			expect(result.mergeSessions?.skippedActive).toBe(1);
+			const skipped = result.mergeSessions?.skipped.find(value => value.path === pair.fork);
 			expect(skipped?.reason).toBe("held by a live process");
 			expect(skipped?.signals).toContain("open-handle");
 			expect(skipped?.holders?.some(value => value.pid === holder.pid)).toBe(true);
 			expect(await Bun.file(pair.fork).exists()).toBe(true);
-			expect(stdout).toContain(`forks skipped: ${pair.fork} held open by pid ${holder.pid} (`);
+			expect(stdout).toContain(`merge skipped: ${pair.fork} held open by pid ${holder.pid} (`);
 		} finally {
 			await holder.close();
 		}
+	});
+
+	test("grafts a fork onto the copy the duplicate phase just reunited", async () => {
+		const agentDir = path.join(root, "agent");
+		const pair = await createForkPair(agentDir);
+		// A second copy of the fork's parent, holding a branch only it has. One pass has
+		// to merge this first: grafting the fork from a pre-duplicate read of the parent
+		// would write back a file with `duplicate-branch` missing.
+		const duplicate = await writeSession(
+			path.join(getSessionsDir(agentDir), "-elsewhere"),
+			`${TIMESTAMP}_${PARENT_ID}.jsonl`,
+			header(PARENT_ID, path.join(root, "project")),
+			[
+				entry("shared-root", null, "shared-root"),
+				entry("attachment", "shared-root", "attachment"),
+				entry("duplicate-branch", "attachment", "duplicate"),
+			],
+		);
+
+		const result = await runGcCommand({ flags: { agentDir, mergeSessions: true, apply: true } });
+
+		expect(result.mergeSessions?.duplicateGroups).toBe(1);
+		expect(result.mergeSessions?.forkPairs).toBe(1);
+		const destination = result.mergeSessions?.candidates.find(
+			candidate => candidate.kind === "duplicate",
+		)?.destination;
+		expect(destination).toBeDefined();
+		const ids = logicalEntries(await loadEntriesFromFile(destination as string, new FileSessionStorage())).map(
+			value => value.id,
+		);
+		expect(ids).toContain("duplicate-branch");
+		expect(ids).toContain("parent-branch");
+		expect(ids).toContain("fork-branch");
+		expect(ids).toContain("fork-descendant");
+		// Both consumed files are archived, not deleted.
+		expect(await Bun.file(pair.fork).exists()).toBe(false);
+		expect(await Bun.file(destination === duplicate ? pair.parent : duplicate).exists()).toBe(false);
 	});
 });

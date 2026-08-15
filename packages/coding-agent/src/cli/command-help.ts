@@ -51,8 +51,8 @@ export const galleryHelp = {
 export const gcHelp = {
 	description: "Run storage garbage collection, including session merges",
 	examples: [
-		"omp gc --merge-duplicates             # Merge split copies of the same session (dry-run by default)",
-		"omp gc --merge-forks                  # Graft forked sessions into their parents (dry-run by default)",
+		"omp gc --merge-sessions          # Reunite duplicate copies and forks of the same conversation",
+		"omp gc --merge-sessions --apply  # Same, but actually rewrite the sessions",
 	],
 } satisfies CommandMetadata;
 
