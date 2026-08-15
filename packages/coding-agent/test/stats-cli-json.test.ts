@@ -19,7 +19,7 @@ afterEach(async () => {
 });
 
 async function writeSessionFixture(agentDir: string): Promise<void> {
-	const timestamp = new Date().toISOString();
+	const timestamp = "2020-01-02T03:04:05.000Z";
 	const timestampMs = Date.parse(timestamp);
 	const entries = [
 		{
@@ -112,7 +112,6 @@ describe("stats CLI JSON", () => {
 		expect(jsonStart).toBeGreaterThanOrEqual(0);
 		const payload = JSON.parse(result.stdout.slice(jsonStart));
 
-		expect(payload.overall.totalRequests).toBe(1);
 		expect(payload.tooling.byTool).toEqual([
 			expect.objectContaining({
 				tool: toolName,

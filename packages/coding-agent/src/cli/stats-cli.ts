@@ -7,7 +7,7 @@
 import {
 	closeDb,
 	getDashboardStats,
-	getToolDashboardStats,
+	getToolUsageStats,
 	getTotalMessageCount,
 	startServer,
 	syncAllSessions,
@@ -129,12 +129,12 @@ export async function runStatsCommand(cmd: StatsCommandArgs): Promise<void> {
 
 	if (cmd.json) {
 		const stats = await getDashboardStats();
-		const toolStats = await getToolDashboardStats();
+		const byTool = await getToolUsageStats("all");
 		console.log(
 			JSON.stringify(
 				{
 					...stats,
-					tooling: { byTool: toolStats.byTool },
+					tooling: { byTool },
 				},
 				null,
 				2,

@@ -47,6 +47,7 @@ import type {
 	ProviderDashboardStats,
 	RequestDetails,
 	ToolDashboardStats,
+	ToolUsageStats,
 } from "./types";
 import { computeUsageWindowStats, fetchUsageSnapshots } from "./usage-windows";
 
@@ -524,6 +525,16 @@ export async function getBehaviorDashboardStats(range?: string | null): Promise<
 		byModel: getBehaviorByModel(cutoff),
 		behaviorSeries: getBehaviorTimeSeries(cutoff),
 	};
+}
+
+/**
+ * Get per-tool usage totals for the requested range without computing the
+ * dashboard's per-model breakdown or time series.
+ */
+export async function getToolUsageStats(range?: string | null): Promise<ToolUsageStats[]> {
+	await initDb();
+	const { cutoff } = getTimeRangeConfig(range);
+	return getToolStats(cutoff ?? undefined);
 }
 
 /**
