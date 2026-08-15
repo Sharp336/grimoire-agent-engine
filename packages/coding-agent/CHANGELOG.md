@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Exposed plan and goal mode state to extensions through `ExtensionContext.getPlanModeState()` and `ExtensionContext.getGoalModeState()`, so an extension can read whether the session is planning without inspecting internals ([#8045](https://github.com/can1357/oh-my-pi/pull/8045) by [@svperfecta](https://github.com/svperfecta)).
+
 ## [17.3.4] - 2026-08-14
 
 ### Changed
@@ -171,7 +175,6 @@
 
 - Removed the `resolveAgentModelSource` model-resolver export, whose only use was being fed to `resolveExplicitModelRole`. Replaced by `resolveAgentModelSelection`, which returns the expanded `patterns` and the pre-expansion `role` together so a spawn path cannot derive one without the other ([#7910](https://github.com/can1357/oh-my-pi/pull/7910) by [@enieuwy](https://github.com/enieuwy)).
 - A run is now attributed to the model that actually produced its output, not whichever model the session was last pointed at. A retry fallback that errored on its first request — an exhausted quota, a hard provider error — was credited with the whole run in the Agent Hub row and the settled task result, even when the previous model did every turn. Sessions expose the serving model directly, holding the last model that produced output while a candidate is armed but unproven, and transcript-derived history stops at the newest turn that produced output.
-- Exposed plan and goal mode state to extensions through `ExtensionContext.getPlanModeState()` and `ExtensionContext.getGoalModeState()`, so an extension can read whether the session is planning without inspecting internals ([#8045](https://github.com/can1357/oh-my-pi/pull/8045) by [@svperfecta](https://github.com/svperfecta)).
 
 ## [17.2.12] - 2026-08-08
 
@@ -268,9 +271,6 @@
 - Fixed parsing of POSIX `$EDITOR` commands that contain quoted arguments or executable paths with spaces.
 - Fixed persisted Agent Hub rows losing the explicit caller model role when a subagent used a model override, preserving role provenance across restarts.
 - Fixed unobserved promise rejections in browser helpers (such as `tab.waitForResponse()`) causing tab workers to hang or crash.
-### Added
-
-- Exposed plan and goal mode state to extensions through `ExtensionContext.getPlanModeState()` and `ExtensionContext.getGoalModeState()`, so an extension can read whether the session is planning without inspecting internals ([#8045](https://github.com/can1357/oh-my-pi/pull/8045)).
 
 ## [17.2.9] - 2026-08-05
 
