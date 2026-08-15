@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Antigravity's authoritative Gemini and shared Claude/GPT five-hour and weekly quota windows to `omp usage`, with compatibility fallback to legacy model quotas ([#8061](https://github.com/can1357/oh-my-pi/pull/8061) by [@paolomazzitti](https://github.com/paolomazzitti)).
+
 ## [17.3.4] - 2026-08-14
 
 ### Fixed
