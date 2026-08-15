@@ -9,9 +9,10 @@ function makeSessionWithLastMessage(
 	prewalkArmed: boolean = false,
 	{
 		cost = 0,
+		directCost,
 		advisorCost = 0,
 		usingSubscription = false,
-	}: { cost?: number; advisorCost?: number; usingSubscription?: boolean } = {},
+	}: { cost?: number; directCost?: number; advisorCost?: number; usingSubscription?: boolean } = {},
 ) {
 	return {
 		messages: lastMessage ? [lastMessage] : [],
@@ -40,6 +41,7 @@ function makeSessionWithLastMessage(
 				tokensPerSecond: null,
 			}),
 			getSessionName: () => "test-session",
+			getDirectUsageCost: () => directCost,
 		},
 		getPrewalkState: () => (prewalkArmed ? { target: { id: "cheap-model", provider: "openai" } } : undefined),
 		getAsyncJobSnapshot: () => undefined,
@@ -104,6 +106,28 @@ describe("StatusLineComponent", () => {
 
 		const stripped = statusLine.getTopBorder(120).content.replace(/\x1b\[[0-9;]*m/g, "");
 		expect(stripped).toContain("$2.67 (sub) + $0.41 (adv)");
+	});
+	it("renders descendant subagent cost separately from direct session cost", () => {
+		const statusLine = new StatusLineComponent(
+			makeSessionWithLastMessage(null, false, {
+				cost: 2.67,
+				directCost: 2.67,
+				advisorCost: 0.41,
+			}) as unknown as AgentSession,
+		);
+		statusLine.setSubagentCostProvider(() => 1.23);
+
+		const stripped = statusLine.getTopBorder(200).content.replace(/\x1b\[[0-9;]*m/g, "");
+		expect(stripped).toContain("$2.67 + $1.23 (subagents) + $0.41 (adv)");
+	});
+	it("uses durable direct cost instead of aggregate task-inclusive cost", () => {
+		const statusLine = new StatusLineComponent(
+			makeSessionWithLastMessage(null, false, { cost: 5, directCost: 2 }) as unknown as AgentSession,
+		);
+
+		const stripped = statusLine.getTopBorder(120).content.replace(/\x1b\[[0-9;]*m/g, "");
+		expect(stripped).toContain("$2.00");
+		expect(stripped).not.toContain("$5.00");
 	});
 
 	it("omits advisor cost when the advisor has never been active", () => {

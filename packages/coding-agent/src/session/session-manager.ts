@@ -343,6 +343,7 @@ export type ReadonlySessionManager = Pick<
 	| "getBranch"
 	| "getHeader"
 	| "getEntries"
+	| "getDirectUsageCost"
 	| "getTree"
 	| "getUsageStatistics"
 	| "putBlob"
@@ -1853,6 +1854,17 @@ export class SessionManager {
 
 	getUsageStatistics(): UsageStatistics {
 		return this.#index.usageSnapshot();
+	}
+	getDirectUsageCost(): number | undefined {
+		let total = 0;
+		let hasAssistantUsage = false;
+		for (const entry of this.#entries) {
+			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+			hasAssistantUsage = true;
+			const cost = entry.message.usage.cost.total;
+			if (Number.isFinite(cost)) total += cost;
+		}
+		return hasAssistantUsage ? total : undefined;
 	}
 
 	/**

@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Changed
+
+- Status-line cost now separates direct session, descendant subagent, and advisor spend.
 
 ## [17.3.4] - 2026-08-14
 
