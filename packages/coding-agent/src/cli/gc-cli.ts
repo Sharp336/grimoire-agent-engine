@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
@@ -197,6 +198,8 @@ export interface EmptySessionGcResult {
 	wouldPrune: number;
 	archived: number;
 	deleted: number;
+	emptyDirs: number;
+	removedDirs: number;
 	candidates: EmptySessionGcCandidate[];
 	skipped: EmptySessionGcSkippedFile[];
 	livenessDegraded: string[];
@@ -1973,6 +1976,8 @@ async function runEmptySessionGc(
 		wouldPrune: 0,
 		archived: 0,
 		deleted: 0,
+		emptyDirs: 0,
+		removedDirs: 0,
 		candidates: [],
 		skipped: [],
 		errors: [],
@@ -2031,8 +2036,60 @@ async function runEmptySessionGc(
 			result.errors.push(`${file}: ${errorMessage(error)}`);
 		}
 	}
+	await sweepEmptySessionDirs(sessionsRoot, options.apply, result);
 	result.livenessDegraded = [...degraded];
 	return result;
+}
+
+/** True when `dir` holds no file anywhere beneath it — a tree of empty directories counts. */
+async function holdsNoFiles(dir: string): Promise<boolean> {
+	for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+		if (!entry.isDirectory()) return false;
+		if (!(await holdsNoFiles(path.join(dir, entry.name)))) return false;
+	}
+	return true;
+}
+
+/**
+ * Remove per-cwd session directories that hold nothing. Pruning a transcript
+ * leaves its directory behind, and the directory is created eagerly when a
+ * session starts — so one appears for every throwaway cwd a session ever ran
+ * in, whether or not it produced a transcript. They are swept regardless of
+ * which run emptied them, because the point is the litter that predates this
+ * one.
+ *
+ * Safe against a session starting concurrently: transcripts are appended
+ * through a long-lived descriptor, but `JsonlWriter`'s constructor re-creates
+ * the parent directory before opening it, so a directory removed between a
+ * session's eager mkdir and its first write comes back. A directory holding a
+ * live session's transcript is never a candidate — it holds a file.
+ */
+async function sweepEmptySessionDirs(
+	sessionsRoot: string,
+	apply: boolean,
+	result: EmptySessionGcResult,
+): Promise<void> {
+	let entries: Dirent[];
+	try {
+		entries = await fs.readdir(sessionsRoot, { withFileTypes: true });
+	} catch (error) {
+		if (codeOf(error) === "ENOENT") return;
+		result.errors.push(`${sessionsRoot}: ${errorMessage(error)}`);
+		return;
+	}
+	for (const entry of entries) {
+		if (!entry.isDirectory()) continue;
+		const dir = path.join(sessionsRoot, entry.name);
+		try {
+			if (!(await holdsNoFiles(dir))) continue;
+			result.emptyDirs++;
+			if (!apply) continue;
+			await fs.rm(dir, { recursive: true });
+			result.removedDirs++;
+		} catch (error) {
+			result.errors.push(`${dir}: ${errorMessage(error)}`);
+		}
+	}
 }
 
 async function checkpointWal(dbPath: string, apply: boolean): Promise<WalCheckpointResult> {
@@ -2365,6 +2422,12 @@ function renderText(result: GcResult, options: ResolvedGcOptions): string {
 			`${assistantTextChars} assistant text ${pluralize("character", assistantTextChars)}`,
 		].filter(part => part !== undefined);
 		lines.push(`${summary} (${breakdown.join(", ")})`);
+		// Silent on a clean store: an operator running this weekly should see a
+		// line only when there was something to remove.
+		if (empty.emptyDirs > 0) {
+			const dirs = `${empty.emptyDirs} empty session ${pluralize("directory", empty.emptyDirs)}`;
+			lines.push(result.apply ? `prune: removed ${empty.removedDirs} of ${dirs}` : `prune: would remove ${dirs}`);
+		}
 		for (const skipped of empty.skipped) {
 			lines.push(
 				`prune skipped: ${shortenPath(skipped.path)} ${formatLivenessReason(skipped.signals, skipped.holders)}`,

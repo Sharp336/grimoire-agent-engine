@@ -278,4 +278,71 @@ describe("omp gc empty-session pruning", () => {
 			await holder.close();
 		}
 	});
+
+	test("removes the session directory left empty by archiving its only transcript", async () => {
+		const agentDir = path.join(root, "agent");
+		const file = await writeSession(agentDir, "last-one", session => {
+			session.appendMessage(userMsg("hello?"));
+		});
+		const directory = path.dirname(file);
+
+		const result = await runGcCommand({ flags: { agentDir, pruneEmptySessions: "archive", apply: true } });
+
+		expect(result.pruneEmptySessions?.removedDirs).toBe(1);
+		expect(await Bun.file(archivedPath(agentDir, file)).exists()).toBe(true);
+		expect(await fs.exists(directory)).toBe(false);
+		expect(stdout).toContain("prune: removed 1 of 1 empty session directory");
+	});
+
+	test("removes a directory that never held a transcript, and reports it apart from sessions", async () => {
+		const agentDir = path.join(root, "agent");
+		const orphan = path.join(getSessionsDir(agentDir), "-tmp-pi-session-harness-litter");
+		await fs.mkdir(orphan, { recursive: true });
+
+		const result = await runGcCommand({ flags: { agentDir, pruneEmptySessions: "archive", apply: true } });
+
+		expect(result.pruneEmptySessions).toMatchObject({ scanned: 0, empty: 0, emptyDirs: 1, removedDirs: 1 });
+		expect(await fs.exists(orphan)).toBe(false);
+	});
+
+	test("keeps the directory of a session it decided to spare", async () => {
+		const agentDir = path.join(root, "agent");
+		const file = await writeSession(agentDir, "answered", session => {
+			session.appendMessage(userMsg("hello?"));
+			session.appendMessage(assistantMsg("hi there"));
+		});
+
+		const result = await runGcCommand({ flags: { agentDir, pruneEmptySessions: "delete", apply: true } });
+
+		expect(result.pruneEmptySessions).toMatchObject({ empty: 0, emptyDirs: 0, removedDirs: 0 });
+		expect(await Bun.file(file).exists()).toBe(true);
+		expect(stdout).not.toContain("empty session director");
+	});
+
+	test("a nested empty subdirectory is still empty; a file inside one is not", async () => {
+		const agentDir = path.join(root, "agent");
+		const sessionsRoot = getSessionsDir(agentDir);
+		const hollow = path.join(sessionsRoot, "-tmp-hollow");
+		const occupied = path.join(sessionsRoot, "-tmp-occupied");
+		await fs.mkdir(path.join(hollow, "subagents"), { recursive: true });
+		await Bun.write(path.join(occupied, "subagents", "nested.jsonl"), "{}\n");
+
+		const result = await runGcCommand({ flags: { agentDir, pruneEmptySessions: "archive", apply: true } });
+
+		expect(result.pruneEmptySessions).toMatchObject({ emptyDirs: 1, removedDirs: 1 });
+		expect(await fs.exists(hollow)).toBe(false);
+		expect(await fs.exists(occupied)).toBe(true);
+	});
+
+	test("dry-run counts empty directories without removing them", async () => {
+		const agentDir = path.join(root, "agent");
+		const orphan = path.join(getSessionsDir(agentDir), "-tmp-dry");
+		await fs.mkdir(orphan, { recursive: true });
+
+		const result = await runGcCommand({ flags: { agentDir, pruneEmptySessions: "archive" } });
+
+		expect(result.pruneEmptySessions).toMatchObject({ emptyDirs: 1, removedDirs: 0 });
+		expect(await fs.exists(orphan)).toBe(true);
+		expect(stdout).toContain("prune: would remove 1 empty session directory");
+	});
 });
