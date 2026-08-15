@@ -101,6 +101,35 @@ describe("startServer access", () => {
 			server.stop();
 		}
 	});
+
+	it("binds to a configurable non-loopback hostname when requested", async () => {
+		let nonLoopbackHostname: string | undefined;
+		const interfaces = networkInterfaces();
+		for (const name in interfaces) {
+			const addresses = interfaces[name] ?? [];
+			for (const address of addresses) {
+				if (address.family === "IPv4" && !address.internal) {
+					nonLoopbackHostname = address.address;
+					break;
+				}
+			}
+			if (nonLoopbackHostname) break;
+		}
+		// No external interface to bind (e.g. isolated CI); nothing to assert.
+		if (!nonLoopbackHostname) return;
+
+		const server = await startServer(0, nonLoopbackHostname);
+		try {
+			expect(server.hostname).toBe(nonLoopbackHostname);
+			expect(await tcpConnects(nonLoopbackHostname, server.port)).toBe(true);
+			const response = await fetch(`http://${nonLoopbackHostname}:${server.port}/api/stats/models`);
+			expect(response.status).toBe(200);
+			expect(response.headers.get(STATS_DASHBOARD_HEADER)).toBe(STATS_DASHBOARD_SECURITY_VERSION);
+			await response.body?.cancel();
+		} finally {
+			server.stop();
+		}
+	});
 });
 
 describe("startServer port conflicts", () => {

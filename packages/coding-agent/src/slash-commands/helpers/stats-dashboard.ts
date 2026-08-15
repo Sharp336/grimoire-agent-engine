@@ -11,6 +11,7 @@ interface StatsDashboardServer {
 
 export interface StatsDashboardArgs {
 	port: number;
+	host?: string;
 }
 
 export interface StatsDashboardLaunchResult {
@@ -20,7 +21,7 @@ export interface StatsDashboardLaunchResult {
 
 let activeStatsServer: StatsDashboardServer | undefined;
 
-const STATS_DASHBOARD_USAGE = "Usage: /stats [--port <port>]";
+const STATS_DASHBOARD_USAGE = "Usage: /stats [--port <port>] [--host <ip>]";
 
 function parsePort(value: string | undefined): number | string {
 	if (!value) return `Missing port. ${STATS_DASHBOARD_USAGE}`;
@@ -33,6 +34,7 @@ function parsePort(value: string | undefined): number | string {
 export function parseStatsDashboardArgs(args: string): StatsDashboardArgs | { error: string } {
 	const tokens = args.split(/\s+/).filter(Boolean);
 	let port = DEFAULT_STATS_DASHBOARD_PORT;
+	let host: string | undefined;
 
 	for (let i = 0; i < tokens.length; i++) {
 		const token = tokens[i];
@@ -48,10 +50,19 @@ export function parseStatsDashboardArgs(args: string): StatsDashboardArgs | { er
 			port = parsed;
 			continue;
 		}
+		if (token === "--host") {
+			host = tokens[++i];
+			if (!host) return { error: `Missing host. ${STATS_DASHBOARD_USAGE}` };
+			continue;
+		}
+		if (token.startsWith("--host=")) {
+			host = token.slice("--host=".length);
+			continue;
+		}
 		return { error: `Unknown option: ${token}. ${STATS_DASHBOARD_USAGE}` };
 	}
 
-	return { port };
+	return { port, host };
 }
 
 export async function launchStatsDashboard(args: StatsDashboardArgs): Promise<StatsDashboardLaunchResult> {
@@ -60,7 +71,7 @@ export async function launchStatsDashboard(args: StatsDashboardArgs): Promise<St
 	let requestedPortIgnored = false;
 
 	if (!activeStatsServer) {
-		activeStatsServer = await stats.startServer(args.port);
+		activeStatsServer = await stats.startServer(args.port, args.host);
 	} else if (args.port !== activeStatsServer.port) {
 		requestedPortIgnored = true;
 	}

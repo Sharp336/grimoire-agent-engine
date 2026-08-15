@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `omp stats` and `/stats` accept a `--host` bind interface (default `127.0.0.1`), so the dashboard can be exposed beyond the host, e.g. from a container with `--host 0.0.0.0`.
+
 ## [17.3.4] - 2026-08-14
 
 ### Changed

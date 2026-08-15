@@ -11,6 +11,7 @@ export default class Stats extends Command {
 	static description = commandHelp.description;
 	static flags = {
 		port: Flags.integer({ char: "p", description: "Port for the dashboard server", default: 3847 }),
+		host: Flags.string({ description: "Host for the dashboard server", default: "127.0.0.1" }),
 		json: Flags.boolean({ char: "j", description: "Output stats as JSON", default: false }),
 		summary: Flags.boolean({ char: "s", description: "Print summary to console", default: false }),
 	};
@@ -21,6 +22,7 @@ export default class Stats extends Command {
 		const cmd: StatsCommandArgs = {
 			port: flags.port,
 			json: flags.json,
+			host: flags.host,
 			summary: flags.summary,
 		};
 

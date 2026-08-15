@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Made the dashboard bind interface configurable via `--host` (default `127.0.0.1`), so the server can be exposed beyond the host, e.g. from a container with `--host 0.0.0.0`.
+
 ## [17.3.0] - 2026-08-13
 
 ### Added

@@ -4,6 +4,7 @@ import { parseArgs } from "node:util";
 import { formatDuration, formatNumber, formatPercent } from "@oh-my-pi/pi-utils";
 import { getDashboardStats, getTotalMessageCount, syncAllSessions } from "./aggregator";
 import { closeDb } from "./db";
+import { STATS_DASHBOARD_HOSTNAME } from "./port-conflict";
 import { startServer } from "./server";
 
 export {
@@ -103,6 +104,7 @@ async function main(): Promise<void> {
 	const { values } = parseArgs({
 		options: {
 			port: { type: "string", short: "p", default: "3847" },
+			host: { type: "string", default: STATS_DASHBOARD_HOSTNAME },
 			json: { type: "boolean", short: "j", default: false },
 			sync: { type: "boolean", short: "s", default: false },
 			help: { type: "boolean", short: "h", default: false },
@@ -119,6 +121,7 @@ Usage:
 
 Options:
   -p, --port <port>  Port for the dashboard server (default: 3847)
+      --host <ip>    Interface to bind (default: 127.0.0.1; use 0.0.0.0 to expose)
   -j, --json         Output stats as JSON and exit
   -s, --sync         Sync session files and show summary
   -h, --help         Show this help message
@@ -127,6 +130,7 @@ Examples:
   omp-stats              # Start dashboard server
   omp-stats --json       # Print stats as JSON
   omp-stats --port 8080  # Start on custom port
+  omp-stats --host 0.0.0.0  # Expose beyond the host (e.g. from a container)
   omp-stats --sync       # Sync and show summary
 `);
 		return;
@@ -172,7 +176,7 @@ Examples:
 
 		// Start server
 		const port = parseInt(values.port || "3847", 10);
-		const { hostname, port: actualPort } = await startServer(port);
+		const { hostname, port: actualPort } = await startServer(port, values.host);
 		console.log(`Dashboard available at: http://${hostname}:${actualPort}`);
 		console.log("Press Ctrl+C to stop\n");
 

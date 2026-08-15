@@ -306,10 +306,10 @@ async function handleStatic(requestPath: string): Promise<Response> {
 	return new Response("Not Found", { status: 404 });
 }
 
-function createDashboardServer(port: number) {
+function createDashboardServer(port: number, hostname: string) {
 	const server = Bun.serve({
 		port,
-		hostname: STATS_DASHBOARD_HOSTNAME,
+		hostname,
 		async fetch(req) {
 			const url = new URL(req.url);
 			const path = url.pathname;
@@ -357,18 +357,25 @@ function createDashboardServer(port: number) {
 
 /**
  * Start the HTTP server, reusing a live dashboard or reclaiming a stale omp listener.
+ *
+ * The bind hostname defaults to the loopback interface so the dashboard stays
+ * private; pass `0.0.0.0` or a specific interface (e.g. a container bridge) to
+ * expose it beyond the host.
  */
-export async function startServer(port = 3847): Promise<{ hostname: string; port: number; stop: () => void }> {
+export async function startServer(
+	port = 3847,
+	hostname: string = STATS_DASHBOARD_HOSTNAME,
+): Promise<{ hostname: string; port: number; stop: () => void }> {
 	await ensureClientBuild();
 	const preparation = await prepareStatsPort(port);
 	if (preparation === "reuse") {
-		return { hostname: STATS_DASHBOARD_HOSTNAME, port, stop: () => {} };
+		return { hostname, port, stop: () => {} };
 	}
 
 	try {
-		const server = createDashboardServer(port);
+		const server = createDashboardServer(port, hostname);
 		return {
-			hostname: STATS_DASHBOARD_HOSTNAME,
+			hostname,
 			port: server.port ?? port,
 			stop: () => server.stop(),
 		};
@@ -377,13 +384,13 @@ export async function startServer(port = 3847): Promise<{ hostname: string; port
 
 		const recovery = await recoverStatsPort(port);
 		if (recovery === "reuse") {
-			return { hostname: STATS_DASHBOARD_HOSTNAME, port, stop: () => {} };
+			return { hostname, port, stop: () => {} };
 		}
 
 		try {
-			const server = createDashboardServer(port);
+			const server = createDashboardServer(port, hostname);
 			return {
-				hostname: STATS_DASHBOARD_HOSTNAME,
+				hostname,
 				port: server.port ?? port,
 				stop: () => server.stop(),
 			};
