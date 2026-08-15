@@ -60,13 +60,13 @@ describe("AgentSession.cancelSubagent", () => {
 			"task",
 			id,
 			async ({ signal }) => {
-				await new Promise<void>((resolve) => {
-					if (signal.aborted) {
-						resolve();
-						return;
-					}
+				const { promise, resolve } = Promise.withResolvers<void>();
+				if (signal.aborted) {
+					resolve();
+				} else {
 					signal.addEventListener("abort", () => resolve(), { once: true });
-				});
+				}
+				await promise;
 				return "done";
 			},
 			{ id, ownerId, agentId: id },
