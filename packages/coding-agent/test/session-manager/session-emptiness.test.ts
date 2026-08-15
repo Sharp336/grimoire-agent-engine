@@ -3,6 +3,7 @@ import {
 	inspectSessionEmptiness,
 	isRespondingAssistantEntry,
 	type SessionEmptiness,
+	sessionPruneReason,
 } from "@oh-my-pi/pi-coding-agent/session/session-emptiness";
 import type { FileEntry, SessionHeader } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -51,14 +52,17 @@ function fileEntries(build: (session: SessionManager) => void): FileEntry[] {
 }
 
 function expected(overrides: Partial<SessionEmptiness> = {}): SessionEmptiness {
-	return {
+	const merged = {
 		hasResponse: false,
+		hasPrompt: false,
 		userMessages: 0,
 		assistantMessages: 0,
 		assistantTextChars: 0,
 		unfinishedAttempts: 0,
 		...overrides,
 	};
+	// hasPrompt tracks userMessages, so every existing case states it once.
+	return { ...merged, hasPrompt: overrides.hasPrompt ?? merged.userMessages > 0 };
 }
 
 describe("inspectSessionEmptiness", () => {
@@ -169,6 +173,40 @@ describe("inspectSessionEmptiness", () => {
 		expect(inspectSessionEmptiness(entries)).toEqual(
 			expected({ hasResponse: true, userMessages: 2, assistantMessages: 1, assistantTextChars: 18 }),
 		);
+	});
+
+	test("a canned assistant reply with no prompt behind it is still nothing anyone asked for", () => {
+		// The exact shape a test-harness fork leaves in the sessions tree: one
+		// assistant message, text "ok", stop reason "stop", no user message ever.
+		const entries = fileEntries(session => {
+			session.appendMessage(assistantMsg("ok"));
+		});
+		const emptiness = inspectSessionEmptiness(entries);
+
+		expect(emptiness).toEqual(
+			expected({ hasResponse: true, hasPrompt: false, assistantMessages: 1, assistantTextChars: 2 }),
+		);
+		// hasResponse alone would keep this file forever.
+		expect(sessionPruneReason(emptiness)).toBe("no-prompt");
+	});
+});
+
+describe("sessionPruneReason", () => {
+	test("the two failures are independent: a real exchange needs both a prompt and an answer", () => {
+		const exchange = fileEntries(session => {
+			session.appendMessage(userMsg("ask"));
+			session.appendMessage(assistantMsg("answer"));
+		});
+		const unanswered = fileEntries(session => {
+			session.appendMessage(userMsg("ask"));
+		});
+		const unasked = fileEntries(session => {
+			session.appendMessage(assistantMsg("ok"));
+		});
+
+		expect(sessionPruneReason(inspectSessionEmptiness(exchange))).toBeUndefined();
+		expect(sessionPruneReason(inspectSessionEmptiness(unanswered))).toBe("no-response");
+		expect(sessionPruneReason(inspectSessionEmptiness(unasked))).toBe("no-prompt");
 	});
 });
 

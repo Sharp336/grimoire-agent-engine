@@ -94,6 +94,7 @@ describe("omp gc empty-session pruning", () => {
 			{
 				path: file,
 				sessionId: "user-only",
+				reason: "no-response",
 				userMessages: 1,
 				assistantMessages: 0,
 				assistantTextChars: 0,
@@ -103,7 +104,7 @@ describe("omp gc empty-session pruning", () => {
 		]);
 		expect(await Bun.file(file).text()).toBe(before);
 		expect(stdout.split("\n")[1]).toBe(
-			"empty sessions: would archive 1 of 1 empty session (0 assistant text characters)",
+			"prune: would archive 1 of 1 dead session (1 unanswered, 0 assistant text characters)",
 		);
 	});
 
@@ -126,7 +127,9 @@ describe("omp gc empty-session pruning", () => {
 			"question artifact",
 		);
 		expect(await Bun.file(artifact).exists()).toBe(false);
-		expect(stdout.split("\n")[1]).toBe("empty sessions: archived 1 of 1 empty session (0 assistant text characters)");
+		expect(stdout.split("\n")[1]).toBe(
+			"prune: archived 1 of 1 dead session (1 unanswered, 0 assistant text characters)",
+		);
 	});
 
 	test("delete apply unlinks the session and its artifacts", async () => {
@@ -143,7 +146,9 @@ describe("omp gc empty-session pruning", () => {
 		expect(result.pruneEmptySessions?.deleted).toBe(1);
 		expect(await Bun.file(file).exists()).toBe(false);
 		expect(await Bun.file(artifactsPath(file)).exists()).toBe(false);
-		expect(stdout.split("\n")[1]).toBe("empty sessions: deleted 1 of 1 empty session (0 assistant text characters)");
+		expect(stdout.split("\n")[1]).toBe(
+			"prune: deleted 1 of 1 dead session (1 unanswered, 0 assistant text characters)",
+		);
 	});
 
 	test("a real assistant reply is never a candidate", async () => {
@@ -188,6 +193,29 @@ describe("omp gc empty-session pruning", () => {
 		expect(await Bun.file(textFile).exists()).toBe(true);
 	});
 
+	test("prunes a session the model answered but nobody ever asked", async () => {
+		const agentDir = path.join(root, "agent");
+		// A test harness forking a session leaves exactly this: one assistant
+		// message, no user message. `hasResponse` is true, so the older rule kept
+		// it forever and 13 of them accumulated in a real sessions tree.
+		const litter = await writeSession(agentDir, "harness-litter", session => {
+			session.appendMessage(assistantMsg("ok"));
+		});
+		const real = await writeSession(agentDir, "real-exchange", session => {
+			session.appendMessage(userMsg("do the work"));
+			session.appendMessage(assistantMsg("done"));
+		});
+
+		const result = await runGcCommand({ flags: { agentDir, pruneEmptySessions: "archive" } });
+
+		expect(result.pruneEmptySessions?.empty).toBe(1);
+		expect(result.pruneEmptySessions?.candidates).toEqual([
+			expect.objectContaining({ path: litter, sessionId: "harness-litter", reason: "no-prompt" }),
+		]);
+		expect(stdout).toContain("1 nobody asked");
+		expect(await Bun.file(real).exists()).toBe(true);
+	});
+
 	test("prunes a fresh session when no process holds it", async () => {
 		const agentDir = path.join(root, "agent");
 		const now = new Date();
@@ -211,6 +239,9 @@ describe("omp gc empty-session pruning", () => {
 	test("backup, broken, compressed, and nested subagent files are ignored", async () => {
 		const agentDir = path.join(root, "agent");
 		const file = await writeSession(agentDir, "top-level", session => {
+			// A real exchange: this test is about which files get scanned, so the
+			// content must not itself be prunable under either reason.
+			session.appendMessage(userMsg("ask"));
 			session.appendMessage(assistantMsg("answered"));
 		});
 		const content = await Bun.file(file).text();
@@ -242,7 +273,7 @@ describe("omp gc empty-session pruning", () => {
 			expect(result.pruneEmptySessions?.skipped[0]?.signals).toContain("open-handle");
 			expect(result.pruneEmptySessions?.skipped[0]?.holders.some(value => value.pid === holder.pid)).toBe(true);
 			expect(await Bun.file(file).exists()).toBe(true);
-			expect(stdout).toContain(`empty sessions skipped: ${file} held open by pid ${holder.pid} (`);
+			expect(stdout).toContain(`prune skipped: ${file} held open by pid ${holder.pid} (`);
 		} finally {
 			await holder.close();
 		}

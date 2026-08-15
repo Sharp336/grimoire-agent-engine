@@ -16,8 +16,8 @@ export default class Gc extends Command {
 		archive: Flags.boolean({ description: "Archive cold sessions" }),
 		"merge-duplicates": Flags.boolean({ description: "Merge duplicate session files that share a session id" }),
 		"merge-forks": Flags.boolean({ description: "Graft forked sessions back into their parent as branches" }),
-		"prune-empty-sessions": Flags.string({
-			description: "Prune sessions where the model never spoke or completed a turn: archive (default) or delete",
+		prune: Flags.string({
+			description: "Prune sessions nobody asked for and nobody answered: archive (default) or delete",
 			options: ["archive", "delete"],
 			optionalValue: "archive",
 		}),
@@ -38,7 +38,7 @@ export default class Gc extends Command {
 				archive: flags.archive,
 				mergeDuplicates: flags["merge-duplicates"],
 				mergeForks: flags["merge-forks"],
-				pruneEmptySessions: flags["prune-empty-sessions"] as "archive" | "delete" | undefined,
+				pruneEmptySessions: flags.prune as "archive" | "delete" | undefined,
 				wal: flags.wal,
 				coldArchiveAfterDays: flags["cold-archive-after-days"],
 				retainNewestGlobal: flags["retain-newest-global"],

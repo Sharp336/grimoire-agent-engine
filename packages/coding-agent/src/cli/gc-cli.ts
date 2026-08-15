@@ -16,7 +16,7 @@ import {
 import { Settings } from "../config/settings";
 import { getDefault } from "../config/settings-schema";
 import { BLOB_HASH_RE } from "../session/blob-store";
-import { inspectSessionEmptiness } from "../session/session-emptiness";
+import { inspectSessionEmptiness, type SessionPruneReason, sessionPruneReason } from "../session/session-emptiness";
 import type { FileEntry, SessionHeader } from "../session/session-entries";
 import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
 import {
@@ -175,6 +175,7 @@ export interface ForkMergeGcResult {
 export interface EmptySessionGcCandidate {
 	path: string;
 	sessionId: string;
+	reason: SessionPruneReason;
 	userMessages: number;
 	assistantMessages: number;
 	assistantTextChars: number;
@@ -359,7 +360,7 @@ export function collectGcErrors(result: GcResult): string[] {
 		...(result.archive?.errors ?? []).map(error => `archive: ${error}`),
 		...(result.mergeDuplicates?.errors ?? []).map(error => `merge: ${error}`),
 		...(result.mergeForks?.errors ?? []).map(error => `fork merge: ${error}`),
-		...(result.pruneEmptySessions?.errors ?? []).map(error => `empty sessions: ${error}`),
+		...(result.pruneEmptySessions?.errors ?? []).map(error => `prune: ${error}`),
 	];
 }
 
@@ -2001,12 +2002,14 @@ async function runEmptySessionGc(
 			const header = entries[0];
 			if (header?.type !== "session") throw new Error("session header missing");
 			const emptiness = inspectSessionEmptiness(entries);
-			if (emptiness.hasResponse) continue;
+			const reason = sessionPruneReason(emptiness);
+			if (!reason) continue;
 
 			result.empty++;
 			result.candidates.push({
 				path: file,
 				sessionId: header.id,
+				reason,
 				userMessages: emptiness.userMessages,
 				assistantMessages: emptiness.assistantMessages,
 				assistantTextChars: emptiness.assistantTextChars,
@@ -2348,16 +2351,26 @@ function renderText(result: GcResult, options: ResolvedGcOptions): string {
 		const pastTense = mode === "archive" ? "archived" : "deleted";
 		const affected = mode === "archive" ? empty.archived : empty.deleted;
 		const assistantTextChars = empty.candidates.reduce((sum, candidate) => sum + candidate.assistantTextChars, 0);
+		const unasked = empty.candidates.filter(candidate => candidate.reason === "no-prompt").length;
+		const unanswered = empty.candidates.length - unasked;
 		const summary = result.apply
-			? `empty sessions: ${pastTense} ${affected} of ${empty.empty} empty ${pluralize("session", empty.empty)}`
-			: `empty sessions: would ${mode} ${empty.wouldPrune} of ${empty.empty} empty ${pluralize("session", empty.empty)}`;
-		lines.push(`${summary} (${assistantTextChars} assistant text ${pluralize("character", assistantTextChars)})`);
+			? `prune: ${pastTense} ${affected} of ${empty.empty} dead ${pluralize("session", empty.empty)}`
+			: `prune: would ${mode} ${empty.wouldPrune} of ${empty.empty} dead ${pluralize("session", empty.empty)}`;
+		// Two reasons, reported apart: "nobody asked" is usually harness litter,
+		// "nobody answered" is usually a prompt that died mid-flight. An operator
+		// auditing a candidate list wants to know which pile it landed in.
+		const breakdown = [
+			unanswered > 0 ? `${unanswered} unanswered` : undefined,
+			unasked > 0 ? `${unasked} nobody asked` : undefined,
+			`${assistantTextChars} assistant text ${pluralize("character", assistantTextChars)}`,
+		].filter(part => part !== undefined);
+		lines.push(`${summary} (${breakdown.join(", ")})`);
 		for (const skipped of empty.skipped) {
 			lines.push(
-				`empty sessions skipped: ${shortenPath(skipped.path)} ${formatLivenessReason(skipped.signals, skipped.holders)}`,
+				`prune skipped: ${shortenPath(skipped.path)} ${formatLivenessReason(skipped.signals, skipped.holders)}`,
 			);
 		}
-		if (empty.errors.length > 0) lines.push(`empty session errors: ${empty.errors.length}`);
+		if (empty.errors.length > 0) lines.push(`prune errors: ${empty.errors.length}`);
 	}
 	if (result.wal) {
 		const state = result.wal.checkpointed ? "checkpointed" : "checkpoint dry-run";

@@ -12,12 +12,32 @@ import type { FileEntry } from "./session-entries";
 export interface SessionEmptiness {
 	/** The model said something, or finished a turn, somewhere in the file. */
 	hasResponse: boolean;
+	/** A human asked for something. Without this, nothing in the file was ever requested. */
+	hasPrompt: boolean;
 	userMessages: number;
 	assistantMessages: number;
 	/** Prose the assistant wrote, summed over every text block, whitespace trimmed off each. */
 	assistantTextChars: number;
 	/** Assistant messages that wrote no prose and never ended a turn. */
 	unfinishedAttempts: number;
+}
+
+/**
+ * Why a session is prunable. Two independent failures, not degrees of one:
+ *
+ * - `no-response` — a human asked, the model never answered.
+ * - `no-prompt` — nobody ever asked. The model may well have spoken; a reply to
+ *   no question is still nothing anyone wanted. Test harnesses and one-token
+ *   probes land here, and `hasResponse` alone can never catch them because the
+ *   canned reply makes the file look answered.
+ */
+export type SessionPruneReason = "no-response" | "no-prompt";
+
+/** The prune verdict, or `undefined` when the session holds a real exchange. */
+export function sessionPruneReason(emptiness: SessionEmptiness): SessionPruneReason | undefined {
+	if (!emptiness.hasPrompt) return "no-prompt";
+	if (!emptiness.hasResponse) return "no-response";
+	return undefined;
 }
 
 /**
@@ -76,9 +96,8 @@ export function isRespondingAssistantEntry(entry: FileEntry): boolean {
 /**
  * Inspect every logical entry in a session file, including abandoned branches.
  *
- * A session is a prune candidate only when the model never said anything and
- * never completed a turn: pure tool-call traffic that was then abandoned, or
- * nothing but user prompts.
+ * Two things make a session prunable, and they are independent: the model never
+ * answered, or nobody ever asked. See `sessionPruneReason`.
  */
 export function inspectSessionEmptiness(entries: readonly FileEntry[]): SessionEmptiness {
 	let hasResponse = false;
@@ -102,5 +121,12 @@ export function inspectSessionEmptiness(entries: readonly FileEntry[]): SessionE
 		else unfinishedAttempts++;
 	}
 
-	return { hasResponse, userMessages, assistantMessages, assistantTextChars, unfinishedAttempts };
+	return {
+		hasResponse,
+		hasPrompt: userMessages > 0,
+		userMessages,
+		assistantMessages,
+		assistantTextChars,
+		unfinishedAttempts,
+	};
 }
