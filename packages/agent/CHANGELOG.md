@@ -13,6 +13,10 @@
 ### Fixed
 
 - Improved the manual `/shake` command to retain a small history of recent tool results, preventing the agent from losing its active working context.
+- Manual `/shake` now keeps a small recent tail of tool results instead of stripping every eligible result, so the agent does not lose the context it is currently working from ([#7776](https://github.com/can1357/oh-my-pi/issues/7776)).
+### Added
+
+- Added trusted tool-call instruction APIs: `beforeToolCall` can return `additionalContext`, and tools can call `AgentToolContext.addAdditionalContext()`. Instructions are injected after settled results in assistant call order and before the next provider request; raw tool output and other untrusted content remain ordinary tool results.
 
 ## [17.2.13] - 2026-08-11
 

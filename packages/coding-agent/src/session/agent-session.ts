@@ -2395,7 +2395,7 @@ export class AgentSession {
 
 	async #persistTurnMessagesForMidRunCompaction(context: AgentTurnEndContext | undefined): Promise<boolean> {
 		if (!context) return true;
-		const turnMessages = [context.message, ...context.toolResults];
+		const turnMessages = [context.message, ...context.toolResults, ...context.additionalMessages];
 		for (const message of turnMessages) {
 			await this.#waitForSessionMessagePersistence(message);
 		}
@@ -3321,15 +3321,16 @@ export class AgentSession {
 			toolCallId: ctx.toolCall.id,
 			input: normalizeToolEventInput(ctx.tool.name, resolveToolEventInput(ctx.tool, eventArgs)),
 		});
-		if (callResult?.block) {
+		if (!callResult) return undefined;
+		if (callResult.block) {
 			return { block: true, reason: callResult.reason || "Tool execution was blocked by an extension" };
 		}
 		// A computer call's event input is a synthetic {actions, pendingSafetyChecks}
 		// view, not the execution params — a revision cannot map back onto them.
-		if (callResult?.input !== undefined && !computer) {
-			return { args: callResult.input };
-		}
-		return undefined;
+		return {
+			...(callResult.input !== undefined && !computer ? { args: callResult.input } : {}),
+			...(callResult.additionalContext !== undefined ? { additionalContext: callResult.additionalContext } : {}),
+		};
 	}
 
 	/** Find the last assistant message in agent state (including aborted ones) */

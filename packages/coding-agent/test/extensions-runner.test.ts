@@ -6,7 +6,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, expectTyp
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Type } from "@oh-my-pi/omptype/typebox";
-import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { AgentMessage, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -2622,6 +2622,106 @@ describe("ExtensionRunner", () => {
 				.split("\n")
 				.map(line => JSON.parse(line));
 			expect(executed).toEqual([{ command: "echo second" }]);
+		});
+
+		it("preserves additional context from every non-blocking handler in registration order", async () => {
+			const first = `
+				export default function(pi) {
+					pi.on("tool_call", async () => ({
+						input: { command: "echo first" },
+						additionalContext: "first context",
+					}));
+					pi.on("tool_call", async () => ({ additionalContext: "   " }));
+				}
+			`;
+			const second = `
+				export default function(pi) {
+					pi.on("tool_call", async () => ({ additionalContext: "second context" }));
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "tool-call-context-a.ts"), first);
+			fs.writeFileSync(path.join(extensionsDir, "tool-call-context-b.ts"), second);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			await expect(
+				runner.emitToolCall({
+					type: "tool_call",
+					toolName: "bash",
+					toolCallId: "tool-call-id",
+					input: { command: "echo original" },
+				}),
+			).resolves.toEqual({
+				input: { command: "echo first" },
+				additionalContext: "first context\n\nsecond context",
+			});
+		});
+
+		it("forwards passive context from wrapper-dispatched calls through the tool context", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("tool_call", async () => ({ additionalContext: "nested device context" }));
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "tool-call-wrapper-context.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const wrapped = new ExtensionToolWrapper(
+				createRecordingTool(path.join(tempDir.path(), "context-call.jsonl")),
+				runner,
+			);
+			const delivered: string[] = [];
+
+			await wrapped.execute("tool-call-id", { command: "echo context" }, undefined, undefined, {
+				...runner.createContext(),
+				addAdditionalContext: (context: string) => {
+					delivered.push(context);
+				},
+			} as unknown as AgentToolContext);
+
+			expect(delivered).toEqual(["nested device context"]);
+		});
+
+		it("discards collected additional context when a later handler blocks", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("tool_call", async () => ({ additionalContext: "must not leak" }));
+					pi.on("tool_call", async () => ({ block: true, reason: "blocked" }));
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "tool-call-context-block.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			await expect(
+				runner.emitToolCall({
+					type: "tool_call",
+					toolName: "bash",
+					toolCallId: "tool-call-id",
+					input: { command: "echo original" },
+				}),
+			).resolves.toEqual({ block: true, reason: "blocked" });
 		});
 
 		it("prompts for the revised input, not the original, on an approval-gated tool (P1 prompt→prompt)", async () => {

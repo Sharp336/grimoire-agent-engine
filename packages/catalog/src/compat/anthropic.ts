@@ -142,11 +142,11 @@ export function buildAnthropicCompat(spec: ModelSpec<"anthropic-messages">): Res
 		// Long cache retention is only sent to the official API by default;
 		// proxies opt in explicitly via `compat.supportsLongCacheRetention: true`.
 		supportsLongCacheRetention: official,
-		// First-party Claude API only. Bedrock/Vertex/Foundry and other
-		// Anthropic-compatible gateways reject mid-conversation system roles, so
-		// detection requires the canonical api.anthropic.com host plus a
-		// supported model id.
-		supportsMidConversationSystem: official && supportsMidConversationSystemMessages(spec.id),
+		// The GA mid-conversation system role is available on the first-party
+		// Claude API and Vertex's native publishers/anthropic route for supported
+		// model families. Other Anthropic-compatible gateways remain opt-in.
+		supportsMidConversationSystem:
+			(official || isVertexAnthropicRoute(baseUrl)) && supportsMidConversationSystemMessages(spec.id),
 		supportsForcedToolChoice: !requiresThinkingEnabled && !isAnthropicFableOrMythosModel(spec.id),
 		// Opus 4.7+ and Fable/Mythos reject temperature/top_p/top_k with a 400.
 		supportsSamplingParams: !hasOpus47ApiRestrictions(spec.id),

@@ -110,7 +110,7 @@ Hook events are strongly typed in `types.ts`.
 
 ### Tool events (pre/post model)
 
-- `tool_call` (pre-execution) → can return `{ block?: boolean; reason?: string; input?: Record<string, unknown> }`. A non-blocking handler that returns `input` replaces the arguments the tool executes with (the raw execution input, not the normalized `event.input` view); ignored when `block` is true, and not applied to `computer` tool calls.
+- `tool_call` (pre-execution) → can return `{ block?: boolean; reason?: string; input?: Record<string, unknown>; additionalContext?: string }`. A non-blocking handler that returns `input` replaces the arguments the tool executes with (the raw execution input, not the normalized `event.input` view); ignored when `block` is true, and not applied to `computer` tool calls. Non-empty `additionalContext` values from all non-blocking handlers are delivered after the tool results and before the next provider request.
 - `tool_result` (post-execution) → can return `{ content?; details?; isError? }`
 
 This is the hook subsystem’s core pre/post interception model.
@@ -138,8 +138,8 @@ tool_call handlers
 
 `HookToolWrapper.execute()` emits `tool_call` before tool execution.
 
-- if any handler returns `{ block: true }`, execution stops
-- if handler throws, wrapper fails closed and blocks execution
+- if any handler returns `{ block: true }`, execution stops and context already collected for that call is discarded
+- if handler throws, wrapper fails closed, blocks execution, and discards collected context
 - returned `reason` becomes the thrown error text
 
 ### 2) Tool execution
@@ -165,6 +165,7 @@ On tool failure, wrapper emits `tool_result` with `isError: true` and error text
 ### What hooks can mutate
 
 - LLM context for a single call via `context` (`messages` replacement chain)
+- passive context for the next provider request via `additionalContext` from a non-blocking `tool_call` handler
 - raw tool execution arguments by returning `input` from `tool_call` (except `computer` calls)
 - tool output content/details on successful tool calls (`tool_result` path)
 - pre-agent injected message via `before_agent_start`
@@ -198,7 +199,7 @@ Inside `HookRunner`, order is deterministic by registration sequence:
 
 Conflict behavior by event type:
 
-- `tool_call`: last returned result wins unless a handler blocks; first block short-circuits. A returned `input` (execution-argument override) follows the same last-wins rule; handlers do not observe each other's revisions
+- `tool_call`: every non-empty `additionalContext` is preserved in handler order; `input` remains last-wins; first block short-circuits and discards context collected for that call. Handlers do not observe each other's input revisions
 - `tool_result`: last returned override wins (no short-circuit)
 - `context`: chained; each handler receives prior handler’s message output
 - `before_agent_start`: first returned message is kept; later messages ignored

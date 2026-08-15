@@ -54,6 +54,8 @@ export interface AgentTurnEndContext {
 	message: AgentMessage;
 	/** Tool results produced by this turn, already paired with `message` in the live context. */
 	toolResults: ToolResultMessage[];
+	/** Passive model-visible messages appended after the tool results at this boundary. */
+	additionalMessages: AgentMessage[];
 	/** True when the current tool-loop batch is continuing without yielding to post-turn steering. */
 	willContinue: boolean;
 }
@@ -574,11 +576,17 @@ export type AgentToolCall = Extract<AssistantMessage["content"][number], { type:
  * written back to the tool-call block on the assistant message, and seen by
  * history, scheduling, execution events, and `tool.execute` alike. It is
  * ignored when `block` is true.
+ *
+ * Set `additionalContext` to attach passive model-visible context to this call.
+ * Non-empty values from a tool batch are injected in assistant tool-call order
+ * after every result settles and before the next provider request. It is ignored
+ * when this call is blocked.
  */
 export interface BeforeToolCallResult {
 	block?: boolean;
 	reason?: string;
 	args?: Record<string, unknown>;
+	additionalContext?: string;
 }
 
 /**
@@ -746,7 +754,14 @@ export type ToolApproval = ToolApprovalDecision | ((args: unknown) => ToolApprov
  * Apps can extend via declaration merging.
  */
 export interface AgentToolContext {
-	// Empty by default - apps extend via declaration merging
+	/**
+	 * Attach trusted, agent-authored instructions to the next provider request.
+	 * The host emits them after tool results with developer/system priority where
+	 * the selected transport supports it. Do not use this channel for raw tool
+	 * output, retrieved documents, web content, or other untrusted data; return
+	 * those through the ordinary tool result instead.
+	 */
+	addAdditionalContext?(context: string): void;
 }
 
 export type AgentToolExecFn<TParameters extends TSchema = TSchema, TDetails = any, TTheme = unknown> = (

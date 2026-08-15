@@ -137,11 +137,9 @@ export type ContentBlockParam =
 	| FallbackBlockParam;
 
 /**
- * A single conversation turn.
- *
- * `system` is the Opus 4.8+ mid-conversation system role
- * (`mid-conversation-system-2026-04-07` beta); the public API otherwise only
- * accepts `user` / `assistant`.
+ * A single conversation turn. `system` is the GA mid-conversation instruction
+ * role accepted by supported Claude models and endpoints; compatibility gating
+ * and placement validation happen before this wire type is constructed.
  */
 export type MessageParam = {
 	role: "user" | "assistant" | "system";

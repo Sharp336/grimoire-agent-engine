@@ -4,11 +4,11 @@ import type { AssistantMessage, DeveloperMessage, Message, Model, ModelSpec, Use
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
 /**
- * Claude Opus 4.8 and the Fable/Mythos 5 generation support mid-conversation
- * `role: "system"` messages. Our `developer` messages (the system-priority
- * instructions we already emit as `developer`/`system` to OpenAI providers)
- * should map to that role on models that support it, while respecting
- * Anthropic's placement rules and falling back to `user` everywhere else.
+ * Claude Opus 4.8+, Sonnet 5+, and the Fable/Mythos 5 generation support
+ * mid-conversation `role: "system"` messages. Our `developer` messages (the
+ * instruction-priority turns also emitted as `developer`/`system` to OpenAI
+ * providers) should map to that role on capable models and endpoints while
+ * respecting Anthropic's placement rules and falling back to `user` elsewhere.
  * @see https://platform.claude.com/docs/en/build-with-claude/mid-conversation-system-messages
  */
 
@@ -88,6 +88,18 @@ describe("Anthropic mid-conversation system messages", () => {
 		// Placement qualifies (follows user, last entry), but system content is
 		// text-only on the wire — the image-bearing turn must stay role: user.
 		expect(params.map(p => p.role)).toEqual(["user", "user"]);
+
+		const mixed = convertAnthropicMessages(
+			[
+				user("hi"),
+				developer("Do not outrank the following image turn."),
+				visualDeveloper,
+				developer("This trailing instruction may be privileged."),
+			],
+			model,
+			false,
+		);
+		expect(mixed.map(p => p.role)).toEqual(["user", "user", "user", "system"]);
 	});
 
 	it("maps developer messages to system on Claude Mythos 5", () => {
@@ -128,16 +140,14 @@ describe("Anthropic mid-conversation system messages", () => {
 		expect(params.map(p => p.role)).toEqual(["user", "user"]);
 	});
 
-	it("upgrades only the trailing developer message in a consecutive run", () => {
+	it("emits consecutive developer messages as one system section", () => {
 		const model = makeModel();
 		const params = convertAnthropicMessages(
 			[user("hi"), developer("Rule A."), developer("Rule B."), assistant("ok", model)],
 			model,
 			false,
 		);
-		// Consecutive system messages are not allowed; the first stays user, only
-		// the trailing developer (before the assistant turn) is upgraded.
-		expect(params[1]?.role).toBe("user");
+		expect(params[1]?.role).toBe("system");
 		expect(params[2]?.role).toBe("system");
 		expect(params[3]?.role).toBe("assistant");
 	});
@@ -166,6 +176,28 @@ describe("Anthropic mid-conversation system messages", () => {
 
 	it("does not use the system role on models older than Opus 4.8", () => {
 		const model = makeModel({ id: "claude-opus-4-5-20251101", name: "Claude Opus 4.5" });
+		const params = convertAnthropicMessages([user("hi"), developer("Be terse.")], model, false);
+		expect(params.map(p => p.role)).toEqual(["user", "user"]);
+	});
+
+	it("uses the GA system role on supported Claude models through Vertex", () => {
+		const model = makeModel({
+			provider: "google-vertex",
+			id: "claude-opus-4-8@20260528",
+			baseUrl:
+				"https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/publishers/anthropic/models/claude-opus-4-8@20260528:streamRawPredict",
+		});
+		const params = convertAnthropicMessages([user("hi"), developer("Be terse.")], model, false);
+		expect(params.map(p => p.role)).toEqual(["user", "system"]);
+	});
+
+	it("keeps unsupported Claude models on user through Vertex", () => {
+		const model = makeModel({
+			provider: "google-vertex",
+			id: "claude-sonnet-4-6@20260217",
+			baseUrl:
+				"https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/publishers/anthropic/models/claude-sonnet-4-6@20260217:streamRawPredict",
+		});
 		const params = convertAnthropicMessages([user("hi"), developer("Be terse.")], model, false);
 		expect(params.map(p => p.role)).toEqual(["user", "user"]);
 	});
