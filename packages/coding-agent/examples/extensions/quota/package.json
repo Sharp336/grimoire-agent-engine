@@ -1,0 +1,10 @@
+{
+  "name": "@omp-agent/quota",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local OMP extension: /quota — provider → account → pool → window quota report using OMP's existing AuthStorage/UsageReport infrastructure.",
+  "type": "module",
+  "main": "index.ts",
+  "scripts": { "test": "bun test" },
+  "devDependencies": { "bun-types": "latest" }
+}
