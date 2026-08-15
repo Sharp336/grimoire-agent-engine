@@ -119,10 +119,13 @@ export class MnemopiEmbedBroker {
 	#accept(socket: net.Socket): void {
 		this.#sockets.add(socket);
 		let buffer = "";
+		let bufferBytes = 0;
 		socket.setEncoding("utf8");
 		socket.on("data", chunk => {
-			buffer += typeof chunk === "string" ? chunk : chunk.toString("utf8");
-			if (Buffer.byteLength(buffer) > MAX_LINE_BYTES) {
+			const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+			buffer += text;
+			bufferBytes += Buffer.byteLength(text);
+			if (bufferBytes > MAX_LINE_BYTES) {
 				socket.destroy(new Error("Mnemopi embed broker request exceeds size limit"));
 				return;
 			}
@@ -130,6 +133,7 @@ export class MnemopiEmbedBroker {
 				const newline = buffer.indexOf("\n");
 				if (newline < 0) break;
 				const line = buffer.slice(0, newline);
+				bufferBytes -= Buffer.byteLength(line) + 1;
 				buffer = buffer.slice(newline + 1);
 				if (line) void this.#handleLine(socket, line);
 			}
@@ -244,12 +248,6 @@ export class MnemopiEmbedBroker {
 	#reply(socket: net.Socket, id: string, message: MnemopiEmbedWorkerOutbound): void {
 		if (socket.destroyed) return;
 		const response = encodeMnemopiEmbedBrokerResponse(this.#token, { id, ok: true, message });
-		socket.write(`${JSON.stringify(response)}\n`);
-	}
-
-	#reject(socket: net.Socket, id: string, error: string): void {
-		if (socket.destroyed) return;
-		const response = encodeMnemopiEmbedBrokerResponse(this.#token, { id, ok: false, error });
 		socket.write(`${JSON.stringify(response)}\n`);
 	}
 }

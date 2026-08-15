@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import * as os from "node:os";
@@ -12,6 +12,7 @@ import {
 	mnemopiEmbedBrokerPipeName,
 } from "../src/mnemopi/embed-broker";
 import {
+	encodeMnemopiEmbedBrokerRequest,
 	encodeMnemopiEmbedBrokerResponse,
 	parseMnemopiEmbedBrokerResponse,
 } from "../src/mnemopi/embed-broker-protocol";
@@ -170,6 +171,47 @@ describe("MnemopiEmbedBroker", () => {
 				"test-token",
 			),
 		).toThrow("authentication failed");
+	});
+
+	it("accounts for fragmented request bytes in linear work", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mnemopi-broker-"));
+		const { endpoint, token } = await start(tempDir);
+		const request = encodeMnemopiEmbedBrokerRequest(token, "wire-fragmented", {
+			type: "ping",
+			id: "x".repeat(64 * 1024),
+		});
+		const frame = `${JSON.stringify(request)}\n`;
+		const frameBytes = Buffer.byteLength(frame);
+		const originalByteLength = Buffer.byteLength;
+		let bytesScanned = 0;
+		let observed = Promise.withResolvers<void>();
+		const byteLengthSpy = spyOn(Buffer, "byteLength").mockImplementation((value, encoding) => {
+			bytesScanned += typeof value === "string" ? value.length : value.byteLength;
+			const result = originalByteLength(value, encoding);
+			observed.resolve();
+			return result;
+		});
+		const socket = net.createConnection(endpoint);
+		try {
+			await new Promise<void>((resolve, reject) => {
+				socket.once("connect", resolve);
+				socket.once("error", reject);
+			});
+			const response = Promise.withResolvers<void>();
+			socket.once("data", () => response.resolve());
+			for (let offset = 0; offset < frame.length; offset += 1024) {
+				observed = Promise.withResolvers<void>();
+				await new Promise<void>((resolve, reject) => {
+					socket.write(frame.slice(offset, offset + 1024), error => (error ? reject(error) : resolve()));
+				});
+				await observed.promise;
+			}
+			await response.promise;
+			expect(bytesScanned).toBeLessThanOrEqual(frameBytes * 3);
+		} finally {
+			byteLengthSpy.mockRestore();
+			socket.destroy();
+		}
 	});
 
 	it("shares one keyed worker across independent clients and preserves equal request ids", async () => {
