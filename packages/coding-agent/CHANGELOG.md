@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added all-time tool-call aggregates to `omp stats -j` under `tooling.byTool` ([#8522](https://github.com/can1357/oh-my-pi/issues/8522)).
+
 ## [17.3.4] - 2026-08-14
 
 ### Changed
