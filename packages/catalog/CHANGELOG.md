@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added the Fireworks Kimi K3 Fast serving-path variant (`fireworks/kimi-k3-fast`, routed to `accounts/fireworks/routers/kimi-k3-fast`) with Fast-tier pricing ($4.50/$22.50 per 1M tokens, $0.45 cache read), inheriting Kimi K3's 1M context, 131K output, and low/high/max thinking ladder.
 - Added support for GLM-5.3 on the z.AI provider. GLM-5.3 introduces a uniform wire-exact `low`/`high`/`max` reasoning-effort ladder on every host (replacing GLM-5.2's host-specific dialects), makes thinking mandatory (`thinking.type` must always be `enabled`; disabling is no longer supported), and defaults to `max` effort. The model is pinned to 1M context and set as the z.AI provider default.
 ## [17.3.4] - 2026-08-14
 

@@ -7,14 +7,17 @@ describe("fireworks fast id helpers", () => {
 		expect(FIREWORKS_FAST_SUFFIX).toBe("-fast");
 		expect(isFireworksFastModelId("kimi-k2.6-fast")).toBe(true);
 		expect(isFireworksFastModelId("glm-5.1-fast")).toBe(true);
+		expect(isFireworksFastModelId("kimi-k3-fast")).toBe(true);
 		expect(isFireworksFastModelId("kimi-k2.6")).toBe(false);
 		expect(isFireworksFastModelId("kimi-k2.7-code")).toBe(false);
+		expect(isFireworksFastModelId("kimi-k3")).toBe(false);
 	});
 
 	it("recovers the base id and is idempotent on non-fast ids", () => {
 		expect(toFireworksBaseModelId("kimi-k2.6-fast")).toBe("kimi-k2.6");
 		expect(toFireworksBaseModelId("kimi-k2.7-code-fast")).toBe("kimi-k2.7-code");
 		expect(toFireworksBaseModelId("glm-5.1-fast")).toBe("glm-5.1");
+		expect(toFireworksBaseModelId("kimi-k3-fast")).toBe("kimi-k3");
 		expect(toFireworksBaseModelId("kimi-k2.6")).toBe("kimi-k2.6");
 	});
 });
@@ -29,6 +32,7 @@ describe("buildFireworksFastSeed", () => {
 			"glm-5.2-fast",
 			"kimi-k2.6-fast",
 			"kimi-k2.7-code-fast",
+			"kimi-k3-fast",
 		]);
 		for (const model of seed) {
 			expect(model.provider).toBe("fireworks");
@@ -41,6 +45,7 @@ describe("buildFireworksFastSeed", () => {
 		expect(byId.get("kimi-k2.7-code-fast")?.cost).toEqual({ input: 1.9, output: 8, cacheRead: 0.38, cacheWrite: 0 });
 		expect(byId.get("glm-5.1-fast")?.cost).toEqual({ input: 2.8, output: 8.8, cacheRead: 0.52, cacheWrite: 0 });
 		expect(byId.get("glm-5.2-fast")?.cost).toEqual({ input: 2.1, output: 6.6, cacheRead: 0.21, cacheWrite: 0 });
+		expect(byId.get("kimi-k3-fast")?.cost).toEqual({ input: 4.5, output: 22.5, cacheRead: 0.45, cacheWrite: 0 });
 	});
 
 	it("inherits limits and modalities from the base model", () => {
@@ -49,5 +54,10 @@ describe("buildFireworksFastSeed", () => {
 		expect(kimi?.contextWindow).toBe(262144);
 		expect(kimi?.reasoning).toBe(true);
 		expect(byId.get("glm-5.1-fast")?.input).toEqual(["text"]);
+		const k3 = byId.get("kimi-k3-fast");
+		expect(k3?.input).toEqual(["text", "image"]);
+		expect(k3?.contextWindow).toBe(1048576);
+		expect(k3?.maxTokens).toBe(131072);
+		expect(k3?.reasoning).toBe(true);
 	});
 });
