@@ -223,6 +223,7 @@
 
 ### Added
 
+- Added China-region MiniMax Token Plan quota reporting for `minimax-code-cn`, using the mainland `api.minimaxi.com` endpoint with credentials and limits independent from the international plan.
 - Added first-class parentTurnId support for nested Codex requests, allowing stream options and metadata helpers to accept and safely propagate the initiating turn's ID.
 - Added preservation of the Codex `encrypted_function_args` plaintext-collaboration marker on replayed function calls, keeping server-marked plaintext tool arguments from being reinterpreted as encrypted on subsequent turns.
 - Added interactive Exa API-key login through `/login exa`, opening the official API-key dashboard and saving pasted keys to the credential store ([#1798](https://github.com/can1357/oh-my-pi/issues/1798)).
