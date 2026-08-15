@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The default interactive status line now uses three deterministic rows: provider/model/effort + OMP identity, provider- and model-scoped quota usage + active task time + context tokens, and the current directory. Provider-native quota windows are preserved, and narrow terminals drop secondary metrics before these required fields.
+- The `time_spent` status-line segment now shows elapsed wall-clock for the current top-level agent turn instead of cumulative session active time. The timer hides when the turn ends, so idle time between prompts is not displayed as active work.
+- The `cache_hit` status-line segment now renders `0.00%` once a turn has prompt usage without cache reads, and hides only when there is no prompt usage at all, so a cold cache is visible instead of the metric silently disappearing.
+- The context status-line segment now reports concrete token counts (`5K/272K`) rather than a percentage, so the footer always shows how much context is actually consumed.
+
+### Fixed
+
+- Fixed the default status line dropping the elapsed-time metric on narrow phone/tmux terminals: wrap priority now keeps `time_spent` with model and context instead of clipping it behind cache, cost, and other secondary segments. Throughput (`token_rate` / tok/s) is dropped first under zoom so it no longer crowds out elapsed time.
+- Fixed the status-line model label cutting version/name fragments with an ellipsis at narrow widths; it now compresses redundant provider words and filler first and keeps provider + version + distinguishing qualifier when those pieces can physically fit.
+- Fixed Bash output truncation ignoring a configured `tools.artifactSpillThreshold` and discarding failure diagnostics. The shared `DEFAULT_MAX_BYTES` is back to 50 KB so non-Bash consumers (JS eval, fetch formatting, security resource output, autoresearch) keep their documented default, and Bash now carries its own budgets — the executor sink is sized for the 20 KB failure-retention budget so diagnostics still exist once the exit status is known, while successful results are final-capped to 12 KB. A configured threshold overrides both, and the full raw stream remains reachable via `artifact://` ([#8170](https://github.com/can1357/oh-my-pi/pull/8170)).
+- Fixed the status line splitting into a second row when the packed layout already fits, so a sparse or `minimal` preset no longer consumes an extra editor row at widths of 160 columns or less ([#8170](https://github.com/can1357/oh-my-pi/pull/8170)).
+- Fixed custom and non-default status-line presets losing their configured left/right group boundary: right-aligned fields, mirrored separators, and end caps are preserved while a row fits, and items are redistributed only when wrapping is genuinely required ([#8170](https://github.com/can1357/oh-my-pi/pull/8170)).
+- Fixed the status-line settings preview showing the legacy single-row layout instead of the wrapped layout the editor actually paints, so narrow-width configuration changes now preview accurately ([#8170](https://github.com/can1357/oh-my-pi/pull/8170)).
+- Fixed the status-line usage cache keying only on provider and account, which kept showing the previous model's quota windows for the five-minute TTL after switching models on the same provider. The active model is now part of the cache key, so a same-provider model switch re-normalizes usage ([#8170](https://github.com/can1357/oh-my-pi/pull/8170)).
+- Fixed advisor context maintenance and promotion reading `contextWindow` directly, which left advisors backed by a model with missing context metadata permanently uncompacted. These paths now use the shared `effectiveContextWindow` helper ([#8170](https://github.com/can1357/oh-my-pi/pull/8170)).
+- Fixed the task progress line, the agent transcript viewer, and the eval renderer showing `0/<window>` for context usage. All three still called `formatContextUsage` with the pre-token percentage signature, so the token count they were meant to display was never passed and always formatted as zero ([#8170](https://github.com/can1357/oh-my-pi/pull/8170)).
+- Fixed long worktree labels in the status-line path segment being middle-truncated, which cut the branch name that identifies the worktree. Relative worktree labels now truncate from the left so the leaf stays readable, while absolute paths keep middle truncation so both the root and the leaf survive ([#8170](https://github.com/can1357/oh-my-pi/pull/8170)).
+- Fixed primary-session context promotion reading `contextWindow` directly, so a model with missing context metadata could never promote to a larger-context sibling. It now uses the same `effectiveContextWindow` helper as the compaction and advisor paths ([#8170](https://github.com/can1357/oh-my-pi/pull/8170)).
+
 ## [17.3.4] - 2026-08-14
 
 ### Changed

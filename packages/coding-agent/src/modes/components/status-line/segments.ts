@@ -21,9 +21,19 @@ function withIcon(icon: string, text: string): string {
 	return icon ? `${icon} ${text}` : text;
 }
 
-/** Left-truncate a path/label to `maxLen`, prefixing an ellipsis when clipped. */
+/** Truncate `pwd` to `maxLen`. Absolute paths preserve both root and leaf via
+ * middle truncation; relative labels (e.g. worktree `project/branch`) preserve
+ * the leaf via left truncation so the worktree name remains fully visible. */
 function clampPathLength(pwd: string, maxLen: number): string {
 	if (pwd.length <= maxLen) return pwd;
+	if (maxLen <= 0) return "";
+	if (maxLen === 1) return "…";
+	if (pwd.startsWith("/")) {
+		const remaining = maxLen - 1;
+		const headLength = Math.max(1, Math.floor(remaining * 0.4));
+		const tailLength = Math.max(0, remaining - headLength);
+		return `${pwd.slice(0, headLength)}…${pwd.slice(-tailLength)}`;
+	}
 	const ellipsis = "…";
 	return `${ellipsis}${pwd.slice(-Math.max(0, maxLen - ellipsis.length))}`;
 }
@@ -36,6 +46,205 @@ function clampPathLength(pwd: string, maxLen: number): string {
 function thinkingGlyph(display: string): string {
 	const space = display.indexOf(" ");
 	return space === -1 ? display : display.slice(0, space);
+}
+
+const PROVIDER_LABELS: Readonly<Record<string, string>> = {
+	anthropic: "A",
+	cursor: "C",
+	google: "G",
+	"google-antigravity": "AG",
+	meta: "M",
+	openai: "OA",
+	"openai-codex": "OC",
+	openrouter: "OR",
+	xai: "X",
+	zai: "Z",
+};
+
+function compactProviderLabel(provider: string): string {
+	const known = PROVIDER_LABELS[provider];
+	if (known) return known;
+	const initials = provider
+		.split(/[-_/]+/)
+		.filter(Boolean)
+		.map(part => part[0]?.toUpperCase() ?? "")
+		.join("");
+	return initials.slice(0, 3) || provider.slice(0, 2).toUpperCase();
+}
+
+const MODEL_FILLER_TOKENS = new Set(["preview", "experimental", "contributor", "edition", "ultra", "extended"]);
+
+const MODEL_EFFORT_TOKENS = new Set(["high", "low", "medium", "max", "xhigh", "fast", "none", "minimal", "default"]);
+
+const MODEL_QUALIFIER_LETTERS: Readonly<Record<string, string>> = {
+	contributor: "C",
+	preview: "P",
+	experimental: "X",
+};
+
+const MODEL_VERSION_TOKEN = /^\d+(?:\.\d+){0,2}$/;
+
+interface CompactModelIdentity {
+	providerLabel: string;
+	pre: string[];
+	version: string | undefined;
+	post: string[];
+	letter: string;
+	hyphenateFamilyVersion: boolean;
+}
+
+function tokenizeModelLabel(text: string): string[] {
+	const trimmed = text.trim();
+	if (!trimmed) return [];
+	const parts = /\s/.test(trimmed) ? trimmed.split(/\s+/) : trimmed.split(/[-_]+/).filter(Boolean);
+	const tokens: string[] = [];
+	for (const part of parts) {
+		const split = /^([A-Za-z]+)-(\d+(?:\.\d+){0,2})$/.exec(part);
+		if (split?.[1] && split[2]) {
+			tokens.push(split[1], split[2]);
+		} else {
+			tokens.push(part);
+		}
+	}
+	return tokens;
+}
+
+function parseCompactModelIdentity(
+	name: string,
+	id: string | undefined,
+	provider: string | undefined,
+): CompactModelIdentity {
+	const providerLabel = provider ? compactProviderLabel(provider) : "";
+	const source = name.trim() || id?.trim() || "no-model";
+	const identity = `${name} ${id ?? ""}`.toLowerCase();
+	let letter = "";
+	for (const [word, abbrev] of Object.entries(MODEL_QUALIFIER_LETTERS)) {
+		if (identity.includes(word)) {
+			letter = abbrev;
+			break;
+		}
+	}
+
+	let text = source.replace(/^Claude\s+/i, "");
+	text = text.replace(/\s+(Contributor|Preview|Experimental)\b/gi, "");
+	let tokens = tokenizeModelLabel(text);
+
+	if (provider) {
+		const providerTokens = new Set(
+			provider
+				.split(/[-_/]+/)
+				.filter(part => part.length > 1)
+				.map(part => part.toLowerCase()),
+		);
+		tokens = tokens.filter(token => !providerTokens.has(token.toLowerCase()));
+	}
+
+	tokens = tokens.filter(token => {
+		const lower = token.toLowerCase();
+		if (MODEL_VERSION_TOKEN.test(token)) return true;
+		return !MODEL_FILLER_TOKENS.has(lower) && !MODEL_EFFORT_TOKENS.has(lower);
+	});
+
+	const versionIdx = tokens.findIndex(token => MODEL_VERSION_TOKEN.test(token));
+	const pre = versionIdx >= 0 ? tokens.slice(0, versionIdx) : tokens;
+	const version = versionIdx >= 0 ? tokens[versionIdx] : undefined;
+	const post = versionIdx >= 0 ? tokens.slice(versionIdx + 1) : [];
+	const family = pre[pre.length - 1];
+	const haystack = `${name} ${id ?? ""}`;
+	const escapedFamily = family ? family.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : "";
+	const escapedVersion = version ? version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : "";
+	const hyphenateFamilyVersion = Boolean(
+		family && version && new RegExp(`${escapedFamily}-${escapedVersion}`, "i").test(haystack),
+	);
+
+	return { providerLabel, pre, version, post, letter, hyphenateFamilyVersion };
+}
+
+function formatCompactModelLabel(
+	identity: CompactModelIdentity,
+	pre: string[],
+	post: string[],
+	includeProvider: boolean,
+	includeLetter: boolean,
+	mode: "spaced" | "glue-post" | "tight",
+): string {
+	const parts: string[] = [];
+	if (identity.hyphenateFamilyVersion && identity.version && pre.length > 0 && mode !== "spaced" && mode !== "tight") {
+		parts.push(...pre.slice(0, -1), `${pre[pre.length - 1]}-${identity.version}`);
+	} else {
+		parts.push(...pre);
+		if (identity.version) parts.push(identity.version);
+	}
+	if (mode === "glue-post" && post.length > 0) {
+		const head = parts.join(" ");
+		const glued = `${head}${post.join("")}`;
+		const prefix = includeProvider && identity.providerLabel ? `${identity.providerLabel}·` : "";
+		return `${prefix}${glued}${includeLetter ? identity.letter : ""}`;
+	}
+	parts.push(...post);
+	const body = parts.filter(Boolean).join(mode === "tight" ? "" : " ");
+	const prefix = includeProvider && identity.providerLabel ? `${identity.providerLabel}·` : "";
+	return `${prefix}${body}${includeLetter ? identity.letter : ""}`;
+}
+
+/**
+ * Compact provider + family/version/qualifier under a cell budget. Drops redundant
+ * provider words, filler, and effort suffixes before ever slicing a token. Never
+ * returns a mid-version fragment when a shorter semantically complete label fits.
+ */
+function compactModelLabel(
+	name: string,
+	id: string | undefined,
+	provider: string | undefined,
+	maxLength: number,
+): string {
+	const identity = parseCompactModelIdentity(name, id, provider);
+	const seen = new Set<string>();
+	const candidates: string[] = [];
+	const push = (label: string) => {
+		if (!label || seen.has(label)) return;
+		seen.add(label);
+		candidates.push(label);
+	};
+	const emit = (nextPre: string[], nextPost: string[], includeProvider: boolean, includeLetter: boolean) => {
+		push(formatCompactModelLabel(identity, nextPre, nextPost, includeProvider, includeLetter, "spaced"));
+		push(formatCompactModelLabel(identity, nextPre, nextPost, includeProvider, includeLetter, "glue-post"));
+		push(formatCompactModelLabel(identity, nextPre, nextPost, includeProvider, includeLetter, "tight"));
+	};
+
+	let pre = [...identity.pre];
+	let post = [...identity.post];
+	emit(pre, post, true, true);
+	while (pre.length > 1) {
+		pre = pre.slice(1);
+		emit(pre, post, true, true);
+	}
+	if (pre.length === 1) {
+		pre = [];
+		emit(pre, post, true, true);
+	}
+	while (post.length > 0) {
+		post = post.slice(0, -1);
+		emit(pre, post, true, true);
+	}
+	emit([], [], true, true);
+	emit([], [], true, false);
+	emit([], [], false, true);
+	emit([], [], false, false);
+	if (identity.letter) push(identity.letter);
+	if (identity.providerLabel) push(identity.providerLabel);
+	for (const token of identity.pre) push(token);
+
+	for (const candidate of candidates) {
+		if (Bun.stringWidth(candidate) <= maxLength) return candidate;
+	}
+	const fallback = identity.version ?? identity.pre[0] ?? identity.providerLabel ?? name;
+	if (Bun.stringWidth(fallback) <= maxLength) return fallback;
+	const truncated = truncateToWidth(fallback, maxLength);
+	if (identity.version && !truncated.includes(identity.version) && Bun.stringWidth(identity.version) <= maxLength) {
+		return identity.version;
+	}
+	return truncated;
 }
 
 function stripDisplayRoot(pwd: string): string {
@@ -88,7 +297,7 @@ const piSegment: StatusLineSegment = {
 			const icon = theme.icon.ghost ? `${theme.icon.ghost} ` : "";
 			return { content: theme.fg("warning", `${icon}${ctx.focusedAgentId} `), visible: true };
 		}
-		const content = theme.icon.pi ? `${theme.icon.pi} ` : "";
+		const content = withIcon(theme.icon.pi, "OMP");
 		return { content: theme.fg("accent", content), visible: true };
 	},
 };
@@ -99,10 +308,8 @@ const modelSegment: StatusLineSegment = {
 		const state = ctx.session.state;
 		const opts = ctx.options.model ?? {};
 
-		let modelName = state.model?.name || state.model?.id || "no-model";
-		if (modelName.startsWith("Claude ")) {
-			modelName = modelName.slice(7);
-		}
+		const rawModelName = state.model?.name || state.model?.id || "no-model";
+		const modelName = compactModelLabel(rawModelName, state.model?.id, state.model?.provider, opts.maxLength ?? 18);
 
 		// Resolve the current thinking-level display ("◉ xhigh", "⟳ auto", …)
 		// when the model supports thinking and the segment isn't hiding it.
@@ -481,12 +688,11 @@ const contextTotalSegment: StatusLineSegment = {
 };
 
 /**
- * Total time the agent was actively processing this session — the union of
- * every `agent_start`→`agent_end` window plus the currently-running window,
- * sourced from {@link SegmentContext.activeMs}. Idle wall-clock between turns
- * never accumulates, so the displayed total reflects how long the agent has
- * been working for the user, not how long the session has been open. Hidden
- * before the first second of activity to avoid flashing `0s` at session start.
+ * Elapsed wall-clock of the current top-level agent turn, sourced from
+ * {@link SegmentContext.activeMs}. Starts at `agent_start`, keeps advancing
+ * while the parent waits on background jobs or subagents, and hides when the
+ * turn ends so idle time is not shown as active work. Hidden before the first
+ * second of activity to avoid flashing `0s` at session start.
  */
 const timeSpentSegment: StatusLineSegment = {
 	id: "time_spent",
@@ -567,15 +773,15 @@ const cacheHitSegment: StatusLineSegment = {
 	id: "cache_hit",
 	render(ctx) {
 		const { cacheRead, cacheWrite, input } = ctx.usageStats;
-		if (!cacheRead) return { content: "", visible: false };
 
 		// Hit rate = cacheRead / total prompt tokens. The prompt is the sum of
 		// cacheRead (served from cache), cacheWrite (newly cached this turn) and
 		// input (uncached). Including uncached input keeps the denominator honest
 		// for Anthropic/OpenRouter; DeepSeek reports its miss as input with
-		// cacheWrite 0, so this still yields hit/(hit+miss).
+		// cacheWrite 0, so this still yields hit/(hit+miss). Once prompt usage
+		// exists, render 0% misses too instead of hiding the cache metric entirely.
 		const total = cacheRead + cacheWrite + input;
-
+		if (total <= 0) return { content: "", visible: false };
 		const rate = (cacheRead / total) * 100;
 		const rateStr = rate.toFixed(2);
 
@@ -635,15 +841,50 @@ function formatUsageReset(value: number, unit: "m" | "h"): string {
 	return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
 }
 
+function formatUsageResetMs(resetMs: number): string {
+	const minutes = Math.max(0, Math.round(resetMs / 60_000));
+	if (minutes < 60) return `${minutes}m`;
+	const hours = Math.floor(minutes / 60);
+	if (hours < 24) {
+		const mins = minutes % 60;
+		return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
+	}
+	const days = Math.floor(hours / 24);
+	const extraHours = hours % 24;
+	return extraHours > 0 ? `${days}d ${extraHours}h` : `${days}d`;
+}
+
 const usageSegment: StatusLineSegment = {
 	id: "usage",
 	render(ctx) {
 		const u = ctx.usage;
-		if (!u || (!u.fiveHour && !u.sevenDay && !u.monthly)) {
+		if (!u || ((!u.windows || u.windows.length === 0) && !u.fiveHour && !u.sevenDay && !u.monthly)) {
 			return { content: "", visible: false };
 		}
+		const compact = typeof ctx.width === "number" && ctx.width > 0 && ctx.width <= 160;
 		const parts: string[] = [];
-		if (u.tier) {
+		const hasCanonical = Boolean(u.fiveHour || u.sevenDay || u.monthly);
+		const labeledWindows = (u.windows ?? []).filter(
+			window => typeof window.label === "string" && window.label.length > 0,
+		);
+		if (!hasCanonical && labeledWindows.length > 0) {
+			if (u.tier && !compact) {
+				const tier = truncateToWidth(sanitizeStatusText(u.tier), TRUNCATE_LENGTHS.SHORT);
+				if (tier) parts.push(theme.fg("accent", tier));
+			}
+			for (const window of labeledWindows.slice(0, 2)) {
+				const label = truncateToWidth(sanitizeStatusText(window.label), compact ? 16 : TRUNCATE_LENGTHS.SHORT);
+				const pctText = theme.fg(pickUsageColor(window.percent), `${Math.round(window.percent)}%`);
+				const reset =
+					!compact && window.resetMs !== undefined
+						? theme.fg("muted", ` (${formatUsageResetMs(window.resetMs)})`)
+						: "";
+				parts.push(`${label} ${pctText}${reset}`);
+			}
+			const joined = parts.join(theme.sep.dot);
+			return { content: compact ? joined : withIcon(theme.icon.time, joined), visible: true };
+		}
+		if (u.tier && !compact) {
 			const tier = truncateToWidth(sanitizeStatusText(u.tier), TRUNCATE_LENGTHS.SHORT);
 			if (tier) parts.push(theme.fg("accent", tier));
 		}
@@ -651,19 +892,19 @@ const usageSegment: StatusLineSegment = {
 			const pct = u.fiveHour.percent;
 			const pctText = theme.fg(pickUsageColor(pct), `${Math.round(pct)}%`);
 			const reset =
-				u.fiveHour.resetMinutes !== undefined
+				!compact && u.fiveHour.resetMinutes !== undefined
 					? theme.fg("muted", ` (${formatUsageReset(u.fiveHour.resetMinutes, "m")})`)
 					: "";
-			parts.push(`5h ${pctText}${reset}`);
+			parts.push(compact ? `5h${pctText}` : `5h ${pctText}${reset}`);
 		}
 		if (u.sevenDay) {
 			const pct = u.sevenDay.percent;
 			const pctText = theme.fg(pickUsageColor(pct), `${Math.round(pct)}%`);
 			const reset =
-				u.sevenDay.resetHours !== undefined
+				!compact && u.sevenDay.resetHours !== undefined
 					? theme.fg("muted", ` (${formatUsageReset(u.sevenDay.resetHours, "h")})`)
 					: "";
-			parts.push(`7d ${pctText}${reset}`);
+			parts.push(compact ? `7d${pctText}` : `7d ${pctText}${reset}`);
 		}
 		if (u.monthly) {
 			const pct = u.monthly.percent;
@@ -672,12 +913,13 @@ const usageSegment: StatusLineSegment = {
 			// "1% used"; OpenCode's endpoint already emits floored integers).
 			const pctText = theme.fg(pickUsageColor(pct), `${Math.floor(pct)}%`);
 			const reset =
-				u.monthly.resetHours !== undefined
+				!compact && u.monthly.resetHours !== undefined
 					? theme.fg("muted", ` (${formatUsageReset(u.monthly.resetHours, "h")})`)
 					: "";
-			parts.push(`mo ${pctText}${reset}`);
+			parts.push(compact ? `mo${pctText}` : `mo ${pctText}${reset}`);
 		}
-		const content = withIcon(theme.icon.time, parts.join(theme.sep.dot));
+		const joined = parts.join(compact ? "·" : theme.sep.dot);
+		const content = compact ? joined : withIcon(theme.icon.time, joined);
 		return { content, visible: true };
 	},
 };

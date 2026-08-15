@@ -11,11 +11,22 @@ function makeSessionWithLastMessage(
 		cost = 0,
 		advisorCost = 0,
 		usingSubscription = false,
-	}: { cost?: number; advisorCost?: number; usingSubscription?: boolean } = {},
+		modelName,
+		modelId,
+		modelProvider,
+	}: {
+		cost?: number;
+		advisorCost?: number;
+		usingSubscription?: boolean;
+		modelName?: string;
+		modelId?: string;
+		modelProvider?: string;
+	} = {},
 ) {
+	const model = { contextWindow: 128000, name: modelName, id: modelId, provider: modelProvider };
 	return {
 		messages: lastMessage ? [lastMessage] : [],
-		model: { contextWindow: 128000 },
+		model,
 		contextUsageRevision: 0,
 		systemPrompt: [],
 		agent: { state: { tools: [] } },
@@ -23,7 +34,7 @@ function makeSessionWithLastMessage(
 		getContextUsage: () => ({ tokens: 42, contextWindow: 128000 }),
 		state: {
 			messages: lastMessage ? [lastMessage] : [],
-			model: { contextWindow: 128000 },
+			model,
 		},
 		sessionManager: {
 			getUsageStatistics: () => ({
@@ -65,6 +76,41 @@ beforeAll(async () => {
 });
 
 describe("StatusLineComponent", () => {
+	it("renders a compact provider-aware model label while preserving contributor identity", () => {
+		const statusLine = new StatusLineComponent(
+			makeSessionWithLastMessage(null, false, {
+				modelName: "Muse Spark 1.2 Contributor",
+				modelId: "muse-spark-1.2-contributor",
+				modelProvider: "meta",
+			}) as unknown as AgentSession,
+		);
+
+		const stripped = statusLine.getTopBorder(100).content.replace(/\x1b\[[0-9;]*m/g, "");
+		expect(stripped).toContain("M·Muse Spark 1.2C");
+		expect(stripped).not.toContain("Contributor");
+	});
+
+	it("distinguishes the same Claude model by provider", () => {
+		const anthropic = new StatusLineComponent(
+			makeSessionWithLastMessage(null, false, {
+				modelName: "Claude Opus 5",
+				modelId: "claude-opus-5",
+				modelProvider: "anthropic",
+			}) as unknown as AgentSession,
+		);
+		const antigravity = new StatusLineComponent(
+			makeSessionWithLastMessage(null, false, {
+				modelName: "Claude Opus 5",
+				modelId: "claude-opus-5",
+				modelProvider: "google-antigravity",
+			}) as unknown as AgentSession,
+		);
+
+		const strip = (value: string) => value.replace(/\x1b\[[0-9;]*m/g, "");
+		expect(strip(anthropic.getTopBorder(100).content)).toContain("A·Opus 5");
+		expect(strip(antigravity.getTopBorder(100).content)).toContain("AG·Opus 5");
+	});
+
 	it("fingerprints tool-call arguments containing bigint values", () => {
 		const statusLine = new StatusLineComponent(
 			makeSessionWithLastMessage({

@@ -6,7 +6,7 @@
 import { ExponentialYield } from "@oh-my-pi/pi-agent-core/utils/yield";
 import { type MinimizerOptions, Shell, type ShellRunResult } from "@oh-my-pi/pi-natives";
 import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
-import { Settings, type ShellMinimizerSettings } from "../config/settings";
+import { getDefault, Settings, type ShellMinimizerSettings } from "../config/settings";
 import { OutputSink } from "../session/streaming-output";
 import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "../tools/output-meta";
 import { getOrCreateSnapshot } from "../utils/shell-snapshot";
@@ -29,6 +29,14 @@ export interface BashExecutorOptions {
 	/** Artifact path/id for full output storage */
 	artifactPath?: string;
 	artifactId?: string;
+	/**
+	 * Byte budget for the output sink, from
+	 * {@link resolveBashSinkSpillThreshold}. Passed as a plain number rather
+	 * than a `Settings` object because `executeBash` also needs the *global*
+	 * settings for shell/minimizer config, which a narrower per-session
+	 * settings object does not provide. Defaults to the Bash failure budget.
+	 */
+	spillThreshold?: number;
 	/**
 	 * Invoked when the native minimizer rewrote the command's output, giving
 	 * the caller a chance to persist the lossless original capture (typically
@@ -61,6 +69,77 @@ export interface BashResult {
  *  command line, so a hostile `.envrc` can't smuggle shell syntax through
  *  `unset`. `.envrc` never produces non-identifier names in practice. */
 const SAFE_ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+// =============================================================================
+// Bash inline budgets — deliberately kept in the Bash domain rather than in the
+// shared `DEFAULT_MAX_BYTES`, which stays at the documented 50 KB so non-Bash
+// consumers (JS eval, fetch formatting, security resource output, autoresearch)
+// keep their contract. Bash measures much noisier output, so it wants a tighter
+// inline body by default.
+//
+// The executor's sink is sized for the FAILURE retention budget because it is
+// constructed before the exit status is known — bytes it drops can never be
+// recovered by a later cap. Successful results are then final-capped down to
+// the smaller success budget at the tool layer. The full raw stream always
+// remains available via `artifact://`.
+// =============================================================================
+
+export const BASH_SUCCESS_INLINE_BYTES = 12 * 1024;
+export const BASH_FAILURE_INLINE_BYTES = 20 * 1024;
+
+/**
+ * Slack allowed above a user-configured spill threshold before the
+ * final-defense inline cap trims the body.
+ *
+ * The sink already bounds the body to the threshold; the wall-time notice, the
+ * exit-code notice, the elision marker and the `[raw output: artifact://N]`
+ * footer are appended afterwards and ride above it. Without headroom a body
+ * sitting exactly at the threshold would be re-truncated to make room for those
+ * notices and a second, mismatched artifact would be saved — the same reason
+ * `INLINE_CAP_SLACK_BYTES` exists in `tools/output-meta.ts`. The Bash defaults
+ * need no slack: they are already final inline caps including the notices.
+ */
+const BASH_INLINE_SLACK_BYTES = 2 * 1024;
+
+/**
+ * The user's explicitly configured spill threshold in bytes, or `undefined`
+ * when the setting is untouched and Bash should apply its own tighter budgets.
+ *
+ * Uses {@link Settings.isConfigured} rather than comparing the resolved value
+ * against the schema default, because an explicit `tools.artifactSpillThreshold: 50`
+ * is a real configuration that must be honoured even though it equals the
+ * default — comparing values would silently downgrade it to Bash's 12/20 KB.
+ *
+ * The optional call guards the partial `{ get() }` settings doubles used
+ * throughout the test suite, which do not implement `isConfigured`; for those a
+ * missing method correctly means "nothing was configured".
+ */
+function configuredSpillThresholdBytes(settings: Settings | undefined): number | undefined {
+	if (settings?.isConfigured?.("tools.artifactSpillThreshold") !== true) return undefined;
+	return (settings.get("tools.artifactSpillThreshold") ?? getDefault("tools.artifactSpillThreshold")) * 1024;
+}
+
+/**
+ * Byte budget for the executor's {@link OutputSink}, sized for failure
+ * retention so a nonzero exit still has its diagnostics intact. An explicitly
+ * configured `tools.artifactSpillThreshold` wins outright.
+ */
+export function resolveBashSinkSpillThreshold(settings: Settings | undefined): number {
+	return configuredSpillThresholdBytes(settings) ?? BASH_FAILURE_INLINE_BYTES;
+}
+
+/**
+ * Final-defense inline cap applied once the exit status is known: successful
+ * results are trimmed to {@link BASH_SUCCESS_INLINE_BYTES} while failures keep
+ * {@link BASH_FAILURE_INLINE_BYTES} of diagnostics. An explicitly configured
+ * `tools.artifactSpillThreshold` wins for both, plus notice slack so the
+ * configured value stays authoritative for the body itself.
+ */
+export function resolveBashInlineCapBudget(settings: Settings | undefined, failed: boolean): number {
+	const configured = configuredSpillThresholdBytes(settings);
+	if (configured !== undefined) return configured + BASH_INLINE_SLACK_BYTES;
+	return failed ? BASH_FAILURE_INLINE_BYTES : BASH_SUCCESS_INLINE_BYTES;
+}
 
 export interface DirenvPreflightOptions {
 	/** Caller-supplied env overlay; these values win over direnv-provided ones. */
@@ -374,8 +453,12 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			? buildUserShellCommand(shell, args, preflight.command)
 			: preflight.command;
 
-	// Create output sink for truncation and artifact handling
+	// Create output sink for truncation and artifact handling. Sized for the
+	// failure retention budget so diagnostics survive until the exit status is
+	// known; successful results are later final-capped to the smaller inline
+	// budget at the tool layer.
 	const sink = new OutputSink({
+		spillThreshold: options?.spillThreshold ?? BASH_FAILURE_INLINE_BYTES,
 		onChunk: options?.onChunk,
 		artifactPath: options?.artifactPath,
 		artifactId: options?.artifactId,

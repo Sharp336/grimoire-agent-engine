@@ -40,6 +40,32 @@ function makeSession(fetchUsageReports: (signal?: AbortSignal) => Promise<unknow
 	} as unknown as AgentSession;
 }
 
+function makeActiveProviderSession(
+	provider: string,
+	fetchUsageReports: (signal?: AbortSignal) => Promise<unknown>,
+): AgentSession {
+	const session = makeSession(fetchUsageReports) as unknown as Record<string, unknown>;
+	const model = { provider, id: "claude-opus-5", name: "Claude Opus 5", contextWindow: 1_000_000, thinking: true };
+	session.state = { messages: [], model, thinkingLevel: "xhigh" };
+	session.model = model;
+	session.sessionId = "provider-session";
+	session.systemPrompt = [];
+	session.agent = { state: { tools: [] } };
+	session.skills = [];
+	session.isAutoThinking = false;
+	session.autoResolvedThinkingLevel = () => undefined;
+	session.isFastModeActive = () => false;
+	session.isFastModeEnabled = () => false;
+	session.getAdvisorStatusOverview = () => ({ configured: false, advisors: [] });
+	session.getGoalModeState = () => null;
+	session.getContextUsage = () => ({ tokens: 219_000, contextWindow: 1_000_000 });
+	session.modelRegistry = {
+		isUsingOAuth: () => false,
+		authStorage: { getOAuthAccountIdentity: () => undefined },
+	};
+	return session as unknown as AgentSession;
+}
+
 function usageReport(percent: number): unknown[] {
 	return [
 		{
@@ -56,6 +82,71 @@ function usageReport(percent: number): unknown[] {
 			],
 		},
 	];
+}
+
+function providerUsageReport(provider: string, id: string, label: string, percent: number): unknown {
+	return {
+		provider,
+		fetchedAt: Date.now(),
+		limits: [
+			{
+				id: `${provider}:${id}`,
+				label,
+				scope: {
+					provider,
+					windowId: id,
+					...(provider === "anthropic" && (id === "5h" || id === "7d") ? { shared: true } : {}),
+				},
+				window: { id, label, resetsAt: Date.now() + 60_000 },
+				amount: { unit: "percent", usedFraction: percent / 100 },
+			},
+		],
+	};
+}
+
+function antigravityUsageReport(): unknown {
+	const provider = "google-antigravity";
+	const limit = (counter: "anthropic" | "google", windowId: "daily" | "weekly", percent: number) => ({
+		id: `${provider}:${counter}:default:${windowId}`,
+		label: counter === "anthropic" ? "Usage (Anthropic)" : "Usage (Google)",
+		scope: { provider, windowId },
+		window: {
+			id: windowId,
+			label: windowId === "daily" ? "Daily" : "Weekly",
+			resetsAt: Date.now() + 60_000,
+		},
+		amount: { unit: "percent", usedFraction: percent / 100 },
+	});
+	return {
+		provider,
+		fetchedAt: Date.now(),
+		limits: [limit("anthropic", "daily", 26), limit("anthropic", "weekly", 71), limit("google", "daily", 99)],
+	};
+}
+
+function anthropicModelScopedUsageReport(): unknown {
+	const provider = "anthropic";
+	const limit = (id: string, percent: number, scope: Record<string, unknown>) => ({
+		id,
+		label: id === "anthropic:5h" ? "Claude 5 Hour" : "Claude 7 Day",
+		scope: { provider, windowId: id === "anthropic:5h" ? "5h" : "7d", ...scope },
+		window: {
+			id: id === "anthropic:5h" ? "5h" : "7d",
+			label: id === "anthropic:5h" ? "5 Hour" : "7 Day",
+			resetsAt: Date.now() + 60_000,
+		},
+		amount: { unit: "percent", usedFraction: percent / 100 },
+	});
+	return {
+		provider,
+		fetchedAt: Date.now(),
+		limits: [
+			limit("anthropic:5h", 31, { shared: true }),
+			limit("anthropic:7d", 20, { shared: true }),
+			limit("anthropic:7d:opus", 80, { tier: "opus" }),
+			limit("anthropic:7d:fable", 99, { tier: "fable" }),
+		],
+	};
 }
 
 interface CodexUsageState {
@@ -234,7 +325,132 @@ describe("StatusLineComponent usage refresh", () => {
 		late.resolve(usageReport(42));
 		await flushMicrotasks();
 
-		expect(plain(component.getTopBorder(80).content)).toContain("5h 42%");
+		expect(plain(component.getTopBorder(80).content)).toContain("5h");
+		expect(plain(component.getTopBorder(80).content)).toContain("42%");
+	});
+
+	it("shows quota from the active provider route instead of the Claude model family", async () => {
+		const reports = [providerUsageReport("anthropic", "5h", "5h", 11), antigravityUsageReport()];
+		const anthropic = new StatusLineComponent(makeActiveProviderSession("anthropic", async () => reports));
+		anthropic.updateSettings({
+			preset: "custom",
+			leftSegments: ["usage"],
+			rightSegments: [],
+			separator: "none",
+			transparent: true,
+		});
+		await refreshUsage(anthropic);
+		const anthropicText = plain(anthropic.getTopBorder(100).content);
+		expect(anthropicText).toContain("5h");
+		expect(anthropicText).toContain("11%");
+		expect(anthropicText).not.toContain("Weekly");
+
+		const antigravity = new StatusLineComponent(makeActiveProviderSession("google-antigravity", async () => reports));
+		antigravity.updateSettings({
+			preset: "custom",
+			leftSegments: ["usage"],
+			rightSegments: [],
+			separator: "none",
+			transparent: true,
+		});
+		await refreshUsage(antigravity);
+		const antigravityText = plain(antigravity.getTopBorder(100).content);
+		expect(antigravityText).toContain("Daily 26%");
+		expect(antigravityText).toContain("Weekly 71%");
+		expect(antigravityText).not.toContain("99%");
+		expect(antigravityText).not.toContain("5h");
+	});
+
+	it("uses the active Anthropic model family when model-scoped weekly quota differs", async () => {
+		const component = new StatusLineComponent(
+			makeActiveProviderSession("anthropic", async () => [anthropicModelScopedUsageReport()]),
+		);
+		component.updateSettings({
+			preset: "custom",
+			leftSegments: ["usage"],
+			rightSegments: [],
+			separator: "none",
+			transparent: true,
+		});
+		await refreshUsage(component);
+		const text = plain(component.getTopBorder(100).content);
+		expect(text).toContain("5h");
+		expect(text).toContain("31%");
+		expect(text).toContain("7d");
+		expect(text).toContain("80%");
+		expect(text).not.toContain("99%");
+	});
+
+	it("renders a provider's real non-Anthropic usage window label", async () => {
+		const reports = [providerUsageReport("cursor", "monthly", "Monthly requests", 30)];
+		const component = new StatusLineComponent(makeActiveProviderSession("cursor", async () => reports));
+		component.updateSettings({
+			preset: "custom",
+			leftSegments: ["usage"],
+			rightSegments: [],
+			separator: "none",
+			transparent: true,
+		});
+		await refreshUsage(component);
+		const text = plain(component.getTopBorder(120).content);
+		expect(text).toContain("mo");
+		expect(text).toContain("30%");
+		expect(text).not.toContain("5h");
+		expect(text).not.toContain("7d");
+	});
+
+	it("clears stale quota immediately when the active model switches providers", async () => {
+		const reports = [providerUsageReport("anthropic", "5h", "5h", 11), antigravityUsageReport()];
+		const session = makeActiveProviderSession("anthropic", async () => reports);
+		const component = new StatusLineComponent(session);
+		component.updateSettings({
+			preset: "custom",
+			leftSegments: ["usage"],
+			rightSegments: [],
+			separator: "none",
+			transparent: true,
+		});
+		await refreshUsage(component);
+		expect(plain(component.getTopBorder(100).content)).toContain("5h");
+		expect(plain(component.getTopBorder(100).content)).toContain("11%");
+
+		const mutable = session as unknown as {
+			state: { model: { provider: string } };
+			model: { provider: string };
+		};
+		mutable.state.model.provider = "google-antigravity";
+		mutable.model.provider = "google-antigravity";
+		component.refreshUsageInBackground();
+		expect(plain(component.getTopBorder(100).content)).not.toContain("11%");
+		vi.advanceTimersByTime(0);
+		await flushMicrotasks();
+		expect(plain(component.getTopBorder(100).content)).toContain("Weekly 71%");
+	});
+
+	it("keeps provider, model, effort, usage, task time, tokens, and cwd in the default three-row footer", async () => {
+		const reports = [
+			providerUsageReport("anthropic", "5h", "5h", 31),
+			providerUsageReport("anthropic", "7d", "7d", 48),
+		];
+		const component = new StatusLineComponent(makeActiveProviderSession("anthropic", async () => reports));
+		component.updateSettings({ preset: "default", transparent: true, sessionAccent: false });
+		component.markActivityStart();
+		await refreshUsage(component, 27_000);
+
+		for (const width of [60, 72, 80]) {
+			const rows = component.getTopBorderRows(width).map(row => plain(row.content));
+			expect(rows).toHaveLength(3);
+			expect(rows[0]).toContain("OMP");
+			expect(rows[0]).toContain("A·Opus 5");
+			expect(rows[0]).toContain("xhigh");
+			expect(rows[1]).toContain("5h");
+			expect(rows[1]).toContain("31%");
+			expect(rows[1]).toContain("7d");
+			expect(rows[1]).toContain("48%");
+			expect(rows[1]).toContain("27.0s");
+			expect(rows[1]).toContain("219K/1M");
+			expect(rows[2].length).toBeGreaterThan(0);
+		}
 	});
 
 	it("re-fetches usage immediately when the session rotates to another org under the same email", async () => {
@@ -570,5 +786,66 @@ describe("StatusLineComponent usage refresh", () => {
 		expect(calls).toBe(3);
 		expect(events).toEqual([]);
 		component.dispose();
+	});
+	it("re-fetches usage when the active model switches within the same provider and account", async () => {
+		let calls = 0;
+		const session = makeActiveProviderSession("anthropic", async () => {
+			calls++;
+			return [anthropicModelScopedUsageReport()];
+		});
+		// Start as Opus — should surface the opus weekly cap (80%).
+		const mutable = session as unknown as {
+			state: { model: { provider: string; id: string } };
+			model: { provider: string; id: string };
+		};
+		mutable.state.model.id = "claude-opus-4";
+		mutable.model.id = "claude-opus-4";
+		const component = new StatusLineComponent(session);
+		component.updateSettings({
+			preset: "custom",
+			leftSegments: ["usage"],
+			rightSegments: [],
+			separator: "none",
+			transparent: true,
+		});
+		await refreshUsage(component);
+		expect(calls).toBe(1);
+		expect(plain(component.getTopBorder(100).content)).toContain("80%");
+		expect(plain(component.getTopBorder(100).content)).not.toContain("99%");
+
+		// Same provider/account, different model (Fable) inside TTL must invalidate.
+		mutable.state.model.id = "claude-fable-5";
+		mutable.model.id = "claude-fable-5";
+		component.refreshUsageInBackground();
+		// Stale quota cleared immediately even before the new fetch lands.
+		expect(plain(component.getTopBorder(100).content)).not.toContain("80%");
+		vi.advanceTimersByTime(0);
+		await flushMicrotasks();
+		expect(calls).toBe(2);
+		expect(plain(component.getTopBorder(100).content)).toContain("99%");
+		expect(plain(component.getTopBorder(100).content)).not.toContain("80%");
+	});
+
+	it("does not re-fetch usage when the active model stays the same inside the TTL", async () => {
+		let calls = 0;
+		const component = new StatusLineComponent(
+			makeActiveProviderSession("anthropic", async () => {
+				calls++;
+				return [anthropicModelScopedUsageReport()];
+			}),
+		);
+		component.updateSettings({
+			preset: "custom",
+			leftSegments: ["usage"],
+			rightSegments: [],
+			separator: "none",
+			transparent: true,
+		});
+		await refreshUsage(component);
+		expect(calls).toBe(1);
+		component.refreshUsageInBackground();
+		vi.advanceTimersByTime(0);
+		await flushMicrotasks();
+		expect(calls).toBe(1);
 	});
 });

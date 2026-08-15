@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the compaction context-window fallback matching any model whose id merely contained `muse-spark`, which handed unrelated third-party models a fabricated 1,048,576-token window and postponed compaction until that threshold. The fallback now requires the `meta` provider and one of the exact catalog-declared Muse Spark ids, and any other model with missing context metadata stays compaction-disabled ([#8170](https://github.com/can1357/oh-my-pi/pull/8170)).
+
 ## [17.3.4] - 2026-08-14
 
 ### Fixed

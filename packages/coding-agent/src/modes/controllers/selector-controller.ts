@@ -229,9 +229,12 @@ export class SelectorController {
 						this.ctx.ui.requestRender();
 					},
 					getStatusLinePreview: () => {
-						// Return the rendered status line for inline preview
+						// Use the same wrapped layout the editor paints so the preview matches live rendering.
 						const availableWidth = this.ctx.editor.getTopBorderAvailableWidth(this.ctx.ui.terminal.columns);
-						return this.ctx.statusLine.getTopBorder(availableWidth).content;
+						return this.ctx.statusLine
+							.getTopBorderRows(availableWidth)
+							.map(row => row.content)
+							.join("\n");
 					},
 					onPluginsChanged: async () => {
 						const projectPath = await resolveActiveProjectRegistryPath(this.ctx.sessionManager.getCwd());

@@ -29,6 +29,7 @@ import { buildResponsesInput, resolveOpenAICompatPolicy } from "@oh-my-pi/pi-ai/
 import { stripOpenAIResponsesOutputOnlyStatusesForReplay } from "@oh-my-pi/pi-ai/utils";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
+import { META_MUSE_STATIC_MODELS } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import { isRecord, logger, prompt, stringifyJson } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { type AgentTelemetry, instrumentedCompleteSimple } from "../telemetry";
@@ -327,6 +328,59 @@ export function resolveBudgetReserveTokens(contextWindow: number, settings: Comp
 	const reserveExceedsWindow = reserveTokens >= contextWindow;
 
 	return defaultReserveIsEffectivelyImpossible || reserveExceedsWindow ? proportionalReserveTokens : reserveTokens;
+}
+
+/**
+ * Published context windows for the models eligible for a metadata fallback,
+ * keyed `provider/id`.
+ *
+ * Derived from the catalog's own `META_MUSE_STATIC_MODELS` rather than
+ * re-listing the ids here, so the eligible set and the window value cannot
+ * drift from the catalog, and a newly shipped Muse SKU is covered without
+ * touching this file.
+ */
+const FALLBACK_CONTEXT_WINDOWS = new Map(
+	META_MUSE_STATIC_MODELS.map(spec => [`${spec.provider}/${spec.id}`, spec.contextWindow ?? 0]),
+);
+
+/**
+ * Fallback context window for a known model whose resolved entry is
+ * missing/null.
+ *
+ * Only Meta's Muse Spark family gets one, at its published limit. Normal
+ * catalog-resolved Muse models already declare that window, so this is a
+ * defensive net purely for models arriving without catalog metadata (dynamic
+ * discovery, a stale/absent cache, or a custom provider config pointing at
+ * Meta). Provider and exact id are both matched — a bare `muse-spark`
+ * substring match would hand a fabricated 1M window to unrelated third-party
+ * models and postpone their compaction until that threshold.
+ *
+ * Every other unknown/null window stays 0 (compaction disabled) rather than
+ * assuming an unsafe broad default.
+ */
+export function fallbackContextWindowForModel(model: Model | undefined): number {
+	if (!model) return 0;
+	return FALLBACK_CONTEXT_WINDOWS.get(`${model.provider}/${model.id}`) ?? 0;
+}
+
+/**
+ * Effective context window for compaction decisions.
+ *
+ * Returns `model.contextWindow` when it is a positive number; otherwise
+ * falls back via {@link fallbackContextWindowForModel} for the known
+ * Meta Muse Spark IDs whose catalog entry is missing/null. A return of
+ * `0` means compaction is disabled (window unknown/unsupported).
+ *
+ * Intended callers: `SessionMaintenance` (primary session pre-prompt and
+ * post-turn checks) and `SessionAdvisors` (advisor context maintenance and
+ * promotion). All compaction-trigger paths must use this helper rather than
+ * reading `model.contextWindow` directly, so the defensive Muse fallback
+ * applies consistently.
+ */
+export function effectiveContextWindow(model: Model | undefined): number {
+	const raw = model?.contextWindow ?? 0;
+	if (raw > 0) return raw;
+	return fallbackContextWindowForModel(model);
 }
 
 /**

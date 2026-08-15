@@ -16,6 +16,7 @@ import {
 	compact,
 	compactionContextTokens,
 	createCompactionSummaryMessage,
+	effectiveContextWindow,
 	estimateTokens,
 	NativeCompactionError,
 	prepareCompaction,
@@ -1202,7 +1203,7 @@ export class SessionAdvisors {
 		if (AIError.is(errorId, AIError.Flag.Abort) || AIError.is(errorId, AIError.Flag.UserInterrupt)) return false;
 		if (
 			AIError.is(errorId, AIError.Flag.ContextOverflow) ||
-			(assistantFailure && AIError.isContextOverflow(assistantFailure, currentModel.contextWindow ?? 0))
+			(assistantFailure && AIError.isContextOverflow(assistantFailure, effectiveContextWindow(currentModel)))
 		) {
 			return false;
 		}
@@ -1288,7 +1289,7 @@ export class SessionAdvisors {
 	): Promise<boolean> {
 		const promotionSettings = this.#host.settings.getGroup("contextPromotion");
 		if (!promotionSettings.enabled) return false;
-		const contextWindow = currentModel.contextWindow ?? 0;
+		const contextWindow = effectiveContextWindow(currentModel);
 		if (contextWindow <= 0) return false;
 		const targetModel = await this.#host.resolveContextPromotionTarget(currentModel, contextWindow, signal);
 		if (!targetModel) return false;
@@ -1329,7 +1330,7 @@ export class SessionAdvisors {
 		if (!compactionSettings.enabled) return false;
 
 		const advisorModel = agent.state.model;
-		const contextWindow = advisorModel.contextWindow ?? 0;
+		const contextWindow = effectiveContextWindow(advisorModel);
 		if (contextWindow <= 0) return false;
 
 		const messages = agent.state.messages;
@@ -1359,7 +1360,7 @@ export class SessionAdvisors {
 		if (await this.#promoteAdvisorContextModel(advisor, advisorModel, signal)) {
 			// Promotion succeeded, check if new model has enough space
 			const newModel = agent.state.model;
-			const newWindow = newModel.contextWindow ?? 0;
+			const newWindow = effectiveContextWindow(newModel);
 			if (newWindow > 0) {
 				const stillNeedsCompaction = shouldCompact(contextTokens, newWindow, compactionSettings);
 				if (!stillNeedsCompaction) return false;

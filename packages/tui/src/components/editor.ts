@@ -395,6 +395,9 @@ export interface EditorTopBorder {
 	revision?: number;
 }
 
+export type EditorTopBorders = readonly EditorTopBorder[];
+export type EditorTopBorderResult = EditorTopBorder | EditorTopBorders;
+
 interface HistoryEntry {
 	prompt: string;
 }
@@ -517,11 +520,12 @@ export class Editor implements Component, Focusable {
 	// (set once, reused every frame) or a `provider` that recomputes lazily just
 	// before the editor paints — the second form lets the host coalesce
 	// per-event rebuilds down to one per rendered frame (see #4145).
-	#topBorderContent?: EditorTopBorder;
-	#topBorderProvider?: (availableWidth: number) => EditorTopBorder | undefined;
+	#topBorderContent?: EditorTopBorder | EditorTopBorders;
+	#topBorderProvider?: (availableWidth: number) => EditorTopBorder | EditorTopBorders | undefined;
 	#topBorderProviderWidth: number | undefined;
 	#topBorderProviderSignature: string | undefined;
 	#topBorderProviderRevision: number | undefined;
+	#topBorderRowCount = 1;
 	#borderVisible = true;
 
 	constructor(theme: EditorTheme) {
@@ -542,9 +546,7 @@ export class Editor implements Component, Focusable {
 	 * {@link setTopBorderProvider} for high-frequency updates — it collapses
 	 * per-event rebuilds to one per painted frame.
 	 */
-	setTopBorder(content: EditorTopBorder | undefined): void {
-		if (this.#topBorderContent?.content === content?.content && this.#topBorderContent?.width === content?.width)
-			return;
+	setTopBorder(content: EditorTopBorder | EditorTopBorders | undefined): void {
 		this.#topBorderContent = content;
 		this.#widthEpochRevision++;
 	}
@@ -560,7 +562,9 @@ export class Editor implements Component, Focusable {
 	 * per frame and does no work between paints. Return a logical `revision` to
 	 * distinguish concurrent status mutations from pure width reflow.
 	 */
-	setTopBorderProvider(provider: ((availableWidth: number) => EditorTopBorder | undefined) | undefined): void {
+	setTopBorderProvider(
+		provider: ((availableWidth: number) => EditorTopBorder | EditorTopBorders | undefined) | undefined,
+	): void {
 		if (this.#topBorderProvider === provider) return;
 		this.#topBorderProvider = provider;
 		this.#topBorderProviderWidth = undefined;
@@ -768,7 +772,7 @@ export class Editor implements Component, Focusable {
 
 	#getVisibleContentHeight(contentLines: number): number {
 		if (this.#maxHeight === undefined) return contentLines;
-		const verticalChrome = this.#borderVisible ? 2 : 0;
+		const verticalChrome = this.#borderVisible ? this.#topBorderRowCount + 1 : 0;
 		return Math.max(1, this.#maxHeight - verticalChrome);
 	}
 
@@ -894,8 +898,57 @@ export class Editor implements Component, Focusable {
 		const borderWidth = this.#getHorizontalChromeWidth(paddingX);
 		const topLeft = this.borderColor(`${box.topLeft}${box.horizontal.repeat(paddingX)}`);
 		const topRight = this.borderColor(`${box.horizontal.repeat(paddingX)}${box.topRight}`);
+		const statusRowLeft = this.borderColor(
+			`${this.#theme.symbols.boxSharp.teeRight}${box.horizontal.repeat(paddingX)}`,
+		);
+		const statusRowRight = this.borderColor(
+			`${box.horizontal.repeat(paddingX)}${this.#theme.symbols.boxSharp.teeLeft}`,
+		);
 		const bottomLeft = this.borderColor(`${box.bottomLeft}${box.horizontal}${padding(Math.max(0, paddingX - 1))}`);
 		const horizontal = this.borderColor(box.horizontal);
+
+		const topFillWidth = borderVisible ? Math.max(0, width - borderWidth * 2) : 0;
+		let rawTopBorder: EditorTopBorder | EditorTopBorders | undefined;
+		if (borderVisible) {
+			if (this.#topBorderProvider) {
+				const previousWidth = this.#topBorderProviderWidth;
+				rawTopBorder = this.#topBorderProvider(topFillWidth);
+				const rows = rawTopBorder ? (Array.isArray(rawTopBorder) ? rawTopBorder : [rawTopBorder]) : [];
+				const signature = rows.map(row => `${row.width}\0${row.content}`).join("\n");
+				const revision = rows.find(row => row.revision !== undefined)?.revision;
+				if (
+					(previousWidth !== undefined &&
+						revision !== undefined &&
+						this.#topBorderProviderRevision !== undefined &&
+						revision !== this.#topBorderProviderRevision) ||
+					(previousWidth === topFillWidth && signature !== this.#topBorderProviderSignature)
+				) {
+					this.#widthEpochRevision++;
+				}
+				this.#topBorderProviderWidth = topFillWidth;
+				this.#topBorderProviderSignature = signature;
+				this.#topBorderProviderRevision = revision;
+			} else {
+				rawTopBorder = this.#topBorderContent;
+			}
+		}
+		let topBorders: readonly EditorTopBorder[] | undefined = rawTopBorder
+			? Array.isArray(rawTopBorder)
+				? rawTopBorder
+				: [rawTopBorder]
+			: undefined;
+		// ponytail: tiny terminals (maxHeight <=3) cannot show two status rows plus a
+		// content row and the bottom border within the cap — clamp would otherwise
+		// blow the cap (2 header +1 content +1 bottom =4 >3) and steal a transcript
+		// row. Prefer keeping the transcript: drop secondary header rows and keep at
+		// least one content row visible. Roomy terminals (maxHeight >=4) keep all rows.
+		if (borderVisible && this.#maxHeight !== undefined) {
+			const maxHeaderRows = Math.max(1, this.#maxHeight - 2); // 1 content +1 bottom reserved
+			if (topBorders && topBorders.length > maxHeaderRows) {
+				topBorders = topBorders.slice(0, maxHeaderRows);
+			}
+		}
+		this.#topBorderRowCount = borderVisible ? Math.max(1, topBorders?.length ?? 1) : 0;
 
 		// Layout the text
 		const layoutLines = this.#layoutText(layoutWidth);
@@ -922,44 +975,21 @@ export class Editor implements Component, Focusable {
 		}
 
 		if (borderVisible) {
-			// Render top border: ╭─ [status content] ────────────────╮
-			const topFillWidth = Math.max(0, width - borderWidth * 2);
-			// Provider (lazy) wins over eager content — a host that installs both
-			// wants the coalesced path; falling back to eager keeps existing
-			// setTopBorder callers working unchanged.
-			let topBorder: EditorTopBorder | undefined;
-			if (this.#topBorderProvider) {
-				const previousWidth = this.#topBorderProviderWidth;
-				topBorder = this.#topBorderProvider(topFillWidth);
-				const signature = topBorder ? `${topBorder.width}\0${topBorder.content}` : "";
-				const revision = topBorder?.revision;
-				if (
-					(previousWidth !== undefined &&
-						revision !== undefined &&
-						this.#topBorderProviderRevision !== undefined &&
-						revision !== this.#topBorderProviderRevision) ||
-					(previousWidth === topFillWidth && signature !== this.#topBorderProviderSignature)
-				) {
-					this.#widthEpochRevision++;
-				}
-				this.#topBorderProviderWidth = topFillWidth;
-				this.#topBorderProviderSignature = signature;
-				this.#topBorderProviderRevision = revision;
-			} else {
-				topBorder = this.#topBorderContent;
-			}
-			if (topBorder) {
-				const { content, width: statusWidth } = topBorder;
-				if (statusWidth <= topFillWidth) {
-					// Status fits - add fill after it
-					const fillWidth = topFillWidth - statusWidth;
-					result.push(topLeft + content + this.borderColor(box.horizontal.repeat(fillWidth)) + topRight);
-				} else {
-					// Status too long - truncate it
-					const truncated = truncateToWidth(content, Math.max(0, topFillWidth - 1));
-					const truncatedWidth = visibleWidth(truncated);
-					const fillWidth = Math.max(0, topFillWidth - truncatedWidth);
-					result.push(topLeft + truncated + this.borderColor(box.horizontal.repeat(fillWidth)) + topRight);
+			if (topBorders && topBorders.length > 0) {
+				for (let idx = 0; idx < topBorders.length; idx++) {
+					const { content, width: statusWidth } = topBorders[idx]!;
+					const isFirst = idx === 0;
+					const left = isFirst ? topLeft : statusRowLeft;
+					const right = isFirst ? topRight : statusRowRight;
+					if (statusWidth <= topFillWidth) {
+						const fillWidth = topFillWidth - statusWidth;
+						result.push(left + content + this.borderColor(box.horizontal.repeat(fillWidth)) + right);
+					} else {
+						const truncated = truncateToWidth(content, Math.max(0, topFillWidth - 1));
+						const truncatedWidth = visibleWidth(truncated);
+						const fillWidth = Math.max(0, topFillWidth - truncatedWidth);
+						result.push(left + truncated + this.borderColor(box.horizontal.repeat(fillWidth)) + right);
+					}
 				}
 			} else {
 				result.push(topLeft + horizontal.repeat(topFillWidth) + topRight);
