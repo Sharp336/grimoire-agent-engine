@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `hideThinkingBlockOnComplete` to hide normally completed reasoning after streaming, while retaining abnormal turns and allowing explicit `Ctrl+T` reveal; applies to subagent transcripts too ([#7494](https://github.com/can1357/oh-my-pi/pull/7494) by [@SebastianMartinezA](https://github.com/SebastianMartinezA)).
 ### Changed
 
 - Routed paid xAI models (`XAI_API_KEY` / `xai/…`) through the Responses API used by SuperGrok OAuth instead of Chat Completions.

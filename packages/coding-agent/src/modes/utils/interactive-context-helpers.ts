@@ -23,9 +23,11 @@ export function createAssistantMessageComponent(
 		ctx.viewSession.extensionRunner?.getAssistantThinkingRenderers(),
 		ctx.ui.imageBudget,
 		ctx.proseOnlyThinking,
+		ctx.hideThinkingBlockOnComplete,
 	);
 	component.setImagesVisible(ctx.settings.get("terminal.showImages"));
 	component.setToolResultImagesVisible(!ctx.hideToolActivity);
 	component.setExpanded(ctx.toolOutputExpanded);
+	component.setUserRevealedThinking(ctx.thinkingRevealed);
 	return component;
 }

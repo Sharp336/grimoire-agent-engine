@@ -48,6 +48,8 @@ export interface AgentTranscriptViewerDeps {
 	getMessageRenderer?: (customType: string) => MessageRenderer | undefined;
 	cwd: string;
 	hideThinkingBlock?: () => boolean;
+	/** Hide thinking blocks once the turn completes (live while streaming). */
+	hideThinkingBlockOnComplete?: () => boolean;
 	proseOnlyThinking?: () => boolean;
 	expandKeys: KeyId[];
 	/** Keys that toggle the whole hub closed (app.agents.hub + app.session.observe). */
@@ -167,6 +169,7 @@ export class AgentTranscriptViewer implements Component {
 			getMessageRenderer: deps.getMessageRenderer,
 			cwd: deps.cwd,
 			hideThinkingBlock: deps.hideThinkingBlock,
+			hideThinkingBlockOnComplete: deps.hideThinkingBlockOnComplete,
 			proseOnlyThinking: deps.proseOnlyThinking,
 			requestRender: deps.requestRender,
 		});

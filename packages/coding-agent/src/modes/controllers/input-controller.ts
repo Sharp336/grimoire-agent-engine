@@ -1972,15 +1972,20 @@ export class InputController {
 		}
 		this.ctx.hideThinkingBlock = !this.ctx.hideThinkingBlock;
 		this.ctx.settings.set("hideThinkingBlock", this.ctx.hideThinkingBlock);
+		// An explicit visible toggle reveals completed reasoning too (wins over
+		// hide-on-complete); hidden restores the clean-transcript default.
+		this.ctx.thinkingRevealed = !this.ctx.hideThinkingBlock;
 
 		for (const child of this.ctx.chatContainer.children) {
 			if (child instanceof AssistantMessageComponent) {
 				child.setHideThinkingBlock(this.ctx.hideThinkingBlock);
+				child.setUserRevealedThinking(this.ctx.thinkingRevealed);
 			}
 		}
 
 		if (this.ctx.streamingComponent && this.ctx.streamingMessage) {
 			this.ctx.streamingComponent.setHideThinkingBlock(this.ctx.hideThinkingBlock);
+			this.ctx.streamingComponent.setUserRevealedThinking(this.ctx.thinkingRevealed);
 			this.ctx.streamingComponent.updateContent(this.ctx.streamingMessage);
 		}
 

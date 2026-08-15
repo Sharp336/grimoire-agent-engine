@@ -480,17 +480,23 @@ export class TranscriptContainer
 		// reaches.
 		let liveStartIndex = -1;
 		let hasLiveBlock = false;
+		let liveRegionPinned = false;
 		for (let i = 0; i < count; i++) {
 			if (!isBlockFinalized(this.children[i]!)) {
-				liveStartIndex = i;
+				if (liveStartIndex === -1) liveStartIndex = i;
 				hasLiveBlock = true;
-				this.#nativeScrollbackLiveRegionPinned =
+				// The seam position comes from the first live block only, but any
+				// live block below it may still pin the region (e.g. a post-tool
+				// assistant segment with hide-on-complete reasoning that a pending
+				// tool card precedes): its rows must not freeze into native
+				// scrollback as snapshots before its final rebuild.
+				liveRegionPinned ||=
 					(
 						this.children[i] as Component & Partial<NativeScrollbackLiveRegion>
 					).isNativeScrollbackLiveRegionPinned?.() === true;
-				break;
 			}
 		}
+		this.#nativeScrollbackLiveRegionPinned = liveRegionPinned;
 
 		const lines = this.#lines;
 		const previousSegments = this.#segments;

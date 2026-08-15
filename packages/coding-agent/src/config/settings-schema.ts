@@ -1107,6 +1107,17 @@ export const SETTINGS_SCHEMA = {
 			description: "Hide thinking blocks in assistant responses",
 		},
 	},
+	hideThinkingBlockOnComplete: {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Thinking",
+			label: "Hide Thinking On Completion",
+			description:
+				"Show thinking while streaming, then hide it once the turn finishes (Codex-style clean transcript). Turns that end abnormally (error, abort, length) keep their reasoning visible for diagnosis",
+		},
+	},
 	proseOnlyThinking: {
 		type: "boolean",
 		default: true,

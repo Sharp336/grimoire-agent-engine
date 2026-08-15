@@ -1053,7 +1053,15 @@ export class EventController {
 			// can never reach native scrollback: the head of the preview is
 			// neither committed nor on screen and the transcript reads as cut.
 			if (this.ctx.streamingMessage.content.some(content => content.type === "toolCall")) {
-				this.ctx.streamingComponent.markTranscriptBlockFinalized();
+				// Tool arguments stream on the tool card, so the assistant text/thinking
+				// is final — seal the block for scrollback, but NOT as a completed turn:
+				// hide-on-complete must wait for the real message_end. Skip the early
+				// seal entirely while the live region is pinned (retractable thinking
+				// visible): a finalized block can't pin its scrollback region, so the
+				// reasoning would freeze into native history before message_end.
+				if (!this.ctx.streamingComponent.isNativeScrollbackLiveRegionPinned?.()) {
+					this.ctx.streamingComponent.markTranscriptBlockFinalized(false);
+				}
 			}
 			for (let contentIndex = 0; contentIndex < this.ctx.streamingMessage.content.length; contentIndex++) {
 				const content = this.ctx.streamingMessage.content[contentIndex]!;

@@ -545,6 +545,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#appearanceRefreshRequest: { token: TerminalAppearanceRequestToken; deadline: number } | undefined;
 	todoPhases: TodoPhase[] = [];
 	hideThinkingBlock = false;
+	hideThinkingBlockOnComplete = false;
+	thinkingRevealed = false;
 	#sessionsWithDisplayableThinkingContent = new WeakSet<AgentSession>();
 	/** Whether the visible session has produced thinking content the user can reveal. */
 	get hasDisplayableThinkingContent(): boolean {
@@ -856,6 +858,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.hideToolActivity = settings.get("display.hideToolActivity");
 		this.chatContainer.setToolActivityVisible(!this.hideToolActivity);
 		this.hideThinkingBlock = settings.get("hideThinkingBlock");
+		this.hideThinkingBlockOnComplete = settings.get("hideThinkingBlockOnComplete");
 		this.proseOnlyThinking = settings.get("proseOnlyThinking");
 
 		const hookCommands: SlashCommand[] = (

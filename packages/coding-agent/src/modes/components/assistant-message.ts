@@ -263,6 +263,22 @@ export class AssistantMessageComponent extends Container {
 	 *  on a fresh block that has no live token throughput of its own. */
 	#thinkingRateLive = false;
 
+	/**
+	 * True once the message has actually ended (message_end, or construction
+	 * with a persisted message). Distinct from {@link #transcriptBlockFinalized},
+	 * which also seals early when a streamed message gains a tool call so its
+	 * scrollback can commit while tool arguments still stream.
+	 */
+	#messageComplete = false;
+
+	/**
+	 * User explicitly revealed thinking (Ctrl+T / settings "Hide Thinking
+	 * Blocks" set to visible): beats hide-on-complete so completed blocks can
+	 * be re-read. Hidden state clears it, restoring the clean-transcript
+	 * default for future turns.
+	 */
+	#userRevealed = false;
+
 	#textColorTransform?: (text: string) => string;
 
 	setTextColorTransform(transform?: (text: string) => string): void {
@@ -275,8 +291,10 @@ export class AssistantMessageComponent extends Container {
 		private readonly thinkingRenderers: readonly AssistantThinkingRenderer[] = [],
 		private readonly imageBudget?: ImageBudget,
 		private proseOnlyThinking = true,
+		private hideThinkingBlockOnComplete = false,
 	) {
 		super();
+		this.#messageComplete = message !== undefined;
 		this.#transcriptBlockFinalized = message !== undefined;
 
 		// Slim cache-invalidation divider, populated above the content when this
@@ -329,6 +347,45 @@ export class AssistantMessageComponent extends Container {
 		this.hideThinkingBlock = hide;
 	}
 
+	setHideThinkingBlockOnComplete(hide: boolean): void {
+		if (this.hideThinkingBlockOnComplete === hide) return;
+		this.hideThinkingBlockOnComplete = hide;
+		// Enabling auto-hide on an incomplete, early-sealed block (tool call
+		// streamed with the setting off) makes its reasoning retractable: reopen
+		// the block so the live-region pin protects it until message_end.
+		if (hide && this.#thinkingIsRetractable()) {
+			this.#transcriptBlockFinalized = false;
+		}
+	}
+
+	setUserRevealedThinking(revealed: boolean): void {
+		if (this.#userRevealed === revealed) return;
+		this.#userRevealed = revealed;
+		// Rebuild cached content: reconstructed components are created with a
+		// completed message and get this setter after the constructor already
+		// rendered, so the reveal must re-render (mirrors image setters).
+		if (this.#lastMessage) {
+			this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
+		}
+	}
+
+	/**
+	 * Effective thinking visibility for this block: hidden when the user's
+	 * global toggle is on, or — with hide-on-complete — once the turn has truly
+	 * completed and ended normally (`stop`/`toolUse`). An explicit user reveal
+	 * (Ctrl+T / settings to visible) wins over hide-on-complete so completed
+	 * reasoning can be re-read. Live blocks keep streaming their reasoning;
+	 * abnormal turns (error/abort/length) keep their trace on every re-render,
+	 * not just the finalize one.
+	 */
+	#effectiveHideThinkingBlock(): boolean {
+		if (this.hideThinkingBlock) return true;
+		if (this.#userRevealed) return false;
+		if (!this.hideThinkingBlockOnComplete || !this.#messageComplete) return false;
+		const reason = this.#lastMessage?.stopReason;
+		return reason === "stop" || reason === "toolUse";
+	}
+
 	setProseOnlyThinking(proseOnly: boolean): void {
 		this.proseOnlyThinking = proseOnly;
 	}
@@ -347,7 +404,7 @@ export class AssistantMessageComponent extends Container {
 	 * Once text starts, a tool call streams, or the block is sealed, the pulse ends.
 	 */
 	#shouldAnimateThinking(message: AssistantMessage): boolean {
-		if (!this.hideThinkingBlock || this.#transcriptBlockFinalized) return false;
+		if (!this.#effectiveHideThinkingBlock() || this.#transcriptBlockFinalized) return false;
 		let tail: "text" | "thinking" | undefined;
 		for (const content of message.content) {
 			if (content.type === "toolCall") return false;
@@ -473,6 +530,12 @@ export class AssistantMessageComponent extends Container {
 		if (this.#transcriptBlockFinalized || !this.#lastUpdateTransient) return 0;
 		if (this.#containsMermaidSource) return 0;
 		if (this.#markerSlot.children.length > 0) return 0;
+		// Reasoning that hide-on-complete will retract at message_end must never
+		// reach immutable native scrollback: defer settling wholesale (like
+		// mermaid) while retractable thinking is currently visible.
+		if (this.#thinkingIsRetractable()) {
+			return 0;
+		}
 		const items = this.#fastPathItems;
 		const width = this.#lastRenderWidth;
 		if (!items || items.length === 0 || width <= 0) return 0;
@@ -497,16 +560,60 @@ export class AssistantMessageComponent extends Container {
 		return settled;
 	}
 
+	/**
+	 * Whether the currently visible reasoning will actually be retracted at
+	 * message_end: hide-on-complete is on, no explicit user reveal overrides
+	 * it, and a visible thinking block exists. Both native-scrollback guards
+	 * (settled-rows deferral and live-region pinning) must agree on this, or a
+	 * revealed turn keeps unnecessary pin/deferral for its whole duration.
+	 */
+	#thinkingIsRetractable(): boolean {
+		if (this.#userRevealed || this.#effectiveHideThinkingBlock()) return false;
+		return (
+			this.hideThinkingBlockOnComplete &&
+			(this.#lastMessage?.content.some(
+				c => c.type === "thinking" && resolveThinkingDisplay(c, this.proseOnlyThinking).visible,
+			) ??
+				false)
+		);
+	}
+
+	/**
+	 * While hide-on-complete keeps retractable reasoning visible, the final
+	 * rebuild at message_end will remove it: pin the live region so scrolled
+	 * thinking rows are never frozen into immutable native scrollback, where
+	 * they would survive the rebuild in terminal history. Mirrors the
+	 * {@link getTranscriptBlockSettledRows} deferral.
+	 */
+	isNativeScrollbackLiveRegionPinned(): boolean {
+		if (this.#transcriptBlockFinalized) return false;
+		return this.#thinkingIsRetractable();
+	}
+
 	getTranscriptBlockVersion(): number {
 		return this.#blockVersion;
 	}
 
-	markTranscriptBlockFinalized(): void {
+	/**
+	 * Seal this block: stops the thinking pulse, marks the transcript block
+	 * finalized so scrollback can commit. `complete` distinguishes the early
+	 * tool-call seal (event-controller calls this once a streamed message
+	 * gains a tool call, while tool arguments still stream) from the real
+	 * turn end — hide-on-complete only retracts reasoning at true completion.
+	 * The rebuild runs only on the false→true transition: the live pulse was
+	 * on screen (hidden-thinking mode) or hide-on-complete still has visible
+	 * reasoning from the streaming render. Later seals are no-ops.
+	 */
+	markTranscriptBlockFinalized(complete = true): void {
+		// Sample the effective visibility before completion flips it: the rebuild
+		// must run exactly on the false→true transition (visible thinking that
+		// now hides), or when the live pulse was on screen. Repeated seals
+		// (per tool-arg tick) stay no-ops.
+		const wasThinkingHidden = this.#effectiveHideThinkingBlock();
+		if (complete) this.#messageComplete = true;
 		this.#transcriptBlockFinalized = true;
 		this.#stopThinkingAnimation();
-		// If the live pulse was on screen when the block sealed, drop the fast path
-		// and rebuild so the placeholder is removed — finalized blocks never animate.
-		if (this.#thinkingDots) {
+		if (this.#thinkingDots || (!wasThinkingHidden && this.#effectiveHideThinkingBlock())) {
 			this.#fastPathKey = undefined;
 			this.#fastPathItems = undefined;
 			if (this.#lastMessage) this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
@@ -688,14 +795,16 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	#computeShapeKey(message: AssistantMessage): string {
-		const parts: string[] = [`htb:${this.hideThinkingBlock ? 1 : 0}|pot:${this.proseOnlyThinking ? 1 : 0}`];
+		const parts: string[] = [
+			`htb:${this.#effectiveHideThinkingBlock() ? 1 : 0}|pot:${this.proseOnlyThinking ? 1 : 0}`,
+		];
 		for (const content of message.content) {
 			if (content.type === "text") {
 				parts.push(canonicalizeMessage(content.text) ? "T1" : "T0");
 			} else if (content.type === "thinking") {
 				const display = resolveThinkingDisplay(content, this.proseOnlyThinking);
 				if (!display.visible) parts.push("K0");
-				else if (this.hideThinkingBlock) parts.push("KH");
+				else if (this.#effectiveHideThinkingBlock()) parts.push("KH");
 				else parts.push("KV");
 			} else {
 				// Non-rendered blocks (toolCall, redactedThinking, …) still occupy a
@@ -838,7 +947,7 @@ export class AssistantMessageComponent extends Container {
 		// would happen mid-stream.
 		this.#containsMermaidSource = message.content.some(content => {
 			if (content.type === "text") return containsMermaidFence(content.text);
-			if (content.type === "thinking" && !this.hideThinkingBlock) {
+			if (content.type === "thinking" && !this.#effectiveHideThinkingBlock()) {
 				const display = resolveThinkingDisplay(content, this.proseOnlyThinking);
 				return display.visible && containsMermaidFence(display.text);
 			}
@@ -863,7 +972,7 @@ export class AssistantMessageComponent extends Container {
 			c =>
 				(c.type === "text" && canonicalizeMessage(c.text)) ||
 				(c.type === "image" && c.data && c.mimeType) ||
-				(!this.hideThinkingBlock &&
+				(!this.#effectiveHideThinkingBlock() &&
 					c.type === "thinking" &&
 					resolveThinkingDisplay(c, this.proseOnlyThinking).visible),
 		);
@@ -883,7 +992,7 @@ export class AssistantMessageComponent extends Container {
 				hasRenderedContent = true;
 			} else if (content.type === "thinking" && resolveThinkingDisplay(content, this.proseOnlyThinking).visible) {
 				const thinkingText = resolveThinkingDisplay(content, this.proseOnlyThinking).text;
-				if (this.hideThinkingBlock) {
+				if (this.#effectiveHideThinkingBlock()) {
 					thinkingIndex += 1;
 					continue;
 				}

@@ -526,14 +526,35 @@ export class SelectorController {
 			}
 			case "hideThinkingBlock":
 				this.ctx.hideThinkingBlock = value as boolean;
+				// Explicit user choice: visible reveals completed reasoning too
+				// (wins over hide-on-complete), hidden restores the default.
+				this.ctx.thinkingRevealed = !(value as boolean);
 				for (const child of this.ctx.chatContainer.children) {
 					if (child instanceof AssistantMessageComponent) {
 						child.setHideThinkingBlock(this.ctx.effectiveHideThinkingBlock);
+						child.setUserRevealedThinking(this.ctx.thinkingRevealed);
 					}
 				}
 				// Full clear + replay so blocks frozen in committed scrollback on
 				// ED3-risk terminals retire their stale snapshots too (see
 				// InputController.toggleThinkingBlockVisibility).
+				this.ctx.ui.resetDisplay();
+				break;
+			case "hideThinkingBlockOnComplete":
+				this.ctx.hideThinkingBlockOnComplete = value as boolean;
+				if (value as boolean) this.ctx.thinkingRevealed = false;
+				for (const child of this.ctx.chatContainer.children) {
+					if (child instanceof AssistantMessageComponent) {
+						child.setHideThinkingBlockOnComplete(value as boolean);
+						// Re-enabling the clean-transcript mode clears any prior
+						// explicit reveal so the setting takes effect again — the
+						// ctx must be cleared too, or new/rebuilt components keep
+						// reading the stale reveal from the factory/builder.
+						if (value as boolean) child.setUserRevealedThinking(false);
+					}
+				}
+				// Full clear + replay so settled blocks frozen in committed scrollback
+				// retire their stale thinking snapshots too.
 				this.ctx.ui.resetDisplay();
 				break;
 			case "proseOnlyThinking":
@@ -2037,6 +2058,7 @@ export class SelectorController {
 			getMessageRenderer: type => this.ctx.session.extensionRunner?.getMessageRenderer(type),
 			cwd: this.ctx.sessionManager.getCwd(),
 			hideThinkingBlock: () => this.ctx.effectiveHideThinkingBlock,
+			hideThinkingBlockOnComplete: () => this.ctx.hideThinkingBlockOnComplete,
 			proseOnlyThinking: () => this.ctx.proseOnlyThinking,
 			focusAgent: id => this.ctx.focusAgentSession(id),
 			sessionFile: this.ctx.sessionManager.getSessionFile() ?? null,
