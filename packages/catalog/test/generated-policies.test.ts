@@ -223,7 +223,7 @@ describe("generated model policies", () => {
 		]);
 	});
 
-	it("pins zai glm-5.2 base id to 1M context", () => {
+	it("pins GLM-5.2 and GLM-5.3 Coding Plan ids to 1M context", () => {
 		const models = [
 			createSpec({
 				id: "glm-5.2",
@@ -232,12 +232,29 @@ describe("generated model policies", () => {
 				contextWindow: 200_000,
 				maxTokens: 8192,
 			}),
+			createSpec({
+				id: "glm-5.3",
+				api: "anthropic-messages",
+				provider: "zai",
+				contextWindow: 200_000,
+				maxTokens: 8192,
+			}),
+			createSpec({
+				id: "glm-5.3",
+				api: "openai-completions",
+				provider: "zhipu-coding-plan",
+				contextWindow: 200_000,
+				maxTokens: 8192,
+			}),
 		];
 
 		applyGeneratedModelPolicies(models);
 
-		expect(models[0]?.contextWindow).toBe(1_000_000);
-		expect(models[0]?.maxTokens).toBe(131_072);
+		expect(models.map(model => [model.contextWindow, model.maxTokens])).toEqual([
+			[1_000_000, 131_072],
+			[1_000_000, 131_072],
+			[1_000_000, 131_072],
+		]);
 	});
 
 	it("pins MiniMax-M3 long-context providers to 1M context", () => {

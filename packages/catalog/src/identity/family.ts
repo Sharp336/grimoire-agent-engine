@@ -251,6 +251,22 @@ export const isGlm52ReasoningEffortModelId = memo((modelId: string): boolean => 
 	return semverGte(glm.version, "5.2");
 });
 
+/**
+ * GLM-5.3+ coding SKUs add a native `low` tier beneath `high`/`max`.
+ * Provider-specific policy (including whether thinking-off floors to `low`)
+ * is resolved in model-thinking rather than assumed for every reseller.
+ */
+export const isGlm53ReasoningEffortModelId = memo((modelId: string): boolean => {
+	const glm = parseGlmModel(bareModelId(modelId));
+	if (!glm || glm.vision) {
+		return false;
+	}
+	if (glm.variant !== "base" && glm.variant !== "air" && glm.variant !== "turbo") {
+		return false;
+	}
+	return semverGte(glm.version, "5.3");
+});
+
 /** GLM vision SKUs — the `v` that attaches to the version (`glm-4v`, `glm-4.5v`). */
 export const isGlmVisionModelId = memo((modelId: string): boolean => {
 	return parseGlmModel(bareModelId(modelId))?.vision === true;

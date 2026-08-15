@@ -49,6 +49,8 @@ import {
 	projectOpenAIProReasoningAliases,
 	SAKANA_FUGU_STATIC_MODELS,
 	stripFireworksDeepSeekThinkingToggle,
+	ZAI_CODING_PLAN_STATIC_MODELS,
+	ZHIPU_CODING_PLAN_STATIC_MODELS,
 } from "../src/provider-models/openai-compat";
 import { type OpenAICodexAccount, openaiCodexModelManagerOptions } from "../src/provider-models/special";
 import type { Api, ModelSpec } from "../src/types";
@@ -555,6 +557,13 @@ async function generateModels() {
 	// Mythos 5). Deduped behind upstream entries; metadata is pinned in
 	// applyAnthropicCatalogPolicy.
 	allModels.push(...ANTHROPIC_CURATED_FALLBACK_MODELS);
+	// GLM-5.3 launched on Z.AI Coding Plan before the PAYG catalog used for
+	// comparison pricing listed it. Earlier upstream rows still win once the
+	// general API advertises the model.
+	allModels.push(...ZAI_CODING_PLAN_STATIC_MODELS);
+	// Zhipu's authoritative `/models` response can lag the Coding Plan rollout;
+	// the model-manager fallback and this seed keep the documented model present.
+	allModels.push(...ZHIPU_CODING_PLAN_STATIC_MODELS);
 	// Seed Meta's documented Muse model so first-run selection does not depend on
 	// credentials or live discovery.
 	allModels.push(...META_MUSE_STATIC_MODELS);

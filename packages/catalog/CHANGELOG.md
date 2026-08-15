@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added GLM-5.3 to the Z.AI and Zhipu Coding Plan catalogs with the documented 1M context, 131,072-token output, and official `low`/`high`/`max` effort contract. Thinking defaults to `max`, while thinking-off requests floor to `low` on those first-party providers ([#8518](https://github.com/can1357/oh-my-pi/issues/8518)).
+
 ## [17.3.4] - 2026-08-14
 
 ### Added

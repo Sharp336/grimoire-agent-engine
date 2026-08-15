@@ -154,7 +154,7 @@ describe("openai-completions compat — GLM coding-plan stream idle timeout", ()
 });
 
 describe("zhipu-coding-plan model discovery", () => {
-	it("uses the dedicated Coding Plan endpoint by default", async () => {
+	it("uses the dedicated endpoint and retains GLM-5.3 when `/models` lags availability", async () => {
 		let requestedUrl = "";
 		const mockFetch: FetchImpl = Object.assign(
 			async (input: string | Request | URL): Promise<Response> => {
@@ -172,7 +172,44 @@ describe("zhipu-coding-plan model discovery", () => {
 		const models = await options.fetchDynamicModels?.();
 
 		expect(requestedUrl).toBe("https://open.bigmodel.cn/api/coding/paas/v4/models");
-		expect(models?.[0]?.id).toBe("glm-5.1");
-		expect(models?.[0]?.baseUrl).toBe("https://open.bigmodel.cn/api/coding/paas/v4");
+		expect(models?.map(model => model.id)).toEqual(["glm-5.1", "glm-5.3"]);
+		const glm53 = models?.find(model => model.id === "glm-5.3");
+		expect(glm53?.baseUrl).toBe("https://open.bigmodel.cn/api/coding/paas/v4");
+		expect(glm53?.contextWindow).toBe(1_000_000);
+		expect(glm53?.maxTokens).toBe(131_072);
+	});
+
+	it("keeps a lagging-catalog GLM-5.3 fallback on the configured endpoint", async () => {
+		const mockFetch: FetchImpl = Object.assign(
+			async (): Promise<Response> =>
+				new Response(JSON.stringify({ data: [{ id: "glm-5.1", name: "GLM-5.1" }] }), {
+					headers: { "content-type": "application/json" },
+				}),
+			{ preconnect: fetch.preconnect },
+		);
+		const options = zhipuCodingPlanModelManagerOptions({
+			apiKey: "test-key",
+			baseUrl: "https://proxy.example.test/zhipu/",
+			fetch: mockFetch,
+		});
+
+		const models = await options.fetchDynamicModels?.();
+
+		expect(models?.find(model => model.id === "glm-5.3")?.baseUrl).toBe("https://proxy.example.test/zhipu");
+	});
+
+	it("keeps the endpoint's GLM-5.3 row authoritative once discovery lists it", async () => {
+		const mockFetch: FetchImpl = Object.assign(
+			async (): Promise<Response> =>
+				new Response(JSON.stringify({ data: [{ id: "glm-5.3", name: "GLM-5.3 Live" }] }), {
+					headers: { "content-type": "application/json" },
+				}),
+			{ preconnect: fetch.preconnect },
+		);
+		const options = zhipuCodingPlanModelManagerOptions({ apiKey: "test-key", fetch: mockFetch });
+
+		const models = await options.fetchDynamicModels?.();
+
+		expect(models?.map(model => [model.id, model.name])).toEqual([["glm-5.3", "GLM-5.3 Live"]]);
 	});
 });

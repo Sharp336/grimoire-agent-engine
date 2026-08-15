@@ -1761,8 +1761,61 @@ export function siliconflowCnModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
-// 6.7 Zhipu Coding Plan
+// 6.7 GLM Coding Plans
 // ---------------------------------------------------------------------------
+
+/**
+ * GLM-5.3 is live for Z.AI Coding Plan subscribers before the general Z.AI
+ * API catalog advertises it. Keep a generated-catalog fallback so the model is
+ * selectable without depending on that upstream rollout. The comparison cost
+ * follows the existing PAYG display policy from issue #5598; the same rates
+ * are published for the GLM-5.3 OpenCode Go route and Z.AI's GLM-5.2 row.
+ * https://docs.z.ai/guides/llm/glm-5.3
+ */
+export const ZAI_CODING_PLAN_STATIC_MODELS: readonly ModelSpec<"anthropic-messages">[] = [
+	{
+		id: "glm-5.3",
+		name: "GLM-5.3",
+		api: "anthropic-messages",
+		provider: "zai",
+		baseUrl: "https://api.z.ai/api/anthropic",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 },
+		contextWindow: 1_000_000,
+		maxTokens: 131_072,
+	},
+];
+
+/**
+ * The Zhipu Coding Plan `/models` endpoint can lag model availability during a
+ * rollout. Z.AI documents GLM-5.3 as available to every plan, so keep it in the
+ * authoritative discovery result even before the endpoint enumerates it.
+ * https://docs.bigmodel.cn/cn/guide/models/text/glm-5.3
+ */
+function buildZhipuCodingPlanGlm53(baseUrl: string): ModelSpec<"openai-completions"> {
+	return {
+		id: "glm-5.3",
+		name: "GLM-5.3",
+		api: "openai-completions",
+		provider: "zhipu-coding-plan",
+		baseUrl,
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1_000_000,
+		maxTokens: 131_072,
+		compat: {
+			thinkingFormat: "zai",
+			reasoningContentField: "reasoning_content",
+			supportsDeveloperRole: false,
+		},
+	};
+}
+
+export const ZHIPU_CODING_PLAN_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
+	buildZhipuCodingPlanGlm53("https://open.bigmodel.cn/api/coding/paas/v4"),
+];
 
 export interface ZhipuCodingPlanModelManagerConfig {
 	apiKey?: string;
@@ -1774,13 +1827,13 @@ export function zhipuCodingPlanModelManagerOptions(
 	config?: ZhipuCodingPlanModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
 	const apiKey = config?.apiKey;
-	const baseUrl = config?.baseUrl ?? "https://open.bigmodel.cn/api/coding/paas/v4";
+	const baseUrl = normalizeAnthropicBaseUrl(config?.baseUrl, "https://open.bigmodel.cn/api/coding/paas/v4");
 	return {
 		providerId: "zhipu-coding-plan",
 		dynamicModelsAuthoritative: true,
 		...(apiKey && {
-			fetchDynamicModels: () =>
-				fetchOpenAICompatibleModels({
+			fetchDynamicModels: async () => {
+				const discovered = await fetchOpenAICompatibleModels({
 					api: "openai-completions",
 					provider: "zhipu-coding-plan",
 					baseUrl,
@@ -1803,7 +1856,12 @@ export function zhipuCodingPlanModelManagerOptions(
 						};
 					},
 					fetch: config?.fetch,
-				}),
+				});
+				if (discovered === null || discovered.some(model => model.id === "glm-5.3")) {
+					return discovered;
+				}
+				return [...discovered, buildZhipuCodingPlanGlm53(baseUrl)];
+			},
 		}),
 	};
 }

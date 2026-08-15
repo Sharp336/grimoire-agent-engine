@@ -275,6 +275,55 @@ describe("model thinking derivation", () => {
 		expect(openRouter.thinking?.effortMap).toBeUndefined();
 	});
 
+	it("applies the GLM-5.3 low/high/max mandatory-thinking contract only to official Coding Plan providers", () => {
+		const zai = createModel({
+			id: "glm-5.3",
+			api: "anthropic-messages",
+			provider: "zai",
+			baseUrl: "https://api.z.ai/api/anthropic",
+		});
+		const zhipu = createModel({
+			id: "glm-5.3",
+			api: "openai-completions",
+			provider: "zhipu-coding-plan",
+			baseUrl: "https://open.bigmodel.cn/api/coding/paas/v4",
+		});
+		const fireworks = createModel({
+			id: "glm-5.3",
+			api: "openai-completions",
+			provider: "fireworks",
+			baseUrl: "https://api.fireworks.ai/inference/v1",
+		});
+		const ollamaCloud = createModel({
+			id: "glm-5.3",
+			api: "ollama-chat",
+			provider: "ollama-cloud",
+			baseUrl: "https://ollama.com",
+		});
+
+		expect(zai.thinking).toEqual({
+			mode: "anthropic-budget-effort",
+			efforts: [Effort.Low, Effort.High, Effort.Max],
+			defaultLevel: Effort.Max,
+			requiresEffort: true,
+		});
+		expect(zhipu.thinking).toEqual({
+			mode: "effort",
+			efforts: [Effort.Low, Effort.High, Effort.Max],
+			defaultLevel: Effort.Max,
+			requiresEffort: true,
+		});
+		expect(fireworks.thinking).toEqual({
+			mode: "effort",
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.Max],
+			effortMap: { minimal: "none" },
+		});
+		expect(ollamaCloud.thinking).toEqual({
+			mode: "effort",
+			efforts: [Effort.High, Effort.Max],
+		});
+	});
+
 	it("applies the DeepSeek effort contract to Ollama Cloud ollama-chat models (issue #8334)", () => {
 		const flash = createModel({
 			id: "deepseek-v4-flash",

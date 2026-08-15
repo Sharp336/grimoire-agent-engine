@@ -3,6 +3,7 @@ import {
 	hasOpus47ApiRestrictions,
 	isClaudeModelId,
 	isGeminiModelId,
+	isGlm53ReasoningEffortModelId,
 	isGlmVisionModelId,
 	isGrokModelId,
 	isGrokReasoningEffortCapable,
@@ -254,6 +255,18 @@ describe("isReasoningGlmModelId", () => {
 		expect(isReasoningGlmModelId("zai-org/GLM-5-Turbo")).toBe(true);
 		// Vision SKUs are still excluded even in uppercase.
 		expect(isReasoningGlmModelId("zai-org/GLM-4.5V")).toBe(false);
+	});
+});
+
+describe("isGlm53ReasoningEffortModelId", () => {
+	test("matches the 5.3+ coding lines without widening to older or non-reasoning variants", () => {
+		expect(isGlm53ReasoningEffortModelId("glm-5.3")).toBe(true);
+		expect(isGlm53ReasoningEffortModelId("z-ai/GLM-5.3-Turbo")).toBe(true);
+		expect(isGlm53ReasoningEffortModelId("glm-6")).toBe(true);
+
+		expect(isGlm53ReasoningEffortModelId("glm-5.2")).toBe(false);
+		expect(isGlm53ReasoningEffortModelId("glm-5.3-flash")).toBe(false);
+		expect(isGlm53ReasoningEffortModelId("glm-5.3v")).toBe(false);
 	});
 });
 

@@ -26,6 +26,7 @@ import {
 	isDeepseekModelIdOrName,
 	isDeepseekV4FlashModelId,
 	isGlm52ReasoningEffortModelId,
+	isGlm53ReasoningEffortModelId,
 	isKimiK3ModelId,
 	isMimoModelIdOrName,
 	isMinimaxM2FamilyModelId,
@@ -177,8 +178,11 @@ function fillThinkingWireDefaults<TApi extends Api>(
 		thinking.supportsDisplay === undefined &&
 		(spec.api === "anthropic-messages" || spec.api === "bedrock-converse-stream") &&
 		supportsAdaptiveThinkingDisplay(spec.id);
-	const needsRequiresEffort = thinking.requiresEffort === undefined && impliesMandatoryReasoning(parsed, spec.id);
-	const needsDefaultLevel = thinking.defaultLevel === undefined && isKimiK3ModelId(spec.id);
+	const officialGlm53CodingPlan = isOfficialGlm53CodingPlanModel(spec);
+	const needsRequiresEffort =
+		thinking.requiresEffort === undefined && (impliesMandatoryReasoning(parsed, spec.id) || officialGlm53CodingPlan);
+	const needsDefaultLevel =
+		thinking.defaultLevel === undefined && (isKimiK3ModelId(spec.id) || officialGlm53CodingPlan);
 	if (!effortsChanged && !shouldReplaceEffortMap && !needsDisplay && !needsRequiresEffort && !needsDefaultLevel) {
 		return thinking;
 	}
@@ -216,7 +220,8 @@ export function deriveThinking<TApi extends Api>(spec: ModelSpec<TApi>, compat: 
 		mode: inferThinkingControlMode(spec, parsed),
 		efforts,
 	};
-	if (isKimiK3ModelId(spec.id)) {
+	const officialGlm53CodingPlan = isOfficialGlm53CodingPlanModel(spec);
+	if (isKimiK3ModelId(spec.id) || officialGlm53CodingPlan) {
 		config.defaultLevel = Effort.Max;
 	}
 	const effortMap = inferEffortMap(spec, compat, config.mode, config.efforts);
@@ -229,7 +234,7 @@ export function deriveThinking<TApi extends Api>(spec: ModelSpec<TApi>, compat: 
 	) {
 		config.supportsDisplay = true;
 	}
-	if (impliesMandatoryReasoning(parsed, spec.id)) {
+	if (impliesMandatoryReasoning(parsed, spec.id) || officialGlm53CodingPlan) {
 		config.requiresEffort = true;
 	}
 	return config;
@@ -312,6 +317,13 @@ function getModelDefinedEfforts<TApi extends Api>(
 	spec: ModelSpec<TApi>,
 	compat: CompatOf<TApi>,
 ): readonly Effort[] | undefined {
+	if (isOfficialGlm53CodingPlanModel(spec)) {
+		// Z.AI documents low/high/max for GLM-5.3 on its Coding Plan
+		// transports. Keep this scoped to the two first-party providers: the
+		// same family on reseller routes retains its independently verified
+		// host ladder.
+		return LOW_HIGH_MAX_REASONING_EFFORTS;
+	}
 	if (isGlm52ReasoningEffortModelId(spec.id)) {
 		// GLM-5.2's reasoning_effort dialect is host-specific (verified against
 		// live endpoints):
@@ -433,6 +445,14 @@ function isAnthropicMessagesGlm52ReasoningEffortModel<TApi extends Api>(spec: Mo
 		spec.api === "anthropic-messages" &&
 		(spec.provider === "umans" || spec.provider === "zai") &&
 		isGlm52ReasoningEffortModelId(spec.id)
+	);
+}
+
+function isOfficialGlm53CodingPlanModel<TApi extends Api>(spec: ModelSpec<TApi>): boolean {
+	if (!isGlm53ReasoningEffortModelId(spec.id)) return false;
+	return (
+		(spec.api === "anthropic-messages" && spec.provider === "zai") ||
+		(spec.api === "openai-completions" && spec.provider === "zhipu-coding-plan")
 	);
 }
 
