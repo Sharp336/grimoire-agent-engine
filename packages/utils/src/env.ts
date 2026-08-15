@@ -36,8 +36,13 @@ export function isMacosMallocStackLoggingEnvName(name: string): boolean {
 	return name === "MallocStackLogging" || name === "MallocStackLoggingNoCompact";
 }
 
+function normalizedEnvName(name: string, platform: NodeJS.Platform = process.platform): string {
+	return platform === "win32" ? name.toUpperCase() : name;
+}
+
 export function filterProcessEnv(env: Record<string, string | undefined>): Record<string, string> {
 	const result: Record<string, string> = {};
+	const platform = process.platform;
 	for (const key in env) {
 		const value = env[key];
 		if (
@@ -48,21 +53,28 @@ export function filterProcessEnv(env: Record<string, string | undefined>): Recor
 		) {
 			continue;
 		}
-		result[key] = value;
+		const normalizedName = normalizedEnvName(key, platform);
+		const outputName =
+			platform === "win32" && (normalizedName === "PATH" || normalizedName === "PATHEXT") ? normalizedName : key;
+		result[outputName] = value;
 	}
 	return result;
 }
+
 // Bun autoloads the project's dotenv files into `process.env` before user code
-// runs — including inside `bun build --compile` binaries — so a snapshot of
-// `Bun.env` is only pre-dotenv when autoloading was explicitly disabled. Linux
-// keeps the original exec environment in procfs, which is authoritative.
+// runs — including inside `bun build --compile` binaries. Linux retains the
+// immutable launch environment in procfs. On other platforms, `Bun.env` is a
+// trustworthy pre-dotenv snapshot only when autoloading was explicitly disabled.
 function readLaunchEnv(): ReadonlyMap<string, string> | undefined {
-	if (process.platform === "linux") {
+	const platform = process.platform;
+	if (platform === "linux") {
 		try {
 			const values = new Map<string, string>();
 			for (const entry of fs.readFileSync("/proc/self/environ", "utf8").split("\0")) {
 				const separator = entry.indexOf("=");
-				if (separator > 0) values.set(entry.slice(0, separator), entry.slice(separator + 1));
+				if (separator > 0) {
+					values.set(normalizedEnvName(entry.slice(0, separator), platform), entry.slice(separator + 1));
+				}
 			}
 			return values;
 		} catch {}
@@ -71,31 +83,20 @@ function readLaunchEnv(): ReadonlyMap<string, string> | undefined {
 	const values = new Map<string, string>();
 	for (const key in Bun.env) {
 		const value = Bun.env[key];
-		if (value !== undefined) values.set(key, value);
+		if (value !== undefined) values.set(normalizedEnvName(key, platform), value);
 	}
 	return values;
 }
 
 const launchEnvValues = readLaunchEnv();
-const projectEnvNamesLoadedByOmp = new Set<string>();
 
-function expandDotenvValues(values: Record<string, string>, env: Record<string, string>): Record<string, string> {
-	const expanded: Record<string, string> = {};
-	for (const key in values) {
-		expanded[key] = values[key].replace(
-			/(\\)?\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g,
-			(match, escaped: string | undefined, braced: string | undefined, bare: string | undefined) => {
-				if (escaped) return match.slice(1);
-				const name = braced ?? bare;
-				if (!name) return match;
-				return env[name] ?? expanded[name] ?? "";
-			},
-		);
-	}
-	return expanded;
-}
-
-/** Filters process env for child shells without launch-cwd dotenv values. */
+/**
+ * Filters process env for child shells without launch-cwd dotenv values.
+ *
+ * Dotenv-owned names use only the authoritative pre-dotenv launch snapshot.
+ * When no trustworthy snapshot exists, those names are removed rather than
+ * reconstructed from an environment Bun has already mutated.
+ */
 export function filterChildShellEnv(
 	env: Record<string, string | undefined>,
 	cwd: string = process.cwd(),
@@ -105,49 +106,43 @@ export function filterChildShellEnv(
 	const nodeEnvName = `.env.${env.NODE_ENV || "development"}`;
 	const modeEnv = parseEnvFile(path.join(cwd, nodeEnvName));
 	const localEnv = parseEnvFile(path.join(cwd, ".env.local"));
-	const launchEnv = { ...projectEnv, ...modeEnv, ...localEnv };
-	const expandedLaunchEnv = {
-		...expandDotenvValues(projectEnv, result),
-		...expandDotenvValues(modeEnv, result),
-		...expandDotenvValues(localEnv, result),
-	};
-	for (const key in launchEnv) {
-		const launchValue = launchEnvValues?.get(key);
-		if (launchValue !== undefined) {
-			// Launcher-owned name: it keeps the launcher's own value. Bun overwrites
-			// an empty launcher value with the dotenv one, so restore the launcher
-			// value whenever what survived is exactly what the dotenv file defines.
-			if (
-				result[key] !== launchValue &&
-				(result[key] === launchEnv[key] || result[key] === expandedLaunchEnv[key])
-			) {
-				result[key] = launchValue;
-			}
-			continue;
-		}
-		if (launchEnvValues || projectEnvNamesLoadedByOmp.has(key)) {
-			// Strong provenance: the launch environment is known and this name is
-			// absent from it, or OMP itself injected the value — either way it came
-			// from a project dotenv file, not the parent shell.
+	const platform = process.platform;
+	const dotenvNames = new Set<string>();
+	for (const file of [projectEnv, modeEnv, localEnv]) {
+		for (const key in file) dotenvNames.add(normalizedEnvName(key, platform));
+	}
+	for (const key in result) {
+		const name = normalizedEnvName(key, platform);
+		if (!dotenvNames.has(name)) continue;
+		const launchValue = launchEnvValues?.get(name);
+		if (launchValue === undefined) {
 			delete result[key];
-		} else if (result[key] === launchEnv[key] || result[key] === expandedLaunchEnv[key]) {
-			// No launch-env snapshot (dotenv autoloaded without procfs): best-effort
-			// value match against the Bun-parsed dotenv.
-			delete result[key];
+		} else {
+			result[key] = launchValue;
 		}
 	}
 	return result;
 }
 
+function findClosingEnvQuote(value: string, quote: string): number {
+	for (let index = 1; index < value.length; index++) {
+		if (value[index] !== quote) continue;
+		let backslashes = 0;
+		for (let previous = index - 1; previous >= 0 && value[previous] === "\\"; previous--) backslashes++;
+		if (backslashes % 2 === 0) return index;
+	}
+	return -1;
+}
+
 /**
- * Parse one dotenv line with Bun-compatible semantics: an optional `export`
- * prefix, full-line `#` comments, inline `#` comments after whitespace on
- * unquoted values, and single/double/backtick quoting (a `#` inside quotes
- * stays literal). Returns undefined for blank lines, comments, and malformed
- * names.
+ * Parse one dotenv assignment with Bun-compatible semantics: an optional
+ * `export` prefix, full-line `#` comments, inline `#` comments after
+ * whitespace on unquoted values, and single/double/backtick quoting. Quoted
+ * values can contain newlines. Returns undefined for blank lines, comments,
+ * and malformed names.
  */
 function parseEnvLine(line: string): { key: string; value: string } | undefined {
-	const trimmed = line.trim();
+	const trimmed = line.trimStart();
 	if (!trimmed || trimmed.startsWith("#")) return undefined;
 	const eqIndex = trimmed.indexOf("=");
 	if (eqIndex === -1) return undefined;
@@ -158,8 +153,7 @@ function parseEnvLine(line: string): { key: string; value: string } | undefined 
 	const raw = trimmed.slice(eqIndex + 1).replace(/^[ \t]+/, "");
 	const quote = raw[0];
 	if (quote === '"' || quote === "'" || quote === "`") {
-		let close = raw.indexOf(quote, 1);
-		while (close !== -1 && raw[close - 1] === "\\") close = raw.indexOf(quote, close + 1);
+		const close = findClosingEnvQuote(raw, quote);
 		return { key, value: close === -1 ? raw.slice(1) : raw.slice(1, close) };
 	}
 	const commentIndex = raw.search(/[ \t]#/);
@@ -168,15 +162,36 @@ function parseEnvLine(line: string): { key: string; value: string } | undefined 
 
 /**
  * Parses a .env file synchronously into key-value string pairs using
- * {@link parseEnvLine} for Bun-compatible line semantics, then mirrors valid
- * `OMP_` variables to their `PI_` aliases.
+ * {@link parseEnvLine} for Bun-compatible assignment semantics, including
+ * multiline quoted values, then mirrors valid `OMP_` variables to their
+ * `PI_` aliases.
  */
 export function parseEnvFile(filePath: string): Record<string, string> {
 	const result: Record<string, string> = {};
 	try {
-		const content = fs.readFileSync(filePath, "utf-8");
-		for (const line of content.split("\n")) {
-			const parsed = parseEnvLine(line);
+		const lines = fs.readFileSync(filePath, "utf-8").split(/\r?\n/);
+		for (let index = 0; index < lines.length; index++) {
+			let assignment = lines[index];
+			const trimmed = assignment.trimStart();
+			if (!trimmed || trimmed.startsWith("#")) continue;
+			const eqIndex = trimmed.indexOf("=");
+			if (eqIndex !== -1) {
+				let key = trimmed.slice(0, eqIndex).trim();
+				const exported = key.match(/^export[ \t]+(.*)$/);
+				if (exported) key = exported[1].trim();
+				if (isValidEnvName(key)) {
+					let raw = trimmed.slice(eqIndex + 1).replace(/^[ \t]+/, "");
+					const quote = raw[0];
+					if (quote === '"' || quote === "'" || quote === "`") {
+						while (findClosingEnvQuote(raw, quote) === -1 && index + 1 < lines.length) {
+							const continuation = lines[++index];
+							assignment += `\n${continuation}`;
+							raw += `\n${continuation}`;
+						}
+					}
+				}
+			}
+			const parsed = parseEnvLine(assignment);
 			if (parsed && isSafeEnvValue(parsed.value)) result[parsed.key] = parsed.value;
 		}
 	} catch {
@@ -210,7 +225,6 @@ for (const file of [projectEnv, agentEnv, piEnv, homeEnv]) {
 	for (const key in file) {
 		if (!isMacosMallocStackLoggingEnvName(key) && !Bun.env[key]) {
 			Bun.env[key] = file[key];
-			if (file === projectEnv) projectEnvNamesLoadedByOmp.add(key);
 		}
 	}
 }

@@ -79,6 +79,18 @@ describe("buildHotkeysMarkdown", () => {
 		expect(markdown).toContain("| `Alt+M` | Select model (set roles) |");
 	});
 
+	it("describes interactive and quick shortcuts as configured-shell operations", () => {
+		const markdown = buildHotkeysMarkdown({
+			keybindings: { getDisplayString: () => "Disabled" },
+			shellName: "zsh",
+		});
+
+		expect(markdown).toContain("| `!` | Open interactive shell (zsh) |");
+		expect(markdown).toContain("| `! command` | Run shell command |");
+		expect(markdown).toContain("| `!! command` | Run shell command (excluded from context) |");
+		expect(markdown).not.toContain("Run bash");
+	});
+
 	it("renders macOS static navigation rows on darwin", () => {
 		setKeyHintPlatform("darwin");
 		const markdown = buildHotkeysMarkdown({ keybindings: { getDisplayString: () => "Disabled" } });

@@ -66,6 +66,21 @@ function exitProcess(code: number): never {
 }
 let cleanupPromise: Promise<void> | undefined;
 let stdioDisconnectRegistrations = 0;
+let sigintCleanupSuspensions = 0;
+
+/**
+ * Temporarily let an inherited-console child own Ctrl+C without triggering
+ * OMP's process-wide cleanup. The returned function is idempotent.
+ */
+export function suspendSigintCleanup(): () => void {
+	sigintCleanupSuspensions++;
+	let active = true;
+	return () => {
+		if (!active) return;
+		active = false;
+		sigintCleanupSuspensions = Math.max(0, sigintCleanupSuspensions - 1);
+	};
+}
 
 /** User-facing command printed before fatal cleanup so interrupted work can be resumed. */
 export interface FatalRecoveryHint {
@@ -268,6 +283,7 @@ async function exitAfterFatal(label: string, logMessage: string, err: Error, rea
 if (isMainThread) {
 	process
 		.on("SIGINT", async () => {
+			if (sigintCleanupSuspensions > 0) return;
 			await runCleanup(Reason.SIGINT);
 			exitProcess(130); // 128 + SIGINT (2)
 		})

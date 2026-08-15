@@ -789,13 +789,20 @@ export class InputController {
 				}
 			}
 
-			// Handle bash command (! for normal, !! for excluded from context)
+			if (text === "!") {
+				await this.ctx.handleInteractiveShell();
+				this.ctx.isBashMode = false;
+				this.ctx.updateEditorBorderColor();
+				return;
+			}
+
+			// Handle quick shell commands (! includes the result; !! excludes it from context).
 			if (text.startsWith("!")) {
 				const isExcluded = text.startsWith("!!");
 				const command = isExcluded ? text.slice(2).trim() : text.slice(1).trim();
 				if (command) {
 					if (this.ctx.session.isBashRunning) {
-						this.ctx.showWarning("A bash command is already running. Press Esc to cancel it first.");
+						this.ctx.showWarning("A shell command is already running. Press Esc to cancel it first.");
 						this.ctx.editor.setText(text);
 						return;
 					}

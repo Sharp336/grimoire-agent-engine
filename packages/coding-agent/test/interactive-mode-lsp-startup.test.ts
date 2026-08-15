@@ -127,4 +127,14 @@ describe("InteractiveMode LSP startup welcome banner", () => {
 		} satisfies LspStartupEvent);
 		expect(showWarningSpy).not.toHaveBeenCalled();
 	});
+
+	it("uses generic shell display text when the configured shell path is invalid", async () => {
+		session.settings.set("shellPath", path.join(tempDir.path(), "missing-shell"));
+
+		await expect(mode.init({ suppressWelcomeIntro: true })).resolves.toBeUndefined();
+
+		const rendered = Bun.stripANSI(mode.ui.render(120).join("\n"));
+		expect(rendered).toContain("for shell (shell)");
+		expect(rendered).not.toContain("missing-shell");
+	});
 });

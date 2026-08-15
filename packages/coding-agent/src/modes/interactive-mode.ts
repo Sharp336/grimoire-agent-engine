@@ -67,6 +67,7 @@ import {
 	settings,
 } from "../config/settings";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
+import { resolveInteractiveShellPath } from "../exec/interactive-shell";
 import type {
 	AutocompleteProviderFactory,
 	ContextUsage,
@@ -997,6 +998,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Get current model info for welcome screen
 		const modelName = this.session.model?.name ?? "Unknown";
 		const providerName = this.session.model?.provider ?? "Unknown";
+		let shellName = "shell";
+		try {
+			shellName = path.basename(resolveInteractiveShellPath(this.settings));
+		} catch (error) {
+			logger.debug("Failed to resolve shell name for welcome", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
 
 		// Get recent sessions
 		const recentSessions = await logger.time("InteractiveMode.init:recentSessions", () =>
@@ -1024,6 +1033,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				providerName,
 				recentSessions,
 				this.#getWelcomeLspServers(),
+				shellName,
 			);
 
 			// Setup UI layout
@@ -4851,6 +4861,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	resetObserverRegistry(): void {
 		this.#observerRegistry.resetSessions();
 		this.#observerRegistry.setMainSession(this.sessionManager.getSessionFile() ?? undefined);
+	}
+
+	handleInteractiveShell(): Promise<void> {
+		return this.#commandController.handleInteractiveShell();
 	}
 
 	handleBashCommand(command: string, excludeFromContext?: boolean): Promise<void> {

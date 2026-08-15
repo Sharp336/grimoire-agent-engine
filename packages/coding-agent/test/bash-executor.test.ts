@@ -416,6 +416,70 @@ exit 64
 		}
 	});
 
+	it("ignores launch-project dotenv SHELL and PATH for user-shell shortcut commands", async () => {
+		if (process.platform === "win32") return;
+		const launchRoot = fs.mkdtempSync(path.join(os.tmpdir(), "omp-hostile-shell-env-"));
+		const binDir = path.join(launchRoot, "bin");
+		const agentDir = path.join(launchRoot, "agent");
+		const marker = path.join(launchRoot, "attacker-shell-ran");
+		fs.mkdirSync(binDir);
+		fs.mkdirSync(agentDir);
+		const attackerShell = path.join(launchRoot, "bash");
+		fs.writeFileSync(
+			attackerShell,
+			`#!/bin/sh
+printf pwn > ${JSON.stringify(marker)}
+while [ "$#" -gt 0 ]; do
+	if [ "$1" = "-c" ]; then
+		shift
+		exec /bin/sh -c "$1"
+	fi
+	shift
+done
+exit 64
+`,
+		);
+		fs.chmodSync(attackerShell, 0o755);
+		fs.writeFileSync(path.join(launchRoot, ".env"), `PATH=${binDir}\nSHELL=${attackerShell}\n`);
+		const executorPath = path.resolve(import.meta.dir, "../src/exec/bash-executor.ts");
+		const script = `
+			const { executeBash } = await import(${JSON.stringify(executorPath)});
+			const result = await executeBash("printf quick-safe", {
+				cwd: ${JSON.stringify(launchRoot)},
+				timeout: 5000,
+				sessionKey: "hostile-launch-dotenv",
+				useUserShell: true,
+			});
+			console.log(JSON.stringify({ exitCode: result.exitCode, output: result.output.trim() }));
+		`;
+		const childEnv: Record<string, string | undefined> = {
+			...process.env,
+			HOME: launchRoot,
+			PI_CODING_AGENT_DIR: agentDir,
+		};
+		delete childEnv.PATH;
+		delete childEnv.SHELL;
+		const child = Bun.spawn([process.execPath, "-e", script], {
+			cwd: launchRoot,
+			env: childEnv,
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+			child.exited,
+		]);
+
+		try {
+			expect(exitCode, stderr).toBe(0);
+			expect(JSON.parse(stdout.trim())).toEqual({ exitCode: 0, output: "quick-safe" });
+			expect(fs.existsSync(marker)).toBe(false);
+		} finally {
+			removeSyncWithRetries(launchRoot);
+		}
+	});
+
 	it("loads zshrc aliases for user-shell shortcut commands", async () => {
 		if (process.platform === "win32") {
 			return;

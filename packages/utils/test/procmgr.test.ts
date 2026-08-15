@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getAgentDir, MAIN_CONFIG_FILENAMES } from "../src/dirs";
-import { getShellArgs, getShellConfig, resolveWindowsShell } from "../src/procmgr";
+import { getShellArgs, getShellConfig, resolveBasicShell, resolveWindowsShell } from "../src/procmgr";
 
 describe("getShellConfig", () => {
 	it("directs invalid custom shell paths to the canonical config file", () => {
@@ -12,6 +12,41 @@ describe("getShellConfig", () => {
 		expect(() => getShellConfig(missingShell)).toThrow(
 			`Custom shell path not found: ${missingShell}\nPlease update shellPath in ${configPath}`,
 		);
+	});
+
+	it("rejects control characters in custom shell paths without rendering them", () => {
+		const unsafeShell = `${path.join(os.tmpdir(), "omp-shell")}\u009b2J`;
+		let message = "";
+
+		try {
+			getShellConfig(unsafeShell);
+		} catch (error) {
+			message = error instanceof Error ? error.message : String(error);
+		}
+
+		expect(message).toBe(
+			"Custom shell path contains control characters. Please update shellPath in your OMP settings.",
+		);
+		expect(message).not.toContain("\u009b");
+	});
+
+	it.skipIf(process.platform === "win32")("does not search the current directory when trusted PATH is empty", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-empty-shell-path-"));
+		const previousCwd = process.cwd();
+		try {
+			const attackerShell = path.join(root, "bash");
+			fs.writeFileSync(attackerShell, "#!/bin/sh\nexit 0\n");
+			fs.chmodSync(attackerShell, 0o755);
+			process.chdir(root);
+
+			const resolved = resolveBasicShell("");
+
+			expect(resolved).not.toBe(attackerShell);
+			expect(resolved ? path.isAbsolute(resolved) : true).toBe(true);
+		} finally {
+			process.chdir(previousCwd);
+			fs.rmSync(root, { recursive: true, force: true });
+		}
 	});
 });
 
@@ -87,5 +122,19 @@ describe("resolveWindowsShell", () => {
 	it.skipIf(process.platform === "win32")("falls back to cmd.exe instead of failing when no bash exists", () => {
 		expect(resolveWindowsShell({})).toBe("C:\\Windows\\System32\\cmd.exe");
 		expect(resolveWindowsShell({ ComSpec: "D:\\win\\cmd.exe" })).toBe("D:\\win\\cmd.exe");
+	});
+
+	it.skipIf(process.platform === "win32")("does not search the current directory when Windows PATH is empty", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-empty-windows-shell-path-"));
+		tempDirs.push(root);
+		const previousCwd = process.cwd();
+		try {
+			fs.writeFileSync(path.join(root, "bash.exe"), "");
+			process.chdir(root);
+
+			expect(resolveWindowsShell({ PATH: "", ComSpec: "D:\\win\\cmd.exe" })).toBe("D:\\win\\cmd.exe");
+		} finally {
+			process.chdir(previousCwd);
+		}
 	});
 });

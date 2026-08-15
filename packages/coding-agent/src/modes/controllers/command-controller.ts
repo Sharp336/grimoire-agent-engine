@@ -11,9 +11,10 @@ import {
 	type UsageReport,
 } from "@oh-my-pi/pi-ai";
 import { Loader, Markdown, padding, Spacer, Text, visibleWidth } from "@oh-my-pi/pi-tui";
-import { formatDuration, logger, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatDuration, logger, postmortem, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
 import { shouldEnableAppendOnlyContext } from "../../config/append-only-context-mode";
 import { type BashResult, isPersistentShellCdCommand } from "../../exec/bash-executor";
+import { resolveInteractiveShellPath, runInteractiveShell } from "../../exec/interactive-shell";
 import { type LoadedCustomShare, loadCustomShare } from "../../export/custom-share";
 import { parseExportArgs } from "../../export/html/args";
 import { shareSession } from "../../export/share";
@@ -582,7 +583,15 @@ export class CommandController {
 	}
 
 	handleHotkeysCommand(): void {
-		const hotkeys = buildHotkeysMarkdown({ keybindings: this.ctx.keybindings });
+		let shellName: string | undefined;
+		try {
+			shellName = path.basename(resolveInteractiveShellPath(this.ctx.settings));
+		} catch (error) {
+			logger.debug("Failed to resolve shell name for hotkeys", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+		const hotkeys = buildHotkeysMarkdown({ keybindings: this.ctx.keybindings, shellName });
 		showMarkdownPanel(this.ctx, "Keyboard Shortcuts", hotkeys);
 	}
 
@@ -1135,6 +1144,81 @@ export class CommandController {
 		}
 	}
 
+	async handleInteractiveShell(): Promise<void> {
+		if (this.ctx.session.isStreaming || this.ctx.session.isBashRunning || this.ctx.session.isEvalRunning) {
+			this.ctx.showWarning("Wait for active work to finish or abort it before opening a shell.");
+			return;
+		}
+
+		let shellPath: string;
+		try {
+			shellPath = resolveInteractiveShellPath(this.ctx.settings);
+		} catch (error) {
+			this.ctx.showError(`Failed to resolve shell: ${error instanceof Error ? error.message : "Unknown error"}`);
+			return;
+		}
+
+		const shellName = path.basename(shellPath);
+		this.ctx.showStatus(`Opening shell (${shellName})...`);
+		this.ctx.ui.requestRender();
+
+		let exitCode: number | undefined;
+		let workingDir: string | undefined;
+		let spawnFailed = false;
+		let spawnError: unknown;
+		let stopBegan = false;
+		const resumeParentSigintCleanup = process.platform === "win32" ? postmortem.suspendSigintCleanup() : undefined;
+		try {
+			stopBegan = true;
+			this.ctx.ui.stop();
+			const result = await runInteractiveShell({
+				shellPath,
+				cwd: this.ctx.sessionManager.getCwd(),
+				env: process.env,
+			});
+			exitCode = result.exitCode;
+			workingDir = result.workingDir;
+		} catch (error) {
+			spawnFailed = true;
+			spawnError = error;
+		} finally {
+			try {
+				if (stopBegan) {
+					this.ctx.ui.start();
+					this.ctx.ui.requestRender(true);
+				}
+			} finally {
+				resumeParentSigintCleanup?.();
+			}
+		}
+
+		if (spawnFailed) {
+			this.ctx.showError(
+				`Failed to open shell (${shellName}): ${spawnError instanceof Error ? spawnError.message : "Unknown error"}`,
+			);
+			return;
+		}
+
+		if (workingDir && path.resolve(workingDir) !== path.resolve(this.ctx.sessionManager.getCwd())) {
+			try {
+				await this.#moveInteractiveCwd(workingDir);
+				this.ctx.ui.requestRender();
+			} catch (error) {
+				this.ctx.showError(
+					`Shell returned to "${workingDir}", but OMP failed to update its working directory: ${
+						error instanceof Error ? error.message : "Unknown error"
+					}`,
+				);
+				return;
+			}
+		}
+		if (exitCode !== undefined && exitCode !== 0) {
+			this.ctx.showWarning(`Shell (${shellName}) exited with code ${exitCode}.`);
+		} else {
+			this.ctx.showStatus(`Returned from shell (${shellName}).`);
+		}
+	}
+
 	async handleBashCommand(command: string, excludeFromContext = false): Promise<void> {
 		const isDeferred = this.ctx.session.isStreaming;
 		const shouldPersistCwd = isPersistentShellCdCommand(command);
@@ -1174,7 +1258,7 @@ export class CommandController {
 				if (shouldPersistCwd) await this.#applyBashResultCwd(result);
 			} catch (error) {
 				this.ctx.showError(
-					`Bash command completed, but OMP failed to update its working directory: ${
+					`Shell command completed, but OMP failed to update its working directory: ${
 						error instanceof Error ? error.message : "Unknown error"
 					}`,
 				);
@@ -1183,7 +1267,7 @@ export class CommandController {
 			if (this.ctx.bashComponent) {
 				this.ctx.bashComponent.setComplete(undefined, false);
 			}
-			this.ctx.showError(`Bash command failed: ${error instanceof Error ? error.message : "Unknown error"}`);
+			this.ctx.showError(`Shell command failed: ${error instanceof Error ? error.message : "Unknown error"}`);
 		}
 
 		this.ctx.bashComponent = undefined;

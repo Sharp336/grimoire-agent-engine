@@ -36,6 +36,15 @@ describe("WelcomeComponent tips", () => {
 		expect(welcomeRegular.tip).toBeDefined();
 	});
 
+	it("labels the shortcut as a shell and shows the resolved shell name", () => {
+		const welcome = new WelcomeComponent("1.0.0", "model", "provider", [], [], "zsh");
+
+		const rendered = Bun.stripANSI(welcome.render(120).join("\n"));
+
+		expect(rendered).toContain("! for shell (zsh)");
+		expect(rendered).not.toContain("run bash");
+	});
+
 	it("weights [NEW] tips above ordinary tips in selection", () => {
 		// Data-independent: tips.txt may legitimately carry zero "[NEW]" tips, so
 		// exercise the weighting contract on a synthetic list.

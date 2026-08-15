@@ -2,6 +2,7 @@ import { type AppKeybinding, type KeybindingsManager, keyHintPlatform, modifierL
 
 export interface HotkeysMarkdownBindings {
 	keybindings: Pick<KeybindingsManager, "getDisplayString">;
+	shellName?: string;
 }
 
 function appKey(bindings: HotkeysMarkdownBindings, action: AppKeybinding): string {
@@ -13,6 +14,9 @@ export function buildHotkeysMarkdown(bindings: HotkeysMarkdownBindings): string 
 	const isMac = platform === "darwin";
 	const alt = modifierLabel("alt", platform);
 	const cmd = modifierLabel("super", platform);
+	const interactiveShellLabel = bindings.shellName
+		? `Open interactive shell (${bindings.shellName})`
+		: "Open interactive shell";
 	return [
 		"**Navigation**",
 		"| Key | Action |",
@@ -61,8 +65,9 @@ export function buildHotkeysMarkdown(bindings: HotkeysMarkdownBindings): string 
 		"| `#<number>` | GitHub issue/PR reference (e.g. `#3164` → `pr://`/`issue://`) |",
 		"| `#` / `#<text>` | Prompt actions (copy / undo / move cursor) |",
 		"| `/` | Slash commands |",
-		"| `!` | Run bash command |",
-		"| `!!` | Run bash command (excluded from context) |",
+		`| \`!\` | ${interactiveShellLabel} |`,
+		"| `! command` | Run shell command |",
+		"| `!! command` | Run shell command (excluded from context) |",
 		"| `$` | Run Python in shared kernel |",
 		"| `$$` | Run Python (excluded from context) |",
 	].join("\n");

@@ -27,6 +27,55 @@ function writeTempEnv(content: string): string {
 	return filePath;
 }
 
+interface ChildEnvFilterProbeOptions {
+	dotenv: string;
+	env: Record<string, string | undefined>;
+	names: string[];
+	noEnvFile?: boolean;
+	platform: NodeJS.Platform;
+}
+
+async function runChildEnvFilterProbe(options: ChildEnvFilterProbeOptions): Promise<Record<string, string>> {
+	const cwd = path.dirname(writeTempEnv(options.dotenv));
+	const probePath = path.join(cwd, "filter-child-env-probe.ts");
+	const envModulePath = path.join(import.meta.dir, "..", "src", "env.ts");
+	fs.writeFileSync(
+		probePath,
+		[
+			`Object.defineProperty(process, "platform", { value: ${JSON.stringify(options.platform)}, configurable: true });`,
+			"// Dynamic import lets this probe set the platform before env.ts snapshots the launch environment.",
+			`const { filterChildShellEnv } = await import(${JSON.stringify(envModulePath)});`,
+			"const filtered = filterChildShellEnv(process.env, process.cwd());",
+			`const names = new Set(${JSON.stringify(options.names)}.map(name => name.toLowerCase()));`,
+			"const selected = Object.fromEntries(Object.entries(filtered).filter(([name]) => names.has(name.toLowerCase())));",
+			"process.stdout.write(JSON.stringify(selected));",
+		].join("\n"),
+	);
+	const proc = Bun.spawn([process.execPath, ...(options.noEnvFile ? ["--no-env-file"] : []), probePath], {
+		cwd,
+		env: { ...process.env, ...options.env },
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	const [stdout, stderr, exitCode] = await Promise.all([
+		new Response(proc.stdout).text(),
+		new Response(proc.stderr).text(),
+		proc.exited,
+	]);
+	expect(exitCode, stderr).toBe(0);
+	return JSON.parse(stdout) as Record<string, string>;
+}
+
+function withPlatform<T>(platform: NodeJS.Platform, action: () => T): T {
+	const originalPlatform = process.platform;
+	Object.defineProperty(process, "platform", { value: platform, configurable: true });
+	try {
+		return action();
+	} finally {
+		Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+	}
+}
+
 describe("getDbBusyTimeoutMs", () => {
 	it("defaults to the bounded headless timeout", () => {
 		const previous = setInteractiveHost(false);
@@ -122,6 +171,36 @@ describe("parseEnvFile", () => {
 			SINGLE: "it\\'s",
 		});
 	});
+
+	it("parses multiline quoted values with Bun-compatible newlines", () => {
+		const filePath = writeTempEnv(
+			[
+				'MULTILINE_DOUBLE="first',
+				'second"',
+				"MULTILINE_SINGLE='third",
+				"fourth'",
+				"MULTILINE_BACKTICK=`fifth",
+				"sixth`",
+				"AFTER=value",
+			].join("\n"),
+		);
+
+		expect(parseEnvFile(filePath)).toEqual({
+			MULTILINE_DOUBLE: "first\nsecond",
+			MULTILINE_SINGLE: "third\nfourth",
+			MULTILINE_BACKTICK: "fifth\nsixth",
+			AFTER: "value",
+		});
+	});
+
+	it("does not let an unclosed quote in a comment consume later assignments", () => {
+		const filePath = writeTempEnv('# ignored="\nPATH=/tmp/pwn\nSHELL=/tmp/pwn/bash\n');
+
+		expect(parseEnvFile(filePath)).toEqual({
+			PATH: "/tmp/pwn",
+			SHELL: "/tmp/pwn/bash",
+		});
+	});
 });
 
 describe("filterProcessEnv", () => {
@@ -165,6 +244,101 @@ describe("filterProcessEnv", () => {
 			"ProgramFiles(x86)": "C:\\Program Files (x86)",
 			"CommonProgramFiles(x86)": "C:\\Program Files (x86)\\Common Files",
 		});
+	});
+
+	it("canonicalizes Windows Path keys for case-sensitive consumers", () => {
+		expect(
+			withPlatform("win32", () =>
+				filterProcessEnv(
+					windowsLikeEnv({
+						Path: "C:\\Windows\\System32",
+						PathExt: ".COM;.EXE;.BAT;.CMD",
+					}),
+				),
+			),
+		).toEqual({
+			PATH: "C:\\Windows\\System32",
+			PATHEXT: ".COM;.EXE;.BAT;.CMD",
+		});
+	});
+});
+
+describe("filterChildShellEnv", () => {
+	it("fails closed for self-referential dotenv PATH and ZDOTDIR without a launch snapshot", async () => {
+		const filtered = await runChildEnvFilterProbe({
+			dotenv: ["PATH=/tmp/omp-hostile:$PATH", "ZDOTDIR=$ZDOTDIR$PWD/.omp-hostile-zdot"].join("\n"),
+			env: { PATH: undefined, ZDOTDIR: undefined },
+			names: ["PATH", "ZDOTDIR"],
+			platform: "darwin",
+		});
+
+		expect(filtered).toEqual({});
+	});
+
+	it("deletes same-named parent values when no snapshot can prove their provenance", async () => {
+		const filtered = await runChildEnvFilterProbe({
+			dotenv: ["PATH=/tmp/project-bin", "SHELL=/tmp/project-shell"].join("\n"),
+			env: {
+				PATH: "/usr/bin",
+				SHELL: "/bin/zsh",
+			},
+			names: ["PATH", "SHELL"],
+			platform: "darwin",
+		});
+
+		expect(filtered).toEqual({});
+	});
+
+	it("preserves launcher-only values while failing closed without a snapshot", async () => {
+		const filtered = await runChildEnvFilterProbe({
+			dotenv: "ZDOTDIR=$ZDOTDIR$PWD/.omp-hostile-zdot\n",
+			env: {
+				OMP_PARENT_ONLY: "trusted",
+				ZDOTDIR: undefined,
+			},
+			names: ["OMP_PARENT_ONLY", "ZDOTDIR"],
+			platform: "darwin",
+		});
+
+		expect(filtered).toEqual({ OMP_PARENT_ONLY: "trusted" });
+	});
+
+	it("filters a differently-cased dotenv-owned Path on Windows", async () => {
+		const filtered = await runChildEnvFilterProbe({
+			dotenv: "PATH=C:\\omp-hostile\n",
+			env: { PATH: undefined, Path: "C:\\omp-hostile" },
+			names: ["PATH"],
+			platform: "win32",
+		});
+
+		expect(filtered).toEqual({});
+	});
+
+	it("restores a differently-cased trusted Windows Path under canonical PATH", async () => {
+		const filtered = await runChildEnvFilterProbe({
+			dotenv: "PATH=C:\\omp-hostile\n",
+			env: {
+				PATH: undefined,
+				Path: "C:\\Windows\\System32",
+			},
+			names: ["PATH"],
+			noEnvFile: true,
+			platform: "win32",
+		});
+
+		expect(filtered).toEqual({ PATH: "C:\\Windows\\System32" });
+	});
+
+	it("restores an empty authoritative launch value", async () => {
+		const filtered = await runChildEnvFilterProbe({
+			dotenv: "PATH=/tmp/omp-hostile:$PATH\n",
+			env: { PATH: "" },
+			names: ["PATH"],
+			noEnvFile: true,
+			platform: "darwin",
+		});
+
+		expect(filtered).toEqual({ PATH: "" });
 	});
 });
 
