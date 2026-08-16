@@ -62,6 +62,7 @@ import type { MCPServerConfig } from "../../mcp/types";
 import { loadAllExtensions } from "../../modes/components/extensions/state-manager";
 import { theme } from "../../modes/theme/theme";
 import { normalizePlanTitle, type PlanApprovalDetails, resolveApprovedPlan } from "../../plan-mode/approved-plan";
+import { type AgentRef, AgentRegistry, type AgentStatus } from "../../registry/agent-registry";
 import type { AgentSession, AgentSessionEvent } from "../../session/agent-session";
 import { BlobStore, resolveImageDataSync } from "../../session/blob-store";
 import { isSilentAbort, SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
@@ -114,6 +115,91 @@ export const ACP_BOOTSTRAP_RACE_GUARD_MS = 50;
 const ACP_CANCEL_CLEANUP_TIMEOUT_MS = 5_000;
 const ACP_ASYNC_DELIVERY_DRAIN_TIMEOUT_MS = 250;
 const ACP_ASYNC_DELIVERY_DRAIN_MAX_PASSES = 3;
+
+/**
+ * Debounce for pushing `_omp/agents/update` after an AgentRegistry change.
+ * Exported so the ACP test harness can drive it with fake timers.
+ */
+export const ACP_AGENTS_DEBOUNCE_MS = 100;
+
+/**
+ * Wire shape of one agent for the `_omp/agents/*` ACP extension surface.
+ *
+ * Field names mirror the collab wire `AgentSnapshot` where they overlap and
+ * add the registry's work/usage telemetry (`activity`, `metrics`, `resolvedModel`),
+ * so an ACP client can render subagent lifecycle, current work, and spend
+ * without polling internal surfaces.
+ */
+export interface AcpAgentSnapshot {
+	id: string;
+	displayName: string;
+	kind: "main" | "sub";
+	parentId?: string;
+	status: AgentStatus;
+	/** Transcript session file, when the agent has one; null when none is known. */
+	sessionFile: string | null;
+	createdAt: number;
+	lastActivity: number;
+	/** One-line gist of the agent's current work; present only while `running`. */
+	activity?: string;
+	/** Last resolved model id, when recorded. */
+	resolvedModel?: string;
+	/** Persisted usage totals, when the agent has finished at least one turn. */
+	metrics?: {
+		tokens: number;
+		requests: number;
+		tools: number;
+		cost: number;
+		durationMs: number;
+		contextTokens?: number;
+		contextWindow?: number;
+	};
+}
+
+/** Serialize a registry ref into the `_omp/agents/*` wire shape. Advisor refs are observability-only and excluded. */
+function toAcpAgentSnapshot(ref: AgentRef): AcpAgentSnapshot | undefined {
+	if (ref.kind === "advisor") return undefined;
+	const history = ref.history;
+	return {
+		id: ref.id,
+		displayName: ref.displayName,
+		kind: ref.kind,
+		parentId: ref.parentId,
+		status: ref.status,
+		sessionFile: ref.sessionFile,
+		createdAt: ref.createdAt,
+		lastActivity: ref.lastActivity,
+		...(ref.activity ? { activity: ref.activity } : {}),
+		...(history?.resolvedModel ? { resolvedModel: history.resolvedModel } : {}),
+		...(history?.metrics
+			? {
+					metrics: {
+						tokens: history.metrics.tokens,
+						requests: history.metrics.requests,
+						tools: history.metrics.tools,
+						cost: history.metrics.cost,
+						durationMs: history.metrics.durationMs,
+						...(history.metrics.contextTokens !== undefined
+							? { contextTokens: history.metrics.contextTokens }
+							: {}),
+						...(history.metrics.contextWindow !== undefined
+							? { contextWindow: history.metrics.contextWindow }
+							: {}),
+					},
+				}
+			: {}),
+	};
+}
+
+/** Current agent roster (main + subagents, advisors excluded), oldest-first. */
+function snapshotAcpAgents(): AcpAgentSnapshot[] {
+	return AgentRegistry.global()
+		.list()
+		.flatMap(ref => {
+			const snapshot = toAcpAgentSnapshot(ref);
+			return snapshot ? [snapshot] : [];
+		});
+}
 
 type AgentImageContent = {
 	type: "image";
@@ -617,6 +703,8 @@ export class AcpAgent implements Agent {
 	#clientCapabilities: ClientCapabilities | undefined;
 	#cancelCleanupTimeoutMs = ACP_CANCEL_CLEANUP_TIMEOUT_MS;
 	#blobs = new BlobStore(getBlobsDir());
+	#agentsDebounce: Timer | undefined;
+	#registryUnsubscribe: (() => void) | undefined;
 
 	constructor(connection: AgentSideConnection, createSession: CreateAcpSession, initialSession?: AgentSession) {
 		this.#connection = connection;
@@ -631,6 +719,14 @@ export class AcpAgent implements Agent {
 	async initialize(params: InitializeRequest): Promise<InitializeResponse> {
 		this.#registerConnectionCleanup();
 		this.#clientCapabilities = params.clientCapabilities;
+		// Live-track subagent activity: mirror the registry into `_omp/agents/update`
+		// notifications once the client has processed `initialize` (in-order JSON-RPC
+		// guarantees the initial push lands after the response). The subscription is
+		// released in `dispose()`.
+		if (!this.#registryUnsubscribe) {
+			this.#registryUnsubscribe = AgentRegistry.global().onChange(() => this.#scheduleAgentsBroadcast());
+			this.#scheduleAgentsBroadcast();
+		}
 		const authMethods: AuthMethod[] = [
 			{
 				id: "agent",
@@ -1125,6 +1221,8 @@ export class AcpAgent implements Agent {
 		switch (method) {
 			case SPEECH_MODELS_LIST_METHOD:
 				return buildAcpSpeechModelsCatalog();
+			case "_omp/agents/list":
+				return { agents: snapshotAcpAgents() };
 			case "_omp/sessions/listAll": {
 				const limit = typeof params.limit === "number" ? Math.max(1, Math.min(5000, params.limit as number)) : 1000;
 				const sessions = await SessionManager.listAll();
@@ -1202,6 +1300,32 @@ export class AcpAgent implements Agent {
 	}
 
 	async extNotification(_method: string, _params: { [key: string]: unknown }): Promise<void> {}
+
+	/**
+	 * Debounced push of the agent roster as an `_omp/agents/update` notification.
+	 * Mirrors the collab host's broadcast: any registry change (spawn, status,
+	 * usage metadata, removal) schedules one full snapshot so ACP clients can
+	 * live-track subagent lifecycle without polling.
+	 */
+	#scheduleAgentsBroadcast(): void {
+		if (this.#agentsDebounce) return;
+		this.#agentsDebounce = setTimeout(() => {
+			this.#agentsDebounce = undefined;
+			// Fire-and-forget: never let a dead or partial connection turn the
+			// registry mirror into an unhandled timer error.
+			if (this.#connection.signal.aborted) return;
+			let delivery: Promise<void> | undefined;
+			try {
+				delivery = this.#connection.extNotification("_omp/agents/update", {
+					agents: snapshotAcpAgents(),
+				});
+			} catch (error) {
+				logger.warn("Failed to push ACP agents/update notification", { error });
+				return;
+			}
+			delivery?.catch(error => logger.warn("Failed to push ACP agents/update notification", { error }));
+		}, ACP_AGENTS_DEBOUNCE_MS);
+	}
 
 	get signal(): AbortSignal {
 		return this.#connection.signal;
@@ -2775,6 +2899,12 @@ export class AcpAgent implements Agent {
 		}
 
 		this.#disposePromise = (async () => {
+			this.#registryUnsubscribe?.();
+			this.#registryUnsubscribe = undefined;
+			if (this.#agentsDebounce !== undefined) {
+				clearTimeout(this.#agentsDebounce);
+				this.#agentsDebounce = undefined;
+			}
 			const records = Array.from(this.#sessions.entries());
 			this.#sessions.clear();
 			await Promise.all(

@@ -9,11 +9,14 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import {
+	ACP_AGENTS_DEBOUNCE_MS,
 	ACP_BOOTSTRAP_RACE_GUARD_MS,
 	AcpAgent,
+	type AcpAgentSnapshot,
 	createAcpExtensionUiContext,
 } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
 import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type {
 	AgentSession,
 	AgentSessionEvent,
@@ -441,6 +444,8 @@ type SetToolUIContextSpy = (uiContext: ExtensionUIContext, hasUI: boolean) => vo
 interface AgentHarness {
 	agent: AcpAgent;
 	updates: SessionNotification[];
+	/** Captured `_omp/*` notifications pushed to the client; `params` is the wire shape the ACP surface emits. */
+	extNotifications: Array<{ method: string; params: { agents: AcpAgentSnapshot[] } }>;
 	abortController: AbortController;
 	sessions: FakeAgentSession[];
 	setToolUIContextSpies: SetToolUIContextSpy[];
@@ -474,6 +479,9 @@ afterEach(async () => {
 		delete process.env.PI_CODING_AGENT_DIR;
 	}
 	resetSettingsForTest();
+	// Registry refs registered by the `_omp/agents/*` tests must not leak into
+	// later tests (the AcpAgent subscription is released via `dispose()`).
+	AgentRegistry.resetGlobalForTests();
 
 	for (const root of cleanupRoots.splice(0)) {
 		await fs.promises.rm(root, { recursive: true, force: true });
@@ -500,6 +508,7 @@ async function createHarness(
 	await Settings.init({ agentDir, inMemory: true });
 
 	const updates: SessionNotification[] = [];
+	const extNotifications: Array<{ method: string; params: { agents: AcpAgentSnapshot[] } }> = [];
 	const abortController = new AbortController();
 	const sessions: FakeAgentSession[] = [];
 	const setToolUIContextSpies: SetToolUIContextSpy[] = [];
@@ -510,6 +519,11 @@ async function createHarness(
 			// microtask before the push and perturb ordering-sensitive tests.
 			if (options.sessionUpdateHook) await options.sessionUpdateHook(notification);
 			updates.push(notification);
+		},
+		extNotification: async (method: string, params: Record<string, unknown>) => {
+			// The surface under test pushes exactly `{ agents: AcpAgentSnapshot[] }`.
+			const snapshot = params as { agents: AcpAgentSnapshot[] };
+			extNotifications.push({ method, params: snapshot });
 		},
 		unstable_createElicitation: options.elicitationHandler
 			? async (req: CreateElicitationRequest) => options.elicitationHandler!(req)
@@ -542,6 +556,7 @@ async function createHarness(
 	return {
 		agent,
 		updates,
+		extNotifications,
 		abortController,
 		sessions,
 		setToolUIContextSpies,
@@ -1078,6 +1093,137 @@ describe("ACP agent", () => {
 			"Unknown ACP ext method",
 		);
 
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("returns the agent roster with subagent telemetry from _omp/agents/list", async () => {
+		const harness = await createHarness();
+		const registry = AgentRegistry.global();
+		const sub = registry.register({
+			id: "SubA",
+			displayName: "SubA",
+			kind: "sub",
+			parentId: "Main",
+			session: null,
+			sessionFile: "/tmp/sub-a.jsonl",
+			status: "running",
+		});
+		registry.setActivity(sub.id, "grepping call sites of resolve()");
+		registry.setHistory(sub.id, {
+			resolvedModel: "claude-sonnet-4-20250514",
+			metrics: { tokens: 900, requests: 2, tools: 5, cost: 0.01, durationMs: 12_000 },
+		});
+		// Advisor transcripts are observability-only and must not leak onto the wire.
+		registry.register({
+			id: "Advisor1",
+			displayName: "Advisor1",
+			kind: "advisor",
+			session: null,
+			status: "idle",
+		});
+		registry.register({
+			id: "Main",
+			displayName: "Main",
+			kind: "main",
+			session: null,
+			status: "idle",
+		});
+
+		const result = (await harness.agent.extMethod("_omp/agents/list", {})) as { agents: AcpAgentSnapshot[] };
+
+		expect(result.agents).toHaveLength(2);
+		const main = result.agents.find(agent => agent.id === "Main");
+		expect(main).toMatchObject({ id: "Main", kind: "main", status: "idle" });
+		const subSnapshot = result.agents.find(agent => agent.id === "SubA");
+		expect(subSnapshot).toMatchObject({
+			id: "SubA",
+			displayName: "SubA",
+			kind: "sub",
+			parentId: "Main",
+			status: "running",
+			sessionFile: "/tmp/sub-a.jsonl",
+			activity: "grepping call sites of resolve()",
+			resolvedModel: "claude-sonnet-4-20250514",
+		});
+		expect(subSnapshot?.metrics).toEqual({
+			tokens: 900,
+			requests: 2,
+			tools: 5,
+			cost: 0.01,
+			durationMs: 12_000,
+		});
+		expect(result.agents.find(agent => agent.id === "Advisor1")).toBeUndefined();
+
+		await harness.agent.dispose();
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("pushes debounced _omp/agents/update notifications on registry changes", async () => {
+		const harness = await createHarness();
+
+		// Fake timers before `initialize` so the debounced roster push is clock-driven.
+		vi.useFakeTimers();
+		await harness.agent.initialize({
+			protocolVersion: 1,
+			clientCapabilities: {},
+		} as Parameters<typeof harness.agent.initialize>[0]);
+
+		// `initialize` schedules an initial roster push once the client is ready.
+		vi.advanceTimersByTime(ACP_AGENTS_DEBOUNCE_MS);
+		await Promise.resolve();
+		const initial = harness.extNotifications.find(notification => notification.method === "_omp/agents/update");
+		expect(initial).toBeDefined();
+		expect(initial!.params.agents).toEqual([]);
+
+		// A spawned subagent lands in the next debounced snapshot.
+		const registry = AgentRegistry.global();
+		const sub = registry.register({
+			id: "SubA",
+			displayName: "SubA",
+			kind: "sub",
+			parentId: "Main",
+			session: null,
+			status: "running",
+		});
+		registry.setActivity(sub.id, "auditing auth middleware");
+		vi.advanceTimersByTime(ACP_AGENTS_DEBOUNCE_MS);
+		await Promise.resolve();
+		const spawned = harness.extNotifications.filter(notification => notification.method === "_omp/agents/update");
+		const last = spawned.at(-1)!;
+		expect(last.params.agents).toHaveLength(1);
+		expect(last.params.agents[0]).toMatchObject({
+			id: "SubA",
+			status: "running",
+			activity: "auditing auth middleware",
+		});
+
+		// Lifecycle transitions push again, so clients can track subagent completion.
+		registry.setStatus(sub.id, "idle", sub);
+		vi.advanceTimersByTime(ACP_AGENTS_DEBOUNCE_MS);
+		await Promise.resolve();
+		const idle = harness.extNotifications.at(-1)!;
+		expect(idle.params.agents[0]).toMatchObject({ id: "SubA", status: "idle" });
+		// `activity` is cleared when the agent leaves `running`.
+		expect(idle.params.agents[0]?.activity).toBeUndefined();
+
+		// dispose() stops the subscription: later registry changes stay silent.
+		await harness.agent.dispose();
+		const countBefore = harness.extNotifications.length;
+		registry.register({
+			id: "SubB",
+			displayName: "SubB",
+			kind: "sub",
+			parentId: "Main",
+			session: null,
+			status: "running",
+		});
+		vi.advanceTimersByTime(ACP_AGENTS_DEBOUNCE_MS);
+		await Promise.resolve();
+		expect(harness.extNotifications.length).toBe(countBefore);
+
+		vi.useRealTimers();
 		harness.abortController.abort();
 		await Bun.sleep(0);
 	});
