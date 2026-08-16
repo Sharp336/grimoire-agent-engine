@@ -20,16 +20,10 @@ import {
 	detectCodexResetFireworks,
 } from "../codex-reset-fireworks";
 import { canReuseCachedPr, createPrCacheContext, isSamePrCacheContext, type PrCacheContext } from "./git-utils";
-import { getPreset } from "./presets";
+import { getPreset, mergeSegmentOptions } from "./presets";
 import { renderSegment, type SegmentContext } from "./segments";
 import { getSeparator } from "./separators";
-import type {
-	CollabStatus,
-	EffectiveStatusLineSettings,
-	StatusLineSegmentId,
-	StatusLineSegmentOptions,
-	StatusLineSettings,
-} from "./types";
+import type { CollabStatus, EffectiveStatusLineSettings, StatusLineSegmentId, StatusLineSettings } from "./types";
 
 const JJ_REFRESH_TTL_MS = 5000;
 const WATCHER_FAILURE_POLL_TTL_MS = 5000;
@@ -1644,19 +1638,7 @@ export class StatusLineComponent implements Component {
 		const preset = this.#settings.preset ?? "default";
 		const presetDef = getPreset(preset);
 		const useCustomSegments = preset === "custom";
-		const mergedSegmentOptions: StatusLineSettings["segmentOptions"] = {};
-
-		for (const [segment, options] of Object.entries(presetDef.segmentOptions ?? {})) {
-			mergedSegmentOptions[segment as keyof StatusLineSegmentOptions] = { ...(options as Record<string, unknown>) };
-		}
-
-		for (const [segment, options] of Object.entries(this.#settings.segmentOptions ?? {})) {
-			const current = mergedSegmentOptions[segment as keyof StatusLineSegmentOptions] ?? {};
-			mergedSegmentOptions[segment as keyof StatusLineSegmentOptions] = {
-				...(current as Record<string, unknown>),
-				...(options as Record<string, unknown>),
-			};
-		}
+		const mergedSegmentOptions = mergeSegmentOptions(preset, this.#settings.segmentOptions);
 
 		const leftSegments = useCustomSegments
 			? (this.#settings.leftSegments ?? presetDef.leftSegments)

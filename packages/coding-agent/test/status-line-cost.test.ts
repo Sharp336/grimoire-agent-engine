@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it } from "bun:test";
+import { mergeSegmentOptions } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/presets";
 import type { SegmentContext } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/segments";
 import { renderSegment } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/segments";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -82,5 +83,29 @@ describe("status line cost segment subscription marker", () => {
 		const rendered = renderSegment("cost", ctx);
 		expect(rendered.visible).toBe(true);
 		expect(rendered.content).toContain("(sub)");
+	});
+});
+
+describe("mergeSegmentOptions", () => {
+	it("merges user options over preset defaults per segment", () => {
+		const merged = mergeSegmentOptions("default", { cost: { showSubscription: false } });
+		expect(merged.cost?.showSubscription).toBe(false);
+		// Preset defaults survive alongside user overrides.
+		expect(merged.model?.showThinkingLevel).toBe(true);
+		expect(merged.git?.showStaged).toBe(true);
+	});
+
+	it("applies preset defaults when the user sets nothing", () => {
+		const merged = mergeSegmentOptions("minimal", undefined);
+		expect(merged.git?.showStaged).toBe(false);
+		expect(merged.path?.maxLength).toBe(30);
+		expect(merged.cost).toBeUndefined();
+	});
+
+	it("merges per option key, not per segment bag", () => {
+		const merged = mergeSegmentOptions("default", { git: { showStaged: false } });
+		expect(merged.git?.showStaged).toBe(false);
+		expect(merged.git?.showBranch).toBe(true);
+		expect(merged.git?.showUnstaged).toBe(true);
 	});
 });
