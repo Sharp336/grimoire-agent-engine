@@ -1,8 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import { type AgentMessage, filterProviderReplayMessages } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent, Message, TextContent } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, Message, TextContent } from "@oh-my-pi/pi-ai";
 import { inferCopilotInitiator } from "@oh-my-pi/pi-ai/providers/github-copilot-headers";
 import {
+	appendCredentialSourceDiagnostic,
 	convertToLlm,
 	SKILL_PROMPT_MESSAGE_TYPE,
 	wrapSteeringForModel,
@@ -478,5 +479,60 @@ describe("wrapSteeringForModel", () => {
 		expect(wrapped[1]).not.toBe(second);
 		expect(getUserText(wrapped[0])).toContain("first steer");
 		expect(getUserText(wrapped[1])).toContain("second steer");
+	});
+});
+
+describe("appendCredentialSourceDiagnostic (#8640)", () => {
+	function errorMessage(overrides: Partial<AssistantMessage> = {}): AssistantMessage {
+		return {
+			role: "assistant",
+			content: [],
+			api: "openai",
+			provider: "ollama-cloud",
+			model: "qwen3",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				reasoningTokens: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "error",
+			errorMessage: "HTTP 401 from https://ollama.com/api/chat\nUnauthorized",
+			timestamp: 1,
+			...overrides,
+		};
+	}
+
+	it("appends the selected credential source to a 401 failure", () => {
+		const msg = errorMessage({ errorStatus: 401 });
+		appendCredentialSourceDiagnostic(msg, () => "local store · api_key #3 (cred 3)");
+		expect(msg.errorMessage).toContain("(selected credential: local store · api_key #3 (cred 3))");
+	});
+
+	it("appends the selected credential source to a 403 failure", () => {
+		const msg = errorMessage({ errorStatus: 403 });
+		appendCredentialSourceDiagnostic(msg, () => "config override (models.yml)");
+		expect(msg.errorMessage).toContain("(selected credential: config override (models.yml))");
+	});
+
+	it("leaves non-auth provider errors untouched", () => {
+		const msg = errorMessage({ errorStatus: 500, errorMessage: "HTTP 500 internal" });
+		appendCredentialSourceDiagnostic(msg, () => "local store · api_key #3 (cred 3)");
+		expect(msg.errorMessage).toBe("HTTP 500 internal");
+	});
+
+	it("leaves the message untouched when no credential source resolves", () => {
+		const msg = errorMessage();
+		appendCredentialSourceDiagnostic(msg, () => undefined);
+		expect(msg.errorMessage).toBe("HTTP 401 from https://ollama.com/api/chat\nUnauthorized");
+	});
+
+	it("leaves non-error stops untouched even on 401", () => {
+		const msg = errorMessage({ stopReason: "stop", errorStatus: 401 });
+		appendCredentialSourceDiagnostic(msg, () => "local store");
+		expect(msg.errorMessage).toBe("HTTP 401 from https://ollama.com/api/chat\nUnauthorized");
 	});
 });

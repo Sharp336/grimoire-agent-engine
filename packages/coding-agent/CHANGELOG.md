@@ -4,6 +4,7 @@
 
 ### Changed
 
+- 401/403 authentication failures now annotate the error with the selected credential source (e.g. `local store · api_key #3`), so users with multiple stored keys can tell which credential was used without digging through `agent.db` ([#8640](https://github.com/can1357/oh-my-pi/issues/8640)).
 - Routed paid xAI models (`XAI_API_KEY` / `xai/…`) through the Responses API used by SuperGrok OAuth instead of Chat Completions.
 - Changed the default model for `XAI_API_KEY` (`xai`) from `grok-4-fast-non-reasoning` to `grok-4.5`.
 - Changed the default model for SuperGrok OAuth (`xai-oauth`) from `grok-4.3` to `grok-4.5`.
