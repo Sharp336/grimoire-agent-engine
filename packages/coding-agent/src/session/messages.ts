@@ -59,6 +59,22 @@ export function logProviderTurnError(msg: AssistantMessage): void {
 	});
 }
 
+/**
+ * Appends which stored credential a 401/403 failure was sent under, so users
+ * with multiple stored keys can tell the new key from a stale/rotated one
+ * without digging through `agent.db` (#8640).
+ *
+ * Only touches auth failures (401/403) with a resolvable source; every other
+ * error path keeps its message byte-identical. The source string comes from
+ * {@link AuthStorage.describeCredentialSource} and is fully sanitized.
+ */
+export function appendCredentialSourceDiagnostic(msg: AssistantMessage, resolveSource: () => string | undefined): void {
+	if (msg.stopReason !== "error" || (msg.errorStatus !== 401 && msg.errorStatus !== 403)) return;
+	const source = resolveSource();
+	if (!source) return;
+	msg.errorMessage = `${msg.errorMessage ?? ""}\n\n(selected credential: ${source})`;
+}
+
 const EPHEMERAL_REPLY_MAX_BYTES = 4096;
 const REPLAN_TITLE_CONTEXT_TURN_LIMIT = 6;
 

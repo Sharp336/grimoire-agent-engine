@@ -1631,4 +1631,139 @@ describe("AgentSession message pipeline", () => {
 		expect(result.assistantMessage.content.some(block => block.type === "toolCall")).toBe(false);
 		expect(result.assistantMessage.content.every(block => block.type !== "toolCall")).toBe(true);
 	});
+
+	it("annotates a 401 turn with the selected credential source (#8640)", async () => {
+		using tempDir = TempDir.createSync("@pi-credential-diag-");
+		const api = "test-credential-diag";
+		registerCustomApi(api, (_model, _context, options) => {
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				const message = createAssistantMessage("");
+				message.content = [];
+				message.stopReason = "error";
+				message.errorMessage = "HTTP 401 from https://ollama.com/api/chat\nUnauthorized";
+				message.errorStatus = 401;
+				stream.push({ type: "start", partial: message });
+				stream.push({ type: "error", reason: "error", error: message });
+			});
+			return stream;
+		});
+
+		const model = buildModel({
+			id: "credential-diag-model",
+			name: "Credential Diag Model",
+			api,
+			// The custom-API path normalizes the provider to the default
+			// "anthropic"; describeCredentialSource must still resolve for it.
+			provider: "anthropic",
+			baseUrl: "",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		} as ModelSpec<Api>) as Model<Api>;
+
+		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		const { session } = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			authStorage,
+			modelRegistry,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			model,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			taskDepth: 1,
+			agentId: "SubAgent",
+		});
+		try {
+			await session.sendUserMessage("please fail with 401");
+
+			const last = session.agent.state.messages.at(-1);
+			expect(last?.role).toBe("assistant");
+			if (last?.role !== "assistant") return;
+			expect(last.errorMessage).toContain("HTTP 401 from https://ollama.com/api/chat\nUnauthorized");
+			expect(last.errorMessage).toContain("(selected credential: runtime override (--api-key))");
+		} finally {
+			await session.dispose();
+			authStorage.close();
+		}
+	});
+
+	it("leaves a 500 turn without a credential annotation (#8640)", async () => {
+		using tempDir = TempDir.createSync("@pi-credential-diag-500-");
+		const api = "test-credential-diag-500";
+		registerCustomApi(api, (_model, _context, options) => {
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				const message = createAssistantMessage("");
+				message.content = [];
+				message.stopReason = "error";
+				message.errorMessage = "HTTP 500 internal";
+				message.errorStatus = 500;
+				stream.push({ type: "start", partial: message });
+				stream.push({ type: "error", reason: "error", error: message });
+			});
+			return stream;
+		});
+
+		const model = buildModel({
+			id: "credential-diag-500-model",
+			name: "Credential Diag 500 Model",
+			api,
+			provider: "ollama-cloud",
+			baseUrl: "",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		} as ModelSpec<Api>) as Model<Api>;
+
+		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+		authStorage.setRuntimeApiKey("ollama-cloud", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		vi.spyOn(authStorage, "describeCredentialSource").mockReturnValue("local store · api_key #3 (cred 3)");
+		const { session } = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			authStorage,
+			modelRegistry,
+			settings: Settings.isolated({ "compaction.enabled": false, "retry.maxRetries": 0 }),
+			model,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			taskDepth: 1,
+			agentId: "SubAgent",
+		});
+		try {
+			await session.sendUserMessage("please fail with 500");
+
+			const last = session.agent.state.messages.at(-1);
+			expect(last?.role).toBe("assistant");
+			if (last?.role !== "assistant") return;
+			expect(last.errorMessage).toContain("HTTP 500 internal");
+			expect(last.errorMessage).not.toContain("selected credential");
+		} finally {
+			await session.dispose();
+			authStorage.close();
+		}
+	});
 });

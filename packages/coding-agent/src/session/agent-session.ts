@@ -284,6 +284,7 @@ import {
 	type LaunchCompletionEntry,
 } from "./launch-completion";
 import {
+	appendCredentialSourceDiagnostic,
 	type BashExecutionMessage,
 	buildReplanTitleContext,
 	CHECKPOINT_ACTIVE_REMINDER_TYPE,
@@ -2893,6 +2894,9 @@ export class AgentSession {
 			// repeatedly on provider errors otherwise leaves no actionable trace
 			// outside the session transcript (issue #6177).
 			logProviderTurnError(msg);
+			appendCredentialSourceDiagnostic(msg, () =>
+				this.#modelRegistry.authStorage.describeCredentialSource(msg.provider, this.sessionId),
+			);
 
 			// Invalidate GitHub Copilot credentials on a hard auth failure (401, or an
 			// expired/revoked token) so stale tokens aren't reused on the next request.
