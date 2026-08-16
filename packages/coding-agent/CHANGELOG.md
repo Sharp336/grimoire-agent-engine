@@ -806,6 +806,11 @@
 ### Added
 
 - Added `RAM` and `Disks` fields to the system prompt's `<workstation>` block. RAM reports capacity, DDR generation, transfer rate, stick count, and — when the DMI export names memory channels unambiguously — channel count and theoretical peak bandwidth (Linux via unprivileged `udevadm` DMI export, Windows via `wmic memorychip`, capacity-only fallback elsewhere), cached in `~/.omp/ram_cache.json` alongside the existing GPU cache. Disks report per-filesystem total and free space live on every build (`df -kP` / `wmic logicaldisk`), collapsing btrfs subvolume and bind mounts and skipping pseudo filesystems.
+- The `<workstation>` block now names the GPU/RAM probe cache files and instructs the agent to delete a stale cache that contradicts observed hardware (e.g. after a GPU swap), so wrong hardware info self-heals on the next session.
+
+### Changed
+
+- The workstation `Distro` field now resolves the actual Linux distribution from `/etc/os-release` (`PRETTY_NAME`, falling back to `NAME` + `VERSION_ID`), e.g. `NixOS 25.11 (Xantusia)` instead of the generic `Linux`. Non-Linux hosts keep the previous `os.type()` value.
 
 ## [17.2.10] - 2026-08-06
 

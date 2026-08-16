@@ -3,7 +3,14 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { formatBytes, refreshDirsFromEnv } from "@oh-my-pi/pi-utils";
-import { buildSystemPrompt, parseDfDisks, parseDmiMemory, parseWmicDisks, parseWmicMemory } from "../src/system-prompt";
+import {
+	buildSystemPrompt,
+	parseDfDisks,
+	parseDmiMemory,
+	parseOsRelease,
+	parseWmicDisks,
+	parseWmicMemory,
+} from "../src/system-prompt";
 
 interface ProbeRunResult {
 	elapsedMs: number;
@@ -416,6 +423,16 @@ describe("workstation hardware parsers", () => {
 
 	it("returns null when no DMI memory device is populated", () => {
 		expect(parseDmiMemory("E: MEMORY_DEVICE_0_PRESENT=0\nE: MEMORY_DEVICE_0_TYPE=Unknown")).toBeNull();
+	});
+
+	it("prefers os-release PRETTY_NAME and falls back to NAME + VERSION_ID", () => {
+		const nixos = ['NAME="NixOS"', 'PRETTY_NAME="NixOS 25.11 (Xantusia)"', 'VERSION_ID="25.11"'].join("\n");
+		expect(parseOsRelease(nixos)).toBe("NixOS 25.11 (Xantusia)");
+
+		const debian = ['NAME="Debian GNU/Linux"', 'VERSION_ID="12"', "ID=debian"].join("\n");
+		expect(parseOsRelease(debian)).toBe("Debian GNU/Linux 12");
+
+		expect(parseOsRelease("ID=mystery")).toBeNull();
 	});
 
 	it("collapses same-device subvolume mounts and skips pseudo filesystems in df output", () => {

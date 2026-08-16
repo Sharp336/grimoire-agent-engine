@@ -3,6 +3,7 @@ PROJECT
 <workstation>
 {{#list environment prefix="- " join="\n"}}{{label}}: {{value}}{{/list}}
 {{#if model}}- Model: {{model}}{{/if}}
+{{#if hardwareCachePaths}}GPU/RAM above come from cached probes ({{hardwareCachePaths}}). Contradicts observed hardware (e.g. after a swap)? Delete the stale cache file; the next session re-probes.{{/if}}
 </workstation>
 
 {{#if contextFiles.length}}

@@ -591,6 +591,35 @@ async function getCpuModel(): Promise<string | undefined> {
 }
 
 /**
+ * Resolve a human distro identity from os-release(5) content: `PRETTY_NAME`
+ * (already includes the version), else `NAME` + `VERSION_ID`, else null.
+ * Exported for tests.
+ */
+export function parseOsRelease(text: string): string | null {
+	const fields: Record<string, string> = {};
+	for (const line of text.split("\n")) {
+		const match = /^([A-Z_]+)=("?)(.*)\2\s*$/.exec(line.trim());
+		if (match) fields[match[1]] = match[3];
+	}
+	if (fields.PRETTY_NAME) return fields.PRETTY_NAME;
+	if (fields.NAME) return fields.VERSION_ID ? `${fields.NAME} ${fields.VERSION_ID}` : fields.NAME;
+	return null;
+}
+
+/** Linux distro identity for the Distro field; non-Linux keeps the os.type() fallback. */
+async function getDistro(): Promise<string | undefined> {
+	if (process.platform !== "linux") return undefined;
+	try {
+		return parseOsRelease(await Bun.file("/etc/os-release").text()) ?? undefined;
+	} catch (error) {
+		if (!isEnoent(error)) {
+			logger.debug("Could not read /etc/os-release", { error: String(error) });
+		}
+		return undefined;
+	}
+}
+
+/**
  * Kernel identity for the workstation block. Prefers the uname build string
  * from `os.version()`, but Bun on macOS 15+ (Darwin 24/25) returns the literal
  * `"unknown"` when `uv_os_uname()`'s `version` field is empty — which surfaces
@@ -609,10 +638,11 @@ function getEnvironmentInfo(
 	gpu: string | undefined,
 	ram: string | undefined,
 	disks: string | undefined,
+	distro: string | undefined,
 ): Array<{ label: string; value: string }> {
 	const entries: Array<{ label: string; value: string | undefined }> = [
 		{ label: "OS", value: `${os.platform()} ${os.release()}` },
-		{ label: "Distro", value: os.type() },
+		{ label: "Distro", value: distro ?? os.type() },
 		{ label: "Kernel", value: getKernelIdentity() },
 		{ label: "Arch", value: os.arch() },
 		{ label: "CPU", value: cpuModel },
@@ -994,6 +1024,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		gpu: undefined as string | undefined,
 		ram: undefined as string | undefined,
 		disks: undefined as string | undefined,
+		distro: undefined as string | undefined,
 	};
 
 	const { promise: deadline, resolve: fireDeadline } = Promise.withResolvers<"__timeout__">();
@@ -1094,6 +1125,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 					.then(override => override ?? bundledPersonality);
 	const ramPromise = logger.time("getCachedRam", getCachedRam);
 	const diskPromise = logger.time("getDiskInfo", getDiskInfo);
+	const distroPromise = logger.time("getDistro", getDistro);
 
 	const [
 		resolvedCustomPrompt,
@@ -1108,6 +1140,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		personalityBlock,
 		ram,
 		disks,
+		distro,
 	] = await Promise.all([
 		withDeadline(
 			"customPrompt",
@@ -1135,6 +1168,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		withDeadline("loadPersonalityOverride", personalityPromise, bundledPersonality),
 		withDeadline("getCachedRam", ramPromise, prepDefaults.ram),
 		withDeadline("getDiskInfo", diskPromise, prepDefaults.disks),
+		withDeadline("getDistro", distroPromise, prepDefaults.distro),
 	]);
 	clearTimeout(deadlineTimer);
 	const agentsMdFiles = Array.from(new Set(workspaceTree.agentsMdFiles)).sort().slice(0, AGENTS_MD_LIMIT);
@@ -1231,7 +1265,20 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	];
 	const injectedAlwaysApplyRules = dedupeAlwaysApplyRules(alwaysApplyRules, promptSources);
 
-	const environment = getEnvironmentInfo(cpuModel, gpu, ram, disks);
+	const environment = getEnvironmentInfo(cpuModel, gpu, ram, disks, distro);
+	// Point the agent at the probe caches so it can self-heal a stale
+	// GPU/RAM line (hardware swap) by deleting the file instead of trusting it.
+	const homeDir = os.homedir();
+	const hardwareCachePaths =
+		gpu || ram
+			? [getGpuCachePath(), getRamCachePath()]
+					.map(cachePath =>
+						normalizePromptPath(
+							cachePath.startsWith(homeDir) ? `~${cachePath.slice(homeDir.length)}` : cachePath,
+						),
+					)
+					.join(", ")
+			: "";
 	const data = {
 		systemPromptCustomization: effectiveSystemPromptCustomization,
 		customPrompt: resolvedCustomPrompt,
@@ -1243,6 +1290,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		toolListMode,
 		toolRefs,
 		environment,
+		hardwareCachePaths,
 		contextFiles,
 		agentsMdSearch: { files: agentsMdFiles },
 		workspaceTree,
