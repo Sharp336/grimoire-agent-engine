@@ -185,6 +185,14 @@ export type StatusLineSegmentId =
 	| "usage"
 	| "collab";
 
+/**
+ * A status-line segment reference: a built-in id, or an arbitrary id an
+ * extension registered via `registerStatusLineSegment`. Kept as a distinct
+ * type (rather than widening `StatusLineSegmentId` itself) so built-in ids
+ * keep literal-type autocomplete in config and preset definitions.
+ */
+export type StatusLineSegmentRef = StatusLineSegmentId | (string & {});
+
 /** Submenu choice metadata. */
 export type SubmenuOption<V extends string = string> = {
 	value: V;
@@ -815,9 +823,21 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"statusLine.leftSegments": { type: "array", default: [] as StatusLineSegmentId[] },
+	"statusLine.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "appearance",
+			group: "Status Line",
+			label: "Enable Status Line",
+			description:
+				"Render the built-in status line in the editor top border. Disable to hand that surface to an extension-provided widget instead (see `ctx.ui.setWidget`).",
+		},
+	},
 
-	"statusLine.rightSegments": { type: "array", default: [] as StatusLineSegmentId[] },
+	"statusLine.leftSegments": { type: "array", default: [] as StatusLineSegmentRef[] },
+
+	"statusLine.rightSegments": { type: "array", default: [] as StatusLineSegmentRef[] },
 
 	"statusLine.segmentOptions": { type: "record", default: {} as Record<string, unknown> },
 
@@ -5784,8 +5804,9 @@ export interface StatusLineSettings {
 	preset: StatusLinePreset;
 	separator: StatusLineSeparatorStyle;
 	showHookStatus: boolean;
-	leftSegments: StatusLineSegmentId[];
-	rightSegments: StatusLineSegmentId[];
+	enabled: boolean;
+	leftSegments: StatusLineSegmentRef[];
+	rightSegments: StatusLineSegmentRef[];
 	segmentOptions: Record<string, unknown>;
 }
 

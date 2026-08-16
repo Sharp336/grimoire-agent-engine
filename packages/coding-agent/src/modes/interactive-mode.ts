@@ -1789,6 +1789,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			rightSegments: settings.get("statusLine.rightSegments"),
 			separator: settings.get("statusLine.separator"),
 			showHookStatus: settings.get("statusLine.showHookStatus"),
+			enabled: settings.get("statusLine.enabled"),
 			sessionAccent: settings.get("statusLine.sessionAccent"),
 			transparent: settings.get("statusLine.transparent"),
 			segmentOptions: settings.get("statusLine.segmentOptions"),

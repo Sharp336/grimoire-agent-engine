@@ -26,8 +26,8 @@ import { getSeparator } from "./separators";
 import type {
 	CollabStatus,
 	EffectiveStatusLineSettings,
-	StatusLineSegmentId,
 	StatusLineSegmentOptions,
+	StatusLineSegmentRef,
 	StatusLineSettings,
 } from "./types";
 
@@ -268,21 +268,21 @@ const EMPTY_MESSAGES: readonly AgentMessage[] = [];
 const STATUS_USAGE_START_DELAY_MS = 0;
 const STATUS_USAGE_REFRESH_TIMEOUT_MS = 2_000;
 
-function hasContextSegment(segments: readonly StatusLineSegmentId[]): boolean {
+function hasContextSegment(segments: readonly StatusLineSegmentRef[]): boolean {
 	return segments.includes("context_pct") || segments.includes("context_total");
 }
-function hasGitSegment(segments: readonly StatusLineSegmentId[]): boolean {
+function hasGitSegment(segments: readonly StatusLineSegmentRef[]): boolean {
 	return segments.includes("git");
 }
 
-function hasPrSegment(segments: readonly StatusLineSegmentId[]): boolean {
+function hasPrSegment(segments: readonly StatusLineSegmentRef[]): boolean {
 	return segments.includes("pr");
 }
-function hasPathSegment(segments: readonly StatusLineSegmentId[]): boolean {
+function hasPathSegment(segments: readonly StatusLineSegmentRef[]): boolean {
 	return segments.includes("path");
 }
 
-function hasGitBackedSegment(segments: readonly StatusLineSegmentId[]): boolean {
+function hasGitBackedSegment(segments: readonly StatusLineSegmentRef[]): boolean {
 	return hasGitSegment(segments) || hasPrSegment(segments);
 }
 
@@ -1717,7 +1717,7 @@ export class StatusLineComponent implements Component {
 
 		// Collect visible segment contents
 		const leftParts: string[] = [];
-		const leftSegIds: StatusLineSegmentId[] = [];
+		const leftSegIds: StatusLineSegmentRef[] = [];
 		for (const segId of effectiveSettings.leftSegments) {
 			if (subagentBadge && segId === "subagents") continue;
 			const rendered = renderSegment(segId, ctx);
@@ -1864,6 +1864,9 @@ export class StatusLineComponent implements Component {
 	}
 
 	getTopBorder(width: number): { content: string; width: number; revision: number } {
+		if (this.#settings.enabled === false) {
+			return { content: "", width: 0, revision: this.#widthEpochRevision };
+		}
 		let content = this.#buildStatusLine(width);
 		if (this.#focusedAgentId && content) {
 			// Dim the whole bar while focus-proxied. Group/cap terminators emit full
