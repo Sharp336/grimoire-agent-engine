@@ -667,6 +667,11 @@ export function getGpuCachePath(): string {
 	return dirs.rootSubdir("gpu_cache.json", "cache");
 }
 
+/** Get the RAM cache path (~/.omp/ram_cache.json). */
+export function getRamCachePath(): string {
+	return dirs.rootSubdir("ram_cache.json", "cache");
+}
+
 /**
  * Get the GitHub view cache database path (~/.omp/cache/github-cache.db).
  * Honors the `OMP_GITHUB_CACHE_DB` env var when set so tests can isolate the

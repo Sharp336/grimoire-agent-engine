@@ -9,9 +9,11 @@ import type { ToolExample, TSchema } from "@oh-my-pi/pi-ai";
 import { renderToolInventory } from "@oh-my-pi/pi-ai/dialect";
 import {
 	$env,
+	formatBytes,
 	getAgentDir,
 	getGpuCachePath,
 	getProjectDir,
+	getRamCachePath,
 	hasFsCode,
 	isEnoent,
 	logger,
@@ -180,20 +182,26 @@ function parseWindowsGpuModel(output: string): string | null {
 
 const SYSTEM_PROMPT_PREP_TIMEOUT_MS = 5000;
 /** Kept below prep timeout so timed-out probes can still write the null cache before fallback. */
-const GPU_PROBE_TIMEOUT_MS = SYSTEM_PROMPT_PREP_TIMEOUT_MS - 500;
+const HOST_PROBE_TIMEOUT_MS = SYSTEM_PROMPT_PREP_TIMEOUT_MS - 500;
 /** Drop stdout from a probe descendant that inherited the pipe after the probe exited. */
-const GPU_PROBE_STDOUT_DRAIN_MS = 250;
+const HOST_PROBE_STDOUT_DRAIN_MS = 250;
 
-async function runGpuProbe(cmd: string[]): Promise<string | null> {
+interface HostProbeOptions {
+	/** Return captured stdout even on a non-zero exit (df exits 1 when any single mount cannot be statted). */
+	lenientExit?: boolean;
+}
+
+async function runHostProbe(cmd: string[], options: HostProbeOptions = {}): Promise<string | null> {
 	try {
 		const proc = Bun.spawn({
 			cmd,
 			stdout: "pipe",
 			stderr: "ignore",
 			stdin: "ignore",
-			timeout: GPU_PROBE_TIMEOUT_MS,
+			timeout: HOST_PROBE_TIMEOUT_MS,
 			// SIGKILL so a probe ignoring SIGTERM (PATH wrapper, wedged WMI) still
-			// dies at the deadline and lets getCachedGpu reach the null-cache write.
+			// dies at the deadline and lets the cached-probe path reach its
+			// null-cache write.
 			killSignal: "SIGKILL",
 		});
 		const stdoutReader = proc.stdout.getReader();
@@ -209,17 +217,18 @@ async function runGpuProbe(cmd: string[]): Promise<string | null> {
 		})();
 		const exitCode = await proc.exited;
 		// Even on exit 0, a probe wrapper can leave a descendant holding stdout open.
-		// Bound the EOF wait so getCachedGpu cannot outlive the probe in either path;
+		// Bound the EOF wait so a cached probe cannot outlive its child in either path;
 		// keep whatever bytes the reader already captured before cancelling.
 		const drained = await Promise.race([
 			stdoutDone.then(() => "ok" as const).catch(() => "err" as const),
-			Bun.sleep(GPU_PROBE_STDOUT_DRAIN_MS).then(() => "timeout" as const),
+			Bun.sleep(HOST_PROBE_STDOUT_DRAIN_MS).then(() => "timeout" as const),
 		]);
 		if (drained !== "ok") {
 			await stdoutReader.cancel().catch(() => undefined);
 			await stdoutDone.catch(() => undefined);
 		}
-		return exitCode === 0 ? stdout : null;
+		if (exitCode !== 0 && !(options.lenientExit && stdout.trim().length > 0)) return null;
+		return stdout;
 	} catch {
 		return null;
 	}
@@ -228,11 +237,11 @@ async function runGpuProbe(cmd: string[]): Promise<string | null> {
 async function getGpuModel(): Promise<string | null> {
 	switch (process.platform) {
 		case "win32": {
-			const output = await runGpuProbe(["wmic", "path", "win32_VideoController", "get", "name"]);
+			const output = await runHostProbe(["wmic", "path", "win32_VideoController", "get", "name"]);
 			return output ? parseWindowsGpuModel(output) : null;
 		}
 		case "linux": {
-			const output = await runGpuProbe(["lspci"]);
+			const output = await runHostProbe(["lspci"]);
 			if (!output) return null;
 			const gpus: Array<{ name: string; priority: number }> = [];
 			for (const line of output.split("\n")) {
@@ -267,6 +276,222 @@ async function getGpuModel(): Promise<string | null> {
 		default:
 			return null;
 	}
+}
+
+/** SMBIOS memory-device type codes (DMTF spec 7.18.2) as reported by wmic's `SMBIOSMemoryType`. */
+const SMBIOS_MEMORY_TYPE: Record<string, string> = {
+	"18": "DDR",
+	"19": "DDR2",
+	"24": "DDR3",
+	"26": "DDR4",
+	"27": "LPDDR",
+	"28": "LPDDR2",
+	"29": "LPDDR3",
+	"30": "LPDDR4",
+	"34": "DDR5",
+	"35": "LPDDR5",
+};
+
+/**
+ * Parse the `E: MEMORY_DEVICE_<n>_<KEY>=<value>` properties that systemd's
+ * dmi/id udev builtin exports (readable without root, unlike `dmidecode`)
+ * into a one-line RAM summary, e.g.
+ * `96.0GB DDR5 @ 6000 MT/s (2x 48.0GB, 2 channels, ~96 GB/s peak)`.
+ *
+ * Channel count and the derived theoretical peak bandwidth
+ * (`channels x data width x transfer rate`) appear only when the locators name
+ * channels unambiguously (`CHANNEL A` / `DIMM_A1` style). The memory-controller
+ * clock ratio (UCLK 1:1 vs 1:2) is firmware state that DMI does not expose, so
+ * it is intentionally absent.
+ *
+ * Exported for tests. Returns null when no populated memory device is found.
+ */
+export function parseDmiMemory(udevText: string): string | null {
+	const devices = new Map<string, Record<string, string>>();
+	for (const line of udevText.split("\n")) {
+		const match = /^E:\s*MEMORY_DEVICE_(\d+)_([A-Z0-9_]+)=(.*)$/.exec(line.trim());
+		if (!match) continue;
+		let device = devices.get(match[1]);
+		if (!device) {
+			device = {};
+			devices.set(match[1], device);
+		}
+		device[match[2]] = match[3].trim();
+	}
+
+	const populated = [...devices.values()].filter(device => {
+		if (device.PRESENT === "0") return false;
+		const size = Number(device.SIZE);
+		return Number.isFinite(size) && size > 0;
+	});
+	if (populated.length === 0) return null;
+
+	const sizes = populated.map(device => Number(device.SIZE));
+	const totalBytes = sizes.reduce((sum, size) => sum + size, 0);
+	const type = populated.map(device => device.TYPE).find(value => value && value !== "Unknown");
+	const speedMts = Math.max(
+		0,
+		...populated.map(device => Number(device.CONFIGURED_SPEED_MTS ?? device.SPEED_MTS) || 0),
+	);
+	// Channel count: only trust an explicit channel token in the locators.
+	// Deduping raw bank locators would count slot-level labels ("BANK 0".."BANK 3")
+	// as one fictitious channel per DIMM and overstate the peak bandwidth.
+	const channelTokens = populated.map(device => {
+		const locators = `${device.BANK_LOCATOR ?? ""} ${device.LOCATOR ?? ""}`;
+		const named = /CHANNEL[\s_-]*([A-Z0-9]+)/i.exec(locators);
+		if (named) return named[1].toUpperCase();
+		const dimmSlot = /\bDIMM[\s_-]?([A-Z])\d*\b/i.exec(locators);
+		return dimmSlot ? dimmSlot[1].toUpperCase() : null;
+	});
+	const channels = channelTokens.every(token => token !== null) ? new Set(channelTokens).size : 0;
+	const dataWidthBits = Math.max(0, ...populated.map(device => Number(device.DATA_WIDTH) || 0)) || 64;
+
+	let summary = formatBytes(totalBytes);
+	if (type) summary += ` ${type}`;
+	if (speedMts > 0) summary += ` @ ${speedMts} MT/s`;
+	const details: string[] = [
+		sizes.every(size => size === sizes[0])
+			? `${populated.length}x ${formatBytes(sizes[0])}`
+			: `${populated.length} DIMMs`,
+	];
+	if (channels > 0) {
+		details.push(`${channels} ${channels === 1 ? "channel" : "channels"}`);
+		if (speedMts > 0) {
+			details.push(`~${Math.round((channels * dataWidthBits * speedMts) / 8000)} GB/s peak`);
+		}
+	}
+	return `${summary} (${details.join(", ")})`;
+}
+
+/** Split `wmic ... /format:list` output (blank-line separated `Key=Value` blocks) into per-record maps. */
+function parseWmicList(output: string): Array<Record<string, string>> {
+	const records: Array<Record<string, string>> = [];
+	for (const block of output.split(/\r?\n\s*\r?\n/)) {
+		const record: Record<string, string> = {};
+		for (const line of block.split("\n")) {
+			const trimmed = line.trim();
+			const separator = trimmed.indexOf("=");
+			if (separator > 0) record[trimmed.slice(0, separator)] = trimmed.slice(separator + 1);
+		}
+		if (Object.keys(record).length > 0) records.push(record);
+	}
+	return records;
+}
+
+/**
+ * Parse `wmic memorychip get ... /format:list` output (blank-line separated
+ * `Key=Value` blocks, one per DIMM) into a one-line RAM summary.
+ * Exported for tests. Returns null when no stick reports a capacity.
+ */
+export function parseWmicMemory(output: string): string | null {
+	const populated = parseWmicList(output).filter(stick => Number(stick.Capacity) > 0);
+
+	if (populated.length === 0) return null;
+
+	const sizes = populated.map(stick => Number(stick.Capacity));
+	const totalBytes = sizes.reduce((sum, size) => sum + size, 0);
+	const type = populated
+		.map(stick => SMBIOS_MEMORY_TYPE[stick.SMBIOSMemoryType ?? ""])
+		.find(value => value !== undefined);
+	const speedMts = Math.max(0, ...populated.map(stick => Number(stick.ConfiguredClockSpeed ?? stick.Speed) || 0));
+
+	let summary = formatBytes(totalBytes);
+	if (type) summary += ` ${type}`;
+	if (speedMts > 0) summary += ` @ ${speedMts} MT/s`;
+	const sticksDetail = sizes.every(size => size === sizes[0])
+		? `${populated.length}x ${formatBytes(sizes[0])}`
+		: `${populated.length} DIMMs`;
+	return `${summary} (${sticksDetail})`;
+}
+
+async function getRamInfo(): Promise<string | null> {
+	switch (process.platform) {
+		case "linux": {
+			// systemd's dmi/id udev builtin re-exports the SMBIOS memory tables
+			// that only root can read from /sys/firmware/dmi, so DDR generation,
+			// transfer rate, and slot population are available unprivileged.
+			const output = await runHostProbe(["udevadm", "info", "/sys/devices/virtual/dmi/id"]);
+			const parsed = output ? parseDmiMemory(output) : null;
+			if (parsed) return parsed;
+			break;
+		}
+		case "win32": {
+			const output = await runHostProbe([
+				"wmic",
+				"memorychip",
+				"get",
+				"Capacity,ConfiguredClockSpeed,Speed,SMBIOSMemoryType",
+				"/format:list",
+			]);
+			const parsed = output ? parseWmicMemory(output) : null;
+			if (parsed) return parsed;
+			break;
+		}
+	}
+	// Capacity-only fallback (macOS, containers, hosts without DMI export).
+	// os.totalmem() reports usable RAM, slightly below the installed total.
+	const totalBytes = os.totalmem();
+	return totalBytes > 0 ? formatBytes(totalBytes) : null;
+}
+
+/**
+ * Parse POSIX `df -kP` output into a one-line per-mount disk summary, e.g.
+ * `/ 1.9TB (751.2GB free); /boot 499.7MB (392.0MB free)`.
+ *
+ * Keeps block-device-backed filesystems (plus the root mount, so container
+ * overlayfs roots survive), collapses bind/subvolume mounts sharing a device
+ * to the shortest mount point, and skips loop/ram pseudo-disks (snaps).
+ * Exported for tests. Returns undefined when nothing qualifies.
+ */
+export function parseDfDisks(dfText: string): string | undefined {
+	const byDevice = new Map<string, { mount: string; totalBytes: number; freeBytes: number }>();
+	for (const line of dfText.split("\n").slice(1)) {
+		const match = /^(\S+)\s+(\d+)\s+\d+\s+(\d+)\s+\S+\s+(.+)$/.exec(line.trim());
+		if (!match) continue;
+		const [, device, totalKb, availKb, mount] = match;
+		if (/^\/dev\/(loop|ram)/.test(device)) continue;
+		if (!device.startsWith("/") && mount !== "/") continue;
+		const existing = byDevice.get(device);
+		if (existing && existing.mount.length <= mount.length) continue;
+		byDevice.set(device, { mount, totalBytes: Number(totalKb) * 1024, freeBytes: Number(availKb) * 1024 });
+	}
+	const disks = [...byDevice.values()].sort((a, b) =>
+		a.mount === "/" ? -1 : b.mount === "/" ? 1 : a.mount.localeCompare(b.mount),
+	);
+	if (disks.length === 0) return undefined;
+	return disks
+		.slice(0, 6)
+		.map(disk => `${disk.mount} ${formatBytes(disk.totalBytes)} (${formatBytes(disk.freeBytes)} free)`)
+		.join("; ");
+}
+
+/**
+ * Parse `wmic logicaldisk get ... /format:list` output into a one-line
+ * per-drive disk summary. Exported for tests.
+ */
+export function parseWmicDisks(output: string): string | undefined {
+	const drives = parseWmicList(output)
+		.filter(record => record.Caption && Number(record.Size) > 0)
+		.map(record => ({
+			caption: record.Caption,
+			totalBytes: Number(record.Size),
+			freeBytes: Number(record.FreeSpace) || 0,
+		}));
+	if (drives.length === 0) return undefined;
+	return drives
+		.slice(0, 6)
+		.map(drive => `${drive.caption} ${formatBytes(drive.totalBytes)} (${formatBytes(drive.freeBytes)} free)`)
+		.join("; ");
+}
+
+/** Live (uncached — free space changes) disk inventory for the workstation block. */
+async function getDiskInfo(): Promise<string | undefined> {
+	if (process.platform === "win32") {
+		const output = await runHostProbe(["wmic", "logicaldisk", "get", "Caption,FreeSpace,Size", "/format:list"]);
+		return output ? parseWmicDisks(output) : undefined;
+	}
+	const output = await runHostProbe(["df", "-kP"], { lenientExit: true });
+	return output ? parseDfDisks(output) : undefined;
 }
 
 function getTerminalName(): string | undefined {
@@ -326,6 +551,31 @@ async function getCachedGpu(): Promise<string | undefined> {
 	return gpu ?? undefined;
 }
 
+/** Cached RAM probe result (~/.omp/ram_cache.json), mirroring the GPU cache. */
+interface RamCache {
+	ram: string | null;
+}
+
+async function getCachedRam(): Promise<string | undefined> {
+	const cachePath = getRamCachePath();
+	try {
+		const content = await Bun.file(cachePath).json();
+		if (content && typeof content === "object" && "ram" in content) {
+			const ram = (content as RamCache).ram;
+			return typeof ram === "string" ? ram : undefined;
+		}
+	} catch {
+		// Missing or invalid cache: fall through to a fresh probe.
+	}
+	const ram = await logger.time("getCachedRam:getRamInfo", getRamInfo);
+	try {
+		await Bun.write(cachePath, JSON.stringify({ ram } satisfies RamCache, null, "\t"));
+	} catch {
+		// Silently ignore cache write failures
+	}
+	return ram ?? undefined;
+}
+
 async function getCpuModel(): Promise<string | undefined> {
 	if (process.platform !== "linux") return os.cpus()[0]?.model;
 	try {
@@ -357,6 +607,8 @@ function getKernelIdentity(): string {
 function getEnvironmentInfo(
 	cpuModel: string | undefined,
 	gpu: string | undefined,
+	ram: string | undefined,
+	disks: string | undefined,
 ): Array<{ label: string; value: string }> {
 	const entries: Array<{ label: string; value: string | undefined }> = [
 		{ label: "OS", value: `${os.platform()} ${os.release()}` },
@@ -364,7 +616,9 @@ function getEnvironmentInfo(
 		{ label: "Kernel", value: getKernelIdentity() },
 		{ label: "Arch", value: os.arch() },
 		{ label: "CPU", value: cpuModel },
+		{ label: "RAM", value: ram },
 		{ label: "GPU", value: gpu },
+		{ label: "Disks", value: disks },
 		{ label: "Terminal", value: getTerminalName() },
 	];
 	return entries.filter((e): e is { label: string; value: string } => !!e.value);
@@ -738,6 +992,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		activeRepoContext: null as ActiveRepoContext | null,
 		cpuModel: undefined as string | undefined,
 		gpu: undefined as string | undefined,
+		ram: undefined as string | undefined,
+		disks: undefined as string | undefined,
 	};
 
 	const { promise: deadline, resolve: fireDeadline } = Promise.withResolvers<"__timeout__">();
@@ -836,6 +1092,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 			: logger
 					.time("loadPersonalityOverride", loadPersonalityOverride)
 					.then(override => override ?? bundledPersonality);
+	const ramPromise = logger.time("getCachedRam", getCachedRam);
+	const diskPromise = logger.time("getDiskInfo", getDiskInfo);
 
 	const [
 		resolvedCustomPrompt,
@@ -848,6 +1106,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		cpuModel,
 		gpu,
 		personalityBlock,
+		ram,
+		disks,
 	] = await Promise.all([
 		withDeadline(
 			"customPrompt",
@@ -873,6 +1133,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		withDeadline("getCpuModel", cpuModelPromise, prepDefaults.cpuModel),
 		withDeadline("getCachedGpu", gpuPromise, prepDefaults.gpu),
 		withDeadline("loadPersonalityOverride", personalityPromise, bundledPersonality),
+		withDeadline("getCachedRam", ramPromise, prepDefaults.ram),
+		withDeadline("getDiskInfo", diskPromise, prepDefaults.disks),
 	]);
 	clearTimeout(deadlineTimer);
 	const agentsMdFiles = Array.from(new Set(workspaceTree.agentsMdFiles)).sort().slice(0, AGENTS_MD_LIMIT);
@@ -969,7 +1231,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	];
 	const injectedAlwaysApplyRules = dedupeAlwaysApplyRules(alwaysApplyRules, promptSources);
 
-	const environment = getEnvironmentInfo(cpuModel, gpu);
+	const environment = getEnvironmentInfo(cpuModel, gpu, ram, disks);
 	const data = {
 		systemPromptCustomization: effectiveSystemPromptCustomization,
 		customPrompt: resolvedCustomPrompt,

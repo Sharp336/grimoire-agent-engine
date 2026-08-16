@@ -94,6 +94,13 @@
 ### Fixed
 
 - Fixed the in-house `marked` list tokenizer incorrectly consuming trailing blank lines at the end of input, ensuring correct list tightness and token generation matching standard `marked` behavior.
+### Added
+
+- Added `getRamCachePath()` (`~/.omp/ram_cache.json`) beside the GPU cache path.
+
+### Changed
+
+- `formatBytes` now has a TB tier instead of capping at GB (e.g. `1.9TB` rather than `1907.3GB`).
 
 ## [17.2.10] - 2026-08-06
 

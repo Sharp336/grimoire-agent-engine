@@ -803,6 +803,9 @@
 - Fixed the status-line `session_name` segment to honor the `statusLine.sessionAccent` setting, falling back to the theme's accent color when disabled.
 - Fixed automatic `agent.continue()` paths failing to run context-fit maintenance when reverting to a smaller-context model after a cooldown expiry.
 - Fixed `/handoff` reporting "Handoff cancelled" for actual generation or stream timeout errors, ensuring the real error is surfaced.
+### Added
+
+- Added `RAM` and `Disks` fields to the system prompt's `<workstation>` block. RAM reports capacity, DDR generation, transfer rate, stick count, and — when the DMI export names memory channels unambiguously — channel count and theoretical peak bandwidth (Linux via unprivileged `udevadm` DMI export, Windows via `wmic memorychip`, capacity-only fallback elsewhere), cached in `~/.omp/ram_cache.json` alongside the existing GPU cache. Disks report per-filesystem total and free space live on every build (`df -kP` / `wmic logicaldisk`), collapsing btrfs subvolume and bind mounts and skipping pseudo filesystems.
 
 ## [17.2.10] - 2026-08-06
 
