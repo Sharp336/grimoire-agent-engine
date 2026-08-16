@@ -1,12 +1,8 @@
+import type { UsageReport } from "@oh-my-pi/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext } from "@oh-my-pi/pi-coding-agent";
 
 import { QuotaDashboardComponent } from "./src/dashboard-component";
-import {
-	buildQuotaDashboardModel,
-	type LocalActiveIdentity,
-	type LocalUsageReport,
-	type QuotaDashboardModel,
-} from "./src/hierarchy";
+import { buildQuotaDashboardModel, type LocalActiveIdentity, type QuotaDashboardModel } from "./src/hierarchy";
 import { renderQuotaSnapshot } from "./src/render-plain";
 
 async function fetchModel(ctx: ExtensionCommandContext, forceRefresh = false): Promise<QuotaDashboardModel | null> {
@@ -16,9 +12,9 @@ async function fetchModel(ctx: ExtensionCommandContext, forceRefresh = false): P
 		await authStorage.invalidateUsageCache();
 	}
 
-	const reports = (await authStorage.fetchUsageReports({
+	const reports: UsageReport[] | null = await authStorage.fetchUsageReports({
 		baseUrlResolver: provider => ctx.modelRegistry.getProviderBaseUrl(provider),
-	})) as LocalUsageReport[] | null;
+	});
 
 	if (!reports || reports.length === 0) return null;
 

@@ -1,4 +1,5 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, expectTypeOf, it } from "bun:test";
+import type { UsageReport } from "@oh-my-pi/pi-ai";
 import {
 	buildQuotaDashboardModel,
 	cleanOrgName,
@@ -8,13 +9,30 @@ import {
 	type LocalUsageReport,
 } from "../src/hierarchy";
 
+type UpstreamUsageLimit = UsageReport["limits"][number];
+type LocalResetCredits = NonNullable<LocalUsageReport["resetCredits"]>;
+type UpstreamResetCredits = NonNullable<UsageReport["resetCredits"]>;
+type LocalResetCredit = NonNullable<LocalResetCredits["credits"]>[number];
+type UpstreamResetCredit = NonNullable<UpstreamResetCredits["credits"]>[number];
+
+expectTypeOf<UsageReport>().toExtend<LocalUsageReport>();
+expectTypeOf<keyof LocalUsageReport>().toExtend<keyof UsageReport>();
+expectTypeOf<keyof LocalUsageLimit>().toExtend<keyof UpstreamUsageLimit>();
+expectTypeOf<keyof LocalUsageLimit["scope"]>().toExtend<keyof UpstreamUsageLimit["scope"]>();
+expectTypeOf<keyof LocalUsageLimit["amount"]>().toExtend<keyof UpstreamUsageLimit["amount"]>();
+expectTypeOf<keyof NonNullable<LocalUsageLimit["window"]>>().toExtend<
+	keyof NonNullable<UpstreamUsageLimit["window"]>
+>();
+expectTypeOf<keyof LocalResetCredits>().toExtend<keyof UpstreamResetCredits>();
+expectTypeOf<keyof LocalResetCredit>().toExtend<keyof UpstreamResetCredit>();
+
 const NOW = 1_700_000_000_000;
 
 function limit(overrides: Partial<LocalUsageLimit> = {}): LocalUsageLimit {
 	return {
 		id: "test:limit",
 		label: "7 Day",
-		scope: { provider: "test" },
+		scope: {},
 		amount: { unit: "percent", remainingFraction: 1.0 },
 		...overrides,
 	};

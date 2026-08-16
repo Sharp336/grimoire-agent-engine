@@ -14,7 +14,7 @@ function limit(overrides: Partial<LocalUsageLimit> = {}): LocalUsageLimit {
 	return {
 		id: "test:limit",
 		label: "7 Day",
-		scope: { provider: "test" },
+		scope: {},
 		amount: { unit: "percent", remainingFraction: 1.0 },
 		...overrides,
 	};
