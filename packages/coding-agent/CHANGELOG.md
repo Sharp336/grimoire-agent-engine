@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the interactive `/quota` provider quota dashboard extension example under `packages/coding-agent/examples/extensions/quota/`.
+
 ## [17.3.5] - 2026-08-16
 
 ### Added
