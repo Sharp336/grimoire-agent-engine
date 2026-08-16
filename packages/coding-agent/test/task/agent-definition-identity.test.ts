@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
 	createAgentDefinitionIdentity,
+	createAgentDefinitionIdentityFromOrigin,
 	createAgentDefinitionOriginIdentity,
 } from "@oh-my-pi/pi-coding-agent/task/agent-definition-identity";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -76,5 +77,32 @@ describe("agent definition identity", () => {
 		expect(moved.definitionId).not.toBe(first.definitionId);
 		expect(changed.definitionId).not.toBe(first.definitionId);
 		expect(Object.isFrozen(extensionOrigin)).toBe(true);
+	});
+
+	test("precomputed directory origin retains exact location and content definition domains", async () => {
+		const temp = TempDir.createSync("omp-agent-definition-precomputed-origin-");
+		tempDirs.push(temp);
+		const packageRoot = path.join(path.resolve(temp.path()), "package");
+		const firstPath = path.join(packageRoot, "agents", "first.md");
+		const secondPath = path.join(packageRoot, "agents", "second.md");
+		const firstContent = "---\nname: first\ndescription: first\n---\nfirst body\n";
+		const secondContent = "---\nname: second\ndescription: second\n---\nsecond body\n";
+		await fs.mkdir(path.dirname(firstPath), { recursive: true });
+		await Promise.all([Bun.write(firstPath, firstContent), Bun.write(secondPath, secondContent)]);
+
+		const origin = await createAgentDefinitionOriginIdentity("extension", packageRoot);
+		const first = await createAgentDefinitionIdentityFromOrigin(origin, firstPath, firstContent);
+		const second = await createAgentDefinitionIdentityFromOrigin(origin, secondPath, secondContent);
+		const changed = await createAgentDefinitionIdentityFromOrigin(origin, firstPath, `${firstContent}changed\n`);
+		const standalone = await createAgentDefinitionIdentity("extension", packageRoot, firstPath, firstContent);
+
+		expect(first).toEqual(standalone);
+		expect(first).toMatchObject(origin);
+		expect(second).toMatchObject(origin);
+		expect(changed).toMatchObject(origin);
+		expect(second.definitionId).not.toBe(first.definitionId);
+		expect(changed.definitionId).not.toBe(first.definitionId);
+		expect(Object.isFrozen(first)).toBe(true);
+		expect(Object.isFrozen(second)).toBe(true);
 	});
 });

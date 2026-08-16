@@ -161,8 +161,9 @@ export function createPersistedSubagentReviverFactory(
 				if (event.type === "agent_start") registry.setStatus(ref.id, "running", session);
 				else if (event.type === "agent_end") registry.setStatus(ref.id, "idle", session);
 			});
-			// Older persisted files predate selected-definition provenance, so retain
-			// the runtime-neutral source and display-name fallbacks for compatibility.
+			// Live lifecycle frames report the selected definition name. New persisted
+			// sessions retain that name; older files predate it and must continue to
+			// report the registry display name (and runtime-neutral source) on revival.
 			const wakeAgent: AgentDefinition = {
 				name: init.agent ?? ref.displayName,
 				description: "",

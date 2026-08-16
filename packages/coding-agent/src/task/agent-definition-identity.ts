@@ -34,12 +34,32 @@ function freezeOrigin(originKind: AgentDefinitionOriginKind, canonicalRoot: stri
 	});
 }
 
+function freezeDefinition(
+	origin: AgentDefinitionOriginIdentity,
+	canonicalDefinition: string,
+	definitionContent: string,
+): AgentDefinitionIdentity {
+	return Object.freeze({
+		...origin,
+		definitionId: opaqueId(DEFINITION_DOMAIN, [origin.originId, canonicalDefinition, definitionContent]),
+	});
+}
+
 /** Create an opaque host-owned origin identity from a host-canonical location. */
 export async function createAgentDefinitionOriginIdentity(
 	originKind: AgentDefinitionOriginKind,
 	originRoot: string,
 ): Promise<AgentDefinitionOriginIdentity> {
 	return freezeOrigin(originKind, await canonicalLocation(originRoot));
+}
+
+/** Create an immutable definition identity from an already-canonicalised directory origin. */
+export async function createAgentDefinitionIdentityFromOrigin(
+	origin: AgentDefinitionOriginIdentity,
+	definitionLocation: string,
+	definitionContent: string,
+): Promise<AgentDefinitionIdentity> {
+	return freezeDefinition(origin, await canonicalLocation(definitionLocation), definitionContent);
 }
 
 /** Create an immutable identity for one filesystem-backed definition and the exact content OMP parsed. */
@@ -53,10 +73,7 @@ export async function createAgentDefinitionIdentity(
 		createAgentDefinitionOriginIdentity(originKind, originRoot),
 		canonicalLocation(definitionLocation),
 	]);
-	return Object.freeze({
-		...origin,
-		definitionId: opaqueId(DEFINITION_DOMAIN, [origin.originId, canonicalDefinition, definitionContent]),
-	});
+	return freezeDefinition(origin, canonicalDefinition, definitionContent);
 }
 
 /** Create an immutable identity for a host-embedded definition and the exact content OMP parsed. */
@@ -65,8 +82,5 @@ export function createEmbeddedAgentDefinitionIdentity(
 	definitionContent: string,
 ): AgentDefinitionIdentity {
 	const origin = freezeOrigin("bundled", "@oh-my-pi/pi-coding-agent");
-	return Object.freeze({
-		...origin,
-		definitionId: opaqueId(DEFINITION_DOMAIN, [origin.originId, definitionLocation, definitionContent]),
-	});
+	return freezeDefinition(origin, definitionLocation, definitionContent);
 }

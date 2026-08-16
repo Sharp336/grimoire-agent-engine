@@ -26,10 +26,10 @@ function makeTempDir(prefix: string): string {
 	return dir.path();
 }
 
-function createRef(sessionFile: string): AgentRef {
+function createRef(sessionFile: string, displayName = "Persisted Restricted"): AgentRef {
 	return {
 		id: "persisted-restricted",
-		displayName: "Persisted Restricted",
+		displayName,
 		kind: "sub",
 		parentId: "Main",
 		status: "parked",
@@ -319,7 +319,7 @@ describe("persisted subagent revival", () => {
 		AgentRegistry.resetGlobalForTests();
 	});
 
-	it("preserves the selected definition identity in cold-revive lifecycle frames", async () => {
+	it("reports the selected definition name and identity for new-format cold revival", async () => {
 		AgentRegistry.resetGlobalForTests();
 		AgentLifecycleManager.resetGlobalForTests();
 		const cwd = makeTempDir("@pi-revive-identity-");
@@ -327,10 +327,10 @@ describe("persisted subagent revival", () => {
 			schemaVersion: 1,
 			originKind: "extension",
 			originId: "sha256:package-origin",
-			definitionId: "sha256:worker-definition",
+			definitionId: "sha256:scout-definition",
 		});
 		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
-			name: "worker",
+			name: "scout",
 			source: "project",
 			identity,
 		});
@@ -343,7 +343,7 @@ describe("persisted subagent revival", () => {
 		const eventBus = new EventBus();
 		const lifecycle: unknown[] = [];
 		eventBus.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, event => lifecycle.push(event));
-		const ref = createRef(sessionFile);
+		const ref = createRef(sessionFile, "Research Scout");
 		AgentRegistry.global().register({
 			id: ref.id,
 			displayName: ref.displayName,
@@ -372,16 +372,64 @@ describe("persisted subagent revival", () => {
 		await finish?.();
 
 		expect(lifecycle[0]).toMatchObject({
-			agent: "worker",
+			agent: "scout",
 			agentSource: "project",
 			agentIdentity: identity,
 			status: "started",
 		});
 		expect(lifecycle.at(-1)).toMatchObject({
-			agent: "worker",
+			agent: "scout",
 			agentSource: "project",
 			agentIdentity: identity,
 		});
+		AgentLifecycleManager.resetGlobalForTests();
+		AgentRegistry.resetGlobalForTests();
+	});
+
+	it("retains the display name for legacy cold revival without a persisted agent name", async () => {
+		AgentRegistry.resetGlobalForTests();
+		AgentLifecycleManager.resetGlobalForTests();
+		const cwd = makeTempDir("@pi-revive-legacy-name-");
+		const sessionFile = await createPersistedSession(cwd);
+		MCPManager.setInstance({ getTools: () => [] } as unknown as MCPManager);
+		let handle: RevivedSessionHandle | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
+			handle = createRevivedSession([]);
+			return { session: handle.session } as CreateAgentSessionResult;
+		});
+		const eventBus = new EventBus();
+		const lifecycle: unknown[] = [];
+		eventBus.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, event => lifecycle.push(event));
+		const ref = createRef(sessionFile, "Research Scout");
+		AgentRegistry.global().register({
+			id: ref.id,
+			displayName: ref.displayName,
+			kind: "sub",
+			session: null,
+			sessionFile,
+			status: "parked",
+		});
+		const reviver = await createFactory(cwd, eventBus)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		const observer = handle?.observer();
+		if (!observer) throw new Error("Expected a cold-revive wake observer");
+		const finish = observer([
+			{
+				role: "custom",
+				customType: "irc:incoming",
+				content: "resume legacy session",
+				display: true,
+				details: { id: "irc-legacy-name", from: "Main", message: "resume legacy session" },
+				attribution: "agent",
+				timestamp: Date.now(),
+			},
+		]);
+		await finish?.();
+
+		expect(lifecycle[0]).toMatchObject({ agent: "Research Scout", status: "started" });
+		expect(lifecycle.at(-1)).toMatchObject({ agent: "Research Scout" });
 		AgentLifecycleManager.resetGlobalForTests();
 		AgentRegistry.resetGlobalForTests();
 	});

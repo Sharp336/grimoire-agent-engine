@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -13,7 +13,7 @@ import {
 	resolveAgentDefinitionIdentities,
 	resolveAgentDefinitionIdentity,
 } from "@oh-my-pi/pi-coding-agent/task/discovery";
-import { getAgentDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { getAgentDir, getConfigAgentDirName, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
 const OMP_AGENT_MD = [
 	"---",
@@ -75,11 +75,59 @@ describe("discoverAgents", () => {
 	});
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		enableProvider("omp-plugins");
 		clearOmpExtensionCliRoots();
 		clearFsCache();
 		setAgentDir(originalAgentDir);
 		await removeWithRetries(tempHome);
+	});
+
+	test("treats the supplied home as authoritative over the ambient agent directory", async () => {
+		const suppliedHome = path.join(tempHome, "supplied-home");
+		const suppliedAgentsDir = path.resolve(suppliedHome, getConfigAgentDirName(), "agents");
+		const ambientAgentDir = path.join(tempHome, "ambient-agent-dir");
+		const ambientAgentsDir = path.join(ambientAgentDir, "agents");
+		await Promise.all([
+			fs.mkdir(suppliedAgentsDir, { recursive: true }),
+			fs.mkdir(ambientAgentsDir, { recursive: true }),
+		]);
+		await Promise.all([
+			fs.writeFile(
+				path.join(suppliedAgentsDir, "home-authority.md"),
+				["---", "name: home-authority", "description: supplied home", "---", "supplied body"].join("\n"),
+			),
+			fs.writeFile(
+				path.join(ambientAgentsDir, "home-authority.md"),
+				["---", "name: home-authority", "description: ambient directory", "---", "ambient body"].join("\n"),
+			),
+		]);
+		setAgentDir(ambientAgentDir);
+		vi.spyOn(os, "homedir").mockReturnValue(suppliedHome);
+
+		const selected = (await discoverAgents(projectDir, suppliedHome)).agents.find(
+			agent => agent.name === "home-authority",
+		);
+
+		expect(selected?.description).toBe("supplied home");
+		expect(selected?.filePath).toBe(path.join(suppliedAgentsDir, "home-authority.md"));
+	});
+
+	test("keeps valid directory siblings when one agent definition is malformed", async () => {
+		const agentsDir = path.resolve(tempHome, getConfigAgentDirName(), "agents");
+		await fs.mkdir(agentsDir, { recursive: true });
+		await Promise.all([
+			fs.writeFile(
+				path.join(agentsDir, "valid-sibling.md"),
+				["---", "name: valid-sibling", "description: valid sibling", "---", "valid body"].join("\n"),
+			),
+			fs.writeFile(path.join(agentsDir, "broken-sibling.md"), ["---", "name: broken-sibling", "---"].join("\n")),
+		]);
+
+		const { agents } = await discoverAgents(projectDir, tempHome);
+
+		expect(agents.find(agent => agent.name === "valid-sibling")?.description).toBe("valid sibling");
+		expect(agents.some(agent => agent.name === "broken-sibling")).toBe(false);
 	});
 
 	test("loads OMP agents but skips Claude Code custom agents", async () => {
@@ -236,6 +284,8 @@ describe("discoverAgents", () => {
 
 		const extensionTaskIdentity = await resolveAgentDefinitionIdentity(projectDir, "task", tempHome);
 		expect(extensionTaskIdentity).toMatchObject({ schemaVersion: 1, originKind: "extension" });
+		expect(extensionTaskIdentity?.originId).toBe(extensionIdentity?.originId);
+		expect(extensionTaskIdentity?.definitionId).not.toBe(extensionIdentity?.definitionId);
 		await fs.rm(path.join(extensionRoot, "agents", "task.md"));
 		clearFsCache();
 		const bundledTaskIdentity = await resolveAgentDefinitionIdentity(projectDir, "task", tempHome);

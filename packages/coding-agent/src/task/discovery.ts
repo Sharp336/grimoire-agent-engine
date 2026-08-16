@@ -22,10 +22,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getConfigAgentDirName, logger } from "@oh-my-pi/pi-utils";
 import { isProviderEnabled } from "../capability";
-import { findAllNearestProjectConfigDirs, getConfigDirs } from "../config";
+import { findAllNearestProjectConfigDirs } from "../config";
 import { listClaudePluginRoots } from "../discovery/helpers";
 import { listOmpExtensionRoots } from "../discovery/omp-extension-roots";
-import { createAgentDefinitionIdentity } from "./agent-definition-identity";
+import {
+	createAgentDefinitionIdentityFromOrigin,
+	createAgentDefinitionOriginIdentity,
+} from "./agent-definition-identity";
 import { loadBundledAgents, parseAgent } from "./agents";
 import type { AgentDefinition, AgentDefinitionIdentity, AgentDefinitionOriginKind, AgentSource } from "./types";
 
@@ -50,22 +53,32 @@ interface AgentDirectory {
 async function loadAgentsFromDir(directory: AgentDirectory): Promise<AgentDefinition[]> {
 	const { dir, source, originKind, originRoot } = directory;
 	const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
-	const files = entries
+	const agentFiles = entries
 		.filter(entry => (entry.isFile() || entry.isSymbolicLink()) && entry.name.endsWith(".md"))
-		.sort((a, b) => a.name.localeCompare(b.name))
-		.map(file => {
-			const filePath = path.join(dir, file.name);
-			return fs
-				.readFile(filePath, "utf-8")
-				.then(async content => {
-					const identity = await createAgentDefinitionIdentity(originKind, originRoot, filePath, content);
-					return parseAgent(filePath, content, source, "warn", identity);
-				})
-				.catch(error => {
-					logger.warn("Failed to read agent file", { filePath, error });
-					return null;
-				});
-		});
+		.sort((a, b) => a.name.localeCompare(b.name));
+	if (agentFiles.length === 0) return [];
+
+	const origin = await createAgentDefinitionOriginIdentity(originKind, originRoot).catch(error => {
+		for (const file of agentFiles) {
+			logger.warn("Failed to read agent file", { filePath: path.join(dir, file.name), error });
+		}
+		return null;
+	});
+	if (!origin) return [];
+
+	const files = agentFiles.map(file => {
+		const filePath = path.join(dir, file.name);
+		return fs
+			.readFile(filePath, "utf-8")
+			.then(async content => {
+				const identity = await createAgentDefinitionIdentityFromOrigin(origin, filePath, content);
+				return parseAgent(filePath, content, source, "warn", identity);
+			})
+			.catch(error => {
+				logger.warn("Failed to read agent file", { filePath, error });
+				return null;
+			});
+	});
 
 	return (await Promise.all(files)).filter(Boolean) as AgentDefinition[];
 }
@@ -82,21 +95,13 @@ async function loadAgentsFromDir(directory: AgentDirectory): Promise<AgentDefini
 export async function discoverAgents(cwd: string, home: string = os.homedir()): Promise<DiscoveryResult> {
 	const resolvedCwd = path.resolve(cwd);
 
-	const userDirs =
-		home === os.homedir()
-			? getConfigDirs("agents", { project: false })
-					.filter(entry => entry.source === TASK_AGENT_CONFIG_SOURCE)
-					.map(entry => ({
-						...entry,
-						path: path.resolve(entry.path),
-					}))
-			: [
-					{
-						path: path.resolve(home, getConfigAgentDirName(), "agents"),
-						source: TASK_AGENT_CONFIG_SOURCE,
-						level: "user" as const,
-					},
-				];
+	const userDirs = [
+		{
+			path: path.resolve(home, getConfigAgentDirName(), "agents"),
+			source: TASK_AGENT_CONFIG_SOURCE,
+			level: "user" as const,
+		},
+	];
 
 	const projectDirs = findAllNearestProjectConfigDirs("agents", resolvedCwd)
 		.filter(entry => entry.source === TASK_AGENT_CONFIG_SOURCE)
