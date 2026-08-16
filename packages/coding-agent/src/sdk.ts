@@ -3072,6 +3072,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					: options.systemPrompt;
 			return {
 				systemPrompt: typeof customPrompt === "string" ? [customPrompt] : customPrompt,
+				hardwareRefreshed: defaultPrompt.hardwareRefreshed,
 			};
 		};
 
@@ -3212,7 +3213,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 
 		setSessionActiveToolNames(initialToolNames);
-		const { systemPrompt } = await logger.time(
+		const { systemPrompt, hardwareRefreshed } = await logger.time(
 			"buildSystemPrompt",
 			rebuildSystemPrompt,
 			initialToolNames,
@@ -3754,6 +3755,21 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					await scheduleToolRegistration(registered);
 				}
 			}
+		}
+		// The initial prompt renders whatever hardware_cache.json already held;
+		// when the background hardware probe scheduled by that build adds fields,
+		// rebuild the stable base prompt so even the FIRST session picks them up
+		// on its next turn (refreshBaseSystemPrompt guards disposal and clears the
+		// provider prompt-cache key only when the rendered prompt changed).
+		if (hardwareRefreshed) {
+			void hardwareRefreshed
+				.then(changed => {
+					if (!changed) return;
+					return session.refreshBaseSystemPrompt();
+				})
+				.catch(error => {
+					logger.debug("Base prompt rebuild after hardware probe failed", { error: String(error) });
+				});
 		}
 		session.yieldQueue.register<McpNotificationEntry>("mcp-notification", {
 			build: buildMcpNotificationBatchMessage,

@@ -823,19 +823,29 @@ interface HardwareCache {
 const HARDWARE_FIELDS = ["cpu", "gpu", "ram", "network", "motherboard", "psu", "disks"] as const;
 type HardwareField = (typeof HARDWARE_FIELDS)[number];
 
-let hardwareRefreshInFlight: Promise<void> | null = null;
+/** Deduplicates concurrent background refreshes per cache path (profiles have distinct caches). */
+const hardwareRefreshInFlight = new Map<string, Promise<boolean>>();
 
-/** Await any in-flight background hardware refresh; test/observability seam. */
-export function hardwareRefreshSettled(): Promise<void> {
-	return hardwareRefreshInFlight ?? Promise.resolve();
+/** A cache snapshot plus the completion signal of the refresh it scheduled. */
+interface HardwareLoad {
+	cache: HardwareCache;
+	/**
+	 * Settles when the background probe finishes; true when it added fields.
+	 * Already-settled `false` when nothing was missing. Held per load result —
+	 * not global state — so a caller that registers after a fast probe already
+	 * finished still observes the outcome.
+	 */
+	refreshed: Promise<boolean>;
 }
 
 /**
  * Load cached hardware facts without ever blocking on probes: the session
  * renders whatever fields are present, and missing fields kick off one
- * background refresh whose results appear from the next session on.
+ * deduplicated background refresh. Callers may await `refreshed` to learn
+ * when a prompt rebuild would pick up new fields; results persist in
+ * hardware_cache.json for later sessions either way.
  */
-async function loadHardwareInfo(): Promise<HardwareCache> {
+async function loadHardwareInfo(): Promise<HardwareLoad> {
 	const cachePath = getHardwareCachePath();
 	const cache: HardwareCache = {};
 	try {
@@ -852,23 +862,30 @@ async function loadHardwareInfo(): Promise<HardwareCache> {
 		}
 	}
 	const missing = HARDWARE_FIELDS.filter(field => cache[field] === undefined);
-	if (missing.length > 0 && !hardwareRefreshInFlight) {
-		// Capture the resolved cache path now: the refresh outlives this call
-		// and must not re-resolve against a profile that changed meanwhile.
-		hardwareRefreshInFlight = refreshHardwareCache(cachePath, cache, missing)
-			.catch(error => logger.warn("Background hardware probe failed", { error: String(error) }))
+	if (missing.length === 0) return { cache, refreshed: Promise.resolve(false) };
+	// Capture the resolved cache path in the key and the closure: the refresh
+	// outlives this call and must not re-resolve against (or block refreshes
+	// for) a different profile activated meanwhile.
+	let refresh = hardwareRefreshInFlight.get(cachePath);
+	if (!refresh) {
+		refresh = refreshHardwareCache(cachePath, cache, missing)
+			.catch(error => {
+				logger.warn("Background hardware probe failed", { error: String(error) });
+				return false;
+			})
 			.finally(() => {
-				hardwareRefreshInFlight = null;
+				hardwareRefreshInFlight.delete(cachePath);
 			});
+		hardwareRefreshInFlight.set(cachePath, refresh);
 	}
-	return cache;
+	return { cache, refreshed: refresh };
 }
 
 async function refreshHardwareCache(
 	cachePath: string,
 	existing: HardwareCache,
 	missing: HardwareField[],
-): Promise<void> {
+): Promise<boolean> {
 	// GPU and network identity both come from lspci on Linux; probe it once.
 	const needsLspci = process.platform === "linux" && (missing.includes("gpu") || missing.includes("network"));
 	const lspciText = needsLspci ? await runHostProbe(["lspci"]) : null;
@@ -882,12 +899,17 @@ async function refreshHardwareCache(
 		disks: getDiskInfo,
 	};
 	const updated: HardwareCache = { ...existing };
+	let changed = false;
 	await Promise.all(
 		missing.map(async field => {
 			try {
 				const value = await probes[field]();
-				if (value) updated[field] = value;
-				else logger.debug("Hardware probe found nothing; field omitted", { field });
+				if (value) {
+					updated[field] = value;
+					changed = true;
+				} else {
+					logger.debug("Hardware probe found nothing; field omitted", { field });
+				}
 			} catch (error) {
 				logger.warn("Hardware probe failed; field omitted", { field, error: String(error) });
 			}
@@ -902,6 +924,7 @@ async function refreshHardwareCache(
 	for (const legacy of ["gpu_cache.json", "ram_cache.json"]) {
 		void fs.unlink(path.join(path.dirname(cachePath), legacy)).catch(() => undefined);
 	}
+	return changed;
 }
 
 async function getCpuModel(): Promise<string | undefined> {
@@ -1286,6 +1309,14 @@ export interface BuildSystemPromptResult {
 	 * a catalog the prompt already carries (issue #7139).
 	 */
 	xdevCatalogNames?: readonly string[];
+	/**
+	 * Settles when the background hardware probe scheduled by this build (if
+	 * any) finishes; true when it added fields, i.e. a prompt rebuild would
+	 * render a more complete workstation block. Already-settled when the
+	 * hardware cache was complete. Kept per-result so a caller registering
+	 * after the probe finished still observes the outcome.
+	 */
+	hardwareRefreshed?: Promise<boolean>;
 }
 
 /** Build the system prompt with tools, guidelines, and context */
@@ -1351,7 +1382,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		activeRepoContext: null as ActiveRepoContext | null,
 		cpuModel: undefined as string | undefined,
 		distro: undefined as string | undefined,
-		hardware: {} as HardwareCache,
+		hardware: { cache: {}, refreshed: Promise.resolve(false) } as HardwareLoad,
 	};
 
 	const { promise: deadline, resolve: fireDeadline } = Promise.withResolvers<"__timeout__">();
@@ -1586,7 +1617,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	];
 	const injectedAlwaysApplyRules = dedupeAlwaysApplyRules(alwaysApplyRules, promptSources);
 
-	const environment = getEnvironmentInfo(cpuModel, distro, hardware);
+	const environment = getEnvironmentInfo(cpuModel, distro, hardware.cache);
 	// Point the agent at the probe cache so it can self-heal a stale hardware
 	// line (e.g. after a GPU swap) by deleting the entry instead of trusting it.
 	const homeDir = os.homedir();
@@ -1657,5 +1688,5 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	// default template; a resolved custom prompt uses a template that omits it.
 	const xdevCatalogNames =
 		!resolvedCustomPrompt && xdevTools.length > 0 ? xdevTools.map(mounted => mounted.name) : undefined;
-	return { systemPrompt, xdevCatalogNames };
+	return { systemPrompt, xdevCatalogNames, hardwareRefreshed: hardware.refreshed };
 }

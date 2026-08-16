@@ -123,7 +123,7 @@ async function runProbeScenario(options: {
 		await Bun.write(
 			scenarioPath,
 			`import { getHardwareCachePath, refreshDirsFromEnv } from ${JSON.stringify(path.resolve(import.meta.dir, "../../utils/src/index.ts"))};
-import { buildSystemPrompt, hardwareRefreshSettled } from ${JSON.stringify(path.join(import.meta.dir, "../src/system-prompt.ts"))};
+import { buildSystemPrompt } from ${JSON.stringify(path.join(import.meta.dir, "../src/system-prompt.ts"))};
 
 Object.defineProperty(process, "platform", { value: ${JSON.stringify(options.platform ?? "linux")} });
 refreshDirsFromEnv();
@@ -146,8 +146,8 @@ const buildOptions = {
 };
 const startedAt = performance.now();
 for (let index = 0; index < Number(process.env.OMP_GPU_PROBE_RUNS ?? "1"); index += 1) {
-	await buildSystemPrompt(buildOptions);
-	await hardwareRefreshSettled();
+	const built = await buildSystemPrompt(buildOptions);
+	await built.hardwareRefreshed;
 }
 const cacheFile = Bun.file(getHardwareCachePath());
 const cached = await cacheFile.exists() ? await cacheFile.json() : null;
@@ -319,6 +319,74 @@ describe.skipIf(process.platform !== "linux")("system prompt hardware probes", (
 
 		expect(result.cached?.ram).toBe(formatBytes(os.totalmem()));
 	}, 15_000);
+});
+
+describe.skipIf(process.platform !== "linux")("system prompt hardware refresh signal", () => {
+	it("reports probe completion through the build result even when awaited after settling", async () => {
+		const buildOptions = {
+			resolvedCustomPrompt: "Base prompt",
+			contextFiles: [],
+			skills: [],
+			rules: [],
+			workspaceTree: {
+				rootPath: import.meta.dir,
+				rendered: "",
+				truncated: false,
+				totalLines: 0,
+				agentsMdFiles: [],
+			},
+			activeRepoContext: null,
+		};
+		const first = await buildSystemPrompt(buildOptions);
+		// The cold build never blocks: RAM is only present after the refresh.
+		expect(first.systemPrompt.join("\n")).not.toContain("- RAM: ");
+		expect(await first.hardwareRefreshed).toBe(true);
+		// Late registration (after settling) must still observe the outcome —
+		// the signal is per-result, not consumed-once global state.
+		expect(await first.hardwareRefreshed).toBe(true);
+
+		// A rebuild now renders the probed fields (RAM always resolves on Linux).
+		const second = await buildSystemPrompt(buildOptions);
+		expect(second.systemPrompt.join("\n")).toContain("- RAM: ");
+		expect(await second.hardwareRefreshed).toBe(false);
+	}, 20_000);
+
+	it("scopes in-flight refreshes per cache path so a profile switch is never starved", async () => {
+		const buildOptions = {
+			resolvedCustomPrompt: "Base prompt",
+			contextFiles: [],
+			skills: [],
+			rules: [],
+			workspaceTree: {
+				rootPath: import.meta.dir,
+				rendered: "",
+				truncated: false,
+				totalLines: 0,
+				agentsMdFiles: [],
+			},
+			activeRepoContext: null,
+		};
+		// Schedule a refresh for profile A but do not await it yet.
+		const first = await buildSystemPrompt(buildOptions);
+
+		// Switch to profile B while A's refresh may still be in flight.
+		const otherRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-prompt-cache-b-"));
+		try {
+			process.env.XDG_CACHE_HOME = otherRoot;
+			await fs.mkdir(path.join(otherRoot, "omp"), { recursive: true });
+			refreshDirsFromEnv();
+
+			// B must get its own refresh (not A's stale in-flight promise) and
+			// populate its own cache file.
+			const second = await buildSystemPrompt(buildOptions);
+			expect(await second.hardwareRefreshed).toBe(true);
+			const cached = await Bun.file(path.join(otherRoot, "omp", "hardware_cache.json")).json();
+			expect(typeof cached.ram).toBe("string");
+		} finally {
+			await first.hardwareRefreshed;
+			await fs.rm(otherRoot, { recursive: true, force: true });
+		}
+	}, 20_000);
 });
 
 describe.skipIf(process.platform !== "linux")("system prompt CPU model", () => {
