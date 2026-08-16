@@ -1,0 +1,111 @@
+# ACP Subagent Activity Extension
+
+`omp acp` exposes subagent lifecycle and usage telemetry to ACP clients through
+two `_omp/*` extension methods. They mirror the Agent Hub roster: the same
+`AgentRegistry` the TUI, collab, and `history://` surfaces read, serialized for
+the wire.
+
+Primary implementation:
+
+- `packages/coding-agent/src/modes/acp/acp-agent.ts` (`AcpAgentSnapshot`,
+  `snapshotAcpAgents`, `AcpAgent.#scheduleAgentsBroadcast`)
+
+The extension surface is opt-in by convention: clients that do not implement
+`extMethod`/`extNotification` simply never see these frames; unknown
+notifications are dropped by the JSON-RPC transport.
+
+## Request: `_omp/agents/list`
+
+Returns the current roster. No parameters.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "_omp/agents/list",
+  "params": {}
+}
+```
+
+Response `result`:
+
+```json
+{
+  "agents": [
+    {
+      "id": "Main",
+      "displayName": "Main",
+      "kind": "main",
+      "status": "running",
+      "sessionFile": null,
+      "createdAt": 1750000000000,
+      "lastActivity": 1750000001000
+    },
+    {
+      "id": "AuthLoader",
+      "displayName": "AuthLoader",
+      "kind": "sub",
+      "parentId": "Main",
+      "status": "running",
+      "sessionFile": "/home/user/.omp/sessions/auth-loader.jsonl",
+      "createdAt": 1750000000100,
+      "lastActivity": 1750000002000,
+      "activity": "grepping call sites of resolve()",
+      "resolvedModel": "anthropic/claude-sonnet-4-20250514",
+      "metrics": {
+        "tokens": 900,
+        "requests": 2,
+        "tools": 5,
+        "cost": 0.01,
+        "durationMs": 12000
+      }
+    }
+  ]
+}
+```
+
+Field reference:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `id` | string | Registry id (`"Main"` for the driving agent, subagent ids for task spawns). |
+| `displayName` | string | Roster display name. |
+| `kind` | `"main"` \| `"sub"` | Advisor transcripts are observability-only and never serialized. |
+| `parentId` | string? | Parent agent id, when the spawn recorded one. |
+| `status` | `"running"` \| `"idle"` \| `"parked"` \| `"aborted"` | Lifecycle state. Finished agents stay `idle`; disposed-but-revivable agents are `parked`; hard-killed agents are `aborted`. |
+| `sessionFile` | string \| null | Transcript session file. Clients can resolve it through `history://`/`agent://` on the same machine. |
+| `createdAt` | number | Registration timestamp (ms). |
+| `lastActivity` | number | Last work/status-change timestamp (ms). |
+| `activity` | string? | One-line gist of current work; present only while `status` is `running`. |
+| `resolvedModel` | string? | Last resolved model id, when recorded. |
+| `metrics` | object? | Persisted usage totals (`tokens`, `requests`, `tools`, `cost`, `durationMs`, optional `contextTokens`/`contextWindow`), present once the agent finished a turn. |
+
+## Notification: `_omp/agents/update`
+
+Pushed after the client's `initialize` completes and again, debounced (100 ms),
+on every registry change: subagent spawn, status transition, usage-metadata
+record, or removal. The payload is the same full `agents` snapshot as
+`_omp/agents/list`, so clients can live-track subagent lifecycle without
+polling. A client that subscribes to the notification right after `initialize`
+also receives the initial snapshot (in-order JSON-RPC guarantees it lands after
+the `initialize` response).
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "_omp/agents/update",
+  "params": { "agents": [] }
+}
+```
+
+## Notes
+
+- The roster is process-global: concurrent ACP sessions (or a simultaneously
+  running TUI) share one `AgentRegistry`, so snapshots include subagents spawned
+  by other sessions of the same process. Filter by `kind: "sub"` (and
+  optionally `parentId`) to scope to subagent work.
+- `activity` refreshes on status/metadata boundaries, not per tool call, so it
+  is a coarse "what is it doing" gist, matching the Agent Hub roster.
+- The surface is transport-agnostic: `omp acp` over stdio and the embedded
+  ACP-channel transport (`mcpServers` type `acp`) both dispatch through the same
+  `extMethod`/`extNotification` hooks.
