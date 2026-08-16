@@ -12,6 +12,7 @@ import {
 	ACP_AGENTS_DEBOUNCE_MS,
 	ACP_BOOTSTRAP_RACE_GUARD_MS,
 	AcpAgent,
+	type AcpAgentProgress,
 	type AcpAgentSnapshot,
 	createAcpExtensionUiContext,
 } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
@@ -25,7 +26,7 @@ import type {
 import { SILENT_ABORT_MARKER } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS } from "@oh-my-pi/pi-coding-agent/stt/models";
-import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
+import { type AgentProgress, TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import {
 	DEFAULT_TTS_LOCAL_MODEL_KEY,
@@ -445,7 +446,10 @@ interface AgentHarness {
 	agent: AcpAgent;
 	updates: SessionNotification[];
 	/** Captured `_omp/*` notifications pushed to the client; `params` is the wire shape the ACP surface emits. */
-	extNotifications: Array<{ method: string; params: { agents: AcpAgentSnapshot[] } }>;
+	extNotifications: Array<{
+		method: string;
+		params: { agents?: AcpAgentSnapshot[]; agent?: AcpAgentProgress };
+	}>;
 	abortController: AbortController;
 	sessions: FakeAgentSession[];
 	setToolUIContextSpies: SetToolUIContextSpy[];
@@ -508,7 +512,10 @@ async function createHarness(
 	await Settings.init({ agentDir, inMemory: true });
 
 	const updates: SessionNotification[] = [];
-	const extNotifications: Array<{ method: string; params: { agents: AcpAgentSnapshot[] } }> = [];
+	const extNotifications: Array<{
+		method: string;
+		params: { agents?: AcpAgentSnapshot[]; agent?: AcpAgentProgress };
+	}> = [];
 	const abortController = new AbortController();
 	const sessions: FakeAgentSession[] = [];
 	const setToolUIContextSpies: SetToolUIContextSpy[] = [];
@@ -521,9 +528,9 @@ async function createHarness(
 			updates.push(notification);
 		},
 		extNotification: async (method: string, params: Record<string, unknown>) => {
-			// The surface under test pushes exactly `{ agents: AcpAgentSnapshot[] }`.
-			const snapshot = params as { agents: AcpAgentSnapshot[] };
-			extNotifications.push({ method, params: snapshot });
+			// The surfaces under test push `{ agents }` (roster) or `{ agent }` (progress).
+			const wire = params as { agents?: AcpAgentSnapshot[]; agent?: AcpAgentProgress };
+			extNotifications.push({ method, params: wire });
 		},
 		unstable_createElicitation: options.elicitationHandler
 			? async (req: CreateElicitationRequest) => options.elicitationHandler!(req)
@@ -1175,8 +1182,7 @@ describe("ACP agent", () => {
 		await Promise.resolve();
 		const initial = harness.extNotifications.find(notification => notification.method === "_omp/agents/update");
 		expect(initial).toBeDefined();
-		expect(initial!.params.agents).toEqual([]);
-
+		expect(initial!.params.agents!).toEqual([]);
 		// A spawned subagent lands in the next debounced snapshot.
 		const registry = AgentRegistry.global();
 		const sub = registry.register({
@@ -1193,7 +1199,7 @@ describe("ACP agent", () => {
 		const spawned = harness.extNotifications.filter(notification => notification.method === "_omp/agents/update");
 		const last = spawned.at(-1)!;
 		expect(last.params.agents).toHaveLength(1);
-		expect(last.params.agents[0]).toMatchObject({
+		expect(last.params.agents![0]).toMatchObject({
 			id: "SubA",
 			status: "running",
 			activity: "auditing auth middleware",
@@ -1204,9 +1210,9 @@ describe("ACP agent", () => {
 		vi.advanceTimersByTime(ACP_AGENTS_DEBOUNCE_MS);
 		await Promise.resolve();
 		const idle = harness.extNotifications.at(-1)!;
-		expect(idle.params.agents[0]).toMatchObject({ id: "SubA", status: "idle" });
+		expect(idle.params.agents![0]).toMatchObject({ id: "SubA", status: "idle" });
 		// `activity` is cleared when the agent leaves `running`.
-		expect(idle.params.agents[0]?.activity).toBeUndefined();
+		expect(idle.params.agents![0]?.activity).toBeUndefined();
 
 		// dispose() stops the subscription: later registry changes stay silent.
 		await harness.agent.dispose();
@@ -1928,6 +1934,104 @@ describe("ACP agent", () => {
 		const completedIdx = statuses.indexOf("completed");
 		expect(statuses.slice(completedIdx)).toEqual(["completed"]);
 		expectAcpNotifications(harness.updates);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("streams live subagent work via _omp/agents/progress and tags tool calls with toolName", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+
+		session.prompt = async (text: string): Promise<boolean> => {
+			session.promptCalls.push(text);
+			session.isStreaming = true;
+			for (const listener of session.listeners()) {
+				listener({
+					type: "tool_execution_update",
+					toolCallId: "task_1",
+					toolName: "task",
+					args: { task: "analyze" },
+					partialResult: {
+						content: [],
+						details: {
+							progress: [
+								{
+									index: 0,
+									id: "ReadA",
+									agent: "task",
+									agentSource: "bundled",
+									status: "running",
+									task: "Read the file a.ts using the read tool. ".repeat(30),
+									lastIntent: "reading a.ts with the read tool",
+									currentTool: "read",
+									currentToolArgs: "a.ts",
+									recentOutput: ["export const a = 1"],
+									recentTools: [],
+									toolCount: 2,
+									requests: 1,
+									tokens: 120,
+									cost: 0.001,
+									durationMs: 5000,
+									resolvedModel: "opencode-go/deepseek-v4-flash",
+								} satisfies AgentProgress,
+							],
+						},
+					},
+				} as AgentSessionEvent);
+				listener({
+					type: "tool_execution_end",
+					toolCallId: "task_1",
+					toolName: "task",
+					isError: false,
+					result: { content: [{ type: "text", text: "done" }], details: {} },
+				} as AgentSessionEvent);
+				listener({ type: "agent_end", messages: [] } as AgentSessionEvent);
+			}
+			session.isStreaming = false;
+			return true;
+		};
+
+		await harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000050",
+			prompt: [{ type: "text", text: "spawn a task" }],
+		} as PromptRequest);
+
+		const progress = harness.extNotifications.filter(
+			notification => notification.method === "_omp/agents/progress",
+		);
+		expect(progress).toHaveLength(1);
+		expect(progress[0]!.params.agent).toMatchObject({
+			id: "ReadA",
+			index: 0,
+			agent: "task",
+			status: "running",
+			lastIntent: "reading a.ts with the read tool",
+			currentTool: "read",
+			currentToolArgs: "a.ts",
+			recentOutput: ["export const a = 1"],
+			toolCount: 2,
+			tokens: 120,
+			cost: 0.001,
+			durationMs: 5000,
+			resolvedModel: "opencode-go/deepseek-v4-flash",
+		});
+		// Long assignment text is bounded on the wire.
+		expect(progress[0]!.params.agent!.task!.length).toBeLessThan(600);
+
+		// Tool calls now carry the harness tool name so clients can classify
+		// the task tool beyond the spec `kind` ("other").
+		const toolUpdates = harness.updates
+			.filter(update => update.sessionId === created.sessionId)
+			.map(update => update.update)
+			.filter(
+				(update): update is Extract<typeof update, { sessionUpdate: "tool_call" | "tool_call_update" }> =>
+					update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update",
+			);
+		expect(toolUpdates.length).toBeGreaterThanOrEqual(2);
+		expect(toolUpdates.every(update => update.toolName === "task")).toBe(true);
 
 		harness.abortController.abort();
 		await Bun.sleep(0);

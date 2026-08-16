@@ -98,6 +98,48 @@ the `initialize` response).
 }
 ```
 
+## Notification: `_omp/agents/progress`
+
+Pushed in real time while a subagent works (the task executor coalesces at
+~150 ms). Carries one subagent's live work snapshot:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "_omp/agents/progress",
+  "params": {
+    "agent": {
+      "id": "ReadA",
+      "index": 0,
+      "agent": "task",
+      "status": "running",
+      "description": "read a.ts",
+      "task": "…",
+      "lastIntent": "reading a.ts with the read tool",
+      "currentTool": "read",
+      "currentToolArgs": "a.ts",
+      "recentOutput": ["export const a = 1"],
+      "toolCount": 2,
+      "requests": 1,
+      "tokens": 120,
+      "cost": 0.001,
+      "durationMs": 5000,
+      "resolvedModel": "opencode-go/deepseek-v4-flash"
+    }
+  }
+}
+```
+
+`status` is one of `pending | running | completed | failed | aborted`; the
+verbose `task`/`description`/`lastIntent` texts are bounded on the wire. The
+`id` matches the roster snapshot id, so clients upsert the same card.
+
+## Tool-call classification
+
+`tool_call` and `tool_call_update` notifications carry an extension field
+`toolName` (the harness tool name, e.g. `task`), so clients can classify the
+task tool beyond the spec `kind` (which maps it to `other`).
+
 ## Notes
 
 - The roster is process-global: concurrent ACP sessions (or a simultaneously

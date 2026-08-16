@@ -72,7 +72,7 @@ import { SessionManager } from "../../session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands, toAcpAvailableCommands } from "../../slash-commands/available-commands";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS } from "../../stt/models";
-import { refreshAgentDiscovery } from "../../task";
+import { type AgentProgress, refreshAgentDiscovery } from "../../task";
 import { AUTO_THINKING, parseConfiguredThinkingLevel } from "../../thinking";
 import { OTHER_OPTION } from "../../tools/ask";
 import { normalizeLocalScheme } from "../../tools/path-utils";
@@ -199,6 +199,76 @@ function snapshotAcpAgents(): AcpAgentSnapshot[] {
 			const snapshot = toAcpAgentSnapshot(ref);
 			return snapshot ? [snapshot] : [];
 		});
+}
+
+/** Cap for the verbose task/assignment texts on the progress wire. */
+const ACP_AGENT_PROGRESS_TASK_CAP = 400;
+
+/**
+ * Wire shape of one subagent's live progress for the `_omp/agents/progress`
+ * notification. Mirrors the task executor's `AgentProgress` snapshot, which
+ * the session stream already carries on `tool_execution_update` events
+ * (`partialResult.details.progress`), so no extra plumbing is needed.
+ */
+export interface AcpAgentProgress {
+	id: string;
+	index: number;
+	agent: string;
+	status: "pending" | "running" | "completed" | "failed" | "aborted";
+	/** One-line label of the subagent's assignment (bounded). */
+	description?: string;
+	/** Spawned task prompt (bounded). */
+	task?: string;
+	/** Latest model intent (bounded). */
+	lastIntent?: string;
+	currentTool?: string;
+	currentToolArgs?: string;
+	recentOutput: string[];
+	toolCount: number;
+	requests: number;
+	tokens: number;
+	contextTokens?: number;
+	contextWindow?: number;
+	cost: number;
+	durationMs: number;
+	resolvedModel?: string;
+}
+
+function bounded(value: string | undefined, cap: number): string | undefined {
+	if (value === undefined || value === "") return undefined;
+	return value.length > cap ? `${value.slice(0, cap)}…` : value;
+}
+
+function toAcpAgentProgress(progress: AgentProgress): AcpAgentProgress {
+	return {
+		id: progress.id,
+		index: progress.index,
+		agent: progress.agent,
+		status: progress.status,
+		description: bounded(progress.description, 200),
+		task: bounded(progress.task, ACP_AGENT_PROGRESS_TASK_CAP),
+		lastIntent: bounded(progress.lastIntent, 200),
+		currentTool: progress.currentTool,
+		currentToolArgs: progress.currentToolArgs,
+		recentOutput: progress.recentOutput,
+		toolCount: progress.toolCount,
+		requests: progress.requests,
+		tokens: progress.tokens,
+		...(progress.contextTokens !== undefined ? { contextTokens: progress.contextTokens } : {}),
+		...(progress.contextWindow !== undefined ? { contextWindow: progress.contextWindow } : {}),
+		cost: progress.cost,
+		durationMs: progress.durationMs,
+		...(progress.resolvedModel ? { resolvedModel: progress.resolvedModel } : {}),
+	};
+}
+
+/** Pull the task tool's `AgentProgress` snapshots out of a tool result/update payload. */
+function extractSubagentProgress(partialResult: unknown): AgentProgress[] | undefined {
+	if (!partialResult || typeof partialResult !== "object" || Array.isArray(partialResult)) return undefined;
+	const details = (partialResult as { details?: unknown }).details;
+	if (!details || typeof details !== "object" || Array.isArray(details)) return undefined;
+	const progress = (details as { progress?: unknown }).progress;
+	return Array.isArray(progress) ? (progress as AgentProgress[]) : undefined;
 }
 
 type AgentImageContent = {
@@ -1336,6 +1406,22 @@ export class AcpAgent implements Agent {
 		}, ACP_AGENTS_DEBOUNCE_MS);
 	}
 
+	/**
+	 * Fire-and-forget push of one subagent progress snapshot. Never throws on
+	 * a dead or partial connection — same contract as `#scheduleAgentsBroadcast`.
+	 */
+	#pushAgentsProgressNotification(agent: AcpAgentProgress): void {
+		if (this.#connection.signal.aborted) return;
+		let delivery: Promise<void> | undefined;
+		try {
+			delivery = this.#connection.extNotification("_omp/agents/progress", { agent });
+		} catch (error) {
+			logger.warn("Failed to push ACP agents/progress notification", { error });
+			return;
+		}
+		delivery?.catch(error => logger.warn("Failed to push ACP agents/progress notification", { error }));
+	}
+
 	get signal(): AbortSignal {
 		return this.#connection.signal;
 	}
@@ -1601,6 +1687,17 @@ export class AcpAgent implements Agent {
 		}
 		if (event.type === "tool_execution_end") {
 			record.toolArgsById.delete(event.toolCallId);
+		}
+		if (event.type === "tool_execution_update") {
+			// Live subagent work: the task tool's progress snapshots ride the
+			// update payload; mirror them as `_omp/agents/progress` so clients
+			// can render subagent work in real time without polling.
+			const progress = extractSubagentProgress(event.partialResult);
+			if (progress) {
+				for (const entry of progress) {
+					this.#pushAgentsProgressNotification(toAcpAgentProgress(entry));
+				}
+			}
 		}
 		this.#clearLiveAssistantMessageAfterEvent(record, event);
 
