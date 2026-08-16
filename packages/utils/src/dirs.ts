@@ -662,14 +662,9 @@ export function getWorktreeDir(segment: string): string {
 	return path.join(getWorktreesDir(), segment);
 }
 
-/** Get the GPU cache path (~/.omp/gpu_cache.json). */
-export function getGpuCachePath(): string {
-	return dirs.rootSubdir("gpu_cache.json", "cache");
-}
-
-/** Get the RAM cache path (~/.omp/ram_cache.json). */
-export function getRamCachePath(): string {
-	return dirs.rootSubdir("ram_cache.json", "cache");
+/** Get the consolidated hardware probe cache path (~/.omp/hardware_cache.json). */
+export function getHardwareCachePath(): string {
+	return dirs.rootSubdir("hardware_cache.json", "cache");
 }
 
 /**

@@ -95,8 +95,9 @@
 
 - Fixed the in-house `marked` list tokenizer incorrectly consuming trailing blank lines at the end of input, ensuring correct list tightness and token generation matching standard `marked` behavior.
 ### Added
+### Breaking Changes
 
-- Added `getRamCachePath()` (`~/.omp/ram_cache.json`) beside the GPU cache path.
+- Replaced `getGpuCachePath()` with `getHardwareCachePath()` (`~/.omp/hardware_cache.json`), the consolidated per-field hardware probe cache.
 
 ### Changed
 

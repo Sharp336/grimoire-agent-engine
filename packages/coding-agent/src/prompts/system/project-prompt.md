@@ -3,7 +3,7 @@ PROJECT
 <workstation>
 {{#list environment prefix="- " join="\n"}}{{label}}: {{value}}{{/list}}
 {{#if model}}- Model: {{model}}{{/if}}
-{{#if hardwareCachePaths}}GPU/RAM above come from cached probes ({{hardwareCachePaths}}). Contradicts observed hardware (e.g. after a swap)? Delete the stale cache file; the next session re-probes.{{/if}}
+{{#if hardwareCachePath}}Hardware fields come from cached background probes ({{hardwareCachePath}}); a field probed on a previous session may be missing here until the next one. Contradicts observed hardware (e.g. after a swap)? Delete the stale entry (or the file); it re-probes next session.{{/if}}
 </workstation>
 
 {{#if contextFiles.length}}

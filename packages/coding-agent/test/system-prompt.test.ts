@@ -5,26 +5,29 @@ import * as path from "node:path";
 import { formatBytes, refreshDirsFromEnv } from "@oh-my-pi/pi-utils";
 import {
 	buildSystemPrompt,
+	type CpuTopologyData,
 	parseDfDisks,
 	parseDmiMemory,
 	parseOsRelease,
+	parseWmicCpu,
 	parseWmicDisks,
 	parseWmicMemory,
+	summarizeCpuTopology,
+	summarizeNetworkDevices,
 } from "../src/system-prompt";
 
 interface ProbeRunResult {
 	elapsedMs: number;
 	childElapsedMs: number;
-	cached: unknown;
+	cached: Record<string, unknown> | null;
 	count: number;
-	ramCached: unknown;
 	ramCount: number;
 }
 
-// In-process buildSystemPrompt calls probe real hardware and persist
-// gpu_cache.json / ram_cache.json. Point the dirs resolver at a throwaway
-// XDG cache root so tests (especially the platform-spoofing one below) can
-// never write into the developer's or CI profile's real caches.
+// In-process buildSystemPrompt calls kick off background hardware probes that
+// persist hardware_cache.json. Point the dirs resolver at a throwaway XDG
+// cache root so tests (especially the platform-spoofing one below) can never
+// write into the developer's or CI profile's real cache.
 const DIRS_ENV_KEYS = ["XDG_CACHE_HOME", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE", "PI_CONFIG_DIR"];
 let savedDirsEnv: Record<string, string | undefined> = {};
 let tempCacheRoot = "";
@@ -73,6 +76,12 @@ const DMI_MEMORY_FIXTURE = [
 
 const DMI_MEMORY_SUMMARY = "96.0GB DDR5 @ 6000 MT/s (2x 48.0GB, 2 channels, ~96 GB/s peak)";
 
+/** lspci output that satisfies both the GPU and network probes. */
+const LSPCI_VALID_OUTPUT = [
+	"00:02.0 VGA compatible controller: NVIDIA TestGPU",
+	"00:03.0 Ethernet controller: FakeNIC 10GbE Controller",
+].join("\n");
+
 async function runProbeScenario(options: {
 	runs: number;
 	platform?: "linux" | "win32";
@@ -94,12 +103,12 @@ async function runProbeScenario(options: {
 		const probePath = path.join(binDir, options.platform === "win32" ? "wmic" : "lspci");
 		await Bun.write(
 			probePath,
-			'#!/usr/bin/env sh\nprintf x >> "$OMP_GPU_PROBE_COUNT"\nif [ -n "$OMP_GPU_PROBE_VALID_OUTPUT" ]; then printf "%s\\n" "$OMP_GPU_PROBE_VALID_OUTPUT"; fi\nif [ "$OMP_GPU_PROBE_DESCENDANT_HOLDS_STDOUT" = "true" ]; then sleep "$OMP_GPU_PROBE_SLEEP" & exit 0; fi\nif [ "$OMP_GPU_PROBE_HOLD_STDOUT_OPEN" = "true" ]; then sleep "$OMP_GPU_PROBE_SLEEP" & wait "$!"; fi\nif [ -n "$OMP_GPU_PROBE_SLEEP" ]; then exec sleep "$OMP_GPU_PROBE_SLEEP"; fi\nexit 0\n',
+			'#!/usr/bin/env sh\ncase "$0" in *lspci) printf x >> "$OMP_GPU_PROBE_COUNT" ;; *) if [ "$1" = "path" ] && [ "$2" = "win32_VideoController" ]; then printf x >> "$OMP_GPU_PROBE_COUNT"; fi ;; esac\nif [ -n "$OMP_GPU_PROBE_VALID_OUTPUT" ]; then printf "%s\\n" "$OMP_GPU_PROBE_VALID_OUTPUT"; fi\nif [ "$OMP_GPU_PROBE_DESCENDANT_HOLDS_STDOUT" = "true" ]; then sleep "$OMP_GPU_PROBE_SLEEP" & exit 0; fi\nif [ "$OMP_GPU_PROBE_HOLD_STDOUT_OPEN" = "true" ]; then sleep "$OMP_GPU_PROBE_SLEEP" & wait "$!"; fi\nif [ -n "$OMP_GPU_PROBE_SLEEP" ]; then exec sleep "$OMP_GPU_PROBE_SLEEP"; fi\nexit 0\n',
 		);
 		await fs.chmod(probePath, 0o755);
 
 		// Deterministic stand-ins for the RAM (udevadm) and disk (df) probes so
-		// GPU-focused scenarios stay isolated from the host's real hardware.
+		// scenarios stay isolated from the host's real hardware.
 		const udevadmPath = path.join(binDir, "udevadm");
 		await Bun.write(
 			udevadmPath,
@@ -113,13 +122,15 @@ async function runProbeScenario(options: {
 		const scenarioPath = path.join(tempRoot, "scenario.ts");
 		await Bun.write(
 			scenarioPath,
-			`import { getGpuCachePath, getRamCachePath, refreshDirsFromEnv } from ${JSON.stringify(path.resolve(import.meta.dir, "../../utils/src/index.ts"))};
-import { buildSystemPrompt } from ${JSON.stringify(path.join(import.meta.dir, "../src/system-prompt.ts"))};
+			`import { getHardwareCachePath, refreshDirsFromEnv } from ${JSON.stringify(path.resolve(import.meta.dir, "../../utils/src/index.ts"))};
+import { buildSystemPrompt, hardwareRefreshSettled } from ${JSON.stringify(path.join(import.meta.dir, "../src/system-prompt.ts"))};
 
 Object.defineProperty(process, "platform", { value: ${JSON.stringify(options.platform ?? "linux")} });
 refreshDirsFromEnv();
 const legacyCache = process.env.OMP_GPU_PROBE_LEGACY_CACHE;
-if (legacyCache !== undefined) await Bun.write(getGpuCachePath(), legacyCache);
+if (legacyCache !== undefined) {
+	await Bun.write(getHardwareCachePath().replace("hardware_cache.json", "gpu_cache.json"), legacyCache);
+}
 const buildOptions = {
 	contextFiles: [],
 	skills: [],
@@ -136,16 +147,15 @@ const buildOptions = {
 const startedAt = performance.now();
 for (let index = 0; index < Number(process.env.OMP_GPU_PROBE_RUNS ?? "1"); index += 1) {
 	await buildSystemPrompt(buildOptions);
+	await hardwareRefreshSettled();
 }
-const cacheFile = Bun.file(getGpuCachePath());
+const cacheFile = Bun.file(getHardwareCachePath());
 const cached = await cacheFile.exists() ? await cacheFile.json() : null;
-const ramCacheFile = Bun.file(getRamCachePath());
-const ramCached = await ramCacheFile.exists() ? await ramCacheFile.json() : null;
 const countFile = Bun.file(process.env.OMP_GPU_PROBE_COUNT ?? "");
 const count = await countFile.exists() ? (await countFile.text()).length : 0;
 const ramCountFile = Bun.file(process.env.OMP_RAM_PROBE_COUNT ?? "");
 const ramCount = await ramCountFile.exists() ? (await ramCountFile.text()).length : 0;
-console.log(JSON.stringify({ elapsedMs: Math.round(performance.now() - startedAt), cached, ramCached, count, ramCount }));
+console.log(JSON.stringify({ elapsedMs: Math.round(performance.now() - startedAt), cached, count, ramCount }));
 `,
 		);
 
@@ -161,7 +171,7 @@ console.log(JSON.stringify({ elapsedMs: Math.round(performance.now() - startedAt
 			OMP_GPU_PROBE_RUNS: String(options.runs),
 		};
 		// Strip inherited dirs-resolver overrides so the temporary HOME/XDG roots
-		// win and the test cannot touch the developer/CI profile's real gpu_cache.json.
+		// win and the test cannot touch the developer/CI profile's real hardware_cache.json.
 		for (const key of ["PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE", "PI_CONFIG_DIR"]) {
 			delete env[key];
 		}
@@ -200,7 +210,7 @@ console.log(JSON.stringify({ elapsedMs: Math.round(performance.now() - startedAt
 		]);
 		const childElapsedMs = Math.round(performance.now() - childStartedAt);
 		if (exitCode !== 0) {
-			throw new Error(`GPU probe scenario failed with exit ${exitCode}: ${stderr}`);
+			throw new Error(`hardware probe scenario failed with exit ${exitCode}: ${stderr}`);
 		}
 		return { ...JSON.parse(stdout.trim()), childElapsedMs };
 	} finally {
@@ -208,38 +218,43 @@ console.log(JSON.stringify({ elapsedMs: Math.round(performance.now() - startedAt
 	}
 }
 
-describe.skipIf(process.platform !== "linux")("system prompt GPU probe", () => {
-	it("caches empty GPU probe results", async () => {
+describe.skipIf(process.platform !== "linux")("system prompt hardware probes", () => {
+	it("caches a valid GPU probe and reuses it without re-running lspci", async () => {
+		const result = await runProbeScenario({ runs: 2, validOutput: LSPCI_VALID_OUTPUT });
+
+		expect(result.cached?.gpu).toBe("02.0 VGA compatible controller: NVIDIA TestGPU");
+		expect(result.cached?.network).toBe("FakeNIC 10GbE Controller");
+		expect(result.count).toBe(1);
+	}, 20_000);
+
+	it("retries failed probes on the next build instead of caching the failure", async () => {
 		const result = await runProbeScenario({ runs: 2 });
 
-		expect(result.cached).toEqual({ version: 1, gpu: null });
-		expect(result.count).toBe(1);
-	}, 15_000);
+		expect(result.cached).not.toBeNull();
+		expect(result.cached).not.toHaveProperty("gpu");
+		// One lspci attempt per build: failures are never persisted.
+		expect(result.count).toBe(2);
+	}, 20_000);
 
-	it("kills the GPU probe at the prep deadline", async () => {
+	it("kills a hung probe at the deadline without blocking the prompt build", async () => {
 		const result = await runProbeScenario({ runs: 1, sleepSeconds: 12, holdStdoutOpen: true });
 
-		expect(result.cached).toEqual({ version: 1, gpu: null });
-		// Probe is SIGKILLed at ~4.5s and the drain wait is bounded, so in-child
-		// time sits near the deadline; waiting on the descendant would push it
-		// past the 12s sleep.
+		expect(result.cached).not.toHaveProperty("gpu");
+		// The probe is SIGKILLed at ~4.5s; waiting on the descendant would push
+		// the settle well past the 12s sleep.
 		expect(result.elapsedMs).toBeLessThan(6500);
 		// Codex#3838: the child process MUST exit shortly after the deadline, not
 		// linger until a descendant holding stdout (sleep 12) exits on its own.
-		// The bound over in-child time budgets bun spawn/startup on loaded runners
-		// while staying far below the descendant's 12s exit.
 		expect(result.childElapsedMs).toBeLessThan(9000);
 	}, 20_000);
 
 	it("does not wait on stdout held by a descendant after a successful probe", async () => {
 		const result = await runProbeScenario({ runs: 1, sleepSeconds: 8, descendantHoldsStdout: true });
 
-		expect(result.cached).toEqual({ version: 1, gpu: null });
-		// Probe exits 0 immediately but leaves a backgrounded sleep holding the stdout
-		// pipe. The success path MUST bound the drain wait, not block until sleep exits.
+		expect(result.cached).not.toHaveProperty("gpu");
+		// Probe exits 0 immediately but leaves a backgrounded sleep holding the
+		// stdout pipe. The success path MUST bound the drain wait.
 		expect(result.elapsedMs).toBeLessThan(2000);
-		// Budgets bun spawn/startup overhead; blocking on the descendant would
-		// take at least the 8s sleep.
 		expect(result.childElapsedMs).toBeLessThan(5000);
 	}, 20_000);
 
@@ -248,15 +263,13 @@ describe.skipIf(process.platform !== "linux")("system prompt GPU probe", () => {
 			runs: 1,
 			sleepSeconds: 8,
 			descendantHoldsStdout: true,
-			validOutput: "00:02.0 VGA compatible controller: NVIDIA TestGPU",
+			validOutput: LSPCI_VALID_OUTPUT,
 		});
 
 		// Probe exited 0 with valid output before bg sleep held stdout open.
 		// Captured stdout MUST be cached, not discarded as if the probe failed.
-		expect(result.cached).toEqual({ version: 1, gpu: "02.0 VGA compatible controller: NVIDIA TestGPU" });
+		expect(result.cached?.gpu).toBe("02.0 VGA compatible controller: NVIDIA TestGPU");
 		expect(result.elapsedMs).toBeLessThan(2000);
-		// Budgets bun spawn/startup overhead; blocking on the descendant would
-		// take at least the 8s sleep.
 		expect(result.childElapsedMs).toBeLessThan(5000);
 	}, 20_000);
 
@@ -267,7 +280,7 @@ describe.skipIf(process.platform !== "linux")("system prompt GPU probe", () => {
 			validOutput: "Name\nGameViewer Virtual Display Adapter\nNVIDIA GeForce RTX 2080 Ti",
 		});
 
-		expect(result.cached).toEqual({ version: 1, gpu: "NVIDIA GeForce RTX 2080 Ti" });
+		expect(result.cached?.gpu).toBe("NVIDIA GeForce RTX 2080 Ti");
 		expect(result.count).toBe(1);
 	});
 
@@ -278,11 +291,11 @@ describe.skipIf(process.platform !== "linux")("system prompt GPU probe", () => {
 			validOutput: "Name\nRemote Display Adapter\nCitrix Virtual Adapter",
 		});
 
-		expect(result.cached).toEqual({ version: 1, gpu: "Remote Display Adapter" });
+		expect(result.cached?.gpu).toBe("Remote Display Adapter");
 		expect(result.count).toBe(1);
 	});
 
-	it("rejects a pre-versioning cache and re-probes the Windows GPU", async () => {
+	it("ignores the superseded GPU cache and re-probes the Windows GPU", async () => {
 		const result = await runProbeScenario({
 			runs: 1,
 			platform: "win32",
@@ -290,11 +303,22 @@ describe.skipIf(process.platform !== "linux")("system prompt GPU probe", () => {
 			legacyCache: JSON.stringify({ gpu: "GameViewer Virtual Display Adapter" }),
 		});
 
-		// The old unversioned cache holds the virtual adapter the previous parser
-		// picked; it MUST be discarded and re-probed, not served indefinitely.
-		expect(result.cached).toEqual({ version: 1, gpu: "NVIDIA GeForce RTX 2080 Ti" });
+		expect(result.cached?.gpu).toBe("NVIDIA GeForce RTX 2080 Ti");
 		expect(result.count).toBe(1);
 	});
+
+	it("caches the parsed DMI RAM summary and reuses it across builds", async () => {
+		const result = await runProbeScenario({ runs: 2, ramDmiOutput: DMI_MEMORY_FIXTURE });
+
+		expect(result.cached?.ram).toBe(DMI_MEMORY_SUMMARY);
+		expect(result.ramCount).toBe(1);
+	}, 20_000);
+
+	it("caches the capacity fallback when DMI reports no populated device", async () => {
+		const result = await runProbeScenario({ runs: 1 });
+
+		expect(result.cached?.ram).toBe(formatBytes(os.totalmem()));
+	}, 15_000);
 });
 
 describe.skipIf(process.platform !== "linux")("system prompt CPU model", () => {
@@ -358,28 +382,11 @@ describe("non-Linux system prompt CPU model", () => {
 
 			expect(cpus).toHaveBeenCalledTimes(1);
 			expect(systemPrompt.systemPrompt.join("\n")).toContain("- CPU: Synthetic Non-Linux CPU");
-			// Spoofed non-Linux platform takes the capacity-only RAM fallback.
-			expect(systemPrompt.systemPrompt.join("\n")).toContain(`- RAM: ${formatBytes(os.totalmem())}`);
 		} finally {
 			cpus.mockRestore();
 			Object.defineProperty(process, "platform", { value: originalPlatform });
 		}
 	});
-});
-
-describe.skipIf(process.platform !== "linux")("system prompt RAM probe", () => {
-	it("caches the parsed DMI RAM summary and reuses it across builds", async () => {
-		const result = await runProbeScenario({ runs: 2, ramDmiOutput: DMI_MEMORY_FIXTURE });
-
-		expect(result.ramCached).toEqual({ ram: DMI_MEMORY_SUMMARY });
-		expect(result.ramCount).toBe(1);
-	}, 20_000);
-
-	it("caches the capacity fallback when DMI reports no populated device", async () => {
-		const result = await runProbeScenario({ runs: 1 });
-
-		expect(result.ramCached).toEqual({ ram: formatBytes(os.totalmem()) });
-	}, 15_000);
 });
 
 describe("workstation hardware parsers", () => {
@@ -435,7 +442,7 @@ describe("workstation hardware parsers", () => {
 		expect(parseOsRelease("ID=mystery")).toBeNull();
 	});
 
-	it("collapses same-device subvolume mounts and skips pseudo filesystems in df output", () => {
+	it("collapses same-device subvolume mounts and reports filesystem types without free space", () => {
 		const df = [
 			"Filesystem     1024-blocks       Used  Available Capacity Mounted on",
 			"/dev/mapper/vg-root 1998672896 1123456789 812345600      59% /nix",
@@ -446,7 +453,9 @@ describe("workstation hardware parsers", () => {
 			"/dev/nvme1n1p1           511744      31744    480000       7% /boot",
 		].join("\n");
 
-		expect(parseDfDisks(df)).toBe("/ 1.9TB (774.7GB free); /boot 499.8MB (468.8MB free)");
+		expect(parseDfDisks(df, { "/": "btrfs", "/boot": "vfat", "/dev/shm": "tmpfs" })).toBe(
+			"/ 1.9TB btrfs; /boot 499.8MB vfat",
+		);
 	});
 
 	it("keeps a container overlay root despite its non-device filesystem name", () => {
@@ -456,13 +465,11 @@ describe("workstation hardware parsers", () => {
 			"tmpfs                 65536        0     65536       0% /dev",
 		].join("\n");
 
-		expect(parseDfDisks(df)).toBe("/ 62.5GB (30.7GB free)");
+		expect(parseDfDisks(df)).toBe("/ 62.5GB");
 	});
 
-	it("returns undefined when df lists no persistent filesystem", () => {
-		expect(
-			parseDfDisks("Filesystem 1024-blocks Used Available Capacity Mounted on\ntmpfs 1 0 1 0% /run"),
-		).toBeUndefined();
+	it("returns null when df lists no persistent filesystem", () => {
+		expect(parseDfDisks("Filesystem 1024-blocks Used Available Capacity Mounted on\ntmpfs 1 0 1 0% /run")).toBeNull();
 	});
 
 	it("summarizes wmic memorychip list output", () => {
@@ -481,17 +488,98 @@ describe("workstation hardware parsers", () => {
 		expect(parseWmicMemory(wmic)).toBe("32.0GB DDR4 @ 3200 MT/s (2x 16.0GB)");
 	});
 
-	it("summarizes wmic logicaldisk list output", () => {
+	it("summarizes wmic logicaldisk list output with filesystem types", () => {
 		const wmic = [
 			"Caption=C:",
+			"FileSystem=NTFS",
 			"FreeSpace=107374182400",
 			"Size=511101108224",
 			"",
 			"Caption=D:",
+			"FileSystem=NTFS",
 			"FreeSpace=53687091200",
 			"Size=107374182400",
 		].join("\r\n");
 
-		expect(parseWmicDisks(wmic)).toBe("C: 476.0GB (100.0GB free); D: 100.0GB (50.0GB free)");
+		expect(parseWmicDisks(wmic)).toBe("C: 476.0GB NTFS; D: 100.0GB NTFS");
+	});
+
+	it("summarizes wmic cpu list output", () => {
+		const wmic = [
+			"L2CacheSize=16384",
+			"L3CacheSize=131072",
+			"MaxClockSpeed=5700",
+			"Name=AMD Ryzen 9 7950X3D 16-Core Processor",
+			"NumberOfCores=16",
+			"NumberOfLogicalProcessors=32",
+		].join("\r\n");
+
+		expect(parseWmicCpu(wmic)).toBe(
+			"AMD Ryzen 9 7950X3D 16-Core Processor — 16c/32t, boost 5.70GHz, L2 16.0MB, L3 128.0MB",
+		);
+	});
+
+	it("summarizes an AMD dual-CCD topology with SMT stride, boost, and caches", () => {
+		const data: CpuTopologyData = {
+			model: "AMD Ryzen 9 7950X3D 16-Core Processor",
+			isAmd: true,
+			threadCount: 32,
+			coreCount: 16,
+			siblingLists: Array.from({ length: 16 }, (_, core) => `${core},${core + 16}`),
+			maxFreqKhz: 5763356,
+			l2TotalKb: 16384,
+			l3Domains: [
+				{ sizeKb: 98304, cpuList: "0-7,16-23" },
+				{ sizeKb: 32768, cpuList: "8-15,24-31" },
+			],
+		};
+
+		expect(summarizeCpuTopology(data)).toBe(
+			"AMD Ryzen 9 7950X3D 16-Core Processor — 16c/32t, SMT siblings t,t+16, boost 5.76GHz, L2 16.0MB, L3 96.0MB+32.0MB (CCD0 0-7,16-23; CCD1 8-15,24-31)",
+		);
+	});
+
+	it("summarizes an Intel hybrid topology with P/E cores", () => {
+		const data: CpuTopologyData = {
+			model: "13th Gen Intel(R) Core(TM) i7-13700K",
+			isAmd: false,
+			threadCount: 24,
+			coreCount: 16,
+			siblingLists: [
+				...Array.from({ length: 8 }, (_, core) => `${core * 2}-${core * 2 + 1}`),
+				...Array.from({ length: 8 }, (_, core) => `${core + 16}`),
+			],
+			maxFreqKhz: 5400000,
+			l2TotalKb: 24576,
+			l3Domains: [{ sizeKb: 30720, cpuList: "0-23" }],
+			pCores: "0-15",
+			eCores: "16-23",
+		};
+
+		expect(summarizeCpuTopology(data)).toBe(
+			"13th Gen Intel(R) Core(TM) i7-13700K — 16c/24t, P-cores 0-15, E-cores 16-23, SMT siblings t,t+1, boost 5.40GHz, L2 24.0MB, L3 30.0MB",
+		);
+	});
+
+	it("matches lspci network devices to interface names and strips revisions", () => {
+		const lspci = [
+			"01:00.0 VGA compatible controller: NVIDIA Corporation AD102 (rev a1)",
+			"07:00.0 Ethernet controller: Realtek Semiconductor Co., Ltd. RTL8126 5GbE Controller (rev 01)",
+			"08:00.0 Network controller: Qualcomm Technologies, Inc WCN785x Wi-Fi 7(802.11be) 320MHz 2x2 [FastConnect 7800] (rev 01)",
+		].join("\n");
+		const interfaces = [
+			{ name: "enp7s0", pciAddr: "0000:07:00.0" },
+			{ name: "wlp8s0", pciAddr: "0000:08:00.0" },
+		];
+
+		expect(summarizeNetworkDevices(lspci, interfaces)).toBe(
+			"Realtek Semiconductor Co., Ltd. RTL8126 5GbE Controller (enp7s0); Qualcomm Technologies, Inc WCN785x Wi-Fi 7(802.11be) 320MHz 2x2 [FastConnect 7800] (wlp8s0)",
+		);
+	});
+
+	it("lists unmatched network devices without an interface suffix", () => {
+		const lspci = "03:00.0 Network controller: MediaTek MT7922 802.11ax";
+
+		expect(summarizeNetworkDevices(lspci, [])).toBe("MediaTek MT7922 802.11ax");
 	});
 });
