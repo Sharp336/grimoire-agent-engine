@@ -104,6 +104,10 @@ the `initialize` response).
   running TUI) share one `AgentRegistry`, so snapshots include subagents spawned
   by other sessions of the same process. Filter by `kind: "sub"` (and
   optionally `parentId`) to scope to subagent work.
+- Tool statuses on the wire are terminal: `tool_call_update` emits
+  `completed`/`failed` once, and late async progress (task/job callbacks that
+  fire after the loop finalized a call) is suppressed so clients never see an
+  `in_progress` that reopens a finished tool call.
 - `activity` refreshes on status/metadata boundaries, not per tool call, so it
   is a coarse "what is it doing" gist, matching the Agent Hub roster.
 - The surface is transport-agnostic: `omp acp` over stdio and the embedded
