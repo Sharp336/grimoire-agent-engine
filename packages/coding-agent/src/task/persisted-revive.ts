@@ -161,13 +161,14 @@ export function createPersistedSubagentReviverFactory(
 				if (event.type === "agent_start") registry.setStatus(ref.id, "running", session);
 				else if (event.type === "agent_end") registry.setStatus(ref.id, "idle", session);
 			});
-			// Persisted files predate an agent-source field, so cold-revived frames
-			// report the runtime-neutral `user` source; name comes from the ref.
+			// Older persisted files predate selected-definition provenance, so retain
+			// the runtime-neutral source and display-name fallbacks for compatibility.
 			const wakeAgent: AgentDefinition = {
-				name: ref.displayName,
+				name: init.agent ?? ref.displayName,
 				description: "",
 				systemPrompt: init.systemPrompt,
-				source: "user",
+				source: init.agentSource ?? "user",
+				...(init.agentIdentity ? { identity: init.agentIdentity } : {}),
 			};
 			attachIrcWakeTurnMonitor(session, {
 				id: ref.id,

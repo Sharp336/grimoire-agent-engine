@@ -474,6 +474,7 @@ function buildFailureResult(
 			id,
 			agent: policy.agent.name,
 			agentSource: policy.agent.source,
+			...(policy.agent.identity ? { agentIdentity: policy.agent.identity } : {}),
 			task: renderSubagentPrompt(request.assignment),
 			assignment: request.assignment.trim(),
 			description: trimToUndefined(request.identity?.label),

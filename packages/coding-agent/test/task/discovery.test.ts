@@ -8,8 +8,12 @@ import {
 	clearOmpExtensionCliRoots,
 	injectOmpExtensionCliRoots,
 } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
-import { discoverAgents } from "@oh-my-pi/pi-coding-agent/task/discovery";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import {
+	discoverAgents,
+	resolveAgentDefinitionIdentities,
+	resolveAgentDefinitionIdentity,
+} from "@oh-my-pi/pi-coding-agent/task/discovery";
+import { getAgentDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
 const OMP_AGENT_MD = [
 	"---",
@@ -60,10 +64,13 @@ async function writeOmpPluginAgent(home: string): Promise<void> {
 describe("discoverAgents", () => {
 	let tempHome: string;
 	let projectDir: string;
+	let originalAgentDir: string;
 
 	beforeEach(async () => {
+		originalAgentDir = getAgentDir();
 		tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "omp-task-agent-discovery-"));
 		projectDir = path.join(tempHome, "project");
+		setAgentDir(path.join(tempHome, ".omp", "agent"));
 		await fs.mkdir(projectDir, { recursive: true });
 	});
 
@@ -71,6 +78,7 @@ describe("discoverAgents", () => {
 		enableProvider("omp-plugins");
 		clearOmpExtensionCliRoots();
 		clearFsCache();
+		setAgentDir(originalAgentDir);
 		await removeWithRetries(tempHome);
 	});
 
@@ -170,5 +178,87 @@ describe("discoverAgents", () => {
 
 		expect(names).toContain("explicit-agent");
 		expect(names).not.toEqual(expect.arrayContaining(["stale-agent", "settings-agent", "loom-verify-spec"]));
+	});
+
+	test("resolves the authoritative same-name winner with distinct user and extension identities", async () => {
+		const extensionRoot = path.join(tempHome, "identity-extension");
+		const extensionAgent = path.join(extensionRoot, "agents", "identity-agent.md");
+		const userAgent = path.join(tempHome, ".omp", "agent", "agents", "identity-agent.md");
+		const extensionDefinition = [
+			"---",
+			"name: identity-agent",
+			"description: extension definition",
+			"---",
+			"extension body",
+		].join("\n");
+		const userDefinition = extensionDefinition.replace("extension definition", "user override");
+		await fs.mkdir(path.dirname(extensionAgent), { recursive: true });
+		await fs.mkdir(path.dirname(userAgent), { recursive: true });
+		await fs.writeFile(extensionAgent, extensionDefinition);
+		await fs.writeFile(
+			path.join(extensionRoot, "agents", "task.md"),
+			extensionDefinition.replace("identity-agent", "task"),
+		);
+		await fs.writeFile(userAgent, userDefinition);
+		injectOmpExtensionCliRoots([extensionRoot], tempHome, projectDir, { mode: "explicit-only" });
+
+		const selectedWithOverride = (await discoverAgents(projectDir, tempHome)).agents.find(
+			agent => agent.name === "identity-agent",
+		);
+		const userIdentity = await resolveAgentDefinitionIdentity(projectDir, "identity-agent", tempHome);
+		expect(selectedWithOverride?.description).toBe("user override");
+		expect(selectedWithOverride?.source).toBe("user");
+		expect(userIdentity).toMatchObject({ schemaVersion: 1, originKind: "user" });
+
+		await fs.rm(userAgent);
+		clearFsCache();
+		const selectedWithoutOverride = (await discoverAgents(projectDir, tempHome)).agents.find(
+			agent => agent.name === "identity-agent",
+		);
+		const extensionIdentity = await resolveAgentDefinitionIdentity(projectDir, "identity-agent", tempHome);
+		expect(selectedWithoutOverride?.description).toBe("extension definition");
+		expect(selectedWithoutOverride?.source).toBe("user");
+		expect(extensionIdentity).toMatchObject({ schemaVersion: 1, originKind: "extension" });
+		expect(extensionIdentity).not.toEqual(userIdentity);
+		await fs.writeFile(extensionAgent, extensionDefinition.replace("extension body", "changed extension body"));
+		clearFsCache();
+		const changedExtensionIdentity = await resolveAgentDefinitionIdentity(projectDir, "identity-agent", tempHome);
+		expect(changedExtensionIdentity?.originId).toBe(extensionIdentity?.originId);
+		expect(changedExtensionIdentity?.definitionId).not.toBe(extensionIdentity?.definitionId);
+
+		const projectAgent = path.join(projectDir, ".omp", "agents", "identity-agent.md");
+		await fs.mkdir(path.dirname(projectAgent), { recursive: true });
+		await fs.writeFile(projectAgent, extensionDefinition.replace("extension definition", "project override"));
+		clearFsCache();
+		const projectIdentity = await resolveAgentDefinitionIdentity(projectDir, "identity-agent", tempHome);
+		expect(projectIdentity).toMatchObject({ schemaVersion: 1, originKind: "project" });
+		expect(projectIdentity).not.toEqual(extensionIdentity);
+
+		const extensionTaskIdentity = await resolveAgentDefinitionIdentity(projectDir, "task", tempHome);
+		expect(extensionTaskIdentity).toMatchObject({ schemaVersion: 1, originKind: "extension" });
+		await fs.rm(path.join(extensionRoot, "agents", "task.md"));
+		clearFsCache();
+		const bundledTaskIdentity = await resolveAgentDefinitionIdentity(projectDir, "task", tempHome);
+		expect(bundledTaskIdentity).toMatchObject({ schemaVersion: 1, originKind: "bundled" });
+		expect(bundledTaskIdentity).not.toEqual(extensionTaskIdentity);
+	});
+
+	test("returns a frozen null-prototype identity map for hostile and missing names", async () => {
+		const userAgent = path.join(tempHome, ".omp", "agent", "agents", "hostile-name.md");
+		await fs.mkdir(path.dirname(userAgent), { recursive: true });
+		await fs.writeFile(
+			userAgent,
+			["---", "name: __proto__", "description: hostile property name", "---", "body"].join("\n"),
+		);
+
+		const identities = await resolveAgentDefinitionIdentities(projectDir, ["__proto__", "missing-agent"], tempHome);
+
+		expect(Object.getPrototypeOf(identities)).toBeNull();
+		expect(Object.isFrozen(identities)).toBe(true);
+		expect(Object.keys(identities)).toEqual(["__proto__"]);
+		const hostileIdentity = identities[["__", "proto__"].join("")];
+		expect(hostileIdentity).toMatchObject({ schemaVersion: 1, originKind: "user" });
+		expect(Object.isFrozen(hostileIdentity)).toBe(true);
+		expect(Object.hasOwn(identities, "missing-agent")).toBe(false);
 	});
 });

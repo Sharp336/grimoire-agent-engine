@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added immutable host-owned selected-agent provenance, bound to the selected definition's origin, canonical location, and exact parser input, to discovered definitions, persisted subagent revivals, lifecycle events, and `SingleResult`, plus extension APIs for resolving the authoritative winning definition and identifying the current manifest package without consumer path heuristics.
+
 ### Changed
 
 - Routed paid xAI models (`XAI_API_KEY` / `xai/…`) through the Responses API used by SuperGrok OAuth instead of Chat Completions.

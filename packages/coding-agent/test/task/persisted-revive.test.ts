@@ -14,6 +14,7 @@ import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
+import { type AgentDefinitionIdentity, TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -67,6 +68,11 @@ async function createPersistedSession(
 	restrictToolNames?: boolean,
 	modelRole?: string,
 	advisor?: string,
+	agent?: Readonly<{
+		name: string;
+		source: "bundled" | "user" | "project";
+		identity: AgentDefinitionIdentity;
+	}>,
 ): Promise<string> {
 	const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
 	const sessionFile = manager.getSessionFile();
@@ -75,6 +81,9 @@ async function createPersistedSession(
 		systemPrompt: "persisted prompt",
 		task: "persisted task",
 		tools: ["read", "yield"],
+		agent: agent?.name,
+		agentSource: agent?.source,
+		agentIdentity: agent?.identity,
 		restrictToolNames,
 		modelRole,
 		resolvedModel: modelRole ? "anthropic/claude-sonnet-4-5" : undefined,
@@ -306,6 +315,73 @@ describe("persisted subagent revival", () => {
 		expect(last.payload.id).toBe(ref.id);
 		expect(last.payload.status).not.toBe("started");
 		rpcRegistry.dispose();
+		AgentLifecycleManager.resetGlobalForTests();
+		AgentRegistry.resetGlobalForTests();
+	});
+
+	it("preserves the selected definition identity in cold-revive lifecycle frames", async () => {
+		AgentRegistry.resetGlobalForTests();
+		AgentLifecycleManager.resetGlobalForTests();
+		const cwd = makeTempDir("@pi-revive-identity-");
+		const identity: AgentDefinitionIdentity = Object.freeze({
+			schemaVersion: 1,
+			originKind: "extension",
+			originId: "sha256:package-origin",
+			definitionId: "sha256:worker-definition",
+		});
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+			name: "worker",
+			source: "project",
+			identity,
+		});
+		MCPManager.setInstance({ getTools: () => [] } as unknown as MCPManager);
+		let handle: RevivedSessionHandle | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
+			handle = createRevivedSession([]);
+			return { session: handle.session } as CreateAgentSessionResult;
+		});
+		const eventBus = new EventBus();
+		const lifecycle: unknown[] = [];
+		eventBus.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, event => lifecycle.push(event));
+		const ref = createRef(sessionFile);
+		AgentRegistry.global().register({
+			id: ref.id,
+			displayName: ref.displayName,
+			kind: "sub",
+			session: null,
+			sessionFile,
+			status: "parked",
+		});
+		const reviver = await createFactory(cwd, eventBus)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		const observer = handle?.observer();
+		if (!observer) throw new Error("Expected a cold-revive wake observer");
+		const finish = observer([
+			{
+				role: "custom",
+				customType: "irc:incoming",
+				content: "resume with original provenance",
+				display: true,
+				details: { id: "irc-identity", from: "Main", message: "resume with original provenance" },
+				attribution: "agent",
+				timestamp: Date.now(),
+			},
+		]);
+		await finish?.();
+
+		expect(lifecycle[0]).toMatchObject({
+			agent: "worker",
+			agentSource: "project",
+			agentIdentity: identity,
+			status: "started",
+		});
+		expect(lifecycle.at(-1)).toMatchObject({
+			agent: "worker",
+			agentSource: "project",
+			agentIdentity: identity,
+		});
 		AgentLifecycleManager.resetGlobalForTests();
 		AgentRegistry.resetGlobalForTests();
 	});

@@ -64,6 +64,7 @@ import type { AsyncJobSnapshot } from "../../session/agent-session";
 import type { CompactMode } from "../../session/compact-modes";
 import type { CustomMessage, CustomMessagePayload } from "../../session/messages";
 import type { ReadonlySessionManager, SessionManager } from "../../session/session-manager";
+import type { AgentDefinitionOriginIdentity } from "../../task/types";
 import type {
 	BashToolDetails,
 	BashToolInput,
@@ -1185,6 +1186,9 @@ export interface ExtensionAPI {
 	/** Injected pi-coding-agent exports for accessing SDK utilities */
 	pi: typeof PiCodingAgent;
 
+	/** Opaque host-owned identity of the manifest package that supplied this extension. */
+	readonly extensionOrigin?: AgentDefinitionOriginIdentity;
+
 	// =========================================================================
 	// Event Subscription
 	// =========================================================================
@@ -1625,6 +1629,8 @@ export interface ExtensionRuntime extends ExtensionRuntimeState, ExtensionAction
 export interface Extension {
 	path: string;
 	resolvedPath: string;
+	/** Opaque host-owned identity of the manifest package that supplied this extension. */
+	origin?: AgentDefinitionOriginIdentity;
 	label?: string;
 	handlers: Map<string, HandlerFn[]>;
 	tools: Map<string, RegisteredTool<any, any>>;
