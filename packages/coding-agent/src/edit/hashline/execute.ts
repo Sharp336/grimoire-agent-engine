@@ -167,8 +167,29 @@ const ECHO_MAX_CHARS = 40;
 function formatEchoSide(text: string): string {
 	// Truncate on code points BEFORE escaping: slicing the escaped string
 	// could split an escape pair (dangling backslash) or a surrogate pair.
-	const chars = Array.from(text);
-	const truncated = chars.length > ECHO_MAX_CHARS ? `${chars.slice(0, ECHO_MAX_CHARS - 1).join("")}…` : text;
+	// The truncation never materializes the line: whether the cap is
+	// exceeded and where the keep-boundary sits both resolve within the
+	// first cap+1 code points, so the scan touches ~cap+2 UTF-16 units
+	// however long the boundary line is.
+	let truncated = text;
+	if (text.length > ECHO_MAX_CHARS) {
+		let units = 0;
+		let codePoints = 0;
+		let boundary = 0;
+		while (units < text.length && codePoints <= ECHO_MAX_CHARS) {
+			if (codePoints === ECHO_MAX_CHARS - 1) boundary = units;
+			const unit = text.charCodeAt(units);
+			// A high surrogate counts as one code point together with its low
+			// half; a lone surrogate (high not followed by low, or any low)
+			// counts alone — exactly Array.from's code-point iteration, so
+			// the bounded scan matches the naive implementation on every
+			// input, ill-formed strings included.
+			const paired = unit >= 0xd800 && unit <= 0xdbff && units + 1 < text.length ? text.charCodeAt(units + 1) : NaN;
+			units += paired >= 0xdc00 && paired <= 0xdfff ? 2 : 1;
+			codePoints++;
+		}
+		if (codePoints > ECHO_MAX_CHARS) truncated = `${text.slice(0, boundary)}…`;
+	}
 	const escaped = truncated.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 	return `"${escaped}"`;
 }
@@ -248,7 +269,7 @@ function renderSection(
 			content: [
 				{
 					type: "text",
-					text: `${result.header}${blockBlock}${echoBlock}${previewBlock}${renumberBlock}${moveBlock}${warningsBlock}`,
+					text: `${result.header}${blockBlock}${moveBlock}${echoBlock}${previewBlock}${renumberBlock}${warningsBlock}`,
 				},
 			],
 			details: pruneOversizedEditSnapshots({
