@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Replaced `getGpuCachePath()` with `getHardwareCachePath()` (`~/.omp/hardware_cache.json`), the consolidated per-field hardware probe cache.
+
+### Changed
+
+- `formatBytes` now has a TB tier instead of capping at GB (e.g. `1.9TB` rather than `1907.3GB`).
+
 ## [18.0.6] - 2026-08-26
 
 ### Added
@@ -94,14 +102,6 @@
 ### Fixed
 
 - Fixed the in-house `marked` list tokenizer incorrectly consuming trailing blank lines at the end of input, ensuring correct list tightness and token generation matching standard `marked` behavior.
-### Added
-### Breaking Changes
-
-- Replaced `getGpuCachePath()` with `getHardwareCachePath()` (`~/.omp/hardware_cache.json`), the consolidated per-field hardware probe cache.
-
-### Changed
-
-- `formatBytes` now has a TB tier instead of capping at GB (e.g. `1.9TB` rather than `1907.3GB`).
 
 ## [17.2.10] - 2026-08-06
 

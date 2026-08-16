@@ -296,6 +296,18 @@ const SMBIOS_MEMORY_TYPE: Record<string, string> = {
 };
 
 /**
+ * A mixed-speed kit runs the whole set at a common supported rate, and only
+ * the firmware-configured per-stick speed reflects that rate — a stick's
+ * rated maximum (DMI `Speed`) can exceed it. Report the lowest configured
+ * speed, and only when every populated stick exposes one; otherwise omit the
+ * rate (and the bandwidth derived from it) rather than overstate the
+ * hardware.
+ */
+function commonSpeedMts(configuredSpeeds: number[]): number {
+	return configuredSpeeds.length > 0 && configuredSpeeds.every(speed => speed > 0) ? Math.min(...configuredSpeeds) : 0;
+}
+
+/**
  * Parse the `E: MEMORY_DEVICE_<n>_<KEY>=<value>` properties that systemd's
  * dmi/id udev builtin exports (readable without root, unlike `dmidecode`)
  * into a one-line RAM summary, e.g.
@@ -332,10 +344,7 @@ export function parseDmiMemory(udevText: string): string | null {
 	const sizes = populated.map(device => Number(device.SIZE));
 	const totalBytes = sizes.reduce((sum, size) => sum + size, 0);
 	const type = populated.map(device => device.TYPE).find(value => value && value !== "Unknown");
-	const speedMts = Math.max(
-		0,
-		...populated.map(device => Number(device.CONFIGURED_SPEED_MTS ?? device.SPEED_MTS) || 0),
-	);
+	const speedMts = commonSpeedMts(populated.map(device => Number(device.CONFIGURED_SPEED_MTS) || 0));
 	// Channel count: only trust an explicit channel token in the locators.
 	// Deduping raw bank locators would count slot-level labels ("BANK 0".."BANK 3")
 	// as one fictitious channel per DIMM and overstate the peak bandwidth.
@@ -396,7 +405,7 @@ export function parseWmicMemory(output: string): string | null {
 	const type = populated
 		.map(stick => SMBIOS_MEMORY_TYPE[stick.SMBIOSMemoryType ?? ""])
 		.find(value => value !== undefined);
-	const speedMts = Math.max(0, ...populated.map(stick => Number(stick.ConfiguredClockSpeed ?? stick.Speed) || 0));
+	const speedMts = commonSpeedMts(populated.map(stick => Number(stick.ConfiguredClockSpeed) || 0));
 
 	let summary = formatBytes(totalBytes);
 	if (type) summary += ` ${type}`;

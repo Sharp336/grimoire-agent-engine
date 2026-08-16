@@ -496,6 +496,40 @@ describe("workstation hardware parsers", () => {
 		expect(parseDmiMemory(slotBanks)).toBe("64.0GB DDR4 @ 3200 MT/s (4x 16.0GB)");
 	});
 
+	it("reports a mixed-speed DMI kit at the slowest stick's rate and derives bandwidth from it", () => {
+		const mixed = [
+			"E: MEMORY_DEVICE_0_SIZE=17179869184",
+			"E: MEMORY_DEVICE_0_TYPE=DDR4",
+			"E: MEMORY_DEVICE_0_DATA_WIDTH=64",
+			"E: MEMORY_DEVICE_0_CONFIGURED_SPEED_MTS=3200",
+			"E: MEMORY_DEVICE_0_BANK_LOCATOR=P0 CHANNEL A",
+			"E: MEMORY_DEVICE_1_SIZE=17179869184",
+			"E: MEMORY_DEVICE_1_TYPE=DDR4",
+			"E: MEMORY_DEVICE_1_DATA_WIDTH=64",
+			"E: MEMORY_DEVICE_1_CONFIGURED_SPEED_MTS=2400",
+			"E: MEMORY_DEVICE_1_BANK_LOCATOR=P0 CHANNEL B",
+		].join("\n");
+
+		expect(parseDmiMemory(mixed)).toBe("32.0GB DDR4 @ 2400 MT/s (2x 16.0GB, 2 channels, ~38 GB/s peak)");
+	});
+
+	it("omits rate and bandwidth when a populated stick lacks a configured speed", () => {
+		const partial = [
+			"E: MEMORY_DEVICE_0_SIZE=17179869184",
+			"E: MEMORY_DEVICE_0_TYPE=DDR4",
+			"E: MEMORY_DEVICE_0_DATA_WIDTH=64",
+			"E: MEMORY_DEVICE_0_CONFIGURED_SPEED_MTS=3200",
+			"E: MEMORY_DEVICE_0_BANK_LOCATOR=P0 CHANNEL A",
+			"E: MEMORY_DEVICE_1_SIZE=17179869184",
+			"E: MEMORY_DEVICE_1_TYPE=DDR4",
+			"E: MEMORY_DEVICE_1_DATA_WIDTH=64",
+			"E: MEMORY_DEVICE_1_SPEED_MTS=3600",
+			"E: MEMORY_DEVICE_1_BANK_LOCATOR=P0 CHANNEL B",
+		].join("\n");
+
+		expect(parseDmiMemory(partial)).toBe("32.0GB DDR4 (2x 16.0GB, 2 channels)");
+	});
+
 	it("returns null when no DMI memory device is populated", () => {
 		expect(parseDmiMemory("E: MEMORY_DEVICE_0_PRESENT=0\nE: MEMORY_DEVICE_0_TYPE=Unknown")).toBeNull();
 	});
@@ -554,6 +588,22 @@ describe("workstation hardware parsers", () => {
 		].join("\r\n");
 
 		expect(parseWmicMemory(wmic)).toBe("32.0GB DDR4 @ 3200 MT/s (2x 16.0GB)");
+	});
+
+	it("reports a mixed-speed wmic kit at the slowest stick's configured rate", () => {
+		const wmic = [
+			"Capacity=17179869184",
+			"ConfiguredClockSpeed=3200",
+			"SMBIOSMemoryType=26",
+			"Speed=3600",
+			"",
+			"Capacity=17179869184",
+			"ConfiguredClockSpeed=2400",
+			"SMBIOSMemoryType=26",
+			"Speed=2400",
+		].join("\r\n");
+
+		expect(parseWmicMemory(wmic)).toBe("32.0GB DDR4 @ 2400 MT/s (2x 16.0GB)");
 	});
 
 	it("summarizes wmic logicaldisk list output with filesystem types", () => {
