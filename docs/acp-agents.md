@@ -134,6 +134,48 @@ Pushed in real time while a subagent works (the task executor coalesces at
 verbose `task`/`description`/`lastIntent` texts are bounded on the wire. The
 `id` matches the roster snapshot id, so clients upsert the same card.
 
+## Request: `_omp/agents/messages`
+
+Returns a subagent's transcript (its own messages, including `thinking`
+blocks) so clients can render subagent reasoning inside the subagent's card.
+Mirrors the RPC `get_subagent_messages` surface.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "_omp/agents/messages",
+  "params": { "agentId": "ReadA", "fromByte": 0 }
+}
+```
+
+Either `agentId` (registry id from a roster snapshot) or `sessionFile` may be
+given; `fromByte` resumes a previous read (byte offset, line-aligned). Only
+files claimed by a registered agent are readable — arbitrary paths are
+rejected. Response `result`:
+
+```json
+{
+  "sessionFile": "…/ReadA.jsonl",
+  "fromByte": 0,
+  "nextByte": 4096,
+  "reset": false,
+  "messages": [
+    { "role": "user", "content": [{ "type": "text", "text": "…" }] },
+    {
+      "role": "assistant",
+      "content": [
+        { "type": "thinking", "thinking": "Let me read the file…" },
+        { "type": "text", "text": "…" }
+      ]
+    }
+  ]
+}
+```
+
+Poll with `fromByte: nextByte` until `nextByte` stops advancing (or `reset`
+appears after a file rotation).
+
 ## Tool-call classification
 
 `tool_call` and `tool_call_update` notifications carry an extension field
