@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added dreaming: idle-time background memory consolidation inspired by OpenClaw. While a session sits idle, the active memory backend consolidates recent session history into long-term memory and records each pass in a human-readable `DREAMS.md` dream diary. Includes the `/dream` command (`status`, `now`, `diary`; alias `/dreaming`) and a Dreaming settings group (`dream.*`) on the memory tab.
+
 ## [17.3.5] - 2026-08-16
 
 ### Added
