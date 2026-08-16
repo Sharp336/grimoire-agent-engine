@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a trusted runtime backend seam for explicit, fail-closed remote structured-subagent execution without local-process fallback.
+
 ## [17.3.5] - 2026-08-16
 
 ### Added

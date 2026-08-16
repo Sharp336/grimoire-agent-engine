@@ -145,6 +145,28 @@ export interface StructuredSubagentResult {
 	temporaryArtifacts: boolean;
 }
 
+/** Explicit execution mode selected by trusted runtime plumbing. */
+export type StructuredSubagentExecutionMode = "local" | "remote";
+
+/** Fully resolved input handed to a remotely executing backend. */
+export interface StructuredSubagentBackendContext {
+	readonly request: StructuredSubagentRequest;
+	readonly policy: EffectiveSubagentPolicy;
+	readonly outputSchema: StructuredSubagentSchemaResolution;
+	readonly signal?: AbortSignal;
+}
+
+/** Trusted runtime seam for executing a normalized structured subagent remotely. */
+export interface StructuredSubagentBackend {
+	run(context: StructuredSubagentBackendContext): Promise<StructuredSubagentResult>;
+}
+
+/** Launch-owned execution selection; this is deliberately separate from agent-authored request data. */
+export interface StructuredSubagentRuntimeOptions {
+	execution?: StructuredSubagentExecutionMode;
+	backend?: StructuredSubagentBackend;
+}
+
 /** Machine-readable failure category so adapters can retain their native errors. */
 export class StructuredSubagentError extends Error {
 	readonly kind: "preflight" | "isolation" | "execution";
@@ -540,12 +562,210 @@ function attachStructuredOutputMetadata(result: SingleResult, schema: Structured
 	result.structuredOutput = output;
 }
 
+function normalizeRemoteRequest(
+	request: StructuredSubagentRequest,
+	policy: EffectiveSubagentPolicy,
+): StructuredSubagentRequest {
+	const identity = request.identity
+		? {
+				id: trimToUndefined(request.identity.id),
+				label: trimToUndefined(request.identity.label),
+			}
+		: undefined;
+	return {
+		...request,
+		assignment: request.assignment.trim(),
+		context: request.context?.trim() || undefined,
+		agent: policy.agentName,
+		schemaMode: policy.schema.mode,
+		identity,
+		index: request.index ?? 0,
+		isolation: {
+			requested: policy.isIsolated,
+			merge: policy.mergeMode,
+			apply: policy.applyChanges,
+		},
+		enableLsp: policy.enableLsp,
+		enableIrc: policy.enableIrc,
+	};
+}
+
+function isFiniteNonNegativeNumber(value: unknown): value is number {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function validateRemoteResult(
+	value: unknown,
+	request: StructuredSubagentRequest,
+	policy: EffectiveSubagentPolicy,
+): string | undefined {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return "result envelope must be an object";
+	const envelope = value as Partial<StructuredSubagentResult>;
+	if (typeof envelope.result !== "object" || envelope.result === null || Array.isArray(envelope.result))
+		return "result must be an object";
+	if (typeof envelope.policy !== "object" || envelope.policy === null || Array.isArray(envelope.policy))
+		return "policy must be an object";
+	if (typeof envelope.mergeSummary !== "string") return "mergeSummary must be a string";
+	if (envelope.changesApplied !== null && typeof envelope.changesApplied !== "boolean")
+		return "changesApplied must be boolean or null";
+	if (typeof envelope.artifactsDir !== "string") return "artifactsDir must be a string";
+	if (typeof envelope.temporaryArtifacts !== "boolean") return "temporaryArtifacts must be boolean";
+
+	const result = envelope.result;
+	if (!Number.isInteger(result.index) || result.index !== (request.index ?? 0))
+		return "result index does not match the normalized request";
+	if (typeof result.id !== "string" || result.id.trim().length === 0) return "result id must be a non-empty string";
+	if (request.identity?.id !== undefined && result.id !== request.identity.id)
+		return "result id does not match the normalized preallocated id";
+	if (result.agent !== policy.agent.name) return "result agent does not match the resolved agent";
+	if (result.agentSource !== policy.agent.source) return "result agentSource does not match the resolved agent";
+	if (typeof result.task !== "string") return "result task must be a string";
+	if (result.assignment !== undefined && result.assignment !== request.assignment)
+		return "result assignment does not match the normalized request";
+	if (!Number.isInteger(result.exitCode)) return "result exitCode must be an integer";
+	if (typeof result.output !== "string") return "result output must be a string";
+	if (typeof result.stderr !== "string") return "result stderr must be a string";
+	if (typeof result.truncated !== "boolean") return "result truncated must be boolean";
+	if (!isFiniteNonNegativeNumber(result.durationMs)) return "result durationMs must be a non-negative number";
+	if (!isFiniteNonNegativeNumber(result.tokens)) return "result tokens must be a non-negative number";
+	if (!Number.isInteger(result.requests) || (result.requests as number) < 0)
+		return "result requests must be a non-negative integer";
+	if (result.error !== undefined && typeof result.error !== "string") return "result error must be a string";
+	if (result.aborted !== undefined && typeof result.aborted !== "boolean") return "result aborted must be boolean";
+	if (result.abortReason !== undefined && typeof result.abortReason !== "string")
+		return "result abortReason must be a string";
+
+	if (policy.schema.source === "none") {
+		if (result.structuredOutput !== undefined) return "schema-free result must not contain structuredOutput";
+		return undefined;
+	}
+	if (typeof result.structuredOutput !== "object" || result.structuredOutput === null)
+		return "schema-bearing result must contain structuredOutput";
+	const structuredOutput = result.structuredOutput;
+	if (structuredOutput.source !== policy.schema.source)
+		return "structuredOutput source does not match effective schema";
+	if (structuredOutput.mode !== policy.schema.mode) return "structuredOutput mode does not match effective schema";
+	if (
+		structuredOutput.status !== "valid" &&
+		structuredOutput.status !== "invalid" &&
+		structuredOutput.status !== "unavailable"
+	) {
+		return "structuredOutput status is invalid";
+	}
+	if (structuredOutput.error !== undefined && typeof structuredOutput.error !== "string")
+		return "structuredOutput error must be a string";
+	if (
+		policy.schema.mode === "strict" &&
+		structuredOutput.status !== "valid" &&
+		(result.exitCode === 0 || !result.stderr.includes("schema_violation"))
+	) {
+		return "strict invalid or unavailable structuredOutput must be a failed schema_violation";
+	}
+	if (structuredOutput.status === "valid") {
+		if (!Object.hasOwn(structuredOutput, "data")) return "valid structuredOutput must contain data";
+		const { validator, error } = buildOutputValidator(policy.schema.schema);
+		if (error) return "valid structuredOutput cannot satisfy an unusable effective schema";
+		const validation = validator?.validate(structuredOutput.data);
+		if (validation && !validation.success) return "structuredOutput data does not satisfy the effective schema";
+	}
+	return undefined;
+}
+
+function remoteAbortReason(signal: AbortSignal | undefined): string {
+	const reason = signal?.reason;
+	if (reason instanceof Error && reason.message.trim()) return reason.message.trim();
+	if (typeof reason === "string" && reason.trim()) return reason.trim();
+	return "Cancelled by caller";
+}
+
+function buildRemoteFailure(
+	request: StructuredSubagentRequest,
+	policy: EffectiveSubagentPolicy,
+	message: string,
+	startedAt: number,
+	aborted = false,
+): StructuredSubagentResult {
+	const id = trimToUndefined(request.identity?.id) ?? sanitizeAgentId(request.identity?.label) ?? "remote";
+	const result = buildFailureResult(request, policy, id, startedAt)(message);
+	if (aborted) {
+		result.aborted = true;
+		result.abortReason = message;
+	}
+	attachStructuredOutputMetadata(result, policy.schema);
+	return {
+		result,
+		policy,
+		mergeSummary: "",
+		changesApplied: null,
+		artifactsDir: "",
+		temporaryArtifacts: false,
+	};
+}
+
+const REMOTE_ABORTED = Symbol("remote structured subagent aborted");
+
+async function runRemoteStructuredSubagent(
+	request: StructuredSubagentRequest,
+	policy: EffectiveSubagentPolicy,
+	backend: StructuredSubagentBackend | undefined,
+): Promise<StructuredSubagentResult> {
+	const startedAt = Date.now();
+	if (!backend) {
+		return buildRemoteFailure(request, policy, "Remote structured subagent backend is unavailable.", startedAt);
+	}
+	const signal = request.signal;
+	if (signal?.aborted) {
+		return buildRemoteFailure(request, policy, remoteAbortReason(signal), startedAt, true);
+	}
+	const context: StructuredSubagentBackendContext = {
+		request,
+		policy,
+		outputSchema: policy.schema,
+		signal,
+	};
+	const cancellation = Promise.withResolvers<typeof REMOTE_ABORTED>();
+	const onAbort = () => cancellation.resolve(REMOTE_ABORTED);
+	signal?.addEventListener("abort", onAbort, { once: true });
+	try {
+		const backendRun = backend.run(context);
+		const candidate = signal ? await Promise.race([backendRun, cancellation.promise]) : await backendRun;
+		if (candidate === REMOTE_ABORTED || signal?.aborted) {
+			return buildRemoteFailure(request, policy, remoteAbortReason(signal), startedAt, true);
+		}
+		const malformed = validateRemoteResult(candidate, request, policy);
+		if (malformed) {
+			return buildRemoteFailure(
+				request,
+				policy,
+				`Remote structured subagent backend returned a malformed result: ${malformed}.`,
+				startedAt,
+			);
+		}
+		return { ...candidate, policy };
+	} catch (error) {
+		if (signal?.aborted) {
+			return buildRemoteFailure(request, policy, remoteAbortReason(signal), startedAt, true);
+		}
+		const message = error instanceof Error ? error.message : String(error);
+		return buildRemoteFailure(request, policy, `Remote structured subagent execution failed: ${message}`, startedAt);
+	} finally {
+		signal?.removeEventListener("abort", onAbort);
+	}
+}
+
 /**
- * Execute a validated subagent. Preflight errors occur before any artifact
- * lease or child dispatch; callers keep responsibility for their result text.
+ * Execute a validated subagent. Preflight errors occur before any dispatch.
+ * Explicit remote execution follows policy resolution and precedes every local
+ * artifact lease, isolation preparation, and subprocess path.
  */
-export async function runStructuredSubagent(request: StructuredSubagentRequest): Promise<StructuredSubagentResult> {
+export async function runStructuredSubagent(
+	request: StructuredSubagentRequest,
+	runtime?: StructuredSubagentRuntimeOptions,
+): Promise<StructuredSubagentResult> {
 	const policy = await resolveEffectiveSubagentPolicy(request);
+	if (runtime?.execution === "remote") {
+		return runRemoteStructuredSubagent(normalizeRemoteRequest(request, policy), policy, runtime.backend);
+	}
 	const lease = await leaseArtifacts(request.session, request.invocationKind);
 	let changesApplied: boolean | null = null;
 	let mergeSummary = "";
