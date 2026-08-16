@@ -5162,7 +5162,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	toggleThinkingBlockVisibility(): void {
 		this.#inputController.toggleThinkingBlockVisibility();
 	}
-
 	toggleTodoExpansion(): void {
 		this.todoExpanded = !this.todoExpanded;
 		this.#renderTodoList();

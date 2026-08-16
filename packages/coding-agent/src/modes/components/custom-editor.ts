@@ -39,6 +39,8 @@ type ConfigurableEditorAction = Extract<
 	| "app.clipboard.pasteImage"
 	| "app.clipboard.pasteTextRaw"
 	| "app.clipboard.copyPrompt"
+	| "app.fast.toggle"
+	| "app.advisor.toggle"
 >;
 
 const DEFAULT_ACTION_KEYS: Record<ConfigurableEditorAction, KeyId[]> = {
@@ -61,6 +63,8 @@ const DEFAULT_ACTION_KEYS: Record<ConfigurableEditorAction, KeyId[]> = {
 	"app.clipboard.pasteImage": ["ctrl+v"],
 	"app.clipboard.pasteTextRaw": ["ctrl+shift+v", "alt+shift+v"],
 	"app.clipboard.copyPrompt": ["alt+shift+c"],
+	"app.fast.toggle": ["alt+shift+f"],
+	"app.advisor.toggle": ["alt+shift+a"],
 };
 
 function buildMatchKeys(keys: readonly KeyId[]): Set<string> {
@@ -551,6 +555,8 @@ export class CustomEditor extends Editor {
 	onSelectModel?: () => void;
 	onToggleToolActivity?: () => void;
 	onToggleThinking?: () => void;
+	onToggleFastMode?: () => void;
+	onToggleAdvisor?: () => void;
 	onExternalEditor?: () => void;
 	onHistorySearch?: () => void;
 	onSuspend?: () => void;
@@ -844,6 +850,17 @@ export class CustomEditor extends Editor {
 		// Space-hold push-to-talk: a sustained space bar starts/stops STT instead of typing spaces.
 		if (this.#handleSpaceHold(data, canonical)) return;
 
+		// Route legacy ESC+uppercase F (\x1bF) for Alt+Shift+F on non-Kitty terminals
+		// without stealing \x1bf (lowercase, Alt+F word-right navigation).
+		if (
+			data === "\x1bF" &&
+			this.onToggleFastMode &&
+			this.#actionKeys.get("app.fast.toggle")?.some(k => k === "alt+shift+f" || k === "shift+alt+f")
+		) {
+			this.onToggleFastMode();
+			return;
+		}
+
 		// One union probe decides whether any per-action interception below can
 		// match — plain typing then skips the ~20 per-action set lookups per key.
 		if (
@@ -907,6 +924,17 @@ export class CustomEditor extends Editor {
 			// Intercept configured tool activity visibility toggle
 			if (this.#matchesAction(canonical, "app.tools.toggleVisibility") && this.onToggleToolActivity) {
 				this.onToggleToolActivity();
+				return;
+			}
+			// Intercept configured fast mode toggle
+			if (this.#matchesAction(canonical, "app.fast.toggle") && this.onToggleFastMode) {
+				this.onToggleFastMode();
+				return;
+			}
+
+			// Intercept configured advisor toggle
+			if (this.#matchesAction(canonical, "app.advisor.toggle") && this.onToggleAdvisor) {
+				this.onToggleAdvisor();
 				return;
 			}
 

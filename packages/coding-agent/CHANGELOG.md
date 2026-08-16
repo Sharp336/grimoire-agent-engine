@@ -67,6 +67,10 @@
 - Fixed external thinking being offered on xAI reasoning-only Responses models (grok-4 family) that reject `reasoning.effort`, where the private scratchpad ran alongside native reasoning instead of replacing it.
 - Fixed the extension tool-call handler timeout rendering outside a titled section in `/settings` by registering its Extensions group on the Tools tab.
 
+### Added
+
+- Added `Alt+Shift+F` (`app.fast.toggle`) and `Alt+Shift+A` (`app.advisor.toggle`) keyboard shortcuts to toggle fast mode (`/fast`) and advisor (`/advisor`) without losing active prompt input.
+
 ## [17.3.4] - 2026-08-14
 
 ### Changed

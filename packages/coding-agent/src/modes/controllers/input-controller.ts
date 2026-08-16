@@ -459,6 +459,10 @@ export class InputController {
 		this.ctx.editor.onToggleThinking = () => this.ctx.toggleThinkingBlockVisibility();
 		this.ctx.editor.setActionKeys("app.editor.external", this.ctx.keybindings.getKeys("app.editor.external"));
 		this.ctx.editor.onExternalEditor = () => void this.openExternalEditor();
+		this.ctx.editor.setActionKeys("app.fast.toggle", this.ctx.keybindings.getKeys("app.fast.toggle"));
+		this.ctx.editor.onToggleFastMode = () => this.toggleFastMode();
+		this.ctx.editor.setActionKeys("app.advisor.toggle", this.ctx.keybindings.getKeys("app.advisor.toggle"));
+		this.ctx.editor.onToggleAdvisor = () => this.toggleAdvisor();
 		this.ctx.editor.setActionKeys(
 			"app.clipboard.pasteImage",
 			this.ctx.keybindings.getKeys("app.clipboard.pasteImage"),
@@ -491,6 +495,12 @@ export class InputController {
 		const planModeKeys = this.ctx.keybindings.getKeys("app.plan.toggle");
 		for (const key of planModeKeys) {
 			this.ctx.editor.setCustomKeyHandler(key, () => void this.ctx.handlePlanModeCommand());
+		}
+		for (const key of this.ctx.keybindings.getKeys("app.fast.toggle")) {
+			this.ctx.editor.setCustomKeyHandler(key, () => this.toggleFastMode());
+		}
+		for (const key of this.ctx.keybindings.getKeys("app.advisor.toggle")) {
+			this.ctx.editor.setCustomKeyHandler(key, () => this.toggleAdvisor());
 		}
 
 		for (const key of this.ctx.keybindings.getKeys("app.session.new")) {
@@ -1991,8 +2001,36 @@ export class InputController {
 		// snapshots (it invalidates every block) and forces a full clear + replay
 		// of the whole transcript, matching setToolsExpanded()'s redraw.
 		this.ctx.ui.resetDisplay();
-
 		this.ctx.showStatus(`Thinking blocks: ${this.ctx.hideThinkingBlock ? "hidden" : "visible"}`);
+	}
+
+	toggleFastMode(): void {
+		if (this.ctx.focusedAgentId) {
+			this.ctx.showStatus("Fast mode applies to the main session — press ←← to return first");
+			return;
+		}
+		const enabled = this.ctx.session.toggleFastMode();
+		this.ctx.statusLine?.invalidate();
+		this.ctx.ui.requestRender();
+		this.ctx.showStatus(`Fast mode ${enabled ? "enabled" : "disabled"}.`);
+	}
+
+	toggleAdvisor(): void {
+		if (this.ctx.focusedAgentId) {
+			this.ctx.showStatus("Advisor applies to the main session — press ←← to return first");
+			return;
+		}
+		const active = this.ctx.session.toggleAdvisorEnabled();
+		const configured = this.ctx.session.isAdvisorEnabled();
+		if (active) {
+			this.ctx.showStatus("Advisor enabled.");
+		} else if (configured) {
+			this.ctx.showStatus("Advisor setting enabled, but no model is assigned to the 'advisor' role.");
+		} else {
+			this.ctx.showStatus("Advisor disabled.");
+		}
+		this.ctx.statusLine?.invalidate();
+		this.ctx.ui.requestRender();
 	}
 
 	#getEditorTerminalPath(): string | null {

@@ -52,6 +52,8 @@ export function buildHotkeysMarkdown(bindings: HotkeysMarkdownBindings): string 
 		`| \`${appKey(bindings, "app.tools.expand")}\` | Toggle tool output expansion |`,
 		`| \`${appKey(bindings, "app.tools.toggleVisibility")}\` | Toggle tool activity visibility |`,
 		`| \`${appKey(bindings, "app.thinking.toggle")}\` | Toggle thinking block visibility |`,
+		`| \`${appKey(bindings, "app.fast.toggle")}\` | Toggle fast mode (/fast) |`,
+		`| \`${appKey(bindings, "app.advisor.toggle")}\` | Toggle advisor (/advisor) |`,
 		`| \`${appKey(bindings, "app.editor.external")}\` | Edit message in external editor |`,
 		`| \`${appKey(bindings, "app.retry")}\` | Retry last failed assistant turn |`,
 		`| \`${appKey(bindings, "app.clipboard.pasteImage")}\` | Paste image or text from clipboard |`,
