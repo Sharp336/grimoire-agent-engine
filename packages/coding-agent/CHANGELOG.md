@@ -12,6 +12,13 @@
 
 - Made the two per-session approval menu options single-line — same height as Approve/Deny, no grey description rows — and colored the tool name inside them green in the TUI; the option labels (what the selector returns and RPC/ACP clients see) are unchanged ([#4608](https://github.com/can1357/oh-my-pi/issues/4608)).
 - Changed the approval-similarity classifier prompts to an explicit rubric: a later call is similar only when it shares the approved calls' effect class (read-only versus side-effecting, a compound command taking the strongest class of its parts) and either their essential command — arguments, flags, loops, and pipes do not change it — or a different command with the same effect on the same kind of target, and the recorded list is read as a statement of intent rather than matched as text. Approving `ls` now covers a `find` loop over the working directory, while `ls && touch ./foo` still prompts ([#4608](https://github.com/can1357/oh-my-pi/issues/4608)).
+- Routed paid xAI models (`XAI_API_KEY` / `xai/…`) through the Responses API used by SuperGrok OAuth instead of Chat Completions.
+- Changed the default model for `XAI_API_KEY` (`xai`) from `grok-4-fast-non-reasoning` to `grok-4.5`.
+- Changed the default model for SuperGrok OAuth (`xai-oauth`) from `grok-4.3` to `grok-4.5`.
+- Included `reasoning.encrypted_content` in Responses `include` for paid xAI and SuperGrok OAuth models.
+- Replayed encrypted xAI reasoning on follow-up Responses turns for `xai` and `xai-oauth`.
+- Kept automatic model selection on paid `xai/grok-4.5` when only `XAI_API_KEY` is set, instead of preferring SuperGrok `xai-oauth/grok-4.5`. Explicit `xai-oauth/grok-4.5` still works with that paid key.
+- Stopped sending presence/frequency penalties and stop sequences to xAI reasoning models such as `grok-4.5`, which reject them.
 
 ### Fixed
 
