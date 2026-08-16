@@ -1999,9 +1999,7 @@ describe("ACP agent", () => {
 			prompt: [{ type: "text", text: "spawn a task" }],
 		} as PromptRequest);
 
-		const progress = harness.extNotifications.filter(
-			notification => notification.method === "_omp/agents/progress",
-		);
+		const progress = harness.extNotifications.filter(notification => notification.method === "_omp/agents/progress");
 		expect(progress).toHaveLength(1);
 		expect(progress[0]!.params.agent).toMatchObject({
 			id: "ReadA",
@@ -2105,9 +2103,9 @@ describe("ACP agent", () => {
 		const byFile = await harness.agent.extMethod("_omp/agents/messages", { sessionFile: transcript });
 		expect((byFile.messages as unknown[]).length).toBe(2);
 		// …but arbitrary paths and unknown ids are rejected.
-		await expect(
-			harness.agent.extMethod("_omp/agents/messages", { agentId: "Nobody" }),
-		).rejects.toThrow("Unknown ACP agent");
+		await expect(harness.agent.extMethod("_omp/agents/messages", { agentId: "Nobody" })).rejects.toThrow(
+			"Unknown ACP agent",
+		);
 		await expect(
 			harness.agent.extMethod("_omp/agents/messages", { sessionFile: "C:/Windows/win.ini" }),
 		).rejects.toThrow("Unknown ACP agent");
