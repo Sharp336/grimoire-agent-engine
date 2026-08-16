@@ -104675,13 +104675,30 @@
 			},
 			"contextWindow": 500000,
 			"maxTokens": 500000,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				],
+				"effortMap": {
+					"minimal": "low"
+				}
+			},
 			"supportsComputerUse": false,
 			"supportsComputerUseConfig": false,
 			"compat": {
+				"reasoningEffortMap": {
+					"minimal": "low"
+				},
 				"includeEncryptedReasoning": false,
 				"filterReasoningHistory": true,
 				"supportsImageDetailOriginal": false,
-				"omitReasoningEffort": true
+				"omitReasoningEffort": false,
+				"supportsReasoningEffort": true
 			}
 		},
 		"grok-build": {

@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Fixed SuperGrok (`xai-oauth`) Grok 4.6 hiding the thinking-level picker: the Responses effort-capable allowlist now includes `grok-4.6`, so `/model` can select the documented `low`/`medium`/`high`/`xhigh` ladder (`max` is rejected by api.x.ai).
+
 - Fixed `streamMarkupHealingPattern` gating DeepSeek DSML healing on a provider-id allowlist, which left DeepSeek models behind user-configured proxies (LiteLLM, private gateways) with no tool-call grammar. Whether the envelope leaks is decided by the serving stack behind the host, not the provider id, so any DeepSeek model on a non-official-OpenAI endpoint now selects `"dsml"`.
 ## [17.3.2] - 2026-08-13
 
