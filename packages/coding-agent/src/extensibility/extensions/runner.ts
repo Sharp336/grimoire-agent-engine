@@ -60,6 +60,7 @@ import type {
 	SessionBeforeSwitchResult,
 	SessionBeforeTreeResult,
 	SessionCompactingResult,
+	SessionCompactionPrecommitResult,
 	SessionStopEvent,
 	SessionStopEventResult,
 	ToolCallEvent,
@@ -358,13 +359,15 @@ type RunnerEmitResult<TEvent extends RunnerEmitEvent> = TEvent extends { type: "
 		? SessionBeforeBranchResult | undefined
 		: TEvent extends { type: "session_before_compact" }
 			? SessionBeforeCompactResult | undefined
-			: TEvent extends { type: "session_before_tree" }
-				? SessionBeforeTreeResult | undefined
-				: TEvent extends { type: "session.compacting" }
-					? SessionCompactingResult | undefined
-					: TEvent extends { type: "session_stop" }
-						? SessionStopEventResult | undefined
-						: undefined;
+			: TEvent extends { type: "session_compaction_precommit" }
+				? SessionCompactionPrecommitResult | undefined
+				: TEvent extends { type: "session_before_tree" }
+					? SessionBeforeTreeResult | undefined
+					: TEvent extends { type: "session.compacting" }
+						? SessionCompactingResult | undefined
+						: TEvent extends { type: "session_stop" }
+							? SessionStopEventResult | undefined
+							: undefined;
 
 // Session-lifecycle handler types live once in session-handler-types (imported
 // above for local use); re-exported here to keep this module's public API stable.
@@ -1215,7 +1218,7 @@ export class ExtensionRunner {
 		// subscribed; building `ctx` for a zero-handler event is pure waste.
 		let ctx: ExtensionContext | undefined;
 		let result: SessionBeforeEventResult | SessionCompactingResult | SessionStopEventResult | undefined;
-
+		let precommitResult: SessionCompactionPrecommitResult | undefined;
 		if (this.#isSessionShutdownEvent(event)) {
 			const timeoutMs = handlerTimeoutForEvent(event.type);
 			const promises: Promise<unknown>[] = [];
@@ -1243,9 +1246,23 @@ export class ExtensionRunner {
 					ctx,
 					ext,
 					handlerTimeoutForEvent(event.type),
+					event.type === "session_compaction_precommit"
+						? (kind, reason) => ({
+								cancel: true,
+								reason: `compaction precommit handler ${kind}: ${reason}`,
+							})
+						: undefined,
 				);
 
-				if (this.#isSessionBeforeEvent(event) && handlerResult) {
+				// A precommit cancellation must not skip other handlers: each listener
+				// may own a separate durable write that must settle before this attempt
+				// can be reported as failed.
+				if (event.type === "session_compaction_precommit") {
+					const candidate = handlerResult as SessionCompactionPrecommitResult | undefined;
+					if (candidate?.cancel && !precommitResult) {
+						precommitResult = candidate;
+					}
+				} else if (this.#isSessionBeforeEvent(event) && handlerResult) {
 					result = handlerResult as SessionBeforeEventResult;
 					if (result.cancel) {
 						return result as RunnerEmitResult<TEvent>;
@@ -1266,6 +1283,10 @@ export class ExtensionRunner {
 					}
 				}
 			}
+		}
+
+		if (event.type === "session_compaction_precommit") {
+			return precommitResult as RunnerEmitResult<TEvent>;
 		}
 
 		return result as RunnerEmitResult<TEvent>;

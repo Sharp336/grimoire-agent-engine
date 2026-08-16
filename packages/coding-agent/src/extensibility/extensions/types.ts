@@ -100,6 +100,8 @@ import type {
 	SessionCompactEvent,
 	SessionCompactingEvent,
 	SessionCompactingResult,
+	SessionCompactionPrecommitEvent,
+	SessionCompactionPrecommitResult,
 	SessionEvent,
 	SessionShutdownEvent,
 	SessionStartEvent,
@@ -674,10 +676,12 @@ export interface ResourcesDiscoverResult {
 }
 
 // ============================================================================
-// Session Events (shared with hooks subsystem)
+// Session Events
 // ============================================================================
 
+/** Session lifecycle events shared with the hooks subsystem. */
 export type {
+	ReadonlyCompactionResult,
 	SessionBeforeBranchEvent,
 	SessionBeforeCompactEvent,
 	SessionBeforeSwitchEvent,
@@ -685,6 +689,7 @@ export type {
 	SessionBranchEvent,
 	SessionCompactEvent,
 	SessionCompactingEvent,
+	SessionCompactionPrecommitEvent,
 	SessionEvent,
 	SessionShutdownEvent,
 	SessionStartEvent,
@@ -1026,6 +1031,7 @@ export function isToolCallEventType(toolName: string, event: ToolCallEvent): boo
 export type ExtensionEvent =
 	| ResourcesDiscoverEvent
 	| SessionEvent
+	| SessionCompactionPrecommitEvent
 	| ContextEvent
 	| BeforeProviderRequestEvent
 	| AfterProviderResponseEvent
@@ -1094,21 +1100,21 @@ export interface UserPythonEventResult {
 	result?: PythonResult;
 }
 
-export type { ToolResultEventResult } from "../shared-events";
-
-export interface BeforeAgentStartEventResult {
-	message?: CustomMessagePayload;
-	/** Replace the system prompt for this turn. If multiple extensions return this, they are chained. */
-	systemPrompt?: string[];
-}
-
 export type {
 	SessionBeforeBranchResult,
 	SessionBeforeCompactResult,
 	SessionBeforeSwitchResult,
 	SessionBeforeTreeResult,
 	SessionCompactingResult,
+	SessionCompactionPrecommitResult,
+	ToolResultEventResult,
 } from "../shared-events";
+
+export interface BeforeAgentStartEventResult {
+	message?: CustomMessagePayload;
+	/** Replace the system prompt for this turn. If multiple extensions return this, they are chained. */
+	systemPrompt?: string[];
+}
 
 // ============================================================================
 // Message Rendering
@@ -1206,6 +1212,10 @@ export interface ExtensionAPI {
 	on(
 		event: "session_before_compact",
 		handler: ExtensionHandler<SessionBeforeCompactEvent, SessionBeforeCompactResult>,
+	): void;
+	on(
+		event: "session_compaction_precommit",
+		handler: ExtensionHandler<SessionCompactionPrecommitEvent, SessionCompactionPrecommitResult>,
 	): void;
 	on(event: "session.compacting", handler: ExtensionHandler<SessionCompactingEvent, SessionCompactingResult>): void;
 	on(event: "session_compact", handler: ExtensionHandler<SessionCompactEvent>): void;

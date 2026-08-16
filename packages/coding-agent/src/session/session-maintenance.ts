@@ -56,7 +56,12 @@ import type { ModelRegistry } from "../config/model-registry";
 import { MODEL_ROLE_IDS } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import { getDefault } from "../config/settings";
-import type { ExtensionRunner, SessionBeforeCompactResult } from "../extensibility/extensions";
+import type {
+	ExtensionRunner,
+	SessionBeforeCompactResult,
+	SessionCompactionPrecommitEvent,
+	SessionCompactionPrecommitResult,
+} from "../extensibility/extensions";
 import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
 import type { GoalModeState } from "../goals/state";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
@@ -173,6 +178,44 @@ function mergeLlmCompactionPreserveData(
 	return snapcompact.stripPreservedArchive(Object.keys(preserveData).length > 0 ? preserveData : undefined);
 }
 
+type AutoCompactionCommitAction = SessionCompactionPrecommitEvent["action"];
+
+/**
+ * Freeze the plain structured data accepted by CompactionEntry persistence.
+ * The event's AbortSignal is deliberately not part of this clone/freeze walk.
+ */
+function deepFreezeCompactionData(value: unknown, seen = new WeakSet<object>()): void {
+	if (value === null || typeof value !== "object") return;
+	if (seen.has(value)) return;
+	seen.add(value);
+
+	if (!Array.isArray(value)) {
+		const prototype = Object.getPrototypeOf(value);
+		if (prototype !== Object.prototype && prototype !== null) {
+			throw new TypeError("Compaction candidates may contain only plain structured data");
+		}
+	}
+
+	for (const child of Object.values(value)) deepFreezeCompactionData(child, seen);
+	Object.freeze(value);
+}
+
+/** Clone once, freeze deeply, then use this same object for listeners and commit. */
+function immutableCompactionCandidate(result: CompactionResult): CompactionResult {
+	const candidate = structuredClone(result);
+	deepFreezeCompactionData(candidate);
+	return candidate;
+}
+
+/**
+ * Preserve the historical public end-event payload: frame archives remain
+ * durable in CompactionEntry but are not repeated through auto_compaction_end.
+ */
+function projectAutoCompactionEndResult(result: CompactionResult): CompactionResult {
+	const preserveData = snapcompact.stripPreservedArchive(result.preserveData);
+	return preserveData === result.preserveData ? result : { ...result, preserveData };
+}
+
 /** Capabilities borrowed from the owning AgentSession. */
 export interface SessionMaintenanceHost {
 	agent: Agent;
@@ -272,6 +315,7 @@ export interface SessionMaintenanceHost {
 export class SessionMaintenance {
 	#compactionAbortController: AbortController | undefined;
 	#autoCompactionAbortController: AbortController | undefined;
+	#autoCompactionIteration = 0;
 	/**
 	 * Live tool-loop contexts parked after mid-turn maintenance hit a no-progress
 	 * dead end. Membership suppresses the repeated rescue + warning while no cut
@@ -2799,6 +2843,15 @@ export class SessionMaintenance {
 				preserveData = mergeLlmCompactionPreserveData(compactionPrep.preserveData, compactResult.preserveData);
 			}
 
+			const result: CompactionResult = {
+				summary,
+				shortSummary,
+				firstKeptEntryId,
+				tokensBefore,
+				details,
+				preserveData,
+			};
+
 			if (autoCompactionSignal.aborted) {
 				await this.#emitLifecycleEvent(
 					{
@@ -2813,14 +2866,47 @@ export class SessionMaintenance {
 				return COMPACTION_CHECK_NONE;
 			}
 
-			this.#host.sessionManager.appendCompaction(
-				summary,
-				shortSummary,
-				firstKeptEntryId,
-				tokensBefore,
-				details,
+			const autoCompactionIteration = ++this.#autoCompactionIteration;
+			const commitAction: AutoCompactionCommitAction = action === "snapcompact" ? "snapcompact" : "context-full";
+			const extensionRunner = this.#host.extensionRunner;
+			const hasPrecommitHandlers = extensionRunner?.hasHandlers("session_compaction_precommit") ?? false;
+			const compactionCandidate = hasPrecommitHandlers ? immutableCompactionCandidate(result) : result;
+			let precommitResult: SessionCompactionPrecommitResult | undefined;
+			if (extensionRunner && hasPrecommitHandlers) {
+				const precommitEvent: SessionCompactionPrecommitEvent = Object.freeze({
+					type: "session_compaction_precommit",
+					customInstructions: undefined,
+					trigger: "auto",
+					reason,
+					action: commitAction,
+					automatic: true,
+					autoCompactionIteration,
+					timestamp: new Date().toISOString(),
+					signal: autoCompactionSignal,
+					compaction: compactionCandidate,
+				});
+				precommitResult = await extensionRunner.emit(precommitEvent);
+			}
+			if (precommitResult?.cancel || autoCompactionSignal.aborted) {
+				await this.#host.emitSessionEvent({
+					type: "auto_compaction_end",
+					action,
+					result: undefined,
+					aborted: true,
+					willRetry: false,
+					errorMessage: precommitResult?.reason,
+				});
+				return COMPACTION_CHECK_NONE;
+			}
+
+			const savedCompactionEntryId = this.#host.sessionManager.appendCompaction(
+				compactionCandidate.summary,
+				compactionCandidate.shortSummary,
+				compactionCandidate.firstKeptEntryId,
+				compactionCandidate.tokensBefore,
+				compactionCandidate.details,
 				fromExtension,
-				preserveData,
+				compactionCandidate.preserveData,
 			);
 			const newEntries = this.#host.sessionManager.getEntries();
 			const sessionContext = this.#host.buildDisplaySessionContext();
@@ -2838,8 +2924,8 @@ export class SessionMaintenance {
 				this.#host.closeCodexProviderSessionsForHistoryRewrite();
 			}
 
-			// Get the saved compaction entry for the hook
-			const savedCompactionEntry = newEntries.find(e => e.type === "compaction" && e.summary === summary) as
+			// Resolve by the returned id: summaries are not unique across a session.
+			const savedCompactionEntry = newEntries.find(e => e.id === savedCompactionEntryId) as
 				| CompactionEntry
 				| undefined;
 
@@ -2859,15 +2945,7 @@ export class SessionMaintenance {
 					await compactEmit;
 				}
 			}
-
-			const result: CompactionResult = {
-				summary,
-				shortSummary,
-				firstKeptEntryId,
-				tokensBefore,
-				details,
-				preserveData: snapcompact.stripPreservedArchive(preserveData),
-			};
+			const endEventResult = projectAutoCompactionEndResult(compactionCandidate);
 			// Post-maintenance progress guard — evaluated BEFORE emitting
 			// auto_compaction_end so the TUI rebuild triggered by that event
 			// already reflects any rescue rewrite (elide / image-drop) and the
@@ -2960,7 +3038,7 @@ export class SessionMaintenance {
 			}
 
 			await this.#emitLifecycleEvent(
-				{ type: "auto_compaction_end", action, result, aborted: false, willRetry },
+				{ type: "auto_compaction_end", action, result: endEventResult, aborted: false, willRetry },
 				options.detachPostCommit === true,
 			);
 

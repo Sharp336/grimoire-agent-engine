@@ -73,6 +73,49 @@ export interface SessionBeforeCompactEvent {
 	signal: AbortSignal;
 }
 
+type DeepReadonly<T> = T extends readonly (infer Item)[]
+	? readonly DeepReadonly<Item>[]
+	: T extends object
+		? { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
+		: T;
+
+/** Compile-time view of the deeply frozen automatic compaction candidate. */
+export type ReadonlyCompactionResult<T = unknown> = DeepReadonly<CompactionResult<T>>;
+
+/**
+ * Extension-only gate for the normal automatic compaction commit.
+ *
+ * The candidate comes from the main `prepareCompaction` summary/snapcompact
+ * pipeline. Automatic handoff, shake/elide, image-drop, and dead-end recovery
+ * rewrites are separate maintenance operations and do not emit this event.
+ * The gate fires after a candidate exists and before its `CompactionEntry` is
+ * appended or installed as active history.
+ */
+export interface SessionCompactionPrecommitEvent {
+	readonly type: "session_compaction_precommit";
+	/** Resolved user instructions for the compaction, when the trigger provides them. */
+	readonly customInstructions?: string;
+	/** The automatic maintenance trigger that requested this compaction. */
+	readonly trigger: "auto";
+	/** The condition that initiated automatic compaction. */
+	readonly reason: "threshold" | "overflow" | "idle" | "incomplete";
+	/** The strategy that produced the proposed compaction entry. */
+	readonly action: "context-full" | "snapcompact";
+	/** Whether this precommit belongs to automatic maintenance. */
+	readonly automatic: true;
+	/** Monotonic precommit attempt number for this session's automatic compactions. */
+	readonly autoCompactionIteration: number;
+	/** Wall-clock time when the proposed compaction entered the precommit boundary. */
+	readonly timestamp: string;
+	/** Cancels the listener when the automatic compaction attempt is superseded or aborted. */
+	readonly signal: AbortSignal;
+	/**
+	 * Exact deeply immutable compaction data passed to `appendCompaction()` if
+	 * every listener settles successfully.
+	 */
+	readonly compaction: ReadonlyCompactionResult;
+}
+
 /** Fired before compaction summarization to customize prompts/context */
 export interface SessionCompactingEvent {
 	type: "session.compacting";
@@ -378,6 +421,14 @@ export interface SessionBeforeCompactResult {
 	cancel?: boolean;
 	/** Custom compaction result - SessionManager adds id/parentId */
 	compaction?: CompactionResult;
+}
+
+/** Return type for `session_compaction_precommit` handlers */
+export interface SessionCompactionPrecommitResult {
+	/** Abort the automatic compaction before it changes session history. */
+	cancel?: boolean;
+	/** Optional explanation surfaced through the automatic compaction queue. */
+	reason?: string;
 }
 
 /** Return type for `session.compacting` handlers */
