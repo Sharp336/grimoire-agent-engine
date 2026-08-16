@@ -155,12 +155,9 @@ export function createPersistedSubagentReviverFactory(
 			await session.setActiveToolsByName([...init.tools, ...session.getMountedXdevToolNames()]);
 			// Cold revives must drive registry status themselves — createAgentSession
 			// doesn't wire this generically (the live path does it in the executor).
-			// Without it the idle-TTL timer never clears on a turn and the lifecycle
-			// could park the agent mid-run.
-			session.subscribe(event => {
-				if (event.type === "agent_start") registry.setStatus(ref.id, "running", session);
-				else if (event.type === "agent_end") registry.setStatus(ref.id, "idle", session);
-			});
+			// The internal run-state signal precedes deferrable public `agent_end`,
+			// keeping idle-TTL ownership synchronized even while prompts unwind.
+			registry.syncSessionStatus(ref.id, session);
 			// Live lifecycle frames report the selected definition name. New persisted
 			// sessions retain that name; older files predate it and must continue to
 			// report the registry display name (and runtime-neutral source) on revival.
