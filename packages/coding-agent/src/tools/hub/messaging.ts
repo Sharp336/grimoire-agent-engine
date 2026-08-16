@@ -66,12 +66,14 @@ export function resolveMessageTimeoutMs(settings: Settings, explicit?: number): 
 	return normalizeIrcTimeoutMs(settings.get("irc.timeoutMs"));
 }
 
-/** Session-buffered inbox drain used before parking a bus waiter. */
+/** Drain one session-buffered message, then the exact IrcBus mailbox, without parking a future waiter. */
 export function drainPendingInbox(registry: AgentRegistry, senderId: string, from?: string): IrcMessage | undefined {
 	const session = registry.get(senderId)?.session;
-	return typeof session?.drainPendingIrcInboxMessages === "function"
-		? session.drainPendingIrcInboxMessages(senderId, { from, limit: 1 })[0]
-		: undefined;
+	const sessionPending =
+		typeof session?.drainPendingIrcInboxMessages === "function"
+			? session.drainPendingIrcInboxMessages(senderId, { from, limit: 1 })[0]
+			: undefined;
+	return sessionPending ?? IrcBus.global().takePending(senderId, from);
 }
 
 /** `wait` result carrying a consumed message. */
@@ -123,7 +125,7 @@ export async function executeList(
 			].filter(Boolean);
 			lines.push(`- ${peer.id} [${peer.displayName} · ${peer.kind} · ${peer.status}] — ${extras.join(", ")}`);
 		}
-		if (peers.some(peer => peer.status === "parked")) {
+		if (refs.some(ref => ref.locality === "local" && ref.id !== senderId && ref.status === "parked")) {
 			lines.push("");
 			lines.push("Parked agents are revived automatically when you message them.");
 		}
@@ -162,6 +164,15 @@ export async function executeSend(
 	const isBroadcast = to === "all";
 	if (isBroadcast && params.await) {
 		return hubErrorResult('`await` is invalid with to:"all" — broadcasts have no single replier.', {
+			op: "send",
+			from: senderId,
+			to,
+		});
+	}
+	const directSender = registry.get(senderId);
+	const directRecipient = isBroadcast ? undefined : registry.get(to);
+	if (params.await && (directSender?.locality === "remote" || directRecipient?.locality === "remote")) {
+		return hubErrorResult("Awaited remote peer sends are unavailable without a controller wait transport.", {
 			op: "send",
 			from: senderId,
 			to,
@@ -215,7 +226,11 @@ export async function executeSend(
 					// Awaited sends mark the sender as blocked on an answer so a
 					// busy recipient that cannot reach a step boundary (async
 					// disabled) auto-replies instead of stranding the sender.
-					{ expectsReply: params.await || undefined, suppressRelay: suppressRelay || undefined },
+					{
+						expectsReply: params.await || undefined,
+						suppressRelay: suppressRelay || undefined,
+						signal,
+					},
 				),
 			),
 		);
@@ -297,7 +312,30 @@ export async function executeMessageWait(
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<CoordinationDetails>> {
 	const { registry, senderId, settings } = deps;
+	if (registry.get(senderId)?.locality === "remote") {
+		return hubErrorResult("Remote peer waits require a controller wait transport.", { op: "wait", from: senderId });
+	}
 	const from = params.from?.trim() || undefined;
+	const pending = drainPendingInbox(registry, senderId, from);
+	if (pending) return messageResult(senderId, pending);
+	const fromRef = from ? registry.get(from) : undefined;
+	if (fromRef?.locality === "remote") {
+		return hubErrorResult(`Remote peer "${from}" cannot be waited through the local message bus.`, {
+			op: "wait",
+			from: senderId,
+		});
+	}
+	if (!from) {
+		const visible = registry.listVisibleTo(senderId);
+		const hasLocalRunningPeer = visible.some(ref => ref.locality !== "remote" && registry.isRunning(ref));
+		const hasRemotePeer = visible.some(ref => ref.locality === "remote");
+		if (!hasLocalRunningPeer && hasRemotePeer) {
+			return hubErrorResult("Remote peers cannot satisfy a local bare message wait.", {
+				op: "wait",
+				from: senderId,
+			});
+		}
+	}
 	const timeoutMs = resolveMessageTimeoutMs(settings, params.timeoutMs);
 	try {
 		const waited = await IrcBus.global().wait(senderId, { from }, timeoutMs, signal, {
@@ -326,6 +364,12 @@ export function executeInbox(
 	senderId: string,
 	peek?: boolean,
 ): AgentToolResult<CoordinationDetails> {
+	if (registry.get(senderId)?.locality === "remote") {
+		return hubErrorResult("Remote peer inbox access requires a controller inbox transport.", {
+			op: "inbox",
+			from: senderId,
+		});
+	}
 	const busMessages = IrcBus.global().inbox(senderId, { peek });
 	const session = registry.get(senderId)?.session;
 	const pendingMessages =
@@ -368,6 +412,7 @@ function outcomeColor(outcome: IrcDeliveryReceipt["outcome"]): ToolUIColor {
 		case "revived":
 			return "warning";
 		case "injected":
+		case "remote":
 			return "accent";
 		case "failed":
 			return "error";

@@ -155,8 +155,12 @@ export class AgentLifecycleManager {
 	adopt(id: string, opts: AdoptOptions, expected?: AgentRefExpectation): void {
 		if (id === MAIN_AGENT_ID) return;
 		const ref = this.#registry.get(id);
-		if (!ref || (expected !== undefined && ref !== expected && ref.session !== expected)) {
-			logger.warn("AgentLifecycleManager.adopt: unknown or replaced agent id", { id });
+		if (
+			!ref ||
+			ref.locality === "remote" ||
+			(expected !== undefined && ref !== expected && ref.session !== expected)
+		) {
+			logger.warn("AgentLifecycleManager.adopt: unknown, remote, or replaced agent id", { id });
 			return;
 		}
 		const existing = this.#adopted.get(id);
@@ -186,7 +190,7 @@ export class AgentLifecycleManager {
 	 */
 	async reclaimDeadCorpse(id: string, expected: AgentRef): Promise<boolean> {
 		const ref = this.#registry.get(id);
-		if (ref !== expected || ref.status !== "parked" || ref.session) return false;
+		if (ref !== expected || ref.locality === "remote" || ref.status !== "parked" || ref.session) return false;
 		if (this.#adopted.has(id) || this.#parks.has(id) || this.#revivals.has(id)) return false;
 
 		const persistedFactory = ref.sessionFile ? this.#persistedReviverFactory : undefined;
@@ -247,7 +251,7 @@ export class AgentLifecycleManager {
 		const adopted = this.#adopted.get(id);
 		if (!adopted) return;
 		const ref = this.#registry.get(id);
-		if (!ref || adopted.ref !== ref) return;
+		if (!ref || ref.locality === "remote" || adopted.ref !== ref) return;
 		const session = ref.session;
 		if (!session) return;
 
@@ -315,6 +319,10 @@ export class AgentLifecycleManager {
 	 * cancelled (session still live) or awaited to completion before revive.
 	 */
 	async ensureLive(id: string): Promise<AgentSession> {
+		const initialRef = this.#registry.get(id);
+		if (initialRef?.locality === "remote") {
+			throw new Error(`Remote agent "${id}" cannot be resumed by the local lifecycle manager.`);
+		}
 		const park = this.#parks.get(id);
 		if (park) {
 			const parked = this.#registry.get(id);
@@ -363,6 +371,9 @@ export class AgentLifecycleManager {
 	 * when the agent is not revivable or no reviver can be produced.
 	 */
 	async #resolveAndRevive(id: string, ref: AgentRef): Promise<AgentSession> {
+		if (ref.locality === "remote") {
+			throw new Error(`Remote agent "${id}" cannot be revived by the local lifecycle manager.`);
+		}
 		let adoption = this.#adopted.get(id);
 		let revive = adoption?.ref === ref ? adoption.revive : undefined;
 		let coldAdopted = false;
@@ -417,6 +428,7 @@ export class AgentLifecycleManager {
 	async release(id: string, expected?: AgentRefExpectation, options?: { tombstone?: boolean }): Promise<boolean> {
 		const adopted = this.#adopted.get(id);
 		const current = this.#registry.get(id);
+		if (current?.locality === "remote") return false;
 		const currentMatches =
 			current && (expected === undefined || current === expected || current.session === expected);
 		const adoptedMatches =

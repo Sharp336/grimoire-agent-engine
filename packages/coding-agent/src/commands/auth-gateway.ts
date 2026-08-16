@@ -25,6 +25,9 @@ export default class AuthGateway extends Command {
 	static flags = {
 		json: Flags.boolean({ description: "Output JSON (token/status/check)" }),
 		bind: Flags.string({ description: "Bind address for `serve` (host:port)", char: "b" }),
+		"policy-socket": Flags.string({
+			description: "Absolute Unix socket path for fail-closed gateway policy authorization and observation",
+		}),
 		regenerate: Flags.boolean({ description: "Regenerate the gateway bearer token (token)" }),
 		"no-auth": Flags.boolean({
 			description:
@@ -59,6 +62,7 @@ export default class AuthGateway extends Command {
 			flags: {
 				json: flags.json,
 				bind: flags.bind,
+				policySocket: flags["policy-socket"],
 				regenerate: flags.regenerate,
 				noAuth: flags["no-auth"],
 				strict: flags.strict,

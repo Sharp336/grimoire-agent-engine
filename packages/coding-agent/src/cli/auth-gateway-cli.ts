@@ -14,6 +14,7 @@
  */
 import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
+import * as net from "node:net";
 import * as path from "node:path";
 import {
 	type Api,
@@ -30,7 +31,13 @@ import {
 	RemoteAuthCredentialStore,
 	type SnapshotResponse,
 } from "@oh-my-pi/pi-ai/auth-broker";
-import { DEFAULT_AUTH_GATEWAY_BIND, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
+import {
+	type AuthGatewayAuthorizationDecision,
+	type AuthGatewayAuthorizationRequest,
+	type AuthGatewayObservation,
+	DEFAULT_AUTH_GATEWAY_BIND,
+	startAuthGateway,
+} from "@oh-my-pi/pi-ai/auth-gateway";
 import { type GeneratedProvider, getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { getConfigRootDir, isEnoent, logger, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
@@ -44,6 +51,7 @@ export interface AuthGatewayCommandArgs {
 	flags: {
 		json?: boolean;
 		bind?: string;
+		policySocket?: string;
 		regenerate?: boolean;
 		/**
 		 * Disable bearer-token auth on inbound requests. Useful when the gateway
@@ -63,6 +71,289 @@ export interface AuthGatewayCommandArgs {
 }
 
 const ACTIONS: readonly AuthGatewayAction[] = ["serve", "token", "status", "check"];
+
+const AUTH_GATEWAY_POLICY_PROTOCOL_VERSION = 1;
+const DEFAULT_POLICY_SOCKET_TIMEOUT_MS = 2_000;
+const DEFAULT_POLICY_SOCKET_MAX_FRAME_BYTES = 64 * 1024;
+const MAX_POLICY_SOCKET_TIMEOUT_MS = 30_000;
+const MAX_POLICY_SOCKET_FRAME_BYTES = 1024 * 1024;
+
+interface AuthGatewayPolicySocketClientOptions {
+	timeoutMs?: number;
+	maxFrameBytes?: number;
+}
+
+export interface AuthGatewayPolicySocketClient {
+	authorizeRequest(request: AuthGatewayAuthorizationRequest): Promise<AuthGatewayAuthorizationDecision>;
+	observe(observation: AuthGatewayObservation): Promise<void>;
+	probe(signal?: AbortSignal): Promise<boolean>;
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasExactKeys(
+	value: unknown,
+	required: readonly string[],
+	optional: readonly string[] = [],
+): value is Record<string, unknown> {
+	if (!isJsonObject(value)) return false;
+	const allowed = new Set([...required, ...optional]);
+	const keys = Object.keys(value);
+	if (keys.length < required.length || keys.length > allowed.size) return false;
+	for (const key of required) {
+		if (!Object.hasOwn(value, key)) return false;
+	}
+	for (const key of keys) {
+		if (!allowed.has(key)) return false;
+	}
+	return true;
+}
+
+function parsePolicyDecision(value: unknown): AuthGatewayAuthorizationDecision {
+	if (hasExactKeys(value, ["authorized"], ["reasonCode"]) && value.authorized === false) {
+		return value as unknown as AuthGatewayAuthorizationDecision;
+	}
+	if (
+		hasExactKeys(value, [
+			"authorized",
+			"authorizationId",
+			"requestedModelId",
+			"resolvedModelId",
+			"sessionId",
+			"allowedOAuthCredentialIds",
+		]) &&
+		value.authorized === true
+	) {
+		return value as unknown as AuthGatewayAuthorizationDecision;
+	}
+	throw new Error("Gateway policy socket returned an invalid authorization decision");
+}
+
+function validatePositiveBoundedInteger(value: number, maximum: number, name: string): void {
+	if (!Number.isSafeInteger(value) || value <= 0 || value > maximum) {
+		throw new Error(`${name} must be a positive integer no greater than ${maximum}`);
+	}
+}
+
+export function validateAuthGatewayPolicySocketPath(socketPath: string): void {
+	if (socketPath.length === 0 || socketPath.includes("\0") || !path.isAbsolute(socketPath)) {
+		throw new Error("--policy-socket must be a non-empty absolute path without NUL bytes");
+	}
+	if (process.platform === "win32") {
+		throw new Error("--policy-socket is only supported on Unix platforms");
+	}
+}
+
+function exchangePolicySocketFrame(
+	socketPath: string,
+	request: Record<string, unknown>,
+	timeoutMs: number,
+	maxFrameBytes: number,
+	signal?: AbortSignal,
+): Promise<unknown> {
+	if (signal?.aborted) throw new Error("Gateway policy socket exchange aborted");
+	const encoded = Buffer.from(`${JSON.stringify(request)}\n`, "utf8");
+	if (encoded.byteLength - 1 > maxFrameBytes) {
+		throw new Error("Gateway policy socket request exceeds the frame limit");
+	}
+
+	return new Promise<unknown>((resolve, reject) => {
+		const socket = new net.Socket();
+		const chunks: Buffer[] = [];
+		let payloadBytes = 0;
+		let settled = false;
+		const timer = setTimeout(() => {
+			fail(new Error("Gateway policy socket exchange timed out"));
+		}, timeoutMs);
+
+		const cleanup = (): void => {
+			clearTimeout(timer);
+			signal?.removeEventListener("abort", onAbort);
+			socket.destroy();
+		};
+		const succeed = (value: unknown): void => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			resolve(value);
+		};
+		const fail = (error: Error): void => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			reject(error);
+		};
+		const onAbort = (): void => {
+			fail(new Error("Gateway policy socket exchange aborted"));
+		};
+
+		signal?.addEventListener("abort", onAbort, { once: true });
+		socket.setNoDelay(true);
+		socket.once("connect", () => {
+			try {
+				socket.write(encoded);
+			} catch {
+				fail(new Error("Gateway policy socket write failed"));
+			}
+		});
+		socket.on("data", chunk => {
+			if (settled) return;
+			const chunkBytes = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk;
+			const newline = chunkBytes.indexOf(0x0a);
+			if (newline === -1) {
+				payloadBytes += chunkBytes.byteLength;
+				if (payloadBytes > maxFrameBytes) {
+					fail(new Error("Gateway policy socket response exceeds the frame limit"));
+					return;
+				}
+				chunks.push(chunkBytes);
+				return;
+			}
+			if (payloadBytes + newline > maxFrameBytes) {
+				fail(new Error("Gateway policy socket response exceeds the frame limit"));
+				return;
+			}
+			if (newline !== chunkBytes.byteLength - 1) {
+				fail(new Error("Gateway policy socket returned trailing frame data"));
+				return;
+			}
+			chunks.push(chunkBytes.subarray(0, newline));
+			try {
+				const bytes = Buffer.concat(chunks, payloadBytes + newline);
+				const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+				succeed(JSON.parse(text));
+			} catch {
+				fail(new Error("Gateway policy socket returned malformed JSON"));
+			}
+		});
+		socket.once("error", () => {
+			fail(new Error("Gateway policy socket is unavailable"));
+		});
+		socket.once("end", () => {
+			fail(new Error("Gateway policy socket closed before a complete response"));
+		});
+		socket.once("close", () => {
+			fail(new Error("Gateway policy socket closed before a complete response"));
+		});
+		socket.connect({ path: socketPath });
+	});
+}
+
+export function createAuthGatewayPolicySocketClient(
+	socketPath: string,
+	options: AuthGatewayPolicySocketClientOptions = {},
+): AuthGatewayPolicySocketClient {
+	validateAuthGatewayPolicySocketPath(socketPath);
+	const timeoutMs = options.timeoutMs ?? DEFAULT_POLICY_SOCKET_TIMEOUT_MS;
+	const maxFrameBytes = options.maxFrameBytes ?? DEFAULT_POLICY_SOCKET_MAX_FRAME_BYTES;
+	validatePositiveBoundedInteger(timeoutMs, MAX_POLICY_SOCKET_TIMEOUT_MS, "Policy socket timeout");
+	validatePositiveBoundedInteger(maxFrameBytes, MAX_POLICY_SOCKET_FRAME_BYTES, "Policy socket frame limit");
+
+	const exchange = (request: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> =>
+		exchangePolicySocketFrame(socketPath, request, timeoutMs, maxFrameBytes, signal);
+
+	return {
+		authorizeRequest: async request => {
+			const response = await exchange(
+				{
+					version: AUTH_GATEWAY_POLICY_PROTOCOL_VERSION,
+					type: "authorize",
+					request: {
+						requestId: request.requestId,
+						format: request.format,
+						requestedModelId: request.requestedModelId,
+						...(request.requestedSessionId === undefined
+							? {}
+							: { requestedSessionId: request.requestedSessionId }),
+						method: request.method,
+						path: request.path,
+						authorization: request.authorization,
+					},
+				},
+				request.signal,
+			);
+			if (
+				!hasExactKeys(response, ["version", "type", "decision"]) ||
+				response.version !== AUTH_GATEWAY_POLICY_PROTOCOL_VERSION ||
+				response.type !== "authorize_result"
+			) {
+				throw new Error("Gateway policy socket returned an invalid authorization response");
+			}
+			return parsePolicyDecision(response.decision);
+		},
+		observe: async observation => {
+			const response = await exchange({
+				version: AUTH_GATEWAY_POLICY_PROTOCOL_VERSION,
+				type: "observe",
+				observation,
+			});
+			if (
+				!hasExactKeys(response, ["version", "type", "ack"]) ||
+				response.version !== AUTH_GATEWAY_POLICY_PROTOCOL_VERSION ||
+				response.type !== "observe_ack" ||
+				response.ack !== true
+			) {
+				throw new Error("Gateway policy socket returned an invalid observation acknowledgement");
+			}
+		},
+		probe: async signal => {
+			const response = await exchange(
+				{
+					version: AUTH_GATEWAY_POLICY_PROTOCOL_VERSION,
+					type: "probe",
+				},
+				signal,
+			);
+			if (
+				!hasExactKeys(response, ["version", "type", "ack"]) ||
+				response.version !== AUTH_GATEWAY_POLICY_PROTOCOL_VERSION ||
+				response.type !== "probe_ack" ||
+				response.ack !== true
+			) {
+				throw new Error("Gateway policy socket returned an invalid readiness acknowledgement");
+			}
+			return true;
+		},
+	};
+}
+
+export interface AuthGatewayPolicyReadinessProbeOptions {
+	cacheMs?: number;
+	now?: () => number;
+}
+
+export function createAuthGatewayPolicyReadinessProbe(
+	client: AuthGatewayPolicySocketClient,
+	options: AuthGatewayPolicyReadinessProbeOptions = {},
+): (signal?: AbortSignal) => Promise<boolean> {
+	const cacheMs = options.cacheMs ?? 250;
+	const now = options.now ?? Date.now;
+	validatePositiveBoundedInteger(cacheMs, 10_000, "Policy readiness cache");
+	let cached = false;
+	let cacheExpiresAt = 0;
+	let inFlight: Promise<boolean> | undefined;
+
+	return async () => {
+		if (now() < cacheExpiresAt) return cached;
+		if (inFlight) return inFlight;
+
+		const probe = client
+			.probe()
+			.catch(() => false)
+			.then(result => {
+				cached = result;
+				cacheExpiresAt = now() + cacheMs;
+				return result;
+			})
+			.finally(() => {
+				if (inFlight === probe) inFlight = undefined;
+			});
+		inFlight = probe;
+		return probe;
+	};
+}
 
 function getTokenFilePath(): string {
 	return path.join(getConfigRootDir(), "auth-gateway.token");
@@ -169,6 +460,8 @@ export function indexModelsByRequestId(
 }
 
 async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
+	const policyClient = flags.policySocket ? createAuthGatewayPolicySocketClient(flags.policySocket) : undefined;
+	const policyReadinessProbe = policyClient ? createAuthGatewayPolicyReadinessProbe(policyClient) : undefined;
 	const brokerConfig = await resolveAuthBrokerConfig();
 	if (!brokerConfig) {
 		throw new Error(
@@ -222,6 +515,13 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 		version: VERSION,
 		resolveModel: (id: string) => modelById.get(id),
 		listModels: () => modelById.values(),
+		...(policyClient && policyReadinessProbe
+			? {
+					authorizeRequest: policyClient.authorizeRequest,
+					observer: policyClient.observe,
+					readinessProbe: policyReadinessProbe,
+				}
+			: {}),
 	});
 	process.stdout.write(`auth-gateway listening on ${handle.url}\n`);
 	if (gatewayToken) {
@@ -387,6 +687,12 @@ async function runStatus(flags: AuthGatewayCommandArgs["flags"]): Promise<void> 
 }
 
 export async function runAuthGatewayCommand(cmd: AuthGatewayCommandArgs): Promise<void> {
+	if (cmd.flags.policySocket !== undefined) {
+		validateAuthGatewayPolicySocketPath(cmd.flags.policySocket);
+		if (cmd.action !== "serve") {
+			throw new Error("--policy-socket is only valid with `auth-gateway serve`");
+		}
+	}
 	switch (cmd.action) {
 		case "serve":
 			await runServe(cmd.flags);

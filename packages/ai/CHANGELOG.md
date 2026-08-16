@@ -5,6 +5,7 @@
 ### Added
 
 - Added fail-closed auth-gateway policy hooks for pre-credential authorization, OAuth row allowlists, caller-identity stripping, and content-free request observations.
+- Added dependency-aware auth-gateway readiness probes so policy-backed gateways report unavailable dependencies without changing legacy health behavior.
 
 ## [17.3.5] - 2026-08-16
 

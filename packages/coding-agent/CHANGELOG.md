@@ -5,6 +5,8 @@
 ### Added
 
 - Added a trusted runtime backend seam for explicit, fail-closed remote structured-subagent execution without local-process fallback.
+- Added an explicit fail-closed Unix policy-socket mode to `auth-gateway serve`, with bounded authorization, observation acknowledgement, and readiness exchanges.
+- Added trusted, fail-closed remote agent-registry and peer-transport seams with generation-bound identities, controller-routed cancellation, and unchanged local hub delivery.
 
 ## [17.3.5] - 2026-08-16
 

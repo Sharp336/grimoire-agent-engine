@@ -1522,6 +1522,15 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 			}
 			try {
 				if (req.method === "GET" && pathname === "/healthz") {
+					if (opts.readinessProbe) {
+						try {
+							if (!(await opts.readinessProbe(req.signal))) {
+								return withCors(json(503, { ok: false, version }), req);
+							}
+						} catch {
+							return withCors(json(503, { ok: false, version }), req);
+						}
+					}
 					return withCors(json(200, { ok: true, version }), req);
 				}
 				if (!isAuthorized(req, tokens)) {
@@ -1563,6 +1572,9 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 
 				// Model catalog.
 				if (req.method === "GET" && pathname === "/v1/models") {
+					if (opts.authorizeRequest) {
+						return withCors(json(403, { error: "route unavailable in gateway policy mode" }), req);
+					}
 					return withCors(handleModelsList(opts), req);
 				}
 

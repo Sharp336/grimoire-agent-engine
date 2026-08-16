@@ -260,6 +260,8 @@ export interface AuthGatewayServerOptions {
 	authorizeRequest?: AuthGatewayRequestAuthorizer;
 	/** Optional trusted sink for content-free policy observations. Rejection fails the request closed. */
 	observer?: AuthGatewayObserver;
+	/** Optional bounded dependency probe for `/healthz`; false or rejection returns 503. */
+	readinessProbe?: (signal: AbortSignal) => boolean | Promise<boolean>;
 	/** Version surfaced on `/healthz`. */
 	version?: string;
 }
