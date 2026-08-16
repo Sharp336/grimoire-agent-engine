@@ -19,6 +19,49 @@ export function json(status: number, body: unknown, headers?: Record<string, str
 	});
 }
 
+const JSON_DECODER = new TextDecoder();
+
+/** Read and parse a JSON request without permitting an unbounded policy preflight allocation. */
+export async function readBoundedJson(request: Request, maxBytes: number): Promise<unknown> {
+	const declaredLength = Number(request.headers.get("content-length"));
+	if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+		throw new Error("Request JSON body exceeds gateway policy limit");
+	}
+	if (!request.body) throw new Error("Request JSON body is empty");
+
+	const reader = request.body.getReader();
+	const chunks: Uint8Array[] = [];
+	let totalBytes = 0;
+	try {
+		for (;;) {
+			const chunk = await reader.read();
+			if (chunk.done) break;
+			totalBytes += chunk.value.byteLength;
+			if (totalBytes > maxBytes) {
+				try {
+					await reader.cancel();
+				} catch {
+					// The bounded rejection below is authoritative.
+				}
+				throw new Error("Request JSON body exceeds gateway policy limit");
+			}
+			chunks.push(chunk.value);
+		}
+	} finally {
+		reader.releaseLock();
+	}
+
+	const bytes = chunks.length === 1 ? chunks[0]! : new Uint8Array(totalBytes);
+	if (chunks.length !== 1) {
+		let offset = 0;
+		for (const chunk of chunks) {
+			bytes.set(chunk, offset);
+			offset += chunk.byteLength;
+		}
+	}
+	return JSON.parse(JSON_DECODER.decode(bytes)) as unknown;
+}
+
 /**
  * Diagnostic response headers for translated inference requests, mirroring the
  * names existing gateway-aware clients already parse: `x-request-id` /
@@ -121,19 +164,44 @@ const PASSTHROUGH_HEADER_NAMES: Record<string, true> = {
 	"x-conversation-id": true,
 };
 
+/** Policy mode forwards only protocol feature/version headers with no identity semantics. */
+const POLICY_PASSTHROUGH_HEADER_NAMES: Record<string, true> = {
+	"anthropic-beta": true,
+	"anthropic-version": true,
+	"openai-beta": true,
+};
+
+/** Retain only explicitly safe protocol feature/version headers in policy mode. */
+export function stripPolicyIdentityHeaders(
+	headers: Readonly<Record<string, string>> | undefined,
+): Record<string, string> {
+	const out: Record<string, string> = {};
+	for (const [name, value] of Object.entries(headers ?? {})) {
+		const lower = name.toLowerCase();
+		if (!value || !POLICY_PASSTHROUGH_HEADER_NAMES[lower]) continue;
+		out[lower] = value;
+	}
+	return out;
+}
+
 /**
  * Extract allow-listed passthrough headers from an inbound request. Keys are
  * lowercased; empty values are dropped. Called once per request in
  * `handleFormatEndpoint`; parsers then read `options.headers`.
  */
-export function captureRequestHeaders(headers: Headers): Record<string, string> {
+export function captureRequestHeaders(
+	headers: Headers,
+	options?: { stripPolicyIdentity?: boolean },
+): Record<string, string> {
 	const out: Record<string, string> = {};
 	headers.forEach((value, key) => {
 		if (!value) return;
 		const lower = key.toLowerCase();
-		if (PASSTHROUGH_HEADER_NAMES[lower] || lower.startsWith("x-stainless-")) {
-			out[lower] = value;
+		if (options?.stripPolicyIdentity) {
+			if (POLICY_PASSTHROUGH_HEADER_NAMES[lower]) out[lower] = value;
+			return;
 		}
+		if (PASSTHROUGH_HEADER_NAMES[lower] || lower.startsWith("x-stainless-")) out[lower] = value;
 	});
 	return out;
 }
