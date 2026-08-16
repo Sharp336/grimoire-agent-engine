@@ -92,6 +92,7 @@ import { shouldShowStartupSplash } from "./startup-splash";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "./system-prompt";
 import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
+import { createLangfuseAttributeConfig } from "./telemetry-attributes";
 import { concreteThinkingLevel, parseConfiguredThinkingLevel } from "./thinking";
 import type { LspStartupServerInfo } from "./tools";
 import { getChangelogPath, resolveStartupChangelogForDisplay, type StartupChangelogSelection } from "./utils/changelog";
@@ -1576,7 +1577,16 @@ export async function runRootCommand(
 	// remains governed by OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT.
 	await logger.time("initTelemetryExport", initTelemetryExport);
 	if (isTelemetryExportEnabled()) {
-		sessionOptions.telemetry = createTelemetryExportConfig(sessionOptions.telemetry);
+		sessionOptions.telemetry = createTelemetryExportConfig({
+			...createLangfuseAttributeConfig({
+				cwd,
+				prompt: parsedArgs.messages[0],
+				mode: isInteractive ? "interactive" : "headless",
+				modelRoles: settingsInstance.get("modelRoles"),
+				defaultModel: sessionOptions.model?.id,
+			}),
+			...sessionOptions.telemetry,
+		});
 	}
 
 	// Handle CLI --api-key as runtime override (not persisted)
