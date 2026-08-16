@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Restored mouse wheel, hover, and click handling in Plan Review while keeping Shift-drag available for native terminal text selection.
+
 ## [17.3.5] - 2026-08-16
 
 ### Added
