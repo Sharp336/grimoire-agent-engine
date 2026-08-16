@@ -5,8 +5,9 @@
  * `omp auth-broker status` (liveness checks). All endpoints except
  * `/v1/healthz` require a bearer token.
  */
+
+import { type } from "@oh-my-pi/omptype";
 import { readSseEvents } from "@oh-my-pi/pi-utils";
-import { type } from "arktype";
 import type { AuthCredential, DisabledCredentialSummary } from "../auth-storage";
 import type {
 	ClientUsageReportRequest,
@@ -28,6 +29,7 @@ import type {
 	UsageResponse,
 	UsageStaleResponse,
 } from "./types";
+import { AUTH_BROKER_CAPABILITIES_HEADER, AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES } from "./types";
 import { getAuthBrokerWireSchemas } from "./wire-schema-resource";
 
 type AuthBrokerResponseSchemaName =
@@ -135,7 +137,9 @@ export class AuthBrokerClient {
 		const query = new URLSearchParams();
 		if (opts.waitMs !== undefined) query.set("wait", String(opts.waitMs));
 		const path = `/v1/snapshot${query.size > 0 ? `?${query.toString()}` : ""}`;
-		const headers: Record<string, string> = {};
+		const headers: Record<string, string> = {
+			[AUTH_BROKER_CAPABILITIES_HEADER]: AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES,
+		};
 		if (opts.ifGenerationGt !== undefined) headers["If-None-Match"] = `"${opts.ifGenerationGt}"`;
 		const timeoutMs =
 			opts.waitMs !== undefined && opts.waitMs > 0 ? Math.max(this.#timeoutMs, opts.waitMs + 1000) : undefined;
@@ -176,6 +180,7 @@ export class AuthBrokerClient {
 		const headers: Record<string, string> = {
 			Accept: "text/event-stream",
 			Authorization: `Bearer ${this.#token}`,
+			[AUTH_BROKER_CAPABILITIES_HEADER]: AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES,
 		};
 		if (opts.signal?.aborted) {
 			throw new AuthBrokerError("Auth broker request aborted", { cause: opts.signal.reason });
@@ -244,12 +249,23 @@ export class AuthBrokerClient {
 		}
 	}
 
-	fetchUsage(signal?: AbortSignal): Promise<UsageResponse> {
-		// Validates the envelope (`generatedAt`, `reports[].provider`, `limits`,
-		// `metadata`) but leaves provider-specific extension fields permissive so
-		// the broker can ship new shapes ahead of the client. `raw` is accepted
-		// but normally stripped by the broker before send.
-		return this.#request<UsageResponse>("GET", "/v1/usage", { schema: "usageResponseSchema", signal });
+	/**
+	 * Fetch aggregate broker usage with a timeout sized for serialized
+	 * same-provider account probes.
+	 */
+	fetchUsage(options: { signal?: AbortSignal; maxAccountsPerProvider?: number } = {}): Promise<UsageResponse> {
+		const requestedAccountCount = options.maxAccountsPerProvider;
+		const accountCount =
+			typeof requestedAccountCount === "number" && Number.isFinite(requestedAccountCount)
+				? Math.max(1, Math.floor(requestedAccountCount))
+				: 1;
+		const perAccountTimeoutMs = Math.max(DEFAULT_TIMEOUT_MS, this.#timeoutMs);
+		const timeoutMs = perAccountTimeoutMs * (accountCount + 1);
+		return this.#request<UsageResponse>("GET", "/v1/usage", {
+			schema: "usageResponseSchema",
+			signal: options.signal,
+			timeoutMs,
+		});
 	}
 
 	/** Recorded usage-limit snapshots from the broker host, oldest first. */
@@ -364,7 +380,13 @@ export class AuthBrokerClient {
 	async #request<t>(
 		method: "GET" | "POST" | "DELETE",
 		path: string,
-		opts: { schema: AuthBrokerResponseSchemaName; auth?: boolean; body?: unknown; signal?: AbortSignal },
+		opts: {
+			schema: AuthBrokerResponseSchemaName;
+			auth?: boolean;
+			body?: unknown;
+			signal?: AbortSignal;
+			timeoutMs?: number;
+		},
 	): Promise<t> {
 		const response = await this.#fetchRaw(method, path, opts);
 		const text = await response.text();

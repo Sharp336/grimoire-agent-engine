@@ -757,7 +757,13 @@ const streamOpenAICompletionsOnce = (
 					disableStrictTools = true;
 					openaiStream = await createCompletionsStream("none");
 				} else {
-					if (!shouldRetryWithoutStrictTools(error, capturedErrorResponse, appliedStrictTools, context.tools)) {
+					if (
+						!shouldRetryWithoutStrictTools(error, capturedErrorResponse, {
+							model,
+							strictToolsApplied: appliedStrictTools,
+							tools: context.tools,
+						})
+					) {
 						throw error;
 					}
 					// Remember the rejection for the rest of the session so every
@@ -1569,17 +1575,19 @@ function buildParams(
 		if (options?.minP !== undefined) {
 			params.min_p = options.minP;
 		}
-		if (options?.presencePenalty !== undefined) {
-			params.presence_penalty = options.presencePenalty;
-		}
-		if (options?.repetitionPenalty !== undefined) {
-			params.repetition_penalty = options.repetitionPenalty;
-		}
-		if (options?.frequencyPenalty !== undefined) {
-			params.frequency_penalty = options.frequencyPenalty;
+		if (initialCompat.supportsPenaltyAndStopParams) {
+			if (options?.presencePenalty !== undefined) {
+				params.presence_penalty = options.presencePenalty;
+			}
+			if (options?.repetitionPenalty !== undefined) {
+				params.repetition_penalty = options.repetitionPenalty;
+			}
+			if (options?.frequencyPenalty !== undefined) {
+				params.frequency_penalty = options.frequencyPenalty;
+			}
 		}
 	}
-	if (options?.stopSequences?.length) {
+	if (options?.stopSequences?.length && initialCompat.supportsPenaltyAndStopParams) {
 		const seqs = options.stopSequences;
 		params.stop = seqs.length === 1 ? seqs[0] : seqs.slice(0, 4);
 	}
@@ -1604,17 +1612,32 @@ function buildParams(
 	if (options?.toolChoice && initialCompat.supportsToolChoice) {
 		params.tool_choice = mapToOpenAICompletionsToolChoice(options.toolChoice);
 	}
+	const forcedToolName =
+		typeof params.tool_choice === "object" && params.tool_choice !== null && "function" in params.tool_choice
+			? params.tool_choice.function.name
+			: undefined;
 	if (
 		typeof params.tool_choice === "object" &&
 		params.tool_choice !== null &&
 		!initialCompat.supportsNamedToolChoice
 	) {
+		// String-only hosts (llama.cpp, LM Studio) accept only none/auto/required,
+		// so a named object degrades to "required". "required" alone lets the host
+		// satisfy the hard choice with ANY advertised tool, defeating the named
+		// force. When the forced tool is present, narrow the advertised tools to it
+		// so "required" still enforces that specific call (mirrors the Ollama chat
+		// transport's selectToolsForToolChoice). When it is absent, leave the full
+		// list intact and let the absent-tool guard below drop the choice for an
+		// unforced turn.
+		if (
+			forcedToolName !== undefined &&
+			Array.isArray(params.tools) &&
+			params.tools.some(tool => tool.type === "function" && tool.function.name === forcedToolName)
+		) {
+			params.tools = params.tools.filter(tool => tool.type === "function" && tool.function.name === forcedToolName);
+		}
 		params.tool_choice = "required";
 	}
-	const forcedToolName =
-		typeof params.tool_choice === "object" && params.tool_choice !== null && "function" in params.tool_choice
-			? params.tool_choice.function.name
-			: undefined;
 	if (
 		forcedToolName !== undefined &&
 		Array.isArray(params.tools) &&

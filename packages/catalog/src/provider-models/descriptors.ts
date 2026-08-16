@@ -9,11 +9,13 @@ import type { ModelManagerConfig, ProviderCatalogEntry, ProviderDescriptor } fro
 import { googleModelManagerOptions, googleVertexModelManagerOptions } from "./google";
 import { ollamaCloudModelManagerOptions } from "./ollama";
 import {
+	aiandModelManagerOptions,
 	aimlApiModelManagerOptions,
 	alibabaCodingPlanModelManagerOptions,
 	alibabaTokenPlanModelManagerOptions,
 	anthropicModelManagerOptions,
 	basetenModelManagerOptions,
+	bedrockMantleModelManagerOptions,
 	cerebrasModelManagerOptions,
 	cloudflareAiGatewayModelManagerOptions,
 	coreWeaveModelManagerOptions,
@@ -21,6 +23,7 @@ import {
 	firepassModelManagerOptions,
 	fireworksModelManagerOptions,
 	githubCopilotModelManagerOptions,
+	gmiCloudModelManagerOptions,
 	groqModelManagerOptions,
 	huggingfaceModelManagerOptions,
 	kiloModelManagerOptions,
@@ -65,6 +68,14 @@ import {
 
 export const CATALOG_PROVIDERS = [
 	{
+		id: "aiand",
+		defaultModel: "moonshotai/kimi-k2.7-code",
+		envVars: ["AIAND_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => aiandModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "ai&" },
+	},
+	{
 		id: "aimlapi",
 		defaultModel: "gpt-5.5-2026-04-23",
 		envVars: ["AIMLAPI_API_KEY"],
@@ -98,6 +109,13 @@ export const CATALOG_PROVIDERS = [
 	{
 		id: "amazon-bedrock",
 		defaultModel: "us.anthropic.claude-opus-4-8",
+	},
+	{
+		id: "bedrock-mantle",
+		defaultModel: "openai.gpt-5.6-terra",
+		envVars: ["AWS_BEARER_TOKEN_BEDROCK"],
+		createModelManagerOptions: (config: ModelManagerConfig) => bedrockMantleModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
 	},
 	{
 		id: "anthropic",
@@ -177,6 +195,14 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["GITLAB_TOKEN"],
 		createModelManagerOptions: (config: ModelManagerConfig) => gitLabDuoWorkflowModelManagerOptions(config),
 		dynamicModelsAuthoritative: true,
+	},
+	{
+		id: "gmi-cloud",
+		defaultModel: "deepseek-ai/DeepSeek-V4-Flash",
+		envVars: ["GMI_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => gmiCloudModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "GMI Cloud" },
 	},
 	{
 		id: "google",
@@ -452,13 +478,13 @@ export const CATALOG_PROVIDERS = [
 	},
 	{
 		id: "xai",
-		defaultModel: "grok-4-fast-non-reasoning",
+		defaultModel: "grok-4.5",
 		envVars: ["XAI_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => xaiModelManagerOptions(config),
 	},
 	{
 		id: "xai-oauth",
-		defaultModel: "grok-4.3",
+		defaultModel: "grok-4.5",
 		envVars: ["XAI_OAUTH_TOKEN", "XAI_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => xaiOAuthModelManagerOptions(config),
 		catalogDiscovery: {
@@ -496,7 +522,7 @@ export const CATALOG_PROVIDERS = [
 	},
 	{
 		id: "zai",
-		defaultModel: "glm-5.2",
+		defaultModel: "glm-5.3",
 		envVars: ["ZAI_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => zaiModelManagerOptions(config),
 		catalogDiscovery: { label: "zAI" },
