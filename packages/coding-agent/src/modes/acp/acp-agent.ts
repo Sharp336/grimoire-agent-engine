@@ -262,6 +262,15 @@ type ManagedSessionRecord = {
 	liveMessageId: string | undefined;
 	liveMessageProgress: { textEmitted: boolean; thoughtEmitted: boolean } | undefined;
 	toolArgsById: Map<string, unknown>;
+	/**
+	 * toolCallIds whose `tool_execution_end` already streamed to the client.
+	 * Async tool progress (task/job callbacks) can push `tool_execution_update`
+	 * events after the loop finalized the call; those late `in_progress`
+	 * updates must not clobber the terminal `completed`/`failed` status on the
+	 * wire. Maintained in the synchronous event-handler prefix; ids are unique
+	 * per session lifetime, so the set is never cleared.
+	 */
+	endedToolCallIds: Set<string>;
 	extensionsConfigured: boolean;
 	// Installed inside `#scheduleBootstrapUpdates` (post-race-guard); released
 	// in `#disposeSessionRecord`. Lives independent of any prompt turn.
@@ -1474,6 +1483,7 @@ export class AcpAgent implements Agent {
 			liveMessageId: undefined,
 			liveMessageProgress: undefined,
 			toolArgsById: new Map(),
+			endedToolCallIds: new Set(),
 			extensionsConfigured: false,
 			closedError: undefined,
 			promptEventHandlers: new Set(),
@@ -1541,7 +1551,18 @@ export class AcpAgent implements Agent {
 		}
 
 		if (event.type === "tool_execution_start" || event.type === "tool_execution_update") {
+			// Async tool progress can fire after the loop finalized the call; a
+			// late `in_progress` would clobber the terminal status already sent
+			// (the ACP tool state machine has no transitions after completion).
+			// The ended-set is maintained in the synchronous prefix of the
+			// event handlers, so an update's check always observes an end that
+			// was emitted before it.
+			if (event.type === "tool_execution_update" && record.endedToolCallIds.has(event.toolCallId)) {
+				return;
+			}
 			record.toolArgsById.set(event.toolCallId, event.args);
+		} else if (event.type === "tool_execution_end") {
+			record.endedToolCallIds.add(event.toolCallId);
 		}
 
 		this.#prepareLiveAssistantMessage(record, event);

@@ -1863,6 +1863,76 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
+	it("suppresses late in_progress updates for tool calls that already ended", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+
+		session.prompt = async (text: string): Promise<boolean> => {
+			session.promptCalls.push(text);
+			session.isStreaming = true;
+			for (const listener of session.listeners()) {
+				listener({
+					type: "tool_execution_start",
+					toolCallId: "task_1",
+					toolName: "task",
+					args: { task: "analyze" },
+					intent: "analyze in parallel",
+				} as AgentSessionEvent);
+				listener({
+					type: "tool_execution_update",
+					toolCallId: "task_1",
+					toolName: "task",
+					args: { task: "analyze" },
+					partialResult: "running",
+				} as AgentSessionEvent);
+				listener({
+					type: "tool_execution_end",
+					toolCallId: "task_1",
+					toolName: "task",
+					isError: false,
+					result: { content: [{ type: "text", text: "done" }], details: {} },
+				} as AgentSessionEvent);
+				// Async job progress fired after the loop finalized the call:
+				// must NOT reopen the terminal status on the wire.
+				listener({
+					type: "tool_execution_update",
+					toolCallId: "task_1",
+					toolName: "task",
+					args: { task: "analyze" },
+					partialResult: "late progress",
+				} as AgentSessionEvent);
+				listener({ type: "agent_end", messages: [] } as AgentSessionEvent);
+			}
+			session.isStreaming = false;
+			return true;
+		};
+
+		await harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000049",
+			prompt: [{ type: "text", text: "spawn a task" }],
+		} as PromptRequest);
+
+		const statuses = harness.updates
+			.filter(update => update.sessionId === created.sessionId)
+			.map(update => update.update)
+			.filter(
+				(update): update is Extract<typeof update, { sessionUpdate: "tool_call_update" }> =>
+					update.sessionUpdate === "tool_call_update" && "toolCallId" in update,
+			)
+			.filter(update => update.toolCallId === "task_1")
+			.map(update => update.status);
+		// pending/in_progress -> completed, and no update after the terminal one.
+		expect(statuses).toContain("completed");
+		const completedIdx = statuses.indexOf("completed");
+		expect(statuses.slice(completedIdx)).toEqual(["completed"]);
+		expectAcpNotifications(harness.updates);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
 	it("refreshes task agent descriptions on ACP /reload-plugins", async () => {
 		const harness = await createHarness();
 		const agentDir = path.join(harness.cwdA, ".omp", "agents");
