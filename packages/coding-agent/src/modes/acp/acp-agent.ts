@@ -60,6 +60,7 @@ import { resolveLocalUrlToPath } from "../../internal-urls";
 import { MCPManager } from "../../mcp/manager";
 import type { MCPServerConfig } from "../../mcp/types";
 import { loadAllExtensions } from "../../modes/components/extensions/state-manager";
+import { readRpcSubagentTranscript } from "../../modes/rpc/rpc-subagents";
 import { theme } from "../../modes/theme/theme";
 import { normalizePlanTitle, type PlanApprovalDetails, resolveApprovedPlan } from "../../plan-mode/approved-plan";
 import { type AgentRef, AgentRegistry, type AgentStatus } from "../../registry/agent-registry";
@@ -269,6 +270,24 @@ function extractSubagentProgress(partialResult: unknown): AgentProgress[] | unde
 	if (!details || typeof details !== "object" || Array.isArray(details)) return undefined;
 	const progress = (details as { progress?: unknown }).progress;
 	return Array.isArray(progress) ? (progress as AgentProgress[]) : undefined;
+}
+
+/**
+ * Resolve an `_omp/agents/messages` request to a transcript file. Only files
+ * currently claimed by a registered agent (main or sub) are readable, so the
+ * surface can never be used to read arbitrary paths.
+ */
+function resolveAcpAgentTranscript(params: { agentId?: unknown; sessionFile?: unknown }): string | undefined {
+	if (typeof params.sessionFile === "string") {
+		const registered = AgentRegistry.global()
+			.list()
+			.some(ref => ref.sessionFile === params.sessionFile);
+		if (registered) return params.sessionFile;
+	}
+	if (typeof params.agentId === "string") {
+		return AgentRegistry.global().get(params.agentId)?.sessionFile ?? undefined;
+	}
+	return undefined;
 }
 
 type AgentImageContent = {
@@ -1302,6 +1321,27 @@ export class AcpAgent implements Agent {
 				return buildAcpSpeechModelsCatalog();
 			case "_omp/agents/list":
 				return { agents: snapshotAcpAgents() };
+			case "_omp/agents/messages": {
+				const sessionFile = resolveAcpAgentTranscript({
+					agentId: params.agentId,
+					sessionFile: params.sessionFile,
+				});
+				if (!sessionFile) {
+					throw new Error("Unknown ACP agent: provide a registered agentId or sessionFile");
+				}
+				const fromByte =
+					typeof params.fromByte === "number" && Number.isFinite(params.fromByte)
+						? Math.max(0, Math.trunc(params.fromByte))
+						: 0;
+				const result = await readRpcSubagentTranscript(sessionFile, fromByte);
+				return {
+					sessionFile: result.sessionFile,
+					fromByte: result.fromByte,
+					nextByte: result.nextByte,
+					reset: result.reset,
+					messages: result.messages,
+				};
+			}
 			case "_omp/sessions/listAll": {
 				const limit = typeof params.limit === "number" ? Math.max(1, Math.min(5000, params.limit as number)) : 1000;
 				const sessions = await SessionManager.listAll();

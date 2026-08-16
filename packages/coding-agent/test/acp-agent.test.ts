@@ -2037,6 +2037,85 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
+	it("returns subagent transcripts with thinking via _omp/agents/messages", async () => {
+		const harness = await createHarness();
+		const transcript = path.join(harness.cwdA, "SubT.jsonl");
+		await fs.promises.writeFile(
+			transcript,
+			[
+				JSON.stringify({
+					type: "session",
+					id: "s0",
+					parentId: null,
+					timestamp: "2026-08-16T10:00:00.000Z",
+				}),
+				JSON.stringify({
+					type: "session_init",
+					id: "si",
+					parentId: "s0",
+					timestamp: "2026-08-16T10:00:01.000Z",
+					agent: "task",
+					task: "read a.ts",
+				}),
+				JSON.stringify({
+					type: "message",
+					id: "m1",
+					parentId: "si",
+					timestamp: "2026-08-16T10:00:02.000Z",
+					message: { role: "user", content: [{ type: "text", text: "read a.ts" }] },
+				}),
+				JSON.stringify({
+					type: "message",
+					id: "m2",
+					parentId: "m1",
+					timestamp: "2026-08-16T10:00:03.000Z",
+					message: {
+						role: "assistant",
+						content: [
+							{ type: "thinking", thinking: "Let me read the file a.ts." },
+							{ type: "text", text: "export const a = 1;" },
+						],
+					},
+				}),
+			].join("\n") + "\n",
+		);
+		const registry = AgentRegistry.global();
+		registry.register({
+			id: "SubT",
+			displayName: "task",
+			kind: "sub",
+			parentId: "Main",
+			session: null,
+			sessionFile: transcript,
+			status: "idle",
+		});
+
+		const result = (await harness.agent.extMethod("_omp/agents/messages", {
+			agentId: "SubT",
+		})) as { messages: Array<{ role: string; content: unknown[] }>; nextByte: number; reset: boolean };
+
+		expect(result.messages).toHaveLength(2);
+		const assistant = result.messages[1]!;
+		expect(assistant.role).toBe("assistant");
+		expect(assistant.content).toContainEqual({ type: "thinking", thinking: "Let me read the file a.ts." });
+		expect(result.reset).toBe(false);
+		expect(typeof result.nextByte).toBe("number");
+
+		// A registered agent resolves by sessionFile too…
+		const byFile = await harness.agent.extMethod("_omp/agents/messages", { sessionFile: transcript });
+		expect((byFile.messages as unknown[]).length).toBe(2);
+		// …but arbitrary paths and unknown ids are rejected.
+		await expect(
+			harness.agent.extMethod("_omp/agents/messages", { agentId: "Nobody" }),
+		).rejects.toThrow("Unknown ACP agent");
+		await expect(
+			harness.agent.extMethod("_omp/agents/messages", { sessionFile: "C:/Windows/win.ini" }),
+		).rejects.toThrow("Unknown ACP agent");
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
 	it("refreshes task agent descriptions on ACP /reload-plugins", async () => {
 		const harness = await createHarness();
 		const agentDir = path.join(harness.cwdA, ".omp", "agents");
