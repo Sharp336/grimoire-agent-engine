@@ -65,6 +65,7 @@ import { buildServiceTierByFamily } from "./config/service-tier";
 import { Settings, type SkillsSettings } from "./config/settings";
 import { CursorExecHandlers, type CursorMcpResourceAdapter } from "./cursor";
 import { createBridgeEditTool, createBridgeGrepFactory } from "./cursor-bridge-tools";
+import { installDreamController } from "./dream";
 import "./discovery";
 import { initializeWithSettings } from "./discovery";
 import { withOmpExtensionRootScope } from "./discovery/omp-extension-roots";
@@ -3857,6 +3858,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				});
 			} else {
 				void logger.time("startMemoryStartupTask", startMemoryBackend);
+			}
+			// Dreaming: idle-time memory consolidation. Installed unconditionally for
+			// top-level sessions (it has no tool-registry dependency, unlike
+			// auto-learn); every gate — dream.enabled, memory backend, cooldown — is
+			// read live when the idle timer arms and fires, so mid-session settings
+			// changes take effect without a restart.
+			if (taskDepth === 0) {
+				installDreamController({ session, settings, agentDir });
 			}
 		}
 

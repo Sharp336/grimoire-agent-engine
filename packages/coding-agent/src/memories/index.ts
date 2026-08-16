@@ -82,6 +82,8 @@ interface Stage1Stats {
 	succeededNoOutput: number;
 	failed: number;
 	produced: number;
+	/** Rollout summaries of sessions that yielded a new raw memory this pass. */
+	synopses: string[];
 	usage: {
 		input: number;
 		output: number;
@@ -89,6 +91,14 @@ interface Stage1Stats {
 		cacheWrite: number;
 		total: number;
 	};
+}
+
+interface Phase2Outcome {
+	/** A consolidation job was claimed (the watermark was dirty). */
+	ran: boolean;
+	/** The consolidation model rewrote MEMORY.md / memory_summary.md / skills. */
+	consolidated: boolean;
+	outputCount: number;
 }
 
 interface Stage1OutputSchema {
@@ -342,8 +352,97 @@ async function runMemoryStartup(options: MemoryStartupOptions): Promise<void> {
 	await options.session.refreshBaseSystemPrompt?.();
 }
 
-async function runPhase1(options: MemoryStartupOptions): Promise<void> {
-	if (!isMemoryStartupActive(options)) return;
+export interface MemoryDreamPassLimits {
+	/** Cap on sessions extracted in one pass (defaults to `memories.maxRolloutsPerStartup`). */
+	maxSessions?: number;
+	/** Sessions active more recently than this are skipped (defaults to `memories.minRolloutIdleHours`). */
+	minSessionIdleHours?: number;
+}
+
+export interface MemoryDreamPassResult {
+	/** False when the local pipeline is not the active backend or its state DB is unavailable. */
+	ran: boolean;
+	/** False when extraction could not run at all (no model or API key resolved). */
+	modelAvailable: boolean;
+	/** Sessions claimed for extraction in this pass. */
+	scanned: number;
+	/** Sessions that yielded a new raw memory. */
+	extracted: number;
+	/** Extraction jobs that failed (they become claimable again after a delay). */
+	failed: number;
+	/** True when cross-session consolidation rewrote MEMORY.md / memory_summary.md. */
+	consolidated: boolean;
+	/** Synopses of the newly extracted sessions, for the dream diary. */
+	synopses: string[];
+}
+
+/**
+ * Run one incremental extraction + consolidation pass over persisted sessions
+ * outside the startup path — the local backend's dreaming entry point.
+ *
+ * Reuses the startup pipeline unchanged (SQLite leases, watermarks, artifact
+ * layout), so a dream pass is idempotent, incremental, and safe against a
+ * concurrently starting process claiming the same jobs. Unlike startup it
+ * deliberately does NOT refresh the live session's injected memory snapshot or
+ * base system prompt: like `learn`, dreams stay prompt-cache neutral — the
+ * next session picks up the fresh artifacts.
+ */
+export async function runMemoryDreamPass(options: {
+	session: AgentSession;
+	settings: Settings;
+	modelRegistry: ModelRegistry;
+	agentDir: string;
+	signal: AbortSignal;
+	limits?: MemoryDreamPassLimits;
+}): Promise<MemoryDreamPassResult> {
+	const idle: MemoryDreamPassResult = {
+		ran: false,
+		modelAvailable: false,
+		scanned: 0,
+		extracted: 0,
+		failed: 0,
+		consolidated: false,
+		synopses: [],
+	};
+	const base = loadMemoryConfig(options.settings);
+	if (!base.enabled) return idle;
+	try {
+		const db = openMemoryDb(getAgentDbPath(options.agentDir));
+		closeMemoryDb(db);
+	} catch (error) {
+		logger.debug("Dream pass skipped: memory state DB unavailable", { error: String(error) });
+		return idle;
+	}
+
+	const startupOptions: MemoryStartupOptions = {
+		session: options.session,
+		settings: options.settings,
+		modelRegistry: options.modelRegistry,
+		agentDir: options.agentDir,
+		signal: options.signal,
+		config: {
+			...base,
+			maxRolloutsPerStartup: options.limits?.maxSessions ?? base.maxRolloutsPerStartup,
+			minRolloutIdleHours: options.limits?.minSessionIdleHours ?? base.minRolloutIdleHours,
+		},
+	};
+	const stage1 = await runPhase1(startupOptions);
+	const phase2 = isMemoryStartupActive(startupOptions)
+		? await runPhase2(startupOptions)
+		: { ran: false, consolidated: false, outputCount: 0 };
+	return {
+		ran: true,
+		modelAvailable: stage1 !== undefined,
+		scanned: stage1?.claimed ?? 0,
+		extracted: stage1?.produced ?? 0,
+		failed: stage1?.failed ?? 0,
+		consolidated: phase2.consolidated,
+		synopses: stage1?.synopses ?? [],
+	};
+}
+
+async function runPhase1(options: MemoryStartupOptions): Promise<Stage1Stats | undefined> {
+	if (!isMemoryStartupActive(options)) return undefined;
 	const { session, modelRegistry, agentDir, config } = options;
 	const db = openMemoryDb(getAgentDbPath(agentDir));
 	const nowSec = unixNow();
@@ -386,7 +485,6 @@ async function runPhase1(options: MemoryStartupOptions): Promise<void> {
 			workerId,
 			excludeThreadIds: currentThreadId ? [currentThreadId] : [],
 		});
-		if (claims.length === 0) return;
 
 		const stats: Stage1Stats = {
 			claimed: claims.length,
@@ -394,8 +492,10 @@ async function runPhase1(options: MemoryStartupOptions): Promise<void> {
 			succeededNoOutput: 0,
 			failed: 0,
 			produced: 0,
+			synopses: [],
 			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		};
+		if (claims.length === 0) return stats;
 
 		await runWithConcurrency(claims, config.stage1Concurrency, async claim => {
 			if (!isMemoryStartupActive(options)) return;
@@ -450,6 +550,7 @@ async function runPhase1(options: MemoryStartupOptions): Promise<void> {
 			});
 			stats.succeeded += 1;
 			stats.produced += 1;
+			stats.synopses.push(result.output.rolloutSummary);
 			if (result.usage) {
 				stats.usage.input += result.usage.input;
 				stats.usage.output += result.usage.output;
@@ -468,13 +569,15 @@ async function runPhase1(options: MemoryStartupOptions): Promise<void> {
 			produced: stats.produced,
 			usage: stats.usage,
 		});
+		return stats;
 	} finally {
 		closeMemoryDb(db);
 	}
 }
 
-async function runPhase2(options: MemoryStartupOptions): Promise<void> {
-	if (!isMemoryStartupActive(options)) return;
+async function runPhase2(options: MemoryStartupOptions): Promise<Phase2Outcome> {
+	const notRan: Phase2Outcome = { ran: false, consolidated: false, outputCount: 0 };
+	if (!isMemoryStartupActive(options)) return notRan;
 	const { session, modelRegistry, agentDir, config } = options;
 	const cwd = session.sessionManager.getCwd();
 	const db = openMemoryDb(getAgentDbPath(agentDir));
@@ -489,17 +592,18 @@ async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 			nowSec,
 			cwd,
 		});
-		if (claimResult.kind !== "claimed") return;
+		if (claimResult.kind !== "claimed") return notRan;
 
 		const claim = claimResult.claim;
 		const outputs = listStage1OutputsForGlobal(db, config.maxRawMemoriesForGlobal, cwd);
 		const newWatermark = computeCompletionWatermark(claim.inputWatermark, outputs);
+		const incomplete: Phase2Outcome = { ran: true, consolidated: false, outputCount: outputs.length };
 
 		await syncPhase2Artifacts(memoryRoot, outputs);
-		if (!isMemoryStartupActive(options)) return;
+		if (!isMemoryStartupActive(options)) return incomplete;
 		if (outputs.length === 0) {
 			await cleanupConsolidatedArtifacts(memoryRoot);
-			if (!isMemoryStartupActive(options)) return;
+			if (!isMemoryStartupActive(options)) return incomplete;
 			const marked = markGlobalPhase2Succeeded(db, {
 				ownershipToken: claim.ownershipToken,
 				newWatermark,
@@ -509,10 +613,10 @@ async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 			if (!marked) {
 				logger.warn("Phase2 empty-input completion lost ownership", { memoryRoot });
 			}
-			return;
+			return incomplete;
 		}
 
-		if (!isMemoryStartupActive(options)) return;
+		if (!isMemoryStartupActive(options)) return incomplete;
 		const phase2Model = await resolveMemoryModel({
 			modelRegistry,
 			session,
@@ -526,7 +630,7 @@ async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 				memoryRoot,
 				cwd,
 			});
-			return;
+			return incomplete;
 		}
 		const phase2ApiKey = await modelRegistry.getApiKey(phase2Model, session.sessionId);
 		if (!phase2ApiKey) {
@@ -537,10 +641,10 @@ async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 				memoryRoot,
 				cwd,
 			});
-			return;
+			return incomplete;
 		}
 
-		if (!isMemoryStartupActive(options)) return;
+		if (!isMemoryStartupActive(options)) return incomplete;
 		let heartbeatLostOwnership = false;
 		const heartbeat = setInterval(() => {
 			if (!isMemoryStartupActive(options)) {
@@ -560,16 +664,19 @@ async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 		}, config.phase2HeartbeatSeconds * 1000);
 
 		try {
-			if (!isMemoryStartupActive(options)) return;
+			if (!isMemoryStartupActive(options)) return incomplete;
 			const consolidated = await runConsolidationModel({
 				memoryRoot,
 				model: phase2Model,
 				apiKey: modelRegistry.resolver(phase2Model, session.sessionId),
 				metadata: session.agent?.metadataForProvider(phase2Model.provider),
 			});
-			if (!isMemoryStartupActive(options)) return;
+			if (!isMemoryStartupActive(options)) return incomplete;
 			await applyConsolidation(memoryRoot, consolidated);
-			if (!isMemoryStartupActive(options)) return;
+			// Artifacts are rewritten from here on: report `consolidated` even when
+			// the pass aborts before marking success (the watermark stays dirty and a
+			// later pass re-runs, but MEMORY.md already reflects this consolidation).
+			if (!isMemoryStartupActive(options)) return { ran: true, consolidated: true, outputCount: outputs.length };
 			if (heartbeatLostOwnership) {
 				throw new Error("Phase2 lease ownership lost before completion");
 			}
@@ -582,8 +689,9 @@ async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 			if (!marked) {
 				throw new Error("Phase2 could not mark success: ownership lost");
 			}
+			return { ran: true, consolidated: true, outputCount: outputs.length };
 		} catch (error) {
-			if (!isMemoryStartupActive(options)) return;
+			if (!isMemoryStartupActive(options)) return incomplete;
 			markPhase2FailureWithFallback(db, {
 				claim,
 				retryDelaySeconds: config.phase2RetryDelaySeconds,
@@ -592,6 +700,7 @@ async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 				cwd,
 				error,
 			});
+			return incomplete;
 		} finally {
 			clearInterval(heartbeat);
 		}
@@ -1232,7 +1341,7 @@ function computeModelTokenBudget(model: Model, config: MemoryRuntimeConfig): num
 	return Math.max(2048, Math.floor(maxTokens));
 }
 
-async function resolveMemoryModel(options: {
+export async function resolveMemoryModel(options: {
 	modelRegistry: ModelRegistry;
 	session: AgentSession;
 	fallbackRole: string;

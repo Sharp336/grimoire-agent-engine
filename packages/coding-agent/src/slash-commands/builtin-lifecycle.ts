@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { setProjectDir } from "@oh-my-pi/pi-utils";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
+import { getDreamController, getDreamDiaryPath, readRecentDreamEntries } from "../dream";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-backend";
 import type { FreshSessionResult } from "../session/agent-session";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
@@ -38,6 +39,21 @@ function parseShakeMode(args: string): ShakeMode | { error: string } {
 	if (verb === "" || verb === "elide") return "elide";
 	if (verb === "images") return "images";
 	return { error: `Unknown /shake mode "${verb}". Use elide or images.` };
+}
+
+/** Compact past/future time for /dream status lines ("23 min ago", "in 2 h"). */
+function formatDreamAge(atSec: number): string {
+	const deltaSec = Math.round(Date.now() / 1000 - atSec);
+	const abs = Math.abs(deltaSec);
+	const text =
+		abs < 90
+			? "moments"
+			: abs < 5400
+				? `${Math.round(abs / 60)} min`
+				: abs < 129_600
+					? `${Math.round(abs / 3600)} h`
+					: `${Math.round(abs / 86_400)} d`;
+	return deltaSec >= 0 ? `${text} ago` : `in ${text}`;
 }
 
 /** Format the session's workspace directories (cwd + additional) for display. */
@@ -356,6 +372,76 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		handleTui: async (command, runtime) => {
 			runtime.ctx.editor.setText("");
 			await runtime.ctx.handleMemoryCommand(command.text);
+		},
+	},
+	{
+		name: "dream",
+		aliases: ["dreaming"],
+		description: "Idle-time memory consolidation (dreaming)",
+		acpDescription: "Run or inspect dreaming",
+		acpInputHint: "<subcommand>",
+		subcommands: [
+			{ name: "status", description: "Show dreaming status and the last result" },
+			{ name: "now", description: "Dream immediately: consolidate recent memory" },
+			{ name: "diary", description: "Show recent dream diary entries" },
+		],
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const verb = (command.args.trim().split(/\s+/)[0] ?? "").toLowerCase() || "status";
+			const controller = getDreamController(runtime.session);
+			switch (verb) {
+				case "status": {
+					if (!controller) {
+						await runtime.output("Dreaming is not available in this session.");
+						return commandConsumed();
+					}
+					const status = await controller.status();
+					if (status.backend === "off") {
+						await runtime.output(
+							"Dreaming is inactive: no memory backend is enabled. Select one with /settings (memory.backend).",
+						);
+						return commandConsumed();
+					}
+					const lines = [
+						`Dreaming: ${status.enabled ? "enabled" : "disabled"} (backend: ${status.backend})`,
+						`State: ${status.running ? "dreaming now" : status.armed ? "idle timer armed" : "waiting for idle"}`,
+					];
+					if (status.lastDreamAtSec) lines.push(`Last dream: ${formatDreamAge(status.lastDreamAtSec)}`);
+					if (status.lastResult)
+						lines.push(`Last result: ${status.lastResult.outcome} — ${status.lastResult.detail}`);
+					if (!status.running && status.nextEligibleAtSec && status.nextEligibleAtSec * 1000 > Date.now()) {
+						lines.push(`Next idle dream: eligible ${formatDreamAge(status.nextEligibleAtSec)}`);
+					}
+					await runtime.output(lines.join("\n"));
+					return commandConsumed();
+				}
+				case "now": {
+					if (!controller) {
+						await runtime.output("Dreaming is not available in this session.");
+						return commandConsumed();
+					}
+					if (runtime.settings.get("memory.backend") === "off") {
+						await runtime.output(
+							"Dreaming needs a memory backend. Select one with /settings (memory.backend) first.",
+						);
+						return commandConsumed();
+					}
+					await runtime.output("Dreaming — consolidating recent memory…");
+					const result = await controller.dreamNow("manual");
+					await runtime.output(
+						`Dream ${result.outcome === "dreamt" ? "complete" : result.outcome}: ${result.detail}`,
+					);
+					return commandConsumed();
+				}
+				case "diary": {
+					const diaryPath = getDreamDiaryPath(runtime.settings.getAgentDir(), runtime.cwd);
+					const entries = await readRecentDreamEntries(diaryPath, 5);
+					await runtime.output(entries ?? "The dream diary is empty — no dreams recorded yet.");
+					return commandConsumed();
+				}
+				default:
+					return usage("Usage: /dream <status|now|diary>", runtime);
+			}
 		},
 	},
 	{

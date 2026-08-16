@@ -140,7 +140,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Git",
 	],
 	context: ["General", "Compaction", "Rules (TTSR)", "Experimental"],
-	memory: ["General", "Auto-Learn", "Mnemopi", "Hindsight"],
+	memory: ["General", "Dreaming", "Auto-Learn", "Mnemopi", "Hindsight"],
 	files: ["Editing", "Reading", "Read Summaries", "LSP"],
 	shell: ["Bash", "Eval & Runtimes"],
 	tools: [
@@ -2667,6 +2667,71 @@ export const SETTINGS_SCHEMA = {
 	},
 	// Config-file-only knob (numbers without `options` are hidden from the UI).
 	"autolearn.minToolCalls": { type: "number", default: 5 },
+
+	// Dreaming: idle-time background memory consolidation.
+	"dream.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "memory",
+			group: "Dreaming",
+			label: "Dreaming",
+			description:
+				"While the session sits idle, consolidate recent session history into long-term memory (needs a memory backend)",
+			condition: "memoryActive",
+		},
+	},
+	"dream.idleMinutes": {
+		type: "number",
+		default: 30,
+		ui: {
+			tab: "memory",
+			group: "Dreaming",
+			label: "Dream After Idle",
+			description: "Minutes of idle time before a dreaming pass may start",
+			condition: "memoryActive",
+			options: [
+				{ value: "10", label: "10 minutes" },
+				{ value: "20", label: "20 minutes" },
+				{ value: "30", label: "30 minutes" },
+				{ value: "60", label: "1 hour" },
+				{ value: "120", label: "2 hours" },
+			],
+		},
+	},
+	"dream.minIntervalHours": {
+		type: "number",
+		default: 6,
+		ui: {
+			tab: "memory",
+			group: "Dreaming",
+			label: "Dream Cooldown",
+			description: "Minimum hours between idle dreaming passes (/dream now bypasses this)",
+			condition: "memoryActive",
+			options: [
+				{ value: "1", label: "1 hour" },
+				{ value: "3", label: "3 hours" },
+				{ value: "6", label: "6 hours" },
+				{ value: "12", label: "12 hours" },
+				{ value: "24", label: "24 hours" },
+			],
+		},
+	},
+	"dream.diary": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "memory",
+			group: "Dreaming",
+			label: "Dream Diary",
+			description: "Record each dreaming pass in DREAMS.md next to the project's memory artifacts",
+			condition: "memoryActive",
+		},
+	},
+	// Config-file-only knobs (numbers without `options` are hidden from the UI).
+	"dream.diaryMaxEntries": { type: "number", default: 50 },
+	"dream.maxSessionsPerDream": { type: "number", default: 16 },
+	"dream.minSessionIdleHours": { type: "number", default: 1 },
 
 	// Mnemopi local SQLite memory backend.
 	"mnemopi.dbPath": {

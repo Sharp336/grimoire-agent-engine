@@ -239,6 +239,14 @@
       "types": "./src/discovery/*.ts",
       "import": "./src/discovery/*.ts"
     },
+    "./dream": {
+      "types": "./src/dream/index.ts",
+      "import": "./src/dream/index.ts"
+    },
+    "./dream/*": {
+      "types": "./src/dream/*.ts",
+      "import": "./src/dream/*.ts"
+    },
     "./edit": {
       "types": "./src/edit/index.ts",
       "import": "./src/edit/index.ts"
