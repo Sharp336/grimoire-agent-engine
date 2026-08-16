@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `statusLine.segmentOptions.cost.showSubscription` (default `true`) to show or hide the `(sub)` OAuth/subscription billing marker in the status-line cost segment and the footer.
+
 ## [17.3.5] - 2026-08-16
 
 ### Added

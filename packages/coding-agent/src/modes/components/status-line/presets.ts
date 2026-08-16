@@ -1,4 +1,31 @@
-import type { PresetDef, StatusLinePreset } from "./types";
+import type { PresetDef, StatusLinePreset, StatusLineSegmentOptions, StatusLineSettings } from "./types";
+
+/**
+ * Segment options effective for the given preset and user overrides — preset
+ * defaults on the bottom, user `statusLine.segmentOptions` merged on top,
+ * per segment. Shared by the status line and the footer so both renderers
+ * honor preset-level option changes identically.
+ */
+export function mergeSegmentOptions(
+	preset: StatusLinePreset | undefined,
+	user: StatusLineSettings["segmentOptions"] | undefined,
+): StatusLineSegmentOptions {
+	const merged: StatusLineSettings["segmentOptions"] = {};
+
+	for (const [segment, options] of Object.entries(getPreset(preset ?? "default").segmentOptions ?? {})) {
+		merged[segment as keyof StatusLineSegmentOptions] = { ...(options as Record<string, unknown>) };
+	}
+
+	for (const [segment, options] of Object.entries(user ?? {})) {
+		const current = merged[segment as keyof StatusLineSegmentOptions] ?? {};
+		merged[segment as keyof StatusLineSegmentOptions] = {
+			...(current as Record<string, unknown>),
+			...(options as Record<string, unknown>),
+		};
+	}
+
+	return merged;
+}
 
 export const STATUS_LINE_PRESETS: Record<StatusLinePreset, PresetDef> = {
 	default: {

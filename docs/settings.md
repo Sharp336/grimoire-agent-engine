@@ -681,6 +681,8 @@ tui:
 
 For a custom status line, set `statusLine.preset: custom` and configure `statusLine.leftSegments`, `statusLine.rightSegments`, and `statusLine.segmentOptions`.
 
+Per-segment options: `model.showThinkingLevel`, `path.abbreviate`/`maxLength`/`stripWorkPrefix`, `git.showBranch`/`showStaged`/`showUnstaged`/`showUntracked`, `time.format`/`showSeconds`, and `cost.showSubscription` (default `true`) — the last shows or hides the `(sub)` marker rendered for OAuth/subscription-billed models in the cost segment and the classic footer.
+
 ### Interaction
 
 | Key                  | Type    | Default         | Values                                                                                                  |

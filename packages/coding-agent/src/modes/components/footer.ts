@@ -9,6 +9,8 @@ import { shortenPath } from "../../tools/render-utils";
 import * as git from "../../utils/git";
 import { sanitizeStatusText } from "../shared";
 import { formatContextUsage, getContextUsageLevel, getContextUsageThemeColor } from "./status-line/context-thresholds";
+import { mergeSegmentOptions } from "./status-line/presets";
+import type { StatusLinePreset, StatusLineSettings } from "./status-line/types";
 
 /**
  * Footer component that shows pwd, token stats, and context usage
@@ -157,12 +159,17 @@ export class FooterComponent implements Component {
 
 		// Show billing summary with subscription and premium-request indicators
 		const usingSubscription = state.model ? this.session.modelRegistry.isUsingOAuth(state.model) : false;
+		const costOptions = mergeSegmentOptions(
+			settings.getGroup("statusLine").preset as StatusLinePreset | undefined,
+			settings.getGroup("statusLine").segmentOptions as StatusLineSettings["segmentOptions"] | undefined,
+		).cost;
+		const showSubscriptionMarker = usingSubscription && costOptions?.showSubscription !== false;
 		const normalizedPremiumRequests = Math.round((totalPremiumRequests + Number.EPSILON) * 100) / 100;
-		if (totalCost || usingSubscription || normalizedPremiumRequests) {
+		if (totalCost || showSubscriptionMarker || normalizedPremiumRequests) {
 			const billingParts: string[] = [];
 			if (totalCost) billingParts.push(`$${totalCost.toFixed(3)}`);
 			if (normalizedPremiumRequests) billingParts.push(`★ ${formatNumber(normalizedPremiumRequests)}`);
-			if (usingSubscription) billingParts.push("(sub)");
+			if (showSubscriptionMarker) billingParts.push("(sub)");
 			if (billingParts.length > 0) statsParts.push(billingParts.join(" "));
 		}
 
