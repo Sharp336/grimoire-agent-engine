@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added fail-closed auth-gateway policy hooks for pre-credential authorization, OAuth row allowlists, caller-identity stripping, and content-free request observations.
+
 ## [17.3.5] - 2026-08-16
 
 ### Added
