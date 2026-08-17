@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added 7 new `alibaba-token-plan` bundled models — `qwen3.8-max`, `qwen3.8-max-preview`, `qwen3.7-plus`, `glm-5.2`, `kimi-k2.7-code`, `deepseek-v4-pro-0813`, and `deepseek-v4-flash-0731` — bringing the catalog from 11 to 18 entries ([#8847](https://github.com/can1357/oh-my-pi/issues/8847)).
+
+### Changed
+
+- Changed the `alibaba-token-plan` default model to `qwen3.8-max` and the login key-validation probe to `qwen3.6-flash`, so login no longer depends on the flagship model id ([#8847](https://github.com/can1357/oh-my-pi/issues/8847)).
+
+### Fixed
+
+- Fixed incorrect bundled metadata for `alibaba-token-plan` models: `glm-5`/`glm-5.1` were flagged non-reasoning and `glm-5` carried an 8x-too-large output cap (131072 vs the real 16384); `qwen3.7-max`, `kimi-k2.5`, `kimi-k2.6`, and `MiniMax-M2.5` had wrong output/context limits; and `deepseek-v3.2` was still pinned to the retired `/compatible-mode/v1` OpenAI-completions surface instead of the Anthropic-messages endpoint ([#8847](https://github.com/can1357/oh-my-pi/issues/8847)).
+
 ## [15.2.4] - 2026-05-22
 
 ### Fixed

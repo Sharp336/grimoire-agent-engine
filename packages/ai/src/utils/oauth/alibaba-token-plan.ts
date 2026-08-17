@@ -16,7 +16,10 @@ import type { OAuthController } from "./types";
 
 const AUTH_URL = "https://modelstudio.console.alibabacloud.com/";
 const API_BASE_URL = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1";
-const VALIDATION_MODEL = "qwen3.7-max";
+// Probe with the cheapest always-present tier rather than the flagship: pinning the
+// probe to a headline model breaks login the moment that id is renamed or retired
+// (see #6078, where a hardcoded qwen3.5-plus probe started 404ing model_not_found).
+const VALIDATION_MODEL = "qwen3.6-flash";
 
 /**
  * Login to Alibaba Token Plan Enterprise.
