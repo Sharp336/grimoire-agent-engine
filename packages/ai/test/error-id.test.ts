@@ -74,6 +74,20 @@ describe("error-id classification", () => {
 		expect(AIError.retriable(id)).toBe(false);
 	});
 
+	it("classifies Codex cyber approval denials as account-scoped policy blocks", () => {
+		const assistant = message({
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			model: "gpt-5.6-sol",
+			errorMessage:
+				"Codex error event: This content was flagged for possible cybersecurity risk. Join Trusted Access for Cyber. (code=cyber_policy)",
+		});
+		const id = AIError.classifyMessage(assistant);
+		expect(AIError.is(id, AIError.Flag.AccountPolicy)).toBe(true);
+		expect(AIError.is(id, AIError.Flag.ContentBlocked)).toBe(true);
+		expect(AIError.retriable(id)).toBe(false);
+	});
+
 	it("keeps raw status fallback unclassified", () => {
 		const id = 503;
 		expect(AIError.is(id, AIError.Flag.Class)).toBe(false);
@@ -114,6 +128,24 @@ describe("error-id classification", () => {
 		expect(AIError.is(id, AIError.Flag.UsageLimit)).toBe(true);
 		expect(AIError.is(id, AIError.Flag.Class)).toBe(true);
 		expect(assistant.errorId).toBe(id);
+	});
+
+	it("classifies Cursor NGHTTP2 stream resets as transient", () => {
+		for (const errorMessage of [
+			"Stream closed with error code NGHTTP2_INTERNAL_ERROR",
+			"Stream closed with error code NGHTTP2_REFUSED_STREAM",
+			"Connect error failed_precondition: Error: Stream closed with error code NGHTTP2_REFUSED_STREAM",
+		]) {
+			const assistant = message({
+				api: "cursor-agent",
+				provider: "cursor",
+				model: "composer-2.5",
+				errorMessage,
+			});
+			const id = AIError.classifyMessage(assistant);
+			expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+			expect(AIError.retriable(id)).toBe(true);
+		}
 	});
 
 	it("merges existing cause-chain kinds with finalized error text kinds", () => {
