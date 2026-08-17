@@ -282,6 +282,33 @@ describe("AuthStorage codex oauth ranking", () => {
 		}
 	});
 
+	test("strict OAuth row selection skips model-scoped blocks before trying blocked rows", async () => {
+		if (!authStorage || !store?.upsertCredentialBlock) throw new Error("test setup failed");
+		await authStorage.set("openai-codex", [
+			{ type: "oauth", ...createCredential("blocked", "blocked@example.com") },
+			{ type: "oauth", ...createCredential("healthy", "healthy@example.com") },
+		]);
+		const rows = store.listAuthCredentials("openai-codex");
+		const blocked = rows[0];
+		const healthy = rows[1];
+		if (!blocked || !healthy) throw new Error("expected two stored credentials");
+		store.upsertCredentialBlock({
+			credentialId: blocked.id,
+			providerKey: "openai-codex:oauth",
+			blockScope: "chat",
+			blockedUntilMs: Date.now() + HOUR_MS,
+		});
+
+		const selected = await authStorage.getOAuthApiKeyFromCredentialIds(
+			"openai-codex",
+			"policy:scoped-block",
+			new Set([blocked.id, healthy.id]),
+			{ modelId: "gpt-5.3-codex" },
+		);
+
+		expect(selected).toEqual({ apiKey: "api-healthy", credentialId: healthy.id });
+	});
+
 	test("prefers near-reset weekly account over lower-used far-reset account", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 

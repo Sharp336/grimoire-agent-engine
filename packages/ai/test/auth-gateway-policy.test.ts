@@ -1,4 +1,5 @@
 import { describe, expect, it, spyOn } from "bun:test";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -89,6 +90,18 @@ function policyGrant(
 	};
 }
 
+function openAIChatBody(model: string, extra?: Record<string, unknown>): string {
+	return JSON.stringify({
+		model,
+		messages: [{ role: "user", content: "raw-policy-prompt" }],
+		stream: false,
+		prompt_cache_key: "caller-body-session",
+		metadata: { account_id: "caller-metadata-account" },
+		user: "caller-user",
+		...extra,
+	});
+}
+
 async function postOpenAIChat(url: string, model: string, extra?: Record<string, unknown>): Promise<Response> {
 	return fetch(`${url}/v1/chat/completions`, {
 		method: "POST",
@@ -105,19 +118,31 @@ async function postOpenAIChat(url: string, model: string, extra?: Record<string,
 			Session_Id: "caller-header-session",
 			"OpenAI-Beta": "responses=v1",
 		},
-		body: JSON.stringify({
-			model,
-			messages: [{ role: "user", content: "raw-policy-prompt" }],
-			stream: false,
-			prompt_cache_key: "caller-body-session",
-			metadata: { account_id: "caller-metadata-account" },
-			user: "caller-user",
-			...extra,
-		}),
+		body: openAIChatBody(model, extra),
 	});
 }
 
 describe("auth-gateway policy hooks", () => {
+	it("preserves native unknown-model precedence over strict body validation", async () => {
+		registerMockApi();
+		const fixture = await createPolicyStorage("gw-native-unknown-model", ["oauth-a"]);
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["gateway-token"],
+			storage: fixture.storage,
+			resolveModel: () => undefined,
+		});
+		try {
+			const response = await postOpenAIChat(handle.url, "unknown-model", { messages: "invalid" });
+			expect(response.status).toBe(404);
+			expect(await response.text()).toContain("Unknown model: unknown-model");
+		} finally {
+			await handle.close();
+			await closePolicyStorage(fixture);
+			clearCustomApis();
+		}
+	});
+
 	it("authorizes a provider-format request before model and credential access, then strips caller identity", async () => {
 		registerMockApi();
 		const fixture = await createPolicyStorage("gw-policy-order", ["oauth-a", "oauth-b"]);
@@ -153,25 +178,38 @@ describe("auth-gateway policy hooks", () => {
 			observer: event => {
 				observations.push(event);
 			},
+			readinessProbe: () => true,
 			resolveModel: selector => {
 				order.push("model");
 				return selector === "resolved-model" ? mock : undefined;
 			},
 		});
 		try {
-			const response = await postOpenAIChat(handle.url, "caller-model");
+			const response = await postOpenAIChat(handle.url, "caller-model", {
+				stream: true,
+				stream_options: { include_usage: true },
+			});
 			expect(response.status).toBe(200);
+			const body = await response.text();
+			expect(body).toContain('"choices":[]');
+			expect(body).toContain('"usage":');
 			expect(order).toEqual(["authorize", "model", "credential", "upstream"]);
 			expect(authorizationRequest?.requestedModelId).toBe("caller-model");
 			expect(authorizationRequest?.authorization).toBe("policy-input");
 			expect(authorizationRequest?.requestedSessionId).toBe("caller-body-session");
+			const expectedBody = openAIChatBody("caller-model", {
+				stream: true,
+				stream_options: { include_usage: true },
+			});
+			expect(authorizationRequest?.payloadByteLength).toBe(Buffer.byteLength(expectedBody));
+			expect(authorizationRequest?.payloadSha256).toBe(createHash("sha256").update(expectedBody).digest("hex"));
 			expect(mock.calls).toHaveLength(1);
 			const options = mock.calls[0]!.options;
 			expect(options?.apiKey).toBe("oauth-b");
 			expect(options?.sessionId).toBe("workspace:authorized-session");
 			expect(options?.promptCacheKey).toBe("workspace:authorized-session");
 			expect(options?.metadata).toBeUndefined();
-			expect(options?.headers).toEqual({ "openai-beta": "responses=v1" });
+			expect(options?.headers).toEqual({});
 			expect(observations.map(event => event.type)).toEqual(["authorization", "credential_selection", "terminal"]);
 			const serializedObservations = JSON.stringify(observations);
 			expect(serializedObservations).not.toContain("oauth-a");
@@ -212,6 +250,8 @@ describe("auth-gateway policy hooks", () => {
 					fixture.credentialIds[1]!,
 					fixture.credentialIds[0]!,
 				]),
+			observer: () => {},
+			readinessProbe: () => true,
 			resolveModel: () => mock,
 		});
 		try {
@@ -233,6 +273,11 @@ describe("auth-gateway policy hooks", () => {
 		let modelResolutions = 0;
 		let authorizerCalls = 0;
 		const observations: AuthGatewayObservation[] = [];
+		const dangerousFieldByModel: Record<string, string> = {
+			"proto-model": "__proto__",
+			"constructor-model": "constructor",
+			"tostring-model": "toString",
+		};
 		const handle = startAuthGateway({
 			bind: "127.0.0.1:0",
 			bearerTokens: ["gateway-token"],
@@ -241,6 +286,25 @@ describe("auth-gateway policy hooks", () => {
 				authorizerCalls++;
 				if (request.requestedModelId === "denied-model") {
 					return { authorized: false, reasonCode: "account_not_allowed" };
+				}
+				if (request.requestedModelId === "throw-model") {
+					throw new Error("private authorizer failure");
+				}
+				const dangerousField = dangerousFieldByModel[request.requestedModelId];
+				if (dangerousField) {
+					const dangerousDecision: Record<string, unknown> = {
+						authorized: true,
+						authorizationId: "authorization:dangerous",
+						requestedModelId: request.requestedModelId,
+						resolvedModelId: "resolved-model",
+						sessionId: "workspace:dangerous",
+						allowedOAuthCredentialIds: [fixture.credentialIds[0]!],
+					};
+					Object.defineProperty(dangerousDecision, dangerousField, {
+						value: true,
+						enumerable: true,
+					});
+					return dangerousDecision as unknown as AuthGatewayAuthorizationDecision;
 				}
 				return {
 					authorized: true,
@@ -254,6 +318,7 @@ describe("auth-gateway policy hooks", () => {
 			observer: event => {
 				observations.push(event);
 			},
+			readinessProbe: () => true,
 			resolveModel: () => {
 				modelResolutions++;
 				return undefined;
@@ -263,22 +328,31 @@ describe("auth-gateway policy hooks", () => {
 			const missingPolicyInput = await fetch(`${handle.url}/v1/chat/completions`, {
 				method: "POST",
 				headers: { Authorization: "Bearer gateway-token", "Content-Type": "application/json" },
-				body: JSON.stringify({
-					model: "missing-policy-input",
-					messages: [{ role: "user", content: "must not authorize" }],
-					stream: false,
-				}),
+				body: "{",
 			});
 			const denied = await postOpenAIChat(handle.url, "denied-model");
 			const malformed = await postOpenAIChat(handle.url, "malformed-model");
+			const unavailable = await postOpenAIChat(handle.url, "throw-model");
+			const dangerous = await Promise.all(
+				Object.keys(dangerousFieldByModel).map(model => postOpenAIChat(handle.url, model)),
+			);
 			expect(missingPolicyInput.status).toBe(401);
-			expect(authorizerCalls).toBe(2);
+			expect(authorizerCalls).toBe(6);
 			expect(denied.status).toBe(403);
 			expect(malformed.status).toBe(500);
+			expect(dangerous.map(response => response.status)).toEqual([500, 500, 500]);
+			expect(unavailable.status).toBe(503);
+			const unavailableBody = await unavailable.text();
+			expect(unavailableBody).toContain("Gateway authorization policy is unavailable");
+			expect(unavailableBody).not.toContain("observer");
+			expect(unavailableBody).not.toContain("private authorizer failure");
 			expect(modelResolutions).toBe(0);
 			expect(accessSpy).toHaveBeenCalledTimes(0);
 			expect(observations.map(event => (event.type === "authorization" ? event.outcome : event.type))).toEqual([
 				"denied",
+				"error",
+				"error",
+				"error",
 				"error",
 			]);
 			expect(await denied.text()).not.toContain("account_not_allowed");
@@ -345,6 +419,7 @@ describe("auth-gateway policy hooks", () => {
 			observer: event => {
 				observations.push(event);
 			},
+			readinessProbe: () => true,
 			resolveModel: () => mock,
 		});
 		try {
@@ -402,6 +477,7 @@ describe("auth-gateway policy hooks", () => {
 			observer: event => {
 				observations.push(event);
 			},
+			readinessProbe: () => true,
 			resolveModel: () => mock,
 		});
 		try {
@@ -419,7 +495,53 @@ describe("auth-gateway policy hooks", () => {
 		}
 	});
 
-	it("withholds the streaming terminal frame when the terminal observer fails", async () => {
+	it("surfaces a latched retry observation failure instead of a generic upstream error", async () => {
+		registerMockApi();
+		const fixture = await createPolicyStorage(
+			"gw-policy-retry-observer",
+			["retry-stale", "retry-sibling"],
+			"mock",
+			access => `${access}-reminted`,
+		);
+		let attempts = 0;
+		const mock = createMockModel({
+			provider: "mock",
+			id: "retry-observer-model",
+			handler: () => {
+				attempts++;
+				if (attempts === 1) throw new ProviderHttpError("private invalid credential", 401);
+				return { content: ["must not escape"] };
+			},
+		});
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["gateway-token"],
+			storage: fixture.storage,
+			authorizeRequest: request =>
+				policyGrant(request, "retry-observer-model", "workspace:retry-observer", fixture.credentialIds),
+			observer: event => {
+				if (event.type === "credential_selection" && event.phase === "force_refresh") {
+					throw new Error("private retry observer failure");
+				}
+			},
+			readinessProbe: () => true,
+			resolveModel: () => mock,
+		});
+		try {
+			const response = await postOpenAIChat(handle.url, "retry-observer-alias");
+			const body = await response.text();
+			expect(response.status).toBe(503);
+			expect(body).toContain("Gateway policy observer is unavailable");
+			expect(body).not.toContain("upstream");
+			expect(body).not.toContain("private");
+		} finally {
+			await handle.close();
+			await closePolicyStorage(fixture);
+			clearCustomApis();
+		}
+	});
+
+	it("preserves successful provider responses when terminal observation delivery fails", async () => {
 		registerMockApi();
 		const fixture = await createPolicyStorage("gw-policy-stream-observer", ["oauth-a"]);
 		const mock = createMockModel({
@@ -436,6 +558,7 @@ describe("auth-gateway policy hooks", () => {
 			observer: event => {
 				if (event.type === "terminal") throw new Error("terminal-observer-private-failure");
 			},
+			readinessProbe: () => true,
 			resolveModel: () => mock,
 		});
 		try {
@@ -450,8 +573,14 @@ describe("auth-gateway policy hooks", () => {
 				received += decoder.decode(chunk.value, { stream: true });
 			}
 			received += decoder.decode();
-			expect(received).not.toContain("[DONE]");
+			expect(received).toContain("[DONE]");
 			expect(received).not.toContain("terminal-observer-private-failure");
+
+			const completeResponse = await postOpenAIChat(handle.url, "stream-observer-alias");
+			expect(completeResponse.status).toBe(200);
+			const completeBody = await completeResponse.text();
+			expect(completeBody).toContain("visible output");
+			expect(completeBody).not.toContain("terminal-observer-private-failure");
 		} finally {
 			await handle.close();
 			await closePolicyStorage(fixture);
@@ -467,7 +596,7 @@ describe("auth-gateway policy hooks", () => {
 		const mock = createMockModel({
 			provider: "mock",
 			id: "pi-resolved",
-			responses: [{ content: ["policy"] }, { content: ["legacy"] }],
+			responses: [{ content: ["policy"] }, { content: ["legacy"] }, { content: ["legacy-prompt-only"] }],
 		});
 		const policyHandle = startAuthGateway({
 			bind: "127.0.0.1:0",
@@ -480,6 +609,8 @@ describe("auth-gateway policy hooks", () => {
 					"workspace:pi-authorized",
 					request.requestedModelId === "pi-missing" ? [999_999] : [allowedId],
 				),
+			observer: () => {},
+			readinessProbe: () => true,
 			resolveModel: () => mock,
 		});
 		try {
@@ -528,7 +659,7 @@ describe("auth-gateway policy hooks", () => {
 			expect(policyOptions?.initiatorOverride).toBeUndefined();
 			expect(policyOptions?.openrouterVariant).toBeUndefined();
 			expect(policyOptions?.statefulResponses).toBeUndefined();
-			expect(policyOptions?.headers).toEqual({ "openai-beta": "responses=v1" });
+			expect(policyOptions?.headers).toEqual({});
 
 			const missingResponse = await fetch(`${policyHandle.url}/v1/pi/stream`, {
 				method: "POST",
@@ -569,11 +700,41 @@ describe("auth-gateway policy hooks", () => {
 			expect(legacyResponse.status).toBe(200);
 			expect(mock.calls[1]!.options?.apiKey).toBe("legacy-runtime-key");
 			expect(mock.calls[1]!.options?.sessionId).toBe("caller-legacy-session");
+
+			const promptOnlyResponse = await fetch(`${legacyHandle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer gateway-token", "Content-Type": "application/json" },
+				body: JSON.stringify({
+					modelId: "pi-legacy",
+					context: { messages: [{ role: "user", content: "legacy prompt only", timestamp: 4 }] },
+					stream: false,
+					options: { promptCacheKey: "caller-prompt-only" },
+				}),
+			});
+			expect(promptOnlyResponse.status).toBe(200);
+			expect(mock.calls[2]!.options?.promptCacheKey).toBe("caller-prompt-only");
+			expect(mock.calls[2]!.options?.sessionId).not.toBe("caller-prompt-only");
 		} finally {
 			await legacyHandle.close();
 			await closePolicyStorage(fixture);
 			clearCustomApis();
 		}
+	});
+
+	it("requires the complete observer and readiness policy composite at construction", () => {
+		const base = {
+			bind: "127.0.0.1:0",
+			bearerTokens: [],
+			storage: {} as AuthStorage,
+			authorizeRequest: () => ({ authorized: false as const }),
+			resolveModel: () => undefined,
+		};
+		expect(() => startAuthGateway({ ...base, readinessProbe: () => true })).toThrow(
+			"requires both observer and readinessProbe",
+		);
+		expect(() => startAuthGateway({ ...base, observer: () => {} })).toThrow(
+			"requires both observer and readinessProbe",
+		);
 	});
 
 	it("fails closed before model or credential access when the observer rejects authorization", async () => {
@@ -590,6 +751,7 @@ describe("auth-gateway policy hooks", () => {
 			observer: () => {
 				throw new Error("observer-private-failure");
 			},
+			readinessProbe: () => true,
 			resolveModel: () => {
 				modelResolutions++;
 				return undefined;

@@ -42,7 +42,6 @@ import {
 	json,
 	readBoundedJson,
 	resolvePeer,
-	stripPolicyIdentityHeaders,
 	withCors,
 } from "./http";
 import type {
@@ -138,7 +137,7 @@ function isBoundedPolicyText(value: unknown, maxLength: number): value is string
 }
 
 function hasOnlyDecisionFields(value: Record<string, unknown>, allowed: Record<string, true>): boolean {
-	return Object.keys(value).every(key => allowed[key]);
+	return Object.keys(value).every(key => Object.hasOwn(allowed, key));
 }
 
 function validateAuthorizationGrant(
@@ -215,6 +214,74 @@ function observerFailureResponse(formatError: GatewayFormatError): Response {
 	return formatError(503, "authorization_error", "Gateway policy observer is unavailable");
 }
 
+class GatewayPolicyRequest {
+	#terminal = false;
+	#observerError: AuthGatewayObserverDeliveryError | undefined;
+	readonly #bootOpts: AuthGatewayBootOptions;
+
+	constructor(
+		readonly policy: GatewayPolicy,
+		bootOpts: AuthGatewayBootOptions,
+	) {
+		this.#bootOpts = bootOpts;
+	}
+
+	get observerError(): AuthGatewayObserverDeliveryError | undefined {
+		return this.#observerError;
+	}
+
+	async observe(observation: AuthGatewayObservation): Promise<void> {
+		if (this.#observerError) throw this.#observerError;
+		try {
+			await emitGatewayObservation(this.#bootOpts, observation);
+		} catch (error) {
+			if (error instanceof AuthGatewayObserverDeliveryError) this.#observerError = error;
+			throw error;
+		}
+	}
+
+	async fail(
+		stage: "model_resolution" | "credential_selection" | "upstream",
+		code: "model_unavailable" | "credential_unavailable" | "credential_rotation_unavailable" | "upstream_error",
+	): Promise<void> {
+		if (this.#terminal) return;
+		await this.observe({
+			type: "error",
+			...policyObservationBase(this.policy),
+			stage,
+			code,
+		});
+		await this.#settle("error", false);
+	}
+
+	async settleAbortedBestEffort(): Promise<void> {
+		await this.#settle("aborted", true);
+	}
+
+	async settleSuccessBestEffort(): Promise<void> {
+		await this.#settle("success", true);
+	}
+
+	async #settle(outcome: "success" | "error" | "aborted", bestEffort: boolean): Promise<void> {
+		if (this.#terminal) return;
+		this.#terminal = true;
+		try {
+			await this.observe({
+				type: "terminal",
+				...policyObservationBase(this.policy),
+				outcome,
+			});
+		} catch (error) {
+			if (!bestEffort || !(error instanceof AuthGatewayObserverDeliveryError)) throw error;
+			logger.warn("auth-gateway policy terminal observation failed after request completion", {
+				requestId: this.policy.requestId,
+				format: this.policy.format,
+				outcome,
+			});
+		}
+	}
+}
+
 async function authorizeGatewayRequest(
 	bootOpts: AuthGatewayBootOptions,
 	req: Request,
@@ -223,6 +290,8 @@ async function authorizeGatewayRequest(
 		format: string;
 		requestedModelId: string;
 		requestedSessionId?: string;
+		payloadByteLength: number;
+		payloadSha256: string;
 	},
 	formatError: GatewayFormatError,
 ): Promise<GatewayAuthorizationResult> {
@@ -253,26 +322,14 @@ async function authorizeGatewayRequest(
 			format: input.format,
 			requestedModelId: input.requestedModelId,
 			requestedSessionId: input.requestedSessionId,
+			payloadByteLength: input.payloadByteLength,
+			payloadSha256: input.payloadSha256,
 			method: req.method,
 			path: new URL(req.url).pathname,
 			authorization,
 			signal: req.signal,
 		});
 	} catch {
-		try {
-			await emitGatewayObservation(bootOpts, {
-				type: "authorization",
-				requestId: input.requestId,
-				format: input.format,
-				requestedModelId: input.requestedModelId,
-				outcome: "error",
-			});
-		} catch (error) {
-			if (error instanceof AuthGatewayObserverDeliveryError) {
-				return { ok: false, response: observerFailureResponse(formatError) };
-			}
-			throw error;
-		}
 		return {
 			ok: false,
 			response: formatError(503, "authorization_error", "Gateway authorization policy is unavailable"),
@@ -515,13 +572,17 @@ async function refreshGatewayApiKeyAfterAuthError(
 	signal: AbortSignal,
 	format: string,
 	peer: string,
-	policy?: GatewayPolicy,
+	policyRequest?: GatewayPolicyRequest,
 ): Promise<GatewayResolvedCredential | undefined> {
 	const message = error instanceof Error ? error.message : String(error);
 	const status = extractHttpStatusFromError(error);
 	const usageLimit = AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message);
-	if (policy) {
+	const policy = policyRequest?.policy;
+	if (policyRequest && policy) {
 		if (oldCredential.credentialId === undefined) return undefined;
+		// AuthStorage must apply the provider error before it can identify the
+		// actual next eligible row. Any later observer rejection is latched on
+		// this request, so the retry cannot turn that mutation into a success.
 		const switched = await bootOpts.storage.rotateSessionCredential(model.provider, sessionId, {
 			error,
 			modelId: model.id,
@@ -531,7 +592,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 			redactOAuthErrors: true,
 		});
 		if (!switched) {
-			await emitGatewayObservation(bootOpts, {
+			await policyRequest.observe({
 				type: "error",
 				...policyObservationBase(policy),
 				stage: "credential_selection",
@@ -550,7 +611,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 			access.credentialId === oldCredential.credentialId ||
 			!policy.allowedOAuthCredentialIds.has(access.credentialId)
 		) {
-			await emitGatewayObservation(bootOpts, {
+			await policyRequest.observe({
 				type: "error",
 				...policyObservationBase(policy),
 				stage: "credential_selection",
@@ -558,7 +619,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 			});
 			return undefined;
 		}
-		await emitGatewayObservation(bootOpts, {
+		await policyRequest.observe({
 			type: "credential_rotation",
 			...policyObservationBase(policy),
 			previousCredentialId: oldCredential.credentialId,
@@ -622,17 +683,19 @@ function buildGatewayApiKeyResolver(
 	requestSignal: AbortSignal,
 	format: string,
 	peer: string,
-	policy?: GatewayPolicy,
+	policyRequest?: GatewayPolicyRequest,
 ): ApiKeyResolver {
+	const policy = policyRequest?.policy;
 	let currentCredential = initialCredential;
 	return async ({ lastChance, error, signal }) => {
+		if (policyRequest?.observerError) throw policyRequest.observerError;
 		const sig = signal ?? requestSignal;
 		if (error === undefined) {
 			currentCredential = initialCredential;
 			return initialCredential.apiKey;
 		}
 		if (!lastChance) {
-			if (policy) {
+			if (policyRequest && policy) {
 				const credentialId = currentCredential.credentialId;
 				if (credentialId === undefined || !policy.allowedOAuthCredentialIds.has(credentialId)) return undefined;
 				const resolved = await bootOpts.storage.getOAuthApiKeyByCredentialId(model.provider, credentialId, {
@@ -641,7 +704,7 @@ function buildGatewayApiKeyResolver(
 					forceRefresh: true,
 				});
 				if (!resolved || !policy.allowedOAuthCredentialIds.has(resolved.credentialId)) {
-					await emitGatewayObservation(bootOpts, {
+					await policyRequest.observe({
 						type: "error",
 						...policyObservationBase(policy),
 						stage: "credential_selection",
@@ -649,13 +712,13 @@ function buildGatewayApiKeyResolver(
 					});
 					return undefined;
 				}
-				currentCredential = resolved;
-				await emitGatewayObservation(bootOpts, {
+				await policyRequest.observe({
 					type: "credential_selection",
 					...policyObservationBase(policy),
 					credentialId: resolved.credentialId,
 					phase: "force_refresh",
 				});
+				currentCredential = resolved;
 				return resolved.apiKey;
 			}
 			const refreshed = await bootOpts.storage.getApiKey(model.provider, sessionId, {
@@ -675,7 +738,7 @@ function buildGatewayApiKeyResolver(
 			sig,
 			format,
 			peer,
-			policy,
+			policyRequest,
 		);
 		if (next) currentCredential = next;
 		return next?.apiKey;
@@ -696,31 +759,6 @@ function mirrorRequestAbort(req: Request): AbortController {
 	return controller;
 }
 
-async function observePolicyFailure(
-	bootOpts: AuthGatewayBootOptions,
-	policy: GatewayPolicy,
-	stage: "model_resolution" | "credential_selection" | "upstream",
-	code:
-		| "model_unavailable"
-		| "credential_unavailable"
-		| "credential_rotation_unavailable"
-		| "request_aborted"
-		| "upstream_error",
-	outcome: "error" | "aborted" = "error",
-): Promise<void> {
-	await emitGatewayObservation(bootOpts, {
-		type: "error",
-		...policyObservationBase(policy),
-		stage,
-		code,
-	});
-	await emitGatewayObservation(bootOpts, {
-		type: "terminal",
-		...policyObservationBase(policy),
-		outcome,
-	});
-}
-
 function genericPolicyErrorMessage(message: AssistantMessage, reason: "error" | "aborted"): AssistantMessage {
 	return {
 		role: "assistant",
@@ -739,34 +777,29 @@ function genericPolicyErrorMessage(message: AssistantMessage, reason: "error" | 
 
 function withPolicyEventObservations(
 	events: AssistantMessageEventStream,
-	bootOpts: AuthGatewayBootOptions,
-	policy: GatewayPolicy,
+	policyRequest: GatewayPolicyRequest,
+	abortUpstream: (reason: Error) => void,
 ): AssistantMessageEventStream {
 	const observed = new AssistantMessageEventStream();
 	const pump = async (): Promise<void> => {
-		let terminal = false;
 		try {
 			for await (const event of events) {
+				if (policyRequest.observerError) {
+					abortUpstream(policyRequest.observerError);
+					observed.fail(policyRequest.observerError);
+					return;
+				}
 				if (event.type === "done") {
-					await emitGatewayObservation(bootOpts, {
-						type: "terminal",
-						...policyObservationBase(policy),
-						outcome: "success",
-					});
-					terminal = true;
+					await policyRequest.settleSuccessBestEffort();
 					observed.push(event);
 					return;
 				}
 				if (event.type === "error") {
-					const outcome = event.reason === "aborted" ? "aborted" : "error";
-					await observePolicyFailure(
-						bootOpts,
-						policy,
-						"upstream",
-						outcome === "aborted" ? "request_aborted" : "upstream_error",
-						outcome,
-					);
-					terminal = true;
+					if (event.reason === "aborted") {
+						await policyRequest.settleAbortedBestEffort();
+					} else {
+						await policyRequest.fail("upstream", "upstream_error");
+					}
 					observed.push({
 						type: "error",
 						reason: event.reason,
@@ -776,22 +809,24 @@ function withPolicyEventObservations(
 				}
 				observed.push(event);
 			}
-			if (!terminal) {
-				await observePolicyFailure(bootOpts, policy, "upstream", "upstream_error");
-				observed.fail(new Error("Gateway upstream stream failed"));
-			}
+			abortUpstream(new Error("Gateway upstream stream ended before a terminal event"));
+			await policyRequest.fail("upstream", "upstream_error");
+			observed.fail(new Error("Gateway upstream stream failed"));
 		} catch (error) {
-			if (error instanceof AuthGatewayObserverDeliveryError) {
-				observed.fail(error);
+			if (policyRequest.observerError) {
+				abortUpstream(policyRequest.observerError);
+				observed.fail(policyRequest.observerError);
 				return;
 			}
 			try {
-				await observePolicyFailure(bootOpts, policy, "upstream", "upstream_error");
+				await policyRequest.fail("upstream", "upstream_error");
 			} catch (observationError) {
 				observed.fail(observationError);
 				return;
 			}
-			observed.fail(new Error("Gateway upstream stream failed"));
+			observed.fail(
+				error instanceof AuthGatewayObserverDeliveryError ? error : new Error("Gateway upstream stream failed"),
+			);
 		}
 	};
 	void pump();
@@ -810,10 +845,28 @@ async function handleFormatEndpoint(
 	const requestId = crypto.randomUUID();
 	const controller = mirrorRequestAbort(req);
 	if (controller.signal.aborted) return clientClosedResponse(route);
+	if (
+		bootOpts.authorizeRequest &&
+		!isBoundedPolicyText(
+			req.headers.get(AUTH_GATEWAY_POLICY_AUTHORIZATION_HEADER),
+			MAX_POLICY_AUTHORIZATION_INPUT_LENGTH,
+		)
+	) {
+		return route.module.formatError(401, "authorization_error", "Missing or invalid gateway policy authorization");
+	}
 
 	let body: unknown;
+	let payloadByteLength = 0;
+	let payloadSha256 = "";
 	try {
-		body = bootOpts.authorizeRequest ? await readBoundedJson(req, MAX_POLICY_REQUEST_BODY_BYTES) : await req.json();
+		if (bootOpts.authorizeRequest) {
+			const bounded = await readBoundedJson(req, MAX_POLICY_REQUEST_BODY_BYTES);
+			body = bounded.value;
+			payloadByteLength = bounded.byteLength;
+			payloadSha256 = bounded.sha256;
+		} else {
+			body = await req.json();
+		}
 	} catch (error) {
 		if (controller.signal.aborted) return clientClosedResponse(route);
 		const message = bootOpts.authorizeRequest ? "Invalid JSON request body" : `Invalid JSON body: ${String(error)}`;
@@ -824,12 +877,17 @@ async function handleFormatEndpoint(
 	// All three supported wire formats put the model id on a top-level `model`
 	// field. Read it without running the full strict schema so the route can
 	// produce a coherent error envelope when the model id is missing.
-	const modelId =
-		typeof body === "object" && body !== null && typeof (body as { model?: unknown }).model === "string"
-			? (body as { model: string }).model
-			: undefined;
+	let modelId: string | undefined;
+	if (typeof body === "object" && body !== null && "model" in body && typeof body.model === "string") {
+		modelId = body.model;
+	}
 	if (!modelId) {
 		return route.module.formatError(400, "invalid_request_error", "Missing top-level `model` field");
+	}
+
+	const nativeModel = bootOpts.authorizeRequest ? undefined : bootOpts.resolveModel(modelId);
+	if (!bootOpts.authorizeRequest && !nativeModel) {
+		return route.module.formatError(404, "invalid_request_error", `Unknown model: ${modelId}`);
 	}
 
 	// Parse the wire-format request BEFORE resolving the credential so we
@@ -858,18 +916,26 @@ async function handleFormatEndpoint(
 			format: route.label,
 			requestedModelId: parsed.modelId,
 			requestedSessionId: parsed.options.promptCacheKey,
+			payloadByteLength,
+			payloadSha256,
 		},
 		route.module.formatError,
 	);
 	if (!authorization.ok) return authorization.response;
 	const policy = authorization.policy;
+	const policyRequest = policy ? new GatewayPolicyRequest(policy, bootOpts) : undefined;
+	const abortedAfterGrant = async (): Promise<Response> => {
+		await policyRequest?.settleAbortedBestEffort();
+		return clientClosedResponse(route);
+	};
+	if (controller.signal.aborted) return abortedAfterGrant();
 
 	const resolvedModelId = policy?.resolvedModelId ?? parsed.modelId;
-	const model = bootOpts.resolveModel(resolvedModelId);
+	const model = policy ? bootOpts.resolveModel(resolvedModelId) : nativeModel;
 	if (!model) {
-		if (policy) {
+		if (policyRequest) {
 			try {
-				await observePolicyFailure(bootOpts, policy, "model_resolution", "model_unavailable");
+				await policyRequest.fail("model_resolution", "model_unavailable");
 			} catch (error) {
 				if (error instanceof AuthGatewayObserverDeliveryError) {
 					return observerFailureResponse(route.module.formatError);
@@ -884,7 +950,7 @@ async function handleFormatEndpoint(
 	// In policy mode parser-captured account, organization, project, client,
 	// and credential headers are discarded before provider options are built.
 	const captured = captureRequestHeaders(req.headers, { stripPolicyIdentity: policy !== undefined });
-	const parsedHeaders = policy ? stripPolicyIdentityHeaders(parsed.options.headers) : (parsed.options.headers ?? {});
+	const parsedHeaders = policy ? {} : (parsed.options.headers ?? {});
 	parsed.options.headers = { ...captured, ...parsedHeaders };
 
 	const sessionId =
@@ -894,11 +960,10 @@ async function handleFormatEndpoint(
 		delete parsed.options.user;
 		delete parsed.options.metadata;
 		delete parsed.options.previousResponseId;
-		delete parsed.options.extra;
 	} else {
 		parsed.options.promptCacheKey ??= sessionId;
 	}
-	if (controller.signal.aborted) return clientClosedResponse(route);
+	if (controller.signal.aborted) return abortedAfterGrant();
 
 	let credential: GatewayResolvedCredential | undefined;
 	try {
@@ -909,14 +974,15 @@ async function handleFormatEndpoint(
 				policy.allowedOAuthCredentialIds,
 				{ modelId: model.id, signal: controller.signal },
 			);
+			if (controller.signal.aborted) return abortedAfterGrant();
 			if (access && policy.allowedOAuthCredentialIds.has(access.credentialId)) {
-				credential = access;
-				await emitGatewayObservation(bootOpts, {
+				await policyRequest?.observe({
 					type: "credential_selection",
 					...policyObservationBase(policy),
 					credentialId: access.credentialId,
 					phase: "initial",
 				});
+				credential = access;
 			}
 		} else {
 			const apiKey = await bootOpts.storage.getApiKey(model.provider, sessionId, {
@@ -926,13 +992,13 @@ async function handleFormatEndpoint(
 			if (apiKey) credential = { apiKey };
 		}
 	} catch (error) {
-		if (error instanceof AuthGatewayObserverDeliveryError) {
+		if (error instanceof AuthGatewayObserverDeliveryError || policyRequest?.observerError) {
 			return observerFailureResponse(route.module.formatError);
 		}
-		if (controller.signal.aborted) return clientClosedResponse(route);
-		if (policy) {
+		if (controller.signal.aborted) return abortedAfterGrant();
+		if (policyRequest) {
 			try {
-				await observePolicyFailure(bootOpts, policy, "credential_selection", "credential_unavailable");
+				await policyRequest.fail("credential_selection", "credential_unavailable");
 			} catch (observationError) {
 				if (observationError instanceof AuthGatewayObserverDeliveryError) {
 					return observerFailureResponse(route.module.formatError);
@@ -945,11 +1011,11 @@ async function handleFormatEndpoint(
 		logger.warn("auth-gateway getApiKey threw", { provider: model.provider, peer, error: classified.message });
 		return route.module.formatError(classified.status, classified.type, classified.message);
 	}
-	if (controller.signal.aborted) return clientClosedResponse(route);
+	if (controller.signal.aborted) return abortedAfterGrant();
 	if (!credential) {
-		if (policy) {
+		if (policyRequest) {
 			try {
-				await observePolicyFailure(bootOpts, policy, "credential_selection", "credential_unavailable");
+				await policyRequest.fail("credential_selection", "credential_unavailable");
 			} catch (error) {
 				if (error instanceof AuthGatewayObserverDeliveryError) {
 					return observerFailureResponse(route.module.formatError);
@@ -974,7 +1040,7 @@ async function handleFormatEndpoint(
 		controller.signal,
 		route.label,
 		peer,
-		policy,
+		policyRequest,
 	);
 
 	logger.info("auth-gateway request", {
@@ -989,28 +1055,20 @@ async function handleFormatEndpoint(
 
 	if (!parsed.stream) {
 		try {
-			if (controller.signal.aborted) {
-				if (policy) await observePolicyFailure(bootOpts, policy, "upstream", "request_aborted", "aborted");
-				return clientClosedResponse(route);
-			}
+			if (controller.signal.aborted) return abortedAfterGrant();
 			const message = await completeSimple(model, parsed.context, streamOpts);
+			if (policyRequest?.observerError) return observerFailureResponse(route.module.formatError);
 			if (message.stopReason === "aborted" || message.stopReason === "error") {
 				const errorMessage =
 					message.errorMessage ??
 					(message.stopReason === "aborted" ? "Request was aborted" : "Upstream request failed");
-				if (policy) {
-					await observePolicyFailure(
-						bootOpts,
-						policy,
-						"upstream",
-						message.stopReason === "aborted" ? "request_aborted" : "upstream_error",
-						message.stopReason === "aborted" ? "aborted" : "error",
-					);
-					return route.module.formatError(
-						message.stopReason === "aborted" ? 499 : 502,
-						message.stopReason === "aborted" ? "request_aborted" : "upstream_error",
-						message.stopReason === "aborted" ? "Request was aborted" : "Upstream request failed",
-					);
+				if (policyRequest) {
+					if (message.stopReason === "aborted") {
+						await policyRequest.settleAbortedBestEffort();
+						return route.module.formatError(499, "request_aborted", "Request was aborted");
+					}
+					await policyRequest.fail("upstream", "upstream_error");
+					return route.module.formatError(502, "upstream_error", "Upstream request failed");
 				}
 				logger.warn("auth-gateway non-streaming failed", {
 					format: route.label,
@@ -1024,38 +1082,21 @@ async function handleFormatEndpoint(
 				const classified = classifyGatewayError(errorMessage);
 				return route.module.formatError(classified.status, classified.type, errorMessage);
 			}
-			if (policy) {
-				await emitGatewayObservation(bootOpts, {
-					type: "terminal",
-					...policyObservationBase(policy),
-					outcome: "success",
-				});
-			}
+			if (policyRequest?.observerError) return observerFailureResponse(route.module.formatError);
+			await policyRequest?.settleSuccessBestEffort();
 			return json(
 				200,
 				route.module.encodeResponse(message, parsed.modelId),
 				gatewayResponseHeaders(model, { requestId, message, startedAt }),
 			);
 		} catch (error) {
-			if (error instanceof AuthGatewayObserverDeliveryError) {
+			if (error instanceof AuthGatewayObserverDeliveryError || policyRequest?.observerError) {
 				return observerFailureResponse(route.module.formatError);
 			}
-			if (controller.signal.aborted) {
-				if (policy) {
-					try {
-						await observePolicyFailure(bootOpts, policy, "upstream", "request_aborted", "aborted");
-					} catch (observationError) {
-						if (observationError instanceof AuthGatewayObserverDeliveryError) {
-							return observerFailureResponse(route.module.formatError);
-						}
-						throw observationError;
-					}
-				}
-				return clientClosedResponse(route);
-			}
-			if (policy) {
+			if (controller.signal.aborted) return abortedAfterGrant();
+			if (policyRequest) {
 				try {
-					await observePolicyFailure(bootOpts, policy, "upstream", "upstream_error");
+					await policyRequest.fail("upstream", "upstream_error");
 				} catch (observationError) {
 					if (observationError instanceof AuthGatewayObserverDeliveryError) {
 						return observerFailureResponse(route.module.formatError);
@@ -1076,15 +1117,15 @@ async function handleFormatEndpoint(
 
 	let events: AssistantMessageEventStream;
 	try {
-		if (controller.signal.aborted) return clientClosedResponse(route);
+		if (controller.signal.aborted) return abortedAfterGrant();
 		events = streamSimple(model, parsed.context, streamOpts);
 	} catch (error) {
-		if (error instanceof AuthGatewayObserverDeliveryError) {
+		if (error instanceof AuthGatewayObserverDeliveryError || policyRequest?.observerError) {
 			return observerFailureResponse(route.module.formatError);
 		}
-		if (policy) {
+		if (policyRequest) {
 			try {
-				await observePolicyFailure(bootOpts, policy, "upstream", "upstream_error");
+				await policyRequest.fail("upstream", "upstream_error");
 			} catch (observationError) {
 				if (observationError instanceof AuthGatewayObserverDeliveryError) {
 					return observerFailureResponse(route.module.formatError);
@@ -1097,15 +1138,20 @@ async function handleFormatEndpoint(
 		logger.warn("auth-gateway streamSimple threw", { format: route.label, error: classified.message, peer });
 		return route.module.formatError(classified.status, classified.type, classified.message);
 	}
-	if (controller.signal.aborted) return clientClosedResponse(route);
+	if (controller.signal.aborted) return abortedAfterGrant();
 
-	if (policy) events = withPolicyEventObservations(events, bootOpts, policy);
+	if (policyRequest) {
+		events = withPolicyEventObservations(events, policyRequest, reason => {
+			if (!controller.signal.aborted) controller.abort(reason);
+		});
+	}
 	const sseStream = route.module.encodeStream(events, parsed.modelId, parsed.options, {
 		signal: controller.signal,
 		onCancel: reason => {
 			if (!controller.signal.aborted) {
 				controller.abort(reason instanceof Error ? reason : new Error("client closed request"));
 			}
+			void policyRequest?.settleAbortedBestEffort();
 		},
 	});
 	return new Response(sseStream, {
@@ -1143,16 +1189,59 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	const controller = mirrorRequestAbort(req);
 	const aborted = (): Response => piNative.formatError(499, "request_aborted", "client closed request");
 	if (controller.signal.aborted) return aborted();
+	if (
+		bootOpts.authorizeRequest &&
+		!isBoundedPolicyText(
+			req.headers.get(AUTH_GATEWAY_POLICY_AUTHORIZATION_HEADER),
+			MAX_POLICY_AUTHORIZATION_INPUT_LENGTH,
+		)
+	) {
+		return piNative.formatError(401, "authorization_error", "Missing or invalid gateway policy authorization");
+	}
 
 	let body: unknown;
+	let payloadByteLength = 0;
+	let payloadSha256 = "";
 	try {
-		body = bootOpts.authorizeRequest ? await readBoundedJson(req, MAX_POLICY_REQUEST_BODY_BYTES) : await req.json();
+		if (bootOpts.authorizeRequest) {
+			const bounded = await readBoundedJson(req, MAX_POLICY_REQUEST_BODY_BYTES);
+			body = bounded.value;
+			payloadByteLength = bounded.byteLength;
+			payloadSha256 = bounded.sha256;
+		} else {
+			body = await req.json();
+		}
 	} catch (error) {
 		if (controller.signal.aborted) return aborted();
 		const message = bootOpts.authorizeRequest ? "Invalid JSON request body" : `Invalid JSON body: ${String(error)}`;
 		return piNative.formatError(400, "invalid_request_error", message);
 	}
 	if (controller.signal.aborted) return aborted();
+
+	let nativeModel: Model<Api> | undefined;
+	if (!bootOpts.authorizeRequest && typeof body === "object" && body !== null) {
+		let requestedModelId: string | undefined;
+		if ("modelId" in body && typeof body.modelId === "string" && body.modelId.length > 0) {
+			requestedModelId = body.modelId;
+		} else if ("model" in body && typeof body.model === "string" && body.model.length > 0) {
+			requestedModelId = body.model;
+		} else if (
+			"model" in body &&
+			typeof body.model === "object" &&
+			body.model !== null &&
+			"id" in body.model &&
+			typeof body.model.id === "string" &&
+			body.model.id.length > 0
+		) {
+			requestedModelId = body.model.id;
+		}
+		if (requestedModelId) {
+			nativeModel = bootOpts.resolveModel(requestedModelId);
+			if (!nativeModel) {
+				return piNative.formatError(404, "invalid_request_error", `Unknown model: ${requestedModelId}`);
+			}
+		}
+	}
 
 	let parsed: piNative.PiNativeParsedRequest;
 	try {
@@ -1175,18 +1264,26 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 			format: "pi-native",
 			requestedModelId: parsed.modelId,
 			requestedSessionId: parsed.options.sessionId ?? parsed.options.promptCacheKey,
+			payloadByteLength,
+			payloadSha256,
 		},
 		piNative.formatError,
 	);
 	if (!authorization.ok) return authorization.response;
 	const policy = authorization.policy;
+	const policyRequest = policy ? new GatewayPolicyRequest(policy, bootOpts) : undefined;
+	const abortedAfterGrant = async (): Promise<Response> => {
+		await policyRequest?.settleAbortedBestEffort();
+		return aborted();
+	};
+	if (controller.signal.aborted) return abortedAfterGrant();
 
 	const resolvedModelId = policy?.resolvedModelId ?? parsed.modelId;
-	const model = bootOpts.resolveModel(resolvedModelId);
+	const model = policy ? bootOpts.resolveModel(resolvedModelId) : nativeModel;
 	if (!model) {
-		if (policy) {
+		if (policyRequest) {
 			try {
-				await observePolicyFailure(bootOpts, policy, "model_resolution", "model_unavailable");
+				await policyRequest.fail("model_resolution", "model_unavailable");
 			} catch (error) {
 				if (error instanceof AuthGatewayObserverDeliveryError) {
 					return observerFailureResponse(piNative.formatError);
@@ -1198,15 +1295,11 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 		return piNative.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	}
 
-	const sessionId =
-		policy?.sessionId ??
-		parsed.options.sessionId ??
-		parsed.options.promptCacheKey ??
-		deriveSessionId(parsed.modelId, parsed.context);
+	const sessionId = policy?.sessionId ?? parsed.options.sessionId ?? deriveSessionId(parsed.modelId, parsed.context);
 	if (policy) {
 		parsed.options.sessionId = sessionId;
 		parsed.options.promptCacheKey = sessionId;
-		parsed.options.headers = stripPolicyIdentityHeaders(parsed.options.headers);
+		parsed.options.headers = {};
 		delete parsed.options.metadata;
 		delete parsed.options.initiatorOverride;
 		delete parsed.options.cachedContent;
@@ -1215,6 +1308,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	} else {
 		parsed.options.sessionId ??= sessionId;
 	}
+	if (controller.signal.aborted) return abortedAfterGrant();
 
 	let credential: GatewayResolvedCredential | undefined;
 	try {
@@ -1225,14 +1319,15 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 				policy.allowedOAuthCredentialIds,
 				{ modelId: model.id, signal: controller.signal },
 			);
+			if (controller.signal.aborted) return abortedAfterGrant();
 			if (access && policy.allowedOAuthCredentialIds.has(access.credentialId)) {
-				credential = access;
-				await emitGatewayObservation(bootOpts, {
+				await policyRequest?.observe({
 					type: "credential_selection",
 					...policyObservationBase(policy),
 					credentialId: access.credentialId,
 					phase: "initial",
 				});
+				credential = access;
 			}
 		} else {
 			const apiKey = await bootOpts.storage.getApiKey(model.provider, sessionId, {
@@ -1242,13 +1337,13 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 			if (apiKey) credential = { apiKey };
 		}
 	} catch (error) {
-		if (error instanceof AuthGatewayObserverDeliveryError) {
+		if (error instanceof AuthGatewayObserverDeliveryError || policyRequest?.observerError) {
 			return observerFailureResponse(piNative.formatError);
 		}
-		if (controller.signal.aborted) return aborted();
-		if (policy) {
+		if (controller.signal.aborted) return abortedAfterGrant();
+		if (policyRequest) {
 			try {
-				await observePolicyFailure(bootOpts, policy, "credential_selection", "credential_unavailable");
+				await policyRequest.fail("credential_selection", "credential_unavailable");
 			} catch (observationError) {
 				if (observationError instanceof AuthGatewayObserverDeliveryError) {
 					return observerFailureResponse(piNative.formatError);
@@ -1261,11 +1356,11 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 		logger.warn("auth-gateway getApiKey threw", { provider: model.provider, peer, error: classified.message });
 		return piNative.formatError(classified.status, classified.type, classified.message);
 	}
-	if (controller.signal.aborted) return aborted();
+	if (controller.signal.aborted) return abortedAfterGrant();
 	if (!credential) {
-		if (policy) {
+		if (policyRequest) {
 			try {
-				await observePolicyFailure(bootOpts, policy, "credential_selection", "credential_unavailable");
+				await policyRequest.fail("credential_selection", "credential_unavailable");
 			} catch (error) {
 				if (error instanceof AuthGatewayObserverDeliveryError) {
 					return observerFailureResponse(piNative.formatError);
@@ -1294,7 +1389,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 		controller.signal,
 		"pi-native",
 		peer,
-		policy,
+		policyRequest,
 	);
 	if (model.api === "openai-codex-responses") {
 		delete streamOpts.temperature;
@@ -1310,7 +1405,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	// headers. Policy mode strips caller-controlled identity and auth values
 	// from both sources, and the authorized session always wins.
 	const captured = captureRequestHeaders(req.headers, { stripPolicyIdentity: policy !== undefined });
-	const optionHeaders = policy ? stripPolicyIdentityHeaders(streamOpts.headers) : (streamOpts.headers ?? {});
+	const optionHeaders = policy ? {} : (streamOpts.headers ?? {});
 	streamOpts.headers = { ...captured, ...optionHeaders };
 	if (policy) {
 		streamOpts.sessionId = sessionId;
@@ -1331,28 +1426,20 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 
 	if (!parsed.stream) {
 		try {
-			if (controller.signal.aborted) {
-				if (policy) await observePolicyFailure(bootOpts, policy, "upstream", "request_aborted", "aborted");
-				return aborted();
-			}
+			if (controller.signal.aborted) return abortedAfterGrant();
 			const message = await completeSimple(model, parsed.context, streamOpts);
+			if (policyRequest?.observerError) return observerFailureResponse(piNative.formatError);
 			if (message.stopReason === "aborted" || message.stopReason === "error") {
 				const errorMessage =
 					message.errorMessage ??
 					(message.stopReason === "aborted" ? "Request was aborted" : "Upstream request failed");
-				if (policy) {
-					await observePolicyFailure(
-						bootOpts,
-						policy,
-						"upstream",
-						message.stopReason === "aborted" ? "request_aborted" : "upstream_error",
-						message.stopReason === "aborted" ? "aborted" : "error",
-					);
-					return piNative.formatError(
-						message.stopReason === "aborted" ? 499 : 502,
-						message.stopReason === "aborted" ? "request_aborted" : "upstream_error",
-						message.stopReason === "aborted" ? "Request was aborted" : "Upstream request failed",
-					);
+				if (policyRequest) {
+					if (message.stopReason === "aborted") {
+						await policyRequest.settleAbortedBestEffort();
+						return piNative.formatError(499, "request_aborted", "Request was aborted");
+					}
+					await policyRequest.fail("upstream", "upstream_error");
+					return piNative.formatError(502, "upstream_error", "Upstream request failed");
 				}
 				logger.warn("auth-gateway non-streaming failed", {
 					format: "pi-native",
@@ -1366,34 +1453,17 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 				const classified = classifyGatewayError(errorMessage);
 				return piNative.formatError(classified.status, classified.type, errorMessage);
 			}
-			if (policy) {
-				await emitGatewayObservation(bootOpts, {
-					type: "terminal",
-					...policyObservationBase(policy),
-					outcome: "success",
-				});
-			}
+			if (policyRequest?.observerError) return observerFailureResponse(piNative.formatError);
+			await policyRequest?.settleSuccessBestEffort();
 			return json(200, { message }, gatewayResponseHeaders(model, { requestId, message, startedAt }));
 		} catch (error) {
-			if (error instanceof AuthGatewayObserverDeliveryError) {
+			if (error instanceof AuthGatewayObserverDeliveryError || policyRequest?.observerError) {
 				return observerFailureResponse(piNative.formatError);
 			}
-			if (controller.signal.aborted) {
-				if (policy) {
-					try {
-						await observePolicyFailure(bootOpts, policy, "upstream", "request_aborted", "aborted");
-					} catch (observationError) {
-						if (observationError instanceof AuthGatewayObserverDeliveryError) {
-							return observerFailureResponse(piNative.formatError);
-						}
-						throw observationError;
-					}
-				}
-				return aborted();
-			}
-			if (policy) {
+			if (controller.signal.aborted) return abortedAfterGrant();
+			if (policyRequest) {
 				try {
-					await observePolicyFailure(bootOpts, policy, "upstream", "upstream_error");
+					await policyRequest.fail("upstream", "upstream_error");
 				} catch (observationError) {
 					if (observationError instanceof AuthGatewayObserverDeliveryError) {
 						return observerFailureResponse(piNative.formatError);
@@ -1410,15 +1480,15 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 
 	let events: AssistantMessageEventStream;
 	try {
-		if (controller.signal.aborted) return aborted();
+		if (controller.signal.aborted) return abortedAfterGrant();
 		events = streamSimple(model, parsed.context, streamOpts);
 	} catch (error) {
-		if (error instanceof AuthGatewayObserverDeliveryError) {
+		if (error instanceof AuthGatewayObserverDeliveryError || policyRequest?.observerError) {
 			return observerFailureResponse(piNative.formatError);
 		}
-		if (policy) {
+		if (policyRequest) {
 			try {
-				await observePolicyFailure(bootOpts, policy, "upstream", "upstream_error");
+				await policyRequest.fail("upstream", "upstream_error");
 			} catch (observationError) {
 				if (observationError instanceof AuthGatewayObserverDeliveryError) {
 					return observerFailureResponse(piNative.formatError);
@@ -1431,15 +1501,20 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 		logger.warn("auth-gateway streamSimple threw", { format: "pi-native", error: classified.message, peer });
 		return piNative.formatError(classified.status, classified.type, classified.message);
 	}
-	if (controller.signal.aborted) return aborted();
+	if (controller.signal.aborted) return abortedAfterGrant();
 
-	if (policy) events = withPolicyEventObservations(events, bootOpts, policy);
+	if (policyRequest) {
+		events = withPolicyEventObservations(events, policyRequest, reason => {
+			if (!controller.signal.aborted) controller.abort(reason);
+		});
+	}
 	const sseStream = piNative.encodeStream(events, parsed.modelId, parsed.options, {
 		signal: controller.signal,
 		onCancel: reason => {
 			if (!controller.signal.aborted) {
 				controller.abort(reason instanceof Error ? reason : new Error("client closed request"));
 			}
+			void policyRequest?.settleAbortedBestEffort();
 		},
 	});
 	return new Response(sseStream, {
@@ -1503,6 +1578,9 @@ function handleModelsList(opts: AuthGatewayBootOptions): Response {
 }
 
 export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServerHandle {
+	if (opts.authorizeRequest && (!opts.observer || !opts.readinessProbe)) {
+		throw new Error("Auth gateway policy mode requires both observer and readinessProbe");
+	}
 	const bind = parseBind(opts.bind ?? DEFAULT_AUTH_GATEWAY_BIND);
 	const tokens = new Set<string>(opts.bearerTokens);
 	const version = opts.version;
@@ -1522,6 +1600,15 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 			}
 			try {
 				if (req.method === "GET" && pathname === "/healthz") {
+					if (opts.readinessProbe) {
+						try {
+							if (!(await opts.readinessProbe(req.signal))) {
+								return withCors(json(503, { ok: false, version }), req);
+							}
+						} catch {
+							return withCors(json(503, { ok: false, version }), req);
+						}
+					}
 					return withCors(json(200, { ok: true, version }), req);
 				}
 				if (!isAuthorized(req, tokens)) {
@@ -1563,6 +1650,9 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 
 				// Model catalog.
 				if (req.method === "GET" && pathname === "/v1/models") {
+					if (opts.authorizeRequest) {
+						return withCors(json(403, { error: "route unavailable in gateway policy mode" }), req);
+					}
 					return withCors(handleModelsList(opts), req);
 				}
 

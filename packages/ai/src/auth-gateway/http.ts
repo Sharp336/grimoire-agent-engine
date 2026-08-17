@@ -4,7 +4,7 @@
  * Centralized so we share the same JSON shape, auth check,
  * and peer-resolution logic.
  */
-import { timingSafeEqual as nodeTimingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual as nodeTimingSafeEqual } from "node:crypto";
 import type { Api, AssistantMessage, Model } from "../types";
 
 const JSON_HEADERS = {
@@ -21,8 +21,14 @@ export function json(status: number, body: unknown, headers?: Record<string, str
 
 const JSON_DECODER = new TextDecoder();
 
-/** Read and parse a JSON request without permitting an unbounded policy preflight allocation. */
-export async function readBoundedJson(request: Request, maxBytes: number): Promise<unknown> {
+export interface BoundedJson {
+	value: unknown;
+	byteLength: number;
+	sha256: string;
+}
+
+/** Read, digest, and parse JSON without permitting an unbounded policy preflight allocation. */
+export async function readBoundedJson(request: Request, maxBytes: number): Promise<BoundedJson> {
 	const declaredLength = Number(request.headers.get("content-length"));
 	if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
 		throw new Error("Request JSON body exceeds gateway policy limit");
@@ -59,7 +65,11 @@ export async function readBoundedJson(request: Request, maxBytes: number): Promi
 			offset += chunk.byteLength;
 		}
 	}
-	return JSON.parse(JSON_DECODER.decode(bytes)) as unknown;
+	return {
+		value: JSON.parse(JSON_DECODER.decode(bytes)) as unknown,
+		byteLength: totalBytes,
+		sha256: createHash("sha256").update(bytes).digest("hex"),
+	};
 }
 
 /**
@@ -164,26 +174,6 @@ const PASSTHROUGH_HEADER_NAMES: Record<string, true> = {
 	"x-conversation-id": true,
 };
 
-/** Policy mode forwards only protocol feature/version headers with no identity semantics. */
-const POLICY_PASSTHROUGH_HEADER_NAMES: Record<string, true> = {
-	"anthropic-beta": true,
-	"anthropic-version": true,
-	"openai-beta": true,
-};
-
-/** Retain only explicitly safe protocol feature/version headers in policy mode. */
-export function stripPolicyIdentityHeaders(
-	headers: Readonly<Record<string, string>> | undefined,
-): Record<string, string> {
-	const out: Record<string, string> = {};
-	for (const [name, value] of Object.entries(headers ?? {})) {
-		const lower = name.toLowerCase();
-		if (!value || !POLICY_PASSTHROUGH_HEADER_NAMES[lower]) continue;
-		out[lower] = value;
-	}
-	return out;
-}
-
 /**
  * Extract allow-listed passthrough headers from an inbound request. Keys are
  * lowercased; empty values are dropped. Called once per request in
@@ -194,14 +184,11 @@ export function captureRequestHeaders(
 	options?: { stripPolicyIdentity?: boolean },
 ): Record<string, string> {
 	const out: Record<string, string> = {};
+	if (options?.stripPolicyIdentity) return out;
 	headers.forEach((value, key) => {
 		if (!value) return;
 		const lower = key.toLowerCase();
-		if (options?.stripPolicyIdentity) {
-			if (POLICY_PASSTHROUGH_HEADER_NAMES[lower]) out[lower] = value;
-			return;
-		}
-		if (PASSTHROUGH_HEADER_NAMES[lower] || lower.startsWith("x-stainless-")) out[lower] = value;
+		if (Object.hasOwn(PASSTHROUGH_HEADER_NAMES, lower) || lower.startsWith("x-stainless-")) out[lower] = value;
 	});
 	return out;
 }

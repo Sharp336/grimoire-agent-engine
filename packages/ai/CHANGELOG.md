@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added fail-closed auth-gateway policy hooks for pre-credential authorization, OAuth row allowlists, caller-identity stripping, and content-free request observations.
+- Added opt-in fail-closed auth-gateway policy hooks for payload-digest-bound pre-credential authorization, OAuth row allowlists, caller-identity stripping, content-free request observations, and dependency-aware readiness.
 
 ## [17.3.5] - 2026-08-16
 

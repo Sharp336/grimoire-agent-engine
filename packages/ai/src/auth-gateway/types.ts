@@ -151,6 +151,9 @@ export interface AuthGatewayAuthorizationRequest {
 	requestedSessionId?: string;
 	method: string;
 	path: string;
+	/** Exact received request-body length and SHA-256, bound by the one-time authorization. */
+	payloadByteLength: number;
+	payloadSha256: string;
 	/**
 	 * Sensitive bounded one-time gateway authorization input from
 	 * {@link AUTH_GATEWAY_POLICY_AUTHORIZATION_HEADER}. Never forwarded,
@@ -225,12 +228,7 @@ export type AuthGatewayCredentialRotationObservation = AuthGatewayPolicyObservat
 export type AuthGatewayErrorObservation = AuthGatewayPolicyObservationBase & {
 	type: "error";
 	stage: "model_resolution" | "credential_selection" | "upstream";
-	code:
-		| "model_unavailable"
-		| "credential_unavailable"
-		| "credential_rotation_unavailable"
-		| "request_aborted"
-		| "upstream_error";
+	code: "model_unavailable" | "credential_unavailable" | "credential_rotation_unavailable" | "upstream_error";
 };
 
 export type AuthGatewayTerminalObservation = AuthGatewayPolicyObservationBase & {
@@ -256,10 +254,20 @@ export interface AuthGatewayServerOptions {
 	bind?: string;
 	/** Accept any of these bearer tokens. Empty allows unauthenticated calls. */
 	bearerTokens: readonly string[];
-	/** Enables fail-closed policy mode for inference routes when supplied. */
+	/**
+	 * Enables fail-closed policy mode for inference routes. Construction also
+	 * requires both `observer` and `readinessProbe`.
+	 */
 	authorizeRequest?: AuthGatewayRequestAuthorizer;
-	/** Optional trusted sink for content-free policy observations. Rejection fails the request closed. */
+	/**
+	 * Optional trusted sink for content-free policy observations. Rejection
+	 * before provider completion fails the request closed. A failed terminal
+	 * success observation is reported internally but cannot replace a provider
+	 * response that already completed successfully.
+	 */
 	observer?: AuthGatewayObserver;
+	/** Optional bounded dependency probe for `/healthz`; false or rejection returns 503. */
+	readinessProbe?: (signal: AbortSignal) => boolean | Promise<boolean>;
 	/** Version surfaced on `/healthz`. */
 	version?: string;
 }

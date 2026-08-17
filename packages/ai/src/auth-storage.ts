@@ -5651,6 +5651,10 @@ export class AuthStorage {
 		options: AuthApiKeyOptions | undefined,
 		allowBlocked: boolean,
 	): Promise<OAuthApiKeySelection | undefined> {
+		const strategy = this.#rankingStrategyResolver?.(provider);
+		const rankingContext: CredentialRankingContext = { modelId: options?.modelId };
+		const blockScope = strategy?.blockScope?.(rankingContext);
+		const blockScopes = strategy?.blockScopes?.(rankingContext) ?? (blockScope ? [blockScope] : []);
 		const resolved = await this.#tryOAuthCredential(
 			provider,
 			{ credential: selection.credential, index: selection.index },
@@ -5664,6 +5668,8 @@ export class AuthStorage {
 				allowBlocked,
 				allowFallback: false,
 				requiredCredentialId: selection.credentialId,
+				blockScope,
+				blockScopes,
 			},
 		);
 		if (!resolved?.credentialId) return undefined;
@@ -6496,7 +6502,9 @@ export class AuthStorage {
 		);
 
 		if (target && AIError.isInvalidatedOAuthTokenError(error)) {
-			const disabledCause = message ?? "upstream reported invalidated OAuth token";
+			const disabledCause = options?.redactOAuthErrors
+				? "upstream reported invalidated OAuth token"
+				: (message ?? "upstream reported invalidated OAuth token");
 			const deleted = this.#store.deleteAuthCredentialRemote
 				? await this.#store.deleteAuthCredentialRemote(target.id, disabledCause)
 				: this.disableCredentialById(target.id, disabledCause);
