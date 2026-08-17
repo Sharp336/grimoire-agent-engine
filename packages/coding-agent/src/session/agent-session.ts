@@ -2461,6 +2461,15 @@ export class AgentSession {
 		// toolUse) assistant message and skipping settle-only work.
 		if (event.type === "message_end" && event.message.role === "assistant") {
 			this.#lastAssistantMessage = event.message;
+			// Annotate the credential source on auth failures BEFORE the display
+			// copy is made below, so the eager TUI render and the persisted
+			// transcript both carry it (issue #8640). The mutation is in-place on
+			// `event.message`, mirroring the `SILENT_ABORT_MARKER` path; the
+			// display spread below inherits it via `{ ...message }`.
+			const settledAssistant = event.message as AssistantMessage;
+			appendCredentialSourceDiagnostic(settledAssistant, () =>
+				this.#modelRegistry.authStorage.describeCredentialSource(settledAssistant.provider, this.sessionId),
+			);
 		}
 		// Plan-mode internal transition: stamp `SILENT_ABORT_MARKER` on the
 		// persisted message BEFORE the obfuscator's display-side copy below.
@@ -2794,9 +2803,6 @@ export class AgentSession {
 			// repeatedly on provider errors otherwise leaves no actionable trace
 			// outside the session transcript (issue #6177).
 			logProviderTurnError(msg);
-			appendCredentialSourceDiagnostic(msg, () =>
-				this.#modelRegistry.authStorage.describeCredentialSource(msg.provider, this.sessionId),
-			);
 
 			// Invalidate GitHub Copilot credentials on a hard auth failure (401, or an
 			// expired/revoked token) so stale tokens aren't reused on the next request.

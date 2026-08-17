@@ -1629,7 +1629,7 @@ describe("AgentSession message pipeline", () => {
 		expect(result.assistantMessage.content.every(block => block.type !== "toolCall")).toBe(true);
 	});
 
-	it("annotates a 401 turn with the selected credential source (#8640)", async () => {
+	it("annotates a 401 turn and persists the annotation to the transcript (#8640)", async () => {
 		using tempDir = TempDir.createSync("@pi-credential-diag-");
 		const api = "test-credential-diag";
 		registerCustomApi(api, (_model, _context, options) => {
@@ -1664,10 +1664,12 @@ describe("AgentSession message pipeline", () => {
 		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		const sessionDir = tempDir.join("session");
+		const sessionManager = SessionManager.create(tempDir.path(), sessionDir);
 		const { session } = await createAgentSession({
 			cwd: tempDir.path(),
 			agentDir: tempDir.path(),
-			sessionManager: SessionManager.inMemory(tempDir.path()),
+			sessionManager,
 			authStorage,
 			modelRegistry,
 			settings: Settings.isolated({ "compaction.enabled": false }),
@@ -1686,13 +1688,24 @@ describe("AgentSession message pipeline", () => {
 		try {
 			await session.sendUserMessage("please fail with 401");
 
+			// In-memory state carries the annotation.
 			const last = session.agent.state.messages.at(-1);
 			expect(last?.role).toBe("assistant");
 			if (last?.role !== "assistant") return;
-			expect(last.errorMessage).toContain("HTTP 401 from https://ollama.com/api/chat\nUnauthorized");
 			expect(last.errorMessage).toContain("(selected credential: runtime override (--api-key))");
+
+			// The persisted transcript must reflect it too, not just the in-place
+			// state mutation — the annotation runs before the display copy, so the
+			// eager TUI render and the on-disk history agree (#8640 roboomp review).
+			await sessionManager.ensureOnDisk();
+			const sessionFile = sessionManager.getSessionFile();
+			expect(sessionFile).toBeTruthy();
+			const transcript = await Bun.file(sessionFile!).text();
+			expect(transcript).toContain("HTTP 401 from https://ollama.com/api/chat\\nUnauthorized");
+			expect(transcript).toContain("(selected credential: runtime override (--api-key))");
 		} finally {
 			await session.dispose();
+			sessionManager.close();
 			authStorage.close();
 		}
 	});

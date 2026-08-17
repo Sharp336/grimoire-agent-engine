@@ -64,12 +64,18 @@ export function logProviderTurnError(msg: AssistantMessage): void {
  * with multiple stored keys can tell the new key from a stale/rotated one
  * without digging through `agent.db` (#8640).
  *
- * Only touches auth failures (401/403) with a resolvable source; every other
- * error path keeps its message byte-identical. The source string comes from
+ * Only touches auth failures (401/403, classified via {@link AIError.Flag.AuthFailed})
+ * with a resolvable source; every other error path keeps its message
+ * byte-identical. Idempotent: re-running over an already-annotated message is a
+ * no-op, so both the eager display copy and the persisted transcript can pass
+ * through it without double-appending. The source string comes from
  * {@link AuthStorage.describeCredentialSource} and is fully sanitized.
  */
 export function appendCredentialSourceDiagnostic(msg: AssistantMessage, resolveSource: () => string | undefined): void {
-	if (msg.stopReason !== "error" || (msg.errorStatus !== 401 && msg.errorStatus !== 403)) return;
+	if (msg.stopReason !== "error") return;
+	if (msg.errorMessage?.includes("(selected credential: ")) return;
+	const errorId = AIError.classifyMessage(msg);
+	if (!AIError.is(errorId, AIError.Flag.AuthFailed) || AIError.is(errorId, AIError.Flag.UsageLimit)) return;
 	const source = resolveSource();
 	if (!source) return;
 	msg.errorMessage = `${msg.errorMessage ?? ""}\n\n(selected credential: ${source})`;

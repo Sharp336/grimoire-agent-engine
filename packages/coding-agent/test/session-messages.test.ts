@@ -525,9 +525,30 @@ describe("appendCredentialSourceDiagnostic (#8640)", () => {
 	});
 
 	it("leaves the message untouched when no credential source resolves", () => {
-		const msg = errorMessage();
+		const msg = errorMessage({ errorStatus: 401 });
 		appendCredentialSourceDiagnostic(msg, () => undefined);
 		expect(msg.errorMessage).toBe("HTTP 401 from https://ollama.com/api/chat\nUnauthorized");
+	});
+
+	it("annotates an auth failure without a numeric errorStatus", () => {
+		// roboomp review #8640: the numeric-only guard missed status-less
+		// 401/403 bodies. Classification now uses the AuthFailed flag.
+		const msg = errorMessage(); // no errorStatus set
+		appendCredentialSourceDiagnostic(msg, () => "local store · api_key #3 (cred 3)");
+		expect(msg.errorMessage).toContain("(selected credential: local store · api_key #3 (cred 3))");
+	});
+
+	it("is idempotent so display and persisted passes do not double-append", () => {
+		const msg = errorMessage({ errorStatus: 401 });
+		appendCredentialSourceDiagnostic(msg, () => "local store · api_key #3 (cred 3)");
+		appendCredentialSourceDiagnostic(msg, () => "local store · api_key #3 (cred 3)");
+		expect(msg.errorMessage!.match(/\(selected credential:/g)).toHaveLength(1);
+	});
+
+	it("leaves usage-limit failures untouched", () => {
+		const msg = errorMessage({ errorStatus: 429, errorMessage: "HTTP 429 rate limit" });
+		appendCredentialSourceDiagnostic(msg, () => "local store");
+		expect(msg.errorMessage).toBe("HTTP 429 rate limit");
 	});
 
 	it("leaves non-error stops untouched even on 401", () => {
