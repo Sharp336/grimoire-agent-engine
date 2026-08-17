@@ -999,6 +999,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"display.showWorkingTimer": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Show Tool Timer",
+			description: "Show elapsed time for the active tool call on the working row above the prompt editor.",
+		},
+	},
+
 	"display.smoothStreaming": {
 		type: "boolean",
 		default: true,

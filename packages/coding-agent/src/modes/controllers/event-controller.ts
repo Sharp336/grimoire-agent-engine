@@ -90,6 +90,7 @@ export class EventController {
 	#lastVisibleBlockCount = 0;
 	#renderedCustomMessages = new Set<string>();
 	#lastIntent: string | undefined = undefined;
+	#activeToolExecutions = new Map<string, { startedAt: number; message: string }>();
 	#backgroundTaskCallIds = new Set<string>();
 	/** Tool calls whose approval prompt drove the title into `attention`; cleared
 	 *  at their tool_execution_end so the title returns to `working`. */
@@ -484,6 +485,7 @@ export class EventController {
 	}
 
 	#updateWorkingMessageFromIntent(intent: unknown): void {
+		if (this.#activeToolExecutions.size > 0) return;
 		if (this.ctx.session.isAborting) return;
 		// Streamed JSON can deliver non-string `i` (object, number, boolean) before
 		// schema validation; `?.` only guards null/undefined, so guard the type too.
@@ -492,6 +494,33 @@ export class EventController {
 		if (!trimmed || trimmed === this.#lastIntent) return;
 		this.#lastIntent = trimmed;
 		this.ctx.setWorkingMessage(`${trimmed}${interruptHint()}`);
+	}
+
+	#startToolExecutionStatus(event: Extract<AgentSessionEvent, { type: "tool_execution_start" }>): void {
+		if (this.ctx.session.isAborting || this.#activeToolExecutions.has(event.toolCallId)) return;
+		const intent = typeof event.intent === "string" ? event.intent.trim() : "";
+		this.#activeToolExecutions.set(event.toolCallId, {
+			startedAt: Date.now(),
+			message: intent || `Running ${event.toolName}`,
+		});
+		this.#syncActiveToolExecutionStatus();
+	}
+
+	#finishToolExecutionStatus(toolCallId: string): void {
+		if (!this.#activeToolExecutions.delete(toolCallId)) return;
+		this.#syncActiveToolExecutionStatus();
+	}
+
+	#syncActiveToolExecutionStatus(): void {
+		const active = this.#activeToolExecutions.values().next().value;
+		if (!active) {
+			this.#lastIntent = undefined;
+			this.ctx.setWorkingMessage(undefined, { timerStartedAt: null });
+			return;
+		}
+		if (this.ctx.session.isAborting) return;
+		this.#lastIntent = active.message;
+		this.ctx.setWorkingMessage(`${active.message}${interruptHint()}`, { timerStartedAt: active.startedAt });
 	}
 
 	subscribeToAgent(): void {
@@ -754,6 +783,7 @@ export class EventController {
 		this.#pinnedErrorComponent = undefined;
 		this.#pinnedErrorMessage = undefined;
 		this.#restorePinnedErrorInline = true;
+		this.#activeToolExecutions.clear();
 		this.ctx.clearPinnedError();
 		if (this.ctx.retryLoader) {
 			this.ctx.retryLoader.stop();
@@ -1351,7 +1381,7 @@ export class EventController {
 	async #handleToolExecutionStart(event: Extract<AgentSessionEvent, { type: "tool_execution_start" }>): Promise<void> {
 		if (this.#retractedToolCallIds.has(event.toolCallId)) return;
 		this.#ensureWorkingLoaderWhileStreaming();
-		this.#updateWorkingMessageFromIntent(event.intent);
+		this.#startToolExecutionStatus(event);
 		if (event.toolName === "ask" || this.#toolWillPromptForApproval(event.toolName, event.args)) {
 			this.#approvalAttentionToolCallIds.add(event.toolCallId);
 			setTerminalTitleState("attention");
@@ -1506,10 +1536,9 @@ export class EventController {
 	}
 
 	async #handleToolExecutionEnd(event: Extract<AgentSessionEvent, { type: "tool_execution_end" }>): Promise<void> {
-		// `createAbortedToolResult` emits start/end after an error/aborted
-		// assistant message. The matching card was deliberately retracted at
-		// message_end; consume the completion instead of recreating/updating UI.
-		if (this.#retractedToolCallIds.delete(event.toolCallId)) return;
+		const retracted = this.#retractedToolCallIds.delete(event.toolCallId);
+		this.#finishToolExecutionStatus(event.toolCallId);
+		if (retracted) return;
 		// A synthetic aborted/error completion (agent-loop's placeholder for a
 		// never-run call on a terminal error/abort) settles the card in place so a
 		// terminal failure stays visible. Remember it so `#handleAutoRetryStart`
@@ -1729,6 +1758,7 @@ export class EventController {
 	}
 
 	async #finishAgentEnd(event: Extract<AgentSessionEvent, { type: "agent_end" }>): Promise<void> {
+		this.#activeToolExecutions.clear();
 		this.#setTerminalProgress(false);
 		this.ctx.statusLine.markActivityEnd();
 		this.#streamingReveal.stop();
@@ -1810,6 +1840,7 @@ export class EventController {
 		if (!this.ctx.viewSession.isStreaming) return;
 		if (this.ctx.autoCompactionLoader || this.ctx.retryLoader) return;
 		this.ctx.ensureLoadingAnimation();
+		if (this.#activeToolExecutions.size > 0) this.#syncActiveToolExecutionStatus();
 	}
 
 	/**

@@ -279,7 +279,7 @@ export interface InteractiveModeContext {
 	flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void>;
 	flushPendingBashComponents(): void;
 	flushPendingModelSwitch(): Promise<void>;
-	setWorkingMessage(message?: string): void;
+	setWorkingMessage(message?: string, options?: { timerStartedAt?: number | null }): void;
 	applyPendingWorkingMessage(): void;
 	ensureLoadingAnimation(): void;
 	startPendingSubmission(input: {
