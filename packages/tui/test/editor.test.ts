@@ -26,6 +26,15 @@ describe("Editor component", () => {
 		expect(editor.getNativeScrollbackWidthEpochRevision()).toBe(changed);
 	});
 
+	it("places the caret on a clicked word", () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.setText("hello world");
+		editor.render(40);
+		expect(editor.placeCursorFromMouse(0, 4)).toBe(false);
+		expect(editor.placeCursorFromMouse(1, 3 + 6)).toBe(true);
+		expect(editor.getCursor()).toEqual({ line: 0, col: 6 });
+	});
+
 	it("advances its width-epoch revision when max height exposes more draft rows", () => {
 		const editor = new Editor(defaultEditorTheme);
 		editor.setText("draft-0\ndraft-1\ndraft-2\ndraft-3");

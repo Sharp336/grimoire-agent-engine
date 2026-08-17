@@ -442,6 +442,7 @@ export class Editor implements Component, Focusable {
 
 	// Store last layout width for cursor navigation
 	#lastLayoutWidth: number = 80;
+	#lastRenderWidth: number = 80;
 	// Line measurement + word-wrap cache shared by #layoutText,
 	// #buildVisualLineMap, and key handlers within a frame. Line text is a
 	// sound key (strings are immutable); cleared on layout-width or
@@ -928,6 +929,7 @@ export class Editor implements Component, Focusable {
 		const contentAreaWidth = this.#getContentWidth(width, paddingX);
 		const layoutWidth = this.#getLayoutWidth(width, paddingX);
 		this.#lastLayoutWidth = layoutWidth;
+		this.#lastRenderWidth = width;
 
 		const box = this.#theme.symbols.boxRound;
 		const borderWidth = this.#getHorizontalChromeWidth(paddingX);
@@ -1775,6 +1777,32 @@ export class Editor implements Component, Focusable {
 
 	getCursor(): { line: number; col: number } {
 		return { line: this.#state.cursorLine, col: this.#state.cursorCol };
+	}
+
+	/**
+	 * Place the caret from a mouse click in this editor's local frame.
+	 * `row`/`col` are 0-based cells in the editor's last render. Returns false
+	 * when the click is on chrome (top border, autocomplete) rather than text.
+	 */
+	placeCursorFromMouse(row: number, col: number): boolean {
+		if (row < 0 || col < 0) return false;
+		const contentRow = this.#borderVisible ? row - 1 : row;
+		if (contentRow < 0) return false;
+		const visualIndex = contentRow + this.#scrollOffset;
+		const visualLines = this.#buildVisualLineMap(this.#lastLayoutWidth);
+		const vl = visualLines[visualIndex];
+		if (!vl) return false;
+		const paddingX = this.#getEditorPaddingX();
+		const leftChrome = this.#borderVisible
+			? this.#getHorizontalChromeWidth(paddingX)
+			: this.#getPromptGutterWidth(this.#lastRenderWidth, paddingX);
+		const textCol = Math.max(0, col - leftChrome);
+		const line = this.#state.lines[vl.logicalLine] || "";
+		const segment = line.slice(vl.startCol, vl.startCol + vl.length);
+		this.#resetKillSequence();
+		this.#state.cursorLine = vl.logicalLine;
+		this.#setCursorCol(vl.startCol + offsetAtVisualCol(segment, textCol));
+		return true;
 	}
 
 	moveToLineStart(): void {

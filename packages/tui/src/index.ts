@@ -37,6 +37,8 @@ export * from "./latex-block";
 export * from "./latex-to-unicode";
 // SGR mouse report parsing
 export * from "./mouse";
+// Visible-window drag selection
+export * from "./text-selection";
 // Mermaid diagram support
 // Input buffering for batch splitting
 export * from "./stdin-buffer";
