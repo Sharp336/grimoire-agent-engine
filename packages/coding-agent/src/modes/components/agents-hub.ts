@@ -38,6 +38,12 @@ import {
 	resolveConfiguredModelPatterns,
 	resolveModelOverride,
 } from "../../config/model-resolver";
+import {
+	isServiceTierInheritSettingValue,
+	resolveAgentServiceTierSetting,
+	SERVICE_TIER_INHERIT_SETTING_VALUES,
+	type ServiceTierInheritSettingValue,
+} from "../../config/service-tier";
 import type { Settings } from "../../config/settings";
 import agentCreationArchitectPrompt from "../../prompts/system/agent-creation-architect.md" with { type: "text" };
 import agentCreationUserPrompt from "../../prompts/system/agent-creation-user.md" with { type: "text" };
@@ -66,6 +72,8 @@ interface HubAgent extends AgentDefinition {
 	prewalkOverride?: string;
 	/** `task.agentAdvisor[name]`: "on", "off", or a model pattern. */
 	advisorOverride?: string;
+	/** `task.agentServiceTierOverrides[name]`: a service-tier setting. */
+	serviceTierOverride?: ServiceTierInheritSettingValue;
 }
 
 const SOURCE_LABEL: Record<AgentSource, string> = {
@@ -87,7 +95,7 @@ interface SidebarEntry {
 type ListRow = { kind: "agent"; agent: HubAgent } | { kind: "new" };
 
 /** The per-agent knob a strip or the model browser is editing. */
-type PropertyKind = "model" | "prewalk" | "advisor";
+type PropertyKind = "model" | "prewalk" | "advisor" | "serviceTier";
 
 interface StripChip {
 	label: string;
@@ -293,6 +301,7 @@ export class AgentsHubComponent implements Component {
 			const overrides = this.#settings.get("task.agentModelOverrides") ?? {};
 			const prewalkOverrides = this.#settings.get("task.agentPrewalk") ?? {};
 			const advisorOverrides = this.#settings.get("task.agentAdvisor") ?? {};
+			const serviceTierOverrides = this.#settings.getGlobalSetting("task.agentServiceTierOverrides") ?? {};
 			this.#allAgents = agents
 				.slice()
 				.sort((a, b) => {
@@ -302,6 +311,7 @@ export class AgentsHubComponent implements Component {
 				})
 				.map(agent => {
 					const override = overrides[agent.name];
+					const serviceTierOverride = serviceTierOverrides[agent.name];
 					const overrideModel = (Array.isArray(override) ? override.join(",") : (override ?? "")).trim();
 					return {
 						...agent,
@@ -309,6 +319,9 @@ export class AgentsHubComponent implements Component {
 						overrideModel: overrideModel || undefined,
 						prewalkOverride: prewalkOverrides[agent.name]?.trim() || undefined,
 						advisorOverride: advisorOverrides[agent.name]?.trim() || undefined,
+						serviceTierOverride: isServiceTierInheritSettingValue(serviceTierOverride)
+							? serviceTierOverride
+							: undefined,
 					};
 				});
 			this.#buildSidebar();
@@ -410,6 +423,18 @@ export class AgentsHubComponent implements Component {
 		});
 		return selection ? (selection.model ?? "@advisor") : undefined;
 	}
+	#effectiveServiceTier(agent: HubAgent): {
+		setting: ServiceTierInheritSettingValue;
+		source: "override" | "tier.subagent";
+	} {
+		const fallbackSetting = this.#settings.get("tier.subagent");
+		const fallback = isServiceTierInheritSettingValue(fallbackSetting) ? fallbackSetting : "inherit";
+		const overrides = this.#settings.get("task.agentServiceTierOverrides") ?? {};
+		return {
+			setting: resolveAgentServiceTierSetting(agent.name, overrides, fallback),
+			source: isServiceTierInheritSettingValue(overrides[agent.name]) ? "override" : "tier.subagent",
+		};
+	}
 
 	// ═══════════════════════════════════════════════════════════════════════
 	// Mutations
@@ -426,7 +451,16 @@ export class AgentsHubComponent implements Component {
 		this.#tui.requestRender();
 	}
 
-	#persistRecord(property: PropertyKind): void {
+	#persistRecord(changedAgent: HubAgent, property: PropertyKind): void {
+		if (property === "serviceTier") {
+			const value = changedAgent.serviceTierOverride;
+			this.#settings.setAgentServiceTierOverride(
+				changedAgent.name,
+				isServiceTierInheritSettingValue(value) ? value : undefined,
+			);
+			return;
+		}
+
 		const overrides: Record<string, string> = {};
 		for (const agent of this.#allAgents) {
 			const value = this.#overrideFor(agent, property)?.trim();
@@ -449,6 +483,8 @@ export class AgentsHubComponent implements Component {
 				return agent.prewalkOverride;
 			case "advisor":
 				return agent.advisorOverride;
+			case "serviceTier":
+				return agent.serviceTierOverride;
 		}
 	}
 
@@ -464,8 +500,11 @@ export class AgentsHubComponent implements Component {
 			case "advisor":
 				agent.advisorOverride = trimmed;
 				break;
+			case "serviceTier":
+				agent.serviceTierOverride = isServiceTierInheritSettingValue(trimmed) ? trimmed : undefined;
+				break;
 		}
-		this.#persistRecord(property);
+		this.#persistRecord(agent, property);
 		this.#notice = this.#describeProperty(agent, property);
 		this.#tui.requestRender();
 	}
@@ -487,6 +526,10 @@ export class AgentsHubComponent implements Component {
 				const pattern = this.#effectiveAdvisorPattern(agent);
 				return `${agent.name} advisor: ${pattern ? `on (${pattern})` : "off"}`;
 			}
+			case "serviceTier": {
+				const { setting, source } = this.#effectiveServiceTier(agent);
+				return `${agent.name} service tier: ${setting} (${source})`;
+			}
 		}
 	}
 
@@ -505,6 +548,10 @@ export class AgentsHubComponent implements Component {
 			case "advisor": {
 				const pattern = this.#effectiveAdvisorPattern(agent);
 				return pattern ?? "off";
+			}
+			case "serviceTier": {
+				const { setting, source } = this.#effectiveServiceTier(agent);
+				return `${setting} (${source})`;
 			}
 		}
 	}
@@ -529,7 +576,13 @@ export class AgentsHubComponent implements Component {
 		this.#strip = {
 			kind: "chips",
 			agent,
-			chips: [enabledChip, propertyChip("model"), propertyChip("prewalk"), propertyChip("advisor")],
+			chips: [
+				enabledChip,
+				propertyChip("model"),
+				propertyChip("prewalk"),
+				propertyChip("advisor"),
+				propertyChip("serviceTier"),
+			],
 			index: 1,
 		};
 	}
@@ -556,6 +609,19 @@ export class AgentsHubComponent implements Component {
 					label: "clear override",
 					styled: theme.fg("warning", "clear override"),
 					action: { kind: "set", property, value: undefined },
+				});
+			}
+		} else if (property === "serviceTier") {
+			chips.push({
+				label: "tier.subagent",
+				styled: mark("tier.subagent", current === undefined),
+				action: { kind: "set", property, value: undefined },
+			});
+			for (const setting of SERVICE_TIER_INHERIT_SETTING_VALUES) {
+				chips.push({
+					label: setting,
+					styled: mark(setting, current === setting),
+					action: { kind: "set", property, value: setting },
 				});
 			}
 		} else {
@@ -1278,9 +1344,14 @@ export class AgentsHubComponent implements Component {
 			lines.push(truncateToWidth(` ${modelLine}`, width));
 			const prewalk = this.#effectivePrewalkPattern(agent);
 			const advisor = this.#effectiveAdvisorPattern(agent);
+			const serviceTier = this.#effectiveServiceTier(agent);
 			const flagLine = [
 				`${theme.fg("muted", "prewalk:")} ${prewalk ? theme.fg("success", prewalk) : theme.fg("dim", "off")}`,
 				`${theme.fg("muted", "advisor:")} ${advisor ? theme.fg("success", advisor) : theme.fg("dim", "off")}`,
+				`${theme.fg("muted", "service tier:")} ${theme.fg("success", serviceTier.setting)} ${theme.fg(
+					serviceTier.source === "override" ? "warning" : "dim",
+					`(${serviceTier.source})`,
+				)}`,
 				agent.filePath ? theme.fg("dim", shortenPath(agent.filePath)) : "",
 			]
 				.filter(Boolean)
@@ -1363,7 +1434,12 @@ export class AgentsHubComponent implements Component {
 		if (this.#strip) {
 			if (this.#strip.kind === "pattern") {
 				const property = this.#strip.property;
-				const values = property === "model" ? "a model pattern" : '"on", "off", or a model pattern';
+				const values =
+					property === "model"
+						? "a model pattern"
+						: property === "serviceTier"
+							? "a service-tier override"
+							: '"on", "off", or a model pattern';
 				return `Enter ${values} (role aliases like @smol and :level suffixes work; empty clears) · Esc back`;
 			}
 			return this.#strip.property ? "←/→ choose · Enter apply · Esc back" : "←/→ choose · Enter open · Esc cancel";

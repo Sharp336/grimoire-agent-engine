@@ -52,7 +52,10 @@ function mockAgents(): void {
 	});
 }
 
-async function createHub(settings: Settings): Promise<{
+async function createHub(
+	settings: Settings,
+	cwd = tempCwd,
+): Promise<{
 	hub: AgentsHubComponent;
 	strip: () => string;
 	type: (text: string) => void;
@@ -61,7 +64,7 @@ async function createHub(settings: Settings): Promise<{
 	let cancelled = false;
 	const hub = await AgentsHubComponent.create(
 		tuiStub,
-		tempCwd,
+		cwd,
 		settings,
 		{ modelRegistry: registryStub },
 		{ onCancel: () => (cancelled = true) },
@@ -219,5 +222,148 @@ describe("AgentsHub configuration strips", () => {
 		hub.handleInput("\x1b"); // close strip
 		expect(strip()).not.toContain("dev →");
 		expect(cancelled()).toBe(false);
+	});
+});
+
+describe("AgentsHub service-tier override", () => {
+	test("cycles service-tier overrides, persists a sparse map, and clears back to the subagent tier", async () => {
+		mockAgents();
+		const settings = Settings.isolated({ "tier.subagent": "scale" });
+		const { hub, strip } = await createHub(settings);
+		const overrides = () => settings.get("task.agentServiceTierOverrides");
+		const openServiceTierStrip = () => {
+			hub.handleInput("\r");
+			for (let i = 0; i < 3; i++) hub.handleInput("\x1b[C");
+			hub.handleInput("\r");
+		};
+
+		expect(overrides()).toEqual({});
+		expect(strip()).toContain("service tier: scale (tier.subagent)");
+
+		for (const [index, tier] of ["inherit", "none", "auto", "default", "flex", "scale", "priority"].entries()) {
+			openServiceTierStrip();
+			for (let i = 0; i <= index; i++) hub.handleInput("\x1b[C");
+			hub.handleInput("\r");
+
+			expect(overrides()).toEqual({ dev: tier });
+			expect(strip()).toContain(`service tier: ${tier} (override)`);
+		}
+
+		openServiceTierStrip();
+		hub.handleInput("\r");
+
+		expect(overrides()).toEqual({});
+		expect(strip()).toContain("service tier: scale (tier.subagent)");
+	});
+
+	test("preserves service-tier overrides for agents omitted from discovery", async () => {
+		mockAgents();
+		const settings = Settings.isolated({
+			"task.agentServiceTierOverrides": { "temporarily-undiscovered-agent": "priority" },
+		});
+		const { hub } = await createHub(settings);
+		const openServiceTierStrip = () => {
+			hub.handleInput("\r");
+			for (let i = 0; i < 3; i++) hub.handleInput("\x1b[C");
+			hub.handleInput("\r");
+		};
+
+		openServiceTierStrip();
+		hub.handleInput("\x1b[C");
+		hub.handleInput("\r");
+		expect(settings.get("task.agentServiceTierOverrides")).toEqual({
+			dev: "inherit",
+			"temporarily-undiscovered-agent": "priority",
+		});
+
+		openServiceTierStrip();
+		hub.handleInput("\r");
+		expect(settings.get("task.agentServiceTierOverrides")).toEqual({
+			"temporarily-undiscovered-agent": "priority",
+		});
+	});
+
+	test("preserves external sibling tier overrides when setting an agent", async () => {
+		vi.spyOn(discovery, "discoverAgents").mockResolvedValue({
+			projectAgentsDir: null,
+			agents: [{ name: "task", description: "Generic task agent", systemPrompt: "", source: "bundled" }],
+		});
+		const cwd = await fs.mkdtemp(path.join(tempCwd, "tier-concurrent-"));
+		const agentDir = path.join(cwd, "agent-config");
+		const configPath = path.join(agentDir, "config.yml");
+		const settings = await Settings.loadIsolated({ cwd, agentDir });
+		const { hub } = await createHub(settings, cwd);
+
+		await Bun.write(configPath, "task:\n  agentServiceTierOverrides:\n    concurrently-added-agent: priority\n");
+		hub.handleInput("\r");
+		for (let i = 0; i < 3; i++) hub.handleInput("\x1b[C");
+		hub.handleInput("\r");
+		hub.handleInput("\x1b[C");
+		hub.handleInput("\r");
+		await settings.flush();
+
+		const reloaded = await Settings.loadIsolated({ cwd, agentDir });
+		expect(reloaded.get("task.agentServiceTierOverrides")).toEqual({
+			task: "inherit",
+			"concurrently-added-agent": "priority",
+		});
+	});
+
+	test("keeps project and overlay tier overrides out of global settings", async () => {
+		vi.spyOn(discovery, "discoverAgents").mockResolvedValue({
+			projectAgentsDir: null,
+			agents: [{ name: "task", description: "Generic task agent", systemPrompt: "", source: "bundled" }],
+		});
+		const cwd = await fs.mkdtemp(path.join(tempCwd, "tier-scope-"));
+		const agentDir = path.join(cwd, "agent-config");
+		const overlayPath = path.join(cwd, "project-overlay.yml");
+		const globalOnlyCwd = await fs.mkdtemp(path.join(tempCwd, "global-only-"));
+		await Bun.write(
+			path.join(agentDir, "config.yml"),
+			"task:\n  agentServiceTierOverrides:\n    global-only-agent: none\n",
+		);
+		await Bun.write(
+			path.join(cwd, ".omp", "settings.json"),
+			JSON.stringify({
+				task: { agentServiceTierOverrides: { "project-only-agent": "auto", task: "flex" } },
+			}),
+		);
+		await Bun.write(
+			overlayPath,
+			"task:\n  agentServiceTierOverrides:\n    task: priority\n    overlay-only-agent: flex\n",
+		);
+		const settings = await Settings.loadIsolated({ cwd, agentDir, configFiles: [overlayPath] });
+		expect(settings.get("task.agentServiceTierOverrides")).toEqual({
+			"global-only-agent": "none",
+			"project-only-agent": "auto",
+			task: "priority",
+			"overlay-only-agent": "flex",
+		});
+		const { hub, strip } = await createHub(settings, cwd);
+		const openServiceTierStrip = () => {
+			hub.handleInput("\r");
+			for (let i = 0; i < 3; i++) hub.handleInput("\x1b[C");
+			hub.handleInput("\r");
+		};
+
+		openServiceTierStrip();
+		hub.handleInput("\x1b[C");
+		hub.handleInput("\r");
+		expect(strip()).toContain("service tier: priority (override)");
+		await settings.flush();
+		const afterGlobalEdit = await Settings.loadIsolated({ cwd: globalOnlyCwd, agentDir });
+		expect(afterGlobalEdit.get("task.agentServiceTierOverrides")).toEqual({
+			"global-only-agent": "none",
+			task: "inherit",
+		});
+
+		openServiceTierStrip();
+		hub.handleInput("\r");
+		expect(strip()).toContain("service tier: priority (override)");
+		await settings.flush();
+		const afterGlobalClear = await Settings.loadIsolated({ cwd: globalOnlyCwd, agentDir });
+		expect(afterGlobalClear.get("task.agentServiceTierOverrides")).toEqual({
+			"global-only-agent": "none",
+		});
 	});
 });

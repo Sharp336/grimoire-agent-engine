@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelRoleAlias } from "../config/model-roles";
+import { isServiceTierInheritSettingValue } from "../config/service-tier";
 import type { Settings } from "../config/settings";
 import { MCPManager } from "../mcp/manager";
 import type { PersistedSubagentReviverFactory } from "../registry/agent-lifecycle";
@@ -79,21 +80,6 @@ export function createPersistedSubagentReviverFactory(
 			taskDepth++;
 			parentId = registry.get(parentId)?.parentId;
 		}
-		// Rebuild the same advisor opt-in the original spawn resolved: `"on"` =
-		// advisor-role model, anything else = the explicit pattern stamped onto
-		// this session's `modelRoles.advisor`. Absent = unadvised (the
-		// createSubagentSettings default).
-		const subagentSettings = createSubagentSettings(ctx.settings, {
-			...(init.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
-			...(init.advisor
-				? {
-						"advisor.enabled": true,
-						...(init.advisor !== "on"
-							? { modelRoles: { ...ctx.settings.getModelRoles(), advisor: init.advisor } }
-							: undefined),
-					}
-				: undefined),
-		});
 		const persistedModelPattern =
 			init.modelRole && init.modelRole !== "default"
 				? [formatModelRoleAlias(init.modelRole), ...(init.resolvedModel ? [init.resolvedModel] : [])]
@@ -111,6 +97,31 @@ export function createPersistedSubagentReviverFactory(
 			const restrictToolNames = init.restrictToolNames === true;
 			const mcpManager = restrictToolNames ? undefined : MCPManager.instance();
 			const mcpProxyTools = mcpManager ? createMCPProxyTools(mcpManager) : [];
+			// New entries snapshot the immediate parent used by `inherit`; legacy
+			// entries retain the prior top-level live-session fallback.
+			const parentServiceTier = init.parentServiceTier ?? ctx.session.serviceTierByFamily;
+			// Rebuild the same advisor opt-in the original spawn resolved: `"on"` =
+			// advisor-role model, anything else = the explicit pattern stamped onto
+			// this session's `modelRoles.advisor`. Absent = unadvised (the
+			// createSubagentSettings default).
+			const subagentSettings = createSubagentSettings(
+				ctx.settings,
+				{
+					...(init.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
+					...(init.advisor
+						? {
+								"advisor.enabled": true,
+								...(init.advisor !== "on"
+									? { modelRoles: { ...ctx.settings.getModelRoles(), advisor: init.advisor } }
+									: undefined),
+							}
+						: undefined),
+				},
+				parentServiceTier,
+				isServiceTierInheritSettingValue(init.serviceTierOverride)
+					? init.serviceTierOverride
+					: ctx.settings.get("tier.subagent"),
+			);
 			const { session } = await createAgentSession({
 				cwd: ctx.session.sessionManager.getCwd(),
 				authStorage: ctx.authStorage,

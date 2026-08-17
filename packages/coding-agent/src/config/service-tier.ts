@@ -50,7 +50,7 @@ export function isServiceTierForFamily(family: string, tier: unknown): tier is S
  * Inherit-capable single value for the subagent/advisor tiers. The chosen tier
  * is broadcast across families and applied to whichever family the spawned
  * model belongs to (clamped to what that family realizes); `"inherit"` defers
- * to the main agent's live per-family selection.
+ * to the parent agent's live per-family selection.
  */
 export const SERVICE_TIER_INHERIT_SETTING_VALUES = [
 	"inherit",
@@ -63,6 +63,25 @@ export const SERVICE_TIER_INHERIT_SETTING_VALUES = [
 ] as const;
 
 export type ServiceTierInheritSettingValue = (typeof SERVICE_TIER_INHERIT_SETTING_VALUES)[number];
+
+/** Whether a runtime value is an inherit-capable subagent service-tier setting. */
+export function isServiceTierInheritSettingValue(value: unknown): value is ServiceTierInheritSettingValue {
+	return typeof value === "string" && (SERVICE_TIER_INHERIT_SETTING_VALUES as readonly string[]).includes(value);
+}
+
+/**
+ * Resolve one agent's sparse service-tier override. Missing or invalid entries
+ * deliberately use the configured subagent fallback so unvalidated settings
+ * values cannot reach provider configuration.
+ */
+export function resolveAgentServiceTierSetting(
+	agentName: string,
+	overrides: Readonly<Record<string, string>>,
+	fallback: ServiceTierInheritSettingValue,
+): ServiceTierInheritSettingValue {
+	const override = overrides[agentName];
+	return isServiceTierInheritSettingValue(override) ? override : fallback;
+}
 
 export const SERVICE_TIER_OPENAI_OPTIONS: ReadonlyArray<SubmenuOption<ServiceTierOpenAISettingValue>> = [
 	{ value: "none", label: "None", description: "Omit service_tier (standard processing)" },
@@ -89,7 +108,7 @@ export const SERVICE_TIER_GOOGLE_OPTIONS: ReadonlyArray<SubmenuOption<ServiceTie
 ];
 
 export const SERVICE_TIER_INHERIT_OPTIONS: ReadonlyArray<SubmenuOption<ServiceTierInheritSettingValue>> = [
-	{ value: "inherit", label: "Inherit", description: "Match the main agent's live per-family tiers" },
+	{ value: "inherit", label: "Inherit", description: "Match the parent agent's live per-family tiers" },
 	{ value: "none", label: "None", description: "Standard processing" },
 	{ value: "auto", label: "Auto", description: "Provider default tier selection (OpenAI family)" },
 	{ value: "default", label: "Default", description: "Standard priority processing (OpenAI family)" },
