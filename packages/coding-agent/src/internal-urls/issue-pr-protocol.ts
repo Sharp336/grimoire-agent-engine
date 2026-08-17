@@ -14,6 +14,7 @@
  * - `issue://owner/repo/123` / `pr://owner/repo/123` — fully qualified single
  *   item.
  * - `issue://owner/repo/123?comments=0` — single item, comments suppressed.
+ * - `issue://owner/repo/123?host=ghe.example.com` — GHES single issue.
  * - `issue://owner/repo?state=closed&limit=20` — list options pass through to
  *   `gh`.
  */
@@ -28,7 +29,7 @@ import {
 	parsePositiveDecimalInt,
 	resolveDefaultRepoMemoized,
 } from "../tools/gh";
-import { type CacheStatus, formatFreshnessNote } from "../tools/github-cache";
+import { type CacheStatus, formatFreshnessNote, resolveGithubCacheAuthKey } from "../tools/github-cache";
 import * as git from "../utils/git";
 import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext } from "./types";
 
@@ -39,6 +40,8 @@ interface ParsedSingle {
 	repo?: string;
 	number: number;
 	comments: boolean;
+	fresh: boolean;
+	githubHost?: string;
 }
 
 interface ParsedPrDiff {
@@ -101,6 +104,52 @@ function parseListOptions(url: InternalUrl, scheme: Scheme, repo: string | undef
 	};
 }
 
+function parseFreshOption(url: InternalUrl, scheme: Scheme): boolean {
+	const values = url.searchParams.getAll("fresh");
+	if (values.length === 0) return false;
+	if (values.length === 1 && (values[0] === "1" || values[0] === "true")) return true;
+	throw new Error(`Invalid ${scheme}:// fresh value. Expected exactly one of: 1, true.`);
+}
+
+function parseGithubHostOption(url: InternalUrl, scheme: Scheme): string | undefined {
+	const values = url.searchParams.getAll("host");
+	if (values.length === 0) return undefined;
+	if (values.length !== 1) {
+		throw new Error(`Invalid ${scheme}:// host value. Expected exactly one GitHub hostname.`);
+	}
+	const raw = values[0];
+	if (!raw || raw !== raw.trim()) {
+		throw new Error(`Invalid ${scheme}:// host value. Expected a GitHub hostname.`);
+	}
+
+	let parsed: URL;
+	try {
+		parsed = new URL(`https://${raw}`);
+	} catch {
+		throw new Error(`Invalid ${scheme}:// host value. Expected a GitHub hostname.`);
+	}
+	if (
+		parsed.protocol !== "https:" ||
+		parsed.username !== "" ||
+		parsed.password !== "" ||
+		parsed.pathname !== "/" ||
+		parsed.search !== "" ||
+		parsed.hash !== "" ||
+		parsed.hostname === ""
+	) {
+		throw new Error(`Invalid ${scheme}:// host value. Expected a GitHub hostname.`);
+	}
+	return parsed.host.toLowerCase();
+}
+
+function rejectGithubHostOption(url: InternalUrl, scheme: Scheme): void {
+	if (url.searchParams.has("host")) {
+		throw new Error(
+			`Invalid ${scheme}:// host option. It is supported only for fully qualified issue://<owner>/<repo>/<number> reads.`,
+		);
+	}
+}
+
 function parseUrl(url: InternalUrl, scheme: Scheme): Parsed {
 	const host = url.rawHost || url.hostname;
 	const rawPath = url.rawPathname ?? url.pathname;
@@ -135,6 +184,7 @@ function parseUrl(url: InternalUrl, scheme: Scheme): Parsed {
 	let diffParts: string[] = [];
 
 	if (!host && parts.length === 0) {
+		rejectGithubHostOption(url, scheme);
 		return parseListOptions(url, scheme, undefined);
 	}
 	if (host && parts.length === 0) {
@@ -150,6 +200,7 @@ function parseUrl(url: InternalUrl, scheme: Scheme): Parsed {
 		diffParts = parts;
 	} else if (host && parts.length === 1) {
 		// scheme://owner/repo  → list
+		rejectGithubHostOption(url, scheme);
 		repo = `${host}/${parts[0]}`;
 		return parseListOptions(url, scheme, repo);
 	} else if (host && parts.length >= 2) {
@@ -184,11 +235,18 @@ function parseUrl(url: InternalUrl, scheme: Scheme): Parsed {
 		throw new Error(`Invalid ${scheme}:// number: ${numberPart ?? "(missing)"}`);
 	}
 
+	const githubHost = parseGithubHostOption(url, scheme);
+	if (githubHost !== undefined && (scheme !== "issue" || repo === undefined || diffParts.length > 0)) {
+		throw new Error(
+			`Invalid ${scheme}:// host option. It is supported only for fully qualified issue://<owner>/<repo>/<number> reads.`,
+		);
+	}
+
 	if (diffParts.length === 0) {
 		const commentsParam = url.searchParams.get("comments");
 		const comments =
 			commentsParam === null ? true : !(commentsParam === "0" || commentsParam.toLowerCase() === "false");
-		return { kind: "single", repo, number: num, comments };
+		return { kind: "single", repo, number: num, comments, fresh: parseFreshOption(url, scheme), githubHost };
 	}
 
 	// diffParts has already been validated above; scheme is `pr`.
@@ -479,6 +537,14 @@ async function fetchAndRenderPrDiff(
 	};
 }
 
+function qualifyRepoForGithubHost(repo: string | undefined, githubHost: string | undefined): string | undefined {
+	if (!githubHost) return repo;
+	if (!repo) {
+		throw new Error("Invalid issue:// host option: a fully qualified owner/repo is required.");
+	}
+	return `${githubHost}/${repo}`;
+}
+
 /**
  * Handler for `issue://` URLs.
  */
@@ -505,13 +571,17 @@ export class IssueProtocolHandler implements ProtocolHandler {
 			throw new Error(`Invalid issue:// URL: unexpected variant '${parsed.kind}'`);
 		}
 		try {
+			const repo = qualifyRepoForGithubHost(parsed.repo, parsed.githubHost);
 			const lookup = await getOrFetchIssue({
 				cwd: resolveCwd(context),
-				repo: parsed.repo,
+				repo,
 				issue: String(parsed.number),
 				includeComments: parsed.comments,
 				signal: context?.signal,
 				settings: settingsFromContext(context),
+				forceRefresh: parsed.fresh,
+				cacheAuthKey:
+					parsed.githubHost === undefined ? undefined : (resolveGithubCacheAuthKey(parsed.githubHost) ?? null),
 			});
 			return buildSingleResource({
 				url,
@@ -576,6 +646,7 @@ export class PrProtocolHandler implements ProtocolHandler {
 				includeComments: parsed.comments,
 				signal: context?.signal,
 				settings: settingsFromContext(context),
+				forceRefresh: parsed.fresh,
 			});
 			return buildSingleResource({
 				url,

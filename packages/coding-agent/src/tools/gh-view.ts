@@ -11,6 +11,7 @@ import {
 	normalizeOptionalString,
 	normalizeText,
 	parseIssueUrl,
+	parseLinkedIssueUrl,
 	parsePositiveDecimalInt,
 	pushLine,
 	requireNonEmpty,
@@ -20,6 +21,8 @@ import { formatShortSha } from "./gh-format";
 import { FILE_PREVIEW_LIMIT } from "./gh-search";
 import type {
 	GhComment,
+	GhIssueHierarchyLink,
+	GhIssueSubIssuesSummary,
 	GhIssueViewData,
 	GhPrFile,
 	GhPrReview,
@@ -27,10 +30,11 @@ import type {
 	GhPrReviewCommentApi,
 	GhPrViewData,
 	GhRepoViewData,
+	GhUser,
 	GithubInput,
 } from "./gh-types";
 import { type CacheStatus, getOrFetchView, resolveGithubCacheAuthKey } from "./github-cache";
-import { ToolError } from "./tool-errors";
+import { ToolAbortError, ToolError } from "./tool-errors";
 
 export const GH_REPO_FIELDS = [
 	"nameWithOwner",
@@ -50,25 +54,42 @@ export const GH_REPO_FIELDS = [
 ];
 export const GH_ISSUE_FIELDS = [
 	"author",
+	"assignees",
 	"body",
 	"comments",
 	"createdAt",
 	"labels",
 	"number",
+	"parent",
 	"state",
 	"stateReason",
+	"subIssues",
+	"subIssuesSummary",
 	"title",
 	"updatedAt",
 	"url",
 ];
+export const GH_ISSUE_HIERARCHY_FIELDS = ["parent", "subIssues", "subIssuesSummary"] as const;
+
+export type IssueHierarchyAvailability = "available" | "local-cli-unsupported" | "server-unsupported";
+
+interface IssueHierarchyFetchResult<T> {
+	data: T;
+	hierarchyAvailability: IssueHierarchyAvailability;
+}
+
 export const GH_ISSUE_FIELDS_NO_COMMENTS = [
 	"author",
+	"assignees",
 	"body",
 	"createdAt",
 	"labels",
 	"number",
+	"parent",
 	"state",
 	"stateReason",
+	"subIssues",
+	"subIssuesSummary",
 	"title",
 	"updatedAt",
 	"url",
@@ -76,22 +97,31 @@ export const GH_ISSUE_FIELDS_NO_COMMENTS = [
 
 export const GH_ISSUE_STATE_REASON_FIELD = "stateReason";
 
-export function ghJsonErrorNamesField(err: unknown, field: string): boolean {
-	if (!(err instanceof Error) || !err.message.includes("Unknown JSON field")) return false;
-	return err.message.includes(`"${field}"`) || err.message.includes(`'${field}'`) || err.message.includes(field);
+export function ghUnknownJsonField(err: unknown): string | undefined {
+	if (!(err instanceof Error)) return undefined;
+	const match = err.message.match(/Unknown JSON field:?\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z][A-Za-z0-9]*))/);
+	return match?.[1] ?? match?.[2] ?? match?.[3];
 }
 
-export function dropJsonField(args: readonly string[], field: string): string[] | undefined {
+export function ghJsonErrorNamesField(err: unknown, field: string): boolean {
+	return ghUnknownJsonField(err) === field;
+}
+
+export function dropJsonFields(args: readonly string[], fieldsToDrop: readonly string[]): string[] | undefined {
 	const next = [...args];
 	const jsonIndex = next.indexOf("--json");
 	if (jsonIndex < 0) return undefined;
 	const fields = next[jsonIndex + 1];
 	if (!fields) return undefined;
 	const splitFields = fields.split(",");
-	const kept = splitFields.filter(candidate => candidate !== field);
+	const kept = splitFields.filter(candidate => !fieldsToDrop.includes(candidate));
 	if (kept.length === splitFields.length) return undefined;
 	next[jsonIndex + 1] = kept.join(",");
 	return next;
+}
+
+export function dropJsonField(args: readonly string[], field: string): string[] | undefined {
+	return dropJsonFields(args, [field]);
 }
 
 /** Runs `gh --json` for issue data, retrying without optional stateReason on older gh releases. */
@@ -108,6 +138,61 @@ export async function githubIssueJsonWithStateReasonFallback<T>(
 		const retryArgs = dropJsonField(args, GH_ISSUE_STATE_REASON_FIELD);
 		if (!retryArgs) throw err;
 		return await git.github.json<T>(cwd, retryArgs, signal, options);
+	}
+}
+
+function classifyHierarchyUnavailable(err: unknown): Exclude<IssueHierarchyAvailability, "available"> | undefined {
+	if (err instanceof ToolAbortError || (err instanceof Error && err.name === "ToolAbortError")) return undefined;
+	if (!(err instanceof Error)) return undefined;
+
+	const unknownField = ghUnknownJsonField(err);
+	if (
+		err.message.includes("Unknown JSON field:") &&
+		unknownField !== undefined &&
+		GH_ISSUE_HIERARCHY_FIELDS.some(field => field === unknownField)
+	) {
+		return "local-cli-unsupported";
+	}
+	if (!err.message.includes("GraphQL:")) return undefined;
+
+	const namesUnsupportedHierarchyField = GH_ISSUE_HIERARCHY_FIELDS.some(field => {
+		const fieldName = `["'\`]?\\b${field}\\b["'\`]?`;
+		const issueType = `["'\`]?\\bIssue\\b["'\`]?`;
+		return (
+			new RegExp(`Cannot query field\\s+${fieldName}[^\\r\\n]{0,80}on type\\s+${issueType}`, "i").test(
+				err.message,
+			) ||
+			new RegExp(`${fieldName}[^\\r\\n]{0,80}does(?:n't| not) exist on type\\s+${issueType}`, "i").test(
+				err.message,
+			) ||
+			new RegExp(`${fieldName}[^\\r\\n]{0,40}(?:is\\s+)?undefined[^\\r\\n]{0,80}on type\\s+${issueType}`, "i").test(
+				err.message,
+			)
+		);
+	});
+	return namesUnsupportedHierarchyField ? "server-unsupported" : undefined;
+}
+
+/**
+ * Fetches an issue with hierarchy data, retrying the base issue fields only
+ * when the local CLI or remote GraphQL schema explicitly rejects hierarchy.
+ */
+export async function githubIssueJsonWithHierarchyFallback<T>(
+	cwd: string,
+	args: readonly string[],
+	signal: AbortSignal | undefined,
+	options?: git.GhCommandOptions,
+): Promise<IssueHierarchyFetchResult<T>> {
+	try {
+		const data = await githubIssueJsonWithStateReasonFallback<T>(cwd, args, signal, options);
+		return { data, hierarchyAvailability: "available" };
+	} catch (err) {
+		const hierarchyAvailability = classifyHierarchyUnavailable(err);
+		if (!hierarchyAvailability) throw err;
+		const retryArgs = dropJsonFields(args, GH_ISSUE_HIERARCHY_FIELDS);
+		if (!retryArgs) throw err;
+		const data = await githubIssueJsonWithStateReasonFallback<T>(cwd, retryArgs, signal, options);
+		return { data, hierarchyAvailability };
 	}
 }
 
@@ -332,9 +417,159 @@ export function formatRepoView(data: GhRepoViewData, input: { repo?: string; bra
 	return lines.join("\n").trim();
 }
 
+function formatAssignees(assignees: GhUser[] | undefined): string | undefined {
+	const names = assignees?.map(formatAuthor).filter((value): value is string => value !== undefined) ?? [];
+	if (names.length === 0) return undefined;
+	return names.join(", ");
+}
+
+interface FormattedIssueHierarchyLink {
+	issueNumber: number;
+	repo: string;
+	host: string;
+	state: string;
+	title: string;
+}
+
+function normalizeIssueHierarchyLink(
+	value: GhIssueHierarchyLink | null | undefined,
+	expectedHost: string,
+): FormattedIssueHierarchyLink | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	if (typeof value.number !== "number" || !Number.isSafeInteger(value.number) || value.number <= 0) return undefined;
+	if (typeof value.state !== "string" || typeof value.title !== "string" || typeof value.url !== "string") {
+		return undefined;
+	}
+	const state = value.state.trim();
+	const title = value.title.trim().replace(/\s+/g, " ");
+	const parsedUrl = parseLinkedIssueUrl(value.url);
+	if (
+		(state !== "OPEN" && state !== "CLOSED") ||
+		!title ||
+		!parsedUrl ||
+		parsedUrl.host !== expectedHost ||
+		parsedUrl.issueNumber !== value.number
+	) {
+		return undefined;
+	}
+	return { host: parsedUrl.host, issueNumber: parsedUrl.issueNumber, repo: parsedUrl.repo, state, title };
+}
+
+function formatIssueHierarchyUrl(link: FormattedIssueHierarchyLink): string {
+	const base = `issue://${link.repo}/${link.issueNumber}`;
+	return link.host === "github.com" ? base : `${base}?host=${encodeURIComponent(link.host)}`;
+}
+
+function formatIssueHierarchySection(data: GhIssueViewData, availability: IssueHierarchyAvailability): string[] {
+	const lines = ["## Issue hierarchy", ""];
+	if (availability === "local-cli-unsupported") {
+		lines.push("Issue hierarchy unavailable: GitHub CLI 2.94.0 or later is required.");
+		return lines;
+	}
+	if (availability === "server-unsupported") {
+		lines.push("Issue hierarchy unavailable on this GitHub server.");
+		return lines;
+	}
+
+	let partial = false;
+	const expectedHost = parseLinkedIssueUrl(data.url)?.host;
+	let parent: FormattedIssueHierarchyLink | undefined;
+	if (data.parent === undefined) {
+		partial = true;
+	} else if (data.parent !== null) {
+		parent = expectedHost ? normalizeIssueHierarchyLink(data.parent, expectedHost) : undefined;
+		if (!parent) partial = true;
+	}
+
+	const subIssues: FormattedIssueHierarchyLink[] = [];
+	let totalCount: number | undefined;
+	const rawSubIssues = data.subIssues;
+	if (
+		!rawSubIssues ||
+		typeof rawSubIssues !== "object" ||
+		!Array.isArray(rawSubIssues.nodes) ||
+		typeof rawSubIssues.totalCount !== "number" ||
+		!Number.isSafeInteger(rawSubIssues.totalCount) ||
+		rawSubIssues.totalCount < 0
+	) {
+		partial = true;
+	} else {
+		totalCount = rawSubIssues.totalCount;
+		for (const rawSubIssue of rawSubIssues.nodes) {
+			const subIssue = expectedHost ? normalizeIssueHierarchyLink(rawSubIssue, expectedHost) : undefined;
+			if (subIssue) {
+				subIssues.push(subIssue);
+			} else {
+				partial = true;
+			}
+		}
+		if (totalCount !== rawSubIssues.nodes.length) partial = true;
+	}
+
+	let summary: GhIssueSubIssuesSummary | undefined;
+	const rawSummary = data.subIssuesSummary;
+	if (
+		!rawSummary ||
+		typeof rawSummary !== "object" ||
+		typeof rawSummary.total !== "number" ||
+		!Number.isSafeInteger(rawSummary.total) ||
+		rawSummary.total < 0 ||
+		typeof rawSummary.completed !== "number" ||
+		!Number.isSafeInteger(rawSummary.completed) ||
+		rawSummary.completed < 0 ||
+		rawSummary.completed > rawSummary.total ||
+		typeof rawSummary.percentCompleted !== "number" ||
+		!Number.isFinite(rawSummary.percentCompleted) ||
+		rawSummary.percentCompleted < 0 ||
+		rawSummary.percentCompleted > 100
+	) {
+		partial = true;
+	} else {
+		summary = rawSummary;
+	}
+	if (summary && (summary.total < subIssues.length || (totalCount !== undefined && summary.total !== totalCount))) {
+		summary = undefined;
+		partial = true;
+	}
+
+	const hierarchyLines: string[] = [];
+	if (parent) {
+		hierarchyLines.push(`Parent: ${parent.state} ${parent.repo}#${parent.issueNumber} — ${parent.title}`);
+		hierarchyLines.push(formatIssueHierarchyUrl(parent));
+	}
+	if (summary && summary.total > 0) {
+		if (hierarchyLines.length > 0) hierarchyLines.push("");
+		const roundedPercent = Math.round(summary.percentCompleted);
+		hierarchyLines.push(`Sub-issues: ${summary.completed}/${summary.total} complete (${roundedPercent}%)`);
+	} else if (subIssues.length > 0) {
+		if (hierarchyLines.length > 0) hierarchyLines.push("");
+		hierarchyLines.push("Sub-issues:");
+	}
+	for (const subIssue of subIssues) {
+		hierarchyLines.push(`- ${subIssue.state} ${subIssue.repo}#${subIssue.issueNumber} — ${subIssue.title}`);
+		hierarchyLines.push(`  ${formatIssueHierarchyUrl(subIssue)}`);
+	}
+
+	if (hierarchyLines.length > 0) {
+		lines.push(...hierarchyLines);
+	} else {
+		lines.push("No visible parent or direct sub-issues for the current GitHub identity.");
+	}
+	if (partial) {
+		lines.push("");
+		lines.push("> WARNING: Issue hierarchy data is partial; only valid visible relationships are shown.");
+	}
+	return lines;
+}
+
 export function formatIssueView(
 	data: GhIssueViewData,
-	input: { issue: string; repo?: string; comments?: boolean },
+	input: {
+		issue: string;
+		repo?: string;
+		comments?: boolean;
+		hierarchyAvailability: IssueHierarchyAvailability;
+	},
 ): string {
 	const lines: string[] = [];
 	const issueNumber = data.number ?? input.issue;
@@ -345,8 +580,11 @@ export function formatIssueView(
 	pushLine(lines, "Author", formatAuthor(data.author));
 	pushLine(lines, "Created", data.createdAt);
 	pushLine(lines, "Updated", data.updatedAt);
+	pushLine(lines, "Assignees", formatAssignees(data.assignees));
 	pushLine(lines, "Labels", formatLabels(data.labels));
 	pushLine(lines, "URL", data.url);
+	lines.push("");
+	lines.push(...formatIssueHierarchySection(data, input.hierarchyAvailability));
 	lines.push("");
 	lines.push("## Body");
 	lines.push("");
@@ -471,6 +709,7 @@ export interface IssueViewLookupOptions {
 	/** Issue number or GitHub issue URL. */
 	issue: string;
 	includeComments?: boolean;
+	forceRefresh?: boolean;
 	signal?: AbortSignal;
 	settings?: Settings;
 	cacheAuthKey?: string | null;
@@ -482,6 +721,7 @@ export interface PrViewLookupOptions {
 	number: number;
 	includeComments?: boolean;
 	signal?: AbortSignal;
+	forceRefresh?: boolean;
 	settings?: Settings;
 	cacheAuthKey?: string | null;
 }
@@ -504,10 +744,20 @@ export async function fetchIssueViewFresh(
 	const args = ["issue", "view", identifier];
 	appendRepoFlag(args, repo, identifier);
 	args.push("--json", (includeComments ? GH_ISSUE_FIELDS : GH_ISSUE_FIELDS_NO_COMMENTS).join(","));
-	const data = await githubIssueJsonWithStateReasonFallback<GhIssueViewData>(cwd, args, signal, {
-		repoProvided: Boolean(repo),
+	const { data, hierarchyAvailability } = await githubIssueJsonWithHierarchyFallback<GhIssueViewData>(
+		cwd,
+		args,
+		signal,
+		{
+			repoProvided: Boolean(repo),
+		},
+	);
+	const rendered = formatIssueView(data, {
+		issue: identifier,
+		repo,
+		comments: includeComments,
+		hierarchyAvailability,
 	});
-	const rendered = formatIssueView(data, { issue: identifier, repo, comments: includeComments });
 	return { rendered, sourceUrl: data.url, payload: data };
 }
 
@@ -571,6 +821,7 @@ export async function getOrFetchIssue(options: IssueViewLookupOptions): Promise<
 		kind: "issue",
 		number: cacheNumber,
 		includeComments,
+		forceRefresh: options.forceRefresh,
 		settings: options.settings,
 		authKey,
 		fetchFresh: doFetch,
@@ -598,6 +849,7 @@ export async function getOrFetchPr(options: PrViewLookupOptions): Promise<ViewLo
 		kind: "pr",
 		number: options.number,
 		includeComments,
+		forceRefresh: options.forceRefresh,
 		settings: options.settings,
 		authKey,
 		fetchFresh: doFetch,

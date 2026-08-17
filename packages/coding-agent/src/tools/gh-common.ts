@@ -122,6 +122,67 @@ export function parsePositiveDecimalInt(value: string | undefined): number | und
 	return num;
 }
 
+export interface ParsedLinkedIssueUrl {
+	repo: string;
+	issueNumber: number;
+	host: string;
+}
+
+/**
+ * Parse a canonical linked-issue URL from GitHub.com or GHES. The URL itself
+ * is authoritative because gh's exported hierarchy shape omits repository
+ * metadata, including for cross-repository relationships.
+ */
+export function parseLinkedIssueUrl(value: string | undefined): ParsedLinkedIssueUrl | undefined {
+	const normalized = normalizeOptionalString(value);
+	if (!normalized) return undefined;
+
+	let linkedUrl: URL;
+	try {
+		linkedUrl = new URL(normalized);
+	} catch {
+		return undefined;
+	}
+	if (
+		(linkedUrl.protocol !== "http:" && linkedUrl.protocol !== "https:") ||
+		linkedUrl.username !== "" ||
+		linkedUrl.password !== "" ||
+		linkedUrl.search !== "" ||
+		linkedUrl.hash !== ""
+	) {
+		return undefined;
+	}
+
+	const pathSegments = linkedUrl.pathname.split("/");
+	if (
+		pathSegments.length !== 5 ||
+		pathSegments[0] !== "" ||
+		pathSegments[3] !== "issues" ||
+		pathSegments[1] === "" ||
+		pathSegments[2] === ""
+	) {
+		return undefined;
+	}
+
+	let owner: string;
+	let repo: string;
+	try {
+		owner = decodeURIComponent(pathSegments[1]);
+		repo = decodeURIComponent(pathSegments[2]);
+	} catch {
+		return undefined;
+	}
+	const safeSegmentPattern = /^[A-Za-z0-9._~-]+$/;
+	if (!safeSegmentPattern.test(owner) || !safeSegmentPattern.test(repo) || owner === "." || owner === "..") {
+		return undefined;
+	}
+	if (repo === "." || repo === "..") return undefined;
+
+	const issueNumber = parsePositiveDecimalInt(pathSegments[4]);
+	if (issueNumber === undefined) return undefined;
+	return { host: linkedUrl.host.toLowerCase(), repo: `${owner}/${repo}`, issueNumber };
+}
+
 export function parseIssueUrl(value: string | undefined): { repo?: string; issueNumber?: number } {
 	const normalized = normalizeOptionalString(value);
 	if (!normalized) return {};

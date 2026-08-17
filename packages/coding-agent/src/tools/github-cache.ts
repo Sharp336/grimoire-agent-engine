@@ -106,7 +106,7 @@ export function openDb(): Database | null {
 		// than running an in-place ALTER dance.
 		const userVersion = (db.prepare("PRAGMA user_version").get() as { user_version?: number } | undefined)
 			?.user_version;
-		if (userVersion !== undefined && userVersion < 3) {
+		if (userVersion !== undefined && userVersion !== 4) {
 			db.run("DROP TABLE IF EXISTS github_view_cache");
 		}
 		db.run(`
@@ -123,7 +123,7 @@ export function openDb(): Database | null {
 				PRIMARY KEY (auth_key, repo, kind, number, include_comments)
 			);
 			CREATE INDEX IF NOT EXISTS idx_github_view_cache_fetched ON github_view_cache(fetched_at);
-			PRAGMA user_version = 3;
+			PRAGMA user_version = 4;
 		`);
 		protectDbFiles(dbPath);
 		cachedDb = db;
@@ -388,6 +388,20 @@ export function clearAll(): void {
 }
 
 /**
+ * Drop all cached issue views across repositories, auth identities, and
+ * comments modes while preserving unrelated PR and PR-diff rows.
+ */
+export function invalidateAllIssueViews(): void {
+	const db = openDb();
+	if (!db) return;
+	try {
+		db.prepare("DELETE FROM github_view_cache WHERE kind = 'issue'").run();
+	} catch (err) {
+		logger.debug("github cache: invalidateAllIssueViews failed", { err: String(err) });
+	}
+}
+
+/**
  * Drop every cached row for a repo, or all rows when the repo is unknown.
  * Fallback for current-branch `gh pr merge`/`gh pr close`-style mutations
  * where the bash command names no PR number or URL, so the target row cannot
@@ -440,6 +454,8 @@ export interface CacheLookupOptions<T> {
 	kind: CacheKind;
 	number: number;
 	includeComments: boolean;
+	/** Bypass cached content, synchronously fetch live data, and replace the row on success. */
+	forceRefresh?: boolean;
 	/**
 	 * Auth/credential namespace for cache rows. Omit only in storage-layer
 	 * tests; pass `null` when production code cannot determine an identity and
@@ -573,6 +589,12 @@ export async function getOrFetchView<T>(options: CacheLookupOptions<T>): Promise
 	// makes `github.cache.hardTtlSec` a real retention cap rather than a soft
 	// suggestion the next `openDb()` call eventually honors.
 	sweepIfDue(ttl.hardMs);
+	if (options.forceRefresh) {
+		const fresh = await options.fetchFresh();
+		const fetchedAt = Date.now();
+		storeResult(authKey, options.repo, options.kind, options.number, options.includeComments, fresh, fetchedAt);
+		return { ...fresh, status: "refreshed", fetchedAt };
+	}
 
 	const cached: CachedView<T> | null = getCached<T>(
 		options.repo,
