@@ -19,6 +19,7 @@ import type { CliConfig, CommandMetadata } from "@oh-my-pi/pi-utils/cli";
 import {
 	APP_NAME,
 	getActiveProfile,
+	getRuntimeBuildInfo,
 	MIN_BUN_VERSION,
 	resolveProfileEnv,
 	setProfile,
@@ -392,6 +393,17 @@ export async function runCli(argv: string[]): Promise<void> {
 	// poison `workerHostEntry()` for the whole test process, forcing eval/stats/
 	// browser workers onto the same-realm inline fallback.
 	if (isProcessEntry) declareWorkerHostEntry();
+
+	if (resolvedArgv.length === 1 && resolvedArgv[0] === "--build-info") {
+		const buildInfo = getRuntimeBuildInfo();
+		if (!buildInfo) {
+			process.stderr.write("error: runtime build info is unavailable because no valid source commit was embedded\n");
+			process.exitCode = 1;
+			return;
+		}
+		process.stdout.write(`${JSON.stringify(buildInfo)}\n`);
+		return;
+	}
 
 	if (resolvedArgv[0] === "--smoke-test") {
 		await runSmokeTest();
