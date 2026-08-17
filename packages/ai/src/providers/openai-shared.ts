@@ -1496,6 +1496,55 @@ export function repairOrphanResponsesToolCalls(input: ResponseInput): ResponseIn
 }
 
 /**
+ * Hoist assistant message items that sit between a tool-call batch and its
+ * outputs to before the first call of that batch.
+ *
+ * The Responses API keys tool outputs by `call_id`, so item order carries no
+ * semantics there, but some upstream gateways (observed: opencode-go / Console
+ * Go) reject a message interleaved between `function_call` items and their
+ * `function_call_output`s with `400 No tool output found for tool call …`,
+ * nondeterministically blaming one call of the batch. The shape arises when a
+ * model streams a trailing text/thinking block after its tool calls: the
+ * block-encode path preserves stream order, so the demoted thinking text lands
+ * as a message item between the calls and the tool results appended after
+ * them.
+ *
+ * Content is unchanged — the message is moved to the canonical
+ * message(s) → calls → outputs position of the same assistant turn.
+ */
+export function hoistInterleavedAssistantMessages<TItem extends { type?: unknown; role?: unknown }>(
+	input: TItem[],
+): TItem[] {
+	let firstPendingCallIndex = -1;
+	let pendingCalls = 0;
+	let changed = false;
+	const result: TItem[] = [];
+	for (const item of input) {
+		const type = item?.type;
+		if (responsesToolCallKind(type) !== undefined) {
+			if (pendingCalls === 0) firstPendingCallIndex = result.length;
+			pendingCalls += 1;
+			result.push(item);
+			continue;
+		}
+		if (responsesToolOutputKind(type) !== undefined) {
+			pendingCalls = Math.max(0, pendingCalls - 1);
+			result.push(item);
+			continue;
+		}
+		const role = item?.role;
+		if (pendingCalls > 0 && role === "assistant") {
+			result.splice(firstPendingCallIndex, 0, item);
+			firstPendingCallIndex += 1;
+			changed = true;
+			continue;
+		}
+		result.push(item);
+	}
+	return changed ? result : input;
+}
+
+/**
  * Some Responses backends (notably GitHub Copilot) reject the OpenAI image
  * `detail: "original"` value with a 400. When the model does not advertise
  * support for it, degrade `"original"` to `"auto"` so the request still goes
@@ -1898,7 +1947,12 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 
 	const withRepairedOutputs = options.repairOrphanOutputs ? repairOrphanResponsesToolOutputs(messages) : messages;
 	const withRepairedCalls = repairOrphanResponsesToolCalls(withRepairedOutputs);
-	return stripUnpairedOpenAIResponsesComputerReasoningIdsForReplay(withRepairedCalls);
+	// Gateways that validate item order reject a message interleaved between a
+	// call batch and its outputs (see hoistInterleavedAssistantMessages); run
+	// the normalization after the orphan repairs so the canonical
+	// message(s) → calls → outputs shape is what reaches the wire.
+	const withOrderedMessages = hoistInterleavedAssistantMessages(withRepairedCalls);
+	return stripUnpairedOpenAIResponsesComputerReasoningIdsForReplay(withOrderedMessages);
 }
 
 type ResponsesReplayAssistantMessage = Omit<ResponseOutputMessage, "id"> & { id?: string };
