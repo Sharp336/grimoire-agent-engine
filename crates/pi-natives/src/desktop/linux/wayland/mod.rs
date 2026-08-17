@@ -31,6 +31,9 @@ pub struct WaylandBackend {
 
 impl WaylandBackend {
 	pub fn new(display: DisplaySelector) -> Self {
+		// Remove the world-readable RemoteDesktop restore token that pre-#7884
+		// builds wrote during read-only calls; nothing reads it anymore (#7884).
+		portal::remove_orphaned_remote_desktop_token();
 		let (ax, ax_error) = match AtSpiAx::new() {
 			Ok(ax) => (Some(ax), None),
 			Err(err) => (None, Some(err)),

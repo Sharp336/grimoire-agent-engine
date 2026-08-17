@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { Api, AssistantMessage, Model, ProviderSessionState, ServiceTier, UsageReport } from "@oh-my-pi/pi-ai";
@@ -16,18 +16,26 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 describe("/fast targets the current model's service-tier family", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
-	let session: AgentSession;
+	let session: AgentSession | undefined;
 	let modelRegistry: ModelRegistry;
+	/** Per-case storage for entitlement tests; closed after each test. */
+	let stubbedStorage: AuthStorage | undefined;
 
-	beforeEach(() => {
+	beforeAll(async () => {
 		tempDir = TempDir.createSync("@pi-fast-mode-scope-");
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 	});
 
 	afterEach(async () => {
-		if (session) {
-			await session.dispose();
-		}
-		authStorage?.close();
+		await session?.dispose();
+		session = undefined;
+		stubbedStorage?.close();
+		stubbedStorage = undefined;
+	});
+
+	afterAll(() => {
+		authStorage.close();
 		tempDir.removeSync();
 		vi.restoreAllMocks();
 	});
@@ -51,17 +59,25 @@ describe("/fast targets the current model's service-tier family", () => {
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
 			streamFn,
 		});
-		authStorage = await AuthStorage.create(
-			path.join(tempDir.path(), "testauth.db"),
-			usageReports ? { fetchUsageReports: async () => usageReports } : {},
-		);
-		authStorage.setRuntimeApiKey(model.provider, "token");
-		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+
+		// Entitlement cases need a storage whose usage-report fetch is stubbed, and a
+		// registry built on that storage so the session reads the stubbed reports. Every
+		// other test keeps the shared beforeAll instances rather than reassigning them,
+		// which would leak the stub into later tests in this file.
+		if (usageReports) {
+			stubbedStorage = await AuthStorage.create(path.join(tempDir.path(), "usage-auth.db"), {
+				fetchUsageReports: async () => usageReports,
+			});
+		}
+		const storage = stubbedStorage ?? authStorage;
+		storage.setRuntimeApiKey(model.provider, "token");
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
 			settings,
-			modelRegistry,
+			modelRegistry: usageReports
+				? new ModelRegistry(storage, path.join(tempDir.path(), "usage-models.yml"))
+				: modelRegistry,
 			agentKind,
 		});
 		session.subscribe(() => {});
