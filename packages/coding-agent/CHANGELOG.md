@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in `progress: true` updates for asynchronous Bash jobs, reporting complete output lines to the model while the owning session is active ([#2762](https://github.com/can1357/oh-my-pi/issues/2762)).
+
 ## [17.3.6] - 2026-08-17
 
 ### Added

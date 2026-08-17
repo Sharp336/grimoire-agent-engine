@@ -300,6 +300,52 @@ async function saveBashOriginalArtifact(session: ToolSession, originalText: stri
 	}
 }
 
+/** Incrementally reports complete, non-empty output lines. */
+class BashProgressLines {
+	static readonly MAX_LINE_CHARS = 4_000;
+	readonly #report: (line: string) => void;
+	#partial = "";
+
+	constructor(report: (line: string) => void) {
+		this.#report = report;
+	}
+
+	append(chunk: string): void {
+		let start = 0;
+		let newline = chunk.indexOf("\n");
+		while (newline !== -1) {
+			this.#appendPartial(chunk.slice(start, newline));
+			this.#reportLine(this.#partial);
+			this.#partial = "";
+			start = newline + 1;
+			newline = chunk.indexOf("\n", start);
+		}
+		if (start < chunk.length) this.#appendPartial(chunk.slice(start));
+	}
+
+	finish(): void {
+		if (this.#partial === "") return;
+		const line = this.#partial;
+		this.#partial = "";
+		this.#reportLine(line);
+	}
+
+	#appendPartial(segment: string): void {
+		if (segment.length >= BashProgressLines.MAX_LINE_CHARS) {
+			this.#partial = segment.slice(-BashProgressLines.MAX_LINE_CHARS);
+			return;
+		}
+		const keep = BashProgressLines.MAX_LINE_CHARS - segment.length;
+		this.#partial = `${this.#partial.slice(-keep)}${segment}`;
+	}
+
+	#reportLine(rawLine: string): void {
+		const line = rawLine.replace(/\r$/, "");
+		if (line.trim().length === 0) return;
+		this.#report(line);
+	}
+}
+
 const BASH_TIMEOUT_DESCRIPTION = `timeout in seconds; 0 disables the command deadline; nonzero values are clamped to ${TOOL_TIMEOUTS.bash.min}-${TOOL_TIMEOUTS.bash.max}`;
 
 const bashSchemaBase = type({
@@ -317,6 +363,7 @@ const bashSchemaWithAsync = type({
 	"cwd?": "string",
 	"pty?": "boolean",
 	"async?": type("boolean").describe("run in background"),
+	"progress?": type("boolean").describe("report complete output lines while the background job runs"),
 });
 
 type BashToolSchema = typeof bashSchemaBase | typeof bashSchemaWithAsync;
@@ -329,6 +376,7 @@ export interface BashToolInput {
 
 	async?: boolean;
 	pty?: boolean;
+	progress?: boolean;
 }
 
 export interface BashToolDetails {
@@ -803,6 +851,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		resolvedEnv?: Record<string, string>;
 		onUpdate?: AgentToolUpdateCallback<BashToolDetails>;
 		forwardUpdates: boolean;
+		progressMode: "disabled" | "lines";
 	}): ManagedBashJobHandle {
 		const manager = this.session.asyncJobManager;
 		if (!manager) {
@@ -817,26 +866,34 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		const jobId = manager.register(
 			"bash",
 			label,
-			async ({ jobId, signal: runSignal, reportProgress }) => {
+			async ({ jobId, signal: runSignal, reportProgress, reportAgentProgress }) => {
 				const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.("bash")) ?? {};
 				const tailBuffer = new TailBuffer(DEFAULT_MAX_BYTES);
+				const progressLines =
+					options.progressMode === "lines" ? new BashProgressLines(reportAgentProgress) : undefined;
 				const wallTimeStart = performance.now();
 				try {
-					const result = await executeBash(options.command, {
-						cwd: options.commandCwd,
-						sessionKey: `${this.session.getSessionId?.() ?? ""}:async:${jobId}`,
-						timeout: options.timeoutMs ?? 0,
-						signal: runSignal,
-						env: options.resolvedEnv,
-						artifactPath,
-						artifactId,
-						onChunk: chunk => {
-							tailBuffer.append(chunk);
-							latestText = tailBuffer.text();
-							void reportProgress(latestText, { async: { state: "running", jobId, type: "bash" } });
-						},
-						onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
-					});
+					let result: BashResult;
+					try {
+						result = await executeBash(options.command, {
+							cwd: options.commandCwd,
+							sessionKey: `${this.session.getSessionId?.() ?? ""}:async:${jobId}`,
+							timeout: options.timeoutMs ?? 0,
+							signal: runSignal,
+							env: options.resolvedEnv,
+							artifactPath,
+							artifactId,
+							onChunk: chunk => {
+								tailBuffer.append(chunk);
+								latestText = tailBuffer.text();
+								void reportProgress(latestText, { async: { state: "running", jobId, type: "bash" } });
+								progressLines?.append(chunk);
+							},
+							onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
+						});
+					} finally {
+						progressLines?.finish();
+					}
 					const wallTimeMs = performance.now() - wallTimeStart;
 					const finalResult = await this.#buildCompletedResult(result, options.timeoutSec, {
 						requestedTimeoutSec: options.requestedTimeoutSec,
@@ -952,6 +1009,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 
 			async: asyncRequested = false,
 			pty = false,
+			progress = false,
 		}: BashToolInput,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<BashToolDetails>,
@@ -974,6 +1032,9 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		}
 		if (asyncRequested && !this.#asyncEnabled) {
 			throw new ToolError("Async bash execution is disabled. Enable async.enabled to use async mode.");
+		}
+		if (progress && !asyncRequested) {
+			throw new ToolError("progress requires `async: true`; foreground commands return their output directly.");
 		}
 
 		// Check both the original command and the cwd-normalized command so
@@ -1068,6 +1129,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				resolvedEnv,
 				onUpdate,
 				forwardUpdates: false,
+				progressMode: progress ? "lines" : "disabled",
 			});
 			return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
 				requestedTimeoutSec,
@@ -1106,6 +1168,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				resolvedEnv,
 				onUpdate,
 				forwardUpdates: !startBackgrounded,
+				progressMode: "disabled",
 			});
 			if (startBackgrounded) {
 				return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {

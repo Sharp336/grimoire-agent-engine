@@ -14,7 +14,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { DaemonCompletionNotification } from "@oh-my-pi/pi-coding-agent/launch/protocol";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import type { AsyncResultEntry } from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
+import type { AsyncProgressEntry, AsyncResultEntry } from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -343,6 +343,120 @@ describe("AgentSession owner-routed async delivery", () => {
 		// reaches quiescence.
 		await session.settleAsyncWork();
 		expect(session.hasPendingAsyncWork()).toBe(false);
+	});
+
+	it("holds progress while idle and injects it at the next active turn", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "Main",
+			ownedAsyncJobManager: manager,
+		});
+
+		const gate = Promise.withResolvers<string>();
+		manager.register("bash", "progress job", () => gate.promise, { id: "progress-job", ownerId: "Main" });
+		const job = manager.getJob("progress-job");
+		if (!job) throw new Error("Expected registered progress job");
+		session.yieldQueue.enqueue<AsyncProgressEntry>("async-progress", {
+			jobId: job.id,
+			text: "LAZY PROGRESS MARKER",
+			job,
+			seq: 1,
+			elapsedMs: 10,
+			epoch: 0,
+		});
+
+		await Promise.resolve();
+		expect(mock.calls).toHaveLength(0);
+
+		await session.sendUserMessage("inspect progress");
+		expect(
+			mock.calls.some(call =>
+				call.context.messages.some(message =>
+					typeof message.content === "string"
+						? message.content.includes("LAZY PROGRESS MARKER")
+						: message.content.some(
+								content => content.type === "text" && content.text.includes("LAZY PROGRESS MARKER"),
+							),
+				),
+			),
+		).toBe(true);
+
+		manager.watchJobs([job.id]);
+		gate.resolve("done");
+		await manager.waitForAll();
+	});
+
+	it("drops late progress from a prior session after its job id is reused", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "Main",
+			ownedAsyncJobManager: manager,
+		});
+		expect(await session.newSession()).toBe(true);
+
+		const gate = Promise.withResolvers<string>();
+		manager.register("bash", "reused progress job", () => gate.promise, { id: "reused-job", ownerId: "Main" });
+		const job = manager.getJob("reused-job");
+		if (!job) throw new Error("Expected registered reused job");
+		session.yieldQueue.enqueue<AsyncProgressEntry>("async-progress", {
+			jobId: job.id,
+			text: "STALE PROGRESS MARKER",
+			job,
+			seq: 1,
+			elapsedMs: 10,
+			epoch: 0,
+		});
+
+		await session.sendUserMessage("fresh turn");
+		expect(
+			mock.calls.every(call =>
+				call.context.messages.every(message =>
+					typeof message.content === "string"
+						? !message.content.includes("STALE PROGRESS MARKER")
+						: message.content.every(
+								content => content.type !== "text" || !content.text.includes("STALE PROGRESS MARKER"),
+							),
+				),
+			),
+		).toBe(true);
+
+		manager.watchJobs([job.id]);
+		gate.resolve("done");
+		await manager.waitForAll();
 	});
 
 	it("keeps the event loop live until a delayed idle flush runs", async () => {

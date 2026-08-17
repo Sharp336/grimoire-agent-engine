@@ -6,7 +6,7 @@
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
-import { formatBytes, formatDuration } from "@oh-my-pi/pi-utils";
+import { formatBytes, formatDuration, sanitizeText } from "@oh-my-pi/pi-utils";
 import {
 	type CustomMessage,
 	type FileMentionMessage,
@@ -14,7 +14,7 @@ import {
 	shouldRenderAbortReason,
 } from "../../session/messages";
 import { createIrcMessageCard } from "../../tools/hub";
-import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
+import { replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 import { ToolActivityContainer } from "../components/tool-activity";
 import { TranscriptBlock } from "../components/transcript-container";
@@ -65,6 +65,35 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): ToolActivit
 		block.addChild(new Text(line, 1, 0));
 	}
 	return new ToolActivityContainer(block);
+}
+
+/** Render bounded progress from a background job that is still running. */
+export function buildAsyncProgressBlock(message: CustomOrHookMessage): TranscriptBlock {
+	const details = (
+		message as CustomMessage<{
+			jobs?: Array<{ jobId?: string; type?: "bash" | "task"; elapsedMs?: number; text?: string }>;
+		}>
+	).details;
+	const block = new TranscriptBlock();
+	for (const job of details?.jobs ?? []) {
+		const jobId = job.jobId ?? "unknown";
+		const elapsed = typeof job.elapsedMs === "number" ? formatDuration(job.elapsedMs) : undefined;
+		const header = [
+			theme.fg("dim", `${theme.status.running} Background job progress`),
+			theme.fg("dim", job.type ? `[${job.type}]` : "[job]"),
+			theme.fg("accent", jobId),
+			elapsed ? theme.fg("dim", `(${elapsed})`) : undefined,
+		]
+			.filter(Boolean)
+			.join(" ");
+		block.addChild(new Text(header, 1, 0));
+		for (const line of (job.text ?? "").split("\n")) {
+			if (line.trim().length === 0) continue;
+			const rendered = truncateToWidth(replaceTabs(shortenPath(sanitizeText(line))), TRUNCATE_LENGTHS.LINE);
+			block.addChild(new Text(theme.fg("dim", `  ${rendered}`), 1, 0));
+		}
+	}
+	return block;
 }
 
 /**

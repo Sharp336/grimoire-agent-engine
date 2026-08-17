@@ -284,6 +284,16 @@ function customOneLiner(msg: CustomMessage | HookMessage): string {
 				.join(", ");
 			return `[async-result] ${oneLine(labels)}`;
 		}
+		case "async-progress": {
+			const jobs = Array.isArray(details.jobs) ? details.jobs : [];
+			const parts = jobs.map(job => {
+				const entry = (job ?? {}) as Record<string, unknown>;
+				const id = typeof entry.jobId === "string" ? entry.jobId : "job";
+				const text = typeof entry.text === "string" ? entry.text : "";
+				return text ? `${id}: ${oneLine(text)}` : id;
+			});
+			return `[async-progress] ${parts.join("; ")}`;
+		}
 		default:
 			return `[${msg.customType}] ${oneLine(contentToText(msg.content))}`;
 	}
