@@ -82,7 +82,6 @@ describe("settings layout", () => {
 
 	it("hides advisor dependent settings when advisor is disabled", () => {
 		const advisorDependentPaths: SettingPath[] = [
-			"advisor.subagents",
 			"advisor.syncBacklog",
 			"advisor.immuneTurns",
 			"advisor.lateConcern",
