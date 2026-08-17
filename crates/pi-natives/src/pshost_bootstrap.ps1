@@ -220,15 +220,23 @@ function Invoke-OnRunspace([string] $Script, [object[]] $Arguments) {
     try { return $ps.Invoke() } finally { $ps.Dispose() }
 }
 
-# Initialize the object-retention store inside the shared runspace. The
-# PostCommandLookupAction flags Application (native executable) lookups so
-# per-invocation exit codes can be attributed without ever resetting
-# $LASTEXITCODE — user commands read the true persisted value at all times.
-# The action fires only on invocation-time lookups: Get-Command / availability
-# probes resolve Applications through CommandDiscovery without triggering it
-# (verified on pwsh 7.6.2, both standalone and through this runspace), so a
-# lookup-only command never inherits a stale exit code. The TS suite pins that
-# contract ("a lookup-only command after a failed native…").
+# Initialize the object-retention store inside the shared runspace.
+#
+# Per-invocation exit attribution must NOT depend on $LASTEXITCODE changing
+# value. Path-invoked Applications and ExternalScripts that exit with the same
+# code as the previous native leave $LASTEXITCODE numerically unchanged, and
+# some of those invocations never fire PostCommandLookupAction — a
+# value-change fallback alone would then leave __ompExit null and report a
+# successful PowerShell-only run. A Write breakpoint on $LASTEXITCODE fires on
+# every assignment PowerShell itself performs for a native/external-script
+# pipeline (including same-code repeats) without ever resetting the variable,
+# so user commands still read the true persisted value. The value-change OR
+# below remains only as a belt-and-suspenders for the first write of a session
+# (unset → N), which some hosts do not surface through the breakpoint.
+# Start-Process / Process.Start do not write $LASTEXITCODE, so they do not
+# trip this flag. Get-Command / availability probes also do not write it, so
+# a lookup-only command after a failed native still stays clean (pinned by
+# the TS suite).
 [void](Invoke-OnRunspace @'
 $global:__omp = [ordered]@{}
 $global:__omp.Last    = $null
@@ -236,12 +244,16 @@ $global:__omp.Counter = 0
 $global:__omp.History = [ordered]@{}
 $ProgressPreference   = 'SilentlyContinue'
 $ErrorActionPreference = 'Continue'
-$ExecutionContext.InvokeCommand.PostCommandLookupAction = {
-    param($CommandName, $CommandLookupEventArgs)
-    if ($CommandLookupEventArgs.Command -and
-        $CommandLookupEventArgs.Command.CommandType -eq [System.Management.Automation.CommandTypes]::Application) {
+$global:__ompNativeRan = $false
+# Best-effort: if breakpoints are disabled in this host, attribution falls
+# back to the value-change OR in Start-Exec's finally (same-code path-invoked
+# repeats may then be missed — acceptable degradation, not a hard failure).
+try {
+    $null = Set-PSBreakpoint -Variable LASTEXITCODE -Mode Write -Action {
         $global:__ompNativeRan = $true
     }
+} catch {
+    # ignored — value-change fallback still covers first/changed exits
 }
 '@)
 
@@ -348,12 +360,13 @@ function Start-Exec([pscustomobject] $Request) {
     # scope, keeping `$x = 1` in the user command persisted into the next
     # call. $LASTEXITCODE is never written by the wrapper, so user commands
     # always read the true persisted value; this invocation's native exit is
-    # attributed via the PostCommandLookupAction flag (or an observed value
-    # change, covering path-invoked executables that skip name lookup)
-    # inside a finally, so it is recorded even when the command throws,
-    # calls exit, returns, or the pipeline is stopped. $commandBody sits
-    # alone on its own line so a trailing line-comment cannot swallow the
-    # `} finally {` that follows.
+    # attributed via the $LASTEXITCODE Write breakpoint flag (set on every
+    # native/external-script assignment, including same-code repeats) or an
+    # observed value change (covers the first write of a session) inside a
+    # finally, so it is recorded even when the command throws, calls exit,
+    # returns, or the pipeline is stopped. $commandBody sits alone on its own
+    # line so a trailing line-comment cannot swallow the `} finally {` that
+    # follows.
     #
     # See Test-HasTopLevelReturn above: most commands splice directly (fast
     # path, unchanged since introduction); a command with a bare top-level
@@ -562,9 +575,10 @@ function Complete-Exec {
     $hadErrors = [bool]$cur.PS.HadErrors -or $cur.HadErrorRecords -or $cur.HadConsoleErr -or ($null -ne $terminatingErrorText)
 
     # Per-invocation exit code: the wrapped script records __ompExit only when
-    # this pipeline ran a native command (lookup flag or exit-code change), so a
-    # stale code from an earlier call never marks a later PS-only command as
-    # failed, while $LASTEXITCODE itself stays untouched and readable.
+    # this pipeline ran a native/external-script command (LASTEXITCODE write
+    # breakpoint flag or exit-code value change), so a stale code from an
+    # earlier call never marks a later PS-only command as failed, while
+    # $LASTEXITCODE itself stays untouched and readable.
     $ec = $null
     try { $ec = $rs.SessionStateProxy.GetVariable('__ompExit') } catch { } # best-effort
     $exitCode = if ($null -ne $ec) { [int]$ec } else { $null }

@@ -1760,9 +1760,25 @@ mod tests {
 		assert_eq!(res.exit_code, Some(7), "native exit code propagates");
 
 		// Repeating the identical native exit must still be attributed to this
-		// invocation (command-lookup flag; a value change alone can't see it).
+		// invocation (LASTEXITCODE write tracking; a value change alone can't see it).
 		let (_, res) = run_cmd(&host, exit_cmd, task::CancelToken::default()).await;
 		assert_eq!(res.exit_code, Some(7), "repeated identical native exit is reported");
+
+		// Path-invoked form with the same repeated exit — must not depend on
+		// PostCommandLookupAction or a numeric change in $LASTEXITCODE.
+		let path_exit_cmd = if cfg!(windows) {
+			"& (Get-Command cmd -CommandType Application).Source /c exit 7"
+		} else {
+			"& (Get-Command sh -CommandType Application).Source -c 'exit 7'"
+		};
+		let (_, res) = run_cmd(&host, path_exit_cmd, task::CancelToken::default()).await;
+		assert_eq!(res.exit_code, Some(7), "path-invoked native exit is reported");
+		let (_, res) = run_cmd(&host, path_exit_cmd, task::CancelToken::default()).await;
+		assert_eq!(
+			res.exit_code,
+			Some(7),
+			"repeated identical path-invoked native exit is reported"
+		);
 
 		// A PS-only command after a native exit must not inherit the stale code.
 		let (_, res) = run_cmd(&host, "'ok'", task::CancelToken::default()).await;

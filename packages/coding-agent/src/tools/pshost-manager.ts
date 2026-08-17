@@ -69,6 +69,15 @@ export interface EphemeralPsHostLease {
 type PsHostSpawner = (options: SpawnPsHostOptions) => Promise<PsHost>;
 
 const spawnRealHost: PsHostSpawner = async options => {
+	// Workspace loads skip the version-sentinel check, so a stale local `.node`
+	// still boots — but the JS re-export is then `undefined` and `new PsHost`
+	// becomes "undefined is not a constructor". Fail with the rebuild path.
+	if (typeof PsHost !== "function") {
+		throw new Error(
+			"@oh-my-pi/pi-natives does not export PsHost — the loaded native addon is stale or incomplete. " +
+				"Rebuild with: bun --cwd=packages/natives run build:bindings (or bun run build:native).",
+		);
+	}
 	const host = new PsHost({
 		parentPid: process.pid,
 		shellPath: options.shellPath,

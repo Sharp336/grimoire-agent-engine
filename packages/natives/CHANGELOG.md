@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `PsHost`, a persistent PowerShell host sidecar. One long-lived `pwsh` process owns a shared runspace, so variables, imported modules, `$LASTEXITCODE`, and the live result objects in `$global:__omp` persist across `run()` calls and stay inspectable via `Enter-PSHostProcess -Id <pid>`. The expensive process spawn is paid once per session (~1s); warm per-call cost is ~20–30 ms. All PowerShell output streams are forwarded — Success and Information (`Write-Host`) verbatim, Warning/Verbose/Debug/Error labeled and ANSI color-coded like the console — with each `chunk` frame tagged by its stream. Cancellation maps to typed `cancelled`/`timedOut` flags (consistent with `Shell`) and stops only the in-flight pipeline, leaving runspace state intact; a parent-PID watchdog terminates the whole `pwsh` process tree if the host's owner dies.
+
+### Fixed
+
+- Fixed path-invoked native and external-script exit attribution in `PsHost`: a Write breakpoint on `$LASTEXITCODE` tracks native execution even when the exit code is unchanged from the previous invocation, so repeated `./script` / absolute-path failures are no longer reported as successful PowerShell-only runs.
+
+
 ## [17.3.5] - 2026-08-16
 
 ### Fixed
@@ -79,9 +88,6 @@
 
 - Fixed per-window capture failing on Wayland with `InvalidTarget` errors for window IDs returned by `desktop.windows()`.
 - Fixed `desktop.capabilities()` incorrectly reporting `capture: true` on Wayland builds compiled without the `wayland-pipewire` feature.
-### Added
-
-- Added `PsHost`, a persistent PowerShell host sidecar. One long-lived `pwsh` process owns a shared runspace, so variables, imported modules, `$LASTEXITCODE`, and the live result objects in `$global:__omp` persist across `run()` calls and stay inspectable via `Enter-PSHostProcess -Id <pid>`. The expensive process spawn is paid once per session (~1s); warm per-call cost is ~20–30 ms. All PowerShell output streams are forwarded — Success and Information (`Write-Host`) verbatim, Warning/Verbose/Debug/Error labeled and ANSI color-coded like the console — with each `chunk` frame tagged by its stream. Cancellation maps to typed `cancelled`/`timedOut` flags (consistent with `Shell`) and stops only the in-flight pipeline, leaving runspace state intact; a parent-PID watchdog terminates the whole `pwsh` process tree if the host's owner dies.
 
 ## [17.2.9] - 2026-08-05
 

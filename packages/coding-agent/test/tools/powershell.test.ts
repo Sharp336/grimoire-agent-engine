@@ -1,4 +1,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { $which } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../src/config/settings";
@@ -203,6 +206,54 @@ suite("PowerShellTool (persistent host)", () => {
 		const failedAgain = await tool.execute("l3", { command: nativeFail });
 		expect(failedAgain.isError).toBe(true);
 		expect(textOf(failedAgain)).toContain("code 7");
+	});
+
+	test("path-invoked native repeating the same exit code is still attributed", async () => {
+		// PostCommandLookupAction is not reliable for every path-invoked form,
+		// and a same-code repeat leaves $LASTEXITCODE numerically unchanged —
+		// attribution must track native execution independently of the value
+		// change (LASTEXITCODE Write breakpoint), or the second failure is
+		// misclassified as a successful PowerShell-only run.
+		const tool = await loadPowerShellTool(fakeSession("ps-path-native-test"));
+		expect(tool).not.toBeNull();
+		if (!tool) return;
+
+		const pathFail =
+			process.platform === "win32"
+				? "& (Get-Command cmd -CommandType Application).Source /c exit 5"
+				: "& (Get-Command sh -CommandType Application).Source -c 'exit 5'";
+
+		const first = await tool.execute("p1", { command: pathFail });
+		expect(first.isError).toBe(true);
+		expect(textOf(first)).toContain("code 5");
+		expect(first.details?.exitCode).toBe(5);
+
+		const second = await tool.execute("p2", { command: pathFail });
+		expect(second.isError).toBe(true);
+		expect(textOf(second)).toContain("code 5");
+		expect(second.details?.exitCode).toBe(5);
+
+		// ExternalScript path with the same repeated exit code.
+		const scriptDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ps-exit-"));
+		try {
+			const scriptPath = path.join(scriptDir, "fail.ps1");
+			await fs.writeFile(scriptPath, "exit 5\n", "utf8");
+			// Single-quoted path so spaces/backslashes don't inject.
+			const lit = scriptPath.replace(/'/g, "''");
+			const scriptFail = `& '${lit}'`;
+			const s1 = await tool.execute("p3", { command: scriptFail });
+			expect(s1.isError).toBe(true);
+			expect(s1.details?.exitCode).toBe(5);
+			const s2 = await tool.execute("p4", { command: scriptFail });
+			expect(s2.isError).toBe(true);
+			expect(s2.details?.exitCode).toBe(5);
+		} finally {
+			await fs.rm(scriptDir, { recursive: true, force: true });
+		}
+
+		const after = await tool.execute("p5", { command: '"still ok"' });
+		expect(after.isError ?? false).toBe(false);
+		expect(textOf(after).trim()).toBe("still ok");
 	});
 
 	test("a direct [Console]::Error write surfaces as error output instead of vanishing", async () => {
