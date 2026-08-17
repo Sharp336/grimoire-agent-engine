@@ -129,13 +129,14 @@ Capability-dependent responses include `Vary: OMP-Auth-Broker-Capabilities` so i
 ### CLI
 
 ```
-omp auth-gateway serve   [--bind=host:port] [--no-auth]
+omp auth-gateway serve   [--bind=host:port] [--no-auth] [--policy-socket=/absolute/path.sock]
 omp auth-gateway token   [--regenerate] [--json]
 omp auth-gateway status  [--json]
 omp auth-gateway check   [--strict] [--json]
 ```
 
 - `serve` requires `OMP_AUTH_BROKER_URL` (or `auth.broker.url` in `config.yml`) — the gateway is itself a broker client. It calls `AuthBrokerClient.fetchSnapshot()`, wraps it in `RemoteAuthCredentialStore`, and constructs an `AuthStorage` that resolves access tokens through the broker. Default bind is `127.0.0.1:4000`. The gateway token is stored at `<config-dir>/auth-gateway.token` (`0600`); `--no-auth` disables the bearer check entirely (loopback-only use).
+- `--policy-socket` opts `serve` into fail-closed, per-request authorization and content-free observation over a bounded NDJSON Unix-socket session. Each authorization carries the exact received request-body byte length and SHA-256 so the trusted policy service can bind the one-time authorization to the payload before credential access. The path must be absolute; the socket must be owned by the gateway's effective user, every ancestor directory must be owned by that user or root, no group/world-writable ancestor is accepted without the sticky bit, and the socket must not be a symlink. Policy mode requires the socket for readiness, restricts credential selection to the authorized OAuth row IDs, forwards no caller-controlled provider headers or identity handles, and returns `403` from `/v1/usage`, `/v1/credentials/check`, and `/v1/models` because those aggregate endpoints cannot be attributed to one authorized request.
 - `token` / `status` manage and inspect the gateway bearer token and upstream broker readiness.
 - `check` probes broker-backed credentials through the gateway store. Without `--strict` it uses provider usage probes; `--strict` also exercises each credential against its chat-completion endpoint and can consume a small amount of quota.
 

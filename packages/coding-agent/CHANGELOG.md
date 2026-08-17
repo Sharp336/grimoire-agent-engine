@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an opt-in fail-closed Unix policy-socket integration to `auth-gateway serve`, with payload byte-length and SHA-256 binding plus a request-scoped framed session for authorization, content-free observations, and dependency-aware readiness.
+
 ## [17.3.6] - 2026-08-17
 
 ### Added

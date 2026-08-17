@@ -23,6 +23,9 @@ import type {
 /** Default bind. Loopback-only — front with reverse proxy for remote access. */
 export const DEFAULT_AUTH_GATEWAY_BIND = "127.0.0.1:4000";
 
+/** Sensitive one-time policy input. Never forwarded upstream, observed, or logged. */
+export const AUTH_GATEWAY_POLICY_AUTHORIZATION_HEADER = "x-omp-auth-gateway-authorization";
+
 export type AuthGatewayToolChoice = "auto" | "none" | "required" | { name: string } | { type: "computer" };
 
 export interface AuthGatewayParsedRequestOptions {
@@ -136,11 +139,135 @@ export interface AuthGatewayFormatModule {
 	formatError(status: number, type: string, message: string): Response;
 }
 
+/** Bounded, content-free request metadata handed to a gateway policy hook. */
+export interface AuthGatewayAuthorizationRequest {
+	/** Gateway-generated identity for this HTTP request. */
+	requestId: string;
+	/** Wire route being authorized (for example `openai-chat` or `pi-native`). */
+	format: string;
+	/** Exact model selector parsed from the caller's request. */
+	requestedModelId: string;
+	/** Optional caller-supplied conversation hint. A grant must replace this with its own namespaced session id. */
+	requestedSessionId?: string;
+	method: string;
+	path: string;
+	/** Exact received request-body length and SHA-256, bound by the one-time authorization. */
+	payloadByteLength: number;
+	payloadSha256: string;
+	/**
+	 * Sensitive bounded one-time gateway authorization input from
+	 * {@link AUTH_GATEWAY_POLICY_AUTHORIZATION_HEADER}. Never forwarded,
+	 * observed, or logged.
+	 */
+	authorization: string;
+	signal: AbortSignal;
+}
+
+/** A fail-closed policy denial. `reasonCode` is observer metadata and is never reflected to the client. */
+export interface AuthGatewayAuthorizationDenial {
+	authorized: false;
+	reasonCode?: string;
+}
+
+/**
+ * A policy grant binding one request to an exact model, session, and ordered
+ * OAuth credential allowlist. Every field is validated by the gateway before
+ * model resolution or credential access.
+ */
+export interface AuthGatewayAuthorizationGrant {
+	authorized: true;
+	authorizationId: string;
+	requestedModelId: string;
+	resolvedModelId: string;
+	/** Namespaced durable identity, for example `workspace:conversation`. */
+	sessionId: string;
+	/** Durable OAuth credential row ids, in policy preference order. */
+	allowedOAuthCredentialIds: readonly number[];
+}
+
+export type AuthGatewayAuthorizationDecision = AuthGatewayAuthorizationDenial | AuthGatewayAuthorizationGrant;
+
+export type AuthGatewayRequestAuthorizer = (
+	request: AuthGatewayAuthorizationRequest,
+) => AuthGatewayAuthorizationDecision | Promise<AuthGatewayAuthorizationDecision>;
+
+export type AuthGatewayAuthorizationObservation = {
+	type: "authorization";
+	requestId: string;
+	format: string;
+	requestedModelId: string;
+	outcome: "authorized" | "denied" | "error";
+	authorizationId?: string;
+	resolvedModelId?: string;
+	sessionId?: string;
+	reasonCode?: string;
+};
+
+export interface AuthGatewayPolicyObservationBase {
+	requestId: string;
+	format: string;
+	authorizationId: string;
+	requestedModelId: string;
+	resolvedModelId: string;
+	sessionId: string;
+}
+
+export type AuthGatewayCredentialSelectionObservation = AuthGatewayPolicyObservationBase & {
+	type: "credential_selection";
+	credentialId: number;
+	phase: "initial" | "force_refresh";
+};
+
+export type AuthGatewayCredentialRotationObservation = AuthGatewayPolicyObservationBase & {
+	type: "credential_rotation";
+	previousCredentialId: number;
+	credentialId: number;
+	reason: "usage_limit" | "authentication_failure";
+};
+
+export type AuthGatewayErrorObservation = AuthGatewayPolicyObservationBase & {
+	type: "error";
+	stage: "model_resolution" | "credential_selection" | "upstream";
+	code: "model_unavailable" | "credential_unavailable" | "credential_rotation_unavailable" | "upstream_error";
+};
+
+export type AuthGatewayTerminalObservation = AuthGatewayPolicyObservationBase & {
+	type: "terminal";
+	outcome: "success" | "error" | "aborted";
+};
+
+/**
+ * Content-free gateway observation. Events contain durable identities and
+ * outcomes only: never bearer bytes, request prompts, or provider responses.
+ */
+export type AuthGatewayObservation =
+	| AuthGatewayAuthorizationObservation
+	| AuthGatewayCredentialSelectionObservation
+	| AuthGatewayCredentialRotationObservation
+	| AuthGatewayErrorObservation
+	| AuthGatewayTerminalObservation;
+
+export type AuthGatewayObserver = (event: AuthGatewayObservation) => void | Promise<void>;
+
 export interface AuthGatewayServerOptions {
 	/** Listen address. Default `127.0.0.1:4000`. */
 	bind?: string;
 	/** Accept any of these bearer tokens. Empty allows unauthenticated calls. */
-	bearerTokens: string[];
+	bearerTokens: readonly string[];
+	/**
+	 * Enables fail-closed policy mode for inference routes. Construction also
+	 * requires both `observer` and `readinessProbe`.
+	 */
+	authorizeRequest?: AuthGatewayRequestAuthorizer;
+	/**
+	 * Optional trusted sink for content-free policy observations. Rejection
+	 * before provider completion fails the request closed. A failed terminal
+	 * success observation is reported internally but cannot replace a provider
+	 * response that already completed successfully.
+	 */
+	observer?: AuthGatewayObserver;
+	/** Optional bounded dependency probe for `/healthz`; false or rejection returns 503. */
+	readinessProbe?: (signal: AbortSignal) => boolean | Promise<boolean>;
 	/** Version surfaced on `/healthz`. */
 	version?: string;
 }

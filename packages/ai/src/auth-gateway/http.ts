@@ -4,7 +4,7 @@
  * Centralized so we share the same JSON shape, auth check,
  * and peer-resolution logic.
  */
-import { timingSafeEqual as nodeTimingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual as nodeTimingSafeEqual } from "node:crypto";
 import type { Api, AssistantMessage, Model } from "../types";
 
 const JSON_HEADERS = {
@@ -17,6 +17,59 @@ export function json(status: number, body: unknown, headers?: Record<string, str
 		status,
 		headers: headers ? { ...JSON_HEADERS, ...headers } : JSON_HEADERS,
 	});
+}
+
+const JSON_DECODER = new TextDecoder();
+
+export interface BoundedJson {
+	value: unknown;
+	byteLength: number;
+	sha256: string;
+}
+
+/** Read, digest, and parse JSON without permitting an unbounded policy preflight allocation. */
+export async function readBoundedJson(request: Request, maxBytes: number): Promise<BoundedJson> {
+	const declaredLength = Number(request.headers.get("content-length"));
+	if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+		throw new Error("Request JSON body exceeds gateway policy limit");
+	}
+	if (!request.body) throw new Error("Request JSON body is empty");
+
+	const reader = request.body.getReader();
+	const chunks: Uint8Array[] = [];
+	let totalBytes = 0;
+	try {
+		for (;;) {
+			const chunk = await reader.read();
+			if (chunk.done) break;
+			totalBytes += chunk.value.byteLength;
+			if (totalBytes > maxBytes) {
+				try {
+					await reader.cancel();
+				} catch {
+					// The bounded rejection below is authoritative.
+				}
+				throw new Error("Request JSON body exceeds gateway policy limit");
+			}
+			chunks.push(chunk.value);
+		}
+	} finally {
+		reader.releaseLock();
+	}
+
+	const bytes = chunks.length === 1 ? chunks[0]! : new Uint8Array(totalBytes);
+	if (chunks.length !== 1) {
+		let offset = 0;
+		for (const chunk of chunks) {
+			bytes.set(chunk, offset);
+			offset += chunk.byteLength;
+		}
+	}
+	return {
+		value: JSON.parse(JSON_DECODER.decode(bytes)) as unknown,
+		byteLength: totalBytes,
+		sha256: createHash("sha256").update(bytes).digest("hex"),
+	};
 }
 
 /**
@@ -126,14 +179,16 @@ const PASSTHROUGH_HEADER_NAMES: Record<string, true> = {
  * lowercased; empty values are dropped. Called once per request in
  * `handleFormatEndpoint`; parsers then read `options.headers`.
  */
-export function captureRequestHeaders(headers: Headers): Record<string, string> {
+export function captureRequestHeaders(
+	headers: Headers,
+	options?: { stripPolicyIdentity?: boolean },
+): Record<string, string> {
 	const out: Record<string, string> = {};
+	if (options?.stripPolicyIdentity) return out;
 	headers.forEach((value, key) => {
 		if (!value) return;
 		const lower = key.toLowerCase();
-		if (PASSTHROUGH_HEADER_NAMES[lower] || lower.startsWith("x-stainless-")) {
-			out[lower] = value;
-		}
+		if (Object.hasOwn(PASSTHROUGH_HEADER_NAMES, lower) || lower.startsWith("x-stainless-")) out[lower] = value;
 	});
 	return out;
 }
