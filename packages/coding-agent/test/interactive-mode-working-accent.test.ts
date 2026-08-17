@@ -86,7 +86,7 @@ afterAll(() => {
 	resetSettingsForTest();
 });
 
-describe("InteractiveMode working-message session accent cache", () => {
+describe("InteractiveMode working row", () => {
 	it("reports a live seam only while status content is mounted", async () => {
 		const { mode } = await createHarness("Live status");
 		const statusContainer = mode.statusContainer as Container & NativeScrollbackLiveRegion;
@@ -98,6 +98,44 @@ describe("InteractiveMode working-message session accent cache", () => {
 		startStableLoader(mode);
 		expect(statusContainer.getNativeScrollbackLiveRegionStart()).toBe(0);
 		expect(statusContainer.isNativeScrollbackLiveRegionPinned?.()).toBe(true);
+	});
+
+	it("shows elapsed time only while a tool call is active", async () => {
+		const { mode } = await createHarness("Timed work");
+		settings.set("display.showWorkingTimer", true);
+		vi.useFakeTimers();
+		let now = 10_000;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+
+		try {
+			mode.ensureLoadingAnimation();
+			expect(Bun.stripANSI(renderLoader(mode))).not.toContain("0s");
+
+			mode.setWorkingMessage("Indexing files", { timerStartedAt: now });
+			expect(Bun.stripANSI(renderLoader(mode))).toContain(`Indexing files${theme.sep.dot}0s`);
+
+			now += 11_000;
+			vi.advanceTimersByTime(11_000);
+			expect(Bun.stripANSI(renderLoader(mode))).toContain(`Indexing files${theme.sep.dot}11s`);
+
+			mode.setWorkingMessage("Still indexing");
+			expect(Bun.stripANSI(renderLoader(mode))).toContain(`Still indexing${theme.sep.dot}11s`);
+
+			mode.setWorkingMessage(undefined, { timerStartedAt: null });
+			mode.loadingAnimation?.stop();
+			const settled = Bun.stripANSI(renderLoader(mode));
+			expect(settled).toContain("Working");
+			expect(settled).not.toContain("11s");
+
+			now += 5_000;
+			vi.advanceTimersByTime(5_000);
+			expect(Bun.stripANSI(renderLoader(mode))).toBe(settled);
+		} finally {
+			mode.loadingAnimation?.stop();
+			settings.set("display.showWorkingTimer", false);
+			vi.useRealTimers();
+			vi.restoreAllMocks();
+		}
 	});
 
 	it("reuses one computed accent across loader spinner and message colorizers", async () => {

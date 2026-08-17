@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an opt-in working-row timer that shows elapsed time for the active tool call above the prompt editor.
+
 ## [17.3.7] - 2026-08-17
 
 ### Changed

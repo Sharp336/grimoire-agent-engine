@@ -8,6 +8,7 @@ import { __providerInFlightForTesting, streamSimple } from "@oh-my-pi/pi-ai/stre
 import type { Context } from "@oh-my-pi/pi-ai/types";
 import {
 	onAppendOnlyModeChanged,
+	onDisplayShowWorkingTimerChanged,
 	onStatusLineSessionAccentChanged,
 	resetSettingsForTest,
 	type SettingPath,
@@ -459,6 +460,35 @@ describe("Settings", () => {
 			expect(Settings.isolated({ inlineToolDescriptors: true }).get("inlineToolDescriptors")).toBe("on");
 			expect(Settings.isolated({ inlineToolDescriptors: false }).get("inlineToolDescriptors")).toBe("off");
 			expect(Settings.isolated().get("inlineToolDescriptors")).toBe("auto");
+		});
+	});
+
+	describe("display.showWorkingTimer hooks", () => {
+		it("notifies subscribers only when the effective value changes", () => {
+			const isolated = Settings.isolated();
+			const values: boolean[] = [];
+			const unsubscribe = onDisplayShowWorkingTimerChanged(() => {
+				values.push(isolated.get("display.showWorkingTimer"));
+			});
+
+			try {
+				isolated.set("display.showWorkingTimer", false);
+				expect(values).toEqual([]);
+
+				isolated.set("display.showWorkingTimer", true);
+				expect(values).toEqual([true]);
+
+				isolated.override("display.showWorkingTimer", true);
+				expect(values).toEqual([true]);
+
+				isolated.clearOverride("display.showWorkingTimer");
+				expect(values).toEqual([true]);
+			} finally {
+				unsubscribe();
+			}
+
+			isolated.set("display.showWorkingTimer", false);
+			expect(values).toEqual([true]);
 		});
 	});
 

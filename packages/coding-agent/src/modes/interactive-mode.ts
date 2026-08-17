@@ -62,6 +62,7 @@ import { formatModelString, type ResolvedModelRoleValue } from "../config/model-
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import {
 	isSettingsInitialized,
+	onDisplayShowWorkingTimerChanged,
 	onModelRolesChanged,
 	onStatusLineSessionAccentChanged,
 	Settings,
@@ -279,6 +280,81 @@ function renderWorkingMessage(message: string, accent?: WorkingMessageAccent): s
 		],
 		theme,
 	);
+}
+
+function workingMessageWithTimer(message: string, elapsedMs: number): string {
+	const timer = `${theme.sep.dot}${formatDuration(elapsedMs)}`;
+	const hint = interruptHint();
+	if (!message.endsWith(hint)) return `${message}${timer}`;
+	return `${message.slice(0, -hint.length)}${timer}${hint}`;
+}
+
+class WorkingLoader extends Loader {
+	#baseMessage: string;
+	#startedAt: number | undefined;
+	readonly #timerEnabled: () => boolean;
+	#elapsedTimer?: NodeJS.Timeout;
+
+	constructor(
+		ui: TUI,
+		spinnerColorFn: (text: string) => string,
+		messageColorFn: LoaderMessageColorFn,
+		message: string,
+		timerEnabled: () => boolean,
+		spinnerFrames?: string[],
+	) {
+		super(ui, spinnerColorFn, messageColorFn, message, spinnerFrames);
+		this.#baseMessage = message;
+		this.#timerEnabled = timerEnabled;
+	}
+
+	override setMessage(message: string): void {
+		this.setWorkingState(message);
+	}
+
+	setWorkingState(message: string, timerStartedAt?: number | null): void {
+		this.#baseMessage = message;
+		if (timerStartedAt !== undefined) {
+			this.#startedAt = timerStartedAt ?? undefined;
+		}
+		this.#syncTimer();
+		this.#syncMessage();
+	}
+
+	refreshTimerSetting(): void {
+		this.#syncTimer();
+		this.#syncMessage();
+	}
+
+	override stop(): void {
+		if (this.#elapsedTimer) {
+			clearInterval(this.#elapsedTimer);
+			this.#elapsedTimer = undefined;
+		}
+		super.stop();
+	}
+
+	#syncTimer(): void {
+		if (!this.#timerEnabled() || this.#startedAt === undefined) {
+			if (this.#elapsedTimer) {
+				clearInterval(this.#elapsedTimer);
+				this.#elapsedTimer = undefined;
+			}
+			return;
+		}
+		if (this.#elapsedTimer) return;
+		this.#elapsedTimer = setInterval(() => this.#syncMessage(), 1_000);
+		this.#elapsedTimer.unref?.();
+	}
+
+	#syncMessage(): void {
+		const startedAt = this.#startedAt;
+		const message =
+			this.#timerEnabled() && startedAt !== undefined
+				? workingMessageWithTimer(this.#baseMessage, Date.now() - startedAt)
+				: this.#baseMessage;
+		super.setMessage(message);
+	}
 }
 
 const EDITOR_MAX_HEIGHT_MIN = 6;
@@ -1199,6 +1275,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			onStatusLineSessionAccentChanged(() => {
 				this.#syncStatusLineSettings();
 				this.#handleSessionAccentInputsChanged();
+			}),
+			onDisplayShowWorkingTimerChanged(() => {
+				if (this.loadingAnimation instanceof WorkingLoader) {
+					this.loadingAnimation.refreshTimerSetting();
+				}
 			}),
 		);
 		// Resync the welcome banner to the live model: init-time reconciliations
@@ -4541,7 +4622,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			// message is static, so leave `animated` unset and let the loader use
 			// the spinner-only ~12.5fps cadence instead of repainting a frozen line.
 			if (shimmerEnabled()) messageColorFn.animated = true;
-			this.loadingAnimation = new Loader(
+			this.loadingAnimation = new WorkingLoader(
 				this.ui,
 				spinner => {
 					const accent = this.#getWorkingMessageAccent();
@@ -4549,6 +4630,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				},
 				messageColorFn,
 				this.#defaultWorkingMessage,
+				() => settings.get("display.showWorkingTimer"),
 				getSymbolTheme().spinnerFrames,
 			);
 			this.statusContainer.addChild(this.loadingAnimation);
@@ -4570,21 +4652,24 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
-	setWorkingMessage(message?: string): void {
+	setWorkingMessage(message?: string, options?: { timerStartedAt?: number | null }): void {
+		const workingMessage = message ?? this.#defaultWorkingMessage;
 		if (message === undefined) {
 			this.#pendingWorkingMessage = undefined;
-			if (this.loadingAnimation) {
-				this.loadingAnimation.setMessage(this.#defaultWorkingMessage);
+		}
+
+		if (this.loadingAnimation) {
+			if (this.loadingAnimation instanceof WorkingLoader) {
+				this.loadingAnimation.setWorkingState(workingMessage, options?.timerStartedAt);
+			} else {
+				this.loadingAnimation.setMessage(workingMessage);
 			}
 			return;
 		}
 
-		if (this.loadingAnimation) {
-			this.loadingAnimation.setMessage(message);
-			return;
+		if (message !== undefined) {
+			this.#pendingWorkingMessage = message;
 		}
-
-		this.#pendingWorkingMessage = message;
 	}
 
 	applyPendingWorkingMessage(): void {

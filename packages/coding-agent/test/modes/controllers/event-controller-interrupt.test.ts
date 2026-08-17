@@ -52,7 +52,17 @@ function toolStartWithIntent(toolCallId: string, intent: string): AgentSessionEv
 	} as unknown as AgentSessionEvent;
 }
 
-describe("EventController aborted-turn working messages", () => {
+function toolEnd(toolCallId: string): AgentSessionEvent {
+	return {
+		type: "tool_execution_end",
+		toolCallId,
+		toolName: "grep",
+		result: { content: [], details: undefined },
+		isError: false,
+	} as unknown as AgentSessionEvent;
+}
+
+describe("EventController working messages", () => {
 	beforeAll(async () => {
 		await initTheme(false);
 	});
@@ -130,5 +140,30 @@ describe("EventController aborted-turn working messages", () => {
 
 		expect(setWorkingMessage).toHaveBeenCalledTimes(1);
 		expect(setWorkingMessage.mock.calls[0]?.[0]).toContain("Editing module");
+	});
+
+	it("keeps the oldest concurrent tool timer until that tool finishes", async () => {
+		const { ctx, pendingTools, setWorkingMessage } = createContext();
+		const controller = new EventController(ctx);
+		await controller.handleEvent(AGENT_START);
+		setWorkingMessage.mockClear();
+		let now = 1_000;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+
+		pendingTools.set("call-1", { updateResult: vi.fn() });
+		await controller.handleEvent(toolStartWithIntent("call-1", "Searching files"));
+		now = 2_000;
+		pendingTools.set("call-2", { updateResult: vi.fn() });
+		await controller.handleEvent(toolStartWithIntent("call-2", "Reading index"));
+
+		expect(setWorkingMessage.mock.lastCall?.[0]).toContain("Searching files");
+		expect(setWorkingMessage.mock.lastCall?.[1]).toEqual({ timerStartedAt: 1_000 });
+
+		await controller.handleEvent(toolEnd("call-1"));
+		expect(setWorkingMessage.mock.lastCall?.[0]).toContain("Reading index");
+		expect(setWorkingMessage.mock.lastCall?.[1]).toEqual({ timerStartedAt: 2_000 });
+
+		await controller.handleEvent(toolEnd("call-2"));
+		expect(setWorkingMessage.mock.lastCall).toEqual([undefined, { timerStartedAt: null }]);
 	});
 });

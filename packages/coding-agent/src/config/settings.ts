@@ -555,6 +555,9 @@ export class Settings {
 		if (path === "statusLine.sessionAccent") {
 			statusLineSessionAccentSignal.fire();
 		}
+		if (path === "display.showWorkingTimer") {
+			displayShowWorkingTimerSignal.fire();
+		}
 		if (path === "modelRoles") {
 			modelRolesSignal.fire();
 		}
@@ -2364,6 +2367,15 @@ const modelRolesSignal = new SettingSignal("modelRoles");
 
 /** Subscribe to model role changes. Returns an unsubscribe function. */
 export const onModelRolesChanged: (cb: () => void) => () => void = modelRolesSignal.on.bind(modelRolesSignal);
+
+/** Fires when `display.showWorkingTimer` changes at runtime. */
+const displayShowWorkingTimerSignal = new SettingSignal("display.showWorkingTimer");
+
+/**
+ * Subscribe to working-timer setting changes.
+ * Returns an unsubscribe function. Callers should re-read settings in the callback.
+ */
+export const onDisplayShowWorkingTimerChanged = (cb: () => void) => displayShowWorkingTimerSignal.on(cb);
 
 /** Fires when `statusLine.sessionAccent` changes at runtime. */
 const statusLineSessionAccentSignal = new SettingSignal("statusLine.sessionAccent");
