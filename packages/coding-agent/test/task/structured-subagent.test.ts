@@ -8,6 +8,7 @@ import {
 	resetRegisteredArtifactDirsForTests,
 } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
 import * as planHandoff from "@oh-my-pi/pi-coding-agent/plan-mode/plan-handoff";
+import { runWithRemoteRuntime } from "@oh-my-pi/pi-coding-agent/remote-runtime/scope";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
@@ -15,8 +16,10 @@ import {
 	buildStructuredSubagentRecoveryHint,
 	resolveEffectiveSubagentPolicy,
 	runStructuredSubagent,
+	type StructuredSubagentBackendContext,
 	StructuredSubagentError,
 	type StructuredSubagentRequest,
+	type StructuredSubagentResult,
 } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import type { AgentDefinition, SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -81,6 +84,33 @@ function result(): SingleResult {
 		durationMs: 1,
 		tokens: 0,
 		requests: 1,
+	};
+}
+
+function remoteResult(context: StructuredSubagentBackendContext): StructuredSubagentResult {
+	const completed = result();
+	completed.id = context.request.identity?.id ?? completed.id;
+	completed.index = context.request.index ?? 0;
+	completed.agent = context.policy.agent.name;
+	completed.agentSource = context.policy.agent.source;
+	completed.task = context.request.assignment;
+	completed.assignment = context.request.assignment;
+	completed.output = '{"agent":true}';
+	if (context.outputSchema.source !== "none") {
+		completed.structuredOutput = {
+			source: context.outputSchema.source,
+			mode: context.outputSchema.mode,
+			status: "valid",
+			data: { agent: true },
+		};
+	}
+	return {
+		result: completed,
+		policy: context.policy,
+		mergeSummary: "",
+		changesApplied: null,
+		artifactsDir: "remote-artifacts",
+		temporaryArtifacts: false,
 	};
 }
 
@@ -272,6 +302,289 @@ describe("structured subagent primitive", () => {
 		expect(dispatched[0]?.modelRole).toBeUndefined();
 		expect(settled.result.modelRole).toBeUndefined();
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("dispatches remote execution after normalization without touching local artifacts, leases, or executors", async () => {
+		const order: string[] = [];
+		vi.spyOn(discoveryModule, "discoverAgents").mockImplementation(async () => {
+			order.push("discovery");
+			return { agents: [AGENT], projectAgentsDir: null };
+		});
+		const mkdir = vi.spyOn(fs, "mkdir");
+		const localRun = vi.spyOn(executorModule, "runSubprocess");
+		const isolatedRun = vi.spyOn(isolationRunner, "runIsolatedSubprocess");
+		const prepareIsolation = vi.spyOn(isolationRunner, "prepareIsolationContext");
+		const loadPlan = vi.spyOn(planHandoff, "loadOverallPlanReference");
+		const childSession = session();
+		let sessionFileCalls = 0;
+		childSession.getSessionFile = () => {
+			sessionFileCalls++;
+			return null;
+		};
+		let received: StructuredSubagentBackendContext | undefined;
+		const schema = {
+			type: "object",
+			properties: { agent: { type: "boolean" } },
+			required: ["agent"],
+			additionalProperties: false,
+		};
+		const accept = vi.fn();
+		const discard = vi.fn();
+		const backend = {
+			run: async (context: StructuredSubagentBackendContext) => {
+				order.push("remote");
+				received = context;
+				return remoteResult(context);
+			},
+			accept,
+			discard,
+		};
+
+		const settled = await runStructuredSubagent(
+			request({
+				session: childSession,
+				assignment: "  Inspect the target.  ",
+				context: "  Shared context.  ",
+				agent: " worker ",
+				outputSchema: schema,
+				schemaMode: "strict",
+				identity: { label: "  Remote Worker  " },
+			}),
+			{ execution: "remote", backend },
+		);
+
+		expect(order).toEqual(["discovery", "remote"]);
+		expect(received?.request).toMatchObject({
+			assignment: "Inspect the target.",
+			context: "Shared context.",
+			agent: "worker",
+			schemaMode: "strict",
+			identity: { label: "Remote Worker" },
+			index: 0,
+			isolation: { requested: false, merge: "patch", apply: true },
+		});
+		expect(received?.outputSchema).toBe(received?.policy.schema);
+		expect(received?.outputSchema.schema).toBe(schema);
+		expect(settled.result.structuredOutput).toMatchObject({ status: "valid", data: { agent: true } });
+		expect(accept).toHaveBeenCalledTimes(1);
+		expect(discard).not.toHaveBeenCalled();
+		expect(sessionFileCalls).toBe(0);
+		expect(childSession.agentOutputManager).toBeUndefined();
+		expect(mkdir).not.toHaveBeenCalled();
+		expect(loadPlan).not.toHaveBeenCalled();
+		expect(prepareIsolation).not.toHaveBeenCalled();
+		expect(localRun).not.toHaveBeenCalled();
+		expect(isolatedRun).not.toHaveBeenCalled();
+		expect(artifactsDirsFromRegistry()).toEqual([]);
+	});
+
+	it("does not dispatch the remote backend when effective-schema preflight rejects", async () => {
+		mockDiscovery();
+		const remoteRun = vi.fn(async (context: StructuredSubagentBackendContext) => remoteResult(context));
+
+		await expect(
+			runStructuredSubagent(request({ outputSchema: false, schemaMode: "strict" }), {
+				execution: "remote",
+				backend: { run: remoteRun },
+			}),
+		).rejects.toThrow("Invalid strict caller output schema");
+
+		expect(remoteRun).not.toHaveBeenCalled();
+		expect(artifactsDirsFromRegistry()).toEqual([]);
+	});
+
+	it("fails closed when remote execution is selected without a backend", async () => {
+		mockDiscovery();
+		const localRun = vi.spyOn(executorModule, "runSubprocess");
+		const isolatedRun = vi.spyOn(isolationRunner, "runIsolatedSubprocess");
+
+		const settled = await runStructuredSubagent(request(), { execution: "remote" });
+
+		expect(settled.result).toMatchObject({
+			exitCode: 1,
+			error: "Remote structured subagent backend is unavailable.",
+		});
+		expect(settled.temporaryArtifacts).toBe(false);
+		expect(settled.artifactsDir).toBe("");
+		expect(localRun).not.toHaveBeenCalled();
+		expect(isolatedRun).not.toHaveBeenCalled();
+		expect(artifactsDirsFromRegistry()).toEqual([]);
+	});
+
+	it("converts a rejected remote execution into an error result without local fallback", async () => {
+		mockDiscovery();
+		const localRun = vi.spyOn(executorModule, "runSubprocess");
+		const isolatedRun = vi.spyOn(isolationRunner, "runIsolatedSubprocess");
+		const backend = {
+			run: async () => {
+				throw new Error("remote unavailable");
+			},
+		};
+
+		const settled = await runStructuredSubagent(request(), { execution: "remote", backend });
+
+		expect(settled.result).toMatchObject({
+			exitCode: 1,
+			error: "Remote structured subagent execution failed: remote unavailable",
+		});
+		expect(localRun).not.toHaveBeenCalled();
+		expect(isolatedRun).not.toHaveBeenCalled();
+		expect(artifactsDirsFromRegistry()).toEqual([]);
+	});
+
+	it("propagates cancellation to the remote backend and settles as aborted", async () => {
+		mockDiscovery();
+		const controller = new AbortController();
+		const started = Promise.withResolvers<void>();
+		const pending = Promise.withResolvers<StructuredSubagentResult>();
+		let receivedSignal: AbortSignal | undefined;
+		const discard = vi.fn();
+		const backend = {
+			run: (context: StructuredSubagentBackendContext) => {
+				receivedSignal = context.signal;
+				started.resolve();
+				return pending.promise;
+			},
+			discard,
+		};
+
+		const execution = runStructuredSubagent(request({ signal: controller.signal }), {
+			execution: "remote",
+			backend,
+		});
+		await started.promise;
+		controller.abort(new Error("remote cancellation"));
+		const settled = await execution;
+
+		expect(receivedSignal).toBe(controller.signal);
+		expect(settled.result).toMatchObject({
+			exitCode: 1,
+			aborted: true,
+			abortReason: "remote cancellation",
+			error: "remote cancellation",
+		});
+		expect(discard).toHaveBeenCalledTimes(1);
+		expect(artifactsDirsFromRegistry()).toEqual([]);
+	});
+
+	it("fails closed on a malformed remote result without local fallback", async () => {
+		mockDiscovery();
+		const localRun = vi.spyOn(executorModule, "runSubprocess");
+		const isolatedRun = vi.spyOn(isolationRunner, "runIsolatedSubprocess");
+		const discard = vi.fn();
+		const backend = {
+			run: async (context: StructuredSubagentBackendContext) => {
+				const malformed = remoteResult(context);
+				malformed.result.structuredOutput = {
+					source: context.outputSchema.source,
+					mode: context.outputSchema.mode,
+					status: "valid",
+					data: { agent: "not-a-boolean" },
+				};
+				return malformed;
+			},
+			discard,
+		};
+
+		const settled = await runStructuredSubagent(request(), { execution: "remote", backend });
+
+		expect(settled.result.exitCode).toBe(1);
+		expect(settled.result.error).toContain("Remote structured subagent backend returned a malformed result");
+		expect(discard).toHaveBeenCalledTimes(1);
+		expect(localRun).not.toHaveBeenCalled();
+		expect(isolatedRun).not.toHaveBeenCalled();
+		expect(artifactsDirsFromRegistry()).toEqual([]);
+	});
+
+	it("fails closed when a remote result changes a preallocated agent id", async () => {
+		mockDiscovery();
+		const localRun = vi.spyOn(executorModule, "runSubprocess");
+		const backend = {
+			run: async (context: StructuredSubagentBackendContext) => {
+				const mismatched = remoteResult(context);
+				mismatched.result.id = "DifferentAgent";
+				return mismatched;
+			},
+		};
+
+		const settled = await runStructuredSubagent(request({ identity: { id: "ReservedAgent" } }), {
+			execution: "remote",
+			backend,
+		});
+
+		expect(settled.result.exitCode).toBe(1);
+		expect(settled.result.error).toContain("result id does not match the normalized preallocated id");
+		expect(localRun).not.toHaveBeenCalled();
+	});
+
+	it("rejects successful strict invalid and unavailable remote schema results", async () => {
+		mockDiscovery();
+		for (const status of ["invalid", "unavailable"] as const) {
+			const backend = {
+				run: async (context: StructuredSubagentBackendContext) => {
+					const malformed = remoteResult(context);
+					malformed.result.exitCode = 0;
+					malformed.result.stderr = "";
+					malformed.result.structuredOutput = {
+						source: context.outputSchema.source,
+						mode: "strict",
+						status,
+						error: `${status} schema result`,
+					};
+					return malformed;
+				},
+			};
+
+			const settled = await runStructuredSubagent(request({ schemaMode: "strict" }), {
+				execution: "remote",
+				backend,
+			});
+
+			expect(settled.result.exitCode).toBe(1);
+			expect(settled.result.error).toContain(
+				"strict invalid or unavailable structuredOutput must be a failed schema_violation",
+			);
+		}
+	});
+
+	it("keeps explicit local execution on the native executor when a backend is injected", async () => {
+		mockDiscovery();
+		const remoteRun = vi.fn(async (context: StructuredSubagentBackendContext) => remoteResult(context));
+		const localRun = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result());
+
+		const settled = await runStructuredSubagent(request({ retainArtifacts: true }), {
+			execution: "local",
+			backend: { run: remoteRun },
+		});
+
+		expect(localRun).toHaveBeenCalledTimes(1);
+		expect(remoteRun).not.toHaveBeenCalled();
+		expect(settled.temporaryArtifacts).toBe(true);
+		expect(path.basename(settled.artifactsDir)).toStartWith("omp-task-");
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("forces every structured launch through the scoped sealed backend without local fallback", async () => {
+		mockDiscovery();
+		const remoteRun = vi.fn(async (context: StructuredSubagentBackendContext) => remoteResult(context));
+		const localRun = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result());
+
+		const settled = await runWithRemoteRuntime(
+			{
+				subagentBackend: { run: remoteRun },
+				registryBackend: {} as never,
+				peerTransport: {} as never,
+			},
+			() =>
+				runStructuredSubagent(request(), {
+					execution: "local",
+					backend: { run: async () => Promise.reject(new Error("must not run")) },
+				}),
+		);
+
+		expect(settled.result.exitCode).toBe(0);
+		expect(remoteRun).toHaveBeenCalledTimes(1);
+		expect(localRun).not.toHaveBeenCalled();
 	});
 
 	it("leases temporary artifacts for a retained invocation and registers them for agent URLs", async () => {

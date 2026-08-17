@@ -6,6 +6,7 @@ import { Command } from "@oh-my-pi/pi-utils/cli";
 import { type Args as ParsedArgs, parseArgs, reportCliUsageError } from "../cli/args";
 import { runRootCommand } from "../main";
 import { prepareAcpTerminalAuthArgs } from "../modes/acp/terminal-auth";
+import { runWithRemoteRuntimeConfig } from "../remote-runtime/bootstrap";
 import { launchHelp } from "./launch-help";
 
 export default class Index extends Command {
@@ -28,6 +29,10 @@ export default class Index extends Command {
 				return;
 			}
 			throw error;
+		}
+		if (parsed.remoteRuntimeConfig) {
+			await runWithRemoteRuntimeConfig(parsed.remoteRuntimeConfig, () => runRootCommand(parsed, args));
+			return;
 		}
 		await runRootCommand(parsed, args);
 	}

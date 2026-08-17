@@ -25,6 +25,7 @@ import { MCPManager } from "../mcp/manager";
 import vibeTurnResultTemplate from "../prompts/tools/vibe-turn-result.md" with { type: "text" };
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { currentRemoteRuntime } from "../remote-runtime/scope";
 import { SessionManager, SessionPersistenceIndeterminateError } from "../session/session-manager";
 import { getBundledAgent } from "../task/agents";
 import { type ExecutorOptions, runSubagentFollowUpTurn, runSubprocess } from "../task/executor";
@@ -1481,6 +1482,9 @@ export class VibeSessionRegistry {
 		message: string,
 		options: { first: boolean },
 	): string {
+		if (currentRemoteRuntime()) {
+			throw new ToolError("Vibe mode cannot execute native workers inside a sealed remote runtime.");
+		}
 		const turnIndex = record.turnCount + 1;
 		const turn: VibeTurn = {
 			jobId: "",

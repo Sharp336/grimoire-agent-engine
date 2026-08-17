@@ -47,6 +47,9 @@ export const launchHelp = {
 			description: "Load an extra config.yml-style overlay for this run (repeatable)",
 			multiple: true,
 		}),
+		"remote-runtime-config": Flags.string({
+			description: "Use a sealed remote runtime authority descriptor (absolute JSON file path)",
+		}),
 		"add-dir": Flags.string({
 			description: "Add a workspace directory beyond the working directory (repeatable)",
 			multiple: true,
