@@ -5,6 +5,7 @@ tools: read, grep, glob, web_search
 model: "@smol"
 thinking-level: medium
 read-summarize: false
+inheritBasePrompt: false
 output:
   properties:
     summary:

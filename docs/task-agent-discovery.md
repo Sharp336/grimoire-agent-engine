@@ -27,7 +27,7 @@ It covers runtime behavior as implemented today, including precedence, invalid-d
 Task agents normalize into `AgentDefinition` (`src/task/types.ts`):
 
 - required `name`, `description`, and `systemPrompt`
-- optional `tools`, `spawns`, prioritized `model` list, `thinkingLevel`, `output`, `blocking`, `autoloadSkills`, `readSummarize`, `prewalk`, `advisor`
+- optional `tools`, `spawns`, prioritized `model` list, `thinkingLevel`, `output`, `blocking`, `autoloadSkills`, `readSummarize`, `prewalk`, `advisor`, `inheritBasePrompt`
 - `source`: `"bundled" | "user" | "project"` (extension agents are tagged with their extension root's project/user level)
 - optional `filePath`
 
@@ -108,6 +108,16 @@ modelRoles:
 
 The `vibe_spawn` `cli` remains `fast` or `good`; update `modelRoles` to change the worker model.
 
+### Prompt inheritance
+
+Subagents normally retain the generic interactive base prompt, then add their agent-specific role and task context before the final project/current-context segment. An agent can set:
+
+```yaml
+inheritBasePrompt: false
+```
+
+This removes only the first generic base-prompt segment. The agent prompt, task `context`, project context, current-context segments, selected tool schemas, and output schema remain. Use it for focused local agents with a complete role prompt; do not use it to compensate for an underspecified agent or task assignment.
+
 ## Bundled agents
 
 Bundled agents are embedded at build time (`src/task/agents.ts`) using text imports.
@@ -116,6 +126,8 @@ Bundled agents are embedded at build time (`src/task/agents.ts`) using text impo
 
 - `scout`, `designer`, `reviewer`, `security-reviewer`, and `librarian` from prompt files
 - `task` and `sonic` from the shared `task.md` body plus injected frontmatter; no bundled agent sets `prewalk` — the generic `task` agent's hand-off is armed by the `task.prewalk` setting (default off), or per agent via `/agents` / `task.agentPrewalk` / user agent frontmatter
+
+The focused worker agents `scout`, `task`, and `sonic` set `inheritBasePrompt: false`; their complete agent contracts, project context, task context, tool schemas, and output schemas remain.
 
 Loading path:
 

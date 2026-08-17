@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Effort } from "@oh-my-pi/pi-ai";
 import { parseAgentFields } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
+import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
 
 describe("parseAgentFields", () => {
@@ -36,6 +37,29 @@ describe("parseAgentFields", () => {
 		expect(fields).toBeDefined();
 		expect(fields?.blocking).toBeUndefined();
 	});
+
+	test("parses inheritBasePrompt from boolean frontmatter", () => {
+		const fields = parseAgentFields({
+			name: "explore",
+			description: "desc",
+			inheritBasePrompt: false,
+		});
+
+		expect(fields).toBeDefined();
+		expect(fields?.inheritBasePrompt).toBe(false);
+	});
+
+	test("ignores invalid inheritBasePrompt values", () => {
+		const fields = parseAgentFields({
+			name: "explore",
+			description: "desc",
+			inheritBasePrompt: "minimal",
+		});
+
+		expect(fields).toBeDefined();
+		expect(fields?.inheritBasePrompt).toBeUndefined();
+	});
+
 	test("parses legacy thinking key", () => {
 		const fields = parseAgentFields({
 			name: "reviewer",
@@ -197,5 +221,11 @@ describe("parseAgentFields", () => {
 		);
 		expect(parseAgentFields({ name: "worker", description: "desc", advisor: "  " })?.advisor).toBeUndefined();
 		expect(parseAgentFields({ name: "worker", description: "desc" })?.advisor).toBeUndefined();
+	});
+});
+
+describe("bundled prompt inheritance", () => {
+	test.each(["scout", "task", "sonic"])("%s omits the interactive base prompt", name => {
+		expect(getBundledAgent(name)?.inheritBasePrompt).toBe(false);
 	});
 });

@@ -28,6 +28,7 @@ interface AgentFrontmatter {
 	blocking?: boolean;
 	prewalk?: boolean | string;
 	advisor?: boolean | string;
+	inheritBasePrompt?: boolean;
 }
 
 interface EmbeddedAgentDef {
@@ -39,7 +40,11 @@ interface EmbeddedAgentDef {
 function buildAgentContent(def: EmbeddedAgentDef): string {
 	const body = prompt.render(def.template);
 	if (!def.frontmatter) return body;
-	return prompt.render(agentFrontmatterTemplate, { ...def.frontmatter, body });
+	return prompt.render(agentFrontmatterTemplate, {
+		...def.frontmatter,
+		omitBasePrompt: def.frontmatter.inheritBasePrompt === false,
+		body,
+	});
 }
 
 const EMBEDDED_AGENT_DEFS: EmbeddedAgentDef[] = [
@@ -56,6 +61,7 @@ const EMBEDDED_AGENT_DEFS: EmbeddedAgentDef[] = [
 			spawns: "*",
 			model: "@task",
 			thinkingLevel: AUTO_THINKING,
+			inheritBasePrompt: false,
 			// No `prewalk` frontmatter: the generic task hand-off (strong model
 			// plans, then hands off to the smol role) is armed by the
 			// `task.prewalk` setting (default off) or per agent via /agents
@@ -70,6 +76,7 @@ const EMBEDDED_AGENT_DEFS: EmbeddedAgentDef[] = [
 			description: "Low-reasoning agent for strictly mechanical updates or data collection only",
 			model: "@smol",
 			thinkingLevel: Effort.Medium,
+			inheritBasePrompt: false,
 		},
 		template: taskMd,
 	},

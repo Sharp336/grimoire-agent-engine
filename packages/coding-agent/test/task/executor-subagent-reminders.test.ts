@@ -243,6 +243,39 @@ describe("runSubprocess yield reminders", () => {
 		expect(userPrompt).not.toMatch(/CONTEXT\n=+/);
 	});
 
+	it("can omit the interactive base prompt while retaining project and current context", async () => {
+		const session = createMockSession(({ emit }) => {
+			emit({
+				type: "tool_execution_end",
+				toolCallId: "tool-lean-system",
+				toolName: "yield",
+				result: {
+					content: [{ type: "text", text: "Result submitted." }],
+					details: { status: "success", data: { ok: true } },
+				},
+				isError: false,
+			});
+		});
+		const createAgentSessionSpy = mockCreateAgentSession(session);
+
+		await runSubprocess({
+			...baseOptions,
+			agent: { ...baseOptions.agent, inheritBasePrompt: false },
+			id: "subagent-lean-system",
+		});
+
+		const systemPromptBuilder = createAgentSessionSpy.mock.calls[0]?.[0]?.systemPrompt;
+		expect(systemPromptBuilder).toBeFunction();
+		if (typeof systemPromptBuilder !== "function") throw new Error("Expected system prompt builder");
+
+		const systemPrompt = systemPromptBuilder(["interactive", "project", "now"]);
+		expect(systemPrompt).toHaveLength(3);
+		expect(systemPrompt).not.toContain("interactive");
+		expect(systemPrompt?.[0]).toBe("project");
+		expect(systemPrompt?.[1]).toContain(baseAgent.systemPrompt);
+		expect(systemPrompt?.[2]).toBe("now");
+	});
+
 	it("sends reminder prompt when subagent stops without yield", async () => {
 		const prompts: string[] = [];
 		const promptOptions: Array<PromptOptions | undefined> = [];

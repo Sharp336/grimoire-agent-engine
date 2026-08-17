@@ -366,6 +366,12 @@ export interface AgentDefinition {
 	thinkingLevel?: ConfiguredThinkingLevel;
 	output?: unknown;
 	blocking?: boolean;
+	/**
+	 * Whether to retain the generic interactive base prompt.
+	 * Set false for focused agents whose own prompt and tool schemas provide the required contract.
+	 * Project context and later prompt segments are still retained.
+	 */
+	inheritBasePrompt?: boolean;
 	autoloadSkills?: string[];
 	/** When `false`, the agent's `read` tool returns verbatim file content instead of structural summaries. */
 	readSummarize?: boolean;
