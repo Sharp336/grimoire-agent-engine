@@ -5,6 +5,9 @@
 ### Added
 
 - Added ACP `_omp/agents/list` and `_omp/agents/update` extension methods exposing subagent lifecycle, current activity, and usage telemetry to ACP clients, plus a real-time `_omp/agents/progress` notification streaming each subagent's live work (intent, active tool, recent output, spend) and an `_omp/agents/messages` request returning a subagent's transcript including its `thinking` blocks. `tool_call`/`tool_call_update` notifications now carry a `toolName` extension field so clients can classify the task tool beyond the spec `kind`.
+### Fixed
+
+- Fixed `omp stats` and `/stats` dashboards being unreachable from container hosts by accepting an explicit `--host` bind address while preserving the `127.0.0.1` default.
 
 ## [17.3.5] - 2026-08-16
 
