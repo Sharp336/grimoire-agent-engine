@@ -108,6 +108,7 @@ const agentEventTypes = new Set<AgentEvent["type"]>([
 	"agent_end",
 	"turn_start",
 	"turn_end",
+	"prompt_progress",
 	"message_start",
 	"message_update",
 	"message_end",

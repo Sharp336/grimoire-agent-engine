@@ -8,6 +8,26 @@ import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream"
 import { createAssistantMessage } from "./helpers";
 
 describe("Agent", () => {
+	it("forwards provider prompt progress to subscribers", async () => {
+		const mock = createMockModel({ responses: [{ content: ["done"] }] });
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"] },
+			streamFn: (model, context, options) => {
+				options?.onPromptProgress?.({ total: 100, cached: 40, processed: 56 }, model);
+				return mock.stream(model, context, options);
+			},
+		});
+		const events: AgentEvent[] = [];
+		agent.subscribe(event => events.push(event));
+
+		await agent.prompt("ping");
+
+		expect(events).toContainEqual({
+			type: "prompt_progress",
+			progress: { total: 100, cached: 40, processed: 56 },
+		});
+	});
+
 	it("should support steering message queueing", async () => {
 		const agent = new Agent();
 

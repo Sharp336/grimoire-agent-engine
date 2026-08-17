@@ -713,6 +713,7 @@ export function buildOpenAIResponsesCompat(spec: OpenAIResponsesSpecLike): Resol
 		// other reasoners (grok-build, grok-code-fast-1, …) 400 if it is sent.
 		supportsReasoningEffort: !isXaiHost || isGrokReasoningEffortCapable(id),
 		supportsLongPromptCacheRetention: isOpenAIUrl,
+		supportsPromptProgress: spec.provider === "llama.cpp",
 		supportsPromptCacheBreakpoints,
 		promptCacheBreakpointTtl: supportsPromptCacheBreakpoints ? "30m" : undefined,
 		// Azure OpenAI and GitHub Copilot Responses paths require tool results
@@ -815,6 +816,7 @@ type ResponsesOnlyCompat = Omit<ResolvedOpenAIResponsesCompat, keyof ResolvedOpe
 function pickResponsesOnly(compat: ResolvedOpenAIResponsesCompat): ResponsesOnlyCompat {
 	return {
 		supportsLongPromptCacheRetention: compat.supportsLongPromptCacheRetention,
+		supportsPromptProgress: compat.supportsPromptProgress,
 		strictResponsesPairing: compat.strictResponsesPairing,
 		supportsImageDetailOriginal: compat.supportsImageDetailOriginal,
 		supportsObfuscationOptOut: compat.supportsObfuscationOptOut,

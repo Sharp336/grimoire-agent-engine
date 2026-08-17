@@ -1056,9 +1056,29 @@ describe("ModelRegistry", () => {
 
 			const model = registry.find("custom-local", "gpt-5.4");
 			expect(model?.contextWindow).toBe(1_000_000);
+			expect(getOpenAICompat(model)?.supportsPromptProgress).toBe(true);
 			// llama.cpp discovery probes the bare root (`/models`, `/props`); chat
 			// traffic must go to the OpenAI-compatible `/v1` prefix.
 			expect(model?.baseUrl).toBe("http://127.0.0.1:8080/v1");
+		});
+
+		test("llama.cpp discovery capability honors an explicit provider opt-out", async () => {
+			writeRawModelsJson({
+				"custom-local": {
+					baseUrl: "http://127.0.0.1:8080",
+					apiKey: "TEST_KEY",
+					api: "openai-responses",
+					discovery: { type: "llama.cpp" },
+					compat: { supportsPromptProgress: false },
+					models: [{ id: "local-model" }],
+				},
+			});
+			const fetchMock = mockOpenAiCompatibleModels("http://127.0.0.1:8080/models", ["local-model"]);
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+			await registry.refreshProvider("custom-local", "online");
+
+			expect(getOpenAICompat(registry.find("custom-local", "local-model"))?.supportsPromptProgress).toBe(false);
 		});
 
 		test("discoverable custom compat survives refresh", async () => {

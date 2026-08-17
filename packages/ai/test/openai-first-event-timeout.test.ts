@@ -9,6 +9,18 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { waitForDelayOrAbort } from "./helpers";
 
 const openAIResponsesModel = getBundledModel("openai", "gpt-5-mini") as Model<"openai-responses">;
+const llamaCppResponsesModel: Model<"openai-responses"> = buildModel({
+	id: "llama-local",
+	name: "llama-local",
+	api: "openai-responses",
+	provider: "llama.cpp",
+	baseUrl: "http://127.0.0.1:8080/v1",
+	reasoning: false,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 128000,
+	maxTokens: 8192,
+});
 const openAICompletionsModel = {
 	...(getBundledModel("openai", "gpt-4o-mini") as Model<"openai-completions">),
 	api: "openai-completions",
@@ -113,7 +125,10 @@ function createSseResponse(events: unknown[]): Response {
 	});
 }
 
-function createNoProgressOpenAIResponsesStream(signal: AbortSignal | undefined): Response {
+function createNoProgressOpenAIResponsesStream(
+	signal: AbortSignal | undefined,
+	includePromptProgress = false,
+): Response {
 	const encoder = new TextEncoder();
 	let interval: NodeJS.Timeout | undefined;
 	let abortListener: (() => void) | undefined;
@@ -139,6 +154,7 @@ function createNoProgressOpenAIResponsesStream(signal: AbortSignal | undefined):
 					encode({
 						type: "response.in_progress",
 						response: { id: "resp_stalled", status: "in_progress" },
+						...(includePromptProgress ? { prompt_progress: { total: 100, cache: 40, processed: 56 } } : {}),
 					}),
 				);
 			}, 2);
@@ -179,8 +195,8 @@ function createDelayedFetch(
 	return mockFetch as typeof fetch;
 }
 
-function createOpenAIResponsesSuccessResponse(): Response {
-	return createSseResponse([
+function openAIResponsesSuccessEvents(): unknown[] {
+	return [
 		{ type: "response.created", response: { id: "resp_delayed" } },
 		{
 			type: "response.output_item.added",
@@ -211,7 +227,56 @@ function createOpenAIResponsesSuccessResponse(): Response {
 				},
 			},
 		},
-	]);
+	];
+}
+
+function createOpenAIResponsesSuccessResponse(): Response {
+	return createSseResponse(openAIResponsesSuccessEvents());
+}
+
+function createPromptProgressOpenAIResponsesStream(signal: AbortSignal | undefined): Response {
+	const encoder = new TextEncoder();
+	let interval: NodeJS.Timeout | undefined;
+	let abortListener: (() => void) | undefined;
+	const encode = (event: unknown): Uint8Array => encoder.encode(`data: ${JSON.stringify(event)}\n\n`);
+	const stream = new ReadableStream<Uint8Array>({
+		start(controller) {
+			controller.enqueue(encode(openAIResponsesSuccessEvents()[0]!));
+			let processed = 0;
+			interval = setInterval(() => {
+				processed += 1;
+				controller.enqueue(
+					encode({
+						type: "response.in_progress",
+						response: { id: "resp_delayed", status: "in_progress" },
+						prompt_progress: { total: 20, cache: 0, processed },
+					}),
+				);
+				if (processed < 20) return;
+				if (interval) clearInterval(interval);
+				for (const event of openAIResponsesSuccessEvents().slice(1)) {
+					controller.enqueue(encode(event));
+				}
+				controller.close();
+			}, 10);
+			abortListener = () => {
+				if (interval) clearInterval(interval);
+				if (abortListener) signal?.removeEventListener("abort", abortListener);
+				const reason = signal?.reason;
+				controller.error(reason instanceof Error ? reason : new Error("request aborted"));
+			};
+			if (signal?.aborted) queueMicrotask(() => abortListener?.());
+			else signal?.addEventListener("abort", abortListener, { once: true });
+		},
+		cancel() {
+			if (interval) clearInterval(interval);
+			if (abortListener) signal?.removeEventListener("abort", abortListener);
+		},
+	});
+	return new Response(stream, {
+		status: 200,
+		headers: { "content-type": "text/event-stream" },
+	});
 }
 
 function createOpenAICompletionsSuccessResponse(modelId: string): Response {
@@ -452,27 +517,53 @@ describe("OpenAI-family first-event timeouts", () => {
 		}
 	});
 
-	it("times out OpenAI responses streams that only emit no-progress status events", async () => {
+	it("does not let llama.cpp prompt progress frames reset other providers' idle watchdog", async () => {
 		const fetchMock: FetchImpl = (input: string | URL | Request, init?: RequestInit) =>
-			Promise.resolve(createNoProgressOpenAIResponsesStream(getRequestSignal(input, init)));
+			Promise.resolve(createNoProgressOpenAIResponsesStream(getRequestSignal(input, init), true));
+		const controller = new AbortController();
+		const abortTimer = setTimeout(() => controller.abort(new Error("fallback abort")), 200);
+		abortTimer.unref();
 
-		const result = await streamOpenAIResponses(openAIResponsesModel, baseContext(), {
+		try {
+			const result = await streamOpenAIResponses(openAIResponsesModel, baseContext(), {
+				apiKey: "test-key",
+				signal: controller.signal,
+				streamFirstEventTimeoutMs: 1_000,
+				streamIdleTimeoutMs: 20,
+				fetch: fetchMock,
+			}).result();
+
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toBe("OpenAI responses stream stalled while waiting for the next event");
+			expect(JSON.parse(JSON.stringify(result.content))).toEqual([
+				{
+					type: "toolCall",
+					id: "call_stalled|fc_stalled",
+					name: "todo",
+					arguments: {},
+				},
+			]);
+		} finally {
+			clearTimeout(abortTimer);
+		}
+	});
+
+	it("keeps capability-gated llama.cpp streams alive during prompt processing", async () => {
+		const progress: number[] = [];
+		const fetchMock: FetchImpl = (input: string | URL | Request, init?: RequestInit) =>
+			Promise.resolve(createPromptProgressOpenAIResponsesStream(getRequestSignal(input, init)));
+
+		const result = await streamOpenAIResponses(llamaCppResponsesModel, baseContext(), {
 			apiKey: "test-key",
 			streamFirstEventTimeoutMs: 1_000,
-			streamIdleTimeoutMs: 20,
+			streamIdleTimeoutMs: 50,
 			fetch: fetchMock,
+			onPromptProgress: update => progress.push(update.processed),
 		}).result();
 
-		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toBe("OpenAI responses stream stalled while waiting for the next event");
-		expect(JSON.parse(JSON.stringify(result.content))).toEqual([
-			{
-				type: "toolCall",
-				id: "call_stalled|fc_stalled",
-				name: "todo",
-				arguments: {},
-			},
-		]);
+		expect(result.stopReason).toBe("stop");
+		expect(getFirstTextContent(result)).toMatchObject({ type: "text", text: "Hello delayed" });
+		expect(progress).toEqual(Array.from({ length: 20 }, (_, index) => index + 1));
 	});
 
 	it("forwards streamSimple per-call timeout options to OpenAI-family providers", async () => {

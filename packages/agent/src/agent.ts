@@ -1403,6 +1403,7 @@ export class Agent {
 			onPayload: this.#onPayload,
 			onResponse: this.#onResponse,
 			onSseEvent: this.#onSseEvent,
+			onPromptProgress: progress => this.#emit({ type: "prompt_progress", progress }),
 			getApiKey: this.getApiKey,
 			getToolContext: this.#getToolContext,
 			syncContextBeforeModelCall: async (context, signal) => {

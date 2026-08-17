@@ -529,6 +529,12 @@ export interface StreamOptions {
 	 */
 	onSseEvent?: (event: RawSseEvent, model?: Model<Api>) => void;
 	/**
+	 * Optional observer for provider-reported prompt processing progress.
+	 * Emitted only when the active provider advertises support.
+	 * Observer failures must not alter the provider stream.
+	 */
+	onPromptProgress?: (progress: PromptProgress, model?: Model<Api>) => void;
+	/**
 	 * Optional override for the first-event watchdog in milliseconds. Built-in
 	 * providers apply this budget twice when they can: once to the underlying
 	 * SDK/request while waiting for the HTTP stream object to exist, then again
@@ -588,6 +594,16 @@ export interface StreamOptions {
 
 	/** Cursor exec/MCP tool handlers (cursor-agent only). */
 	execHandlers?: CursorExecHandlers;
+}
+
+/** Normalized prompt processing counters reported by a streaming provider. */
+export interface PromptProgress {
+	/** Total prompt tokens reported for the current request. */
+	total: number;
+	/** Prompt tokens already processed, including tokens restored from cache. */
+	processed: number;
+	/** Prompt tokens restored from the provider's cache. */
+	cached: number;
 }
 
 // Unified options with reasoning passed to streamSimple() and completeSimple()

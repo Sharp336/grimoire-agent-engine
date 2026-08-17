@@ -66,6 +66,7 @@ const WIRE_AGENT_EVENT_TYPES: Record<WireAgentEvent["type"], true> = {
 	agent_end: true,
 	turn_start: true,
 	turn_end: true,
+	prompt_progress: true,
 	message_start: true,
 	message_update: true,
 	message_end: true,

@@ -15,6 +15,34 @@ function isProcessAlive(pid: number): boolean {
 }
 
 describe("RpcClient lifecycle (issue #4079 B)", () => {
+	test("forwards prompt progress through agent and session event listeners", async () => {
+		using client = new RpcClient({
+			cliPath: MOCK_AGENT,
+			env: { MOCK_RPC_PROMPT_PROGRESS: "1" },
+		});
+		const agentEvent = Promise.withResolvers<unknown>();
+		const sessionEvent = Promise.withResolvers<unknown>();
+		client.onEvent(event => {
+			if (event.type === "prompt_progress") agentEvent.resolve(event);
+		});
+		client.onSessionEvent(event => {
+			if (event.type === "prompt_progress") sessionEvent.resolve(event);
+		});
+
+		await client.start();
+		const events = await Promise.race([
+			Promise.all([agentEvent.promise, sessionEvent.promise]),
+			Bun.sleep(1_000).then(() => {
+				throw new Error("Timed out waiting for prompt_progress RPC event");
+			}),
+		]);
+
+		expect(events).toEqual([
+			{ type: "prompt_progress", progress: { total: 100, processed: 56, cached: 40 } },
+			{ type: "prompt_progress", progress: { total: 100, processed: 56, cached: 40 } },
+		]);
+	}, 20_000);
+
 	test("auto-negotiates protocol v2 and reassembles an oversized response", async () => {
 		using client = new RpcClient({
 			cliPath: MOCK_AGENT,

@@ -55,6 +55,11 @@ process.stdout.write(
 			: { type: "ready" },
 	)}\n`,
 );
+if (Bun.env.MOCK_RPC_PROMPT_PROGRESS === "1") {
+	process.stdout.write(
+		`${JSON.stringify({ type: "prompt_progress", progress: { total: 100, processed: 56, cached: 40 } })}\n`,
+	);
+}
 
 function writeFrame(frame: Record<string, unknown>): void {
 	const logical = Buffer.from(JSON.stringify(frame), "utf8");

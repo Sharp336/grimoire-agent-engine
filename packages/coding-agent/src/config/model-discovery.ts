@@ -37,6 +37,13 @@ import type { ProviderDiscovery } from "./models-config-schema";
 export const DISCOVERY_DEFAULT_CONTEXT_WINDOW = OPENAI_COMPAT_DISCOVERY_DEFAULT_CONTEXT_WINDOW;
 export const DISCOVERY_DEFAULT_MAX_TOKENS = OPENAI_COMPAT_DISCOVERY_DEFAULT_MAX_TOKENS;
 
+const LLAMA_CPP_DISCOVERY_COMPAT = { supportsPromptProgress: true } satisfies OpenAICompat;
+
+/** Compatibility defaults implied by a configured discovery protocol. */
+export function getDiscoveryCompatDefaults(discovery: ProviderDiscovery | undefined): OpenAICompat | undefined {
+	return discovery?.type === "llama.cpp" ? LLAMA_CPP_DISCOVERY_COMPAT : undefined;
+}
+
 /**
  * Run `fn` with a hard deadline while also signalling cooperative transports
  * to abort. The independent rejection keeps discovery bounded when a runtime
@@ -657,6 +664,7 @@ export async function discoverLlamaCppModels(
 						supportsStore: false,
 						supportsDeveloperRole: false,
 						supportsReasoningEffort: false,
+						...LLAMA_CPP_DISCOVERY_COMPAT,
 					},
 				} as ModelSpec<Api>),
 			),

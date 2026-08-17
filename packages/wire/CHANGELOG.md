@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added normalized prompt-processing progress events for collaboration clients.
+
 ## [16.3.0] - 2026-07-02
 
 ### Breaking Changes

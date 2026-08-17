@@ -350,6 +350,12 @@ export interface OpenAICompat {
 	streamIdleTimeoutMs?: number;
 	/** Whether the host honors `prompt_cache_retention: "24h"` on the Responses API. Default: auto-detected (api.openai.com). */
 	supportsLongPromptCacheRetention?: boolean;
+	/**
+	 * Whether the Responses endpoint accepts llama.cpp's `return_progress`
+	 * request field and emits `prompt_progress` on `response.in_progress` events.
+	 * Default: enabled only for the llama.cpp provider.
+	 */
+	supportsPromptProgress?: boolean;
 	/** Whether tool schemas must be sent either all strict or all non-strict. Undefined keeps the existing per-tool mixed behavior. */
 	toolStrictMode?: "all_strict" | "none";
 	/** Whether request shaping may send reasoning params at all. Default: auto-detected (disabled for GitHub Copilot chat-completions). */
@@ -686,6 +692,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "isOpenRouterHost"
 			| "supportsStrictMode"
 			| "supportsLongPromptCacheRetention"
+			| "supportsPromptProgress"
 			| "alwaysSendMaxTokens"
 			| "wireModelIdMode"
 			| "vercelGatewayRouting"
@@ -717,6 +724,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 /** Fully-resolved Responses-API compat view (same contract as `ResolvedOpenAICompat`). */
 export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompat {
 	supportsLongPromptCacheRetention: boolean;
+	supportsPromptProgress: boolean;
 	strictResponsesPairing: boolean;
 	supportsImageDetailOriginal: boolean;
 	supportsObfuscationOptOut: boolean;

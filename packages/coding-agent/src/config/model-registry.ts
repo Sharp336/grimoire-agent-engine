@@ -62,6 +62,7 @@ import {
 	discoverLlamaCppModelRuntimeMetadata,
 	discoverModelsByProviderType,
 	ensureLlamaCppV1BaseUrl,
+	getDiscoveryCompatDefaults,
 	getImplicitOllamaBaseUrl,
 	getOllamaContextLengthOverride,
 	normalizeLiteLLMDiscoveryBaseUrl,
@@ -124,6 +125,15 @@ interface CustomModelsResult {
 	configuredProviders?: Set<string>;
 	error?: ConfigError;
 	found: boolean;
+}
+
+function resolveProviderCompat(
+	compat: ModelSpec<Api>["compat"] | undefined,
+	discovery: DiscoveryProviderConfig["discovery"] | undefined,
+	disableStrictTools: boolean | undefined,
+): ModelSpec<Api>["compat"] | undefined {
+	const resolvedCompat = mergeCompat(getDiscoveryCompatDefaults(discovery), compat);
+	return disableStrictTools ? mergeCompat(resolvedCompat, { disableStrictTools: true }) : resolvedCompat;
 }
 
 /**
@@ -940,6 +950,11 @@ export class ModelRegistry {
 		const configuredProviders = new Set(Object.keys(value.providers ?? {}));
 		for (const [providerName, providerConfig] of providerEntries) {
 			const resolvedProviderHeaders = resolveConfigHeaders(providerConfig.headers);
+			const providerCompat = resolveProviderCompat(
+				providerConfig.compat,
+				providerConfig.discovery,
+				providerConfig.disableStrictTools,
+			);
 			// Always set overrides when baseUrl/headers/apiKey/authHeader/compat/disableStrictTools/transport are present
 			if (
 				providerConfig.baseUrl ||
@@ -951,7 +966,6 @@ export class ModelRegistry {
 				providerConfig.remoteCompaction ||
 				providerConfig.transport
 			) {
-				const disableStrictCompat = providerConfig.disableStrictTools ? { disableStrictTools: true } : undefined;
 				overrides.set(providerName, {
 					baseUrl:
 						providerConfig.discovery?.type === "litellm"
@@ -960,7 +974,7 @@ export class ModelRegistry {
 					headers: resolvedProviderHeaders,
 					apiKey: providerConfig.apiKey,
 					authHeader: providerConfig.authHeader,
-					compat: mergeCompat(providerConfig.compat, disableStrictCompat),
+					compat: providerCompat,
 					remoteCompaction: providerConfig.remoteCompaction,
 					transport: providerConfig.transport,
 				});
@@ -972,7 +986,6 @@ export class ModelRegistry {
 			}
 
 			if (providerConfig.discovery && (providerConfig.api || providerConfig.discovery.type === "proxy")) {
-				const disableStrictCompat = providerConfig.disableStrictTools ? { disableStrictTools: true } : undefined;
 				discoverableProviders.push({
 					provider: providerName,
 					// Proxy discovery derives per-model api from /v1/models's
@@ -981,7 +994,7 @@ export class ModelRegistry {
 					api: (providerConfig.api ?? "openai-completions") as Api,
 					baseUrl: providerConfig.baseUrl,
 					headers: resolvedProviderHeaders,
-					compat: mergeCompat(providerConfig.compat, disableStrictCompat),
+					compat: providerCompat,
 					remoteCompaction: providerConfig.remoteCompaction,
 					discovery: providerConfig.discovery,
 					optional: false,
@@ -1582,13 +1595,15 @@ export class ModelRegistry {
 			const modelDefs = providerConfig.models ?? [];
 			if (modelDefs.length === 0) continue; // Override-only, no custom models
 			const resolvedProviderHeaders = resolveConfigHeaders(providerConfig.headers);
+			const providerCompat = resolveProviderCompat(
+				providerConfig.compat,
+				providerConfig.discovery,
+				providerConfig.disableStrictTools,
+			);
 			if (providerConfig.apiKey) {
 				this.#installProviderApiKey(providerName, providerConfig.apiKey);
 			}
 			for (const modelDef of modelDefs) {
-				const providerCompat = providerConfig.disableStrictTools
-					? mergeCompat(providerConfig.compat, { disableStrictTools: true })
-					: providerConfig.compat;
 				const model = buildCustomModelOverlay(
 					providerName,
 					providerConfig.baseUrl!,

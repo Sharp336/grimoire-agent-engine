@@ -52,7 +52,7 @@ function toolStartWithIntent(toolCallId: string, intent: string): AgentSessionEv
 	} as unknown as AgentSessionEvent;
 }
 
-describe("EventController aborted-turn working messages", () => {
+describe("EventController working messages", () => {
 	beforeAll(async () => {
 		await initTheme(false);
 	});
@@ -130,5 +130,47 @@ describe("EventController aborted-turn working messages", () => {
 
 		expect(setWorkingMessage).toHaveBeenCalledTimes(1);
 		expect(setWorkingMessage.mock.calls[0]?.[0]).toContain("Editing module");
+	});
+
+	it("shows prompt progress and restores the default label when output starts", async () => {
+		const { ctx, setWorkingMessage } = createContext();
+		const controller = new EventController(ctx);
+		await controller.handleEvent(AGENT_START);
+		setWorkingMessage.mockClear();
+
+		await controller.handleEvent({
+			type: "prompt_progress",
+			progress: { total: 100, cached: 40, processed: 56 },
+		});
+		expect(setWorkingMessage).toHaveBeenLastCalledWith(expect.stringContaining("Working (56%)"));
+		await controller.handleEvent({
+			type: "prompt_progress",
+			progress: { total: 200, cached: 80, processed: 113 },
+		});
+		expect(setWorkingMessage).toHaveBeenCalledTimes(1);
+
+		await controller.handleEvent({
+			type: "message_update",
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text: "p" }],
+				api: "openai-responses",
+				provider: "test-provider",
+				model: "test-model",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: Date.now(),
+			},
+			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "p", partial: undefined },
+		} as unknown as AgentSessionEvent);
+
+		expect(setWorkingMessage).toHaveBeenLastCalledWith();
 	});
 });

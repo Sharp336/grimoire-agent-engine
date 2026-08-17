@@ -180,6 +180,7 @@ export class EventController {
 	#prevHideThinking = false;
 	#handlers: AgentSessionEventHandlers;
 	#terminalProgressActive = false;
+	#promptProgressPercent: number | undefined = undefined;
 	// Coalescing window for `message_update` events at the subscription boundary.
 	// `message_update` carries the CUMULATIVE assistant message (every update
 	// re-lists all content blocks), so when a burst of deltas arrives faster than
@@ -235,6 +236,7 @@ export class EventController {
 			agent_end: e => this.#handleAgentEnd(e),
 			turn_start: async () => {},
 			turn_end: async e => this.#handleTurnEnd(e),
+			prompt_progress: e => this.#handlePromptProgress(e),
 			message_start: e => this.#handleMessageStart(e),
 			message_update: e => this.#handleMessageUpdate(e),
 			message_end: e => this.#handleMessageEnd(e),
@@ -734,6 +736,7 @@ export class EventController {
 	}
 
 	async #handleAgentStart(_event: Extract<AgentSessionEvent, { type: "agent_start" }>): Promise<void> {
+		this.#promptProgressPercent = undefined;
 		this.#clearApprovalPreviewGates();
 		this.#toolTimelineComponents.clear();
 		this.#streamedToolCallIdByIndex.clear();
@@ -1019,6 +1022,10 @@ export class EventController {
 	}
 
 	async #handleMessageUpdate(event: Extract<AgentSessionEvent, { type: "message_update" }>): Promise<void> {
+		if (this.#promptProgressPercent !== undefined) {
+			this.#promptProgressPercent = undefined;
+			this.ctx.setWorkingMessage();
+		}
 		this.#ensureWorkingLoaderWhileStreaming();
 		if (!this.#vocalizedMessageUpdates.delete(event)) {
 			this.#vocalizeDelta(event);
@@ -1186,6 +1193,14 @@ export class EventController {
 
 			this.ctx.ui.requestRender();
 		}
+	}
+
+	async #handlePromptProgress(event: Extract<AgentSessionEvent, { type: "prompt_progress" }>): Promise<void> {
+		const percent = Math.floor((event.progress.processed / event.progress.total) * 100);
+		if (percent === this.#promptProgressPercent) return;
+		this.#promptProgressPercent = percent;
+		this.ctx.setWorkingMessage(`Working (${percent}%)${interruptHint()}`);
+		this.ctx.ui.requestRender();
 	}
 
 	async #handleMessageEnd(event: Extract<AgentSessionEvent, { type: "message_end" }>): Promise<void> {

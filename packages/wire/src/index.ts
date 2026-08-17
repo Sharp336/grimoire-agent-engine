@@ -178,11 +178,19 @@ export interface CollabPromptDetails {
 // Events (handled subset)
 // ═══════════════════════════════════════════════════════════════════════════
 
+/** Normalized prompt processing counters reported by a streaming provider. */
+export interface PromptProgress {
+	total: number;
+	processed: number;
+	cached: number;
+}
+
 export type AgentEvent =
 	| { type: "agent_start" }
 	| { type: "agent_end" }
 	| { type: "turn_start" }
 	| { type: "turn_end" }
+	| { type: "prompt_progress"; progress: PromptProgress }
 	| { type: "message_start"; message: WireMessage }
 	/** Carries the FULL accumulating partial message — no delta tracking needed. */
 	| { type: "message_update"; message: WireMessage }

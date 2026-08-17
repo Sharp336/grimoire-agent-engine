@@ -50,6 +50,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"toolStrictMode?": '"all_strict" | "none"',
 		"streamIdleTimeoutMs?": "number >= 0",
 		"supportsLongPromptCacheRetention?": "boolean",
+		"supportsPromptProgress?": "boolean",
 		"supportsReasoningParams?": "boolean",
 		"alwaysSendMaxTokens?": "boolean",
 		"strictResponsesPairing?": "boolean",

@@ -10,6 +10,7 @@ import type {
 	Context,
 	Model,
 	OpenAICompat,
+	PromptProgress,
 	ProviderSessionState,
 	RawSseEvent,
 	ServiceTier,
@@ -367,6 +368,35 @@ function markOpenAIResponsesChainZeroDataRetention(chain: OpenAIResponsesChainSt
 
 type OpenRouterAnthropicCacheControl = { type: "ephemeral"; ttl?: "1h" };
 
+/** Parse llama.cpp's top-level extension on Responses `response.in_progress` events. */
+function parseLlamaCppPromptProgress(event: unknown): PromptProgress | undefined {
+	if (!event || typeof event !== "object") return undefined;
+	const record = event as Record<string, unknown>;
+	if (record.type !== "response.in_progress") return undefined;
+	const raw = record.prompt_progress;
+	if (!raw || typeof raw !== "object") return undefined;
+	const progress = raw as Record<string, unknown>;
+	const total = progress.total;
+	const processed = progress.processed;
+	const cached = progress.cache;
+	if (
+		typeof total !== "number" ||
+		!Number.isFinite(total) ||
+		total <= 0 ||
+		typeof processed !== "number" ||
+		!Number.isFinite(processed) ||
+		processed < 0 ||
+		processed > total ||
+		typeof cached !== "number" ||
+		!Number.isFinite(cached) ||
+		cached < 0 ||
+		cached > processed
+	) {
+		return undefined;
+	}
+	return { total, processed, cached };
+}
+
 type OpenAIResponsesSamplingParams = ResponseCreateParamsStreaming & {
 	top_p?: number;
 	top_k?: number;
@@ -375,6 +405,7 @@ type OpenAIResponsesSamplingParams = ResponseCreateParamsStreaming & {
 	repetition_penalty?: number;
 	session_id?: string;
 	stream_options?: { include_obfuscation?: boolean };
+	return_progress?: boolean;
 	provider?: OpenAICompat["openRouterRouting"];
 	reasoning?: { effort?: string } | { enabled: false };
 	cache_control?: OpenRouterAnthropicCacheControl;
@@ -731,6 +762,7 @@ const streamOpenAIResponsesOnce = (
 					attemptStream.queue.length = 0;
 				};
 				nativeOutputItems.length = 0;
+				const supportsPromptProgress = model.compat.supportsPromptProgress;
 				const timedOpenaiStream = iterateWithIdleTimeout(openaiStream, {
 					idleTimeoutMs,
 					firstItemTimeoutMs: firstEventTimeoutMs,
@@ -739,10 +771,22 @@ const streamOpenAIResponsesOnce = (
 					onFirstItemTimeout: () => abortTracker.abortLocally(firstEventTimeoutAbortError),
 					onIdle: () => requestAbortController.abort(),
 					abortSignal: options?.signal,
-					isProgressItem: isOpenAIResponsesProgressEvent,
+					isProgressItem: event =>
+						isOpenAIResponsesProgressEvent(event) ||
+						(supportsPromptProgress && parseLlamaCppPromptProgress(event) !== undefined),
 				});
 				const observedOpenaiStream = (async function* (): AsyncGenerator<ResponseStreamEvent> {
 					for await (const event of timedOpenaiStream) {
+						if (supportsPromptProgress) {
+							const progress = parseLlamaCppPromptProgress(event);
+							if (progress) {
+								try {
+									options?.onPromptProgress?.(progress, model);
+								} catch {
+									// Progress observers are diagnostic/UI-only and cannot break generation.
+								}
+							}
+						}
 						if (isOpenAIResponsesReplayUnsafeEvent(event)) {
 							sawReplayUnsafeOutput = true;
 							if (!forwardAttemptLive) {
@@ -1211,6 +1255,7 @@ export function buildParams(
 		session_id: model.compat.isOpenRouterHost ? getOpenRouterResponsesSessionId(options) : undefined,
 		store: false,
 		stream_options: model.compat.supportsObfuscationOptOut ? { include_obfuscation: false } : undefined,
+		return_progress: model.compat.supportsPromptProgress ? true : undefined,
 	};
 	if (options?.include?.length) params.include = Array.from(new Set(options.include));
 	maybeAddOpenRouterAnthropicCacheControl(params, model, cacheRetention);

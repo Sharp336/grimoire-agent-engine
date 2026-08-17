@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `prompt_progress` agent events so clients can display provider-reported prompt processing progress before generation begins.
+
 ## [17.3.5] - 2026-08-16
 
 ### Added
