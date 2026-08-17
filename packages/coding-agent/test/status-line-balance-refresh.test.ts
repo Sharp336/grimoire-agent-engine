@@ -36,7 +36,7 @@ function setActiveModelForTest(session: AgentSession, model: TestModel): void {
 }
 
 function makeDeepSeekSession(
-	options: { baseUrl?: string; getApiKey?: () => Promise<string | undefined> } = {},
+	options: { baseUrl?: string; getApiKey?: () => Promise<string | undefined>; authGeneration?: () => number } = {},
 ): AgentSession {
 	const messages: unknown[] = [];
 	const model = {
@@ -51,7 +51,13 @@ function makeDeepSeekSession(
 		model,
 		isStreaming: false,
 		isFastModeActive: () => false,
-		modelRegistry: { getApiKey: options.getApiKey ?? (async () => "sk-test") },
+		modelRegistry: {
+			getApiKey: options.getApiKey ?? (async () => "sk-test"),
+			authStorage: {
+				getGeneration: options.authGeneration ?? (() => 1),
+				getOAuthAccountIdentity: () => undefined,
+			},
+		},
 		sessionManager: {
 			getUsageStatistics: () => ({
 				input: 0,
@@ -333,5 +339,55 @@ describe("StatusLineComponent balance refresh", () => {
 		const segmentText = fromGlyph.slice(0, fromGlyph.indexOf("\x1b[0m"));
 		expect(segmentText).toContain("42.00");
 		expect(segmentText).toContain("\x1b[39m");
+	});
+
+	it("re-fetches inside the TTL when the credential changes under the same model", async () => {
+		let generation = 1;
+		const session = makeDeepSeekSession({ authGeneration: () => generation });
+		const component = new StatusLineComponent(session);
+
+		await render(component);
+		pending.resolve(new Response(JSON.stringify({ balance_infos: [{ total_balance: "42.00", currency: "CNY" }] })));
+		await flushMicrotasks();
+		component.updateSettings({ preset: "custom", leftSegments: ["balance"], rightSegments: [] });
+		expect(component.getTopBorder(120).content).toContain("42.00");
+		expect(fetchCalls).toBe(1);
+
+		// `/login deepseek` stores a key AuthStorage then prefers over the env
+		// one. The Model object is untouched and the TTL is still fresh, so the
+		// generation bump is the only thing that can retire the old account's
+		// figure.
+		generation = 2;
+		pending = Promise.withResolvers<Response>();
+		await render(component);
+
+		expect(component.getTopBorder(120).content).not.toContain("42.00");
+		expect(fetchCalls).toBe(2);
+
+		pending.resolve(new Response(JSON.stringify({ balance_infos: [{ total_balance: "7.00", currency: "CNY" }] })));
+		await flushMicrotasks();
+		expect(component.getTopBorder(120).content).toContain("7.00");
+	});
+
+	it("discards a balance whose credential changed while the request was in flight", async () => {
+		let generation = 1;
+		const session = makeDeepSeekSession({ authGeneration: () => generation });
+		const component = new StatusLineComponent(session);
+		component.updateSettings({ preset: "custom", leftSegments: ["balance"], rightSegments: [] });
+
+		await render(component);
+		expect(fetchCalls).toBe(1);
+
+		generation = 2;
+		pending.resolve(new Response(JSON.stringify({ balance_infos: [{ total_balance: "42.00", currency: "CNY" }] })));
+		await flushMicrotasks();
+
+		// The figure belongs to the previous account: it must never render, and
+		// #balanceFetchedAt must stay unstamped so the TTL cannot swallow the
+		// re-fetch on the next redraw.
+		expect(component.getTopBorder(120).content).not.toContain("42.00");
+		pending = Promise.withResolvers<Response>();
+		await render(component);
+		expect(fetchCalls).toBe(2);
 	});
 });

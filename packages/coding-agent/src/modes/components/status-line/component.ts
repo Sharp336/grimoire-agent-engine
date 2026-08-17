@@ -456,6 +456,7 @@ export class StatusLineComponent implements Component {
 	// API-key provider balance caching (e.g. DeepSeek)
 	#cachedBalance: StatusLineBalance | null = null;
 	#balanceModel: Model | null = null;
+	#balanceAuthGeneration = 0;
 	#balanceFetchedAt = 0;
 	#balanceInFlight = false;
 	#balanceTimer: Timer | null = null;
@@ -815,6 +816,7 @@ export class StatusLineComponent implements Component {
 		this.#cachedBalance = null;
 		this.#balanceModel = null;
 		this.#balanceFetchedAt = 0;
+		this.#balanceAuthGeneration = 0;
 		this.#balanceInFlight = false;
 		this.#contextUsageCache = undefined;
 		this.#lastTokensPerSecond = null;
@@ -1389,7 +1391,20 @@ export class StatusLineComponent implements Component {
 			this.#balanceFetchedAt = 0;
 			return;
 		}
-		if (this.#balanceModel !== null && this.#balanceModel !== model) {
+		// The credential can change while the `Model` object stays identical:
+		// `/login deepseek` stores a key AuthStorage then prefers over an env
+		// or static one, and a logout drops it. Both bump AuthStorage's
+		// generation, so reading it is the cheap synchronous signal that the
+		// cached figure may belong to another account, and it has to precede
+		// the TTL guard or the previous account's balance stays on screen for
+		// five minutes. Credential changes AuthStorage does not own — a
+		// 401/quota sibling rotation, or a `!command` provider key
+		// re-resolving — leave the counter alone and stay TTL-bounded.
+		const authGeneration = session.modelRegistry?.authStorage.getGeneration() ?? 0;
+		if (
+			this.#balanceModel !== null &&
+			(this.#balanceModel !== model || this.#balanceAuthGeneration !== authGeneration)
+		) {
 			this.#cachedBalance = null;
 			this.#balanceModel = null;
 			this.#balanceFetchedAt = 0;
@@ -1401,11 +1416,11 @@ export class StatusLineComponent implements Component {
 		this.#balanceInFlight = true;
 		this.#balanceTimer = setTimeout(() => {
 			this.#balanceTimer = null;
-			void this.#runBalanceRefresh(session, model);
+			void this.#runBalanceRefresh(session, model, authGeneration);
 		}, 0);
 	}
 
-	async #runBalanceRefresh(session: AgentSession, model: Model): Promise<void> {
+	async #runBalanceRefresh(session: AgentSession, model: Model, authGeneration: number): Promise<void> {
 		if (this.#disposed || this.session !== session || (session.state.model ?? session.model) !== model) {
 			this.#balanceInFlight = false;
 			return;
@@ -1420,6 +1435,7 @@ export class StatusLineComponent implements Component {
 				this.#cachedBalance?.amount !== balance?.amount || this.#cachedBalance?.symbol !== balance?.symbol;
 			this.#cachedBalance = balance;
 			this.#balanceModel = model;
+			this.#balanceAuthGeneration = authGeneration;
 			this.#balanceFetchedAt = Date.now();
 			if (changed) this.#onBranchChange?.();
 		} catch {
