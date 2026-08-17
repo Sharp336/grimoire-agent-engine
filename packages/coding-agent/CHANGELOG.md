@@ -5,6 +5,12 @@
 ### Added
 
 - Added immutable host-owned selected-agent provenance, bound to the selected definition's origin, canonical location, and exact parser input, to discovered definitions, persisted subagent revivals, lifecycle events, and `SingleResult`, plus extension APIs for resolving the authoritative winning definition and identifying the current manifest package without consumer path heuristics.
+## [17.3.7] - 2026-08-17
+
+### Changed
+
+- Send the `omp/<version>` User-Agent on xAI chat (`xai` and `xai-oauth`) unless the request already set its own ([#8840](https://github.com/can1357/oh-my-pi/pull/8840) by [@Jaaneek](https://github.com/Jaaneek)).
+
 ## [17.3.6] - 2026-08-17
 
 ### Added
