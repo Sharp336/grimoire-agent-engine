@@ -11,6 +11,35 @@ interface BtwPanelComponentOptions {
 	canBranch?: () => boolean;
 }
 
+/** Never shrink the live side answer below this, even on a short terminal. */
+const BTW_ANSWER_MIN_ROWS = 6;
+/** Ceiling for the live side answer as a share of the viewport. */
+const BTW_ANSWER_VIEWPORT_FRACTION = 0.4;
+
+/**
+ * Bounds the rendered answer so the anchored panel keeps fitting the window.
+ * Delegates to the real renderer at the real width, so the visible rows cannot
+ * drift from the answer the user copies or branches.
+ */
+class BoundedAnswer implements Component {
+	constructor(
+		private readonly answer: Component,
+		private readonly maxRows: () => number,
+	) {}
+
+	render(width: number): readonly string[] {
+		const rows = this.answer.render(width);
+		const limit = Math.max(1, this.maxRows());
+		if (rows.length <= limit) return rows;
+		const hidden = rows.length - (limit - 1);
+		// Keep the tail: a streaming answer is read at its newest end.
+		return [
+			theme.fg("dim", `… ${hidden} earlier ${hidden === 1 ? "row" : "rows"} — c copy for the full answer`),
+			...rows.slice(rows.length - (limit - 1)),
+		];
+	}
+}
+
 class BtwFooter implements Component {
 	#getLine: () => string;
 	#line: string | undefined;
@@ -156,6 +185,23 @@ export class BtwPanelComponent extends Container {
 				this.#state === "running" ? `${theme.status.pending} Waiting for response…` : "No text returned.";
 			return new Text(theme.fg("dim", waiting), 1, 0);
 		}
-		return new Markdown(text, 1, 0, getMarkdownTheme());
+		return new BoundedAnswer(new Markdown(text, 1, 0, getMarkdownTheme()), () => this.#maxAnswerRows());
+	}
+
+	/**
+	 * The panel lives in the anchored live region above the editor, which the
+	 * engine can only keep out of native scrollback while it fits the window.
+	 * A long side answer that outgrows it scrolls off, commits as history, and
+	 * then re-commits from its new position on the next rebuild — the answer
+	 * piles up in chunks while it is still streaming. Bound the live view the
+	 * same way queued command output is bounded; the full text stays one `c`
+	 * away and `b` still promotes all of it into the chat.
+	 */
+	#maxAnswerRows(): number {
+		// Hosts that render the panel outside a real terminal (tests, headless
+		// probes) expose no viewport; fall back to the floor rather than assuming.
+		const viewport = this.#tui.terminal?.rows;
+		if (typeof viewport !== "number" || !Number.isFinite(viewport) || viewport <= 0) return BTW_ANSWER_MIN_ROWS;
+		return Math.max(BTW_ANSWER_MIN_ROWS, Math.trunc(viewport * BTW_ANSWER_VIEWPORT_FRACTION));
 	}
 }

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a long `/btw` answer piling its own rows into native scrollback while the primary turn streams. The panel lives in the anchored live region, which only stays out of history while it fits the viewport; an unbounded side answer scrolled off, was recorded, and was recorded again on every rebuild. The live answer is now bounded to 40% of the viewport (floor 6 rows) with its newest end visible, the same way queued command output is bounded, and `c copy` still yields the whole answer. Measured on one pane with a 60-line answer under a 200-line streaming reply: 39 duplicated lines before, 0 after.
+
 ## [17.3.5] - 2026-08-16
 
 ### Added
