@@ -7,6 +7,7 @@
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
+import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobManager } from "../../async";
 import { settings } from "../../config/settings";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
@@ -35,6 +36,7 @@ const WAIT_DURATION_MS: Record<string, number> = {
 	"1m": 60_000,
 	"5m": 5 * 60_000,
 };
+const REMOTE_AGENT_CANCEL_TIMEOUT_MS = 5_000;
 
 /**
  * A wait snapshot where every watched job is still running and nothing was
@@ -217,9 +219,16 @@ export function buildJobResult(
 
 	const lines: string[] = [];
 
-	if (cancelOutcomes.length > 0) {
-		lines.push(`## Cancelled (${cancelOutcomes.length})\n`);
-		for (const o of cancelOutcomes) lines.push(`- ${o.message}`);
+	const failedCancellations = cancelOutcomes.filter(outcome => outcome.status === "failed");
+	const completedCancellations = cancelOutcomes.filter(outcome => outcome.status !== "failed");
+	if (completedCancellations.length > 0) {
+		lines.push(`## Cancelled (${completedCancellations.length})\n`);
+		for (const outcome of completedCancellations) lines.push(`- ${outcome.message}`);
+		lines.push("");
+	}
+	if (failedCancellations.length > 0) {
+		lines.push(`## Cancellation Failed (${failedCancellations.length})\n`);
+		for (const outcome of failedCancellations) lines.push(`- ${outcome.message}`);
 		lines.push("");
 	}
 
@@ -265,6 +274,7 @@ export function buildJobResult(
 	return {
 		content: [{ type: "text", text: lines.join("\n").trimEnd() }],
 		details,
+		...(cancelOutcomes.some(outcome => outcome.status === "failed") ? { isError: true } : {}),
 		// A wait where everything is still running carries no new information
 		// once a later wait exists — same predicate the TUI uses to displace
 		// stale waiting frames.
@@ -323,16 +333,57 @@ export async function executeCancel(
 	manager: AsyncJobManager,
 	ownerId: string | undefined,
 	ids: string[],
+	signal?: AbortSignal,
 ): Promise<AgentToolResult<CoordinationDetails>> {
 	const ownerFilter = ownerId ? { ownerId } : undefined;
 	const cancelOutcomes: CancelOutcome[] = [];
 	for (const id of ids) {
 		const existing = manager.getJob(id);
+		const registeredRef = session.agentRegistry?.get(id);
+		const ownedRunningJob = existing?.status === "running" && (!ownerId || existing.ownerId === ownerId);
+		if (ownedRunningJob) {
+			const remoteCancellation =
+				registeredRef?.locality === "remote" ? cancelAgentRegistration(session, ownerId, id, signal) : undefined;
+			const localCancelled = manager.cancel(id, ownerFilter);
+			if (remoteCancellation) {
+				const remoteOutcome = await remoteCancellation;
+				if (!localCancelled) {
+					cancelOutcomes.push({
+						id,
+						status: "failed",
+						message: `Background job ${id} remained running while remote cancellation was attempted.`,
+					});
+				} else if (remoteOutcome.status !== "cancelled") {
+					cancelOutcomes.push({
+						...remoteOutcome,
+						status: "failed",
+						message: `${remoteOutcome.message} The owning local background job was cancelled.`,
+					});
+				} else {
+					cancelOutcomes.push({
+						id,
+						status: "cancelled",
+						message: `Cancelled remote agent ${id} and its owning local background job.`,
+					});
+				}
+			} else {
+				cancelOutcomes.push(
+					localCancelled
+						? { id, status: "cancelled", message: `Cancelled background job ${id}.` }
+						: { id, status: "failed", message: `Background job ${id} remained running.` },
+				);
+			}
+			continue;
+		}
+		if (registeredRef?.locality === "remote") {
+			cancelOutcomes.push(await cancelAgentRegistration(session, ownerId, id, signal));
+			continue;
+		}
 		if (!existing || (ownerId && existing.ownerId !== ownerId)) {
 			// No job by this id (or it belongs to another agent): a budget-aborted
 			// keep-alive subagent lives on as a jobless registration long after its
 			// job row is reaped, so let cancel reach the agent registration too.
-			cancelOutcomes.push(await cancelAgentRegistration(session, ownerId, id));
+			cancelOutcomes.push(await cancelAgentRegistration(session, ownerId, id, signal));
 			continue;
 		}
 		if (existing.status !== "running") {
@@ -340,9 +391,9 @@ export async function executeCancel(
 			// The agent registration behind it (job id == agent id for task
 			// spawns) can outlive the row as an idle/parked zombie — try the
 			// registration kill before reporting the row as already done.
-			const regOutcome = await cancelAgentRegistration(session, ownerId, id);
+			const regOutcome = await cancelAgentRegistration(session, ownerId, id, signal);
 			cancelOutcomes.push(
-				regOutcome.status === "cancelled"
+				regOutcome.status === "cancelled" || regOutcome.status === "failed"
 					? regOutcome
 					: {
 							id,
@@ -375,10 +426,11 @@ async function cancelAgentRegistration(
 	session: ToolSession,
 	ownerId: string | undefined,
 	id: string,
+	signal?: AbortSignal,
 ): Promise<CancelOutcome> {
 	const registry = session.agentRegistry;
 	const ref = registry?.get(id);
-	if (ref?.kind !== "sub") {
+	if (!registry || ref?.kind !== "sub") {
 		return { id, status: "not_found", message: `Background job not found: ${id}` };
 	}
 	if (id === ownerId) {
@@ -386,6 +438,25 @@ async function cancelAgentRegistration(
 	}
 	if (ownerId && ref.parentId !== ownerId) {
 		return { id, status: "not_found", message: `Agent ${id} was not spawned by you and cannot be cancelled.` };
+	}
+	if (ref.locality === "remote") {
+		const timeoutSignal = AbortSignal.timeout(REMOTE_AGENT_CANCEL_TIMEOUT_MS);
+		const operationSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+		try {
+			await untilAborted(operationSignal, () => registry.cancelRemote(id, operationSignal));
+			return { id, status: "cancelled", message: `Cancelled remote agent ${id}.` };
+		} catch (error) {
+			const reason = timeoutSignal.aborted
+				? `timed out after ${REMOTE_AGENT_CANCEL_TIMEOUT_MS}ms`
+				: error instanceof Error
+					? error.message
+					: String(error);
+			return {
+				id,
+				status: "failed",
+				message: `Remote agent ${id} cancellation failed: ${reason}.`,
+			};
+		}
 	}
 	const lifecycle = session.agentLifecycle?.();
 	try {

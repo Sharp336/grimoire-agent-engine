@@ -10,6 +10,7 @@ import { type Args as ParsedArgs, parseArgs, reportCliUsageError } from "../cli/
 import { acpHelp as commandHelp } from "../cli/command-help";
 import { runRootCommand } from "../main";
 import { prepareAcpTerminalAuthArgs } from "../modes/acp/terminal-auth";
+import { runWithRemoteRuntimeConfig } from "../remote-runtime/bootstrap";
 
 export default class Acp extends Command {
 	static description = commandHelp.description;
@@ -29,6 +30,10 @@ export default class Acp extends Command {
 		}
 		if (!terminalAuth) {
 			parsed.mode = "acp";
+		}
+		if (parsed.remoteRuntimeConfig) {
+			await runWithRemoteRuntimeConfig(parsed.remoteRuntimeConfig, () => runRootCommand(parsed, args));
+			return;
 		}
 		await runRootCommand(parsed, args);
 	}

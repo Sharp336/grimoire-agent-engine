@@ -67,6 +67,7 @@ import { initTheme, stopThemeWatcher } from "./modes/theme/theme";
 import type { SubmittedUserInput } from "./modes/types";
 import { createWarpEventBridgeExtension } from "./modes/warp-events";
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
+import { currentRemoteRuntime } from "./remote-runtime/scope";
 import {
 	type CreateAgentSessionOptions,
 	type CreateAgentSessionResult,
@@ -1208,6 +1209,9 @@ export async function runRootCommand(
 	rawArgs: string[],
 	deps: RunRootCommandDependencies = DEFAULT_RUN_ROOT_DEPENDENCIES,
 ): Promise<void> {
+	if (parsed.remoteRuntimeConfig && !currentRemoteRuntime()) {
+		throw new Error("Remote runtime configuration must be installed before the root command starts.");
+	}
 	logger.startTiming();
 	startStartupWatchdog();
 

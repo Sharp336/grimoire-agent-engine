@@ -52,7 +52,7 @@ export interface JobSnapshot {
 	errorText?: string;
 }
 
-export type CancelStatus = "cancelled" | "not_found" | "already_completed";
+export type CancelStatus = "cancelled" | "not_found" | "already_completed" | "failed";
 
 export interface CancelOutcome {
 	id: string;

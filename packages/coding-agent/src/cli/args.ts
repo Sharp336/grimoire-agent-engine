@@ -32,6 +32,8 @@ export interface Args {
 	provider?: string;
 	model?: string;
 	config?: string[];
+	/** Absolute path to one immutable sealed-runtime authority descriptor. */
+	remoteRuntimeConfig?: string;
 	smol?: string;
 	slow?: string;
 	plan?: string;

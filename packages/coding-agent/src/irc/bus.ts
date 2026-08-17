@@ -17,7 +17,8 @@
 
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { type AgentRef, AgentRegistry, MAIN_AGENT_ID, type RemoteAgentIdentity } from "../registry/agent-registry";
+import { currentRemoteRuntime } from "../remote-runtime/scope";
 import type { CustomMessage } from "../session/messages";
 
 export interface IrcMessage {
@@ -34,8 +35,47 @@ export interface IrcMessage {
 
 export interface IrcDeliveryReceipt {
 	to: string;
-	outcome: "injected" | "woken" | "revived" | "failed";
+	outcome: "injected" | "woken" | "revived" | "remote" | "failed";
 	error?: string;
+}
+
+export type PeerExecutionIdentity =
+	| { locality: "local"; agentId: string; generation: number }
+	| ({
+			locality: "remote";
+			agentId: string;
+	  } & RemoteAgentIdentity);
+
+export interface PeerTransportPayload {
+	body: string;
+	replyTo?: string;
+}
+
+export interface PeerTransportDelivery {
+	deliveryId: string;
+	sequence: number;
+	kind: "message";
+	sender: PeerExecutionIdentity;
+	recipient: PeerExecutionIdentity;
+	payload: PeerTransportPayload;
+}
+
+export interface PeerTransportResult {
+	deliveryId: string;
+	sequence: number;
+	sender: PeerExecutionIdentity;
+	recipient: PeerExecutionIdentity;
+	outcome: "accepted" | "rejected" | "duplicate" | "conflict";
+	error?: string;
+}
+
+/**
+ * Trusted transport adapter. Endpoint and capability material is captured by
+ * the implementation and is deliberately absent from every delivery payload.
+ */
+export interface PeerTransportBackend {
+	deliver(delivery: Readonly<PeerTransportDelivery>, signal?: AbortSignal): Promise<PeerTransportResult>;
+	cancel(delivery: Readonly<PeerTransportDelivery>): Promise<void>;
 }
 
 interface IrcWaiter {
@@ -66,12 +106,19 @@ export class IrcBus {
 	readonly #lifecycle: () => AgentLifecycleManager;
 	readonly #mailboxes = new Map<string, IrcMessage[]>();
 	readonly #waiters = new Map<string, IrcWaiter[]>();
+	readonly #transportSequences = new WeakMap<AgentRef, number>();
+	readonly #peerTransport: PeerTransportBackend | undefined;
 
-	constructor(registry: AgentRegistry = AgentRegistry.global(), lifecycle?: AgentLifecycleManager) {
+	constructor(
+		registry: AgentRegistry = AgentRegistry.global(),
+		lifecycle?: AgentLifecycleManager,
+		peerTransport?: PeerTransportBackend,
+	) {
 		this.#registry = registry;
 		// Lazy: the lifecycle global self-constructs against the global registry,
 		// so only touch it when a parked recipient actually needs reviving.
 		this.#lifecycle = () => lifecycle ?? AgentLifecycleManager.global();
+		this.#peerTransport = peerTransport;
 	}
 
 	/**
@@ -100,7 +147,7 @@ export class IrcBus {
 	 */
 	async send(
 		msg: Omit<IrcMessage, "id" | "ts">,
-		opts?: { expectsReply?: boolean; suppressRelay?: boolean },
+		opts?: { expectsReply?: boolean; suppressRelay?: boolean; signal?: AbortSignal },
 	): Promise<IrcDeliveryReceipt> {
 		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
 		const ref = this.#registry.get(message.to);
@@ -125,6 +172,24 @@ export class IrcBus {
 				outcome: "failed",
 				error: `Agent "${message.to}" is a read-only advisor transcript and cannot be messaged.`,
 			};
+		}
+		const senderRef = this.#registry.get(message.from);
+		if (ref.locality === "remote" || senderRef?.locality === "remote") {
+			if (!senderRef) {
+				return {
+					to: message.to,
+					outcome: "failed",
+					error: `Unknown sender agent "${message.from}" for remote delivery.`,
+				};
+			}
+			if (senderRef.status === "aborted") {
+				return {
+					to: message.to,
+					outcome: "failed",
+					error: `Sender agent "${message.from}" was hard-aborted.`,
+				};
+			}
+			return this.#sendRemote(message, senderRef, ref, opts?.signal);
 		}
 
 		// A `parked` recipient always needs the lifecycle to revive it — this is
@@ -276,7 +341,9 @@ export class IrcBus {
 		if (liveness) {
 			const { registry, senderId } = liveness;
 			const hasRunningSender = (from?: string): boolean =>
-				registry.listVisibleTo(senderId).some(ref => registry.isRunning(ref) && (!from || ref.id === from));
+				registry
+					.listVisibleTo(senderId)
+					.some(ref => ref.locality !== "remote" && registry.isRunning(ref) && (!from || ref.id === from));
 			const check = filter.from ? () => hasRunningSender(filter.from) : () => hasRunningSender();
 			unsubscribeLiveness = registry.onChange(() => {
 				if (!check()) {
@@ -290,6 +357,10 @@ export class IrcBus {
 
 		return promise;
 	}
+	/** Consume the oldest already-buffered message without parking a future waiter. */
+	takePending(agentId: string, from?: string): IrcMessage | undefined {
+		return this.#takeFromMailbox(agentId, from);
+	}
 
 	/** Drain (or peek) pending messages for `agentId`. */
 	inbox(agentId: string, opts?: { peek?: boolean }): IrcMessage[] {
@@ -302,6 +373,127 @@ export class IrcBus {
 
 	unreadCount(agentId: string): number {
 		return this.#mailboxes.get(agentId)?.length ?? 0;
+	}
+
+	#executionIdentity(ref: AgentRef): PeerExecutionIdentity | undefined {
+		if (ref.locality === "remote") {
+			return Object.freeze({
+				locality: "remote",
+				agentId: ref.id,
+				controllerId: ref.remote.controllerId,
+				executionId: ref.remote.executionId,
+				generation: ref.remote.generation,
+			});
+		}
+		if (!Number.isSafeInteger(ref.generation) || (ref.generation ?? 0) <= 0) return undefined;
+		return Object.freeze({ locality: "local", agentId: ref.id, generation: ref.generation as number });
+	}
+
+	#sameExecution(left: PeerExecutionIdentity, right: PeerExecutionIdentity): boolean {
+		if (left.locality !== right.locality || left.agentId !== right.agentId || left.generation !== right.generation)
+			return false;
+		return (
+			left.locality === "local" ||
+			(right.locality === "remote" &&
+				left.controllerId === right.controllerId &&
+				left.executionId === right.executionId)
+		);
+	}
+
+	async #sendRemote(
+		message: IrcMessage,
+		senderRef: AgentRef,
+		recipientRef: AgentRef,
+		signal?: AbortSignal,
+	): Promise<IrcDeliveryReceipt> {
+		const transport = currentRemoteRuntime()?.peerTransport ?? this.#peerTransport;
+		if (!transport) {
+			return {
+				to: message.to,
+				outcome: "failed",
+				error: `Remote peer transport is unavailable for "${message.to}".`,
+			};
+		}
+		if (Buffer.byteLength(message.body) > 131_072 || Buffer.byteLength(message.replyTo ?? "") > 256) {
+			return {
+				to: message.to,
+				outcome: "failed",
+				error: "Remote peer message exceeds the transport bounds.",
+			};
+		}
+		const sender = this.#executionIdentity(senderRef);
+		const recipient = this.#executionIdentity(recipientRef);
+		if (!sender || !recipient) {
+			return {
+				to: message.to,
+				outcome: "failed",
+				error: "Remote peer delivery requires generation-bound local execution identities.",
+			};
+		}
+		if (signal?.aborted) {
+			return { to: message.to, outcome: "failed", error: "Remote peer delivery was cancelled." };
+		}
+		const sequence = (this.#transportSequences.get(senderRef) ?? 0) + 1;
+		this.#transportSequences.set(senderRef, sequence);
+		const payload = Object.freeze({
+			body: message.body,
+			...(message.replyTo ? { replyTo: message.replyTo } : {}),
+		});
+		const delivery = Object.freeze({
+			deliveryId: message.id,
+			sequence,
+			kind: "message" as const,
+			sender,
+			recipient,
+			payload,
+		});
+		let removeAbort: (() => void) | undefined;
+		if (signal) {
+			const cancel = (): void => {
+				void transport.cancel(delivery).catch(() => {
+					logger.debug("IrcBus: remote delivery cancellation failed", {
+						deliveryId: delivery.deliveryId,
+					});
+				});
+			};
+			signal.addEventListener("abort", cancel, { once: true });
+			removeAbort = () => signal.removeEventListener("abort", cancel);
+		}
+		try {
+			const result = await transport.deliver(delivery, signal);
+			if (
+				!result ||
+				typeof result !== "object" ||
+				result.deliveryId !== delivery.deliveryId ||
+				result.sequence !== delivery.sequence ||
+				!this.#sameExecution(result.sender, delivery.sender) ||
+				!this.#sameExecution(result.recipient, delivery.recipient) ||
+				!["accepted", "rejected", "duplicate", "conflict"].includes(result.outcome) ||
+				(result.error !== undefined && (typeof result.error !== "string" || result.error.length > 4096))
+			) {
+				return {
+					to: message.to,
+					outcome: "failed",
+					error: "Remote peer transport returned a malformed or stale delivery result.",
+				};
+			}
+			if (result.outcome !== "accepted") {
+				return {
+					to: message.to,
+					outcome: "failed",
+					error: `Remote peer delivery was ${result.outcome}.`,
+				};
+			}
+			return { to: message.to, outcome: "remote" };
+		} catch {
+			return {
+				to: message.to,
+				outcome: "failed",
+				error: "Remote peer delivery failed.",
+			};
+		} finally {
+			removeAbort?.();
+		}
 	}
 
 	#enqueue(message: IrcMessage): void {

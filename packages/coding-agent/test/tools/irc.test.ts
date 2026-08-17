@@ -665,6 +665,8 @@ describe("IRC", () => {
 			const peerIds = details?.peers?.map(peer => peer.id) ?? [];
 			expect(peerIds).toContain("0-Worker");
 			expect(peerIds).not.toContain("0-Main/advisor");
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+			expect(text).not.toContain("Parked agents are revived automatically");
 		});
 
 		it("op=send returns receipts immediately without waiting for a reply", async () => {

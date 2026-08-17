@@ -117,6 +117,9 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--config": (result, value) => {
 		result.config = [...(result.config ?? []), value];
 	},
+	"--remote-runtime-config": (result, value) => {
+		result.remoteRuntimeConfig = value;
+	},
 	"--add-dir": (result, value) => {
 		result.addDir = [...(result.addDir ?? []), value];
 	},

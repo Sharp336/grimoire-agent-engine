@@ -283,7 +283,7 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 				if (!params.ids?.length) {
 					return hubErrorResult('`ids` is required for op="cancel".', { op: "cancel", jobs: [] });
 				}
-				return await executeCancel(this.session, manager, this.#ownerId(), params.ids);
+				return await executeCancel(this.session, manager, this.#ownerId(), params.ids, signal);
 			}
 			case "jobs": {
 				const manager = this.session.asyncJobManager;
@@ -343,11 +343,27 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 		const manager = this.session.asyncJobManager;
 		const ownerId = this.#ownerId();
 		const from = params.from?.trim() || undefined;
+		const localSenderMessaging =
+			messaging?.registry.get(messaging.senderId)?.locality === "remote" ? null : messaging;
+		const hasLocalRunningPeer = messaging?.registry
+			.listVisibleTo(messaging.senderId)
+			.some(ref => ref.locality !== "remote" && messaging.registry.isRunning(ref));
+		const hasRemotePeer = messaging?.registry
+			.listVisibleTo(messaging.senderId)
+			.some(ref => ref.locality === "remote");
+		const fromIsRemote = from ? messaging?.registry.get(from)?.locality === "remote" : false;
+		const peerWaitMessaging =
+			messaging?.registry.get(messaging.senderId)?.locality === "remote" ||
+			fromIsRemote ||
+			(!from && !hasLocalRunningPeer && hasRemotePeer)
+				? null
+				: messaging;
 
-		// A message already buffered on the session satisfies the wait first.
-		if (messaging) {
-			const pending = drainPendingInbox(messaging.registry, messaging.senderId, from);
-			if (pending) return messageResult(messaging.senderId, pending);
+		// A local sender always consumes already-buffered session/bus messages
+		// before deciding whether a future remote-only wait is unsupported.
+		if (localSenderMessaging) {
+			const pending = drainPendingInbox(localSenderMessaging.registry, localSenderMessaging.senderId, from);
+			if (pending) return messageResult(localSenderMessaging.senderId, pending);
 		}
 
 		// Resolve which jobs to watch:
@@ -370,17 +386,20 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 
 		if (!manager || runningJobs.length === 0) {
 			// No job legs: pure message wait — or nothing to block on at all.
-			if (!messaging) return nothingToWaitForResult(this.session);
+			if (!peerWaitMessaging) {
+				if (messaging) return executeMessageWait(messaging, { from, timeoutMs: params.timeoutMs }, signal);
+				return nothingToWaitForResult(this.session);
+			}
 			if (!from) {
 				// A bare wait can only be satisfied by a running peer eventually
 				// sending something; with none, return the snapshot immediately
 				// instead of blocking a full message-timeout window.
-				const hasRunningPeer = messaging.registry
-					.listVisibleTo(messaging.senderId)
-					.some(ref => messaging.registry.isRunning(ref));
+				const hasRunningPeer = peerWaitMessaging.registry
+					.listVisibleTo(peerWaitMessaging.senderId)
+					.some(ref => peerWaitMessaging.registry.isRunning(ref));
 				if (!hasRunningPeer) return nothingToWaitForResult(this.session);
 			}
-			return executeMessageWait(messaging, { from, timeoutMs: params.timeoutMs }, signal);
+			return executeMessageWait(peerWaitMessaging, { from, timeoutMs: params.timeoutMs }, signal);
 		}
 
 		// Wait window: explicit timeout wins (0 = no window); otherwise the
@@ -395,13 +414,13 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 
 		// Message leg: park a bus waiter with no timeout of its own — the race
 		// window governs. Cancelled via sentinel so late losers do not reject.
-		const busAbort = messaging ? new AbortController() : undefined;
+		const busAbort = peerWaitMessaging ? new AbortController() : undefined;
 		const busCancelled = new Error("hub wait settled");
 		let removeBusAbortListener: (() => void) | undefined;
 		const busLeg =
-			messaging && busAbort
+			peerWaitMessaging && busAbort
 				? IrcBus.global()
-						.wait(messaging.senderId, { from }, 0, busAbort.signal)
+						.wait(peerWaitMessaging.senderId, { from }, 0, busAbort.signal)
 						.then(
 							message => ({ message, error: null as Error | null }),
 							error => ({
@@ -471,9 +490,9 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 		// A message consumed by the bus waiter must never be dropped — it wins
 		// even a photo-finish race (job results re-deliver themselves; a
 		// dequeued message would otherwise be lost).
-		if (busLeg && messaging) {
+		if (busLeg && peerWaitMessaging) {
 			const settled = await busLeg;
-			if (settled.message) return messageResult(messaging.senderId, settled.message);
+			if (settled.message) return messageResult(peerWaitMessaging.senderId, settled.message);
 		}
 
 		return buildJobResult(this.session, manager, "wait", jobsToWatch, []);

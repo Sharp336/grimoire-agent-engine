@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an explicit opt-in `--remote-runtime-config` Unix-socket transport for structured subagents, remote registry lifecycle, peer messaging, and Hub operations. This exposes a versioned runtime/source-reference integration seam only; it does not make Oh My Pi a Juiz production authority, ship controller credentials or endpoints, or enable remote execution by default.
+
 ## [17.3.6] - 2026-08-17
 
 ### Added
