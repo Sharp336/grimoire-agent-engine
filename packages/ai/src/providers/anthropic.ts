@@ -80,6 +80,12 @@ export type AnthropicHeaderOptions = {
 	stream?: boolean;
 	modelHeaders?: Record<string, string>;
 	isCloudflareAiGateway?: boolean;
+	/**
+	 * When true, omit the claude-code-specific beta defaults (claude-code-20250219,
+	 * oauth-2025-04-20, context-management-2025-06-27, prompt-caching-scope-2026-01-05).
+	 * Use for Anthropic-compat endpoints that route or reject based on unknown beta values.
+	 */
+	stripClaudeCodeBetas?: boolean;
 };
 
 export function normalizeAnthropicBaseUrl(baseUrl?: string): string | undefined {
@@ -152,18 +158,21 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 	const oauthToken = options.isOAuth ?? isAnthropicOAuthToken(options.apiKey);
 	const extraBetas = options.extraBetas ?? [];
 	const stream = options.stream ?? false;
-	const betaHeader = buildBetaHeader(claudeCodeBetaDefaults, extraBetas);
+	const betaHeader = buildBetaHeader(options.stripClaudeCodeBetas ? [] : claudeCodeBetaDefaults, extraBetas);
 	const acceptHeader = stream ? "text/event-stream" : "application/json";
 	const modelHeaders = Object.fromEntries(
 		Object.entries(options.modelHeaders ?? {}).filter(([key]) => !enforcedHeaderKeys.has(key.toLowerCase())),
 	);
+	// Only include Anthropic-Beta when non-empty — some compat gateways (e.g. Alibaba)
+	// return 404 when they receive an empty Anthropic-Beta header value.
+	const betaHeaders: Record<string, string> = betaHeader ? { "Anthropic-Beta": betaHeader } : {};
 
 	if (options.isCloudflareAiGateway) {
 		return {
 			...modelHeaders,
 			Accept: acceptHeader,
 			...sharedHeaders,
-			"Anthropic-Beta": betaHeader,
+			...betaHeaders,
 			"cf-aig-authorization": `Bearer ${options.apiKey}`,
 		};
 	}
@@ -179,7 +188,7 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 			Accept: acceptHeader,
 			Authorization: `Bearer ${options.apiKey}`,
 			...sharedHeaders,
-			"Anthropic-Beta": betaHeader,
+			...betaHeaders,
 			"User-Agent": userAgent,
 		};
 	} else if (!isAnthropicApiBaseUrl(options.baseUrl)) {
@@ -188,14 +197,14 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 			Accept: acceptHeader,
 			Authorization: `Bearer ${options.apiKey}`,
 			...sharedHeaders,
-			"Anthropic-Beta": betaHeader,
+			...betaHeaders,
 		};
 	} else {
 		return {
 			...modelHeaders,
 			Accept: acceptHeader,
 			...sharedHeaders,
-			"Anthropic-Beta": betaHeader,
+			...betaHeaders,
 			"X-Api-Key": options.apiKey,
 		};
 	}
@@ -1576,6 +1585,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		stream,
 		modelHeaders: mergeHeaders(model.headers, foundryCustomHeaders, headers, dynamicHeaders),
 		isCloudflareAiGateway: model.provider === "cloudflare-ai-gateway",
+		stripClaudeCodeBetas: model.provider === "alibaba-token-plan",
 	});
 
 	if (model.provider === "cloudflare-ai-gateway") {

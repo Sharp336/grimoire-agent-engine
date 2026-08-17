@@ -65,10 +65,7 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
 		/(^|\/)claude[-.]/i.test(model.id) ||
 		/(^|\/)anthropic\//i.test(model.id);
 	const isAlibaba =
-		provider === "alibaba-coding-plan" ||
-		provider === "alibaba-token-plan" ||
-		baseUrl.includes("dashscope") ||
-		baseUrl.includes("maas.aliyuncs.com");
+		provider === "alibaba-coding-plan" || baseUrl.includes("dashscope") || baseUrl.includes("maas.aliyuncs.com");
 	const isQwen = model.id.toLowerCase().includes("qwen");
 	// DeepSeek V4 (and other reasoning-capable DeepSeek models) reject follow-up requests in
 	// thinking mode unless prior assistant tool-call turns include `reasoning_content`. The

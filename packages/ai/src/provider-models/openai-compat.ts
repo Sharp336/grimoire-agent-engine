@@ -1063,7 +1063,7 @@ export function alibabaCodingPlanModelManagerOptions(
 // Alibaba Token Plan Enterprise
 // ---------------------------------------------------------------------------
 
-const ALIBABA_TOKEN_PLAN_OPENAI_BASE_URL = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1";
+const ALIBABA_TOKEN_PLAN_ANTHROPIC_BASE_URL = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic";
 
 export interface AlibabaTokenPlanModelManagerConfig {
 	apiKey?: string;
@@ -1072,24 +1072,8 @@ export interface AlibabaTokenPlanModelManagerConfig {
 
 export function alibabaTokenPlanModelManagerOptions(
 	config?: AlibabaTokenPlanModelManagerConfig,
-): ModelManagerOptions<"openai-completions"> {
-	const apiKey = config?.apiKey;
-	const baseUrl = config?.baseUrl ?? ALIBABA_TOKEN_PLAN_OPENAI_BASE_URL;
-	const references = createBundledReferenceMap<"openai-completions">("alibaba-token-plan");
-	return {
-		providerId: "alibaba-token-plan",
-		fetchDynamicModels: () =>
-			fetchOpenAICompatibleModels({
-				api: "openai-completions",
-				provider: "alibaba-token-plan",
-				baseUrl,
-				apiKey,
-				mapModel: (entry, defaults) => {
-					const reference = references.get(defaults.id);
-					return mapWithBundledReference(entry, defaults, reference);
-				},
-			}),
-	};
+): ModelManagerOptions<"anthropic-messages"> {
+	return createSimpleAnthropicProviderOptions("alibaba-token-plan", ALIBABA_TOKEN_PLAN_ANTHROPIC_BASE_URL, config);
 }
 
 // ---------------------------------------------------------------------------
@@ -2200,11 +2184,7 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_CODING_PLANS: readonly ModelsDevProviderDe
 		},
 	),
 	// --- Alibaba Token Plan Enterprise ---
-	openAiCompletionsDescriptor("alibaba-token-plan", "alibaba-token-plan", ALIBABA_TOKEN_PLAN_OPENAI_BASE_URL, {
-		compat: {
-			supportsDeveloperRole: false,
-		},
-	}),
+	anthropicMessagesDescriptor("alibaba-token-plan", "alibaba-token-plan", ALIBABA_TOKEN_PLAN_ANTHROPIC_BASE_URL),
 ];
 
 const filterActiveToolCallModels = (_id: string, m: ModelsDevModel): boolean => {
