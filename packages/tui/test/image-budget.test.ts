@@ -37,9 +37,9 @@ const MULTIPLEXER_ENV_KEYS = [
 	"CMUX_SURFACE_ID",
 	"CMUX_REMOTE_TRANSPORT",
 ] as const;
-const ORIGINAL_MULTIPLEXER_ENV = Object.fromEntries(
-	MULTIPLEXER_ENV_KEYS.map(key => [key, Bun.env[key]]),
-) as Partial<Record<(typeof MULTIPLEXER_ENV_KEYS)[number], string>>;
+const ORIGINAL_MULTIPLEXER_ENV = Object.fromEntries(MULTIPLEXER_ENV_KEYS.map(key => [key, Bun.env[key]])) as Partial<
+	Record<(typeof MULTIPLEXER_ENV_KEYS)[number], string>
+>;
 const ORIGINAL_TERM = Bun.env.TERM;
 
 beforeEach(() => {

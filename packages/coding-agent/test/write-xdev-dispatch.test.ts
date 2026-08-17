@@ -375,7 +375,6 @@ describe("read and write route xd:// device URLs", () => {
 		expect(finalResult.details?.xdev).toMatchObject({ args: { model: "flux-schnell" } });
 	});
 
-
 	it("renders device execution errors as the mounted tool instead of write", async () => {
 		await themeModule.initTheme();
 		const uiTheme = (await themeModule.getThemeByName("dark")) ?? (await themeModule.getThemeByName("light"));

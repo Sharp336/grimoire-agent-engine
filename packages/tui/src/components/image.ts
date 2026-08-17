@@ -1,5 +1,5 @@
 import { getKittyGraphics, kittyPlaceholdersFit } from "../kitty-graphics";
-import { type MouseRoutable, type SgrMouseEvent } from "../mouse";
+import type { MouseRoutable, SgrMouseEvent } from "../mouse";
 import {
 	calculateImageFit,
 	getCellDimensions,
@@ -574,7 +574,6 @@ export class Image implements Component, MouseRoutable {
 		return true;
 	}
 
-
 	/**
 	 * Whether this image can be rendered as ordinary Kitty placeholder cells
 	 * at the supplied width. ImageGrid uses this before composing children;
@@ -636,7 +635,6 @@ export class Image implements Component, MouseRoutable {
 			this.#lastRenderedRows = this.#cachedLines.length;
 			return this.#cachedLines;
 		}
-
 
 		let lines: string[];
 

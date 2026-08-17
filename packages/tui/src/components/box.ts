@@ -32,7 +32,6 @@ interface ChildLayout {
 	height: number;
 }
 
-
 /** Box-drawing glyphs plus an optional colorizer for an outline drawn around a {@link Box}. */
 export interface BoxBorder {
 	chars: {
@@ -83,7 +82,6 @@ export class Box implements Component, MouseRoutable {
 		const routed = child.routeMouse(event, line - target.top, col - target.left);
 		return routed !== false;
 	}
-
 
 	// Cache for rendered output
 	#cached?: Cache;
