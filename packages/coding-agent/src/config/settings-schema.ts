@@ -1096,6 +1096,17 @@ export const SETTINGS_SCHEMA = {
 			description: "Remove the 1-character horizontal padding from the left and right of the terminal output",
 		},
 	},
+	"tui.mainTextSelection": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Main-view drag-select copy",
+			description:
+				"Drag-select transcript text to copy, and click in the composer to place the caret. Turns on mouse tracking, so native click-drag select and unshifted wheel need Shift or this setting off. Selection covers only the visible window.",
+		},
+	},
 	"tui.scrollbackRebuild": {
 		type: "boolean",
 		default: false,

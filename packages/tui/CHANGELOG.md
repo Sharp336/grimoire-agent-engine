@@ -20,6 +20,7 @@
 - Fixed images rendering as the `[Image: …]` text card on SIXEL terminals that expose no identifying environment variable (foot, xterm, contour): the graphics probe no longer requires Windows Terminal, and no longer reads an XTSMGRAPHICS success reply as a failure.
 - Fixed the multiline editor ignoring a `tui.input.submit` remap onto Ctrl+Enter: the hardcoded Ctrl/Shift+Enter → newline fallbacks now yield to an explicit submit binding, so Ctrl+Enter can be used to submit ([#8906](https://github.com/can1357/oh-my-pi/issues/8906)).
 - Main-view drag-select now copies the highlighted text to the clipboard, and a click in the composer places the caret on that word.
+- Wheel reports scroll the in-app transcript (composer stays pinned). Native history is left alone so drag-select and wheel can both stay on.
 
 
 ## [17.3.5] - 2026-08-16

@@ -1459,6 +1459,8 @@ export class TUI extends Container {
 	#textSelection: TextSelection | null = null;
 	#selectionSourceWindow: string[] | null = null;
 	#onSelectionCopy: ((text: string) => void | Promise<void>) | undefined;
+	/** Lines the live window is peeked above the tail. 0 follows the composer. */
+	#viewOffset = 0;
 	#tuiStarted = false;
 	#altPreviousLines: string[] = [];
 	#altEnterWidth = 0;
@@ -2289,12 +2291,29 @@ export class TUI extends Container {
 		if (this.#tuiStarted && !this.#altActive) this.terminal.write(MAIN_MOUSE_TRACKING_ON);
 	}
 
+	/** Turn off main-view drag-select and restore native terminal mouse handling. */
+	disableMainTextSelection(): void {
+		this.#onSelectionCopy = undefined;
+		this.#mainMouseTracking = false;
+		this.#textSelection = null;
+		this.#selectionSourceWindow = null;
+		this.#viewOffset = 0;
+		if (this.#tuiStarted && !this.#altActive) this.terminal.write(MAIN_MOUSE_TRACKING_OFF);
+		this.requestRender();
+	}
+
 	#handleMainSelectionInput(data: string): boolean {
 		const event = parseSgrMouse(data);
 		if (!event) return false;
 		if (event.leftClick && this.#tryPlaceEditorCursor(event.row, event.col)) return true;
 		const result = applySelectionMouse(this.#textSelection, event);
 		if (result.action === "ignore") return false;
+		if (result.action === "scroll") {
+			this.#textSelection = null;
+			this.#selectionSourceWindow = null;
+			this.#scrollMainView(event.wheel ?? -1);
+			return true;
+		}
 		if (result.action === "copy") {
 			const text = result.selection
 				? reconstructSelectionText(this.#selectionSourceWindow ?? [], result.selection)
@@ -2310,12 +2329,28 @@ export class TUI extends Container {
 		return true;
 	}
 
+	#scrollMainView(delta: -1 | 1): void {
+		const maxOffset = this.#windowTopRow;
+		const next = delta < 0 ? Math.min(maxOffset, this.#viewOffset + 3) : Math.max(0, this.#viewOffset - 3);
+		if (next === this.#viewOffset) return;
+		this.#viewOffset = next;
+		this.requestRender();
+	}
+
 	#tryPlaceEditorCursor(screenRow: number, screenCol: number): boolean {
 		const focused = this.#focusedComponent;
 		if (!focused || typeof focused.placeCursorFromMouse !== "function") return false;
 		const loc = this.#locateInFrame(focused);
 		if (!loc) return false;
-		const localRow = screenRow + this.#windowTopRow - loc.start;
+		const height = this.terminal.rows;
+		const editorRows = Math.min(height, loc.rows);
+		const scrollRows = height - editorRows;
+		const viewTop = Math.max(0, this.#windowTopRow - this.#viewOffset);
+		const frameRow =
+			this.#viewOffset > 0 && editorRows > 0 && screenRow >= scrollRows
+				? this.#windowTopRow + screenRow
+				: viewTop + screenRow;
+		const localRow = frameRow - loc.start;
 		if (localRow < 0 || localRow >= loc.rows) return false;
 		if (!focused.placeCursorFromMouse(localRow, screenCol)) return false;
 		this.requestRender();
@@ -4029,7 +4064,7 @@ export class TUI extends Container {
 			// accepted wrap drift does not read as a violation on the next
 			// ordinary frame.
 			chunkTo =
-				hasVisibleOverlay || geometryChanged
+				hasVisibleOverlay || geometryChanged || this.#viewOffset > 0
 					? this.#committedRows
 					: Math.min(windowTop, Math.max(this.#committedRows, commitCeiling));
 			if (widthChanged) {
@@ -4049,8 +4084,15 @@ export class TUI extends Container {
 			}
 		}
 		const frame = this.#prepareFrame(rawFrame, width);
+		this.#viewOffset = Math.min(this.#viewOffset, windowTop);
+		const viewTop = Math.max(0, windowTop - this.#viewOffset);
+		const peekEditor = this.#viewOffset > 0 ? this.#focusedComponent : null;
+		const peekEditorLoc = peekEditor ? this.#locateInFrame(peekEditor) : undefined;
+		const editorRows = peekEditorLoc ? Math.min(height, peekEditorLoc.rows) : 0;
+		const peekScrollRows = height - editorRows;
 		let window: string[] = new Array(height);
-		for (let r = 0; r < height; r++) window[r] = frame[windowTop + r] ?? "";
+		for (let r = 0; r < peekScrollRows; r++) window[r] = frame[viewTop + r] ?? "";
+		for (let r = 0; r < editorRows; r++) window[peekScrollRows + r] = frame[windowTop + peekScrollRows + r] ?? "";
 		if (this.#textSelection && !hasVisibleOverlay) {
 			this.#selectionSourceWindow = window.slice();
 			applySelectionHighlight(window, this.#textSelection);
@@ -4174,7 +4216,7 @@ export class TUI extends Container {
 				scrollRows = Math.min(logicalSuffixRows, appendWindowMovement);
 				commitTo = commitFrom + scrollRows;
 			}
-			if (hasVisibleOverlay) {
+			if (hasVisibleOverlay || this.#viewOffset > 0) {
 				scrollRows = 0;
 				commitTo = commitFrom;
 			}

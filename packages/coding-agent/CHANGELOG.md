@@ -180,6 +180,7 @@
 
 - Fixed `omp stats` and `/stats` dashboards being unreachable from container hosts by accepting an explicit `--host` bind address while preserving the `127.0.0.1` default.
 - Enabled main-view drag-select copy through the existing clipboard helper, with a status-line confirmation.
+- Added `tui.mainTextSelection` (default on) so that can be turned off, restoring native click-drag select and unshifted wheel.
 
 
 ## [17.3.5] - 2026-08-16

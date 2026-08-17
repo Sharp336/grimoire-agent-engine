@@ -585,6 +585,21 @@ export class SelectorController {
 				this.ctx.ui.setScrollbackRebuild(value as boolean);
 				break;
 
+			case "tui.mainTextSelection":
+				if (value) {
+					this.ctx.ui.enableMainTextSelection(async text => {
+						try {
+							await copyToClipboard(text);
+							this.ctx.showStatus("Copied!");
+						} catch (error) {
+							this.ctx.showWarning(`Copy failed: ${error instanceof Error ? error.message : String(error)}`);
+						}
+					});
+				} else {
+					this.ctx.ui.disableMainTextSelection();
+				}
+				break;
+
 			case "tui.renderMermaid":
 				setMarkdownMermaidRendering(value as boolean);
 				this.ctx.session.refreshBaseSystemPrompt().catch(err => {

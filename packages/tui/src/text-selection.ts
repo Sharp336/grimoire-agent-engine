@@ -72,16 +72,17 @@ export function applySelectionHighlight(lines: string[], sel: TextSelection): vo
  * Update selection from an SGR event. Returns:
  * - `"start"` / `"move"` when the drag changed
  * - `"copy"` when a non-empty selection was released
+ * - `"scroll"` when the report is a wheel notch (not a selection gesture)
  * - `"ignore"` when the event is not a left-button selection gesture
  * - `"consumed"` when the event is a mouse report that must not reach the editor
  */
 export function applySelectionMouse(
 	sel: TextSelection | null,
 	event: SgrMouseEvent,
-): { selection: TextSelection | null; action: "start" | "move" | "copy" | "ignore" | "consumed" } {
+): { selection: TextSelection | null; action: "start" | "move" | "copy" | "scroll" | "ignore" | "consumed" } {
 	const cell: Cell = { row: event.row, col: event.col };
 	if (event.wheel !== null) {
-		return { selection: sel, action: "consumed" };
+		return { selection: sel, action: "scroll" };
 	}
 	const button = event.button & 3;
 	if (event.release) {
@@ -106,7 +107,7 @@ export function applySelectionMouse(
 export function applySelectionInput(
 	sel: TextSelection | null,
 	data: string,
-): { selection: TextSelection | null; action: "start" | "move" | "copy" | "ignore" | "consumed" } | null {
+): { selection: TextSelection | null; action: "start" | "move" | "copy" | "scroll" | "ignore" | "consumed" } | null {
 	if (!data.startsWith("\x1b[<")) return null;
 	const event = parseSgrMouse(data);
 	if (!event) return null;

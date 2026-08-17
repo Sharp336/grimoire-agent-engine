@@ -57,9 +57,9 @@ describe("text-selection", () => {
 		expect(reconstructSelectionText(["alpha beta"], sel!.selection!)).toBe("alpha");
 	});
 
-	it("consumes wheel without starting a selection", () => {
+	it("reports wheel as scroll without starting a selection", () => {
 		const result = applySelectionInput(null, "\x1b[<64;1;1M");
-		expect(result?.action).toBe("consumed");
+		expect(result?.action).toBe("scroll");
 		expect(result?.selection).toBeNull();
 	});
 
