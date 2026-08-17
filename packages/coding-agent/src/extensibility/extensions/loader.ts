@@ -73,6 +73,15 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	flagValues = new Map<string, boolean | string>();
 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; sourceId: string }> = [];
 
+	registerProvider(name: string, config: ProviderConfig, sourceId: string): void {
+		this.pendingProviderRegistrations.push({ name, config, sourceId });
+	}
+
+	unregisterProvider(name: string): void {
+		const remaining = this.pendingProviderRegistrations.filter(registration => registration.name !== name);
+		this.pendingProviderRegistrations.splice(0, this.pendingProviderRegistrations.length, ...remaining);
+	}
+
 	sendMessage(): void {
 		throw new ExtensionRuntimeNotInitializedError();
 	}
@@ -166,10 +175,12 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	}
 
 	registerTool<TParams extends TSchema = TSchema, TDetails = unknown>(tool: ToolDefinition<TParams, TDetails>): void {
-		this.extension.tools.set(tool.name, {
+		const registered = {
 			definition: tool,
 			extensionPath: this.extension.path,
-		});
+		};
+		this.extension.tools.set(tool.name, registered);
+		for (const listener of this.extension.toolRegistrationListeners ?? []) listener(tool.name);
 	}
 
 	registerCommand(
@@ -290,7 +301,11 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	}
 
 	registerProvider(name: string, config: ProviderConfig): void {
-		this.runtime.pendingProviderRegistrations.push({ name, config, sourceId: this.extension.path });
+		this.runtime.registerProvider(name, config, this.extension.path);
+	}
+
+	unregisterProvider(name: string): void {
+		this.runtime.unregisterProvider(name, this.extension.path);
 	}
 }
 
@@ -303,6 +318,7 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		resolvedPath,
 		handlers: new Map(),
 		tools: new Map(),
+		toolRegistrationListeners: new Set(),
 		assistantThinkingRenderers: [],
 		messageRenderers: new Map(),
 		commands: new Map(),
@@ -313,20 +329,24 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 
 /**
  * Runs an extension factory with provider registration rollback on failure.
- * Records the number of pending provider registrations before the factory runs,
- * and restores that checkpoint if the factory throws.
+ * Restores the complete registration queue when the factory throws because an
+ * extension may unregister entries queued by an earlier extension.
  */
 async function runExtensionFactory(
 	factory: ExtensionFactory,
 	api: ExtensionAPI,
 	runtime: IExtensionRuntime,
 ): Promise<void> {
-	const providerRegistrationCheckpoint = runtime.pendingProviderRegistrations.length;
+	const providerRegistrationCheckpoint = [...runtime.pendingProviderRegistrations];
 
 	try {
 		await factory(api);
 	} catch (error) {
-		runtime.pendingProviderRegistrations.length = providerRegistrationCheckpoint;
+		runtime.pendingProviderRegistrations.splice(
+			0,
+			runtime.pendingProviderRegistrations.length,
+			...providerRegistrationCheckpoint,
+		);
 		throw error;
 	}
 }
@@ -593,6 +613,8 @@ async function discoverHooksInPackageRoot(root: string): Promise<string[]> {
 export interface DiscoverExtensionPathOptions {
 	/** Include ambient native extensions, hooks, and installed plugins. */
 	ambient?: boolean;
+	/** Include ambient hook factories. Disable for read-only catalog commands. */
+	includeAmbientHooks?: boolean;
 }
 
 export async function discoverExtensionPaths(
@@ -645,11 +667,13 @@ export async function discoverExtensionPaths(
 	// scans only this invocation's configured package roots; it must not consult
 	// settings, installed packages, or process-global CLI injection state.
 	if (ambient) {
-		const hooks = await loadCapability<Hook>(hookCapability.id, loadOptions);
-		for (const hookPath of hooks.items
-			.map(hook => hook.path)
-			.filter(hookPath => isExtensionFile(path.basename(hookPath)))) {
-			addPath(hookPath);
+		if (options.includeAmbientHooks !== false) {
+			const hooks = await loadCapability<Hook>(hookCapability.id, loadOptions);
+			for (const hookPath of hooks.items
+				.map(hook => hook.path)
+				.filter(hookPath => isExtensionFile(path.basename(hookPath)))) {
+				addPath(hookPath);
+			}
 		}
 	} else {
 		for (const configuredPath of configuredPaths) {
