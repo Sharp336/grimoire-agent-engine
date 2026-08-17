@@ -193,6 +193,7 @@ import { releaseTabsForOwner } from "../tools/browser/tab-supervisor";
 import type { CheckpointState, CompletedRewindState } from "../tools/checkpoint";
 import { releaseComputerSessionsForOwner } from "../tools/computer/supervisor";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
+import { disposePsHostSession } from "../tools/pshost-manager";
 import {
 	buildResolveReminderMessage,
 	isPreviewResolutionToolCall,
@@ -3975,6 +3976,24 @@ export class AgentSession {
 		}
 	}
 
+	/**
+	 * Dispose this session's pooled PowerShell host. Only hosts keyed by a real
+	 * session id are reachable here — a ToolSession without an id pools under a
+	 * private fallback key and is reaped by idle TTL / process-level cleanup.
+	 */
+	async #disposePsHost(sessionId: string | undefined): Promise<void> {
+		if (!sessionId) return;
+		try {
+			await withTimeout(
+				disposePsHostSession(sessionId),
+				3_000,
+				"Timed out disposing PowerShell host during dispose",
+			);
+		} catch (error) {
+			logger.warn("Failed to dispose PowerShell host during dispose", { error: String(error) });
+		}
+	}
+
 	async #releaseOwnedComputerSessions(ownerId: string | undefined): Promise<void> {
 		if (!ownerId) return;
 		try {
@@ -4051,6 +4070,7 @@ export class AgentSession {
 			this.#disposeOwnedAsyncJobs(),
 			this.#eval.disposeKernels(),
 			this.#releaseOwnedBrowserTabs(this.sessionManager.getSessionId()),
+			this.#disposePsHost(this.sessionManager.getSessionId()),
 			this.#releaseOwnedComputerSessions(this.#eval.getKernelOwnerId()),
 			shutdownTinyTitleClient(),
 			this.#disconnectOwnedMcp(),

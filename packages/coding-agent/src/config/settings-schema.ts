@@ -3563,6 +3563,47 @@ export const SETTINGS_SCHEMA = {
 		default: undefined,
 	},
 
+	// PowerShell (persistent host sidecar; pwsh required)
+	"powershell.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "shell",
+			group: "PowerShell",
+			label: "PowerShell",
+			description:
+				"Enable the powershell tool (opt-in; requires pwsh on PATH) — a persistent pwsh host with retained session state",
+		},
+	},
+	"powershell.shellPath": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "shell",
+			group: "PowerShell",
+			label: "PowerShell Path",
+			description: "Path to the pwsh executable. Defaults to `pwsh` on PATH",
+		},
+	},
+	"powershell.outputWidth": {
+		type: "number",
+		default: 120,
+		ui: {
+			tab: "shell",
+			group: "PowerShell",
+			label: "PowerShell Output Width",
+			description: "Column width passed to Out-String when rendering command output",
+		},
+	},
+	"powershell.historyDepth": {
+		type: "number",
+		default: 20,
+	},
+	"powershell.idleTtlMs": {
+		type: "number",
+		default: 600_000,
+	},
+
 	// Eval (per-backend toggles; add more as new backends ship, e.g. eval.ts)
 	"eval.py": {
 		type: "boolean",
