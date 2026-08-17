@@ -23,8 +23,10 @@ export const getGeminiCliHeaders = (modelId?: string) => ({
  * (and its @google/genai → google-auth-library dependency chain) into the startup
  * parse graph.
  *
- * Format captured from the real 2.8.0 `antigravity/hub` client:
- * `antigravity/hub/2.8.0 (aidev_client; os_type=darwin; arch=arm64; cl=963137146)`.
+ * Format decompiled from real 2.8.1 `antigravity/hub` client (`setHeaders` @ `0x101a531c0`):
+ * `antigravity/hub/2.8.1 (os_type=darwin; arch=arm64; aidev_client; cl=963137146; auth_method=oauth)`.
+ * Token ordering from decompiled binary: `os_type` -> `arch` -> `aidev_client` -> `cl` -> `auth_method=oauth`.
+ *
  * The backend gates newer models (e.g. gemini-3.7-flash) on the client version,
  * so the version tracks the latest Antigravity release via the update manifest
  * (see {@link ensureAntigravityVersion}) with `DEFAULT_ANTIGRAVITY_VERSION` as
@@ -32,7 +34,7 @@ export const getGeminiCliHeaders = (modelId?: string) => ({
  * client the version and manifest are captured from, independent of the host
  * platform. Overrides: PI_AI_ANTIGRAVITY_VERSION / _CL / _OS / _ARCH.
  */
-export const DEFAULT_ANTIGRAVITY_VERSION = "2.8.0";
+export const DEFAULT_ANTIGRAVITY_VERSION = "2.8.1";
 
 const ANTIGRAVITY_VERSION_MANIFEST_URL =
 	"https://antigravity-hub-auto-updater-974169037036.us-central1.run.app/manifest/latest-arm64-mac.yml";
@@ -98,7 +100,8 @@ export function getAntigravityUserAgent(): string {
 	const cl = process.env.PI_AI_ANTIGRAVITY_CL || "963137146";
 	const os = process.env.PI_AI_ANTIGRAVITY_OS || "darwin";
 	const arch = process.env.PI_AI_ANTIGRAVITY_ARCH || "arm64";
-	return `antigravity/hub/${version} (aidev_client; os_type=${os}; arch=${arch}; cl=${cl})`;
+	const clPart = cl ? `; cl=${cl}` : "";
+	return `antigravity/hub/${version} (os_type=${os}; arch=${arch}; aidev_client${clPart}; auth_method=oauth)`;
 }
 
 /**

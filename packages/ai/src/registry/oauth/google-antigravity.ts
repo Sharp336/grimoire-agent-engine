@@ -27,8 +27,6 @@ const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const CLOUD_CODE_ENDPOINT = "https://cloudcode-pa.googleapis.com";
 const DAILY_CLOUD_CODE_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
-const NODE_API_CLIENT_USER_AGENT = "google-api-nodejs-client/10.3.0";
-const GOOG_API_CLIENT_HEADER = "gl-node/22.21.1";
 const TIER_FREE = "free-tier";
 const PROJECT_ONBOARD_MAX_ATTEMPTS = 5;
 const PROJECT_ONBOARD_INTERVAL_MS = 2000;
@@ -207,14 +205,9 @@ async function discoverProject(
 			tier_id: fallbackTierId,
 			metadata: getAntigravityOnboardMetadata(),
 		};
-		const onboardHeaders: Record<string, string> = {
-			...headers,
-			"User-Agent": `${headers["User-Agent"]} ${NODE_API_CLIENT_USER_AGENT}`,
-			"X-Goog-Api-Client": GOOG_API_CLIENT_HEADER,
-		};
 		const provisionedProject = await onboardProjectWithRetries(
 			DAILY_CLOUD_CODE_ENDPOINT,
-			onboardHeaders,
+			headers,
 			onboardBody,
 			signal,
 			onProgress,
