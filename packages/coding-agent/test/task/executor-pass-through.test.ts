@@ -200,6 +200,27 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(childSettings?.get("tier.google")).toBe("none");
 	});
 
+	it("falls back when the per-agent tier setting is null", async () => {
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+		const settings = Settings.isolated({
+			"tier.subagent": "none",
+			"task.agentServiceTierOverrides": null,
+		});
+
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: { ...baseAgent, name: "standard" },
+			settings,
+		});
+
+		expect(result.exitCode).toBe(0);
+		const childSettings = spy.mock.calls[0]?.[0]?.settings;
+		expect(childSettings?.get("tier.openai")).toBe("none");
+		expect(childSettings?.get("tier.anthropic")).toBe("none");
+		expect(childSettings?.get("tier.google")).toBe("none");
+	});
+
 	it("passes and records immediate parent tiers for an agent explicitly configured to inherit", async () => {
 		let recordedParentServiceTier: ServiceTierByFamily | undefined;
 		const session = yieldEmittingSession(parentServiceTier => {

@@ -2715,7 +2715,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		settingsOverride: settings.get("task.agentAdvisor")[agent.name],
 		agentAdvisor: agent.advisor,
 	});
-	const serviceTierOverrides = settings.get("task.agentServiceTierOverrides");
+	const serviceTierOverrides = settings.get("task.agentServiceTierOverrides") ?? {};
 	const configuredServiceTierOverride = serviceTierOverrides[agent.name];
 	const serviceTierOverride = isServiceTierInheritSettingValue(configuredServiceTierOverride)
 		? configuredServiceTierOverride
