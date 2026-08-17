@@ -56,6 +56,13 @@ interface MCPAddWizardOAuthOptions {
 	resource?: string;
 	registrationUrl?: string;
 	/**
+	 * Scopes the user entered in place of the discovered set, forwarded as the
+	 * authoritative `oauth.scopes` override so they also outrank a `scope`
+	 * embedded in the authorization URL. Absent when the user kept whatever
+	 * discovery produced.
+	 */
+	scopeOverride?: string;
+	/**
 	 * External cancellation source. Aborting it tears down the in-flight OAuth
 	 * flow and surfaces a neutral cancellation error. The wizard wires its own
 	 * controller here so Esc cancels the OAuth wait instead of stepping back
@@ -78,6 +85,12 @@ interface WizardState {
 	oauthClientId: string;
 	oauthClientSecret: string;
 	oauthScopes: string;
+	/**
+	 * Scopes discovery prefilled into {@link WizardState.oauthScopes}, so an
+	 * untouched value can be told apart from one the user chose. Only the
+	 * latter is persisted as an `oauth.scopes` override.
+	 */
+	oauthScopesDiscovered: string;
 	oauthResource: string;
 	oauthCredentialId: string | null;
 	apiKey: string;
@@ -110,6 +123,7 @@ export class MCPAddWizard extends OverlayPanel {
 		oauthClientId: "",
 		oauthClientSecret: "",
 		oauthScopes: "",
+		oauthScopesDiscovered: "",
 		oauthResource: "",
 		oauthCredentialId: null,
 		apiKey: "",
@@ -1014,6 +1028,7 @@ export class MCPAddWizard extends OverlayPanel {
 					this.#state.oauthRegistrationUrl = oauth.registrationUrl || "";
 					this.#state.oauthClientId = oauth.clientId || "";
 					this.#state.oauthScopes = oauth.scopes || "";
+					this.#state.oauthScopesDiscovered = this.#state.oauthScopes;
 					this.#state.oauthResource = oauth.resource || (this.#state.transport === "stdio" ? "" : this.#state.url);
 					this.#state.authMethod = "oauth";
 
@@ -1059,6 +1074,29 @@ export class MCPAddWizard extends OverlayPanel {
 	/**
 	 * Build a server config from current wizard state for connection testing (no auth).
 	 */
+	/**
+	 * Scopes the user chose over the discovered set, or `undefined` when they
+	 * kept discovery's answer. Persisting only a user-chosen value keeps
+	 * discovery results out of the config file, where they would freeze and
+	 * later shadow whatever the server advertises.
+	 */
+	#oauthScopeOverride(): string | undefined {
+		if (this.#state.authMethod !== "oauth") return undefined;
+		if (this.#state.oauthScopes === this.#state.oauthScopesDiscovered) return undefined;
+		return this.#state.oauthScopes;
+	}
+
+	/**
+	 * Persist a user-chosen scope override on the config so later
+	 * authorizations — notably `/mcp reauth` — reuse it instead of falling back
+	 * to discovery and re-requesting the set the user rejected.
+	 */
+	#applyOAuthScopeOverride(config: MCPServerConfig): void {
+		const scopes = this.#oauthScopeOverride();
+		if (scopes === undefined) return;
+		config.oauth = { ...config.oauth, scopes };
+	}
+
 	#buildServerConfig(): MCPServerConfig {
 		return this.#buildServerConfigWithAuth(false);
 	}
@@ -1184,6 +1222,7 @@ export class MCPAddWizard extends OverlayPanel {
 					serverUrl: this.#state.url || undefined,
 					registrationUrl: this.#state.oauthRegistrationUrl || undefined,
 					resource: oauthResource || undefined,
+					scopeOverride: this.#oauthScopeOverride(),
 					abortSignal: this.#oauthAbort.signal,
 				},
 			);
@@ -1343,6 +1382,8 @@ export class MCPAddWizard extends OverlayPanel {
 				};
 			}
 
+			this.#applyOAuthScopeOverride(config);
+
 			// Add API key to env if manual auth — use user-chosen env var name
 			if (this.#state.authMethod === "manual" && this.#state.apiKey) {
 				const envKey = this.#state.envVarName || "API_KEY";
@@ -1371,6 +1412,8 @@ export class MCPAddWizard extends OverlayPanel {
 				clientSecret: this.#state.oauthClientSecret || undefined,
 			};
 		}
+
+		this.#applyOAuthScopeOverride(config);
 
 		// Add API key using user-chosen header name and auth location
 		if (this.#state.authMethod === "manual" && this.#state.apiKey) {
