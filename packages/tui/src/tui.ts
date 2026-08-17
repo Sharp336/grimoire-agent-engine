@@ -538,7 +538,12 @@ export interface OverlayHandle {
  * Container - a component that contains other components
  */
 export class Container
-	implements Component, MouseRoutable, NativeScrollbackCommittedRows, NativeScrollbackReplay, NativeScrollbackWidthEpoch
+	implements
+		Component,
+		MouseRoutable,
+		NativeScrollbackCommittedRows,
+		NativeScrollbackReplay,
+		NativeScrollbackWidthEpoch
 {
 	children: Component[] = [];
 

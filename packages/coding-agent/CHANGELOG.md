@@ -100,6 +100,25 @@
 - Fixed OMP panicking at startup when the host environment contains a non-UTF-8 variable value; such entries are now skipped when copying the host environment into the shell ([#8925](https://github.com/can1357/oh-my-pi/issues/8925)).
 - Fixed `/mcp reauth` refusing to run the OAuth flow for HTTP MCP servers that allow unauthenticated `initialize` but require auth for `tools/call`; endpoint discovery now runs against the server URL before giving up ([#8922](https://github.com/can1357/oh-my-pi/issues/8922)).
 
+### Added
+
+- Added model-first image generation: a curated capability catalog of 13 flagship models (Nano Banana Pro/2, GPT Image 2, FLUX.2 Pro/Max, Seedream 4.5/5 Pro, Qwen Image 3, Recraft V4/Vector, Krea 2 Large, Grok Imagine, FLUX.1 Schnell) with per-binding capability validation, canonical knobs (`model`, `resolution`, `n`, `quality`, `output_format`, `background`, `seed`), and fail-closed errors instead of silent model substitution.
+- Added a FAL backend (`FAL_KEY`) with queue-API generation, CDN input upload, polling, and job cancellation, plus a `fal:<endpoint-id>` escape hatch that reaches any FAL endpoint without a release.
+- Reworked OpenRouter image generation onto its dedicated Images API (`POST /api/v1/images`) with `input_references` edits and surfaced `costUsd`.
+- Added `providers.imageModel` setting for a default image model (catalog alias or raw `fal:`/`openrouter:` reference).
+
+### Changed
+
+- Multi-image tool results now render through a responsive `ImageGrid`, while unsupported direct-placement protocols retain safe vertical rendering.
+
+### Fixed
+
+- Fixed `generate_image` inline previews and lifecycle blocks for both direct and `xd://` dispatches, including actionable diagnostics when inline rendering is unavailable.
+- Fixed hosted OpenAI image generation silently defaulting to GPT Image 1 and active Codex sessions preferring a metered OpenAI credential when both credentials were available.
+- Fixed mouse-wheel scrolling in the normal transcript after inline images by keeping normal-screen image clicks opt-in, preserving native terminal scrollback by default.
+- Fixed discovered FAL edit endpoints with singular `image_url` inputs and preserved provider error messages returned by completed or failed queue jobs.
+
+
 ## [17.3.7] - 2026-08-17
 
 ### Changed
@@ -270,24 +289,6 @@
 - Fixed retry-fallback selection switching to a fallback model with a context window too small to hold the current session context.
 - Fixed OpenCode discovery ignoring `opencode.jsonc` files and rejecting comments in `opencode.json`.
 - Fixed WSL2 startup hanging forever when the Windows interop pipe is wedged: the WSL host-home discovery probes (`cmd.exe`, `wslpath`) now run under a 500ms hard timeout and fall back to the Linux `$HOME`/`~/.omp` candidates ([#8402](https://github.com/can1357/oh-my-pi/issues/8402)).
-
-### Added
-
-- Added model-first image generation: a curated capability catalog of 13 flagship models (Nano Banana Pro/2, GPT Image 2, FLUX.2 Pro/Max, Seedream 4.5/5 Pro, Qwen Image 3, Recraft V4/Vector, Krea 2 Large, Grok Imagine, FLUX.1 Schnell) with per-binding capability validation, canonical knobs (`model`, `resolution`, `n`, `quality`, `output_format`, `background`, `seed`), and fail-closed errors instead of silent model substitution.
-- Added a FAL backend (`FAL_KEY`) with queue-API generation, CDN input upload, polling, and job cancellation, plus a `fal:<endpoint-id>` escape hatch that reaches any FAL endpoint without a release.
-- Reworked OpenRouter image generation onto its dedicated Images API (`POST /api/v1/images`) with `input_references` edits and surfaced `costUsd`.
-- Added `providers.imageModel` setting for a default image model (catalog alias or raw `fal:`/`openrouter:` reference).
-
-### Changed
-
-- Multi-image tool results now render through a responsive `ImageGrid`, while unsupported direct-placement protocols retain safe vertical rendering.
-
-### Fixed
-
-- Fixed `generate_image` inline previews and lifecycle blocks for both direct and `xd://` dispatches, including actionable diagnostics when inline rendering is unavailable.
-- Fixed hosted OpenAI image generation silently defaulting to GPT Image 1 and active Codex sessions preferring a metered OpenAI credential when both credentials were available.
-- Fixed mouse-wheel scrolling in the normal transcript after inline images by keeping normal-screen image clicks opt-in, preserving native terminal scrollback by default.
-- Fixed discovered FAL edit endpoints with singular `image_url` inputs and preserved provider error messages returned by completed or failed queue jobs.
 
 ## [17.2.15] - 2026-08-12
 
@@ -2213,19 +2214,6 @@
 - Fixed turn-ending provider errors rendering with a doubled blank gap above the `Error:` block (caller and error block each added a spacer).
 - Fixed the write tool renderer crashing when persisted runtime content is a truthy non-string value; rendering now coerces display content before Windows CR normalization. ([#4495](https://github.com/can1357/oh-my-pi/issues/4495))
 - Fixed cmux-backend `browser({action:"run"})` calls crashing the entire process with an unhandled rejection when the tab was released mid-run (e.g. a sibling subagent calling `browser({action:"close", all:true})` or a session-scoped tab reap). `runInTabWithSnapshot` in `tab-supervisor.ts` creates a `Promise.withResolvers()` triple so `releaseTab` can signal in-flight runs, but the cmux branch used to await `runCmuxCode(...)` directly and never awaited the local promise. When `releaseTab` rejected that orphaned promise ("Tab ... was closed"), Bun surfaced it as an unhandled rejection and the top-level handler tore the whole session down, killing every other tab and subagent sharing it. Both backends now await the same `promise` (so `pending.reject` always has an attached handler AND the caller sees `Tab "..." was closed` immediately instead of blocking to the run's timeout), and a new `pending.closeAc` is composed into the cmux run's abort signal so `wait(...)`, in-flight cmux socket calls, and the facade proxies unwind promptly when the tab is closed rather than leaking to their own timeout ([#4499](https://github.com/can1357/oh-my-pi/issues/4499)).
-
-### Added
-
-- Added compact TSV table rendering for large JSON-array tool outputs (mostly MCP), replacing blind head/tail byte truncation, with `read artifact://<id>` recovery of the full JSON. Gated by a new `tools.jsonOutputTable` setting (default enabled).
-
-### Changed
-
-- Changed superseded-read pruning to also invalidate reads made stale by a later `edit`/`write` of the same file, not just by a newer read of it (gated by the existing `compaction.supersedeReads` setting). Touch keys are cwd-aware (absolute and relative path forms both match the read they invalidate) and hashline `MV` file-ops also invalidate reads of the move destination.
-
-### Fixed
-
-- Fixed the MCP tool-result renderer's raw-text display not replacing tabs before truncation, a pre-existing sanitization gap surfaced by the new JSON table output.
-- Fixed `truncateMiddle` silently degrading to tail-only truncation at half the configured budget for content whose first line exceeds the head byte budget (e.g. minified single-line JSON): the head budget is now spent on a byte-windowed head fragment before the elision marker.
 
 ## [16.3.5] - 2026-07-04
 
