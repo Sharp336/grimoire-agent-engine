@@ -120,6 +120,10 @@
 
 - Removed legacy local request-cost estimation machinery and database schemas previously used for OpenCode Go estimates.
 
+### Added
+
+- Added `FAL_KEY` to the image-generation env-key table so `getEnvApiKey("fal")` and the credential cascade resolve FAL credentials.
+
 ## [17.2.15] - 2026-08-12
 
 ### Fixed

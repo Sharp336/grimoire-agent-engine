@@ -1,11 +1,13 @@
 import type { Clipboard, SnapshotStore } from "@oh-my-pi/hashline";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { ImageGalleryImage, MouseRoutable, SgrMouseEvent } from "@oh-my-pi/pi-tui";
 import {
 	Box,
 	type Component,
 	Container,
 	getImageDimensions,
 	Image,
+	ImageGrid,
 	ImageProtocol,
 	imageFallback,
 	type NativeScrollbackLiveRegion,
@@ -114,6 +116,11 @@ function stabilizeStreamingPreviews(previews: PerFileDiffPreview[]): PerFileDiff
 function isEditLikeToolName(toolName: string): boolean {
 	return toolName === "edit" || toolName === "apply_patch";
 }
+function imageSourceFingerprint(image: { data?: string; mimeType?: string }): string {
+	const data = image.data ?? "";
+	const mimeType = image.mimeType ?? "";
+	return `${image.data === undefined ? "u" : "d"}:${data.length}:${Bun.hash(data).toString(16)}:${image.mimeType === undefined ? "u" : mimeType}`;
+}
 
 function resolveEditModeForTool(toolName: string, tool: AgentTool | undefined): EditMode | undefined {
 	if (toolName === "apply_patch") return "apply_patch";
@@ -187,6 +194,25 @@ class SafeToolRendererComponent implements Component {
 			return this.#fallback()?.render(width) ?? [];
 		}
 	}
+	hasMouseTargets(): boolean {
+		const component = this.#component as Component & Partial<MouseRoutable>;
+		return component.hasMouseTargets?.() === true;
+	}
+
+	routeMouse(event: SgrMouseEvent, line: number, col: number): boolean {
+		const component = this.#component as Component & Partial<MouseRoutable>;
+		if (component.routeMouse === undefined) return false;
+		try {
+			return component.routeMouse(event, line, col) !== false;
+		} catch (err) {
+			logger.warn("Tool renderer mouse routing failed", {
+				tool: this.#toolName,
+				stage: this.#stage,
+				error: String(err),
+			});
+			return false;
+		}
+	}
 
 	handleInput(data: string): void {
 		const handleInput = this.#component.handleInput;
@@ -227,13 +253,19 @@ export interface TranscriptLiveRegionProbe {
 	 */
 	isBlockUncommitted?(component: Component): boolean;
 }
-
 /** Minimal TUI surface ToolExecutionComponent uses to schedule repaints and share image budget. */
 export interface ToolExecutionUi {
 	requestRender(): void;
 	requestComponentRender(component: Component): void;
 	resetDisplay(): void;
 	imageBudget?: TUI["imageBudget"];
+	/** Optional fullscreen image viewer supplied by the active TUI host. */
+	openImageGallery?: (images: readonly ImageGalleryImage[], initialIndex?: number) => void;
+	/**
+	 * Normal-screen inline image clicks are opt-in: enabling mouse tracking here
+	 * disables the terminal's native scrollback wheel.
+	 */
+	allowInlineImageClicks?: boolean;
 }
 
 export interface ToolExecutionOptions {
@@ -346,6 +378,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	#multiFileBoxes: (Box | Spacer)[] = []; // Extra boxes for multi-file edit results
 	#imageComponents: Image[] = [];
 	#imageSpacers: Spacer[] = [];
+	#imageGrid?: ImageGrid;
 	readonly #instanceId = ++toolExecutionInstanceSeq;
 	#toolName: string;
 	#toolLabel: string;
@@ -394,8 +427,11 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	 *  drain loop re-runs once the current compute settles, so a slow diff
 	 *  coalesces streamed ticks instead of being aborted by each one. */
 	#editDiffDirty = false;
-	// Cached converted images for Kitty protocol (which requires PNG), keyed by index
-	#convertedImages: Map<number, { data: string; mimeType: string }> = new Map();
+	// Converted PNGs are keyed by their source payload, so unchanged streaming
+	// snapshots retain the conversion and changed slots cannot reuse stale bytes.
+	#convertedImages: Map<string, { data: string; mimeType: string }> = new Map();
+	#inFlightImageConversions = new Set<string>();
+	#imageFingerprints = new Map<number, string>();
 	// Spinner animation for partial task results
 	#spinnerFrame?: number;
 	#spinnerActive = false;
@@ -408,6 +444,10 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	// sealed the block stays in the transcript's repaintable live region so a
 	// late result still repaints instead of stranding the streaming preview.
 	#sealed = false;
+	// A seal requested while Kitty conversions are in flight is deferred until
+	// the current image fingerprint has no pending conversions. Otherwise the
+	// ready PNG subset could commit before the eventual ImageGrid rebuild.
+	#sealRequested = false;
 	// Tool result snapshots that may be superseded by a later same-tool call
 	// while still in the transcript live region. `hub` uses this for repeated
 	// all-running polls; `todo` uses it for per-turn state snapshots so only the
@@ -658,6 +698,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		this.#firstResultViewportRepaintShapePainted = false;
 		this.#partialResultShapePainted = false;
 		this.#result = result;
+		this.#syncImageSources(this.#getAllImageBlocks());
 		this.#resultVersion++;
 		this.#isPartial = isPartial;
 		this.#displaceableByToolName = displaceableToolName(this.#toolName, result, isPartial);
@@ -691,6 +732,90 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		const xdevImages = isRecord(details) && isRecord(details.xdev) ? imageBlocksFromDetails(details.xdev.inner) : [];
 		return [...contentImages, ...detailImages, ...xdevImages];
 	}
+	#getGalleryImages(): ImageGalleryImage[] {
+		const galleryImages: ImageGalleryImage[] = [];
+		if (!this.#showImages || TERMINAL.imageProtocol === null) return galleryImages;
+		const imageBlocks = this.#getAllImageBlocks();
+		for (let i = 0; i < imageBlocks.length; i++) {
+			const image = imageBlocks[i]!;
+			if (!image.data || !image.mimeType) continue;
+			const fingerprint = this.#imageFingerprints.get(i);
+			const converted = fingerprint === undefined ? undefined : this.#convertedImages.get(fingerprint);
+			const data = converted?.data ?? image.data;
+			const mimeType = converted?.mimeType ?? image.mimeType;
+			if (TERMINAL.imageProtocol === ImageProtocol.Kitty && mimeType !== "image/png") continue;
+			galleryImages.push({ data, mimeType });
+		}
+		return galleryImages;
+	}
+
+	#openImageGallery(index: number): void {
+		const images = this.#getGalleryImages();
+		if (images.length === 0) return;
+		this.#ui.openImageGallery?.(images, Math.max(0, Math.min(index, images.length - 1)));
+	}
+
+	#syncImageSources(imageBlocks: Array<{ data?: string; mimeType?: string }>): void {
+		const next = new Map<number, string>();
+		const active = new Set<string>();
+		for (let i = 0; i < imageBlocks.length; i++) {
+			const fingerprint = imageSourceFingerprint(imageBlocks[i]);
+			next.set(i, fingerprint);
+			active.add(fingerprint);
+		}
+		for (const [index, previous] of this.#imageFingerprints) {
+			if (next.get(index) !== previous) this.#ui.imageBudget?.releaseId(this.#imageKey(index));
+		}
+		this.#imageFingerprints = next;
+		for (const fingerprint of this.#convertedImages.keys()) {
+			if (!active.has(fingerprint)) this.#convertedImages.delete(fingerprint);
+		}
+	}
+	/**
+	 * A hidden or protocol-less image cannot repaint its terminal graphics. Release
+	 * the stable ids before rebuilding the text-only shape so the next pass purges
+	 * the terminal store instead of leaving the old payload live.
+	 */
+	#releaseHiddenImageBudgetIds(): void {
+		if (this.#showImages && TERMINAL.imageProtocol) return;
+		const budget = this.#ui.imageBudget;
+		if (!budget) return;
+		for (const index of this.#imageFingerprints.keys()) {
+			budget.releaseId(this.#imageKey(index));
+		}
+	}
+
+	#hasCurrentImageFingerprint(fingerprint: string): boolean {
+		for (const current of this.#imageFingerprints.values()) {
+			if (current === fingerprint) return true;
+		}
+		return false;
+	}
+	#hasCurrentImageConversionsInFlight(): boolean {
+		for (const fingerprint of this.#imageFingerprints.values()) {
+			if (this.#inFlightImageConversions.has(fingerprint)) return true;
+		}
+		return false;
+	}
+
+	#settleImageConversion(fingerprint: string, converted: boolean): void {
+		const current = this.#hasCurrentImageFingerprint(fingerprint);
+		this.#inFlightImageConversions.delete(fingerprint);
+		const pending = this.#hasCurrentImageConversionsInFlight();
+
+		// A failed conversion still settles the live-region gate, but must not
+		// rebuild: updateDisplay would immediately schedule the same failed source
+		// again. Successful conversions rebuild so ImageGrid can replace the
+		// provisional ready-image subset.
+		if (current && converted) this.#displayInputVersion++;
+		if (!pending && this.#sealRequested) this.#sealed = true;
+		if (current && converted) this.#updateDisplay();
+		if (current || !pending) this.#ui.requestRender();
+	}
+
+	#imageKey(index: number): string {
+		return `te${this.#instanceId}:${index}`;
+	}
 
 	/**
 	 * Convert non-PNG images to PNG for Kitty graphics protocol.
@@ -705,22 +830,24 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 
 		for (let i = 0; i < imageBlocks.length; i++) {
 			const img = imageBlocks[i];
-			if (!img.data || !img.mimeType) continue;
-			// Skip if already PNG or already converted
-			if (img.mimeType === "image/png") continue;
-			if (this.#convertedImages.has(i)) continue;
+			if (!img.data || !img.mimeType || img.mimeType === "image/png") continue;
+			const fingerprint = this.#imageFingerprints.get(i);
+			if (!fingerprint || this.#convertedImages.has(fingerprint) || this.#inFlightImageConversions.has(fingerprint))
+				continue;
 
-			// Convert async - catch errors from processing
-			const index = i;
+			this.#inFlightImageConversions.add(fingerprint);
+			let converted = false;
 			convertImageToPng({ type: "image", data: img.data, mimeType: img.mimeType })
-				.then(converted => {
-					this.#convertedImages.set(index, converted);
-					this.#displayInputVersion++;
-					this.#updateDisplay();
-					this.#ui.requestRender();
+				.then(result => {
+					if (!this.#hasCurrentImageFingerprint(fingerprint)) return;
+					this.#convertedImages.set(fingerprint, result);
+					converted = true;
 				})
 				.catch(() => {
 					// Ignore conversion failures - display will use original image format
+				})
+				.finally(() => {
+					this.#settleImageConversion(fingerprint, converted);
 				});
 		}
 	}
@@ -893,14 +1020,17 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	 * Whether this block has reached a terminal state for transcript freezing.
 	 * Reports `false` while it can still visually change so the
 	 * {@link TranscriptContainer} keeps it inside the repaintable live region:
-	 * a foreground tool awaiting its result, or one streaming partial output.
+	 * a foreground tool awaiting its result, one streaming partial output, or a
+	 * final Kitty result whose non-PNG images are still being converted.
 	 * Hidden blocks render no rows, so they cannot gate later streaming content.
 	 * Visibility toggles reset and replay the transcript before revealing them.
 	 * A final (non-partial) result, a background-async tool the agent has moved
-	 * past, or an explicit {@link seal} also flips it to `true`.
+	 * past, or an explicit {@link seal} also flips it to `true` once those conversions
+	 * settle.
 	 */
 	isTranscriptBlockFinalized(): boolean {
 		if (!this.#toolActivityVisible) return true;
+		if (this.#hasCurrentImageConversionsInFlight()) return false;
 		if (this.#sealed) return true;
 		if (this.#result === undefined) return false;
 		// A displaceable snapshot stays live: its rows are kept out of native
@@ -919,8 +1049,8 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	 * transcript live region.
 	 */
 	seal(): void {
-		if (this.#sealed) return;
-		this.#sealed = true;
+		if (this.#sealed || this.#sealRequested) return;
+		this.#sealRequested = true;
 		this.#displaceableByToolName = undefined;
 		// A sealed detached task is abandoned history: settle its progress rows
 		// on static gray — but only while none of them are committed; a recolor
@@ -930,6 +1060,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 			this.#backgroundTaskFrozenStyled = true;
 		}
 		this.stopAnimation();
+		if (!this.#hasCurrentImageConversionsInFlight()) this.#sealed = true;
 		this.#updateDisplay();
 		this.#ui.requestRender();
 	}
@@ -989,10 +1120,16 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	}
 
 	#updateDisplay(): void {
+		// Releasing before the rebuild is important: removing Image children alone
+		// cannot tell ImageBudget that their Kitty ids are no longer live.
+		this.#releaseHiddenImageBudgetIds();
 		// `TERMINAL.imageProtocol` is resolved by an async capability probe during
 		// TUI startup, so a result rendered before it lands must re-shape once it
 		// does (it gates Image children vs text fallback in #rebuildDisplay); keyed
 		// here for the same reason markdown.ts keys its render cache on it.
+		// Re-check conversion here as well as after result updates: capability
+		// discovery can promote a result that was first rendered without Kitty.
+		this.#maybeConvertImagesForKitty();
 		const key = `${this.#resultVersion}|${this.#expanded}|${this.#isPartial}|${this.#spinnerFrame ?? "-"}|${this.#showImages}|${getThemeEpoch()}|${this.#displayInputVersion}|${this.#backgroundTaskFrozenStyled}|${TERMINAL.imageProtocol ?? "-"}|${this.#imageSizeKey()}`;
 		if (key === this.#lastDisplayKey && this.#displayBuilt) return;
 		this.#lastDisplayKey = key;
@@ -1313,8 +1450,11 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 			this.#contentText.setCustomBgFn(stateBgFn);
 			this.#contentText.invalidate();
 		}
-
 		// Handle images (same for both custom and built-in)
+		if (this.#imageGrid) {
+			this.removeChild(this.#imageGrid);
+			this.#imageGrid = undefined;
+		}
 		for (const img of this.#imageComponents) {
 			this.removeChild(img);
 		}
@@ -1326,31 +1466,54 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 
 		if (this.#result) {
 			const imageBlocks = this.#getAllImageBlocks();
+			const imageComponents: Image[] = [];
 
+			let galleryIndex = 0;
 			for (let i = 0; i < imageBlocks.length; i++) {
 				const img = imageBlocks[i];
 				if (TERMINAL.imageProtocol && this.#showImages && img.data && img.mimeType) {
-					// Use converted PNG for Kitty protocol if available
-					const converted = this.#convertedImages.get(i);
+					// Use converted PNG for Kitty protocol if available.
+					const fingerprint = this.#imageFingerprints.get(i);
+					const converted = fingerprint === undefined ? undefined : this.#convertedImages.get(fingerprint);
 					const imageData = converted?.data ?? img.data;
 					const imageMimeType = converted?.mimeType ?? img.mimeType;
 
-					// For Kitty, skip non-PNG images that haven't been converted yet
+					// For Kitty, skip non-PNG images that haven't been converted yet.
 					if (TERMINAL.imageProtocol === ImageProtocol.Kitty && imageMimeType !== "image/png") {
 						continue;
 					}
-
-					const spacer = new Spacer(1);
-					this.addChild(spacer);
-					this.#imageSpacers.push(spacer);
+					const currentGalleryIndex = galleryIndex++;
 					const imageComponent = new Image(
 						imageData,
 						imageMimeType,
 						{ fallbackColor: (s: string) => theme.fg("toolOutput", s) },
-						{ ...resolveImageOptions(), budget: this.#ui.imageBudget, imageKey: `te${this.#instanceId}:${i}` },
+						{
+							...resolveImageOptions(),
+							budget: this.#ui.imageBudget,
+							imageKey: this.#imageKey(i),
+							imageIndex: currentGalleryIndex,
+							onClick:
+								this.#ui.allowInlineImageClicks !== true || this.#ui.openImageGallery === undefined
+									? undefined
+									: () => this.#openImageGallery(currentGalleryIndex),
+						},
 					);
-					this.#imageComponents.push(imageComponent);
-					this.addChild(imageComponent);
+					imageComponents.push(imageComponent);
+				}
+			}
+
+			if (imageComponents.length > 0) {
+				const spacer = new Spacer(1);
+				this.addChild(spacer);
+				this.#imageSpacers.push(spacer);
+
+				if (imageComponents.length === 1) {
+					this.#imageComponents.push(imageComponents[0]);
+					this.addChild(imageComponents[0]);
+				} else {
+					this.#imageComponents = imageComponents;
+					this.#imageGrid = new ImageGrid(imageComponents);
+					this.addChild(this.#imageGrid);
 				}
 			}
 		}

@@ -215,7 +215,7 @@ class SelectSubmenu extends Container {
 	}
 
 	/** Mouse routed from the host: wheel steps, hover lights, click confirms. */
-	routeMouse(event: SgrMouseEvent, line: number, _col: number): void {
+	override routeMouse(event: SgrMouseEvent, line: number, _col: number): void {
 		routeSelectListMouse(this.#selectList, event, line - this.#selectListLineOffset);
 	}
 
