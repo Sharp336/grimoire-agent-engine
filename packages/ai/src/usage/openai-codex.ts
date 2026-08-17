@@ -583,10 +583,20 @@ function isCodexSparkRequest(context?: CredentialRankingContext): boolean {
 }
 
 /**
+ * Mirror of `SALVAGE_MIN_USED_FRACTION` in the coding-agent expiry-salvage
+ * planner (`packages/coding-agent/src/session/codex-auto-reset.ts`). A reset
+ * spent on windows that are almost entirely free restores ~nothing, so both
+ * auto-redeem and the ranking boost agree on when a credit is worth acting
+ * on — keeping routing and redemption from diverging (#8342).
+ */
+const CODEX_SALVAGE_MIN_USED_FRACTION = 0.25;
+
+/**
  * Soonest saved-reset expiry (epoch ms) within the salvage horizon, or
  * undefined when the account has no such credit. Credit details are consumed
  * conservatively: aggregate-only, missing, invalid, or already-expired
- * entries never produce a boost (#8342).
+ * entries never produce a boost, and neither do credits whose chat windows
+ * are mostly free (redeeming them would restore almost nothing) (#8342).
  */
 function getCodexResetCreditExpiryBoostMs(
 	report: UsageReport,
@@ -597,6 +607,10 @@ function getCodexResetCreditExpiryBoostMs(
 	if (horizonMs === undefined || horizonMs <= 0) return undefined;
 	const credits = report.resetCredits;
 	if (!credits || credits.availableCount <= 0 || !credits.credits?.length) return undefined;
+	const windows = codexRankingStrategy.findWindowLimits(report, context);
+	const primaryUsed = windows.primary?.amount.usedFraction ?? 0;
+	const secondaryUsed = windows.secondary?.amount.usedFraction ?? 0;
+	if (Math.max(primaryUsed, secondaryUsed) < CODEX_SALVAGE_MIN_USED_FRACTION) return undefined;
 	let soonestMs: number | undefined;
 	for (const credit of credits.credits) {
 		if ((credit.status ?? "available") !== "available" || !credit.expiresAt) continue;

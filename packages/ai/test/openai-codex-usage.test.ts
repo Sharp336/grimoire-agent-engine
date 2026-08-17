@@ -8,7 +8,7 @@
  */
 import { describe, expect, it } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
-import type { CredentialRankingContext, UsageReport } from "@oh-my-pi/pi-ai/usage";
+import type { CredentialRankingContext, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import { codexRankingStrategy, openaiCodexUsageProvider } from "@oh-my-pi/pi-ai/usage/openai-codex";
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -396,10 +396,19 @@ describe("openai-codex usage parser", () => {
 	describe("codexRankingStrategy.getResetCreditExpiryBoostMs (#8342)", () => {
 		const now = Date.parse("2026-08-15T12:00:00Z");
 		const inHours = (hours: number): string => new Date(now + hours * HOUR_MS).toISOString();
-		const baseReport = (): UsageReport => ({
+		const windowLimit = (key: "primary" | "secondary", usedFraction: number): UsageLimit => ({
+			id: `openai-codex:${key}`,
+			label: key === "primary" ? "1 Hour" : "7 Day",
+			scope: { provider: "openai-codex", windowId: key === "primary" ? "1h" : "7d", shared: true },
+			amount: { unit: "percent", usedFraction },
+		});
+		const baseReport = (overrides: { primaryUsed?: number; secondaryUsed?: number } = {}): UsageReport => ({
 			provider: "openai-codex",
 			fetchedAt: now,
-			limits: [],
+			limits: [
+				windowLimit("primary", overrides.primaryUsed ?? 0.5),
+				windowLimit("secondary", overrides.secondaryUsed ?? 0.5),
+			],
 			metadata: { accountId: "acct-1" },
 		});
 		const context = (salvageHorizonMs: number): CredentialRankingContext => ({
@@ -469,6 +478,19 @@ describe("openai-codex usage parser", () => {
 			};
 			expect(codexRankingStrategy.getResetCreditExpiryBoostMs?.(withCredit, context(0), now)).toBeUndefined();
 			expect(codexRankingStrategy.getResetCreditExpiryBoostMs?.(withCredit, undefined, now)).toBeUndefined();
+		});
+
+		it("skips a credit whose chat windows are mostly free", () => {
+			// Mirrors the auto-redeem SALVAGE_MIN_USED_FRACTION gate: spending a
+			// reset on nearly-empty windows restores ~nothing, so the ranking
+			// boost must not steer work to such an account (#8342 review).
+			const mostlyFree: UsageReport = {
+				...baseReport({ primaryUsed: 0.1, secondaryUsed: 0.2 }),
+				resetCredits: { availableCount: 1, credits: [{ expiresAt: inHours(3), status: "available" }] },
+			};
+			expect(
+				codexRankingStrategy.getResetCreditExpiryBoostMs?.(mostlyFree, context(12 * HOUR_MS), now),
+			).toBeUndefined();
 		});
 	});
 });

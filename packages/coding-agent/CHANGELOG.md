@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Codex credential ranking now boosts accounts whose saved reset credits expire within the configured salvage horizon (`codexResets.salvageHorizonHours`), so new sessions steer toward the credit that would otherwise be lost before it expires ([#8342](https://github.com/can1357/oh-my-pi/issues/8342)).
+
 ## [17.3.4] - 2026-08-14
 
 ### Changed

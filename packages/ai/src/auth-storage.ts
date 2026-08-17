@@ -4533,11 +4533,20 @@ export class AuthStorage {
 			return left.planPriority - right.planPriority;
 		}
 		if (left.hasPriorityBoost !== right.hasPriorityBoost) return left.hasPriorityBoost ? -1 : 1;
+		// Short-window guard: candidates whose primary (e.g. 5h) window is
+		// nearly exhausted rank behind cool ones regardless of drain urgency —
+		// overflow lands on the next-most-urgent cool account instead.
+		const leftHot = left.primaryUsed >= PRIMARY_WINDOW_HOT_FRACTION;
+		const rightHot = right.primaryUsed >= PRIMARY_WINDOW_HOT_FRACTION;
+		if (leftHot !== rightHot) return leftHot ? 1 : -1;
 		// Expiring saved-reset boost: an account whose reset would otherwise die
 		// inside the salvage horizon outranks siblings without one; among boosted
 		// candidates the soonest expiry wins, so work steers to the credit that
-		// is about to be lost. Blocked/exhausted/plan-ineligible filtering above
-		// still gates, so the boost never resurrects an unusable account.
+		// is about to be lost. It sits AFTER the hot-window guard so a nearly
+		// exhausted account is not piled on just because it holds a credit —
+		// overflow still lands on a cool sibling first. Blocked/exhausted/
+		// plan-ineligible filtering above already gates, so the boost never
+		// resurrects an unusable account.
 		const leftReset = left.resetCreditExpiryBoostMs;
 		const rightReset = right.resetCreditExpiryBoostMs;
 		if (leftReset !== rightReset) {
@@ -4545,12 +4554,6 @@ export class AuthStorage {
 			if (rightReset === undefined) return -1;
 			return leftReset - rightReset;
 		}
-		// Short-window guard: candidates whose primary (e.g. 5h) window is
-		// nearly exhausted rank behind cool ones regardless of drain urgency —
-		// overflow lands on the next-most-urgent cool account instead.
-		const leftHot = left.primaryUsed >= PRIMARY_WINDOW_HOT_FRACTION;
-		const rightHot = right.primaryUsed >= PRIMARY_WINDOW_HOT_FRACTION;
-		if (leftHot !== rightHot) return leftHot ? 1 : -1;
 		// Usage-backed candidates outrank unmeasured ones: required-drain
 		// scores are only comparable between measured windows, and the
 		// clockless headroom fallback (0..1) must not let an account whose
