@@ -15,6 +15,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { engines, version } from "../package.json" with { type: "json" };
+import { RUNTIME_BUILD_SOURCE_COMMIT } from "./runtime-build-source";
 
 /** App name (e.g. "omp") */
 export const APP_NAME: string = "omp";
@@ -33,6 +34,41 @@ export const USER_AGENT = `omp/${VERSION}`;
 
 /** Minimum Bun version */
 export const MIN_BUN_VERSION: string = engines.bun.replace(/[^0-9.]/g, "");
+
+/** Stable schema emitted by `omp --build-info` from a compiled artifact. */
+export const RUNTIME_BUILD_INFO_SCHEMA = "sheltie.runtime-build-info/v1";
+
+export interface RuntimeBuildInfo {
+	readonly schema: typeof RUNTIME_BUILD_INFO_SCHEMA;
+	readonly name: "omp";
+	readonly version: string;
+	readonly sourceCommit: string;
+}
+
+const SOURCE_COMMIT_RE = /^[0-9a-f]{40}$/;
+
+/** Accept only the immutable Git object identity embedded by the binary builder. */
+export function parseEmbeddedSourceCommit(sourceCommit: string | undefined): string | undefined {
+	return sourceCommit !== undefined && SOURCE_COMMIT_RE.test(sourceCommit) ? sourceCommit : undefined;
+}
+
+/**
+ * Resolve build metadata only from the source identity module replaced by the
+ * standalone binary builder. Source runs keep its immutable `undefined`
+ * fallback, so ambient process state cannot claim artifact provenance.
+ */
+export function getRuntimeBuildInfo(
+	sourceCommit: string | undefined = RUNTIME_BUILD_SOURCE_COMMIT,
+): RuntimeBuildInfo | undefined {
+	const embeddedSourceCommit = parseEmbeddedSourceCommit(sourceCommit);
+	if (!embeddedSourceCommit) return undefined;
+	return {
+		schema: RUNTIME_BUILD_INFO_SCHEMA,
+		name: "omp",
+		version: VERSION,
+		sourceCommit: embeddedSourceCommit,
+	};
+}
 
 const PROFILE_NAME_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const PROFILE_ENV_KEYS = ["OMP_PROFILE", "PI_PROFILE"] as const;

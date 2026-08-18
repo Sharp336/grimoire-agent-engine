@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `omp --build-info` for compiled binaries, reporting the exact source commit embedded by clean local and release builds.
+
 ## [17.3.7] - 2026-08-17
 
 ### Changed

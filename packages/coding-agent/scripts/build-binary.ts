@@ -2,7 +2,7 @@
 
 import { createRequire } from "node:module";
 import * as path from "node:path";
-import { compileCodingAgent } from "./compile-binary";
+import { compileCodingAgent, resolveCleanSourceCommit } from "./compile-binary";
 
 const packageDir = path.join(import.meta.dir, "..");
 const repoRoot = path.join(packageDir, "..", "..");
@@ -71,6 +71,8 @@ async function runCommand(
 }
 
 async function main(): Promise<void> {
+	const sourceCommit = resolveCleanSourceCommit(repoRoot);
+
 	const crossBuild = resolveCrossBuild(Bun.env.CROSS_TARGET);
 	const shouldAdhocSign = process.platform === "darwin" && !crossBuild && Bun.env.BUN_NO_CODESIGN_MACHO_BINARY !== "1";
 	const outName = crossBuild ? `omp-${crossBuild.id}` : "omp";
@@ -97,6 +99,7 @@ async function main(): Promise<void> {
 				target: crossBuild?.target,
 				executablePath: Bun.env.BUN_COMPILE_EXECUTABLE_PATH || undefined,
 				skipBuiltinCodesign: shouldAdhocSign,
+				sourceCommit,
 			});
 
 			if (shouldAdhocSign) {

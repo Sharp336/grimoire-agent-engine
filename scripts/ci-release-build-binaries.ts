@@ -3,7 +3,11 @@
 import * as fs from "node:fs/promises";
 import { createRequire } from "node:module";
 import * as path from "node:path";
-import { COMPILED_EXTERNAL_DEPENDENCIES, compileCodingAgent } from "../packages/coding-agent/scripts/compile-binary";
+import {
+	COMPILED_EXTERNAL_DEPENDENCIES,
+	compileCodingAgent,
+	resolveCleanSourceCommit,
+} from "../packages/coding-agent/scripts/compile-binary";
 
 interface BinaryTarget {
 	id: string;
@@ -129,7 +133,7 @@ async function embedNative(target: BinaryTarget): Promise<void> {
 	});
 }
 
-async function buildBinary(target: BinaryTarget): Promise<void> {
+async function buildBinary(target: BinaryTarget, sourceCommit: string): Promise<void> {
 	console.log(`Building ${target.outfile}...`);
 	await embedNative(target);
 	if (isDryRun) {
@@ -147,6 +151,7 @@ async function buildBinary(target: BinaryTarget): Promise<void> {
 		target: target.target,
 		minifyIdentifiers: true,
 		skipBuiltinCodesign: shouldAdhocSignDarwinBinary(target),
+		sourceCommit,
 	});
 	// Bun 1.3.12 emits a truncated Mach-O signature on darwin builds.
 	if (shouldAdhocSignDarwinBinary(target)) {
@@ -190,6 +195,8 @@ async function main(): Promise<void> {
 	if (selectedTargets.length === 0) {
 		throw new Error("No release targets selected.");
 	}
+	// Resolve before code generation makes its checked-in placeholders dirty.
+	const sourceCommit = isDryRun ? "" : resolveCleanSourceCommit(repoRoot);
 
 	await fs.mkdir(binariesDir, { recursive: true });
 	// Generate inside the try so resetArtifacts() always restores the empty
@@ -197,7 +204,7 @@ async function main(): Promise<void> {
 	try {
 		await generateBundle();
 		for (const target of selectedTargets) {
-			await buildBinary(target);
+			await buildBinary(target, sourceCommit);
 		}
 	} finally {
 		await resetArtifacts();
