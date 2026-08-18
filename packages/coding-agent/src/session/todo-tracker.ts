@@ -5,9 +5,20 @@ import type { Settings } from "../config/settings";
 import eagerTaskPrompt from "../prompts/system/eager-task.md" with { type: "text" };
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
 import midRunTodoNudgePrompt from "../prompts/system/mid-run-todo-nudge.md" with { type: "text" };
-import { getLatestTodoPhasesFromEntries, isTodoPhase, type TodoItem, type TodoPhase } from "../tools/todo";
+import postCompactionIncompleteTodosPrompt from "../prompts/system/post-compaction-incomplete-todos.md" with {
+	type: "text",
+};
+import { getLatestTodoPhasesFromEntries, isTodoPhase, type TodoPhase } from "../tools/todo";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { AgentSessionEvent } from "./agent-session-events";
+import {
+	capIncompleteTodoRows,
+	collectIncompleteTodoRows,
+	formatIncompleteTodoSnapshotLines,
+	formatIncompleteTodosSection,
+	groupIncompleteTodoRowsByPhase,
+	upsertIncompleteTodosSection,
+} from "./incomplete-todos";
 import type { SessionManager } from "./session-manager";
 
 const MID_RUN_NUDGE_MUTATION_THRESHOLD = 12;
@@ -50,13 +61,17 @@ export interface TodoTrackerHost {
 	model(): Model | undefined;
 	agentKind(): "main" | "sub";
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
-	scheduleAgentContinue(options: { generation?: number }): void;
+	scheduleAgentContinue(options: { generation?: number; onSkip?: () => void }): void;
+	/** Drop a queued post-budget todo force so a skipped continue cannot hijack the next turn. */
+	clearForcedTodoToolChoice(): void;
 	promptGeneration(): number;
 	hasPendingAsyncWake(): boolean;
 	getActiveToolNames(): string[];
 	toolRegistry(): Map<string, AgentTool>;
 	planModeEnabled(): boolean;
 	consumeLastServedToolChoiceLabel(): string | undefined;
+	/** Force the next model turn to call the todo tool (post-budget escape hatch). */
+	forceTodoToolChoice(): boolean;
 }
 
 /** Owns canonical todo state, eager preludes, and completion reminders. */
@@ -64,7 +79,6 @@ export class TodoTracker {
 	readonly #host: TodoTrackerHost;
 	#phases: TodoPhase[] = [];
 	#reminderCount = 0;
-	#reminderAwaitingProgress = false;
 	#mutationsSinceLastTouch = 0;
 	#midRunNudgeCount = 0;
 
@@ -95,7 +109,6 @@ export class TodoTracker {
 	/** Resets per-prompt reminder and mutation budgets. */
 	resetCycle(): void {
 		this.#reminderCount = 0;
-		this.#reminderAwaitingProgress = false;
 		this.#mutationsSinceLastTouch = 0;
 		this.#midRunNudgeCount = 0;
 	}
@@ -107,7 +120,6 @@ export class TodoTracker {
 		} else if (!isError && MUTATING_TOOLS[toolName]) {
 			this.#mutationsSinceLastTouch++;
 		}
-		this.#reminderAwaitingProgress = false;
 	}
 
 	/** Detects whether a successful todo result came from an init operation. */
@@ -184,11 +196,55 @@ export class TodoTracker {
 		};
 	}
 
+	/** True when any todo is still pending or in_progress (blocked/abandoned/completed do not count). */
+	hasOpenActionableTodos(): boolean {
+		return this.#incompleteActionableByPhase().some(phase => phase.tasks.length > 0);
+	}
+
+	/**
+	 * Structured incomplete-todo lines for the compaction summarizer input
+	 * (`SummaryOptions.extraContext`), so the contract survives the cut.
+	 */
+	buildIncompleteTodosCompactionContext(): string[] {
+		const rows = collectIncompleteTodoRows(this.#phases);
+		if (rows.length === 0) return [];
+		return [
+			"Incomplete todos that MUST survive compaction (pending/in_progress only; a text-only stop is not completion):",
+			...formatIncompleteTodoSnapshotLines(rows),
+		];
+	}
+
+	/**
+	 * Upserts the incomplete todo list into a compaction summary so it remains
+	 * durable text after snapcompact/LLM summarization. A later compact rewrites
+	 * the section from the live list, or strips it when nothing remains.
+	 */
+	appendIncompleteTodosToSummary(summary: string): string {
+		const rows = collectIncompleteTodoRows(this.#phases);
+		return upsertIncompleteTodosSection(summary, formatIncompleteTodosSection(rows));
+	}
+
 	/** Builds reminder-only eager preludes after compaction. */
 	buildPostCompactionEagerNudges(): AgentMessage[] {
 		const nudges: AgentMessage[] = [];
-		const todo = this.createEagerTodoPrelude(undefined);
-		if (todo) nudges.push(todo.message);
+		const rows = collectIncompleteTodoRows(this.#phases);
+		if (rows.length > 0) {
+			const capped = capIncompleteTodoRows(rows);
+			nudges.push({
+				role: "custom",
+				customType: "post-compaction-incomplete-todos",
+				content: prompt.render(postCompactionIncompleteTodosPrompt, {
+					phases: groupIncompleteTodoRowsByPhase(capped.rows),
+					overflow: capped.overflow,
+				}),
+				display: false,
+				attribution: "agent",
+				timestamp: Date.now(),
+			});
+		} else {
+			const todo = this.createEagerTodoPrelude(undefined);
+			if (todo) nudges.push(todo.message);
+		}
 		const task = this.createEagerTaskPrelude(undefined);
 		if (task) nudges.push(task);
 		return nudges;
@@ -198,46 +254,19 @@ export class TodoTracker {
 	async checkCompletion(message: AssistantMessage): Promise<boolean> {
 		if (this.#host.consumeLastServedToolChoiceLabel() === "user-force") return false;
 		if (this.#host.planModeEnabled()) return false;
-		if (this.#reminderAwaitingProgress) {
-			logger.debug("Todo completion: prior reminder still awaiting agent action; staying silent", {
-				attempt: this.#reminderCount,
-			});
-			return false;
-		}
 		if (!this.#host.settings.get("todo.reminders") || !this.#host.settings.get("todo.enabled")) {
 			this.#reminderCount = 0;
-			this.#reminderAwaitingProgress = false;
 			return false;
 		}
-		const remindersMax = this.#host.settings.get("todo.remindersMax");
-		if (this.#reminderCount >= remindersMax) {
-			logger.debug("Todo completion: max reminders reached", { count: this.#reminderCount });
-			return false;
-		}
-		const phases = this.phases;
-		if (phases.length === 0) {
-			this.#reminderCount = 0;
-			this.#reminderAwaitingProgress = false;
-			return false;
-		}
-		const incompleteByPhase = phases
-			.map(phase => ({
-				name: phase.name,
-				tasks: phase.tasks
-					.filter(
-						(task): task is TodoItem & { status: "pending" | "in_progress" } =>
-							task.status === "pending" || task.status === "in_progress",
-					)
-					.map(task => ({ content: task.content, status: task.status })),
-			}))
-			.filter(phase => phase.tasks.length > 0);
+		const incompleteByPhase = this.#incompleteActionableByPhase();
 		const incomplete = incompleteByPhase.flatMap(phase => phase.tasks);
 		if (incomplete.length === 0) {
 			this.#reminderCount = 0;
-			this.#reminderAwaitingProgress = false;
 			return false;
 		}
-		if (isAwaitingUserAnswer(message)) {
+		// Skip only when the turn is awaiting a user answer and does not also
+		// claim completion. A slogan plus "anything else?" still reminds.
+		if (isAwaitingUserAnswer(message) && !claimsCompletion(textBeforeTrailingQuestion(assistantText(message)))) {
 			logger.debug("Todo completion: assistant is waiting for user input; skipping reminder", {
 				incomplete: incomplete.length,
 			});
@@ -249,24 +278,34 @@ export class TodoTracker {
 			});
 			return false;
 		}
-		this.#reminderCount++;
+		const remindersMax = this.#host.settings.get("todo.remindersMax");
+		const pastBudget = this.#reminderCount >= remindersMax;
+		if (!pastBudget) {
+			this.#reminderCount++;
+		}
+		const attempt = pastBudget ? remindersMax : this.#reminderCount;
+		const isEscapeHatch = pastBudget || this.#reminderCount >= remindersMax;
 		const todoList = incompleteByPhase
-			.map(phase => `- ${phase.name}\n${phase.tasks.map(task => `  - ${task.content}`).join("\n")}`)
+			.map(phase => `- ${phase.name}\n${phase.tasks.map(task => `  - [${task.status}] ${task.content}`).join("\n")}`)
 			.join("\n");
+		const actionLine = isEscapeHatch
+			? "Do not close with prose. Mark each remaining item complete, blocked, or abandoned with the todo tool (done / block / drop), then continue real work. A text-only stop is not completion."
+			: "Please continue working on these tasks or mark them complete/blocked/abandoned with the todo tool if finished. A text-only stop is not completion.";
 		const reminder =
 			`<system-reminder>\n` +
 			`You stopped with ${incomplete.length} incomplete todo item(s):\n${todoList}\n\n` +
-			`Please continue working on these tasks or mark them complete if finished.\n` +
-			`(Reminder ${this.#reminderCount}/${remindersMax})\n` +
+			`${actionLine}\n` +
+			`(Reminder ${attempt}/${remindersMax}${pastBudget ? "; budget spent — todo tool required" : ""})\n` +
 			`</system-reminder>`;
-		logger.debug("Todo completion: sending reminder", {
+		logger.debug(pastBudget ? "Todo completion: post-budget escape hatch" : "Todo completion: sending reminder", {
 			incomplete: incomplete.length,
-			attempt: this.#reminderCount,
+			attempt,
+			pastBudget,
 		});
 		await this.#host.emitSessionEvent({
 			type: "todo_reminder",
 			todos: incomplete,
-			attempt: this.#reminderCount,
+			attempt,
 			maxAttempts: remindersMax,
 		});
 		const reminderMessage: Message = {
@@ -276,10 +315,18 @@ export class TodoTracker {
 			timestamp: Date.now(),
 		};
 		this.#mutationsSinceLastTouch = 0;
-		this.#reminderAwaitingProgress = true;
 		this.#host.agent.appendMessage(reminderMessage);
 		this.#host.sessionManager.appendMessage(reminderMessage);
-		this.#host.scheduleAgentContinue({ generation: this.#host.promptGeneration() });
+		if (isEscapeHatch) {
+			this.#host.forceTodoToolChoice();
+		}
+		// Continue even if forceTodoToolChoice no-ops (todo missing / no named choice).
+		this.#host.scheduleAgentContinue({
+			generation: this.#host.promptGeneration(),
+			// User-prompt preempt / abort / compaction skips the continue but must not
+			// leave a forced todo queued for the next unrelated turn.
+			onSkip: () => this.#host.clearForcedTodoToolChoice(),
+		});
 		return true;
 	}
 
@@ -324,6 +371,13 @@ export class TodoTracker {
 			toolRefs: { task: wireName("task"), todo: wireName("todo") },
 			taskBatch: this.#host.settings.get("task.batch"),
 		};
+	}
+
+	#incompleteActionableByPhase(): Array<{
+		name: string;
+		tasks: Array<{ content: string; status: "pending" | "in_progress" }>;
+	}> {
+		return groupIncompleteTodoRowsByPhase(collectIncompleteTodoRows(this.#phases));
 	}
 
 	#clonePhases(phases: TodoPhase[]): TodoPhase[] {
@@ -380,6 +434,17 @@ function isResponseCueLine(line: string): boolean {
 		.text.replace(/[.!?。！？]+$/, "")
 		.trim();
 	return USER_RESPONSE_CUE_RE.test(candidate);
+}
+
+const COMPLETION_CLAIM_RE =
+	/\b(?:(?:i(?:'ve| have)|we(?:'ve| have))\s+(?:now\s+)?(?:finished|completed|done)\s+(?:everything|all)\b|(?:i(?:'m| am)|we(?:'re| are))\s+(?:all\s+)?(?:done|finished)\b|(?:the\s+)?task(?:s)?\s+(?:is\s+|are\s+|now\s+)?complete\b|(?:the\s+)?(?:work|job)\s+is\s+(?:done|finished|complete(?:d)?)\b|(?:finished|completed)\s+everything\b|everything\s+(?:is\s+)?(?:done|finished|complete(?:d)?)\b|all\s+done\b|all\s+(?:the\s+)?(?:tasks?|items?|todos?|work)\s+(?:are\s+|is\s+|now\s+)?(?:done|finished|complete(?:d)?|wired)\b|all\s+\d+\s+items?\b[\s\S]{0,40}\b(?:done|wired|complete|finished)\b|that(?:'s| is)\s+(?:all|everything)\b)/i;
+
+function textBeforeTrailingQuestion(text: string): string {
+	return text.replace(/(?:^|[\n.!]\s*)[^.!?\n？]*[?？]\s*$/u, "").trim();
+}
+
+function claimsCompletion(text: string): boolean {
+	return text.length > 0 && COMPLETION_CLAIM_RE.test(text);
 }
 
 function isAwaitingUserAnswer(message: AssistantMessage): boolean {

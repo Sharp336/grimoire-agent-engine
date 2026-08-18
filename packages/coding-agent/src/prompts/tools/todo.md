@@ -25,6 +25,7 @@ Each completion: earliest still-open task (phase order) auto-promotes to `in_pro
 ## Rules
 
 - Mark tasks done immediately after finishing; complete phases in order.
+- If items are pending and none are in_progress, mark one in_progress before continuing.
 - NEVER make a todo call the turn's only tool call. Batch with real work: `init` with first reads/edits; each `done`/`start` with next action. Solo todo turns waste a round trip.
 - Waiting on something you can't act on—a user decision, another agent, external service: `block` task (optional `reason`); remains tracked but avoids stop reminder. `unblock` when actionable. If blocker agent-actionable, `append` an unblocking task instead.
 - Keep introduced `task`/`phase` strings stable.

@@ -235,6 +235,10 @@ export interface SessionMaintenanceHost {
 	resetCodexProviderAfterCompaction(compaction: CodexCompactionContext): void;
 	resetPlanReference(): void;
 	syncTodoPhasesFromBranch(): void;
+	/** Live pending/in_progress todo lines for the compaction summarizer input. */
+	incompleteTodosCompactionContext(): string[];
+	/** Keep incomplete todos in the standing compaction summary text. */
+	appendIncompleteTodosToCompactionSummary(summary: string): string;
 	resetAdvisorRuntimes(reason?: string): void;
 	rebaseAfterCompaction(): void;
 	recordAnchoredHistoryRewrite(tokensRemoved: number): void;
@@ -636,7 +640,7 @@ export class SessionMaintenance {
 				compactionCandidates = this.#getCompactionModelCandidates(availableModels);
 			}
 			const pathEntries = this.#host.sessionManager.getBranch();
-			const preparation = prepareCompaction(pathEntries, effectiveSettings, this.#model);
+			let preparation = prepareCompaction(pathEntries, effectiveSettings, this.#model);
 			if (!preparation) {
 				// Check why we can't compact
 				const lastEntry = pathEntries[pathEntries.length - 1];
@@ -670,6 +674,8 @@ export class SessionMaintenance {
 			}
 
 			const compactionPrep = await this.#prepareCompactionFromHooks(preparation, hookCompaction);
+			this.#host.syncTodoPhasesFromBranch();
+			preparation = this.#withIncompleteTodoSnapshot(preparation);
 
 			// Strategy honored on manual /compact too. Custom instructions (public
 			// user focus OR internal plan-mode guidance) imply a directed LLM
@@ -843,7 +849,7 @@ export class SessionMaintenance {
 						compactionAbortController.signal,
 						{
 							promptOverride: this.#host.obfuscateTextForProvider(compactionPrep.hookPrompt),
-							extraContext: compactionPrep.hookContext,
+							extraContext: this.#compactionExtraContext(compactionPrep.hookContext),
 							remoteInstructions: this.#host.baseSystemPrompt().join("\n\n"),
 							convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
 							codexCompaction,
@@ -871,6 +877,7 @@ export class SessionMaintenance {
 				throw new CompactionCancelledError();
 			}
 
+			summary = this.#host.appendIncompleteTodosToCompactionSummary(summary);
 			this.#host.sessionManager.appendCompaction(
 				summary,
 				shortSummary,
@@ -1547,6 +1554,29 @@ export class SessionMaintenance {
 		);
 	}
 
+	#compactionExtraContext(hookContext: string[] | undefined): string[] | undefined {
+		const todoContext = this.#host.incompleteTodosCompactionContext();
+		if (todoContext.length === 0) return hookContext;
+		return [...todoContext, ...(hookContext ?? [])];
+	}
+
+	#withIncompleteTodoSnapshot(preparation: CompactionPreparation): CompactionPreparation {
+		const todoContext = this.#host.incompleteTodosCompactionContext();
+		if (todoContext.length === 0) return preparation;
+		const snapshot: AgentMessage = {
+			role: "custom",
+			customType: "incomplete-todos-snapshot",
+			content: `<incomplete-todos>\n${todoContext.join("\n")}\n</incomplete-todos>`,
+			display: false,
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
+		return {
+			...preparation,
+			messagesToSummarize: [snapshot, ...preparation.messagesToSummarize],
+		};
+	}
+
 	async #compactWithFallbackModel(
 		preparation: CompactionPreparation,
 		customInstructions: string | undefined,
@@ -2111,6 +2141,9 @@ export class SessionMaintenance {
 		const rebuilt = snapcompact.getPreservedArchive(result.preserveData);
 		if (!rebuilt || rebuilt.frames.length >= archive.frames.length) return undefined;
 
+		// Regular compact paths sync before writing leftovers; rescue must too.
+		this.#host.syncTodoPhasesFromBranch();
+		result.summary = this.#host.appendIncompleteTodosToCompactionSummary(result.summary);
 		const rebuiltEntryId = this.#host.sessionManager.appendCompaction(
 			result.summary,
 			result.shortSummary,
@@ -2518,6 +2551,8 @@ export class SessionMaintenance {
 			}
 
 			const compactionPrep = await this.#prepareCompactionFromHooks(preparation, hookCompaction);
+			this.#host.syncTodoPhasesFromBranch();
+			preparation = this.#withIncompleteTodoSnapshot(preparation);
 
 			let summary: string;
 			let shortSummary: string | undefined;
@@ -2667,7 +2702,7 @@ export class SessionMaintenance {
 								autoCompactionSignal,
 								{
 									promptOverride: this.#host.obfuscateTextForProvider(compactionPrep.hookPrompt),
-									extraContext: compactionPrep.hookContext,
+									extraContext: this.#compactionExtraContext(compactionPrep.hookContext),
 									remoteInstructions: this.#host.baseSystemPrompt().join("\n\n"),
 									metadata: this.#host.agent.metadataForProvider(candidate.provider),
 									initiatorOverride: "agent",
@@ -2813,6 +2848,7 @@ export class SessionMaintenance {
 				return COMPACTION_CHECK_NONE;
 			}
 
+			summary = this.#host.appendIncompleteTodosToCompactionSummary(summary);
 			this.#host.sessionManager.appendCompaction(
 				summary,
 				shortSummary,

@@ -302,12 +302,71 @@ describe("AgentSession thinking-loop retry", () => {
 		expect(redirects[0].attribution).toBe("agent");
 		expect(typeof redirects[0].content).toBe("string");
 		expect(redirects[0].content).toContain("thinking_loop_detected");
+		expect(redirects[0].content).toContain("Task genuinely complete → emit final answer");
 
 		const assistants = session.agent.state.messages.filter(
 			(message): message is AssistantMessage => message.role === "assistant",
 		);
 		expect(assistants).toHaveLength(1);
 		expect(assistants[0].content).toEqual([{ type: "text", text: "Recovered after retry." }]);
+	});
+
+	it("drops the emit-final-answer option from the thinking-loop redirect while todos are open", async () => {
+		const model = createMockModel({ provider: "openrouter", id: "google/gemini-3.5-flash" }).model;
+		const calls: string[] = [];
+		const contexts: Context[] = [];
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			convertToLlm,
+			streamFn: (requestedModel, context, _options?: SimpleStreamOptions) => {
+				calls.push(`${requestedModel.provider}/${requestedModel.id}`);
+				contexts.push(context);
+				return calls.length === 1 ? errorIdOnlyThinkingLoopStream(requestedModel) : successStream(requestedModel);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.enabled": true,
+			"retry.baseDelayMs": 0,
+			"retry.maxDelayMs": 5_000,
+			"retry.maxRetries": 1,
+			"retry.modelFallback": false,
+			"todo.enabled": true,
+			"todo.reminders": false,
+			"model.loopGuard.enabled": true,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		session.setTodoPhases([
+			{
+				name: "Work",
+				tasks: [{ content: "finish the remaining items", status: "pending" }],
+			},
+		]);
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+
+		await session.prompt("Trigger redirect injection after thinking loop with open todos");
+		await session.waitForIdle();
+
+		const redirects = session.agent.state.messages.filter(
+			(message): message is CustomMessage =>
+				message.role === "custom" && message.customType === "thinking-loop-redirect",
+		);
+		expect(redirects).toHaveLength(1);
+		expect(redirects[0].content).toContain("thinking_loop_detected");
+		expect(redirects[0].content).toContain("Issue one concrete normal-format tool call");
+		expect(redirects[0].content).not.toContain("emit final answer");
 	});
 
 	it("injects a redirect notice on each consecutive thinking-loop retry", async () => {

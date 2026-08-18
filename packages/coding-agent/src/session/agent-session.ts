@@ -1039,6 +1039,22 @@ export class AgentSession {
 			toolRegistry: () => this.#tools.registry,
 			planModeEnabled: () => this.#planModeState?.enabled === true,
 			consumeLastServedToolChoiceLabel: () => this.#toolChoiceQueue.consumeLastServedLabel(),
+			forceTodoToolChoice: () => {
+				// Post-budget escape hatch. Only a named tool_choice pins `todo`.
+				// Google can name it (`{ type: "tool", name }`); a string
+				// `"required"` would let the model call any tool and then
+				// text-only stop again, so do not queue it. checkCompletion still
+				// appends the hatch text and continues when this returns false.
+				if (!this.getActiveToolNames().includes("todo")) return false;
+				const forced = buildNamedToolChoice("todo", this.model);
+				if (!forced || typeof forced === "string") return false;
+				this.#toolChoiceQueue.removeByLabel("todo-escape");
+				this.#toolChoiceQueue.pushOnce(forced, { label: "todo-escape" });
+				return true;
+			},
+			clearForcedTodoToolChoice: () => {
+				this.#toolChoiceQueue.removeByLabel("todo-escape");
+			},
 		};
 		this.#todo = new TodoTracker(todoHost);
 		this.#ownedAsyncJobManager = config.ownedAsyncJobManager;
@@ -1105,6 +1121,7 @@ export class AgentSession {
 			runAutoCompaction: (reason, willRetry, deferred, allowDefer, options) =>
 				this.#maintenance.runAutoCompaction(reason, willRetry, deferred, allowDefer, options),
 			withBashBranchTransition: operation => this.#bash.withBranchTransition(operation),
+			hasOpenActionableTodos: () => this.#todo.hasOpenActionableTodos(),
 		};
 		this.#recovery = new TurnRecovery(recoveryHost, { initialRetryFallback: config.initialRetryFallback });
 		this.#detachUsageBeforeQueueDequeue = this.agent.addBeforeQueuedMessageDequeueHook(async signal => {
@@ -1548,6 +1565,8 @@ export class AgentSession {
 				this.#planReferenceSent = false;
 			},
 			syncTodoPhasesFromBranch: () => this.#todo.syncFromBranch(),
+			incompleteTodosCompactionContext: () => this.#todo.buildIncompleteTodosCompactionContext(),
+			appendIncompleteTodosToCompactionSummary: summary => this.#todo.appendIncompleteTodosToSummary(summary),
 			resetAdvisorRuntimes: (reason?: string) => this.#advisors.resetAllRuntimes(reason),
 			rebaseAfterCompaction: () => this.#stats.rebaseAfterCompaction(),
 			recordAnchoredHistoryRewrite: tokensRemoved => this.#stats.recordAnchoredHistoryRewrite(tokensRemoved),
@@ -3287,14 +3306,17 @@ export class AgentSession {
 			// at invocation (past the abort check below), so an aborted continuation queues
 			// nothing; scoped to this request via prependMessages, never the shared queue.
 			const eagerNudges = this.#todo.buildPostCompactionEagerNudges();
+			const continueText = prompt.render(autoContinuePrompt, {
+				hasOpenTodos: this.#todo.hasOpenActionableTodos(),
+			});
 			await this.#promptWithMessage(
 				{
 					role: "developer",
-					content: [{ type: "text", text: autoContinuePrompt }],
+					content: [{ type: "text", text: continueText }],
 					attribution: "agent",
 					timestamp: Date.now(),
 				},
-				autoContinuePrompt,
+				continueText,
 				{
 					skipPostPromptRecoveryWait: true,
 					prependMessages: eagerNudges.length > 0 ? eagerNudges : undefined,
@@ -5359,6 +5381,7 @@ export class AgentSession {
 			// A user turn owns the next decision; drop a queued forced choice from
 			// a reminder continuation this prompt just preempted.
 			this.#toolChoiceQueue.removeByLabel("plan-mode-decision");
+			this.#toolChoiceQueue.removeByLabel("todo-escape");
 		}
 
 		// If streaming, queue via steer() or followUp() based on option

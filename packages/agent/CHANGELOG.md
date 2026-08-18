@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Compaction summaries now keep an Incomplete Todos section so pending/in_progress items survive the cut. The section is a clean output heading; preserve-don't-mark-done lives in the instruction prose.
+
 ## [17.3.5] - 2026-08-16
 
 ### Added
