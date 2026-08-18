@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `tui.resizeScrollback: preserve` re-emitting committed transcript rows when a tmux width epoch settled without a resolvable source boundary; recovery now resumes from the deepest transcript block structurally proven stable (identity, finalization, and version), never replaying already-committed rows into scrollback even when nothing can be proven at all, while Ctrl+O keeps its explicit full replay.
+
 ## [18.0.0] - 2026-08-22
 
 ### Added

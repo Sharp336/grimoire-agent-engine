@@ -342,6 +342,75 @@ export class TranscriptContainer
 		return rows;
 	}
 
+	/**
+	 * Structural resume boundary for a preserve-mode replay that settled with
+	 * no logical source boundary. `committedRows` is the old-width committed
+	 * count in this container's own local coordinate space; the walk proves
+	 * stability the same way {@link resolveNativeScrollbackWidthEpoch} does
+	 * (component identity plus finalized + version match), but — unlike that
+	 * method — stops and returns the last proven boundary instead of failing
+	 * outright the moment one segment cannot be proven: a mutable/reflowed
+	 * block duplicates only itself and everything below it, never loses rows
+	 * above it. The still-live source segment is the only one that may
+	 * delegate into a nested resolver when the boundary lands inside it.
+	 */
+	resolveNativeScrollbackCommittedRows(boundary: unknown, committedRows: number): number | undefined {
+		if (typeof boundary !== "object" || boundary === null) return undefined;
+		const marker = this.#widthEpochBoundaries.get(boundary);
+		if (!marker) return undefined;
+		const capturedSegments: BlockSegment[] = [
+			...marker.precedingSegments,
+			marker.segment,
+			...marker.trailingSegments,
+		];
+		const sourceCapturedIndex = marker.precedingSegments.length;
+		let mapped = 0;
+		for (let i = 0; i < capturedSegments.length; i++) {
+			const captured = capturedSegments[i]!;
+			if (committedRows <= captured.startRow) return mapped;
+			const current = this.#segments[i];
+			const identityStable = current !== undefined && current.component === captured.component;
+			const fullyCovered = committedRows >= captured.startRow + captured.rowCount;
+			if (!fullyCovered) {
+				// committedRows lands inside this segment's old span. Only the
+				// still-live source segment delegates deeper; a partially
+				// covered leading/trailing segment ends the walk here.
+				if (
+					i === sourceCapturedIndex &&
+					identityStable &&
+					marker.childHasBoundary &&
+					marker.childBoundary !== undefined
+				) {
+					const child = current!.component as Component & Partial<NativeScrollbackWidthEpoch>;
+					if (typeof child.resolveNativeScrollbackCommittedRows === "function") {
+						let leadingTrimmedRows = 0;
+						while (
+							leadingTrimmedRows < captured.rawRef.length &&
+							isPlainBlank(captured.rawRef[leadingTrimmedRows]!)
+						) {
+							leadingTrimmedRows++;
+						}
+						const contributionRows = Math.max(
+							0,
+							Math.min(captured.contribution.length, committedRows - captured.startRow - captured.sep),
+						);
+						const childRows = child.resolveNativeScrollbackCommittedRows(
+							marker.childBoundary,
+							contributionRows + leadingTrimmedRows,
+						);
+						if (childRows !== undefined) mapped = this.#mapNativeScrollbackWidthEpochRows(current!, childRows);
+					}
+				}
+				return mapped;
+			}
+			if (!identityStable || !captured.finalized || !current!.finalized || current!.version !== captured.version) {
+				return mapped;
+			}
+			mapped = current!.startRow + current!.rowCount;
+		}
+		return mapped;
+	}
+
 	#mapNativeScrollbackWidthEpochRows(segment: BlockSegment, rawRows: number): number {
 		let leadingTrimmedRows = 0;
 		while (leadingTrimmedRows < segment.rawRef.length && isPlainBlank(segment.rawRef[leadingTrimmedRows]!)) {

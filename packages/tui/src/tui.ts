@@ -249,6 +249,18 @@ export interface NativeScrollbackWidthEpoch {
 	isNativeScrollbackWidthEpochAppendOnly?(boundary: unknown): boolean;
 	/** Changes when child structure mutates independently of width reflow. */
 	getNativeScrollbackWidthEpochRevision?(): number;
+	/**
+	 * Structural alternative to a textual/content scan for resuming a
+	 * `preserve`-mode replay without re-emitting native-scrollback history.
+	 * `committedRows` is the old-width committed-row count (this component's
+	 * own local coordinate space); the return value is the deepest
+	 * current-width row structurally proven — by component identity plus
+	 * finalization/version stability, never by row-count comparison alone —
+	 * to correspond to rows already committed to the tape at the old width.
+	 * Returns undefined when no boundary can be proven safe; callers must
+	 * treat that as "resume from 0" (duplication, never loss).
+	 */
+	resolveNativeScrollbackCommittedRows?(boundary: unknown, committedRows: number): number | undefined;
 }
 
 /**
@@ -1658,6 +1670,75 @@ export class TUI extends Container {
 			rows += candidate.rowCount;
 		}
 		return rows;
+	}
+
+	/**
+	 * Structural resume boundary for a preserve-mode replay that settled
+	 * unresolved (no logical source boundary at all). Unlike
+	 * {@link resolveNativeScrollbackWidthEpoch}, which requires every leading
+	 * segment to be provably stable before returning anything, this walks
+	 * leading segments only as far as they stay provably stable and returns
+	 * the deepest point reached — a leading segment that cannot be proven
+	 * stable, or that only partially absorbs `committedRows`, ends the walk
+	 * without invalidating the segments already proven. Duplicating rows
+	 * from an unproven point on is the accepted tradeoff; losing rows is not.
+	 *
+	 * Returning `mapped` (possibly `0`) from every early exit above is
+	 * intentional: a component that was CONSULTED and affirmatively could
+	 * not vouch for its own content (grew, changed, or lost identity) must
+	 * cause a real re-emit of the disputed range — the caller cannot tell
+	 * "proven 0" apart from "consulted and refused" here, and conflating
+	 * them into a seam-trusting skip would silently strand a genuine content
+	 * correction below the seam forever (it would never re-render into
+	 * scrollback). `undefined` is reserved for the one case with no opinion
+	 * to consult at all: no leading segment contributed anything AND the
+	 * segment's own component doesn't even implement this resolver — there
+	 * nothing was consulted, so nothing was disproven either, and the caller
+	 * may fall back to the frame-local committed seam instead of row zero.
+	 */
+	resolveNativeScrollbackCommittedRows(boundary: unknown, committedRows: number): number | undefined {
+		if (typeof boundary !== "object" || boundary === null) return undefined;
+		const marker = this.#rootWidthEpochBoundaries.get(boundary);
+		if (!marker) return undefined;
+		const segment = this.#frameSegments[marker.sourceIndex];
+		if (segment?.component !== marker.component) return undefined;
+		let oldRowsConsumed = 0;
+		let mapped = 0;
+		for (let index = 0; index < marker.leading.length; index++) {
+			if (committedRows <= oldRowsConsumed) return mapped;
+			const captured = marker.leading[index]!;
+			const current = this.#frameSegments[index];
+			const fullyCovered = committedRows >= oldRowsConsumed + captured.rowCount;
+			// A revisionless component reports no width-independent mutation
+			// signal, and its wrapped row count legitimately shrinks or grows
+			// on rewrap alone — an exact match would misclassify a merely
+			// reflowed segment as unstable (rewrapping this same content at a
+			// different width never keeps an identical row count in general).
+			// A row-count INCREASE cannot come from rewrapping alone shedding
+			// rows it never needed; it only means new content was appended
+			// during the settle window. Refuse to fold that growth into the
+			// proven boundary — a same-or-shrunk row count is the accepted
+			// proof of no growth; a component reporting a revision proves
+			// stability exactly, growth or not.
+			const stable =
+				current?.component === captured.component &&
+				(captured.revision === undefined
+					? current.rowCount <= captured.rowCount
+					: current.widthEpochRevision === captured.revision);
+			if (!fullyCovered || !stable) return mapped;
+			oldRowsConsumed += captured.rowCount;
+			mapped = current!.start + current!.rowCount;
+		}
+		if (committedRows <= oldRowsConsumed) return mapped;
+		const childSource = getNativeScrollbackWidthEpoch(marker.component);
+		if (typeof childSource?.resolveNativeScrollbackCommittedRows !== "function") {
+			return mapped === 0 ? undefined : mapped;
+		}
+		const childResolved = childSource.resolveNativeScrollbackCommittedRows(
+			marker.childBoundary,
+			committedRows - oldRowsConsumed,
+		);
+		return childResolved === undefined ? mapped : segment.start + childResolved;
 	}
 
 	#getNativeScrollbackWidthEpochCurrentRows(boundary: unknown): number | undefined {
@@ -3871,6 +3952,7 @@ export class TUI extends Container {
 				break;
 			}
 		}
+		const preservesScrollback = this.#resizeScrollbackMode === "preserve";
 		// Without a logical source boundary, pending growth folded into an
 		// overlay-covered width reset cannot be separated from reflow. Replay
 		// conservatively from row zero after the overlay closes: duplication is
@@ -3896,7 +3978,52 @@ export class TUI extends Container {
 				resizeHadPendingRender &&
 				widthEpochBoundary !== undefined &&
 				widthEpochSourceBoundary === undefined);
-		if (replayUnresolvedWidthEpoch) prevWindowTop = 0;
+		// Structural resume boundary: map the old-width committed-row count
+		// through the captured width-epoch marker into a current-width row
+		// structurally proven (component identity plus finalization/version
+		// stability) to already correspond to native history on the tape.
+		// `committedRows` must be in the SAME frame-local coordinate space the
+		// marker's captured segments were measured in. `#committedRows` is
+		// only that once no width epoch has ever settled; once a baseline
+		// exists it degrades to the opaque native-tape row count (see the
+		// `componentCommittedRows` comment in render()), which the resolver
+		// walk would misread as an old-frame row count on a second, later
+		// epoch (e.g. an oscillating resize) — proving rows structurally
+		// unreachable and losing them. `placementEpochWatermark`, captured
+		// above before this epoch's classification runs, is exactly that
+		// frame-local seam in both cases.
+		//
+		// Preserve's zero-growth contract: committed rows are NEVER
+		// re-emitted into native scrollback on ANY settled width epoch,
+		// resolved or unresolved. The resolver's only job is to let a
+		// provably stable prefix strictly below the seam refresh when it can
+		// prove one (a resolved boundary K < seam re-emits [K, seam) —
+		// content whose current-width form isn't yet proven — which is safe
+		// because it never re-emits past the seam); it never widens what
+		// counts as "already committed". So an undefined result (no
+		// component implements the resolver, or nothing past row zero could
+		// be proven) must fall back to the seam itself, not row zero —
+		// row zero would replay the entire committed transcript. Non-preserve
+		// modes keep the row-zero fallback below; only preserve carries this
+		// contract. Falling back to the seam means growth that accrued ABOVE
+		// it during the unresolved epoch, but that this frame's rewrap can't
+		// attribute to a proven boundary, stays viewport-only until it
+		// scrolls off or a later resolved epoch commits it: native
+		// scrollback may consequently miss unattributable growth, but never
+		// re-receives a row it already holds. That is the accepted preserve
+		// tradeoff — zero growth beats scrollback completeness — and Ctrl+O's
+		// explicit full copy remains the escape hatch. The fallback is
+		// clamped to `frameLength` because the seam was measured before this
+		// frame's rewrap and could exceed the rewrapped row count.
+		let unresolvedWidthEpochResume = 0;
+		if (replayUnresolvedWidthEpoch) {
+			if (preservesScrollback) {
+				const seamFallback = Math.max(0, Math.min(placementEpochWatermark, frameLength));
+				unresolvedWidthEpochResume =
+					this.resolveNativeScrollbackCommittedRows(widthEpochBoundary, placementEpochWatermark) ?? seamFallback;
+			}
+			prevWindowTop = preservesScrollback ? unresolvedWidthEpochResume : 0;
+		}
 
 		// 4. Classify. A resize is an explicit user gesture: normally the engine
 		// erases and replays so history rewraps at the new geometry (the reader
@@ -4193,9 +4320,16 @@ export class TUI extends Container {
 			let commitFrom: number;
 			let commitTo: number;
 			if (replayUnresolvedWidthEpoch) {
-				commitFrom = 0;
+				// Merge of upstream's commitCeiling clamp (native-scrollback pinned
+				// boundary) with preserve-mode's committed-boundary resume: never
+				// re-emit rows the pane already holds, and never commit past the
+				// pinned ceiling. `unresolvedWidthEpochResume` already carries the
+				// seam fallback (see above) when the resolver proved nothing, so
+				// an unresolved epoch commits at most [seam, windowTop) — pending
+				// growth only, never the committed prefix below the seam.
+				commitFrom = preservesScrollback ? Math.min(unresolvedWidthEpochResume, windowTop) : 0;
 				commitTo = Math.min(windowTop, commitCeiling);
-				scrollRows = commitTo;
+				scrollRows = Math.max(0, commitTo - commitFrom);
 			} else if (logicalAppend && !logicalPrefixAppend) {
 				const sourceWindowTop = Math.max(0, widthEpochSourceBoundary - height);
 				const logicalSuffixRows = Math.max(0, widthEpochCurrentRows - widthEpochSourceBoundary);
