@@ -10,8 +10,15 @@
 import { constants as fsConstants, type Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getAgentDir, isEnoent } from "@oh-my-pi/pi-utils";
+import { getAgentDir, isEnoent, parseFrontmatter } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
+import { redactSecrets } from "../utils/redact";
+import type { ManagedProcedureMetadata, ManagedProcedureMetadataInput } from "./catalog";
+import {
+	buildManagedProcedureMetadata,
+	MANAGED_PROCEDURE_FRONTMATTER_KEY,
+	parseManagedProcedureMetadata,
+} from "./catalog";
 
 /** Provider id stamped on discovered managed skills (distinguishes them from authored). */
 export const MANAGED_SKILLS_PROVIDER_ID = "omp-managed";
@@ -69,16 +76,17 @@ export function sanitizeManagedDescription(raw: string): string {
 }
 
 /**
- * Serialize the minimal `name`/`description` frontmatter block via the repo's
- * YAML helper (round-trips through `parseFrontmatter`).
+ * Serialize the managed-skill frontmatter block via the repo's YAML helper
+ * (round-trips through `parseFrontmatter`).
  */
-export function toSkillFrontmatter(name: string, description: string): string {
-	const frontmatter = YAML.stringify(
-		{ name, description: sanitizeManagedDescription(description) },
-		null,
-		2,
-	).trimEnd();
-	return `---\n${frontmatter}\n---\n`;
+export function toSkillFrontmatter(name: string, description: string, metadata?: ManagedProcedureMetadata): string {
+	const frontmatter = {
+		name,
+		description: sanitizeManagedDescription(description),
+		...(metadata ? { [MANAGED_PROCEDURE_FRONTMATTER_KEY]: metadata } : {}),
+	};
+	const serialized = YAML.stringify(frontmatter, null, 2).trimEnd();
+	return `---\n${serialized}\n---\n`;
 }
 
 export interface WriteManagedSkillInput {
@@ -86,6 +94,36 @@ export interface WriteManagedSkillInput {
 	name: string;
 	description: string;
 	body: string;
+	metadata?: ManagedProcedureMetadataInput;
+}
+
+/** Read the persisted catalog metadata for a managed skill, if present and valid. */
+export async function readManagedSkillMetadata(name: string): Promise<ManagedProcedureMetadata | null> {
+	const safeName = sanitizeSkillName(name);
+	const file = path.join(getManagedSkillsDir(), safeName, "SKILL.md");
+	let content: string;
+	try {
+		content = await Bun.file(file).text();
+	} catch {
+		return null;
+	}
+	try {
+		const { frontmatter } = parseFrontmatter(content, { source: file });
+		return parseManagedProcedureMetadata(frontmatter[MANAGED_PROCEDURE_FRONTMATTER_KEY]);
+	} catch {
+		return null;
+	}
+}
+
+function assertManagedSkillSize(content: string): void {
+	// Cap the UTF-8 byte size of the FINAL file (body + description + frontmatter),
+	// not the UTF-16 code-unit length of the body alone.
+	const bytes = Buffer.byteLength(content, "utf8");
+	if (bytes > MAX_MANAGED_SKILL_BYTES) {
+		throw new Error(
+			`Managed skill is ${bytes} bytes; the limit is ${MAX_MANAGED_SKILL_BYTES}. Trim the body or description.`,
+		);
+	}
 }
 
 /**
@@ -141,7 +179,7 @@ async function openManagedSkillFileForUpdate(name: string, file: string) {
 	try {
 		return await fs.open(file, UPDATE_FILE_OPEN_FLAGS);
 	} catch (err) {
-		if ((err as { code?: string }).code === "ELOOP") {
+		if (err && typeof err === "object" && "code" in err && err.code === "ELOOP") {
 			throw new Error(`Managed skill "${name}" SKILL.md is a symlink; refusing to overwrite it.`);
 		}
 		throw err;
@@ -152,7 +190,7 @@ async function openManagedSkillFileForUpdate(name: string, file: string) {
 export async function writeManagedSkill(input: WriteManagedSkillInput): Promise<{ path: string }> {
 	const name = sanitizeSkillName(input.name);
 	const description = sanitizeManagedDescription(input.description);
-	const body = input.body.trim();
+	const body = redactSecrets(input.body.trim());
 	// Reject empty content: an all-whitespace/control description sanitizes to ""
 	// and the `requireDescription` discovery scan then silently drops the skill,
 	// so the tool would report success for a skill that never appears.
@@ -161,15 +199,6 @@ export async function writeManagedSkill(input: WriteManagedSkillInput): Promise<
 	}
 	if (!body) {
 		throw new Error(`Managed skill "${name}" needs a non-empty body.`);
-	}
-	const content = `${toSkillFrontmatter(name, description)}\n${body}\n`;
-	// Cap the UTF-8 byte size of the FINAL file (body + description + frontmatter),
-	// not the UTF-16 code-unit length of the body alone.
-	const bytes = Buffer.byteLength(content, "utf8");
-	if (bytes > MAX_MANAGED_SKILL_BYTES) {
-		throw new Error(
-			`Managed skill is ${bytes} bytes; the limit is ${MAX_MANAGED_SKILL_BYTES}. Trim the body or description.`,
-		);
 	}
 	return serializeSkillMutation(name, async () => {
 		await assertManagedRootSafe();
@@ -188,13 +217,16 @@ export async function writeManagedSkill(input: WriteManagedSkillInput): Promise<
 			);
 		}
 		if (input.action === "create") {
+			const metadata = buildManagedProcedureMetadata(input.metadata);
+			const content = `${toSkillFrontmatter(name, description, metadata)}\n${body}\n`;
+			assertManagedSkillSize(content);
 			await fs.mkdir(dir, { recursive: true });
 			// O_CREAT|O_EXCL ("wx"): atomic create that fails if the file already
 			// exists (closing the check-then-write race) and refuses a symlinked SKILL.md.
 			try {
 				await fs.writeFile(file, content, { flag: "wx" });
 			} catch (err) {
-				if ((err as { code?: string }).code === "EEXIST") {
+				if (err && typeof err === "object" && "code" in err && err.code === "EEXIST") {
 					throw new Error(`Managed skill "${name}" already exists. Use action "update" to change it.`);
 				}
 				throw err;
@@ -220,6 +252,10 @@ export async function writeManagedSkill(input: WriteManagedSkillInput): Promise<
 		try {
 			const openStat = await handle.stat();
 			assertManagedSkillFileSafeForUpdate(name, openStat);
+			const previous = await readManagedSkillMetadata(name);
+			const metadata = buildManagedProcedureMetadata(input.metadata, previous ?? undefined);
+			const content = `${toSkillFrontmatter(name, description, metadata)}\n${body}\n`;
+			assertManagedSkillSize(content);
 			await handle.truncate(0);
 			await handle.writeFile(content);
 		} finally {

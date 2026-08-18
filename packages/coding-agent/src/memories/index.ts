@@ -6,7 +6,6 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { type ApiKey, completeSimple, Effort, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { getAgentDbPath, getMemoriesDir, isEnoent, logger, parseJsonlLenient, prompt } from "@oh-my-pi/pi-utils";
-
 import type { ModelRegistry } from "../config/model-registry";
 import { getModelMatchPreferences, resolveModelRoleValue } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
@@ -17,6 +16,7 @@ import readPathTemplate from "../prompts/memories/read-path.md" with { type: "te
 import stageOneInputTemplate from "../prompts/memories/stage_one_input.md" with { type: "text" };
 import stageOneSystemTemplate from "../prompts/memories/stage_one_system.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
+import { redactSecrets } from "../utils/redact";
 import {
 	claimStage1Jobs,
 	clearMemoryData as clearMemoryDataInDb,
@@ -1123,25 +1123,6 @@ function hasExactKeys(value: Record<string, unknown>, expectedKeys: string[], al
 		if (sortedKeys[i] !== sortedExpected[i]) return false;
 	}
 	return true;
-}
-
-function redactSecrets(input: string): string {
-	let out = input;
-	const patterns = [
-		/(?:sk|pk|rk|tok|key|secret|token|password)[-_A-Za-z0-9]{12,}/g,
-		/[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/g,
-		/(?:AKIA|ASIA)[A-Z0-9]{16}/g,
-		// Common provider token prefixes (GitHub, npm, Slack, Google).
-		/(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/g,
-		/github_pat_[A-Za-z0-9_]{20,}/g,
-		/npm_[A-Za-z0-9]{30,}/g,
-		/xox[baprs]-[A-Za-z0-9-]{10,}/g,
-		/AIza[A-Za-z0-9_-]{30,}/g,
-	];
-	for (const pattern of patterns) {
-		out = out.replace(pattern, "[REDACTED]");
-	}
-	return out;
 }
 
 function sanitizeSkillName(name: string): string {

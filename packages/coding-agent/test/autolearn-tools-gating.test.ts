@@ -3,7 +3,9 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import { getManagedSkillsDir } from "@oh-my-pi/pi-coding-agent/autolearn/managed-skills";
+import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import type { CaptureMetadataContext } from "@oh-my-pi/pi-coding-agent/autolearn/capture-request";
+import { getManagedSkillsDir, readManagedSkillMetadata } from "@oh-my-pi/pi-coding-agent/autolearn/managed-skills";
 import { type SettingPath, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { resetActiveSkillsForTests, type Skill, setActiveSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import type { HindsightSessionState } from "@oh-my-pi/pi-coding-agent/hindsight/state";
@@ -191,6 +193,114 @@ describe("manage_skill execute", () => {
 		expect(text).not.toContain("Created");
 		// Nothing was written, so the managed skill can never surface.
 		expect(await Bun.file(path.join(getManagedSkillsDir(), "demo", "SKILL.md")).exists()).toBe(false);
+	});
+
+	/**
+	 * `ompManaged.toolFamilies` is the catalog's coverage key. Inside a bounded
+	 * Auto-Learn capture the host assigns exactly one family per write slot and
+	 * accounts the write against it, so a model-supplied family must NOT be able to
+	 * widen what the procedure will later be recalled for.
+	 */
+	describe("trusted capture metadata", () => {
+		/**
+		 * Build a tool-context double carrying only the capture marker.
+		 *
+		 * `AgentToolContext` also requires the full session surface (`sessionManager`,
+		 * `modelRegistry`, …), none of which `manage_skill` touches on this path, so
+		 * the cast goes through `unknown` rather than fabricating a fake session.
+		 */
+		function captureCtx(metadata: CaptureMetadataContext): AgentToolContext {
+			return { autolearnCapture: metadata } as unknown as AgentToolContext;
+		}
+
+		/** A recovery capture holding the single NAMED `bash` slot. */
+		const captureContext = captureCtx({
+			scope: "global",
+			toolFamilies: ["bash"],
+			platforms: ["win32"],
+			triggers: ["cl not recognized"],
+			assignedFamily: "bash",
+		});
+
+		/**
+		 * A manual `/learn` capture: the host supplies scope/platform but claims NO
+		 * family, exactly as `CaptureAssignments` does for its single unnamed slot.
+		 */
+		const manualCaptureContext = captureCtx({
+			scope: "global",
+			toolFamilies: [],
+			platforms: ["win32"],
+			triggers: ["msvc"],
+		});
+
+		it("persists only the host-assigned family when the model claims another", async () => {
+			await tool().execute(
+				"cap",
+				{
+					action: "create",
+					name: "msvc-setup",
+					description: "Set up MSVC.",
+					body: "# MSVC",
+					// The model tries to self-grant coverage for a candidate the host did
+					// not assign to this slot.
+					match: { toolFamilies: ["mcp:playwright"], platforms: ["linux"], triggers: ["browser timeout"] },
+				},
+				undefined,
+				undefined,
+				captureContext,
+			);
+
+			const persisted = await readManagedSkillMetadata("msvc-setup");
+			// Coverage keys are host-only: recall for `mcp:playwright` must be
+			// impossible, or the catalog would contradict the runner's report that the
+			// candidate went uncovered.
+			expect(persisted?.toolFamilies).toEqual(["bash"]);
+			expect(persisted?.platforms).toEqual(["win32"]);
+			// Symptom text is not a coverage key, so the model's own description of the
+			// failure it fixed is kept alongside the host's derived terms.
+			expect(persisted?.triggers).toEqual(["cl not recognized", "browser timeout"]);
+		});
+
+		it("keeps the model-supplied families outside a capture", async () => {
+			await tool().execute("plain", {
+				action: "create",
+				name: "browser-recipe",
+				description: "Drive the browser.",
+				body: "# Browser",
+				match: { toolFamilies: ["mcp:playwright"], platforms: ["linux"], triggers: ["browser timeout"] },
+			});
+
+			// No host assignment exists for a normal call, so the model's list is the
+			// only source and must survive.
+			const persisted = await readManagedSkillMetadata("browser-recipe");
+			expect(persisted?.toolFamilies).toEqual(["mcp:playwright"]);
+			expect(persisted?.platforms).toEqual(["linux"]);
+			expect(persisted?.triggers).toEqual(["browser timeout"]);
+		});
+
+		it("keeps the model-supplied families for a manual capture's unnamed slot", async () => {
+			await tool().execute(
+				"manual",
+				{
+					action: "create",
+					name: "msvc-manual",
+					description: "Set up MSVC.",
+					body: "# MSVC",
+					match: { toolFamilies: ["bash"], platforms: ["linux"], triggers: ["cl not recognized"] },
+				},
+				undefined,
+				undefined,
+				manualCaptureContext,
+			);
+
+			// `/learn` makes no per-family coverage claim, so overriding here would
+			// strip every recall key from a procedure the user explicitly asked for.
+			const persisted = await readManagedSkillMetadata("msvc-manual");
+			expect(persisted?.toolFamilies).toEqual(["bash"]);
+			// The host still knows the real platform better than the model does.
+			expect(persisted?.platforms).toEqual(["win32"]);
+			expect(persisted?.triggers).toEqual(["msvc", "cl not recognized"]);
+		});
 	});
 });
 

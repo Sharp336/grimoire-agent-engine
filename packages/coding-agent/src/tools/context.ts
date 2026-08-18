@@ -1,4 +1,5 @@
 import type { AgentToolContext, ToolCallContext } from "@oh-my-pi/pi-agent-core";
+import type { CaptureMetadataContext } from "../autolearn/capture-request";
 import type { CustomToolContext } from "../extensibility/custom-tools/types";
 import type { ExtensionUIContext } from "../extensibility/extensions/types";
 
@@ -18,6 +19,10 @@ declare module "@oh-my-pi/pi-agent-core" {
 		xdevTierResolved?(tier: "read" | "write" | "exec"): void;
 		/** Set only after an interactive prompt approves provider computer safety checks. */
 		providerSafetyApproved?: boolean;
+		/** Set only inside the private Auto-Learn capture agent. Host-controlled: the
+		 * model cannot supply it. Carries trusted catalog metadata merged over
+		 * model-supplied values, and marks the call for the approval auto-allow. */
+		autolearnCapture?: CaptureMetadataContext;
 	}
 }
 

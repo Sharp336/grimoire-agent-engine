@@ -19,6 +19,7 @@ import type {
 	ProviderSessionState,
 	ServiceTier,
 	SimpleStreamOptions,
+	ToolChoice,
 } from "@oh-my-pi/pi-ai";
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
@@ -38,7 +39,16 @@ import {
 	loadAdvisorTranscriptCosts,
 } from "./advisor";
 import { AsyncJobManager } from "./async";
-import { AutoLearnController, buildAutoLearnInstructions } from "./autolearn/controller";
+import { CaptureAssignments } from "./autolearn/capture-assignments";
+import {
+	type AutoLearnCaptureRequest,
+	type AutoLearnCaptureResult,
+	CAPTURE_RESULT_DETAILS_KEY,
+	type CapturedProcedure,
+	type CaptureWriteRecord,
+} from "./autolearn/capture-request";
+import { AUTOLEARN_SUBSTANTIVE_NUDGE, buildAutoLearnInstructions } from "./autolearn/controller";
+import { installAutoLearnController } from "./autolearn/install";
 import { createAutoresearchExtension } from "./autoresearch";
 import { loadCapability } from "./capability";
 import { type Rule, ruleCapability, setActiveRules } from "./capability/rule";
@@ -65,6 +75,9 @@ import { buildServiceTierByFamily } from "./config/service-tier";
 import { Settings, type SkillsSettings } from "./config/settings";
 import { CursorExecHandlers, type CursorMcpResourceAdapter } from "./cursor";
 import { createBridgeEditTool, createBridgeGrepFactory } from "./cursor-bridge-tools";
+import autolearnCaptureManual from "./prompts/system/autolearn-capture-manual.md" with { type: "text" };
+import autolearnCaptureRecovery from "./prompts/system/autolearn-capture-recovery.md" with { type: "text" };
+import autolearnCaptureRetry from "./prompts/system/autolearn-capture-retry.md" with { type: "text" };
 import "./discovery";
 import { initializeWithSettings } from "./discovery";
 import { withOmpExtensionRootScope } from "./discovery/omp-extension-roots";
@@ -1122,20 +1135,95 @@ export interface AutoLearnCaptureRunnerOptions {
 	onPayload?: SimpleStreamOptions["onPayload"];
 	onResponse?: SimpleStreamOptions["onResponse"];
 	createSessionId?: () => string;
+	/**
+	 * Publishes the per-call assignment source for the private capture, so the
+	 * capture agent's `getToolContext` can stamp trusted metadata on each
+	 * `manage_skill` call. Cleared when the capture ends.
+	 */
+	setCaptureAssignments?: (assignments: CaptureAssignments | undefined) => void;
 }
 
-/** Build a private capture runner over a detached message snapshot and provider session. */
-export function createAutoLearnCaptureRunner(
-	options: AutoLearnCaptureRunnerOptions,
-): (content: string, signal?: AbortSignal) => Promise<void> {
-	return async (content, signal) => {
-		if (options.captureTools.length === 0 || signal?.aborted) return;
-		const captureModel = options.sourceAgent.state.model;
-		if (!captureModel) return;
+/** The only tool a bounded capture is allowed to call. */
+const CAPTURE_WRITER_TOOL = "manage_skill";
 
-		const captureSessionId = options.createSessionId?.() ?? Bun.randomUUIDv7();
-		const captureProviderSessionState = new Map<string, ProviderSessionState>();
-		const captureMessages = options.sourceAgent.state.messages.map((message): AgentMessage => {
+/** What a bounded capture persisted, keyed by the host-assigned candidate. */
+interface CaptureOutcome {
+	/** Procedures whose `manage_skill` result finalized without error. */
+	stored: CapturedProcedure[];
+	/** Candidate families the HOST assigned to those successful calls. */
+	covered: Set<string>;
+}
+
+/**
+ * What a bounded capture persisted, read from the trusted details `manage_skill`
+ * stamps on a FINALIZED non-error result.
+ *
+ * The tool throws on name collision, symlink refusal, and the size cap, so a
+ * non-error result is the only proof a file landed — and the stamped
+ * `assignedFamily` is the only sound link from that write back to the candidate
+ * the host asked about. Procedure names, write counts, and the model's own
+ * `match.toolFamilies` are all unreliable for this.
+ */
+function collectCaptureOutcome(messages: readonly AgentMessage[]): CaptureOutcome {
+	const outcome: CaptureOutcome = { stored: [], covered: new Set() };
+	for (const message of messages) {
+		if (message.role !== "toolResult" || message.toolName !== CAPTURE_WRITER_TOOL) continue;
+		if (message.isError === true) continue;
+		const record = readCaptureWriteRecord(message.details);
+		if (!record) continue;
+		if (!outcome.stored.some(stored => stored.name === record.name)) {
+			outcome.stored.push({ action: record.action, name: record.name });
+		}
+		if (record.family !== undefined) outcome.covered.add(record.family);
+	}
+	return outcome;
+}
+
+/** Read the host-stamped capture record off a tool result's details, if present. */
+function readCaptureWriteRecord(details: unknown): CaptureWriteRecord | null {
+	if (!details || typeof details !== "object" || !(CAPTURE_RESULT_DETAILS_KEY in details)) return null;
+	const raw = details[CAPTURE_RESULT_DETAILS_KEY];
+	if (!raw || typeof raw !== "object") return null;
+	if (!("action" in raw) || !("name" in raw)) return null;
+	const { action, name } = raw;
+	if (typeof name !== "string" || (action !== "create" && action !== "update")) return null;
+	const family = "family" in raw && typeof raw.family === "string" ? raw.family : undefined;
+	return { action, name, family };
+}
+
+/**
+ * Candidates a bounded capture was asked to cover, in prompt order.
+ *
+ * One per recovered family. A manual capture has exactly one unnamed candidate,
+ * so its coverage is "at least one trusted write record" rather than a family set.
+ */
+function captureCandidates(request: AutoLearnCaptureRequest): string[] {
+	return request.kind === "recovery" ? request.families.map(family => family.family) : [];
+}
+
+/** Whether every candidate this request named has a trusted write record. */
+function isCaptureComplete(request: AutoLearnCaptureRequest, outcome: CaptureOutcome): boolean {
+	if (request.kind === "recovery") {
+		return request.families.every(family => outcome.covered.has(family.family));
+	}
+	return outcome.stored.length > 0;
+}
+
+/**
+ * Build the private capture agent's messages and prompt for one request.
+ *
+ * Only `substantive` copies the primary transcript. `recovery` gets bounded,
+ * already-redacted evidence; `manual` gets the caller's immutable snapshot. In
+ * both bounded cases nothing else from the live conversation is copied.
+ */
+function buildCapturePayload(
+	request: AutoLearnCaptureRequest,
+	sourceAgent: Agent,
+): { messages: AgentMessage[]; content: string; customType: string } {
+	if (request.kind === "substantive") {
+		// Detach the snapshot: strip provider payloads and response ids so the
+		// private run cannot resume the primary provider session.
+		const messages = sourceAgent.state.messages.map((message): AgentMessage => {
 			if (message.role === "assistant") {
 				return { ...message, responseId: undefined, providerPayload: undefined };
 			}
@@ -1144,14 +1232,131 @@ export function createAutoLearnCaptureRunner(
 			}
 			return message;
 		});
+		return { messages, content: AUTOLEARN_SUBSTANTIVE_NUDGE, customType: "autolearn-nudge" };
+	}
+	if (request.kind === "recovery") {
+		return {
+			messages: [],
+			content: prompt.render(autolearnCaptureRecovery, {
+				families: request.families.map(family => ({
+					...family,
+					singleFailure: family.failureCount === 1,
+				})),
+				references: request.references,
+			}),
+			customType: "autolearn-capture-recovery",
+		};
+	}
+	return {
+		messages: [...request.messages],
+		content: prompt.render(autolearnCaptureManual, {
+			focus: request.focus,
+			turns: request.turns,
+			singleTurn: request.turns === 1,
+			references: request.references,
+		}),
+		customType: "autolearn-capture-manual",
+	};
+}
+
+/**
+ * Wrap the procedure writer with the host's bounded-capture limits.
+ *
+ * The capture prompt asks for one procedure per candidate and never to delete,
+ * but a prompt is guidance, not enforcement — and the capture marker deliberately
+ * auto-allows this tool with no interactive approval, so nothing downstream would
+ * stop a stray call. Two limits are enforced here, before any filesystem work:
+ *
+ *   - `action: "delete"` is refused outright. A capture exists to ADD knowledge;
+ *     letting it remove procedures would make an unattended background turn
+ *     capable of destroying the catalog.
+ *   - a call with no host-granted write slot is refused, so a capture cannot mint
+ *     more procedures than the host asked about.
+ *
+ * Refusals throw, which surfaces as an ordinary error tool result: the capture
+ * agent can then stop, and the runner reports only what actually landed.
+ */
+function boundedCaptureWriter(writer: AgentTool, assignments: CaptureAssignments): AgentTool {
+	return {
+		...writer,
+		execute: async (toolCallId, params, signal, onUpdate, context) => {
+			// `in` narrowing keeps the read checked: fabricating a shape with `as` here
+			// would silently pass a non-object through the delete guard.
+			if (params && typeof params === "object" && "action" in params && params.action === "delete") {
+				throw new Error("An Auto-Learn capture may only create or update a procedure, never delete one.");
+			}
+			if (!assignments.hasSlot(toolCallId)) {
+				throw new Error(
+					`This capture may store at most ${assignments.budget} procedure(s); that budget is already assigned.`,
+				);
+			}
+			return await writer.execute(toolCallId, params, signal, onUpdate, context);
+		},
+	};
+}
+
+/**
+ * Build a private capture runner.
+ *
+ * Bounded requests (`recovery`, `manual`) get only the static system prompt plus
+ * their own rendered prompt, the sole `manage_skill` tool, and a ONE-SHOT forced
+ * tool choice so the agent writes once and can then stop instead of being forced
+ * to write forever.
+ */
+export function createAutoLearnCaptureRunner(
+	options: AutoLearnCaptureRunnerOptions,
+): (request: AutoLearnCaptureRequest, signal?: AbortSignal) => Promise<AutoLearnCaptureResult> {
+	return async (request, signal) => {
+		if (options.captureTools.length === 0 || signal?.aborted) return { stored: [], error: "Capture is unavailable." };
+		const captureModel = options.sourceAgent.state.model;
+		if (!captureModel) return { stored: [], error: "No model is selected." };
+
+		const bounded = request.kind !== "substantive";
+		const writer = options.captureTools.find(tool => tool.name === CAPTURE_WRITER_TOOL);
+		if (bounded && !writer) {
+			return { stored: [], error: `The ${CAPTURE_WRITER_TOOL} tool is not available in this session.` };
+		}
+		const captureSessionId = options.createSessionId?.() ?? Bun.randomUUIDv7();
+		const captureProviderSessionState = new Map<string, ProviderSessionState>();
+		const payload = buildCapturePayload(request, options.sourceAgent);
+		// Host-owned write-slot assignment. Created before the agent so the capture's
+		// `getToolContext` can stamp each `manage_skill` call with exactly one family
+		// and the wrapper below can refuse an unassigned call.
+		const assignments = bounded
+			? new CaptureAssignments({
+					base: request.metadata,
+					candidates: captureCandidates(request),
+					writerToolName: CAPTURE_WRITER_TOOL,
+				})
+			: undefined;
+		// A bounded capture gets exactly ONE tool, and that tool is wrapped: `learn`
+		// and everything else would let it write to memory or touch the workspace
+		// outside its mandate, and the raw writer would let it delete procedures or
+		// mint more than the host asked for.
+		const tools =
+			bounded && writer && assignments ? [boundedCaptureWriter(writer, assignments)] : options.captureTools;
+
+		// One-shot forcing: name the sole tool on the first turn so a weaker model
+		// cannot answer in prose, then fall back to normal choice so the agent can
+		// yield. `buildNamedToolChoice` returns "required" for providers that cannot
+		// name a tool, and undefined when the model supports no forcing at all.
+		let forcedOnce = false;
+		const getToolChoice = bounded
+			? (): ToolChoice | undefined => {
+					if (forcedOnce) return undefined;
+					forcedOnce = true;
+					return buildNamedToolChoice(CAPTURE_WRITER_TOOL, captureModel) ?? "required";
+				}
+			: undefined;
+
 		const captureAgent = options.createAgent({
 			initialState: {
 				systemPrompt: [...options.sourceAgent.state.systemPrompt],
 				model: captureModel,
 				thinkingLevel: options.sourceAgent.state.thinkingLevel,
 				disableReasoning: options.sourceAgent.state.disableReasoning,
-				tools: options.captureTools,
-				messages: captureMessages,
+				tools,
+				messages: payload.messages,
 			},
 			sessionId: captureSessionId,
 			promptCacheKey: captureSessionId,
@@ -1159,27 +1364,61 @@ export function createAutoLearnCaptureRunner(
 			getApiKey: requestModel => options.sourceAgent.getApiKey?.(requestModel),
 			onPayload: options.onPayload,
 			onResponse: options.onResponse,
+			getToolChoice,
 		});
 		captureAgent.setMetadataResolver(provider => options.sourceAgent.metadataForProvider(provider));
 		const captureMessage: CustomMessage = {
 			role: "custom",
-			customType: "autolearn-nudge",
-			content,
+			customType: payload.customType,
+			content: payload.content,
 			display: false,
 			attribution: "agent",
 			timestamp: Date.now(),
 		};
 		const abortCapture = () => captureAgent.abort(signal?.reason);
 		signal?.addEventListener("abort", abortCapture, { once: true });
+		// Publishing the assignments is what lets `manage_skill` receive trusted
+		// per-call metadata and lets the approval wrapper auto-allow this one writer.
+		options.setCaptureAssignments?.(assignments);
+		let failure: string | undefined;
 		try {
 			if (signal?.aborted) {
 				abortCapture();
-				return;
+				return { stored: [], error: "Capture was aborted." };
 			}
 			await captureAgent.prompt(captureMessage);
+			// One corrective retry, decided from the host's OWN assignment records so
+			// a capture agent cannot talk its way out of it. Anything still missing
+			// after the retry is logged, never reported as stored.
+			if (bounded && assignments && !signal?.aborted) {
+				const firstPass = collectCaptureOutcome(captureAgent.state.messages);
+				if (!isCaptureComplete(request, firstPass)) {
+					const remaining = assignments.reopenUncovered(firstPass.covered);
+					forcedOnce = false;
+					await captureAgent.prompt({
+						role: "custom",
+						customType: `${payload.customType}-retry`,
+						content: prompt.render(autolearnCaptureRetry, {
+							families: remaining,
+							// A manual capture has no named candidate; the prompt asks for
+							// the single missing procedure instead of naming a family.
+							unnamed: remaining.length === 0,
+						}),
+						display: false,
+						attribution: "agent",
+						timestamp: Date.now(),
+					});
+				}
+			}
 		} catch (error) {
-			if (!signal?.aborted) throw error;
+			if (!signal?.aborted) {
+				failure = error instanceof Error ? error.message : String(error);
+				if (!bounded) throw error;
+			} else {
+				failure = "Capture was aborted.";
+			}
 		} finally {
+			options.setCaptureAssignments?.(undefined);
 			signal?.removeEventListener("abort", abortCapture);
 			for (const [providerKey, state] of captureProviderSessionState) {
 				try {
@@ -1193,6 +1432,26 @@ export function createAutoLearnCaptureRunner(
 			}
 			captureProviderSessionState.clear();
 		}
+		if (!bounded) return { stored: [] };
+		const outcome = collectCaptureOutcome(captureAgent.state.messages);
+		if (outcome.stored.length === 0) {
+			return { stored: [], error: failure ?? "The capture agent did not store a procedure." };
+		}
+		// Partial coverage: retain the subset that really landed and name the
+		// shortfall rather than implying every candidate was captured.
+		if (!isCaptureComplete(request, outcome)) {
+			const missing = captureCandidates(request).filter(candidate => !outcome.covered.has(candidate));
+			logger.info("auto-learn capture covered only part of its candidates", {
+				kind: request.kind,
+				stored: outcome.stored.length,
+				missing,
+			});
+			return {
+				stored: outcome.stored,
+				error: failure ?? `No procedure was stored for: ${missing.join(", ")}.`,
+			};
+		}
+		return failure === undefined ? { stored: outcome.stored } : { stored: outcome.stored, error: failure };
 	};
 }
 /**
@@ -3778,11 +4037,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			});
 		};
 
+		// Per-call assignment source for the private capture, published by the runner
+		// for the duration of one capture and read by the capture agent's tool
+		// context. Host-owned: the model can neither set nor observe it.
+		let captureAssignments: CaptureAssignments | undefined;
+
 		const runAutoLearnCapture = createAutoLearnCaptureRunner({
 			sourceAgent: agent,
 			captureTools: autoLearnCaptureTools,
 			onPayload,
 			onResponse,
+			setCaptureAssignments: assignments => {
+				captureAssignments = assignments;
+			},
 			createAgent: captureOptions => {
 				const captureModel = captureOptions.initialState?.model;
 				const captureSessionId = captureOptions.sessionId;
@@ -3815,7 +4082,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					maxRetryDelayMs: agent.maxRetryDelayMs,
 					kimiApiFormat,
 					preferWebsockets: preferOpenAICodexWebsockets,
-					getToolContext: toolCall => toolContextStore.getContext(toolCall),
+					// Same base context as the primary agent, plus the trusted capture
+					// marker. `manage_skill` merges that metadata over model-supplied
+					// values, and the approval wrapper uses it to auto-allow this one
+					// writer inside the private capture.
+					getToolContext: toolCall => {
+						const base = toolContextStore.getContext(toolCall);
+						// `ToolCallContext` describes the whole batch; the call being
+						// processed is the entry at `index`. Without it no slot can be
+						// assigned, so fall back to the unmarked context rather than
+						// crediting an arbitrary candidate.
+						const current = toolCall ? toolCall.toolCalls[toolCall.index] : undefined;
+						if (!current || !captureAssignments) return base;
+						return { ...base, autolearnCapture: captureAssignments.contextFor(current) };
+					},
 					streamFn: settingsAwareStreamFn,
 					transformToolCallArguments,
 					resolveFallbackTool: resolveDeviceTool,
@@ -3842,18 +4122,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Gated on `autolearn.enabled` to match the tools: `createTools` builds the
 		// `learn`/`manage_skill` registry ONCE at session start and no settings
 		// change rebuilds it, so installing the controller while disabled would let a
-		// mid-session enable fire a nudge pointing at tools the session never built.
+		// mid-session enable arm recall pointing at tools the session never built.
 		// Activation is therefore a session-start decision for BOTH the controller
-		// and the tools; the fire-time re-check in `#onAgentEnd` still handles a
-		// mid-session DISABLE. The subscription lives for the session's lifetime; the
-		// reference is intentionally discarded (the listener retains it).
+		// and the tools; the fire-time re-check in the controller still handles a
+		// mid-session DISABLE.
 		if (!restrictToolNames) {
 			if (settings.get("autolearn.enabled") && taskDepth === 0) {
 				await logger.time("startMemoryStartupTask", startMemoryBackend);
-				new AutoLearnController({
+				await installAutoLearnController({
 					session,
 					settings,
-					capture: content => session.runAutolearnCapture(signal => runAutoLearnCapture(content, signal)),
+					runCapture: runAutoLearnCapture,
+					initialTools,
+					cwd: () => sessionManager.getCwd(),
 				});
 			} else {
 				void logger.time("startMemoryStartupTask", startMemoryBackend);

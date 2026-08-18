@@ -39,6 +39,7 @@ import {
 	type BeforeToolCallResult,
 	EventLoopKeepalive,
 	resolveTelemetry,
+	type SoftToolRequirement,
 	type StreamFn,
 	TERMINAL_TOOL_RESULT_ABORT_REASON,
 	type ThinkingLevel,
@@ -100,6 +101,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { type AdvisorConfig, type AdvisorRuntimeStatus, loadAdvisorTranscriptCosts } from "../advisor";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager } from "../async";
+import type { ManualAutoLearnHandler, ManualAutoLearnResult } from "../autolearn/capture-request";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import type { ModelRegistry } from "../config/model-registry";
 import type { ResolvedModelRoleValue } from "../config/model-resolver";
@@ -243,6 +245,11 @@ import {
 	type AsyncResultEntry,
 	buildAsyncResultBatchMessage,
 } from "./async-job-delivery";
+import {
+	AUTOLEARN_RECALL_MESSAGE_TYPE,
+	type AutolearnRecallEntry,
+	buildAutolearnRecallMessage,
+} from "./autolearn-recall";
 import { BashRunner, type BashRunnerHost } from "./bash-runner";
 import {
 	checkpointStartedAtFromEntry,
@@ -450,11 +457,14 @@ function cloneMessageEndNotification(message: AgentMessage): AgentMessage {
 	const snapshot: Record<PropertyKey, unknown> = {};
 	for (const key of Reflect.ownKeys(message)) {
 		const descriptor = Object.getOwnPropertyDescriptor(message, key);
+
 		if (!descriptor?.enumerable) continue;
 		snapshot[key] = cloneMessageEndNotificationField(Reflect.get(message, key));
 	}
 	return snapshot as unknown as AgentMessage;
 }
+/** Awaited per-turn hook receiving the finalized turn context. */
+export type AgentTurnEndHook = (context: AgentTurnEndContext, signal?: AbortSignal) => Promise<void> | void;
 
 const INTERRUPTED_THINKING_MIN_CHARS = 60;
 
@@ -484,6 +494,9 @@ export class AgentSession {
 	// Event subscription state
 	#unsubscribeAgent?: () => void;
 	#cancelExitRecorder?: () => void;
+	#turnEndHooks: Array<{ hook: AgentTurnEndHook; active: boolean }> = [];
+	#skillRefreshHooks: Array<{ hook: () => Promise<void> | void; active: boolean }> = [];
+
 	#cancelFatalRecoveryHint?: () => void;
 	#exitRecorded = false;
 	#unsubscribeAppendOnly?: () => void;
@@ -535,6 +548,7 @@ export class AgentSession {
 	#titleSystemPrompt: string | undefined;
 	#titleGenerationAbortController = new AbortController();
 	#toolChoiceQueue = new ToolChoiceQueue();
+	#proceduralRequirement: SoftToolRequirement | undefined;
 
 	readonly #bash: BashRunner;
 
@@ -561,6 +575,7 @@ export class AgentSession {
 	 * across a `/new` is dropped regardless of job-id reuse.
 	 */
 	#asyncDeliveryEpoch = 0;
+	#autolearnRecallEpoch = 0;
 
 	readonly #irc: IrcBridge;
 	#ircWakeTurnObserver:
@@ -574,7 +589,9 @@ export class AgentSession {
 	#freshProviderSessionId: string | undefined;
 	#inheritedProviderPromptCacheKey: string | undefined;
 	#autolearnCaptureAbortController: AbortController | undefined;
-	#autolearnCaptureTask: Promise<void> | undefined;
+	/** Result type is per-capture, so the retained handle is only used for drain/abort. */
+	#autolearnCaptureTask: Promise<unknown> | undefined;
+	#manualAutoLearnHandler: ManualAutoLearnHandler | undefined;
 	#isDisposed = false;
 	/** Process-wide by default (double-spend safety across sessions); injectable for tests. */
 	#codexResetCoordinator: CodexAutoRedeemCoordinator;
@@ -1211,6 +1228,15 @@ export class AgentSession {
 			await this.#prewalk.advanceAtTurnEnd(messages, context);
 			await this.#advisors.onPrimaryTurnEnd(messages, context?.willContinue, signal);
 			await this.#maintenance.maintainContextMidRun(messages, signal, context);
+			if (!context || signal?.aborted) return;
+			for (const registration of this.#turnEndHooks) {
+				if (!registration.active) continue;
+				try {
+					await registration.hook(context, signal);
+				} catch (error) {
+					logger.warn("turn-end hook failed", { error: String(error) });
+				}
+			}
 		});
 		this.yieldQueue = new YieldQueue({
 			isStreaming: () => this.isStreaming,
@@ -1253,6 +1279,11 @@ export class AgentSession {
 			isStale: entry =>
 				this.#isDisposed || !isLaunchCompletionOwner(entry.owner, this.sessionManager.getSessionId()),
 			build: buildLaunchCompletionBatchMessage,
+		});
+		this.yieldQueue.register<AutolearnRecallEntry>(AUTOLEARN_RECALL_MESSAGE_TYPE, {
+			isStale: entry => this.#isDisposed || entry.epoch !== this.#autolearnRecallEpoch,
+			build: buildAutolearnRecallMessage,
+			skipIdleFlush: true,
 		});
 		// Background-job completions / late diagnostics are pulled into the run at
 		// each step boundary as non-interrupting asides. Peer IRCs share the aside
@@ -1618,7 +1649,6 @@ export class AgentSession {
 			syncTodoPhasesFromBranch: () => this.#todo.syncFromBranch(),
 		};
 		this.#handoff = new SessionHandoff(handoffHost);
-
 		this.#rehydrateCheckpointRewindState();
 
 		// Always subscribe to agent events for internal handling
@@ -1639,6 +1669,56 @@ export class AgentSession {
 
 	getAgentId(): string | undefined {
 		return this.#agentId;
+	}
+	/** Register an awaited turn-end hook. Returns an idempotent unsubscribe. */
+	registerTurnEndHook(hook: AgentTurnEndHook): () => void {
+		if (this.#isDisposed) return () => {};
+		const registration = { hook, active: true };
+		this.#turnEndHooks.push(registration);
+		return () => {
+			registration.active = false;
+		};
+	}
+	/** Invalidate every queued but undelivered recall card (episode resolved, recall disabled, session reset). */
+	invalidateAutolearnRecall(): void {
+		this.#autolearnRecallEpoch++;
+	}
+
+	/** Queue one recall card batch for delivery into the CURRENT run's next provider turn. */
+	enqueueAutolearnRecall(entry: Omit<AutolearnRecallEntry, "epoch">): void {
+		this.yieldQueue.enqueue(AUTOLEARN_RECALL_MESSAGE_TYPE, {
+			...entry,
+			epoch: this.#autolearnRecallEpoch,
+		});
+	}
+
+	/** Install/clear the Auto-Learn procedural-memory soft read requirement. */
+	setProceduralMemoryRequirement(requirement: SoftToolRequirement | undefined): void {
+		this.#proceduralRequirement = requirement;
+	}
+
+	/** Installed by AutoLearnController; removed on controller disposal. */
+	setManualAutoLearnHandler(handler: ManualAutoLearnHandler | undefined): void {
+		this.#manualAutoLearnHandler = handler;
+	}
+
+	/** Whether an explicit `/learn` can run in this session. */
+	get canRequestAutoLearnCapture(): boolean {
+		return this.#manualAutoLearnHandler !== undefined && !this.#isDisposed;
+	}
+
+	/**
+	 * Run one explicit user-directed capture. Rejects with a concrete operator
+	 * message when Auto-Learn is unavailable for this session.
+	 */
+	requestAutoLearnCapture(request: { turns: number; focus?: string }): Promise<ManualAutoLearnResult> {
+		if (!this.canRequestAutoLearnCapture) {
+			return Promise.resolve({
+				ok: false,
+				error: "Auto-Learn is disabled for this session. Enable autolearn.enabled and start a new session.",
+			});
+		}
+		return this.#manualAutoLearnHandler!(request);
 	}
 
 	/** Dequeue the next HARD forced tool choice for the upcoming LLM call, dropping
@@ -1679,7 +1759,8 @@ export class AgentSession {
 				reminder: [buildResolveReminderMessage(head.sourceToolName)],
 			};
 		}
-		return undefined;
+		if (this.#planModeState?.enabled || this.#goalModeState?.enabled) return undefined;
+		return this.#proceduralRequirement;
 	}
 
 	/** Peek the head non-forcing pending preview invoker, for the preview-resolution dispatch. */
@@ -3839,16 +3920,24 @@ export class AgentSession {
 		}
 	}
 
-	/** Run one abortable auto-learn capture outside the primary agent loop. */
-	async runAutolearnCapture(capture: (signal: AbortSignal) => Promise<void>): Promise<void> {
-		if (this.#autolearnCaptureTask || this.#isDisposed) return;
+	/**
+	 * Run one abortable auto-learn capture outside the primary agent loop.
+	 *
+	 * Returns the capture's own result so an explicit `/learn` can report exactly
+	 * what was stored. Resolves `undefined` when a capture is already in flight or
+	 * the session is disposed — the caller must treat that as "nothing captured",
+	 * never as success.
+	 */
+	async runAutolearnCapture<T>(capture: (signal: AbortSignal) => Promise<T>): Promise<T | undefined> {
+		if (this.#autolearnCaptureTask || this.#isDisposed) return undefined;
 		const controller = new AbortController();
 		this.#autolearnCaptureAbortController = controller;
-		const task = (async () => {
+		const task = (async (): Promise<T | undefined> => {
 			try {
-				await capture(controller.signal);
+				return await capture(controller.signal);
 			} catch (error) {
 				if (!controller.signal.aborted) throw error;
+				return undefined;
 			} finally {
 				if (this.#autolearnCaptureAbortController === controller) {
 					this.#autolearnCaptureAbortController = undefined;
@@ -3857,7 +3946,7 @@ export class AgentSession {
 		})();
 		this.#autolearnCaptureTask = task;
 		try {
-			await task;
+			return await task;
 		} finally {
 			if (this.#autolearnCaptureTask === task) this.#autolearnCaptureTask = undefined;
 		}
@@ -3907,8 +3996,13 @@ export class AgentSession {
 		this.#memory.cancelLocalMemoryStartup();
 		this.#titleGenerationAbortController.abort();
 		this.#abortAutolearnCapture();
-		this.#irc.flushPending();
+		this.#turnEndHooks.length = 0;
+		this.#skillRefreshHooks.length = 0;
+		this.#proceduralRequirement = undefined;
+		this.#manualAutoLearnHandler = undefined;
+		this.invalidateAutolearnRecall();
 		this.yieldQueue.clear();
+		this.#irc.flushPending();
 		this.agent.setAsideMessageProvider(undefined);
 		this.agent.hasIrcInterrupts = undefined;
 		this.#advisors.stopRuntime();
@@ -4577,9 +4671,37 @@ export class AgentSession {
 		return this.#tools.applyActiveToolsByName(toolNames);
 	}
 
-	/** Rediscovers reloadable skills and refreshes prompt metadata. */
-	refreshSkills(): Promise<void> {
-		return this.#tools.refreshSkills();
+	/**
+	 * Rediscovers reloadable skills and refreshes prompt metadata, then runs the
+	 * registered post-refresh hooks.
+	 *
+	 * The hooks are awaited HERE rather than inside `SessionTools` so a consumer
+	 * that must reconcile derived state (the Auto-Learn procedure catalog) observes
+	 * the new active skill snapshot, not the one being replaced.
+	 */
+	async refreshSkills(): Promise<void> {
+		await this.#tools.refreshSkills();
+		for (const registration of this.#skillRefreshHooks) {
+			if (!registration.active) continue;
+			try {
+				await registration.hook();
+			} catch (error) {
+				logger.warn("skill refresh hook failed", { error: String(error) });
+			}
+		}
+	}
+
+	/**
+	 * Register an awaited hook that runs after every skill refresh. Returns an
+	 * idempotent unsubscribe.
+	 */
+	registerSkillRefreshHook(hook: () => Promise<void> | void): () => void {
+		if (this.#isDisposed) return () => {};
+		const registration = { hook, active: true };
+		this.#skillRefreshHooks.push(registration);
+		return () => {
+			registration.active = false;
+		};
 	}
 
 	/** Selects enabled tools, ignoring names absent from the registry. */

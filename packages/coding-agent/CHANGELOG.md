@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Replaced the experimental Auto-Learn booleans with explicit modes. `autolearn.autoContinue` and `autolearn.minToolCalls` are gone; `autolearn.captureMode` (`off`/`substantive`/`recovery`/`both`, default `recovery`), `autolearn.captureDelivery` (`manual`/`automatic`, default `automatic`), `autolearn.recallMode` (`off`/`suggest`/`require`, default `require`), `autolearn.failureThreshold` (default `3`), `autolearn.procedureScope` (`global`/`project-tagged`, default `global`), and `autolearn.substantiveMinToolCalls` (default `5`) replace them. Existing configs migrate automatically: a legacy `autoContinue` supplies `captureMode: substantive` plus `captureDelivery: automatic`/`manual`, and `minToolCalls` becomes `substantiveMinToolCalls`; both legacy keys are then dropped.
+- Managed Auto-Learn procedures no longer appear in the system prompt's `<skills>` listing. The catalog grows without bound as procedures accumulate, so a growing listing charged every turn for procedures that are almost never relevant. They remain in the active skill snapshot, readable via `skill://<name>`, and invocable as `/skill:<name>`; the host now recalls the relevant descriptor after repeated tool failures instead.
+
+### Added
+
+- Added failure-aware procedural memory to Auto-Learn. After `autolearn.failureThreshold` genuine failures from the same tool family, OMP searches a local SQLite descriptor catalog of prior successful procedures and surfaces at most one compact card (`name` + `description` + `skill://<name>`); in `recallMode: require` it also installs a soft `read` requirement targeting exactly that procedure, so a compliant turn pays no `tool_choice` change. Lookup and ranking are fully deterministic and offline — no embeddings, no remote service — so a capable local model behaves identically to a hosted one. Procedure bodies never enter the conversation before that targeted read.
+- Added `/learn [--turns 1-12] [focus text]`, which snapshots a bounded window of recent completed exchanges (default four, capped at 16,000 estimated tokens) and runs an isolated one-shot writer over it. It reports a stored name only after a finalized successful write, and neither the capture prompt nor the capture agent's review enters the primary transcript.
+- Added `ompManaged` frontmatter to managed procedures (`scope`, project identity, `toolFamilies`, `platforms`, `triggers`) plus optional `scope`/`match` inputs on `manage_skill` and `learn`. These fields drive procedural recall; managed skills without the block remain readable as global legacy procedures.
+- Added `host_blocked` to the core synthetic tool-result source, and approval-policy/user-denial refusals now throw the existing `ToolCallBlockedError`. This gives Auto-Learn a structured exclusion for host refusals instead of classifying error strings, so a denied or cancelled call can never become learned failure evidence.
+
+### Changed
+
+- `agent.db` schema is now version 7, adding an `autolearn_procedures` descriptor cache with an external-content FTS5 index. The filesystem stays authoritative: startup and every skill refresh repair missing rows and drop rows for procedures that no longer exist, while recall outcome counters survive descriptor rewrites and halve past 256 samples so stale history cannot dominate ranking.
+
+### Fixed
+
+- Fixed quadratic backtracking in secret redaction. The JWT-shaped pattern retried its `{16,}` segments from every offset inside a long unbroken run of word characters, so redacting a 64 KB generated body took seconds (8 KB already cost ~85ms) and could stall a managed-skill write. The pattern is now anchored to token boundaries, making it linear.
+
 ## [17.3.7] - 2026-08-17
 
 ### Changed

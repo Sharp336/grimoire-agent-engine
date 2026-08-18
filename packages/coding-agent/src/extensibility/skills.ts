@@ -385,7 +385,14 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 			baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 			source: `${capSkill._source.provider}:${capSkill.level}`,
 			...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
-			hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
+			// Managed procedures NEVER enter the `<skills>` prompt listing: the catalog
+			// grows without bound as Auto-Learn captures, and a growing listing would
+			// add unbounded prompt cost to every turn (and invalidate the cached
+			// prefix on every capture). The host recalls the relevant descriptor after
+			// repeated failures instead. `hide` only gates that listing — the skill
+			// stays in the active snapshot, resolvable via `skill://`, and invocable
+			// as `/skill:<name>`.
+			hide: true,
 			_source: capSkill._source,
 		});
 		realPathSet.add(resolvedPath);

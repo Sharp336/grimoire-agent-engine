@@ -1,9 +1,14 @@
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import type { CaptureWriteRecord } from "../autolearn/capture-request";
+import { CAPTURE_RESULT_DETAILS_KEY } from "../autolearn/capture-request";
+import type { ProcedureDescriptor } from "../autolearn/catalog";
 import {
 	deleteManagedSkill,
 	getManagedSkillsDir,
+	readManagedSkillMetadata,
+	sanitizeManagedDescription,
 	sanitizeSkillName,
 	writeManagedSkill,
 } from "../autolearn/managed-skills";
@@ -18,6 +23,12 @@ const manageSkillSchema = type({
 		"one-line description of when to use the skill (required for create/update)",
 	),
 	"body?": type("string").describe("the SKILL.md body in markdown, no frontmatter (required for create/update)"),
+	"scope?": type("'global' | 'project-tagged'"),
+	"match?": type({
+		"toolFamilies?": "string[]",
+		"platforms?": "string[]",
+		"triggers?": "string[]",
+	}),
 }).narrow(
 	(p, ctx) =>
 		p.action === "delete" ||
@@ -45,17 +56,30 @@ export class ManageSkillTool implements AgentTool<typeof manageSkillSchema> {
 	readonly loadMode = "essential" as const;
 	readonly summary = "Create, update, or delete an isolated managed skill";
 
-	constructor(private readonly refreshSkills?: () => Promise<void>) {}
+	constructor(
+		private readonly refreshSkills?: () => Promise<void>,
+		private readonly syncDescriptor?: (descriptor: ProcedureDescriptor) => Promise<void> | void,
+		private readonly deleteDescriptor?: (name: string) => Promise<void> | void,
+	) {}
 
 	static createIf(session: ToolSession): ManageSkillTool | null {
 		if (!session.settings.get("autolearn.enabled")) return null;
+		// ToolSession exposes no descriptor-cache hook; the controller owns catalog sync.
 		return new ManageSkillTool(session.refreshSkills);
 	}
 
-	async execute(_id: string, params: ManageSkillParams): Promise<AgentToolResult> {
+	async execute(
+		_id: string,
+		params: ManageSkillParams,
+		_signal?: AbortSignal,
+		_onUpdate?: AgentToolUpdateCallback,
+		context?: AgentToolContext,
+	): Promise<AgentToolResult> {
 		if (params.action === "delete") {
-			await deleteManagedSkill(params.name);
+			const name = sanitizeSkillName(params.name);
+			await deleteManagedSkill(name);
 			await this.refreshSkills?.();
+			await this.deleteDescriptor?.(name);
 			return {
 				content: [{ type: "text", text: `Deleted managed skill "${params.name}".` }],
 				details: { action: "delete", name: params.name },
@@ -85,18 +109,78 @@ export class ManageSkillTool implements AgentTool<typeof manageSkillSchema> {
 				details: { action: "create", name: params.name, shadowed: true },
 			};
 		}
+
+		const name = sanitizeSkillName(params.name);
+		const capture = context?.autolearnCapture;
+		const modelMatch = params.match;
+		const metadata =
+			capture || params.scope !== undefined || modelMatch !== undefined
+				? {
+						scope: capture?.scope ?? params.scope,
+						projectKey: capture ? capture.projectKey : undefined,
+						projectLabel: capture ? capture.projectLabel : undefined,
+						// `toolFamilies` is the catalog's COVERAGE key: the ranker matches a
+						// failure family against it exactly.
+						//
+						// A RECOVERY capture holds a NAMED slot, and the runner accounts that
+						// write against exactly that family — so the host list REPLACES the
+						// model's. Unioning would let a capture holding slot `bash` also tag
+						// itself `mcp:playwright`, making the procedure recallable for a
+						// candidate the runner simultaneously reports as uncovered.
+						//
+						// A MANUAL capture (`/learn`) has one UNNAMED slot: the host claims no
+						// family, makes no coverage assertion, and the manual prompt asks the
+						// model to supply the families itself. Overriding there would silently
+						// strip every recall key from a user-requested procedure. Same for an
+						// ordinary non-capture call.
+						toolFamilies: capture?.assignedFamily !== undefined ? capture.toolFamilies : modelMatch?.toolFamilies,
+						platforms: capture?.platforms ?? modelMatch?.platforms,
+						// `triggers` are symptom text, not a coverage key — they can only help
+						// lexical ranking, never grant a family match — so the model's own
+						// description of the failure it fixed is merged in on purpose.
+						triggers: [...(capture?.triggers ?? []), ...(modelMatch?.triggers ?? [])],
+					}
+				: undefined;
 		const { path: skillPath } = await writeManagedSkill({
 			action: params.action,
-			name: params.name,
+			name,
 			description: params.description,
 			body: params.body,
+			metadata,
 		});
 		await this.refreshSkills?.();
+		if (this.syncDescriptor) {
+			const persistedMetadata = await readManagedSkillMetadata(name);
+			const descriptor: ProcedureDescriptor = {
+				name,
+				description: sanitizeManagedDescription(params.description),
+				scope: persistedMetadata?.scope ?? "global",
+				projectKey: persistedMetadata?.projectKey,
+				projectLabel: persistedMetadata?.projectLabel,
+				toolFamilies: persistedMetadata?.toolFamilies ?? [],
+				platforms: persistedMetadata?.platforms ?? [],
+				triggers: persistedMetadata?.triggers ?? [],
+			};
+			await this.syncDescriptor(descriptor);
+		}
 		const relativePath = path.relative(getManagedSkillsDir(), skillPath);
 		const verb = params.action === "create" ? "Created" : "Updated";
+		const details = {
+			action: params.action,
+			name: params.name,
+			...(capture
+				? {
+						[CAPTURE_RESULT_DETAILS_KEY]: {
+							action: params.action,
+							name,
+							family: capture.assignedFamily,
+						} satisfies CaptureWriteRecord,
+					}
+				: {}),
+		};
 		return {
 			content: [{ type: "text", text: `${verb} managed skill "${params.name}" (managed-skills/${relativePath}).` }],
-			details: { action: params.action, name: params.name },
+			details,
 		};
 	}
 }

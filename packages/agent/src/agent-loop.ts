@@ -2551,7 +2551,10 @@ async function executeToolCalls(
 				caughtError = e;
 				result = {
 					content: [{ type: "text", text: e instanceof Error ? e.message : String(e) }],
-					details: {},
+					details:
+						e instanceof ToolCallBlockedError
+							? { __synthetic: true, source: "host_blocked", executed: false }
+							: {},
 				};
 				isError = true;
 			}
@@ -2588,7 +2591,10 @@ async function executeToolCalls(
 					caughtError = e;
 					result = {
 						content: [{ type: "text", text: e instanceof Error ? e.message : String(e) }],
-						details: {},
+						details:
+							e instanceof ToolCallBlockedError
+								? { __synthetic: true, source: "host_blocked", executed: false }
+								: {},
 					};
 					isError = true;
 				}
@@ -2765,8 +2771,8 @@ async function executeToolCalls(
  * websocket close) was surfaced by the CLI as if the local tool had failed.
  *
  * `source` names the state that prevented execution — either an assistant-side
- * turn termination (`assistant_stop_*`) or a mid-batch interrupt that skipped a
- * still-pending call to service queued steering/peer input (`interrupt_skipped`).
+ * turn termination (`assistant_stop_*`), a host refusal (`host_blocked`), or a
+ * mid-batch interrupt that skipped a still-pending call (`interrupt_skipped`).
  * `upstreamError` is the provider-reported message when the turn ended with
  * `stopReason === "error"`.
  */
@@ -2777,7 +2783,8 @@ export interface SyntheticToolResultDetails {
 		| "assistant_stop_error"
 		| "assistant_stop_skipped"
 		| "assistant_stop_length"
-		| "interrupt_skipped";
+		| "interrupt_skipped"
+		| "host_blocked";
 	executed: false;
 	upstreamError?: string;
 }
