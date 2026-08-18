@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Serper as a Google-backed web search provider, including direct answers, knowledge graph sources, organic results, recency filters, and related queries.
+
 ## [17.3.7] - 2026-08-17
 
 ### Changed

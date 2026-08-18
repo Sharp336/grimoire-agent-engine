@@ -10,6 +10,7 @@ export const SEARCH_PROVIDER_OPTIONS = [
 		label: "Auto",
 		description: "Automatically uses the first configured web-search provider",
 	},
+	{ value: "serper", label: "Serper", description: "Google Search results via SERPER_API_KEY or /login serper" },
 	{
 		value: "perplexity",
 		label: "Perplexity",
