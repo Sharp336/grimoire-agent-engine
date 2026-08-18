@@ -5,6 +5,9 @@ import type { Settings } from "../config/settings";
 import eagerTaskPrompt from "../prompts/system/eager-task.md" with { type: "text" };
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
 import midRunTodoNudgePrompt from "../prompts/system/mid-run-todo-nudge.md" with { type: "text" };
+import postCompactionIncompleteTodosPrompt from "../prompts/system/post-compaction-incomplete-todos.md" with {
+	type: "text",
+};
 import { getLatestTodoPhasesFromEntries, isTodoPhase, type TodoItem, type TodoPhase } from "../tools/todo";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { AgentSessionEvent } from "./agent-session-events";
@@ -64,7 +67,6 @@ export class TodoTracker {
 	readonly #host: TodoTrackerHost;
 	#phases: TodoPhase[] = [];
 	#reminderCount = 0;
-	#reminderAwaitingProgress = false;
 	#mutationsSinceLastTouch = 0;
 	#midRunNudgeCount = 0;
 
@@ -95,7 +97,6 @@ export class TodoTracker {
 	/** Resets per-prompt reminder and mutation budgets. */
 	resetCycle(): void {
 		this.#reminderCount = 0;
-		this.#reminderAwaitingProgress = false;
 		this.#mutationsSinceLastTouch = 0;
 		this.#midRunNudgeCount = 0;
 	}
@@ -107,7 +108,6 @@ export class TodoTracker {
 		} else if (!isError && MUTATING_TOOLS[toolName]) {
 			this.#mutationsSinceLastTouch++;
 		}
-		this.#reminderAwaitingProgress = false;
 	}
 
 	/** Detects whether a successful todo result came from an init operation. */
@@ -184,11 +184,28 @@ export class TodoTracker {
 		};
 	}
 
+	/** True when any todo is still pending or in_progress (blocked/abandoned/completed do not count). */
+	hasOpenActionableTodos(): boolean {
+		return this.#incompleteActionableByPhase().some(phase => phase.tasks.length > 0);
+	}
+
 	/** Builds reminder-only eager preludes after compaction. */
 	buildPostCompactionEagerNudges(): AgentMessage[] {
 		const nudges: AgentMessage[] = [];
-		const todo = this.createEagerTodoPrelude(undefined);
-		if (todo) nudges.push(todo.message);
+		const incompleteByPhase = this.#incompleteActionableByPhase();
+		if (incompleteByPhase.length > 0) {
+			nudges.push({
+				role: "custom",
+				customType: "post-compaction-incomplete-todos",
+				content: prompt.render(postCompactionIncompleteTodosPrompt, { phases: incompleteByPhase }),
+				display: false,
+				attribution: "agent",
+				timestamp: Date.now(),
+			});
+		} else {
+			const todo = this.createEagerTodoPrelude(undefined);
+			if (todo) nudges.push(todo.message);
+		}
 		const task = this.createEagerTaskPrelude(undefined);
 		if (task) nudges.push(task);
 		return nudges;
@@ -198,15 +215,8 @@ export class TodoTracker {
 	async checkCompletion(message: AssistantMessage): Promise<boolean> {
 		if (this.#host.consumeLastServedToolChoiceLabel() === "user-force") return false;
 		if (this.#host.planModeEnabled()) return false;
-		if (this.#reminderAwaitingProgress) {
-			logger.debug("Todo completion: prior reminder still awaiting agent action; staying silent", {
-				attempt: this.#reminderCount,
-			});
-			return false;
-		}
 		if (!this.#host.settings.get("todo.reminders") || !this.#host.settings.get("todo.enabled")) {
 			this.#reminderCount = 0;
-			this.#reminderAwaitingProgress = false;
 			return false;
 		}
 		const remindersMax = this.#host.settings.get("todo.remindersMax");
@@ -214,27 +224,10 @@ export class TodoTracker {
 			logger.debug("Todo completion: max reminders reached", { count: this.#reminderCount });
 			return false;
 		}
-		const phases = this.phases;
-		if (phases.length === 0) {
-			this.#reminderCount = 0;
-			this.#reminderAwaitingProgress = false;
-			return false;
-		}
-		const incompleteByPhase = phases
-			.map(phase => ({
-				name: phase.name,
-				tasks: phase.tasks
-					.filter(
-						(task): task is TodoItem & { status: "pending" | "in_progress" } =>
-							task.status === "pending" || task.status === "in_progress",
-					)
-					.map(task => ({ content: task.content, status: task.status })),
-			}))
-			.filter(phase => phase.tasks.length > 0);
+		const incompleteByPhase = this.#incompleteActionableByPhase();
 		const incomplete = incompleteByPhase.flatMap(phase => phase.tasks);
 		if (incomplete.length === 0) {
 			this.#reminderCount = 0;
-			this.#reminderAwaitingProgress = false;
 			return false;
 		}
 		if (isAwaitingUserAnswer(message)) {
@@ -251,12 +244,12 @@ export class TodoTracker {
 		}
 		this.#reminderCount++;
 		const todoList = incompleteByPhase
-			.map(phase => `- ${phase.name}\n${phase.tasks.map(task => `  - ${task.content}`).join("\n")}`)
+			.map(phase => `- ${phase.name}\n${phase.tasks.map(task => `  - [${task.status}] ${task.content}`).join("\n")}`)
 			.join("\n");
 		const reminder =
 			`<system-reminder>\n` +
 			`You stopped with ${incomplete.length} incomplete todo item(s):\n${todoList}\n\n` +
-			`Please continue working on these tasks or mark them complete if finished.\n` +
+			`Please continue working on these tasks or mark them complete with the todo tool if finished. A text-only stop is not completion.\n` +
 			`(Reminder ${this.#reminderCount}/${remindersMax})\n` +
 			`</system-reminder>`;
 		logger.debug("Todo completion: sending reminder", {
@@ -276,7 +269,6 @@ export class TodoTracker {
 			timestamp: Date.now(),
 		};
 		this.#mutationsSinceLastTouch = 0;
-		this.#reminderAwaitingProgress = true;
 		this.#host.agent.appendMessage(reminderMessage);
 		this.#host.sessionManager.appendMessage(reminderMessage);
 		this.#host.scheduleAgentContinue({ generation: this.#host.promptGeneration() });
@@ -324,6 +316,23 @@ export class TodoTracker {
 			toolRefs: { task: wireName("task"), todo: wireName("todo") },
 			taskBatch: this.#host.settings.get("task.batch"),
 		};
+	}
+
+	#incompleteActionableByPhase(): Array<{
+		name: string;
+		tasks: Array<{ content: string; status: "pending" | "in_progress" }>;
+	}> {
+		return this.#phases
+			.map(phase => ({
+				name: phase.name,
+				tasks: phase.tasks
+					.filter(
+						(task): task is TodoItem & { status: "pending" | "in_progress" } =>
+							task.status === "pending" || task.status === "in_progress",
+					)
+					.map(task => ({ content: task.content, status: task.status })),
+			}))
+			.filter(phase => phase.tasks.length > 0);
 	}
 
 	#clonePhases(phases: TodoPhase[]): TodoPhase[] {

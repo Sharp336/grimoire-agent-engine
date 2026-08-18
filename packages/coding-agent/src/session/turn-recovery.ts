@@ -167,6 +167,8 @@ export interface TurnRecoveryHost {
 		},
 	): Promise<RecoveryCompactionResult>;
 	withBashBranchTransition<T>(operation: () => T): T;
+	/** Whether any todo is still pending or in_progress. */
+	hasOpenActionableTodos(): boolean;
 }
 
 /** Construction-time retry state restored from model selection. */
@@ -2219,17 +2221,20 @@ export class TurnRecovery {
 	#maybeInjectThinkingLoopRedirect(id: number): void {
 		if (!AIError.is(id, AIError.Flag.ThinkingLoop)) return;
 		if (this.#host.settings.get("model.loopGuard.enabled") !== true) return;
+		const content = prompt.render(thinkingLoopRedirectTemplate, {
+			hasOpenTodos: this.#host.hasOpenActionableTodos(),
+		});
 		this.#host.agent.appendMessage({
 			role: "custom",
 			customType: THINKING_LOOP_REDIRECT_TYPE,
-			content: thinkingLoopRedirectTemplate,
+			content,
 			display: false,
 			attribution: "agent",
 			timestamp: Date.now(),
 		});
 		this.#host.sessionManager.appendCustomMessageEntry(
 			THINKING_LOOP_REDIRECT_TYPE,
-			thinkingLoopRedirectTemplate,
+			content,
 			false,
 			undefined,
 			"agent",

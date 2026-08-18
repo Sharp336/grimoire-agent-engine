@@ -1105,6 +1105,7 @@ export class AgentSession {
 			runAutoCompaction: (reason, willRetry, deferred, allowDefer, options) =>
 				this.#maintenance.runAutoCompaction(reason, willRetry, deferred, allowDefer, options),
 			withBashBranchTransition: operation => this.#bash.withBranchTransition(operation),
+			hasOpenActionableTodos: () => this.#todo.hasOpenActionableTodos(),
 		};
 		this.#recovery = new TurnRecovery(recoveryHost, { initialRetryFallback: config.initialRetryFallback });
 		this.#detachUsageBeforeQueueDequeue = this.agent.addBeforeQueuedMessageDequeueHook(async signal => {
@@ -3287,14 +3288,17 @@ export class AgentSession {
 			// at invocation (past the abort check below), so an aborted continuation queues
 			// nothing; scoped to this request via prependMessages, never the shared queue.
 			const eagerNudges = this.#todo.buildPostCompactionEagerNudges();
+			const continueText = prompt.render(autoContinuePrompt, {
+				hasOpenTodos: this.#todo.hasOpenActionableTodos(),
+			});
 			await this.#promptWithMessage(
 				{
 					role: "developer",
-					content: [{ type: "text", text: autoContinuePrompt }],
+					content: [{ type: "text", text: continueText }],
 					attribution: "agent",
 					timestamp: Date.now(),
 				},
-				autoContinuePrompt,
+				continueText,
 				{
 					skipPostPromptRecoveryWait: true,
 					prependMessages: eagerNudges.length > 0 ? eagerNudges : undefined,

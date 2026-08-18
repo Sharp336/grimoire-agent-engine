@@ -10,15 +10,13 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 /**
- * Regression coverage for issue #2590: `#checkTodoCompletion` used to schedule
- * `agent.continue()` after appending its `<system-reminder>`, so any text-only
- * acknowledgement from the agent ("paused at your instruction") triggered another
- * `agent_end`, which incremented the counter and fired the next reminder — no
- * user input required. Within a single user pause that loop runs 1/3 → 2/3 → 3/3.
+ * Stop-time todo reminders (#2590 / #8874).
  *
- * The contract these tests defend: a reminder MUST NOT escalate inside a
- * self-continuation chain unless the agent has produced a tool-level result
- * (e.g. called `todo` or `edit`) between the prior reminder and the next stop.
+ * A text-only `stop` with pending/in_progress todos is not terminal unless the
+ * assistant is waiting for the user (question / response cue) or the remaining
+ * items are blocked/abandoned/completed. A text-only "all done" after reminder
+ * 1/3 is not progress and must not suppress 2/3–3/3. The reminder budget still
+ * caps at `todo.remindersMax` so a fake-complete cannot loop forever.
  */
 const sharedAuthStorage = createInMemoryAuthStorage();
 sharedAuthStorage.setRuntimeApiKey("anthropic", "test-key");
@@ -33,6 +31,7 @@ describe("AgentSession todo reminder self-continuation suppression", () => {
 	let session: AgentSession;
 	let sessionManager: SessionManager;
 	let reminderAttempts: number[];
+	let agentEndTerminalStates: Array<boolean | undefined>;
 
 	function textOnlyAssistantMessage(text = "paused at your instruction"): AssistantMessage {
 		return {
@@ -137,8 +136,14 @@ describe("AgentSession todo reminder self-continuation suppression", () => {
 		});
 
 		reminderAttempts = [];
+		agentEndTerminalStates = [];
 		session.subscribe((event: AgentSessionEvent) => {
 			if (event.type === "todo_reminder") reminderAttempts.push(event.attempt);
+			if (event.type === "agent_end") {
+				agentEndTerminalStates.push(
+					(event as Extract<AgentSessionEvent, { type: "agent_end" }> & { isTerminal?: boolean }).isTerminal,
+				);
+			}
 		});
 
 		session.setTodoPhases([
@@ -165,6 +170,7 @@ describe("AgentSession todo reminder self-continuation suppression", () => {
 		emitTextOnlyStop();
 		await session.waitForIdle();
 		expect(reminderAttempts).toEqual([1]);
+		expect(agentEndTerminalStates).toEqual([false]);
 
 		const reminderEntry = todoReminderTranscriptEntry();
 		expect(reminderEntry?.type).toBe("message");
@@ -227,41 +233,58 @@ describe("AgentSession todo reminder self-continuation suppression", () => {
 		expect(continueSpy).toHaveBeenCalledTimes(1);
 	});
 
-	it("fires exactly one reminder per user pause when the agent only acknowledges", async () => {
-		// Each call to continue() mirrors what the bug-reported model did: emit another
-		// text-only stop ("paused at your instruction"), no tool calls in between.
+	it("does not treat a text-only all-done as terminal or as reminder progress", async () => {
 		vi.spyOn(session.agent, "continue").mockImplementation(async () => {
-			emitTextOnlyStop();
+			emitTextOnlyStop("Task complete. All 2 items now wired.");
 		});
 
-		emitTextOnlyStop();
+		emitTextOnlyStop("Task complete. All 2 items now wired.");
 		await session.waitForIdle();
 
-		// With the bug: reminderAttempts === [1, 2, 3] within a single user pause.
-		// With the fix: the second `agent_end` is suppressed because no tool action ran
-		// between the first reminder and the agent's text-only ack.
-		expect(reminderAttempts).toEqual([1]);
+		// 1/3, then the same text-only slogan, then 2/3 and 3/3. After the budget
+		// the next text-only stop is allowed to settle.
+		expect(reminderAttempts).toEqual([1, 2, 3]);
+		expect(agentEndTerminalStates[0]).toBe(false);
+		expect(agentEndTerminalStates.at(-1)).toBe(true);
 	});
 
-	it("re-escalates after the agent makes tool-level progress between stops", async () => {
+	it("still re-escalates after the agent makes tool-level progress between stops", async () => {
 		let continueCount = 0;
 		vi.spyOn(session.agent, "continue").mockImplementation(async () => {
 			continueCount += 1;
 			if (continueCount === 1) {
-				// In response to reminder 1/3 the agent actually did work (called `todo`),
-				// then stopped again with todos still incomplete.
 				emitToolResult("todo", { phases: session.getTodoPhases() });
 				emitTextOnlyStop();
 				return;
 			}
-			// Subsequent continuations are bare acks — they must not escalate further.
 			emitTextOnlyStop();
 		});
 
 		emitTextOnlyStop();
 		await session.waitForIdle();
 
-		// 1/3 fires, agent does work, 2/3 fires, agent acks → suppressed, no 3/3.
-		expect(reminderAttempts).toEqual([1, 2]);
+		expect(reminderAttempts).toEqual([1, 2, 3]);
+	});
+
+	it("allows a text-only stop when remaining todos are only blocked or closed", async () => {
+		session.setTodoPhases([
+			{
+				name: "Waiting",
+				tasks: [
+					{ content: "Need review", status: "blocked", blocker: "waiting on user" },
+					{ content: "Shipped", status: "completed" },
+					{ content: "Dropped", status: "abandoned" },
+				],
+			},
+		]);
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		emitTextOnlyStop("Task complete.");
+		await session.waitForIdle();
+
+		expect(reminderAttempts).toEqual([]);
+		expect(todoReminderTranscriptEntry()).toBeUndefined();
+		expect(continueSpy).not.toHaveBeenCalled();
+		expect(agentEndTerminalStates.at(-1)).toBe(true);
 	});
 });

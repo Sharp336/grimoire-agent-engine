@@ -368,7 +368,7 @@ describe("AgentSession eager prelude re-injection after compaction", () => {
 		expect(continuation.toolChoice).toBeUndefined();
 	});
 
-	it("does not re-inject the eager todo reminder when todos survived compaction", async () => {
+	it("re-injects the surviving incomplete todo list instead of the create-a-list prelude", async () => {
 		const { session, sessionManager, waitForCall } = await createHarness({
 			"task.eager": "default",
 			"todo.enabled": true,
@@ -389,6 +389,29 @@ describe("AgentSession eager prelude re-injection after compaction", () => {
 		expect(session.getTodoPhases().length).toBeGreaterThan(0);
 		expect(continuation.messageTexts.some(text => text.includes("Consider calling"))).toBe(false);
 		expect(continuation.messageTexts.some(text => text.includes("You MUST call"))).toBe(false);
+		const incompleteNudge = continuation.messageTexts.find(text =>
+			text.includes("These incomplete todos remain after compaction"),
+		);
+		expect(incompleteNudge).toBeDefined();
+		expect(incompleteNudge).toContain("- Work");
+		expect(incompleteNudge).toContain("- [pending] do the thing");
+		expect(continuation.messageTexts.some(text => text.includes("If no work remains, say so"))).toBe(false);
+	});
+
+	it("keeps the no-work-remains auto-continue line when no todos are open", async () => {
+		const { session, waitForCall } = await createHarness({
+			"task.eager": "default",
+			"todo.enabled": true,
+			"todo.eager": "default",
+		});
+		stubCompaction();
+
+		const continuation = await runToContinuation(session, waitForCall);
+
+		expect(continuation.messageTexts.some(text => text.includes("If no work remains, say so"))).toBe(true);
+		expect(
+			continuation.messageTexts.some(text => text.includes("These incomplete todos remain after compaction")),
+		).toBe(false);
 	});
 
 	it("resets Codex provider history after successful auto-compaction", async () => {
