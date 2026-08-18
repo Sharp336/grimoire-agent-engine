@@ -13,6 +13,7 @@ import { githubToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/gh-renderer"
 import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { WriteTool, writeToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/write";
 import {
+	dispatchXdevTool,
 	listXdevTools,
 	resolveMountedXdevTool,
 	XDEV_DOCS_PER_DEVICE_CAP,
@@ -22,6 +23,7 @@ import {
 	xdevDocs,
 	xdevDocsAll,
 	xdevEntries,
+	xdevListing,
 } from "@oh-my-pi/pi-coding-agent/tools/xdev";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -42,12 +44,17 @@ function xdevSession(cwd: string, overrides: Partial<ToolSession> = {}): ToolSes
 	};
 }
 
-function createTestXdevState(tools: Tool[], builtInNames: Iterable<string> = tools.map(tool => tool.name)): XdevState {
+function createTestXdevState(
+	tools: Tool[],
+	builtInNames: Iterable<string> = tools.map(tool => tool.name),
+	overrides: Partial<XdevState> = {},
+): XdevState {
 	return {
 		tools: new Map(tools.map(tool => [tool.name, tool])),
 		mountedNames: new Set(tools.map(tool => tool.name)),
 		builtInNames: new Set(builtInNames),
 		isActive: () => false,
+		...overrides,
 	};
 }
 
@@ -557,6 +564,97 @@ describe("read and write route xd:// device URLs", () => {
 		} finally {
 			await removeWithRetries(tempDir);
 		}
+	});
+	it("groups MCP tools by authoritative server metadata and loads one service on demand", () => {
+		const createMcpTool = (name: string, serverName: string, toolName: string): Tool =>
+			({
+				name,
+				label: toolName,
+				description: `Description for ${toolName}`,
+				parameters: type({}),
+				loadMode: "discoverable",
+				mcpServerName: serverName,
+				mcpToolName: toolName,
+				async execute() {
+					return { content: [{ type: "text", text: "" }] };
+				},
+			}) as Tool;
+		const first = createMcpTool("mcp__grafana_dev_search", "grafana-dev", "search");
+		const colliding = createMcpTool("mcp__grafana_dev_search_2", "grafana:dev", "search");
+		const xdev = createTestXdevState([first, colliding], [], {
+			getMcpServerInstructions: () =>
+				new Map([
+					["grafana-dev", "Search the primary workspace first."],
+					["grafana:dev", "Search the secondary workspace first."],
+				]),
+		});
+
+		const listing = xdevListing(xdev);
+		expect(listing).toContain('xd://mcp-service:grafana-dev — MCP service "grafana-dev" (1 tool)');
+		expect(listing).toContain('xd://mcp-service:grafana%3Adev — MCP service "grafana:dev" (1 tool)');
+		expect(listing).not.toContain("xd://mcp__grafana_dev_search");
+
+		const promptDocs = xdevDocsAll(xdev, "builtins");
+		expect(promptDocs).toContain("xd://mcp-service:grafana-dev");
+		expect(promptDocs).not.toContain("xd://mcp__grafana_dev_search");
+
+		const primaryDocs = xdevDocs(xdev, "mcp-service:grafana-dev");
+		expect(primaryDocs).toContain("Search the primary workspace first.");
+		expect(primaryDocs).toContain("xd://mcp__grafana_dev_search");
+		expect(primaryDocs).not.toContain("secondary workspace");
+		expect(primaryDocs).not.toContain("xd://mcp__grafana_dev_search_2");
+
+		const secondaryDocs = xdevDocs(xdev, "mcp-service:grafana%3Adev");
+		expect(secondaryDocs).toContain("Search the secondary workspace first.");
+		expect(secondaryDocs).toContain("xd://mcp__grafana_dev_search_2");
+	});
+
+	it("keeps canonical service paths distinct from colliding ordinary devices", async () => {
+		let ordinaryExecutions = 0;
+		const serviceTool = {
+			name: "mcp__foo_search",
+			label: "search",
+			description: "Search foo",
+			parameters: type({}),
+			loadMode: "discoverable",
+			mcpServerName: "foo",
+			mcpToolName: "search",
+			async execute() {
+				return { content: [{ type: "text" as const, text: "service tool" }] };
+			},
+		} as Tool;
+		const ordinaryTool = {
+			name: "mcp-service:foo",
+			label: "ordinary",
+			description: "Ordinary colliding device",
+			parameters: type({}),
+			loadMode: "discoverable",
+			async execute() {
+				ordinaryExecutions++;
+				return { content: [{ type: "text" as const, text: "ordinary result" }] };
+			},
+		} as Tool;
+		const xdev = createTestXdevState([serviceTool, ordinaryTool]);
+		const ordinaryPath = "mcp-tool:mcp-service%3Afoo";
+
+		const listing = xdevListing(xdev);
+		expect(listing).toContain("xd://mcp-service:foo — MCP service");
+		expect(listing).toContain(`xd://${ordinaryPath} — Ordinary colliding device`);
+		expect(() => xdevDocs(xdev, "mcp-service:%66oo")).toThrow();
+
+		const serviceDocs = xdevDocs(xdev, "mcp-service:foo");
+		expect(serviceDocs).toContain('# MCP service "foo"');
+		expect(serviceDocs).not.toContain("Ordinary colliding device");
+		const ordinaryDocs = xdevDocs(xdev, ordinaryPath);
+		expect(ordinaryDocs).toContain("Ordinary colliding device");
+		expect(ordinaryDocs).toContain(`Execute by writing JSON to xd://${ordinaryPath}.`);
+
+		const serviceWrite = await dispatchXdevTool(xdev, "mcp-service:foo", "{}", "service-write");
+		expect(serviceWrite.result.isError).toBe(true);
+		expect(ordinaryExecutions).toBe(0);
+		const ordinaryWrite = await dispatchXdevTool(xdev, ordinaryPath, "{}", "ordinary-write");
+		expect(ordinaryWrite.result.content).toEqual([{ type: "text", text: "ordinary result" }]);
+		expect(ordinaryExecutions).toBe(1);
 	});
 });
 

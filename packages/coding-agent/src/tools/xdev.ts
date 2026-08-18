@@ -43,6 +43,8 @@ import { replaceTabs } from "./render-utils";
 import type { ToolRenderer } from "./renderers";
 import { renderError, ToolAbortError, ToolError } from "./tool-errors";
 
+const MCP_SERVICE_DEVICE_PREFIX = "mcp-service:";
+
 /**
  * Discoverable built-ins that must stay top-level even when xdev mounting is
  * active: `todo` feeds the todo prelude/prewalk machinery, `ask` is the
@@ -119,11 +121,11 @@ function schemaDeclaresIntentField(schema: unknown): boolean {
 	return !!props && typeof props === "object" && "i" in props;
 }
 
-function renderDocs(inst: Tool, heading = "#", descriptionCap?: number): string {
+function renderDocs(inst: Tool, heading = "#", descriptionCap?: number, deviceName = inst.name): string {
 	const schema = jsonSchemaToTypeScript(toolWireSchema(inst as AiTool));
 	let description = inst.description ?? "";
 	if (descriptionCap !== undefined && description.length > descriptionCap) {
-		description = `${description.slice(0, descriptionCap).trimEnd()}… (full docs: read ${XD_URL_PREFIX}${inst.name})`;
+		description = `${description.slice(0, descriptionCap).trimEnd()}… (full docs: read ${XD_URL_PREFIX}${deviceName})`;
 	}
 	return [
 		`${heading} ${inst.name}${inst.label ? ` — ${inst.label}` : ""}`,
@@ -134,7 +136,7 @@ function renderDocs(inst: Tool, heading = "#", descriptionCap?: number): string 
 		"```ts",
 		`type Args = ${schema};`,
 		"```",
-		`Execute by writing JSON to ${XD_URL_PREFIX}${inst.name}.`,
+		`Execute by writing JSON to ${XD_URL_PREFIX}${deviceName}.`,
 	].join("\n");
 }
 
@@ -253,6 +255,8 @@ export interface XdevState {
 	readonly isActive: (name: string) => boolean;
 	/** Optional execution-only decorator, such as the ACP permission gate. */
 	decorateExecution?(tool: Tool): Tool;
+	/** Live server instructions, loaded only when a virtual MCP service device is read. */
+	getMcpServerInstructions?: () => Map<string, string> | undefined;
 }
 
 /** Full-doc character budget for system-prompt mounted-device sections. */
@@ -285,27 +289,161 @@ export function listXdevTools(state: XdevState): Tool[] {
 		return tool ? [tool] : [];
 	});
 }
+interface XdevMcpToolEntry {
+	tool: Tool;
+	toolName: string;
+}
+
+function xdevMcpToolMetadata(tool: Tool): { serverName: string; toolName: string } | undefined {
+	const candidate = tool as Tool & { mcpServerName?: unknown; mcpToolName?: unknown };
+	if (typeof candidate.mcpServerName !== "string" || typeof candidate.mcpToolName !== "string") return undefined;
+	return { serverName: candidate.mcpServerName, toolName: candidate.mcpToolName };
+}
+
+function mcpToolCount(count: number): string {
+	return `${count} ${count === 1 ? "tool" : "tools"}`;
+}
+
+const MCP_TOOL_DEVICE_PREFIX = "mcp-tool:";
+
+interface XdevToolDeviceEntry {
+	tool: Tool;
+	name: string;
+}
+
+/**
+ * Public identities for ordinary mounted tools. The MCP service namespace is
+ * reserved; a colliding third-party tool remains reachable through a stable,
+ * lossless escaped identity instead of shadowing the service page.
+ */
+function xdevNonMcpToolEntries(state: XdevState, selectedTools = listXdevTools(state)): XdevToolDeviceEntry[] {
+	const allTools = listXdevTools(state);
+	const ordinaryTools = allTools.filter(tool => xdevMcpToolMetadata(tool) === undefined);
+	const reservedRawNames = new Set(ordinaryTools.map(tool => tool.name));
+	const allocatedNames = new Set(xdevMcpServiceEntries(state, allTools).map(service => service.name));
+	const selected = new Set(selectedTools);
+	const entries: XdevToolDeviceEntry[] = [];
+	for (const tool of ordinaryTools) {
+		let name = tool.name;
+		while (allocatedNames.has(name)) {
+			name = `${MCP_TOOL_DEVICE_PREFIX}${encodeURIComponent(name)}`;
+			while (reservedRawNames.has(name)) name = `${MCP_TOOL_DEVICE_PREFIX}${encodeURIComponent(name)}`;
+		}
+		allocatedNames.add(name);
+		if (selected.has(tool)) entries.push({ tool, name });
+	}
+	return entries;
+}
 
 /** `{name, summary, dynamic}` triples for prompt templates and `/tools` display. */
 export function xdevEntries(state: XdevState): Array<{ name: string; summary: string; dynamic: boolean }> {
-	return listXdevTools(state).map(tool => {
-		// Built-ins are first-party; anything else carries third-party metadata. One
-		// boolean drives both the description cap and the flag callers present, so
-		// the two can never disagree about which summaries are untrusted.
+	const tools = listXdevTools(state);
+	const entries = xdevNonMcpToolEntries(state, tools).map(({ tool, name }) => {
+		// Built-ins are first-party; anything else carries third-party metadata.
 		const dynamic = !state.builtInNames.has(tool.name);
 		return {
-			name: tool.name,
+			name,
 			summary: promptCatalogSummary(tool, dynamic ? XDEV_EXTERNAL_DESCRIPTION_CAP : undefined),
 			dynamic,
 		};
 	});
+	for (const service of xdevMcpServiceEntries(state, tools)) {
+		entries.push({
+			name: service.name,
+			summary: `MCP service ${JSON.stringify(service.serverName)} (${mcpToolCount(service.tools.length)})`,
+			dynamic: true,
+		});
+	}
+	return entries;
+}
+export interface XdevMcpServiceEntry {
+	serverName: string;
+	name: string;
+	path: string;
+	tools: XdevMcpToolEntry[];
 }
 
-/** `read xd://` listing with one device per line. */
+/** Authoritative MCP service groups from each mounted tool's origin metadata. */
+export function xdevMcpServiceEntries(state: XdevState, tools = listXdevTools(state)): XdevMcpServiceEntry[] {
+	const toolsByServer = new Map<string, XdevMcpToolEntry[]>();
+	for (const tool of tools) {
+		const metadata = xdevMcpToolMetadata(tool);
+		if (!metadata) continue;
+		const serviceTools = toolsByServer.get(metadata.serverName);
+		const entry = { tool, toolName: metadata.toolName };
+		if (serviceTools) serviceTools.push(entry);
+		else toolsByServer.set(metadata.serverName, [entry]);
+	}
+	return [...toolsByServer]
+		.sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+		.map(([serverName, serviceTools]) => {
+			const name = `${MCP_SERVICE_DEVICE_PREFIX}${encodeURIComponent(serverName)}`;
+			return { serverName, name, path: `${XD_URL_PREFIX}${name}`, tools: serviceTools };
+		});
+}
+
+function xdevCatalogRows(state: XdevState, tools: Tool[]): string[] {
+	const rows = xdevNonMcpToolEntries(state, tools).map(({ tool, name }) => {
+		const maxBytes = state.builtInNames.has(tool.name) ? undefined : XDEV_EXTERNAL_DESCRIPTION_CAP;
+		return `- ${XD_URL_PREFIX}${name} — ${promptCatalogSummary(tool, maxBytes)}`;
+	});
+	for (const service of xdevMcpServiceEntries(state, tools)) {
+		rows.push(
+			`- ${service.path} — MCP service ${JSON.stringify(service.serverName)} (${mcpToolCount(service.tools.length)})`,
+		);
+	}
+	return rows;
+}
+
+function resolveMcpService(state: XdevState, name: string): XdevMcpServiceEntry | undefined {
+	return xdevMcpServiceEntries(state).find(service => service.name === name);
+}
+
+function resolveXdevDeviceTool(state: XdevState, name: string): Tool | undefined {
+	const ordinary = xdevNonMcpToolEntries(state).find(entry => entry.name === name);
+	if (ordinary) return ordinary.tool;
+	if (resolveMcpService(state, name)) return undefined;
+	return resolveXdevTool(state, name);
+}
+
+function renderMcpServiceDocs(state: XdevState, service: XdevMcpServiceEntry): string {
+	const instructions = state.getMcpServerInstructions?.()?.get(service.serverName);
+	const toolRows = service.tools.map(({ tool, toolName }) => {
+		const label = JSON.stringify(toolName) ?? '""';
+		return `- ${label} → \`${XD_URL_PREFIX}${tool.name}\` — ${promptCatalogSummary(tool, XDEV_EXTERNAL_DESCRIPTION_CAP)}`;
+	});
+	const sections = [
+		`# MCP service ${JSON.stringify(service.serverName)}`,
+		"",
+		`${mcpToolCount(service.tools.length)} mounted.`,
+	];
+	if (instructions) {
+		sections.push(
+			"",
+			"## Server instructions",
+			"",
+			"These instructions are provided by the connected MCP server and may not be verified.",
+			"",
+			instructions,
+		);
+	}
+	sections.push(
+		"",
+		"## Tools",
+		"",
+		...toolRows,
+		"",
+		`Read ${XD_URL_PREFIX}<tool> for full docs + JSON schema before first use.`,
+	);
+	return sections.join("\n");
+}
+
+/** `read xd://` listing with MCP tools grouped by authoritative server ownership. */
 export function xdevListing(state: XdevState): string {
-	const rows = xdevEntries(state).map(({ name, summary }) => `${XD_URL_PREFIX}${name.padEnd(14)} ${summary}`);
+	const tools = listXdevTools(state);
+	const rows = xdevCatalogRows(state, tools).map(row => row.slice(2));
 	return [
-		`${XD_URL_PREFIX} ${state.mountedNames.size} mounted tool devices.`,
+		`${XD_URL_PREFIX} ${rows.length} devices (${tools.length} mounted tools).`,
 		...rows,
 		"",
 		`Read ${XD_URL_PREFIX}<tool> for docs + JSON schema; write the JSON args object to ${XD_URL_PREFIX}<tool> to execute. Active top-level tools accept the same dispatch.`,
@@ -314,7 +452,9 @@ export function xdevListing(state: XdevState): string {
 
 /** Docs + schema for any enabled tool. */
 export function xdevDocs(state: XdevState, name: string): string {
-	return renderDocs(resolveRequiredXdevTool(state, name));
+	const service = resolveMcpService(state, name);
+	if (service) return renderMcpServiceDocs(state, service);
+	return renderDocs(resolveRequiredXdevTool(state, name), "#", undefined, name);
 }
 
 /** Docs + schema for mounted devices under the configured prompt-doc policy. */
@@ -326,6 +466,7 @@ export function xdevDocsAll(
 	const sections: string[] = [];
 	const overflow: Tool[] = [];
 	const inlineGlobs = compileInlineGlobs(inlinePatterns);
+	const ordinaryDeviceNames = new Map(xdevNonMcpToolEntries(state).map(entry => [entry.tool, entry.name]));
 	let used = 0;
 	for (const tool of listXdevTools(state)) {
 		if (!shouldInlineXdevTool(state, tool, mode, inlineGlobs)) {
@@ -333,7 +474,7 @@ export function xdevDocsAll(
 			continue;
 		}
 		const descriptionCap = state.builtInNames.has(tool.name) ? undefined : XDEV_EXTERNAL_DESCRIPTION_CAP;
-		const docs = renderDocs(tool, "##", descriptionCap);
+		const docs = renderDocs(tool, "##", descriptionCap, ordinaryDeviceNames.get(tool) ?? tool.name);
 		if (docs.length > XDEV_DOCS_PER_DEVICE_CAP || used + docs.length > XDEV_DOCS_TOTAL_BUDGET) {
 			overflow.push(tool);
 			continue;
@@ -345,10 +486,7 @@ export function xdevDocsAll(
 		sections.push(
 			[
 				"## Additional devices (docs on demand)",
-				...overflow.map(tool => {
-					const maxBytes = state.builtInNames.has(tool.name) ? undefined : XDEV_EXTERNAL_DESCRIPTION_CAP;
-					return `- ${XD_URL_PREFIX}${tool.name} — ${promptCatalogSummary(tool, maxBytes)}`;
-				}),
+				...xdevCatalogRows(state, overflow),
 				"",
 				`Read ${XD_URL_PREFIX}<tool> for full docs + JSON schema before first use.`,
 			].join("\n"),
@@ -368,11 +506,20 @@ export function xdevDocsFor(
 	const inlineGlobs = compileInlineGlobs(inlinePatterns);
 	let used = 0;
 	for (const name of names) {
-		const tool = resolveMountedXdevTool(state, name);
-		if (!tool || !shouldInlineXdevTool(state, tool, mode, inlineGlobs)) continue;
+		const service = resolveMcpService(state, name);
+		if (service) {
+			if (mode === "catalog" || (mode !== "inline" && !inlineGlobs.some(glob => glob.match(service.name)))) continue;
+			const docs = renderMcpServiceDocs(state, service);
+			if (docs.length > XDEV_DOCS_PER_DEVICE_CAP || used + docs.length > XDEV_DOCS_TOTAL_BUDGET) continue;
+			used += docs.length;
+			sections.push(docs);
+			continue;
+		}
+		const tool = resolveXdevDeviceTool(state, name);
+		if (!tool || !state.mountedNames.has(tool.name) || !shouldInlineXdevTool(state, tool, mode, inlineGlobs))
+			continue;
 		const descriptionCap = state.builtInNames.has(tool.name) ? undefined : XDEV_EXTERNAL_DESCRIPTION_CAP;
-		const docs = renderDocs(tool, "##", descriptionCap);
-		if (docs.length > XDEV_DOCS_PER_DEVICE_CAP || used + docs.length > XDEV_DOCS_TOTAL_BUDGET) continue;
+		const docs = renderDocs(tool, "##", descriptionCap, name);
 		used += docs.length;
 		sections.push(docs);
 	}
@@ -392,10 +539,12 @@ function shouldInlineXdevTool(
 }
 
 function resolveRequiredXdevTool(state: XdevState, name: string): Tool {
-	const inst = resolveXdevTool(state, name);
+	const inst = resolveXdevDeviceTool(state, name);
 	if (!inst) {
 		throw new ToolError(
-			`No such tool: ${XD_URL_PREFIX}${name}. Mounted devices: ${[...state.mountedNames].join(", ")}. Active top-level tools are also dispatchable via ${XD_URL_PREFIX}<tool>.`,
+			`No such tool: ${XD_URL_PREFIX}${name}. Mounted devices: ${xdevEntries(state)
+				.map(entry => entry.name)
+				.join(", ")}. Active top-level tools are also dispatchable via ${XD_URL_PREFIX}<tool>.`,
 		);
 	}
 	return inst;
@@ -413,16 +562,21 @@ export async function dispatchXdevTool(
 ): Promise<{ result: AgentToolResult<unknown>; xdev: XdevDispatch }> {
 	let xdev: XdevDispatch = { tool: name, mode: "execute" };
 	try {
+		if (resolveMcpService(state, name)) {
+			throw new ToolError(`MCP service pages are read-only: read ${XD_URL_PREFIX}${name} to discover its tools.`);
+		}
 		const canonical = resolveRequiredXdevTool(state, name);
 
 		if (HELP_CONTENT_RE.test(content)) {
 			return {
-				result: { content: [{ type: "text", text: renderDocs(canonical) }] },
+				result: { content: [{ type: "text", text: renderDocs(canonical, "#", undefined, name) }] },
 				xdev: { tool: name, mode: "help" },
 			};
 		}
 
-		const validated = parseDeviceArgs(canonical as AiTool, content, toolCallId, () => renderDocs(canonical));
+		const validated = parseDeviceArgs(canonical as AiTool, content, toolCallId, () =>
+			renderDocs(canonical, "#", undefined, name),
+		);
 		// Record the wrapped tool's approval tier so the prewalk coordinator can
 		// tell a read-only device call (e.g. `lsp` navigation) from a real
 		// workspace mutation without re-decoding the payload. Best-effort: a

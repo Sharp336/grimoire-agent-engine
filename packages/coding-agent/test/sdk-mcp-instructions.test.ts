@@ -13,21 +13,20 @@ import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
 import {
 	BOUNDED_GUIDANCE_MODE,
 	CONTEXT_MODE_NO_INSTRUCTIONS_MODE,
+	LONG_INSTRUCTIONS_MODE,
+	LONG_INSTRUCTIONS_PREFIX,
 	SERVER_INSTRUCTIONS,
 	TOOL_RESULT,
 } from "./fixtures/instructions-mcp";
 
-// Contract: a deferred interactive (`hasUI`) session runs MCP discovery off the
-// first-paint path. Once the background connection completes, the resulting
-// `refreshMCPTools` rebuild must add one global bounded route section for every
-// mounted MCP tool, whether or not its server returned optional `instructions`.
-// Any supplied server instructions join their separately framed section for the
-// rest of the session. Regression guards cover both previously dropped deferred
-// instructions and the installed Context Mode server's absent instructions.
+// Contract: deferred UI discovery advertises each mounted MCP server as one
+// virtual xd:// service. Tool names, schemas, and optional server instructions
+// load only when that service path is read. Explicitly top-level MCP tools keep
+// their server instructions inline because they have no service device.
 const FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "instructions-mcp.ts");
 const MCP_TOOL_NAME = "mcp__instr_do_thing";
-const MCP_ROUTE_SECTION = "## MCP Tool Routes";
-const CONTEXT_MODE_ROUTE = '- "ctx_execute" → `xd://mcp__context_mode_ctx_execute`';
+const MCP_SERVICE_PATH = "xd://mcp-service:instr";
+const CONTEXT_MODE_SERVICE_PATH = "xd://mcp-service:context-mode";
 const CONTEXT_MODE_MCP_TOOL_NAME = "mcp__context_mode_ctx_execute";
 
 describe("createAgentSession MCP server instructions (deferred UI)", () => {
@@ -83,7 +82,7 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 		mock.restore();
 	});
 
-	it("folds server instructions into the prompt once deferred discovery connects", async () => {
+	it("loads mounted server tools and instructions through one deferred service", async () => {
 		const { session } = await createAgentSession({
 			cwd: tempDir,
 			agentDir: tempDir,
@@ -102,36 +101,85 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 			hasUI: true,
 		});
 		try {
-			// First paint: discovery is still in flight, so the server's
-			// instructions are not yet present.
-			expect(session.systemPrompt.join("\n")).not.toContain(SERVER_INSTRUCTIONS);
-
-			// Background connect + `refreshMCPTools` rebuild must surface the
-			// instructions. This is a genuine integration wait: discovery spawns
-			// the fixture as a real subprocess and connects asynchronously, and
-			// the SDK fires that work fire-and-forget with no completion promise
-			// or event exposed to await — so fake timers cannot drive it and we
-			// poll the live prompt with a generous ceiling, exiting the instant
-			// the rebuilt prompt carries the instructions.
-			const deadline = Date.now() + 12_000;
 			let prompt = session.systemPrompt.join("\n");
-			while (!prompt.includes(SERVER_INSTRUCTIONS) && Date.now() < deadline) {
+			expect(prompt).not.toContain(MCP_SERVICE_PATH);
+			// This integration spawns a real MCP subprocess and the deferred SDK
+			// connection exposes no completion event. Poll the positive service
+			// signal, exiting immediately when the registry rebuild lands.
+			const deadline = Date.now() + 12_000;
+			while (!prompt.includes(MCP_SERVICE_PATH) && Date.now() < deadline) {
 				await Bun.sleep(10);
 				prompt = session.systemPrompt.join("\n");
 			}
 
-			expect(prompt).toContain(SERVER_INSTRUCTIONS);
-			// The instructions are framed under the MCP section, and guidance keeps
-			// the escaped original tool name while routing through the exact
-			// normalized name actually mounted in the live xd:// registry.
-			expect(prompt).toContain("MCP Server Instructions");
-			expect(prompt).toContain('- "do\\u0060thing" → `xd://mcp__instr_do_thing`');
+			expect(prompt).toContain(MCP_SERVICE_PATH);
+			expect(prompt).not.toContain(SERVER_INSTRUCTIONS);
+			expect(prompt).not.toContain(MCP_TOOL_NAME);
+			expect(prompt).not.toContain("## MCP Tool Routes");
+
+			const read = session.agent.state.tools.find(tool => tool.name === "read");
+			if (!read) throw new Error("expected active read tool");
+			const result = await read.execute("read-mcp-service", { path: MCP_SERVICE_PATH });
+			const text = result.content.find(entry => entry.type === "text")?.text ?? "";
+			expect(text).toContain(SERVER_INSTRUCTIONS);
+			expect(text).toContain(`xd://${MCP_TOOL_NAME}`);
 		} finally {
 			await session.dispose();
 		}
 	}, 20_000);
 
-	it("renders a mounted Context Mode route when initialize omits instructions", async () => {
+	it("marks lazy server instructions when the bounded page truncates them", async () => {
+		fs.writeFileSync(
+			path.join(tempDir, ".mcp.json"),
+			JSON.stringify({
+				mcpServers: {
+					instr: {
+						type: "stdio",
+						command: process.execPath,
+						args: [FIXTURE_PATH, LONG_INSTRUCTIONS_MODE],
+					},
+				},
+			}),
+		);
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({}),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableLsp: false,
+			skipPythonPreflight: true,
+			enableMCP: true,
+			hasUI: true,
+		});
+		try {
+			const deadline = Date.now() + 12_000;
+			while (
+				!session.getXdevToolEntries().some(entry => entry.name === "mcp-service:instr") &&
+				Date.now() < deadline
+			) {
+				await Bun.sleep(10);
+			}
+			const read = session.agent.state.tools.find(tool => tool.name === "read");
+			if (!read) throw new Error("expected active read tool");
+			const result = await read.execute("read-long-mcp-service", { path: MCP_SERVICE_PATH });
+			const text = result.content.find(entry => entry.type === "text")?.text ?? "";
+
+			expect(text).toContain(LONG_INSTRUCTIONS_PREFIX);
+			expect(text).toContain("\n[truncated]");
+			expect(text).not.toContain("x".repeat(5_000));
+		} finally {
+			await session.dispose();
+		}
+	}, 20_000);
+
+	it("advertises a mounted service when initialize omits instructions", async () => {
 		fs.writeFileSync(
 			path.join(tempDir, ".mcp.json"),
 			JSON.stringify({
@@ -162,32 +210,26 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 			hasUI: true,
 		});
 		try {
-			// Context Mode advertises mounted MCP tools but currently supplies no
-			// `connection.instructions`. Deferred discovery must still rebuild the
-			// prompt with the globally rendered route guidance. The SDK exposes no
-			// completion signal for this real child-process handshake, and fake
-			// timers cannot drive it, so poll only until the route becomes visible.
 			let prompt = session.systemPrompt.join("\n");
-			expect(prompt).not.toContain(CONTEXT_MODE_ROUTE);
+			expect(prompt).not.toContain(CONTEXT_MODE_SERVICE_PATH);
 			const deadline = Date.now() + 12_000;
-			while (!prompt.includes(CONTEXT_MODE_ROUTE) && Date.now() < deadline) {
+			while (!prompt.includes(CONTEXT_MODE_SERVICE_PATH) && Date.now() < deadline) {
 				await Bun.sleep(10);
 				prompt = session.systemPrompt.join("\n");
 			}
 
-			expect(prompt).toContain(CONTEXT_MODE_ROUTE);
-			expect(session.getXdevToolEntries().map(entry => entry.name)).toContain(CONTEXT_MODE_MCP_TOOL_NAME);
+			expect(prompt).toContain(CONTEXT_MODE_SERVICE_PATH);
+			expect(prompt).not.toContain(CONTEXT_MODE_MCP_TOOL_NAME);
+			expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("mcp-service:context-mode");
 			expect(session.getActiveToolNames()).not.toContain(CONTEXT_MODE_MCP_TOOL_NAME);
-			expect(prompt.split(MCP_ROUTE_SECTION)).toHaveLength(2);
 			expect(prompt).not.toContain(SERVER_INSTRUCTIONS);
 			expect(prompt).not.toContain("## MCP Server Instructions");
-			expect(prompt).not.toContain("### context-mode");
 		} finally {
 			await session.dispose();
 		}
 	}, 20_000);
 
-	it("bounds mounted route guidance deterministically and points to the live xd:// inventory", async () => {
+	it("keeps a large mounted tool catalog behind its service page", async () => {
 		fs.writeFileSync(
 			path.join(tempDir, ".mcp.json"),
 			JSON.stringify({
@@ -218,24 +260,24 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 			hasUI: true,
 		});
 		try {
-			// Deferred discovery is a real child-process handshake with no
-			// completion signal exposed to this integration harness; fake timers
-			// cannot advance it, so retain the established polling bounds above.
 			const deadline = Date.now() + 12_000;
 			let prompt = session.systemPrompt.join("\n");
-			while (!prompt.includes(SERVER_INSTRUCTIONS) && Date.now() < deadline) {
+			while (!prompt.includes(MCP_SERVICE_PATH) && Date.now() < deadline) {
 				await Bun.sleep(10);
 				prompt = session.systemPrompt.join("\n");
 			}
 
-			expect(prompt).toContain(SERVER_INSTRUCTIONS);
-			const renderedMappings = prompt.split("\n").filter(line => line.startsWith('- "row_'));
-			expect(renderedMappings).toHaveLength(64);
-			expect(renderedMappings[0]).toBe('- "row_aa" → `xd://mcp__instr_row_aa`');
-			expect(renderedMappings[63]).toBe('- "row_cl" → `xd://mcp__instr_row_cl`');
-			expect(prompt).not.toContain('- "row_cm" → `xd://mcp__instr_row_cm`');
-			// Truncation notice present (row_cm absent above proves the cap applied).
-			expect(prompt).toContain("omitted");
+			expect(prompt).toContain('MCP service "instr" (65 tools)');
+			expect(prompt).not.toContain("mcp__instr_row_aa");
+			expect(prompt).not.toContain(SERVER_INSTRUCTIONS);
+
+			const read = session.agent.state.tools.find(tool => tool.name === "read");
+			if (!read) throw new Error("expected active read tool");
+			const result = await read.execute("read-large-mcp-service", { path: MCP_SERVICE_PATH });
+			const text = result.content.find(entry => entry.type === "text")?.text ?? "";
+			expect(text).toContain(SERVER_INSTRUCTIONS);
+			expect(text).toContain("xd://mcp__instr_row_aa");
+			expect(text).toContain("xd://mcp__instr_row_cm");
 		} finally {
 			await session.dispose();
 		}

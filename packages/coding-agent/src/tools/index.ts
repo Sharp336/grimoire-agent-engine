@@ -305,6 +305,8 @@ export interface ToolSession {
 	asyncJobManager?: AsyncJobManager;
 	/** MCP manager visible to subagents without relying on the process-global singleton. */
 	mcpManager?: MCPManager;
+	/** Live MCP server instructions for virtual xd:// service pages. */
+	getMcpServerInstructions?: () => Map<string, string> | undefined;
 	/** Local protocol root to propagate to nested subagents and eval-created agents. */
 	localProtocolOptions?: LocalProtocolOptions;
 	/** Settings instance for passing to subagents */
@@ -707,6 +709,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			mountedNames,
 			builtInNames,
 			isActive: name => session.isToolActive?.(name) === true,
+			getMcpServerInstructions: session.getMcpServerInstructions,
 		};
 		tools = kept;
 	}

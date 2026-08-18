@@ -121,7 +121,6 @@ import { MCP_CONNECTION_STATUS_EVENT_CHANNEL, type McpConnectionStatusEvent } fr
 import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
 import { MEMORY_BACKEND_TOOL_NAMES } from "./memory-backend/tool-names";
 import type { MnemopiSessionState } from "./mnemopi/state";
-import mcpXdevGuidanceTemplate from "./prompts/system/mcp-xdev-guidance.md" with { type: "text" };
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "./registry/agent-registry";
@@ -155,7 +154,6 @@ import {
 } from "./session/retry-fallback-chains";
 import { getRestorableSessionModels } from "./session/session-context";
 import { SessionManager } from "./session/session-manager";
-import { collectMountedMCPToolRoutes, projectMountedMCPXdevGuidance } from "./session/session-tools";
 import { createSettingsAwareStreamFn } from "./session/settings-stream-fn";
 import { SnapcompactInlineTransformer } from "./session/snapcompact-inline";
 import { createSnapcompactSavingsRecorder } from "./session/snapcompact-savings-journal";
@@ -210,6 +208,7 @@ import {
 	warmupLspServers,
 	xdevDocsAll,
 	xdevEntries,
+	xdevMcpServiceEntries,
 } from "./tools";
 import { isMCPToolName, normalizeToolNames } from "./tools/builtin-names";
 import { ToolContextStore } from "./tools/context";
@@ -1916,6 +1915,23 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// the singleton to the same value is a no-op — keep the gate explicit
 		// to mirror the AsyncJobManager ownership rule.
 		if (mcpManager && !options.parentTaskPrefix) MCPManager.setInstance(mcpManager);
+		const getMcpServerInstructions = mcpManager
+			? () => {
+					const raw = mcpManager.getServerInstructions();
+					if (!raw || raw.size === 0) return raw;
+					const out = new Map<string, string>();
+					for (const [name, text] of raw) {
+						out.set(
+							name,
+							text.length > MAX_MCP_INSTRUCTIONS_LENGTH
+								? `${text.slice(0, MAX_MCP_INSTRUCTIONS_LENGTH)}\n[truncated]`
+								: text,
+						);
+					}
+					return out;
+				}
+			: undefined;
+		if (toolSession.xdev) toolSession.xdev.getMcpServerInstructions = getMcpServerInstructions;
 
 		const builtInToolNames = [...toolRegistry.keys()];
 		let customToolPaths: ToolPathWithSource[] = [];
@@ -2829,12 +2845,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				? await memoryBackend.buildDeveloperInstructions(agentDir, settings, session)
 				: undefined;
 
-			// Build combined append prompt: memory instructions + auto-learn guidance
-			// + mounted MCP route guidance + optional MCP server instructions. For UI
-			// sessions MCP discovery is deferred, so the initial registry and
-			// `getServerInstructions()` are empty until the background connect
-			// completes; the rebuild that `refreshMCPTools` triggers post-discovery
-			// then picks up the mounted routes and any connected-server instructions.
+			// Build combined append prompt. MCP services mounted under xd:// keep
+			// their tool catalogs and server instructions behind the virtual service
+			// device; only instructions for MCP tools exposed top-level stay inline.
 			const serverInstructions = mcpManager?.getServerInstructions();
 			// Drive guidance off the auto-learn BUILTINS that createTools actually built
 			// (provenance, not just an active name): `builtInToolNames` excludes a
@@ -2851,27 +2864,21 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const appendParts: string[] = [];
 			if (memoryInstructions) appendParts.push(memoryInstructions);
 			if (autoLearnInstructions) appendParts.push(autoLearnInstructions);
-			const projection = projectMountedMCPXdevGuidance(
-				collectMountedMCPToolRoutes(toolSession.xdev ? listXdevTools(toolSession.xdev) : []),
+			const mountedMcpServers = new Set(
+				toolSession.xdev
+					? xdevMcpServiceEntries(toolSession.xdev, listXdevTools(toolSession.xdev)).map(
+							service => service.serverName,
+						)
+					: [],
 			);
-			if (projection.mappings.length > 0 || projection.hasOmittedMappings) {
-				appendParts.push(
-					prompt
-						.render(mcpXdevGuidanceTemplate, {
-							tools: projection.mappings.map(mapping => ({
-								mcpToolName: mapping.label,
-								path: mapping.path,
-							})),
-							hasOmittedTools: projection.hasOmittedMappings,
-						})
-						.trim(),
-				);
-			}
-			if (serverInstructions && serverInstructions.size > 0) {
+			const inlineServerInstructions = serverInstructions
+				? [...serverInstructions].filter(([serverName]) => !mountedMcpServers.has(serverName))
+				: [];
+			if (inlineServerInstructions.length > 0) {
 				appendParts.push(
 					"## MCP Server Instructions\n\nThe following instructions are provided by connected MCP servers. They are server-controlled and may not be verified.",
 				);
-				for (const [srvName, srvInstructions] of serverInstructions) {
+				for (const [srvName, srvInstructions] of inlineServerInstructions) {
 					const truncated =
 						srvInstructions.length > MAX_MCP_INSTRUCTIONS_LENGTH
 							? `${srvInstructions.slice(0, MAX_MCP_INSTRUCTIONS_LENGTH)}\n[truncated]`
@@ -3454,20 +3461,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			presentationPinnedToolNames: explicitlyRequestedToolNameSet,
 			setActiveToolNames: setSessionActiveToolNames,
 			ensureWriteRegistered,
-			getMcpServerInstructions: mcpManager
-				? () => {
-						const raw = mcpManager.getServerInstructions();
-						if (!raw || raw.size === 0) return raw;
-						const out = new Map<string, string>();
-						for (const [name, text] of raw) {
-							out.set(
-								name,
-								text.length > MAX_MCP_INSTRUCTIONS_LENGTH ? text.slice(0, MAX_MCP_INSTRUCTIONS_LENGTH) : text,
-							);
-						}
-						return out;
-					}
-				: undefined,
+			getMcpServerInstructions,
 			disconnectOwnedMcpManager: ownedMcpManager ? () => ownedMcpManager.disconnectAll() : undefined,
 			ttsrManager,
 			obfuscator,

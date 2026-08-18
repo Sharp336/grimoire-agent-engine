@@ -5,9 +5,8 @@
  * on `initialize`; its Context Mode fixture mode omits that field entirely.
  *
  * Used by `sdk-mcp-instructions.test.ts` to prove that deferred interactive
- * (`hasUI`) discovery rebuilds global mounted-route guidance independently of
- * optional server instructions, while still folding instructions into the
- * prompt when a connected server provides them.
+ * (`hasUI`) discovery advertises one compact service device while keeping tool
+ * routes and optional server instructions behind that on-demand page.
  *
  * Speaks newline-delimited JSON-RPC 2.0 (the wire format of `StdioTransport`):
  * one JSON object per line on stdin, one JSON response per line on stdout.
@@ -30,6 +29,8 @@ export const SERVER_INSTRUCTIONS =
 export const TOOL_NAME = "do`thing";
 export const TOOL_RESULT = "MCP_DEFERRED_SMOKE_OK_5c92";
 export const BOUNDED_GUIDANCE_MODE = "--bounded-guidance";
+export const LONG_INSTRUCTIONS_MODE = "--long-instructions";
+export const LONG_INSTRUCTIONS_PREFIX = "LONG_INSTRUCTIONS_SENTINEL_79db: ";
 export const CONTEXT_MODE_NO_INSTRUCTIONS_MODE = "--context-mode-no-instructions";
 const CONTEXT_MODE_TOOL_NAME = "ctx_execute";
 /** One more tool than the 64-row prompt budget, forcing the static fallback. */
@@ -44,6 +45,7 @@ type JsonRpcRequest = {
 
 function buildResult(method: string): Record<string, unknown> {
 	const contextModeWithoutInstructions = process.argv.includes(CONTEXT_MODE_NO_INSTRUCTIONS_MODE);
+	const longInstructions = process.argv.includes(LONG_INSTRUCTIONS_MODE);
 	switch (method) {
 		case "initialize":
 			return {
@@ -52,7 +54,13 @@ function buildResult(method: string): Record<string, unknown> {
 				// Declare only the tools capability so the client never probes
 				// resources/list or prompts/list — keeps the fixture minimal.
 				capabilities: { tools: {} },
-				...(contextModeWithoutInstructions ? {} : { instructions: SERVER_INSTRUCTIONS }),
+				...(contextModeWithoutInstructions
+					? {}
+					: {
+							instructions: longInstructions
+								? `${LONG_INSTRUCTIONS_PREFIX}${"x".repeat(5_000)}`
+								: SERVER_INSTRUCTIONS,
+						}),
 			};
 		case "tools/list": {
 			const tools = process.argv.includes(BOUNDED_GUIDANCE_MODE)

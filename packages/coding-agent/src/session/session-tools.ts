@@ -11,7 +11,7 @@ import { CustomToolAdapter } from "../extensibility/custom-tools/wrapper";
 import type { ExtensionRunner, SourceInfo, ToolInfo } from "../extensibility/extensions";
 import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
 import { loadSkills, type Skill, type SkillWarning, setActiveSkills } from "../extensibility/skills";
-import { type LocalProtocolOptions, XD_URL_PREFIX } from "../internal-urls";
+import type { LocalProtocolOptions } from "../internal-urls";
 import { deduplicateMCPToolsByName } from "../mcp/tool-bridge";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
 import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
@@ -23,7 +23,15 @@ import { computerExposureMode } from "../tools/computer/exposure";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
 import { supportsExternalThinking } from "../tools/think";
 import { ToolAbortError, ToolError } from "../tools/tool-errors";
-import { isMountableUnderXdev, listXdevTools, type XdevState, xdevDocsFor, xdevEntries } from "../tools/xdev";
+import {
+	isMountableUnderXdev,
+	listXdevTools,
+	type XdevState,
+	xdevDocsAll,
+	xdevDocsFor,
+	xdevEntries,
+	xdevMcpServiceEntries,
+} from "../tools/xdev";
 import { type EditMode, resolveEditMode } from "../utils/edit-mode";
 import { type InspectImageMode, isInspectImageToolActive } from "../utils/inspect-image-mode";
 import {
@@ -91,79 +99,6 @@ interface SessionToolsOptions {
 	skillsReloadable?: boolean;
 }
 
-export interface MountedMCPToolRouteSource {
-	readonly name: string;
-	readonly mcpServerName?: unknown;
-	readonly mcpToolName?: unknown;
-}
-
-export interface MountedMCPToolRoute {
-	readonly mcpServerName: string;
-	readonly mcpToolName: string;
-	readonly name: string;
-}
-
-export interface MCPXdevGuidanceMapping extends MountedMCPToolRoute {
-	readonly label: string;
-	readonly path: string;
-}
-
-export interface MCPXdevGuidanceProjection {
-	readonly mappings: readonly MCPXdevGuidanceMapping[];
-	readonly hasOmittedMappings: boolean;
-}
-
-const MAX_MCP_XDEV_GUIDANCE_MAPPING_DATA_LENGTH = 4000;
-const MAX_MCP_XDEV_GUIDANCE_MAPPINGS = 64;
-
-/** Yield exact mounted MCP ownership and route metadata. */
-export function* collectMountedMCPToolRoutes(
-	tools: Iterable<MountedMCPToolRouteSource>,
-): Generator<MountedMCPToolRoute> {
-	for (const tool of tools) {
-		if (typeof tool.mcpServerName !== "string" || typeof tool.mcpToolName !== "string") continue;
-		yield {
-			mcpServerName: tool.mcpServerName,
-			mcpToolName: tool.mcpToolName,
-			name: tool.name,
-		};
-	}
-}
-
-function formatMCPXdevGuidanceLabel(label: string): string {
-	return (JSON.stringify(label) ?? '""')
-		.replaceAll("`", "\\u0060")
-		.replaceAll("\u2028", "\\u2028")
-		.replaceAll("\u2029", "\\u2029");
-}
-
-/**
- * Project exact live MCP routes into the bounded, Markdown-safe mapping data
- * rendered by the static MCP guidance prompt.
- */
-export function projectMountedMCPXdevGuidance(routes: Iterable<MountedMCPToolRoute>): MCPXdevGuidanceProjection {
-	const mappings: MCPXdevGuidanceMapping[] = [];
-	let remainingMappingDataLength = MAX_MCP_XDEV_GUIDANCE_MAPPING_DATA_LENGTH;
-	let hasOmittedMappings = false;
-	for (const route of routes) {
-		const rawMappingDataLength = route.mcpToolName.length + XD_URL_PREFIX.length + route.name.length;
-		if (mappings.length >= MAX_MCP_XDEV_GUIDANCE_MAPPINGS || rawMappingDataLength > remainingMappingDataLength) {
-			hasOmittedMappings = true;
-			continue;
-		}
-		const label = formatMCPXdevGuidanceLabel(route.mcpToolName);
-		const path = `${XD_URL_PREFIX}${route.name}`;
-		const mappingDataLength = label.length + path.length;
-		if (mappingDataLength > remainingMappingDataLength) {
-			hasOmittedMappings = true;
-			continue;
-		}
-		mappings.push({ ...route, label, path });
-		remainingMappingDataLength -= mappingDataLength;
-	}
-	return { mappings, hasOmittedMappings };
-}
-
 const XDEV_MOUNT_NOTICE_MESSAGE_TYPE = "xdev-mount-notice";
 
 /**
@@ -194,6 +129,7 @@ export class SessionTools {
 	#extensionMcpTools = new Map<string, AgentTool>();
 	#xdev: XdevState | undefined;
 	#pendingXdevMountDelta: { added: Set<string>; removed: Set<string> } | undefined;
+	#appliedXdevCatalogNames: ReadonlySet<string> | undefined;
 	/**
 	 * Dynamic (`xd://`) devices the model has already been told are mounted.
 	 * Seeded lazily from persisted history on resume (see
@@ -796,8 +732,11 @@ export class SessionTools {
 		}
 
 		const previousMounted = new Set(this.#xdev?.mountedNames ?? []);
+		const previousCatalogNames =
+			this.#appliedXdevCatalogNames ?? new Set(this.#xdev ? xdevEntries(this.#xdev).map(entry => entry.name) : []);
 		const previousActiveToolNames = this.getActiveToolNames();
 		this.#setMountedNames(mountNames);
+		const currentCatalogNames = new Set(this.#xdev ? xdevEntries(this.#xdev).map(entry => entry.name) : []);
 		this.#setActiveToolNames?.(validToolNames);
 
 		let rebuiltSystemPrompt: string[] | undefined;
@@ -826,7 +765,8 @@ export class SessionTools {
 			return;
 		}
 
-		this.#notifyXdevMountDelta(previousMounted);
+		this.#notifyXdevMountDelta(previousCatalogNames, currentCatalogNames);
+		this.#appliedXdevCatalogNames = currentCatalogNames;
 		this.#host.agent.setTools(tools);
 		if (rebuiltSystemPrompt && rebuiltSignature) {
 			if (this.#lastAppliedToolSignature !== undefined) this.#host.clearInheritedProviderPromptCacheKey();
@@ -849,19 +789,16 @@ export class SessionTools {
 	/**
 	 * Record a mid-session `xd://` mount delta for the model. Non-MCP mount
 	 * churn remains notice-only, leaving the system prompt and provider cache
-	 * prefix byte-stable; mounted MCP route changes additionally rebuild the
-	 * global route guidance through the applied-tool signature. The delta is NOT
-	 * steered immediately — a steered notice landing at a run's stop boundary
-	 * (or while the session is idle) forces an unsolicited extra assistant turn
-	 * — so it is coalesced into {@link #pendingXdevMountDelta} and rides along
-	 * with the next prompt (docs + schema stay one `read xd://<tool>` away).
-	 * Full docs join the system prompt opportunistically on a rebuild.
+	 * prefix byte-stable; mounted MCP service-summary changes additionally
+	 * rebuild the compact catalog through the applied-tool signature. The delta
+	 * is NOT steered immediately — a steered notice landing at a run's stop
+	 * boundary (or while the session is idle) forces an unsolicited extra
+	 * assistant turn — so it is coalesced into {@link #pendingXdevMountDelta}
+	 * and rides along with the next prompt.
 	 */
-	#notifyXdevMountDelta(previousMounted: ReadonlySet<string>): void {
-		const current = this.#xdev?.mountedNames;
-		if (!current) return;
-		const addedNames = [...current].filter(name => !previousMounted.has(name));
-		const removedNames = [...previousMounted].filter(name => !current.has(name));
+	#notifyXdevMountDelta(previous: ReadonlySet<string>, current: ReadonlySet<string>): void {
+		const addedNames = [...current].filter(name => !previous.has(name));
+		const removedNames = [...previous].filter(name => !current.has(name));
 		if (addedNames.length === 0 && removedNames.length === 0) return;
 		// Coalesce against the unannounced delta: an unmount cancels a pending
 		// mount the model never learned about, and a remount cancels a pending
@@ -896,6 +833,7 @@ export class SessionTools {
 	resetAnnouncedMounts(): void {
 		this.#announcedMounts.clear();
 		this.#announcedMountsSeeded = false;
+		this.#appliedXdevCatalogNames = undefined;
 	}
 
 	/**
@@ -1408,13 +1346,13 @@ export class SessionTools {
 	 *      `tool.customWireName` and overrides the internal name on the model wire
 	 *      (e.g. `edit` exposes itself as `apply_patch` to GPT-5 in apply_patch mode);
 	 *      a stale wire name would desync prompt guidance from actual tool routing.
-	 *   3. The bounded mounted-MCP projection: escaped original-name labels,
-	 *      actual `xd://` paths, and the omission flag in catalog order. These are
-	 *      the exact values rendered by the global transport guidance; catalog
-	 *      churn wholly behind the fallback does not change the prompt.
-	 *   4. MCP server instructions text (per server), since `rebuildSystemPrompt`
-	 *      embeds these in the appended prompt under "## MCP Server Instructions".
-	 *      A server upgrade can change instructions while keeping tools identical.
+	 *   3. The MCP portion of the xd:// documentation block rendered under the
+	 *      current docs mode and allowlist. Inline MCP details therefore invalidate
+	 *      the prompt, while catalog-mode churn behind an unchanged service row
+	 *      does not. Non-MCP mounts continue through dynamic notices.
+	 *   4. Inline MCP server instructions for services without a lazy service
+	 *      device. A server upgrade can change instructions while keeping tools
+	 *      identical.
 	 *
 	 * Settings-driven tool metadata is covered automatically: built-in tools that
 	 * depend on settings expose `description`/`label` via getters (see `TaskTool`,
@@ -1442,32 +1380,28 @@ export class SessionTools {
 		const describeTool = (tool: AgentTool): string =>
 			`${tool.name}=${tool.label ?? ""}|${tool.description ?? ""}|${tool.customWireName ?? ""}`;
 		const descriptionSegment = tools.map(describeTool).join("\u0002");
-		const mountedMCPProjection = projectMountedMCPXdevGuidance(
-			collectMountedMCPToolRoutes(this.#xdev ? listXdevTools(this.#xdev) : []),
-		);
-		const mountedMCPRouteSegment =
-			JSON.stringify({
-				mappings: mountedMCPProjection.mappings.map(mapping => [mapping.label, mapping.path] as const),
-				hasOmittedMappings: mountedMCPProjection.hasOmittedMappings,
-			}) ?? "{}";
+		const mountedMCPServices = this.#xdev ? xdevMcpServiceEntries(this.#xdev, listXdevTools(this.#xdev)) : [];
+		const mountedMCPServiceNames = new Set(mountedMCPServices.map(service => service.serverName));
+		const mountedMCPToolNames = mountedMCPServices.flatMap(service => service.tools.map(entry => entry.tool.name));
+		const xdevDocsSegment = this.#xdev
+			? xdevDocsAll(
+					{ ...this.#xdev, mountedNames: new Set(mountedMCPToolNames) },
+					this.#host.settings.get("tools.xdevDocs"),
+					this.#host.settings.get("tools.xdevInlineDevices"),
+				)
+			: "";
 		const serverInstructions = this.#getMcpServerInstructions?.();
 		let instructionsSegment = "";
 		if (serverInstructions && serverInstructions.size > 0) {
-			// Sort by server name so transport flap order does not perturb the signature.
+			// Only top-level MCP tools need instructions in the system prompt.
 			const entries: string[] = [];
 			for (const [server, instructions] of serverInstructions) {
-				entries.push(`${server}=${instructions}`);
+				if (!mountedMCPServiceNames.has(server)) entries.push(`${server}=${instructions}`);
 			}
 			entries.sort();
 			instructionsSegment = entries.join("\u0006");
 		}
-		// The non-MCP remainder of the xd:// inventory is deliberately NOT part
-		// of the signature: its mount/unmount announces itself through
-		// `#notifyXdevMountDelta` rather than rewriting the system prompt, keeping
-		// the provider cache prefix byte-stable. Mounted MCP routes are the narrow
-		// exception above, bounded to the exact projection rendered in the global
-		// route guidance so churn wholly behind its fallback does not rebuild.
-		return `${nameSegment}\u0003${descriptionSegment}\u0007${instructionsSegment}\u0008${mountedMCPRouteSegment}`;
+		return `${nameSegment}\u0003${descriptionSegment}\u0007${instructionsSegment}\u0008${xdevDocsSegment}`;
 	}
 
 	/**
