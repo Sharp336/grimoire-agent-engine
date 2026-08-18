@@ -8,6 +8,7 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ChatTranscriptBuilder } from "@oh-my-pi/pi-coding-agent/modes/components/chat-transcript-builder";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-coding-agent/modes/components/read-tool-group";
+import { formatUsageRow } from "@oh-my-pi/pi-coding-agent/modes/components/usage-row";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
@@ -18,6 +19,8 @@ import { formatNumber } from "@oh-my-pi/pi-utils";
 // 4242 → "4.2K": distinctive enough not to collide with a read group's render.
 const USAGE_INPUT = 4242;
 const USAGE_LABEL = formatNumber(USAGE_INPUT);
+// Persisted serving-model identity (provider/id) shown on rebuilt rows.
+const USAGE_MODEL = "anthropic/claude-sonnet-4-5";
 // Fixed local wall-clock time so the rendered stamp is deterministic across time zones.
 // Single-digit month/day/hour/minute/second exercise the formatter's zero-padding.
 const USAGE_TS = new Date(2026, 0, 2, 3, 4, 5).getTime();
@@ -56,6 +59,27 @@ function readTurn(
 		timestamp,
 	} as unknown as AgentMessage;
 	return [assistant, toolResult];
+}
+
+/** A text-only assistant turn: its usage stays standalone (no read group to attach to). */
+function textTurn(): AgentMessage {
+	return {
+		role: "assistant",
+		content: [{ type: "text", text: "done" }],
+		api: "anthropic-messages",
+		provider: "anthropic",
+		model: "claude-sonnet-4-5",
+		stopReason: "stop",
+		usage: {
+			input: USAGE_INPUT,
+			output: 7,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: USAGE_INPUT + 7,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		timestamp: USAGE_TS,
+	} as unknown as AgentMessage;
 }
 
 function makeHarness(showTokenUsage: boolean): { ctx: InteractiveModeContext; helpers: UiHelpers } {
@@ -103,6 +127,7 @@ describe("UiHelpers.renderSessionContext token-usage row placement", () => {
 		const rendered = group!.render(120).join("\n");
 		expect(rendered).toContain(USAGE_LABEL);
 		expect(rendered).toContain(USAGE_TS_LABEL);
+		expect(rendered).toContain(USAGE_MODEL);
 		expect(children[children.length - 1]).toBe(group!);
 		expect(children.filter(component => component.render(120).join("\n").includes(USAGE_LABEL))).toHaveLength(1);
 	});
@@ -134,6 +159,21 @@ describe("UiHelpers.renderSessionContext token-usage row placement", () => {
 		expect(children.some(c => c.render(120).join("\n").includes(USAGE_LABEL))).toBe(false);
 		// Last block is the read group, not a usage row.
 		expect(children[children.length - 1]).toBeInstanceOf(ReadToolGroupComponent);
+	});
+
+	it("renders the serving model on the standalone rebuilt row without a thinking level", () => {
+		const { ctx, helpers } = makeHarness(true);
+		const message = textTurn();
+		helpers.renderSessionContext({ messages: [message] } as SessionContext);
+
+		const children = ctx.chatContainer.children;
+		const last = children[children.length - 1]!;
+		const rendered = Bun.stripANSI(last.render(120).join("\n"));
+		// Rebuilt rows carry the persisted provider/model but never a thinking
+		// level — the level is not persisted per message.
+		const usage = (message as Extract<AgentMessage, { role: "assistant" }>).usage;
+		expect(rendered).toContain(formatUsageRow(usage, undefined, undefined, USAGE_TS, USAGE_MODEL));
+		expect(rendered).toContain(USAGE_MODEL);
 	});
 });
 
@@ -175,6 +215,7 @@ describe("ChatTranscriptBuilder token-usage row timestamp", () => {
 		const rendered = last.render(120).join("\n");
 		expect(rendered).toContain(USAGE_TS_LABEL);
 		expect(rendered).toContain(USAGE_LABEL);
+		expect(rendered).toContain(USAGE_MODEL);
 	});
 
 	it("keeps grouped read metrics nested on the reusable transcript-builder path", () => {
@@ -201,6 +242,7 @@ describe("ChatTranscriptBuilder token-usage row timestamp", () => {
 		const rendered = groups[0]!.render(120).join("\n");
 		expect(rendered).toContain(USAGE_TS_LABEL);
 		expect(rendered).toContain(SECOND_USAGE_TS_LABEL);
+		expect(rendered).toContain(USAGE_MODEL);
 		expect(
 			builder.container.children.filter(component => component.render(120).join("\n").includes(USAGE_LABEL)),
 		).toEqual([groups[0]!]);

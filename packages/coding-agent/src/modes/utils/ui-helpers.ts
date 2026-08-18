@@ -374,6 +374,7 @@ export class UiHelpers {
 		let pendingUsageDuration: number | undefined;
 		let pendingUsageTtft: number | undefined;
 		let pendingUsageTimestamp: number | undefined;
+		let pendingUsageModel: string | undefined;
 		let pendingReadUsageCallIds: string[] | undefined;
 		const flushPendingUsage = () => {
 			if (!pendingUsage) return;
@@ -385,19 +386,27 @@ export class UiHelpers {
 					pendingUsageDuration,
 					pendingUsageTtft,
 					pendingUsageTimestamp,
+					pendingUsageModel,
 				) ??
 					false);
 			if (!usageAttached) {
 				readGroup?.seal();
 				readGroup = null;
 				this.ctx.chatContainer.addChild(
-					createUsageRowBlock(pendingUsage, pendingUsageDuration, pendingUsageTtft, pendingUsageTimestamp),
+					createUsageRowBlock(
+						pendingUsage,
+						pendingUsageDuration,
+						pendingUsageTtft,
+						pendingUsageTimestamp,
+						pendingUsageModel,
+					),
 				);
 			}
 			pendingUsage = undefined;
 			pendingUsageDuration = undefined;
 			pendingUsageTtft = undefined;
 			pendingUsageTimestamp = undefined;
+			pendingUsageModel = undefined;
 			pendingReadUsageCallIds = undefined;
 		};
 		// Rebuild-time mirror of the event controller's displaceable-poll
@@ -605,6 +614,7 @@ export class UiHelpers {
 				pendingUsageDuration = message.duration;
 				pendingUsageTtft = message.ttft;
 				pendingUsageTimestamp = message.timestamp;
+				pendingUsageModel = pendingUsage ? `${message.provider}/${message.model}` : undefined;
 				pendingReadUsageCallIds = pendingUsage ? groupedReadUsageCallIds(message) : undefined;
 			} else if (message.role === "toolResult") {
 				if (options.preservedLiveToolCallIds?.has(message.toolCallId)) continue;

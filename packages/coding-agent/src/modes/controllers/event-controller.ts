@@ -1299,6 +1299,7 @@ export class EventController {
 			}
 			this.#lastAssistantComponent = lastPostToolAssistantComponent ?? this.ctx.streamingComponent;
 			if (settings.get("display.showTokenUsage") && assistantUsageIsBilled(event.message.usage)) {
+				const usageRowModel = `${event.message.provider}/${event.message.model}`;
 				const readCallIds = groupedReadUsageCallIds(event.message);
 				const usageAttached =
 					readCallIds !== undefined &&
@@ -1308,6 +1309,8 @@ export class EventController {
 						event.message.duration,
 						event.message.ttft,
 						event.message.timestamp,
+						usageRowModel,
+						this.ctx.session.thinkingLevel,
 					) ??
 						false);
 				if (!usageAttached) {
@@ -1318,6 +1321,8 @@ export class EventController {
 							event.message.duration,
 							event.message.ttft,
 							event.message.timestamp,
+							usageRowModel,
+							this.ctx.session.thinkingLevel,
 						),
 					);
 				}

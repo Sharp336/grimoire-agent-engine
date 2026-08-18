@@ -1,3 +1,4 @@
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { Container, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { formatNumber } from "@oh-my-pi/pi-utils";
@@ -16,7 +17,14 @@ function formatUsageTimestamp(ms: number): string {
 }
 
 /** Format the metrics shared by standalone usage blocks and compact tool groups. */
-export function formatUsageRow(usage: Usage, durationMs?: number, ttftMs?: number, timestamp?: number): string {
+export function formatUsageRow(
+	usage: Usage,
+	durationMs?: number,
+	ttftMs?: number,
+	timestamp?: number,
+	model?: string,
+	thinkingLevel?: ThinkingLevel,
+): string {
 	const totalInput = usage.input + usage.cacheWrite;
 	const parts: string[] = [];
 	// Lead with the turn's local wall-clock time (down to the second), log-line style.
@@ -38,15 +46,31 @@ export function formatUsageRow(usage: Usage, durationMs?: number, ttftMs?: numbe
 		const tokPerSec = (usage.output / durationMs) * 1000;
 		parts.push(`${theme.icon.throughput} ${tokPerSec.toFixed(1)}/s`);
 	}
+	if (model) {
+		parts.push(model);
+	}
+	if (thinkingLevel !== undefined && thinkingLevel !== ThinkingLevel.Off) {
+		parts.push(thinkingLevel);
+	}
 	return parts.join("  ");
 }
 
 // `timestamp` is optional and trails the throughput args to preserve the existing
-// (usage, durationMs, ttftMs) call contract — this function is part of the package's
+// (usage, durationMs, ttftMs) call contract; `model` and `thinkingLevel` trail
+// `timestamp` for the same reason — this function is part of the package's
 // public export surface (./modes/components/*).
-export function createUsageRowBlock(usage: Usage, durationMs?: number, ttftMs?: number, timestamp?: number): Container {
+export function createUsageRowBlock(
+	usage: Usage,
+	durationMs?: number,
+	ttftMs?: number,
+	timestamp?: number,
+	model?: string,
+	thinkingLevel?: ThinkingLevel,
+): Container {
 	const block = new Container();
 	block.addChild(new Spacer(1));
-	block.addChild(new Text(theme.fg("dim", formatUsageRow(usage, durationMs, ttftMs, timestamp)), 1, 0));
+	block.addChild(
+		new Text(theme.fg("dim", formatUsageRow(usage, durationMs, ttftMs, timestamp, model, thinkingLevel)), 1, 0),
+	);
 	return block;
 }
