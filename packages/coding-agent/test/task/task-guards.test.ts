@@ -108,6 +108,8 @@ function createFakeSession(config: FakeSessionConfig = {}): FakeSessionHandle {
 			releaseHang();
 		},
 		dispose: async () => {},
+		setIrcWakeTurnObserver: () => {},
+		subscribeRunState: () => () => {},
 	};
 	return {
 		session: session as AgentSession,

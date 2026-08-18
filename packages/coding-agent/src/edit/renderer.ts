@@ -115,7 +115,7 @@ interface EditRenderArgs {
 	patch?: string;
 	input?: string;
 	_input?: string;
-	all?: boolean;
+	replace_all?: boolean;
 	// Patch mode fields
 	op?: Operation;
 	rename?: unknown;
@@ -140,7 +140,7 @@ interface HashlineInputEntry {
 	path: string;
 	op?: Operation;
 	rename?: string;
-	/** A SWAP/DEL/INS line-editing op precedes the file op — keeps a move framed. */
+	/** A PUT/CUT line edit precedes the file op — keeps a move framed. */
 	hasLineEdits?: boolean;
 }
 
@@ -412,6 +412,42 @@ function renderPlainTextPreview(text: string, uiTheme: Theme, _filePath?: string
 	}
 	return preview.trimEnd();
 }
+
+interface StreamingDiffTail {
+	content: string;
+	hidden: boolean;
+}
+
+/**
+ * Select the trailing physical lines that fit the live preview budget.
+ *
+ * Walk backward from the end instead of splitting the complete diff. This keeps
+ * allocation and scanning proportional to the visible suffix. One physical line
+ * may exceed the budget, but it is still kept so the newest change is visible.
+ */
+function sliceStreamingDiffTail(diff: string, innerWidth: number, budget: number): StreamingDiffTail {
+	let end = diff.length;
+	while (end > 0 && diff.charCodeAt(end - 1) === 10) end--;
+	if (end === 0) return { content: "", hidden: false };
+
+	const rowLimit = Math.max(1, budget);
+	let start = end;
+	let cursor = end;
+	let visualRows = 0;
+	while (cursor >= 0) {
+		const newline = cursor > 0 ? diff.lastIndexOf("\n", cursor - 1) : -1;
+		const lineStart = newline + 1;
+		const lineRows = Math.max(1, wrapTextWithAnsi(replaceTabs(diff.slice(lineStart, cursor)), innerWidth).length);
+		if (visualRows > 0 && visualRows + lineRows > rowLimit) break;
+		visualRows += lineRows;
+		start = lineStart;
+		if (newline < 0) break;
+		cursor = newline;
+	}
+
+	return { content: diff.slice(start, end), hidden: start > 0 };
+}
+
 function formatStreamingDiff(
 	diff: string,
 	rawPath: string,
@@ -442,26 +478,14 @@ function formatStreamingDiff(
 		// its Myers alignment is not monotonic in payload length, so a hunk-aware
 		// window stutters as rows move between hunks. Expanded widens the window
 		// to the viewport; the full diff appears once the result finalizes.
-		const allLines = diff.replace(/\n+$/u, "").split("\n");
-		let visualUsed = 0;
-		let cut = allLines.length;
-		for (let i = allLines.length - 1; i >= 0; i--) {
-			const lineRows = Math.max(1, wrapTextWithAnsi(replaceTabs(allLines[i]!), innerWidth).length);
-			if (visualUsed + lineRows > budget && visualUsed > 0) break;
-			visualUsed += lineRows;
-			cut = i;
-		}
-		const hiddenLines = cut;
-		const visible = hiddenLines > 0 ? allLines.slice(hiddenLines) : allLines;
+		const tail = sliceStreamingDiffTail(diff, innerWidth, budget);
 		let rendered = "\n\n";
-		if (hiddenLines > 0) {
-			const hiddenHunks = getDiffStats(allLines.slice(0, hiddenLines).join("\n")).hunks;
-			const remainder: string[] = [];
-			if (hiddenHunks > 0) remainder.push(`${hiddenHunks} more hunks`);
-			remainder.push(`${hiddenLines} more lines`);
-			rendered += `${uiTheme.fg("dim", `… (${remainder.join(", ")} above)`)}\n`;
+		if (tail.hidden) {
+			// Exact hidden line/hunk counts require scanning the discarded prefix,
+			// which would make every streaming update scale with the complete diff.
+			rendered += `${uiTheme.fg("dim", "… (content above)")}\n`;
 		}
-		rendered += renderDiffColored(visible.join("\n"), { filePath: rawPath });
+		rendered += renderDiffColored(tail.content, { filePath: rawPath });
 		return rendered;
 	});
 	// The animated glyph rides this trailing line — inside the transcript's
@@ -568,9 +592,9 @@ function parseHashlineInputPreviewHeader(line: string): string | null {
 	return previewPath.length > 0 ? previewPath : null;
 }
 
-// Line-editing op headers (SWAP/DEL/INS family), distinct from the file-level
-// REM/MV ops. Body rows are always `+TEXT`, so this only matches real headers.
-const HL_LINE_OP_HEADER = /^(?:SWAP|DEL|INS)\b/;
+// Line-editing op headers (PUT/CUT family), distinct from file-level
+// REM/MV ops. Body rows are `+TEXT`, so this only matches real headers.
+const HL_LINE_OP_HEADER = /^(?:PUT|CUT)\b/;
 
 /**
  * Walk a (possibly mid-stream) hashline payload into per-section descriptors:
@@ -864,6 +888,7 @@ function renderSingleFileResult(
 
 	let diffSectionRenderDiffFn: ((t: string, o?: { filePath?: string }) => string) | undefined;
 	const diffSectionCache = createRenderedStringCache();
+	const statsSuffixCache = createRenderedStringCache();
 
 	return framedBlock(uiTheme, width => {
 		const { expanded, renderContext } = options;
@@ -887,7 +912,11 @@ function renderSingleFileResult(
 		// Change stats ride inline on the header bar next to the path.
 		const previewDiff = editDiffPreview && !("error" in editDiffPreview) ? editDiffPreview.diff : undefined;
 		const headerDiff = isError ? undefined : details?.diff || previewDiff;
-		const statsSuffix = headerDiff ? formatDiffStatsSuffix(headerDiff, uiTheme) : "";
+		const statsSuffix = headerDiff
+			? cachedRenderedString(statsSuffixCache, uiTheme, false, "", headerDiff, () =>
+					formatDiffStatsSuffix(headerDiff, uiTheme),
+				)
+			: "";
 		const header = renderEditHeader(width, uiTheme, {
 			icon: isError ? "error" : "success",
 			iconOverride: !isError && !options.isPartial ? uiTheme.styledSymbol("tool.edit", "accent") : undefined,

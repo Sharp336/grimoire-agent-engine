@@ -12,11 +12,11 @@ This document covers the current extension runtime in:
 
 For discovery paths and filesystem loading rules, see [`extension-loading.md`](./extension-loading.md).
 
-For packaged user-facing extension CLIs/features such as `packages/swarm-extension`, see [`user-facing-packages.md`](./user-facing-packages.md).
+For packaged user-facing extension CLIs/features, see [`user-facing-packages.md`](./user-facing-packages.md).
 
 ## What an extension is
 
-An extension is a TS/JS module exporting a default factory:
+An extension is a TS/JS module exporting a default factory. Factories may initialize synchronously or return a promise:
 
 ```ts
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
@@ -70,7 +70,7 @@ Important constraint from `loader.ts`:
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
-  const { z } = pi.zod;
+  const z = pi.zod;
 
   pi.setLabel("Safety + Utilities");
 
@@ -123,6 +123,7 @@ Core methods:
 - `setModel`, `getThinkingLevel`, `setThinkingLevel`
 - `getServiceTiers`, `setServiceTier`
 - `registerProvider`
+- `registerFileWriteFallback`, `registerFileDeleteFallback`
 - `events` (shared event bus)
 
 `getServiceTiers()` returns a detached snapshot of the session's live per-family tier map. `setServiceTier(family, tier)` changes one family for subsequent requests; pass `undefined` to clear that session override. OpenAI accepts `auto`, `default`, `flex`, `scale`, or `priority`; Anthropic accepts `priority`; Google accepts `flex` or `priority`. Changes made while a response is streaming do not alter that in-flight request.
@@ -132,8 +133,9 @@ In interactive mode, `input` handlers run before the built-in first-message auto
 Also exposed:
 
 - `pi.logger`
-- `pi.typebox` (zod-backed compatibility shim for legacy TypeBox-style schemas)
-- `pi.zod` (injected `zod/v4` module — canonical for tool parameter schemas)
+- `pi.arktype` (the omptype `type(...)` schema builder)
+- `pi.zod` (Zod-compatible builder backed by omptype)
+- `pi.typebox` (legacy TypeBox-compatible shim)
 - `pi.pi` (package exports)
 
 ### Message delivery semantics
@@ -157,7 +159,9 @@ Handlers and tool `execute` receive `ctx` with:
 - `sessionManager` (read-only)
 - `modelRegistry`, `model`
 - `models` (read-only model query — see below)
+- `localProtocolOptions` (optional calling-session `local://` root mapping for external tool bridges)
 - `getContextUsage()`
+- `getAsyncJobSnapshot()` returns the current session's read-only async-job snapshot, or `null` when no session owns the context
 - `compact(...)`
 - `isIdle()`, `hasPendingMessages()`, `abort()`
 - `shutdown()`
@@ -202,7 +206,7 @@ If you use raw `setInterval`/`setTimeout` or detached promises instead, you own 
 const current = ctx.models.current();
 const contrasting = ctx.models
   .list()
-  .find(m => current && ctx.models.family(m) !== ctx.models.family(current));
+  .find((m) => current && ctx.models.family(m) !== ctx.models.family(current));
 ```
 
 ## 3) Command context (`ExtensionCommandContext`)
@@ -248,7 +252,7 @@ Cancelable pre-events:
 - `agent_start` / `agent_end` — agent loop lifecycle notification; `agent_end` remains notification-only
 - `session_stop` — main-session stop hook, awaited before settle; may continue with `{ continue: true, additionalContext }` or `{ decision: "block", reason }`; capped at 8 consecutive continuations and never fires for task/subagent sessions
 - `turn_start` / `turn_end`
-- `message_start` / `message_update` / `message_end`
+- `message_start` / `message_update` / `message_end` — lifecycle notifications; `message_end` receives a detached message snapshot, so use `tool_result` or `context` when an extension needs to change provider context
 
 ### Tool lifecycle
 
@@ -268,6 +272,25 @@ Cancelable pre-events:
 - `goal_updated`
 - `credential_disabled`
 
+### MCP notifications
+
+- `mcp_notification` — fired for every JSON-RPC notification received from a connected MCP server, AFTER the manager's own handling of known list/update methods (`notifications/tools/list_changed`, `notifications/resources/list_changed`, `notifications/resources/updated`, `notifications/prompts/list_changed`). Unknown or server-custom methods are also delivered. Payload: `{ server: string; method: string; params: unknown }`. Multiple extensions may subscribe; a handler that throws does not prevent other handlers from firing. Notifications received before any listener attaches are buffered (bounded FIFO, cap 100, drop-oldest) and drained into the first subscriber — so startup-time frames aren't lost even if the extension binds after MCP discovery.
+
+Bridging a push-capable MCP into a session steer:
+
+```ts
+pi.on("mcp_notification", (event) => {
+  if (event.server !== "peer-bus") return;
+  if (event.method !== "notifications/peer_message") return;
+  const params = event.params as { from: string; text: string };
+  pi.sendUserMessage(`[from ${params.from}] ${params.text}`, {
+    deliverAs: "steer",
+  });
+});
+```
+
+The runtime handles the JSON-RPC transport and its own list/update refresh first; the handler runs afterwards and can inject a mid-turn steer via `pi.sendMessage` / `pi.sendUserMessage`.
+
 ### User command interception
 
 - `user_bash` (override with `{ result }`)
@@ -280,7 +303,7 @@ Current runtime note: `ExtensionRunner.emitResourcesDiscover(...)` is implemente
 
 ## Tool authoring details
 
-`registerTool` uses `ToolDefinition` from `types.ts`.
+`registerTool` uses `ToolDefinition` from `types.ts`. Its `parameters` field accepts omptype schemas; the injected TypeBox compatibility shim remains available for legacy extensions.
 
 Current `execute` signature:
 
@@ -294,10 +317,30 @@ execute(
 ): Promise<AgentToolResult>
 ```
 
+### Delegating to a native built-in (`ctx.invokeTool`)
+
+A tool that re-registers a built-in name (e.g. wrapping `write` to add logging or a policy check) can
+run the original instead of reimplementing it. When your registered tool shadows a built-in, the `ctx`
+passed to `execute` carries:
+
+```ts
+ctx.invokeTool?<TDetails>(
+  params: Record<string, unknown>,
+  options?: { signal?: AbortSignal; onUpdate?: AgentToolUpdateCallback },
+): Promise<AgentToolResult<TDetails>>
+```
+
+It runs the **native** built-in of the same name as your tool (delegation is same-tool only, so it
+cannot reach an arbitrary target or escalate past the approval already granted for this call) and
+returns its result, including the native tool's own side effects and internal bookkeeping. It is
+present only when a native built-in of that name exists — `ctx.invokeTool` is `undefined` for a
+net-new tool that shadows no built-in. The native call is not re-gated, since it is the same tool you
+are already approved as, and delegation depth is guarded against accidental self-recursion.
+
 Template:
 
 ```ts
-const { z } = pi.zod;
+const z = pi.zod;
 
 pi.registerTool({
   name: "my_tool",
@@ -326,7 +369,138 @@ pi.registerTool({
 });
 ```
 
-`tool_call`/`tool_result` intercept all tools once the registry is wrapped in `sdk.ts`, including built-ins and extension/custom tools. `ToolDefinition` also supports optional `hidden`, `defaultInactive`, `deferrable`, `approval`, `mcpServerName`, `mcpToolName`, `renderCall`, and `renderResult` fields.
+`tool_call`/`tool_result` intercept all tools once the registry is wrapped in `sdk.ts`, including built-ins and extension/custom tools. `ToolDefinition` also supports optional `hidden`, `defaultInactive`, `loadMode` (`"discoverable"` by default, or `"essential"`), `deferrable`, `approval` (`"exec"` by default), `strict`, `mcpServerName`, `mcpToolName`, `renderCall`, and `renderResult` fields.
+
+### File write fallback (`registerFileWriteFallback`)
+
+`write`, `edit` and `apply_patch` perform the real byte-write to an ordinary file
+path through one shared primitive
+(`file ? file.write(content) : Bun.write(dst, content)`). When that primitive fails
+with a permission error (`EPERM`/`EACCES`/`EROFS` — every other error, such as
+`EISDIR`, is unaffected), the coding agent consults handlers registered
+via `pi.registerFileWriteFallback` before giving up:
+
+```ts
+import type { FileWriteFallbackHandler } from "@oh-my-pi/pi-coding-agent";
+
+const writeThroughBroker: FileWriteFallbackHandler = async (req, ctx) => {
+  // req: { dst: string; content: string; cause: unknown }
+  const ok = await myPrivilegedWriter.write(req.dst, req.content);
+  return ok;
+};
+
+pi.registerFileWriteFallback(writeThroughBroker);
+```
+
+Handlers run in registration order; the first one to resolve `true` counts as the
+bytes being durably on disk, and the native tool continues exactly as if its own
+write had succeeded — including recording its file snapshot under the real
+destination path, so a later hashline `edit` on that path keeps working. A
+throwing handler is logged and skipped in favor of the next one — per handler, so a
+later handler registered by the same extension still runs; if every handler
+returns `false` (or none are registered), the original error is rethrown
+unchanged. Intended for a host that embeds the agent inside a sandbox denying
+direct filesystem writes but exposing a privileged write channel.
+
+`req.dst` is the **symlink-resolved** destination, not the path the tool was given.
+The kernel follows every component above the last, so `ws/link/file` under a
+`ws/link -> /elsewhere` link lands outside `ws` while still looking in-workspace, and
+a prefix allowlist in your handler would pass on that innocent-looking path. For a
+write the final component is followed too, so it is resolved as well; for a delete it
+is not, because `unlink` removes a link rather than what it points at (so a delete
+`req.dst` may itself name a link). Treat `req.dst` as authoritative and do not
+re-derive the target from anything else. When the real destination cannot be
+established — a dangling final link, or an ancestor this process may not resolve — no
+handler is consulted at all and the original error is rethrown, because there is no
+destination to hand a privileged writer.
+
+Two details matter when the destination is outside what the host allows:
+
+- **A missing parent directory.** `Bun.write` creates missing parents itself, and
+  when that `mkdir` is the operation being denied it reports the subsequent
+  `open()`'s `ENOENT` rather than the denial. The agent redoes the `mkdir`
+  explicitly to recover the real errno, so this still reaches a handler — with
+  `req.cause` set to the `mkdir` denial. In that case `req.dst`'s parent does not
+  exist yet and the handler is responsible for creating it. An `ENOENT` with a
+  genuinely creatable or invalid parent is not diverted. (`apply_patch` creates the
+  parent as a separate step before writing; that `mkdir` tolerates a denial when a
+  fallback is registered, so the write still reaches the handler.)
+- **A hashline `MV`.** `edit`'s move writes its destination directly rather than
+  through the LSP writethrough. It is routed to the same handlers, and the source
+  unlink goes to the delete seam below, so a move out of a directory you cannot
+  write completes too.
+
+This is deliberately not an interception of every write the agent can make. A
+permission error from these surfaces as it does today, with no handler consulted:
+
+- `write` to an archive member (`foo.zip:entry`) or to a SQLite row. Neither is a
+  byte-write to `dst`: an archive rewrite reads the whole archive, replaces one
+  entry, writes a temp file and renames over the original, so what lands is a whole
+  binary container rather than the string the tool was handed; a SQLite write is a
+  row operation inside the database engine with no byte payload at all. Brokering
+  either needs a different request shape than "these bytes belong at this path".
+- The ACP bridge's `writeTextFile`, which hands the write to a remote client.
+- The `lsp` tool's own writes: applying a workspace edit or code action, and the
+  Biome formatter, which writes the buffer and then shells out to `biome format
+  --write` — a subprocess write no in-process seam can reach.
+
+### File delete fallback (`registerFileDeleteFallback`)
+
+Removing a file is a different primitive from writing one, and it has its own seam:
+
+```ts
+pi.registerFileDeleteFallback(async (req, ctx) => {
+  // req: { dst; cause; confirmedFile; sessionId } — no `content`.
+  return await myPrivilegedWriter.unlink(req.dst);
+});
+```
+
+It covers `edit`'s `REM`, the source side of a hashline `MV`, and `apply_patch`'s
+delete op, and follows the same rules as the write seam: same permission codes, first
+`true` wins, a throwing handler is skipped, the original error is rethrown if none
+succeed, and nothing happens at all when no handler is registered. Two differences:
+
+- **`ENOENT` is never diverted.** Nothing is created on the way to an unlink, so a
+  missing file genuinely is missing — `REM` turns it into a not-found error.
+- **A handler must unlink, never remove recursively.** `unlink` on a directory reports
+  `EPERM` on macOS, which is indistinguishable from a sandbox denial by error code
+  alone, so the seam `lstat`s the target and refuses to divert a directory. But when
+  the target's own metadata sits behind the same boundary that denied the unlink —
+  the common sandbox case — that check cannot be resolved, and `req.dst` may then be a
+  directory. `req.confirmedFile` is `true` only when the seam positively established
+  the target is a plain regular file; a symlink reports `false` too, since unlinking a
+  link is fine but resolving it acts on something else entirely. A privileged helper
+  that recursively removes `req.dst`, or realpaths it first, would act far outside
+  what a tool that only ever removes one file asked for.
+
+**Registering for deletes is deliberately separate from registering for writes.** A
+write handler brokers `req.content` to `req.dst`; if a delete request reached it, the
+missing content invites brokering an empty write and *truncating* the file that was
+meant to be removed. A write-only handler therefore never sees a delete.
+
+Two lifecycle constraints, which apply to both seams:
+
+- **Register during extension load** (from the default factory), like other
+  `register*` calls. Handlers are installed when `ExtensionRunner.initialize` runs;
+  an extension that registered nothing by then is skipped entirely, so a first
+  registration made later never takes effect. The `ctx` a handler receives is built
+  per invocation, not captured at install time, so `ctx.cwd` and `ctx.hasUI` describe
+  the session as it is when the mutation is denied — a workspace change (`/move`) is
+  reflected in the next request rather than pinned to load time.
+- **The registries are process-wide.** A process can host several sessions (a subagent
+  gets its own runner), so a handler may be consulted for a denied write or delete
+  from any session in the process — not only the one whose extension registered it.
+  This is deliberate: a subagent spawned with restricted tools loads no extensions of
+  its own, and a host that registers once in its top-level session still expects its
+  subagents' writes brokered. `req.sessionId` names the session that issued the
+  mutation (`undefined` when it did not come from a tool call), and
+  `ctx.sessionManager.getSessionId()` names the handler's own — compare them to make
+  the decision per session. It matters most before prompting: `ctx.ui` belongs to the
+  handler's session, not necessarily to the one being asked about. Handlers are
+  removed on `session_shutdown`.
+
+With nothing registered none of this engages: the primitive runs exactly as it did
+before and performs no extra syscalls.
 
 ## UI integration points
 
@@ -373,13 +547,13 @@ When no UI context is supplied to runner init, `ctx.hasUI` is `false` and method
 
 ### ACP mode
 
-ACP installs an elicitation-bridged UI context (`createAcpExtensionUiContext` in `acp-agent.ts`). `ctx.hasUI` is `true` while only `select`/`confirm`/`input` round-trip (as ACP elicitations; defaults are returned when the client lacks the `elicitation.form` capability). The non-elicitation surface (widgets, editor, theming, terminal input, autocomplete stacking) is stubbed no-op.
+ACP installs an elicitation-bridged UI context (`createAcpExtensionUiContext` in `acp-agent.ts`). `ctx.hasUI` is `true` while `select`/`confirm`/`input`/`editor` round-trip (as ACP elicitations; defaults are returned when the client lacks the `elicitation.form` capability). The non-elicitation surface (widgets, theming, terminal input, autocomplete stacking) is stubbed no-op.
 
 ## Session and state patterns
 
 For durable extension state:
 
-1. Persist with `pi.appendEntry(customType, data)`.
+1. Persist with `pi.appendEntry("com.example.my-extension.state", data)`. The `customType` namespace is global: use a package- or reverse-domain-qualified value and avoid the core-reserved values in the [`custom` session-entry reference](./session.md#custom).
 2. Rebuild state from `ctx.sessionManager.getBranch()` on `session_start`, `session_branch`, `session_tree`.
 3. Keep tool result `details` structured when state should be visible/reconstructible from tool result history.
 
@@ -389,7 +563,10 @@ Example reconstruction pattern:
 pi.on("session_start", async (_event, ctx) => {
   let latest;
   for (const entry of ctx.sessionManager.getBranch()) {
-    if (entry.type === "custom" && entry.customType === "my-state") {
+    if (
+      entry.type === "custom" &&
+      entry.customType === "com.example.my-extension.state"
+    ) {
       latest = entry.data;
     }
   }
@@ -416,7 +593,9 @@ import { Container, Text } from "@oh-my-pi/pi-tui";
 
 pi.registerAssistantThinkingRenderer((context, theme) => {
   const container = new Container();
-  container.addChild(new Text(theme.fg("dim", `thinking chars: ${context.text.length}`), 1, 0));
+  container.addChild(
+    new Text(theme.fg("dim", `thinking chars: ${context.text.length}`), 1, 0),
+  );
   return container;
 });
 ```

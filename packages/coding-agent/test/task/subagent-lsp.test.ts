@@ -85,6 +85,8 @@ function createYieldingSession(): AgentSession {
 		getLastAssistantMessage: () => state.messages[state.messages.length - 1],
 		abort: async () => {},
 		dispose: async () => {},
+		setIrcWakeTurnObserver: () => {},
+		subscribeRunState: () => () => {},
 	} as unknown as AgentSession;
 }
 

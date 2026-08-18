@@ -62,6 +62,8 @@ export interface RpcClientOptions {
 	sessionDir?: string;
 	/** Additional CLI arguments */
 	args?: string[];
+	/** Grace period before escalating process termination (default: process utility default, 1000ms) */
+	terminationGraceMs?: number;
 	/** Custom tools owned by the embedding host and exposed over the RPC transport */
 	customTools?: RpcClientCustomTool[];
 }
@@ -128,6 +130,7 @@ const sessionEventTypes = new Set<AgentSessionEvent["type"]>([
 	"irc_message",
 	"notice",
 	"thinking_level_changed",
+	"model_changed",
 	"goal_updated",
 ]);
 
@@ -323,7 +326,7 @@ export class RpcClient {
 			this.#pendingHostToolCalls.clear();
 
 			try {
-				child.kill();
+				child.kill(undefined, this.options.terminationGraceMs);
 			} catch {
 				// The process may already have exited.
 			}
@@ -350,6 +353,13 @@ export class RpcClient {
 			// failures are reaped by the readyPromise catch below; established
 			// workers are reaped here so pending requests cannot hang indefinitely.
 			if (!readySettled) {
+				// Stdout can close before the exit reaper finishes draining stderr.
+				// child.exited settles only after the stderr tail is complete (for
+				// nonzero exits), so give it a bounded head start: the exit watcher
+				// below was registered first and rejects with the real stderr text
+				// instead of an empty "Stderr:" (flaked under full-suite load).
+				await Promise.race([child.exited.catch(() => {}), Bun.sleep(250)]);
+				if (readySettled) return;
 				readySettled = true;
 				readyReject(new Error(`Agent output stream ended before ready. Stderr: ${child.peekStderr()}`));
 				return;
@@ -439,7 +449,7 @@ export class RpcClient {
 
 		const error = new Error("Client stopped");
 		const child = this.#process;
-		child.kill();
+		child.kill(undefined, this.options.terminationGraceMs);
 		this.#abortController.abort(error);
 		this.#process = null;
 		for (const request of this.#pendingRequests.values()) request.reject(error);
@@ -597,6 +607,23 @@ export class RpcClient {
 	 */
 	async getState(): Promise<RpcSessionState> {
 		const response = await this.#send({ type: "get_state" });
+		const state = this.#getData<RpcSessionState>(response);
+		return {
+			...state,
+			fastModeEnabled: state.fastModeEnabled === true,
+			fastModeActive: state.fastModeActive === true,
+			tokensPerSecond:
+				typeof state.tokensPerSecond === "number" && Number.isFinite(state.tokensPerSecond)
+					? state.tokensPerSecond
+					: null,
+		};
+	}
+
+	/**
+	 * Enable or disable fast mode for the active model family.
+	 */
+	async setFastMode(enabled: boolean): Promise<{ enabled: boolean; active: boolean }> {
+		const response = await this.#send({ type: "set_fast_mode", enabled });
 		return this.#getData(response);
 	}
 

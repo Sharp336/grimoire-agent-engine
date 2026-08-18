@@ -10,6 +10,7 @@ import type {
 	ExtensionAskDialogResultItem,
 	ExtensionCommandContextActions,
 	ExtensionContextActions,
+	ExtensionCustomOptions,
 	ExtensionError,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
@@ -128,7 +129,7 @@ export class ExtensionUiController {
 		};
 		this.ctx.setToolUIContext(uiContext, true);
 		this.#toolUIContext = uiContext;
-		this.ctx.session.setUsageFallbackConfirmer?.(confirmation => {
+		this.ctx.session.setUsageFallbackConfirmer?.((confirmation, signal) => {
 			const reserve =
 				confirmation.remainingPercent === undefined
 					? "inside the configured reserve margin"
@@ -136,6 +137,7 @@ export class ExtensionUiController {
 			return this.showHookConfirm(
 				"Coding-plan reserve reached",
 				`${confirmation.from} has ${reserve}. Switch to ${confirmation.to}? Choose No to keep using the current plan.`,
+				{ signal },
 			);
 		});
 
@@ -165,7 +167,7 @@ export class ExtensionUiController {
 				this.ctx.sessionManager.appendLabelChange(targetId, label);
 			},
 			getActiveTools: () => this.ctx.session.getEnabledToolNames(),
-			getAllTools: () => this.ctx.session.getAllToolNames(),
+			getAllTools: () => this.ctx.session.getAllToolInfos(),
 			setActiveTools: toolNames => this.ctx.session.setActiveToolsByName(toolNames),
 			setModel: async model => {
 				const key = await this.ctx.session.modelRegistry.getApiKey(model);
@@ -201,7 +203,7 @@ export class ExtensionUiController {
 			waitForIdle: () => this.ctx.session.agent.waitForIdle(),
 			reload: async () => {
 				await this.ctx.session.reload();
-				this.ctx.renderInitialMessages({ clearTerminalHistory: true });
+				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 				await this.ctx.reloadTodos();
 				this.ctx.showStatus("Reloaded session");
 			},
@@ -244,7 +246,7 @@ export class ExtensionUiController {
 				}
 
 				// Update UI
-				this.ctx.renderInitialMessages({ clearTerminalHistory: true });
+				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 				await this.ctx.reloadTodos();
 				this.ctx.editor.setDraft(result.selectedText, result.selectedImages);
 				this.ctx.showStatus("Branched to new session");
@@ -258,7 +260,7 @@ export class ExtensionUiController {
 				}
 
 				// Update UI
-				this.ctx.renderInitialMessages({ clearTerminalHistory: true });
+				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 				await this.ctx.reloadTodos();
 				if (result.editorText && !this.ctx.editor.getText().trim()) {
 					this.ctx.editor.setDraft(result.editorText, result.editorImages);
@@ -275,13 +277,13 @@ export class ExtensionUiController {
 					return { cancelled: true };
 				}
 				setSessionTerminalTitle(this.ctx.sessionManager.getSessionName(), this.ctx.sessionManager.getCwd());
-				this.ctx.renderInitialMessages({ clearTerminalHistory: true });
+				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 				await this.ctx.reloadTodos();
 				return { cancelled: false };
 			},
 		};
 
-		extensionRunner.initialize(actions, contextActions, commandActions, uiContext);
+		extensionRunner.initialize(actions, contextActions, commandActions, uiContext, "tui");
 
 		// Subscribe to extension errors
 		extensionRunner.onError((error: ExtensionError) => {
@@ -398,7 +400,7 @@ export class ExtensionUiController {
 				this.ctx.sessionManager.appendLabelChange(targetId, label);
 			},
 			getActiveTools: () => this.ctx.session.getEnabledToolNames(),
-			getAllTools: () => this.ctx.session.getAllToolNames(),
+			getAllTools: () => this.ctx.session.getAllToolInfos(),
 			setActiveTools: toolNames => this.ctx.session.setActiveToolsByName(toolNames),
 			setModel: async model => {
 				const key = await this.ctx.session.modelRegistry.getApiKey(model);
@@ -434,7 +436,7 @@ export class ExtensionUiController {
 			waitForIdle: () => this.ctx.session.agent.waitForIdle(),
 			reload: async () => {
 				await this.ctx.session.reload();
-				this.ctx.renderInitialMessages({ clearTerminalHistory: true });
+				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 				await this.ctx.reloadTodos();
 				this.ctx.showStatus("Reloaded session");
 			},
@@ -474,7 +476,7 @@ export class ExtensionUiController {
 				}
 
 				// Update UI
-				this.ctx.renderInitialMessages({ clearTerminalHistory: true });
+				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 				await this.ctx.reloadTodos();
 				this.ctx.editor.setDraft(result.selectedText, result.selectedImages);
 				this.ctx.showStatus("Branched to new session");
@@ -488,7 +490,7 @@ export class ExtensionUiController {
 				}
 
 				// Update UI
-				this.ctx.renderInitialMessages({ clearTerminalHistory: true });
+				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 				await this.ctx.reloadTodos();
 				if (result.editorText && !this.ctx.editor.getText().trim()) {
 					this.ctx.editor.setDraft(result.editorText, result.editorImages);
@@ -504,13 +506,13 @@ export class ExtensionUiController {
 				if (!result) {
 					return { cancelled: true };
 				}
-				this.ctx.renderInitialMessages({ clearTerminalHistory: true });
+				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 				await this.ctx.reloadTodos();
 				return { cancelled: false };
 			},
 		};
 
-		extensionRunner.initialize(actions, contextActions, commandActions, uiContext);
+		extensionRunner.initialize(actions, contextActions, commandActions, uiContext, "tui");
 	}
 
 	/**
@@ -1046,52 +1048,78 @@ export class ExtensionUiController {
 			keybindings: KeybindingsManager,
 			done: (result: T) => void,
 		) => (Component & { dispose?(): void }) | Promise<Component & { dispose?(): void }>,
-		options?: { overlay?: boolean },
+		options?: ExtensionCustomOptions,
 	): Promise<T> {
 		const savedText = this.ctx.editor.getText();
 		const keybindings = KeybindingsManager.inMemory();
 
-		const { promise, resolve } = Promise.withResolvers<T>();
+		const { promise, resolve, reject } = Promise.withResolvers<T>();
 		let component: (Component & { dispose?(): void }) | undefined;
 		let overlayHandle: OverlayHandle | undefined;
 		let closed = false;
+		let editorReplaced = false;
 
-		const close = (result: T) => {
-			if (closed) return;
-			closed = true;
+		const cleanup = () => {
 			component?.dispose?.();
 			overlayHandle?.hide();
 			overlayHandle = undefined;
-			if (!options?.overlay) {
+			if (editorReplaced) {
 				this.ctx.editorContainer.clear();
 				this.ctx.editorContainer.addChild(this.ctx.editor);
 				this.ctx.editor.setText(savedText);
 			}
 			this.ctx.ui.setFocus(this.ctx.editor);
 			this.ctx.ui.requestRender();
-			resolve(result);
 		};
+		const finish = (settle: () => void) => {
+			if (closed) return;
+			closed = true;
+			options?.signal?.removeEventListener("abort", onAbort);
+			try {
+				cleanup();
+			} finally {
+				settle();
+			}
+		};
+		const fail = (error: unknown) => finish(() => reject(error));
+		const onAbort = () => fail(options?.signal?.reason ?? new DOMException("Dialog aborted", "AbortError"));
+		const close = (result: T) => finish(() => resolve(result));
 
-		Promise.try(() => factory(this.ctx.ui, theme, keybindings, close)).then(c => {
-			if (closed) {
-				c.dispose?.();
-				return;
-			}
-			component = c;
-			if (options?.overlay) {
-				overlayHandle = this.ctx.ui.showOverlay(component, {
-					anchor: "bottom-center",
-					width: "100%",
-					maxHeight: "100%",
-					margin: 0,
-				});
-				return;
-			}
-			this.ctx.editorContainer.clear();
-			this.ctx.editorContainer.addChild(component);
-			this.ctx.ui.setFocus(component);
-			this.ctx.ui.requestRender();
-		});
+		if (options?.signal?.aborted) {
+			fail(options.signal.reason ?? new DOMException("Dialog aborted", "AbortError"));
+			return promise;
+		}
+		options?.signal?.addEventListener("abort", onAbort, { once: true });
+
+		Promise.try(() => factory(this.ctx.ui, theme, keybindings, close))
+			.then(c => {
+				if (closed) {
+					c.dispose?.();
+					return;
+				}
+				component = c;
+				if (options?.overlay) {
+					const overlayOptions =
+						typeof options.overlayOptions === "function" ? options.overlayOptions() : options.overlayOptions;
+					overlayHandle = this.ctx.ui.showOverlay(
+						component,
+						overlayOptions ?? {
+							anchor: "bottom-center",
+							width: "100%",
+							maxHeight: "100%",
+							margin: 0,
+						},
+					);
+					options.onHandle?.(overlayHandle);
+					return;
+				}
+				editorReplaced = true;
+				this.ctx.editorContainer.clear();
+				this.ctx.editorContainer.addChild(component);
+				this.ctx.ui.setFocus(component);
+				this.ctx.ui.requestRender();
+			})
+			.catch(fail);
 		return promise;
 	}
 

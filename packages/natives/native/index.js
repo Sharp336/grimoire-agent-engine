@@ -19,6 +19,7 @@ const nativeBindings = loadNative();
 export const AudioCapture = nativeBindings.AudioCapture;
 export const AudioPlayback = nativeBindings.AudioPlayback;
 export const DesktopSession = nativeBindings.DesktopSession;
+export const FileLock = nativeBindings.FileLock;
 export const LiveWebRtcPeer = nativeBindings.LiveWebRtcPeer;
 export const MacAppearanceObserver = nativeBindings.MacAppearanceObserver;
 export const MacOSPowerAssertion = nativeBindings.MacOSPowerAssertion;
@@ -28,7 +29,7 @@ export const Shell = nativeBindings.Shell;
 
 // functions
 export const __ompInstallTokioRuntime = nativeBindings.__ompInstallTokioRuntime;
-export const __piNativesV17_1_8 = nativeBindings.__piNativesV17_1_8;
+export const __piNativesV17_3_7 = nativeBindings.__piNativesV17_3_7;
 export const astEdit = nativeBindings.astEdit;
 export const astGrep = nativeBindings.astGrep;
 export const astMatch = nativeBindings.astMatch;
@@ -68,6 +69,7 @@ export const matchesLegacySequence = nativeBindings.matchesLegacySequence;
 export const mmrRerankIndices = nativeBindings.mmrRerankIndices;
 export const parseKey = nativeBindings.parseKey;
 export const parseKittySequence = nativeBindings.parseKittySequence;
+export const pdfToMarkdown = nativeBindings.pdfToMarkdown;
 export const readImageFromClipboard = nativeBindings.readImageFromClipboard;
 export const renderSnapcompactPng = nativeBindings.renderSnapcompactPng;
 export const search = nativeBindings.search;
