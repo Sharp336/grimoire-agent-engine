@@ -338,6 +338,7 @@ describe("AgentSession thinking-loop retry", () => {
 			"retry.maxRetries": 1,
 			"retry.modelFallback": false,
 			"todo.enabled": true,
+			"todo.reminders": false,
 			"model.loopGuard.enabled": true,
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Compaction summaries now keep an Incomplete Todos section so pending/in_progress items survive the cut.
+
 ## [17.3.5] - 2026-08-16
 
 ### Added

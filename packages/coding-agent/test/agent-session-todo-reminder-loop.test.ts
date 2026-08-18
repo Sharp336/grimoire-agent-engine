@@ -15,8 +15,9 @@ import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
  * A text-only `stop` with pending/in_progress todos is not terminal unless the
  * assistant is waiting for the user (question / response cue) or the remaining
  * items are blocked/abandoned/completed. A text-only "all done" after reminder
- * 1/3 is not progress and must not suppress 2/3–3/3. The reminder budget still
- * caps at `todo.remindersMax` so a fake-complete cannot loop forever.
+ * 1/3 is not progress and must not suppress 2/3–3/3. After `todo.remindersMax`,
+ * a text-only slogan is still not a terminal stop: the last reminder is an
+ * escape hatch that requires a todo-tool action (done / block / drop).
  */
 const sharedAuthStorage = createInMemoryAuthStorage();
 sharedAuthStorage.setRuntimeApiKey("anthropic", "test-key");
@@ -234,18 +235,44 @@ describe("AgentSession todo reminder self-continuation suppression", () => {
 	});
 
 	it("does not treat a text-only all-done as terminal or as reminder progress", async () => {
+		let extraStops = 0;
 		vi.spyOn(session.agent, "continue").mockImplementation(async () => {
-			emitTextOnlyStop("Task complete. All 2 items now wired.");
+			extraStops += 1;
+			// Cap extra stops so the post-budget escape hatch can be observed without
+			// looping forever (production keeps scheduling continue until a todo-tool
+			// action lands).
+			if (extraStops <= 4) {
+				emitTextOnlyStop("Task complete. All 2 items now wired.");
+			}
 		});
 
 		emitTextOnlyStop("Task complete. All 2 items now wired.");
 		await session.waitForIdle();
 
 		// 1/3, then the same text-only slogan, then 2/3 and 3/3. After the budget
-		// the next text-only stop is allowed to settle.
-		expect(reminderAttempts).toEqual([1, 2, 3]);
+		// a text-only stop is still not terminal while pending/in_progress remain.
+		expect(reminderAttempts.slice(0, 3)).toEqual([1, 2, 3]);
+		expect(reminderAttempts.every(attempt => attempt >= 1 && attempt <= 3)).toBe(true);
 		expect(agentEndTerminalStates[0]).toBe(false);
-		expect(agentEndTerminalStates.at(-1)).toBe(true);
+		expect(agentEndTerminalStates.at(-1)).toBe(false);
+		expect(agentEndTerminalStates.every(state => state === false)).toBe(true);
+
+		const reminderTexts = sessionManager.getBranch().flatMap(entry => {
+			if (entry.type !== "message" || entry.message.role !== "developer") return [];
+			const { content } = entry.message;
+			if (!Array.isArray(content)) return [];
+			return content
+				.filter(
+					(item): item is TextContent =>
+						item.type === "text" && item.text.includes("You stopped with 2 incomplete todo item(s):"),
+				)
+				.map(item => item.text);
+		});
+		const lastReminder = reminderTexts.at(-1);
+		expect(lastReminder).toContain("todo tool");
+		expect(lastReminder).toContain("done / block / drop");
+		expect(lastReminder).toContain("Do not close with prose");
+		expect(lastReminder).not.toContain("If no work remains");
 	});
 
 	it("still re-escalates after the agent makes tool-level progress between stops", async () => {
@@ -257,13 +284,14 @@ describe("AgentSession todo reminder self-continuation suppression", () => {
 				emitTextOnlyStop();
 				return;
 			}
-			emitTextOnlyStop();
+			if (continueCount <= 4) emitTextOnlyStop();
 		});
 
 		emitTextOnlyStop();
 		await session.waitForIdle();
 
-		expect(reminderAttempts).toEqual([1, 2, 3]);
+		expect(reminderAttempts.slice(0, 3)).toEqual([1, 2, 3]);
+		expect(agentEndTerminalStates.at(-1)).toBe(false);
 	});
 
 	it("allows a text-only stop when remaining todos are only blocked or closed", async () => {

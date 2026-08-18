@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed a text-only `stop` being treated as a terminal turn while todos were still `pending` or `in_progress`, including after snapcompact auto-continue and thinking-loop recovery ([#8874](https://github.com/can1357/oh-my-pi/issues/8874)).
+- Fixed a text-only `stop` being treated as a terminal turn while todos were still `pending` or `in_progress`, including after the reminder budget, snapcompact/LLM compaction (incomplete list is now part of the summarizer input), and thinking-loop recovery ([#8874](https://github.com/can1357/oh-my-pi/issues/8874)).
 
 ## [17.3.7] - 2026-08-17
 

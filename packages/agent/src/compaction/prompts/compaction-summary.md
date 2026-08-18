@@ -27,6 +27,9 @@ You MUST use this format (sections can be omitted if not applicable):
 ## Next Steps
 1. [Ordered list of next actions]
 
+## Incomplete Todos
+- [ ] [Preserve pending/in_progress items from additional-context and the conversation; do not mark them done]
+
 ## Critical Context
 - [Important data, pending questions, references]
 

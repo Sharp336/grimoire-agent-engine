@@ -37,6 +37,9 @@ Format (omit inapplicable sections):
 ## Next Steps
 1. [Update based on current state]
 
+## Incomplete Todos
+- [ ] [Preserve pending/in_progress items from additional-context and the conversation; do not mark them done]
+
 ## Critical Context
 - [Preserve important context; add new if needed]
 

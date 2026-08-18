@@ -60,6 +60,8 @@ export interface TodoTrackerHost {
 	toolRegistry(): Map<string, AgentTool>;
 	planModeEnabled(): boolean;
 	consumeLastServedToolChoiceLabel(): string | undefined;
+	/** Force the next model turn to call the todo tool (post-budget escape hatch). */
+	forceTodoToolChoice(): boolean;
 }
 
 /** Owns canonical todo state, eager preludes, and completion reminders. */
@@ -189,6 +191,46 @@ export class TodoTracker {
 		return this.#incompleteActionableByPhase().some(phase => phase.tasks.length > 0);
 	}
 
+	/**
+	 * Structured incomplete-todo lines for the compaction summarizer input
+	 * (`SummaryOptions.extraContext`), so the contract survives the cut.
+	 */
+	buildIncompleteTodosCompactionContext(): string[] {
+		const incompleteByPhase = this.#incompleteActionableByPhase();
+		if (incompleteByPhase.length === 0) return [];
+		const lines = [
+			"Incomplete todos that MUST survive compaction (pending/in_progress only; a text-only stop is not completion):",
+		];
+		for (const phase of incompleteByPhase) {
+			for (const task of phase.tasks) {
+				lines.push(`[${phase.name}] [${task.status}] ${task.content}`);
+			}
+		}
+		return lines;
+	}
+
+	/**
+	 * Appends the incomplete todo list to a compaction summary so it remains
+	 * durable text after snapcompact/LLM summarization (mirrors file-ops upsert).
+	 */
+	appendIncompleteTodosToSummary(summary: string): string {
+		const incompleteByPhase = this.#incompleteActionableByPhase();
+		if (incompleteByPhase.length === 0) return summary;
+		const block = [
+			"## Incomplete Todos",
+			"These pending/in_progress items remain after compaction; continue them. A text-only stop is not completion.",
+			...incompleteByPhase.flatMap(phase => [
+				`- ${phase.name}`,
+				...phase.tasks.map(task => `  - [${task.status}] ${task.content}`),
+			]),
+		].join("\n");
+		const trimmed = summary.trimEnd();
+		if (trimmed.includes("## Incomplete Todos")) {
+			return `${trimmed}\n`;
+		}
+		return `${trimmed}\n\n${block}\n`;
+	}
+
 	/** Builds reminder-only eager preludes after compaction. */
 	buildPostCompactionEagerNudges(): AgentMessage[] {
 		const nudges: AgentMessage[] = [];
@@ -219,11 +261,6 @@ export class TodoTracker {
 			this.#reminderCount = 0;
 			return false;
 		}
-		const remindersMax = this.#host.settings.get("todo.remindersMax");
-		if (this.#reminderCount >= remindersMax) {
-			logger.debug("Todo completion: max reminders reached", { count: this.#reminderCount });
-			return false;
-		}
 		const incompleteByPhase = this.#incompleteActionableByPhase();
 		const incomplete = incompleteByPhase.flatMap(phase => phase.tasks);
 		if (incomplete.length === 0) {
@@ -242,24 +279,34 @@ export class TodoTracker {
 			});
 			return false;
 		}
-		this.#reminderCount++;
+		const remindersMax = this.#host.settings.get("todo.remindersMax");
+		const pastBudget = this.#reminderCount >= remindersMax;
+		if (!pastBudget) {
+			this.#reminderCount++;
+		}
+		const attempt = pastBudget ? remindersMax : this.#reminderCount;
+		const isEscapeHatch = pastBudget || this.#reminderCount >= remindersMax;
 		const todoList = incompleteByPhase
 			.map(phase => `- ${phase.name}\n${phase.tasks.map(task => `  - [${task.status}] ${task.content}`).join("\n")}`)
 			.join("\n");
+		const actionLine = isEscapeHatch
+			? "Do not close with prose. Mark each remaining item complete, blocked, or abandoned with the todo tool (done / block / drop), then continue real work. A text-only stop is not completion."
+			: "Please continue working on these tasks or mark them complete/blocked/abandoned with the todo tool if finished. A text-only stop is not completion.";
 		const reminder =
 			`<system-reminder>\n` +
 			`You stopped with ${incomplete.length} incomplete todo item(s):\n${todoList}\n\n` +
-			`Please continue working on these tasks or mark them complete with the todo tool if finished. A text-only stop is not completion.\n` +
-			`(Reminder ${this.#reminderCount}/${remindersMax})\n` +
+			`${actionLine}\n` +
+			`(Reminder ${attempt}/${remindersMax}${pastBudget ? "; budget spent — todo tool required" : ""})\n` +
 			`</system-reminder>`;
-		logger.debug("Todo completion: sending reminder", {
+		logger.debug(pastBudget ? "Todo completion: post-budget escape hatch" : "Todo completion: sending reminder", {
 			incomplete: incomplete.length,
-			attempt: this.#reminderCount,
+			attempt,
+			pastBudget,
 		});
 		await this.#host.emitSessionEvent({
 			type: "todo_reminder",
 			todos: incomplete,
-			attempt: this.#reminderCount,
+			attempt,
 			maxAttempts: remindersMax,
 		});
 		const reminderMessage: Message = {
@@ -271,6 +318,9 @@ export class TodoTracker {
 		this.#mutationsSinceLastTouch = 0;
 		this.#host.agent.appendMessage(reminderMessage);
 		this.#host.sessionManager.appendMessage(reminderMessage);
+		if (isEscapeHatch) {
+			this.#host.forceTodoToolChoice();
+		}
 		this.#host.scheduleAgentContinue({ generation: this.#host.promptGeneration() });
 		return true;
 	}

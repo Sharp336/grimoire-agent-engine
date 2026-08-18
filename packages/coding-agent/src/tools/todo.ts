@@ -768,6 +768,14 @@ function formatSummary(phases: TodoPhase[], errors: string[], readOnly = false):
 				: "."
 		}`,
 	);
+	if (
+		!readOnly &&
+		errors.length === 0 &&
+		remainingTasks.some(task => task.status === "pending") &&
+		!remainingTasks.some(task => task.status === "in_progress")
+	) {
+		lines.push("No task is in_progress. Mark one in_progress with the todo tool before continuing.");
+	}
 	for (const phase of phases) {
 		lines.push(`  ${phase.name}:`);
 		for (const task of phase.tasks) {

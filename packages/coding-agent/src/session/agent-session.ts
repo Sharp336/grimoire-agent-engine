@@ -1039,6 +1039,14 @@ export class AgentSession {
 			toolRegistry: () => this.#tools.registry,
 			planModeEnabled: () => this.#planModeState?.enabled === true,
 			consumeLastServedToolChoiceLabel: () => this.#toolChoiceQueue.consumeLastServedLabel(),
+			forceTodoToolChoice: () => {
+				if (!this.getActiveToolNames().includes("todo")) return false;
+				const forced = buildNamedToolChoice("todo", this.model);
+				if (!forced || typeof forced === "string") return false;
+				this.#toolChoiceQueue.removeByLabel("todo-escape");
+				this.#toolChoiceQueue.pushOnce(forced, { label: "todo-escape" });
+				return true;
+			},
 		};
 		this.#todo = new TodoTracker(todoHost);
 		this.#ownedAsyncJobManager = config.ownedAsyncJobManager;
@@ -1549,6 +1557,8 @@ export class AgentSession {
 				this.#planReferenceSent = false;
 			},
 			syncTodoPhasesFromBranch: () => this.#todo.syncFromBranch(),
+			incompleteTodosCompactionContext: () => this.#todo.buildIncompleteTodosCompactionContext(),
+			appendIncompleteTodosToCompactionSummary: summary => this.#todo.appendIncompleteTodosToSummary(summary),
 			resetAdvisorRuntimes: (reason?: string) => this.#advisors.resetAllRuntimes(reason),
 			rebaseAfterCompaction: () => this.#stats.rebaseAfterCompaction(),
 			recordAnchoredHistoryRewrite: tokensRemoved => this.#stats.recordAnchoredHistoryRewrite(tokensRemoved),
