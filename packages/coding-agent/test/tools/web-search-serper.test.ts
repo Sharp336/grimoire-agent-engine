@@ -27,7 +27,7 @@ afterEach(() => {
 });
 
 describe("Serper web search", () => {
-	it("registers login, environment, and lazy search-provider metadata", async () => {
+	it("registers login, environment, and search-provider metadata", async () => {
 		expect(getProviderDefinition("serper")).toMatchObject({
 			id: "serper",
 			name: "Serper",
