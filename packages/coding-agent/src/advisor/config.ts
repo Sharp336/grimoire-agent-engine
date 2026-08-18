@@ -20,7 +20,7 @@ import { collectConfigCandidates } from "./watchdog";
 export interface AdvisorConfig {
 	name: string;
 	model?: string;
-	/** Retry fallback chain key used after credential rotation fails. Defaults to `advisor`. */
+	/** Explicit retry fallback chain owner. Omitted uses normal resolution with an `advisor` role hint. */
 	fallbackRole?: string;
 	tools?: string[];
 	instructions?: string;

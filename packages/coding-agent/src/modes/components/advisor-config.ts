@@ -292,7 +292,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 	#advisorPreview(advisor: AdvisorConfig, bodyWidth: number): string[] {
 		const model = advisor.model?.trim() || this.#defaultModelLabel || "advisor role default";
 		const tools = formatAdvisorTools(advisor.tools, "no tools");
-		const fallbackRole = advisor.fallbackRole?.trim() || "advisor";
+		const fallbackRole = advisor.fallbackRole?.trim() || "automatic (advisor hint)";
 		const lines = [
 			theme.bold(advisor.name || "(unnamed)"),
 			"",
@@ -370,7 +370,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 
 	#advisorSummary(advisor: AdvisorConfig): string {
 		const model = advisor.model?.trim() || this.#defaultModelLabel || "advisor role default";
-		const fallbackRole = advisor.fallbackRole?.trim() || "advisor";
+		const fallbackRole = advisor.fallbackRole?.trim() || "automatic";
 		const tools = formatAdvisorTools(advisor.tools, "no tools");
 		return `${model} · fallback ${fallbackRole} · ${tools}`;
 	}
