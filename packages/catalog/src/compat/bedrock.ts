@@ -1,42 +1,68 @@
+import { bareModelId, parseOpenAIModel, semverGte } from "../identity/classify";
 import { supportsAdaptiveThinkingDisplay } from "../identity/family";
 import type { ModelSpec, ResolvedBedrockCompat } from "../types";
 import { applyCompatOverrides } from "./apply";
 
-const NO_EXPLICIT_CHECKPOINTS: ResolvedBedrockCompat = {
+/** Cache-related fields resolved by id; `supportsSamplingParams` is filled in by `buildBedrockCompat`. */
+type BedrockPromptCacheCompat = Omit<ResolvedBedrockCompat, "supportsSamplingParams">;
+
+/**
+ * OpenAI GPT-5.6+ served through Bedrock Converse. These reject explicit `cachePoint`
+ * blocks (HTTP 403) while caching automatically, and reject `temperature`/`topP`
+ * (HTTP 400).
+ */
+export function isBedrockOpenAIEffortModelId(modelId: string): boolean {
+	const parsed = parseOpenAIModel(bareModelId(modelId));
+	return parsed !== null && semverGte(parsed.version, "5.6");
+}
+
+const NO_EXPLICIT_CHECKPOINTS: BedrockPromptCacheCompat = {
 	promptCacheMode: "none",
 	supportsLongPromptCacheRetention: false,
 	promptCacheMinimumTokens: 0,
 	promptCacheMaximumCheckpoints: 0,
 };
-const EXPLICIT_CHECKPOINTS_1024_5M: ResolvedBedrockCompat = {
+/**
+ * Bedrock caches these prompts automatically (verified: a repeated 3k-token prefix with no
+ * `cachePoint` reported `cacheWriteInputTokens` then `cacheReadInputTokens`), and rejects an
+ * explicit `cachePoint` with HTTP 403. "automatic" also makes
+ * `AWS_BEDROCK_FORCE_CACHE` a no-op for them.
+ */
+const AUTOMATIC_PROMPT_CACHE: BedrockPromptCacheCompat = {
+	promptCacheMode: "automatic",
+	supportsLongPromptCacheRetention: false,
+	promptCacheMinimumTokens: 0,
+	promptCacheMaximumCheckpoints: 0,
+};
+const EXPLICIT_CHECKPOINTS_1024_5M: BedrockPromptCacheCompat = {
 	promptCacheMode: "explicit",
 	supportsLongPromptCacheRetention: false,
 	promptCacheMinimumTokens: 1024,
 	promptCacheMaximumCheckpoints: 4,
 };
 
-const EXPLICIT_CHECKPOINTS_1024_1H: ResolvedBedrockCompat = {
+const EXPLICIT_CHECKPOINTS_1024_1H: BedrockPromptCacheCompat = {
 	promptCacheMode: "explicit",
 	supportsLongPromptCacheRetention: true,
 	promptCacheMinimumTokens: 1024,
 	promptCacheMaximumCheckpoints: 4,
 };
 
-const EXPLICIT_CHECKPOINTS_2048_5M: ResolvedBedrockCompat = {
+const EXPLICIT_CHECKPOINTS_2048_5M: BedrockPromptCacheCompat = {
 	promptCacheMode: "explicit",
 	supportsLongPromptCacheRetention: false,
 	promptCacheMinimumTokens: 2048,
 	promptCacheMaximumCheckpoints: 4,
 };
 
-const EXPLICIT_CHECKPOINTS_4096_5M: ResolvedBedrockCompat = {
+const EXPLICIT_CHECKPOINTS_4096_5M: BedrockPromptCacheCompat = {
 	promptCacheMode: "explicit",
 	supportsLongPromptCacheRetention: false,
 	promptCacheMinimumTokens: 4096,
 	promptCacheMaximumCheckpoints: 4,
 };
 
-const EXPLICIT_CHECKPOINTS_4096_1H: ResolvedBedrockCompat = {
+const EXPLICIT_CHECKPOINTS_4096_1H: BedrockPromptCacheCompat = {
 	promptCacheMode: "explicit",
 	supportsLongPromptCacheRetention: true,
 	promptCacheMinimumTokens: 4096,
@@ -45,7 +71,7 @@ const EXPLICIT_CHECKPOINTS_4096_1H: ResolvedBedrockCompat = {
 
 // AWS モデルカード: 512 トークン、最大 4 個のキャッシュチェックポイント、5 分と 1 時間の TTL。
 // https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-opus-5.html
-const EXPLICIT_CHECKPOINTS_512_1H: ResolvedBedrockCompat = {
+const EXPLICIT_CHECKPOINTS_512_1H: BedrockPromptCacheCompat = {
 	promptCacheMode: "explicit",
 	supportsLongPromptCacheRetention: true,
 	promptCacheMinimumTokens: 512,
@@ -58,8 +84,12 @@ const EXPLICIT_CHECKPOINTS_512_1H: ResolvedBedrockCompat = {
  * these exact documented model and inference-profile IDs conservative rather
  * than treating arbitrary Nova-like application profiles as checkpoint-capable.
  */
-function detectedBedrockCompat(modelId: string): ResolvedBedrockCompat {
+function detectedBedrockCompat(modelId: string): BedrockPromptCacheCompat {
 	const id = modelId.toLowerCase();
+
+	if (isBedrockOpenAIEffortModelId(modelId)) {
+		return AUTOMATIC_PROMPT_CACHE;
+	}
 
 	if (
 		id === "amazon.nova-lite-v1:0" ||
@@ -140,9 +170,12 @@ const BEDROCK_REASONING_STREAM_IDLE_TIMEOUT_MS = 600_000;
  */
 const BEDROCK_ADAPTIVE_THINKING_STREAM_IDLE_TIMEOUT_MS = 900_000;
 
-/** Resolve Bedrock Converse prompt-cache and stream-watchdog compat once per model. */
+/** Resolve Bedrock Converse prompt-cache, sampling, and stream-watchdog compat once per model. */
 export function buildBedrockCompat(spec: ModelSpec<"bedrock-converse-stream">): ResolvedBedrockCompat {
-	const compat = { ...detectedBedrockCompat(spec.id) };
+	const compat: ResolvedBedrockCompat = {
+		...detectedBedrockCompat(spec.id),
+		supportsSamplingParams: !isBedrockOpenAIEffortModelId(spec.id),
+	};
 	compat.streamIdleTimeoutMs = spec.reasoning
 		? supportsAdaptiveThinkingDisplay(spec.id)
 			? BEDROCK_ADAPTIVE_THINKING_STREAM_IDLE_TIMEOUT_MS

@@ -2,13 +2,16 @@ import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
+import { calculateCost, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import {
 	BEDROCK_MANTLE_STATIC_MODELS,
 	bedrockMantleModelManagerOptions,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
-import type { FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
+import type { FetchImpl, ModelSpec, Usage } from "@oh-my-pi/pi-catalog/types";
 import { dropBedrockMantleOpenAIModels } from "../scripts/generated-policies";
 
 const MANTLE_MODEL_IDS = [
@@ -123,5 +126,71 @@ describe("Amazon Bedrock OpenAI routing", () => {
 			"amazon-bedrock/openai.gpt-oss-120b",
 			"bedrock-mantle/openai.gpt-5.6-sol",
 		]);
+	});
+
+	test("us.openai.gpt-5.6-sol gets automatic caching and no sampling params; Anthropic Bedrock ids keep explicit checkpoints and sampling", () => {
+		const gpt56 = buildModel(bedrockModel("amazon-bedrock", "us.openai.gpt-5.6-sol"));
+		expect(gpt56.compat.promptCacheMode).toBe("automatic");
+		expect(gpt56.compat.supportsSamplingParams).toBe(false);
+
+		const claude = buildModel(bedrockModel("amazon-bedrock", "us.anthropic.claude-opus-4-8"));
+		expect(claude.compat.promptCacheMode).toBe("explicit");
+		expect(claude.compat.supportsSamplingParams).toBe(true);
+	});
+
+	test("routes GPT-5.6 Converse ids to effort-mode thinking; gpt-oss stays budget-mode", () => {
+		const gpt56 = buildModel(bedrockModel("amazon-bedrock", "us.openai.gpt-5.6-sol"));
+		expect(gpt56.thinking).toEqual({
+			mode: "effort",
+			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+		});
+
+		const gptOss = buildModel(bedrockModel("amazon-bedrock", "openai.gpt-oss-120b"));
+		expect(gptOss.thinking?.mode).toBe("budget");
+	});
+
+	test("prices Bedrock's automatic-cache buckets and the long-context tier for GPT-5.6 Sol (US)", () => {
+		const model = getBundledModel<"bedrock-converse-stream">("amazon-bedrock", "us.openai.gpt-5.6-sol");
+
+		// First call: ordinary prompt tokens land in cacheWriteInputTokens (Bedrock's automatic
+		// caching), not inputTokens — the short-tier write rate must price them, not the read rate.
+		const first: Usage = {
+			input: 2,
+			output: 5,
+			cacheRead: 0,
+			cacheWrite: 3020,
+			totalTokens: 3027,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		calculateCost(model, first);
+		expect(first.cost.input).toBeCloseTo((2 * 5.5) / 1_000_000, 10);
+		expect(first.cost.cacheWrite).toBeCloseTo((3020 * 6.875) / 1_000_000, 10);
+		expect(first.cost.output).toBeCloseTo((5 * 33) / 1_000_000, 10);
+		expect(first.cost.cacheRead).toBe(0);
+
+		// Second call: the same tokens now come back as a cache read.
+		const second: Usage = {
+			input: 2,
+			output: 5,
+			cacheRead: 3020,
+			cacheWrite: 0,
+			totalTokens: 3027,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		calculateCost(model, second);
+		expect(second.cost.cacheRead).toBeCloseTo((3020 * 0.55) / 1_000_000, 10);
+
+		// Crossing the 272K long-context threshold prices the whole request at the long tier.
+		const longContext: Usage = {
+			input: 300_000,
+			output: 1000,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 301_000,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		calculateCost(model, longContext);
+		expect(longContext.cost.input).toBeCloseTo((300_000 * 11) / 1_000_000, 10);
+		expect(longContext.cost.output).toBeCloseTo((1000 * 49.5) / 1_000_000, 10);
 	});
 });

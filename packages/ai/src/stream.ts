@@ -2013,12 +2013,13 @@ function mapOptionsForApi<TApi extends Api>(
 			const bedrockBase: BedrockOptions = {
 				...base,
 				reasoning: options?.reasoning,
+				disableReasoning: options?.disableReasoning || options?.forceReasoningOff,
 				thinkingBudgets: options?.thinkingBudgets,
 				toolChoice: mapAnthropicToolChoice(options?.toolChoice),
 				thinkingDisplay: options?.hideThinkingSummary ? "omitted" : undefined,
 			};
-			// Adaptive mode sends effort directly, no budget_tokens — skip budget inflation.
-			if (model.thinking?.mode === "anthropic-adaptive") {
+			// Adaptive and effort modes send effort directly, no `budget_tokens` — skip budget inflation.
+			if (model.thinking?.mode === "anthropic-adaptive" || model.thinking?.mode === "effort") {
 				return castApi<"bedrock-converse-stream">(bedrockBase);
 			}
 			const budgetInfo = resolveBedrockThinkingBudget(model as Model<"bedrock-converse-stream">, options);
