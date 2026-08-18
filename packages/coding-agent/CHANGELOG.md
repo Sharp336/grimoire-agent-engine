@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added `showProvider` option to the status line model segment (`statusLine.segmentOptions.model.showProvider`) to display the provider prefix (e.g. "Anthropic/opus-4.5") for disambiguation in multi-provider sessions.
 
 ## [17.3.7] - 2026-08-17
 
@@ -433,7 +436,6 @@
 ### Added
 
 - Added the `/reset` slash command to reset the conversation context in place: it drops the live messages, queued turns, and pending tool calls (and cancels the turn's async jobs, post-prompt continuations, and checkpoint/plan runtime state) while keeping the session id, title, cwd, model, and on-disk transcript. It records a durable reset boundary so the live transcript stays cleared across rebuilds (theme change, focus attach, `/shake`, resume) instead of resurrecting the pre-reset messages, while the full pre-reset history stays on disk ([#3580](https://github.com/can1357/oh-my-pi/issues/3580)).
-
 ### Fixed
 
 - Fixed extension slash commands appearing as user prompts after being handled locally.
