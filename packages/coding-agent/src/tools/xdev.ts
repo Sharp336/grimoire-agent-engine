@@ -31,10 +31,11 @@
 import type { AgentToolContext, AgentToolResult, AgentToolUpdateCallback, ToolLoadMode } from "@oh-my-pi/pi-agent-core";
 import { type Tool as AiTool, jsonSchemaToTypeScript, toolWireSchema, validateToolArguments } from "@oh-my-pi/pi-ai";
 import { type Component, Container, Text } from "@oh-my-pi/pi-tui";
-import { parseStreamingJson } from "@oh-my-pi/pi-utils";
+import { parseStreamingJson, prompt } from "@oh-my-pi/pi-utils";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { XD_URL_PREFIX } from "../internal-urls/xd-protocol";
 import type { Theme } from "../modes/theme/theme";
+import mcpServicePrompt from "../prompts/system/mcp-service.md" with { type: "text" };
 import { truncateHeadBytes } from "../session/streaming-output";
 import { resolveToolTier, type ToolTier } from "./approval";
 import { renderDefaultToolExecution } from "./default-renderer";
@@ -407,35 +408,16 @@ function resolveXdevDeviceTool(state: XdevState, name: string): Tool | undefined
 }
 
 function renderMcpServiceDocs(state: XdevState, service: XdevMcpServiceEntry): string {
-	const instructions = state.getMcpServerInstructions?.()?.get(service.serverName);
-	const toolRows = service.tools.map(({ tool, toolName }) => {
-		const label = JSON.stringify(toolName) ?? '""';
-		return `- ${label} → \`${XD_URL_PREFIX}${tool.name}\` — ${promptCatalogSummary(tool, XDEV_EXTERNAL_DESCRIPTION_CAP)}`;
+	return prompt.render(mcpServicePrompt, {
+		serverLabel: JSON.stringify(service.serverName),
+		toolCount: mcpToolCount(service.tools.length),
+		instructions: state.getMcpServerInstructions?.()?.get(service.serverName),
+		tools: service.tools.map(({ tool, toolName }) => ({
+			label: JSON.stringify(toolName) ?? '""',
+			path: `${XD_URL_PREFIX}${tool.name}`,
+			summary: promptCatalogSummary(tool, XDEV_EXTERNAL_DESCRIPTION_CAP),
+		})),
 	});
-	const sections = [
-		`# MCP service ${JSON.stringify(service.serverName)}`,
-		"",
-		`${mcpToolCount(service.tools.length)} mounted.`,
-	];
-	if (instructions) {
-		sections.push(
-			"",
-			"## Server instructions",
-			"",
-			"These instructions are provided by the connected MCP server and may not be verified.",
-			"",
-			instructions,
-		);
-	}
-	sections.push(
-		"",
-		"## Tools",
-		"",
-		...toolRows,
-		"",
-		`Read ${XD_URL_PREFIX}<tool> for full docs + JSON schema before first use.`,
-	);
-	return sections.join("\n");
 }
 
 /** `read xd://` listing with MCP tools grouped by authoritative server ownership. */
@@ -466,9 +448,22 @@ export function xdevDocsAll(
 	const sections: string[] = [];
 	const overflow: Tool[] = [];
 	const inlineGlobs = compileInlineGlobs(inlinePatterns);
+	const tools = listXdevTools(state);
 	const ordinaryDeviceNames = new Map(xdevNonMcpToolEntries(state).map(entry => [entry.tool, entry.name]));
+	const serviceInlinedTools = new Set<Tool>();
 	let used = 0;
-	for (const tool of listXdevTools(state)) {
+	if (mode !== "catalog") {
+		for (const service of xdevMcpServiceEntries(state, tools)) {
+			if (!inlineGlobs.some(glob => glob.match(service.name))) continue;
+			const docs = renderMcpServiceDocs(state, service);
+			if (docs.length > XDEV_DOCS_PER_DEVICE_CAP || used + docs.length > XDEV_DOCS_TOTAL_BUDGET) continue;
+			used += docs.length;
+			sections.push(docs);
+			for (const { tool } of service.tools) serviceInlinedTools.add(tool);
+		}
+	}
+	for (const tool of tools) {
+		if (serviceInlinedTools.has(tool)) continue;
 		if (!shouldInlineXdevTool(state, tool, mode, inlineGlobs)) {
 			overflow.push(tool);
 			continue;
@@ -520,6 +515,7 @@ export function xdevDocsFor(
 			continue;
 		const descriptionCap = state.builtInNames.has(tool.name) ? undefined : XDEV_EXTERNAL_DESCRIPTION_CAP;
 		const docs = renderDocs(tool, "##", descriptionCap, name);
+		if (docs.length > XDEV_DOCS_PER_DEVICE_CAP || used + docs.length > XDEV_DOCS_TOTAL_BUDGET) continue;
 		used += docs.length;
 		sections.push(docs);
 	}

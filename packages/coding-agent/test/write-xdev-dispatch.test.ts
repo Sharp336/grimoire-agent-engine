@@ -22,6 +22,7 @@ import {
 	type XdevState,
 	xdevDocs,
 	xdevDocsAll,
+	xdevDocsFor,
 	xdevEntries,
 	xdevListing,
 } from "@oh-my-pi/pi-coding-agent/tools/xdev";
@@ -607,6 +608,11 @@ describe("read and write route xd:// device URLs", () => {
 		const secondaryDocs = xdevDocs(xdev, "mcp-service:grafana%3Adev");
 		expect(secondaryDocs).toContain("Search the secondary workspace first.");
 		expect(secondaryDocs).toContain("xd://mcp__grafana_dev_search_2");
+
+		const allowlistedServiceDocs = xdevDocsAll(xdev, "builtins", ["mcp-service:grafana-dev"]);
+		expect(allowlistedServiceDocs).toContain('# MCP service "grafana-dev"');
+		expect(allowlistedServiceDocs).toContain("Search the primary workspace first.");
+		expect(allowlistedServiceDocs).not.toContain("Search the secondary workspace first.");
 	});
 
 	it("keeps canonical service paths distinct from colliding ordinary devices", async () => {
@@ -655,6 +661,22 @@ describe("read and write route xd:// device URLs", () => {
 		const ordinaryWrite = await dispatchXdevTool(xdev, ordinaryPath, "{}", "ordinary-write");
 		expect(ordinaryWrite.result.content).toEqual([{ type: "text", text: "ordinary result" }]);
 		expect(ordinaryExecutions).toBe(1);
+	});
+
+	it("bounds ordinary device docs in late mount notices", () => {
+		const oversized = {
+			name: "oversized",
+			label: "oversized",
+			description: "x".repeat(XDEV_DOCS_PER_DEVICE_CAP + 1),
+			parameters: type({}),
+			loadMode: "discoverable",
+			async execute() {
+				return { content: [{ type: "text" as const, text: "" }] };
+			},
+		} as Tool;
+		const xdev = createTestXdevState([oversized]);
+
+		expect(xdevDocsFor(xdev, [oversized.name], "inline")).toBe("");
 	});
 });
 
