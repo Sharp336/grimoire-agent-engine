@@ -5,6 +5,7 @@
 ### Added
 
 - Added `qwenTemplateReasoningEffort` to the `models.yml` `compat` schema, so the auto-enabled Qwen 3.8+ template effort dialect (`chat_template_kwargs.reasoning_effort`) can be switched off per provider/model for strict local servers that reject unknown `chat_template_kwargs`.
+- Added Black Forest Labs (FLUX) to the `generate_image` tool: text-to-image via `flux-2-pro`, edits via `flux-kontext-pro`, authenticated with `/login bfl` or `BFL_API_KEY`.
 
 ### Changed
 

@@ -806,4 +806,389 @@ describe("imageGenTool", () => {
 		expect(requestUrls).toEqual(["https://api.x.ai/v1/images/generations"]);
 		expect(result.details?.provider).toBe("xai");
 	});
+
+	function createBFLContext(fetchMock: typeof fetch, extraProviders: Record<string, string> = {}): CustomToolContext {
+		const providerKeys: Record<string, string> = { bfl: "test-bfl-key", ...extraProviders };
+		return {
+			fetch: fetchMock,
+			sessionManager: {
+				getCwd: () => "/tmp",
+				getSessionId: () => "test-session",
+			} as unknown as ReadonlySessionManager,
+			modelRegistry: {
+				getApiKey: async () => undefined,
+				getApiKeyForProvider: async (provider: string) => providerKeys[provider],
+				getProviderBaseUrl: () => undefined,
+				getAll: () => [],
+				authStorage: {
+					hasNonEnvCredential: (provider: string) => provider in providerKeys,
+					rotateSessionCredential: async () => false,
+				},
+				resolver: (provider: string) => async () => providerKeys[provider] ?? "test-bfl-key",
+			} as unknown as ModelRegistry,
+			model: undefined,
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+		};
+	}
+
+	it("generates a BFL image via submit, poll, and signed sample download", async () => {
+		setImageProviderOrder(["bfl"]);
+		const requestUrls: string[] = [];
+		let submitBody: Record<string, unknown> | undefined;
+		let pollCount = 0;
+
+		const fetchMock: typeof fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+			const url = input.toString();
+			requestUrls.push(url);
+			if (url === "https://api.bfl.ai/v1/flux-2-pro") {
+				submitBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+				return new Response(
+					JSON.stringify({ id: "task-1", polling_url: "https://api.eu.bfl.ai/v1/get_result?id=task-1" }),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}
+			if (url === "https://api.eu.bfl.ai/v1/get_result?id=task-1") {
+				pollCount += 1;
+				if (pollCount === 1) {
+					return new Response(JSON.stringify({ status: "Pending" }), {
+						status: 200,
+						headers: { "content-type": "application/json" },
+					});
+				}
+				return new Response(
+					JSON.stringify({ status: "Ready", result: { sample: "https://delivery.bfl.ai/sample.png" } }),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}
+			if (url === "https://delivery.bfl.ai/sample.png") {
+				return new Response(Buffer.from("fake-bfl-image"), {
+					status: 200,
+					headers: { "content-type": "image/png" },
+				});
+			}
+			throw new Error(`Unexpected request: ${url}`);
+		}) as unknown as typeof fetch;
+
+		const ctx = createBFLContext(fetchMock);
+		const result = await imageGenTool.execute("call-bfl", { subject: "a fox", aspect_ratio: "4:3" }, undefined, ctx);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		expect(requestUrls).toEqual([
+			"https://api.bfl.ai/v1/flux-2-pro",
+			"https://api.eu.bfl.ai/v1/get_result?id=task-1",
+			"https://api.eu.bfl.ai/v1/get_result?id=task-1",
+			"https://delivery.bfl.ai/sample.png",
+		]);
+		// flux-2-pro ignores aspect_ratio: the ratio must arrive as explicit dimensions.
+		expect(submitBody).toEqual({ prompt: "a fox.", width: 1152, height: 864 });
+		expect(result.details?.provider).toBe("bfl");
+		expect(result.details?.model).toBe("flux-2-pro");
+		expect(result.details?.imageCount).toBe(1);
+		expect(result.details?.images?.[0]?.data).toBe(Buffer.from("fake-bfl-image").toBase64());
+		const savedPath = result.details?.imagePaths[0];
+		if (!savedPath) throw new Error("Expected generated image path");
+		expect(await Bun.file(savedPath).bytes()).toEqual(Buffer.from("fake-bfl-image"));
+	}, 15_000);
+
+	it("authenticates BFL submit and poll requests with the x-key header, never Authorization", async () => {
+		setImageProviderOrder(["bfl"]);
+		const captured: { xKey: string | null; authorization: string | null } = { xKey: null, authorization: null };
+		const pollCaptured: { xKey: string | null; authorization: string | null } = { xKey: null, authorization: null };
+
+		const fetchMock: typeof fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+			const url = input.toString();
+			if (url === "https://api.bfl.ai/v1/flux-2-pro") {
+				const headers = new Headers(init?.headers);
+				captured.xKey = headers.get("x-key");
+				captured.authorization = headers.get("authorization");
+				return new Response(
+					JSON.stringify({ id: "task-2", polling_url: "https://api.eu.bfl.ai/v1/get_result?id=task-2" }),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}
+			if (url === "https://api.eu.bfl.ai/v1/get_result?id=task-2") {
+				const headers = new Headers(init?.headers);
+				pollCaptured.xKey = headers.get("x-key");
+				pollCaptured.authorization = headers.get("authorization");
+				return new Response(
+					JSON.stringify({ status: "Ready", result: { sample: "https://delivery.bfl.ai/sample2.png" } }),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}
+			return new Response(Buffer.from("bfl-wire-image"), {
+				status: 200,
+				headers: { "content-type": "image/png" },
+			});
+		}) as unknown as typeof fetch;
+
+		const ctx = createBFLContext(fetchMock);
+		const result = await imageGenTool.execute("call-bfl-wire", { subject: "a cat" }, undefined, ctx);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		expect(captured.xKey).toBe("test-bfl-key");
+		expect(captured.authorization).toBeNull();
+		// The regional polling URL is authenticated the same way as the submit.
+		expect(pollCaptured.xKey).toBe("test-bfl-key");
+		expect(pollCaptured.authorization).toBeNull();
+		expect(result.details?.provider).toBe("bfl");
+	});
+
+	it("maps xAI-only ratios to explicit BFL dimensions instead of skipping the provider", async () => {
+		setImageProviderOrder(["bfl"]);
+		let submitBody: Record<string, unknown> | undefined;
+
+		const fetchMock: typeof fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+			const url = input.toString();
+			if (url === "https://api.bfl.ai/v1/flux-2-pro") {
+				submitBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+				return new Response(
+					JSON.stringify({ id: "task-5", polling_url: "https://api.eu.bfl.ai/v1/get_result?id=task-5" }),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}
+			if (url === "https://api.eu.bfl.ai/v1/get_result?id=task-5") {
+				return new Response(
+					JSON.stringify({ status: "Ready", result: { sample: "https://delivery.bfl.ai/sample5.png" } }),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}
+			return new Response(Buffer.from("bfl-ratio-image"), {
+				status: 200,
+				headers: { "content-type": "image/png" },
+			});
+		}) as unknown as typeof fetch;
+
+		const ctx = createBFLContext(fetchMock);
+		const result = await imageGenTool.execute(
+			"call-bfl-ratio",
+			{ subject: "a cat", aspect_ratio: "3:2" },
+			undefined,
+			ctx,
+		);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		expect(submitBody).toEqual({ prompt: "a cat.", width: 1248, height: 832 });
+		expect(result.details?.provider).toBe("bfl");
+	});
+
+	it("falls through to the next credentialed provider on a BFL HTTP failure", async () => {
+		setImageProviderOrder(["bfl", "xai"]);
+		const requestUrls: string[] = [];
+
+		const fetchMock: typeof fetch = (async (input: string | URL | Request) => {
+			const url = input.toString();
+			requestUrls.push(url);
+			if (url.startsWith("https://api.bfl.ai/")) {
+				return new Response(JSON.stringify({ detail: "Not authenticated" }), {
+					status: 403,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			return new Response(
+				JSON.stringify({ data: [{ b64_json: Buffer.from("bfl-fallback-xai-image").toString("base64") }] }),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		}) as unknown as typeof fetch;
+
+		const ctx = createBFLContext(fetchMock, { "xai-oauth": "test-xai-token" });
+		const result = await imageGenTool.execute("call-bfl-fallback", { subject: "a cat" }, undefined, ctx);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		expect(requestUrls).toEqual(["https://api.bfl.ai/v1/flux-2-pro", "https://api.x.ai/v1/images/generations"]);
+		expect(result.details?.provider).toBe("xai");
+	});
+
+	it("routes BFL edits to flux-kontext-pro with the source image in the body", async () => {
+		setImageProviderOrder(["bfl"]);
+		let submitUrl: string | undefined;
+		let submitBody: Record<string, unknown> | undefined;
+		const sourceImage = Buffer.from("bfl-source-image").toString("base64");
+
+		const fetchMock: typeof fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+			const url = input.toString();
+			if (url.startsWith("https://api.bfl.ai/v1/flux-")) {
+				submitUrl = url;
+				submitBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+				return new Response(
+					JSON.stringify({ id: "task-3", polling_url: "https://api.eu.bfl.ai/v1/get_result?id=task-3" }),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}
+			if (url === "https://api.eu.bfl.ai/v1/get_result?id=task-3") {
+				return new Response(
+					JSON.stringify({ status: "Ready", result: { sample: "https://delivery.bfl.ai/sample3.png" } }),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}
+			return new Response(Buffer.from("bfl-edited-image"), {
+				status: 200,
+				headers: { "content-type": "image/png" },
+			});
+		}) as unknown as typeof fetch;
+
+		const ctx = createBFLContext(fetchMock);
+		const result = await imageGenTool.execute(
+			"call-bfl-edit",
+			{
+				subject: "a cat",
+				changes: ["make it wear a hat"],
+				aspect_ratio: "4:3",
+				input: [{ data: sourceImage, mime_type: "image/png" }],
+			},
+			undefined,
+			ctx,
+		);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		expect(submitUrl).toBe("https://api.bfl.ai/v1/flux-kontext-pro");
+		// Kontext honors aspect_ratio directly; no width/height mapping on the edit path.
+		expect(submitBody).toEqual({
+			prompt: "a cat.\n\nChanges:\n- make it wear a hat",
+			aspect_ratio: "4:3",
+			input_image: sourceImage,
+		});
+		expect(result.details?.provider).toBe("bfl");
+		expect(result.details?.model).toBe("flux-kontext-pro");
+	});
+
+	it("falls through to the next credentialed provider when a BFL poll ends terminal-non-ready", async () => {
+		setImageProviderOrder(["bfl", "xai"]);
+		const requestUrls: string[] = [];
+
+		const fetchMock: typeof fetch = (async (input: string | URL | Request) => {
+			const url = input.toString();
+			requestUrls.push(url);
+			if (url === "https://api.bfl.ai/v1/flux-2-pro") {
+				return new Response(
+					JSON.stringify({ id: "task-4", polling_url: "https://api.eu.bfl.ai/v1/get_result?id=task-4" }),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}
+			if (url === "https://api.eu.bfl.ai/v1/get_result?id=task-4") {
+				return new Response(JSON.stringify({ status: "Content Moderated" }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			return new Response(
+				JSON.stringify({ data: [{ b64_json: Buffer.from("bfl-moderated-xai-image").toString("base64") }] }),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		}) as unknown as typeof fetch;
+
+		const ctx = createBFLContext(fetchMock, { "xai-oauth": "test-xai-token" });
+		const result = await imageGenTool.execute("call-bfl-moderated", { subject: "a cat" }, undefined, ctx);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		expect(requestUrls).toEqual([
+			"https://api.bfl.ai/v1/flux-2-pro",
+			"https://api.eu.bfl.ai/v1/get_result?id=task-4",
+			"https://api.x.ai/v1/images/generations",
+		]);
+		expect(result.details?.provider).toBe("xai");
+	});
+
+	it("falls through past BFL when an edit supplies more than one reference image", async () => {
+		setImageProviderOrder(["bfl", "xai"]);
+		const requestUrls: string[] = [];
+		const fetchMock: typeof fetch = (async (input: string | URL | Request) => {
+			const url = input.toString();
+			requestUrls.push(url);
+			if (url.startsWith("https://api.bfl.ai/")) {
+				throw new Error(`BFL must not be called for multi-image edits: ${url}`);
+			}
+			return new Response(
+				JSON.stringify({ data: [{ b64_json: Buffer.from("bfl-multi-xai-image").toString("base64") }] }),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		}) as unknown as typeof fetch;
+		const sourceImage = Buffer.from("bfl-source-image").toString("base64");
+
+		const ctx = createBFLContext(fetchMock, { "xai-oauth": "test-xai-token" });
+		const result = await imageGenTool.execute(
+			"call-bfl-multi-input",
+			{
+				subject: "a cat",
+				changes: ["make it wear a hat"],
+				input: [
+					{ data: sourceImage, mime_type: "image/png" },
+					{ data: sourceImage, mime_type: "image/png" },
+				],
+			},
+			undefined,
+			ctx,
+		);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		expect(requestUrls).toEqual(["https://api.x.ai/v1/images/edits"]);
+		expect(result.details?.provider).toBe("xai");
+	});
+
+	it("falls through to the next credentialed provider when BFL returns malformed JSON", async () => {
+		setImageProviderOrder(["bfl", "xai"]);
+		const requestUrls: string[] = [];
+		const fetchMock: typeof fetch = (async (input: string | URL | Request) => {
+			const url = input.toString();
+			requestUrls.push(url);
+			if (url.startsWith("https://api.bfl.ai/")) {
+				return new Response("<html>gateway error</html>", {
+					status: 200,
+					headers: { "content-type": "text/html" },
+				});
+			}
+			return new Response(
+				JSON.stringify({ data: [{ b64_json: Buffer.from("bfl-malformed-xai-image").toString("base64") }] }),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		}) as unknown as typeof fetch;
+
+		const ctx = createBFLContext(fetchMock, { "xai-oauth": "test-xai-token" });
+		const result = await imageGenTool.execute("call-bfl-malformed", { subject: "a cat" }, undefined, ctx);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		expect(requestUrls).toEqual(["https://api.bfl.ai/v1/flux-2-pro", "https://api.x.ai/v1/images/generations"]);
+		expect(result.details?.provider).toBe("xai");
+	});
+
+	it("falls through to the next credentialed provider when the BFL sample download fails", async () => {
+		setImageProviderOrder(["bfl", "xai"]);
+		const requestUrls: string[] = [];
+		const fetchMock: typeof fetch = (async (input: string | URL | Request) => {
+			const url = input.toString();
+			requestUrls.push(url);
+			if (url === "https://api.bfl.ai/v1/flux-2-pro") {
+				return new Response(
+					JSON.stringify({ id: "task-6", polling_url: "https://api.eu.bfl.ai/v1/get_result?id=task-6" }),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}
+			if (url === "https://api.eu.bfl.ai/v1/get_result?id=task-6") {
+				return new Response(
+					JSON.stringify({ status: "Ready", result: { sample: "https://delivery.bfl.ai/sample6.png" } }),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}
+			if (url === "https://delivery.bfl.ai/sample6.png") {
+				return new Response("expired signature", { status: 403 });
+			}
+			return new Response(
+				JSON.stringify({ data: [{ b64_json: Buffer.from("bfl-download-xai-image").toString("base64") }] }),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		}) as unknown as typeof fetch;
+
+		const ctx = createBFLContext(fetchMock, { "xai-oauth": "test-xai-token" });
+		const result = await imageGenTool.execute("call-bfl-download-fail", { subject: "a cat" }, undefined, ctx);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		expect(requestUrls).toEqual([
+			"https://api.bfl.ai/v1/flux-2-pro",
+			"https://api.eu.bfl.ai/v1/get_result?id=task-6",
+			"https://delivery.bfl.ai/sample6.png",
+			"https://api.x.ai/v1/images/generations",
+		]);
+		expect(result.details?.provider).toBe("xai");
+	});
 });
