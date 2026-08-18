@@ -120,6 +120,27 @@ async function hasLiveDaemonBroker(runtimeDir: string): Promise<boolean> {
  * for {@link DAEMON_RUNTIME_STALE_GRACE_MS}. The caller's own `currentRuntimeDir`
  * and the machine-global daemon container are always skipped.
  */
+/** Whether a directory looks like a daemon runtime scope, guarding against
+ * accidental deletion of unrelated directories during sibling sweep.
+ * Checks for the presence of broker.pid or the clients/ subdirectory. */
+async function isDaemonRuntimeDir(dir: string): Promise<boolean> {
+	try {
+		const hasBrokerPid = await fs.stat(path.join(dir, BROKER_PID_FILE)).then(
+			() => true,
+			() => false,
+		);
+		if (hasBrokerPid) return true;
+		const hasClients = await fs.stat(path.join(dir, CLIENTS_DIR)).then(
+			() => true,
+			() => false,
+		);
+		if (hasClients) return true;
+		return false;
+	} catch {
+		return false;
+	}
+}
+
 export async function pruneDeadDaemonRuntimeDirs(currentRuntimeDir: string): Promise<void> {
 	const root = path.dirname(currentRuntimeDir);
 	if (path.basename(root) === GLOBAL_DAEMON_DIR) return;
@@ -146,6 +167,10 @@ export async function pruneDeadDaemonRuntimeDirs(currentRuntimeDir: string): Pro
 			if (now - stat.mtimeMs < DAEMON_RUNTIME_STALE_GRACE_MS) continue;
 			if (await hasLiveDaemonBroker(dir)) continue;
 			if (await hasLiveDaemonProjectPresence(dir)) continue;
+			// Defense in depth: only delete directories that look like daemon scopes.
+			// Without this check, a smoke-test runtime dir under os.tmpdir() causes
+			// the sweep to rm -rf arbitrary neighbouring directories (issue #8721).
+			if (!(await isDaemonRuntimeDir(dir))) continue;
 			await fs.rm(dir, { recursive: true, force: true });
 		} catch (error) {
 			if (isEnoent(error)) continue;
