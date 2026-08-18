@@ -255,6 +255,9 @@ xxhash-rust = { version = "0.8", features = ["xxh64"] }
 # ──────────────────────────────────────────────────────────────────────────────
 # Audio & Realtime Media
 # ──────────────────────────────────────────────────────────────────────────────
+# Kept with no use-position: pi-voice declares it so this `static` feature
+# unifies into the audiopus_sys build that `opus` pulls in, forcing the
+# vendored libopus. Dropping either declaration links the host libopus.
 audiopus_sys = { version = "0.2.2", features = ["static"] }
 opus = "0.3.1"
 webrtc = "0.17.2"
