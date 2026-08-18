@@ -422,6 +422,7 @@ export class StatusLineComponent implements Component {
 			rightSegments: settings.get("statusLine.rightSegments"),
 			separator: settings.get("statusLine.separator"),
 			showHookStatus: settings.get("statusLine.showHookStatus"),
+			enabled: settings.get("statusLine.enabled"),
 			segmentOptions: settings.getGroup("statusLine").segmentOptions,
 			sessionAccent: settings.get("statusLine.sessionAccent"),
 			transparent: settings.get("statusLine.transparent"),

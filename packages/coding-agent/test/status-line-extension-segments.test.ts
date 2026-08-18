@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { StatusLineComponent } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
@@ -79,6 +79,23 @@ describe("statusLine.enabled", () => {
 
 		const border = component.getTopBorder(80);
 		expect(border.content.length).toBeGreaterThan(0);
+	});
+
+	it("renders nothing on cold start when config already has enabled: false, before any updateSettings() call", () => {
+		// Regression test: the constructor must read statusLine.enabled from the
+		// settings store itself, the same way #syncStatusLineSettings() does --
+		// otherwise a pre-existing `enabled: false` in config has no effect until
+		// some unrelated event (e.g. session-accent change) happens to trigger a
+		// full settings resync.
+		settings.set("statusLine.enabled", false);
+		try {
+			const component = new StatusLineComponent(makeSession());
+			const border = component.getTopBorder(80);
+			expect(border.content).toBe("");
+			expect(border.width).toBe(0);
+		} finally {
+			settings.set("statusLine.enabled", true);
+		}
 	});
 });
 
