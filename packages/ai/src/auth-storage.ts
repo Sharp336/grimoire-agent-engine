@@ -53,7 +53,7 @@ import { cursorUsageProvider } from "./usage/cursor";
 import { googleGeminiCliUsageProvider } from "./usage/gemini";
 import { githubCopilotUsageProvider } from "./usage/github-copilot";
 import { antigravityRankingStrategy, antigravityUsageProvider } from "./usage/google-antigravity";
-import { kimiUsageProvider } from "./usage/kimi";
+import { kimiRankingStrategy, kimiUsageProvider } from "./usage/kimi";
 import { minimaxCodeUsageProvider } from "./usage/minimax-code";
 import { ollamaCloudUsageProvider, ollamaUsageProvider } from "./usage/ollama";
 import { codexRankingStrategy, openaiCodexUsageProvider } from "./usage/openai-codex";
@@ -1082,6 +1082,7 @@ const DEFAULT_RANKING_STRATEGIES = new Map<Provider, CredentialRankingStrategy>(
 	["openai-codex", codexRankingStrategy],
 	["anthropic", claudeRankingStrategy],
 	["google-antigravity", antigravityRankingStrategy],
+	["kimi-code", kimiRankingStrategy],
 	["zai", zaiRankingStrategy],
 	["opencode-go", opencodeGoRankingStrategy],
 ]);
@@ -2697,7 +2698,7 @@ export class AuthStorage {
 	/**
 	 * Whether a request could resolve a key for this provider, including
 	 * cross-provider env aliases (`xai-oauth` borrowing `XAI_API_KEY`).
-	 * Use this for explicit model preflight (`xai-oauth/grok-4.5`); use
+	 * Use this for explicit model preflight (`xai-oauth/grok-4.6`); use
 	 * {@link hasAuth} for auto-availability so the default picker stays on
 	 * paid `xai` when only `XAI_API_KEY` is set.
 	 */
@@ -2731,8 +2732,8 @@ export class AuthStorage {
 	 * `getEnvApiKey("xai-oauth")` also accepts `XAI_API_KEY` so an explicit
 	 * `xai-oauth/…` stream can still borrow the paid key. Availability and
 	 * origin must not: otherwise an API-key-only setup marks SuperGrok as
-	 * signed in and `pickDefaultAvailableModel` prefers `xai-oauth/grok-4.5`
-	 * over paid `xai/grok-4.5`.
+	 * signed in and `pickDefaultAvailableModel` prefers `xai-oauth/grok-4.6`
+	 * over paid `xai/grok-4.6`.
 	 */
 	#hasDedicatedEnvAuth(provider: string): boolean {
 		if (provider === "xai-oauth") {
