@@ -20,6 +20,8 @@ import { collectConfigCandidates } from "./watchdog";
 export interface AdvisorConfig {
 	name: string;
 	model?: string;
+	/** Retry fallback chain key used after credential rotation fails. Defaults to `advisor`. */
+	fallbackRole?: string;
 	tools?: string[];
 	instructions?: string;
 	/** Per-advisor on/off toggle (default `true`). When `false`, the advisor
@@ -52,6 +54,7 @@ export interface DiscoveredAdvisors {
 const advisorEntrySchema = type({
 	name: "string",
 	"model?": "string",
+	"fallbackRole?": "string",
 	"tools?": "string[]",
 	"instructions?": "string",
 	"enabled?": "boolean",
@@ -170,6 +173,7 @@ export async function discoverAdvisorConfigs(cwd: string, agentDir?: string): Pr
 			advisors.set(slug, {
 				name: entry.name,
 				model: entry.model?.trim() || undefined,
+				fallbackRole: entry.fallbackRole?.trim() || undefined,
 				tools: filterAdvisorTools(entry.tools, item.path),
 				instructions,
 				enabled: entry.enabled,
@@ -256,6 +260,7 @@ export async function loadWatchdogConfigFile(filePath: string): Promise<Watchdog
 	const advisors = (result.advisors ?? []).map(a => {
 		const advisor: AdvisorConfig = { name: a.name };
 		if (a.model?.trim()) advisor.model = a.model;
+		if (a.fallbackRole?.trim()) advisor.fallbackRole = a.fallbackRole;
 		if (a.tools !== undefined) advisor.tools = [...a.tools];
 		if (a.instructions?.trim()) advisor.instructions = a.instructions;
 		if (a.enabled !== undefined) advisor.enabled = a.enabled;
@@ -303,6 +308,7 @@ export function serializeWatchdogConfig(doc: WatchdogConfigDoc): string {
 		for (const advisor of doc.advisors) {
 			lines.push(`  - name: ${YAML.stringify(advisor.name)}`);
 			if (advisor.model?.trim()) lines.push(`    model: ${YAML.stringify(advisor.model)}`);
+			if (advisor.fallbackRole?.trim()) lines.push(`    fallbackRole: ${YAML.stringify(advisor.fallbackRole)}`);
 			if (advisor.tools !== undefined) {
 				if (advisor.tools.length === 0) {
 					lines.push("    tools: []");
