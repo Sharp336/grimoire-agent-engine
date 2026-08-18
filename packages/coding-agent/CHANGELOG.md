@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Applied registered extension shell environments to interactive `!` commands.
+
 ## [18.0.3] - 2026-08-23
 
 ### Added
