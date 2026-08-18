@@ -1422,6 +1422,7 @@ describe("AgentSession retry fallback", () => {
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
 			"retry.fallbackChains": {
+				[advisorRoleSelector]: [unrelatedFallbackSelector],
 				commit: [unrelatedFallbackSelector],
 				advisor: [unrelatedFallbackSelector],
 				plan: [advisorFallbackSelector],

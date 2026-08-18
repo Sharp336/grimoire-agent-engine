@@ -361,6 +361,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 		return (
 			advisor.name === "default" &&
 			!advisor.model?.trim() &&
+			!advisor.fallbackRole?.trim() &&
 			advisor.tools === undefined &&
 			!advisor.instructions?.trim() &&
 			advisor.enabled !== false
