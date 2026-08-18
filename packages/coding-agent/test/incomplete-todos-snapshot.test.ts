@@ -5,9 +5,11 @@ import {
 	formatIncompleteTodoSnapshotLines,
 	formatIncompleteTodosSection,
 	INCOMPLETE_TODOS_SNAPSHOT_CAP,
+	parseIncompleteTodosFromSummary,
 	upsertIncompleteTodosSection,
 } from "@oh-my-pi/pi-coding-agent/session/incomplete-todos";
-import type { TodoPhase } from "@oh-my-pi/pi-coding-agent/tools/todo";
+import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { getLatestTodoPhasesFromEntries, type TodoPhase } from "@oh-my-pi/pi-coding-agent/tools/todo";
 
 function phase(
 	name: string,
@@ -80,5 +82,119 @@ describe("incomplete todo snapshot helpers", () => {
 		expect(stripped).toContain("## Next Steps");
 		expect(stripped).not.toContain("## Incomplete Todos");
 		expect(stripped).not.toContain("new leftover");
+	});
+
+	it("reconstructs leftover phases from the standing Incomplete Todos section", () => {
+		const summary = [
+			"## Goal",
+			"Ship the parser",
+			"",
+			formatIncompleteTodosSection([
+				{ phase: "Work", status: "in_progress", title: "do the thing" },
+				{ phase: "Work", status: "pending", title: "wire it" },
+				{ phase: "Later", status: "pending", title: "docs" },
+			]),
+			"",
+			"## Next Steps",
+			"1. Keep going",
+			"",
+		].join("\n");
+
+		expect(parseIncompleteTodosFromSummary(summary)).toEqual([
+			{
+				name: "Work",
+				tasks: [
+					{ content: "do the thing", status: "in_progress" },
+					{ content: "wire it", status: "pending" },
+				],
+			},
+			{ name: "Later", tasks: [{ content: "docs", status: "pending" }] },
+		]);
+	});
+});
+
+describe("getLatestTodoPhasesFromEntries reconstructs leftover todos after compact", () => {
+	const TIMESTAMP = "2026-08-18T00:00:00.000Z";
+
+	function compaction(id: string, parentId: string | null, summary: string): SessionEntry {
+		return {
+			type: "compaction",
+			id,
+			parentId,
+			timestamp: TIMESTAMP,
+			summary,
+			firstKeptEntryId: "kept",
+			tokensBefore: 1000,
+		};
+	}
+
+	it("reads leftover pending/in_progress from the latest compaction summary", () => {
+		const summary = [
+			"Earlier work was summarized.",
+			"",
+			formatIncompleteTodosSection([
+				{ phase: "Work", status: "pending", title: "do the thing" },
+				{ phase: "Work", status: "in_progress", title: "wire it" },
+			]),
+		].join("\n");
+
+		const entries = [
+			{
+				type: "message",
+				id: "user",
+				parentId: null,
+				timestamp: TIMESTAMP,
+				message: { role: "user", content: [{ type: "text", text: "go" }], timestamp: 1 },
+			},
+			compaction("c1", "user", summary),
+		] as SessionEntry[];
+
+		expect(getLatestTodoPhasesFromEntries(entries)).toEqual([
+			{
+				name: "Work",
+				tasks: [
+					{ content: "do the thing", status: "pending" },
+					{ content: "wire it", status: "in_progress" },
+				],
+			},
+		]);
+	});
+
+	it("prefers a newer todo toolResult over an older compaction leftover section", () => {
+		const leftover = formatIncompleteTodosSection([{ phase: "Work", status: "pending", title: "stale leftover" }]);
+		const entries = [
+			compaction("c1", null, leftover ?? ""),
+			{
+				type: "message",
+				id: "todo",
+				parentId: "c1",
+				timestamp: TIMESTAMP,
+				message: {
+					role: "toolResult",
+					toolName: "todo",
+					toolCallId: "call-1",
+					content: [{ type: "text", text: "ok" }],
+					isError: false,
+					details: {
+						phases: [{ name: "Work", tasks: [{ content: "fresh item", status: "in_progress" }] }],
+					},
+					timestamp: 2,
+				},
+			},
+		] as SessionEntry[];
+
+		expect(getLatestTodoPhasesFromEntries(entries)).toEqual([
+			{ name: "Work", tasks: [{ content: "fresh item", status: "in_progress" }] },
+		]);
+	});
+
+	it("does not revive leftovers from an older compaction once the latest compact stripped the section", () => {
+		const stale = formatIncompleteTodosSection([{ phase: "Work", status: "pending", title: "old leftover" }]);
+		const entries = [
+			compaction("c1", null, stale ?? ""),
+			compaction("c2", "c1", "## Goal\nAll caught up.\n"),
+		] as SessionEntry[];
+
+		expect(getLatestTodoPhasesFromEntries(entries)).toEqual([]);
 	});
 });

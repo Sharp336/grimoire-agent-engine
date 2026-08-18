@@ -110,7 +110,7 @@ export function upsertIncompleteTodosSection(summary: string, block: string | un
 	return `${split.before}\n\n${block}\n\n${split.after}\n`;
 }
 
-function splitIncompleteTodosSection(summary: string): { before: string; after: string } | undefined {
+function splitIncompleteTodosSection(summary: string): { before: string; body: string; after: string } | undefined {
 	const headingRe = /^## Incomplete Todos[ \t]*$/m;
 	const match = headingRe.exec(summary);
 	if (!match) return undefined;
@@ -121,6 +121,37 @@ function splitIncompleteTodosSection(summary: string): { before: string; after: 
 	const end = nextHeading ? afterHeading + nextHeading.index : summary.length;
 	return {
 		before: summary.slice(0, start).trimEnd(),
+		body: summary.slice(start, end).trim(),
 		after: summary.slice(end).replace(/^\n+/, "").trimEnd(),
 	};
+}
+
+const INCOMPLETE_TODO_TASK_RE = /^\s+- \[(pending|in_progress)\] (.+)$/;
+const INCOMPLETE_TODO_PHASE_RE = /^- (.+)$/;
+const INCOMPLETE_TODO_OVERFLOW_RE = /^- \+ \d+ more$/;
+
+/**
+ * Reconstruct leftover pending/in_progress phases from a compaction summary's
+ * standing `## Incomplete Todos` section. Used after the latest todo toolResult
+ * has been summarized away.
+ */
+export function parseIncompleteTodosFromSummary(summary: string): TodoPhase[] {
+	const split = splitIncompleteTodosSection(summary);
+	if (!split) return [];
+	const phases: TodoPhase[] = [];
+	for (const line of split.body.split(/\r?\n/)) {
+		if (line === INCOMPLETE_TODOS_HEADING || INCOMPLETE_TODO_OVERFLOW_RE.test(line)) continue;
+		const task = INCOMPLETE_TODO_TASK_RE.exec(line);
+		if (task) {
+			const last = phases.at(-1);
+			if (!last) continue;
+			last.tasks.push({ content: task[2], status: task[1] as "pending" | "in_progress" });
+			continue;
+		}
+		const phase = INCOMPLETE_TODO_PHASE_RE.exec(line);
+		if (phase && !INCOMPLETE_TODO_OVERFLOW_RE.test(line)) {
+			phases.push({ name: phase[1], tasks: [] });
+		}
+	}
+	return phases.filter(phase => phase.tasks.length > 0);
 }

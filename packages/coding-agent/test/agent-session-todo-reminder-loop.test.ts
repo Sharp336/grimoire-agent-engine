@@ -201,6 +201,30 @@ describe("AgentSession todo reminder self-continuation suppression", () => {
 		expect(agentEndTerminalStates.at(-1)).toBe(true);
 	});
 
+	it("still reminds when a fake-complete slogan ends with a trailing question", async () => {
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		emitTextOnlyStop("Task complete. All done. Is there anything else?");
+		await session.waitForIdle();
+
+		expect(reminderAttempts).toEqual([1]);
+		expect(todoReminderTranscriptEntry()).toBeDefined();
+		expect(continueSpy).toHaveBeenCalledTimes(1);
+		expect(agentEndTerminalStates.at(-1)).toBe(false);
+	});
+
+	it("still treats a last-line-only question as a real stop", async () => {
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		emitTextOnlyStop("I need a decision on the remaining work.\n\nWhich trade-off should I optimize for?");
+		await session.waitForIdle();
+
+		expect(reminderAttempts).toEqual([]);
+		expect(todoReminderTranscriptEntry()).toBeUndefined();
+		expect(continueSpy).not.toHaveBeenCalled();
+		expect(agentEndTerminalStates.at(-1)).toBe(true);
+	});
+
 	it("still reminds when the assistant answers its own prompt-shaped question", async () => {
 		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
 

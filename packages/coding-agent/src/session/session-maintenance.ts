@@ -2141,6 +2141,8 @@ export class SessionMaintenance {
 		const rebuilt = snapcompact.getPreservedArchive(result.preserveData);
 		if (!rebuilt || rebuilt.frames.length >= archive.frames.length) return undefined;
 
+		// Regular compact paths sync before writing leftovers; rescue must too.
+		this.#host.syncTodoPhasesFromBranch();
 		result.summary = this.#host.appendIncompleteTodosToCompactionSummary(result.summary);
 		const rebuiltEntryId = this.#host.sessionManager.appendCompaction(
 			result.summary,

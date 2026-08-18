@@ -61,7 +61,9 @@ export interface TodoTrackerHost {
 	model(): Model | undefined;
 	agentKind(): "main" | "sub";
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
-	scheduleAgentContinue(options: { generation?: number }): void;
+	scheduleAgentContinue(options: { generation?: number; onSkip?: () => void }): void;
+	/** Drop a queued post-budget todo force so a skipped continue cannot hijack the next turn. */
+	clearForcedTodoToolChoice(): void;
 	promptGeneration(): number;
 	hasPendingAsyncWake(): boolean;
 	getActiveToolNames(): string[];
@@ -317,7 +319,12 @@ export class TodoTracker {
 			this.#host.forceTodoToolChoice();
 		}
 		// Continue even if forceTodoToolChoice no-ops (todo missing / no named choice).
-		this.#host.scheduleAgentContinue({ generation: this.#host.promptGeneration() });
+		this.#host.scheduleAgentContinue({
+			generation: this.#host.promptGeneration(),
+			// User-prompt preempt / abort / compaction skips the continue but must not
+			// leave a forced todo queued for the next unrelated turn.
+			onSkip: () => this.#host.clearForcedTodoToolChoice(),
+		});
 		return true;
 	}
 
@@ -427,9 +434,27 @@ function isResponseCueLine(line: string): boolean {
 	return USER_RESPONSE_CUE_RE.test(candidate);
 }
 
+const FAKE_COMPLETE_SLOGAN_RE =
+	/\b(?:task(?:s)?\s+complete|all\s+done|all\s+\d+\s+items?\b[\s\S]{0,40}\b(?:done|wired|complete|finished))\b/i;
+
+function textBeforeTrailingQuestion(text: string): string {
+	return text.replace(/(?:^|[\n.!]\s*)[^.!?\n？]*[?？]\s*$/u, "").trim();
+}
+
+function isFakeCompleteSlogan(text: string): boolean {
+	return FAKE_COMPLETE_SLOGAN_RE.test(text);
+}
+
 function isAwaitingUserAnswer(message: AssistantMessage): boolean {
 	const text = assistantText(message);
 	if (!text) return false;
 	const lastLine = text.split(/\r?\n/).at(-1)?.trim();
-	return lastLine !== undefined && (isQuestionPromptLine(lastLine) || isResponseCueLine(lastLine));
+	if (lastLine === undefined || !(isQuestionPromptLine(lastLine) || isResponseCueLine(lastLine))) {
+		return false;
+	}
+	// A genuine last-line question still yields. A fake-complete slogan that
+	// tacks on "anything else?" must not skip the leftover-todo reminder.
+	const prefix = textBeforeTrailingQuestion(text);
+	if (prefix && isFakeCompleteSlogan(prefix)) return false;
+	return true;
 }

@@ -1040,15 +1040,20 @@ export class AgentSession {
 			planModeEnabled: () => this.#planModeState?.enabled === true,
 			consumeLastServedToolChoiceLabel: () => this.#toolChoiceQueue.consumeLastServedLabel(),
 			forceTodoToolChoice: () => {
-				// Post-budget escape hatch. Named tool_choice only; a string/"required"
-				// result is not a named todo force. checkCompletion still appends the
-				// text reminder and continues when this returns false.
+				// Post-budget escape hatch. Named tool_choice, or Google's string
+				// "required" (buildNamedToolChoice cannot name a Gemini tool).
+				// checkCompletion still appends the text reminder and continues when
+				// this returns false.
 				if (!this.getActiveToolNames().includes("todo")) return false;
 				const forced = buildNamedToolChoice("todo", this.model);
-				if (!forced || typeof forced === "string") return false;
+				if (!forced) return false;
+				if (typeof forced === "string" && forced !== "required") return false;
 				this.#toolChoiceQueue.removeByLabel("todo-escape");
 				this.#toolChoiceQueue.pushOnce(forced, { label: "todo-escape" });
 				return true;
+			},
+			clearForcedTodoToolChoice: () => {
+				this.#toolChoiceQueue.removeByLabel("todo-escape");
 			},
 		};
 		this.#todo = new TodoTracker(todoHost);
@@ -5376,6 +5381,7 @@ export class AgentSession {
 			// A user turn owns the next decision; drop a queued forced choice from
 			// a reminder continuation this prompt just preempted.
 			this.#toolChoiceQueue.removeByLabel("plan-mode-decision");
+			this.#toolChoiceQueue.removeByLabel("todo-escape");
 		}
 
 		// If streaming, queue via steer() or followUp() based on option
