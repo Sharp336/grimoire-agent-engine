@@ -2050,6 +2050,12 @@ export class StatusLineComponent implements Component {
 		let rightWidth = groupWidth(right, rightCapWidth, rightSepWidth);
 		const totalWidth = () => leftWidth + rightWidth + (left.length > 0 && right.length > 0 ? 1 : 0);
 
+		// Segments shed by line 1's size budget move to the overflow line instead
+		// of being lost. Collected here in pop/drop order (right-to-left), then
+		// reversed back to reading order when assembling the second line.
+		const overflowLeft: string[] = [];
+		const overflowRight: string[] = [];
+
 		if (topFillWidth > 0) {
 			// Truncate the session-name segment before dropping right segments —
 			// the title is the only elastic one on the right, and dropping it
@@ -2068,7 +2074,8 @@ export class StatusLineComponent implements Component {
 				}
 			}
 			while (totalWidth() > topFillWidth && right.length > 0) {
-				right.pop();
+				const popped = right.pop();
+				if (popped !== undefined) overflowRight.push(popped);
 				rightWidth = groupWidth(right, rightCapWidth, rightSepWidth);
 			}
 			// Shrink path before dropping left segments — path is the only elastic segment
@@ -2117,6 +2124,7 @@ export class StatusLineComponent implements Component {
 
 			while (totalWidth() > topFillWidth && left.length > 0) {
 				const dropIdx = leftOverflowDropIndex();
+				overflowLeft.push(left[dropIdx]);
 				left.splice(dropIdx, 1);
 				leftSegIds.splice(dropIdx, 1);
 				leftWidth = groupWidth(left, leftCapWidth, leftSepWidth);
@@ -2147,156 +2155,32 @@ export class StatusLineComponent implements Component {
 
 		const leftGroup = renderGroup(left, "left");
 		const rightGroup = renderGroup(right, "right");
-		if (!leftGroup && !rightGroup) return "";
 
-		if (topFillWidth === 0 || (plain && (left.length === 0 || right.length === 0))) {
-			return leftGroup + (leftGroup && rightGroup ? " " : "") + rightGroup;
+		// Line 1 is the primary bar, kept-set exactly as before the two-line work.
+		let line1: string;
+		if (!leftGroup && !rightGroup) {
+			line1 = "";
+		} else if (topFillWidth === 0 || left.length === 0 || right.length === 0) {
+			line1 = leftGroup + (leftGroup && rightGroup ? " " : "") + rightGroup;
+		} else {
+			const gapWidth = Math.max(1, topFillWidth - leftWidth - rightWidth);
+			const sessionName =
+				effectiveSettings.sessionAccent !== false ? this.session.sessionManager?.getSessionName() : undefined;
+			const accentHex = sessionName
+				? getSessionAccentHex(sessionName, theme.getMajorThemeColorHexes(), theme.accentSurfaceLuminance)
+				: undefined;
+			const gapColor = getSessionAccentAnsi(accentHex) ?? theme.getFgAnsi("border");
+			const gapFill = `${gapColor}${theme.boxRound.horizontal.repeat(gapWidth)}\x1b[39m`;
+			line1 = leftGroup + gapFill + rightGroup;
 		}
 
-		const gapWidth = Math.max(1, topFillWidth - leftWidth - rightWidth);
-		if (plain) {
-			// Standalone composers: no gauge line between the groups, just air.
-			return leftGroup + padding(gapWidth) + rightGroup;
-		}
-		// Box layout: with one group absent (an unnamed session hides
-		// `session_name`, emptying the default preset's right group) the gauge
-		// runs to the border edge instead of disappearing, so embedded context
-		// labels don't fall back to a context chip until the session is titled.
-		return leftGroup + this.#buildContextGaugeFill(gapWidth, ctx, effectiveSettings, embedContext) + rightGroup;
-	}
-
-	/**
-	 * The gauge line bridging the left and right groups in box layout. Driven
-	 * by `statusLine.contextLine`:
-	 * - `off`: solid accent line (no context feedback).
-	 * - `percentage`: used portion in accent, remainder in the border color.
-	 * - `annotated` : percentage plus preset-aware markers where
-	 *   speculative compaction starts and where auto-compaction fires.
-	 * - `embedded` (default): annotated markers plus percentage/window labels absorbed
-	 *   from configured context segments.
-	 */
-	#buildContextGaugeFill(
-		gapWidth: number,
-		ctx: SegmentContext,
-		effectiveSettings: EffectiveStatusLineSettings,
-		embedContext: boolean,
-	): string {
-		const sessionName =
-			effectiveSettings.sessionAccent !== false ? this.session.sessionManager?.getSessionName() : undefined;
-		const accentHex = sessionName
-			? getSessionAccentHex(sessionName, theme.getMajorThemeColorHexes(), theme.accentSurfaceLuminance)
-			: undefined;
-		const usedColor = getSessionAccentAnsi(accentHex) ?? theme.getFgAnsi("borderAccent");
-		const horizontal = theme.boxRound.horizontal;
-		const mode = effectiveSettings.contextLine ?? "embedded";
-		const pct = ctx.contextPercent;
-		if (mode === "off" || pct === null || pct === undefined) {
-			return `\x1b[49m${usedColor}${horizontal.repeat(gapWidth)}\x1b[39m`;
-		}
-
-		const clampedPct = Math.min(100, Math.max(0, pct));
-		let percentLabel = "";
-		let windowLabel = "";
-		let percentStart = -1;
-		let windowStart = -1;
-		let scaleWidth = gapWidth;
-		// >100%: usage anchored past the active window (e.g. model switch to a
-		// smaller window). The bar clamps full, but the embedded label breaks
-		// past the window label — `──200K─120%` with the percent in error color.
-		const percentOverflow = pct > 100;
-		if (embedContext) {
-			const candidatePercent = formatEmbeddedContextPercent(percentOverflow ? pct : clampedPct);
-			const candidateWindow = formatNumber(ctx.contextWindow);
-			if (gapWidth >= candidatePercent.length + candidateWindow.length + 4) {
-				percentLabel = candidatePercent;
-				windowLabel = candidateWindow;
-				if (percentOverflow) {
-					percentStart = gapWidth - percentLabel.length;
-					windowStart = percentStart - 1 - windowLabel.length;
-				} else {
-					windowStart = gapWidth - windowLabel.length - 1;
-				}
-				scaleWidth = windowStart;
-			}
-		}
-
-		// At least one accent cell: a fresh session still shows the session-accent
-		// line starting at the left instead of a fully dim bar.
-		const usedCount = Math.min(scaleWidth, Math.max(1, Math.round((clampedPct / 100) * scaleWidth)));
-		const unusedColor = theme.getFgAnsi("border");
-
-		// Boundary markers are only meaningful when auto-compaction can fire and
-		// the line is long enough for the markers to read as positions.
-		let speculationIdx = -1;
-		let thresholdIdx = -1;
-		if ((mode === "annotated" || mode === "embedded") && ctx.autoCompactEnabled && gapWidth >= 8) {
-			const boundaries = this.#compactionBoundaries(ctx.contextWindow);
-			if (boundaries) {
-				const cellFor = (percent: number) =>
-					Math.min(scaleWidth - 1, Math.max(0, Math.round((percent / 100) * scaleWidth)));
-				thresholdIdx = cellFor(boundaries.thresholdPercent);
-				// null = no background speculation will run (async disabled or the
-				// first available method is local/instant) — no tick to show.
-				if (boundaries.speculationPercent !== null) speculationIdx = cellFor(boundaries.speculationPercent);
-				if (speculationIdx === thresholdIdx) speculationIdx = -1; // threshold wins the cell
-			}
-		}
-
-		if (percentLabel && percentStart < 0) {
-			const maxStart = scaleWidth - percentLabel.length - 1;
-			const preferredStart = Math.min(maxStart, Math.max(1, usedCount));
-			const overlapsBoundary = (start: number): boolean => {
-				const end = start + percentLabel.length;
-				return (speculationIdx >= start && speculationIdx < end) || (thresholdIdx >= start && thresholdIdx < end);
-			};
-			for (let distance = 0; distance <= maxStart; distance++) {
-				const left = preferredStart - distance;
-				if (left >= 1 && !overlapsBoundary(left)) {
-					percentStart = left;
-					break;
-				}
-				if (distance === 0) continue;
-				const right = preferredStart + distance;
-				if (right <= maxStart && !overlapsBoundary(right)) {
-					percentStart = right;
-					break;
-				}
-			}
-		}
-
-		const speculationGlyph = theme.symbol("context.speculation");
-		const thresholdGlyph = theme.symbol("context.compaction");
-		const speculationColor = theme.getFgAnsi("muted");
-		const overflowColor = theme.getFgAnsi("error");
-		const rawAccentHex = accentHex ?? theme.getColorHex("borderAccent");
-		const dimmedAccentHex = adjustHsv(rawAccentHex, { s: 0.7, v: 0.75 });
-		const thresholdColor = getSessionAccentAnsi(dimmedAccentHex) ?? usedColor;
-
-		let out = "\x1b[49m";
-		let activeColor = "";
-		for (let i = 0; i < gapWidth; i++) {
-			let color = i < usedCount ? usedColor : unusedColor;
-			let glyph = horizontal;
-			if (percentStart >= 0 && i >= percentStart && i < percentStart + percentLabel.length) {
-				color = percentOverflow ? overflowColor : usedColor;
-				glyph = percentLabel.charAt(i - percentStart);
-			} else if (i === thresholdIdx) {
-				color = thresholdColor;
-				glyph = thresholdGlyph;
-			} else if (i === speculationIdx) {
-				color = speculationColor;
-				glyph = speculationGlyph;
-			} else if (windowStart >= 0 && i >= windowStart && i < windowStart + windowLabel.length) {
-				color = thresholdColor;
-				glyph = windowLabel.charAt(i - windowStart);
-			}
-			if (color !== activeColor) {
-				out += color;
-				activeColor = color;
-			}
-			out += glyph;
-		}
-		return `${out}\x1b[39m`;
+		// Line 2: overflowed segments kept in original reading order — left group
+		// first, then right group — joined by the dot separator. Each part is
+		// already self-contained ANSI from renderSegment, so no bg group or
+		// powerline caps are needed; the editor frames/pads this row.
+		const overflowParts = [...overflowLeft.reverse(), ...overflowRight.reverse()];
+		if (overflowParts.length === 0) return line1;
+		return `${line1}\n${overflowParts.join(theme.sep.dot)}`;
 	}
 
 	/** Auto-compaction boundary percents, or null when unavailable (disabled, no window). */
@@ -2321,41 +2205,17 @@ export class StatusLineComponent implements Component {
 			// `\x1b[0m` resets that would cancel faint mid-bar, so re-open it after each.
 			content = `\x1b[2m${content.replaceAll("\x1b[0m", "\x1b[0m\x1b[2m")}\x1b[22m`;
 		}
-		return {
-			content,
-			width: visibleWidth(content),
-			revision: this.#renderRevision,
-		};
-	}
-	/**
-	 * Standalone bar placement derived from the composer style. `bottomBar`
-	 * `"full"` renders both groups on the bottom bar (pi/borderless/field/rail);
-	 * `"left"` renders just the left group there — the right group attaches to
-	 * the editor's top rule via {@link getStandaloneTopBorder} (claude/rule);
-	 * `"none"` returns the bar to the box composer's embedded top border.
-	 * `bottomBarGap` inserts a blank spacer row above the bar for styles whose
-	 * editor has no bottom chrome.
-	 */
-	setComposerStyle(style: Pick<ComposerStyle, "bottomBar" | "bottomBarGap">): void {
-		this.#standalone = style.bottomBar === "none" ? false : style.bottomBar === "left" ? "left-only" : "full";
-		this.#standaloneGap = style.bottomBarGap;
-	}
-
-	/** While true, the standalone bar yields its row to the editor's autocomplete menu. */
-	setAutocompleteActiveProbe(probe: (() => boolean) | undefined): void {
-		this.#autocompleteActiveProbe = probe;
-	}
-
-	/** Plain right-group content for the claude composer's top rule. */
-	getStandaloneTopBorder(width: number, previewTitle?: string): { content: string; width: number; revision: number } {
-		let content = this.#buildStatusLine(width, "plain-right", previewTitle);
-		if (this.#focusedAgentId && content) {
-			content = `\x1b[2m${content.replaceAll("\x1b[0m", "\x1b[0m\x1b[2m")}\x1b[22m`;
+		// With a two-line overflow the reported width is the widest line, which is
+		// what the editor budgets per row. A single-line bar keeps today's value.
+		let borderWidth = 0;
+		for (const line of content.split("\n")) {
+			const lineWidth = visibleWidth(line);
+			if (lineWidth > borderWidth) borderWidth = lineWidth;
 		}
 		return {
 			content,
-			width: visibleWidth(content),
-			revision: this.#renderRevision,
+			width: borderWidth,
+			revision: this.#widthEpochRevision,
 		};
 	}
 
