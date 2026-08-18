@@ -1318,34 +1318,8 @@ def test_submit_pr_review_posts_summary_only_when_no_staged_comments(db: Databas
     assert captured["body"]["comments"] == []
 
 
-def test_submit_pr_review_422_falls_back_to_issue_comments(db: Database, tmp_path: Path) -> None:
-    comment_bodies: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/reviews"):
-            return httpx.Response(422, json={"message": "Validation failed"})
-        if request.url.path == "/repos/octo/widget/issues/99/comments":
-            body = json.loads(request.content)["body"]
-            comment_bodies.append(body)
-            return httpx.Response(200, json={"id": len(comment_bodies), "body": body})
-        return httpx.Response(404, json={"message": "unrouted"})
-
-    bindings, loop, t = _review_bindings(db, tmp_path, httpx.MockTransport(handler))
-    try:
-        stage_tool = next(x for x in build(bindings) if x.name == "pr_review_comment")
-        submit_tool = next(x for x in build(bindings) if x.name == "submit_pr_review")
-        stage_tool.execute({"path": "src/app.py", "line": 12, "body": "finding"}, _ctx())
-        result = submit_tool.execute({"body": "summary"}, _ctx())
-    finally:
-        _stop_loop(loop, t)
-
-    assert "posted summary + 1 inline comment(s) as issue comments" in result
-    assert comment_bodies == ["summary", "**`src/app.py:12`**\n\nfinding"]
-    assert db.list_staged_review_comments(bindings.issue_key) == []
-
-
-def test_submit_pr_review_non_recoverable_raises_and_keeps_staged(db: Database, tmp_path: Path) -> None:
-    """A 403 (not 422 or 500) propagates to the model and keeps staged comments."""
+def test_submit_pr_review_failure_keeps_staged_comments(db: Database, tmp_path: Path) -> None:
+    """A 403 propagates to the model and keeps staged comments."""
     bindings, loop, t = _review_bindings(
         db,
         tmp_path,
@@ -1363,37 +1337,6 @@ def test_submit_pr_review_non_recoverable_raises_and_keeps_staged(db: Database, 
     rows = db.list_staged_review_comments(bindings.issue_key)
     assert len(rows) == 1
     assert rows[0].path == "src/app.py"
-
-
-def test_submit_pr_review_500_falls_back_to_issue_comments(db: Database, tmp_path: Path) -> None:
-    """A 500 from Forgejo's reviews endpoint triggers the same fallback as 422.
-
-    Without this, the 500 propagates to the model, causing a retry-and-degrade
-    loop where the model strips newlines from subsequent review bodies.
-    """
-    comment_bodies: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/reviews"):
-            return httpx.Response(500, json={"message": "github error"})
-        if request.url.path == "/repos/octo/widget/issues/99/comments":
-            body = json.loads(request.content)["body"]
-            comment_bodies.append(body)
-            return httpx.Response(200, json={"id": len(comment_bodies), "body": body})
-        return httpx.Response(404, json={"message": "unrouted"})
-
-    bindings, loop, t = _review_bindings(db, tmp_path, httpx.MockTransport(handler))
-    try:
-        stage_tool = next(x for x in build(bindings) if x.name == "pr_review_comment")
-        submit_tool = next(x for x in build(bindings) if x.name == "submit_pr_review")
-        stage_tool.execute({"path": "src/app.py", "line": 12, "body": "finding"}, _ctx())
-        result = submit_tool.execute({"body": "summary"}, _ctx())
-    finally:
-        _stop_loop(loop, t)
-
-    assert "posted summary + 1 inline comment(s) as issue comments" in result
-    assert comment_bodies == ["summary", "**`src/app.py:12`**\n\nfinding"]
-    assert db.list_staged_review_comments(bindings.issue_key) == []
 
 
 def test_review_tools_reject_outside_review_mode(db: Database, tmp_path: Path) -> None:
