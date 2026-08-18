@@ -5677,6 +5677,29 @@ describe("advisor", () => {
 			expect(text).toContain("default");
 			expect(text).toContain("anthropic/claude-opus");
 		});
+		it("preserves fallbackRole when saving an otherwise bare default advisor", async () => {
+			const uiTheme = await getThemeByName("dark");
+			if (!uiTheme) throw new Error("theme unavailable");
+			setThemeInstance(uiTheme);
+			let saved: WatchdogConfigDoc | undefined;
+			const overlay = new AdvisorConfigOverlayComponent(
+				{} as unknown as TUI,
+				deps,
+				"project",
+				{ advisors: [{ name: "default", fallbackRole: "plan" }] },
+				{
+					...callbacks,
+					save: async (_scope, doc) => {
+						saved = structuredClone(doc);
+					},
+				},
+			);
+			overlay.render(200);
+			for (let index = 0; index < 4; index++) overlay.handleInput("\x1b[B");
+			overlay.handleInput("\r");
+			await settleUntil(() => saved !== undefined);
+			expect(saved).toEqual({ advisors: [{ name: "default", fallbackRole: "plan" }] });
+		});
 		it("shows disabled advisors with a dim circle marker and toggles them in the detail editor", async () => {
 			const uiTheme = await getThemeByName("dark");
 			if (!uiTheme) throw new Error("theme unavailable");

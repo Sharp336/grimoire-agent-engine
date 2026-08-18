@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added per-advisor `fallbackRole` support in `WATCHDOG.yml`, allowing named advisors to retain independent retry fallback chains even when their primary models overlap.
+
 ## [17.3.7] - 2026-08-17
 
 ### Changed

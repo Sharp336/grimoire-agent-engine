@@ -1384,7 +1384,7 @@ describe("AgentSession retry fallback", () => {
 		});
 	});
 
-	it("keeps advisor fallback recovery on its role chain when another role shares its model", async () => {
+	it("honors a named advisor fallback role when other roles share its model", async () => {
 		const mainModel = getBundledModel("openai", "gpt-4o-mini");
 		const advisorPrimary = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const unrelatedFallback = getBundledModel("openai", "gpt-4o");
@@ -1422,13 +1422,16 @@ describe("AgentSession retry fallback", () => {
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
 			"retry.fallbackChains": {
+				[advisorRoleSelector]: [unrelatedFallbackSelector],
 				commit: [unrelatedFallbackSelector],
-				advisor: [advisorFallbackSelector],
+				advisor: [unrelatedFallbackSelector],
+				plan: [advisorFallbackSelector],
 			},
 			"advisor.syncBacklog": "1",
 		});
 		settings.setModelRole("commit", `${advisorPrimarySelector}:medium`);
 		settings.setModelRole("advisor", advisorRoleSelector);
+		settings.setModelRole("plan", advisorRoleSelector);
 		vi.spyOn(modelRegistry.authStorage, "markUsageLimitReached").mockResolvedValue({ switched: false });
 
 		session = new AgentSession({
@@ -1437,7 +1440,7 @@ describe("AgentSession retry fallback", () => {
 			settings,
 			modelRegistry,
 			advisorTools: [],
-			advisorConfigs: [{ name: "fallback-test", model: advisorRoleSelector }],
+			advisorConfigs: [{ name: "fallback-test", model: advisorRoleSelector, fallbackRole: "plan" }],
 			advisorStreamFn: (model, context, options) => {
 				const selector = `${model.provider}/${model.id}`;
 				requestedAdvisorModels.push(selector);
@@ -1486,14 +1489,14 @@ describe("AgentSession retry fallback", () => {
 				type: "retry_fallback_applied",
 				from: advisorRoleSelector,
 				to: advisorFallbackSelector,
-				role: "advisor",
+				role: "plan",
 			},
 		]);
 		expect(fallbackSucceededEvents).toEqual([
 			{
 				type: "retry_fallback_succeeded",
 				model: `${advisorFallbackSelector}:high`,
-				role: "advisor",
+				role: "plan",
 			},
 		]);
 		expect(advisorFailures).toEqual([]);

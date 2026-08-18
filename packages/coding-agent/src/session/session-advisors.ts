@@ -158,6 +158,7 @@ interface ActiveAdvisor {
 	model: Model;
 	thinkingLevel: ThinkingLevel;
 	providerSessionId: string | undefined;
+	fallbackRole: string | undefined;
 	retryFallback?: AdvisorRetryFallbackState;
 	retryFallbackPendingSuccess: boolean;
 	signature: string;
@@ -638,9 +639,15 @@ export class SessionAdvisors {
 	#advisorRuntimeSignature(config: AdvisorConfig, slug: string, model: Model, thinkingLevel: ThinkingLevel): string {
 		const tools = config.tools?.length ? config.tools.join("\u001e") : "";
 		const instructions = config.instructions?.trim() ?? "";
-		return [config.name, slug, formatModelStringWithRouting(model), thinkingLevel, tools, instructions].join(
-			"\u001f",
-		);
+		return [
+			config.name,
+			slug,
+			formatModelStringWithRouting(model),
+			thinkingLevel,
+			config.fallbackRole?.trim() ?? "",
+			tools,
+			instructions,
+		].join("\u001f");
 	}
 
 	#advisorRuntimeMatchesCurrentConfig(): boolean {
@@ -943,6 +950,7 @@ export class SessionAdvisors {
 				model: advisorModel,
 				thinkingLevel: advisorThinkingLevel,
 				providerSessionId: advisorProviderSessionId,
+				fallbackRole: config.fallbackRole?.trim() || undefined,
 				retryFallbackPendingSuccess: false,
 				signature,
 			};
@@ -1241,7 +1249,9 @@ export class SessionAdvisors {
 		const retrySettings = this.#host.settings.getGroup("retry");
 		if (!retrySettings.enabled || !retrySettings.modelFallback) return false;
 		const role =
-			advisor.retryFallback?.role ?? this.#host.resolveRetryFallbackRole(currentSelector, currentModel, "advisor");
+			advisor.retryFallback?.role ??
+			advisor.fallbackRole ??
+			this.#host.resolveRetryFallbackRole(currentSelector, currentModel, "advisor");
 		if (!role || this.#host.findRetryFallbackCandidates(role, currentSelector, currentModel).length === 0)
 			return false;
 
