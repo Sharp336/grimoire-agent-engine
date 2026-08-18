@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Serper API-key authentication via `/login serper` or `SERPER_API_KEY`.
+
 ## [17.3.7] - 2026-08-17
 
 ### Changed
