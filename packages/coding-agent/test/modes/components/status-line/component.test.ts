@@ -134,10 +134,13 @@ describe("StatusLineComponent", () => {
 			makeSessionWithLastMessage(null, false, { cost: 5, directCost: 2 }) as unknown as AgentSession,
 		);
 		statusLine.setCollabStatus({ role: "guest", participantCount: 1 });
+		statusLine.setSubagentCostProvider(() => 3);
 
 		const stripped = statusLine.getTopBorder(200).content.replace(/\x1b\[[0-9;]*m/g, "");
 		expect(stripped).toContain("$5.00");
 		expect(stripped).not.toContain("$2.00");
+		expect(stripped).not.toContain("$3.00");
+		expect(stripped).not.toContain("(subagents)");
 	});
 
 	it("omits advisor cost when the advisor has never been active", () => {

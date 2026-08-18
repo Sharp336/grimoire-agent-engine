@@ -1563,11 +1563,11 @@ export class StatusLineComponent implements Component {
 			premiumRequests: 0,
 			cost: 0,
 		};
-		const sessionCost =
-			this.#collabStatus?.role === "guest"
-				? aggregateUsageStats.cost
-				: this.#getDirectSessionCost(aggregateUsageStats.cost);
-		const providedSubagentCost = this.#subagentCostProvider?.(this.#focusedAgentId) ?? 0;
+		const isCollabGuest = this.#collabStatus?.role === "guest";
+		const sessionCost = isCollabGuest
+			? aggregateUsageStats.cost
+			: this.#getDirectSessionCost(aggregateUsageStats.cost);
+		const providedSubagentCost = isCollabGuest ? 0 : (this.#subagentCostProvider?.(this.#focusedAgentId) ?? 0);
 		const subagentCost = Number.isFinite(providedSubagentCost) ? Math.max(0, providedSubagentCost) : 0;
 		const usageStats = {
 			...aggregateUsageStats,

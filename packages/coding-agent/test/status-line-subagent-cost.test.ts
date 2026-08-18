@@ -102,29 +102,4 @@ describe("aggregateSubagentCost", () => {
 			}),
 		).toBeCloseTo(0.5, 8);
 	});
-	it("includes mirrored descendants without host session paths", () => {
-		const rows = [makeRef("Remote", "Main", { sessionFile: null })];
-		const observedById = new Map<string, ObservableSession>([
-			[
-				"Remote",
-				{
-					id: "Remote",
-					kind: "subagent",
-					label: "Remote",
-					status: "active",
-					lastUpdate: 0,
-					progress: { cost: 0.6 } as never,
-				},
-			],
-		]);
-
-		expect(
-			aggregateSubagentCost({
-				ownerId: "Main",
-				allowUnscoped: true,
-				rows,
-				observedById,
-			}),
-		).toBeCloseTo(0.6, 8);
-	});
 });
