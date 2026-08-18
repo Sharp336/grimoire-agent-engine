@@ -126,7 +126,7 @@ describe("AgentSession todo-escape tool_choice", () => {
 		expect(session.toolChoiceQueue.inspect()).not.toContain("todo-escape");
 	});
 
-	it("allows Google required through the todo escape hatch", async () => {
+	it("pins the named todo tool on Google instead of a generic required choice", async () => {
 		const base = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!base) throw new Error("Expected bundled anthropic model");
 		const google = { ...base, api: "google-generative-ai", provider: "google", id: "gemini-2.5-flash" } as Model;
@@ -136,6 +136,6 @@ describe("AgentSession todo-escape tool_choice", () => {
 		emitTextOnlyStop();
 		await session.waitForIdle();
 		expect(session.toolChoiceQueue.inspect()).toContain("todo-escape");
-		expect(session.toolChoiceQueue.nextToolChoice()).toBe("required");
+		expect(session.toolChoiceQueue.nextToolChoice()).toEqual({ type: "tool", name: "todo" });
 	});
 });

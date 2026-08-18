@@ -1040,14 +1040,14 @@ export class AgentSession {
 			planModeEnabled: () => this.#planModeState?.enabled === true,
 			consumeLastServedToolChoiceLabel: () => this.#toolChoiceQueue.consumeLastServedLabel(),
 			forceTodoToolChoice: () => {
-				// Post-budget escape hatch. Named tool_choice, or Google's string
-				// "required" (buildNamedToolChoice cannot name a Gemini tool).
-				// checkCompletion still appends the text reminder and continues when
-				// this returns false.
+				// Post-budget escape hatch. Only a named tool_choice pins `todo`.
+				// Google can name it (`{ type: "tool", name }`); a string
+				// `"required"` would let the model call any tool and then
+				// text-only stop again, so do not queue it. checkCompletion still
+				// appends the hatch text and continues when this returns false.
 				if (!this.getActiveToolNames().includes("todo")) return false;
 				const forced = buildNamedToolChoice("todo", this.model);
-				if (!forced) return false;
-				if (typeof forced === "string" && forced !== "required") return false;
+				if (!forced || typeof forced === "string") return false;
 				this.#toolChoiceQueue.removeByLabel("todo-escape");
 				this.#toolChoiceQueue.pushOnce(forced, { label: "todo-escape" });
 				return true;

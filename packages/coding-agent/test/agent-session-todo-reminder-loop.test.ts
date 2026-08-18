@@ -213,6 +213,18 @@ describe("AgentSession todo reminder self-continuation suppression", () => {
 		expect(agentEndTerminalStates.at(-1)).toBe(false);
 	});
 
+	it("still reminds when finished-everything claims completion before a trailing question", async () => {
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		emitTextOnlyStop("I've finished everything. Let me know if you'd like anything else?");
+		await session.waitForIdle();
+
+		expect(reminderAttempts).toEqual([1]);
+		expect(todoReminderTranscriptEntry()).toBeDefined();
+		expect(continueSpy).toHaveBeenCalledTimes(1);
+		expect(agentEndTerminalStates.at(-1)).toBe(false);
+	});
+
 	it("still treats a last-line-only question as a real stop", async () => {
 		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
 

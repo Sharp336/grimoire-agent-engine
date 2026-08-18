@@ -52,6 +52,38 @@ describe("incomplete todo snapshot helpers", () => {
 		expect(capIncompleteTodoRows(rows).overflow).toBe(7);
 	});
 
+	it("replaces an Incomplete Todos heading that has a trailing colon or extra text", () => {
+		const stale = [
+			"## Goal",
+			"Ship the parser",
+			"",
+			"## Incomplete Todos: leftover work",
+			"These pending/in_progress items remain after compaction; continue them. A text-only stop is not completion.",
+			"- Work",
+			"  - [pending] old leftover",
+			"",
+			"## Next Steps",
+			"1. Keep going",
+			"",
+		].join("\n");
+
+		const replaced = upsertIncompleteTodosSection(
+			stale,
+			formatIncompleteTodosSection([{ phase: "Work", status: "in_progress", title: "new leftover" }]),
+		);
+		expect(replaced).toContain("## Goal");
+		expect(replaced).toContain("## Next Steps");
+		expect(replaced).toContain("[in_progress] new leftover");
+		expect(replaced).not.toContain("old leftover");
+		expect(replaced).not.toContain("## Incomplete Todos:");
+		expect([...replaced.matchAll(/## Incomplete Todos/g)]).toHaveLength(1);
+
+		const reconstructed = parseIncompleteTodosFromSummary(
+			["## Goal", "", "## Incomplete Todos leftover", "- Work", "  - [pending] still open", ""].join("\n"),
+		);
+		expect(reconstructed).toEqual([{ name: "Work", tasks: [{ content: "still open", status: "pending" }] }]);
+	});
+
 	it("replaces a stale Incomplete Todos section and strips it when empty", () => {
 		const stale = [
 			"## Goal",

@@ -10,10 +10,10 @@ describe("buildNamedToolChoice", () => {
 		expect(buildNamedToolChoice("todo", model)).toEqual({ type: "tool", name: "todo" });
 	});
 
-	it("returns required for Google/Gemini so the todo escape hatch can engage", () => {
+	it("names todo for Google/Gemini instead of a generic required choice", () => {
 		const base = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!base) throw new Error("Expected bundled anthropic model");
 		const google = { ...base, api: "google-generative-ai", provider: "google", id: "gemini-2.5-flash" } as Model;
-		expect(buildNamedToolChoice("todo", google)).toBe("required");
+		expect(buildNamedToolChoice("todo", google)).toEqual({ type: "tool", name: "todo" });
 	});
 });

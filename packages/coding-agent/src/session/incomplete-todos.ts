@@ -3,6 +3,8 @@ import type { TodoPhase } from "../tools/todo";
 /** Cap leftover-todo dumps so a huge list cannot overflow every compact. */
 export const INCOMPLETE_TODOS_SNAPSHOT_CAP = 40;
 const INCOMPLETE_TODOS_HEADING = "## Incomplete Todos";
+/** Exact h2, or the same heading with a trailing colon / extra text. */
+const INCOMPLETE_TODOS_HEADING_RE = /^## Incomplete Todos(?:[ \t]*:.*|[ \t]+.+)?[ \t]*$/m;
 
 export interface IncompleteTodoRow {
 	phase: string;
@@ -111,8 +113,7 @@ export function upsertIncompleteTodosSection(summary: string, block: string | un
 }
 
 function splitIncompleteTodosSection(summary: string): { before: string; body: string; after: string } | undefined {
-	const headingRe = /^## Incomplete Todos[ \t]*$/m;
-	const match = headingRe.exec(summary);
+	const match = INCOMPLETE_TODOS_HEADING_RE.exec(summary);
 	if (!match) return undefined;
 	const start = match.index;
 	const afterHeading = start + match[0].length;
@@ -140,7 +141,7 @@ export function parseIncompleteTodosFromSummary(summary: string): TodoPhase[] {
 	if (!split) return [];
 	const phases: TodoPhase[] = [];
 	for (const line of split.body.split(/\r?\n/)) {
-		if (line === INCOMPLETE_TODOS_HEADING || INCOMPLETE_TODO_OVERFLOW_RE.test(line)) continue;
+		if (INCOMPLETE_TODOS_HEADING_RE.test(line) || INCOMPLETE_TODO_OVERFLOW_RE.test(line)) continue;
 		const task = INCOMPLETE_TODO_TASK_RE.exec(line);
 		if (task) {
 			const last = phases.at(-1);

@@ -264,7 +264,9 @@ export class TodoTracker {
 			this.#reminderCount = 0;
 			return false;
 		}
-		if (isAwaitingUserAnswer(message)) {
+		// Skip only when the turn is awaiting a user answer and does not also
+		// claim completion. A slogan plus "anything else?" still reminds.
+		if (isAwaitingUserAnswer(message) && !claimsCompletion(textBeforeTrailingQuestion(assistantText(message)))) {
 			logger.debug("Todo completion: assistant is waiting for user input; skipping reminder", {
 				incomplete: incomplete.length,
 			});
@@ -434,27 +436,20 @@ function isResponseCueLine(line: string): boolean {
 	return USER_RESPONSE_CUE_RE.test(candidate);
 }
 
-const FAKE_COMPLETE_SLOGAN_RE =
-	/\b(?:task(?:s)?\s+complete|all\s+done|all\s+\d+\s+items?\b[\s\S]{0,40}\b(?:done|wired|complete|finished))\b/i;
+const COMPLETION_CLAIM_RE =
+	/\b(?:(?:i(?:'ve| have)|we(?:'ve| have))\s+(?:now\s+)?(?:finished|completed|done)\s+(?:everything|all)\b|(?:i(?:'m| am)|we(?:'re| are))\s+(?:all\s+)?(?:done|finished)\b|(?:the\s+)?task(?:s)?\s+(?:is\s+|are\s+|now\s+)?complete\b|(?:the\s+)?(?:work|job)\s+is\s+(?:done|finished|complete(?:d)?)\b|(?:finished|completed)\s+everything\b|everything\s+(?:is\s+)?(?:done|finished|complete(?:d)?)\b|all\s+done\b|all\s+(?:the\s+)?(?:tasks?|items?|todos?|work)\s+(?:are\s+|is\s+|now\s+)?(?:done|finished|complete(?:d)?|wired)\b|all\s+\d+\s+items?\b[\s\S]{0,40}\b(?:done|wired|complete|finished)\b|that(?:'s| is)\s+(?:all|everything)\b)/i;
 
 function textBeforeTrailingQuestion(text: string): string {
 	return text.replace(/(?:^|[\n.!]\s*)[^.!?\n？]*[?？]\s*$/u, "").trim();
 }
 
-function isFakeCompleteSlogan(text: string): boolean {
-	return FAKE_COMPLETE_SLOGAN_RE.test(text);
+function claimsCompletion(text: string): boolean {
+	return text.length > 0 && COMPLETION_CLAIM_RE.test(text);
 }
 
 function isAwaitingUserAnswer(message: AssistantMessage): boolean {
 	const text = assistantText(message);
 	if (!text) return false;
 	const lastLine = text.split(/\r?\n/).at(-1)?.trim();
-	if (lastLine === undefined || !(isQuestionPromptLine(lastLine) || isResponseCueLine(lastLine))) {
-		return false;
-	}
-	// A genuine last-line question still yields. A fake-complete slogan that
-	// tacks on "anything else?" must not skip the leftover-todo reminder.
-	const prefix = textBeforeTrailingQuestion(text);
-	if (prefix && isFakeCompleteSlogan(prefix)) return false;
-	return true;
+	return lastLine !== undefined && (isQuestionPromptLine(lastLine) || isResponseCueLine(lastLine));
 }

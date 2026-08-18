@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed a text-only `stop` being treated as a terminal turn while todos were still `pending` or `in_progress`, including after the reminder budget, snapcompact/LLM compaction (capped leftover list on a non-user snapshot plus a standing summary section that rewrites when the live list changes), and thinking-loop recovery ([#8874](https://github.com/can1357/oh-my-pi/issues/8874)). A skipped post-budget continue no longer leaves a forced `todo` tool_choice queued for the next user turn; Google models can use the `"required"` hatch; leftover pending/in_progress items reconstruct from the compaction `## Incomplete Todos` section after the last todo result is summarized away; and a fake-complete slogan with a trailing question still reminds.
+- Fixed a text-only `stop` being treated as a terminal turn while todos were still `pending` or `in_progress`, including after the reminder budget, snapcompact/LLM compaction (capped leftover list on a non-user snapshot plus a standing summary section that rewrites when the live list changes), and thinking-loop recovery ([#8874](https://github.com/can1357/oh-my-pi/issues/8874)). A skipped post-budget continue no longer leaves a forced `todo` tool_choice queued for the next user turn; Google models pin the named `todo` tool instead of a generic `"required"` hatch; leftover pending/in_progress items reconstruct from the compaction `## Incomplete Todos` section (including a heading with a trailing colon or extra text) after the last todo result is summarized away; and a completion claim with a trailing question still reminds.
 
 ## [17.3.7] - 2026-08-17
 
