@@ -7,6 +7,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
+import { isReduceMotion } from "../../config/reduce-motion";
 import { type ThemeColor, theme } from "../theme/theme";
 
 const FRAME_INTERVAL_MS = 85;
@@ -341,6 +342,7 @@ export class CodexResetFireworksController {
 
 	/** Present a celebration unless another one already owns the modal overlay. */
 	show(event: CodexResetFireworksEvent): boolean {
+		if (isReduceMotion()) return false;
 		if (this.#active) return false;
 		const component = new CodexResetFireworksComponent(this.host, event);
 		const overlay = this.host.ui.showOverlay(component, {

@@ -9,6 +9,7 @@ import {
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import { APP_NAME } from "@oh-my-pi/pi-utils";
+import { isReduceMotion } from "../../config/reduce-motion";
 import { gradientLogo, PI_LOGO } from "../components/welcome";
 import { theme } from "../theme/theme";
 import type { InteractiveModeContext } from "../types";
@@ -80,6 +81,11 @@ export class SetupWizardComponent implements Component, OverlayFocusOwner {
 	) {}
 
 	run(): Promise<void> {
+		if (isReduceMotion()) {
+			if (this.scenes.length === 0) this.#complete();
+			else this.#mountCurrentScene();
+			return this.#done.promise;
+		}
 		this.#phase = this.scenes.length === 0 ? "outro" : "splash";
 		this.#phaseStartedAt = performance.now();
 		this.#startTimer();

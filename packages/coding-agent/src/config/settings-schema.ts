@@ -1287,6 +1287,22 @@ export const SETTINGS_SCHEMA = {
 			description: "Reveal assistant text and streamed tool input smoothly while chunks arrive",
 		},
 	},
+	"display.reduceMotion": {
+		type: "enum",
+		values: ["off", "on", "strict"] as const,
+		default: "off",
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Reduce Motion",
+			description: "Freeze cosmetic terminal animations; strict also limits repaint frequency",
+			options: [
+				{ value: "off", label: "Off", description: "Use the normal animation cadence" },
+				{ value: "on", label: "On", description: "Freeze cosmetic animations" },
+				{ value: "strict", label: "Strict", description: "Freeze animations and limit repaints to 4 fps" },
+			],
+		},
+	},
 
 	"display.hideToolActivity": {
 		type: "boolean",

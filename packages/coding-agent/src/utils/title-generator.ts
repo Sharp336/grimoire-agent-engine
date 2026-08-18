@@ -9,8 +9,8 @@ import { StreamMarkupHealing } from "@oh-my-pi/pi-ai/utils/stream-markup-healing
 import { isConPTYHosted } from "@oh-my-pi/pi-tui";
 import { isTerminalHeadless, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
-
 import { resolveRoleSelection } from "../config/model-resolver";
+import { isReduceMotion } from "../config/reduce-motion";
 import type { Settings } from "../config/settings";
 import titleMarkerInstruction from "../prompts/system/title-marker-instruction.md" with { type: "text" };
 import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
@@ -554,7 +554,7 @@ function stopTerminalTitleSpinner(): void {
 }
 
 function startTerminalTitleSpinner(): void {
-	if (isConPTYHosted() || terminalTitleRuntime.timer || !process.stdout.isTTY) return;
+	if (isReduceMotion() || isConPTYHosted() || terminalTitleRuntime.timer || !process.stdout.isTTY) return;
 	terminalTitleRuntime.timer = setInterval(() => {
 		terminalTitleRuntime.frame = (terminalTitleRuntime.frame + 1) % TITLE_SPINNER_FRAMES.length;
 		emitTerminalTitle();
@@ -581,6 +581,12 @@ export function setTerminalTitleStateEnabled(enabled: boolean): void {
 	terminalTitleRuntime.enabled = enabled;
 	if (enabled && terminalTitleRuntime.state === "working") startTerminalTitleSpinner();
 	else stopTerminalTitleSpinner();
+	emitTerminalTitle();
+}
+
+export function applyTerminalTitleReduceMotion(): void {
+	if (isReduceMotion()) stopTerminalTitleSpinner();
+	else if (terminalTitleRuntime.enabled && terminalTitleRuntime.state === "working") startTerminalTitleSpinner();
 	emitTerminalTitle();
 }
 

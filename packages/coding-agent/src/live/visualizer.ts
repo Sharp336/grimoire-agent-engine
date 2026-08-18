@@ -8,6 +8,7 @@ import {
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { isReduceMotion } from "../config/reduce-motion";
 import { type ThemeColor, theme } from "../modes/theme/theme";
 
 /** Distinct states of a realtime call connection. */
@@ -173,7 +174,8 @@ export class LiveVisualizer implements Component {
 			muted: "×",
 			error: "!",
 		};
-		const icon = this.#phase === "working" ? spinners[this.#frame % spinners.length] : staticIcons[this.#phase];
+		const frame = isReduceMotion() ? 0 : this.#frame;
+		const icon = this.#phase === "working" ? spinners[frame % spinners.length] : staticIcons[this.#phase];
 		const phaseColors: Record<LivePhase, ThemeColor> = {
 			connecting: "dim",
 			listening: "success",
@@ -207,9 +209,10 @@ export class LiveVisualizer implements Component {
 		const output = Array.from({ length: rows }, () => "");
 		const energy = this.#phase === "muted" ? 0 : Math.min(1, Math.sqrt(this.#displayLevel * 5));
 		const maxHeight = rows * (blocks.length - 1);
+		const frame = isReduceMotion() ? 0 : this.#frame;
 		for (let column = 0; column < width; column += 1) {
-			const carrier = 0.5 + 0.5 * Math.sin(this.#frame * 0.43 + column * 0.71);
-			const shimmer = 0.5 + 0.5 * Math.sin(this.#frame * 0.19 - column * 1.17);
+			const carrier = 0.5 + 0.5 * Math.sin(frame * 0.43 + column * 0.71);
+			const shimmer = 0.5 + 0.5 * Math.sin(frame * 0.19 - column * 1.17);
 			const height = Math.round(energy * (0.3 + carrier * 0.5 + shimmer * 0.2) * maxHeight);
 			for (let row = 0; row < rows; row += 1) {
 				const units = Math.max(0, Math.min(blocks.length - 1, height - (rows - row - 1) * 8));

@@ -15,6 +15,7 @@ import {
 	type TUI,
 } from "@oh-my-pi/pi-tui";
 import { getProjectDir, isRecord, logger, sanitizeText } from "@oh-my-pi/pi-utils";
+import { isReduceMotion } from "../../config/reduce-motion";
 import { EDIT_MODE_STRATEGIES, type EditMode, type PerFileDiffPreview } from "../../edit";
 import type { Theme } from "../../modes/theme/theme";
 import { getThemeEpoch, theme } from "../../modes/theme/theme";
@@ -868,6 +869,12 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		const completedTasks = (this.#result?.details as { completedTasks?: unknown[] } | undefined)?.completedTasks;
 		if (!completedTasks || completedTasks.length === 0) {
 			this.#stopTodoStrikeAnimation();
+			return;
+		}
+		if (isReduceMotion()) {
+			this.#stopTodoStrikeAnimation();
+			this.#spinnerFrame = TODO_STRIKE_TOTAL_FRAMES;
+			this.#renderState.spinnerFrame = TODO_STRIKE_TOTAL_FRAMES;
 			return;
 		}
 		if (this.#todoStrikeInterval) return;

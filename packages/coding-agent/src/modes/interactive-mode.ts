@@ -34,7 +34,7 @@ import {
 	setTuiTight,
 	TERMINAL,
 	Text,
-	type TUI,
+	TUI,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import type { TerminalAppearanceRequestToken } from "@oh-my-pi/pi-tui/terminal";
@@ -59,9 +59,11 @@ import type { CollabHost } from "../collab/host";
 import { KeybindingsManager } from "../config/keybindings";
 import { formatModelString, type ResolvedModelRoleValue } from "../config/model-resolver";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
+import { reduceMotionLevel } from "../config/reduce-motion";
 import {
 	isSettingsInitialized,
 	onModelRolesChanged,
+	onReduceMotionChanged,
 	onStatusLineSessionAccentChanged,
 	Settings,
 	settings,
@@ -142,6 +144,7 @@ import { resumeCommand } from "../utils/resume-command";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../utils/session-color";
 import { messageHasDisplayableThinking } from "../utils/thinking-display";
 import {
+	applyTerminalTitleReduceMotion,
 	disposeTerminalTitleState,
 	popTerminalTitle,
 	pushTerminalTitle,
@@ -864,6 +867,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.setScrollbackRebuild(settings.get("tui.scrollbackRebuild"));
 		this.ui.setResizeScrollback(settings.get("tui.resizeScrollback"));
 		this.ui.setShowHardwareCursor(settings.get("showHardwareCursor"));
+		this.#applyReduceMotion();
+		this.#eventBusUnsubscribers.push(onReduceMotionChanged(() => this.#applyReduceMotion()));
 		// OSC 66 text-sizing is Kitty-only; resolve the setting against the terminal's
 		// capability (`TERMINAL.textSizing` defaults on for Kitty) so it stays off
 		// unless the user opts in, and never emits raw escapes on other terminals.
@@ -1959,6 +1964,12 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	#computeEditorMaxHeight(): number {
 		return computeEditorMaxHeight(this.ui.terminal.rows);
+	}
+
+	#applyReduceMotion(): void {
+		TUI.setMinRenderInterval(reduceMotionLevel() === "strict" ? 250 : 1000 / 30);
+		applyTerminalTitleReduceMotion();
+		this.ui.requestRender();
 	}
 
 	#syncEditorMaxHeight(): void {

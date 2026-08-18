@@ -1,4 +1,5 @@
 import { type Component, matchesKey, type OverlayFocusOwner } from "@oh-my-pi/pi-tui";
+import { isReduceMotion } from "../../config/reduce-motion";
 import type { InteractiveModeContext } from "../types";
 import { renderSetupSplash, SETUP_SPLASH_MS, SETUP_TICK_MS } from "./scenes/splash";
 
@@ -88,6 +89,7 @@ export async function runStartupSplash(
 	ctx: InteractiveModeContext,
 	options: RunStartupSplashOptions = {},
 ): Promise<void> {
+	if (isReduceMotion()) return;
 	const component = new StartupSplashComponent(ctx, options);
 	const overlay = ctx.ui.showOverlay(component, {
 		width: "100%",

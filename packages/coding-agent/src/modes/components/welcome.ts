@@ -8,6 +8,7 @@ import {
 	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
 import { APP_NAME } from "@oh-my-pi/pi-utils";
+import { isReduceMotion } from "../../config/reduce-motion";
 import { theme } from "../../modes/theme/theme";
 import tipsText from "./tips.txt" with { type: "text" };
 
@@ -191,6 +192,11 @@ export class WelcomeComponent implements Component {
 	 * subsequent calls reset and replay.
 	 */
 	playIntro(requestRender: () => void): void {
+		if (isReduceMotion()) {
+			this.#stopAnimation();
+			requestRender();
+			return;
+		}
 		this.#stopAnimation();
 		this.#requestRender = requestRender;
 		this.#animStart = performance.now();
@@ -440,7 +446,7 @@ export class WelcomeComponent implements Component {
 		// its hue phase from wall-clock time so it shimmers across the welcome
 		// intro's re-render frames, then settles into a still rainbow once the box
 		// caches its resting frame. Non-"[NEW]" tips ignore the phase entirely.
-		const phase = NEW_TIP_MARKER.test(tip) ? performance.now() / NEW_GLOW_PERIOD_MS : 0;
+		const phase = NEW_TIP_MARKER.test(tip) && !isReduceMotion() ? performance.now() / NEW_GLOW_PERIOD_MS : 0;
 		return renderWelcomeTip(tip, boxWidth, phase);
 	}
 

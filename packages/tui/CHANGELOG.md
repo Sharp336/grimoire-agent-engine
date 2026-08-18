@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a configurable minimum render interval for accessibility modes that need to cap terminal repaint frequency ([#8336](https://github.com/can1357/oh-my-pi/issues/8336)).
+
 ## [18.0.0] - 2026-08-22
 
 ### Breaking Changes

@@ -82,6 +82,7 @@ export interface Args {
 	noTitle?: boolean;
 	autoApprove?: boolean;
 	approvalMode?: "always-ask" | "write" | "yolo";
+	reduceMotion?: "off" | "on" | "strict";
 	messages: string[];
 	fileArgs: string[];
 	/** Extension-registered flags this parse recognized — name to value. */
