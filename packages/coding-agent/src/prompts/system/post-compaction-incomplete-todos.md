@@ -6,4 +6,6 @@ These incomplete todos remain after compaction. Continue them; do not treat the 
   - [{{status}}] {{content}}
 {{/each}}
 {{/each}}
+{{#if overflow}}+ {{overflow}} more
+{{/if}}
 </system-reminder>

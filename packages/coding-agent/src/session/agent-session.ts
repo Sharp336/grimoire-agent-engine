@@ -1040,6 +1040,9 @@ export class AgentSession {
 			planModeEnabled: () => this.#planModeState?.enabled === true,
 			consumeLastServedToolChoiceLabel: () => this.#toolChoiceQueue.consumeLastServedLabel(),
 			forceTodoToolChoice: () => {
+				// Post-budget escape hatch. Named tool_choice only; a string/"required"
+				// result is not a named todo force. checkCompletion still appends the
+				// text reminder and continues when this returns false.
 				if (!this.getActiveToolNames().includes("todo")) return false;
 				const forced = buildNamedToolChoice("todo", this.model);
 				if (!forced || typeof forced === "string") return false;

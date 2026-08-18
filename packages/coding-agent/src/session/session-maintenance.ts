@@ -1564,8 +1564,11 @@ export class SessionMaintenance {
 		const todoContext = this.#host.incompleteTodosCompactionContext();
 		if (todoContext.length === 0) return preparation;
 		const snapshot: AgentMessage = {
-			role: "user",
-			content: [{ type: "text", text: `<incomplete-todos>\n${todoContext.join("\n")}\n</incomplete-todos>` }],
+			role: "custom",
+			customType: "incomplete-todos-snapshot",
+			content: `<incomplete-todos>\n${todoContext.join("\n")}\n</incomplete-todos>`,
+			display: false,
+			attribution: "agent",
 			timestamp: Date.now(),
 		};
 		return {

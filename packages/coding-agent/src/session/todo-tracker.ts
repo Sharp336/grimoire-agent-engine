@@ -8,9 +8,17 @@ import midRunTodoNudgePrompt from "../prompts/system/mid-run-todo-nudge.md" with
 import postCompactionIncompleteTodosPrompt from "../prompts/system/post-compaction-incomplete-todos.md" with {
 	type: "text",
 };
-import { getLatestTodoPhasesFromEntries, isTodoPhase, type TodoItem, type TodoPhase } from "../tools/todo";
+import { getLatestTodoPhasesFromEntries, isTodoPhase, type TodoPhase } from "../tools/todo";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { AgentSessionEvent } from "./agent-session-events";
+import {
+	capIncompleteTodoRows,
+	collectIncompleteTodoRows,
+	formatIncompleteTodoSnapshotLines,
+	formatIncompleteTodosSection,
+	groupIncompleteTodoRowsByPhase,
+	upsertIncompleteTodosSection,
+} from "./incomplete-todos";
 import type { SessionManager } from "./session-manager";
 
 const MID_RUN_NUDGE_MUTATION_THRESHOLD = 12;
@@ -196,50 +204,37 @@ export class TodoTracker {
 	 * (`SummaryOptions.extraContext`), so the contract survives the cut.
 	 */
 	buildIncompleteTodosCompactionContext(): string[] {
-		const incompleteByPhase = this.#incompleteActionableByPhase();
-		if (incompleteByPhase.length === 0) return [];
-		const lines = [
+		const rows = collectIncompleteTodoRows(this.#phases);
+		if (rows.length === 0) return [];
+		return [
 			"Incomplete todos that MUST survive compaction (pending/in_progress only; a text-only stop is not completion):",
+			...formatIncompleteTodoSnapshotLines(rows),
 		];
-		for (const phase of incompleteByPhase) {
-			for (const task of phase.tasks) {
-				lines.push(`[${phase.name}] [${task.status}] ${task.content}`);
-			}
-		}
-		return lines;
 	}
 
 	/**
-	 * Appends the incomplete todo list to a compaction summary so it remains
-	 * durable text after snapcompact/LLM summarization (mirrors file-ops upsert).
+	 * Upserts the incomplete todo list into a compaction summary so it remains
+	 * durable text after snapcompact/LLM summarization. A later compact rewrites
+	 * the section from the live list, or strips it when nothing remains.
 	 */
 	appendIncompleteTodosToSummary(summary: string): string {
-		const incompleteByPhase = this.#incompleteActionableByPhase();
-		if (incompleteByPhase.length === 0) return summary;
-		const block = [
-			"## Incomplete Todos",
-			"These pending/in_progress items remain after compaction; continue them. A text-only stop is not completion.",
-			...incompleteByPhase.flatMap(phase => [
-				`- ${phase.name}`,
-				...phase.tasks.map(task => `  - [${task.status}] ${task.content}`),
-			]),
-		].join("\n");
-		const trimmed = summary.trimEnd();
-		if (trimmed.includes("## Incomplete Todos")) {
-			return `${trimmed}\n`;
-		}
-		return `${trimmed}\n\n${block}\n`;
+		const rows = collectIncompleteTodoRows(this.#phases);
+		return upsertIncompleteTodosSection(summary, formatIncompleteTodosSection(rows));
 	}
 
 	/** Builds reminder-only eager preludes after compaction. */
 	buildPostCompactionEagerNudges(): AgentMessage[] {
 		const nudges: AgentMessage[] = [];
-		const incompleteByPhase = this.#incompleteActionableByPhase();
-		if (incompleteByPhase.length > 0) {
+		const rows = collectIncompleteTodoRows(this.#phases);
+		if (rows.length > 0) {
+			const capped = capIncompleteTodoRows(rows);
 			nudges.push({
 				role: "custom",
 				customType: "post-compaction-incomplete-todos",
-				content: prompt.render(postCompactionIncompleteTodosPrompt, { phases: incompleteByPhase }),
+				content: prompt.render(postCompactionIncompleteTodosPrompt, {
+					phases: groupIncompleteTodoRowsByPhase(capped.rows),
+					overflow: capped.overflow,
+				}),
 				display: false,
 				attribution: "agent",
 				timestamp: Date.now(),
@@ -321,6 +316,7 @@ export class TodoTracker {
 		if (isEscapeHatch) {
 			this.#host.forceTodoToolChoice();
 		}
+		// Continue even if forceTodoToolChoice no-ops (todo missing / no named choice).
 		this.#host.scheduleAgentContinue({ generation: this.#host.promptGeneration() });
 		return true;
 	}
@@ -372,17 +368,7 @@ export class TodoTracker {
 		name: string;
 		tasks: Array<{ content: string; status: "pending" | "in_progress" }>;
 	}> {
-		return this.#phases
-			.map(phase => ({
-				name: phase.name,
-				tasks: phase.tasks
-					.filter(
-						(task): task is TodoItem & { status: "pending" | "in_progress" } =>
-							task.status === "pending" || task.status === "in_progress",
-					)
-					.map(task => ({ content: task.content, status: task.status })),
-			}))
-			.filter(phase => phase.tasks.length > 0);
+		return groupIncompleteTodoRowsByPhase(collectIncompleteTodoRows(this.#phases));
 	}
 
 	#clonePhases(phases: TodoPhase[]): TodoPhase[] {

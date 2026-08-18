@@ -186,6 +186,7 @@ describe("AgentSession todo reminder self-continuation suppression", () => {
 		expect(reminderAttempts).toEqual([]);
 		expect(todoReminderTranscriptEntry()).toBeUndefined();
 		expect(continueSpy).not.toHaveBeenCalled();
+		expect(agentEndTerminalStates.at(-1)).toBe(true);
 	});
 
 	it("does not remind or continue when the assistant yields with a non-English (Chinese) question", async () => {
@@ -197,6 +198,7 @@ describe("AgentSession todo reminder self-continuation suppression", () => {
 		expect(reminderAttempts).toEqual([]);
 		expect(todoReminderTranscriptEntry()).toBeUndefined();
 		expect(continueSpy).not.toHaveBeenCalled();
+		expect(agentEndTerminalStates.at(-1)).toBe(true);
 	});
 
 	it("still reminds when the assistant answers its own prompt-shaped question", async () => {
@@ -292,6 +294,20 @@ describe("AgentSession todo reminder self-continuation suppression", () => {
 
 		expect(reminderAttempts.slice(0, 3)).toEqual([1, 2, 3]);
 		expect(agentEndTerminalStates.at(-1)).toBe(false);
+	});
+
+	it("refuses a text-only terminal stop while an in_progress todo remains", async () => {
+		session.setTodoPhases([
+			{
+				name: "Pending review",
+				tasks: [{ content: "Slice 81", status: "in_progress" }],
+			},
+		]);
+		vi.spyOn(session.agent, "continue").mockResolvedValue();
+		emitTextOnlyStop();
+		await session.waitForIdle();
+		expect(reminderAttempts).toEqual([1]);
+		expect(agentEndTerminalStates).toEqual([false]);
 	});
 
 	it("allows a text-only stop when remaining todos are only blocked or closed", async () => {

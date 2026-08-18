@@ -89,14 +89,17 @@ function createAssistantResponse(text: string) {
 /** Short-circuit the LLM summary so compaction completes without a network call. */
 function stubCompaction(
 	firstKeptEntryId?: string,
-	captured?: { extraContext?: string[]; snapshotText?: string },
+	captured?: { extraContext?: string[]; snapshotText?: string; snapshotRole?: string },
 ): void {
 	vi.spyOn(compactionModule, "compact").mockImplementation(
 		async (preparation, _model, _apiKey, _custom, _signal, options) => {
 			if (captured) {
 				captured.extraContext = options?.extraContext;
 				const first = preparation.messagesToSummarize[0];
-				if (first) captured.snapshotText = getMessageText(first);
+				if (first) {
+					captured.snapshotText = getMessageText(first);
+					captured.snapshotRole = first.role;
+				}
 			}
 			return {
 				summary: "compacted",
@@ -392,7 +395,7 @@ describe("AgentSession eager prelude re-injection after compaction", () => {
 		const todoEntryId = sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, {
 			phases: [{ name: "Work", tasks: [{ content: "do the thing", status: "pending" }] }],
 		});
-		const captured: { extraContext?: string[]; snapshotText?: string } = {};
+		const captured: { extraContext?: string[]; snapshotText?: string; snapshotRole?: string } = {};
 		stubCompaction(todoEntryId, captured);
 
 		const continuationPromise = waitForCall(call => call.callIndex > 0);
@@ -410,6 +413,8 @@ describe("AgentSession eager prelude re-injection after compaction", () => {
 		expect(incompleteNudge).toContain("- [pending] do the thing");
 		expect(continuation.messageTexts.some(text => text.includes("If no work remains, say so"))).toBe(false);
 		expect(captured.extraContext?.some(line => line.includes("[Work] [pending] do the thing"))).toBe(true);
+		expect(captured.snapshotRole).toBe("custom");
+		expect(captured.snapshotRole).not.toBe("user");
 		expect(captured.snapshotText).toContain("<incomplete-todos>");
 		expect(captured.snapshotText).toContain("[Work] [pending] do the thing");
 		expect(
