@@ -123,6 +123,28 @@ const CONDITIONS: Record<string, () => boolean> = {
 			return false;
 		}
 	},
+	// Failure-aware rows matter when either half of the failure pipeline runs:
+	// recall searches the catalog after the threshold, and recovery capture keys
+	// its episode on the same count.
+	autolearnFailureAware: () => {
+		try {
+			if (Settings.instance.get("autolearn.enabled") !== true) return false;
+			if (Settings.instance.get("autolearn.recallMode") !== "off") return true;
+			const captureMode = Settings.instance.get("autolearn.captureMode");
+			return captureMode === "recovery" || captureMode === "both";
+		} catch {
+			return false;
+		}
+	},
+	autolearnSubstantive: () => {
+		try {
+			if (Settings.instance.get("autolearn.enabled") !== true) return false;
+			const captureMode = Settings.instance.get("autolearn.captureMode");
+			return captureMode === "substantive" || captureMode === "both";
+		} catch {
+			return false;
+		}
+	},
 	autoThinkingActive: () => {
 		try {
 			return Settings.instance.get("defaultThinkingLevel") === "auto";

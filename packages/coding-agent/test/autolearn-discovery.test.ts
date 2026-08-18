@@ -41,12 +41,17 @@ describe("managed-skills discovery", () => {
 		await removeWithRetries(tempHome);
 	});
 
-	it("surfaces a managed skill tagged with the omp-managed provider", async () => {
+	it("surfaces a managed skill as hidden from the base prompt while retaining it for resolution", async () => {
 		await writeSkill(managedDir, "foo", "A managed skill.");
+		await writeSkill(authoredDir, "authored", "An authored skill.");
 		const { skills } = await loadSkills({ cwd: tempCwd });
 		const foo = skills.find(s => s.name === "foo");
+		const authored = skills.find(s => s.name === "authored");
 		expect(foo).toBeDefined();
 		expect(foo?.source).toBe("omp-managed:user");
+		expect(foo?.hide).toBe(true);
+		expect(authored).toBeDefined();
+		expect(authored?.hide).not.toBe(true);
 	});
 
 	it("lets an authored skill win a name collision and drops the managed one", async () => {

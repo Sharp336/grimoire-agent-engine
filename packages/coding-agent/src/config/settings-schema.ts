@@ -2639,9 +2639,11 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	// Auto-Learn (experimental): post-stop nudge to capture lessons to memory
-	// and mint/enhance isolated managed skills under ~/.omp/agent/managed-skills.
-	// Master flag is default-off → zero footprint; sub-flags gate behaviour.
+	// Auto-Learn (experimental): failure-aware procedural memory. Recall searches a
+	// local descriptor catalog after repeated tool failures and softly requires the
+	// matched `skill://` body; capture records/improves procedures in isolated
+	// managed skills under ~/.omp/agent/managed-skills.
+	// Master flag is default-off → zero footprint; sub-modes gate behaviour.
 	"autolearn.enabled": {
 		type: "boolean",
 		default: false,
@@ -2650,23 +2652,129 @@ export const SETTINGS_SCHEMA = {
 			group: "Auto-Learn",
 			label: "Auto-Learn (experimental)",
 			description:
-				"After the agent stops, nudge it to capture lessons to memory and create/enhance isolated managed skills",
+				"Recall prior procedures after repeated tool failures and capture new ones into isolated managed skills",
 		},
 	},
-	"autolearn.autoContinue": {
-		type: "boolean",
-		default: false,
+	"autolearn.captureMode": {
+		type: "enum",
+		values: ["off", "substantive", "recovery", "both"] as const,
+		default: "recovery",
 		ui: {
 			tab: "memory",
 			group: "Auto-Learn",
-			label: "Auto-run capture at stop",
-			description:
-				"When on, auto-run one private capture turn at stop (uses extra tokens). When off, only standing auto-learn guidance remains.",
+			label: "Capture mode",
+			description: "What the private capture agent is allowed to record after a terminal stop",
 			condition: "autolearnActive",
+			options: [
+				{ value: "off", label: "Off", description: "Never run an automatic capture agent" },
+				{
+					value: "substantive",
+					label: "Substantive",
+					description: "Capture after any turn that met the tool-call threshold",
+				},
+				{
+					value: "recovery",
+					label: "Recovery",
+					description: "Capture only a repeated-failure family that later succeeded",
+				},
+				{
+					value: "both",
+					label: "Both",
+					description: "Prefer recovery capture; fall back to substantive capture for that stop",
+				},
+			],
 		},
 	},
-	// Config-file-only knob (numbers without `options` are hidden from the UI).
-	"autolearn.minToolCalls": { type: "number", default: 5 },
+	"autolearn.captureDelivery": {
+		type: "enum",
+		values: ["manual", "automatic"] as const,
+		default: "automatic",
+		ui: {
+			tab: "memory",
+			group: "Auto-Learn",
+			label: "Capture delivery",
+			description:
+				"Automatic runs the isolated capture agent at a normal terminal stop; manual leaves capture to an explicit /learn",
+			condition: "autolearnActive",
+			options: [
+				{ value: "manual", label: "Manual", description: "Only `/learn` starts a capture" },
+				{ value: "automatic", label: "Automatic", description: "Run one private capture turn at stop" },
+			],
+		},
+	},
+	"autolearn.recallMode": {
+		type: "enum",
+		values: ["off", "suggest", "require"] as const,
+		default: "require",
+		ui: {
+			tab: "memory",
+			group: "Auto-Learn",
+			label: "Recall mode",
+			description:
+				"After the failure threshold: suggest emits descriptor cards only; require also soft-requires the matched `skill://` read",
+			condition: "autolearnActive",
+			options: [
+				{ value: "off", label: "Off", description: "Never search the procedure catalog" },
+				{ value: "suggest", label: "Suggest", description: "Emit up to three descriptor cards" },
+				{ value: "require", label: "Require", description: "Soft-require reading the single best match" },
+			],
+		},
+	},
+	"autolearn.failureThreshold": {
+		type: "number",
+		default: 3,
+		ui: {
+			tab: "memory",
+			group: "Auto-Learn",
+			label: "Failure threshold",
+			description: "Same-family tool failures before recall/recovery capture arms (clamped to 2-10)",
+			condition: "autolearnFailureAware",
+			options: [
+				{ value: "2", label: "2" },
+				{ value: "3", label: "3" },
+				{ value: "4", label: "4" },
+				{ value: "5", label: "5" },
+			],
+		},
+	},
+	"autolearn.procedureScope": {
+		type: "enum",
+		values: ["global", "project-tagged"] as const,
+		default: "global",
+		ui: {
+			tab: "memory",
+			group: "Auto-Learn",
+			label: "Procedure scope",
+			description:
+				"Tag newly captured procedures with the current project for ranking affinity; every procedure stays globally searchable",
+			condition: "autolearnActive",
+			options: [
+				{ value: "global", label: "Global", description: "No project tag" },
+				{
+					value: "project-tagged",
+					label: "Project-tagged",
+					description: "Tag with the current project and boost same-project matches",
+				},
+			],
+		},
+	},
+	"autolearn.substantiveMinToolCalls": {
+		type: "number",
+		default: 5,
+		ui: {
+			tab: "memory",
+			group: "Auto-Learn",
+			label: "Substantive tool calls",
+			description: "Minimum tool calls in a turn before substantive capture runs (clamped to 1-100)",
+			condition: "autolearnSubstantive",
+			options: [
+				{ value: "3", label: "3" },
+				{ value: "5", label: "5" },
+				{ value: "8", label: "8" },
+				{ value: "12", label: "12" },
+			],
+		},
+	},
 
 	// Mnemopi local SQLite memory backend.
 	"mnemopi.dbPath": {

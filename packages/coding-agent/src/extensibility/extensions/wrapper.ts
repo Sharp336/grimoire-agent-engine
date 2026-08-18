@@ -1,12 +1,13 @@
 /**
  * Tool wrappers for extensions.
  */
-import type {
-	AgentTool,
-	AgentToolContext,
-	AgentToolResult,
-	AgentToolUpdateCallback,
-	ToolLoadMode,
+import {
+	type AgentTool,
+	type AgentToolContext,
+	type AgentToolResult,
+	type AgentToolUpdateCallback,
+	ToolCallBlockedError,
+	type ToolLoadMode,
 } from "@oh-my-pi/pi-agent-core";
 import type { ComputerSafetyCheck, ImageContent, Static, TextContent, TSchema } from "@oh-my-pi/pi-ai";
 import { sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
@@ -192,8 +193,10 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		const approvalMode: ApprovalMode = cliAutoApprove ? "yolo" : configuredMode;
 		const userPolicies = (settings?.get("tools.approval") ?? {}) as Record<string, unknown>;
 		const preResolved = resolveApproval(this.tool, approvalArgs(params, context), approvalMode, userPolicies);
+		// Policy denial and user cancellation are host decisions, not tool contract failures; Auto-Learn
+		// must exclude them structurally rather than matching error text.
 		if (preResolved.policy === "deny") {
-			throw new Error(
+			throw new ToolCallBlockedError(
 				`Tool "${preResolved.policyKey ?? this.tool.name}" is blocked by user policy.\n` +
 					`To allow: remove "tools.approval.${preResolved.policyKey ?? this.tool.name}: deny" from config.`,
 			);
@@ -221,7 +224,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 
 				if (callResult?.block) {
 					const reason = callResult.reason || "Tool execution was blocked by an extension";
-					throw new Error(reason);
+					throw new ToolCallBlockedError(reason);
 				}
 				// A non-blocking handler may replace the execution input. The returned object is the raw
 				// input passed to `execute` (handler-owned; not re-normalized). Skipped for `computer`
@@ -246,7 +249,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		const resolved = resolveApproval(this.tool, resolvedArgs, approvalMode, userPolicies);
 		context?.xdevTierResolved?.(resolved.tier);
 		if (resolved.policy === "deny") {
-			throw new Error(
+			throw new ToolCallBlockedError(
 				`Tool "${resolved.policyKey ?? this.tool.name}" is blocked by user policy.\n` +
 					`To allow: remove "tools.approval.${resolved.policyKey ?? this.tool.name}: deny" from config.`,
 			);
@@ -266,6 +269,25 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			required: pendingSafetyChecks.length > 0 || (resolved.policy === "prompt" && (explicitPrompt || !xdevBypass)),
 			reason: resolved.reason,
 		};
+		// Auto-Learn's private capture agent has no interactive UI and no user
+		// watching: prompting there would hang the capture until it timed out. Its
+		// ONLY tool is a managed-procedure writer confined to
+		// `~/.omp/agent/managed-skills`, so allow exactly `manage_skill`/`learn`
+		// inside that host-marked context.
+		//
+		// Deliberately placed AFTER both `deny` checks, so an explicit
+		// `tools.approval.manage_skill: deny` still wins. Primary-session and manual
+		// tool calls never carry this marker and keep normal approval behavior. The
+		// marker is host-constructed — the model cannot supply `AgentToolContext`.
+		if (
+			approvalCheck.required &&
+			context?.autolearnCapture !== undefined &&
+			pendingSafetyChecks.length === 0 &&
+			(this.tool.name === "manage_skill" || this.tool.name === "learn") &&
+			settings?.get("autolearn.enabled") === true
+		) {
+			approvalCheck.required = false;
+		}
 
 		if (approvalCheck.required) {
 			const scheduledCall = context?.toolCall?.toolCalls[context.toolCall.index];
@@ -308,11 +330,11 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				const reason = "no interactive UI available";
 				await emitApprovalResolved(false, reason);
 				if (pendingSafetyChecks.length > 0) {
-					throw new Error(
+					throw new ToolCallBlockedError(
 						`Tool "${this.tool.name}" has pending provider safety checks but no interactive UI is available.`,
 					);
 				}
-				throw new Error(
+				throw new ToolCallBlockedError(
 					`Tool "${this.tool.name}" requires approval but no interactive UI available.\n` +
 						`Options:\n` +
 						`  1. Set tools.approvalMode: yolo in /settings\n` +
@@ -337,7 +359,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			const approved = choice === "Approve";
 			await emitApprovalResolved(approved, approved ? undefined : "denied by user");
 			if (!approved) {
-				throw new Error(`Tool call denied by user: ${this.tool.name}`);
+				throw new ToolCallBlockedError(`Tool call denied by user: ${this.tool.name}`);
 			}
 			if (pendingSafetyChecks.length > 0) {
 				if (!context) throw new Error("Provider safety approval context is unavailable");

@@ -26,7 +26,12 @@ export interface RepeatedToolCallDetection {
 	readonly argumentsSummary: string;
 }
 
-function canonicalizeToolCallValue(value: unknown): unknown {
+/**
+ * Recursively sorts object keys, preserves array order, and strips both the
+ * wire `INTENT_FIELD` and legacy `__intent` at every depth. Auto-Learn reuses
+ * this for transient bounded capture evidence, not as a family key.
+ */
+export function canonicalizeToolCallValue(value: unknown): unknown {
 	if (Array.isArray(value)) {
 		return value.map(item => canonicalizeToolCallValue(item));
 	}

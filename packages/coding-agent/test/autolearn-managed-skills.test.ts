@@ -6,6 +6,7 @@ import {
 	deleteManagedSkill,
 	getManagedSkillsDir,
 	MAX_MANAGED_SKILL_BYTES,
+	readManagedSkillMetadata,
 	sanitizeSkillName,
 	toSkillFrontmatter,
 	writeManagedSkill,
@@ -66,6 +67,124 @@ describe("managed-skills primitives", () => {
 			await expect(
 				writeManagedSkill({ action: "create", name: "foo", description: "x", body: "y" }),
 			).rejects.toThrow(/already exists/);
+		});
+		it("round-trips normalized ompManaged metadata while preserving name and description frontmatter", async () => {
+			await writeManagedSkill({
+				action: "create",
+				name: "metadata",
+				description: "A metadata-backed procedure.",
+				body: "# Metadata\nbody",
+				metadata: {
+					scope: "project-tagged",
+					projectKey: "Project-Key",
+					projectLabel: "Project Label",
+					toolFamilies: ["MCP:Server"],
+					platforms: ["WIN32"],
+					triggers: ["CL not recognized"],
+				},
+			});
+
+			const metadata = await readManagedSkillMetadata("metadata");
+			expect(metadata).toEqual({
+				schemaVersion: 1,
+				scope: "project-tagged",
+				projectKey: "project-key",
+				projectLabel: "project label",
+				toolFamilies: ["mcp:server"],
+				platforms: ["win32"],
+				triggers: ["cl not recognized"],
+			});
+			const { frontmatter } = parseFrontmatter(await Bun.file(skillFile("metadata")).text(), { source: "test" });
+			expect(frontmatter.name).toBe("metadata");
+			expect(frontmatter.description).toBe("A metadata-backed procedure.");
+			expect(frontmatter.ompManaged).toEqual(metadata);
+		});
+
+		it("preserves omitted catalog metadata when an update changes only the body", async () => {
+			await writeManagedSkill({
+				action: "create",
+				name: "preserve",
+				description: "A preserved procedure.",
+				body: "# Original",
+				metadata: {
+					toolFamilies: ["bash"],
+					platforms: ["win32"],
+					triggers: ["cl not recognized"],
+				},
+			});
+			const original = await readManagedSkillMetadata("preserve");
+
+			await writeManagedSkill({
+				action: "update",
+				name: "preserve",
+				description: "A preserved procedure.",
+				body: "# Updated",
+			});
+
+			expect(await readManagedSkillMetadata("preserve")).toEqual(original);
+			const { body } = parseFrontmatter(await Bun.file(skillFile("preserve")).text(), { source: "test" });
+			expect(body).toContain("# Updated");
+		});
+
+		it("updates a legacy managed skill without metadata and reports null before the update", async () => {
+			const file = skillFile("legacy");
+			await fs.mkdir(path.dirname(file), { recursive: true });
+			await fs.writeFile(
+				file,
+				["---", "name: legacy", "description: Legacy procedure.", "---", "", "# Legacy"].join("\n"),
+			);
+
+			expect(await readManagedSkillMetadata("legacy")).toBeNull();
+			await writeManagedSkill({
+				action: "update",
+				name: "legacy",
+				description: "Updated legacy procedure.",
+				body: "# Updated legacy",
+			});
+
+			const { frontmatter, body } = parseFrontmatter(await Bun.file(file).text(), { source: "test" });
+			expect(frontmatter.name).toBe("legacy");
+			expect(frontmatter.description).toBe("Updated legacy procedure.");
+			expect(body).toContain("# Updated legacy");
+			expect(await readManagedSkillMetadata("legacy")).toMatchObject({
+				schemaVersion: 1,
+				scope: "global",
+				toolFamilies: [],
+				platforms: [],
+				triggers: [],
+			});
+		});
+
+		it("redacts provider tokens before the final size cap while preserving Markdown structure", async () => {
+			const githubToken = `ghp_${"a".repeat(2_000)}`;
+			const jwt = `${"a".repeat(16)}.${"b".repeat(16)}.${"c".repeat(16)}`;
+			const rawBody = [
+				"# Heading",
+				"",
+				"```sh",
+				"x".repeat(62_500),
+				`export GH_TOKEN=${githubToken}`,
+				`# ${jwt}`,
+				"```",
+				"",
+			].join("\n");
+			expect(Buffer.byteLength(rawBody, "utf8")).toBeGreaterThan(MAX_MANAGED_SKILL_BYTES);
+			await writeManagedSkill({
+				action: "create",
+				name: "redacted",
+				description: "Redaction procedure.",
+				body: rawBody,
+			});
+
+			const content = await Bun.file(skillFile("redacted")).text();
+			expect(Buffer.byteLength(content, "utf8")).toBeLessThanOrEqual(MAX_MANAGED_SKILL_BYTES);
+			const { body } = parseFrontmatter(content, { source: "test" });
+			expect(body).toContain("# Heading");
+			expect(body).toContain("```sh");
+			expect(body).toContain("```");
+			expect(body).not.toContain(githubToken);
+			expect(body).not.toContain(jwt);
+			expect(body.match(/\[REDACTED\]/g)).toHaveLength(2);
 		});
 
 		it("update overwrites the body; update of a missing skill throws", async () => {

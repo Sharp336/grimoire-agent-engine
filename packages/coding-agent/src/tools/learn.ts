@@ -1,5 +1,6 @@
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import { logger } from "@oh-my-pi/pi-utils";
 import { sanitizeSkillName, writeManagedSkill } from "../autolearn/managed-skills";
 import { isNameClaimedByAuthoredSkill } from "../extensibility/skills";
 import { localBackend } from "../memory-backend/local-backend";
@@ -14,9 +15,14 @@ const learnSchema = type({
 		name: type("string").describe("kebab-case skill name"),
 		description: type("string").describe("one-line description of when to use the skill"),
 		body: type("string").describe("the SKILL.md body in markdown (no frontmatter)"),
+		"scope?": type("'global' | 'project-tagged'"),
+		"match?": type({
+			"toolFamilies?": "string[]",
+			"platforms?": "string[]",
+			"triggers?": "string[]",
+		}),
 	}).describe("also create or enhance a managed skill in the same call"),
 });
-
 export type LearnParams = typeof learnSchema.infer;
 
 /**
@@ -121,10 +127,37 @@ export class LearnTool implements AgentTool<typeof learnSchema> {
 				};
 			}
 			try {
-				await writeManagedSkill(params.skill);
+				await writeManagedSkill({
+					action: params.skill.action,
+					name: params.skill.name,
+					description: params.skill.description,
+					body: params.skill.body,
+					metadata:
+						params.skill.scope === undefined && params.skill.match === undefined
+							? undefined
+							: {
+									scope: params.skill.scope,
+									toolFamilies: params.skill.match?.toolFamilies,
+									platforms: params.skill.match?.platforms,
+									triggers: params.skill.match?.triggers,
+								},
+				});
 			} catch (err) {
 				const reason = err instanceof Error ? err.message : String(err);
 				throw new Error(`${memoryMessage}, but the managed skill could not be written: ${reason}`);
+			}
+			// Rediscover so the new procedure enters the active skill snapshot — and,
+			// through the session's skill-refresh hook, the Auto-Learn descriptor
+			// catalog — in THIS session rather than only after a restart. Best-effort:
+			// the SKILL.md is already on disk, so a refresh failure must not turn a
+			// successful write into an error.
+			try {
+				await this.session.refreshSkills?.();
+			} catch (err) {
+				logger.warn("learn could not refresh skills after writing a managed procedure", {
+					name: params.skill.name,
+					error: String(err),
+				});
 			}
 			const verb = params.skill.action === "create" ? "Created" : "Updated";
 			return {

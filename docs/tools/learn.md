@@ -42,7 +42,7 @@
 3. If `skill` is absent, the tool returns after the memory write/queue.
 4. If `skill.action == "create"`, the tool checks the lowercased/validated name against active authored skills. A conflict returns an error result after the lesson has already been stored or queued.
 5. Otherwise, it calls `writeManagedSkill(...)`. Skill-write failure is rethrown as a partial outcome because lesson persistence already happened.
-6. Unlike `manage_skill`, `learn` does not call the session's `refreshSkills` callback after writing. The managed skill is discovered on a later skill refresh/session.
+6. On a successful write it calls the session's `refreshSkills` callback (best-effort; a refresh failure is logged and does not fail the write), so the new procedure enters the active skill snapshot — and, via the session's skill-refresh hook, the Auto-Learn descriptor catalog — in the same session. `scope` and `match` are forwarded to the procedure's `ompManaged` frontmatter, which is what makes it recallable after repeated tool failures.
 
 ## Modes / Variants
 - Memory-only lesson capture.

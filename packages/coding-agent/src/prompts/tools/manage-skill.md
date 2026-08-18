@@ -9,4 +9,9 @@ User-authored skills separate; tool NEVER edits them.
 
 `name`: kebab-case (lowercase letters, digits, hyphens).
 `description`: specific; drives discovery.
-No frontmatter in `body`; generated from `name` and `description`.
+- `description` plus `match` fields drive procedural recall after repeated tool failures.
+- `match.toolFamilies`: failing tool names such as `bash` or `mcp:<server>`.
+- `match.platforms`: `process.platform` values.
+- `match.triggers`: failure symptoms that should recall this procedure.
+- `scope: "project-tagged"` adds current-project ranking affinity; the procedure stays searchable everywhere.
+No frontmatter in `body`; generated from `name`, `description`, and catalog metadata.

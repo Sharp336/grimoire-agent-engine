@@ -1,4 +1,9 @@
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
+import {
+	MANUAL_CAPTURE_DEFAULT_TURNS,
+	MANUAL_CAPTURE_MAX_TURNS,
+	MANUAL_CAPTURE_MIN_TURNS,
+} from "../autolearn/capture-request";
 import { settings } from "../config/settings";
 import type { AgentSession } from "../session/agent-session";
 import type { SessionOAuthAccountList } from "../session/agent-session-types";
@@ -137,7 +142,93 @@ async function handleSessionPinCommand(
 	await output(`Pinned ${account.label} to this session for ${providerName}.`);
 }
 
+/** `Usage:` line shown for every malformed `/learn` invocation. */
+const LEARN_USAGE = `Usage: /learn [--turns ${MANUAL_CAPTURE_MIN_TURNS}-${MANUAL_CAPTURE_MAX_TURNS}] [focus text]`;
+
+/**
+ * Parse `/learn` arguments.
+ *
+ * `--turns N` is accepted anywhere in the string (including `--turns=N`) and the
+ * remaining text becomes the optional focus, so `/learn MSVC setup --turns 2`
+ * works as naturally as the flag-first form. Any unknown `--flag` or an
+ * out-of-range count is rejected rather than silently ignored: a user who
+ * mistyped the window must not get a capture over the wrong exchanges.
+ */
+function parseLearnArgs(args: string): { turns: number; focus?: string } | { error: string } {
+	const tokens = args.trim().split(/\s+/).filter(Boolean);
+	let turns = MANUAL_CAPTURE_DEFAULT_TURNS;
+	let sawTurns = false;
+	const focusParts: string[] = [];
+	for (let i = 0; i < tokens.length; i++) {
+		const token = tokens[i];
+		if (!token.startsWith("--")) {
+			focusParts.push(token);
+			continue;
+		}
+		const inline = token.startsWith("--turns=") ? token.slice("--turns=".length) : undefined;
+		if (token !== "--turns" && inline === undefined) return { error: LEARN_USAGE };
+		if (sawTurns) return { error: LEARN_USAGE };
+		const raw = inline ?? tokens[++i];
+		if (raw === undefined) return { error: LEARN_USAGE };
+		// Reject `2.5`, `0x2`, and `2abc`: only a plain integer names a window.
+		if (!/^\d+$/.test(raw)) return { error: LEARN_USAGE };
+		const parsed = Number.parseInt(raw, 10);
+		if (parsed < MANUAL_CAPTURE_MIN_TURNS || parsed > MANUAL_CAPTURE_MAX_TURNS) return { error: LEARN_USAGE };
+		turns = parsed;
+		sawTurns = true;
+	}
+	const focus = focusParts.join(" ").trim();
+	return focus ? { turns, focus } : { turns };
+}
+
+/**
+ * Run an explicit `/learn`.
+ *
+ * Gates on BOTH the live `autolearn.enabled` setting and the session-start
+ * `manage_skill` registration: the tool registry is built once at startup, so a
+ * mid-session enable would otherwise promise a capture the session cannot run.
+ */
+async function handleLearnCommand(args: string, runtime: SlashCommandRuntime): Promise<void> {
+	const parsed = parseLearnArgs(args);
+	if ("error" in parsed) {
+		await runtime.output(parsed.error);
+		return;
+	}
+	if (!settings.get("autolearn.enabled") || !runtime.session.canRequestAutoLearnCapture) {
+		await runtime.output(
+			"Auto-Learn is disabled for this session. Enable autolearn.enabled and start a new session.",
+		);
+		return;
+	}
+	// A capture reads the branch as it stands; a streaming turn is still changing it.
+	if (runtime.session.isStreaming) {
+		await runtime.output("Cannot learn while the session is streaming.");
+		return;
+	}
+	const result = await runtime.session.requestAutoLearnCapture(parsed);
+	if (!result.ok) {
+		await runtime.output(result.error);
+		return;
+	}
+	// Only finalized successful writes reach here, so naming them is safe.
+	const lines = result.stored.map(
+		stored => `${stored.action === "create" ? "Learned" : "Updated"} procedure: ${stored.name}`,
+	);
+	await runtime.output(lines.join("\n"));
+}
+
 export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
+	{
+		name: "learn",
+		description: "Store the recent work as a reusable managed procedure",
+		acpDescription: "Capture recent work as a reusable procedure",
+		acpInputHint: `[--turns ${MANUAL_CAPTURE_MIN_TURNS}-${MANUAL_CAPTURE_MAX_TURNS}] [focus text]`,
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			await handleLearnCommand(command.args, runtime);
+			return commandConsumed();
+		},
+	},
 	{
 		name: "todo",
 		description: "View or modify the agent's todo list",

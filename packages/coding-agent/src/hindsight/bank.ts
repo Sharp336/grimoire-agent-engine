@@ -20,15 +20,13 @@
  * lands against a missing bank.
  */
 
-import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
-import * as git from "../utils/git";
+import { resolveProjectLabel } from "../utils/project-identity";
 import type { HindsightApi } from "./client";
 import type { HindsightConfig } from "./config";
 
 const DEFAULT_BANK_NAME = "omp";
 const PROJECT_TAG_PREFIX = "project:";
-const UNKNOWN_PROJECT = "unknown";
 const MISSION_SET_CAP = 10_000;
 
 export type RecallTagsMatch = "any" | "all" | "any_strict" | "all_strict";
@@ -55,35 +53,11 @@ function baseBankId(config: HindsightConfig): string {
 }
 
 /**
- * Best-effort project label from a working-directory path.
- *
- * When `directory` lives inside a git repository we resolve the primary
- * checkout root (or the shared common dir for bare-repo worktrees) via
- * {@link git.repo.primaryRootSync} and basename that, so every linked
- * worktree of one repo shares the same `project:<name>` tag.
- * Outside a repo (or when resolution fails), fall back to the cwd basename.
- *
- * The basename is lowercased. The label becomes a tag, and Hindsight matches
- * tags literally, so a checkout at `.../General` would otherwise retain into a
- * `project:General` scope that never meets the `project:general` scope every
- * other client of the same bank reads and writes.
- *
- * Sync only: this runs on the hot path of `computeBankScope`, which is
- * exposed as a sync API to callers like `backend.ts` and must stay sync.
- * `git.repo.primaryRootSync` walks `.git`/`commondir` with sync file reads —
- * no subprocess — so the cost is one or two `stat`s and a small `readFile`.
- */
-function projectLabel(directory: string): string {
-	if (!directory) return UNKNOWN_PROJECT;
-	const primary = git.repo.primaryRootSync(directory);
-	return path.basename(primary ?? directory).toLowerCase() || UNKNOWN_PROJECT;
-}
-
-/**
  * Resolve the active bank target plus optional tag scoping.
  *
  * Always returns a non-empty `bankId`. Tag fields are populated only for
- * `per-project-tagged`.
+ * `per-project-tagged`. Project labels come from the shared project identity
+ * utility, which keeps Hindsight and Auto-Learn repository-root rules aligned.
  */
 export function computeBankScope(config: HindsightConfig, directory: string): BankScope {
 	const base = baseBankId(config);
@@ -91,9 +65,9 @@ export function computeBankScope(config: HindsightConfig, directory: string): Ba
 		case "global":
 			return { bankId: base };
 		case "per-project":
-			return { bankId: `${base}-${projectLabel(directory)}` };
+			return { bankId: `${base}-${resolveProjectLabel(directory)}` };
 		case "per-project-tagged": {
-			const tag = `${PROJECT_TAG_PREFIX}${projectLabel(directory)}`;
+			const tag = `${PROJECT_TAG_PREFIX}${resolveProjectLabel(directory)}`;
 			return {
 				bankId: base,
 				retainTags: [tag],

@@ -9,6 +9,13 @@ import {
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai";
 import { AsyncDrain, getAgentDbPath, getDbBusyTimeoutMs, getStatsDbPath, isRecord, logger } from "@oh-my-pi/pi-utils";
+import type {
+	ProcedureDescriptor,
+	ProcedureDescriptorRow,
+	ProcedureOutcome,
+	ProcedureSearchQuery,
+} from "../autolearn/catalog";
+import { MAX_PROCEDURE_CANDIDATES } from "../autolearn/catalog";
 import type { RawSettings as Settings } from "../config/settings";
 
 /** Row shape for settings table queries */
@@ -42,6 +49,20 @@ type StatsMessageRow = {
 	output_tokens: number;
 	duration: number;
 	ttft: number | null;
+};
+type AutolearnProcedureRow = {
+	name: string;
+	description: string;
+	scope: string;
+	project_key: string | null;
+	project_label: string | null;
+	tool_families: string;
+	platforms: string;
+	triggers: string;
+	success_count: number;
+	miss_count: number;
+	last_recalled_at: number | null;
+	updated_at: number;
 };
 
 /** Per-model running sums accumulated during a backfill walk. */
@@ -88,6 +109,8 @@ export interface ModelPerfStats {
  * plain average into a recency-weighted one (provider speeds drift over time).
  */
 const MODEL_PERF_DECAY_AT = 256;
+/** Decay threshold for Auto-Learn procedure outcomes. */
+const AUTOLEARN_OUTCOME_DECAY_AT = 256;
 /** meta-table marker set once historical stats.db rows have been imported into model_perf. */
 const MODEL_PERF_BACKFILL_KEY = "model_perf_backfill";
 /** Batch window for deferred model_perf writes; matches prompt-history's drain cadence. */
@@ -115,8 +138,45 @@ function normalizeModelPerfSample(modelKey: string, sample: ModelPerfSample): Mo
 	return { modelKey, outputTokens, durationMs, ttftSamples: ttftMs !== undefined ? 1 : 0, ttftMs: ttftMs ?? 0 };
 }
 
+/**
+ * Serialize a normalized match list for storage.
+ *
+ * JSON, NOT a whitespace join: a trigger like `cl not recognized` and an MCP
+ * family whose raw server name contains a space must survive the round trip, or
+ * the ranker's EXACT `toolFamilies.includes(family)` / `platforms.includes(...)`
+ * comparisons silently stop matching. FTS5's `unicode61` tokenizer splits on the
+ * JSON punctuation, so every word is still individually indexed and
+ * prefix-searchable, and the `LIKE` fallback still finds infixes.
+ */
+function serializeAutolearnTerms(terms: readonly string[]): string {
+	return terms.length === 0 ? "" : JSON.stringify(terms);
+}
+
+/**
+ * Parse a stored match list back into terms.
+ *
+ * Defensive: the column may hold `''`, a whitespace-joined value written by an
+ * older build, or hand-edited junk. Anything unparseable degrades to whitespace
+ * splitting rather than dropping the row.
+ */
+function parseAutolearnTerms(raw: string): string[] {
+	const text = raw.trim();
+	if (text.length === 0) return [];
+	if (text.startsWith("[")) {
+		try {
+			const parsed: unknown = JSON.parse(text);
+			if (Array.isArray(parsed)) {
+				return parsed.filter((entry): entry is string => typeof entry === "string" && entry.length > 0);
+			}
+		} catch {
+			// Fall through to the whitespace split below.
+		}
+	}
+	return text.split(/\s+/).filter(Boolean);
+}
+
 /** Current agent.db schema version; bump when schema changes require migration. */
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
 
 /** Singleton instances per database path */
@@ -136,6 +196,12 @@ export class AgentStorage {
 	#listModelUsageStmt: Statement;
 	#upsertModelPerfStmt: Statement;
 	#listModelPerfStmt: Statement;
+	#upsertAutolearnProcedureStmt: Statement;
+	#listAutolearnProcedureNamesStmt: Statement;
+	#searchAutolearnProceduresStmt: Statement;
+	#deleteAutolearnProcedureStmt: Statement;
+	#recordAutolearnProcedureOutcomeStmt: Statement;
+	#substringAutolearnStmts = new Map<number, Statement>();
 	#modelUsageCache: string[] | null = null;
 	/** Only the real user db auto-imports stats.db history; custom paths (tests, embedding) opt in explicitly. */
 	#autoPerfBackfill: boolean;
@@ -189,6 +255,37 @@ ON CONFLICT(model_key) DO UPDATE SET
 		this.#listModelPerfStmt = this.#db.prepare(
 			"SELECT model_key, samples, output_tokens, gen_ms, ttft_samples, ttft_ms FROM model_perf",
 		);
+		this.#upsertAutolearnProcedureStmt = this.#db.prepare(
+			`INSERT INTO autolearn_procedures
+(name, description, scope, project_key, project_label, tool_families, platforms, triggers, updated_at)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ${SQLITE_NOW_EPOCH})
+ON CONFLICT(name) DO UPDATE SET
+description = excluded.description,
+scope = excluded.scope,
+project_key = excluded.project_key,
+project_label = excluded.project_label,
+tool_families = excluded.tool_families,
+platforms = excluded.platforms,
+triggers = excluded.triggers,
+updated_at = ${SQLITE_NOW_EPOCH}`,
+		);
+		this.#listAutolearnProcedureNamesStmt = this.#db.prepare("SELECT name FROM autolearn_procedures");
+		this.#searchAutolearnProceduresStmt = this.#db.prepare(
+			`SELECT p.name, p.description, p.scope, p.project_key, p.project_label, p.tool_families, p.platforms, p.triggers, p.success_count, p.miss_count, p.last_recalled_at, p.updated_at
+FROM autolearn_procedures_fts f
+JOIN autolearn_procedures p ON p.id = f.rowid
+WHERE autolearn_procedures_fts MATCH ?
+ORDER BY bm25(autolearn_procedures_fts) ASC
+LIMIT ?`,
+		);
+		this.#deleteAutolearnProcedureStmt = this.#db.prepare("DELETE FROM autolearn_procedures WHERE name = ?");
+		this.#recordAutolearnProcedureOutcomeStmt = this.#db.prepare(
+			`UPDATE autolearn_procedures
+SET success_count = (CASE WHEN success_count + miss_count >= ${AUTOLEARN_OUTCOME_DECAY_AT} THEN success_count / 2 ELSE success_count END) + CASE WHEN ?2 = 'success' THEN 1 ELSE 0 END,
+miss_count = (CASE WHEN success_count + miss_count >= ${AUTOLEARN_OUTCOME_DECAY_AT} THEN miss_count / 2 ELSE miss_count END) + CASE WHEN ?2 = 'miss' THEN 1 ELSE 0 END,
+last_recalled_at = ${SQLITE_NOW_EPOCH}
+WHERE name = ?1`,
+		);
 	}
 
 	/**
@@ -221,6 +318,43 @@ CREATE TABLE IF NOT EXISTS model_perf (
 	ttft_ms REAL NOT NULL DEFAULT 0,
 	updated_at INTEGER NOT NULL DEFAULT (${SQLITE_NOW_EPOCH})
 );
+CREATE TABLE IF NOT EXISTS autolearn_procedures (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	name TEXT NOT NULL UNIQUE,
+	description TEXT NOT NULL,
+	scope TEXT NOT NULL DEFAULT 'global',
+	project_key TEXT,
+	project_label TEXT,
+	tool_families TEXT NOT NULL DEFAULT '',
+	platforms TEXT NOT NULL DEFAULT '',
+	triggers TEXT NOT NULL DEFAULT '',
+	success_count INTEGER NOT NULL DEFAULT 0,
+	miss_count INTEGER NOT NULL DEFAULT 0,
+	last_recalled_at INTEGER,
+	updated_at INTEGER NOT NULL DEFAULT (${SQLITE_NOW_EPOCH})
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS autolearn_procedures_fts USING fts5(
+	name, description, tool_families, platforms, triggers,
+	content='autolearn_procedures', content_rowid='id'
+);
+
+CREATE TRIGGER IF NOT EXISTS autolearn_procedures_ai AFTER INSERT ON autolearn_procedures BEGIN
+	INSERT INTO autolearn_procedures_fts(rowid, name, description, tool_families, platforms, triggers)
+	VALUES (new.id, new.name, new.description, new.tool_families, new.platforms, new.triggers);
+END;
+
+CREATE TRIGGER IF NOT EXISTS autolearn_procedures_ad AFTER DELETE ON autolearn_procedures BEGIN
+	INSERT INTO autolearn_procedures_fts(autolearn_procedures_fts, rowid, name, description, tool_families, platforms, triggers)
+	VALUES ('delete', old.id, old.name, old.description, old.tool_families, old.platforms, old.triggers);
+END;
+
+CREATE TRIGGER IF NOT EXISTS autolearn_procedures_au AFTER UPDATE ON autolearn_procedures BEGIN
+	INSERT INTO autolearn_procedures_fts(autolearn_procedures_fts, rowid, name, description, tool_families, platforms, triggers)
+	VALUES ('delete', old.id, old.name, old.description, old.tool_families, old.platforms, old.triggers);
+	INSERT INTO autolearn_procedures_fts(rowid, name, description, tool_families, platforms, triggers)
+	VALUES (new.id, new.name, new.description, new.tool_families, new.platforms, new.triggers);
+END;
 
 CREATE TABLE IF NOT EXISTS meta (
 	key TEXT PRIMARY KEY,
@@ -317,6 +451,13 @@ CREATE TABLE settings (
 			this.#db.run("DELETE FROM model_perf");
 			this.#db.prepare("DELETE FROM meta WHERE key = ?").run(MODEL_PERF_BACKFILL_KEY);
 		}
+		if (fromVersion < 7) {
+			try {
+				this.#db.run("INSERT INTO autolearn_procedures_fts(autolearn_procedures_fts) VALUES('rebuild')");
+			} catch (error) {
+				logger.warn("AgentStorage Auto-Learn procedure FTS rebuild failed", { error: String(error) });
+			}
+		}
 	}
 
 	#migrateSchemaV4ToV5(): void {
@@ -394,13 +535,19 @@ FROM model_usage_legacy
 		for (const storage of instances.values()) storage.#close();
 		instances.clear();
 	}
-
 	#close(): void {
 		this.#listSettingsStmt.finalize();
 		this.#upsertModelUsageStmt.finalize();
 		this.#listModelUsageStmt.finalize();
 		this.#upsertModelPerfStmt.finalize();
 		this.#listModelPerfStmt.finalize();
+		this.#upsertAutolearnProcedureStmt.finalize();
+		this.#listAutolearnProcedureNamesStmt.finalize();
+		this.#searchAutolearnProceduresStmt.finalize();
+		this.#deleteAutolearnProcedureStmt.finalize();
+		this.#recordAutolearnProcedureOutcomeStmt.finalize();
+		for (const stmt of this.#substringAutolearnStmts.values()) stmt.finalize();
+		this.#substringAutolearnStmts.clear();
 		// SqliteAuthCredentialStore.close() finalizes its own statements and
 		// closes the shared #db handle — must run after our statements finalize.
 		this.#authStore.close();
@@ -458,6 +605,147 @@ FROM model_usage_legacy
 		} catch (error) {
 			logger.warn("AgentStorage failed to get model usage order", { error: String(error) });
 			return [];
+		}
+	}
+	/**
+	 * Synchronizes the filesystem-authoritative managed procedure descriptors
+	 * while preserving outcome history owned by this cache.
+	 */
+	syncAutolearnProcedures(descriptors: readonly ProcedureDescriptor[]): void {
+		try {
+			this.#db.transaction(() => {
+				const activeNames = new Set(descriptors.map(descriptor => descriptor.name));
+				const existing = this.#listAutolearnProcedureNamesStmt.all() as Array<{ name: string }>;
+				for (const row of existing) {
+					if (!activeNames.has(row.name)) this.#deleteAutolearnProcedureStmt.run(row.name);
+				}
+				for (const descriptor of descriptors) {
+					this.#upsertAutolearnProcedureStmt.run(
+						descriptor.name,
+						descriptor.description,
+						descriptor.scope,
+						descriptor.projectKey ?? null,
+						descriptor.projectLabel ?? null,
+						serializeAutolearnTerms(descriptor.toolFamilies),
+						serializeAutolearnTerms(descriptor.platforms),
+						serializeAutolearnTerms(descriptor.triggers),
+					);
+				}
+			})();
+		} catch (error) {
+			logger.warn("AgentStorage failed to sync Auto-Learn procedures", { error: String(error) });
+		}
+	}
+
+	/** Upserts one managed procedure descriptor while preserving outcome history. */
+	upsertAutolearnProcedure(descriptor: ProcedureDescriptor): void {
+		try {
+			this.#upsertAutolearnProcedureStmt.run(
+				descriptor.name,
+				descriptor.description,
+				descriptor.scope,
+				descriptor.projectKey ?? null,
+				descriptor.projectLabel ?? null,
+				serializeAutolearnTerms(descriptor.toolFamilies),
+				serializeAutolearnTerms(descriptor.platforms),
+				serializeAutolearnTerms(descriptor.triggers),
+			);
+		} catch (error) {
+			logger.warn("AgentStorage failed to upsert Auto-Learn procedure", {
+				name: descriptor.name,
+				error: String(error),
+			});
+		}
+	}
+
+	/** Removes one managed procedure descriptor from the cache. */
+	deleteAutolearnProcedure(name: string): void {
+		try {
+			this.#deleteAutolearnProcedureStmt.run(name);
+		} catch (error) {
+			logger.warn("AgentStorage failed to delete Auto-Learn procedure", { name, error: String(error) });
+		}
+	}
+
+	/**
+	 * Search the local descriptor cache for candidates that OVERLAP the query.
+	 *
+	 * Retrieval is deliberately OR-based, unlike prompt-history search. A failure
+	 * episode contributes up to 32 symptom tokens; requiring a candidate to contain
+	 * every one of them (token-AND) would return nothing in practice and starve the
+	 * eligibility gate in `rankProcedureCandidates`, which is what actually decides
+	 * relevance (exact family + 1 specific overlap, or 3 specific overlaps).
+	 *
+	 * Family and platform are included as ordinary retrieval terms, never as
+	 * required ones: platform is a ranking-only affinity, and a procedure recorded
+	 * on another platform must still be reachable.
+	 */
+	searchAutolearnProcedures(query: ProcedureSearchQuery): {
+		rows: ProcedureDescriptorRow[];
+		lexicalRank: Map<string, number>;
+	} {
+		const tokens = this.#tokenizeAutolearnTerms([
+			...query.tokens,
+			...(query.toolFamily ? [query.toolFamily] : []),
+			...(query.platform ? [query.platform] : []),
+		]);
+		if (tokens.length === 0) return { rows: [], lexicalRank: new Map() };
+
+		let ftsRows: AutolearnProcedureRow[] = [];
+		try {
+			// Explicit `OR` between prefix terms; bm25 then ranks by how many (and how
+			// rare) the matched terms were, so the best-overlapping rows come first.
+			const ftsQuery = tokens.map(token => `"${token.replace(/"/g, '""')}"*`).join(" OR ");
+			ftsRows = this.#searchAutolearnProceduresStmt.all(
+				ftsQuery,
+				MAX_PROCEDURE_CANDIDATES,
+			) as AutolearnProcedureRow[];
+		} catch (error) {
+			logger.debug("AgentStorage Auto-Learn FTS query failed, using substring only", { error: String(error) });
+		}
+
+		let substringRows: AutolearnProcedureRow[];
+		try {
+			const stmt = this.#getAutolearnSubstringStmt(tokens.length);
+			const patterns = tokens.map(token => `%${token.replace(/[\\%_]/g, "\\$&")}%`);
+			// The statement binds each token twice: once in the overlap score, once in
+			// the OR filter. Score parameters come first, matching the SELECT order.
+			const params: unknown[] = [...patterns, ...patterns, MAX_PROCEDURE_CANDIDATES];
+			substringRows = stmt.all(...(params as [string, ...unknown[]])) as AutolearnProcedureRow[];
+		} catch (error) {
+			logger.warn("AgentStorage Auto-Learn substring search failed", { error: String(error) });
+			return { rows: [], lexicalRank: new Map() };
+		}
+
+		const rowsByName = new Map<string, AutolearnProcedureRow>();
+		const lexicalRank = new Map<string, number>();
+		for (const [index, row] of ftsRows.entries()) {
+			rowsByName.set(row.name, row);
+			lexicalRank.set(row.name, 1 / (index + 1));
+		}
+		for (const row of substringRows) {
+			if (rowsByName.size >= MAX_PROCEDURE_CANDIDATES || rowsByName.has(row.name)) continue;
+			rowsByName.set(row.name, row);
+		}
+
+		return {
+			rows: [...rowsByName.values()]
+				.slice(0, MAX_PROCEDURE_CANDIDATES)
+				.map(row => this.#toAutolearnProcedureRow(row)),
+			lexicalRank,
+		};
+	}
+
+	/** Records a recalled procedure outcome and applies recency decay atomically. */
+	recordAutolearnProcedureOutcome(name: string, outcome: ProcedureOutcome): void {
+		try {
+			this.#recordAutolearnProcedureOutcomeStmt.run(name, outcome);
+		} catch (error) {
+			logger.warn("AgentStorage failed to record Auto-Learn procedure outcome", {
+				name,
+				outcome,
+				error: String(error),
+			});
 		}
 	}
 
@@ -766,6 +1054,66 @@ ON CONFLICT(model_key) DO UPDATE SET
 	 */
 	cleanExpiredCache(): void {
 		this.#authStore.cleanExpiredCache();
+	}
+
+	#tokenizeAutolearnTerms(values: readonly string[]): string[] {
+		const tokens: string[] = [];
+		const seen = new Set<string>();
+		for (const value of values) {
+			for (const token of value.toLowerCase().split(/[^\p{L}\p{N}]+/u)) {
+				if (token.length === 0 || seen.has(token)) continue;
+				seen.add(token);
+				tokens.push(token);
+			}
+		}
+		return tokens;
+	}
+
+	/**
+	 * Substring fallback statement for `tokenCount` terms.
+	 *
+	 * OR, not AND: this backs up the FTS query for infix matches its prefix-only
+	 * wildcard cannot reach, so it must have the same overlap semantics. Rows are
+	 * ordered by HOW MANY terms they matched (then recency) so the bounded `LIMIT`
+	 * keeps the best-overlapping candidates rather than the most recently written.
+	 */
+	#getAutolearnSubstringStmt(tokenCount: number): Statement {
+		let stmt = this.#substringAutolearnStmts.get(tokenCount);
+		if (stmt) return stmt;
+		const searchableText =
+			"name || ' ' || description || ' ' || tool_families || ' ' || platforms || ' ' || triggers";
+		const term = `${searchableText} LIKE ? ESCAPE '\\' COLLATE NOCASE`;
+		const whereClause = Array(tokenCount).fill(term).join(" OR ");
+		// Each parameter is bound twice — once in the score, once in the filter — so
+		// callers must pass the token list twice, score parameters first.
+		const scoreClause = Array(tokenCount).fill(`(CASE WHEN ${term} THEN 1 ELSE 0 END)`).join(" + ");
+		stmt = this.#db.prepare(
+			`SELECT name, description, scope, project_key, project_label, tool_families, platforms, triggers, success_count, miss_count, last_recalled_at, updated_at,
+	(${scoreClause}) AS overlap_score
+FROM autolearn_procedures
+WHERE ${whereClause}
+ORDER BY overlap_score DESC, updated_at DESC, id DESC
+LIMIT ?`,
+		);
+		this.#substringAutolearnStmts.set(tokenCount, stmt);
+		return stmt;
+	}
+
+	#toAutolearnProcedureRow(row: AutolearnProcedureRow): ProcedureDescriptorRow {
+		return {
+			name: row.name,
+			description: row.description,
+			scope: row.scope === "project-tagged" ? "project-tagged" : "global",
+			projectKey: row.project_key || undefined,
+			projectLabel: row.project_label || undefined,
+			toolFamilies: parseAutolearnTerms(row.tool_families),
+			platforms: parseAutolearnTerms(row.platforms),
+			triggers: parseAutolearnTerms(row.triggers),
+			successCount: row.success_count,
+			missCount: row.miss_count,
+			lastRecalledAt: row.last_recalled_at ?? null,
+			updatedAt: row.updated_at,
+		};
 	}
 
 	/**

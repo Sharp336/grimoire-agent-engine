@@ -1613,6 +1613,43 @@ export class Settings {
 			}
 		}
 
+		// autolearn: `autoContinue` boolean + `minToolCalls` → explicit modes.
+		// Each new field migrates independently so a partially-configured install
+		// keeps the new defaults for whatever it never set:
+		// - `autoContinue: true`  → captureMode "substantive" + delivery "automatic"
+		//   (the legacy behaviour: capture whenever the tool-count threshold was met)
+		// - `autoContinue: false` → captureMode "substantive" + delivery "manual"
+		//   (legacy passive mode ran no capture; standing guidance only)
+		// - key absent            → leave the new "recovery"/"automatic" defaults
+		// Both spellings are accepted (nested object and quoted dotted key), and both
+		// legacy keys are dropped whenever present so a non-boolean/non-number leftover
+		// cannot linger past the migration.
+		const autolearnObj = isRecord(raw.autolearn) ? (raw.autolearn as Record<string, unknown>) : undefined;
+		const legacyAutoContinue = autolearnObj?.autoContinue ?? raw["autolearn.autoContinue"];
+		const legacyMinToolCalls = autolearnObj?.minToolCalls ?? raw["autolearn.minToolCalls"];
+		if (legacyAutoContinue !== undefined || legacyMinToolCalls !== undefined) {
+			if (!autolearnObj) raw.autolearn = {};
+			const target = raw.autolearn as Record<string, unknown>;
+			// Normalize an explicit quoted-dotted new value into the nested form the
+			// resolver reads (same treatment as the inspect_image migration above),
+			// so a user who already opted into the new keys is not silently reverted
+			// to a schema default by the legacy fallback below.
+			for (const field of ["captureMode", "captureDelivery", "substantiveMinToolCalls"]) {
+				const flat = raw[`autolearn.${field}`];
+				if (flat !== undefined && target[field] === undefined) target[field] = flat;
+				delete raw[`autolearn.${field}`];
+			}
+			if (typeof legacyAutoContinue === "boolean") {
+				target.captureMode ??= "substantive";
+				target.captureDelivery ??= legacyAutoContinue ? "automatic" : "manual";
+			}
+			if (typeof legacyMinToolCalls === "number") target.substantiveMinToolCalls ??= legacyMinToolCalls;
+			delete target.autoContinue;
+			delete target.minToolCalls;
+		}
+		delete raw["autolearn.autoContinue"];
+		delete raw["autolearn.minToolCalls"];
+
 		// power.preventIdleSleep / power.preventSystemSleep / power.declareUserActive
 		// / power.preventDisplaySleep (four booleans) → power.sleepPrevention enum.
 		// The enum is cumulative: each level adds the flags of all lower levels.

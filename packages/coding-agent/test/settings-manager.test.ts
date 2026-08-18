@@ -1019,6 +1019,66 @@ describe("Settings", () => {
 			expect(settings.get("todo.eager")).toBe("default");
 		});
 
+		it("migrates legacy autolearn.autoContinue true to substantive/automatic capture", async () => {
+			await writeSettings({ autolearn: { enabled: true, autoContinue: true, minToolCalls: 8 } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("autolearn.captureMode")).toBe("substantive");
+			expect(settings.get("autolearn.captureDelivery")).toBe("automatic");
+			expect(settings.get("autolearn.substantiveMinToolCalls")).toBe(8);
+
+			settings.set("display.showTokenUsage", true);
+			await settings.flush();
+			const onDisk = (await readSettings()).autolearn as Record<string, unknown>;
+			expect("autoContinue" in onDisk).toBe(false);
+			expect("minToolCalls" in onDisk).toBe(false);
+		});
+
+		it("migrates legacy autolearn.autoContinue false to manual delivery", async () => {
+			await writeSettings({ autolearn: { enabled: true, autoContinue: false } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			// Legacy passive mode ran no capture agent; manual delivery is its equivalent.
+			expect(settings.get("autolearn.captureMode")).toBe("substantive");
+			expect(settings.get("autolearn.captureDelivery")).toBe("manual");
+			// Untouched knob keeps its new default rather than inheriting the legacy one.
+			expect(settings.get("autolearn.substantiveMinToolCalls")).toBe(5);
+		});
+
+		it("keeps failure-aware defaults when no legacy autolearn keys exist", async () => {
+			await writeSettings({ autolearn: { enabled: true } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("autolearn.captureMode")).toBe("recovery");
+			expect(settings.get("autolearn.captureDelivery")).toBe("automatic");
+			expect(settings.get("autolearn.recallMode")).toBe("require");
+			expect(settings.get("autolearn.failureThreshold")).toBe(3);
+			expect(settings.get("autolearn.procedureScope")).toBe("global");
+		});
+
+		it("lets explicit new autolearn modes win over quoted dotted legacy keys", async () => {
+			await Bun.write(
+				getConfigPath(),
+				`"autolearn.enabled": true\n"autolearn.autoContinue": true\n"autolearn.minToolCalls": 9\n"autolearn.captureMode": recovery\n"autolearn.substantiveMinToolCalls": 3\n`,
+			);
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("autolearn.captureMode")).toBe("recovery");
+			expect(settings.get("autolearn.substantiveMinToolCalls")).toBe(3);
+			// Delivery had no explicit new value, so the legacy boolean still supplies it.
+			expect(settings.get("autolearn.captureDelivery")).toBe("automatic");
+
+			settings.set("display.showTokenUsage", true);
+			await settings.flush();
+			const onDisk = await readSettings();
+			expect("autolearn.autoContinue" in onDisk).toBe(false);
+			expect("autolearn.minToolCalls" in onDisk).toBe(false);
+		});
+
 		it("moves legacy lastChangelogVersion out of config.yml into the marker file", async () => {
 			await writeSettings({ lastChangelogVersion: "0.40.0" });
 
