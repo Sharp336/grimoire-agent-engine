@@ -135,6 +135,39 @@ describe("Serper web search", () => {
 		expect(result.sources).toEqual([]);
 	});
 
+	it("prioritizes linked answer boxes and sanitizes tabs", async () => {
+		const fetchMock: FetchImpl = async () =>
+			new Response(
+				JSON.stringify({
+					answerBox: {
+						title: "Featured\tanswer",
+						answer: "Direct\tanswer",
+						link: "https://example.com/featured",
+						snippet: "Source\tsnippet",
+					},
+					organic: [{ title: "Organic", link: "https://example.com/organic" }],
+				}),
+				{ headers: { "Content-Type": "application/json" } },
+			);
+
+		const result = await searchSerper({
+			query: "featured answer",
+			num_results: 1,
+			authStorage: createAuthStorage(),
+			fetch: fetchMock,
+		});
+
+		expect(result.answer).not.toContain("\t");
+		expect(result.sources).toEqual([
+			{
+				title: "Featured   answer",
+				url: "https://example.com/featured",
+				snippet: "Source   snippet",
+				publishedDate: undefined,
+			},
+		]);
+	});
+
 	it("rejects malformed success responses", async () => {
 		const invalidJsonFetch: FetchImpl = async () =>
 			new Response("<html>not json</html>", { headers: { "Content-Type": "text/html" } });

@@ -1,4 +1,5 @@
 import { type ApiKey, type AuthStorage, type FetchImpl, getEnvApiKey, withAuth } from "@oh-my-pi/pi-ai";
+import { replaceTabs } from "@oh-my-pi/pi-tui";
 import type { SearchResponse, SearchSource } from "../../../web/search/types";
 import { SearchProviderError } from "../../../web/search/types";
 import type { StructuredQuery } from "../query";
@@ -26,7 +27,9 @@ function asObject(value: unknown): JsonObject | undefined {
 }
 
 function text(value: unknown): string | undefined {
-	return typeof value === "string" && value.trim() ? value.trim() : undefined;
+	if (typeof value !== "string") return undefined;
+	const normalized = replaceTabs(value).trim();
+	return normalized || undefined;
 }
 
 function httpUrl(value: unknown): string | undefined {
@@ -74,6 +77,9 @@ function parseResponse(
 		sources.push(source);
 	};
 
+	const answerBox = asObject(data.answerBox);
+	if (answerBox) addSource(sourceFrom(answerBox));
+
 	const knowledgeGraph = asObject(data.knowledgeGraph);
 	if (knowledgeGraph) {
 		addSource(
@@ -88,7 +94,6 @@ function parseResponse(
 		for (const result of data.organic) addSource(sourceFrom(result));
 	}
 
-	const answerBox = asObject(data.answerBox);
 	let answer: string | undefined;
 	if (answerBox) {
 		const title = text(answerBox.title);
