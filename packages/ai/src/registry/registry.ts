@@ -9,6 +9,7 @@ import { azureProvider } from "./azure";
 import { basetenProvider } from "./baseten";
 import { bedrockMantleProvider } from "./bedrock-mantle";
 import { cerebrasProvider } from "./cerebras";
+import { charmHyperProvider } from "./charm-hyper";
 import { cloudflareAiGatewayProvider } from "./cloudflare-ai-gateway";
 import { coreWeaveProvider } from "./coreweave";
 import { cursorProvider } from "./cursor";
@@ -120,6 +121,7 @@ const ALL = [
 	metaProvider,
 	moonshotProvider,
 	cerebrasProvider,
+	charmHyperProvider,
 	basetenProvider,
 	fireworksProvider,
 	togetherProvider,

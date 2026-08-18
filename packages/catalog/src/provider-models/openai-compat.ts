@@ -6131,3 +6131,109 @@ export const MODELS_DEV_PROVIDER_DESCRIPTORS: readonly ModelsDevProviderDescript
 	...MODELS_DEV_PROVIDER_DESCRIPTORS_CODING_PLANS,
 	...MODELS_DEV_PROVIDER_DESCRIPTORS_SPECIALIZED,
 ];
+
+// ---------------------------------------------------------------------------
+// 25 Charm Hyper
+// ---------------------------------------------------------------------------
+
+const HYPER_BASE_URL = "https://hyper.charm.land/v1";
+/**
+ * Documented Hyper effort vocabulary, verified live (2026-08): every listed
+ * value is accepted upstream. `none` through `minimal` pass through verbatim
+ * (Hyper treats them as its lowest reasoning rung, cross-checked against equal
+ * completions+reasoning-token counts), `low`..`max` map to the wire-exact
+ * efforts hidden from thinking-disabled models.
+ */
+const HYPER_EFFORT_BY_WIRE_VALUE: Record<string, Effort> = {
+	none: Effort.Minimal,
+	minimal: Effort.Minimal,
+	low: Effort.Low,
+	medium: Effort.Medium,
+	high: Effort.High,
+	xhigh: Effort.XHigh,
+	max: Effort.Max,
+};
+
+export interface HyperModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+function mapHyperThinking(entry: OpenAICompatibleModelRecord): ThinkingConfig | undefined {
+	if (!isRecord(entry.reasoning) || !Array.isArray(entry.reasoning.effort_levels)) {
+		return undefined;
+	}
+	const efforts: Effort[] = [];
+	for (const level of entry.reasoning.effort_levels) {
+		const raw = isRecord(level) ? level.value : undefined;
+		if (typeof raw !== "string") continue;
+		const effort = HYPER_EFFORT_BY_WIRE_VALUE[raw];
+		if (effort !== undefined && !efforts.includes(effort)) {
+			efforts.push(effort);
+		}
+	}
+	if (efforts.length === 0) return undefined;
+	const defaultRaw = entry.reasoning.default_effort_level;
+	const defaultLevel = typeof defaultRaw === "string" ? HYPER_EFFORT_BY_WIRE_VALUE[defaultRaw] : undefined;
+	return {
+		mode: "effort",
+		efforts: efforts.sort((a, b) => THINKING_EFFORTS.indexOf(a) - THINKING_EFFORTS.indexOf(b)),
+		...(defaultLevel && efforts.includes(defaultLevel) && { defaultLevel }),
+	};
+}
+
+/**
+ * Hyper bills cache-hit tokens at `pricing.cache_hit` and cache creation at
+ * `pricing.cache_create`. Cached tokens surface through the OpenAI
+ * `prompt_tokens_details.cached_tokens` hook.
+ */
+function mapHyperCost(entry: OpenAICompatibleModelRecord): ModelSpec<"openai-completions">["cost"] {
+	if (!isRecord(entry.pricing)) {
+		return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+	}
+	const pricing = entry.pricing;
+	return {
+		input: toPositiveNumber(pricing.input, 0),
+		output: toPositiveNumber(pricing.output, 0),
+		cacheRead: toPositiveNumber(pricing.cache_hit, 0),
+		cacheWrite: toPositiveNumber(pricing.cache_create, 0),
+	};
+}
+
+function mapHyperModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+): ModelSpec<"openai-completions"> {
+	const thinking = mapHyperThinking(entry);
+	const capabilities = isRecord(entry.capabilities) ? entry.capabilities : undefined;
+	return {
+		...defaults,
+		name: toModelName(entry.display_name, defaults.name),
+		reasoning: thinking !== undefined,
+		input: capabilities?.vision === true ? ["text", "image"] : ["text"],
+		contextWindow: toPositiveNumber(entry.context_window, null),
+		maxTokens: toPositiveNumber(entry.max_output_tokens, null),
+		cost: mapHyperCost(entry),
+		...(thinking && { thinking }),
+	};
+}
+
+/**
+ * Hyper's `/v1/models` is public and carries the live per-model tariff, so
+ * discovery runs with or without an API key and always reports the endpoint
+ * snapshot as the authoritative catalog.
+ */
+export function hyperModelManagerOptions(config?: HyperModelManagerConfig): ModelManagerOptions<"openai-completions"> {
+	// Custom base URLs in this repo conventionally point at the host, not the
+	// `/v1` surface; normalize here the same way every sibling provider does.
+	const baseUrl = config?.baseUrl?.trim().replace(/\/+$/, "");
+	return createOpenAICompatibleModelManagerOptions({
+		api: "openai-completions",
+		providerId: "charm-hyper",
+		defaultBaseUrl: HYPER_BASE_URL,
+		config: { ...config, baseUrl: baseUrl ? (baseUrl.endsWith("/v1") ? baseUrl : `${baseUrl}/v1`) : undefined },
+		dynamicModelsAuthoritative: true,
+		mapModel: mapHyperModel,
+	});
+}

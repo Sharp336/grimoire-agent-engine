@@ -26,6 +26,7 @@ import {
 	gmiCloudModelManagerOptions,
 	groqModelManagerOptions,
 	huggingfaceModelManagerOptions,
+	hyperModelManagerOptions,
 	kiloModelManagerOptions,
 	kimiCodeModelManagerOptions,
 	litellmModelManagerOptions,
@@ -468,6 +469,14 @@ export const CATALOG_PROVIDERS = [
 			label: "Wafer Serverless",
 			oauthProvider: "wafer-serverless",
 		},
+	},
+	{
+		id: "charm-hyper",
+		defaultModel: "deepseek-v4-pro",
+		envVars: ["HYPER_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => hyperModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "Charm Hyper", allowUnauthenticated: true },
 	},
 	{
 		id: "coreweave",

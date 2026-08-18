@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Charm Hyper (`charm-hyper`) provider registration with API-key login flow (`HYPER_API_KEY`, keys prefixed `sk-hyper-`).
+
 ## [17.3.7] - 2026-08-17
 
 ### Changed
