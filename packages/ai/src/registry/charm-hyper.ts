@@ -5,7 +5,7 @@ import type { ProviderDefinition } from "./types";
 
 const innerLogin = createApiKeyLogin({
 	providerLabel: "Charm Hyper",
-	authUrl: "https://hyper.charm.land/keys",
+	authUrl: "https://hyper.charm.land/",
 	instructions:
 		"Create or copy your API key from the Hyper dashboard (hyper.charm.land is Charm's public inference gateway, unaffiliated with this project)",
 	promptMessage: "Paste your Hyper API key",
