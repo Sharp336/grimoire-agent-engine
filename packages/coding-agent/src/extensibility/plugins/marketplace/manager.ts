@@ -304,6 +304,7 @@ export class MarketplaceManager {
 		try {
 			version = await this.#resolvePluginVersion(pluginEntry, sourcePath);
 			cachePath = await cachePlugin(sourcePath, this.#opts.pluginsCacheDir, marketplace, name, version);
+			await this.#installPluginDependencies(cachePath);
 			await this.#writeEmbeddedLspConfig(pluginEntry, cachePath);
 			await this.#writeEmbeddedDapConfig(pluginEntry, cachePath);
 		} finally {
@@ -790,6 +791,43 @@ export class MarketplaceManager {
 
 	async #writeRuntimeConfig(scope: "user" | "project", config: PluginRuntimeConfig): Promise<void> {
 		await Bun.write(this.#runtimeLockPath(scope), JSON.stringify(config, null, 2));
+	}
+
+	async #installPluginDependencies(cachePath: string): Promise<void> {
+		try {
+			const pkgFile = Bun.file(path.join(cachePath, "package.json"));
+			if (!(await pkgFile.exists())) return;
+			const pkg = (await pkgFile.json()) as Record<string, unknown>;
+			const deps = pkg["dependencies"];
+			const hasDeps =
+				deps !== null && typeof deps === "object" && Object.keys(deps as Record<string, unknown>).length > 0;
+			if (!hasDeps) return;
+			const proc = Bun.spawn(["bun", "install", "--ignore-scripts"], {
+				cwd: cachePath,
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			const [exitCode, stdout, stderr] = await Promise.all([
+				proc.exited,
+				new Response(proc.stdout).text(),
+				new Response(proc.stderr).text(),
+			]);
+			if (exitCode !== 0) {
+				logger.warn("Failed to install marketplace plugin dependencies", {
+					cachePath,
+					exitCode,
+					stdout,
+					stderr,
+				});
+			} else {
+				logger.debug("Installed marketplace plugin dependencies", { cachePath });
+			}
+		} catch (err) {
+			logger.warn("Failed to install marketplace plugin dependencies", {
+				cachePath,
+				error: String(err),
+			});
+		}
 	}
 
 	async #resolvePluginPackageName(installPath: string, fallbackName: string): Promise<string> {
