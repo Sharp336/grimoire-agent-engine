@@ -21,7 +21,8 @@ import type {
 
 const CONTINUATION_PROMPT = prompt.render(continuationPrompt);
 const HISTORICAL_TOOL_DESCRIPTION = prompt.render(historicalToolDescriptionPrompt);
-const TOOL_RESULT_IMAGE_PLACEHOLDER = "(see attached image)";
+const CURRENT_TOOL_RESULT_IMAGE_PLACEHOLDER = "(see attached image)";
+const HISTORICAL_IMAGE_PLACEHOLDER = "(image omitted from history)";
 const TOOL_RESULT_MAX_BYTES = 25_000;
 const HISTORY_BASE_BYTES = 850_000;
 const HISTORY_BASE_TOKENS = 200_000;
@@ -104,15 +105,11 @@ function truncateUtf8(text: string, maxBytes: number): string {
 function toolResult(
 	message: ToolResultMessage,
 	normalizeId: (id: string) => string,
-	images: readonly KiroImageBlock[],
+	imagePlaceholder: string,
 ): KiroToolResult {
 	const text = textContent(message);
 	return {
-		content: [
-			{
-				text: truncateUtf8(text || (images.length > 0 ? TOOL_RESULT_IMAGE_PLACEHOLDER : ""), TOOL_RESULT_MAX_BYTES),
-			},
-		],
+		content: [{ text: truncateUtf8(text || imagePlaceholder, TOOL_RESULT_MAX_BYTES) }],
 		status: message.isError ? "error" : "success",
 		toolUseId: normalizeId(message.toolCallId),
 	};
@@ -147,22 +144,17 @@ function userMessage(content: string, modelId: string): KiroUserInputMessage {
 function ordinaryImages(messages: readonly KiroOrdinaryMessage[]): KiroImageBlock[] {
 	return messages.flatMap(imageContent);
 }
-function resultCarrier(
+function historicalResultCarrier(
 	group: KiroAssistantGroup,
 	modelId: string,
 	normalizeId: (id: string) => string,
 	content: string,
-	includeImages: boolean,
 ): KiroUserInputMessage {
-	const images: KiroImageBlock[] = [];
-	const results = group.results.map(result => {
-		const resultImages = imageContent(result);
-		if (includeImages) images.push(...resultImages);
-		return toolResult(result, normalizeId, resultImages);
-	});
+	const results = group.results.map(result =>
+		toolResult(result, normalizeId, imageContent(result).length > 0 ? HISTORICAL_IMAGE_PLACEHOLDER : ""),
+	);
 	return {
 		...userMessage(content, modelId),
-		...(includeImages && images.length > 0 ? { images } : {}),
 		userInputMessageContext: { toolResults: results },
 	};
 }
@@ -218,17 +210,17 @@ export function transformKiroRequest(
 		const ordinary = joinMessageText(segment.group.messages);
 		if (segment.group.resultGroup) {
 			history.push({
-				userInputMessage: resultCarrier(
+				userInputMessage: historicalResultCarrier(
 					segment.group.resultGroup,
 					modelId,
 					id => normalizer.normalize(id),
 					ordinary,
-					false,
 				),
 			});
 			continue;
 		}
 		let content = ordinary;
+		if (!content && ordinaryImages(segment.group.messages).length > 0) content = HISTORICAL_IMAGE_PLACEHOLDER;
 		if (systemPending) {
 			content = joinPromptContent(systemPending, content);
 			systemPending = "";
@@ -247,7 +239,11 @@ export function transformKiroRequest(
 				systemPending = "";
 			}
 			currentContext.toolResults = plan.current.group.resultGroup.results.map(result =>
-				toolResult(result, id => normalizer.normalize(id), imageContent(result)),
+				toolResult(
+					result,
+					id => normalizer.normalize(id),
+					imageContent(result).length > 0 ? CURRENT_TOOL_RESULT_IMAGE_PLACEHOLDER : "",
+				),
 			);
 			currentImages = [
 				...ordinaryImages(plan.current.group.messages),

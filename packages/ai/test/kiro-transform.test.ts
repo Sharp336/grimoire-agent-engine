@@ -360,7 +360,7 @@ describe("Kiro request transformation", () => {
 		const resultEntry = history.find(entry => entry.userInputMessage?.userInputMessageContext?.toolResults)
 			?.userInputMessage?.userInputMessageContext?.toolResults?.[0];
 
-		expect(resultEntry?.content).toEqual([{ text: "(see attached image)" }]);
+		expect(resultEntry?.content).toEqual([{ text: "(image omitted from history)" }]);
 		expect(
 			history.find(entry => entry.userInputMessage?.userInputMessageContext?.toolResults)?.userInputMessage?.images,
 		).toBeUndefined();
@@ -406,6 +406,25 @@ describe("Kiro request transformation", () => {
 			assistantEntries.flatMap(entry => entry.assistantResponseMessage?.toolUses?.map(use => use.toolUseId) ?? []),
 		);
 		expect(resultEntry?.images).toBeUndefined();
+	});
+	test("marks stripped image-only user history without emitting an empty turn", () => {
+		const context: Context = {
+			messages: [
+				{
+					role: "user",
+					content: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }],
+					timestamp: 0,
+				},
+				assistantText("The image shows a dashboard", 1),
+				{ role: "user", content: "Continue", timestamp: 2 },
+			],
+		};
+
+		const historicalUser = transformKiroRequest(createModel(), context).conversationState.history?.[0]
+			?.userInputMessage;
+
+		expect(historicalUser?.content).toBe("(image omitted from history)");
+		expect(historicalUser?.images).toBeUndefined();
 	});
 
 	test("replays visible assistant text without provisional reasoning", () => {
