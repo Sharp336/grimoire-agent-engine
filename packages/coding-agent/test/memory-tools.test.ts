@@ -31,6 +31,11 @@ import { MemoryEditTool } from "@oh-my-pi/pi-coding-agent/tools/memory-edit";
 import { MemoryRecallTool } from "@oh-my-pi/pi-coding-agent/tools/memory-recall";
 import { MemoryReflectTool } from "@oh-my-pi/pi-coding-agent/tools/memory-reflect";
 import { MemoryRetainTool } from "@oh-my-pi/pi-coding-agent/tools/memory-retain";
+import { MemoryLinkTool } from "@oh-my-pi/pi-coding-agent/tools/memory-link";
+import { MemoryRelatedTool } from "@oh-my-pi/pi-coding-agent/tools/memory-related";
+import { MemoryForgetTool } from "@oh-my-pi/pi-coding-agent/tools/memory-forget";
+
+
 import { resetMemoryForTests } from "@oh-my-pi/pi-mnemopi";
 import { logger, TempDir } from "@oh-my-pi/pi-utils";
 
@@ -251,9 +256,15 @@ describe("Mnemopi tool factories", () => {
 		expect(MemoryRetainTool.createIf(localSession)).toBeNull();
 		expect(MemoryRecallTool.createIf(localSession)).toBeNull();
 		expect(MemoryReflectTool.createIf(localSession)).toBeNull();
+		expect(MemoryLinkTool.createIf(localSession)).toBeNull();
+		expect(MemoryRelatedTool.createIf(localSession)).toBeNull();
+		expect(MemoryForgetTool.createIf(localSession)).toBeNull();
+		expect(MemoryLinkTool.createIf(makeSession(hindsightSettings))).toBeNull();
+
 		expect(MemoryEditTool.createIf(makeSession(offSettings))).toBeNull();
 		expect(MemoryEditTool.createIf(makeSession(hindsightSettings))).toBeNull();
 	});
+
 
 	it("retain/recall/reflect/edit factories return tool instances when memory.backend === mnemopi", () => {
 		const settings = Settings.isolated({ "memory.backend": "mnemopi" });
@@ -262,7 +273,24 @@ describe("Mnemopi tool factories", () => {
 		expect(MemoryRecallTool.createIf(session)).toBeInstanceOf(MemoryRecallTool);
 		expect(MemoryReflectTool.createIf(session)).toBeInstanceOf(MemoryReflectTool);
 		expect(MemoryEditTool.createIf(session)).toBeInstanceOf(MemoryEditTool);
+		expect(MemoryLinkTool.createIf(session)).toBeNull();
+		expect(MemoryRelatedTool.createIf(session)).toBeNull();
+		expect(MemoryForgetTool.createIf(session)).toBeNull();
+
 	});
+
+	it("mnemon-only tools mount only for memory.backend === mnemon", () => {
+		const session = makeSession(Settings.isolated({ "memory.backend": "mnemon" }));
+		expect(MemoryLinkTool.createIf(session)).toBeInstanceOf(MemoryLinkTool);
+		expect(MemoryRelatedTool.createIf(session)).toBeInstanceOf(MemoryRelatedTool);
+		expect(MemoryForgetTool.createIf(session)).toBeInstanceOf(MemoryForgetTool);
+		expect(MemoryRetainTool.createIf(session)).toBeInstanceOf(MemoryRetainTool);
+		expect(MemoryRecallTool.createIf(session)).toBeInstanceOf(MemoryRecallTool);
+		expect(MemoryReflectTool.createIf(session)).toBeNull();
+		expect(MemoryForgetTool.createIf(session)?.approval).toBe("write");
+	});
+
+
 });
 
 describe("retain.execute", () => {

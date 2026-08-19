@@ -3,7 +3,9 @@ import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { sanitizeSkillName, writeManagedSkill } from "../autolearn/managed-skills";
 import { isNameClaimedByAuthoredSkill } from "../extensibility/skills";
 import { localBackend } from "../memory-backend/local-backend";
+import { mnemonBackend } from "../mnemon/backend";
 import learnDescription from "../prompts/tools/learn.md" with { type: "text" };
+
 import type { ToolSession } from ".";
 
 const learnSchema = type({
@@ -44,15 +46,25 @@ export class LearnTool implements AgentTool<typeof learnSchema> {
 	static createIf(session: ToolSession): LearnTool | null {
 		if (!session.settings.get("autolearn.enabled")) return null;
 		const backend = session.settings.get("memory.backend");
-		if (backend !== "hindsight" && backend !== "mnemopi" && backend !== "local") return null;
+		if (backend !== "hindsight" && backend !== "mnemopi" && backend !== "mnemon" && backend !== "local") return null;
 		return new LearnTool(session);
 	}
+
 
 	async execute(_id: string, params: LearnParams): Promise<AgentToolResult> {
 		// 1) Persist or queue the lesson to long-term memory (mirrors MemoryRetainTool).
 		const backend = this.session.settings.get("memory.backend");
 		let memoryMessage = "Lesson stored";
-		if (backend === "mnemopi") {
+		if (backend === "mnemon") {
+			const result = await mnemonBackend.save?.(
+				{ agentDir: this.session.settings.getAgentDir(), cwd: this.session.settings.getCwd(), session: this.session as never },
+				{ content: params.memory, context: params.context, source: "coding-agent-learn", importance: 3 },
+			);
+			if (!result || result.stored === 0) {
+				throw new Error(result?.message || "Mnemon did not store the lesson.");
+			}
+		} else if (backend === "mnemopi") {
+
 			const state = this.session.getMnemopiSessionState?.();
 			if (!state) {
 				throw new Error("Mnemopi backend is not initialised for this session.");

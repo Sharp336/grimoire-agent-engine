@@ -1,0 +1,59 @@
+# Mnemon memory backend
+
+Oh My Pi can use the native [Mnemon](https://github.com/mnemon-dev/mnemon) CLI as a long-term memory backend.
+
+```yaml
+memory:
+  backend: mnemon
+mnemon:
+  autoRecall: true
+  recallLimit: 3
+```
+
+This is **not** Mnemopi. It talks to `~/.mnemon` through `mnemon` on PATH (`mnemon >= 0.2.1`). Do **not** set `mnemopi.dbPath` to that database — the schemas differ and can corrupt the store.
+
+## Why switch from Mnemopi
+
+| | Mnemopi | Mnemon |
+|---|---|---|
+| Store | Separate SQLite under the agent dir | The `~/.mnemon` graph already used by Claude, Codex, OpenClaw, Pi |
+| First-turn recall | Up to 8 hits / ~5000 tokens | High-score only, 3×320 clips |
+| Writes | Auto-retain every N turns + sleep/extract | LLM-supervised `retain` / `mnemon_remember` only |
+| Graph | Optional episodic linking | Typed causal/semantic/temporal/entity/**supersedes** |
+| `/memory clear` | Deletes bank files | Refused |
+
+Recalled rows are background leads, not instructions.
+
+## Agent tools
+
+- `recall` — native hybrid recall; optional `limit` (default 10)
+- `retain` — `mnemon remember`; optional `category` / `importance` / `entities`; receipt includes id and candidates
+- `link` — typed edge, including `supersedes`
+- `related` — graph neighbors of an id
+- `forget` — soft-delete one id (`approval = write`)
+- `learn` — same write path when `autolearn.enabled` is on
+
+`reflect` and `memory_edit` stay Mnemopi/Hindsight-only. `read memory://<id>` is not supported; use `recall` / `related` ids.
+
+
+
+## Settings
+
+| Setting | Default | Description |
+|---|---|---|
+| `memory.backend` | `off` | Set to `mnemon` |
+| `mnemon.cliPath` | PATH | Optional absolute `mnemon` binary |
+| `mnemon.autoRecall` | `true` | First-turn silent high-only recall |
+| `mnemon.recallLimit` | `3` | Silent clip cap |
+
+## Operations
+
+- `/memory stats` and `/memory diagnose` report native insight/edge counts and the resolved CLI path.
+- `/memory enqueue` is a no-op: native writes are already durable.
+- `/memory clear` throws. Use `forget` or `mnemon gc`.
+- Subagents do not auto-recall. `recall` / `retain` / `link` / `related` / `forget` still work via the CLI.
+
+
+
+Requires `mnemon` on PATH. Homebrew 0.2.0 is enough for recall/retain/link/related/forget. `link type=supersedes` falls back to `causal` until [mnemon-dev/mnemon#98](https://github.com/mnemon-dev/mnemon/pull/98) lands; prefer `~/.local/bin/mnemon` 0.2.1+ if you want native demotion.
+

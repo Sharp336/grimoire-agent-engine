@@ -5,8 +5,20 @@
 ### Added
 
 - Added `providers.cacheRetention` setting (`/settings` → Providers → Protocol) to control prompt-cache retention per request: `auto` keeps the provider default (Anthropic: 5m entries with idle keep-alive refreshes), `short` forces 5m, `long` restores 1h TTLs where supported and disables the keep-alive refresh loop, `none` disables prompt caching.
+- Added `memory.backend: mnemon`, a native [Mnemon](https://github.com/mnemon-dev/mnemon) CLI backend against `~/.mnemon`. It occupies the same host slot as Mnemopi (`recall` / `retain`, `/memory stats`, first-turn silent recall, compaction context) without using the Mnemopi SQLite schema. Silent recall is high-score only. `/memory clear` is refused. `reflect` and `memory_edit` stay Mnemopi/Hindsight-only. Do not point `mnemopi.dbPath` at `~/.mnemon`.
+- Added host `link` for `memory.backend: mnemon` (`id1`/`id2`/`type`/`weight`, including `supersedes`). `retain` now returns the new insight id and link candidates so the graph loop can close without dropping to the CLI. `supersedes` falls back to `causal` on CLIs that reject the fifth edge type.
+
+- Added host `related` and `forget` for `memory.backend: mnemon`. `retain` now accepts `category`, `importance`, and `entities` instead of hardcoding `context`/`3`. `recall` accepts optional `limit`.
+
+
+
+### Fixed
+
+- Fixed `/memory stats` crashing on `memory.backend: mnemon` (`undefined is not an object (evaluating 'this.status')`) when the TUI extracted the unbound hook.
+
 
 ## [17.3.7] - 2026-08-17
+
 
 ### Changed
 

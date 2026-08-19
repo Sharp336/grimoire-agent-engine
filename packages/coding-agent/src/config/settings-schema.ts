@@ -2615,17 +2615,17 @@ export const SETTINGS_SCHEMA = {
 	"memories.summaryInjectionTokenLimit": { type: "number", default: 5000 },
 
 	// Memory backend selector — picks between local memories pipeline,
-	// Mnemopi local SQLite, Hindsight remote memory, or off. The legacy
-	// `memories.enabled` flag is migration input only; see config/settings.ts.
+	// Mnemopi local SQLite, native Mnemon CLI, Hindsight remote memory, or off.
+	// The legacy `memories.enabled` flag is migration input only; see config/settings.ts.
 	"memory.backend": {
 		type: "enum",
-		values: ["off", "local", "hindsight", "mnemopi"] as const,
+		values: ["off", "local", "hindsight", "mnemopi", "mnemon"] as const,
 		default: "off",
 		ui: {
 			tab: "memory",
 			group: "General",
 			label: "Memory Backend",
-			description: "Off, local summary pipeline, Mnemopi SQLite, or Hindsight remote memory",
+			description: "Off, local summary pipeline, Mnemopi SQLite, native Mnemon CLI, or Hindsight remote memory",
 			options: [
 				{ value: "off", label: "Off", description: "No memory subsystem runs" },
 				{ value: "local", label: "Local", description: "Local rollout summarisation pipeline (memory_summary.md)" },
@@ -2635,9 +2635,15 @@ export const SETTINGS_SCHEMA = {
 					label: "Mnemopi",
 					description: "Local SQLite recall/retain backend with optional embeddings",
 				},
+				{
+					value: "mnemon",
+					label: "Mnemon",
+					description: "Native Mnemon CLI against ~/.mnemon (typed graph, no auto-retain drain)",
+				},
 			],
 		},
 	},
+
 
 	// Auto-Learn (experimental): post-stop nudge to capture lessons to memory
 	// and mint/enhance isolated managed skills under ~/.omp/agent/managed-skills.
@@ -2910,6 +2916,33 @@ export const SETTINGS_SCHEMA = {
 	"mnemopi.recallMaxQueryChars": { type: "number", default: 4000 },
 	"mnemopi.injectionTokenLimit": { type: "number", default: 5000 },
 	"mnemopi.debug": { type: "boolean", default: false },
+
+	// Native Mnemon CLI backend. Talks to the existing ~/.mnemon store.
+	// Never point mnemopi.dbPath at that database — schemas differ.
+	"mnemon.cliPath": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "memory",
+			group: "Mnemon",
+			label: "Mnemon CLI Path",
+			description: "Optional absolute path to mnemon. Defaults to PATH, then ~/.local/bin, then Homebrew.",
+			condition: "mnemonActive",
+		},
+	},
+	"mnemon.autoRecall": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "memory",
+			group: "Mnemon",
+			label: "Mnemon Auto Recall",
+			description: "Inject high-score native recall into the first turn of each session",
+			condition: "mnemonActive",
+		},
+	},
+	"mnemon.recallLimit": { type: "number", default: 3 },
+
 
 	// Hindsight (https://hindsight.vectorize.io)
 	"hindsight.apiUrl": {
