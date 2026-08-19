@@ -305,24 +305,27 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 		// `memory_edit update` and lets agents inspect the full content of a
 		// clipped recall preview before overwriting it (issue #4443).
 		if (namespace !== MEMORY_NAMESPACE) {
-			const mnemopiStates = mnemopiSessionStatesFromRegistry();
-			const hindsightActive =
-				backend === "hindsight" ||
-				(mnemopiStates.length === 0 &&
-					AgentRegistry.global()
-						.list()
-						.some(ref => ref.session?.getHindsightSessionState?.()));
-			if (hindsightActive) {
-				throw new Error(
-					"Hindsight memories are not addressable via memory://. Recall results are final — use `recall` to search or `reflect` to synthesize. `read memory://<id>` is only available with memory.backend=mnemopi.",
-				);
-			}
 			if (backend === "mnemon") {
 				throw new Error(
 					"Native Mnemon memories are not addressable via memory://. Use `recall` for ids, then `related` / `forget`. The CLI is an alternative. `read memory://<id>` is only available with memory.backend=mnemopi.",
 				);
 			}
-
+			if (backend === "hindsight") {
+				throw new Error(
+					"Hindsight memories are not addressable via memory://. Recall results are final — use `recall` to search or `reflect` to synthesize. `read memory://<id>` is only available with memory.backend=mnemopi.",
+				);
+			}
+			const mnemopiStates = mnemopiSessionStatesFromRegistry();
+			const hindsightActive =
+				mnemopiStates.length === 0 &&
+				AgentRegistry.global()
+					.list()
+					.some(ref => ref.session?.getHindsightSessionState?.());
+			if (hindsightActive) {
+				throw new Error(
+					"Hindsight memories are not addressable via memory://. Recall results are final — use `recall` to search or `reflect` to synthesize. `read memory://<id>` is only available with memory.backend=mnemopi.",
+				);
+			}
 			if (mnemopiStates.length === 0) {
 				throw new Error(
 					`Unknown memory namespace: ${namespace}. Supported: ${MEMORY_NAMESPACE} (file-backed memory summary), or a mnemopi memory id when memory.backend=mnemopi is active.`,

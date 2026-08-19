@@ -10,10 +10,11 @@ import {
 	resetMnemonConversationTracking,
 } from "../src/mnemon/backend";
 import { applyMnemonRecallQuality, focusMnemonQuery, formatMnemonSilentRecall } from "../src/mnemon/quality";
+import { LearnTool } from "../src/tools/learn";
 
 describe("mnemon quality", () => {
-	it("silent mode keeps only high-score rows", () => {
-		const filtered = applyMnemonRecallQuality(
+	it("drops superseded rows in both silent and explicit recall modes", () => {
+		const silent = applyMnemonRecallQuality(
 			[
 				{ id: "high", content: "keep", score: 0.81 },
 				{ id: "medium", content: "drop", score: 0.4 },
@@ -21,7 +22,28 @@ describe("mnemon quality", () => {
 			],
 			{ limit: 3, mode: "silent" },
 		);
-		expect(filtered.results.map(row => row.id)).toEqual(["high"]);
+		expect(silent.results.map(row => row.id)).toEqual(["high"]);
+
+		const explicit = applyMnemonRecallQuality(
+			[
+				{ id: "high", content: "keep", score: 0.81 },
+				{ id: "medium", content: "keep", score: 0.4 },
+				{ id: "old", content: "drop", score: 0.9, superseded: true },
+			],
+			{ limit: 3, mode: "explicit" },
+		);
+		expect(explicit.results.map(row => row.id)).toEqual(["high", "medium"]);
+	});
+
+	it("clamps limit 0 to 1 instead of falling back to default 10", () => {
+		const filtered = applyMnemonRecallQuality(
+			[
+				{ id: "one", content: "first", score: 0.8 },
+				{ id: "two", content: "second", score: 0.7 },
+			],
+			{ limit: 0, mode: "explicit" },
+		);
+		expect(filtered.results.length).toBe(1);
 	});
 
 	it("formats every already-limited silent row", () => {
@@ -104,11 +126,35 @@ describe("mnemonBackend", () => {
 		expect(state!.lastRecallSnippet).toBeUndefined();
 	});
 
-	it("returns static developer instructions mentioning leads-not-authority", async () => {
+	it("renders developer instructions and incorporates lastRecallSnippet when present", async () => {
 		const settings = Settings.isolated({ "memory.backend": "mnemon" });
-		const text = await mnemonBackend.buildDeveloperInstructions("/tmp/agent", settings);
-		expect(text).toContain("retrieval leads");
-		expect(text).toContain("no automatic retain drain");
+		const session = { sessionId: "s-snippet", settings } as never;
+		await mnemonBackend.start({
+			session,
+			settings,
+			modelRegistry: {} as never,
+			agentDir: "/tmp/agent",
+			taskDepth: 0,
+		});
+		const state = getMnemonSessionState(session);
+		expect(state).toBeDefined();
+
+		const initial = await mnemonBackend.buildDeveloperInstructions("/tmp/agent", settings, session);
+		expect(initial).toBeDefined();
+
+		state!.lastRecallSnippet = "Recalled memories snippet test marker";
+		const withSnippet = await mnemonBackend.buildDeveloperInstructions("/tmp/agent", settings, session);
+		expect(withSnippet).toContain("Recalled memories snippet test marker");
+	});
+
+	it("formats compaction context with focused query", async () => {
+		const emptyContext = await mnemonBackend.preCompactionContext?.([]);
+		expect(emptyContext).toBeDefined();
+
+		const withUser = await mnemonBackend.preCompactionContext?.([
+			{ role: "user", content: "Please check the authentication middleware refactor" } as never,
+		]);
+		expect(withUser).toContain("authentication");
 	});
 
 	it("renders /memory stats when the hook is extracted unbound", async () => {
@@ -210,5 +256,105 @@ exit 1
 		expect(result?.status).toBe("linked");
 		expect(result?.type).toBe("causal");
 		expect(result?.message).toContain("causal");
+	});
+
+	it("folds input.context and terminates flags before content and query", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "mnemon-cli-test-"));
+		const cli = join(dir, "mnemon");
+		writeFileSync(
+			cli,
+			`#!/usr/bin/env bash
+set -e
+args=("$@")
+if [[ "\${args[*]}" =~ remember ]]; then
+  dashdash_idx=-1
+  for ((i=0; i<\${#args[@]}; i++)); do
+    if [[ "\${args[i]}" == "--" ]]; then dashdash_idx=$i; fi
+  done
+  if [[ $dashdash_idx -lt 0 ]]; then
+    echo "missing -- separator before positional content" >&2
+    exit 1
+  fi
+  printf '{"id":"c47248fa-2aa5-4268-b49a-6a0d5f45d593","action":"added"}\\n'
+  exit 0
+elif [[ "\${args[*]}" =~ recall ]]; then
+  dashdash_idx=-1
+  for ((i=0; i<\${#args[@]}; i++)); do
+    if [[ "\${args[i]}" == "--" ]]; then dashdash_idx=$i; fi
+  done
+  if [[ $dashdash_idx -lt 0 ]]; then
+    echo "missing -- separator before query" >&2
+    exit 1
+  fi
+  printf '{"results":[{"id":"c47248fa-2aa5-4268-b49a-6a0d5f45d593","content":"matched","score":0.9}]}\\n'
+  exit 0
+fi
+echo "unexpected \${args[*]}" >&2
+exit 1
+`,
+		);
+		chmodSync(cli, 0o755);
+		const settings = Settings.isolated({ "memory.backend": "mnemon", "mnemon.cliPath": cli });
+		const ctx = { agentDir: "/tmp/agent", cwd: "/tmp/project", session: { settings } as never };
+
+		const saveRes = await mnemonBackend.save?.(ctx, {
+			content: "--watch flag behavior",
+			context: "investigated in cli.ts",
+		});
+		expect(saveRes?.stored).toBe(1);
+		expect(saveRes?.ids?.[0]).toBe("c47248fa-2aa5-4268-b49a-6a0d5f45d593");
+
+		const searchRes = await mnemonBackend.search?.(ctx, "--watch", { limit: 5 });
+		expect(searchRes?.count).toBe(1);
+		expect(searchRes?.items[0]?.content).toBe("matched");
+	});
+
+	it("returns replaced_id as id when action is skipped", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "mnemon-cli-dup-"));
+		const cli = join(dir, "mnemon");
+		writeFileSync(
+			cli,
+			`#!/usr/bin/env bash
+set -e
+printf '{"id":"new-unpersisted-id","replaced_id":"existing-persisted-uuid","action":"skipped"}\\n'
+`,
+		);
+		chmodSync(cli, 0o755);
+		const settings = Settings.isolated({ "memory.backend": "mnemon", "mnemon.cliPath": cli });
+		const ctx = { agentDir: "/tmp/agent", cwd: "/tmp/project", session: { settings } as never };
+
+		const result = await mnemonBackend.save?.(ctx, { content: "duplicate fact" });
+		expect(result?.stored).toBe(0);
+		expect(result?.message).toBe("skipped");
+		expect(result?.ids).toEqual(["existing-persisted-uuid"]);
+	});
+
+	it("learn tool succeeds without error when mnemon returns action: skipped", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "mnemon-cli-learn-"));
+		const cli = join(dir, "mnemon");
+		writeFileSync(
+			cli,
+			`#!/usr/bin/env bash
+set -e
+printf '{"id":"new-id","replaced_id":"existing-uuid","action":"skipped"}\\n'
+`,
+		);
+		chmodSync(cli, 0o755);
+		const settings = Settings.isolated({
+			"autolearn.enabled": true,
+			"memory.backend": "mnemon",
+			"mnemon.cliPath": cli,
+		});
+		const session = {
+			cwd: "/tmp/project",
+			hasUI: false,
+			settings,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+		};
+		const tool = LearnTool.createIf(session as never);
+		expect(tool).toBeInstanceOf(LearnTool);
+		const execution = await tool!.execute("1", { memory: "Already remembered rule" });
+		expect(execution.content[0]?.text).toContain("Lesson already present in memory");
 	});
 });

@@ -632,4 +632,14 @@ describe("MemoryProtocolHandler — mnemon", () => {
 			/Native Mnemon memories are not addressable via memory:\/\/[\s\S]*`related` \/ `forget`/,
 		);
 	});
+
+	it("prioritizes explicit mnemon backend over cross-session hindsight fallback", async () => {
+		await withHindsightSession(async () => {
+			const router = InternalUrlRouter.instance();
+			const settings = Settings.isolated({ "memory.backend": "mnemon" });
+			await expect(router.resolve("memory://a1b2c3d4e5f6", { settings })).rejects.toThrow(
+				/Native Mnemon memories are not addressable via memory:\/\//,
+			);
+		});
+	});
 });

@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { $which } from "@oh-my-pi/pi-utils";
 
 const MAX_OUTPUT_BYTES = 256 * 1024;
@@ -50,6 +51,8 @@ async function spawnOnce(command: string, args: string[], options: MnemonRunOpti
 	});
 	let stdout = "";
 	let stderr = "";
+	const stdoutDecoder = new StringDecoder("utf8");
+	const stderrDecoder = new StringDecoder("utf8");
 	let bytes = 0;
 	let settled = false;
 	let pendingError: Error | null = null;
@@ -68,7 +71,6 @@ async function spawnOnce(command: string, args: string[], options: MnemonRunOpti
 	const stop = (error: Error) => {
 		pendingError = error;
 		if (child.exitCode !== null || child.signalCode !== null) {
-			finish(error);
 			return;
 		}
 		child.kill("SIGTERM");
@@ -85,7 +87,7 @@ async function spawnOnce(command: string, args: string[], options: MnemonRunOpti
 			stop(new Error(`mnemon output exceeded ${MAX_OUTPUT_BYTES} bytes`));
 			return;
 		}
-		const text = chunk.toString("utf8");
+		const text = kind === "stdout" ? stdoutDecoder.write(chunk) : stderrDecoder.write(chunk);
 		if (kind === "stdout") stdout += text;
 		else stderr += text;
 	};
@@ -96,9 +98,10 @@ async function spawnOnce(command: string, args: string[], options: MnemonRunOpti
 		finish(new Error(`failed to launch mnemon (${JSON.stringify(command)}): ${error.message}`));
 	});
 	child.on("close", exitCode => {
+		stdout += stdoutDecoder.end();
+		stderr += stderrDecoder.end();
 		finish(pendingError, pendingError ? undefined : { stdout, stderr, exitCode });
 	});
-
 	const timeout = setTimeout(() => {
 		stop(new Error(`mnemon did not respond within ${timeoutMs}ms`));
 	}, timeoutMs);

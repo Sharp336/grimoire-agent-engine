@@ -63,8 +63,11 @@ export class LearnTool implements AgentTool<typeof learnSchema> {
 				},
 				{ content: params.memory, context: params.context, source: "coding-agent-learn", importance: 3 },
 			);
-			if (!result || result.stored === 0) {
+			if (!result || (result.stored === 0 && result.message !== "skipped")) {
 				throw new Error(result?.message || "Mnemon did not store the lesson.");
+			}
+			if (result.message === "skipped") {
+				memoryMessage = "Lesson already present in memory";
 			}
 		} else if (backend === "mnemopi") {
 			const state = this.session.getMnemopiSessionState?.();

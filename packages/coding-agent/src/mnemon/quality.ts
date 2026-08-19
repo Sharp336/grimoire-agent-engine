@@ -31,7 +31,7 @@ export function parseMnemonRecallPayload(payload: unknown): MnemonRecallPayload 
 }
 
 function scoreDecision(row: MnemonRecallRow, mode: MnemonRecallMode) {
-	if (row.superseded && mode === "silent") return { action: "drop" as const, tier: "low" as const };
+	if (row.superseded) return { action: "drop" as const, tier: "low" as const };
 	const score = row.score;
 	if (score === undefined || score === null) {
 		return { action: mode === "silent" ? ("drop" as const) : ("keep" as const), tier: "unknown" as const };
@@ -54,7 +54,8 @@ export function applyMnemonRecallQuality(
 	options: { limit?: number; mode?: MnemonRecallMode },
 ) {
 	const mode = options.mode ?? "explicit";
-	const requested = Math.max(1, Math.min(TOOL_RECALL_MAX, Number(options.limit) || 10));
+	const num = Number(options.limit);
+	const requested = Math.max(1, Math.min(TOOL_RECALL_MAX, Number.isFinite(num) ? Math.round(num) : 10));
 	const evaluated = results.map(row => ({ row, decision: scoreDecision(row, mode) }));
 	const kept = evaluated.filter(entry => entry.decision.action === "keep");
 	const selected =
