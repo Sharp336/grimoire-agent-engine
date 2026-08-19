@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Focused live task and eval subagent previews on unfinished agents, collapsing settled rows into a status summary ([#8949](https://github.com/can1357/oh-my-pi/issues/8949)).
 
 ## [17.3.7] - 2026-08-17
 
