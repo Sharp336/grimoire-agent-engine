@@ -8,10 +8,12 @@ import {
 	formatCollabLink,
 } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
+import { aggregateSubagentCost } from "@oh-my-pi/pi-coding-agent/modes/components/agent-hub-projection";
 import {
 	countRunningSubagentBadgeAgents,
 	getRunningSubagentBadgeRegistry,
 } from "@oh-my-pi/pi-coding-agent/modes/running-subagent-badge";
+import type { ObservableSession } from "@oh-my-pi/pi-coding-agent/modes/session-observer-registry";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
@@ -150,6 +152,32 @@ describe("collab guest running-subagents badge", () => {
 			expect(ctx.collabGuest).toBe(guest);
 			expect(counts).toEqual([0, 1]);
 			expect(ctx.statusLine.subagentCount).toBe(1);
+			const guestRegistry = getRunningSubagentBadgeRegistry(guest);
+			const mirrored = guestRegistry.get("remote-one");
+			if (!mirrored) throw new Error("Expected mirrored remote-one agent");
+			expect(mirrored.session).toBeNull();
+			expect(mirrored.sessionFile).toBeNull();
+			const observedById = new Map<string, ObservableSession>([
+				[
+					"remote-one",
+					{
+						id: "remote-one",
+						kind: "subagent",
+						label: "Remote 1",
+						status: "completed",
+						lastUpdate: 0,
+						progress: { cost: 0.6 } as never,
+					},
+				],
+			]);
+			expect(
+				aggregateSubagentCost({
+					ownerId: "Main",
+					ownerSessionFile: "/sessions/host.jsonl",
+					rows: guestRegistry.list(),
+					observedById,
+				}),
+			).toBe(0);
 
 			nextWelcomeAgents = makeAgents(["remote-one", "remote-two"]);
 			const secondSnapshot = Promise.withResolvers<void>();

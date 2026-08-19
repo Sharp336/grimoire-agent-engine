@@ -235,6 +235,8 @@ class SessionEntryIndex {
 	#labels = new Map<string, string>();
 	#leaf: string | null = null;
 	#usage = emptyUsageStatistics();
+	#directCost = 0;
+	#hasAssistantUsage = false;
 
 	clear(): void {
 		this.#entriesById.clear();
@@ -242,6 +244,8 @@ class SessionEntryIndex {
 		this.#labels.clear();
 		this.#leaf = null;
 		this.#usage = emptyUsageStatistics();
+		this.#directCost = 0;
+		this.#hasAssistantUsage = false;
 	}
 
 	rebuild(entries: readonly SessionEntry[]): void {
@@ -263,6 +267,11 @@ class SessionEntryIndex {
 		}
 
 		addUsage(this.#usage, entryUsage(entry));
+		if (entry.type === "message" && entry.message.role === "assistant") {
+			this.#hasAssistantUsage = true;
+			const cost = entry.message.usage.cost.total;
+			if (Number.isFinite(cost)) this.#directCost += cost;
+		}
 	}
 
 	has(id: string): boolean {
@@ -307,6 +316,10 @@ class SessionEntryIndex {
 
 	usageSnapshot(): UsageStatistics {
 		return { ...this.#usage };
+	}
+
+	directUsageCost(): number | undefined {
+		return this.#hasAssistantUsage ? this.#directCost : undefined;
 	}
 
 	pathTo(id: string | null | undefined = this.#leaf): SessionEntry[] {
@@ -374,6 +387,7 @@ export type ReadonlySessionManager = Pick<
 	| "getBranch"
 	| "getHeader"
 	| "getEntries"
+	| "getDirectUsageCost"
 	| "getTree"
 	| "getUsageStatistics"
 	| "putBlob"
@@ -1916,6 +1930,10 @@ export class SessionManager {
 
 	getUsageStatistics(): UsageStatistics {
 		return this.#index.usageSnapshot();
+	}
+
+	getDirectUsageCost(): number | undefined {
+		return this.#index.directUsageCost();
 	}
 
 	/**

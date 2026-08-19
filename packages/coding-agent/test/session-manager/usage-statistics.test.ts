@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 describe("SessionManager usage statistics", () => {
 	it("accumulates premium requests from assistant messages and task tool results", () => {
@@ -48,6 +49,104 @@ describe("SessionManager usage statistics", () => {
 		expect(usage.input).toBe(12);
 		expect(usage.output).toBe(8);
 		expect(usage.premiumRequests).toBe(3);
+	});
+	it("separates direct assistant cost from embedded task cost", () => {
+		const session = SessionManager.inMemory();
+
+		session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+		session.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "hi" }],
+			api: "openai-completions",
+			provider: "openai",
+			model: "gpt-5",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 2.5, output: 0, cacheRead: 0, cacheWrite: 0, total: 2.5 },
+			},
+			stopReason: "stop",
+			timestamp: 2,
+		});
+		session.appendMessage({
+			role: "toolResult",
+			toolCallId: "task_1",
+			toolName: "task",
+			content: [{ type: "text", text: "task output" }],
+			details: {
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 1.25, output: 0, cacheRead: 0, cacheWrite: 0, total: 1.25 },
+				},
+			},
+			isError: false,
+			timestamp: 3,
+		});
+
+		expect(session.getUsageStatistics().cost).toBeCloseTo(3.75, 8);
+		expect(session.getDirectUsageCost()).toBeCloseTo(2.5, 8);
+	});
+
+	it("rebuilds direct assistant cost on reopen and clears it for a new session", async () => {
+		using tempDir = TempDir.createSync("@pi-usage-direct-cost-");
+		const session = SessionManager.create(tempDir.path(), tempDir.path());
+		session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+		session.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "hi" }],
+			api: "openai-completions",
+			provider: "openai",
+			model: "gpt-5",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 2.5, output: 0, cacheRead: 0, cacheWrite: 0, total: 2.5 },
+			},
+			stopReason: "stop",
+			timestamp: 2,
+		});
+		session.appendMessage({
+			role: "toolResult",
+			toolCallId: "task_1",
+			toolName: "task",
+			content: [{ type: "text", text: "task output" }],
+			details: {
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 1.25, output: 0, cacheRead: 0, cacheWrite: 0, total: 1.25 },
+				},
+			},
+			isError: false,
+			timestamp: 3,
+		});
+		await session.flush();
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persisted session file");
+		await session.close();
+
+		const reopened = await SessionManager.open(sessionFile, tempDir.path());
+		try {
+			expect(reopened.getUsageStatistics().cost).toBeCloseTo(3.75, 8);
+			expect(reopened.getDirectUsageCost()).toBeCloseTo(2.5, 8);
+			await reopened.newSession();
+			expect(reopened.getDirectUsageCost()).toBeUndefined();
+		} finally {
+			await reopened.close();
+		}
 	});
 
 	it("keeps orchestration usage out of ordinary input while preserving total tokens", () => {

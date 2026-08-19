@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import type { AgentMetricsSummary, AgentRef, AgentStatus } from "../../registry/agent-registry";
 import { MAIN_AGENT_ID } from "../../registry/agent-registry";
 import type { ObservableSession } from "../session-observer-registry";
@@ -21,6 +22,55 @@ export const STATUS_ORDER: Record<AgentStatus, number> = { running: 0, idle: 1, 
 
 function finiteMetric(value: number | undefined): number {
 	return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+function isDescendantOf(ownerId: string, ref: AgentRef, refsById: ReadonlyMap<string, AgentRef>): boolean {
+	let parentId = ref.parentId;
+	const seen = new Set<string>();
+	while (parentId && !seen.has(parentId)) {
+		if (parentId === ownerId) return true;
+		seen.add(parentId);
+		parentId = refsById.get(parentId)?.parentId;
+	}
+	return false;
+}
+
+function isCurrentSessionDescendant(ownerSessionFile: string | undefined, sessionFile: string | null): boolean {
+	if (!ownerSessionFile || !sessionFile) return false;
+	const ownerArtifactsDir = ownerSessionFile.endsWith(".jsonl")
+		? ownerSessionFile.slice(0, -".jsonl".length)
+		: ownerSessionFile;
+	const relative = path.relative(path.resolve(ownerArtifactsDir), path.resolve(sessionFile));
+	return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
+}
+
+function directCostForRef(ref: AgentRef): number | undefined {
+	return ref.session?.sessionManager?.getDirectUsageCost?.();
+}
+
+export function aggregateSubagentCost(args: {
+	ownerId: string;
+	ownerSessionFile?: string;
+	rows: readonly AgentRef[];
+	observedById: ReadonlyMap<string, ObservableSession>;
+}): number {
+	const refsById = new Map(args.rows.map(ref => [ref.id, ref]));
+	let total = 0;
+	for (const ref of args.rows) {
+		if (
+			ref.kind !== "sub" ||
+			!isDescendantOf(args.ownerId, ref, refsById) ||
+			!isCurrentSessionDescendant(args.ownerSessionFile, ref.sessionFile)
+		)
+			continue;
+		const durableCost = directCostForRef(ref);
+		const historyCost = ref.history?.metrics?.cost;
+		const observedCost = args.observedById.get(ref.id)?.progress?.cost;
+		const cost = [durableCost, historyCost, observedCost].find(
+			(value): value is number => typeof value === "number" && Number.isFinite(value),
+		);
+		if (cost !== undefined) total += cost;
+	}
+	return total;
 }
 
 /** Exact observer usage for one roster entry. */

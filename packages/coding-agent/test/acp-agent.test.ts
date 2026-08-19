@@ -1757,7 +1757,7 @@ describe("ACP agent", () => {
 		expect(names).not.toContain("loop");
 		expect(names).not.toContain("login");
 		expect(names).not.toContain("new");
-		expect(names).not.toContain("handoff");
+		expect(names).toContain("handoff");
 		expect(names).not.toContain("fork");
 		expect(names).not.toContain("btw");
 		expect(names).not.toContain("drop");

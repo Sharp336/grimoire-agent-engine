@@ -356,6 +356,7 @@ export class StatusLineComponent implements Component {
 	 * dependency graph; interactive-mode wires it to VibeSessionRegistry.
 	 */
 	#vibeWorkerTokenRate: (() => number | null) | null = null;
+	#subagentCostProvider: ((focusedAgentId?: string) => number) | null = null;
 	#collabStatus: CollabStatus | null = null;
 	#focusedAgentId: string | undefined;
 	#activeRepoCache: ActiveRepoCache | undefined;
@@ -620,6 +621,11 @@ export class StatusLineComponent implements Component {
 	 */
 	setVibeWorkerTokenRateProvider(provider: (() => number | null) | undefined): void {
 		this.#vibeWorkerTokenRate = provider ?? null;
+	}
+
+	setSubagentCostProvider(provider: ((focusedAgentId?: string) => number) | undefined): void {
+		this.#subagentCostProvider = provider ?? null;
+		this.invalidate();
 	}
 
 	setCollabStatus(status: CollabStatus | null): void {
@@ -1526,6 +1532,11 @@ export class StatusLineComponent implements Component {
 		return { usedTokens, contextWindow };
 	}
 
+	#getDirectSessionCost(fallback: number): number {
+		const directCost = this.session.sessionManager?.getDirectUsageCost?.();
+		return typeof directCost === "number" && Number.isFinite(directCost) ? directCost : fallback;
+	}
+
 	#buildSegmentContext(
 		width: number,
 		segmentOptions: StatusLineSettings["segmentOptions"],
@@ -1552,8 +1563,16 @@ export class StatusLineComponent implements Component {
 			premiumRequests: 0,
 			cost: 0,
 		};
+		const isCollabGuest = this.#collabStatus?.role === "guest";
+		const sessionCost = isCollabGuest
+			? aggregateUsageStats.cost
+			: this.#getDirectSessionCost(aggregateUsageStats.cost);
+		const providedSubagentCost = isCollabGuest ? 0 : (this.#subagentCostProvider?.(this.#focusedAgentId) ?? 0);
+		const subagentCost = Number.isFinite(providedSubagentCost) ? Math.max(0, providedSubagentCost) : 0;
 		const usageStats = {
 			...aggregateUsageStats,
+			cost: sessionCost,
+			subagentCost,
 			tokensPerSecond: this.#getTokensPerSecond(),
 		};
 

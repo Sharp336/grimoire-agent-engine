@@ -153,6 +153,7 @@ import {
 	type VibeParentSession,
 	VibeSessionRegistry,
 } from "../vibe/runtime";
+import { aggregateSubagentCost } from "./components/agent-hub-projection";
 import type { AssistantMessageComponent } from "./components/assistant-message";
 import type { BashExecutionComponent } from "./components/bash-execution";
 import { ChatBlock, type ChatBlockHost } from "./components/chat-block";
@@ -911,6 +912,21 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#inputController.notifyTitleGenerationStart();
 		});
 		this.#observerRegistry = new SessionObserverRegistry();
+		this.statusLine.setSubagentCostProvider(focusedAgentId => {
+			if (this.collabGuest) return 0;
+			const registry = getRunningSubagentBadgeRegistry(this.collabGuest);
+			const ownerSessionFile = focusedAgentId
+				? (registry.get(focusedAgentId)?.sessionFile ?? undefined)
+				: this.sessionManager.getSessionFile();
+			const observedById = new Map<string, ObservableSession>();
+			for (const observed of this.#observerRegistry.getSessions()) observedById.set(observed.id, observed);
+			return aggregateSubagentCost({
+				ownerId: focusedAgentId ?? MAIN_AGENT_ID,
+				ownerSessionFile,
+				rows: registry.list(),
+				observedById,
+			});
+		});
 	}
 
 	#handleMcpConnectionStatusEvent(event: McpConnectionStatusEvent): void {

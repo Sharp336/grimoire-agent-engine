@@ -34,6 +34,7 @@ function createContext(loopMode: SegmentContext["loopMode"]): SegmentContext {
 			orchestrationCacheRead: 0,
 			premiumRequests: 0,
 			cost: 0,
+			subagentCost: 0,
 			tokensPerSecond: null,
 		},
 		contextPercent: 0,
