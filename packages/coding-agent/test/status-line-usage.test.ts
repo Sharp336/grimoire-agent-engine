@@ -400,6 +400,37 @@ describe("usage status-line segment", () => {
 		expect(content).not.toContain("90%");
 	});
 
+	it("prefers Cursor included usage over legacy monthly request limits", async () => {
+		const component = makeComponent(
+			[
+				{
+					provider: "cursor",
+					limits: [
+						{
+							id: "cursor:requests:gpt-4",
+							scope: { windowId: "monthly" },
+							amount: { usedFraction: 0.9 },
+						},
+						{
+							id: "cursor:usd:individual-included",
+							scope: { windowId: "monthly" },
+							amount: { usedFraction: 0.00205 },
+						},
+					],
+				},
+			],
+			{ provider: "cursor" },
+		);
+
+		component.refreshUsageInBackground();
+		await flushUsageRefresh();
+		const content = stripVTControlCharacters(component.getTopBorder(200).content);
+
+		expect(content).toContain("mo");
+		expect(content).toContain("0%");
+		expect(content).not.toContain("90%");
+	});
+
 	it("renders all three OpenCode Go windows including monthly", async () => {
 		const now = Date.now();
 		const component = makeComponent(

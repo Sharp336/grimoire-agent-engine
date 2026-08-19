@@ -25,7 +25,7 @@ function normalizeCursorBaseUrl(baseUrl?: string): string {
 	return baseUrl.replace(/\/+$/, "");
 }
 
-type CursorUsageSource = "auth-usage" | "usage-summary" | "auth-me";
+type CursorUsageSource = "auth-usage" | "usage-summary" | "auth-me" | "current-period-usage" | "plan-info";
 
 async function fetchCursorJson(
 	ctx: UsageFetchContext,
@@ -71,6 +71,63 @@ function deriveResetsAt(payload: Record<string, unknown>): number | undefined {
 		}
 	}
 	return undefined;
+}
+
+function titleCaseCursorPlan(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const parts = value
+		.trim()
+		.split(/[-_\s]+/g)
+		.filter(Boolean)
+		.map(part => part[0]!.toUpperCase() + part.slice(1).toLowerCase());
+	return parts.length > 0 ? parts.join(" ") : undefined;
+}
+
+function formatCursorPlanType(name?: string, price?: string): string | undefined {
+	const label = name?.trim();
+	const cost = price?.trim();
+	if (label && cost) return `${label} (${cost})`;
+	return label || cost || undefined;
+}
+
+export interface CursorPlanInfo {
+	planName?: string;
+	price?: string;
+}
+
+export function parseCursorPlanInfo(payload: unknown): CursorPlanInfo | null {
+	if (!isRecord(payload) || !isRecord(payload.planInfo)) return null;
+	const planName =
+		typeof payload.planInfo.planName === "string" && payload.planInfo.planName.trim()
+			? payload.planInfo.planName.trim()
+			: undefined;
+	const price =
+		typeof payload.planInfo.price === "string" && payload.planInfo.price.trim()
+			? payload.planInfo.price.trim()
+			: undefined;
+	if (!planName && !price) return null;
+	return { ...(planName ? { planName } : {}), ...(price ? { price } : {}) };
+}
+
+function cursorAutoBucketNote(models: unknown): string | undefined {
+	if (!Array.isArray(models)) return undefined;
+	const names = models
+		.filter((model): model is string => typeof model === "string" && model.trim() !== "")
+		.map(model => model.trim());
+	if (names.length === 0) return undefined;
+	return `Includes ${names.join(", ")}`;
+}
+
+function pushCursorIncludedUsage(limits: UsageLimit[], amount: UsageAmount, window: UsageWindow): void {
+	if (amount.limit === undefined || amount.limit <= 0) return;
+	limits.push({
+		id: "cursor:usd:individual-included",
+		label: "Included Usage",
+		scope: { provider: "cursor", windowId: window.id },
+		window,
+		amount,
+		...(amount.usedFraction !== undefined ? { status: usageStatus(amount.usedFraction) } : {}),
+	});
 }
 
 /**
@@ -166,6 +223,10 @@ function parseCursorPlanDashboardAmounts(bucket: Record<string, unknown>): {
 
 function pushCursorPlanRails(limits: UsageLimit[], bucket: Record<string, unknown>, window: UsageWindow): void {
 	const rails = parseCursorPlanDashboardAmounts(bucket);
+	if (rails.auto || rails.api) {
+		const included = parseCursorCentsBucket(bucket);
+		if (included) pushCursorIncludedUsage(limits, included, window);
+	}
 	if (rails.auto) {
 		limits.push({
 			id: "cursor:usd:individual-auto",
@@ -196,6 +257,47 @@ function pushCursorPlanRails(limits: UsageLimit[], bucket: Record<string, unknow
 			...(rails.fallback.usedFraction !== undefined ? { status: usageStatus(rails.fallback.usedFraction) } : {}),
 		});
 	}
+}
+
+export function parseCursorCurrentPeriodUsage(payload: unknown, fetchedAt = Date.now()): UsageReport | null {
+	if (!isRecord(payload) || !isRecord(payload.planUsage)) return null;
+	const resetsAt = deriveResetsAt(payload);
+	const window: UsageWindow = {
+		id: "monthly",
+		label: "Monthly",
+		...(resetsAt !== undefined ? { resetsAt } : {}),
+	};
+	const enabled = payload.planUsage.enabled !== false && payload.enabled !== false;
+	const bucket = {
+		enabled,
+		used: payload.planUsage.totalSpend ?? payload.planUsage.used,
+		limit: payload.planUsage.limit,
+		remaining: payload.planUsage.remaining,
+		autoPercentUsed: payload.planUsage.autoPercentUsed,
+		apiPercentUsed: payload.planUsage.apiPercentUsed,
+		totalPercentUsed: payload.planUsage.totalPercentUsed,
+	};
+	const limits: UsageLimit[] = [];
+	pushCursorPlanRails(limits, bucket, window);
+	if (limits.length === 0) {
+		const included = parseCursorCentsBucket({
+			enabled,
+			used: payload.planUsage.totalSpend ?? payload.planUsage.used,
+			limit: payload.planUsage.limit,
+			remaining: payload.planUsage.remaining,
+		});
+		if (included) pushCursorIncludedUsage(limits, included, window);
+	}
+	if (limits.length === 0) return null;
+	const auto = limits.find(limit => limit.id === "cursor:usd:individual-auto");
+	const bucketNote = cursorAutoBucketNote(payload.autoBucketModels);
+	if (auto && bucketNote) auto.notes = [bucketNote];
+	return {
+		provider: "cursor",
+		fetchedAt,
+		limits,
+		raw: payload,
+	};
 }
 
 /**
@@ -262,11 +364,13 @@ export function parseCursorIndividualUsage(payload: unknown, fetchedAt = Date.no
 
 	if (limits.length === 0) return null;
 
+	const planType = formatCursorPlanType(titleCaseCursorPlan(payload.membershipType));
 	return {
 		provider: "cursor",
 		fetchedAt,
 		limits,
 		raw: payload,
+		...(planType ? { metadata: { planType } } : {}),
 	};
 }
 
@@ -384,12 +488,20 @@ export const cursorUsageProvider: UsageProvider = {
 
 		let summaryReportPromise = Promise.resolve<UsageReport | null>(null);
 		let profileEmailPromise = Promise.resolve<string | undefined>(undefined);
+		let periodReportPromise = Promise.resolve<UsageReport | null>(null);
+		let planInfoPromise = Promise.resolve<CursorPlanInfo | null>(null);
 		if (credential.type === "oauth" && baseUrl === DEFAULT_CURSOR_BASE_URL) {
 			const userId = extractCursorAccessTokenUserId(token);
 			if (userId) {
 				const sessionHeaders: Record<string, string> = {
 					Accept: "application/json",
 					Cookie: `WorkosCursorSessionToken=${encodeURIComponent(`${userId}::${token}`)}`,
+				};
+				const dashboardHeaders: Record<string, string> = {
+					...sessionHeaders,
+					"Content-Type": "application/json",
+					Origin: "https://cursor.com",
+					Referer: "https://cursor.com/dashboard?tab=spending",
 				};
 				summaryReportPromise = fetchCursorJson(
 					ctx,
@@ -419,35 +531,87 @@ export const cursorUsageProvider: UsageProvider = {
 					}
 					return payload.email.trim();
 				});
+				periodReportPromise = fetchCursorJson(
+					ctx,
+					"https://cursor.com/api/dashboard/get-current-period-usage",
+					{
+						method: "POST",
+						headers: dashboardHeaders,
+						body: "{}",
+						signal: params.signal,
+					},
+					"current-period-usage",
+				).then(payload => parseCursorCurrentPeriodUsage(payload, fetchedAt));
+				planInfoPromise = fetchCursorJson(
+					ctx,
+					"https://cursor.com/api/dashboard/get-plan-info",
+					{
+						method: "POST",
+						headers: dashboardHeaders,
+						body: "{}",
+						signal: params.signal,
+					},
+					"plan-info",
+				).then(payload => parseCursorPlanInfo(payload));
 			}
 		}
 
-		const [legacyReport, summaryReport, profileEmail] = await Promise.all([
+		const [legacyReport, summaryReport, profileEmail, periodReport, planInfo] = await Promise.all([
 			legacyReportPromise,
 			summaryReportPromise,
 			profileEmailPromise,
+			periodReportPromise,
+			planInfoPromise,
 		]);
+		const dashboardReport = summaryReport ?? periodReport;
 		let report: UsageReport | null;
-		if (legacyReport && summaryReport) {
+		if (legacyReport && dashboardReport) {
 			report = {
 				provider: "cursor",
 				fetchedAt,
-				limits: [...legacyReport.limits, ...summaryReport.limits],
+				limits: [...legacyReport.limits, ...dashboardReport.limits],
 				raw: {
 					authUsage: legacyReport.raw,
-					usageSummary: summaryReport.raw,
+					...(summaryReport?.raw !== undefined ? { usageSummary: summaryReport.raw } : {}),
+					...(periodReport?.raw !== undefined ? { currentPeriodUsage: periodReport.raw } : {}),
 				},
+				...(dashboardReport.metadata ? { metadata: dashboardReport.metadata } : {}),
+				...(dashboardReport.notes ? { notes: dashboardReport.notes } : {}),
 			};
 		} else {
-			report = legacyReport ?? summaryReport;
+			report = legacyReport ?? dashboardReport;
 		}
 		if (!report) return null;
 
+		if (summaryReport && periodReport) {
+			const auto = report.limits.find(limit => limit.id === "cursor:usd:individual-auto");
+			const periodAuto = periodReport.limits.find(limit => limit.id === "cursor:usd:individual-auto");
+			if (auto && periodAuto?.notes?.length) {
+				auto.notes = [...new Set([...(auto.notes ?? []), ...periodAuto.notes])];
+			}
+			if (
+				!report.limits.some(
+					limit =>
+						limit.id === "cursor:usd:individual-included" ||
+						limit.id === "cursor:usd:individual-plan" ||
+						limit.id === "cursor:usd:individual-overall",
+				)
+			) {
+				const included = periodReport.limits.find(limit => limit.id === "cursor:usd:individual-included");
+				if (included) report.limits.unshift(included);
+			}
+		}
+
 		const email = profileEmail ?? credential.email?.trim();
+		const planType =
+			formatCursorPlanType(planInfo?.planName, planInfo?.price) ??
+			(typeof report.metadata?.planType === "string" ? report.metadata.planType : undefined);
 		const metadata = {
+			...report.metadata,
 			...(email ? { email } : {}),
 			...(credential.accountId ? { accountId: credential.accountId } : {}),
 			...(credential.projectId ? { projectId: credential.projectId } : {}),
+			...(planType ? { planType } : {}),
 		};
 		if (Object.keys(metadata).length > 0) report.metadata = metadata;
 		return report;

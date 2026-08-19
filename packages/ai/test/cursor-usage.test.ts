@@ -1,7 +1,13 @@
 import { describe, expect, it } from "bun:test";
 import { type AuthCredentialStore, AuthStorage } from "../src/auth-storage";
 import type { UsageFetchContext, UsageFetchParams } from "../src/usage";
-import { cursorUsageProvider, parseCursorIndividualUsage, parseCursorUsage } from "../src/usage/cursor";
+import {
+	cursorUsageProvider,
+	parseCursorCurrentPeriodUsage,
+	parseCursorIndividualUsage,
+	parseCursorPlanInfo,
+	parseCursorUsage,
+} from "../src/usage/cursor";
 
 function createCursorAccessToken(sub: string): string {
 	const payload = btoa(JSON.stringify({ sub })).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
@@ -220,13 +226,23 @@ describe("cursor usage provider", () => {
 
 			const report = parseCursorIndividualUsage(payload, 123);
 			expect(report?.limits.map(limit => ({ id: limit.id, label: limit.label }))).toEqual([
+				{ id: "cursor:usd:individual-included", label: "Included Usage" },
 				{ id: "cursor:usd:individual-auto", label: "Cursor Models" },
 				{ id: "cursor:usd:individual-api", label: "Other Models" },
 				{ id: "cursor:usd:individual-ondemand", label: "On-Demand Usage" },
 			]);
-			const auto = report?.limits[0]?.amount;
-			const api = report?.limits[1]?.amount;
-			const onDemand = report?.limits[2]?.amount;
+			const included = report?.limits[0]?.amount;
+			const auto = report?.limits[1]?.amount;
+			const api = report?.limits[2]?.amount;
+			const onDemand = report?.limits[3]?.amount;
+			expect(included).toEqual({
+				used: 15.04,
+				limit: 70,
+				remaining: 54.96,
+				usedFraction: 1504 / 7000,
+				remainingFraction: 5496 / 7000,
+				unit: "usd",
+			});
 			expect(auto?.unit).toBe("percent");
 			expect(auto?.used).toBeCloseTo(1.85);
 			expect(auto?.usedFraction).toBeCloseTo(0.0185);
@@ -275,6 +291,7 @@ describe("cursor usage provider", () => {
 				},
 			});
 			expect(report?.limits.map(limit => limit.id)).toEqual([
+				"cursor:usd:individual-included",
 				"cursor:usd:individual-auto",
 				"cursor:usd:individual-api",
 			]);
@@ -323,6 +340,22 @@ describe("cursor usage provider", () => {
 			).toBeNull();
 		});
 
+		it("surfaces membershipType as plan metadata", () => {
+			const report = parseCursorIndividualUsage({
+				membershipType: "pro_plus",
+				individualUsage: {
+					plan: {
+						enabled: true,
+						used: 1504,
+						limit: 7000,
+						remaining: 5496,
+						autoPercentUsed: 1.85,
+						apiPercentUsed: 0,
+					},
+				},
+			});
+			expect(report?.metadata).toEqual({ planType: "Pro Plus" });
+		});
 		it("emits uncapped used-only dollar usage when the limit is null", () => {
 			const report = parseCursorIndividualUsage({
 				individualUsage: { overall: { enabled: true, used: "2500", limit: null } },
@@ -389,6 +422,75 @@ describe("cursor usage provider", () => {
 				},
 				status: "ok",
 			});
+		});
+	});
+
+	describe("parseCursorCurrentPeriodUsage", () => {
+		it("maps spending-tab planUsage to included and percent rails", () => {
+			const report = parseCursorCurrentPeriodUsage(
+				{
+					billingCycleEnd: "1789759085000",
+					planUsage: {
+						totalSpend: 82,
+						limit: 40000,
+						remaining: 39918,
+						autoPercentUsed: 0.006,
+						apiPercentUsed: 0.14,
+					},
+					autoBucketModels: ["default", "composer-2"],
+				},
+				123,
+			);
+			expect(report?.limits.map(limit => limit.id)).toEqual([
+				"cursor:usd:individual-included",
+				"cursor:usd:individual-auto",
+				"cursor:usd:individual-api",
+			]);
+			expect(report?.limits[0]?.amount).toMatchObject({ used: 0.82, limit: 400, unit: "usd" });
+			expect(report?.limits[1]?.notes).toEqual(["Includes default, composer-2"]);
+			expect(report?.limits[0]?.window?.resetsAt).toBe(1_789_759_085_000);
+		});
+
+		it("rejects a nested disabled plan even when stale percent fields remain", () => {
+			expect(
+				parseCursorCurrentPeriodUsage({
+					planUsage: {
+						enabled: false,
+						totalSpend: 82,
+						limit: 40000,
+						autoPercentUsed: 0.006,
+						apiPercentUsed: 0.14,
+					},
+				}),
+			).toBeNull();
+		});
+
+		it("rejects a top-level disabled plan even when stale percent fields remain", () => {
+			expect(
+				parseCursorCurrentPeriodUsage({
+					enabled: false,
+					planUsage: {
+						totalSpend: 82,
+						limit: 40000,
+						autoPercentUsed: 0.006,
+						apiPercentUsed: 0.14,
+					},
+				}),
+			).toBeNull();
+		});
+	});
+
+	describe("parseCursorPlanInfo", () => {
+		it("reads Ultra plan name and price", () => {
+			expect(
+				parseCursorPlanInfo({
+					planInfo: { planName: "Ultra", price: "$200/mo", includedAmountCents: 40000 },
+				}),
+			).toEqual({ planName: "Ultra", price: "$200/mo" });
+		});
+
+		it("rejects payloads without planInfo", () => {
+			expect(parseCursorPlanInfo({ membershipType: "ultra" })).toBeNull();
 		});
 	});
 
@@ -566,7 +668,12 @@ describe("cursor usage provider", () => {
 					expect(headers.get("Authorization")).toBe(`Bearer ${accessToken}`);
 					return Response.json(authUsagePayload);
 				}
-				expect(["https://cursor.com/api/usage-summary", "https://cursor.com/api/auth/me"]).toContain(url);
+				expect([
+					"https://cursor.com/api/usage-summary",
+					"https://cursor.com/api/auth/me",
+					"https://cursor.com/api/dashboard/get-current-period-usage",
+					"https://cursor.com/api/dashboard/get-plan-info",
+				]).toContain(url);
 				expect(headers.get("Accept")).toBe("application/json");
 				expect(headers.get("Cookie")).toBe(
 					`WorkosCursorSessionToken=${encodeURIComponent(`user_123::${accessToken}`)}`,
@@ -596,6 +703,8 @@ describe("cursor usage provider", () => {
 				"https://api2.cursor.sh/auth/usage",
 				"https://cursor.com/api/usage-summary",
 				"https://cursor.com/api/auth/me",
+				"https://cursor.com/api/dashboard/get-current-period-usage",
+				"https://cursor.com/api/dashboard/get-plan-info",
 			]);
 			expect(report?.metadata).toEqual({
 				email: "person@example.com",
@@ -694,6 +803,109 @@ describe("cursor usage provider", () => {
 			});
 		});
 
+		it("overlays spending-tab plan name and Cursor Models note", async () => {
+			const accessToken = createCursorAccessToken("auth0|user_ultra");
+			const mockFetch = (async (input: string | URL): Promise<Response> => {
+				const url = typeof input === "string" ? input : input.toString();
+				if (url === "https://api2.cursor.sh/auth/usage") {
+					return Response.json({});
+				}
+				if (url === "https://cursor.com/api/usage-summary") {
+					return Response.json({
+						membershipType: "ultra",
+						individualUsage: {
+							plan: {
+								enabled: true,
+								used: 82,
+								limit: 40000,
+								remaining: 39918,
+								autoPercentUsed: 0.006,
+								apiPercentUsed: 0.14,
+							},
+						},
+					});
+				}
+				if (url === "https://cursor.com/api/auth/me") {
+					return Response.json({ email: "ultra@example.com", sub: "user_ultra" });
+				}
+				if (url === "https://cursor.com/api/dashboard/get-current-period-usage") {
+					return Response.json({
+						planUsage: {
+							totalSpend: 82,
+							limit: 40000,
+							remaining: 39918,
+							autoPercentUsed: 0.006,
+							apiPercentUsed: 0.14,
+						},
+						autoBucketModels: ["default", "composer-2"],
+					});
+				}
+				if (url === "https://cursor.com/api/dashboard/get-plan-info") {
+					return Response.json({
+						planInfo: { planName: "Ultra", price: "$200/mo" },
+					});
+				}
+				return new Response("not found", { status: 404 });
+			}) as unknown as typeof fetch;
+
+			const report = await cursorUsageProvider.fetchUsage(
+				{
+					provider: "cursor",
+					credential: { type: "oauth", accessToken },
+				},
+				{ fetch: mockFetch },
+			);
+
+			expect(report?.metadata).toEqual({
+				email: "ultra@example.com",
+				planType: "Ultra ($200/mo)",
+			});
+			expect(report?.limits.map(limit => limit.id)).toEqual([
+				"cursor:usd:individual-included",
+				"cursor:usd:individual-auto",
+				"cursor:usd:individual-api",
+			]);
+			expect(report?.limits.find(limit => limit.id === "cursor:usd:individual-auto")?.notes).toEqual([
+				"Includes default, composer-2",
+			]);
+		});
+
+		it("uses spending-tab period usage when the summary request fails", async () => {
+			const accessToken = createCursorAccessToken("auth0|user_period");
+			const mockFetch = (async (input: string | URL): Promise<Response> => {
+				const url = typeof input === "string" ? input : input.toString();
+				if (url === "https://cursor.com/api/usage-summary") {
+					return new Response("Unavailable", { status: 503 });
+				}
+				if (url === "https://cursor.com/api/dashboard/get-current-period-usage") {
+					return Response.json({
+						planUsage: {
+							totalSpend: 82,
+							limit: 40000,
+							remaining: 39918,
+							autoPercentUsed: 0.006,
+							apiPercentUsed: 0.14,
+						},
+					});
+				}
+				return Response.json({});
+			}) as unknown as typeof fetch;
+
+			const report = await cursorUsageProvider.fetchUsage(
+				{
+					provider: "cursor",
+					credential: { type: "oauth", accessToken },
+				},
+				{ fetch: mockFetch },
+			);
+
+			expect(report?.limits.map(limit => limit.id)).toEqual([
+				"cursor:usd:individual-included",
+				"cursor:usd:individual-auto",
+				"cursor:usd:individual-api",
+			]);
+		});
+
 		it("returns legacy usage when the personal summary request fails", async () => {
 			const accessToken = createCursorAccessToken("auth0|user_789");
 			const authUsagePayload = {
@@ -728,6 +940,8 @@ describe("cursor usage provider", () => {
 				"https://api2.cursor.sh/auth/usage",
 				"https://cursor.com/api/usage-summary",
 				"https://cursor.com/api/auth/me",
+				"https://cursor.com/api/dashboard/get-current-period-usage",
+				"https://cursor.com/api/dashboard/get-plan-info",
 			]);
 			expect(report?.limits.map(limit => limit.id)).toEqual(["cursor:requests:gpt-4"]);
 			expect(report?.raw).toEqual(authUsagePayload);

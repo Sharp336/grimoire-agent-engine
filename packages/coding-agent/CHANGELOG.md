@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `/usage` and the status-line monthly Cursor meter now follow the spending dashboard: plan name/price on the provider header, an Included Usage rail, and `mo N%` preferring that included pool over legacy per-model request fractions.
+
 ## [17.3.8] - 2026-08-19
 
 ### Added

@@ -77,7 +77,18 @@ function renderUsageReports(
 	for (const [provider, providerReports] of [...grouped.entries()].sort(([left], [right]) =>
 		left.localeCompare(right),
 	)) {
-		lines.push("", formatProviderName(provider));
+		const planTypes = [
+			...new Set(
+				providerReports.flatMap(report => {
+					const planType = report.metadata?.planType;
+					return typeof planType === "string" && planType.trim() ? [planType.trim()] : [];
+				}),
+			),
+		];
+		lines.push(
+			"",
+			planTypes.length === 1 ? `${formatProviderName(provider)} · ${planTypes[0]}` : formatProviderName(provider),
+		);
 		const reportingModels = usageModelSelectors.filter(selector => selector.startsWith(`${provider}/`));
 		if (reportingModels.length > 0) {
 			lines.push("  Models with usage data");

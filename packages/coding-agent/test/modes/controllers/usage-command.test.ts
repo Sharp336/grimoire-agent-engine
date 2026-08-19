@@ -120,6 +120,43 @@ describe("CommandController /usage", () => {
 		expect(output).toContain("resets in 1d");
 	});
 
+	it("renders Cursor spending-tab plan name on the provider header", async () => {
+		const present = vi.fn();
+		const ctx = {
+			session: createUsageSessionDouble(),
+			ui: { terminal: { columns: 100 } },
+			present,
+			presentCommandOutput: present,
+			showWarning: vi.fn(),
+			showError: vi.fn(),
+		} as unknown as InteractiveModeContext;
+		const controller = new CommandController(ctx);
+		const now = Date.now();
+
+		await controller.handleUsageCommand([
+			{
+				provider: "cursor",
+				fetchedAt: now,
+				limits: [
+					{
+						id: "cursor:usd:individual-included",
+						label: "Included Usage",
+						scope: { provider: "cursor", windowId: "monthly" },
+						window: { id: "monthly", label: "Monthly" },
+						amount: { unit: "usd", used: 0.82, limit: 400, remaining: 399.18, usedFraction: 0.00205 },
+						status: "ok",
+					},
+				],
+				metadata: { email: "cursor@example.test", planType: "Ultra ($200/mo)" },
+			},
+		]);
+
+		const output = renderPresentedBlocks(present.mock.calls[0]?.[0]);
+		expect(output).toContain("Cursor");
+		expect(output).toContain("Ultra ($200/mo)");
+		expect(output).toContain("Included Usage");
+	});
+
 	it("renders saved reset expiry lines for future and expired credits", async () => {
 		const present = vi.fn();
 		const ctx = {
