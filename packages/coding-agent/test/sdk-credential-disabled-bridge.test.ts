@@ -509,6 +509,7 @@ describe("createAgentSession credential_disabled subscription", () => {
 				fileWriteFallbackHandlers: [],
 				fileDeleteFallbackHandlers: [],
 				messageRenderers: new Map(),
+				statusLineSegments: new Map(),
 				commands: new Map(),
 				flags: new Map(),
 				shortcuts: new Map(),

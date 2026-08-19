@@ -46,6 +46,7 @@ import type {
 	MessageRenderer,
 	ProviderConfig,
 	RegisteredCommand,
+	StatusLineSegmentRenderer,
 	ToolDefinition,
 	ToolInfo,
 } from "./types";
@@ -231,6 +232,10 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		this.extension.messageRenderers.set(customType, renderer as MessageRenderer);
 	}
 
+	registerStatusLineSegment(id: string, renderer: StatusLineSegmentRenderer): void {
+		this.extension.statusLineSegments.set(id, renderer);
+	}
+
 	registerAssistantThinkingRenderer(renderer: AssistantThinkingRenderer): void {
 		this.extension.assistantThinkingRenderers.push(renderer);
 	}
@@ -332,6 +337,7 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		fileWriteFallbackHandlers: [],
 		fileDeleteFallbackHandlers: [],
 		messageRenderers: new Map(),
+		statusLineSegments: new Map(),
 		commands: new Map(),
 		flags: new Map(),
 		shortcuts: new Map(),

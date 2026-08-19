@@ -2,14 +2,28 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
-import { formatDuration, formatNumber, getProjectDir, pathIsWithin, relativePathWithinRoot } from "@oh-my-pi/pi-utils";
+import {
+	formatDuration,
+	formatNumber,
+	getProjectDir,
+	logger,
+	pathIsWithin,
+	relativePathWithinRoot,
+} from "@oh-my-pi/pi-utils";
+import type { StatusLineSegmentContext as ExtensionStatusLineSegmentContext } from "../../../extensibility/extensions/types";
 import { type ThemeColor, theme } from "../../../modes/theme/theme";
 import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../../../tools/render-utils";
 import { fileHyperlink } from "../../../tui/hyperlink";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../../../utils/session-color";
 import { sanitizeStatusText } from "../../shared";
 import { formatContextUsage, getContextUsageLevel, getContextUsageThemeColor } from "./context-thresholds";
-import type { RenderedSegment, SegmentContext, StatusLineSegment, StatusLineSegmentId } from "./types";
+import type {
+	RenderedSegment,
+	SegmentContext,
+	StatusLineSegment,
+	StatusLineSegmentId,
+	StatusLineSegmentRef,
+} from "./types";
 
 export type { SegmentContext } from "./types";
 
@@ -713,12 +727,45 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	collab: collabSegment,
 };
 
-export function renderSegment(id: StatusLineSegmentId, ctx: SegmentContext): RenderedSegment {
-	const segment = SEGMENTS[id];
-	if (!segment) {
+/** Maps the internal render context down to the smaller, stable shape exposed to extensions. */
+function toExtensionSegmentContext(ctx: SegmentContext): ExtensionStatusLineSegmentContext {
+	return {
+		width: ctx.width,
+		usage: {
+			inputTokens: ctx.usageStats.input,
+			outputTokens: ctx.usageStats.output,
+			cacheReadTokens: ctx.usageStats.cacheRead,
+			cacheWriteTokens: ctx.usageStats.cacheWrite,
+			totalTokens: ctx.usageStats.totalTokens,
+			cost: ctx.usageStats.cost,
+			tokensPerSecond: ctx.usageStats.tokensPerSecond,
+		},
+		contextPercent: ctx.contextPercent,
+		contextTokens: ctx.contextTokens,
+		contextWindow: ctx.contextWindow,
+		git: { branch: ctx.git.branch },
+		activeMs: ctx.activeMs,
+	};
+}
+
+export function renderSegment(id: StatusLineSegmentRef, ctx: SegmentContext): RenderedSegment {
+	// Built-in ids always win, even if a plugin registered the same id — see
+	// `ExtensionRunner.getStatusLineSegment`.
+	const segment = SEGMENTS[id as StatusLineSegmentId];
+	if (segment) {
+		return segment.render(ctx);
+	}
+
+	const extensionRenderer = ctx.session.extensionRunner?.getStatusLineSegment(id);
+	if (!extensionRenderer) {
 		return { content: "", visible: false };
 	}
-	return segment.render(ctx);
+	try {
+		return extensionRenderer(toExtensionSegmentContext(ctx), theme);
+	} catch (error) {
+		logger.warn(`status-line segment "${id}" threw during render: ${error instanceof Error ? error.message : error}`);
+		return { content: "", visible: false };
+	}
 }
 
 export const ALL_SEGMENT_IDS: StatusLineSegmentId[] = Object.keys(SEGMENTS) as StatusLineSegmentId[];

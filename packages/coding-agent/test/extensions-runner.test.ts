@@ -3816,6 +3816,7 @@ describe("ExtensionRunner", () => {
 				fileWriteFallbackHandlers: [],
 				fileDeleteFallbackHandlers: [],
 				messageRenderers: new Map(),
+				statusLineSegments: new Map(),
 				commands: new Map(),
 				flags: new Map(),
 				shortcuts: new Map(),

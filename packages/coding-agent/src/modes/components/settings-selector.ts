@@ -37,7 +37,7 @@ import {
 import type {
 	SettingTab,
 	StatusLinePreset,
-	StatusLineSegmentId,
+	StatusLineSegmentRef,
 	StatusLineSeparatorStyle,
 } from "../../config/settings-schema";
 import { SETTING_TABS, TAB_METADATA } from "../../config/settings-schema";
@@ -510,8 +510,8 @@ export interface SettingsRuntimeContext {
 /** Status line settings subset for preview */
 export interface StatusLinePreviewSettings {
 	preset?: StatusLinePreset;
-	leftSegments?: StatusLineSegmentId[];
-	rightSegments?: StatusLineSegmentId[];
+	leftSegments?: StatusLineSegmentRef[];
+	rightSegments?: StatusLineSegmentRef[];
 	separator?: StatusLineSeparatorStyle;
 	sessionAccent?: boolean;
 	transparent?: boolean;

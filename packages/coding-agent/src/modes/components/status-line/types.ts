@@ -1,10 +1,15 @@
 import type { CollabSessionState } from "../../../collab/protocol";
-import type { StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle } from "../../../config/settings-schema";
+import type {
+	StatusLinePreset,
+	StatusLineSegmentId,
+	StatusLineSegmentRef,
+	StatusLineSeparatorStyle,
+} from "../../../config/settings-schema";
 import type { AgentSession } from "../../../session/agent-session";
 import type { ActiveRepoContext } from "../../../utils/active-repo-context";
 import type { LoopLimitRuntime } from "../../loop-limit";
 
-export type { StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle };
+export type { StatusLinePreset, StatusLineSegmentId, StatusLineSegmentRef, StatusLineSeparatorStyle };
 
 /** Collab session indicator + (guest-only) host-state override for segments. */
 export interface CollabStatus {
@@ -23,11 +28,13 @@ export interface StatusLineSegmentOptions {
 
 export interface StatusLineSettings {
 	preset?: StatusLinePreset;
-	leftSegments?: StatusLineSegmentId[];
-	rightSegments?: StatusLineSegmentId[];
+	leftSegments?: StatusLineSegmentRef[];
+	rightSegments?: StatusLineSegmentRef[];
 	separator?: StatusLineSeparatorStyle;
 	segmentOptions?: StatusLineSegmentOptions;
 	showHookStatus?: boolean;
+	/** Render the built-in status line into the editor top border. Defaults to true. */
+	enabled?: boolean;
 	sessionAccent?: boolean;
 	/** Drop the theme's `statusLineBg` fill and powerline caps so the bar
 	 *  inherits the terminal's default background. */
