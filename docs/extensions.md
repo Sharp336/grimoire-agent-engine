@@ -246,7 +246,7 @@ Cancelable pre-events:
 
 - `input`
 - `before_agent_start`
-- `before_provider_request` (may replace provider request payload)
+- `before_provider_request` (may replace provider request payload — the replacement is applied by every provider that fires the hook, which is all of them except `devin-agent`, which does not fire it)
 - `before_provider_headers` — add per-request headers before the provider HTTP call (see [below](#before_provider_headers))
 - `after_provider_response`
 - `context`

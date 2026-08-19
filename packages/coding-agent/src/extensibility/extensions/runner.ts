@@ -1796,8 +1796,9 @@ export class ExtensionRunner {
 		return current;
 	}
 
-	async emitAfterProviderResponse(response: ProviderResponseMetadata, _model?: Model): Promise<void> {
-		const ctx = this.createContext();
+	/** Runs response hooks with the model that produced that provider response. */
+	async emitAfterProviderResponse(response: ProviderResponseMetadata, model?: Model): Promise<void> {
+		const ctx = this.createContext(model);
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("after_provider_response");
