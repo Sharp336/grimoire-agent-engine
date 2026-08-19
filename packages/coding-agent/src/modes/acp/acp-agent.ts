@@ -470,6 +470,16 @@ export function createAcpExtensionUiContext(
 	};
 }
 
+export type AcpAgentOptions = {
+	/**
+	 * Empty client `mcpServers` load the on-disk host catalog. Tests set
+	 * false so they stay isolated from the developer's MCP servers.
+	 * Default true.
+	 */
+	loadHostMcpCatalog?: boolean;
+};
+
+
 export class AcpAgent implements Agent {
 	#connection: AgentSideConnection;
 	#initialSession: AgentSession | undefined;
@@ -480,12 +490,21 @@ export class AcpAgent implements Agent {
 	#clientCapabilities: ClientCapabilities | undefined;
 	#cancelCleanupTimeoutMs = ACP_CANCEL_CLEANUP_TIMEOUT_MS;
 	#blobs = new BlobStore(getBlobsDir());
+	#loadHostMcpCatalog: boolean;
 
-	constructor(connection: AgentSideConnection, createSession: CreateAcpSession, initialSession?: AgentSession) {
+
+	constructor(
+		connection: AgentSideConnection,
+		createSession: CreateAcpSession,
+		initialSession?: AgentSession,
+		options?: AcpAgentOptions,
+	) {
 		this.#connection = connection;
 		this.#initialSession = initialSession;
 		this.#createSession = createSession;
+		this.#loadHostMcpCatalog = options?.loadHostMcpCatalog ?? true;
 	}
+
 
 	setCancelCleanupTimeoutForTesting(timeoutMs: number): void {
 		this.#cancelCleanupTimeoutMs = Math.max(1, timeoutMs);
@@ -2498,14 +2517,11 @@ export class AcpAgent implements Agent {
 	/**
 	 * Zeron and other hosts send `mcpServers: []` as "agent owns MCP", not
 	 * "wipe the catalog". Load the same on-disk sources interactive `omp` uses.
-	 * Harness fakes without auth storage keep the empty wipe so unit tests
-	 * stay isolated from the developer's real MCP servers.
+	 * Tests pass `loadHostMcpCatalog: false` to keep the empty wipe.
 	 */
 	async #connectHostMcpCatalog(record: ManagedSessionRecord): Promise<void> {
 		const session = record.session;
-		const authStorage = session.modelRegistry?.authStorage;
-		if (!authStorage) {
-			logger.debug("ACP skipped host MCP catalog", { reason: "no-auth-storage" });
+		if (!this.#loadHostMcpCatalog) {
 			record.mcpManager = undefined;
 			await session.refreshMCPTools([]);
 			return;
@@ -2517,7 +2533,7 @@ export class AcpAgent implements Agent {
 			filterExa: true,
 			filterBrowser: settings.get("browser.enabled") ?? false,
 			cacheStorage: settings.getStorage(),
-			authStorage,
+			authStorage: session.modelRegistry?.authStorage,
 		});
 		for (const { path, error } of loaded.errors) {
 			logger.error("MCP tool load failed", { path, error });
