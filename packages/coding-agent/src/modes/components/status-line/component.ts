@@ -3,6 +3,7 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import { type Component, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 import { getProjectDir } from "@oh-my-pi/pi-utils";
+import { isReduceMotion } from "../../../config/reduce-motion";
 import { settings } from "../../../config/settings";
 import type { AgentSession } from "../../../session/agent-session";
 import type { OAuthAccountIdentity } from "../../../session/auth-storage";
@@ -1258,7 +1259,7 @@ export class StatusLineComponent implements Component {
 		const contextKey = this.#formatUsageContextKey(activeProvider, activeIdentity);
 		const previous = this.#codexResetSnapshots.get(contextKey);
 		this.#codexResetSnapshots.set(contextKey, resetSnapshot);
-		if (!previous || !settings.get("tui.codexResetFireworks")) return;
+		if (!previous || !settings.get("tui.codexResetFireworks") || isReduceMotion()) return;
 		const event = detectCodexResetFireworks(previous, resetSnapshot);
 		if (event) this.#onCodexResetFireworks?.(event);
 	}

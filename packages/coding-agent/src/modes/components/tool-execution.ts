@@ -15,6 +15,7 @@ import {
 	type TUI,
 } from "@oh-my-pi/pi-tui";
 import { getProjectDir, logger, sanitizeText } from "@oh-my-pi/pi-utils";
+import { isReduceMotion } from "../../config/reduce-motion";
 import { EDIT_MODE_STRATEGIES, type EditMode, type PerFileDiffPreview } from "../../edit";
 import type { Theme } from "../../modes/theme/theme";
 import { getThemeEpoch, theme } from "../../modes/theme/theme";
@@ -702,19 +703,23 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 			const frame = sharedSpinnerFrame(frameCount);
 			this.#spinnerFrame = frame;
 			this.#renderState.spinnerFrame = frame;
-			this.#spinnerInterval = setInterval(() => {
-				// If a detached task interval from an older render path is still live,
-				// stop it the instant the block leaves the repaintable region.
-				if (this.#maybeFreezeBackgroundTask()) return;
-				const now = performance.now();
-				const frameCount = theme.spinnerFrames.length;
-				this.#spinnerFrame = sharedSpinnerFrame(frameCount, now);
-				this.#renderState.spinnerFrame = this.#spinnerFrame;
-				// Component-scoped: a spinner tick only changes this tool block, so
-				// the TUI reuses every other root subtree instead of walking the
-				// whole tree (issue #4377).
-				this.#ui.requestComponentRender(this);
-			}, SPINNER_RENDER_INTERVAL_MS);
+			// A frozen single-frame spinner (reduce-motion) never advances; skip
+			// the interval and keep the initial static frame.
+			if (theme.spinnerFrames.length > 1) {
+				this.#spinnerInterval = setInterval(() => {
+					// If a detached task interval from an older render path is still live,
+					// stop it the instant the block leaves the repaintable region.
+					if (this.#maybeFreezeBackgroundTask()) return;
+					const now = performance.now();
+					const frameCount = theme.spinnerFrames.length;
+					this.#spinnerFrame = sharedSpinnerFrame(frameCount, now);
+					this.#renderState.spinnerFrame = this.#spinnerFrame;
+					// Component-scoped: a spinner tick only changes this tool block, so
+					// the TUI reuses every other root subtree instead of walking the
+					// whole tree (issue #4377).
+					this.#ui.requestComponentRender(this);
+				}, SPINNER_RENDER_INTERVAL_MS);
+			}
 		} else if (!needsSpinner && this.#spinnerInterval) {
 			clearInterval(this.#spinnerInterval);
 			this.#spinnerInterval = undefined;
@@ -764,6 +769,12 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		}
 		const completedTasks = (this.#result?.details as { completedTasks?: unknown[] } | undefined)?.completedTasks;
 		if (!completedTasks || completedTasks.length === 0) {
+			this.#stopTodoStrikeAnimation();
+			return;
+		}
+		// Reduce motion: skip the strikethrough sweep; completed lines render
+		// fully struck (the terminal state of the animation) right away.
+		if (isReduceMotion()) {
 			this.#stopTodoStrikeAnimation();
 			return;
 		}

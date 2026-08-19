@@ -1,4 +1,5 @@
 import { matchesKey, replaceTabs, ScrollView, Text, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
+import { isReduceMotion } from "../config/reduce-motion";
 import type { Theme } from "../modes/theme/theme";
 import { formatElapsed, formatNum, isBetter } from "./helpers";
 import { currentResults, findBaselineMetric, findBaselineRunNumber, findBaselineSecondary } from "./state";
@@ -57,7 +58,7 @@ export function createDashboardController(): DashboardController {
 			await ctx.ui.custom<void>(
 				(tui, theme, _keybindings, done) => {
 					overlayTui = tui;
-					if (!spinnerTimer) {
+					if (!spinnerTimer && !isReduceMotion()) {
 						spinnerTimer = setInterval(() => {
 							spinnerFrame += 1;
 							requestRender();

@@ -3,6 +3,7 @@ import type { Api, Model } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
+	buildTerminalTitleWithState,
 	disposeTerminalTitleState,
 	generateSessionTitle,
 	setExtensionTerminalTitle,
@@ -767,5 +768,18 @@ describe("terminal title runtime", () => {
 		} finally {
 			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
 		}
+	});
+});
+
+describe("buildTerminalTitleWithState static separator (reduce-motion)", () => {
+	it("renders a static ':' working separator instead of braille frames", () => {
+		const title = buildTerminalTitleWithState("proj", "working", 3, true, "linux", true);
+		expect(title).toContain(":");
+		for (const frame of SPINNER_FRAMES) expect(title).not.toContain(frame);
+	});
+
+	it("keeps the animated braille frame when staticSpinner is false", () => {
+		const title = buildTerminalTitleWithState("proj", "working", 3, true, "linux", false);
+		expect(SPINNER_FRAMES.some(frame => title.includes(frame))).toBe(true);
 	});
 });

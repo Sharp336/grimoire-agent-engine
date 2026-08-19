@@ -12,6 +12,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { BracketedPasteHandler } from "@oh-my-pi/pi-tui/bracketed-paste";
 import type { AppKeybinding } from "../../config/keybindings";
+import { isReduceMotion } from "../../config/reduce-motion";
 import { isSettingsInitialized, settings } from "../../config/settings";
 import { imageReferenceHyperlink, PLACEHOLDER_REGEX, renderPlaceholders } from "../image-references";
 import { hasMagicKeyword, highlightMagicKeywords } from "../magic-keywords";
@@ -466,7 +467,7 @@ export class CustomEditor extends Editor {
 	 *  item markers use the accent color so separate follow-ups remain visible while composing. */
 	override decorateText = (text: string): string => {
 		const editorText = this.getText();
-		const animated = this.focused && this.#shimmerEnabled() && hasMagicKeyword(editorText);
+		const animated = this.focused && this.#shimmerEnabled() && !isReduceMotion() && hasMagicKeyword(editorText);
 		const phase = animated ? (Date.now() % CustomEditor.SHIMMER_PERIOD_MS) / CustomEditor.SHIMMER_PERIOD_MS : 0;
 		if (animated) this.#scheduleShimmerFrame();
 		if (this.#queueDecorationText !== editorText) {

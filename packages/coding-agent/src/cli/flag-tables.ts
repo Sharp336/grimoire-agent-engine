@@ -246,6 +246,20 @@ export const OPTIONAL_FLAGS: Record<string, OptionalFlagConfig> = {
 	"--resume": { set: setResume, rejectEmpty: true },
 	"-r": { set: setResume, rejectEmpty: true },
 	"--session": { set: setResume, rejectEmpty: true },
+	"--reduce-motion": {
+		set: (result, value) => {
+			if (value === undefined) {
+				result.reduceMotion = "on";
+				return;
+			}
+			if (value === "off" || value === "on" || value === "strict") {
+				result.reduceMotion = value;
+				return;
+			}
+			throw new CliUsageError(`--reduce-motion accepts "on", "strict", or "off" (got "${value}")`);
+		},
+		rejectEmpty: true,
+	},
 };
 
 /**

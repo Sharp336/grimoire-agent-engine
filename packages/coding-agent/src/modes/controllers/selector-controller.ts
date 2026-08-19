@@ -20,6 +20,7 @@ import {
 	resolveModelRoleValue,
 } from "../../config/model-resolver";
 import { getRoleInfo } from "../../config/model-roles";
+import { REDUCE_MOTION_STRICT_RENDER_INTERVAL_MS } from "../../config/reduce-motion";
 import { settings } from "../../config/settings";
 import { disableProvider, enableProvider } from "../../discovery";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
@@ -576,6 +577,12 @@ export class SelectorController {
 
 			case "tui.scrollbackRebuild":
 				this.ctx.ui.setScrollbackRebuild(value as boolean);
+				break;
+
+			case "display.reduceMotion":
+				this.ctx.ui.setMinRenderInterval(value === "strict" ? REDUCE_MOTION_STRICT_RENDER_INTERVAL_MS : undefined);
+				this.ctx.ui.invalidate();
+				this.ctx.ui.requestRender();
 				break;
 
 			case "tui.renderMermaid":

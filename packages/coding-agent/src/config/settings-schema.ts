@@ -999,6 +999,31 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"display.reduceMotion": {
+		type: "enum",
+		values: ["off", "on", "strict"] as const,
+		default: "off",
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Reduce Motion",
+			description: "Reduce or eliminate cosmetic TUI animation (accessibility, remote/low-bandwidth sessions)",
+			options: [
+				{ value: "off", label: "Off", description: "Full animations" },
+				{
+					value: "on",
+					label: "On",
+					description: "Freeze spinners, shimmer, and pulses; content repaints normally",
+				},
+				{
+					value: "strict",
+					label: "Strict",
+					description: "Also cap repaints at ~4fps to minimize bytes over remote links",
+				},
+			],
+		},
+	},
+
 	"display.smoothStreaming": {
 		type: "boolean",
 		default: true,
