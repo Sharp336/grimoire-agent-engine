@@ -438,15 +438,36 @@ describe("Ollama searchOllama auth resolution", () => {
 
 		const error = await promise.catch(e => e);
 		expect(error).toBeInstanceOf(Error);
-		expect(error.message).toMatch(/OLLAMA_API_KEY/i);
+		expect(error.message).toMatch(/OLLAMA_CLOUD_API_KEY/i);
+	});
+
+	it("resolves credentials for ollama-cloud provider", async () => {
+		const resolverMock = vi.fn(() => async () => "test-key");
+		const authStorage = {
+			resolver: resolverMock,
+			hasAuth: vi.fn(() => true),
+		} as unknown as AuthStorage;
+		const fetchMock: FetchImpl = async () =>
+			new Response(JSON.stringify({ results: [] }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+
+		await searchOllama({ ...makeParams("test"), authStorage, fetch: fetchMock });
+
+		expect(resolverMock).toHaveBeenCalledWith("ollama-cloud", expect.any(Object));
 	});
 });
+
 describe("OllamaProvider", () => {
 	const availableStorage = makeAuthStorage("test-key");
 	const unavailableStorage = makeAuthStorage(undefined);
 
 	it("is available when a credential exists", () => {
-		expect(new OllamaProvider().isAvailable(availableStorage)).toBe(true);
+		const hasAuthMock = vi.fn((provider: string) => provider === "ollama-cloud");
+		const authStorage = { hasAuth: hasAuthMock } as unknown as AuthStorage;
+		expect(new OllamaProvider().isAvailable(authStorage)).toBe(true);
+		expect(hasAuthMock).toHaveBeenCalledWith("ollama-cloud");
 	});
 
 	it("is not available when no credential exists", () => {

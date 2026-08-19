@@ -206,7 +206,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
     - `limit` and `num_search_results` are collapsed together before dispatch.
     - Output: `sources` only.
   - **Ollama** — `packages/coding-agent/src/web/search/providers/ollama.ts`
-    - Availability: `OLLAMA_API_KEY` env or `agent.db` credential for `ollama`.
+    - Availability: `OLLAMA_CLOUD_API_KEY` env or `agent.db` credential for `ollama-cloud`.
     - Querying: POST `https://ollama.com/api/web_search` with `{ query, max_results }`, `Authorization: Bearer <key>`.
     - Ignores `recency`, `max_tokens`, and `temperature`.
     - `limit` and `num_search_results` are collapsed together before dispatch, clamped to `1..10`, default `5`.

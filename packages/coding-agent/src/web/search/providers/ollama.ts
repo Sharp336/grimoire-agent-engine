@@ -116,7 +116,7 @@ function toSearchSources(response: OllamaSearchResponse, numResults: number): Se
 
 /** Execute Ollama web search. */
 export async function searchOllama(params: SearchParamsWithFetch): Promise<SearchResponse> {
-	const keyOrResolver: ApiKey = params.authStorage.resolver("ollama", {
+	const keyOrResolver: ApiKey = params.authStorage.resolver("ollama-cloud", {
 		sessionId: params.sessionId,
 	});
 
@@ -134,7 +134,7 @@ export async function searchOllama(params: SearchParamsWithFetch): Promise<Searc
 		{
 			signal: params.signal,
 			missingKeyMessage:
-				'Ollama credentials not found. Set OLLAMA_API_KEY or configure an API key for provider "ollama".',
+				'Ollama Cloud credentials not found. Set OLLAMA_CLOUD_API_KEY or configure an API key for provider "ollama-cloud".',
 		},
 	);
 
@@ -151,7 +151,7 @@ export class OllamaProvider extends SearchProvider {
 	readonly label = "Ollama";
 
 	isAvailable(authStorage: AuthStorage): boolean {
-		return authStorage.hasAuth("ollama") || !!getEnvApiKey("ollama");
+		return authStorage.hasAuth("ollama-cloud") || !!getEnvApiKey("ollama-cloud");
 	}
 
 	/**
