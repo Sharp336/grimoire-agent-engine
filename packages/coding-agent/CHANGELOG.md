@@ -15,6 +15,7 @@
 ### Fixed
 
 - Fixed `/memory stats` crashing on `memory.backend: mnemon` (`undefined is not an object (evaluating 'this.status')`) when the TUI extracted the unbound hook.
+- Fixed `memory.backend: mnemon` host tools so `link` / `related` / `forget` mount and unmount on backend switch, `link` is write-tier, secret scans cover every persisted save field, and abort/timeout waits for the CLI child to exit.
 
 
 ## [17.3.7] - 2026-08-17

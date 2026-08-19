@@ -49,9 +49,17 @@ const INSIGHT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 const LINK_TYPES = new Set<MemoryBackendLinkType>(["causal", "semantic", "temporal", "entity", "supersedes"]);
 const CATEGORIES = new Set(["preference", "decision", "insight", "fact", "context"]);
 
+function looksLikeSecret(value: string | undefined) {
+	return Boolean(value && SECRET_RE.test(value));
+}
+
 function isUnsupportedSupersedesError(error: unknown) {
 	const text = error instanceof Error ? error.message : String(error);
 	return /invalid edge type ["']supersedes["']/i.test(text) || /valid:.*\bcausal\b.*\bentity\b/i.test(text);
+}
+
+function asRecord(value: unknown) {
+	return value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
 }
 
 function parseLinkCandidates(parsed: Record<string, unknown> | undefined): MemoryBackendLinkCandidate[] {
@@ -106,6 +114,14 @@ function setMnemonSessionState(session: AgentSession, state: MnemonSessionState 
 	return previous;
 }
 
+export function resetMnemonConversationTracking(session: AgentSession | undefined) {
+	const state = getMnemonSessionState(session);
+	if (!state || state.aliasOf) return false;
+	state.hasRecalledForFirstTurn = false;
+	state.lastRecallSnippet = undefined;
+	return true;
+}
+
 export function loadMnemonConfig(settings: Settings): MnemonBackendConfig {
 	return {
 		cliPath: settings.get("mnemon.cliPath"),
@@ -114,18 +130,15 @@ export function loadMnemonConfig(settings: Settings): MnemonBackendConfig {
 	};
 }
 
-function asRecord(value: unknown) {
-	return value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
-}
-
 async function recall(cli: MnemonCli, query: string, limit: number, mode: MnemonRecallMode, signal?: AbortSignal) {
-	const payload = await cli.runJson(["recall", query, "--limit", String(Math.min(50, Math.max(limit, limit * 3)))], {
+	const requested = Math.max(1, Math.min(50, Math.round(Number(limit)) || 10));
+	const payload = await cli.runJson(["recall", query, "--limit", String(Math.min(50, requested * 3))], {
 		signal,
 		timeoutMs: 8_000,
 		readonly: true,
 	});
 	const parsed = parseMnemonRecallPayload(payload);
-	return applyMnemonRecallQuality(parsed.results, { limit, mode });
+	return applyMnemonRecallQuality(parsed.results, { limit: requested, mode });
 }
 
 function toSearchItems(rows: MnemonRecallRow[]): MemoryBackendSearchItem[] {
@@ -176,7 +189,7 @@ async function readMnemonStatus(session: AgentSession | undefined): Promise<Memo
 			writable: false,
 			searchable: false,
 			error: error instanceof Error ? error.message : String(error),
-			message: "mnemon CLI unavailable. Install mnemon >= 0.2.1 and keep it on PATH, or set mnemon.cliPath.",
+			message: "mnemon CLI unavailable. Install mnemon and keep it on PATH, or set mnemon.cliPath.",
 		};
 	}
 }
@@ -277,7 +290,7 @@ export const mnemonBackend: MemoryBackend = {
 	async save({ session }, input: MemoryBackendSaveInput) {
 		const content = input.content.trim();
 		if (!content) return { backend: "mnemon" as const, stored: 0, message: "Memory content is empty." };
-		if (SECRET_RE.test(content)) {
+		if ([content, input.context, input.source, input.entities, input.category].some(looksLikeSecret)) {
 			return {
 				backend: "mnemon" as const,
 				stored: 0,
@@ -364,7 +377,7 @@ export const mnemonBackend: MemoryBackend = {
 				message: linked
 					? usedType === input.type
 						? "linked"
-						: "linked as causal; CLI rejected supersedes (mnemon < 0.2.1)"
+						: "linked as causal; CLI rejected supersedes"
 					: "mnemon link did not confirm",
 			};
 		} catch (error) {
@@ -471,10 +484,9 @@ export const mnemonBackend: MemoryBackend = {
 			"",
 			primary ? `- CLI: ${primary.cli.command}` : "- CLI: ephemeral (session not started)",
 			"- store: ~/.mnemon (never point mnemopi at this path; schemas differ)",
-			"- require: mnemon on PATH. 0.2.0 works; supersedes falls back to causal until mnemon-dev/mnemon#98 merges",
-
+			"- require: mnemon on PATH. Homebrew 0.2.0 works; supersedes falls back to causal until the CLI admits the type",
 			"- silent recall: high-score only; no automatic retain drain",
-			"- /memory clear is refused: use mnemon forget <id> or mnemon gc",
+			"- /memory clear is refused: use forget or mnemon gc",
 		].join("\n");
 	},
 

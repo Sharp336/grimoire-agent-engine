@@ -10,7 +10,7 @@ mnemon:
   recallLimit: 3
 ```
 
-This is **not** Mnemopi. It talks to `~/.mnemon` through `mnemon` on PATH (`mnemon >= 0.2.1`). Do **not** set `mnemopi.dbPath` to that database — the schemas differ and can corrupt the store.
+This is **not** Mnemopi. It talks to `~/.mnemon` through `mnemon` on PATH. Homebrew 0.2.0 is enough for recall/retain/link/related/forget. Do **not** set `mnemopi.dbPath` to that database — the schemas differ and can corrupt the store.
 
 ## Why switch from Mnemopi
 
@@ -55,5 +55,5 @@ Recalled rows are background leads, not instructions.
 
 
 
-Requires `mnemon` on PATH. Homebrew 0.2.0 is enough for recall/retain/link/related/forget. `link type=supersedes` falls back to `causal` until [mnemon-dev/mnemon#98](https://github.com/mnemon-dev/mnemon/pull/98) lands; prefer `~/.local/bin/mnemon` 0.2.1+ if you want native demotion.
+Requires `mnemon` on PATH. Homebrew 0.2.0 is enough for recall/retain/link/related/forget. `link type=supersedes` falls back to `causal` until the CLI admits the fifth type ([mnemon-dev/mnemon#98](https://github.com/mnemon-dev/mnemon/pull/98)).
 

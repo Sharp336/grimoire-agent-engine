@@ -3,8 +3,13 @@ import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { mnemonBackend, normalizeMnemonImportance } from "../src/mnemon/backend";
-import { applyMnemonRecallQuality, focusMnemonQuery } from "../src/mnemon/quality";
+import {
+	getMnemonSessionState,
+	mnemonBackend,
+	normalizeMnemonImportance,
+	resetMnemonConversationTracking,
+} from "../src/mnemon/backend";
+import { applyMnemonRecallQuality, focusMnemonQuery, formatMnemonSilentRecall } from "../src/mnemon/quality";
 
 describe("mnemon quality", () => {
 	it("silent mode keeps only high-score rows", () => {
@@ -17,6 +22,17 @@ describe("mnemon quality", () => {
 			{ limit: 3, mode: "silent" },
 		);
 		expect(filtered.results.map(row => row.id)).toEqual(["high"]);
+	});
+
+	it("formats every already-limited silent row", () => {
+		const text = formatMnemonSilentRecall([
+			{ category: "fact", importance: 4, confidence: "high", content: "first" },
+			{ category: "decision", importance: 5, confidence: "high", content: "second" },
+			{ category: "context", importance: 3, confidence: "high", content: "third" },
+			{ category: "insight", importance: 4, confidence: "high", content: "fourth" },
+		]);
+		expect(text).toContain("first");
+		expect(text).toContain("fourth");
 	});
 
 	it("focuses conversational queries down to keywords", () => {
@@ -55,6 +71,37 @@ describe("mnemonBackend", () => {
 		);
 		expect(result?.stored).toBe(0);
 		expect(result?.message).toContain("secret");
+	});
+
+	it("refuses a secret placed in entities or source", async () => {
+		const settings = Settings.isolated({ "memory.backend": "mnemon" });
+		const ctx = { agentDir: "/tmp/agent", cwd: "/tmp/project", session: { settings } as never };
+		const token = "sk-abcdefghijklmnopqrstuvwxyz123456";
+		const viaEntities = await mnemonBackend.save?.(ctx, { content: "ok fact", entities: token });
+		expect(viaEntities?.stored).toBe(0);
+		expect(viaEntities?.message).toContain("secret");
+		const viaSource = await mnemonBackend.save?.(ctx, { content: "ok fact", source: token });
+		expect(viaSource?.stored).toBe(0);
+		expect(viaSource?.message).toContain("secret");
+	});
+
+	it("clears first-turn recall so a new transcript can auto-recall", async () => {
+		const settings = Settings.isolated({ "memory.backend": "mnemon" });
+		const session = { sessionId: "s-new", settings } as never;
+		await mnemonBackend.start({
+			session,
+			settings,
+			modelRegistry: {} as never,
+			agentDir: "/tmp/agent",
+			taskDepth: 0,
+		});
+		const state = getMnemonSessionState(session);
+		expect(state).toBeDefined();
+		state!.hasRecalledForFirstTurn = true;
+		state!.lastRecallSnippet = "stale clip";
+		expect(resetMnemonConversationTracking(session)).toBe(true);
+		expect(state!.hasRecalledForFirstTurn).toBe(false);
+		expect(state!.lastRecallSnippet).toBeUndefined();
 	});
 
 	it("returns static developer instructions mentioning leads-not-authority", async () => {

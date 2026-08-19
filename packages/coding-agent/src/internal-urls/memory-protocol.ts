@@ -319,7 +319,7 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 			}
 			if (backend === "mnemon") {
 				throw new Error(
-					"Native Mnemon memories are not addressable via memory://. Use `recall` for ids, then `mnemon related` / `mnemon forget` on the CLI. `read memory://<id>` is only available with memory.backend=mnemopi.",
+					"Native Mnemon memories are not addressable via memory://. Use `recall` for ids, then `related` / `forget`. The CLI is an alternative. `read memory://<id>` is only available with memory.backend=mnemopi.",
 				);
 			}
 

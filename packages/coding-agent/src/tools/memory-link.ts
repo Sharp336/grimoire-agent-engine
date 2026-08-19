@@ -15,7 +15,7 @@ export type MemoryLinkParams = typeof memoryLinkSchema.infer;
 
 export class MemoryLinkTool implements AgentTool<typeof memoryLinkSchema> {
 	readonly name = "link";
-	readonly approval = "read" as const;
+	readonly approval = "write" as const;
 	readonly label = "Link";
 	readonly description = linkDescription;
 	readonly parameters = memoryLinkSchema;

@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { $which } from "@oh-my-pi/pi-utils";
 
 const MAX_OUTPUT_BYTES = 256 * 1024;
 const KILL_GRACE_MS = 1_500;
@@ -25,27 +26,18 @@ export interface MnemonCli {
 }
 
 const COMMON_PATHS = [
-	join(homedir(), ".local", "bin", "mnemon"),
-	join(homedir(), "go", "bin", "mnemon"),
+	path.join(os.homedir(), ".local", "bin", "mnemon"),
+	path.join(os.homedir(), "go", "bin", "mnemon"),
 	"/opt/homebrew/bin/mnemon",
 	"/usr/local/bin/mnemon",
 ];
 
-function findOnPath() {
-	for (const dir of String(process.env.PATH ?? "").split(":")) {
-		if (!dir) continue;
-		const candidate = join(dir, "mnemon");
-		if (existsSync(candidate)) return candidate;
-	}
-	return undefined;
-}
-
 export function findMnemonCommand(configured?: string) {
 	const explicit = configured?.trim();
-	if (explicit && existsSync(explicit)) return explicit;
+	if (explicit && fs.existsSync(explicit)) return explicit;
 	const fromEnv = process.env.MNEMON_CLI_PATH?.trim();
-	if (fromEnv && existsSync(fromEnv)) return fromEnv;
-	return findOnPath() ?? COMMON_PATHS.find(path => existsSync(path)) ?? "mnemon";
+	if (fromEnv && fs.existsSync(fromEnv)) return fromEnv;
+	return $which("mnemon") ?? COMMON_PATHS.find(candidate => fs.existsSync(candidate)) ?? "mnemon";
 }
 
 async function spawnOnce(command: string, args: string[], options: MnemonRunOptions = {}) {
@@ -60,7 +52,9 @@ async function spawnOnce(command: string, args: string[], options: MnemonRunOpti
 	let stderr = "";
 	let bytes = 0;
 	let settled = false;
-	let killTimer: ReturnType<typeof setTimeout> | undefined;
+	let pendingError: Error | null = null;
+	let killTimer: Timer | undefined;
+	const timeoutMs = options.timeoutMs ?? 8_000;
 
 	const finish = (error: Error | null, result?: MnemonProcessResult) => {
 		if (settled) return;
@@ -71,22 +65,24 @@ async function spawnOnce(command: string, args: string[], options: MnemonRunOpti
 		if (error) reject(error);
 		else resolve(result!);
 	};
-	const stop = () => {
-		if (child.exitCode !== null || child.signalCode !== null) return;
+	const stop = (error: Error) => {
+		pendingError = error;
+		if (child.exitCode !== null || child.signalCode !== null) {
+			finish(error);
+			return;
+		}
 		child.kill("SIGTERM");
 		killTimer = setTimeout(() => {
 			if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
 		}, KILL_GRACE_MS);
 	};
 	const onAbort = () => {
-		stop();
-		finish(new Error(`mnemon aborted: ${String(options.signal?.reason ?? "cancelled")}`));
+		stop(new Error(`mnemon aborted: ${String(options.signal?.reason ?? "cancelled")}`));
 	};
 	const append = (kind: "stdout" | "stderr", chunk: Buffer) => {
 		bytes += chunk.byteLength;
 		if (bytes > MAX_OUTPUT_BYTES) {
-			stop();
-			finish(new Error(`mnemon output exceeded ${MAX_OUTPUT_BYTES} bytes`));
+			stop(new Error(`mnemon output exceeded ${MAX_OUTPUT_BYTES} bytes`));
 			return;
 		}
 		const text = chunk.toString("utf8");
@@ -99,12 +95,13 @@ async function spawnOnce(command: string, args: string[], options: MnemonRunOpti
 	child.on("error", (error: Error) => {
 		finish(new Error(`failed to launch mnemon (${JSON.stringify(command)}): ${error.message}`));
 	});
-	child.on("close", exitCode => finish(null, { stdout, stderr, exitCode }));
+	child.on("close", exitCode => {
+		finish(pendingError, pendingError ? undefined : { stdout, stderr, exitCode });
+	});
 
 	const timeout = setTimeout(() => {
-		stop();
-		finish(new Error(`mnemon did not respond within ${options.timeoutMs}ms`));
-	}, options.timeoutMs ?? 8_000);
+		stop(new Error(`mnemon did not respond within ${timeoutMs}ms`));
+	}, timeoutMs);
 
 	if (options.signal?.aborted) onAbort();
 	else options.signal?.addEventListener("abort", onAbort, { once: true });

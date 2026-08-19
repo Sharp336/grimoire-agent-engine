@@ -9,9 +9,9 @@
 - CLI: `mnemon link <id1> <id2> --type <type> --weight <0-1>`
 
 ## Registration / Visibility
-- Tool metadata: `approval = "read"`, `strict = true`, `loadMode = "discoverable"`. Successful calls write a graph edge.
+- Tool metadata: `approval = "write"`, `strict = true`, `loadMode = "discoverable"`. Successful calls write a graph edge.
 - Registered only when `memory.backend = "mnemon"`. Absent for `off`, `local`, `hindsight`, and `mnemopi`.
-- Unrestricted sessions with an explicit tool list auto-include `recall` / `retain` / `link` for Mnemon. Restricted lists are not widened.
+- Unrestricted sessions with an explicit tool list auto-include `recall` / `retain` / `link` / `related` / `forget` for Mnemon. Restricted lists are not widened.
 - In an ordinary `tools.xdev` session the tool may appear as `xd://link`.
 
 ## Inputs

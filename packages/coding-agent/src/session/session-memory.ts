@@ -7,6 +7,7 @@ import type { Settings } from "../config/settings";
 import type { HindsightSessionState } from "../hindsight/state";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
 import type { MemoryBackendStartOptions } from "../memory-backend/types";
+import { resetMnemonConversationTracking } from "../mnemon/backend";
 import type { MnemopiSessionState } from "../mnemopi/state";
 
 /** Capabilities borrowed from the owning AgentSession. */
@@ -110,16 +111,22 @@ export class SessionMemory {
 		return true;
 	}
 
+	#resetMnemonConversationTrackingIfMnemon(): boolean {
+		if (this.#host.settings.get("memory.backend") !== "mnemon") return false;
+		return resetMnemonConversationTracking(this.#host.memoryBackendSession());
+	}
+
 	/** Resets transcript-scoped memory counters and removes a promoted prompt. */
 	async resetContextForNewTranscript(): Promise<void> {
 		const hadPromotedMemoryPrompt = this.#baseSystemPromptBeforeMemoryPromotion !== undefined;
 		const resetHindsight = this.#resetHindsightConversationTrackingIfHindsight();
 		const resetMnemopi = this.#resetMnemopiConversationTrackingIfMnemopi();
+		const resetMnemon = this.#resetMnemonConversationTrackingIfMnemon();
 		if (hadPromotedMemoryPrompt) {
 			this.#host.setBaseSystemPrompt(this.#baseSystemPromptBeforeMemoryPromotion!);
 			this.#baseSystemPromptBeforeMemoryPromotion = undefined;
 		}
-		if (resetHindsight || resetMnemopi || hadPromotedMemoryPrompt) {
+		if (resetHindsight || resetMnemopi || resetMnemon || hadPromotedMemoryPrompt) {
 			await this.#host.refreshBaseSystemPrompt();
 		}
 	}

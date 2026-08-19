@@ -72,7 +72,6 @@ export function applyMnemonRecallQuality(
 
 export function formatMnemonSilentRecall(results: MnemonRecallRow[]) {
 	return results
-		.slice(0, 3)
 		.map(row => {
 			const body = String(row.content ?? "")
 				.trim()
