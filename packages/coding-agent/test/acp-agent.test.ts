@@ -28,7 +28,7 @@ import {
 	TTS_LOCAL_MODELS,
 	TTS_LOCAL_VOICE_OPTIONS,
 } from "@oh-my-pi/pi-coding-agent/tts/models";
-import { getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
+import { getConfigRootDir, getMCPConfigPath, setAgentDir } from "@oh-my-pi/pi-utils";
 import type {
 	AgentSideConnection,
 	ClientCapabilities,
@@ -46,6 +46,7 @@ import {
 	zSessionNotification,
 } from "@oh-my-pi/pi-utils/acp";
 import { TOOL_NAME as DELAYED_MCP_TOOL_NAME } from "./fixtures/delayed-tool-mcp";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 /** Validates an ACP wire payload against the in-house protocol schemas. */
 function expectAcpStructure(schema: Validator<unknown>, value: unknown): void {
@@ -168,9 +169,12 @@ class FakeAgentSession {
 		return this.sessionManager.getHeader()?.title ?? `Session ${this.sessionId}`;
 	}
 
-	get modelRegistry(): { getApiKey: (model: Model) => Promise<string> } {
+	hostMcpAuthStorage: unknown;
+
+	get modelRegistry(): { getApiKey: (model: Model) => Promise<string>; authStorage?: unknown } {
 		return {
 			getApiKey: async (_model: Model) => "test-key",
+			...(this.hostMcpAuthStorage ? { authStorage: this.hostMcpAuthStorage } : {}),
 		};
 	}
 
@@ -467,7 +471,10 @@ afterEach(async () => {
 });
 
 async function createHarness(
-	options: { elicitationHandler?: (req: CreateElicitationRequest) => Promise<CreateElicitationResponse> } = {},
+	options: {
+		elicitationHandler?: (req: CreateElicitationRequest) => Promise<CreateElicitationResponse>;
+		hostMcpAuthStorage?: unknown;
+	} = {},
 ): Promise<AgentHarness> {
 	const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-acp-test-"));
 	cleanupRoots.push(root);
@@ -494,10 +501,14 @@ async function createHarness(
 		closed: Promise.withResolvers<void>().promise,
 	} as unknown as AgentSideConnection;
 
-	const initialSession = new FakeAgentSession(cwdA);
+	const attachHostMcpAuth = (session: FakeAgentSession): FakeAgentSession => {
+		session.hostMcpAuthStorage = options.hostMcpAuthStorage;
+		return session;
+	};
+	const initialSession = attachHostMcpAuth(new FakeAgentSession(cwdA));
 	sessions.push(initialSession);
 	const factory = async (cwd: string): Promise<AgentSession> => {
-		const session = new FakeAgentSession(cwd);
+		const session = attachHostMcpAuth(new FakeAgentSession(cwd));
 		sessions.push(session);
 		return session as unknown as AgentSession;
 	};
@@ -2835,6 +2846,67 @@ describe("ACP agent MCP server configuration (late-connecting servers)", () => {
 			expect(namesOf(refreshSpy.mock.calls.at(-1)?.[0] ?? [])).toEqual([`mcp__delayed_${DELAYED_MCP_TOOL_NAME}`]);
 		} finally {
 			refreshSpy.mockRestore();
+		}
+	}, 15_000);
+
+	it("loads the host MCP catalog when the client sends no servers", async () => {
+		const authStorage = createInMemoryAuthStorage();
+		try {
+			const harness = await createHarness({ hostMcpAuthStorage: authStorage });
+			await Bun.write(
+				getMCPConfigPath("user", harness.cwdA),
+				JSON.stringify({
+					mcpServers: {
+						hostonly: { command: BUN_EXEC, args: [FIXTURE_PATH] },
+					},
+				}),
+			);
+			const refreshSpy = spyOn(FakeAgentSession.prototype, "refreshMCPTools");
+			const namesOf = (tools: unknown[]) => (tools as Array<{ name: string }>).map(tool => tool.name);
+			try {
+				const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+				expectAcpStructure(zNewSessionResponse, created);
+				const hostTool = `mcp__hostonly_${DELAYED_MCP_TOOL_NAME}`;
+				await pollUntil(() => namesOf(refreshSpy.mock.calls.at(-1)?.[0] ?? []).includes(hostTool));
+				expect(namesOf(refreshSpy.mock.calls.at(-1)?.[0] ?? [])).toContain(hostTool);
+			} finally {
+				refreshSpy.mockRestore();
+			}
+		} finally {
+			authStorage.close();
+		}
+	}, 15_000);
+
+	it("keeps client-supplied MCP servers instead of the host catalog", async () => {
+		const authStorage = createInMemoryAuthStorage();
+		try {
+			const harness = await createHarness({ hostMcpAuthStorage: authStorage });
+			await Bun.write(
+				getMCPConfigPath("user", harness.cwdA),
+				JSON.stringify({
+					mcpServers: {
+						hostonly: { command: BUN_EXEC, args: [FIXTURE_PATH] },
+					},
+				}),
+			);
+			const refreshSpy = spyOn(FakeAgentSession.prototype, "refreshMCPTools");
+			const namesOf = (tools: unknown[]) => (tools as Array<{ name: string }>).map(tool => tool.name);
+			try {
+				const created = await harness.agent.newSession({
+					cwd: harness.cwdA,
+					mcpServers: [{ name: "delayed", command: BUN_EXEC, args: [FIXTURE_PATH], env: [] }],
+				});
+				expectAcpStructure(zNewSessionResponse, created);
+				const clientTool = `mcp__delayed_${DELAYED_MCP_TOOL_NAME}`;
+				await pollUntil(() => namesOf(refreshSpy.mock.calls.at(-1)?.[0] ?? []).includes(clientTool));
+				const names = namesOf(refreshSpy.mock.calls.at(-1)?.[0] ?? []);
+				expect(names).toEqual([clientTool]);
+				expect(names.some(name => name.includes("hostonly"))).toBe(false);
+			} finally {
+				refreshSpy.mockRestore();
+			}
+		} finally {
+			authStorage.close();
 		}
 	}, 15_000);
 });
