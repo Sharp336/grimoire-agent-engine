@@ -225,9 +225,15 @@ function createBootstrapModel(
 	};
 }
 
+export const KIRO_AUTO_MODEL = createBootstrapModel("auto", {
+	contextWindow: 1_000_000,
+	maxTokens: 65_536,
+	thinking: KIRO_THINKING,
+});
+
 /** Safe offline bootstrap; authenticated discovery replaces it with the profile catalog. */
 export const KIRO_MODELS: readonly KiroModelSpec[] = [
-	createBootstrapModel("auto", { contextWindow: 1_000_000, maxTokens: 65_536, thinking: KIRO_THINKING }),
+	KIRO_AUTO_MODEL,
 	createBootstrapModel("claude-opus-5", { contextWindow: 1_000_000, maxTokens: 128_000, thinking: KIRO_THINKING }),
 	createBootstrapModel("claude-sonnet-5", { contextWindow: 1_000_000, maxTokens: 65_536, thinking: KIRO_THINKING }),
 	createBootstrapModel("claude-opus-4.8", { contextWindow: 1_000_000, maxTokens: 128_000, thinking: KIRO_THINKING }),

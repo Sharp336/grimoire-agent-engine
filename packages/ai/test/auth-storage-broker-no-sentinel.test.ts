@@ -67,17 +67,23 @@ describe("AuthStorage broker sentinel refresh", () => {
 		const providerRefresh = vi.spyOn(oauthUtils, "refreshOAuthToken").mockImplementation(async () => {
 			throw new Error("provider-direct refresh must not be called");
 		});
-
-		const access = await authStorage.getOAuthAccess("anthropic", "broker-session");
-
-		expect(access).toEqual({
-			accessToken: "broker-access-rotated",
-			credentialId: expect.any(Number),
-			accountId: "broker-account",
-			email: "broker@example.com",
-			projectId: "broker-project",
-			enterpriseUrl: "https://broker.example.test",
+		const getOAuthApiKey = vi.spyOn(oauthUtils, "getOAuthApiKey").mockResolvedValue({
+			newCredentials: {
+				access: "broker-access-rotated",
+				refresh: REMOTE_REFRESH_SENTINEL,
+				expires: Date.now() + 60 * 60_000,
+				accountId: "broker-account",
+				email: "broker@example.com",
+				projectId: "broker-project",
+				enterpriseUrl: undefined,
+			},
+			apiKey: "broker-api-key",
 		});
+
+		const apiKey = await authStorage.getApiKey("anthropic", "broker-session");
+
+		expect(apiKey).toBe("broker-api-key");
+		expect(getOAuthApiKey).toHaveBeenCalledTimes(1);
 		expect(brokerRefreshCalls).toBe(1);
 		expect(providerRefresh).not.toHaveBeenCalled();
 		const persisted = store.listAuthCredentials("anthropic");

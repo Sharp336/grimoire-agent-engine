@@ -114,6 +114,22 @@ export type OAuthCredential = {
 	type: "oauth";
 } & OAuthCredentials;
 
+function mergeOAuthCredential(current: OAuthCredential, refreshed: OAuthCredentials): OAuthCredential {
+	return {
+		...current,
+		...refreshed,
+		type: "oauth",
+		accountId: refreshed.accountId ?? current.accountId,
+		email: refreshed.email ?? current.email,
+		projectId: refreshed.projectId ?? current.projectId,
+		enterpriseUrl: refreshed.enterpriseUrl ?? current.enterpriseUrl,
+		apiEndpoint: refreshed.apiEndpoint ?? current.apiEndpoint,
+		orgId: refreshed.orgId ?? current.orgId,
+		orgName: refreshed.orgName ?? current.orgName,
+		authorizedAt: refreshed.authorizedAt ?? current.authorizedAt,
+	};
+}
+
 export type AuthCredential = ApiKeyCredential | OAuthCredential;
 
 export type AuthCredentialEntry = AuthCredential | AuthCredential[];
@@ -4940,11 +4956,7 @@ export class AuthStorage {
 						credentialId,
 						options?.signal,
 					);
-					const updated: OAuthCredential = {
-						...candidate.selection.credential,
-						...refreshedCredentials,
-						type: "oauth",
-					};
+					const updated = mergeOAuthCredential(candidate.selection.credential, refreshedCredentials);
 					candidate.selection.credential = updated;
 					if (credentialId !== undefined) {
 						const idx = this.#replaceCredentialById(provider, credentialId, updated);
@@ -5436,22 +5448,7 @@ export class AuthStorage {
 				result = await getOAuthApiKey(provider as OAuthProvider, oauthCreds);
 			}
 			if (!result) return undefined;
-			const updated: OAuthCredential = {
-				...selection.credential,
-				...(provider === "kiro" ? result.newCredentials : {}),
-				type: "oauth",
-				access: result.newCredentials.access,
-				refresh: result.newCredentials.refresh,
-				expires: result.newCredentials.expires,
-				accountId: result.newCredentials.accountId ?? selection.credential.accountId,
-				email: result.newCredentials.email ?? selection.credential.email,
-				projectId: result.newCredentials.projectId ?? selection.credential.projectId,
-				enterpriseUrl: result.newCredentials.enterpriseUrl ?? selection.credential.enterpriseUrl,
-				apiEndpoint: result.newCredentials.apiEndpoint ?? selection.credential.apiEndpoint,
-				orgId: result.newCredentials.orgId ?? selection.credential.orgId,
-				orgName: result.newCredentials.orgName ?? selection.credential.orgName,
-				authorizedAt: result.newCredentials.authorizedAt ?? selection.credential.authorizedAt,
-			};
+			const updated = mergeOAuthCredential(selection.credential, result.newCredentials);
 			if (credentialId !== undefined) {
 				const idx = this.#replaceCredentialById(provider, credentialId, updated);
 				if (idx !== -1) selection.index = idx;
@@ -6702,20 +6699,7 @@ export class AuthStorage {
 				}
 				throw error;
 			}
-			const updated: OAuthCredential = {
-				type: "oauth",
-				access: refreshed.access,
-				refresh: refreshed.refresh,
-				expires: refreshed.expires,
-				accountId: refreshed.accountId ?? attempted.accountId,
-				email: refreshed.email ?? attempted.email,
-				projectId: refreshed.projectId ?? attempted.projectId,
-				enterpriseUrl: refreshed.enterpriseUrl ?? attempted.enterpriseUrl,
-				apiEndpoint: refreshed.apiEndpoint ?? attempted.apiEndpoint,
-				orgId: refreshed.orgId ?? attempted.orgId,
-				orgName: refreshed.orgName ?? attempted.orgName,
-				authorizedAt: refreshed.authorizedAt ?? attempted.authorizedAt,
-			};
+			const updated = mergeOAuthCredential(attempted, refreshed);
 			// Persist by id: the array may have been reordered/shrunk while the
 			// refresh was in flight, so the pre-await positional index is unsafe. A
 			// -1 means the row was disabled/removed mid-refresh — surface that as a
