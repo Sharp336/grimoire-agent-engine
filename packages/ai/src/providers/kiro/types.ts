@@ -32,7 +32,7 @@ export interface KiroToolSpec {
 }
 
 export interface KiroImageBlock {
-	format: "jpeg" | "png";
+	format: "jpeg" | "png" | "gif" | "webp";
 	source: { bytes: string };
 }
 

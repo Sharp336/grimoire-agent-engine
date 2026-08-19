@@ -55,6 +55,10 @@ function imageFormat(mimeType: string): KiroImageBlock["format"] {
 			return "jpeg";
 		case "image/png":
 			return "png";
+		case "image/gif":
+			return "gif";
+		case "image/webp":
+			return "webp";
 		default:
 			throw new Error(`Kiro does not support image type: ${mimeType}`);
 	}
@@ -102,16 +106,18 @@ function assistantMessage(
 	return { content: content.toWellFormed(), ...(toolUses.length > 0 ? { toolUses } : {}) };
 }
 
-function assertNoToolResultImages(message: ToolResultMessage): void {
-	if (message.content.some(part => part.type === "image")) {
-		throw new Error("Kiro tool-result image input is not enabled: only user-message image wire shape is verified");
-	}
-}
+/** Text kept in a tool result when its only payload is an image promoted to the user input. */
+const TOOL_RESULT_IMAGE_PLACEHOLDER = "(see attached image)";
 
-function toolResult(message: ToolResultMessage, normalizeId: (id: string) => string): KiroToolResult {
-	assertNoToolResultImages(message);
+/** Scan the message once; callers accumulate the same blocks onto the paired user input. */
+function toolResult(
+	message: ToolResultMessage,
+	normalizeId: (id: string) => string,
+	images: KiroImageBlock[],
+): KiroToolResult {
+	const text = textContent(message);
 	return {
-		content: [{ text: textContent(message) }],
+		content: [{ text: text || (images.length > 0 ? TOOL_RESULT_IMAGE_PLACEHOLDER : "") }],
 		status: message.isError ? "error" : "success",
 		toolUseId: normalizeId(message.toolCallId),
 	};
@@ -227,14 +233,19 @@ export function transformKiroRequest(
 			if (converted) history.push({ assistantResponseMessage: converted });
 			continue;
 		}
-		const results = [toolResult(message, id => normalizer.normalize(id))];
+		const images = imageContent(message);
+		const results = [toolResult(message, id => normalizer.normalize(id), images)];
 		while (historyMessages[index + 1]?.role === "toolResult") {
 			index++;
-			results.push(toolResult(historyMessages[index] as ToolResultMessage, id => normalizer.normalize(id)));
+			const nextResult = historyMessages[index] as ToolResultMessage;
+			const nextImages = imageContent(nextResult);
+			results.push(toolResult(nextResult, id => normalizer.normalize(id), nextImages));
+			images.push(...nextImages);
 		}
 		history.push({
 			userInputMessage: {
 				...userMessage(TOOL_RESULTS_PROMPT, model.requestModelId ?? model.id),
+				...(images.length > 0 ? { images } : {}),
 				userInputMessageContext: { toolResults: results },
 			},
 		});
@@ -248,12 +259,20 @@ export function transformKiroRequest(
 		const converted = assistantMessage(first, id => normalizer.normalize(id));
 		if (converted) history.push({ assistantResponseMessage: converted });
 		for (const message of currentMessages.slice(1)) {
-			if (message.role === "toolResult") currentResults.push(toolResult(message, id => normalizer.normalize(id)));
+			if (message.role === "toolResult") {
+				const images = imageContent(message);
+				currentResults.push(toolResult(message, id => normalizer.normalize(id), images));
+				currentImages.push(...images);
+			}
 		}
 		currentContent = currentResults.length > 0 ? TOOL_RESULTS_PROMPT : CONTINUATION_PROMPT;
 	} else if (first?.role === "toolResult") {
 		for (const message of currentMessages) {
-			if (message.role === "toolResult") currentResults.push(toolResult(message, id => normalizer.normalize(id)));
+			if (message.role === "toolResult") {
+				const images = imageContent(message);
+				currentResults.push(toolResult(message, id => normalizer.normalize(id), images));
+				currentImages.push(...images);
+			}
 		}
 		currentContent = TOOL_RESULTS_PROMPT;
 	} else if (first) {

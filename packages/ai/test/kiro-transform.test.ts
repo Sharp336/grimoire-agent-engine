@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { transformKiroRequest } from "@oh-my-pi/pi-ai/providers/kiro/index";
-import type { AssistantMessage, Context, Model, Tool, Usage } from "@oh-my-pi/pi-ai/types";
+import type { AssistantMessage, Context, Model, Tool, ToolResultMessage, Usage } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 
@@ -52,12 +52,12 @@ function assistantToolCall(id: string, stopReason: AssistantMessage["stopReason"
 	};
 }
 
-function toolResult(toolCallId: string, isError = false) {
+function toolResult(toolCallId: string, isError = false, content?: ToolResultMessage["content"]) {
 	return {
 		role: "toolResult" as const,
 		toolCallId,
 		toolName: "lookup",
-		content: [{ type: "text" as const, text: isError ? "lookup failed" : "file contents" }],
+		content: content ?? [{ type: "text" as const, text: isError ? "lookup failed" : "file contents" }],
 		isError,
 		timestamp: 2,
 	};
@@ -229,7 +229,7 @@ describe("Kiro request transformation", () => {
 	});
 
 	test("fails closed for unsupported user image formats", () => {
-		for (const mimeType of ["image/gif", "image/webp", "image/bmp"] as const) {
+		for (const mimeType of ["image/bmp", "image/tiff"] as const) {
 			const context: Context = {
 				messages: [
 					{
@@ -244,7 +244,87 @@ describe("Kiro request transformation", () => {
 		}
 	});
 
-	test("rejects images in tool results instead of emitting an unsupported wire shape", () => {
+	test("serializes gif and webp user-message images with the Amazon Q wire formats", () => {
+		for (const [mimeType, format] of [
+			["image/gif", "gif"],
+			["image/webp", "webp"],
+		] as const) {
+			const context: Context = {
+				messages: [
+					{
+						role: "user",
+						content: [{ type: "image", data: "YmxvYg==", mimeType }],
+						timestamp: 0,
+					},
+				],
+			};
+
+			const current = transformKiroRequest(createModel(), context).conversationState.currentMessage.userInputMessage;
+			expect(current.images).toEqual([{ format, source: { bytes: "YmxvYg==" } }]);
+		}
+	});
+
+	test("promotes JPEG and PNG tool-result images onto the paired user input", () => {
+		for (const [mimeType, format] of [
+			["image/jpeg", "jpeg"],
+			["image/png", "png"],
+		] as const) {
+			const imageData = "aGVsbG8=";
+			const context: Context = {
+				messages: [
+					{ role: "user", content: "Start", timestamp: 0 },
+					assistantToolCall("tool-1"),
+					{
+						...toolResult("tool-1"),
+						content: [
+							{ type: "text", text: "file contents" },
+							{ type: "image", data: imageData, mimeType },
+						],
+					},
+				],
+				tools: [lookupTool],
+			};
+
+			const request = transformKiroRequest(createModel(), context);
+			const current = request.conversationState.currentMessage.userInputMessage;
+			const result = current.userInputMessageContext?.toolResults?.[0];
+			const assistant = request.conversationState.history?.at(-1)?.assistantResponseMessage;
+
+			expect(result?.content).toEqual([{ text: "file contents" }]);
+			expect(result?.status).toBe("success");
+			expect(result?.toolUseId).toBe(assistant?.toolUses?.[0]?.toolUseId);
+			expect(current.images).toEqual([{ format, source: { bytes: imageData } }]);
+		}
+	});
+
+	test("promotes WebP tool-result screenshots without dropping tool bookkeeping", () => {
+		const webpData = "UklGRnIAAABXRUJQVlA4WAoAAAAQAAAAAQAAAQAAQUxQSAIAAAABx9D/AAAAAAAA";
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "Inspect the screenshot", timestamp: 0 },
+				assistantToolCall("read-1"),
+				{
+					...toolResult("read-1"),
+					content: [
+						{ type: "text", text: "[Image: image/webp]" },
+						{ type: "image", data: webpData, mimeType: "image/webp" },
+					],
+				},
+			],
+			tools: [lookupTool],
+		};
+
+		const request = transformKiroRequest(createModel(), context);
+		const current = request.conversationState.currentMessage.userInputMessage;
+		const result = current.userInputMessageContext?.toolResults?.[0];
+		const assistant = request.conversationState.history?.at(-1)?.assistantResponseMessage;
+
+		expect(result?.content).toEqual([{ text: "[Image: image/webp]" }]);
+		expect(result?.toolUseId).toBe(assistant?.toolUses?.[0]?.toolUseId);
+		expect(current.images).toEqual([{ format: "webp", source: { bytes: webpData } }]);
+	});
+
+	test("substitutes a placeholder when a tool result is image-only", () => {
 		const context: Context = {
 			messages: [
 				{ role: "user", content: "Start", timestamp: 0 },
@@ -257,6 +337,75 @@ describe("Kiro request transformation", () => {
 			],
 		};
 
-		expect(() => transformKiroRequest(createModel(), context)).toThrow(/tool-result image input is not enabled/);
+		const request = transformKiroRequest(createModel(), context);
+		const history = request.conversationState.history ?? [];
+		const resultEntry = history.find(entry => entry.userInputMessage?.userInputMessageContext?.toolResults)
+			?.userInputMessage?.userInputMessageContext?.toolResults?.[0];
+
+		expect(resultEntry?.content).toEqual([{ text: "(see attached image)" }]);
+		expect(
+			history.find(entry => entry.userInputMessage?.userInputMessageContext?.toolResults)?.userInputMessage?.images,
+		).toEqual([{ format: "png", source: { bytes: "aGVsbG8=" } }]);
+	});
+
+	test("batches images from consecutive historical tool results", () => {
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "Start", timestamp: 0 },
+				assistantToolCall("tool-a"),
+				assistantToolCall("tool-b"),
+				{
+					...toolResult("tool-a"),
+					content: [
+						{ type: "text", text: "first result" },
+						{ type: "image", data: "aW1nLWE=", mimeType: "image/png" },
+					],
+				},
+				{
+					...toolResult("tool-b"),
+					content: [
+						{ type: "text", text: "second result" },
+						{ type: "image", data: "aW1nLWI=", mimeType: "image/webp" },
+					],
+				},
+				{ role: "user", content: "Continue", timestamp: 4 },
+			],
+		};
+
+		const request = transformKiroRequest(createModel(), context);
+		const history = request.conversationState.history ?? [];
+		const resultEntry = history.find(
+			entry => entry.userInputMessage?.userInputMessageContext?.toolResults,
+		)?.userInputMessage;
+		const assistantEntries = history.filter(entry => entry.assistantResponseMessage);
+
+		expect(resultEntry?.userInputMessageContext?.toolResults?.map(result => result.content[0]?.text)).toEqual([
+			"first result",
+			"second result",
+		]);
+		expect(resultEntry?.userInputMessageContext?.toolResults?.map(result => result.toolUseId)).toEqual(
+			assistantEntries.flatMap(entry => entry.assistantResponseMessage?.toolUses?.map(use => use.toolUseId) ?? []),
+		);
+		expect(resultEntry?.images).toEqual([
+			{ format: "png", source: { bytes: "aW1nLWE=" } },
+			{ format: "webp", source: { bytes: "aW1nLWI=" } },
+		]);
+	});
+
+	test("fails closed for unsupported tool-result image formats", () => {
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "Start", timestamp: 0 },
+				assistantToolCall("tool-1"),
+				{
+					...toolResult("tool-1"),
+					content: [{ type: "image", data: "bmp-bytes", mimeType: "image/bmp" }],
+				},
+			],
+		};
+
+		expect(() => transformKiroRequest(createModel(), context)).toThrow(
+			/Kiro does not support image type: image\/bmp/,
+		);
 	});
 });

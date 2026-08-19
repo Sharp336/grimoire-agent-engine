@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Kiro requests now promote images returned by tools onto the paired user input message: tool results keep their text, status, and `toolUseId` pairing, image-only tool results carry a `(see attached image)` placeholder, and the image bytes travel through the capture-verified `userInputMessage.images` wire shape instead of failing the turn ([#12](https://github.com/ajdiyassin/oh-my-pi/issues/12)).
+- Kiro image serialization now accepts `image/gif` and `image/webp` alongside JPEG and PNG, following the Amazon Q image format enum; unsupported formats still fail closed before any request is sent.
+
 ## [17.3.8] - 2026-08-19
 
 ### Changed
