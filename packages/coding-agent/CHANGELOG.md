@@ -55,6 +55,9 @@
 - `/retry` and `/handoff` now work over ACP, so editor clients (Zed) list them and can run them instead of sending the text to the model.
 
 ## [17.4.0] - 2026-08-20
+### Fixed
+
+- Fixed Cursor hosted Imagine writes landing as 0-byte files: proto3 `WriteArgs.file_text` is `""` when unset, so the exec bridge's `fileText ?? decode(fileBytes)` ignored the PNG in `file_bytes`. Non-empty `file_bytes` are now written raw (no UTF-8 / newline munging).
 
 ### Added
 

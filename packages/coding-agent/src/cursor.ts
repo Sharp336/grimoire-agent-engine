@@ -26,6 +26,7 @@ import {
 	piLsPath,
 	piReadPath,
 	piTimeout,
+	cursorWritePayload,
 } from "@oh-my-pi/pi-ai/providers/cursor/exec-modern";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { cursorMcpPrefersReplaceEdit, normalizeCursorReplaceArgs } from "./cursor-bridge-tools";
@@ -365,6 +366,52 @@ async function executeDelete(options: CursorExecBridgeOptions, pathArg: string, 
 	return createToolResultMessage(toolCallId, toolName, result, isError);
 }
 
+async function executeBinaryWrite(
+	options: CursorExecBridgeOptions,
+	pathArg: string,
+	bytes: Uint8Array,
+	toolCallId: string,
+) {
+	const toolName = "write";
+
+	if (options.allowDirectFileMutation === false) {
+		const result = buildToolErrorResult(`Tool "${toolName}" not available`);
+		return createToolResultMessage(toolCallId, toolName, result, true);
+	}
+
+	const refusal = refuseByWritePolicy(options, toolName, pathArg);
+	if (refusal) {
+		return createToolResultMessage(toolCallId, toolName, buildToolErrorResult(refusal), true);
+	}
+
+	options.emitEvent?.({
+		type: "tool_execution_start",
+		toolCallId,
+		toolName,
+		args: { path: pathArg, content: `[binary ${bytes.byteLength} bytes]` },
+	});
+
+	const absolutePath = resolveToCwd(pathArg, options.getCwd?.() ?? options.cwd);
+	let isError = false;
+	let result: AgentToolResult<unknown>;
+
+	try {
+		fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
+		fs.writeFileSync(absolutePath, bytes);
+		result = {
+			content: [{ type: "text", text: `Successfully wrote ${bytes.byteLength} bytes to ${pathArg}` }],
+			details: { path: pathArg, bytes: bytes.byteLength },
+		};
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		result = buildToolErrorResult(message);
+		isError = true;
+	}
+
+	options.emitEvent?.({ type: "tool_execution_end", toolCallId, toolName, result, isError });
+	return createToolResultMessage(toolCallId, toolName, result, isError);
+}
+
 function decodeToolCallId(toolCallId?: string): string {
 	return toolCallId && toolCallId.length > 0 ? toolCallId : randomUUID();
 }
@@ -477,10 +524,13 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 
 	async write(args: Parameters<NonNullable<ICursorExecHandlers["write"]>>[0]) {
 		const toolCallId = decodeToolCallId(args.toolCallId);
-		const content = args.fileText ?? new TextDecoder().decode(args.fileBytes ?? new Uint8Array());
+		const payload = cursorWritePayload(args);
+		if (payload.mode === "bytes") {
+			return await executeBinaryWrite(this.options, args.path, payload.bytes, toolCallId);
+		}
 		const toolResultMessage = await executeTool(this.options, "write", toolCallId, {
 			path: args.path,
-			content,
+			content: payload.text,
 		});
 		return toolResultMessage;
 	}

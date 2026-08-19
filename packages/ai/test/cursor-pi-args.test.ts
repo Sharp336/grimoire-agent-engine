@@ -3,6 +3,8 @@ import { type } from "@oh-my-pi/omptype";
 import {
 	cursorEditOwnedReadPath,
 	cursorRawReadPath,
+	cursorWriteDisplayContent,
+	cursorWritePayload,
 	omitUndefinedArgs,
 	piGrepSkip,
 	piReadPath,
@@ -10,6 +12,22 @@ import {
 
 import type { Tool } from "../src/types";
 import { validateToolArguments } from "../src/utils/validation";
+
+describe("cursorWritePayload", () => {
+	it("prefers non-empty file_bytes over empty proto3 file_text", () => {
+		const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+		const payload = cursorWritePayload({ fileText: "", fileBytes: png });
+		expect(payload).toEqual({ mode: "bytes", bytes: png });
+		expect(cursorWriteDisplayContent(payload)).toBe("[binary 8 bytes]");
+	});
+
+	it("uses file_text when file_bytes is empty", () => {
+		expect(cursorWritePayload({ fileText: "hello", fileBytes: new Uint8Array() })).toEqual({
+			mode: "text",
+			text: "hello",
+		});
+	});
+});
 
 describe("omitUndefinedArgs", () => {
 	it("drops keys whose value is undefined and keeps defined optionals", () => {

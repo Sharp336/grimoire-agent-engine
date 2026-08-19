@@ -221,3 +221,26 @@ export function omitUndefinedArgs<T extends Record<string, unknown>>(
 	}
 	return out as { [K in keyof T]?: Exclude<T[K], undefined> };
 }
+
+export type CursorWritePayload =
+	| { mode: "bytes"; bytes: Uint8Array }
+	| { mode: "text"; text: string };
+
+/**
+ * Choose the payload a Cursor `WriteArgs` frame actually wants on disk.
+ *
+ * Proto3 `file_text` is a plain `string`, so an unset field decodes as `""`.
+ * Hosted GenerateImage then sends the PNG in `file_bytes` and leaves text empty.
+ * `fileText ?? decode(fileBytes)` therefore always writes a 0-byte file.
+ * Non-empty `file_bytes` wins and must be written raw (no UTF-8 / newline munging).
+ */
+export function cursorWritePayload(args: { fileText?: string; fileBytes?: Uint8Array }): CursorWritePayload {
+	const bytes = args.fileBytes;
+	if (bytes && bytes.byteLength > 0) return { mode: "bytes", bytes };
+	return { mode: "text", text: args.fileText ?? "" };
+}
+
+/** Transcript/display form: never dump raw image bytes into a text block. */
+export function cursorWriteDisplayContent(payload: CursorWritePayload): string {
+	return payload.mode === "bytes" ? `[binary ${payload.bytes.byteLength} bytes]` : payload.text;
+}

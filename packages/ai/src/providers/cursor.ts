@@ -222,6 +222,8 @@ import {
 	buildPiWriteRejected,
 	buildPiWriteResult,
 	cursorEditOwnedReadPath,
+	cursorWriteDisplayContent,
+	cursorWritePayload,
 	omitUndefinedArgs,
 	piEscapeRegexLiteral,
 	piGrepSkip,
@@ -1619,12 +1621,12 @@ async function handleExecServerMessage(
 			const args = execMsg.message.value;
 			if (!args.toolCallId) args.toolCallId = crypto.randomUUID();
 			const editOwned = isEditOwnedToolCallId(state, output, args.toolCallId);
-			// Match the bridge: prefer `fileText`, fall back to decoded `fileBytes`.
-			const content = args.fileText ?? new TextDecoder().decode(args.fileBytes ?? new Uint8Array());
+			// Hosted image gen writes PNG bytes in `file_bytes` with empty `file_text`.
+			const payload = cursorWritePayload(args);
 			if (!editOwned) {
 				synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "write", {
 					path: args.path,
-					content,
+					content: cursorWriteDisplayContent(payload),
 				});
 			}
 			const write = execHandlers?.write?.bind(execHandlers);
