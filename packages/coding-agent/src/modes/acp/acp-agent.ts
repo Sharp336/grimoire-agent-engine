@@ -479,7 +479,6 @@ export type AcpAgentOptions = {
 	loadHostMcpCatalog?: boolean;
 };
 
-
 export class AcpAgent implements Agent {
 	#connection: AgentSideConnection;
 	#initialSession: AgentSession | undefined;
@@ -492,7 +491,6 @@ export class AcpAgent implements Agent {
 	#blobs = new BlobStore(getBlobsDir());
 	#loadHostMcpCatalog: boolean;
 
-
 	constructor(
 		connection: AgentSideConnection,
 		createSession: CreateAcpSession,
@@ -504,7 +502,6 @@ export class AcpAgent implements Agent {
 		this.#createSession = createSession;
 		this.#loadHostMcpCatalog = options?.loadHostMcpCatalog ?? true;
 	}
-
 
 	setCancelCleanupTimeoutForTesting(timeoutMs: number): void {
 		this.#cancelCleanupTimeoutMs = Math.max(1, timeoutMs);
@@ -2532,7 +2529,7 @@ export class AcpAgent implements Agent {
 			enableProjectConfig: settings.get("mcp.enableProjectConfig") ?? true,
 			filterExa: true,
 			filterBrowser: settings.get("browser.enabled") ?? false,
-			cacheStorage: settings.getStorage(),
+			cacheStorage: typeof settings.getStorage === "function" ? settings.getStorage() : undefined,
 			authStorage: session.modelRegistry?.authStorage,
 		});
 		for (const { path, error } of loaded.errors) {

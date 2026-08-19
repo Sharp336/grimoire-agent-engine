@@ -921,7 +921,9 @@ describe("ACP event mapper", () => {
 					return session as unknown as AgentSession;
 				},
 				new ReplayTestSession(cwd, initialSessionDir) as unknown as AgentSession,
+				{ loadHostMcpCatalog: false },
 			);
+
 			const created = await agent.newSession({ cwd, mcpServers: [] });
 			const session = sessions[0]!;
 			session.sessionManager.appendMessage({

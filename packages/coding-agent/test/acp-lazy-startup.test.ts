@@ -349,6 +349,9 @@ describe("ACP lazy startup", () => {
 				}
 				return new LazyFakeSession(cwd) as unknown as AgentSession;
 			},
+			undefined,
+			undefined,
+			{ loadHostMcpCatalog: false },
 		);
 
 		try {
