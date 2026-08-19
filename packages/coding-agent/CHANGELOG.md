@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- The AIML API "Get API key" sign-in now renders an API-key paste field alongside the browser device flow: the first key wins, a browser-minted key auto-fills the visible field with a confirmation line (via the new optional `OAuthController.onPromptResolve` callback), a manually pasted key is validated before being accepted, and auth instructions render directly under the login URL they reference.
+
 ## [17.3.7] - 2026-08-17
 
 ### Changed
