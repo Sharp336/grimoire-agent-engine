@@ -233,11 +233,18 @@ import {
 	piTimeout,
 } from "./cursor/exec-modern";
 import { handleInteractionQuery } from "./cursor/interaction-query";
-import { buildCursorRequestContext, cursorPreviousWorkspaceUris, resolveCursorWorkspacePaths } from "./cursor/workspace";
+import {
+	buildCursorRequestContext,
+	cursorPreviousWorkspaceUris,
+	mergeCursorPreviousWorkspaceUris,
+	resolveCursorWorkspacePaths,
+} from "./cursor/workspace";
 
 export {
 	buildCursorRequestContext,
 	cursorPreviousWorkspaceUris,
+	cursorProjectFolder,
+	mergeCursorPreviousWorkspaceUris,
 	resolveCursorWorkspacePaths,
 	toCursorFileUri,
 } from "./cursor/workspace";
@@ -1486,7 +1493,7 @@ async function handleExecServerMessage(
 	const execCase = execMsg.message.case;
 	log("exec", "dispatch", { execCase, execId: execMsg.execId, hasHandlers: !!execHandlers });
 	if (execCase === "requestContextArgs") {
-		const requestContext = buildCursorRequestContext(requestContextTools, workspacePaths);
+		const requestContext = buildCursorRequestContext(requestContextTools, workspacePaths, requestContextRules);
 
 		const requestContextResult = create(RequestContextResultSchema, {
 			result: {
@@ -5120,8 +5127,7 @@ export async function buildGrpcRequest(
 		...baseState,
 		rootPromptMessagesJson,
 		turns,
-		previousWorkspaceUris:
-			baseState.previousWorkspaceUris.length > 0 ? baseState.previousWorkspaceUris : workspaceUris,
+		previousWorkspaceUris: mergeCursorPreviousWorkspaceUris(baseState.previousWorkspaceUris, workspaceUris),
 	});
 
 	const wireModelId = model.requestModelId ?? model.id;

@@ -1,3 +1,4 @@
+import path from "node:path";
 import { describe, expect, it } from "bun:test";
 import {
 	type BlockState,
@@ -30,6 +31,7 @@ import {
 	ConversationStateStructureSchema,
 	ConversationTokenDetailsSchema,
 	type CursorRule,
+	CursorRuleSchema,
 	type ExecServerMessage,
 	ExecServerMessageSchema,
 	ExecuteHookArgsSchema,
@@ -83,6 +85,7 @@ async function dispatchExec(
 	options: {
 		execHandlers?: CursorExecHandlers;
 		requestContextTools?: McpToolDefinition[];
+		workspacePaths?: string[];
 		requestContextRules?: CursorRule[];
 	} = {},
 ): Promise<{ frames: AgentClientMessage[]; output: AssistantMessage; results: ToolResultMessage[] }> {
@@ -112,7 +115,9 @@ async function dispatchExec(
 		},
 		{ sawTokenDelta: false },
 		options.requestContextTools ?? [],
-		options.requestContextRules,
+		options.requestContextRules ?? [],
+		undefined,
+		options.workspacePaths ?? [],
 	);
 
 	return { frames: written.map(decodeClientFrame), output, results };
@@ -230,6 +235,52 @@ describe("Cursor requestContext rules", () => {
 		expect(rules).toHaveLength(2);
 		expect(rules[1]?.content).toContain(canary);
 		expect(rules[1]?.type?.type.case).toBe("global");
+	});
+});
+
+describe("Cursor requestContext workspace", () => {
+	it("returns workspace roots on requestContextArgs, not process.cwd()", async () => {
+		const workspace = path.resolve("/tmp/omp-request-context-root");
+		const { frames } = await dispatchExec(
+			buildExecMessage({
+				case: "requestContextArgs",
+				value: create(RequestContextArgsSchema, {}),
+			}),
+			{ workspacePaths: [workspace] },
+		);
+		const result = soleResult(frames);
+		expect(result.case).toBe("requestContextResult");
+		if (result.case !== "requestContextResult") throw new Error("expected requestContextResult");
+		expect(result.value.result.case).toBe("success");
+		if (result.value.result.case !== "success") throw new Error("expected success");
+		const ctx = result.value.result.value.requestContext;
+		expect(ctx?.env?.workspacePaths).toEqual([workspace]);
+		expect(ctx?.mcpFileSystemOptions?.workspaceProjectDir).toBe(workspace);
+		expect(ctx?.env?.projectFolder).toContain(".cursor");
+		expect(ctx?.env?.projectFolder).not.toBe(path.basename(workspace));
+	});
+
+	it("forwards requestContext.rules through the handshake", async () => {
+		const workspace = path.resolve("/tmp/omp-request-context-rules");
+		const { frames } = await dispatchExec(
+			buildExecMessage({
+				case: "requestContextArgs",
+				value: create(RequestContextArgsSchema, {}),
+			}),
+			{
+				workspacePaths: [workspace],
+				requestContextRules: [
+					create(CursorRuleSchema, { fullPath: "/omp/system-prompt/0.mdc", content: "PIKEL-CANARY-7F3A" }),
+				],
+			},
+		);
+		const result = soleResult(frames);
+		if (result.case !== "requestContextResult") throw new Error("expected requestContextResult");
+		if (result.value.result.case !== "success") throw new Error("expected success");
+		const ctx = result.value.result.value.requestContext;
+		expect(ctx?.rules).toHaveLength(1);
+		expect(ctx?.rules[0]?.content).toBe("PIKEL-CANARY-7F3A");
+		expect(ctx?.env?.workspacePaths).toEqual([workspace]);
 	});
 });
 
