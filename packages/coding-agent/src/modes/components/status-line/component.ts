@@ -1377,7 +1377,13 @@ export class StatusLineComponent implements Component {
 			// When /auth/usage and /api/usage-summary are merged, prefer the personal
 			// dashboard rails over legacy per-model request fractions.
 			if (limitId === "cursor:usd:individual-auto") return 0;
-			if (limitId === "cursor:usd:individual-plan" || limitId === "cursor:usd:individual-overall") return 1;
+			if (
+				limitId === "cursor:usd:individual-plan" ||
+				limitId === "cursor:usd:individual-overall" ||
+				limitId === "cursor:usd:individual-included"
+			) {
+				return 1;
+			}
 			if (typeof limitId === "string" && limitId.startsWith("cursor:usd:individual-")) return 2;
 			return 3;
 		};

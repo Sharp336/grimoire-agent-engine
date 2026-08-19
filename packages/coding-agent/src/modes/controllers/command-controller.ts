@@ -1878,7 +1878,22 @@ export function renderUsageReports(
 			}
 		}
 
-		lines.push(uiTheme.bold(uiTheme.fg("accent", providerName)));
+		const planTypes = [
+			...new Set(
+				providerReports.flatMap(report => {
+					const planType = report.metadata?.planType;
+					return typeof planType === "string" && planType.trim() ? [planType.trim()] : [];
+				}),
+			),
+		];
+		const planLabel =
+			planTypes.length === 1
+				? replaceTabs(truncateToWidth(sanitizeText(planTypes[0]!.replace(/[\r\n]+/g, " ")), availableWidth))
+				: undefined;
+		const providerHeading = planLabel
+			? `${uiTheme.bold(uiTheme.fg("accent", providerName))} ${uiTheme.fg("dim", `· ${planLabel}`)}`
+			: uiTheme.bold(uiTheme.fg("accent", providerName));
+		lines.push(providerHeading);
 		const activeAccountLabel = formatActiveAccountLabel(activeAccount);
 		if (activeAccountLabel) {
 			lines.push(`  ${uiTheme.fg("accent", "in use by this session:")} ${activeAccountLabel}`);

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Cursor `/usage` now reads the spending dashboard: included-dollar usage, Ultra/Pro plan name and price, and Cursor Models bucket notes from `/api/usage-summary`, `/api/dashboard/get-current-period-usage`, and `/api/dashboard/get-plan-info`.
+
 ## [17.3.8] - 2026-08-19
 
 ### Changed

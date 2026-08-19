@@ -473,6 +473,7 @@ Cursor's integration in `packages/ai` operates over an HTTP/2 Connect RPC transp
 - **Usage & Quota Tracking (`packages/ai/src/usage/cursor.ts`)**:
   - Standard quota fetched from `https://api2.cursor.sh/auth/usage` (`parseCursorUsage`).
   - For OAuth credentials with WorkOS user sessions (`WorkosCursorSessionToken=${userId}::${accessToken}`), fetches personal usage from `https://cursor.com/api/usage-summary` (`parseCursorIndividualUsage`) and user profile email from `https://cursor.com/api/auth/me`.
+  - The same session also POSTs `https://cursor.com/api/dashboard/get-current-period-usage` and `https://cursor.com/api/dashboard/get-plan-info` so `/usage` can show the spending-tab Included Usage rail, plan name/price, and Cursor Models bucket note.
 
 ### Catalog model handling
 - **Descriptor Config (`packages/catalog/src/provider-models/descriptors.ts`)**:

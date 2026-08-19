@@ -3,6 +3,7 @@ import type { UsageReport } from "@oh-my-pi/pi-ai";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { buildUsageReportText } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/usage-report";
 
 interface RenderableBlock {
 	render(width: number): string[];
@@ -120,6 +121,80 @@ describe("CommandController /usage", () => {
 		expect(output).toContain("resets in 1d");
 	});
 
+	it("renders Cursor spending-tab plan name on the provider header", async () => {
+		const present = vi.fn();
+		const ctx = {
+			session: createUsageSessionDouble(),
+			ui: { terminal: { columns: 100 } },
+			present,
+			presentCommandOutput: present,
+			showWarning: vi.fn(),
+			showError: vi.fn(),
+		} as unknown as InteractiveModeContext;
+		const controller = new CommandController(ctx);
+		const now = Date.now();
+
+		await controller.handleUsageCommand([
+			{
+				provider: "cursor",
+				fetchedAt: now,
+				limits: [
+					{
+						id: "cursor:usd:individual-included",
+						label: "Included Usage",
+						scope: { provider: "cursor", windowId: "monthly" },
+						window: { id: "monthly", label: "Monthly" },
+						amount: { unit: "usd", used: 0.82, limit: 400, remaining: 399.18, usedFraction: 0.00205 },
+						status: "ok",
+					},
+				],
+				metadata: { email: "cursor@example.test", planType: "Ultra ($200/mo)" },
+			},
+		]);
+
+		const output = renderPresentedBlocks(present.mock.calls[0]?.[0]);
+		expect(output).toContain("Cursor");
+		expect(output).toContain("Ultra ($200/mo)");
+		expect(output).toContain("Included Usage");
+	});
+
+	it("sanitizes Cursor plan names before rendering the provider header", async () => {
+		const present = vi.fn();
+		const ctx = {
+			session: createUsageSessionDouble(),
+			ui: { terminal: { columns: 100 } },
+			present,
+			presentCommandOutput: present,
+			showWarning: vi.fn(),
+			showError: vi.fn(),
+		} as unknown as InteractiveModeContext;
+		const controller = new CommandController(ctx);
+
+		await controller.handleUsageCommand([
+			{
+				provider: "cursor",
+				fetchedAt: Date.now(),
+				limits: [
+					{
+						id: "cursor:usd:individual-included",
+						label: "Included Usage",
+						scope: { provider: "cursor", windowId: "monthly" },
+						window: { id: "monthly", label: "Monthly" },
+						amount: { unit: "usd", used: 0.82, limit: 400, remaining: 399.18, usedFraction: 0.00205 },
+						status: "ok",
+					},
+				],
+				metadata: { planType: "\u001b[31mUltra\t($200/mo)\u001b[0m" },
+			},
+		]);
+
+		const output = renderPresentedBlocks(present.mock.calls[0]?.[0]);
+		expect(output).toContain("Ultra");
+		expect(output).toContain("($200/mo)");
+		expect(output).not.toContain("\u001b[31m");
+		expect(output).not.toContain("\t");
+	});
+
 	it("renders saved reset expiry lines for future and expired credits", async () => {
 		const present = vi.fn();
 		const ctx = {
@@ -159,5 +234,35 @@ describe("CommandController /usage", () => {
 		expect(output).toContain(`expires in`);
 		expect(output).toContain(`(${futureIso.slice(0, 10)})`);
 		expect(output).toContain(`expired (${expiredIso.slice(0, 10)})`);
+	});
+});
+
+describe("buildUsageReportText plan header", () => {
+	it("sanitizes Cursor plan names on the plaintext provider header", async () => {
+		const text = await buildUsageReportText({
+			session: {
+				model: undefined,
+				fetchUsageReports: async () => [
+					{
+						provider: "cursor",
+						fetchedAt: Date.now(),
+						limits: [
+							{
+								id: "cursor:usd:individual-included",
+								label: "Included Usage",
+								scope: { provider: "cursor", windowId: "monthly" },
+								amount: { unit: "usd", used: 0.82, limit: 400 },
+							},
+						],
+						metadata: { planType: "\u001b[31mUltra\t($200/mo)\u001b[0m" },
+					},
+				],
+				getUsageReportingModelSelectors: () => [],
+			},
+		} as never);
+
+		expect(text).toContain("Cursor · Ultra  ($200/mo)");
+		expect(text).not.toContain("\u001b[31m");
+		expect(text).not.toContain("\t");
 	});
 });
