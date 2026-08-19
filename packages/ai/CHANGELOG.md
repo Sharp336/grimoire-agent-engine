@@ -6,6 +6,14 @@
 
 - Kiro requests now promote images returned by tools onto the paired user input message: tool results keep their text, status, and `toolUseId` pairing, image-only tool results carry a `(see attached image)` placeholder, and the image bytes travel through the capture-verified `userInputMessage.images` wire shape instead of failing the turn ([#12](https://github.com/ajdiyassin/oh-my-pi/issues/12)).
 - Kiro image serialization now accepts `image/gif` and `image/webp` alongside JPEG and PNG, following the Amazon Q image format enum; unsupported formats still fail closed before any request is sent.
+- Added a native Kiro provider with AWS IAM Identity Center device login, Kiro API-key login, profile selection, credential-scoped model discovery, AWS EventStream streaming, and native text, reasoning, tool, image, cancellation, and error handling.
+
+### Fixed
+
+- Fixed Kiro streams that ended after reasoning-only output by surfacing a recoverable empty response for session-level final-answer recovery.
+- Hardened Kiro registration caching and refresh endpoint validation, including the canonical regional fallback when `tokenEndpoint` is omitted.
+- Redacted Kiro registered-client secrets alongside OAuth refresh tokens in generic remote credential snapshots.
+- Fixed local OpenAI-compatible servers with strict `chat_template_kwargs` whitelists (e.g. NInfer) failing every Qwen 3.8+ turn with `400 chat_template_kwargs.reasoning_effort is not supported` after the effort routing fix: the reasoning-effort fallback now recognizes a rejection of the kwargs spelling itself, retries with the kwarg stripped while keeping the effort on the standard top-level `reasoning_effort` field (hoisting it there for the kwargs-only vLLM dialect), and remembers the shape for the rest of the session. Value-level rejections and drops now also update the `chat_template_kwargs.reasoning_effort` twin instead of leaving a stale effort for kwargs-reading renderers, and unknown-parameter 400s naming `reasoning_effort` are recognized as effort rejections.
 
 ## [17.3.8] - 2026-08-19
 
@@ -66,8 +74,6 @@
 
 - Fixed `omp usage invalidate` to discard stale OAuth and API-key usage snapshots, then force a cache-bypassing, per-provider serialized refresh with a broker request budget sized for the full unfiltered account batch, so upgraded subscriptions do not silently retain pre-change quota data.
 - Fixed quota reporting and Cookie capture guidance for China (Beijing) Alibaba Token Plan credentials ([#8509](https://github.com/can1357/oh-my-pi/issues/8509)).
-- Fixed Kiro streams that ended after reasoning-only output by surfacing a recoverable empty response for session-level final-answer recovery.
-- Fixed `omp usage invalidate` to discard stale OAuth and API-key usage snapshots, then force a cache-bypassing, per-provider serialized refresh so upgraded subscriptions do not silently retain pre-change quota data.
 
 ## [17.3.3] - 2026-08-14
 
@@ -146,14 +152,6 @@
 - Fixed the AWS credential resolver ignoring `role_arn` profiles: shared-config role chaining (`source_profile` recursion, `web_identity_token_file`, `credential_source`) now resolves via STS `AssumeRole`/`AssumeRoleWithWebIdentity`, honoring `role_session_name`/`duration_seconds`/`external_id`, so Bedrock is detected on EKS/IRSA and multi-account setups instead of reporting "No models available" ([#8209](https://github.com/can1357/oh-my-pi/issues/8209)).
 - Fixed Bedrock availability being under-detected on Nitro/EKS hosts: the EC2 metadata probe now recognizes Nitro DMI markers (`board_asset_tag` instance ids, `Amazon EC2` vendor fields) in addition to the Xen `ec2` UUID prefix ([#8209](https://github.com/can1357/oh-my-pi/issues/8209)).
 - Fixed DeepSeek Responses targets (opencode-go) rejecting a thinking-mode continuation with `400 The reasoning_text in the thinking mode must be passed back to the API` after a prewalk hand-off plus mid-run compaction: the Responses input builder re-encoded replayed assistant turns without a reasoning item, so the request enabled reasoning but shipped no `reasoning_text`. The encoder now synthesizes a `reasoning_text` reasoning item for every replayed assistant turn when the target requires reasoning replay in thinking mode (`requiresReasoningContentForAllAssistantTurns` / `requiresReasoningContentForToolCalls`), mirroring the chat-completions `reasoning_content` safety net ([#8248](https://github.com/can1357/oh-my-pi/issues/8248)).
-### Added
-
-- Added a native Kiro provider with AWS IAM Identity Center device login, Kiro API-key login, profile selection, credential-scoped model discovery, AWS EventStream streaming, and native text, reasoning, tool, image, cancellation, and error handling.
-
-### Fixed
-
-- Hardened Kiro registration caching and refresh endpoint validation, including the canonical regional fallback when `tokenEndpoint` is omitted.
-- Redacted Kiro registered-client secrets alongside OAuth refresh tokens in generic remote credential snapshots.
 
 ## [17.2.12] - 2026-08-08
 

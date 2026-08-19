@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `qwenTemplateReasoningEffort` to the `models.yml` `compat` schema, so the auto-enabled Qwen 3.8+ template effort dialect (`chat_template_kwargs.reasoning_effort`) can be switched off per provider/model for strict local servers that reject unknown `chat_template_kwargs`.
+- Added native Kiro AWS device/API-key login UX with local profile selection and credential-scoped model discovery.
+
+### Changed
+
+- `/settings` rows can now carry a risk note: a warning glyph on the row plus a warning-colored line above the description. `External Thinking` (`externalThinking`, `--external-thinking`) is the first user — providers have flagged the request shape it produces as abuse, up to account-level enforcement, so both the settings entry and `--help` now say so.
+
+### Fixed
+
+- Prevented false login success for deferred Kiro Builder login and blocked legacy extensions from shadowing the native Kiro provider.
+
 ## [17.3.8] - 2026-08-19
 
 ### Added
@@ -319,13 +332,6 @@
 
 - Removed the `resolveAgentModelSource` model-resolver export, whose only use was being fed to `resolveExplicitModelRole`. Replaced by `resolveAgentModelSelection`, which returns the expanded `patterns` and the pre-expansion `role` together so a spawn path cannot derive one without the other ([#7910](https://github.com/can1357/oh-my-pi/pull/7910) by [@enieuwy](https://github.com/enieuwy)).
 - A run is now attributed to the model that actually produced its output, not whichever model the session was last pointed at. A retry fallback that errored on its first request — an exhausted quota, a hard provider error — was credited with the whole run in the Agent Hub row and the settled task result, even when the previous model did every turn. Sessions expose the serving model directly, holding the last model that produced output while a candidate is armed but unproven, and transcript-derived history stops at the newest turn that produced output.
-### Added
-
-- Added native Kiro AWS device/API-key login UX with local profile selection and credential-scoped model discovery.
-
-### Fixed
-
-- Prevented false login success for deferred Kiro Builder login and blocked legacy extensions from shadowing the native Kiro provider.
 
 ## [17.2.12] - 2026-08-08
 

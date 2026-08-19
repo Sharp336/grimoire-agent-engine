@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added credential-scoped Kiro model discovery and cache namespaces for OAuth profiles and API keys.
+
+### Changed
+
+- Marked Kiro discovery as authoritative and explicit-only so the catalog does not fabricate a default model.
+
+### Fixed
+
+- Fixed `opencode-go/muse-spark-1.2` and `muse-spark-1.2-contributor` still failing every tool-call turn with `OpenAI completions stream closed before a finish_reason was received` on 17.3.8. The earlier pin only covered the models.dev resolver, but models.dev omits these ids under `opencode-go` entirely, so live `/zen/go/v1/models` discovery had no bundled reference and defaulted them to chat completions. The per-id API pins now also apply inside the discovery mapper, and pinned ids invalidate cached routes written before the pin ([#8957](https://github.com/can1357/oh-my-pi/issues/8957)).
+- Future gateway-first OpenCode models (ids the gateway serves before models.dev lists them, like muse-spark-1.2 was) no longer default to chat completions blindly: discovery now borrows the `openai-responses` route from the sibling gateway's catalog or the billing-variant base id (`-free`/`-contributor`). Only the responses signal is borrowed — anthropic transports genuinely diverge across the gateways (e.g. `minimax-m2.5`) and are never inferred.
+
 ## [17.3.8] - 2026-08-19
 
 ### Added
@@ -128,13 +141,6 @@
 
 - Marked `meta/muse-spark-1.2` and `muse-spark-1.2-contributor` as image-capable (`input: ["text", "image"]`) with the same Responses reasoning, thinking, and cost metadata as `muse-spark-1.1` (contributor uses its discounted 0.1/0.2 pricing), so `omp models` no longer lists them as text-only.
 - Fixed GLM-5.2 thinking levels across Baseten, CoreWeave, HuggingFace, and other uppercase-ID resellers, which were getting the generic `xhigh` effort ladder instead of the GLM-5.2-specific tiers. Also added Baseten `zai-org/GLM-5.2-Fast` and Fireworks `glm-5.2-fast` as reasoning models ([#8200](https://github.com/can1357/oh-my-pi/pull/8200) by [@jcfrancisco](https://github.com/jcfrancisco)).
-### Added
-
-- Added credential-scoped Kiro model discovery and cache namespaces for OAuth profiles and API keys.
-
-### Changed
-
-- Marked Kiro discovery as authoritative and explicit-only so the catalog does not fabricate a default model.
 
 ## [17.2.12] - 2026-08-08
 
