@@ -35,4 +35,13 @@ describe("assistantUsageIsBilled", () => {
 		expect(assistantUsageIsBilled(emptyBilledMessage.usage)).toBe(true);
 		expect(assistantUsageIsBilled(emptyFreeMessage.usage)).toBe(false);
 	});
+
+	// #8142: `usage` is required by the type, but persisted sessions are replayed
+	// without validation, so a hand-authored / converted / legacy `.jsonl` entry
+	// can reach this helper with nothing recorded. Answering instead of throwing
+	// is what keeps `omp -r` from aborting before the TUI is usable.
+	it("reports a turn with no recorded usage as unbilled instead of throwing", () => {
+		expect(() => assistantUsageIsBilled(undefined)).not.toThrow();
+		expect(assistantUsageIsBilled(undefined)).toBe(false);
+	});
 });

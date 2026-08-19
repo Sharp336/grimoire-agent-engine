@@ -180,6 +180,21 @@ function resolveSnapshotTtlMs(): number {
 }
 
 /**
+ * True when the initial snapshot failed because the broker never produced an
+ * HTTP response — connection refused, DNS failure, TLS failure, timeout, or
+ * abort.
+ *
+ * {@link AuthBrokerClient} only leaves `status` undefined on that transport
+ * path: every response-derived failure (HTTP status errors, malformed JSON,
+ * schema validation) carries the originating status. That makes `status ===
+ * undefined` a precise "the broker is not answering" signal rather than a
+ * broad catch-all, so a rejected token is never mistaken for an outage.
+ */
+function isBrokerUnreachable(error: unknown): error is AuthBrokerError {
+	return error instanceof AuthBrokerError && error.status === undefined;
+}
+
+/**
  * Resolve broker connection configuration using the same precedence as the TUI:
  *
  * 1. `OMP_AUTH_BROKER_URL` / `OMP_AUTH_BROKER_TOKEN` env vars.
@@ -272,6 +287,10 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 		}
 
 		let initialSnapshot = cachedSnapshot;
+		// Set when the broker never answered and no cached snapshot can carry the
+		// session — the configured broker is skipped and the local SQLite store
+		// below is used instead.
+		let brokerUnreachable = false;
 		try {
 			const initialResult = await client.fetchSnapshot({
 				signal: cachedSnapshot ? AbortSignal.timeout(SNAPSHOT_CACHE_REVALIDATION_TIMEOUT_MS) : undefined,
@@ -283,21 +302,38 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 			initialSnapshot = initialResult.snapshot;
 			persist?.(initialSnapshot);
 		} catch (error) {
-			if (!cachedSnapshot || (error instanceof AuthBrokerError && [401, 403].includes(error.status ?? 0)))
+			// A broker that answers and rejects the token is a credential problem,
+			// not an outage: degrading to local credentials would hide it.
+			if (error instanceof AuthBrokerError && [401, 403].includes(error.status ?? 0)) throw error;
+			if (cachedSnapshot) {
+				// Revalidation failed but the cache is still fresh — serve it.
+			} else if (isBrokerUnreachable(error)) {
+				logger.warn(
+					"auth-broker unreachable; falling back to the local credential store. " +
+						"Run `omp config reset auth.broker.url` and `omp config reset auth.broker.token` " +
+						"to drop this broker configuration, or start the broker to use it again.",
+					{ url: brokerConfig.url, error: String(error) },
+				);
+				brokerUnreachable = true;
+			} else {
 				throw error;
+			}
 		}
-		const store = new RemoteAuthCredentialStore({
-			client,
-			initialSnapshot,
-			onSnapshot: persist,
-			accountPool,
-		});
-		const storage = new AuthStorage(store, {
-			configValueResolver: options.configValueResolver,
-			sourceLabel: options.sourceLabel ?? `broker ${brokerConfig.url}`,
-		});
-		await storage.reload();
-		return storage;
+
+		if (!brokerUnreachable) {
+			const store = new RemoteAuthCredentialStore({
+				client,
+				initialSnapshot,
+				onSnapshot: persist,
+				accountPool,
+			});
+			const storage = new AuthStorage(store, {
+				configValueResolver: options.configValueResolver,
+				sourceLabel: options.sourceLabel ?? `broker ${brokerConfig.url}`,
+			});
+			await storage.reload();
+			return storage;
+		}
 	}
 
 	const dbPath = getAgentDbPath(agentDir);

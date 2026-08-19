@@ -38,16 +38,25 @@ export interface CacheInvalidation {
  * of repeating the banner on every turn while it re-warms.
  *
  * Returns `undefined` (no marker) for the first turn, turns whose predecessor
- * never read a warm prefix, tiny contexts, turns that reused any cache, and —
- * crucially — turns on providers with *implicit* best-effort caching. Only an
- * explicit, prefix-controlled cache (Anthropic / Bedrock `cache_control`)
- * re-creates the prefix on a cold turn (`cacheWrite > 0`); implicit caches
- * (Google / OpenAI / Fireworks) report `cacheWrite: 0` and drop `cacheRead` to
- * zero intermittently as routine propagation noise that self-heals the next
- * turn, so flagging it would be a false positive.
+ * never read a warm prefix, turns with no recorded usage at all, tiny contexts,
+ * turns that reused any cache, and — crucially — turns on providers with
+ * *implicit* best-effort caching. Only an explicit, prefix-controlled cache
+ * (Anthropic / Bedrock `cache_control`) re-creates the prefix on a cold turn
+ * (`cacheWrite > 0`); implicit caches (Google / OpenAI / Fireworks) report
+ * `cacheWrite: 0` and drop `cacheRead` to zero intermittently as routine
+ * propagation noise that self-heals the next turn, so flagging it would be a
+ * false positive.
  */
-export function detectCacheInvalidation(prev: Usage | undefined, current: Usage): CacheInvalidation | undefined {
+export function detectCacheInvalidation(
+	prev: Usage | undefined,
+	current: Usage | undefined,
+): CacheInvalidation | undefined {
 	if (!prev) return undefined;
+	// `usage` is non-optional on the assistant message type, but persisted
+	// session records are not validated on read: hand-authored, converted, or
+	// legacy `.jsonl` entries can omit it (#8142). A turn with no recorded usage
+	// carries no evidence either way, so it is never a cache invalidation.
+	if (!current) return undefined;
 	// Only flag a warm→cold transition: the previous turn must have actually read
 	// a meaningful prefix from cache. A write-only predecessor (first request, or
 	// a re-write after expiry) has not proven the cache is live, so a cold turn

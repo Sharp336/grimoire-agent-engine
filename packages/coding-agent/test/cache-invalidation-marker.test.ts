@@ -73,6 +73,17 @@ describe("detectCacheInvalidation", () => {
 		const prev = usage({ cacheRead: 40_000, cacheWrite: 1_000 });
 		expect(detectCacheInvalidation(prev, usage({ cacheRead: 0, input: 12 }))).toBeUndefined();
 	});
+
+	it("does not flag a turn with no recorded usage, even after a warm predecessor", () => {
+		// #8142: replaying a persisted session does not validate the record, so an
+		// assistant entry can arrive with no `usage` at all. Nothing is known about
+		// what that turn reprocessed, so there is no invalidation to claim — and
+		// answering here is what keeps `omp -r` from aborting mid-replay.
+		const prev = usage({ cacheRead: 49_837, cacheWrite: 980, output: 79 });
+		expect(() => detectCacheInvalidation(prev, undefined)).not.toThrow();
+		expect(detectCacheInvalidation(prev, undefined)).toBeUndefined();
+		expect(detectCacheInvalidation(undefined, undefined)).toBeUndefined();
+	});
 });
 
 describe("CacheInvalidationMarkerComponent", () => {
