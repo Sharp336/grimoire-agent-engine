@@ -78,6 +78,7 @@ export {
 	cursorRawReadPath,
 	cursorWriteDisplayContent,
 	cursorWritePayload,
+	decodeCursorWriteBytes,
 	omitUndefinedArgs,
 	piEscapeRegexLiteral,
 	piGrepSkip,

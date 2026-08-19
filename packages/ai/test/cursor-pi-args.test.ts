@@ -27,6 +27,30 @@ describe("cursorWritePayload", () => {
 			text: "hello",
 		});
 	});
+
+	it("decodes JSON/base64 file_bytes that have no byteLength", () => {
+		const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+		const b64 = Buffer.from(png).toString("base64");
+		expect(cursorWritePayload({ fileText: "", fileBytes: b64 })).toEqual({ mode: "bytes", bytes: png });
+		expect(cursorWritePayload({ fileText: "", fileBytes: Array.from(png) })).toEqual({
+			mode: "bytes",
+			bytes: png,
+		});
+		expect(cursorWritePayload({ fileText: "", fileBytes: { type: "Buffer", data: Array.from(png) } })).toEqual({
+			mode: "bytes",
+			bytes: png,
+		});
+	});
+
+	it("decodes file_text when encoding_hint is base64", () => {
+		const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+		const payload = cursorWritePayload({
+			fileText: Buffer.from(png).toString("base64"),
+			fileBytes: new Uint8Array(),
+			encodingHint: "base64",
+		});
+		expect(payload).toEqual({ mode: "bytes", bytes: png });
+	});
 });
 
 describe("omitUndefinedArgs", () => {

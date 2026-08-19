@@ -57,7 +57,7 @@
 ## [17.4.0] - 2026-08-20
 ### Fixed
 
-- Fixed Cursor hosted Imagine writes landing as 0-byte files: proto3 `WriteArgs.file_text` is `""` when unset, so the exec bridge's `fileText ?? decode(fileBytes)` ignored the PNG in `file_bytes`. Non-empty `file_bytes` are now written raw (no UTF-8 / newline munging).
+- Fixed Cursor hosted Imagine writes landing as 0-byte files: proto3 `WriteArgs.file_text` is `""` when unset, so the exec bridge's `fileText ?? decode(fileBytes)` ignored the PNG in `file_bytes`. Non-empty `file_bytes` are now written raw, including JSON/base64/Buffer encodings that a `Uint8Array`-only check would drop.
 
 ### Added
 

@@ -2761,8 +2761,9 @@ function buildWriteResultFromToolResult(
 	if (toolResult.isError) {
 		return buildWriteErrorResult(args.path, text || "Write failed");
 	}
-	const fileText = args.fileText ?? "";
-	const fileSize = args.fileBytes?.length ?? Buffer.byteLength(fileText, "utf-8");
+	const payload = cursorWritePayload(args);
+	const fileText = payload.mode === "text" ? payload.text : "";
+	const fileSize = payload.mode === "bytes" ? payload.bytes.byteLength : Buffer.byteLength(fileText, "utf-8");
 	const linesCreated = fileText ? fileText.split("\n").length : 0;
 	return create(WriteResultSchema, {
 		result: {

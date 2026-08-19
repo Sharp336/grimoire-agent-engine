@@ -745,6 +745,26 @@ describe("CursorExecHandlers.write file_bytes", () => {
 		const written = new Uint8Array(await Bun.file(target).arrayBuffer());
 		expect(written).toEqual(png);
 	});
+
+	it("writes JSON/base64 file_bytes instead of a 0-byte text file", async () => {
+		const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x0d, 0x0a]);
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>(),
+			allowDirectFileMutation: true,
+		});
+		const target = path.join(cwd, "assets", "dog-b64.png");
+		const result = await handlers.write({
+			path: target,
+			fileText: "",
+			fileBytes: Buffer.from(png).toString("base64"),
+			toolCallId: "img2",
+		} as never);
+
+		expect(result.isError).toBe(false);
+		const written = new Uint8Array(await Bun.file(target).arrayBuffer());
+		expect(written).toEqual(png);
+	});
 });
 
 describe("pi_bash timeout presence", () => {

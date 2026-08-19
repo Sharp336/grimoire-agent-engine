@@ -234,10 +234,69 @@ export type CursorWritePayload =
  * `fileText ?? decode(fileBytes)` therefore always writes a 0-byte file.
  * Non-empty `file_bytes` wins and must be written raw (no UTF-8 / newline munging).
  */
-export function cursorWritePayload(args: { fileText?: string; fileBytes?: Uint8Array }): CursorWritePayload {
-	const bytes = args.fileBytes;
-	if (bytes && bytes.byteLength > 0) return { mode: "bytes", bytes };
-	return { mode: "text", text: args.fileText ?? "" };
+export type CursorWriteArgsLike = {
+	fileText?: string;
+	fileBytes?: unknown;
+	encodingHint?: string;
+};
+
+/**
+ * Coerce a WriteArgs `file_bytes` value into raw octets.
+ *
+ * Proto binary decode yields `Uint8Array`. JSON / JS bridges often re-encode
+ * `bytes` as a base64 string, a Node `Buffer`, an `ArrayBuffer`, a number
+ * array, or `{ type: "Buffer", data: number[] }`. Those shapes have no
+ * `byteLength` (or a misleading one), so a `Uint8Array`-only check drops the
+ * PNG and writes proto3-empty `file_text` instead.
+ */
+export function decodeCursorWriteBytes(value: unknown): Uint8Array | undefined {
+	if (value == null) return undefined;
+	if (value instanceof Uint8Array) return value.byteLength > 0 ? value : undefined;
+	if (value instanceof ArrayBuffer) {
+		return value.byteLength > 0 ? new Uint8Array(value) : undefined;
+	}
+	if (typeof Buffer !== "undefined" && Buffer.isBuffer(value)) {
+		return value.byteLength > 0 ? new Uint8Array(value) : undefined;
+	}
+	if (Array.isArray(value) && value.length > 0 && value.every(n => typeof n === "number")) {
+		return Uint8Array.from(value);
+	}
+	if (typeof value === "object" && value !== null && "data" in value) {
+		const data = (value as { type?: string; data?: unknown }).data;
+		if (Array.isArray(data) && data.length > 0 && data.every(n => typeof n === "number")) {
+			return Uint8Array.from(data);
+		}
+	}
+	if (typeof value === "string" && value.length > 0) {
+		try {
+			const decoded = Buffer.from(value, "base64");
+			if (decoded.byteLength === 0) return undefined;
+			// Reject strings that are not actually base64 (Buffer.from is permissive).
+			const roundTrip = decoded.toString("base64").replace(/=+$/, "");
+			const compact = value.replace(/\s+/g, "").replace(/=+$/, "");
+			if (roundTrip !== compact) return undefined;
+			return new Uint8Array(decoded);
+		} catch {
+			return undefined;
+		}
+	}
+	return undefined;
+}
+
+export function cursorWritePayload(args: CursorWriteArgsLike): CursorWritePayload {
+	const bytes = decodeCursorWriteBytes(args.fileBytes);
+	if (bytes) return { mode: "bytes", bytes };
+	const text = args.fileText ?? "";
+	const hint = args.encodingHint?.trim().toLowerCase();
+	if (text && (hint === "base64" || hint === "base64url")) {
+		try {
+			const decoded = Buffer.from(text, hint === "base64url" ? "base64url" : "base64");
+			if (decoded.byteLength > 0) return { mode: "bytes", bytes: new Uint8Array(decoded) };
+		} catch {
+			/* fall through to raw text */
+		}
+	}
+	return { mode: "text", text };
 }
 
 /** Transcript/display form: never dump raw image bytes into a text block. */
