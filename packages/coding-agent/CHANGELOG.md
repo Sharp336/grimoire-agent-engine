@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added `speech.duckGain` (0–1, default 0.25) to configure how far the assistant's speech ducks while push-to-talk is held, replacing the previously hardcoded constant so macOS users no longer need to patch and re-sign the binary ([#8282](https://github.com/can1357/oh-my-pi/issues/8282)).
+
 - Added `qwenTemplateReasoningEffort` to the `models.yml` `compat` schema, so the auto-enabled Qwen 3.8+ template effort dialect (`chat_template_kwargs.reasoning_effort`) can be switched off per provider/model for strict local servers that reject unknown `chat_template_kwargs`.
 
 ### Changed

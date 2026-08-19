@@ -42,7 +42,7 @@ import { settings } from "../config/settings";
 import { DEFAULT_TTS_VOICE } from "./models";
 import { SpeakableStream } from "./speakable";
 import { BlockAccumulator, type SpeechEnhancer } from "./speech-enhancer";
-import { createStreamingPlayer, DUCK_GAIN } from "./streaming-player";
+import { createStreamingPlayer } from "./streaming-player";
 import { type TtsStreamHandle, ttsClient } from "./tts-client";
 
 /** Quiet time on the delta stream before the buffered partial is spoken. */
@@ -224,7 +224,7 @@ export class Vocalizer {
 	/** Lower the volume while the user is speaking (push-to-talk), so speech doesn't drown them out. */
 	duck(): void {
 		this.#ducked = true;
-		for (const player of this.#livePlayers) player.setGain(DUCK_GAIN);
+		for (const player of this.#livePlayers) player.setGain(resolveDuckGain());
 	}
 
 	/** Restore full volume once the user stops speaking. */
@@ -355,7 +355,7 @@ export class Vocalizer {
 		const voice = settings.get("speech.voice") || DEFAULT_TTS_VOICE;
 		const handle = ttsClient.synthesizeStream(modelKey, { voice, signal: abort.signal });
 		const player = this.#createPlayer();
-		player.setGain(this.#ducked ? DUCK_GAIN : 1);
+		player.setGain(this.#ducked ? resolveDuckGain() : 1);
 		this.#liveAborts.add(abort);
 		this.#livePlayers.add(player);
 		this.#chain = this.#chain.then(async () => {
@@ -413,6 +413,20 @@ export class Vocalizer {
 		}
 		player.stop();
 	}
+}
+
+/** Default duck gain, matching the historical hardcoded constant. */
+const DEFAULT_DUCK_GAIN = 0.25;
+
+/**
+ * Resolve the push-to-talk duck gain from the `speech.duckGain` setting.
+ * Clamped to 0..1 so an out-of-range config cannot amplify playback; a
+ * missing or non-finite value falls back to the historical 0.25 (#8282).
+ */
+export function resolveDuckGain(): number {
+	const configured = settings.get("speech.duckGain");
+	if (typeof configured !== "number" || !Number.isFinite(configured)) return DEFAULT_DUCK_GAIN;
+	return Math.min(Math.max(configured, 0), 1);
 }
 
 /** Process-level vocalizer shared by the event controller and the ask tool. */

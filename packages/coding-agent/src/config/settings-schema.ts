@@ -5117,6 +5117,17 @@ export const SETTINGS_SCHEMA = {
 			options: TTS_LOCAL_VOICE_OPTIONS,
 		},
 	},
+	"speech.duckGain": {
+		type: "number",
+		default: 0.25,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Speech Duck Gain",
+			description:
+				"Volume the assistant's speech ducks to while push-to-talk is held (0 = full mute, 1 = no ducking). Replaces the previously hardcoded 0.25 so macOS users don't need to patch and re-sign the binary (#8282)",
+		},
+	},
 	"providers.tinyModel": {
 		type: "enum",
 		values: TINY_TITLE_MODEL_VALUES,
