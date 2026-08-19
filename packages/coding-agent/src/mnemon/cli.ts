@@ -34,10 +34,10 @@ const COMMON_PATHS = [
 ];
 
 export function findMnemonCommand(configured?: string) {
-	const explicit = configured?.trim();
-	if (explicit && fs.existsSync(explicit)) return explicit;
-	const fromEnv = process.env.MNEMON_CLI_PATH?.trim();
-	if (fromEnv && fs.existsSync(fromEnv)) return fromEnv;
+	// An explicit override is authoritative: spawning a bad path must surface an actionable
+	// error instead of silently running a different mnemon found on PATH.
+	const explicit = configured?.trim() || process.env.MNEMON_CLI_PATH?.trim();
+	if (explicit) return explicit;
 	return $which("mnemon") ?? COMMON_PATHS.find(candidate => fs.existsSync(candidate)) ?? "mnemon";
 }
 

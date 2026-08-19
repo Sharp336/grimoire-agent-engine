@@ -148,8 +148,11 @@ function cliFor(session: AgentSession | undefined, settings?: Settings) {
 
 export function normalizeMnemonImportance(value: number | undefined) {
 	if (!Number.isFinite(value)) return 3;
-	if (value! > 0 && value! <= 1) return Math.max(1, Math.min(5, Math.round(value! * 5)));
-	return Math.max(1, Math.min(5, Math.round(value!)));
+	const num = value as number;
+	// Fractional 0-1 compatibility values (mnemopi confidence) scale onto 1-5;
+	// an explicit integer 1 keeps its documented lowest-importance meaning.
+	if (num > 0 && num < 1) return Math.max(1, Math.min(5, Math.round(num * 5)));
+	return Math.max(1, Math.min(5, Math.round(num)));
 }
 
 async function readMnemonStatus(session: AgentSession | undefined): Promise<MemoryBackendStatus> {

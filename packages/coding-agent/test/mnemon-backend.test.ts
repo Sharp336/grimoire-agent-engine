@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	getMnemonSessionState,
@@ -9,6 +9,7 @@ import {
 	normalizeMnemonImportance,
 	resetMnemonConversationTracking,
 } from "../src/mnemon/backend";
+import { findMnemonCommand } from "../src/mnemon/cli";
 import { applyMnemonRecallQuality, focusMnemonQuery, formatMnemonSilentRecall } from "../src/mnemon/quality";
 import { LearnTool } from "../src/tools/learn";
 
@@ -65,10 +66,18 @@ describe("mnemon quality", () => {
 		expect(query.toLowerCase()).not.toContain("feel");
 	});
 
-	it("maps mnemopi 0-1 importance onto 1-5", () => {
+	it("maps fractional importance onto 1-5 but keeps explicit integer 1", () => {
 		expect(normalizeMnemonImportance(0.8)).toBe(4);
+		expect(normalizeMnemonImportance(1)).toBe(1);
 		expect(normalizeMnemonImportance(3)).toBe(3);
+		expect(normalizeMnemonImportance(9)).toBe(5);
 		expect(normalizeMnemonImportance(undefined)).toBe(3);
+	});
+
+	it("keeps a configured cliPath authoritative even when the path is missing", () => {
+		const missing = path.join(os.tmpdir(), "omp-mnemon-does-not-exist", "mnemon");
+		expect(findMnemonCommand(missing)).toBe(missing);
+		expect(findMnemonCommand("  ")).not.toBe("  ");
 	});
 });
 
@@ -148,12 +157,14 @@ describe("mnemonBackend", () => {
 	});
 
 	it("formats compaction context with focused query", async () => {
-		const emptyContext = await mnemonBackend.preCompactionContext?.([]);
+		const settings = Settings.isolated({ "memory.backend": "mnemon" });
+		const emptyContext = await mnemonBackend.preCompactionContext?.([], settings);
 		expect(emptyContext).toBeDefined();
 
-		const withUser = await mnemonBackend.preCompactionContext?.([
-			{ role: "user", content: "Please check the authentication middleware refactor" } as never,
-		]);
+		const withUser = await mnemonBackend.preCompactionContext?.(
+			[{ role: "user", content: "Please check the authentication middleware refactor" } as never],
+			settings,
+		);
 		expect(withUser).toContain("authentication");
 	});
 
@@ -219,9 +230,9 @@ describe("mnemonBackend", () => {
 	});
 
 	it("falls back supersedes to causal when the CLI rejects the fifth type", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "mnemon-cli-"));
-		const cli = join(dir, "mnemon");
-		writeFileSync(
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mnemon-cli-"));
+		const cli = path.join(dir, "mnemon");
+		fs.writeFileSync(
 			cli,
 			`#!/usr/bin/env bash
 set -e
@@ -242,7 +253,7 @@ echo "unexpected \${args[*]}" >&2
 exit 1
 `,
 		);
-		chmodSync(cli, 0o755);
+		fs.chmodSync(cli, 0o755);
 		const settings = Settings.isolated({ "memory.backend": "mnemon", "mnemon.cliPath": cli });
 		const result = await mnemonBackend.link?.(
 			{ agentDir: "/tmp/agent", cwd: "/tmp/project", session: { settings } as never },
@@ -259,9 +270,9 @@ exit 1
 	});
 
 	it("folds input.context and terminates flags before content and query", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "mnemon-cli-test-"));
-		const cli = join(dir, "mnemon");
-		writeFileSync(
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mnemon-cli-test-"));
+		const cli = path.join(dir, "mnemon");
+		fs.writeFileSync(
 			cli,
 			`#!/usr/bin/env bash
 set -e
@@ -293,7 +304,7 @@ echo "unexpected \${args[*]}" >&2
 exit 1
 `,
 		);
-		chmodSync(cli, 0o755);
+		fs.chmodSync(cli, 0o755);
 		const settings = Settings.isolated({ "memory.backend": "mnemon", "mnemon.cliPath": cli });
 		const ctx = { agentDir: "/tmp/agent", cwd: "/tmp/project", session: { settings } as never };
 
@@ -310,16 +321,16 @@ exit 1
 	});
 
 	it("returns replaced_id as id when action is skipped", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "mnemon-cli-dup-"));
-		const cli = join(dir, "mnemon");
-		writeFileSync(
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mnemon-cli-dup-"));
+		const cli = path.join(dir, "mnemon");
+		fs.writeFileSync(
 			cli,
 			`#!/usr/bin/env bash
 set -e
 printf '{"id":"new-unpersisted-id","replaced_id":"existing-persisted-uuid","action":"skipped"}\\n'
 `,
 		);
-		chmodSync(cli, 0o755);
+		fs.chmodSync(cli, 0o755);
 		const settings = Settings.isolated({ "memory.backend": "mnemon", "mnemon.cliPath": cli });
 		const ctx = { agentDir: "/tmp/agent", cwd: "/tmp/project", session: { settings } as never };
 
@@ -330,16 +341,16 @@ printf '{"id":"new-unpersisted-id","replaced_id":"existing-persisted-uuid","acti
 	});
 
 	it("learn tool succeeds without error when mnemon returns action: skipped", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "mnemon-cli-learn-"));
-		const cli = join(dir, "mnemon");
-		writeFileSync(
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mnemon-cli-learn-"));
+		const cli = path.join(dir, "mnemon");
+		fs.writeFileSync(
 			cli,
 			`#!/usr/bin/env bash
 set -e
 printf '{"id":"new-id","replaced_id":"existing-uuid","action":"skipped"}\\n'
 `,
 		);
-		chmodSync(cli, 0o755);
+		fs.chmodSync(cli, 0o755);
 		const settings = Settings.isolated({
 			"autolearn.enabled": true,
 			"memory.backend": "mnemon",
@@ -355,6 +366,7 @@ printf '{"id":"new-id","replaced_id":"existing-uuid","action":"skipped"}\\n'
 		const tool = LearnTool.createIf(session as never);
 		expect(tool).toBeInstanceOf(LearnTool);
 		const execution = await tool!.execute("1", { memory: "Already remembered rule" });
-		expect(execution.content[0]?.text).toContain("Lesson already present in memory");
+		const text = execution.content[0]?.type === "text" ? execution.content[0].text : "";
+		expect(text).toContain("Lesson already present in memory");
 	});
 });
