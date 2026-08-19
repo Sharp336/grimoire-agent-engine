@@ -239,6 +239,9 @@ export type StatusLineSegmentId =
 	| "usage"
 	| "collab";
 
+/** A built-in status-line id or an id registered by an extension. */
+export type StatusLineSegmentRef = StatusLineSegmentId | (string & {});
+
 /** Submenu choice metadata. */
 export type SubmenuOption<V extends string = string> = {
 	value: V;
@@ -5943,8 +5946,8 @@ export interface StatusLineSettings {
 	preset: StatusLinePreset;
 	separator: StatusLineSeparatorStyle;
 	showHookStatus: boolean;
-	leftSegments: StatusLineSegmentId[];
-	rightSegments: StatusLineSegmentId[];
+	leftSegments: StatusLineSegmentRef[];
+	rightSegments: StatusLineSegmentRef[];
 	segmentOptions: Record<string, unknown>;
 }
 
