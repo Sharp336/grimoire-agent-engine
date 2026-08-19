@@ -19,6 +19,7 @@ import {
 	type CompactionResult,
 	type CompactionSettings,
 	calculateContextTokens,
+	calculatePromptTokens,
 	collectShakeRegions,
 	compact,
 	compactionContextTokens,
@@ -286,6 +287,23 @@ export class SessionMaintenance {
 	 */
 	#midTurnDeadEndPendingPrePrompt = false;
 	#skipPostTurnMaintenanceAssistantTimestamp: number | undefined;
+	/**
+	 * Consecutive below-threshold direct retries after an output-side
+	 * `stopReason === "length"`. Each retry re-enters the same recovery branch,
+	 * so without a bound the session can spin forever issuing paid model calls
+	 * that all hit the same output-token cap. Reset on any other stop reason.
+	 * After the cap, the incomplete path falls back to compaction once, then
+	 * terminates recovery with a user-visible warning instead of scheduling
+	 * another identical retry.
+	 */
+	#incompleteBelowThresholdRetries = 0;
+	/**
+	 * Whether the current streak of below-threshold length stops has already
+	 * used its one compaction fallback. Prevents infinite 3-retry + 1-compaction
+	 * cycles: after the fallback compaction, further length stops terminate
+	 * recovery instead of looping. Reset together with the retry counter.
+	 */
+	#incompleteCompactionFallbackUsed = false;
 	readonly #host: SessionMaintenanceHost;
 
 	get #model(): Model | undefined {
@@ -298,6 +316,16 @@ export class SessionMaintenance {
 
 	constructor(host: SessionMaintenanceHost) {
 		this.#host = host;
+	}
+
+	/**
+	 * Reset the incomplete-output recovery state. Called when a new user prompt
+	 * arrives so a prior streak of length stops doesn't bleed into the next
+	 * turn's retry budget.
+	 */
+	resetIncompleteRecovery(): void {
+		this.#incompleteBelowThresholdRetries = 0;
+		this.#incompleteCompactionFallbackUsed = false;
 	}
 
 	/** Whether manual or automatic context maintenance is active. */
@@ -1214,6 +1242,14 @@ export class SessionMaintenance {
 		allowDefer = true,
 		autoContinue = true,
 	): Promise<CompactionCheckResult> {
+		// Reset the below-threshold incomplete-retry counter on any non-length
+		// stop: the loop hazard only exists while consecutive turns burn their
+		// output budget. A successful (or errored/aborted) turn means the model
+		// produced output, so the next length stop gets a fresh budget.
+		if (assistantMessage.stopReason !== "length") {
+			this.#incompleteBelowThresholdRetries = 0;
+			this.#incompleteCompactionFallbackUsed = false;
+		}
 		// Skip if message was aborted (user cancelled) - unless skipAbortedCheck is false
 		if (skipAbortedCheck && assistantMessage.stopReason === "aborted") return COMPACTION_CHECK_NONE;
 		const contextWindow = this.#model?.contextWindow ?? 0;
@@ -1322,17 +1358,112 @@ export class SessionMaintenance {
 				this.#host.scheduleAgentContinue({ delayMs: 100, generation });
 				return COMPACTION_CHECK_CONTINUATION;
 			}
-
 			const incompleteCompactionSettings = this.#host.settings.getGroup("compaction");
 			if (incompleteCompactionSettings.enabled && incompleteCompactionSettings.strategy !== "off") {
-				logger.debug("Compaction triggered by response.incomplete (length stop, no promotion target)", {
+				// Gate recovery compaction on the actual threshold: the model hit
+				// its output-token limit (stopReason "length"), not a context
+				// overflow. If context is well below the compaction threshold,
+				// compacting shrinks the prompt for no reason — the retry will
+				// produce the same truncated output on a smaller context. Only
+				// compact when context is genuinely above the threshold.
+				//
+				// Use calculatePromptTokens (input + cache) instead of
+				// calculateContextTokens (which includes the discarded output
+				// tokens): a turn that burned 75k output with 10k input reads
+				// as 85k with calculateContextTokens and would compact even
+				// though the retry replays ~10k. The stored-context floor
+				// (compactionContextTokens) still applies — a payload-compression
+				// hook or thinking-signature mismatch can deflate billed usage
+				// below what the next prompt actually carries (#3174).
+				const incompleteContextWindow = this.#model?.contextWindow ?? 0;
+				const promptTokens = calculatePromptTokens(assistantMessage.usage);
+				const storedTokens = this.#estimateStoredContextTokens();
+				const incompleteContextTokens = compactionContextTokens(promptTokens, storedTokens);
+				const incompleteShouldCompact =
+					incompleteContextWindow > 0 &&
+					shouldCompact(incompleteContextTokens, incompleteContextWindow, incompleteCompactionSettings);
+				if (incompleteShouldCompact) {
+					logger.debug("Compaction triggered by response.incomplete (length stop, no promotion target)", {
+						model: `${assistantMessage.provider}/${assistantMessage.model}`,
+						strategy: incompleteCompactionSettings.strategy,
+						contextTokens: incompleteContextTokens,
+						promptTokens,
+						storedTokens,
+						contextWindow: incompleteContextWindow,
+					});
+					return await this.#host.runRecoveryCompactionWithRollback("incomplete", assistantMessage, allowDefer, {
+						autoContinue,
+						triggerContextTokens: incompleteContextTokens,
+					});
+				}
+				// Context is below the compaction threshold — the output
+				// truncation was caused by the model's output-token budget, not
+				// by context pressure, so compaction would not help. Drop the
+				// dead turn and retry on the same context. Only schedule the
+				// continuation when autoContinue is true: the pre-prompt recovery
+				// path calls checkCompaction with autoContinue=false, and
+				// scheduling a continuation there races with the caller's
+				// pending prompt (AgentBusyError).
+				if (autoContinue) this.#incompleteBelowThresholdRetries++;
+				if (this.#incompleteBelowThresholdRetries > 3) {
+					// Bound reached. If we haven't used the compaction fallback
+					// yet, try it once. With strategy "shake" the fallback may
+					// be a no-op (reclaims nothing), so runRecoveryCompaction-
+					// WithRollback owns the decision to fall through to
+					// context-full when shake reclaims nothing.
+					if (!this.#incompleteCompactionFallbackUsed) {
+						logger.warn("response.incomplete repeated on every retry below threshold — falling back to compaction", {
+							model: `${assistantMessage.provider}/${assistantMessage.model}`,
+							consecutiveRetries: this.#incompleteBelowThresholdRetries,
+							contextTokens: incompleteContextTokens,
+							contextWindow: incompleteContextWindow,
+						});
+						this.#incompleteCompactionFallbackUsed = true;
+						return await this.#host.runRecoveryCompactionWithRollback("incomplete", assistantMessage, allowDefer, {
+							autoContinue,
+							triggerContextTokens: incompleteContextTokens,
+						});
+					}
+					// Fallback compaction already used and the model is still
+					// hitting output limits. Terminate recovery: do NOT
+					// schedule another continuation. Leave the truncated turn
+					// visible so the user sees what happened.
+					logger.warn("response.incomplete persists after compaction fallback — terminating recovery", {
+						model: `${assistantMessage.provider}/${assistantMessage.model}`,
+						consecutiveRetries: this.#incompleteBelowThresholdRetries,
+						contextTokens: incompleteContextTokens,
+						contextWindow: incompleteContextWindow,
+					});
+					// Surface to the TUI/RPC so the user understands why the
+					// hidden recovery loop stopped — logger.warn is log-file only.
+					await this.#host.emitSessionEvent({
+						type: "notice",
+						level: "warning",
+						message: `The model repeatedly hit its output-token limit. Recovery stopped after ${this.#incompleteBelowThresholdRetries} retries and one compaction fallback. The last truncated response is shown above — try simplifying the task or increasing the model's output budget.`,
+						source: "compaction",
+					});
+					this.#incompleteBelowThresholdRetries = 0;
+					this.#incompleteCompactionFallbackUsed = false;
+					return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
+				}
+				logger.debug("response.incomplete (length stop) below compaction threshold — retrying without compaction", {
 					model: `${assistantMessage.provider}/${assistantMessage.model}`,
-					strategy: incompleteCompactionSettings.strategy,
+					contextTokens: incompleteContextTokens,
+					promptTokens,
+					storedTokens,
+					contextWindow: incompleteContextWindow,
+					consecutiveRetries: this.#incompleteBelowThresholdRetries,
 				});
-				return await this.#host.runRecoveryCompactionWithRollback("incomplete", assistantMessage, allowDefer, {
-					autoContinue,
-					triggerContextTokens: calculateContextTokens(assistantMessage.usage),
-				});
+				// Only drop the turn and schedule a continuation when
+				// autoContinue allows it. When autoContinue is false (pre-prompt
+				// recovery), drop the dead turn but let the caller drive the
+				// next prompt — scheduling a continuation would race with it.
+				await this.#host.dropPersistedAssistantTurn(assistantMessage);
+				if (autoContinue) {
+					this.#host.scheduleAgentContinue({ delayMs: 100, generation });
+					return COMPACTION_CHECK_CONTINUATION;
+				}
+				return COMPACTION_CHECK_NONE;
 			}
 			// Neither promotion nor compaction is available — surface the dead-end so
 			// the user understands why the turn yielded with nothing.
@@ -1341,7 +1472,6 @@ export class SessionMaintenance {
 			});
 			return COMPACTION_CHECK_NONE;
 		}
-
 		// Stale-result pass runs every turn, before any threshold gating: it is
 		// cheap (bails when no candidate) and independent of the compaction
 		// setting.

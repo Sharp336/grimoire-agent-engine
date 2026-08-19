@@ -22,8 +22,8 @@ import {
 	withTimeoutSignal,
 } from "../utils/fetch-timeout";
 
-const REPO = "can1357/oh-my-pi";
-const PACKAGE = "@oh-my-pi/pi-coding-agent";
+const REPO = $env.OMP_UPDATE_REPO || "can1357/oh-my-pi";
+const PACKAGE = $env.OMP_UPDATE_PACKAGE || "@oh-my-pi/pi-coding-agent";
 const HOMEBREW_FORMULA = "can1357/tap/omp";
 const MISE_TOOL = "github:can1357/oh-my-pi";
 const NIX_STORE_DIR = "/nix/store";
@@ -32,13 +32,18 @@ const NIX_STORE_DIR = "/nix/store";
  *
  * Pinned across both the version check and the bun install step so the two
  * agree on which catalog they are talking to. A user's bun may be pointed at
- * an unofficial mirror (corporate proxy, Taobao, etc.) that lags the upstream
+ * an unofficial mirror (corporate proxy, Taobao, …) that lags the upstream
  * registry by minutes-to-hours, in which case `getLatestRelease` would resolve
  * a version the mirror has not yet replicated and the install would fail with
  * `No version matching "X" found for specifier "<pkg>" (but package exists)`.
  * See #1686.
+ *
+ * `OMP_UPDATE_REGISTRY` (and its `OMP_UPDATE_REPO`/`OMP_UPDATE_PACKAGE`/
+ * `OMP_UPDATE_NATIVES_PACKAGE` siblings below) exist for maintaining a
+ * private fork against its own registry/repo instead of upstream: unset,
+ * every updater behaves exactly as before.
  */
-const NPM_REGISTRY = "https://registry.npmjs.org/";
+const NPM_REGISTRY = $env.OMP_UPDATE_REGISTRY || "https://registry.npmjs.org/";
 const GITHUB_API = "https://api.github.com";
 const RELEASE_METADATA_TIMEOUT_MS = 30_000;
 const BINARY_DOWNLOAD_TIMEOUT_MS = 15 * 60_000;
@@ -49,7 +54,7 @@ const BINARY_DOWNLOAD_TIMEOUT_MS = 15 * 60_000;
  * disk; see {@link buildBunInstallArgs} for why this must be installed
  * explicitly rather than inherited as a transitive dependency.
  */
-const NATIVES_PACKAGE = "@oh-my-pi/pi-natives";
+const NATIVES_PACKAGE = $env.OMP_UPDATE_NATIVES_PACKAGE || "@oh-my-pi/pi-natives";
 
 /**
  * Platform tags the release pipeline publishes as
