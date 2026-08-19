@@ -16,6 +16,7 @@ import {
 	isGrokReasoningEffortCapable,
 	isKimiK3ModelId,
 	isKimiModelId,
+	isQwen38PlusTemplateEffortModelId,
 	isReasoningGlmModelId,
 } from "../identity/family";
 import { resolveModelReference } from "../identity/reference";
@@ -2980,6 +2981,10 @@ export const ALIBABA_TOKEN_PLAN_DISCOVERED_MODEL_LIMITS: Readonly<Record<string,
 		contextWindow: 1_000_000,
 		maxTokens: 384_000,
 	},
+	"deepseek-v4-pro-0813": {
+		contextWindow: 1_000_000,
+		maxTokens: 384_000,
+	},
 	"deepseek-v3.2": {
 		contextWindow: 131_072,
 		maxTokens: 65_536,
@@ -4994,6 +4999,11 @@ export function vllmModelManagerOptions(config?: VllmModelManagerConfig): ModelM
 					return {
 						...model,
 						contextWindow: toPositiveNumber(entry.max_model_len, model.contextWindow),
+						// vLLM's /v1/models reports no reasoning capability. Qwen 3.8+
+						// open weights always think (the template cannot disable it), so
+						// light up the effort dial; buildModel derives the template
+						// ladder from the id + local-backend compat.
+						reasoning: model.reasoning || isQwen38PlusTemplateEffortModelId(model.id),
 					};
 				},
 				fetch: config?.fetch,
@@ -5071,8 +5081,18 @@ export interface GithubCopilotModelManagerConfig {
 
 const COPILOT_ANTHROPIC_MODEL_PATTERN = /^claude-(haiku|sonnet|opus|fable|mythos)-\d/;
 const isCopilotResponsesModelId = (modelId: string): boolean =>
-	modelId === "grok-4.5" || modelId.startsWith("gpt-5") || modelId.startsWith("oswe") || modelId.startsWith("mai-");
-const COPILOT_CACHE_INVALIDATED_MODEL_IDS = ["grok-4.5", "grok-4.5-1m", "mai-code-1-flash-picker"];
+	modelId === "grok-4.5" ||
+	modelId === "grok-4.6" ||
+	modelId.startsWith("gpt-5") ||
+	modelId.startsWith("oswe") ||
+	modelId.startsWith("mai-");
+const COPILOT_CACHE_INVALIDATED_MODEL_IDS = [
+	"grok-4.5",
+	"grok-4.5-1m",
+	"grok-4.6",
+	"grok-4.6-1m",
+	"mai-code-1-flash-picker",
+];
 
 function inferCopilotApi(modelId: string): Api {
 	if (COPILOT_ANTHROPIC_MODEL_PATTERN.test(modelId)) {
@@ -5705,8 +5725,17 @@ const OPENCODE_ZEN_API_RESOLUTION = createOpenCodeApiResolution("https://opencod
 // /zen/go/v1/chat/completions route does not work for this model while
 // /zen/go/v1/responses does (user-verified against the live gateway,
 // 2026-08-08; Flash only — deepseek-v4-pro serves fine on chat completions).
+//
+// muse-spark-1.2 / muse-spark-1.2-contributor are the same inverse case: the
+// Go gateway's /zen/go/v1/models discovery drops the `provider.npm` hint, so
+// without an override they fall through to openai-completions even though the
+// gateway only serves them at /zen/go/v1/responses (@ai-sdk/openai per
+// https://opencode.ai/docs/go/#endpoints). The completions parser then closes
+// the stream with no finish_reason on every tool-call turn (#8957).
 const OPENCODE_GO_API_RESOLUTION = createOpenCodeApiResolution("https://opencode.ai/zen/go", {
 	"deepseek-v4-flash": "openai-responses",
+	"muse-spark-1.2": "openai-responses",
+	"muse-spark-1.2-contributor": "openai-responses",
 	"minimax-m2.7": "openai-completions",
 	"minimax-m3": "openai-completions",
 	"minimax-m3-free": "openai-completions",
