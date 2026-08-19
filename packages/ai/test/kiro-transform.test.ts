@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { transformKiroRequest } from "@oh-my-pi/pi-ai/providers/kiro/index";
 import type { AssistantMessage, Context, Model, Tool, ToolResultMessage, Usage } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -22,7 +23,7 @@ const zeroUsage: Usage = {
 };
 
 function createModel(
-	options: { reasoning?: boolean; thinking?: Model["thinking"]; maxTokens?: number } = {},
+	options: { reasoning?: boolean; thinking?: Model["thinking"]; maxTokens?: number; contextWindow?: number } = {},
 ): Model<"kiro-api"> {
 	return buildModel({
 		id: "kiro-test-model",
@@ -34,7 +35,7 @@ function createModel(
 		...(options.thinking ? { thinking: options.thinking } : {}),
 		input: ["text", "image"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 32_000,
+		contextWindow: options.contextWindow ?? 32_000,
 		maxTokens: options.maxTokens ?? 4_096,
 	});
 }
@@ -60,6 +61,19 @@ function toolResult(toolCallId: string, isError = false, content?: ToolResultMes
 		content: content ?? [{ type: "text" as const, text: isError ? "lookup failed" : "file contents" }],
 		isError,
 		timestamp: 2,
+	};
+}
+
+function assistantText(text: string, timestamp: number): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [{ type: "text", text }],
+		api: "kiro-api",
+		provider: "kiro",
+		model: "kiro-test-model",
+		usage: zeroUsage,
+		stopReason: "stop",
+		timestamp,
 	};
 }
 
@@ -90,8 +104,7 @@ describe("Kiro request transformation", () => {
 		const history = request.conversationState.history ?? [];
 		const current = request.conversationState.currentMessage.userInputMessage;
 		const historicalAssistant = history.find(entry => entry.assistantResponseMessage)?.assistantResponseMessage;
-		const historicalResult = history.find(entry => entry.userInputMessage?.userInputMessageContext?.toolResults)
-			?.userInputMessage?.userInputMessageContext?.toolResults?.[0];
+		const historicalResult = current.userInputMessageContext?.toolResults?.[0];
 
 		expect(history[0]?.userInputMessage?.content).toContain("Follow the system instruction.");
 		expect(current.content).toBe("Current question");
@@ -288,7 +301,9 @@ describe("Kiro request transformation", () => {
 			const request = transformKiroRequest(createModel(), context);
 			const current = request.conversationState.currentMessage.userInputMessage;
 			const result = current.userInputMessageContext?.toolResults?.[0];
-			const assistant = request.conversationState.history?.at(-1)?.assistantResponseMessage;
+			const assistant = request.conversationState.history?.find(
+				entry => entry.assistantResponseMessage,
+			)?.assistantResponseMessage;
 
 			expect(result?.content).toEqual([{ text: "file contents" }]);
 			expect(result?.status).toBe("success");
@@ -317,7 +332,9 @@ describe("Kiro request transformation", () => {
 		const request = transformKiroRequest(createModel(), context);
 		const current = request.conversationState.currentMessage.userInputMessage;
 		const result = current.userInputMessageContext?.toolResults?.[0];
-		const assistant = request.conversationState.history?.at(-1)?.assistantResponseMessage;
+		const assistant = request.conversationState.history?.find(
+			entry => entry.assistantResponseMessage,
+		)?.assistantResponseMessage;
 
 		expect(result?.content).toEqual([{ text: "[Image: image/webp]" }]);
 		expect(result?.toolUseId).toBe(assistant?.toolUses?.[0]?.toolUseId);
@@ -333,7 +350,8 @@ describe("Kiro request transformation", () => {
 					...toolResult("tool-1"),
 					content: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }],
 				},
-				{ role: "user", content: "Continue", timestamp: 3 },
+				assistantText("Image inspected", 3),
+				{ role: "user", content: "Continue", timestamp: 4 },
 			],
 		};
 
@@ -345,7 +363,7 @@ describe("Kiro request transformation", () => {
 		expect(resultEntry?.content).toEqual([{ text: "(see attached image)" }]);
 		expect(
 			history.find(entry => entry.userInputMessage?.userInputMessageContext?.toolResults)?.userInputMessage?.images,
-		).toEqual([{ format: "png", source: { bytes: "aGVsbG8=" } }]);
+		).toBeUndefined();
 	});
 
 	test("batches images from consecutive historical tool results", () => {
@@ -368,7 +386,8 @@ describe("Kiro request transformation", () => {
 						{ type: "image", data: "aW1nLWI=", mimeType: "image/webp" },
 					],
 				},
-				{ role: "user", content: "Continue", timestamp: 4 },
+				assistantText("Both images inspected", 4),
+				{ role: "user", content: "Continue", timestamp: 5 },
 			],
 		};
 
@@ -386,10 +405,162 @@ describe("Kiro request transformation", () => {
 		expect(resultEntry?.userInputMessageContext?.toolResults?.map(result => result.toolUseId)).toEqual(
 			assistantEntries.flatMap(entry => entry.assistantResponseMessage?.toolUses?.map(use => use.toolUseId) ?? []),
 		);
-		expect(resultEntry?.images).toEqual([
-			{ format: "png", source: { bytes: "aW1nLWE=" } },
-			{ format: "webp", source: { bytes: "aW1nLWI=" } },
-		]);
+		expect(resultEntry?.images).toBeUndefined();
+	});
+
+	test("replays visible assistant text without provisional reasoning", () => {
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "Start", timestamp: 0 },
+				{
+					role: "assistant",
+					content: [
+						{ type: "thinking", thinking: "discarded hypothesis" },
+						{ type: "text", text: "Established conclusion" },
+					],
+					api: "kiro-api",
+					provider: "kiro",
+					model: "kiro-test-model",
+					usage: zeroUsage,
+					stopReason: "stop",
+					timestamp: 1,
+				},
+				{ role: "user", content: "Continue", timestamp: 2 },
+			],
+		};
+
+		const content = transformKiroRequest(createModel(), context).conversationState.history?.find(
+			entry => entry.assistantResponseMessage,
+		)?.assistantResponseMessage?.content;
+
+		expect(content).toBe("Established conclusion");
+		expect(content).not.toContain("discarded hypothesis");
+	});
+
+	test("uses empty user content for structured historical tool results", () => {
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "Start", timestamp: 0 },
+				assistantToolCall("tool-1"),
+				toolResult("tool-1"),
+				assistantText("Tool result handled", 3),
+				{ role: "user", content: "Continue", timestamp: 4 },
+			],
+		};
+
+		const carrier = transformKiroRequest(createModel(), context).conversationState.history?.find(
+			entry => entry.userInputMessage?.userInputMessageContext?.toolResults,
+		)?.userInputMessage;
+
+		expect(carrier?.content).toBe("");
+		expect(carrier?.userInputMessageContext?.toolResults).toHaveLength(1);
+	});
+
+	test("drops unmatched tool state without inventing calls or results", () => {
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "Start", timestamp: 0 },
+				assistantToolCall("missing-result"),
+				toolResult("orphan-result"),
+				{ role: "user", content: "Continue", timestamp: 3 },
+			],
+		};
+
+		const request = transformKiroRequest(createModel(), context);
+		const serialized = JSON.stringify(request.conversationState);
+
+		expect(serialized).not.toContain("missing-result");
+		expect(serialized).not.toContain("orphan-result");
+		expect(serialized).not.toContain("unknown_tool");
+	});
+
+	test("rejects ambiguous duplicate tool IDs before encoding", () => {
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "Start", timestamp: 0 },
+				assistantToolCall("duplicate"),
+				assistantToolCall("duplicate"),
+				toolResult("duplicate"),
+			],
+		};
+
+		expect(() => transformKiroRequest(createModel(), context)).toThrow(/duplicate tool call id/);
+	});
+
+	test("truncates tool results to 25000 valid UTF-8 bytes", () => {
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "Start", timestamp: 0 },
+				assistantToolCall("large-result"),
+				toolResult("large-result", false, [{ type: "text", text: "é".repeat(20_000) }]),
+			],
+		};
+
+		const result = transformKiroRequest(createModel(), context).conversationState.currentMessage.userInputMessage
+			.userInputMessageContext?.toolResults?.[0]?.content[0]?.text;
+
+		expect(result).toBeDefined();
+		expect(Buffer.byteLength(result ?? "", "utf8")).toBeLessThanOrEqual(25_000);
+		expect(result).toEndWith("\n...[truncated]");
+		expect(result).not.toContain("�");
+	});
+
+	test("classifies oversized local history as context overflow", () => {
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "A history entry larger than the scaled byte limit", timestamp: 0 },
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "answer" }],
+					api: "kiro-api",
+					provider: "kiro",
+					model: "kiro-test-model",
+					usage: zeroUsage,
+					stopReason: "stop",
+					timestamp: 1,
+				},
+				{ role: "user", content: "Continue", timestamp: 2 },
+			],
+		};
+
+		try {
+			transformKiroRequest(createModel({ contextWindow: 1 }), context);
+			expect.unreachable("expected local history overflow");
+		} catch (error) {
+			expect(AIError.is(AIError.classify(error), AIError.Flag.ContextOverflow)).toBe(true);
+		}
+	});
+
+	test("uses an explicit Kiro conversation identity", () => {
+		const context: Context = { messages: [{ role: "user", content: "Start", timestamp: 0 }] };
+
+		expect(
+			transformKiroRequest(createModel(), context, { conversationId: "session-1" }).conversationState.conversationId,
+		).toBe("session-1");
+	});
+
+	test("keeps repeated historical tool turns paired and alternating", () => {
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "First", timestamp: 0 },
+				assistantToolCall("tool-1"),
+				toolResult("tool-1"),
+				assistantText("First complete", 3),
+				{ role: "user", content: "Second", timestamp: 4 },
+				{ ...assistantToolCall("tool-2"), timestamp: 5 },
+				{ ...toolResult("tool-2"), timestamp: 6 },
+				assistantText("Second complete", 7),
+				{ role: "user", content: "Continue", timestamp: 8 },
+			],
+		};
+
+		const history = transformKiroRequest(createModel(), context).conversationState.history ?? [];
+		const roles = history.map(entry => (entry.userInputMessage ? "user" : "assistant"));
+		const uses = history.flatMap(entry => entry.assistantResponseMessage?.toolUses ?? []);
+		const results = history.flatMap(entry => entry.userInputMessage?.userInputMessageContext?.toolResults ?? []);
+
+		expect(roles).toEqual(["user", "assistant", "user", "assistant", "user", "assistant", "user", "assistant"]);
+		expect(results.map(result => result.toolUseId)).toEqual(uses.map(use => use.toolUseId));
 	});
 
 	test("fails closed for unsupported tool-result image formats", () => {

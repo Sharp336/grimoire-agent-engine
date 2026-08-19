@@ -11,6 +11,7 @@
 ### Fixed
 
 - Fixed Kiro streams that ended after reasoning-only output by surfacing a recoverable empty response for session-level final-answer recovery.
+- Fixed long Kiro sessions replaying provisional reasoning as assistant speech, resending historical screenshots, fabricating tool-result carrier prose, emitting malformed tool histories, exceeding provider payload limits without local compaction recovery, and changing conversation identity between turns ([#13](https://github.com/ajdiyassin/oh-my-pi/issues/13)).
 - Hardened Kiro registration caching and refresh endpoint validation, including the canonical regional fallback when `tokenEndpoint` is omitted.
 - Redacted Kiro registered-client secrets alongside OAuth refresh tokens in generic remote credential snapshots.
 ### Fixed

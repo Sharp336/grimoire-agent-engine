@@ -1,24 +1,14 @@
 import { prompt } from "@oh-my-pi/pi-utils";
-import type {
-	AssistantMessage,
-	Context,
-	Effort,
-	ImageContent,
-	Message,
-	Model,
-	Tool,
-	ToolCall,
-	ToolResultMessage,
-} from "../../types";
+import * as AIError from "../../error";
+import type { Context, Effort, ImageContent, Message, Model, Tool, ToolCall, ToolResultMessage } from "../../types";
 import { toolWireSchema } from "../../utils/schema/wire";
 import { buildKiroModelRequestFields } from "./adaptive-thinking";
+import { type KiroAssistantGroup, type KiroOrdinaryMessage, prepareKiroHistory } from "./history";
 import { createKiroToolUseIdNormalizer } from "./id-normalizer";
-import assistantHistoryPrompt from "./prompts/assistant-history.md" with { type: "text" };
 import continuationPrompt from "./prompts/continuation.md" with { type: "text" };
 import defaultToolDescriptionPrompt from "./prompts/default-tool-description.md" with { type: "text" };
 import historicalToolDescriptionPrompt from "./prompts/historical-tool-description.md" with { type: "text" };
 import joinedContentPrompt from "./prompts/joined-content.md" with { type: "text" };
-import toolResultsPrompt from "./prompts/tool-results.md" with { type: "text" };
 import type {
 	KiroAssistantResponseMessage,
 	KiroHistoryEntry,
@@ -26,28 +16,34 @@ import type {
 	KiroRequest,
 	KiroToolResult,
 	KiroToolSpec,
-	KiroToolUse,
 	KiroUserInputMessage,
 } from "./types";
 
 const CONTINUATION_PROMPT = prompt.render(continuationPrompt);
 const HISTORICAL_TOOL_DESCRIPTION = prompt.render(historicalToolDescriptionPrompt);
-const TOOL_RESULTS_PROMPT = prompt.render(toolResultsPrompt);
+const TOOL_RESULT_IMAGE_PLACEHOLDER = "(see attached image)";
+const TOOL_RESULT_MAX_BYTES = 25_000;
+const HISTORY_BASE_BYTES = 850_000;
+const HISTORY_BASE_TOKENS = 200_000;
+const HISTORY_TRUNCATION_SUFFIX = "\n...[truncated]";
 
 function joinPromptContent(prefix: string, content: string): string {
 	return prompt.render(joinedContentPrompt, { prefix, content });
 }
-
 function textContent(message: Message): string {
 	if (typeof message.content === "string") return message.content.toWellFormed();
 	let text = "";
-	for (const part of message.content) {
-		if (part.type === "text") text += part.text;
-		else if (part.type === "thinking") text += part.thinking;
-	}
+	for (const part of message.content) if (part.type === "text") text += part.text;
 	return text.toWellFormed();
 }
-
+function joinMessageText(messages: readonly KiroOrdinaryMessage[]): string {
+	let text = "";
+	for (const message of messages) {
+		const next = textContent(message);
+		if (next) text = text ? joinPromptContent(text, next) : next;
+	}
+	return text;
+}
 function imageFormat(mimeType: string): KiroImageBlock["format"] {
 	switch (mimeType.trim().toLowerCase()) {
 		case "image/jpeg":
@@ -63,66 +59,64 @@ function imageFormat(mimeType: string): KiroImageBlock["format"] {
 			throw new Error(`Kiro does not support image type: ${mimeType}`);
 	}
 }
-
 function isImageContent(part: unknown): part is ImageContent {
 	return typeof part === "object" && part !== null && "type" in part && part.type === "image" && "mimeType" in part;
 }
-
 function imageContent(message: Message): KiroImageBlock[] {
 	if (typeof message.content === "string") return [];
 	const images: KiroImageBlock[] = [];
-	for (const part of message.content) {
-		if (!isImageContent(part)) continue;
-		images.push({ format: imageFormat(part.mimeType), source: { bytes: part.data } });
-	}
+	for (const part of message.content)
+		if (isImageContent(part)) images.push({ format: imageFormat(part.mimeType), source: { bytes: part.data } });
 	return images;
 }
-
 function parseToolArguments(call: ToolCall): Record<string, unknown> {
 	if (typeof call.arguments !== "string") return call.arguments;
 	const value: unknown = JSON.parse(call.arguments);
-	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+	if (typeof value !== "object" || value === null || Array.isArray(value))
 		throw new Error(`Kiro historical tool call ${call.id} must contain a JSON object`);
-	}
 	return value as Record<string, unknown>;
 }
-
 function assistantMessage(
-	message: AssistantMessage,
+	group: KiroAssistantGroup,
 	normalizeId: (id: string) => string,
-): KiroAssistantResponseMessage | undefined {
-	const thinking: string[] = [];
+): KiroAssistantResponseMessage {
 	let text = "";
-	const toolUses: KiroToolUse[] = [];
-	for (const part of message.content) {
-		if (part.type === "text") text += part.text;
-		else if (part.type === "thinking") thinking.push(part.thinking);
-		else if (part.type === "toolCall") {
-			toolUses.push({ name: part.name, toolUseId: normalizeId(part.id), input: parseToolArguments(part) });
+	for (const message of group.messages) {
+		for (const part of message.content) {
+			if (part.type === "text") text += part.text;
 		}
 	}
-	const content = prompt.render(assistantHistoryPrompt, { thinking, text });
-	if (!content && toolUses.length === 0) return undefined;
-	return { content: content.toWellFormed(), ...(toolUses.length > 0 ? { toolUses } : {}) };
+	const toolUses = group.calls.map(call => ({
+		name: call.name,
+		toolUseId: normalizeId(call.id),
+		input: parseToolArguments(call),
+	}));
+	return { content: text.toWellFormed(), ...(toolUses.length > 0 ? { toolUses } : {}) };
 }
-
-/** Text kept in a tool result when its only payload is an image promoted to the user input. */
-const TOOL_RESULT_IMAGE_PLACEHOLDER = "(see attached image)";
-
-/** Scan the message once; callers accumulate the same blocks onto the paired user input. */
+function truncateUtf8(text: string, maxBytes: number): string {
+	const bytes = new TextEncoder().encode(text.toWellFormed());
+	if (bytes.byteLength <= maxBytes) return text.toWellFormed();
+	const suffixBytes = new TextEncoder().encode(HISTORY_TRUNCATION_SUFFIX);
+	let end = Math.max(0, maxBytes - suffixBytes.byteLength);
+	while (end > 0 && end < bytes.byteLength && (bytes[end] & 0xc0) === 0x80) end--;
+	return `${new TextDecoder().decode(bytes.subarray(0, end))}${HISTORY_TRUNCATION_SUFFIX}`;
+}
 function toolResult(
 	message: ToolResultMessage,
 	normalizeId: (id: string) => string,
-	images: KiroImageBlock[],
+	images: readonly KiroImageBlock[],
 ): KiroToolResult {
 	const text = textContent(message);
 	return {
-		content: [{ text: text || (images.length > 0 ? TOOL_RESULT_IMAGE_PLACEHOLDER : "") }],
+		content: [
+			{
+				text: truncateUtf8(text || (images.length > 0 ? TOOL_RESULT_IMAGE_PLACEHOLDER : ""), TOOL_RESULT_MAX_BYTES),
+			},
+		],
 		status: message.isError ? "error" : "success",
 		toolUseId: normalizeId(message.toolCallId),
 	};
 }
-
 function toolsToKiro(tools: readonly Tool[]): KiroToolSpec[] {
 	return tools.map(tool => ({
 		toolSpecification: {
@@ -132,55 +126,74 @@ function toolsToKiro(tools: readonly Tool[]): KiroToolSpec[] {
 		},
 	}));
 }
-
-function historicalToolNames(history: readonly KiroHistoryEntry[]): Set<string> {
-	const names = new Set<string>();
-	for (const entry of history) {
-		for (const use of entry.assistantResponseMessage?.toolUses ?? []) names.add(use.name);
-	}
-	return names;
-}
-
 function appendHistoricalToolPlaceholders(tools: KiroToolSpec[], history: readonly KiroHistoryEntry[]): void {
-	const current = new Set(tools.map(tool => tool.toolSpecification.name));
-	for (const name of historicalToolNames(history)) {
-		if (current.has(name)) continue;
-		tools.push({
-			toolSpecification: {
-				name,
-				description: HISTORICAL_TOOL_DESCRIPTION,
-				inputSchema: { json: { type: "object", properties: {} } },
-			},
-		});
-	}
+	const names = new Set(tools.map(tool => tool.toolSpecification.name));
+	for (const entry of history)
+		for (const use of entry.assistantResponseMessage?.toolUses ?? [])
+			if (!names.has(use.name)) {
+				names.add(use.name);
+				tools.push({
+					toolSpecification: {
+						name: use.name,
+						description: HISTORICAL_TOOL_DESCRIPTION,
+						inputSchema: { json: { type: "object", properties: {} } },
+					},
+				});
+			}
 }
-
 function userMessage(content: string, modelId: string): KiroUserInputMessage {
 	return { content: content.toWellFormed(), modelId, origin: "KIRO_CLI" };
 }
-
-/**
- * Drop assistant turns that never completed, plus the tool results that answered
- * their calls. Keeping an orphaned result would ship a `toolUseId` with no
- * matching `toolUse` in history, which the runtime rejects.
- */
-function retainPairedMessages(messages: readonly Message[]): Message[] {
-	const droppedToolCallIds = new Set<string>();
-	const retained: Message[] = [];
-	for (const message of messages) {
-		if (message.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted")) {
-			for (const part of message.content) {
-				if (part.type === "toolCall") droppedToolCallIds.add(part.id);
+function ordinaryImages(messages: readonly KiroOrdinaryMessage[]): KiroImageBlock[] {
+	return messages.flatMap(imageContent);
+}
+function resultCarrier(
+	group: KiroAssistantGroup,
+	modelId: string,
+	normalizeId: (id: string) => string,
+	content: string,
+	includeImages: boolean,
+): KiroUserInputMessage {
+	const images: KiroImageBlock[] = [];
+	const results = group.results.map(result => {
+		const resultImages = imageContent(result);
+		if (includeImages) images.push(...resultImages);
+		return toolResult(result, normalizeId, resultImages);
+	});
+	return {
+		...userMessage(content, modelId),
+		...(includeImages && images.length > 0 ? { images } : {}),
+		userInputMessageContext: { toolResults: results },
+	};
+}
+function serializedHistoryBytes(history: readonly KiroHistoryEntry[]): number {
+	return new TextEncoder().encode(JSON.stringify(history)).byteLength;
+}
+function validateWireHistory(history: readonly KiroHistoryEntry[]): void {
+	let expected: "user" | "assistant" = "user";
+	const calls = new Set<string>();
+	for (const entry of history) {
+		const isUser = entry.userInputMessage !== undefined;
+		const isAssistant = entry.assistantResponseMessage !== undefined;
+		if (isUser === isAssistant || (isUser && expected !== "user") || (isAssistant && expected !== "assistant"))
+			throw new Error("Kiro history alternation is invalid");
+		if (isAssistant) {
+			for (const use of entry.assistantResponseMessage?.toolUses ?? []) {
+				if (calls.has(use.toolUseId)) throw new Error(`Kiro history duplicate wire tool id: ${use.toolUseId}`);
+				calls.add(use.toolUseId);
 			}
-			continue;
+			expected = "user";
+		} else {
+			for (const result of entry.userInputMessage?.userInputMessageContext?.toolResults ?? []) {
+				if (!calls.has(result.toolUseId)) throw new Error(`Kiro history orphan tool result: ${result.toolUseId}`);
+				calls.delete(result.toolUseId);
+			}
+			expected = "assistant";
 		}
-		if (message.role === "toolResult" && droppedToolCallIds.has(message.toolCallId)) continue;
-		retained.push(message);
 	}
-	return retained;
+	if (calls.size > 0) throw new Error("Kiro history contains an incomplete tool-call batch");
 }
 
-/** Convert OMP context into the capture-verified Kiro runtime request. */
 export function transformKiroRequest(
 	model: Model,
 	context: Context,
@@ -188,117 +201,83 @@ export function transformKiroRequest(
 		reasoning?: Effort;
 		disableReasoning?: boolean;
 		hideThinkingSummary?: boolean;
-		/** Request-level output cap; bounded by the model ceiling before serialization. */
 		maxTokens?: number;
+		conversationId?: string;
 	} = {},
 ): KiroRequest {
 	const normalizer = createKiroToolUseIdNormalizer();
-	const messages = retainPairedMessages(context.messages);
-
-	let currentStart = messages.length - 1;
-	while (currentStart > 0 && messages[currentStart]?.role === "toolResult") currentStart--;
-	if (currentStart >= 0 && messages[currentStart]?.role === "assistant") {
-		const assistant = messages[currentStart] as AssistantMessage;
-		if (!assistant.content.some(part => part.type === "toolCall")) currentStart++;
-	}
-	const historyMessages = messages.slice(0, currentStart);
-	const currentMessages = messages.slice(currentStart);
+	const plan = prepareKiroHistory(context.messages);
+	const modelId = model.requestModelId ?? model.id;
 	const history: KiroHistoryEntry[] = [];
 	let systemPending = (context.systemPrompt ?? []).join("\n");
-
-	for (let index = 0; index < historyMessages.length; index++) {
-		const message = historyMessages[index];
-		if (message.role === "user" || message.role === "developer") {
-			let content = textContent(message);
-			if (systemPending) {
-				content = joinPromptContent(systemPending, content);
+	for (const segment of plan.history) {
+		if (segment.kind === "assistant") {
+			history.push({ assistantResponseMessage: assistantMessage(segment.group, id => normalizer.normalize(id)) });
+			continue;
+		}
+		const ordinary = joinMessageText(segment.group.messages);
+		if (segment.group.resultGroup) {
+			history.push({
+				userInputMessage: resultCarrier(
+					segment.group.resultGroup,
+					modelId,
+					id => normalizer.normalize(id),
+					ordinary,
+					false,
+				),
+			});
+			continue;
+		}
+		let content = ordinary;
+		if (systemPending) {
+			content = joinPromptContent(systemPending, content);
+			systemPending = "";
+		}
+		history.push({ userInputMessage: userMessage(content, modelId) });
+	}
+	let currentContent = CONTINUATION_PROMPT;
+	let currentImages: KiroImageBlock[] = [];
+	const currentContext: NonNullable<KiroUserInputMessage["userInputMessageContext"]> = {};
+	if (plan.current.kind === "user") {
+		const ordinary = joinMessageText(plan.current.group.messages);
+		if (plan.current.group.resultGroup) {
+			currentContent = ordinary;
+			if (systemPending && ordinary) {
+				currentContent = joinPromptContent(systemPending, ordinary);
 				systemPending = "";
 			}
-			const images = imageContent(message);
-			const previous = history.at(-1)?.userInputMessage;
-			if (previous && images.length === 0 && !previous.images?.length) {
-				previous.content = joinPromptContent(previous.content, content);
-			} else {
-				history.push({
-					userInputMessage: {
-						...userMessage(content, model.requestModelId ?? model.id),
-						...(images.length > 0 ? { images } : {}),
-					},
-				});
+			currentContext.toolResults = plan.current.group.resultGroup.results.map(result =>
+				toolResult(result, id => normalizer.normalize(id), imageContent(result)),
+			);
+			currentImages = [
+				...ordinaryImages(plan.current.group.messages),
+				...plan.current.group.resultGroup.results.flatMap(imageContent),
+			];
+		} else {
+			currentContent = ordinary;
+			if (systemPending) {
+				currentContent = joinPromptContent(systemPending, currentContent);
+				systemPending = "";
 			}
-			continue;
+			currentImages = ordinaryImages(plan.current.group.messages);
 		}
-		if (message.role === "assistant") {
-			const converted = assistantMessage(message, id => normalizer.normalize(id));
-			if (converted) history.push({ assistantResponseMessage: converted });
-			continue;
-		}
-		const images = imageContent(message);
-		const results = [toolResult(message, id => normalizer.normalize(id), images)];
-		while (historyMessages[index + 1]?.role === "toolResult") {
-			index++;
-			const nextResult = historyMessages[index] as ToolResultMessage;
-			const nextImages = imageContent(nextResult);
-			results.push(toolResult(nextResult, id => normalizer.normalize(id), nextImages));
-			images.push(...nextImages);
-		}
-		history.push({
-			userInputMessage: {
-				...userMessage(TOOL_RESULTS_PROMPT, model.requestModelId ?? model.id),
-				...(images.length > 0 ? { images } : {}),
-				userInputMessageContext: { toolResults: results },
-			},
-		});
 	}
-
-	let currentContent = "";
-	let currentImages: KiroImageBlock[] = [];
-	const currentResults: KiroToolResult[] = [];
-	const first = currentMessages[0];
-	if (first?.role === "assistant") {
-		const converted = assistantMessage(first, id => normalizer.normalize(id));
-		if (converted) history.push({ assistantResponseMessage: converted });
-		for (const message of currentMessages.slice(1)) {
-			if (message.role === "toolResult") {
-				const images = imageContent(message);
-				currentResults.push(toolResult(message, id => normalizer.normalize(id), images));
-				currentImages.push(...images);
-			}
-		}
-		currentContent = currentResults.length > 0 ? TOOL_RESULTS_PROMPT : CONTINUATION_PROMPT;
-	} else if (first?.role === "toolResult") {
-		for (const message of currentMessages) {
-			if (message.role === "toolResult") {
-				const images = imageContent(message);
-				currentResults.push(toolResult(message, id => normalizer.normalize(id), images));
-				currentImages.push(...images);
-			}
-		}
-		currentContent = TOOL_RESULTS_PROMPT;
-	} else if (first) {
-		currentContent = textContent(first);
-		currentImages = imageContent(first);
-	}
-	if (systemPending) currentContent = joinPromptContent(systemPending, currentContent);
-	if (currentContent.trim().length === 0) currentContent = CONTINUATION_PROMPT;
-
+	if (currentContent.trim().length === 0 && !currentContext.toolResults) currentContent = CONTINUATION_PROMPT;
 	const toolSpecs = toolsToKiro(context.tools ?? []);
 	appendHistoricalToolPlaceholders(toolSpecs, history);
-	const currentContext: NonNullable<KiroUserInputMessage["userInputMessageContext"]> = {};
-	if (currentResults.length > 0) currentContext.toolResults = currentResults;
 	if (toolSpecs.length > 0) currentContext.tools = toolSpecs;
 	const requestFields = options.disableReasoning
 		? undefined
 		: buildKiroModelRequestFields(model, options.reasoning, options.hideThinkingSummary, options.maxTokens);
-	return {
+	const request: KiroRequest = {
 		agentMode: "vibe",
 		conversationState: {
 			chatTriggerType: "MANUAL",
 			agentTaskType: "vibe",
-			conversationId: crypto.randomUUID(),
+			conversationId: options.conversationId ?? crypto.randomUUID(),
 			currentMessage: {
 				userInputMessage: {
-					...userMessage(currentContent, model.requestModelId ?? model.id),
+					...userMessage(currentContent, modelId),
 					...(currentImages.length > 0 ? { images: currentImages } : {}),
 					...(Object.keys(currentContext).length > 0 ? { userInputMessageContext: currentContext } : {}),
 				},
@@ -307,4 +286,16 @@ export function transformKiroRequest(
 		},
 		...(requestFields ? { additionalModelRequestFields: requestFields } : {}),
 	};
+	validateWireHistory([
+		...(request.conversationState.history ?? []),
+		{ userInputMessage: request.conversationState.currentMessage.userInputMessage },
+	]);
+	const contextWindow = model.contextWindow ?? HISTORY_BASE_TOKENS;
+	const maxHistoryBytes = Math.floor(HISTORY_BASE_BYTES * (contextWindow / HISTORY_BASE_TOKENS));
+	if (serializedHistoryBytes(request.conversationState.history ?? []) > maxHistoryBytes)
+		throw AIError.attach(
+			new Error(`Kiro history exceeds local limit of ${maxHistoryBytes} UTF-8 bytes`),
+			AIError.create(AIError.Flag.ContextOverflow),
+		);
+	return request;
 }
