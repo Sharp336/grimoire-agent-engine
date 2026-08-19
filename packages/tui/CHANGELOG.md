@@ -37,6 +37,9 @@
 
 - Fixed an issue where repeated pane-width adjustments or terminal resizing could corrupt native scrollback and soft-wrap behavior.
 - Fixed an issue where scaled OSC 66 Markdown headings (such as "Large Headings" on Kitty) would render as invisible placeholders or get partially cleared after a redraw or terminal resize.
+### Added
+
+- Added base fullscreen overlays, which keep an alternate-screen application surface below ordinary dialogs and menus without stealing their focus.
 
 ## [17.2.13] - 2026-08-11
 

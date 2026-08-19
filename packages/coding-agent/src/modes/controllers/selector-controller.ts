@@ -574,6 +574,10 @@ export class SelectorController {
 				this.ctx.ui.requestRender();
 				break;
 
+			case "tui.fullscreen":
+				this.ctx.setFullscreenTui(value as boolean);
+				break;
+
 			case "tui.scrollbackRebuild":
 				this.ctx.ui.setScrollbackRebuild(value as boolean);
 				break;
