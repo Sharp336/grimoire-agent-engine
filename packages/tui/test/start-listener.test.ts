@@ -33,7 +33,8 @@ describe("TUI start listeners", () => {
 
 	it("runs start hooks before the initial render", async () => {
 		const events: string[] = [];
-		const tui = new TUI(new VirtualTerminal(80, 24));
+		const terminal = new VirtualTerminal(80, 24);
+		const tui = new TUI(terminal);
 		tui.addChild(new RenderProbe(events));
 		tui.addStartListener(() => {
 			events.push("start");
@@ -41,7 +42,7 @@ describe("TUI start listeners", () => {
 
 		try {
 			tui.start();
-			await Bun.sleep(50);
+			await terminal.waitForRender(() => events.includes("render"));
 			expect(events[0]).toBe("start");
 			expect(events).toContain("render");
 		} finally {

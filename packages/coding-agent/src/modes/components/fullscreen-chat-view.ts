@@ -119,9 +119,10 @@ export class FullscreenChatView implements Component, OverlayFocusOwner {
 		}
 
 		if (event.release) {
-			const consumed = this.#draggingScrollbar;
 			this.#draggingScrollbar = false;
-			return consumed;
+			// Mouse tracking is enabled for the whole fullscreen surface, so even a
+			// release that did not end a scrollbar drag must stay out of the editor.
+			return true;
 		}
 
 		const scrollbarColumn = this.#width - 1;

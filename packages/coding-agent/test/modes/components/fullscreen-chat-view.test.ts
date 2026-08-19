@@ -63,4 +63,18 @@ describe("FullscreenChatView", () => {
 		const rendered = view.render(12);
 		expect(rendered.slice(0, 4).some(line => line.includes("…"))).toBe(false);
 	});
+
+	it("consumes mouse releases that do not end a scrollbar drag", () => {
+		const transcript = new LinesComponent(["message"]);
+		const editor = new LinesComponent(["editor"]);
+		const editorContainer = new Container();
+		editorContainer.addChild(editor);
+		const view = new FullscreenChatView([transcript], [editorContainer], editorContainer, () => 6);
+
+		view.render(12);
+		// A press away from the scrollbar is ignored by navigation but remains
+		// consumed. Its matching release must not leak an SGR sequence to the editor.
+		expect(view.handleViewportInput("\x1b[<0;1;1M")).toBe(true);
+		expect(view.handleViewportInput("\x1b[<0;1;1m")).toBe(true);
+	});
 });

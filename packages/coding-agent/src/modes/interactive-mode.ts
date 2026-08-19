@@ -4183,10 +4183,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.#extensionUiController.clearExtensionTerminalInputListeners();
 		this.#extensionUiController.clearHookWidgets();
-		this.#fullscreenChatInputUnsubscribe?.();
-		this.#fullscreenChatInputUnsubscribe = undefined;
-		this.#fullscreenChatOverlay = undefined;
-		this.#fullscreenChatView = undefined;
+		// TUI keeps overlay entries across stop/start cycles. Tear the base view
+		// down through its normal path so a later UI restart cannot re-enter the
+		// alternate screen with an orphaned fullscreen surface.
+		this.setFullscreenTui(false);
 		for (const unsubscribe of this.#eventBusUnsubscribers) {
 			unsubscribe();
 		}
