@@ -126,6 +126,22 @@ describe("Kiro request transformation", () => {
 		expect(historicalResult?.toolUseId).toBe(historicalAssistant?.toolUses?.[0]?.toolUseId);
 	});
 
+	test("preserves an empty active-tool description without inventing guidance", () => {
+		const emptyDescriptionTool: Tool<typeof lookupParameters> = {
+			...lookupTool,
+			description: "",
+		};
+		const context: Context = {
+			messages: [{ role: "user", content: "Use the tool", timestamp: 0 }],
+			tools: [emptyDescriptionTool],
+		};
+
+		const description = transformKiroRequest(createModel(), context).conversationState.currentMessage.userInputMessage
+			.userInputMessageContext?.tools?.[0]?.toolSpecification.description;
+
+		expect(description).toBe("");
+	});
+
 	test("uses the continuation prompt for image-only current turns", () => {
 		const context: Context = {
 			messages: [

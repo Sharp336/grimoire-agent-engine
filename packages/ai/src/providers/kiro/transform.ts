@@ -6,7 +6,6 @@ import { buildKiroModelRequestFields } from "./adaptive-thinking";
 import { type KiroAssistantGroup, type KiroOrdinaryMessage, prepareKiroHistory } from "./history";
 import { createKiroToolUseIdNormalizer } from "./id-normalizer";
 import continuationPrompt from "./prompts/continuation.md" with { type: "text" };
-import defaultToolDescriptionPrompt from "./prompts/default-tool-description.md" with { type: "text" };
 import historicalToolDescriptionPrompt from "./prompts/historical-tool-description.md" with { type: "text" };
 import joinedContentPrompt from "./prompts/joined-content.md" with { type: "text" };
 import type {
@@ -118,7 +117,7 @@ function toolsToKiro(tools: readonly Tool[]): KiroToolSpec[] {
 	return tools.map(tool => ({
 		toolSpecification: {
 			name: tool.name,
-			description: tool.description.trim() || prompt.render(defaultToolDescriptionPrompt, { toolName: tool.name }),
+			description: tool.description,
 			inputSchema: { json: toolWireSchema(tool) },
 		},
 	}));
