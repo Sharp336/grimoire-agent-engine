@@ -236,6 +236,24 @@ describe("StatusLineComponent context breakdown", () => {
 		expect(plain).toContain("1.8%/272K");
 	});
 
+	it("renders anchored used tokens against the context window", () => {
+		const { session } = makeSession({
+			messages: [userMessage("hi"), assistantMessage("done")],
+			usage: { tokens: 5000, contextWindow: 272_000, percent: 1.8 },
+		});
+		const comp = new StatusLineComponent(session);
+		comp.updateSettings({
+			preset: "custom",
+			leftSegments: ["context_tokens"],
+			rightSegments: [],
+			separator: "powerline-thin",
+		});
+
+		const plain = comp.getTopBorder(80).content.replaceAll(/\x1b\[[0-9;]*m/g, "");
+		expect(plain).toContain("5K/272K");
+		expect(plain).not.toContain("%");
+	});
+
 	it("renders speculative percent instead of ? after compaction", () => {
 		const { session } = makeSession({
 			messages: [userMessage("compaction summary")],

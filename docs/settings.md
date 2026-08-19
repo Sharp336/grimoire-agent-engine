@@ -682,6 +682,7 @@ tui:
 | `tui.hyperlinks`            | enum    | `auto`           | `off`, `auto`, `always`.                                                  |
 
 For a custom status line, set `statusLine.preset: custom` and configure `statusLine.leftSegments`, `statusLine.rightSegments`, and `statusLine.segmentOptions`.
+Use `context_pct` for percentage/window, `context_tokens` for used tokens/window, or `context_total` for the window alone.
 
 ### Interaction
 
