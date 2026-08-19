@@ -5438,8 +5438,19 @@ export class AuthStorage {
 			if (!result) return undefined;
 			const updated: OAuthCredential = {
 				...selection.credential,
-				...result.newCredentials,
+				...(provider === "kiro" ? result.newCredentials : {}),
 				type: "oauth",
+				access: result.newCredentials.access,
+				refresh: result.newCredentials.refresh,
+				expires: result.newCredentials.expires,
+				accountId: result.newCredentials.accountId ?? selection.credential.accountId,
+				email: result.newCredentials.email ?? selection.credential.email,
+				projectId: result.newCredentials.projectId ?? selection.credential.projectId,
+				enterpriseUrl: result.newCredentials.enterpriseUrl ?? selection.credential.enterpriseUrl,
+				apiEndpoint: result.newCredentials.apiEndpoint ?? selection.credential.apiEndpoint,
+				orgId: result.newCredentials.orgId ?? selection.credential.orgId,
+				orgName: result.newCredentials.orgName ?? selection.credential.orgName,
+				authorizedAt: result.newCredentials.authorizedAt ?? selection.credential.authorizedAt,
 			};
 			if (credentialId !== undefined) {
 				const idx = this.#replaceCredentialById(provider, credentialId, updated);

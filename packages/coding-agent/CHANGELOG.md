@@ -437,6 +437,8 @@
 
 ### Added
 
+- Added Kiro model availability and runtime routing to the coding agent ([#8758](https://github.com/can1357/oh-my-pi/pull/8758) by [@fanbaoyu1024](https://github.com/fanbaoyu1024)).
+
 - Added `providers.cacheRetention` setting (`/settings` → Providers → Protocol) to control prompt-cache retention per request: `auto` keeps the provider default (Anthropic: 5m entries with idle keep-alive refreshes), `short` forces 5m, `long` restores 1h TTLs where supported and disables the keep-alive refresh loop, `none` disables prompt caching.
 
 ### Changed
