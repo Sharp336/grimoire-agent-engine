@@ -1886,10 +1886,13 @@ export function renderUsageReports(
 				}),
 			),
 		];
-		const providerHeading =
+		const planLabel =
 			planTypes.length === 1
-				? `${uiTheme.bold(uiTheme.fg("accent", providerName))} ${uiTheme.fg("dim", `· ${planTypes[0]}`)}`
-				: uiTheme.bold(uiTheme.fg("accent", providerName));
+				? replaceTabs(truncateToWidth(sanitizeText(planTypes[0]!.replace(/[\r\n]+/g, " ")), availableWidth))
+				: undefined;
+		const providerHeading = planLabel
+			? `${uiTheme.bold(uiTheme.fg("accent", providerName))} ${uiTheme.fg("dim", `· ${planLabel}`)}`
+			: uiTheme.bold(uiTheme.fg("accent", providerName));
 		lines.push(providerHeading);
 		const activeAccountLabel = formatActiveAccountLabel(activeAccount);
 		if (activeAccountLabel) {

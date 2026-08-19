@@ -87,7 +87,9 @@ function renderUsageReports(
 		];
 		lines.push(
 			"",
-			planTypes.length === 1 ? `${formatProviderName(provider)} · ${planTypes[0]}` : formatProviderName(provider),
+			planTypes.length === 1
+				? `${formatProviderName(provider)} · ${sanitizeText(planTypes[0]!.replace(/[\r\n]+/g, " ").replace(/\t/g, "  "))}`
+				: formatProviderName(provider),
 		);
 		const reportingModels = usageModelSelectors.filter(selector => selector.startsWith(`${provider}/`));
 		if (reportingModels.length > 0) {
