@@ -892,6 +892,12 @@
 
 ### Added
 
+- Added a native Supermemory memory backend with project-scoped recall, profiles, explicit save/search, automatic retention, compaction context, `/memory` operations, and self-hosted endpoint support via `SUPERMEMORY_BASE_URL`.
+
+### Fixed
+
+- Fixed deferred memory backend settings being ignored by fork, resume, branch, and handoff session transitions.
+- Fixed automatic Supermemory retention reusing one document identity across cadence windows, which caused later conversation windows to overwrite earlier retained content.
 - `omp usage` now surfaces auto-disabled credentials as red `✗` tombstone rows (identity, how long ago, the shortened upstream cause — e.g. `Refresh token expired` — and a re-login hint), including a provider section when no active credential remains. User-driven tombstones (`replaced by newer credential`, `deleted by user`) and API-key rows stay hidden. Requires a broker with `GET /v1/credentials/disabled`; older brokers degrade to no tombstone rows.
 - `omp usage` warns about Anthropic's ~30-day OAuth grant lifetime: accounts whose interactive login (`authorizedAt`) is within a week of the deadline get a yellow `⚠ re-login within <time>` line, and past-deadline accounts a red one. Grants die server-side exactly ~30 days after login regardless of refresh rotation, so this is the only warning before the broker auto-disables the row.
 

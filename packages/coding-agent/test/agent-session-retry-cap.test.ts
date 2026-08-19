@@ -2047,7 +2047,10 @@ describe("AgentSession retry delay cap", () => {
 				tools: [],
 				messages: [],
 			},
-			streamFn: mock.stream,
+			streamFn: (streamModel, context, options) => {
+				session?.beginDispose();
+				return mock.stream(streamModel, context, options);
+			},
 		});
 
 		const settings = Settings.isolated({
@@ -2071,9 +2074,8 @@ describe("AgentSession retry delay cap", () => {
 			if (event.type === "auto_retry_start") retryStartEvents.push(event);
 		});
 
-		// Enter the disposing window before the empty abort lands. Without the
-		// #isDisposed guard this prompt would hang on an orphaned retry promise.
-		session.beginDispose();
+		const abortRetry = vi.spyOn(session, "abortRetry");
+
 		await session.prompt("Trigger empty aborted turn while disposing");
 		await session.waitForIdle();
 
@@ -2082,6 +2084,8 @@ describe("AgentSession retry delay cap", () => {
 		expect(mock.calls).toHaveLength(1);
 		const last = lastAssistant(session);
 		expect(last.stopReason).toBe("aborted");
+		await session.dispose();
+		expect(abortRetry).toHaveBeenCalledTimes(1);
 	});
 
 	it("caps repeated OpenRouter stream closes after streamed thinking at one retry", async () => {
