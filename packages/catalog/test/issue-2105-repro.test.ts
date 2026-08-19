@@ -7,8 +7,10 @@ describe("AIML API built-in provider (issue #2105)", () => {
 		const descriptor = PROVIDER_DESCRIPTORS.find(item => item.providerId === "aimlapi");
 
 		expect(descriptor).toBeDefined();
+		expect(descriptor?.defaultModel).toBe("openai/gpt-5-5");
+		expect(descriptor?.catalogDiscovery?.label).toBe("AIML API");
 		expect(descriptor?.catalogDiscovery?.envVars).toContain("AIMLAPI_API_KEY");
-		expect(DEFAULT_MODEL_PER_PROVIDER.aimlapi).toBeDefined();
+		expect(DEFAULT_MODEL_PER_PROVIDER.aimlapi).toBe("openai/gpt-5-5");
 	});
 
 	test("resolves AIMLAPI_API_KEY via env", () => {
