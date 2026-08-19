@@ -472,7 +472,7 @@ export const CATALOG_PROVIDERS = [
 	},
 	{
 		id: "charm-hyper",
-		defaultModel: "deepseek-v4-pro",
+		defaultModel: "deepseek-v4-pro-0813",
 		envVars: ["HYPER_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => hyperModelManagerOptions(config),
 		dynamicModelsAuthoritative: true,
