@@ -10,8 +10,6 @@ const innerLogin = createApiKeyLogin({
 		"Create or copy your API key from the Hyper dashboard (hyper.charm.land is Charm's public inference gateway, unaffiliated with this project)",
 	promptMessage: "Paste your Hyper API key",
 	placeholder: "sk-hyper-...",
-	// `/v1/models` is public, so it cannot prove a key is valid; `/v1/credits`
-	// 401s without a working key and costs nothing.
 	validation: {
 		kind: "models-endpoint",
 		provider: "charm-hyper",
