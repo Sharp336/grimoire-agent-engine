@@ -159,7 +159,9 @@ async function createAgent(): Promise<AcpAgent> {
 
 	const initialSession = new FakeAgentSession(cwd);
 	const factory = async (next: string): Promise<AgentSession> => new FakeAgentSession(next) as unknown as AgentSession;
-	return new AcpAgent(connection, factory, initialSession as unknown as AgentSession);
+	return new AcpAgent(connection, factory, initialSession as unknown as AgentSession, {
+		loadHostMcpCatalog: false,
+	});
 }
 
 function buildInitializeRequest(overrides: Partial<InitializeRequest> = {}): InitializeRequest {

@@ -10,6 +10,11 @@
 
 - `/settings` rows can now carry a risk note: a warning glyph on the row plus a warning-colored line above the description. `External Thinking` (`externalThinking`, `--external-thinking`) is the first user — providers have flagged the request shape it produces as abuse, up to account-level enforcement, so both the settings entry and `--help` now say so.
 
+### Fixed
+
+- Fixed `omp acp` wiping the host MCP catalog when the client sends `mcpServers: []`. Hosts such as Zeron send an empty list to mean "agent owns MCP", not "connect nothing"; empty now loads the same on-disk catalog as interactive `omp`, while a non-empty client list still replaces it.
+
+
 ## [17.3.8] - 2026-08-19
 
 ### Added

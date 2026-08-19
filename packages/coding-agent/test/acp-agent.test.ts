@@ -28,7 +28,7 @@ import {
 	TTS_LOCAL_MODELS,
 	TTS_LOCAL_VOICE_OPTIONS,
 } from "@oh-my-pi/pi-coding-agent/tts/models";
-import { getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
+import { getConfigRootDir, getMCPConfigPath, setAgentDir } from "@oh-my-pi/pi-utils";
 import type {
 	AgentSideConnection,
 	ClientCapabilities,
@@ -467,7 +467,10 @@ afterEach(async () => {
 });
 
 async function createHarness(
-	options: { elicitationHandler?: (req: CreateElicitationRequest) => Promise<CreateElicitationResponse> } = {},
+	options: {
+		elicitationHandler?: (req: CreateElicitationRequest) => Promise<CreateElicitationResponse>;
+		loadHostMcpCatalog?: boolean;
+	} = {},
 ): Promise<AgentHarness> {
 	const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-acp-test-"));
 	cleanupRoots.push(root);
@@ -502,7 +505,10 @@ async function createHarness(
 		return session as unknown as AgentSession;
 	};
 
-	const agent = new AcpAgent(connection, factory, initialSession as unknown as AgentSession);
+	const agent = new AcpAgent(connection, factory, initialSession as unknown as AgentSession, {
+		loadHostMcpCatalog: options.loadHostMcpCatalog ?? false,
+	});
+
 	if (options.elicitationHandler) {
 		// Drive `initialize` so the agent caches `clientCapabilities.elicitation.form`
 		// and `#requestAcpPlanApprovalChoice` actually goes through the elicitation.
@@ -2833,6 +2839,78 @@ describe("ACP agent MCP server configuration (late-connecting servers)", () => {
 			// server's tool. Before the fix, this late arrival was dropped.
 			await pollUntil(() => refreshSpy.mock.calls.length > 1);
 			expect(namesOf(refreshSpy.mock.calls.at(-1)?.[0] ?? [])).toEqual([`mcp__delayed_${DELAYED_MCP_TOOL_NAME}`]);
+		} finally {
+			refreshSpy.mockRestore();
+		}
+	}, 15_000);
+
+	it("loads the host MCP catalog when the client sends no servers", async () => {
+		const harness = await createHarness({ loadHostMcpCatalog: true });
+		await Bun.write(
+			getMCPConfigPath("user", harness.cwdA),
+			JSON.stringify({
+				mcpServers: {
+					hostonly: { command: BUN_EXEC, args: [FIXTURE_PATH] },
+				},
+			}),
+		);
+		const refreshSpy = spyOn(FakeAgentSession.prototype, "refreshMCPTools");
+		const namesOf = (tools: unknown[]) => (tools as Array<{ name: string }>).map(tool => tool.name);
+		try {
+			const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+			expectAcpStructure(zNewSessionResponse, created);
+			const hostTool = `mcp__hostonly_${DELAYED_MCP_TOOL_NAME}`;
+			await pollUntil(() => namesOf(refreshSpy.mock.calls.at(-1)?.[0] ?? []).includes(hostTool));
+			expect(namesOf(refreshSpy.mock.calls.at(-1)?.[0] ?? [])).toContain(hostTool);
+		} finally {
+			refreshSpy.mockRestore();
+		}
+	}, 15_000);
+
+	it("wipes MCP tools when host catalog loading is disabled", async () => {
+		const harness = await createHarness({ loadHostMcpCatalog: false });
+		await Bun.write(
+			getMCPConfigPath("user", harness.cwdA),
+			JSON.stringify({
+				mcpServers: {
+					hostonly: { command: BUN_EXEC, args: [FIXTURE_PATH] },
+				},
+			}),
+		);
+		const refreshSpy = spyOn(FakeAgentSession.prototype, "refreshMCPTools");
+		const namesOf = (tools: unknown[]) => (tools as Array<{ name: string }>).map(tool => tool.name);
+		try {
+			const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+			expectAcpStructure(zNewSessionResponse, created);
+			expect(namesOf(refreshSpy.mock.calls.at(-1)?.[0] ?? [])).toEqual([]);
+		} finally {
+			refreshSpy.mockRestore();
+		}
+	}, 15_000);
+
+	it("keeps client-supplied MCP servers instead of the host catalog", async () => {
+		const harness = await createHarness({ loadHostMcpCatalog: true });
+		await Bun.write(
+			getMCPConfigPath("user", harness.cwdA),
+			JSON.stringify({
+				mcpServers: {
+					hostonly: { command: BUN_EXEC, args: [FIXTURE_PATH] },
+				},
+			}),
+		);
+		const refreshSpy = spyOn(FakeAgentSession.prototype, "refreshMCPTools");
+		const namesOf = (tools: unknown[]) => (tools as Array<{ name: string }>).map(tool => tool.name);
+		try {
+			const created = await harness.agent.newSession({
+				cwd: harness.cwdA,
+				mcpServers: [{ name: "delayed", command: BUN_EXEC, args: [FIXTURE_PATH], env: [] }],
+			});
+			expectAcpStructure(zNewSessionResponse, created);
+			const clientTool = `mcp__delayed_${DELAYED_MCP_TOOL_NAME}`;
+			await pollUntil(() => namesOf(refreshSpy.mock.calls.at(-1)?.[0] ?? []).includes(clientTool));
+			const names = namesOf(refreshSpy.mock.calls.at(-1)?.[0] ?? []);
+			expect(names).toEqual([clientTool]);
+			expect(names.some(name => name.includes("hostonly"))).toBe(false);
 		} finally {
 			refreshSpy.mockRestore();
 		}

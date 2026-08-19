@@ -56,6 +56,7 @@ import { getSessionSlashCommands } from "../../extensibility/extensions/get-comm
 import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
 import { resolveLocalUrlToPath } from "../../internal-urls";
+import { discoverAndLoadMCPTools } from "../../mcp/loader";
 import { MCPManager } from "../../mcp/manager";
 import type { MCPServerConfig } from "../../mcp/types";
 import { loadAllExtensions } from "../../modes/components/extensions/state-manager";
@@ -469,6 +470,15 @@ export function createAcpExtensionUiContext(
 	};
 }
 
+export type AcpAgentOptions = {
+	/**
+	 * Empty client `mcpServers` load the on-disk host catalog. Tests set
+	 * false so they stay isolated from the developer's MCP servers.
+	 * Default true.
+	 */
+	loadHostMcpCatalog?: boolean;
+};
+
 export class AcpAgent implements Agent {
 	#connection: AgentSideConnection;
 	#initialSession: AgentSession | undefined;
@@ -479,11 +489,18 @@ export class AcpAgent implements Agent {
 	#clientCapabilities: ClientCapabilities | undefined;
 	#cancelCleanupTimeoutMs = ACP_CANCEL_CLEANUP_TIMEOUT_MS;
 	#blobs = new BlobStore(getBlobsDir());
+	#loadHostMcpCatalog: boolean;
 
-	constructor(connection: AgentSideConnection, createSession: CreateAcpSession, initialSession?: AgentSession) {
+	constructor(
+		connection: AgentSideConnection,
+		createSession: CreateAcpSession,
+		initialSession?: AgentSession,
+		options?: AcpAgentOptions,
+	) {
 		this.#connection = connection;
 		this.#initialSession = initialSession;
 		this.#createSession = createSession;
+		this.#loadHostMcpCatalog = options?.loadHostMcpCatalog ?? true;
 	}
 
 	setCancelCleanupTimeoutForTesting(timeoutMs: number): void {
@@ -2435,8 +2452,7 @@ export class AcpAgent implements Agent {
 		await record.mcpRefreshChain;
 		record.mcpRefreshChain = undefined;
 		if (servers.length === 0) {
-			record.mcpManager = undefined;
-			await record.session.refreshMCPTools([]);
+			await this.#connectHostMcpCatalog(record);
 			return;
 		}
 
@@ -2449,22 +2465,8 @@ export class AcpAgent implements Agent {
 		// The returned promise propagates failures (the initial awaited refresh below must
 		// fail session setup, as the pre-queue code did); the stored chain swallows them
 		// after logging so background firings only warn and the chain never rejects.
-		const enqueueMcpToolsRefresh = (): Promise<void> => {
-			const run = (record.mcpRefreshChain ?? Promise.resolve()).then(async () => {
-				if (record.mcpManager !== manager) return;
-				await record.session.refreshMCPTools(manager.getTools());
-			});
-			record.mcpRefreshChain = run.catch(error => {
-				logger.warn("ACP MCP tool refresh failed", {
-					error: error instanceof Error ? error.message : String(error),
-				});
-			});
-			return run;
-		};
-		manager.setOnToolsChanged(() => {
-			// Failures are logged once via the stored chain's catch above.
-			enqueueMcpToolsRefresh().catch(() => {});
-		});
+		const enqueueMcpToolsRefresh = this.#bindMcpToolsRefresh(record, manager);
+
 		const configs: MCPConfigMap = {};
 		const sources: MCPSourceMap = {};
 		for (const server of servers) {
@@ -2487,6 +2489,61 @@ export class AcpAgent implements Agent {
 		}
 
 		record.mcpManager = manager;
+		await enqueueMcpToolsRefresh();
+	}
+
+	#bindMcpToolsRefresh(record: ManagedSessionRecord, manager: MCPManager): () => Promise<void> {
+		const enqueueMcpToolsRefresh = (): Promise<void> => {
+			const run = (record.mcpRefreshChain ?? Promise.resolve()).then(async () => {
+				if (record.mcpManager !== manager) return;
+				await record.session.refreshMCPTools(manager.getTools());
+			});
+			record.mcpRefreshChain = run.catch(error => {
+				logger.warn("ACP MCP tool refresh failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			});
+			return run;
+		};
+		manager.setOnToolsChanged(() => {
+			enqueueMcpToolsRefresh().catch(() => {});
+		});
+		return enqueueMcpToolsRefresh;
+	}
+
+	/**
+	 * Zeron and other hosts send `mcpServers: []` as "agent owns MCP", not
+	 * "wipe the catalog". Load the same on-disk sources interactive `omp` uses.
+	 * Tests pass `loadHostMcpCatalog: false` to keep the empty wipe.
+	 */
+	async #connectHostMcpCatalog(record: ManagedSessionRecord): Promise<void> {
+		const session = record.session;
+		if (!this.#loadHostMcpCatalog) {
+			record.mcpManager = undefined;
+			await session.refreshMCPTools([]);
+			return;
+		}
+
+		const settings = session.settings;
+		const loaded = await discoverAndLoadMCPTools(session.sessionManager.getCwd(), {
+			enableProjectConfig: settings.get("mcp.enableProjectConfig") ?? true,
+			filterExa: true,
+			filterBrowser: settings.get("browser.enabled") ?? false,
+			cacheStorage: typeof settings.getStorage === "function" ? settings.getStorage() : undefined,
+			authStorage: session.modelRegistry?.authStorage,
+		});
+		for (const { path, error } of loaded.errors) {
+			logger.error("MCP tool load failed", { path, error });
+		}
+		if (settings.get("mcp.notifications")) {
+			loaded.manager.setNotificationsEnabled(true);
+		}
+		logger.info("ACP loaded host MCP catalog", {
+			connected: loaded.connectedServers,
+			errors: loaded.errors.map(entry => entry.path),
+		});
+		const enqueueMcpToolsRefresh = this.#bindMcpToolsRefresh(record, loaded.manager);
+		record.mcpManager = loaded.manager;
 		await enqueueMcpToolsRefresh();
 	}
 

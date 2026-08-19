@@ -2,7 +2,7 @@ import * as stream from "node:stream";
 import { postmortem } from "@oh-my-pi/pi-utils";
 import { AgentSideConnection, ndJsonStream, type Stream } from "@oh-my-pi/pi-utils/acp";
 import type { AgentSession } from "../../session/agent-session";
-import { AcpAgent } from "./acp-agent";
+import { AcpAgent, type AcpAgentOptions } from "./acp-agent";
 
 /** Creates sessions requested by an ACP client. */
 export type AcpSessionFactory = (cwd: string) => Promise<AgentSession>;
@@ -13,9 +13,10 @@ export function createAcpConnection(
 	createSession: AcpSessionFactory,
 	initialSession?: AgentSession,
 	onAgent?: (agent: AcpAgent) => void,
+	agentOptions?: AcpAgentOptions,
 ): AgentSideConnection {
 	return new AgentSideConnection(connection => {
-		const agent = new AcpAgent(connection, createSession, initialSession);
+		const agent = new AcpAgent(connection, createSession, initialSession, agentOptions);
 		onAgent?.(agent);
 		return agent;
 	}, transport);
