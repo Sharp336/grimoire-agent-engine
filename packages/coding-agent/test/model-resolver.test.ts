@@ -457,8 +457,8 @@ describe("pickDefaultAvailableModel", () => {
 	});
 
 	test("prefers SuperGrok over paid xAI when both defaults are present", () => {
-		const paid = getBundledModel("xai", DEFAULT_MODEL_PER_PROVIDER.xai);
-		const oauth = getBundledModel("xai-oauth", DEFAULT_MODEL_PER_PROVIDER["xai-oauth"]);
+		const paid = getBundledModel("xai", DEFAULT_MODEL_PER_PROVIDER.xai!);
+		const oauth = getBundledModel("xai-oauth", DEFAULT_MODEL_PER_PROVIDER["xai-oauth"]!);
 		if (!paid || !oauth) {
 			throw new Error("Expected bundled xAI provider defaults");
 		}
