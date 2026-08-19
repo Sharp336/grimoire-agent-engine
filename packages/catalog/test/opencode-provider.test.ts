@@ -54,6 +54,17 @@ describe("OpenCode provider discovery", () => {
 		});
 	});
 
+	test("routes opencode-go muse-spark-1.2-contributor to the responses API", () => {
+		const descriptor = MODELS_DEV_PROVIDER_DESCRIPTORS.find(item => item.providerId === "opencode-go");
+		// The OpenCode Go gateway serves muse-spark-1.2-contributor only at
+		// /zen/go/v1/responses (https://opencode.ai/docs/go/#endpoints); the
+		// /zen/go/v1/chat/completions route it previously resolved to fails.
+		expect(descriptor?.resolveApi?.("muse-spark-1.2-contributor", { tool_call: true })).toEqual({
+			api: "openai-responses",
+			baseUrl: "https://opencode.ai/zen/go/v1",
+		});
+	});
+
 	test("replaces stale bundled Zen models with each credential's live endpoint list", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-opencode-zen-"));
 		try {

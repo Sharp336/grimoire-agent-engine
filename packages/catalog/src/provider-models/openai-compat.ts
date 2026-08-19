@@ -5717,6 +5717,10 @@ const OPENCODE_ZEN_API_RESOLUTION = createOpenCodeApiResolution("https://opencod
 // 2026-08-08; Flash only — deepseek-v4-pro serves fine on chat completions).
 const OPENCODE_GO_API_RESOLUTION = createOpenCodeApiResolution("https://opencode.ai/zen/go", {
 	"deepseek-v4-flash": "openai-responses",
+	// muse-spark-1.2-contributor is served only at /zen/go/v1/responses — the
+	// /zen/go/v1/chat/completions route does not exist for it (endpoint table:
+	// https://opencode.ai/docs/go/#endpoints, issue #8963).
+	"muse-spark-1.2-contributor": "openai-responses",
 	"minimax-m2.7": "openai-completions",
 	"minimax-m3": "openai-completions",
 	"minimax-m3-free": "openai-completions",
