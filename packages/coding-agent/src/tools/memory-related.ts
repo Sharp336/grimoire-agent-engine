@@ -59,7 +59,12 @@ export class MemoryRelatedTool implements AgentTool<typeof memoryRelatedSchema> 
 			})
 			.join("\n");
 		return {
-			content: [{ type: "text", text: `Found ${result.count} related ${result.count === 1 ? "memory" : "memories"}:\n\n${formatted}` }],
+			content: [
+				{
+					type: "text",
+					text: `Found ${result.count} related ${result.count === 1 ? "memory" : "memories"}:\n\n${formatted}`,
+				},
+			],
 			details: { count: result.count, id: result.id },
 		};
 	}

@@ -15,7 +15,6 @@ import type { AgentSession } from "../session/agent-session";
 
 export type MemoryBackendId = "off" | "local" | "hindsight" | "mnemopi" | "mnemon";
 
-
 export interface MemoryBackendStatus {
 	backend: MemoryBackendId;
 	active: boolean;
@@ -64,7 +63,6 @@ export interface MemoryBackendSaveInput {
 	category?: string;
 	entities?: string;
 }
-
 
 export interface MemoryBackendSaveResult {
 	backend: MemoryBackendId;
@@ -131,8 +129,6 @@ export interface MemoryBackendForgetResult {
 	id?: string;
 	message?: string;
 }
-
-
 
 export interface MemoryBackendOperationContext {
 	agentDir: string;
@@ -208,8 +204,6 @@ export interface MemoryBackend {
 
 	/** Soft-delete one insight. Mnemon-only. */
 	forget?(context: MemoryBackendOperationContext, id: string): Promise<MemoryBackendForgetResult>;
-
-
 
 	/** Render backend-specific memory statistics as markdown (`/memory stats`). */
 	stats?(agentDir: string, cwd: string, session?: AgentSession): Promise<string | undefined>;

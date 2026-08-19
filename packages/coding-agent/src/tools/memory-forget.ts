@@ -36,7 +36,7 @@ export class MemoryForgetTool implements AgentTool<typeof memoryForgetSchema> {
 			},
 			params.id,
 		);
-		if (!result || result.status !== "deleted") {
+		if (result?.status !== "deleted") {
 			return {
 				content: [{ type: "text", text: result?.message ?? "Forget rejected." }],
 				details: result ?? { status: "rejected" },

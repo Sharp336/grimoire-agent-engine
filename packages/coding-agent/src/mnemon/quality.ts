@@ -23,7 +23,8 @@ export function parseMnemonRecallPayload(payload: unknown): MnemonRecallPayload 
 	if (Array.isArray(payload)) return { results: payload as MnemonRecallRow[] };
 	if (payload && typeof payload === "object" && "results" in payload) {
 		const results = Array.isArray(payload.results) ? (payload.results as MnemonRecallRow[]) : [];
-		const hint = "hint" in payload && typeof payload.hint === "string" && payload.hint.trim() ? payload.hint : undefined;
+		const hint =
+			"hint" in payload && typeof payload.hint === "string" && payload.hint.trim() ? payload.hint : undefined;
 		return { results, hint };
 	}
 	return { results: [] };

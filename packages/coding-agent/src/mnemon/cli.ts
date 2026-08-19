@@ -1,5 +1,5 @@
-import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -115,7 +115,10 @@ export function createMnemonCli(command = findMnemonCommand()): MnemonCli {
 	let queue = Promise.resolve();
 	const enqueue = <T>(work: () => Promise<T>) => {
 		const run = queue.then(work, work);
-		queue = run.then(() => undefined, () => undefined);
+		queue = run.then(
+			() => undefined,
+			() => undefined,
+		);
 		return run;
 	};
 

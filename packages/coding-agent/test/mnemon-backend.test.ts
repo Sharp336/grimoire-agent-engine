@@ -6,8 +6,6 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import { mnemonBackend, normalizeMnemonImportance } from "../src/mnemon/backend";
 import { applyMnemonRecallQuality, focusMnemonQuery } from "../src/mnemon/quality";
 
-
-
 describe("mnemon quality", () => {
 	it("silent mode keeps only high-score rows", () => {
 		const filtered = applyMnemonRecallQuality(
@@ -167,5 +165,3 @@ exit 1
 		expect(result?.message).toContain("causal");
 	});
 });
-
-

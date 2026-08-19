@@ -62,7 +62,6 @@ import { MemoryReflectTool } from "./memory-reflect";
 import { MemoryRelatedTool } from "./memory-related";
 import { MemoryRetainTool } from "./memory-retain";
 
-
 import { wrapToolWithMetaNotice } from "./output-meta";
 import { ReadTool } from "./read";
 import type { PlanProposalHandler } from "./resolve";
@@ -101,13 +100,12 @@ export * from "./inspect-image";
 export * from "./learn";
 export * from "./manage-skill";
 export * from "./memory-edit";
+export * from "./memory-forget";
+export * from "./memory-link";
 export * from "./memory-recall";
 export * from "./memory-reflect";
-export * from "./memory-retain";
-export * from "./memory-link";
 export * from "./memory-related";
-export * from "./memory-forget";
-
+export * from "./memory-retain";
 
 export * from "./read";
 export * from "./report-tool-issue";
@@ -456,7 +454,6 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	forget: MemoryForgetTool.createIf,
 	reflect: MemoryReflectTool.createIf,
 
-
 	learn: LearnTool.createIf,
 	manage_skill: ManageSkillTool.createIf,
 };
@@ -606,7 +603,6 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			) {
 				requestedTools.push("learn");
 			}
-
 		}
 	}
 	const allTools: Record<string, ToolFactory> = { ...BUILTIN_TOOLS, ...HIDDEN_TOOLS };
@@ -655,7 +651,6 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "link" || name === "related" || name === "forget") {
 			return session.settings.get("memory.backend") === "mnemon";
 		}
-
 
 		if (name === "reflect") {
 			return ["hindsight", "mnemopi"].includes(session.settings.get("memory.backend") ?? "");

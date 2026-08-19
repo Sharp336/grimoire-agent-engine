@@ -39,7 +39,7 @@ export class MemoryLinkTool implements AgentTool<typeof memoryLinkSchema> {
 			},
 			params,
 		);
-		if (!result || result.status !== "linked") {
+		if (result?.status !== "linked") {
 			return {
 				content: [{ type: "text", text: result?.message ?? "Link rejected." }],
 				details: result ?? { status: "rejected" },

@@ -16,16 +16,15 @@ import type {
 	MemoryBackendStatus,
 } from "../memory-backend/types";
 
-
 import type { AgentSession } from "../session/agent-session";
 import { createMnemonCli, findMnemonCommand, type MnemonCli } from "./cli";
 import {
 	applyMnemonRecallQuality,
 	focusMnemonQuery,
 	formatMnemonSilentRecall,
-	parseMnemonRecallPayload,
 	type MnemonRecallMode,
 	type MnemonRecallRow,
+	parseMnemonRecallPayload,
 } from "./quality";
 
 const SECRET_RE =
@@ -55,8 +54,6 @@ function isUnsupportedSupersedesError(error: unknown) {
 	return /invalid edge type ["']supersedes["']/i.test(text) || /valid:.*\bcausal\b.*\bentity\b/i.test(text);
 }
 
-
-
 function parseLinkCandidates(parsed: Record<string, unknown> | undefined): MemoryBackendLinkCandidate[] {
 	const out: MemoryBackendLinkCandidate[] = [];
 	const seen: Record<string, true> = {};
@@ -81,7 +78,6 @@ function parseLinkCandidates(parsed: Record<string, unknown> | undefined): Memor
 	if (out.length < 8) push(parsed?.semantic_candidates, "semantic", "similarity");
 	return out;
 }
-
 
 export interface MnemonBackendConfig {
 	cliPath?: string;
@@ -122,13 +118,7 @@ function asRecord(value: unknown) {
 	return value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
 }
 
-async function recall(
-	cli: MnemonCli,
-	query: string,
-	limit: number,
-	mode: MnemonRecallMode,
-	signal?: AbortSignal,
-) {
+async function recall(cli: MnemonCli, query: string, limit: number, mode: MnemonRecallMode, signal?: AbortSignal) {
 	const payload = await cli.runJson(["recall", query, "--limit", String(Math.min(50, Math.max(limit, limit * 3)))], {
 		signal,
 		timeoutMs: 8_000,
@@ -191,7 +181,6 @@ async function readMnemonStatus(session: AgentSession | undefined): Promise<Memo
 	}
 }
 
-
 export const mnemonBackend: MemoryBackend = {
 	id: "mnemon",
 
@@ -223,7 +212,7 @@ export const mnemonBackend: MemoryBackend = {
 	async beforeAgentStartPrompt(session, promptText) {
 		const state = getMnemonSessionState(session);
 		const primary = state?.aliasOf ?? state;
-		if (!primary || !primary.config.autoRecall || primary.hasRecalledForFirstTurn) return undefined;
+		if (!primary?.config.autoRecall || primary.hasRecalledForFirstTurn) return undefined;
 		const query = focusMnemonQuery(promptText);
 		if (!query) return undefined;
 		primary.hasRecalledForFirstTurn = true;
@@ -245,7 +234,9 @@ export const mnemonBackend: MemoryBackend = {
 	},
 
 	async clear() {
-		throw new Error("Refused: memory.backend=mnemon will not wipe ~/.mnemon. Use `mnemon forget <id>` or `mnemon gc`.");
+		throw new Error(
+			"Refused: memory.backend=mnemon will not wipe ~/.mnemon. Use `mnemon forget <id>` or `mnemon gc`.",
+		);
 	},
 
 	async enqueue() {
@@ -255,7 +246,6 @@ export const mnemonBackend: MemoryBackend = {
 	async status({ session }): Promise<MemoryBackendStatus> {
 		return readMnemonStatus(session);
 	},
-
 
 	async search({ session, cwd: _cwd }, query, options) {
 		const focused = focusMnemonQuery(query, 500);
@@ -270,7 +260,8 @@ export const mnemonBackend: MemoryBackend = {
 				query: focused,
 				count: filtered.results.length,
 				items: toSearchItems(filtered.results),
-				message: filtered.dropped > 0 ? `omitted ${filtered.dropped} low-confidence or overflow memories` : undefined,
+				message:
+					filtered.dropped > 0 ? `omitted ${filtered.dropped} low-confidence or overflow memories` : undefined,
 			};
 		} catch (error) {
 			return {
@@ -323,7 +314,11 @@ export const mnemonBackend: MemoryBackend = {
 				candidates: parseLinkCandidates(parsed),
 			};
 		} catch (error) {
-			return { backend: "mnemon" as const, stored: 0, message: error instanceof Error ? error.message : String(error) };
+			return {
+				backend: "mnemon" as const,
+				stored: 0,
+				message: error instanceof Error ? error.message : String(error),
+			};
 		}
 	},
 
@@ -381,7 +376,6 @@ export const mnemonBackend: MemoryBackend = {
 		}
 	},
 
-
 	async related({ session }, input: MemoryBackendRelatedInput): Promise<MemoryBackendRelatedResult> {
 		const id = input.id.trim();
 		if (!INSIGHT_ID_RE.test(id)) {
@@ -433,7 +427,12 @@ export const mnemonBackend: MemoryBackend = {
 				backend: "mnemon",
 				status: parsed?.status === "deleted" ? "deleted" : "rejected",
 				id: typeof parsed?.id === "string" ? parsed.id : id,
-				message: typeof parsed?.message === "string" ? parsed.message : parsed?.status === "deleted" ? "deleted" : "forget did not confirm",
+				message:
+					typeof parsed?.message === "string"
+						? parsed.message
+						: parsed?.status === "deleted"
+							? "deleted"
+							: "forget did not confirm",
 			};
 		} catch (error) {
 			return {
@@ -444,8 +443,6 @@ export const mnemonBackend: MemoryBackend = {
 			};
 		}
 	},
-
-
 
 	async stats(_agentDir, _cwd, session) {
 		const status = await readMnemonStatus(session);
@@ -465,7 +462,6 @@ export const mnemonBackend: MemoryBackend = {
 			.filter(Boolean)
 			.join("\n");
 	},
-
 
 	async diagnose(_agentDir, _cwd, session) {
 		const state = getMnemonSessionState(session);
