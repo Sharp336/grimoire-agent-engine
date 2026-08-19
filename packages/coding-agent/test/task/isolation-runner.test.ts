@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import {
 	applyEligibleNestedPatches,
@@ -47,32 +48,32 @@ async function seedFooRepo(finalContent: string): Promise<{ repoRoot: string; pa
 	const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-isolation-merge-"));
 	tempRoots.push(repoRoot);
 
-	await git(repoRoot, "init");
+	await git(repoRoot, "init", "-q", "-b", "main");
 	await git(repoRoot, "config", "user.email", "repro@example.com");
 	await git(repoRoot, "config", "user.name", "Repro");
-	await Bun.write(path.join(repoRoot, "foo.txt"), "old\n");
+	await Bun.write(path.join(repoRoot, "foo.txt"), finalContent);
 	await git(repoRoot, "add", "foo.txt");
-	await git(repoRoot, "commit", "-m", "base");
-	await Bun.write(path.join(repoRoot, "foo.txt"), "new\n");
-	await git(repoRoot, "commit", "-am", "change to new");
+	await git(repoRoot, "commit", "-q", "-m", "fixture state");
 
+	// The merge contract needs a valid old→new patch, not a second commit and
+	// diff-tree subprocess for every scenario.
 	const patchPath = path.join(repoRoot, "task.patch");
-	const patchText = await git(repoRoot, "diff-tree", "--binary", "--full-index", "--no-commit-id", "-p", "HEAD");
-	await Bun.write(patchPath, patchText);
-
-	if (finalContent !== "new\n") {
-		await git(repoRoot, "reset", "--hard", "HEAD~1");
-		if (finalContent !== "old\n") {
-			await Bun.write(path.join(repoRoot, "foo.txt"), finalContent);
-			await git(repoRoot, "commit", "-am", "diverge");
-		}
-	}
+	await Bun.write(
+		patchPath,
+		"diff --git a/foo.txt b/foo.txt\n" +
+			"--- a/foo.txt\n" +
+			"+++ b/foo.txt\n" +
+			"@@ -1 +1 @@\n" +
+			"-old\n" +
+			"+new\n",
+	);
 	return { repoRoot, patchPath };
 }
 
 describe("runIsolatedSubprocess", () => {
 	afterEach(async () => {
 		vi.restoreAllMocks();
+		AgentRegistry.resetGlobalForTests();
 		await Promise.all(tempRoots.splice(0).map(tempRoot => fs.rm(tempRoot, { force: true, recursive: true })));
 	});
 
@@ -107,6 +108,13 @@ describe("runIsolatedSubprocess", () => {
 			nestedPatches: [],
 		});
 		const cleanupSpy = vi.spyOn(worktreeModule, "cleanupIsolation").mockResolvedValue();
+		AgentRegistry.global().register({
+			id: "PreserveBranchFailure",
+			displayName: "PreserveBranchFailure",
+			kind: "sub",
+			session: null,
+			status: "parked",
+		});
 		const deleteSpy = vi.spyOn(gitModule.branch, "tryDelete").mockResolvedValue(true);
 
 		const outcome = await runIsolatedSubprocess({
@@ -138,6 +146,7 @@ describe("runIsolatedSubprocess", () => {
 		expect(captureSpy).toHaveBeenCalledWith(isolationDir, baseline);
 		expect(deleteSpy).toHaveBeenCalledWith(repoRoot, "omp/task/PreserveBranchFailure");
 		expect(cleanupSpy).toHaveBeenCalledTimes(1);
+		expect(AgentRegistry.global().get("PreserveBranchFailure")?.history?.patchPath).toBe(patchPath);
 	});
 
 	it("keeps an isolated worktree until deferred child cleanup settles", async () => {

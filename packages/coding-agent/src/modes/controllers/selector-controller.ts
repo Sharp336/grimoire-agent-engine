@@ -80,8 +80,8 @@ import { copyToClipboard } from "../../utils/clipboard";
 import { repo } from "../../utils/git";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
 import { type AdvisorConfigDeps, AdvisorConfigOverlayComponent } from "../components/advisor-config";
-import { AgentDashboard } from "../components/agent-dashboard";
 import { AgentHubOverlayComponent } from "../components/agent-hub";
+import { AgentsHubComponent } from "../components/agents-hub";
 import { AssistantMessageComponent } from "../components/assistant-message";
 import { CopySelectorComponent } from "../components/copy-selector";
 import { ExtensionDashboard } from "../components/extensions";
@@ -98,7 +98,6 @@ import { renderSegmentTrack } from "../components/segment-track";
 import { SessionAccountSelectorComponent } from "../components/session-account-selector";
 import { SessionSelectorComponent, type SessionSelectorOptions } from "../components/session-selector";
 import { SettingsSelectorComponent } from "../components/settings-selector";
-import { StrippedToolCallsPlaceholder } from "../components/stripped-tool-calls-placeholder";
 import { ToolExecutionComponent } from "../components/tool-execution";
 import { TranscriptBlock } from "../components/transcript-container";
 import { TreeSelectorComponent } from "../components/tree-selector";
@@ -110,6 +109,23 @@ const MANUAL_LOGIN_PROMPT = "Paste the authorization code (or full redirect URL)
 
 export class SelectorController {
 	constructor(private ctx: InteractiveModeContext) {}
+	/**
+	 * Mount a primary fullscreen menu through the one polished modal path shared
+	 * by Settings, Model Hub, and Agent Hub.
+	 */
+	#showFullscreenMenu(component: Component): OverlayHandle {
+		const handle = this.ctx.ui.showOverlay(component, {
+			anchor: "bottom-center",
+			width: "100%",
+			maxHeight: "100%",
+			margin: 0,
+			fullscreen: true,
+		});
+		this.ctx.ui.setFocus(component);
+		this.ctx.ui.requestRender();
+		return handle;
+	}
+
 	#defaultRoleMutationTail = Promise.resolve();
 
 	async #acquireDefaultRoleMutation(): Promise<() => void> {
@@ -242,15 +258,7 @@ export class SelectorController {
 					},
 				},
 			);
-			overlayHandle = this.ctx.ui.showOverlay(selector, {
-				anchor: "bottom-center",
-				width: "100%",
-				maxHeight: "100%",
-				margin: 0,
-				fullscreen: true,
-			});
-			this.ctx.ui.setFocus(selector);
-			this.ctx.ui.requestRender();
+			overlayHandle = this.#showFullscreenMenu(selector);
 		});
 	}
 
@@ -380,31 +388,36 @@ export class SelectorController {
 	}
 
 	/**
-	 * Show the Agent Control Center dashboard.
+	 * Fullscreen agents hub on the alternate screen (the /models idiom): scope
+	 * sidebar, agent rows, and chip strips that dive into the model browser.
 	 */
 	async showAgentsDashboard(): Promise<void> {
 		const activeModel = this.ctx.session.model;
 		const activeModelPattern = activeModel ? `${activeModel.provider}/${activeModel.id}` : undefined;
 		const defaultModelPattern = this.ctx.settings.getModelRole("default");
-		const dashboard = await AgentDashboard.create(getProjectDir(), this.ctx.settings, this.ctx.ui.terminal.rows, {
-			modelRegistry: this.ctx.session.modelRegistry,
-			activeModelPattern,
-			defaultModelPattern,
-		});
-		const overlay = this.ctx.ui.showOverlay(dashboard, {
-			width: "100%",
-			maxHeight: "100%",
-			anchor: "top-left",
-			margin: 0,
-		});
-		dashboard.onClose = () => {
-			overlay.hide();
+		let overlayHandle: OverlayHandle | undefined;
+		let hub: AgentsHubComponent | undefined;
+		let closed = false;
+		const done = () => {
+			if (closed) return;
+			closed = true;
+			hub?.dispose();
+			overlayHandle?.hide();
 			this.focusActiveEditorArea();
 			this.ctx.ui.requestRender();
 		};
-		dashboard.onRequestRender = () => {
-			this.ctx.ui.requestRender();
-		};
+		hub = await AgentsHubComponent.create(
+			this.ctx.ui,
+			getProjectDir(),
+			this.ctx.settings,
+			{
+				modelRegistry: this.ctx.session.modelRegistry,
+				activeModelPattern,
+				defaultModelPattern,
+			},
+			{ onCancel: () => done() },
+		);
+		overlayHandle = this.#showFullscreenMenu(hub);
 	}
 
 	/**
@@ -465,6 +478,11 @@ export class SelectorController {
 					this.ctx.showError(`Failed to apply vision mode: ${err}`);
 				});
 				break;
+			case "externalThinking":
+				void this.ctx.session.setThinkToolEnabled(value as boolean).catch(err => {
+					this.ctx.showError(`Failed to apply external thinking: ${err}`);
+				});
+				break;
 			case "autocompleteMaxVisible":
 				this.ctx.editor.setAutocompleteMaxVisible(typeof value === "number" ? value : Number(value));
 				break;
@@ -475,15 +493,13 @@ export class SelectorController {
 				this.ctx.hideToolActivity = hidden;
 				if (!hidden) this.ctx.toolOutputExpanded = false;
 				for (const child of this.ctx.chatContainer.children) {
-					if (child instanceof ToolExecutionComponent || child instanceof ReadToolGroupComponent) {
-						if (!hidden) child.setExpanded(false);
-						child.setToolActivityVisible(!hidden);
+					if (!hidden && (child instanceof ToolExecutionComponent || child instanceof ReadToolGroupComponent)) {
+						child.setExpanded(false);
 					} else if (child instanceof AssistantMessageComponent) {
 						child.setToolResultImagesVisible(!hidden);
-					} else if (child instanceof StrippedToolCallsPlaceholder) {
-						child.setToolActivityVisible(!hidden);
 					}
 				}
+				this.ctx.chatContainer.setToolActivityVisible(!hidden);
 				if (hidden) this.ctx.ui.clearInlineImages();
 				this.ctx.ui.resetDisplay();
 				break;
@@ -537,6 +553,12 @@ export class SelectorController {
 				// Rebuild swaps between the collapsed tail and the full inline
 				// history; full reset retires blocks already committed to native
 				// scrollback (mirrors cacheMissMarker).
+				this.ctx.rebuildChatFromMessages();
+				this.ctx.ui.resetDisplay();
+				break;
+			case "display.showTokenUsage":
+				// Rebuild reruns usage-row detection under the new setting; resetDisplay
+				// retires rows already committed to native scrollback.
 				this.ctx.rebuildChatFromMessages();
 				this.ctx.ui.resetDisplay();
 				break;
@@ -1017,15 +1039,7 @@ export class SelectorController {
 				initialProviderId: hubOptions.initialProviderId,
 			},
 		);
-		overlayHandle = this.ctx.ui.showOverlay(hub, {
-			anchor: "bottom-center",
-			width: "100%",
-			maxHeight: "100%",
-			margin: 0,
-			fullscreen: true,
-		});
-		this.ctx.ui.setFocus(hub);
-		this.ctx.ui.requestRender();
+		overlayHandle = this.#showFullscreenMenu(hub);
 	}
 
 	/** /login round-trip for a locked provider; reopen the hub on that provider only after a successful login. */
@@ -1143,7 +1157,7 @@ export class SelectorController {
 						return;
 					}
 
-					this.ctx.renderInitialMessages({ clearTerminalHistory: true });
+					await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 					this.ctx.editor.setDraft(result.selectedText, result.selectedImages);
 					done();
 					this.ctx.showStatus("Branched to new session");
@@ -1316,7 +1330,7 @@ export class SelectorController {
 
 						// Update UI — rebuild the display transcript for the new leaf (the
 						// context from navigateTree is the LLM context, not the transcript).
-						this.ctx.renderInitialMessages({ clearTerminalHistory: true });
+						await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 						await this.ctx.reloadTodos();
 						if (result.editorText && !this.ctx.editor.getText().trim()) {
 							this.ctx.editor.setDraft(result.editorText, result.editorImages);
@@ -1556,7 +1570,7 @@ export class SelectorController {
 		this.ctx.statusLine.resetActiveTime();
 		this.ctx.ui.requestRender();
 		this.ctx.updateEditorBorderColor();
-		this.ctx.renderInitialMessages({ clearTerminalHistory: true });
+		await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 		await this.ctx.reloadTodos();
 		this.ctx.ui.requestRender(true, { clearScrollback: true });
 		return true;
@@ -1590,7 +1604,7 @@ export class SelectorController {
 		this.ctx.updateEditorBorderColor();
 
 		// Clear and re-render the chat
-		this.ctx.renderInitialMessages({ clearTerminalHistory: true });
+		await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 		await this.ctx.reloadTodos();
 		this.ctx.showStatus(movedProject ? `Resumed session in ${shortenPath(newCwd)}` : "Resumed session");
 		return true;
@@ -1994,27 +2008,23 @@ export class SelectorController {
 			...this.ctx.keybindings.getKeys("app.agents.hub"),
 			...this.ctx.keybindings.getKeys("app.session.observe"),
 		];
-		let hub: AgentHubOverlayComponent | undefined;
+		let overlayHandle: OverlayHandle | undefined;
+		let closed = false;
 
-		// Render the hub inline in the editor slot — the same anchored region
-		// every other selector (model, session, tree, the `ask` tool) uses —
-		// rather than a floating overlay. A non-fullscreen overlay composited over
-		// a live transcript strands a stale copy in native scrollback every time a
-		// running subagent's progress grows the frame and scrolls the window; the
-		// hub is opened mid-run, so those copies stacked into a wall of duplicate
-		// "Agent Hub" frames bleeding the task tree behind them. As an editor-slot
-		// component it rides the normal append-only commit path: the transcript
-		// commits above it exactly once and the hub repaints in place.
 		const done = () => {
-			hub?.dispose();
-			this.ctx.editorContainer.clear();
-			this.ctx.editorContainer.addChild(this.ctx.editor);
-			this.ctx.ui.setFocus(this.ctx.editor);
+			if (closed) return;
+			closed = true;
+			hub.dispose();
+			overlayHandle?.hide();
+			// A gated empty Hub may never have been mounted. Restoring editor
+			// focus in that case would steal focus from a menu opened meanwhile.
+			if (overlayHandle) this.focusActiveEditorArea();
 			this.ctx.ui.requestRender();
 		};
 
-		hub = new AgentHubOverlayComponent({
+		const hub = new AgentHubOverlayComponent({
 			observers,
+			settings: this.ctx.settings,
 			hubKeys,
 			expandKeys: this.ctx.keybindings.getKeys("app.tools.expand"),
 			onDone: done,
@@ -2023,6 +2033,7 @@ export class SelectorController {
 			remote: this.ctx.collabGuest?.hubRemote,
 			ui: this.ctx.ui,
 			getTool: name => this.ctx.session.getToolByName(name),
+			isBuiltInTool: name => this.ctx.session.hasBuiltInTool(name),
 			getMessageRenderer: type => this.ctx.session.extensionRunner?.getMessageRenderer(type),
 			cwd: this.ctx.sessionManager.getCwd(),
 			hideThinkingBlock: () => this.ctx.effectiveHideThinkingBlock,
@@ -2032,30 +2043,24 @@ export class SelectorController {
 		});
 
 		const showReadyHub = () => {
-			// The double-← gesture passes requireContent so it stays inert when
-			// neither live nor persisted subagents are available. Persisted rows now
-			// load asynchronously, so defer the gate until that scan has refreshed the
-			// hub instead of treating the initial empty table as authoritative.
+			if (closed) return;
+			// The double-← gesture stays inert when neither live nor persisted
+			// subagents are available, so wait for discovery before making the gate.
 			if (options?.requireContent && hub.isEmpty) {
-				hub.dispose();
+				done();
 				return;
 			}
 
-			this.ctx.editorContainer.clear();
-			this.ctx.editorContainer.addChild(hub);
-			this.ctx.ui.setFocus(hub);
-			// When the hub was raised by the editor's double-← gesture, prime its own
-			// close detector so the *next* single ← dismisses it — the two taps that
-			// opened it were consumed by the editor's detector (issue #4780).
+			// Prime the detector before the first frame when the editor's double-←
+			// gesture opened the hub, so the next single ← dismisses it.
 			if (options?.armCloseTap) hub.armCloseTap();
-			this.ctx.ui.requestRender();
+			overlayHandle = this.#showFullscreenMenu(hub);
 		};
 
 		if (options?.requireContent && hub.isEmpty) {
 			void hub.persistedSubagentsReady.then(showReadyHub);
-			return;
+		} else {
+			showReadyHub();
 		}
-
-		showReadyHub();
 	}
 }

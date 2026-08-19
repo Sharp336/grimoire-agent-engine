@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import { Agent, AgentBusyError, type AgentEvent, type AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import { type SimpleStreamOptions, type ToolResultMessage, z } from "@oh-my-pi/pi-ai";
+import type { SimpleStreamOptions, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
@@ -41,7 +42,7 @@ describe("Agent", () => {
 		await prompt;
 	});
 	it("classifies agent-authored steering as a parent steering message", async () => {
-		const toolSchema = z.object({ value: z.string() });
+		const toolSchema = type({ value: type("string") });
 		const executed: string[] = [];
 		let agent: Agent;
 		const tool: AgentTool<typeof toolSchema, { value: string }> = {
@@ -104,7 +105,7 @@ describe("Agent", () => {
 	});
 
 	it("classifies user-attributed custom steering as a queued user message", async () => {
-		const toolSchema = z.object({ value: z.string() });
+		const toolSchema = type({ value: type("string") });
 		const executed: string[] = [];
 		let agent: Agent;
 		const tool: AgentTool<typeof toolSchema, { value: string }> = {
@@ -188,7 +189,7 @@ describe("Agent", () => {
 		];
 
 		for (const scenario of cases) {
-			const toolSchema = z.object({ value: z.string() });
+			const toolSchema = type({ value: type("string") });
 			const executed: string[] = [];
 			let agent: Agent;
 			const tool: AgentTool<typeof toolSchema, { value: string }> = {
@@ -301,7 +302,11 @@ describe("Agent", () => {
 	});
 	it("keeps follow-up ownership when the deadline expires during a dequeue hook", async () => {
 		const mock = createMockModel({ responses: [{ content: ["done"] }] });
-		const agent = new Agent({ streamFn: mock.stream, deadline: Date.now() + 250 });
+		// Generous budget: the loop checks the deadline before invoking dequeue
+		// hooks, so the mock roundtrip must beat it even on starved CI runners.
+		// The hook itself parks until the deadline timer aborts the loop signal,
+		// so the expiry-during-hook branch stays exercised.
+		const agent = new Agent({ streamFn: mock.stream, deadline: Date.now() + 1_000 });
 		let hookSignal: AbortSignal | undefined;
 		agent.addBeforeQueuedMessageDequeueHook(async signal => {
 			if (!signal) throw new Error("Expected the active loop signal");
@@ -319,7 +324,8 @@ describe("Agent", () => {
 		expect(agent.peekFollowUpQueue()).toHaveLength(1);
 	});
 	it("keeps queued work when continue() reaches its deadline inside a dequeue hook", async () => {
-		const agent = new Agent({ deadline: Date.now() + 25 });
+		// Same starvation guard as above: hook entry must precede expiry.
+		const agent = new Agent({ deadline: Date.now() + 1_000 });
 		agent.replaceMessages([createAssistantMessage([{ type: "text", text: "ready" }])]);
 		agent.addBeforeQueuedMessageDequeueHook(async signal => {
 			if (!signal) throw new Error("Expected the deadline-aware dequeue signal");
@@ -1059,7 +1065,7 @@ describe("Agent", () => {
 	});
 
 	it("prompt() refreshes tools and system prompt between same-turn model calls", async () => {
-		const toolSchema = z.object({ value: z.string() });
+		const toolSchema = type({ value: type("string") });
 		type Details = { value: string };
 
 		const betaTool: AgentTool<typeof toolSchema, Details> = {
@@ -1124,7 +1130,7 @@ describe("Agent", () => {
 	});
 
 	it("prompt() drops stale forced toolChoice after same-turn tool refresh", async () => {
-		const toolSchema = z.object({ value: z.string() });
+		const toolSchema = type({ value: type("string") });
 		type Details = { value: string };
 
 		const betaTool: AgentTool<typeof toolSchema, Details> = {
@@ -1182,7 +1188,7 @@ describe("Agent", () => {
 	});
 
 	it("drops queued forced toolChoice when the queued tool is not active", async () => {
-		const toolSchema = z.object({ value: z.string() });
+		const toolSchema = type({ value: type("string") });
 		type Details = { value: string };
 
 		const betaTool: AgentTool<typeof toolSchema, Details> = {
@@ -1214,7 +1220,7 @@ describe("Agent", () => {
 	});
 
 	it("re-reads thinking level for each model call within a run", async () => {
-		const toolSchema = z.object({ value: z.string() });
+		const toolSchema = type({ value: type("string") });
 		type Details = { value: string };
 		const alphaTool: AgentTool<typeof toolSchema, Details> = {
 			name: "alpha",
@@ -1275,7 +1281,7 @@ describe("Agent", () => {
 	});
 
 	it("re-reads disableReasoning for each model call within a run", async () => {
-		const toolSchema = z.object({ value: z.string() });
+		const toolSchema = type({ value: type("string") });
 		type Details = { value: string };
 		const alphaTool: AgentTool<typeof toolSchema, Details> = {
 			name: "alpha",
@@ -1367,7 +1373,7 @@ describe("Agent", () => {
 	});
 
 	it("re-reads cwd from cwdResolver for each model call within a run (a /move mid-run is seen)", async () => {
-		const toolSchema = z.object({ value: z.string() });
+		const toolSchema = type({ value: type("string") });
 		type Details = { value: string };
 		const alphaTool: AgentTool<typeof toolSchema, Details> = {
 			name: "alpha",
@@ -1408,18 +1414,6 @@ describe("Agent", () => {
 		expect(cwdPerCall).toEqual(["/live/repo-a", "/live/repo-b"]);
 	});
 
-	it("returns static metadata via the plain setter", () => {
-		const agent = new Agent();
-		expect(agent.metadata).toBeUndefined();
-
-		const value = { user_id: "static" };
-		agent.metadata = value;
-		expect(agent.metadata).toEqual({ user_id: "static" });
-
-		agent.metadata = undefined;
-		expect(agent.metadata).toBeUndefined();
-	});
-
 	it("metadataForProvider resolves dynamic value at every call when a resolver is installed", () => {
 		const agent = new Agent();
 		let live = "alpha";
@@ -1438,7 +1432,6 @@ describe("Agent", () => {
 		expect(agent.metadataForProvider("any")).toEqual({ user_id: "from-resolver" });
 
 		agent.metadata = { user_id: "from-static" };
-		expect(agent.metadata).toEqual({ user_id: "from-static" });
 		expect(agent.metadataForProvider("any")).toEqual({ user_id: "from-static" });
 	});
 
@@ -1461,7 +1454,6 @@ describe("Agent", () => {
 
 		agent.setMetadataResolver(undefined);
 		expect(agent.metadataForProvider("any")).toEqual({ user_id: "static" });
-		expect(agent.metadata).toEqual({ user_id: "static" });
 	});
 });
 

@@ -63,6 +63,7 @@ import { wrapToolWithMetaNotice } from "./output-meta";
 import { ReadTool } from "./read";
 import type { PlanProposalHandler } from "./resolve";
 import { SecurityScanTool } from "./security-scan";
+import { supportsExternalThinking, ThinkTool } from "./think";
 import { type TodoPhase, TodoTool } from "./todo";
 import { WriteTool } from "./write";
 import { isMountableUnderXdev, type XdevState } from "./xdev";
@@ -86,6 +87,7 @@ export * from "./debug";
 export * from "./essential-tools";
 export * from "./eval";
 export * from "./eval-backends";
+export * from "./file-write-fallback";
 export * from "./gh";
 export * from "./glob";
 export * from "./grep";
@@ -103,6 +105,7 @@ export * from "./report-tool-issue";
 export * from "./resolve";
 export * from "./review";
 export * from "./security-scan";
+export * from "./think";
 export * from "./todo";
 export * from "./tts";
 export * from "./vibe";
@@ -451,6 +454,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 };
 
 export const HIDDEN_TOOLS: Record<HiddenToolName, ToolFactory> = {
+	think: () => new ThinkTool(),
 	yield: s => new YieldTool(s),
 	goal: s => new GoalTool(s),
 };
@@ -477,6 +481,8 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	const memoryBackend = restrictToolNames
 		? ""
 		: (session.getMemoryBackend?.()?.id ?? session.settings.get("memory.backend") ?? "");
+	const externalThinkingActive =
+		session.settings.get("externalThinking") && supportsExternalThinking(session.getActiveModel?.());
 	if (goalModeActive && requestedTools && !requestedTools.includes("goal")) {
 		requestedTools.push("goal");
 	}
@@ -577,6 +583,15 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (session.settings.get("memory.backend") === "mnemopi" && !requestedTools.includes("memory_edit")) {
 			requestedTools.push("memory_edit");
 		}
+		if (externalThinkingActive && !requestedTools.includes("think")) {
+			requestedTools.push("think");
+		}
+		// Auto-learn tools are gated by `autolearn.enabled` but, like the memory
+		// tools above, must also be force-included into an explicit requestedTools
+		// list so a restricted top-level session whose controller/guidance is
+		// active still exposes the tools the nudge points at. Gated to the primary
+		// session: subagents and auxiliary agents must never have a write-capable
+		// tool whitelist widened implicitly.
 		if (session.settings.get("autolearn.enabled") && isPrimaryAutolearnSession) {
 			if (!requestedTools.includes("manage_skill")) requestedTools.push("manage_skill");
 			if (
@@ -613,6 +628,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "inspect_image") return isInspectImageToolActive(session);
 		if (name === "web_search") return session.settings.get("web_search.enabled");
 		if (name === "security_scan") return session.settings.get("security.enabled");
+		if (name === "think") return externalThinkingActive;
 		if (name === "ask") return session.settings.get("ask.enabled");
 		if (name === "browser") return session.settings.get("browser.enabled");
 		if (name === "computer") return session.settings.get("computer.enabled");
@@ -659,6 +675,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 					...Object.entries(BUILTIN_TOOLS)
 						.filter(([name]) => isToolAllowed(name))
 						.map(([name, factory]) => [name, factory] as const),
+					...(externalThinkingActive ? ([["think", HIDDEN_TOOLS.think]] as const) : []),
 					...(includeYield ? ([["yield", HIDDEN_TOOLS.yield]] as const) : []),
 					...(goalModeActive ? ([["goal", HIDDEN_TOOLS.goal]] as const) : []),
 				];

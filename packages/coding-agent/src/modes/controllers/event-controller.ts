@@ -24,7 +24,7 @@ import { getSymbolTheme, theme } from "../../modes/theme/theme";
 import type { InteractiveModeContext, TodoPhase } from "../../modes/types";
 import idleRecapPrompt from "../../prompts/system/recap-user.md" with { type: "text" };
 import type { AgentSessionEvent } from "../../session/agent-session";
-import { isSilentAbort, readQueueChipText, resolveAbortLabel } from "../../session/messages";
+import { isSilentAbort, isUserInvokedSkillPrompt, readQueueChipText, resolveAbortLabel } from "../../session/messages";
 import { type ApprovalMode, resolveApproval } from "../../tools/approval";
 import { previewLine, TRUNCATE_LENGTHS } from "../../tools/render-utils";
 import { PROPOSE_DEVICE_NAME, writeDeviceDispatch } from "../../tools/resolve";
@@ -72,6 +72,12 @@ function exposesRawPartialJson(toolName: string, rawInput: boolean, tool: unknow
 type AgentSessionEventHandlers = {
 	[E in AgentSessionEventKind]: (event: Extract<AgentSessionEvent, { type: E }>) => Promise<void>;
 };
+interface ApprovalPreviewGate {
+	promise: Promise<void>;
+	resolve(): void;
+	reject(reason?: unknown): void;
+	started: boolean;
+}
 
 export class EventController {
 	#lastReadGroup: ReadToolGroupComponent | undefined = undefined;
@@ -88,6 +94,8 @@ export class EventController {
 	/** Tool calls whose approval prompt drove the title into `attention`; cleared
 	 *  at their tool_execution_end so the title returns to `working`. */
 	#approvalAttentionToolCallIds = new Set<string>();
+	#approvalPreviewGates = new Map<string, ApprovalPreviewGate>();
+	#detachToolApprovalPreviewWaiter: (() => void) | undefined;
 	#readToolCallArgs = new Map<string, Record<string, unknown>>();
 	#readToolCallAssistantComponents = new Map<string, AssistantMessageComponent>();
 	#toolTimelineComponents = new Map<string, Component>();
@@ -133,6 +141,8 @@ export class EventController {
 	// restored when the banner clears at the next `agent_start` (see
 	// #handleMessageEnd / #handleAgentStart).
 	#pinnedErrorComponent: AssistantMessageComponent | undefined = undefined;
+	#pinnedErrorMessage: AssistantMessage | undefined = undefined;
+	#restorePinnedErrorInline = true;
 	#retrySupersededAssistantComponents = new Map<string, AssistantMessageComponent>();
 	#retrySupersededAssistantQueue: AssistantMessageComponent[] = [];
 	// Set when `auto_retry_start` fires and cleared by `auto_retry_end` (both
@@ -197,6 +207,9 @@ export class EventController {
 		// vocalizer falls back to mechanical cleanup when unset. Tolerates
 		// partial contexts (tests, minimal embeddings) by wiring null.
 		const session = ctx.session;
+		this.#detachToolApprovalPreviewWaiter = session?.extensionRunner?.setToolApprovalPreviewWaiter(toolCallId =>
+			this.#waitForToolApprovalPreview(toolCallId),
+		);
 		vocalizer.setEnhancer(
 			session?.modelRegistry && session.agent && session.settings
 				? new SpeechEnhancer({
@@ -273,6 +286,9 @@ export class EventController {
 	}
 
 	dispose(): void {
+		this.#detachToolApprovalPreviewWaiter?.();
+		this.#detachToolApprovalPreviewWaiter = undefined;
+		this.#clearApprovalPreviewGates();
 		if (this.#messageUpdateTimer) {
 			clearTimeout(this.#messageUpdateTimer);
 			this.#messageUpdateTimer = undefined;
@@ -294,6 +310,36 @@ export class EventController {
 		this.#lastReadGroup?.finalize();
 		this.#lastReadGroup = undefined;
 	}
+	#approvalPreviewGate(toolCallId: string): ApprovalPreviewGate {
+		let gate = this.#approvalPreviewGates.get(toolCallId);
+		if (!gate) {
+			const deferred = Promise.withResolvers<void>();
+			gate = { ...deferred, started: false };
+			this.#approvalPreviewGates.set(toolCallId, gate);
+		}
+		return gate;
+	}
+
+	async #waitForToolApprovalPreview(toolCallId: string): Promise<void> {
+		await this.#approvalPreviewGate(toolCallId).promise;
+	}
+
+	#startToolApprovalPreview(toolCallId: string): void {
+		const gate = this.#approvalPreviewGate(toolCallId);
+		if (gate.started) return;
+		gate.started = true;
+		const component = this.ctx.pendingTools.get(toolCallId);
+		const ready = component instanceof ToolExecutionComponent ? component.whenPreviewSettled() : Promise.resolve();
+		void ready.then(() => {
+			this.ctx.ui.requestRender();
+			gate.resolve();
+		}, gate.reject);
+	}
+
+	#clearApprovalPreviewGates(): void {
+		for (const gate of this.#approvalPreviewGates.values()) gate.resolve();
+		this.#approvalPreviewGates.clear();
+	}
 
 	#getReadGroup(): ReadToolGroupComponent {
 		if (!this.#lastReadGroup) {
@@ -301,7 +347,6 @@ export class EventController {
 				showContentPreview: this.ctx.settings.get("read.toolResultPreview"),
 			});
 			group.setExpanded(this.ctx.toolOutputExpanded);
-			group.setToolActivityVisible(!this.ctx.hideToolActivity);
 			this.ctx.chatContainer.addChild(group);
 			this.#lastReadGroup = group;
 		}
@@ -607,6 +652,8 @@ export class EventController {
 		this.#readToolCallAssistantComponents.clear();
 		this.#lastAssistantComponent = undefined;
 		this.#pinnedErrorComponent = undefined;
+		this.#pinnedErrorMessage = undefined;
+		this.#restorePinnedErrorInline = true;
 		this.#retryPending = this.ctx.viewSession.isRetrying;
 		this.#cancelIdleCompaction();
 		this.#cancelIdleRecap();
@@ -687,6 +734,7 @@ export class EventController {
 	}
 
 	async #handleAgentStart(_event: Extract<AgentSessionEvent, { type: "agent_start" }>): Promise<void> {
+		this.#clearApprovalPreviewGates();
 		this.#toolTimelineComponents.clear();
 		this.#streamedToolCallIdByIndex.clear();
 		this.#retractedToolCallIds.clear();
@@ -699,10 +747,13 @@ export class EventController {
 		this.#resetReadGroup();
 		this.#resolveDisplaceableTodo();
 		this.#lastAssistantComponent = undefined;
-		// Restore the previous turn's inline error in the transcript before dropping
-		// the banner, so the error stays in history once the banner is gone.
-		this.#pinnedErrorComponent?.setErrorPinned(false);
+		// Restore terminal errors in transcript history when their banner clears.
+		// Recoverable empty-output attempts are discarded by session recovery and
+		// must stay hidden rather than resurfacing as a stale inline error.
+		if (this.#restorePinnedErrorInline) this.#pinnedErrorComponent?.setErrorPinned(false);
 		this.#pinnedErrorComponent = undefined;
+		this.#pinnedErrorMessage = undefined;
+		this.#restorePinnedErrorInline = true;
 		this.ctx.clearPinnedError();
 		if (this.ctx.retryLoader) {
 			this.ctx.retryLoader.stop();
@@ -727,7 +778,17 @@ export class EventController {
 			}
 			this.#renderedCustomMessages.add(signature);
 			this.#resetReadGroup();
-			this.ctx.addMessageToChat(event.message);
+			if (
+				event.message.role === "custom" &&
+				this.ctx.optimisticSkillMessagePending &&
+				isUserInvokedSkillPrompt(event.message)
+			) {
+				// The optimistic `/skill:` row painted at submit time (issue #8895):
+				// swap it for the canonical message instead of appending a duplicate.
+				this.ctx.reconcileOptimisticSkillMessage(event.message);
+			} else {
+				this.ctx.addMessageToChat(event.message);
+			}
 			// Queued custom-message chips are derived from the agent queue; refresh the
 			// pending bar when the queued custom is consumed so the chip disappears
 			// immediately.
@@ -1073,6 +1134,7 @@ export class EventController {
 						content.name,
 						renderArgs,
 						{
+							useBuiltInRenderer: this.ctx.viewSession.hasBuiltInTool(content.name),
 							snapshots: getFileSnapshotStore(this.ctx.viewSession),
 							clipboard: getEditClipboard(this.ctx.viewSession),
 							showImages: settings.get("terminal.showImages"),
@@ -1085,7 +1147,6 @@ export class EventController {
 						content.id,
 					);
 					component.setExpanded(this.ctx.toolOutputExpanded);
-					component.setToolActivityVisible(!this.ctx.hideToolActivity);
 					this.ctx.chatContainer.addChild(component);
 					this.ctx.pendingTools.set(content.id, component);
 					this.#toolTimelineComponents.set(content.id, component);
@@ -1276,14 +1337,20 @@ export class EventController {
 			}
 			this.ctx.streamingComponent = undefined;
 			this.ctx.streamingMessage = undefined;
-			// Pin a turn-ending provider error (e.g. Anthropic content-filter block)
-			// above the editor so it survives transcript scroll. Cleared at the next
-			// turn's agent_start. Suppress the transcript's inline `Error: …` line for
-			// the same message while pinned so the error isn't rendered twice.
+			// Pin a turn-ending provider error above the editor so it survives
+			// transcript scroll and suppress its duplicate inline row. Empty-output
+			// errors are known intermediate attempts: hide them entirely while
+			// session recovery continues, but retain the component so a terminal
+			// retry-cap event can promote its final error into the one banner.
 			if (event.message.stopReason === "error" && event.message.errorMessage && !isSilentAbort(event.message)) {
+				const recoverableEmptyOutput =
+					!event.message.errorMessage.startsWith("Retry budget exhausted") &&
+					AIError.is(AIError.classifyMessage(event.message), AIError.Flag.EmptyResponse);
 				this.#lastAssistantComponent?.setErrorPinned(true);
 				this.#pinnedErrorComponent = this.#lastAssistantComponent;
-				this.ctx.showPinnedError(event.message.errorMessage);
+				this.#pinnedErrorMessage = event.message;
+				this.#restorePinnedErrorInline = !recoverableEmptyOutput;
+				if (!recoverableEmptyOutput) this.ctx.showPinnedError(event.message.errorMessage);
 			}
 			this.ctx.statusLine.invalidate();
 			this.ctx.ui.requestRender();
@@ -1312,6 +1379,7 @@ export class EventController {
 					this.ctx.pendingTools.set(event.toolCallId, group);
 					this.#toolTimelineComponents.set(event.toolCallId, group);
 				}
+				this.#startToolApprovalPreview(event.toolCallId);
 				this.ctx.ui.requestRender();
 				return;
 			}
@@ -1322,6 +1390,7 @@ export class EventController {
 				event.toolName,
 				event.args,
 				{
+					useBuiltInRenderer: this.ctx.viewSession.hasBuiltInTool(event.toolName),
 					snapshots: getFileSnapshotStore(this.ctx.viewSession),
 					clipboard: getEditClipboard(this.ctx.viewSession),
 					showImages: settings.get("terminal.showImages"),
@@ -1334,8 +1403,8 @@ export class EventController {
 				this.ctx.sessionManager.getCwd(),
 				event.toolCallId,
 			);
+			component.setArgsComplete(event.toolCallId);
 			component.setExpanded(this.ctx.toolOutputExpanded);
-			component.setToolActivityVisible(!this.ctx.hideToolActivity);
 			this.ctx.chatContainer.addChild(component);
 			this.ctx.pendingTools.set(event.toolCallId, component);
 			this.#toolTimelineComponents.set(event.toolCallId, component);
@@ -1361,6 +1430,7 @@ export class EventController {
 				this.ctx.ui.requestRender();
 			}
 		}
+		this.#startToolApprovalPreview(event.toolCallId);
 	}
 
 	/**
@@ -1574,8 +1644,8 @@ export class EventController {
 			// This text can be a provider error copied verbatim off the wire (the
 			// Cursor todo bridge forwards the server's string), so it may carry
 			// ANSI escapes, other C0/C1 controls, tabs, newlines, or a line far
-			// wider than the terminal. `showWarning` renders through a plain
-			// `Text`, which strips none of that — an escape reaches the terminal
+			// wider than the terminal. `showWarning` renders through a plain `Text`,
+			// which strips none of that — an escape reaches the terminal
 			// and can repaint outside the row. `sanitizeText` drops the control
 			// sequences (and returns the same reference when there are none),
 			// then `previewLine` collapses the remaining whitespace and bounds
@@ -1587,6 +1657,7 @@ export class EventController {
 			const detail = textContent ? previewLine(sanitizeText(textContent), TRUNCATE_LENGTHS.LINE) : "";
 			this.ctx.showWarning(
 				`Todo update failed${detail ? `: ${detail}` : ". Progress may be stale until todo succeeds."}`,
+				{ hideWithToolActivity: true },
 			);
 		}
 		// Plan approval rides a `write` to xd://propose: the dispatch metadata on
@@ -1605,11 +1676,29 @@ export class EventController {
 				typeof details.title === "string" &&
 				typeof details.planExists === "boolean"
 			) {
-				await this.ctx.handlePlanApproval({
-					planFilePath: details.planFilePath,
-					title: details.title,
-					planExists: details.planExists,
-				});
+				// Dispatch the approval WITHOUT blocking the serialized event
+				// dispatch chain. `handlePlanApproval` -> `#approvePlan` awaits
+				// `session.prompt` for the ENTIRE approved-execution turn; awaiting
+				// it here (this handler runs inside `#runSerialized`) would hold the
+				// single dispatch link for the whole run, so the run's own
+				// agent_start / message_start / tool / coalesced message_update
+				// events queue behind it on `#dispatchTail` and the chat stays blank
+				// until execution finishes (issue #7684, follow-up to #5688 which
+				// only closed the overlay). Detaching frees the link the moment this
+				// handler returns; the approval overlay and the turn's live events
+				// then render. The approval flow surfaces its own failures via
+				// `showError`, so only an unexpected rejection is logged here.
+				void this.ctx
+					.handlePlanApproval({
+						planFilePath: details.planFilePath,
+						title: details.title,
+						planExists: details.planExists,
+					})
+					.catch(err => {
+						logger.warn("Plan approval dispatch failed", {
+							error: err instanceof Error ? err.message : String(err),
+						});
+					});
 			}
 		}
 	}
@@ -1636,6 +1725,12 @@ export class EventController {
 		// model/thinking level until the terminal settle.
 		if (event.isTerminal === false) {
 			await this.ctx.flushPendingModelSwitch();
+			// Reaching here means the first guard passed, so `isStreaming` is already
+			// false: a command issued from now on mounts immediately. Leaving earlier
+			// panels queued would render them out of order, minutes later, after the
+			// user was told they were only waiting for the turn. The transcript is
+			// quiescent at a settle, which is the condition #4806 wanted.
+			this.ctx.flushPendingCommandOutput();
 			return;
 		}
 		setTerminalTitleState("idle");
@@ -1836,7 +1931,7 @@ export class EventController {
 		} else if (isHandoffAction) {
 			this.ctx.clearTransientSessionUi();
 			this.ctx.lastAssistantUsage = undefined;
-			this.ctx.renderInitialMessages();
+			await this.ctx.renderInitialMessages();
 			this.ctx.statusLine.invalidate();
 			await this.ctx.reloadTodos();
 			this.ctx.ui.requestRender(true, { clearScrollback: true });
@@ -1875,6 +1970,8 @@ export class EventController {
 			// restore its inline Error row; just unpin the fixed-region banner so the
 			// retry UI is the visible state.
 			this.#pinnedErrorComponent = undefined;
+			this.#pinnedErrorMessage = undefined;
+			this.#restorePinnedErrorInline = true;
 			this.ctx.clearPinnedError();
 		}
 		const delaySeconds = Math.round(event.delayMs / 1000);
@@ -1896,22 +1993,51 @@ export class EventController {
 			this.ctx.retryLoader = undefined;
 			this.ctx.statusContainer.disposeChildren();
 		}
-		if (event.success) {
-			let appliedRecovered = false;
-			for (const recovered of event.recoveredErrors ?? []) {
-				const component = this.#takeRetrySupersededAssistantComponent(recovered.persistenceKey);
-				if (!component) continue;
-				component.applyRetryRecovery(recovered.retryRecovery);
-				if (this.#pinnedErrorComponent === component) this.#pinnedErrorComponent = undefined;
-				appliedRecovered = true;
+		const pinnedError = this.#pinnedErrorMessage?.errorMessage;
+		const terminalFailurePinned =
+			!event.success &&
+			this.#pinnedErrorComponent !== undefined &&
+			pinnedError !== undefined &&
+			pinnedError === event.finalError;
+		let stalePinnedErrorCleared = false;
+		if (!event.success && this.#pinnedErrorComponent && !terminalFailurePinned) {
+			this.#pinnedErrorComponent.setErrorPinned(false);
+			this.#pinnedErrorComponent = undefined;
+			this.#pinnedErrorMessage = undefined;
+			this.#restorePinnedErrorInline = true;
+			this.ctx.clearPinnedError();
+			stalePinnedErrorCleared = true;
+		}
+		let appliedRetryUpdate = false;
+		for (const retryError of event.retryErrors ?? []) {
+			const component = this.#takeRetrySupersededAssistantComponent(retryError.persistenceKey);
+			if (!component) continue;
+			component.applyRetryRecovery(retryError.retryRecovery);
+			if (!terminalFailurePinned && this.#pinnedErrorComponent === component) {
+				this.#pinnedErrorComponent = undefined;
+				this.#pinnedErrorMessage = undefined;
+				this.#restorePinnedErrorInline = true;
 			}
-			if (appliedRecovered || (event.recoveredErrors?.length ?? 0) > 0) {
-				this.ctx.clearPinnedError();
+			appliedRetryUpdate = true;
+		}
+		if (
+			!terminalFailurePinned &&
+			!stalePinnedErrorCleared &&
+			(appliedRetryUpdate || (event.retryErrors?.length ?? 0) > 0)
+		) {
+			this.ctx.clearPinnedError();
+		}
+		this.#clearRetrySupersededAssistantComponents();
+		if (!event.success) {
+			if (terminalFailurePinned) {
+				const terminalError = this.#restorePinnedErrorInline
+					? `Retry failed after ${event.attempt} attempts: ${event.finalError || pinnedError || "Unknown error"}`
+					: (pinnedError ?? event.finalError);
+				if (terminalError) this.ctx.showPinnedError(terminalError);
+				this.#restorePinnedErrorInline = true;
+			} else {
+				this.ctx.showError(`Retry failed after ${event.attempt} attempts: ${event.finalError || "Unknown error"}`);
 			}
-			this.#clearRetrySupersededAssistantComponents();
-		} else {
-			this.#clearRetrySupersededAssistantComponents();
-			this.ctx.showError(`Retry failed after ${event.attempt} attempts: ${event.finalError || "Unknown error"}`);
 		}
 		this.#ensureWorkingLoaderWhileStreaming();
 		this.ctx.ui.requestRender();
@@ -1955,7 +2081,6 @@ export class EventController {
 		const component = new TodoReminderComponent(event.todos, event.attempt, event.maxAttempts);
 		this.ctx.present(component);
 	}
-
 	async #handleTodoAutoClear(_event: Extract<AgentSessionEvent, { type: "todo_auto_clear" }>): Promise<void> {
 		await this.ctx.reloadTodos();
 	}
