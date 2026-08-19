@@ -97,6 +97,17 @@ describe("cursor onPayload replacement", () => {
 		expect(message.value.customSystemPrompt).toBeUndefined();
 	});
 
+	it("seeds previousWorkspaceUris from cwd on a new conversation", async () => {
+		const cwd = process.cwd();
+		const { conversationState } = await buildGrpcRequest(model, context, { cwd }, {
+			conversationId: "conv-workspace",
+			blobStore: new Map(),
+		});
+		const expected = cwd.replaceAll("\\", "/");
+		const uri = expected.startsWith("/") ? `file://${expected}` : `file:///${expected}`;
+		expect(conversationState.previousWorkspaceUris).toEqual([uri]);
+	});
+
 	it("lets the onPayload replacement override customSystemPrompt", async () => {
 		const { requestBytes } = await buildGrpcRequest(
 			model,

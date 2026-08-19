@@ -104,7 +104,6 @@ import {
 	RecordScreenFailureSchema,
 	RecordScreenResultSchema,
 	RequestContextResultSchema,
-	RequestContextSchema,
 	RequestContextSuccessSchema,
 	RequestedModelSchema,
 	ResumeActionSchema,
@@ -234,6 +233,14 @@ import {
 	piTimeout,
 } from "./cursor/exec-modern";
 import { handleInteractionQuery } from "./cursor/interaction-query";
+import { buildCursorRequestContext, cursorPreviousWorkspaceUris, resolveCursorWorkspacePaths } from "./cursor/workspace";
+
+export {
+	buildCursorRequestContext,
+	cursorPreviousWorkspaceUris,
+	resolveCursorWorkspacePaths,
+	toCursorFileUri,
+} from "./cursor/workspace";
 
 export const CURSOR_API_URL = "https://api2.cursor.sh";
 export const CURSOR_CLIENT_VERSION = "cli-2026.07.23-e383d2b";
@@ -330,6 +337,8 @@ export interface CursorOptions extends StreamOptions {
 	conversationId?: string;
 	execHandlers?: CursorExecHandlers;
 	onToolResult?: CursorToolResultHandler;
+	/** Extra workspace roots for Cursor requestContext (defaults to `cwd`). */
+	workspacePaths?: string[];
 }
 
 const CONNECT_END_STREAM_FLAG = 0b00000010;
@@ -796,6 +805,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 							requestContextTools,
 							requestContextRules,
 							onConversationCheckpoint,
+							resolveCursorWorkspacePaths(options),
 						).catch(error => {
 							log("error", "handleServerMessage", { error: String(error) });
 						});
@@ -1026,6 +1036,7 @@ export async function handleServerMessage(
 	requestContextTools: McpToolDefinition[],
 	requestContextRules: CursorRule[] = [],
 	onConversationCheckpoint?: (checkpoint: ConversationStateStructure) => void,
+	workspacePaths: string[] = [],
 ): Promise<void> {
 	const msgCase = msg.message.case;
 
@@ -1051,6 +1062,7 @@ export async function handleServerMessage(
 				output,
 				stream,
 				state,
+				workspacePaths,
 			),
 		);
 	} else if (msgCase === "interactionQuery") {
@@ -1469,20 +1481,12 @@ async function handleExecServerMessage(
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
 	state: BlockState,
+	workspacePaths: string[] = [],
 ): Promise<void> {
 	const execCase = execMsg.message.case;
 	log("exec", "dispatch", { execCase, execId: execMsg.execId, hasHandlers: !!execHandlers });
 	if (execCase === "requestContextArgs") {
-		const requestContext = create(RequestContextSchema, {
-			rules: requestContextRules,
-			repositoryInfo: [],
-			tools: requestContextTools,
-			gitRepos: [],
-			projectLayouts: [],
-			mcpInstructions: [],
-			fileContents: {},
-			customSubagents: [],
-		});
+		const requestContext = buildCursorRequestContext(requestContextTools, workspacePaths);
 
 		const requestContextResult = create(RequestContextResultSchema, {
 			result: {
@@ -5084,6 +5088,7 @@ export async function buildGrpcRequest(
 		model.id,
 	);
 
+	const workspaceUris = cursorPreviousWorkspaceUris(options);
 	// Preserve cached non-history state fields (todos, file states, summaries, etc.)
 	// when the system prompt is unchanged; otherwise start fresh.
 	const cachedPromptHead = state.conversationState?.rootPromptMessagesJson?.slice(0, systemPromptIds.length) ?? [];
@@ -5098,7 +5103,7 @@ export async function buildGrpcRequest(
 					turns: [],
 					todos: [],
 					pendingToolCalls: [],
-					previousWorkspaceUris: [],
+					previousWorkspaceUris: workspaceUris,
 					fileStates: {},
 					fileStatesV2: {},
 					summaryArchives: [],
@@ -5115,6 +5120,8 @@ export async function buildGrpcRequest(
 		...baseState,
 		rootPromptMessagesJson,
 		turns,
+		previousWorkspaceUris:
+			baseState.previousWorkspaceUris.length > 0 ? baseState.previousWorkspaceUris : workspaceUris,
 	});
 
 	const wireModelId = model.requestModelId ?? model.id;
