@@ -1,13 +1,23 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
 import { Agent } from "@oh-my-pi/pi-agent-core";
+import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type {
+	SessionCompactionPrecommitEvent,
+	SessionCompactionPrecommitResult,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
-import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import {
+	EXTENSION_HANDLER_TIMEOUT_MS,
+	ExtensionRunner,
+	testSetExtensionHandlerTimeoutMs,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import type { CompactionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as unexpectedStopClassifier from "@oh-my-pi/pi-coding-agent/session/unexpected-stop-classifier";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
@@ -15,8 +25,18 @@ import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 
 const runtimeSignalStoreKey = "__ompRuntimeSignals";
-
-type RuntimeSignalGlobal = typeof globalThis & { [runtimeSignalStoreKey]?: string[] };
+type RuntimeSignalGlobal = typeof globalThis & {
+	[runtimeSignalStoreKey]?: string[];
+	__ompManualCompactGate?: Promise<void>;
+	__ompPrecommitGate?: Promise<void>;
+	__ompPrecommitResult?: SessionCompactionPrecommitResult;
+	__ompPrecommitError?: Error;
+	__ompPrecommitEntered?: (event: SessionCompactionPrecommitEvent) => void;
+	__ompPrecommitFollower?: (event: SessionCompactionPrecommitEvent) => void;
+	__ompCompactionDetails?: unknown;
+	__ompCompactionPreserveData?: Record<string, unknown>;
+	__ompPrecommitMutation?: (event: SessionCompactionPrecommitEvent) => void;
+};
 
 function getRuntimeSignals(): string[] {
 	const globalWithSignals = globalThis as RuntimeSignalGlobal;
@@ -36,6 +56,8 @@ describe("AgentSession auto-compaction queue resume", () => {
 	let sessionManager: SessionManager;
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
+	let extensionRunner: ExtensionRunner;
+	let reportedExtensionErrors: Array<{ event: string; error: string }>;
 	beforeAll(async () => {
 		tempDir = TempDir.createSync("@pi-auto-compaction-queue-");
 		authStorage = await AuthStorage.create(":memory:");
@@ -43,9 +65,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		modelRegistry = new ModelRegistry(authStorage);
 	});
 
-	beforeEach(async () => {
-		vi.useFakeTimers();
-
+	async function setupSession(includePrecommitHandlers = true): Promise<void> {
 		// Install the short-circuit extension directly. Loading a generated
 		// TypeScript file here used to compile the same fixture for every test.
 		const runtime = new ExtensionRuntime();
@@ -53,21 +73,38 @@ describe("AgentSession auto-compaction queue resume", () => {
 			pi => {
 				pi.on("session_before_compact", async event => {
 					getRuntimeSignals().push("before_compact:enter");
-					const gate = (globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> })
-						.__ompManualCompactGate;
+					const gate = (globalThis as RuntimeSignalGlobal).__ompManualCompactGate;
 					if (gate) await gate;
-					return {
-						compaction: {
-							summary: "compacted",
-							shortSummary: undefined,
-							firstKeptEntryId: event.preparation.firstKeptEntryId,
-							tokensBefore: event.preparation.tokensBefore,
-							details: {},
-						},
+					const compaction: CompactionResult = {
+						summary: "compacted",
+						shortSummary: undefined,
+						firstKeptEntryId: event.preparation.firstKeptEntryId,
+						tokensBefore: event.preparation.tokensBefore,
+						details: (globalThis as RuntimeSignalGlobal).__ompCompactionDetails ?? {},
+						preserveData: (globalThis as RuntimeSignalGlobal).__ompCompactionPreserveData,
 					};
+					return { compaction };
 				});
+				if (includePrecommitHandlers) {
+					pi.on("session_compaction_precommit", async event => {
+						const runtimeGlobal = globalThis as RuntimeSignalGlobal;
+						getRuntimeSignals().push(`compaction:precommit:${event.reason}`);
+						runtimeGlobal.__ompPrecommitMutation?.(event);
+						runtimeGlobal.__ompPrecommitEntered?.(event);
+						if (runtimeGlobal.__ompPrecommitGate) await runtimeGlobal.__ompPrecommitGate;
+						if (runtimeGlobal.__ompPrecommitError) throw runtimeGlobal.__ompPrecommitError;
+						return runtimeGlobal.__ompPrecommitResult;
+					});
+					pi.on("session_compaction_precommit", event => {
+						const runtimeGlobal = globalThis as RuntimeSignalGlobal;
+						runtimeGlobal.__ompPrecommitFollower?.(event);
+					});
+				}
 				pi.on("auto_compaction_start", event => {
 					getRuntimeSignals().push(`compaction:start:${event.reason}`);
+				});
+				pi.on("session_compact", () => {
+					getRuntimeSignals().push("compaction:post");
 				});
 				pi.on("auto_compaction_end", event => {
 					getRuntimeSignals().push(`compaction:end:${event.aborted ? "aborted" : "ok"}`);
@@ -85,7 +122,11 @@ describe("AgentSession auto-compaction queue resume", () => {
 		sessionManager = SessionManager.inMemory(tempDir.path());
 		getRuntimeSignals().length = 0;
 
-		const extensionRunner = new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry);
+		extensionRunner = new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry);
+		reportedExtensionErrors = [];
+		extensionRunner.onError(error => {
+			reportedExtensionErrors.push({ event: error.event, error: error.error });
+		});
 
 		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!bundled) {
@@ -117,13 +158,70 @@ describe("AgentSession auto-compaction queue resume", () => {
 			sessionManager,
 			settings: Settings.isolated({
 				"compaction.autoContinue": false,
+				"compaction.strategy": "context-full",
 				"todo.reminders": true,
 				"todo.remindersMax": 3,
 			}),
 			modelRegistry,
 			extensionRunner,
 		});
+	}
+
+	beforeEach(async () => {
+		vi.useFakeTimers();
+		await setupSession();
 	});
+
+	function triggerThresholdAutoCompaction(): void {
+		const assistantMsg = {
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text: "Done." }],
+			api: "anthropic-messages" as const,
+			provider: "anthropic" as const,
+			model: "claude-sonnet-4-5",
+			stopReason: "stop" as const,
+			usage: {
+				input: 190000,
+				output: 1000,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 191000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		};
+
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+	}
+
+	function observeAutoCompactionEnd(): Promise<Extract<AgentSessionEvent, { type: "auto_compaction_end" }>> {
+		const { promise, resolve } = Promise.withResolvers<Extract<AgentSessionEvent, { type: "auto_compaction_end" }>>();
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_end") resolve(event);
+		});
+		return promise;
+	}
+
+	async function waitForFakeTimerBounded<T>(event: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+		let settled = false;
+		void event.then(
+			() => {
+				settled = true;
+			},
+			() => {
+				settled = true;
+			},
+		);
+		const observed = withTimeout(event, timeoutMs, message);
+		const timerStepMs = 10;
+		for (let elapsed = 0; elapsed < timeoutMs && !settled; elapsed += timerStepMs) {
+			for (let flush = 0; flush < 10 && !settled; flush++) await Promise.resolve();
+			if (!settled) vi.advanceTimersByTime(Math.min(timerStepMs, timeoutMs - elapsed));
+		}
+		for (let flush = 0; flush < 10 && !settled; flush++) await Promise.resolve();
+		return observed;
+	}
 
 	afterEach(async () => {
 		try {
@@ -134,8 +232,17 @@ describe("AgentSession auto-compaction queue resume", () => {
 				await Bun.sleep(0);
 			} finally {
 				getRuntimeSignals().length = 0;
-				(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate =
-					undefined;
+				const runtimeGlobal = globalThis as RuntimeSignalGlobal;
+				runtimeGlobal.__ompManualCompactGate = undefined;
+				runtimeGlobal.__ompPrecommitGate = undefined;
+				runtimeGlobal.__ompPrecommitResult = undefined;
+				runtimeGlobal.__ompPrecommitError = undefined;
+				runtimeGlobal.__ompPrecommitEntered = undefined;
+				runtimeGlobal.__ompPrecommitFollower = undefined;
+				runtimeGlobal.__ompCompactionDetails = undefined;
+				runtimeGlobal.__ompCompactionPreserveData = undefined;
+				runtimeGlobal.__ompPrecommitMutation = undefined;
+				testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
 				vi.restoreAllMocks();
 			}
 		}
@@ -955,6 +1062,304 @@ describe("AgentSession auto-compaction queue resume", () => {
 		await compactionDone;
 
 		expect(capturedIsCompacting).toBe(true);
+	});
+
+	it("awaits automatic precommit before appending or replacing compaction context", async () => {
+		const appendCompactionSpy = vi.spyOn(sessionManager, "appendCompaction");
+		const replaceMessagesSpy = vi.spyOn(session.agent, "replaceMessages");
+		const precommitGate = Promise.withResolvers<void>();
+		const precommitEntered = Promise.withResolvers<SessionCompactionPrecommitEvent>();
+		const runtimeGlobal = globalThis as RuntimeSignalGlobal;
+		runtimeGlobal.__ompPrecommitGate = precommitGate.promise;
+		runtimeGlobal.__ompPrecommitEntered = precommitEntered.resolve;
+		const compactionEnd = observeAutoCompactionEnd();
+
+		triggerThresholdAutoCompaction();
+		const event = await waitForFakeTimerBounded(precommitEntered.promise, 1000, "Precommit event timed out");
+
+		try {
+			expect(event).toMatchObject({
+				type: "session_compaction_precommit",
+				trigger: "auto",
+				reason: "threshold",
+				action: "context-full",
+				automatic: true,
+				autoCompactionIteration: 1,
+				compaction: { summary: "compacted", details: {} },
+			});
+			expect(new Date(event.timestamp).toISOString()).toBe(event.timestamp);
+			expect(event.customInstructions).toBeUndefined();
+			expect(event.signal.aborted).toBe(false);
+			expect(appendCompactionSpy).not.toHaveBeenCalled();
+			expect(replaceMessagesSpy).not.toHaveBeenCalled();
+			expect(getRuntimeSignals()).toContain("compaction:precommit:threshold");
+			expect(getRuntimeSignals()).not.toContain("compaction:post");
+		} finally {
+			precommitGate.resolve();
+		}
+		const end = await waitForFakeTimerBounded(compactionEnd, 1000, "Auto-compaction end timed out");
+		expect(end.aborted).toBe(false);
+		expect(end.result).toBe(event.compaction);
+		expect(getRuntimeSignals().filter(signal => signal === "compaction:precommit:threshold")).toHaveLength(1);
+		expect(appendCompactionSpy).toHaveBeenCalledTimes(1);
+		expect(replaceMessagesSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("emits automatic precommit before session_compact after a successful commit", async () => {
+		const compactionEnd = observeAutoCompactionEnd();
+
+		triggerThresholdAutoCompaction();
+
+		const end = await waitForFakeTimerBounded(compactionEnd, 1000, "Auto-compaction end timed out");
+		const signals = getRuntimeSignals();
+		const precommitIndex = signals.indexOf("compaction:precommit:threshold");
+		const postCommitIndex = signals.indexOf("compaction:post");
+
+		expect(end.aborted).toBe(false);
+		expect(precommitIndex).toBeGreaterThanOrEqual(0);
+		expect(postCommitIndex).toBeGreaterThan(precommitIndex);
+		expect(signals.filter(signal => signal === "compaction:precommit:threshold")).toHaveLength(1);
+	});
+
+	it("fails closed when automatic precommit explicitly cancels", async () => {
+		const branchBefore = sessionManager.getBranch();
+		const appendCompactionSpy = vi.spyOn(sessionManager, "appendCompaction");
+		const replaceMessagesSpy = vi.spyOn(session.agent, "replaceMessages");
+		const runtimeGlobal = globalThis as RuntimeSignalGlobal;
+		const follower = vi.fn();
+		runtimeGlobal.__ompPrecommitFollower = follower;
+		runtimeGlobal.__ompPrecommitResult = { cancel: true, reason: "test cancellation" };
+		const compactionEnd = observeAutoCompactionEnd();
+
+		triggerThresholdAutoCompaction();
+
+		const end = await waitForFakeTimerBounded(compactionEnd, 1000, "Cancelled auto-compaction end timed out");
+		expect(end).toMatchObject({ aborted: true, result: undefined });
+		expect(appendCompactionSpy).not.toHaveBeenCalled();
+		expect(replaceMessagesSpy).not.toHaveBeenCalled();
+		const branchAfter = sessionManager.getBranch();
+		expect(branchAfter.slice(0, branchBefore.length)).toEqual(branchBefore);
+		expect(branchAfter).toHaveLength(branchBefore.length + 1);
+		expect(branchAfter.some(entry => entry.type === "compaction")).toBe(false);
+		expect(follower).toHaveBeenCalledTimes(1);
+		expect(getRuntimeSignals()).toContain("compaction:precommit:threshold");
+		expect(end.errorMessage).toBe("test cancellation");
+		expect(getRuntimeSignals()).not.toContain("compaction:post");
+	});
+
+	it("fails closed when an automatic precommit handler throws", async () => {
+		const branchBefore = sessionManager.getBranch();
+		const appendCompactionSpy = vi.spyOn(sessionManager, "appendCompaction");
+		const replaceMessagesSpy = vi.spyOn(session.agent, "replaceMessages");
+		const runtimeGlobal = globalThis as RuntimeSignalGlobal;
+		const follower = vi.fn();
+		runtimeGlobal.__ompPrecommitFollower = follower;
+		runtimeGlobal.__ompPrecommitError = new Error("precommit fixture failure");
+		const compactionEnd = observeAutoCompactionEnd();
+
+		triggerThresholdAutoCompaction();
+
+		const end = await waitForFakeTimerBounded(compactionEnd, 1000, "Failed auto-compaction end timed out");
+		expect(end).toMatchObject({
+			aborted: true,
+			result: undefined,
+			errorMessage: "compaction precommit handler error: precommit fixture failure",
+		});
+		expect(appendCompactionSpy).not.toHaveBeenCalled();
+		expect(replaceMessagesSpy).not.toHaveBeenCalled();
+		const branchAfter = sessionManager.getBranch();
+		expect(branchAfter.slice(0, branchBefore.length)).toEqual(branchBefore);
+		expect(branchAfter).toHaveLength(branchBefore.length + 1);
+		expect(branchAfter.some(entry => entry.type === "compaction")).toBe(false);
+		expect(follower).toHaveBeenCalledTimes(1);
+		expect(reportedExtensionErrors).toContainEqual({
+			event: "session_compaction_precommit",
+			error: "precommit fixture failure",
+		});
+		expect(getRuntimeSignals()).toContain("compaction:precommit:threshold");
+		expect(getRuntimeSignals()).not.toContain("compaction:post");
+	});
+
+	it("fails closed on precommit timeout, reports the error, and still settles later listeners", async () => {
+		const branchBefore = sessionManager.getBranch();
+		const appendCompactionSpy = vi.spyOn(sessionManager, "appendCompaction");
+		const replaceMessagesSpy = vi.spyOn(session.agent, "replaceMessages");
+		const runtimeGlobal = globalThis as RuntimeSignalGlobal;
+		const follower = vi.fn();
+		testSetExtensionHandlerTimeoutMs(20);
+		runtimeGlobal.__ompPrecommitFollower = follower;
+		runtimeGlobal.__ompPrecommitGate = new Promise<void>(() => {});
+		const compactionEnd = observeAutoCompactionEnd();
+
+		triggerThresholdAutoCompaction();
+
+		const end = await waitForFakeTimerBounded(compactionEnd, 1000, "Timed-out auto-compaction end timed out");
+		expect(end).toMatchObject({
+			aborted: true,
+			result: undefined,
+			errorMessage: "compaction precommit handler timeout: handler timed out after 20ms",
+		});
+		expect(appendCompactionSpy).not.toHaveBeenCalled();
+		expect(replaceMessagesSpy).not.toHaveBeenCalled();
+		const branchAfter = sessionManager.getBranch();
+		expect(branchAfter.slice(0, branchBefore.length)).toEqual(branchBefore);
+		expect(branchAfter).toHaveLength(branchBefore.length + 1);
+		expect(branchAfter.some(entry => entry.type === "compaction")).toBe(false);
+		expect(follower).toHaveBeenCalledTimes(1);
+		expect(reportedExtensionErrors).toContainEqual({
+			event: "session_compaction_precommit",
+			error: "handler timed out after 20ms",
+		});
+		expect(getRuntimeSignals()).not.toContain("compaction:post");
+	});
+
+	it("appends the original unfrozen candidate without precommit handlers", async () => {
+		const details = { files: { read: ["src/a.ts"] } };
+		const preserveData = { audit: { marker: "kept" } };
+
+		await session.dispose();
+		await setupSession(false);
+
+		const emitSpy = vi.spyOn(extensionRunner, "emit");
+		const runtimeGlobal = globalThis as RuntimeSignalGlobal;
+		runtimeGlobal.__ompCompactionDetails = details;
+		runtimeGlobal.__ompCompactionPreserveData = preserveData;
+		const compactionEnd = observeAutoCompactionEnd();
+
+		expect(extensionRunner.hasHandlers("session_compaction_precommit")).toBe(false);
+		triggerThresholdAutoCompaction();
+
+		const end = await waitForFakeTimerBounded(compactionEnd, 1000, "No-handler auto-compaction end timed out");
+		const persisted = sessionManager
+			.getBranch()
+			.filter((entry): entry is CompactionEntry => entry.type === "compaction")
+			.at(-1);
+
+		expect(emitSpy).not.toHaveBeenCalledWith(expect.objectContaining({ type: "session_compaction_precommit" }));
+		expect(getRuntimeSignals()).not.toContain("compaction:precommit:threshold");
+		expect(Object.isFrozen(details)).toBe(false);
+		expect(Object.isFrozen(details.files)).toBe(false);
+		expect(Object.isFrozen(preserveData)).toBe(false);
+		expect(Object.isFrozen(preserveData.audit)).toBe(false);
+		expect(persisted).toMatchObject({
+			summary: "compacted",
+			details,
+			preserveData,
+		});
+		expect(persisted?.details).toBe(details);
+		expect(persisted?.preserveData).toBe(preserveData);
+		expect(end).toMatchObject({
+			action: "context-full",
+			aborted: false,
+			result: { details, preserveData },
+		});
+	});
+
+	it("freezes one exact snapcompact proposal and strips only the post-commit end projection", async () => {
+		const details = { files: { read: ["src/a.ts"] } };
+		const preserveData = {
+			snapcompact: {
+				frames: [{ data: "frame-1", mimeType: "image/png", cols: 4, rows: 2, chars: 8 }],
+				text: "archived conversation",
+				totalChars: 21,
+				truncatedChars: 0,
+			},
+			audit: { marker: "kept" },
+		};
+		const runtimeGlobal = globalThis as RuntimeSignalGlobal;
+		const { promise: precommitEntered, resolve: onPrecommitEntered } =
+			Promise.withResolvers<SessionCompactionPrecommitEvent>();
+		let followerEvent: SessionCompactionPrecommitEvent | undefined;
+		let blockedMutations = 0;
+		runtimeGlobal.__ompCompactionDetails = details;
+		runtimeGlobal.__ompCompactionPreserveData = preserveData;
+		runtimeGlobal.__ompPrecommitEntered = onPrecommitEntered;
+		runtimeGlobal.__ompPrecommitFollower = event => {
+			followerEvent = event;
+		};
+		runtimeGlobal.__ompPrecommitMutation = event => {
+			// The listener intentionally violates the public readonly contract to
+			// prove the runtime boundary protects later listeners and persistence.
+			const mutableEvent = event as unknown as { timestamp: string; autoCompactionIteration: number };
+			const mutableDetails = event.compaction.details as { files: { read: string[] } };
+			const mutablePreserveData = event.compaction.preserveData as typeof preserveData;
+			const mutations = [
+				() => {
+					mutableEvent.timestamp = "mutated";
+				},
+				() => {
+					mutableEvent.autoCompactionIteration = 99;
+				},
+				() => {
+					mutableDetails.files.read[0] = "mutated.ts";
+				},
+				() => {
+					mutablePreserveData.snapcompact.frames[0].data = "mutated-frame";
+				},
+			];
+			for (const mutate of mutations) {
+				try {
+					mutate();
+				} catch {
+					blockedMutations++;
+				}
+			}
+		};
+		session.agent.setModel({ ...session.agent.state.model, input: ["text", "image"] });
+		session.settings.override("compaction.strategy", "snapcompact");
+		const compactionEnd = observeAutoCompactionEnd();
+
+		triggerThresholdAutoCompaction();
+
+		const proposal = await waitForFakeTimerBounded(precommitEntered, 1000, "Snapcompact precommit timed out");
+		const end = await waitForFakeTimerBounded(compactionEnd, 1000, "Snapcompact end timed out");
+		const persisted = sessionManager
+			.getBranch()
+			.filter((entry): entry is CompactionEntry => entry.type === "compaction")
+			.at(-1);
+
+		expect(blockedMutations).toBe(4);
+		expect(Object.isFrozen(proposal)).toBe(true);
+		expect(Object.isFrozen(proposal.compaction)).toBe(true);
+		expect(Object.isFrozen(proposal.compaction.details)).toBe(true);
+		expect(Object.isFrozen(proposal.compaction.preserveData?.snapcompact)).toBe(true);
+		expect(followerEvent).toBe(proposal);
+		expect(followerEvent?.compaction).toBe(proposal.compaction);
+		expect(proposal.action).toBe("snapcompact");
+		expect(proposal.compaction.details).toEqual(details);
+		expect(proposal.compaction.preserveData).toEqual(preserveData);
+		expect(persisted).toMatchObject(proposal.compaction);
+		expect(persisted?.details).toBe(proposal.compaction.details);
+		expect(persisted?.preserveData).toBe(proposal.compaction.preserveData);
+		expect(end).toMatchObject({
+			action: "snapcompact",
+			aborted: false,
+			result: { preserveData: { audit: { marker: "kept" } } },
+		});
+		expect(end.result).not.toBe(proposal.compaction);
+	});
+
+	it("does not advertise automatic shake maintenance as a compaction precommit", async () => {
+		const precommit = vi.fn();
+		const appendCompactionSpy = vi.spyOn(sessionManager, "appendCompaction");
+		const runtimeGlobal = globalThis as RuntimeSignalGlobal;
+		runtimeGlobal.__ompPrecommitEntered = precommit;
+		session.settings.override("compaction.strategy", "shake");
+		vi.spyOn(session, "shake").mockResolvedValue({
+			mode: "elide",
+			toolResultsDropped: 1,
+			blocksDropped: 0,
+			tokensFreed: 100_000,
+		});
+		vi.spyOn(session, "getContextUsage").mockReturnValue({ tokens: 1000, contextWindow: 200_000, percent: 0.5 });
+		const compactionEnd = observeAutoCompactionEnd();
+
+		triggerThresholdAutoCompaction();
+
+		const end = await waitForFakeTimerBounded(compactionEnd, 1000, "Auto-shake end timed out");
+		expect(end).toMatchObject({ action: "shake", result: undefined, aborted: false });
+		expect(precommit).not.toHaveBeenCalled();
+		expect(appendCompactionSpy).not.toHaveBeenCalled();
 	});
 
 	it("forwards todo reminder lifecycle signals to extensions", async () => {
