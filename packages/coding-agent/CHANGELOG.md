@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Tool blocks no longer commit their spinner head and preview rows to native scrollback while they run, so a completed call cannot re-anchor the committed prefix and duplicate its box in a multiplexer pane ([#8881](https://github.com/can1357/oh-my-pi/issues/8881)).
+
 ### Added
 
 - Added `qwenTemplateReasoningEffort` to the `models.yml` `compat` schema, so the auto-enabled Qwen 3.8+ template effort dialect (`chat_template_kwargs.reasoning_effort`) can be switched off per provider/model for strict local servers that reject unknown `chat_template_kwargs`.

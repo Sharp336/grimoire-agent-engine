@@ -876,17 +876,16 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	}
 
 	/**
-	 * Keeps in-flight TV-wall frames out of immutable native scrollback: the
-	 * `vibe_wait` wall, displaceable snapshots (`hub` waiting polls, `todo`
-	 * lists), and live `task` calls. Their frames replace each other rather
-	 * than append — task progress rows rewrite in place on every snapshot —
-	 * so an unpinned commit records a per-tick frozen snapshot (and for
-	 * displaceable blocks force-seals them, stacking the next poll below).
-	 * The finalized frame commits exactly once when the pin lifts.
+	 * Keeps in-flight frames out of immutable native scrollback. An unfinalized
+	 * block still rewrites rows it already rendered — a preview replaced by the
+	 * result, a TV-wall frame replacing its predecessor — so committing them
+	 * guarantees a later committed-prefix re-anchor, and on a multiplexer that
+	 * cannot erase scrollback the engine recommits the block below its stale
+	 * copy (issue #8881). Height is not a concern: an unfinalized block renders
+	 * a bounded preview, and the finalized frame commits once the pin lifts.
 	 */
 	isNativeScrollbackLiveRegionPinned(): boolean {
-		if (this.isTranscriptBlockFinalized()) return false;
-		return this.#toolName === "vibe_wait" || this.#toolName === "task" || this.#displaceableByToolName !== undefined;
+		return !this.isTranscriptBlockFinalized();
 	}
 
 	/**
