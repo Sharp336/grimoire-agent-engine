@@ -9,16 +9,39 @@
  * worker alive while connected (Chrome 116+); a chrome.alarms tick revives it
  * and re-dials after Chrome reaps it while disconnected.
  */
+import { AttachmentGuard } from "../../coding-agent/src/tools/browser/relay/attachment-guard";
 import type { ExtToRelayMessage, RelayToExtMessage, TabSnapshot } from "../../coding-agent/src/tools/browser/relay/protocol";
 
 const DEFAULT_PORT = 9224;
 const PING_INTERVAL_MS = 20_000;
 const RECONNECT_MIN_MS = 1_000;
 const RECONNECT_MAX_MS = 10_000;
+/**
+ * How long the relay may stay disconnected before we reclaim our debugger
+ * attachments. Covers a couple of reconnect backoff cycles so a brief relay
+ * restart doesn't strip a live session, but a dead relay no longer orphans the
+ * "started debugging this browser" infobar forever (#8930).
+ */
+const ORPHAN_GRACE_MS = 30_000;
 
 let ws: WebSocket | null = null;
 let reconnectDelay = RECONNECT_MIN_MS;
 let pingTimer: NodeJS.Timeout | null = null;
+
+/**
+ * The extension owns its `chrome.debugger` attachments: it outlives the relay,
+ * so it must detach tabs the relay can no longer speak for. The relay reconciles
+ * live attachments from the next `hello` and re-attaches any tab that still has
+ * session holders, so an early detach is safe.
+ */
+const attachmentGuard = new AttachmentGuard<NodeJS.Timeout>({
+	graceMs: ORPHAN_GRACE_MS,
+	setTimer: (fn, ms) => setTimeout(fn, ms),
+	clearTimer: handle => clearTimeout(handle),
+	detachAll: tabIds => {
+		for (const tabId of tabIds) void chrome.debugger.detach({ tabId }).catch(() => {});
+	},
+});
 
 interface RelaySettings {
 	port: number;
@@ -155,9 +178,11 @@ async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>): Promise<un
 	switch (msg.op) {
 		case "attach":
 			await chrome.debugger.attach({ tabId: msg.tabId }, "1.3");
+			attachmentGuard.track(msg.tabId);
 			return {};
 		case "detach":
 			await chrome.debugger.detach({ tabId: msg.tabId });
+			attachmentGuard.untrack(msg.tabId);
 			return {};
 		case "send":
 			return await chrome.debugger.sendCommand(
@@ -217,6 +242,7 @@ async function connect(): Promise<void> {
 	ws = socket;
 	socket.onopen = () => {
 		reconnectDelay = RECONNECT_MIN_MS;
+		attachmentGuard.onConnected();
 		void setBadge(true);
 		void buildHello().then(hello => post(hello));
 		clearInterval(pingTimer ?? undefined);
@@ -234,6 +260,7 @@ async function connect(): Promise<void> {
 		}
 		void setBadge(false);
 		void restoreGroups();
+		attachmentGuard.onDisconnected();
 		scheduleReconnect();
 	};
 	socket.onerror = () => {
@@ -250,6 +277,10 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 
 chrome.debugger.onDetach.addListener((source, reason) => {
 	if (source.tabId === undefined) return;
+	// The attachment is gone (user clicked Cancel, tab navigated to a
+	// non-attachable target, or Chrome tore it down); stop tracking it so a
+	// later orphan sweep never tries to detach a tab we no longer own.
+	attachmentGuard.untrack(source.tabId);
 	post({ t: "detached", tabId: source.tabId, reason });
 });
 
@@ -284,5 +315,8 @@ chrome.storage.onChanged.addListener((_changes, areaName) => {
 chrome.action.onClicked.addListener(() => void chrome.runtime.openOptionsPage());
 chrome.runtime.onInstalled.addListener(() => void connect());
 chrome.runtime.onStartup.addListener(() => void connect());
+// Clean teardown: detach any tab we still own before the worker is suspended,
+// so the debugger infobar never survives the extension going idle.
+chrome.runtime.onSuspend.addListener(() => attachmentGuard.onSuspend());
 
 void connect();

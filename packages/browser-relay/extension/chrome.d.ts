@@ -100,5 +100,6 @@ declare const chrome: {
 		openOptionsPage(): Promise<void>;
 		onInstalled: ChromeEvent<() => void>;
 		onStartup: ChromeEvent<() => void>;
+		onSuspend: ChromeEvent<() => void>;
 	};
 };
