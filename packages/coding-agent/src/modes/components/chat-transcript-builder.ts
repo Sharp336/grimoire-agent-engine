@@ -331,12 +331,18 @@ export class ChatTranscriptBuilder {
 		this.#trackExpandable(assistantComponent);
 		this.container.addChild(assistantComponent);
 
+		// `usage` is declared non-optional on the assistant message, but persisted
+		// session records are replayed without validation, so a hand-authored,
+		// converted, or legacy entry can arrive without it (#8142). Treat that as
+		// "no usage recorded": render the turn, skip the cache-miss marker, and
+		// leave the last-seen usage untouched rather than throwing mid-rebuild.
+		const usage: Usage | undefined = message.usage;
 		if (settings.get("display.cacheMissMarker")) {
-			const invalidation = detectCacheInvalidation(this.#lastAssistantUsage, message.usage);
+			const invalidation = detectCacheInvalidation(this.#lastAssistantUsage, usage);
 			if (invalidation) assistantComponent.setCacheInvalidation(invalidation);
 		}
-		if (message.usage.cacheRead + message.usage.cacheWrite + message.usage.input > 0) {
-			this.#lastAssistantUsage = message.usage;
+		if (usage && usage.cacheRead + usage.cacheWrite + usage.input > 0) {
+			this.#lastAssistantUsage = usage;
 		}
 
 		const hasVisibleAssistantContent = assistantHasVisibleContent(message);
@@ -425,8 +431,7 @@ export class ChatTranscriptBuilder {
 			appendAssistantSegment(afterToolSegment);
 		}
 
-		this.#pendingUsage =
-			settings.get("display.showTokenUsage") && assistantUsageIsBilled(message.usage) ? message.usage : undefined;
+		this.#pendingUsage = settings.get("display.showTokenUsage") && assistantUsageIsBilled(usage) ? usage : undefined;
 		this.#pendingUsageDuration = message.duration;
 		this.#pendingUsageTtft = message.ttft;
 		this.#pendingUsageTimestamp = message.timestamp;

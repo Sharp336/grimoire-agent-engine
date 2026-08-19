@@ -247,8 +247,15 @@ export function resolveAssistantErrorPresentation(
  * `false`, but any input, output, cache, or premium request keeps the row so
  * cost transparency survives — the live path and the resume/rebuild path
  * agree turn-by-turn.
+ *
+ * `usage` is non-optional on the message type, but persisted session records
+ * are replayed without validation, so a hand-authored, converted, or legacy
+ * `.jsonl` entry can omit it (#8142). A turn with nothing recorded carries no
+ * evidence of billed work, so it collapses to `false` and renders no usage row
+ * — the same outcome as an explicit all-zero usage.
  */
-export function assistantUsageIsBilled(usage: AssistantAgentMessage["usage"]): boolean {
+export function assistantUsageIsBilled(usage: AssistantAgentMessage["usage"] | undefined): boolean {
+	if (!usage) return false;
 	if (usage.input > 0 || usage.output > 0) return true;
 	if (usage.cacheRead > 0 || usage.cacheWrite > 0) return true;
 	if ((usage.premiumRequests ?? 0) > 0) return true;

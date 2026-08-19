@@ -460,13 +460,19 @@ export class UiHelpers {
 				const lastChild = this.ctx.chatContainer.children[this.ctx.chatContainer.children.length - 1];
 				const assistantComponent = lastChild instanceof AssistantMessageComponent ? lastChild : undefined;
 				if (assistantComponent) {
-					const usage = message.usage;
+					// `usage` is declared non-optional on the assistant message, but a
+					// persisted session is replayed without validation, so a
+					// hand-authored, converted, or legacy `.jsonl` entry can arrive
+					// without it (#8142). Treat that as "no usage recorded": render the
+					// turn, skip the cache-miss marker, and leave the baseline alone
+					// rather than aborting the whole resume.
+					const usage: Usage | undefined = message.usage;
 					const explained = sessionContext.cacheMissExplainedAt?.[i] ?? false;
 					if (this.ctx.settings.get("display.cacheMissMarker") && !explained) {
 						const invalidation = detectCacheInvalidation(this.ctx.lastAssistantUsage, usage);
 						if (invalidation) assistantComponent.setCacheInvalidation(invalidation);
 					}
-					if (usage.cacheRead + usage.cacheWrite + usage.input > 0) {
+					if (usage && usage.cacheRead + usage.cacheWrite + usage.input > 0) {
 						this.ctx.lastAssistantUsage = usage;
 					}
 				}
