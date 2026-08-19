@@ -139,6 +139,33 @@ describe("renderUsageReports (#3268 TUI aggregate)", () => {
 		expect(text).not.toContain("1 accts");
 	});
 
+	it("renders absolute credit usage alongside the remaining percentage", () => {
+		const reports: UsageReport[] = [
+			report("kiro", "kiro@example.test", [
+				{
+					id: "credits",
+					label: "Credits",
+					scope: { provider: "kiro", accountId: "kiro-account", tier: "KIRO PRO" },
+					window: { id: "billing-cycle", label: "Billing cycle" },
+					amount: {
+						used: 558.34,
+						limit: 1000,
+						remaining: 441.66,
+						usedFraction: 0.55834,
+						remainingFraction: 0.44166,
+						unit: "credits",
+					},
+					status: "ok",
+				},
+			]),
+		];
+
+		const text = stripVTControlCharacters(renderUsageReports(reports, theme, Date.now(), 160));
+
+		expect(text).toContain("558.34 / 1,000 credits");
+		expect(text).toContain("44.2% free");
+	});
+
 	it("preserves capped aggregate status when a group mixes capped and used-only amounts", () => {
 		const reports: UsageReport[] = [
 			report("anthropic", "capped@example.test", [
