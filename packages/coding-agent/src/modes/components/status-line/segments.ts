@@ -468,6 +468,20 @@ const contextPctSegment: StatusLineSegment = {
 	},
 };
 
+const contextTokensSegment: StatusLineSegment = {
+	id: "context_tokens",
+	render(ctx) {
+		const window = ctx.contextWindow;
+		const autoIcon = ctx.autoCompactEnabled && theme.icon.auto ? ` ${theme.icon.auto}` : "";
+		const text = `${formatNumber(ctx.contextTokens)}/${window > 0 ? formatNumber(window) : "?"}${autoIcon}`;
+		const color = getContextUsageThemeColor(getContextUsageLevel(ctx.contextPercent ?? 0, window));
+		return {
+			content: withIcon(theme.icon.context, theme.fg(color, text)),
+			visible: true,
+		};
+	},
+};
+
 const contextTotalSegment: StatusLineSegment = {
 	id: "context_total",
 	render(ctx) {
@@ -700,6 +714,7 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	token_rate: tokenRateSegment,
 	cost: costSegment,
 	context_pct: contextPctSegment,
+	context_tokens: contextTokensSegment,
 	context_total: contextTotalSegment,
 	time_spent: timeSpentSegment,
 	time: timeSegment,

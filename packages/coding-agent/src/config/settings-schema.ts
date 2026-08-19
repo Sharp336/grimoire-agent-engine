@@ -174,6 +174,7 @@ export type StatusLineSegmentId =
 	| "token_rate"
 	| "cost"
 	| "context_pct"
+	| "context_tokens"
 	| "context_total"
 	| "time_spent"
 	| "time"

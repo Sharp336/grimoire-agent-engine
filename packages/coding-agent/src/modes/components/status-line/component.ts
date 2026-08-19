@@ -269,7 +269,7 @@ const STATUS_USAGE_START_DELAY_MS = 0;
 const STATUS_USAGE_REFRESH_TIMEOUT_MS = 2_000;
 
 function hasContextSegment(segments: readonly StatusLineSegmentId[]): boolean {
-	return segments.includes("context_pct") || segments.includes("context_total");
+	return segments.includes("context_pct") || segments.includes("context_tokens") || segments.includes("context_total");
 }
 function hasGitSegment(segments: readonly StatusLineSegmentId[]): boolean {
 	return segments.includes("git");
