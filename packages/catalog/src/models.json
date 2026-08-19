@@ -24448,7 +24448,7 @@
 		"grok-4.6": {
 			"id": "grok-4.6",
 			"name": "Grok 4.6",
-			"api": "openai-completions",
+			"api": "openai-responses",
 			"provider": "github-copilot",
 			"baseUrl": "https://api.githubcopilot.com",
 			"reasoning": true,

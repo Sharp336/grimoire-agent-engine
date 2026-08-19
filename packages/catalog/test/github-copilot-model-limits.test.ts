@@ -390,9 +390,23 @@ describe("github copilot model limits mapping", () => {
 		const model = models.find(candidate => candidate.id === "grok-4.5");
 		expect(model?.api).toBe("openai-responses");
 	});
+	it("routes grok-4.6 to the openai-responses endpoint (#8807)", async () => {
+		const { models } = await discoverCopilotModels({
+			data: [
+				{
+					id: "grok-4.6",
+					name: "Grok 4.6",
+				},
+			],
+		});
+
+		const model = models.find(candidate => candidate.id === "grok-4.6");
+		expect(model?.api).toBe("openai-responses");
+	});
 	for (const migration of [
 		{ id: "mai-code-1-flash-picker", name: "MAI-Code-1-Flash" },
 		{ id: "grok-4.5", name: "Grok 4.5" },
+		{ id: "grok-4.6", name: "Grok 4.6" },
 	]) {
 		it(`refreshes a cached ${migration.name} completion route after the endpoint migration`, async () => {
 			const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), `pi-ai-copilot-${migration.id}-cache-`));
@@ -433,7 +447,7 @@ describe("github copilot model limits mapping", () => {
 			}
 		});
 	}
-	it("drops cached Grok 4.5 context variants when the migration refresh fails", async () => {
+	it("drops cached Grok 4.5 and 4.6 context variants when the migration refresh fails", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-copilot-grok-variant-cache-"));
 		const cacheDbPath = path.join(tempDir, "models.db");
 		const cacheProviderId = "github-copilot-grok-variant-cache-test";
@@ -449,6 +463,12 @@ describe("github copilot model limits mapping", () => {
 						requestModelId: "grok-4.5",
 						contextWindow: 500_000,
 					},
+					cachedCopilotCompletionModel("grok-4.6", "Grok 4.6"),
+					{
+						...cachedCopilotCompletionModel("grok-4.6-1m", "Grok 4.6 (1M)"),
+						requestModelId: "grok-4.6",
+						contextWindow: 500_000,
+					},
 				],
 			});
 			await oldManager.refresh("online");
@@ -462,13 +482,15 @@ describe("github copilot model limits mapping", () => {
 			const { models } = await manager.refresh("online-if-uncached");
 
 			expect(fetchMock).toHaveBeenCalledTimes(2);
-			// The bundled catalog now ships a responses-route grok-4.5, so the id
-			// resurfaces from the bundle after the failed refresh. The migration
-			// contract is that the stale cached COMPLETIONS route never comes
-			// back — and the cached long-context variant has no bundled entry,
-			// so it stays dropped.
+			// The bundled catalog now ships responses-route grok-4.5 and grok-4.6, so the ids
+			// resurface from the bundle after the failed refresh. The migration
+			// contract is that the stale cached COMPLETIONS routes never come
+			// back — and the cached long-context variants have no bundled entries,
+			// so they stay dropped.
 			expect(models.find(candidate => candidate.id === "grok-4.5")?.api).toBe("openai-responses");
 			expect(models.find(candidate => candidate.id === "grok-4.5-1m")).toBeUndefined();
+			expect(models.find(candidate => candidate.id === "grok-4.6")?.api).toBe("openai-responses");
+			expect(models.find(candidate => candidate.id === "grok-4.6-1m")).toBeUndefined();
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}

@@ -14,6 +14,7 @@
 - Fixed SuperGrok (`xai-oauth`) Grok 4.6 hiding the thinking-level picker: the Responses effort-capable allowlist now includes `grok-4.6`, so `/model` can select the documented `low`/`medium`/`high`/`xhigh` ladder (`max` is rejected by api.x.ai).
 - Marked CoreWeave runtime discovery as authoritative so stale bundled model ids that the endpoint no longer serves stop appearing as selectable models.
 - ChatGPT Codex discovery that advertises only worker `-wm` SKUs now also registers the plain model route, so a configured `openai-codex/<model>` keeps resolving instead of fuzzy-falling-back to the `-wm` SKU some accounts reject.
+- Fixed GitHub Copilot routing for `grok-4.6` and its 1M-context variant to use the Responses endpoint instead of the unsupported Chat Completions endpoint ([#8807](https://github.com/can1357/oh-my-pi/issues/8807)).
 
 ## [17.3.6] - 2026-08-17
 
