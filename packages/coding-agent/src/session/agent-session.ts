@@ -6422,7 +6422,7 @@ export class AgentSession {
 			if (!memoryPromptOptions.isCurrent()) {
 				return;
 			}
-			this.agent.setSystemPrompt(beforeAgentStartSystemPrompt);
+			this.#tools.setTurnSystemPromptOverride(beforeAgentStartSystemPrompt);
 
 			// Bail out if a newer abort/prompt cycle has started since we began setup
 			if (!memoryPromptOptions.isCurrent()) {
@@ -6494,7 +6494,7 @@ export class AgentSession {
 						if (!memoryPromptOptions.isCurrent()) return false;
 						beforeAgentStartSystemPrompt = await emitBeforeAgentStart(rebuiltSystemPrompt);
 						if (!memoryPromptOptions.isCurrent()) return false;
-						this.agent.setSystemPrompt(beforeAgentStartSystemPrompt);
+						this.#tools.setTurnSystemPromptOverride(beforeAgentStartSystemPrompt);
 						return true;
 					},
 					() => {
