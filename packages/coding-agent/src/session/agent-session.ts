@@ -6362,6 +6362,7 @@ export class AgentSession {
 			if ((this.#isDisposed && !disposingBeforeTransition) || !memoryPromptOptions.isCurrent()) return;
 			const beforeAgentStartMessageCount = messages.length;
 			let baseXdevCatalogDelivered = true;
+			let beforeAgentStartReplacedSystemPrompt = false;
 			const emitBeforeAgentStart = async (systemPrompt: string[]): Promise<string[]> => {
 				if (!this.#extensionRunner) return systemPrompt;
 				const result = await this.#extensionRunner.emitBeforeAgentStart(
@@ -6369,6 +6370,7 @@ export class AgentSession {
 					options?.images,
 					systemPrompt,
 				);
+				beforeAgentStartReplacedSystemPrompt = result?.systemPrompt !== undefined;
 				baseXdevCatalogDelivered = result?.systemPrompt === undefined;
 				if (result?.messages) {
 					const promptAttribution: "user" | "agent" | undefined =
@@ -6397,6 +6399,14 @@ export class AgentSession {
 				}
 				return result?.systemPrompt ?? systemPrompt;
 			};
+			const applyBeforeAgentStartSystemPrompt = (systemPrompt: string[]): void => {
+				if (beforeAgentStartReplacedSystemPrompt) {
+					this.#tools.setTurnSystemPromptOverride(systemPrompt);
+					return;
+				}
+				this.#tools.clearTurnSystemPromptOverride();
+				this.agent.setSystemPrompt(systemPrompt);
+			};
 
 			let beforeAgentStartSystemPrompt = await this.#buildSystemPromptForAgentStart(
 				expandedText,
@@ -6422,7 +6432,7 @@ export class AgentSession {
 			if (!memoryPromptOptions.isCurrent()) {
 				return;
 			}
-			this.#tools.setTurnSystemPromptOverride(beforeAgentStartSystemPrompt);
+			applyBeforeAgentStartSystemPrompt(beforeAgentStartSystemPrompt);
 
 			// Bail out if a newer abort/prompt cycle has started since we began setup
 			if (!memoryPromptOptions.isCurrent()) {
@@ -6494,7 +6504,7 @@ export class AgentSession {
 						if (!memoryPromptOptions.isCurrent()) return false;
 						beforeAgentStartSystemPrompt = await emitBeforeAgentStart(rebuiltSystemPrompt);
 						if (!memoryPromptOptions.isCurrent()) return false;
-						this.#tools.setTurnSystemPromptOverride(beforeAgentStartSystemPrompt);
+						applyBeforeAgentStartSystemPrompt(beforeAgentStartSystemPrompt);
 						return true;
 					},
 					() => {
