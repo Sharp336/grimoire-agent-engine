@@ -403,6 +403,7 @@ export function streamKiro(model: Model, context: Context, options: KiroOptions 
 	const stream = new MessageEventStream();
 	const timestamp = Date.now();
 	const startTime = performance.now();
+	const conversationId = options.sessionId ?? crypto.randomUUID();
 	void (async () => {
 		let state = createAttempt(model, stream, timestamp);
 		try {
@@ -419,6 +420,7 @@ export function streamKiro(model: Model, context: Context, options: KiroOptions 
 					disableReasoning: options.disableReasoning,
 					hideThinkingSummary: options.hideThinkingSummary,
 					maxTokens: options.maxTokens,
+					conversationId,
 				});
 				if (credential.profileArn) payload.profileArn = credential.profileArn;
 				const replacement = await options.onPayload?.(payload, model);

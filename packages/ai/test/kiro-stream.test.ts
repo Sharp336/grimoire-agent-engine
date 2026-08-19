@@ -365,6 +365,55 @@ describe("Kiro stream transport", () => {
 		expect(result.content).toContainEqual({ type: "text", text: "recovered" });
 	});
 
+	test("reuses the session ID as the Kiro conversation ID across turns", async () => {
+		const conversationIds: string[] = [];
+		const fetch: FetchImpl = async (_input, init) => {
+			const payload = eventPayload(JSON.parse(String(init?.body)));
+			conversationIds.push(payload.conversationState.conversationId);
+			return responseForEvents([["assistantResponseEvent", { content: "ok" }]]);
+		};
+		const options = { apiKey: "kiro-token", fetch, sessionId: "session-shared" };
+		await streamKiro(createModel(), TEST_CONTEXT, options).result();
+		await streamKiro(createModel(), TEST_CONTEXT, options).result();
+
+		expect(conversationIds).toEqual(["session-shared", "session-shared"]);
+	});
+
+	test("isolates Kiro conversations for different session IDs", async () => {
+		const conversationIds: string[] = [];
+		const fetch: FetchImpl = async (_input, init) => {
+			const payload = eventPayload(JSON.parse(String(init?.body)));
+			conversationIds.push(payload.conversationState.conversationId);
+			return responseForEvents([["assistantResponseEvent", { content: "ok" }]]);
+		};
+		await streamKiro(createModel(), TEST_CONTEXT, { apiKey: "kiro-token", fetch, sessionId: "session-a" }).result();
+		await streamKiro(createModel(), TEST_CONTEXT, { apiKey: "kiro-token", fetch, sessionId: "session-b" }).result();
+
+		expect(conversationIds).toEqual(["session-a", "session-b"]);
+	});
+
+	test("reuses one generated conversation ID across a pre-output retry", async () => {
+		let attempts = 0;
+		const conversationIds: string[] = [];
+		const fetch: FetchImpl = async (_input, init) => {
+			const payload = eventPayload(JSON.parse(String(init?.body)));
+			conversationIds.push(payload.conversationState.conversationId);
+			attempts++;
+			return attempts === 1
+				? Response.json({ code: "INSUFFICIENT_MODEL_CAPACITY", message: "try another model" }, { status: 429 })
+				: responseForEvents([["assistantResponseEvent", { content: "recovered" }]]);
+		};
+		const result = await streamKiro(createModel(), TEST_CONTEXT, {
+			apiKey: "kiro-token",
+			fetch,
+			providerRetryWait: async () => {},
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(conversationIds).toHaveLength(2);
+		expect(conversationIds[0]).toBe(conversationIds[1]);
+	});
+
 	test("maps context overflow responses and validates active endpoint routing before fetch", async () => {
 		let fetchCalls = 0;
 		const contextFetch: FetchImpl = async () => {
