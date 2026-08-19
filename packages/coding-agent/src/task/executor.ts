@@ -68,6 +68,7 @@ import {
 	type AgentProgress,
 	MAX_OUTPUT_BYTES,
 	MAX_OUTPUT_LINES,
+	type RoutingIntent,
 	type SingleResult,
 	type StructuredSubagentOutput,
 	type StructuredSubagentSchemaMode,
@@ -495,6 +496,22 @@ export interface ExecutorOptions {
 	onCleanupDeferred?: (completion: Promise<void>) => void;
 	/** Internal cleanup grace override for deterministic lifecycle tests. */
 	cleanupGraceMs?: number;
+	/** Routing intent selected for this spawn. */
+	routingIntent?: RoutingIntent;
+	/** Resource pool label chosen by routing. */
+	resourcePool?: string;
+	/** Concise routing reason for UI. */
+	routingReason?: string;
+	/** Whether parent-pool anti-affinity was applied. */
+	routingAntiAffinity?: boolean;
+	/** Whether chosen pool is parent pool despite avoidParentPool. */
+	routingParentPoolFallback?: boolean;
+	/** Whether usage/headroom influenced selection. */
+	routingUsageInfluenced?: boolean;
+	/** Why routing was bypassed (explicit pin / operator override). */
+	routingBypassReason?: string;
+	/** Bounded contract-reroute history. */
+	routingReroutes?: { from: string; to: string; reason: string }[];
 }
 
 function parseStringifiedJson(value: unknown): unknown {
@@ -937,6 +954,14 @@ interface RunMonitorArgs {
 	softRequestBudgetNotice: boolean;
 	/** Wall-clock cap in ms; 0 disables the timer. */
 	maxRuntimeMs: number;
+	routingIntent?: RoutingIntent;
+	resourcePool?: string;
+	routingReason?: string;
+	routingAntiAffinity?: boolean;
+	routingParentPoolFallback?: boolean;
+	routingUsageInfluenced?: boolean;
+	routingBypassReason?: string;
+	routingReroutes?: { from: string; to: string; reason: string }[];
 }
 
 /**
@@ -1041,8 +1066,15 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		durationMs: 0,
 		modelOverride: args.modelOverride,
 		modelRole: args.modelRole,
+		routingIntent: args.routingIntent,
+		resourcePool: args.resourcePool,
+		routingReason: args.routingReason,
+		routingAntiAffinity: args.routingAntiAffinity,
+		routingParentPoolFallback: args.routingParentPoolFallback,
+		routingUsageInfluenced: args.routingUsageInfluenced,
+		routingBypassReason: args.routingBypassReason,
+		routingReroutes: args.routingReroutes,
 	};
-
 	const outputChunks: string[] = [];
 	const finalOutputChunks: string[] = [];
 	const RECENT_OUTPUT_TAIL_BYTES = 8 * 1024;
@@ -2275,6 +2307,14 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		extractedToolData: progress.extractedToolData,
 		retryFailure: progress.retryFailure,
 		outputMeta,
+		routingIntent: progress.routingIntent,
+		resourcePool: progress.resourcePool,
+		routingReason: progress.routingReason,
+		routingAntiAffinity: progress.routingAntiAffinity,
+		routingParentPoolFallback: progress.routingParentPoolFallback,
+		routingUsageInfluenced: progress.routingUsageInfluenced,
+		routingBypassReason: progress.routingBypassReason,
+		routingReroutes: progress.routingReroutes,
 	};
 }
 
@@ -2799,6 +2839,14 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		softRequestBudget,
 		softRequestBudgetNotice,
 		maxRuntimeMs,
+		routingIntent: options.routingIntent,
+		resourcePool: options.resourcePool,
+		routingReason: options.routingReason,
+		routingAntiAffinity: options.routingAntiAffinity,
+		routingParentPoolFallback: options.routingParentPoolFallback,
+		routingUsageInfluenced: options.routingUsageInfluenced,
+		routingBypassReason: options.routingBypassReason,
+		routingReroutes: options.routingReroutes,
 	});
 	const progress = monitor.progress;
 	let unsubscribe: (() => void) | null = null;

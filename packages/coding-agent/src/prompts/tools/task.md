@@ -27,8 +27,10 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
   - `task`: Complete, self-contained instructions. One-liners or missing acceptance criteria are PROHIBITED.
 {{#if effortEnabled}}  - `effort`: Scale w/ complexity of this task: `"lo"`|`"med"`|`"hi"`
 {{/if}}
+  - `intent`: Routing hint for the dynamic pool router: `default`|`cheap`|`normal`|`strong`|`vision`|`large-context`|`same-pool-ok` (capability, not a model ID; parent pool protected unless `same-pool-ok`).
   - `outputSchema`: Invocation-specific JSON Schema. Overrides the selected agent and parent-session schemas.
   - `schemaMode`: `"permissive"` (default) accepts a retry-exhausted invalid result with a warning; `"strict"` fails it.
+  - `routing`: Batch routing constraints: `excludePools`/`preferPools` (pool/provider/label match), `allowParentPool`, `sticky` (when true, applies constraints to the session via runtime override — not a persisted config write).
 {{#if isolationEnabled}}
 {{#if applyIsolatedChanges}}
   - `isolated`: Run in a dedicated worktree; successful changes are automatically applied to the parent checkout.
@@ -42,6 +44,7 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 - `task`: Complete, self-contained instructions. One-liners or missing acceptance criteria are PROHIBITED.
 {{#if effortEnabled}}- `effort`: Scale w/ complexity of this task: `"lo"`|`"med"`|`"hi"`
 {{/if}}
+- `intent`: Routing hint: `default`|`cheap`|`normal`|`strong`|`vision`|`large-context`|`same-pool-ok`.
 - `outputSchema`: Invocation-specific JSON Schema. Overrides the selected agent and parent-session schemas.
 - `schemaMode`: `"permissive"` (default) accepts a retry-exhausted invalid result with a warning; `"strict"` fails it.
 {{#if isolationEnabled}}

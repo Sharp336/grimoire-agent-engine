@@ -749,7 +749,22 @@ searxng:
 | `auth.broker.token`                 | string  | _(unset)_ | Auth-broker token. Overridden by `OMP_AUTH_BROKER_TOKEN`.                                                                                                                                                                                                                                                                                                                                                                              |
 | `secrets.enabled`                   | boolean | `false`   | Enable configured secret obfuscation and built-in credential-shaped token redaction before provider requests. See [Secret obfuscation](./secrets.md).                                                                                                                                                                                                                                                                                  |
 
-Provider credentials and custom model definitions are configured separately — see [Providers](./providers.md) and [Models](./models.md).
+### Task — dynamic worker routing
+
+All keys under `task.routing` (`src/config/settings-schema.ts` and `src/task/routing/*`):
+
+| Key | Type | Default | Notes |
+| --- | ---- | ------- | ----- |
+| `task.routing.enabled` | boolean | `true` | Master switch. `false` returns `routing_disabled` and falls back to the pre-routing model path. |
+| `task.routing.avoidParentPool` | boolean | `true` | Default parent-pool anti-affinity: children avoid the parent's resource pool when a viable external candidate exists. |
+| `task.routing.parentPoolFallback` | enum | `allow` | `allow` permits a visible same-pool fallback when no external candidate survives; `deny` returns `parent_pool_fail_closed` instead. |
+| `task.routing.excludePools` | array | `[]` | Case-insensitive matches against `provider`, `accountKey`, `label`, or pool `key`; matched candidates are removed and never relaxed. |
+| `task.routing.preferPools` | array | `[]` | Same matching as `excludePools`; matched candidates get +25 scoring bonus. |
+| `task.routing.agentIntents` | record | `{}` | `agent name → RoutingIntent` (`"default" \| "cheap" \| "normal" \| "strong" \| "vision" \| "large-context" \| "same-pool-ok"`). Per-item `intent` overrides this mapping. |
+| `task.routing.workerModels` | array | `[]` | Extra selectors/patterns eligible for any routed agent — roster, never bound to a specific agent (e.g. `cursor/composer-2.5`). |
+| `task.routing.maxContractReroutes` | number | `1` | Bounded automatic reroutes when a child fails its structured-output contract before returning useful work (Composer 2.5 + `scout` regression). Capped by existing retry limits. |
+
+Wire-level per-batch `routing` object (`src/task/types.ts`) supports `excludePools`, `preferPools`, `allowParentPool`, and `sticky`. A sticky run policy is **a runtime session override**, not a persisted global write: `sticky: true` applies the batch's `routing` constraints via `settings.override` so later spawns in the same session inherit them. To scope it per repository, edit `<cwd>/.omp/config.yml` directly — `omp config set` always writes the global file (see [Where writes go](#where-writes-go)).
 
 ### Other groups
 

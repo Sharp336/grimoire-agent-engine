@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added dynamic worker routing that protects the parent resource pool (`provider` + normalized `baseUrl` + account key; env/fallback credentials collapse to one pool; a Claude-family model via Cursor is a Cursor pool), routes children by `intent` (`default`|`cheap`|`normal`|`strong`|`vision`|`large-context`|`same-pool-ok`), and picks workers from the available registry by hard-filter order, scored selection (usage/preference/sibling diversity/cost/reasoning/rank with bounded 5-point tie-break), sticky session policy (`task.routing.*`), and bounded automatic reroute on structured-output contract failure (e.g. `scout` `schema_violation: (root): expected object, received string`; `task.routing.maxContractReroutes` default `1`). Precedence: per-spawn pin → `task.agentModelOverrides` → per-spawn `routing` → sticky session policy → dynamic router → auth/retry fallback. New observability: pool label, routing intent/reason, anti-affinity/fallback/usage flags, bypass reason, and reroute history; verbose traces go to logs, not the roster.
+- Worker-routing candidates are restricted to OMP's curated model chains (`priority.json` `slow`/`designer`/`smol`) plus concrete `modelRoles` / `task.agentModelOverrides` selectors, so an authenticated but unsuitable model is never routed to an agentic child.
+
 ### Changed
 
 - The default interactive status line now uses three deterministic rows: provider/model/effort + OMP identity, provider- and model-scoped quota usage + active task time + context tokens, and the current directory. Provider-native quota windows are preserved, and narrow terminals drop secondary metrics before these required fields.

@@ -7,6 +7,18 @@ import type { NestedRepoPatch } from "./worktree";
 
 /** Source of an agent definition */
 export type AgentSource = "bundled" | "user" | "project";
+
+/** Routing intent for dynamic worker selection (capability/preference, not a model identity). */
+export type RoutingIntent = "default" | "cheap" | "normal" | "strong" | "vision" | "large-context" | "same-pool-ok";
+
+/** Per-call routing constraints (batch-level). */
+export interface TaskRoutingOptions {
+	excludePools?: string[];
+	preferPools?: string[];
+	allowParentPool?: boolean;
+	sticky?: boolean;
+}
+
 /**
  * Enforcement policy for a structured subagent output schema.
  *
@@ -110,13 +122,21 @@ export const LABEL_MAX = 80;
 const outputSchemaInputSchema = type("object | boolean | string | null");
 // Coarse per-spawn thinking effort; must stay in sync with TASK_EFFORTS in ../thinking.
 const effortRule = '"lo" | "med" | "hi"' as const;
-
+const intentRule = '"default" | "cheap" | "normal" | "strong" | "vision" | "large-context" | "same-pool-ok"' as const;
+const routingSchema = type({
+	"excludePools?": "string[]",
+	"preferPools?": "string[]",
+	"allowParentPool?": "boolean",
+	"sticky?": "boolean",
+	"+": "delete",
+});
 export const taskItemSchema = type({
 	"name?": "string",
 	agent: "string = 'task'",
 	task: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
+	"intent?": intentRule,
 	"+": "delete",
 });
 const taskItemSchemaIsolated = type({
@@ -126,9 +146,9 @@ const taskItemSchemaIsolated = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"isolated?": "boolean",
+	"intent?": intentRule,
 	"+": "delete",
 });
-
 /** Single task item. Fields are optional defensively: args stream in token by token. */
 export interface TaskItem {
 	/** Stable agent name; becomes the registry/IRC id. Default = generated AdjectiveNoun. */
@@ -145,6 +165,8 @@ export interface TaskItem {
 	schemaMode?: "permissive" | "strict";
 	/** Run this spawn in an isolated worktree (batch form; flat form carries it top-level). */
 	isolated?: boolean;
+	/** Routing intent for dynamic worker selection; per-item override wins over agentIntents default. */
+	intent?: RoutingIntent;
 }
 
 export const taskSchema = type({
@@ -154,6 +176,7 @@ export const taskSchema = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"isolated?": "boolean",
+	"intent?": intentRule,
 	"+": "delete",
 });
 const taskSchemaNoIsolation = type({
@@ -162,16 +185,19 @@ const taskSchemaNoIsolation = type({
 	task: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
+	"intent?": intentRule,
 	"+": "delete",
 });
 const taskSchemaBatch = type({
 	context: "string",
 	tasks: taskItemSchemaIsolated.array(),
+	"routing?": routingSchema,
 	"+": "delete",
 });
 const taskSchemaBatchNoIsolation = type({
 	context: "string",
 	tasks: taskItemSchema.array(),
+	"routing?": routingSchema,
 	"+": "delete",
 });
 const ALL_TASK_SCHEMAS = [taskSchema, taskSchemaNoIsolation, taskSchemaBatch, taskSchemaBatchNoIsolation] as const;
@@ -200,6 +226,7 @@ function createTaskSchema(options: {
 }): BaseType {
 	const agent = taskAgentSchemaRule(options.defaultAgent);
 	const effortField = options.effortEnabled ? { "effort?": effortRule } : {};
+	const intentField = { "intent?": intentRule } as const;
 	if (options.batchEnabled) {
 		if (options.isolationEnabled) {
 			const item = type.raw({
@@ -210,11 +237,13 @@ function createTaskSchema(options: {
 				"outputSchema?": outputSchemaInputSchema,
 				"schemaMode?": '"permissive" | "strict"',
 				"isolated?": "boolean",
+				...intentField,
 				"+": "delete",
 			});
 			return type.raw({
 				context: "string",
 				tasks: item.array(),
+				"routing?": routingSchema,
 				"+": "delete",
 			});
 		}
@@ -225,11 +254,13 @@ function createTaskSchema(options: {
 			...effortField,
 			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
+			...intentField,
 			"+": "delete",
 		});
 		return type.raw({
 			context: "string",
 			tasks: item.array(),
+			"routing?": routingSchema,
 			"+": "delete",
 		});
 	}
@@ -242,6 +273,7 @@ function createTaskSchema(options: {
 			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
 			"isolated?": "boolean",
+			...intentField,
 			"+": "delete",
 		});
 	}
@@ -252,6 +284,7 @@ function createTaskSchema(options: {
 		...effortField,
 		"outputSchema?": outputSchemaInputSchema,
 		"schemaMode?": '"permissive" | "strict"',
+		...intentField,
 		"+": "delete",
 	});
 }
@@ -302,6 +335,12 @@ export interface TaskParams {
 	context?: string;
 	/** Run in an isolated worktree (flat form; per-item in batch form). */
 	isolated?: boolean;
+	/** Routing intent for the spawn (flat form; per-item in batch). */
+	intent?: RoutingIntent;
+	/** Batch-level routing constraints (batch form only). */
+	routing?: TaskRoutingOptions;
+	/** Internal: pool keys for sibling diversity (not part of wire schema). */
+	siblingPools?: readonly string[];
 }
 
 /**
@@ -468,6 +507,22 @@ export interface AgentProgress {
 	 * `extractedToolData.task` after that.
 	 */
 	inflightTaskDetails?: TaskToolDetails;
+	/** Routing intent selected for this spawn. */
+	routingIntent?: RoutingIntent;
+	/** Resource pool label (human readable) chosen by routing. */
+	resourcePool?: string;
+	/** Concise routing reason for normal UI. */
+	routingReason?: string;
+	/** Whether parent-pool anti-affinity was applied. */
+	routingAntiAffinity?: boolean;
+	/** Whether the chosen pool is the parent pool despite avoidParentPool. */
+	routingParentPoolFallback?: boolean;
+	/** Whether usage/headroom influenced selection. */
+	routingUsageInfluenced?: boolean;
+	/** Why routing was bypassed (e.g. explicit model pin, operator override). */
+	routingBypassReason?: string;
+	/** Bounded contract-reroute history for this spawn. */
+	routingReroutes?: { from: string; to: string; reason: string }[];
 }
 
 /** Result from a single agent execution */
@@ -538,6 +593,22 @@ export interface SingleResult {
 	};
 	/** Output metadata for agent:// URL integration */
 	outputMeta?: { lineCount: number; charCount: number };
+	/** Routing intent selected for this spawn. */
+	routingIntent?: RoutingIntent;
+	/** Resource pool label (human readable) chosen by routing. */
+	resourcePool?: string;
+	/** Concise routing reason for normal UI. */
+	routingReason?: string;
+	/** Whether parent-pool anti-affinity was applied. */
+	routingAntiAffinity?: boolean;
+	/** Whether the chosen pool is the parent pool despite avoidParentPool. */
+	routingParentPoolFallback?: boolean;
+	/** Whether usage/headroom influenced selection. */
+	routingUsageInfluenced?: boolean;
+	/** Why routing was bypassed (e.g. explicit model pin, operator override). */
+	routingBypassReason?: string;
+	/** Bounded contract-reroute history for this spawn. */
+	routingReroutes?: { from: string; to: string; reason: string }[];
 }
 
 /** Tool details for TUI rendering */

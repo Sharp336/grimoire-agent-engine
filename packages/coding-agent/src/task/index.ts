@@ -51,7 +51,14 @@ import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "./render";
 import { repairTaskParams } from "./repair-args";
-import { resolveEffectiveSubagentPolicy, runStructuredSubagent, StructuredSubagentError } from "./structured-subagent";
+import { DEAD_MODEL_PATTERN, extractSelectorFromDeadMessage, isDeadModelFileMessage } from "./routing/dead-route";
+import { applyStickyRoutingPolicy } from "./routing/snapshot";
+import {
+	type EffectiveSubagentPolicy,
+	resolveEffectiveSubagentPolicy,
+	runStructuredSubagent,
+	StructuredSubagentError,
+} from "./structured-subagent";
 
 function renderSubagentUserPrompt(assignment: string): string {
 	return prompt.render(subagentUserPromptTemplate, {
@@ -279,9 +286,9 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 	if ("schemaMode" in params) item.schemaMode = params.schemaMode;
 	if ("effort" in params) item.effort = params.effort;
 	if ("isolated" in params) item.isolated = params.isolated;
+	if ("intent" in params) item.intent = params.intent;
 	return [item];
 }
-
 /**
  * Per-spawn params handed to the executor path: top-level call fields with the
  * item's identity substituted in. Each spawn's `agent` resolves here —
@@ -304,14 +311,21 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
 	} else if ("isolated" in params) {
 		spawn.isolated = params.isolated;
 	}
+	if (item.intent !== undefined) {
+		spawn.intent = item.intent;
+	} else if ("intent" in params) {
+		spawn.intent = params.intent;
+	}
+	if (params.routing !== undefined) spawn.routing = params.routing;
+	if (params.siblingPools !== undefined) spawn.siblingPools = params.siblingPools;
 	return spawn;
 }
-
 /** One sync-executed spawn: its item, position in the original call, and (for mixed calls) a pre-claimed agent id. */
 interface SyncSpawnRef {
 	item: TaskItem;
 	index: number;
 	preAllocatedId?: string;
+	siblingPools?: readonly string[];
 }
 
 /** Merged view of a sync spawn set's payloads: joined text plus flattened results/usage/paths. */
@@ -579,7 +593,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	 * spawns and work already parked in the semaphore queue.
 	 */
 	#spawnSemaphore: Semaphore | undefined;
-
+	/** Pool keys for sibling diversity — accumulates chosen pools for in-flight siblings. */
+	#siblingPoolKeys: string[] = [];
+	/** Exact worker selectors that 404'd / were reported dead this run — siblings must not retry them. Bounded to 20. */
+	#deadWorkerSelectors: Set<string> = new Set();
 	get parameters(): TaskToolSchemaInstance {
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
 		const isolationEnabled = !planMode && this.session.settings.get("task.isolation.mode") !== "none";
@@ -638,6 +655,38 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	#releaseSpawnSemaphore(): void {
 		this.#getSpawnSemaphore().release();
 	}
+	#recordDeadWorkerRoute(selector: string): void {
+		const trimmed = selector.trim();
+		if (!trimmed) return;
+		const key = trimmed.toLowerCase();
+		if (this.#deadWorkerSelectors.has(key)) return;
+		if (this.#deadWorkerSelectors.size >= 20) {
+			const first = this.#deadWorkerSelectors.values().next().value;
+			if (first !== undefined) this.#deadWorkerSelectors.delete(first);
+		}
+		this.#deadWorkerSelectors.add(key);
+	}
+
+	#maybeRecordDeadFromResult(result: SingleResult, attemptedSelector?: string): void {
+		const text = [result.error ?? "", result.stderr ?? "", result.output ?? ""].join("\n");
+		if (!text || !DEAD_MODEL_PATTERN.test(text)) return;
+		const extracted = extractSelectorFromDeadMessage(text);
+		const toRecord = extracted ?? attemptedSelector;
+		if (toRecord) this.#recordDeadWorkerRoute(toRecord);
+	}
+
+	async #maybeRecordDeadFromChildSession(agentId: string, attemptedSelector?: string): Promise<void> {
+		try {
+			const parentFile = this.session.getSessionFile?.();
+			if (!parentFile) return;
+			const childFile = path.join(path.dirname(parentFile), path.basename(parentFile, ".jsonl"), `${agentId}.jsonl`);
+			const text = await Bun.file(childFile).text();
+			if (!isDeadModelFileMessage(text)) return;
+			const extracted = extractSelectorFromDeadMessage(text);
+			const toRecord = extracted ?? attemptedSelector;
+			if (toRecord) this.#recordDeadWorkerRoute(toRecord);
+		} catch {}
+	}
 
 	/**
 	 * Resolve the shared policy before detached work exists. The resulting
@@ -645,7 +694,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	 * normalized task params rather than smuggling internal policy over the
 	 * task wire contract.
 	 */
-	#resolveSpawnPreflight(params: TaskParams) {
+	#resolveSpawnPreflight(params: TaskParams, siblingPools?: readonly string[], deadSelectors?: readonly string[]) {
+		const dead = deadSelectors ?? (this.#deadWorkerSelectors.size > 0 ? [...this.#deadWorkerSelectors] : undefined);
 		return resolveEffectiveSubagentPolicy({
 			session: this.session,
 			invocationKind: "task",
@@ -656,6 +706,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
 			...(params.effort !== undefined ? { effort: params.effort } : {}),
 			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
+			...(params.intent !== undefined ? { intent: params.intent } : {}),
+			...(params.routing !== undefined ? { routing: params.routing } : {}),
+			...(siblingPools ? { siblingPools } : {}),
+			...(dead ? { deadSelectors: dead } : {}),
 			blockedAgent: this.#blockedAgent,
 			enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
 			enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
@@ -688,22 +742,36 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			return createTaskModeError(validationError);
 		}
 
+		// Sticky run policy: a session-scoped runtime override, never a persisted config write.
+		if (params.routing?.sticky) applyStickyRoutingPolicy(this.session.settings, params.routing);
+
 		const spawnItems = resolveSpawnItems(params);
 		const normalizedSpawnParams = spawnItems.map(item => spawnParamsFor(params, item, defaultAgent));
 		const resolvedAgents = normalizedSpawnParams.map(spawn => spawn.agent ?? defaultAgent);
 		// Resolve every item before choosing an execution path. No executor or
 		// job manager may observe a batch unless every effective policy is valid.
-		const preflights = await Promise.all(
-			normalizedSpawnParams.map(async spawn => {
-				try {
-					return { policy: await this.#resolveSpawnPreflight(spawn) };
-				} catch (error) {
-					return { error: error instanceof StructuredSubagentError ? error.message : String(error) };
+		// Sequential preflights ensure sibling diversity: each spawn's routing sees pools chosen for earlier siblings.
+		const siblingPoolKeysForBatch: string[] = [...this.#siblingPoolKeys];
+		const preflightResults: Array<{ policy?: EffectiveSubagentPolicy; error?: string }> = [];
+		for (let i = 0; i < normalizedSpawnParams.length; i++) {
+			const spawn = normalizedSpawnParams[i]!;
+			spawn.siblingPools = [...siblingPoolKeysForBatch];
+			try {
+				const policy = await this.#resolveSpawnPreflight(spawn, siblingPoolKeysForBatch);
+				preflightResults.push({ policy });
+				const poolKey = policy.routingPoolKey ?? policy.routingDecision?.pool.key;
+				if (poolKey) {
+					siblingPoolKeysForBatch.push(poolKey);
+					this.#siblingPoolKeys.push(poolKey);
+					if (this.#siblingPoolKeys.length > 20) this.#siblingPoolKeys.shift();
 				}
-			}),
-		);
+			} catch (error) {
+				preflightResults.push({ error: error instanceof StructuredSubagentError ? error.message : String(error) });
+			}
+		}
+		const preflights = preflightResults;
 		const preflightFailures = preflights
-			.map((preflight, index) => ("error" in preflight ? { index, error: preflight.error } : undefined))
+			.map((preflight, index) => (preflight.error !== undefined ? { index, error: preflight.error } : undefined))
 			.filter((failure): failure is { index: number; error: string } => failure !== undefined);
 		if (preflightFailures.length > 0) {
 			if (!batchEnabled) {
@@ -757,7 +825,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			const result = await this.#executeSyncFanout(
 				toolCallId,
 				params,
-				spawnItems.map((item, index) => ({ item, index })),
+				spawnItems.map((item, index) => ({
+					item,
+					index,
+					siblingPools: (normalizedSpawnParams[index] as TaskParams).siblingPools,
+				})),
 				defaultAgent,
 				signal,
 				onUpdate,
@@ -862,6 +934,14 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					tokens: 0,
 					cost: 0,
 					durationMs: 0,
+					routingIntent: policy.routingIntent,
+					resourcePool: policy.resourcePool,
+					routingReason: policy.routingReason,
+					routingAntiAffinity: policy.routingAntiAffinity,
+					routingParentPoolFallback: policy.routingParentPoolFallback,
+					routingUsageInfluenced: policy.routingUsageInfluenced,
+					routingBypassReason: policy.routingBypassReason,
+					routingReroutes: policy.routingReroutes,
 				},
 			});
 		}
@@ -899,10 +979,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const failedSchedules: string[] = [];
 		for (const spawn of asyncSpawns) {
 			try {
+				const baseSpawnParams = spawnParamsFor(params, spawn.item, defaultAgent);
+				const siblingPools = (normalizedSpawnParams[spawn.index] as TaskParams).siblingPools;
+				if (siblingPools) baseSpawnParams.siblingPools = siblingPools;
 				const jobId = this.#registerSpawnJob({
 					manager,
 					toolCallId,
-					spawnParams: spawnParamsFor(params, spawn.item, defaultAgent),
+					spawnParams: baseSpawnParams,
 					agentId: spawn.agentId,
 					progress: spawn.progress,
 					ircEnabled,
@@ -1002,7 +1085,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			params,
 			defaultAgent,
 			signal,
-			spawns: syncSpawns.map(spawn => ({ item: spawn.item, index: spawn.index, preAllocatedId: spawn.agentId })),
+			spawns: syncSpawns.map(spawn => ({
+				item: spawn.item,
+				index: spawn.index,
+				preAllocatedId: spawn.agentId,
+				siblingPools: (normalizedSpawnParams[spawn.index] as TaskParams).siblingPools,
+			})),
 			onItemProgress: onUpdate
 				? (index, progress) => {
 						const spawn = spawns.find(candidate => candidate.index === index);
@@ -1022,7 +1110,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		syncUsage = merged.usage;
 		syncOutputPaths = merged.outputPaths;
 		syncProjectAgentsDir = merged.projectAgentsDir;
-		// Settle the inline spawns' progress rows from their merged results so
+		for (const result of merged.results) {
+			const attempted = (result.modelOverride as string[] | undefined)?.[0] ?? result.resolvedModel;
+			this.#maybeRecordDeadFromResult(result, attempted);
+			// Best-effort child file scan for fallback-dead (404 that fell back to success)
+			await this.#maybeRecordDeadFromChildSession(result.id, attempted);
+		}
 		// post-return job updates carry final statuses, not the last snapshot.
 		for (let position = 0; position < syncSpawns.length; position++) {
 			const spawn = syncSpawns[position];
@@ -1151,6 +1244,16 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 							progress.recentOutput = nextProgress.recentOutput.slice();
 							progress.retryState = nextProgress.retryState;
 							progress.retryFailure = nextProgress.retryFailure;
+							progress.routingIntent = nextProgress.routingIntent ?? progress.routingIntent;
+							progress.resourcePool = nextProgress.resourcePool ?? progress.resourcePool;
+							progress.routingReason = nextProgress.routingReason ?? progress.routingReason;
+							progress.routingAntiAffinity = nextProgress.routingAntiAffinity ?? progress.routingAntiAffinity;
+							progress.routingParentPoolFallback =
+								nextProgress.routingParentPoolFallback ?? progress.routingParentPoolFallback;
+							progress.routingUsageInfluenced =
+								nextProgress.routingUsageInfluenced ?? progress.routingUsageInfluenced;
+							progress.routingBypassReason = nextProgress.routingBypassReason ?? progress.routingBypassReason;
+							progress.routingReroutes = nextProgress.routingReroutes ?? progress.routingReroutes;
 						}
 						const updateText =
 							update.content.find(part => part.type === "text")?.text ?? `Running background task ${agentId}...`;
@@ -1189,6 +1292,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					} else {
 						delete progress.resolvedModel;
 						delete progress.resolvedModelIsFallback;
+					}
+					if (singleResult) {
+						const attempted =
+							(singleResult.modelOverride as string[] | undefined)?.[0] ??
+							(progress.modelOverride as string[] | undefined)?.[0];
+						this.#maybeRecordDeadFromResult(singleResult, attempted);
+						await this.#maybeRecordDeadFromChildSession(agentId, attempted);
 					}
 					onSettled?.(resultFailed);
 					const statusText = resultFailed
@@ -1347,9 +1457,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 								if (progress) onItemProgress(spawn.index, progress);
 							}
 						: undefined;
+					const syncSpawnParams = spawnParamsFor(params, spawn.item, defaultAgent);
+					if (spawn.siblingPools) syncSpawnParams.siblingPools = spawn.siblingPools;
 					return await this.#executeSync(
 						toolCallId,
-						spawnParamsFor(params, spawn.item, defaultAgent),
+						syncSpawnParams,
 						workerSignal,
 						itemOnUpdate,
 						spawn.preAllocatedId,
@@ -1425,6 +1537,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
 				...(params.effort !== undefined ? { effort: params.effort } : {}),
 				identity: { id: preAllocatedId, label: params.name },
+				...(params.intent !== undefined ? { intent: params.intent } : {}),
+				...(params.routing !== undefined ? { routing: params.routing } : {}),
+				...(params.siblingPools !== undefined ? { siblingPools: params.siblingPools } : {}),
+				...(this.#deadWorkerSelectors.size > 0 ? { deadSelectors: [...this.#deadWorkerSelectors] } : {}),
 				index: spawnIndex,
 				parentToolCallId: toolCallId,
 				detached,

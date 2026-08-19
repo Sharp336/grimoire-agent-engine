@@ -4783,6 +4783,58 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	// Dynamic worker routing — parent-pool protection + capability-aware selection.
+	// Precedence (highest first): 1) explicit per-invocation model pin (request.model from the
+	// eval/agent bridge) bypasses the router; 2) per-spawn routing constraints (intent/routing);
+	// 3) sticky session routing policy (runtime settings.override); 4) dynamic router defaults;
+	// 5) existing auth/retry fallback recovery (unchanged, runs last). Bypass is recorded as
+	// routingBypassReason. task.agentModelOverrides is an agent *default*, not a pin: it enters
+	// routing as a preference so ordinary capabilities stay dynamically routable.
+	"task.routing.enabled": {
+		type: "boolean",
+		default: true,
+		description: "Enable dynamic worker routing for task subagents (parent-pool aware selection)",
+	},
+	"task.routing.avoidParentPool": {
+		type: "boolean",
+		default: true,
+		description: "When routing, avoid the parent session's resource pool when alternatives exist",
+	},
+	"task.routing.parentPoolFallback": {
+		type: "enum",
+		values: ["allow", "deny"] as const,
+		default: "allow",
+		description: "Whether a spawn may fall back to the parent pool when no external candidate remains",
+	},
+	"task.routing.excludePools": {
+		type: "array",
+		default: [] as string[],
+		description:
+			"Pools to exclude from routing (case-insensitive match against provider, accountKey, label, or pool key)",
+	},
+	"task.routing.preferPools": {
+		type: "array",
+		default: [] as string[],
+		description:
+			"Pools to prefer in routing (case-insensitive match against provider, accountKey, label, or pool key)",
+	},
+	"task.routing.agentIntents": {
+		type: "record",
+		default: {} as Record<string, string>,
+		description: "Per-agent routing intent defaults (agent name → intent string)",
+	},
+	"task.routing.maxContractReroutes": {
+		type: "number",
+		default: 1,
+		description: "Maximum automatic reroutes on structured-output contract failure to a different-pool candidate",
+	},
+	"task.routing.workerModels": {
+		type: "array",
+		default: [] as string[],
+		description:
+			"Worker candidate roster: extra model selectors/patterns eligible for any routed subagent (e.g. cursor/composer-2.5). Roster entries are candidates only — they are never bound to a specific agent",
+	},
+
 	// Skills
 	"skills.enabled": { type: "boolean", default: true },
 

@@ -1930,6 +1930,22 @@ export class Settings {
 		}
 		delete raw["computer.backend"];
 
+		// task.agentModelOverrides: flat dotted key -> nested task.agentModelOverrides
+		// Older configs wrote this as top-level `task.agentModelOverrides` (YAML flat key with dot);
+		// newer code writes nested `task: { agentModelOverrides: ... }`. Expand flat into nested so
+		// getByPath(["task","agentModelOverrides"]) finds it, without hardcoding any home path.
+		if ("task.agentModelOverrides" in raw) {
+			const flat = raw["task.agentModelOverrides"];
+			if (isRecord(flat)) {
+				const taskObj = isRecord(raw.task) ? (raw.task as Record<string, unknown>) : {};
+				if (!("agentModelOverrides" in taskObj)) {
+					taskObj.agentModelOverrides = flat;
+					raw.task = taskObj;
+				}
+			}
+			delete raw["task.agentModelOverrides"];
+		}
+
 		return raw;
 	}
 

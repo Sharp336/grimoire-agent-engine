@@ -7,7 +7,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
-import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
+import { $env, logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import { resolveAgentModelSelection } from "../config/model-resolver";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
@@ -33,16 +33,35 @@ import {
 } from "./isolation-runner";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
+import { classifyContractFailure } from "./routing/contract-failure";
+import { routeWorker } from "./routing/router";
+import { seededRandom } from "./routing/select";
+import {
+	buildRoutingSnapshot,
+	getRoutingPolicyFromSettings,
+	resolveParentPoolIdentity,
+	resolveProviderPool,
+	selectorProvider,
+} from "./routing/snapshot";
+import type {
+	ResourcePoolIdentity,
+	RoutingCandidateInput,
+	RoutingDecision,
+	RoutingPolicy,
+	RoutingRequest,
+	RoutingRequirements,
+} from "./routing/types";
 import { resolveSpawnPolicy } from "./spawn-policy";
 import {
 	type AgentDefinition,
 	type AgentProgress,
 	canSpawnAtDepth,
+	type RoutingIntent,
 	type SingleResult,
 	type StructuredSubagentOutput,
+	type TaskRoutingOptions,
 } from "./types";
 import { type NestedRepoPatch, parseIsolationMode } from "./worktree";
-
 /** Validation behavior requested for an effective output schema. */
 export type StructuredSubagentSchemaMode = "permissive" | "strict";
 
@@ -114,15 +133,22 @@ export interface StructuredSubagentRequest {
 	maxRuntimeMs?: number;
 	signal?: AbortSignal;
 	onProgress?: (progress: AgentProgress) => void;
+	/** Routing intent for this spawn (per-item override). */
+	intent?: RoutingIntent;
+	/** Batch-level routing constraints for this spawn. */
+	routing?: TaskRoutingOptions;
+	/** Sibling pool keys already chosen for in-flight siblings. */
+	siblingPools?: readonly string[];
+	/** Exact selectors that 404'd earlier this run — must be suppressed. */
+	deadSelectors?: readonly string[];
 }
-
 /** A normalized preflight result, reusable by tests and adapters. */
 export interface EffectiveSubagentPolicy {
 	discovery: DiscoveryResult;
 	agentName: string;
 	agent: AgentDefinition;
 	effectiveAgent: AgentDefinition;
-	modelOverride?: string | string[];
+	modelOverride?: string[];
 	/** Explicit pre-expansion model role alias selected for this run. */
 	modelRole?: string;
 	parentActiveModelPattern?: string;
@@ -133,6 +159,30 @@ export interface EffectiveSubagentPolicy {
 	applyChanges: boolean;
 	enableLsp: boolean;
 	enableIrc: boolean;
+	/** Routing intent resolved for this spawn. */
+	routingIntent?: RoutingIntent;
+	/** Resource pool label chosen by routing (human readable). */
+	resourcePool?: string;
+	/** Pool key for sibling diversity (provider\0baseUrl\0accountKey). */
+	routingPoolKey?: string;
+	/** Concise routing reason for normal UI. */
+	routingReason?: string;
+	/** Whether parent-pool anti-affinity was applied. */
+	routingAntiAffinity?: boolean;
+	/** Whether chosen pool is parent pool despite avoidParentPool. */
+	routingParentPoolFallback?: boolean;
+	/** Whether usage/headroom influenced selection. */
+	routingUsageInfluenced?: boolean;
+	/** Why routing was bypassed (explicit pin / operator override). */
+	routingBypassReason?: string;
+	/** Bounded contract-reroute history. */
+	routingReroutes?: { from: string; to: string; reason: string }[];
+	/** Full routing decision for reroute logic (not surfaced directly). */
+	routingDecision?: RoutingDecision;
+	/** Candidate inputs used for routing (for reroute peer lookup). */
+	routingCandidates?: RoutingCandidateInput[];
+	/** Parent pool identity used for routing. */
+	routingParentPool?: ResourcePoolIdentity;
 }
 
 /** Settled child execution plus data needed by the frontends' own rendering. */
@@ -298,7 +348,141 @@ export async function resolveEffectiveSubagentPolicy(
 	// Role identity and patterns come from one call so they cannot be derived
 	// from different sources: the expansion below discards the alias, and the
 	// child's inherited retry-fallback chain is keyed off the role.
-	const { patterns: modelOverride, role: modelRole } = resolveAgentModelSelection(modelResolution);
+	const { patterns: initialPatterns, role: modelRole } = resolveAgentModelSelection(modelResolution);
+	let modelOverride: string[] | undefined = initialPatterns.length > 0 ? initialPatterns : undefined;
+
+	// Routing intent resolution: per-item → agentIntents[agent] → "default"
+	const rawIntent =
+		request.intent ?? request.session.settings.get("task.routing.agentIntents")[agentName] ?? "default";
+	const validIntents = new Set(["default", "cheap", "normal", "strong", "vision", "large-context", "same-pool-ok"]);
+	const routingIntent: RoutingIntent = validIntents.has(rawIntent) ? (rawIntent as RoutingIntent) : "default";
+
+	const requirements: RoutingRequirements = {};
+	if (schema.source !== "none") requirements.structuredOutput = true;
+
+	let resourcePool: string | undefined;
+	let routingPoolKey: string | undefined;
+	let routingReason: string | undefined;
+	let routingAntiAffinity: boolean | undefined;
+	let routingParentPoolFallback: boolean | undefined;
+	let routingUsageInfluenced: boolean | undefined;
+	let routingBypassReason: string | undefined;
+	const routingReroutes: { from: string; to: string; reason: string }[] = [];
+	let routingDecision: RoutingDecision | undefined;
+	let routingCandidates: RoutingCandidateInput[] | undefined;
+	let routingParentPool: ResourcePoolIdentity | undefined;
+	// Only a per-invocation pin (`agent(..., model)` / eval bridge) bypasses the
+	// router. `task.agentModelOverrides` is an agent *default*, not a hard pin:
+	// treating it as one would re-bind every ordinary capability to one model and
+	// defeat pool protection, so it enters routing as a preference instead.
+	const hasExplicitPin =
+		request.model !== undefined &&
+		(Array.isArray(request.model) ? request.model.length > 0 : request.model.trim().length > 0);
+
+	if (hasExplicitPin) {
+		routingBypassReason = "explicit model pin";
+		const pinSelector = modelOverride?.[0];
+		const pinProvider = pinSelector === undefined ? undefined : selectorProvider(pinSelector);
+		if (pinSelector && pinProvider) {
+			routingParentPool = resolveParentPoolIdentity(request.session);
+			const pinPool = resolveProviderPool(request.session, pinProvider);
+			resourcePool = pinPool?.label;
+			routingPoolKey = pinPool?.key;
+			const poolSuffix = pinPool ? `${pinPool.label} pool; ` : "";
+			if (pinPool !== undefined && pinPool.key === routingParentPool?.key) {
+				routingParentPoolFallback = true;
+				routingAntiAffinity = false;
+				routingReason = `${pinSelector} (${poolSuffix}${routingBypassReason} intentionally overrides parent-pool protection)`;
+			} else {
+				routingReason = `${pinSelector} (${poolSuffix}${routingBypassReason})`;
+			}
+		}
+	} else {
+		const policyFromSettings = getRoutingPolicyFromSettings(request.session);
+		const policy: RoutingPolicy = {
+			enabled: policyFromSettings.enabled,
+			avoidParentPool: policyFromSettings.avoidParentPool,
+			parentPoolFallback: policyFromSettings.parentPoolFallback,
+			excludePools: [...policyFromSettings.excludePools],
+			preferPools: [...policyFromSettings.preferPools],
+		};
+		if (request.routing) {
+			if (request.routing.excludePools)
+				policy.excludePools = [...policy.excludePools, ...request.routing.excludePools];
+			if (request.routing.preferPools) policy.preferPools = [...policy.preferPools, ...request.routing.preferPools];
+			if (request.routing.allowParentPool !== undefined) {
+				policy.avoidParentPool = !request.routing.allowParentPool;
+				policy.parentPoolFallback = request.routing.allowParentPool ? "allow" : "deny";
+			}
+		}
+		try {
+			const snapshot = await buildRoutingSnapshot(request.session);
+			routingCandidates = snapshot.candidates;
+			routingParentPool = snapshot.parentPool;
+			const preferredSelector = modelOverride?.[0];
+			if (preferredSelector) {
+				for (const cand of routingCandidates) {
+					if (cand.selector === preferredSelector) {
+						cand.preferredRank = 0;
+						break;
+					}
+				}
+			}
+			const routingRequest: RoutingRequest = {
+				agent: agentName,
+				intent: routingIntent,
+				requirements,
+				parentPool: routingParentPool,
+				siblingPools: request.siblingPools,
+				deadSelectors: request.deadSelectors,
+				policy,
+				candidates: routingCandidates,
+				// Batch preflight and dispatch each resolve routing for the same spawn;
+				// seeding from fields both calls share keeps them on the same candidate.
+				random: seededRandom(`${agentName}\u0000${request.assignment}`),
+			};
+			const outcome = routeWorker(routingRequest);
+			if (!outcome.ok) {
+				if (outcome.code === "routing_disabled" || outcome.code === "no_viable_candidate") {
+					logger.debug("Routing fallback to configured model", {
+						agent: agentName,
+						reason: outcome.reason,
+						trace: outcome.trace.join("; "),
+					});
+					routingReason = outcome.reason;
+				} else if (outcome.code === "parent_pool_fail_closed") {
+					logger.debug("Routing parent_pool_fail_closed", { agent: agentName, trace: outcome.trace.join("; ") });
+					throw new StructuredSubagentError(
+						"preflight",
+						`Routing: parent pool is protected and no external candidate is viable for ${agentName} (${outcome.reason})`,
+					);
+				}
+			} else {
+				routingDecision = outcome;
+				modelOverride = outcome.selectors;
+				resourcePool = outcome.pool.label;
+				routingPoolKey = outcome.pool.key;
+				routingReason = outcome.reason;
+				routingAntiAffinity = outcome.antiAffinityApplied;
+				routingParentPoolFallback = outcome.parentPoolFallback;
+				routingUsageInfluenced = outcome.usageInfluenced;
+				logger.debug("Routing decision", {
+					agent: agentName,
+					reason: outcome.reason,
+					trace: outcome.trace.join("; "),
+				});
+				if (outcome.trace.length > 0) {
+					logger.debug("Routing trace", { trace: outcome.trace });
+				}
+			}
+		} catch (error) {
+			if (error instanceof StructuredSubagentError) throw error;
+			logger.warn("Routing snapshot failed, falling back to configured model", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+
 	const isolationMode = request.session.settings.get("task.isolation.mode");
 	const isIsolated = request.isolation?.requested === true;
 	if (isIsolated && isolationMode === "none") {
@@ -330,6 +514,18 @@ export async function resolveEffectiveSubagentPolicy(
 			(request.enableIrc ??
 				(request.session.enableIrc !== false &&
 					isIrcEnabled(request.session.settings, request.session.taskDepth ?? 0))),
+		routingIntent,
+		resourcePool,
+		routingPoolKey,
+		routingReason,
+		routingAntiAffinity,
+		routingParentPoolFallback,
+		routingUsageInfluenced,
+		routingBypassReason,
+		routingReroutes: routingReroutes.length > 0 ? routingReroutes : undefined,
+		routingDecision,
+		routingCandidates,
+		routingParentPool,
 	};
 }
 
@@ -413,6 +609,14 @@ function buildExecutorOptions(
 		parentActiveModelPattern: policy.parentActiveModelPattern,
 		thinkingLevel: policy.effectiveAgent.thinkingLevel,
 		effort: request.effort,
+		routingIntent: policy.routingIntent,
+		resourcePool: policy.resourcePool,
+		routingReason: policy.routingReason,
+		routingAntiAffinity: policy.routingAntiAffinity,
+		routingParentPoolFallback: policy.routingParentPoolFallback,
+		routingUsageInfluenced: policy.routingUsageInfluenced,
+		routingBypassReason: policy.routingBypassReason,
+		routingReroutes: policy.routingReroutes,
 		...(policy.schema.source === "none"
 			? {}
 			: {
@@ -552,7 +756,7 @@ function attachStructuredOutputMetadata(result: SingleResult, schema: Structured
  * lease or child dispatch; callers keep responsibility for their result text.
  */
 export async function runStructuredSubagent(request: StructuredSubagentRequest): Promise<StructuredSubagentResult> {
-	const policy = await resolveEffectiveSubagentPolicy(request);
+	let policy = await resolveEffectiveSubagentPolicy(request);
 	const lease = await leaseArtifacts(request.session, request.invocationKind);
 	let changesApplied: boolean | null = null;
 	let mergeSummary = "";
@@ -582,7 +786,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 				);
 			}
 		}
-		const result = !isolationContext
+		let result = !isolationContext
 			? await runSubprocess(baseOptions)
 			: await runIsolatedSubprocess({
 					baseOptions,
@@ -596,6 +800,105 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 					buildFailureResult: buildFailureResult(request, policy, id, Date.now()),
 				});
 		attachStructuredOutputMetadata(result, policy.schema);
+		// Bounded contract-failure reroute: on structured-output contract failure, try next eligible pool
+		{
+			let currentResult = result;
+			let currentPolicy = policy;
+			let currentBaseOptions = baseOptions;
+			const maxReroutes = request.session.settings.get("task.routing.maxContractReroutes");
+			let attempts = 0;
+			const accumulatedReroutes: { from: string; to: string; reason: string }[] = [
+				...(currentPolicy.routingReroutes ?? []),
+			];
+			while (attempts < maxReroutes) {
+				const classification = classifyContractFailure(currentResult);
+				if (!classification.isContractFailure) break;
+				const decision = currentPolicy.routingDecision;
+				const candidates = currentPolicy.routingCandidates;
+				if (!decision || !candidates || decision.selectors.length <= 1) break;
+				// The auth/retry chain may have moved on from modelOverride[0], so the
+				// authoritative failed route is whatever actually ran.
+				const failedSelector = currentResult.resolvedModel ?? currentPolicy.modelOverride?.[0];
+				if (!failedSelector) break;
+				const failedCand = candidates.find(c => c.selector === failedSelector);
+				const failedPoolKey = failedCand?.pool.key ?? decision.pool.key;
+				let nextSelector: string | undefined;
+				let nextIdx = -1;
+				for (let i = 0; i < decision.selectors.length; i++) {
+					const sel = decision.selectors[i];
+					if (sel === failedSelector) continue;
+					const cand = candidates.find(c => c.selector === sel);
+					if (!cand) continue;
+					if (cand.pool.key !== failedPoolKey) {
+						nextSelector = sel;
+						nextIdx = i;
+						break;
+					}
+				}
+				if (!nextSelector) break;
+				accumulatedReroutes.push({ from: failedSelector, to: nextSelector, reason: classification.reason });
+				logger.warn(
+					`Routing contract failure reroute ${failedSelector} -> ${nextSelector}: ${classification.reason}`,
+					{
+						agent: currentPolicy.agentName,
+						from: failedSelector,
+						to: nextSelector,
+					},
+				);
+				const remainingSelectors = decision.selectors.slice(nextIdx);
+				currentPolicy = {
+					...currentPolicy,
+					modelOverride: remainingSelectors,
+					routingReroutes: [...accumulatedReroutes],
+					resourcePool:
+						candidates.find(c => c.selector === nextSelector)?.pool.label ?? currentPolicy.resourcePool,
+					routingReason: `reroute ${failedSelector} -> ${nextSelector}: ${classification.reason}`,
+				};
+				policy = currentPolicy;
+				currentBaseOptions = buildExecutorOptions(request, currentPolicy, lease, id);
+				currentBaseOptions.onCleanupDeferred = completion => {
+					deferredCleanup = completion;
+				};
+				currentBaseOptions.planReference = await loadPlanReference(request, currentPolicy);
+				try {
+					const nextResult = !isolationContext
+						? await runSubprocess(currentBaseOptions)
+						: await runIsolatedSubprocess({
+								baseOptions: currentBaseOptions,
+								context: isolationContext,
+								preferredBackend: parseIsolationMode(request.session.settings.get("task.isolation.mode")),
+								agentId: id,
+								mergeMode: currentPolicy.mergeMode,
+								artifactsDir: lease.artifactsDir,
+								description: trimToUndefined(request.identity?.label),
+								buildCommitMessage: makeIsolationCommitMessage(request.session),
+								buildFailureResult: buildFailureResult(request, currentPolicy, id, Date.now()),
+							});
+					attachStructuredOutputMetadata(nextResult, currentPolicy.schema);
+					// Propagate accumulated reroutes onto the result for observability (executor also carries them via progress)
+					nextResult.routingReroutes = [...accumulatedReroutes];
+					nextResult.routingIntent = currentPolicy.routingIntent;
+					nextResult.resourcePool = currentPolicy.resourcePool;
+					nextResult.routingReason = currentPolicy.routingReason;
+					nextResult.routingAntiAffinity = currentPolicy.routingAntiAffinity;
+					nextResult.routingParentPoolFallback = currentPolicy.routingParentPoolFallback;
+					nextResult.routingUsageInfluenced = currentPolicy.routingUsageInfluenced;
+					nextResult.routingBypassReason = currentPolicy.routingBypassReason;
+					currentResult = nextResult;
+					attempts++;
+				} catch (rerouteError) {
+					logger.warn("Reroute execution failed", {
+						error: rerouteError instanceof Error ? rerouteError.message : String(rerouteError),
+					});
+					break;
+				}
+			}
+			result = currentResult;
+			// Ensure final result carries accumulated reroutes even if loop exited via break before updating result
+			if (accumulatedReroutes.length > 0 && (!result.routingReroutes || result.routingReroutes.length === 0)) {
+				result.routingReroutes = [...accumulatedReroutes];
+			}
+		}
 		requiresRecoveryArtifacts =
 			policy.isIsolated &&
 			(result.exitCode !== 0 || result.error !== undefined || result.aborted === true) &&

@@ -197,17 +197,20 @@ A missing name fails preflight with `Unknown agent "...". Available: ...`; no su
 
 `TaskTool.create()` memoizes discovery per resolved working directory when building the model-facing tool description. Execution rediscovers agents, so the runtime set can differ from the earlier description if agent or extension files changed mid-session. Blocking behavior is determined after policy resolution rather than from a stale description-time agent object.
 
-## Model and structured-output precedence
+## Model and structured-output precedence (including dynamic worker routing)
 
-For task dispatch, model precedence is:
+For task dispatch, the authoritative routing precedence is:
 
-1. `task.agentModelOverrides[agentName]`
-2. the agent frontmatter's prioritized `model` list
-3. the parent's active model, then its configured/default model fallback
+1. **Explicit per-invocation model pin** (`request.model` from the eval/agent bridge, e.g. `agent("scout", model="…")`) — router **bypassed entirely**.
+2. **Per-spawn routing constraints** from the task call — `intent` on the item and `routing: { excludePools, preferPools, allowParentPool }` on the batch.
+3. **Sticky session routing policy** — the same constraints persisted for the session via runtime `settings.override` when `routing.sticky` is used. Never a global/persisted config write.
+4. **Dynamic router defaults** — `task.routing.*` settings (`enabled`, `avoidParentPool`, `parentPoolFallback`, `excludePools`, `preferPools`, `agentIntents`, `workerModels`) plus the `task.agentModelOverrides` *preference* and candidate scoring described below.
+5. **Existing auth/retry fallback recovery** — unchanged, runs last (including `retry.usageAwareFallback`).
 
-Role aliases in either of the first two sources are expanded through `modelRoles`. The shared eval bridge can also supply an invocation-local model override ahead of the settings override; the task wire schema does not expose that field.
+`task.agentModelOverrides[agent]` is an **agent default, not a hard pin**: it enters routing as a preference (`preferredRank = 0` for the matching candidate in `buildRoutingSnapshot`) so ordinary capabilities stay dynamically routable across pools. When the router is bypassed by an explicit per-invocation pin (case 1), that is recorded as `routingBypassReason`. If the pinned model lands in the parent pool despite `avoidParentPool`, it is reported as an intentional anti-affinity override (`routingParentPoolFallback` / parent-pool fallback exception).
 
-Runtime output schema precedence is:
+Role aliases in pinned selectors are still expanded through `modelRoles`; the shared eval bridge's invocation-local `model` sits ahead of `task.agentModelOverrides`. The task wire schema does not expose a separate `model` field — per-item `intent` and batch-level `routing` are the model-facing surface.
+Runtime output schema precedence is unchanged:
 
 1. the task item's explicit `outputSchema`
 2. agent frontmatter `output`
@@ -216,6 +219,60 @@ Runtime output schema precedence is:
 The task item's optional `schemaMode` overrides the parent session mode; the default is `permissive`.
 
 The model-facing prompt (`src/prompts/tools/task.md`) tags read-only agents and warns against offloading reasoning to `scout`/`sonic`.
+
+### Dynamic worker routing
+
+#### Routing intent
+
+Per item `intent` (`src/task/routing/types.ts: RoutingIntent`):
+
+```
+"default" | "cheap" | "normal" | "strong" | "vision" | "large-context" | "same-pool-ok"
+```
+
+`agentIntents` in settings maps agent name → intent; the per-item field overrides it. `same-pool-ok` explicitly permits the parent pool; every other intent is subject to anti-affinity when `avoidParentPool` is true.
+
+#### Candidate eligibility (`src/task/routing/snapshot.ts: buildRoutingSnapshot`)
+
+Candidates are not the whole catalog. `buildRoutingSnapshot` starts from `modelRegistry.getAvailable()` filtered by `hasConfiguredAuth`, then keeps only models matching **intentional worker sources**: the explicit roster `task.routing.workerModels` and any concrete provider-qualified selector (`provider/model`) configured in `modelRoles` or `task.agentModelOverrides`. Bare aliases like `flash`, `mini`, `pro`, `haiku`, `codex` are **never** globally eligible — they would admit stale catalog models such as the former `google/gemini-1.5-flash` (404). When no intentional roster is configured, the fallback is the curated concrete priority roster (only provider-qualified selectors from `priority.json`: `slow`/`designer`/`smol` filtered to contain `/`), never bare aliases. Position in that combined list becomes the candidate's `preferredRank` (roster entries intentionally rank first), so OMP's existing quality ordering carries into scoring. Usage health comes from cached/last-good reports only — building a snapshot performs no network fetch and no credential refresh.
+
+#### Hard-filter order (`src/task/routing/candidates.ts: filterRoutingCandidates`)
+
+Applied in order; first-match removals are final for that candidate:
+
+1. `usage === "depleted"` — removed.
+2. **Dead routes** (`deadSelectors` from observed `404 / not found / invalid model / deprecated` launch failures this run) — exact selector match (provider-qualified or bare id suffix) removed. Bounded to 20 per `TaskTool` instance, so a known-dead route is not immediately retried by a sibling. Reuses the same hard-filter path as depleted/exclusions.
+3. **Exclusion patterns** (`task.routing.excludePools` + effective per-spawn/session `excludePools`) — removed. **Always enforced, never relaxed**, even to satisfy anti-affinity recovery.
+4. **Requirement filters** from `RoutingRequirements`: `vision` requires `candidate.vision`, `minContextWindow` requires `candidate.contextWindow !== null && >= min`, `structuredOutput` requires `candidate.supportsTools`.
+5. **Intent-implied requirements**: `intent === "vision"` implies `vision`; `intent === "large-context"` implies `minContextWindow` of at least 200_000 unless the request specifies a larger minimum; `intent === "strong"` removes non-`reasoning` candidates whenever at least one `reasoning` candidate survives — a capability floor, so no combination of cheapness/headroom/preference bonuses can downgrade a strong task.
+6. **Parent-pool anti-affinity** — when `policy.avoidParentPool && intent !== "same-pool-ok"` and `parentPool` is set, drop parent-pool candidates **only if** at least one non-parent candidate survives steps 1–5. Otherwise this step is skipped (so the failure mode is handled by step 7, not by silent elimination).
+7. **Fail-closed guard** — if the viable set after steps 1–6 contains only parent-pool candidates and `policy.parentPoolFallback === "deny"`, the selector returns `parent_pool_fail_closed` instead of choosing one.
+`RoutingUsageState: "healthy" | "reserve" | "depleted" | "unknown"`. `unknown` is **never hard-filtered** and never bypasses dead/exclusion/anti-affinity hard filters (steps 2, 3 and 6).
+
+#### Scoring summary (`src/task/routing/select.ts: scoreRoutingCandidate`)
+
+Additive, small/understandable; higher wins:
+
+- **Usage:** `healthy` +30, `unknown` +10, `reserve` −40. Unknown ranks **below healthy and above reserve** — it is never treated as unlimited headroom.
+- **Pool preference:** `preferPools` match +25.
+- **Sibling diversity:** pool key already in `siblingPools` (in-flight siblings) → −30 — outweighs `preferredRank` (+8) and `unknown→healthy` (+20) so a healthy alternative pool beats a preferred repeat, but not a depleted/reserve one (handled by hard filters).
+- **Intent fit:** `cheap` adds `40 / (1 + costPerMTokenTotal)` and `normal`/`default` add `10 / (1 + costPerMTokenTotal)`, so a materially cheaper candidate wins outright rather than landing inside the tie-break band; `strong` is enforced as a hard capability floor (step 4 above) and additionally rewards `reasoning`; `vision`/`large-context` are neutral (already hard-filtered).
+- **`preferredRank`** (the agent's configured default model; 0 = highest) contributes a small bonus so existing configuration still wins among otherwise-equal candidates, but it **must not** override usage/exclusion/anti-affinity outcomes.
+- **Bounded tie-break:** candidates within 5 points of the top score are shuffled via `request.random ?? Math.random`; `random: () => 0` makes the result fully deterministic (first of the band) and is used by tests. Task dispatch supplies `seededRandom(agent + assignment)` so the batch-preflight and dispatch resolutions of the same spawn pick the same candidate.
+
+`routeWorker` (`src/task/routing/router.ts`) returns `policy.enabled === false` → `{ ok:false, code:"routing_disabled" }`, empty viable set → `no_viable_candidate`, otherwise a `RoutingDecision` whose `selectors` are **all** viable candidates sorted best-first and deduped by selector. The `reason` is one concise UI line like `` `cursor/composer-2.5 (cursor pool; parent pool anthropic excluded; headroom healthy)` ``; `trace` is verbose debug/log only.
+
+#### Unknown-usage rule
+
+`unknown` is viable but **ranks below `healthy` and above `reserve`** (`healthy +30 > unknown +10 > reserve −40`). It is never treated as unlimited headroom and never bypasses hard exclusions or parent-pool anti-affinity. The router's `usageInfluenced` flag is set when a `reserve`/`depleted`/`unknown` signal changes which candidate is chosen.
+
+#### Bounded contract-failure reroute
+
+Routing treats the agent's required execution/output contract as a hard compatibility constraint (tool support, vision, context, structured output). Beyond hard filtering, when a child launches but fails its **structured-output contract** before returning useful work (the mandatory regression is Composer 2.5 + `scout`: `` `schema_violation: (root): expected object, received string` ``), that route is classified distinctly from ordinary task failure and the router automatically retries the next eligible external-pool candidate.
+
+- Reroutes are bounded by `task.routing.maxContractReroutes` (default `1`) and the existing task/retry limits — never an unbounded loop.
+- The failed pool is never re-selected for the same requirement without evidence of compatibility.
+- The failure, replacement route, and reason are surfaced concisely in `routingReroutes` / `routingReason`; verbose traces stay in logs. The parent receives the final useful result or a clear bounded failure without needing to probe models or inspect raw transcripts.
 
 ## Command discovery interaction
 

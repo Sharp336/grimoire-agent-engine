@@ -32,14 +32,18 @@ The roster updates from the session's agent registry and progress events. Its re
 
 The header aggregates status and usage across measured agents. Press `t` to switch between the stable flat roster and a parent/child tree.
 
-On a wide terminal, the selected agent's inspector appears beside the roster. On a narrow terminal, press `Tab` to replace the roster with it. The inspector adds:
+Routing work adds child metadata to the same surfaces (persisted alongside `AgentProgress` / `SingleResult` in `src/task/types.ts`):
 
-- the current tool and arguments, last intent, and retry state;
-- context-window use when available;
-- parent and child lineage;
-- output and patch paths, plus isolated-worktree branch metadata when present.
+- **Resource pool label** (`resourcePool`) — concise pool label, not just `provider/model`.
+- **Routing intent** (`routingIntent`) — the resolved `RoutingIntent` for that child.
+- **Concise routing reason** (`routingReason`) — one line for the roster, e.g. `` `cursor/composer-2.5 (cursor pool; parent pool anthropic excluded; headroom healthy)` ``.
+- **Parent-pool anti-affinity applied** (`routingAntiAffinity`) and **parent-pool fallback exception** (`routingParentPoolFallback`) — distinguish protected-pool avoidance from an intentional same-pool fallback.
+- **Usage-influenced** (`routingUsageInfluenced`) — headroom/reserve/unknown signal changed the outcome.
+- **Pin/bypass reason** (`routingBypassReason`) — when `request.model` or `task.agentModelOverrides` bypassed the router; if the pinned target lands in the parent pool it is surfaced as an intentional anti-affinity override.
+- **Reroute history** (`routingReroutes: { from, to, reason }[]`) — bounded structured-output contract reroutes (e.g. `scout` schema violation → next external pool).
 
-Metrics depend on the progress or persisted usage data available for that agent. Missing data appears as `usage —` rather than an estimate.
+Verbose scoring traces (`trace`) go to the logger only, never the roster UI. All fields appear in progress/result payloads and Hub progress; missing routing data appears as absent rather than an estimate, mirroring the usage field.
+
 
 ### Roster controls
 

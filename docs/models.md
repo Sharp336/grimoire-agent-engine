@@ -181,6 +181,22 @@ catalog matches the cached one, the cached rows are returned verbatim —
 the static + dynamic merge is bypassed entirely. The fingerprint is
 memoized per process by tagging the static-models array with a symbol
 property, so repeated cold-start calls do not re-hash.
+## Resource-pool identity and dynamic worker routing
+
+Dynamic worker routing groups models into **resource pools** — the billing/quota route actually consumed, not merely the model family. A Claude-family model reached through Cursor is a **Cursor** pool member, not direct Anthropic. The router uses this identity to protect the parent session's pool by default.
+
+### Resource-pool identity
+
+A pool is `provider` + normalized `baseUrl` + account key (`src/task/routing/pool.ts`):
+
+- `provider` — canonical provider id (`anthropic`, `cursor`, `openai-codex`, …).
+- `baseUrl` — normalized by stripping the trailing slash and lowercasing the host; absent when the provider uses its built-in default.
+- `accountKey` — `accountId` or `email` lowercased when the credential carries one; otherwise `"api-key"` for stored/runtime/config API keys, `"env"` for env-derived credentials, or `"none"`. Env and fallback credentials intentionally collapse into one shared pool per `provider`+`baseUrl`.
+- `key` — `` `${provider}\0${normalizedBaseUrl}\0${accountKey}` ``; `label` is the concise human form shown in routing observability (e.g. `cursor` or `anthropic (alice@x.com)`).
+
+### Where routing sits
+
+ModelRegistry merge and per-provider/model overrides still produce the full available model set as before. Dynamic routing runs **at task spawn time** after that set is built: it builds candidates from the available registry, hard-filters and scores them (see [Task Agent Discovery and Selection](./task-agent-discovery.md#dynamic-worker-routing)), and hands the ordered selectors to the existing model resolver / executor. Existing `retry.usageAwareFallback` and auth/retry fallback still run last — they recover from provider errors after the routing decision, they do not choose the initial pool.
 
 ## Provider and model identity
 

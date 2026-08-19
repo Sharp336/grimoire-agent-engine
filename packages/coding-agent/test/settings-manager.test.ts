@@ -1295,6 +1295,43 @@ describe("Settings", () => {
 			expect(settings.get("power.sleepPrevention")).toBe("display");
 		});
 
+		it("migrates flat task.agentModelOverrides to nested and preserves task.disabledAgents", async () => {
+			// Simulate real /home/chris/.omp/agent/config.yml which has flat `task.agentModelOverrides:`
+			// at top level plus nested `task: { disabledAgents: [...] }`. Before the fix this parsed as
+			// literal flat key and Settings.get("task.agentModelOverrides") returned {}.
+			await Bun.write(
+				getConfigPath(),
+				`task.agentModelOverrides:\n  scout: "@smol"\n  task: "@Contributor"\n  reviewer: "@slow"\ntask:\n  disabledAgents:\n    - designer\n`,
+			);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("task.agentModelOverrides")).toEqual({
+				scout: "@smol",
+				task: "@Contributor",
+				reviewer: "@slow",
+			});
+			expect(settings.get("task.disabledAgents")).toEqual(["designer"]);
+			// Trigger a write so the migration is persisted and flat key is removed
+			settings.set("display.showTokenUsage", true);
+			await settings.flush();
+			const raw = await readSettings();
+			expect(raw["task.agentModelOverrides"]).toBeUndefined();
+			expect((raw.task as Record<string, unknown>)?.agentModelOverrides).toEqual({
+				scout: "@smol",
+				task: "@Contributor",
+				reviewer: "@slow",
+			});
+		});
+
+		it("prefers nested task.agentModelOverrides when both flat and nested exist", async () => {
+			await Bun.write(
+				getConfigPath(),
+				`task.agentModelOverrides:\n  scout: "@smol"\ntask:\n  agentModelOverrides:\n    scout: "@task"\n  disabledAgents:\n    - designer\n`,
+			);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("task.agentModelOverrides")).toEqual({ scout: "@task" });
+			expect(settings.get("task.disabledAgents")).toEqual(["designer"]);
+		});
+
 		it("does not overwrite an explicit power.sleepPrevention", async () => {
 			await writeSettings({
 				power: { sleepPrevention: "off", preventIdleSleep: true },
