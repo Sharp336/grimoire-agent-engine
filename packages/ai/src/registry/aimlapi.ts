@@ -3,7 +3,7 @@ import type { ProviderDefinition } from "./types";
 
 export const aimlApiProvider = {
 	id: "aimlapi",
-	name: "aimlapi.com (1000+ models, one-click set up)",
+	name: "AIML API",
 	// "Get API key" device-authorization login. The heavy flow module is
 	// dynamically imported so it stays out of the eager startup graph
 	// (see docs/adding-a-provider.md § Conventions).
