@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { OllamaProvider, searchOllama } from "@oh-my-pi/pi-coding-agent/web/search/providers/ollama";
+import { parseSearchQuery } from "@oh-my-pi/pi-coding-agent/web/search/query";
 
 const OLLAMA_SEARCH_URL = "https://ollama.com/api/web_search";
 
@@ -75,6 +76,50 @@ describe("Ollama searchOllama request shape", () => {
 
 		expect(capturedBody?.query).toBe("rust async");
 		expect(capturedBody?.max_results).toBe(7);
+	});
+
+	it("formats queries containing directives (phrases, negation, site)", async () => {
+		let capturedBody: Record<string, unknown> | undefined;
+		const fetchMock: FetchImpl = async (_input, init) => {
+			capturedBody = JSON.parse(init?.body as string);
+			return new Response(JSON.stringify({ results: [] }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		};
+
+		await searchOllama({
+			...makeParams('"machine learning" site:arxiv.org -deprecated python'),
+			fetch: fetchMock,
+		});
+
+		expect(capturedBody?.query).toContain('"machine learning"');
+		expect(capturedBody?.query).toContain("site:arxiv.org");
+		expect(capturedBody?.query).toContain("-deprecated");
+		expect(capturedBody?.query).toContain("python");
+	});
+
+	it("uses pre-parsed query when provided", async () => {
+		let capturedBody: Record<string, unknown> | undefined;
+		const fetchMock: FetchImpl = async (_input, init) => {
+			capturedBody = JSON.parse(init?.body as string);
+			return new Response(JSON.stringify({ results: [] }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		};
+
+		const parsedQuery = parseSearchQuery('"large language model" -obsolete site:ollama.com llama');
+
+		await searchOllama({
+			...makeParams("raw text that should be ignored", { parsedQuery }),
+			fetch: fetchMock,
+		});
+
+		expect(capturedBody?.query).toContain('"large language model"');
+		expect(capturedBody?.query).toContain("-obsolete");
+		expect(capturedBody?.query).toContain("site:ollama.com");
+		expect(capturedBody?.query).toContain("llama");
 	});
 
 	it("defaults max_results to 5 when no count is specified", async () => {

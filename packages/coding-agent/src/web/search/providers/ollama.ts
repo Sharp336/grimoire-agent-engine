@@ -8,6 +8,7 @@
 import { type ApiKey, type AuthStorage, type FetchImpl, getEnvApiKey, withAuth } from "@oh-my-pi/pi-ai";
 import type { SearchResponse, SearchSource } from "../../../web/search/types";
 import { SearchProviderError } from "../../../web/search/types";
+import { formatQuery, parseSearchQuery } from "../query";
 import { clampNumResults } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
@@ -32,12 +33,11 @@ interface OllamaSearchResponse {
 }
 
 /** Read response body up to a byte cap, truncating if the limit is exceeded. */
-async function readLimitedText(response: Response, maxBytes: number, truncate = false): Promise<string> {
+async function readLimitedText(response: Response, maxBytes: number): Promise<string> {
 	const reader = (response.body as ReadableStream<Uint8Array> | null)?.getReader();
 	if (!reader) {
 		const text = await response.text();
-		if (truncate && text.length > maxBytes) return text.slice(0, maxBytes);
-		return text;
+		return text.length > maxBytes ? text.slice(0, maxBytes) : text;
 	}
 
 	const chunks: Uint8Array[] = [];
@@ -82,7 +82,7 @@ async function callOllamaSearch(
 	});
 
 	if (!response.ok) {
-		const errorText = await readLimitedText(response, MAX_ERROR_BYTES, true);
+		const errorText = await readLimitedText(response, MAX_ERROR_BYTES);
 		const classified = classifyProviderHttpError("ollama", response.status, errorText);
 		if (classified) throw classified;
 		throw new SearchProviderError("ollama", `Ollama API error (${response.status}): ${errorText}`, response.status);
@@ -123,9 +123,14 @@ export async function searchOllama(params: SearchParamsWithFetch): Promise<Searc
 	const numResults = clampNumResults(params.numSearchResults ?? params.limit, DEFAULT_NUM_RESULTS, MAX_NUM_RESULTS);
 	const fetchImpl = params.fetch;
 
+	const parsed = params.parsedQuery ?? parseSearchQuery(params.query);
+	const query = parsed.hasDirectives
+		? formatQuery(parsed, { phrases: true, negation: true, site: true })
+		: params.query;
+
 	const data = await withAuth(
 		keyOrResolver,
-		key => callOllamaSearch(key, params.query, numResults, params.signal, fetchImpl, params.timeoutMs),
+		key => callOllamaSearch(key, query, numResults, params.signal, fetchImpl, params.timeoutMs),
 		{
 			signal: params.signal,
 			missingKeyMessage:

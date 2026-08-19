@@ -27,6 +27,7 @@ interface OllamaTagsResponse {
 
 const VALID_HOSTNAMES = new Set(["ollama.com", "www.ollama.com"]);
 const RESERVED_ROOTS = new Set([
+	"library",
 	"models",
 	"blog",
 	"docs",
@@ -111,6 +112,13 @@ function parseOllamaUrl(url: string): { modelRef: string; baseRef: string; pageU
 			return { modelRef, baseRef, pageUrl };
 		}
 
+		if (parts.length === 1 && !RESERVED_ROOTS.has(parts[0])) {
+			const modelRef = decodeURIComponent(parts[0]);
+			const baseRef = modelRef.split(":")[0] ?? modelRef;
+			const pageUrl = `${parsed.origin}/${buildModelPath(["library", baseRef])}`;
+			return { modelRef, baseRef, pageUrl };
+		}
+
 		if (parts.length >= 2 && !RESERVED_ROOTS.has(parts[0])) {
 			const namespace = decodeURIComponent(parts[0]);
 			const model = decodeURIComponent(parts[1]);
@@ -187,6 +195,10 @@ export const handleOllama: SpecialHandler = async (
 			const name = (model.model ?? model.name ?? "").toLowerCase();
 			return name === baseLower || name.startsWith(`${baseLower}:`);
 		});
+
+		if (!pageResult.ok && (!tagsResult.ok || matchingModels.length === 0)) {
+			return null;
+		}
 
 		const tagRef = modelRef.includes(":") ? modelRef : null;
 		const selectedTag = tagRef ? matchingModels.find(model => (model.model ?? model.name ?? "") === tagRef) : null;
