@@ -7,7 +7,7 @@
  */
 
 /** Image generation backends, in settings/tool vocabulary. */
-export type ImageProvider = "antigravity" | "gemini" | "openai" | "openai-codex" | "openrouter" | "xai";
+export type ImageProvider = "antigravity" | "bfl" | "gemini" | "openai" | "openai-codex" | "openrouter" | "xai";
 
 /** Auto-resolution fallback order when no configured entry or session provider matches. */
 export const AUTO_IMAGE_PROVIDER_ORDER: readonly ImageProvider[] = [
@@ -15,6 +15,7 @@ export const AUTO_IMAGE_PROVIDER_ORDER: readonly ImageProvider[] = [
 	"openai-codex",
 	"antigravity",
 	"xai",
+	"bfl",
 	"openrouter",
 	"gemini",
 ];
@@ -40,6 +41,11 @@ export const IMAGE_PROVIDER_CHOICES = [
 		value: "xai",
 		label: "xAI Grok Imagine",
 		description: "Requires xAI Grok OAuth or XAI_API_KEY",
+	},
+	{
+		value: "bfl",
+		label: "Black Forest Labs",
+		description: "FLUX via /login bfl or BFL_API_KEY",
 	},
 	{ value: "gemini", label: "Gemini", description: "Requires GEMINI_API_KEY" },
 	{ value: "openrouter", label: "OpenRouter", description: "Requires OPENROUTER_API_KEY" },

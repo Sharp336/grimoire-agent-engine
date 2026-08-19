@@ -8,6 +8,7 @@ import { anthropicProvider } from "./anthropic";
 import { azureProvider } from "./azure";
 import { basetenProvider } from "./baseten";
 import { bedrockMantleProvider } from "./bedrock-mantle";
+import { bflProvider } from "./black-forest-labs";
 import { cerebrasProvider } from "./cerebras";
 import { cloudflareAiGatewayProvider } from "./cloudflare-ai-gateway";
 import { coreWeaveProvider } from "./coreweave";
@@ -145,6 +146,7 @@ const ALL = [
 	tavilyProvider,
 	kagiProvider,
 	exaProvider,
+	bflProvider,
 	parallelProvider,
 	ollamaProvider,
 	ollamaCloudProvider,
