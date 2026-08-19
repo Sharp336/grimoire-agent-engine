@@ -53,6 +53,22 @@ export function cursorProjectSlug(workspaceRoot: string): string {
 	return withDrive.replace(/[\\/:.]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "") || "workspace";
 }
 
+/**
+ * Hosted Imagine writes under `env.project_folder` (`~/.cursor/projects/<slug>/`).
+ * Map that artifact path back onto the live workspace root so PNGs land in the repo.
+ */
+export function remapCursorArtifactPath(filePath: string, workspacePaths: readonly string[]): string {
+	const resolved = path.resolve(filePath);
+	for (const root of workspacePaths) {
+		const artifactRoot = cursorProjectFolder(root);
+		const relative = path.relative(artifactRoot, resolved);
+		if (relative === "") return path.resolve(root);
+		if (relative.startsWith(`..${path.sep}`) || relative === ".." || path.isAbsolute(relative)) continue;
+		return path.resolve(root, relative);
+	}
+	return resolved;
+}
+
 export function cursorPreviousWorkspaceUris(options?: { cwd?: string; workspacePaths?: string[] }): string[] {
 	return resolveCursorWorkspacePaths(options).map(toCursorFileUri);
 }

@@ -10,6 +10,7 @@ import {
 	type ToolCallState,
 } from "@oh-my-pi/pi-ai/providers/cursor";
 import { cursorWritePayload } from "@oh-my-pi/pi-ai/providers/cursor-pi-args";
+import { cursorProjectFolder } from "@oh-my-pi/pi-ai/providers/cursor/workspace";
 import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
@@ -173,6 +174,22 @@ describe("Cursor hosted GenerateImage", () => {
 		expect(block?.[kCursorExecResolved]).toBe(true);
 		expect(results[0]?.isError).toBe(false);
 		expect(new Uint8Array(fs.readFileSync(target))).toEqual(PNG);
+	});
+
+	it("relocates Imagine files from ~/.cursor/projects/<slug> into the session cwd", () => {
+		const dir = tempDir();
+		const artifact = path.join(cursorProjectFolder(dir), "assets", "cat.png");
+		const relocated = path.join(dir, "assets", "cat.png");
+		const { results } = runGenerateImage(
+			generateImageToolCall({
+				filePath: artifact,
+				imageData: Buffer.from(PNG).toString("base64"),
+			}),
+			[dir],
+		);
+		expect(results[0]?.isError).toBe(false);
+		expect(new Uint8Array(fs.readFileSync(relocated))).toEqual(PNG);
+		expect(fs.existsSync(artifact)).toBe(false);
 	});
 
 	it("does not write when image_data is empty", () => {

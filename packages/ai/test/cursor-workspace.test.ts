@@ -9,6 +9,7 @@ import {
 	cursorProjectFolder,
 	cursorProjectSlug,
 	mergeCursorPreviousWorkspaceUris,
+	remapCursorArtifactPath,
 	resolveCursorWorkspacePaths,
 	toCursorFileUri,
 } from "../src/providers/cursor/workspace.ts";
@@ -82,6 +83,15 @@ describe("cursor workspace helpers", () => {
 			expect(cursorProjectSlug("/home/user/git/agentera")).toBe("home-user-git-agentera");
 		}
 		expect(cursorProjectFolder(workspace).startsWith(path.join(os.homedir(), ".cursor", "projects"))).toBe(true);
+	});
+
+	it("remaps Imagine paths under ~/.cursor/projects/<slug> onto the workspace root", () => {
+		const workspace = path.resolve("/tmp/omp-cursor-image-root");
+		const artifact = path.join(cursorProjectFolder(workspace), "assets", "cat.png");
+		expect(remapCursorArtifactPath(artifact, [workspace])).toBe(path.join(workspace, "assets", "cat.png"));
+		expect(remapCursorArtifactPath(path.join(workspace, "assets", "cat.png"), [workspace])).toBe(
+			path.join(workspace, "assets", "cat.png"),
+		);
 	});
 
 	it("appends live workspace URIs after a cwd change without dropping the checkpoint", () => {

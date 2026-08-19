@@ -241,6 +241,7 @@ import {
 	buildCursorRequestContext,
 	cursorPreviousWorkspaceUris,
 	mergeCursorPreviousWorkspaceUris,
+	remapCursorArtifactPath,
 	resolveCursorWorkspacePaths,
 } from "./cursor/workspace";
 
@@ -1624,6 +1625,7 @@ async function handleExecServerMessage(
 		}
 		case "writeArgs": {
 			const args = execMsg.message.value;
+			args.path = remapCursorArtifactPath(args.path, workspacePaths);
 			if (!args.toolCallId) args.toolCallId = crypto.randomUUID();
 			const editOwned = isEditOwnedToolCallId(state, output, args.toolCallId);
 			// Hosted image gen writes PNG bytes in `file_bytes` with empty `file_text`.

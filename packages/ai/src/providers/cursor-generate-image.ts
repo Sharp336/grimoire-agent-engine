@@ -12,6 +12,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 import { type CursorWritePayload, decodeCursorWriteBytes } from "./cursor-pi-args";
+import { remapCursorArtifactPath } from "./cursor/workspace";
 
 const RASTER_IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|ico|tiff?|avif)$/i;
 
@@ -54,10 +55,11 @@ export function persistGenerateImageResult(
 	if (result?.case !== "success") {
 		return { text: "GenerateImage completed without a result", isError: true };
 	}
-	const filePath = result.value?.filePath || call?.args?.filePath;
-	if (!filePath) {
+	const requested = result.value?.filePath || call?.args?.filePath;
+	if (!requested) {
 		return { text: "GenerateImage succeeded but file_path was empty", isError: true };
 	}
+	const filePath = remapCursorArtifactPath(requested, workspacePaths);
 	if (!pathInsideWorkspace(filePath, workspacePaths)) {
 		return { text: `Refused to write generated image outside the workspace: ${filePath}`, isError: true };
 	}
