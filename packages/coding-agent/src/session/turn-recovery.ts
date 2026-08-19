@@ -830,6 +830,15 @@ export class TurnRecovery {
 	 * even if queued user input gets drained next. Restoring the failed turn
 	 * before that continuation preserves the visible stop reason and rebuilds the
 	 * active assistant tail that `Agent.continue()` needs to dequeue follow-ups.
+	 *
+	 * `reason === "incomplete"` is exempt from restoration: that turn is a
+	 * dead-end output-token-limit truncation (`stopReason: "length"`) with no
+	 * actionable deliverable, not an error the user needs to see. Restoring it
+	 * would let a no-op shake/compaction pass (e.g. an already-small session)
+	 * resurrect the truncated turn for replay — the exact loop the threshold
+	 * gate above this call exists to prevent. `overflow` keeps the rollback: the
+	 * input itself is broken, so surfacing the failure when nothing else can
+	 * resolve it is the honest outcome.
 	 */
 	async #runRecoveryCompactionWithRollback(
 		reason: "overflow" | "incomplete",
@@ -845,7 +854,7 @@ export class TurnRecovery {
 			phase: "mid_turn",
 		});
 		const compactionEntryAfter = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
-		if (result.historyRewritten !== true && compactionEntryAfter === compactionEntryBefore) {
+		if (reason !== "incomplete" && result.historyRewritten !== true && compactionEntryAfter === compactionEntryBefore) {
 			this.#restoreFailedAssistantTurn(assistantMessage);
 		}
 		return result;
