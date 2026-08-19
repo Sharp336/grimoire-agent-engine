@@ -27,6 +27,7 @@ import {
 	piReadPath,
 	piTimeout,
 	cursorWritePayload,
+	emptyImageWriteReason,
 } from "@oh-my-pi/pi-ai/providers/cursor/exec-modern";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { cursorMcpPrefersReplaceEdit, normalizeCursorReplaceArgs } from "./cursor-bridge-tools";
@@ -527,6 +528,10 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		const payload = cursorWritePayload(args);
 		if (payload.mode === "bytes") {
 			return await executeBinaryWrite(this.options, args.path, payload.bytes, toolCallId);
+		}
+		const emptyImageReason = emptyImageWriteReason(args.path, payload);
+		if (emptyImageReason) {
+			return createToolResultMessage(toolCallId, "write", buildToolErrorResult(emptyImageReason), true);
 		}
 		const toolResultMessage = await executeTool(this.options, "write", toolCallId, {
 			path: args.path,

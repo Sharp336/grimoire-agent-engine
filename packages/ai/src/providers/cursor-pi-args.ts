@@ -238,6 +238,7 @@ export type CursorWriteArgsLike = {
 	fileText?: string;
 	fileBytes?: unknown;
 	encodingHint?: string;
+	$unknown?: Array<{ no: number; data?: Uint8Array }>;
 };
 
 /**
@@ -284,7 +285,9 @@ export function decodeCursorWriteBytes(value: unknown): Uint8Array | undefined {
 }
 
 export function cursorWritePayload(args: CursorWriteArgsLike): CursorWritePayload {
-	const bytes = decodeCursorWriteBytes(args.fileBytes);
+	const bytes =
+		decodeCursorWriteBytes(args.fileBytes) ??
+		decodeCursorWriteBytes(args.$unknown?.find(field => field.no === 5)?.data);
 	if (bytes) return { mode: "bytes", bytes };
 	const text = args.fileText ?? "";
 	const hint = args.encodingHint?.trim().toLowerCase();

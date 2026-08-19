@@ -224,6 +224,7 @@ import {
 	cursorEditOwnedReadPath,
 	cursorWriteDisplayContent,
 	cursorWritePayload,
+	emptyImageWriteReason,
 	omitUndefinedArgs,
 	piEscapeRegexLiteral,
 	piGrepSkip,
@@ -234,6 +235,7 @@ import {
 	piReadPathHasRange,
 	piTimeout,
 } from "./cursor/exec-modern";
+import { persistGenerateImageResult, selectGenerateImageCall } from "./cursor-generate-image";
 import { handleInteractionQuery } from "./cursor/interaction-query";
 import {
 	buildCursorRequestContext,
@@ -747,6 +749,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 				setFirstTokenTime: () => {
 					if (!firstTokenTime) firstTokenTime = performance.now();
 				},
+				workspacePaths: resolveCursorWorkspacePaths(options),
 				onTodoSnapshot: options?.execHandlers?.todoSync?.bind(options.execHandlers),
 				onToolResult: options?.onToolResult,
 			};
@@ -975,7 +978,7 @@ export type ToolCallState = ToolCall & {
 	[kStreamingBlockIndex]: number;
 	[kStreamingPartialJson]?: string;
 	[kStreamingLastParseLen]?: number;
-	[kStreamingBlockKind]: "mcp" | "todo" | "cursor-exec" | "cursor-edit" | "connect-scm" | "web-fetch";
+	[kStreamingBlockKind]: "mcp" | "todo" | "cursor-exec" | "cursor-edit" | "connect-scm" | "web-fetch" | "generate-image";
 	[kStreamingEnvelopeId]?: string;
 	[kCursorExecResolved]?: true;
 };
@@ -1013,6 +1016,8 @@ export interface BlockState {
 	setThinkingBlock: (b: (ThinkingContent & { [kStreamingBlockIndex]: number }) | null) => void;
 	setToolCall: (t: ToolCallState | null) => void;
 	setFirstTokenTime: () => void;
+	/** Session cwd / extra roots used to confine hosted GenerateImage writes. */
+	workspacePaths?: string[];
 	/** Mirror a server-confirmed todo snapshot into local session state. */
 	onTodoSnapshot?: CursorTodoSyncHandler;
 	/**
@@ -1623,6 +1628,16 @@ async function handleExecServerMessage(
 			const editOwned = isEditOwnedToolCallId(state, output, args.toolCallId);
 			// Hosted image gen writes PNG bytes in `file_bytes` with empty `file_text`.
 			const payload = cursorWritePayload(args);
+			const emptyImageReason = emptyImageWriteReason(args.path, payload);
+			if (emptyImageReason) {
+				synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "write", {
+					path: args.path,
+					content: cursorWriteDisplayContent(payload),
+				});
+				sendExecClientMessage(h2Request, execMsg, "writeResult", buildWriteRejectedResult(args.path, emptyImageReason));
+				await pairSynthesizedExecResult(state, onToolResult, args.toolCallId, "write", emptyImageReason, true);
+				return;
+			}
 			if (!editOwned) {
 				synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "write", {
 					path: args.path,
@@ -3568,7 +3583,7 @@ export function flushOpenToolCalls(
 			clearStreamingPartialJson(block);
 		}
 		const kind = block[kStreamingBlockKind];
-		if (kind === "connect-scm" || kind === "todo" || kind === "cursor-edit") {
+		if (kind === "connect-scm" || kind === "todo" || kind === "cursor-edit" || kind === "generate-image") {
 			if (!(kind === "cursor-edit" && state.pairedEditToolCallIds?.has(block.id))) {
 				state.onToolResult?.({
 					role: "toolResult",
@@ -4224,6 +4239,29 @@ export function processInteractionUpdate(
 				return;
 			}
 
+			const generateImageCall = selectGenerateImageCall(toolCall);
+			if (generateImageCall) {
+				const filePath = generateImageCall.args?.filePath;
+				const callId = update.message.value.callId || crypto.randomUUID();
+				const block: ToolCallState = {
+					type: "toolCall",
+					id: callId,
+					name: "generate_image",
+					arguments: {
+						path: filePath,
+						description: generateImageCall.args?.description,
+					},
+					[kStreamingBlockIndex]: output.content.length,
+					[kStreamingBlockKind]: "generate-image",
+					[kStreamingEnvelopeId]: update.message.value.callId || undefined,
+					[kCursorExecResolved]: true,
+				};
+				output.content.push(block);
+				retainStreamedCall(state, block, update.message.value.callId);
+				stream.push({ type: "toolcall_start", contentIndex: output.content.length - 1, partial: output });
+				return;
+			}
+
 			openOrUpdateEditBlock(output, stream, state, toolCall, update.message.value.callId);
 		}
 	} else if (updateCase === "toolCallDelta" || updateCase === "partialToolCall") {
@@ -4325,6 +4363,24 @@ export function processInteractionUpdate(
 					role: "toolResult",
 					toolCallId: settled.id,
 					toolName: "web_fetch",
+					content: [{ type: "text", text }],
+					isError,
+					timestamp: Date.now(),
+				});
+			} else if (settled[kStreamingBlockKind] === "generate-image") {
+				const generateImageCall = selectGenerateImageCall(toolCall);
+				const filePath = generateImageCall?.result?.result?.value?.filePath || generateImageCall?.args?.filePath;
+				if (filePath || generateImageCall?.args?.description) {
+					settled.arguments = {
+						path: filePath,
+						description: generateImageCall?.args?.description,
+					};
+				}
+				const { text, isError } = persistGenerateImageResult(generateImageCall, state.workspacePaths ?? []);
+				state.onToolResult?.({
+					role: "toolResult",
+					toolCallId: settled.id,
+					toolName: "generate_image",
 					content: [{ type: "text", text }],
 					isError,
 					timestamp: Date.now(),

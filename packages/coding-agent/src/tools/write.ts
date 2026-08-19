@@ -1116,6 +1116,11 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		// Peel a read-tool selector (`:raw`, `:1-20`, …) so the write target matches
 		// what `read` resolves for the same URL; line-range/malformed selectors throw.
 		const path = peelWriteUrlSelector(unwrapHashlineHeaderPath(rawPath));
+		if (content.length === 0 && /\.(png|jpe?g|gif|webp|bmp|ico|tiff?|avif)$/i.test(path)) {
+			throw new ToolError(
+				"Refusing to write a 0-byte image file. Hosted GenerateImage delivers PNG bytes in file_bytes / image_data, not empty content.",
+			);
+		}
 		return untilAborted(signal, async () => {
 			// Strip hashline display prefixes ([PATH#HASH] + LINE:) if the model copied them from read output
 			const { text: cleanContent, stripped } = stripWriteContent(this.session, content);

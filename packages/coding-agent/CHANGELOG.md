@@ -57,7 +57,7 @@
 ## [17.4.0] - 2026-08-20
 ### Fixed
 
-- Fixed Cursor hosted Imagine writes landing as 0-byte files: proto3 `WriteArgs.file_text` is `""` when unset, so the exec bridge's `fileText ?? decode(fileBytes)` ignored the PNG in `file_bytes`. Non-empty `file_bytes` are now written raw, including JSON/base64/Buffer encodings that a `Uint8Array`-only check would drop.
+- Fixed Cursor hosted Imagine writes landing as 0-byte files: persist `generate_image_tool_call.image_data` to `file_path`, reject empty image `WriteArgs` / `write({ content: "" })` so they cannot clobber a real PNG, and still write non-empty `file_bytes` raw.
 
 ### Added
 
