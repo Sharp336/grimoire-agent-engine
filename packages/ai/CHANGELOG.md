@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Aligned the Devin Connect-RPC adapter's `GetChatMessage` request with the wire format captured from the Devin CLI (v3000.4.25) and Devin Desktop via mitmproxy. The adapter previously impersonated Windsurf (`ideName="windsurf"`, `extensionName="windsurf"`) and sent fields the real Devin clients never transmit.
+  - Removed the `GetUserJwt` preflight RPC: the session token is now placed directly in `Metadata.apiKey` (field 3), eliminating an extra HTTP round-trip per chat request.
+  - Fixed metadata identity to `ideName="devin-cli"`, `extensionName`/`ideType="chisel"`, version `"3000.4.25"`. Added `os` and attestation field 31 (`f`, derived from `getInstallId()`). Removed `userJwt`, `sessionId`, `requestId`, `triggerId`, `lsTimestamp`.
+  - Switched from gzip-compressed Connect frames (flag `0x01`) to raw uncompressed frames (flag `0x00`), matching the CLI. Removed `connect-content-encoding`, `user-agent`, and `connect-accept-encoding` headers.
+  - Updated `CompletionConfiguration` defaults to `maxTokens=128000`, `maxNewlines=400`, `temperature=1.0`, `topK=40`, `topP=0.95` (all still overridable via `StreamOptions`/`model.maxTokens`). Removed hardcoded stop patterns (only caller-specified ones are sent), `firstTemperature`, and `fimEotProbThreshold`.
+  - Removed extra request fields absent from CLI traffic: `executionId`, `toolChoice`, `systemPromptCacheOptions`, `disableParallelToolCalls`.
+  - Added `authorization: Basic <token>-<token>` HTTP header (matching the CLI's auth pattern), suppressed the default `User-Agent` header, and set `Accept-Encoding: identity` to avoid advertising compression support the CLI doesn't send.
+
 ### Fixed
 
 - Fixed local OpenAI-compatible servers with strict `chat_template_kwargs` whitelists (e.g. NInfer) failing every Qwen 3.8+ turn with `400 chat_template_kwargs.reasoning_effort is not supported` after the effort routing fix: the reasoning-effort fallback now recognizes a rejection of the kwargs spelling itself, retries with the kwarg stripped while keeping the effort on the standard top-level `reasoning_effort` field (hoisting it there for the kwargs-only vLLM dialect), and remembers the shape for the rest of the session. Value-level rejections and drops now also update the `chat_template_kwargs.reasoning_effort` twin instead of leaving a stale effort for kwargs-reading renderers, and unknown-parameter 400s naming `reasoning_effort` are recognized as effort rejections.
