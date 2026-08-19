@@ -120,9 +120,9 @@ describe("generated model policies", () => {
 		expect(models[4]?.cost.longContext).toBeUndefined();
 	});
 
-	it("pins GPT-5.6 Codex-transport context window to the 372K hard capacity (#5705)", () => {
+	it("floors GPT-5.6 Codex-transport context windows at 1M (openai/codex#38917)", () => {
 		const models: ModelSpec<Api>[] = [
-			// Codex discovery underreports these via DEFAULT_CONTEXT_WINDOW=272000.
+			// Codex discovery/registry still reports the stale 272000 for these.
 			createSpec({
 				id: "gpt-5.6-luna",
 				api: "openai-codex-responses",
@@ -155,9 +155,9 @@ describe("generated model policies", () => {
 
 		applyGeneratedModelPolicies(models);
 
-		expect(models[0]?.contextWindow).toBe(372000);
-		expect(models[1]?.contextWindow).toBe(372000);
-		expect(models[2]?.contextWindow).toBe(372000);
+		expect(models[0]?.contextWindow).toBe(1_000_000);
+		expect(models[1]?.contextWindow).toBe(1_000_000);
+		expect(models[2]?.contextWindow).toBe(1_000_000);
 		expect(models[3]?.contextWindow).toBe(1050000);
 		expect(models[4]?.contextWindow).toBe(272000);
 	});
@@ -391,11 +391,11 @@ describe("generated model policies", () => {
 		expect(models[0]?.compat?.supportsToolChoice).toBe(false);
 	});
 
-	it("sets OpenCode Go DeepSeek V4 tool-call request compat", () => {
-		const models: ModelSpec<"openai-completions">[] = [
+	it("sets OpenCode Go DeepSeek V4 tool-call request compat for both OpenAI APIs", () => {
+		const models: ModelSpec<Api>[] = [
 			createSpec({
 				id: "deepseek-v4-flash",
-				api: "openai-completions",
+				api: "openai-responses",
 				provider: "opencode-go",
 			}),
 			createSpec({

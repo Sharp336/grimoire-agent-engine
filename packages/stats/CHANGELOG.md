@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Window token estimates now use broker-held fleet token burn (per-client observed-usage reports) when an auth broker is configured, matching the fleet-wide window fractions instead of undercounting with local-only message stats.
+
+### Fixed
+
+- Fixed subscription-window insights merging distinct limits that share a duration label (Anthropic's overall vs model-scoped 7-day windows, Codex base vs Spark weeklies); interleaved fractions inflated window-equivalents consumed by orders of magnitude and broke tokens-per-window estimates. Windows now group by provider limit id.
+
+## [17.3.6] - 2026-08-17
+
+### Fixed
+
+- Fixed the stats dashboard being unreachable from container hosts by accepting an explicit `--host` bind address while preserving loopback-only binding and same-origin API access by default.
+
 ## [17.3.0] - 2026-08-13
 
 ### Added

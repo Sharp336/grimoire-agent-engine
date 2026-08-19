@@ -630,6 +630,7 @@ def _pr_file_from(data: Any) -> PullRequestFileInfo:
         status=str(data.get("status") or ""),
         additions=int(data.get("additions") or 0),
         deletions=int(data.get("deletions") or 0),
+        patch=str(data.get("patch") or ""),
     )
 
 
@@ -647,6 +648,7 @@ def _pr_from(data: Any) -> PullRequestInfo:
         head_repo=str(data.get("head_repo") or ""),
         title=str(data.get("title") or ""),
         body=str(data.get("body") or ""),
+        head_sha=str(data.get("head_sha") or ""),
     )
 
 

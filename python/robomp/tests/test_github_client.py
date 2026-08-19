@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import httpx
 import pytest
@@ -123,7 +124,11 @@ def test_get_pull_request_parses_head_repo_and_author() -> None:
             json={
                 "number": 9,
                 "html_url": "https://github.com/octo/widget/pull/9",
-                "head": {"ref": "farm/abc12345/fix", "repo": {"full_name": "octo/widget"}},
+                "head": {
+                    "ref": "farm/abc12345/fix",
+                    "sha": "abc1234567890123456789012345678901234567",
+                    "repo": {"full_name": "octo/widget"},
+                },
                 "base": {"ref": "main"},
                 "state": "open",
                 "user": {"login": "robomp-bot"},
@@ -133,6 +138,7 @@ def test_get_pull_request_parses_head_repo_and_author() -> None:
     client = GitHubClient("tok", transport=httpx.MockTransport(handler))
     pr = _run_async(client.get_pull_request("octo/widget", 9))
     assert pr.head_ref == "farm/abc12345/fix"
+    assert pr.head_sha == "abc1234567890123456789012345678901234567"
     assert pr.head_repo == "octo/widget"
     assert pr.author == "robomp-bot"
 
@@ -166,7 +172,15 @@ def test_list_pr_files_parses_changed_file_summary() -> None:
         assert request.url.params.get("per_page") == "100"
         return httpx.Response(
             200,
-            json=[{"filename": "src/app.py", "status": "modified", "additions": 5, "deletions": 2}],
+            json=[
+                {
+                    "filename": "src/app.py",
+                    "status": "modified",
+                    "additions": 5,
+                    "deletions": 2,
+                    "patch": "@@ -8,3 +8,5 @@\n ctx\n+added\n ctx2",
+                }
+            ],
         )
 
     client = GitHubClient("tok", transport=httpx.MockTransport(handler))
@@ -175,6 +189,20 @@ def test_list_pr_files_parses_changed_file_summary() -> None:
     assert files[0].path == "src/app.py"
     assert files[0].additions == 5
     assert files[0].deletions == 2
+    assert files[0].patch.startswith("@@ -8,3 +8,5")
+
+
+def test_list_pr_files_defaults_missing_patch_to_empty() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/repos/octo/widget/pulls/9/files"
+        return httpx.Response(
+            200,
+            json=[{"filename": "src/app.py", "status": "modified", "additions": 5, "deletions": 2}],
+        )
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler))
+    files = _run_async(client.list_pr_files("octo/widget", 9))
+    assert files[0].patch == ""
 
 
 def test_list_pr_files_paginates_past_first_page() -> None:
@@ -252,8 +280,6 @@ def test_submit_pr_review_forgejo_uses_new_position_payload() -> None:
     captured: dict[str, object] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        import json
-
         captured["path"] = request.url.path
         captured["body"] = json.loads(request.content)
         return httpx.Response(

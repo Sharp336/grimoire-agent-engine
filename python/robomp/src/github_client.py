@@ -78,6 +78,7 @@ class PullRequestFileInfo:
     status: str
     additions: int
     deletions: int
+    patch: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -836,6 +837,7 @@ def _pr_file_from_payload(data: Mapping[str, Any]) -> PullRequestFileInfo:
         status=str(data.get("status") or ""),
         additions=int(data.get("additions") or 0),
         deletions=int(data.get("deletions") or 0),
+        patch=str(data.get("patch") or ""),
     )
 
 
