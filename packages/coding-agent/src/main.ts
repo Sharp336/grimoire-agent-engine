@@ -1547,7 +1547,17 @@ export async function runRootCommand(
 
 	await pluginPreloadPromise;
 	if (deps === DEFAULT_RUN_ROOT_DEPENDENCIES) {
-		await logger.time("registerDaemonProjectPresence", registerDaemonProjectPresence, cwd);
+		const presenceSessionId = sessionManager?.getSessionId();
+		const presenceSession = presenceSessionId
+			? { sessionId: presenceSessionId, title: sessionManager?.getSessionName() }
+			: undefined;
+		await logger.time(
+			"registerDaemonProjectPresence",
+			registerDaemonProjectPresence,
+			cwd,
+			undefined,
+			presenceSession,
+		);
 	}
 
 	scheduleMarketplaceAutoUpdate({
