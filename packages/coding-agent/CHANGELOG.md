@@ -4,6 +4,7 @@
 
 ### Added
 
+- The AIML API "Get API key" sign-in now renders an API-key paste field alongside the browser device flow: the first key wins, a browser-minted key auto-fills the visible field with a confirmation line (via the new optional `OAuthController.onPromptResolve` callback), a manually pasted key is validated before being accepted, and auth instructions render directly under the login URL they reference.
 - Added `qwenTemplateReasoningEffort` to the `models.yml` `compat` schema, so the auto-enabled Qwen 3.8+ template effort dialect (`chat_template_kwargs.reasoning_effort`) can be switched off per provider/model for strict local servers that reject unknown `chat_template_kwargs`.
 
 ### Changed

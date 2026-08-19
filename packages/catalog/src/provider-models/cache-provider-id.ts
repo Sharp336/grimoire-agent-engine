@@ -9,6 +9,8 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 	switch (providerId) {
 		case "ollama":
 			return "http://127.0.0.1:11434";
+		case "aimlapi":
+			return Bun.env.AIMLAPI_INFERENCE_URL?.trim() || "https://api.aimlapi.com/v1";
 		case "litellm":
 			return Bun.env.LITELLM_BASE_URL ?? "http://localhost:4000/v1";
 		case "opencode-go":
@@ -42,6 +44,12 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 	switch (providerId) {
 		case "ollama":
 			return resolveOllamaModelCacheProviderId(providerId, options.baseUrl);
+		case "aimlapi": {
+			// Key by base URL so switching AIMLAPI_INFERENCE_URL (e.g. prod ↔ staging)
+			// serves a fresh model list instead of the other environment's cache.
+			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
+			return `aimlapi:${Bun.hash(baseUrl).toString(36)}`;
+		}
 		case "cursor":
 			// v3: max-mode Claude/Gemini rows cached before the 1M context-window
 			// discovery fix carry a stale 200k window and must be refetched.
