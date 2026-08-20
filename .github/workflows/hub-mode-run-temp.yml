@@ -25,6 +25,59 @@ jobs:
           set -euo pipefail
           sed -n '/^          set -euo pipefail$/,$p' .github/workflows/hub-mode-rework-temp.yml \
             | sed 's/^          //' \
-            | sed 's#git rm .github/workflows/hub-mode-rework-temp.yml#git rm .github/workflows/hub-mode-rework-temp.yml .github/workflows/hub-mode-run-temp.yml#' \
             > /tmp/rework-hub.sh
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          p = Path('/tmp/rework-hub.sh')
+          text = p.read_text()
+
+          # Workflow files are updated later through the GitHub connector, whose
+          # token has workflow permission. This Action commits source only.
+          text = text.replace('git rm .github/workflows/hub-mode-rework-temp.yml', ': # helper workflows removed separately')
+          text = text.replace('git add -A', 'git add packages/coding-agent')
+
+          # Keep compact.ts out of hub/index.ts re-exports to avoid an ESM cycle:
+          # compact imports the upstream HubTool, while the upstream module must
+          # remain independent of the adapter.
+          text = text.replace('printf \'\\nexport { CompactHubTool, compactHubSchema, createHubTool } from "./compact";\\n\' >> packages/coding-agent/src/tools/hub/index.ts', ': # compact factory imported directly by tools/index.ts')
+
+          marker = '          # Format exactly the TypeScript files touched by this rework.\n'
+          if marker not in text:
+              raise SystemExit('format marker missing from prepared rework')
+
+          fix = r'''          python3 <<'FIX'
+          from pathlib import Path
+
+          # Factory imports compact directly; hub/index remains upstream-facing.
+          p = Path("packages/coding-agent/src/tools/index.ts")
+          s = p.read_text()
+          s = s.replace(
+              'import { createHubTool, isIrcEnabled } from "./hub";\n',
+              'import { isIrcEnabled } from "./hub";\nimport { createHubTool } from "./hub/compact";\n',
+          )
+          old = '''\t\tif (name === "hub") {\n\t\t\tif (restrictToolNames) return false;\n\t\t\tif (session.settings.get("hub.mode") === "full") {\n\t\t\t\treturn session.enableIrc !== false && isIrcEnabled(session.settings, session.taskDepth ?? 0);\n\t\t\t}\n\t\t\treturn session.settings.get("async.enabled") || session.settings.get("launch.enabled");\n\t\t}\n'''
+          new = '''\t\tif (name === "hub") {\n\t\t\tif (restrictToolNames) return false;\n\t\t\tconst peerMessagingAvailable =\n\t\t\t\tsession.enableIrc !== false && isIrcEnabled(session.settings, session.taskDepth ?? 0);\n\t\t\treturn (\n\t\t\t\tsession.settings.get("async.enabled") ||\n\t\t\t\tsession.settings.get("launch.enabled") ||\n\t\t\t\t(session.settings.get("hub.mode") === "full" && peerMessagingAvailable)\n\t\t\t);\n\t\t}\n'''
+          if old not in s:
+              raise SystemExit("tools/index.ts: generated Hub gate not found")
+          p.write_text(s.replace(old, new, 1))
+
+          # Compact is a model-surface adapter over the upstream HubTool.
+          p = Path("packages/coding-agent/src/tools/hub/compact.ts")
+          s = p.read_text()
+          s = s.replace('import { HubTool, hubSchema } from ".";', 'import { HubTool, hubSchema, isIrcEnabled } from ".";')
+          s = s.replace('readonly approval = this.delegate.approval;', 'get approval() {\n\t\treturn this.delegate.approval;\n\t}')
+          old = '''export function createHubTool(session: ToolSession): HubTool | CompactHubTool {\n\treturn session.settings.get("hub.mode") === "full" ? new HubTool(session) : new CompactHubTool(session);\n}\n'''
+          new = '''export function createHubTool(session: ToolSession): HubTool | CompactHubTool {\n\tconst peerMessagingAvailable =\n\t\tsession.enableIrc !== false && isIrcEnabled(session.settings, session.taskDepth ?? 0);\n\treturn session.settings.get("hub.mode") === "full" && peerMessagingAvailable\n\t\t? new HubTool(session)\n\t\t: new CompactHubTool(session);\n}\n'''
+          if old not in s:
+              raise SystemExit("compact.ts: generated factory not found")
+          p.write_text(s.replace(old, new, 1))
+          FIX
+
+'''
+          text = text.replace(marker, fix + marker, 1)
+          p.write_text(text)
+          PY
+
           bash /tmp/rework-hub.sh
