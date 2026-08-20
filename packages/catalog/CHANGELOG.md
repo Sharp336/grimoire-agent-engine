@@ -4,6 +4,43 @@
 
 ### Added
 
+- Added helper functions and constants for reading enterprise ChatGPT workspace data-residency regions from Codex OAuth access tokens and forwarding the residency header to Codex backend endpoints.
+
+### Changed
+
+- Preserved API-advertised `tool_mode` metadata (such as `code_mode_only` for GPT-5.6 Code Mode models) on Codex catalog models and types ([#9069](https://github.com/can1357/oh-my-pi/pull/9069)).
+- Added an optional `tokenizer` family field across bundled, discovered, and custom catalog models (`claude-v3`/`v47`/`v5`, Qwen 3.5+, DeepSeek V3/V4/R1, Kimi K2/K3, and GLM-5+), which can also be explicitly overridden in model configuration.
+- Updated subscription Codex GPT-5.6 Sol, Terra, and Luna models to include first-party `cost.longContext` pricing tiers for token inputs exceeding 272K tokens.
+
+### Fixed
+
+- Fixed Vercel AI Gateway Muse Spark 1.2 Contributor requests failing with HTTP 400 errors by capping advertised output allowances to the model's 131K limit.
+- Fixed LiteLLM model discovery to route OpenAI models through the Responses API for reasoning summaries in thinking blocks ([#9085](https://github.com/can1357/oh-my-pi/pull/9085)).
+- Fixed OpenCode Console Go and Zen Responses providers rejecting forced tool choices by automatically downgrading forced or named tool selections to `auto`.
+- Fixed OpenCode Go Muse Spark 1.2 and Muse Spark 1.2 Contributor models failing during tool calls or missing reasoning effort levels, ensuring they correctly route to the Responses API with full thinking, context, and multimodal support ([#8957](https://github.com/can1357/oh-my-pi/issues/8957)).
+- Improved OpenCode gateway model discovery to automatically infer the Responses API route for unlisted models from sibling gateways and billing base variants.
+- Fixed Cursor GPT-5.6 (Luna, Sol, and Terra) model discovery creating duplicate rows for each thinking tier by collapsing tiers into unified models with configurable reasoning effort ([#9025](https://github.com/can1357/oh-my-pi/issues/9025)).
+- Fixed Google Gemini CLI model discovery failing with `403 PERMISSION_DENIED` by directing catalog refresh requests to the appropriate Antigravity discovery endpoints ([#8885](https://github.com/can1357/oh-my-pi/issues/8885)).
+
+## [17.4.0] - 2026-08-20
+
+### Added
+
+- Models now include an optional `tokenizer` family field across bundled, discovered, and custom models (supporting Claude, Qwen, DeepSeek, Kimi, and GLM families), with support for explicit overrides in model configuration.
+- Added long-context cost tiers (`cost.longContext`) to subscription Codex GPT-5.6 models (Sol, Terra, Luna) matching first-party API pricing above 272K input tokens.
+
+### Changed
+
+- Bundled model metadata is prebuilt during generation, reducing catalog startup work.
+
+### Fixed
+
+- Fixed tool-call turn failures for `opencode-go/muse-spark-1.2` and related variants by ensuring API transport pins apply to live discovery and automatically inferring response routes for gateway-first OpenCode models ([#8957](https://github.com/can1357/oh-my-pi/issues/8957)).
+
+## [17.3.8] - 2026-08-19
+
+### Added
+
 - Added a Cursor variant-collapse table folding the per-effort Grok siblings (`cursor-grok-4.5` low/medium/high and `cursor-grok-4.6` low/medium/high/xhigh, plus their `-fast` service-tier lanes) into one logical model per lane with effort routing onto the live wire ids, matching Devin's `grok-4-5` collapse ([#8803](https://github.com/can1357/oh-my-pi/issues/8803)).
 - Regenerated the Cursor agent protobufs to model hosted WebFetch permission queries (`interaction_query` / `interaction_response` field 9) and the matching `ToolCall` variant (field 37).
 
@@ -19,6 +56,7 @@
 - Fixed `opencode-go/muse-spark-1.2` (and `muse-spark-1.2-contributor`) failing every tool-call turn with `OpenAI completions stream closed before a finish_reason was received`. The Go gateway serves these ids only at `/zen/go/v1/responses`, but the `/zen/go/v1/models` discovery omits the `provider.npm` hint, so the resolver fell through to `openai-completions`; both ids are now pinned to `openai-responses` like `deepseek-v4-flash` ([#8957](https://github.com/can1357/oh-my-pi/issues/8957)).
 - Fixed GitHub Copilot `grok-4.6` / `grok-4.6-1m` failing with HTTP 400 `unsupported_api_for_model` by routing them through the OpenAI Responses API (`/responses`) instead of `/chat/completions`, matching `grok-4.5`. Stale cached completion routes are invalidated on refresh ([#8807](https://github.com/can1357/oh-my-pi/issues/8807)).
 - Fixed Cursor Grok 4.5/4.6 discovery classifying the versioned ids as non-reasoning: `GetUsableModels` ships no `thinkingDetails` and the bundled references read `reasoning: false`, so the picker hid the effort ladder. Discovery now marks `cursor-grok-<version>` ids as reasoning models (the non-reasoning `grok-code-*` ids stay out) ([#8803](https://github.com/can1357/oh-my-pi/issues/8803)).
+- Fixed GMI Cloud (`gmi-cloud`) models resolved via `/v1/models` discovery surfacing with `null` context windows, zero pricing, and no reasoning/thinking metadata for every model except the bundled `deepseek-ai/DeepSeek-V4-Flash` seed. GMI's endpoint returns only bare `{id}` rows, so the mapper now recovers intrinsic capability metadata (context window, output limit, reasoning, thinking ladder) for resold open-weight models from the cross-provider canonical reference index — matching the SiliconFlow behavior — while never borrowing another provider's pricing ([#8890](https://github.com/can1357/oh-my-pi/issues/8890)).
 
 ## [17.3.6] - 2026-08-17
 

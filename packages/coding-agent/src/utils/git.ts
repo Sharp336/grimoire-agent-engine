@@ -2043,12 +2043,17 @@ export const patch = {
 		}
 	},
 
-	/** Join patch parts into a single patch string. */
+	/**
+	 * Join patch parts into a single patch string.
+	 *
+	 * Each part is terminated with a single `\n` if it lacks one, then parts are
+	 * concatenated verbatim — matching git's native multi-file diff layout. Parts
+	 * are NOT separated by an extra blank line and trailing newlines are NOT
+	 * stripped: a `GIT binary patch` block ends in a blank line that
+	 * `git apply --binary` requires, and stripping it corrupts the patch (#8899).
+	 */
 	join(parts: string[]): string {
-		return `${parts
-			.map(part => (part.endsWith("\n") ? part : `${part}\n`))
-			.join("\n")
-			.replace(/\n+$/, "")}\n`;
+		return parts.map(part => (part.endsWith("\n") ? part : `${part}\n`)).join("");
 	},
 };
 
