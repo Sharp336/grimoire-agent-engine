@@ -36,7 +36,9 @@ jobs:
 
       - name: Apply exact review fixes
         if: steps.marker.outputs.run == 'true'
-        run: python3 scripts/local-pr9108-review-repair.py
+        run: |
+          python3 scripts/local-pr9108-review-repair.py
+          python3 scripts/local-pr9108-type-fixes.py
 
       - name: Install dependencies
         if: steps.marker.outputs.run == 'true'
@@ -92,7 +94,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rm -f LOCAL-PR9108-REPAIR-REQUEST scripts/local-pr9108-review-repair.py
+          rm -f LOCAL-PR9108-REPAIR-REQUEST scripts/local-pr9108-review-repair.py scripts/local-pr9108-type-fixes.py
           git config user.name "cp7-local-review-repair"
           git config user.email "actions@users.noreply.github.com"
           git add \
@@ -107,7 +109,8 @@ jobs:
             packages/coding-agent/test/runtime-model-identity.test.ts \
             packages/coding-agent/test/task-routing-integration.test.ts \
             LOCAL-PR9108-REPAIR-REQUEST \
-            scripts/local-pr9108-review-repair.py
+            scripts/local-pr9108-review-repair.py \
+            scripts/local-pr9108-type-fixes.py
           git diff --cached --check
           git commit -m "fix(task): address PR 9108 review blockers"
           git push origin HEAD:fix/pr9108-review-findings
