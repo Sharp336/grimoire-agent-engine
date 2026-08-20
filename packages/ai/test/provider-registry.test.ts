@@ -18,6 +18,7 @@ const ENV_KEYS = [
 	"ZENMUX_API_KEY",
 	"EXA_API_KEY",
 	"XAI_OAUTH_TOKEN",
+	"XAI_API_KEY",
 	"UMANS_AI_CODING_PLAN_API_KEY",
 	"LLAMA_CPP_API_KEY",
 	"WANDB_API_KEY",
@@ -59,6 +60,15 @@ describe("provider registry auth surface", () => {
 		expect(getEnvApiKey("coreweave")).toBe("wandb-env");
 		Bun.env.COREWEAVE_API_KEY = "coreweave-env";
 		expect(getEnvApiKey("coreweave")).toBe("coreweave-env");
+	});
+
+	test("structured xAI OAuth bootstrap JSON is never exposed as a bearer", () => {
+		Bun.env.XAI_OAUTH_TOKEN = '{"access":"oauth-access","refresh":"oauth-refresh"}';
+		delete Bun.env.XAI_API_KEY;
+		expect(getEnvApiKey("xai-oauth")).toBeUndefined();
+
+		Bun.env.XAI_API_KEY = "paid-xai-env";
+		expect(getEnvApiKey("xai-oauth")).toBe("paid-xai-env");
 	});
 
 	test("login list contains loginable providers and excludes env-only model providers", () => {

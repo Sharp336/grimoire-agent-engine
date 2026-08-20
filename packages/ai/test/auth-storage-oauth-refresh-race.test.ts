@@ -195,6 +195,31 @@ describe("AuthStorage OAuth refresh race", () => {
 		);
 	});
 
+	test("does not send structured xAI OAuth bootstrap JSON after invalid_grant disables its row", async () => {
+		if (!store) throw new Error("test setup failed");
+
+		const expiredCredential = {
+			type: "oauth" as const,
+			access: "expired-access",
+			refresh: "dead-refresh",
+			expires: Date.now() - 60_000,
+		};
+		const bootstrapPayload = JSON.stringify(expiredCredential);
+		let refreshCalls = 0;
+		authStorage = new AuthStorage(store, {
+			async refreshOAuthCredential() {
+				refreshCalls += 1;
+				throw new Error('HTTP 400 invalid_grant {"error":"invalid_grant"}');
+			},
+		});
+		await authStorage.set("xai-oauth", [expiredCredential]);
+
+		await withEnv({ XAI_OAUTH_TOKEN: bootstrapPayload, XAI_API_KEY: undefined }, async () => {
+			expect(await authStorage!.getApiKey("xai-oauth", "session-structured-bootstrap")).toBeUndefined();
+		});
+		expect(refreshCalls).toBe(1);
+	});
+
 	test("durably disables a semantically unchanged xAI row after a peer reorders its JSON keys", async () => {
 		if (!store) throw new Error("test setup failed");
 

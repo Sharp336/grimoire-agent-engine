@@ -8,7 +8,7 @@
  * - re-exported `SqliteAuthCredentialStore`: concrete SQLite-backed implementation
  */
 import { createHash } from "node:crypto";
-import { $env, $envExact, extractRetryHint, getAgentDbPath, logger } from "@oh-my-pi/pi-utils";
+import { $envExact, extractRetryHint, getAgentDbPath, logger } from "@oh-my-pi/pi-utils";
 import {
 	isSqliteCorruptionError,
 	resolveCredentialIdentityKey,
@@ -28,6 +28,7 @@ import type {
 	OAuthProvider,
 	OAuthProviderId,
 } from "./registry/oauth/types";
+import { getXAIOAuthEnvBearer } from "./registry/xai-oauth";
 import { getEnvApiKey, getEnvApiKeyName } from "./stream";
 import type { Provider } from "./types";
 import type {
@@ -2859,7 +2860,7 @@ export class AuthStorage {
 	 */
 	#hasDedicatedEnvAuth(provider: string): boolean {
 		if (provider === "xai-oauth") {
-			return Boolean($env.XAI_OAUTH_TOKEN?.trim());
+			return Boolean(getXAIOAuthEnvBearer());
 		}
 		return Boolean(getEnvApiKey(provider));
 	}
@@ -3693,7 +3694,7 @@ export class AuthStorage {
 					requests.push(request);
 					hasUsableStoredOAuthCredential = true;
 				}
-				const oauthToken = $env.XAI_OAUTH_TOKEN?.trim();
+				const oauthToken = getXAIOAuthEnvBearer();
 				if (!hasUsableStoredOAuthCredential && oauthToken) {
 					const request = this.#buildUsageRequest(provider, { type: "oauth", accessToken: oauthToken }, baseUrl);
 					if (!providerImpl.supports || providerImpl.supports(request)) requests.push(request);

@@ -18,6 +18,7 @@
 - Fixed Cursor provider issues with native file edit streaming (`editToolCall`) and ensuring always-apply system rules are properly preserved.
 - Fixed Cursor HTTP/2 requests ignoring standard proxy environment variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`).
 - Fixed definitive OAuth refresh failures looping indefinitely when a SQLite disable CAS missed semantically equivalent JSON or a nested credential-selection pass reset the peer-rotation replay budget. Credential replay now requires a full persisted OAuth value change and remains bounded to one replay per resolution chain.
+- Fixed structured xAI OAuth bootstrap JSON being sent as a bearer token after a persisted credential was disabled.
 
 ## [17.4.0] - 2026-08-20
 
