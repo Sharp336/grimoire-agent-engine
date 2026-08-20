@@ -1196,6 +1196,7 @@ export class EventController {
 	}
 
 	async #handlePromptProgress(event: Extract<AgentSessionEvent, { type: "prompt_progress" }>): Promise<void> {
+		if (this.ctx.session.isAborting) return;
 		const percent = Math.floor((event.progress.processed / event.progress.total) * 100);
 		if (percent === this.#promptProgressPercent) return;
 		this.#promptProgressPercent = percent;

@@ -9,6 +9,7 @@ import { vocalizer } from "@oh-my-pi/pi-coding-agent/tts/vocalizer";
 function createContext() {
 	const setWorkingMessage = vi.fn();
 	const ensureLoadingAnimation = vi.fn();
+	const requestRender = vi.fn();
 	const pendingTools = new Map<string, unknown>();
 	const session = {
 		getToolByName: () => undefined,
@@ -30,11 +31,11 @@ function createContext() {
 		setWorkingMessage,
 		clearPinnedError: vi.fn(),
 		ensureLoadingAnimation,
-		ui: { requestRender: vi.fn() },
+		ui: { requestRender },
 		session,
 		viewSession: session,
 	} as unknown as InteractiveModeContext;
-	return { ctx, pendingTools, setWorkingMessage, session };
+	return { ctx, pendingTools, requestRender, setWorkingMessage, session };
 }
 
 const AGENT_START = { type: "agent_start" } as unknown as AgentSessionEvent;
@@ -112,6 +113,23 @@ describe("EventController working messages", () => {
 
 		expect(setWorkingMessage).toHaveBeenCalledTimes(1);
 		expect(setWorkingMessage.mock.calls[0]?.[0]).toContain("Searching files");
+	});
+
+	it("suppresses late prompt-progress updates while aborting", async () => {
+		const { ctx, requestRender, setWorkingMessage, session } = createContext();
+		const controller = new EventController(ctx);
+		await controller.handleEvent(AGENT_START);
+		setWorkingMessage.mockClear();
+		requestRender.mockClear();
+		session.isAborting = true;
+
+		await controller.handleEvent({
+			type: "prompt_progress",
+			progress: { total: 100, cached: 40, processed: 56 },
+		});
+
+		expect(setWorkingMessage).not.toHaveBeenCalled();
+		expect(requestRender).not.toHaveBeenCalled();
 	});
 
 	it("resumes intent updates once aborting clears", async () => {
