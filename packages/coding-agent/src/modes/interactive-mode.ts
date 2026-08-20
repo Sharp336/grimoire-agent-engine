@@ -471,14 +471,21 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 			expanded: true,
 			renderItem: session => {
 				const displayId = formatTaskId(session.id);
-				let line = `${dot} ${theme.fg("accent", theme.bold(displayId))}`;
+				// Compact model identity: verified provider/model from runtime (ponytail: naive compact, upgrade to abbreviated mapping later)
+				const resolved = session.progress?.resolvedModel?.trim();
+				const isFallback = session.progress?.resolvedModelIsFallback;
+				let modelSuffix = "";
+				if (resolved) {
+					const fallbackPrefix = isFallback ? "↪ " : "";
+					const modelBudget = Math.max(10, columns - visibleWidth(displayId) - 12);
+					modelSuffix = `  ${theme.fg("muted", fallbackPrefix + truncateToWidth(resolved, modelBudget))}`;
+				}
+				let line = `${dot} ${theme.fg("accent", theme.bold(displayId))}${modelSuffix}`;
 				const description = session.description?.trim() || session.progress?.description?.trim();
 				if (description) {
-					const budget = Math.max(TRUNCATE_LENGTHS.SHORT, columns - visibleWidth(displayId) - 10);
+					const budget = Math.max(TRUNCATE_LENGTHS.SHORT, columns - visibleWidth(displayId) - visibleWidth(resolved ?? "") - 14);
 					line += `${theme.fg("accent", ":")} ${theme.fg("accent", truncateToWidth(replaceTabs(description), budget))}`;
 				} else {
-					// No spawn description: fall back to a muted task preview, same as
-					// the inline task rows when a row has no label.
 					const taskPreview = session.progress?.task?.trim();
 					if (taskPreview) {
 						line += ` ${theme.fg("muted", truncateToWidth(replaceTabs(taskPreview), TRUNCATE_LENGTHS.SHORT))}`;

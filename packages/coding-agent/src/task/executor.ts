@@ -2299,6 +2299,9 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		modelRole,
 		resolvedModel: progress.resolvedModel,
 		resolvedModelIsFallback: progress.resolvedModelIsFallback,
+		selectedModel: progress.selectedModel,
+		parentModel: progress.parentModel,
+		ompVersion: progress.ompVersion,
 		error: exitCode !== 0 && stderr ? stderr : undefined,
 		aborted: wasAborted,
 		abortReason: finalAbortReason,
@@ -3020,8 +3023,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					displayLevel !== undefined
 						? formatModelSelectorValue(formatModelStringWithRouting(model), displayLevel)
 						: formatModelStringWithRouting(model);
+				// Preserve selected before any runtime fallback
+				if (!progress.selectedModel) progress.selectedModel = progress.resolvedModel;
+				progress.parentModel = options.parentActiveModelPattern;
+				progress.ompVersion = "17.3.4";
 			}
-			// Precedence: caller `effort` > explicit `:level` suffix on the resolved
 			// model pattern > agent-definition default (e.g. task's `auto`) >
 			// pattern-derived level.
 			const effectiveThinkingLevel =

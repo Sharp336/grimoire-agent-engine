@@ -473,6 +473,14 @@ export interface AgentProgress {
 	resolvedModel?: string;
 	/** True when {@link resolvedModel} is the target of an active retry fallback (not the originally configured model). Lets observer-only UIs (collab guests, Agent Hub rows with no live session) flag the fallback and keep the provider. */
 	resolvedModelIsFallback?: boolean;
+	/** Selected/requested model before any runtime fallback or reroute. Preserved even when {@link resolvedModel} updates to the actual serving model. */
+	selectedModel?: string;
+	/** Effort/thinking suffix associated with the selected model when explicitly set. */
+	selectedModelThinkingLevel?: string;
+	/** Parent provider/model that spawned this subagent, for expanded detail provenance. */
+	parentModel?: string;
+	/** OMP version/build identity at spawn time. */
+	ompVersion?: string;
 	/** Data extracted by registered subprocess tool handlers (keyed by tool name) */
 	extractedToolData?: Record<string, unknown[]>;
 	/**
@@ -560,6 +568,10 @@ export interface SingleResult {
 	resolvedModel?: string;
 	/** True when {@link resolvedModel} is the target of an active retry fallback. Mirrors {@link AgentProgress.resolvedModelIsFallback} onto the settled result. */
 	resolvedModelIsFallback?: boolean;
+	/** Selected/requested model before any runtime fallback. */
+	selectedModel?: string;
+	parentModel?: string;
+	ompVersion?: string;
 	error?: string;
 	aborted?: boolean;
 	abortReason?: string;
