@@ -683,3 +683,42 @@ def test_event_row_defaults_platform_to_github(tmp_path: Path) -> None:
     row = db.claim_next_event()
     assert row is not None
     assert row.platform == "github"
+
+
+def test_release_lifecycle_and_active_selection(db: Database) -> None:
+    first = db.upsert_release(
+        repo="octo/widget",
+        tag="v1.2.3",
+        version="1.2.3",
+        current_sha="sha-1",
+        session_dir="/sessions/v1.2.3",
+    )
+    assert first.state == "awaiting_ci"
+    assert db.get_active_release("octo/widget") == first
+
+    fixing = db.bump_release_round(first.key, failed_sha="sha-1")
+    assert fixing.rounds == 1
+    assert fixing.state == "fixing"
+    assert fixing.last_failed_sha == "sha-1"
+
+    db.set_release_sha(first.key, "sha-2")
+    db.set_release_state(first.key, "awaiting_ci")
+    updated = db.get_release(first.key)
+    assert updated is not None
+    assert updated.current_sha == "sha-2"
+    assert updated.last_error is None
+
+    second = db.upsert_release(
+        repo="octo/widget",
+        tag="v1.2.4",
+        version="1.2.4",
+        current_sha="sha-3",
+        session_dir="/sessions/v1.2.4",
+    )
+    assert db.get_active_release("octo/widget") == second
+    db.set_release_state(second.key, "superseded")
+    active = db.get_active_release("octo/widget")
+    assert active is not None and active.key == first.key
+    db.set_release_state(first.key, "green")
+    assert db.get_active_release("octo/widget") is None
+    assert {row.state for row in db.list_releases()} == {"green", "superseded"}

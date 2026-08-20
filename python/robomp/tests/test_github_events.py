@@ -1093,3 +1093,99 @@ def test_route_review_comment_deleted_does_not_queue() -> None:
         resolve_issue_from_pr=lambda _r, _n: "octo/widget#42",
     )
     assert not decision.should_queue
+
+
+def _release_workflow_payload(
+    *,
+    action: str = "completed",
+    repo: str = "octo/widget",
+    message: str = "chore: bump version to 17.2.8",
+) -> dict[str, object]:
+    return {
+        "action": action,
+        "repository": {"full_name": repo, "default_branch": "main"},
+        "workflow_run": {
+            "id": 10,
+            "name": "CI",
+            "head_branch": "main",
+            "head_sha": "abc",
+            "conclusion": "failure",
+            "head_commit": {"message": message},
+        },
+    }
+
+
+def test_release_workflow_completion_queues_sentinel() -> None:
+    decision = route(
+        "workflow_run",
+        _release_workflow_payload(),
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+        release_sentinel_enabled=True,
+    )
+    assert decision.should_queue
+    assert decision.task == "handle_release_ci"
+    assert decision.issue_key == "octo/widget#release"
+
+
+def test_release_workflow_from_bot_still_queues() -> None:
+    payload = _release_workflow_payload()
+    payload["sender"] = {"login": BOT, "type": "Bot"}
+    run = payload["workflow_run"]
+    assert isinstance(run, dict)
+    run["actor"] = {"login": BOT, "type": "Bot"}
+    decision = route(
+        "workflow_run",
+        payload,
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+        release_sentinel_enabled=True,
+    )
+    assert decision.should_queue
+
+
+def test_release_workflow_requested_is_ignored() -> None:
+    decision = route(
+        "workflow_run",
+        _release_workflow_payload(action="requested"),
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+        release_sentinel_enabled=True,
+    )
+    assert not decision.should_queue
+    assert decision.reason == "workflow_run.requested ignored"
+
+
+def test_non_release_workflow_is_ignored() -> None:
+    decision = route(
+        "workflow_run",
+        _release_workflow_payload(message="fix(ci): repair tests"),
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+        release_sentinel_enabled=True,
+    )
+    assert not decision.should_queue
+    assert decision.reason == "not a release commit"
+
+
+def test_release_workflow_is_ignored_when_sentinel_disabled() -> None:
+    decision = route(
+        "workflow_run",
+        _release_workflow_payload(),
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+    )
+    assert not decision.should_queue
+    assert decision.reason == "release sentinel disabled"
+
+
+def test_release_workflow_requires_allowlisted_repo() -> None:
+    decision = route(
+        "workflow_run",
+        _release_workflow_payload(repo="other/repo"),
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+        release_sentinel_enabled=True,
+    )
+    assert not decision.should_queue
+    assert decision.reason == "repo not on allowlist"
