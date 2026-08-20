@@ -50,7 +50,7 @@ export function normalizeToolName(name: string): string {
 	const lower = name.toLowerCase();
 	return (
 		LEGACY_BUILTIN_TOOL_NAME_ALIASES.get(lower) ??
-		(Object.hasOwn(CANONICAL_TOOL_NAMES, lower) ? lower : name.startsWith("mcp__") ? lower : name)
+		(Object.hasOwn(CANONICAL_TOOL_NAMES, lower) ? lower : lower.startsWith("mcp__") ? lower : name)
 	);
 }
 

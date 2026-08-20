@@ -3066,13 +3066,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// constructed and attached. Startup failure therefore leaves it revivable.
 		hasRegistered = options.expectedAgentRef === undefined || options.expectedAgentRef === null;
 
+		// Compiled once so late `registerTool()` activations reuse the same promoted
+		// set as the initial partition instead of bypassing promotion (see scheduleToolRegistration).
+		const promotedNames = compileXdevPromoteSet(settings.get("tools.xdevPromote"));
 		// Partition the initial enabled set for the xd:// transport. Tool instances
 		// remain in the canonical map; only presentation names move between layers.
 		// Mounting requires both transport halves in the granted set (`read xd://`
 		// discovers, `write xd://<tool>` executes); a session without either keeps
 		// every tool top-level instead of auto-granting the missing transport.
 		if (toolSession.xdev) {
-			const promotedNames = compileXdevPromoteSet(settings.get("tools.xdevPromote"));
 			const topLevelToolNames: string[] = [];
 			const mountedNames: string[] = [];
 			for (const name of initialToolNames) {
@@ -3577,7 +3579,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						builtInRegistryToolNames.has("write") &&
 						enabled.includes("read") &&
 						enabled.includes("write") &&
-						isMountableUnderXdev(liveTool);
+						isMountableUnderXdev(liveTool, promotedNames);
 					const nextMounted = shouldMount
 						? mounted.includes(name)
 							? mounted
