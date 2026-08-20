@@ -35,7 +35,7 @@ export interface LoadMCPConfigsResult {
 /**
  * Convert canonical MCPServer to legacy MCPServerConfig.
  */
-function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
+export function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
 	// Determine transport type
 	const transport = server.transport ?? (server.command ? "stdio" : server.url ? "http" : "stdio");
 	const shared = {
@@ -44,6 +44,8 @@ function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
 		requestIdFormat: server.requestIdFormat,
 		auth: server.auth,
 		oauth: server.oauth,
+		lifecycle: server.lifecycle,
+		idleTimeout: server.idleTimeout,
 	};
 
 	if (transport === "stdio") {

@@ -4489,6 +4489,31 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"mcp.defaultLifecycle": {
+		type: "enum",
+		values: ["eager", "lazy"] as const,
+		default: "eager",
+		ui: {
+			tab: "tools",
+			group: "Discovery & MCP",
+			label: "MCP Default Lifecycle",
+			description:
+				"Default connection lifecycle for MCP servers without an explicit lifecycle field. Set to lazy to connect servers on first tool use and idle-disconnect them.",
+		},
+	},
+
+	"mcp.defaultIdleTimeoutMs": {
+		type: "number",
+		default: 300000,
+		ui: {
+			tab: "tools",
+			group: "Discovery & MCP",
+			label: "MCP Idle Disconnect (ms)",
+			description:
+				"Idle timeout in milliseconds before a lazy MCP server is disconnected. 0 disables idle disconnect.",
+		},
+	},
+
 	// ────────────────────────────────────────────────────────────────────────
 	// Tasks
 	// ────────────────────────────────────────────────────────────────────────

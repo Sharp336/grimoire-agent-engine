@@ -49,6 +49,8 @@ interface MCPConfigFile {
 				callbackPath?: string;
 				prompt?: string;
 			};
+			lifecycle?: "eager" | "lazy";
+			idleTimeout?: number;
 		}
 	>;
 }
@@ -106,6 +108,8 @@ function transformMCPConfig(config: MCPConfigFile, source: SourceMeta): MCPServe
 				auth: serverConfig.auth,
 				oauth: serverConfig.oauth,
 				transport: serverConfig.type,
+				lifecycle: serverConfig.lifecycle,
+				idleTimeout: serverConfig.idleTimeout,
 				_source: source,
 			};
 

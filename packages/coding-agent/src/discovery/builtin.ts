@@ -194,6 +194,8 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 					  }
 					| undefined,
 				transport: serverConfig.type as "stdio" | "sse" | "http" | undefined,
+				lifecycle: serverConfig.lifecycle as "eager" | "lazy" | undefined,
+				idleTimeout: serverConfig.idleTimeout as number | undefined,
 				_source: createSourceMeta(PROVIDER_ID, path, level),
 			});
 		}

@@ -1860,6 +1860,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				const cacheStorage = settings.getStorage();
 				mcpManager = new MCPManager(cwd, cacheStorage ? new MCPToolCache(cacheStorage) : null);
 				mcpManager.setAuthStorage(authStorage);
+				mcpManager.setLifecycleDefaults(
+					settings.get("mcp.defaultLifecycle") === "lazy" ? "lazy" : "eager",
+					settings.get("mcp.defaultIdleTimeoutMs"),
+				);
 				toolSession.mcpManager = mcpManager;
 
 				if (settings.get("mcp.notifications")) {
@@ -1897,6 +1901,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					...mcpDiscoverOptions,
 					cacheStorage: settings.getStorage(),
 					authStorage,
+					lifecycleDefaults: {
+						lifecycle: settings.get("mcp.defaultLifecycle") === "lazy" ? "lazy" : "eager",
+						idleTimeoutMs: settings.get("mcp.defaultIdleTimeoutMs"),
+					},
 				});
 				mcpManager = mcpResult.manager;
 				toolSession.mcpManager = mcpManager;

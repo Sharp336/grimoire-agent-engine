@@ -34,6 +34,12 @@ import type {
 /** Reconnect callback: tears down a stale connection, optionally authorizing first. */
 export type MCPReconnect = (options?: { authChallenge?: MCPAuthChallenge }) => Promise<MCPServerConnection | null>;
 
+/** Hooks the manager uses to refcount in-flight tool calls for idle-disconnect. */
+export interface MCPActivityHooks {
+	begin(): void;
+	end(): void;
+}
+
 /**
  * Network-level and stale-session errors that warrant a reconnect + single retry.
  * Conservative: only catches errors where the server is likely alive but the
@@ -476,14 +482,20 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	readonly strict = false as const;
 
 	/** Create MCPTool instances for all tools from an MCP server connection */
-	static fromTools(connection: MCPServerConnection, tools: MCPToolDefinition[], reconnect?: MCPReconnect): MCPTool[] {
-		return tools.map(tool => new MCPTool(connection, tool, reconnect));
+	static fromTools(
+		connection: MCPServerConnection,
+		tools: MCPToolDefinition[],
+		reconnect?: MCPReconnect,
+		onActivity?: MCPActivityHooks,
+	): MCPTool[] {
+		return tools.map(tool => new MCPTool(connection, tool, reconnect, onActivity));
 	}
 
 	constructor(
 		private connection: MCPServerConnection,
 		private readonly tool: MCPToolDefinition,
 		private readonly reconnect?: MCPReconnect,
+		private readonly onActivity?: MCPActivityHooks,
 	) {
 		this.name = createMCPToolName(connection.name, tool.name);
 		this.label = `${connection.name}/${tool.name}`;
@@ -513,6 +525,7 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		const provider = this.connection._source?.provider;
 		const providerName = this.connection._source?.providerName;
 
+		this.onActivity?.begin();
 		try {
 			const attempt = await callToolWithAuthRetry(this.connection, this.tool.name, args, this.reconnect, signal);
 			if (attempt.error !== undefined) {
@@ -560,6 +573,8 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 				}
 			}
 			return buildErrorResult(error, this.connection.name, this.tool.name, provider, providerName);
+		} finally {
+			this.onActivity?.end();
 		}
 	}
 }
@@ -592,8 +607,9 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		getConnection: () => Promise<MCPServerConnection>,
 		source?: SourceMeta,
 		reconnect?: MCPReconnect,
+		onActivity?: MCPActivityHooks,
 	): DeferredMCPTool[] {
-		return tools.map(tool => new DeferredMCPTool(serverName, tool, getConnection, source, reconnect));
+		return tools.map(tool => new DeferredMCPTool(serverName, tool, getConnection, source, reconnect, onActivity));
 	}
 
 	constructor(
@@ -602,6 +618,7 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		private readonly getConnection: () => Promise<MCPServerConnection>,
 		source?: SourceMeta,
 		private readonly reconnect?: MCPReconnect,
+		private readonly onActivity?: MCPActivityHooks,
 	) {
 		this.name = createMCPToolName(serverName, tool.name);
 		this.label = `${serverName}/${tool.name}`;
@@ -633,6 +650,7 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		const provider = this.#fallbackProvider;
 		const providerName = this.#fallbackProviderName;
 
+		this.onActivity?.begin();
 		try {
 			const connection = await untilAborted(signal, () => this.getConnection());
 			throwIfAborted(signal);
@@ -711,6 +729,8 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 				}
 			}
 			return buildErrorResult(connError, this.serverName, this.tool.name, provider, providerName);
+		} finally {
+			this.onActivity?.end();
 		}
 	}
 }

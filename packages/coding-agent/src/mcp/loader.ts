@@ -10,6 +10,7 @@ import type { AuthStorage } from "../session/auth-storage";
 import { type MCPLoadResult, MCPManager } from "./manager";
 import type { McpConnectionStatusEvent } from "./startup-events";
 import { MCPToolCache } from "./tool-cache";
+import type { MCPLifecycle } from "./types";
 
 /** Result from loading MCP tools */
 export interface MCPToolsLoadResult {
@@ -39,6 +40,8 @@ export interface MCPToolsLoadOptions {
 	cacheStorage?: AgentStorage | null;
 	/** Auth storage used to resolve OAuth credentials before initial MCP connect */
 	authStorage?: AuthStorage;
+	/** Default lifecycle + idle timeout for servers without an explicit `lifecycle`. */
+	lifecycleDefaults?: { lifecycle: MCPLifecycle; idleTimeoutMs: number };
 }
 
 async function resolveToolCache(storage: AgentStorage | null | undefined): Promise<MCPToolCache | null> {
@@ -64,6 +67,9 @@ export async function discoverAndLoadMCPTools(cwd: string, options?: MCPToolsLoa
 	const manager = new MCPManager(cwd, toolCache);
 	if (options?.authStorage) {
 		manager.setAuthStorage(options.authStorage);
+	}
+	if (options?.lifecycleDefaults) {
+		manager.setLifecycleDefaults(options.lifecycleDefaults.lifecycle, options.lifecycleDefaults.idleTimeoutMs);
 	}
 
 	let result: MCPLoadResult;

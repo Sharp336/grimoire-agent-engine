@@ -128,17 +128,28 @@
         },
         "oauth": {
           "$ref": "#/$defs/oauthConfig"
+        },
+        "lifecycle": {
+          "type": "string",
+          "enum": ["eager", "lazy"],
+          "description": "Connection lifecycle. \"eager\" (default) connects at session start; \"lazy\" connects on first tool use and disconnects after idleTimeout."
+        },
+        "idleTimeout": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Idle disconnect timeout in milliseconds for lazy servers. 0 disables idle disconnect (connect on first use, stay connected)."
         }
       }
     },
     "stdioServer": {
+      "type": "object",
+      "unevaluatedProperties": false,
       "allOf": [
         {
           "$ref": "#/$defs/serverBase"
         },
         {
           "type": "object",
-          "additionalProperties": false,
           "required": ["command"],
           "properties": {
             "type": {
@@ -174,13 +185,14 @@
       ]
     },
     "httpServer": {
+      "type": "object",
+      "unevaluatedProperties": false,
       "allOf": [
         {
           "$ref": "#/$defs/serverBase"
         },
         {
           "type": "object",
-          "additionalProperties": false,
           "required": ["type", "url"],
           "properties": {
             "type": {
@@ -205,13 +217,14 @@
       ]
     },
     "sseServer": {
+      "type": "object",
+      "unevaluatedProperties": false,
       "allOf": [
         {
           "$ref": "#/$defs/serverBase"
         },
         {
           "type": "object",
-          "additionalProperties": false,
           "required": ["type", "url"],
           "properties": {
             "type": {

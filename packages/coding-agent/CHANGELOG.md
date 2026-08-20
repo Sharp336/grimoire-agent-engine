@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in per-server MCP `lifecycle: eager | lazy` plus `idleTimeout`, with global defaults `mcp.defaultLifecycle` and `mcp.defaultIdleTimeoutMs`. `lazy` servers advertise cached tools without spawning at session start, connect on first tool call (single-flight), and idle-disconnect after `idleTimeout` (never mid-call). Default remains `eager`, so existing configs are unchanged.
+
 ## [17.4.0] - 2026-08-20
 
 ### Added
