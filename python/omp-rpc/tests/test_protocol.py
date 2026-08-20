@@ -14,6 +14,7 @@ from omp_rpc import (
     parse_notification,
     parse_session_state,
 )
+from omp_rpc.protocol import parse_extension_ui_request
 
 
 class ProtocolParsingTests(unittest.TestCase):
@@ -228,6 +229,39 @@ class ProtocolParsingTests(unittest.TestCase):
         self.assertTrue(notification.is_interactive())
         self.assertTrue(notification.requires_response())
         self.assertFalse(notification.is_passive())
+
+    def test_parse_right_sidebar_widget_geometry(self) -> None:
+        request = parse_extension_ui_request(
+            {
+                "type": "extension_ui_request",
+                "id": "1",
+                "method": "setWidget",
+                "widgetKey": "quota",
+                "widgetLines": ["5 hour 42%"],
+                "widgetPlacement": "rightSidebar",
+                "widgetWidth": 44,
+                "widgetMinWidth": 28,
+                "widgetMinMainWidth": 64,
+            }
+        )
+
+        self.assertEqual(request.widget_placement, "rightSidebar")
+        self.assertEqual(request.widget_width, 44)
+        self.assertEqual(request.widget_min_width, 28)
+        self.assertEqual(request.widget_min_main_width, 64)
+
+    def test_reject_boolean_sidebar_width(self) -> None:
+        with self.assertRaisesRegex(ValueError, "widgetWidth must be an integer"):
+            parse_extension_ui_request(
+                {
+                    "type": "extension_ui_request",
+                    "id": "1",
+                    "method": "setWidget",
+                    "widgetKey": "quota",
+                    "widgetPlacement": "rightSidebar",
+                    "widgetWidth": True,
+                }
+            )
 
     def test_parse_open_url_request(self) -> None:
         notification = parse_notification(

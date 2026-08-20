@@ -42,20 +42,43 @@ describe("RPC extension UI", () => {
 		expect(pendingRequests.size).toBe(0);
 	});
 
-	it("omits unsupported right-sidebar placement from passive widget frames", () => {
+	it("forwards right-sidebar placement and geometry for passive widget frames", () => {
 		const output = vi.fn<(frame: object) => void>();
 
-		emitRpcWidgetRequest(output, "right", ["sidebar"], { placement: "rightSidebar" });
+		emitRpcWidgetRequest(output, "quota", ["5 hour 42%"], {
+			placement: "rightSidebar",
+			width: 44,
+			minWidth: 28,
+			minMainWidth: 64,
+		});
+
+		expect(output).toHaveBeenCalledWith({
+			type: "extension_ui_request",
+			id: expect.any(String),
+			method: "setWidget",
+			widgetKey: "quota",
+			widgetLines: ["5 hour 42%"],
+			widgetPlacement: "rightSidebar",
+			widgetWidth: 44,
+			widgetMinWidth: 28,
+			widgetMinMainWidth: 64,
+		});
+	});
+
+	it("keeps supported legacy widget placements unchanged", () => {
+		const output = vi.fn<(frame: object) => void>();
+
+		emitRpcWidgetRequest(output, "above", ["context"], { placement: "aboveEditor" });
 		emitRpcWidgetRequest(output, "below", ["status"], { placement: "belowEditor" });
 
 		expect(output).toHaveBeenNthCalledWith(1, {
 			type: "extension_ui_request",
 			id: expect.any(String),
 			method: "setWidget",
-			widgetKey: "right",
-			widgetLines: ["sidebar"],
+			widgetKey: "above",
+			widgetLines: ["context"],
+			widgetPlacement: "aboveEditor",
 		});
-		expect(JSON.stringify(output.mock.calls[0]?.[0])).not.toContain("rightSidebar");
 		expect(output).toHaveBeenNthCalledWith(2, {
 			type: "extension_ui_request",
 			id: expect.any(String),
@@ -64,5 +87,15 @@ describe("RPC extension UI", () => {
 			widgetLines: ["status"],
 			widgetPlacement: "belowEditor",
 		});
+	});
+
+	it("ignores component widget factories in RPC mode", () => {
+		const output = vi.fn<(frame: object) => void>();
+		const componentFactory = (() => ({ render: () => [] })) as never;
+
+		expect(() =>
+			emitRpcWidgetRequest(output, "quota", componentFactory, { placement: "rightSidebar" }),
+		).not.toThrow();
+		expect(output).not.toHaveBeenCalled();
 	});
 });
