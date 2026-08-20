@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed OpenCode Go and OpenCode Zen dynamic discovery of gateway-first models (`muse-spark-1.2`, `muse-spark-1.2-contributor`, and related billing variants) surfacing with `null` context window (`?`), missing pricing, and raw ID display names by recovering canonical and variant-base model specifications.
+- Set Muse Spark models (`muse-spark-1.1`, `muse-spark-1.2`, `muse-spark-1.2-contributor`) to text-only (`input: ["text"]`) by default so snapcompact cleanly falls back to textual history compression rather than failing on dense image frames.
+
 ## [17.4.0] - 2026-08-20
 
 ### Added

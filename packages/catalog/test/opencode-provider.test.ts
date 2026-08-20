@@ -81,12 +81,26 @@ describe("OpenCode provider discovery", () => {
 		const models = await options.fetchDynamicModels?.();
 		expect(models).not.toBeNull();
 		const byId = new Map((models ?? []).map(model => [model.id, model]));
-		for (const id of ["muse-spark-1.2", "muse-spark-1.2-contributor"]) {
-			expect(byId.get(id)).toMatchObject({
-				api: "openai-responses",
-				baseUrl: "https://opencode.ai/zen/go/v1",
-			});
-		}
+		expect(byId.get("muse-spark-1.2")).toMatchObject({
+			name: "Muse Spark 1.2",
+			api: "openai-responses",
+			baseUrl: "https://opencode.ai/zen/go/v1",
+			contextWindow: 1_048_576,
+			maxTokens: 131_072,
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 },
+		});
+		expect(byId.get("muse-spark-1.2-contributor")).toMatchObject({
+			name: "Muse Spark 1.2 Contributor",
+			api: "openai-responses",
+			baseUrl: "https://opencode.ai/zen/go/v1",
+			contextWindow: 1_048_576,
+			maxTokens: 131_072,
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 },
+		});
 		// Contrast: an unpinned id with a bundled reference keeps its route.
 		expect(byId.get("kimi-k3")).toMatchObject({ api: "openai-completions" });
 		// Upgrade path: pinned ids invalidate caches written before the pin,

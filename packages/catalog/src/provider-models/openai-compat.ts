@@ -2608,9 +2608,24 @@ function openCodeModelManagerOptions(
 					baseUrl: discoveryBaseUrl,
 					apiKey,
 					mapModel: (entry, defaults) => {
-						const reference = references.get(defaults.id);
-						const name = toModelName(entry.name, reference?.name ?? defaults.name);
 						const base = openCodeBaseModelId(defaults.id);
+						const bundledRef =
+							references.get(defaults.id) ??
+							siblingReferences.get(defaults.id) ??
+							(base ? references.get(base) ?? siblingReferences.get(base) : undefined);
+						const canonicalRef =
+							!bundledRef
+								? (resolveModelReference(defaults.id, getBundledModelReferenceIndex()) as ModelSpec<Api> | undefined) ??
+								  (base ? (resolveModelReference(base, getBundledModelReferenceIndex()) as ModelSpec<Api> | undefined) : undefined)
+								: undefined;
+						const reference = bundledRef ?? canonicalRef;
+						let fallbackName = reference?.name ?? defaults.name;
+						if (defaults.id.endsWith("-contributor") && !fallbackName.toLowerCase().includes("contributor")) {
+							fallbackName = `${fallbackName} Contributor`;
+						} else if (defaults.id.endsWith("-free") && !fallbackName.toLowerCase().includes("free")) {
+							fallbackName = `${fallbackName} (Free)`;
+						}
+						const name = toModelName(entry.name === entry.id ? undefined : entry.name, fallbackName);
 						// Pins win over bundled references (stale bundled routes
 						// must not stick), and a base-id pin covers its billing
 						// variants; the responses fallback covers gateway-first ids.
@@ -2624,12 +2639,19 @@ function openCodeModelManagerOptions(
 						if (!reference) {
 							return { ...defaults, name, api, baseUrl };
 						}
+						let cost = reference.cost;
+						if (defaults.id.endsWith("-contributor")) {
+							cost = { input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 };
+						} else if (defaults.id.endsWith("-free")) {
+							cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+						}
 						return {
 							...reference,
 							id: defaults.id,
 							name,
 							api,
 							baseUrl,
+							cost,
 							contextWindow: toPositiveNumber(entry.context_length, reference.contextWindow),
 							maxTokens: toPositiveNumber(entry.max_completion_tokens, reference.maxTokens),
 						};
@@ -3937,7 +3959,7 @@ export const META_MUSE_STATIC_MODELS: readonly ModelSpec<"openai-responses">[] =
 		provider: "meta",
 		baseUrl: META_MODEL_API_BASE_URL,
 		reasoning: true,
-		input: ["text", "image"],
+		input: ["text"],
 		cost: META_MUSE_SPARK_COST,
 		contextWindow: 1_048_576,
 		maxTokens: 131_072,
@@ -3954,7 +3976,7 @@ export const META_MUSE_STATIC_MODELS: readonly ModelSpec<"openai-responses">[] =
 		provider: "meta",
 		baseUrl: META_MODEL_API_BASE_URL,
 		reasoning: true,
-		input: ["text", "image"],
+		input: ["text"],
 		cost: META_MUSE_SPARK_COST,
 		contextWindow: 1_048_576,
 		maxTokens: 131_072,
@@ -3971,7 +3993,7 @@ export const META_MUSE_STATIC_MODELS: readonly ModelSpec<"openai-responses">[] =
 		provider: "meta",
 		baseUrl: META_MODEL_API_BASE_URL,
 		reasoning: true,
-		input: ["text", "image"],
+		input: ["text"],
 		cost: { input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 },
 		contextWindow: 1_048_576,
 		maxTokens: 131_072,
