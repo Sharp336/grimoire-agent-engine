@@ -105,48 +105,57 @@ describe("task spawn routing", () => {
 		AgentRegistry.resetGlobalForTests();
 	});
 
-	it("returns immediately on spawn and delivers the follow-up hint when the job completes", async () => {
-		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
-			agents: [{ ...taskAgent, model: ["anthropic/claude-sonnet-4"] }],
-			projectAgentsDir: null,
-		});
-		const gate = deferred();
-		const runSpy = vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
-			await gate.promise;
-			return makeResult(options.id ?? "?");
-		});
+	it.each([
+		["compact", false],
+		["full", true],
+	] as const)(
+		"returns immediately on spawn and applies %s follow-up guidance",
+		async (hubMode, showsMessagingHint) => {
+			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+				agents: [{ ...taskAgent, model: ["anthropic/claude-sonnet-4"] }],
+				projectAgentsDir: null,
+			});
+			const gate = deferred();
+			const runSpy = vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+				await gate.promise;
+				return makeResult(options.id ?? "?");
+			});
 
-		const manager = createManager();
-		const tool = await TaskTool.create(
-			createSession({ manager, settings: { "task.agentModelOverrides": { task: "openai/gpt-4.1-mini" } } }),
-		);
+			const manager = createManager();
+			const tool = await TaskTool.create(
+				createSession({
+					manager,
+					settings: { "hub.mode": hubMode, "task.agentModelOverrides": { task: "openai/gpt-4.1-mini" } },
+				}),
+			);
 
-		const result = await tool.execute("tc-spawn", {
-			agent: "task",
-			name: "Spawnling",
-			task: "Do the thing.",
-		} as TaskParams);
+			const result = await tool.execute("tc-spawn", {
+				agent: "task",
+				name: "Spawnling",
+				task: "Do the thing.",
+			} as TaskParams);
 
-		// Tool returned while the job body is still gated on the deferred.
-		const text = getFirstText(result);
-		expect(text).toContain("Spawned agent `Spawnling`");
-		const jobId = result.details?.async?.jobId;
-		expect(jobId).toBeTruthy();
-		expect(text).toContain(`job \`${jobId}\``);
-		const job = manager.getJob(jobId!);
-		expect(job?.status).toBe("running");
-		expect(job?.resultText).toBeUndefined();
+			// Tool returned while the job body is still gated on the deferred.
+			const text = getFirstText(result);
+			expect(text).toContain("Spawned agent `Spawnling`");
+			const jobId = result.details?.async?.jobId;
+			expect(jobId).toBeTruthy();
+			expect(text).toContain(`job \`${jobId}\``);
+			const job = manager.getJob(jobId!);
+			expect(job?.status).toBe("running");
+			expect(job?.resultText).toBeUndefined();
 
-		gate.resolve();
-		await job!.promise;
+			gate.resolve();
+			await job!.promise;
 
-		expect(job!.status).toBe("completed");
-		expect(job!.resultText).toContain("Spawnling is now idle");
-		expect(job!.resultText).toContain("message it via `hub` to follow up");
-		expect(job!.resultText).toContain("history://Spawnling");
-		expect(runSpy).toHaveBeenCalledTimes(1);
-		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual(["openai/gpt-4.1-mini"]);
-	});
+			expect(job!.status).toBe("completed");
+			expect(job!.resultText).toContain("Spawnling is now idle");
+			expect(job!.resultText?.includes("message it via `hub` to follow up")).toBe(showsMessagingHint);
+			expect(job!.resultText).toContain("history://Spawnling");
+			expect(runSpy).toHaveBeenCalledTimes(1);
+			expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual(["openai/gpt-4.1-mini"]);
+		},
+	);
 
 	it("bounds concurrent job bodies with the session spawn semaphore", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({

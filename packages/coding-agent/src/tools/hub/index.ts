@@ -70,12 +70,7 @@ export type { LaunchParams, LaunchToolDetails } from "./launch";
 export { createIrcMessageCard, isIrcEnabled } from "./messaging";
 export * from "./types";
 
-/**
- * Full runtime schema retained for the upstream Hub implementation. Peer
- * messaging remains implemented and testable internally; the model-facing
- * schema below deliberately exposes only parent-side orchestration.
- */
-const internalHubSchema = type({
+export const hubSchema = type({
 	op: type(
 		"'send' | 'wait' | 'inbox' | 'list' | 'jobs' | 'cancel' | 'start' | 'ps' | 'logs' | 'stop' | 'restart' | 'describe'",
 	).describe("hub operation"),
@@ -120,15 +115,7 @@ const internalHubSchema = type({
 	"timeout?": type("number > 0").describe("logs/stop/wait with name: max seconds; default 30 (stop: 5)"),
 });
 
-/** Model-visible Hub surface: async job control plus supervised processes only. */
-const hubSchema = internalHubSchema.omit("op", "to", "message", "replyTo", "await", "from", "timeoutMs", "peek").and({
-	op: type("'send' | 'wait' | 'jobs' | 'cancel' | 'start' | 'ps' | 'logs' | 'stop' | 'restart' | 'describe'").describe(
-		"hub operation",
-	),
-	"timeoutMs?": type("number").describe("wait (jobs): timeout in milliseconds (0 waits indefinitely)"),
-});
-
-type HubParams = typeof internalHubSchema.infer;
+type HubParams = typeof hubSchema.infer;
 
 interface MessagingDeps {
 	registry: AgentRegistry;
@@ -139,7 +126,7 @@ interface MessagingDeps {
 const PROGRESS_INTERVAL_MS = 500;
 
 /** Mutating process ops require exec approval; messaging, jobs, and inspection are read-only. */
-function hubApproval(params: unknown): ToolApprovalDecision {
+export function hubApproval(params: unknown): ToolApprovalDecision {
 	if (typeof params !== "object" || params === null || !("op" in params)) return "exec";
 	const op = params.op;
 	switch (op) {
@@ -168,7 +155,7 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 	readonly name = "hub";
 	readonly approval = hubApproval;
 	readonly label = "Hub";
-	readonly summary = "Control background jobs and supervise long-running processes";
+	readonly summary = "Message peer agents, control background jobs, and supervise long-running processes";
 	readonly description: string;
 	readonly parameters = hubSchema;
 	readonly strict = true;
@@ -177,15 +164,41 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 		return params.op === "logs" && params.follow === true;
 	};
 	readonly loadMode = "essential";
+	readonly #peerMessagingVisible: boolean;
 
 	readonly examples: readonly ToolExample<typeof hubSchema.infer>[] = [
 		{
-			caption: "Wait for the first background job to settle",
+			caption: "List peers",
+			call: { op: "list" },
+		},
+		{
+			caption: "Fire-and-forget DM — same send wakes idle/parked peers",
+			call: {
+				op: "send",
+				to: "AuthLoader",
+				message: "Still touching src/server/auth.ts? I need to add a 401 path.",
+			},
+		},
+		{
+			caption: "Round-trip when you cannot proceed without the answer",
+			call: {
+				op: "send",
+				to: "Main",
+				message: "JWT or session cookies for the auth flow?",
+				await: true,
+			},
+		},
+		{
+			caption: "Completely blocked: wait for the first finished job or incoming message",
 			call: { op: "wait" },
 		},
 		{
-			caption: "Cancel a hung background job",
-			call: { op: "cancel", ids: ["task_a1b2c3"] },
+			caption: "Block until a specific peer answers",
+			call: { op: "wait", from: "AuthLoader", timeoutMs: 60000 },
+		},
+		{
+			caption: "Kill a hung background job",
+			call: { op: "cancel", ids: ["bash_a1b2c3"] },
 		},
 		{
 			caption: "Snapshot every background job without waiting",
@@ -219,12 +232,17 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 		},
 	];
 
-	constructor(private readonly session: ToolSession) {
+	constructor(
+		private readonly session: ToolSession,
+		options: { peerMessagingVisible?: boolean } = {},
+	) {
+		this.#peerMessagingVisible = options.peerMessagingVisible ?? true;
 		this.description = prompt.render(hubDescription);
 	}
 
 	/** Messaging deps when this session can address peers; null otherwise. */
 	#messaging(): MessagingDeps | null {
+		if (!this.#peerMessagingVisible) return null;
 		const registry = this.session.agentRegistry;
 		const senderId = this.session.getAgentId?.() ?? null;
 		if (!registry || !senderId) return null;
@@ -276,7 +294,7 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 			case "jobs": {
 				const manager = this.session.asyncJobManager;
 				if (!manager) return this.#asyncDisabled("jobs");
-				return executeJobsSnapshot(this.session, manager, this.#ownerId());
+				return executeJobsSnapshot(this.session, manager, this.#ownerId(), this.#peerMessagingVisible);
 			}
 			case "start":
 			case "ps":
@@ -348,7 +366,7 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 				: manager.getRunningJobs(ownerId ? { ownerId } : undefined)
 			: [];
 		if (manager && ids?.length && jobsToWatch.length === 0) {
-			return noMatchingJobsResult(this.session, ids);
+			return noMatchingJobsResult(this.session, ids, this.#peerMessagingVisible);
 		}
 		const runningJobs = jobsToWatch.filter(j => j.status === "running");
 		if (manager && jobsToWatch.length > 0 && runningJobs.length === 0) {
@@ -358,7 +376,7 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 
 		if (!manager || runningJobs.length === 0) {
 			// No job legs: pure message wait — or nothing to block on at all.
-			if (!messaging) return nothingToWaitForResult(this.session);
+			if (!messaging) return nothingToWaitForResult(this.session, this.#peerMessagingVisible);
 			if (!from) {
 				// A bare wait can only be satisfied by a running peer eventually
 				// sending something; with none, return the snapshot immediately
@@ -366,7 +384,7 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 				const hasRunningPeer = messaging.registry
 					.listVisibleTo(messaging.senderId)
 					.some(ref => messaging.registry.isRunning(ref));
-				if (!hasRunningPeer) return nothingToWaitForResult(this.session);
+				if (!hasRunningPeer) return nothingToWaitForResult(this.session, this.#peerMessagingVisible);
 			}
 			return executeMessageWait(messaging, { from, timeoutMs: params.timeoutMs }, signal);
 		}

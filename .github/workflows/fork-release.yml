@@ -58,11 +58,18 @@ jobs:
 
           unexpected="$(git diff --name-only "$official_sha" "$GITHUB_SHA" -- . \
             ':(exclude).github/workflows/fork-release.yml' \
-            ':(exclude)packages/coding-agent/src/prompts/tools/hub.md' \
+            ':(exclude)FORK.md' \
+            ':(exclude)packages/coding-agent/src/config/settings-schema.ts' \
+            ':(exclude)packages/coding-agent/src/prompts/tools/hub-compact.md' \
             ':(exclude)packages/coding-agent/src/prompts/tools/task.md' \
+            ':(exclude)packages/coding-agent/src/task/index.ts' \
+            ':(exclude)packages/coding-agent/src/tools/index.ts' \
+            ':(exclude)packages/coding-agent/src/tools/hub/compact.ts' \
             ':(exclude)packages/coding-agent/src/tools/hub/index.ts' \
             ':(exclude)packages/coding-agent/src/tools/hub/jobs.ts' \
-            ':(exclude)packages/coding-agent/test/tools/hub-model-surface.test.ts')"
+            ':(exclude)packages/coding-agent/CHANGELOG.md' \
+            ':(exclude)packages/coding-agent/test/task/task-spawn.test.ts' \
+            ':(exclude)packages/coding-agent/test/tools/hub-mode.test.ts')"
           if [ -n "$unexpected" ]; then
             echo "::error::Fork main contains changes outside the maintained downstream files:"
             printf '%s\n' "$unexpected"
@@ -96,7 +103,7 @@ jobs:
           bun run collab:web:build
           # Match upstream CI: musl-release.test.ts is intentionally excluded.
           bun test scripts/ci-test-ts.test.ts scripts/release.test.ts
-          bun test packages/coding-agent/test/tools/hub-model-surface.test.ts
+          bun test packages/coding-agent/test/tools/hub-mode.test.ts
 
   build:
     name: Build ${{ matrix.target }}
@@ -266,7 +273,7 @@ jobs:
 
             Linux x64, Linux ARM64, and Windows x64 use the same upstream release targets as the official build. Linux native addons are the official same-version precompiled packages; upstream GNU native targets use a glibc 2.17 portability floor, matching the official CentOS 7-compatible build strategy.
 
-            The upstream Hub messaging implementation remains in source. This fork only narrows the model-facing Hub schema, descriptions, examples, and task/job guidance to parent-side asynchronous job control and supervised long-running processes. This workflow does not compile Rust.
+            This fork defaults `hub.mode` to `compact`, exposing parent-side asynchronous job control and supervised long-running processes without peer-agent messaging in the model context. Set `hub.mode` to `full` to restore the upstream Hub surface without rebuilding. The upstream Hub/IRC runtime remains intact. This workflow does not compile Rust.
           files: |
             dist/omp-linux-x64
             dist/omp-linux-arm64

@@ -126,7 +126,7 @@ export function runningAgentsOutsideJobs(session: ToolSession): AgentActivitySna
 }
 
 /** Model-facing lines for the running-agents section shared by `jobs` and empty-wait results. */
-function describeAgents(agents: AgentActivitySnapshot[]): string[] {
+function describeAgents(session: ToolSession, agents: AgentActivitySnapshot[]): string[] {
 	const lines = [`## Running Agents (${agents.length}) — not job-backed\n`];
 	for (const agent of agents) {
 		const parent = agent.parentId ? ` (spawned by \`${agent.parentId}\`)` : "";
@@ -136,11 +136,15 @@ function describeAgents(agents: AgentActivitySnapshot[]): string[] {
 	}
 	lines.push(
 		"",
-		"These agents have no job entry; inspect transcripts at `history://<id>` or cancel an owned child with `hub` cancel.",
+		session.settings.get("hub.mode") === "full"
+			? "These agents have no job entry; message them via `hub` send, transcripts at `history://<id>`."
+			: "These agents have no job entry; inspect transcripts at `history://<id>` or cancel an owned child with `hub` cancel.",
 	);
 	if (agents.some(agent => !agent.live)) {
 		lines.push(
-			"An agent with no turn in flight cannot make progress and never satisfies a bare `wait`; clear it with `hub` cancel.",
+			session.settings.get("hub.mode") === "full"
+				? "An agent with no turn in flight cannot answer a message and never satisfies a bare `wait`; clear it with `hub` cancel."
+				: "An agent with no turn in flight cannot make progress and never satisfies a bare `wait`; clear it with `hub` cancel.",
 		);
 	}
 	return lines;
@@ -250,7 +254,7 @@ export function buildJobResult(
 
 	if (agents.length > 0) {
 		if (lines.length > 0) lines.push("");
-		lines.push(...describeAgents(agents));
+		lines.push(...describeAgents(session, agents));
 	}
 
 	// A tool result must never be empty text — the model cannot tell "no
@@ -275,26 +279,34 @@ export function buildJobResult(
 	};
 }
 
-/** `wait` with explicit ids that matched nothing visible: correct the caller, surface live agents. */
-export function noMatchingJobsResult(session: ToolSession, ids: string[]): AgentToolResult<CoordinationDetails> {
+/** `wait` with explicit ids that matched nothing visible: correct the caller and optionally surface live agents. */
+export function noMatchingJobsResult(
+	session: ToolSession,
+	ids: string[],
+	includeAgentRoster = true,
+): AgentToolResult<CoordinationDetails> {
 	// Zero pollable jobs is not necessarily "nothing running": agents woken
 	// via hub messages or owned by another agent run with no job entry.
 	// Report them so the snapshot matches the UI's running-agent count
 	// (task job ids are agent ids, so a stale id often names one).
-	const agents = runningAgentsOutsideJobs(session);
+	const agents = includeAgentRoster ? runningAgentsOutsideJobs(session) : [];
 	const lines: string[] = [`No matching jobs found for IDs: ${ids.join(", ")}`];
-	const registry = session.agentRegistry;
-	for (const id of ids) {
-		const ref = registry?.get(id);
-		if (!ref) continue;
-		lines.push(
-			ref.status === "running"
-				? `- \`${id}\` is a running agent with no job entry — inspect transcript at history://${id}; cancel it with \`hub\` cancel if it is owned by you.`
-				: `- \`${id}\` is a ${ref.status} agent (its job is gone) — transcript at history://${id}`,
-		);
+	if (includeAgentRoster) {
+		const registry = session.agentRegistry;
+		for (const id of ids) {
+			const ref = registry?.get(id);
+			if (!ref) continue;
+			lines.push(
+				ref.status === "running"
+					? session.settings.get("hub.mode") === "full"
+						? `- \`${id}\` is a running agent with no job entry — message it via \`hub\` send; transcript at history://${id}`
+						: `- \`${id}\` is a running agent with no job entry — inspect transcript at history://${id}; cancel it with \`hub\` cancel if it is owned by you.`
+					: `- \`${id}\` is a ${ref.status} agent (its job is gone) — transcript at history://${id}`,
+			);
+		}
 	}
 	if (agents.length > 0) {
-		lines.push("", ...describeAgents(agents));
+		lines.push("", ...describeAgents(session, agents));
 	}
 	return {
 		content: [{ type: "text", text: lines.join("\n") }],
@@ -307,11 +319,14 @@ export function noMatchingJobsResult(session: ToolSession, ids: string[]): Agent
 }
 
 /** Bare `wait` with no running jobs and nobody who could message: nothing to block on. */
-export function nothingToWaitForResult(session: ToolSession): AgentToolResult<CoordinationDetails> {
-	const agents = runningAgentsOutsideJobs(session);
+export function nothingToWaitForResult(
+	session: ToolSession,
+	includeAgentRoster = true,
+): AgentToolResult<CoordinationDetails> {
+	const agents = includeAgentRoster ? runningAgentsOutsideJobs(session) : [];
 	const lines: string[] = ["No running background jobs to wait for."];
 	if (agents.length > 0) {
-		lines.push("", ...describeAgents(agents));
+		lines.push("", ...describeAgents(session, agents));
 	}
 	return {
 		content: [{ type: "text", text: lines.join("\n") }],
@@ -416,9 +431,17 @@ export function executeJobsSnapshot(
 	session: ToolSession,
 	manager: AsyncJobManager,
 	ownerId: string | undefined,
+	includeAgentRoster = true,
 ): AgentToolResult<CoordinationDetails> {
 	const jobs = manager.getAllJobs(ownerId ? { ownerId } : undefined);
-	return buildJobResult(session, manager, "jobs", jobs, [], runningAgentsOutsideJobs(session));
+	return buildJobResult(
+		session,
+		manager,
+		"jobs",
+		jobs,
+		[],
+		includeAgentRoster ? runningAgentsOutsideJobs(session) : [],
+	);
 }
 
 // =============================================================================

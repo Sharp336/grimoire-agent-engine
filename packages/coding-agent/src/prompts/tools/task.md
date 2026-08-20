@@ -6,7 +6,7 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 
 # Async Job Contract
 - Results auto-deliver. A settled `hub jobs`/`hub wait` snapshot is the delivery; no duplicate `async-result` follows.
-- Job IDs are process-local and expire roughly five minutes after settlement. Afterward, use `agent://<id>` or `history://<id>` for retained output.
+- Job IDs are process-local and expire roughly five minutes after settlement. Afterward, use {{#if ircEnabled}}the agent ID with `hub send`, {{/if}}`agent://<id>`, or `history://<id>`.
 - `completed` means successful yield/job exit, not artifact acceptance. Verify claimed changes.
 {{/if}}
 
@@ -14,7 +14,7 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 - **Agent typing:** Pick each item's `agent` type.{{#if scoutAvailable}} Read-only research MUST use `agent: "scout"` (faster model).{{/if}} Use default worker only when no specialist fits.
 - **No overhead:** Each `task` MUST instruct its agent to skip formatters, linters, and project-wide test suites. Run those once at the end.
 - **One-pass:** Prefer agents that investigate AND edit in one pass;{{#if scoutAvailable}} spin a read-only scout only when affected files are genuinely unknown.{{/if}}
-- **Overlap is safe:** Concurrent edits to the same files auto-resolve. NEVER shrink or serialize a batch to avoid file overlap. Two prerequisites:
+- **Overlap is safe:** Concurrent edits to the same files auto-resolve{{#if ircEnabled}}; worst case, agents coordinate directly over IRC{{/if}}. NEVER shrink or serialize a batch to avoid file overlap. Two prerequisites:
   1. Every task MUST skip validation (build/lint/tests) — validating mid-flight blocks agents on each other's edits.
   2. Decide cross-task contracts up front (e.g. the interface A implements and B consumes) and state them in the {{#if batchEnabled}}batch `context`{{else}}task{{/if}}, not left for agents to negotiate.
 
@@ -22,7 +22,7 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 {{#if batchEnabled}}
 - `context`: Shared project state, constraints, and contracts. Applies to the entire batch; do not duplicate this background into individual tasks.
 - `tasks[]`: Array of subagents to spawn.
-  - `name`: A stable CamelCase identifier (≤32 chars), used as the agent/job ID. Generated automatically if omitted.
+  - `name`: A stable CamelCase identifier (≤32 chars), used {{#if ircEnabled}}to address the agent (IRC, job ids){{else}}as the agent/job ID{{/if}}. Generated automatically if omitted.
   - `agent`: The agent type running this item (e.g. {{#if scoutAvailable}}`scout`, {{/if}}`reviewer`). Omitting it gives you the general-purpose worker (`{{defaultAgent}}`) — NEVER pass that name explicitly. Only omit it after checking the agent list below and finding no specialist that fits.{{#if allowedAgentsText}} Current spawn policy allows: {{allowedAgentsText}}.{{/if}}
   - `task`: Complete, self-contained instructions. One-liners or missing acceptance criteria are PROHIBITED.
 {{#if effortEnabled}}  - `effort`: Scale w/ complexity of this task: `"lo"`|`"med"`|`"hi"`
@@ -37,7 +37,7 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 {{/if}}
 {{/if}}
 {{else}}
-- `name`: A stable CamelCase identifier (≤32 chars), used as the agent/job ID. Generated automatically if omitted.
+- `name`: A stable CamelCase identifier (≤32 chars), used {{#if ircEnabled}}to address the agent (IRC, job ids){{else}}as the agent/job ID{{/if}}. Generated automatically if omitted.
 - `agent`: The agent type to spawn (e.g. {{#if scoutAvailable}}`scout`, {{/if}}`reviewer`). Omitting it gives you the general-purpose worker (`{{defaultAgent}}`) — NEVER pass that name explicitly. Only omit it after checking the agent list below and finding no specialist that fits.{{#if allowedAgentsText}} Current spawn policy allows: {{allowedAgentsText}}.{{/if}}
 - `task`: Complete, self-contained instructions. One-liners or missing acceptance criteria are PROHIBITED.
 {{#if effortEnabled}}- `effort`: Scale w/ complexity of this task: `"lo"`|`"med"`|`"hi"`
@@ -54,7 +54,7 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 {{/if}}
 
 # Communication
-Subagents start blank — no conversation history. Put all required context, constraints, and cross-task contracts in the task input.
+Subagents start blank — no conversation history.{{#if ircEnabled}} Parent-to-subagent IRC delivered immediately as steering.{{else}} Put all required context, constraints, and cross-task contracts in the task input.{{/if}}
 Pass large payloads via `local://<path>` URIs, NEVER inline text.
 
 # Format Contracts
