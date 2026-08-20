@@ -3165,7 +3165,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Hindsight",
 			label: "Hindsight Mental Model Auto-Seed",
 			description:
-				"At session start, create any built-in mental models (project-conventions, project-decisions, user-preferences) that do not yet exist on the bank.",
+				"At session start, create any built-in mental models (project-workflow, project-pitfalls, project-decisions, user-preferences) that do not yet exist on the bank.",
 			condition: "hindsightActive",
 		},
 	},

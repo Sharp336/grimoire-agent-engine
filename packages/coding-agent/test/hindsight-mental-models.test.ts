@@ -6,6 +6,7 @@ import {
 	type MentalModelSummary,
 } from "@oh-my-pi/pi-coding-agent/hindsight/client";
 import {
+	builtinSeedsForTest,
 	diffMentalModelContent,
 	ensureMentalModels,
 	loadMentalModelsBlock,
@@ -19,6 +20,87 @@ afterEach(() => {
 });
 
 /* -------------------------------------------------------------------------- */
+/* seeds.json — the built-in taxonomy, encoded as data                         */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The trigger policy every built-in seed must carry. `delta` +
+ * `refresh_after_consolidation` is the normal Hindsight refresh path; the rest
+ * pins refresh scope and recall budget so a curated model can never read other
+ * mental models, inherit a mutable server-side recall default, or refresh
+ * unattended without leaving a trace.
+ */
+const SEED_TRIGGER = {
+	mode: "delta",
+	refresh_after_consolidation: true,
+	exclude_mental_models: true,
+	tags_match: "all_strict",
+	keep_trace: true,
+	include_chunks: true,
+	recall_max_tokens: 8000,
+	recall_chunks_max_tokens: 3000,
+};
+
+describe("builtin seeds", () => {
+	it("encodes exactly the four-model taxonomy — no architecture or environment seed", () => {
+		expect(builtinSeedsForTest.map(seed => seed.id)).toEqual([
+			"user-preferences",
+			"project-workflow",
+			"project-pitfalls",
+			"project-decisions",
+		]);
+		expect(builtinSeedsForTest.map(seed => seed.name)).toEqual([
+			"User Preferences",
+			"Project Workflow",
+			"Project Pitfalls",
+			"Project Decisions",
+		]);
+	});
+
+	it("keeps user preferences global and untagged while project models stay project-tagged", () => {
+		const preferences = builtinSeedsForTest.find(seed => seed.id === "user-preferences");
+		expect(preferences?.scopes).toEqual(["global", "per-project", "per-project-tagged"]);
+		expect(preferences?.projectTagged).toBe(false);
+		expect(preferences?.max_tokens).toBe(600);
+		for (const id of ["project-workflow", "project-pitfalls", "project-decisions"]) {
+			const seed = builtinSeedsForTest.find(candidate => candidate.id === id);
+			expect(seed?.scopes).toEqual(["per-project", "per-project-tagged"]);
+			expect(seed?.projectTagged).toBe(true);
+			expect(seed?.max_tokens).toBe(800);
+		}
+	});
+
+	it("gives every seed the same bounded, non-inheriting trigger policy", () => {
+		for (const seed of builtinSeedsForTest) {
+			expect(seed.trigger).toEqual(SEED_TRIGGER);
+		}
+	});
+
+	it("requires claim, evidence, recency, and confidence from every source query", () => {
+		for (const seed of builtinSeedsForTest) {
+			const query = seed.source_query.toLowerCase();
+			expect(query).toContain("claim");
+			expect(query).toContain("evidence");
+			expect(query).toContain("last observed");
+			expect(query).toContain("confidence of high, medium, or low");
+		}
+	});
+
+	it("makes every source query exclude unsupported, volatile, and superseded state", () => {
+		for (const seed of builtinSeedsForTest) {
+			const query = seed.source_query.toLowerCase();
+			expect(query).toContain("exclude");
+			expect(query).toContain("unsupported");
+			expect(query).toMatch(/volatile|one-off|one-time|speculative/);
+			expect(query).toMatch(/supersede/);
+			// Six-month usefulness is the whole point of a curated model: a
+			// query that admits short-lived state churns on every refresh.
+			expect(query).toContain("six months");
+		}
+	});
+});
+
+/* -------------------------------------------------------------------------- */
 /* resolveSeedsForScope                                                        */
 /* -------------------------------------------------------------------------- */
 
@@ -27,20 +109,14 @@ afterEach(() => {
 // matching). Tag derivation MUST stay disciplined per scoping mode.
 
 describe("resolveSeedsForScope", () => {
-	it("global scoping emits only seeds whose scopes include 'global', and never project-tagged ones", () => {
+	it("global scoping emits only untagged user preferences", () => {
 		const scope: BankScope = { bankId: "omp" };
 		const seeds = resolveSeedsForScope(scope, "global");
-		expect(seeds.length).toBeGreaterThan(0);
-		// project-conventions is per-project only — must not appear.
-		expect(seeds.some(s => s.id === "project-conventions")).toBe(false);
-		// user-preferences applies to every scope.
-		const userPrefs = seeds.find(s => s.id === "user-preferences");
-		expect(userPrefs).toBeDefined();
-		// In global mode there is no project axis, so untagged seeds carry no tags.
-		expect(userPrefs?.tags).toEqual([]);
+		expect(seeds.map(seed => seed.id)).toEqual(["user-preferences"]);
+		expect(seeds[0].tags).toEqual([]);
 	});
 
-	it("per-project-tagged scoping bakes the scope's retainTags into projectTagged seeds and leaves untagged seeds bare", () => {
+	it("per-project-tagged scoping emits the exact project taxonomy with project-qualified ids", () => {
 		const scope: BankScope = {
 			bankId: "omp",
 			retainTags: ["project:omp"],
@@ -48,24 +124,39 @@ describe("resolveSeedsForScope", () => {
 			recallTagsMatch: "any",
 		};
 		const seeds = resolveSeedsForScope(scope, "per-project-tagged");
-		const projectConv = seeds.find(s => s.id === "project-conventions-omp");
-		const userPrefs = seeds.find(s => s.id === "user-preferences");
-		expect(projectConv?.legacyIds).toEqual(["project-conventions"]);
-		expect(projectConv?.tags).toEqual(["project:omp"]);
-		// user-preferences is intentionally untagged so the refresh reads the
-		// whole bank, not just the project subset.
-		expect(userPrefs?.tags).toEqual([]);
+		expect(seeds.map(seed => seed.id).toSorted()).toEqual([
+			"project-decisions-omp",
+			"project-pitfalls-omp",
+			"project-workflow-omp",
+			"user-preferences",
+		]);
+
+		const userPreferences = seeds.find(seed => seed.id === "user-preferences");
+		expect(userPreferences?.tags).toEqual([]);
+		for (const [id, legacyId] of [
+			["project-decisions-omp", "project-decisions"],
+			["project-workflow-omp", "project-workflow"],
+			["project-pitfalls-omp", "project-pitfalls"],
+		] as const) {
+			const projectSeed = seeds.find(seed => seed.id === id);
+			expect(projectSeed?.tags).toEqual(["project:omp"]);
+			expect(projectSeed?.legacyIds).toEqual([legacyId]);
+		}
 	});
 
-	it("per-project scoping yields project-conventions but the scope carries no tags so the seed is untagged", () => {
+	it("per-project scoping emits the exact unsuffixed taxonomy with the built-in trigger policy", () => {
 		const scope: BankScope = { bankId: "omp-myproj" };
 		const seeds = resolveSeedsForScope(scope, "per-project");
-		const projectConv = seeds.find(s => s.id === "project-conventions");
-		expect(projectConv).toBeDefined();
-		// per-project mode isolates via bank id, not tags. retainTags is undefined,
-		// so projectTagged seeds resolve to no tags. This is correct: the bank is
-		// already a per-project silo.
-		expect(projectConv?.tags).toEqual([]);
+		expect(seeds.map(seed => seed.id).toSorted()).toEqual([
+			"project-decisions",
+			"project-pitfalls",
+			"project-workflow",
+			"user-preferences",
+		]);
+		for (const seed of seeds) {
+			expect(seed.tags).toEqual([]);
+			expect(seed.trigger).toEqual(SEED_TRIGGER);
+		}
 	});
 });
 
@@ -74,7 +165,14 @@ describe("resolveSeedsForScope", () => {
 /* -------------------------------------------------------------------------- */
 
 interface FakeApiCalls {
-	created: Array<{ id: string | undefined; name: string; sourceQuery: string; tags?: string[] }>;
+	created: Array<{
+		id: string | undefined;
+		name: string;
+		sourceQuery: string;
+		tags?: string[];
+		maxTokens?: number;
+		trigger?: unknown;
+	}>;
 }
 
 function makeFakeApi(existing: MentalModelSummary[]): { api: HindsightApi; calls: FakeApiCalls } {
@@ -85,9 +183,16 @@ function makeFakeApi(existing: MentalModelSummary[]): { api: HindsightApi; calls
 			_bankId: string,
 			name: string,
 			sourceQuery: string,
-			options: { id?: string; tags?: string[] },
+			options: { id?: string; tags?: string[]; maxTokens?: number; trigger?: unknown },
 		) => {
-			calls.created.push({ id: options.id, name, sourceQuery, tags: options.tags });
+			calls.created.push({
+				id: options.id,
+				name,
+				sourceQuery,
+				tags: options.tags,
+				maxTokens: options.maxTokens,
+				trigger: options.trigger,
+			});
 			return { operation_id: `op-${calls.created.length}` };
 		},
 	} as unknown as HindsightApi;
@@ -102,20 +207,20 @@ describe("ensureMentalModels", () => {
 			"omp",
 			[
 				{ id: "user-preferences", name: "User Preferences", sourceQuery: "q1", tags: [] },
-				{ id: "project-conventions", name: "Project Conventions", sourceQuery: "q2", tags: ["project:omp"] },
+				{ id: "project-workflow", name: "Project Workflow", sourceQuery: "q2", tags: ["project:omp"] },
 			],
 			false,
 		);
 		expect(calls.created).toHaveLength(1);
-		expect(calls.created[0].id).toBe("project-conventions");
+		expect(calls.created[0].id).toBe("project-workflow");
 		expect(calls.created[0].tags).toEqual(["project:omp"]);
 	});
 
 	it("matches legacy bare project seeds only when their tags match the active project", async () => {
 		const legacyProjectA: MentalModelSummary = {
-			id: "project-conventions",
+			id: "project-workflow",
 			bank_id: "omp",
-			name: "Project Conventions",
+			name: "Project Workflow",
 			tags: ["project:a"],
 		};
 
@@ -125,11 +230,11 @@ describe("ensureMentalModels", () => {
 			"omp",
 			[
 				{
-					id: "project-conventions-a",
-					name: "Project Conventions",
+					id: "project-workflow-a",
+					name: "Project Workflow",
 					sourceQuery: "q",
 					tags: ["project:a"],
-					legacyIds: ["project-conventions"],
+					legacyIds: ["project-workflow"],
 				},
 			],
 			false,
@@ -142,17 +247,17 @@ describe("ensureMentalModels", () => {
 			"omp",
 			[
 				{
-					id: "project-conventions-b",
-					name: "Project Conventions",
+					id: "project-workflow-b",
+					name: "Project Workflow",
 					sourceQuery: "q",
 					tags: ["project:b"],
-					legacyIds: ["project-conventions"],
+					legacyIds: ["project-workflow"],
 				},
 			],
 			false,
 		);
 		expect(differentProject.calls.created).toHaveLength(1);
-		expect(differentProject.calls.created[0].id).toBe("project-conventions-b");
+		expect(differentProject.calls.created[0].id).toBe("project-workflow-b");
 	});
 
 	it("does not modify existing models even if their fields drift from the seed list", async () => {
@@ -192,6 +297,35 @@ describe("ensureMentalModels", () => {
 			ensureMentalModels(api, "omp", [{ id: "x", name: "X", sourceQuery: "q", tags: [] }], false),
 		).resolves.toBeUndefined();
 		expect(calls.created).toHaveLength(0);
+	});
+
+	it("forwards each resolved seed's tags, token cap, and trigger policy to createMentalModel", async () => {
+		const { api, calls } = makeFakeApi([]);
+		const seeds = resolveSeedsForScope(
+			{ bankId: "omp", retainTags: ["project:omp"], recallTags: ["project:omp"], recallTagsMatch: "any" },
+			"per-project-tagged",
+		);
+		await ensureMentalModels(api, "omp", seeds, false);
+
+		expect(calls.created.map(call => call.id)).toEqual([
+			"user-preferences",
+			"project-workflow-omp",
+			"project-pitfalls-omp",
+			"project-decisions-omp",
+		]);
+		for (const call of calls.created) {
+			expect(call.trigger).toEqual(SEED_TRIGGER);
+		}
+
+		const preferences = calls.created.find(call => call.id === "user-preferences");
+		// Untagged on purpose: an empty tag list must reach the wire as absent,
+		// otherwise the refresh filters against a tag we never retain with.
+		expect(preferences?.tags).toBeUndefined();
+		expect(preferences?.maxTokens).toBe(600);
+
+		const workflow = calls.created.find(call => call.id === "project-workflow-omp");
+		expect(workflow?.tags).toEqual(["project:omp"]);
+		expect(workflow?.maxTokens).toBe(800);
 	});
 });
 

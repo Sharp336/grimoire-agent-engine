@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Hindsight now creates the built-in User Preferences, Project Decisions, Project Workflow, and Project Pitfalls models only when each is absent, leaving existing models unchanged. Their source queries now require a claim, its evidence, when it was last observed, and a confidence, and reject unsupported, volatile, or superseded state; each refresh keeps delta + refresh-after-consolidation while excluding other mental models, pinning `all_strict` tag matching, keeping a refresh trace, and bounding its own recall budget.
+
 ## [17.4.0] - 2026-08-20
 
 ### Added

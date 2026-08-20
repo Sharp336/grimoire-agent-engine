@@ -3,7 +3,10 @@
  *
  * Mental models are persisted, named summaries on the Hindsight server. They
  * are populated by a background reflect at create time and refreshed
- * automatically when consolidation runs (`refresh_after_consolidation: true`).
+ * automatically when consolidation runs (`refresh_after_consolidation: true`),
+ * under the per-seed trigger policy in `seeds.json`: a delta refresh whose
+ * scope excludes other mental models, pins its tag-match mode, keeps a refresh
+ * trace, and bounds its own recall budget (see `MentalModelSeedTrigger`).
  *
  * This module:
  *   1. **Seeds** a small, curated set of mental models on first session boot
@@ -28,7 +31,7 @@
  * Seed tags are baked from `seeds.json` plus, for `projectTagged: true`
  * entries, the active scope's `retainTags` (i.e. `project:<cwd>`). In
  * `per-project-tagged`, those project seeds also get project-suffixed ids so
- * each tag can own its conventions/decisions models in the shared bank.
+ * each tag can own its workflow/pitfalls/decisions models in the shared bank.
  * Untagged seeds (e.g. `user-preferences`) read every memory in the bank — the
  * reflect call applies no tag filter when `tags` is empty.
  *
@@ -44,12 +47,37 @@ import type { BankScope } from "./bank";
 import type {
 	HindsightApi,
 	MentalModelListResponse,
-	MentalModelMode,
 	MentalModelSummary,
 	MentalModelTrigger,
+	TagsMatch,
 } from "./client";
 import type { HindsightScoping } from "./config";
 import seedsData from "./seeds.json" with { type: "json" };
+
+/**
+ * Trigger policy a seed may carry. Extends the wire trigger with the refresh
+ * scope and recall-budget knobs Hindsight reads off the stored trigger:
+ * `exclude_mental_models` keeps a refresh from reading other curated models,
+ * `tags_match` pins the tag filter instead of inheriting the server default,
+ * `keep_trace` records why an unattended refresh produced what it did, and the
+ * three recall knobs bound the per-refresh retrieval instead of inheriting
+ * mutable bank/global defaults. The object is forwarded verbatim to
+ * `createMentalModel`, so every field here reaches the server.
+ */
+export interface MentalModelSeedTrigger extends MentalModelTrigger {
+	/** Skip the reflect loop's `search_mental_models` tool (no summary-of-summaries feedback). */
+	exclude_mental_models?: boolean;
+	/** Tag-match mode for the refresh scope. Pinned rather than inherited. */
+	tags_match?: TagsMatch;
+	/** Persist the refresh trace — the only post-hoc diagnostic for unattended refreshes. */
+	keep_trace?: boolean;
+	/** Whether the refresh's internal recall returns raw chunk text. */
+	include_chunks?: boolean;
+	/** Token budget for facts returned by the refresh's internal recall. */
+	recall_max_tokens?: number;
+	/** Token budget for raw chunks returned by the refresh's internal recall. */
+	recall_chunks_max_tokens?: number;
+}
 
 interface RawSeed {
 	id: string;
@@ -57,7 +85,7 @@ interface RawSeed {
 	source_query: string;
 	scopes: HindsightScoping[];
 	projectTagged: boolean;
-	trigger?: { mode?: MentalModelMode; refresh_after_consolidation?: boolean };
+	trigger?: MentalModelSeedTrigger;
 	max_tokens?: number;
 	extra_tags?: string[];
 }
@@ -76,7 +104,7 @@ export interface MentalModelSeed {
 	maxTokens?: number;
 	/** Legacy unqualified seed ids accepted as already-present when tags match. */
 	legacyIds?: string[];
-	trigger?: MentalModelTrigger;
+	trigger?: MentalModelSeedTrigger;
 }
 
 /**

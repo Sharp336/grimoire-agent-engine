@@ -1,32 +1,77 @@
 {
-	"$schema_doc": "Built-in mental model seeds. Each entry is created once per bank if absent. Existing models are NEVER modified by the bootstrap path — operators who want to change a curated model must delete and re-seed (or call refreshMentalModel for a content-only refresh). Tags must intersect the tags actually attached to retains, otherwise refresh returns empty (Hindsight all_strict matching). Source queries live here and not in TS so changes are reviewable as data, not code. `max_tokens` bounds server-side reflect generation per model; a separate client-side render budget bounds the total injected block.",
+	"$schema_doc": "Built-in mental model seeds. Each entry is created once per bank if absent. Existing models are NEVER modified by the bootstrap path — operators who want to change a curated model must delete and re-seed (or call refreshMentalModel for a content-only refresh). Tags must intersect the tags actually attached to retains, otherwise refresh returns empty (Hindsight all_strict matching). Source queries live here and not in TS so changes are reviewable as data, not code. `max_tokens` bounds server-side reflect generation per model; a separate client-side render budget bounds the total injected block. Every seed carries the same trigger policy: `delta` + `refresh_after_consolidation` keeps the normal incremental refresh; `exclude_mental_models` keeps a refresh from reading other curated models (no summary-of-summaries feedback); `tags_match: all_strict` pins the tag filter instead of inheriting the server default (a no-op filter for untagged seeds, strict isolation for project-tagged ones); `keep_trace` is the only way to diagnose a consolidation-driven refresh after the fact; and `include_chunks` / `recall_max_tokens` / `recall_chunks_max_tokens` pin the per-refresh recall budget instead of inheriting mutable bank/global defaults. Chunk text stays on because these queries demand evidence per entry and the bank retains verbatim, but both token budgets are pinned so the evidence channel stays bounded.",
 	"seeds": [
 		{
 			"id": "user-preferences",
 			"name": "User Preferences",
-			"source_query": "What does the user prefer in coding style, tooling, communication, and review? Capture only durable preferences expressed across sessions, not one-off requests.",
+			"source_query": "What durable preferences does the user hold for coding style, tooling, workflow, communication, and review? Include a preference only when separate sessions support it or the user stated it as a standing rule. For each entry give the preference as a directive claim, the evidence behind it (what the user said or repeatedly did), when it was last observed, and a confidence of high, medium, or low. Exclude unsupported guesses, one-off requests, task-specific instructions, and volatile in-flight state. When two preferences conflict, keep the most recent and drop the superseded one. Keep only entries expected to still hold in six months.",
 			"scopes": ["global", "per-project", "per-project-tagged"],
 			"projectTagged": false,
 			"max_tokens": 600,
-			"trigger": { "mode": "delta", "refresh_after_consolidation": true }
+			"trigger": {
+				"mode": "delta",
+				"refresh_after_consolidation": true,
+				"exclude_mental_models": true,
+				"tags_match": "all_strict",
+				"keep_trace": true,
+				"include_chunks": true,
+				"recall_max_tokens": 8000,
+				"recall_chunks_max_tokens": 3000
+			}
 		},
 		{
-			"id": "project-conventions",
-			"name": "Project Conventions",
-			"source_query": "What are this project's conventions for code style, build, testing, release, and pull-request review? Only include conventions that are explicit in the project (settings, scripts, contributor docs, repeatedly enforced in review).",
+			"id": "project-workflow",
+			"name": "Project Workflow",
+			"source_query": "What established build, test, release, review, and development workflows does this project follow? Include a workflow only when a repository source (script, config, CI definition, documented command) or repeated practice supports it. For each entry give the workflow as an actionable claim, the evidence behind it (command, file, or repeated observation), when it was last observed, and a confidence of high, medium, or low. Exclude unsupported guesses, one-off commands, and volatile state such as in-flight tasks, branches, or incidents. Drop any workflow superseded by a newer command or tool. Keep only entries expected to still hold in six months.",
 			"scopes": ["per-project", "per-project-tagged"],
 			"projectTagged": true,
 			"max_tokens": 800,
-			"trigger": { "mode": "delta", "refresh_after_consolidation": true }
+			"trigger": {
+				"mode": "delta",
+				"refresh_after_consolidation": true,
+				"exclude_mental_models": true,
+				"tags_match": "all_strict",
+				"keep_trace": true,
+				"include_chunks": true,
+				"recall_max_tokens": 8000,
+				"recall_chunks_max_tokens": 3000
+			}
+		},
+		{
+			"id": "project-pitfalls",
+			"name": "Project Pitfalls",
+			"source_query": "What recurring failures, hazards, or sharp edges affect this project, and what durable mitigation is established for each? Include a pitfall only when it was observed more than once or carries an evidenced mitigation. For each entry give the failure mode and its mitigation as a claim, the evidence behind it (error, incident, or landed fix), when it was last observed, and a confidence of high, medium, or low. Exclude unsupported or speculative risks and volatile state such as a single transient outage or an open investigation. Drop any pitfall a landed fix has superseded. Keep only entries expected to still hold in six months.",
+			"scopes": ["per-project", "per-project-tagged"],
+			"projectTagged": true,
+			"max_tokens": 800,
+			"trigger": {
+				"mode": "delta",
+				"refresh_after_consolidation": true,
+				"exclude_mental_models": true,
+				"tags_match": "all_strict",
+				"keep_trace": true,
+				"include_chunks": true,
+				"recall_max_tokens": 8000,
+				"recall_chunks_max_tokens": 3000
+			}
 		},
 		{
 			"id": "project-decisions",
 			"name": "Project Decisions",
-			"source_query": "What durable architectural or product decisions have been made for this project, and what rationale or trade-offs were recorded? Include only decisions that are stable across sessions; exclude transient plans, unresolved ideas, and active task state.",
+			"source_query": "What durable architectural or product decisions govern this project, and what rationale or trade-off was recorded for each? Include a decision only when it was actually adopted, not merely proposed. For each entry give the decision as a claim, the evidence behind it (where it was decided or where it is enforced), when it was last observed, and a confidence of high, medium, or low. Exclude unsupported guesses and volatile state such as proposals, open questions, and in-flight plans. When decisions conflict, keep the one that superseded the others and say what it replaced. Keep only entries expected to still hold in six months.",
 			"scopes": ["per-project", "per-project-tagged"],
 			"projectTagged": true,
 			"max_tokens": 800,
-			"trigger": { "mode": "delta", "refresh_after_consolidation": true }
+			"trigger": {
+				"mode": "delta",
+				"refresh_after_consolidation": true,
+				"exclude_mental_models": true,
+				"tags_match": "all_strict",
+				"keep_trace": true,
+				"include_chunks": true,
+				"recall_max_tokens": 8000,
+				"recall_chunks_max_tokens": 3000
+			}
 		}
 	]
 }
