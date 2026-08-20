@@ -669,23 +669,23 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 		}
 	}
 
-	const promptProgress = createPiNativePromptProgressRelay();
-	streamOpts.onPromptProgress = progress => promptProgress.emit(progress);
+	const promptProgress = parsed.capabilities.promptProgress ? createPiNativePromptProgressRelay() : undefined;
+	if (promptProgress) streamOpts.onPromptProgress = progress => promptProgress.emit(progress);
 	let events: AssistantMessageEventStream;
 	try {
 		if (controller.signal.aborted) {
-			promptProgress.close();
+			promptProgress?.close();
 			return aborted();
 		}
 		events = streamSimple(model, parsed.context, streamOpts);
 	} catch (error) {
-		promptProgress.close();
+		promptProgress?.close();
 		const classified = classifyGatewayError(error);
 		logger.warn("auth-gateway streamSimple threw", { format: "pi-native", error: classified.message, peer });
 		return piNative.formatError(classified.status, classified.type, classified.message);
 	}
 	if (controller.signal.aborted) {
-		promptProgress.close();
+		promptProgress?.close();
 		return aborted();
 	}
 

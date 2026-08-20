@@ -29,7 +29,7 @@ import { createAbortSourceTracker } from "../utils/abort";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
 import { notifyProviderResponse } from "../utils/provider-response";
-import { isPiNativePromptProgressFrame } from "./pi-native-protocol";
+import { isPiNativePromptProgressFrame, PI_NATIVE_CLIENT_CAPABILITIES } from "./pi-native-protocol";
 
 /**
  * Fields that must not cross the wire — either non-serializable (functions,
@@ -185,6 +185,7 @@ export function streamPiNative<TApi extends Api>(
 				modelId: `${model.provider}/${model.id}`,
 				context,
 				options: buildWireOptions(options),
+				capabilities: PI_NATIVE_CLIENT_CAPABILITIES,
 				stream: true,
 			});
 

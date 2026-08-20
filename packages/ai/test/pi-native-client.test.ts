@@ -149,7 +149,7 @@ afterEach(() => {
 });
 
 describe("streamPiNative request shape", () => {
-	it("POSTs `{modelId, context, options, stream:true}` to `<baseUrl>/v1/pi/stream`", async () => {
+	it("POSTs the prompt-progress capability with the canonical request", async () => {
 		const final = baseAssistant();
 		const captured: { url?: string; init?: RequestInit } = {};
 		const fetchImpl: FetchImpl = (async (input, init) => {
@@ -177,6 +177,7 @@ describe("streamPiNative request shape", () => {
 		// registry keys on `${provider}/${id}` first (see auth-gateway-cli runServe).
 		expect(body.modelId).toBe("anthropic/claude-sonnet-4-5");
 		expect(body.context).toEqual(baseContext);
+		expect(body.capabilities).toEqual({ promptProgress: true });
 		expect(body.stream).toBe(true);
 		expect(body.options.temperature).toBe(0.7);
 	});

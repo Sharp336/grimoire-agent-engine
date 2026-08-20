@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added normalized prompt-processing progress events for llama.cpp Responses streams, including capability-gated `return_progress` requests, propagation across pi-native gateways, and safe handling of missing or malformed progress frames.
+- Added normalized prompt-processing progress events for llama.cpp Responses streams, including capability-gated `return_progress` requests, client-negotiated propagation across pi-native gateways, and safe handling of missing or malformed progress frames.
 
 ## [17.3.5] - 2026-08-16
 

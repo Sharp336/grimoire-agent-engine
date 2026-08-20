@@ -20,7 +20,7 @@
  *
  * Endpoint contract:
  *   POST /v1/pi/stream
- *   body:    { modelId, context, options?, stream? }   // `stream` defaults to true
+ *   body:    { modelId, context, options?, capabilities?, stream? }   // `stream` defaults to true
  *   200 SSE: assistant events plus prompt-progress frames (terminated by `data: [DONE]`)
  *   200 JSON (stream=false): { message: AssistantMessage }
  *   4xx/5xx: { error: { type, message } }
@@ -29,12 +29,17 @@
 import type { AuthGatewayStreamControl } from "../auth-gateway/types";
 import * as AIError from "../error";
 import type { AssistantMessageEventStream, Context, SimpleStreamOptions } from "../types";
-import type { PiNativePromptProgressFrame, PiNativePromptProgressRelay } from "./pi-native-protocol";
+import type {
+	PiNativeClientCapabilities,
+	PiNativePromptProgressFrame,
+	PiNativePromptProgressRelay,
+} from "./pi-native-protocol";
 
 export interface PiNativeParsedRequest {
 	modelId: string;
 	context: Context;
 	options: SimpleStreamOptions;
+	capabilities: PiNativeClientCapabilities;
 	stream: boolean;
 }
 /**
@@ -140,6 +145,13 @@ export function parseRequest(body: unknown, _headers?: Headers): PiNativeParsedR
 		}
 	}
 
+	const capabilities: PiNativeClientCapabilities = {};
+	const rawCapabilities = obj.capabilities;
+	if (typeof rawCapabilities === "object" && rawCapabilities !== null && !Array.isArray(rawCapabilities)) {
+		const capabilityBag = rawCapabilities as Record<string, unknown>;
+		if (capabilityBag.promptProgress === true) capabilities.promptProgress = true;
+	}
+
 	// `stream` defaults to true — pi-native clients overwhelmingly stream, and
 	// matching `streamProxy`'s implicit-stream behavior avoids a one-flag papercut.
 	const stream = typeof obj.stream === "boolean" ? obj.stream : true;
@@ -148,6 +160,7 @@ export function parseRequest(body: unknown, _headers?: Headers): PiNativeParsedR
 		modelId,
 		context: context as Context,
 		options,
+		capabilities,
 		stream,
 	};
 }

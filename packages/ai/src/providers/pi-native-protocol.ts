@@ -1,5 +1,15 @@
 import type { AssistantMessageEvent, PromptProgress } from "../types";
 
+/** Optional pi-native wire extensions understood by the requesting client. */
+export interface PiNativeClientCapabilities {
+	promptProgress?: true;
+}
+
+/** Extensions supported by this pi-native client build. */
+export const PI_NATIVE_CLIENT_CAPABILITIES = {
+	promptProgress: true,
+} as const satisfies PiNativeClientCapabilities;
+
 /** Prompt-processing progress carried beside canonical assistant events. */
 export interface PiNativePromptProgressFrame {
 	type: "prompt_progress";

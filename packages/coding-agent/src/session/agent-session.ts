@@ -2084,8 +2084,26 @@ export class AgentSession {
 	 * turn-ending error render entirely.
 	 */
 	#subscriberEmitGate: Promise<void> = Promise.resolve();
+	/**
+	 * Source-order generation for prompt processing. Subscriber delivery can lag
+	 * behind agent-core while an extension handler is awaited, so the generation
+	 * lets a delayed prompt-progress event detect that output or a newer turn has
+	 * already overtaken it.
+	 */
+	#promptProgressGeneration = 0;
+	#assistantOutputGeneration: number | undefined;
 
 	async #emitSessionEvent(event: AgentSessionEvent, options: { detachExtensions?: boolean } = {}): Promise<void> {
+		// Record prompt/output ordering before the first await. `message_update`
+		// bypasses the subscriber gate for responsive streaming, while prompt
+		// progress waits behind extension handlers; this source-order state prevents
+		// delayed progress from restoring the loader after output has arrived.
+		if (event.type === "agent_start" || event.type === "turn_start") {
+			this.#promptProgressGeneration++;
+		} else if (event.type === "message_update") {
+			this.#assistantOutputGeneration = this.#promptProgressGeneration;
+		}
+		const promptProgressGeneration = this.#promptProgressGeneration;
 		if (event.type === "message_update") {
 			this.#emit(event);
 			void this.#queueExtensionEvent(event);
@@ -2120,6 +2138,13 @@ export class AgentSession {
 			// care about the final settle.
 			if (event.type === "agent_end" && this.#promptInFlightCount > 0) {
 				this.#pendingAgentEndEmit = event;
+				return;
+			}
+			if (
+				event.type === "prompt_progress" &&
+				(promptProgressGeneration !== this.#promptProgressGeneration ||
+					promptProgressGeneration === this.#assistantOutputGeneration)
+			) {
 				return;
 			}
 			this.#emit(event);

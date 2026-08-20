@@ -846,6 +846,72 @@ describe("AgentSession message pipeline", () => {
 		await Bun.sleep(0);
 	});
 
+	it("drops prompt progress overtaken by output without suppressing the next turn", async () => {
+		const turnStartBlocked = Promise.withResolvers<void>();
+		const extensionEmit = vi.fn(async (event: { type: string }) => {
+			if (event.type === "turn_start") await turnStartBlocked.promise;
+		});
+		const session = new AgentSession({
+			agent: createAgent(),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: {} as never,
+			extensionRunner: {
+				hasHandlers: () => true,
+				emit: extensionEmit,
+			} as never,
+		});
+		sessions.push(session);
+
+		const events: AgentSessionEvent[] = [];
+		const firstTurnEnd = Promise.withResolvers<void>();
+		const nextTurnProgress = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			events.push(event);
+			if (event.type === "turn_end") firstTurnEnd.resolve();
+			if (event.type === "prompt_progress") nextTurnProgress.resolve();
+		});
+
+		const assistantMessage = createAssistantMessage("output");
+		session.agent.emitExternalEvent({ type: "turn_start" });
+		session.agent.emitExternalEvent({
+			type: "prompt_progress",
+			progress: { total: 100, processed: 50, cached: 0 },
+		});
+		session.agent.emitExternalEvent({
+			type: "message_update",
+			message: assistantMessage,
+			assistantMessageEvent: {
+				type: "text_delta",
+				contentIndex: 0,
+				delta: "output",
+				partial: assistantMessage,
+			},
+		});
+		session.agent.emitExternalEvent({ type: "turn_end", message: assistantMessage, toolResults: [] });
+
+		try {
+			await Bun.sleep(0);
+			expect(events.some(event => event.type === "message_update")).toBe(true);
+			expect(events.some(event => event.type === "prompt_progress")).toBe(false);
+		} finally {
+			turnStartBlocked.resolve();
+		}
+		await firstTurnEnd.promise;
+		expect(events.some(event => event.type === "prompt_progress")).toBe(false);
+
+		session.agent.emitExternalEvent({ type: "turn_start" });
+		session.agent.emitExternalEvent({
+			type: "prompt_progress",
+			progress: { total: 100, processed: 25, cached: 0 },
+		});
+		await nextTurnProgress.promise;
+		expect(events.at(-1)).toEqual({
+			type: "prompt_progress",
+			progress: { total: 100, processed: 25, cached: 0 },
+		});
+	});
+
 	it("keeps first-turn memory in the stable prompt on the next turn", async () => {
 		const api = "test-injected-memory-append-only-cache";
 		const contexts: Context[] = [];

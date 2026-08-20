@@ -276,7 +276,7 @@ describe("pi-native gateway cache controls", () => {
 });
 
 describe("pi-native gateway prompt progress", () => {
-	it("bridges provider prompt progress into the pi-native SSE stream", async () => {
+	it("emits prompt progress only when the client advertises support", async () => {
 		registerMockApi();
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-progress-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
@@ -292,13 +292,32 @@ describe("pi-native gateway prompt progress", () => {
 
 		try {
 			mock.push((_context, options) => {
+				options?.onPromptProgress?.({ total: 100, processed: 25, cached: 0 }, mock);
+				return { content: ["legacy"] };
+			});
+			const legacyResponse = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({ modelId: "pi-native-progress", context: baseContext }),
+			});
+
+			expect(legacyResponse.status).toBe(200);
+			const legacyFrames = (await collectSse(legacyResponse.body!)).map(parseSseLine);
+			expect(legacyFrames).not.toContainEqual(expect.objectContaining({ type: "prompt_progress" }));
+			expect(legacyFrames).toContainEqual(expect.objectContaining({ type: "done" }));
+
+			mock.push((_context, options) => {
 				options?.onPromptProgress?.({ total: 100, processed: 56, cached: 40 }, mock);
 				return { content: ["ok"] };
 			});
 			const response = await fetch(`${handle.url}/v1/pi/stream`, {
 				method: "POST",
 				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
-				body: JSON.stringify({ modelId: "pi-native-progress", context: baseContext }),
+				body: JSON.stringify({
+					modelId: "pi-native-progress",
+					context: baseContext,
+					capabilities: { promptProgress: true },
+				}),
 			});
 
 			expect(response.status).toBe(200);
