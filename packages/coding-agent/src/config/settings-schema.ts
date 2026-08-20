@@ -567,7 +567,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Advisor",
 			label: "Steer In-Progress Concerns",
 			description:
-				"Let concern-level advice raised during in-progress work interrupt and steer the primary agent. Off withholds concerns until a completed review.",
+				"Let concern-level advice raised during in-progress work interrupt and steer the primary agent. Off drops those concerns; blockers still pass.",
 			condition: "advisorEnabled",
 		},
 	},

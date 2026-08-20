@@ -445,7 +445,7 @@ describe("advisor", () => {
 			const tool = new AdviseTool(onAdvice);
 			const note = "The result still needs a focused regression test.";
 
-			tool.beginUpdate(true);
+			tool.beginUpdate({ inProgress: true });
 			const deferred = await tool.execute("tc-1", { note, severity: "concern" });
 			await tool.execute("tc-2", { note: "Minor naming cleanup.", severity: "nit" });
 			await tool.execute("tc-3", { note: "A destructive command is running.", severity: "blocker" });
@@ -458,7 +458,7 @@ describe("advisor", () => {
 
 			// Completing the turn deterministically flushes both withheld notes,
 			// oldest first — no reliance on the advisor model re-raising them.
-			tool.beginUpdate(false);
+			tool.beginUpdate({ inProgress: false });
 			expect(onAdvice).toHaveBeenCalledTimes(3);
 			expect(onAdvice).toHaveBeenNthCalledWith(2, note, "concern");
 			expect(onAdvice).toHaveBeenNthCalledWith(3, "Minor naming cleanup.", "nit");
@@ -473,12 +473,12 @@ describe("advisor", () => {
 			const tool = new AdviseTool(onAdvice);
 			const note = "Same point raised repeatedly.";
 
-			tool.beginUpdate(true);
+			tool.beginUpdate({ inProgress: true });
 			await tool.execute("tc-1", { note, severity: "concern" });
 			await tool.execute("tc-2", { note, severity: "concern" });
 			await tool.execute("tc-3", { note, severity: "concern" });
 
-			tool.beginUpdate(false);
+			tool.beginUpdate({ inProgress: false });
 			// Identical note queued once, flushed once.
 			expect(onAdvice).toHaveBeenCalledTimes(1);
 			expect(onAdvice).toHaveBeenCalledWith(note, "concern");
@@ -488,11 +488,11 @@ describe("advisor", () => {
 			const onAdvice = vi.fn();
 			const tool = new AdviseTool(onAdvice);
 
-			tool.beginUpdate(true);
+			tool.beginUpdate({ inProgress: true });
 			await tool.execute("tc-1", { note: "Same point raised repeatedly.", severity: "nit" });
 			await tool.execute("tc-2", { note: "Same   point raised repeatedly.", severity: "concern" });
 
-			tool.beginUpdate(false);
+			tool.beginUpdate({ inProgress: false });
 			expect(onAdvice).toHaveBeenCalledTimes(1);
 			expect(onAdvice).toHaveBeenCalledWith("Same point raised repeatedly.", "concern");
 		});
@@ -501,7 +501,7 @@ describe("advisor", () => {
 			const onAdvice = vi.fn();
 			const tool = new AdviseTool(onAdvice);
 
-			tool.beginUpdate(true, true);
+			tool.beginUpdate({ inProgress: true, steerInProgressConcerns: true });
 			await tool.execute("tc-1", {
 				note: "The active edit targets the wrong code path.",
 				severity: "concern",

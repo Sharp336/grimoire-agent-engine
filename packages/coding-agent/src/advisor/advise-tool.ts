@@ -195,20 +195,20 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 
 	/**
 	 * Mark whether the next advisor prompt reviews an in-progress primary turn.
-	 * Non-blockers are normally withheld until a completed update so partial work
-	 * does not interrupt the primary before it can finish its planned steps.
-	 * When configured, a concern may pass through to the normal steering policy;
-	 * nits remain withheld and blockers always pass through.
+	 * Non-blockers are normally deferred while reviewing partial work so they do
+	 * not interrupt the primary before it can finish its planned steps. When
+	 * configured, a concern may pass through to the normal steering policy; nits
+	 * remain deferred and blockers always pass through.
 	 */
-	beginUpdate(inProgress: boolean, steerInProgressConcerns = false): void {
+	beginUpdate(options: { inProgress: boolean; steerInProgressConcerns?: boolean }): void {
 		const wasInProgress = this.#inProgressUpdate;
-		this.#inProgressUpdate = inProgress;
-		this.#steerInProgressConcerns = steerInProgressConcerns;
+		this.#inProgressUpdate = options.inProgress;
+		this.#steerInProgressConcerns = options.steerInProgressConcerns ?? false;
 		// Turn just completed: flush everything withheld mid-turn, oldest first.
 		// Each flush re-enters the normal dedupe path (escalation rank > delivered
 		// rank), so a note the advisor already got through at a higher severity
 		// stays suppressed while a genuinely-new deferred note is delivered once.
-		if (wasInProgress && !inProgress && this.#deferredNotes.length > 0) {
+		if (wasInProgress && !options.inProgress && this.#deferredNotes.length > 0) {
 			const pending = this.#deferredNotes;
 			this.#deferredNotes = [];
 			for (const { note, severity } of pending) this.#deliver(note, severity);

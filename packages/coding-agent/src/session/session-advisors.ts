@@ -948,7 +948,7 @@ export class SessionAdvisors {
 				beginAdvisorUpdate: inProgress => {
 					const steerInProgressConcerns = this.#host.settings.get("advisor.steerInProgressConcerns");
 					advisorRef.agent.state.systemPrompt[0] = resolveAdvisorSystemPrompt(steerInProgressConcerns);
-					advisorRef.adviseTool.beginUpdate(inProgress, steerInProgressConcerns);
+					advisorRef.adviseTool.beginUpdate({ inProgress, steerInProgressConcerns });
 					advisorRef.emissionGuard.beginUpdate();
 				},
 				onTurnError: (error, failedMessages, signal) =>
