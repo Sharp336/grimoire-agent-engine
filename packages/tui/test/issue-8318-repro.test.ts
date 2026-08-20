@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { type Component, type NativeScrollbackLiveRegion, TUI } from "@oh-my-pi/pi-tui";
 import { VirtualTerminal } from "./virtual-terminal";
 
@@ -11,6 +11,11 @@ import { VirtualTerminal } from "./virtual-terminal";
 const OSC66 = "\x1b]66;";
 const ST = "\x1b\\";
 const ERASE_LINE = "\x1b[2K";
+const PLATFORM_DESCRIPTOR = Object.getOwnPropertyDescriptor(process, "platform");
+
+afterEach(() => {
+	if (PLATFORM_DESCRIPTOR) Object.defineProperty(process, "platform", PLATFORM_DESCRIPTOR);
+});
 
 class RawLines implements Component {
 	#lines: string[];
@@ -277,6 +282,91 @@ describe("issue #8318: scaled OSC 66 headings survive repaint and resize", () =>
 			const seg0 = viewportPaint!.split("\r\n")[0]!;
 			const row0 = seg0.slice(seg0.lastIndexOf("\x1b[H") + 3);
 			expectClearsRightOfGlyph(row0, 14);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("preserves scaled-heading spacer glyphs and sidebar suffixes on ordinary paints", async () => {
+		const term = new VirtualTerminal(80, 6);
+		const tui = new TUI(term);
+		const content = new RawLines(["old heading", "old spacer", "Body"]);
+		tui.addChild(content);
+		tui.setRightSidebar(
+			{ render: () => ["SIDE-0", "SIDE-1", "SIDE-2"] },
+			{ width: 20, minWidth: 12, minMainWidth: 40 },
+		);
+		const writes = captureWrites(term);
+		try {
+			tui.start();
+			await settle(term);
+			writes.length = 0;
+
+			content.setLines([`${OSC66}s=2;Heading${ST}`, "", "Body"]);
+			tui.requestRender();
+			await settle(term);
+
+			const { spacers } = headingAndSpacers(writes, 1);
+			expectClearsRightOfGlyph(spacers[0]!, 14);
+			expect(spacers[0]).toContain("SIDE-1");
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("classifies scaled-heading spacer rows from main-only resize frames", async () => {
+		const term = new VirtualTerminal(80, 6);
+		const tui = new TUI(term);
+		tui.addChild(new RawLines([`${OSC66}s=2;Heading${ST}`, "", "Body"]));
+		tui.setRightSidebar(
+			{ render: () => ["SIDE-0", "SIDE-1", "SIDE-2"] },
+			{ width: 20, minWidth: 12, minMainWidth: 40 },
+		);
+		const writes = captureWrites(term);
+		try {
+			tui.start();
+			await settle(term);
+			writes.length = 0;
+
+			term.resize(79, 6);
+			const viewportPaint = writes.find(
+				write => write.includes("\x1b[H") && !write.includes("\x1b[2J") && !write.includes("\x1b[3J"),
+			);
+			expect(viewportPaint).toBeDefined();
+			const rows = viewportPaint!.split("\r\n");
+			const headingIndex = rows.findIndex(row => row.includes(OSC66));
+			expect(headingIndex).toBeGreaterThanOrEqual(0);
+			const spacer = rows[headingIndex + 1]!;
+			expectClearsRightOfGlyph(spacer, 14);
+			expect(spacer).toContain("SIDE-1");
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("keeps main-only OSC 66 spacer metadata through ConPTY truncation with a sidebar", async () => {
+		Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+		const term = new VirtualTerminal(80, 6, 12_000);
+		const tui = new TUI(term);
+		tui.addChild(
+			new RawLines(
+				Array.from({ length: 9000 }, (_, index) => `${index.toString().padStart(5, "0")}-${"x".repeat(80)}`),
+			),
+		);
+		tui.addChild(new RawLines([`${OSC66}s=2;Heading${ST}`, "", "Body"]));
+		tui.setRightSidebar(
+			{ render: () => Array.from({ length: 6 }, (_, index) => `SIDE-${index}`) },
+			{ width: 20, minWidth: 12, minMainWidth: 40 },
+		);
+		const writes = captureWrites(term);
+		try {
+			tui.start({ clearScrollback: true });
+			await term.waitForRender();
+
+			expect(writes.join("")).toContain("older lines hidden");
+			const { spacers } = headingAndSpacers(writes, 1);
+			expectClearsRightOfGlyph(spacers[0]!, 14);
+			expect(spacers[0]).toContain("SIDE-4");
 		} finally {
 			tui.stop();
 		}

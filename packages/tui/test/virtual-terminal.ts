@@ -410,6 +410,17 @@ export class VirtualTerminal implements Terminal {
 		return columns;
 	}
 
+	/** Columns in a viewport row that carry an OSC 8 hyperlink. */
+	getViewportRowHyperlinkColumns(row: number): number[] {
+		const cells = this.#presentedRowCells(row);
+		if (!cells) return [];
+		const columns: number[] = [];
+		for (let col = 0; col < cells.length; col++) {
+			if ((cells[col]?.hyperlink_id ?? 0) !== 0) columns.push(col);
+		}
+		return columns;
+	}
+
 	/** Whether the cell at a viewport position carries the italic attribute. */
 	getCellItalic(row: number, col: number): boolean {
 		const cells = this.#presentedRowCells(row);

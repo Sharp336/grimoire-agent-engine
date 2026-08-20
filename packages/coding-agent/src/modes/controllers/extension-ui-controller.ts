@@ -1,4 +1,4 @@
-import type { Component, OverlayHandle, TUI } from "@oh-my-pi/pi-tui";
+import type { Component, OverlayHandle, RightSidebarOptions, TUI } from "@oh-my-pi/pi-tui";
 import { Container, Spacer, Text } from "@oh-my-pi/pi-tui";
 import type { CollabUiRequestDraft, CollabUiSelectItem } from "@oh-my-pi/pi-wire";
 import { KeybindingsManager } from "../../config/keybindings";
@@ -53,6 +53,42 @@ interface CollabAskDialogWinner {
  *  "unavailable" collide with the transport sentinel. */
 type GuestUiResult = { kind: "answered"; value: string } | { kind: "cancelled" } | { kind: "unavailable" };
 
+class ExtensionWidgetBoundary implements Component {
+	#failed = false;
+	readonly children: Component[];
+
+	constructor(
+		private readonly inner: ExtensionUiComponent,
+		private readonly onError: (error: unknown) => void,
+	) {
+		this.children = [inner];
+	}
+
+	render(width: number): readonly string[] {
+		if (this.#failed) return [];
+		try {
+			return this.inner.render(width);
+		} catch (error) {
+			this.#failed = true;
+			queueMicrotask(() => this.onError(error));
+			return [];
+		}
+	}
+
+	invalidate(): void {
+		this.inner.invalidate?.();
+	}
+
+	dispose(): void {
+		this.inner.dispose?.();
+	}
+}
+
+interface RightSidebarWidgetEntry {
+	component: ExtensionWidgetBoundary;
+	options: ExtensionWidgetOptions;
+}
+
 function toWireSelectOptions(options: ExtensionUISelectItem[]): CollabUiSelectItem[] {
 	return options.map(option =>
 		typeof option === "string"
@@ -68,6 +104,8 @@ export class ExtensionUiController {
 	#composerShapeDisposers: Array<() => void> = [];
 	#hookWidgetsAbove = new Map<string, ExtensionUiComponent>();
 	#hookWidgetsBelow = new Map<string, ExtensionUiComponent>();
+	#hookWidgetsRight = new Map<string, RightSidebarWidgetEntry>();
+	#hookWidgetsRightContainer = new Container();
 	// Single-file dialog surface (`editorContainer` + focus) is shared by the
 	// selector / input / editor modals, so only one may be presented at a time;
 	// the rest queue. See `#presentDialog`.
@@ -325,23 +363,54 @@ export class ExtensionUiController {
 
 	setHookWidget(key: string, content: ExtensionWidgetContent, options?: ExtensionWidgetOptions): void {
 		const placement = options?.placement ?? "aboveEditor";
+		const restoreFocus = placement === "rightSidebar" && content !== undefined;
+		const previousFocus = restoreFocus ? this.ctx.ui.getFocused() : null;
 		this.#removeHookWidget(this.#hookWidgetsAbove, key);
 		this.#removeHookWidget(this.#hookWidgetsBelow, key);
 
 		if (content === undefined) {
+			this.#removeRightSidebarWidget(key);
 			this.#rebuildHookWidgets();
 			return;
 		}
 
-		const target = placement === "belowEditor" ? this.#hookWidgetsBelow : this.#hookWidgetsAbove;
-		target.set(key, this.#createHookWidget(content));
-		this.#rebuildHookWidgets();
+		try {
+			if (placement === "rightSidebar") {
+				const existing = this.#hookWidgetsRight.get(key);
+				const inner = this.#createHookWidget(content);
+				let boundary: ExtensionWidgetBoundary;
+				boundary = new ExtensionWidgetBoundary(inner, () => {
+					const entry = this.#hookWidgetsRight.get(key);
+					if (entry?.component !== boundary) return;
+					this.#hookWidgetsRight.delete(key);
+					boundary.dispose();
+					this.#rebuildHookWidgets();
+					this.ctx.showError(`Extension widget "${key}" render failed`);
+				});
+				existing?.component.dispose();
+				// Map#set on an existing key replaces its value without moving it.
+				this.#hookWidgetsRight.set(key, { component: boundary, options: options ?? {} });
+			} else {
+				this.#removeRightSidebarWidget(key);
+				const target = placement === "belowEditor" ? this.#hookWidgetsBelow : this.#hookWidgetsAbove;
+				target.set(key, this.#createHookWidget(content));
+			}
+			this.#rebuildHookWidgets();
+		} finally {
+			if (restoreFocus) this.ctx.ui.setFocus(previousFocus);
+		}
 	}
 
 	#removeHookWidget(widgets: Map<string, ExtensionUiComponent>, key: string): void {
 		const existing = widgets.get(key);
 		existing?.dispose?.();
 		widgets.delete(key);
+	}
+
+	#removeRightSidebarWidget(key: string): void {
+		const existing = this.#hookWidgetsRight.get(key);
+		existing?.component.dispose();
+		this.#hookWidgetsRight.delete(key);
 	}
 
 	#createHookWidget(content: ExtensionWidgetContent): ExtensionUiComponent {
@@ -364,7 +433,30 @@ export class ExtensionUiController {
 	#rebuildHookWidgets(): void {
 		this.#renderHookWidgetContainer(this.ctx.hookWidgetContainerAbove, this.#hookWidgetsAbove, true, true);
 		this.#renderHookWidgetContainer(this.ctx.hookWidgetContainerBelow, this.#hookWidgetsBelow, false, false);
+		this.#rebuildRightSidebarWidgets();
 		this.ctx.ui.requestRender();
+	}
+
+	#rebuildRightSidebarWidgets(): void {
+		this.#hookWidgetsRightContainer.clear();
+		for (const entry of this.#hookWidgetsRight.values()) {
+			this.#hookWidgetsRightContainer.addChild(entry.component);
+		}
+
+		if (this.#hookWidgetsRight.size === 0) {
+			this.ctx.ui.setRightSidebar(undefined);
+			return;
+		}
+
+		const geometry = [...this.#hookWidgetsRight.values()].reduce<RightSidebarOptions>(
+			(acc, entry) => ({
+				width: Math.max(acc.width, entry.options.width ?? 44),
+				minWidth: Math.max(acc.minWidth, entry.options.minWidth ?? 28),
+				minMainWidth: Math.max(acc.minMainWidth, entry.options.minMainWidth ?? 64),
+			}),
+			{ width: 2, minWidth: 2, minMainWidth: 1 },
+		);
+		this.ctx.ui.setRightSidebar(this.#hookWidgetsRightContainer, geometry);
 	}
 
 	#renderHookWidgetContainer(
@@ -1159,8 +1251,13 @@ export class ExtensionUiController {
 		for (const widget of this.#hookWidgetsBelow.values()) {
 			widget.dispose?.();
 		}
+		for (const entry of this.#hookWidgetsRight.values()) {
+			entry.component.dispose();
+		}
 		this.#hookWidgetsAbove.clear();
 		this.#hookWidgetsBelow.clear();
+		this.#hookWidgetsRight.clear();
+		this.#hookWidgetsRightContainer.clear();
 		this.#rebuildHookWidgets();
 	}
 

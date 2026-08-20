@@ -612,6 +612,24 @@ Example:
 }
 ```
 
+`setWidget` forwards string-array sidebar content and geometry:
+
+```json
+{
+  "type": "extension_ui_request",
+  "id": "123",
+  "method": "setWidget",
+  "widgetKey": "quota",
+  "widgetLines": ["5 hour 42%"],
+  "widgetPlacement": "rightSidebar",
+  "widgetWidth": 44,
+  "widgetMinWidth": 28,
+  "widgetMinMainWidth": 64
+}
+```
+
+RPC hosts may ignore unsupported widget placements. Component-factory widgets are process-local UI and emit no RPC frame; only string-array widgets are forwarded.
+
 ### Inbound response
 
 `RpcExtensionUIResponse` (`type: "extension_ui_response"`):

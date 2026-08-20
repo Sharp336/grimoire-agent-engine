@@ -37,6 +37,8 @@ export * from "./latex-block";
 export * from "./latex-to-unicode";
 // SGR mouse report parsing
 export * from "./mouse";
+// Reserved sidebar layout
+export * from "./reserved-sidebar";
 // Mermaid diagram support
 // Input buffering for batch splitting
 export * from "./stdin-buffer";

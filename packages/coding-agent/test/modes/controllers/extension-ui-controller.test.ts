@@ -38,6 +38,7 @@ function makeHarness() {
 			requestRender,
 			setFocus,
 			showOverlay,
+			setRightSidebar: vi.fn(),
 			terminal: { rows: 40 },
 		},
 		editorContainer,

@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import { Container, type NativeScrollbackLiveRegion, type RenderScheduler, TUI } from "@oh-my-pi/pi-tui";
+import {
+	type Component,
+	Container,
+	type NativeScrollbackLiveRegion,
+	type RenderScheduler,
+	TUI,
+} from "@oh-my-pi/pi-tui";
 import { Image, ImageBudget } from "@oh-my-pi/pi-tui/components/image";
 import { Text } from "@oh-my-pi/pi-tui/components/text";
 import { getKittyGraphics, setKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graphics";
@@ -27,6 +33,7 @@ const BASE64_ONE_PIXEL_PNG =
 // be re-used (Kitty replace semantics strip the old placement everywhere,
 // scrollback included — the permanently cropped images on WezTerm).
 
+const PLATFORM_DESCRIPTOR = Object.getOwnPropertyDescriptor(process, "platform");
 const originalProtocol = TERMINAL.imageProtocol;
 const originalTerminalId = terminal.id;
 const originalGraphics = { ...getKittyGraphics() };
@@ -42,6 +49,7 @@ beforeEach(() => {
 
 afterEach(() => {
 	setCellDimensions(originalCellDims);
+	if (PLATFORM_DESCRIPTOR) Object.defineProperty(process, "platform", PLATFORM_DESCRIPTOR);
 	terminal.imageProtocol = originalProtocol;
 	terminal.id = originalTerminalId;
 	setKittyGraphics(originalGraphics);
@@ -280,6 +288,7 @@ describe("TUI direct-placement clipping", () => {
 		const lines: string[] = [];
 		return {
 			tui,
+			term,
 			writes,
 			pump,
 			imageId,
@@ -396,6 +405,43 @@ describe("TUI direct-placement clipping", () => {
 		}
 	});
 
+	it("clips straddling placements and advances epochs with a visible sidebar", () => {
+		const h = makeHarness("sidebar-straddle");
+		h.tui.setRightSidebar(
+			{ render: () => Array.from({ length: 12 }, (_, index) => `SIDE-${index}`) },
+			{ width: 12, minWidth: 8, minMainWidth: 20 },
+		);
+		try {
+			h.tui.start();
+			h.pump();
+			h.streamLines(10);
+			h.writes.length = 0;
+
+			const overlay = h.tui.showOverlay(new Text("OVERLAY", 0, 0), { anchor: "top-left", width: "100%" });
+			h.pump();
+			overlay.hide();
+			h.pump();
+
+			const placements = capturePlacements(h.output(), h.imageId);
+			expect(placements.length).toBeGreaterThan(0);
+			for (const placement of placements) {
+				expect(placement.placementId).toBe(2);
+				expect(placement.rows).toBeLessThan(6);
+				expect(placement.srcY).toBe(Math.floor((60 * (6 - placement.rows)) / 6));
+				expect(placement.cuu).toBe(placement.rows - 1);
+			}
+			const { baseY } = h.term.getBufferPosition();
+			expect(
+				h.term
+					.getScrollBuffer()
+					.slice(0, baseY)
+					.some(line => line.includes("SIDE-")),
+			).toBe(false);
+		} finally {
+			h.tui.stop();
+		}
+	});
+
 	it("restarts epochs on a destructive clear, deleting exactly the ids each image ever placed", () => {
 		const h = makeHarness("stale");
 		// A second image that never advances past epoch 1: its delete set pins
@@ -447,6 +493,91 @@ describe("TUI direct-placement clipping", () => {
 			}
 		} finally {
 			h.tui.stop();
+		}
+	});
+	it("clips main inline images before the reserved sidebar column", async () => {
+		const terminal = new VirtualTerminal(120, 12);
+		const writes: string[] = [];
+		const realWrite = terminal.write.bind(terminal);
+		vi.spyOn(terminal, "write").mockImplementation((data: string) => {
+			writes.push(data);
+			realWrite(data);
+		});
+		const tui = new TUI(terminal);
+		const imageKey = "sidebar-boundary";
+		const image = new Image(
+			BASE64_ONE_PIXEL_PNG,
+			"image/png",
+			{ fallbackColor: text => text },
+			{ maxWidthCells: 100, maxHeightCells: 2, budget: tui.imageBudget, imageKey },
+			{ widthPx: 800, heightPx: 20 },
+		);
+		const imageId = tui.imageBudget.acquireId(imageKey);
+		tui.addChild(image);
+		tui.setRightSidebar({ render: () => ["SIDEBAR"] }, { width: 44, minWidth: 28, minMainWidth: 64 });
+		try {
+			tui.start();
+			await terminal.waitForRender(() => writes.join("").includes(`i=${imageId}`));
+			const placementPattern = new RegExp(`i=${imageId},p=\\d+,c=(\\d+),r=\\d+`, "g");
+			const columns = [...writes.join("").matchAll(placementPattern)].map(match => Number(match[1]));
+			expect(columns.length).toBeGreaterThan(0);
+			expect(columns.at(-1)).toBeLessThanOrEqual(76);
+			expect(terminal.getViewport().some(line => line.includes("SIDEBAR"))).toBe(true);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("keeps main-only Kitty clipping metadata through ConPTY truncation with a sidebar", async () => {
+		Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+		const terminal = new VirtualTerminal(120, 12, 12_000);
+		const writes: string[] = [];
+		const realWrite = terminal.write.bind(terminal);
+		vi.spyOn(terminal, "write").mockImplementation((data: string) => {
+			writes.push(data);
+			realWrite(data);
+		});
+		const tui = new TUI(terminal);
+		const filler: Component = {
+			render: () => ["prefix", `\x1b_Ga=T,f=100;${"A".repeat(530_000)}\x1b\\`],
+		};
+		const imageKey = "conpty-sidebar-clip";
+		const image = new Image(
+			BASE64_ONE_PIXEL_PNG,
+			"image/png",
+			{ fallbackColor: text => text },
+			{ maxWidthCells: 4, maxHeightCells: 6, budget: tui.imageBudget, imageKey },
+			{ widthPx: 40, heightPx: 60 },
+		);
+		const imageId = tui.imageBudget.acquireId(imageKey);
+		const placementOnly: Component = {
+			render: width => {
+				const lines = image.render(width);
+				return [lines.at(-1) ?? ""];
+			},
+		};
+		tui.addChild(filler);
+		tui.addChild(placementOnly);
+		tui.addChild({ render: () => Array.from({ length: 11 }, (_, index) => `tail-${index}`) });
+		tui.setRightSidebar(
+			{ render: () => Array.from({ length: 12 }, (_, index) => `SIDE-${index}`) },
+			{ width: 44, minWidth: 28, minMainWidth: 64 },
+		);
+		try {
+			tui.start({ clearScrollback: true });
+			await terminal.waitForRender();
+
+			const output = writes.join("");
+			expect(output).toContain("older lines hidden");
+			const placements = capturePlacements(output, imageId);
+			expect(placements.length).toBeGreaterThan(0);
+			const placement = placements.at(-1)!;
+			expect(placement.placementId).toBe(1);
+			expect(placement.rows).toBeLessThan(6);
+			expect(placement.srcY).toBe(Math.floor((60 * (6 - placement.rows)) / 6));
+			expect(placement.cuu).toBe(placement.rows - 1);
+		} finally {
+			tui.stop();
 		}
 	});
 });

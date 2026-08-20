@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "bun:test";
-import { type PendingExtensionRequest, requestRpcDialog } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
+import {
+	emitRpcWidgetRequest,
+	type PendingExtensionRequest,
+	requestRpcDialog,
+} from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 
 describe("RPC extension UI", () => {
 	it("cancels the remote dialog when its signal aborts", async () => {
@@ -36,5 +40,62 @@ describe("RPC extension UI", () => {
 			targetId: request.id,
 		});
 		expect(pendingRequests.size).toBe(0);
+	});
+
+	it("forwards right-sidebar placement and geometry for passive widget frames", () => {
+		const output = vi.fn<(frame: object) => void>();
+
+		emitRpcWidgetRequest(output, "quota", ["5 hour 42%"], {
+			placement: "rightSidebar",
+			width: 44,
+			minWidth: 28,
+			minMainWidth: 64,
+		});
+
+		expect(output).toHaveBeenCalledWith({
+			type: "extension_ui_request",
+			id: expect.any(String),
+			method: "setWidget",
+			widgetKey: "quota",
+			widgetLines: ["5 hour 42%"],
+			widgetPlacement: "rightSidebar",
+			widgetWidth: 44,
+			widgetMinWidth: 28,
+			widgetMinMainWidth: 64,
+		});
+	});
+
+	it("keeps supported legacy widget placements unchanged", () => {
+		const output = vi.fn<(frame: object) => void>();
+
+		emitRpcWidgetRequest(output, "above", ["context"], { placement: "aboveEditor" });
+		emitRpcWidgetRequest(output, "below", ["status"], { placement: "belowEditor" });
+
+		expect(output).toHaveBeenNthCalledWith(1, {
+			type: "extension_ui_request",
+			id: expect.any(String),
+			method: "setWidget",
+			widgetKey: "above",
+			widgetLines: ["context"],
+			widgetPlacement: "aboveEditor",
+		});
+		expect(output).toHaveBeenNthCalledWith(2, {
+			type: "extension_ui_request",
+			id: expect.any(String),
+			method: "setWidget",
+			widgetKey: "below",
+			widgetLines: ["status"],
+			widgetPlacement: "belowEditor",
+		});
+	});
+
+	it("ignores component widget factories in RPC mode", () => {
+		const output = vi.fn<(frame: object) => void>();
+		const componentFactory = () => ({ render: () => [] });
+
+		expect(() =>
+			emitRpcWidgetRequest(output, "quota", componentFactory, { placement: "rightSidebar" }),
+		).not.toThrow();
+		expect(output).not.toHaveBeenCalled();
 	});
 });

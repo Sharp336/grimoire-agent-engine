@@ -20,7 +20,9 @@ SteeringMode: TypeAlias = Literal["all", "one-at-a-time"]
 InterruptMode: TypeAlias = Literal["immediate", "wait"]
 StopReason: TypeAlias = Literal["stop", "length", "toolUse", "error", "aborted"]
 NotifyType: TypeAlias = Literal["info", "warning", "error"]
-WidgetPlacement: TypeAlias = Literal["aboveEditor", "belowEditor"]
+WidgetPlacement: TypeAlias = Literal[
+    "aboveEditor", "belowEditor", "rightSidebar"
+]
 TodoStatus: TypeAlias = Literal[
     "pending", "in_progress", "completed", "abandoned", "blocked"
 ]
@@ -77,7 +79,7 @@ _STOP_REASON_VALUES: Final[frozenset[str]] = frozenset(
 )
 _NOTIFY_TYPE_VALUES: Final[frozenset[str]] = frozenset({"info", "warning", "error"})
 _WIDGET_PLACEMENT_VALUES: Final[frozenset[str]] = frozenset(
-    {"aboveEditor", "belowEditor"}
+    {"aboveEditor", "belowEditor", "rightSidebar"}
 )
 _TODO_STATUS_VALUES: Final[frozenset[str]] = frozenset(
     {"pending", "in_progress", "completed", "abandoned", "blocked"}
@@ -934,6 +936,9 @@ class ExtensionUiRequest:
     widget_key: str | None = None
     widget_lines: tuple[str, ...] | None = None
     widget_placement: WidgetPlacement | None = None
+    widget_width: int | None = None
+    widget_min_width: int | None = None
+    widget_min_main_width: int | None = None
     text: str | None = None
     url: str | None = None
     launch_url: str | None = None
@@ -1568,6 +1573,9 @@ def parse_extension_ui_request(payload: JsonObject) -> ExtensionUiRequest:
                 field="extension_ui_request.widgetPlacement",
             ),
         ),
+        widget_width=_optional_int(payload, "widgetWidth"),
+        widget_min_width=_optional_int(payload, "widgetMinWidth"),
+        widget_min_main_width=_optional_int(payload, "widgetMinMainWidth"),
         text=_optional_str(payload, "text"),
         url=_optional_str(payload, "url"),
         launch_url=_optional_str(payload, "launchUrl"),

@@ -22,6 +22,13 @@ import { DEFAULT_MAX_INLINE_IMAGES, ImageBudget } from "./components/image";
 import { planDeccaraFills } from "./deccara";
 import { isKeyRelease, matchesKey } from "./keys";
 import { LoopWatchdog } from "./loop-watchdog";
+import {
+	composeRightSidebar,
+	type ResolvedRightSidebarLayout,
+	RIGHT_SIDEBAR_BOUNDARY_RESET,
+	type RightSidebarOptions,
+	resolveRightSidebarLayout,
+} from "./reserved-sidebar";
 import { isConPTYHosted, setAltScreenActive, type Terminal } from "./terminal";
 import {
 	encodeKittyDeleteImage,
@@ -186,6 +193,24 @@ export interface Component {
 	 */
 	dispose?(): void;
 }
+
+interface RightSidebarRegistration {
+	component: Component;
+	options: RightSidebarOptions;
+}
+
+interface ActiveViewportLayout {
+	terminalWidth: number;
+	mainWidth: number;
+	height: number;
+	sidebar: ResolvedRightSidebarLayout;
+}
+
+const DEFAULT_RIGHT_SIDEBAR_OPTIONS: RightSidebarOptions = {
+	width: 44,
+	minWidth: 28,
+	minMainWidth: 64,
+};
 
 /** Lets an overlay root delegate keyboard focus to components it owns. */
 export interface OverlayFocusOwner {
@@ -1346,6 +1371,9 @@ export class TUI extends Container {
 	#windowTopRow = 0;
 	// Exactly what is painted on the screen rows (post-composite, prepared).
 	#previousWindow: string[] = [];
+	// Main-only rows corresponding to #previousWindow. Sidebar composition is
+	// viewport-local and must never participate in scroll-append/history checks.
+	#previousMainWindow: string[] = [];
 	#nativeScrollbackLiveRegionStart: number | undefined;
 	#nativeScrollbackLiveRegionPinned = false;
 	// Start row of the topmost live region that pinned itself. The topmost seam
@@ -1493,6 +1521,8 @@ export class TUI extends Container {
 	#preparedMeta: PreparedLine[] = [];
 	#preparedValidRows = 0;
 
+	#rightSidebar: RightSidebarRegistration | undefined;
+
 	// Overlay stack for modal components rendered on top of base content
 	overlayStack: {
 		component: Component;
@@ -1507,6 +1537,60 @@ export class TUI extends Container {
 		this.#renderScheduler = options?.renderScheduler ?? DEFAULT_RENDER_SCHEDULER;
 		this.#showHardwareCursor = showHardwareCursor === undefined ? this.#showHardwareCursor : showHardwareCursor;
 		this.#watchdog = new LoopWatchdog();
+	}
+
+	setRightSidebar(
+		component: Component | undefined,
+		options: RightSidebarOptions = DEFAULT_RIGHT_SIDEBAR_OPTIONS,
+	): void {
+		const previousLayout = this.#resolveRightSidebar(this.terminal.columns);
+		if (component === undefined) {
+			if (this.#rightSidebar === undefined) return;
+			this.#rightSidebar = undefined;
+		} else {
+			this.#rightSidebar = { component, options };
+		}
+		const nextLayout = this.#resolveRightSidebar(this.terminal.columns);
+		const geometryChanged =
+			previousLayout.visible !== nextLayout.visible ||
+			previousLayout.mainWidth !== nextLayout.mainWidth ||
+			previousLayout.sidebarWidth !== nextLayout.sidebarWidth;
+		if (geometryChanged) {
+			this.requestRender(true, { clearScrollback: this.#hasEverRendered && !isMultiplexerSession() });
+		} else {
+			this.requestRender();
+		}
+	}
+
+	#resolveRightSidebar(terminalWidth: number): ResolvedRightSidebarLayout {
+		const registration = this.#rightSidebar;
+		return registration
+			? resolveRightSidebarLayout(terminalWidth, registration.options)
+			: {
+					terminalWidth,
+					mainWidth: terminalWidth,
+					sidebarWidth: 0,
+					sidebarContentWidth: 0,
+					visible: false,
+				};
+	}
+
+	#activeViewportLayout(): ActiveViewportLayout {
+		const terminalWidth = this.terminal.columns;
+		const sidebar = this.#resolveRightSidebar(terminalWidth);
+		return {
+			terminalWidth,
+			mainWidth: sidebar.mainWidth,
+			height: this.terminal.rows,
+			sidebar,
+		};
+	}
+
+	#composeRightSidebarIntoWindow(window: string[], layout: ResolvedRightSidebarLayout): string[] {
+		const registration = this.#rightSidebar;
+		if (!layout.visible || !registration) return window;
+		const sidebarLines = registration.component.render(layout.sidebarContentWidth);
+		return [...composeRightSidebar(window, sidebarLines, layout)];
 	}
 
 	override captureNativeScrollbackWidthEpoch(): unknown {
@@ -2004,6 +2088,13 @@ export class TUI extends Container {
 	}
 
 	setFocus(component: Component | null): void {
+		if (
+			component !== null &&
+			this.#rightSidebar !== undefined &&
+			subtreeContains(this.#rightSidebar.component, component)
+		) {
+			return;
+		}
 		const topVisibleOverlay = this.#getTopmostVisibleOverlay();
 		if (topVisibleOverlay && !isOverlayFocusTarget(topVisibleOverlay.component, component)) {
 			const currentFocus = this.#focusedComponent;
@@ -2129,6 +2220,7 @@ export class TUI extends Container {
 
 	override invalidate(): void {
 		super.invalidate();
+		this.#rightSidebar?.component.invalidate?.();
 		for (const overlay of this.overlayStack) overlay.component.invalidate?.();
 	}
 
@@ -2577,13 +2669,16 @@ export class TUI extends Container {
 			return;
 		}
 
-		const width = this.terminal.columns;
-		const height = this.terminal.rows;
+		const { terminalWidth, height, mainWidth, sidebar: sidebarLayout } = this.#activeViewportLayout();
 		if (!this.#hasEverRendered || this.#resizeEventPending) {
 			this.requestComponentRender(component);
 			return;
 		}
-		if (width !== this.#previousWidth || height !== this.#previousHeight || width !== this.#composeWidth) {
+		if (
+			terminalWidth !== this.#previousWidth ||
+			height !== this.#previousHeight ||
+			mainWidth !== this.#composeWidth
+		) {
 			this.requestComponentRender(component);
 			return;
 		}
@@ -2640,25 +2735,46 @@ export class TUI extends Container {
 			return;
 		}
 
-		const nextLines = root.render(width);
+		const nextLines = root.render(mainWidth);
 		if (nextLines.length !== segment.rowCount) {
 			this.requestComponentRender(component);
 			return;
 		}
 
-		let firstChanged = -1;
-		let lastChanged = -1;
-		const previousWindow = this.#previousWindow;
+		const mainWindowLines = new Array<string>(nextLines.length);
 		for (let i = 0; i < nextLines.length; i++) {
 			const frameRow = segment.start + i;
 			const raw = nextLines[i]!;
 			const composed = this.#stripCursorMarkers(raw);
-			const prepared = this.#prepareLine(composed, width);
+			const prepared = this.#prepareLine(composed, mainWidth);
 			this.#composedFrame[frameRow] = composed;
 			this.#preparedMeta[frameRow] = prepared;
 			this.#preparedFrame[frameRow] = prepared.line;
-			if (previousWindow[screenStart + i] === prepared.line) continue;
-			previousWindow[screenStart + i] = prepared.line;
+			mainWindowLines[i] = prepared.line;
+		}
+		const sidebarRegistration = this.#rightSidebar;
+		const sidebarLines =
+			sidebarLayout.visible && sidebarRegistration
+				? sidebarRegistration.component.render(sidebarLayout.sidebarContentWidth)
+				: undefined;
+		const nextWindowLines = sidebarLines
+			? composeRightSidebar(
+					mainWindowLines,
+					sidebarLines.slice(screenStart, screenStart + mainWindowLines.length),
+					sidebarLayout,
+				)
+			: mainWindowLines;
+
+		let firstChanged = -1;
+		let lastChanged = -1;
+		const previousWindow = this.#previousWindow;
+		const previousMainWindow = this.#previousMainWindow;
+		for (let i = 0; i < nextWindowLines.length; i++) {
+			const line = nextWindowLines[i]!;
+			const unchanged = previousWindow[screenStart + i] === line;
+			previousMainWindow[screenStart + i] = mainWindowLines[i] ?? "";
+			if (unchanged) continue;
+			previousWindow[screenStart + i] = line;
 			if (firstChanged === -1) firstChanged = i;
 			lastChanged = i;
 		}
@@ -2678,7 +2794,7 @@ export class TUI extends Container {
 
 		if (firstChanged === -1) {
 			this.#writeCursorPosition(cursorPos, this.#composedFrame.length);
-			this.#previousWidth = width;
+			this.#previousWidth = terminalWidth;
 			this.#previousHeight = height;
 			return;
 		}
@@ -2693,12 +2809,14 @@ export class TUI extends Container {
 		for (let i = firstChanged; i <= lastChanged; i++) {
 			if (i > firstChanged) buffer += "\r\n";
 			buffer += this.#lineRewriteSequence(
-				this.#preparedFrame[segment.start + i] ?? "",
-				width,
+				previousWindow[screenStart + i] ?? "",
+				terminalWidth,
 				screenStart + i,
 				segment.start + i,
 				this.#committedRows,
 				this.#osc66SpacerGlyphWidth(this.#preparedFrame, segment.start + i),
+				mainWindowLines[i] ?? "",
+				sidebarLayout,
 			);
 		}
 		const cursorControl = this.#cursorControlSequence(
@@ -2710,7 +2828,7 @@ export class TUI extends Container {
 		buffer += this.#paintEndSequence;
 		this.terminal.write(buffer);
 		this.#windowTopRow = windowTop;
-		this.#commit(this.#composedFrame, previousWindow, width, height, cursorControl);
+		this.#commit(this.#composedFrame, previousWindow, previousMainWindow, terminalWidth, height, cursorControl);
 	}
 
 	#postFullPaintSettleDelay(): number {
@@ -2758,10 +2876,16 @@ export class TUI extends Container {
 	 * the partial compose would reuse, or when a requested component is not
 	 * reachable from the current root child list.
 	 */
-	#resolvePartialComposeRoots(width: number, height: number): Set<Component> | null {
+	#resolvePartialComposeRoots(terminalWidth: number, mainWidth: number, height: number): Set<Component> | null {
 		if (this.#componentRenderTargets.size === 0) return null;
 		if (!this.#hasEverRendered || this.#resizeEventPending) return null;
-		if (width !== this.#previousWidth || height !== this.#previousHeight || width !== this.#composeWidth) return null;
+		if (
+			terminalWidth !== this.#previousWidth ||
+			height !== this.#previousHeight ||
+			mainWidth !== this.#composeWidth
+		) {
+			return null;
+		}
 		if (this.#clearScrollbackOnNextRender || this.#forceViewportRepaintOnNextRender) return null;
 		if (this.overlayStack.length > 0) return null;
 		// The image budget audits display order across the whole frame; a
@@ -3322,8 +3446,8 @@ export class TUI extends Container {
 		width: number,
 		height: number,
 		cursorPos: { row: number; col: number } | null,
-	): { lines: string[]; cursorPos: { row: number; col: number } | null } {
-		if (!isConPTYHosted()) return { lines, cursorPos };
+	): { lines: string[]; cursorPos: { row: number; col: number } | null; sourceStart: number } {
+		if (!isConPTYHosted()) return { lines, cursorPos, sourceStart: 0 };
 
 		let totalBytes = 0;
 		let exceedsThreshold = false;
@@ -3334,7 +3458,7 @@ export class TUI extends Container {
 				break;
 			}
 		}
-		if (!exceedsThreshold) return { lines, cursorPos };
+		if (!exceedsThreshold) return { lines, cursorPos, sourceStart: 0 };
 
 		let retainedBytes = 0;
 		let retainedStart = lines.length;
@@ -3345,7 +3469,7 @@ export class TUI extends Container {
 			retainedStart -= 1;
 			retainedBytes += Buffer.byteLength(lines[retainedStart] ?? "", "utf8") + 8;
 		}
-		if (retainedStart <= 0) return { lines, cursorPos };
+		if (retainedStart <= 0) return { lines, cursorPos, sourceStart: 0 };
 
 		const marker = truncateToWidth(
 			`[${retainedStart} older lines hidden to keep Windows console resume responsive]`,
@@ -3359,11 +3483,12 @@ export class TUI extends Container {
 		}
 
 		if (cursorPos === null || cursorPos.row < retainedStart) {
-			return { lines: truncated, cursorPos: null };
+			return { lines: truncated, cursorPos: null, sourceStart: retainedStart };
 		}
 		return {
 			lines: truncated,
 			cursorPos: { row: cursorPos.row - retainedStart + 1, col: cursorPos.col },
+			sourceStart: retainedStart,
 		};
 	}
 
@@ -3398,8 +3523,38 @@ export class TUI extends Container {
 		});
 	}
 
-	#terminalLine(line: string, screenRow = -1, frameRow = -1, committedTo = -1): string {
-		if (TERMINAL.isImageLine(line)) return this.#imageLineSequence(line, screenRow, frameRow, committedTo);
+	#rightSidebarBoundarySequence(layout: ResolvedRightSidebarLayout): string {
+		const moveToBoundary = layout.mainWidth > 0 ? `\x1b[${layout.mainWidth}C` : "";
+		return `${RIGHT_SIDEBAR_BOUNDARY_RESET}\r${moveToBoundary}`;
+	}
+
+	#rightSidebarSuffixSequence(line: string, mainLine: string, layout: ResolvedRightSidebarLayout | undefined): string {
+		if (!layout?.visible) return "";
+		const main = truncateToWidth(mainLine, layout.mainWidth);
+		if (!line.startsWith(main)) return "";
+		const paddingWidth = Math.max(0, layout.mainWidth - visibleWidth(main));
+		const suffixOffset = main.length + RIGHT_SIDEBAR_BOUNDARY_RESET.length + paddingWidth;
+		if (suffixOffset > line.length) return "";
+		const suffix = line.slice(suffixOffset);
+		return this.#rightSidebarBoundarySequence(layout) + suffix;
+	}
+
+	#terminalLine(
+		line: string,
+		screenRow = -1,
+		frameRow = -1,
+		committedTo = -1,
+		mainLine = line,
+		sidebarLayout?: ResolvedRightSidebarLayout,
+	): string {
+		if (TERMINAL.isImageLine(mainLine)) {
+			if (mainLine === line) return this.#imageLineSequence(mainLine, screenRow, frameRow, committedTo);
+			const suffix = this.#rightSidebarSuffixSequence(line, mainLine, sidebarLayout);
+			if (suffix.length > 0) {
+				const placement = this.#imageLineSequence(mainLine, screenRow, frameRow, committedTo);
+				return placement + suffix + LINE_TERMINATOR;
+			}
+		}
 		const coalesced = coalesceAdjacentSgr(line);
 		return coalesced + (line.includes("\x1b]8;") ? LINE_TERMINATOR : SEGMENT_RESET);
 	}
@@ -3415,8 +3570,9 @@ export class TUI extends Container {
 	 */
 	#doRender(): void {
 		if (this.#stopped) return;
-		const width = this.terminal.columns;
-		const height = this.terminal.rows;
+		const layout = this.#activeViewportLayout();
+		const { terminalWidth, height, mainWidth, sidebar: sidebarLayout } = layout;
+		const contentWidthChanged = this.#composeWidth >= 0 && mainWidth !== this.#composeWidth;
 
 		// Consume the component-scoped accumulation: it describes the render
 		// requests made up to this frame, whichever path the frame takes.
@@ -3444,7 +3600,7 @@ export class TUI extends Container {
 			this.#altActive = true;
 			this.#altMouseTrackingActive = wantMouseTracking;
 			this.#altPreviousLines = [];
-			this.#altEnterWidth = width;
+			this.#altEnterWidth = terminalWidth;
 			this.#altEnterHeight = height;
 			this.#altWidthEpochBoundary = this.captureNativeScrollbackWidthEpoch();
 		} else if (!wantAlt && this.#altActive) {
@@ -3473,9 +3629,9 @@ export class TUI extends Container {
 			// toggles — the Warp-class quirk. Latch the in-place resize path so
 			// this exit and the revert SIGWINCH repaint without an ED3 scrollback
 			// rewrap instead of flashing a destructive full paint (#6511).
-			if (width !== this.#altEnterWidth || height !== this.#altEnterHeight) {
+			if (terminalWidth !== this.#altEnterWidth || height !== this.#altEnterHeight) {
 				this.#resizeEventPending = true;
-				if (width === this.#altEnterWidth) this.#altToggleResizesInPlace = true;
+				if (terminalWidth === this.#altEnterWidth) this.#altToggleResizesInPlace = true;
 			}
 		} else if (wantMouseTracking !== this.#altMouseTrackingActive) {
 			this.terminal.write(wantMouseTracking ? MOUSE_TRACKING_ON : MOUSE_TRACKING_OFF);
@@ -3483,7 +3639,7 @@ export class TUI extends Container {
 		}
 		if (this.#altActive) {
 			this.#componentRenderTargets.clear();
-			this.#renderAltFrame(width, height);
+			this.#renderAltFrame(terminalWidth, height);
 			return;
 		}
 
@@ -3518,7 +3674,7 @@ export class TUI extends Container {
 		// (overlay resizes are not on the drag-cost hot path).
 		if (this.#resizeViewportActive && this.#hasEverRendered && this.#getTopmostVisibleOverlay() === undefined) {
 			this.#componentRenderTargets.clear();
-			this.#renderResizeViewport(width, height);
+			this.#renderResizeViewport(layout);
 			return;
 		}
 
@@ -3531,7 +3687,8 @@ export class TUI extends Container {
 			!this.#resizeRepaintsInPlace() &&
 			(this.#clearScrollbackOnNextRender ||
 				this.#resizeEventPending ||
-				(this.#previousWidth > 0 && this.#previousWidth !== width) ||
+				contentWidthChanged ||
+				(this.#previousWidth > 0 && this.#previousWidth !== terminalWidth) ||
 				(this.#previousHeight > 0 && this.#previousHeight !== height));
 		if (replayFullHistory) {
 			for (const child of this.children) prepareNativeScrollbackReplay(child);
@@ -3543,19 +3700,21 @@ export class TUI extends Container {
 		// a quiescent budget, and a partial tree walk would under-count display
 		// order — and re-renders only the requested root subtrees, reusing the
 		// previous segment of every other root child.
-		const partialRoots = componentScopedOnly ? this.#resolvePartialComposeRoots(width, height) : null;
+		const partialRoots = componentScopedOnly
+			? this.#resolvePartialComposeRoots(terminalWidth, mainWidth, height)
+			: null;
 		this.#componentRenderTargets.clear();
 		let rawFrame: readonly string[];
 		if (partialRoots !== null) {
 			this.#partialComposeRoots = partialRoots;
 			try {
-				rawFrame = this.render(width);
+				rawFrame = this.render(mainWidth);
 			} finally {
 				this.#partialComposeRoots = null;
 			}
 		} else {
 			this.#imageBudget.beginPass();
-			rawFrame = this.render(width);
+			rawFrame = this.render(mainWidth);
 			this.#imageBudget.endPass();
 		}
 		// Ghostty initial-image deferral must run before any render state is
@@ -3594,8 +3753,9 @@ export class TUI extends Container {
 		const resizeHadPendingRender = this.#multiplexerResizeHasPendingRender;
 		this.#multiplexerResizeHasPendingRender = false;
 		if (resizeEventOccurred) this.#forgetHardwareCursorState();
-		const widthChanged = this.#previousWidth > 0 && this.#previousWidth !== width;
-		const widthEpochOccurred = widthChanged || (resizeEventOccurred && this.#multiplexerWidthEpochPending);
+		const terminalWidthChanged = this.#previousWidth > 0 && this.#previousWidth !== terminalWidth;
+		const widthEpochOccurred =
+			contentWidthChanged || terminalWidthChanged || (resizeEventOccurred && this.#multiplexerWidthEpochPending);
 		const capturedWidthEpochBoundary = this.#multiplexerWidthEpochBoundary;
 		const widthEpochBoundary = this.#widthEpochOverlayBoundary ?? capturedWidthEpochBoundary;
 		const widthEpochSourceBoundary = widthEpochOccurred
@@ -3617,7 +3777,7 @@ export class TUI extends Container {
 		const heightChanged =
 			(this.#previousHeight > 0 && this.#previousHeight !== height) ||
 			(resizeEventOccurred && this.#previousHeight > 0);
-		const geometryChanged = widthChanged || heightChanged;
+		const geometryChanged = contentWidthChanged || terminalWidthChanged || heightChanged;
 		const widthEpochReset = widthEpochOccurred && this.#resizeRepaintsInPlace();
 		// A later width reset cannot use the opaque native ledger against
 		// attachment rows from the current-width placement epoch. Capture that
@@ -3806,7 +3966,7 @@ export class TUI extends Container {
 		// remainder removes committed rows — drop the commit seam by it and let
 		// the next chunk re-commit them. A short frame gains blank rows instead
 		// of pulling.
-		if (fullPaint || widthChanged) {
+		if (fullPaint || widthEpochOccurred) {
 			this.#muxPushedRows = 0;
 		} else if (
 			geometryChanged &&
@@ -3897,7 +4057,7 @@ export class TUI extends Container {
 			windowTop = Math.max(0, frameLength - height);
 			chunkTo = windowTop;
 			this.#committedRows = windowTop;
-			if (widthChanged) {
+			if (widthEpochOccurred) {
 				// A rewrap invalidated the recorded bytes: re-base the audit prefix
 				// at the new width so the accepted wrap drift does not read as a
 				// violation on the next ordinary frame.
@@ -3931,7 +4091,7 @@ export class TUI extends Container {
 				hasVisibleOverlay || geometryChanged
 					? this.#committedRows
 					: Math.min(windowTop, Math.max(this.#committedRows, commitCeiling));
-			if (widthChanged) {
+			if (widthEpochOccurred) {
 				committedPrefixResliced = true;
 				this.#committedPrefix = rawFrame.slice(0, this.#committedRows);
 			}
@@ -3947,16 +4107,17 @@ export class TUI extends Container {
 				break;
 			}
 		}
-		const frame = this.#prepareFrame(rawFrame, width);
-		let window: string[] = new Array(height);
-		for (let r = 0; r < height; r++) window[r] = frame[windowTop + r] ?? "";
+		const frame = this.#prepareFrame(rawFrame, mainWidth);
+		const mainWindow: string[] = new Array(height);
+		for (let r = 0; r < height; r++) mainWindow[r] = frame[windowTop + r] ?? "";
+		let window = this.#composeRightSidebarIntoWindow(mainWindow, sidebarLayout);
 		if (hasVisibleOverlay) {
-			window = this.#compositeOverlaysIntoWindow(window, width, height);
+			window = this.#compositeOverlaysIntoWindow(window, terminalWidth, height);
 			const overlayMarkers = this.#extractCursorMarkers(window);
 			if (overlayMarkers.length > 0) {
 				cursorPos = { row: windowTop + overlayMarkers[0]!.row, col: overlayMarkers[0]!.col };
 			}
-			window = this.#prepareLinesArray(window, width);
+			window = this.#prepareLinesArray(window, terminalWidth);
 		}
 		const cursorTrackingLineCount = hasVisibleOverlay ? Math.max(frame.length, windowTop + height) : frame.length;
 
@@ -4006,7 +4167,9 @@ export class TUI extends Container {
 
 		// 6. Emit.
 		if (intent.kind === "fullPaint") {
-			this.#emitFullPaint(frame, window, width, height, cursorPos, purgeSequence, imageTransmitBuffer, {
+			this.#emitFullPaint(frame, window, terminalWidth, height, cursorPos, purgeSequence, imageTransmitBuffer, {
+				mainWindow,
+				sidebarLayout,
 				clearScrollback: intent.clearScrollback,
 				chunkTo,
 				windowTop,
@@ -4074,16 +4237,27 @@ export class TUI extends Container {
 				commitTo = commitFrom;
 			}
 			this.#imageBudget.observeCommitWatermark(commitTo);
-			this.#emitWidthEpochBaseline(frame, window, width, height, cursorPos, purgeSequence, imageTransmitBuffer, {
-				repaintFromScreenRow: 0,
-				commitFrom,
-				commitTo,
-				appendOnly: logicalAppend,
-				prepaintWindowTop: logicalAppend && !logicalPrefixAppend && !hasVisibleOverlay ? commitFrom : undefined,
-				windowTop,
-				cursorTrackingLineCount,
-				leadingSequence: deferredAltExit,
-			});
+			this.#emitWidthEpochBaseline(
+				frame,
+				window,
+				mainWindow,
+				sidebarLayout,
+				terminalWidth,
+				height,
+				cursorPos,
+				purgeSequence,
+				imageTransmitBuffer,
+				{
+					repaintFromScreenRow: 0,
+					commitFrom,
+					commitTo,
+					appendOnly: logicalAppend,
+					prepaintWindowTop: logicalAppend && !logicalPrefixAppend && !hasVisibleOverlay ? commitFrom : undefined,
+					windowTop,
+					cursorTrackingLineCount,
+					leadingSequence: deferredAltExit,
+				},
+			);
 			this.#pendingAltExit = "";
 			if (!hasVisibleOverlay) {
 				this.#widthEpochOverlayReplayPending = false;
@@ -4155,7 +4329,9 @@ export class TUI extends Container {
 		if (imageTransmitBuffer.length > 0) {
 			this.terminal.write(imageTransmitBuffer);
 		}
-		this.#emitUpdate(frame, window, width, height, cursorPos, purgeSequence, {
+		this.#emitUpdate(frame, window, terminalWidth, height, cursorPos, purgeSequence, {
+			mainWindow,
+			sidebarLayout,
 			chunkTo,
 			windowTop,
 			prevWindowTop,
@@ -4431,6 +4607,15 @@ export class TUI extends Container {
 	}
 
 	/**
+	 * Exact final-cell confidence shared by whole-row and sidebar-only rewrites.
+	 * `undefined` means the ASCII scanner cannot prove physical width.
+	 */
+	#lineFillsWidth(line: string, width: number): boolean | undefined {
+		const exactWidth = this.#ansiAsciiLineWidth(line, width);
+		return exactWidth === undefined ? undefined : exactWidth >= width;
+	}
+
+	/**
 	 * Columns to preserve when `lines[index]` is a blank row that a scaled OSC 66
 	 * heading flows into, or `-1` when it is not such a row. A scale-`s` heading
 	 * occupies `s` rows and `visibleWidth` columns, so the `s - 1` blank rows
@@ -4457,6 +4642,8 @@ export class TUI extends Container {
 		frameRow = -1,
 		committedTo = -1,
 		spacerGlyphWidth = -1,
+		mainLine = line,
+		sidebarLayout?: ResolvedRightSidebarLayout,
 	): string {
 		// Reserved lower half of a scaled OSC 66 heading. The glyph re-emitted on
 		// the row above owns columns `[0, spacerGlyphWidth)` here, so preserve
@@ -4466,17 +4653,20 @@ export class TUI extends Container {
 		// keeps the erase on the default background (BCE).
 		if (spacerGlyphWidth >= 0) {
 			if (spacerGlyphWidth >= width) return "";
-			return `${SEGMENT_RESET}\x1b[${spacerGlyphWidth}C${ERASE_TO_END_OF_LINE}`;
+			let sequence = `${SEGMENT_RESET}\x1b[${spacerGlyphWidth}C${ERASE_TO_END_OF_LINE}`;
+			const suffix = this.#rightSidebarSuffixSequence(line, mainLine, sidebarLayout);
+			if (suffix.length > 0) sequence += suffix + LINE_TERMINATOR;
+			return sequence;
 		}
-		if (TERMINAL.isImageLine(line)) {
-			return ERASE_LINE + this.#imageLineSequence(line, screenRow, frameRow, committedTo);
+		if (TERMINAL.isImageLine(mainLine)) {
+			return ERASE_LINE + this.#terminalLine(line, screenRow, frameRow, committedTo, mainLine, sidebarLayout);
 		}
 		const terminalLine = this.#terminalLine(line);
-		const asciiWidth = this.#ansiAsciiLineWidth(line, width);
-		if (asciiWidth !== undefined) {
+		const fillsWidth = this.#lineFillsWidth(line, width);
+		if (fillsWidth !== undefined) {
 			// Exact width model: skip the erase only when the row truly fills
 			// the line (an EL there would eat the last cell via pending-wrap).
-			return asciiWidth >= width ? terminalLine : terminalLine + ERASE_TO_END_OF_LINE;
+			return fillsWidth ? terminalLine : terminalLine + ERASE_TO_END_OF_LINE;
 		}
 		// Non-ASCII rows: the native measure can over-count combining-heavy
 		// scripts, so a row it calls "full" may render short and leave stale
@@ -4494,12 +4684,14 @@ export class TUI extends Container {
 	#commit(
 		lines: readonly string[],
 		window: string[],
+		mainWindow: string[],
 		width: number,
 		height: number,
 		hardwareCursor: HardwareCursorUpdate,
 	): void {
 		this.#previousFrameLength = lines.length;
 		this.#previousWindow = window;
+		this.#previousMainWindow = mainWindow;
 		this.#forceViewportRepaintOnNextRender = false;
 		this.#previousWidth = width;
 		this.#previousHeight = height;
@@ -4564,6 +4756,8 @@ export class TUI extends Container {
 	#emitWidthEpochBaseline(
 		frame: readonly string[],
 		window: string[],
+		mainWindow: string[],
+		sidebarLayout: ResolvedRightSidebarLayout,
 		width: number,
 		height: number,
 		cursorPos: { row: number; col: number } | null,
@@ -4617,6 +4811,9 @@ export class TUI extends Container {
 						screenRow,
 						options.windowTop + screenRow,
 						options.commitTo,
+						this.#osc66SpacerGlyphWidth(frame, options.windowTop + screenRow),
+						mainWindow[screenRow] ?? "",
+						sidebarLayout,
 					);
 				}
 			} else {
@@ -4641,6 +4838,9 @@ export class TUI extends Container {
 						Math.min(options.commitTo - options.commitFrom + screenRow, height - 1),
 						options.windowTop + screenRow,
 						options.commitTo,
+						this.#osc66SpacerGlyphWidth(frame, options.windowTop + screenRow),
+						mainWindow[screenRow] ?? "",
+						sidebarLayout,
 					);
 					wroteLine = true;
 				}
@@ -4654,6 +4854,9 @@ export class TUI extends Container {
 					screenRow,
 					options.windowTop + screenRow,
 					options.commitTo,
+					this.#osc66SpacerGlyphWidth(frame, options.windowTop + screenRow),
+					mainWindow[screenRow] ?? "",
+					sidebarLayout,
 				);
 			}
 		}
@@ -4671,7 +4874,7 @@ export class TUI extends Container {
 		buffer += this.#paintEndSequence;
 		this.terminal.write(buffer);
 
-		this.#commit(frame, window, width, height, {
+		this.#commit(frame, window, mainWindow, width, height, {
 			toRow: target?.row ?? contentBottomRow,
 			state: target,
 			visible: target?.visible ?? false,
@@ -4693,6 +4896,8 @@ export class TUI extends Container {
 		purgeSequence: string,
 		imageTransmitBuffer: string,
 		options: {
+			mainWindow: string[];
+			sidebarLayout: ResolvedRightSidebarLayout;
 			clearScrollback: boolean;
 			chunkTo: number;
 			windowTop: number;
@@ -4735,6 +4940,7 @@ export class TUI extends Container {
 		// theme change / session replace) just to be returned unchanged.
 		// `paintLines` stays null unless truncation actually rewrote the replay.
 		let paintLines: string[] | null = null;
+		let paintMainLines: string[] | null = null;
 		let paintLineCount = chunkTo + height;
 		if (options.boundConptyPaint && isConPTYHosted()) {
 			const merged = new Array<string>(chunkTo + height);
@@ -4747,6 +4953,13 @@ export class TUI extends Container {
 				paintLines = paint.lines;
 				paintLineCount = paint.lines.length;
 				paintCursorPos = paint.cursorPos;
+				paintMainLines = new Array<string>(paint.lines.length);
+				paintMainLines[0] = paint.lines[0] ?? "";
+				for (let i = 1; i < paint.lines.length; i++) {
+					const sourceRow = paint.sourceStart + i - 1;
+					paintMainLines[i] =
+						sourceRow < chunkTo ? (frame[sourceRow] ?? "") : (options.mainWindow[sourceRow - chunkTo] ?? "");
+				}
 			}
 		}
 		let buffer = this.#paintBeginSequence + this.#leaveResizeAltSequence() + options.leadingSequence + purgeSequence;
@@ -4825,16 +5038,27 @@ export class TUI extends Container {
 							frameRow,
 							chunkTo,
 							this.#osc66SpacerGlyphWidth(frame, frameRow),
+							options.mainWindow[screenRow] ?? "",
+							options.sidebarLayout,
 						)
-					: this.#terminalLine(line, writeRow, frameRow, chunkTo);
+					: this.#terminalLine(
+							line,
+							writeRow,
+							frameRow,
+							chunkTo,
+							options.mainWindow[screenRow] ?? "",
+							options.sidebarLayout,
+						);
 			}
 		} else {
 			// ConPTY-truncated replay: leading rows were dropped, so frame-space
 			// positions are unknown — placements still clip to the write row but
-			// skip epoch bookkeeping.
+			// skip epoch bookkeeping. `paintMainLines` maps the exact retained
+			// source slice so sidebar composition cannot hide image/OSC metadata.
 			for (let i = 0; i < paintLines.length; i++) {
 				if (i > 0) buffer += "\r\n";
 				const line = visibleTexts && i >= visibleStart ? visibleTexts[i - visibleStart] : (paintLines[i] ?? "");
+				const mainLine = paintMainLines?.[i] ?? line;
 				const writeRow = Math.min(i, height - 1);
 				buffer += options.clearScrollback
 					? this.#lineRewriteSequence(
@@ -4843,9 +5067,11 @@ export class TUI extends Container {
 							writeRow,
 							-1,
 							chunkTo,
-							this.#osc66SpacerGlyphWidth(paintLines, i),
+							this.#osc66SpacerGlyphWidth(paintMainLines ?? paintLines, i),
+							mainLine,
+							options.sidebarLayout,
 						)
-					: this.#terminalLine(line, writeRow, -1, chunkTo);
+					: this.#terminalLine(line, writeRow, -1, chunkTo, mainLine, options.sidebarLayout);
 			}
 		}
 		buffer += fillSequence;
@@ -4879,7 +5105,7 @@ export class TUI extends Container {
 
 		this.#committedRows = chunkTo;
 		this.#windowTopRow = windowTop;
-		this.#commit(frame, window, width, height, committedCursor);
+		this.#commit(frame, window, options.mainWindow, width, height, committedCursor);
 	}
 
 	/**
@@ -4919,8 +5145,9 @@ export class TUI extends Container {
 	 * `#commit` nor `#emitFullPaint`, so the settle full paint reconciles against
 	 * the pre-drag screen state.
 	 */
-	#renderResizeViewport(width: number, height: number): void {
-		if (width <= 0 || height <= 0) return;
+	#renderResizeViewport(layout: ActiveViewportLayout): void {
+		const { terminalWidth, mainWidth, height } = layout;
+		if (terminalWidth <= 0 || mainWidth <= 0 || height <= 0) return;
 		// Tail renders call block.render(), which observes inline images on the
 		// budget. This is a STABLE (partial) pass: the tail walk is bottom-up and
 		// sees only the visible subset, so display-order-by-call-order is wrong
@@ -4931,8 +5158,8 @@ export class TUI extends Container {
 		// off a partial walk. The settle paint's own beginPass()/endPass() is the
 		// authoritative accounting, and its beginPass() wipes these frames.
 		this.#imageBudget.beginPass(true);
-		const { framed, viewportTop, contentRows } = this.#composeResizeViewport(width, height);
-		this.#emitResizeViewport(framed, viewportTop, height, contentRows, width);
+		const { framed, mainFramed, viewportTop, contentRows } = this.#composeResizeViewport(layout);
+		this.#emitResizeViewport(framed, mainFramed, layout.sidebar, viewportTop, height, contentRows, terminalWidth);
 		this.#resizeViewportPaintCount += 1;
 	}
 
@@ -4955,17 +5182,22 @@ export class TUI extends Container {
 	 * above the fold, so its reserved rows are preserved instead of erased
 	 * (issue #8318).
 	 */
-	#composeResizeViewport(
-		width: number,
-		height: number,
-	): { framed: readonly string[]; viewportTop: number; contentRows: number } {
+	#composeResizeViewport(layout: ActiveViewportLayout): {
+		framed: readonly string[];
+		mainFramed: readonly string[];
+		viewportTop: number;
+		contentRows: number;
+	} {
+		const { mainWidth, height } = layout;
 		const maxRows = height + TUI.#OSC66_MAX_SPACER_ROWS;
 		const tail: string[] = []; // bottom-first: viewport rows plus context above
 		const children = this.children;
 		for (let i = children.length - 1; i >= 0 && tail.length < maxRows; i--) {
 			const child = children[i]!;
 			const provider = asViewportTailProvider(child);
-			const rows = provider ? provider.renderViewportTail(width, maxRows - tail.length) : child.render(width);
+			const rows = provider
+				? provider.renderViewportTail(mainWidth, maxRows - tail.length)
+				: child.render(mainWidth);
 			for (let r = rows.length - 1; r >= 0 && tail.length < maxRows; r--) {
 				tail.push(rows[r]!);
 			}
@@ -4983,7 +5215,16 @@ export class TUI extends Container {
 		const framed: string[] = new Array(extra + height);
 		for (let k = 0; k < extra; k++) framed[k] = tail[tail.length - 1 - k]!;
 		for (let screenRow = 0; screenRow < height; screenRow++) framed[extra + screenRow] = window[screenRow]!;
-		return { framed: this.#prepareLinesArray(framed, width), viewportTop: extra, contentRows };
+		const mainFramed = this.#prepareLinesArray(framed, mainWidth);
+		let paintedFramed = mainFramed;
+		if (layout.sidebar.visible) {
+			paintedFramed = mainFramed.slice();
+			const composedWindow = this.#composeRightSidebarIntoWindow(mainFramed.slice(extra), layout.sidebar);
+			for (let screenRow = 0; screenRow < height; screenRow++) {
+				paintedFramed[extra + screenRow] = composedWindow[screenRow]!;
+			}
+		}
+		return { framed: paintedFramed, mainFramed, viewportTop: extra, contentRows };
 	}
 
 	/**
@@ -5055,6 +5296,8 @@ export class TUI extends Container {
 	 */
 	#emitResizeViewport(
 		framed: readonly string[],
+		mainFramed: readonly string[],
+		sidebarLayout: ResolvedRightSidebarLayout,
 		viewportTop: number,
 		height: number,
 		contentRows: number,
@@ -5075,7 +5318,9 @@ export class TUI extends Container {
 				r,
 				-1,
 				this.#committedRows,
-				this.#osc66SpacerGlyphWidth(framed, idx),
+				this.#osc66SpacerGlyphWidth(mainFramed, idx),
+				mainFramed[idx] ?? "",
+				sidebarLayout,
 			);
 		}
 		// Park the hardware cursor at the real content bottom, not the padded
@@ -5174,6 +5419,8 @@ export class TUI extends Container {
 		cursorPos: { row: number; col: number } | null,
 		purgeSequence: string,
 		options: {
+			mainWindow: string[];
+			sidebarLayout: ResolvedRightSidebarLayout;
 			chunkTo: number;
 			windowTop: number;
 			prevWindowTop: number;
@@ -5196,6 +5443,7 @@ export class TUI extends Container {
 		const chunkLength = chunkTo - chunkFrom;
 		const scroll = windowTop - prevWindowTop;
 		const previousWindow = this.#previousWindow;
+		const previousMainWindow = this.#previousMainWindow;
 		const contentRows = Math.max(1, Math.min(height, frame.length - windowTop));
 		const contentBottomRow = windowTop + contentRows - 1;
 		// Terminals clamp the hardware cursor to the viewport on resize; clamp
@@ -5212,16 +5460,44 @@ export class TUI extends Container {
 			scroll < height &&
 			chunkFrom === prevWindowTop
 		) {
-			let prefixIntact = previousWindow.length === height;
+			let prefixIntact = previousMainWindow.length === height;
 			for (let i = 0; prefixIntact && i < chunkLength; i++) {
-				if (previousWindow[i] !== frame[chunkFrom + i]) prefixIntact = false;
+				if (previousMainWindow[i] !== frame[chunkFrom + i]) prefixIntact = false;
 			}
 			if (prefixIntact) {
 				let buffer = this.#paintBeginSequence + purgeSequence;
-				const moveToBottom = height - 1 - currentScreenRow;
-				if (moveToBottom > 0) buffer += `\x1b[${moveToBottom}B`;
+				if (options.sidebarLayout.visible) {
+					if (currentScreenRow > 0) buffer += `\x1b[${currentScreenRow}A`;
+					buffer += "\r";
+					for (let i = 0; i < scroll; i++) {
+						if (i > 0) buffer += "\r\n";
+						buffer += this.#lineRewriteSequence(
+							frame[chunkFrom + i] ?? "",
+							width,
+							i,
+							chunkFrom + i,
+							chunkTo,
+							this.#osc66SpacerGlyphWidth(frame, chunkFrom + i),
+						);
+					}
+					const moveToBottom = height - scroll;
+					if (moveToBottom > 0) buffer += `\x1b[${moveToBottom}B`;
+				} else {
+					const moveToBottom = height - 1 - currentScreenRow;
+					if (moveToBottom > 0) buffer += `\x1b[${moveToBottom}B`;
+				}
 				for (let r = height - scroll; r < height; r++) {
-					buffer += `\r\n${this.#lineRewriteSequence(window[r] ?? "", width, height - 1, windowTop + r, chunkTo, this.#osc66SpacerGlyphWidth(frame, windowTop + r))}`;
+					buffer += "\r\n";
+					buffer += this.#lineRewriteSequence(
+						window[r] ?? "",
+						width,
+						height - 1,
+						windowTop + r,
+						chunkTo,
+						this.#osc66SpacerGlyphWidth(frame, windowTop + r),
+						options.mainWindow[r] ?? "",
+						options.sidebarLayout,
+					);
 				}
 				// Rewrite any remaining changed rows after the shift.
 				let firstChanged = -1;
@@ -5238,13 +5514,36 @@ export class TUI extends Container {
 					buffer += "\r";
 					for (let r = firstChanged; r <= lastChanged; r++) {
 						if (r > firstChanged) buffer += "\r\n";
+						const line = window[r] ?? "";
+						if (line === (previousWindow[r + scroll] ?? "")) continue;
+						if (
+							options.sidebarLayout.visible &&
+							(options.mainWindow[r] ?? "") === (previousMainWindow[r + scroll] ?? "")
+						) {
+							const suffix = this.#rightSidebarSuffixSequence(
+								line,
+								options.mainWindow[r] ?? "",
+								options.sidebarLayout,
+							);
+							if (suffix.length > 0) {
+								const fillsWidth = this.#lineFillsWidth(line, width);
+								if (fillsWidth === undefined) {
+									buffer += this.#rightSidebarBoundarySequence(options.sidebarLayout) + ERASE_TO_END_OF_LINE;
+								}
+								buffer += suffix + LINE_TERMINATOR;
+								if (fillsWidth === false) buffer += ERASE_TO_END_OF_LINE;
+								continue;
+							}
+						}
 						buffer += this.#lineRewriteSequence(
-							window[r] ?? "",
+							line,
 							width,
 							r,
 							windowTop + r,
 							chunkTo,
 							this.#osc66SpacerGlyphWidth(frame, windowTop + r),
+							options.mainWindow[r] ?? "",
+							options.sidebarLayout,
 						);
 					}
 					cursorFromRow = windowTop + lastChanged;
@@ -5255,7 +5554,7 @@ export class TUI extends Container {
 				this.terminal.write(buffer);
 				this.#committedRows = chunkTo;
 				this.#windowTopRow = windowTop;
-				this.#commit(frame, window, width, height, cursorControl);
+				this.#commit(frame, window, options.mainWindow, width, height, cursorControl);
 				return;
 			}
 		}
@@ -5286,6 +5585,7 @@ export class TUI extends Container {
 				this.#writeCursorPosition(cursorPos, cursorTrackingLineCount);
 				this.#previousWidth = width;
 				this.#previousHeight = height;
+				this.#previousMainWindow = options.mainWindow;
 				return;
 			}
 			let buffer = this.#paintBeginSequence + purgeSequence;
@@ -5321,6 +5621,8 @@ export class TUI extends Container {
 					windowTop + r,
 					this.#committedRows,
 					this.#osc66SpacerGlyphWidth(frame, windowTop + r),
+					options.mainWindow[r] ?? "",
+					options.sidebarLayout,
 				);
 			}
 			buffer += fillSequence;
@@ -5337,7 +5639,7 @@ export class TUI extends Container {
 			buffer += this.#paintEndSequence;
 			this.terminal.write(buffer);
 			this.#windowTopRow = windowTop;
-			this.#commit(frame, window, width, height, cursorControl);
+			this.#commit(frame, window, options.mainWindow, width, height, cursorControl);
 			return;
 		}
 
@@ -5371,6 +5673,8 @@ export class TUI extends Container {
 				windowTop + screenRow,
 				chunkTo,
 				this.#osc66SpacerGlyphWidth(frame, windowTop + screenRow),
+				options.mainWindow[screenRow] ?? "",
+				options.sidebarLayout,
 			);
 			wroteLine = true;
 		}
@@ -5382,7 +5686,7 @@ export class TUI extends Container {
 		this.terminal.write(buffer);
 		this.#committedRows = chunkTo;
 		this.#windowTopRow = windowTop;
-		this.#commit(frame, window, width, height, cursorControl);
+		this.#commit(frame, window, options.mainWindow, width, height, cursorControl);
 	}
 
 	/** Optional intent log under PI_DEBUG_REDRAW. */
