@@ -42,6 +42,7 @@ import type {
 	AutocompleteItem,
 	AutocompleteProvider,
 	Component,
+	ComposerStyle,
 	EditorTheme,
 	KeyId,
 	OverlayHandle,
@@ -366,6 +367,16 @@ export interface ExtensionUIContext {
 
 	/** Set tool output expansion state. */
 	setToolsExpanded(expanded: boolean): void;
+}
+
+/** Visual composer style and selector copy registered by an extension. */
+export interface ComposerShapeDefinition {
+	/** User-facing name shown in composer-shape selectors. */
+	label: string;
+	/** Optional detail shown under the selector label. */
+	description?: string;
+	/** Renderer contract; its id becomes the persisted `composer.shape` value. */
+	style: ComposerStyle;
 }
 
 // ============================================================================
@@ -1363,6 +1374,14 @@ export interface ExtensionAPI {
 	/** Register a renderer for assistant thinking blocks. Rendered after the original thinking text. */
 	registerAssistantThinkingRenderer(renderer: AssistantThinkingRenderer): void;
 
+	/**
+	 * Register a composer shape for the interactive editor.
+	 *
+	 * Registration happens during extension load. Built-in ids cannot be
+	 * replaced; when extensions reuse an id, the later extension wins.
+	 */
+	registerComposerShape(definition: ComposerShapeDefinition): void;
+
 	// =========================================================================
 	// Actions
 	// =========================================================================
@@ -1693,6 +1712,7 @@ export interface Extension {
 	fileWriteFallbackHandlers: FileWriteFallbackHandler[];
 	fileDeleteFallbackHandlers: FileDeleteFallbackHandler[];
 	messageRenderers: Map<string, MessageRenderer>;
+	composerShapes: Map<string, ComposerShapeDefinition>;
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;

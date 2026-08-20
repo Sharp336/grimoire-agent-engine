@@ -160,9 +160,10 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 				"stale snapcompact archive",
 				userEntryId,
 				150_000,
-				{ readFiles: ["src/a.ts"], modifiedFiles: ["src/b.ts"] },
-				false,
-				makeArchivePreserveData(options.frameCount),
+				{
+					details: { readFiles: ["src/a.ts"], modifiedFiles: ["src/b.ts"] },
+					preserveData: makeArchivePreserveData(options.frameCount),
+				},
 			);
 		}
 

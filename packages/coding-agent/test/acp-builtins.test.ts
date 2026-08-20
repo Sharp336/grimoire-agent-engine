@@ -243,6 +243,24 @@ describe("ACP builtin slash commands", () => {
 		expect(output).toEqual(["Fast mode is off."]);
 	});
 
+	it("toggles extended context with explicit controls and reports state", async () => {
+		const { output, runtime } = createRuntime();
+
+		expect(await executeAcpBuiltinSlashCommand("/extended-context off", runtime)).toEqual({ consumed: true });
+		expect(runtime.settings.get("extendedContext")).toBe(false);
+		expect(await executeAcpBuiltinSlashCommand("/extended-context on", runtime)).toEqual({ consumed: true });
+		expect(runtime.settings.get("extendedContext")).toBe(true);
+		expect(await executeAcpBuiltinSlashCommand("/extended-context", runtime)).toEqual({ consumed: true });
+		expect(runtime.settings.get("extendedContext")).toBe(false);
+		expect(await executeAcpBuiltinSlashCommand("/extended-context status", runtime)).toEqual({ consumed: true });
+		expect(output).toEqual([
+			"Extended context disabled.",
+			"Extended context enabled.",
+			"Extended context disabled.",
+			"Extended context is off.",
+		]);
+	});
+
 	it("forces a tool and returns remaining prompt text", async () => {
 		const { output, runtime } = createRuntime();
 

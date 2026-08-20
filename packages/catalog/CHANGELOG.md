@@ -2,15 +2,20 @@
 
 ## [Unreleased]
 
+## [17.4.0] - 2026-08-20
+
 ### Added
 
-- Models now materialize an optional `tokenizer` family in the catalog (`claude-v3`/`v47`/`v5`, Qwen 3.5+, DeepSeek V3/V4/R1, Kimi K2/K3, and GLM-5+). The field follows `requestModelId`, applies to bundled, discovered, and custom models, and can be explicitly overridden in model configuration.
-- Subscription Codex GPT-5.6 Sol/Terra/Luna now carry the same `cost.longContext` tier as their first-party API siblings (2x input / 1.5x output above 272K input tokens, [openai/codex#32486](https://github.com/openai/codex/issues/32486)), so cost attribution reflects the higher rating above the threshold and downstream consumers can locate the standard-pricing boundary.
+- Models now include an optional `tokenizer` family field across bundled, discovered, and custom models (supporting Claude, Qwen, DeepSeek, Kimi, and GLM families), with support for explicit overrides in model configuration.
+- Added long-context cost tiers (`cost.longContext`) to subscription Codex GPT-5.6 models (Sol, Terra, Luna) matching first-party API pricing above 272K input tokens.
+
+### Changed
+
+- Bundled model metadata is prebuilt during generation, reducing catalog startup work.
 
 ### Fixed
 
-- Fixed `opencode-go/muse-spark-1.2` and `muse-spark-1.2-contributor` still failing every tool-call turn with `OpenAI completions stream closed before a finish_reason was received` on 17.3.8. The earlier pin only covered the models.dev resolver, but models.dev omits these ids under `opencode-go` entirely, so live `/zen/go/v1/models` discovery had no bundled reference and defaulted them to chat completions. The per-id API pins now also apply inside the discovery mapper, and pinned ids invalidate cached routes written before the pin ([#8957](https://github.com/can1357/oh-my-pi/issues/8957)).
-- Future gateway-first OpenCode models (ids the gateway serves before models.dev lists them, like muse-spark-1.2 was) no longer default to chat completions blindly: discovery now borrows the `openai-responses` route from the sibling gateway's catalog or the billing-variant base id (`-free`/`-contributor`). Only the responses signal is borrowed — anthropic transports genuinely diverge across the gateways (e.g. `minimax-m2.5`) and are never inferred.
+- Fixed tool-call turn failures for `opencode-go/muse-spark-1.2` and related variants by ensuring API transport pins apply to live discovery and automatically inferring response routes for gateway-first OpenCode models ([#8957](https://github.com/can1357/oh-my-pi/issues/8957)).
 
 ## [17.3.8] - 2026-08-19
 
