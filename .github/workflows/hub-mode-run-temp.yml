@@ -17,6 +17,8 @@ jobs:
           ref: hub-model-surface
           fetch-depth: 0
 
+      - uses: ./.github/actions/bun-install
+
       - name: Execute prepared rework
         shell: bash
         run: |
