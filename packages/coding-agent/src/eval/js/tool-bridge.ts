@@ -23,7 +23,7 @@ type ToolValue =
 	| {
 			text: string;
 			details?: unknown;
-			images?: Array<{ mimeType: string; data: string }>;
+			images?: Array<{ mimeType: string; data?: string }>;
 			hasError?: boolean;
 	  };
 function toolResultHasError(result: AgentToolResult): boolean {
@@ -142,6 +142,12 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 		const text = textBlocks.map(block => block.text).join("");
 		const hasError = toolResultHasError(result);
 		options.emitStatus?.(summarizeToolResult(name, normalizedArgs, result, text, hasError));
+		let imagesDisplayed = false;
+		for (const block of imageBlocks) {
+			if (!options.emitDisplay) break;
+			options.emitDisplay({ type: "image", data: block.data, mimeType: block.mimeType });
+			imagesDisplayed = true;
+		}
 		if (result.details === undefined && imageBlocks.length === 0 && !hasError) {
 			return text;
 		}
@@ -150,9 +156,11 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 			details: result.details,
 		};
 		if (imageBlocks.length > 0) {
+			// The display channel already carried the pixels; repeating base64 here
+			// would land in the cell's auto-serialized value as duplicate garbage.
 			value.images = imageBlocks.map(block => ({
 				mimeType: block.mimeType,
-				data: block.data,
+				data: imagesDisplayed ? undefined : block.data,
 			}));
 		}
 		if (hasError) {

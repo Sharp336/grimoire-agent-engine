@@ -223,6 +223,32 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		expect(session?.getActiveToolNames()).toContain("eval");
 	});
 
+	it("keeps a plan-mode entry from adopting the injected transport eval", async () => {
+		const evalTool = { ...makeTool("eval"), supportsCodeModeTransport: () => true };
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"providers.openai-codex.codeMode": "auto",
+		});
+		const created = createHarness(settings, {
+			extraRegistryTools: [makeTool("write"), evalTool],
+			builtInToolNames: ["read", "write"],
+			initialModel: { provider: "openai-codex", id: "gpt-5.6-sol" },
+		});
+		await created.init({ suppressWelcomeIntro: true });
+		await session?.setActiveToolsByName(["read"]);
+		expect(session?.getEnabledToolNames()).toContain("eval");
+		expect(session?.callerRequestedToolNames()).not.toContain("eval");
+
+		await created.handlePlanModeCommand();
+
+		// Plan mode reapplies its own snapshot of the tool set. Taking that from
+		// the enabled names would adopt the transport `eval` as caller-selected,
+		// and a later Code Mode exit would expose it as a directly callable tool.
+		expect(created.planModeEnabled).toBe(true);
+		expect(session?.callerRequestedToolNames()).not.toContain("eval");
+		expect(session?.getActiveToolNames()).toContain("eval");
+	});
+
 	it("does not activate an extension-shadowed write tool in plan mode", async () => {
 		const shadowWriteTool = makeTool("write");
 		const created = createHarness(Settings.isolated({ "plan.defaultOnStartup": true, "compaction.enabled": false }), {
