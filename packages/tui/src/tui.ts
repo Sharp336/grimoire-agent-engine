@@ -3523,6 +3523,11 @@ export class TUI extends Container {
 		});
 	}
 
+	#rightSidebarBoundarySequence(layout: ResolvedRightSidebarLayout): string {
+		const moveToBoundary = layout.mainWidth > 0 ? `\x1b[${layout.mainWidth}C` : "";
+		return `${RIGHT_SIDEBAR_BOUNDARY_RESET}\r${moveToBoundary}`;
+	}
+
 	#rightSidebarSuffixSequence(
 		line: string,
 		mainLine: string,
@@ -3535,8 +3540,7 @@ export class TUI extends Container {
 		const suffixOffset = main.length + RIGHT_SIDEBAR_BOUNDARY_RESET.length + paddingWidth;
 		if (suffixOffset > line.length) return "";
 		const suffix = line.slice(suffixOffset);
-		const moveToBoundary = layout.mainWidth > 0 ? `\x1b[${layout.mainWidth}C` : "";
-		return `${RIGHT_SIDEBAR_BOUNDARY_RESET}\r${moveToBoundary}${suffix}`;
+		return this.#rightSidebarBoundarySequence(layout) + suffix;
 	}
 
 	#terminalLine(
@@ -4607,6 +4611,15 @@ export class TUI extends Container {
 	}
 
 	/**
+	 * Exact final-cell confidence shared by whole-row and sidebar-only rewrites.
+	 * `undefined` means the ASCII scanner cannot prove physical width.
+	 */
+	#lineFillsWidth(line: string, width: number): boolean | undefined {
+		const exactWidth = this.#ansiAsciiLineWidth(line, width);
+		return exactWidth === undefined ? undefined : exactWidth >= width;
+	}
+
+	/**
 	 * Columns to preserve when `lines[index]` is a blank row that a scaled OSC 66
 	 * heading flows into, or `-1` when it is not such a row. A scale-`s` heading
 	 * occupies `s` rows and `visibleWidth` columns, so the `s - 1` blank rows
@@ -4653,11 +4666,11 @@ export class TUI extends Container {
 			return ERASE_LINE + this.#terminalLine(line, screenRow, frameRow, committedTo, mainLine, sidebarLayout);
 		}
 		const terminalLine = this.#terminalLine(line);
-		const asciiWidth = this.#ansiAsciiLineWidth(line, width);
-		if (asciiWidth !== undefined) {
+		const fillsWidth = this.#lineFillsWidth(line, width);
+		if (fillsWidth !== undefined) {
 			// Exact width model: skip the erase only when the row truly fills
 			// the line (an EL there would eat the last cell via pending-wrap).
-			return asciiWidth >= width ? terminalLine : terminalLine + ERASE_TO_END_OF_LINE;
+			return fillsWidth ? terminalLine : terminalLine + ERASE_TO_END_OF_LINE;
 		}
 		// Non-ASCII rows: the native measure can over-count combining-heavy
 		// scripts, so a row it calls "full" may render short and leave stale
@@ -5527,8 +5540,13 @@ export class TUI extends Container {
 								options.sidebarLayout,
 							);
 							if (suffix.length > 0) {
+								const fillsWidth = this.#lineFillsWidth(line, width);
+								if (fillsWidth === undefined) {
+									buffer +=
+										this.#rightSidebarBoundarySequence(options.sidebarLayout) + ERASE_TO_END_OF_LINE;
+								}
 								buffer += suffix + LINE_TERMINATOR;
-								if (visibleWidth(line) < width) buffer += ERASE_TO_END_OF_LINE;
+								if (fillsWidth === false) buffer += ERASE_TO_END_OF_LINE;
 								continue;
 							}
 						}
