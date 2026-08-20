@@ -33,7 +33,7 @@ function translateDef(def: SettingDef): SettingDef {
 		description: i18n.t(`settings.${def.path}.description`, def.description),
 	};
 	// Translate submenu options (label + optional description)
-	if (translated.type === "submenu") {
+	if (translated.type === "submenu" || translated.type === "multiselect") {
 		(translated as SubmenuSettingDef).options = (def as SubmenuSettingDef).options.map(o =>
 			translateOption(def.path, o),
 		);
