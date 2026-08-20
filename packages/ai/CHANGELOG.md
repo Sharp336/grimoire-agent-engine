@@ -17,8 +17,6 @@
 - Fixed Google Cloud Code Assist and Antigravity rejecting MCP tool schemas with unsupported annotations (`x-mcp-header`, `deprecated`, `readOnly`, `writeOnly`, `$comment`).
 - Fixed Cursor provider issues with native file edit streaming (`editToolCall`) and ensuring always-apply system rules are properly preserved.
 - Fixed Cursor HTTP/2 requests ignoring standard proxy environment variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`).
-### Fixed
-
 - Fixed definitive OAuth refresh failures looping indefinitely when a SQLite disable CAS missed semantically equivalent JSON or a nested credential-selection pass reset the peer-rotation replay budget. Credential replay now requires a full persisted OAuth value change and remains bounded to one replay per resolution chain.
 
 ## [17.4.0] - 2026-08-20
@@ -32,7 +30,6 @@
 - Fixed tool-argument repair applying lossy transformations (such as stringifying objects or stripping unrecognized keys) when validating union schemas (`anyOf`/`oneOf`), preventing corrupted tool call and subagent payloads
 - Fixed 400 errors when communicating with local OpenAI-compatible inference servers that reject `chat_template_kwargs.reasoning_effort` by improving reasoning effort parameter fallback and compatibility handling
 - Fixed DeepSeek-family models on hosts like Fireworks losing reasoning whenever tools were offered: a redundant `tool_choice: "auto"` is now omitted so the provider keeps thinking enabled; forced and `"none"` selectors still take priority ([#1207](https://github.com/can1357/oh-my-pi/issues/1207))
-- Fixed local OpenAI-compatible servers with strict `chat_template_kwargs` whitelists (e.g. NInfer) failing every Qwen 3.8+ turn with `400 chat_template_kwargs.reasoning_effort is not supported` after the effort routing fix: the reasoning-effort fallback now recognizes a rejection of the kwargs spelling itself, retries with the kwarg stripped while keeping the effort on the standard top-level `reasoning_effort` field (hoisting it there for the kwargs-only vLLM dialect), and remembers the shape for the rest of the session. Value-level rejections and drops now also update the `chat_template_kwargs.reasoning_effort` twin instead of leaving a stale effort for kwargs-reading renderers, and unknown-parameter 400s naming `reasoning_effort` are recognized as effort rejections.
 
 ## [17.3.8] - 2026-08-19
 
