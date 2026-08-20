@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, setSystemTime, test, vi } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, setSystemTime, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -10,6 +10,7 @@ import {
 	SqliteAuthCredentialStore,
 } from "@oh-my-pi/pi-ai/auth-storage";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
+import { logger } from "@oh-my-pi/pi-utils";
 import { removeWithRetries } from "../../utils/src/temp";
 import { withEnv } from "./helpers";
 
@@ -23,17 +24,33 @@ describe("AuthStorage OAuth refresh race", () => {
 	let store: AuthCredentialStore | null = null;
 	let authStorage: AuthStorage | null = null;
 	let events: CredentialDisabledEvent[] = [];
+	const chainLogEvents: logger.LogEvent[] = [];
+	const disposeChainLogSink = logger.registerLogSink(event => {
+		if (event.context?.event === "omp_oauth_refresh_cas_chain/v1") chainLogEvents.push(event);
+	});
+
+	function expectSingleRedactedChainEvent(expected: Record<string, unknown>, redactedValues: readonly string[]): void {
+		expect(chainLogEvents).toHaveLength(1);
+		expect(chainLogEvents[0]?.level).toBe("info");
+		expect(chainLogEvents[0]?.message).toBe("OAuth refresh/CAS chain terminal");
+		expect(chainLogEvents[0]?.context).toEqual(expected);
+		const encoded = JSON.stringify(chainLogEvents[0]?.context);
+		for (const value of redactedValues) expect(encoded).not.toContain(value);
+	}
 
 	beforeEach(async () => {
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-auth-oauth-race-"));
 		store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
 		events = [];
+		chainLogEvents.length = 0;
 		authStorage = new AuthStorage(store, {
 			onCredentialDisabled: event => {
 				events.push(event);
 			},
 		});
 	});
+
+	afterAll(() => disposeChainLogSink());
 
 	afterEach(async () => {
 		vi.restoreAllMocks();
@@ -46,6 +63,57 @@ describe("AuthStorage OAuth refresh race", () => {
 			await removeWithRetries(tempDir);
 			tempDir = "";
 		}
+	});
+
+	test("emits one redacted refreshed xAI OAuth CAS chain terminal event", async () => {
+		if (!store) throw new Error("test setup failed");
+
+		authStorage = new AuthStorage(store, {
+			async refreshOAuthCredential(_provider, _credentialId, credential) {
+				return {
+					...credential,
+					access: "rotated-access",
+					refresh: "rotated-refresh",
+					expires: Date.now() + 60 * 60_000,
+				};
+			},
+		});
+		await authStorage.set("xai-oauth", [
+			{
+				type: "oauth",
+				access: "expired-access",
+				refresh: "stale-refresh",
+				expires: Date.now() - 60_000,
+				accountId: "secret-account",
+				email: "secret@example.test",
+			},
+		]);
+
+		await withEnv({ XAI_OAUTH_TOKEN: undefined, XAI_API_KEY: undefined }, async () => {
+			expect(await authStorage!.getApiKey("xai-oauth", "session-refresh-success")).toBe("rotated-access");
+		});
+		expectSingleRedactedChainEvent(
+			{
+				event: "omp_oauth_refresh_cas_chain/v1",
+				provider: "xai-oauth",
+				chain_ordinal: 1,
+				refresh_attempt_count: 1,
+				credential_reload_count: 0,
+				cas_attempt_count: 1,
+				cas_success_count: 1,
+				cas_lost_count: 0,
+				rotation_replay_count: 0,
+				outcome: "refreshed",
+			},
+			[
+				"expired-access",
+				"stale-refresh",
+				"rotated-access",
+				"rotated-refresh",
+				"secret-account",
+				"secret@example.test",
+			],
+		);
 	});
 
 	test("durably disables unchanged noncanonical xAI invalid_grant credentials", async () => {
@@ -115,6 +183,21 @@ describe("AuthStorage OAuth refresh race", () => {
 		} finally {
 			observer.close();
 		}
+		expectSingleRedactedChainEvent(
+			{
+				event: "omp_oauth_refresh_cas_chain/v1",
+				provider: "xai-oauth",
+				chain_ordinal: 1,
+				refresh_attempt_count: 1,
+				credential_reload_count: 0,
+				cas_attempt_count: 1,
+				cas_success_count: 1,
+				cas_lost_count: 0,
+				rotation_replay_count: 0,
+				outcome: "definitive_invalid_grant",
+			},
+			["expired-access", "dead-refresh"],
+		);
 	});
 
 	test("replays exactly once when a peer rotates after an xAI CAS miss", async () => {
@@ -166,6 +249,21 @@ describe("AuthStorage OAuth refresh race", () => {
 			refresh: "peer-refresh",
 		});
 		expect(persisted[0]?.disabledCause).toBeNull();
+		expectSingleRedactedChainEvent(
+			{
+				event: "omp_oauth_refresh_cas_chain/v1",
+				provider: "xai-oauth",
+				chain_ordinal: 1,
+				refresh_attempt_count: 1,
+				credential_reload_count: 1,
+				cas_attempt_count: 1,
+				cas_success_count: 0,
+				cas_lost_count: 1,
+				rotation_replay_count: 1,
+				outcome: "cas_lost",
+			},
+			["expired-access", "stale-refresh", "peer-access", "peer-refresh", "invalid_grant"],
+		);
 	});
 
 	test("does not disable a credential another process already rotated", async () => {

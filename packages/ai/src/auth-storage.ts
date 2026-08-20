@@ -937,6 +937,47 @@ export interface StoredOAuthRefreshResult<T extends OAuthCredential = OAuthCrede
 	removed: boolean;
 }
 
+type OAuthRefreshCASChainOutcome =
+	| "refreshed"
+	| "cas_lost"
+	| "definitive_invalid_grant"
+	| "peer_rotation_replayed"
+	| "terminal_refresh_failure";
+
+type OAuthRefreshCASChainState = {
+	provider: string;
+	chainOrdinal: number;
+	refreshAttemptCount: number;
+	credentialReloadCount: number;
+	casAttemptCount: number;
+	casSuccessCount: number;
+	casLostCount: number;
+	rotationReplayCount: number;
+	outcome?: OAuthRefreshCASChainOutcome;
+};
+
+const OAUTH_REFRESH_CAS_CHAIN = Symbol("oauth-refresh-cas-chain");
+type InstrumentedStoredOAuthRefreshOptions<T extends OAuthCredential> = StoredOAuthRefreshOptions<T> & {
+	[OAUTH_REFRESH_CAS_CHAIN]?: OAuthRefreshCASChainState;
+};
+
+const OAUTH_REFRESH_CAS_OUTCOME_PRIORITY: Record<OAuthRefreshCASChainOutcome, number> = {
+	terminal_refresh_failure: 0,
+	refreshed: 1,
+	definitive_invalid_grant: 2,
+	peer_rotation_replayed: 3,
+	cas_lost: 4,
+};
+
+function recordOAuthRefreshCASOutcome(chain: OAuthRefreshCASChainState, outcome: OAuthRefreshCASChainOutcome): void {
+	if (
+		chain.outcome === undefined ||
+		OAUTH_REFRESH_CAS_OUTCOME_PRIORITY[outcome] > OAUTH_REFRESH_CAS_OUTCOME_PRIORITY[chain.outcome]
+	) {
+		chain.outcome = outcome;
+	}
+}
+
 /**
  * Identifies which stored account to redeem a saved rate-limit reset for.
  * Any one field is enough; `credentialId` is the most precise.
@@ -1350,6 +1391,7 @@ export class AuthStorage {
 	#generationListeners: Set<(generation: number) => void> = new Set();
 	#oauthRefreshInFlight: Map<number, Promise<AuthCredentialSnapshotEntry>> = new Map();
 	#oauthCredentialRefreshInFlight: Map<number, Promise<OAuthCredentials>> = new Map();
+	#oauthRefreshCASChainOrdinal = 0;
 	#closed = false;
 
 	constructor(store: AuthCredentialStore, options: AuthStorageOptions = {}) {
@@ -2442,6 +2484,7 @@ export class AuthStorage {
 		provider: string,
 		options: StoredOAuthRefreshOptions<T>,
 	): Promise<StoredOAuthRefreshResult<T>> {
+		const chain = (options as InstrumentedStoredOAuthRefreshOptions<T>)[OAUTH_REFRESH_CAS_CHAIN];
 		const refreshSkewMs = options.refreshSkewMs ?? OAUTH_REFRESH_SKEW_MS;
 		const hasDurableLease =
 			!!this.#store.tryAcquireCredentialRefreshLease &&
@@ -2580,12 +2623,22 @@ export class AuthStorage {
 				} catch (error) {
 					if (options.isDefinitiveFailure?.(error)) {
 						const disabledCause = options.disabledCause?.(error) ?? `oauth refresh failed: ${String(error)}`;
+						if (chain) chain.casAttemptCount += 1;
 						const disabled = this.#store.tryDisableAuthCredentialIfMatches(
 							row.id,
 							serialized.data,
 							disabledCause,
 							leasedCredentialId !== undefined ? { owner, nowMs: Date.now() } : undefined,
 						);
+						if (chain) {
+							if (disabled) {
+								chain.casSuccessCount += 1;
+								recordOAuthRefreshCASOutcome(chain, "definitive_invalid_grant");
+							} else {
+								chain.casLostCount += 1;
+								recordOAuthRefreshCASOutcome(chain, "cas_lost");
+							}
+						}
 						if (disabled) {
 							this.#setStoredCredentials(
 								provider,
@@ -2597,6 +2650,7 @@ export class AuthStorage {
 							this.#emitCredentialDisabled({ provider, disabledCause });
 							return { credential: undefined, refreshed: false, removed: true };
 						}
+						if (chain) chain.credentialReloadCount += 1;
 						await this.reload();
 						const latest = this.#getStoredCredentials(provider).find(entry => entry.id === row.id)?.credential;
 						return {
@@ -2639,14 +2693,19 @@ export class AuthStorage {
 						orgName: refreshed.orgName ?? current.orgName,
 					};
 			if (this.#store.tryUpdateAuthCredentialIfMatches) {
-				if (
-					!this.#store.tryUpdateAuthCredentialIfMatches(
-						row.id,
-						serialized.data,
-						merged,
-						leasedCredentialId !== undefined ? { owner, nowMs: Date.now() } : undefined,
-					)
-				) {
+				if (chain) chain.casAttemptCount += 1;
+				const updated = this.#store.tryUpdateAuthCredentialIfMatches(
+					row.id,
+					serialized.data,
+					merged,
+					leasedCredentialId !== undefined ? { owner, nowMs: Date.now() } : undefined,
+				);
+				if (!updated) {
+					if (chain) {
+						chain.casLostCount += 1;
+						chain.credentialReloadCount += 1;
+						recordOAuthRefreshCASOutcome(chain, "cas_lost");
+					}
 					await this.reload();
 					const latest = this.#getStoredCredentials(provider).find(entry => entry.id === row.id)?.credential;
 					return {
@@ -2654,6 +2713,10 @@ export class AuthStorage {
 						refreshed: false,
 						removed: false,
 					};
+				}
+				if (chain) {
+					chain.casSuccessCount += 1;
+					recordOAuthRefreshCASOutcome(chain, "refreshed");
 				}
 			} else {
 				this.#store.updateAuthCredential(row.id, merged);
@@ -4782,6 +4845,24 @@ export class AuthStorage {
 		return this.#orderUsageRankedCandidates(ranked, args.planRequirement);
 	}
 
+	#emitOAuthRefreshCASChain(chain: OAuthRefreshCASChainState): void {
+		if (chain.refreshAttemptCount === 0 && chain.credentialReloadCount === 0 && chain.casAttemptCount === 0) {
+			return;
+		}
+		logger.info("OAuth refresh/CAS chain terminal", {
+			event: "omp_oauth_refresh_cas_chain/v1",
+			provider: chain.provider,
+			chain_ordinal: chain.chainOrdinal,
+			refresh_attempt_count: chain.refreshAttemptCount,
+			credential_reload_count: chain.credentialReloadCount,
+			cas_attempt_count: chain.casAttemptCount,
+			cas_success_count: chain.casSuccessCount,
+			cas_lost_count: chain.casLostCount,
+			rotation_replay_count: chain.rotationReplayCount,
+			outcome: chain.outcome ?? "terminal_refresh_failure",
+		});
+	}
+
 	/**
 	 * Resolves an OAuth credential, trying credentials in priority order.
 	 *
@@ -4804,7 +4885,30 @@ export class AuthStorage {
 		provider: string,
 		sessionId?: string,
 		options?: AuthApiKeyOptions,
-		rotationReplayBudget = 1,
+	): Promise<OAuthResolutionResult | undefined> {
+		const chain: OAuthRefreshCASChainState = {
+			provider,
+			chainOrdinal: ++this.#oauthRefreshCASChainOrdinal,
+			refreshAttemptCount: 0,
+			credentialReloadCount: 0,
+			casAttemptCount: 0,
+			casSuccessCount: 0,
+			casLostCount: 0,
+			rotationReplayCount: 0,
+		};
+		try {
+			return await this.#resolveOAuthSelectionWithChain(provider, sessionId, options, 1, chain);
+		} finally {
+			this.#emitOAuthRefreshCASChain(chain);
+		}
+	}
+
+	async #resolveOAuthSelectionWithChain(
+		provider: string,
+		sessionId: string | undefined,
+		options: AuthApiKeyOptions | undefined,
+		rotationReplayBudget: number,
+		chain: OAuthRefreshCASChainState,
 	): Promise<OAuthResolutionResult | undefined> {
 		const credentials = this.#getCredentialsForProvider(provider)
 			.map((credential, index) => ({ credential, index }))
@@ -4940,6 +5044,7 @@ export class AuthStorage {
 						refreshTarget,
 						credentialId,
 						options?.signal,
+						chain,
 					);
 					const updated: OAuthCredential = {
 						...candidate.selection.credential,
@@ -5057,6 +5162,7 @@ export class AuthStorage {
 						blockScopes,
 						rotationReplayBudget,
 						terminalCredentialIds,
+						chain,
 					},
 				);
 				if (resolved) return resolved;
@@ -5138,16 +5244,26 @@ export class AuthStorage {
 		credential: OAuthCredential,
 		credentialId: number | undefined,
 		signal?: AbortSignal,
+		chain?: OAuthRefreshCASChainState,
 	): Promise<OAuthCredentials> {
+		if (chain && Date.now() + OAUTH_REFRESH_SKEW_MS >= credential.expires) {
+			chain.refreshAttemptCount += 1;
+		}
 		if (credentialId !== undefined) {
 			const existing = this.#oauthCredentialRefreshInFlight.get(credentialId);
 			if (existing) return raceCredentialRefreshWithSignal(existing, signal);
 		}
 		if (Date.now() + OAUTH_REFRESH_SKEW_MS < credential.expires) return credential;
 		if (credentialId === undefined) {
-			return this.#refreshOAuthCredentialUnshared(provider, credential, undefined, signal);
+			return this.#refreshOAuthCredentialUnshared(provider, credential, undefined, signal, chain);
 		}
-		const promise = this.#refreshOAuthCredentialUnshared(provider, credential, credentialId).finally(() => {
+		const promise = this.#refreshOAuthCredentialUnshared(
+			provider,
+			credential,
+			credentialId,
+			undefined,
+			chain,
+		).finally(() => {
 			this.#oauthCredentialRefreshInFlight.delete(credentialId);
 		});
 		this.#oauthCredentialRefreshInFlight.set(credentialId, promise);
@@ -5159,6 +5275,7 @@ export class AuthStorage {
 		credential: OAuthCredential,
 		credentialId: number | undefined,
 		signal?: AbortSignal,
+		chain?: OAuthRefreshCASChainState,
 	): Promise<OAuthCredentials> {
 		const hasDurableLease =
 			!!this.#store.tryAcquireCredentialRefreshLease &&
@@ -5167,7 +5284,7 @@ export class AuthStorage {
 			!!this.#store.renewCredentialRefreshLease;
 		if (credentialId !== undefined && hasDurableLease) {
 			const forceRefresh = credential.expires === 0;
-			const result = await this.refreshStoredOAuthCredential(provider, {
+			const refreshOptions: InstrumentedStoredOAuthRefreshOptions<OAuthCredential> = {
 				credentialId,
 				observedCredential: forceRefresh ? undefined : credential,
 				credentialFromRow: row => row,
@@ -5182,8 +5299,14 @@ export class AuthStorage {
 					),
 				isDefinitiveFailure: error => AIError.isDefinitiveOAuthFailure(String(error)),
 				disabledCause: error => `oauth refresh failed: ${String(error)}`,
-			});
+				[OAUTH_REFRESH_CAS_CHAIN]: chain,
+			};
+			const result = await this.refreshStoredOAuthCredential(provider, refreshOptions);
 			if (result.credential) {
+				if (chain && !result.refreshed && chain.casLostCount === 0) {
+					chain.credentialReloadCount += 1;
+					recordOAuthRefreshCASOutcome(chain, "peer_rotation_replayed");
+				}
 				if (result.refreshed) {
 					// We performed this refresh ourselves — trust the provider's new token
 					// even when its lifetime is shorter than the refresh skew (some grants
@@ -5331,6 +5454,7 @@ export class AuthStorage {
 			rotationReplayBudget?: number;
 			/** Credential rows that definitively failed but could not be disabled in this resolution. */
 			terminalCredentialIds?: Set<number>;
+			chain: OAuthRefreshCASChainState;
 		},
 	): Promise<OAuthResolutionResult | undefined> {
 		const {
@@ -5347,6 +5471,7 @@ export class AuthStorage {
 			allowFallback = true,
 			rotationReplayBudget = 1,
 			terminalCredentialIds,
+			chain,
 		} = usageOptions;
 		if (
 			!allowBlocked &&
@@ -5409,6 +5534,7 @@ export class AuthStorage {
 					selection.credential,
 					credentialId,
 					options?.signal,
+					chain,
 				);
 				const apiKey = customProvider.getApiKey
 					? customProvider.getApiKey(refreshedCredentials)
@@ -5425,6 +5551,7 @@ export class AuthStorage {
 					selection.credential,
 					credentialId,
 					options?.signal,
+					chain,
 				);
 				const oauthCreds: Record<string, OAuthCredentials> = {
 					[provider]: refreshedCredentials,
@@ -5481,12 +5608,14 @@ export class AuthStorage {
 			}
 			this.#recordOAuthBearerCredentialId(provider, result.apiKey, credentialId);
 			this.#recordSessionCredential(provider, sessionId, "oauth", selection.index);
+			if (chain.refreshAttemptCount > 0) recordOAuthRefreshCASOutcome(chain, "refreshed");
 			return { apiKey: result.apiKey, credential: updated, credentialId };
 		} catch (error) {
 			const errorMsg = String(error);
 			// Only remove credentials for definitive auth failures
 			// Keep credentials for transient errors (network, 5xx) and block temporarily
 			const isDefinitiveFailure = AIError.isDefinitiveOAuthFailure(errorMsg);
+			if (chain.refreshAttemptCount > 0) recordOAuthRefreshCASOutcome(chain, "terminal_refresh_failure");
 
 			logger.warn("OAuth token refresh failed", {
 				provider,
@@ -5513,7 +5642,13 @@ export class AuthStorage {
 				if (outcome === "cas-lost") return undefined;
 				if (this.#getCredentialsForProvider(provider).some(credential => credential.type === "oauth")) {
 					if (allowFallback) {
-						return this.#resolveOAuthSelection(provider, sessionId, options, rotationReplayBudget);
+						return this.#resolveOAuthSelectionWithChain(
+							provider,
+							sessionId,
+							options,
+							rotationReplayBudget,
+							chain,
+						);
 					}
 				}
 			} else {
@@ -5708,6 +5843,16 @@ export class AuthStorage {
 		providerKey: string,
 		options: AuthApiKeyOptions | undefined,
 	): Promise<OAuthAccessResolution> {
+		const chain: OAuthRefreshCASChainState = {
+			provider,
+			chainOrdinal: ++this.#oauthRefreshCASChainOrdinal,
+			refreshAttemptCount: 0,
+			credentialReloadCount: 0,
+			casAttemptCount: 0,
+			casSuccessCount: 0,
+			casLostCount: 0,
+			rotationReplayCount: 0,
+		};
 		try {
 			const resolved = await this.#tryOAuthCredential(
 				provider,
@@ -5715,7 +5860,7 @@ export class AuthStorage {
 				providerKey,
 				undefined,
 				options,
-				{ checkUsage: false, allowBlocked: true, allowFallback: false },
+				{ checkUsage: false, allowBlocked: true, allowFallback: false, chain },
 			);
 			if (!resolved) {
 				return {
@@ -5754,6 +5899,8 @@ export class AuthStorage {
 				orgName: selection.credential.orgName,
 				error: error instanceof Error ? error.message : String(error),
 			};
+		} finally {
+			this.#emitOAuthRefreshCASChain(chain);
 		}
 	}
 
