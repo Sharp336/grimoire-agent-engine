@@ -10,7 +10,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { $env, $which, APP_NAME, compareVersions, isEnoent, VERSION } from "@oh-my-pi/pi-utils";
+import { $env, $pickenv, $which, APP_NAME, compareVersions, isEnoent, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import { $ } from "bun";
@@ -28,17 +28,80 @@ const HOMEBREW_FORMULA = "can1357/tap/omp";
 const MISE_TOOL = "github:can1357/oh-my-pi";
 const NIX_STORE_DIR = "/nix/store";
 /**
- * Official npm registry origin.
+ * Official npm registry origin, used when nothing overrides it.
  *
- * Pinned across both the version check and the bun install step so the two
- * agree on which catalog they are talking to. A user's bun may be pointed at
- * an unofficial mirror (corporate proxy, Taobao, etc.) that lags the upstream
- * registry by minutes-to-hours, in which case `getLatestRelease` would resolve
- * a version the mirror has not yet replicated and the install would fail with
+ * Whichever registry is in effect is pinned across both the version check and
+ * the package-manager install step so the two agree on which catalog they are
+ * talking to. A user's bun may be pointed at an unofficial mirror (corporate
+ * proxy, Taobao, etc.) that lags the chosen registry by minutes-to-hours, in
+ * which case `getLatestRelease` would resolve a version the mirror has not yet
+ * replicated and the install would fail with
  * `No version matching "X" found for specifier "<pkg>" (but package exists)`.
  * See #1686.
  */
-const NPM_REGISTRY = "https://registry.npmjs.org/";
+const DEFAULT_NPM_REGISTRY = "https://registry.npmjs.org/";
+
+/** Environment variable that overrides {@link DEFAULT_NPM_REGISTRY}. */
+export const REGISTRY_ENV_VAR = "OMP_UPDATE_REGISTRY";
+
+/**
+ * Normalize a user-supplied registry URL into the form the update path
+ * concatenates package names onto (`${registry}${pkg}/latest`).
+ *
+ * Only http(s) is accepted: the value is handed to bun/npm as
+ * `--registry=`, and a non-http scheme there fails deep inside the package
+ * manager with a far less obvious message than a rejection here. A mirror
+ * mounted under a path prefix (`https://nexus.corp/repository/npm-group`) is
+ * supported; the trailing slash is added when missing so the prefix is not
+ * swallowed by the package name.
+ */
+export function normalizeRegistryUrl(value: string, source = "--registry"): string {
+	const trimmed = value.trim();
+	if (!trimmed) throw new Error(`Invalid npm registry from ${source}: value is empty`);
+	let url: URL;
+	try {
+		url = new URL(trimmed);
+	} catch {
+		throw new Error(`Invalid npm registry from ${source}: ${trimmed} is not a valid URL`);
+	}
+	if (url.protocol !== "http:" && url.protocol !== "https:") {
+		throw new Error(`Invalid npm registry from ${source}: ${trimmed} must use http:// or https://`);
+	}
+	const normalized = url.href;
+	return normalized.endsWith("/") ? normalized : `${normalized}/`;
+}
+
+/**
+ * Registry in effect for this process, resolved once from
+ * {@link REGISTRY_ENV_VAR} and overridable by `--registry` via
+ * {@link setUpdateRegistry}.
+ *
+ * Deliberately module state rather than a parameter threaded through every
+ * call site: the version check ({@link fetchLatestManifest}), the bun install
+ * ({@link buildBunInstallArgs}) and the npm install
+ * ({@link buildNpmInstallArgs}) MUST observe the same catalog, and a single
+ * source of truth is what keeps a future call site from silently reaching for
+ * the default.
+ */
+let updateRegistry: string | undefined;
+
+/** The npm registry `omp update` reads and installs from. */
+export function getUpdateRegistry(): string {
+	if (updateRegistry === undefined) {
+		const fromEnv = $pickenv(REGISTRY_ENV_VAR);
+		updateRegistry = fromEnv ? normalizeRegistryUrl(fromEnv, `$${REGISTRY_ENV_VAR}`) : DEFAULT_NPM_REGISTRY;
+	}
+	return updateRegistry;
+}
+
+/**
+ * Override the registry for this process. `undefined` clears the override so
+ * the next read re-resolves from {@link REGISTRY_ENV_VAR}; `--registry` wins
+ * over the environment because it is the more specific request.
+ */
+export function setUpdateRegistry(value: string | undefined): void {
+	updateRegistry = value === undefined ? undefined : normalizeRegistryUrl(value);
+}
 const GITHUB_API = "https://api.github.com";
 const RELEASE_METADATA_TIMEOUT_MS = 30_000;
 const BINARY_DOWNLOAD_TIMEOUT_MS = 15 * 60_000;
@@ -358,7 +421,9 @@ export interface BinaryReplacementOptions {
  * Parse update subcommand arguments.
  * Returns undefined if not an update command.
  */
-export function parseUpdateArgs(args: string[]): { force: boolean; check: boolean; plugins: boolean } | undefined {
+export function parseUpdateArgs(
+	args: string[],
+): { force: boolean; check: boolean; plugins: boolean; registry?: string } | undefined {
 	if (args.length === 0 || args[0] !== "update") {
 		return undefined;
 	}
@@ -367,7 +432,21 @@ export function parseUpdateArgs(args: string[]): { force: boolean; check: boolea
 		force: args.includes("--force") || args.includes("-f"),
 		check: args.includes("--check") || args.includes("-c"),
 		plugins: args.includes("--plugins") || args.includes("-l"),
+		registry: parseValueFlag(args, "--registry", "-r"),
 	};
+}
+
+/** Read a `--name=value` / `--name value` (or short-alias) option out of an argv slice. */
+function parseValueFlag(args: string[], name: string, alias: string): string | undefined {
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i];
+		if (arg === undefined) continue;
+		if (arg === name || arg === alias) return args[i + 1];
+		for (const prefix of [`${name}=`, `${alias}=`]) {
+			if (arg.startsWith(prefix)) return arg.slice(prefix.length);
+		}
+	}
+	return undefined;
 }
 
 async function getBunGlobalBinDir(): Promise<string | undefined> {
@@ -714,7 +793,7 @@ async function fetchLatestManifest(
 ): Promise<{ version: string; manifest: Record<string, unknown> }> {
 	let response: Response;
 	try {
-		response = await fetch(`${NPM_REGISTRY}${pkg}/latest`, {
+		response = await fetch(`${getUpdateRegistry()}${pkg}/latest`, {
 			signal: withTimeoutSignal(timeoutMs),
 		});
 	} catch (err) {
@@ -1249,13 +1328,15 @@ function buildVersionedPackageInstallArgs(
 /**
  * Build the bun argv used to globally install a specific omp version.
  *
- * The version is selected by hitting {@link NPM_REGISTRY} directly in
+ * The version is selected by hitting {@link getUpdateRegistry} directly in
  * {@link getLatestRelease}, so the install MUST observe the same catalog:
  *
- * - `--registry=${NPM_REGISTRY}` pins the install to the official registry
- *   regardless of the user's bunfig/`.npmrc`. A mirror (corporate proxy,
- *   Taobao, …) that hasn't yet replicated the release would otherwise reject
- *   a version the upstream registry already advertises.
+ * - `--registry=${getUpdateRegistry()}` pins the install to that same registry
+ *   regardless of the user's bunfig/`.npmrc`. A different mirror (corporate
+ *   proxy, Taobao, …) that hasn't yet replicated the release would otherwise
+ *   reject a version the checked registry already advertises. Users whose
+ *   network cannot reach the official registry at all point both steps at
+ *   their own mirror with `--registry` or `$OMP_UPDATE_REGISTRY`.
  * - `--no-cache` tells bun to ignore its on-disk manifest snapshot so it
  *   re-fetches metadata from that registry on every invocation.
  *
@@ -1280,12 +1361,13 @@ export function buildBunInstallArgs(
 	expectedVersion: string,
 	nativeTag: string = currentNativeTag(),
 	packages: ReleasePackages = CURRENT_PACKAGES,
+	registry: string = getUpdateRegistry(),
 ): string[] {
 	return [
 		"install",
 		"-g",
 		"--no-cache",
-		`--registry=${NPM_REGISTRY}`,
+		`--registry=${registry}`,
 		...buildVersionedPackageInstallArgs(expectedVersion, nativeTag, packages),
 	];
 }
@@ -1303,12 +1385,13 @@ export function buildNpmInstallArgs(
 	nativeTag: string = currentNativeTag(),
 	packages: ReleasePackages = CURRENT_PACKAGES,
 	flags: { force?: boolean } = {},
+	registry: string = getUpdateRegistry(),
 ): string[] {
 	return [
 		"install",
 		"-g",
 		...(flags.force ? ["--force"] : []),
-		`--registry=${NPM_REGISTRY}`,
+		`--registry=${registry}`,
 		...buildVersionedPackageInstallArgs(expectedVersion, nativeTag, packages),
 	];
 }
@@ -1712,8 +1795,23 @@ function installerHint(): string {
 /**
  * Run the update command.
  */
-export async function runUpdateCommand(opts: { force: boolean; check: boolean }): Promise<void> {
+export async function runUpdateCommand(opts: { force: boolean; check: boolean; registry?: string }): Promise<void> {
 	console.log(chalk.dim(`Current version: ${VERSION}`));
+
+	// Resolve before the version check so both it and the install below read
+	// the same catalog; an unusable value fails here rather than halfway
+	// through an install.
+	let registry: string;
+	try {
+		if (opts.registry !== undefined) setUpdateRegistry(opts.registry);
+		registry = getUpdateRegistry();
+	} catch (err) {
+		console.error(chalk.red(err instanceof Error ? err.message : String(err)));
+		process.exit(1);
+	}
+	if (registry !== DEFAULT_NPM_REGISTRY) {
+		console.log(chalk.dim(`Using npm registry: ${registry}`));
+	}
 
 	// Check for updates
 	let release: ReleaseInfo;
@@ -1806,14 +1904,17 @@ ${chalk.bold("Usage:")}
   ${APP_NAME} update [options]
 
 ${chalk.bold("Options:")}
-  -c, --check     Check for updates without installing
-  -f, --force     Force reinstall even if up to date
-  -l, --plugins   Update installed plugins
+  -c, --check         Check for updates without installing
+  -f, --force         Force reinstall even if up to date
+  -l, --plugins       Update installed plugins
+  -r, --registry URL  npm registry to check and install from
+                      (default: $${REGISTRY_ENV_VAR} or the official registry)
 
 ${chalk.bold("Examples:")}
   ${APP_NAME} update              Update to latest version
   ${APP_NAME} update --check      Check if updates are available
   ${APP_NAME} update --force      Force reinstall
   ${APP_NAME} update -l           Update installed plugins
+  ${APP_NAME} update --registry=https://nexus.corp/repository/npm-group/
 `);
 }
