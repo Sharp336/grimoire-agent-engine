@@ -70,7 +70,12 @@ export type { LaunchParams, LaunchToolDetails } from "./launch";
 export { createIrcMessageCard, isIrcEnabled } from "./messaging";
 export * from "./types";
 
-const hubSchema = type({
+/**
+ * Full runtime schema retained for the upstream Hub implementation. Peer
+ * messaging remains implemented and testable internally; the model-facing
+ * schema below deliberately exposes only parent-side orchestration.
+ */
+const internalHubSchema = type({
 	op: type(
 		"'send' | 'wait' | 'inbox' | 'list' | 'jobs' | 'cancel' | 'start' | 'ps' | 'logs' | 'stop' | 'restart' | 'describe'",
 	).describe("hub operation"),
@@ -115,7 +120,17 @@ const hubSchema = type({
 	"timeout?": type("number > 0").describe("logs/stop/wait with name: max seconds; default 30 (stop: 5)"),
 });
 
-type HubParams = typeof hubSchema.infer;
+/** Model-visible Hub surface: async job control plus supervised processes only. */
+const hubSchema = internalHubSchema
+	.omit("op", "to", "message", "replyTo", "await", "from", "timeoutMs", "peek")
+	.and({
+		op: type(
+			"'send' | 'wait' | 'jobs' | 'cancel' | 'start' | 'ps' | 'logs' | 'stop' | 'restart' | 'describe'",
+		).describe("hub operation"),
+		"timeoutMs?": type("number").describe("wait (jobs): timeout in milliseconds (0 waits indefinitely)"),
+	});
+
+type HubParams = typeof internalHubSchema.infer;
 
 interface MessagingDeps {
 	registry: AgentRegistry;
@@ -155,7 +170,7 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 	readonly name = "hub";
 	readonly approval = hubApproval;
 	readonly label = "Hub";
-	readonly summary = "Message peer agents, control background jobs, and supervise long-running processes";
+	readonly summary = "Control background jobs and supervise long-running processes";
 	readonly description: string;
 	readonly parameters = hubSchema;
 	readonly strict = true;
@@ -167,37 +182,12 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 
 	readonly examples: readonly ToolExample<typeof hubSchema.infer>[] = [
 		{
-			caption: "List peers",
-			call: { op: "list" },
-		},
-		{
-			caption: "Fire-and-forget DM — same send wakes idle/parked peers",
-			call: {
-				op: "send",
-				to: "AuthLoader",
-				message: "Still touching src/server/auth.ts? I need to add a 401 path.",
-			},
-		},
-		{
-			caption: "Round-trip when you cannot proceed without the answer",
-			call: {
-				op: "send",
-				to: "Main",
-				message: "JWT or session cookies for the auth flow?",
-				await: true,
-			},
-		},
-		{
-			caption: "Completely blocked: wait for the first finished job or incoming message",
+			caption: "Wait for the first background job to settle",
 			call: { op: "wait" },
 		},
 		{
-			caption: "Block until a specific peer answers",
-			call: { op: "wait", from: "AuthLoader", timeoutMs: 60000 },
-		},
-		{
-			caption: "Kill a hung background job",
-			call: { op: "cancel", ids: ["bash_a1b2c3"] },
+			caption: "Cancel a hung background job",
+			call: { op: "cancel", ids: ["task_a1b2c3"] },
 		},
 		{
 			caption: "Snapshot every background job without waiting",
