@@ -33,6 +33,23 @@ async function createMounted(rows = 8) {
 }
 
 describe("TUI reserved right sidebar", () => {
+	it("preserves default initial-paint scrollback semantics", async () => {
+		const terminal = new VirtualTerminal(120, 8, 100);
+		const writes: string[] = [];
+		const write = terminal.write.bind(terminal);
+		terminal.write = data => {
+			writes.push(data);
+			write(data);
+		};
+		const tui = new TUI(terminal);
+		const main = new WidthAndTextProbe("MAIN");
+		tui.addChild(main);
+		tui.start();
+		active.push({ tui, terminal });
+		await terminal.waitForRender(() => main.lastWidth === 120);
+		expect(writes.join("")).not.toContain("\x1b[3J");
+	});
+
 	it("renders main and sidebar at their allocated widths", async () => {
 		const { terminal, main, side } = await createMounted();
 		expect(main.lastWidth).toBe(76);

@@ -3464,7 +3464,7 @@ export class TUI extends Container {
 		const height = this.terminal.rows;
 		const sidebarLayout = this.#resolveRightSidebar(terminalWidth);
 		const mainWidth = sidebarLayout.mainWidth;
-		const contentWidthChanged = mainWidth !== this.#composeWidth;
+		const contentWidthChanged = this.#composeWidth >= 0 && mainWidth !== this.#composeWidth;
 
 		// Consume the component-scoped accumulation: it describes the render
 		// requests made up to this frame, whichever path the frame takes.
