@@ -6,10 +6,11 @@
  * - `omp --mode json "prompt"` - JSON event stream
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { type AgentSession, type AgentSessionEvent, SHUTDOWN_CONSOLIDATE_BUDGET_MS } from "../session/agent-session";
 import { isSilentAbort } from "../session/messages";
+import type { UsageStatistics } from "../session/session-entries";
 import { flushTelemetryExport } from "../telemetry-export";
 import { initializeExtensions } from "./runtime-init";
 
@@ -29,6 +30,129 @@ export interface PrintModeOptions {
 	printThoughts?: boolean;
 	/** Whether the caller explicitly started the headless plan flow. */
 	planYolo?: boolean;
+}
+
+export const PRINT_MODE_SESSION_RESULT_SCHEMA = "omp.session-result/v1";
+
+export interface PrintModeSessionResult {
+	type: "session_result";
+	schema: typeof PRINT_MODE_SESSION_RESULT_SCHEMA;
+	sessionId: string;
+	status: "success" | "incomplete" | "error" | "aborted" | "no_output";
+	stopReason: AssistantMessage["stopReason"] | null;
+	provider: string | null;
+	model: string | null;
+	responseId: string | null;
+	result: string;
+	error: {
+		message: string;
+		status: number | null;
+		id: number | null;
+	} | null;
+	usage: {
+		inputTokens: number;
+		outputTokens: number;
+		cacheReadTokens: number;
+		cacheWriteTokens: number;
+		totalTokens: number;
+		orchestrationInputTokens: number;
+		orchestrationOutputTokens: number;
+		orchestrationCacheReadTokens: number;
+		premiumRequests: number;
+		costUsd: number;
+	};
+	modelRequests: number;
+	retries: number;
+	startedAt: string;
+	completedAt: string;
+	durationMs: number;
+}
+
+function usageDelta(before: UsageStatistics, after: UsageStatistics): UsageStatistics {
+	return {
+		input: Math.max(0, after.input - before.input),
+		output: Math.max(0, after.output - before.output),
+		cacheRead: Math.max(0, after.cacheRead - before.cacheRead),
+		cacheWrite: Math.max(0, after.cacheWrite - before.cacheWrite),
+		totalTokens: Math.max(0, after.totalTokens - before.totalTokens),
+		orchestrationInput: Math.max(0, after.orchestrationInput - before.orchestrationInput),
+		orchestrationOutput: Math.max(0, after.orchestrationOutput - before.orchestrationOutput),
+		orchestrationCacheRead: Math.max(0, after.orchestrationCacheRead - before.orchestrationCacheRead),
+		premiumRequests: Math.max(0, after.premiumRequests - before.premiumRequests),
+		cost: Math.max(0, after.cost - before.cost),
+	};
+}
+
+function sessionResultStatus(message: AssistantMessage | undefined): PrintModeSessionResult["status"] {
+	switch (message?.stopReason) {
+		case "stop":
+			return "success";
+		case "error":
+			return "error";
+		case "aborted":
+			return "aborted";
+		case "length":
+		case "toolUse":
+			return "incomplete";
+		default:
+			return "no_output";
+	}
+}
+
+function buildSessionResult(options: {
+	sessionId: string;
+	finalMessage: AssistantMessage | undefined;
+	usageBefore: UsageStatistics;
+	usageAfter: UsageStatistics;
+	modelRequests: number;
+	retries: number;
+	startedAtMs: number;
+	completedAtMs: number;
+}): PrintModeSessionResult {
+	const { finalMessage } = options;
+	const usage = usageDelta(options.usageBefore, options.usageAfter);
+	const terminalFailure = finalMessage?.stopReason === "error" || finalMessage?.stopReason === "aborted";
+	const errorMessage = finalMessage?.errorMessage;
+	return {
+		type: "session_result",
+		schema: PRINT_MODE_SESSION_RESULT_SCHEMA,
+		sessionId: options.sessionId,
+		status: sessionResultStatus(finalMessage),
+		stopReason: finalMessage?.stopReason ?? null,
+		provider: finalMessage?.provider ?? null,
+		model: finalMessage?.model ?? null,
+		responseId: finalMessage?.responseId ?? null,
+		result:
+			finalMessage?.content
+				.filter(content => content.type === "text")
+				.map(content => sanitizeText(content.text))
+				.join("\n") ?? "",
+		error:
+			terminalFailure || errorMessage
+				? {
+						message: sanitizeText(errorMessage ?? `Request ${finalMessage?.stopReason ?? "failed"}`),
+						status: finalMessage?.errorStatus ?? null,
+						id: finalMessage?.errorId ?? null,
+					}
+				: null,
+		usage: {
+			inputTokens: usage.input,
+			outputTokens: usage.output,
+			cacheReadTokens: usage.cacheRead,
+			cacheWriteTokens: usage.cacheWrite,
+			totalTokens: usage.totalTokens,
+			orchestrationInputTokens: usage.orchestrationInput,
+			orchestrationOutputTokens: usage.orchestrationOutput,
+			orchestrationCacheReadTokens: usage.orchestrationCacheRead,
+			premiumRequests: usage.premiumRequests,
+			costUsd: usage.cost,
+		},
+		modelRequests: options.modelRequests,
+		retries: options.retries,
+		startedAt: new Date(options.startedAtMs).toISOString(),
+		completedAt: new Date(options.completedAtMs).toISOString(),
+		durationMs: Math.max(0, options.completedAtMs - options.startedAtMs),
+	};
 }
 
 /** Matches the longest built-in provider request deadline while bounding tool-loop stalls. */
@@ -90,6 +214,11 @@ export function printableEvent(event: AgentSessionEvent): unknown {
  */
 export async function runPrintMode(session: AgentSession, options: PrintModeOptions): Promise<void> {
 	const { mode, messages = [], initialMessage, initialImages, printThoughts, planYolo = false } = options;
+	const startedAtMs = Date.now();
+	const usageBefore = session.sessionManager.getUsageStatistics();
+	let modelRequests = 0;
+	let retries = 0;
+	let finalMessage: AssistantMessage | undefined;
 
 	// process.stdout.write is fire-and-forget: a large final record (e.g. a
 	// multi-MB agent_end) can be dropped when the process exits before the pipe
@@ -151,6 +280,20 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 
 	// Always subscribe to enable session persistence via _handleAgentEvent
 	session.subscribe(event => {
+		if (event.type === "message_end" && event.message.role === "assistant") {
+			modelRequests++;
+			finalMessage = event.message;
+		} else if (event.type === "auto_retry_start") {
+			retries++;
+		} else if (event.type === "agent_end") {
+			for (let index = event.messages.length - 1; index >= 0; index--) {
+				const message = event.messages[index];
+				if (message?.role === "assistant") {
+					finalMessage = message;
+					break;
+				}
+			}
+		}
 		// In JSON mode, output all events
 		if (mode === "json") {
 			writeStdoutLine(`${JSON.stringify(printableEvent(event))}\n`);
@@ -236,6 +379,24 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 	}
 
 	await session.waitForAdvisorCatchup(PRINT_MODE_ADVISOR_DRAIN_TIMEOUT_MS);
+	if (mode === "json") {
+		const completedAtMs = Date.now();
+		const header = session.sessionManager.getHeader();
+		writeStdoutLine(
+			`${JSON.stringify(
+				buildSessionResult({
+					sessionId: header?.id ?? session.sessionId,
+					finalMessage,
+					usageBefore,
+					usageAfter: session.sessionManager.getUsageStatistics(),
+					modelRequests,
+					retries,
+					startedAtMs,
+					completedAtMs,
+				}),
+			)}\n`,
+		);
+	}
 
 	// Block shutdown until every serialized stdout write (including the final
 	// agent_end and late JSON advisor events) has drained; process.exit would

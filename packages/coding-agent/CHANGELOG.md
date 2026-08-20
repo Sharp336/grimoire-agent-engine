@@ -15,6 +15,7 @@
 - Explicit DAP adapters can now attach without a PID or port when `attachDefaults` provide the target arguments.
 - Added `isProjectTrusted()` compatibility shim to `ExtensionContext` for extensions targeting upstream per-directory trust gates.
 - Added `retry.maxSessionRetries` (default: 10) to cap automatic API retries cumulatively across successful turns and model or credential fallback instead of granting every turn a fresh retry budget.
+- JSON print mode now ends with one versioned `omp.session-result/v1` record containing the terminal outcome, final text, structured error, invocation usage/cost, model-request and retry counts, session ID, and timing.
 
 ### Changed
 
