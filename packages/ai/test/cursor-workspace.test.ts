@@ -1,6 +1,6 @@
+import { describe, expect, it } from "bun:test";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "bun:test";
 import { CursorRuleSchema } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import { create } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 import {
@@ -64,9 +64,11 @@ describe("cursor workspace helpers", () => {
 
 	it("round-trips requestContext.rules so a parallel rules fill is not wiped", () => {
 		const workspace = path.resolve("/tmp/omp-cursor-rules-root");
-		const ctx = buildCursorRequestContext([], [workspace], [
-			create(CursorRuleSchema, { fullPath: "/omp/system-prompt/0.mdc", content: "PIKEL-CANARY-7F3A" }),
-		]);
+		const ctx = buildCursorRequestContext(
+			[],
+			[workspace],
+			[create(CursorRuleSchema, { fullPath: "/omp/system-prompt/0.mdc", content: "PIKEL-CANARY-7F3A" })],
+		);
 		expect(ctx.rules).toHaveLength(1);
 		expect(ctx.rules[0]?.content).toBe("PIKEL-CANARY-7F3A");
 		expect(ctx.env?.workspacePaths).toEqual([workspace]);
@@ -92,6 +94,19 @@ describe("cursor workspace helpers", () => {
 		expect(remapCursorArtifactPath(path.join(workspace, "assets", "cat.png"), [workspace])).toBe(
 			path.join(workspace, "assets", "cat.png"),
 		);
+	});
+
+	it("leaves relative write paths unchanged so the exec bridge can resolve against session cwd", () => {
+		const workspace = path.resolve("/tmp/omp-cursor-image-root");
+		expect(remapCursorArtifactPath("assets/dog.png", [workspace])).toBe("assets/dog.png");
+		expect(remapCursorArtifactPath("src/app.ts", [workspace])).toBe("src/app.ts");
+	});
+
+	it("does not resolve relative paths against process.cwd()", () => {
+		const workspace = path.resolve("/tmp/omp-session-root");
+		const remapped = remapCursorArtifactPath("assets/dog.png", [workspace]);
+		expect(remapped).toBe("assets/dog.png");
+		expect(path.isAbsolute(remapped)).toBe(false);
 	});
 
 	it("appends live workspace URIs after a cwd change without dropping the checkpoint", () => {

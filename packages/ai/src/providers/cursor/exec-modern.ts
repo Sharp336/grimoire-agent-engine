@@ -79,6 +79,8 @@ export {
 	cursorWriteDisplayContent,
 	cursorWritePayload,
 	decodeCursorWriteBytes,
+	emptyImageWriteReason,
+	isRasterImagePath,
 	omitUndefinedArgs,
 	piEscapeRegexLiteral,
 	piGrepSkip,
@@ -90,7 +92,6 @@ export {
 	piReadPathHasRange,
 	piTimeout,
 } from "../cursor-pi-args";
-export { emptyImageWriteReason } from "../cursor-generate-image";
 
 /** Flatten a tool result's content into the single `output` string the Pi frames carry. */
 export function piOutputText(toolResult: ToolResultMessage): string {

@@ -235,21 +235,26 @@ import {
 	piReadPathHasRange,
 	piTimeout,
 } from "./cursor/exec-modern";
-import { persistGenerateImageResult, selectGenerateImageCall } from "./cursor-generate-image";
 import { handleInteractionQuery } from "./cursor/interaction-query";
 import {
 	buildCursorRequestContext,
+	confineCursorWorkspacePath,
 	cursorPreviousWorkspaceUris,
 	mergeCursorPreviousWorkspaceUris,
+	normalizeCursorFsPath,
 	remapCursorArtifactPath,
 	resolveCursorWorkspacePaths,
 } from "./cursor/workspace";
+import { persistGenerateImageResult, selectGenerateImageCall } from "./cursor-generate-image";
 
 export {
 	buildCursorRequestContext,
+	confineCursorWorkspacePath,
 	cursorPreviousWorkspaceUris,
 	cursorProjectFolder,
 	mergeCursorPreviousWorkspaceUris,
+	normalizeCursorFsPath,
+	remapCursorArtifactPath,
 	resolveCursorWorkspacePaths,
 	toCursorFileUri,
 } from "./cursor/workspace";
@@ -1019,6 +1024,8 @@ export interface BlockState {
 	setFirstTokenTime: () => void;
 	/** Session cwd / extra roots used to confine hosted GenerateImage writes. */
 	workspacePaths?: string[];
+	/** Absolute paths persisted from hosted GenerateImage this turn; later writeArgs must not clobber them. */
+	persistedGenerateImagePaths?: Set<string>;
 	/** Mirror a server-confirmed todo snapshot into local session state. */
 	onTodoSnapshot?: CursorTodoSyncHandler;
 	/**
@@ -1625,18 +1632,35 @@ async function handleExecServerMessage(
 		}
 		case "writeArgs": {
 			const args = execMsg.message.value;
+			// Imagine `file_path` is under `env.project_folder`. Remap onto the
+			// workspace; relative non-artifact paths come back unchanged so the
+			// bridge still resolves them against session cwd, not process.cwd().
 			args.path = remapCursorArtifactPath(args.path, workspacePaths);
 			if (!args.toolCallId) args.toolCallId = crypto.randomUUID();
 			const editOwned = isEditOwnedToolCallId(state, output, args.toolCallId);
-			// Hosted image gen writes PNG bytes in `file_bytes` with empty `file_text`.
+			// Proto3 `file_text` is `""` when unset. Hosted GenerateImage already
+			// persisted `image_data`; a follow-up writeArgs with empty text would
+			// truncate that PNG. Compare the confined path so a relative writeArgs
+			// still hits the persist set when session cwd ≠ process.cwd().
 			const payload = cursorWritePayload(args);
-			const emptyImageReason = emptyImageWriteReason(args.path, payload);
+			const confined = confineCursorWorkspacePath(args.path, workspacePaths);
+			const alreadyPersisted = confined
+				? state.persistedGenerateImagePaths?.has(normalizeCursorFsPath(confined))
+				: false;
+			const emptyImageReason = alreadyPersisted
+				? "Refusing to overwrite a generated image that was already saved this turn."
+				: emptyImageWriteReason(args.path, payload);
 			if (emptyImageReason) {
 				synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "write", {
 					path: args.path,
 					content: cursorWriteDisplayContent(payload),
 				});
-				sendExecClientMessage(h2Request, execMsg, "writeResult", buildWriteRejectedResult(args.path, emptyImageReason));
+				sendExecClientMessage(
+					h2Request,
+					execMsg,
+					"writeResult",
+					buildWriteRejectedResult(args.path, emptyImageReason),
+				);
 				await pairSynthesizedExecResult(state, onToolResult, args.toolCallId, "write", emptyImageReason, true);
 				return;
 			}
@@ -4370,15 +4394,24 @@ export function processInteractionUpdate(
 					timestamp: Date.now(),
 				});
 			} else if (settled[kStreamingBlockKind] === "generate-image") {
+				// Persist here: this conversation step carries `image_data`. The
+				// later `writeArgs` is proto3-empty `file_text` and must not be
+				// the write that creates the file.
 				const generateImageCall = selectGenerateImageCall(toolCall);
-				const filePath = generateImageCall?.result?.result?.value?.filePath || generateImageCall?.args?.filePath;
-				if (filePath || generateImageCall?.args?.description) {
+				const persisted = persistGenerateImageResult(generateImageCall, state.workspacePaths ?? []);
+				const { text, isError } = persisted;
+				if (persisted.filePath || generateImageCall?.args?.description || generateImageCall?.args?.filePath) {
 					settled.arguments = {
-						path: filePath,
+						path: persisted.filePath ?? generateImageCall?.args?.filePath,
 						description: generateImageCall?.args?.description,
 					};
 				}
-				const { text, isError } = persistGenerateImageResult(generateImageCall, state.workspacePaths ?? []);
+				if (persisted.filePath) {
+					if (!state.persistedGenerateImagePaths) {
+						state.persistedGenerateImagePaths = new Set();
+					}
+					state.persistedGenerateImagePaths.add(normalizeCursorFsPath(persisted.filePath));
+				}
 				state.onToolResult?.({
 					role: "toolResult",
 					toolCallId: settled.id,

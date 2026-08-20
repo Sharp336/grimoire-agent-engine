@@ -18,6 +18,8 @@ import type {
 	ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
 import {
+	cursorWritePayload,
+	emptyImageWriteReason,
 	omitUndefinedArgs,
 	piEscapeRegexLiteral,
 	piGrepSkip,
@@ -26,9 +28,8 @@ import {
 	piLsPath,
 	piReadPath,
 	piTimeout,
-	cursorWritePayload,
-	emptyImageWriteReason,
 } from "@oh-my-pi/pi-ai/providers/cursor/exec-modern";
+import { confineCursorWorkspacePath } from "@oh-my-pi/pi-ai/providers/cursor/workspace";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { cursorMcpPrefersReplaceEdit, normalizeCursorReplaceArgs } from "./cursor-bridge-tools";
 import type { MCPResourceReadResult } from "./mcp/types";
@@ -141,7 +142,8 @@ interface CursorExecBridgeOptions {
 }
 
 /**
- * Write a downloaded resource without following a link at the target.
+ * Write bytes without following a link at the target (MCP `download_path` and
+ * Cursor `file_bytes` / Imagine PNGs).
  *
  * The containment check and the write are separate syscalls, so a link planted
  * at the target in between would redirect the bytes — the check cannot close
@@ -392,13 +394,23 @@ async function executeBinaryWrite(
 		args: { path: pathArg, content: `[binary ${bytes.byteLength} bytes]` },
 	});
 
-	const absolutePath = resolveToCwd(pathArg, options.getCwd?.() ?? options.cwd);
+	// Binary payloads cannot go through WriteTool (UTF-8 / newline munging).
+	// Remap often yields an absolute workspace path, so `confineToWorkspace`
+	// (absolute-reject; MCP `download_path` is relative-by-contract) cannot
+	// be used. Lexical-under-cwd plus `O_NOFOLLOW` closes the symlink TOCTOU
+	// a contain-then-writeFile would leave.
+	const cwd = options.getCwd?.() ?? options.cwd;
+	const confined = confineCursorWorkspacePath(pathArg, [cwd]);
+	if (!confined) {
+		const result = buildToolErrorResult(`Refused to write outside the workspace: ${pathArg}`);
+		return createToolResultMessage(toolCallId, toolName, result, true);
+	}
+
 	let isError = false;
 	let result: AgentToolResult<unknown>;
 
 	try {
-		fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
-		fs.writeFileSync(absolutePath, bytes);
+		await writeWithoutFollowingLinks(confined, Buffer.from(bytes));
 		result = {
 			content: [{ type: "text", text: `Successfully wrote ${bytes.byteLength} bytes to ${pathArg}` }],
 			details: { path: pathArg, bytes: bytes.byteLength },
@@ -525,6 +537,9 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 
 	async write(args: Parameters<NonNullable<ICursorExecHandlers["write"]>>[0]) {
 		const toolCallId = decodeToolCallId(args.toolCallId);
+		// `file_bytes` is raw octets; WriteTool would UTF-8 / newline-munge them.
+		// Proto3 empty `file_text` plus a raster path is the hosted-Imagine
+		// follow-up write — refuse it rather than truncating the PNG to 0 bytes.
 		const payload = cursorWritePayload(args);
 		if (payload.mode === "bytes") {
 			return await executeBinaryWrite(this.options, args.path, payload.bytes, toolCallId);

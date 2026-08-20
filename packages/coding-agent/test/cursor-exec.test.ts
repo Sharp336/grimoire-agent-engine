@@ -765,6 +765,48 @@ describe("CursorExecHandlers.write file_bytes", () => {
 		const written = new Uint8Array(await Bun.file(target).arrayBuffer());
 		expect(written).toEqual(png);
 	});
+
+	it("refuses an empty image write so it cannot clobber a PNG", async () => {
+		const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x0d, 0x0a]);
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>(),
+			allowDirectFileMutation: true,
+		});
+		const target = path.join(cwd, "assets", "keep.png");
+		await fs.mkdir(path.dirname(target), { recursive: true });
+		await Bun.write(target, png);
+		const result = await handlers.write({
+			path: target,
+			fileText: "",
+			fileBytes: new Uint8Array(),
+			toolCallId: "img3",
+		} as never);
+		expect(result.isError).toBe(true);
+		expect(new Uint8Array(await Bun.file(target).arrayBuffer())).toEqual(png);
+	});
+
+	it("refuses binary writes outside the session cwd", async () => {
+		const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>(),
+			allowDirectFileMutation: true,
+		});
+		const outside = path.join(os.tmpdir(), `omp-binary-outside-${process.pid}.png`);
+		try {
+			const result = await handlers.write({
+				path: outside,
+				fileText: "",
+				fileBytes: png,
+				toolCallId: "img4",
+			} as never);
+			expect(result.isError).toBe(true);
+			expect(await Bun.file(outside).exists()).toBe(false);
+		} finally {
+			await fs.rm(outside, { force: true });
+		}
+	});
 });
 
 describe("pi_bash timeout presence", () => {
