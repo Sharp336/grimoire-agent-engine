@@ -42,6 +42,19 @@ jobs:
         if: steps.marker.outputs.run == 'true'
         run: bun install --frozen-lockfile
 
+      - name: Format reviewed PR files
+        if: steps.marker.outputs.run == 'true'
+        run: |
+          bunx biome check --write --unsafe \
+            packages/coding-agent/src/modes/interactive-mode.ts \
+            packages/coding-agent/src/task/executor.ts \
+            packages/coding-agent/src/task/routing/snapshot.ts \
+            packages/coding-agent/src/task/subagent-ledger.ts \
+            packages/coding-agent/test/pr9108-review-regressions.test.ts \
+            packages/coding-agent/test/routing-probe.ts \
+            packages/coding-agent/test/runtime-model-identity.test.ts \
+            packages/coding-agent/test/task-routing-integration.test.ts
+
       - name: Fetch release native addons
         if: steps.marker.outputs.run == 'true'
         shell: bash
@@ -70,7 +83,7 @@ jobs:
             packages/coding-agent/test/runtime-model-identity.test.ts \
             packages/coding-agent/test/task-routing-integration.test.ts
 
-      - name: Run TypeScript checks
+      - name: Run full TypeScript and repository checks
         if: steps.marker.outputs.run == 'true'
         run: bun run check:ts
 
@@ -82,13 +95,19 @@ jobs:
           rm -f LOCAL-PR9108-REPAIR-REQUEST scripts/local-pr9108-review-repair.py
           git config user.name "cp7-local-review-repair"
           git config user.email "actions@users.noreply.github.com"
-          git add packages/coding-agent/src/config/settings-schema.ts \
-                  packages/coding-agent/src/task/index.ts \
-                  packages/coding-agent/src/task/executor.ts \
-                  packages/coding-agent/test/task-routing-integration.test.ts \
-                  packages/coding-agent/test/pr9108-review-regressions.test.ts \
-                  LOCAL-PR9108-REPAIR-REQUEST \
-                  scripts/local-pr9108-review-repair.py
+          git add \
+            packages/coding-agent/src/config/settings-schema.ts \
+            packages/coding-agent/src/modes/interactive-mode.ts \
+            packages/coding-agent/src/task/executor.ts \
+            packages/coding-agent/src/task/index.ts \
+            packages/coding-agent/src/task/routing/snapshot.ts \
+            packages/coding-agent/src/task/subagent-ledger.ts \
+            packages/coding-agent/test/pr9108-review-regressions.test.ts \
+            packages/coding-agent/test/routing-probe.ts \
+            packages/coding-agent/test/runtime-model-identity.test.ts \
+            packages/coding-agent/test/task-routing-integration.test.ts \
+            LOCAL-PR9108-REPAIR-REQUEST \
+            scripts/local-pr9108-review-repair.py
           git diff --cached --check
           git commit -m "fix(task): address PR 9108 review blockers"
           git push origin HEAD:fix/pr9108-review-findings
