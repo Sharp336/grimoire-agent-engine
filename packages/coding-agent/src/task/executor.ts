@@ -2268,6 +2268,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		modelRole,
 		resolvedModel: progress.resolvedModel,
 		resolvedModelIsFallback: progress.resolvedModelIsFallback,
+		advisor: progress.advisor,
 		error: exitCode !== 0 && stderr ? stderr : undefined,
 		aborted: wasAborted,
 		abortReason: finalAbortReason,
@@ -2358,6 +2359,9 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 		}
 
 		turnMonitor.setActiveSession(session);
+		// A parked agent's wake turns run under the same session, so the marker carries
+		// across them.
+		if (session.isAdvisorActive?.() === true) turnMonitor.progress.advisor = true;
 		const unsubscribeTurn = turnMonitor.attach(session);
 		return async turnError => {
 			unsubscribeTurn();
@@ -3148,6 +3152,15 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				throw err;
 			}
 			sessionCreatedAt = performance.now();
+			// Only the built session can answer this: a spawn's `advisor.enabled` is necessary
+			// but not sufficient — the advisor role has to resolve to a model too. Stamped on
+			// progress (and flushed) so a running row can mark the child before it settles.
+			// Optional-called for the reason the status line's `getAdvisorStatusOverview?.()`
+			// is: a partial session stand-in reports nothing rather than failing the spawn.
+			if (session.isAdvisorActive?.() === true) {
+				progress.advisor = true;
+				monitor.scheduleProgress(true);
+			}
 
 			monitor.setActiveSession(session);
 			// Run-state notifications precede deferrable wire-level `agent_end`,

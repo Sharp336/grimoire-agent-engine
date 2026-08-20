@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Subagent model badge — task-widget rows now show each subagent's resolved `provider/model` right after its context gauge (`80 🛠 · 30.1%/500K · anthropic/claude-opus-5:max`), marked with the advisor icon when a live advisor watches that child. `task.showResolvedModelBadge` now defaults on; the same badge lands on `agent()` progress rows in `eval` and `task` rows in `hub jobs`.
+
 ## [17.4.0] - 2026-08-20
 
 ### Added
