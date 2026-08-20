@@ -1,0 +1,141 @@
+name: Local PR 9108 review repair
+
+on:
+  pull_request:
+    branches:
+      - feat/omp-subagent-runtime-model-identity
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'fix/pr9108-review-findings'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/pr9108-review-findings
+          fetch-depth: 0
+
+      - name: Check repair request marker
+        id: marker
+        shell: bash
+        run: |
+          if [[ -f LOCAL-PR9108-REPAIR-REQUEST ]]; then
+            echo 'run=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'run=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: oven-sh/setup-bun@v2
+        if: steps.marker.outputs.run == 'true'
+        with:
+          bun-version: 1.3.14
+
+      - name: Apply exact review fixes
+        if: steps.marker.outputs.run == 'true'
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          def replace_exact(path: str, old: str, new: str) -> None:
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected exactly one anchor, found {count}")
+              p.write_text(text.replace(old, new, 1))
+
+          replace_exact(
+              "packages/coding-agent/src/config/settings-schema.ts",
+              '\t"task.routing.enabled": {\n\t\ttype: "boolean",\n\t\tdefault: true,',
+              '\t"task.routing.enabled": {\n\t\ttype: "boolean",\n\t\tdefault: false,',
+          )
+
+          replace_exact(
+              "packages/coding-agent/src/task/index.ts",
+              '''\t\tconst siblingPoolKeysForBatch: string[] = [...this.#siblingPoolKeys];\n\t\tconst preflightResults: Array<{ policy?: EffectiveSubagentPolicy; error?: string }> = [];''',
+              '''\t\tconst siblingPoolKeysForBatch: string[] = [...this.#siblingPoolKeys];\n\t\tconst selectedPoolKeysForBatch: string[] = [];\n\t\tconst preflightResults: Array<{ policy?: EffectiveSubagentPolicy; error?: string }> = [];''',
+          )
+          replace_exact(
+              "packages/coding-agent/src/task/index.ts",
+              '''\t\t\t\tif (poolKey) {\n\t\t\t\t\tsiblingPoolKeysForBatch.push(poolKey);\n\t\t\t\t\tthis.#siblingPoolKeys.push(poolKey);\n\t\t\t\t\tif (this.#siblingPoolKeys.length > 20) this.#siblingPoolKeys.shift();\n\t\t\t\t}''',
+              '''\t\t\t\tif (poolKey) {\n\t\t\t\t\tsiblingPoolKeysForBatch.push(poolKey);\n\t\t\t\t\tselectedPoolKeysForBatch.push(poolKey);\n\t\t\t\t}''',
+          )
+          replace_exact(
+              "packages/coding-agent/src/task/index.ts",
+              '''\t\t}\n\t\tconst policies = preflights.map(preflight => preflight.policy!);''',
+              '''\t\t}\n\t\t// Persist sibling routing history only after the complete batch passes preflight.\n\t\tfor (const poolKey of selectedPoolKeysForBatch) {\n\t\t\tthis.#siblingPoolKeys.push(poolKey);\n\t\t\tif (this.#siblingPoolKeys.length > 20) this.#siblingPoolKeys.shift();\n\t\t}\n\t\tconst policies = preflights.map(preflight => preflight.policy!);''',
+          )
+
+          replace_exact(
+              "packages/coding-agent/src/task/executor.ts",
+              'import { subprocessToolRegistry } from "./subprocess-tool-registry";\n',
+              '''import { subprocessToolRegistry } from "./subprocess-tool-registry";\nimport {\n\tappendLedgerEntry,\n\tgetOmpVersion,\n\tledgerPathForSession,\n\tprogressToLedgerEntry,\n\tshouldAppendLedgerEntry,\n\ttype LedgerEntry,\n} from "./subagent-ledger";\n''',
+          )
+          replace_exact(
+              "packages/coding-agent/src/task/executor.ts",
+              '\tlet lastLedgerEntry: import("./subagent-ledger").LedgerEntry | undefined;',
+              '\tlet lastLedgerEntry: LedgerEntry | undefined;',
+          )
+          replace_exact(
+              "packages/coding-agent/src/task/executor.ts",
+              '''\t\tif (args.sessionFile) {\n\t\t\tconst snapshot = { ...progress } as typeof progress;\n\t\t\tvoid (async () => {\n\t\t\t\ttry {\n\t\t\t\t\tconst { progressToLedgerEntry, ledgerPathForSession, appendLedgerEntry, shouldAppendLedgerEntry } = await import("./subagent-ledger");\n\t\t\t\t\tconst entry = progressToLedgerEntry(snapshot);\n\t\t\t\t\tif (shouldAppendLedgerEntry(lastLedgerEntry, entry)) {\n\t\t\t\t\t\tawait appendLedgerEntry(ledgerPathForSession(args.sessionFile as string), entry);\n\t\t\t\t\t\tlastLedgerEntry = entry;\n\t\t\t\t\t}\n\t\t\t\t} catch {}\n\t\t\t})();\n\t\t}''',
+              '''\t\tif (args.sessionFile) {\n\t\t\tconst snapshot = { ...progress } as typeof progress;\n\t\t\tvoid (async () => {\n\t\t\t\ttry {\n\t\t\t\t\tconst entry = progressToLedgerEntry(snapshot);\n\t\t\t\t\tif (shouldAppendLedgerEntry(lastLedgerEntry, entry)) {\n\t\t\t\t\t\tawait appendLedgerEntry(ledgerPathForSession(args.sessionFile as string), entry);\n\t\t\t\t\t\tlastLedgerEntry = entry;\n\t\t\t\t\t}\n\t\t\t\t} catch (error) {\n\t\t\t\t\tlogger.debug("Subagent ledger append failed", {\n\t\t\t\t\t\tid,\n\t\t\t\t\t\tsessionFile: args.sessionFile,\n\t\t\t\t\t\terror: error instanceof Error ? error.message : String(error),\n\t\t\t\t\t});\n\t\t\t\t}\n\t\t\t})();\n\t\t}''',
+          )
+
+          replace_exact(
+              "packages/coding-agent/src/task/executor.ts",
+              '''\t\t\tconst configuredModelPatterns = resolveConfiguredModelPatterns(modelPatterns, settings);\n\t\t\tconst inheritedRetryFallbackChain =''',
+              '''\t\t\tconst configuredModelPatterns = resolveConfiguredModelPatterns(modelPatterns, settings);\n\t\t\t// Capture the requested/selected route before auth fallback can substitute the parent model.\n\t\t\tconst selectedResolution = resolveModelOverride(modelPatterns, modelRegistry, settings);\n\t\t\tconst inheritedRetryFallbackChain =''',
+          )
+          replace_exact(
+              "packages/coding-agent/src/task/executor.ts",
+              '''\t\t\tconst effortLevel =\n\t\t\t\toptions.effort !== undefined\n\t\t\t\t\t? resolveTaskEffortLevel(model, options.effort, spawnEffortCeiling)\n\t\t\t\t\t: undefined;\n\t\t\tif (model) {''',
+              '''\t\t\tconst effortLevel =\n\t\t\t\toptions.effort !== undefined\n\t\t\t\t\t? resolveTaskEffortLevel(model, options.effort, spawnEffortCeiling)\n\t\t\t\t\t: undefined;\n\t\t\tif (selectedResolution.model) {\n\t\t\t\tconst selectedEffortLevel =\n\t\t\t\t\toptions.effort !== undefined\n\t\t\t\t\t\t? resolveTaskEffortLevel(selectedResolution.model, options.effort, spawnEffortCeiling)\n\t\t\t\t\t\t: undefined;\n\t\t\t\tconst selectedDisplayLevel =\n\t\t\t\t\tselectedEffortLevel ??\n\t\t\t\t\t(selectedResolution.explicitThinkingLevel ? selectedResolution.thinkingLevel : undefined);\n\t\t\t\tprogress.selectedModel =\n\t\t\t\t\tselectedDisplayLevel !== undefined\n\t\t\t\t\t\t? formatModelSelectorValue(formatModelStringWithRouting(selectedResolution.model), selectedDisplayLevel)\n\t\t\t\t\t\t: formatModelStringWithRouting(selectedResolution.model);\n\t\t\t}\n\t\t\tif (model) {''',
+          )
+          replace_exact(
+              "packages/coding-agent/src/task/executor.ts",
+              '''\t\t\t\t// Preserve selected before any runtime fallback\n\t\t\t\tif (!progress.selectedModel) progress.selectedModel = progress.resolvedModel;\n\t\t\t\tprogress.parentModel = options.parentActiveModelPattern;\n\t\t\t\ttry {\n\t\t\t\t\tconst { getOmpVersion } = await import("./subagent-ledger");\n\t\t\t\t\tprogress.ompVersion = getOmpVersion();\n\t\t\t\t} catch {\n\t\t\t\t\tprogress.ompVersion = "unknown";\n\t\t\t\t}''',
+              '''\t\t\t\tprogress.selectedModel ??= progress.resolvedModel;\n\t\t\t\tprogress.parentModel = options.parentActiveModelPattern;\n\t\t\t\tprogress.ompVersion = getOmpVersion();''',
+          )
+
+          Path("packages/coding-agent/test/pr9108-review-regressions.test.ts").write_text('''import { describe, expect, it } from "bun:test";\nimport { SETTINGS_SCHEMA } from "@oh-my-pi/pi-coding-agent/config/settings-schema";\n\nconst root = new URL("../src/", import.meta.url);\nconst readSource = async (relative: string) => Bun.file(new URL(relative, root)).text();\n\ndescribe("PR #9108 review regressions", () => {\n\tit("keeps dynamic task routing opt-in by default", () => {\n\t\texpect(SETTINGS_SCHEMA["task.routing.enabled"].default).toBe(false);\n\t});\n\n\tit("keeps routing snapshot off provider usage/network probes", async () => {\n\t\tconst source = await readSource("task/routing/snapshot.ts");\n\t\texpect(source).not.toContain("getModelUsageHealth(");\n\t\texpect(source).toContain('usage: "unknown"');\n\t});\n\n\tit("keeps ledger persistence outside transcript discovery and uses static imports", async () => {\n\t\tconst ledger = await readSource("task/subagent-ledger.ts");\n\t\tconst executor = await readSource("task/executor.ts");\n\t\texpect(ledger).toContain(".ledger.ndjson");\n\t\texpect(ledger).not.toContain(".ledger.jsonl");\n\t\texpect(executor).not.toContain('await import("./subagent-ledger")');\n\t\texpect(executor).not.toContain('import("./subagent-ledger").LedgerEntry');\n\t\texpect(executor).toContain('logger.debug("Subagent ledger append failed"');\n\t});\n\n\tit("captures selected model before auth fallback", async () => {\n\t\tconst source = await readSource("task/executor.ts");\n\t\tconst selected = source.indexOf("const selectedResolution = resolveModelOverride(");\n\t\tconst fallback = source.indexOf("resolveModelOverrideWithAuthFallback(");\n\t\texpect(selected).toBeGreaterThan(-1);\n\t\texpect(fallback).toBeGreaterThan(-1);\n\t\texpect(selected).toBeLessThan(fallback);\n\t\texpect(source).toContain("selectedResolution.explicitThinkingLevel");\n\t});\n\n\tit("does not persist sibling history before the batch failure gate", async () => {\n\t\tconst source = await readSource("task/index.ts");\n\t\tconst start = source.indexOf("const siblingPoolKeysForBatch");\n\t\tconst failureGate = source.indexOf("if (preflightFailures.length > 0)", start);\n\t\tconst beforeGate = source.slice(start, failureGate);\n\t\texpect(start).toBeGreaterThan(-1);\n\t\texpect(failureGate).toBeGreaterThan(start);\n\t\texpect(beforeGate).not.toContain("this.#siblingPoolKeys.push(poolKey)");\n\t\texpect(source.indexOf("this.#siblingPoolKeys.push(poolKey)", failureGate)).toBeGreaterThan(failureGate);\n\t});\n});\n''')
+          PY
+
+          rm -f LOCAL-PR9108-REPAIR-REQUEST
+
+      - name: Install dependencies
+        if: steps.marker.outputs.run == 'true'
+        run: bun install --frozen-lockfile
+
+      - name: Run targeted regression tests
+        if: steps.marker.outputs.run == 'true'
+        run: |
+          bun test \
+            packages/coding-agent/test/pr9108-review-regressions.test.ts \
+            packages/coding-agent/test/runtime-model-identity.test.ts \
+            packages/coding-agent/test/task-routing-integration.test.ts
+
+      - name: Run TypeScript checks
+        if: steps.marker.outputs.run == 'true'
+        run: bun run check:ts
+
+      - name: Commit verified local repair
+        if: steps.marker.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "cp7-local-review-repair"
+          git config user.email "actions@users.noreply.github.com"
+          git add packages/coding-agent/src/config/settings-schema.ts \
+                  packages/coding-agent/src/task/index.ts \
+                  packages/coding-agent/src/task/executor.ts \
+                  packages/coding-agent/test/pr9108-review-regressions.test.ts \
+                  LOCAL-PR9108-REPAIR-REQUEST
+          git diff --cached --check
+          git commit -m "fix(task): address PR 9108 review blockers"
+          git push origin HEAD:fix/pr9108-review-findings
