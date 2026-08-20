@@ -79,6 +79,7 @@ import {
 	kStreamingLastParseLen,
 	kStreamingPartialJson,
 } from "../utils/block-symbols";
+import { deterministicUuid } from "../utils/deterministic-id";
 import { hasVisibleAssistantContent } from "../utils/empty-completion-retry";
 import type { AssistantMessageEventStream } from "../utils/event-stream";
 import {
@@ -451,6 +452,16 @@ export function calculateOpenAIUsageAccounting(accounting: OpenAIUsageAccounting
 	};
 }
 
+const DEEPSEEK_USER_ID_HASH_DOMAIN = "omp-deepseek-user-id-v1";
+
+/** Derive DeepSeek's per-session isolation key without putting caller/session data on the wire. */
+export function deriveDeepSeekUserId(sessionId: string | undefined): string | undefined {
+	if (!sessionId) return undefined;
+	const wellFormedSessionId = sessionId.toWellFormed();
+	if (!wellFormedSessionId) return undefined;
+	return `omp_${deterministicUuid(`${DEEPSEEK_USER_ID_HASH_DOMAIN}\0${wellFormedSessionId}`)}`;
+}
+
 /** Normalize a cache identity to the wire limit accepted by OpenAI-family providers. */
 export function normalizeOpenAIPromptCacheKey(sessionId: string | undefined): string | undefined {
 	return normalizeOpenAIStableId(sessionId, 64, "pc_");
@@ -753,6 +764,7 @@ export type OpenAICompletionsParams = Omit<ChatCompletionCreateParamsStreaming, 
 	reasoning_effort?: string | null;
 	service_tier?: ServiceTier;
 	tool_stream?: boolean;
+	user_id?: string;
 	provider?: OpenAICompat["openRouterRouting"];
 	providerOptions?: { gateway?: { only?: string[]; order?: string[] } };
 };

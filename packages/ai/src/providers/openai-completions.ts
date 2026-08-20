@@ -96,6 +96,7 @@ import {
 	clearOpenAIStrictToolsState,
 	createInitialResponsesAssistantMessage,
 	createOpenAIStrictToolsState,
+	deriveDeepSeekUserId,
 	disableStrictToolsForScope,
 	getOpenAIPromptCacheKey,
 	getOpenAIStrictToolsScope,
@@ -680,6 +681,8 @@ const streamOpenAICompletionsOnce = (
 			const createCompletionsStream = async (toolStrictModeOverride?: ToolStrictModeOverride) => {
 				const effectiveToolStrictModeOverride = disableStrictTools ? "none" : toolStrictModeOverride;
 				let { params, strictToolsApplied } = buildParams(model, context, options, effectiveToolStrictModeOverride);
+				const deepseekUserId = directDeepSeekEndpoint ? deriveDeepSeekUserId(options?.sessionId) : undefined;
+				if (deepseekUserId) params.user_id = deepseekUserId;
 				appliedStrictTools = strictToolsApplied;
 				const reasoningEffortFallbackKey = createOpenAIReasoningEffortFallbackKey(
 					"chat-completions",
