@@ -139,10 +139,77 @@ async function applyVisionMode(session: AgentSession, mode: InspectImageMode): P
 }
 
 const AUTOCOMPLETE_DETAIL_LIMIT = 48;
+const LOOP_UNTIL_GOAL_FLAG = "--until-goal";
+const GOAL_AWARE_LOOP_CLEANUP_INTERVAL_MS = 1_000;
+
+interface GoalAwareLoopWatcher {
+	unsubscribe: () => void;
+	cleanupTimer: NodeJS.Timeout;
+}
+
+const goalAwareLoopWatchers = new WeakMap<AgentSession, GoalAwareLoopWatcher>();
 
 function shortDetail(value: string, limit = AUTOCOMPLETE_DETAIL_LIMIT): string {
 	const singleLine = value.replace(/\s+/g, " ").trim();
 	return singleLine.length <= limit ? singleLine : `${singleLine.slice(0, limit - 1)}…`;
+}
+
+function clearGoalAwareLoopWatcher(session: AgentSession): void {
+	const watcher = goalAwareLoopWatchers.get(session);
+	if (!watcher) return;
+	goalAwareLoopWatchers.delete(session);
+	clearInterval(watcher.cleanupTimer);
+	watcher.unsubscribe();
+}
+
+function splitGoalAwareLoopArgs(args: string): { untilGoal: boolean; args: string } {
+	const tokens = args.match(/\S+/g) ?? [];
+	const untilGoal = tokens.includes(LOOP_UNTIL_GOAL_FLAG);
+	if (!untilGoal) return { untilGoal: false, args };
+	return {
+		untilGoal: true,
+		args: tokens.filter(token => token !== LOOP_UNTIL_GOAL_FLAG).join(" "),
+	};
+}
+
+function watchGoalAwareLoop(ctx: InteractiveModeContext, goalId: string): void {
+	clearGoalAwareLoopWatcher(ctx.session);
+	const stopLoop = (message: string) => {
+		if (ctx.loopModeEnabled) {
+			ctx.disableLoopMode(message);
+		}
+		clearGoalAwareLoopWatcher(ctx.session);
+	};
+	const unsubscribe = ctx.session.subscribe(event => {
+		if (!ctx.loopModeEnabled) {
+			clearGoalAwareLoopWatcher(ctx.session);
+			return;
+		}
+		if (event.type !== "goal_updated") return;
+		const goal = event.goal ?? event.state?.goal;
+		if (!goal) {
+			stopLoop("Goal ended. Loop mode disabled.");
+			return;
+		}
+		if (goal.id !== goalId) {
+			stopLoop("Active goal changed. Loop mode disabled.");
+			return;
+		}
+		if (goal.status === "complete") {
+			stopLoop("Goal completed. Loop mode disabled.");
+			return;
+		}
+		if (goal.status !== "active") {
+			stopLoop(`Goal is ${goal.status}. Loop mode disabled.`);
+		}
+	});
+	const cleanupTimer = setInterval(() => {
+		if (!ctx.loopModeEnabled || ctx.isShuttingDown) {
+			clearGoalAwareLoopWatcher(ctx.session);
+		}
+	}, GOAL_AWARE_LOOP_CLEANUP_INTERVAL_MS);
+	cleanupTimer.unref();
+	goalAwareLoopWatchers.set(ctx.session, { unsubscribe, cleanupTimer });
 }
 
 export function formatTokenCount(value: number): string {
@@ -281,8 +348,8 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "loop",
 		description:
-			"Toggle loop mode. While enabled, the next prompt you send re-submits after every yield. Esc cancels the current iteration; /loop again to disable.",
-		inlineHint: "[count|duration] [prompt]",
+			"Toggle loop mode. While enabled, the next prompt re-submits after every yield. Add --until-goal to keep an active goal alive until it reaches a terminal state. Esc cancels the current iteration; /loop again to disable.",
+		inlineHint: "[count|duration] [--until-goal] [prompt]",
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
 			if (!runtime.ctx.loopModeEnabled) return "Loop: off";
@@ -292,7 +359,37 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			return "Loop: on (waiting for next prompt)";
 		},
 		handleTui: async (command, runtime) => {
-			const prompt = await runtime.ctx.handleLoopCommand(command.args);
+			clearGoalAwareLoopWatcher(runtime.ctx.session);
+			if (runtime.ctx.loopModeEnabled) {
+				await runtime.ctx.handleLoopCommand(command.args);
+				runtime.ctx.editor.setText("");
+				return;
+			}
+
+			const parsedArgs = splitGoalAwareLoopArgs(command.args);
+			let loopArgs = command.args;
+			let goalId: string | undefined;
+			if (parsedArgs.untilGoal) {
+				const state = runtime.ctx.session.getGoalModeState();
+				if (!state || !state.enabled || state.goal.status !== "active") {
+					runtime.ctx.showWarning("/loop --until-goal requires an active goal.");
+					runtime.ctx.editor.setText("");
+					return;
+				}
+				const continuation = runtime.ctx.session.goalRuntime.buildContinuationPrompt();
+				if (!continuation) {
+					runtime.ctx.showWarning("Could not build a continuation prompt for the active goal.");
+					runtime.ctx.editor.setText("");
+					return;
+				}
+				loopArgs = [parsedArgs.args, continuation].filter(Boolean).join(" ");
+				goalId = state.goal.id;
+			}
+
+			const prompt = await runtime.ctx.handleLoopCommand(loopArgs);
+			if (goalId && runtime.ctx.loopModeEnabled) {
+				watchGoalAwareLoop(runtime.ctx, goalId);
+			}
 			runtime.ctx.editor.setText("");
 			// Surface any inline prompt so the dispatcher returns it and the normal
 			// submit flow runs the first loop iteration (recording it as the loop prompt).
