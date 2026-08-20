@@ -5,6 +5,7 @@
 ### Added
 
 - Added Codex Responses support for Code Mode, preserving tool modes and passing tool namespace metadata during sessions.
+- Added first-party DeepSeek API-key balance reporting from `/user/balance`, including currency-safe remaining balances and exhausted-key status without querying DeepSeek-labelled proxy endpoints.
 
 ### Fixed
 
