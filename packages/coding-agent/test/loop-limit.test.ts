@@ -83,11 +83,12 @@ describe("/loop slash command", () => {
 			type: "goal_updated",
 			goal: { ...ACTIVE_GOAL, status: "complete", updatedAt: 2 },
 		});
-		expect(disableLoopMode).toHaveBeenCalledTimes(1);
-		expect(showStatus).toHaveBeenCalledWith("Goal completed. Loop mode disabled.");
+		expect(disableLoopMode).toHaveBeenCalledWith("Goal completed. Loop mode disabled.");
+		expect(showStatus).not.toHaveBeenCalled();
 	});
 
 	test("preserves count or duration as a safety cap with --until-goal", async () => {
+		let goalListener: ((event: unknown) => void) | undefined;
 		const ctx: Record<string, unknown> = {
 			loopModeEnabled: false,
 			editor: { setText: vi.fn() },
@@ -95,7 +96,7 @@ describe("/loop slash command", () => {
 			disableLoopMode: vi.fn(),
 			showStatus: vi.fn(),
 		};
-		const handleLoopCommand = vi.fn(async (args?: string) => {
+		const handleLoopCommand = vi.fn(async (_args?: string) => {
 			ctx.loopModeEnabled = true;
 			return "continue toward the active goal";
 		});
@@ -103,13 +104,20 @@ describe("/loop slash command", () => {
 		ctx.session = {
 			getGoalModeState: () => ({ enabled: true, mode: "active", goal: ACTIVE_GOAL }),
 			goalRuntime: { buildContinuationPrompt: () => "continue toward the active goal" },
-			subscribe: () => vi.fn(),
+			subscribe: (listener: (event: unknown) => void) => {
+				goalListener = listener;
+				return vi.fn();
+			},
 		};
 		const runtime = { ctx } as unknown as BuiltinSlashCommandRuntime;
 
 		await executeBuiltinSlashCommand("/loop 10m --until-goal", runtime);
 
 		expect(handleLoopCommand).toHaveBeenCalledWith("10m continue toward the active goal");
+		goalListener?.({
+			type: "goal_updated",
+			goal: { ...ACTIVE_GOAL, status: "complete", updatedAt: 2 },
+		});
 	});
 
 	test("rejects --until-goal without an active goal", async () => {
