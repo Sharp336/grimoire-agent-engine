@@ -73,7 +73,11 @@ export function generateCodeModeDeclarations(
 		if (isObject) {
 			for (const [key, value] of Object.entries(wire.properties ?? {})) {
 				const summary = summarize(value.description);
-				if (summary) docs.push(`@param args.${key} - ${summary}`);
+				// A schema key is arbitrary text: quote it, then neutralize a terminator.
+				const path = TS_IDENTIFIER.test(key)
+					? `args.${key}`
+					: `args[${JSON.stringify(key).replaceAll("*/", "*\\/")}]`;
+				if (summary) docs.push(`@param ${path} - ${summary}`);
 			}
 		}
 		const doc = docs.filter(line => line !== undefined);

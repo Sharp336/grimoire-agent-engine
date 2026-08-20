@@ -61,6 +61,19 @@ describe("generateCodeModeDeclarations", () => {
 		]);
 		expect(out.split("\n")[0]).toBe("  /** closes *\\/ here */");
 	});
+	test("a comment terminator in a parameter name cannot close the JSDoc", () => {
+		const out = generateCodeModeDeclarations([
+			{
+				name: "sneaky",
+				parameters: {
+					type: "object",
+					properties: { "query*/": { type: "string", description: "Search text." } },
+					required: ["query*/"],
+				},
+			},
+		]);
+		expect(out.split("\n")[0]).toBe('  /** @param args["query*\\/"] - Search text. */');
+	});
 	test("enums become literal unions", () => {
 		const out = generateCodeModeDeclarations([
 			{
