@@ -981,6 +981,17 @@ export const SETTINGS_SCHEMA = {
 			description: "Remove the 1-character horizontal padding from the left and right of the terminal output",
 		},
 	},
+	"tui.fullscreen": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Fullscreen TUI",
+			description:
+				"Use an alternate-screen chat view with an independently scrollable transcript, scrollbar, and fixed editor/status dock",
+		},
+	},
 	"tui.scrollbackRebuild": {
 		type: "boolean",
 		default: false,

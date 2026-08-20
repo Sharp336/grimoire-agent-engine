@@ -1312,6 +1312,10 @@ export async function runRootCommand(
 		// setup-time checks (e.g. #wrapToolForAcpPermission) also see the yolo intent.
 		settingsInstance.override("tools.approvalMode", "yolo");
 	}
+	if (parsedArgs.tuiMode) {
+		// --tui-mode affects only this process; /settings remains the persistent preference.
+		settingsInstance.override("tui.fullscreen", parsedArgs.tuiMode === "fullscreen");
+	}
 	if (parsedArgs.mode === "rpc" || parsedArgs.mode === "rpc-ui") {
 		applyRpcDefaultSettingOverrides(settingsInstance);
 	} else if (parsedArgs.mode === "acp") {
