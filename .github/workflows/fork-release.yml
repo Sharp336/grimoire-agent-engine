@@ -109,7 +109,10 @@ jobs:
         run: |
           bun run ci:check:full
           bun run collab:web:build
-          bun run test:scripts
+          # Match upstream CI exactly. The upstream workflow intentionally does
+          # not run test:scripts here because musl-release.test.ts fails on main
+          # for an unrelated fake-binary install smoke check.
+          bun test scripts/ci-test-ts.test.ts scripts/release.test.ts
 
       - name: Install official precompiled native artifacts
         env:
