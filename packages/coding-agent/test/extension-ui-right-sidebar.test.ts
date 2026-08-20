@@ -151,6 +151,52 @@ describe("ExtensionUiController rightSidebar widgets", () => {
 		}
 	});
 
+	it("restores editor focus when a focus-stealing sidebar factory throws", async () => {
+		const terminal = new VirtualTerminal(120, 8);
+		const tui = new TUI(terminal);
+		const editorInputs: string[] = [];
+		const editor: Component = {
+			render: () => ["EDITOR"],
+			handleInput: data => editorInputs.push(data),
+		};
+		const orphan: Component = {
+			render: () => ["ORPHAN"],
+			handleInput: () => {
+				throw new Error("orphan received input");
+			},
+		};
+		const { controller } = createController({
+			requestRender: () => tui.requestRender(),
+			setRightSidebar: (component: Component | undefined, options?: unknown) =>
+				tui.setRightSidebar(component, options as never),
+			setFocus: (component: Component | null) => tui.setFocus(component),
+			getFocused: () => tui.getFocused(),
+		});
+		tui.addChild(editor);
+		tui.setFocus(editor);
+		tui.start();
+		try {
+			await terminal.waitForRender(() => terminal.getViewport().some(line => line.includes("EDITOR")));
+
+			expect(() =>
+				controller.setHookWidget(
+					"throwing-focus-thief",
+					ui => {
+						ui.setFocus(orphan);
+						throw new Error("factory failed");
+					},
+					rightSidebarDefaults,
+				),
+			).toThrow("factory failed");
+			expect(tui.getFocused()).toBe(editor);
+
+			terminal.sendInput("x");
+			expect(editorInputs).toEqual(["x"]);
+		} finally {
+			tui.stop();
+		}
+	});
+
 	it("removes and disposes only the matching key, then unmounts the final key", () => {
 		const { controller, mounted } = createController();
 		const first = new Probe(["A"]);

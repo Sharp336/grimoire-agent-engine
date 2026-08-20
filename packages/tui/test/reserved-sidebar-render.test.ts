@@ -245,6 +245,43 @@ describe("TUI reserved right sidebar", () => {
 		expect(terminal.getScrollBuffer().slice(0, baseY).some(line => line.includes("SIDEBAR"))).toBe(false);
 	});
 
+	it("does not erase a full-width sidebar suffix during scroll-append diffs", async () => {
+		const terminal = new VirtualTerminal(120, 5, 100);
+		const writes: string[] = [];
+		const write = terminal.write.bind(terminal);
+		terminal.write = data => {
+			writes.push(data);
+			write(data);
+		};
+		const tui = new TUI(terminal);
+		const main = new MutableLinesProbe(Array.from({ length: 8 }, (_, index) => `MAIN-${index}`));
+		tui.addChild(main);
+		tui.setRightSidebar(
+			{
+				render: width =>
+					Array.from({ length: 5 }, (_, index) => `${"s".repeat(width - 1)}${index}`),
+			},
+			{ width: 44, minWidth: 28, minMainWidth: 64 },
+		);
+		tui.start();
+		active.push({ tui, terminal });
+		await terminal.waitForRender(() => terminal.getViewport().some(line => line.includes("MAIN-7")));
+		writes.length = 0;
+
+		main.lines.push("MAIN-8");
+		tui.requestRender();
+		await terminal.waitForRender(() => terminal.getViewport().some(line => line.includes("MAIN-8")));
+
+		expect(writes.join("")).not.toContain(`0\x1b[0m\x1b]8;;\x07\x1b[K`);
+		const baseline = terminal.getViewport();
+		expect(baseline[0]?.endsWith("0")).toBe(true);
+		writes.length = 0;
+
+		tui.requestRender();
+		await terminal.waitForRender();
+		expect(terminal.getViewport()).toEqual(baseline);
+	});
+
 	it("isolates main SGR and OSC 8 state before padding, separator, and sidebar", async () => {
 		const terminal = new VirtualTerminal(120, 4, 100);
 		const writes: string[] = [];
