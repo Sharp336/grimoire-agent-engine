@@ -91,10 +91,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				name,
 				enabled: typeof serverConfig.enabled === "boolean" ? serverConfig.enabled : undefined,
 				timeout: typeof serverConfig.timeout === "number" ? serverConfig.timeout : undefined,
-				lifecycle:
-					serverConfig.lifecycle === "eager" || serverConfig.lifecycle === "lazy"
-						? serverConfig.lifecycle
-						: undefined,
+				lifecycle: serverConfig.lifecycle as MCPServer["lifecycle"] | undefined,
 				idleTimeout: typeof serverConfig.idleTimeout === "number" ? serverConfig.idleTimeout : undefined,
 				command: serverConfig.command as string | undefined,
 				args: serverConfig.args as string[] | undefined,

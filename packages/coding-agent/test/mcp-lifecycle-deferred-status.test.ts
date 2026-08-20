@@ -25,7 +25,7 @@ describe("MCP lazy lifecycle: deferred startup status", () => {
 		try {
 			await manager.connectServers({ lazy: config }, {}, event => events.push(event));
 			expect(events).toEqual([]);
-			expect(manager.getConnectionStatus("lazy")).toBe("disconnected");
+			expect(manager.getConnectionStatus("lazy")).toBe("deferred");
 		} finally {
 			await manager.disconnectAll();
 		}
@@ -44,7 +44,7 @@ describe("MCP lazy lifecycle: deferred startup status", () => {
 				{ type: "connecting", serverNames: ["eager"] },
 				{ type: "connected", serverName: "eager" },
 			]);
-			expect(manager.getConnectionStatus("cached")).toBe("disconnected");
+			expect(manager.getConnectionStatus("cached")).toBe("deferred");
 			expect(manager.getConnectionStatus("eager")).toBe("connected");
 		} finally {
 			await manager.disconnectAll();

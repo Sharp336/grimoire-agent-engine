@@ -27,10 +27,12 @@ This document describes how MCP servers are discovered, connected, exposed as to
 
 Both paths:
 
-- pass `authStorage`, cache storage, `mcp.enableProjectConfig`, and browser-MCP filtering based on the `browser.enabled` setting,
+- pass `authStorage`, cache storage, `mcp.enableProjectConfig`, browser-MCP filtering based on `browser.enabled`, and the global `mcp.defaultLifecycle` and `mcp.defaultIdleTimeoutMs` settings,
 - always set `filterExa: true`,
 - log per-server load/connect errors,
 - store the manager in `toolSession.mcpManager` and the session result.
+
+The `omp read` command passes the same lifecycle defaults when it initializes MCP resources.
 
 If `enableMCP` is false, MCP discovery is skipped entirely.
 
@@ -69,10 +71,11 @@ So startup does not fail the whole agent session when individual MCP servers fai
 - `#reconnectHistory: Map<string, number[]>` plus `#epoch` — per-server crash-window accounting and invalidation of reconnect attempts that outlive a global disconnect.
 - listener/callback state, including a bounded pending-notification FIFO and tracked resource subscriptions/refreshes.
 
-`getConnectionStatus(name)` derives status from these maps:
+`getConnectionStatus(name)` derives status from these registries:
 
-- `connected` if in `#connections`,
-- `connecting` if pending connect, pending tool load, or pending reconnect,
+- `connected` if the server has a live entry in `#connections`,
+- `connecting` if it has a pending connect, tool load, or reconnect,
+- `deferred` if cached `DeferredMCPTool`s make the server available on demand without a live transport,
 - `disconnected` otherwise.
 
 ## Connection establishment and startup timing
@@ -101,6 +104,17 @@ For each discovered server in `connectServers()`:
 - sends `notifications/initialized`,
 - uses timeout precedence `OMP_MCP_TIMEOUT_MS`, then `config.timeout`, then 30s; `0` disables the client-side timeout,
 - closes transport on init failure.
+### Configured eager and lazy lifecycle
+
+Each server may set `lifecycle` to `eager` or `lazy`. A per-server value overrides `mcp.defaultLifecycle`. The default is `eager`.
+
+An eager server follows the connection pipeline above. A lazy server behaves according to its cache entry:
+
+- A warm tool cache with `requiresConnection: false` creates `DeferredMCPTool`s without starting a transport. The first tool call connects and replaces that server's deferred tools with live tools.
+- A cold cache connects once to discover and cache tools.
+- A cache entry that records prompts, resources, resource templates, or server instructions as live-only state connects at startup so that state remains available.
+
+After a lazy tool call, the manager disconnects an idle transport after the server's `idleTimeout` or the global `mcp.defaultIdleTimeoutMs`. The default lazy idle timeout is 300,000 ms. A value of `0` disables idle disconnect. Active tool calls and live-only server state prevent the idle reaper from closing the transport. After an idle disconnect, cached tools remain registered with `deferred` status and reconnect on the next call.
 
 ### Fast startup gate + deferred fallback
 

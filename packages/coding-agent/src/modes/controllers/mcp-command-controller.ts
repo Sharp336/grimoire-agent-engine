@@ -1245,7 +1245,7 @@ export class MCPCommandController {
 	async #waitForServerConnectionWithAnimation(
 		name: string,
 		options?: { suppressDisconnectedWarning?: boolean },
-	): Promise<"connected" | "connecting" | "disconnected"> {
+	): Promise<"connected" | "connecting" | "deferred" | "disconnected"> {
 		if (!this.ctx.mcpManager) return "disconnected";
 
 		const block = new McpConnectingBlock(name);
@@ -1264,6 +1264,8 @@ export class MCPCommandController {
 			}
 			if (state === "connected") {
 				block.setStatus(theme.fg("success", `${theme.status.enabled} Connected to "${name}"`));
+			} else if (state === "deferred") {
+				block.setStatus(theme.fg("muted", `◌ "${name}" is available on demand`));
 			} else if (state === "connecting") {
 				block.setStatus(theme.fg("muted", `◌ "${name}" is still connecting...`));
 			} else {
@@ -1283,7 +1285,8 @@ export class MCPCommandController {
 		if (!this.ctx.mcpManager) return;
 		if (this.ctx.mcpManager.getConnectionStatus(name) !== "disconnected") return;
 		await this.ctx.mcpManager.connectServers({ [name]: config }, {});
-		if (this.ctx.mcpManager.getConnectionStatus(name) === "connected") {
+		const state = this.ctx.mcpManager.getConnectionStatus(name);
+		if (state === "connected" || state === "deferred") {
 			await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
 		}
 	}
@@ -1303,7 +1306,7 @@ export class MCPCommandController {
 				config.enabled === false
 					? "disconnected"
 					: await this.#waitForServerConnectionWithAnimation(name, { suppressDisconnectedWarning: true });
-			let isConnected = state === "connected";
+			let isConnected = state === "connected" || state === "deferred";
 			const isConnecting = state === "connecting";
 
 			// Fallback: if manager state is still disconnected but direct test works,
@@ -1454,9 +1457,11 @@ export class MCPCommandController {
 							? theme.fg("warning", " ◌ inactive")
 							: state === "connected"
 								? theme.fg("success", " ● connected")
-								: state === "connecting"
-									? theme.fg("muted", " ◌ connecting")
-									: theme.fg("muted", " ○ not connected");
+								: state === "deferred"
+									? theme.fg("muted", " ◌ on demand")
+									: state === "connecting"
+										? theme.fg("muted", " ◌ connecting")
+										: theme.fg("muted", " ○ not connected");
 					lines.push(`  ${theme.fg("accent", name)}${status} ${theme.fg("dim", `[${type}]`)}`);
 				}
 				lines.push("");
@@ -1477,9 +1482,11 @@ export class MCPCommandController {
 							? theme.fg("warning", " ◌ inactive")
 							: state === "connected"
 								? theme.fg("success", " ● connected")
-								: state === "connecting"
-									? theme.fg("muted", " ◌ connecting")
-									: theme.fg("muted", " ○ not connected");
+								: state === "deferred"
+									? theme.fg("muted", " ◌ on demand")
+									: state === "connecting"
+										? theme.fg("muted", " ◌ connecting")
+										: theme.fg("muted", " ○ not connected");
 					lines.push(`  ${theme.fg("accent", name)}${status} ${theme.fg("dim", `[${type}]`)}`);
 				}
 				lines.push("");
@@ -1494,9 +1501,11 @@ export class MCPCommandController {
 						const status =
 							state === "connected"
 								? theme.fg("success", " ● connected")
-								: state === "connecting"
-									? theme.fg("muted", " ◌ connecting")
-									: theme.fg("muted", " ○ not connected");
+								: state === "deferred"
+									? theme.fg("muted", " ◌ on demand")
+									: state === "connecting"
+										? theme.fg("muted", " ◌ connecting")
+										: theme.fg("muted", " ○ not connected");
 						lines.push(`  ${theme.fg("accent", name)}${status}`);
 					}
 					lines.push("");
@@ -1701,9 +1710,11 @@ export class MCPCommandController {
 					const status =
 						state === "connected"
 							? theme.fg("success", "Connected")
-							: state === "connecting"
-								? theme.fg("muted", "Connecting")
-								: theme.fg("warning", "Not connected yet");
+							: state === "deferred"
+								? theme.fg("muted", "Available on demand")
+								: state === "connecting"
+									? theme.fg("muted", "Connecting")
+									: theme.fg("warning", "Not connected yet");
 					this.#showMessage(
 						[
 							"",
@@ -1745,9 +1756,11 @@ export class MCPCommandController {
 				status =
 					state === "connected"
 						? theme.fg("success", "Connected")
-						: state === "connecting"
-							? theme.fg("muted", "Connecting")
-							: theme.fg("warning", "Not connected yet");
+						: state === "deferred"
+							? theme.fg("muted", "Available on demand")
+							: state === "connecting"
+								? theme.fg("muted", "Connecting")
+								: theme.fg("warning", "Not connected yet");
 			}
 
 			const lines = [
@@ -1942,9 +1955,11 @@ export class MCPCommandController {
 					`  Status: ${
 						state === "connected"
 							? theme.fg("success", "connected")
-							: state === "connecting"
-								? theme.fg("muted", "connecting")
-								: theme.fg("warning", "not connected")
+							: state === "deferred"
+								? theme.fg("muted", "available on demand")
+								: state === "connecting"
+									? theme.fg("muted", "connecting")
+									: theme.fg("warning", "not connected")
 					}`,
 					"",
 				];

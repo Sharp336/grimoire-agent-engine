@@ -7,6 +7,7 @@ import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const CLI_ENTRY = path.join(import.meta.dir, "..", "src", "cli.ts");
 const FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "resources-no-templates-mcp.ts");
+const LAZY_FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "lazy-lifecycle-mcp.ts");
 
 describe("omp read MCP resources", () => {
 	let root: string;
@@ -74,5 +75,34 @@ describe("omp read MCP resources", () => {
 		expect(output).toContain("fixture content for urn:fixture:gamma");
 		expect(output).toContain("fixture content for test://beta");
 		expect(error).toContain('No MCP server has resource "test://missing"');
+	}, 30_000);
+	it("honors the global lazy lifecycle when reading an MCP URI", async () => {
+		const spawnLog = path.join(root, "spawn.log");
+		await Bun.write(
+			path.join(projectDir, ".mcp.json"),
+			JSON.stringify({
+				mcpServers: {
+					fixture: {
+						type: "stdio",
+						command: process.execPath,
+						args: [LAZY_FIXTURE_PATH],
+						env: { MCP_SPAWN_LOG: spawnLog },
+					},
+				},
+			}),
+		);
+		await Bun.write(path.join(agentDir, "settings.json"), JSON.stringify({ mcp: { defaultLifecycle: "lazy" } }));
+		await Bun.write(
+			probePath,
+			[
+				`import { runCli } from ${JSON.stringify(url.pathToFileURL(CLI_ENTRY).href)};`,
+				'await runCli(["read", "probe://missing"]);',
+			].join("\n"),
+		);
+
+		expect((await runReadProbe()).exitCode).toBe(1);
+		expect((await runReadProbe()).exitCode).toBe(1);
+		const spawns = (await fs.readFile(spawnLog, "utf8")).trim().split("\n");
+		expect(spawns).toHaveLength(1);
 	}, 30_000);
 });

@@ -49,7 +49,7 @@ describe("MCP lazy lifecycle: cold cache populates once", () => {
 		const second = new MCPManager(workDir, cache);
 		try {
 			await second.connectServers({ lazy: config }, {});
-			expect(second.getConnectionStatus("lazy")).toBe("disconnected");
+			expect(second.getConnectionStatus("lazy")).toBe("deferred");
 			expect(hasServerTool(second, "lazy")).toBe(true);
 			// No additional spawn — still just the one from the cold-cache session.
 			expect(spawnCount(spawnLog)).toBe(1);

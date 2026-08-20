@@ -37,7 +37,7 @@ describe("MCP lazy lifecycle: first call connects on demand", () => {
 		try {
 			await manager.connectServers({ lazy: config }, {});
 			// Not connected, not spawned yet.
-			expect(manager.getConnectionStatus("lazy")).toBe("disconnected");
+			expect(manager.getConnectionStatus("lazy")).toBe("deferred");
 			expect(spawnCount(spawnLog)).toBe(0);
 
 			const result = await executeServerTool(manager, "lazy");

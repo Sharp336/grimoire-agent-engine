@@ -43,7 +43,7 @@ describe("MCP lazy lifecycle: idle disconnect and re-spawn", () => {
 			expect(spawnCount(spawnLog)).toBe(1);
 
 			// Idle reaper fires ~150ms after the call completes.
-			expect(await waitFor(() => manager.getConnectionStatus("lazy") === "disconnected")).toBe(true);
+			expect(await waitFor(() => manager.getConnectionStatus("lazy") === "deferred")).toBe(true);
 			// Tools survive the reap as deferred placeholders.
 			expect(hasServerTool(manager, "lazy")).toBe(true);
 

@@ -1086,7 +1086,7 @@ export class MCPManager {
 	/**
 	 * Get current connection status for a server.
 	 */
-	getConnectionStatus(name: string): "connected" | "connecting" | "disconnected" {
+	getConnectionStatus(name: string): "connected" | "connecting" | "deferred" | "disconnected" {
 		if (this.#connections.has(name)) return "connected";
 		if (
 			this.#pendingConnections.has(name) ||
@@ -1094,9 +1094,9 @@ export class MCPManager {
 			this.#pendingReconnections.has(name)
 		)
 			return "connecting";
+		if (this.#tools.some(tool => tool.mcpServerName === name && tool instanceof DeferredMCPTool)) return "deferred";
 		return "disconnected";
 	}
-
 	/**
 	 * Get the source metadata for a server.
 	 */

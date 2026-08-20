@@ -38,7 +38,7 @@ describe("MCP lazy lifecycle: warm cache does not spawn", () => {
 		try {
 			const result = await manager.connectServers({ lazy: config }, {});
 
-			expect(manager.getConnectionStatus("lazy")).toBe("disconnected");
+			expect(manager.getConnectionStatus("lazy")).toBe("deferred");
 			expect(hasServerTool(manager, "lazy")).toBe(true);
 			expect(result.tools.length).toBeGreaterThan(0);
 			expect(result.connectedServers).not.toContain("lazy");

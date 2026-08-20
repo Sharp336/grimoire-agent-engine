@@ -56,7 +56,7 @@ describe("MCP lifecycle precedence: per-server overrides the default", () => {
 		try {
 			await manager.connectServers({ srv: config }, {});
 			// Inherited lazy → advertised from cache, not spawned.
-			expect(manager.getConnectionStatus("srv")).toBe("disconnected");
+			expect(manager.getConnectionStatus("srv")).toBe("deferred");
 			expect(hasServerTool(manager, "srv")).toBe(true);
 			expect(spawnCount(spawnLog)).toBe(0);
 		} finally {

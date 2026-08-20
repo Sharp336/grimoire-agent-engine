@@ -65,6 +65,10 @@ export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
 				filterBrowser: settings.get("browser.enabled") ?? false,
 				cacheStorage: settings.getStorage(),
 				authStorage,
+				lifecycleDefaults: {
+					lifecycle: settings.get("mcp.defaultLifecycle") === "lazy" ? "lazy" : "eager",
+					idleTimeoutMs: settings.get("mcp.defaultIdleTimeoutMs"),
+				},
 			});
 			mcpManager = result.manager;
 			session.mcpManager = mcpManager;
