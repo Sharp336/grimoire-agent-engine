@@ -1,0 +1,28 @@
+name: Hub Mode Run Temp
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: hub-model-surface
+          fetch-depth: 0
+
+      - name: Execute prepared rework
+        shell: bash
+        run: |
+          set -euo pipefail
+          sed -n '/^          set -euo pipefail$/,$p' .github/workflows/hub-mode-rework-temp.yml \
+            | sed 's/^          //' \
+            | sed 's#git rm .github/workflows/hub-mode-rework-temp.yml#git rm .github/workflows/hub-mode-rework-temp.yml .github/workflows/hub-mode-run-temp.yml#' \
+            > /tmp/rework-hub.sh
+          bash /tmp/rework-hub.sh
