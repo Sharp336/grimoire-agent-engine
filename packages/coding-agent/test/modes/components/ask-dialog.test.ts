@@ -132,6 +132,77 @@ describe("AskDialogComponent", () => {
 		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Option B"]);
 	});
 
+	it("single-question, single-select: Space(A) then Down then Enter submits A, not B", () => {
+		const onSubmit = vi.fn();
+		const questions: ExtensionAskDialogQuestion[] = [
+			{
+				id: "q1",
+				question: "Choose one?",
+				options: [{ label: "Option A" }, { label: "Option B" }],
+			},
+		];
+		const component = new AskDialogComponent(questions, {
+			onSubmit,
+			onCancel: vi.fn(),
+			onPrompt: vi.fn(),
+		});
+
+		component.handleInput(SPACE); // mark A
+		component.handleInput(DOWN); // cursor to B
+		component.handleInput(ENTER); // commit the mark, not B
+		expect(onSubmit).toHaveBeenCalledTimes(1);
+		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Option A"]);
+	});
+
+	it("single-question, single-select: Space on Other stays open; Enter commits the custom answer", async () => {
+		const onPrompt = vi.fn().mockReturnValue(Promise.resolve("my custom answer"));
+		const onSubmit = vi.fn();
+		const questions: ExtensionAskDialogQuestion[] = [
+			{
+				id: "q1",
+				question: "Choose one?",
+				options: [{ label: "Option A" }, { label: "Option B" }],
+			},
+		];
+		const component = new AskDialogComponent(questions, {
+			onSubmit,
+			onCancel: vi.fn(),
+			onPrompt,
+		});
+
+		component.handleInput(DOWN); // Option B
+		component.handleInput(DOWN); // Other
+		component.handleInput(SPACE);
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(onPrompt).toHaveBeenCalledTimes(1);
+		expect(onSubmit).not.toHaveBeenCalled(); // dialog stays open
+
+		component.handleInput(ENTER);
+		expect(onSubmit).toHaveBeenCalledTimes(1);
+		expect(onSubmit.mock.calls[0][0].results[0]).toEqual(
+			expect.objectContaining({
+				selectedOptions: [],
+				customInput: "my custom answer",
+			}),
+		);
+	});
+
+	it("multi-question, single-select: footer hints Enter next, not submit", () => {
+		const questions: ExtensionAskDialogQuestion[] = [
+			{ id: "q1", question: "Q1?", options: [{ label: "A1" }, { label: "B1" }] },
+			{ id: "q2", question: "Q2?", options: [{ label: "A2" }, { label: "B2" }] },
+		];
+		const component = new AskDialogComponent(questions, {
+			onSubmit: vi.fn(),
+			onCancel: vi.fn(),
+			onPrompt: vi.fn(),
+		});
+
+		expect(render(component)).toContain("Space select · Enter next · n note");
+	});
+
 	it("single-question, single-select: Space then n attaches a note to the marked choice", async () => {
 		const onPrompt = vi.fn().mockReturnValue(Promise.resolve("Why A"));
 		const onSubmit = vi.fn();

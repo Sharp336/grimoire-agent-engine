@@ -616,7 +616,9 @@ export class AskDialogComponent implements Component {
 		const question = this.#questions[this.#currentQuestionIndex()];
 		// Enter advances in multi-question dialogs and submits single-question ones.
 		const enterAction = this.#questions.length > 1 ? "next" : "submit";
-		const action = question?.multi ? `Space toggle · Enter ${enterAction}` : "Space select · Enter submit · n note";
+		const action = question?.multi
+			? `Space toggle · Enter ${enterAction}`
+			: `Space select · Enter ${enterAction} · n note`;
 		const tabs = this.#hasSubmitTab() ? " · Tab/←/→" : "";
 		if (this.#questionCanPage && indicator) {
 			return `${action} · ↑/↓${tabs} · ${cancel} · ${pageKeysLabel()} ${indicator}`;
@@ -687,13 +689,13 @@ export class AskDialogComponent implements Component {
 		const isEnter = matchesKey(keyData, "enter") || matchesKey(keyData, "return") || keyData === "\n";
 		const isSpace = matchesKey(keyData, "space") || keyData === " ";
 		if (!isEnter && !isSpace) return;
-		if (rowItem.kind === "other") {
-			void this.#promptForCustomInput(question, state, rowItem);
-			return;
-		}
-		const option = question.options[rowItem.optionIndex ?? -1];
-		if (!option) return;
 		if (question.multi) {
+			if (rowItem.kind === "other") {
+				void this.#promptForCustomInput(question, state, rowItem, false);
+				return;
+			}
+			const option = question.options[rowItem.optionIndex ?? -1];
+			if (!option) return;
 			if (isEnter) {
 				// Enter confirms the current selection without toggling the
 				// focused option; Space toggles. Advances to the next question
@@ -712,6 +714,14 @@ export class AskDialogComponent implements Component {
 			return;
 		}
 		if (isSpace) {
+			if (rowItem.kind === "other") {
+				// Space opens the custom-answer prompt without forwarding so the
+				// dialog stays open until Enter commits it.
+				void this.#promptForCustomInput(question, state, rowItem, false);
+				return;
+			}
+			const option = question.options[rowItem.optionIndex ?? -1];
+			if (!option) return;
 			// Space marks the focused option as the choice without forwarding,
 			// so the user can review it or add a note (`n`) before submitting
 			// with Enter. Enter alone still selects and advances in one step.
@@ -721,6 +731,18 @@ export class AskDialogComponent implements Component {
 			this.#requestRender();
 			return;
 		}
+		// Single-select Enter: commit an existing Space-marked answer (option or
+		// custom) regardless of the cursor row; otherwise act on the focused row.
+		if (state.selectedOptions.size > 0 || state.customInput !== undefined) {
+			this.#advanceAfterQuestion();
+			return;
+		}
+		if (rowItem.kind === "other") {
+			void this.#promptForCustomInput(question, state, rowItem, true);
+			return;
+		}
+		const option = question.options[rowItem.optionIndex ?? -1];
+		if (!option) return;
 		state.selectedOptions = new Set([option.label]);
 		state.customInput = undefined;
 		clearNoteUnlessRow(state, rowItem.key);
@@ -764,6 +786,7 @@ export class AskDialogComponent implements Component {
 		question: ExtensionAskDialogQuestion,
 		state: QuestionState,
 		rowItem: QuestionRow,
+		forwardOnAnswer: boolean,
 	): Promise<void> {
 		this.#promptActive = true;
 		try {
@@ -782,7 +805,7 @@ export class AskDialogComponent implements Component {
 			if (!question.multi) {
 				state.selectedOptions.clear();
 				clearNoteUnlessRow(state, rowItem.key);
-				this.#advanceAfterQuestion();
+				if (forwardOnAnswer) this.#advanceAfterQuestion();
 			}
 		} finally {
 			this.#promptActive = false;
