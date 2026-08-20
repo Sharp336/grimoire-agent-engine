@@ -7,7 +7,7 @@
 - Sloppy edits now support inline replacements with `⟪old│new⟫` syntax (`⟪old│⟫` for deletions and `⟪│new⟫` for insertions), alongside automatic recovery for common formatting mistakes without needing a retry.
 - Sloppy edits now recover operations that mix `⟪old│new⟫` inline replacements with a `»` REWRITE instead of failing the payload: a redundant REWRITE is dropped, a diverging one is applied as the final text, and a note explains the interpretation.
 - Expanded archive support in `read` and `write` tools: `read` can now inspect and extract members from `.rar`, `.7z`, `.iso`, `.cab`, `.deb`, `.rpm`, `.cpio`, `.ar`/`.a`, `.lzh`, `.arj`, compressed tar files (`.tar.bz2`, `.tar.xz`, `.tar.zst`), package formats (`.whl`, `.ipa`, `.xpi`, `.vsix`, `.nupkg`, `.cbz`, `.cbr`), `.asar` archives, and single-file compressed streams; `write` can create `.tar.zst` and update `.asar` archives.
-- Added Code Mode for Codex `code_mode_only` models via `providers.openai-codex.codeMode` (`off`/`on`/`auto`), demoting non-essential tools into an eval bridge with generated TypeScript definitions.
+- Added Code Mode for Codex `code_mode_only` models via `providers.openai-codex.codeMode` (`off`/`on`/`auto`), demoting non-essential tools into an eval bridge with generated TypeScript definitions ([#9050](https://github.com/can1357/oh-my-pi/issues/9050)).
 - MCP tool names longer than 64 characters are now automatically truncated with a deterministic hash suffix to comply with strict provider validators.
 - Marketplace-installed plugins with manifest settings can now be configured through `omp plugin config` and Settings → Plugins.
 - Configured discovery providers with `authHeader` now preserve cached models across application restarts.
@@ -53,7 +53,6 @@
 - Fixed prompt guidance and descriptions for Task tools and SSH usage.
 - ACP editor clients that support elicitation forms (Zed) can now use `ask`, so the agent can pose single-choice, multi-select, and free-text questions inline instead of guessing.
 - `/retry` and `/handoff` now work over ACP, so editor clients (Zed) list them and can run them instead of sending the text to the model.
-- Added Code Mode for Codex `code_mode_only` models ([#9050](https://github.com/can1357/oh-my-pi/issues/9050)), mirroring codex-rs: the `providers.openai-codex.codeMode` setting (`off`/`on`/`auto`, default `off`; `auto` follows the model catalog's `tool_mode` flag) collapses the direct tool surface to the eval/ask/todo/yield keep-set (plus `providers.openai-codex.codeModeDirectTools`) whenever an openai-codex model matches and `eval` is part of the session's tool set, demoting every other enabled tool to the eval bridge with generated TypeScript `tool.<name>()` declarations in the eval tool description. A session whose tools exclude `eval` - a restricted subagent, or Vibe mode - keeps its direct surface instead of gaining a JS runtime. Turn metadata carries codex-rs's `tool_namespaces_info` exposure snapshot while active, model and setting changes reconcile the surface in place, and startup applies it before the first provider turn ([#9069](https://github.com/can1357/oh-my-pi/pull/9069) by [@MilesCranmerBot](https://github.com/MilesCranmerBot)).
 
 ## [17.4.0] - 2026-08-20
 
