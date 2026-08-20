@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, type Mock, mock, spyOn } from "bun:test";
 import { streamPiNative } from "@oh-my-pi/pi-ai/providers/pi-native-client";
+import type { PiNativeStreamFrame } from "@oh-my-pi/pi-ai/providers/pi-native-protocol";
 import type {
 	AssistantMessage,
 	AssistantMessageEvent,
@@ -11,7 +12,7 @@ import type {
 } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
-function sseBytes(events: AssistantMessageEvent[]): Uint8Array {
+function sseBytes(events: PiNativeStreamFrame[]): Uint8Array {
 	const encoder = new TextEncoder();
 	const parts: Uint8Array[] = [];
 	for (const event of events) {
@@ -27,7 +28,7 @@ function sseBytes(events: AssistantMessageEvent[]): Uint8Array {
 	}
 	return out;
 }
-function sseEventBytes(event: AssistantMessageEvent): Uint8Array {
+function sseEventBytes(event: PiNativeStreamFrame): Uint8Array {
 	return new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`);
 }
 
@@ -86,7 +87,7 @@ function delayedBody(chunks: Array<{ atMs: number; bytes: Uint8Array }>): Readab
 	});
 }
 
-function fakeResponse(events: AssistantMessageEvent[], init: ResponseInit = {}): Response {
+function fakeResponse(events: PiNativeStreamFrame[], init: ResponseInit = {}): Response {
 	return new Response(fakeBody(sseBytes(events)), {
 		status: 200,
 		headers: { "Content-Type": "text/event-stream" },
@@ -209,6 +210,7 @@ describe("streamPiNative request shape", () => {
 				responseMetadata = response;
 			},
 			onSseEvent: () => undefined,
+			onPromptProgress: () => undefined,
 			providerSessionState: new Map(),
 			maxTokens: 1024,
 		});
@@ -221,6 +223,7 @@ describe("streamPiNative request shape", () => {
 		expect("onPayload" in body.options).toBe(false);
 		expect("onResponse" in body.options).toBe(false);
 		expect("onSseEvent" in body.options).toBe(false);
+		expect("onPromptProgress" in body.options).toBe(false);
 		expect("providerSessionState" in body.options).toBe(false);
 		// And the legitimate options survive
 		expect(body.options.maxTokens).toBe(1024);
@@ -300,6 +303,92 @@ describe("streamPiNative event flow", () => {
 		const result = await stream.result();
 
 		expect(seen).toEqual(events);
+		expect(result).toEqual(final);
+	});
+
+	it("forwards prompt progress to the local observer without emitting an assistant event", async () => {
+		const final = baseAssistant({ content: [{ type: "text", text: "done" }] });
+		const start = { type: "start", partial: baseAssistant() } satisfies AssistantMessageEvent;
+		const done = { type: "done", reason: "stop", message: final } satisfies AssistantMessageEvent;
+		const progress = { total: 100, processed: 56, cached: 40 };
+		const fetchImpl: FetchImpl = (async () =>
+			fakeResponse([start, { type: "prompt_progress", progress }, done])) as FetchImpl;
+		const observed: (typeof progress)[] = [];
+
+		const stream = streamPiNative(fakeModel(), baseContext, {
+			apiKey: "k",
+			fetch: fetchImpl,
+			onPromptProgress: update => observed.push(update),
+		});
+		const seen = await collectEvents(stream);
+
+		expect(observed).toEqual([progress]);
+		expect(seen).toEqual([start, done]);
+		expect(await stream.result()).toEqual(final);
+	});
+
+	it("keeps the first-event watchdog alive with pi-native prompt-progress frames", async () => {
+		const final = baseAssistant({ content: [{ type: "text", text: "done" }] });
+		const chunks = [
+			{ atMs: 0, bytes: sseEventBytes({ type: "start", partial: baseAssistant() }) },
+			{
+				atMs: 15,
+				bytes: sseEventBytes({
+					type: "prompt_progress",
+					progress: { total: 100, processed: 20, cached: 0 },
+				}),
+			},
+			{
+				atMs: 35,
+				bytes: sseEventBytes({
+					type: "prompt_progress",
+					progress: { total: 100, processed: 40, cached: 0 },
+				}),
+			},
+			{
+				atMs: 55,
+				bytes: sseEventBytes({
+					type: "prompt_progress",
+					progress: { total: 100, processed: 60, cached: 0 },
+				}),
+			},
+			{ atMs: 75, bytes: sseEventBytes({ type: "done", reason: "stop", message: final }) },
+		];
+		const fetchImpl: FetchImpl = (async () =>
+			new Response(delayedBody(chunks), {
+				status: 200,
+				headers: { "Content-Type": "text/event-stream" },
+			})) as FetchImpl;
+		const observed: number[] = [];
+
+		const result = await streamPiNative(fakeModel(), baseContext, {
+			apiKey: "k",
+			fetch: fetchImpl,
+			streamFirstEventTimeoutMs: 25,
+			streamIdleTimeoutMs: 25,
+			onPromptProgress: progress => observed.push(progress.processed),
+		}).result();
+
+		expect(result).toEqual(final);
+		expect(observed).toEqual([20, 40, 60]);
+	});
+
+	it("isolates pi-native prompt-progress observer failures from generation", async () => {
+		const final = baseAssistant({ content: [{ type: "text", text: "done" }] });
+		const fetchImpl: FetchImpl = (async () =>
+			fakeResponse([
+				{ type: "prompt_progress", progress: { total: 100, processed: 56, cached: 40 } },
+				{ type: "done", reason: "stop", message: final },
+			])) as FetchImpl;
+
+		const result = await streamPiNative(fakeModel(), baseContext, {
+			apiKey: "k",
+			fetch: fetchImpl,
+			onPromptProgress: () => {
+				throw new Error("observer failed");
+			},
+		}).result();
+
 		expect(result).toEqual(final);
 	});
 

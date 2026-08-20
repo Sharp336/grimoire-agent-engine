@@ -6,6 +6,7 @@ import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import { createPiNativePromptProgressRelay } from "@oh-my-pi/pi-ai/providers/pi-native-protocol";
 import { encodeStream, formatError, parseRequest } from "@oh-my-pi/pi-ai/providers/pi-native-server";
 import type {
 	AssistantMessage,
@@ -273,7 +274,75 @@ describe("pi-native gateway cache controls", () => {
 		}
 	});
 });
+
+describe("pi-native gateway prompt progress", () => {
+	it("bridges provider prompt progress into the pi-native SSE stream", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-progress-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("openrouter", "test-key");
+		const mock = createMockModel({ provider: "openrouter", id: "pi-native-progress" });
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => mock,
+			version: "test",
+		});
+
+		try {
+			mock.push((_context, options) => {
+				options?.onPromptProgress?.({ total: 100, processed: 56, cached: 40 }, mock);
+				return { content: ["ok"] };
+			});
+			const response = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({ modelId: "pi-native-progress", context: baseContext }),
+			});
+
+			expect(response.status).toBe(200);
+			const frames = (await collectSse(response.body!)).map(parseSseLine);
+			expect(frames).toContainEqual({
+				type: "prompt_progress",
+				progress: { total: 100, processed: 56, cached: 40 },
+			});
+			expect(frames).toContainEqual(expect.objectContaining({ type: "done" }));
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+			clearCustomApis();
+		}
+	});
+});
+
 describe("pi-native encodeStream", () => {
+	it("emits the latest progress snapshot buffered before the encoder attaches", async () => {
+		const final = baseAssistant();
+		const promptProgress = createPiNativePromptProgressRelay();
+		promptProgress.emit({ total: 100, processed: 20, cached: 0 });
+		promptProgress.emit({ total: 100, processed: 40, cached: 0 });
+
+		const chunks = await collectSse(
+			encodeStream(
+				makeEventStream([{ type: "done", reason: "stop", message: final }], final),
+				undefined,
+				undefined,
+				{
+					promptProgress,
+				},
+			),
+		);
+		const parsed = chunks.map(parseSseLine);
+
+		expect(parsed).toEqual([
+			{ type: "prompt_progress", progress: { total: 100, processed: 40, cached: 0 } },
+			{ type: "done", reason: "stop", message: JSON.parse(JSON.stringify(final)) },
+			"[DONE]",
+		]);
+	});
+
 	it("ships every AssistantMessageEvent verbatim, terminated by [DONE]", async () => {
 		// Pi-native is omp-talks-to-omp: the client feeds parsed events directly
 		// into `AssistantMessageEventStream.push()`, so the wire IS the canonical

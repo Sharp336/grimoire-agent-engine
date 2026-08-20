@@ -28,6 +28,7 @@ import { isUsageLimitOutcome } from "../error/rate-limit";
 import * as anthropicMessages from "../providers/anthropic-messages-server";
 import * as openaiChat from "../providers/openai-chat-server";
 import * as openaiResponses from "../providers/openai-responses-server";
+import { createPiNativePromptProgressRelay } from "../providers/pi-native-protocol";
 import * as piNative from "../providers/pi-native-server";
 import { completeSimple, streamSimple } from "../stream";
 import type { Api, AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "../types";
@@ -668,19 +669,29 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 		}
 	}
 
+	const promptProgress = createPiNativePromptProgressRelay();
+	streamOpts.onPromptProgress = progress => promptProgress.emit(progress);
 	let events: AssistantMessageEventStream;
 	try {
-		if (controller.signal.aborted) return aborted();
+		if (controller.signal.aborted) {
+			promptProgress.close();
+			return aborted();
+		}
 		events = streamSimple(model, parsed.context, streamOpts);
 	} catch (error) {
+		promptProgress.close();
 		const classified = classifyGatewayError(error);
 		logger.warn("auth-gateway streamSimple threw", { format: "pi-native", error: classified.message, peer });
 		return piNative.formatError(classified.status, classified.type, classified.message);
 	}
-	if (controller.signal.aborted) return aborted();
+	if (controller.signal.aborted) {
+		promptProgress.close();
+		return aborted();
+	}
 
 	const sseStream = piNative.encodeStream(events, parsed.modelId, parsed.options, {
 		signal: controller.signal,
+		promptProgress,
 		onCancel: reason => {
 			if (!controller.signal.aborted) {
 				controller.abort(reason instanceof Error ? reason : new Error("client closed request"));

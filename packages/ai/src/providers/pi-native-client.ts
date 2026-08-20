@@ -2,12 +2,11 @@
  * Client half of the pi-native auth-gateway protocol.
  *
  * Dispatches a {@link streamSimple}-shaped request to an `omp auth-gateway`
- * via `POST /v1/pi/stream`, reads the SSE event stream back, and pushes the
- * parsed events into a local {@link AssistantMessageEventStream} — the same
- * stream type every other provider client produces. Callers downstream of
- * `streamSimple` cannot tell whether the events came from a real provider
- * SDK or from a gateway hop; they consume `AssistantMessageEvent`s either
- * way.
+ * via `POST /v1/pi/stream`, reads canonical assistant events plus pi-native
+ * prompt-progress frames from SSE, and pushes only the assistant events into
+ * a local {@link AssistantMessageEventStream}. Prompt progress is delivered
+ * through the caller's observer, so callers downstream of `streamSimple`
+ * retain the same assistant-event contract as every other provider client.
  *
  * Activated when a {@link Model} has `transport: "pi-native"` set; the
  * dispatch hook lives in `streamSimple()` (see `../stream.ts`). Used by
@@ -30,6 +29,7 @@ import { createAbortSourceTracker } from "../utils/abort";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
 import { notifyProviderResponse } from "../utils/provider-response";
+import { isPiNativePromptProgressFrame } from "./pi-native-protocol";
 
 /**
  * Fields that must not cross the wire — either non-serializable (functions,
@@ -45,6 +45,7 @@ const NON_WIRE_KEYS = new Set<keyof SimpleStreamOptions>([
 	"onPayload",
 	"onResponse",
 	"onSseEvent",
+	"onPromptProgress",
 	"execHandlers",
 	"cursorExecHandlers",
 	"cursorOnToolResult",
@@ -53,9 +54,15 @@ const NON_WIRE_KEYS = new Set<keyof SimpleStreamOptions>([
 const PI_NATIVE_STREAM_IDLE_TIMEOUT_ERROR = "pi-native stream stalled while waiting for the next event";
 const PI_NATIVE_STREAM_FIRST_EVENT_TIMEOUT_ERROR = "pi-native stream timed out while waiting for the first event";
 
+function getPiNativeFrameType(event: unknown): unknown {
+	if (typeof event !== "object" || event === null || !("type" in event)) return undefined;
+	return event.type;
+}
+
 function isPiNativeProgressEvent(event: unknown): boolean {
-	if (typeof event !== "object" || event === null || !("type" in event)) return true;
-	return event.type !== "start";
+	const type = getPiNativeFrameType(event);
+	if (type === "prompt_progress") return isPiNativePromptProgressFrame(event);
+	return type !== "start";
 }
 
 function buildWireOptions(options: SimpleStreamOptions | undefined): Record<string, unknown> {
@@ -129,11 +136,12 @@ function buildHeaders(model: Model<Api>, apiKey: string | undefined): Record<str
  * Stream a turn through an `omp auth-gateway` over the pi-native protocol.
  *
  * The returned {@link AssistantMessageEventStream} receives each parsed
- * `AssistantMessageEvent` verbatim from the gateway; the terminal `done` /
- * `error` event resolves `.result()` automatically via the base class's
- * completion check. Non-streaming consumers just call `.result()` and pay
- * for SSE framing they don't use — that overhead is dominated by provider
- * latency, so we always stream rather than maintaining a parallel
+ * `AssistantMessageEvent` verbatim from the gateway; prompt-progress frames
+ * invoke `options.onPromptProgress` and are otherwise consumed here. The
+ * terminal `done` / `error` event resolves `.result()` automatically via the
+ * base class's completion check. Non-streaming consumers just call `.result()`
+ * and pay for SSE framing they don't use — that overhead is dominated by
+ * provider latency, so we always stream rather than maintaining a parallel
  * non-streaming path.
  */
 export function streamPiNative<TApi extends Api>(
@@ -202,10 +210,7 @@ export function streamPiNative<TApi extends Api>(
 
 			const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs();
 			const firstEventTimeoutMs = options?.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(idleTimeoutMs);
-			const source = readSseJson<AssistantMessageEvent>(
-				response.body as ReadableStream<Uint8Array>,
-				abortTracker.requestSignal,
-			);
+			const source = readSseJson<unknown>(response.body as ReadableStream<Uint8Array>, abortTracker.requestSignal);
 			const watchedSource = iterateWithIdleTimeout(source, {
 				idleTimeoutMs,
 				firstItemTimeoutMs: firstEventTimeoutMs,
@@ -218,7 +223,18 @@ export function streamPiNative<TApi extends Api>(
 				isProgressItem: isPiNativeProgressEvent,
 			});
 			let sawTerminal = false;
-			for await (const event of watchedSource) {
+			for await (const frame of watchedSource) {
+				if (getPiNativeFrameType(frame) === "prompt_progress") {
+					if (isPiNativePromptProgressFrame(frame)) {
+						try {
+							options?.onPromptProgress?.(frame.progress, model);
+						} catch {
+							// Progress observers are diagnostic/UI-only and cannot break generation.
+						}
+					}
+					continue;
+				}
+				const event = frame as AssistantMessageEvent;
 				if (event.type === "done" || event.type === "error") sawTerminal = true;
 				stream.push(event);
 				// `stream.push` resolves `.result()` on `done`/`error`; subsequent

@@ -10,18 +10,18 @@
  * translations impose on first-class pi-ai fields (service tier, cache
  * markers, thinking budgets, tool-choice variants, …).
  *
- * The streaming wire is {@link AssistantMessageEvent} serialized verbatim and
- * SSE-framed. Same type pi-ai already produces internally; the client feeds
- * each parsed event straight into `AssistantMessageEventStream.push()` with
- * no translation. Including `partial: AssistantMessage` on every delta is
- * O(N²) in turn length on the wire — acceptable for the loopback / sidecar
- * topology this transport is designed for; provider latency dominates the
- * actual cost.
+ * The streaming wire carries {@link AssistantMessageEvent}s serialized
+ * verbatim plus pi-native-only prompt-progress frames. The client consumes
+ * progress through its observer and feeds every assistant event straight into
+ * `AssistantMessageEventStream.push()` with no translation. Including
+ * `partial: AssistantMessage` on every delta is O(N²) in turn length on the
+ * wire — acceptable for the loopback / sidecar topology this transport is
+ * designed for; provider latency dominates the actual cost.
  *
  * Endpoint contract:
  *   POST /v1/pi/stream
  *   body:    { modelId, context, options?, stream? }   // `stream` defaults to true
- *   200 SSE: stream of `AssistantMessageEvent` (terminated by `data: [DONE]`)
+ *   200 SSE: assistant events plus prompt-progress frames (terminated by `data: [DONE]`)
  *   200 JSON (stream=false): { message: AssistantMessage }
  *   4xx/5xx: { error: { type, message } }
  */
@@ -29,6 +29,7 @@
 import type { AuthGatewayStreamControl } from "../auth-gateway/types";
 import * as AIError from "../error";
 import type { AssistantMessageEventStream, Context, SimpleStreamOptions } from "../types";
+import type { PiNativePromptProgressFrame, PiNativePromptProgressRelay } from "./pi-native-protocol";
 
 export interface PiNativeParsedRequest {
 	modelId: string;
@@ -157,8 +158,14 @@ export function parseRequest(body: unknown, _headers?: Headers): PiNativeParsedR
 const SSE_ENCODER = new TextEncoder();
 const SSE_DONE = SSE_ENCODER.encode("data: [DONE]\n\n");
 
+export interface PiNativeStreamControl extends AuthGatewayStreamControl {
+	/** Provider progress relay installed before `streamSimple` starts. */
+	promptProgress?: PiNativePromptProgressRelay;
+}
+
 /**
- * Ship every {@link AssistantMessageEvent} verbatim, SSE-framed.
+ * Ship every {@link AssistantMessageEvent} verbatim and interleave provider
+ * prompt-progress frames from the request relay.
  *
  * No per-event re-shaping: the pi-native client is pi-ai itself, so the
  * canonical event type IS the wire type. Including the rolling
@@ -173,7 +180,7 @@ export function encodeStream(
 	events: AssistantMessageEventStream,
 	_requestedModelId?: string,
 	_options?: SimpleStreamOptions,
-	control?: AuthGatewayStreamControl,
+	control?: PiNativeStreamControl,
 ): ReadableStream<Uint8Array> {
 	let cancelled = control?.signal?.aborted === true;
 	const markCancelled = () => {
@@ -182,11 +189,17 @@ export function encodeStream(
 	control?.signal?.addEventListener("abort", markCancelled, { once: true });
 	return new ReadableStream<Uint8Array>({
 		async start(controller) {
+			let unsubscribePromptProgress: (() => void) | undefined;
 			try {
 				if (cancelled) {
 					controller.close();
 					return;
 				}
+				unsubscribePromptProgress = control?.promptProgress?.subscribe(progress => {
+					if (cancelled) return;
+					const frame: PiNativePromptProgressFrame = { type: "prompt_progress", progress };
+					controller.enqueue(SSE_ENCODER.encode(`data: ${JSON.stringify(frame)}\n\n`));
+				});
 				for await (const event of events) {
 					if (cancelled) return;
 					controller.enqueue(SSE_ENCODER.encode(`data: ${JSON.stringify(event)}\n\n`));
@@ -212,11 +225,14 @@ export function encodeStream(
 					controller.close();
 				}
 			} finally {
+				unsubscribePromptProgress?.();
+				control?.promptProgress?.close();
 				control?.signal?.removeEventListener("abort", markCancelled);
 			}
 		},
 		cancel(reason) {
 			cancelled = true;
+			control?.promptProgress?.close();
 			control?.signal?.removeEventListener("abort", markCancelled);
 			control?.onCancel?.(reason);
 		},
