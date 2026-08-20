@@ -343,6 +343,7 @@ function extractOAuthTokenIdentifiers(token: string | undefined): string[] | und
 export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	#db: Database;
 	#listActiveStmt: Statement;
+	#getActiveByIdStmt: Statement;
 	#listActiveByProviderStmt: Statement;
 	#listDisabledStmt: Statement;
 	#listDisabledByProviderStmt: Statement;
@@ -389,6 +390,9 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 
 		this.#listActiveStmt = this.#db.prepare(
 			"SELECT id, provider, credential_type, data, disabled_cause, identity_key FROM auth_credentials WHERE disabled_cause IS NULL ORDER BY id ASC",
+		);
+		this.#getActiveByIdStmt = this.#db.prepare(
+			"SELECT id, provider, credential_type, data, disabled_cause, identity_key FROM auth_credentials WHERE id = ? AND disabled_cause IS NULL",
 		);
 		this.#listActiveByProviderStmt = this.#db.prepare(
 			"SELECT id, provider, credential_type, data, disabled_cause, identity_key FROM auth_credentials WHERE provider = ? AND disabled_cause IS NULL ORDER BY id ASC",
@@ -1457,10 +1461,10 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	/**
-	 * CAS-style disable: only soft-deletes the row when its `data` column still
-	 * matches `expectedData` and the row has not already been disabled. Used by
-	 * the OAuth refresh-failure path to avoid clobbering a peer that rotated the
-	 * row between our pre-check and the disable.
+	 * CAS-style disable: first matches the exact serialized bytes, then falls
+	 * back to a semantic comparison for legacy/noncanonical JSON. The fallback
+	 * still uses the currently observed raw bytes in its update predicate, so a
+	 * peer rotation between the read and disable wins the race.
 	 */
 	tryDisableAuthCredentialIfMatches(
 		id: number,
@@ -1468,16 +1472,28 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		disabledCause: string,
 		lease?: CredentialRefreshLeaseFence,
 	): boolean {
-		const result = lease
-			? (this.#deleteIfMatchesWithLeaseStmt.run(
-					normalizeDisabledCause(disabledCause),
-					id,
-					expectedData,
-					id,
-					lease.owner,
-					lease.nowMs,
-				) as { changes: number })
-			: (this.#deleteIfMatchesStmt.run(normalizeDisabledCause(disabledCause), id, expectedData) as {
+		const normalizedCause = normalizeDisabledCause(disabledCause);
+		let result = lease
+			? (this.#deleteIfMatchesWithLeaseStmt.run(normalizedCause, id, expectedData, id, lease.owner, lease.nowMs) as {
+					changes: number;
+				})
+			: (this.#deleteIfMatchesStmt.run(normalizedCause, id, expectedData) as {
+					changes: number;
+				});
+		if (result.changes > 0) return true;
+
+		const row = this.#getActiveByIdStmt.get(id) as AuthRow | undefined;
+		if (!row) return false;
+		const credential = deserializeCredential(row);
+		if (!credential) return false;
+		const serialized = serializeCredential(row.provider, credential);
+		if (!serialized || serialized.data !== expectedData) return false;
+
+		result = lease
+			? (this.#deleteIfMatchesWithLeaseStmt.run(normalizedCause, id, row.data, id, lease.owner, lease.nowMs) as {
+					changes: number;
+				})
+			: (this.#deleteIfMatchesStmt.run(normalizedCause, id, row.data) as {
 					changes: number;
 				});
 		return result.changes > 0;
@@ -1962,6 +1978,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#closed = true;
 		this.#listActiveStmt.finalize();
 		this.#listActiveByProviderStmt.finalize();
+		this.#getActiveByIdStmt.finalize();
 		this.#listDisabledStmt.finalize();
 		this.#listDisabledByProviderStmt.finalize();
 		this.#insertStmt.finalize();

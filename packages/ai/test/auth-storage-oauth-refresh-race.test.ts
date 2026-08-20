@@ -48,16 +48,18 @@ describe("AuthStorage OAuth refresh race", () => {
 		}
 	});
 
-	test("bounds unchanged xAI invalid_grant CAS misses without returning a provider key", async () => {
+	test("durably disables unchanged noncanonical xAI invalid_grant credentials", async () => {
 		if (!store) throw new Error("test setup failed");
 
 		let refreshCalls = 0;
-		authStorage = new AuthStorage(store, {
-			async refreshOAuthCredential() {
-				refreshCalls += 1;
-				throw new Error('HTTP 400 invalid_grant {"error":"invalid_grant"}');
-			},
-		});
+		const createStorage = () =>
+			new AuthStorage(store!, {
+				async refreshOAuthCredential() {
+					refreshCalls += 1;
+					throw new Error('HTTP 400 invalid_grant {"error":"invalid_grant"}');
+				},
+			});
+		authStorage = createStorage();
 		await authStorage.set("xai-oauth", [
 			{
 				type: "oauth",
@@ -83,14 +85,25 @@ describe("AuthStorage OAuth refresh race", () => {
 		await authStorage.reload();
 
 		await withEnv({ XAI_OAUTH_TOKEN: undefined, XAI_API_KEY: undefined }, async () => {
-			const apiKey = await authStorage!.getApiKey("xai-oauth", "session-invalid-grant");
 			let providerRequestCount = 0;
-			if (apiKey) providerRequestCount += 1;
+			const firstKey = await authStorage!.getApiKey("xai-oauth", "session-invalid-grant");
+			if (firstKey) providerRequestCount += 1;
+			expect(firstKey).toBeUndefined();
+			expect(refreshCalls).toBe(1);
 
-			expect(apiKey).toBeUndefined();
+			const secondKey = await authStorage!.getApiKey("xai-oauth", "session-invalid-grant");
+			if (secondKey) providerRequestCount += 1;
+			expect(secondKey).toBeUndefined();
+			expect(refreshCalls).toBe(1);
+
+			authStorage = createStorage();
+			await authStorage.reload();
+			const reloadedKey = await authStorage.getApiKey("xai-oauth", "session-invalid-grant-reloaded");
+			if (reloadedKey) providerRequestCount += 1;
+			expect(reloadedKey).toBeUndefined();
+			expect(refreshCalls).toBe(1);
 			expect(providerRequestCount).toBe(0);
 		});
-		expect(refreshCalls).toBe(1);
 
 		const observer = new Database(path.join(tempDir, "agent.db"), { readonly: true });
 		try {
@@ -98,7 +111,7 @@ describe("AuthStorage OAuth refresh race", () => {
 				.prepare("SELECT data, disabled_cause FROM auth_credentials WHERE id = ?")
 				.get(credentialId) as { data: string; disabled_cause: string | null };
 			expect(row.data).toBe(noncanonicalData);
-			expect(row.disabled_cause).toBeNull();
+			expect(row.disabled_cause).toContain("invalid_grant");
 		} finally {
 			observer.close();
 		}
