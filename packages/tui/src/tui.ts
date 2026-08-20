@@ -198,6 +198,13 @@ interface RightSidebarRegistration {
 	options: RightSidebarOptions;
 }
 
+interface ActiveViewportLayout {
+	terminalWidth: number;
+	mainWidth: number;
+	height: number;
+	sidebar: ResolvedRightSidebarLayout;
+}
+
 const DEFAULT_RIGHT_SIDEBAR_OPTIONS: RightSidebarOptions = {
 	width: 44,
 	minWidth: 28,
@@ -1554,6 +1561,24 @@ export class TUI extends Container {
 				};
 	}
 
+	#activeViewportLayout(): ActiveViewportLayout {
+		const terminalWidth = this.terminal.columns;
+		const sidebar = this.#resolveRightSidebar(terminalWidth);
+		return {
+			terminalWidth,
+			mainWidth: sidebar.mainWidth,
+			height: this.terminal.rows,
+			sidebar,
+		};
+	}
+
+	#composeRightSidebarIntoWindow(window: string[], layout: ResolvedRightSidebarLayout): string[] {
+		const registration = this.#rightSidebar;
+		if (!layout.visible || !registration) return window;
+		const sidebarLines = registration.component.render(layout.sidebarContentWidth);
+		return [...composeRightSidebar(window, sidebarLines, layout)];
+	}
+
 	override captureNativeScrollbackWidthEpoch(): unknown {
 		const liveSource = this.#frameSegments.findIndex(segment => segment.liveLocalStart !== undefined);
 		const indices = Array.from({ length: this.#frameSegments.length }, (_value, index) => index)
@@ -2174,6 +2199,7 @@ export class TUI extends Container {
 
 	override invalidate(): void {
 		super.invalidate();
+		this.#rightSidebar?.component.invalidate?.();
 		for (const overlay of this.overlayStack) overlay.component.invalidate?.();
 	}
 
@@ -2622,10 +2648,12 @@ export class TUI extends Container {
 			return;
 		}
 
-		const terminalWidth = this.terminal.columns;
-		const height = this.terminal.rows;
-		const sidebarLayout = this.#resolveRightSidebar(terminalWidth);
-		const mainWidth = sidebarLayout.mainWidth;
+		const {
+			terminalWidth,
+			height,
+			mainWidth,
+			sidebar: sidebarLayout,
+		} = this.#activeViewportLayout();
 		if (!this.#hasEverRendered || this.#resizeEventPending) {
 			this.requestComponentRender(component);
 			return;
@@ -3490,10 +3518,13 @@ export class TUI extends Container {
 	 */
 	#doRender(): void {
 		if (this.#stopped) return;
-		const terminalWidth = this.terminal.columns;
-		const height = this.terminal.rows;
-		const sidebarLayout = this.#resolveRightSidebar(terminalWidth);
-		const mainWidth = sidebarLayout.mainWidth;
+		const layout = this.#activeViewportLayout();
+		const {
+			terminalWidth,
+			height,
+			mainWidth,
+			sidebar: sidebarLayout,
+		} = layout;
 		const contentWidthChanged = this.#composeWidth >= 0 && mainWidth !== this.#composeWidth;
 
 		// Consume the component-scoped accumulation: it describes the render
@@ -3596,7 +3627,7 @@ export class TUI extends Container {
 		// (overlay resizes are not on the drag-cost hot path).
 		if (this.#resizeViewportActive && this.#hasEverRendered && this.#getTopmostVisibleOverlay() === undefined) {
 			this.#componentRenderTargets.clear();
-			this.#renderResizeViewport(terminalWidth, height);
+			this.#renderResizeViewport(layout);
 			return;
 		}
 
@@ -4032,10 +4063,7 @@ export class TUI extends Container {
 		const frame = this.#prepareFrame(rawFrame, mainWidth);
 		let window: string[] = new Array(height);
 		for (let r = 0; r < height; r++) window[r] = frame[windowTop + r] ?? "";
-		if (sidebarLayout.visible && this.#rightSidebar) {
-			const sidebarLines = this.#rightSidebar.component.render(sidebarLayout.sidebarContentWidth);
-			window = [...composeRightSidebar(window, sidebarLines, sidebarLayout)];
-		}
+		window = this.#composeRightSidebarIntoWindow(window, sidebarLayout);
 		if (hasVisibleOverlay) {
 			window = this.#compositeOverlaysIntoWindow(window, terminalWidth, height);
 			const overlayMarkers = this.#extractCursorMarkers(window);
@@ -5005,8 +5033,9 @@ export class TUI extends Container {
 	 * `#commit` nor `#emitFullPaint`, so the settle full paint reconciles against
 	 * the pre-drag screen state.
 	 */
-	#renderResizeViewport(width: number, height: number): void {
-		if (width <= 0 || height <= 0) return;
+	#renderResizeViewport(layout: ActiveViewportLayout): void {
+		const { terminalWidth, mainWidth, height } = layout;
+		if (terminalWidth <= 0 || mainWidth <= 0 || height <= 0) return;
 		// Tail renders call block.render(), which observes inline images on the
 		// budget. This is a STABLE (partial) pass: the tail walk is bottom-up and
 		// sees only the visible subset, so display-order-by-call-order is wrong
@@ -5017,8 +5046,8 @@ export class TUI extends Container {
 		// off a partial walk. The settle paint's own beginPass()/endPass() is the
 		// authoritative accounting, and its beginPass() wipes these frames.
 		this.#imageBudget.beginPass(true);
-		const { framed, viewportTop, contentRows } = this.#composeResizeViewport(width, height);
-		this.#emitResizeViewport(framed, viewportTop, height, contentRows, width);
+		const { framed, viewportTop, contentRows } = this.#composeResizeViewport(layout);
+		this.#emitResizeViewport(framed, viewportTop, height, contentRows, terminalWidth);
 		this.#resizeViewportPaintCount += 1;
 	}
 
@@ -5042,16 +5071,18 @@ export class TUI extends Container {
 	 * (issue #8318).
 	 */
 	#composeResizeViewport(
-		width: number,
-		height: number,
+		layout: ActiveViewportLayout,
 	): { framed: readonly string[]; viewportTop: number; contentRows: number } {
+		const { mainWidth, height } = layout;
 		const maxRows = height + TUI.#OSC66_MAX_SPACER_ROWS;
 		const tail: string[] = []; // bottom-first: viewport rows plus context above
 		const children = this.children;
 		for (let i = children.length - 1; i >= 0 && tail.length < maxRows; i--) {
 			const child = children[i]!;
 			const provider = asViewportTailProvider(child);
-			const rows = provider ? provider.renderViewportTail(width, maxRows - tail.length) : child.render(width);
+			const rows = provider
+				? provider.renderViewportTail(mainWidth, maxRows - tail.length)
+				: child.render(mainWidth);
 			for (let r = rows.length - 1; r >= 0 && tail.length < maxRows; r--) {
 				tail.push(rows[r]!);
 			}
@@ -5069,7 +5100,14 @@ export class TUI extends Container {
 		const framed: string[] = new Array(extra + height);
 		for (let k = 0; k < extra; k++) framed[k] = tail[tail.length - 1 - k]!;
 		for (let screenRow = 0; screenRow < height; screenRow++) framed[extra + screenRow] = window[screenRow]!;
-		return { framed: this.#prepareLinesArray(framed, width), viewportTop: extra, contentRows };
+		const prepared = this.#prepareLinesArray(framed, mainWidth);
+		if (layout.sidebar.visible) {
+			const composedWindow = this.#composeRightSidebarIntoWindow(prepared.slice(extra), layout.sidebar);
+			for (let screenRow = 0; screenRow < height; screenRow++) {
+				prepared[extra + screenRow] = composedWindow[screenRow]!;
+			}
+		}
+		return { framed: prepared, viewportTop: extra, contentRows };
 	}
 
 	/**
