@@ -357,7 +357,7 @@ export class SessionTools {
 	}
 
 	#getActiveNonMCPToolNames(): string[] {
-		return this.getEnabledToolNames().filter(name => !isMCPToolName(name) && this.#toolRegistry.has(name));
+		return this.#callerRequestedToolNames().filter(name => !isMCPToolName(name) && this.#toolRegistry.has(name));
 	}
 
 	/** Names of tools currently exposed at the top level. */
@@ -564,7 +564,7 @@ export class SessionTools {
 		return this.runToolRegistryMutation(async () => {
 			const removed = new Set(this.#installedVibeToolNames);
 			this.#uninstallVibeTools();
-			const nextEnabled = this.getEnabledToolNames().filter(name => !removed.has(name));
+			const nextEnabled = this.#callerRequestedToolNames().filter(name => !removed.has(name));
 			await this.#applyActiveToolsByName(nextEnabled);
 		});
 	}
@@ -678,12 +678,19 @@ export class SessionTools {
 		return signature;
 	}
 
+	/**
+	 * The enabled set as the caller last requested it. A Code Mode `eval`
+	 * injection is transport, not a selection, so internal reapplies must not
+	 * feed it back as if the caller had asked for a directly active `eval`.
+	 */
+	#callerRequestedToolNames(): string[] {
+		const enabledToolNames = this.getEnabledToolNames();
+		return this.#codeModeInjectedEval ? enabledToolNames.filter(name => name !== "eval") : enabledToolNames;
+	}
+
 	/** Reapplies the preserved enabled set after model or Code Mode setting changes. */
 	reconcileCodeMode(): Promise<void> {
-		const enabledToolNames = this.getEnabledToolNames();
-		return this.applyActiveToolsByName(
-			this.#codeModeInjectedEval ? enabledToolNames.filter(name => name !== "eval") : enabledToolNames,
-		);
+		return this.applyActiveToolsByName(this.#callerRequestedToolNames());
 	}
 
 	/** Enabled MCP tools in their current presentation partition. */
@@ -1264,7 +1271,7 @@ export class SessionTools {
 	replaceMemoryTools(tools: AgentTool[]): Promise<void> {
 		return this.runToolRegistryMutation(async () => {
 			const removed = new Set<string>(MEMORY_BACKEND_TOOL_NAMES.filter(name => this.#builtInToolNames.has(name)));
-			const nextActive = this.getEnabledToolNames().filter(name => !removed.has(name));
+			const nextActive = this.#callerRequestedToolNames().filter(name => !removed.has(name));
 			for (const name of removed) {
 				this.#toolRegistry.delete(name);
 				this.#builtInToolNames.delete(name);
@@ -1299,7 +1306,7 @@ export class SessionTools {
 	setComputerToolEnabled(enabled: boolean): Promise<boolean> {
 		return this.runToolRegistryMutation(async () => {
 			const logState = (): void => this.#logComputerState("Computer tool state changed", enabled);
-			const active = this.getEnabledToolNames();
+			const active = this.#callerRequestedToolNames();
 			if (!enabled) {
 				if (active.includes("computer")) {
 					await this.#applyActiveToolsByName(active.filter(name => name !== "computer"));
@@ -1349,7 +1356,7 @@ export class SessionTools {
 
 	#setThinkToolActive(enabled: boolean): Promise<boolean> {
 		return this.runToolRegistryMutation(async () => {
-			const active = this.getEnabledToolNames();
+			const active = this.#callerRequestedToolNames();
 			if (!enabled) {
 				if (active.includes("think")) {
 					await this.#applyActiveToolsByName(active.filter(name => name !== "think"));
@@ -1406,7 +1413,7 @@ export class SessionTools {
 					| undefined;
 				readTool?.syncInspectImageState?.(available);
 			};
-			const active = this.getEnabledToolNames();
+			const active = this.#callerRequestedToolNames();
 			const isActive = active.includes("inspect_image");
 			if (expected === isActive) {
 				syncReadDescription(isActive);
@@ -1732,7 +1739,7 @@ export class SessionTools {
 		}
 
 		const previousRpcHostToolNames = new Set(this.#rpcHostToolNames);
-		const previousActiveToolNames = this.getEnabledToolNames();
+		const previousActiveToolNames = this.#callerRequestedToolNames();
 		const previousRpcHostTools = new Map(
 			[...previousRpcHostToolNames].flatMap(name => {
 				const tool = this.#toolRegistry.get(name);

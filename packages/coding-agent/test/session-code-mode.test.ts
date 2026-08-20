@@ -279,6 +279,19 @@ describe("Code Mode session reconciliation", () => {
 		expect(session.agent.state.tools.map(value => value.name)).toEqual(["eval"]);
 	});
 
+	test("internal reapplies keep transport-only eval out of the caller's slate", async () => {
+		const { session, directModel } = createSession(Settings.isolated({ "providers.openai-codex.codeMode": "auto" }));
+		await session.setActiveToolsByName(["read"]);
+		expect(session.getEnabledToolNames()).toEqual(["read", "eval"]);
+
+		// Reconstructs its slate from the enabled set, which now carries the
+		// injected transport `eval`.
+		await session.removeVibeToolsPreservingActive();
+		await session.setModel(directModel);
+
+		expect(session.agent.state.tools.map(value => value.name)).toEqual(["read"]);
+	});
+
 	test("an eval replacement that cannot state transport support keeps the direct surface", async () => {
 		const { session } = createSession(
 			Settings.isolated({ "providers.openai-codex.codeMode": "auto" }),
