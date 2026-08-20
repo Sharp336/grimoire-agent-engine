@@ -45,6 +45,8 @@ export interface BankScope {
 	recallTags?: string[];
 	/** Match mode for `recallTags`. Defaults to `any` so untagged ("global") memories surface too. */
 	recallTagsMatch?: RecallTagsMatch;
+	/** Observation consolidation scopes. Tagged mode uses only the derived project tag. */
+	observationScopes?: string[][];
 }
 
 /** Compose the prefixed base bank id (no project segment). */
@@ -79,6 +81,17 @@ function projectLabel(directory: string): string {
 	return path.basename(primary ?? directory).toLowerCase() || UNKNOWN_PROJECT;
 }
 
+function uniquePreserveOrder(tags: string[]): string[] {
+	const seen = new Set<string>();
+	const out: string[] = [];
+	for (const tag of tags) {
+		if (!tag || seen.has(tag)) continue;
+		seen.add(tag);
+		out.push(tag);
+	}
+	return out;
+}
+
 /**
  * Resolve the active bank target plus optional tag scoping.
  *
@@ -97,10 +110,11 @@ export function computeBankScope(config: HindsightConfig, directory: string): Ba
 			return {
 				bankId: base,
 				retainTags: [tag],
-				recallTags: [tag],
-				// `any` keeps untagged "global" memories visible alongside the
-				// project-tagged ones; flip to `*_strict` to harden isolation.
-				recallTagsMatch: "any",
+				recallTags: uniquePreserveOrder([tag, ...config.recallTags]),
+				// `any` keeps untagged / `project:global` memories visible
+				// alongside the cwd project tag unless the operator hardens it.
+				recallTagsMatch: config.recallTagsMatch,
+				observationScopes: [[tag]],
 			};
 		}
 	}

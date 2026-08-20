@@ -73,6 +73,9 @@ function makeConfig(overrides: Partial<HindsightConfig> = {}): HindsightConfig {
 		mentalModelAutoSeed: false,
 		mentalModelRefreshIntervalMs: 5 * 60 * 1000,
 		mentalModelMaxRenderChars: 16_000,
+		retainStrategy: null,
+		recallTags: [],
+		recallTagsMatch: "any",
 		...overrides,
 	};
 }

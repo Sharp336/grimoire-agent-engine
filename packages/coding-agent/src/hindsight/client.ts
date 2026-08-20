@@ -107,6 +107,8 @@ export interface RetainOptions extends HindsightRequestOptions {
 	async?: boolean;
 	tags?: string[];
 	updateMode?: UpdateMode;
+	observationScopes?: MemoryItemInput["observationScopes"];
+	strategy?: string;
 }
 
 export interface RetainBatchOptions extends HindsightRequestOptions {
@@ -268,6 +270,8 @@ export class HindsightApi {
 			documentId: options?.documentId,
 			tags: options?.tags,
 			updateMode: options?.updateMode,
+			observationScopes: options?.observationScopes,
+			strategy: options?.strategy,
 		});
 
 		return this.#request<RetainResponse>(

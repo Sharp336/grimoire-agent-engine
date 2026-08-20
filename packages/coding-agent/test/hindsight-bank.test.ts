@@ -68,6 +68,9 @@ const baseConfig = (overrides: Partial<HindsightConfig> = {}): HindsightConfig =
 	mentalModelAutoSeed: false,
 	mentalModelRefreshIntervalMs: 5 * 60 * 1000,
 	mentalModelMaxRenderChars: 16_000,
+	retainStrategy: null,
+	recallTags: [],
+	recallTagsMatch: "any",
 	...overrides,
 });
 
@@ -138,6 +141,7 @@ describe("computeBankScope", () => {
 				retainTags: ["project:proj"],
 				recallTags: ["project:proj"],
 				recallTagsMatch: "any",
+				observationScopes: [["project:proj"]],
 			});
 		});
 
@@ -157,6 +161,51 @@ describe("computeBankScope", () => {
 			const scope = computeBankScope(baseConfig({ scoping: "per-project-tagged" }), "/work/General");
 			expect(scope.retainTags).toEqual(["project:general"]);
 			expect(scope.recallTags).toEqual(["project:general"]);
+		});
+
+		it("adds configured recallTags after the automatic project tag", () => {
+			const scope = computeBankScope(
+				baseConfig({ scoping: "per-project-tagged", recallTags: ["project:global"] }),
+				"/path/speech-core",
+			);
+			expect(scope.retainTags).toEqual(["project:speech-core"]);
+			expect(scope.recallTags).toEqual(["project:speech-core", "project:global"]);
+			expect(scope.recallTagsMatch).toBe("any");
+			expect(scope.observationScopes).toEqual([["project:speech-core"]]);
+		});
+
+		it("does not let configured recallTags replace the automatic project tag", () => {
+			const scope = computeBankScope(
+				baseConfig({ scoping: "per-project-tagged", recallTags: ["project:global", "project:speech-core"] }),
+				"/path/speech-core",
+			);
+			expect(scope.recallTags).toEqual(["project:speech-core", "project:global"]);
+		});
+
+		it("deduplicates configured recall tags against the automatic project tag", () => {
+			const scope = computeBankScope(
+				baseConfig({
+					scoping: "per-project-tagged",
+					recallTags: ["project:speech-core", "project:global", "project:global"],
+				}),
+				"/path/speech-core",
+			);
+			expect(scope.recallTags).toEqual(["project:speech-core", "project:global"]);
+		});
+
+		it("forwards recallTagsMatch", () => {
+			const scope = computeBankScope(
+				baseConfig({ scoping: "per-project-tagged", recallTagsMatch: "any_strict" }),
+				"/work/proj",
+			);
+			expect(scope.recallTagsMatch).toBe("any_strict");
+		});
+
+		it("scopes observations to the derived project tag only", () => {
+			const scope = computeBankScope(baseConfig({ scoping: "per-project-tagged" }), "/path/speech-core");
+			expect(scope.observationScopes).toEqual([["project:speech-core"]]);
+			expect(JSON.stringify(scope.observationScopes)).not.toContain("role:");
+			expect(JSON.stringify(scope.observationScopes)).not.toContain("source:");
 		});
 	});
 

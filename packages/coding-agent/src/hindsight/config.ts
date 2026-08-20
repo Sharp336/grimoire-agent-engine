@@ -32,6 +32,8 @@ export interface HindsightConfig {
 	retainEveryNTurns: number;
 	retainOverlapTurns: number;
 	retainContext: string;
+	/** Per-item Hindsight extraction strategy. Null/empty omits the field. */
+	retainStrategy: string | null;
 
 	recallBudget: "low" | "mid" | "high";
 	recallMaxTokens: number;
@@ -39,6 +41,9 @@ export interface HindsightConfig {
 	recallContextTurns: number;
 	recallMaxQueryChars: number;
 	recallPromptPreamble: string;
+	/** Extra recall tags merged after the automatic project tag in tagged mode. */
+	recallTags: string[];
+	recallTagsMatch: "any" | "all" | "any_strict" | "all_strict";
 
 	debug: boolean;
 
@@ -60,6 +65,7 @@ export interface HindsightConfig {
 const VALID_RETAIN_MODES: HindsightConfig["retainMode"][] = ["full-session", "last-turn"];
 const VALID_BUDGETS: HindsightConfig["recallBudget"][] = ["low", "mid", "high"];
 const VALID_SCOPINGS: HindsightScoping[] = ["global", "per-project", "per-project-tagged"];
+const VALID_TAGS_MATCH: HindsightConfig["recallTagsMatch"][] = ["any", "all", "any_strict", "all_strict"];
 
 const DEFAULT_PREAMBLE =
 	"Relevant memories from past conversations (prioritize recent when conflicting). " +
@@ -102,6 +108,26 @@ function pickScoping(value: unknown): HindsightScoping | undefined {
 		: undefined;
 }
 
+function pickTagsMatch(value: unknown): HindsightConfig["recallTagsMatch"] | undefined {
+	return typeof value === "string" && (VALID_TAGS_MATCH as string[]).includes(value)
+		? (value as HindsightConfig["recallTagsMatch"])
+		: undefined;
+}
+
+function coerceStringList(value: unknown): string[] {
+	if (!Array.isArray(value)) return [];
+	const out: string[] = [];
+	const seen = new Set<string>();
+	for (const item of value) {
+		if (typeof item !== "string") continue;
+		const tag = item.trim();
+		if (!tag || seen.has(tag)) continue;
+		seen.add(tag);
+		out.push(tag);
+	}
+	return out;
+}
+
 /**
  * Load the resolved Hindsight config.
  *
@@ -128,6 +154,7 @@ export function loadHindsightConfig(settings: Settings, env: NodeJS.ProcessEnv =
 	const reflectTimeoutMsEnv = envInt(env.HINDSIGHT_REFLECT_TIMEOUT_MS);
 	const recallTimeoutMsEnv = envInt(env.HINDSIGHT_RECALL_TIMEOUT_MS);
 	const retainTimeoutMsEnv = envInt(env.HINDSIGHT_RETAIN_TIMEOUT_MS);
+	const retainStrategyEnv = envString(env.HINDSIGHT_RETAIN_STRATEGY);
 
 	// Read from settings (each falls back to its schema default).
 	const settingsRetainMode = pickRetainMode(settings.get("hindsight.retainMode"));
@@ -143,6 +170,17 @@ export function loadHindsightConfig(settings: Settings, env: NodeJS.ProcessEnv =
 			value: settings.get("hindsight.scoping"),
 		});
 	}
+	const settingsTagsMatch = pickTagsMatch(settings.get("hindsight.recallTagsMatch"));
+	if (settings.get("hindsight.recallTagsMatch") && !settingsTagsMatch) {
+		logger.warn("Hindsight: invalid recallTagsMatch setting, falling back to any", {
+			value: settings.get("hindsight.recallTagsMatch"),
+		});
+	}
+	const settingsRetainStrategy = envString(
+		typeof settings.get("hindsight.retainStrategy") === "string"
+			? settings.get("hindsight.retainStrategy")
+			: undefined,
+	);
 
 	const config: HindsightConfig = {
 		hindsightApiUrl: apiUrlEnv ?? settings.get("hindsight.apiUrl") ?? null,
@@ -161,6 +199,7 @@ export function loadHindsightConfig(settings: Settings, env: NodeJS.ProcessEnv =
 		retainEveryNTurns: retainEveryNTurnsEnv ?? settings.get("hindsight.retainEveryNTurns"),
 		retainOverlapTurns: settings.get("hindsight.retainOverlapTurns"),
 		retainContext: settings.get("hindsight.retainContext") ?? "omp",
+		retainStrategy: retainStrategyEnv ?? settingsRetainStrategy ?? null,
 
 		recallBudget: recallBudgetEnv ?? settingsRecallBudget ?? "mid",
 		recallMaxTokens: recallMaxTokensEnv ?? settings.get("hindsight.recallMaxTokens"),
@@ -168,6 +207,8 @@ export function loadHindsightConfig(settings: Settings, env: NodeJS.ProcessEnv =
 		recallContextTurns: recallContextTurnsEnv ?? settings.get("hindsight.recallContextTurns"),
 		recallMaxQueryChars: recallMaxQueryCharsEnv ?? settings.get("hindsight.recallMaxQueryChars"),
 		recallPromptPreamble: DEFAULT_PREAMBLE,
+		recallTags: coerceStringList(settings.get("hindsight.recallTags")),
+		recallTagsMatch: settingsTagsMatch ?? "any",
 
 		debug: debugEnv ?? settings.get("hindsight.debug"),
 

@@ -44,6 +44,8 @@ export interface HindsightSessionStateOptions {
 	/** Tag filter applied to every recall/reflect — non-empty in per-project-tagged mode. */
 	recallTags?: string[];
 	recallTagsMatch?: "any" | "all" | "any_strict" | "all_strict";
+	/** Observation consolidation scopes copied from the resolved bank scope. */
+	observationScopes?: string[][];
 	config: HindsightConfig;
 	session: AgentSession;
 	banksSet: Set<string>;
@@ -150,12 +152,18 @@ export class HindsightRetainQueue {
 
 		try {
 			await ensureBankExists(state.client, state.bankId, state.config, state.banksSet);
+			const retainStrategy = state.config.retainStrategy || undefined;
 			const batch: MemoryItemInput[] = items.map(item => ({
 				content: item.content,
 				context: item.context ?? state.config.retainContext,
-				metadata: { session_id: sessionId },
+				metadata: {
+					session_id: sessionId,
+					...(retainStrategy ? { retain_strategy: retainStrategy } : {}),
+				},
 				tags: state.retainTags,
 				timestamp: item.timestamp,
+				strategy: retainStrategy,
+				observationScopes: state.observationScopes,
 			}));
 			await state.client.retainBatch(state.bankId, batch, { async: true });
 			if (state.config.debug) {
@@ -209,6 +217,8 @@ export class HindsightSessionState {
 	/** Tag filter applied to every recall/reflect — non-empty in per-project-tagged mode. */
 	recallTags?: string[];
 	recallTagsMatch?: "any" | "all" | "any_strict" | "all_strict";
+	/** Observation consolidation scopes copied from the resolved bank scope. */
+	observationScopes?: string[][];
 	config: HindsightConfig;
 	session: AgentSession;
 	banksSet: Set<string>;
@@ -254,6 +264,7 @@ export class HindsightSessionState {
 		this.retainTags = options.retainTags;
 		this.recallTags = options.recallTags;
 		this.recallTagsMatch = options.recallTagsMatch;
+		this.observationScopes = options.observationScopes;
 		this.config = options.config;
 		this.session = options.session;
 		this.banksSet = options.banksSet;
@@ -346,13 +357,19 @@ export class HindsightSessionState {
 		}
 
 		await ensureBankExists(this.client, this.bankId, this.config, this.banksSet);
+		const retainStrategy = this.config.retainStrategy || undefined;
 		await this.client.retain(this.bankId, transcript, {
 			documentId,
 			context: this.config.retainContext,
-			metadata: { session_id: this.sessionId },
+			metadata: {
+				session_id: this.sessionId,
+				...(retainStrategy ? { retain_strategy: retainStrategy } : {}),
+			},
 			tags: this.retainTags,
 			timestamp: retainedAt,
 			async: true,
+			strategy: retainStrategy,
+			observationScopes: this.observationScopes,
 		});
 		if (nextCachedTranscript !== undefined) {
 			this.#cachedTranscript = nextCachedTranscript;

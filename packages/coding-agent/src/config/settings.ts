@@ -2508,6 +2508,9 @@ const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
 	"hindsight.bankId": () => hindsightScopeSignal.fire(),
 	"hindsight.bankIdPrefix": () => hindsightScopeSignal.fire(),
 	"hindsight.scoping": () => hindsightScopeSignal.fire(),
+	"hindsight.recallTags": () => hindsightScopeSignal.fire(),
+	"hindsight.recallTagsMatch": () => hindsightScopeSignal.fire(),
+	"hindsight.retainStrategy": () => hindsightScopeSignal.fire(),
 	extendedContext: () => extendedContextSignal.fire(),
 	"worktree.base": value => {
 		const dir = typeof value === "string" && value.trim() ? value : undefined;
