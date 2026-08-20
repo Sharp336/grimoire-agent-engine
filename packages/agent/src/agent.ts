@@ -1263,13 +1263,12 @@ export class Agent {
 		try {
 			const dequeueSignal = this.#continuationDequeueSignal(signal);
 			const messages = this.#state.messages;
-			if (messages.length === 0) {
-				// An empty transcript has nothing to resume, but a queued steer/follow-up
-				// must still be delivered as the opening turn — mirroring the assistant-tail
-				// branch below. Throwing here leaves the message undeliverable, and idle-drain
-				// callers (AgentSession#scheduleQueuedMessageDrain) re-arm continue() on every
-				// microtask because hasQueuedMessages() never clears, spinning an unbounded
-				// allocation loop until OOM (issue #6344).
+			const lastRole = messages.at(-1)?.role;
+			// Empty, assistant, and toolResult tails can resume from a queued
+			// steer/follow-up. Prefix pending asides onto that continuation so
+			// skip-flush asides land in the first provider request. Bare
+			// toolResult (no queue) still falls through to #runLoop(undefined).
+			if (messages.length === 0 || lastRole === "assistant" || lastRole === "toolResult") {
 				const queuedSteering = await this.#dequeueSteeringMessagesAfterHooks(dequeueSignal);
 				if (queuedSteering.length > 0) {
 					await this.#runQueuedContinuation(
@@ -1286,28 +1285,16 @@ export class Agent {
 					await this.#runQueuedContinuation(queuedFollowUp, "followUp", undefined, signal, dequeueSignal);
 					return;
 				}
-				throw new Error("No messages to continue from");
-			}
-			if (messages[messages.length - 1].role === "assistant") {
-				const queuedSteering = await this.#dequeueSteeringMessagesAfterHooks(dequeueSignal);
-				if (queuedSteering.length > 0) {
-					await this.#runQueuedContinuation(
-						queuedSteering,
-						"steering",
-						{ skipInitialSteeringPoll: true },
-						signal,
-						dequeueSignal,
-					);
-					return;
+				if (messages.length === 0) {
+					// Throwing here leaves the message undeliverable, and idle-drain
+					// callers (AgentSession#scheduleQueuedMessageDrain) re-arm continue()
+					// on every microtask because hasQueuedMessages() never clears,
+					// spinning an unbounded allocation loop until OOM (issue #6344).
+					throw new Error("No messages to continue from");
 				}
-
-				const queuedFollowUp = await this.#dequeueFollowUpMessagesAfterHooks(dequeueSignal);
-				if (queuedFollowUp.length > 0) {
-					await this.#runQueuedContinuation(queuedFollowUp, "followUp", undefined, signal, dequeueSignal);
-					return;
+				if (lastRole === "assistant") {
+					throw new Error("Cannot continue from message role: assistant");
 				}
-
-				throw new Error("Cannot continue from message role: assistant");
 			}
 
 			await this.#runLoop(undefined, undefined, signal, true);
