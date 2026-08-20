@@ -47,7 +47,6 @@ function createYieldingSession(fallback: "served" | "unproven" = "served"): Agen
 		sessionManager: { appendSessionInit: () => {} },
 		getActiveToolNames: () => ["yield"],
 		getEnabledToolNames: () => ["yield"],
-		callerRequestedToolNames: () => ["yield"],
 		setActiveToolsByName: async () => {},
 		setIrcWakeTurnObserver: () => {},
 		subscribeRunState: () => () => {},

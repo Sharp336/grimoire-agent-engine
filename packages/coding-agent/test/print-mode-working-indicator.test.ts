@@ -81,7 +81,6 @@ function createDelayedSession(
 		isStreaming: false,
 		getPlanReferencePath: () => "",
 		getEnabledToolNames: () => enabledToolNames,
-		callerRequestedToolNames: () => enabledToolNames,
 		hasBuiltInTool: (name: string) => name === "write",
 		setActiveToolsByName: async (names: string[]) => {
 			enabledToolNames = names;

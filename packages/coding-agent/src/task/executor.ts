@@ -3203,9 +3203,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// except under prewalk, whose plan nudge + todo gate require the
 			// subagent to commit its own todo list before the hand-off.
 			const isParentOwnedTool = (name: string): boolean => !prewalk && name === "todo";
-			// A Code Mode transport `eval` is not part of the subagent's contract:
-			// revival reapplies these names against a possibly non-Code-Mode model.
-			const subagentToolNames = session.callerRequestedToolNames();
+			const subagentToolNames = session.getEnabledToolNames();
 			const filteredSubagentTools = subagentToolNames.filter(name => !isParentOwnedTool(name));
 			if (filteredSubagentTools.length !== subagentToolNames.length) {
 				await awaitAbortable(session.setActiveToolsByName(filteredSubagentTools));
@@ -3214,7 +3212,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			session.sessionManager.appendSessionInit({
 				systemPrompt: session.agent.state.systemPrompt.join("\n\n"),
 				task,
-				tools: session.callerRequestedToolNames(),
+				tools: session.getEnabledToolNames(),
 				agent: agent.name,
 				modelRole: modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings),
 				resolvedModel: progress.resolvedModel,

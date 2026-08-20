@@ -70,7 +70,6 @@ export interface PrewalkCoordinatorHost {
 	runToolRegistryMutation<T>(mutation: () => Promise<T>): Promise<T>;
 	getActiveToolNames(): string[];
 	getEnabledToolNames(): string[];
-	callerRequestedToolNames(): string[];
 	getSelectedMCPToolNames(): string[];
 	getMountedXdevToolNames(): string[];
 	hasBuiltInTool(name: string): boolean;
@@ -253,7 +252,7 @@ export class PrewalkCoordinator {
 	async armPlanYoloIfNeeded(): Promise<void> {
 		if (!this.#planYolo || this.#planYoloArmed) return;
 		this.#planYoloArmed = true;
-		const previousEnabledTools = this.#host.callerRequestedToolNames();
+		const previousEnabledTools = this.#host.getEnabledToolNames();
 		const previousMountedTools = this.#host.getMountedXdevToolNames();
 		const augmentations = this.#host.hasBuiltInTool("write") ? ["write"] : [];
 		await this.#host.setActiveToolsByName([...new Set([...previousEnabledTools, ...augmentations])]);

@@ -53,6 +53,7 @@
 - Fixed prompt guidance and descriptions for Task tools and SSH usage.
 - ACP editor clients that support elicitation forms (Zed) can now use `ask`, so the agent can pose single-choice, multi-select, and free-text questions inline instead of guessing.
 - `/retry` and `/handoff` now work over ACP, so editor clients (Zed) list them and can run them instead of sending the text to the model.
+- Added Code Mode for Codex `code_mode_only` models ([#9050](https://github.com/can1357/oh-my-pi/issues/9050)), mirroring codex-rs: the `providers.openai-codex.codeMode` setting (`off`/`on`/`auto`, default `off`; `auto` follows the model catalog's `tool_mode` flag) collapses the direct tool surface to the eval/ask/todo/yield keep-set (plus `providers.openai-codex.codeModeDirectTools`) whenever an openai-codex model matches and `eval` is part of the session's tool set, demoting every other enabled tool to the eval bridge with generated TypeScript `tool.<name>()` declarations in the eval tool description. A session whose tools exclude `eval` - a restricted subagent, or Vibe mode - keeps its direct surface instead of gaining a JS runtime. Turn metadata carries codex-rs's `tool_namespaces_info` exposure snapshot while active, model and setting changes reconcile the surface in place, and startup applies it before the first provider turn ([#9069](https://github.com/can1357/oh-my-pi/pull/9069) by [@MilesCranmerBot](https://github.com/MilesCranmerBot)).
 
 ## [17.4.0] - 2026-08-20
 

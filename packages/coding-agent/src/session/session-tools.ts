@@ -226,7 +226,6 @@ export class SessionTools {
 	/** Wire-name snapshot for the direct Code Mode tools last applied successfully. */
 	#codeModeDirectWireSignature: string | undefined;
 	/** Whether eval was added only as the current Code Mode transport. */
-	#codeModeInjectedEval = false;
 	/**
 	 * `xd://` device names the current base system prompt renders in its catalog
 	 * (the last rebuild's {@link BuildSystemPromptResult.xdevCatalogNames}). Consulted
@@ -357,7 +356,7 @@ export class SessionTools {
 	}
 
 	#getActiveNonMCPToolNames(): string[] {
-		return this.callerRequestedToolNames().filter(name => !isMCPToolName(name) && this.#toolRegistry.has(name));
+		return this.getEnabledToolNames().filter(name => !isMCPToolName(name) && this.#toolRegistry.has(name));
 	}
 
 	/** Names of tools currently exposed at the top level. */
@@ -564,7 +563,7 @@ export class SessionTools {
 		return this.runToolRegistryMutation(async () => {
 			const removed = new Set(this.#installedVibeToolNames);
 			this.#uninstallVibeTools();
-			const nextEnabled = this.callerRequestedToolNames().filter(name => !removed.has(name));
+			const nextEnabled = this.getEnabledToolNames().filter(name => !removed.has(name));
 			await this.#applyActiveToolsByName(nextEnabled);
 		});
 	}
@@ -678,19 +677,9 @@ export class SessionTools {
 		return signature;
 	}
 
-	/**
-	 * The enabled set as the caller last requested it. A Code Mode `eval`
-	 * injection is transport, not a selection, so internal reapplies must not
-	 * feed it back as if the caller had asked for a directly active `eval`.
-	 */
-	callerRequestedToolNames(): string[] {
-		const enabledToolNames = this.getEnabledToolNames();
-		return this.#codeModeInjectedEval ? enabledToolNames.filter(name => name !== "eval") : enabledToolNames;
-	}
-
-	/** Reapplies the preserved enabled set after model or Code Mode setting changes. */
+	/** Reapplies the enabled set after model or Code Mode setting changes. */
 	reconcileCodeMode(): Promise<void> {
-		return this.applyActiveToolsByName(this.callerRequestedToolNames());
+		return this.applyActiveToolsByName(this.getEnabledToolNames());
 	}
 
 	/** Enabled MCP tools in their current presentation partition. */
@@ -830,18 +819,14 @@ export class SessionTools {
 	async #applyActiveToolsByName(toolNames: string[], forcePromptRefresh = false, signal?: AbortSignal): Promise<void> {
 		signal?.throwIfAborted();
 		toolNames = normalizeToolNames(toolNames);
-		const injectEval = this.#toolRegistry.has("eval") && !toolNames.includes("eval");
-		const codeModeToolNames = injectEval ? [...toolNames, "eval"] : toolNames;
 		const codeMode = resolveCodeMode({
 			provider: this.#host.model()?.provider ?? "",
 			toolMode: this.#host.model()?.toolMode,
 			setting: this.#host.settings.get("providers.openai-codex.codeMode"),
 			extraDirectTools: this.#host.settings.get("providers.openai-codex.codeModeDirectTools"),
-			enabledToolNames: codeModeToolNames,
+			enabledToolNames: toolNames,
 			evalTransportAvailable: this.#hasCodeModeEvalTransport(),
 		});
-		const nextCodeModeInjectedEval = codeMode.active && injectEval;
-		if (codeMode.active) toolNames = codeModeToolNames;
 		let builtInWriteAvailable = this.#builtInToolNames.has("write");
 		if (toolNames.includes("write") && !builtInWriteAvailable) {
 			const writeRegistration = this.#ensureWriteRegistered?.();
@@ -989,7 +974,6 @@ export class SessionTools {
 		this.#codeModeDirectWireSignature = codeMode.active
 			? this.#computeCodeModeDirectWireSignature(appliedNames)
 			: undefined;
-		this.#codeModeInjectedEval = nextCodeModeInjectedEval;
 		if (rebuiltSystemPrompt && rebuiltSignature) {
 			if (this.#lastAppliedToolSignature !== undefined) this.#host.clearInheritedProviderPromptCacheKey();
 			this.#baseSystemPrompt = rebuiltSystemPrompt;
@@ -1271,7 +1255,7 @@ export class SessionTools {
 	replaceMemoryTools(tools: AgentTool[]): Promise<void> {
 		return this.runToolRegistryMutation(async () => {
 			const removed = new Set<string>(MEMORY_BACKEND_TOOL_NAMES.filter(name => this.#builtInToolNames.has(name)));
-			const nextActive = this.callerRequestedToolNames().filter(name => !removed.has(name));
+			const nextActive = this.getEnabledToolNames().filter(name => !removed.has(name));
 			for (const name of removed) {
 				this.#toolRegistry.delete(name);
 				this.#builtInToolNames.delete(name);
@@ -1306,7 +1290,7 @@ export class SessionTools {
 	setComputerToolEnabled(enabled: boolean): Promise<boolean> {
 		return this.runToolRegistryMutation(async () => {
 			const logState = (): void => this.#logComputerState("Computer tool state changed", enabled);
-			const active = this.callerRequestedToolNames();
+			const active = this.getEnabledToolNames();
 			if (!enabled) {
 				if (active.includes("computer")) {
 					await this.#applyActiveToolsByName(active.filter(name => name !== "computer"));
@@ -1356,7 +1340,7 @@ export class SessionTools {
 
 	#setThinkToolActive(enabled: boolean): Promise<boolean> {
 		return this.runToolRegistryMutation(async () => {
-			const active = this.callerRequestedToolNames();
+			const active = this.getEnabledToolNames();
 			if (!enabled) {
 				if (active.includes("think")) {
 					await this.#applyActiveToolsByName(active.filter(name => name !== "think"));
@@ -1413,7 +1397,7 @@ export class SessionTools {
 					| undefined;
 				readTool?.syncInspectImageState?.(available);
 			};
-			const active = this.callerRequestedToolNames();
+			const active = this.getEnabledToolNames();
 			const isActive = active.includes("inspect_image");
 			if (expected === isActive) {
 				syncReadDescription(isActive);
@@ -1739,7 +1723,7 @@ export class SessionTools {
 		}
 
 		const previousRpcHostToolNames = new Set(this.#rpcHostToolNames);
-		const previousActiveToolNames = this.callerRequestedToolNames();
+		const previousActiveToolNames = this.getEnabledToolNames();
 		const previousRpcHostTools = new Map(
 			[...previousRpcHostToolNames].flatMap(name => {
 				const tool = this.#toolRegistry.get(name);

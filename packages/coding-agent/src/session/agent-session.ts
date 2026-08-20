@@ -1040,7 +1040,6 @@ export class AgentSession {
 			runToolRegistryMutation: mutation => this.runToolRegistryMutation(mutation),
 			getActiveToolNames: () => this.getActiveToolNames(),
 			getEnabledToolNames: () => this.getEnabledToolNames(),
-			callerRequestedToolNames: () => this.callerRequestedToolNames(),
 			getSelectedMCPToolNames: () => this.getSelectedMCPToolNames(),
 			getMountedXdevToolNames: () => this.getMountedXdevToolNames(),
 			hasBuiltInTool: name => this.hasBuiltInTool(name),
@@ -4562,11 +4561,6 @@ export class AgentSession {
 	/** Enabled top-level and discoverable tool names. */
 	getEnabledToolNames(): string[] {
 		return this.#tools.getEnabledToolNames();
-	}
-
-	/** Enabled names as last requested, excluding a Code Mode transport `eval`. */
-	callerRequestedToolNames(): string[] {
-		return this.#tools.callerRequestedToolNames();
 	}
 
 	/** Names of dynamic tools mounted under `xd://`. */

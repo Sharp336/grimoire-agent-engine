@@ -75,9 +75,7 @@ export class TanCommandController {
 		const parentPromptCacheKey = session.agent.promptCacheKey ?? parentSessionId;
 		const thinkingLevel = session.configuredThinkingLevel();
 		const systemPrompt = [...session.systemPrompt];
-		// The clone's contract is what the parent selected: a Code Mode transport
-		// `eval` is not part of it and must not survive into a non-Code-Mode model.
-		const toolNames = session.callerRequestedToolNames();
+		const toolNames = session.getEnabledToolNames();
 		const modelRegistry = session.modelRegistry;
 		const ownerId = session.getAgentId() ?? MAIN_AGENT_ID;
 		const mcpManager = this.ctx.mcpManager;
@@ -154,7 +152,7 @@ export class TanCommandController {
 						clone.sessionManager?.appendSessionInit?.({
 							systemPrompt: clone.systemPrompt ? clone.systemPrompt.join("\n\n") : systemPrompt.join("\n\n"),
 							task: trimmedWork,
-							tools: clone.callerRequestedToolNames(),
+							tools: clone.getEnabledToolNames(),
 						});
 						const abortClone = () => {
 							void clone?.abort();

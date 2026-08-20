@@ -2799,7 +2799,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			// sdk.ts excludes "goal" from the initial active tool set unconditionally.
 			// Re-add it now so the agent can call resume, complete, or drop on this goal.
 			if (restored?.goal) {
-				const previousTools = this.session.callerRequestedToolNames().filter(name => name !== "goal");
+				const previousTools = this.session.getEnabledToolNames().filter(name => name !== "goal");
 				this.#goalModePreviousTools = previousTools;
 				await this.session.setActiveToolsByName([...new Set([...previousTools, "goal"])]);
 			}
@@ -2856,7 +2856,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.planModePaused = false;
 
 		const planFilePath = options?.planFilePath ?? (await this.#getPlanFilePath());
-		const previousTools = this.session.callerRequestedToolNames();
+		const previousTools = this.session.getEnabledToolNames();
 		// `plan-mode-active.md` instructs the agent to draft the plan file with
 		// `write` and refine it with `edit`, and plan approval itself is a `write`
 		// to `xd://propose`. Both must be in the active set or the agent falls
@@ -3032,7 +3032,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showWarning("Exit vibe mode first.");
 			return;
 		}
-		const previousTools = this.session.callerRequestedToolNames().filter(name => name !== "goal");
+		const previousTools = this.session.getEnabledToolNames().filter(name => name !== "goal");
 		const goalTools = [...new Set([...previousTools, "goal"])];
 		this.#goalModePreviousTools = previousTools;
 		this.goalModePaused = false;
@@ -3333,7 +3333,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			executionModel?: ResolvedRoleModel;
 		},
 	): Promise<boolean> {
-		const previousTools = this.#planModePreviousTools ?? this.session.callerRequestedToolNames();
+		const previousTools = this.#planModePreviousTools ?? this.session.getEnabledToolNames();
 
 		// Mark the pending abort caused by the plan-mode → compaction transition as
 		// silent BEFORE #exitPlanMode raises it. The `finally` below clears the
@@ -3627,7 +3627,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// vibe set, so re-snapshotting it here would make the snapshot useless. That
 		// path passes the pre-vibe toolset recorded on the target's own mode_change
 		// entry instead.
-		const previousTools = options?.previousTools ?? this.session.callerRequestedToolNames();
+		const previousTools = options?.previousTools ?? this.session.getEnabledToolNames();
 		const vibeBaseTools = ["read"];
 		if (this.session.hasBuiltInTool("todo")) vibeBaseTools.push("todo");
 		await this.session.activateVibeTools(vibeBaseTools);
@@ -3774,7 +3774,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			// calling `goal create`. Record the pre-interview toolset first: the
 			// tool-driven create flips goalModeEnabled via `goal_updated`, and the
 			// eventual goal exit restores this set (dropping the goal tool again).
-			const enabledTools = this.session.callerRequestedToolNames();
+			const enabledTools = this.session.getEnabledToolNames();
 			this.#goalModePreviousTools = enabledTools.filter(name => name !== "goal");
 			if (!enabledTools.includes("goal")) {
 				await this.session.setActiveToolsByName([...enabledTools, "goal"]);
