@@ -324,6 +324,9 @@ export class StatusLineComponent implements Component {
 	#onBranchChange: (() => void) | null = null;
 	#disposed = false;
 	#autoCompactEnabled: boolean = true;
+	/** Pulse timer for the running-speculation indicator; live only while speculation runs. */
+	#speculationBlinkTimer: NodeJS.Timeout | undefined;
+	#speculationBlinkOn = true;
 	#hookStatuses: Map<string, string> = new Map();
 	#subagentCount: number = 0;
 	/**
@@ -694,10 +697,36 @@ export class StatusLineComponent implements Component {
 		this.#branchResolveActive = undefined;
 		this.#resetJjRequests();
 		this.#onBranchChange = null;
+		this.#stopSpeculationBlink();
 		this.#clearUsageStartTimer();
 		this.#onCodexResetFireworks = undefined;
 		this.#codexResetSnapshots.clear();
 		this.#retireGitWatcher();
+	}
+
+	/**
+	 * Drive the context segment's pulse while a background speculative
+	 * compaction runs: a slow toggle that invalidates and repaints through the
+	 * same host callback async git/PR resolves use. Stops (and resets phase)
+	 * the first render after speculation leaves the running state.
+	 */
+	#syncSpeculationBlink(state: "idle" | "running" | "armed"): void {
+		if (state === "running" && !this.#disposed) {
+			this.#speculationBlinkTimer ??= setInterval(() => {
+				this.#speculationBlinkOn = !this.#speculationBlinkOn;
+				this.invalidate();
+				this.#onBranchChange?.();
+			}, 600);
+			return;
+		}
+		this.#stopSpeculationBlink();
+	}
+
+	#stopSpeculationBlink(): void {
+		if (!this.#speculationBlinkTimer) return;
+		clearInterval(this.#speculationBlinkTimer);
+		this.#speculationBlinkTimer = undefined;
+		this.#speculationBlinkOn = true;
 	}
 
 	#clearUsageStartTimer(): void {
@@ -1599,6 +1628,8 @@ export class StatusLineComponent implements Component {
 				this.#getGitStatus(activeRepoCache.effectiveGitCwd))
 			: null;
 		const gitPr = includePr ? this.#lookupPr(activeRepoCache.effectiveGitCwd) : null;
+		const compactionSpeculation = this.session.compactionSpeculation ?? "idle";
+		this.#syncSpeculationBlink(compactionSpeculation);
 		return {
 			session: this.session,
 			focusedAgentId: this.#focusedAgentId,
@@ -1621,6 +1652,8 @@ export class StatusLineComponent implements Component {
 			contextTokens,
 			contextWindow,
 			autoCompactEnabled: this.#autoCompactEnabled,
+			compactionSpeculation,
+			speculationBlinkOn: this.#speculationBlinkOn,
 			subagentCount: this.#subagentCount,
 			activeMs: this.getActiveMs(),
 			git: {

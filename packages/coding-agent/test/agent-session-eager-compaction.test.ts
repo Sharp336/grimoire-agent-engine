@@ -173,7 +173,7 @@ describe("AgentSession eager prelude re-injection after compaction", () => {
 		const settings = Settings.isolated({
 			"compaction.enabled": true,
 			"compaction.autoContinue": true,
-			"compaction.strategy": "context-full",
+			"compaction.methodOrder": ["soft"],
 			"task.eager": "always",
 			"todo.enabled": false,
 			"todo.eager": "default",

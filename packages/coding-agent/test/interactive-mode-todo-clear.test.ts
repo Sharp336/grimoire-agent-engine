@@ -297,9 +297,11 @@ describe("InteractiveMode todo HUD anchor", () => {
 
 		// Lightened: no boxed top/bottom rules.
 		expect(lines.some(line => line === "─".repeat(80))).toBe(false);
-		// Root header carries overall stage progression (on stage 1 of 2).
+		// Root header carries the summed task progress bar (1 of 4 tasks closed).
 		const root = lines.find(line => line.includes("Todos"));
-		expect(root).toContain("1/2");
+		expect(root).toContain("1/4");
+		expect(root).toContain(theme.progress.filled);
+		expect(root).toContain(theme.progress.empty);
 		// Active stage: highlighted header with its own task progress, expanded as a
 		// connector tree; the just-completed task stays as the lead row so progress
 		// is visible while the stage still has open work.
@@ -322,7 +324,7 @@ describe("InteractiveMode todo HUD anchor", () => {
 		expect(mode.todoContainer.render(80)).toHaveLength(0);
 	});
 
-	it("omits the stage count and roman numeral for a single-phase list", () => {
+	it("keeps the summed progress bar but omits the roman numeral for a single-phase list", () => {
 		mode.setTodos([
 			{
 				name: "Tasks",
@@ -336,16 +338,17 @@ describe("InteractiveMode todo HUD anchor", () => {
 			.render(80)
 			.flatMap(line => line.split("\n"))
 			.map(line => Bun.stripANSI(line));
-		// One stage → no redundant "1/1" stage count on the root.
+		// One stage → the root still carries the summed bar and task counts.
 		const root = lines.find(line => line.includes("Todos"));
-		expect(root).not.toContain("/");
+		expect(root).toContain("0/2");
+		expect(root).toContain(theme.progress.empty);
 		// The stage keeps its task progress; no roman numeral for a lone stage.
 		expect(lines.some(line => line.includes("Tasks") && line.includes("0/2"))).toBe(true);
 		expect(lines.some(line => line.includes("I. Tasks"))).toBe(false);
 		expect(lines.some(line => line.includes("alpha"))).toBe(true);
 	});
 
-	it("caps the visible stage list and leaves the hidden ones to the header count", () => {
+	it("caps the visible stage list and summarizes the hidden ones in an overflow row", () => {
 		const stage = (name: string): TodoPhase => ({ name, tasks: [{ content: `${name} task`, status: "pending" }] });
 		mode.setTodos([
 			stage("Discovery"),
@@ -360,14 +363,15 @@ describe("InteractiveMode todo HUD anchor", () => {
 			.render(80)
 			.flatMap(line => line.split("\n"))
 			.map(line => Bun.stripANSI(line));
-		// Active stage + four following stages render; the rest are dropped.
+		// Active stage + four following stages render; the rest collapse into a
+		// trailing "… n more stages" row.
 		expect(lines.some(line => line.includes("II. Two"))).toBe(true);
 		expect(lines.some(line => line.includes("V. Five"))).toBe(true);
 		expect(lines.some(line => line.includes("Six"))).toBe(false);
-		// No overflow row — the header's "1/7" implies the hidden stages.
-		expect(lines.some(line => line.includes("more"))).toBe(false);
+		expect(lines.some(line => line.includes("2 more stages"))).toBe(true);
+		// Root header sums tasks across every stage, hidden ones included.
 		const root = lines.find(line => line.includes("Todos"));
-		expect(root).toContain("1/7");
+		expect(root).toContain("0/7");
 	});
 
 	it("anchors the todo HUD as a native-scrollback live region while populated", () => {
