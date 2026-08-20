@@ -219,10 +219,13 @@ describe("AgentSession shake", () => {
 			seedHeavyToolResult("X".repeat(20_000));
 			const firstKeptEntryId = sessionManager.getBranch()[0]?.id;
 			if (!firstKeptEntryId) throw new Error("Expected seeded branch");
-			sessionManager.appendCompaction("remote summary", undefined, firstKeptEntryId, 10_000, {}, false, {
-				openaiRemoteCompaction: {
-					provider: "openai",
-					replacementHistory: [],
+			sessionManager.appendCompaction("remote summary", undefined, firstKeptEntryId, 10_000, {
+				details: {},
+				preserveData: {
+					openaiRemoteCompaction: {
+						provider: "openai",
+						replacementHistory: [],
+					},
 				},
 			});
 			sessionManager.appendMessage({

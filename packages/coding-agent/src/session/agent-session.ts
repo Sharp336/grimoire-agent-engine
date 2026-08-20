@@ -9467,6 +9467,10 @@ export class AgentSession {
 	getAdvisorCost(): number {
 		return this.#advisors.getAdvisorCost();
 	}
+	/** Return whether any active or configured advisor is running on an OAuth/subscription model. */
+	isAdvisorUsingSubscription(): boolean {
+		return this.#advisors.isUsingSubscription();
+	}
 	/**
 	 * Return structured advisor stats for the status command and TUI panel.
 	 */

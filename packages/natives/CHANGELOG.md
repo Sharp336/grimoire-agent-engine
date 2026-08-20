@@ -2,16 +2,22 @@
 
 ## [Unreleased]
 
+## [17.4.0] - 2026-08-20
+
 ### Added
 
-- Added `ClaudeV3`/`ClaudeV47`/`ClaudeV5` encodings to `countTokens`: a Rust rewrite of [ctok](https://github.com/sanderland/ctok) by Sander Land (MIT), reconstructing Anthropic's `count_tokens` offline. Counts are exact on ctok's ~3.4M-response measurement corpora; the port is validated against 493 Python-ctok reference fixtures covering all three families. The pipeline is byte-level throughout — markers occupy one byte, normalization borrows text no rule touches, ASCII and ideographs skip the Unicode tables, and pieces are matched with one Aho-Corasick transition per byte instead of a per-position vocabulary descent — which counts English prose at 64 MiB/s, markdown at 73 MiB/s, source code at 35 MiB/s and CJK at 49 MiB/s per core: 1.5× (CJK, already cheap per byte) to 5.5× (prose, markdown, digits) a straightforward character-level implementation of the same model, which is held to byte-for-byte identical counts across 2.4M randomized differential comparisons.
-- Added zstd-embedded exact content tokenizers for Qwen 3.5+/3.6+/3.8, DeepSeek V3/V4/R1, Kimi K2/K3, and GLM-5 alongside the rebuilt OpenAI o200k/cl100k and Claude reconstructions. `countTokens` now reads JavaScript strings through a reusable UTF-16 buffer, so native counting does not allocate a UTF-8 temporary.
-- Added `nodeChainAt`: the named tree-sitter node chain containing a line, innermost-first, with grammar kind and line span per node. Powers hashline's structural edit repairs (annotation-row classification, opener-anchored insert relocation) without lexical heuristics.
+- Added offline `countTokens` support for Anthropic Claude families (`ClaudeV3`, `ClaudeV47`, `ClaudeV5`) via a high-performance native port of `ctok`.
+- Added exact offline token counting support for Qwen (3.5+, 3.6+, 3.8), DeepSeek (V3, V4, R1), Kimi (K2, K3), and GLM-5 models alongside rebuilt OpenAI encodings, with optimized zero-allocation string passing from JavaScript.
+- Added `nodeChainAt` native API to retrieve innermost-first tree-sitter node chains with grammar kinds and line spans for structural syntax analysis.
 
 ### Changed
 
-- Shell builtin utilities now stream their output. Utilities that emit progressively (`grep`, `rg`, `sed`, `cat`, `head`, `tail`, `cut`, `date`, `uniq`, `comm`, `jq`, `ls`, `fd`) write through a destination-aware buffer: line-buffered to pipes/terminals so each completed line reaches the TUI's live tool output (or the next pipeline stage) as it is produced, block-buffered to regular files for throughput. Previously they held everything in an exit-flushed 8–32 KiB `BufWriter`. `rg --line-buffered`/`--no-line-buffered` still force a policy. Builtin stderr goes through the same policy, and when fd 1 and fd 2 share a destination (`2>&1`, or the default merged capture pipe) both streams funnel through one serialized writer, so diagnostics interleave with output in exact write order.
-- Compound (`{ …; }`, `(…)`) and shell-function pipeline stages now run concurrently with the rest of the pipeline, like builtin and external stages already did. They previously executed inline while the pipeline was being spawned, which delayed all downstream output until the stage exited and deadlocked the shell when a stage produced more than a pipe buffer with no reader running (e.g. `{ seq 1 200000; } | head -n 1`).
+- Improved shell builtins (`grep`, `rg`, `sed`, `cat`, `head`, `tail`, `jq`, `ls`, etc.) to stream output progressively with destination-aware line buffering for pipes, terminals, and live TUI output, while maintaining block buffering for file writes.
+- Updated compound blocks (`{ ...; }`, `(...)`) and shell-function pipeline stages to run concurrently with other pipeline stages, preventing head-of-line blocking and pipe buffer deadlocks.
+
+### Fixed
+
+- Fixed the shell output minimizer dropping failure details from non-TTY `bun test` runs: the `(fail)` line, code frame, `error:` assertion, and stack trace are now kept instead of collapsing a failing run to bare pass/fail counts; unrecognized failing test formats now fall back to head/tail instead of counts-only output.
 
 ## [17.3.8] - 2026-08-19
 
