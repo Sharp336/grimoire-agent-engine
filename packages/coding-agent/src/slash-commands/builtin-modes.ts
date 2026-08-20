@@ -140,7 +140,14 @@ async function applyVisionMode(session: AgentSession, mode: InspectImageMode): P
 
 const AUTOCOMPLETE_DETAIL_LIMIT = 48;
 const LOOP_UNTIL_GOAL_FLAG = "--until-goal";
-const goalAwareLoopWatchers = new WeakMap<AgentSession, () => void>();
+const GOAL_AWARE_LOOP_CLEANUP_INTERVAL_MS = 1_000;
+
+interface GoalAwareLoopWatcher {
+	unsubscribe: () => void;
+	cleanupTimer: NodeJS.Timeout;
+}
+
+const goalAwareLoopWatchers = new WeakMap<AgentSession, GoalAwareLoopWatcher>();
 
 function shortDetail(value: string, limit = AUTOCOMPLETE_DETAIL_LIMIT): string {
 	const singleLine = value.replace(/\s+/g, " ").trim();
@@ -148,10 +155,11 @@ function shortDetail(value: string, limit = AUTOCOMPLETE_DETAIL_LIMIT): string {
 }
 
 function clearGoalAwareLoopWatcher(session: AgentSession): void {
-	const unsubscribe = goalAwareLoopWatchers.get(session);
-	if (!unsubscribe) return;
+	const watcher = goalAwareLoopWatchers.get(session);
+	if (!watcher) return;
 	goalAwareLoopWatchers.delete(session);
-	unsubscribe();
+	clearInterval(watcher.cleanupTimer);
+	watcher.unsubscribe();
 }
 
 function splitGoalAwareLoopArgs(args: string): { untilGoal: boolean; args: string } {
@@ -168,8 +176,7 @@ function watchGoalAwareLoop(ctx: InteractiveModeContext, goalId: string): void {
 	clearGoalAwareLoopWatcher(ctx.session);
 	const stopLoop = (message: string) => {
 		if (ctx.loopModeEnabled) {
-			ctx.disableLoopMode();
-			ctx.showStatus(message);
+			ctx.disableLoopMode(message);
 		}
 		clearGoalAwareLoopWatcher(ctx.session);
 	};
@@ -196,7 +203,13 @@ function watchGoalAwareLoop(ctx: InteractiveModeContext, goalId: string): void {
 			stopLoop(`Goal is ${goal.status}. Loop mode disabled.`);
 		}
 	});
-	goalAwareLoopWatchers.set(ctx.session, unsubscribe);
+	const cleanupTimer = setInterval(() => {
+		if (!ctx.loopModeEnabled || ctx.isShuttingDown) {
+			clearGoalAwareLoopWatcher(ctx.session);
+		}
+	}, GOAL_AWARE_LOOP_CLEANUP_INTERVAL_MS);
+	cleanupTimer.unref();
+	goalAwareLoopWatchers.set(ctx.session, { unsubscribe, cleanupTimer });
 }
 
 export function formatTokenCount(value: number): string {
