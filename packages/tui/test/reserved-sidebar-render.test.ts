@@ -282,6 +282,39 @@ describe("TUI reserved right sidebar", () => {
 		expect(terminal.getViewport()).toEqual(baseline);
 	});
 
+	it("clears stale suffix cells when combining-heavy width is uncertain", async () => {
+		const terminal = new VirtualTerminal(120, 5, 100);
+		const tui = new TUI(terminal);
+		const main = new MutableLinesProbe(Array.from({ length: 8 }, (_, index) => `MAIN-${index}`));
+		tui.addChild(main);
+		tui.setRightSidebar(
+			{
+				render: width => [
+					"a\u064e".repeat(Math.ceil(width / 2)),
+					"L".repeat(width),
+					...Array.from({ length: 3 }, (_, index) => `short-${index}`),
+				],
+			},
+			{ width: 44, minWidth: 28, minMainWidth: 64 },
+		);
+		tui.start();
+		active.push({ tui, terminal });
+		await terminal.waitForRender(() => terminal.getViewport().some(line => line.includes("MAIN-7")));
+
+		main.lines.push("MAIN-8");
+		tui.requestRender();
+		await terminal.waitForRender(() => terminal.getViewport().some(line => line.includes("MAIN-8")));
+
+		const baseline = terminal.getViewport();
+		const firstSuffix = baseline[0]?.slice(76) ?? "";
+		expect(firstSuffix).toContain("a");
+		expect(firstSuffix).not.toContain("L");
+
+		tui.requestRender();
+		await terminal.waitForRender();
+		expect(terminal.getViewport()).toEqual(baseline);
+	});
+
 	it("isolates main SGR and OSC 8 state before padding, separator, and sidebar", async () => {
 		const terminal = new VirtualTerminal(120, 4, 100);
 		const writes: string[] = [];
