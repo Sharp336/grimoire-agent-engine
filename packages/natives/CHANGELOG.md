@@ -2,6 +2,59 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `ClaudeV3`/`ClaudeV47`/`ClaudeV5` encodings to `countTokens`: a Rust rewrite of [ctok](https://github.com/sanderland/ctok) by Sander Land (MIT), reconstructing Anthropic's `count_tokens` offline. Counts are exact on ctok's ~3.4M-response measurement corpora; the port is validated against 493 Python-ctok reference fixtures covering all three families. The pipeline is byte-level throughout — markers occupy one byte, normalization borrows text no rule touches, ASCII and ideographs skip the Unicode tables, and pieces are matched with one Aho-Corasick transition per byte instead of a per-position vocabulary descent — which counts English prose at 64 MiB/s, markdown at 73 MiB/s, source code at 35 MiB/s and CJK at 49 MiB/s per core: 1.5× (CJK, already cheap per byte) to 5.5× (prose, markdown, digits) a straightforward character-level implementation of the same model, which is held to byte-for-byte identical counts across 2.4M randomized differential comparisons.
+- Added zstd-embedded exact content tokenizers for Qwen 3.5+/3.6+/3.8, DeepSeek V3/V4/R1, Kimi K2/K3, and GLM-5 alongside the rebuilt OpenAI o200k/cl100k and Claude reconstructions. `countTokens` now reads JavaScript strings through a reusable UTF-16 buffer, so native counting does not allocate a UTF-8 temporary.
+- Added `nodeChainAt`: the named tree-sitter node chain containing a line, innermost-first, with grammar kind and line span per node. Powers hashline's structural edit repairs (annotation-row classification, opener-anchored insert relocation) without lexical heuristics.
+
+### Changed
+
+- Shell builtin utilities now stream their output. Utilities that emit progressively (`grep`, `rg`, `sed`, `cat`, `head`, `tail`, `cut`, `date`, `uniq`, `comm`, `jq`, `ls`, `fd`) write through a destination-aware buffer: line-buffered to pipes/terminals so each completed line reaches the TUI's live tool output (or the next pipeline stage) as it is produced, block-buffered to regular files for throughput. Previously they held everything in an exit-flushed 8–32 KiB `BufWriter`. `rg --line-buffered`/`--no-line-buffered` still force a policy. Builtin stderr goes through the same policy, and when fd 1 and fd 2 share a destination (`2>&1`, or the default merged capture pipe) both streams funnel through one serialized writer, so diagnostics interleave with output in exact write order.
+- Compound (`{ …; }`, `(…)`) and shell-function pipeline stages now run concurrently with the rest of the pipeline, like builtin and external stages already did. They previously executed inline while the pipeline was being spawned, which delayed all downstream output until the stage exited and deadlocked the shell when a stage produced more than a pipe buffer with no reader running (e.g. `{ seq 1 200000; } | head -n 1`).
+
+## [17.3.8] - 2026-08-19
+
+### Changed
+
+- `enclosingBlockBoundaries` and `blockRangeAt` now reuse a parsed tree-sitter tree when the same source and language were parsed before, and skip subtrees whose line span holds no visible line. Together these cut the block-context work the `read` tool performs on every non-raw read: for an 81KB TypeScript source with a mid-file window, 13.4ms to 4.45ms on a first parse and to 0.149ms once the tree is cached; for a 1.06MB source, 188.1ms to 55.8ms and to 0.440ms. The tree cache is bounded (12 entries, 4MiB of retained source) and verifies content byte-for-byte on every hit, so a hash collision can only cost a re-parse. The subtree skip is proven equivalent by differential comparison against the exhaustive walk across 4827 repository files and 38,616 window comparisons.
+
+## [17.3.5] - 2026-08-16
+
+### Fixed
+
+- Fixed the native `xargs` builtin panicking in `-I`/`-i` replace mode when stdin is empty; it now exits successfully without running the command, matching GNU behavior.
+- Fixed inline-code foreground color incorrectly carrying into plain text when a Markdown codespan ended exactly at a soft-wrap boundary.
+- Fixed `wrapTextWithAnsi` leaving a trailing space plus a stray underline open/close pair on the line above a soft wrap when a style opened immediately after that space (e.g. `read this thread <underline>https://…`), a regression from the codespan color-bleed fix: only sequences that follow visible content now ride along with the current token, while sequences after whitespace still wait for the token they style.
+
+## [17.3.4] - 2026-08-14
+
+### Added
+
+- Added the async `pdfToMarkdown` native API backed by `pdf-inspector`, with page numbering, page-count, OCR-needed-page, and encoding-issue metadata.
+
+### Changed
+
+- Docker images (`Dockerfile`, `scripts/install-tests/*.dockerfile`) build the native addon through the cargo/napi-rs backend (`OMP_NATIVE_BUILD_BACKEND=cargo`) instead of Bazel: a single fixed host target gains nothing from hermetic cross toolchains, and none of those images shipped bazelisk. `OMP_NATIVE_CARGO_PROFILE` picks the profile for that path (images use `ci`, local default stays `local`).
+
+### Fixed
+
+- Fixed the root Cargo workspace failing to load when a stale directory exists under `crates/` — e.g. a deleted crate whose directory survived `git reset --hard`. `members` no longer globs `crates/pi-*`, so a directory without a `Cargo.toml` can no longer break every cargo and Bazel build.
+- Fixed Docker build contexts shipping nested build output: `.dockerignore` patterns are anchored at the context root, so bare `target/` and `dist/` matched neither `go-port/*/target` (~1.4 GB) nor `packages/*/dist` (~600 MB).
+- Fixed `deviceCheckGenerateToken` aborting the whole process with `SIGTRAP` when called from a macOS session without GUI/graphic access (SSH, a launchd `LaunchDaemon`, a CI runner, a service account, a sandbox), which made every `openai-codex/*` OAuth model unusable for such accounts. `-[DCDevice isSupported]` synchronously opens an XPC connection to the per-user DeviceCheck metadata daemon, which exists only in an interactive GUI login session; without one the connection setup hits `_xpc_api_misuse` and traps before any completion handler runs, so the promise never rejects. The binding now checks the caller's security session for the `sessionHasGraphicAccess` attribute first and resolves `{ supported: false, error: … }` instead of touching DeviceCheck when it is absent ([#8353](https://github.com/can1357/oh-my-pi/issues/8353)).
+
+## [17.3.1] - 2026-08-13
+
+### Fixed
+
+- Fixed `omp` failing to start on a clean Windows install with `Failed to load pi_natives native addon for win32-x64 ... The specified module could not be found` (LoadLibrary error 126). The shipped win32-x64 addon linked the dynamic MSVC CRT (`/MD`) and imported `VCRUNTIME140.dll` from the Visual C++ Redistributable, which is absent on a fresh Windows install. The addon now statically links the CRT (`+crt-static` for rustc plus the `static_link_msvcrt` cc feature for its C dependencies), so the `.node` imports only core Windows system DLLs ([#8439](https://github.com/can1357/oh-my-pi/issues/8439)).
+
+## [17.3.0] - 2026-08-13
+
+### Fixed
+
+- Fixed an issue where shell-internal background jobs (such as `yes >/dev/null &`) could survive a one-shot shell session and consume CPU indefinitely after the command returned.
+
 ## [17.2.12] - 2026-08-08
 
 ### Changed

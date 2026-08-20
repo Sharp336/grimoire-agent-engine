@@ -3,6 +3,11 @@ import { DEFAULT_SHARE_URL } from "@oh-my-pi/pi-wire";
 import { SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
 import { DEFAULT_RELAY_URL } from "../collab/protocol";
 import { DEFAULT_LIVE_VOICE, LIVE_VOICE_OPTIONS, LIVE_VOICE_VALUES } from "../live/voices";
+import {
+	COMPACTION_METHOD_CHOICES,
+	type CompactionMethod,
+	DEFAULT_COMPACTION_METHOD_ORDER,
+} from "../session/compaction-methods";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS, STT_MODEL_VALUES } from "../stt/models";
 import { STT_SUBMIT_TRIGGER_OPTIONS, STT_SUBMIT_TRIGGER_VALUES } from "../stt/submit-trigger";
 import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "../thinking";
@@ -152,6 +157,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Output Limits",
 		"Execution",
 		"Discovery & MCP",
+		"Extensions",
 		"Developer",
 	],
 	tasks: ["Modes", "Subagents", "Isolation", "Commands & Skills"],
@@ -198,6 +204,12 @@ interface UiBase {
 	group?: string;
 	label: string;
 	description: string;
+	/**
+	 * Risk note. Marks the settings row with a warning glyph and renders above
+	 * the description in warning styling. For settings that can get the user
+	 * rate-limited, flagged, or banned — not for merely advanced options.
+	 */
+	warning?: string;
 	/** Condition function name - setting only shown when true */
 	condition?: string;
 }
@@ -385,6 +397,8 @@ export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 	},
 ];
 
+const DEFAULT_AGENT_MODEL_OVERRIDES: Record<string, string | string[]> = {};
+
 export const SETTINGS_SCHEMA = {
 	// ────────────────────────────────────────────────────────────────────────
 	// General settings (no UI)
@@ -464,17 +478,6 @@ export const SETTINGS_SCHEMA = {
 			label: "Enable Prewalk",
 			description:
 				"Start on the active model, then switch to a fast/cheap model (default the 'smol' role) at the first edit/write after the plan nudge's todo list exists — the strong model plans, commits the todos, and starts the implementation before handing off. Overridable per session with --prewalk / --no-prewalk.",
-		},
-	},
-	"advisor.subagents": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "model",
-			group: "Advisor",
-			label: "Advisor for Subagents",
-			description: "Also enable the advisor on spawned task/eval subagents.",
-			condition: "advisorEnabled",
 		},
 	},
 	"advisor.syncBacklog": {
@@ -1136,6 +1139,19 @@ export const SETTINGS_SCHEMA = {
 			label: "Omit Thinking summaries",
 			description:
 				"Instruct upstream providers to completely omit thinking summaries from responses (where supported)",
+		},
+	},
+
+	externalThinking: {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Thinking",
+			label: "External Thinking",
+			description: "Private scratchpad; not shown to user. Disables supported GPT, Claude, and Gemini reasoning",
+			warning:
+				"At your own risk: providers have flagged this request shape as abuse, up to account-level enforcement",
 		},
 	},
 
@@ -2138,6 +2154,21 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	// Premium long-context tiers (OpenAI GPT-5.6 bills 2x input / 1.5x output
+	// above 272K input tokens). Off caps affected models at the threshold so
+	// compaction kicks in before any request crosses into premium billing.
+	extendedContext: {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "context",
+			group: "General",
+			label: "Extended Context",
+			description:
+				"Use premium long-context windows on models that bill extra past a threshold (e.g. GPT-5.6 1M charges 2x input above 272K); off caps them at the standard-pricing window",
+		},
+	},
+
 	// Compaction
 	"compaction.enabled": {
 		type: "boolean",
@@ -2161,39 +2192,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"compaction.strategy": {
-		type: "enum",
-		values: ["context-full", "handoff", "shake", "snapcompact", "off"] as const,
-		default: "snapcompact",
+	"compaction.methodOrder": {
+		type: "array",
+		default: [...DEFAULT_COMPACTION_METHOD_ORDER],
 		ui: {
 			tab: "context",
 			group: "Compaction",
-			label: "Compaction Strategy",
+			label: "Compaction Method Order",
 			description:
-				"Choose in-place context-full maintenance, auto-handoff, surgical shake (drop heavy content), snapcompact (archive history as dense images), or disable auto maintenance (off)",
-			options: [
-				{
-					value: "context-full",
-					label: "Context-full",
-					description: "Summarize in-place and keep the current session",
-				},
-				{ value: "handoff", label: "Handoff", description: "Generate handoff and continue in a new session" },
-				{
-					value: "shake",
-					label: "Shake",
-					description: "Drop heavy content (tool results + large blocks) in place; recover via artifact",
-				},
-				{
-					value: "snapcompact",
-					label: "Snapcompact",
-					description: "Archive history onto dense bitmap images the model reads back; no LLM call",
-				},
-				{
-					value: "off",
-					label: "Off",
-					description: "Disable automatic context maintenance (same behavior as Auto-compact off)",
-				},
-			],
+				"Preferred fallback order for automatic context maintenance; unavailable or failed methods advance to the next choice",
+			options: COMPACTION_METHOD_CHOICES,
+			ordered: true,
 		},
 	},
 
@@ -2254,17 +2263,6 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"compaction.remoteEnabled": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "context",
-			group: "Compaction",
-			label: "Remote Compaction",
-			description: "Use remote compaction endpoints when available instead of local summarization",
-		},
-	},
-
 	"compaction.remoteStreamingV2Enabled": {
 		type: "boolean",
 		default: true,
@@ -2273,6 +2271,18 @@ export const SETTINGS_SCHEMA = {
 			group: "Compaction",
 			label: "Remote Compaction V2",
 			description: "Use Responses streaming compaction for compatible remote compaction models",
+		},
+	},
+
+	"compaction.asyncEnabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "context",
+			group: "Compaction",
+			label: "Async Compaction",
+			description:
+				"Speculatively summarize in the background as context nears the compaction threshold, then splice the ready result in when the threshold is crossed",
 		},
 	},
 
@@ -4724,9 +4734,13 @@ export const SETTINGS_SCHEMA = {
 
 	"task.agentModelOverrides": {
 		type: "record",
-		default: {} as Record<string, string>,
+		default: DEFAULT_AGENT_MODEL_OVERRIDES,
 	},
 	"task.agentPrewalk": {
+		type: "record",
+		default: {} as Record<string, string>,
+	},
+	"task.agentAdvisor": {
 		type: "record",
 		default: {} as Record<string, string>,
 	},
@@ -4738,7 +4752,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Subagents",
 			label: "Generic Task Prewalk",
 			description:
-				"Arm prewalk for the bundled generic `task` subagent: it starts on its resolved model, plans and begins the implementation, then hands off to the 'smol' role at its first edit/write. Per-agent overrides (task.agentPrewalk, toggled with P in /agents) and user agent `prewalk` frontmatter apply regardless of this toggle.",
+				"Arm prewalk for the bundled generic `task` subagent: it starts on its resolved model, plans and begins the implementation, then hands off to the 'smol' role at its first edit/write. Per-agent overrides (task.agentPrewalk, configured from the /agents hub) and user agent `prewalk` frontmatter apply regardless of this toggle.",
 		},
 	},
 
@@ -5247,6 +5261,39 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"providers.cacheRetention": {
+		type: "enum",
+		values: ["auto", "short", "long", "none"] as const,
+		default: "auto",
+		ui: {
+			tab: "providers",
+			group: "Protocol",
+			label: "Prompt Cache Retention",
+			description:
+				"Prompt-cache retention forwarded to providers that support it (Anthropic, Bedrock, OpenRouter, OpenAI)",
+			options: [
+				{
+					value: "auto",
+					label: "Auto",
+					description:
+						"Provider default — Anthropic uses 5m entries kept warm by idle keep-alive refreshes; PI_CACHE_RETENTION still applies",
+				},
+				{
+					value: "short",
+					label: "Short (5m)",
+					description:
+						"Cheapest cache writes; Anthropic keeps the entry warm with bounded keep-alive refreshes while idle",
+				},
+				{
+					value: "long",
+					label: "Long (1h)",
+					description: "1h TTL where the provider supports it; pricier writes, no keep-alive refresh requests",
+				},
+				{ value: "none", label: "Off", description: "Disable prompt caching and cache-affinity routing" },
+			],
+		},
+	},
+
 	"providers.streamFirstEventTimeoutSeconds": {
 		type: "number",
 		default: -1,
@@ -5471,6 +5518,11 @@ export const SETTINGS_SCHEMA = {
 		default: undefined,
 	},
 
+	"searxng.safesearch": {
+		type: "number",
+		default: undefined,
+	},
+
 	"commit.mapReduceEnabled": { type: "boolean", default: true },
 
 	"commit.mapReduceMinFiles": { type: "number", default: 4 },
@@ -5482,6 +5534,18 @@ export const SETTINGS_SCHEMA = {
 	"commit.mapReduceMaxConcurrency": { type: "number", default: 5 },
 
 	"commit.changelogMaxDiffChars": { type: "number", default: 120000 },
+
+	"extensionHandlers.toolCallTimeoutMs": {
+		type: "number",
+		default: 30_000,
+		ui: {
+			tab: "tools",
+			group: "Extensions",
+			label: "Tool Call Handler Timeout (ms)",
+			description:
+				"Positive finite active-work timeout for extension tool_call handlers; invalid values use 30000ms, and time awaiting OMP-owned dialogs does not count",
+		},
+	},
 
 	"dev.autoqa": {
 		type: "boolean",
@@ -5657,15 +5721,15 @@ export type Personality = SettingValue<"personality">;
 
 export interface CompactionSettings {
 	enabled: boolean;
-	strategy: "context-full" | "handoff" | "shake" | "snapcompact" | "off";
+	methodOrder: CompactionMethod[];
 	thresholdPercent: number;
 	thresholdTokens: number;
 	reserveTokens: number | undefined;
 	keepRecentTokens: number;
 	midTurnEnabled: boolean;
+	asyncEnabled: boolean;
 	handoffSaveToDisk: boolean;
 	autoContinue: boolean;
-	remoteEnabled: boolean;
 	remoteEndpoint: string | undefined;
 	remoteStreamingV2Enabled: boolean;
 	v2RetainedMessageBudget: number;

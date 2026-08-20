@@ -28,6 +28,7 @@ import { execCommand } from "../../exec/exec";
 // Runtime self-reference: dereference this namespace only inside loader functions to keep the index.ts cycle safe.
 import * as PiCodingAgent from "../../index";
 import type { CustomMessagePayload } from "../../session/messages";
+import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
 import { EventBus } from "../../utils/event-bus";
 import * as TypeBox from "../legacy-typebox";
 import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/legacy-pi-compat";
@@ -175,10 +176,20 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	}
 
 	registerTool<TParams extends TSchema = TSchema, TDetails = unknown>(tool: ToolDefinition<TParams, TDetails>): void {
-		this.extension.tools.set(tool.name, {
+		const registered = {
 			definition: tool,
 			extensionPath: this.extension.path,
-		});
+		};
+		this.extension.tools.set(tool.name, registered);
+		for (const listener of this.extension.toolRegistrationListeners ?? []) listener(tool.name);
+	}
+
+	registerFileWriteFallback(handler: FileWriteFallbackHandler): void {
+		this.extension.fileWriteFallbackHandlers.push(handler);
+	}
+
+	registerFileDeleteFallback(handler: FileDeleteFallbackHandler): void {
+		this.extension.fileDeleteFallbackHandlers.push(handler);
 	}
 
 	registerCommand(
@@ -316,7 +327,10 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		resolvedPath,
 		handlers: new Map(),
 		tools: new Map(),
+		toolRegistrationListeners: new Set(),
 		assistantThinkingRenderers: [],
+		fileWriteFallbackHandlers: [],
+		fileDeleteFallbackHandlers: [],
 		messageRenderers: new Map(),
 		commands: new Map(),
 		flags: new Map(),
@@ -610,6 +624,8 @@ async function discoverHooksInPackageRoot(root: string): Promise<string[]> {
 export interface DiscoverExtensionPathOptions {
 	/** Include ambient native extensions, hooks, and installed plugins. */
 	ambient?: boolean;
+	/** Include ambient hook factories. Disable for read-only catalog commands. */
+	includeAmbientHooks?: boolean;
 }
 
 export async function discoverExtensionPaths(
@@ -662,11 +678,13 @@ export async function discoverExtensionPaths(
 	// scans only this invocation's configured package roots; it must not consult
 	// settings, installed packages, or process-global CLI injection state.
 	if (ambient) {
-		const hooks = await loadCapability<Hook>(hookCapability.id, loadOptions);
-		for (const hookPath of hooks.items
-			.map(hook => hook.path)
-			.filter(hookPath => isExtensionFile(path.basename(hookPath)))) {
-			addPath(hookPath);
+		if (options.includeAmbientHooks !== false) {
+			const hooks = await loadCapability<Hook>(hookCapability.id, loadOptions);
+			for (const hookPath of hooks.items
+				.map(hook => hook.path)
+				.filter(hookPath => isExtensionFile(path.basename(hookPath)))) {
+				addPath(hookPath);
+			}
 		}
 	} else {
 		for (const configuredPath of configuredPaths) {

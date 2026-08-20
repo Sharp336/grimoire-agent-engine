@@ -97,6 +97,10 @@ export interface SegmentContext {
 	contextTokens: number;
 	contextWindow: number;
 	autoCompactEnabled: boolean;
+	/** Background speculative-compaction state (async compaction). */
+	compactionSpeculation: "idle" | "running" | "armed";
+	/** Blink phase for the running-speculation pulse; toggled by the component's timer. */
+	speculationBlinkOn: boolean;
 	subagentCount: number;
 	/**
 	 * Active processing time accumulated this session, in ms — the union of
@@ -122,6 +126,7 @@ export interface SegmentContext {
 		tier?: string;
 		fiveHour?: { percent: number; resetMinutes?: number };
 		sevenDay?: { percent: number; resetHours?: number };
+		monthly?: { percent: number; resetHours?: number };
 	} | null;
 }
 

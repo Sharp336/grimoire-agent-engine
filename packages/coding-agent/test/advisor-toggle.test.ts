@@ -14,20 +14,19 @@ import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/ex
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
-import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 describe("AgentSession advisor toggle", () => {
-	let sharedDir: TempDir;
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
 	let model: Model;
 	let replacementModel: Model;
 
-	beforeAll(async () => {
-		sharedDir = TempDir.createSync("@pi-advisor-toggle-shared-");
-		authStorage = await AuthStorage.create(path.join(sharedDir.path(), "testauth.db"));
+	beforeAll(() => {
+		authStorage = createInMemoryAuthStorage();
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		authStorage.setRuntimeApiKey("openai", "test-key");
 		authStorage.setRuntimeApiKey("openrouter", "test-key");
@@ -40,11 +39,8 @@ describe("AgentSession advisor toggle", () => {
 		replacementModel = replacement;
 	});
 
-	afterAll(async () => {
+	afterAll(() => {
 		authStorage.close();
-		try {
-			await sharedDir.remove();
-		} catch {}
 	});
 
 	let tempDir: TempDir;
@@ -627,57 +623,21 @@ describe("AgentSession advisor toggle", () => {
 		await session.dispose();
 		expect((await loadAdvisorTranscriptCosts(previousSessionFile)).get("")).toBeCloseTo(0.75, 8);
 	});
-	it("clears advisor cost when a handoff opens the replacement session", async () => {
+	it("resets advisor runtimes after an in-place handoff compaction", async () => {
 		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue("## Goal\nContinue from here");
-		try {
-			const advisor = enableAdvisor();
-			prepareHandoffConversation(advisor);
-			const previousSessionFile = session.sessionFile;
-			const newSession = sessionManager.newSession.bind(sessionManager);
-			vi.spyOn(sessionManager, "newSession").mockImplementation(async options => {
-				const result = await newSession(options);
-				// The outgoing advisor finalizes after the replacement file is selected.
-				appendAdvisorCost(advisor, 9, 3);
-				return result;
-			});
+		const advisor = enableAdvisor();
+		prepareHandoffConversation(advisor);
+		session.settings.set("compaction.keepRecentTokens", 1);
+		const sessionFile = session.sessionFile;
 
-			await session.handoff();
+		const result = await session.handoff();
 
-			// The handoff hands the work over to a fresh conversation, so the spend of
-			// the one it summarizes must not follow it.
-			expect(session.sessionFile).not.toBe(previousSessionFile);
-			expect(session.getAdvisorCost()).toBe(0);
-			const replacementSessionFile = session.sessionFile;
-			if (!replacementSessionFile) throw new Error("Expected the replacement session to be persisted");
-			appendAdvisorCost(advisor, 0.25, 4);
-			expect(session.getAdvisorCost()).toBeCloseTo(0.25, 8);
-			await session.dispose();
-			expect((await loadAdvisorTranscriptCosts(replacementSessionFile)).get("")).toBeCloseTo(0.25, 8);
-		} finally {
-			vi.restoreAllMocks();
-		}
-	});
-	it("restores advisor recording when a handoff fails before replacing the session", async () => {
-		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue("## Goal\nContinue from here");
-		try {
-			const advisor = enableAdvisor();
-			prepareHandoffConversation(advisor);
-			const previousSessionFile = session.sessionFile;
-			if (!previousSessionFile) throw new Error("Expected the previous session to be persisted");
-			const failure = new Error("replacement session failed");
-			vi.spyOn(sessionManager, "newSession").mockRejectedValue(failure);
-
-			await expect(session.handoff()).rejects.toThrow(failure);
-
-			expect(session.sessionFile).toBe(previousSessionFile);
-			expect(session.getAdvisorCost()).toBeCloseTo(0.5, 8);
-			appendAdvisorCost(advisor, 0.25, 3);
-			expect(session.getAdvisorCost()).toBeCloseTo(0.75, 8);
-			await session.dispose();
-			expect((await loadAdvisorTranscriptCosts(previousSessionFile)).get("")).toBeCloseTo(0.75, 8);
-		} finally {
-			vi.restoreAllMocks();
-		}
+		expect(result?.document).toContain("Continue from here");
+		expect(session.sessionFile).toBe(sessionFile);
+		const compaction = sessionManager.getBranch().at(-1);
+		expect(compaction).toMatchObject({ type: "compaction" });
+		if (compaction?.type !== "compaction") throw new Error("Expected handoff compaction entry");
+		expect(compaction.summary).toContain("Continue from here");
 	});
 	it("clears advisor cost when a branch skips conversation restore", async () => {
 		const extensionRunner = {

@@ -14,11 +14,11 @@ import { buildAnthropicCompat } from "./compat/anthropic";
 import { buildBedrockCompat } from "./compat/bedrock";
 import { buildDevinCompat } from "./compat/devin";
 import { buildOpenAICompat, buildOpenAIResponsesCompat, buildOpenRouterCompat } from "./compat/openai";
+import { bareModelId, parseOpenAIModel, semverGte } from "./identity/classify";
 import { resolveModelThinking } from "./model-thinking";
+import { resolveModelTokenizer } from "./model-tokenizer";
 import type { Api, CompatOf, Model, ModelSpec } from "./types";
 import { cleanModelName } from "./utils";
-
-const OPENAI_GA_COMPUTER_MODEL_RE = /^gpt-5\.(?:[4-9]|[1-9]\d)(?:[.-]|$)/i;
 
 function isDirectOpenAIResponsesEndpoint(spec: ModelSpec<Api>): boolean {
 	if (spec.api === "openai-responses") {
@@ -55,7 +55,8 @@ function explicitComputerUseConfig(spec: ModelSpec<Api>): boolean | undefined {
 function supportsOpenAIGAComputerUse(spec: ModelSpec<Api>, explicitSupport: boolean | undefined): boolean {
 	if (explicitSupport !== undefined) return explicitSupport;
 	if (!isDirectOpenAIResponsesEndpoint(spec)) return false;
-	return OPENAI_GA_COMPUTER_MODEL_RE.test(spec.requestModelId ?? spec.id);
+	const parsed = parseOpenAIModel(bareModelId(spec.requestModelId ?? spec.id));
+	return parsed !== null && semverGte(parsed.version, "5.4");
 }
 
 export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi> {
@@ -64,6 +65,7 @@ export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi>
 	return {
 		...spec,
 		name: cleanModelName(spec.name),
+		tokenizer: spec.tokenizer ?? resolveModelTokenizer(spec.requestModelId ?? spec.id),
 		thinking: resolveModelThinking(spec, compat),
 		supportsComputerUse: supportsOpenAIGAComputerUse(spec, supportsComputerUseConfig),
 		supportsComputerUseConfig,

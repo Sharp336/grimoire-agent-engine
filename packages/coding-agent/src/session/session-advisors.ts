@@ -5,18 +5,17 @@ import {
 	type AgentToolContext,
 	AppendOnlyContextManager,
 	type CompactionSummaryMessage,
-	countTokens,
 	resolveTelemetry,
 	type StreamFn,
 	ThinkingLevel,
+	type Tokenizer,
 } from "@oh-my-pi/pi-agent-core";
 import {
 	type CompactionResult,
-	calculateContextTokens,
 	compact,
 	compactionContextTokens,
 	createCompactionSummaryMessage,
-	estimateTokens,
+	estimateTranscriptTokens,
 	NativeCompactionError,
 	prepareCompaction,
 	type SessionMessageEntry,
@@ -84,6 +83,7 @@ import {
 } from "../thinking";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ClientBridge } from "./client-bridge";
+import { resolveCompactionMethodOrder } from "./compaction-methods";
 import type { CustomMessage, CustomMessagePayload } from "./messages";
 import { isAdvisorCard, isTerminalTextAssistantAnswer } from "./queued-messages";
 import {
@@ -242,7 +242,6 @@ export interface SessionAdvisorsHost {
 	onPayload: SimpleStreamOptions["onPayload"] | undefined;
 	onResponse: SimpleStreamOptions["onResponse"] | undefined;
 	onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;
-	agentKind(): "main" | "sub";
 	isDisposed(): boolean;
 	abortInProgress(): boolean;
 	allowAgentInitiatedTurns(): boolean;
@@ -263,7 +262,11 @@ export interface SessionAdvisorsHost {
 		signal: AbortSignal,
 	): Promise<Model | undefined>;
 	resolveCompactionModelCandidates(preferredModel: Model | null | undefined, availableModels: Model[]): Model[];
-	resolveRetryFallbackRole(currentSelector: string, currentModel?: Model | null): string | undefined;
+	resolveRetryFallbackRole(
+		currentSelector: string,
+		currentModel?: Model | null,
+		roleHint?: string,
+	): string | undefined;
 	findRetryFallbackCandidates(
 		role: string,
 		currentSelector: string,
@@ -418,8 +421,8 @@ export class SessionAdvisors {
 	}
 
 	/** Re-primes advisor transcript views after an in-conversation history rewrite. */
-	resetAllRuntimes(): void {
-		this.#resetAllAdvisorRuntimes();
+	resetAllRuntimes(reason?: string): void {
+		this.#resetAllAdvisorRuntimes(reason);
 	}
 
 	/** Whether live runtimes still match the resolved advisor configuration. */
@@ -535,7 +538,7 @@ export class SessionAdvisors {
 		for (const a of this.#advisors) {
 			a.agentUnsubscribe?.();
 			a.agentUnsubscribe = undefined;
-			a.runtime.reset();
+			a.runtime.reset("conversation-boundary");
 			a.adviseTool.resetDeliveredNotes();
 			a.emissionGuard.reset();
 			this.#attachAdvisorRecorderFeed(a);
@@ -653,7 +656,6 @@ export class SessionAdvisors {
 		if (this.#host.isDisposed()) return false;
 		if (this.#advisors.length > 0) return true;
 		if (!this.#advisorEnabled) return false;
-		if (this.#host.agentKind() !== "main" && !this.#host.settings.get("advisor.subagents")) return false;
 
 		// Rebuild the status map from scratch so removed/renamed advisors don't
 		// leave stale entries. #resolveAdvisorRuntimeDescriptors populates every
@@ -785,14 +787,22 @@ export class SessionAdvisors {
 				mcpResources: this.#advisorMcpResources,
 			});
 			const baseAdvisorStreamFn = this.#advisorStreamFn ?? streamSimple;
-			const advisorStreamFn: StreamFn = (requestModel, context, options) =>
-				baseAdvisorStreamFn(
-					requestModel,
-					context,
-					requestModel.api === "openai-codex-responses"
-						? { ...options, codexSseMaxAttempts: ADVISOR_CODEX_SSE_MAX_ATTEMPTS }
-						: options,
-				);
+			const advisorStreamFn: StreamFn = (requestModel, context, options) => {
+				if (requestModel.api === "openai-codex-responses") {
+					return baseAdvisorStreamFn(requestModel, context, {
+						...options,
+						codexSseMaxAttempts: ADVISOR_CODEX_SSE_MAX_ATTEMPTS,
+					});
+				}
+				if (
+					requestModel.api === "google-generative-ai" ||
+					requestModel.api === "google-gemini-cli" ||
+					requestModel.api === "google-vertex"
+				) {
+					return baseAdvisorStreamFn(requestModel, context, { ...options, acceptEmptyResponse: true });
+				}
+				return baseAdvisorStreamFn(requestModel, context, options);
+			};
 			const advisorAgent = new Agent({
 				initialState: {
 					systemPrompt,
@@ -832,8 +842,17 @@ export class SessionAdvisors {
 					let quarantined: string | undefined;
 					try {
 						quarantinedAdvisorOutput = undefined;
-						currentAdvisorInput = input;
-						await advisorAgent.prompt(input);
+						// Multi-message input (candidate 4) must serialize deterministically
+						// for quarantine source text; reuse the session history formatter
+						// rather than ad-hoc joins so all message kinds (text/tool/
+						// custom/structured) are preserved exactly as rendered.
+						currentAdvisorInput = Array.isArray(input)
+							? formatSessionHistoryMarkdown(input, { watchedRoles: true })
+							: input;
+						// Agent.prompt's overloads accept string OR AgentMessage[] but not
+						// the union, so narrow first; both branches intentionally identical.
+						if (Array.isArray(input)) await advisorAgent.prompt(input);
+						else await advisorAgent.prompt(input);
 						quarantined = quarantinedAdvisorOutput;
 					} finally {
 						quarantinedAdvisorOutput = undefined;
@@ -873,8 +892,7 @@ export class SessionAdvisors {
 			const runtime = new AdvisorRuntime(advisorAgentFacade, {
 				snapshotMessages: () => this.#host.agent.state.messages,
 				enqueueAdvice: (note, severity) => this.#routeAdvice(advisorRef, note, severity),
-				maintainContext: (incomingTokens, signal) =>
-					this.#maintainAdvisorContext(advisorRef, incomingTokens, signal),
+				maintainContext: (incoming, signal) => this.#maintainAdvisorContext(advisorRef, incoming, signal),
 				obfuscator: this.#host.obfuscator,
 				getModelIdentity: () => formatModelString(advisorRef.agent.state.model),
 				beginAdvisorUpdate: inProgress => {
@@ -1057,8 +1075,8 @@ export class SessionAdvisors {
 	}
 
 	/** Re-prime every advisor's transcript view after an in-conversation history rewrite. */
-	#resetAllAdvisorRuntimes(): void {
-		for (const a of this.#advisors) a.runtime.reset();
+	#resetAllAdvisorRuntimes(reason?: string): void {
+		for (const a of this.#advisors) a.runtime.reset(reason);
 	}
 
 	#stopAdvisorRuntime(): void {
@@ -1221,7 +1239,8 @@ export class SessionAdvisors {
 
 		const retrySettings = this.#host.settings.getGroup("retry");
 		if (!retrySettings.enabled || !retrySettings.modelFallback) return false;
-		const role = advisor.retryFallback?.role ?? this.#host.resolveRetryFallbackRole(currentSelector, currentModel);
+		const role =
+			advisor.retryFallback?.role ?? this.#host.resolveRetryFallbackRole(currentSelector, currentModel, "advisor");
 		if (!role || this.#host.findRetryFallbackCandidates(role, currentSelector, currentModel).length === 0)
 			return false;
 
@@ -1298,35 +1317,33 @@ export class SessionAdvisors {
 
 	async #maintainAdvisorContext(
 		advisor: ActiveAdvisor,
-		incomingTokens: number,
+		incoming: AgentMessage,
 		signal: AbortSignal,
 	): Promise<boolean> {
 		await this.#maybeRestoreAdvisorRetryFallbackPrimary(advisor, signal);
 		const agent = advisor.agent;
+		const incomingTokens = agent.tokenizer.countMessage(incoming);
 
 		const compactionSettings = this.#host.settings.getGroup("compaction");
-		if (compactionSettings.strategy === "off") return false;
-		if (!compactionSettings.enabled) return false;
+		if (!compactionSettings.enabled || resolveCompactionMethodOrder(compactionSettings.methodOrder).length === 0) {
+			return false;
+		}
 
 		const advisorModel = agent.state.model;
 		const contextWindow = advisorModel.contextWindow ?? 0;
 		if (contextWindow <= 0) return false;
 
 		const messages = agent.state.messages;
-		const estimateOptions = { excludeEncryptedReasoning: true } as const;
-		let storedConversationTokens = 0;
-		for (const message of messages) {
-			storedConversationTokens += estimateTokens(message, estimateOptions);
-		}
+		const storedConversationTokens = agent.tokenizer.countMessages(messages, { excludeEncryptedReasoning: true });
 		// Provider usage (including cache reads and generated output) is the
 		// trustworthy anchor for accumulated context. Add only the trailing incoming
 		// delta to that arm. Floor it by a full local estimate — fixed advisor system
 		// prompt, tool schemas, stored messages, and incoming delta — so provider
 		// under-reporting or payload transforms cannot suppress maintenance.
-		const providerContextTokens = this.#estimateAdvisorContextTokens(messages) + incomingTokens;
+		const providerContextTokens = this.#estimateAdvisorContextTokens(messages, agent.tokenizer) + incomingTokens;
 		const localContextTokens =
-			countTokens(agent.state.systemPrompt) +
-			estimateToolSchemaTokens(agent.state.tools) +
+			agent.tokenizer.countTokens(agent.state.systemPrompt) +
+			estimateToolSchemaTokens(agent.state.tools, agent.tokenizer) +
 			storedConversationTokens +
 			incomingTokens;
 		const contextTokens = compactionContextTokens(providerContextTokens, localContextTokens);
@@ -1386,7 +1403,7 @@ export class SessionAdvisors {
 			this.#host.sessionId(),
 			advisor.slug,
 		);
-		const preparation = prepareCompaction(pathEntries, compactionSettings, advisorModel);
+		const preparation = prepareCompaction(pathEntries, compactionSettings, advisorModel, agent.tokenizer);
 		if (!preparation) {
 			// Cannot prepare compaction, fallback to re-prime
 			return true;
@@ -1604,9 +1621,10 @@ export class SessionAdvisors {
 
 	/**
 	 * Whether a live advisor agent is attached to this session. True only when
-	 * `advisor.enabled` is set AND a model resolved for the `advisor` role AND
-	 * the advisor applies to this agent kind — i.e. the actual runtime exists,
-	 * not merely the setting. Drives the status-line badge and `/dump advisor`.
+	 * `advisor.enabled` is set for this session (subagents opt in per agent via
+	 * frontmatter `advisor` / `task.agentAdvisor`) AND a model resolved for the
+	 * `advisor` role — i.e. the actual runtime exists, not merely the setting.
+	 * Drives the status-line badge and `/dump advisor`.
 	 */
 	isAdvisorActive(): boolean {
 		return this.#advisors.length > 0;
@@ -1737,7 +1755,7 @@ export class SessionAdvisors {
 	#computeAdvisorStat(advisor: ActiveAdvisor): PerAdvisorStat {
 		const model = advisor.agent.state.model;
 		const messages = advisor.agent.state.messages;
-		const contextTokens = this.#estimateAdvisorContextTokens(messages);
+		const contextTokens = this.#estimateAdvisorContextTokens(messages, advisor.agent.tokenizer);
 		let input = 0;
 		let output = 0;
 		let reasoning = 0;
@@ -1827,7 +1845,7 @@ export class SessionAdvisors {
 	 * retained pre-compaction messages is stale and must not immediately retrigger
 	 * maintenance on the newly compacted context.
 	 */
-	#estimateAdvisorContextTokens(messages: AgentMessage[]): number {
+	#estimateAdvisorContextTokens(messages: AgentMessage[], tokenizer: Tokenizer): number {
 		let usageAnchorStartIndex = 0;
 		for (let i = messages.length - 1; i >= 0; i--) {
 			const message = messages[i];
@@ -1839,33 +1857,10 @@ export class SessionAdvisors {
 			usageAnchorStartIndex = advisorSummary.advisorUsageAnchorStartIndex ?? messages.length;
 			break;
 		}
-
-		let lastUsageIndex: number | undefined;
-		let lastUsage: AssistantMessage["usage"] | undefined;
-		for (let i = messages.length - 1; i >= usageAnchorStartIndex; i--) {
-			const message = messages[i];
-			if (message.role !== "assistant") continue;
-			const assistant = message as AssistantMessage;
-			if (assistant.stopReason !== "aborted" && assistant.stopReason !== "error" && assistant.usage) {
-				lastUsage = assistant.usage;
-				lastUsageIndex = i;
-				break;
-			}
-		}
-
-		const estimateOptions = { excludeEncryptedReasoning: true } as const;
-		if (!lastUsage || lastUsageIndex === undefined) {
-			let estimated = 0;
-			for (const message of messages) {
-				estimated += estimateTokens(message, estimateOptions);
-			}
-			return estimated;
-		}
-		let trailingTokens = 0;
-		for (let i = lastUsageIndex + 1; i < messages.length; i++) {
-			trailingTokens += estimateTokens(messages[i], estimateOptions);
-		}
-		return calculateContextTokens(lastUsage) + trailingTokens;
+		return estimateTranscriptTokens(messages, tokenizer, {
+			anchorFromIndex: usageAnchorStartIndex,
+			excludeEncryptedReasoning: true,
+		});
 	}
 
 	/**

@@ -15,6 +15,7 @@ import { googleGeminiCliModelManagerOptions } from "@oh-my-pi/pi-catalog/provide
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import {
 	ANTIGRAVITY_VARIANT_COLLAPSE_TABLE,
+	CURSOR_VARIANT_COLLAPSE_TABLE,
 	collapseEffortVariants,
 	collapseEffortVariantsAcrossProviders,
 	DEVIN_VARIANT_COLLAPSE_TABLE,
@@ -656,6 +657,77 @@ describe("Devin tier routing", () => {
 	});
 });
 
+describe("Cursor Grok tier routing (issue #8803)", () => {
+	function cursorMemberSpec(id: string): ModelSpec<"cursor-agent"> {
+		return {
+			id,
+			name: id,
+			api: "cursor-agent",
+			provider: "cursor",
+			baseUrl: "https://api2.cursor.sh",
+			// Live GetUsableModels + bundled references mark these reasoning:false;
+			// collapse must still recognize the effort ladder.
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 64_000,
+		};
+	}
+
+	const RAW_SIBLINGS = [
+		"cursor-grok-4.5-high",
+		"cursor-grok-4.5-high-fast",
+		"cursor-grok-4.5-low",
+		"cursor-grok-4.5-low-fast",
+		"cursor-grok-4.5-medium",
+		"cursor-grok-4.5-medium-fast",
+		"cursor-grok-4.6-high",
+		"cursor-grok-4.6-high-fast",
+		"cursor-grok-4.6-low",
+		"cursor-grok-4.6-low-fast",
+		"cursor-grok-4.6-medium",
+		"cursor-grok-4.6-medium-fast",
+		"cursor-grok-4.6-xhigh",
+		"cursor-grok-4.6-xhigh-fast",
+	];
+
+	it("collapses the 14 effort siblings into four logical models, split by the -fast lane", () => {
+		const collapsed = collapseEffortVariants(RAW_SIBLINGS.map(cursorMemberSpec), CURSOR_VARIANT_COLLAPSE_TABLE);
+		expect(collapsed.map(model => model.id).sort()).toEqual([
+			"cursor-grok-4.5",
+			"cursor-grok-4.5-fast",
+			"cursor-grok-4.6",
+			"cursor-grok-4.6-fast",
+		]);
+
+		const g46 = collapsed.find(model => model.id === "cursor-grok-4.6");
+		if (!g46) throw new Error("cursor-grok-4.6 did not collapse");
+		expect(g46.name).toBe("Grok 4.6");
+		// Effort route forces reasoning even though every member said false.
+		expect(g46.reasoning).toBe(true);
+		expect(g46.thinking?.mode).toBe("effort");
+		expect(g46.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh]);
+		expect(g46.thinking?.requiresEffort).toBe(true);
+	});
+
+	it("routes each user effort onto the live sibling wire id per service-tier lane", () => {
+		const collapsed = collapseEffortVariants(RAW_SIBLINGS.map(cursorMemberSpec), CURSOR_VARIANT_COLLAPSE_TABLE);
+		const model = (id: string) => {
+			const found = collapsed.find(m => m.id === id);
+			if (!found) throw new Error(`${id} did not collapse`);
+			return buildModel(found as ModelSpec<"cursor-agent">);
+		};
+
+		expect(resolveWireModelId(model("cursor-grok-4.6"), Effort.XHigh)).toBe("cursor-grok-4.6-xhigh");
+		expect(resolveWireModelId(model("cursor-grok-4.6"), Effort.Low)).toBe("cursor-grok-4.6-low");
+		expect(resolveWireModelId(model("cursor-grok-4.6-fast"), Effort.High)).toBe("cursor-grok-4.6-high-fast");
+		expect(resolveWireModelId(model("cursor-grok-4.5"), Effort.Medium)).toBe("cursor-grok-4.5-medium");
+		// 4.5 has no xhigh sibling: the ceiling stays at high.
+		expect(model("cursor-grok-4.5").thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High]);
+	});
+});
+
 describe("variant aliases", () => {
 	it("resolves members and recycled ids per provider", () => {
 		expect(resolveVariantAlias("google-antigravity", "gemini-3.5-flash-low")).toBe("gemini-3.5-flash");
@@ -814,6 +886,27 @@ describe("antigravity discovery collapsing", () => {
 				supportsImages: true,
 				thinkingBudget: 10_000,
 			},
+			"gemini-3.7-flash-low": {
+				displayName: "Gemini 3.7 Flash Low",
+				supportsThinking: true,
+				supportsImages: true,
+				maxTokens: 1_048_576,
+				maxOutputTokens: 65_536,
+			},
+			"gemini-3.7-flash-medium": {
+				displayName: "Gemini 3.7 Flash Medium",
+				supportsThinking: true,
+				supportsImages: true,
+				maxTokens: 1_048_576,
+				maxOutputTokens: 65_536,
+			},
+			"gemini-3.7-flash-high": {
+				displayName: "Gemini 3.7 Flash High",
+				supportsThinking: true,
+				supportsImages: true,
+				maxTokens: 1_048_576,
+				maxOutputTokens: 65_536,
+			},
 			"claude-sonnet-4-6": { displayName: "Claude Sonnet 4.6", supportsThinking: true, supportsImages: true },
 			"claude-sonnet-4-6-thinking": {
 				displayName: "Claude Sonnet 4.6 Thinking",
@@ -835,7 +928,12 @@ describe("antigravity discovery collapsing", () => {
 	it("returns collapsed logical entries and keeps the denylist", async () => {
 		const models = await fetchAntigravityDiscoveryModels({ token: "t", endpoint: "https://cca.test", fetcher });
 
-		expect(models?.map(m => m.id).sort()).toEqual(["claude-sonnet-4-6", "gemini-2.5-flash", "gemini-3.5-flash"]);
+		expect(models?.map(m => m.id).sort()).toEqual([
+			"claude-sonnet-4-6",
+			"gemini-2.5-flash",
+			"gemini-3.5-flash",
+			"gemini-3.7-flash",
+		]);
 		const flash = models?.find(m => m.id === "gemini-3.5-flash");
 		expect(flash?.requestModelId).toBe("gemini-3.5-flash-extra-low");
 		expect(flash?.thinking?.effortRouting?.[Effort.High]).toBe("gemini-3-flash-agent");
@@ -845,6 +943,19 @@ describe("antigravity discovery collapsing", () => {
 		const flash25 = models?.find(m => m.id === "gemini-2.5-flash");
 		expect(flash25?.thinking?.effortRouting?.[Effort.High]).toBe("gemini-2.5-flash-thinking");
 		expect(flash25?.thinking?.effortRouting?.off).toBe("gemini-2.5-flash");
+		const flash37 = models?.find(m => m.id === "gemini-3.7-flash");
+		expect(flash37?.requestModelId).toBe("gemini-3.7-flash-low");
+		expect(flash37?.thinking).toEqual({
+			mode: "google-level",
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+			requiresEffort: true,
+			effortRouting: {
+				minimal: "gemini-3.7-flash-low",
+				low: "gemini-3.7-flash-low",
+				medium: "gemini-3.7-flash-medium",
+				high: "gemini-3.7-flash-high",
+			},
+		});
 	});
 
 	it("keeps collapsed routing through the gemini-cli re-provision", async () => {
@@ -860,6 +971,10 @@ describe("antigravity discovery collapsing", () => {
 		expect(flash?.baseUrl).toBe("https://cca.test");
 		expect(flash?.requestModelId).toBe("gemini-3.5-flash-extra-low");
 		expect(flash?.thinking?.effortRouting?.off).toBe("gemini-3.5-flash-extra-low");
+		const flash37 = models?.find(m => m.id === "gemini-3.7-flash");
+		expect(flash37?.requestModelId).toBe("gemini-3.7-flash-low");
+		expect(flash37?.thinking?.requiresEffort).toBe(true);
+		expect(flash37?.thinking?.effortRouting?.[Effort.High]).toBe("gemini-3.7-flash-high");
 	});
 
 	it("uses the primary daily endpoint by default", async () => {
@@ -877,7 +992,9 @@ describe("antigravity discovery collapsing", () => {
 			fetcher: defaultFetcher,
 		});
 
-		expect(requestedUrls[0]).toContain(ANTIGRAVITY_PRIMARY_ENDPOINT);
+		const discoveryUrl = requestedUrls.find(url => url.includes("/v1internal:fetchAvailableModels"));
+		expect(discoveryUrl).toBeDefined();
+		expect(discoveryUrl).toContain(ANTIGRAVITY_PRIMARY_ENDPOINT);
 		expect(models?.[0]?.baseUrl).toBe(ANTIGRAVITY_PRIMARY_ENDPOINT);
 	});
 });

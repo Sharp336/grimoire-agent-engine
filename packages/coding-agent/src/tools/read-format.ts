@@ -1,5 +1,10 @@
 import * as path from "node:path";
-import { formatHashlineHeader, formatNumberedLine, formatNumberedLines } from "@oh-my-pi/hashline";
+import {
+	formatHashlineHeader,
+	formatNumberedLine,
+	formatNumberedLines,
+	splitAddressableFileLines,
+} from "@oh-my-pi/hashline";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { canonicalSnapshotKey, getFileSnapshotStore, recordSeenLines } from "../edit/file-snapshot-store";
 import { normalizeToLF } from "../edit/normalize";
@@ -32,16 +37,17 @@ export interface HashlineHeaderContext {
 }
 
 export function formatReadHashlineHeader(displayPath: string, tag: string): string {
-	// In-workspace reads collapse to the bare filename for brevity: the edit
-	// tool's snapshot-tag recovery rebinds a bare `[name#tag]` onto the in-tree
-	// file it uniquely names. Out-of-workspace reads can't lean on that —
-	// recovery refuses to redirect a write outside the cwd/sandbox
-	// (HashlineFilesystem.allowTagPathRecovery) — so an absolute displayPath
-	// must stay directly resolvable, otherwise the basename resolves against
-	// cwd, misses, and the edit fails with "File not found" (e.g. ~/.claude/*).
-	// `shortenPath` keeps `~/.claude/...` (round-trips through resolveToCwd's ~
-	// expansion) instead of leaking the full home path into the read output.
-	const anchor = path.isAbsolute(displayPath) ? shortenPath(displayPath) : path.basename(displayPath);
+	// In-workspace reads keep their workspace-relative path (e.g.
+	// `src/settings.json`), not just the basename: collapsing to the bare name
+	// made a header ambiguous whenever another same-named file exists at cwd —
+	// the edit tool would resolve the bare name against cwd, hit the wrong
+	// file, and reject the valid edit via the snapshot-tag guard (the authored
+	// path exists, so Patcher's tag-path recovery never runs). The relative
+	// path stays directly resolvable against cwd and names the file uniquely.
+	// Out-of-workspace reads use an absolute displayPath; `shortenPath` keeps
+	// `~/.claude/...` (round-trips through resolveToCwd's ~ expansion) instead
+	// of leaking the full home path into the read output.
+	const anchor = path.isAbsolute(displayPath) ? shortenPath(displayPath) : displayPath;
 	return formatHashlineHeader(anchor, tag);
 }
 
@@ -66,7 +72,20 @@ export async function readHashlineHeaderContext(
 	absolutePath: string,
 	cwd: string,
 ): Promise<HashlineHeaderContext> {
-	const fullText = await Bun.file(absolutePath).text();
+	return hashlineHeaderContextForText(session, absolutePath, cwd, await Bun.file(absolutePath).text());
+}
+
+/**
+ * {@link readHashlineHeaderContext} for a caller that already holds the file's
+ * full text, so the file is not reopened just to hash it. Line endings are
+ * normalized here, exactly as the reading variant does.
+ */
+export function hashlineHeaderContextForText(
+	session: ToolSession,
+	absolutePath: string,
+	cwd: string,
+	fullText: string,
+): HashlineHeaderContext {
 	const context = recordFullHashlineContext(
 		session,
 		absolutePath,
@@ -290,7 +309,7 @@ export function buildInMemoryTextResult(
 ): AgentToolResult<ReadToolDetails> {
 	const displayMode = resolveFileDisplayMode(session, { raw: options.raw, immutable: options.immutable });
 	const details = options.details ?? {};
-	const allLines = text.split("\n");
+	const allLines = options.raw === true ? text.split("\n") : splitAddressableFileLines(text);
 	const totalLines = allLines.length;
 	details.totalLines = totalLines;
 	// User-requested 0-indexed range start. Lines BEFORE this are leading
@@ -386,6 +405,7 @@ export function buildInMemoryTextResult(
 	const buildLineEntries = (endLineDisplay: number): LineEntry[] =>
 		buildLineEntriesWithBlockContext(allLines, [{ startLine: startLineDisplay, endLine: endLineDisplay }], {
 			path: options.sourcePath,
+			text,
 		});
 
 	let outputText: string;
@@ -487,7 +507,7 @@ export function buildInMemoryMultiRangeResult(
 ): AgentToolResult<ReadToolDetails> {
 	const displayMode = resolveFileDisplayMode(session, { raw: options.raw, immutable: options.immutable });
 	const details = options.details ?? {};
-	const allLines = text.split("\n");
+	const allLines = options.raw === true ? text.split("\n") : splitAddressableFileLines(text);
 	const totalLines = allLines.length;
 	details.totalLines = totalLines;
 	const shouldAddHashLines = displayMode.hashLines;
@@ -528,7 +548,7 @@ export function buildInMemoryMultiRangeResult(
 	if (options.raw === true) {
 		outputText = rawParts.length > 0 ? rawParts.join("\n\n…\n\n") : "";
 	} else if (visibleSpans.length > 0) {
-		const entries = buildLineEntriesWithBlockContext(allLines, visibleSpans, { path: options.sourcePath });
+		const entries = buildLineEntriesWithBlockContext(allLines, visibleSpans, { path: options.sourcePath, text });
 		if (shouldAddHashLines) seenLines = lineNumbersFromEntries(entries);
 		const firstLine = entries.find(entry => entry.kind === "line");
 		if (firstLine?.kind === "line") {

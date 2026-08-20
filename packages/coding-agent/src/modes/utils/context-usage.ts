@@ -1,6 +1,6 @@
-import { countTokens } from "@oh-my-pi/pi-agent-core";
+import type { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type { CompactionSettings } from "@oh-my-pi/pi-agent-core/compaction";
-import { effectiveReserveTokens, estimateTokens, resolveThresholdTokens } from "@oh-my-pi/pi-agent-core/compaction";
+import { effectiveReserveTokens, resolveThresholdTokens } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Tool as AiTool, Model } from "@oh-my-pi/pi-ai";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { formatNumber } from "@oh-my-pi/pi-utils";
@@ -72,18 +72,19 @@ function renderedSkills(
 	return skills.filter(skill => skill.hide !== true);
 }
 
-export function estimateSkillsTokens(skills: readonly Skill[]): number {
+export function estimateSkillsTokens(skills: readonly Skill[], tokenizer: Tokenizer): number {
 	const fragments: string[] = [];
 	for (const skill of skills) {
 		// "- name: description\n" wire framing tokenizes ~identically to the
 		// concatenated form, so encode each piece separately and sum.
 		fragments.push(skill.name, skill.description);
 	}
-	return countTokens(fragments);
+	return tokenizer.countTokens(fragments);
 }
 
 export function estimateToolSchemaTokens(
 	tools: ReadonlyArray<Pick<Tool, "name" | "description" | "parameters">>,
+	tokenizer: Tokenizer,
 ): number {
 	const fragments: string[] = [];
 	for (const tool of tools) {
@@ -99,7 +100,7 @@ export function estimateToolSchemaTokens(
 			// Schema may contain functions or cycles; ignore.
 		}
 	}
-	return countTokens(fragments);
+	return tokenizer.countTokens(fragments);
 }
 
 /**
@@ -127,6 +128,9 @@ interface NonMessageTokenCache {
 	systemPromptRef: readonly string[];
 	toolsRef: ReadonlyArray<Pick<Tool, "name" | "description" | "parameters">>;
 	skillsRef: readonly Skill[];
+	// The Agent swaps its Tokenizer instance when the model's encoding changes,
+	// so instance identity doubles as the encoding key.
+	tokenizerRef: Tokenizer;
 	tokens: number | undefined;
 	breakdown:
 		| {
@@ -144,7 +148,7 @@ interface CachedNonMessageTokenSource extends NonMessageTokenSource {
 	[NON_MESSAGE_TOKEN_CACHE]?: NonMessageTokenCache;
 }
 
-function nonMessageTokenCacheEntry(session: NonMessageTokenSource): NonMessageTokenCache {
+function nonMessageTokenCacheEntry(session: NonMessageTokenSource, tokenizer: Tokenizer): NonMessageTokenCache {
 	const cachedSession: CachedNonMessageTokenSource = session;
 	const systemPromptRef = session.systemPrompt ?? EMPTY_STRING_PARTS;
 	const toolsRef = session.agent?.state?.tools ?? EMPTY_TOOLS;
@@ -154,21 +158,22 @@ function nonMessageTokenCacheEntry(session: NonMessageTokenSource): NonMessageTo
 		entry &&
 		entry.systemPromptRef === systemPromptRef &&
 		entry.toolsRef === toolsRef &&
-		entry.skillsRef === skillsRef
+		entry.skillsRef === skillsRef &&
+		entry.tokenizerRef === tokenizer
 	) {
 		return entry;
 	}
-	entry = { systemPromptRef, toolsRef, skillsRef, tokens: undefined, breakdown: undefined };
+	entry = { systemPromptRef, toolsRef, skillsRef, tokenizerRef: tokenizer, tokens: undefined, breakdown: undefined };
 	cachedSession[NON_MESSAGE_TOKEN_CACHE] = entry;
 	return entry;
 }
 
-export function computeNonMessageTokens(session: NonMessageTokenSource): number {
-	const entry = nonMessageTokenCacheEntry(session);
+export function computeNonMessageTokens(session: NonMessageTokenSource, tokenizer: Tokenizer): number {
+	const entry = nonMessageTokenCacheEntry(session, tokenizer);
 	if (entry.tokens !== undefined) return entry.tokens;
 	const systemPromptParts = session.systemPrompt ?? EMPTY_STRING_PARTS;
 	const tools = session.agent?.state?.tools ?? EMPTY_TOOLS;
-	const tokens = countTokens(systemPromptParts) + estimateToolSchemaTokens(tools);
+	const tokens = tokenizer.countTokens(systemPromptParts) + estimateToolSchemaTokens(tools, tokenizer);
 	entry.tokens = tokens;
 	return tokens;
 }
@@ -179,20 +184,23 @@ export function computeNonMessageTokens(session: NonMessageTokenSource): number 
  * the status-line fast path intentionally uses the equivalent collapsed total
  * in `computeNonMessageTokens`.
  */
-export function computeNonMessageBreakdown(session: NonMessageTokenSource): {
+export function computeNonMessageBreakdown(
+	session: NonMessageTokenSource,
+	tokenizer: Tokenizer,
+): {
 	skillsTokens: number;
 	toolsTokens: number;
 	systemContextTokens: number;
 	systemPromptTokens: number;
 } {
-	const entry = nonMessageTokenCacheEntry(session);
+	const entry = nonMessageTokenCacheEntry(session, tokenizer);
 	if (entry.breakdown) return entry.breakdown;
 	const tools = session.agent?.state?.tools ?? EMPTY_TOOLS;
-	const skillsTokens = estimateSkillsTokens(renderedSkills(session.skills ?? EMPTY_SKILLS, tools));
-	const toolsTokens = estimateToolSchemaTokens(tools);
+	const skillsTokens = estimateSkillsTokens(renderedSkills(session.skills ?? EMPTY_SKILLS, tools), tokenizer);
+	const toolsTokens = estimateToolSchemaTokens(tools, tokenizer);
 	const systemPromptParts = session.systemPrompt ?? EMPTY_STRING_PARTS;
-	const systemContextTokens = countTokens(systemPromptParts.slice(1));
-	const systemPromptTokens = Math.max(0, countTokens(systemPromptParts[0] ?? "") - skillsTokens);
+	const systemContextTokens = tokenizer.countTokens(systemPromptParts.slice(1));
+	const systemPromptTokens = Math.max(0, tokenizer.countTokens(systemPromptParts[0] ?? "") - skillsTokens);
 	const breakdown = { skillsTokens, toolsTokens, systemContextTokens, systemPromptTokens };
 	entry.breakdown = breakdown;
 	return breakdown;
@@ -207,6 +215,7 @@ export function computeContextBreakdown(
 	options?: { snapcompactSavings?: boolean },
 ): ContextBreakdown {
 	const model = session.model;
+	const tokenizer = session.agent.tokenizer;
 	const contextWindow = model?.contextWindow ?? 0;
 
 	const breakdown = typeof session.getContextBreakdown === "function" ? session.getContextBreakdown() : undefined;
@@ -226,13 +235,10 @@ export function computeContextBreakdown(
 		systemPromptTokens = breakdown.systemPromptTokens;
 		usedTokens = breakdown.usedTokens;
 	} else {
-		const convo = session.messages;
-		if (convo) {
-			for (const message of convo) {
-				messagesTokens += estimateTokens(message);
-			}
-		}
-		const nonMessage = computeNonMessageBreakdown(session);
+		// Category split needs a messages-only number, so this walk stays local:
+		// an anchored total folds the system prompt and tool schemas into it.
+		messagesTokens = tokenizer.countMessages(session.messages ?? []);
+		const nonMessage = computeNonMessageBreakdown(session, tokenizer);
 		skillsTokens = nonMessage.skillsTokens;
 		toolsTokens = nonMessage.toolsTokens;
 		systemContextTokens = nonMessage.systemContextTokens;
