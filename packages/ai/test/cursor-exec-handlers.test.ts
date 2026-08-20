@@ -91,10 +91,15 @@ function cursorAssistant(
 	};
 }
 
-function captureCursorPayload(context: Context, model: Model<"cursor-agent"> = cursorModel): Promise<AgentRunRequest> {
+function captureCursorPayload(
+	context: Context,
+	model: Model<"cursor-agent"> = cursorModel,
+	options?: { requestModelId?: string },
+): Promise<AgentRunRequest> {
 	const { promise, resolve, reject } = Promise.withResolvers<AgentRunRequest>();
 	streamCursor(model, context, {
 		apiKey: "test-token",
+		requestModelId: options?.requestModelId,
 		onPayload: payload => {
 			if (isAgentRunRequest(payload)) {
 				resolve(payload);
@@ -499,6 +504,50 @@ describe("Cursor request action encoding", () => {
 		expect(payload.modelDetails?.maxMode).toBe(true);
 		expect(payload.requestedModel?.modelId).toBe("cursor-composer-2.5-max");
 		expect(payload.requestedModel?.maxMode).toBe(true);
+	});
+
+	it("sends the resolved Grok Fast sibling id, not the collapsed Low default", async () => {
+		const grokFast = buildModel({
+			id: "cursor-grok-4.6-fast",
+			name: "Grok 4.6 Fast",
+			api: "cursor-agent",
+			provider: "cursor",
+			baseUrl: "",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1,
+			maxTokens: 1,
+			requestModelId: "cursor-grok-4.6-low-fast",
+			thinking: {
+				mode: "effort",
+				efforts: ["low", "medium", "high", "xhigh"],
+				requiresEffort: true,
+				effortRouting: {
+					low: "cursor-grok-4.6-low-fast",
+					medium: "cursor-grok-4.6-medium-fast",
+					high: "cursor-grok-4.6-high-fast",
+					xhigh: "cursor-grok-4.6-xhigh-fast",
+				},
+			},
+		});
+
+		const defaultPayload = await captureCursorPayload(
+			{ messages: [{ role: "user", content: "continue", timestamp: 0 }] },
+			grokFast,
+		);
+		expect(defaultPayload.modelDetails?.modelId).toBe("cursor-grok-4.6-low-fast");
+		expect(defaultPayload.requestedModel?.modelId).toBe("cursor-grok-4.6-low-fast");
+		expect(defaultPayload.modelDetails?.displayModelId).toBe("cursor-grok-4.6-fast");
+
+		const xhighPayload = await captureCursorPayload(
+			{ messages: [{ role: "user", content: "continue", timestamp: 0 }] },
+			grokFast,
+			{ requestModelId: "cursor-grok-4.6-xhigh-fast" },
+		);
+		expect(xhighPayload.modelDetails?.modelId).toBe("cursor-grok-4.6-xhigh-fast");
+		expect(xhighPayload.requestedModel?.modelId).toBe("cursor-grok-4.6-xhigh-fast");
+		expect(xhighPayload.modelDetails?.displayModelId).toBe("cursor-grok-4.6-fast");
 	});
 
 	it("sends max-mode metadata with prior history when switching providers mid-conversation", async () => {

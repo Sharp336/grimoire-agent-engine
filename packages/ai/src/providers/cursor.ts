@@ -330,6 +330,13 @@ export interface CursorOptions extends StreamOptions {
 	conversationId?: string;
 	execHandlers?: CursorExecHandlers;
 	onToolResult?: CursorToolResultHandler;
+	/**
+	 * Upstream wire model id override for collapsed effort-tier variants.
+	 * Serialized as `requestModelId ?? model.requestModelId ?? model.id`.
+	 * Cursor Grok Fast/standard lanes encode effort in the sibling id
+	 * (`cursor-grok-4.6-xhigh-fast`), not a separate thinking field.
+	 */
+	requestModelId?: string;
 }
 
 const CONNECT_END_STREAM_FLAG = 0b00000010;
@@ -5117,7 +5124,7 @@ export async function buildGrpcRequest(
 		turns,
 	});
 
-	const wireModelId = model.requestModelId ?? model.id;
+	const wireModelId = options?.requestModelId ?? model.requestModelId ?? model.id;
 	const cursorMaxMode = model.cursorMaxMode === true;
 	const modelDetails = create(ModelDetailsSchema, {
 		modelId: wireModelId,

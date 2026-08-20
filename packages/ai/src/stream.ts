@@ -2307,10 +2307,16 @@ function mapOptionsForApi<TApi extends Api>(
 			});
 
 		case "cursor-agent": {
+			const cursorModel = model as Model<"cursor-agent">;
+			const effort =
+				options?.reasoning && !options.disableReasoning && !options.forceReasoningOff
+					? requireSupportedEffort(cursorModel, options.reasoning)
+					: undefined;
 			const execHandlers = options?.cursorExecHandlers ?? options?.execHandlers;
 			const onToolResult = options?.cursorOnToolResult ?? execHandlers?.onToolResult;
 			return castApi<"cursor-agent">({
 				...base,
+				requestModelId: resolveWireModelId(cursorModel, effort),
 				execHandlers,
 				onToolResult,
 			});
