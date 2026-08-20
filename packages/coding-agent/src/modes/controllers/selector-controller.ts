@@ -893,7 +893,7 @@ export class SelectorController {
 									thinkingLevel: isAuto ? ThinkingLevel.Inherit : concreteThinking,
 									persist: targetScope === "global",
 								});
-								if (!switched) return;
+								if (!switched) return false;
 								if (targetScope === "project") {
 									this.ctx.settings.setProjectModelRole(
 										"default",
@@ -924,6 +924,7 @@ export class SelectorController {
 						}
 					} catch (error) {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
+						return false;
 					} finally {
 						releaseDefaultMutation?.();
 						hub?.refreshAfterExternalMutation();

@@ -769,6 +769,248 @@ describe("ModelHub", () => {
 			expect(onFallbackChainChange).toHaveBeenLastCalledWith("default", ["test/model-b"]);
 		});
 
+		test("[ on the front fallback of a role promotes it to primary, demoting the current primary into its slot", async () => {
+			const a = makeModel("test", "model-a");
+			const b = makeModel("test", "model-b");
+			const settings = Settings.isolated({
+				modelRoles: { default: "test/model-a" },
+				"retry.fallbackChains": { default: ["test/model-b"] },
+			});
+			const { hub, onAssign, onFallbackChainChange } = createHub({ models: [a, b], scoped: true, settings });
+
+			enterRolesView(hub);
+			hub.handleInput(DOWN); // default's only chain entry (model-b)
+			hub.handleInput("[");
+			await Promise.resolve(); // let the awaited onAssign settle before the chain rewrite runs
+
+			expect(onAssign).toHaveBeenCalledWith(b, "default", ThinkingLevel.Inherit, "test/model-b", undefined);
+			expect(onFallbackChainChange).toHaveBeenLastCalledWith("default", ["test/model-a"]);
+		});
+
+		test("[ on the front fallback is a no-op when the role has no explicit primary to demote", () => {
+			const a = makeModel("test", "model-a");
+			const b = makeModel("test", "model-b");
+			const settings = Settings.isolated({
+				"retry.fallbackChains": { default: ["test/model-a", "test/model-b"] },
+			});
+			const { hub, onAssign, onFallbackChainChange } = createHub({ models: [a, b], scoped: true, settings });
+
+			enterRolesView(hub);
+			hub.handleInput(DOWN); // first chain entry (model-a), default has no explicit primary
+			hub.handleInput("[");
+
+			expect(onAssign).not.toHaveBeenCalled();
+			expect(onFallbackChainChange).not.toHaveBeenCalled();
+		});
+
+		test("[ on a model-keyed chain's front entry is a no-op (no primary slot to promote into)", () => {
+			const a = makeModel("test", "model-a");
+			const b = makeModel("test", "model-b");
+			const settings = Settings.isolated({
+				"retry.fallbackChains": { "test/model-a": ["test/model-b"] },
+			});
+			const { hub, onAssign, onFallbackChainChange } = createHub({ models: [a, b], scoped: true, settings });
+
+			enterRolesView(hub);
+			hub.handleInput(UP); // wraps to the trailing "+ New fallback…" row
+			hub.handleInput(UP); // steps onto the chain's front entry (model-b)
+			hub.handleInput("[");
+
+			expect(onAssign).not.toHaveBeenCalled();
+			expect(onFallbackChainChange).not.toHaveBeenCalled();
+		});
+
+		test("[ on a front fallback with its own :level suffix applies that level to the promoted primary and preserves the old primary's level in its demoted slot", async () => {
+			const primaryModel = getBundledModel("openai", "gpt-5.5");
+			const fallbackModel = getBundledModel("openai", "gpt-5.6");
+			if (!primaryModel || !fallbackModel) {
+				throw new Error("Expected bundled OpenAI models for promote thinking-level test");
+			}
+			const settings = Settings.isolated({
+				modelRoles: { default: `${primaryModel.provider}/${primaryModel.id}:high` },
+				"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}:low`] },
+			});
+			const { hub, onAssign, onFallbackChainChange } = createHub({
+				models: [primaryModel, fallbackModel],
+				scoped: true,
+				settings,
+			});
+
+			enterRolesView(hub);
+			hub.handleInput(DOWN); // default's only chain entry (gpt-5.6:low)
+			hub.handleInput("[");
+			await Promise.resolve(); // let the awaited onAssign settle before the chain rewrite runs
+
+			expect(onAssign).toHaveBeenCalledWith(
+				fallbackModel,
+				"default",
+				ThinkingLevel.Low,
+				`${fallbackModel.provider}/${fallbackModel.id}`,
+				undefined,
+			);
+			expect(onFallbackChainChange).toHaveBeenLastCalledWith("default", [
+				`${primaryModel.provider}/${primaryModel.id}:high`,
+			]);
+		});
+
+		test("[ on an unsuffixed front fallback inherits the current primary's thinking level instead of resetting to inherit", async () => {
+			const primaryModel = getBundledModel("openai", "gpt-5.5");
+			const fallbackModel = getBundledModel("openai", "gpt-5.6");
+			if (!primaryModel || !fallbackModel) {
+				throw new Error("Expected bundled OpenAI models for promote thinking-level test");
+			}
+			const settings = Settings.isolated({
+				modelRoles: { default: `${primaryModel.provider}/${primaryModel.id}:high` },
+				"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+			});
+			const { hub, onAssign, onFallbackChainChange } = createHub({
+				models: [primaryModel, fallbackModel],
+				scoped: true,
+				settings,
+			});
+
+			enterRolesView(hub);
+			hub.handleInput(DOWN); // default's only chain entry (gpt-5.6, no suffix)
+			hub.handleInput("[");
+			await Promise.resolve(); // let the awaited onAssign settle before the chain rewrite runs
+
+			// The fallback carries no explicit level, so promoting it inherits the
+			// outgoing primary's :high instead of collapsing to Inherit.
+			expect(onAssign).toHaveBeenCalledWith(
+				fallbackModel,
+				"default",
+				ThinkingLevel.High,
+				`${fallbackModel.provider}/${fallbackModel.id}`,
+				undefined,
+			);
+			expect(onFallbackChainChange).toHaveBeenLastCalledWith("default", [
+				`${primaryModel.provider}/${primaryModel.id}:high`,
+			]);
+		});
+
+		test("[ on a provider-wildcard front entry (provider/*) promotes to its resolved concrete model and keeps the wildcard rule in the chain", async () => {
+			const a = makeModel("a", "model");
+			const b = makeModel("b", "model");
+			const settings = Settings.isolated({
+				modelRoles: { default: "a/model" },
+				"retry.fallbackChains": { default: ["b/*"] },
+			});
+			const { hub, onAssign, onFallbackChainChange } = createHub({ models: [a, b], scoped: true, settings });
+
+			enterRolesView(hub);
+			hub.handleInput(DOWN); // default's only chain entry (b/*)
+			hub.handleInput("["); // promote — the wildcard resolves against the primary's id
+			await Promise.resolve(); // let the awaited onAssign settle before the chain rewrite runs
+
+			expect(onAssign).toHaveBeenCalledWith(b, "default", ThinkingLevel.Inherit, "b/model", undefined);
+			// A wildcard is a standing provider-level rule, not a one-off pick:
+			// promoting through it demotes the old primary ahead of the rule
+			// instead of deleting the rule from the chain.
+			expect(onFallbackChainChange).toHaveBeenLastCalledWith("default", ["a/model", "b/*"]);
+		});
+
+		test("[ on the front fallback does not rewrite the chain while the assignment is still pending, and applies it once resolved", async () => {
+			const a = makeModel("test", "model-a");
+			const b = makeModel("test", "model-b");
+			const settings = Settings.isolated({
+				modelRoles: { default: "test/model-a" },
+				"retry.fallbackChains": { default: ["test/model-b"] },
+			});
+			const { promise: assignSettled, resolve: settleAssign } = Promise.withResolvers<boolean>();
+			const onAssign = vi.fn(() => assignSettled);
+			const { hub, onFallbackChainChange } = createHub({
+				models: [a, b],
+				scoped: true,
+				settings,
+				callbacks: { onAssign },
+			});
+
+			enterRolesView(hub);
+			hub.handleInput(DOWN); // default's only chain entry (model-b)
+			hub.handleInput("[");
+
+			// The assignment (e.g. an in-flight provider switch) hasn't settled yet —
+			// the chain must not be rewritten out from under the still-pending swap.
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(onAssign).toHaveBeenCalledWith(b, "default", ThinkingLevel.Inherit, "test/model-b", undefined);
+			expect(onFallbackChainChange).not.toHaveBeenCalled();
+
+			settleAssign(true);
+			await assignSettled;
+			await Promise.resolve();
+			expect(onFallbackChainChange).toHaveBeenLastCalledWith("default", ["test/model-a"]);
+		});
+
+		test("[ on the front fallback leaves the chain untouched when the assignment reports failure", async () => {
+			const a = makeModel("test", "model-a");
+			const b = makeModel("test", "model-b");
+			const settings = Settings.isolated({
+				modelRoles: { default: "test/model-a" },
+				"retry.fallbackChains": { default: ["test/model-b"] },
+			});
+			// Mirrors a rejected provider switch (selector-controller.ts's
+			// `onAssign` returns `false` when `session.setModel` reports
+			// `switched: false`): the chain must not demote the primary that
+			// never actually moved.
+			const onAssign = vi.fn(async () => false);
+			const { hub, onFallbackChainChange } = createHub({
+				models: [a, b],
+				scoped: true,
+				settings,
+				callbacks: { onAssign },
+			});
+
+			enterRolesView(hub);
+			hub.handleInput(DOWN); // default's only chain entry (model-b)
+			hub.handleInput("[");
+			await Promise.resolve();
+			await Promise.resolve();
+
+			expect(onAssign).toHaveBeenCalledWith(b, "default", ThinkingLevel.Inherit, "test/model-b", undefined);
+			expect(onFallbackChainChange).not.toHaveBeenCalled();
+		});
+
+		test("[ on the front fallback of a two-entry chain freezes further reordering until the promotion resolves", async () => {
+			const a = makeModel("test", "model-a");
+			const b = makeModel("test", "model-b");
+			const c = makeModel("test", "model-c");
+			const settings = Settings.isolated({
+				modelRoles: { default: "test/model-a" },
+				"retry.fallbackChains": { default: ["test/model-b", "test/model-c"] },
+			});
+			const { promise: assignSettled, resolve: settleAssign } = Promise.withResolvers<boolean>();
+			const onAssign = vi.fn(() => assignSettled);
+			const { hub, onFallbackChainChange } = createHub({
+				models: [a, b, c],
+				scoped: true,
+				settings,
+				callbacks: { onAssign },
+			});
+
+			enterRolesView(hub);
+			hub.handleInput(DOWN); // default's front chain entry (model-b)
+			hub.handleInput("["); // promote model-b — the assignment is still pending
+			await Promise.resolve();
+			expect(normalize(hub.render(220))).toContain("promoting…");
+
+			// A `]` on the same still-front row during the pending gap must be
+			// rejected outright, not applied against a stale pre-promotion chain
+			// snapshot and then clobbered (or clobber) the promotion's own write.
+			hub.handleInput("]");
+			await Promise.resolve();
+			expect(onFallbackChainChange).not.toHaveBeenCalled();
+
+			settleAssign(true);
+			await assignSettled;
+			await Promise.resolve();
+
+			// Only the promotion's own write landed: model-a demoted into the
+			// chain, model-c undisturbed — the rejected `]` never touched settings.
+			expect(onFallbackChainChange).toHaveBeenLastCalledWith("default", ["test/model-a", "test/model-c"]);
+			expect(normalize(hub.render(220))).not.toContain("promoting…");
+		});
+
 		test("windows the roles list so model-keyed chains past the panel height stay reachable", () => {
 			const settings = Settings.isolated({
 				// Model-keyed chains sort alphabetically; the unique tail key lands last.

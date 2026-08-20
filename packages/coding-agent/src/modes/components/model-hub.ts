@@ -31,7 +31,18 @@ import type { ModelRegistry } from "../../config/model-registry";
 import { type ModelRoleLookup, type ResolvedModelRoleValue, resolveModelRoleValue } from "../../config/model-resolver";
 import { getKnownRoleIds, getRoleInfo } from "../../config/model-roles";
 import type { Settings } from "../../config/settings";
-import { AUTO_THINKING, type ConfiguredThinkingLevel, getConfiguredThinkingLevelMetadata } from "../../thinking";
+import {
+	formatRetryFallbackSelector,
+	isRetryFallbackWildcardKey,
+	parseRetryFallbackChainEntry,
+	parseRetryFallbackSelector,
+} from "../../session/retry-fallback-chains";
+import {
+	AUTO_THINKING,
+	type ConfiguredThinkingLevel,
+	concreteThinkingLevel,
+	getConfiguredThinkingLevelMetadata,
+} from "../../thinking";
 import { theme } from "../theme/theme";
 import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../utils/keybinding-matchers";
 import {
@@ -79,14 +90,19 @@ export interface ScopedModelItem {
 export type ModelRoleSelectionScope = "global" | "project";
 
 export interface ModelHubCallbacks {
-	/** Persist a role assignment. */
+	/**
+	 * Persist a role assignment. An explicit `false` (sync or resolved) tells a
+	 * caller that derives further state from the assignment (e.g. promoting a
+	 * fallback) that it did not apply, so it must not persist that derived
+	 * state; any other return, including `void`, is treated as success.
+	 */
 	onAssign: (
 		model: Model,
 		role: string,
 		thinkingLevel: ConfiguredThinkingLevel | undefined,
 		selector: string,
 		scope?: ModelRoleSelectionScope,
-	) => void;
+	) => void | boolean | Promise<void | boolean>;
 	/** Clear a configured role back to auto-selection. */
 	onUnassign: (role: string, scope?: ModelRoleSelectionScope) => void;
 	/** Persist a `retry.fallbackChains` entry — keyed by a role, `provider/model-id`, or `provider/*`; an empty chain clears the key. */
@@ -211,6 +227,15 @@ export class ModelHubComponent implements Component {
 	#roleScrollStart = 0;
 	/** Roles rows actually drawn this frame; bounds mouse hit-testing to the visible window. */
 	#rolesVisibleCount = 0;
+	/**
+	 * Roles whose front-fallback promotion is awaiting an async `onAssign`
+	 * result. While a role is in this set, every mutation of its primary or
+	 * chain is rejected: without this, a `[`/`]`/`x`/Enter pressed during the
+	 * gap could persist a chain edit that the promotion's own eventual write
+	 * (still holding a stale pre-await snapshot) then silently overwrites, or
+	 * vice versa — either way discarding one of the two edits.
+	 */
+	#pendingPromotions = new Set<string>();
 
 	#assigning: AssignTarget | null = null;
 	#strip: StripState | null = null;
@@ -784,8 +809,14 @@ export class ModelHubComponent implements Component {
 		return resolved.explicitThinkingLevel ? (resolved.thinkingLevel ?? ThinkingLevel.Inherit) : ThinkingLevel.Inherit;
 	}
 
-	/** Persist `role → item`, preserving a still-supported thinking level, then open the thinking strip. */
+	/**
+	 * Persist `role → item`, preserving a still-supported thinking level,
+	 * then open the thinking strip. Rejects while `role`'s promotion is
+	 * pending — it would otherwise race the promotion's own `onAssign` call
+	 * for the same role.
+	 */
 	#assignRole(item: ModelBrowserItem, role: string, returnToRoles: boolean, scope?: ModelRoleSelectionScope): void {
+		if (this.#pendingPromotions.has(role)) return;
 		if (this.#settings.get("modelRoleStorage") === "project" && scope === undefined) {
 			this.#openScopeStrip(item, role, returnToRoles);
 			return;
@@ -806,15 +837,18 @@ export class ModelHubComponent implements Component {
 	}
 
 	#unassignRole(role: string): void {
+		if (this.#pendingPromotions.has(role)) return;
 		const assignment = this.#roles[role];
 		if (!assignment || assignment.autoSelected) return;
-		if (this.#settings.get("modelRoleStorage") === "project") {
-			const source = this.#settings.getModelRoleSource(role);
-			this.#callbacks.onUnassign(role, source === "default" ? undefined : source);
-		} else {
-			this.#callbacks.onUnassign(role);
-		}
+		this.#callbacks.onUnassign(role, this.#roleStorageScope(role));
 		this.#refreshAfterMutation();
+	}
+
+	/** The scope a persisted write to `role` should carry: its current storage source under project storage, else `undefined`. */
+	#roleStorageScope(role: string): ModelRoleSelectionScope | undefined {
+		if (this.#settings.get("modelRoleStorage") !== "project") return undefined;
+		const source = this.#settings.getModelRoleSource(role);
+		return source === "default" ? undefined : source;
 	}
 
 	#thinkingOptionsFor(model: Model): ConfiguredThinkingLevel[] {
@@ -931,7 +965,7 @@ export class ModelHubComponent implements Component {
 				}
 				return;
 			case "unassign":
-				if (chip.role) {
+				if (chip.role && !this.#pendingPromotions.has(chip.role)) {
 					if (this.#settings.get("modelRoleStorage") === "project") {
 						this.#callbacks.onUnassign(chip.role, chip.scope);
 					} else {
@@ -960,7 +994,7 @@ export class ModelHubComponent implements Component {
 				}
 				return;
 			case "thinking":
-				if (strip.role && chip.thinkingLevel !== undefined) {
+				if (strip.role && chip.thinkingLevel !== undefined && !this.#pendingPromotions.has(strip.role)) {
 					this.#callbacks.onAssign(
 						strip.item.model,
 						strip.role,
@@ -1029,6 +1063,7 @@ export class ModelHubComponent implements Component {
 
 	/** Write the picked model into the target chain slot, dedupe, and land back on its Roles row. */
 	#commitFallback(item: ModelBrowserItem, target: { role: string; index: number | null }): void {
+		if (this.#pendingPromotions.has(target.role)) return;
 		const chain = [...(this.#fallbackChains()[target.role] ?? [])];
 		const selector = item.selector;
 		if (target.index !== null && target.index < chain.length) {
@@ -1049,8 +1084,16 @@ export class ModelHubComponent implements Component {
 		if (rowIndex >= 0) this.#roleIndex = rowIndex;
 	}
 
-	/** Persist `role`'s chain through the host callback and rebuild dependent state. */
+	/**
+	 * Persist `role`'s chain through the host callback and rebuild dependent
+	 * state. Rejects while `role`'s promotion is pending — the central
+	 * choke point for every chain-mutating path (append/replace/remove/
+	 * reorder/clear), so a promotion can never race a concurrent edit; the
+	 * promotion's own eventual write bypasses this by removing itself from
+	 * `#pendingPromotions` first.
+	 */
 	#setFallbackChain(role: string, chain: string[]): void {
+		if (this.#pendingPromotions.has(role)) return;
 		this.#callbacks.onFallbackChainChange?.(role, chain);
 		this.#refreshAfterMutation();
 	}
@@ -1065,6 +1108,7 @@ export class ModelHubComponent implements Component {
 
 	/** Remove one chain entry; the cursor stays on the nearest surviving row. */
 	#removeFallback(row: { role: string; chainIndex: number }): void {
+		if (this.#pendingPromotions.has(row.role)) return;
 		const chain = [...(this.#fallbackChains()[row.role] ?? [])];
 		if (row.chainIndex >= chain.length) return;
 		chain.splice(row.chainIndex, 1);
@@ -1072,14 +1116,90 @@ export class ModelHubComponent implements Component {
 		this.#roleIndex = Math.min(this.#roleIndex, Math.max(0, this.#rolesRows.length - 1));
 	}
 
-	/** Move a chain entry one slot earlier/later; the cursor follows the moved entry. */
+	/**
+	 * Move a chain entry one slot earlier/later; the cursor follows the moved
+	 * entry. Moving the front entry earlier promotes it to `row.role`'s
+	 * primary model instead, demoting the current primary into its slot.
+	 */
 	#moveFallback(row: { role: string; chainIndex: number }, delta: -1 | 1): void {
+		if (this.#pendingPromotions.has(row.role)) return;
 		const chain = [...(this.#fallbackChains()[row.role] ?? [])];
+		if (row.chainIndex >= chain.length) return;
 		const target = row.chainIndex + delta;
-		if (row.chainIndex >= chain.length || target < 0 || target >= chain.length) return;
+		if (target < 0) {
+			void this.#promoteFallback(row.role, chain);
+			return;
+		}
+		if (target >= chain.length) return;
 		[chain[row.chainIndex], chain[target]] = [chain[target], chain[row.chainIndex]];
 		this.#setFallbackChain(row.role, chain);
 		this.#roleIndex += delta;
+	}
+
+	/**
+	 * Swap `role`'s primary model with the front of its fallback chain,
+	 * preserving each side's thinking level. The front entry is resolved
+	 * with `parseRetryFallbackChainEntry` against the primary as `current`,
+	 * so a `provider/*`/`provider/prefix/*` wildcard entry promotes to the
+	 * same concrete model runtime fallback recovery would pick — not just a
+	 * literal `provider/id` selector. A front entry's own `:level` suffix
+	 * wins; an unsuffixed entry inherits the current primary's level instead
+	 * of resetting to `Inherit`, matching the runtime fallback's
+	 * `selector.thinkingLevel ?? currentThinkingLevel` carry-over
+	 * (`turn-recovery.ts`). No-op for model/provider-keyed chains (they have
+	 * no primary to swap into), for roles without an explicit primary
+	 * (nothing to demote), for a front entry whose resolved model is no
+	 * longer available, for a role already promoting, and — since
+	 * `onAssign` may validate/switch asynchronously (e.g. a failed provider
+	 * switch) — for an assignment that reports it did not apply: the chain
+	 * is left untouched so a rejected promotion cannot demote the primary
+	 * out from under it. `role` is added to `#pendingPromotions` for the
+	 * async gap so every other role/chain mutation (see `#setFallbackChain`,
+	 * `#assignRole`, `#unassignRole`) rejects input instead of racing this
+	 * call's captured `primary`/`chain` snapshot with the eventual
+	 * demote-write.
+	 */
+	async #promoteFallback(role: string, chain: readonly string[]): Promise<void> {
+		if (this.#pendingPromotions.has(role)) return;
+		if (!this.#visibleRoleIds().includes(role)) return;
+		const primary = this.#roles[role];
+		if (!primary || primary.autoSelected) return;
+		const currentSelector = parseRetryFallbackSelector(
+			`${primary.model.provider}/${primary.model.id}`,
+			this.#registry,
+		);
+		if (!currentSelector) return;
+		const parsed = parseRetryFallbackChainEntry(this.#registry, chain[0], currentSelector);
+		if (!parsed) return;
+		const promoted = this.#availableItems.find(
+			item => item.model.provider === parsed.provider && item.model.id === parsed.id,
+		);
+		if (!promoted) return;
+		let level: ConfiguredThinkingLevel = parsed.thinkingLevel ?? primary.thinkingLevel;
+		if (!this.#thinkingOptionsFor(promoted.model).includes(level)) level = ThinkingLevel.Inherit;
+		const scope = this.#roleStorageScope(role);
+		this.#pendingPromotions.add(role);
+		this.#tui.requestRender();
+		let applied: void | boolean;
+		try {
+			applied = await this.#callbacks.onAssign(promoted.model, role, level, promoted.selector, scope);
+		} finally {
+			this.#pendingPromotions.delete(role);
+		}
+		if (applied === false) {
+			this.#tui.requestRender();
+			return;
+		}
+		const demotedSelector = formatRetryFallbackSelector(primary.model, concreteThinkingLevel(primary.thinkingLevel));
+		// A wildcard front entry (`provider/*`, `provider/prefix/*`) is a
+		// standing provider-level rule, not a one-off pick — it resolves fresh
+		// against whatever the primary becomes, so promoting through it keeps
+		// it in the chain (now behind the newly demoted primary) instead of
+		// consuming it. Only a concrete front entry, whose selector IS the
+		// promoted model, gets replaced by the demoted primary.
+		const restOfChain = isRetryFallbackWildcardKey(chain[0]) ? chain : chain.slice(1);
+		this.#setFallbackChain(role, [demotedSelector, ...restOfChain]);
+		this.#roleIndex = Math.max(0, this.#roleIndex - 1);
 	}
 
 	#cancelAssign(): void {
@@ -1383,7 +1503,8 @@ export class ModelHubComponent implements Component {
 			return;
 		}
 		// Reordering: [ / shift+↑ moves the row earlier, ] / shift+↓ later —
-		// cycle order on a role row, chain order on a fallback row.
+		// cycle order on a role row, chain order on a fallback row (moving the
+		// front entry earlier promotes it to primary, demoting the primary).
 		if (matchesKey(data, "shift+up")) {
 			if (role) this.#moveCycleMembership(role, -1);
 			else if (row?.kind === "fallback") this.#moveFallback(row, -1);
@@ -1833,9 +1954,10 @@ export class ModelHubComponent implements Component {
 			// Quick-cycle membership badge (`⟳2` = second stop of the ctrl+p cycle).
 			const cycleIndex = cycleOrder.indexOf(role);
 			const cycleStyled = cycleIndex >= 0 ? theme.fg("accent", `${theme.icon.loop}${cycleIndex + 1}`) : "";
+			const pendingStyled = this.#pendingPromotions.has(role) ? theme.fg("warning", "promoting…") : "";
 
 			let line = ` ${cursor} ${dot} ${tagStyled}  ${value}`;
-			const right = [levelStyled, cycleStyled].filter(part => part.length > 0).join("  ");
+			const right = [levelStyled, cycleStyled, pendingStyled].filter(part => part.length > 0).join("  ");
 			const rightWidth = visibleWidth(right);
 			const lineWidth = visibleWidth(line);
 			if (rightWidth > 0 && lineWidth + rightWidth + 2 <= width) {
@@ -1941,8 +2063,17 @@ export class ModelHubComponent implements Component {
 				return "↑/↓ providers · → roles · Esc close";
 			}
 			const row = this.#rolesRows[this.#roleIndex];
+			if ((row?.kind === "role" || row?.kind === "fallback") && this.#pendingPromotions.has(row.role)) {
+				return "Promotion pending — applying the new primary model…";
+			}
 			if (row?.kind === "fallback") {
-				return "↑/↓ rows · Enter replace · f add another · x remove · [/] reorder · ← providers";
+				const canPromote =
+					row.chainIndex === 0 &&
+					this.#visibleRoleIds().includes(row.role) &&
+					!!this.#roles[row.role] &&
+					!this.#roles[row.role]?.autoSelected;
+				const reorder = canPromote ? "[ promote to primary · ] reorder" : "[/] reorder";
+				return `↑/↓ rows · Enter replace · f add another · x remove · ${reorder} · ← providers`;
 			}
 			if (row?.kind === "chainKey") {
 				return "↑/↓ rows · Enter/f add fallback · x clear chain · ← providers";
