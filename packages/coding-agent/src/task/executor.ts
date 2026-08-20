@@ -1301,6 +1301,16 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				sessionFile: args.sessionFile,
 			});
 		}
+		// machine-owned ledger (best-effort, never blocks progress)
+		if (args.sessionFile) {
+			void (async () => {
+				try {
+					const { progressToLedgerEntry, ledgerPathForSession, appendLedgerEntry } = await import("./subagent-ledger");
+					const entry = progressToLedgerEntry(progress);
+					await appendLedgerEntry(ledgerPathForSession(args.sessionFile as string), entry);
+				} catch {}
+			})();
+		}
 		lastProgressEmitMs = Date.now();
 	};
 

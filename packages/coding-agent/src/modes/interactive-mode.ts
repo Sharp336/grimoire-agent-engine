@@ -52,8 +52,8 @@ import {
 	prompt,
 	setProjectDir,
 } from "@oh-my-pi/pi-utils";
+import { compactModelIdentity } from "../task/subagent-ledger";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import { reset as resetCapabilities } from "../capability";
 import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
 import { KeybindingsManager } from "../config/keybindings";
@@ -477,8 +477,9 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 				let modelSuffix = "";
 				if (resolved) {
 					const fallbackPrefix = isFallback ? "↪ " : "";
+					const compact = compactModelIdentity(resolved);
 					const modelBudget = Math.max(10, columns - visibleWidth(displayId) - 12);
-					modelSuffix = `  ${theme.fg("muted", fallbackPrefix + truncateToWidth(resolved, modelBudget))}`;
+					modelSuffix = `  ${theme.fg("muted", fallbackPrefix + truncateToWidth(compact, modelBudget))}`;
 				}
 				let line = `${dot} ${theme.fg("accent", theme.bold(displayId))}${modelSuffix}`;
 				const description = session.description?.trim() || session.progress?.description?.trim();

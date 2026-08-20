@@ -3,9 +3,8 @@ import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { renderSubagentHudLines } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import type { ObservableSession } from "@oh-my-pi/pi-coding-agent/modes/session-observer-registry";
 import type { AgentProgress } from "@oh-my-pi/pi-coding-agent/task";
-import { detectModelAttributionMismatch, formatExpandedDetail, formatRuntimeModelUsage } from "@oh-my-pi/pi-coding-agent/task/subagent-ledger";
-beforeAll(() => initTheme());
-
+import { compactModelIdentity, detectModelAttributionMismatch, formatExpandedDetail, formatRuntimeModelUsage, ledgerPathForSession, appendLedgerEntry, readLedgerEntries, progressToLedgerEntry } from "@oh-my-pi/pi-coding-agent/task/subagent-ledger";
+beforeAll(async () => { await initTheme(); });
 function makeProgress(overrides: Partial<AgentProgress> & { id: string }): AgentProgress {
 	return {
 		index: 0,
@@ -51,10 +50,9 @@ describe("SPEC runtime model identity RED", () => {
 			},
 		];
 		const out = stripAnsi(renderSubagentHudLines(sessions, 120).join("\n"));
-		// Must contain provider/model, not just bare name
 		expect(out).toContain("WriterRedTests");
-		expect(out).toContain("google-antigravity");
-		expect(out).toContain("gemini");
+		// compact mobile HUD
+		expect(out).toContain("AGY·G3.7F·high");
 	});
 
 	it("2. fallback updates HUD to actual fallback model, retains selected", () => {
@@ -82,7 +80,7 @@ describe("SPEC runtime model identity RED", () => {
 			},
 		];
 		const out = stripAnsi(renderSubagentHudLines(sessions, 120).join("\n"));
-		expect(out).toContain("meta/muse-spark");
+		expect(out).toContain("META·MS1.2");
 		expect(out).toContain("↪");
 	});
 
@@ -170,5 +168,79 @@ describe("SPEC runtime model identity RED", () => {
 		for (const line of narrow) {
 			expect(line.length).toBeLessThanOrEqual(60);
 		}
+	});
+	it("10. compact abbreviations for all required providers", () => {
+		expect(compactModelIdentity("google-antigravity/gemini-3.7-flash:high")).toBe("AGY·G3.7F·high");
+		expect(compactModelIdentity("meta/muse-spark-1.2-contributor")).toBe("META·MS1.2");
+		expect(compactModelIdentity("openai-codex/gpt-5.6-sol")).toBe("OAI·G5.6S");
+		expect(compactModelIdentity("cursor/grok-4.6")).toBe("CUR·G4.6");
+	});
+	it("11. HUD shows compact for each model", () => {
+		const cases: Array<[string, string]> = [
+			["google-antigravity/gemini-3.7-flash:high", "AGY·G3.7F·high"],
+			["meta/muse-spark-1.2-contributor", "META·MS1.2"],
+			["openai-codex/gpt-5.6-sol", "OAI·G5.6S"],
+			["cursor/grok-4.6", "CUR·G4.6"],
+		];
+		for (const [model, compact] of cases) {
+			const sessions: ObservableSession[] = [
+				{
+					id: "TestAgent",
+					kind: "subagent",
+					label: "TestAgent",
+					description: "work",
+					status: "active",
+					detached: true,
+					lastUpdate: Date.now(),
+					progress: makeProgress({ id: "TestAgent", status: "running", resolvedModel: model }),
+				},
+			];
+			const out = stripAnsi(renderSubagentHudLines(sessions, 120).join("\n"));
+			expect(out).toContain(compact);
+		}
+	});
+	it("12. ledger captures required fields", () => {
+		const p = makeProgress({
+			id: "WriterRedTests",
+			status: "running",
+			resolvedModel: "meta/muse-spark-1.2-contributor:high",
+			selectedModel: "google-antigravity/gemini-3.7-flash:high",
+			resolvedModelIsFallback: true,
+			resourcePool: "meta",
+			parentModel: "anthropic/claude-opus-5",
+			ompVersion: "17.3.4",
+			routingIntent: "strong",
+			routingReason: "parent Anthropic pool excluded",
+			routingReroutes: [{ from: "google-antigravity/gemini-3.7-flash", to: "meta/muse-spark-1.2-contributor", reason: "fallback" }],
+		} as Partial<AgentProgress> & { id: string });
+		const e = progressToLedgerEntry(p as AgentProgress);
+		expect(e.selectedModel).toBe("google-antigravity/gemini-3.7-flash:high");
+		expect(e.actualModel).toBe("meta/muse-spark-1.2-contributor:high");
+		expect(e.fallback).toBe(true);
+		expect(e.parentModel).toBe("anthropic/claude-opus-5");
+		expect(e.ompVersion).toBe("17.3.4");
+		expect(e.resourcePool).toBe("meta");
+		expect(e.routingReason).toBeDefined();
+		expect(e.routingReroutes?.length).toBe(1);
+		expect(e.effort).toBe("high");
+	});
+	it("13. ledger JSONL persistence roundtrip", async () => {
+		const tmp = await import("node:os");
+		const path = await import("node:path");
+		const fs = await import("node:fs/promises");
+		const dir = await fs.mkdtemp(path.join(tmp.tmpdir(), "ledger-test-"));
+		const ledgerPath = path.join(dir, "test.ledger.jsonl");
+		const p = makeProgress({
+			id: "RedTestWriter",
+			status: "running",
+			resolvedModel: "google-antigravity/gemini-3.7-flash",
+			selectedModel: "google-antigravity/gemini-3.7-flash",
+			ompVersion: "17.3.4",
+		} as Partial<AgentProgress> & { id: string });
+		await appendLedgerEntry(ledgerPath, progressToLedgerEntry(p as AgentProgress));
+		const entries = await readLedgerEntries(ledgerPath);
+		expect(entries.length).toBe(1);
+		expect(entries[0].actualModel).toBe("google-antigravity/gemini-3.7-flash");
+		expect(ledgerPathForSession("/tmp/session.jsonl")).toBe("/tmp/session.ledger.jsonl");
 	});
 });
