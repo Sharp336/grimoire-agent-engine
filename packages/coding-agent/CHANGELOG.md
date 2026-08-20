@@ -14,6 +14,7 @@
 - Added repeat read warning hints when identical file content is read multiple times.
 - Explicit DAP adapters can now attach without a PID or port when `attachDefaults` provide the target arguments.
 - Added `isProjectTrusted()` compatibility shim to `ExtensionContext` for extensions targeting upstream per-directory trust gates.
+- Added `retry.maxSessionRetries` (default: 10) to cap automatic API retries cumulatively across successful turns and model or credential fallback instead of granting every turn a fresh retry budget.
 
 ### Changed
 

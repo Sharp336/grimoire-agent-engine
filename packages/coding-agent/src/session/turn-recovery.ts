@@ -192,6 +192,7 @@ export class TurnRecovery {
 	readonly #host: TurnRecoveryHost;
 	#retryAbortController: AbortController | undefined;
 	#retryAttempt = 0;
+	#sessionRetryCount = 0;
 	#retryPromise: Promise<void> | undefined;
 	#retryResolve: (() => void) | undefined;
 	#activeRetryFallback: ActiveRetryFallbackState | undefined;
@@ -1912,10 +1913,30 @@ export class TurnRecovery {
 		const maxRetries = this.#isOpenRouterThinkingStreamClose(message)
 			? Math.min(retrySettings.maxRetries, 1)
 			: retrySettings.maxRetries;
+		const maxSessionRetries = Math.max(0, retrySettings.maxSessionRetries);
 		const retryBudgetExhausted = this.#retryAttempt > maxRetries;
+		const sessionRetryBudgetExhausted = this.#sessionRetryCount >= maxSessionRetries;
 
 		const errorMessage = message.errorMessage || "Unknown error";
 		const id = this.#classifyRetryMessage(message);
+		if (sessionRetryBudgetExhausted) {
+			const retries = this.#sessionRetryCount;
+			const budgetMessage = `Session retry budget exhausted after ${retries} ${retries === 1 ? "retry" : "retries"}: ${errorMessage}`;
+			message.errorMessage = budgetMessage;
+			await this.persistTerminalEmptyErrorTurn(message);
+			const retryErrors = await this.#markPendingRetryErrors({ status: "superseded" });
+			await this.#host.emitSessionEvent({
+				type: "auto_retry_end",
+				success: false,
+				attempt: this.#retryAttempt - 1,
+				finalError: budgetMessage,
+				retryErrors,
+			});
+			this.#clearPendingRetryErrors();
+			this.#retryAttempt = 0;
+			this.resolveRetry();
+			return false;
+		}
 		const preserveFailedTurn =
 			options?.preserveFailedTurn === true ||
 			((classifierRefusal || AIError.is(id, AIError.Flag.MalformedFunctionCall)) &&
@@ -2131,6 +2152,8 @@ export class TurnRecovery {
 			this.resolveRetry();
 			return false;
 		}
+
+		this.#sessionRetryCount++;
 
 		await this.#recordPendingRetryError(message, id, { switchedCredential, switchedModel, delayMs });
 

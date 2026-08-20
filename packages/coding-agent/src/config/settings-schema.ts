@@ -1644,6 +1644,25 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"retry.maxSessionRetries": {
+		type: "number",
+		default: 10,
+		ui: {
+			tab: "model",
+			group: "Retry & Fallback",
+			label: "Session Retry Attempts",
+			description:
+				"Maximum automatic retry attempts across one agent session, including retries after successful turns and model or credential fallback",
+			options: [
+				{ value: "1", label: "1 retry" },
+				{ value: "3", label: "3 retries" },
+				{ value: "5", label: "5 retries" },
+				{ value: "10", label: "10 retries" },
+				{ value: "25", label: "25 retries" },
+			],
+		},
+	},
+
 	"retry.baseDelayMs": { type: "number", default: 500 },
 	"retry.maxDelayMs": {
 		type: "number",
@@ -5886,6 +5905,7 @@ export interface ContextPromotionSettings {
 export interface RetrySettings {
 	enabled: boolean;
 	maxRetries: number;
+	maxSessionRetries: number;
 	baseDelayMs: number;
 	maxDelayMs: number;
 	modelFallback: boolean;

@@ -2215,4 +2215,67 @@ describe("AgentSession retry delay cap", () => {
 		expect(last.stopReason).toBe("stop");
 		expect(last.content).toContainEqual({ type: "text", text: "recovered after default 502 retry budget" });
 	});
+
+	it("caps automatic retries cumulatively across successful turns", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+
+		const mock = createMockModel({
+			responses: [
+				{ throw: "502 Bad Gateway first turn" },
+				{ content: ["first turn recovered"] },
+				{ throw: "502 Bad Gateway second turn" },
+				{ content: ["second turn recovered"] },
+				{ throw: "502 Bad Gateway third turn" },
+				{ content: ["must remain unused"] },
+			],
+		});
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (requestedModel, context, options) => mock.stream(requestedModel, context, options),
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 1,
+			"retry.maxSessionRetries": 2,
+			"retry.modelFallback": false,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const retryStartEvents: AutoRetryStartEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") retryStartEvents.push(event);
+		});
+
+		await session.prompt("First transient failure");
+		await session.waitForIdle();
+		await session.prompt("Second transient failure");
+		await session.waitForIdle();
+		await session.prompt("Third transient failure");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(5);
+		expect(retryStartEvents).toHaveLength(2);
+		expect(lastAssistant(session).stopReason).toBe("error");
+		expect(lastAssistant(session).errorMessage).toBe(
+			"Session retry budget exhausted after 2 retries: 502 Bad Gateway third turn",
+		);
+		expect(session.isRetrying).toBe(false);
+	});
 });
