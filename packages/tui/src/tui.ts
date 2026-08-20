@@ -24,8 +24,8 @@ import { isKeyRelease, matchesKey } from "./keys";
 import { LoopWatchdog } from "./loop-watchdog";
 import {
 	composeRightSidebar,
-	RIGHT_SIDEBAR_BOUNDARY_RESET,
 	type ResolvedRightSidebarLayout,
+	RIGHT_SIDEBAR_BOUNDARY_RESET,
 	type RightSidebarOptions,
 	resolveRightSidebarLayout,
 } from "./reserved-sidebar";
@@ -3528,11 +3528,7 @@ export class TUI extends Container {
 		return `${RIGHT_SIDEBAR_BOUNDARY_RESET}\r${moveToBoundary}`;
 	}
 
-	#rightSidebarSuffixSequence(
-		line: string,
-		mainLine: string,
-		layout: ResolvedRightSidebarLayout | undefined,
-	): string {
+	#rightSidebarSuffixSequence(line: string, mainLine: string, layout: ResolvedRightSidebarLayout | undefined): string {
 		if (!layout?.visible) return "";
 		const main = truncateToWidth(mainLine, layout.mainWidth);
 		if (!line.startsWith(main)) return "";
@@ -4962,9 +4958,7 @@ export class TUI extends Container {
 				for (let i = 1; i < paint.lines.length; i++) {
 					const sourceRow = paint.sourceStart + i - 1;
 					paintMainLines[i] =
-						sourceRow < chunkTo
-							? (frame[sourceRow] ?? "")
-							: (options.mainWindow[sourceRow - chunkTo] ?? "");
+						sourceRow < chunkTo ? (frame[sourceRow] ?? "") : (options.mainWindow[sourceRow - chunkTo] ?? "");
 				}
 			}
 		}
@@ -5165,15 +5159,7 @@ export class TUI extends Container {
 		// authoritative accounting, and its beginPass() wipes these frames.
 		this.#imageBudget.beginPass(true);
 		const { framed, mainFramed, viewportTop, contentRows } = this.#composeResizeViewport(layout);
-		this.#emitResizeViewport(
-			framed,
-			mainFramed,
-			layout.sidebar,
-			viewportTop,
-			height,
-			contentRows,
-			terminalWidth,
-		);
+		this.#emitResizeViewport(framed, mainFramed, layout.sidebar, viewportTop, height, contentRows, terminalWidth);
 		this.#resizeViewportPaintCount += 1;
 	}
 
@@ -5542,8 +5528,7 @@ export class TUI extends Container {
 							if (suffix.length > 0) {
 								const fillsWidth = this.#lineFillsWidth(line, width);
 								if (fillsWidth === undefined) {
-									buffer +=
-										this.#rightSidebarBoundarySequence(options.sidebarLayout) + ERASE_TO_END_OF_LINE;
+									buffer += this.#rightSidebarBoundarySequence(options.sidebarLayout) + ERASE_TO_END_OF_LINE;
 								}
 								buffer += suffix + LINE_TERMINATOR;
 								if (fillsWidth === false) buffer += ERASE_TO_END_OF_LINE;

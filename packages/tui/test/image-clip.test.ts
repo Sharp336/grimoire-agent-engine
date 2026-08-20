@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import { type Component, Container, type NativeScrollbackLiveRegion, type RenderScheduler, TUI } from "@oh-my-pi/pi-tui";
+import {
+	type Component,
+	Container,
+	type NativeScrollbackLiveRegion,
+	type RenderScheduler,
+	TUI,
+} from "@oh-my-pi/pi-tui";
 import { Image, ImageBudget } from "@oh-my-pi/pi-tui/components/image";
 import { Text } from "@oh-my-pi/pi-tui/components/text";
 import { getKittyGraphics, setKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graphics";
@@ -425,7 +431,12 @@ describe("TUI direct-placement clipping", () => {
 				expect(placement.cuu).toBe(placement.rows - 1);
 			}
 			const { baseY } = h.term.getBufferPosition();
-			expect(h.term.getScrollBuffer().slice(0, baseY).some(line => line.includes("SIDE-"))).toBe(false);
+			expect(
+				h.term
+					.getScrollBuffer()
+					.slice(0, baseY)
+					.some(line => line.includes("SIDE-")),
+			).toBe(false);
 		} finally {
 			h.tui.stop();
 		}

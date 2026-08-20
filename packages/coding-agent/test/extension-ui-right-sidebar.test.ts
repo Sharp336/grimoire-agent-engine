@@ -1,9 +1,9 @@
 import { beforeAll, describe, expect, it, mock } from "bun:test";
 import { type Component, Container, TUI } from "@oh-my-pi/pi-tui";
+import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 import type { ExtensionWidgetOptions, WidgetPlacement } from "../src/extensibility/extensions";
 import { ExtensionUiController } from "../src/modes/controllers/extension-ui-controller";
 import { getThemeByName, setThemeInstance } from "../src/modes/theme/theme";
-import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 
 beforeAll(async () => {
 	const dark = await getThemeByName("dark");
@@ -94,9 +94,7 @@ describe("ExtensionUiController rightSidebar widgets", () => {
 		controller.setHookWidget("a", () => newA, rightSidebarDefaults);
 
 		const lines = mounted.at(-1)?.component?.render(43) ?? [];
-		expect(lines.findIndex(line => line.includes("new A"))).toBeLessThan(
-			lines.findIndex(line => line.includes("B")),
-		);
+		expect(lines.findIndex(line => line.includes("new A"))).toBeLessThan(lines.findIndex(line => line.includes("B")));
 		expect(oldA.disposeCalls).toBe(1);
 		expect(newA.disposeCalls).toBe(0);
 		expect(b.disposeCalls).toBe(0);

@@ -242,7 +242,12 @@ describe("TUI reserved right sidebar", () => {
 		expect(tui.fullRedraws).toBe(redraws);
 		expect(rewrittenMainRows.size).toBeLessThan(5);
 		const { baseY } = terminal.getBufferPosition();
-		expect(terminal.getScrollBuffer().slice(0, baseY).some(line => line.includes("SIDEBAR"))).toBe(false);
+		expect(
+			terminal
+				.getScrollBuffer()
+				.slice(0, baseY)
+				.some(line => line.includes("SIDEBAR")),
+		).toBe(false);
 	});
 
 	it("does not erase a full-width sidebar suffix during scroll-append diffs", async () => {
@@ -258,8 +263,7 @@ describe("TUI reserved right sidebar", () => {
 		tui.addChild(main);
 		tui.setRightSidebar(
 			{
-				render: width =>
-					Array.from({ length: 5 }, (_, index) => `${"s".repeat(width - 1)}${index}`),
+				render: width => Array.from({ length: 5 }, (_, index) => `${"s".repeat(width - 1)}${index}`),
 			},
 			{ width: 44, minWidth: 28, minMainWidth: 64 },
 		);
