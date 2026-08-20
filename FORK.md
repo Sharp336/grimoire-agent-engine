@@ -2,7 +2,7 @@
 
 # oh-my-pi Fork 维护说明
 
-本文档定义本 fork 的上游同步、Hub 定制、发布构建和验证要求，并记录 fork 与上游正式版本之间的同步历史。
+本文档定义本 fork 的上游同步、Hub 与 Plan 模式提示词定制、发布构建和验证要求，并记录 fork 与上游正式版本之间的同步历史。
 
 ## 1. 仓库与上游
 
@@ -158,6 +158,16 @@ Compact Hub 不能因为 IRC 未启用而整体隐藏。只要启用了异步任
 - Compact 模式使用独立精简 Hub prompt，只描述异步任务管理、子 Agent 状态管理和长进程管理。
 - Compact prompt 不描述 peer messaging、IRC、inbox 或 Agent-to-Agent send。
 - task prompt 根据 `hub.mode` 动态决定是否显示 IRC/peer coordination 内容。
+
+### 7.1 Plan 模式的问题还原与澄清
+
+需求：每轮注入的隐藏 `plan-mode-context` developer 提示词必须先还原用户真正要解决的问题。可通过对话上下文或仓库探索确认的信息由 Agent 自行确认；只有仍会影响最终行为、范围或方案的关键歧义才向用户澄清，不得代替用户作关键假设。
+
+最终英文指令为：
+
+> First reconstruct the problem the user actually needs solved. Resolve anything confirmable from conversation context or exploration independently. Ask the user only about remaining critical ambiguities that would change final behavior, scope, or approach; NEVER make a key assumption on the user's behalf.
+
+配套规则：非关键偏好可以采用推荐默认值并记录为 assumption；关键歧义必须澄清。`ask` 工具不可用时，允许提出最少必要的纯文本问题，不得以默认假设替代。该定制仅修改 Plan 模式的隐藏 developer 上下文，不拼接或改写用户消息。
 
 ## 8. 发布要求
 
