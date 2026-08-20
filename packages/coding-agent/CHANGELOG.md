@@ -96,6 +96,9 @@
 - `/retry` and `/handoff` now work over ACP, so editor clients (Zed) list them and can run them instead of sending the text to the model.
 - Added `qwenTemplateReasoningEffort` to the `models.yml` `compat` schema, so the auto-enabled Qwen 3.8+ template effort dialect (`chat_template_kwargs.reasoning_effort`) can be switched off per provider/model for strict local servers that reject unknown `chat_template_kwargs`.
 - Extensions can provide a normalized `usage` provider through `pi.registerProvider()`. Its reports now flow through AuthStorage caching, history, and usage displays, and the override is removed when the extension provider is unregistered.
+### Added
+
+- Fast mode, advisor, and auto-compaction now appear as switches in ACP editor clients (Zed 1.14.2+), alongside the existing mode/model/thinking selectors.
 
 ## [17.4.0] - 2026-08-20
 

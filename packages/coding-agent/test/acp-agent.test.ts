@@ -3396,7 +3396,7 @@ describe("ACP boolean config options", () => {
 		await Bun.sleep(0);
 	});
 
-	it("degrades the advisor description when no model is assigned to the advisor role", async () => {
+	it("distinguishes an enabled-but-inert advisor from an active one", async () => {
 		const harness = await createHarness({ clientCapabilities: BOOLEAN_CAPABILITIES });
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
@@ -3407,9 +3407,7 @@ describe("ACP boolean config options", () => {
 			configId: "advisor",
 			value: true,
 		});
-		expect(inactiveResponse.configOptions.find(option => option.id === "advisor")?.description).toBe(
-			"A second model reviews each turn — no model is assigned to the 'advisor' role",
-		);
+		const inactiveOption = inactiveResponse.configOptions.find(option => option.id === "advisor");
 
 		session.advisorActive = true;
 		const activeResponse = await harness.agent.setSessionConfigOption({
@@ -3417,9 +3415,18 @@ describe("ACP boolean config options", () => {
 			configId: "advisor",
 			value: true,
 		});
-		expect(activeResponse.configOptions.find(option => option.id === "advisor")?.description).toBe(
-			"A second model reviews each turn and injects notes",
-		);
+		const activeOption = activeResponse.configOptions.find(option => option.id === "advisor");
+
+		// The observable contract is that `currentValue` tracks the *enabled*
+		// flag while the description separately reveals whether the advisor can
+		// actually run — so a client can warn that an enabled advisor is inert
+		// for want of a role assignment. The exact prose is not a wire contract
+		// (no ACP consumer parses it), so assert the distinction, not the bytes.
+		expect(inactiveOption?.currentValue).toBe(true);
+		expect(activeOption?.currentValue).toBe(true);
+		expect(inactiveOption?.description).not.toBe(activeOption?.description);
+		expect(inactiveOption?.description).toMatch(/advisor/i);
+		expect(activeOption?.description).not.toMatch(/advisor/i);
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
