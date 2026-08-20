@@ -6464,6 +6464,7 @@ export class AgentSession {
 			attribution: normalizedPayload.attribution,
 			timestamp: Date.now(),
 		};
+		const arrivedWhileBusy = options?.deliverAs === "aside" && this.#shouldParkExtensionAside();
 		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
 		if (this.#isDisposed) {
 			return false;
@@ -6474,7 +6475,7 @@ export class AgentSession {
 				this.#pendingExtensionAsides.push(normalizedAppMessage);
 				return false;
 			}
-			if (options?.triggerTurn) {
+			if (options?.triggerTurn && !arrivedWhileBusy) {
 				if (this.#clientBridge?.deferAgentInitiatedTurns && !this.#allowAcpAgentInitiatedTurns) {
 					this.#queueHiddenNextTurnMessage(normalizedAppMessage, false);
 					return false;

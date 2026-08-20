@@ -24,6 +24,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { type CustomMessage, convertToLlm, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { SessionProviderBoundary } from "@oh-my-pi/pi-coding-agent/session/session-provider-boundary";
 import { Snowflake, TempDir } from "@oh-my-pi/pi-utils";
 
 const ASIDE_TYPE = "extension-aside-test";
@@ -351,6 +352,45 @@ describe("AgentSession extension deliverAs aside", () => {
 
 		await parked.abort();
 		await parked.waitForIdle();
+		await running.catch(() => {});
+	});
+
+	it("ignores triggerTurn when the turn settles during aside image normalize (case 1c)", async () => {
+		const normalizeGate = Promise.withResolvers<void>();
+		const enteredNormalize = Promise.withResolvers<void>();
+		let delayNormalize = false;
+		const original = SessionProviderBoundary.prototype.normalizeAgentMessageImages;
+		vi.spyOn(SessionProviderBoundary.prototype, "normalizeAgentMessageImages").mockImplementation(async function (
+			this: SessionProviderBoundary,
+			message,
+		) {
+			if (delayNormalize) {
+				enteredNormalize.resolve();
+				await normalizeGate.promise;
+			}
+			return original.call(this, message);
+		});
+
+		const { session: parked, streamStarted } = await createParkedSession();
+		const promptSpy = vi.spyOn(parked.agent, "prompt");
+		const running = parked.prompt("do work");
+		await streamStarted;
+		expect(promptSpy).toHaveBeenCalledTimes(1);
+
+		delayNormalize = true;
+		const sendPromise = parked.sendCustomMessage(asidePayload("late aside"), {
+			deliverAs: "aside",
+			triggerTurn: true,
+		});
+		await enteredNormalize.promise;
+		await parked.abort();
+		await parked.waitForIdle();
+		normalizeGate.resolve();
+		await sendPromise;
+
+		expect(promptSpy).toHaveBeenCalledTimes(1);
+		expect(parked.agent.state.messages.filter(isExtensionAside).map(asideContent)).toContain("late aside");
+
 		await running.catch(() => {});
 	});
 
