@@ -2950,6 +2950,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 	"mnemon.recallLimit": { type: "number", default: 3 },
+	"mnemon.autoRetain": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "memory",
+			group: "Mnemon",
+			label: "Mnemon Auto Retain",
+			description: "Retain completed conversation turns into ~/.mnemon after agent turns",
+			condition: "mnemonActive",
+		},
+	},
+	"mnemon.retainEveryNTurns": { type: "number", default: 4 },
 
 	// Hindsight (https://hindsight.vectorize.io)
 	"hindsight.apiUrl": {

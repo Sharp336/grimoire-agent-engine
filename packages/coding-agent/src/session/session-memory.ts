@@ -7,7 +7,7 @@ import type { Settings } from "../config/settings";
 import type { HindsightSessionState } from "../hindsight/state";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
 import type { MemoryBackendStartOptions } from "../memory-backend/types";
-import { resetMnemonConversationTracking } from "../mnemon/backend";
+import { disposeMnemonSessionState, resetMnemonConversationTracking } from "../mnemon/backend";
 import type { MnemopiSessionState } from "../mnemopi/state";
 
 /** Capabilities borrowed from the owning AgentSession. */
@@ -170,6 +170,12 @@ export class SessionMemory {
 			} catch (error) {
 				logger.warn("Memory lifecycle: Mnemopi dispose failed", { error: String(error) });
 			}
+		}
+
+		try {
+			disposeMnemonSessionState(this.#host.memoryBackendSession());
+		} catch (error) {
+			logger.warn("Memory lifecycle: Mnemon dispose failed", { error: String(error) });
 		}
 	}
 

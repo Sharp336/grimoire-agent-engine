@@ -18,7 +18,9 @@ import type {
 import mnemonCompactionTemplate from "../prompts/memories/mnemon-compaction.md" with { type: "text" };
 import mnemonFirstTurnTemplate from "../prompts/memories/mnemon-first-turn.md" with { type: "text" };
 import mnemonInstructionsTemplate from "../prompts/memories/mnemon-instructions.md" with { type: "text" };
-import type { AgentSession } from "../session/agent-session";
+import { prepareRetentionTranscript, type HindsightMessage } from "../hindsight/content";
+import { extractMessages } from "../hindsight/transcript";
+import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
 import { createMnemonCli, findMnemonCommand, type MnemonCli } from "./cli";
 import {
 	applyMnemonRecallQuality,
@@ -78,6 +80,8 @@ export interface MnemonBackendConfig {
 	cliPath?: string;
 	autoRecall: boolean;
 	recallLimit: number;
+	autoRetain: boolean;
+	retainEveryNTurns: number;
 }
 
 interface MnemonSessionState {
@@ -86,6 +90,9 @@ interface MnemonSessionState {
 	hasRecalledForFirstTurn: boolean;
 	lastRecallSnippet?: string;
 	aliasOf?: MnemonSessionState;
+	lastRetainedTurn: number;
+	unsubscribe?: () => void;
+	retainInFlight?: Promise<void>;
 }
 
 const sessionStates = new WeakMap<AgentSession, MnemonSessionState>();
@@ -96,9 +103,18 @@ export function getMnemonSessionState(session: AgentSession | undefined) {
 
 function setMnemonSessionState(session: AgentSession, state: MnemonSessionState | undefined) {
 	const previous = sessionStates.get(session);
+	if (previous && previous !== state) {
+		previous.unsubscribe?.();
+		previous.unsubscribe = undefined;
+	}
 	if (state) sessionStates.set(session, state);
 	else sessionStates.delete(session);
 	return previous;
+}
+
+export function disposeMnemonSessionState(session: AgentSession | undefined): void {
+	if (!session) return;
+	setMnemonSessionState(session, undefined);
 }
 
 export function resetMnemonConversationTracking(session: AgentSession | undefined) {
@@ -106,6 +122,7 @@ export function resetMnemonConversationTracking(session: AgentSession | undefine
 	if (!state || state.aliasOf) return false;
 	state.hasRecalledForFirstTurn = false;
 	state.lastRecallSnippet = undefined;
+	state.lastRetainedTurn = 0;
 	return true;
 }
 
@@ -114,7 +131,47 @@ export function loadMnemonConfig(settings: Settings): MnemonBackendConfig {
 		cliPath: settings.get("mnemon.cliPath"),
 		autoRecall: settings.get("mnemon.autoRecall") !== false,
 		recallLimit: Math.max(1, Math.min(50, settings.get("mnemon.recallLimit") ?? 3)),
+		autoRetain: settings.get("mnemon.autoRetain") !== false,
+		retainEveryNTurns: Math.max(1, Math.floor(settings.get("mnemon.retainEveryNTurns") ?? 4)),
 	};
+}
+
+/** Slice messages to the tail after the last retained user turn. */
+function sliceUnretainedMessages(messages: HindsightMessage[], lastRetainedTurn: number): HindsightMessage[] {
+	if (lastRetainedTurn <= 0) return messages;
+	let userTurns = 0;
+	for (let index = 0; index < messages.length; index++) {
+		if (messages[index].role !== "user") continue;
+		userTurns++;
+		if (userTurns > lastRetainedTurn) return messages.slice(index);
+	}
+	return [];
+}
+/** Retain the unretained transcript tail as one `context` insight via `mnemon remember`. */
+async function retainTranscriptTail(state: MnemonSessionState, session: AgentSession, force = false): Promise<void> {
+	const flat = extractMessages(session.sessionManager);
+	const userTurns = flat.filter(message => message.role === "user").length;
+	if (!force && userTurns - state.lastRetainedTurn < state.config.retainEveryNTurns) return;
+	const { transcript } = prepareRetentionTranscript(sliceUnretainedMessages(flat, state.lastRetainedTurn), true);
+	if (!transcript) return;
+	const args = [
+		"remember",
+		"--cat",
+		"context",
+		"--imp",
+		"2",
+		"--source",
+		"agent",
+		"--no-diff",
+		"--",
+		transcript,
+	];
+	try {
+		await state.cli.runText(args, { timeoutMs: 8_000 });
+		state.lastRetainedTurn = userTurns;
+	} catch (error) {
+		logger.warn("Mnemon: auto-retain failed", { error: String(error) });
+	}
 }
 
 async function recall(cli: MnemonCli, query: string, limit: number, mode: MnemonRecallMode, signal?: AbortSignal) {
@@ -195,11 +252,22 @@ export const mnemonBackend: MemoryBackend = {
 		if (options.taskDepth > 0) return;
 		try {
 			const config = loadMnemonConfig(options.settings);
-			setMnemonSessionState(session, {
+			const state: MnemonSessionState = {
 				cli: createMnemonCli(findMnemonCommand(config.cliPath)),
 				config,
 				hasRecalledForFirstTurn: false,
-			});
+				lastRetainedTurn: 0,
+			};
+			setMnemonSessionState(session, state);
+			if (config.autoRetain) {
+				state.unsubscribe = session.subscribe((event: AgentSessionEvent) => {
+					if (event.type === "agent_end") {
+						state.retainInFlight = retainTranscriptTail(state, session).catch(error => {
+							logger.warn("Mnemon: agent_end retention failed", { error: String(error) });
+						});
+					}
+				});
+			}
 		} catch (error) {
 			logger.warn("Mnemon: backend startup failed; memory backend inert.", { error: String(error) });
 		}
@@ -246,8 +314,12 @@ export const mnemonBackend: MemoryBackend = {
 		);
 	},
 
-	async enqueue() {
-		// Native writes are already durable. No extraction worker to flush.
+	async enqueue(_agentDir, _cwd, session) {
+		const state = getMnemonSessionState(session);
+		const primary = state?.aliasOf ?? state;
+		if (!primary) return;
+		// Force retention of the current transcript tail regardless of the turn cadence.
+		await retainTranscriptTail(primary, session as AgentSession, true);
 	},
 
 	async status({ session }): Promise<MemoryBackendStatus> {
@@ -483,7 +555,7 @@ export const mnemonBackend: MemoryBackend = {
 			primary ? `- CLI: ${primary.cli.command}` : "- CLI: ephemeral (session not started)",
 			"- store: ~/.mnemon (never point mnemopi at this path; schemas differ)",
 			"- require: mnemon on PATH. Homebrew 0.2.0 works; supersedes falls back to causal until the CLI admits the type",
-			"- silent recall: high-score only; no automatic retain drain",
+			"- silent recall: high-score only; auto-retain stores raw transcript tails every N turns",
 			"- /memory clear is refused: use forget or mnemon gc",
 		].join("\n");
 	},

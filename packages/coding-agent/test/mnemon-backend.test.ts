@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
+	disposeMnemonSessionState,
 	getMnemonSessionState,
 	mnemonBackend,
 	normalizeMnemonImportance,
@@ -368,5 +369,179 @@ printf '{"id":"new-id","replaced_id":"existing-uuid","action":"skipped"}\\n'
 		const execution = await tool!.execute("1", { memory: "Already remembered rule" });
 		const text = execution.content[0]?.type === "text" ? execution.content[0].text : "";
 		expect(text).toContain("Lesson already present in memory");
+	});
+});
+
+describe("mnemon auto-retain", () => {
+	beforeEach(() => {
+		resetSettingsForTest();
+	});
+
+	afterEach(() => {
+		resetSettingsForTest();
+	});
+
+	function makeFakeCli(logPath: string): string {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mnemon-retain-"));
+		const cli = path.join(dir, "mnemon");
+		fs.writeFileSync(
+			cli,
+			`#!/usr/bin/env bash
+set -e
+args=("$@")
+if [[ "\${args[0]}" == "remember" ]]; then
+  joined=$(printf '%s ' "\${args[@]}")
+  printf '%s\\n' "\${joined//$'\\n'/ }" >> "${logPath}"
+  printf '{"id":"c47248fa-2aa5-4268-b49a-6a0d5f45d593","action":"added"}\\n'
+  exit 0
+fi
+echo "unexpected \${args[*]}" >&2
+exit 1
+`,
+		);
+		fs.chmodSync(cli, 0o755);
+		return cli;
+	}
+
+	function makeSession(settings: Settings, entries: unknown[], listeners: Array<(event: unknown) => void>) {
+		return {
+			sessionId: "retain-test-session",
+			settings,
+			sessionManager: { getEntries: () => entries },
+			subscribe: (listener: (event: unknown) => void) => {
+				listeners.push(listener);
+				return () => {};
+			},
+		} as never;
+	}
+
+	function userEntry(text: string) {
+		return { type: "message", message: { role: "user", content: text } };
+	}
+
+	function assistantEntry(text: string) {
+		return { type: "message", message: { role: "assistant", content: [{ type: "text", text }] } };
+	}
+
+	function readLog(logPath: string): string[] {
+		if (!fs.existsSync(logPath)) return [];
+		return fs.readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean);
+	}
+
+	it("retains the unretained transcript tail on agent_end after N user turns", async () => {
+		const logPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "mnemon-retain-log-")), "log.txt");
+		const cli = makeFakeCli(logPath);
+		const settings = Settings.isolated({
+			"memory.backend": "mnemon",
+			"mnemon.cliPath": cli,
+			"mnemon.retainEveryNTurns": 2,
+		});
+		const listeners: Array<(event: unknown) => void> = [];
+		const session = makeSession(
+			settings,
+			[userEntry("first question"), assistantEntry("first answer"), userEntry("second question"), assistantEntry("second answer")],
+			listeners,
+		);
+
+		await mnemonBackend.start({ session, settings, modelRegistry: {} as never, agentDir: "/tmp/agent", taskDepth: 0 });
+		listeners[0]!({ type: "agent_end", messages: [] });
+		await getMnemonSessionState(session)?.retainInFlight;
+
+		const lines = readLog(logPath);
+		expect(lines).toHaveLength(1);
+		expect(lines[0]).toContain("remember");
+		expect(lines[0]).toContain("--cat context");
+		expect(lines[0]).toContain("--imp 2");
+		expect(lines[0]).toContain("--source agent");
+		expect(lines[0]).toContain("--no-diff");
+		expect(lines[0]).toContain("first question");
+		expect(lines[0]).toContain("second answer");
+	});
+
+	it("skips retention until the turn cadence is met", async () => {
+		const logPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "mnemon-retain-log-")), "log.txt");
+		const cli = makeFakeCli(logPath);
+		const settings = Settings.isolated({
+			"memory.backend": "mnemon",
+			"mnemon.cliPath": cli,
+			"mnemon.retainEveryNTurns": 2,
+		});
+		const listeners: Array<(event: unknown) => void> = [];
+		const session = makeSession(settings, [userEntry("only one turn"), assistantEntry("answer")], listeners);
+
+		await mnemonBackend.start({ session, settings, modelRegistry: {} as never, agentDir: "/tmp/agent", taskDepth: 0 });
+		listeners[0]!({ type: "agent_end", messages: [] });
+		await getMnemonSessionState(session)?.retainInFlight;
+
+		expect(readLog(logPath)).toHaveLength(0);
+	});
+
+	it("enqueue forces retention regardless of cadence", async () => {
+		const logPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "mnemon-retain-log-")), "log.txt");
+		const cli = makeFakeCli(logPath);
+		const settings = Settings.isolated({
+			"memory.backend": "mnemon",
+			"mnemon.cliPath": cli,
+			"mnemon.retainEveryNTurns": 4,
+		});
+		const listeners: Array<(event: unknown) => void> = [];
+		const session = makeSession(settings, [userEntry("single turn"), assistantEntry("answer")], listeners);
+
+		await mnemonBackend.start({ session, settings, modelRegistry: {} as never, agentDir: "/tmp/agent", taskDepth: 0 });
+		await mnemonBackend.enqueue("/tmp/agent", "/tmp/project", session);
+
+		const lines = readLog(logPath);
+		expect(lines).toHaveLength(1);
+		expect(lines[0]).toContain("single turn");
+	});
+
+	it("does not retain when autoRetain is disabled", async () => {
+		const logPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "mnemon-retain-log-")), "log.txt");
+		const cli = makeFakeCli(logPath);
+		const settings = Settings.isolated({
+			"memory.backend": "mnemon",
+			"mnemon.cliPath": cli,
+			"mnemon.autoRetain": false,
+			"mnemon.retainEveryNTurns": 1,
+		});
+		const listeners: Array<(event: unknown) => void> = [];
+		const session = makeSession(settings, [userEntry("turn"), assistantEntry("answer")], listeners);
+
+		await mnemonBackend.start({ session, settings, modelRegistry: {} as never, agentDir: "/tmp/agent", taskDepth: 0 });
+		// No subscription is installed when autoRetain is off.
+		expect(listeners).toHaveLength(0);
+		expect(readLog(logPath)).toHaveLength(0);
+	});
+
+	it("disposeMnemonSessionState unsubscribes listeners and clears state", async () => {
+		const logPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "mnemon-retain-log-")), "log.txt");
+		const cli = makeFakeCli(logPath);
+		const settings = Settings.isolated({
+			"memory.backend": "mnemon",
+			"mnemon.cliPath": cli,
+			"mnemon.autoRetain": true,
+			"mnemon.retainEveryNTurns": 1,
+		});
+		let unsubscribed = false;
+		const listeners: Array<(event: unknown) => void> = [];
+		const session = {
+			sessionId: "test-session",
+			settings,
+			sessionManager: { getEntries: () => [userEntry("question"), assistantEntry("answer")] },
+			subscribe: (listener: (event: unknown) => void) => {
+				listeners.push(listener);
+				return () => {
+					unsubscribed = true;
+				};
+			},
+		} as never;
+
+		await mnemonBackend.start({ session, settings, modelRegistry: {} as never, agentDir: "/tmp/agent", taskDepth: 0 });
+		expect(getMnemonSessionState(session)).toBeDefined();
+		expect(unsubscribed).toBe(false);
+
+		disposeMnemonSessionState(session);
+		expect(unsubscribed).toBe(true);
+		expect(getMnemonSessionState(session)).toBeUndefined();
 	});
 });
