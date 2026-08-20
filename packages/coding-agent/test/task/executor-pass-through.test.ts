@@ -13,6 +13,7 @@ import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-regis
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolPathWithSource } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools";
 import type { LoadExtensionsResult } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
@@ -135,6 +136,39 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(forwarded?.rules).toBe(rules);
 		expect(forwarded?.preloadedExtensionPaths).toBe(preloadedExtensionPaths);
 		expect(forwarded?.preloadedCustomToolPaths).toBe(preloadedCustomToolPaths);
+	});
+
+	it("keeps native descriptors while suppressing inherited capabilities for minimal-task", async () => {
+		const session = yieldEmittingSession();
+		const initSpy = vi.spyOn(session.sessionManager, "appendSessionInit");
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+		const settings = Settings.isolated({ inlineToolDescriptors: "on" });
+		const inheritedSkill = { name: "sentinel-skill" } as unknown as Skill;
+		const inheritedRule = { name: "sentinel-rule" } as unknown as Rule;
+
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: { ...baseAgent, systemPreset: "minimal-task" },
+			id: "minimal-task-child",
+			settings,
+			skills: [inheritedSkill],
+			rules: [inheritedRule],
+			autoloadSkills: [inheritedSkill],
+		});
+
+		expect(result.exitCode).toBe(0);
+		const forwarded = spy.mock.calls[0]?.[0];
+		expect(forwarded?.settings?.get("inlineToolDescriptors")).toBe("off");
+		expect(forwarded?.skills).toEqual([]);
+		expect(forwarded?.rules).toEqual([]);
+		if (typeof forwarded?.systemPrompt !== "function") throw new Error("Expected system-prompt builder");
+		const rendered = forwarded.systemPrompt(["PROJECT_SENTINEL", "SKILL_SENTINEL", "RULE_SENTINEL"]);
+		const renderedParts = typeof rendered === "string" ? [rendered] : rendered;
+		expect(renderedParts).toHaveLength(1);
+		expect(renderedParts.join("\n")).not.toContain("PROJECT_SENTINEL");
+		expect(renderedParts.join("\n")).not.toContain("SKILL_SENTINEL");
+		expect(renderedParts.join("\n")).not.toContain("RULE_SENTINEL");
+		expect(initSpy).toHaveBeenCalledWith(expect.objectContaining({ systemPreset: "minimal-task" }));
 	});
 
 	it("forwards an exact credential resolver without replacing it", async () => {
