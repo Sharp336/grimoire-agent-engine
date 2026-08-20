@@ -2169,7 +2169,7 @@ export class SessionMaintenance {
 			return Math.min(
 				snapcompact.MAX_FRAMES_DEFAULT,
 				snapcompact.maxFramesForDataBudget(),
-				snapcompact.providerFrameBudget(this.#model?.provider),
+				snapcompact.providerFrameBudget(this.#model?.provider, this.#model?.api),
 			);
 		}
 		const reserve = effectiveReserveTokens(ctxWindow, settings);
@@ -2212,7 +2212,7 @@ export class SessionMaintenance {
 			Math.floor(frameBudget / snapcompact.FRAME_TOKEN_ESTIMATE),
 			snapcompact.MAX_FRAMES_DEFAULT,
 			snapcompact.maxFramesForDataBudget(),
-			snapcompact.providerFrameBudget(this.#model?.provider),
+			snapcompact.providerFrameBudget(this.#model?.provider, this.#model?.api),
 		);
 	}
 
@@ -2454,7 +2454,7 @@ export class SessionMaintenance {
 			return Math.min(
 				snapcompact.MAX_FRAMES_DEFAULT,
 				snapcompact.maxFramesForDataBudget(),
-				snapcompact.providerFrameBudget(this.#model?.provider),
+				snapcompact.providerFrameBudget(this.#model?.provider, this.#model?.api),
 			);
 		}
 		const thresholdTokens = resolveThresholdTokens(ctxWindow, settings);
@@ -2474,7 +2474,7 @@ export class SessionMaintenance {
 			Math.floor(frameBudget / snapcompact.FRAME_TOKEN_ESTIMATE),
 			snapcompact.MAX_FRAMES_DEFAULT,
 			snapcompact.maxFramesForDataBudget(),
-			snapcompact.providerFrameBudget(this.#model?.provider),
+			snapcompact.providerFrameBudget(this.#model?.provider, this.#model?.api),
 		);
 	}
 
