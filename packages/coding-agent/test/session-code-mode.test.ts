@@ -176,8 +176,21 @@ describe("buildToolNamespacesInfo", () => {
 			});
 		}
 	});
-});
 
+	test("prototype-named tools land as own entries", () => {
+		const info = buildToolNamespacesInfo({
+			tools: [{ name: "toString" }, { name: "__proto__" }],
+			directToolNames: new Set<string>(),
+		});
+
+		const wire = new Map<string, { code_mode_name: string }>(
+			Object.entries(JSON.parse(JSON.stringify(info)).functions.functions),
+		);
+		expect([...wire.keys()].sort()).toEqual(["__proto__", "toString"]);
+		expect(wire.get("toString")?.code_mode_name).toBe("toString");
+		expect(wire.get("__proto__")?.code_mode_name).toBe("__proto__");
+	});
+});
 describe("Code Mode session reconciliation", () => {
 	const sessions: AgentSession[] = [];
 

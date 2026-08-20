@@ -4563,6 +4563,11 @@ export class AgentSession {
 		return this.#tools.getEnabledToolNames();
 	}
 
+	/** Enabled names as last requested, excluding a Code Mode transport `eval`. */
+	callerRequestedToolNames(): string[] {
+		return this.#tools.callerRequestedToolNames();
+	}
+
 	/** Names of dynamic tools mounted under `xd://`. */
 	getMountedXdevToolNames(): string[] {
 		return this.#tools.getMountedXdevToolNames();

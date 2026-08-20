@@ -39,6 +39,19 @@ describe("generateCodeModeDeclarations", () => {
 		]);
 		expect(out).toContain('op: "init" | "done"');
 	});
+	test("union item types are parenthesized inside arrays", () => {
+		const out = generateCodeModeDeclarations([
+			{
+				name: "chmod",
+				parameters: {
+					type: "object",
+					properties: { modes: { type: "array", items: { enum: ["read", "write"] } } },
+					required: ["modes"],
+				},
+			},
+		]);
+		expect(out).toContain('modes: ("read" | "write")[]');
+	});
 	test("non-identifier property keys stay quoted", () => {
 		const out = generateCodeModeDeclarations([
 			{

@@ -60,6 +60,7 @@ function createYieldingSession(): AgentSession {
 		},
 		getActiveToolNames: () => ["yield"],
 		getEnabledToolNames: () => ["yield"],
+		callerRequestedToolNames: () => ["yield"],
 		setActiveToolsByName: async () => {},
 		subscribe: (listener: (event: AgentSessionEvent) => void) => {
 			listeners.push(listener);

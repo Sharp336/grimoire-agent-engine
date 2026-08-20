@@ -41,6 +41,7 @@ function createHangingSession(): HangingSessionHandle {
 		} as never,
 		getActiveToolNames: () => ["read", "yield"],
 		getEnabledToolNames: () => ["read", "yield"],
+		callerRequestedToolNames: () => ["read", "yield"],
 		setActiveToolsByName: async (_names: string[]) => {},
 		subscribe: (_listener: (event: AgentSessionEvent) => void) => () => {},
 		prompt: async (_text: string, _options?: PromptOptions) => {
@@ -131,6 +132,7 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 			sessionManager: { appendSessionInit: () => {} } as never,
 			getActiveToolNames: () => ["read", "yield"],
 			getEnabledToolNames: () => ["read", "yield"],
+			callerRequestedToolNames: () => ["read", "yield"],
 			setActiveToolsByName: async () => {},
 			subscribe: (listener: (event: AgentSessionEvent) => void) => {
 				// Fire a synthetic yield on the next tick to drive runSubprocess to
@@ -290,6 +292,7 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 			sessionManager: { appendSessionInit: () => {} } as never,
 			getActiveToolNames: () => ["read", "yield"],
 			getEnabledToolNames: () => ["read", "yield"],
+			callerRequestedToolNames: () => ["read", "yield"],
 			setActiveToolsByName: async () => {},
 			subscribe: (listener: (event: AgentSessionEvent) => void) => {
 				listenerRef = listener;
@@ -370,6 +373,7 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 			sessionManager: { appendSessionInit: () => {} } as never,
 			getActiveToolNames: () => ["read", "yield"],
 			getEnabledToolNames: () => ["read", "yield"],
+			callerRequestedToolNames: () => ["read", "yield"],
 			setActiveToolsByName: async () => {},
 			subscribe: (listener: (event: AgentSessionEvent) => void) => {
 				listenerRef = listener;
@@ -472,6 +476,7 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 			sessionManager: { appendSessionInit: () => {} } as never,
 			getActiveToolNames: () => ["read", "yield"],
 			getEnabledToolNames: () => ["read", "yield"],
+			callerRequestedToolNames: () => ["read", "yield"],
 			setActiveToolsByName: async () => {},
 			subscribe: (listener: (event: AgentSessionEvent) => void) => {
 				listenerRef = listener;
@@ -604,6 +609,7 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 			sessionManager: { appendSessionInit: () => {} } as never,
 			getActiveToolNames: () => ["read", "yield"],
 			getEnabledToolNames: () => ["read", "yield"],
+			callerRequestedToolNames: () => ["read", "yield"],
 			setActiveToolsByName: async () => {},
 			subscribe: (listener: (event: AgentSessionEvent) => void) => {
 				listenerRef = listener;
@@ -689,6 +695,7 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 			sessionManager: { appendSessionInit: () => {} } as never,
 			getActiveToolNames: () => ["read", "yield"],
 			getEnabledToolNames: () => ["read", "yield"],
+			callerRequestedToolNames: () => ["read", "yield"],
 			setActiveToolsByName: async () => {},
 			subscribe: (listener: (event: AgentSessionEvent) => void) => {
 				queueMicrotask(() => {

@@ -66,7 +66,9 @@ export function buildToolNamespacesInfo(args: {
 	tools: ReadonlyArray<{ name: string; customWireName?: string; loadMode?: string; mcpServerName?: string }>;
 	directToolNames: ReadonlySet<string>;
 }): ToolNamespacesInfo {
-	const functions: Record<string, ToolNamespaceFunctionInfo> = {};
+	// Null prototype: a tool named `toString` or `__proto__` must land as an own
+	// entry instead of reading or replacing an inherited member.
+	const functions: Record<string, ToolNamespaceFunctionInfo> = Object.create(null);
 	for (const tool of args.tools) {
 		const direct = args.directToolNames.has(tool.name);
 		const wireName = direct ? (tool.customWireName ?? tool.name) : tool.name;
