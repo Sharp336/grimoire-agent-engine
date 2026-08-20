@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `agentKind` (`"main"` | `"sub"`) and `taskDepth` to the extension `tool_call` event, so a handler can tell a top-level call from a delegated one. Both fields are optional, and a handler running on a host that does not report them sees `undefined` — letting it fail open rather than break. This makes depth-scoped policy expressible: an extension can block `write`/`edit`/`bash` for `agentKind === "main"` while leaving the subagents that perform the work untouched, which previously was impossible because both paths emitted the same undifferentiated event.
+
 ## [17.4.0] - 2026-08-20
 
 ### Added
