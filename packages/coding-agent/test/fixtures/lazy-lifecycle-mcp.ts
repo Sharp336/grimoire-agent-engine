@@ -95,7 +95,13 @@ function startServer(): void {
 			}
 			// Notifications (no `id`) get no response.
 			if (msg.id === undefined || msg.id === null) return;
+			if (msg.method === "initialize") {
+				const initializeDelayMs = Number(process.env.MCP_INITIALIZE_DELAY_MS ?? "0") || 0;
+				if (initializeDelayMs > 0) await Bun.sleep(initializeDelayMs);
+			}
 			if (msg.method === "tools/call" && callDelayMs > 0) {
+				const callLog = process.env.MCP_CALL_LOG;
+				if (callLog) fs.appendFileSync(callLog, `call ${process.pid}\\n`);
 				await Bun.sleep(callDelayMs);
 			}
 			const response = { jsonrpc: "2.0" as const, id: msg.id, result: buildResult(msg.method) };

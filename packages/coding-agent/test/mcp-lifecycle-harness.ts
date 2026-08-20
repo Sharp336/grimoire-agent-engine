@@ -52,6 +52,10 @@ export interface LazyConfigOptions {
 	crashBeforeInit?: boolean;
 	/** Delay each `tools/call` response by this many ms (hold a call in-flight). */
 	callDelayMs?: number;
+	/** Delay the fixture initialize response by this many ms. */
+	initializeDelayMs?: number;
+	/** File the fixture appends a line to when it receives tools/call. */
+	callLog?: string;
 	/** Make the fixture expose prompt capability through prompts/list and prompts/get. */
 	advertisePrompts?: boolean;
 	/** Advertise prompt capability while returning an empty current prompt list. */
@@ -67,6 +71,8 @@ export function lazyConfig(options: LazyConfigOptions = {}): MCPStdioServerConfi
 	if (options.spawnLog) env.MCP_SPAWN_LOG = options.spawnLog;
 	if (options.crashBeforeInit) env.MCP_CRASH_BEFORE_INIT = "1";
 	if (options.callDelayMs) env.MCP_CALL_DELAY_MS = String(options.callDelayMs);
+	if (options.initializeDelayMs) env.MCP_INITIALIZE_DELAY_MS = String(options.initializeDelayMs);
+	if (options.callLog) env.MCP_CALL_LOG = options.callLog;
 	if (options.advertisePrompts) env.MCP_ADVERTISE_PROMPTS = "1";
 	if (options.emptyPrompts) env.MCP_EMPTY_PROMPTS = "1";
 	if (options.instructions) env.MCP_INSTRUCTIONS = options.instructions;

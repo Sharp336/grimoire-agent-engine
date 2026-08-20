@@ -257,6 +257,8 @@ export class MCPManager {
 	#defaultIdleTimeoutMs = 300_000;
 	/** In-flight tool-call refcount per server; guards lazy idle-disconnect. */
 	#activeCalls = new Map<string, number>();
+	/** Opaque activity generation per server; replaced when its state is cleared. */
+	#activityTokens = new Map<string, symbol>();
 	/** Timestamp (ms) of the last tool-call activity per server. */
 	#lastActivityAt = new Map<string, number>();
 	/** Pending idle-disconnect timers per lazy server. */
@@ -290,14 +292,20 @@ export class MCPManager {
 
 	/** Activity hooks handed to a server's tools so the manager can refcount calls. */
 	#activityHooks(name: string): MCPActivityHooks {
+		let token = this.#activityTokens.get(name);
+		if (!token) {
+			token = Symbol(name);
+			this.#activityTokens.set(name, token);
+		}
 		return {
-			begin: () => this.#beginCall(name),
-			end: () => this.#endCall(name),
+			begin: () => this.#beginCall(name, token),
+			end: () => this.#endCall(name, token),
 		};
 	}
 
 	/** Mark a tool call started: bump the refcount and cancel any pending idle reap. */
-	#beginCall(name: string): void {
+	#beginCall(name: string, token: symbol): void {
+		if (this.#activityTokens.get(name) !== token) return;
 		this.#activeCalls.set(name, (this.#activeCalls.get(name) ?? 0) + 1);
 		this.#lastActivityAt.set(name, Date.now());
 		const timer = this.#idleTimers.get(name);
@@ -308,7 +316,8 @@ export class MCPManager {
 	}
 
 	/** Mark a tool call finished: drop the refcount and (re)arm the idle reaper. */
-	#endCall(name: string): void {
+	#endCall(name: string, token: symbol): void {
+		if (this.#activityTokens.get(name) !== token) return;
 		const next = (this.#activeCalls.get(name) ?? 1) - 1;
 		if (next <= 0) {
 			this.#activeCalls.delete(name);
@@ -318,7 +327,6 @@ export class MCPManager {
 		this.#lastActivityAt.set(name, Date.now());
 		this.#scheduleIdleCheck(name);
 	}
-
 	/**
 	 * Arm an idle-disconnect timer for a lazy server with idle work remaining.
 	 * No-op for eager servers, disabled idle timeouts (`idleTimeout <= 0`), or a
@@ -349,6 +357,7 @@ export class MCPManager {
 		if (timer) clearTimeout(timer);
 		this.#idleTimers.delete(name);
 		this.#activeCalls.delete(name);
+		this.#activityTokens.delete(name);
 		this.#lastActivityAt.delete(name);
 	}
 
@@ -676,7 +685,6 @@ export class MCPManager {
 		const reportedErrors = new Set<string>();
 		let allowBackgroundLogging = false;
 		const statusServerNames: string[] = [];
-		const deferredServers: string[] = [];
 		const validationFailures: Array<{ name: string; message: string }> = [];
 
 		// Prepare connection tasks
@@ -705,13 +713,12 @@ export class MCPManager {
 				continue;
 			}
 
-			statusServerNames.push(name);
-
 			// Validate config
 			const validationErrors = validateServerConfig(name, config);
 			if (validationErrors.length > 0) {
 				const message = validationErrors.join("; ");
 				errors.set(name, message);
+				statusServerNames.push(name);
 				validationFailures.push({ name, message });
 				reportedErrors.add(name);
 				continue;
@@ -741,13 +748,12 @@ export class MCPManager {
 							onActivity,
 						),
 					);
-					// Lazy startup is complete for this server: emit a terminal status
-					// so the UI does not keep it in the pending "connecting" set.
-					deferredServers.push(name);
 					continue;
 				}
 				// Cold cache: fall through to the eager connect below to populate it.
 			}
+
+			statusServerNames.push(name);
 
 			// Resolve auth config before connecting, but do so per-server in parallel.
 			const connectionPromise = (async () => {
@@ -862,9 +868,6 @@ export class MCPManager {
 		// Notify about servers we're connecting to, including configs that fail fast.
 		if (statusServerNames.length > 0 && onStatus) {
 			onStatus({ type: "connecting", serverNames: statusServerNames });
-			for (const name of deferredServers) {
-				onStatus({ type: "connected", serverName: name });
-			}
 			for (const { name, message } of validationFailures) {
 				onStatus(createMcpStartupFailure(name, message, sources[name]));
 			}
@@ -1240,6 +1243,7 @@ export class MCPManager {
 		}
 		this.#idleTimers.clear();
 		this.#activeCalls.clear();
+		this.#activityTokens.clear();
 		this.#lastActivityAt.clear();
 	}
 

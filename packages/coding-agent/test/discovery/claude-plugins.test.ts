@@ -1474,6 +1474,73 @@ describe("listClaudePluginRoots", () => {
 	});
 });
 
+describe("Claude plugin MCP lifecycle fields", () => {
+	let tempDir: string;
+	let originalHome: string | undefined;
+
+	beforeEach(async () => {
+		clearClaudePluginRootsCache();
+		clearFsCache();
+		originalHome = process.env.HOME;
+		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "claude-plugins-mcp-lifecycle-test-"));
+		process.env.HOME = tempDir;
+		vi.spyOn(os, "homedir").mockReturnValue(tempDir);
+	});
+
+	afterEach(async () => {
+		clearClaudePluginRootsCache();
+		clearFsCache();
+		vi.restoreAllMocks();
+		if (originalHome === undefined) delete process.env.HOME;
+		else process.env.HOME = originalHome;
+		await removeWithRetries(tempDir);
+	});
+
+	test("forwards lifecycle and preserves idleTimeout: 0", async () => {
+		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const pluginPath = path.join(tempDir, "plugins", "lifecycle");
+		await fs.mkdir(pluginsDir, { recursive: true });
+		await fs.mkdir(pluginPath, { recursive: true });
+		await fs.writeFile(
+			path.join(pluginsDir, "installed_plugins.json"),
+			JSON.stringify({
+				version: 2,
+				plugins: {
+					"lifecycle@market": [
+						{
+							scope: "user",
+							installPath: pluginPath,
+							version: "1.0.0",
+							installedAt: "2026-06-01T00:00:00Z",
+							lastUpdated: "2026-06-01T00:00:00Z",
+						},
+					],
+				},
+			}),
+		);
+		await fs.writeFile(
+			path.join(pluginPath, ".mcp.json"),
+			JSON.stringify({
+				probe: { command: "probe", lifecycle: "lazy", idleTimeout: 0 },
+				short: { command: "short", lifecycle: "lazy", idleTimeout: 123 },
+			}),
+		);
+
+		const result = await loadCapability<MCPServer>(mcpCapability.id, {
+			cwd: tempDir,
+			providers: ["claude-plugins"],
+		});
+		expect(result.all.find(server => server.name === "lifecycle:probe")).toMatchObject({
+			lifecycle: "lazy",
+			idleTimeout: 0,
+		});
+		expect(result.all.find(server => server.name === "lifecycle:short")).toMatchObject({
+			lifecycle: "lazy",
+			idleTimeout: 123,
+		});
+	});
+});
+
 describe("discoverAgents plugin precedence", () => {
 	let tempDir: string;
 	let originalClaudeConfigDir: string | undefined;

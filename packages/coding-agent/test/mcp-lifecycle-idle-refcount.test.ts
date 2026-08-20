@@ -54,4 +54,61 @@ describe("MCP lazy lifecycle: no idle disconnect mid-call", () => {
 			await manager.disconnectAll();
 		}
 	}, 20_000);
+	for (const resetMode of ["server", "all"] as const) {
+		it(`ignores a stale completion after disconnect${resetMode === "all" ? "All" : "Server"}`, async () => {
+			const cache = inMemoryToolCache();
+			const callLog = `${workDir}/calls.log`;
+			const config = lazyConfig({
+				lifecycle: "lazy",
+				idleTimeout: 100,
+				initializeDelayMs: 250,
+				callDelayMs: 600,
+				callLog,
+			});
+			await cache.set("lazy", config, [TOOL_DEF]);
+
+			const manager = new MCPManager(workDir, cache);
+			try {
+				await manager.connectServers({ lazy: config }, {});
+				const oldTool = manager.getTools()[0];
+				if (!oldTool) throw new Error("missing cached lazy tool");
+				const oldAbort = new AbortController();
+				const oldCall = oldTool.execute(
+					"old-call",
+					{},
+					undefined,
+					{} as Parameters<typeof oldTool.execute>[3],
+					oldAbort.signal,
+				);
+				expect(await waitFor(() => manager.getConnectionStatus("lazy") === "connecting")).toBe(true);
+
+				if (resetMode === "all") await manager.disconnectAll();
+				else await manager.disconnectServer("lazy");
+
+				await manager.connectServers({ lazy: config }, {});
+				const replacementTool = manager.getTools()[0];
+				if (!replacementTool) throw new Error("missing replacement lazy tool");
+				const replacementCall = replacementTool.execute(
+					"replacement-call",
+					{},
+					undefined,
+					{} as Parameters<typeof replacementTool.execute>[3],
+					undefined,
+				);
+				expect(
+					await waitFor(() => fs.existsSync(callLog) && fs.readFileSync(callLog, "utf8").includes("call ")),
+				).toBe(true);
+
+				// Release the old completion only after the replacement generation has
+				// entered its call. A name-only refcount would now decrement the
+				// replacement call to zero and arm its idle reaper.
+				oldAbort.abort();
+				await oldCall.catch(() => undefined);
+				expect(await waitFor(() => manager.getConnectionStatus("lazy") === "disconnected", 500)).toBe(false);
+				expect(resultText(await replacementCall)).toBe("pong");
+			} finally {
+				await manager.disconnectAll();
+			}
+		}, 20_000);
+	}
 });

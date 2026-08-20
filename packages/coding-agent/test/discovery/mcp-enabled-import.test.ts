@@ -124,6 +124,23 @@ describe("translated MCP importers propagate enabled: false", () => {
 			expect(server?.enabled).toBe(false);
 		});
 	}
+	test("claude carries lifecycle and preserves idleTimeout: 0", async () => {
+		const filePath = path.join(tempCwd, ".claude", ".mcp.json");
+		await fs.mkdir(path.dirname(filePath), { recursive: true });
+		await fs.writeFile(
+			filePath,
+			JSON.stringify({
+				mcpServers: {
+					lazy: { command: "lazy-server", lifecycle: "lazy", idleTimeout: 0 },
+					short: { command: "short-server", lifecycle: "lazy", idleTimeout: 123 },
+				},
+			}),
+		);
+
+		const servers = await loadMcp(tempCwd, "claude");
+		expect(servers.find(server => server.name === "lazy")).toMatchObject({ lifecycle: "lazy", idleTimeout: 0 });
+		expect(servers.find(server => server.name === "short")).toMatchObject({ lifecycle: "lazy", idleTimeout: 123 });
+	});
 
 	for (const { provider, userFile, projectFile } of COMPOUND_FIXTURES) {
 		test(`${provider} project enabled: false suppresses a same-named user server`, async () => {

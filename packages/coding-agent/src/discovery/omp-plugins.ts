@@ -278,6 +278,8 @@ interface RawMcpServer {
 	enabled?: boolean;
 	timeout?: number;
 	requestIdFormat?: unknown;
+	lifecycle?: MCPServer["lifecycle"];
+	idleTimeout?: number;
 	command?: string;
 	args?: string[];
 	env?: Record<string, string>;
@@ -332,6 +334,8 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				...(cfg.enabled !== undefined && { enabled: cfg.enabled }),
 				...(cfg.timeout !== undefined && { timeout: cfg.timeout }),
 				...(requestIdFormat !== undefined && { requestIdFormat }),
+				...(cfg.lifecycle !== undefined && { lifecycle: cfg.lifecycle }),
+				...(cfg.idleTimeout !== undefined && { idleTimeout: cfg.idleTimeout }),
 				...(rooted.command !== undefined && { command: rooted.command }),
 				...(cfg.args !== undefined && { args: cfg.args }),
 				...(cfg.env !== undefined && { env: cfg.env }),

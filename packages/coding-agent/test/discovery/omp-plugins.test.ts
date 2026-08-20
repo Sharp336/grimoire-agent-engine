@@ -349,6 +349,25 @@ test(".mcp.json expands environment placeholders recursively", async () => {
 	}
 });
 
+test(".mcp.json forwards lifecycle and preserves idleTimeout: 0", async () => {
+	writeFile(
+		path.join(ext, ".mcp.json"),
+		JSON.stringify({
+			mcpServers: {
+				lazy: { command: "lazy-server", lifecycle: "lazy", idleTimeout: 0 },
+				short: { command: "short-server", lifecycle: "lazy", idleTimeout: 123 },
+			},
+		}),
+	);
+	writeFile(path.join(project, ".omp", "settings.json"), JSON.stringify({ extensions: [ext] }));
+
+	const servers = await loadFromPlugin<{ name: string; lifecycle?: string; idleTimeout?: number }>(
+		mcpCapability.id,
+		ctx(),
+	);
+	expect(servers.find(server => server.name === "lazy")).toMatchObject({ lifecycle: "lazy", idleTimeout: 0 });
+	expect(servers.find(server => server.name === "short")).toMatchObject({ lifecycle: "lazy", idleTimeout: 123 });
+});
 test("relative path-like command and cwd resolve against the plugin config directory", async () => {
 	writeFile(
 		path.join(ext, ".mcp.json"),

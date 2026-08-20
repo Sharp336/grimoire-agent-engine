@@ -548,6 +548,8 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 			const raw = serverCfg as {
 				enabled?: boolean;
 				timeout?: number;
+				lifecycle?: MCPServer["lifecycle"];
+				idleTimeout?: number;
 				command?: string;
 				args?: string[];
 				env?: Record<string, string>;
@@ -578,6 +580,8 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				name: namespacedName,
 				...(raw.enabled !== undefined && { enabled: raw.enabled }),
 				...(raw.timeout !== undefined && { timeout: raw.timeout }),
+				...(raw.lifecycle !== undefined && { lifecycle: raw.lifecycle }),
+				...(raw.idleTimeout !== undefined && { idleTimeout: raw.idleTimeout }),
 				...(rooted.command !== undefined && { command: rooted.command }),
 				...(raw.args !== undefined && { args: substitutePluginRoot(raw.args, root.path) }),
 				...(raw.env !== undefined && { env: substitutePluginRoot(raw.env, root.path) }),

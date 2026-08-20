@@ -15,7 +15,7 @@ describe("MCP lazy lifecycle: deferred startup status", () => {
 		fs.rmSync(workDir, { recursive: true, force: true });
 	});
 
-	it("settles a cache-backed server after announcing it as connecting", async () => {
+	it("does not announce a cache-backed lazy server as connected", async () => {
 		const cache = inMemoryToolCache();
 		const config = lazyConfig({ lifecycle: "lazy" });
 		await cache.set("lazy", config, [TOOL_DEF]);
@@ -24,11 +24,28 @@ describe("MCP lazy lifecycle: deferred startup status", () => {
 		const manager = new MCPManager(workDir, cache);
 		try {
 			await manager.connectServers({ lazy: config }, {}, event => events.push(event));
-			expect(events).toEqual([
-				{ type: "connecting", serverNames: ["lazy"] },
-				{ type: "connected", serverName: "lazy" },
-			]);
+			expect(events).toEqual([]);
 			expect(manager.getConnectionStatus("lazy")).toBe("disconnected");
+		} finally {
+			await manager.disconnectAll();
+		}
+	});
+	it("reports only real startup connections when cached and eager servers are mixed", async () => {
+		const cache = inMemoryToolCache();
+		const cachedConfig = lazyConfig({ lifecycle: "lazy" });
+		const eagerConfig = lazyConfig({ lifecycle: "eager" });
+		await cache.set("cached", cachedConfig, [TOOL_DEF]);
+		const events: McpConnectionStatusEvent[] = [];
+
+		const manager = new MCPManager(workDir, cache);
+		try {
+			await manager.connectServers({ cached: cachedConfig, eager: eagerConfig }, {}, event => events.push(event));
+			expect(events).toEqual([
+				{ type: "connecting", serverNames: ["eager"] },
+				{ type: "connected", serverName: "eager" },
+			]);
+			expect(manager.getConnectionStatus("cached")).toBe("disconnected");
+			expect(manager.getConnectionStatus("eager")).toBe("connected");
 		} finally {
 			await manager.disconnectAll();
 		}
