@@ -8,7 +8,12 @@
  */
 import { runExtensionCompact, runExtensionSetModel } from "../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../extensibility/extensions/get-commands-handler";
-import type { ExtensionError, ExtensionMode, ExtensionUIContext } from "../extensibility/extensions/types";
+import type {
+	CustomMessageDeliverAs,
+	ExtensionError,
+	ExtensionMode,
+	ExtensionUIContext,
+} from "../extensibility/extensions/types";
 import type { AgentSession } from "../session/agent-session";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 
@@ -29,7 +34,10 @@ export interface InitializeExtensionsOptions {
 	/** Optional lifecycle hook for extension-originated messages that can start an agent turn. */
 	markAgentInvokingMessage?: () => void;
 	/** Optional lifecycle hook for extension-originated sends whose success/failure determines turn ownership. */
-	trackAgentInvokingMessage?: (task: Promise<unknown>) => void;
+	trackAgentInvokingMessage?: (
+		task: Promise<unknown>,
+		hint?: { deliverAs?: CustomMessageDeliverAs; isStreaming?: boolean },
+	) => void;
 }
 
 /**
@@ -60,7 +68,10 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 				const sendTask = session.sendCustomMessage(message, sendOptions);
 				if (sendOptions?.triggerTurn) {
 					if (trackAgentInvokingMessage) {
-						trackAgentInvokingMessage(sendTask);
+						trackAgentInvokingMessage(sendTask, {
+							deliverAs: sendOptions.deliverAs,
+							isStreaming: session.isStreaming,
+						});
 					} else {
 						markAgentInvokingMessage?.();
 					}
@@ -72,7 +83,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 			sendUserMessage: (content, sendOptions) => {
 				const sendTask = session.sendUserMessage(content, sendOptions);
 				if (trackAgentInvokingMessage) {
-					trackAgentInvokingMessage(sendTask);
+					trackAgentInvokingMessage(sendTask, { isStreaming: session.isStreaming });
 				} else {
 					markAgentInvokingMessage?.();
 				}
