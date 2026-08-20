@@ -810,12 +810,27 @@ export class ModelRegistry {
 			}
 			const configStale = this.#isDiscoveryCacheOlderThanModelsConfig(cache.updatedAt);
 			// Cached rows never persist headers (#5780); models that had live
-			// headers cannot be rebuilt here, so exclude them and mark the
-			// discovery stale to force a refetch instead of returning models
-			// missing required transport headers.
+			// headers are re-derived from provider config here rather than dropped,
+			// so they are available at startup without a network round-trip.
+			// When no authHeader/apiKey config exists (keyless providers such as
+			// ollama / lm-studio / llama.cpp) restoredHeaders is undefined and the
+			// old behaviour — filter out header-omitted models and mark stale — is
+			// preserved exactly.
+			const providerOverride = this.#providerOverrides.get(providerConfig.provider);
+			const restoredHeaders = mergeAuthHeaderSources(
+				[providerConfig.headers],
+				providerOverride?.authHeader,
+				providerOverride?.apiKey,
+			);
 			const omittedHeaderIds = new Set(cache.headerOmittedModelIds);
 			const usableCacheModels =
-				omittedHeaderIds.size > 0 ? cache.models.filter(model => !omittedHeaderIds.has(model.id)) : cache.models;
+				omittedHeaderIds.size === 0
+					? cache.models
+					: restoredHeaders
+						? cache.models.map(model =>
+								omittedHeaderIds.has(model.id) ? { ...model, headers: { ...restoredHeaders } } : model,
+							)
+						: cache.models.filter(model => !omittedHeaderIds.has(model.id));
 			const models = this.#applyProviderModelOverrides(
 				providerConfig.provider,
 				this.#normalizeDiscoverableModels(
@@ -836,7 +851,7 @@ export class ModelRegistry {
 					!cache.fresh ||
 					!cache.authoritative ||
 					configStale ||
-					omittedHeaderIds.size > 0,
+					(omittedHeaderIds.size > 0 && !restoredHeaders),
 				fetchedAt: cache.updatedAt,
 				models: models.map(model => model.id),
 			});
@@ -1197,6 +1212,11 @@ export class ModelRegistry {
 			cacheProviderId,
 			cacheTtlMs: 24 * 60 * 60 * 1000,
 			fetchDynamicModels,
+			restorableHeaderFallback: mergeAuthHeaderSources(
+				[providerConfig.headers],
+				this.#providerOverrides.get(providerId)?.authHeader,
+				this.#providerOverrides.get(providerId)?.apiKey,
+			),
 		});
 		const result = await manager.refresh(effectiveStrategy);
 		const status = discoveryError
