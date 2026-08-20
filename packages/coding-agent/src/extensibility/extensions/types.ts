@@ -219,10 +219,16 @@ export interface ExtensionUIDialogOptions {
 /** Raw terminal input listener for extensions. */
 export type TerminalInputHandler = (data: string) => { consume?: boolean; data?: string } | undefined;
 
-export type WidgetPlacement = "aboveEditor" | "belowEditor";
+export type WidgetPlacement = "aboveEditor" | "belowEditor" | "rightSidebar";
 
 export interface ExtensionWidgetOptions {
 	placement?: WidgetPlacement;
+	/** Preferred reserved-column width, including the separator. `rightSidebar` only. */
+	width?: number;
+	/** Smallest visible reserved-column width, including the separator. `rightSidebar` only. */
+	minWidth?: number;
+	/** Smallest width retained for transcript/editor content. `rightSidebar` only. */
+	minMainWidth?: number;
 }
 
 export type ExtensionUiComponent = Component & { dispose?(): void };
@@ -287,7 +293,13 @@ export interface ExtensionUIContext {
 	/** Set the working/loading message shown during streaming. Call with no argument to restore default. */
 	setWorkingMessage(message?: string): void;
 
-	/** Set a widget to display above or below the editor. Accepts string array or component factory. */
+	/**
+	 * Set a widget using a string array or component factory.
+	 *
+	 * String arrays are capped at 10 lines; component factories are uncapped.
+	 * `rightSidebar` widgets are non-focusable and respond to terminal-width changes.
+	 * Sidebar geometry fields are ignored for above/below placements.
+	 */
 	setWidget(key: string, content: ExtensionWidgetContent, options?: ExtensionWidgetOptions): void;
 
 	/** Set a custom footer component, or undefined to restore the built-in footer. */

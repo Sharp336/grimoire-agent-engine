@@ -1,7 +1,14 @@
-import { describe, expect, it, mock } from "bun:test";
+import { beforeAll, describe, expect, it, mock } from "bun:test";
 import { Container, type Component } from "@oh-my-pi/pi-tui";
 import type { ExtensionWidgetOptions, WidgetPlacement } from "../src/extensibility/extensions";
 import { ExtensionUiController } from "../src/modes/controllers/extension-ui-controller";
+import { getThemeByName, setThemeInstance } from "../src/modes/theme/theme";
+
+beforeAll(async () => {
+	const dark = await getThemeByName("dark");
+	if (!dark) throw new Error("Failed to load dark theme");
+	setThemeInstance(dark);
+});
 
 class Probe implements Component {
 	disposeCalls = 0;
