@@ -2219,6 +2219,9 @@
 ### Fixed
 
 - Fixed `omp usage` hiding sibling-only limits such as Claude 7 Day (Fable) on accounts whose current report omitted that scoped bucket; the account now renders an explicit `not reported` row instead of looking like the usage refresh skipped the column.
+### Added
+
+- Opt-in per-server MCP `lifecycle: eager | lazy` plus `idleTimeout`, with global defaults `mcp.defaultLifecycle` and `mcp.defaultIdleTimeoutMs`. `lazy` servers advertise cached tools without spawning at session start, connect on first tool call (single-flight), and idle-disconnect after `idleTimeout` (never mid-call). Default remains `eager`, so existing configs are unchanged.
 
 ## [16.3.3] - 2026-07-02
 

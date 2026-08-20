@@ -64,6 +64,10 @@ export interface MCPServer {
 	};
 	/** Transport type */
 	transport?: "stdio" | "sse" | "http";
+	/** Connection lifecycle: "eager" (default) connects at session start; "lazy" connects on first tool use and idle-disconnects after idleTimeout. */
+	lifecycle?: "eager" | "lazy";
+	/** Idle-disconnect timeout in milliseconds for lazy servers. 0 disables idle disconnect. */
+	idleTimeout?: number;
 	/** Source metadata (added by loader) */
 	_source: SourceMeta;
 }
@@ -108,6 +112,18 @@ export const mcpCapability = defineCapability<MCPServer>({
 		}
 		if ((server.transport === "http" || server.transport === "sse") && !server.url) {
 			return "http/sse transport requires url field";
+		}
+
+		// Validate lifecycle policy so a typo (e.g. "lazyy") surfaces as a config
+		// error instead of silently falling through every === "lazy" check as eager.
+		if (server.lifecycle !== undefined && server.lifecycle !== "eager" && server.lifecycle !== "lazy") {
+			return `Invalid lifecycle "${server.lifecycle}" (expected "eager" or "lazy")`;
+		}
+		if (
+			server.idleTimeout !== undefined &&
+			(typeof server.idleTimeout !== "number" || !Number.isFinite(server.idleTimeout) || server.idleTimeout < 0)
+		) {
+			return "idleTimeout must be a non-negative number of milliseconds";
 		}
 
 		return undefined;

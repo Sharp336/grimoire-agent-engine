@@ -59,6 +59,9 @@ export interface MCPAuthConfig {
 	resource?: string;
 }
 
+/** Connection lifecycle for an MCP server. */
+export type MCPLifecycle = "lazy" | "eager";
+
 /** Encoding used for outgoing JSON-RPC request ids. */
 export type MCPRequestIdFormat = "string" | "number";
 
@@ -80,6 +83,10 @@ interface MCPServerConfigBase {
 	 * tool's config do not, since the key is not part of those formats.
 	 */
 	requestIdFormat?: MCPRequestIdFormat;
+	/** Connection lifecycle. Eager is the default. */
+	lifecycle?: MCPLifecycle;
+	/** Lazy-server idle disconnect timeout in milliseconds; 0 disables reaping. */
+	idleTimeout?: number;
 	/** Authentication configuration (optional) */
 	auth?: MCPAuthConfig;
 	/** OAuth configuration for servers requiring explicit client credentials */
