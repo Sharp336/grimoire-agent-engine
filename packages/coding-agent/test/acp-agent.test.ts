@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { Model } from "@oh-my-pi/pi-ai";
+import { type Model, serviceTierFamily } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
@@ -382,6 +382,12 @@ class FakeAgentSession {
 		this.setFastModeCalls.push(enabled);
 		this.fastMode = enabled;
 		return true;
+	}
+
+	// Mirrors ModelControls.supportsFastMode so the Fireworks (no service-tier
+	// family) case stays a real classification, not a hardcoded fake answer.
+	supportsFastMode(): boolean {
+		return this.model !== undefined && serviceTierFamily(this.model) !== undefined;
 	}
 
 	isFastModeEnabled(): boolean {

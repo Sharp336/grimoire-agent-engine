@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import { type AssistantMessage, type Model, serviceTierFamily } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import { getBlobsDir, isEnoent, logger, type postmortem, VERSION } from "@oh-my-pi/pi-utils";
 import {
 	type Agent,
@@ -791,7 +791,7 @@ export class AcpAgent implements Agent {
 				// A client replaying a saved default can ask for fast mode on a
 				// model that has no service-tier family; skip rather than let
 				// `setFastMode` emit an operator notice for a no-op.
-				if (this.#supportsFastMode(record.session)) {
+				if (record.session.supportsFastMode()) {
 					record.session.setFastMode(enabled);
 				}
 				break;
@@ -1750,16 +1750,6 @@ export class AcpAgent implements Agent {
 		});
 	}
 
-	/**
-	 * Fast mode is a per-model-family service-tier switch. A model with no
-	 * service-tier family has nothing to toggle — `setFastMode` would only
-	 * emit "The current model has no service-tier control for /fast to
-	 * toggle." — so hide the switch instead of showing a dead one.
-	 */
-	#supportsFastMode(session: AgentSession): boolean {
-		return session.model !== undefined && serviceTierFamily(session.model) !== undefined;
-	}
-
 	#buildConfigOptions(session: AgentSession): SessionConfigOption[] {
 		const currentModeId = this.#getCurrentModeId(session);
 		const modeOptions = this.#getAvailableModes(session).map(mode => ({
@@ -1811,7 +1801,10 @@ export class AcpAgent implements Agent {
 		// selects first in the array, which clients use both for placement
 		// priority and to resolve category keybinding ties.
 		if (this.#clientCapabilities?.session?.configOptions?.boolean != null) {
-			if (this.#supportsFastMode(session)) {
+			// A model with no service-tier family has nothing to toggle, and
+			// `setFastMode` would only emit "no service-tier control for /fast to
+			// toggle" — so hide the switch rather than show a dead one.
+			if (session.supportsFastMode()) {
 				configOptions.push({
 					id: FAST_CONFIG_ID,
 					name: "Fast mode",
