@@ -4588,6 +4588,11 @@ export class AgentSession {
 		return this.#tools.getEvalBridgeToolNames();
 	}
 
+	/** Tools left directly model-visible by Code Mode; undefined when inactive. */
+	getCodeModeDirectToolNames(): readonly string[] | undefined {
+		return this.#tools.getCodeModeDirectToolNames();
+	}
+
 	/** Whether a registry entry came from a built-in factory. */
 	hasBuiltInTool(name: string): boolean {
 		return this.#tools.hasBuiltInTool(name);

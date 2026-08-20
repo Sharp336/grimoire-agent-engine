@@ -223,6 +223,9 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 
 		expect(created.planModeEnabled).toBe(true);
 		expect(session?.getActiveToolNames()).toContain("write");
+		// The eval tool advertises the bridge from this set, so a direct `write`
+		// must never appear as `tool.write()`.
+		expect(session?.getCodeModeDirectToolNames()).toContain("write");
 		expect(session?.getActiveToolNames()).toContain("eval");
 	});
 

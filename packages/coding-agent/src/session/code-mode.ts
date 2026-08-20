@@ -6,13 +6,24 @@
 
 import { logger } from "@oh-my-pi/pi-utils";
 
-/** Tool names that always stay directly model-visible under code mode. */
+/**
+ * Tool names that always stay directly model-visible under code mode. The
+ * `__*__` names are the eval bridge's own internal operations (declared in
+ * `eval/*-bridge.ts`, spelled out here to keep this module free of eval
+ * imports): `callSessionTool` consumes them before the registry, so a
+ * registered tool sharing one of those names is only reachable while it stays
+ * on the direct surface.
+ */
 export const CODE_MODE_KEEP_TOOLS: Record<string, true> = {
 	eval: true,
 	ask: true,
 	todo: true,
 	yield: true,
 	think: true,
+	__agent__: true,
+	__budget__: true,
+	__completion__: true,
+	__concurrency__: true,
 };
 
 export interface CodeModeResolution {

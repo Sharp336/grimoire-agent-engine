@@ -10,6 +10,7 @@ interface JsonSchema {
 	properties?: Record<string, JsonSchema>;
 	required?: string[];
 	items?: JsonSchema;
+	description?: string;
 	enum?: unknown[];
 }
 
@@ -47,14 +48,35 @@ function tsType(schema: JsonSchema | undefined, depth: number): string {
 	}
 }
 
-export function generateCodeModeDeclarations(tools: ReadonlyArray<{ name: string; parameters: unknown }>): string {
-	const lines = tools.map(tool => {
+/** One line, capped: a bridged MCP tool's description can run for paragraphs. */
+function summarize(text: string | undefined): string | undefined {
+	const single = text?.replace(/\s+/gu, " ").trim();
+	if (!single) return undefined;
+	return single.length > 200 ? `${single.slice(0, 199)}…` : single;
+}
+
+export function generateCodeModeDeclarations(
+	tools: ReadonlyArray<{ name: string; description?: string; parameters: unknown }>,
+): string {
+	const lines = tools.flatMap(tool => {
 		const printedName = TS_IDENTIFIER.test(tool.name) ? tool.name : JSON.stringify(tool.name);
 		const wire = isArkSchema(tool.parameters)
 			? (arkToWireSchema(tool.parameters) as JsonSchema)
 			: (tool.parameters as JsonSchema | undefined);
-		const args = wire?.type === "object" && wire.properties ? tsType(wire, 0) : "unknown";
-		return `  ${printedName}(args: ${args}): Promise<unknown>;`;
+		const isObject = wire?.type === "object" && wire.properties !== undefined;
+		const args = isObject ? tsType(wire, 0) : "unknown";
+		const docs = [summarize(tool.description)];
+		if (isObject) {
+			for (const [key, value] of Object.entries(wire.properties ?? {})) {
+				const summary = summarize(value.description);
+				if (summary) docs.push(`@param args.${key} - ${summary}`);
+			}
+		}
+		const doc = docs.filter(line => line !== undefined);
+		return [
+			...(doc.length > 0 ? [`  /** ${doc.join(" ")} */`] : []),
+			`  ${printedName}(args: ${args}): Promise<unknown>;`,
+		];
 	});
 	return lines.join("\n");
 }

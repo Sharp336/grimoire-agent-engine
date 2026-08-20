@@ -9,10 +9,14 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../src/config/model-registry";
 import { Settings } from "../src/config/settings";
+import { EVAL_AGENT_BRIDGE_NAME } from "../src/eval/agent-bridge";
+import { EVAL_BUDGET_BRIDGE_NAME } from "../src/eval/budget-bridge";
+import { EVAL_COMPLETION_BRIDGE_NAME } from "../src/eval/completion-bridge";
+import { EVAL_CONCURRENCY_BRIDGE_NAME } from "../src/eval/concurrency-bridge";
 import { createAgentSession } from "../src/sdk";
 import { AgentSession } from "../src/session/agent-session";
 import type { ToolNamespacesInfo } from "../src/session/code-mode";
-import { buildToolNamespacesInfo, resolveCodeMode } from "../src/session/code-mode";
+import { buildToolNamespacesInfo, CODE_MODE_KEEP_TOOLS, resolveCodeMode } from "../src/session/code-mode";
 import { SessionManager } from "../src/session/session-manager";
 
 const ENABLED = ["eval", "ask", "todo", "yield", "think", "read", "bash", "edit", "mcp__gmail__search"];
@@ -113,6 +117,28 @@ describe("resolveCodeMode", () => {
 			evalTransportAvailable: true,
 		});
 		expect([...r.directToolNames]).toEqual(["eval"]);
+	});
+	test("reserved eval bridge names stay direct", () => {
+		// `callSessionTool` consumes these before the registry, so demoting a tool
+		// that shares one of those names would make it unreachable.
+		const r = resolveCodeMode({
+			provider: "openai-codex",
+			toolMode: "code_mode_only",
+			setting: "auto",
+			enabledToolNames: ["eval", "read", "__agent__", "__budget__", "__completion__", "__concurrency__"],
+			evalTransportAvailable: true,
+		});
+		expect([...r.directToolNames]).toEqual(["eval", "__agent__", "__budget__", "__completion__", "__concurrency__"]);
+	});
+	test("the reserved keep-set names match the bridge constants", () => {
+		for (const name of [
+			EVAL_AGENT_BRIDGE_NAME,
+			EVAL_BUDGET_BRIDGE_NAME,
+			EVAL_COMPLETION_BRIDGE_NAME,
+			EVAL_CONCURRENCY_BRIDGE_NAME,
+		]) {
+			expect(CODE_MODE_KEEP_TOOLS[name]).toBe(true);
+		}
 	});
 });
 

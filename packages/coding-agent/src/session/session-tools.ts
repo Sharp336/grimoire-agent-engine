@@ -225,7 +225,8 @@ export class SessionTools {
 	#toolPredicateNames: readonly string[] | undefined;
 	/** Wire-name snapshot for the direct Code Mode tools last applied successfully. */
 	#codeModeDirectWireSignature: string | undefined;
-	/** Whether eval was added only as the current Code Mode transport. */
+	/** Direct partition of the last applied Code Mode surface; undefined when inactive. */
+	#codeModeDirectToolNames: readonly string[] | undefined;
 	/**
 	 * `xd://` device names the current base system prompt renders in its catalog
 	 * (the last rebuild's {@link BuildSystemPromptResult.xdevCatalogNames}). Consulted
@@ -396,6 +397,11 @@ export class SessionTools {
 	/** Canonical allowlist advertised by and enforced for the eval bridge. */
 	getEvalBridgeToolNames(): string[] {
 		return this.getEnabledToolNames();
+	}
+
+	/** Tools left directly model-visible by the last applied Code Mode partition; undefined when inactive. */
+	getCodeModeDirectToolNames(): readonly string[] | undefined {
+		return this.#codeModeDirectToolNames;
 	}
 
 	#hasCodeModeEvalTransport(): boolean {
@@ -916,11 +922,16 @@ export class SessionTools {
 		const previousMounted = new Set(this.#xdev?.mountedNames ?? []);
 		const previousActiveToolNames = this.getActiveToolNames();
 		const previousEnabledToolNames = this.#enabledToolNames;
+		const previousCodeModeDirectToolNames = this.#codeModeDirectToolNames;
 		const previousToolPredicateNames = this.#toolPredicateNames;
 		this.#enabledToolNames = new Set([...validToolNames, ...mountNames]);
 		this.#setMountedNames(mountNames);
 		this.#toolPredicateNames = codeMode.active ? [...this.#enabledToolNames] : appliedNames;
 		this.#setActiveToolNames?.(this.#toolPredicateNames);
+		// The eval tool advertises whatever stays direct, including a plan-mode
+		// transport `write`, so the applied partition lands before the rebuild
+		// reads the tool descriptions.
+		this.#codeModeDirectToolNames = codeMode.active ? appliedNames : undefined;
 
 		let rebuiltSystemPrompt: string[] | undefined;
 		let rebuiltSignature: string | undefined;
@@ -957,6 +968,7 @@ export class SessionTools {
 			this.#toolPredicateNames = previousToolPredicateNames;
 			this.#setActiveToolNames?.(previousToolPredicateNames ?? previousActiveToolNames);
 			this.#enabledToolNames = previousEnabledToolNames;
+			this.#codeModeDirectToolNames = previousCodeModeDirectToolNames;
 			throw error;
 		}
 
@@ -965,6 +977,7 @@ export class SessionTools {
 			this.#toolPredicateNames = previousToolPredicateNames;
 			this.#setActiveToolNames?.(previousToolPredicateNames ?? previousActiveToolNames);
 			this.#enabledToolNames = previousEnabledToolNames;
+			this.#codeModeDirectToolNames = previousCodeModeDirectToolNames;
 			return;
 		}
 
