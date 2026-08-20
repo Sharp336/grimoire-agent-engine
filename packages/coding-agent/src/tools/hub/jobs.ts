@@ -134,9 +134,14 @@ function describeAgents(agents: AgentActivitySnapshot[]): string[] {
 		const stale = agent.live ? "" : " — no turn in flight (stale registration?)";
 		lines.push(`- \`${agent.id}\`${parent} — up ${formatDuration(agent.ageMs)}${activity}${stale}`);
 	}
-	lines.push("", "These agents have no job entry; inspect transcripts at `history://<id>` or cancel an owned child with `hub` cancel.");
+	lines.push(
+		"",
+		"These agents have no job entry; inspect transcripts at `history://<id>` or cancel an owned child with `hub` cancel.",
+	);
 	if (agents.some(agent => !agent.live)) {
-		lines.push("An agent with no turn in flight cannot make progress and never satisfies a bare `wait`; clear it with `hub` cancel.");
+		lines.push(
+			"An agent with no turn in flight cannot make progress and never satisfies a bare `wait`; clear it with `hub` cancel.",
+		);
 	}
 	return lines;
 }

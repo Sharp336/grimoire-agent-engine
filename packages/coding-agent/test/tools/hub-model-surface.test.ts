@@ -32,7 +32,14 @@ describe("fork Hub model surface", () => {
 		const taskPrompt = await Bun.file(new URL("../../src/prompts/tools/task.md", import.meta.url)).text();
 		const modelText = `${tool.summary}\n${tool.description}\n${taskPrompt}`;
 
-		for (const forbidden of ["peer messaging", "hub send", "inbox", "replyTo", "Parent-to-subagent IRC", "coordinate directly over IRC"]) {
+		for (const forbidden of [
+			"peer messaging",
+			"hub send",
+			"inbox",
+			"replyTo",
+			"Parent-to-subagent IRC",
+			"coordinate directly over IRC",
+		]) {
 			expect(modelText).not.toContain(forbidden);
 		}
 		for (const example of tool.examples) {

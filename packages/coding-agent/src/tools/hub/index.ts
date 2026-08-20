@@ -121,14 +121,12 @@ const internalHubSchema = type({
 });
 
 /** Model-visible Hub surface: async job control plus supervised processes only. */
-const hubSchema = internalHubSchema
-	.omit("op", "to", "message", "replyTo", "await", "from", "timeoutMs", "peek")
-	.and({
-		op: type(
-			"'send' | 'wait' | 'jobs' | 'cancel' | 'start' | 'ps' | 'logs' | 'stop' | 'restart' | 'describe'",
-		).describe("hub operation"),
-		"timeoutMs?": type("number").describe("wait (jobs): timeout in milliseconds (0 waits indefinitely)"),
-	});
+const hubSchema = internalHubSchema.omit("op", "to", "message", "replyTo", "await", "from", "timeoutMs", "peek").and({
+	op: type("'send' | 'wait' | 'jobs' | 'cancel' | 'start' | 'ps' | 'logs' | 'stop' | 'restart' | 'describe'").describe(
+		"hub operation",
+	),
+	"timeoutMs?": type("number").describe("wait (jobs): timeout in milliseconds (0 waits indefinitely)"),
+});
 
 type HubParams = typeof internalHubSchema.infer;
 
