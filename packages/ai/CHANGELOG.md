@@ -17,6 +17,7 @@
 - Fixed Google Cloud Code Assist and Antigravity rejecting MCP tool schemas with unsupported annotations (`x-mcp-header`, `deprecated`, `readOnly`, `writeOnly`, `$comment`).
 - Fixed Cursor provider issues with native file edit streaming (`editToolCall`) and ensuring always-apply system rules are properly preserved.
 - Fixed Cursor HTTP/2 requests ignoring standard proxy environment variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`).
+- Fixed the official DeepSeek Chat Completions route clamping models with a documented 384k output budget to the generic 64k OpenAI-compatible ceiling; third-party endpoints keep the conservative cap.
 
 ## [17.4.0] - 2026-08-20
 

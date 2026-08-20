@@ -1,5 +1,6 @@
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { toFirepassWireModelId, toFireworksWireModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
+import { hostMatchesUrl } from "@oh-my-pi/pi-catalog/hosts";
 import { isGlm52ReasoningEffortModelId, isKimiK3ModelId } from "@oh-my-pi/pi-catalog/identity";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
@@ -1166,18 +1167,24 @@ function isZaiReasoningEffortDialect(model: Model<"openai-completions">, compat:
 	return compat.thinkingFormat === "zai" && isGlm52ReasoningEffortModelId(model.id);
 }
 
+const DEEPSEEK_MAX_OUTPUT_TOKENS = 384_000;
+
 /**
  * Provider-specific Chat Completions output clamp.
  *
  * Most OpenAI-compatible endpoints retain the conservative 64k ceiling from
- * {@link resolveOpenAIOutputTokenParam}. Z.AI/GLM-5.2 reasoning and native
- * Moonshot K3 explicitly accept their full advertised model caps, so those
- * routes clamp to `model.maxTokens` instead.
+ * {@link resolveOpenAIOutputTokenParam}. The official DeepSeek API accepts up
+ * to 384k output tokens and is bounded by both that documented ceiling and the
+ * model catalog. Z.AI/GLM-5.2 reasoning and native Moonshot K3 similarly accept
+ * their full advertised model caps.
  */
 export function resolveOpenAICompletionsOutputClamp(
 	model: Model<"openai-completions">,
 	compat: ResolvedOpenAICompat,
 ): number | undefined {
+	if (hostMatchesUrl(model.baseUrl, "deepseekDirect")) {
+		return Math.min(model.maxTokens ?? OPENAI_MAX_OUTPUT_TOKENS, DEEPSEEK_MAX_OUTPUT_TOKENS);
+	}
 	if (isZaiReasoningEffortDialect(model, compat)) {
 		return model.maxTokens ?? OPENAI_MAX_OUTPUT_TOKENS;
 	}

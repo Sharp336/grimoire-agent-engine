@@ -6,12 +6,12 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 // Output-token wire policy for OpenAI-family providers:
-//   - Non-aggregator completions + non-OpenRouter responses: clamp to
-//     OPENAI_MAX_OUTPUT_TOKENS (mirrors Anthropic's cap) so a catalog maxTokens
-//     that tracks the context window never overflows the upstream.
-//   - OpenRouter completions/responses: omit default max token fields entirely.
-//     OpenRouter filters out any upstream whose output cap is below the requested
-//     value (e.g. Cerebras GLM-4.7 ~40k), silently defeating provider routing.
+//   - Compatible endpoints default to OPENAI_MAX_OUTPUT_TOKENS so a catalog
+//     maxTokens that tracks context size cannot overflow an unknown upstream.
+//   - First-party endpoints with known larger limits (including DeepSeek) use
+//     their documented ceiling, still bounded by the catalog model cap.
+//   - OpenRouter completions/responses omit default max token fields entirely
+//     because requested caps can silently filter the selected upstream.
 //     Explicit caller caps and Kimi chat-completions via OpenRouter are still sent.
 
 const ctx: Context = {
@@ -205,6 +205,24 @@ describe("OpenAI-family output-token cap", () => {
 
 	it("clamps non-aggregator completions output to the 64k ceiling", async () => {
 		const body = await captureCompletionsBody(directCompletionsModel(131_072), 131_072);
+		expect(body.max_completion_tokens ?? body.max_tokens).toBe(OPENAI_MAX_OUTPUT_TOKENS);
+	});
+
+	it("lets the official DeepSeek route use its advertised 384k output cap", async () => {
+		const model = getBundledModel("deepseek", "deepseek-v4-pro") as Model<"openai-completions">;
+		expect(model.maxTokens).toBe(384_000);
+		const body = await captureCompletionsBody(model, 384_000);
+		expect(body.max_completion_tokens ?? body.max_tokens).toBe(384_000);
+	});
+
+	it("keeps the conservative cap for DeepSeek-labelled third-party endpoints", async () => {
+		const base = getBundledModel("deepseek", "deepseek-v4-pro") as Model<"openai-completions">;
+		const model = buildModel({
+			...base,
+			baseUrl: "https://proxy.example/v1",
+			compat: base.compatConfig,
+		} as ModelSpec<"openai-completions">);
+		const body = await captureCompletionsBody(model, 384_000);
 		expect(body.max_completion_tokens ?? body.max_tokens).toBe(OPENAI_MAX_OUTPUT_TOKENS);
 	});
 
