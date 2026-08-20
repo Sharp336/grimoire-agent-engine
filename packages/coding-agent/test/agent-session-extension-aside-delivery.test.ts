@@ -360,15 +360,14 @@ describe("AgentSession extension deliverAs aside", () => {
 		const enteredNormalize = Promise.withResolvers<void>();
 		let delayNormalize = false;
 		const original = SessionProviderBoundary.prototype.normalizeAgentMessageImages;
-		vi.spyOn(SessionProviderBoundary.prototype, "normalizeAgentMessageImages").mockImplementation(async function (
-			this: SessionProviderBoundary,
-			message,
-		) {
+		vi.spyOn(SessionProviderBoundary.prototype, "normalizeAgentMessageImages").mockImplementation(async function <
+			T extends AgentMessage,
+		>(this: SessionProviderBoundary, message: T): Promise<T> {
 			if (delayNormalize) {
 				enteredNormalize.resolve();
 				await normalizeGate.promise;
 			}
-			return original.call(this, message);
+			return original.call(this, message) as Promise<T>;
 		});
 
 		const { session: parked, streamStarted } = await createParkedSession();
