@@ -33,27 +33,32 @@ import {
 import { tinyModelClient } from "../tiny/title-client";
 
 /**
- * Rendered classifier prompts, keyed by whether `max` is offered as a label.
- * Two variants only, so both are memoized on first use.
+ * Rendered classifier prompts, keyed by the highest label the classifier may
+ * emit. Three variants are memoized on first use.
  */
-const DIFFICULTY_SYSTEM_PROMPTS: Partial<Record<"max" | "xhigh", string>> = {};
+const DIFFICULTY_SYSTEM_PROMPTS: Partial<Record<"high" | "xhigh" | "max", string>> = {};
 
 /**
  * Highest effort this turn's classification may resolve to: the configured
  * ceiling, further limited by what the target model actually exposes. The
- * default keeps `auto` one tier below the top, so only an explicit
- * `ultrathink` reaches {@link Effort.Max}.
+ * default keeps `auto` one tier below the top, so only an explicit `ultrathink`
+ * reaches {@link Effort.Max}.
  */
 function autoEffortCeiling(deps: ClassifyDifficultyDeps): Effort {
-	if (deps.settings.get("providers.autoThinkingMaxEffort") !== Effort.Max) return Effort.XHigh;
+	const configured = deps.settings.get("providers.autoThinkingMaxEffort");
+	if (configured === Effort.High) return Effort.High;
+	if (configured !== Effort.Max) return Effort.XHigh;
 	return getSupportedEfforts(deps.model).includes(Effort.Max) ? Effort.Max : Effort.XHigh;
 }
 
 function difficultySystemPromptFor(ceiling: Effort): string {
-	const key = ceiling === Effort.Max ? "max" : "xhigh";
+	const key = ceiling === Effort.High ? "high" : ceiling === Effort.Max ? "max" : "xhigh";
 	const cached = DIFFICULTY_SYSTEM_PROMPTS[key];
 	if (cached !== undefined) return cached;
-	const rendered = prompt.render(difficultySystemPrompt, { allowMax: key === "max" });
+	const rendered = prompt.render(difficultySystemPrompt, {
+		allowXHigh: key !== "high",
+		allowMax: key === "max",
+	});
 	DIFFICULTY_SYSTEM_PROMPTS[key] = rendered;
 	return rendered;
 }
@@ -101,10 +106,14 @@ export async function classifyDifficulty(
 	const backend = deps.settings.get("providers.autoThinkingModel");
 	const input = preprocessTinyMessage(promptText);
 	const online = backend === ONLINE_AUTO_THINKING_MODEL_KEY;
-	// The 3-bucket local classifier cannot select `max`, so its ceiling stays at
-	// XHigh whatever the setting says — otherwise a sparse ladder would snap its
-	// `hard` bucket up to a tier it never chose.
-	const ceiling = online ? autoEffortCeiling(deps) : Effort.XHigh;
+	// The local classifier cannot emit `max`, but a configured `high` ceiling
+	// still applies to its `hard` bucket. Preserve the existing xhigh-only
+	// behavior for the `max` opt-in because the local model has no max label.
+	const ceiling = online
+		? autoEffortCeiling(deps)
+		: deps.settings.get("providers.autoThinkingMaxEffort") === Effort.High
+			? Effort.High
+			: Effort.XHigh;
 	const effort = online ? await classifyOnline(input, deps, ceiling) : await classifyLocal(input, backend, deps);
 	// The ceiling goes into the clamp itself: capping the request alone is not
 	// enough, because a sparse ladder snaps an excluded request back up.
