@@ -341,6 +341,41 @@ printf '{"id":"new-unpersisted-id","replaced_id":"existing-persisted-uuid","acti
 		expect(result?.ids).toEqual(["existing-persisted-uuid"]);
 	});
 
+	it("stores learned lessons at Mnemon's default non-immune importance", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mnemon-cli-durable-learn-"));
+		const cli = path.join(dir, "mnemon");
+		fs.writeFileSync(
+			cli,
+			`#!/usr/bin/env bash
+set -e
+if [[ " $* " != *" --imp 3 "* ]]; then
+  echo "expected learned lesson to use --imp 3: $*" >&2
+  exit 1
+fi
+printf '{"id":"durable-id","action":"added"}\\n'
+`,
+		);
+		fs.chmodSync(cli, 0o755);
+		const settings = Settings.isolated({
+			"autolearn.enabled": true,
+			"memory.backend": "mnemon",
+			"mnemon.cliPath": cli,
+		});
+		const session = {
+			cwd: "/tmp/project",
+			hasUI: false,
+			settings,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+		};
+
+		const tool = LearnTool.createIf(session as never);
+		expect(tool).toBeInstanceOf(LearnTool);
+		const execution = await tool!.execute("1", { memory: "Keep this reusable lesson" });
+		const text = execution.content[0]?.type === "text" ? execution.content[0].text : "";
+		expect(text).toContain("Lesson stored");
+	});
+
 	it("learn tool succeeds without error when mnemon returns action: skipped", async () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mnemon-cli-learn-"));
 		const cli = path.join(dir, "mnemon");
@@ -439,11 +474,22 @@ exit 1
 		const listeners: Array<(event: unknown) => void> = [];
 		const session = makeSession(
 			settings,
-			[userEntry("first question"), assistantEntry("first answer"), userEntry("second question"), assistantEntry("second answer")],
+			[
+				userEntry("first question"),
+				assistantEntry("first answer"),
+				userEntry("second question"),
+				assistantEntry("second answer"),
+			],
 			listeners,
 		);
 
-		await mnemonBackend.start({ session, settings, modelRegistry: {} as never, agentDir: "/tmp/agent", taskDepth: 0 });
+		await mnemonBackend.start({
+			session,
+			settings,
+			modelRegistry: {} as never,
+			agentDir: "/tmp/agent",
+			taskDepth: 0,
+		});
 		listeners[0]!({ type: "agent_end", messages: [] });
 		await getMnemonSessionState(session)?.retainInFlight;
 
@@ -469,7 +515,13 @@ exit 1
 		const listeners: Array<(event: unknown) => void> = [];
 		const session = makeSession(settings, [userEntry("only one turn"), assistantEntry("answer")], listeners);
 
-		await mnemonBackend.start({ session, settings, modelRegistry: {} as never, agentDir: "/tmp/agent", taskDepth: 0 });
+		await mnemonBackend.start({
+			session,
+			settings,
+			modelRegistry: {} as never,
+			agentDir: "/tmp/agent",
+			taskDepth: 0,
+		});
 		listeners[0]!({ type: "agent_end", messages: [] });
 		await getMnemonSessionState(session)?.retainInFlight;
 
@@ -487,7 +539,13 @@ exit 1
 		const listeners: Array<(event: unknown) => void> = [];
 		const session = makeSession(settings, [userEntry("single turn"), assistantEntry("answer")], listeners);
 
-		await mnemonBackend.start({ session, settings, modelRegistry: {} as never, agentDir: "/tmp/agent", taskDepth: 0 });
+		await mnemonBackend.start({
+			session,
+			settings,
+			modelRegistry: {} as never,
+			agentDir: "/tmp/agent",
+			taskDepth: 0,
+		});
 		await mnemonBackend.enqueue("/tmp/agent", "/tmp/project", session);
 
 		const lines = readLog(logPath);
@@ -507,7 +565,13 @@ exit 1
 		const listeners: Array<(event: unknown) => void> = [];
 		const session = makeSession(settings, [userEntry("turn"), assistantEntry("answer")], listeners);
 
-		await mnemonBackend.start({ session, settings, modelRegistry: {} as never, agentDir: "/tmp/agent", taskDepth: 0 });
+		await mnemonBackend.start({
+			session,
+			settings,
+			modelRegistry: {} as never,
+			agentDir: "/tmp/agent",
+			taskDepth: 0,
+		});
 		// No subscription is installed when autoRetain is off.
 		expect(listeners).toHaveLength(0);
 		expect(readLog(logPath)).toHaveLength(0);
@@ -536,7 +600,13 @@ exit 1
 			},
 		} as never;
 
-		await mnemonBackend.start({ session, settings, modelRegistry: {} as never, agentDir: "/tmp/agent", taskDepth: 0 });
+		await mnemonBackend.start({
+			session,
+			settings,
+			modelRegistry: {} as never,
+			agentDir: "/tmp/agent",
+			taskDepth: 0,
+		});
 		expect(getMnemonSessionState(session)).toBeDefined();
 		expect(unsubscribed).toBe(false);
 

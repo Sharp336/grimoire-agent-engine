@@ -1,5 +1,7 @@
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
+import { type HindsightMessage, prepareRetentionTranscript } from "../hindsight/content";
+import { extractMessages } from "../hindsight/transcript";
 import type {
 	MemoryBackend,
 	MemoryBackendForgetResult,
@@ -18,8 +20,6 @@ import type {
 import mnemonCompactionTemplate from "../prompts/memories/mnemon-compaction.md" with { type: "text" };
 import mnemonFirstTurnTemplate from "../prompts/memories/mnemon-first-turn.md" with { type: "text" };
 import mnemonInstructionsTemplate from "../prompts/memories/mnemon-instructions.md" with { type: "text" };
-import { prepareRetentionTranscript, type HindsightMessage } from "../hindsight/content";
-import { extractMessages } from "../hindsight/transcript";
 import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
 import { createMnemonCli, findMnemonCommand, type MnemonCli } from "./cli";
 import {
@@ -154,18 +154,7 @@ async function retainTranscriptTail(state: MnemonSessionState, session: AgentSes
 	if (!force && userTurns - state.lastRetainedTurn < state.config.retainEveryNTurns) return;
 	const { transcript } = prepareRetentionTranscript(sliceUnretainedMessages(flat, state.lastRetainedTurn), true);
 	if (!transcript) return;
-	const args = [
-		"remember",
-		"--cat",
-		"context",
-		"--imp",
-		"2",
-		"--source",
-		"agent",
-		"--no-diff",
-		"--",
-		transcript,
-	];
+	const args = ["remember", "--cat", "context", "--imp", "2", "--source", "agent", "--no-diff", "--", transcript];
 	try {
 		await state.cli.runText(args, { timeoutMs: 8_000 });
 		state.lastRetainedTurn = userTurns;
