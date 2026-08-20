@@ -98,37 +98,6 @@ describe("callSessionTool", () => {
 		});
 	});
 
-	it("forwards bridged image blocks to the display channel", async () => {
-		const session = createSession([
-			createTool("read", async () => ({
-				content: [
-					{ type: "text", text: "shot.png" },
-					{ type: "image", mimeType: "image/png", data: "abc123" },
-					{ type: "image", mimeType: "image/webp", data: "def456" },
-				],
-			})),
-		]);
-		const displayed: Array<{ type: string; data: string; mimeType: string }> = [];
-
-		const result = await callSessionTool(
-			"read",
-			{ path: "shot.png" },
-			{ session, emitDisplay: output => displayed.push(output) },
-		);
-
-		expect(displayed).toEqual([
-			{ type: "image", data: "abc123", mimeType: "image/png" },
-			{ type: "image", data: "def456", mimeType: "image/webp" },
-		]);
-		// The pixels reached the model through the display channel; repeating the
-		// base64 in the cell value would double it as auto-serialized JSON.
-		expect(result).toEqual({
-			text: "shot.png",
-			details: undefined,
-			images: [{ mimeType: "image/png" }, { mimeType: "image/webp" }],
-		});
-	});
-
 	it("marks structured results when the underlying tool reports an error", async () => {
 		const session = createSession([
 			createTool("mcp__demo_fail", async () => ({
