@@ -36,6 +36,7 @@ const DIRECT_RESIZE_ENV: Record<string, string | undefined> = {
 	CMUX_WORKSPACE_ID: undefined,
 	CMUX_SURFACE_ID: undefined,
 	CMUX_REMOTE_TRANSPORT: undefined,
+	TERM: undefined,
 	TERM_PROGRAM: undefined,
 	PI_TUI_RESIZE_IN_PLACE: "0",
 };
