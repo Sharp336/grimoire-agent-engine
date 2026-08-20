@@ -43,6 +43,7 @@ describe("fork Hub model surface", () => {
 			expect(modelText).not.toContain(forbidden);
 		}
 		for (const example of tool.examples) {
+			if (!("call" in example)) continue;
 			expect(example.call.op).not.toBe("list");
 			expect(example.call.op).not.toBe("inbox");
 			for (const field of ["to", "message", "replyTo", "await", "from", "peek"]) {
@@ -58,7 +59,6 @@ describe("fork Hub model surface", () => {
 		const tool = makeTool({
 			agentRegistry: registry,
 			getAgentId: () => "Main",
-			settings: { get: () => undefined } as ToolSession["settings"],
 		});
 
 		const result = await tool.execute("internal_list", { op: "list" });
