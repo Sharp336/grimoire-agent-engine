@@ -3021,10 +3021,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			: undefined;
 		const xdevReadAvailable =
 			builtInRegistryToolNames.has("read") &&
-			(explicitlyRequestedToolNameSet === undefined || explicitlyRequestedToolNameSet.has("read"));
+			(explicitlyRequestedToolNameSet === undefined || explicitlyRequestedToolNameSet.has("read")) &&
+			!isToolDisallowed("read", disallowedPatterns);
 		const xdevWriteAvailable =
 			builtInRegistryToolNames.has("write") &&
-			(explicitlyRequestedToolNameSet === undefined || explicitlyRequestedToolNameSet.has("write"));
+			(explicitlyRequestedToolNameSet === undefined || explicitlyRequestedToolNameSet.has("write")) &&
+			!isToolDisallowed("write", disallowedPatterns);
 		const initialRequestedActiveToolNames = options.toolNames
 			? requestedActiveToolNames
 			: requestedActiveToolNames.filter(name => !defaultInactiveToolNames.has(name));

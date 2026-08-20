@@ -2042,7 +2042,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
-	it("does not re-add a disallowed write tool when xd:// tools mount", async () => {
+	it("does not mount xd:// tools when the write transport is disallowed", async () => {
 		const tempDir = makeTempDir();
 		const mcpProxy: CustomTool = {
 			name: "mcp__db_query",
@@ -2063,10 +2063,40 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		});
 
 		try {
-			// MCP tools mount under xd:// (write transport present), which would
-			// previously re-add the disallowed `write` tool to the active set.
-			expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("mcp__db_query");
+			// A disallowed write transport prevents xd:// mounting entirely, so the
+			// proxy surfaces top-level and write never re-enters the active set.
+			expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain("mcp__db_query");
 			expect(session.getActiveToolNames()).not.toContain("write");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("does not mount xd:// tools when the read transport is disallowed", async () => {
+		const tempDir = makeTempDir();
+		const mcpProxy: CustomTool = {
+			name: "mcp__db_query",
+			label: "DB Query",
+			description: "MCP proxy tool",
+			parameters: type({}),
+			mcpServerName: "db",
+			mcpToolName: "query",
+			async execute() {
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		};
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			customTools: [mcpProxy],
+			disallowedTools: ["read"],
+		});
+
+		try {
+			// A disallowed read transport prevents xd:// mounting: the model can no
+			// longer read xd:// results, so advertising mounted tools would mislead.
+			expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain("mcp__db_query");
+			expect(session.getActiveToolNames()).not.toContain("read");
 		} finally {
 			await session.dispose();
 		}
