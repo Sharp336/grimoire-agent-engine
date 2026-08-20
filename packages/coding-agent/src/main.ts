@@ -1309,7 +1309,10 @@ export async function runRootCommand(
 	// i18n.language settings take effect (cli.ts runs i18n.init() before Settings.init)
 	try {
 		const lang = settingsInstance.get("i18n.language");
-		if (lang) await i18n.setLanguage(lang);
+		// Only re-sync when the user explicitly configured a language; the schema
+		// default "en" would otherwise clobber a zh detected from OMP_LANG/
+		// config.yml during i18n.init().
+		if (lang && settingsInstance.isConfigured("i18n.language")) await i18n.setLanguage(lang);
 	} catch {
 		// No i18n.language setting; keep default from i18n.init()
 	}
