@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { CATALOG_PROVIDERS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
-import { META_MUSE_STATIC_MODELS, metaModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import {
+	META_MUSE_SPARK_CONTRIBUTOR_COST,
+	META_MUSE_SPARK_COST,
+	META_MUSE_STATIC_MODELS,
+	metaModelManagerOptions,
+} from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 
 describe("Meta Model API provider", () => {
 	test("ships Muse Spark 1.1 with its documented Responses capabilities", () => {
@@ -14,7 +19,7 @@ describe("Meta Model API provider", () => {
 				baseUrl: "https://api.meta.ai/v1",
 				reasoning: true,
 				input: ["text"],
-				cost: { input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 },
+				cost: META_MUSE_SPARK_COST,
 				contextWindow: 1_048_576,
 				maxTokens: 131_072,
 				thinking: {
@@ -34,7 +39,7 @@ describe("Meta Model API provider", () => {
 				baseUrl: "https://api.meta.ai/v1",
 				reasoning: true,
 				input: ["text"],
-				cost: { input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 },
+				cost: META_MUSE_SPARK_COST,
 				contextWindow: 1_048_576,
 				maxTokens: 131_072,
 				thinking: {
@@ -54,7 +59,7 @@ describe("Meta Model API provider", () => {
 				baseUrl: "https://api.meta.ai/v1",
 				reasoning: true,
 				input: ["text"],
-				cost: { input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 },
+				cost: META_MUSE_SPARK_CONTRIBUTOR_COST,
 				contextWindow: 1_048_576,
 				maxTokens: 131_072,
 				thinking: {

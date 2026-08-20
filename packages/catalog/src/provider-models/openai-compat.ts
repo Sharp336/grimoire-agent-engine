@@ -2626,22 +2626,27 @@ function openCodeModelManagerOptions(
 							fallbackName = `${fallbackName} (Free)`;
 						}
 						const name = toModelName(entry.name === entry.id ? undefined : entry.name, fallbackName);
+						const directRef = references.get(defaults.id);
 						// Pins win over bundled references (stale bundled routes
 						// must not stick), and a base-id pin covers its billing
 						// variants; the responses fallback covers gateway-first ids.
 						const api =
 							apiOverrides[defaults.id] ??
 							(base ? apiOverrides[base] : undefined) ??
-							reference?.api ??
+							directRef?.api ??
 							fallbackApi(defaults.id, base) ??
 							defaults.api;
 						const baseUrl = openCodeBaseUrlForApi(api, basePath);
 						if (!reference) {
 							return { ...defaults, name, api, baseUrl };
 						}
+						let input = reference.input;
+						if (defaults.id.includes("muse-spark")) {
+							input = ["text"];
+						}
 						let cost = reference.cost;
-						if (defaults.id.endsWith("-contributor")) {
-							cost = { input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 };
+						if (defaults.id.includes("muse-spark") && defaults.id.endsWith("-contributor")) {
+							cost = META_MUSE_SPARK_CONTRIBUTOR_COST;
 						} else if (defaults.id.endsWith("-free")) {
 							cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 						}
@@ -2651,6 +2656,7 @@ function openCodeModelManagerOptions(
 							name,
 							api,
 							baseUrl,
+							input,
 							cost,
 							contextWindow: toPositiveNumber(entry.context_length, reference.contextWindow),
 							maxTokens: toPositiveNumber(entry.max_completion_tokens, reference.maxTokens),
@@ -3945,7 +3951,8 @@ export function coreWeaveModelManagerOptions(
 // ---------------------------------------------------------------------------
 
 const META_MODEL_API_BASE_URL = "https://api.meta.ai/v1";
-const META_MUSE_SPARK_COST = { input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 } as const;
+export const META_MUSE_SPARK_COST = { input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 } as const;
+export const META_MUSE_SPARK_CONTRIBUTOR_COST = { input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 } as const;
 const META_MUSE_SPARK_THINKING: ThinkingConfig = {
 	mode: "effort",
 	efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
@@ -3994,7 +4001,7 @@ export const META_MUSE_STATIC_MODELS: readonly ModelSpec<"openai-responses">[] =
 		baseUrl: META_MODEL_API_BASE_URL,
 		reasoning: true,
 		input: ["text"],
-		cost: { input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 },
+		cost: META_MUSE_SPARK_CONTRIBUTOR_COST,
 		contextWindow: 1_048_576,
 		maxTokens: 131_072,
 		thinking: META_MUSE_SPARK_THINKING,
