@@ -160,6 +160,22 @@ describe("buildToolNamespacesInfo", () => {
 		});
 		expect(info.functions.functions.edit).toBeUndefined();
 	});
+	test("a direct wire alias wins its name regardless of registry order", () => {
+		const tools = [{ name: "edit", customWireName: "apply_patch" }, { name: "apply_patch" }];
+		const direct = new Set(["edit"]);
+		const forward = buildToolNamespacesInfo({ tools, directToolNames: direct });
+		const reversed = buildToolNamespacesInfo({ tools: [...tools].reverse(), directToolNames: direct });
+
+		for (const info of [forward, reversed]) {
+			expect(info.functions.functions.apply_patch).toEqual({
+				name: "apply_patch",
+				direct: true,
+				code_mode_name: "edit",
+				deferred: false,
+				source: { kind: "harness" },
+			});
+		}
+	});
 });
 
 describe("Code Mode session reconciliation", () => {
@@ -450,6 +466,25 @@ describe("Code Mode session reconciliation", () => {
 
 		expect(session.codeModeNamespacesInfo).toBeUndefined();
 		expect(session.getActiveToolNames()).toEqual(["eval", "read"]);
+	});
+
+	test("plan guidance keeps task delegation after Code Mode demotes the tool", async () => {
+		const { session } = createSession(
+			Settings.isolated({ "providers.openai-codex.codeMode": "on" }),
+			undefined,
+			undefined,
+			[tool("task")],
+		);
+		await session.setActiveToolsByName(["eval", "task"]);
+		expect(session.getActiveToolNames()).not.toContain("task");
+
+		session.setPlanModeState({ enabled: true, planFilePath: "local://PLAN.md" });
+		await session.sendPlanModeContext();
+
+		const planMessage = session.state.messages.find(
+			message => (message as { customType?: string }).customType === "plan-mode-context",
+		);
+		expect(String((planMessage as { content?: string })?.content)).toContain("`scout` subagents");
 	});
 });
 

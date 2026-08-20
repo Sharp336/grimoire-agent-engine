@@ -5257,15 +5257,17 @@ export class AgentSession {
 				: sessionPlanUrl;
 
 		const planExists = fs.existsSync(resolvedPlanPath);
-		const activeToolNames = this.getActiveToolNames();
+		// Capability gates, not the visible surface: a Code Mode partition keeps
+		// `task` and `ask` callable through the eval bridge after demoting them.
+		const capableToolNames = this.getEnabledToolNames();
 		const content = prompt.render(planModeActivePrompt, {
 			planFilePath: displayPlanPath,
 			planExists,
 			askToolName: "ask",
 			writeToolName: "write",
 			editToolName: "edit",
-			askAvailable: activeToolNames.includes("ask"),
-			taskAvailable: activeToolNames.includes("task"),
+			askAvailable: capableToolNames.includes("ask"),
+			taskAvailable: capableToolNames.includes("task"),
 			isHashlineEditMode: this.#resolveActiveEditMode() === "hashline",
 			reentry: state.reentry ?? false,
 			iterative: state.workflow === "iterative",

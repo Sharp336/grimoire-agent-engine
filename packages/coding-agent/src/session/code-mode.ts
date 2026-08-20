@@ -4,6 +4,8 @@
  * bridge, mirroring codex-rs ToolMode::CodeModeOnly.
  */
 
+import { logger } from "@oh-my-pi/pi-utils";
+
 /** Tool names that always stay directly model-visible under code mode. */
 export const CODE_MODE_KEEP_TOOLS: Record<string, true> = {
 	eval: true,
@@ -68,6 +70,19 @@ export function buildToolNamespacesInfo(args: {
 	for (const tool of args.tools) {
 		const direct = args.directToolNames.has(tool.name);
 		const wireName = direct ? (tool.customWireName ?? tool.name) : tool.name;
+		const existing = functions[wireName];
+		// A direct tool's wire alias can collide with another enabled tool's own
+		// name (built-in `edit` as `apply_patch` beside a literal `apply_patch`).
+		// One wire name can only denote one callable, so the direct exposure wins
+		// regardless of registry order rather than whichever tool came last.
+		if (existing && (existing.direct || !direct)) {
+			logger.warn("Code Mode wire name collision", {
+				wireName,
+				kept: existing.code_mode_name,
+				dropped: tool.name,
+			});
+			continue;
+		}
 		functions[wireName] = {
 			name: wireName,
 			direct,

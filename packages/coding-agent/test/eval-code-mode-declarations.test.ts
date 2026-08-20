@@ -80,7 +80,7 @@ test("EvalTool advertises only tools authorized for its bridge", () => {
 	expect(description).not.toContain("write(args:");
 });
 
-test("EvalTool description renders the Code Mode guidance and declarations block only when active", () => {
+test("EvalTool advertises bridged tool declarations only while Code Mode is active", () => {
 	const read = { name: "read", parameters: type({ path: "string" }) };
 	const baseSession = {
 		cwd: "/tmp",
@@ -94,21 +94,18 @@ test("EvalTool description renders the Code Mode guidance and declarations block
 		...baseSession,
 		settings: Settings.isolated({ "providers.openai-codex.codeMode": "on" }),
 	} as unknown as ToolSession).description;
-	expect(active).toContain("Codex Code Mode is active");
-	expect(active).toContain("exec tool declarations:");
 	expect(active).toContain("declare const tool: {");
-	expect(active).toContain("  read(args:");
-	expect(active).toContain("parallel([() => tool.");
+	expect(active).toContain("read(args:");
 
 	const inactive = new EvalTool({
 		...baseSession,
 		settings: Settings.isolated({ "providers.openai-codex.codeMode": "off" }),
 	} as unknown as ToolSession).description;
-	expect(inactive).not.toContain("Codex Code Mode is active");
-	expect(inactive).not.toContain("exec tool declarations:");
+	expect(inactive).not.toContain("declare const tool");
+	expect(inactive).not.toContain("read(args:");
 });
 
-test("EvalTool omits JavaScript Code Mode guidance when the JS backend is disabled", () => {
+test("EvalTool omits bridged tool declarations when the JS backend is disabled", () => {
 	const read = { name: "read", parameters: type({ path: "string" }) };
 	const session = {
 		cwd: "/tmp",
@@ -124,5 +121,5 @@ test("EvalTool omits JavaScript Code Mode guidance when the JS backend is disabl
 		getEvalBridgeToolNames: () => ["eval", "read"],
 	} as unknown as ToolSession;
 
-	expect(new EvalTool(session).description).not.toContain("Codex Code Mode is active");
+	expect(new EvalTool(session).description).not.toContain("declare const tool");
 });
