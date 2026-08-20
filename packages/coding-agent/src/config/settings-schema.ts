@@ -4884,12 +4884,13 @@ export const SETTINGS_SCHEMA = {
 
 	"task.showResolvedModelBadge": {
 		type: "boolean",
-		default: false,
+		default: true,
 		ui: {
 			tab: "appearance",
 			group: "Display",
 			label: "Show Resolved Model Badge",
-			description: "Display the actual model ID used by each subagent in the task widget status line",
+			description:
+				"Show each subagent's resolved provider/model after its context gauge in the task widget, marked with the advisor icon when a live advisor watches it",
 		},
 	},
 

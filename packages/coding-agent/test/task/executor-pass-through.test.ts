@@ -221,6 +221,38 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(persistedInits[0]).toMatchObject({ restrictToolNames: true, tools: ["read", "yield"] });
 	});
 
+	it("marks the child advised on progress and the settled result when its session has a live advisor", async () => {
+		const session = yieldEmittingSession();
+		Object.assign(session, { isAdvisorActive: () => true });
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+		const advisedFlags: Array<boolean | undefined> = [];
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "advised-child",
+			onProgress: progress => advisedFlags.push(progress.advisor),
+		});
+
+		expect(result.exitCode).toBe(0);
+		// The marker rides progress so a running row can mark the child before it settles,
+		// and again on the result so a rebuilt transcript keeps it.
+		expect(advisedFlags).toContain(true);
+		expect(result.advisor).toBe(true);
+	});
+
+	it("leaves the child unmarked when its session reports no live advisor", async () => {
+		const session = yieldEmittingSession();
+		Object.assign(session, { isAdvisorActive: () => false });
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		const result = await runSubprocess({ ...baseOptions, id: "unadvised-child" });
+
+		expect(result.exitCode).toBe(0);
+		// `advisor.enabled` alone is not enough: an advisor role that resolves to no model
+		// leaves no runtime to mark, so the badge must stay bare.
+		expect(result.advisor).toBeUndefined();
+	});
+
 	it("retains inherited MCP proxy tools for normal children", async () => {
 		const session = yieldEmittingSession();
 		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));

@@ -434,6 +434,12 @@ export interface AgentProgress {
 	resolvedModel?: string;
 	/** True when {@link resolvedModel} is the target of an active retry fallback (not the originally configured model). Lets observer-only UIs (collab guests, Agent Hub rows with no live session) flag the fallback and keep the provider. */
 	resolvedModelIsFallback?: boolean;
+	/**
+	 * True when a live advisor is attached to this child's session — `advisor.enabled`
+	 * for the spawn AND a resolvable advisor-role model, i.e. the runtime exists rather
+	 * than merely the setting. Marks the model badge with `theme.icon.advisor`.
+	 */
+	advisor?: boolean;
 	/** Data extracted by registered subprocess tool handlers (keyed by tool name) */
 	extractedToolData?: Record<string, unknown[]>;
 	/**
@@ -505,6 +511,8 @@ export interface SingleResult {
 	resolvedModel?: string;
 	/** True when {@link resolvedModel} is the target of an active retry fallback. Mirrors {@link AgentProgress.resolvedModelIsFallback} onto the settled result. */
 	resolvedModelIsFallback?: boolean;
+	/** True when a live advisor watched this child's turns. Mirrors {@link AgentProgress.advisor} onto the settled result. */
+	advisor?: boolean;
 	error?: string;
 	aborted?: boolean;
 	abortReason?: string;

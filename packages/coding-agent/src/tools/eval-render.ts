@@ -142,7 +142,10 @@ function agentEventStatus(value: unknown): AgentEventStatus {
 	}
 }
 
-/** Append the toolCount · context · cost · model stat run, mirroring the task tool. */
+/** Display cells budgeted for the resolved-model badge, advisor marker included. */
+const MODEL_BADGE_WIDTH = 30;
+
+/** Append the toolCount · context · model · cost stat run, mirroring the task tool. */
 function formatAgentStats(event: EvalStatusEvent, theme: Theme): string {
 	let line = "";
 	const toolCount = eventNumber(event.toolCount);
@@ -158,13 +161,15 @@ function formatAgentStats(event: EvalStatusEvent, theme: Theme): string {
 				: formatNumber(contextTokens);
 		line += `${theme.sep.dot}${theme.fg("dim", ctx)}`;
 	}
+	const model = eventString(event.model);
+	if (model && settings.get("task.showResolvedModelBadge")) {
+		const advisorMark = event.advisor === true && theme.icon.advisor ? ` ${theme.icon.advisor}` : "";
+		const badge = truncateToWidth(replaceTabs(model), MODEL_BADGE_WIDTH - Bun.stringWidth(advisorMark));
+		line += `${theme.sep.dot}${theme.fg("dim", `${badge}${advisorMark}`)}`;
+	}
 	const cost = eventNumber(event.cost);
 	if (cost > 0) {
 		line += `${theme.sep.dot}${theme.fg("statusLineCost", `$${cost.toFixed(2)}`)}`;
-	}
-	const model = eventString(event.model);
-	if (model && settings.get("task.showResolvedModelBadge")) {
-		line += `${theme.sep.dot}${theme.fg("dim", truncateToWidth(replaceTabs(model), 30))}`;
 	}
 	return line;
 }

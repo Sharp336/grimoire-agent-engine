@@ -160,6 +160,7 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 		const current = session.asyncJobManager?.getJob(j.id);
 		const latest = current ?? j;
 		let resolvedModel: string | undefined;
+		let advisor = false;
 		if (latest.type === "task") {
 			const progressValue = latest.latestDetails?.progress;
 			if (Array.isArray(progressValue)) {
@@ -178,6 +179,7 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 					const trimmed = modelValue.trim();
 					if (trimmed) resolvedModel = trimmed;
 				}
+				advisor = progressRecord?.advisor === true;
 			}
 		}
 		return {
@@ -186,7 +188,7 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 			status: latest.status as JobSnapshot["status"],
 			label: latest.label,
 			durationMs: Math.max(0, now - latest.startTime),
-			...(resolvedModel ? { resolvedModel } : {}),
+			...(resolvedModel ? { resolvedModel, ...(advisor ? { advisor: true } : {}) } : {}),
 			...(latest.resultText ? { resultText: latest.resultText } : {}),
 			...(latest.errorText ? { errorText: latest.errorText } : {}),
 		};
@@ -642,18 +644,20 @@ export function jobsRenderResult(
 							visibleLabelLines[visibleLabelLines.length - 1] = `${last} …`;
 						}
 						const durationText = uiTheme.fg("dim", formatDuration(job.durationMs));
+						const advisorMark = job.advisor === true && uiTheme.icon.advisor ? ` ${uiTheme.icon.advisor}` : "";
 						const modelText =
 							job.type === "task" &&
 							typeof job.resolvedModel === "string" &&
 							job.resolvedModel.trim() &&
 							settings.get("task.showResolvedModelBadge")
-								? `${uiTheme.sep.dot}${uiTheme.fg(
+								? // The advisor marker is budgeted before truncating so it cannot be the clipped cell.
+									`${uiTheme.sep.dot}${uiTheme.fg(
 										"dim",
-										truncateToWidth(
+										`${truncateToWidth(
 											replaceTabs(job.resolvedModel.trim()),
-											MODEL_BADGE_MAX_WIDTH,
+											MODEL_BADGE_MAX_WIDTH - Bun.stringWidth(advisorMark),
 											Ellipsis.Unicode,
-										),
+										)}${advisorMark}`,
 									)}`
 								: "";
 						// Running rows in a live block shimmer their label; once the block

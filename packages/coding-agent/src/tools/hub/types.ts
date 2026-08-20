@@ -49,6 +49,8 @@ export interface JobSnapshot {
 	durationMs: number;
 	/** Effective task model selector, including an explicit reasoning suffix when configured. */
 	resolvedModel?: string;
+	/** A live advisor watched this task job's turns — marks the model badge. */
+	advisor?: boolean;
 	resultText?: string;
 	errorText?: string;
 }
