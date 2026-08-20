@@ -15,6 +15,13 @@ type MCPToolCachePayload = {
 	version: number;
 	configHash: string;
 	tools: MCPToolDefinition[];
+	requiresConnection?: boolean;
+};
+
+export type MCPToolCacheEntry = {
+	tools: MCPToolDefinition[];
+	/** `null` means the cache predates capability metadata and needs one handshake. */
+	requiresConnection: boolean | null;
 };
 
 function stableClone(value: unknown): unknown {
@@ -58,6 +65,10 @@ export class MCPToolCache {
 	constructor(private storage: AgentStorage) {}
 
 	async get(serverName: string, config: MCPServerConfig): Promise<MCPToolDefinition[] | null> {
+		return (await this.getEntry(serverName, config))?.tools ?? null;
+	}
+
+	async getEntry(serverName: string, config: MCPServerConfig): Promise<MCPToolCacheEntry | null> {
 		const key = cacheKey(serverName);
 		const raw = this.storage.getCache(key);
 		if (!raw) return null;
@@ -74,6 +85,7 @@ export class MCPToolCache {
 		if (parsed.version !== CACHE_VERSION) return null;
 		if (typeof parsed.configHash !== "string") return null;
 		if (!Array.isArray(parsed.tools)) return null;
+		if (parsed.requiresConnection !== undefined && typeof parsed.requiresConnection !== "boolean") return null;
 
 		let currentHash: string;
 		try {
@@ -85,10 +97,18 @@ export class MCPToolCache {
 
 		if (parsed.configHash !== currentHash) return null;
 
-		return parsed.tools as MCPToolDefinition[];
+		return {
+			tools: parsed.tools as MCPToolDefinition[],
+			requiresConnection: parsed.requiresConnection ?? null,
+		};
 	}
 
-	async set(serverName: string, config: MCPServerConfig, tools: MCPToolDefinition[]): Promise<void> {
+	async set(
+		serverName: string,
+		config: MCPServerConfig,
+		tools: MCPToolDefinition[],
+		requiresConnection = false,
+	): Promise<void> {
 		let configHash: string;
 		try {
 			configHash = await hashConfig(config);
@@ -101,6 +121,7 @@ export class MCPToolCache {
 			version: CACHE_VERSION,
 			configHash,
 			tools,
+			requiresConnection,
 		};
 
 		let serialized: string;

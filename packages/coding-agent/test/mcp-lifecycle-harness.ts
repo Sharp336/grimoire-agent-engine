@@ -52,6 +52,10 @@ export interface LazyConfigOptions {
 	crashBeforeInit?: boolean;
 	/** Delay each `tools/call` response by this many ms (hold a call in-flight). */
 	callDelayMs?: number;
+	/** Make the fixture expose prompt capability through prompts/list and prompts/get. */
+	advertisePrompts?: boolean;
+	/** Advertise prompt capability while returning an empty current prompt list. */
+	emptyPrompts?: boolean;
 }
 
 export function lazyConfig(options: LazyConfigOptions = {}): MCPStdioServerConfig {
@@ -59,6 +63,8 @@ export function lazyConfig(options: LazyConfigOptions = {}): MCPStdioServerConfi
 	if (options.spawnLog) env.MCP_SPAWN_LOG = options.spawnLog;
 	if (options.crashBeforeInit) env.MCP_CRASH_BEFORE_INIT = "1";
 	if (options.callDelayMs) env.MCP_CALL_DELAY_MS = String(options.callDelayMs);
+	if (options.advertisePrompts) env.MCP_ADVERTISE_PROMPTS = "1";
+	if (options.emptyPrompts) env.MCP_EMPTY_PROMPTS = "1";
 
 	const config: MCPStdioServerConfig = { type: "stdio", command: BUN, args: [FIXTURE] };
 	if (options.lifecycle) config.lifecycle = options.lifecycle;

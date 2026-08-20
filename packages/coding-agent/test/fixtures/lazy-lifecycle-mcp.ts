@@ -10,6 +10,8 @@
  *   MCP_CRASH_BEFORE_INIT="1"  exit(1) before speaking MCP, so the connect fails.
  *   MCP_CALL_DELAY_MS   delay each `tools/call` response by this many ms, used to
  *                       hold a call in-flight across an idle window.
+ *   MCP_ADVERTISE_PROMPTS="1" advertise prompt capability.
+ *   MCP_EMPTY_PROMPTS="1"     return no current prompts from prompts/list.
  *
  * Speaks newline-delimited JSON-RPC 2.0 (the wire format of `StdioTransport`),
  * same shape as `many-tools-mcp.ts`. Exported constants are imported by tests;
@@ -34,7 +36,10 @@ function buildResult(method: string): Record<string, unknown> {
 			return {
 				protocolVersion: "2025-03-26",
 				serverInfo: { name: "lazy-lifecycle-fixture", version: "1.0.0" },
-				capabilities: { tools: {} },
+				capabilities: {
+					tools: {},
+					...(process.env.MCP_ADVERTISE_PROMPTS === "1" ? { prompts: {} } : {}),
+				},
 			};
 		case "tools/list":
 			return {
@@ -48,6 +53,15 @@ function buildResult(method: string): Record<string, unknown> {
 			};
 		case "tools/call":
 			return { content: [{ type: "text", text: "pong" }] };
+		case "prompts/list":
+			return {
+				prompts: process.env.MCP_EMPTY_PROMPTS === "1" ? [] : [{ name: "hello", description: "Fixture prompt" }],
+			};
+		case "prompts/get":
+			return {
+				description: "Fixture prompt",
+				messages: [{ role: "user", content: { type: "text", text: "hello" } }],
+			};
 		default:
 			return {};
 	}
