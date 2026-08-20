@@ -655,6 +655,25 @@ export function requestRpcDialog<T>(
 	output({ type: "extension_ui_request", id, ...request } as RpcExtensionUIRequest);
 	return promise;
 }
+
+/** Emit a legacy RPC widget frame without interactive-only sidebar placement. */
+export function emitRpcWidgetRequest(
+	output: (frame: RpcExtensionUIRequest | object) => void,
+	key: string,
+	lines: string[] | undefined,
+	options?: ExtensionWidgetOptions,
+): void {
+	const widgetPlacement = options?.placement === "rightSidebar" ? undefined : options?.placement;
+	const request: RpcExtensionUIRequest = {
+		type: "extension_ui_request",
+		id: Snowflake.next() as string,
+		method: "setWidget",
+		widgetKey: key,
+		widgetLines: lines,
+		...(widgetPlacement === undefined ? {} : { widgetPlacement }),
+	};
+	output(request);
+}
 /**
  * Run in RPC mode.
  * Listens for JSON commands on stdin, outputs events and responses on stdout.
@@ -824,14 +843,7 @@ export async function runRpcMode(
 		setWidget(key: string, content: unknown, options?: ExtensionWidgetOptions): void {
 			// Only support string arrays in RPC mode - factory functions are ignored
 			if (content === undefined || Array.isArray(content)) {
-				this.output({
-					type: "extension_ui_request",
-					id: Snowflake.next() as string,
-					method: "setWidget",
-					widgetKey: key,
-					widgetLines: content as string[] | undefined,
-					widgetPlacement: options?.placement,
-				} as RpcExtensionUIRequest);
+				emitRpcWidgetRequest(this.output, key, content as string[] | undefined, options);
 			}
 			// Component factories are not supported in RPC mode - would need TUI access
 		}

@@ -61,15 +61,23 @@ describe("ExtensionUiController rightSidebar widgets", () => {
 		const { controller, mounted } = createController();
 		controller.setHookWidget("a", ["A"], {
 			placement: "rightSidebar",
-			width: 40,
+			width: 46,
 			minWidth: 24,
 			minMainWidth: 60,
 		});
-		controller.setHookWidget("b", ["B"], rightSidebarDefaults);
+		controller.setHookWidget("b", ["B"], {
+			placement: "rightSidebar",
+			minWidth: 30,
+			minMainWidth: 70,
+		});
 
-		expect(mounted.at(-1)?.options).toEqual({ width: 44, minWidth: 28, minMainWidth: 64 });
-		const lines = mounted.at(-1)?.component?.render(43) ?? [];
-		expect(lines.findIndex(line => line.includes("A"))).toBeLessThan(lines.findIndex(line => line.includes("B")));
+		expect(mounted.at(-1)?.options).toEqual({ width: 46, minWidth: 30, minMainWidth: 70 });
+		const lines = mounted.at(-1)?.component?.render(45) ?? [];
+		const aIndex = lines.findIndex(line => line.includes("A"));
+		const bIndex = lines.findIndex(line => line.includes("B"));
+		expect(aIndex).toBeGreaterThanOrEqual(0);
+		expect(bIndex).toBeGreaterThanOrEqual(0);
+		expect(aIndex).toBeLessThan(bIndex);
 	});
 
 	it("removes and disposes only the matching key, then unmounts the final key", () => {
