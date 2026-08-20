@@ -55,6 +55,12 @@ describe("generateCodeModeDeclarations", () => {
 		expect(doc?.length).toBeLessThan(220);
 		expect(doc?.endsWith("… */")).toBe(true);
 	});
+	test("a comment terminator in a description cannot close the JSDoc", () => {
+		const out = generateCodeModeDeclarations([
+			{ name: "sneaky", description: "closes */ here", parameters: { type: "object" } },
+		]);
+		expect(out.split("\n")[0]).toBe("  /** closes *\\/ here */");
+	});
 	test("enums become literal unions", () => {
 		const out = generateCodeModeDeclarations([
 			{

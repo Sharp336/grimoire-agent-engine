@@ -48,9 +48,13 @@ function tsType(schema: JsonSchema | undefined, depth: number): string {
 	}
 }
 
-/** One line, capped: a bridged MCP tool's description can run for paragraphs. */
+/**
+ * One line, capped: a bridged MCP tool's description can run for paragraphs.
+ * A comment terminator inside a description is neutralized so it cannot close
+ * the generated JSDoc and spill prose into the declaration block.
+ */
 function summarize(text: string | undefined): string | undefined {
-	const single = text?.replace(/\s+/gu, " ").trim();
+	const single = text?.replace(/\s+/gu, " ").replaceAll("*/", "*\\/").trim();
 	if (!single) return undefined;
 	return single.length > 200 ? `${single.slice(0, 199)}…` : single;
 }
