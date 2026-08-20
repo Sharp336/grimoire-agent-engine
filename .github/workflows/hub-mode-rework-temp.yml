@@ -1,0 +1,335 @@
+name: Hub Mode Rework Temp
+
+on:
+  push:
+    branches: [hub-model-surface]
+
+permissions:
+  contents: write
+
+jobs:
+  rework:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: hub-model-surface
+          fetch-depth: 0
+
+      - uses: ./.github/actions/bun-install
+
+      - name: Rework Hub into compact/full modes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+
+          # Start from the official-source versions on our release base, then apply
+          # only the configuration/surface changes needed by this fork.
+          git checkout origin/main -- \
+            .github/workflows/fork-release.yml \
+            packages/coding-agent/src/config/settings-schema.ts \
+            packages/coding-agent/src/prompts/tools/hub.md \
+            packages/coding-agent/src/prompts/tools/task.md \
+            packages/coding-agent/src/task/index.ts \
+            packages/coding-agent/src/tools/index.ts \
+            packages/coding-agent/src/tools/hub/index.ts \
+            packages/coding-agent/src/tools/hub/jobs.ts
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one match, got {count}: {old[:100]!r}")
+              p.write_text(text.replace(old, new, 1))
+
+          # 1) Config: one enum, default compact. Config-file/CLI visible, no extra UI surface.
+          replace_once(
+              "packages/coding-agent/src/config/settings-schema.ts",
+              'setupVersion: { type: "number", default: 0 },\n',
+              'setupVersion: { type: "number", default: 0 },\n\n'
+              '\t"hub.mode": {\n'
+              '\t\ttype: "enum",\n'
+              '\t\tvalues: ["compact", "full"] as const,\n'
+              '\t\tdefault: "compact",\n'
+              '\t},\n',
+          )
+
+          # 2) Export the upstream schema unchanged so CompactHubTool can derive from it.
+          replace_once(
+              "packages/coding-agent/src/tools/hub/index.ts",
+              "const hubSchema = type({\n",
+              "export const hubSchema = type({\n",
+          )
+
+          # 3) Tool factory picks the model surface. Compact Hub no longer depends on IRC availability.
+          replace_once(
+              "packages/coding-agent/src/tools/index.ts",
+              'import { HubTool, isIrcEnabled } from "./hub";\n',
+              'import { createHubTool, isIrcEnabled } from "./hub";\n',
+          )
+          replace_once(
+              "packages/coding-agent/src/tools/index.ts",
+              '\thub: s => new HubTool(s),\n',
+              '\thub: createHubTool,\n',
+          )
+          replace_once(
+              "packages/coding-agent/src/tools/index.ts",
+              '''\t\tif (name === "hub") {\n\t\t\treturn (\n\t\t\t\t!restrictToolNames && session.enableIrc !== false && isIrcEnabled(session.settings, session.taskDepth ?? 0)\n\t\t\t);\n\t\t}\n''',
+              '''\t\tif (name === "hub") {\n\t\t\tif (restrictToolNames) return false;\n\t\t\tif (session.settings.get("hub.mode") === "full") {\n\t\t\t\treturn session.enableIrc !== false && isIrcEnabled(session.settings, session.taskDepth ?? 0);\n\t\t\t}\n\t\t\treturn session.settings.get("async.enabled") || session.settings.get("launch.enabled");\n\t\t}\n''',
+          )
+
+          # 4) Task's *model-facing* IRC guidance follows hub.mode. Runtime IRC plumbing stays upstream.
+          replace_once(
+              "packages/coding-agent/src/task/index.ts",
+              '\t\t\tircEnabled: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),\n',
+              '\t\t\tircEnabled: this.#isPeerMessagingVisible(),\n',
+          )
+          replace_once(
+              "packages/coding-agent/src/task/index.ts",
+              '\t#isBatchEnabled(): boolean {\n\t\treturn this.session.settings.get("task.batch");\n\t}\n',
+              '\t#isBatchEnabled(): boolean {\n\t\treturn this.session.settings.get("task.batch");\n\t}\n\n'
+              '\t#isPeerMessagingVisible(): boolean {\n'
+              '\t\treturn (\n'
+              '\t\t\tthis.session.settings.get("hub.mode") === "full" &&\n'
+              '\t\t\tthis.session.enableIrc !== false &&\n'
+              '\t\t\tisIrcEnabled(this.session.settings, this.session.taskDepth ?? 0)\n'
+              '\t\t);\n'
+              '\t}\n',
+          )
+          replace_once(
+              "packages/coding-agent/src/task/index.ts",
+              '\t\tconst ircEnabled = isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0);\n',
+              '\t\tconst ircEnabled = this.#isPeerMessagingVisible();\n',
+          )
+
+          # 5) Job result guidance is full-mode aware; job control behavior is unchanged.
+          replace_once(
+              "packages/coding-agent/src/tools/hub/jobs.ts",
+              'function describeAgents(agents: AgentActivitySnapshot[]): string[] {\n',
+              'function describeAgents(session: ToolSession, agents: AgentActivitySnapshot[]): string[] {\n',
+          )
+          replace_once(
+              "packages/coding-agent/src/tools/hub/jobs.ts",
+              '\tlines.push("", "These agents have no job entry; message them via `hub` send, transcripts at `history://<id>`.");\n',
+              '\tlines.push(\n'
+              '\t\t"",\n'
+              '\t\tsession.settings.get("hub.mode") === "full"\n'
+              '\t\t\t? "These agents have no job entry; message them via `hub` send, transcripts at `history://<id>`."\n'
+              '\t\t\t: "These agents have no job entry; inspect transcripts at `history://<id>` or cancel an owned child with `hub` cancel.",\n'
+              '\t);\n',
+          )
+          # All call sites are internal to this file.
+          p = Path("packages/coding-agent/src/tools/hub/jobs.ts")
+          text = p.read_text().replace("describeAgents(agents)", "describeAgents(session, agents)")
+          old = '''\t\tlines.push(\n\t\t\tref.status === "running"\n\t\t\t\t? `- \\`${id}\\` is a running agent with no job entry — message it via \\`hub\\` send; transcript at history://${id}`\n\t\t\t\t: `- \\`${id}\\` is a ${ref.status} agent (its job is gone) — transcript at history://${id}`,\n\t\t);\n'''
+          new = '''\t\tlines.push(\n\t\t\tref.status === "running"\n\t\t\t\t? session.settings.get("hub.mode") === "full"\n\t\t\t\t\t? `- \\`${id}\\` is a running agent with no job entry — message it via \\`hub\\` send; transcript at history://${id}`\n\t\t\t\t\t: `- \\`${id}\\` is a running agent with no job entry — transcript at history://${id}`\n\t\t\t\t: `- \\`${id}\\` is a ${ref.status} agent (its job is gone) — transcript at history://${id}`,\n\t\t);\n'''
+          if text.count(old) != 1:
+              raise SystemExit("jobs.ts: running-agent guidance anchor mismatch")
+          p.write_text(text.replace(old, new, 1))
+
+          # 6) Release workflow now accepts direct source/config changes and never applies a build-time patch.
+          p = Path(".github/workflows/fork-release.yml")
+          text = p.read_text()
+          text = text.replace(
+              "            ':(exclude)scripts/apply-fork-patches.ts')",
+              "            ':(exclude)packages/coding-agent/src/config/settings-schema.ts' \\\n"
+              "            ':(exclude)packages/coding-agent/src/task/index.ts' \\\n"
+              "            ':(exclude)packages/coding-agent/src/tools/index.ts' \\\n"
+              "            ':(exclude)packages/coding-agent/src/tools/hub/index.ts' \\\n"
+              "            ':(exclude)packages/coding-agent/src/tools/hub/compact.ts' \\\n"
+              "            ':(exclude)packages/coding-agent/src/tools/hub/jobs.ts' \\\n"
+              "            ':(exclude)packages/coding-agent/src/prompts/tools/hub-compact.md' \\\n"
+              "            ':(exclude)packages/coding-agent/test/tools/hub-mode.test.ts')",
+          )
+          start = text.find("      - name: Apply minimal downstream Hub patch\n")
+          end = text.find("      - name: Run official TypeScript and release-script checks\n")
+          if start == -1 or end == -1 or end <= start:
+              raise SystemExit("release workflow: validate patch step anchors not found")
+          text = text[:start] + text[end:]
+          start = text.find("      - name: Apply minimal downstream Hub patch\n", text.find("  build:\n"))
+          end = text.find("      - name: Install official precompiled native artifact\n", start)
+          if start == -1 or end == -1 or end <= start:
+              raise SystemExit("release workflow: build patch step anchors not found")
+          text = text[:start] + text[end:]
+          text = text.replace(
+              "            Changes are limited to the fork release workflow and a build-time patch that removes Hub peer messaging while retaining task creation, background-job control, and supervised long-running processes. This workflow does not compile Rust.",
+              "            This fork defaults `hub.mode` to `compact`, exposing parent-side asynchronous job control and supervised long-running processes without peer-agent messaging in the model context. Set `hub.mode: full` to restore the upstream full Hub surface without rebuilding. The upstream Hub/IRC runtime remains intact. This workflow does not compile Rust.",
+          )
+          p.write_text(text)
+          PY
+
+          cat > packages/coding-agent/src/prompts/tools/hub-compact.md <<'EOF'
+          Parent-side orchestration for background jobs and supervised long-running processes.
+
+          # Background Jobs
+
+          Background jobs auto-deliver when they finish. You NEVER need to poll; if `jobs`/`wait` observes a settled job first, that snapshot is the delivery and suppresses duplicate `async-result`.
+
+          - **`wait`**: use only when blocked with no other work. Bare `wait` watches all running jobs; `ids` narrows to specific jobs.
+          - **`jobs`**: status snapshot of background jobs without waiting.
+          - **`cancel`**: cancel owned background jobs or child agents by `ids`.
+          - Job IDs are process-local and expire roughly five minutes after settlement. Use `agent://<id>` or `history://<id>` for retained subagent output.
+          - `completed` means successful yield/job exit, not artifact acceptance. Verify claimed changes.
+
+          # Processes
+
+          Project-scoped long-running processes shared by every omp instance in the same directory. A long-running service, watcher, debugger, REPL, or process needing later input MUST use `op:"start"`, not `bash`.
+
+          - **`start`** launches `application` + `args` directly. `cwd` defaults to the session directory; `pty` defaults true.
+          - **`ps`**, **`logs`**, **`wait`** (with `name`), **`send`** (with `name`), **`stop`**, **`restart`**, and **`describe`** address the stable process `name`.
+          - **`logs`** defaults to the last 100 lines. `head: true` reads the beginning. `grep` is a regex. `follow: true` waits for output after `cursor`.
+          - **`wait`** with `name` blocks until readiness/exit/`pattern` or `timeout` (seconds).
+          - **`send`** with `name` writes stdin, terminal keys, or a process-tree signal.
+          - **`stop`** performs graceful process-tree termination before hard-kill; **`restart`** reuses the retained launch spec.
+          EOF
+
+          cat > packages/coding-agent/src/tools/hub/compact.ts <<'EOF'
+          import { type } from "@oh-my-pi/omptype";
+          import type {
+            AgentTool,
+            AgentToolContext,
+            AgentToolResult,
+            AgentToolUpdateCallback,
+          } from "@oh-my-pi/pi-agent-core";
+          import type { ToolExample } from "@oh-my-pi/pi-ai";
+          import { prompt } from "@oh-my-pi/pi-utils";
+          import compactHubDescription from "../../prompts/tools/hub-compact.md" with { type: "text" };
+          import type { ToolSession } from "..";
+          import { HubTool, hubSchema } from ".";
+          import type { HubDetails } from "./types";
+
+          export const compactHubSchema = hubSchema
+            .omit("op", "to", "message", "replyTo", "await", "from", "timeoutMs", "peek")
+            .and({
+              op: type(
+                "'send' | 'wait' | 'jobs' | 'cancel' | 'start' | 'ps' | 'logs' | 'stop' | 'restart' | 'describe'",
+              ).describe("hub operation"),
+              "timeoutMs?": type("number").describe("wait (jobs): timeout in milliseconds (0 waits indefinitely)"),
+            });
+
+          type CompactHubParams = typeof compactHubSchema.infer;
+
+          /**
+           * Model-facing compact Hub. Runtime execution is delegated to the
+           * upstream full HubTool so this mode changes visibility, not behavior.
+           */
+          export class CompactHubTool implements AgentTool<typeof compactHubSchema, HubDetails> {
+            readonly name = "hub";
+            readonly label = "Hub";
+            readonly summary = "Control background jobs and supervise long-running processes";
+            readonly description = prompt.render(compactHubDescription);
+            readonly parameters = compactHubSchema;
+            readonly strict = true;
+            readonly loadMode = "essential";
+            readonly approval = this.delegate.approval;
+            readonly interruptible = (params: Partial<CompactHubParams>): boolean => {
+              if (params.op === "wait") return true;
+              return params.op === "logs" && params.follow === true;
+            };
+            readonly examples: readonly ToolExample<typeof compactHubSchema.infer>[] = [
+              { caption: "Wait for the first background job to settle", call: { op: "wait" } },
+              { caption: "Cancel a hung background job", call: { op: "cancel", ids: ["task_a1b2c3"] } },
+              { caption: "Snapshot every background job without waiting", call: { op: "jobs" } },
+              {
+                caption: "Start a dev server and wait for readiness",
+                call: { op: "start", name: "web", application: "bun", args: ["run", "dev"], ready: { port: 5173 } },
+              },
+              { caption: "Follow process output", call: { op: "logs", name: "web", follow: true, timeout: 30 } },
+              { caption: "Send input to a process", call: { op: "send", name: "debugger", text: "continue" } },
+              { caption: "Wait for a process to exit", call: { op: "wait", name: "web", for: "exit", timeout: 30 } },
+            ];
+
+            private readonly delegate: HubTool;
+
+            constructor(session: ToolSession) {
+              this.delegate = new HubTool(session);
+            }
+
+            execute(
+              toolCallId: string,
+              params: CompactHubParams,
+              signal?: AbortSignal,
+              onUpdate?: AgentToolUpdateCallback<HubDetails>,
+              context?: AgentToolContext,
+            ): Promise<AgentToolResult<HubDetails>> {
+              return this.delegate.execute(toolCallId, params, signal, onUpdate, context);
+            }
+          }
+
+          export function createHubTool(session: ToolSession): HubTool | CompactHubTool {
+            return session.settings.get("hub.mode") === "full" ? new HubTool(session) : new CompactHubTool(session);
+          }
+          EOF
+
+          # Export compact factory without changing the upstream runtime module shape more than necessary.
+          printf '\nexport { CompactHubTool, compactHubSchema, createHubTool } from "./compact";\n' >> packages/coding-agent/src/tools/hub/index.ts
+
+          cat > packages/coding-agent/test/tools/hub-mode.test.ts <<'EOF'
+          import { describe, expect, test } from "bun:test";
+          import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+          import { CompactHubTool, HubTool, createHubTool } from "@oh-my-pi/pi-coding-agent/tools/hub";
+
+          function sessionWithMode(mode: "compact" | "full"): ToolSession {
+            return {
+              settings: { get: (key: string) => (key === "hub.mode" ? mode : undefined) } as unknown as ToolSession["settings"],
+            } as ToolSession;
+          }
+
+          describe("fork hub.mode", () => {
+            test("defaults/selects compact and can select full without rebuilding", () => {
+              expect(createHubTool(sessionWithMode("compact"))).toBeInstanceOf(CompactHubTool);
+              expect(createHubTool(sessionWithMode("full"))).toBeInstanceOf(HubTool);
+            });
+
+            test("compact hides peer messaging while keeping jobs and process control", () => {
+              const tool = new CompactHubTool(sessionWithMode("compact"));
+              const expression = tool.parameters.expression;
+              for (const visible of ["send", "wait", "jobs", "cancel", "start", "ps", "logs", "stop", "restart", "describe"]) {
+                expect(expression).toMatch(new RegExp(`\\b${visible}\\b`));
+              }
+              for (const hidden of ["list", "inbox", "to", "message", "replyTo", "await", "from", "peek"]) {
+                expect(expression).not.toMatch(new RegExp(`\\b${hidden}\\b`));
+              }
+              expect(`${tool.summary}\n${tool.description}`).not.toContain("peer");
+            });
+
+            test("full exposes the upstream messaging surface", () => {
+              const tool = new HubTool(sessionWithMode("full"));
+              const expression = tool.parameters.expression;
+              for (const visible of ["list", "inbox", "to", "message", "replyTo", "await", "from", "peek"]) {
+                expect(expression).toMatch(new RegExp(`\\b${visible}\\b`));
+              }
+              expect(tool.description).toContain("Messaging & Jobs");
+            });
+          });
+          EOF
+
+          # Remove the obsolete static-surface regression test and the old patch script.
+          rm -f packages/coding-agent/test/tools/hub-model-surface.test.ts scripts/apply-fork-patches.ts
+
+          # Format exactly the TypeScript files touched by this rework.
+          bunx biome format --write \
+            packages/coding-agent/src/config/settings-schema.ts \
+            packages/coding-agent/src/task/index.ts \
+            packages/coding-agent/src/tools/index.ts \
+            packages/coding-agent/src/tools/hub/index.ts \
+            packages/coding-agent/src/tools/hub/compact.ts \
+            packages/coding-agent/src/tools/hub/jobs.ts \
+            packages/coding-agent/test/tools/hub-mode.test.ts
+
+          git diff --check
+
+          # The helper workflow must never become part of the fork delta.
+          git rm .github/workflows/hub-mode-rework-temp.yml
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fork: make Hub surface configurable"
+          git push origin HEAD:hub-model-surface
