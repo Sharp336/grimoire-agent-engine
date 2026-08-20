@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `omp update --registry` and `OMP_UPDATE_REGISTRY` — point the update check and install at an internal npm mirror (Artifactory, Nexus, Verdaccio) when the official registry is unreachable ([#9114](https://github.com/can1357/oh-my-pi/issues/9114)).
+
 ## [17.4.0] - 2026-08-20
 
 ### Added

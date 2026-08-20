@@ -14,8 +14,10 @@ import {
 	buildNpmInstallArgs,
 	buildRenameCleanupPackages,
 	downloadVerifiedBinary,
+	getUpdateRegistry,
 	isMuslLinuxForTest,
 	migrateRenamedInstall,
+	normalizeRegistryUrl,
 	parseUpdateArgs,
 	pruneBunInstallCache,
 	type ReleaseInfo,
@@ -27,6 +29,7 @@ import {
 	resolveReleaseRename,
 	resolveUpdateMethodForTest,
 	resolveUpdateTargetFromPath,
+	setUpdateRegistry,
 	shouldForceBinaryUpdate,
 	sweepStaleUpdateArtifacts,
 	updateViaBinaryAt,
@@ -83,6 +86,16 @@ describe("update command plugin dispatch", () => {
 describe("parseUpdateArgs", () => {
 	it("preserves the legacy plugin update shorthand", () => {
 		expect(parseUpdateArgs(["update", "-l"])).toEqual({ force: false, check: false, plugins: true });
+	});
+
+	it("reads the registry override from both the attached and separated argv forms", () => {
+		// A dropped value would silently send the update back to the default
+		// registry — the exact failure the override exists to avoid.
+		const registry = "https://nexus.corp/repository/npm-group/";
+		expect(parseUpdateArgs(["update", `--registry=${registry}`])?.registry).toBe(registry);
+		expect(parseUpdateArgs(["update", "--registry", registry])?.registry).toBe(registry);
+		expect(parseUpdateArgs(["update", "-r", registry])?.registry).toBe(registry);
+		expect(parseUpdateArgs(["update", "--check"])?.registry).toBeUndefined();
 	});
 });
 
@@ -1346,5 +1359,69 @@ describe("update-cli concurrent binary updates", () => {
 		expect(await Bun.file(targetPath).bytes()).toEqual(new Uint8Array(payload));
 		const residue = (await fs.readdir(dir)).filter(name => name.endsWith(".bak") || name.endsWith(".new"));
 		expect(residue).toEqual([]);
+	});
+});
+
+describe("update-cli configurable registry", () => {
+	const originalEnv = process.env.OMP_UPDATE_REGISTRY;
+
+	afterEach(() => {
+		setUpdateRegistry(undefined);
+		if (originalEnv === undefined) delete process.env.OMP_UPDATE_REGISTRY;
+		else process.env.OMP_UPDATE_REGISTRY = originalEnv;
+		vi.restoreAllMocks();
+	});
+
+	it("resolves the registry as flag > OMP_UPDATE_REGISTRY > official", () => {
+		delete process.env.OMP_UPDATE_REGISTRY;
+		expect(getUpdateRegistry()).toBe("https://registry.npmjs.org/");
+
+		process.env.OMP_UPDATE_REGISTRY = "https://nexus.corp/repository/npm-group/";
+		setUpdateRegistry(undefined);
+		expect(getUpdateRegistry()).toBe("https://nexus.corp/repository/npm-group/");
+
+		setUpdateRegistry("https://artifactory.corp/api/npm/npm/");
+		expect(getUpdateRegistry()).toBe("https://artifactory.corp/api/npm/npm/");
+	});
+
+	it("appends the trailing slash a path-prefixed mirror needs so the package name cannot swallow the prefix", () => {
+		// Concatenating the package name onto an unslashed value yields
+		// .../npm-group@oh-my-pi/pi-coding-agent/latest — a 404 on every mirror.
+		expect(normalizeRegistryUrl("https://nexus.corp/repository/npm-group")).toBe(
+			"https://nexus.corp/repository/npm-group/",
+		);
+	});
+
+	it("rejects values that would otherwise fail deep inside bun/npm", () => {
+		expect(() => normalizeRegistryUrl("   ")).toThrow("value is empty");
+		expect(() => normalizeRegistryUrl("nexus.corp/npm")).toThrow("not a valid URL");
+		expect(() => normalizeRegistryUrl("ftp://nexus.corp/npm")).toThrow("http:// or https://");
+	});
+
+	it("points the version check, the bun install and the npm install at the same overridden catalog", async () => {
+		// The invariant #1686 established, now that the catalog is selectable:
+		// a version resolved from one registry must be installed from that same
+		// registry, or the install fails with `No version matching "X"`.
+		setUpdateRegistry("https://nexus.corp/repository/npm-group/");
+		const urls: string[] = [];
+		const fetchStub = Object.assign(
+			async (input: string | URL | Request) => {
+				urls.push(String(input));
+				return Response.json({ version: "16.3.15" });
+			},
+			{ preconnect: globalThis.fetch.preconnect },
+		);
+		vi.spyOn(globalThis, "fetch").mockImplementation(fetchStub);
+
+		const release = await updateCli.getLatestRelease();
+
+		expect(release.version).toBe("16.3.15");
+		expect(urls).toEqual(["https://nexus.corp/repository/npm-group/@oh-my-pi/pi-coding-agent/latest"]);
+		expect(buildBunInstallArgs("16.3.15", "linux-x64")).toContain(
+			"--registry=https://nexus.corp/repository/npm-group/",
+		);
+		expect(buildNpmInstallArgs("16.3.15", "linux-x64")).toContain(
+			"--registry=https://nexus.corp/repository/npm-group/",
+		);
 	});
 });
