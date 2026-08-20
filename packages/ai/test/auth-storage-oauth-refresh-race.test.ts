@@ -153,24 +153,19 @@ describe("AuthStorage OAuth refresh race", () => {
 		await authStorage.reload();
 
 		await withEnv({ XAI_OAUTH_TOKEN: undefined, XAI_API_KEY: undefined }, async () => {
-			let providerRequestCount = 0;
 			const firstKey = await authStorage!.getApiKey("xai-oauth", "session-invalid-grant");
-			if (firstKey) providerRequestCount += 1;
 			expect(firstKey).toBeUndefined();
 			expect(refreshCalls).toBe(1);
 
 			const secondKey = await authStorage!.getApiKey("xai-oauth", "session-invalid-grant");
-			if (secondKey) providerRequestCount += 1;
 			expect(secondKey).toBeUndefined();
 			expect(refreshCalls).toBe(1);
 
 			authStorage = createStorage();
 			await authStorage.reload();
 			const reloadedKey = await authStorage.getApiKey("xai-oauth", "session-invalid-grant-reloaded");
-			if (reloadedKey) providerRequestCount += 1;
 			expect(reloadedKey).toBeUndefined();
 			expect(refreshCalls).toBe(1);
-			expect(providerRequestCount).toBe(0);
 		});
 
 		const observer = new Database(path.join(tempDir, "agent.db"), { readonly: true });
@@ -198,6 +193,58 @@ describe("AuthStorage OAuth refresh race", () => {
 			},
 			["expired-access", "dead-refresh"],
 		);
+	});
+
+	test("durably disables a semantically unchanged xAI row after a peer reorders its JSON keys", async () => {
+		if (!store) throw new Error("test setup failed");
+
+		const expires = Date.now() - 60_000;
+		const reorderedData = JSON.stringify({
+			expires,
+			refresh: "dead-refresh",
+			access: "expired-access",
+		});
+		let credentialId: number | undefined;
+		let refreshCalls = 0;
+		authStorage = new AuthStorage(store, {
+			async refreshOAuthCredential() {
+				refreshCalls += 1;
+				if (credentialId === undefined) throw new Error("missing seeded xAI credential");
+				const writer = new Database(path.join(tempDir, "agent.db"));
+				try {
+					writer.prepare("UPDATE auth_credentials SET data = ? WHERE id = ?").run(reorderedData, credentialId);
+				} finally {
+					writer.close();
+				}
+				throw new Error('HTTP 400 invalid_grant {"error":"invalid_grant"}');
+			},
+		});
+		await authStorage.set("xai-oauth", [
+			{
+				type: "oauth",
+				access: "expired-access",
+				refresh: "dead-refresh",
+				expires,
+			},
+		]);
+		credentialId = store.listAuthCredentials("xai-oauth")[0]?.id;
+		if (credentialId === undefined) throw new Error("missing seeded xAI credential");
+
+		await withEnv({ XAI_OAUTH_TOKEN: undefined, XAI_API_KEY: undefined }, async () => {
+			expect(await authStorage!.getApiKey("xai-oauth", "session-reordered-invalid-grant")).toBeUndefined();
+		});
+		expect(refreshCalls).toBe(1);
+
+		const observer = new Database(path.join(tempDir, "agent.db"), { readonly: true });
+		try {
+			const row = observer
+				.prepare("SELECT data, disabled_cause FROM auth_credentials WHERE id = ?")
+				.get(credentialId) as { data: string; disabled_cause: string | null };
+			expect(row.data).toBe(reorderedData);
+			expect(row.disabled_cause).toContain("invalid_grant");
+		} finally {
+			observer.close();
+		}
 	});
 
 	test("replays exactly once when a peer rotates after an xAI CAS miss", async () => {
@@ -263,6 +310,77 @@ describe("AuthStorage OAuth refresh race", () => {
 				outcome: "cas_lost",
 			},
 			["expired-access", "stale-refresh", "peer-access", "peer-refresh", "invalid_grant"],
+		);
+	});
+
+	test("shares one peer-rotation replay budget across nested and outer candidate passes", async () => {
+		if (!store) throw new Error("test setup failed");
+
+		let refreshCalls = 0;
+		authStorage = new AuthStorage(store, {
+			async refreshOAuthCredential() {
+				refreshCalls += 1;
+				throw new Error('HTTP 400 invalid_grant {"error":"invalid_grant"}');
+			},
+		});
+		await authStorage.set("xai-oauth", [
+			{
+				type: "oauth",
+				access: "expired-access",
+				refresh: "stale-refresh",
+				expires: Date.now() - 60_000,
+			},
+		]);
+		const credentialId = store.listAuthCredentials("xai-oauth")[0]?.id;
+		if (credentialId === undefined) throw new Error("missing seeded xAI credential");
+
+		let peerRotation = 0;
+		const originalTryDisable = store.tryDisableAuthCredentialIfMatches.bind(store);
+		const tryDisableSpy = vi
+			.spyOn(store, "tryDisableAuthCredentialIfMatches")
+			.mockImplementation((id, expectedData, disabledCause, lease) => {
+				peerRotation += 1;
+				store!.updateAuthCredential(id, {
+					type: "oauth",
+					access: `peer-access-${peerRotation}`,
+					refresh: `peer-refresh-${peerRotation}`,
+					expires: Date.now() - 60_000,
+				});
+				return originalTryDisable(id, expectedData, disabledCause, lease);
+			});
+
+		await withEnv({ XAI_OAUTH_TOKEN: undefined, XAI_API_KEY: undefined }, async () => {
+			expect(await authStorage!.getApiKey("xai-oauth", "session-two-peer-rotations")).toBeUndefined();
+		});
+		expect(refreshCalls).toBe(2);
+		expect(tryDisableSpy).toHaveBeenCalledTimes(2);
+		expect(store.listAuthCredentials("xai-oauth")[0]?.credential).toMatchObject({
+			type: "oauth",
+			access: "peer-access-2",
+			refresh: "peer-refresh-2",
+		});
+		expectSingleRedactedChainEvent(
+			{
+				event: "omp_oauth_refresh_cas_chain/v1",
+				provider: "xai-oauth",
+				chain_ordinal: 1,
+				refresh_attempt_count: 2,
+				credential_reload_count: 2,
+				cas_attempt_count: 2,
+				cas_success_count: 0,
+				cas_lost_count: 2,
+				rotation_replay_count: 1,
+				outcome: "cas_lost",
+			},
+			[
+				"expired-access",
+				"stale-refresh",
+				"peer-access-1",
+				"peer-refresh-1",
+				"peer-access-2",
+				"peer-refresh-2",
+				"invalid_grant",
+			],
 		);
 	});
 

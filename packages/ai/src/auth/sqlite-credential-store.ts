@@ -34,6 +34,7 @@ import type {
 	UsageHistoryEntry,
 	UsageHistoryQuery,
 } from "../usage";
+import { areJsonValuesEqual } from "../utils/schema/equality";
 
 // 5 min stale tolerance. Anthropic / OpenAI rate-limit /usage hard at the IP
 // level so we can't fetch all N credentials every cycle; with a long cache
@@ -154,6 +155,14 @@ function deserializeCredential(row: AuthRow): AuthCredential | null {
 		return { type: "oauth", ...(parsed as Record<string, unknown>) } as AuthCredential;
 	}
 	return null;
+}
+
+function areSerializedCredentialDataEqual(left: string, right: string): boolean {
+	try {
+		return areJsonValuesEqual(JSON.parse(left), JSON.parse(right));
+	} catch {
+		return false;
+	}
 }
 
 function normalizeDisabledCause(disabledCause: string): string {
@@ -1484,10 +1493,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 
 		const row = this.#getActiveByIdStmt.get(id) as AuthRow | undefined;
 		if (!row) return false;
-		const credential = deserializeCredential(row);
-		if (!credential) return false;
-		const serialized = serializeCredential(row.provider, credential);
-		if (!serialized || serialized.data !== expectedData) return false;
+		if (!areSerializedCredentialDataEqual(row.data, expectedData)) return false;
 
 		result = lease
 			? (this.#deleteIfMatchesWithLeaseStmt.run(normalizedCause, id, row.data, id, lease.owner, lease.nowMs) as {

@@ -953,8 +953,17 @@ type OAuthRefreshCASChainState = {
 	casSuccessCount: number;
 	casLostCount: number;
 	rotationReplayCount: number;
+	remainingRotationReplays: number;
+	terminalCredentialIds: Set<number>;
 	outcome?: OAuthRefreshCASChainOutcome;
 };
+
+class OAuthRefreshCASResolutionError extends Error {
+	constructor(readonly outcome: "peer-rotated" | "cas-lost") {
+		super(`OAuth refresh CAS resolution required: ${outcome}`);
+		this.name = "OAuthRefreshCASResolutionError";
+	}
+}
 
 const OAUTH_REFRESH_CAS_CHAIN = Symbol("oauth-refresh-cas-chain");
 type InstrumentedStoredOAuthRefreshOptions<T extends OAuthCredential> = StoredOAuthRefreshOptions<T> & {
@@ -4895,9 +4904,11 @@ export class AuthStorage {
 			casSuccessCount: 0,
 			casLostCount: 0,
 			rotationReplayCount: 0,
+			remainingRotationReplays: 1,
+			terminalCredentialIds: new Set<number>(),
 		};
 		try {
-			return await this.#resolveOAuthSelectionWithChain(provider, sessionId, options, 1, chain);
+			return await this.#resolveOAuthSelectionWithChain(provider, sessionId, options, chain);
 		} finally {
 			this.#emitOAuthRefreshCASChain(chain);
 		}
@@ -4907,7 +4918,6 @@ export class AuthStorage {
 		provider: string,
 		sessionId: string | undefined,
 		options: AuthApiKeyOptions | undefined,
-		rotationReplayBudget: number,
 		chain: OAuthRefreshCASChainState,
 	): Promise<OAuthResolutionResult | undefined> {
 		const credentials = this.#getCredentialsForProvider(provider)
@@ -5009,97 +5019,126 @@ export class AuthStorage {
 		const forceRefreshIndex = options?.forceRefresh
 			? (sessionPreferredIndex ?? candidates[0]?.selection.index)
 			: undefined;
-		await Promise.all(
-			candidates.map(async candidate => {
-				const force = forceRefreshIndex !== undefined && candidate.selection.index === forceRefreshIndex;
-				const initialCredentialId = this.#getStoredCredentials(provider)[candidate.selection.index]?.id;
-				let syncedPeerCredential = false;
-				if (initialCredentialId !== undefined) {
-					const beforeSync = candidate.selection.credential;
-					if (!this.#syncOAuthSelectionFromStore(provider, candidate.selection, initialCredentialId)) return;
-					syncedPeerCredential = !authCredentialEquals(beforeSync, candidate.selection.credential);
-				}
-				const hasFreshAccess = Date.now() + OAUTH_REFRESH_SKEW_MS < candidate.selection.credential.expires;
-				if ((!force || syncedPeerCredential) && hasFreshAccess) return;
-				const latestCredential = this.#getCredentialsForProvider(provider)[candidate.selection.index];
-				if (
-					!force &&
-					latestCredential?.type === "oauth" &&
-					Date.now() + OAUTH_REFRESH_SKEW_MS < latestCredential.expires
-				) {
-					candidate.selection.credential = latestCredential;
-					return;
-				}
-				const credentialId = this.#getStoredCredentials(provider)[candidate.selection.index]?.id;
-				try {
-					// Hand #refreshOAuthCredential a stale clone (expires:0) so its
-					// not-yet-expired short-circuit doesn't suppress the forced
-					// re-mint; an in-flight peer refresh is still awaited via the
-					// per-credential single-flight.
-					const refreshTarget = force
-						? { ...candidate.selection.credential, expires: 0 }
-						: candidate.selection.credential;
-					const refreshedCredentials = await this.#refreshOAuthCredential(
-						provider,
-						refreshTarget,
-						credentialId,
-						options?.signal,
-						chain,
-					);
-					const updated: OAuthCredential = {
-						...candidate.selection.credential,
-						...refreshedCredentials,
-						type: "oauth",
-					};
-					candidate.selection.credential = updated;
-					if (credentialId !== undefined) {
-						const idx = this.#replaceCredentialById(provider, credentialId, updated);
-						if (idx !== -1) candidate.selection.index = idx;
-					} else {
-						this.#replaceCredentialAt(provider, candidate.selection.index, updated);
+		if (candidates.length > 1 || options?.forceRefresh) {
+			await Promise.all(
+				candidates.map(async candidate => {
+					const force = forceRefreshIndex !== undefined && candidate.selection.index === forceRefreshIndex;
+					const initialCredentialId = this.#getStoredCredentials(provider)[candidate.selection.index]?.id;
+					let syncedPeerCredential = false;
+					if (initialCredentialId !== undefined) {
+						const beforeSync = candidate.selection.credential;
+						if (!this.#syncOAuthSelectionFromStore(provider, candidate.selection, initialCredentialId)) return;
+						syncedPeerCredential = !authCredentialEquals(beforeSync, candidate.selection.credential);
 					}
-				} catch (error) {
-					// A failed preflight already exercised the provider refresh path.
-					// Do not replay the same refresh token in the final candidate pass.
-					const errorMsg = String(error);
-					const isDefinitiveFailure = AIError.isDefinitiveOAuthFailure(errorMsg);
-					logger.debug("OAuth preflight refresh failed", {
-						provider,
-						index: candidate.selection.index,
-						error: errorMsg,
-						isDefinitiveFailure,
-					});
-					if (isDefinitiveFailure) {
-						// A dead grant discovered during preflight must be disabled here too —
-						// the final candidate pass below skips every `preflightFailures` entry,
-						// so if this branch only blocked the row (like the transient case), the
-						// definitive failure would never reach `#tryOAuthCredential`'s own
-						// disable logic and the row would be retried forever instead of torn down.
-						await this.#disableDefinitiveOAuthFailure(
+					const hasFreshAccess = Date.now() + OAUTH_REFRESH_SKEW_MS < candidate.selection.credential.expires;
+					if ((!force || syncedPeerCredential) && hasFreshAccess) return;
+					const latestCredential = this.#getCredentialsForProvider(provider)[candidate.selection.index];
+					if (
+						!force &&
+						latestCredential?.type === "oauth" &&
+						Date.now() + OAUTH_REFRESH_SKEW_MS < latestCredential.expires
+					) {
+						candidate.selection.credential = latestCredential;
+						return;
+					}
+					const credentialId = this.#getStoredCredentials(provider)[candidate.selection.index]?.id;
+					try {
+						// Hand #refreshOAuthCredential a stale clone (expires:0) so its
+						// not-yet-expired short-circuit doesn't suppress the forced
+						// re-mint; an in-flight peer refresh is still awaited via the
+						// per-credential single-flight.
+						const refreshTarget = force
+							? { ...candidate.selection.credential, expires: 0 }
+							: candidate.selection.credential;
+						const refreshedCredentials = await this.#refreshOAuthCredential(
 							provider,
+							refreshTarget,
 							credentialId,
-							candidate.selection.credential,
-							candidate.selection.index,
-							errorMsg,
+							options?.signal,
+							chain,
 						);
-					} else if (credentialId !== undefined) {
-						const latestIndex = this.#getStoredCredentials(provider).findIndex(
-							entry => entry.id === credentialId,
-						);
-						if (latestIndex !== -1) {
-							this.#markCredentialBlocked(
-								provider,
-								providerKey,
-								latestIndex,
-								Date.now() + OAUTH_REFRESH_FAILURE_BACKOFF_MS,
-								blockScope,
-							);
+						const updated: OAuthCredential = {
+							...candidate.selection.credential,
+							...refreshedCredentials,
+							type: "oauth",
+						};
+						candidate.selection.credential = updated;
+						if (credentialId !== undefined) {
+							const idx = this.#replaceCredentialById(provider, credentialId, updated);
+							if (idx !== -1) candidate.selection.index = idx;
+						} else {
+							this.#replaceCredentialAt(provider, candidate.selection.index, updated);
 						}
+					} catch (error) {
+						if (error instanceof OAuthRefreshCASResolutionError) {
+							if (
+								error.outcome === "peer-rotated" &&
+								credentialId !== undefined &&
+								chain.remainingRotationReplays > 0 &&
+								this.#syncOAuthSelectionFromStore(provider, candidate.selection, credentialId)
+							) {
+								chain.remainingRotationReplays -= 1;
+								chain.rotationReplayCount += 1;
+								return;
+							}
+							if (credentialId !== undefined) chain.terminalCredentialIds.add(credentialId);
+							preflightFailures.add(candidate);
+							return;
+						}
+						// A failed preflight already exercised the provider refresh path.
+						// Do not replay the same refresh token in the final candidate pass.
+						const errorMsg = String(error);
+						const isDefinitiveFailure = AIError.isDefinitiveOAuthFailure(errorMsg);
+						logger.debug("OAuth preflight refresh failed", {
+							provider,
+							index: candidate.selection.index,
+							error: errorMsg,
+							isDefinitiveFailure,
+						});
+						if (isDefinitiveFailure) {
+							// A dead grant discovered during preflight must be disabled here too —
+							// the final candidate pass below skips every `preflightFailures` entry,
+							// so if this branch only blocked the row (like the transient case), the
+							// definitive failure would never reach `#tryOAuthCredential`'s own
+							// disable logic and the row would be retried forever instead of torn down.
+							const outcome = await this.#disableDefinitiveOAuthFailure(
+								provider,
+								credentialId,
+								candidate.selection.credential,
+								candidate.selection.index,
+								errorMsg,
+								chain,
+							);
+							if (outcome === "peer-rotated" && credentialId !== undefined) {
+								if (
+									chain.remainingRotationReplays > 0 &&
+									this.#syncOAuthSelectionFromStore(provider, candidate.selection, credentialId)
+								) {
+									chain.remainingRotationReplays -= 1;
+									chain.rotationReplayCount += 1;
+									return;
+								}
+								chain.terminalCredentialIds.add(credentialId);
+							}
+						} else if (credentialId !== undefined) {
+							const latestIndex = this.#getStoredCredentials(provider).findIndex(
+								entry => entry.id === credentialId,
+							);
+							if (latestIndex !== -1) {
+								this.#markCredentialBlocked(
+									provider,
+									providerKey,
+									latestIndex,
+									Date.now() + OAUTH_REFRESH_FAILURE_BACKOFF_MS,
+									blockScope,
+								);
+							}
+						}
+						preflightFailures.add(candidate);
 					}
-					preflightFailures.add(candidate);
-				}
-			}),
-		);
+				}),
+			);
+		}
 
 		// Enforce a tier only when at least one account is confirmed eligible. If
 		// every report is unknown or ineligible, preserve trial/grandfathered access
@@ -5130,7 +5169,6 @@ export class AuthStorage {
 				}
 			}
 		}
-		const terminalCredentialIds = new Set<number>();
 
 		const passes: Array<{ allowBlocked: boolean; enforcePlanRequirement: boolean }> = [
 			{ allowBlocked: false, enforcePlanRequirement },
@@ -5142,7 +5180,7 @@ export class AuthStorage {
 			for (const candidate of candidates) {
 				if (preflightFailures.has(candidate)) continue;
 				const candidateCredentialId = this.#getStoredCredentials(provider)[candidate.selection.index]?.id;
-				if (candidateCredentialId !== undefined && terminalCredentialIds.has(candidateCredentialId)) continue;
+				if (candidateCredentialId !== undefined && chain.terminalCredentialIds.has(candidateCredentialId)) continue;
 				const resolved = await this.#tryOAuthCredential(
 					provider,
 					candidate.selection,
@@ -5160,8 +5198,6 @@ export class AuthStorage {
 						rankingContext,
 						blockScope,
 						blockScopes,
-						rotationReplayBudget,
-						terminalCredentialIds,
 						chain,
 					},
 				);
@@ -5192,31 +5228,32 @@ export class AuthStorage {
 		attemptedCredential: OAuthCredential,
 		index: number,
 		errorMsg: string,
+		chain?: OAuthRefreshCASChainState,
 	): Promise<"disabled" | "peer-rotated" | "cas-lost"> {
-		// The credential at this index may have been rotated by another process between
-		// our in-memory snapshot and the refresh attempt: Anthropic rotates refresh
-		// tokens on every use, so the peer's success leaves our stored token invalid.
-		// Re-read the row from disk before marking it disabled — if the persisted
-		// refresh token has changed, the peer rotation succeeded and we should pick
-		// up the new credential instead of soft-deleting the row that the peer just
-		// updated.
+		// Re-read the row before disabling it. Any semantic OAuth change versions
+		// the credential, even when the refresh token itself is unchanged.
 		if (credentialId !== undefined) {
 			const latestRow = this.#store.listAuthCredentials(provider).find(row => row.id === credentialId);
-			const latestCredential = latestRow?.credential;
-			if (latestCredential?.type === "oauth" && latestCredential.refresh !== attemptedCredential.refresh) {
+			if (!latestRow) return "disabled";
+			const latestCredential = latestRow.credential;
+			if (latestCredential.type === "oauth" && !authCredentialEquals(latestCredential, attemptedCredential)) {
 				logger.debug("OAuth refresh race detected; another process rotated token first", {
 					provider,
 					index,
 					credentialId,
 				});
+				if (chain) {
+					chain.credentialReloadCount += 1;
+					recordOAuthRefreshCASOutcome(chain, "peer_rotation_replayed");
+				}
 				await this.reload();
 				return "peer-rotated";
 			}
 		}
-		// Permanently disable invalid credentials with an explicit cause for inspection/debugging.
-		// Use a CAS-style disable conditioned on the row still containing the stale credential
-		// we tried to refresh, so a peer rotation that lands between the pre-check above and
-		// this disable doesn't soft-delete the freshly-rotated row.
+
+		// Permanently disable an unchanged invalid credential. The byte-exact CAS
+		// protects a peer rotation that lands after the semantic pre-check.
+		if (chain) chain.casAttemptCount += 1;
 		const disabled =
 			credentialId !== undefined
 				? this.#disableCredentialByIdIfMatches(
@@ -5231,12 +5268,33 @@ export class AuthStorage {
 						attemptedCredential,
 						`oauth refresh failed: ${errorMsg}`,
 					);
-		if (!disabled) {
-			logger.debug("OAuth refresh disable lost CAS; reloading after peer rotation", { provider, index });
-			await this.reload();
-			return "cas-lost";
+		if (chain) {
+			if (disabled) {
+				chain.casSuccessCount += 1;
+				recordOAuthRefreshCASOutcome(chain, "definitive_invalid_grant");
+			} else {
+				chain.casLostCount += 1;
+				recordOAuthRefreshCASOutcome(chain, "cas_lost");
+			}
 		}
-		return "disabled";
+		if (disabled) return "disabled";
+
+		logger.debug("OAuth refresh disable lost CAS; checking persisted credential version", {
+			provider,
+			index,
+			credentialId,
+		});
+		if (chain) chain.credentialReloadCount += 1;
+		await this.reload();
+		if (credentialId !== undefined) {
+			const reloadedCredential = this.#getStoredCredentials(provider).find(
+				entry => entry.id === credentialId,
+			)?.credential;
+			if (reloadedCredential?.type === "oauth" && !authCredentialEquals(reloadedCredential, attemptedCredential)) {
+				return "peer-rotated";
+			}
+		}
+		return "cas-lost";
 	}
 
 	async #refreshOAuthCredential(
@@ -5301,9 +5359,11 @@ export class AuthStorage {
 				disabledCause: error => `oauth refresh failed: ${String(error)}`,
 				[OAUTH_REFRESH_CAS_CHAIN]: chain,
 			};
+			const casLostCountBefore = chain?.casLostCount ?? 0;
 			const result = await this.refreshStoredOAuthCredential(provider, refreshOptions);
 			if (result.credential) {
-				if (chain && !result.refreshed && chain.casLostCount === 0) {
+				const adoptedPeerCredential = !result.refreshed && !authCredentialEquals(result.credential, credential);
+				if (chain && adoptedPeerCredential && chain.casLostCount === casLostCountBefore) {
 					chain.credentialReloadCount += 1;
 					recordOAuthRefreshCASOutcome(chain, "peer_rotation_replayed");
 				}
@@ -5314,11 +5374,20 @@ export class AuthStorage {
 					// due for refresh again instead of rejecting a token we just minted.
 					if (Date.now() < result.credential.expires) return result.credential;
 				} else if (Date.now() + OAUTH_REFRESH_SKEW_MS < result.credential.expires) {
-					// Reloaded (not refreshed by us) credential — match #refreshOAuthCredential's
-					// freshness contract: a reload within the refresh skew still counts as
-					// needing refresh, so returning it here would make the final candidate pass
-					// refresh the same row again and replay the token we just failed on.
+					// A fresh peer credential completes the bounded replay without another
+					// selector pass. An expired peer still falls through so the caller can
+					// spend the shared replay budget on one actual refresh attempt.
+					if (chain && adoptedPeerCredential && chain.remainingRotationReplays > 0) {
+						chain.remainingRotationReplays -= 1;
+						chain.rotationReplayCount += 1;
+					}
 					return result.credential;
+				}
+				if (adoptedPeerCredential) {
+					throw new OAuthRefreshCASResolutionError("peer-rotated");
+				}
+				if (chain && chain.casLostCount > casLostCountBefore) {
+					throw new OAuthRefreshCASResolutionError("cas-lost");
 				}
 				throw new AIError.OAuthError(
 					`OAuth refresh did not produce a usable credential for provider: ${provider}`,
@@ -5450,10 +5519,6 @@ export class AuthStorage {
 			blockScopes?: readonly string[];
 			/** When false, a definitive failure of THIS credential returns undefined instead of falling back to the ranked/round-robin selector (target-only resolution). */
 			allowFallback?: boolean;
-			/** Remaining peer-rotation replays allowed for this resolution chain. */
-			rotationReplayBudget?: number;
-			/** Credential rows that definitively failed but could not be disabled in this resolution. */
-			terminalCredentialIds?: Set<number>;
 			chain: OAuthRefreshCASChainState;
 		},
 	): Promise<OAuthResolutionResult | undefined> {
@@ -5469,8 +5534,6 @@ export class AuthStorage {
 			blockScope,
 			blockScopes,
 			allowFallback = true,
-			rotationReplayBudget = 1,
-			terminalCredentialIds,
 			chain,
 		} = usageOptions;
 		if (
@@ -5611,6 +5674,15 @@ export class AuthStorage {
 			if (chain.refreshAttemptCount > 0) recordOAuthRefreshCASOutcome(chain, "refreshed");
 			return { apiKey: result.apiKey, credential: updated, credentialId };
 		} catch (error) {
+			if (error instanceof OAuthRefreshCASResolutionError) {
+				if (error.outcome === "peer-rotated" && allowFallback && chain.remainingRotationReplays > 0) {
+					chain.remainingRotationReplays -= 1;
+					chain.rotationReplayCount += 1;
+					return this.#resolveOAuthSelectionWithChain(provider, sessionId, options, chain);
+				}
+				if (credentialId !== undefined) chain.terminalCredentialIds.add(credentialId);
+				return undefined;
+			}
 			const errorMsg = String(error);
 			// Only remove credentials for definitive auth failures
 			// Keep credentials for transient errors (network, 5xx) and block temporarily
@@ -5631,24 +5703,24 @@ export class AuthStorage {
 					selection.credential,
 					selection.index,
 					errorMsg,
+					chain,
 				);
 				if (outcome === "peer-rotated") {
-					if (allowFallback && rotationReplayBudget > 0) {
-						return this.#resolveOAuthSelection(provider, sessionId, options, rotationReplayBudget - 1);
+					if (allowFallback && chain.remainingRotationReplays > 0) {
+						chain.remainingRotationReplays -= 1;
+						chain.rotationReplayCount += 1;
+						return this.#resolveOAuthSelectionWithChain(provider, sessionId, options, chain);
 					}
-					if (credentialId !== undefined) terminalCredentialIds?.add(credentialId);
+					if (credentialId !== undefined) chain.terminalCredentialIds.add(credentialId);
 					return undefined;
 				}
-				if (outcome === "cas-lost") return undefined;
+				if (outcome === "cas-lost") {
+					if (credentialId !== undefined) chain.terminalCredentialIds.add(credentialId);
+					return undefined;
+				}
 				if (this.#getCredentialsForProvider(provider).some(credential => credential.type === "oauth")) {
 					if (allowFallback) {
-						return this.#resolveOAuthSelectionWithChain(
-							provider,
-							sessionId,
-							options,
-							rotationReplayBudget,
-							chain,
-						);
+						return this.#resolveOAuthSelectionWithChain(provider, sessionId, options, chain);
 					}
 				}
 			} else {
@@ -5852,6 +5924,8 @@ export class AuthStorage {
 			casSuccessCount: 0,
 			casLostCount: 0,
 			rotationReplayCount: 0,
+			remainingRotationReplays: 1,
+			terminalCredentialIds: new Set<number>(),
 		};
 		try {
 			const resolved = await this.#tryOAuthCredential(
