@@ -449,4 +449,37 @@ describe("TUI direct-placement clipping", () => {
 			h.tui.stop();
 		}
 	});
+	it("clips main inline images before the reserved sidebar column", async () => {
+		const terminal = new VirtualTerminal(120, 12);
+		const writes: string[] = [];
+		const realWrite = terminal.write.bind(terminal);
+		vi.spyOn(terminal, "write").mockImplementation((data: string) => {
+			writes.push(data);
+			realWrite(data);
+		});
+		const tui = new TUI(terminal);
+		const imageKey = "sidebar-boundary";
+		const image = new Image(
+			BASE64_ONE_PIXEL_PNG,
+			"image/png",
+			{ fallbackColor: text => text },
+			{ maxWidthCells: 100, maxHeightCells: 2, budget: tui.imageBudget, imageKey },
+			{ widthPx: 800, heightPx: 20 },
+		);
+		const imageId = tui.imageBudget.acquireId(imageKey);
+		tui.addChild(image);
+		tui.setRightSidebar({ render: () => ["SIDEBAR"] }, { width: 44, minWidth: 28, minMainWidth: 64 });
+		try {
+			tui.start();
+			await terminal.waitForRender(() => writes.join("").includes(`i=${imageId}`));
+			const placementPattern = new RegExp(`i=${imageId},p=\\d+,c=(\\d+),r=\\d+`, "g");
+			const columns = [...writes.join("").matchAll(placementPattern)].map(match => Number(match[1]));
+			expect(columns.length).toBeGreaterThan(0);
+			expect(columns.at(-1)).toBeLessThanOrEqual(76);
+			expect(terminal.getViewport().some(line => line.includes("SIDEBAR"))).toBe(true);
+		} finally {
+			tui.stop();
+		}
+	});
+
 });
