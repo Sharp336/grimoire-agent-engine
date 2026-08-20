@@ -70,6 +70,21 @@ export function compactModelIdentity(resolved: string): string {
 }
 
 
+let cachedOmpVersion: string | undefined;
+export function getOmpVersion(): string {
+	if (cachedOmpVersion) return cachedOmpVersion;
+	try {
+		// eslint-disable-next-line @typescript-eslint/no-require-imports
+		const pkg = require("../../package.json") as { version?: string };
+		if (pkg.version) {
+			cachedOmpVersion = pkg.version;
+			return cachedOmpVersion;
+		}
+	} catch {}
+	cachedOmpVersion = "unknown";
+	return cachedOmpVersion;
+}
+
 function extractEffort(model?: string): string | undefined {
 	if (!model) return undefined;
 	const idx = model.lastIndexOf(":");
@@ -146,7 +161,7 @@ export function formatExpandedDetail(p: AgentProgress & { ompVersion?: string },
 	}
 	if (p.routingReason) lines.push(`routing: ${p.routingReason}`);
 	lines.push(`revision: unavailable`);
-	const ver = p.ompVersion ?? opts?.ompVersion ?? "unavailable";
+	const ver = p.ompVersion ?? opts?.ompVersion ?? getOmpVersion();
 	lines.push(`ompVersion: ${ver}`);
 	return lines.join("\n");
 }
@@ -157,6 +172,24 @@ export function ledgerEntryToJsonl(entry: LedgerEntry): string {
 }
 export function parseLedgerJsonl(line: string): LedgerEntry {
 	return JSON.parse(line) as LedgerEntry;
+}
+
+export function shouldAppendLedgerEntry(prev: LedgerEntry | undefined, next: LedgerEntry): boolean {
+	if (!prev) return true;
+	if (prev.selectedModel !== next.selectedModel) return true;
+	if (prev.actualModel !== next.actualModel) return true;
+	if (prev.fallback !== next.fallback) return true;
+	if (prev.status !== next.status && (next.status === "completed" || next.status === "failed" || next.status === "aborted")) return true;
+	const prevReroutes = prev.routingReroutes ?? [];
+	const nextReroutes = next.routingReroutes ?? [];
+	if (prevReroutes.length !== nextReroutes.length) return true;
+	for (let i = 0; i < nextReroutes.length; i++) {
+		if (prevReroutes[i]?.from !== nextReroutes[i]?.from || prevReroutes[i]?.to !== nextReroutes[i]?.to) return true;
+	}
+	if (prev.ompVersion !== next.ompVersion) return true;
+	if (prev.parentModel !== next.parentModel) return true;
+	if (prev.resourcePool !== next.resourcePool) return true;
+	return false;
 }
 
 export function ledgerPathForSession(sessionFile: string): string {

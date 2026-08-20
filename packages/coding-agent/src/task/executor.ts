@@ -1266,7 +1266,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	const PROGRESS_COALESCE_MS = 150;
 	let lastProgressEmitMs = 0;
 	let progressTimeoutId: NodeJS.Timeout | null = null;
-
+	let lastLedgerEntry: import("./subagent-ledger").LedgerEntry | undefined;
 	// Recompute progress.recentOutput from the capped tail. Deferred: text_delta
 	// appends only extend the tail and mark it dirty; the (up to 8KB) split/filter
 	// runs synchronously here, immediately before the ONLY places the progress
@@ -1301,13 +1301,17 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				sessionFile: args.sessionFile,
 			});
 		}
-		// machine-owned ledger (best-effort, never blocks progress)
+		// machine-owned ledger: append only on material changes (selected/actual/fallback/reroute/terminal)
 		if (args.sessionFile) {
+			const snapshot = { ...progress } as typeof progress;
 			void (async () => {
 				try {
-					const { progressToLedgerEntry, ledgerPathForSession, appendLedgerEntry } = await import("./subagent-ledger");
-					const entry = progressToLedgerEntry(progress);
-					await appendLedgerEntry(ledgerPathForSession(args.sessionFile as string), entry);
+					const { progressToLedgerEntry, ledgerPathForSession, appendLedgerEntry, shouldAppendLedgerEntry } = await import("./subagent-ledger");
+					const entry = progressToLedgerEntry(snapshot);
+					if (shouldAppendLedgerEntry(lastLedgerEntry, entry)) {
+						await appendLedgerEntry(ledgerPathForSession(args.sessionFile as string), entry);
+						lastLedgerEntry = entry;
+					}
 				} catch {}
 			})();
 		}
@@ -3036,7 +3040,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				// Preserve selected before any runtime fallback
 				if (!progress.selectedModel) progress.selectedModel = progress.resolvedModel;
 				progress.parentModel = options.parentActiveModelPattern;
-				progress.ompVersion = "17.3.4";
+				try {
+					const { getOmpVersion } = await import("./subagent-ledger");
+					progress.ompVersion = getOmpVersion();
+				} catch {
+					progress.ompVersion = "unknown";
+				}
 			}
 			// model pattern > agent-definition default (e.g. task's `auto`) >
 			// pattern-derived level.

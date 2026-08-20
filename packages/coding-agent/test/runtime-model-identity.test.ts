@@ -2,8 +2,7 @@ import { describe, expect, it, beforeAll } from "bun:test";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { renderSubagentHudLines } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import type { ObservableSession } from "@oh-my-pi/pi-coding-agent/modes/session-observer-registry";
-import type { AgentProgress } from "@oh-my-pi/pi-coding-agent/task";
-import { compactModelIdentity, detectModelAttributionMismatch, formatExpandedDetail, formatRuntimeModelUsage, ledgerPathForSession, appendLedgerEntry, readLedgerEntries, progressToLedgerEntry } from "@oh-my-pi/pi-coding-agent/task/subagent-ledger";
+import { compactModelIdentity, detectModelAttributionMismatch, formatExpandedDetail, formatRuntimeModelUsage, ledgerPathForSession, appendLedgerEntry, readLedgerEntries, progressToLedgerEntry, shouldAppendLedgerEntry, getOmpVersion } from "@oh-my-pi/pi-coding-agent/task/subagent-ledger";
 beforeAll(async () => { await initTheme(); });
 function makeProgress(overrides: Partial<AgentProgress> & { id: string }): AgentProgress {
 	return {
@@ -242,5 +241,21 @@ describe("SPEC runtime model identity RED", () => {
 		expect(entries.length).toBe(1);
 		expect(entries[0].actualModel).toBe("google-antigravity/gemini-3.7-flash");
 		expect(ledgerPathForSession("/tmp/session.jsonl")).toBe("/tmp/session.ledger.jsonl");
+	});
+	it("14. ledger deduplicates non-material progress ticks", () => {
+		const base = progressToLedgerEntry(makeProgress({ id: "A", status: "running", resolvedModel: "google-antigravity/gemini-3.7-flash:high", selectedModel: "google-antigravity/gemini-3.7-flash:high", resourcePool: "google-antigravity", ompVersion: "17.3.4" } as Partial<AgentProgress> & { id: string }) as AgentProgress);
+		const same = { ...base, timestamp: new Date().toISOString() };
+		expect(shouldAppendLedgerEntry(base, same)).toBe(false);
+		const fallbackChange = { ...base, actualModel: "meta/muse-spark-1.2-contributor:high", fallback: true };
+		expect(shouldAppendLedgerEntry(base, fallbackChange as unknown as import("@oh-my-pi/pi-coding-agent/task/subagent-ledger").LedgerEntry)).toBe(true);
+		const completed = { ...fallbackChange, status: "completed" };
+		expect(shouldAppendLedgerEntry(fallbackChange as unknown as import("@oh-my-pi/pi-coding-agent/task/subagent-ledger").LedgerEntry, completed as unknown as import("@oh-my-pi/pi-coding-agent/task/subagent-ledger").LedgerEntry)).toBe(true);
+		const completedAgain = { ...completed, timestamp: new Date().toISOString() };
+		expect(shouldAppendLedgerEntry(completed as unknown as import("@oh-my-pi/pi-coding-agent/task/subagent-ledger").LedgerEntry, completedAgain as unknown as import("@oh-my-pi/pi-coding-agent/task/subagent-ledger").LedgerEntry)).toBe(false);
+	});
+	it("15. OMP version derived automatically", () => {
+		const v = getOmpVersion();
+		expect(v).not.toBe("unknown");
+		expect(v).toMatch(/^\d+\.\d+\.\d+/);
 	});
 });
