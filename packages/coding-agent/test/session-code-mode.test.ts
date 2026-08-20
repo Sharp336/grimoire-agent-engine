@@ -494,22 +494,29 @@ describe("Code Mode session reconciliation", () => {
 	});
 
 	test("plan guidance keeps task delegation after Code Mode demotes the tool", async () => {
-		const { session } = createSession(
-			Settings.isolated({ "providers.openai-codex.codeMode": "on" }),
-			undefined,
-			undefined,
-			[tool("task")],
-		);
-		await session.setActiveToolsByName(["eval", "task"]);
-		expect(session.getActiveToolNames()).not.toContain("task");
+		async function planPrompt(extraTools: AgentTool[], names: string[]): Promise<string> {
+			const { session } = createSession(
+				Settings.isolated({ "providers.openai-codex.codeMode": "on" }),
+				undefined,
+				undefined,
+				extraTools,
+			);
+			await session.setActiveToolsByName(names);
+			expect(session.getActiveToolNames()).not.toContain("task");
+			session.setPlanModeState({ enabled: true, planFilePath: "local://PLAN.md" });
+			await session.sendPlanModeContext();
+			const planMessage = session.state.messages.find(
+				message => (message as { customType?: string }).customType === "plan-mode-context",
+			);
+			return String((planMessage as { content?: string })?.content);
+		}
 
-		session.setPlanModeState({ enabled: true, planFilePath: "local://PLAN.md" });
-		await session.sendPlanModeContext();
-
-		const planMessage = session.state.messages.find(
-			message => (message as { customType?: string }).customType === "plan-mode-context",
-		);
-		expect(String((planMessage as { content?: string })?.content)).toContain("`scout` subagents");
+		// `task` is bridge-reachable but demoted off the direct surface, so the
+		// guidance must still cover delegation: the capability gate reads the
+		// enabled set, not the model-visible one.
+		const withTask = await planPrompt([tool("task")], ["eval", "task"]);
+		const withoutTask = await planPrompt([], ["eval"]);
+		expect(withTask).not.toBe(withoutTask);
 	});
 });
 
