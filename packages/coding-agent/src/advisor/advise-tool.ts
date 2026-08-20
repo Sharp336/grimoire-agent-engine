@@ -20,6 +20,7 @@ const adviseSchema = type({
 export type AdviseParams = typeof adviseSchema.infer;
 
 export type AdvisorSeverity = "nit" | "concern" | "blocker";
+export type AdvisorSteerLevel = "concern" | "blocker";
 
 export interface AdviseDetails {
 	note: string;
@@ -65,14 +66,19 @@ export function formatAdvisorBatchContent(notes: readonly AdvisorNote[]): string
 		.join("\n");
 }
 
-/**
- * Whether advice at this severity should interrupt the running agent (delivered
- * via the steering channel, aborting in-flight tools) rather than ride the
- * non-interrupting aside queue that lands at the next step boundary. `concern`
- * and `blocker` interrupt; a plain `nit` queues.
- */
-export function isInterruptingSeverity(severity: AdvisorSeverity | undefined): boolean {
-	return severity === "concern" || severity === "blocker";
+/** Rank advisor severities so threshold and dedupe comparisons share one order. */
+const ADVISOR_SEVERITY_RANK: Record<AdvisorSeverity, number> = { nit: 1, concern: 2, blocker: 3 };
+
+function advisorSeverityRank(severity: AdvisorSeverity | undefined): number {
+	return ADVISOR_SEVERITY_RANK[severity ?? "nit"];
+}
+
+/** Whether advice meets the configured minimum severity for primary-agent steering. */
+export function shouldSteerAdvisorSeverity(
+	severity: AdvisorSeverity | undefined,
+	steerLevel: AdvisorSteerLevel,
+): boolean {
+	return advisorSeverityRank(severity) >= ADVISOR_SEVERITY_RANK[steerLevel];
 }
 
 /** How an advisor note is routed to the primary. */
@@ -90,33 +96,15 @@ export function isAdvisorInterruptImmuneTurnActive(opts: {
 /**
  * Decide how one advisor note reaches the primary agent.
  *
- * - A `preserveOnly` caller records every note that arrives while the primary
- *   is idle as a visible card and never starts a new primary turn.
- * - A non-interrupting `nit` always rides the non-interrupting aside queue.
- * - An interrupting `concern`/`blocker` is normally steered into the agent: into
- *   the live turn while one is streaming, or (when idle) a triggered turn so the
- *   advice is acted on immediately.
- * - If the primary tail is already a terminal text answer and there is no queued
- *   work, a late `concern` is preserved as a visible card instead of waking the
- *   primary to restate completion. A `blocker` is the exception: it means the
- *   agent handed off broken or unexercised work, so it still steers a triggered
- *   turn to force the primary to acknowledge and continue before the turn is
- *   considered done (#5628) — deferring it to the next user turn is the bug.
- * - After a deliberate user interrupt (`autoResumeSuppressed`) the advisor must
- *   not auto-resume the stopped run. While the agent is idle — or still tearing
- *   the interrupted turn down (`aborting`) — the note is preserved as a visible
- *   card instead of restarting the run. But once a turn is actively streaming
- *   again (a resume the user already drove), steering the note in does NOT
- *   auto-resume anything, so it is delivered live. Parking it during an active
- *   run instead strands it (it never reaches the running agent) and the withheld
- *   notes dump as one burst at the next user prompt — the bug this guards.
- * - During the post-interrupt immune-turn window, further `concern` notes are
- *   downgraded to asides; preservation still wins. A `blocker` is exempt: it
- *   means the agent handed off broken or unexercised work, so it still steers a
- *   triggered turn even right after a prior interrupt (#5628).
+ * `steerLevel` is the minimum severity that must interrupt a live primary turn
+ * or trigger an idle one. A late concern below that threshold remains visible
+ * without waking a primary that already returned a terminal answer. Safety
+ * constraints still win: headless preservation, deliberate user interrupts,
+ * and the post-interrupt immune-turn window can prevent an automatic turn.
  */
 export function resolveAdvisorDeliveryChannel(opts: {
 	severity: AdvisorSeverity | undefined;
+	steerLevel: AdvisorSteerLevel;
 	autoResumeSuppressed: boolean;
 	streaming: boolean;
 	aborting: boolean;
@@ -125,10 +113,24 @@ export function resolveAdvisorDeliveryChannel(opts: {
 	preserveOnly?: boolean;
 }): AdvisorDeliveryChannel {
 	if (opts.preserveOnly && !opts.streaming) return "preserve";
-	if (!isInterruptingSeverity(opts.severity)) return "aside";
-	if (opts.autoResumeSuppressed && (opts.aborting || !opts.streaming)) return "preserve";
-	if (opts.terminalAnswerNoQueuedWork && opts.severity !== "blocker" && !opts.streaming && !opts.aborting)
+	const shouldSteer = shouldSteerAdvisorSeverity(opts.severity, opts.steerLevel);
+	if (
+		opts.autoResumeSuppressed &&
+		(opts.aborting || !opts.streaming) &&
+		(shouldSteer || opts.severity === "concern")
+	) {
 		return "preserve";
+	}
+	if (
+		opts.terminalAnswerNoQueuedWork &&
+		opts.severity === "concern" &&
+		!shouldSteer &&
+		!opts.streaming &&
+		!opts.aborting
+	) {
+		return "preserve";
+	}
+	if (!shouldSteer) return "aside";
 	if (opts.interruptImmuneTurnActive && opts.severity !== "blocker") return "aside";
 	return "steer";
 }
@@ -163,14 +165,6 @@ function advisorNoteDedupeKey(note: string): string {
 	return note.trim().replace(/\s+/g, " ");
 }
 
-/** Rank advisor severities so the dedupe state can detect a real escalation
- *  (nit → concern → blocker) versus a verbatim repeat. `undefined` defers to
- *  `nit` because the schema treats an omitted severity as a plain nit. */
-const ADVISOR_SEVERITY_RANK: Record<AdvisorSeverity, number> = { nit: 1, concern: 2, blocker: 3 };
-function advisorSeverityRank(severity: AdvisorSeverity | undefined): number {
-	return ADVISOR_SEVERITY_RANK[severity ?? "nit"];
-}
-
 export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails> {
 	readonly name = "advise";
 	readonly label = "Advise";
@@ -183,27 +177,25 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 	 *  by retagging the same text at a lower or equal severity. */
 	#deliveredNoteSeverities = new Map<string, number>();
 	#inProgressUpdate = false;
-	#steerInProgressConcerns = false;
+	#steerLevel: AdvisorSteerLevel = "blocker";
 
 	constructor(private readonly onAdvice: (note: string, severity?: AdviseDetails["severity"]) => void) {}
 
 	/**
 	 * Mark whether the next advisor prompt reviews an in-progress primary turn.
-	 * Non-blockers are normally dropped while reviewing partial work so they do
-	 * not interrupt the primary before it can finish its planned steps. When
-	 * configured, a concern may pass through to the normal steering policy; nits
-	 * remain dropped and blockers always pass through.
+	 * Advice below the steering threshold is dropped while reviewing partial
+	 * work so it cannot interrupt before the primary finishes its planned steps.
 	 */
-	beginUpdate(options: { inProgress: boolean; steerInProgressConcerns?: boolean }): void {
+	beginUpdate(options: { inProgress: boolean; steerLevel?: AdvisorSteerLevel }): void {
 		this.#inProgressUpdate = options.inProgress;
-		this.#steerInProgressConcerns = options.steerInProgressConcerns ?? false;
+		this.#steerLevel = options.steerLevel ?? "blocker";
 	}
 
 	/** Clear delivered-note memory when the advisor starts a fresh conversation. */
 	resetDeliveredNotes(): void {
 		this.#deliveredNoteSeverities.clear();
 		this.#inProgressUpdate = false;
-		this.#steerInProgressConcerns = false;
+		this.#steerLevel = "blocker";
 	}
 
 	async execute(
@@ -213,8 +205,7 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 		_onUpdate?: AgentToolUpdateCallback<AdviseDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<AdviseDetails>> {
-		const maySteerConcern = args.severity === "concern" && this.#steerInProgressConcerns;
-		if (this.#inProgressUpdate && args.severity !== "blocker" && !maySteerConcern) {
+		if (this.#inProgressUpdate && !shouldSteerAdvisorSeverity(args.severity, this.#steerLevel)) {
 			return {
 				content: [{ type: "text", text: "Recorded." }],
 				details: { note: args.note, severity: args.severity },
