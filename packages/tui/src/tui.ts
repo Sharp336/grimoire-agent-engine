@@ -24,9 +24,9 @@ import { isKeyRelease, matchesKey } from "./keys";
 import { LoopWatchdog } from "./loop-watchdog";
 import {
 	composeRightSidebar,
-	resolveRightSidebarLayout,
 	type ResolvedRightSidebarLayout,
 	type RightSidebarOptions,
+	resolveRightSidebarLayout,
 } from "./reserved-sidebar";
 import { isConPTYHosted, setAltScreenActive, type Terminal } from "./terminal";
 import {
@@ -2648,12 +2648,7 @@ export class TUI extends Container {
 			return;
 		}
 
-		const {
-			terminalWidth,
-			height,
-			mainWidth,
-			sidebar: sidebarLayout,
-		} = this.#activeViewportLayout();
+		const { terminalWidth, height, mainWidth, sidebar: sidebarLayout } = this.#activeViewportLayout();
 		if (!this.#hasEverRendered || this.#resizeEventPending) {
 			this.requestComponentRender(component);
 			return;
@@ -3519,12 +3514,7 @@ export class TUI extends Container {
 	#doRender(): void {
 		if (this.#stopped) return;
 		const layout = this.#activeViewportLayout();
-		const {
-			terminalWidth,
-			height,
-			mainWidth,
-			sidebar: sidebarLayout,
-		} = layout;
+		const { terminalWidth, height, mainWidth, sidebar: sidebarLayout } = layout;
 		const contentWidthChanged = this.#composeWidth >= 0 && mainWidth !== this.#composeWidth;
 
 		// Consume the component-scoped accumulation: it describes the render
@@ -4188,16 +4178,25 @@ export class TUI extends Container {
 				commitTo = commitFrom;
 			}
 			this.#imageBudget.observeCommitWatermark(commitTo);
-			this.#emitWidthEpochBaseline(frame, window, terminalWidth, height, cursorPos, purgeSequence, imageTransmitBuffer, {
-				repaintFromScreenRow: 0,
-				commitFrom,
-				commitTo,
-				appendOnly: logicalAppend,
-				prepaintWindowTop: logicalAppend && !logicalPrefixAppend && !hasVisibleOverlay ? commitFrom : undefined,
-				windowTop,
-				cursorTrackingLineCount,
-				leadingSequence: deferredAltExit,
-			});
+			this.#emitWidthEpochBaseline(
+				frame,
+				window,
+				terminalWidth,
+				height,
+				cursorPos,
+				purgeSequence,
+				imageTransmitBuffer,
+				{
+					repaintFromScreenRow: 0,
+					commitFrom,
+					commitTo,
+					appendOnly: logicalAppend,
+					prepaintWindowTop: logicalAppend && !logicalPrefixAppend && !hasVisibleOverlay ? commitFrom : undefined,
+					windowTop,
+					cursorTrackingLineCount,
+					leadingSequence: deferredAltExit,
+				},
+			);
 			this.#pendingAltExit = "";
 			if (!hasVisibleOverlay) {
 				this.#widthEpochOverlayReplayPending = false;
@@ -5070,9 +5069,11 @@ export class TUI extends Container {
 	 * above the fold, so its reserved rows are preserved instead of erased
 	 * (issue #8318).
 	 */
-	#composeResizeViewport(
-		layout: ActiveViewportLayout,
-	): { framed: readonly string[]; viewportTop: number; contentRows: number } {
+	#composeResizeViewport(layout: ActiveViewportLayout): {
+		framed: readonly string[];
+		viewportTop: number;
+		contentRows: number;
+	} {
 		const { mainWidth, height } = layout;
 		const maxRows = height + TUI.#OSC66_MAX_SPACER_ROWS;
 		const tail: string[] = []; // bottom-first: viewport rows plus context above

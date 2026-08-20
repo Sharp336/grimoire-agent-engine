@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, it, mock } from "bun:test";
-import { Container, type Component } from "@oh-my-pi/pi-tui";
+import { type Component, Container } from "@oh-my-pi/pi-tui";
 import type { ExtensionWidgetOptions, WidgetPlacement } from "../src/extensibility/extensions";
 import { ExtensionUiController } from "../src/modes/controllers/extension-ui-controller";
 import { getThemeByName, setThemeInstance } from "../src/modes/theme/theme";
@@ -91,7 +91,12 @@ describe("ExtensionUiController rightSidebar widgets", () => {
 
 		expect(first.disposeCalls).toBe(1);
 		expect(second.disposeCalls).toBe(0);
-		expect(mounted.at(-1)?.component?.render(43).some(line => line.includes("B"))).toBe(true);
+		expect(
+			mounted
+				.at(-1)
+				?.component?.render(43)
+				.some(line => line.includes("B")),
+		).toBe(true);
 
 		controller.setHookWidget("b", undefined, rightSidebarDefaults);
 		controller.setHookWidget("b", undefined, rightSidebarDefaults);
@@ -163,13 +168,8 @@ describe("ExtensionUiController rightSidebar widgets", () => {
 	});
 
 	it("fully cleans up every placement and unmounts the aggregate", () => {
-		const {
-			controller,
-			hookWidgetContainerAbove,
-			hookWidgetContainerBelow,
-			mounted,
-			setRightSidebar,
-		} = createController();
+		const { controller, hookWidgetContainerAbove, hookWidgetContainerBelow, mounted, setRightSidebar } =
+			createController();
 		const above = new Probe(["above"]);
 		const below = new Probe(["below"]);
 		const rightA = new Probe(["right A"]);

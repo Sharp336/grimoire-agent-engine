@@ -1,8 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import {
 	composeRightSidebar,
-	resolveRightSidebarLayout,
 	type RightSidebarOptions,
+	resolveRightSidebarLayout,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 
@@ -73,11 +73,7 @@ describe("resolveRightSidebarLayout", () => {
 describe("composeRightSidebar", () => {
 	it("places the separator at mainWidth and preserves ANSI width", () => {
 		const layout = resolveRightSidebarLayout(120, OPTIONS);
-		const result = composeRightSidebar(
-			["main", "\x1b[31mcolored\x1b[0m"],
-			["side", "quota 42%"],
-			layout,
-		);
+		const result = composeRightSidebar(["main", "\x1b[31mcolored\x1b[0m"], ["side", "quota 42%"], layout);
 
 		expect(result).toHaveLength(2);
 		expect(visibleWidth(result[0]!)).toBeLessThanOrEqual(120);

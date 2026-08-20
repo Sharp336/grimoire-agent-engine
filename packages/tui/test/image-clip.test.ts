@@ -481,5 +481,4 @@ describe("TUI direct-placement clipping", () => {
 			tui.stop();
 		}
 	});
-
 });

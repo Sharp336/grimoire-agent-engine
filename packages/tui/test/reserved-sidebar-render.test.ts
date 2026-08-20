@@ -5,7 +5,10 @@ import { VirtualTerminal } from "./virtual-terminal";
 
 class WidthAndTextProbe implements Component {
 	readonly widths: number[] = [];
-	constructor(private readonly prefix: string, private readonly rows = 1) {}
+	constructor(
+		private readonly prefix: string,
+		private readonly rows = 1,
+	) {}
 	render(width: number): readonly string[] {
 		this.widths.push(width);
 		return Array.from({ length: this.rows }, (_, index) => `${this.prefix}-${index}`);

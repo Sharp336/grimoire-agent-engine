@@ -31,7 +31,7 @@ export default function rightSidebarExample(pi: ExtensionAPI): void {
 	function mount(ctx: ExtensionContext): void {
 		ctx.ui.setWidget(
 			"right-sidebar-example",
-			(tui) => {
+			tui => {
 				sidebar = new SidebarExample(tui);
 				render(ctx);
 				return sidebar;
