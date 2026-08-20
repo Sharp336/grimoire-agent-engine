@@ -3446,8 +3446,8 @@ export class TUI extends Container {
 		width: number,
 		height: number,
 		cursorPos: { row: number; col: number } | null,
-	): { lines: string[]; cursorPos: { row: number; col: number } | null } {
-		if (!isConPTYHosted()) return { lines, cursorPos };
+	): { lines: string[]; cursorPos: { row: number; col: number } | null; sourceStart: number } {
+		if (!isConPTYHosted()) return { lines, cursorPos, sourceStart: 0 };
 
 		let totalBytes = 0;
 		let exceedsThreshold = false;
@@ -3458,7 +3458,7 @@ export class TUI extends Container {
 				break;
 			}
 		}
-		if (!exceedsThreshold) return { lines, cursorPos };
+		if (!exceedsThreshold) return { lines, cursorPos, sourceStart: 0 };
 
 		let retainedBytes = 0;
 		let retainedStart = lines.length;
@@ -3469,7 +3469,7 @@ export class TUI extends Container {
 			retainedStart -= 1;
 			retainedBytes += Buffer.byteLength(lines[retainedStart] ?? "", "utf8") + 8;
 		}
-		if (retainedStart <= 0) return { lines, cursorPos };
+		if (retainedStart <= 0) return { lines, cursorPos, sourceStart: 0 };
 
 		const marker = truncateToWidth(
 			`[${retainedStart} older lines hidden to keep Windows console resume responsive]`,
@@ -3483,11 +3483,12 @@ export class TUI extends Container {
 		}
 
 		if (cursorPos === null || cursorPos.row < retainedStart) {
-			return { lines: truncated, cursorPos: null };
+			return { lines: truncated, cursorPos: null, sourceStart: retainedStart };
 		}
 		return {
 			lines: truncated,
 			cursorPos: { row: cursorPos.row - retainedStart + 1, col: cursorPos.col },
+			sourceStart: retainedStart,
 		};
 	}
 
@@ -4930,6 +4931,7 @@ export class TUI extends Container {
 		// theme change / session replace) just to be returned unchanged.
 		// `paintLines` stays null unless truncation actually rewrote the replay.
 		let paintLines: string[] | null = null;
+		let paintMainLines: string[] | null = null;
 		let paintLineCount = chunkTo + height;
 		if (options.boundConptyPaint && isConPTYHosted()) {
 			const merged = new Array<string>(chunkTo + height);
@@ -4942,6 +4944,15 @@ export class TUI extends Container {
 				paintLines = paint.lines;
 				paintLineCount = paint.lines.length;
 				paintCursorPos = paint.cursorPos;
+				paintMainLines = new Array<string>(paint.lines.length);
+				paintMainLines[0] = paint.lines[0] ?? "";
+				for (let i = 1; i < paint.lines.length; i++) {
+					const sourceRow = paint.sourceStart + i - 1;
+					paintMainLines[i] =
+						sourceRow < chunkTo
+							? (frame[sourceRow] ?? "")
+							: (options.mainWindow[sourceRow - chunkTo] ?? "");
+				}
 			}
 		}
 		let buffer = this.#paintBeginSequence + this.#leaveResizeAltSequence() + options.leadingSequence + purgeSequence;
@@ -5035,10 +5046,12 @@ export class TUI extends Container {
 		} else {
 			// ConPTY-truncated replay: leading rows were dropped, so frame-space
 			// positions are unknown — placements still clip to the write row but
-			// skip epoch bookkeeping.
+			// skip epoch bookkeeping. `paintMainLines` maps the exact retained
+			// source slice so sidebar composition cannot hide image/OSC metadata.
 			for (let i = 0; i < paintLines.length; i++) {
 				if (i > 0) buffer += "\r\n";
 				const line = visibleTexts && i >= visibleStart ? visibleTexts[i - visibleStart] : (paintLines[i] ?? "");
+				const mainLine = paintMainLines?.[i] ?? line;
 				const writeRow = Math.min(i, height - 1);
 				buffer += options.clearScrollback
 					? this.#lineRewriteSequence(
@@ -5047,9 +5060,11 @@ export class TUI extends Container {
 							writeRow,
 							-1,
 							chunkTo,
-							this.#osc66SpacerGlyphWidth(paintLines, i),
+							this.#osc66SpacerGlyphWidth(paintMainLines ?? paintLines, i),
+							mainLine,
+							options.sidebarLayout,
 						)
-					: this.#terminalLine(line, writeRow, -1, chunkTo);
+					: this.#terminalLine(line, writeRow, -1, chunkTo, mainLine, options.sidebarLayout);
 			}
 		}
 		buffer += fillSequence;
@@ -5512,7 +5527,8 @@ export class TUI extends Container {
 								options.sidebarLayout,
 							);
 							if (suffix.length > 0) {
-								buffer += suffix + LINE_TERMINATOR + ERASE_TO_END_OF_LINE;
+								buffer += suffix + LINE_TERMINATOR;
+								if (visibleWidth(line) < width) buffer += ERASE_TO_END_OF_LINE;
 								continue;
 							}
 						}

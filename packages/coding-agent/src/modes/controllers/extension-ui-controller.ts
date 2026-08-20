@@ -374,28 +374,31 @@ export class ExtensionUiController {
 			return;
 		}
 
-		if (placement === "rightSidebar") {
-			const existing = this.#hookWidgetsRight.get(key);
-			const inner = this.#createHookWidget(content);
-			let boundary: ExtensionWidgetBoundary;
-			boundary = new ExtensionWidgetBoundary(inner, () => {
-				const entry = this.#hookWidgetsRight.get(key);
-				if (entry?.component !== boundary) return;
-				this.#hookWidgetsRight.delete(key);
-				boundary.dispose();
-				this.#rebuildHookWidgets();
-				this.ctx.showError(`Extension widget "${key}" render failed`);
-			});
-			existing?.component.dispose();
-			// Map#set on an existing key replaces its value without moving it.
-			this.#hookWidgetsRight.set(key, { component: boundary, options: options ?? {} });
-		} else {
-			this.#removeRightSidebarWidget(key);
-			const target = placement === "belowEditor" ? this.#hookWidgetsBelow : this.#hookWidgetsAbove;
-			target.set(key, this.#createHookWidget(content));
+		try {
+			if (placement === "rightSidebar") {
+				const existing = this.#hookWidgetsRight.get(key);
+				const inner = this.#createHookWidget(content);
+				let boundary: ExtensionWidgetBoundary;
+				boundary = new ExtensionWidgetBoundary(inner, () => {
+					const entry = this.#hookWidgetsRight.get(key);
+					if (entry?.component !== boundary) return;
+					this.#hookWidgetsRight.delete(key);
+					boundary.dispose();
+					this.#rebuildHookWidgets();
+					this.ctx.showError(`Extension widget "${key}" render failed`);
+				});
+				existing?.component.dispose();
+				// Map#set on an existing key replaces its value without moving it.
+				this.#hookWidgetsRight.set(key, { component: boundary, options: options ?? {} });
+			} else {
+				this.#removeRightSidebarWidget(key);
+				const target = placement === "belowEditor" ? this.#hookWidgetsBelow : this.#hookWidgetsAbove;
+				target.set(key, this.#createHookWidget(content));
+			}
+			this.#rebuildHookWidgets();
+		} finally {
+			if (restoreFocus) this.ctx.ui.setFocus(previousFocus);
 		}
-		this.#rebuildHookWidgets();
-		if (restoreFocus) this.ctx.ui.setFocus(previousFocus);
 	}
 
 	#removeHookWidget(widgets: Map<string, ExtensionUiComponent>, key: string): void {

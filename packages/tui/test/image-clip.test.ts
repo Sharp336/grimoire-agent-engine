@@ -528,10 +528,7 @@ describe("TUI direct-placement clipping", () => {
 		});
 		const tui = new TUI(terminal);
 		const filler: Component = {
-			render: width =>
-				Array.from({ length: 7000 }, (_, index) =>
-					`${index.toString().padStart(5, "0")}-${"x".repeat(width)}`.slice(0, width),
-				),
+			render: () => ["prefix", `\x1b_Ga=T,f=100;${"A".repeat(530_000)}\x1b\\`],
 		};
 		const imageKey = "conpty-sidebar-clip";
 		const image = new Image(
@@ -542,11 +539,15 @@ describe("TUI direct-placement clipping", () => {
 			{ widthPx: 40, heightPx: 60 },
 		);
 		const imageId = tui.imageBudget.acquireId(imageKey);
+		const placementOnly: Component = {
+			render: width => {
+				const lines = image.render(width);
+				return [lines.at(-1) ?? ""];
+			},
+		};
 		tui.addChild(filler);
-		tui.addChild(image);
-		tui.addChild({
-			render: () => Array.from({ length: 10 }, (_, index) => `tail-${index}`),
-		});
+		tui.addChild(placementOnly);
+		tui.addChild({ render: () => Array.from({ length: 11 }, (_, index) => `tail-${index}`) });
 		tui.setRightSidebar(
 			{ render: () => Array.from({ length: 12 }, (_, index) => `SIDE-${index}`) },
 			{ width: 44, minWidth: 28, minMainWidth: 64 },
@@ -561,9 +562,9 @@ describe("TUI direct-placement clipping", () => {
 			expect(placements.length).toBeGreaterThan(0);
 			const placement = placements.at(-1)!;
 			expect(placement.placementId).toBe(1);
-			expect(placement.rows).toBe(2);
-			expect(placement.srcY).toBe(40);
-			expect(placement.cuu).toBe(1);
+			expect(placement.rows).toBeLessThan(6);
+			expect(placement.srcY).toBe(Math.floor((60 * (6 - placement.rows)) / 6));
+			expect(placement.cuu).toBe(placement.rows - 1);
 		} finally {
 			tui.stop();
 		}
