@@ -3966,7 +3966,7 @@ export class TUI extends Container {
 		// remainder removes committed rows — drop the commit seam by it and let
 		// the next chunk re-commit them. A short frame gains blank rows instead
 		// of pulling.
-		if (fullPaint || widthChanged) {
+		if (fullPaint || widthEpochOccurred) {
 			this.#muxPushedRows = 0;
 		} else if (
 			geometryChanged &&
@@ -4057,7 +4057,7 @@ export class TUI extends Container {
 			windowTop = Math.max(0, frameLength - height);
 			chunkTo = windowTop;
 			this.#committedRows = windowTop;
-			if (widthChanged) {
+			if (widthEpochOccurred) {
 				// A rewrap invalidated the recorded bytes: re-base the audit prefix
 				// at the new width so the accepted wrap drift does not read as a
 				// violation on the next ordinary frame.
@@ -4091,7 +4091,7 @@ export class TUI extends Container {
 				hasVisibleOverlay || geometryChanged
 					? this.#committedRows
 					: Math.min(windowTop, Math.max(this.#committedRows, commitCeiling));
-			if (widthChanged) {
+			if (widthEpochOccurred) {
 				committedPrefixResliced = true;
 				this.#committedPrefix = rawFrame.slice(0, this.#committedRows);
 			}
