@@ -189,17 +189,21 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 	 *  tool previously returned "Recorded." for a note that was never routed).
 	 *  Cleared on `resetDeliveredNotes` alongside the delivered-rank map. */
 	#deferredNotes: { key: string; note: string; severity?: AdviseDetails["severity"] }[] = [];
+	#steerInProgressConcerns = false;
 
 	constructor(private readonly onAdvice: (note: string, severity?: AdviseDetails["severity"]) => void) {}
 
 	/**
 	 * Mark whether the next advisor prompt reviews an in-progress primary turn.
-	 * Non-blockers are withheld until a completed update so partial work does
-	 * not interrupt the primary before it can finish its planned steps.
+	 * Non-blockers are normally withheld until a completed update so partial work
+	 * does not interrupt the primary before it can finish its planned steps.
+	 * When configured, a concern may pass through to the normal steering policy;
+	 * nits remain withheld and blockers always pass through.
 	 */
-	beginUpdate(inProgress: boolean): void {
+	beginUpdate(inProgress: boolean, steerInProgressConcerns = false): void {
 		const wasInProgress = this.#inProgressUpdate;
 		this.#inProgressUpdate = inProgress;
+		this.#steerInProgressConcerns = steerInProgressConcerns;
 		// Turn just completed: flush everything withheld mid-turn, oldest first.
 		// Each flush re-enters the normal dedupe path (escalation rank > delivered
 		// rank), so a note the advisor already got through at a higher severity
@@ -216,6 +220,7 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 		this.#deliveredNoteSeverities.clear();
 		this.#inProgressUpdate = false;
 		this.#deferredNotes = [];
+		this.#steerInProgressConcerns = false;
 	}
 
 	async execute(
@@ -225,7 +230,8 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 		_onUpdate?: AgentToolUpdateCallback<AdviseDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<AdviseDetails>> {
-		if (this.#inProgressUpdate && args.severity !== "blocker") {
+		const maySteerConcern = args.severity === "concern" && this.#steerInProgressConcerns;
+		if (this.#inProgressUpdate && args.severity !== "blocker" && !maySteerConcern) {
 			// Withheld, not delivered: queue for the deterministic flush on the next
 			// completed update. Skip if an identical note is already pending so a
 			// long mid-turn can't pile up 20 copies of the same advice. Tell the

@@ -934,7 +934,10 @@ export class SessionAdvisors {
 				obfuscator: this.#host.obfuscator,
 				getModelIdentity: () => formatModelString(advisorRef.agent.state.model),
 				beginAdvisorUpdate: inProgress => {
-					advisorRef.adviseTool.beginUpdate(inProgress);
+					advisorRef.adviseTool.beginUpdate(
+						inProgress,
+						this.#host.settings.get("advisor.steerInProgressConcerns"),
+					);
 					advisorRef.emissionGuard.beginUpdate();
 				},
 				onTurnError: (error, failedMessages, signal) =>

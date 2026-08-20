@@ -559,6 +559,18 @@ export const SETTINGS_SCHEMA = {
 			condition: "advisorEnabled",
 		},
 	},
+	"advisor.steerInProgressConcerns": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Advisor",
+			label: "Steer In-Progress Concerns",
+			description:
+				"Let concern-level advice raised during in-progress work interrupt and steer the primary agent. Off withholds concerns until a completed review.",
+			condition: "advisorEnabled",
+		},
+	},
 	"advisor.immuneTurns": {
 		type: "number",
 		default: 3,

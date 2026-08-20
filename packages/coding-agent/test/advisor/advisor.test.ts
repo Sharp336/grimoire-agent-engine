@@ -497,6 +497,21 @@ describe("advisor", () => {
 			expect(onAdvice).toHaveBeenCalledWith("Same point raised repeatedly.", "concern");
 		});
 
+		it("forwards in-progress concerns when concern steering is enabled", async () => {
+			const onAdvice = vi.fn();
+			const tool = new AdviseTool(onAdvice);
+
+			tool.beginUpdate(true, true);
+			await tool.execute("tc-1", {
+				note: "The active edit targets the wrong code path.",
+				severity: "concern",
+			});
+			await tool.execute("tc-2", { note: "Minor naming cleanup.", severity: "nit" });
+
+			expect(onAdvice).toHaveBeenCalledTimes(1);
+			expect(onAdvice).toHaveBeenCalledWith("The active edit targets the wrong code path.", "concern");
+		});
+
 		it("validates parameters using ArkType", () => {
 			const onAdvice = vi.fn();
 			const tool = new AdviseTool(onAdvice);

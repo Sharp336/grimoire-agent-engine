@@ -324,6 +324,12 @@
 - `qwenTemplateReasoningEffort` in `models.yml` `compat` to disable the Qwen 3.8+ reasoning-effort template parameter for strict local servers.
 - Click-to-toggle and drag-to-reorder for list-valued editors in `/settings`.
 - `icon.subscription` and `icon.advisor` symbol-theme tokens (Nerd Font, Unicode, ASCII).
+- Added `advisor.steerInProgressConcerns` so users can let concern-level advice interrupt an active primary turn instead of withholding it until a completed review ([#9074](https://github.com/can1357/oh-my-pi/issues/9074)).
+- Added `qwenTemplateReasoningEffort` to the `models.yml` `compat` schema, so the auto-enabled Qwen 3.8+ template effort dialect (`chat_template_kwargs.reasoning_effort`) can be switched off per provider/model for strict local servers that reject unknown `chat_template_kwargs`.
+- Added `tokenizer` to custom model and `modelOverrides` configuration. It overrides the catalog-resolved local tokenizer family for a model when a proxy serves a known model id with a different tokenizer.
+- Added `extendedContext` setting (`/settings` → Context → General, default on). When off, models with a premium long-context price tier (OpenAI GPT-5.6 Sol/Terra/Luna bill 2x input / 1.5x output above 272K input tokens, on both the API and subscription Codex) are capped at the standard-pricing threshold — they appear as 272K again and compaction fires before a request crosses into premium billing. Toggling mid-session re-clamps or restores the active model's window immediately. Anthropic Claude 4.6+ serves its full 1M window at standard pricing, so no Anthropic model is affected.
+- Added click-to-toggle and drag-to-reorder controls for list-valued `/settings` editors.
+- Added `compaction.asyncEnabled` (Async Compaction, default on): when context enters the band just below the compaction threshold, maintenance speculatively summarizes in the background off a branch snapshot (first configured LLM-backed method — remote, handoff, or soft — isolated from the live turn by a side session id) and holds the armed result; crossing the threshold then splices it in instantly instead of blocking on a summarization round-trip. Armed results are invalidated by branch changes, reset boundaries, model switches that strand provider-native replay payloads, and context growth past `keepRecentTokens` (which re-speculates). The status line pulses the auto-compact icon while a speculation runs and holds it in accent once a result is armed.
 
 ### Changed
 
