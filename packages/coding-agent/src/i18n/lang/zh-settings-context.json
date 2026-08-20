@@ -128,8 +128,6 @@
   "settings.contextPromotion.enabled.label": "自动提升上下文",
   "settings.context.extendedContext.description": "在超过阈值时使用付费的长上下文窗口（例如 GPT-5.6 1M 在超过 272K 时收取 2 倍输入费用）；关闭则限制在标准定价窗口",
   "settings.context.extendedContext.label": "扩展上下文",
-  "settings.context.extendedContext.description": "在超过阈值时使用付费的长上下文窗口（例如 GPT-5.6 1M 在超过 272K 时收取 2 倍输入费用）；关闭则限制在标准定价窗口",
-  "settings.context.extendedContext.label": "扩展上下文",
   "settings.defaultThinkingLevel.label": "思考等级",
   "settings.dev.autoqaPush.endpoint.label": "自动 QA 推送地址",
   "settings.git.enabled.label": "启用 Git 集成",
