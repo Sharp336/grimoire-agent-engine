@@ -1538,7 +1538,7 @@ export class TUI extends Container {
 		} else {
 			this.#rightSidebar = { component, options };
 		}
-		this.requestRender(true, { clearScrollback: !isMultiplexerSession() });
+		this.requestRender(true, { clearScrollback: this.#hasEverRendered && !isMultiplexerSession() });
 	}
 
 	#resolveRightSidebar(terminalWidth: number): ResolvedRightSidebarLayout {
@@ -2622,13 +2622,19 @@ export class TUI extends Container {
 			return;
 		}
 
-		const width = this.terminal.columns;
+		const terminalWidth = this.terminal.columns;
 		const height = this.terminal.rows;
+		const sidebarLayout = this.#resolveRightSidebar(terminalWidth);
+		const mainWidth = sidebarLayout.mainWidth;
 		if (!this.#hasEverRendered || this.#resizeEventPending) {
 			this.requestComponentRender(component);
 			return;
 		}
-		if (width !== this.#previousWidth || height !== this.#previousHeight || width !== this.#composeWidth) {
+		if (
+			terminalWidth !== this.#previousWidth ||
+			height !== this.#previousHeight ||
+			mainWidth !== this.#composeWidth
+		) {
 			this.requestComponentRender(component);
 			return;
 		}
@@ -2685,25 +2691,43 @@ export class TUI extends Container {
 			return;
 		}
 
-		const nextLines = root.render(width);
+		const nextLines = root.render(mainWidth);
 		if (nextLines.length !== segment.rowCount) {
 			this.requestComponentRender(component);
 			return;
 		}
 
-		let firstChanged = -1;
-		let lastChanged = -1;
-		const previousWindow = this.#previousWindow;
+		const mainWindowLines = new Array<string>(nextLines.length);
 		for (let i = 0; i < nextLines.length; i++) {
 			const frameRow = segment.start + i;
 			const raw = nextLines[i]!;
 			const composed = this.#stripCursorMarkers(raw);
-			const prepared = this.#prepareLine(composed, width);
+			const prepared = this.#prepareLine(composed, mainWidth);
 			this.#composedFrame[frameRow] = composed;
 			this.#preparedMeta[frameRow] = prepared;
 			this.#preparedFrame[frameRow] = prepared.line;
-			if (previousWindow[screenStart + i] === prepared.line) continue;
-			previousWindow[screenStart + i] = prepared.line;
+			mainWindowLines[i] = prepared.line;
+		}
+		const sidebarRegistration = this.#rightSidebar;
+		const sidebarLines =
+			sidebarLayout.visible && sidebarRegistration
+				? sidebarRegistration.component.render(sidebarLayout.sidebarContentWidth)
+				: undefined;
+		const nextWindowLines = sidebarLines
+			? composeRightSidebar(
+					mainWindowLines,
+					sidebarLines.slice(screenStart, screenStart + mainWindowLines.length),
+					sidebarLayout,
+				)
+			: mainWindowLines;
+
+		let firstChanged = -1;
+		let lastChanged = -1;
+		const previousWindow = this.#previousWindow;
+		for (let i = 0; i < nextWindowLines.length; i++) {
+			const line = nextWindowLines[i]!;
+			if (previousWindow[screenStart + i] === line) continue;
+			previousWindow[screenStart + i] = line;
 			if (firstChanged === -1) firstChanged = i;
 			lastChanged = i;
 		}
@@ -2723,7 +2747,7 @@ export class TUI extends Container {
 
 		if (firstChanged === -1) {
 			this.#writeCursorPosition(cursorPos, this.#composedFrame.length);
-			this.#previousWidth = width;
+			this.#previousWidth = terminalWidth;
 			this.#previousHeight = height;
 			return;
 		}
@@ -2738,8 +2762,8 @@ export class TUI extends Container {
 		for (let i = firstChanged; i <= lastChanged; i++) {
 			if (i > firstChanged) buffer += "\r\n";
 			buffer += this.#lineRewriteSequence(
-				this.#preparedFrame[segment.start + i] ?? "",
-				width,
+				previousWindow[screenStart + i] ?? "",
+				terminalWidth,
 				screenStart + i,
 				segment.start + i,
 				this.#committedRows,
@@ -2755,7 +2779,7 @@ export class TUI extends Container {
 		buffer += this.#paintEndSequence;
 		this.terminal.write(buffer);
 		this.#windowTopRow = windowTop;
-		this.#commit(this.#composedFrame, previousWindow, width, height, cursorControl);
+		this.#commit(this.#composedFrame, previousWindow, terminalWidth, height, cursorControl);
 	}
 
 	#postFullPaintSettleDelay(): number {
@@ -2803,10 +2827,16 @@ export class TUI extends Container {
 	 * the partial compose would reuse, or when a requested component is not
 	 * reachable from the current root child list.
 	 */
-	#resolvePartialComposeRoots(width: number, height: number): Set<Component> | null {
+	#resolvePartialComposeRoots(terminalWidth: number, mainWidth: number, height: number): Set<Component> | null {
 		if (this.#componentRenderTargets.size === 0) return null;
 		if (!this.#hasEverRendered || this.#resizeEventPending) return null;
-		if (width !== this.#previousWidth || height !== this.#previousHeight || width !== this.#composeWidth) return null;
+		if (
+			terminalWidth !== this.#previousWidth ||
+			height !== this.#previousHeight ||
+			mainWidth !== this.#composeWidth
+		) {
+			return null;
+		}
 		if (this.#clearScrollbackOnNextRender || this.#forceViewportRepaintOnNextRender) return null;
 		if (this.overlayStack.length > 0) return null;
 		// The image budget audits display order across the whole frame; a
@@ -3592,7 +3622,9 @@ export class TUI extends Container {
 		// a quiescent budget, and a partial tree walk would under-count display
 		// order — and re-renders only the requested root subtrees, reusing the
 		// previous segment of every other root child.
-		const partialRoots = componentScopedOnly ? this.#resolvePartialComposeRoots(terminalWidth, height) : null;
+		const partialRoots = componentScopedOnly
+			? this.#resolvePartialComposeRoots(terminalWidth, mainWidth, height)
+			: null;
 		this.#componentRenderTargets.clear();
 		let rawFrame: readonly string[];
 		if (partialRoots !== null) {
