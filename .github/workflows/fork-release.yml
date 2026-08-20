@@ -14,10 +14,15 @@ permissions:
   contents: write
 
 jobs:
-  package:
-    name: Package Linux and Windows x64
+  validate:
+    name: Validate official release base
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
+    timeout-minutes: 60
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      official-tag: ${{ steps.metadata.outputs.official-tag }}
+      official-sha: ${{ steps.metadata.outputs.official-sha }}
+      release-tag: ${{ steps.metadata.outputs.release-tag }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -62,6 +67,7 @@ jobs:
 
           for package in \
             @oh-my-pi/pi-natives-linux-x64 \
+            @oh-my-pi/pi-natives-linux-arm64 \
             @oh-my-pi/pi-natives-win32-x64; do
             published="$(npm view "${package}@${version}" version 2>/dev/null || true)"
             if [ "$published" != "$version" ]; then
@@ -96,9 +102,6 @@ jobs:
             exit 1
           fi
 
-          # The downstream patch is generated text. Normalize the generated
-          # TypeScript plus the patch script itself before the official Biome
-          # check so formatting policy remains identical to upstream.
           bunx biome format --write \
             scripts/apply-fork-patches.ts \
             packages/coding-agent/src/tools/hub/index.ts \
@@ -109,14 +112,55 @@ jobs:
         run: |
           bun run ci:check:full
           bun run collab:web:build
-          # Match upstream CI exactly. The upstream workflow intentionally does
-          # not run test:scripts here because musl-release.test.ts fails on main
-          # for an unrelated fake-binary install smoke check.
+          # Match upstream CI: musl-release.test.ts is intentionally excluded.
           bun test scripts/ci-test-ts.test.ts scripts/release.test.ts
 
-      - name: Install official precompiled native artifacts
+  build:
+    name: Build ${{ matrix.target }}
+    needs: validate
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64
+            runner: ubuntu-22.04
+            native-package: "@oh-my-pi/pi-natives-linux-x64"
+            native-files: "pi_natives.linux-x64-baseline.node pi_natives.linux-x64-modern.node"
+            binary: omp-linux-x64
+            smoke: true
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+            native-package: "@oh-my-pi/pi-natives-linux-arm64"
+            native-files: "pi_natives.linux-arm64.node"
+            binary: omp-linux-arm64
+            smoke: true
+          - target: win32-x64
+            runner: ubuntu-22.04
+            native-package: "@oh-my-pi/pi-natives-win32-x64"
+            native-files: "pi_natives.win32-x64-baseline.node"
+            binary: omp-windows-x64.exe
+            smoke: false
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - uses: ./.github/actions/bun-install
+
+      - name: Apply minimal downstream Hub patch
+        run: |
+          bun scripts/apply-fork-patches.ts
+          bunx biome format --write \
+            scripts/apply-fork-patches.ts \
+            packages/coding-agent/src/tools/hub/index.ts \
+            packages/coding-agent/src/tools/hub/jobs.ts
+          git diff --check
+
+      - name: Install official precompiled native artifact
         env:
-          VERSION: ${{ steps.metadata.outputs.version }}
+          VERSION: ${{ needs.validate.outputs.version }}
+          NATIVE_PACKAGE: ${{ matrix.native-package }}
+          REQUIRED_NATIVE_FILES: ${{ matrix.native-files }}
         shell: bash
         run: |
           set -euo pipefail
@@ -125,24 +169,11 @@ jobs:
           trap 'rm -rf "$temp_dir"' EXIT
           rm -f "$native_dir"/*.node
 
-          download_leaf() {
-            local package="$1"
-            local extract_dir="$temp_dir/extract"
-            local tarball
-            rm -rf "$extract_dir"
-            mkdir -p "$extract_dir"
-            tarball="$(npm view "${package}@${VERSION}" dist.tarball)"
-            curl -fsSL --retry 3 "$tarball" | tar -xz -C "$extract_dir"
-            cp "$extract_dir"/package/*.node "$native_dir"/
-          }
+          tarball="$(npm view "${NATIVE_PACKAGE}@${VERSION}" dist.tarball)"
+          curl -fsSL --retry 3 "$tarball" | tar -xz -C "$temp_dir"
+          cp "$temp_dir"/package/*.node "$native_dir"/
 
-          download_leaf @oh-my-pi/pi-natives-linux-x64
-          download_leaf @oh-my-pi/pi-natives-win32-x64
-
-          for file in \
-            pi_natives.linux-x64-baseline.node \
-            pi_natives.linux-x64-modern.node \
-            pi_natives.win32-x64-baseline.node; do
+          for file in $REQUIRED_NATIVE_FILES; do
             test -s "$native_dir/$file" || {
               echo "::error::Missing official native artifact: $file"
               exit 1
@@ -150,40 +181,83 @@ jobs:
           done
           find "$native_dir" -maxdepth 1 -name '*.node' -printf '%f\n' | sort
 
-      - name: Build official Linux and Windows x64 binaries
+      - name: Build official target
         env:
-          RELEASE_TARGETS: linux-x64,win32-x64
+          RELEASE_TARGETS: ${{ matrix.target }}
         run: bun run ci:release:build-binaries
 
-      - name: Smoke-test Linux x64 binary
+      - name: Verify binary
+        env:
+          BINARY_NAME: ${{ matrix.binary }}
+        shell: bash
+        run: test -s "packages/coding-agent/binaries/${BINARY_NAME}"
+
+      - name: Smoke-test Linux binary
+        if: matrix.smoke
+        env:
+          BINARY_NAME: ${{ matrix.binary }}
         shell: bash
         run: |
           set -euo pipefail
-          binary="$PWD/packages/coding-agent/binaries/omp-linux-x64"
+          binary="$PWD/packages/coding-agent/binaries/${BINARY_NAME}"
           runtime_dir="$(mktemp -d)"
           trap 'rm -rf "$runtime_dir"' EXIT
           HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" "$binary" --version
           HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" "$binary" --smoke-test
 
-      - name: Stage release assets and verify checksums
+      - name: Upload target binary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: omp-binary-${{ matrix.target }}
+          path: packages/coding-agent/binaries/${{ matrix.binary }}
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    name: Publish fork release
+    needs: [validate, build]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - uses: ./.github/actions/bun-install
+
+      - name: Download target binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: omp-binary-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify release assets and checksums
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p dist
-          cp packages/coding-agent/binaries/omp-linux-x64 dist/
-          cp packages/coding-agent/binaries/omp-windows-x64.exe dist/
+          for file in \
+            omp-linux-x64 \
+            omp-linux-arm64 \
+            omp-windows-x64.exe; do
+            test -s "dist/$file" || {
+              echo "::error::Missing release asset: $file"
+              exit 1
+            }
+          done
+
           bun run ci:release:checksums \
             dist/SHA256SUMS.txt \
             dist/omp-linux-x64 \
+            dist/omp-linux-arm64 \
             dist/omp-windows-x64.exe
           (cd dist && sha256sum -c SHA256SUMS.txt)
 
-      - name: Upload release artifact
+      - name: Upload combined release artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: omp-${{ steps.metadata.outputs.version }}-fork-${{ github.run_number }}
+          name: omp-${{ needs.validate.outputs.version }}-fork-${{ github.run_number }}
           path: |
             dist/omp-linux-x64
+            dist/omp-linux-arm64
             dist/omp-windows-x64.exe
             dist/SHA256SUMS.txt
           if-no-files-found: error
@@ -191,7 +265,7 @@ jobs:
 
       - name: Create fork release tag
         env:
-          RELEASE_TAG: ${{ steps.metadata.outputs.release-tag }}
+          RELEASE_TAG: ${{ needs.validate.outputs.release-tag }}
         shell: bash
         run: |
           set -euo pipefail
@@ -211,16 +285,17 @@ jobs:
       - name: Publish GitHub release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
-          tag_name: ${{ steps.metadata.outputs.release-tag }}
-          name: OMP ${{ steps.metadata.outputs.version }} fork build ${{ github.run_number }}
+          tag_name: ${{ needs.validate.outputs.release-tag }}
+          name: OMP ${{ needs.validate.outputs.version }} fork build ${{ github.run_number }}
           body: |
-            Downstream fork package based on official `${{ steps.metadata.outputs.official-tag }}`.
+            Downstream fork package based on official `${{ needs.validate.outputs.official-tag }}`.
 
-            Changes are limited to the fork release workflow and a build-time patch that removes Hub peer messaging while retaining task creation, background-job control, and supervised long-running processes.
+            Linux x64, Linux ARM64, and Windows x64 use the same upstream release targets as the official build. Linux native addons are the official same-version precompiled packages; upstream GNU native targets use a glibc 2.17 portability floor, matching the official CentOS 7-compatible build strategy.
 
-            Rust native addons are the official `${{ steps.metadata.outputs.version }}` precompiled npm artifacts; this workflow does not compile Rust.
+            Changes are limited to the fork release workflow and a build-time patch that removes Hub peer messaging while retaining task creation, background-job control, and supervised long-running processes. This workflow does not compile Rust.
           files: |
             dist/omp-linux-x64
+            dist/omp-linux-arm64
             dist/omp-windows-x64.exe
             dist/SHA256SUMS.txt
           generate_release_notes: false
