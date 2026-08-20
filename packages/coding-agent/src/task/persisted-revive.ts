@@ -87,6 +87,7 @@ export function createPersistedSubagentReviverFactory(
 		// createSubagentSettings default).
 		const subagentSettings = createSubagentSettings(ctx.settings, {
 			...(init.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
+			...(init.systemPreset === "minimal-task" ? { inlineToolDescriptors: "off" } : undefined),
 			...(init.advisor
 				? {
 						"advisor.enabled": true,
@@ -100,6 +101,7 @@ export function createPersistedSubagentReviverFactory(
 			init.modelRole && init.modelRole !== "default"
 				? [formatModelRoleAlias(init.modelRole), ...(init.resolvedModel ? [init.resolvedModel] : [])]
 				: init.resolvedModel;
+		const minimalCapabilityOverrides = init.systemPreset === "minimal-task" ? { skills: [], rules: [] } : undefined;
 		return async expectedRef => {
 			// Re-open fresh on every revive: park closes the writer, so this takes
 			// the single-writer lock cleanly and restores the full message history.
@@ -132,6 +134,7 @@ export function createPersistedSubagentReviverFactory(
 				outputSchemaMode: init.outputSchemaMode,
 				restrictToolNames: restrictToolNames || undefined,
 				requireYieldTool: true,
+				...minimalCapabilityOverrides,
 				systemPrompt: () => [init.systemPrompt],
 				// Old files predate persisted spawns: deny re-spawning rather than let
 				// createAgentSession default to wildcard ("*").
@@ -177,6 +180,7 @@ export function createPersistedSubagentReviverFactory(
 				name: ref.displayName,
 				description: "",
 				systemPrompt: init.systemPrompt,
+				systemPreset: init.systemPreset,
 				source: "user",
 			};
 			attachIrcWakeTurnMonitor(session, {

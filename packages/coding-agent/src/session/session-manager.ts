@@ -18,7 +18,7 @@ import {
 	stringifyJson,
 	toError,
 } from "@oh-my-pi/pi-utils";
-import type { StructuredSubagentSchemaMode } from "../task/types";
+import type { StructuredSubagentSchemaMode, SystemPromptPreset } from "../task/types";
 import { ArtifactManager } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore } from "./blob-store";
 import type { CompactionMethod } from "./compaction-methods";
@@ -2220,6 +2220,7 @@ export class SessionManager {
 		systemPrompt: string;
 		task: string;
 		tools: string[];
+		systemPreset?: SystemPromptPreset;
 		agent?: string;
 		modelRole?: string;
 		resolvedModel?: string;
@@ -2754,6 +2755,7 @@ export class SessionManager {
 			systemPrompt: string;
 			task: string;
 			tools: string[];
+			systemPreset?: SystemPromptPreset;
 			agent?: string;
 			modelRole?: string;
 			resolvedModel?: string;
@@ -2770,6 +2772,7 @@ export class SessionManager {
 			systemPrompt: string;
 			task: string;
 			tools: string[];
+			systemPreset?: SystemPromptPreset;
 			agent?: string;
 			modelRole?: string;
 			resolvedModel?: string;
@@ -2790,6 +2793,7 @@ export class SessionManager {
 					systemPrompt: entry.systemPrompt,
 					task: entry.task,
 					tools: entry.tools,
+					systemPreset: entry.systemPreset,
 					agent: entry.agent,
 					modelRole: entry.modelRole,
 					resolvedModel: entry.resolvedModel,

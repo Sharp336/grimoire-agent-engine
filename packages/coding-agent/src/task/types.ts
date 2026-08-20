@@ -7,6 +7,9 @@ import type { NestedRepoPatch } from "./worktree";
 
 /** Source of an agent definition */
 export type AgentSource = "bundled" | "user" | "project";
+
+/** Opt-in strategy for constructing a subagent's system prompt. */
+export type SystemPromptPreset = "minimal-task";
 /**
  * Enforcement policy for a structured subagent output schema.
  *
@@ -360,6 +363,7 @@ export interface AgentDefinition {
 	name: string;
 	description: string;
 	systemPrompt: string;
+	systemPreset?: SystemPromptPreset;
 	tools?: string[];
 	spawns?: string[] | "*";
 	model?: string[];
