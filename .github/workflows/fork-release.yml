@@ -20,9 +20,9 @@ jobs:
     timeout-minutes: 60
     outputs:
       version: ${{ steps.metadata.outputs.version }}
-      official-tag: ${{ steps.metadata.outputs.official-tag }}
-      official-sha: ${{ steps.metadata.outputs.official-sha }}
-      release-tag: ${{ steps.metadata.outputs.release-tag }}
+      official_tag: ${{ steps.metadata.outputs.official_tag }}
+      official_sha: ${{ steps.metadata.outputs.official_sha }}
+      release_tag: ${{ steps.metadata.outputs.release_tag }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -78,9 +78,9 @@ jobs:
 
           {
             echo "version=$version"
-            echo "official-tag=$official_tag"
-            echo "official-sha=$official_sha"
-            echo "release-tag=$release_tag"
+            echo "official_tag=$official_tag"
+            echo "official_sha=$official_sha"
+            echo "release_tag=$release_tag"
           } >> "$GITHUB_OUTPUT"
 
           echo "Official source: ${official_tag} (${official_sha})"
@@ -125,20 +125,20 @@ jobs:
         include:
           - target: linux-x64
             runner: ubuntu-22.04
-            native-package: "@oh-my-pi/pi-natives-linux-x64"
-            native-files: "pi_natives.linux-x64-baseline.node pi_natives.linux-x64-modern.node"
+            native_package: "@oh-my-pi/pi-natives-linux-x64"
+            native_files: "pi_natives.linux-x64-baseline.node pi_natives.linux-x64-modern.node"
             binary: omp-linux-x64
             smoke: true
           - target: linux-arm64
             runner: ubuntu-24.04-arm
-            native-package: "@oh-my-pi/pi-natives-linux-arm64"
-            native-files: "pi_natives.linux-arm64.node"
+            native_package: "@oh-my-pi/pi-natives-linux-arm64"
+            native_files: "pi_natives.linux-arm64.node"
             binary: omp-linux-arm64
             smoke: true
           - target: win32-x64
             runner: ubuntu-22.04
-            native-package: "@oh-my-pi/pi-natives-win32-x64"
-            native-files: "pi_natives.win32-x64-baseline.node"
+            native_package: "@oh-my-pi/pi-natives-win32-x64"
+            native_files: "pi_natives.win32-x64-baseline.node"
             binary: omp-windows-x64.exe
             smoke: false
     runs-on: ${{ matrix.runner }}
@@ -159,8 +159,8 @@ jobs:
       - name: Install official precompiled native artifact
         env:
           VERSION: ${{ needs.validate.outputs.version }}
-          NATIVE_PACKAGE: ${{ matrix.native-package }}
-          REQUIRED_NATIVE_FILES: ${{ matrix.native-files }}
+          NATIVE_PACKAGE: ${{ matrix.native_package }}
+          REQUIRED_NATIVE_FILES: ${{ matrix.native_files }}
         shell: bash
         run: |
           set -euo pipefail
@@ -265,7 +265,7 @@ jobs:
 
       - name: Create fork release tag
         env:
-          RELEASE_TAG: ${{ needs.validate.outputs.release-tag }}
+          RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
         shell: bash
         run: |
           set -euo pipefail
@@ -285,10 +285,10 @@ jobs:
       - name: Publish GitHub release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
-          tag_name: ${{ needs.validate.outputs.release-tag }}
+          tag_name: ${{ needs.validate.outputs.release_tag }}
           name: OMP ${{ needs.validate.outputs.version }} fork build ${{ github.run_number }}
           body: |
-            Downstream fork package based on official `${{ needs.validate.outputs.official-tag }}`.
+            Downstream fork package based on official `${{ needs.validate.outputs.official_tag }}`.
 
             Linux x64, Linux ARM64, and Windows x64 use the same upstream release targets as the official build. Linux native addons are the official same-version precompiled packages; upstream GNU native targets use a glibc 2.17 portability floor, matching the official CentOS 7-compatible build strategy.
 
