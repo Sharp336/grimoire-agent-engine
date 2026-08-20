@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, setSystemTime, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -45,6 +46,113 @@ describe("AuthStorage OAuth refresh race", () => {
 			await removeWithRetries(tempDir);
 			tempDir = "";
 		}
+	});
+
+	test("bounds unchanged xAI invalid_grant CAS misses without returning a provider key", async () => {
+		if (!store) throw new Error("test setup failed");
+
+		let refreshCalls = 0;
+		authStorage = new AuthStorage(store, {
+			async refreshOAuthCredential() {
+				refreshCalls += 1;
+				throw new Error('HTTP 400 invalid_grant {"error":"invalid_grant"}');
+			},
+		});
+		await authStorage.set("xai-oauth", [
+			{
+				type: "oauth",
+				access: "expired-access",
+				refresh: "dead-refresh",
+				expires: Date.now() - 60_000,
+			},
+		]);
+		const credentialId = store.listAuthCredentials("xai-oauth")[0]?.id;
+		if (credentialId === undefined) throw new Error("missing seeded xAI credential");
+
+		const noncanonicalData = JSON.stringify(
+			{ access: "expired-access", refresh: "dead-refresh", expires: Date.now() - 60_000 },
+			null,
+			1,
+		).replaceAll("\n", " ");
+		const writer = new Database(path.join(tempDir, "agent.db"));
+		try {
+			writer.prepare("UPDATE auth_credentials SET data = ? WHERE id = ?").run(noncanonicalData, credentialId);
+		} finally {
+			writer.close();
+		}
+		await authStorage.reload();
+
+		await withEnv({ XAI_OAUTH_TOKEN: undefined, XAI_API_KEY: undefined }, async () => {
+			const apiKey = await authStorage!.getApiKey("xai-oauth", "session-invalid-grant");
+			let providerRequestCount = 0;
+			if (apiKey) providerRequestCount += 1;
+
+			expect(apiKey).toBeUndefined();
+			expect(providerRequestCount).toBe(0);
+		});
+		expect(refreshCalls).toBe(1);
+
+		const observer = new Database(path.join(tempDir, "agent.db"), { readonly: true });
+		try {
+			const row = observer
+				.prepare("SELECT data, disabled_cause FROM auth_credentials WHERE id = ?")
+				.get(credentialId) as { data: string; disabled_cause: string | null };
+			expect(row.data).toBe(noncanonicalData);
+			expect(row.disabled_cause).toBeNull();
+		} finally {
+			observer.close();
+		}
+	});
+
+	test("replays exactly once when a peer rotates after an xAI CAS miss", async () => {
+		if (!store) throw new Error("test setup failed");
+
+		let refreshCalls = 0;
+		authStorage = new AuthStorage(store, {
+			async refreshOAuthCredential() {
+				refreshCalls += 1;
+				throw new Error('HTTP 400 invalid_grant {"error":"invalid_grant"}');
+			},
+		});
+		await authStorage.set("xai-oauth", [
+			{
+				type: "oauth",
+				access: "expired-access",
+				refresh: "stale-refresh",
+				expires: Date.now() - 60_000,
+			},
+		]);
+		const credentialId = store.listAuthCredentials("xai-oauth")[0]?.id;
+		if (credentialId === undefined) throw new Error("missing seeded xAI credential");
+
+		const originalTryDisable = store.tryDisableAuthCredentialIfMatches.bind(store);
+		const tryDisableSpy = vi
+			.spyOn(store, "tryDisableAuthCredentialIfMatches")
+			.mockImplementation((id, expectedData, disabledCause) => {
+				store!.updateAuthCredential(id, {
+					type: "oauth",
+					access: "peer-access",
+					refresh: "peer-refresh",
+					expires: Date.now() + 60 * 60_000,
+				});
+				return originalTryDisable(id, expectedData, disabledCause);
+			});
+
+		await withEnv({ XAI_OAUTH_TOKEN: undefined, XAI_API_KEY: undefined }, async () => {
+			const apiKey = await authStorage!.getApiKey("xai-oauth", "session-peer-rotation");
+			expect(apiKey).toBe("peer-access");
+		});
+		expect(refreshCalls).toBe(1);
+		expect(tryDisableSpy).toHaveBeenCalledTimes(1);
+
+		const persisted = store.listAuthCredentials("xai-oauth");
+		expect(persisted).toHaveLength(1);
+		expect(persisted[0]?.credential).toMatchObject({
+			type: "oauth",
+			access: "peer-access",
+			refresh: "peer-refresh",
+		});
+		expect(persisted[0]?.disabledCause).toBeNull();
 	});
 
 	test("does not disable a credential another process already rotated", async () => {

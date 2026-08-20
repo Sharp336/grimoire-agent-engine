@@ -1180,7 +1180,11 @@ function authCredentialEquals(left: AuthCredential, right: AuthCredential): bool
 		left.accountId === right.accountId &&
 		left.email === right.email &&
 		left.projectId === right.projectId &&
-		left.enterpriseUrl === right.enterpriseUrl
+		left.enterpriseUrl === right.enterpriseUrl &&
+		left.apiEndpoint === right.apiEndpoint &&
+		left.orgId === right.orgId &&
+		left.orgName === right.orgName &&
+		left.authorizedAt === right.authorizedAt
 	);
 }
 
@@ -4800,6 +4804,7 @@ export class AuthStorage {
 		provider: string,
 		sessionId?: string,
 		options?: AuthApiKeyOptions,
+		rotationReplayBudget = 1,
 	): Promise<OAuthResolutionResult | undefined> {
 		const credentials = this.#getCredentialsForProvider(provider)
 			.map((credential, index) => ({ credential, index }))
@@ -5020,6 +5025,7 @@ export class AuthStorage {
 				}
 			}
 		}
+		const terminalCredentialIds = new Set<number>();
 
 		const passes: Array<{ allowBlocked: boolean; enforcePlanRequirement: boolean }> = [
 			{ allowBlocked: false, enforcePlanRequirement },
@@ -5030,6 +5036,8 @@ export class AuthStorage {
 		for (const pass of passes) {
 			for (const candidate of candidates) {
 				if (preflightFailures.has(candidate)) continue;
+				const candidateCredentialId = this.#getStoredCredentials(provider)[candidate.selection.index]?.id;
+				if (candidateCredentialId !== undefined && terminalCredentialIds.has(candidateCredentialId)) continue;
 				const resolved = await this.#tryOAuthCredential(
 					provider,
 					candidate.selection,
@@ -5047,6 +5055,8 @@ export class AuthStorage {
 						rankingContext,
 						blockScope,
 						blockScopes,
+						rotationReplayBudget,
+						terminalCredentialIds,
 					},
 				);
 				if (resolved) return resolved;
@@ -5317,6 +5327,10 @@ export class AuthStorage {
 			blockScopes?: readonly string[];
 			/** When false, a definitive failure of THIS credential returns undefined instead of falling back to the ranked/round-robin selector (target-only resolution). */
 			allowFallback?: boolean;
+			/** Remaining peer-rotation replays allowed for this resolution chain. */
+			rotationReplayBudget?: number;
+			/** Credential rows that definitively failed but could not be disabled in this resolution. */
+			terminalCredentialIds?: Set<number>;
 		},
 	): Promise<OAuthResolutionResult | undefined> {
 		const {
@@ -5331,6 +5345,8 @@ export class AuthStorage {
 			blockScope,
 			blockScopes,
 			allowFallback = true,
+			rotationReplayBudget = 1,
+			terminalCredentialIds,
 		} = usageOptions;
 		if (
 			!allowBlocked &&
@@ -5488,12 +5504,17 @@ export class AuthStorage {
 					errorMsg,
 				);
 				if (outcome === "peer-rotated") {
-					if (allowFallback) return this.#resolveOAuthSelection(provider, sessionId, options);
+					if (allowFallback && rotationReplayBudget > 0) {
+						return this.#resolveOAuthSelection(provider, sessionId, options, rotationReplayBudget - 1);
+					}
+					if (credentialId !== undefined) terminalCredentialIds?.add(credentialId);
 					return undefined;
 				}
 				if (outcome === "cas-lost") return undefined;
 				if (this.#getCredentialsForProvider(provider).some(credential => credential.type === "oauth")) {
-					if (allowFallback) return this.#resolveOAuthSelection(provider, sessionId, options);
+					if (allowFallback) {
+						return this.#resolveOAuthSelection(provider, sessionId, options, rotationReplayBudget);
+					}
 				}
 			} else {
 				// Block temporarily for transient failures (5 minutes)
