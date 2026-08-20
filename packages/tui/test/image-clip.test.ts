@@ -280,6 +280,7 @@ describe("TUI direct-placement clipping", () => {
 		const lines: string[] = [];
 		return {
 			tui,
+			term,
 			writes,
 			pump,
 			imageId,
@@ -391,6 +392,38 @@ describe("TUI direct-placement clipping", () => {
 			// them: both must replace placement 2 exactly — repeated overlay
 			// toggles must not mint a fresh placement per frame (#8057 review).
 			expect(new Set(after.map(p => p.placementId))).toEqual(new Set([2]));
+		} finally {
+			h.tui.stop();
+		}
+	});
+
+	it("clips straddling placements and advances epochs with a visible sidebar", () => {
+		const h = makeHarness("sidebar-straddle");
+		h.tui.setRightSidebar(
+			{ render: () => Array.from({ length: 12 }, (_, index) => `SIDE-${index}`) },
+			{ width: 12, minWidth: 8, minMainWidth: 20 },
+		);
+		try {
+			h.tui.start();
+			h.pump();
+			h.streamLines(10);
+			h.writes.length = 0;
+
+			const overlay = h.tui.showOverlay(new Text("OVERLAY", 0, 0), { anchor: "top-left", width: "100%" });
+			h.pump();
+			overlay.hide();
+			h.pump();
+
+			const placements = capturePlacements(h.output(), h.imageId);
+			expect(placements.length).toBeGreaterThan(0);
+			for (const placement of placements) {
+				expect(placement.placementId).toBe(2);
+				expect(placement.rows).toBeLessThan(6);
+				expect(placement.srcY).toBe(Math.floor((60 * (6 - placement.rows)) / 6));
+				expect(placement.cuu).toBe(placement.rows - 1);
+			}
+			const { baseY } = h.term.getBufferPosition();
+			expect(h.term.getScrollBuffer().slice(0, baseY).some(line => line.includes("SIDE-"))).toBe(false);
 		} finally {
 			h.tui.stop();
 		}

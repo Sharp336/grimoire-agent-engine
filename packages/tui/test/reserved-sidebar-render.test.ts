@@ -29,6 +29,14 @@ class MutableWidthAndTextProbe implements Component {
 	}
 }
 
+class MutableLinesProbe implements Component {
+	constructor(readonly lines: string[]) {}
+
+	render(): readonly string[] {
+		return this.lines;
+	}
+}
+
 class RenderCountingTUI extends TUI {
 	renders = 0;
 
@@ -94,6 +102,58 @@ describe("TUI reserved right sidebar", () => {
 		expect(terminal.getScrollBuffer().some(line => line.includes("EXISTING-HISTORY"))).toBe(true);
 	});
 
+	it("uses an ordinary render for same-geometry sidebar updates without clearing history", async () => {
+		const terminal = new VirtualTerminal(120, 4, 100);
+		terminal.write("EXISTING-HISTORY\r\nA\r\nB\r\nC\r\nD");
+		const writes: string[] = [];
+		const write = terminal.write.bind(terminal);
+		terminal.write = data => {
+			writes.push(data);
+			write(data);
+		};
+		const tui = new TUI(terminal);
+		tui.addChild(new WidthAndTextProbe("MAIN", 4));
+		tui.setRightSidebar(new WidthAndTextProbe("OLD-SIDE", 4), {
+			width: 44,
+			minWidth: 28,
+			minMainWidth: 64,
+		});
+		tui.start();
+		active.push({ tui, terminal });
+		await terminal.waitForRender(() => terminal.getViewport().some(line => line.includes("OLD-SIDE")));
+		writes.length = 0;
+
+		tui.setRightSidebar(new WidthAndTextProbe("NEW-SIDE", 4), {
+			width: 44,
+			minWidth: 28,
+			minMainWidth: 64,
+		});
+		await terminal.waitForRender(() => terminal.getViewport().some(line => line.includes("NEW-SIDE")));
+
+		expect(writes.join("")).not.toContain("\x1b[3J");
+		expect(terminal.getScrollBuffer().some(line => line.includes("EXISTING-HISTORY"))).toBe(true);
+	});
+
+	it("still reflows with a destructive replay when sidebar geometry changes", async () => {
+		const { terminal, tui, main } = await createMounted(4);
+		const writes: string[] = [];
+		const write = terminal.write.bind(terminal);
+		terminal.write = data => {
+			writes.push(data);
+			write(data);
+		};
+
+		tui.setRightSidebar(new WidthAndTextProbe("NARROW-SIDE", 4), {
+			width: 36,
+			minWidth: 28,
+			minMainWidth: 64,
+		});
+		await terminal.waitForRender(() => main.lastWidth === 84);
+
+		expect(writes.join("")).toContain("\x1b[3J");
+		expect(main.lastWidth).toBe(84);
+	});
+
 	it("keeps component-scoped composition on the allocated main width", async () => {
 		const terminal = new VirtualTerminal(120, 8, 100);
 		const scheduler = new StressRenderScheduler();
@@ -153,6 +213,59 @@ describe("TUI reserved right sidebar", () => {
 		const history = terminal.getScrollBuffer().slice(0, baseY);
 		expect(baseY).toBeGreaterThan(0);
 		expect(history.some(line => line.includes("SIDE-"))).toBe(false);
+	});
+
+	it("keeps the scroll-append fast path with a visible sidebar", async () => {
+		const terminal = new VirtualTerminal(120, 5, 100);
+		const writes: string[] = [];
+		const write = terminal.write.bind(terminal);
+		terminal.write = data => {
+			writes.push(data);
+			write(data);
+		};
+		const tui = new TUI(terminal);
+		const main = new MutableLinesProbe(Array.from({ length: 8 }, (_, index) => `MAIN-${index}`));
+		tui.addChild(main);
+		tui.setRightSidebar({ render: () => ["SIDEBAR"] }, { width: 44, minWidth: 28, minMainWidth: 64 });
+		tui.start();
+		active.push({ tui, terminal });
+		await terminal.waitForRender(() => terminal.getViewport().some(line => line.includes("MAIN-7")));
+		const redraws = tui.fullRedraws;
+		writes.length = 0;
+
+		main.lines.push("MAIN-8");
+		tui.requestRender();
+		await terminal.waitForRender(() => terminal.getViewport().some(line => line.includes("MAIN-8")));
+
+		const output = writes.join("");
+		const rewrittenMainRows = new Set([...output.matchAll(/MAIN-\d+/g)].map(match => match[0]));
+		expect(tui.fullRedraws).toBe(redraws);
+		expect(rewrittenMainRows.size).toBeLessThan(5);
+		const { baseY } = terminal.getBufferPosition();
+		expect(terminal.getScrollBuffer().slice(0, baseY).some(line => line.includes("SIDEBAR"))).toBe(false);
+	});
+
+	it("isolates main SGR and OSC 8 state before padding, separator, and sidebar", async () => {
+		const terminal = new VirtualTerminal(120, 4, 100);
+		const writes: string[] = [];
+		const write = terminal.write.bind(terminal);
+		terminal.write = data => {
+			writes.push(data);
+			write(data);
+		};
+		const tui = new TUI(terminal);
+		tui.addChild({
+			render: () => ["\x1b[31;41m\x1b]8;;https://example.test\x07MAIN"],
+		});
+		tui.setRightSidebar({ render: () => ["SIDEBAR"] }, { width: 44, minWidth: 28, minMainWidth: 64 });
+		tui.start();
+		active.push({ tui, terminal });
+		await terminal.waitForRender(() => terminal.getViewport()[0]?.includes("SIDEBAR") ?? false);
+
+		expect(writes.join("")).toContain("MAIN\x1b[0m\x1b]8;;\x07");
+		expect(terminal.getViewportRowForegroundColumns(0)).toEqual([0, 1, 2, 3]);
+		expect(terminal.getViewportRowBackgroundColumns(0)).toEqual([0, 1, 2, 3]);
+		expect(terminal.getViewportRowHyperlinkColumns(0)).toEqual([0, 1, 2, 3]);
 	});
 
 	it("restores full-width main rendering after unmount", async () => {

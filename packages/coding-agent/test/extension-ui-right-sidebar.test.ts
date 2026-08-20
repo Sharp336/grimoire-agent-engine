@@ -1,8 +1,9 @@
 import { beforeAll, describe, expect, it, mock } from "bun:test";
-import { type Component, Container } from "@oh-my-pi/pi-tui";
+import { type Component, Container, TUI } from "@oh-my-pi/pi-tui";
 import type { ExtensionWidgetOptions, WidgetPlacement } from "../src/extensibility/extensions";
 import { ExtensionUiController } from "../src/modes/controllers/extension-ui-controller";
 import { getThemeByName, setThemeInstance } from "../src/modes/theme/theme";
+import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 
 beforeAll(async () => {
 	const dark = await getThemeByName("dark");
@@ -24,17 +25,19 @@ class Probe implements Component {
 	}
 }
 
-function createController() {
+function createController(uiOverrides: Record<string, unknown> = {}) {
 	const mounted: Array<{ component: Component | undefined; options: unknown }> = [];
 	const setRightSidebar = mock((component: Component | undefined, options?: unknown) => {
 		mounted.push({ component, options });
 	});
 	const requestRender = mock(() => {});
+	const setFocus = mock((_component: Component | null) => {});
+	const getFocused = mock((): Component | null => null);
 	const showError = mock((_message: string) => {});
 	const hookWidgetContainerAbove = new Container();
 	const hookWidgetContainerBelow = new Container();
 	const ctx = {
-		ui: { requestRender, setRightSidebar },
+		ui: { requestRender, setRightSidebar, setFocus, getFocused, ...uiOverrides },
 		hookWidgetContainerAbove,
 		hookWidgetContainerBelow,
 		showError,
@@ -78,6 +81,74 @@ describe("ExtensionUiController rightSidebar widgets", () => {
 		expect(aIndex).toBeGreaterThanOrEqual(0);
 		expect(bIndex).toBeGreaterThanOrEqual(0);
 		expect(aIndex).toBeLessThan(bIndex);
+	});
+
+	it("keeps same-placement updates in order and disposes the replaced widget exactly once", () => {
+		const { controller, mounted } = createController();
+		const oldA = new Probe(["old A"]);
+		const newA = new Probe(["new A"]);
+		const b = new Probe(["B"]);
+		controller.setHookWidget("a", () => oldA, rightSidebarDefaults);
+		controller.setHookWidget("b", () => b, rightSidebarDefaults);
+
+		controller.setHookWidget("a", () => newA, rightSidebarDefaults);
+
+		const lines = mounted.at(-1)?.component?.render(43) ?? [];
+		expect(lines.findIndex(line => line.includes("new A"))).toBeLessThan(
+			lines.findIndex(line => line.includes("B")),
+		);
+		expect(oldA.disposeCalls).toBe(1);
+		expect(newA.disposeCalls).toBe(0);
+		expect(b.disposeCalls).toBe(0);
+	});
+
+	it("rejects focus requested by a sidebar factory and keeps input on the editor", async () => {
+		const terminal = new VirtualTerminal(120, 8);
+		const tui = new TUI(terminal);
+		const editorInputs: string[] = [];
+		const sidebarInputs: string[] = [];
+		const editor: Component = {
+			render: () => ["EDITOR"],
+			handleInput: data => editorInputs.push(data),
+		};
+		const sidebarChild: Component = {
+			render: () => ["SIDEBAR"],
+			handleInput: data => sidebarInputs.push(data),
+		};
+		const sidebarRoot = new Container();
+		sidebarRoot.addChild(sidebarChild);
+		const { controller } = createController({
+			requestRender: () => tui.requestRender(),
+			setRightSidebar: (component: Component | undefined, options?: unknown) =>
+				tui.setRightSidebar(component, options as never),
+			setFocus: (component: Component | null) => tui.setFocus(component),
+			getFocused: () => tui.getFocused(),
+		});
+		tui.addChild(editor);
+		tui.setFocus(editor);
+
+		controller.setHookWidget(
+			"focus-thief",
+			ui => {
+				ui.setFocus(sidebarChild);
+				return sidebarRoot;
+			},
+			rightSidebarDefaults,
+		);
+		tui.start();
+		try {
+			await terminal.waitForRender(() => terminal.getViewport().some(line => line.includes("SIDEBAR")));
+			expect(tui.getFocused()).toBe(editor);
+
+			tui.setFocus(sidebarChild);
+			terminal.sendInput("x");
+
+			expect(tui.getFocused()).toBe(editor);
+			expect(editorInputs).toEqual(["x"]);
+			expect(sidebarInputs).toEqual([]);
+		} finally {
+			tui.stop();
+		}
 	});
 
 	it("removes and disposes only the matching key, then unmounts the final key", () => {

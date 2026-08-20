@@ -281,4 +281,61 @@ describe("issue #8318: scaled OSC 66 headings survive repaint and resize", () =>
 			tui.stop();
 		}
 	});
+
+	it("preserves scaled-heading spacer glyphs and sidebar suffixes on ordinary paints", async () => {
+		const term = new VirtualTerminal(80, 6);
+		const tui = new TUI(term);
+		const content = new RawLines(["old heading", "old spacer", "Body"]);
+		tui.addChild(content);
+		tui.setRightSidebar(
+			{ render: () => ["SIDE-0", "SIDE-1", "SIDE-2"] },
+			{ width: 20, minWidth: 12, minMainWidth: 40 },
+		);
+		const writes = captureWrites(term);
+		try {
+			tui.start();
+			await settle(term);
+			writes.length = 0;
+
+			content.setLines([`${OSC66}s=2;Heading${ST}`, "", "Body"]);
+			tui.requestRender();
+			await settle(term);
+
+			const { spacers } = headingAndSpacers(writes, 1);
+			expectClearsRightOfGlyph(spacers[0]!, 14);
+			expect(spacers[0]).toContain("SIDE-1");
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("classifies scaled-heading spacer rows from main-only resize frames", async () => {
+		const term = new VirtualTerminal(80, 6);
+		const tui = new TUI(term);
+		tui.addChild(new RawLines([`${OSC66}s=2;Heading${ST}`, "", "Body"]));
+		tui.setRightSidebar(
+			{ render: () => ["SIDE-0", "SIDE-1", "SIDE-2"] },
+			{ width: 20, minWidth: 12, minMainWidth: 40 },
+		);
+		const writes = captureWrites(term);
+		try {
+			tui.start();
+			await settle(term);
+			writes.length = 0;
+
+			term.resize(79, 6);
+			const viewportPaint = writes.find(
+				write => write.includes("\x1b[H") && !write.includes("\x1b[2J") && !write.includes("\x1b[3J"),
+			);
+			expect(viewportPaint).toBeDefined();
+			const rows = viewportPaint!.split("\r\n");
+			const headingIndex = rows.findIndex(row => row.includes(OSC66));
+			expect(headingIndex).toBeGreaterThanOrEqual(0);
+			const spacer = rows[headingIndex + 1]!;
+			expectClearsRightOfGlyph(spacer, 14);
+			expect(spacer).toContain("SIDE-1");
+		} finally {
+			tui.stop();
+		}
+	});
 });
