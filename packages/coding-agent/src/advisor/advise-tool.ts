@@ -183,22 +183,27 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 	 *  by retagging the same text at a lower or equal severity. */
 	#deliveredNoteSeverities = new Map<string, number>();
 	#inProgressUpdate = false;
+	#steerInProgressConcerns = false;
 
 	constructor(private readonly onAdvice: (note: string, severity?: AdviseDetails["severity"]) => void) {}
 
 	/**
 	 * Mark whether the next advisor prompt reviews an in-progress primary turn.
-	 * Non-blockers are withheld until a completed update so partial work does
-	 * not interrupt the primary before it can finish its planned steps.
+	 * Non-blockers are normally withheld until a completed update so partial work
+	 * does not interrupt the primary before it can finish its planned steps.
+	 * When configured, a concern may pass through to the normal steering policy;
+	 * nits remain withheld and blockers always pass through.
 	 */
-	beginUpdate(inProgress: boolean): void {
+	beginUpdate(inProgress: boolean, steerInProgressConcerns = false): void {
 		this.#inProgressUpdate = inProgress;
+		this.#steerInProgressConcerns = steerInProgressConcerns;
 	}
 
 	/** Clear delivered-note memory when the advisor starts a fresh conversation. */
 	resetDeliveredNotes(): void {
 		this.#deliveredNoteSeverities.clear();
 		this.#inProgressUpdate = false;
+		this.#steerInProgressConcerns = false;
 	}
 
 	async execute(
@@ -208,7 +213,8 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 		_onUpdate?: AgentToolUpdateCallback<AdviseDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<AdviseDetails>> {
-		if (this.#inProgressUpdate && args.severity !== "blocker") {
+		const maySteerConcern = args.severity === "concern" && this.#steerInProgressConcerns;
+		if (this.#inProgressUpdate && args.severity !== "blocker" && !maySteerConcern) {
 			return {
 				content: [{ type: "text", text: "Recorded." }],
 				details: { note: args.note, severity: args.severity },

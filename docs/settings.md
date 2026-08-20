@@ -378,6 +378,7 @@ See [Advisor and WATCHDOG.md](./advisor-watchdog.md) for runtime behavior, `WATC
 | `advisor.enabled`     | boolean | `false` | Enable the advisor runtime when `modelRoles.advisor` resolves to an available model.                                                                 |
 | `task.agentAdvisor`   | record  | `{}`    | Per-agent subagent advisor: agent name → `"on"` / `"off"` / advisor model pattern. Overrides agent frontmatter `advisor`; configured from the `/agents` hub. |
 | `advisor.syncBacklog` | enum    | `off`   | Bounded advisor catch-up delay: `off`, `1`, `3`, or `5`. The primary waits up to 30 seconds only while advisor backlog is at or above the threshold. |
+| `advisor.steerInProgressConcerns` | boolean | `false` | Let concern-level advice raised during in-progress work enter the normal steering policy immediately; nits remain withheld. |
 | `advisor.immuneTurns` | number  | `3`     | After a `concern`/`blocker` interrupts, route further concerns/blockers as non-interrupting asides for this many completed primary turns.            |
 
 ### Thinking
