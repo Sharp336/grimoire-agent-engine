@@ -758,6 +758,18 @@ describe("AgentSession extension deliverAs aside", () => {
 	function seedHandoffMessages(sessionManager: SessionManager): void {
 		sessionManager.appendMessage({ role: "user", content: "seed", timestamp: 1 });
 		sessionManager.appendMessage({ role: "user", content: "seed-2", timestamp: 2 });
+		const lastEntryId = sessionManager.getBranch().at(-1)?.id;
+		if (!lastEntryId) throw new Error("expected seeded entry id");
+		vi.spyOn(compactionModule, "prepareCompaction").mockReturnValue({
+			firstKeptEntryId: lastEntryId,
+			messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "old" }], timestamp: 1 }],
+			turnPrefixMessages: [],
+			recentMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 100,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: compactionModule.DEFAULT_COMPACTION_SETTINGS,
+		});
 	}
 
 	it("drops pending asides on successful handoff without flushing into the replacement transcript (case 9g)", async () => {
