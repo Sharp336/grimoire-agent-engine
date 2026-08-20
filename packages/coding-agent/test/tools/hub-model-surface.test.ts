@@ -1,10 +1,15 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { HubTool } from "@oh-my-pi/pi-coding-agent/tools/hub";
 
-function makeTool(): HubTool {
-	return new HubTool({} as ToolSession);
+function makeTool(session: Partial<ToolSession> = {}): HubTool {
+	return new HubTool(session as ToolSession);
 }
+
+afterEach(() => {
+	AgentRegistry.resetGlobalForTests();
+});
 
 describe("fork Hub model surface", () => {
 	test("exposes parent-side async and process control only", () => {
@@ -22,11 +27,12 @@ describe("fork Hub model surface", () => {
 		}
 	});
 
-	test("descriptions and examples do not teach peer messaging", () => {
+	test("descriptions, examples, and task guidance do not teach peer messaging", async () => {
 		const tool = makeTool();
-		const modelText = `${tool.summary}\n${tool.description}`;
+		const taskPrompt = await Bun.file(new URL("../../src/prompts/tools/task.md", import.meta.url)).text();
+		const modelText = `${tool.summary}\n${tool.description}\n${taskPrompt}`;
 
-		for (const forbidden of ["peer", "inbox", "replyTo", "message them", "with `to`"]) {
+		for (const forbidden of ["peer messaging", "hub send", "inbox", "replyTo", "Parent-to-subagent IRC", "coordinate directly over IRC"]) {
 			expect(modelText).not.toContain(forbidden);
 		}
 		for (const example of tool.examples) {
@@ -36,5 +42,21 @@ describe("fork Hub model surface", () => {
 				expect(field in example.call).toBe(false);
 			}
 		}
+	});
+
+	test("keeps the upstream peer-messaging runtime implementation available internally", async () => {
+		const registry = AgentRegistry.global();
+		registry.register({ id: "Main", displayName: "main", kind: "main", session: null });
+		registry.register({ id: "Worker", displayName: "worker", kind: "sub", parentId: "Main", session: null });
+		const tool = makeTool({
+			agentRegistry: registry,
+			getAgentId: () => "Main",
+			settings: { get: () => undefined } as ToolSession["settings"],
+		});
+
+		const result = await tool.execute("internal_list", { op: "list" });
+		expect(result.isError).not.toBe(true);
+		const text = result.content.find(item => item.type === "text")?.text ?? "";
+		expect(text).toContain("Worker");
 	});
 });
