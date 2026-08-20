@@ -33,7 +33,7 @@ export function MetricCluster({ stats }: MetricClusterProps) {
 					<div className="stats-metric-label">{t("metric.requests")}</div>
 					<div className="stats-metric-value">{formatInteger(stats.totalRequests)}</div>
 				</div>
-			<div
+				<div
 					className="stats-metric-card primary"
 					title="Prompt-input cost saved versus billing the same tokens uncached; cache writes can make this negative"
 				>

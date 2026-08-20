@@ -88,7 +88,7 @@ async function main(): Promise<void> {
 			["bun", "--cwd=../natives", "run", "gen:native"],
 			crossBuild ? { ...Bun.env, TARGET_PLATFORM: crossBuild.platform, TARGET_ARCH: crossBuild.arch } : Bun.env,
 		);
-await runCommand(["bun", "scripts/generate-embedded-translations.ts"]);
+		await runCommand(["bun", "scripts/generate-embedded-translations.ts"]);
 		try {
 			await compileCodingAgent({
 				repoRoot,

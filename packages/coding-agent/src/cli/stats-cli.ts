@@ -135,7 +135,7 @@ async function printStatsSummary(): Promise<void> {
 		return `${usd} (≈¥${(n * rate).toFixed(2)})`;
 	}
 
-console.log(chalk.bold(`\n${i18n.t("cli.stats.title", "=== AI Usage Statistics ===")}\n`));
+	console.log(chalk.bold(`\n${i18n.t("cli.stats.title", "=== AI Usage Statistics ===")}\n`));
 	console.log(chalk.bold(i18n.t("cli.stats.overall", "Overall:")));
 	console.log(
 		`  ${i18n.t("cli.stats.requests", "Requests:")} ${formatNumber(overall.totalRequests)} ${i18n.t("cli.stats.errorsSuffix", "({count} errors)", { count: formatNumber(overall.failedRequests) })}`,
@@ -168,12 +168,16 @@ console.log(chalk.bold(`\n${i18n.t("cli.stats.title", "=== AI Usage Statistics =
 		console.log(chalk.bold(`\n${i18n.t("cli.stats.byModel", "By Model:")}`));
 		for (const m of byModel.slice(0, 10)) {
 			console.log(
-`  ${m.model}: ${i18n.t("cli.stats.reqsCacheSuffix", "{count} reqs, {cost}, {pct} cache rate, {savings} cache savings", {
-				count: formatNumber(m.totalRequests),
-				cost: formatLocalCost(m.totalCost),
-				pct: formatPercent(m.cacheRate),
-				savings: formatPercent(m.cacheSavings),
-			})}`,
+				`  ${m.model}: ${i18n.t(
+					"cli.stats.reqsCacheSuffix",
+					"{count} reqs, {cost}, {pct} cache rate, {savings} cache savings",
+					{
+						count: formatNumber(m.totalRequests),
+						cost: formatLocalCost(m.totalCost),
+						pct: formatPercent(m.cacheRate),
+						savings: formatPercent(m.cacheSavings),
+					},
+				)}`,
 			);
 		}
 	}

@@ -85,7 +85,7 @@ async function main(): Promise<void> {
 	// archive the same way compiled binaries do (scripts/build-binary.ts). Reset
 	// afterwards to keep the checked-in placeholder empty.
 	await runCommand(["bun", "--cwd=../stats", "run", "gen:stats"]);
-// One payload for both consumers: inlined into dist/cli.js via `--define` for
+	// One payload for both consumers: inlined into dist/cli.js via `--define` for
 	// the bundled CLI entrypoint, and written to dist/docs-index.generated.txt so
 	// SDK consumers importing `@oh-my-pi/pi-coding-agent/*` (TypeScript source, no
 	// build-time embed) can still resolve omp:// docs (see src/internal-urls/docs-index.ts).
@@ -120,7 +120,7 @@ async function main(): Promise<void> {
 	} finally {
 		await runCommand(["bun", "--cwd=../stats", "run", "gen:stats:reset"]);
 	}
-// Copy bundled i18n translations so dist/cli.js can find them at runtime
+	// Copy bundled i18n translations so dist/cli.js can find them at runtime
 	// (import.meta.dir resolves to dist/, not src/i18n/).
 	const langSrc = path.join(packageDir, "src", "i18n", "lang");
 	const langDst = path.join(outDir, "lang");

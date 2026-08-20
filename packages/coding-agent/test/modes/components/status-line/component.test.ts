@@ -151,7 +151,6 @@ describe("StatusLineComponent", () => {
 			setThemeInstance(baseTheme);
 		}
 	});
-	});
 
 	it("omits advisor cost when the advisor has never been active", () => {
 		const statusLine = new StatusLineComponent(

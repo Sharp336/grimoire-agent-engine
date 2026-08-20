@@ -463,7 +463,7 @@ const costSegment: StatusLineSegment = {
 		}
 
 		const billingParts: string[] = [];
-if (cost) {
+		if (cost) {
 			billingParts.push(formatSpend(cost, usingSubscription, theme));
 		} else if (usingSubscription) {
 			billingParts.push(
@@ -471,7 +471,7 @@ if (cost) {
 			);
 		}
 		if (normalizedPremiumRequests) billingParts.push(`★ ${formatNumber(normalizedPremiumRequests)}`);
-if (advisorCost) {
+		if (advisorCost) {
 			const prefix = billingParts.length ? "+ " : "";
 			billingParts.push(`${prefix}${formatAdvisorSpend(advisorCost, advisorUsingSubscription, theme)}`);
 		}
