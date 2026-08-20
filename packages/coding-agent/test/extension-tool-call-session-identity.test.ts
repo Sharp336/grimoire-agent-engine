@@ -1,124 +1,139 @@
 /**
- * Tests that ExtensionToolWrapper reports the calling session's identity on
- * `tool_call`. Extensions need this to scope policy to the top-level agent
- * without also constraining the subagents it delegates to — blocking a tool
- * on an undifferentiated event blocks both.
+ * Tests that a `tool_call` event reports the calling session's identity through
+ * the real session dispatch path. Extensions need this to scope policy to the
+ * top-level agent without also constraining the subagents it delegates to —
+ * blocking a tool on an undifferentiated event blocks both.
+ *
+ * These drive `AgentSession` via `createAgentSession` rather than invoking the
+ * tool wrapper directly: for a model-dispatched call `#beforeToolCall` marks the
+ * event as already emitted and the wrapper suppresses its own, so the session
+ * path is the only one that runs in practice.
  */
 
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
-import * as fs from "node:fs";
-import * as path from "node:path";
-import type { AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import { afterEach, describe, expect, it } from "bun:test";
+import { type Api, clearCustomApis, type Model, type ModelSpec, registerCustomApi } from "@oh-my-pi/pi-ai";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
-import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
-import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import { createAssistantMessage } from "./helpers/agent-session-setup";
 
-describe("ExtensionToolWrapper tool_call session identity", () => {
-	let tempDir: TempDir;
-	let extensionsDir: string;
-	let sessionManager: SessionManager;
-	let sharedTempDir: TempDir;
-	let modelRegistry: ModelRegistry;
-	let authStorage: AuthStorage;
-	let observedPath: string;
+interface ObservedIdentity {
+	agentKind?: "main" | "sub";
+	taskDepth?: number;
+}
 
-	beforeAll(async () => {
-		sharedTempDir = TempDir.createSync("@pi-tool-call-identity-shared-");
-		authStorage = await AuthStorage.create(path.join(sharedTempDir.path(), "testauth.db"));
-		modelRegistry = new ModelRegistry(authStorage);
-	});
-
-	afterAll(() => {
-		authStorage.close();
-		sharedTempDir.removeSync();
-	});
-
-	beforeEach(() => {
-		tempDir = TempDir.createSync("@pi-tool-call-identity-");
-		extensionsDir = path.join(getProjectAgentDir(tempDir.path()), "extensions");
-		fs.mkdirSync(extensionsDir, { recursive: true });
-		sessionManager = SessionManager.inMemory();
-		observedPath = path.join(tempDir.path(), "observed.json");
-	});
-
+describe("tool_call session identity", () => {
 	afterEach(() => {
-		tempDir.removeSync();
+		clearCustomApis();
 	});
+
+	/** Model that dispatches one `read` call, then finishes. */
+	function registerToolCallingApi(api: string): void {
+		let requests = 0;
+		registerCustomApi(api, () => {
+			requests++;
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				if (requests === 1) {
+					const message = createAssistantMessage("");
+					const toolCall = {
+						type: "toolCall",
+						id: "call-identity-1",
+						name: "read",
+						arguments: { path: "identity.txt" },
+					} as const;
+					message.content = [toolCall];
+					message.stopReason = "toolUse";
+					stream.push({ type: "toolcall_start", contentIndex: 0, partial: message });
+					stream.push({ type: "toolcall_end", contentIndex: 0, toolCall: toolCall as never, partial: message });
+					stream.push({ type: "done", reason: "toolUse", message });
+				} else {
+					const message = createAssistantMessage("done");
+					stream.push({ type: "done", reason: "stop", message });
+				}
+			});
+			return stream;
+		});
+	}
+
+	function buildStubModel(api: string, id: string): Model<Api> {
+		return buildModel({
+			id,
+			name: id,
+			api,
+			provider: "ollama",
+			baseUrl: "http://127.0.0.1:11434",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		} as ModelSpec<Api>) as Model<Api>;
+	}
 
 	/**
-	 * Loads an extension that appends each `tool_call` event's identity fields to
-	 * a JSON-lines file, so the assertion reads what the wrapper actually emitted.
+	 * Runs one model-dispatched tool call in a session at `taskDepth`, returning
+	 * the identity fields the `tool_call` handler observed. `undefined` omits the
+	 * option entirely, exercising the default top-level case.
 	 */
-	const runnerRecordingIdentity = async (): Promise<ExtensionRunner> => {
-		fs.writeFileSync(
-			path.join(extensionsDir, "record-identity.ts"),
-			`import * as fs from "node:fs";
-			export default function (pi) {
-				pi.on("tool_call", event => {
-					fs.appendFileSync(
-						${JSON.stringify(observedPath)},
-						JSON.stringify({ agentKind: event.agentKind, taskDepth: event.taskDepth }) + "\\n",
-					);
-				});
-			}`,
-		);
-		const discovered = fs
-			.readdirSync(extensionsDir, { withFileTypes: true })
-			.filter(entry => entry.isFile() && entry.name.endsWith(".ts"))
-			.map(entry => path.join(extensionsDir, entry.name))
-			.sort();
-		const result = await loadExtensions(discovered, tempDir.path());
-		return new ExtensionRunner(result.extensions, result.runtime, tempDir.path(), sessionManager, modelRegistry);
-	};
+	async function observeIdentity(taskDepth: number | undefined): Promise<ObservedIdentity[]> {
+		using tempDir = TempDir.createSync("@pi-tool-call-identity-");
+		const api = `test-identity-${taskDepth ?? "default"}`;
+		registerToolCallingApi(api);
+		const observed: ObservedIdentity[] = [];
+		const recordIdentity: ExtensionFactory = pi => {
+			pi.on("tool_call", async event => {
+				observed.push({ agentKind: event.agentKind, taskDepth: event.taskDepth });
+				return undefined;
+			});
+		};
+		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		const { session } = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			authStorage,
+			modelRegistry,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			model: buildStubModel(api, `identity-model-${taskDepth ?? "default"}`),
+			disableExtensionDiscovery: true,
+			extensions: [recordIdentity],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			toolNames: ["read"],
+			...(taskDepth === undefined ? {} : { taskDepth }),
+		});
+		try {
+			await session.sendUserMessage("read it");
+			return observed;
+		} finally {
+			await session.dispose();
+			authStorage.close();
+		}
+	}
 
-	const observed = (): Array<{ agentKind?: string; taskDepth?: number }> =>
-		fs
-			.readFileSync(observedPath, "utf8")
-			.split("\n")
-			.filter(line => line.length > 0)
-			.map(line => JSON.parse(line));
-
-	const identityTool: AgentTool = {
-		name: "write",
-		label: "Write",
-		description: "Test tool",
-		parameters: {} as never,
-		execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
-	} as AgentTool;
-
-	it("reports agentKind main and taskDepth 0 for a top-level call", async () => {
-		const wrapped = new ExtensionToolWrapper(identityTool, await runnerRecordingIdentity());
-
-		await wrapped.execute("call-main", {} as never, undefined, undefined, {
-			agentKind: "main",
-			taskDepth: 0,
-		} as AgentToolContext);
-
-		expect(observed()).toEqual([{ agentKind: "main", taskDepth: 0 }]);
+	it("reports main and depth 0 for a top-level session", async () => {
+		expect(await observeIdentity(undefined)).toEqual([{ agentKind: "main", taskDepth: 0 }]);
 	});
 
-	it("reports agentKind sub and the child depth for a delegated call", async () => {
-		const wrapped = new ExtensionToolWrapper(identityTool, await runnerRecordingIdentity());
-
-		await wrapped.execute("call-sub", {} as never, undefined, undefined, {
-			agentKind: "sub",
-			taskDepth: 1,
-		} as AgentToolContext);
-
-		expect(observed()).toEqual([{ agentKind: "sub", taskDepth: 1 }]);
+	it("reports sub and the child depth for a delegated session", async () => {
+		expect(await observeIdentity(1)).toEqual([{ agentKind: "sub", taskDepth: 1 }]);
 	});
 
-	it("omits both fields when the host does not report them", async () => {
-		const wrapped = new ExtensionToolWrapper(identityTool, await runnerRecordingIdentity());
-
-		// A handler must be able to tell "top-level" from "not reported" so it can
-		// fail open on hosts that predate these fields.
-		await wrapped.execute("call-unknown", {} as never, undefined, undefined, {} as AgentToolContext);
-
-		expect(observed()).toEqual([{}]);
+	it("distinguishes a nested subagent from a first-level one", async () => {
+		// `agentKind` collapses every subagent to "sub"; depth is what separates a
+		// nested agent from a first-level one, so it must survive the real path.
+		expect(await observeIdentity(2)).toEqual([{ agentKind: "sub", taskDepth: 2 }]);
 	});
 });
