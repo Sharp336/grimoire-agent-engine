@@ -237,6 +237,7 @@ export type StatusLineSegmentId =
 	| "cache_hit"
 	| "session_name"
 	| "usage"
+	| "balance"
 	| "collab";
 
 /** Submenu choice metadata. */

@@ -724,6 +724,26 @@ const usageSegment: StatusLineSegment = {
 	},
 };
 
+/** Green above 50, amber above 10, red at or below 10 — same ladder as usage. */
+function pickBalanceColor(amount: number): ThemeColor {
+	if (amount > 50) return "success";
+	if (amount > 10) return "warning";
+	return "error";
+}
+
+const balanceSegment: StatusLineSegment = {
+	id: "balance",
+	render(ctx) {
+		const b = ctx.balance;
+		if (!b) return { content: "", visible: false };
+		const text = sanitizeStatusText(`${b.symbol}${b.amount.toFixed(2)}`);
+		if (!text) return { content: "", visible: false };
+		// theme.fg closes with `\x1b[39m`, so the status line's own background
+		// and separator styling survive the segment.
+		return { content: `💳 ${theme.fg(pickBalanceColor(b.amount), text)}`, visible: true };
+	},
+};
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Segment Registry
 // ═══════════════════════════════════════════════════════════════════════════
@@ -752,6 +772,7 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	cache_hit: cacheHitSegment,
 	session_name: sessionNameSegment,
 	usage: usageSegment,
+	balance: balanceSegment,
 	collab: collabSegment,
 };
 

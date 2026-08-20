@@ -1,6 +1,6 @@
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Model, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import {
 	type Component,
 	type ComposerStyle,
@@ -34,6 +34,7 @@ import { getSeparator } from "./separators";
 import type {
 	CollabStatus,
 	EffectiveStatusLineSettings,
+	StatusLineBalance,
 	StatusLineSegmentId,
 	StatusLineSegmentOptions,
 	StatusLineSettings,
@@ -275,6 +276,8 @@ interface ActiveMeter {
 const EMPTY_MESSAGES: readonly AgentMessage[] = [];
 const STATUS_USAGE_START_DELAY_MS = 0;
 const STATUS_USAGE_REFRESH_TIMEOUT_MS = 2_000;
+const STATUS_BALANCE_REFRESH_MS = 5 * 60_000; // 5 min TTL
+const STATUS_BALANCE_FETCH_TIMEOUT_MS = 3_000;
 
 function isContextSegment(segment: StatusLineSegmentId): boolean {
 	return segment === "context_pct" || segment === "context_total";
@@ -450,6 +453,13 @@ export class StatusLineComponent implements Component {
 	#latestAppliedUsageRefreshSequence = 0;
 	#codexResetSnapshots = new Map<string, CodexResetUsageSnapshot>();
 	#onCodexResetFireworks: ((event: CodexResetFireworksEvent) => void) | undefined;
+	// API-key provider balance caching (e.g. DeepSeek)
+	#cachedBalance: StatusLineBalance | null = null;
+	#balanceModel: Model | null = null;
+	#balanceAuthGeneration = 0;
+	#balanceFetchedAt = 0;
+	#balanceInFlight = false;
+	#balanceTimer: Timer | null = null;
 	// Context-usage memo. The status line redraws on every agent event, so the
 	// hot path must not recompute context tokens unless an input changed.
 	// `getContextUsage()` anchors on the last assistant's real prompt-token
@@ -741,6 +751,7 @@ export class StatusLineComponent implements Component {
 		this.#clearUsageStartTimer();
 		this.#onCodexResetFireworks = undefined;
 		this.#codexResetSnapshots.clear();
+		this.#clearBalanceTimer();
 		this.#retireGitWatcher();
 	}
 
@@ -775,6 +786,13 @@ export class StatusLineComponent implements Component {
 		this.#usageStartTimer = null;
 	}
 
+	#clearBalanceTimer(): void {
+		if (!this.#balanceTimer) return;
+		clearTimeout(this.#balanceTimer);
+		this.#balanceTimer = null;
+		this.#balanceInFlight = false;
+	}
+
 	invalidate(): void {
 		this.#widthEpochRevision++;
 		// Generic repaint invalidation (theme change, message event, model
@@ -791,9 +809,15 @@ export class StatusLineComponent implements Component {
 	}
 	#invalidateSessionCaches(): void {
 		this.#clearUsageStartTimer();
+		this.#clearBalanceTimer();
 		this.#cachedUsage = null;
 		this.#usageFetchedAt = 0;
 		this.#usageInFlight = false;
+		this.#cachedBalance = null;
+		this.#balanceModel = null;
+		this.#balanceFetchedAt = 0;
+		this.#balanceAuthGeneration = 0;
+		this.#balanceInFlight = false;
 		this.#contextUsageCache = undefined;
 		this.#lastTokensPerSecond = null;
 		this.#lastTokensPerSecondTimestamp = null;
@@ -1345,6 +1369,116 @@ export class StatusLineComponent implements Component {
 			});
 	}
 
+	// ── API-key provider balance (e.g. DeepSeek) ──
+
+	/**
+	 * Fetch and cache the account balance for the active API-key provider.
+	 * Currently only DeepSeek is supported; other providers no-op.
+	 *
+	 * Runs in the background with a 5-min cache TTL, similar to
+	 * {@link refreshUsageInBackground}.
+	 */
+	refreshBalanceInBackground(): void {
+		const session = this.session;
+		const model = session.state.model ?? session.model;
+		if (model?.provider !== "deepseek") {
+			// Model switches happen within the same session and do not invalidate
+			// these caches. Clear before the TTL guard so a fresh DeepSeek balance
+			// is never rendered under the next provider.
+			this.#clearBalanceTimer();
+			this.#cachedBalance = null;
+			this.#balanceModel = null;
+			this.#balanceFetchedAt = 0;
+			return;
+		}
+		// The credential can change while the `Model` object stays identical:
+		// `/login deepseek` stores a key AuthStorage then prefers over an env
+		// or static one, and a logout drops it. Both bump AuthStorage's
+		// generation, so reading it is the cheap synchronous signal that the
+		// cached figure may belong to another account, and it has to precede
+		// the TTL guard or the previous account's balance stays on screen for
+		// five minutes. Credential changes AuthStorage does not own — a
+		// 401/quota sibling rotation, or a `!command` provider key
+		// re-resolving — leave the counter alone and stay TTL-bounded.
+		const authGeneration = session.modelRegistry?.authStorage.getGeneration() ?? 0;
+		if (
+			this.#balanceModel !== null &&
+			(this.#balanceModel !== model || this.#balanceAuthGeneration !== authGeneration)
+		) {
+			this.#cachedBalance = null;
+			this.#balanceModel = null;
+			this.#balanceFetchedAt = 0;
+		}
+		if (this.#balanceInFlight || this.#balanceTimer) return;
+		const now = Date.now();
+		if (this.#balanceFetchedAt > 0 && now - this.#balanceFetchedAt < STATUS_BALANCE_REFRESH_MS) return;
+
+		this.#balanceInFlight = true;
+		this.#balanceTimer = setTimeout(() => {
+			this.#balanceTimer = null;
+			void this.#runBalanceRefresh(session, model, authGeneration);
+		}, 0);
+	}
+
+	async #runBalanceRefresh(session: AgentSession, model: Model, authGeneration: number): Promise<void> {
+		if (this.#disposed || this.session !== session || (session.state.model ?? session.model) !== model) {
+			this.#balanceInFlight = false;
+			return;
+		}
+		try {
+			const balance = await this.#fetchDeepSeekBalance(session, model);
+			if (this.#disposed || this.session !== session || (session.state.model ?? session.model) !== model) return;
+			// Same reason as #applyUsageRefreshReports: the fetch is async, so
+			// without a repaint the segment stays blank until an unrelated event
+			// (git resolve, keystroke, agent turn) rebuilds the top border.
+			const changed =
+				this.#cachedBalance?.amount !== balance?.amount || this.#cachedBalance?.symbol !== balance?.symbol;
+			this.#cachedBalance = balance;
+			this.#balanceModel = model;
+			this.#balanceAuthGeneration = authGeneration;
+			this.#balanceFetchedAt = Date.now();
+			if (changed) this.#onBranchChange?.();
+		} catch {
+			if (this.#disposed || this.session !== session || (session.state.model ?? session.model) !== model) return;
+			this.#balanceFetchedAt = Date.now();
+		} finally {
+			if (this.session === session) this.#balanceInFlight = false;
+		}
+	}
+
+	async #fetchDeepSeekBalance(session: AgentSession, model: Model): Promise<StatusLineBalance | null> {
+		// A gateway key must never be sent to DeepSeek's public balance endpoint.
+		// Empty uses the first-party default; an explicit URL must have the exact
+		// direct API hostname. Substring matching is unsafe for credential gates.
+		if (model.baseUrl) {
+			let hostname: string;
+			try {
+				hostname = new URL(model.baseUrl).hostname.toLowerCase();
+			} catch {
+				return null;
+			}
+			if (hostname !== "api.deepseek.com") return null;
+		}
+		const apiKey = await session.modelRegistry?.getApiKey(model, session.sessionId);
+		if (!apiKey || (session.state.model ?? session.model) !== model) return null;
+
+		const signal = AbortSignal.timeout(STATUS_BALANCE_FETCH_TIMEOUT_MS);
+		const resp = await fetch("https://api.deepseek.com/user/balance", {
+			headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
+			signal,
+		});
+		const json = (await resp.json()) as {
+			balance_infos?: Array<{ total_balance?: string; currency?: string }>;
+		};
+		const info = json?.balance_infos?.[0];
+		const total = parseFloat(info?.total_balance ?? "");
+		if (Number.isNaN(total)) return null;
+
+		const currencySymbol: Record<string, string> = { CNY: "¥", USD: "$", EUR: "€", GBP: "£" };
+		const symbol = currencySymbol[info?.currency ?? ""] ?? info?.currency ?? "¥";
+		return { symbol, amount: total };
+	}
+
 	async #raceUsageRefreshWithSignal(promise: Promise<unknown>, signal: AbortSignal): Promise<unknown> {
 		if (signal.aborted) throw signal.reason;
 		const aborted = Promise.withResolvers<never>();
@@ -1537,7 +1671,6 @@ export class StatusLineComponent implements Component {
 		const effectiveTier = fiveHourTier ?? sevenDayTier ?? monthlyTier;
 		return { tier: effectiveTier, fiveHour, sevenDay, monthly };
 	}
-
 	/**
 	 * Used-tokens / context-window totals for the status-line context% segment,
 	 * memoized so the per-event redraw stays O(1) when nothing changed.
@@ -1601,12 +1734,16 @@ export class StatusLineComponent implements Component {
 		includePath: boolean,
 		includeGit: boolean,
 		includePr: boolean,
+		includeBalance: boolean,
 		previewTitle?: string,
 	): SegmentContext {
 		const state = this.session.state;
 
-		// Trigger background fetch (5-min TTL); render uses cached value
+		// Trigger background fetches; render uses cached values. Balance is
+		// opt-in, so default presets must not make authenticated requests that
+		// can never produce visible output.
 		this.refreshUsageInBackground();
+		if (includeBalance) this.refreshBalanceInBackground();
 
 		// Get usage statistics
 		const aggregateUsageStats = this.session.sessionManager?.getUsageStatistics() ?? {
@@ -1699,6 +1836,7 @@ export class StatusLineComponent implements Component {
 			},
 			worktree: activeRepoCache.worktree,
 			usage: this.#cachedUsage,
+			balance: this.#cachedBalance,
 		};
 	}
 
@@ -1771,6 +1909,8 @@ export class StatusLineComponent implements Component {
 		const plain = layout !== "box";
 		const includePath =
 			hasPathSegment(effectiveSettings.leftSegments) || hasPathSegment(effectiveSettings.rightSegments);
+		const includeBalance =
+			effectiveSettings.leftSegments.includes("balance") || effectiveSettings.rightSegments.includes("balance");
 		const gitEnabled = this.#gitEnabled();
 		const includeGit =
 			gitEnabled &&
@@ -1783,6 +1923,7 @@ export class StatusLineComponent implements Component {
 			includePath,
 			includeGit,
 			includePr,
+			includeBalance,
 			previewTitle,
 		);
 		const separatorDef = plain

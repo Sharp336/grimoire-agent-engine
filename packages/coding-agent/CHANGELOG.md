@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a `balance` status-line segment reporting the remaining account balance for API-key providers such as DeepSeek. It only fetches when the segment is actually configured, resolves the key against a strictly parsed `api.deepseek.com`, and owns its cache by the active model plus AuthStorage's credential generation, so a provider switch, a model switch, a `/login` or a logout retires the previous account's figure ahead of the cache TTL ([#6361](https://github.com/can1357/oh-my-pi/pull/6361)).
+
 ## [17.4.0] - 2026-08-20
 
 ### Added

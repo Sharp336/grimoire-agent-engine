@@ -139,6 +139,19 @@ export interface SegmentContext {
 		sevenDay?: { percent: number; resetHours?: number };
 		monthly?: { percent: number; resetHours?: number };
 	} | null;
+	/**
+	 * API-key provider account balance (e.g. DeepSeek). Null when unavailable or
+	 * not an API-key provider. Carried as data, not pre-rendered text, so the
+	 * segment colours it through the theme like every other segment — a raw
+	 * `\x1b[0m` inside a segment would also clear the status line's background.
+	 */
+	balance: StatusLineBalance | null;
+}
+
+export interface StatusLineBalance {
+	/** Currency symbol resolved from the provider response (`¥`, `$`, …). */
+	symbol: string;
+	amount: number;
 }
 
 export interface RenderedSegment {
