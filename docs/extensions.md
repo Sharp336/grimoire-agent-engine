@@ -566,7 +566,42 @@ Current no-op methods in this controller:
 - `setFooter`
 - `setHeader`
 
-`setEditorComponent` is wired to the live editor (`ctx.setEditorComponent(factory)`). `setWidget` renders real widget components above or below the editor via `setHookWidget(...)` (`placement: "aboveEditor" | "belowEditor"`; string-array content capped at 10 lines).
+`setEditorComponent` is wired to the live editor (`ctx.setEditorComponent(factory)`). `setWidget` renders real widget components above or below the editor via `setHookWidget(...)` (`placement: "aboveEditor" | "belowEditor"`; string-array content capped at 10 lines), or in the reserved column described below.
+
+### Reserved right sidebar
+
+Use `placement: "rightSidebar"` to reserve terminal columns for observational UI. The complete copyable [`right-sidebar.ts`](../packages/coding-agent/examples/extensions/right-sidebar.ts) example mounts a component factory with this call:
+
+```ts
+ctx.ui.setWidget(
+  "right-sidebar-example",
+  (tui) => {
+    sidebar = new SidebarExample(tui);
+    render(ctx);
+    return sidebar;
+  },
+  {
+    placement: "rightSidebar",
+    width: 44,
+    minWidth: 28,
+    minMainWidth: 64,
+  },
+);
+```
+
+The geometry fields have these semantics:
+
+- `width` is the preferred reserved-column width.
+- `minWidth` is the smallest visible reserved-column width.
+- `minMainWidth` is the smallest width retained for the transcript, editor, and other main content.
+- `width` and `minWidth` both include the one-column separator, so the component receives `sidebar width - 1` in `render(width)`.
+- The sidebar is hidden when the terminal is narrower than `minMainWidth + minWidth`; otherwise it shrinks as needed from `width` to `minWidth`. With the values above, 120 columns produce 76 main columns plus a 44-column sidebar (43 content columns), 91 columns hide it, and 92 columns produce 64 main columns plus a 28-column sidebar (27 content columns).
+
+Right-sidebar widgets are display-only: they cannot receive focus or input, so typing and commands continue to target the editor. String-array widgets keep at most 10 content lines and then show a truncation notice; prefer a component factory for more than 10 lines. The extension owns the widget lifecycle—remove it explicitly with `ctx.ui.setWidget("right-sidebar-example", undefined)`, including during `session_shutdown`.
+
+Print, headless, and subagent paths do not render the sidebar (`ctx.hasUI` is `false` and UI methods are inert). RPC mode can forward string-array widgets to a host, but component factories do not emit RPC frames.
+
+This reserved column is not a modal `ctx.ui.custom()` overlay: modal overlays composite over the viewport and can temporarily cover the sidebar, while the sidebar participates in the base layout and reflows main content. It is also distinct from PR [#4603](https://github.com/can1357/oh-my-pi/pull/4603)'s `rightEditor` tradeoff, which placed widgets opportunistically in unused whitespace rather than reserving a column.
 
 ### RPC mode (`rpc-mode.ts`)
 

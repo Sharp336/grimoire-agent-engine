@@ -53,6 +53,7 @@
 - Fixed prompt guidance and descriptions for Task tools and SSH usage.
 - ACP editor clients that support elicitation forms (Zed) can now use `ask`, so the agent can pose single-choice, multi-select, and free-text questions inline instead of guessing.
 - `/retry` and `/handoff` now work over ACP, so editor clients (Zed) list them and can run them instead of sending the text to the model.
+- Added `rightSidebar` extension widget placement with preferred, minimum, and main-content width geometry plus RPC forwarding ([#8126](https://github.com/can1357/oh-my-pi/issues/8126)). This is separate from PR [#4603](https://github.com/can1357/oh-my-pi/pull/4603)'s `rightEditor` whitespace-widget tradeoff: reserved sidebars reflow the main content.
 
 ## [17.4.0] - 2026-08-20
 

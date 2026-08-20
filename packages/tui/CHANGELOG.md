@@ -5,6 +5,7 @@
 ### Added
 
 - Added optional `getNativeScrollbackLiveRegionPinnedStart()` hook to allow nested transcripts to pin a later dashboard without shifting the earliest live seam.
+- Added a viewport-local reserved right-sidebar compositor with responsive reflow ([#8126](https://github.com/can1357/oh-my-pi/issues/8126)). Unlike PR [#4603](https://github.com/can1357/oh-my-pi/pull/4603)'s `rightEditor` tradeoff, it reserves columns and reflows main content instead of placing widgets in available whitespace.
 
 ## [17.4.0] - 2026-08-20
 
