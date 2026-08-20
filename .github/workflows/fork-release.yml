@@ -59,6 +59,7 @@ jobs:
           unexpected="$(git diff --name-only "$official_sha" "$GITHUB_SHA" -- . \
             ':(exclude).github/workflows/fork-release.yml' \
             ':(exclude)packages/coding-agent/src/prompts/tools/hub.md' \
+            ':(exclude)packages/coding-agent/src/prompts/tools/task.md' \
             ':(exclude)packages/coding-agent/src/tools/hub/index.ts' \
             ':(exclude)packages/coding-agent/src/tools/hub/jobs.ts' \
             ':(exclude)packages/coding-agent/test/tools/hub-model-surface.test.ts')"
@@ -265,7 +266,7 @@ jobs:
 
             Linux x64, Linux ARM64, and Windows x64 use the same upstream release targets as the official build. Linux native addons are the official same-version precompiled packages; upstream GNU native targets use a glibc 2.17 portability floor, matching the official CentOS 7-compatible build strategy.
 
-            The upstream Hub messaging implementation remains in source. This fork only narrows the model-facing Hub schema, descriptions, examples, and job guidance to parent-side asynchronous job control and supervised long-running processes. This workflow does not compile Rust.
+            The upstream Hub messaging implementation remains in source. This fork only narrows the model-facing Hub schema, descriptions, examples, and task/job guidance to parent-side asynchronous job control and supervised long-running processes. This workflow does not compile Rust.
           files: |
             dist/omp-linux-x64
             dist/omp-linux-arm64
