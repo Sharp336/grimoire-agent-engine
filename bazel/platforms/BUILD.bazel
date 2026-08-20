@@ -44,6 +44,15 @@ platform(
 )
 
 platform(
+    name = "darwin-x64-modern",
+    constraint_values = [
+        "@platforms//os:macos",
+        "@platforms//cpu:x86_64",
+        "//bazel/variants:modern",
+    ],
+)
+
+platform(
     name = "darwin-arm64",
     constraint_values = [
         "@platforms//os:macos",

@@ -195,7 +195,7 @@ crate.annotation(
         # the UBSan runtime. Opus shipped without sanitizers under
         # cargo-zigbuild too.
         "CFLAGS": "-fno-sanitize=undefined",
-        "PATH": "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin:/run/current-system/sw/bin",
+        "PATH": "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin:/opt/zerobrew/bin:/run/current-system/sw/bin",
     },
 )
 
