@@ -19,6 +19,8 @@
   "settings.edit.mode.label": "编辑模式",
   "settings.edit.streamingAbort.description": "补丁预览失败时中止流式编辑工具调用",
   "settings.edit.streamingAbort.label": "预览失败时中止",
+  "settings.lsp.shared.label": "共享语言服务器",
+  "settings.lsp.shared.description": "通过守护进程代理在 omp 实例间共享每个项目的一个语言服务器（不可用时回退到私有服务器）",
   "settings.lsp.diagnosticsDeduplicate.description": "抑制已显示过的编辑后诊断，仅展示新增或变更的",
   "settings.lsp.diagnosticsDeduplicate.label": "去重诊断",
   "settings.lsp.diagnosticsOnEdit.description": "编辑代码文件后返回 LSP 诊断",

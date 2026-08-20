@@ -15,6 +15,8 @@
   "settings.bash.stripTrailingHeadTail.label": "去除 head/tail 管道",
   "settings.bashInterceptor.enabled.description": "阻止使用具有专用工具的 shell 命令",
   "settings.bashInterceptor.enabled.label": "Bash 拦截器",
+  "settings.eval.autoBackground.enabled.label": "Eval 自动后台",
+  "settings.eval.autoBackground.enabled.description": "自动将长时间运行的 eval 单元放入后台并稍后返回结果",
   "settings.eval.jl.description": "允许 eval 工具将 Julia 代码单元分派到持久 Julia 内核",
   "settings.eval.jl.label": "Julia 执行后端",
   "settings.eval.js.description": "允许 eval 工具将 JavaScript 代码单元分派到进程内运行时",

@@ -20,6 +20,8 @@
   "settings.eval.js.description": "Allow the eval tool to dispatch JavaScript cells to the in-process runtime",
   "settings.eval.rb.label": "Ruby Eval Backend",
   "settings.eval.rb.description": "Allow the eval tool to dispatch Ruby cells to the persistent Ruby kernel",
+  "settings.eval.autoBackground.enabled.label": "Eval Auto-Background",
+  "settings.eval.autoBackground.enabled.description": "Automatically background long-running eval cells and deliver the result later",
   "settings.eval.jl.label": "Julia Eval Backend",
   "settings.eval.jl.description": "Allow the eval tool to dispatch Julia cells to the persistent Julia kernel",
   "settings.python.kernelMode.label": "Python Kernel Mode",

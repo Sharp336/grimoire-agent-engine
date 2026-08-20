@@ -51,6 +51,8 @@
   "settings.lsp.enabled.description": "Enable the lsp tool for code intelligence (definitions, references, diagnostics, rename)",
   "settings.lsp.lazy.label": "Lazy LSP Startup",
   "settings.lsp.lazy.description": "Start language servers on first use (lsp tool or editing a matching file type) instead of at session startup",
+  "settings.lsp.shared.label": "Shared Language Servers",
+  "settings.lsp.shared.description": "Share one language server per project across omp instances via the daemon broker (falls back to private servers when unavailable)",
   "settings.lsp.formatOnWrite.label": "Format on Write",
   "settings.lsp.formatOnWrite.description": "Automatically format code files using LSP after writing",
   "settings.lsp.diagnosticsOnWrite.label": "Diagnostics on Write",
