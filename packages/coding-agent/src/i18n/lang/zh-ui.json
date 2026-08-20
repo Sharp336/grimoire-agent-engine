@@ -171,5 +171,8 @@
   "composer.shape.field": "紧凑字段",
   "composer.shape.fieldDesc": "填充的单行字段，带强调色端盖",
   "composer.shape.rail": "强调导轨",
-  "composer.shape.railDesc": "填充的单行字段，由单条强调导轨锚定"
+  "composer.shape.railDesc": "填充的单行字段，由单条强调导轨锚定",
+
+  "settings.orderedListHint": "点击切换 · 拖动选中项重排序 · ←/→ 移动 · 1-9 定位 · Esc 返回",
+  "settings.unorderedListHint": "点击/Enter/Space 切换 · Esc 返回"
 }

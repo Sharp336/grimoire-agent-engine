@@ -142,5 +142,8 @@
   "composer.shape.field": "Compact Field",
   "composer.shape.fieldDesc": "Filled one-row field with accent end caps",
   "composer.shape.rail": "Accent Rail",
-  "composer.shape.railDesc": "Filled one-row field anchored by a single accent rail"
+  "composer.shape.railDesc": "Filled one-row field anchored by a single accent rail",
+
+  "settings.orderedListHint": "Click to toggle · drag selected items to reorder · ←/→ move · 1-9 place · Esc to go back",
+  "settings.unorderedListHint": "Click/Enter/Space to toggle · Esc to go back"
 }

@@ -288,8 +288,12 @@ class MultiSelectSubmenu extends Container {
 
 		this.addChild(new Spacer(1));
 		const hint = this.ordered
-			? "  Click to toggle · drag selected items to reorder · ←/→ move · 1-9 place · Esc to go back"
-			: "  Click/Enter/Space to toggle · Esc to go back";
+			? "  " +
+				i18n.t(
+					"settings.orderedListHint",
+					"Click to toggle · drag selected items to reorder · ←/→ move · 1-9 place · Esc to go back",
+				)
+			: `  ${i18n.t("settings.unorderedListHint", "Click/Enter/Space to toggle · Esc to go back")}`;
 		this.addChild(new Text(theme.fg("dim", hint), 0, 0));
 	}
 
