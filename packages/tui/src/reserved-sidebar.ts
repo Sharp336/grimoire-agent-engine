@@ -14,6 +14,9 @@ export interface ResolvedRightSidebarLayout {
 	visible: boolean;
 }
 
+/** Close main-row SGR and OSC 8 state before entering reserved columns. */
+export const RIGHT_SIDEBAR_BOUNDARY_RESET = "\x1b[0m\x1b]8;;\x07";
+
 function finiteInteger(value: number, fallback: number): number {
 	return Number.isFinite(value) ? Math.trunc(value) : fallback;
 }
@@ -61,7 +64,7 @@ export function composeRightSidebar(
 		const main = truncateToWidth(window[row] ?? "", layout.mainWidth);
 		const mainPadding = " ".repeat(Math.max(0, layout.mainWidth - visibleWidth(main)));
 		const sidebar = truncateToWidth(sidebarLines[row] ?? "", layout.sidebarContentWidth);
-		output[row] = `${main}${mainPadding}${separator}${sidebar}`;
+		output[row] = `${main}${RIGHT_SIDEBAR_BOUNDARY_RESET}${mainPadding}${separator}${sidebar}`;
 	}
 	return output;
 }

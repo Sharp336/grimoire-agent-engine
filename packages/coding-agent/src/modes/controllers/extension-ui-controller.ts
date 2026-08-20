@@ -55,11 +55,14 @@ type GuestUiResult = { kind: "answered"; value: string } | { kind: "cancelled" }
 
 class ExtensionWidgetBoundary implements Component {
 	#failed = false;
+	readonly children: Component[];
 
 	constructor(
 		private readonly inner: ExtensionUiComponent,
 		private readonly onError: (error: unknown) => void,
-	) {}
+	) {
+		this.children = [inner];
+	}
 
 	render(width: number): readonly string[] {
 		if (this.#failed) return [];
@@ -360,16 +363,19 @@ export class ExtensionUiController {
 
 	setHookWidget(key: string, content: ExtensionWidgetContent, options?: ExtensionWidgetOptions): void {
 		const placement = options?.placement ?? "aboveEditor";
+		const restoreFocus = placement === "rightSidebar" && content !== undefined;
+		const previousFocus = restoreFocus ? this.ctx.ui.getFocused() : null;
 		this.#removeHookWidget(this.#hookWidgetsAbove, key);
 		this.#removeHookWidget(this.#hookWidgetsBelow, key);
-		this.#removeRightSidebarWidget(key);
 
 		if (content === undefined) {
+			this.#removeRightSidebarWidget(key);
 			this.#rebuildHookWidgets();
 			return;
 		}
 
 		if (placement === "rightSidebar") {
+			const existing = this.#hookWidgetsRight.get(key);
 			const inner = this.#createHookWidget(content);
 			let boundary: ExtensionWidgetBoundary;
 			boundary = new ExtensionWidgetBoundary(inner, () => {
@@ -380,12 +386,16 @@ export class ExtensionUiController {
 				this.#rebuildHookWidgets();
 				this.ctx.showError(`Extension widget "${key}" render failed`);
 			});
+			existing?.component.dispose();
+			// Map#set on an existing key replaces its value without moving it.
 			this.#hookWidgetsRight.set(key, { component: boundary, options: options ?? {} });
 		} else {
+			this.#removeRightSidebarWidget(key);
 			const target = placement === "belowEditor" ? this.#hookWidgetsBelow : this.#hookWidgetsAbove;
 			target.set(key, this.#createHookWidget(content));
 		}
 		this.#rebuildHookWidgets();
+		if (restoreFocus) this.ctx.ui.setFocus(previousFocus);
 	}
 
 	#removeHookWidget(widgets: Map<string, ExtensionUiComponent>, key: string): void {

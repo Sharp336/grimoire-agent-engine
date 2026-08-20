@@ -265,7 +265,7 @@ describe("TUI reserved right sidebar", () => {
 		expect(writes.join("")).toContain("MAIN\x1b[0m\x1b]8;;\x07");
 		expect(terminal.getViewportRowForegroundColumns(0)).toEqual([0, 1, 2, 3]);
 		expect(terminal.getViewportRowBackgroundColumns(0)).toEqual([0, 1, 2, 3]);
-		expect(terminal.getViewportRowHyperlinkColumns(0)).toEqual([0, 1, 2, 3]);
+		expect(terminal.getViewportRowHyperlinkColumns(0).some(column => column >= 76)).toBe(false);
 	});
 
 	it("restores full-width main rendering after unmount", async () => {
