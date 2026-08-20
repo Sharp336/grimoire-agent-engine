@@ -2736,7 +2736,7 @@ export const SETTINGS_SCHEMA = {
 				{
 					value: "mnemon",
 					label: "Mnemon",
-					description: "Native Mnemon CLI against ~/.mnemon (typed graph, no auto-retain drain)",
+					description: "Native Mnemon CLI against ~/.mnemon (typed graph, configurable auto-retention)",
 				},
 			],
 		},
