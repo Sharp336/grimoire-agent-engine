@@ -112,6 +112,26 @@ jobs:
         if: steps.marker.outputs.run == 'true'
         run: bun install --frozen-lockfile
 
+      - name: Fetch release native addons
+        if: steps.marker.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tarball="$(npm view @oh-my-pi/pi-natives-linux-x64@latest dist.tarball)"
+          curl -fsSL --retry 3 "$tarball" | tar -xz -C "$RUNNER_TEMP"
+          mkdir -p packages/natives/native
+          cp "$RUNNER_TEMP/package/pi_natives.linux-x64-baseline.node" packages/natives/native/
+          cp "$RUNNER_TEMP/package/pi_natives.linux-x64-modern.node" packages/natives/native/
+          cat > "$RUNNER_TEMP/smoke-addons.js" <<'EOF'
+          for (const f of process.argv.slice(2)) {
+            const m = require(f);
+            if (!m || Object.keys(m).length === 0) process.exit(1);
+          }
+          EOF
+          bun "$RUNNER_TEMP/smoke-addons.js" \
+            "$PWD/packages/natives/native/pi_natives.linux-x64-baseline.node" \
+            "$PWD/packages/natives/native/pi_natives.linux-x64-modern.node"
+
       - name: Run targeted regression tests
         if: steps.marker.outputs.run == 'true'
         run: |
