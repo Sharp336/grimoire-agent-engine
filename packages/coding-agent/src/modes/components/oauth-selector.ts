@@ -440,7 +440,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 	 * #visibleCount rows from #scrollStart. Wheel moves the selection, motion
 	 * drives the hover band, and a left click selects and confirms like Enter.
 	 */
-	override routeMouse(event: SgrMouseEvent, line: number, _col: number): void {
+	routeMouse(event: SgrMouseEvent, line: number, _col: number): void {
 		if (event.wheel !== null) {
 			this.handleWheel(event.wheel);
 			return;
