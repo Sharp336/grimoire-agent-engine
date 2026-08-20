@@ -2165,7 +2165,13 @@ export class SessionMaintenance {
 	 */
 	#computeSnapcompactMaxFrames(preparation: CompactionPreparation, settings: EngineCompactionSettings): number {
 		const ctxWindow = this.#model?.contextWindow ?? 0;
-		if (ctxWindow <= 0) return Math.min(snapcompact.MAX_FRAMES_DEFAULT, snapcompact.maxFramesForDataBudget());
+		if (ctxWindow <= 0) {
+			return Math.min(
+				snapcompact.MAX_FRAMES_DEFAULT,
+				snapcompact.maxFramesForDataBudget(),
+				snapcompact.providerFrameBudget(this.#model?.provider, this.#model?.id),
+			);
+		}
 		const reserve = effectiveReserveTokens(ctxWindow, settings);
 		let baseTokens = computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer);
 		baseTokens += this.#tokenizer.countMessages(preparation.recentMessages);
@@ -2206,6 +2212,7 @@ export class SessionMaintenance {
 			Math.floor(frameBudget / snapcompact.FRAME_TOKEN_ESTIMATE),
 			snapcompact.MAX_FRAMES_DEFAULT,
 			snapcompact.maxFramesForDataBudget(),
+			snapcompact.providerFrameBudget(this.#model?.provider, this.#model?.id),
 		);
 	}
 
@@ -2443,7 +2450,13 @@ export class SessionMaintenance {
 	 */
 	#computeSnapcompactRescueMaxFrames(settings: EngineCompactionSettings, keptTailTokens: number): number {
 		const ctxWindow = this.#model?.contextWindow ?? 0;
-		if (ctxWindow <= 0) return Math.min(snapcompact.MAX_FRAMES_DEFAULT, snapcompact.maxFramesForDataBudget());
+		if (ctxWindow <= 0) {
+			return Math.min(
+				snapcompact.MAX_FRAMES_DEFAULT,
+				snapcompact.maxFramesForDataBudget(),
+				snapcompact.providerFrameBudget(this.#model?.provider, this.#model?.id),
+			);
+		}
 		const thresholdTokens = resolveThresholdTokens(ctxWindow, settings);
 		const recoveryBandTokens = Math.floor(thresholdTokens * COMPACTION_RECOVERY_BAND);
 		const baseTokens = computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer);
@@ -2454,12 +2467,14 @@ export class SessionMaintenance {
 		const frameBudget = recoveryBandTokens - baseTokens - keptTailTokens - textEdgeTokens - SUMMARY_TEMPLATE_TOKENS;
 		if (frameBudget < snapcompact.FRAME_TOKEN_ESTIMATE) return 0;
 		// Same hard caps as #computeSnapcompactMaxFrames: a threshold-derived
-		// count above the per-request payload budget would "shrink" a huge
-		// archive to a frame count the rebuilt prompt can never attach anyway.
+		// count above the per-request payload or provider image budget would
+		// "shrink" a huge archive to a frame count the rebuilt prompt can never
+		// attach anyway.
 		return Math.min(
 			Math.floor(frameBudget / snapcompact.FRAME_TOKEN_ESTIMATE),
 			snapcompact.MAX_FRAMES_DEFAULT,
 			snapcompact.maxFramesForDataBudget(),
+			snapcompact.providerFrameBudget(this.#model?.provider, this.#model?.id),
 		);
 	}
 

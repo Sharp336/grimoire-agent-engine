@@ -290,7 +290,7 @@ export function estimateInlineSavings(input: {
 			if (block.type === "image") existingImages++;
 		}
 	}
-	const budget = snapcompact.providerImageBudget(model.provider) - existingImages;
+	const budget = snapcompact.providerImageBudget(model.provider, model.id) - existingImages;
 
 	const candidates: InlineToolResultCandidate[] = [];
 	if (options.renderToolResults) {
@@ -422,7 +422,7 @@ export class SnapcompactInlineTransformer {
 
 		const shape = snapcompact.resolveShape(model, this.options.shape);
 		const tokenizer = new Tokenizer(model);
-		const budget = snapcompact.providerImageBudget(model.provider) - countContextImages(context);
+		const budget = snapcompact.providerImageBudget(model.provider, model.id) - countContextImages(context);
 		if (budget <= 0) return context;
 
 		const messages = [...context.messages];
