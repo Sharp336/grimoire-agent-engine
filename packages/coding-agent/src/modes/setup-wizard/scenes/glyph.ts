@@ -1,13 +1,14 @@
 import { routeSelectListMouse, type SelectItem, SelectList, type SgrMouseEvent } from "@oh-my-pi/pi-tui";
+import { i18n } from "../../../i18n";
 import { getSelectListTheme, type SymbolPreset, setSymbolPreset, theme } from "../../theme/theme";
 import type { SetupScene, SetupSceneController, SetupSceneHost } from "./types";
 
 const GLYPH_PRESETS = ["nerd", "unicode", "ascii"] as const satisfies readonly SymbolPreset[];
 
 const GLYPH_LABELS: Readonly<Record<SymbolPreset, string>> = {
-	nerd: "Nerd Font",
-	unicode: "Unicode",
-	ascii: "ASCII",
+	nerd: i18n.t("setup.glyph.nerd", "Nerd Font"),
+	unicode: i18n.t("setup.glyph.unicode", "Unicode"),
+	ascii: i18n.t("setup.glyph.ascii", "ASCII"),
 };
 
 const GLYPH_SAMPLES: Readonly<Record<SymbolPreset, string>> = {
@@ -24,8 +25,8 @@ const GLYPH_ITEMS: readonly SelectItem[] = GLYPH_PRESETS.map((preset, index) => 
 }));
 
 class GlyphSceneController implements SetupSceneController {
-	title = "Choose glyph mode";
-	subtitle = "Pick the row that renders cleanly in your terminal.";
+	title = i18n.t("setup.glyph.title", "Choose glyph mode");
+	subtitle = i18n.t("setup.glyph.subtitle", "Pick the row that renders cleanly in your terminal.");
 	#selectList: SelectList;
 	#previewRequest = 0;
 	#committing = false;
@@ -69,7 +70,13 @@ class GlyphSceneController implements SetupSceneController {
 	}
 
 	render(width: number): readonly string[] {
-		const lines = [theme.fg("muted", "If a row shows boxes, tofu, or misaligned icons, pick another."), ""];
+		const lines = [
+			theme.fg(
+				"muted",
+				i18n.t("setup.glyph.hint", "If a row shows boxes, tofu, or misaligned icons, pick another."),
+			),
+			"",
+		];
 		this.#listRowStart = lines.length;
 		lines.push(...this.#selectList.render(width));
 		return lines;
@@ -97,7 +104,7 @@ class GlyphSceneController implements SetupSceneController {
 
 export const glyphSetupScene: SetupScene = {
 	id: "glyph-mode",
-	title: "Choose glyph mode",
+	title: i18n.t("setup.glyph.title", "Choose glyph mode"),
 	minVersion: 1,
 	mount: host => new GlyphSceneController(host),
 };

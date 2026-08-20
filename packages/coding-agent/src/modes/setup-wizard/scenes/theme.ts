@@ -7,6 +7,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
+import { i18n } from "../../../i18n";
 import {
 	enableAutoTheme,
 	getAvailableThemes,
@@ -24,12 +25,36 @@ import type { SetupScene, SetupSceneController, SetupSceneHost } from "./types";
 type ThemeMode = "curated" | "all";
 
 const CURATED_ITEMS: readonly SelectItem[] = [
-	{ value: "auto", label: "Match terminal", description: "Titanium in dark terminals, Light in light terminals" },
-	{ value: "theme:titanium", label: "Titanium", description: "Default dark theme" },
-	{ value: "theme:light", label: "Light", description: "Default light theme" },
-	{ value: "colorblind", label: "Colorblind colors", description: "Adjust red/green contrast" },
-	{ value: "ansi", label: "ANSI-safe", description: "ASCII glyphs with the dark terminal theme" },
-	{ value: "browse", label: "Browse all…", description: "Show every built-in and custom theme" },
+	{
+		value: "auto",
+		label: i18n.t("setup.theme.matchTerminal", "Match terminal"),
+		description: i18n.t("setup.theme.matchTerminalDesc", "Titanium in dark terminals, Light in light terminals"),
+	},
+	{
+		value: "theme:titanium",
+		label: i18n.t("setup.theme.titanium", "Titanium"),
+		description: i18n.t("setup.theme.titaniumDesc", "Default dark theme"),
+	},
+	{
+		value: "theme:light",
+		label: i18n.t("setup.theme.light", "Light"),
+		description: i18n.t("setup.theme.lightDesc", "Default light theme"),
+	},
+	{
+		value: "colorblind",
+		label: i18n.t("setup.theme.colorblind", "Colorblind colors"),
+		description: i18n.t("setup.theme.colorblindDesc", "Adjust red/green contrast"),
+	},
+	{
+		value: "ansi",
+		label: i18n.t("setup.theme.ansi", "ANSI-safe"),
+		description: i18n.t("setup.theme.ansiDesc", "ASCII glyphs with the dark terminal theme"),
+	},
+	{
+		value: "browse",
+		label: i18n.t("setup.theme.browse", "Browse all…"),
+		description: i18n.t("setup.theme.browseDesc", "Show every built-in and custom theme"),
+	},
 ];
 
 function fitLine(line: string, width: number): string {
@@ -78,19 +103,19 @@ function renderMockEditor(width: number): string[] {
 function renderThemePreview(width: number): string[] {
 	const previewWidth = Math.max(24, Math.min(width, 88));
 	return [
-		theme.bold("Preview"),
+		theme.bold(i18n.t("setup.theme.previewLabel", "Preview")),
 		`${theme.fg("success", `${theme.status.success} success`)}  ${theme.fg("warning", `${theme.status.warning} warning`)}  ${theme.fg("error", `${theme.status.error} error`)}  ${theme.fg("accent", "accent")}`,
 		"",
-		theme.fg("muted", "Status line"),
+		theme.fg("muted", i18n.t("setup.theme.statusLine", "Status line")),
 		renderMockStatusLine(previewWidth),
-		theme.fg("muted", "Editor"),
+		theme.fg("muted", i18n.t("setup.theme.editor", "Editor")),
 		...renderMockEditor(previewWidth),
 	];
 }
 
 class ThemeSceneController implements SetupSceneController {
-	title = "Pick a theme";
-	subtitle = "Move through the list to preview; Enter saves the highlighted choice.";
+	title = i18n.t("setup.theme.title", "Pick a theme");
+	subtitle = i18n.t("setup.theme.subtitle", "Move through the list to preview; Enter saves the highlighted choice.");
 	#mode: ThemeMode = "curated";
 	#selectList: SelectList;
 	#loadingAllThemes = false;
@@ -139,10 +164,13 @@ class ThemeSceneController implements SetupSceneController {
 	render(width: number, maxLines?: number): readonly string[] {
 		const budget = maxLines ?? Number.POSITIVE_INFINITY;
 		const lines = [
-			theme.fg("muted", "Theme changes preview live. Nothing is saved until you press Enter."),
+			theme.fg(
+				"muted",
+				i18n.t("setup.theme.previewHint", "Theme changes preview live. Nothing is saved until you press Enter."),
+			),
 			this.#mode === "all"
-				? theme.fg("dim", "Browsing all themes · Esc returns to curated choices")
-				: theme.fg("dim", "Esc skips this step"),
+				? theme.fg("dim", i18n.t("setup.theme.escCurated", "Browsing all themes · Esc returns to curated choices"))
+				: theme.fg("dim", i18n.t("setup.theme.escSkip", "Esc skips this step")),
 			"",
 		];
 		// The mock status-line/editor block is decorative — the wizard itself
@@ -155,7 +183,7 @@ class ThemeSceneController implements SetupSceneController {
 		}
 		if (this.#loadingAllThemes) {
 			this.#listRowStart = -1;
-			lines.push(theme.fg("dim", "Loading themes…"));
+			lines.push(theme.fg("dim", i18n.t("setup.theme.loading", "Loading themes…")));
 		} else {
 			this.#listRowStart = lines.length;
 			if (maxLines !== undefined) {
@@ -224,7 +252,7 @@ class ThemeSceneController implements SetupSceneController {
 			const items = themes.map(name => ({
 				value: `theme:${name}`,
 				label: name,
-				description: name === this.#originalTheme ? "current" : undefined,
+				description: name === this.#originalTheme ? i18n.t("setup.theme.current", "current") : undefined,
 			}));
 			const selectedIndex = Math.max(0, themes.indexOf(this.#originalTheme ?? ""));
 			this.#mode = "all";
@@ -324,7 +352,7 @@ class ThemeSceneController implements SetupSceneController {
 
 export const themeSetupScene: SetupScene = {
 	id: "theme",
-	title: "Pick a theme",
+	title: i18n.t("setup.theme.title", "Pick a theme"),
 	minVersion: 1,
 	mount: host => new ThemeSceneController(host),
 };
