@@ -189,14 +189,14 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 
 	/**
 	 * Mark whether the next advisor prompt reviews an in-progress primary turn.
-	 * Non-blockers are normally withheld until a completed update so partial work
-	 * does not interrupt the primary before it can finish its planned steps.
-	 * When configured, a concern may pass through to the normal steering policy;
-	 * nits remain withheld and blockers always pass through.
+	 * Non-blockers are normally dropped while reviewing partial work so they do
+	 * not interrupt the primary before it can finish its planned steps. When
+	 * configured, a concern may pass through to the normal steering policy; nits
+	 * remain dropped and blockers always pass through.
 	 */
-	beginUpdate(inProgress: boolean, steerInProgressConcerns = false): void {
-		this.#inProgressUpdate = inProgress;
-		this.#steerInProgressConcerns = steerInProgressConcerns;
+	beginUpdate(options: { inProgress: boolean; steerInProgressConcerns?: boolean }): void {
+		this.#inProgressUpdate = options.inProgress;
+		this.#steerInProgressConcerns = options.steerInProgressConcerns ?? false;
 	}
 
 	/** Clear delivered-note memory when the advisor starts a fresh conversation. */

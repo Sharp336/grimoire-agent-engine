@@ -440,12 +440,12 @@ describe("advisor", () => {
 			expect(onAdvice).toHaveBeenNthCalledWith(3, note, "blocker");
 		});
 
-		it("withholds non-blockers for in-progress updates without consuming dedupe state", async () => {
+		it("drops non-blockers for in-progress updates without consuming dedupe state", async () => {
 			const onAdvice = vi.fn();
 			const tool = new AdviseTool(onAdvice);
 			const note = "The result still needs a focused regression test.";
 
-			tool.beginUpdate(true);
+			tool.beginUpdate({ inProgress: true });
 			await tool.execute("tc-1", { note, severity: "concern" });
 			await tool.execute("tc-2", { note: "Minor naming cleanup.", severity: "nit" });
 			await tool.execute("tc-3", { note: "A destructive command is running.", severity: "blocker" });
@@ -453,7 +453,7 @@ describe("advisor", () => {
 			expect(onAdvice).toHaveBeenCalledTimes(1);
 			expect(onAdvice).toHaveBeenCalledWith("A destructive command is running.", "blocker");
 
-			tool.beginUpdate(false);
+			tool.beginUpdate({ inProgress: false });
 			await tool.execute("tc-4", { note, severity: "concern" });
 			expect(onAdvice).toHaveBeenCalledTimes(2);
 			expect(onAdvice).toHaveBeenLastCalledWith(note, "concern");
@@ -463,7 +463,7 @@ describe("advisor", () => {
 			const onAdvice = vi.fn();
 			const tool = new AdviseTool(onAdvice);
 
-			tool.beginUpdate(true, true);
+			tool.beginUpdate({ inProgress: true, steerInProgressConcerns: true });
 			await tool.execute("tc-1", {
 				note: "The active edit targets the wrong code path.",
 				severity: "concern",

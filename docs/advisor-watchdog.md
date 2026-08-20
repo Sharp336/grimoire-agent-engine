@@ -135,7 +135,7 @@ So the advisor can steer and resume a run the agent ended on its own **while it 
 
 `advisor.immuneTurns` limits interruption frequency. After the advisor successfully delivers a `concern` or `blocker` through the steering channel, later concerns/blockers are routed as non-interrupting asides until the configured number of primary turns has completed. The default is `3`. `nit` notes are unchanged, and advice raised while user-interrupt auto-resume suppression is active is still preserved instead of restarting a stopped run.
 
-While an advisor update is reviewing work still in progress, `AdviseTool` always withholds `nit` calls. It also withholds `concern` calls by default; set `advisor.steerInProgressConcerns` to `true` to pass them into the normal steering policy immediately. A `blocker` may always interrupt partial work. The tool also suppresses the same whitespace-normalized note at an equal or lower severity while allowing a real escalation (`nit` → `concern` → `blocker`).
+While an advisor update is reviewing work still in progress, `AdviseTool` always drops `nit` calls. It also drops `concern` calls by default; set `advisor.steerInProgressConcerns` to `true` to pass them into the normal steering policy immediately. A `blocker` may always interrupt partial work. The tool also suppresses the same whitespace-normalized note at an equal or lower severity while allowing a real escalation (`nit` → `concern` → `blocker`).
 
 ### Emission guard
 
