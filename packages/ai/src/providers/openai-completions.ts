@@ -87,6 +87,7 @@ import {
 import {
 	applyChatCompletionsCompatPolicy,
 	applyChatCompletionsToolStream,
+	applyDeepSeekV4TimeWindowCost,
 	applyOpenAIExtraBody,
 	applyOpenAIGatewayRouting,
 	applyOpenAIServiceTier,
@@ -642,6 +643,7 @@ const streamOpenAICompletionsOnce = (
 		let decodedEventCount = 0;
 		let lastDecodedEventType: string | undefined;
 		let streamFinishedAt: number | undefined;
+		let streamRequestStartedAtMs: number | undefined;
 
 		try {
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
@@ -720,6 +722,7 @@ const streamOpenAICompletionsOnce = (
 					if (requestTimeoutMs !== undefined) {
 						headersWithTimeout["X-Stainless-Timeout"] = Math.floor(requestTimeoutMs / 1000).toString();
 					}
+					const requestStartedAtMs = directDeepSeekEndpoint ? Date.now() : undefined;
 					const { events, response, requestId } = await postOpenAIStream<ChatCompletionChunk>({
 						url: completionsUrl,
 						headers: headersWithTimeout,
@@ -732,6 +735,7 @@ const streamOpenAICompletionsOnce = (
 						// extend the deadline.
 						onSseEvent: rawSseObserver,
 					});
+					streamRequestStartedAtMs = requestStartedAtMs;
 					streamResponseStatus = response.status;
 					streamDeepSeekTraceId = response.headers.get("x-ds-trace-id")?.trim() || undefined;
 					streamRequestId = requestId?.trim() || response.headers.get("request-id")?.trim() || undefined;
@@ -1047,6 +1051,8 @@ const streamOpenAICompletionsOnce = (
 			let awaitTrailingUsageDetails = false;
 			const applyUsagePayload = (rawUsage: object): void => {
 				output.usage = parseChunkUsage(rawUsage, model, premiumRequestsTotal);
+				if (directDeepSeekEndpoint)
+					applyDeepSeekV4TimeWindowCost(model, baseUrl, output.usage, streamRequestStartedAtMs);
 				sawUsagePayload = true;
 				awaitTrailingUsageDetails = !hasPositiveCacheReadTokenField(rawUsage);
 			};

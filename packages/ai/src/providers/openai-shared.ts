@@ -1,7 +1,12 @@
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { toFirepassWireModelId, toFireworksWireModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { hostMatchesUrl } from "@oh-my-pi/pi-catalog/hosts";
-import { isGlm52ReasoningEffortModelId, isKimiK3ModelId } from "@oh-my-pi/pi-catalog/identity";
+import {
+	bareModelId,
+	isDeepseekV4FlashModelId,
+	isGlm52ReasoningEffortModelId,
+	isKimiK3ModelId,
+} from "@oh-my-pi/pi-catalog/identity";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import type {
@@ -410,6 +415,54 @@ export function applyOpenRouterReportedCost(model: Pick<Model, "provider">, usag
 		usage.cost.cacheWrite = 0;
 	}
 	usage.cost.total = reportedCost;
+}
+
+const DEEPSEEK_V4_PEAK_TOKEN_RATES = {
+	flash: { cacheHit: 0.014, cacheMiss: 0.44, output: 1.32 },
+	pro: { cacheHit: 0.044, cacheMiss: 1.32, output: 3.96 },
+} as const;
+
+function resolveDeepSeekV4PeakTokenRates(modelId: string) {
+	if (isDeepseekV4FlashModelId(modelId)) return DEEPSEEK_V4_PEAK_TOKEN_RATES.flash;
+	const normalizedModelId = bareModelId(modelId).toLowerCase();
+	return normalizedModelId === "deepseek-v4-pro" || normalizedModelId.startsWith("deepseek-v4-pro-")
+		? DEEPSEEK_V4_PEAK_TOKEN_RATES.pro
+		: undefined;
+}
+
+/**
+ * Replace catalog estimates with DeepSeek V4's recurring UTC-window price.
+ *
+ * Peak windows are 01:00–04:00 and 06:00–10:00 UTC; all other times are 50% off.
+ * Source: https://api-docs.deepseek.com/quick_start/pricing/
+ */
+export function applyDeepSeekV4TimeWindowCost(
+	model: Pick<Model, "id">,
+	baseUrl: string | undefined,
+	usage: Usage,
+	requestStartedAtMs: number | undefined,
+): boolean {
+	if (
+		!isDeepSeekDirectEndpoint(baseUrl) ||
+		typeof requestStartedAtMs !== "number" ||
+		!Number.isFinite(requestStartedAtMs)
+	) {
+		return false;
+	}
+	const rates = resolveDeepSeekV4PeakTokenRates(model.id);
+	if (!rates) return false;
+	const startedAt = new Date(requestStartedAtMs);
+	if (Number.isNaN(startedAt.getTime())) return false;
+	const utcHour = startedAt.getUTCHours();
+	const multiplier = (utcHour >= 1 && utcHour < 4) || (utcHour >= 6 && utcHour < 10) ? 1 : 0.5;
+	const orchestration = usage.orchestration;
+	usage.cost.input = (rates.cacheMiss / 1_000_000) * multiplier * (usage.input + (orchestration?.input ?? 0));
+	usage.cost.output = (rates.output / 1_000_000) * multiplier * (usage.output + (orchestration?.output ?? 0));
+	usage.cost.cacheRead =
+		(rates.cacheHit / 1_000_000) * multiplier * (usage.cacheRead + (orchestration?.cacheRead ?? 0));
+	usage.cost.cacheWrite = (rates.cacheMiss / 1_000_000) * multiplier * usage.cacheWrite;
+	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
+	return true;
 }
 
 export interface OpenAIUsageAccountingInput {
