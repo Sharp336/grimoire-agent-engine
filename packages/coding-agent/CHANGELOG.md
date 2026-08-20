@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Ask dialog: Space now selects a single-choice option without submitting, so you can add a note (`n`) before confirming with Enter.
+
 ## [17.4.0] - 2026-08-20
 
 ### Added

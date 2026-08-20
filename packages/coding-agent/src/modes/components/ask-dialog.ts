@@ -616,13 +616,13 @@ export class AskDialogComponent implements Component {
 		const question = this.#questions[this.#currentQuestionIndex()];
 		// Enter advances in multi-question dialogs and submits single-question ones.
 		const enterAction = this.#questions.length > 1 ? "next" : "submit";
-		const action = question?.multi ? `Space toggle · Enter ${enterAction}` : "Enter select · n note";
+		const action = question?.multi ? `Space toggle · Enter ${enterAction}` : "Space select · Enter submit · n note";
 		const tabs = this.#hasSubmitTab() ? " · Tab/←/→" : "";
 		if (this.#questionCanPage && indicator) {
 			return `${action} · ↑/↓${tabs} · ${cancel} · ${pageKeysLabel()} ${indicator}`;
 		}
 		const scroll = indicator ? ` ${indicator} scroll ·` : "";
-		return `${action} · ↑/↓ move${tabs} ·${scroll} ${cancel}`;
+		return `${action} · ↑/↓${tabs} ·${scroll} ${cancel}`;
 	}
 
 	#questionRows(question: ExtensionAskDialogQuestion): QuestionRow[] {
@@ -686,7 +686,7 @@ export class AskDialogComponent implements Component {
 		}
 		const isEnter = matchesKey(keyData, "enter") || matchesKey(keyData, "return") || keyData === "\n";
 		const isSpace = matchesKey(keyData, "space") || keyData === " ";
-		if (!isEnter && !(question.multi && isSpace)) return;
+		if (!isEnter && !isSpace) return;
 		if (rowItem.kind === "other") {
 			void this.#promptForCustomInput(question, state, rowItem);
 			return;
@@ -708,6 +708,16 @@ export class AskDialogComponent implements Component {
 			} else {
 				state.selectedOptions.add(option.label);
 			}
+			this.#requestRender();
+			return;
+		}
+		if (isSpace) {
+			// Space marks the focused option as the choice without forwarding,
+			// so the user can review it or add a note (`n`) before submitting
+			// with Enter. Enter alone still selects and advances in one step.
+			state.selectedOptions = new Set([option.label]);
+			state.customInput = undefined;
+			clearNoteUnlessRow(state, rowItem.key);
 			this.#requestRender();
 			return;
 		}

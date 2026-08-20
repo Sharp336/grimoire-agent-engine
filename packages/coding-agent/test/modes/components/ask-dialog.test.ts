@@ -101,6 +101,113 @@ describe("AskDialogComponent", () => {
 		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Option A"]);
 	});
 
+	it("single-question, single-select: Space marks the choice without forwarding; Enter submits it", () => {
+		const onSubmit = vi.fn();
+		const questions: ExtensionAskDialogQuestion[] = [
+			{
+				id: "q1",
+				question: "Choose one?",
+				options: [{ label: "Option A" }, { label: "Option B" }],
+			},
+		];
+		const component = new AskDialogComponent(questions, {
+			onSubmit,
+			onCancel: vi.fn(),
+			onPrompt: vi.fn(),
+		});
+		expect(render(component)).toContain("Space select · Enter submit · n note");
+
+		// Space marks Option A as the choice; nothing is forwarded or submitted.
+		component.handleInput(SPACE);
+		expect(onSubmit).not.toHaveBeenCalled();
+
+		// Moving the cursor and marking another option moves the choice.
+		component.handleInput(DOWN);
+		component.handleInput(SPACE);
+		expect(onSubmit).not.toHaveBeenCalled();
+
+		// Enter submits the marked choice.
+		component.handleInput(ENTER);
+		expect(onSubmit).toHaveBeenCalledTimes(1);
+		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Option B"]);
+	});
+
+	it("single-question, single-select: Space then n attaches a note to the marked choice", async () => {
+		const onPrompt = vi.fn().mockReturnValue(Promise.resolve("Why A"));
+		const onSubmit = vi.fn();
+		const questions: ExtensionAskDialogQuestion[] = [
+			{
+				id: "q1",
+				question: "Choose one?",
+				options: [{ label: "Option A" }, { label: "Option B" }],
+			},
+		];
+		const component = new AskDialogComponent(questions, {
+			onSubmit,
+			onCancel: vi.fn(),
+			onPrompt,
+		});
+
+		// Space selects without forwarding, then `n` adds a note to the choice.
+		component.handleInput(SPACE);
+		expect(onSubmit).not.toHaveBeenCalled();
+		component.handleInput("n");
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(onPrompt).toHaveBeenCalledTimes(1);
+		expect(onPrompt.mock.calls[0][0]).toBe("Note for Option A: Choose one?");
+
+		component.handleInput(ENTER);
+		expect(onSubmit).toHaveBeenCalledTimes(1);
+		expect(onSubmit.mock.calls[0][0].results[0]).toEqual(
+			expect.objectContaining({
+				selectedOptions: ["Option A"],
+				note: "Why A",
+			}),
+		);
+	});
+
+	it("multi-question, single-select: Space marks without advancing; Enter advances to the next question", () => {
+		const onSubmit = vi.fn();
+		const questions: ExtensionAskDialogQuestion[] = [
+			{
+				id: "q1",
+				question: "Q1?",
+				options: [{ label: "A1" }, { label: "B1" }],
+			},
+			{
+				id: "q2",
+				question: "Q2?",
+				options: [{ label: "A2" }, { label: "B2" }],
+			},
+		];
+		const component = new AskDialogComponent(questions, {
+			onSubmit,
+			onCancel: vi.fn(),
+			onPrompt: vi.fn(),
+		});
+
+		// Space marks A1 without advancing to Q2.
+		component.handleInput(SPACE);
+		expect(onSubmit).not.toHaveBeenCalled();
+		expect(render(component)).toContain("Q1?");
+
+		// Re-marking another option moves the choice; Enter then advances.
+		component.handleInput(DOWN);
+		component.handleInput(SPACE);
+		component.handleInput(ENTER);
+		expect(onSubmit).not.toHaveBeenCalled();
+		expect(render(component)).toContain("Q2?");
+
+		// Mark on Q2 and submit from the Submit tab.
+		component.handleInput(SPACE);
+		component.handleInput(TAB);
+		component.handleInput(ENTER);
+		expect(onSubmit).toHaveBeenCalledTimes(1);
+		expect(onSubmit.mock.calls[0][0].results.map((result: { selectedOptions: string[] }) => result.selectedOptions)).toEqual([["B1"], ["A2"]]);
+	});
+
 	it("single-question, single-select: DOWN then Enter selects second option and submits", () => {
 		const onSubmit = vi.fn();
 		const onCancel = vi.fn();
