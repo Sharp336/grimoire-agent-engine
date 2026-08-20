@@ -3411,6 +3411,7 @@ export class AgentSession {
 				type: "tool_call",
 				toolName: ctx.tool.name,
 				toolCallId: ctx.toolCall.id,
+				agentKind: this.#agentKind,
 				input: normalizeToolEventInput(ctx.tool.name, resolveToolEventInput(ctx.tool, eventArgs)),
 			},
 			signal,
