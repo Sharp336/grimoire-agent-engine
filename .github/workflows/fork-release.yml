@@ -96,6 +96,15 @@ jobs:
             exit 1
           fi
 
+          # The downstream patch is generated text. Normalize the generated
+          # TypeScript plus the patch script itself before the official Biome
+          # check so formatting policy remains identical to upstream.
+          bunx biome format --write \
+            scripts/apply-fork-patches.ts \
+            packages/coding-agent/src/tools/hub/index.ts \
+            packages/coding-agent/src/tools/hub/jobs.ts
+          git diff --check
+
       - name: Run official TypeScript and release-script checks
         run: |
           bun run ci:check:full
