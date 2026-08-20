@@ -247,6 +247,23 @@ async function spawnUrlTunnel(
 	const deadline = Date.now() + READY_TIMEOUT_MS;
 	let scanned = 0;
 	let baseUrl: string | undefined;
+	const scanLog = (text: string): string | undefined => {
+		if (text.length <= scanned) return undefined;
+		if (baseUrl === undefined) {
+			for (const line of text.slice(scanned).split("\n")) {
+				const url = extract(line);
+				if (url) {
+					baseUrl = normalizeBaseUrl(url);
+					break;
+				}
+			}
+			scanned = text.lastIndexOf("\n") + 1;
+		}
+		// The URL banner can precede edge registration (cloudflared prints the
+		// hostname before any connection is live); wait for the ready marker.
+		return baseUrl !== undefined && (!readyPattern || readyPattern.test(text)) ? baseUrl : undefined;
+	};
+
 	while (Date.now() < deadline) {
 		let text = "";
 		try {
@@ -254,24 +271,20 @@ async function spawnUrlTunnel(
 		} catch {
 			// Log file not flushed yet; keep polling.
 		}
-		if (text.length > scanned) {
-			if (baseUrl === undefined) {
-				for (const line of text.slice(scanned).split("\n")) {
-					const url = extract(line);
-					if (url) {
-						baseUrl = normalizeBaseUrl(url);
-						break;
-					}
-				}
-				scanned = text.lastIndexOf("\n") + 1;
-			}
-			// The URL banner can precede edge registration (cloudflared prints the
-			// hostname before any connection is live); wait for the ready marker.
-			if (baseUrl !== undefined && (!readyPattern || readyPattern.test(text))) {
-				return { proc, baseUrl };
-			}
-		}
+		let readyUrl = scanLog(text);
+		if (readyUrl) return { proc, baseUrl: readyUrl };
 		if (proc.exitCode !== null) {
+			// exitCode may become visible after the poll's read but before the
+			// child descriptor is fully drained. Read once more after exit so a
+			// short-lived supervised tunnel can still publish its URL.
+			await proc.exited;
+			try {
+				text = await Bun.file(logPath).text();
+			} catch {
+				// The diagnostic below remains authoritative when no log exists.
+			}
+			readyUrl = scanLog(text);
+			if (readyUrl) return { proc, baseUrl: readyUrl };
 			throw new Error(`${argv[0]} exited with code ${proc.exitCode} before reporting a tunnel URL`);
 		}
 		await Bun.sleep(150);
