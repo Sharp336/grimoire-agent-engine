@@ -32,6 +32,9 @@ export type SymbolKey =
 	| "tree.vertical"
 	| "tree.horizontal"
 	| "tree.hook"
+	// Progress Bar
+	| "progress.filled"
+	| "progress.empty"
 	// Box Drawing - Rounded
 	| "boxRound.topLeft"
 	| "boxRound.topRight"
@@ -242,6 +245,9 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"tree.vertical": "│",
 	"tree.horizontal": "─",
 	"tree.hook": "└",
+	// Progress bar
+	"progress.filled": "━",
+	"progress.empty": "─",
 	// Box (rounded)
 	"boxRound.topLeft": "╭",
 	"boxRound.topRight": "╮",
@@ -472,6 +478,11 @@ const NERD_SYMBOLS: SymbolMap = {
 	"tree.horizontal": "─",
 	// pick: └ | alt: ╰ ⎿ ↳
 	"tree.hook": "└",
+	// Progress Bar (same as unicode)
+	// pick: ━ | alt: ▰ ▮ ■
+	"progress.filled": "━",
+	// pick: ─ | alt: ▱ ▯ ╌
+	"progress.empty": "─",
 	// Box Drawing - Rounded (same as unicode)
 	// pick: ╭ | alt: ┌ ┏ ╔
 	"boxRound.topLeft": "╭",
@@ -762,6 +773,9 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"tree.vertical": "|",
 	"tree.horizontal": "-",
 	"tree.hook": "`-",
+	// Progress Bar
+	"progress.filled": "=",
+	"progress.empty": "-",
 	// Box Drawing - Rounded (ASCII fallback)
 	"boxRound.topLeft": "+",
 	"boxRound.topRight": "+",

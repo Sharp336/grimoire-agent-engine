@@ -2,6 +2,7 @@ import { describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type {
 	ResetCreditAccountStatus,
 	ResetCreditRedeemOutcome,
@@ -1149,7 +1150,7 @@ describe("wave 5 — adapters and polish", () => {
 			contextWindow: 200_000,
 		};
 		(session as unknown as Record<string, unknown>).skills = [];
-		(session as unknown as Record<string, unknown>).agent = { state: { tools: [] } };
+		(session as unknown as Record<string, unknown>).agent = { state: { tools: [] }, tokenizer: new Tokenizer() };
 		(session as unknown as Record<string, unknown>).systemPrompt = ["You are a helpful assistant."];
 		session.messages = [
 			{ role: "user", content: "Hello, how are you?" },

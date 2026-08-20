@@ -180,7 +180,7 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 			sessionManager,
 			settings: Settings.isolated({
 				"compaction.autoContinue": true,
-				"compaction.strategy": "snapcompact",
+				"compaction.methodOrder": ["snapcompact", "soft"],
 				// Fixed trigger so the rescue's threshold-derived frame budget is
 				// deterministic: band 0.8 × 60k = 48k minus base/edge reserves
 				// yields well under 16 frames — the rebuild must shrink.

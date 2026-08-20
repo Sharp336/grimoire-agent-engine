@@ -184,6 +184,7 @@ export interface ModelPatch {
 	thinking?: ThinkingConfig;
 	input?: ("text" | "image")[];
 	imageInputDecoder?: Model<Api>["imageInputDecoder"];
+	tokenizer?: Model<Api>["tokenizer"];
 	supportsTools?: boolean;
 	cost?: Partial<Model<Api>["cost"]>;
 	contextWindow?: number;
@@ -211,6 +212,7 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 	if (patch.reasoning !== undefined) result.reasoning = patch.reasoning;
 	if (patch.thinking !== undefined) result.thinking = patch.thinking;
 	if (patch.input !== undefined) result.input = patch.input;
+	if (patch.tokenizer !== undefined) result.tokenizer = patch.tokenizer;
 	if (patch.imageInputDecoder !== undefined) result.imageInputDecoder = patch.imageInputDecoder;
 	if (patch.supportsTools !== undefined) result.supportsTools = patch.supportsTools;
 	if (patch.contextWindow !== undefined) result.contextWindow = patch.contextWindow;

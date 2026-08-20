@@ -140,6 +140,18 @@ function getDisabledProviderIdsFromSettings(): Set<string> {
 	}
 }
 
+/**
+ * Whether premium long-context windows are enabled. Defaults to true when the
+ * settings singleton is not initialized (SDK embedding, early boot).
+ */
+function isExtendedContextEnabledFromSettings(): boolean {
+	try {
+		return settings.get("extendedContext");
+	} catch {
+		return true;
+	}
+}
+
 /** Authentication material returned to legacy extensions for one model request. */
 export type ResolvedRequestAuth =
 	| {
@@ -176,6 +188,7 @@ export class ModelRegistry {
 	#cacheDbPath?: string;
 	#suppressedSelectors: Map<string, number> = new Map();
 	#backgroundRefresh?: Promise<void>;
+	#policyReapply?: Promise<void>;
 	#lastDiscoveryWarnings: Map<string, string> = new Map();
 	// Runtime extension model overlays — persist across refresh() cycles so that
 	// models registered by extensions survive the model selector's offline reload.
@@ -267,6 +280,27 @@ export class ModelRegistry {
 		this.#reloadStaticModels();
 		this.#suppressedSelectors.clear();
 		await this.#refreshRuntimeDiscoveries(strategy);
+	}
+
+	/**
+	 * Rebuild the catalog after a policy-affecting setting change (e.g.
+	 * `extendedContext`). Forces the static reload past the models.yml mtime
+	 * gate, then restores runtime-discovered models from the SQLite cache —
+	 * offline, a settings flip must never hit the network. Concurrent calls
+	 * coalesce onto one rebuild.
+	 */
+	reapplyModelPolicies(): Promise<void> {
+		this.#policyReapply ??= this.#runPolicyReapply();
+		return this.#policyReapply;
+	}
+
+	async #runPolicyReapply(): Promise<void> {
+		try {
+			this.#lastStaticLoadMtime = null;
+			await this.refresh("offline");
+		} finally {
+			this.#policyReapply = undefined;
+		}
 	}
 
 	refreshInBackground(strategy: ModelRefreshStrategy = "online-if-uncached"): void {
@@ -1558,7 +1592,19 @@ export class ModelRegistry {
 		});
 	}
 	#applyHardcodedModelPolicies(models: Model<Api>[]): Model<Api>[] {
+		const extendedContext = isExtendedContextEnabledFromSettings();
 		return models.map(model => {
+			// Extended context off: cap models with a premium long-context price
+			// tier (e.g. GPT-5.6 bills 2x input above 272K) at the standard-pricing
+			// threshold so compaction fires before a request crosses into the tier.
+			// Explicit per-model `contextWindow` overrides reapply later in
+			// composition and win over this cap.
+			if (!extendedContext) {
+				const threshold = model.cost.longContext?.inputThreshold;
+				if (threshold !== undefined && model.contextWindow !== null && model.contextWindow > threshold) {
+					model = applyModelOverride(model, { contextWindow: threshold });
+				}
+			}
 			if (model.provider === "ollama-cloud" && model.omitMaxOutputTokens !== true) {
 				model = applyModelOverride(model, { omitMaxOutputTokens: true });
 			}

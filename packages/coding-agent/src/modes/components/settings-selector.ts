@@ -231,7 +231,8 @@ class MultiSelectSubmenu extends Container {
 	#value: string[];
 	#cursor = 0;
 	#selectListLineOffset = 0;
-
+	#pressedItemId: string | undefined;
+	#dropItemId: string | undefined;
 	constructor(
 		private readonly title: string,
 		private readonly description: string,
@@ -277,8 +278,8 @@ class MultiSelectSubmenu extends Container {
 
 		this.addChild(new Spacer(1));
 		const hint = this.ordered
-			? "  Enter/Space to toggle · ←/→ move · 1-9 place at position · Esc to go back"
-			: "  Enter/Space to toggle · Esc to go back";
+			? "  Click to toggle · drag selected items to reorder · ←/→ move · 1-9 place · Esc to go back"
+			: "  Click/Enter/Space to toggle · Esc to go back";
 		this.addChild(new Text(theme.fg("dim", hint), 0, 0));
 	}
 
@@ -304,6 +305,16 @@ class MultiSelectSubmenu extends Container {
 		this.#apply(next);
 	}
 
+	/** Move a selected item before another selected item, retaining every other preference. */
+	#moveBefore(id: string, beforeId: string): void {
+		if (id === beforeId) return;
+		const next = this.#value.filter(value => value !== id);
+		const target = next.indexOf(beforeId);
+		if (target === -1) return;
+		next.splice(target, 0, id);
+		this.#apply(next);
+	}
+
 	/** Splice the option into the 1-based `position` of the selection (adding it if unselected). */
 	#placeAt(id: string, position: number): void {
 		const next = this.#value.filter(v => v !== id);
@@ -325,7 +336,46 @@ class MultiSelectSubmenu extends Container {
 	}
 
 	routeMouse(event: SgrMouseEvent, line: number, _col: number): void {
-		routeSelectListMouse(this.#selectList, event, line - this.#selectListLineOffset);
+		const itemIndex = this.#selectList.hitTest(line - this.#selectListLineOffset);
+		if (event.wheel !== null) {
+			routeSelectListMouse(this.#selectList, event, line - this.#selectListLineOffset);
+			return;
+		}
+		if (event.motion) {
+			this.#selectList.setHoverIndex(itemIndex ?? null);
+			const target = itemIndex === undefined ? undefined : this.options[itemIndex]?.value;
+			if (
+				this.ordered &&
+				this.#pressedItemId !== undefined &&
+				target !== undefined &&
+				target !== this.#pressedItemId &&
+				this.#value.includes(target)
+			) {
+				this.#dropItemId = target;
+			}
+			return;
+		}
+		if (event.leftClick && itemIndex !== undefined) {
+			const item = this.options[itemIndex];
+			if (!item) return;
+			this.#cursor = itemIndex;
+			this.#selectList.setSelectedIndex(itemIndex);
+			this.#pressedItemId = item.value;
+			this.#dropItemId = item.value;
+			return;
+		}
+		if (!event.release) return;
+
+		const pressedItemId = this.#pressedItemId;
+		const dropItemId = this.#dropItemId;
+		this.#pressedItemId = undefined;
+		this.#dropItemId = undefined;
+		if (!pressedItemId) return;
+		if (this.ordered && dropItemId !== undefined && dropItemId !== pressedItemId) {
+			this.#moveBefore(pressedItemId, dropItemId);
+			return;
+		}
+		this.#toggle(pressedItemId);
 	}
 
 	handleInput(data: string): void {

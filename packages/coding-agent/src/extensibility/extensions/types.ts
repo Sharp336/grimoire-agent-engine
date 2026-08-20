@@ -384,9 +384,9 @@ export interface CompactOptions {
 	onComplete?: (result: CompactionResult) => void;
 	onError?: (error: Error) => void;
 	/**
-	 * Force a one-off compaction mode for this invocation, overriding the
-	 * configured `compaction.strategy` / `remoteEnabled` (the `/compact`
-	 * subcommands: `soft` | `remote` | `snapcompact`). Omitted = configured behavior.
+	 * Force a one-off compaction mode for this invocation, replacing the
+	 * configured `compaction.methodOrder` (`/compact soft`, `remote`, or
+	 * `snapcompact`). Omitted = configured preference order.
 	 */
 	mode?: CompactMode;
 	/**

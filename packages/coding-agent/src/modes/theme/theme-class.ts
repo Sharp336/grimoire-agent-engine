@@ -423,6 +423,13 @@ export class Theme {
 		};
 	}
 
+	get progress() {
+		return {
+			filled: this.#symbols["progress.filled"],
+			empty: this.#symbols["progress.empty"],
+		};
+	}
+
 	get boxRound() {
 		return {
 			topLeft: this.#symbols["boxRound.topLeft"],
