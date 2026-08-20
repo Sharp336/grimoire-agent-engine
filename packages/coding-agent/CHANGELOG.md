@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- `hindsight.retainStrategy` (env `HINDSIGHT_RETAIN_STRATEGY`) — optional per-item Hindsight extraction strategy on auto-retain. Unset omits the field so the bank default applies; it is not written as a `strategy:*` tag.
+- `hindsight.recallTags` and `hindsight.recallTagsMatch` — extra recall tags and match mode. In `per-project-tagged`, configured tags are appended after the automatic `project:<repo>` tag and deduplicated. Default match remains `any`.
+
+### Changed
+
+- `per-project-tagged` auto-retain now sends `observation_scopes: [[project:<repo>]]` so observation consolidation follows the routing project instead of the server default (which could fragment on extra tags).
+
 ## [17.4.0] - 2026-08-20
 
 ### Added
