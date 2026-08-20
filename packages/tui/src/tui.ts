@@ -22,6 +22,12 @@ import { DEFAULT_MAX_INLINE_IMAGES, ImageBudget } from "./components/image";
 import { planDeccaraFills } from "./deccara";
 import { isKeyRelease, matchesKey } from "./keys";
 import { LoopWatchdog } from "./loop-watchdog";
+import {
+	composeRightSidebar,
+	resolveRightSidebarLayout,
+	type ResolvedRightSidebarLayout,
+	type RightSidebarOptions,
+} from "./reserved-sidebar";
 import { isConPTYHosted, setAltScreenActive, type Terminal } from "./terminal";
 import {
 	encodeKittyDeleteImage,
@@ -186,6 +192,17 @@ export interface Component {
 	 */
 	dispose?(): void;
 }
+
+interface RightSidebarRegistration {
+	component: Component;
+	options: RightSidebarOptions;
+}
+
+const DEFAULT_RIGHT_SIDEBAR_OPTIONS: RightSidebarOptions = {
+	width: 44,
+	minWidth: 28,
+	minMainWidth: 64,
+};
 
 /** Lets an overlay root delegate keyboard focus to components it owns. */
 export interface OverlayFocusOwner {
@@ -1493,6 +1510,8 @@ export class TUI extends Container {
 	#preparedMeta: PreparedLine[] = [];
 	#preparedValidRows = 0;
 
+	#rightSidebar: RightSidebarRegistration | undefined;
+
 	// Overlay stack for modal components rendered on top of base content
 	overlayStack: {
 		component: Component;
@@ -1507,6 +1526,32 @@ export class TUI extends Container {
 		this.#renderScheduler = options?.renderScheduler ?? DEFAULT_RENDER_SCHEDULER;
 		this.#showHardwareCursor = showHardwareCursor === undefined ? this.#showHardwareCursor : showHardwareCursor;
 		this.#watchdog = new LoopWatchdog();
+	}
+
+	setRightSidebar(
+		component: Component | undefined,
+		options: RightSidebarOptions = DEFAULT_RIGHT_SIDEBAR_OPTIONS,
+	): void {
+		if (component === undefined) {
+			if (this.#rightSidebar === undefined) return;
+			this.#rightSidebar = undefined;
+		} else {
+			this.#rightSidebar = { component, options };
+		}
+		this.requestRender(true, { clearScrollback: !isMultiplexerSession() });
+	}
+
+	#resolveRightSidebar(terminalWidth: number): ResolvedRightSidebarLayout {
+		const registration = this.#rightSidebar;
+		return registration
+			? resolveRightSidebarLayout(terminalWidth, registration.options)
+			: {
+					terminalWidth,
+					mainWidth: terminalWidth,
+					sidebarWidth: 0,
+					sidebarContentWidth: 0,
+					visible: false,
+				};
 	}
 
 	override captureNativeScrollbackWidthEpoch(): unknown {
@@ -3415,8 +3460,11 @@ export class TUI extends Container {
 	 */
 	#doRender(): void {
 		if (this.#stopped) return;
-		const width = this.terminal.columns;
+		const terminalWidth = this.terminal.columns;
 		const height = this.terminal.rows;
+		const sidebarLayout = this.#resolveRightSidebar(terminalWidth);
+		const mainWidth = sidebarLayout.mainWidth;
+		const contentWidthChanged = mainWidth !== this.#composeWidth;
 
 		// Consume the component-scoped accumulation: it describes the render
 		// requests made up to this frame, whichever path the frame takes.
@@ -3444,7 +3492,7 @@ export class TUI extends Container {
 			this.#altActive = true;
 			this.#altMouseTrackingActive = wantMouseTracking;
 			this.#altPreviousLines = [];
-			this.#altEnterWidth = width;
+			this.#altEnterWidth = terminalWidth;
 			this.#altEnterHeight = height;
 			this.#altWidthEpochBoundary = this.captureNativeScrollbackWidthEpoch();
 		} else if (!wantAlt && this.#altActive) {
@@ -3473,9 +3521,9 @@ export class TUI extends Container {
 			// toggles — the Warp-class quirk. Latch the in-place resize path so
 			// this exit and the revert SIGWINCH repaint without an ED3 scrollback
 			// rewrap instead of flashing a destructive full paint (#6511).
-			if (width !== this.#altEnterWidth || height !== this.#altEnterHeight) {
+			if (terminalWidth !== this.#altEnterWidth || height !== this.#altEnterHeight) {
 				this.#resizeEventPending = true;
-				if (width === this.#altEnterWidth) this.#altToggleResizesInPlace = true;
+				if (terminalWidth === this.#altEnterWidth) this.#altToggleResizesInPlace = true;
 			}
 		} else if (wantMouseTracking !== this.#altMouseTrackingActive) {
 			this.terminal.write(wantMouseTracking ? MOUSE_TRACKING_ON : MOUSE_TRACKING_OFF);
@@ -3483,7 +3531,7 @@ export class TUI extends Container {
 		}
 		if (this.#altActive) {
 			this.#componentRenderTargets.clear();
-			this.#renderAltFrame(width, height);
+			this.#renderAltFrame(terminalWidth, height);
 			return;
 		}
 
@@ -3518,7 +3566,7 @@ export class TUI extends Container {
 		// (overlay resizes are not on the drag-cost hot path).
 		if (this.#resizeViewportActive && this.#hasEverRendered && this.#getTopmostVisibleOverlay() === undefined) {
 			this.#componentRenderTargets.clear();
-			this.#renderResizeViewport(width, height);
+			this.#renderResizeViewport(terminalWidth, height);
 			return;
 		}
 
@@ -3531,7 +3579,8 @@ export class TUI extends Container {
 			!this.#resizeRepaintsInPlace() &&
 			(this.#clearScrollbackOnNextRender ||
 				this.#resizeEventPending ||
-				(this.#previousWidth > 0 && this.#previousWidth !== width) ||
+				contentWidthChanged ||
+				(this.#previousWidth > 0 && this.#previousWidth !== terminalWidth) ||
 				(this.#previousHeight > 0 && this.#previousHeight !== height));
 		if (replayFullHistory) {
 			for (const child of this.children) prepareNativeScrollbackReplay(child);
@@ -3543,19 +3592,19 @@ export class TUI extends Container {
 		// a quiescent budget, and a partial tree walk would under-count display
 		// order — and re-renders only the requested root subtrees, reusing the
 		// previous segment of every other root child.
-		const partialRoots = componentScopedOnly ? this.#resolvePartialComposeRoots(width, height) : null;
+		const partialRoots = componentScopedOnly ? this.#resolvePartialComposeRoots(terminalWidth, height) : null;
 		this.#componentRenderTargets.clear();
 		let rawFrame: readonly string[];
 		if (partialRoots !== null) {
 			this.#partialComposeRoots = partialRoots;
 			try {
-				rawFrame = this.render(width);
+				rawFrame = this.render(mainWidth);
 			} finally {
 				this.#partialComposeRoots = null;
 			}
 		} else {
 			this.#imageBudget.beginPass();
-			rawFrame = this.render(width);
+			rawFrame = this.render(mainWidth);
 			this.#imageBudget.endPass();
 		}
 		// Ghostty initial-image deferral must run before any render state is
@@ -3594,8 +3643,9 @@ export class TUI extends Container {
 		const resizeHadPendingRender = this.#multiplexerResizeHasPendingRender;
 		this.#multiplexerResizeHasPendingRender = false;
 		if (resizeEventOccurred) this.#forgetHardwareCursorState();
-		const widthChanged = this.#previousWidth > 0 && this.#previousWidth !== width;
-		const widthEpochOccurred = widthChanged || (resizeEventOccurred && this.#multiplexerWidthEpochPending);
+		const terminalWidthChanged = this.#previousWidth > 0 && this.#previousWidth !== terminalWidth;
+		const widthEpochOccurred =
+			contentWidthChanged || terminalWidthChanged || (resizeEventOccurred && this.#multiplexerWidthEpochPending);
 		const capturedWidthEpochBoundary = this.#multiplexerWidthEpochBoundary;
 		const widthEpochBoundary = this.#widthEpochOverlayBoundary ?? capturedWidthEpochBoundary;
 		const widthEpochSourceBoundary = widthEpochOccurred
@@ -3617,7 +3667,7 @@ export class TUI extends Container {
 		const heightChanged =
 			(this.#previousHeight > 0 && this.#previousHeight !== height) ||
 			(resizeEventOccurred && this.#previousHeight > 0);
-		const geometryChanged = widthChanged || heightChanged;
+		const geometryChanged = contentWidthChanged || terminalWidthChanged || heightChanged;
 		const widthEpochReset = widthEpochOccurred && this.#resizeRepaintsInPlace();
 		// A later width reset cannot use the opaque native ledger against
 		// attachment rows from the current-width placement epoch. Capture that
@@ -3947,16 +3997,20 @@ export class TUI extends Container {
 				break;
 			}
 		}
-		const frame = this.#prepareFrame(rawFrame, width);
+		const frame = this.#prepareFrame(rawFrame, mainWidth);
 		let window: string[] = new Array(height);
 		for (let r = 0; r < height; r++) window[r] = frame[windowTop + r] ?? "";
+		if (sidebarLayout.visible && this.#rightSidebar) {
+			const sidebarLines = this.#rightSidebar.component.render(sidebarLayout.sidebarContentWidth);
+			window = [...composeRightSidebar(window, sidebarLines, sidebarLayout)];
+		}
 		if (hasVisibleOverlay) {
-			window = this.#compositeOverlaysIntoWindow(window, width, height);
+			window = this.#compositeOverlaysIntoWindow(window, terminalWidth, height);
 			const overlayMarkers = this.#extractCursorMarkers(window);
 			if (overlayMarkers.length > 0) {
 				cursorPos = { row: windowTop + overlayMarkers[0]!.row, col: overlayMarkers[0]!.col };
 			}
-			window = this.#prepareLinesArray(window, width);
+			window = this.#prepareLinesArray(window, terminalWidth);
 		}
 		const cursorTrackingLineCount = hasVisibleOverlay ? Math.max(frame.length, windowTop + height) : frame.length;
 
@@ -4006,7 +4060,7 @@ export class TUI extends Container {
 
 		// 6. Emit.
 		if (intent.kind === "fullPaint") {
-			this.#emitFullPaint(frame, window, width, height, cursorPos, purgeSequence, imageTransmitBuffer, {
+			this.#emitFullPaint(frame, window, terminalWidth, height, cursorPos, purgeSequence, imageTransmitBuffer, {
 				clearScrollback: intent.clearScrollback,
 				chunkTo,
 				windowTop,
@@ -4074,7 +4128,7 @@ export class TUI extends Container {
 				commitTo = commitFrom;
 			}
 			this.#imageBudget.observeCommitWatermark(commitTo);
-			this.#emitWidthEpochBaseline(frame, window, width, height, cursorPos, purgeSequence, imageTransmitBuffer, {
+			this.#emitWidthEpochBaseline(frame, window, terminalWidth, height, cursorPos, purgeSequence, imageTransmitBuffer, {
 				repaintFromScreenRow: 0,
 				commitFrom,
 				commitTo,
@@ -4155,7 +4209,7 @@ export class TUI extends Container {
 		if (imageTransmitBuffer.length > 0) {
 			this.terminal.write(imageTransmitBuffer);
 		}
-		this.#emitUpdate(frame, window, width, height, cursorPos, purgeSequence, {
+		this.#emitUpdate(frame, window, terminalWidth, height, cursorPos, purgeSequence, {
 			chunkTo,
 			windowTop,
 			prevWindowTop,
