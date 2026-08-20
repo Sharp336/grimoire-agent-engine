@@ -158,6 +158,7 @@ describe("InteractiveMode todo HUD persistence", () => {
 
 		vi.advanceTimersByTime(999);
 		expect(renderTodos(mode)).toContain("done task");
+		expect(renderTodos(mode)).toContain("TODO");
 
 		vi.advanceTimersByTime(1);
 		expect(renderTodos(mode)).not.toContain("done task");
@@ -297,11 +298,10 @@ describe("InteractiveMode todo HUD anchor", () => {
 
 		// Lightened: no boxed top/bottom rules.
 		expect(lines.some(line => line === "─".repeat(80))).toBe(false);
-		// Root header carries the summed task progress bar (1 of 4 tasks closed).
-		const root = lines.find(line => line.includes("Todos"));
-		expect(root).toContain("1/4");
-		expect(root).toContain(theme.progress.filled);
-		expect(root).toContain(theme.progress.empty);
+		// The title remains a compact anchor; overall progress colors the tree
+		// spine and tail, not the title text.
+		const root = lines.find(line => line.includes("TODO"));
+		expect(root?.trim()).toBe("TODO");
 		// Active stage: highlighted header with its own task progress, expanded as a
 		// connector tree; the just-completed task stays as the lead row so progress
 		// is visible while the stage still has open work.
@@ -338,10 +338,10 @@ describe("InteractiveMode todo HUD anchor", () => {
 			.render(80)
 			.flatMap(line => line.split("\n"))
 			.map(line => Bun.stripANSI(line));
-		// One stage → the root still carries the summed bar and task counts.
-		const root = lines.find(line => line.includes("Todos"));
-		expect(root).toContain("0/2");
-		expect(root).toContain(theme.progress.empty);
+		// One stage still renders the compact title; progress belongs to the
+		// tree spine and tail.
+		const root = lines.find(line => line.includes("TODO"));
+		expect(root?.trim()).toBe("TODO");
 		// The stage keeps its task progress; no roman numeral for a lone stage.
 		expect(lines.some(line => line.includes("Tasks") && line.includes("0/2"))).toBe(true);
 		expect(lines.some(line => line.includes("I. Tasks"))).toBe(false);
@@ -369,9 +369,9 @@ describe("InteractiveMode todo HUD anchor", () => {
 		expect(lines.some(line => line.includes("V. Five"))).toBe(true);
 		expect(lines.some(line => line.includes("Six"))).toBe(false);
 		expect(lines.some(line => line.includes("2 more stages"))).toBe(true);
-		// Root header sums tasks across every stage, hidden ones included.
-		const root = lines.find(line => line.includes("Todos"));
-		expect(root).toContain("0/7");
+		// Hidden stages do not change the compact title.
+		const root = lines.find(line => line.includes("TODO"));
+		expect(root?.trim()).toBe("TODO");
 	});
 
 	it("anchors the todo HUD as a native-scrollback live region while populated", () => {

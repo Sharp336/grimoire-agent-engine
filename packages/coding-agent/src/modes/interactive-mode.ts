@@ -26,6 +26,7 @@ import type {
 import {
 	Container,
 	clearRenderCache,
+	getComposerStyle,
 	Loader,
 	Markdown,
 	ProcessTerminal,
@@ -452,11 +453,6 @@ const MODEL_CYCLE_TRACK_CLEAR_MS = 4000;
 
 const SUBAGENT_HUD_VISIBLE_LIMIT = 8;
 const SUBAGENT_OBSERVER_UI_COALESCE_MS = 100;
-// Instant, independent of `tasks.todoClearDelay`: fires the moment every todo
-// closes, shrinking the header bar to nothing before the row is dropped. The
-// phase/task tree below is unaffected and keeps following the clear delay.
-const TODO_BAR_COLLAPSE_DURATION_MS = 260;
-const TODO_BAR_COLLAPSE_TICK_MS = 1000 / 30;
 
 /**
  * Build the anchored subagent HUD block: a bold accent "Subagents" header plus
@@ -563,10 +559,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	loopLimit: LoopLimitRuntime | undefined = undefined;
 	#loopAutoSubmitTimer: NodeJS.Timeout | undefined;
 	#todoAutoClearTimer: NodeJS.Timeout | undefined;
-	#todoBarCollapseTimer: NodeJS.Timeout | undefined;
-	#todoBarCollapseStartedAt: number | undefined;
-	#todoBarCollapsed = false;
-	#todoListWasSettled = false;
 	#modelCycleClearTimer: NodeJS.Timeout | undefined;
 	#nextAppearanceRequestToken = 1;
 	#appearanceRefreshRequest: { token: TerminalAppearanceRequestToken; deadline: number } | undefined;
@@ -1105,11 +1097,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		// HUDs, just above the editor's hook-widget top margin — so it reads next to
 		// the prompt while keeping the one-line gap above the editor.
 		this.ui.addChild(this.statusContainer);
-		this.ui.addChild(this.statusLine); // Only renders hook statuses (main status in editor border)
 		this.ui.addChild(this.hookWidgetContainerAbove);
 		this.ui.addChild(this.editorContainer);
 		this.ui.addChild(this.hookWidgetContainerBelow);
+		this.ui.addChild(this.statusLine);
 		this.ui.setFocus(this.editor);
+		this.syncComposerShape();
 
 		this.#inputController.setupKeyHandlers();
 		this.#inputController.setupEditorSubmitHandler();
@@ -1918,7 +1911,29 @@ export class InteractiveMode implements InteractiveModeContext {
 			transparent: settings.get("statusLine.transparent"),
 			segmentOptions: settings.get("statusLine.segmentOptions"),
 			compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
+			contextLine: settings.get("statusLine.contextLine"),
 		});
+	}
+	syncComposerShape(): void {
+		const shape = settings.get("composer.shape") ?? "box";
+		const style = getComposerStyle(shape);
+		this.editor.setBorderStyle(shape);
+		this.statusLine.setAutocompleteActiveProbe(() => this.editor.isAutocompleteActive());
+		switch (style.statusAttachment) {
+			case "top-border":
+				this.editor.setTopBorderProvider(availableWidth => this.statusLine.getTopBorder(availableWidth));
+				break;
+			case "top-rule-chip":
+				this.editor.setTopBorderProvider(availableWidth => this.statusLine.getStandaloneTopBorder(availableWidth));
+				break;
+			case "none":
+				this.editor.setTopBorderProvider(undefined);
+				this.editor.setTopBorder(undefined);
+				break;
+		}
+		this.statusLine.setComposerStyle(style);
+		this.updateEditorBorderColor();
+		this.ui.requestRender();
 	}
 
 	#handleSessionAccentInputsChanged(): void {
@@ -2230,39 +2245,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#todoAutoClearTimer.unref?.();
 	}
 
-	#cancelTodoBarCollapseAnimation(): void {
-		if (!this.#todoBarCollapseTimer) return;
-		clearInterval(this.#todoBarCollapseTimer);
-		this.#todoBarCollapseTimer = undefined;
-	}
-
-	#todoBarCollapseFraction(): number {
-		if (this.#todoBarCollapseStartedAt === undefined) return 0;
-		const elapsed = Date.now() - this.#todoBarCollapseStartedAt;
-		return Math.min(1, Math.max(0, elapsed / TODO_BAR_COLLAPSE_DURATION_MS));
-	}
-
-	/**
-	 * Fires once, the instant the todo list first fully closes: shrinks the
-	 * header bar to nothing over `TODO_BAR_COLLAPSE_DURATION_MS` and then drops
-	 * the whole row. Independent of `tasks.todoClearDelay`, which governs when
-	 * the remaining phase/task tree disappears — the tree is untouched here.
-	 */
-	#startTodoBarCollapseAnimation(): void {
-		this.#cancelTodoBarCollapseAnimation();
-		this.#todoBarCollapsed = false;
-		this.#todoBarCollapseStartedAt = Date.now();
-		this.#todoBarCollapseTimer = setInterval(() => {
-			if (this.#todoBarCollapseFraction() >= 1) {
-				this.#todoBarCollapsed = true;
-				this.#cancelTodoBarCollapseAnimation();
-			}
-			this.#renderTodoList();
-			this.ui.requestRender();
-		}, TODO_BAR_COLLAPSE_TICK_MS);
-		this.#todoBarCollapseTimer.unref?.();
-	}
-
 	/**
 	 * Render the ctrl+p model-role cycle chip track into its own anchored
 	 * container (just above the editor), mirroring the todo HUD: the container is
@@ -2341,23 +2323,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#renderTodoList(): void {
 		this.todoContainer.clear();
 		const phases = this.todoPhases.filter(phase => phase.tasks.length > 0);
-		if (phases.length === 0) {
-			this.#cancelTodoBarCollapseAnimation();
-			this.#todoBarCollapsed = false;
-			this.#todoBarCollapseStartedAt = undefined;
-			this.#todoListWasSettled = false;
-			return;
-		}
-		const settled = this.#isTodoListSettled(phases);
-		if (settled && !this.#todoListWasSettled) {
-			this.#startTodoBarCollapseAnimation();
-		} else if (!settled && this.#todoListWasSettled) {
-			this.#cancelTodoBarCollapseAnimation();
-			this.#todoBarCollapsed = false;
-			this.#todoBarCollapseStartedAt = undefined;
-		}
-		this.#todoListWasSettled = settled;
-
+		if (phases.length === 0) return;
 		const expanded = this.todoExpanded;
 		const multiPhase = phases.length > 1;
 		const activeIdx = phases.indexOf(this.#getActivePhase(phases) ?? phases[0]);
@@ -2400,7 +2366,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		// One phase node. The active stage is highlighted with normal-brightness task
 		// progress; other stages render their whole row (name + progress) in the
-		// brighter muted gray. The root header carries the summed progress bar.
+		// brighter muted gray. Overall progress lives in the tree spine (below).
 		const renderPhase = (phase: TodoPhase, oneBased: number, isActive: boolean): string | string[] => {
 			const label = multiPhase ? formatPhaseDisplayName(phase.name, oneBased) : phase.name;
 			// Closed, not just completed: the collapsed task window hides abandoned
@@ -2421,44 +2387,52 @@ export class InteractiveMode implements InteractiveModeContext {
 		const baseIdx = expanded ? 0 : activeIdx;
 		const phaseSlice = expanded ? phases.slice(baseIdx) : phases.slice(baseIdx, baseIdx + 1 + subsequentStageCap);
 		const hiddenStages = phases.length - baseIdx - phaseSlice.length;
-		const phaseTreeLines = renderTreeList(
-			{
-				items: phaseSlice,
-				expanded,
-				trailingSummary: hiddenStages > 0 ? formatMoreItems(hiddenStages, "stage") : "",
-				renderItem: (phase, ctx) => renderPhase(phase, baseIdx + ctx.index + 1, baseIdx + ctx.index === activeIdx),
-			},
-			theme,
-		);
 
-		// Header: overall task progress as a bar summed across every stage (no
-		// trailing count — the bar itself carries the signal). Once the list
-		// fully closes, `#startTodoBarCollapseAnimation` shrinks the bar to
-		// nothing over `TODO_BAR_COLLAPSE_DURATION_MS` and the whole row is then
-		// dropped — the phase/task tree below is untouched and keeps its own
-		// per-stage counts until the separate `tasks.todoClearDelay` timer fires.
-		const headerLines: string[] = [""];
-		if (!this.#todoBarCollapsed) {
-			const barWidth = 20;
-			const collapseFraction = this.#todoBarCollapseFraction();
-			let bar: string;
-			if (collapseFraction > 0) {
-				const shrunkWidth = Math.max(0, Math.round(barWidth * (1 - collapseFraction)));
-				bar = theme.fg("accent", theme.progress.filled.repeat(shrunkWidth));
-			} else {
-				const totalTasks = phases.reduce((sum, phase) => sum + phase.tasks.length, 0);
-				const closedTasks = phases.reduce((sum, phase) => sum + phase.tasks.filter(isClosedTodo).length, 0);
-				// Clamp so any progress shows a sliver and only 100% fills the bar.
-				let filledWidth = Math.round((closedTasks / totalTasks) * barWidth);
-				if (closedTasks > 0) filledWidth = Math.max(filledWidth, 1);
-				if (closedTasks < totalTasks) filledWidth = Math.min(filledWidth, barWidth - 1);
-				bar =
-					theme.fg("accent", theme.progress.filled.repeat(filledWidth)) +
-					theme.fg("dim", theme.progress.empty.repeat(barWidth - filledWidth));
+		// Flatten the stage tree into content rows plus a per-row top-level spine
+		// glyph (`├─` for stage rows, `│` for continuations). The spine never
+		// closes downward — a short elbow tail (`└────`) ends the block instead,
+		// so spine + bend + tail form one continuous progress path.
+		const spineGlyphs: string[] = [];
+		const contentLines: string[] = [];
+		const pushBlock = (block: string | string[]): void => {
+			const rows = Array.isArray(block) ? block : [block];
+			if (rows.length === 0) return;
+			spineGlyphs.push(`${theme.tree.branch} `);
+			contentLines.push(replaceTabs(rows[0]!));
+			for (let i = 1; i < rows.length; i++) {
+				spineGlyphs.push(`${theme.tree.vertical}  `);
+				contentLines.push(replaceTabs(rows[i]!));
 			}
-			headerLines.push(`${theme.bold(theme.fg("accent", "Todos"))} ${bar}`);
+		};
+		for (let i = 0; i < phaseSlice.length; i++) {
+			pushBlock(renderPhase(phaseSlice[i], baseIdx + i + 1, baseIdx + i === activeIdx));
 		}
-		const lines = [...headerLines, ...phaseTreeLines.map(line => ` ${line}`)];
+		if (hiddenStages > 0) {
+			pushBlock(theme.fg("muted", formatMoreItems(hiddenStages, "stage")));
+		}
+
+		// Closing tail: hook + a few horizontals. Every tail cell is 1 column in
+		// both glyph sets, so string slicing below splits it by visible cells.
+		const tailLen = 6;
+		const tail = theme.tree.hook + theme.tree.horizontal.repeat(Math.max(0, tailLen - visibleWidth(theme.tree.hook)));
+
+		// Overall progress (summed across every stage) fills the path in reading
+		// order: down the spine, around the bend, out along the tail.
+		// Clamp so partial progress lights at least one cell; a closed plan fills
+		// the entire path until the configured auto-clear removes the HUD.
+		const totalTasks = phases.reduce((sum, phase) => sum + phase.tasks.length, 0);
+		const closedTasks = phases.reduce((sum, phase) => sum + phase.tasks.filter(isClosedTodo).length, 0);
+		const pathLen = contentLines.length + tailLen;
+		let filled = Math.round((closedTasks / totalTasks) * pathLen);
+		if (closedTasks > 0) filled = Math.max(filled, 1);
+		if (closedTasks < totalTasks) filled = Math.min(filled, pathLen - 1);
+
+		const lines = ["", theme.bold(theme.fg("accent", "TODO"))];
+		for (let i = 0; i < contentLines.length; i++) {
+			lines.push(` ${theme.fg(i < filled ? "accent" : "dim", spineGlyphs[i]!)}${contentLines[i]}`);
+		}
+		const tailFilled = Math.max(0, Math.min(filled - contentLines.length, tail.length));
+		lines.push(` ${theme.fg("accent", tail.slice(0, tailFilled))}${theme.fg("dim", tail.slice(tailFilled))}`);
 		this.todoContainer.addChild(new Text(lines.join("\n"), 1, 0));
 	}
 
@@ -4331,7 +4305,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		stopSharedSpinnerTicker();
 		this.#liveCommandController.dispose();
 		this.#cancelTodoAutoClearTimer();
-		this.#cancelTodoBarCollapseAnimation();
 		this.#cancelObserverUiSyncTimer();
 		this.#cancelGoalContinuation();
 		if (this.#sttController) {
@@ -4340,6 +4313,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.#extensionUiController.clearExtensionTerminalInputListeners();
 		this.#extensionUiController.clearHookWidgets();
+		this.#extensionUiController.disposeComposerShapes();
 		for (const unsubscribe of this.#eventBusUnsubscribers) {
 			unsubscribe();
 		}
@@ -4470,7 +4444,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.ui.requestRender();
 		};
 		nextEditor.setShimmerRepaintHandler(() => this.ui.requestDirectWrite(nextEditor));
-		nextEditor.setTopBorderProvider(availableWidth => this.statusLine.getTopBorder(availableWidth));
+		this.editor = nextEditor;
+		this.syncComposerShape();
 		nextEditor.setMaxHeight(this.#computeEditorMaxHeight());
 		if (this.historyStorage) {
 			nextEditor.setHistoryStorage(this.historyStorage);

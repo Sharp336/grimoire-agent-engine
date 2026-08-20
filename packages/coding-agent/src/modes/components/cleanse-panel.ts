@@ -5,7 +5,7 @@
  * checker/wave/agent rows from {@link CleanseBoardModel} animate in place while
  * permanent log lines accumulate above them.
  */
-import { Container, Spacer, Text, type TUI } from "@oh-my-pi/pi-tui";
+import { Spacer, Text, type TUI } from "@oh-my-pi/pi-tui";
 import { CleanseBoardModel, type CleanseStatusBoard } from "../../cleanse/board";
 import type { CleanseCheckerDescriptor } from "../../cleanse/checkers";
 import type { CleanseAgentOutcome, CleanseAssignment, CleanseCheckResult, CleanseRunStatus } from "../../cleanse/types";
@@ -13,7 +13,7 @@ import { SPINNER_FRAMES } from "../../cli/live-board";
 import type { AgentProgress } from "../../task/types";
 import { replaceTabs } from "../../tools/render-utils";
 import { theme } from "../theme/theme";
-import { DynamicBorder } from "./dynamic-border";
+import { OverlayPanel } from "./overlay-box";
 
 const SPINNER_INTERVAL_MS = 80;
 const MAX_LOG_LINES = 14;
@@ -27,10 +27,9 @@ interface CleansePanelComponentOptions {
 /** Terminal state of the run, mirrored into the footer once the core settles. */
 type CleansePanelOutcome = CleanseRunStatus | "error";
 
-export class CleansePanelComponent extends Container implements CleanseStatusBoard {
+export class CleansePanelComponent extends OverlayPanel implements CleanseStatusBoard {
 	readonly interactive = true;
 
-	readonly #request: string | undefined;
 	readonly #tui: TUI;
 	readonly #model = new CleanseBoardModel();
 	readonly #logLines: string[] = [];
@@ -41,8 +40,7 @@ export class CleansePanelComponent extends Container implements CleanseStatusBoa
 	#liveClosed = false;
 
 	constructor(options: CleansePanelComponentOptions) {
-		super();
-		this.#request = options.request;
+		super(options.request ? `/cleanse ${replaceTabs(options.request)}` : "/cleanse");
 		this.#tui = options.tui;
 		this.#timer = setInterval(() => {
 			this.#frame = (this.#frame + 1) % SPINNER_FRAMES.length;
@@ -134,29 +132,23 @@ export class CleansePanelComponent extends Container implements CleanseStatusBoa
 
 	#rebuild(): void {
 		this.clear();
-		this.addChild(new DynamicBorder(str => theme.fg("dim", str)));
 		this.addChild(new Spacer(1));
-		const header = this.#request ? `/cleanse ${this.#request}` : "/cleanse";
-		this.addChild(new Text(theme.fg("accent", replaceTabs(header)), 1, 0));
 		if (this.#logLines.length > 0) {
+			for (const line of this.#logLines) this.addChild(new Text(replaceTabs(line), 0, 0));
 			this.addChild(new Spacer(1));
-			for (const line of this.#logLines) this.addChild(new Text(replaceTabs(line), 1, 0));
 		}
 		if (!this.#liveClosed) {
 			const liveLines = this.#model.renderLive(SPINNER_FRAMES[this.#frame] ?? SPINNER_FRAMES[0]);
 			if (liveLines.length > 0) {
+				for (const line of liveLines) this.addChild(new Text(replaceTabs(line), 0, 0));
 				this.addChild(new Spacer(1));
-				for (const line of liveLines) this.addChild(new Text(replaceTabs(line), 1, 0));
 			}
 		}
 		if (this.#errorMessage) {
+			this.addChild(new Text(theme.fg("error", replaceTabs(this.#errorMessage)), 0, 0));
 			this.addChild(new Spacer(1));
-			this.addChild(new Text(theme.fg("error", replaceTabs(this.#errorMessage)), 1, 0));
 		}
-		this.addChild(new Spacer(1));
-		this.addChild(new Text(this.#footerLine(), 1, 0));
-		this.addChild(new Spacer(1));
-		this.addChild(new DynamicBorder(str => theme.fg("dim", str)));
+		this.addChild(new Text(this.#footerLine(), 0, 0));
 		this.#tui.requestRender();
 	}
 

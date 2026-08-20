@@ -59,6 +59,11 @@ function supportsOpenAIGAComputerUse(spec: ModelSpec<Api>, explicitSupport: bool
 	return parsed !== null && semverGte(parsed.version, "5.4");
 }
 
+/**
+ * Build one model from an authored spec. Bundled models.json rows are fully
+ * materialized by the generator and consumed directly (see `models.ts`), so
+ * this only runs for discovered/custom/override specs.
+ */
 export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi> {
 	const compat = buildCompat(spec) as CompatOf<TApi>;
 	const supportsComputerUseConfig = explicitComputerUseConfig(spec);

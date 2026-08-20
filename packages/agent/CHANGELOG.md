@@ -2,20 +2,23 @@
 
 ## [Unreleased]
 
+## [17.4.0] - 2026-08-20
+
 ### Breaking Changes
 
-- Local token counting is now an immutable, model-scoped `Tokenizer` instance instead of process-global functions. The free `countTokens`/`countTokensConservatively` exports and the `setTokenizerModel()` global setter are gone; construct a `Tokenizer(modelId)` — the encoding is fixed at construction, there is no `setModel` — and call `tokenizer.countTokens(text, mode?)`. An `Agent` owns one for its active model (exposed as `agent.tokenizer`) and replaces the instance when the active model's encoding changes, so don't cache it across model switches. `countTokensConservatively` collapsed into that one method as `mode: "upperbound"`; the modes are `"strict"` (always exact native), `"approximate"` (default, fast byte estimate when no exact tokenizer applies), and `"upperbound"` (raw byte length, never undercounts).
-- The free `estimateTokens(message, tokenizer, options?)` is gone; use `tokenizer.countMessage(message, options?)` or `tokenizer.countMessages(messages, options?)`. Per-message estimates are memoized per tokenizer instance (keyed by message identity) and invalidated across every instance by `invalidateMessageCache(message)`, which bumps a shared version tag. `findCutPoint`, `prepareBranchEntries`, `collectShakeRegions`, `pruneToolOutputs`, `pruneSupersededToolResults`, and `trimRemoteCompactionInputToContextWindow` take an explicit `Tokenizer`, and `prepareCompaction` accepts the caller's (warm) tokenizer as an optional trailing parameter. Token math is scoped to the model that will be billed for it rather than to whichever `Agent` last constructed itself.
+- Replaced global token counting functions (`countTokens`, `countTokensConservatively`, `setTokenizerModel`, and `estimateTokens`) with model-scoped, immutable `Tokenizer` instances (`agent.tokenizer`). Use `tokenizer.countTokens(text, mode?)`, `tokenizer.countMessage(message)`, or `tokenizer.countMessages(messages)`.
+- Updated context management functions (`findCutPoint`, `prepareBranchEntries`, `collectShakeRegions`, `pruneToolOutputs`, `pruneSupersededToolResults`, and `trimRemoteCompactionInputToContextWindow`) to require an explicit `Tokenizer` instance.
 
 ### Added
 
-- Added `Tokenizer.checkTokenBudget(text, budget)`: a cheap-first budget probe. Byte length is a hard upper bound on token count, so text whose raw bytes already fit answers "fits" without tokenizing at all; only text that busts the bound pays for an exact count (and that count is returned, so a proportional clamp gets the denominator it needs). Since the bound overshoots ~4x on prose, the common "comfortably under budget" answer is free. Compaction's summary-window fit check and OpenAI remote-compaction trimming now route through it.
-- Added provider-anchored transcript accounting (`findTranscriptUsageAnchor`, `isTranscriptUsageAnchor`, `estimateTranscriptTokens`). Every settled assistant turn carries `usage` covering the exact prompt it was sent, so transcript sizing charges that report for the prefix and tokenizes only the tail appended after it — counting proportional to one turn instead of the whole history, every turn. The four hand-rolled copies of the anchor trust rules (session stats ×3, shake) now share one predicate, and the deliberately provider-independent compaction floor counts every message locally via `tokenizer.countMessages`.
-- Exported `remotePreserveReusable(preserveData, activeModel, settings)` — whether a prior remote compaction's provider-native replay payload is still readable by the active model — so hosts can validate speculatively produced compaction results before committing them.
+- Added `Tokenizer.checkTokenBudget(text, budget)` to efficiently verify if text fits within a token limit using fast byte-bound checks before falling back to full tokenization.
+- Added provider-anchored transcript token estimation (`findTranscriptUsageAnchor`, `isTranscriptUsageAnchor`, `estimateTranscriptTokens`) to calculate transcript token counts incrementally from the latest reported assistant turn usage.
+- Added `remotePreserveReusable()` to check whether a previous remote compaction payload remains reusable with the active model.
 
 ### Changed
 
-- Catalog-resolved tokenizer families now drive exact native counts: Claude, Qwen 3.5+, DeepSeek V3/V4/R1, Kimi K2/K3, and GLM-5+ use their matching embedded tokenizer; unknown models retain the fast estimate (or o200k with `PI_TOKENIZER_ACCURATE=1`). `Tokenizer` now takes the resolved catalog `Model`, never a raw model id.
+- Expanded native tokenizer support across catalog models, adding exact embedded token counting for Claude, Qwen 3.5+, DeepSeek V3/V4/R1, Kimi K2/K3, and GLM-5+ models. `Tokenizer` now constructs from a resolved catalog `Model`.
+- `createCompactionSummaryMessage` takes an options object after `(summary, tokensBefore, timestamp)`; `CompactionSummaryMessage` gained optional `method` and `tokensAfter` display metadata.
 
 ## [17.3.8] - 2026-08-19
 

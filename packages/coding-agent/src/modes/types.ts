@@ -121,6 +121,7 @@ export interface InteractiveModeContext {
 	hookWidgetContainerAbove: Container;
 	hookWidgetContainerBelow: Container;
 	statusLine: StatusLineComponent;
+	syncComposerShape(): void;
 
 	// Session access
 	session: AgentSession;

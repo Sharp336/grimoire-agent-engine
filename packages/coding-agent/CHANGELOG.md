@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [17.4.0] - 2026-08-20
+
 ### Added
 
 - Added `tools.xdevPromote` (and the per-agent `xdevPromote` frontmatter) to keep specific tools top-level instead of mounting them under `xd://`, without disabling `tools.xdev` globally. The setting accepts a list or a single name / comma-separated string (e.g. `tools.xdevPromote: lsp`). Promotion only changes presentation; tools still need their normal enablement, and an explicitly empty per-agent `xdevPromote` clears the inherited global promotion ([#5648](https://github.com/can1357/oh-my-pi/issues/5648)).
@@ -10,22 +12,39 @@
 - Added `extendedContext` setting (`/settings` → Context → General, default on). When off, models with a premium long-context price tier (OpenAI GPT-5.6 Sol/Terra/Luna bill 2x input / 1.5x output above 272K input tokens, on both the API and subscription Codex) are capped at the standard-pricing threshold — they appear as 272K again and compaction fires before a request crosses into premium billing. Toggling mid-session re-clamps or restores the active model's window immediately. Anthropic Claude 4.6+ serves its full 1M window at standard pricing, so no Anthropic model is affected.
 - Added click-to-toggle and drag-to-reorder controls for list-valued `/settings` editors.
 - Added `compaction.asyncEnabled` (Async Compaction, default on): when context enters the band just below the compaction threshold, maintenance speculatively summarizes in the background off a branch snapshot (first configured LLM-backed method — remote, handoff, or soft — isolated from the live turn by a side session id) and holds the armed result; crossing the threshold then splices it in instantly instead of blocking on a summarization round-trip. Armed results are invalidated by branch changes, reset boundaries, model switches that strand provider-native replay payloads, and context growth past `keepRecentTokens` (which re-speculates). The status line pulses the auto-compact icon while a speculation runs and holds it in accent once a result is armed.
+- `/cleanse` (and `omp cleanse`) — run the checker/repair loop in-session, with a live status board of running checkers, repair subagents, and token/cost totals.
+- `omp ps` — interactive monitor for daemon-supervised background processes.
+- Composer layouts — `composer.shape` picks the editor frame (rounded box, Claude Code rules, upstream-pi rules, borderless), with live previews in `/settings` and the setup wizard.
+- Context line — `statusLine.contextLine` gauge (`percentage`, `annotated`, `embedded`) showing context usage and compaction boundaries.
+- Backgroundable Python — `eval` cells can run async and auto-background like `bash`, with configurable thresholds.
+- Local Claude token counting — Anthropic-family tokens now count via a native local tokenizer, and every counter (session maintenance, advisor, stats, context tools) uses the active model's own tokenizer.
+- `extendedContext` setting — pick whether models with premium long-context pricing (272K/1M tiers on Codex-class models) use the extended window or compact early and stay on standard pricing.
+- `/extended-context` — toggle premium long-context windows without leaving the session.
+- Speculative compaction — with `compaction.asyncEnabled`, all compaction modes compact in parallel while the session continues, then splice the result in instantly.
+- `tokenizer` property on custom models and `modelOverrides` to pin the tokenizer family for proxy models.
+- `qwenTemplateReasoningEffort` in `models.yml` `compat` to disable the Qwen 3.8+ reasoning-effort template parameter for strict local servers.
+- Click-to-toggle and drag-to-reorder for list-valued editors in `/settings`.
+- `icon.subscription` and `icon.advisor` symbol-theme tokens (Nerd Font, Unicode, ASCII).
 
 ### Changed
 
-- `omp cleanse` and the `/cleanse` slash command now render a live interactive status board with running checkers, repair subagents, tool counts, token/cost totals, and live scrollback in both the CLI and interactive terminal modes
-- Replaced the single `compaction.strategy` / `compaction.remoteEnabled` policy with ordered `compaction.methodOrder` preferences. The default now tries OpenAI-compatible server compaction, snapcompact, handoff, shake, then soft compaction; unavailable or failed methods advance through that list.
-- `/settings` rows can now carry a risk note: a warning glyph on the row plus a warning-colored line above the description. `External Thinking` (`externalThinking`, `--external-thinking`) is the first user — providers have flagged the request shape it produces as abuse, up to account-level enforcement, so both the settings entry and `--help` now say so.
-- The todo HUD header now draws a summed progress bar counting closed/total tasks across every stage. Once all tasks close, the bar smoothly collapses before the row disappears.
-- Token counting is now scoped to the model being billed rather than to a process-global tokenizer: session maintenance, stats, advisors, `/context`, snapcompact inline imaging, and `compress` each count through the owning agent's `Tokenizer` (`agent.tokenizer`). Message counting is `Tokenizer.countMessage`/`countMessages` (replacing the free `estimateTokens(message, tokenizer)` helper; the legacy shim keeps a compat `estimateTokens` export for legacy pi extensions). `estimateToolSchemaTokens`, `estimateSkillsTokens`, `computeNonMessageTokens`, and `computeNonMessageBreakdown` take an explicit tokenizer; standalone prompt inspection intentionally keeps the default estimate because it has no resolved catalog model.
-- The advisor runtime's `maintainContext` hook now receives the pending update as a message instead of a pre-computed token count — sizing it needs the advisor model's tokenizer, which the host owns.
-- Handoff no longer starts a new session: `/handoff` and the auto-maintenance `handoff` method now commit the generated document as a regular compaction entry on the current session (document becomes the summary, recent history is kept per `compaction.keepRecentTokens`, session id/transcript/cache key unchanged). The `session_before_switch`/`session_switch` extension events no longer fire with reason `"handoff"`, mid-turn maintenance no longer skips the handoff preference, and overflow recovery can now apply a pre-armed handoff result.
+- Typing anywhere in the /models UI now immediately focuses the model list for instant search and arrow navigation.
+- Revamped the todo HUD — overall progress renders along the tree-spine connector with smooth completion transitions.
+- Compaction divider now names the maintenance method that fired (`remote-compacted`, `soft-compacted`, `handed-off`, `snap-compacted`) and shows the before → after context size (e.g. `256K→20K`).
+- `/handoff` (and automatic handoff compaction) now compacts in place, replacing the session context instead of forking a new session.
+- Compaction method priorities — `compaction.methodOrder` takes an ordered preference list (e.g. `[remote, snap]` uses remote compaction where the provider supports it, such as OpenAI, and snap everywhere else), replacing `compaction.strategy`/`compaction.remoteEnabled`.
+- Unified inline overlays and selectors (model picker, settings, `/cleanse`) into one titled rounded-box panel style.
+- Risk badges and warnings on `/settings` rows, starting with External Thinking.
+- Faster CLI Startup
 
 ### Fixed
 
-- Fixed a prompt cancelled during turn setup (Esc while the pre-stream spinner is up, after dispatch had started) vanishing entirely: it was never persisted to the session — so the `/tree` and `/branch` selectors had nothing to rewind to — and was not returned to the editor either, while its optimistic transcript row kept lingering. A prompt dropped before reaching the agent (abort or usage-preflight denial racing setup) is now handed back: the stale transcript row is removed and the typed text and image attachments are restored to the editor for editing.
-- Fixed macOS `top`-style single-dash long options in the `top` shell builtin: `top -l 2 -pid 56943 -stats pid,cpu,th,mem,pstate` previously failed with `invalid value 'id' for '--pid <PIDS>'` because clap read `-pid` as `-p id`. Single-dash long spellings now parse, and `-stats` selects and orders output columns using macOS stat keys (`pid`, `cpu`, `th`, `mem`, `pstate`, ...).
-- Fixed a sweep of GNU/BSD compatibility gaps in the built-in shell utilities, found by auditing every builtin against its real counterpart: `timeout` gained `-s`/`-k`/`--preserve-status`/`--foreground`/`-v`, GNU exit codes (124/125/137), signal delivery to the child process group with `-k` SIGKILL escalation, and `timeout 0` disabling the limit; `diff` gained normal-format default output, `-w`/`-b`/`-B`/`-i`/`-x`/`-L`/`-s`/`--strip-trailing-cr`, context format (`-c`/`-C`), bundled flags (`-ru`, `-urN`), timestamped unified headers, and no longer recurses directories without `-r`; `find` fixed inverted `-newerXY` timestamp comparisons, anchored `-regex` to whole paths, and gained BSD `-perm +mode`, `-type f,d` lists, `-size` `T`/`P` suffixes, ISO dates in `-newermt`, and BSD leading flags `-E`/`-x`/`-s`; `date` gained BSD `-r <epoch>`, `-v` adjustments, and `-j -f` strptime parsing, and `-I` no longer swallows a following `+FORMAT`; `tail`/`head` accept obsolete `-N`/`+N` counts at any argv position with any file count, `tail -r -n N` works, and `head` continues past per-file I/O errors with GNU header/separator placement; `rg` resolves `-s`/`-i`/`-S` by last occurrence, accepts `--no-config`/`-j`/`--threads`/`--no-column`, implements `--path-separator`, and emits clean NUL-delimited output under `-0`/`-l0`; `stat` prints integer epochs for `%X`/`%Y`/`%Z` (bash arithmetic on `stat -c %Y` works) and gained BSD `-s`/`-x` output modes plus `-t` time formatting; `cksum` is now registered (multi-algorithm `cksum -a sha256`); `truncate` implements `-o`/`--io-blocks` (previously silently truncated to the raw byte count), accepts `b` (512-byte) suffix and BSD `=` prefix; `sleep`/`timeout` accept `infinity` and keep sub-millisecond precision; `yes` and `errno` accept hyphen-prefixed operands (`yes -n`, `errno -2`); `nohup -- cmd` no longer tries to run `--` (including backgrounded via the brush wrapper); `which` gained BSD `-s` and errors on zero operands; `kill` accepts attached values (`-s9`, `-sKILL`, `-l9`) and maps exit statuses above 128 (`kill -l 137` → `KILL`).
+- `/models` keeps `auto` thinking on non-default roles such as `task` instead of changing the active model and displaying the role as `max`.
+- Subagent `yield` structured results no longer get corrupted by lossy argument repairs; prompt guidance improved for weak callers.
+- GitHub `file_read` returns proper image blocks and direct view URLs for image/binary files.
+- Cancelled prompts during pre-stream turn setup restore the text and image attachments to the editor.
+- `top` builtin accepts single-dash macOS flags such as `-pid` and `-stats`.
+- GNU/BSD compat sweep across built-in shell utilities (`timeout`, `diff`, `find`, `date`, `tail`, `head`, `rg`, `stat`, `truncate`, `cksum`, `sleep`, `which`, `nohup`, `kill`).
 
 ## [17.3.8] - 2026-08-19
 

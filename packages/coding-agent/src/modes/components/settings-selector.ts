@@ -35,6 +35,7 @@ import {
 	validateProviderMaxInFlightRequests,
 } from "../../config/settings";
 import type {
+	ContextLineMode,
 	SettingTab,
 	StatusLinePreset,
 	StatusLineSegmentId,
@@ -44,6 +45,8 @@ import { SETTING_TABS, TAB_METADATA } from "../../config/settings-schema";
 import { getCurrentThemeName, getSelectListTheme, getSettingsListTheme, theme } from "../../modes/theme/theme";
 import { AUTO_THINKING, type ConfiguredThinkingLevel } from "../../thinking";
 import { getTabBarTheme } from "../shared";
+import { type ComposerPreviewStatusSource, ComposerShapePreview } from "./composer-shape-preview";
+import { getComposerShapeOptions } from "./composer-shape-registry";
 import { bottomBorder, divider, row, topBorder } from "./overlay-box";
 import { handleInputOrEscape, PluginSettingsComponent } from "./plugin-settings";
 import { getSettingDef, getSettingsForTab, type SettingDef } from "./settings-defs";
@@ -555,11 +558,14 @@ export interface SettingsRuntimeContext {
 	imageBudget?: ImageBudget;
 	/** Schedules a re-render after async preview work completes. */
 	requestRender?: () => void;
+	/** Live status renderer for composer-shape previews (the session's status line). */
+	composerPreviewStatus?: ComposerPreviewStatusSource;
 }
 
 /** Status line settings subset for preview */
 export interface StatusLinePreviewSettings {
 	preset?: StatusLinePreset;
+	contextLine?: ContextLineMode;
 	leftSegments?: StatusLineSegmentId[];
 	rightSegments?: StatusLineSegmentId[];
 	separator?: StatusLineSeparatorStyle;
@@ -1071,8 +1077,9 @@ export class SettingsSelectorComponent implements Component {
 			});
 		} else if (def.path === "theme.dark" || def.path === "theme.light") {
 			options = this.context.availableThemes.map(t => ({ value: t, label: t }));
+		} else if (def.path === "composer.shape") {
+			options = getComposerShapeOptions();
 		}
-
 		// Preview handlers
 		let onPreview: ((value: string) => void | Promise<void>) | undefined;
 		let onPreviewCancel: (() => void) | undefined;
@@ -1116,6 +1123,13 @@ export class SettingsSelectorComponent implements Component {
 				const separator = settings.get("statusLine.separator");
 				this.callbacks.onStatusLinePreview?.({ separator });
 			};
+		} else if (def.path === "statusLine.contextLine") {
+			onPreview = value => {
+				this.callbacks.onStatusLinePreview?.({ contextLine: value as ContextLineMode });
+			};
+			onPreviewCancel = () => {
+				this.callbacks.onStatusLinePreview?.({ contextLine: settings.get("statusLine.contextLine") });
+			};
 		} else if (def.path === "snapcompact.shape") {
 			const shapePreview = new SnapcompactShapePreview(currentValue, {
 				model: this.context.model,
@@ -1124,8 +1138,14 @@ export class SettingsSelectorComponent implements Component {
 			});
 			onPreview = value => shapePreview.setValue(value);
 			footer = shapePreview;
+		} else if (def.path === "composer.shape") {
+			const shapePreview = new ComposerShapePreview(String(currentValue ?? "box"), {
+				requestRender: this.context.requestRender,
+				status: this.context.composerPreviewStatus,
+			});
+			onPreview = value => shapePreview.setValue(value);
+			footer = shapePreview;
 		}
-
 		// Provide status line preview for theme selection
 		const isThemeSetting = def.path === "theme.dark" || def.path === "theme.light";
 		const getPreview = isThemeSetting ? this.callbacks.getStatusLinePreview : undefined;
