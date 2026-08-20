@@ -35,7 +35,7 @@ import type {
 import { isUsageLimitOutcome, resolveModelServiceTier, streamSimple } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import { extractHttpStatusFromError, extractRetryHint, logger } from "@oh-my-pi/pi-utils";
+import { extractHttpStatusFromError, extractRetryHint, logger, prompt } from "@oh-my-pi/pi-utils";
 import {
 	ADVISOR_DEFAULT_TOOL_NAMES,
 	AdviseTool,
@@ -73,7 +73,7 @@ import { CursorExecHandlers, type CursorMcpResourceAdapter } from "../cursor";
 import { bridgeToolMap } from "../cursor-bridge-tools";
 import { estimateToolSchemaTokens } from "../modes/utils/context-usage";
 import type { PlanModeState } from "../plan-mode/state";
-import advisorSystemPrompt from "../prompts/advisor/system.md" with { type: "text" };
+import advisorSystemPromptTemplate from "../prompts/advisor/system.md" with { type: "text" };
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import {
 	concreteThinkingLevel,
@@ -93,11 +93,23 @@ import {
 	type RetryFallbackSelector,
 } from "./retry-fallback-chains";
 import { formatSessionDumpText } from "./session-dump-format";
+
 import type { CompactionEntry, SessionEntry } from "./session-entries";
 import { formatSessionHistoryMarkdown } from "./session-history-format";
 import type { SessionManager } from "./session-manager";
 import { buildSessionMetadata } from "./session-metadata";
 import type { YieldQueue } from "./yield-queue";
+
+const ADVISOR_SYSTEM_PROMPT = prompt.render(advisorSystemPromptTemplate, {
+	steerInProgressConcerns: false,
+});
+const ADVISOR_SYSTEM_PROMPT_WITH_IN_PROGRESS_CONCERNS = prompt.render(advisorSystemPromptTemplate, {
+	steerInProgressConcerns: true,
+});
+
+function resolveAdvisorSystemPrompt(steerInProgressConcerns: boolean): string {
+	return steerInProgressConcerns ? ADVISOR_SYSTEM_PROMPT_WITH_IN_PROGRESS_CONCERNS : ADVISOR_SYSTEM_PROMPT;
+}
 
 const ADVISOR_CODEX_SSE_MAX_ATTEMPTS = 1;
 /** Advisor statistics for the advisor status command. */
@@ -732,7 +744,7 @@ export class SessionAdvisors {
 
 			// `#advisorWatchdogPrompt` already carries WATCHDOG.md + YAML shared
 			// instructions; `config.instructions` adds this advisor's specialization.
-			const systemPrompt = [advisorSystemPrompt];
+			const systemPrompt = [resolveAdvisorSystemPrompt(this.#host.settings.get("advisor.steerInProgressConcerns"))];
 			if (this.#advisorContextPrompt) systemPrompt.push(this.#advisorContextPrompt);
 			if (this.#advisorWatchdogPrompt) systemPrompt.push(this.#advisorWatchdogPrompt);
 			if (this.#advisorSharedInstructions) systemPrompt.push(this.#advisorSharedInstructions);
@@ -934,10 +946,9 @@ export class SessionAdvisors {
 				obfuscator: this.#host.obfuscator,
 				getModelIdentity: () => formatModelString(advisorRef.agent.state.model),
 				beginAdvisorUpdate: inProgress => {
-					advisorRef.adviseTool.beginUpdate(
-						inProgress,
-						this.#host.settings.get("advisor.steerInProgressConcerns"),
-					);
+					const steerInProgressConcerns = this.#host.settings.get("advisor.steerInProgressConcerns");
+					advisorRef.agent.state.systemPrompt[0] = resolveAdvisorSystemPrompt(steerInProgressConcerns);
+					advisorRef.adviseTool.beginUpdate(inProgress, steerInProgressConcerns);
 					advisorRef.emissionGuard.beginUpdate();
 				},
 				onTurnError: (error, failedMessages, signal) =>

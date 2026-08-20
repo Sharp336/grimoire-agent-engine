@@ -163,6 +163,17 @@ describe("AgentSession advisor toggle", () => {
 		expect(session.formatAdvisorStatus()).toContain("Advisor is enabled (anthropic/claude-sonnet-4-5)");
 	});
 
+	it("instructs the configured advisor to raise material in-progress concerns", () => {
+		session.settings.override("advisor.steerInProgressConcerns", true);
+		const advisor = enableAdvisor();
+		const systemPrompt = advisor.state.systemPrompt.join("\n");
+
+		expect(systemPrompt).toContain(
+			"Raise `concern` only for a material issue that would waste work if left until completion",
+		);
+		expect(systemPrompt).not.toContain("Withhold critique of partial work");
+	});
+
 	it("explicit enable rebuilds the runtime when the advisor role changes", () => {
 		session.settings.setModelRole("advisor", `${model.provider}/${model.id}`);
 		expect(session.setAdvisorEnabled(true)).toBe(true);
