@@ -21,6 +21,7 @@ import {
 	type ExtensionUIDialogOptions,
 	type ExtensionUISelectItem,
 	type ExtensionWidgetOptions,
+	type ExtensionWidgetContent,
 	getExtensionUISelectOptionLabel,
 } from "../../extensibility/extensions";
 import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
@@ -656,21 +657,24 @@ export function requestRpcDialog<T>(
 	return promise;
 }
 
-/** Emit a legacy RPC widget frame without interactive-only sidebar placement. */
+/** Emit a passive RPC widget frame; component factories remain headless no-ops. */
 export function emitRpcWidgetRequest(
 	output: (frame: RpcExtensionUIRequest | object) => void,
 	key: string,
-	lines: string[] | undefined,
+	content: ExtensionWidgetContent,
 	options?: ExtensionWidgetOptions,
 ): void {
-	const widgetPlacement = options?.placement === "rightSidebar" ? undefined : options?.placement;
+	if (content !== undefined && !Array.isArray(content)) return;
 	const request: RpcExtensionUIRequest = {
 		type: "extension_ui_request",
 		id: Snowflake.next() as string,
 		method: "setWidget",
 		widgetKey: key,
-		widgetLines: lines,
-		...(widgetPlacement === undefined ? {} : { widgetPlacement }),
+		widgetLines: content,
+		...(options?.placement === undefined ? {} : { widgetPlacement: options.placement }),
+		...(options?.width === undefined ? {} : { widgetWidth: options.width }),
+		...(options?.minWidth === undefined ? {} : { widgetMinWidth: options.minWidth }),
+		...(options?.minMainWidth === undefined ? {} : { widgetMinMainWidth: options.minMainWidth }),
 	};
 	output(request);
 }
@@ -840,12 +844,8 @@ export async function runRpcMode(
 			// Not supported in RPC mode
 		}
 
-		setWidget(key: string, content: unknown, options?: ExtensionWidgetOptions): void {
-			// Only support string arrays in RPC mode - factory functions are ignored
-			if (content === undefined || Array.isArray(content)) {
-				emitRpcWidgetRequest(this.output, key, content as string[] | undefined, options);
-			}
-			// Component factories are not supported in RPC mode - would need TUI access
+		setWidget(key: string, content: ExtensionWidgetContent, options?: ExtensionWidgetOptions): void {
+			emitRpcWidgetRequest(this.output, key, content, options);
 		}
 
 		setFooter(_factory: unknown): void {

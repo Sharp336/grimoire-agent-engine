@@ -91,7 +91,7 @@ describe("RPC extension UI", () => {
 
 	it("ignores component widget factories in RPC mode", () => {
 		const output = vi.fn<(frame: object) => void>();
-		const componentFactory = (() => ({ render: () => [] })) as never;
+		const componentFactory = () => ({ render: () => [] });
 
 		expect(() =>
 			emitRpcWidgetRequest(output, "quota", componentFactory, { placement: "rightSidebar" }),
