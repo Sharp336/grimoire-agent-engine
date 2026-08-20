@@ -61,12 +61,12 @@ describe("builtin seeds", () => {
 		const preferences = builtinSeedsForTest.find(seed => seed.id === "user-preferences");
 		expect(preferences?.scopes).toEqual(["global", "per-project", "per-project-tagged"]);
 		expect(preferences?.projectTagged).toBe(false);
-		expect(preferences?.max_tokens).toBe(600);
+		expect(preferences?.max_tokens).toBe(900);
 		for (const id of ["project-workflow", "project-pitfalls", "project-decisions"]) {
 			const seed = builtinSeedsForTest.find(candidate => candidate.id === id);
 			expect(seed?.scopes).toEqual(["per-project", "per-project-tagged"]);
 			expect(seed?.projectTagged).toBe(true);
-			expect(seed?.max_tokens).toBe(800);
+			expect(seed?.max_tokens).toBe(1200);
 		}
 	});
 
@@ -321,11 +321,11 @@ describe("ensureMentalModels", () => {
 		// Untagged on purpose: an empty tag list must reach the wire as absent,
 		// otherwise the refresh filters against a tag we never retain with.
 		expect(preferences?.tags).toBeUndefined();
-		expect(preferences?.maxTokens).toBe(600);
+		expect(preferences?.maxTokens).toBe(900);
 
 		const workflow = calls.created.find(call => call.id === "project-workflow-omp");
 		expect(workflow?.tags).toEqual(["project:omp"]);
-		expect(workflow?.maxTokens).toBe(800);
+		expect(workflow?.maxTokens).toBe(1200);
 	});
 });
 

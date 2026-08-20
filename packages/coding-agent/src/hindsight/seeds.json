@@ -7,7 +7,7 @@
 			"source_query": "What durable preferences does the user hold for coding style, tooling, workflow, communication, and review? Include a preference only when separate sessions support it or the user stated it as a standing rule. For each entry give the preference as a directive claim, the evidence behind it (what the user said or repeatedly did), when it was last observed, and a confidence of high, medium, or low. Exclude unsupported guesses, one-off requests, task-specific instructions, and volatile in-flight state. When two preferences conflict, keep the most recent and drop the superseded one. Keep only entries expected to still hold in six months.",
 			"scopes": ["global", "per-project", "per-project-tagged"],
 			"projectTagged": false,
-			"max_tokens": 600,
+			"max_tokens": 900,
 			"trigger": {
 				"mode": "delta",
 				"refresh_after_consolidation": true,
@@ -25,7 +25,7 @@
 			"source_query": "What established build, test, release, review, and development workflows does this project follow? Include a workflow only when a repository source (script, config, CI definition, documented command) or repeated practice supports it. For each entry give the workflow as an actionable claim, the evidence behind it (command, file, or repeated observation), when it was last observed, and a confidence of high, medium, or low. Exclude unsupported guesses, one-off commands, and volatile state such as in-flight tasks, branches, or incidents. Drop any workflow superseded by a newer command or tool. Keep only entries expected to still hold in six months.",
 			"scopes": ["per-project", "per-project-tagged"],
 			"projectTagged": true,
-			"max_tokens": 800,
+			"max_tokens": 1200,
 			"trigger": {
 				"mode": "delta",
 				"refresh_after_consolidation": true,
@@ -43,7 +43,7 @@
 			"source_query": "What recurring failures, hazards, or sharp edges affect this project, and what durable mitigation is established for each? Include a pitfall only when it was observed more than once or carries an evidenced mitigation. For each entry give the failure mode and its mitigation as a claim, the evidence behind it (error, incident, or landed fix), when it was last observed, and a confidence of high, medium, or low. Exclude unsupported or speculative risks and volatile state such as a single transient outage or an open investigation. Drop any pitfall a landed fix has superseded. Keep only entries expected to still hold in six months.",
 			"scopes": ["per-project", "per-project-tagged"],
 			"projectTagged": true,
-			"max_tokens": 800,
+			"max_tokens": 1200,
 			"trigger": {
 				"mode": "delta",
 				"refresh_after_consolidation": true,
@@ -61,7 +61,7 @@
 			"source_query": "What durable architectural or product decisions govern this project, and what rationale or trade-off was recorded for each? Include a decision only when it was actually adopted, not merely proposed. For each entry give the decision as a claim, the evidence behind it (where it was decided or where it is enforced), when it was last observed, and a confidence of high, medium, or low. Exclude unsupported guesses and volatile state such as proposals, open questions, and in-flight plans. When decisions conflict, keep the one that superseded the others and say what it replaced. Keep only entries expected to still hold in six months.",
 			"scopes": ["per-project", "per-project-tagged"],
 			"projectTagged": true,
-			"max_tokens": 800,
+			"max_tokens": 1200,
 			"trigger": {
 				"mode": "delta",
 				"refresh_after_consolidation": true,
