@@ -24,6 +24,10 @@ import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../s
 import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
 import type {
+	AdvisorContextContribution,
+	AdvisorContextEvent,
+	AdvisorContextEventResult,
+	AdvisorContextPolicyAttribution,
 	AfterProviderResponseEvent,
 	AssistantThinkingRenderer,
 	BeforeAgentStartEvent,
@@ -85,6 +89,7 @@ export type ExtensionErrorListener = (error: ExtensionError) => void;
 
 export const EXTENSION_HANDLER_TIMEOUT_MS = 30_000;
 let extensionHandlerTimeoutMs = EXTENSION_HANDLER_TIMEOUT_MS;
+const NEVER_ABORTED_SIGNAL = new AbortController().signal;
 
 function throwUnsupportedServiceTierAction(): never {
 	throw new Error("This extension host does not support service-tier actions");
@@ -224,6 +229,11 @@ function createHandlerContext(
 		enumerable: true,
 		configurable: true,
 	});
+	Object.defineProperty(scoped, "signal", {
+		value: handlerSignal,
+		enumerable: true,
+		configurable: true,
+	});
 	return scoped;
 }
 
@@ -325,6 +335,73 @@ const MAX_PENDING_CREDENTIAL_DISABLED = 32;
  * spills, but it does so consistently at both ends. Drop-oldest under pressure.
  */
 const MAX_PENDING_MCP_NOTIFICATIONS = 100;
+const MAX_ADVISOR_CONTEXT_CONTRIBUTIONS = 8;
+const MAX_ADVISOR_CONTEXT_CHARS = 8_000;
+const MAX_ADVISOR_CONTEXT_POLICIES = 16;
+const MAX_ADVISOR_ATTRIBUTION_CHARS = 256;
+const MAX_ADVISOR_SOURCE_CHARS = 80;
+const MAX_ADVISOR_POLICY_TEXT_CHARS = 2_000;
+const MAX_ADVISOR_CONTEXT_COLLECTION_MS = 2_000;
+const VISIBLE_POLICY_CONTROL_CHARACTERS = /[\p{Cc}\p{Cf}]/u;
+
+function boundedAdvisorPolicyAttributions(value: unknown): AdvisorContextPolicyAttribution[] {
+	if (!Array.isArray(value)) return [];
+	const policies: AdvisorContextPolicyAttribution[] = [];
+	for (const item of value) {
+		if (!item || typeof item !== "object") continue;
+		const candidate = item as Record<string, unknown>;
+		const rawAttribution = typeof candidate.attribution === "string" ? candidate.attribution : "";
+		const attribution = rawAttribution.trim();
+		const source = typeof candidate.source === "string" ? candidate.source.trim() : "";
+		const condition = typeof candidate.condition === "string" ? candidate.condition.trim() : "";
+		const behavior = typeof candidate.behavior === "string" ? candidate.behavior.trim() : "";
+		if (!attribution || attribution !== rawAttribution || attribution.length > MAX_ADVISOR_ATTRIBUTION_CHARS)
+			continue;
+		if (
+			/\s|[\p{Cc}\p{Cf}]/u.test(attribution) ||
+			!source ||
+			source.length > MAX_ADVISOR_SOURCE_CHARS ||
+			VISIBLE_POLICY_CONTROL_CHARACTERS.test(source) ||
+			!condition ||
+			condition.length > MAX_ADVISOR_POLICY_TEXT_CHARS ||
+			VISIBLE_POLICY_CONTROL_CHARACTERS.test(condition) ||
+			!behavior ||
+			behavior.length > MAX_ADVISOR_POLICY_TEXT_CHARS ||
+			VISIBLE_POLICY_CONTROL_CHARACTERS.test(behavior)
+		)
+			continue;
+		policies.push({ attribution, source, condition, behavior });
+		if (policies.length >= MAX_ADVISOR_CONTEXT_POLICIES) break;
+	}
+	return policies;
+}
+
+function buildAdvisorContextContribution(
+	result: AdvisorContextEventResult | undefined,
+	trusted: boolean,
+): AdvisorContextContribution | undefined {
+	const validatedPolicies = trusted ? boundedAdvisorPolicyAttributions(result?.policies) : [];
+	let policies: AdvisorContextPolicyAttribution[] = [];
+	let policyContext = "";
+	for (const policy of validatedPolicies) {
+		const nextPolicies = [...policies, policy];
+		const nextContext = `OMP core-validated current-review policies:\n${JSON.stringify({ policies: nextPolicies })}`;
+		if (nextContext.length > MAX_ADVISOR_CONTEXT_CHARS) continue;
+		policies = nextPolicies;
+		policyContext = nextContext;
+	}
+
+	const rawContext = typeof result?.context === "string" ? result.context : "";
+	if (!policyContext && !rawContext.trim()) return undefined;
+	if (!policyContext) return { context: rawContext.slice(0, MAX_ADVISOR_CONTEXT_CHARS), policies };
+
+	const separator = rawContext.trim() ? "\n\n" : "";
+	const remaining = MAX_ADVISOR_CONTEXT_CHARS - policyContext.length - separator.length;
+	return {
+		context: `${policyContext}${separator}${remaining > 0 ? rawContext.slice(0, remaining) : ""}`,
+		policies,
+	};
+}
 
 /**
  * Events handled by the generic emit() method.
@@ -335,6 +412,7 @@ type RunnerEmitEvent = Exclude<
 	| ToolCallEvent
 	| ToolResultEvent
 	| UserBashEvent
+	| AdvisorContextEvent
 	| ContextEvent
 	| BeforeProviderRequestEvent
 	| AfterProviderResponseEvent
@@ -1157,6 +1235,7 @@ export class ExtensionRunner {
 		return {
 			ui: this.#uiContext,
 			mode: this.#mode,
+			signal: delegation?.signal ?? NEVER_ABORTED_SIGNAL,
 			getContextUsage: () => this.#getContextUsageFn(),
 			compact: instructionsOrOptions => this.#compactFn(instructionsOrOptions),
 			getAsyncJobSnapshot: () => this.#getAsyncJobSnapshotFn(),
@@ -1492,6 +1571,48 @@ export class ExtensionRunner {
 			return { block: true, reason: `Tool execution was cancelled while an extension handler was pending` };
 		}
 		return result;
+	}
+
+	async emitAdvisorContext(event: AdvisorContextEvent, signal?: AbortSignal): Promise<AdvisorContextContribution[]> {
+		if (!this.hasHandlers("advisor_context")) return [];
+		const deadline = Date.now() + MAX_ADVISOR_CONTEXT_COLLECTION_MS;
+		const contributions: AdvisorContextContribution[] = [];
+		let ctx: ExtensionContext | undefined;
+		for (const ext of this.extensions) {
+			const handlers = ext.handlers.get("advisor_context");
+			if (!handlers?.length) continue;
+			ctx ??= this.createContext();
+			for (const handler of handlers) {
+				if (signal?.aborted) return [];
+				let remainingMs = deadline - Date.now();
+				if (remainingMs <= 0) return contributions;
+				let isolatedEvent: AdvisorContextEvent;
+				try {
+					isolatedEvent = structuredClone(event);
+				} catch (error) {
+					logger.warn("Advisor context updates could not be detached; extension context omitted", {
+						error: error instanceof Error ? error.message : String(error),
+					});
+					return [];
+				}
+				remainingMs = deadline - Date.now();
+				if (remainingMs <= 0) return contributions;
+				const result = (await this.#runHandlerWithTimeout(
+					handler,
+					isolatedEvent,
+					ctx,
+					ext,
+					remainingMs,
+					undefined,
+					signal,
+				)) as AdvisorContextEventResult | undefined;
+				const contribution = buildAdvisorContextContribution(result, ext.trusted === true);
+				if (!contribution) continue;
+				contributions.push(contribution);
+				if (contributions.length >= MAX_ADVISOR_CONTEXT_CONTRIBUTIONS) return contributions;
+			}
+		}
+		return contributions;
 	}
 
 	async emitUserBash(event: UserBashEvent): Promise<UserBashEventResult | undefined> {

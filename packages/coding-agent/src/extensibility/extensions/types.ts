@@ -456,6 +456,8 @@ export interface ExtensionContext {
 	ui: ExtensionUIContext;
 	/** Current run mode. Use `"tui"` to guard terminal-only UI such as custom components. */
 	mode: ExtensionMode;
+	/** Cancellation scoped to the current extension handler invocation. */
+	signal: AbortSignal;
 	/** Get current context usage for the active model. */
 	getContextUsage(): ContextUsage | undefined;
 	/** Get a read-only snapshot of async jobs owned by this session. */
@@ -864,6 +866,22 @@ export interface UserPythonEvent {
 }
 
 // ============================================================================
+// Advisor Context Events
+// ============================================================================
+
+/**
+ * Fired before native Advisor review so extensions can contribute bounded context.
+ * Handlers share a two-second aggregate budget and should stop work when `ctx.signal` aborts.
+ */
+export interface AdvisorContextEvent {
+	type: "advisor_context";
+	/** Stable session scope; opaque to extensions. */
+	scopeKey: string;
+	/** The bounded newest primary transcript updates about to be reviewed. */
+	updates: readonly unknown[];
+}
+
+// ============================================================================
 // Input Events
 // ============================================================================
 
@@ -1066,6 +1084,7 @@ export type ExtensionEvent =
 	| McpNotificationEvent
 	| UserBashEvent
 	| UserPythonEvent
+	| AdvisorContextEvent
 	| InputEvent
 	| ToolCallEvent
 	| ToolResultEvent
@@ -1104,6 +1123,35 @@ export interface UserBashEventResult {
 export interface UserPythonEventResult {
 	/** Full replacement: extension handled execution, use this result */
 	result?: PythonResult;
+}
+
+/**
+ * Exact approved policy text that an extension loaded through the exact-path
+ * `--trusted-extension` allowlist permits the native Advisor to attribute
+ * visibly when it directly causes an `advise()` call.
+ */
+export interface AdvisorContextPolicyAttribution {
+	/** Opaque alias included in private Advisor context; never rendered. */
+	attribution: string;
+	/** User-facing source label, such as "Experience". */
+	source: string;
+	/** Exact approved applicability wording. */
+	condition: string;
+	/** Exact approved behavior wording. */
+	behavior: string;
+}
+
+export interface AdvisorContextEventResult {
+	/** Bounded context appended to the native Advisor review update. */
+	context?: string;
+	/** Policy aliases accepted only from exact-path `--trusted-extension` modules. */
+	policies?: AdvisorContextPolicyAttribution[];
+}
+
+/** Sanitized contribution accepted by the extension runner. */
+export interface AdvisorContextContribution {
+	context: string;
+	policies: AdvisorContextPolicyAttribution[];
 }
 
 export type { ToolResultEventResult } from "../shared-events";
@@ -1199,6 +1247,9 @@ export interface ExtensionAPI {
 	/** Injected pi-coding-agent exports for accessing SDK utilities */
 	pi: typeof PiCodingAgent;
 
+	/** Stable runtime host identifier for cross-host extensions. */
+	readonly host: "omp";
+
 	// =========================================================================
 	// Event Subscription
 	// =========================================================================
@@ -1259,6 +1310,7 @@ export interface ExtensionAPI {
 	on(event: "tool_result", handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult>): void;
 	on(event: "user_bash", handler: ExtensionHandler<UserBashEvent, UserBashEventResult>): void;
 	on(event: "user_python", handler: ExtensionHandler<UserPythonEvent, UserPythonEventResult>): void;
+	on(event: "advisor_context", handler: ExtensionHandler<AdvisorContextEvent, AdvisorContextEventResult>): void;
 	on(event: "mcp_notification", handler: ExtensionHandler<McpNotificationEvent>): void;
 
 	// =========================================================================
@@ -1704,6 +1756,8 @@ export interface ExtensionRuntime extends ExtensionRuntimeState, ExtensionAction
 export interface Extension {
 	path: string;
 	resolvedPath: string;
+	/** Loaded through the exact-path `--trusted-extension` allowlist. */
+	trusted?: boolean;
 	label?: string;
 	handlers: Map<string, HandlerFn[]>;
 	tools: Map<string, RegisteredTool<any, any>>;

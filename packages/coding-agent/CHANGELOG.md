@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added a bounded `advisor_context` extension event before native Advisor reviews, with detached recent updates and current-review opaque policy aliases. Only extensions loaded through the exact-path `--trusted-extension` allowlist may provide authoritative policy aliases; that trust is preserved when the same extension path is reloaded for a child session, while ordinary extensions remain quoted context only. Valid trusted aliases produce visible source/condition/behavior provenance and core-validated human-approved policy guidance on the native Advisor card; the primary must correct conflicting behavior, repeated findings for the same policy are deduplicated, and unknown aliases remain generic non-authoritative advice.
 
 ## [17.4.0] - 2026-08-20
 
@@ -359,7 +362,6 @@
 - A run is now attributed to the model that actually produced its output, not whichever model the session was last pointed at. A retry fallback that errored on its first request — an exhausted quota, a hard provider error — was credited with the whole run in the Agent Hub row and the settled task result, even when the previous model did every turn. Sessions expose the serving model directly, holding the last model that produced output while a candidate is armed but unproven, and transcript-derived history stops at the newest turn that produced output.
 
 ## [17.2.12] - 2026-08-08
-
 ### Fixed
 
 - Fixed shell minimization replacing meaningful `rustc --print` output with `OK`.
