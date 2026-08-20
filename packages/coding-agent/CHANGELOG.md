@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The `/model` Roles panel's `[`/`]` fallback reordering now supports promoting a fallback into the primary slot: pressing `[` on a role's front fallback entry swaps it with the role's current primary (demoting the primary into the vacated chain slot) instead of no-op'ing at the chain boundary. Scoped to role-keyed chains with an explicit primary — model/provider-keyed chains and roles still on auto-selection have no primary slot to promote into.
+
 ## [17.4.0] - 2026-08-20
 
 ### Added

@@ -348,27 +348,24 @@ export function resolveRetryFallbackChainKey(
  * id-prefixed `provider/prefix/*` entry re-prefixes the failing model's
  * bare id instead (openrouter/google/* : google-antigravity/x →
  * openrouter/google/x). Ids the target provider lacks are skipped by the
- * candidate loop's registry lookup.
+ * candidate loop's registry lookup. Exported so callers outside retry
+ * resolution (e.g. the `/model` hub's fallback-promotion UI) resolve a
+ * wildcard chain entry against a chosen `current` the same way runtime
+ * fallback recovery does, instead of duplicating this logic.
  */
-function parseRetryFallbackChainEntry(
-	context: RetryFallbackResolutionContext,
+export function parseRetryFallbackChainEntry(
+	modelLookup: RetryFallbackModelLookup,
 	entry: string,
 	current: RetryFallbackSelector | undefined,
 ): RetryFallbackSelector | undefined {
-	if (!isRetryFallbackWildcardKey(entry)) return parseRetryFallbackSelector(entry, context.modelLookup);
+	if (!isRetryFallbackWildcardKey(entry)) return parseRetryFallbackSelector(entry, modelLookup);
 	if (!current) return undefined;
-	const { provider, idPrefix } = parseRetryFallbackWildcard(entry, candidate =>
-		context.modelLookup.hasProvider(candidate),
-	);
+	const { provider, idPrefix } = parseRetryFallbackWildcard(entry, candidate => modelLookup.hasProvider(candidate));
 	const bareId = current.id.slice(current.id.lastIndexOf("/") + 1);
 	let id: string;
 	if (idPrefix !== undefined) {
 		id = `${idPrefix}/${bareId}`;
-	} else if (
-		bareId !== current.id &&
-		!context.modelLookup.find(provider, current.id) &&
-		context.modelLookup.find(provider, bareId)
-	) {
+	} else if (bareId !== current.id && !modelLookup.find(provider, current.id) && modelLookup.find(provider, bareId)) {
 		// Aggregator → direct: the failing id carries a vendor prefix the
 		// target provider does not use (openrouter/google/x → google-vertex/x).
 		id = bareId;
@@ -417,7 +414,7 @@ function getRetryFallbackEffectiveChain(
 		}
 	}
 	for (const selector of context.chains[chainKey] ?? []) {
-		const parsed = parseRetryFallbackChainEntry(context, selector, parsedCurrent);
+		const parsed = parseRetryFallbackChainEntry(context.modelLookup, selector, parsedCurrent);
 		if (!parsed || seen.has(parsed.raw)) continue;
 		seen.add(parsed.raw);
 		chain.push(parsed);
