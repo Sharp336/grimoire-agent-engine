@@ -105,9 +105,9 @@ The `advise` tool accepts one note and an optional severity:
 
 | Severity        | Delivery                                                                                                                                                             | Intended use                                                                 |
 | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| omitted / `nit` | Non-interrupting aside, batched into the primary transcript at the next step boundary.                                                                               | Cleanup, simplification, low-risk edge cases.                                |
-| `concern`       | Interrupting steering message when delivery permits. In-progress concerns require `advisor.steerInProgressConcerns`; late terminal-answer concerns are preserved as visible cards.             | Material risk, likely wrong direction, missing constraint, hallucinated API. |
-| `blocker`       | Interrupting steering message when the delivery constraints below permit it. Unlike a `concern`, a terminal answer alone does not prevent it from triggering a turn. | Continuing would clearly waste work or produce broken output.                |
+| omitted / `nit` | Non-interrupting aside, batched into the primary transcript at the next step boundary. | Cleanup, simplification, low-risk edge cases. |
+| `concern` | Steering message when `advisor.steerLevel` is `concern`; otherwise non-interrupting, dropped during in-progress reviews, and preserved visibly after a terminal answer. | Material risk, likely wrong direction, missing constraint, hallucinated API. |
+| `blocker` | Always meets the steering threshold. Interrupts a live turn or triggers an idle turn when delivery constraints permit. | Continuing would clearly waste work or produce broken output. |
 
 Accepted notes are rendered into the primary transcript as XML-escaped `<advisory>` elements. Named roster advisors add an `advisor` attribute:
 
@@ -135,7 +135,7 @@ So the advisor can steer and resume a run the agent ended on its own **while it 
 
 `advisor.immuneTurns` limits interruption frequency. After the advisor successfully delivers a `concern` or `blocker` through the steering channel, later concerns/blockers are routed as non-interrupting asides until the configured number of primary turns has completed. The default is `3`. `nit` notes are unchanged, and advice raised while user-interrupt auto-resume suppression is active is still preserved instead of restarting a stopped run.
 
-While an advisor update is reviewing work still in progress, `AdviseTool` always drops `nit` calls. It also drops `concern` calls by default; set `advisor.steerInProgressConcerns` to `true` to pass them into the normal steering policy immediately. A `blocker` may always interrupt partial work. The tool also suppresses the same whitespace-normalized note at an equal or lower severity while allowing a real escalation (`nit` → `concern` → `blocker`).
+While an advisor update is reviewing work still in progress, `AdviseTool` drops advice below `advisor.steerLevel`. The default `blocker` level therefore admits only blockers; `concern` admits both concerns and blockers. Nits remain non-interrupting. The same threshold controls completed-turn delivery: an admitted concern can trigger a new primary turn after a terminal answer, while a concern below the threshold is preserved as a visible card. The tool also suppresses the same whitespace-normalized note at an equal or lower severity while allowing a real escalation (`nit` → `concern` → `blocker`).
 
 ### Emission guard
 

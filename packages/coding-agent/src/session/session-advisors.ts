@@ -48,15 +48,16 @@ import {
 	AdvisorRuntime,
 	type AdvisorRuntimeStatus,
 	type AdvisorSeverity,
+	type AdvisorSteerLevel,
 	AdvisorTranscriptRecorder,
 	advisorTranscriptFilename,
 	buildAdvisorQuarantineSourceText,
 	formatAdvisorBatchContent,
 	getOrCreateAdvisorProviderSessionId,
 	isAdvisorInterruptImmuneTurnActive,
-	isInterruptingSeverity,
 	quarantineAdvisorUnsafeOutput,
 	resolveAdvisorDeliveryChannel,
+	shouldSteerAdvisorSeverity,
 	slugifyAdvisorName,
 } from "../advisor";
 import type { ModelRegistry } from "../config/model-registry";
@@ -100,15 +101,13 @@ import type { SessionManager } from "./session-manager";
 import { buildSessionMetadata } from "./session-metadata";
 import type { YieldQueue } from "./yield-queue";
 
-const ADVISOR_SYSTEM_PROMPT = prompt.render(advisorSystemPromptTemplate, {
-	steerInProgressConcerns: false,
-});
-const ADVISOR_SYSTEM_PROMPT_WITH_IN_PROGRESS_CONCERNS = prompt.render(advisorSystemPromptTemplate, {
-	steerInProgressConcerns: true,
-});
+const ADVISOR_SYSTEM_PROMPTS: Record<AdvisorSteerLevel, string> = {
+	blocker: prompt.render(advisorSystemPromptTemplate, { steerConcerns: false }),
+	concern: prompt.render(advisorSystemPromptTemplate, { steerConcerns: true }),
+};
 
-function resolveAdvisorSystemPrompt(steerInProgressConcerns: boolean): string {
-	return steerInProgressConcerns ? ADVISOR_SYSTEM_PROMPT_WITH_IN_PROGRESS_CONCERNS : ADVISOR_SYSTEM_PROMPT;
+function resolveAdvisorSystemPrompt(steerLevel: AdvisorSteerLevel): string {
+	return ADVISOR_SYSTEM_PROMPTS[steerLevel];
 }
 
 const ADVISOR_CODEX_SSE_MAX_ATTEMPTS = 1;
@@ -744,7 +743,7 @@ export class SessionAdvisors {
 
 			// `#advisorWatchdogPrompt` already carries WATCHDOG.md + YAML shared
 			// instructions; `config.instructions` adds this advisor's specialization.
-			const systemPrompt = [resolveAdvisorSystemPrompt(this.#host.settings.get("advisor.steerInProgressConcerns"))];
+			const systemPrompt = [resolveAdvisorSystemPrompt(this.#host.settings.get("advisor.steerLevel"))];
 			if (this.#advisorContextPrompt) systemPrompt.push(this.#advisorContextPrompt);
 			if (this.#advisorWatchdogPrompt) systemPrompt.push(this.#advisorWatchdogPrompt);
 			if (this.#advisorSharedInstructions) systemPrompt.push(this.#advisorSharedInstructions);
@@ -946,9 +945,9 @@ export class SessionAdvisors {
 				obfuscator: this.#host.obfuscator,
 				getModelIdentity: () => formatModelString(advisorRef.agent.state.model),
 				beginAdvisorUpdate: inProgress => {
-					const steerInProgressConcerns = this.#host.settings.get("advisor.steerInProgressConcerns");
-					advisorRef.agent.state.systemPrompt[0] = resolveAdvisorSystemPrompt(steerInProgressConcerns);
-					advisorRef.adviseTool.beginUpdate({ inProgress, steerInProgressConcerns });
+					const steerLevel = this.#host.settings.get("advisor.steerLevel");
+					advisorRef.agent.state.systemPrompt[0] = resolveAdvisorSystemPrompt(steerLevel);
+					advisorRef.adviseTool.beginUpdate({ inProgress, steerLevel });
 					advisorRef.emissionGuard.beginUpdate();
 				},
 				onTurnError: (error, failedMessages, signal) =>
@@ -1029,17 +1028,13 @@ export class SessionAdvisors {
 	}
 
 	/**
-	 * Route one accepted advice note from `advisor` to the primary. Concern and
-	 * blocker interrupt the running agent through the steering channel; once the
-	 * loop has yielded, `triggerTurn` resumes it. After a terminal text answer with
-	 * no queued work, a concern is preserved as a visible advisor card, while a
-	 * blocker wakes the primary to acknowledge work it handed off incorrectly.
-	 * After a deliberate user interrupt auto-resume is suppressed while idle/unwinding
-	 * (the note becomes a preserved card re-entering on resume); a live-streaming turn is
-	 * steered in directly. A plain nit always rides the non-interrupting YieldQueue
-	 * aside. Suppression by the per-advisor emission guard drops the note silently —
-	 * the model still saw `Recorded.`, so it isn't tempted to rephrase the same note
-	 * past the dedupe.
+	 * Route one accepted advice note from `advisor` to the primary. Notes at or
+	 * above `advisor.steerLevel` interrupt the live agent or trigger an idle turn.
+	 * A late concern below the threshold is preserved visibly after a terminal
+	 * answer. User-interrupt suppression, plan mode, deferred ACP turns, headless
+	 * drains, and the immune-turn window can still prevent automatic steering.
+	 * Suppression by the per-advisor emission guard drops the note silently — the
+	 * model still saw `Recorded.`, so it is not tempted to rephrase past dedupe.
 	 */
 	#hasTerminalTextAnswerWithoutQueuedWork(): boolean {
 		if (this.#host.agent.hasQueuedMessages() || this.#host.hasPendingNextTurnMessages()) return false;
@@ -1057,9 +1052,11 @@ export class SessionAdvisors {
 		// The implicit single ("default") advisor stamps no source name, so its
 		// agent-facing `<advisory>` bytes stay identical to the pre-multi-advisor path.
 		const source = advisor.slug ? advisor.name : undefined;
-		const interrupting = isInterruptingSeverity(severity);
+		const steerLevel = this.#host.settings.get("advisor.steerLevel");
+		const steering = shouldSteerAdvisorSeverity(severity, steerLevel);
 		const channel = resolveAdvisorDeliveryChannel({
 			severity,
+			steerLevel,
 			autoResumeSuppressed: this.#advisorAutoResumeSuppressed,
 			preserveOnly: this.#preserveAdvisorAdvice,
 			// Key on the live agent-core loop, not session `isStreaming` (which also
@@ -1068,7 +1065,7 @@ export class SessionAdvisors {
 			streaming: this.#host.agent.state.isStreaming && !this.#preserveTerminalYieldAdvice,
 			aborting: this.#host.abortInProgress(),
 			terminalAnswerNoQueuedWork: this.#hasTerminalTextAnswerWithoutQueuedWork(),
-			interruptImmuneTurnActive: interrupting && this.#isAdvisorInterruptImmuneTurnActive(),
+			interruptImmuneTurnActive: steering && this.#isAdvisorInterruptImmuneTurnActive(),
 		});
 		if (channel === "aside") {
 			this.#host.yieldQueue.enqueue("advisor", { note, severity, advisor: source });

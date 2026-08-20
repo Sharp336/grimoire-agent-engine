@@ -559,15 +559,19 @@ export const SETTINGS_SCHEMA = {
 			condition: "advisorEnabled",
 		},
 	},
-	"advisor.steerInProgressConcerns": {
-		type: "boolean",
-		default: false,
+	"advisor.steerLevel": {
+		type: "enum",
+		values: ["blocker", "concern"] as const,
+		default: "blocker",
 		ui: {
 			tab: "model",
 			group: "Advisor",
-			label: "Steer In-Progress Concerns",
-			description:
-				"Let concern-level advice raised during in-progress work interrupt and steer the primary agent. Off drops those concerns; blockers still pass.",
+			label: "Advisor Steer Level",
+			description: "Minimum advisor severity that makes the primary agent read the note and respond.",
+			options: [
+				{ value: "blocker", label: "Blocker", description: "Only blockers force a response. Default." },
+				{ value: "concern", label: "Concern", description: "Concerns and blockers force a response." },
+			],
 			condition: "advisorEnabled",
 		},
 	},

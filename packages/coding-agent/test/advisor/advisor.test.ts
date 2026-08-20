@@ -19,9 +19,9 @@ import {
 	formatAdvisorContextPrompt,
 	isAdvisorInterruptImmuneTurnActive,
 	isAdvisorTranscriptName,
-	isInterruptingSeverity,
 	quarantineAdvisorUnsafeOutput,
 	resolveAdvisorDeliveryChannel,
+	shouldSteerAdvisorSeverity,
 	type WatchdogConfigDoc,
 } from "../../src/advisor";
 import type { ModelRegistry } from "../../src/config/model-registry";
@@ -445,7 +445,7 @@ describe("advisor", () => {
 			const tool = new AdviseTool(onAdvice);
 			const note = "The result still needs a focused regression test.";
 
-			tool.beginUpdate({ inProgress: true });
+			tool.beginUpdate({ inProgress: true, steerLevel: "blocker" });
 			const deferred = await tool.execute("tc-1", { note, severity: "concern" });
 			await tool.execute("tc-2", { note: "Minor naming cleanup.", severity: "nit" });
 			await tool.execute("tc-3", { note: "A destructive command is running.", severity: "blocker" });
@@ -478,7 +478,7 @@ describe("advisor", () => {
 			await tool.execute("tc-2", { note, severity: "concern" });
 			await tool.execute("tc-3", { note, severity: "concern" });
 
-			tool.beginUpdate({ inProgress: false });
+			tool.beginUpdate({ inProgress: false, steerLevel: "blocker" });
 			// Identical note queued once, flushed once.
 			expect(onAdvice).toHaveBeenCalledTimes(1);
 			expect(onAdvice).toHaveBeenCalledWith(note, "concern");
@@ -488,11 +488,11 @@ describe("advisor", () => {
 			const onAdvice = vi.fn();
 			const tool = new AdviseTool(onAdvice);
 
-			tool.beginUpdate({ inProgress: true });
+			tool.beginUpdate({ inProgress: true, steerLevel: "blocker" });
 			await tool.execute("tc-1", { note: "Same point raised repeatedly.", severity: "nit" });
 			await tool.execute("tc-2", { note: "Same   point raised repeatedly.", severity: "concern" });
 
-			tool.beginUpdate({ inProgress: false });
+			tool.beginUpdate({ inProgress: false, steerLevel: "blocker" });
 			expect(onAdvice).toHaveBeenCalledTimes(1);
 			expect(onAdvice).toHaveBeenCalledWith("Same point raised repeatedly.", "concern");
 		});
@@ -501,7 +501,7 @@ describe("advisor", () => {
 			const onAdvice = vi.fn();
 			const tool = new AdviseTool(onAdvice);
 
-			tool.beginUpdate({ inProgress: true, steerInProgressConcerns: true });
+			tool.beginUpdate({ inProgress: true, steerLevel: "concern" });
 			await tool.execute("tc-1", {
 				note: "The active edit targets the wrong code path.",
 				severity: "concern",
@@ -821,11 +821,13 @@ describe("advisor", () => {
 	});
 
 	describe("advice delivery policy", () => {
-		it("interrupts on concern and blocker, queues a plain nit", () => {
-			expect(isInterruptingSeverity("blocker")).toBe(true);
-			expect(isInterruptingSeverity("concern")).toBe(true);
-			expect(isInterruptingSeverity("nit")).toBe(false);
-			expect(isInterruptingSeverity(undefined)).toBe(false);
+		it("steers only severities at or above the configured level", () => {
+			expect(shouldSteerAdvisorSeverity("blocker", "blocker")).toBe(true);
+			expect(shouldSteerAdvisorSeverity("concern", "blocker")).toBe(false);
+			expect(shouldSteerAdvisorSeverity("blocker", "concern")).toBe(true);
+			expect(shouldSteerAdvisorSeverity("concern", "concern")).toBe(true);
+			expect(shouldSteerAdvisorSeverity("nit", "concern")).toBe(false);
+			expect(shouldSteerAdvisorSeverity(undefined, "concern")).toBe(false);
 		});
 
 		it("keeps the interrupt-immune turn fence half-open for the configured window", () => {
@@ -5474,6 +5476,7 @@ describe("advisor", () => {
 				expect(
 					resolveAdvisorDeliveryChannel({
 						severity,
+						steerLevel: "concern",
 						autoResumeSuppressed: false,
 						streaming: false,
 						aborting: false,
@@ -5488,6 +5491,7 @@ describe("advisor", () => {
 			expect(
 				resolveAdvisorDeliveryChannel({
 					severity: "nit",
+					steerLevel: "concern",
 					autoResumeSuppressed: false,
 					streaming: true,
 					aborting: false,
@@ -5498,6 +5502,7 @@ describe("advisor", () => {
 				expect(
 					resolveAdvisorDeliveryChannel({
 						severity,
+						steerLevel: "concern",
 						autoResumeSuppressed: false,
 						streaming: true,
 						aborting: false,
@@ -5511,6 +5516,7 @@ describe("advisor", () => {
 			expect(
 				resolveAdvisorDeliveryChannel({
 					severity: "nit",
+					steerLevel: "concern",
 					autoResumeSuppressed: true,
 					streaming: true,
 					aborting: true,
@@ -5519,6 +5525,7 @@ describe("advisor", () => {
 			expect(
 				resolveAdvisorDeliveryChannel({
 					severity: undefined,
+					steerLevel: "concern",
 					autoResumeSuppressed: false,
 					streaming: false,
 					aborting: false,
@@ -5532,6 +5539,7 @@ describe("advisor", () => {
 					expect(
 						resolveAdvisorDeliveryChannel({
 							severity,
+							steerLevel: "concern",
 							autoResumeSuppressed: false,
 							streaming,
 							aborting: false,
@@ -5541,10 +5549,11 @@ describe("advisor", () => {
 			}
 		});
 
-		it("preserves a late concern when the primary already ended with a terminal answer", () => {
+		it("preserves a late concern below the blocker steering threshold", () => {
 			expect(
 				resolveAdvisorDeliveryChannel({
 					severity: "concern",
+					steerLevel: "blocker",
 					autoResumeSuppressed: false,
 					streaming: false,
 					aborting: false,
@@ -5553,10 +5562,24 @@ describe("advisor", () => {
 			).toBe("preserve");
 		});
 
+		it("steers a late concern at the concern threshold so the primary responds", () => {
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "concern",
+					steerLevel: "concern",
+					autoResumeSuppressed: false,
+					streaming: false,
+					aborting: false,
+					terminalAnswerNoQueuedWork: true,
+				}),
+			).toBe("steer");
+		});
+
 		it("steers a late blocker after a terminal answer so the primary continues and acknowledges it (#5628)", () => {
 			expect(
 				resolveAdvisorDeliveryChannel({
 					severity: "blocker",
+					steerLevel: "blocker",
 					autoResumeSuppressed: false,
 					streaming: false,
 					aborting: false,
@@ -5569,6 +5592,7 @@ describe("advisor", () => {
 			expect(
 				resolveAdvisorDeliveryChannel({
 					severity: "concern",
+					steerLevel: "concern",
 					autoResumeSuppressed: false,
 					streaming: true,
 					aborting: false,
@@ -5578,6 +5602,7 @@ describe("advisor", () => {
 			expect(
 				resolveAdvisorDeliveryChannel({
 					severity: "blocker",
+					steerLevel: "blocker",
 					autoResumeSuppressed: false,
 					streaming: false,
 					aborting: false,
@@ -5587,6 +5612,7 @@ describe("advisor", () => {
 			expect(
 				resolveAdvisorDeliveryChannel({
 					severity: "blocker",
+					steerLevel: "blocker",
 					autoResumeSuppressed: true,
 					streaming: false,
 					aborting: false,
@@ -5599,6 +5625,7 @@ describe("advisor", () => {
 				expect(
 					resolveAdvisorDeliveryChannel({
 						severity,
+						steerLevel: "concern",
 						autoResumeSuppressed: true,
 						streaming: false,
 						aborting: false,
@@ -5613,6 +5640,7 @@ describe("advisor", () => {
 			expect(
 				resolveAdvisorDeliveryChannel({
 					severity: "blocker",
+					steerLevel: "blocker",
 					autoResumeSuppressed: true,
 					streaming: true,
 					aborting: true,
@@ -5625,6 +5653,7 @@ describe("advisor", () => {
 				expect(
 					resolveAdvisorDeliveryChannel({
 						severity,
+						steerLevel: "concern",
 						autoResumeSuppressed: true,
 						streaming: true,
 						aborting: false,
