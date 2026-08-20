@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added model-first image generation: a curated capability catalog of 13 flagship models (Nano Banana Pro/2, GPT Image 2, FLUX.2 Pro/Max, Seedream 4.5/5 Pro, Qwen Image 3, Recraft V4/Vector, Krea 2 Large, Grok Imagine, FLUX.1 Schnell) with per-binding capability validation, canonical knobs (`model`, `resolution`, `n`, `quality`, `output_format`, `background`, `seed`), and fail-closed errors instead of silent model substitution.
+- Added a FAL backend (`FAL_KEY`) with queue-API generation, CDN input upload, polling, and job cancellation, plus a `fal:<endpoint-id>` escape hatch that reaches any FAL endpoint without a release.
+- Reworked OpenRouter image generation onto its dedicated Images API (`POST /api/v1/images`) with `input_references` edits and surfaced `costUsd`.
+- Added `providers.imageModel` setting for a default image model (catalog alias or raw `fal:`/`openrouter:` reference).
+
+### Changed
+
+- Multi-image tool results now render through a responsive `ImageGrid`, while unsupported direct-placement protocols retain safe vertical rendering.
+
+### Fixed
+
+- Fixed `generate_image` inline previews and lifecycle blocks for both direct and `xd://` dispatches, including actionable diagnostics when inline rendering is unavailable.
+- Fixed hosted OpenAI image generation silently defaulting to GPT Image 1 and active Codex sessions preferring a metered OpenAI credential when both credentials were available.
+- Fixed mouse-wheel scrolling in the normal transcript after inline images by keeping normal-screen image clicks opt-in, preserving native terminal scrollback by default.
+- Fixed discovered FAL edit endpoints with singular `image_url` inputs and preserved provider error messages returned by completed or failed queue jobs.
+
+
 ## [17.4.0] - 2026-08-20
 
 ### Added
@@ -99,25 +118,6 @@
 - Fixed terminals that deliver Shift+Enter as a bare LF (or the legacy CSI `13;2~` form) getting a plain switch instead of summarize-and-switch in the `/tree` selector ([#8821](https://github.com/can1357/oh-my-pi/issues/8821)).
 - Fixed OMP panicking at startup when the host environment contains a non-UTF-8 variable value; such entries are now skipped when copying the host environment into the shell ([#8925](https://github.com/can1357/oh-my-pi/issues/8925)).
 - Fixed `/mcp reauth` refusing to run the OAuth flow for HTTP MCP servers that allow unauthenticated `initialize` but require auth for `tools/call`; endpoint discovery now runs against the server URL before giving up ([#8922](https://github.com/can1357/oh-my-pi/issues/8922)).
-
-### Added
-
-- Added model-first image generation: a curated capability catalog of 13 flagship models (Nano Banana Pro/2, GPT Image 2, FLUX.2 Pro/Max, Seedream 4.5/5 Pro, Qwen Image 3, Recraft V4/Vector, Krea 2 Large, Grok Imagine, FLUX.1 Schnell) with per-binding capability validation, canonical knobs (`model`, `resolution`, `n`, `quality`, `output_format`, `background`, `seed`), and fail-closed errors instead of silent model substitution.
-- Added a FAL backend (`FAL_KEY`) with queue-API generation, CDN input upload, polling, and job cancellation, plus a `fal:<endpoint-id>` escape hatch that reaches any FAL endpoint without a release.
-- Reworked OpenRouter image generation onto its dedicated Images API (`POST /api/v1/images`) with `input_references` edits and surfaced `costUsd`.
-- Added `providers.imageModel` setting for a default image model (catalog alias or raw `fal:`/`openrouter:` reference).
-
-### Changed
-
-- Multi-image tool results now render through a responsive `ImageGrid`, while unsupported direct-placement protocols retain safe vertical rendering.
-
-### Fixed
-
-- Fixed `generate_image` inline previews and lifecycle blocks for both direct and `xd://` dispatches, including actionable diagnostics when inline rendering is unavailable.
-- Fixed hosted OpenAI image generation silently defaulting to GPT Image 1 and active Codex sessions preferring a metered OpenAI credential when both credentials were available.
-- Fixed mouse-wheel scrolling in the normal transcript after inline images by keeping normal-screen image clicks opt-in, preserving native terminal scrollback by default.
-- Fixed discovered FAL edit endpoints with singular `image_url` inputs and preserved provider error messages returned by completed or failed queue jobs.
-
 
 ## [17.3.7] - 2026-08-17
 

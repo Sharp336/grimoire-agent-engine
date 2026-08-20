@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a responsive `ImageGrid` component for safely composing multiple inline images as a contact sheet when the terminal supports Kitty Unicode placeholders.
+
+
 ## [17.4.0] - 2026-08-20
 
 ### Added
@@ -15,11 +20,6 @@
 
 - Fixed images rendering as the `[Image: …]` text card on SIXEL terminals that expose no identifying environment variable (foot, xterm, contour): the graphics probe no longer requires Windows Terminal, and no longer reads an XTSMGRAPHICS success reply as a failure.
 - Fixed the multiline editor ignoring a `tui.input.submit` remap onto Ctrl+Enter: the hardcoded Ctrl/Shift+Enter → newline fallbacks now yield to an explicit submit binding, so Ctrl+Enter can be used to submit ([#8906](https://github.com/can1357/oh-my-pi/issues/8906)).
-
-### Added
-
-- Added a responsive `ImageGrid` component for safely composing multiple inline images as a contact sheet when the terminal supports Kitty Unicode placeholders.
-
 
 ## [17.3.5] - 2026-08-16
 
