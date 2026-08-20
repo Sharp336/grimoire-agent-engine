@@ -107,6 +107,18 @@ function makeAssistant(payload: string): AssistantMessage {
 		errorMessage: "Deadline exceeded",
 		errorStatus: 502,
 		errorId: 17,
+		errorDiagnostics: {
+			kind: "premature_sse_close",
+			httpStatus: 200,
+			deepseekTraceId: "trace-ds-7",
+			requestId: "request-x-7",
+			decodedEventCount: 1,
+			responseId: "chatcmpl-terminal",
+			lastEventType: "chat.completion.chunk",
+			sawContent: true,
+			sawFinishReason: false,
+			elapsedMs: 125,
+		},
 		timestamp: Date.now(),
 	};
 }
@@ -215,7 +227,23 @@ describe("print-mode JSON flush (#7635)", () => {
 			provider: "deepseek",
 			model: "deepseek-v4-pro",
 			result: payload,
-			error: { message: "Deadline exceeded", status: 502, id: 17 },
+			error: {
+				message: "Deadline exceeded",
+				status: 502,
+				id: 17,
+				diagnostics: {
+					kind: "premature_sse_close",
+					httpStatus: 200,
+					deepseekTraceId: "trace-ds-7",
+					requestId: "request-x-7",
+					decodedEventCount: 1,
+					responseId: "chatcmpl-terminal",
+					lastEventType: "chat.completion.chunk",
+					sawContent: true,
+					sawFinishReason: false,
+					elapsedMs: 125,
+				},
+			},
 			usage: {
 				inputTokens: 5,
 				outputTokens: 7,

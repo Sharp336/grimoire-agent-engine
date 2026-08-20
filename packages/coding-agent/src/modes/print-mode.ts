@@ -48,6 +48,7 @@ export interface PrintModeSessionResult {
 		message: string;
 		status: number | null;
 		id: number | null;
+		diagnostics?: AssistantMessage["errorDiagnostics"];
 	} | null;
 	usage: {
 		inputTokens: number;
@@ -133,6 +134,7 @@ function buildSessionResult(options: {
 						message: sanitizeText(errorMessage ?? `Request ${finalMessage?.stopReason ?? "failed"}`),
 						status: finalMessage?.errorStatus ?? null,
 						id: finalMessage?.errorId ?? null,
+						...(finalMessage?.errorDiagnostics ? { diagnostics: finalMessage.errorDiagnostics } : {}),
 					}
 				: null,
 		usage: {

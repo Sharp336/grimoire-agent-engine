@@ -20,6 +20,11 @@ const completionsModel = {
 	...(getBundledModel("openai", "gpt-4o-mini") as Model<"openai-completions">),
 	api: "openai-completions",
 } satisfies Model<"openai-completions">;
+const directDeepSeekModel = getBundledModel("deepseek", "deepseek-v4-pro") as Model<"openai-completions">;
+const proxiedDeepSeekModel = {
+	...directDeepSeekModel,
+	baseUrl: "https://proxy.example/v1",
+} satisfies Model<"openai-completions">;
 const responsesModel = getBundledModel("openai", "gpt-5-mini") as Model<"openai-responses">;
 
 function baseContext(): Context {
@@ -50,6 +55,44 @@ function createNeverClosingSseResponse(events: unknown[]): Response {
 function createNeverClosingFetch(events: unknown[]): FetchImpl {
 	async function mockFetch(_input: string | URL | Request, _init?: RequestInit): Promise<Response> {
 		return createNeverClosingSseResponse(events);
+	}
+	return mockFetch as typeof fetch;
+}
+
+function createSocketClosingFetch(): FetchImpl {
+	async function mockFetch(_input: string | URL | Request, _init?: RequestInit): Promise<Response> {
+		const encoder = new TextEncoder();
+		let pullCount = 0;
+		const stream = new ReadableStream<Uint8Array>(
+			{
+				pull(controller) {
+					if (pullCount++ === 0) {
+						controller.enqueue(
+							encoder.encode(
+								`data: ${JSON.stringify({
+									id: "chatcmpl-terminal",
+									object: "chat.completion.chunk",
+									created: 0,
+									model: directDeepSeekModel.id,
+									choices: [{ index: 0, delta: { role: "assistant", content: "partial" } }],
+								})}\n\n`,
+							),
+						);
+						return;
+					}
+					controller.error(new Error("The socket connection was closed unexpectedly"));
+				},
+			},
+			{ highWaterMark: 0 },
+		);
+		return new Response(stream, {
+			status: 200,
+			headers: {
+				"content-type": "text/event-stream",
+				"x-ds-trace-id": "trace-ds-7",
+				"x-request-id": "request-x-7",
+			},
+		});
 	}
 	return mockFetch as typeof fetch;
 }
@@ -191,5 +234,37 @@ describe("terminal frame without connection close", () => {
 		expect(result.usage.input).toBe(10);
 		expect(result.usage.output).toBe(5);
 		expect(Date.now() - startedAt).toBeLessThan(2_000);
+	}, 10_000);
+
+	it("records structured diagnostics for an official DeepSeek stream that closes before completion", async () => {
+		const result = await streamOpenAICompletions(directDeepSeekModel, baseContext(), {
+			apiKey: "test-key",
+			fetch: createSocketClosingFetch(),
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.content).toEqual([{ type: "text", text: "partial" }]);
+		expect(result.errorDiagnostics).toEqual({
+			kind: "premature_sse_close",
+			httpStatus: 200,
+			deepseekTraceId: "trace-ds-7",
+			requestId: "request-x-7",
+			decodedEventCount: 1,
+			responseId: "chatcmpl-terminal",
+			lastEventType: "chat.completion.chunk",
+			sawContent: true,
+			sawFinishReason: false,
+			elapsedMs: expect.any(Number),
+		});
+	}, 10_000);
+
+	it("does not attach DeepSeek diagnostics to a third-party endpoint", async () => {
+		const result = await streamOpenAICompletions(proxiedDeepSeekModel, baseContext(), {
+			apiKey: "test-key",
+			fetch: createSocketClosingFetch(),
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorDiagnostics).toBeUndefined();
 	}, 10_000);
 });

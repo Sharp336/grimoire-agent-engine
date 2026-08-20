@@ -1169,6 +1169,11 @@ function isZaiReasoningEffortDialect(model: Model<"openai-completions">, compat:
 
 const DEEPSEEK_MAX_OUTPUT_TOKENS = 384_000;
 
+/** True only for DeepSeek's first-party API, never merely DeepSeek-labelled compatible hosts. */
+export function isDeepSeekDirectEndpoint(baseUrl: string | undefined): boolean {
+	return hostMatchesUrl(baseUrl, "deepseekDirect");
+}
+
 /**
  * Provider-specific Chat Completions output clamp.
  *
@@ -1178,11 +1183,12 @@ const DEEPSEEK_MAX_OUTPUT_TOKENS = 384_000;
  * model catalog. Z.AI/GLM-5.2 reasoning and native Moonshot K3 similarly accept
  * their full advertised model caps.
  */
+
 export function resolveOpenAICompletionsOutputClamp(
 	model: Model<"openai-completions">,
 	compat: ResolvedOpenAICompat,
 ): number | undefined {
-	if (hostMatchesUrl(model.baseUrl, "deepseekDirect")) {
+	if (isDeepSeekDirectEndpoint(model.baseUrl)) {
 		return Math.min(model.maxTokens ?? OPENAI_MAX_OUTPUT_TOKENS, DEEPSEEK_MAX_OUTPUT_TOKENS);
 	}
 	if (isZaiReasoningEffortDialect(model, compat)) {

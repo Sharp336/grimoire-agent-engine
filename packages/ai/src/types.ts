@@ -898,6 +898,20 @@ export interface ContextSnapshot {
 	lastMessageTimestamp?: number;
 }
 
+/** Bounded, non-secret transport context retained when an SSE stream closes before its terminal event. */
+export interface PrematureSseCloseDiagnostics {
+	kind: "premature_sse_close";
+	httpStatus: number;
+	deepseekTraceId?: string;
+	requestId?: string;
+	decodedEventCount: number;
+	responseId?: string;
+	lastEventType?: string;
+	sawContent: boolean;
+	sawFinishReason: boolean;
+	elapsedMs: number;
+}
+
 export interface AssistantMessage {
 	role: "assistant";
 	content: (
@@ -933,6 +947,8 @@ export interface AssistantMessage {
 	errorStatus?: number;
 	/** Structured machine-readable error classifier; see `utils/error-id.ts` for bit layout and helpers. */
 	errorId?: number;
+	/** Bounded transport diagnostics for provider failures that need more context than status and classifier fields. */
+	errorDiagnostics?: PrematureSseCloseDiagnostics;
 	/**
 	 * Stable identifiers for request features the provider silently dropped
 	 * during this turn (e.g. `"priority"`). Set when a server-side rejection

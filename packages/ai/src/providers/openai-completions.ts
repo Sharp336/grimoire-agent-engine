@@ -3,7 +3,13 @@ import { isKimiModelId } from "@oh-my-pi/pi-catalog/identity";
 import { resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
-import { $env, logger, parseStreamingJson, parseStreamingJsonThrottled } from "@oh-my-pi/pi-utils";
+import {
+	$env,
+	isUnexpectedSocketCloseMessage,
+	logger,
+	parseStreamingJson,
+	parseStreamingJsonThrottled,
+} from "@oh-my-pi/pi-utils";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
 import { getKimiCommonHeaders } from "../registry/oauth/kimi";
@@ -94,6 +100,7 @@ import {
 	getOpenAIPromptCacheKey,
 	getOpenAIStrictToolsScope,
 	isCompiledGrammarTooLargeStrictError,
+	isDeepSeekDirectEndpoint,
 	isOpenRouterAnthropicModel,
 	isStrictToolsDisabledForScope,
 	type OpenAICompatPolicy,
@@ -627,6 +634,13 @@ const streamOpenAICompletionsOnce = (
 		// the catch handler uses it to close open blocks before emitting the
 		// terminal error so both exit paths obey the same block lifecycle.
 		let finishOpenBlocksOnError: () => void = () => {};
+		let directDeepSeekEndpoint = false;
+		let streamResponseStatus: number | undefined;
+		let streamDeepSeekTraceId: string | undefined;
+		let streamRequestId: string | undefined;
+		let decodedEventCount = 0;
+		let lastDecodedEventType: string | undefined;
+		let streamFinishedAt: number | undefined;
 
 		try {
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
@@ -645,6 +659,7 @@ const streamOpenAICompletionsOnce = (
 				options?.initiatorOverride,
 				getOpenAIPromptCacheKey(options),
 			);
+			directDeepSeekEndpoint = isDeepSeekDirectEndpoint(baseUrl);
 			const premiumRequestsTotal = copilotPremiumRequests;
 			let appliedStrictTools = false;
 			const requestReasoningEffortFallbacks = new Map<string, OpenAIReasoningEffortFallback>();
@@ -714,6 +729,9 @@ const streamOpenAICompletionsOnce = (
 						// extend the deadline.
 						onSseEvent: rawSseObserver,
 					});
+					streamResponseStatus = response.status;
+					streamDeepSeekTraceId = response.headers.get("x-ds-trace-id")?.trim() || undefined;
+					streamRequestId = requestId?.trim() || response.headers.get("request-id")?.trim() || undefined;
 					await notifyProviderResponse(options, response, model, requestId);
 					return events;
 				} finally {
@@ -1022,7 +1040,6 @@ const streamOpenAICompletionsOnce = (
 			// OpenAI-compatible servers send basic usage with `finish_reason` and
 			// cache-read details in a trailing usage-only chunk, so only the
 			// no-choice terminal path may break while those details are pending.
-			let streamFinishedAt: number | undefined;
 			let sawUsagePayload = false;
 			let awaitTrailingUsageDetails = false;
 			const applyUsagePayload = (rawUsage: object): void => {
@@ -1051,6 +1068,9 @@ const streamOpenAICompletionsOnce = (
 			});
 			for await (const chunk of terminalAwareStream) {
 				if (!chunk || typeof chunk !== "object") continue;
+				decodedEventCount += 1;
+				const chunkEventType = typeof chunk.object === "string" ? chunk.object : undefined;
+				if (chunkEventType) lastDecodedEventType = chunkEventType;
 
 				// OpenAI documents ChatCompletionChunk.id as the unique chat completion identifier,
 				// and each chunk in a streamed completion carries the same id.
@@ -1380,7 +1400,30 @@ const streamOpenAICompletionsOnce = (
 			// Some providers via OpenRouter include extra details here.
 			const rawMetadata = (error as { error?: { metadata?: { raw?: string } } })?.error?.metadata?.raw;
 			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;
-			output.duration = performance.now() - startTime;
+			const elapsedMs = performance.now() - startTime;
+			output.duration = elapsedMs;
+			if (
+				directDeepSeekEndpoint &&
+				streamResponseStatus !== undefined &&
+				streamFinishedAt === undefined &&
+				!abortTracker.getLocalAbortReason() &&
+				!abortTracker.wasCallerAbort() &&
+				((error instanceof AIError.ProviderResponseError && error.kind === "incomplete-stream") ||
+					isUnexpectedSocketCloseMessage(error instanceof Error ? error.message : String(error)))
+			) {
+				output.errorDiagnostics = {
+					kind: "premature_sse_close",
+					httpStatus: streamResponseStatus,
+					...(streamDeepSeekTraceId ? { deepseekTraceId: streamDeepSeekTraceId } : {}),
+					...(streamRequestId ? { requestId: streamRequestId } : {}),
+					decodedEventCount,
+					...(output.responseId ? { responseId: output.responseId } : {}),
+					...(lastDecodedEventType ? { lastEventType: lastDecodedEventType } : {}),
+					sawContent: hasVisibleAssistantContent(output),
+					sawFinishReason: streamFinishedAt !== undefined,
+					elapsedMs,
+				};
+			}
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
