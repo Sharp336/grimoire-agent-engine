@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Upgraded the collaboration protocol to version 4. Guests using version 3 are rejected during the handshake because they cannot handle prompt-progress events.
+
 ### Added
 
 - Added normalized prompt-processing progress events for collaboration clients.

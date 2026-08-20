@@ -401,8 +401,11 @@ export type WireFrame = GuestFrame | HostFrame;
  *   answered by the `ui-response` guest frame. Guests that predate the
  *   grammar would silently drop `ui-request` (asks hang forever on the
  *   host), so they must be rejected at hello.
+ * - `4`: hosts may send `prompt_progress` agent events. Version 3 guests do
+ *   not recognize that event and fail while dispatching it, so they must be
+ *   rejected at hello.
  */
-export const COLLAB_PROTO = 3;
+export const COLLAB_PROTO = 4;
 
 /** Parameter key used for intent tracing (e.g. prompt explanation/reasoning) */
 export const INTENT_FIELD = "i";

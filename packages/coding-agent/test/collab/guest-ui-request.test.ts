@@ -431,15 +431,15 @@ describe("collab TUI guest ui-request handling (#4049)", () => {
 	});
 });
 
-// ── Proto handshake (#4049: ui-request frames require COLLAB_PROTO >= 3) ───
+// ── Proto handshake ─────────────────────────────────────────────────────────
 //
-// The ui-request/ui-response grammar shipped without a proto bump, so v2
-// guests joined fine and silently dropped host asks. These tests pin the
-// enforcement: a real CollabHost must reject stale-proto hellos with an
+// Incompatible frame and event additions require stale guests to be rejected
+// before live traffic reaches code that cannot dispatch it. These tests pin
+// the enforcement: a real CollabHost must reject stale-proto hellos with an
 // observable error frame (never a welcome), current-proto guests must still
-// complete a full ui-request round trip, and a rejected CollabGuestLink
-// join must fail fast with the host's reason instead of hanging until the
-// welcome timeout.
+// complete a full ui-request round trip, and a rejected CollabGuestLink join
+// must fail fast with the host's reason instead of hanging until the welcome
+// timeout.
 
 /** Minimal InteractiveModeContext double: only the members CollabHost touches. */
 function makeHostContext(): InteractiveModeContext {
@@ -518,17 +518,17 @@ async function joinRawGuest(
 	return { socket, nextFrame };
 }
 
-describe("collab proto handshake (#4049)", () => {
-	it("host rejects a stale-proto hello with a protocol-mismatch error and never welcomes or admits the guest", async () => {
+describe("collab proto handshake", () => {
+	it("host rejects a v3 guest before forwarding unsupported prompt-progress events", async () => {
 		const host = new CollabHost(makeHostContext());
 		await host.start("ws://localhost:8787");
-		const guest = await joinRawGuest(host.link, COLLAB_PROTO - 1);
+		const guest = await joinRawGuest(host.link, 3);
 		try {
 			const reply = await guest.nextFrame();
 			if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
 			expect(reply.message).toContain("protocol mismatch");
 			expect(reply.message).toContain(`host speaks v${COLLAB_PROTO}`);
-			expect(reply.message).toContain(`guest sent v${COLLAB_PROTO - 1}`);
+			expect(reply.message).toContain("guest sent v3");
 			// The rejected guest was never admitted: no participant entry, and a
 			// host ask finds no writable peer to route to.
 			expect(host.participants.filter(p => p.role !== "host")).toEqual([]);
@@ -539,14 +539,14 @@ describe("collab proto handshake (#4049)", () => {
 		}
 	});
 
-	it("welcomes a current-proto guest at v3 and round-trips a ui-request", async () => {
+	it("welcomes a current-proto guest at v4 and round-trips a ui-request", async () => {
 		const host = new CollabHost(makeHostContext());
 		await host.start("ws://localhost:8787");
 		const guest = await joinRawGuest(host.link, COLLAB_PROTO);
 		try {
 			const welcome = await guest.nextFrame();
 			if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
-			expect(welcome.proto).toBe(3);
+			expect(welcome.proto).toBe(4);
 
 			const pending = host.requestGuestUi({ kind: "select", title: "Continue?", options: ["Yes"] });
 			if (!pending) throw new Error("expected writable guest UI request");
