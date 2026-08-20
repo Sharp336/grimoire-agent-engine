@@ -1200,7 +1200,7 @@ describe("AgentSession handoff", () => {
 
 		session.agent.emitExternalEvent({ type: "message_end", message: overflowAssistant });
 		session.agent.emitExternalEvent({ type: "agent_end", messages: [overflowAssistant] });
-		await waitFor(() => events.filter(event => event.type === "auto_compaction_end").length === 1);
+		await session.waitForIdle();
 
 		expect(handoffSpy).not.toHaveBeenCalled();
 		const startEvents = events.filter(event => event.type === "auto_compaction_start");
@@ -1522,9 +1522,7 @@ describe("AgentSession handoff", () => {
 
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMessage });
 		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
-		await waitFor(() =>
-			events.some(event => event.type === "auto_compaction_end" && event.action === "context-full"),
-		);
+		await session.waitForIdle();
 
 		expect(generateHandoffSpy).toHaveBeenCalledTimes(1);
 		const endEvents = events.filter(event => event.type === "auto_compaction_end");
