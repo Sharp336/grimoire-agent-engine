@@ -458,11 +458,24 @@ const contextPctSegment: StatusLineSegment = {
 		const pct = ctx.contextPercent;
 		const window = ctx.contextWindow;
 
-		const autoIcon = ctx.autoCompactEnabled && theme.icon.auto ? ` ${theme.icon.auto}` : "";
-		const text = `${formatContextUsage(pct, window, ctx.contextTokens)}${autoIcon}`;
-
 		const color = getContextUsageThemeColor(getContextUsageLevel(pct ?? 0, window));
-		const content = withIcon(theme.icon.context, theme.fg(color, text));
+		// Async-compaction indicator: pulse the auto icon while a background
+		// speculation runs, hold it in accent once a result is armed.
+		let autoIcon = "";
+		if (ctx.autoCompactEnabled && theme.icon.auto) {
+			const speculation = ctx.compactionSpeculation;
+			const iconColor =
+				speculation === "running"
+					? ctx.speculationBlinkOn
+						? "accent"
+						: "muted"
+					: speculation === "armed"
+						? "accent"
+						: color;
+			autoIcon = ` ${theme.fg(iconColor, theme.icon.auto)}`;
+		}
+		const text = theme.fg(color, formatContextUsage(pct, window, ctx.contextTokens));
+		const content = withIcon(theme.icon.context, `${text}${autoIcon}`);
 
 		return { content, visible: true };
 	},
@@ -639,7 +652,7 @@ const usageSegment: StatusLineSegment = {
 	id: "usage",
 	render(ctx) {
 		const u = ctx.usage;
-		if (!u || (!u.fiveHour && !u.sevenDay)) {
+		if (!u || (!u.fiveHour && !u.sevenDay && !u.monthly)) {
 			return { content: "", visible: false };
 		}
 		const parts: string[] = [];
@@ -664,6 +677,18 @@ const usageSegment: StatusLineSegment = {
 					? theme.fg("muted", ` (${formatUsageReset(u.sevenDay.resetHours, "h")})`)
 					: "";
 			parts.push(`7d ${pctText}${reset}`);
+		}
+		if (u.monthly) {
+			const pct = u.monthly.percent;
+			// Cursor and OpenCode Go (normalize gates monthly to those providers).
+			// Both floor used percents upstream (Cursor's dashboard shows 1.88 →
+			// "1% used"; OpenCode's endpoint already emits floored integers).
+			const pctText = theme.fg(pickUsageColor(pct), `${Math.floor(pct)}%`);
+			const reset =
+				u.monthly.resetHours !== undefined
+					? theme.fg("muted", ` (${formatUsageReset(u.monthly.resetHours, "h")})`)
+					: "";
+			parts.push(`mo ${pctText}${reset}`);
 		}
 		const content = withIcon(theme.icon.time, parts.join(theme.sep.dot));
 		return { content, visible: true };

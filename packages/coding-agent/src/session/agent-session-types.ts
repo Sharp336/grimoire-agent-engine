@@ -164,6 +164,8 @@ export interface AgentSessionConfig {
 	createMemoryTools?: () => Promise<AgentTool[]>;
 	/** Creates the built-in `computer` tool for session-scoped runtime enablement (see {@link AgentSession.setComputerToolEnabled}). */
 	createComputerTool?: () => Promise<AgentTool | null>;
+	/** Creates the private `think` scratchpad tool for runtime setting changes. */
+	createThinkTool?: () => Promise<AgentTool | null>;
 	/** Creates the built-in `inspect_image` tool for session-scoped runtime enablement (see {@link AgentSession.setInspectImageMode}). */
 	createInspectImageTool?: () => Promise<AgentTool | null>;
 	/** Model registry for API key resolution and model discovery. */
@@ -174,6 +176,8 @@ export interface AgentSessionConfig {
 	createVibeTools?: () => AgentTool[];
 	/** Names whose current registry entry is the built-in implementation. */
 	builtInToolNames?: Iterable<string>;
+	/** MCP names whose initial registry entries came from the manager snapshot. */
+	mcpManagerToolNames?: Iterable<string>;
 	/** Updates tool-session predicates from the live active tool set. */
 	setActiveToolNames?: (names: Iterable<string>) => void;
 	/** Registers the write transport when runtime xdev mounts first need it. */
@@ -207,8 +211,6 @@ export interface AgentSessionConfig {
 		toolNames: string[],
 		tools: Map<string, AgentTool>,
 	) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
-	/** Local calendar date provider used by prompt-cache invalidation. */
-	getLocalCalendarDate?: () => string;
 	/** Tools mounted under `xd://`, for `/tools` display. */
 	getXdevToolEntries?: () => Array<{ name: string; summary: string }>;
 	/** `xd://` presentation state backed by the canonical tool map. */
@@ -304,6 +306,16 @@ export interface PromptOptions {
 	skipCompactionCheck?: boolean;
 }
 
+/** Payload for {@link AgentSession.setPromptDropped}: a user prompt cancelled
+ *  before it reached the agent (an abort or usage preflight denial raced turn
+ *  setup), so it was never persisted to the session. */
+export interface DroppedPrompt {
+	/** The prompt exactly as typed, before template/command expansion. */
+	text: string;
+	/** Image attachments submitted with the prompt. */
+	images?: ImageContent[];
+}
+
 /** Options for AgentSession.followUp(). */
 export interface FollowUpOptions {
 	/** Enqueue as a hidden developer message instead of a user follow-up. */
@@ -324,7 +336,6 @@ export interface HandoffResult {
 export interface SessionHandoffOptions {
 	autoTriggered?: boolean;
 	signal?: AbortSignal;
-	onSwitchCancelled?: () => void;
 }
 
 /** Result from cycleModel(). */

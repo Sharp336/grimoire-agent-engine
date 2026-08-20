@@ -42,6 +42,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"disableReasoningOnForcedToolChoice?": "boolean",
 		"disableReasoningOnToolChoice?": "boolean",
 		"thinkingFormat?": '"openai" | "openrouter" | "zai" | "qwen" | "qwen-chat-template"',
+		"qwenTemplateReasoningEffort?": "boolean",
 		"openRouterRouting?": OpenRouterRoutingSchema,
 		"vercelGatewayRouting?": VercelGatewayRoutingSchema,
 		"extraBody?": { "[string]": "unknown" },
@@ -131,6 +132,10 @@ export const getModelsConfigSchemaBundle = once(() => {
 			};
 		});
 
+	const ModelTokenizerSchema = type(
+		'"claude-v3" | "claude-v47" | "claude-v5" | "claude-v5-sonnet" | "qwen3" | "deepseek-v3" | "kimi-k2" | "glm5"',
+	);
+
 	const RemoteCompactionSchema = type({
 		"enabled?": "boolean",
 		"api?": ApiSchema,
@@ -167,6 +172,8 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"reasoning?": "boolean",
 		"thinking?": ModelThinkingSchema,
 		"input?": '("text" | "image")[]',
+		"imageInputDecoder?": '"stb"',
+		"tokenizer?": ModelTokenizerSchema,
 		"supportsTools?": "boolean",
 		"cost?": {
 			input: "number",
@@ -216,6 +223,8 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"reasoning?": "boolean",
 		"thinking?": ModelThinkingSchema,
 		"input?": '("text" | "image")[]',
+		"imageInputDecoder?": '"stb"',
+		"tokenizer?": ModelTokenizerSchema,
 		"supportsTools?": "boolean",
 		"cost?": {
 			"input?": "number",
