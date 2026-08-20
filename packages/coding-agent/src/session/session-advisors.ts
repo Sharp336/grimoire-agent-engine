@@ -1029,14 +1029,16 @@ export class SessionAdvisors {
 			terminalAnswerNoQueuedWork: this.#hasTerminalTextAnswerWithoutQueuedWork(),
 			interruptImmuneTurnActive: steering && this.#isAdvisorInterruptImmuneTurnActive(),
 		});
-		if (channel === "aside") {
+		const planModeEnabled = this.#host.planModeState()?.enabled === true;
+		const preserveAside = channel === "aside" && severity === "concern" && planModeEnabled;
+		if (channel === "aside" && !preserveAside) {
 			this.#host.yieldQueue.enqueue("advisor", { note, severity, advisor: source });
 			return;
 		}
 		const notes: AdvisorNote[] = [{ note, severity, advisor: source }];
 		const content = formatAdvisorBatchContent(notes);
 		const details = { notes } satisfies AdvisorMessageDetails;
-		if (channel === "preserve") {
+		if (channel === "preserve" || preserveAside) {
 			this.#host.preserveAdvisorCard({
 				role: "custom",
 				customType: "advisor",
@@ -1060,7 +1062,7 @@ export class SessionAdvisors {
 			!this.#host.agent.state.isStreaming &&
 			this.#host.clientBridge()?.deferAgentInitiatedTurns === true &&
 			!this.#host.allowAgentInitiatedTurns();
-		if (this.#host.planModeState()?.enabled || cannotAutoTrigger) {
+		if (planModeEnabled || cannotAutoTrigger) {
 			this.#host.preserveAdvisorCard({
 				role: "custom",
 				customType: "advisor",
