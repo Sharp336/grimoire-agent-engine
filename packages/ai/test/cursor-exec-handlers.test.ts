@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { Effort } from "@oh-my-pi/pi-ai";
 import {
 	type BlockState,
 	buildCursorHistoryForTest,
@@ -12,6 +13,7 @@ import {
 	type ToolCallState,
 } from "@oh-my-pi/pi-ai/providers/cursor";
 import { streamCursor as lazyStreamCursor, setCursorProviderModule } from "@oh-my-pi/pi-ai/providers/register-builtins";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { AssistantMessage, Context, CursorExecHandlers, Model, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
@@ -91,6 +93,20 @@ function cursorAssistant(
 	};
 }
 
+function captureCursorRunRequest(
+	resolve: (payload: AgentRunRequest) => void,
+	reject: (error: Error) => void,
+): (payload: unknown) => never {
+	return payload => {
+		if (isAgentRunRequest(payload)) {
+			resolve(payload);
+		} else {
+			reject(new Error("Cursor payload was not an AgentRunRequest"));
+		}
+		throw new Error("stop after capturing Cursor payload");
+	};
+}
+
 function captureCursorPayload(
 	context: Context,
 	model: Model<"cursor-agent"> = cursorModel,
@@ -100,15 +116,24 @@ function captureCursorPayload(
 	streamCursor(model, context, {
 		apiKey: "test-token",
 		requestModelId: options?.requestModelId,
-		onPayload: payload => {
-			if (isAgentRunRequest(payload)) {
-				resolve(payload);
-			} else {
-				reject(new Error("Cursor payload was not an AgentRunRequest"));
-			}
-			throw new Error("stop after capturing Cursor payload");
-		},
+		onPayload: captureCursorRunRequest(resolve, reject),
 	});
+	return promise;
+}
+
+function captureCursorPayloadFromStreamSimple(
+	context: Context,
+	model: Model<"cursor-agent">,
+	options?: { reasoning?: Effort },
+): Promise<AgentRunRequest> {
+	const { promise, resolve, reject } = Promise.withResolvers<AgentRunRequest>();
+	void streamSimple(model, context, {
+		apiKey: "test-token",
+		reasoning: options?.reasoning,
+		onPayload: captureCursorRunRequest(resolve, reject),
+	})
+		.result()
+		.catch(reject);
 	return promise;
 }
 
@@ -521,13 +546,13 @@ describe("Cursor request action encoding", () => {
 			requestModelId: "cursor-grok-4.6-low-fast",
 			thinking: {
 				mode: "effort",
-				efforts: ["low", "medium", "high", "xhigh"],
+				efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
 				requiresEffort: true,
 				effortRouting: {
-					low: "cursor-grok-4.6-low-fast",
-					medium: "cursor-grok-4.6-medium-fast",
-					high: "cursor-grok-4.6-high-fast",
-					xhigh: "cursor-grok-4.6-xhigh-fast",
+					[Effort.Low]: "cursor-grok-4.6-low-fast",
+					[Effort.Medium]: "cursor-grok-4.6-medium-fast",
+					[Effort.High]: "cursor-grok-4.6-high-fast",
+					[Effort.XHigh]: "cursor-grok-4.6-xhigh-fast",
 				},
 			},
 		});
@@ -540,10 +565,10 @@ describe("Cursor request action encoding", () => {
 		expect(defaultPayload.requestedModel?.modelId).toBe("cursor-grok-4.6-low-fast");
 		expect(defaultPayload.modelDetails?.displayModelId).toBe("cursor-grok-4.6-fast");
 
-		const xhighPayload = await captureCursorPayload(
+		const xhighPayload = await captureCursorPayloadFromStreamSimple(
 			{ messages: [{ role: "user", content: "continue", timestamp: 0 }] },
 			grokFast,
-			{ requestModelId: "cursor-grok-4.6-xhigh-fast" },
+			{ reasoning: Effort.XHigh },
 		);
 		expect(xhighPayload.modelDetails?.modelId).toBe("cursor-grok-4.6-xhigh-fast");
 		expect(xhighPayload.requestedModel?.modelId).toBe("cursor-grok-4.6-xhigh-fast");
