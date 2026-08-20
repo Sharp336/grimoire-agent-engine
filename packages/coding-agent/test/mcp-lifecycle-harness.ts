@@ -56,6 +56,10 @@ export interface LazyConfigOptions {
 	advertisePrompts?: boolean;
 	/** Advertise prompt capability while returning an empty current prompt list. */
 	emptyPrompts?: boolean;
+	/** Server instructions the fixture returns from `initialize`. */
+	instructions?: string;
+	/** Make the fixture return an empty `tools/list`. */
+	noTools?: boolean;
 }
 
 export function lazyConfig(options: LazyConfigOptions = {}): MCPStdioServerConfig {
@@ -65,6 +69,8 @@ export function lazyConfig(options: LazyConfigOptions = {}): MCPStdioServerConfi
 	if (options.callDelayMs) env.MCP_CALL_DELAY_MS = String(options.callDelayMs);
 	if (options.advertisePrompts) env.MCP_ADVERTISE_PROMPTS = "1";
 	if (options.emptyPrompts) env.MCP_EMPTY_PROMPTS = "1";
+	if (options.instructions) env.MCP_INSTRUCTIONS = options.instructions;
+	if (options.noTools) env.MCP_NO_TOOLS = "1";
 
 	const config: MCPStdioServerConfig = { type: "stdio", command: BUN, args: [FIXTURE] };
 	if (options.lifecycle) config.lifecycle = options.lifecycle;

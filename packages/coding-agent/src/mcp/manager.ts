@@ -56,6 +56,21 @@ import type {
 } from "./types";
 import { MCPNotificationMethods } from "./types";
 
+/**
+ * Whether a server's state is only reachable while its transport is live.
+ *
+ * Prompts, resources, templates and `instructions` are read from the connection
+ * (or injected into the system prompt) through synchronous accessors, so such a
+ * server must neither be idle-reaped nor started from cached tools alone.
+ */
+function needsLiveConnection(connection: MCPServerConnection): boolean {
+	return (
+		serverSupportsPrompts(connection.capabilities) ||
+		serverSupportsResources(connection.capabilities) ||
+		(connection.instructions?.trim().length ?? 0) > 0
+	);
+}
+
 type ToolLoadResult = {
 	connection: MCPServerConnection;
 	serverTools: MCPToolDefinition[];
@@ -358,15 +373,11 @@ export class MCPManager {
 			return;
 		}
 
-		// Prompts, resources and templates are only readable from a live
-		// connection, and `getServerPrompts`/`getServerResources` are synchronous,
-		// so reaping such a server would silently drop its slash commands and
-		// resources. Keep it connected; only tool-only servers are reaped.
-		if (
-			serverSupportsPrompts(connection.capabilities) ||
-			serverSupportsResources(connection.capabilities) ||
-			(this.#subscribedResources.get(name)?.size ?? 0) > 0
-		) {
+		// Prompts, resources, templates and instructions are only readable from a
+		// live connection, and their accessors are synchronous, so reaping such a
+		// server would silently drop its slash commands, resources or system
+		// prompt text. Keep it connected; only tool-only servers are reaped.
+		if (needsLiveConnection(connection) || (this.#subscribedResources.get(name)?.size ?? 0) > 0) {
 			return;
 		}
 
@@ -716,7 +727,7 @@ export class MCPManager {
 			// fall through to a one-time eager connect this session to populate it.
 			if (this.#effectiveLifecycle(config) === "lazy") {
 				const cached = this.toolCache ? await this.toolCache.getEntry(name, config) : null;
-				if (cached && cached.tools.length > 0 && cached.requiresConnection === false) {
+				if (cached && cached.requiresConnection === false) {
 					const source = this.#sources.get(name) ?? sources[name];
 					const reconnect = () => this.reconnectServer(name);
 					const onActivity = this.#activityHooks(name);
@@ -832,12 +843,7 @@ export class MCPManager {
 					const customTools = MCPTool.fromTools(connection, serverTools, reconnect, this.#activityHooks(name));
 					this.#replaceServerTools(name, customTools);
 					void this.#onToolsChanged?.(this.#tools);
-					void this.toolCache?.set(
-						name,
-						config,
-						serverTools,
-						serverSupportsPrompts(connection.capabilities) || serverSupportsResources(connection.capabilities),
-					);
+					void this.toolCache?.set(name, config, serverTools, needsLiveConnection(connection));
 
 					onStatus?.({ type: "connected", serverName: name });
 					await this.#loadServerResourcesAndPrompts(name, connection);
@@ -1452,12 +1458,7 @@ export class MCPManager {
 			const serverTools = await listTools(connection);
 			const reconnect = (options?: { authChallenge?: MCPAuthChallenge }) => this.reconnectServer(name, options);
 			const customTools = MCPTool.fromTools(connection, serverTools, reconnect, this.#activityHooks(name));
-			void this.toolCache?.set(
-				name,
-				config,
-				serverTools,
-				serverSupportsPrompts(connection.capabilities) || serverSupportsResources(connection.capabilities),
-			);
+			void this.toolCache?.set(name, config, serverTools, needsLiveConnection(connection));
 			this.#replaceServerTools(name, customTools);
 			void this.#onToolsChanged?.(this.#tools);
 			void this.#loadServerResourcesAndPrompts(name, connection);
@@ -1509,12 +1510,7 @@ export class MCPManager {
 		const serverTools = await listTools(connection);
 		const reconnect = () => this.reconnectServer(name);
 		const customTools = MCPTool.fromTools(connection, serverTools, reconnect, this.#activityHooks(name));
-		void this.toolCache?.set(
-			name,
-			connection.config,
-			serverTools,
-			serverSupportsPrompts(connection.capabilities) || serverSupportsResources(connection.capabilities),
-		);
+		void this.toolCache?.set(name, connection.config, serverTools, needsLiveConnection(connection));
 
 		// Replace tools from this server
 		this.#replaceServerTools(name, customTools);

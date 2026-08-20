@@ -31,10 +31,7 @@ describe("MCP lazy lifecycle: idle close race", () => {
 		await cache.set("lazy", config, [TOOL_DEF]);
 
 		const manager = new MCPManager(workDir, cache);
-		let releaseClose!: () => void;
-		const closeGate = new Promise<void>(resolve => {
-			releaseClose = resolve;
-		});
+		const { promise: closeGate, resolve: releaseClose } = Promise.withResolvers<void>();
 		let closeStarted = false;
 		try {
 			await manager.connectServers({ lazy: config }, {});

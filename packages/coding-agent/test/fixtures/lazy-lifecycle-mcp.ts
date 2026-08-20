@@ -12,6 +12,8 @@
  *                       hold a call in-flight across an idle window.
  *   MCP_ADVERTISE_PROMPTS="1" advertise prompt capability.
  *   MCP_EMPTY_PROMPTS="1"     return no current prompts from prompts/list.
+ *   MCP_INSTRUCTIONS    return these server instructions from `initialize`.
+ *   MCP_NO_TOOLS="1"    return an empty `tools/list`, as a tool-less server does.
  *
  * Speaks newline-delimited JSON-RPC 2.0 (the wire format of `StdioTransport`),
  * same shape as `many-tools-mcp.ts`. Exported constants are imported by tests;
@@ -40,8 +42,10 @@ function buildResult(method: string): Record<string, unknown> {
 					tools: {},
 					...(process.env.MCP_ADVERTISE_PROMPTS === "1" ? { prompts: {} } : {}),
 				},
+				...(process.env.MCP_INSTRUCTIONS ? { instructions: process.env.MCP_INSTRUCTIONS } : {}),
 			};
 		case "tools/list":
+			if (process.env.MCP_NO_TOOLS === "1") return { tools: [] };
 			return {
 				tools: [
 					{

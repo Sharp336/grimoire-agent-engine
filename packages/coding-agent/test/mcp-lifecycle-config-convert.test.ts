@@ -6,7 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { MCPServer } from "../src/capability/mcp";
+import { type MCPServer, mcpCapability } from "../src/capability/mcp";
 import { convertToLegacyConfig } from "../src/mcp/config";
 import { MCPManager } from "../src/mcp/manager";
 import {
@@ -112,19 +112,26 @@ describe("convertToLegacyConfig threads lifecycle + idleTimeout", () => {
 	});
 });
 
-describe("mcp-schema.json constrains lifecycle", () => {
-	const schema = JSON.parse(
-		fs.readFileSync(path.join(import.meta.dir, "..", "src", "config", "mcp-schema.json"), "utf8"),
-	);
-	const props = schema.$defs.serverBase.properties;
+describe("mcpCapability validates lifecycle fields", () => {
+	const validate = (server: Partial<MCPServer>): string | undefined =>
+		mcpCapability.validate?.({ name: "s", command: "cmd", ...server } as MCPServer);
 
-	it("accepts only eager and lazy for lifecycle (rejects other values)", () => {
-		expect(props.lifecycle.enum).toEqual(["eager", "lazy"]);
-		expect(props.lifecycle.enum).not.toContain("keep-alive");
+	it("accepts eager, lazy, and an omitted lifecycle", () => {
+		expect(validate({ lifecycle: "eager" })).toBeUndefined();
+		expect(validate({ lifecycle: "lazy" })).toBeUndefined();
+		expect(validate({})).toBeUndefined();
 	});
 
-	it("declares idleTimeout as a non-negative number", () => {
-		expect(props.idleTimeout.type).toBe("number");
-		expect(props.idleTimeout.minimum).toBe(0);
+	it("rejects any other lifecycle value, including the never-shipped keep-alive", () => {
+		expect(validate({ lifecycle: "lazyy" as MCPServer["lifecycle"] })).toContain("Invalid lifecycle");
+		expect(validate({ lifecycle: "keep-alive" as MCPServer["lifecycle"] })).toContain("Invalid lifecycle");
+	});
+
+	it("accepts non-negative idleTimeout values and rejects the rest", () => {
+		expect(validate({ idleTimeout: 0 })).toBeUndefined();
+		expect(validate({ idleTimeout: 5000 })).toBeUndefined();
+		expect(validate({ idleTimeout: -1 })).toContain("non-negative");
+		expect(validate({ idleTimeout: Number.POSITIVE_INFINITY })).toContain("non-negative");
+		expect(validate({ idleTimeout: "300" as unknown as number })).toContain("non-negative");
 	});
 });
