@@ -130,6 +130,10 @@ class FakeAgentSession {
 	systemPrompt = "system";
 	disposed = false;
 	fastMode = false;
+	setFastModeCalls: boolean[] = [];
+	advisorEnabled = false;
+	advisorActive = false;
+	autoCompactionEnabled = true;
 	forcedToolChoice: string | undefined;
 	get settings(): Settings {
 		return Settings.instance;
@@ -375,12 +379,30 @@ class FakeAgentSession {
 	}
 
 	setFastMode(enabled: boolean): boolean {
+		this.setFastModeCalls.push(enabled);
 		this.fastMode = enabled;
 		return true;
 	}
 
 	isFastModeEnabled(): boolean {
 		return this.fastMode;
+	}
+
+	setAdvisorEnabled(enabled: boolean): boolean {
+		this.advisorEnabled = enabled;
+		return enabled && this.advisorActive;
+	}
+
+	isAdvisorEnabled(): boolean {
+		return this.advisorEnabled;
+	}
+
+	isAdvisorActive(): boolean {
+		return this.advisorEnabled && this.advisorActive;
+	}
+
+	setAutoCompactionEnabled(enabled: boolean): void {
+		this.autoCompactionEnabled = enabled;
 	}
 
 	setForcedToolChoice(toolName: string): void {
@@ -484,6 +506,7 @@ async function createHarness(
 		clientCapabilities?: ClientCapabilities;
 		/** Runs before a notification is recorded, so a test can delay one delivery. */
 		sessionUpdateHook?: (notification: SessionNotification) => Promise<void> | void;
+		sessionModels?: Model[];
 	} = {},
 ): Promise<AgentHarness> {
 	const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-acp-test-"));
@@ -516,10 +539,10 @@ async function createHarness(
 		closed: Promise.withResolvers<void>().promise,
 	} as unknown as AgentSideConnection;
 
-	const initialSession = new FakeAgentSession(cwdA);
+	const initialSession = new FakeAgentSession(cwdA, options.sessionModels);
 	sessions.push(initialSession);
 	const factory = async (cwd: string, factoryOptions?: { interactivePrompts?: boolean }) => {
-		const session = new FakeAgentSession(cwd);
+		const session = new FakeAgentSession(cwd, options.sessionModels);
 		const setToolUIContext = vi.fn();
 		sessions.push(session);
 		setToolUIContextSpies.push(setToolUIContext);
@@ -3254,6 +3277,191 @@ describe("ACP agent", () => {
 			expect(second.sessionId).toBe("session-after-switch");
 			expect(third.sessionId).toBe("session-after-switch");
 		});
+	});
+});
+
+describe("ACP boolean config options", () => {
+	const BOOLEAN_CAPABILITIES: ClientCapabilities = { session: { configOptions: { boolean: {} } } };
+	const FIREWORKS_MODEL: Model = buildModel({
+		id: "kimi-k2",
+		name: "Kimi",
+		api: "openai-completions",
+		provider: "fireworks",
+		baseUrl: "https://example.invalid",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128_000,
+		maxTokens: 8_192,
+	});
+
+	function configIds(configOptions: Array<{ id: string }> | null | undefined): string[] {
+		return (configOptions ?? []).map(option => option.id);
+	}
+
+	it("advertises fast/advisor/autoCompaction only with the capability", async () => {
+		const harness = await createHarness({ clientCapabilities: BOOLEAN_CAPABILITIES });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+
+		expect(configIds(created.configOptions)).toEqual([
+			"mode",
+			"model",
+			"thinking",
+			"fast",
+			"advisor",
+			"autoCompaction",
+		]);
+		const fastOption = created.configOptions?.find(option => option.id === "fast");
+		expect(fastOption?.type).toBe("boolean");
+		expect(fastOption?.category).toBe("model_config");
+		expect(fastOption?.currentValue).toBe(false);
+		const advisorOption = created.configOptions?.find(option => option.id === "advisor");
+		expect(advisorOption?.type).toBe("boolean");
+		expect(advisorOption?.category).toBeUndefined();
+		const autoCompactionOption = created.configOptions?.find(option => option.id === "autoCompaction");
+		expect(autoCompactionOption?.type).toBe("boolean");
+		expect(autoCompactionOption?.category).toBeUndefined();
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("omits the boolean options without the capability", async () => {
+		const harness = await createHarness({ clientCapabilities: {} });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+
+		expect(configIds(created.configOptions)).toEqual(["mode", "model", "thinking"]);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("hides fast mode for a model with no service-tier family", async () => {
+		const harness = await createHarness({
+			clientCapabilities: BOOLEAN_CAPABILITIES,
+			sessionModels: [FIREWORKS_MODEL],
+		});
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+
+		const ids = configIds(created.configOptions);
+		expect(ids).toContain("advisor");
+		expect(ids).toContain("autoCompaction");
+		expect(ids).not.toContain("fast");
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("toggles fast, advisor, and autoCompaction and pushes config_option_update", async () => {
+		const harness = await createHarness({ clientCapabilities: BOOLEAN_CAPABILITIES });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+
+		const updatesBefore = harness.updates.length;
+		const fastResponse = await harness.agent.setSessionConfigOption({
+			sessionId: created.sessionId,
+			configId: "fast",
+			value: true,
+		});
+		expect(session.isFastModeEnabled()).toBe(true);
+		expect(fastResponse.configOptions.find(option => option.id === "fast")?.currentValue).toBe(true);
+
+		const advisorResponse = await harness.agent.setSessionConfigOption({
+			sessionId: created.sessionId,
+			configId: "advisor",
+			value: true,
+		});
+		expect(session.advisorEnabled).toBe(true);
+		expect(advisorResponse.configOptions.find(option => option.id === "advisor")?.currentValue).toBe(true);
+
+		const compactionResponse = await harness.agent.setSessionConfigOption({
+			sessionId: created.sessionId,
+			configId: "autoCompaction",
+			value: false,
+		});
+		expect(session.autoCompactionEnabled).toBe(false);
+		expect(compactionResponse.configOptions.find(option => option.id === "autoCompaction")?.currentValue).toBe(false);
+
+		const configUpdates = harness.updates
+			.slice(updatesBefore)
+			.filter(
+				notification =>
+					notification.sessionId === created.sessionId &&
+					notification.update.sessionUpdate === "config_option_update",
+			);
+		expect(configUpdates.length).toBe(3);
+		expectAcpNotifications(configUpdates);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("degrades the advisor description when no model is assigned to the advisor role", async () => {
+		const harness = await createHarness({ clientCapabilities: BOOLEAN_CAPABILITIES });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+
+		session.advisorActive = false;
+		const inactiveResponse = await harness.agent.setSessionConfigOption({
+			sessionId: created.sessionId,
+			configId: "advisor",
+			value: true,
+		});
+		expect(inactiveResponse.configOptions.find(option => option.id === "advisor")?.description).toBe(
+			"A second model reviews each turn — no model is assigned to the 'advisor' role",
+		);
+
+		session.advisorActive = true;
+		const activeResponse = await harness.agent.setSessionConfigOption({
+			sessionId: created.sessionId,
+			configId: "advisor",
+			value: true,
+		});
+		expect(activeResponse.configOptions.find(option => option.id === "advisor")?.description).toBe(
+			"A second model reviews each turn and injects notes",
+		);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("skips setting fast mode on a model with no service-tier family", async () => {
+		const harness = await createHarness({
+			clientCapabilities: BOOLEAN_CAPABILITIES,
+			sessionModels: [FIREWORKS_MODEL],
+		});
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+
+		await harness.agent.setSessionConfigOption({
+			sessionId: created.sessionId,
+			configId: "fast",
+			value: true,
+		});
+		expect(session.setFastModeCalls).toEqual([]);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("rejects wrong value types for select and boolean config options", async () => {
+		const harness = await createHarness({ clientCapabilities: BOOLEAN_CAPABILITIES });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+
+		await expect(
+			harness.agent.setSessionConfigOption({ sessionId: created.sessionId, configId: "mode", value: true }),
+		).rejects.toThrow("Unsupported boolean ACP config option: mode");
+
+		await expect(
+			harness.agent.setSessionConfigOption({
+				sessionId: created.sessionId,
+				configId: "advisor",
+				value: "on",
+			}),
+		).rejects.toThrow("Expected a boolean value for ACP config option: advisor");
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
 	});
 });
 

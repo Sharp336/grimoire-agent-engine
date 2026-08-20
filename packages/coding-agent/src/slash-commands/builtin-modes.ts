@@ -407,16 +407,19 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			if (!arg || arg === "toggle") {
 				const enabled = runtime.session.toggleFastMode();
 				await runtime.output(`Fast mode ${enabled ? "enabled" : "disabled"}.`);
+				await runtime.notifyConfigChanged?.();
 				return commandConsumed();
 			}
 			if (arg === "on") {
 				const supported = runtime.session.setFastMode(true);
 				await runtime.output(supported ? "Fast mode enabled." : "Fast mode is unavailable for the current model.");
+				await runtime.notifyConfigChanged?.();
 				return commandConsumed();
 			}
 			if (arg === "off") {
 				runtime.session.setFastMode(false);
 				await runtime.output("Fast mode disabled.");
+				await runtime.notifyConfigChanged?.();
 				return commandConsumed();
 			}
 			if (arg === "status") {
