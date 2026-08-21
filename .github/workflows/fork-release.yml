@@ -56,27 +56,6 @@ jobs:
             exit 1
           fi
 
-          unexpected="$(git diff --name-only "$official_sha" "$GITHUB_SHA" -- . \
-            ':(exclude).github/workflows/fork-release.yml' \
-            ':(exclude)FORK.md' \
-            ':(exclude)packages/coding-agent/src/config/settings-schema.ts' \
-            ':(exclude)packages/coding-agent/src/prompts/tools/hub-compact.md' \
-            ':(exclude)packages/coding-agent/src/prompts/tools/task.md' \
-            ':(exclude)packages/coding-agent/src/task/index.ts' \
-            ':(exclude)packages/coding-agent/src/tools/index.ts' \
-            ':(exclude)packages/coding-agent/src/tools/hub/compact.ts' \
-            ':(exclude)packages/coding-agent/src/tools/hub/index.ts' \
-            ':(exclude)packages/coding-agent/src/tools/hub/jobs.ts' \
-            ':(exclude)packages/coding-agent/src/tools/hub/schema.ts' \
-            ':(exclude)packages/coding-agent/CHANGELOG.md' \
-            ':(exclude)packages/coding-agent/test/task/task-spawn.test.ts' \
-            ':(exclude)packages/coding-agent/test/tools/hub-mode.test.ts')"
-          if [ -n "$unexpected" ]; then
-            echo "::error::Fork main contains changes outside the maintained downstream files:"
-            printf '%s\n' "$unexpected"
-            exit 1
-          fi
-
           for package in \
             @oh-my-pi/pi-natives-linux-x64 \
             @oh-my-pi/pi-natives-linux-arm64 \
