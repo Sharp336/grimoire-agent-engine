@@ -9,13 +9,21 @@ import type { MCPServerConfig, MCPToolDefinition } from "./types";
 
 const CACHE_VERSION = 1;
 const CACHE_PREFIX = "mcp_tools:";
-const CACHE_TTL_MS = 60 * 60 * 1000;
+/** How long cached tool definitions stay fresh before one revalidation handshake. */
+const CACHE_FRESH_MS = 60 * 60 * 1000;
+/** Storage-level retention; a fresh-expired row stays readable as stale until this lapses. */
+const CACHE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 type MCPToolCachePayload = {
 	version: number;
 	configHash: string;
 	tools: MCPToolDefinition[];
 	requiresConnection?: boolean;
+	/**
+	 * Epoch ms until which this entry counts as fresh. Absent on legacy v1
+	 * rows, which are treated as stale: one revalidation, still advertised.
+	 */
+	freshUntil?: number;
 };
 
 export type MCPToolCacheEntry = {
@@ -62,13 +70,30 @@ function cacheKey(serverName: string): string {
 }
 
 export class MCPToolCache {
-	constructor(private storage: AgentStorage) {}
+	constructor(
+		private storage: AgentStorage,
+		private clock: () => number = Date.now,
+	) {}
 
-	async get(serverName: string, config: MCPServerConfig): Promise<MCPToolDefinition[] | null> {
-		return (await this.getEntry(serverName, config))?.tools ?? null;
+	async get(
+		serverName: string,
+		config: MCPServerConfig,
+		options?: { includeStale?: boolean },
+	): Promise<MCPToolDefinition[] | null> {
+		return (await this.getEntry(serverName, config, options))?.tools ?? null;
 	}
 
-	async getEntry(serverName: string, config: MCPServerConfig): Promise<MCPToolCacheEntry | null> {
+	/**
+	 * Fresh-only by default: a stale entry returns null so callers still
+	 * trigger one revalidation handshake. Pass `{ includeStale: true }` to read
+	 * a config-matching entry whose freshness lapsed but whose storage
+	 * retention holds.
+	 */
+	async getEntry(
+		serverName: string,
+		config: MCPServerConfig,
+		options?: { includeStale?: boolean },
+	): Promise<MCPToolCacheEntry | null> {
 		const key = cacheKey(serverName);
 		const raw = this.storage.getCache(key);
 		if (!raw) return null;
@@ -86,6 +111,12 @@ export class MCPToolCache {
 		if (typeof parsed.configHash !== "string") return null;
 		if (!Array.isArray(parsed.tools)) return null;
 		if (parsed.requiresConnection !== undefined && typeof parsed.requiresConnection !== "boolean") return null;
+		if (
+			parsed.freshUntil !== undefined &&
+			(typeof parsed.freshUntil !== "number" || !Number.isFinite(parsed.freshUntil))
+		) {
+			return null;
+		}
 
 		let currentHash: string;
 		try {
@@ -96,6 +127,10 @@ export class MCPToolCache {
 		}
 
 		if (parsed.configHash !== currentHash) return null;
+
+		// Rows without freshness metadata (legacy v1) count as stale.
+		const fresh = typeof parsed.freshUntil === "number" && parsed.freshUntil > this.clock();
+		if (!fresh && !options?.includeStale) return null;
 
 		return {
 			tools: parsed.tools as MCPToolDefinition[],
@@ -117,11 +152,14 @@ export class MCPToolCache {
 			return;
 		}
 
+		const nowMs = this.clock();
+
 		const payload: MCPToolCachePayload = {
 			version: CACHE_VERSION,
 			configHash,
 			tools,
 			requiresConnection,
+			freshUntil: nowMs + CACHE_FRESH_MS,
 		};
 
 		let serialized: string;
@@ -132,7 +170,7 @@ export class MCPToolCache {
 			return;
 		}
 
-		const expiresAtSec = Math.floor((Date.now() + CACHE_TTL_MS) / 1000);
+		const expiresAtSec = Math.floor((nowMs + CACHE_RETENTION_MS) / 1000);
 		this.storage.setCache(cacheKey(serverName), serialized, expiresAtSec);
 	}
 }

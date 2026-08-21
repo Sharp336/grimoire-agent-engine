@@ -1,12 +1,14 @@
 /**
- * Contract: a lazy server with a WARM tool cache advertises its tools as
- * DeferredMCPTool placeholders WITHOUT spawning the subprocess at startup.
- * This is the memory win — the whole point of `lifecycle: "lazy"`.
+ * Contract: a lazy server with a FRESH tool cache advertises its tools as
+ * DeferredMCPTool placeholders WITHOUT spawning the subprocess; an EXPIRED
+ * cache spawns once to revalidate while its stale definitions stay advertised.
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { MCPManager } from "../src/mcp/manager";
+import { MCPToolCache } from "../src/mcp/tool-cache";
+import { AgentStorage } from "../src/session/agent-storage";
 import {
 	hasServerTool,
 	inMemoryToolCache,
@@ -17,7 +19,7 @@ import {
 	waitFor,
 } from "./mcp-lifecycle-harness";
 
-describe("MCP lazy lifecycle: warm cache does not spawn", () => {
+describe("MCP lazy lifecycle: fresh cache does not spawn, expired cache revalidates", () => {
 	let workDir: string;
 
 	beforeEach(() => {
@@ -47,6 +49,46 @@ describe("MCP lazy lifecycle: warm cache does not spawn", () => {
 			expect(spawnCount(spawnLog)).toBe(0);
 		} finally {
 			await manager.disconnectAll();
+		}
+	}, 15_000);
+
+	it("advertises stale tools from an expired-freshness cache while one revalidation spawn runs", async () => {
+		const spawnLog = path.join(workDir, "expired-cache.log");
+		// Mutable cache clock: seed two hours ago, run at real time.
+		let nowMs = Date.now() - 2 * 60 * 60 * 1000;
+		let manager: MCPManager | undefined;
+		try {
+			const storage = await AgentStorage.open(path.join(workDir, "agent.db"));
+			const cache = new MCPToolCache(storage, () => nowMs);
+			const config = lazyConfig({
+				lifecycle: "lazy",
+				spawnLog,
+				// Keep the handshake pending past the 250 ms startup gate.
+				initializeDelayMs: 1000,
+			});
+			await cache.set("lazy", config, [TOOL_DEF]);
+
+			// Advance past the one-hour freshness window.
+			nowMs = Date.now();
+
+			// Simulate AuthStorage startup hygiene: DB-expired rows are physically
+			// deleted, so only stale-in-payload retention can survive.
+			storage.cleanExpiredCache();
+
+			manager = new MCPManager(workDir, cache);
+			const result = await manager.connectServers({ lazy: config }, {});
+
+			// Expiry triggers exactly one revalidation connection.
+			expect(spawnCount(spawnLog)).toBe(1);
+			// Config-matching stale definitions are advertised until live tools arrive.
+			expect(hasServerTool(manager, "lazy")).toBe(true);
+			expect(result.tools.length).toBeGreaterThan(0);
+
+			// Drain the delayed revalidation before teardown to avoid child-process races.
+			expect(await waitFor(() => manager?.getConnectionStatus("lazy") === "connected")).toBe(true);
+		} finally {
+			await manager?.disconnectAll();
+			AgentStorage.resetInstance();
 		}
 	}, 15_000);
 

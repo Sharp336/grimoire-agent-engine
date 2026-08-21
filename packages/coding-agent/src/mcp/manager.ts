@@ -1013,7 +1013,10 @@ export class MCPManager {
 			if (pendingTasks.length > 0 && this.toolCache) {
 				await Promise.all(
 					pendingTasks.map(async task => {
-						const cached = await this.toolCache?.get(task.name, task.config);
+						// Include stale entries: the freshness-lapsed row triggered
+						// revalidation above, so its config-matching stale definitions
+						// still advertise until the live handshake replaces them.
+						const cached = await this.toolCache?.get(task.name, task.config, { includeStale: true });
 						if (cached) {
 							cachedTools.set(task.name, cached);
 						}
