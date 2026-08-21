@@ -379,7 +379,7 @@ describe("skill inspector", () => {
 		expect(Bun.stripANSI(list.render(80).join("\n"))).toContain("personal");
 	});
 
-	test("project-only context files show the project name without repeating project", () => {
+	test("project-only context files do not invent a project name without .omp", () => {
 		const list = new ExtensionList([
 			{
 				id: "context-file:project:AGENTS.md",
@@ -396,9 +396,10 @@ describe("skill inspector", () => {
 		]);
 		list.setFocused(true);
 		const text = Bun.stripANSI(list.render(80).join("\n"));
-		expect(text).toContain("personal");
+		expect(text).toContain("AGENTS.md");
 		expect(text).not.toContain("project · personal");
 		expect(text).not.toMatch(/AGENTS\.md\s+project\b/);
+		expect(text).not.toMatch(/AGENTS\.md\s+personal\b/);
 	});
 });
 

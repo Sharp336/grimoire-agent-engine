@@ -186,14 +186,11 @@ export function liveToolDetail(live: LiveToolRecord | undefined): string | undef
 	return undefined;
 }
 
-/** Project-local items only — user/native/global rows stay unlabeled. */
+/** Project-local items only. Uses the directory that contains `.omp`, when present. */
 export function projectListHint(ext: Extension): string | undefined {
 	if (ext.source.level !== "project") return undefined;
-	const worlds = ext.path.match(/(?:^|\/)worlds\/([^/]+)\//)?.[1];
-	if (worlds && worlds !== "_template") return worlds;
 	const omp = ext.path.match(/(?:^|\/)([^/]+)\/\.omp\//)?.[1];
-	if (omp && omp !== "_template") return omp;
-	return undefined;
+	return omp && omp.length > 0 ? omp : undefined;
 }
 
 export function joinListHints(...parts: Array<string | undefined>): string | undefined {

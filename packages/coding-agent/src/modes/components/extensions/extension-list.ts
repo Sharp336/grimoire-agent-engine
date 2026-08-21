@@ -228,14 +228,21 @@ export class ExtensionList implements Component {
 		// When master is disabled, all items appear dimmed
 		const effectivelyDisabled = masterDisabled || ext.state === "disabled";
 		const mcpSnap =
-			ext.kind === "mcp" && isDiscoveredMcpServer(ext.raw)
-				? snapshotMcpRuntime(ext.raw, this.#mcpSource, { enabled: !effectivelyDisabled })
+			ext.kind === "mcp" && isDiscoveredMcpServer(ext.raw) && ext.state !== "shadowed"
+				? snapshotMcpRuntime(ext.raw, this.#mcpSource, {
+						enabled: !effectivelyDisabled,
+						shadowed: false,
+					})
 				: undefined;
 
 		// Status icon: MCP rows use live connection health, not "enabled in config".
-		const stateIcon = mcpSnap
-			? this.#getMcpHealthIcon(mcpSnap.health, masterDisabled)
-			: this.#getStateIcon(ext.state, masterDisabled);
+		// Shadowed same-name configs keep the shadowed glyph — never the winner's health.
+		const stateIcon =
+			ext.state === "shadowed"
+				? this.#getStateIcon(ext.state, masterDisabled)
+				: mcpSnap
+					? this.#getMcpHealthIcon(mcpSnap.health, masterDisabled)
+					: this.#getStateIcon(ext.state, masterDisabled);
 
 		// Name
 		let name = ext.displayName;

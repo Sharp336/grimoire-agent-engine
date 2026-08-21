@@ -15,6 +15,7 @@ import type {
 	MCPServerConfig,
 	MCPServerConnection,
 } from "../../../mcp/types";
+import { PREVIEW_LIMITS } from "../../../tools/render-utils";
 
 export type MCPConnectionHealth = "connected" | "connecting" | "disconnected" | "inactive";
 
@@ -56,7 +57,7 @@ export interface MCPRuntimeSource {
 	getServerPrompts?(name: string): MCPPrompt[] | undefined;
 }
 
-const DEFAULT_VISIBLE_TOOLS = 8;
+const DEFAULT_VISIBLE_TOOLS = PREVIEW_LIMITS.COLLAPSED_ITEMS;
 
 export function isDiscoveredMcpServer(raw: unknown): raw is MCPServer {
 	if (!raw || typeof raw !== "object") return false;
@@ -136,7 +137,7 @@ function identityFrom(
 export function snapshotMcpRuntime(
 	server: MCPServer,
 	manager: MCPRuntimeSource | MCPManager | undefined,
-	opts?: { enabled: boolean },
+	opts?: { enabled?: boolean; shadowed?: boolean },
 ): MCPRuntimeSnapshot {
 	const enabled = opts?.enabled ?? server.enabled !== false;
 	const transport = inferMcpTransport(server);
@@ -153,7 +154,9 @@ export function snapshotMcpRuntime(
 		prompts: [],
 	};
 
-	if (!enabled || !manager) {
+	// Shadowed same-name configs share a name with the winner. Joining by
+	// server.name would steal the live connection's health/tools/instructions.
+	if (opts?.shadowed || !enabled || !manager) {
 		return base;
 	}
 
@@ -218,7 +221,7 @@ export function formatMcpHealthLabel(health: MCPConnectionHealth): string {
 
 export function visibleMcpTools(
 	tools: MCPRuntimeCatalogItem[],
-	limit = DEFAULT_VISIBLE_TOOLS,
+	limit: number = DEFAULT_VISIBLE_TOOLS,
 ): { shown: MCPRuntimeCatalogItem[]; hidden: number } {
 	if (tools.length <= limit) return { shown: tools, hidden: 0 };
 	return { shown: tools.slice(0, limit), hidden: tools.length - limit };

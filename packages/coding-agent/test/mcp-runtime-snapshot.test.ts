@@ -124,6 +124,19 @@ describe("snapshotMcpRuntime", () => {
 		);
 	});
 
+	test("does not join a shadowed same-name config against the winner", () => {
+		const winner = connection();
+		const snap = snapshotMcpRuntime(server({ command: "/usr/bin/shadowed-github" }), sourceFor("connected", winner), {
+			shadowed: true,
+		});
+		expect(snap.health).toBe("disconnected");
+		expect(snap.title).toBeUndefined();
+		expect(snap.description).toBeUndefined();
+		expect(snap.tools).toEqual([]);
+		expect(snap.instructions).toBeUndefined();
+		expect(snap.command).toBe("/usr/bin/shadowed-github");
+	});
+
 	test("infers http from url when transport is omitted", () => {
 		expect(inferMcpTransport({ name: "remote", url: "https://example.test/mcp", _source: source })).toBe("http");
 		expect(inferMcpTransport({ type: "sse", url: "https://example.test/sse" })).toBe("sse");

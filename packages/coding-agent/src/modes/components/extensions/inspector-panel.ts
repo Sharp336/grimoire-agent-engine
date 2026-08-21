@@ -8,7 +8,7 @@
 import * as os from "node:os";
 import { type Component, visibleWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
 import { theme } from "../../../modes/theme/theme";
-import { expandKeyHint, shortenPath } from "../../../tools/render-utils";
+import { expandKeyHint, PREVIEW_LIMITS, replaceTabs, shortenPath } from "../../../tools/render-utils";
 import {
 	commandInspectorData,
 	contextInspectorData,
@@ -26,6 +26,7 @@ import {
 } from "./inspector-model";
 import {
 	formatMcpHealthLabel,
+	inferMcpTransport,
 	isDiscoveredMcpServer,
 	type MCPConnectionHealth,
 	type MCPRuntimeSource,
@@ -47,8 +48,8 @@ interface KindView {
 	config: string[];
 }
 
-const PREVIEW_LINE_BUDGET = 12;
-const MCP_TOOL_BUDGET = 8;
+const PREVIEW_LINE_BUDGET = PREVIEW_LIMITS.EXPANDED_LINES;
+const MCP_TOOL_BUDGET = PREVIEW_LIMITS.COLLAPSED_ITEMS;
 
 export class InspectorPanel implements Component {
 	#extension: Extension | null = null;
@@ -143,9 +144,22 @@ export class InspectorPanel implements Component {
 
 	#mcpKind(ext: Extension): KindView {
 		const width = this.#width;
-		const snap = isDiscoveredMcpServer(ext.raw)
-			? snapshotMcpRuntime(ext.raw, this.#mcpSource, { enabled: ext.state !== "disabled" })
-			: undefined;
+		const snap =
+			isDiscoveredMcpServer(ext.raw) && ext.state !== "shadowed"
+				? snapshotMcpRuntime(ext.raw, this.#mcpSource, { enabled: ext.state !== "disabled" })
+				: undefined;
+		if (ext.state === "shadowed") {
+			const config: string[] = [];
+			const transport = isDiscoveredMcpServer(ext.raw) ? inferMcpTransport(ext.raw) : "stdio";
+			config.push(theme.fg("muted", "Connection"));
+			config.push(this.#rule());
+			this.#pushLabeled(config, "Transport", transport, width);
+			if (isDiscoveredMcpServer(ext.raw) && ext.raw.command) {
+				this.#pushLabeled(config, "Command", shortenPath(ext.raw.command, os.homedir()), width, "success");
+			}
+			config.push("");
+			return { description: undefined, surface: [], contents: [], config };
+		}
 		const health: MCPConnectionHealth = snap?.health ?? "disconnected";
 		const transport = snap?.transport ?? "stdio";
 		const runtimeLine = `${this.#mcpHealthGlyph(health)} ${formatMcpHealthLabel(health)}     ${theme.fg("muted", transport)}`;
@@ -204,7 +218,7 @@ export class InspectorPanel implements Component {
 		if (snap?.instructions) {
 			contents.push(theme.fg("muted", "Server guidance"));
 			contents.push(this.#rule());
-			this.#pushPreview(contents, snap.instructions, width, 12);
+			this.#pushPreview(contents, snap.instructions, width, PREVIEW_LINE_BUDGET);
 			contents.push("");
 		}
 
@@ -447,7 +461,7 @@ export class InspectorPanel implements Component {
 	): void {
 		const prefix = `  ${label.padEnd(10)} `;
 		const indent = " ".repeat(visibleWidth(prefix));
-		const wrapped = wrapTextWithAnsi(theme.fg(valueColor, value), Math.max(8, width - indent.length));
+		const wrapped = wrapTextWithAnsi(theme.fg(valueColor, replaceTabs(value)), Math.max(8, width - indent.length));
 		lines.push(`${prefix}${wrapped[0] ?? ""}`);
 		for (const extra of wrapped.slice(1)) {
 			lines.push(`${indent}${extra}`);
@@ -459,7 +473,7 @@ export class InspectorPanel implements Component {
 			this.#pushLabeled(lines, label, items[0], width);
 			return;
 		}
-		const cap = this.#expanded ? items.length : 3;
+		const cap = this.#expanded ? items.length : PREVIEW_LIMITS.COLLAPSED_LINES;
 		const shown = items.slice(0, cap);
 		const hidden = items.length - shown.length;
 		const indent = "             ";
@@ -493,7 +507,7 @@ export class InspectorPanel implements Component {
 			return;
 		}
 		const wrapped: string[] = [];
-		for (const raw of text.split("\n")) {
+		for (const raw of replaceTabs(text).split("\n")) {
 			const highlighted = this.#highlightMarkdown(raw);
 			const folded = wrapTextWithAnsi(highlighted, Math.max(8, width - 1));
 			if (folded.length === 0) wrapped.push("");
@@ -518,7 +532,7 @@ export class InspectorPanel implements Component {
 
 	#pushWrapped(lines: string[], text: string, width: number, indent = ""): void {
 		const budget = Math.max(1, width - indent.length);
-		const wrapped = wrapTextWithAnsi(text, budget);
+		const wrapped = wrapTextWithAnsi(replaceTabs(text), budget);
 		for (const line of wrapped.length > 0 ? wrapped : [""]) {
 			lines.push(`${indent}${line}`);
 		}

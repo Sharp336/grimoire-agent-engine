@@ -173,4 +173,34 @@ describe("MCP list runtime join", () => {
 		const text = Bun.stripANSI(list.render(80).join("\n"));
 		expect(text).toContain("unavailable");
 	});
+
+	test("shadowed same-name config does not inherit the winner's health or tools", () => {
+		const winner = mcpExtension("active");
+		const shadowed: Extension = {
+			...mcpExtension("shadowed"),
+			id: "mcp:github:user",
+			path: "/home/sf/.omp/agent/mcp.json",
+			shadowedBy: "github",
+			raw: { ...githubServer, command: "/usr/bin/shadowed-github" },
+		};
+		const list = new ExtensionList([winner, shadowed], { mcpSource: connectedSource() });
+		list.setFocused(true);
+		const text = Bun.stripANSI(list.render(80).join("\n"));
+		expect(text).toContain("2 tools · 1 resource");
+		const winnerIdx = text.indexOf("2 tools · 1 resource");
+		const secondGithub = text.indexOf("github", winnerIdx + 1);
+		expect(secondGithub).toBeGreaterThan(-1);
+		expect(text.slice(secondGithub)).not.toContain("2 tools");
+		expect(text.slice(secondGithub)).not.toContain("Connected");
+
+		const panel = new InspectorPanel();
+		panel.setMcpSource(connectedSource());
+		panel.setExtension(shadowed);
+		const inspector = Bun.stripANSI(panel.render(72).join("\n"));
+		expect(inspector).toContain("Shadowed");
+		expect(inspector).not.toContain("Connected");
+		expect(inspector).not.toContain("search_code");
+		expect(inspector).not.toContain("GitHub MCP Server");
+		expect(inspector).toContain("/usr/bin/shadowed-github");
+	});
 });
