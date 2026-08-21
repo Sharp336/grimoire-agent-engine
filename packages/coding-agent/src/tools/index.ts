@@ -155,6 +155,8 @@ export interface DeferredDiagnosticsEntry {
 export interface ToolSession {
 	/** Current working directory */
 	cwd: string;
+	/** Move the persisted session and its tool cwd to a worktree. */
+	moveToCwd?: (cwd: string) => Promise<void>;
 	/** Additional workspace directories beyond cwd (multi-root), forwarded to subagents. */
 	additionalDirectories?: string[];
 	/** Whether UI is available */

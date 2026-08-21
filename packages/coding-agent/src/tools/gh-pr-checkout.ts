@@ -327,6 +327,7 @@ export async function executePrCheckout(
 
 	if (!isMulti) {
 		const [outcome] = outcomes;
+		await session.moveToCwd?.(outcome.worktreePath);
 		return buildTextResult(formatPrCheckoutResult(outcome), outcome.data.url, {
 			repo: repo ?? outcome.data.headRepository?.nameWithOwner,
 			branch: outcome.localBranch,

@@ -1081,6 +1081,36 @@ describe("github tool", () => {
 			expect(runGit(worktreePath, ["branch", "--show-current"])).toBe("pr-123");
 		});
 
+		it("moves the session to a single checked-out worktree", async () => {
+			vi.spyOn(git.github, "json")
+				.mockResolvedValueOnce({
+					number: 124,
+					title: "Session move",
+					url: "https://github.com/base/repo/pull/124",
+					baseRefName: "main",
+					headRefName: fixture.headRefName,
+					headRefOid: fixture.headRefOid,
+					headRepository: { nameWithOwner: "contrib/repo" },
+					headRepositoryOwner: { login: "contrib" },
+					isCrossRepository: true,
+					maintainerCanModify: true,
+				})
+				.mockResolvedValueOnce({
+					nameWithOwner: "contrib/repo",
+					sshUrl: fixture.forkBare,
+					url: fixture.forkBare,
+				});
+
+			const moveToCwd = vi.fn(async (_cwd: string) => {});
+			const session = { ...createSession(fixture.repoRoot), moveToCwd } as ToolSession;
+			const tool = new GithubTool(session);
+			await tool.execute("pr-checkout-session-move", { op: "pr_checkout", pr: "124" });
+
+			const primaryRoot = (await git.repo.primaryRoot(fixture.repoRoot)) ?? fixture.repoRoot;
+			const worktreePath = await expectedWorktreePath(tempHome.home, primaryRoot, "pr-124");
+			expect(moveToCwd).toHaveBeenCalledWith(worktreePath);
+		});
+
 		// These assertions are non-mutating (a no-op add and rejected adds), so
 		// reuse the checkout fixture instead of cloning another repository.
 		describe("git.remote.add idempotency", () => {

@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Changed
+
+- Single PR worktree checkouts now move the active session to the external worktree before returning.
 
 ## [17.4.1] - 2026-08-21
 
