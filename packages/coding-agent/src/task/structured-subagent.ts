@@ -203,12 +203,12 @@ function renderSubagentPrompt(assignment: string): string {
 }
 
 function trimToUndefined(value: string | undefined): string | undefined {
-	const trimmed = trimToUndefined(value);
+	const trimmed = value?.trim();
 	return trimmed || undefined;
 }
 
 function sanitizeAgentId(value: string | undefined): string | undefined {
-	const trimmed = value?.trim();
+	const trimmed = trimToUndefined(value);
 	const sanitized = trimmed?.replace(/[^A-Za-z0-9_-]+/g, "").slice(0, 48);
 	return sanitized || undefined;
 }
