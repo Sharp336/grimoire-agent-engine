@@ -13,7 +13,7 @@ import {
 	type Skill,
 } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
-import { buildAvailableSlashCommands } from "@oh-my-pi/pi-coding-agent/slash-commands/available-commands";
+import { getSessionSlashCommands } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/get-commands-handler";
 import { buildSystemPrompt } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -472,17 +472,24 @@ enabled: false
 
 		beforeEach(async () => {
 			tempSkillsDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-opt-in-skills-"));
-			for (const [name, body] of [
-				["visible-skill", "Visible skill instructions."],
-				["manual-skill", "Manual skill instructions."],
+			for (const [directoryName, skillName, body] of [
+				["visible-skill", "visible-skill", "Visible skill instructions."],
+				["explicit-only-directory", "manual-skill", "Manual skill instructions."],
 			] as const) {
-				const skillDir = path.join(tempSkillsDir, name);
+				const skillDir = path.join(tempSkillsDir, directoryName);
 				await fs.mkdir(skillDir, { recursive: true });
 				await fs.writeFile(
 					path.join(skillDir, "SKILL.md"),
-					["---", `name: ${name}`, `description: ${name} description.`, "---", "", `# ${name}`, "", body].join(
-						"\n",
-					),
+					[
+						"---",
+						`name: ${skillName}`,
+						`description: ${skillName} description.`,
+						"---",
+						"",
+						`# ${skillName}`,
+						"",
+						body,
+					].join("\n"),
 				);
 			}
 		});
@@ -517,22 +524,17 @@ enabled: false
 				includeModelInPrompt: false,
 				personality: "none",
 			});
-			const commands = await buildAvailableSlashCommands(
-				{
-					customCommands: [],
-					skills,
-					skillsSettings,
-					setSlashCommands: () => {},
-					sessionManager: { getCwd: () => tempSkillsDir },
-				},
-				async () => [],
-			);
+			const commands = getSessionSlashCommands({
+				customCommands: [],
+				skills,
+				skillsSettings,
+			});
 			const manualSkillResource = await InternalUrlRouter.instance().resolve("skill://manual-skill", { skills });
 
 			return {
 				prompt: systemPrompt.join("\n"),
 				discoveredSkillNames: skills.map(skill => skill.name),
-				skillCommands: commands.filter(command => command.source === "skill").map(command => `/${command.name}`),
+				skillCommands: commands.filter(command => command.source === "skill").map(command => command.name),
 				manualSkillContent: manualSkillResource.content,
 			};
 		}
@@ -542,7 +544,7 @@ enabled: false
 
 			expect(observed.discoveredSkillNames).toEqual(["manual-skill", "visible-skill"]);
 			expect(observed.prompt).toContain("visible-skill");
-			expect(observed.skillCommands).toContain("/skill:manual-skill");
+			expect(observed.skillCommands).toContain("skill:manual-skill");
 			expect(observed.manualSkillContent).toContain("Manual skill instructions.");
 			expect(observed.prompt.includes("manual-skill")).toBe(false);
 		}
