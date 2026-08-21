@@ -1,0 +1,50 @@
+name: Verify fork release PR
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/fork-release-native-manifest.json
+      - .github/scripts/fork-release-native.sh
+      - .github/workflows/fork-release.yml
+      - .github/workflows/verify-fork-release-pr.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Validate workflow and shell syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n .github/scripts/fork-release-native.sh
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          "$(go env GOPATH)/bin/actionlint" .github/workflows/fork-release.yml
+
+      - name: Assert the two-install release architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          workflow=.github/workflows/fork-release.yml
+          test "$(grep -c 'uses: ./.github/actions/bun-install' "$workflow")" -eq 2
+          grep -q 'RELEASE_TARGETS: linux-x64,win32-x64' "$workflow"
+          grep -q 'runs-on: ubuntu-24.04-arm' "$workflow"
+          grep -q 'retention-days: 1' "$workflow"
+          if grep -qE 'pi-natives-(linux-x64|linux-arm64|win32-x64)@latest' .github/workflows/*.yml; then
+            echo '::error::floating native package reference found'
+            exit 1
+          fi
+
+      - name: Download and verify all locked native packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          for target in linux-x64 linux-arm64 win32-x64; do
+            bash .github/scripts/fork-release-native.sh "$target" "$RUNNER_TEMP/native-$target"
+          done
