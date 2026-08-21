@@ -135,9 +135,9 @@ describe("nested eval agent turn-budget accounting", () => {
 				spent: childOwnOutputTokens,
 				hard: true,
 			});
-			await expect(runEvalAgent({ prompt: "nested work", agent: "task" }, { session: childSession })).rejects.toThrow(
-				"agent() blocked: turn token budget exhausted",
-			);
+			await expect(
+				runEvalAgent({ prompt: "nested work", agent: "task" }, { session: childSession }),
+			).rejects.toThrow("agent() blocked: turn token budget exhausted");
 			return createResult(options.id, childOwnOutputTokens);
 		});
 
