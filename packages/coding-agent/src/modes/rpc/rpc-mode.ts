@@ -967,7 +967,6 @@ export async function runRpcMode(
 	// Shutdown request flag (wrapped in object to allow mutation with const)
 	const shutdownState = { requested: false };
 
-
 	// Wire up UI context for tool execution (ask tool, etc.) and extensions.
 	// A single shared instance routes all responses received on stdin to the
 	// correct waiting promise regardless of which code path created the request.
