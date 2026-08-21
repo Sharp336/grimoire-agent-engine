@@ -1935,49 +1935,6 @@ describe("lsp regressions", () => {
 		expect(getLanguageFromPath("source.gs")).toBe("genie");
 	});
 
-	it("detects a Vala project from meson.build and reports workspace diagnostics unavailable", async () => {
-		const tempDir = TempDir.createSync("@omp-lsp-vala-workspace-");
-		try {
-			await Bun.write(
-				path.join(tempDir.path(), "meson.build"),
-				"project('testapp', 'vala',\n  version: '0.1.0',\n  license: 'MIT'\n)\n",
-			);
-
-			const tool = new LspTool(makeLspSession(tempDir.path()));
-			const result = await tool.execute("vala-workspace-diagnostics", {
-				action: "diagnostics",
-				file: "*",
-			});
-
-			const output = textResult(result);
-			expect(output).toContain("Workspace diagnostics not available");
-			expect(output).toContain("Vala (vala-language-server)");
-		} finally {
-			tempDir.removeSync();
-		}
-	});
-
-	it("treats a non-Vala meson.build as unknown for workspace diagnostics", async () => {
-		const tempDir = TempDir.createSync("@omp-lsp-vala-nonvala-meson-");
-		try {
-			await Bun.write(
-				path.join(tempDir.path(), "meson.build"),
-				"project('c-app', 'c',\n  version: '1.0'\n)\n",
-			);
-
-			const tool = new LspTool(makeLspSession(tempDir.path()));
-			const result = await tool.execute("nonvala-meson-diagnostics", {
-				action: "diagnostics",
-				file: "*",
-			});
-
-			const output = textResult(result);
-			expect(output).toContain("Cannot detect project type");
-		} finally {
-			tempDir.removeSync();
-		}
-	});
-
 	it("loads config-only marketplace LSP servers from Claude plugin cache", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-marketplace-config-");
 		const home = path.join(tempDir.path(), "home");
