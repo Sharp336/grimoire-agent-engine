@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
-import { runIsolatedSubprocess } from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
+import { type IsolatedRunOptions, runIsolatedSubprocess } from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import type { SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
 import * as worktreeModule from "@oh-my-pi/pi-coding-agent/task/worktree";
 import * as natives from "@oh-my-pi/pi-natives";
@@ -26,7 +26,7 @@ function createResult(overrides: Partial<SingleResult> = {}): SingleResult {
 	};
 }
 
-function runOptions(overrides: Partial<Parameters<typeof runIsolatedSubprocess>[0]> = {}) {
+function runOptions(overrides: Partial<IsolatedRunOptions> = {}) {
 	return {
 		baseOptions: {
 			cwd: "/repo",
