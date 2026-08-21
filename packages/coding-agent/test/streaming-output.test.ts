@@ -381,6 +381,35 @@ describe("OutputSink", () => {
 		}
 	});
 
+	test("makes mirrored bytes readable before each onChunk notification", async () => {
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "mirrored-output.log");
+		const artifactFile = Bun.file(artifactPath);
+		const observations: Array<Promise<{ notified: string; mirrored: string }>> = [];
+		let notified = "";
+		const sink = new OutputSink({
+			artifactPath,
+			artifactId: "mirror-readable-onchunk",
+			artifactWriteMode: "mirror",
+			chunkThrottleMs: 60_000,
+			onChunk: chunk => {
+				notified += chunk;
+				const notifiedAtCallback = notified;
+				observations.push(artifactFile.text().then(mirrored => ({ notified: notifiedAtCallback, mirrored })));
+			},
+		});
+
+		sink.push("first\n");
+		sink.push("second\n");
+		const dumped = await sink.dump();
+		for (const observation of await Promise.all(observations)) {
+			expect(observation.mirrored).toContain(observation.notified);
+		}
+		expect(notified).toBe("first\nsecond\n");
+		expect(notified).toBe(dumped.output);
+		expect(await artifactFile.text()).toBe(notified);
+	});
+
 	test("throttled onChunk coalesces held-back chunks instead of dropping them", async () => {
 		const chunks: string[] = [];
 		const sink = new OutputSink({ onChunk: chunk => chunks.push(chunk), chunkThrottleMs: 60_000 });
