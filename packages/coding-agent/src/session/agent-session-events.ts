@@ -4,6 +4,7 @@ import type { Effort } from "@oh-my-pi/pi-ai";
 import type { Rule } from "../capability/rule";
 import type { RetryErrorUpdate } from "../extensibility/shared-events";
 import type { Goal, GoalModeState } from "../goals/state";
+import type { AgentSource } from "../task/types";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { TodoItem } from "../tools/todo";
 import type { CustomMessage } from "./messages";
@@ -61,7 +62,8 @@ export type AgentSessionEvent =
 			/** The level `auto` resolved to this turn, once classified. */
 			resolved?: Effort;
 	  }
-	| { type: "goal_updated"; goal: Goal | null; state?: GoalModeState };
+	| { type: "goal_updated"; goal: Goal | null; state?: GoalModeState }
+	| { type: "persona_changed"; personaName: string | null; source?: AgentSource };
 
 /** Listener function for agent session events. */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;

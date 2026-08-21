@@ -454,7 +454,7 @@ export class TodoCommandController {
 			timestamp: Date.now(),
 		};
 		this.ctx.agent.appendMessage(message);
-		this.ctx.sessionManager.appendMessage(message);
+		this.ctx.sessionManager.appendMessage(message, this.ctx.session.activePersonaName ?? undefined);
 	}
 }
 

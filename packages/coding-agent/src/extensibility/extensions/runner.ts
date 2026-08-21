@@ -454,6 +454,7 @@ export class ExtensionRunner {
 	#reloadHandler: () => Promise<void> = async () => {};
 	#shutdownHandler: ShutdownHandler = () => {};
 	#getMemoryFn?: () => MemoryRuntimeContext | undefined;
+	#getActivePersonaNameFn: () => string | null = () => null;
 	#commandDiagnostics: Array<{ type: string; message: string; path: string }> = [];
 	#toolRegistrationScope = new AsyncLocalStorage<ToolRegistrationScope>();
 	#toolRegistrationBarrier: Promise<void> | undefined;
@@ -605,11 +606,13 @@ export class ExtensionRunner {
 		private readonly modelRegistry: ModelRegistry,
 		getMemory?: () => MemoryRuntimeContext | undefined,
 		private readonly settings?: Settings,
+		getActivePersonaName?: () => string | null,
 		private readonly localProtocolOptions?: LocalProtocolOptions,
 		getAsyncJobSnapshot?: () => AsyncJobSnapshot | null,
 	) {
 		this.#uiContext = noOpUIContext;
 		this.#getMemoryFn = getMemory;
+		this.#getActivePersonaNameFn = getActivePersonaName ?? (() => null);
 		this.#getAsyncJobSnapshotFn = getAsyncJobSnapshot ?? (() => null);
 	}
 
@@ -1154,6 +1157,7 @@ export class ExtensionRunner {
 		},
 	): ExtensionContext {
 		const getModel = model ? () => model : this.#getModel;
+		const getActivePersonaName = () => this.#getActivePersonaNameFn();
 		return {
 			ui: this.#uiContext,
 			mode: this.#mode,
@@ -1174,6 +1178,9 @@ export class ExtensionRunner {
 			hasPendingMessages: () => this.#hasPendingMessagesFn(),
 			shutdown: () => this.#shutdownHandler(),
 			getSystemPrompt: () => this.#getSystemPromptFn(),
+			get activePersonaName() {
+				return getActivePersonaName();
+			},
 			localProtocolOptions: this.localProtocolOptions,
 			memory: this.#getMemoryFn?.(),
 			setInterval: (callback, ms, ...args) => this.#managedTimers.setInterval(callback, ms, ...args),
@@ -1222,8 +1229,12 @@ export class ExtensionRunner {
 	}
 
 	createCommandContext(): ExtensionCommandContext {
+		const base = this.createContext();
 		return {
-			...this.createContext(),
+			...base,
+			get activePersonaName() {
+				return base.activePersonaName;
+			},
 			getContextUsage: () => this.#getContextUsageFn(),
 			waitForIdle: () => this.#waitForIdleFn(),
 			newSession: options => this.#newSessionHandler(options),

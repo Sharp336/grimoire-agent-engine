@@ -355,6 +355,28 @@ export interface ReviewData {
 	summary?: ReviewSummary;
 }
 
+/**
+ * Persisted persona-selection stamp, as returned by `SessionManager.getLastAgentName()`.
+ * - `string` — a named persona is active
+ * - `null` — an explicit persona clear was recorded (null sentinel)
+ * - `undefined` — no persona entry found (session has never selected one)
+ */
+export type PersonaStamp = string | null | undefined;
+
+/**
+ * How `AgentSession#applyAgentPersona` should apply a persona:
+ * - `"cycle"` — user-initiated Tab cycle / explicit `--agent` startup: apply model,
+ *   apply frontmatter thinking level (unless a model selector already set one explicitly),
+ *   and record the change for resume.
+ * - `"fresh"` — `/new` session: always resolves to the default persona. If that
+ *   differs from the persona active a moment ago, apply its model/thinking level
+ *   (the outgoing persona's model shouldn't stick to the new identity). If it's
+ *   the same persona, leave the current model alone (preserves a manual override).
+ * - `"restore"` — silent restoration (switchSession, branch navigation): no model change,
+ *   no thinking-level change, no history recording.
+ */
+export type PersonaApplyMode = "cycle" | "fresh" | "restore";
+
 /** Agent definition (bundled or discovered) */
 export interface AgentDefinition {
 	name: string;
@@ -369,6 +391,10 @@ export interface AgentDefinition {
 	autoloadSkills?: string[];
 	/** When `false`, the agent's `read` tool returns verbatim file content instead of structural summaries. */
 	readSummarize?: boolean;
+	/** Rotation category: `"primary"` agents appear in Tab rotation; `"subagent"` agents are never rotated. Omitted ≡ `"subagent"`. */
+	mode?: "primary" | "subagent";
+	/** Tab-cycle position. Lower = earlier. Agents without order sort alphabetically after all ordered agents. */
+	order?: number;
 	/** Prewalk hand-off for the spawned session: `true` = switch to the default prewalk target at the first edit/write, string = custom target model pattern. */
 	prewalk?: boolean | string;
 	/** Advisor for spawned sessions of this agent: `true` = advise with the default advisor-role model, string = advise with that model pattern (optional `:level` suffix). Absent/`false` = no advisor. */

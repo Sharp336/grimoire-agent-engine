@@ -18,7 +18,7 @@ import {
 	stringifyJson,
 	toError,
 } from "@oh-my-pi/pi-utils";
-import type { StructuredSubagentSchemaMode } from "../task/types";
+import type { PersonaStamp, StructuredSubagentSchemaMode } from "../task/types";
 import { ArtifactManager } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore } from "./blob-store";
 import type { CompactionMethod } from "./compaction-methods";
@@ -45,6 +45,7 @@ import {
 	type ModeChangeEntry,
 	type ModelChangeEntry,
 	type NewSessionOptions,
+	type PersonaChangeEntry,
 	type ResetBoundaryEntry,
 	type ServiceTierChangeEntry,
 	type SessionEntry,
@@ -2140,8 +2141,10 @@ export class SessionManager {
 			| BashExecutionMessage
 			| PythonExecutionMessage
 			| FileMentionMessage,
+		agent?: string,
 	): string {
 		const entry: SessionMessageEntry = { type: "message", ...this.#freshEntryFields(), message };
+		if (agent) entry.agent = agent;
 		this.#recordEntry(entry);
 		return entry.id;
 	}
@@ -2159,6 +2162,7 @@ export class SessionManager {
 			| PythonExecutionMessage
 			| FileMentionMessage,
 		parentId: string | null,
+		agent?: string,
 	): string {
 		if (parentId !== null && !this.#index.has(parentId)) throw new Error(`Entry ${parentId} not found`);
 		const activeLeafId = this.#index.leafId();
@@ -2169,6 +2173,7 @@ export class SessionManager {
 			timestamp: nowIso(),
 			message,
 		};
+		if (agent) entry.agent = agent;
 		this.#recordEntry(entry);
 		this.#index.setLeaf(activeLeafId);
 		return entry.id;
@@ -2212,6 +2217,20 @@ export class SessionManager {
 			role,
 			resolvedModelIsFallback,
 		};
+		this.#recordEntry(entry);
+		return entry.id;
+	}
+
+	/**
+	 * Append a persona-change record as a child of the current leaf, then advance
+	 * the leaf. Written on every user-initiated persona cycle so that
+	 * getLastAgentName() can recover the active persona on resume even when the
+	 * user switched and exited before sending any message. Pass `null` when the
+	 * persona was explicitly cleared — the null sentinel prevents a stale prior
+	 * persona_change from surviving to the next resume.
+	 */
+	appendPersonaChange(personaName: string | null): string {
+		const entry: PersonaChangeEntry = { type: "persona_change", ...this.#freshEntryFields(), personaName };
 		this.#recordEntry(entry);
 		return entry.id;
 	}
@@ -2396,6 +2415,29 @@ export class SessionManager {
 		for (let index = branch.length - 1; index >= 0; index--) {
 			const entry = branch[index];
 			if (entry.type === "model_change") return entry.role ?? "default";
+		}
+		return undefined;
+	}
+
+	/** Returns the name of the most recently active agent in this session's branch.
+	 * Scans backward for the most recent persona_change entry (written on every
+	 * user-initiated Tab cycle) or, for older sessions without that entry, falls
+	 * back to the agent field on the last stamped message.
+	 * - `string` — a named persona is active
+	 * - `null`   — an explicit persona clear was recorded (null sentinel)
+	 * - `undefined` — no persona entry found (session has never selected one) */
+	getLastAgentName(): PersonaStamp {
+		const branch = this.getBranch();
+		for (let index = branch.length - 1; index >= 0; index--) {
+			const entry = branch[index];
+			if (entry.type === "persona_change") {
+				// Return the raw name — null for explicit clear sentinel, string for a name.
+				// Callers distinguish null (clear) from undefined (no stamp).
+				return (entry as PersonaChangeEntry).personaName;
+			}
+			if (entry.type === "message" && typeof (entry as SessionMessageEntry).agent === "string") {
+				return (entry as SessionMessageEntry).agent;
+			}
 		}
 		return undefined;
 	}

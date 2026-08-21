@@ -23,6 +23,7 @@ import type { SessionTreeNode } from "../../session/session-entries";
 import { toPathList } from "../../tools/path-utils";
 import { shortenPath } from "../../tools/render-utils";
 import { canonicalizeMessage } from "../../utils/thinking-display";
+import { sanitizeStatusText } from "../shared";
 import { resolveAssistantErrorPresentation } from "../utils/transcript-render-helpers";
 import { OverlayPanel, PanelDivider } from "./overlay-box";
 import { centeredWindow, contentRowWidth, renderScrollableList } from "./selector-helpers";
@@ -292,6 +293,7 @@ class TreeList implements Component {
 				entry.type === "custom" ||
 				entry.type === "model_change" ||
 				entry.type === "thinking_level_change" ||
+				entry.type === "persona_change" ||
 				entry.type === "service_tier_change" ||
 				entry.type === "title_change" ||
 				entry.type === "credential_pin" ||
@@ -393,6 +395,9 @@ class TreeList implements Component {
 				break;
 			case "custom":
 				parts.push("custom", entry.customType);
+				break;
+			case "persona_change":
+				parts.push("persona", sanitizeStatusText(entry.personaName ?? ""));
 				break;
 			case "label":
 				parts.push("label", entry.label ?? "");
@@ -692,6 +697,9 @@ class TreeList implements Component {
 				break;
 			case "label":
 				result = theme.fg("dim", `[label: ${entry.label ?? "(cleared)"}]`);
+				break;
+			case "persona_change":
+				result = theme.fg("dim", `[persona: ${sanitizeStatusText(entry.personaName ?? "")}]`);
 				break;
 			case "service_tier_change": {
 				// Per-family map, or null when the session went back to the default.

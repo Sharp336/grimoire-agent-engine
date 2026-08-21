@@ -15,6 +15,7 @@ import { buildSessionOptions as buildCliSessionOptions } from "@oh-my-pi/pi-codi
 import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import * as discovery from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
@@ -35,6 +36,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 	beforeEach(() => {
 		tempDir = path.join(os.tmpdir(), `pi-sdk-model-selection-${Snowflake.next()}`);
 		fs.mkdirSync(tempDir, { recursive: true });
+		vi.spyOn(discovery, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
 	});
 
 	afterEach(() => {

@@ -1598,19 +1598,17 @@ export class SelectorController {
 				return false;
 			}
 		}
-		// Switch session via AgentSession (emits hook and tool session events). The
-		// SessionManager adopts the resumed session's own cwd when it differs.
+		// switchSession() restores the active persona via the resolvePersona callback
+		// configured in sdk.ts — no additional persona discovery needed here.
 		await this.ctx.session.switchSession(sessionPath);
 		this.ctx.clearTransientSessionUi();
 		const newCwd = this.ctx.sessionManager.getCwd();
 		const movedProject = normalizePathForComparison(newCwd) !== normalizePathForComparison(previousCwd);
 		if (movedProject) {
-			// Resumed a session from another project: re-point the process and every
-			// cwd-derived cache at it before rendering.
 			await this.ctx.applyCwdChange(newCwd);
 		}
+
 		this.#refreshSessionTerminalTitle();
-		this.ctx.updateEditorBorderColor();
 
 		// Clear and re-render the chat
 		await this.ctx.renderInitialMessages({ clearTerminalHistory: true });

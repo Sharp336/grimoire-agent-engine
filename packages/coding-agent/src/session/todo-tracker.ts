@@ -58,6 +58,7 @@ export interface TodoTrackerHost {
 	toolRegistry(): Map<string, AgentTool>;
 	planModeEnabled(): boolean;
 	consumeLastServedToolChoiceLabel(): string | undefined;
+	activePersonaName(): string | null;
 }
 
 /** Owns canonical todo state, eager preludes, and completion reminders. */
@@ -279,7 +280,7 @@ export class TodoTracker {
 		this.#mutationsSinceLastTouch = 0;
 		this.#reminderAwaitingProgress = true;
 		this.#host.agent.appendMessage(reminderMessage);
-		this.#host.sessionManager.appendMessage(reminderMessage);
+		this.#host.sessionManager.appendMessage(reminderMessage, this.#host.activePersonaName() ?? undefined);
 		this.#host.scheduleAgentContinue({ generation: this.#host.promptGeneration() });
 		return true;
 	}

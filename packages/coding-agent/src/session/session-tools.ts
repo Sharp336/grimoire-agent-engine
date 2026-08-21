@@ -59,6 +59,8 @@ export interface SessionToolsHost {
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 	notifyCommandMetadataChanged(): void;
 	localProtocolOptions(): LocalProtocolOptions;
+	/** Called after the base system prompt is rebuilt and applied, so the owning session can re-append its own trailing blocks (e.g. an active persona's prompt). */
+	onSystemPromptRebuild?(): void;
 	/** Session-scoped `/vision` override; undefined means "follow the persisted setting". */
 	getInspectImageModeOverride(): InspectImageMode | undefined;
 	setInspectImageModeOverride(mode: InspectImageMode | undefined): void;
@@ -988,6 +990,7 @@ export class SessionTools {
 			this.#baseSystemPrompt = rebuiltSystemPrompt;
 			this.#host.clearMemoryPromotionSnapshot();
 			this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
+			this.#host.onSystemPromptRebuild?.();
 			this.#lastAppliedToolSignature = rebuiltSignature;
 			this.#promptModelKey = this.#currentPromptModelKey();
 			this.#basePromptXdevNames = new Set(rebuiltXdevCatalogNames);
@@ -1504,6 +1507,7 @@ export class SessionTools {
 			this.#host.clearInheritedProviderPromptCacheKey();
 		}
 		this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
+		this.#host.onSystemPromptRebuild?.();
 		this.#promptModelKey = this.#currentPromptModelKey();
 		// Refresh the cached signature so a subsequent `applyActiveToolsByName` with
 		// the same tool set does not re-rebuild on top of the explicit refresh we

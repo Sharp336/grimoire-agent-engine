@@ -53,6 +53,7 @@ const STATE_TRIGGER_EVENTS: Record<string, true> = {
 	message_end: true,
 	tool_execution_end: true,
 	thinking_level_changed: true,
+	persona_changed: true,
 	model_changed: true,
 	auto_compaction_end: true,
 };
@@ -78,6 +79,7 @@ const WIRE_AGENT_EVENT_TYPES: Record<WireAgentEvent["type"], true> = {
 	auto_retry_start: true,
 	auto_retry_end: true,
 	thinking_level_changed: true,
+	persona_changed: true,
 };
 
 const WIRE_SESSION_ENTRY_TYPES: Record<WireSessionEntry["type"], true> = {
@@ -87,6 +89,7 @@ const WIRE_SESSION_ENTRY_TYPES: Record<WireSessionEntry["type"], true> = {
 	branch_summary: true,
 	model_change: true,
 	thinking_level_change: true,
+	persona_change: true,
 };
 const COLLAB_BUS_CHANNELS = [
 	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
@@ -534,6 +537,7 @@ export class CollabHost {
 			cwd: this.#ctx.sessionManager.getCwd(),
 			model: session.model,
 			thinkingLevel: session.thinkingLevel,
+			activePersonaName: session.activePersonaName,
 			contextUsage: {
 				tokens,
 				contextWindow: breakdown.contextWindow,

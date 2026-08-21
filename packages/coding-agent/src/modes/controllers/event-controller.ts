@@ -282,6 +282,10 @@ export class EventController {
 				this.ctx.ui.resetDisplay();
 			},
 			goal_updated: async () => {},
+			persona_changed: async () => {
+				this.ctx.updateEditorBorderColor();
+				this.ctx.ui.requestRender();
+			},
 		} satisfies AgentSessionEventHandlers;
 	}
 

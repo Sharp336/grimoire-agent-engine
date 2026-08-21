@@ -487,6 +487,8 @@ export interface ExtensionContext {
 	shutdown(): void;
 	/** Get the current effective system prompt. */
 	getSystemPrompt(): string[];
+	/** Name of the currently active primary persona, or null if no persona is loaded. Set via Tab-cycle or --agent flag. */
+	activePersonaName: string | null;
 	/** Structured memory runtime for status/search/save across the configured backend. */
 	memory?: MemoryRuntimeContext;
 	/**

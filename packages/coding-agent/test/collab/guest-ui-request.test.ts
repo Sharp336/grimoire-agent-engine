@@ -199,6 +199,7 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 			messages: [],
 			switchSession: () => Promise.resolve(),
 			newSession: () => Promise.resolve(),
+			setReplicaPersonaName: () => {},
 			agent: {
 				state: { model: undefined },
 				setModel: () => {},
