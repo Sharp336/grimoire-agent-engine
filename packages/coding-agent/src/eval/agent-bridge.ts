@@ -2,6 +2,7 @@
  * Host-side handler for the eval `agent()` helper.
  */
 import { type } from "@oh-my-pi/omptype";
+import { Snowflake } from "@oh-my-pi/pi-utils";
 import {
 	buildStructuredSubagentRecoveryHint,
 	getEffectiveEvalTurnBudget,
@@ -138,6 +139,10 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 					...(parsed.apply !== undefined ? { apply: parsed.apply } : {}),
 				}
 			: undefined;
+	const identity = {
+		id: `EvalAgent-${Snowflake.next()}`,
+		...(parsed.label !== undefined ? { label: parsed.label } : {}),
+	};
 
 	try {
 		const execution = await withBridgeTimeoutPause(
@@ -150,7 +155,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 					...(parsed.agent !== undefined ? { agent: parsed.agent } : {}),
 					...(Object.hasOwn(parsed, "schema") ? { outputSchema: parsed.schema } : {}),
 					...(parsed.schemaMode !== undefined ? { schemaMode: parsed.schemaMode } : {}),
-					...(parsed.label !== undefined ? { identity: { label: parsed.label } } : {}),
+					identity,
 					...(isolation ? { isolation } : {}),
 					...(parsed.handle ? { retainArtifacts: true } : {}),
 					keepAlive: false,
