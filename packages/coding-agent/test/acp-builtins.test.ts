@@ -17,6 +17,8 @@ import { removeWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
 
 interface FakeAcpBuiltinSession {
 	fastMode: boolean;
+	advisorEnabled: boolean;
+	advisorActive: boolean;
 	forcedToolChoice: string | undefined;
 	isStreaming: boolean;
 	sessionFile: string | undefined;
@@ -28,6 +30,10 @@ interface FakeAcpBuiltinSession {
 	toggleFastMode(): boolean;
 	setFastMode(enabled: boolean): boolean;
 	isFastModeEnabled(): boolean;
+	setAdvisorEnabled(enabled: boolean): boolean;
+	isAdvisorEnabled(): boolean;
+	toggleAdvisorEnabled(): boolean;
+	isAdvisorActive(): boolean;
 	setForcedToolChoice(toolName: string): void;
 	fetchUsageReports?: () => Promise<unknown>;
 	getAsyncJobSnapshot: (opts?: { recentLimit?: number }) => { running: unknown[]; recent: unknown[] } | null;
@@ -84,6 +90,8 @@ function createRuntime() {
 	let fakeSessionManager: FakeAcpBuiltinSessionManager | undefined;
 	const session: FakeAcpBuiltinSession = {
 		fastMode: false,
+		advisorEnabled: false,
+		advisorActive: false,
 		forcedToolChoice: undefined as string | undefined,
 		isStreaming: false,
 		sessionFile: undefined,
@@ -102,6 +110,20 @@ function createRuntime() {
 		},
 		isFastModeEnabled() {
 			return this.fastMode;
+		},
+		setAdvisorEnabled(enabled: boolean) {
+			this.advisorEnabled = enabled;
+			return enabled && this.advisorActive;
+		},
+		isAdvisorEnabled() {
+			return this.advisorEnabled;
+		},
+		toggleAdvisorEnabled() {
+			this.advisorEnabled = !this.advisorEnabled;
+			return this.advisorEnabled;
+		},
+		isAdvisorActive() {
+			return this.advisorEnabled && this.advisorActive;
 		},
 		setForcedToolChoice(toolName: string) {
 			this.forcedToolChoice = toolName;
@@ -241,6 +263,49 @@ describe("ACP builtin slash commands", () => {
 
 		expect(result).toEqual({ consumed: true });
 		expect(output).toEqual(["Fast mode is off."]);
+	});
+
+	it("/fast on emits a config-change notification and enables fast mode", async () => {
+		const { output, runtime, session } = createRuntime();
+		let configNotified = 0;
+		runtime.notifyConfigChanged = () => {
+			configNotified++;
+		};
+
+		const result = await executeAcpBuiltinSlashCommand("/fast on", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(session.fastMode).toBe(true);
+		expect(output).toEqual(["Fast mode enabled."]);
+		expect(configNotified).toBe(1);
+	});
+
+	it("/fast status does not emit a config-change notification", async () => {
+		const { runtime } = createRuntime();
+		let configNotified = 0;
+		runtime.notifyConfigChanged = () => {
+			configNotified++;
+		};
+
+		await executeAcpBuiltinSlashCommand("/fast status", runtime);
+
+		expect(configNotified).toBe(0);
+	});
+
+	it("/advisor on emits a config-change notification and enables the advisor", async () => {
+		const { output, runtime, session } = createRuntime();
+		session.advisorActive = true;
+		let configNotified = 0;
+		runtime.notifyConfigChanged = () => {
+			configNotified++;
+		};
+
+		const result = await executeAcpBuiltinSlashCommand("/advisor on", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(session.advisorEnabled).toBe(true);
+		expect(output).toEqual(["Advisor enabled."]);
+		expect(configNotified).toBe(1);
 	});
 
 	it("toggles extended context with explicit controls and reports state", async () => {

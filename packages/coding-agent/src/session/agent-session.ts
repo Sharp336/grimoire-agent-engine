@@ -7154,6 +7154,11 @@ export class AgentSession {
 		return this.#models.cycleThinkingLevel();
 	}
 
+	/** Reports whether the active model has any service tier a `/fast` toggle could set. */
+	supportsFastMode(): boolean {
+		return this.#models.supportsFastMode();
+	}
+
 	/** Reports whether `/fast` is enabled for the active model family. */
 	isFastModeEnabled(): boolean {
 		return this.#models.isFastModeEnabled();

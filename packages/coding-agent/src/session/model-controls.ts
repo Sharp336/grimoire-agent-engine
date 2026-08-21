@@ -655,6 +655,19 @@ export class ModelControls {
 	}
 
 	/**
+	 * Whether the active model exposes a service-tier family at all, i.e.
+	 * whether a `/fast` toggle would do anything. False when no model is
+	 * selected or the provider has no service tiers (e.g. Fireworks, which
+	 * carries its own Providers › Fireworks Tier toggle instead).
+	 *
+	 * Callers that surface a fast-mode control use this to hide it rather than
+	 * offering a switch whose writes {@link setFastMode} would discard.
+	 */
+	supportsFastMode(): boolean {
+		return this.#model !== undefined && serviceTierFamily(this.#model) !== undefined;
+	}
+
+	/**
 	 * True when the currently selected model's family is set to `priority` — the
 	 * `/fast` on/off state for the active model. Returns false when no model is
 	 * selected or the model exposes no service-tier family (e.g. Fireworks, which

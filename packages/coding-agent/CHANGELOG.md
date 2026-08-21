@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Fast mode, advisor, and auto-compaction now appear as switches in ACP editor clients (Zed 1.14.2+), alongside the existing mode/model/thinking selectors.
+
 ## [17.4.3] - 2026-08-21
 
 ### Fixed

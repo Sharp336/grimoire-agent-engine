@@ -98,6 +98,9 @@ const REFINE_OPTION = "Refine plan";
 const MODE_CONFIG_ID = "mode";
 const MODEL_CONFIG_ID = "model";
 const THINKING_CONFIG_ID = "thinking";
+const FAST_CONFIG_ID = "fast";
+const ADVISOR_CONFIG_ID = "advisor";
+const AUTO_COMPACTION_CONFIG_ID = "autoCompaction";
 const THINKING_OFF = "off";
 const SESSION_PAGE_SIZE = 50;
 const SPEECH_MODELS_LIST_METHOD = "speech.models.list";
@@ -772,19 +775,32 @@ export class AcpAgent implements Agent {
 
 	async setSessionConfigOption(params: SetSessionConfigOptionRequest): Promise<SetSessionConfigOptionResponse> {
 		const record = this.#getSessionRecord(params.sessionId);
-		if (typeof params.value === "boolean") {
-			throw new Error(`Unsupported boolean ACP config option: ${params.configId}`);
-		}
 
 		switch (params.configId) {
 			case MODE_CONFIG_ID:
-				this.#applyModeChange(record.session, params.value);
+				this.#applyModeChange(record.session, this.#expectSelectValue(params));
 				break;
 			case MODEL_CONFIG_ID:
-				await this.#setModelById(record.session, params.value);
+				await this.#setModelById(record.session, this.#expectSelectValue(params));
 				break;
 			case THINKING_CONFIG_ID:
-				this.#setThinkingLevelById(record.session, params.value);
+				this.#setThinkingLevelById(record.session, this.#expectSelectValue(params));
+				break;
+			case FAST_CONFIG_ID: {
+				const enabled = this.#expectBooleanValue(params);
+				// A client replaying a saved default can ask for fast mode on a
+				// model that has no service-tier family; skip rather than let
+				// `setFastMode` emit an operator notice for a no-op.
+				if (record.session.supportsFastMode()) {
+					record.session.setFastMode(enabled);
+				}
+				break;
+			}
+			case ADVISOR_CONFIG_ID:
+				record.session.setAdvisorEnabled(this.#expectBooleanValue(params));
+				break;
+			case AUTO_COMPACTION_CONFIG_ID:
+				record.session.setAutoCompactionEnabled(this.#expectBooleanValue(params));
 				break;
 			default:
 				throw new Error(`Unknown ACP config option: ${params.configId}`);
@@ -814,6 +830,20 @@ export class AcpAgent implements Agent {
 			await this.#pushConfigOptionUpdate(record);
 		}
 		return { configOptions: this.#buildConfigOptions(record.session) };
+	}
+
+	#expectSelectValue(params: SetSessionConfigOptionRequest): string {
+		if (typeof params.value === "boolean") {
+			throw new Error(`Unsupported boolean ACP config option: ${params.configId}`);
+		}
+		return params.value;
+	}
+
+	#expectBooleanValue(params: SetSessionConfigOptionRequest): boolean {
+		if (typeof params.value !== "boolean") {
+			throw new Error(`Expected a boolean value for ACP config option: ${params.configId}`);
+		}
+		return params.value;
 	}
 
 	async prompt(params: PromptRequest): Promise<PromptResponse> {
@@ -1765,6 +1795,44 @@ export class AcpAgent implements Agent {
 			),
 			options: this.#buildThinkingOptions(session),
 		});
+
+		// ACP: agents MUST NOT send `type: "boolean"` options unless the client
+		// advertised support. Appending after mode/model/thinking keeps the
+		// selects first in the array, which clients use both for placement
+		// priority and to resolve category keybinding ties.
+		if (this.#clientCapabilities?.session?.configOptions?.boolean != null) {
+			// A model with no service-tier family has nothing to toggle, and
+			// `setFastMode` would only emit "no service-tier control for /fast to
+			// toggle" — so hide the switch rather than show a dead one.
+			if (session.supportsFastMode()) {
+				configOptions.push({
+					id: FAST_CONFIG_ID,
+					name: "Fast mode",
+					description: "Priority service tier (OpenAI service_tier=priority, Anthropic speed=fast)",
+					category: "model_config",
+					type: "boolean",
+					currentValue: session.isFastModeEnabled(),
+				});
+			}
+			const advisorEnabled = session.isAdvisorEnabled();
+			configOptions.push({
+				id: ADVISOR_CONFIG_ID,
+				name: "Advisor",
+				description:
+					advisorEnabled && !session.isAdvisorActive()
+						? "A second model reviews each turn — no model is assigned to the 'advisor' role"
+						: "A second model reviews each turn and injects notes",
+				type: "boolean",
+				currentValue: advisorEnabled,
+			});
+			configOptions.push({
+				id: AUTO_COMPACTION_CONFIG_ID,
+				name: "Auto-compaction",
+				description: "Automatically compact the session context before it overflows",
+				type: "boolean",
+				currentValue: session.autoCompactionEnabled,
+			});
+		}
 		return configOptions;
 	}
 
