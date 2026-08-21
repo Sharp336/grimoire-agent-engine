@@ -8,6 +8,7 @@ import * as mcpClient from "@oh-my-pi/pi-coding-agent/mcp/client";
 import * as oauthFlow from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
 import type { MCPServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { MCPCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/mcp-command-controller";
+import { McpTestEscapeState } from "@oh-my-pi/pi-coding-agent/modes/mcp-test-escape";
 import { OAuthManualInputManager } from "@oh-my-pi/pi-coding-agent/modes/oauth-manual-input";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import {
@@ -47,17 +48,16 @@ function createController(authStorage: AuthStorage, mcpManagerOverrides: Record<
 	const showStatus = vi.fn();
 	const present = vi.fn();
 	const editor: { onEscape?: () => void } = {};
-	const beginMcpTest = vi.fn((_abortController: AbortController, _name: string) => {
-		// Mirror McpTestEscapeState.begin: superseding a still-pending test
-		// aborts its predecessor so the first connection attempt is not
-		// orphaned when Esc ownership moves to the new test. mock.calls
-		// already contains the current call, so the predecessor is at -2.
-		const prior = beginMcpTest.mock.calls.at(-2)?.[0] as AbortController | undefined;
-		if (prior && prior !== _abortController && !prior.signal.aborted) {
-			prior.abort();
-		}
+	// The controller tests exercise the real Esc state machine, not a reimplementation:
+	// the spies only record calls while delegating to McpTestEscapeState, so a regression
+	// in InteractiveMode's delegation or the state's supersede logic fails these tests.
+	const mcpTestEscape = new McpTestEscapeState();
+	const beginMcpTest = vi.fn((abortController: AbortController, name: string) => {
+		mcpTestEscape.begin(abortController, name);
 	});
-	const settleMcpTest = vi.fn();
+	const settleMcpTest = vi.fn((abortController: AbortController) => {
+		mcpTestEscape.settle(abortController);
+	});
 	const prepareConfig = vi.fn(async (config: MCPServerConfig) => config);
 	const mcpManager = {
 		prepareConfig,
