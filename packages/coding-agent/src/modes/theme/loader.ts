@@ -122,13 +122,24 @@ export interface CreateThemeOptions {
 	mode?: ColorMode;
 	symbolPresetOverride?: SymbolPreset;
 	colorBlindMode?: boolean;
+	/** Render chat surfaces (user/custom messages, tool panels) on the terminal's default background. */
+	chatTransparent?: boolean;
 }
+
+/** Chat-owned surfaces cleared by `chatTransparent`; status line and selection fills stay opaque. */
+const CHAT_TRANSPARENT_SURFACES: readonly ThemeBg[] = [
+	"userMessageBg",
+	"customMessageBg",
+	"toolPendingBg",
+	"toolSuccessBg",
+	"toolErrorBg",
+];
 
 /** HSV adjustment to shift green toward blue for colorblind mode (red-green colorblindness) */
 const COLORBLIND_ADJUSTMENT = { h: 60, s: 0.71 };
 
 export function createTheme(themeJson: ThemeJson, options: CreateThemeOptions = {}): Theme {
-	const { mode, symbolPresetOverride, colorBlindMode } = options;
+	const { mode, symbolPresetOverride, colorBlindMode, chatTransparent } = options;
 	const colorMode = mode ?? detectColorMode();
 	const resolvedColors = resolveThemeColors(themeJson.colors, themeJson.vars);
 
@@ -161,7 +172,16 @@ export function createTheme(themeJson: ThemeJson, options: CreateThemeOptions = 
 	const symbolPreset: SymbolPreset = symbolPresetOverride ?? themeJson.symbols?.preset ?? "unicode";
 	const symbolOverrides = themeJson.symbols?.overrides ?? {};
 	const spinnerFramesOverrides = normalizeSpinnerFramesOverride(themeJson.symbols?.spinnerFrames);
-	return new Theme(fgColors, bgColors, colorMode, symbolPreset, symbolOverrides, spinnerFramesOverrides);
+	const transparentSurfaces = chatTransparent ? CHAT_TRANSPARENT_SURFACES : [];
+	return new Theme(
+		fgColors,
+		bgColors,
+		colorMode,
+		symbolPreset,
+		symbolOverrides,
+		spinnerFramesOverrides,
+		transparentSurfaces,
+	);
 }
 
 export async function loadTheme(name: string, options: CreateThemeOptions = {}): Promise<Theme> {

@@ -96,6 +96,7 @@ export interface ThemeChangeEvent {
 
 var currentSymbolPresetOverride: SymbolPreset | undefined;
 var currentColorBlindMode: boolean = false;
+var currentChatTransparent: boolean = false;
 var themeWatcher: fs.FSWatcher | undefined;
 var themeReloadTimer: NodeJS.Timeout | undefined;
 var sigwinchHandler: (() => void) | undefined;
@@ -110,6 +111,7 @@ function getCurrentThemeOptions(): CreateThemeOptions {
 	return {
 		symbolPresetOverride: currentSymbolPresetOverride,
 		colorBlindMode: currentColorBlindMode,
+		chatTransparent: currentChatTransparent,
 	};
 }
 
@@ -119,6 +121,7 @@ export async function initTheme(
 	colorBlindMode?: boolean,
 	darkTheme?: string,
 	lightTheme?: string,
+	chatTransparent?: boolean,
 ): Promise<void> {
 	autoDetectedTheme = true;
 	autoDarkTheme = darkTheme ?? "dark";
@@ -127,6 +130,7 @@ export async function initTheme(
 	currentThemeName = name;
 	currentSymbolPresetOverride = symbolPreset;
 	currentColorBlindMode = colorBlindMode ?? false;
+	currentChatTransparent = chatTransparent ?? false;
 	try {
 		theme = await loadTheme(name, getCurrentThemeOptions());
 		if (enableWatcher) {
@@ -297,6 +301,35 @@ export async function setColorBlindMode(enabled: boolean): Promise<void> {
  */
 export function getColorBlindMode(): boolean {
 	return currentColorBlindMode;
+}
+
+/**
+ * Set transparent chat surfaces, recreating the theme with the new setting.
+ * When enabled, chat bubbles and tool panels use the terminal's default background.
+ */
+export async function setChatTransparent(enabled: boolean): Promise<void> {
+	currentChatTransparent = enabled;
+	if (!currentThemeName) return;
+
+	const requestId = ++themeLoadRequestId;
+	try {
+		const loadedTheme = await loadTheme(currentThemeName, getCurrentThemeOptions());
+		if (requestId !== themeLoadRequestId) return;
+		theme = loadedTheme;
+	} catch {
+		if (requestId !== themeLoadRequestId) return;
+		// Fall back to dark theme
+		theme = await loadTheme("dark", getCurrentThemeOptions());
+		if (requestId !== themeLoadRequestId) return;
+	}
+	notifyThemeChange({ ephemeral: true });
+}
+
+/**
+ * Get the current transparent chat surfaces setting.
+ */
+export function getChatTransparent(): boolean {
+	return currentChatTransparent;
 }
 
 export function onThemeChange(callback: (event: ThemeChangeEvent) => void): () => void {

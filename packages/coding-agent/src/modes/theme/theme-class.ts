@@ -156,6 +156,7 @@ export class Theme {
 		private readonly symbolPreset: SymbolPreset,
 		symbolOverrides: Partial<Record<SymbolKey, string>>,
 		spinnerFramesOverrides: Partial<Record<SpinnerType, string[]>> = {},
+		transparentSurfaces: readonly ThemeBg[] = [],
 	) {
 		this.statusLineLuminance = colorLuma(bgColors.statusLineBg);
 		this.#statusLineContrastLuminance = relativeLuminance(bgColors.statusLineBg);
@@ -172,6 +173,12 @@ export class Theme {
 		for (const [key, value] of Object.entries(bgColors) as [ThemeBg, string | number][]) {
 			this.#bgColors[key] = bgAnsi(value, mode);
 			this.#hexBgColors[key] = resolveToHex(value, slIsLight);
+		}
+		// Transparent surfaces drop the theme's opaque fill so bg(key, ...) and
+		// getBgAnsi(key) resolve to the terminal's default background instead.
+		// Hex backgrounds keep the original values so HTML export stays styled.
+		for (const key of transparentSurfaces) {
+			if (key in this.#bgColors) this.#bgColors[key] = "\x1b[49m";
 		}
 		// Build symbol map from preset + overrides
 		const baseSymbols = SYMBOL_PRESETS[symbolPreset];
