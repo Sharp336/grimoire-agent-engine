@@ -9,6 +9,7 @@ import * as os from "node:os";
 import { type Component, visibleWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
 import { theme } from "../../../modes/theme/theme";
 import { expandKeyHint, PREVIEW_LIMITS, replaceTabs, shortenPath } from "../../../tools/render-utils";
+import { sanitizeDisplayField, sanitizeDisplayText } from "./display-text";
 import {
 	commandInspectorData,
 	contextInspectorData,
@@ -343,7 +344,7 @@ export class InspectorPanel implements Component {
 		const surface: string[] = [];
 		surface.push(theme.fg("muted", "Invocation"));
 		surface.push(this.#rule());
-		surface.push(`  ${theme.fg("accent", `/${ext.name}`)}`);
+		surface.push(`  ${theme.fg("accent", `/${sanitizeDisplayText(ext.name)}`)}`);
 		if (data.argumentHint) this.#pushLabeled(surface, "hint", data.argumentHint, this.#width, "dim");
 		if (data.usesArguments) surface.push(`  ${theme.fg("dim", "accepts $ARGUMENTS")}`);
 		surface.push("");
@@ -419,8 +420,10 @@ export class InspectorPanel implements Component {
 	}
 
 	#pushIdentity(lines: string[], ext: Extension, title: string | undefined): void {
-		lines.push(theme.bold(theme.fg("accent", ext.displayName)));
-		if (title && title !== ext.displayName) lines.push(theme.fg("muted", title));
+		const name = sanitizeDisplayText(ext.displayName);
+		lines.push(theme.bold(theme.fg("accent", name)));
+		const cleanTitle = sanitizeDisplayField(title);
+		if (cleanTitle && cleanTitle !== name) lines.push(theme.fg("muted", cleanTitle));
 		lines.push("");
 	}
 	#pushRuntime(lines: string[], ext: Extension, kind: KindView): void {
@@ -439,15 +442,21 @@ export class InspectorPanel implements Component {
 	}
 
 	#pushDescription(lines: string[], description: string | undefined, width: number): void {
-		if (typeof description !== "string" || description.length === 0) return;
-		this.#pushWrapped(lines, description, width);
+		const text = sanitizeDisplayField(description);
+		if (!text) return;
+		this.#pushWrapped(lines, text, width);
 		lines.push("");
 	}
 
 	#pushOrigin(lines: string[], ext: Extension, width: number): void {
 		lines.push(theme.fg("muted", "Origin:"));
 		const levelLabel = ext.source.level === "user" ? "User" : ext.source.level === "project" ? "Project" : "Native";
-		this.#pushWrapped(lines, theme.italic(`via ${ext.source.providerName} (${levelLabel})`), width, "  ");
+		this.#pushWrapped(
+			lines,
+			theme.italic(`via ${sanitizeDisplayText(ext.source.providerName)} (${levelLabel})`),
+			width,
+			"  ",
+		);
 		this.#pushWrapped(lines, shortenPath(ext.path, os.homedir()), width, "  ");
 		lines.push("");
 	}
@@ -461,7 +470,10 @@ export class InspectorPanel implements Component {
 	): void {
 		const prefix = `  ${label.padEnd(10)} `;
 		const indent = " ".repeat(visibleWidth(prefix));
-		const wrapped = wrapTextWithAnsi(theme.fg(valueColor, replaceTabs(value)), Math.max(8, width - indent.length));
+		const wrapped = wrapTextWithAnsi(
+			theme.fg(valueColor, sanitizeDisplayText(value)),
+			Math.max(8, width - indent.length),
+		);
 		lines.push(`${prefix}${wrapped[0] ?? ""}`);
 		for (const extra of wrapped.slice(1)) {
 			lines.push(`${indent}${extra}`);
@@ -507,7 +519,7 @@ export class InspectorPanel implements Component {
 			return;
 		}
 		const wrapped: string[] = [];
-		for (const raw of replaceTabs(text).split("\n")) {
+		for (const raw of sanitizeDisplayText(text).split("\n")) {
 			const highlighted = this.#highlightMarkdown(raw);
 			const folded = wrapTextWithAnsi(highlighted, Math.max(8, width - 1));
 			if (folded.length === 0) wrapped.push("");

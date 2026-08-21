@@ -6,7 +6,9 @@
  * `Extension.raw`.
  */
 import type { MCPServer } from "../../../capability/mcp";
-import type { MCPManager } from "../../../mcp/manager";
+import type { SourceMeta } from "../../../capability/types";
+import { loadAllMCPConfigs } from "../../../mcp/config";
+import type { MCPLoadResult, MCPManager } from "../../../mcp/manager";
 import type {
 	MCPImplementation,
 	MCPPrompt,
@@ -16,6 +18,7 @@ import type {
 	MCPServerConnection,
 } from "../../../mcp/types";
 import { PREVIEW_LIMITS } from "../../../tools/render-utils";
+import { sanitizeDisplayField, sanitizeDisplayText } from "./display-text";
 
 export type MCPConnectionHealth = "connected" | "connecting" | "disconnected" | "inactive";
 
@@ -57,6 +60,61 @@ export interface MCPRuntimeSource {
 	getServerPrompts?(name: string): MCPPrompt[] | undefined;
 }
 
+/** Manager methods `/extensions` needs to match `/mcp enable` / `/mcp disable`. */
+export interface MCPToggleManager {
+	getConnectionStatus(name: string): "connected" | "connecting" | "disconnected";
+	getTools(): unknown[];
+	disconnectServer(name: string): Promise<void>;
+	connectServers(
+		configs: Record<string, MCPServerConfig>,
+		sources: Record<string, SourceMeta>,
+	): Promise<Pick<MCPLoadResult, "errors"> | MCPLoadResult>;
+}
+
+export interface MCPToggleSession {
+	refreshMCPTools(tools: unknown[]): Promise<void> | void;
+}
+
+export interface ApplyMcpToggleRuntimeOptions {
+	name: string;
+	enabled: boolean;
+	cwd: string;
+	manager?: MCPToggleManager;
+	session?: MCPToggleSession;
+	loadConfigs?: typeof loadAllMCPConfigs;
+}
+
+/**
+ * After `/extensions` persists an MCP enable/disable, apply the same live
+ * connect/disconnect + session tool refresh that `/mcp enable` / `/mcp disable`
+ * already do. Config persistence stays in `setMcpServerEnabled`.
+ */
+export async function applyMcpToggleRuntime(options: ApplyMcpToggleRuntimeOptions): Promise<void> {
+	const { name, enabled, cwd, manager, session, loadConfigs = loadAllMCPConfigs } = options;
+	if (!manager) return;
+
+	if (!enabled) {
+		await manager.disconnectServer(name);
+		await session?.refreshMCPTools(manager.getTools());
+		return;
+	}
+
+	if (manager.getConnectionStatus(name) !== "disconnected") {
+		await session?.refreshMCPTools(manager.getTools());
+		return;
+	}
+
+	const { configs, sources } = await loadConfigs(cwd);
+	const config = configs[name];
+	if (!config) {
+		await session?.refreshMCPTools(manager.getTools());
+		return;
+	}
+	const source = sources[name];
+	await manager.connectServers({ [name]: config }, source ? { [name]: source } : {});
+	await session?.refreshMCPTools(manager.getTools());
+}
+
 const DEFAULT_VISIBLE_TOOLS = PREVIEW_LIMITS.COLLAPSED_ITEMS;
 
 export function isDiscoveredMcpServer(raw: unknown): raw is MCPServer {
@@ -82,10 +140,13 @@ export function inferMcpTransport(server: MCPServer | MCPServerConfig): "stdio" 
 }
 
 function catalogItem(name: string, title?: string, description?: string): MCPRuntimeCatalogItem {
+	const cleanName = sanitizeDisplayText(name);
+	const cleanTitle = sanitizeDisplayField(title);
+	const cleanDescription = sanitizeDisplayField(description);
 	return {
-		name,
-		...(title && title !== name ? { title } : {}),
-		...(description ? { description } : {}),
+		name: cleanName,
+		...(cleanTitle && cleanTitle !== cleanName ? { title: cleanTitle } : {}),
+		...(cleanDescription ? { description: cleanDescription } : {}),
 	};
 }
 
@@ -124,13 +185,14 @@ function identityFrom(
 	fallbackName: string,
 ): Pick<MCPRuntimeSnapshot, "title" | "description" | "websiteUrl" | "implementationName" | "implementationVersion"> {
 	if (!info) return {};
-	const displayTitle = info.title && info.title !== fallbackName ? info.title : undefined;
+	const implementationName = sanitizeDisplayField(info.name);
+	const displayTitle = sanitizeDisplayField(info.title);
 	return {
-		title: displayTitle,
-		description: info.description,
-		websiteUrl: info.websiteUrl,
-		implementationName: info.name,
-		implementationVersion: info.version,
+		title: displayTitle && displayTitle !== fallbackName ? displayTitle : undefined,
+		description: sanitizeDisplayField(info.description),
+		websiteUrl: sanitizeDisplayField(info.websiteUrl),
+		implementationName,
+		implementationVersion: sanitizeDisplayField(info.version),
 	};
 }
 
@@ -145,9 +207,9 @@ export function snapshotMcpRuntime(
 	const base: MCPRuntimeSnapshot = {
 		health: enabled ? "disconnected" : "inactive",
 		transport,
-		command: server.command,
-		args: server.args,
-		url: server.url,
+		command: sanitizeDisplayField(server.command),
+		args: server.args?.map(arg => sanitizeDisplayText(arg)),
+		url: sanitizeDisplayField(server.url),
 		envCount,
 		tools: [],
 		resources: [],
@@ -172,15 +234,23 @@ export function snapshotMcpRuntime(
 		...base,
 		health,
 		...identity,
-		instructions: connection?.instructions,
+		instructions: sanitizeDisplayField(connection?.instructions),
 		tools,
 		resources: connection ? resourcesFrom(connection, manager) : [],
 		prompts: connection ? promptsFrom(connection, manager) : [],
 		command:
-			server.command ??
-			(connection?.config && "command" in connection.config ? connection.config.command : undefined),
-		args: server.args ?? (connection?.config && "args" in connection.config ? connection.config.args : undefined),
-		url: server.url ?? (connection?.config && "url" in connection.config ? connection.config.url : undefined),
+			sanitizeDisplayField(server.command) ??
+			(connection?.config && "command" in connection.config
+				? sanitizeDisplayField(connection.config.command)
+				: undefined),
+		args:
+			server.args?.map(arg => sanitizeDisplayText(arg)) ??
+			(connection?.config && "args" in connection.config
+				? connection.config.args?.map(arg => sanitizeDisplayText(arg))
+				: undefined),
+		url:
+			sanitizeDisplayField(server.url) ??
+			(connection?.config && "url" in connection.config ? sanitizeDisplayField(connection.config.url) : undefined),
 		transport: connection ? inferMcpTransport(connection.config) : transport,
 	};
 }

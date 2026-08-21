@@ -3,6 +3,7 @@ import type { MCPServer } from "@oh-my-pi/pi-coding-agent/capability/mcp";
 import type { SourceMeta } from "@oh-my-pi/pi-coding-agent/capability/types";
 import type { MCPServerConnection, MCPTransport } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import {
+	applyMcpToggleRuntime,
 	formatMcpHealthLabel,
 	formatMcpListHint,
 	inferMcpTransport,
@@ -150,5 +151,96 @@ describe("snapshotMcpRuntime", () => {
 		expect(shown).toHaveLength(8);
 		expect(hidden).toBe(4);
 		expect(formatMcpHealthLabel("disconnected")).toBe("Not connected");
+	});
+
+	test("strips OSC/BEL/tabs from server-provided display fields before theming", () => {
+		const dirty = connection({
+			serverInfo: {
+				name: "github-mcp-server",
+				title: "GitHub\x1b]8;;https://evil.test\x07 MCP\tServer",
+				version: "0.19.0",
+				description: "Access\x1b[31m GitHub",
+			},
+			tools: [
+				{
+					name: "search_code",
+					description: "Search\x07 code",
+					inputSchema: { type: "object" },
+				},
+			],
+			instructions: "Prefer\x1b[1m search_code",
+		});
+		const snap = snapshotMcpRuntime(server(), sourceFor("connected", dirty));
+		expect(snap.title).toBe("GitHub MCP   Server");
+		expect(snap.title).not.toContain("\x1b");
+		expect(snap.title).not.toContain("\x07");
+		expect(snap.title).not.toContain("\t");
+		expect(snap.description).toBe("Access GitHub");
+		expect(snap.tools[0]?.description).toBe("Search code");
+		expect(snap.instructions).toBe("Prefer search_code");
+	});
+});
+
+describe("applyMcpToggleRuntime", () => {
+	test("disable disconnects the live manager and refreshes session tools", async () => {
+		const disconnected: string[] = [];
+		const refreshed: unknown[][] = [];
+		const tools = [{ mcpServerName: "other" }];
+		await applyMcpToggleRuntime({
+			name: "github",
+			enabled: false,
+			cwd: "/tmp",
+			manager: {
+				getConnectionStatus: () => "connected",
+				getTools: () => tools,
+				disconnectServer: async name => {
+					disconnected.push(name);
+				},
+				connectServers: async () => {
+					throw new Error("disable must not reconnect");
+				},
+			},
+			session: {
+				refreshMCPTools: next => {
+					refreshed.push(next);
+				},
+			},
+		});
+		expect(disconnected).toEqual(["github"]);
+		expect(refreshed).toEqual([tools]);
+	});
+
+	test("enable reconnects a disconnected server then refreshes session tools", async () => {
+		const connected: Array<Record<string, { command: string }>> = [];
+		const refreshed: unknown[][] = [];
+		const tools = [{ mcpServerName: "github" }];
+		await applyMcpToggleRuntime({
+			name: "github",
+			enabled: true,
+			cwd: "/tmp/project",
+			loadConfigs: async () => ({
+				configs: { github: { command: "github-mcp-server" } },
+				sources: {},
+				exaApiKeys: [],
+			}),
+			manager: {
+				getConnectionStatus: () => "disconnected",
+				getTools: () => tools,
+				disconnectServer: async () => {
+					throw new Error("enable must not disconnect");
+				},
+				connectServers: async configs => {
+					connected.push(configs as Record<string, { command: string }>);
+					return { errors: new Map() };
+				},
+			},
+			session: {
+				refreshMCPTools: next => {
+					refreshed.push(next);
+				},
+			},
+		});
+		expect(connected).toEqual([{ github: { command: "github-mcp-server" } }]);
+		expect(refreshed).toEqual([tools]);
 	});
 });

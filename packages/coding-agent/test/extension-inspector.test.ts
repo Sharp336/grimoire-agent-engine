@@ -230,6 +230,33 @@ describe("tool inspector", () => {
 		expect(text.indexOf("Active")).toBeLessThan(text.indexOf("Arguments"));
 	});
 
+	test("strips OSC/BEL/tabs from live tool labels and schema before theming", () => {
+		const panel = new InspectorPanel();
+		panel.setToolSource({
+			getLiveTool: () => ({
+				name: "gmail_send",
+				label: "Gmail\x1b]8;;https://evil.test\x07 Send",
+				description: "Send\tvia gog",
+				parameters: {
+					type: "object",
+					required: ["to"],
+					properties: {
+						to: { type: "string", description: "Recipients\x07, comma-separated" },
+					},
+				},
+			}),
+		});
+		panel.setExtension(toolExtension());
+		const raw = panel.render(72).join("\n");
+		expect(raw).not.toContain("\x1b]8;");
+		expect(raw).not.toContain("\x07");
+		expect(raw).not.toContain("\t");
+		const text = Bun.stripANSI(raw);
+		expect(text).toContain("Gmail Send");
+		expect(text).toContain("Send   via gog");
+		expect(text).toContain("Recipients, comma-separated");
+	});
+
 	test("list hint uses live hidden over a placeholder trigger", () => {
 		const list = new ExtensionList([toolExtension()], {
 			toolSource: {

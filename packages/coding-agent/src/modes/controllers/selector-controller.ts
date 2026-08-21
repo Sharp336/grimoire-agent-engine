@@ -404,6 +404,8 @@ export class SelectorController {
 					return tools;
 				},
 			},
+			onMcpToolsChanged: tools =>
+				this.ctx.session.refreshMCPTools(tools as Parameters<typeof this.ctx.session.refreshMCPTools>[0]),
 		});
 		// Fullscreen dashboard on the alternate screen (the /settings idiom): the
 		// overlay borrows the terminal's alt buffer and enables mouse tracking for

@@ -37,6 +37,7 @@ import type { EventBus } from "../../../utils/event-bus";
 import { bottomBorder, divider, row, topBorder } from "../overlay-box";
 import { ExtensionList } from "./extension-list";
 import { InspectorPanel, type ToolRuntimeSource } from "./inspector-panel";
+import { applyMcpToggleRuntime } from "./mcp-runtime";
 import {
 	applyDisabledExtensionsToState,
 	applyFilter,
@@ -54,6 +55,7 @@ export interface ExtensionDashboardOptions {
 	mcpManager?: MCPManager;
 	eventBus?: EventBus;
 	toolSource?: ToolRuntimeSource;
+	onMcpToolsChanged?: (tools: unknown[]) => Promise<void> | void;
 }
 
 function extFooter(): string {
@@ -103,6 +105,7 @@ export class ExtensionDashboard implements Component {
 		private readonly mcpManager: MCPManager | undefined,
 		private readonly eventBus: EventBus | undefined,
 		private readonly toolSource: ToolRuntimeSource | undefined,
+		private readonly onMcpToolsChanged?: (tools: unknown[]) => Promise<void> | void,
 	) {}
 
 	static async create(
@@ -119,6 +122,7 @@ export class ExtensionDashboard implements Component {
 			options.mcpManager,
 			options.eventBus,
 			options.toolSource,
+			options.onMcpToolsChanged,
 		);
 		await dashboard.#init();
 		return dashboard;
@@ -338,6 +342,20 @@ export class ExtensionDashboard implements Component {
 			});
 		} catch (error) {
 			logger.warn("Failed to persist MCP toggle", { name, enabled, error: String(error) });
+			await this.#refreshFromState();
+			return;
+		}
+
+		try {
+			await applyMcpToggleRuntime({
+				name,
+				enabled,
+				cwd: this.cwd,
+				manager: this.mcpManager,
+				session: this.onMcpToolsChanged ? { refreshMCPTools: this.onMcpToolsChanged } : undefined,
+			});
+		} catch (error) {
+			logger.warn("Failed to apply MCP toggle to live manager", { name, enabled, error: String(error) });
 		}
 
 		// Reconcile `settings.disabledExtensions` with the canonical mcp.json
@@ -356,7 +374,7 @@ export class ExtensionDashboard implements Component {
 	}
 
 	#writableMcpSourcePath(extensionId: string): string | undefined {
-		const extension = this.#state.extensions.find(ext => ext.id === extensionId);
+		const extension = this.#state.extensions.find(ext => ext.id === extensionId && ext.state !== "shadowed");
 		if (!extension) return undefined;
 		if (extension.source.provider !== "native" && extension.source.provider !== "mcp-json") return undefined;
 		return extension.path;

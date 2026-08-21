@@ -73,6 +73,7 @@
 
 ### Changed
 
+- `/extensions` MCP enable/disable now disconnects or reconnects the live `MCPManager` and refreshes session MCP tools, matching `/mcp enable` / `/mcp disable`.
 - `/extensions` MCP status no longer means "enabled in config": a selected server shows Connected / Connecting / Not connected / Inactive from the live manager, matching `/mcp list`. The command/url is no longer used as the MCP description.
 - `/extensions` no longer leads with `Type:` / `Status:` plumbing. Enablement is the first fact after the name for every kind; MCP keeps live connection health in that slot.
 - Added `compaction.asyncEnabled` (default: on) to speculatively summarize context in the background before hitting threshold limits, avoiding blocking summarization pauses.
@@ -91,6 +92,8 @@
 
 ### Fixed
 
+- `/extensions` sanitizes untrusted MCP/tool display strings (`sanitizeText` then `replaceTabs`) before applying theme SGR, so OSC/BEL/ANSI from a server cannot leak into the TUI.
+- Shadowed `/extensions` rows are informational only: Space/Enter/click no longer toggle them, including same-name MCP configs that share the winner's `mcp:<name>` id.
 - Fixed regional HTTP 401 data-residency errors during Codex chat, web search, and image generation requests by passing token residency metadata on requests.
 - Fixed macOS SSH ControlMaster socket creation failures caused by `sun_path` length limits when using named profiles.
 - Fixed an issue where Nix-packaged builds failed to load on-demand native addons (`onnxruntime-node`/`sherpa-onnx`) due to missing shared C++ runtime library paths.

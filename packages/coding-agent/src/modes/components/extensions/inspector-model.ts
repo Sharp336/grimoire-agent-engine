@@ -8,6 +8,7 @@ import * as fs from "node:fs";
 import { arkToWireSchema, isArkSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { parseFrontmatter } from "@oh-my-pi/pi-utils";
 import { parseRuleConditionAndScope } from "../../../capability/rule";
+import { sanitizeDisplayField, sanitizeDisplayText } from "./display-text";
 import type { Extension, ExtensionState } from "./types";
 
 export interface LiveToolRecord {
@@ -57,7 +58,7 @@ export function parseToolFileHeader(source: string): string | undefined {
 		.split(/\n\s*\n/)
 		.map(paragraph => paragraph.trim())
 		.filter(paragraph => paragraph.length > 0 && !/^symlink:/i.test(paragraph));
-	return paragraphs.length > 0 ? paragraphs.join("\n\n") : undefined;
+	return paragraphs.length > 0 ? sanitizeDisplayField(paragraphs.join("\n\n")) : undefined;
 }
 
 export function toolFileHeaderDescription(filePath: string | undefined): string | undefined {
@@ -80,9 +81,9 @@ export function commandPreview(content: string | undefined): CommandPreview {
 	const argumentHint = typeof argumentHintRaw === "string" ? argumentHintRaw.trim() : "";
 	const text = body.length > 0 ? body : content;
 	return {
-		description: description.length > 0 ? description : undefined,
-		body: text,
-		argumentHint: argumentHint.length > 0 ? argumentHint : undefined,
+		description: description.length > 0 ? sanitizeDisplayField(description) : undefined,
+		body: sanitizeDisplayText(text),
+		argumentHint: argumentHint.length > 0 ? sanitizeDisplayField(argumentHint) : undefined,
 		usesArguments: /\$ARGUMENTS\b/.test(text),
 	};
 }
@@ -93,16 +94,19 @@ function asRecord(raw: unknown): Record<string, unknown> | null {
 
 function stringField(raw: Record<string, unknown>, key: string): string | undefined {
 	const value = raw[key];
-	return typeof value === "string" && value.length > 0 ? value : undefined;
+	return typeof value === "string" && value.length > 0 ? sanitizeDisplayField(value) : undefined;
 }
 
 function stringArray(value: unknown): string[] | undefined {
 	if (typeof value === "string") {
-		const token = value.trim();
-		return token.length > 0 ? [token] : undefined;
+		const token = sanitizeDisplayField(value.trim());
+		return token ? [token] : undefined;
 	}
 	if (!Array.isArray(value)) return undefined;
-	const items = value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0);
+	const items = value
+		.filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
+		.map(entry => sanitizeDisplayText(entry))
+		.filter(entry => entry.length > 0);
 	return items.length > 0 ? items : undefined;
 }
 
@@ -160,11 +164,11 @@ export function toolParamsFromSchema(schema: unknown): ToolParamView[] {
 		const isRequired = required.has(name);
 		const defaultVal = record.default !== undefined ? `Default: ${String(record.default)}` : null;
 		params.push({
-			name,
+			name: sanitizeDisplayText(name),
 			type: paramType(record),
 			required: isRequired,
 			flag: isRequired ? "Required" : (defaultVal ?? "Optional"),
-			description: typeof record.description === "string" ? record.description : undefined,
+			description: typeof record.description === "string" ? sanitizeDisplayField(record.description) : undefined,
 		});
 	}
 	return params;
@@ -241,10 +245,15 @@ export function toolInspectorData(
 			? toolFileHeaderDescription(ext.path)
 			: discovered;
 		return {
-			description,
+			description: sanitizeDisplayField(description),
 			params: [],
 			runtimeDetail: `${lives.length} tools`,
-			factory: lives,
+			factory: lives.map(live => ({
+				...live,
+				name: sanitizeDisplayText(live.name),
+				label: sanitizeDisplayField(live.label),
+				description: sanitizeDisplayField(live.description),
+			})),
 		};
 	}
 	const live = lives[0];
@@ -255,8 +264,8 @@ export function toolInspectorData(
 			? live.description
 			: (discovered ?? live?.description ?? toolFileHeaderDescription(ext.path));
 	return {
-		label: live?.label && live.label !== ext.displayName ? live.label : undefined,
-		description,
+		label: live?.label && live.label !== ext.displayName ? sanitizeDisplayField(live.label) : undefined,
+		description: sanitizeDisplayField(description),
 		params: toolParamsFromSchema(live?.parameters ?? raw?.parameters ?? raw?.inputSchema),
 		runtimeDetail: liveToolDetail(live) ?? ext.trigger,
 		factory: lives,
@@ -285,7 +294,7 @@ export function ruleInspectorData(ext: Extension): {
 	const interruptMode = stringField(raw, "interruptMode");
 	const content = stringField(raw, "content") ?? "";
 	return {
-		description: stringField(raw, "description") ?? ext.description,
+		description: stringField(raw, "description") ?? sanitizeDisplayField(ext.description),
 		alwaysApply,
 		globs,
 		condition: parsed.condition,
@@ -315,7 +324,7 @@ export function skillInspectorData(ext: Extension): {
 	else if (alwaysApply) runtimeDetail = "always";
 	else if (globs) runtimeDetail = globs.join(", ");
 	return {
-		description: stringField(frontmatter, "description") ?? ext.description,
+		description: stringField(frontmatter, "description") ?? sanitizeDisplayField(ext.description),
 		content: stringField(raw, "content") ?? "",
 		globs,
 		alwaysApply,
@@ -335,8 +344,8 @@ export function commandInspectorData(ext: Extension): {
 	const preview = commandPreview(stringField(raw, "content"));
 	return {
 		...preview,
-		description: preview.description ?? ext.description,
-		runtimeDetail: ext.trigger ?? `/${ext.name}`,
+		description: preview.description ?? sanitizeDisplayField(ext.description),
+		runtimeDetail: ext.trigger ?? `/${sanitizeDisplayText(ext.name)}`,
 	};
 }
 
@@ -399,6 +408,6 @@ export function enablementLabel(state: ExtensionState, reason?: string, shadowed
 			return `Disabled (${reasonText})`;
 		}
 		case "shadowed":
-			return `Shadowed${shadowedBy ? ` by ${shadowedBy}` : ""}`;
+			return `Shadowed${shadowedBy ? ` by ${sanitizeDisplayText(shadowedBy)}` : ""}`;
 	}
 }

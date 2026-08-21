@@ -10,6 +10,7 @@ import { isProviderEnabled } from "../../../discovery";
 import { theme } from "../../../modes/theme/theme";
 import { matchesSelectDown, matchesSelectUp } from "../../utils/keybinding-matchers";
 import { clampSelection, contentRowWidth, renderScrollableList, searchableChar } from "../selector-helpers";
+import { sanitizeDisplayText } from "./display-text";
 import {
 	formatExtensionListHint,
 	joinListHints,
@@ -244,8 +245,7 @@ export class ExtensionList implements Component {
 					? this.#getMcpHealthIcon(mcpSnap.health, masterDisabled)
 					: this.#getStateIcon(ext.state, masterDisabled);
 
-		// Name
-		let name = ext.displayName;
+		let name = sanitizeDisplayText(ext.displayName);
 		const nameWidth = Math.min(24, width - 16);
 
 		// Build the line with indentation (visually "inside" the master switch)
@@ -463,7 +463,9 @@ export class ExtensionList implements Component {
 		if (item?.type === "master") {
 			this.callbacks.onMasterToggle?.(item.providerId);
 		} else if (item?.type === "extension") {
-			// Only allow toggling if the provider master switch is enabled.
+			// Shadowed same-name rows share the winner's id (`mcp:github`).
+			// Toggling them would mutate whichever config `find(id)` hits first.
+			if (item.item.state === "shadowed") return;
 			const masterDisabled = this.#masterSwitchProvider !== null && !isProviderEnabled(this.#masterSwitchProvider);
 			if (!masterDisabled) {
 				const newEnabled = item.item.state === "disabled";
