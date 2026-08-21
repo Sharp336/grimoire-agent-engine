@@ -1309,7 +1309,7 @@ export class MCPCommandController {
 			let isConnected = state === "connected";
 			const isDeferred = state === "deferred";
 			const isConnecting = state === "connecting";
-			const toolsAvailable = isConnected || isDeferred;
+			let toolsAvailable = isConnected || isDeferred;
 
 			// Fallback: if manager state is still disconnected but direct test works,
 			// report as connected to avoid false-negative messaging.
@@ -1317,6 +1317,7 @@ export class MCPCommandController {
 				try {
 					await this.#handleTestConnection(config);
 					isConnected = true;
+					toolsAvailable = true;
 					await this.#syncManagerConnection(name, config);
 				} catch {
 					// Keep disconnected status

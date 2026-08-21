@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { SourceMeta } from "@oh-my-pi/pi-coding-agent/capability/types";
+import * as mcpClient from "@oh-my-pi/pi-coding-agent/mcp/client";
 import type { MCPServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { MCPCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/mcp-command-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -37,6 +38,7 @@ function createController() {
 		disconnectAll: vi.fn(async () => {}),
 		discoverAndConnect: vi.fn(async () => ({ errors: new Map<string, string>() })),
 		disconnectServer: vi.fn(async () => {}),
+		prepareConfig: vi.fn(async (config: MCPServerConfig) => config),
 		connectServers: vi.fn(
 			async (_configs: Record<string, MCPServerConfig>, _sources: Record<string, SourceMeta>) => ({
 				errors: new Map<string, string>(),
@@ -174,5 +176,25 @@ describe("/mcp enable and disable", () => {
 		expect(rendered).toContain('Added server "lazy" to project config');
 		expect(rendered).toContain("Server is available on demand");
 		expect(rendered).not.toContain("Successfully connected to server");
+	});
+
+	test("activates server tools when the direct-test fallback connects", async () => {
+		const { controller, mcpManager, presentCommandOutput, session } = createController();
+		mcpManager.getConnectionStatus
+			.mockReturnValueOnce("disconnected") // #waitForServerConnectionWithAnimation
+			.mockReturnValueOnce("disconnected") // #syncManagerConnection pre-check
+			.mockReturnValueOnce("connected"); // #syncManagerConnection post-connect
+		vi.spyOn(mcpClient, "connectToServer").mockResolvedValue({} as never);
+		vi.spyOn(mcpClient, "disconnectServer").mockResolvedValue(undefined);
+		const lazyTool = { name: "lazy_echo", description: "", parameters: {}, mcpServerName: "lazy" };
+		mcpManager.getTools.mockReturnValue([lazyTool]);
+		session.getToolByName.mockImplementation((name: string) => (name === lazyTool.name ? lazyTool : undefined));
+
+		await controller.handle("/mcp add lazy -- lazy-server");
+
+		expect(mcpManager.connectServers).toHaveBeenCalledTimes(1);
+		expect(session.setActiveToolsByName).toHaveBeenCalledWith(["lazy_echo"]);
+		const rendered = renderPresentedOutput(presentCommandOutput);
+		expect(rendered).toContain("Successfully connected to server");
 	});
 });
