@@ -14,6 +14,7 @@
 - Fixed long Kiro sessions replaying provisional reasoning as assistant speech, resending historical screenshots, fabricating tool-result carrier prose, emitting malformed tool histories, exceeding provider payload limits without local compaction recovery, and changing conversation identity between turns ([#13](https://github.com/ajdiyassin/oh-my-pi/issues/13)).
 - Hardened Kiro registration caching and refresh endpoint validation, including the canonical regional fallback when `tokenEndpoint` is omitted.
 - Redacted Kiro registered-client secrets alongside OAuth refresh tokens in generic remote credential snapshots.
+- Kiro OAuth token refresh now honors the caller's abort signal, bounding refresh network work to refresh ownership.
 - Added Codex Responses support for Code Mode, preserving tool modes and passing tool namespace metadata during sessions.
 
 ### Fixed

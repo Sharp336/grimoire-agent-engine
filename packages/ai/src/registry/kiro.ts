@@ -66,7 +66,7 @@ export const kiroProvider = {
 		throwIfKiroLoginCancelled(callbacks.signal);
 		return result;
 	},
-	refreshToken: (credentials: OAuthCredentials) => refreshKiroToken(credentials),
+	refreshToken: (credentials: OAuthCredentials, signal?: AbortSignal) => refreshKiroToken(credentials, { signal }),
 	getApiKey: (credentials: OAuthCredentials) => {
 		if (!credentials.orgId) {
 			throw new AIError.OAuthError("Kiro OAuth credentials are missing the selected profile", {
