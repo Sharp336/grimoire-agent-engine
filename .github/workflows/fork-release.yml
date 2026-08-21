@@ -328,7 +328,7 @@ jobs:
               -f body="$(cat "$notes")" \
               -F draft=false \
               -F prerelease=false \
-              -f make_latest=false \
+              -f make_latest=true \
               --jq '.id')"
           else
             gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
@@ -336,7 +336,7 @@ jobs:
               -f body="$(cat "$notes")" \
               -F draft=false \
               -F prerelease=false \
-              -f make_latest=false >/dev/null
+              -f make_latest=true >/dev/null
           fi
           gh release upload "$RELEASE_TAG" \
             release/omp-linux-x64 \
