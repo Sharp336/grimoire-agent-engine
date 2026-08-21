@@ -1226,7 +1226,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Display",
 			label: "Rewrite Scrollback",
 			description:
-				"This setting erases and replays terminal scrollback when a block's final form replaces its live preview. Stale preview copies then never stay in history. When off, stale previews stay in history and the final form is appended below them.",
+				"This setting erases and replays terminal scrollback when a block's final form replaces its live preview. Stale preview copies then never stay in history on a direct terminal. A multiplexer session keeps the stale copy and adds the final form below it.",
 		},
 	},
 
