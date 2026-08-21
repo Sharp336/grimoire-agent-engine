@@ -485,9 +485,9 @@ const contextPctSegment: StatusLineSegment = {
 	id: "context_pct",
 	render(ctx) {
 		const pct = ctx.contextPercent;
-		const window = ctx.contextWindow;
+		const denominator = ctx.contextPercentDenominator;
 
-		const color = getContextUsageThemeColor(getContextUsageLevel(pct ?? 0, window));
+		const color = getContextUsageThemeColor(getContextUsageLevel(pct ?? 0, denominator));
 		// Async-compaction indicator: pulse the auto icon while a background
 		// speculation runs, hold it in accent once a result is armed.
 		let autoIcon = "";
@@ -503,7 +503,7 @@ const contextPctSegment: StatusLineSegment = {
 						: color;
 			autoIcon = ` ${theme.fg(iconColor, theme.icon.auto)}`;
 		}
-		const text = theme.fg(color, formatContextUsage(pct, window, ctx.contextTokens));
+		const text = theme.fg(color, formatContextUsage(pct, denominator, ctx.contextTokens));
 		const content = withIcon(theme.icon.context, `${text}${autoIcon}`);
 
 		return { content, visible: true };

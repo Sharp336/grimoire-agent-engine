@@ -1,12 +1,13 @@
 import type { Tokenizer } from "@oh-my-pi/pi-agent-core";
-import type { CompactionSettings } from "@oh-my-pi/pi-agent-core/compaction";
+import type { CompactionSettings as EngineCompactionSettings } from "@oh-my-pi/pi-agent-core/compaction";
 import { effectiveReserveTokens, resolveThresholdTokens } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Tool as AiTool, Model } from "@oh-my-pi/pi-ai";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { formatNumber } from "@oh-my-pi/pi-utils";
+import type { ContextPercentBase, CompactionSettings as CodingCompactionSettings } from "../../config/settings-schema";
 import type { Skill } from "../../extensibility/skills";
 import type { AgentSession } from "../../session/agent-session";
-import { resolveSpeculationMethod } from "../../session/compaction-methods";
+import { hasAvailableCompactionMethod, resolveSpeculationMethod } from "../../session/compaction-methods";
 import { estimateInlineSavings, type SnapcompactSavingsEstimate } from "../../session/snapcompact-inline";
 import { resolveSpeculationLeadTokens } from "../../session/speculation-lead";
 import type { Tool } from "../../tools";
@@ -43,16 +44,82 @@ export interface ContextBreakdown {
 	snapcompact?: SnapcompactSavingsEstimate;
 }
 
+export interface ContextPercentDenominatorOptions {
+	/** Active model used to determine which configured compaction method can run. */
+	model?: Model | null;
+	/** Model context capacity; returned unchanged when compaction-relative display is unavailable. */
+	modelContextWindow: number;
+	/** Presentation base. Unknown values intentionally fall back to the model window. */
+	contextPercentBase?: ContextPercentBase | string;
+	/** Current coding-agent compaction settings. */
+	compactionSettings?: CodingCompactionSettings | EngineCompactionSettings | null;
+	/**
+	 * Host threshold from a collab state frame: a number when runnable, `null`
+	 * when the host state authoritatively has no threshold, and `undefined`
+	 * when no collab state is being rendered.
+	 */
+	compactionThresholdTokens?: number | null;
+}
+
+/**
+ * Resolve the status line's presentation-only context percentage denominator.
+ * Canonical context statistics remain model-window based; this only selects the
+ * scale used by context percentage labels, colors, and the gauge.
+ */
+export function resolveContextPercentDenominator(options: ContextPercentDenominatorOptions): number {
+	const modelWindow = options.modelContextWindow;
+	if (!Number.isFinite(modelWindow) || modelWindow <= 0) return 0;
+	if (options.contextPercentBase !== "compaction") return modelWindow;
+
+	const explicitThreshold = options.compactionThresholdTokens;
+	if (explicitThreshold !== undefined) {
+		return typeof explicitThreshold === "number" &&
+			Number.isFinite(explicitThreshold) &&
+			explicitThreshold > 0 &&
+			explicitThreshold < modelWindow
+			? explicitThreshold
+			: modelWindow;
+	}
+
+	const settings = options.compactionSettings;
+	if (!settings || typeof settings !== "object" || settings.enabled !== true) return modelWindow;
+	const strategy = (settings as { strategy?: unknown }).strategy;
+	if (
+		strategy !== undefined &&
+		strategy !== "context-full" &&
+		strategy !== "handoff" &&
+		strategy !== "shake" &&
+		strategy !== "snapcompact" &&
+		strategy !== "off"
+	) {
+		return modelWindow;
+	}
+	if (strategy === "off") return modelWindow;
+
+	const methodOrder = (settings as { methodOrder?: unknown }).methodOrder;
+	if (!Array.isArray(methodOrder) || methodOrder.length === 0) return modelWindow;
+	if (!hasAvailableCompactionMethod(options.model, settings as CodingCompactionSettings)) return modelWindow;
+
+	const thresholdTokens = resolveThresholdTokens(modelWindow, settings as EngineCompactionSettings);
+	return Number.isFinite(thresholdTokens) && thresholdTokens > 0 && thresholdTokens < modelWindow
+		? thresholdTokens
+		: modelWindow;
+}
+
 /** Percent positions (0–100 of the context window) for the auto-compaction boundaries. */
 export interface CompactionBoundaries {
 	/** Where auto-compaction fires. */
 	thresholdPercent: number;
+	/** Auto-compaction threshold in context tokens. */
+	thresholdTokens: number;
 	/**
 	 * Where the background speculative summarizer starts (threshold − lead), or
 	 * `null` when no speculation will run (async compaction disabled, or the
 	 * first available method is local — snapcompact/shake — and thus instant).
 	 */
 	speculationPercent: number | null;
+	/** Background speculation start in context tokens, or `null` when unavailable. */
+	speculationTokens: number | null;
 }
 
 /**
@@ -65,18 +132,34 @@ export function computeCompactionBoundaries(
 	settings: AgentSession["settings"],
 	contextWindow: number,
 	model?: Model | null,
+	thresholdOverrideTokens?: number | null,
 ): CompactionBoundaries | null {
 	if (!(contextWindow > 0)) return null;
+	if (thresholdOverrideTokens === null) return null;
 	const configured = settings.getGroup("compaction");
-	const compactionSettings = configured as CompactionSettings;
-	if (!configured.enabled || compactionSettings.strategy === "off") return null;
-	const thresholdTokens = resolveThresholdTokens(contextWindow, compactionSettings);
-	if (!(thresholdTokens > 0) || thresholdTokens > contextWindow) return null;
-	const speculates = configured.asyncEnabled !== false && resolveSpeculationMethod(model, configured) !== undefined;
+	const compactionSettings = configured as EngineCompactionSettings;
+	let thresholdTokens: number | undefined;
+	if (thresholdOverrideTokens !== undefined) {
+		thresholdTokens = thresholdOverrideTokens;
+	} else {
+		thresholdTokens =
+			configured.enabled && compactionSettings.strategy !== "off"
+				? resolveThresholdTokens(contextWindow, compactionSettings)
+				: undefined;
+	}
+	if (thresholdTokens === undefined || !(thresholdTokens > 0) || thresholdTokens > contextWindow) return null;
+	const configuredForSpeculation =
+		configured.enabled === true &&
+		compactionSettings.strategy !== "off" &&
+		configured.asyncEnabled !== false &&
+		resolveSpeculationMethod(model, configured) !== undefined;
 	const leadTokens = resolveSpeculationLeadTokens(thresholdTokens);
+	const speculationTokens = configuredForSpeculation ? Math.max(0, thresholdTokens - leadTokens) : null;
 	return {
 		thresholdPercent: (thresholdTokens / contextWindow) * 100,
-		speculationPercent: speculates ? (Math.max(0, thresholdTokens - leadTokens) / contextWindow) * 100 : null,
+		thresholdTokens,
+		speculationPercent: speculationTokens === null ? null : (speculationTokens / contextWindow) * 100,
+		speculationTokens,
 	};
 }
 
@@ -309,7 +392,7 @@ export function computeContextBreakdown(
 
 	let autoCompactBufferTokens = 0;
 	if (contextWindow > 0) {
-		const compactionSettings = session.settings.getGroup("compaction") as CompactionSettings;
+		const compactionSettings = session.settings.getGroup("compaction") as EngineCompactionSettings;
 		if (compactionSettings.enabled && compactionSettings.strategy !== "off") {
 			const threshold = resolveThresholdTokens(contextWindow, compactionSettings);
 			autoCompactBufferTokens = Math.max(0, contextWindow - threshold);

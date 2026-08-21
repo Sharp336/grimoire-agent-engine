@@ -21,7 +21,11 @@ import { getSessionAccentAnsi, getSessionAccentHex } from "../../../utils/sessio
 import { calculateTokensPerSecond } from "../../../utils/token-rate";
 import { sanitizeStatusText } from "../../shared";
 import { theme } from "../../theme/theme";
-import { type CompactionBoundaries, computeCompactionBoundaries } from "../../utils/context-usage";
+import {
+	type CompactionBoundaries,
+	computeCompactionBoundaries,
+	resolveContextPercentDenominator,
+} from "../../utils/context-usage";
 import {
 	type CodexResetFireworksEvent,
 	type CodexResetUsageSnapshot,
@@ -307,6 +311,20 @@ function removeContextSegments(parts: string[], segments: StatusLineSegmentId[])
 function formatEmbeddedContextPercent(percent: number): string {
 	return `${percent > 0 && percent < 1 ? percent.toFixed(1) : Math.round(percent)}%`;
 }
+/**
+ * Three-state host-threshold selector for context percentage and gauge markers:
+ * `undefined` means local/no collab state, a number is a runnable host
+ * threshold, and `null` means the collab host state authoritatively omitted
+ * its threshold.
+ */
+function resolveCollabCompactionThreshold(status: CollabStatus | null): number | null | undefined {
+	if (status?.role !== "guest") return undefined;
+	const state = status.stateOverride;
+	if (state === undefined || state === null) return undefined;
+	const threshold = state.contextUsage?.compactionThresholdTokens;
+	return typeof threshold === "number" && Number.isFinite(threshold) && threshold > 0 ? threshold : null;
+}
+
 function hasGitSegment(segments: readonly StatusLineSegmentId[]): boolean {
 	return segments.includes("git");
 }
@@ -469,6 +487,7 @@ export class StatusLineComponent implements Component {
 			transparent: settings.get("statusLine.transparent"),
 			compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
 			contextLine: settings.get("statusLine.contextLine"),
+			contextPercentBase: settings.get("statusLine.contextPercentBase"),
 		};
 	}
 
@@ -1551,7 +1570,7 @@ export class StatusLineComponent implements Component {
 	 */
 	getCachedContextBreakdown(): { usedTokens: number; contextWindow: number } {
 		const messages = this.session.messages ?? EMPTY_MESSAGES;
-		const modelContextWindow = this.session.model?.contextWindow ?? 0;
+		const modelContextWindow = this.session.state?.model?.contextWindow ?? this.session.model?.contextWindow ?? 0;
 		const length = messages.length;
 		const lastFingerprint = length > 0 ? messageFingerprint(messages[length - 1]!) : undefined;
 		// Bumps when the in-flight pending snapshot is set/cleared. Without it a
@@ -1599,6 +1618,7 @@ export class StatusLineComponent implements Component {
 	#buildSegmentContext(
 		width: number,
 		segmentOptions: StatusLineSettings["segmentOptions"],
+		contextPercentBase: StatusLineSettings["contextPercentBase"],
 		includePath: boolean,
 		includeGit: boolean,
 		includePr: boolean,
@@ -1626,20 +1646,34 @@ export class StatusLineComponent implements Component {
 			...aggregateUsageStats,
 			tokensPerSecond: this.#getTokensPerSecond(),
 		};
-
-		let contextWindow = state.model?.contextWindow ?? this.session.model?.contextWindow ?? 0;
+		const model = state.model ?? this.session.model;
 		const breakdown = this.getCachedContextBreakdown();
+		const stateContextWindow = state.model?.contextWindow ?? 0;
+		const sessionContextWindow = this.session.model?.contextWindow ?? 0;
+		const fallbackContextWindow =
+			stateContextWindow > 0 ? stateContextWindow : sessionContextWindow > 0 ? sessionContextWindow : 0;
+		let contextWindow = breakdown.contextWindow > 0 ? breakdown.contextWindow : fallbackContextWindow;
 		let contextTokens = breakdown.usedTokens;
-		contextWindow = breakdown.contextWindow || contextWindow;
-		let contextPercent: number | null = contextWindow > 0 ? (breakdown.usedTokens / contextWindow) * 100 : null;
+		let compactionThresholdTokens = resolveCollabCompactionThreshold(this.#collabStatus);
 		// Collab guest: context comes from the host's state frames — the local
 		// replica does no accounting of its own.
 		const collabState = this.#collabStatus?.stateOverride;
-		if (collabState?.contextUsage) {
-			contextWindow = collabState.contextUsage.contextWindow || contextWindow;
-			contextTokens = collabState.contextUsage.tokens ?? contextTokens;
-			contextPercent = collabState.contextUsage.percent ?? contextPercent;
+		const collabUsage = collabState?.contextUsage;
+		if (collabUsage) {
+			if (collabUsage.contextWindow > 0) contextWindow = collabUsage.contextWindow;
+			contextTokens = collabUsage.tokens ?? contextTokens;
 		}
+		const compactionSource = typeof this.session.settings?.getGroup === "function" ? this.session.settings : settings;
+		const compactionSettings = compactionSource.getGroup("compaction");
+		const contextPercentDenominator = resolveContextPercentDenominator({
+			model,
+			modelContextWindow: contextWindow,
+			contextPercentBase,
+			compactionSettings,
+			compactionThresholdTokens,
+		});
+		const contextPercent =
+			contextPercentDenominator > 0 ? (contextTokens / contextPercentDenominator) * 100 : null;
 
 		const shouldResolveActiveRepo = this.#gitEnabled() && (includePath || includeGit || includePr);
 		const projectDir = getProjectDir();
@@ -1688,6 +1722,7 @@ export class StatusLineComponent implements Component {
 			contextPercent,
 			contextTokens,
 			contextWindow,
+			contextPercentDenominator,
 			autoCompactEnabled: this.#autoCompactEnabled,
 			compactionSpeculation,
 			speculationBlinkOn: this.#speculationBlinkOn,
@@ -1741,6 +1776,7 @@ export class StatusLineComponent implements Component {
 			rightSegments,
 			separator: this.#settings.separator ?? presetDef.separator,
 			segmentOptions: mergedSegmentOptions,
+			contextPercentBase: this.#settings.contextPercentBase ?? settings.get("statusLine.contextPercentBase") ?? "model",
 		};
 	}
 
@@ -1781,6 +1817,7 @@ export class StatusLineComponent implements Component {
 		const ctx = this.#buildSegmentContext(
 			width,
 			effectiveSettings.segmentOptions,
+			effectiveSettings.contextPercentBase,
 			includePath,
 			includeGit,
 			includePr,
@@ -2024,6 +2061,8 @@ export class StatusLineComponent implements Component {
 		let windowLabel = "";
 		let percentStart = -1;
 		let windowStart = -1;
+		let thresholdIdx = -1;
+		let speculationIdx = -1;
 		let scaleWidth = gapWidth;
 		// >100%: usage anchored past the active window (e.g. model switch to a
 		// smaller window). The bar clamps full, but the embedded label breaks
@@ -2031,7 +2070,7 @@ export class StatusLineComponent implements Component {
 		const percentOverflow = pct > 100;
 		if (embedContext) {
 			const candidatePercent = formatEmbeddedContextPercent(percentOverflow ? pct : clampedPct);
-			const candidateWindow = formatNumber(ctx.contextWindow);
+			const candidateWindow = formatNumber(ctx.contextPercentDenominator);
 			if (gapWidth >= candidatePercent.length + candidateWindow.length + 4) {
 				percentLabel = candidatePercent;
 				windowLabel = candidateWindow;
@@ -2050,19 +2089,30 @@ export class StatusLineComponent implements Component {
 		const usedCount = Math.min(scaleWidth, Math.max(1, Math.round((clampedPct / 100) * scaleWidth)));
 		const unusedColor = theme.getFgAnsi("border");
 
-		// Boundary markers are only meaningful when auto-compaction can fire and
-		// the line is long enough for the markers to read as positions.
-		let speculationIdx = -1;
-		let thresholdIdx = -1;
-		if ((mode === "annotated" || mode === "embedded") && ctx.autoCompactEnabled && gapWidth >= 8) {
-			const boundaries = this.#compactionBoundaries(ctx.contextWindow);
+		// Boundary markers follow the authoritative host threshold while a collab
+		// state is present; only local/no-state rendering consults the local
+		// auto-compaction toggle.
+		const thresholdOverrideTokens = resolveCollabCompactionThreshold(ctx.collab);
+		const hasCollabThresholdState = thresholdOverrideTokens !== undefined;
+		const shouldRenderCompactionMarkers = hasCollabThresholdState
+			? thresholdOverrideTokens !== null
+			: ctx.autoCompactEnabled;
+		if ((mode === "annotated" || mode === "embedded") && shouldRenderCompactionMarkers && gapWidth >= 8) {
+			const boundaries = this.#compactionBoundaries(ctx.contextWindow, thresholdOverrideTokens);
 			if (boundaries) {
-				const cellFor = (percent: number) =>
-					Math.min(scaleWidth - 1, Math.max(0, Math.round((percent / 100) * scaleWidth)));
-				thresholdIdx = cellFor(boundaries.thresholdPercent);
+				const markerDenominator =
+					effectiveSettings.contextPercentBase === "compaction"
+						? ctx.contextPercentDenominator
+						: ctx.contextWindow;
+				const cellFor = (tokens: number) =>
+					Math.min(
+						Math.max(0, scaleWidth - 1),
+						Math.max(0, Math.round((tokens / markerDenominator) * scaleWidth)),
+					);
+				thresholdIdx = cellFor(boundaries.thresholdTokens);
 				// null = no background speculation will run (async disabled or the
 				// first available method is local/instant) — no tick to show.
-				if (boundaries.speculationPercent !== null) speculationIdx = cellFor(boundaries.speculationPercent);
+				if (boundaries.speculationTokens !== null) speculationIdx = cellFor(boundaries.speculationTokens);
 				if (speculationIdx === thresholdIdx) speculationIdx = -1; // threshold wins the cell
 			}
 		}
@@ -2124,8 +2174,11 @@ export class StatusLineComponent implements Component {
 		return `${out}\x1b[39m`;
 	}
 
-	/** Auto-compaction boundary percents, or null when unavailable (disabled, no window). */
-	#compactionBoundaries(contextWindow: number): CompactionBoundaries | null {
+	/** Auto-compaction boundaries, or null when unavailable (disabled, no window). */
+	#compactionBoundaries(
+		contextWindow: number,
+		thresholdOverrideTokens?: number | null,
+	): CompactionBoundaries | null {
 		// Collab-guest replicas and test mocks have no session-scoped settings;
 		// the global store carries the same compaction knobs.
 		const source = typeof this.session.settings?.getGroup === "function" ? this.session.settings : settings;
@@ -2133,7 +2186,7 @@ export class StatusLineComponent implements Component {
 		// (and therefore whether a speculation tick is meaningful).
 		const model = this.session.state?.model ?? this.session.model;
 		try {
-			return computeCompactionBoundaries(source, contextWindow, model);
+			return computeCompactionBoundaries(source, contextWindow, model, thresholdOverrideTokens);
 		} catch {
 			return null;
 		}

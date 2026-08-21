@@ -228,6 +228,7 @@ export class SelectorController {
 							transparent: settings.get("statusLine.transparent"),
 							compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
 							contextLine: settings.get("statusLine.contextLine"),
+							contextPercentBase: settings.get("statusLine.contextPercentBase"),
 							...previewSettings,
 						});
 						this.ctx.ui.requestRender();
@@ -259,6 +260,7 @@ export class SelectorController {
 							transparent: settings.get("statusLine.transparent"),
 							compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
 							contextLine: settings.get("statusLine.contextLine"),
+							contextPercentBase: settings.get("statusLine.contextPercentBase"),
 						});
 						this.ctx.ui.requestRender();
 					},
@@ -449,6 +451,14 @@ export class SelectorController {
 				this.ctx.session.setAutoCompactionEnabled(value as boolean);
 				this.ctx.statusLine.setAutoCompactEnabled(value as boolean);
 				break;
+			case "compaction.enabled":
+			case "compaction.methodOrder":
+			case "compaction.thresholdTokens":
+			case "compaction.thresholdPercent":
+			case "compaction.reserveTokens":
+				this.ctx.collabHost?.scheduleStateBroadcast();
+				break;
+
 			case "composer.shape":
 				this.ctx.syncComposerShape();
 				break;
@@ -671,6 +681,8 @@ export class SelectorController {
 			case "statusLine.sessionAccent":
 			case "statusLine.transparent":
 			case "statusLine.compactThinkingLevel":
+			case "statusLine.contextLine":
+			case "statusLine.contextPercentBase":
 			case "statusLineSegments":
 			case "statusLineModelThinking":
 			case "statusLinePathAbbreviate":
@@ -692,6 +704,8 @@ export class SelectorController {
 					transparent: settings.get("statusLine.transparent"),
 					segmentOptions: settings.get("statusLine.segmentOptions"),
 					compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
+					contextLine: settings.get("statusLine.contextLine"),
+					contextPercentBase: settings.get("statusLine.contextPercentBase"),
 				};
 				this.ctx.statusLine.updateSettings(statusLineSettings);
 				this.ctx.ui.requestRender();

@@ -18,6 +18,7 @@ import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-ag
 import type { ContextUsage } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { StatusLineComponent } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
 import { initTheme, setSymbolPreset, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import type { CollabContextUsage, CollabSessionState } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { getSessionAccentAnsi } from "@oh-my-pi/pi-coding-agent/utils/session-color";
 import { adjustHsv } from "@oh-my-pi/pi-utils";
@@ -110,6 +111,38 @@ function userMessage(text: string): unknown {
 }
 function assistantMessage(text: string): unknown {
 	return { role: "assistant", content: [{ type: "text", text }] };
+}
+function renderContextSegment(
+	session: AgentSession,
+	segment: "context_pct" | "context_total",
+	contextPercentBase?: "model" | "compaction",
+): string {
+	const comp = new StatusLineComponent(session);
+	comp.updateSettings({
+		preset: "custom",
+		leftSegments: [segment],
+		rightSegments: [],
+		separator: "powerline-thin",
+		contextPercentBase,
+	});
+	return comp.getTopBorder(80).content.replaceAll(/\x1b\[[0-9;]*m/g, "");
+}
+
+function renderGuestContextSegment(session: AgentSession, contextUsage: CollabContextUsage): string {
+	const comp = new StatusLineComponent(session);
+	comp.setCollabStatus({
+		role: "guest",
+		participantCount: 2,
+		stateOverride: { contextUsage } as CollabSessionState,
+	});
+	comp.updateSettings({
+		preset: "custom",
+		leftSegments: ["context_pct"],
+		rightSegments: [],
+		separator: "powerline-thin",
+		contextPercentBase: "compaction",
+	});
+	return comp.getTopBorder(80).content.replaceAll(/\x1b\[[0-9;]*m/g, "");
 }
 
 describe("StatusLineComponent context breakdown", () => {
@@ -253,6 +286,276 @@ describe("StatusLineComponent context breakdown", () => {
 		// 5000 / 272000 → 1.8%, window formatted as 272K (matches the footer gauge).
 		const plain = comp.getTopBorder(80).content.replaceAll(/\x1b\[[0-9;]*m/g, "");
 		expect(plain).toContain("1.8%/272K");
+	});
+
+	it("defaults context_pct to the model window while context_total remains the model capability", () => {
+		const { session } = makeSession({
+			messages: [userMessage("hi")],
+			contextWindow: 200_000,
+			usage: { tokens: 150_000, contextWindow: 200_000, percent: 75 },
+			settings: Settings.isolated(),
+		});
+
+		expect(renderContextSegment(session, "context_pct")).toContain("75.0%/200K");
+		expect(renderContextSegment(session, "context_total")).toContain("200K");
+	});
+
+	it("uses a fixed thresholdTokens as the context_pct denominator without shrinking context_total", () => {
+		const { session } = makeSession({
+			messages: [userMessage("hi")],
+			contextWindow: 200_000,
+			usage: { tokens: 150_000, contextWindow: 200_000, percent: 75 },
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.thresholdTokens": 100_000,
+				"compaction.thresholdPercent": 25,
+			}),
+		});
+
+		expect(renderContextSegment(session, "context_pct", "compaction")).toContain("150.0%/100K");
+		expect(renderContextSegment(session, "context_total", "compaction")).toContain("200K");
+	});
+
+	it("uses thresholdPercent as the compaction-relative context_pct denominator", () => {
+		const { session } = makeSession({
+			messages: [userMessage("hi")],
+			contextWindow: 200_000,
+			usage: { tokens: 150_000, contextWindow: 200_000, percent: 75 },
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.thresholdTokens": -1,
+				"compaction.thresholdPercent": 50,
+			}),
+		});
+
+		expect(renderContextSegment(session, "context_pct", "compaction")).toContain("150.0%/100K");
+	});
+
+	it("uses a reserve-derived compaction threshold as the context_pct denominator", () => {
+		const { session } = makeSession({
+			messages: [userMessage("hi")],
+			contextWindow: 200_000,
+			usage: { tokens: 150_000, contextWindow: 200_000, percent: 75 },
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.thresholdTokens": -1,
+				"compaction.thresholdPercent": -1,
+				"compaction.reserveTokens": 50_000,
+			}),
+		});
+
+		expect(renderContextSegment(session, "context_pct", "compaction")).toContain("100.0%/150K");
+	});
+
+	it("falls back to the model denominator when compaction is disabled", () => {
+		const { session } = makeSession({
+			messages: [userMessage("hi")],
+			contextWindow: 200_000,
+			usage: { tokens: 150_000, contextWindow: 200_000, percent: 75 },
+			settings: Settings.isolated({
+				"compaction.enabled": false,
+				"compaction.thresholdTokens": 100_000,
+				"compaction.thresholdPercent": -1,
+			}),
+		});
+
+		expect(renderContextSegment(session, "context_pct", "compaction")).toContain("75.0%/200K");
+	});
+
+	it("falls back to the model denominator when snapcompact is the only method for a text model", () => {
+		const { session } = makeSession({
+			messages: [userMessage("hi")],
+			contextWindow: 200_000,
+			usage: { tokens: 150_000, contextWindow: 200_000, percent: 75 },
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.methodOrder": ["snapcompact"],
+				"compaction.thresholdTokens": 100_000,
+				"compaction.thresholdPercent": -1,
+			}),
+			modelInput: ["text"],
+		});
+
+		expect(renderContextSegment(session, "context_pct", "compaction")).toContain("75.0%/200K");
+	});
+
+	it("falls back to the model denominator when remote compaction has no route", () => {
+		const { session } = makeSession({
+			messages: [userMessage("hi")],
+			contextWindow: 200_000,
+			usage: { tokens: 150_000, contextWindow: 200_000, percent: 75 },
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.methodOrder": ["remote"],
+				"compaction.thresholdTokens": 100_000,
+				"compaction.thresholdPercent": -1,
+			}),
+		});
+
+		expect(renderContextSegment(session, "context_pct", "compaction")).toContain("75.0%/200K");
+	});
+
+	it("uses the host threshold for a guest when the local threshold conflicts", () => {
+		const { session } = makeSession({
+			messages: [userMessage("hi")],
+			contextWindow: 200_000,
+			usage: { tokens: 120_000, contextWindow: 200_000, percent: 60 },
+			settings: Settings.isolated({
+				"statusLine.contextPercentBase": "compaction",
+				"compaction.enabled": true,
+				"compaction.thresholdTokens": 80_000,
+				"compaction.thresholdPercent": -1,
+			}),
+		});
+
+		const plain = renderGuestContextSegment(session, {
+			tokens: 120_000,
+			contextWindow: 200_000,
+			percent: 60,
+			compactionThresholdTokens: 150_000,
+		});
+		expect(plain).toContain("80.0%/150K");
+		expect(plain).not.toContain("150.0%/80K");
+	});
+
+	it("uses the model window when the host has no threshold, ignoring the local guest threshold", () => {
+		const { session } = makeSession({
+			messages: [userMessage("hi")],
+			contextWindow: 200_000,
+			usage: { tokens: 120_000, contextWindow: 200_000, percent: 60 },
+			settings: Settings.isolated({
+				"statusLine.contextPercentBase": "compaction",
+				"compaction.enabled": true,
+				"compaction.thresholdTokens": 80_000,
+				"compaction.thresholdPercent": -1,
+			}),
+		});
+
+		const plain = renderGuestContextSegment(session, {
+			tokens: 120_000,
+			contextWindow: 200_000,
+			percent: 60,
+		});
+		expect(plain).toContain("60.0%/200K");
+		expect(plain).not.toContain("150.0%/80K");
+	});
+
+	it("places the compaction marker in the final cell of a threshold-relative gauge", () => {
+		const renderGauge = (contextPercentBase: "model" | "compaction"): string[] => {
+			const { session } = makeSession({
+				messages: [userMessage("hi"), assistantMessage("done")],
+				contextWindow: 200_000,
+				usage: { tokens: 50_000, contextWindow: 200_000, percent: 25 },
+				settings: Settings.isolated({
+					"compaction.enabled": true,
+					"compaction.thresholdTokens": 100_000,
+					"compaction.thresholdPercent": -1,
+				}),
+			});
+			const render = (
+				leftSegments: ("pi" | "context_pct")[],
+				rightSegments: ("session_name" | "context_total")[],
+			) => {
+				const comp = new StatusLineComponent(session);
+				comp.updateSettings({
+					preset: "custom",
+					leftSegments,
+					rightSegments,
+					separator: "none",
+					sessionAccent: false,
+					contextLine: "annotated",
+					contextPercentBase,
+				});
+				return comp.getTopBorder(80);
+			};
+
+			const full = render(["pi"], ["session_name"]);
+			const left = render(["pi"], []);
+			const right = render([], ["session_name"]);
+			const plain = full.content.replaceAll(/\x1b\[[0-9;]*m/g, "");
+			return [...plain].slice(left.width, full.width - right.width);
+		};
+
+		const modelGauge = renderGauge("model");
+		const compactionGauge = renderGauge("compaction");
+		const compactionMarker = theme.symbol("context.compaction");
+		const modelMarkerIndex = modelGauge.indexOf(compactionMarker);
+		expect(modelMarkerIndex).toBeGreaterThanOrEqual(0);
+		expect(modelMarkerIndex).toBeLessThan(modelGauge.length - 1);
+		expect(compactionGauge.at(-1)).toBe(compactionMarker);
+	});
+	it("clamps the >100% gauge fill at the model window", () => {
+		const renderPercentageGauge = (tokens: number): string => {
+			const { session } = makeSession({
+				messages: [userMessage("hi"), assistantMessage("done")],
+				contextWindow: 200_000,
+				usage: {
+					tokens,
+					contextWindow: 200_000,
+					percent: (tokens / 200_000) * 100,
+				},
+				settings: Settings.isolated(),
+			});
+			const comp = new StatusLineComponent(session);
+			comp.updateSettings({
+				preset: "custom",
+				leftSegments: ["pi"],
+				rightSegments: ["session_name"],
+				separator: "none",
+				sessionAccent: false,
+				contextLine: "percentage",
+			});
+			return comp.getTopBorder(80).content;
+		};
+
+		const atWindow = renderPercentageGauge(200_000);
+		const overWindow = renderPercentageGauge(240_000);
+		expect(overWindow).toBe(atWindow);
+	});
+
+	it("recomputes context_pct when its base, compaction settings, and model usage change", () => {
+		const sessionSettings = Settings.isolated();
+		sessionSettings.set("compaction.enabled", true);
+		sessionSettings.set("compaction.thresholdTokens", 100_000);
+		sessionSettings.set("compaction.thresholdPercent", -1);
+		const fake = makeSession({
+			messages: [userMessage("hi")],
+			contextWindow: 200_000,
+			usage: { tokens: 150_000, contextWindow: 200_000, percent: 75 },
+			settings: sessionSettings,
+		});
+		const comp = new StatusLineComponent(fake.session);
+		const update = (contextPercentBase: "model" | "compaction") => {
+			comp.updateSettings({
+				preset: "custom",
+				leftSegments: ["context_pct"],
+				rightSegments: [],
+				separator: "powerline-thin",
+				contextPercentBase,
+			});
+			return comp.getTopBorder(80).content.replaceAll(/\x1b\[[0-9;]*m/g, "");
+		};
+
+		expect(update("compaction")).toContain("150.0%/100K");
+		expect(update("model")).toContain("75.0%/200K");
+
+		sessionSettings.set("compaction.enabled", false);
+		expect(update("compaction")).toContain("75.0%/200K");
+		sessionSettings.set("compaction.enabled", true);
+		expect(update("compaction")).toContain("150.0%/100K");
+
+		sessionSettings.set("compaction.thresholdTokens", 50_000);
+		expect(update("compaction")).toContain("300.0%/50K");
+
+		sessionSettings.set("compaction.thresholdTokens", -1);
+		sessionSettings.set("compaction.thresholdPercent", 50);
+		expect(update("compaction")).toContain("150.0%/100K");
+
+		const mutableModel = fake.session.model as { contextWindow: number };
+		mutableModel.contextWindow = 100_000;
+		fake.setUsage({ tokens: 75_000, contextWindow: 100_000, percent: 75 });
+		expect(update("compaction")).toContain("150.0%/50K");
+
 	});
 
 	it("renders speculative percent instead of ? after compaction", () => {

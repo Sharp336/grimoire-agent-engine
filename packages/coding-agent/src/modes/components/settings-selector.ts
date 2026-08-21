@@ -36,6 +36,7 @@ import {
 } from "../../config/settings";
 import type {
 	ContextLineMode,
+	ContextPercentBase,
 	SettingTab,
 	StatusLinePreset,
 	StatusLineSegmentId,
@@ -566,6 +567,7 @@ export interface SettingsRuntimeContext {
 export interface StatusLinePreviewSettings {
 	preset?: StatusLinePreset;
 	contextLine?: ContextLineMode;
+	contextPercentBase?: ContextPercentBase;
 	leftSegments?: StatusLineSegmentId[];
 	rightSegments?: StatusLineSegmentId[];
 	separator?: StatusLineSeparatorStyle;
@@ -1130,6 +1132,15 @@ export class SettingsSelectorComponent implements Component {
 			onPreviewCancel = () => {
 				this.callbacks.onStatusLinePreview?.({ contextLine: settings.get("statusLine.contextLine") });
 			};
+		} else if (def.path === "statusLine.contextPercentBase") {
+			onPreview = value => {
+				this.callbacks.onStatusLinePreview?.({ contextPercentBase: value as ContextPercentBase });
+			};
+			onPreviewCancel = () => {
+				this.callbacks.onStatusLinePreview?.({
+					contextPercentBase: settings.get("statusLine.contextPercentBase"),
+				});
+			};
 		} else if (def.path === "snapcompact.shape") {
 			const shapePreview = new SnapcompactShapePreview(currentValue, {
 				model: this.context.model,
@@ -1398,6 +1409,7 @@ export class SettingsSelectorComponent implements Component {
 			separator: settings.get("statusLine.separator"),
 			sessionAccent: settings.get("statusLine.sessionAccent"),
 			transparent: settings.get("statusLine.transparent"),
+			contextPercentBase: settings.get("statusLine.contextPercentBase"),
 		};
 		this.callbacks.onStatusLinePreview?.(statusLineSettings);
 	}

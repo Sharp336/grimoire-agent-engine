@@ -146,6 +146,8 @@ export const COMPOSER_SHAPE_VALUES = BUILTIN_COMPOSER_SHAPES.map(shape => shape.
 
 export type ContextLineMode = "off" | "percentage" | "annotated" | "embedded";
 export const CONTEXT_LINE_MODE_VALUES = ["off", "percentage", "annotated", "embedded"] as const;
+export type ContextPercentBase = "model" | "compaction";
+export const CONTEXT_PERCENT_BASE_VALUES = ["model", "compaction"] as const;
 
 export type SettingTab =
 	| "appearance"
@@ -805,6 +807,26 @@ export const SETTINGS_SCHEMA = {
 					value: "embedded",
 					label: "Embedded",
 					description: "Annotated line with the context percentage and window embedded in the gauge",
+				},
+			],
+		},
+	},
+
+	"statusLine.contextPercentBase": {
+		type: "enum",
+		values: CONTEXT_PERCENT_BASE_VALUES,
+		default: "model",
+		ui: {
+			tab: "appearance",
+			group: "Status Line",
+			label: "Context Percentage Base",
+			description: "Choose whether context percentage is relative to the model window or auto-compaction threshold",
+			options: [
+				{ value: "model", label: "Model Window", description: "Percentage of the model's context window" },
+				{
+					value: "compaction",
+					label: "Auto-Compaction",
+					description: "Percentage of the active auto-compaction threshold",
 				},
 			],
 		},
@@ -6169,6 +6191,7 @@ export interface StatusLineSettings {
 	leftSegments: StatusLineSegmentId[];
 	rightSegments: StatusLineSegmentId[];
 	segmentOptions: Record<string, unknown>;
+	contextPercentBase: ContextPercentBase;
 }
 
 export interface ThinkingBudgetsSettings {

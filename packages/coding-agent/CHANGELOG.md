@@ -77,6 +77,7 @@
 ### Fixed
 
 - Fixed the edit tool rejecting payloads containing a glued `«»` line: after MATCH it now reads as the mistyped `»` separator, elsewhere as a stray terminator to drop.
+- Added a status-line option to show context usage relative to the active compaction threshold instead of the model's full context window.
 
 ## [17.4.2] - 2026-08-21
 

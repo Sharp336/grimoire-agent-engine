@@ -26,7 +26,7 @@ describe("AgentSession session stats", () => {
 		session = undefined;
 	});
 
-	it("preserves authoritative provider occupancy above the local transcript estimate", () => {
+	it("preserves authoritative provider occupancy above the local transcript estimate when status-line uses compaction base", () => {
 		const model = modelRegistry.getAll().find(candidate => candidate.contextWindow && candidate.contextWindow > 0);
 		if (!model?.contextWindow) {
 			throw new Error("Expected bundled model with a context window");
@@ -72,7 +72,12 @@ describe("AgentSession session stats", () => {
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.thresholdTokens": 80_000,
+				"compaction.thresholdPercent": -1,
+				"statusLine.contextPercentBase": "compaction",
+			}),
 			modelRegistry,
 		});
 

@@ -1,6 +1,7 @@
 import type { CollabSessionState } from "../../../collab/protocol";
 import type {
 	ContextLineMode,
+	ContextPercentBase,
 	StatusLinePreset,
 	StatusLineSegmentId,
 	StatusLineSeparatorStyle,
@@ -9,7 +10,13 @@ import type { AgentSession } from "../../../session/agent-session";
 import type { ActiveRepoContext } from "../../../utils/active-repo-context";
 import type { LoopLimitRuntime } from "../../loop-limit";
 
-export type { ContextLineMode, StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle };
+export type {
+	ContextLineMode,
+	ContextPercentBase,
+	StatusLinePreset,
+	StatusLineSegmentId,
+	StatusLineSeparatorStyle,
+};
 
 /** Collab session indicator + (guest-only) host-state override for segments. */
 export interface CollabStatus {
@@ -44,6 +51,7 @@ export interface StatusLineSettings {
 	 *  usage. `embedded` moves configured context segments into the annotated
 	 *  gauge as percentage and window labels. Box composer only. */
 	contextLine?: ContextLineMode;
+	contextPercentBase?: ContextPercentBase;
 }
 
 export type EffectiveStatusLineSettings = Required<
@@ -107,6 +115,8 @@ export interface SegmentContext {
 	contextPercent: number | null;
 	contextTokens: number;
 	contextWindow: number;
+	/** Denominator used for context percentage rendering (model window or active compaction threshold). */
+	contextPercentDenominator: number;
 	autoCompactEnabled: boolean;
 	/** Background speculative-compaction state (async compaction). */
 	compactionSpeculation: "idle" | "running" | "armed";

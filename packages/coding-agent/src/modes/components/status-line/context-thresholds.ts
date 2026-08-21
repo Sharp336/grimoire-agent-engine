@@ -12,7 +12,7 @@ const CONTEXT_ERROR_TOKEN_THRESHOLD = 500_000;
 
 function reachesThreshold(
 	contextPercent: number,
-	contextWindow: number,
+	contextDenominator: number,
 	percentThreshold: number,
 	tokenThreshold: number,
 ): boolean {
@@ -20,23 +20,33 @@ function reachesThreshold(
 		return false;
 	}
 
-	if (!Number.isFinite(contextWindow) || contextWindow <= 0) {
+	if (!Number.isFinite(contextDenominator) || contextDenominator <= 0) {
 		return contextPercent >= percentThreshold;
 	}
 
-	const tokenPercentThreshold = (tokenThreshold / contextWindow) * 100;
+	const tokenPercentThreshold = (tokenThreshold / contextDenominator) * 100;
 	return contextPercent >= Math.min(percentThreshold, tokenPercentThreshold);
 }
 
-export function getContextUsageLevel(contextPercent: number, contextWindow: number): ContextUsageLevel {
+export function getContextUsageLevel(contextPercent: number, contextDenominator: number): ContextUsageLevel {
 	if (
-		reachesThreshold(contextPercent, contextWindow, CONTEXT_ERROR_PERCENT_THRESHOLD, CONTEXT_ERROR_TOKEN_THRESHOLD)
+		reachesThreshold(
+			contextPercent,
+			contextDenominator,
+			CONTEXT_ERROR_PERCENT_THRESHOLD,
+			CONTEXT_ERROR_TOKEN_THRESHOLD,
+		)
 	) {
 		return "error";
 	}
 
 	if (
-		reachesThreshold(contextPercent, contextWindow, CONTEXT_PURPLE_PERCENT_THRESHOLD, CONTEXT_PURPLE_TOKEN_THRESHOLD)
+		reachesThreshold(
+			contextPercent,
+			contextDenominator,
+			CONTEXT_PURPLE_PERCENT_THRESHOLD,
+			CONTEXT_PURPLE_TOKEN_THRESHOLD,
+		)
 	) {
 		return "purple";
 	}
@@ -44,7 +54,7 @@ export function getContextUsageLevel(contextPercent: number, contextWindow: numb
 	if (
 		reachesThreshold(
 			contextPercent,
-			contextWindow,
+			contextDenominator,
 			CONTEXT_WARNING_PERCENT_THRESHOLD,
 			CONTEXT_WARNING_TOKEN_THRESHOLD,
 		)
@@ -56,20 +66,21 @@ export function getContextUsageLevel(contextPercent: number, contextWindow: numb
 }
 
 /**
- * Format context usage as `<percent>%/<window>` when the model window is known.
- * Unknown windows render as `<tokens>/?`, because `0.0%/0` suggests a real
- * empty context instead of missing provider metadata.
+ * Format context usage as `<percent>%/<denominator>` when the selected
+ * presentation denominator is known. Unknown denominators render as
+ * `<tokens>/?`, because `0.0%/0` suggests a real empty context instead of
+ * missing provider metadata.
  */
 export function formatContextUsage(
 	contextPercent: number | null | undefined,
-	contextWindow: number,
+	contextDenominator: number,
 	usedTokens?: number,
 ): string {
-	if (!Number.isFinite(contextWindow) || contextWindow <= 0) {
+	if (!Number.isFinite(contextDenominator) || contextDenominator <= 0) {
 		return `${formatNumber(usedTokens ?? 0)}/?`;
 	}
 	const pct = contextPercent === null || contextPercent === undefined ? "?" : `${contextPercent.toFixed(1)}%`;
-	return `${pct}/${formatNumber(contextWindow)}`;
+	return `${pct}/${formatNumber(contextDenominator)}`;
 }
 
 export function getContextUsageThemeColor(level: ContextUsageLevel): ThemeColor {

@@ -45,6 +45,11 @@ export { DEFAULT_RELAY_URL, ENVELOPE_HEADER_LENGTH, ROOM_ID_BYTES };
 export type CollabParticipant = Participant;
 export type AgentSnapshot = WireAgentSnapshot;
 
+export interface CollabContextUsage extends ContextUsage {
+	/** Host's runnable automatic-compaction threshold in context tokens. */
+	compactionThresholdTokens?: number;
+}
+
 /** Debounced footer snapshot broadcast by the host. */
 export type CollabSessionState = SessionState & {
 	/**
@@ -53,7 +58,7 @@ export type CollabSessionState = SessionState & {
 	 */
 	model?: Model;
 	/** Host status-line context numbers (guest system prompt/tools differ, so local estimates drift). */
-	contextUsage?: ContextUsage;
+	contextUsage?: CollabContextUsage;
 };
 
 /**

@@ -108,6 +108,35 @@ export function canUseRemoteCompaction(model: Model | null | undefined, settings
 }
 
 /**
+ * Whether a configured method can run for the active model. This deliberately
+ * includes handoff and shake: speculation preserves their historical behavior,
+ * while automatic threshold selection filters them out separately.
+ */
+function isCompactionMethodAvailable(
+	model: Model | null | undefined,
+	settings: CompactionSettings,
+	candidate: CompactionMethod,
+): boolean {
+	return candidate === "remote"
+		? canUseRemoteCompaction(model, resolveMethodSettings(settings, candidate))
+		: candidate === "snapcompact"
+			? model?.input?.includes("image") === true
+			: true;
+}
+
+/** Whether the configured order contains a runnable threshold compaction method. */
+export function hasAvailableCompactionMethod(
+	model: Model | null | undefined,
+	settings: CompactionSettings,
+): boolean {
+	for (const candidate of resolveCompactionMethodOrder(settings.methodOrder)) {
+		if (candidate === "handoff" || candidate === "shake") continue;
+		if (isCompactionMethodAvailable(model, settings, candidate)) return true;
+	}
+	return false;
+}
+
+/**
  * First configured method a threshold pass would run, or undefined when it is
  * local (snapcompact/shake) — local methods are effectively instant, so there
  * is nothing to speculate. Shared by the maintenance loop's speculation gate
@@ -118,13 +147,7 @@ export function resolveSpeculationMethod(
 	settings: CompactionSettings,
 ): "remote" | "handoff" | "soft" | undefined {
 	for (const candidate of resolveCompactionMethodOrder(settings.methodOrder)) {
-		const available =
-			candidate === "remote"
-				? canUseRemoteCompaction(model, resolveMethodSettings(settings, candidate))
-				: candidate === "snapcompact"
-					? model?.input?.includes("image") === true
-					: true;
-		if (!available) continue;
+		if (!isCompactionMethodAvailable(model, settings, candidate)) continue;
 		return candidate === "remote" || candidate === "handoff" || candidate === "soft" ? candidate : undefined;
 	}
 	return undefined;
