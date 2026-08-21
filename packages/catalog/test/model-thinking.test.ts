@@ -1090,3 +1090,35 @@ describe("Qwen 3.8 local template effort ladder", () => {
 		expect(ollama.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.Max]);
 	});
 });
+
+describe("deepseek-v4-flash on non-OpenAI-compat transports (#9134)", () => {
+	it("exposes the official low/high/max ladder over openai-responses (opencode-go)", () => {
+		const model = createModel({
+			id: "deepseek-v4-flash",
+			api: "openai-responses",
+			provider: "opencode-go",
+			reasoning: true,
+		});
+		expect(getSupportedEfforts(model)).toEqual([Effort.Low, Effort.High, Effort.Max]);
+	});
+
+	it("exposes the official low/high/max ladder over anthropic-messages (umans gateway)", () => {
+		const model = createModel({
+			id: "umans-deepseek-v4-flash-0731",
+			api: "anthropic-messages",
+			provider: "umans",
+			reasoning: true,
+		});
+		expect(getSupportedEfforts(model)).toEqual([Effort.Low, Effort.High, Effort.Max]);
+	});
+
+	it("exposes the official low/high/max ladder over anthropic-messages (vercel-ai-gateway)", () => {
+		const model = createModel({
+			id: "deepseek/deepseek-v4-flash",
+			api: "anthropic-messages",
+			provider: "vercel-ai-gateway",
+			reasoning: true,
+		});
+		expect(getSupportedEfforts(model)).toEqual([Effort.Low, Effort.High, Effort.Max]);
+	});
+});

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `deepseek-v4-flash` SKUs served over `openai-responses` (opencode-go) and `anthropic-messages` (umans, vercel-ai-gateway) transports exposing the generic five-tier effort ladder instead of the official `low/high/max` ([#9134](https://github.com/can1357/oh-my-pi/issues/9134)).
+
 ## [17.4.2] - 2026-08-21
 
 ### Added
