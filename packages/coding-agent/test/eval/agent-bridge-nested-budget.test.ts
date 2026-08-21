@@ -177,4 +177,46 @@ describe("nested eval agent turn-budget accounting", () => {
 			hard: false,
 		});
 	});
+
+	it("keeps concurrent top-level eval contexts isolated when their local allocators would collide", async () => {
+		const rootA = SessionManager.inMemory();
+		const rootB = SessionManager.inMemory();
+		const childA = SessionManager.inMemory();
+		const childB = SessionManager.inMemory();
+		rootA.beginTurnBudget(10_000, false);
+		rootB.beginTurnBudget(20_000, false);
+		childA.beginTurnBudget(100_000, false);
+		childB.beginTurnBudget(100_000, false);
+		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents: [createAgent()], projectAgentsDir: null });
+
+		const topLevelIds = new Map<string, string>();
+		const { promise: bothStarted, resolve: resolveBothStarted } = Promise.withResolvers<void>();
+		let topLevelStarts = 0;
+		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
+			if (options.assignment === "parent a" || options.assignment === "parent b") {
+				topLevelIds.set(options.assignment, options.id);
+				topLevelStarts += 1;
+				if (topLevelStarts === 2) resolveBothStarted();
+				await bothStarted;
+				if (options.assignment === "parent a") {
+					await runEvalAgent({ prompt: "nested a", agent: "task" }, { session: createBudgetSession(childA, options.id) });
+					return createResult(options.id, 100);
+				}
+				await runEvalAgent({ prompt: "nested b", agent: "task" }, { session: createBudgetSession(childB, options.id) });
+				return createResult(options.id, 200);
+			}
+			if (options.assignment === "nested a") return createResult(options.id, 1_000);
+			if (options.assignment === "nested b") return createResult(options.id, 2_000);
+			throw new Error(`unexpected assignment: ${options.assignment}`);
+		});
+
+		await Promise.all([
+			runEvalAgent({ prompt: "parent a", agent: "task" }, { session: createBudgetSession(rootA) }),
+			runEvalAgent({ prompt: "parent b", agent: "task" }, { session: createBudgetSession(rootB) }),
+		]);
+
+		expect(topLevelIds.get("parent a")).not.toBe(topLevelIds.get("parent b"));
+		expect(rootA.getTurnBudget().spent).toBe(1_100);
+		expect(rootB.getTurnBudget().spent).toBe(2_200);
+	});
 });
