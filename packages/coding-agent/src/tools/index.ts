@@ -50,7 +50,8 @@ import { resolveEvalBackends } from "./eval-backends";
 import { GithubTool } from "./gh";
 import { GlobTool } from "./glob";
 import { GrepTool } from "./grep";
-import { HubTool, isIrcEnabled } from "./hub";
+import { isIrcEnabled } from "./hub";
+import { createHubTool } from "./hub/compact";
 import { InspectImageTool } from "./inspect-image";
 import { LearnTool } from "./learn";
 import { ManageSkillTool } from "./manage-skill";
@@ -91,6 +92,7 @@ export * from "./gh";
 export * from "./glob";
 export * from "./grep";
 export * from "./hub";
+export * from "./hub/compact";
 export * from "./image-gen";
 export * from "./inspect-image";
 export * from "./learn";
@@ -434,7 +436,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	checkpoint: CheckpointTool.createIf,
 	rewind: RewindTool.createIf,
 	task: s => TaskTool.create(s),
-	hub: s => new HubTool(s),
+	hub: createHubTool,
 	todo: s => new TodoTool(s),
 	web_search: s => new WebSearchTool(s),
 	write: s => new WriteTool(s),
@@ -623,9 +625,11 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 				((session.taskDepth ?? 0) === 0 || requestedTools !== undefined)
 			);
 		if (name === "hub") {
-			return (
-				!restrictToolNames && session.enableIrc !== false && isIrcEnabled(session.settings, session.taskDepth ?? 0)
-			);
+			if (restrictToolNames) return false;
+			if (session.settings.get("hub.mode") === "full") {
+				return session.enableIrc !== false && isIrcEnabled(session.settings, session.taskDepth ?? 0);
+			}
+			return session.settings.get("async.enabled") || session.settings.get("launch.enabled");
 		}
 		if (name === "retain" || name === "recall" || name === "reflect") {
 			return ["hindsight", "mnemopi"].includes(session.settings.get("memory.backend") ?? "");

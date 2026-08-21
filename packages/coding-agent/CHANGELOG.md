@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added runtime-selectable `hub.mode` settings: `compact` keeps async-job and process supervision visible without peer messaging, while `full` restores the official Hub surface.
+
 ## [17.4.0] - 2026-08-20
 
 ### Added

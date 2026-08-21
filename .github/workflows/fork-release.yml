@@ -56,15 +56,6 @@ jobs:
             exit 1
           fi
 
-          unexpected="$(git diff --name-only "$official_sha" "$GITHUB_SHA" -- . \
-            ':(exclude).github/workflows/fork-release.yml' \
-            ':(exclude)scripts/apply-fork-patches.ts')"
-          if [ -n "$unexpected" ]; then
-            echo "::error::Fork main contains changes outside the two maintained fork files:"
-            printf '%s\n' "$unexpected"
-            exit 1
-          fi
-
           for package in \
             @oh-my-pi/pi-natives-linux-x64 \
             @oh-my-pi/pi-natives-linux-arm64 \
@@ -86,34 +77,13 @@ jobs:
           echo "Official source: ${official_tag} (${official_sha})"
           echo "Fork release: ${release_tag} (${GITHUB_SHA})"
 
-      - name: Apply minimal downstream Hub patch
-        run: |
-          bun scripts/apply-fork-patches.ts
-          git diff --check
-          changed="$(git diff --name-only | sort)"
-          expected="$(printf '%s\n' \
-            docs/tools/hub.md \
-            packages/coding-agent/src/prompts/tools/hub.md \
-            packages/coding-agent/src/tools/hub/index.ts \
-            packages/coding-agent/src/tools/hub/jobs.ts | sort)"
-          if [ "$changed" != "$expected" ]; then
-            echo "::error::Fork patch changed an unexpected file set"
-            printf 'Expected:\n%s\nActual:\n%s\n' "$expected" "$changed"
-            exit 1
-          fi
-
-          bunx biome format --write \
-            scripts/apply-fork-patches.ts \
-            packages/coding-agent/src/tools/hub/index.ts \
-            packages/coding-agent/src/tools/hub/jobs.ts
-          git diff --check
-
-      - name: Run official TypeScript and release-script checks
+      - name: Run official checks and fork Hub regression
         run: |
           bun run ci:check:full
           bun run collab:web:build
           # Match upstream CI: musl-release.test.ts is intentionally excluded.
           bun test scripts/ci-test-ts.test.ts scripts/release.test.ts
+          bun test packages/coding-agent/test/tools/hub-mode.test.ts
 
   build:
     name: Build ${{ matrix.target }}
@@ -146,15 +116,6 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       - uses: ./.github/actions/bun-install
-
-      - name: Apply minimal downstream Hub patch
-        run: |
-          bun scripts/apply-fork-patches.ts
-          bunx biome format --write \
-            scripts/apply-fork-patches.ts \
-            packages/coding-agent/src/tools/hub/index.ts \
-            packages/coding-agent/src/tools/hub/jobs.ts
-          git diff --check
 
       - name: Install official precompiled native artifact
         env:
@@ -292,7 +253,7 @@ jobs:
 
             Linux x64, Linux ARM64, and Windows x64 use the same upstream release targets as the official build. Linux native addons are the official same-version precompiled packages; upstream GNU native targets use a glibc 2.17 portability floor, matching the official CentOS 7-compatible build strategy.
 
-            Changes are limited to the fork release workflow and a build-time patch that removes Hub peer messaging while retaining task creation, background-job control, and supervised long-running processes. This workflow does not compile Rust.
+            This fork defaults `hub.mode` to `compact`, exposing parent-side asynchronous job control and supervised long-running processes without peer-agent messaging in the model context. Set `hub.mode` to `full` to restore the upstream Hub surface without rebuilding. The upstream Hub/IRC runtime remains intact. This workflow does not compile Rust.
           files: |
             dist/omp-linux-x64
             dist/omp-linux-arm64

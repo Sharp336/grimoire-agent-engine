@@ -32,27 +32,33 @@ describe("plan-mode re-entry prompt", () => {
 describe("plan-mode-active tool availability", () => {
 	it("omits ask-tool directives when ask is unavailable", () => {
 		const withoutAsk = render({ askAvailable: false, iterative: true });
-		expect(withoutAsk).not.toContain("`ask`: 2–4 mutually exclusive options");
-		expect(withoutAsk).not.toContain("`ask` only for preferences/tradeoffs");
-		expect(withoutAsk).not.toContain("Using `ask` to gather requirements");
+		expect(withoutAsk).not.toContain("ask early via `ask`");
+		expect(withoutAsk).not.toContain("`ask` only for critical preferences/tradeoffs");
+		expect(withoutAsk).not.toContain("`ask` gathers a required critical clarification");
 
 		const withAsk = render({ askAvailable: true, iterative: true });
-		expect(withAsk).toContain("`ask`: 2–4 mutually exclusive options");
-		expect(withAsk).toContain("`ask` only for preferences/tradeoffs");
+		expect(withAsk).toContain("ask early via `ask`");
+		expect(withAsk).toContain("`ask` only for critical preferences/tradeoffs");
+		expect(withAsk).toContain("`ask` gathers a required critical clarification");
 	});
 
-	it("records preferences as assumptions when ask is unavailable", () => {
+	it("uses prose for critical clarification instead of assuming when ask is unavailable", () => {
 		const iterativeWithoutAsk = render({ askAvailable: false, iterative: true });
-		expect(iterativeWithoutAsk).toContain("Record as Assumptions with a recommended default");
-		expect(iterativeWithoutAsk).toContain("record preferences/tradeoffs as Assumptions");
-		expect(iterativeWithoutAsk).not.toContain("`ask` only for preferences/tradeoffs");
+		expect(iterativeWithoutAsk).toContain("ask the minimum necessary blocking question in prose");
+		expect(iterativeWithoutAsk).toContain("NEVER default it");
+		expect(iterativeWithoutAsk).not.toContain("Record as Assumptions with a recommended default");
+		expect(iterativeWithoutAsk).not.toContain("`ask` only for critical preferences/tradeoffs");
 
 		const parallelWithoutAsk = render({ askAvailable: false, iterative: false });
-		expect(parallelWithoutAsk).toContain(
-			"record remaining preference questions as Assumptions with a recommended default",
-		);
-		// A prose question cannot end the turn in plan mode — no prose-terminal option.
-		expect(parallelWithoutAsk).not.toContain("Presenting a choice between approaches");
+		expect(parallelWithoutAsk).toContain("ask the minimum necessary blocking question in prose");
+		expect(parallelWithoutAsk).toContain("a concise prose question gathers a required critical clarification");
+		expect(parallelWithoutAsk).not.toContain("Record preference questions as Assumptions");
+	});
+
+	it("allows defaults only for non-load-bearing preferences", () => {
+		const rendered = render({ askAvailable: false });
+		expect(rendered).toContain("Non-load-bearing preferences MAY use a recommended default");
+		expect(rendered).toContain("NEVER record an unresolved key ambiguity as an assumption");
 	});
 
 	it("omits scout-via-task dispatch when the task tool is unavailable", () => {

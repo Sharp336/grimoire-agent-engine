@@ -452,6 +452,11 @@ export const SETTINGS_SCHEMA = {
 	// General settings (no UI)
 	// ────────────────────────────────────────────────────────────────────────
 	setupVersion: { type: "number", default: 0 },
+	"hub.mode": {
+		type: "enum",
+		values: ["compact", "full"] as const,
+		default: "compact",
+	},
 
 	// Auth broker — credentials proxied through a remote `omp auth-broker serve`
 	// host. Hidden from the UI; populate via env vars or hand-edited config.yml.

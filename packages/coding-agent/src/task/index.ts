@@ -609,7 +609,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			batchEnabled: this.#isBatchEnabled(),
 			effortEnabled: this.session.settings.get("task.enableEffort"),
 			asyncEnabled: this.session.settings.get("async.enabled"),
-			ircEnabled: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
+			ircEnabled: this.#isPeerMessagingVisible(),
 			parentSpawns: this.session.getSessionSpawns() ?? "*",
 		});
 	}
@@ -623,6 +623,14 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 
 	#isBatchEnabled(): boolean {
 		return this.session.settings.get("task.batch");
+	}
+
+	#isPeerMessagingVisible(): boolean {
+		return (
+			this.session.settings.get("hub.mode") === "full" &&
+			this.session.enableIrc !== false &&
+			isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0)
+		);
 	}
 
 	#getSpawnSemaphore(): Semaphore {
@@ -732,7 +740,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			this.session.settings.get("task.maxRecursionDepth") ?? 2,
 			this.session.taskDepth ?? 0,
 		);
-		const ircEnabled = isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0);
+		const ircEnabled = this.#isPeerMessagingVisible();
 
 		if (!manager || asyncItems.length === 0) {
 			// Sync fallback: async execution disabled, orphaned host that never
