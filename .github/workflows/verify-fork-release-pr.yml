@@ -67,69 +67,80 @@ jobs:
           release = release.replace('-f make_latest=false', '-f make_latest=true')
           (generated / 'fork-release.yml').write_text(release)
 
-          install_sh = Path('scripts/install.sh').read_text()
-          install_sh = install_sh.replace(
+          install_path = Path('scripts/install.sh')
+          install_sh = install_path.read_text().replace(
               'https://raw.githubusercontent.com/can1357/oh-my-pi/main/scripts/install.sh',
               'https://raw.githubusercontent.com/jchanghong023/oh-my-pi/main/scripts/install.sh',
           )
-          old_os = '''    case "$OS" in
-              Linux)  PLATFORM="linux" ;;
-              Darwin) PLATFORM="darwin" ;;
-              *)      echo "Unsupported OS: $OS"; exit 1 ;;
-          esac'''
-          new_os = '''    case "$OS" in
-              Linux) PLATFORM="linux" ;;
-              Darwin)
-                  echo "This fork does not publish macOS binaries. Re-run with --source to install from the fork repository."
-                  exit 1
-                  ;;
-              *) echo "Unsupported OS: $OS"; exit 1 ;;
-          esac'''
-          if install_sh.count(old_os) != 1:
+          lines = install_sh.splitlines()
+
+          os_start = lines.index('    case "$OS" in')
+          expected_os = [
+              '    case "$OS" in',
+              '        Linux)  PLATFORM="linux" ;;',
+              '        Darwin) PLATFORM="darwin" ;;',
+              '        *)      echo "Unsupported OS: $OS"; exit 1 ;;',
+              '    esac',
+          ]
+          if lines[os_start:os_start + len(expected_os)] != expected_os:
               raise SystemExit('install.sh OS block changed unexpectedly')
-          install_sh = install_sh.replace(old_os, new_os)
-          old_musl = '''    if [ "$PLATFORM" = "linux" ]; then
-              if [ -f /etc/alpine-release ] || { command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl; }; then
-                  PLATFORM="linux-musl"
-              fi
-          fi'''
-          new_musl = '''    if [ -f /etc/alpine-release ] || { command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl; }; then
-              echo "This fork publishes glibc Linux binaries only; musl users should re-run with --source."
-              exit 1
-          fi'''
-          if install_sh.count(old_musl) != 1:
+          lines[os_start:os_start + len(expected_os)] = [
+              '    case "$OS" in',
+              '        Linux) PLATFORM="linux" ;;',
+              '        Darwin)',
+              '            echo "This fork does not publish macOS binaries. Re-run with --source to install from the fork repository."',
+              '            exit 1',
+              '            ;;',
+              '        *) echo "Unsupported OS: $OS"; exit 1 ;;',
+              '    esac',
+          ]
+
+          musl_start = lines.index('    if [ "$PLATFORM" = "linux" ]; then')
+          expected_musl = [
+              '    if [ "$PLATFORM" = "linux" ]; then',
+              '        if [ -f /etc/alpine-release ] || { command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl; }; then',
+              '            PLATFORM="linux-musl"',
+              '        fi',
+              '    fi',
+          ]
+          if lines[musl_start:musl_start + len(expected_musl)] != expected_musl:
               raise SystemExit('install.sh musl block changed unexpectedly')
-          install_sh = install_sh.replace(old_musl, new_musl)
-          old_source = '''    source)
-              if ! has_bun; then'''
-          new_source = '''    source)
-              if [ -z "$REF" ]; then
-                  REF="main"
-              fi
-              if ! has_bun; then'''
-          if install_sh.count(old_source) != 1:
+          lines[musl_start:musl_start + len(expected_musl)] = [
+              '    if [ -f /etc/alpine-release ] || { command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl; }; then',
+              '        echo "This fork publishes glibc Linux binaries only; musl users should re-run with --source."',
+              '        exit 1',
+              '    fi',
+          ]
+
+          main_logic = lines.index('# Main logic')
+          source_index = lines.index('    source)', main_logic)
+          if lines[source_index + 1] != '        if ! has_bun; then':
               raise SystemExit('install.sh source branch changed unexpectedly')
-          install_sh = install_sh.replace(old_source, new_source)
+          lines[source_index + 1:source_index + 1] = [
+              '        if [ -z "$REF" ]; then',
+              '            REF="main"',
+              '        fi',
+          ]
+          install_sh = '\n'.join(lines) + '\n'
           if 'PLATFORM="darwin"' in install_sh or 'PLATFORM="linux-musl"' in install_sh:
               raise SystemExit('unsupported binary platform remains in install.sh')
           (generated / 'install.sh').write_text(install_sh)
 
-          install_ps1 = Path('scripts/install.ps1').read_text()
-          install_ps1 = install_ps1.replace(
+          ps_path = Path('scripts/install.ps1')
+          install_ps1 = ps_path.read_text().replace(
               'https://raw.githubusercontent.com/can1357/oh-my-pi/main/scripts/install.ps1',
               'https://raw.githubusercontent.com/jchanghong023/oh-my-pi/main/scripts/install.ps1',
           )
-          old_ps_source = '''if ($Source) {
-              if (-not (Test-BunInstalled)) {'''
-          new_ps_source = '''if ($Source) {
-              if (-not $Ref) {
-                  $Ref = "main"
-              }
-              if (-not (Test-BunInstalled)) {'''
-          if install_ps1.count(old_ps_source) != 1:
+          ps_lines = install_ps1.splitlines()
+          ps_source = ps_lines.index('if ($Source) {')
+          if ps_lines[ps_source + 1] != '    if (-not (Test-BunInstalled)) {':
               raise SystemExit('install.ps1 source branch changed unexpectedly')
-          install_ps1 = install_ps1.replace(old_ps_source, new_ps_source)
-          (generated / 'install.ps1').write_text(install_ps1)
+          ps_lines[ps_source + 1:ps_source + 1] = [
+              '    if (-not $Ref) {',
+              '        $Ref = "main"',
+              '    }',
+          ]
+          (generated / 'install.ps1').write_text('\n'.join(ps_lines) + '\n')
           PY
 
           git config user.name github-actions[bot]
