@@ -1,0 +1,129 @@
+name: Bootstrap fork release native manifest
+
+on:
+  push:
+    branches: [optimize-fork-release-pipeline]
+    paths:
+      - .github/workflows/bootstrap-fork-release.yml
+
+permissions:
+  contents: write
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: optimize-fork-release-pipeline
+          fetch-depth: 0
+
+      - name: Pin CI native package and generate SHA-256 manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/workflows/ci.yml')
+          text = path.read_text()
+          replacements = {
+              "fetch the latest release's Linux x64 pair": "fetch the matching 17.4.0 Linux x64 pair",
+              "# ---- PR path: latest release addons from npm ----": "# ---- PR path: matching release addons from npm ----",
+              "@oh-my-pi/pi-natives-linux-x64@latest dist.tarball": "@oh-my-pi/pi-natives-linux-x64@17.4.0 dist.tarball",
+              "PR CI tests against the latest release addons by design": "PR CI tests against the matching 17.4.0 release addons by design",
+          }
+          for old, new in replacements.items():
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'expected exactly one occurrence of {old!r}, found {count}')
+              text = text.replace(old, new)
+          if '@oh-my-pi/pi-natives-linux-x64@latest' in text:
+              raise SystemExit('latest native package reference remains in CI')
+          path.write_text(text)
+          PY
+
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+          mkdir -p "$work/packages"
+
+          packages=(
+            "linux-x64|@oh-my-pi/pi-natives-linux-x64"
+            "linux-arm64|@oh-my-pi/pi-natives-linux-arm64"
+            "win32-x64|@oh-my-pi/pi-natives-win32-x64"
+          )
+
+          for entry in "${packages[@]}"; do
+            target="${entry%%|*}"
+            package="${entry#*|}"
+            spec="${package}@17.4.0"
+            dest="$work/packages/$target"
+            mkdir -p "$dest"
+            tarball="$(npm view "$spec" dist.tarball)"
+            integrity="$(npm view "$spec" dist.integrity)"
+            test -n "$tarball"
+            test -n "$integrity"
+            curl -fsSL --retry 3 "$tarball" | tar -xz -C "$dest"
+            node - "$dest/package/package.json" "$package" <<'NODE'
+          const fs = require('node:fs');
+          const [manifestPath, expectedName] = process.argv.slice(2);
+          const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+          if (manifest.name !== expectedName || manifest.version !== '17.4.0') {
+            throw new Error(`unexpected native package manifest: ${manifest.name}@${manifest.version}`);
+          }
+          NODE
+            mapfile -t nodes < <(find "$dest/package" -maxdepth 1 -type f -name '*.node' -printf '%f\n' | sort)
+            if [ "${#nodes[@]}" -eq 0 ]; then
+              echo "::error::No .node files in $spec"
+              exit 1
+            fi
+            printf '%s\n' "$integrity" > "$dest/integrity.txt"
+            (cd "$dest/package" && sha256sum "${nodes[@]}") > "$dest/SHA256SUMS.txt"
+          done
+
+          python3 - "$work" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          work = pathlib.Path(sys.argv[1])
+          package_names = {
+              'linux-x64': '@oh-my-pi/pi-natives-linux-x64',
+              'linux-arm64': '@oh-my-pi/pi-natives-linux-arm64',
+              'win32-x64': '@oh-my-pi/pi-natives-win32-x64',
+          }
+          targets = {}
+          for target, package_name in package_names.items():
+              root = work / 'packages' / target
+              files = {}
+              for line in (root / 'SHA256SUMS.txt').read_text().splitlines():
+                  digest, filename = line.split(maxsplit=1)
+                  files[filename.lstrip('*')] = digest
+              targets[target] = {
+                  'package': package_name,
+                  'version': '17.4.0',
+                  'distIntegrity': (root / 'integrity.txt').read_text().strip(),
+                  'files': dict(sorted(files.items())),
+              }
+
+          manifest = {
+              'source': {
+                  'version': '17.4.0',
+                  'officialTag': 'v17.4.0',
+                  'officialSha': '72000acfeb902e21816252699482887f34d1a5a4',
+              },
+              'targets': targets,
+          }
+          output = pathlib.Path('.github/fork-release-native-manifest.json')
+          output.write_text(json.dumps(manifest, indent=2) + '\n')
+          print(output.read_text())
+          PY
+
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -- .github/workflows/ci.yml .github/fork-release-native-manifest.json
+          git diff --cached --check
+          git commit -m "ci: pin official native release artifacts"
+          git push origin HEAD:optimize-fork-release-pipeline
