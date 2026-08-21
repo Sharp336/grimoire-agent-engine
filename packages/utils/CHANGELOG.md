@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `ClientCapabilities.session.configOptions.boolean` in the ACP protocol types, so clients can advertise support for boolean session config options.
+
 ## [17.4.2] - 2026-08-21
 
 ### Fixed
