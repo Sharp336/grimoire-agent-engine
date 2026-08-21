@@ -86,7 +86,9 @@ export const KEYBINDINGS = {
 		description: "Clear screen or cancel",
 	},
 	"app.exit": {
-		defaultKeys: "ctrl+d",
+		// Intentionally unbound: Ctrl+D is an Emacs-style forward delete
+		// (`tui.editor.deleteCharForward`). Exit via `/exit` or double Ctrl+C.
+		defaultKeys: [],
 		description: "Exit application",
 	},
 	"app.suspend": {

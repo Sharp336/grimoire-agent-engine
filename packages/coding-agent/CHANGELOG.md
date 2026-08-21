@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `Ctrl+D` no longer exits the application: it now performs an Emacs-style forward character delete (`tui.editor.deleteCharForward`). `app.exit` ships unbound; exit with `/exit`, double `Ctrl+C`, or bind `app.exit` to a key of your choice.
+
 ## [17.4.1] - 2026-08-21
 
 ### Added

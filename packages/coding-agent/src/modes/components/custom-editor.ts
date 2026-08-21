@@ -44,7 +44,7 @@ type ConfigurableEditorAction = Extract<
 const DEFAULT_ACTION_KEYS: Record<ConfigurableEditorAction, KeyId[]> = {
 	"app.interrupt": ["escape"],
 	"app.clear": ["ctrl+c"],
-	"app.exit": ["ctrl+d"],
+	"app.exit": [],
 	"app.suspend": ["ctrl+z"],
 	"app.display.reset": ["alt+l"],
 	"app.thinking.cycle": ["shift+tab"],

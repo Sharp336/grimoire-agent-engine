@@ -104,3 +104,37 @@ describe("shipped dequeue defaults", () => {
 		expect(onDequeue).toHaveBeenCalledTimes(1);
 	});
 });
+
+describe("Ctrl+D forward delete", () => {
+	it("is unbound from app.exit by default", () => {
+		const keybindings = KeybindingsManager.inMemory();
+		expect(keybindings.getKeys("app.exit")).toEqual([]);
+		expect(keybindings.getKeys("tui.editor.deleteCharForward")).toContain("ctrl+d");
+	});
+
+	it("deletes the character in front of the cursor instead of exiting", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const onExit = vi.fn();
+
+		editor.onExit = onExit;
+		editor.setText("abc");
+		editor.handleInput("\x1b[D"); // Left — cursor now sits in front of "c"
+		editor.handleInput("\x04"); // Ctrl+D
+
+		expect(onExit).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("ab");
+	});
+
+	it("still fires the exit handler when the user binds app.exit explicitly", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const onExit = vi.fn();
+
+		editor.onExit = onExit;
+		editor.setActionKeys("app.exit", ["ctrl+d"]);
+		editor.setText("abc");
+		editor.handleInput("\x04");
+
+		expect(onExit).toHaveBeenCalledTimes(1);
+		expect(editor.getText()).toBe("abc");
+	});
+});

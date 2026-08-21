@@ -72,7 +72,7 @@ This prevents partial escape chunks from being misinterpreted as normal keypress
 
 ### Shutdown and terminal handoff
 
-Exit from double `Ctrl+C`, empty-editor `Ctrl+D`, `/exit`, and postmortem signals converges on a promise-memoized session teardown. The first caller wins: it snapshots the editor draft, calls `beginDispose()` synchronously, attempts to save the draft, and then disposes the session. A draft-save failure is logged but does not skip disposal; later keypress or signal callers await the same promise and cannot double-run shutdown.
+Exit from double `Ctrl+C`, `/exit`, an explicit `app.exit` binding (unbound by default — `Ctrl+D` is a forward delete), and postmortem signals converges on a promise-memoized session teardown. The first caller wins: it snapshots the editor draft, calls `beginDispose()` synchronously, attempts to save the draft, and then disposes the session. A draft-save failure is logged but does not skip disposal; later keypress or signal callers await the same promise and cannot double-run shutdown.
 
 Interactive shutdown then follows this ownership order:
 
@@ -104,12 +104,12 @@ Routing details:
 
 ## Key handling split: editor vs controller
 
-`CustomEditor` intercepts high-priority combos first (escape, ctrl-c/d/z, ctrl-v, ctrl-p variants, ctrl-t, alt-up, extension custom keys) and delegates the rest to base `Editor` behavior (text editing, history, autocomplete, cursor movement).
+`CustomEditor` intercepts high-priority combos first (escape, ctrl-c/z, ctrl-v, ctrl-p variants, ctrl-t, alt-up, extension custom keys) and delegates the rest to base `Editor` behavior (text editing including `Ctrl+D` forward delete, history, autocomplete, cursor movement).
 
 `InputController.setupKeyHandlers()` then binds editor callbacks to mode actions:
 
 - cancellation / mode exits on `Escape`
-- shutdown on double `Ctrl+C` or empty-editor `Ctrl+D`
+- shutdown on double `Ctrl+C` or a user-configured `app.exit` key (no default)
 - suspend/resume on `Ctrl+Z`
 - slash-command and selector hotkeys
 - follow-up/dequeue toggles and expansion toggles
