@@ -83,4 +83,33 @@ describe("MCP lazy lifecycle: warm cache does not spawn", () => {
 			await second.disconnectAll();
 		}
 	}, 20_000);
+
+	it("removes stale deferred tools before rejecting an invalid replacement", async () => {
+		const spawnLog = path.join(workDir, "stale-replacement.log");
+		const cache = inMemoryToolCache();
+		const config = lazyConfig({ lifecycle: "lazy", spawnLog });
+		await cache.set("lazy", config, [TOOL_DEF]);
+
+		const manager = new MCPManager(workDir, cache);
+		try {
+			await manager.connectServers({ lazy: config }, {});
+			expect(manager.getConnectionStatus("lazy")).toBe("deferred");
+			const staleTool = manager.getTools().find(tool => tool.mcpServerName === "lazy");
+			expect(staleTool).toBeDefined();
+			if (!staleTool) throw new Error("Expected a deferred tool for the warm cache");
+
+			const invalidConfig = { ...config, command: "" };
+			const result = await manager.connectServers({ lazy: invalidConfig }, {});
+
+			expect(result.errors.get("lazy")).toContain('Server "lazy": stdio server requires "command" field');
+			expect(manager.getConnectionStatus("lazy")).toBe("disconnected");
+			expect(manager.getServerConfig("lazy")).toBeUndefined();
+			expect(manager.getTools()).not.toContain(staleTool);
+
+			await staleTool.execute("stale-call", {}, undefined, undefined as never, undefined as never);
+			expect(spawnCount(spawnLog)).toBe(0);
+		} finally {
+			await manager.disconnectAll();
+		}
+	}, 15_000);
 });

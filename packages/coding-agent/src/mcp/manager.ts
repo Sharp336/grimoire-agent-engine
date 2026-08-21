@@ -793,6 +793,7 @@ export class MCPManager {
 			// Validate config
 			const validationErrors = validateServerConfig(name, config);
 			if (validationErrors.length > 0) {
+				await this.disconnectServer(name);
 				const message = validationErrors.join("; ");
 				errors.set(name, message);
 				statusServerNames.push(name);
