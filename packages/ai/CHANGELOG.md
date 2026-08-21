@@ -20,6 +20,7 @@
 ### Fixed
 
 - Fixed Cursor Grok 4.5/4.6 (and Fast) effort selections being billed and served as the collapsed default Low sibling: `cursor-agent` now resolves `thinking.effortRouting` onto the outbound wire id (`cursor-grok-4.6-xhigh-fast` for xHigh Fast), matching Devin/Gemini CLI.
+- Fixed Cursor turns on non-reasoning models (e.g. Composer 2.5) throwing when a leftover SDK or global `reasoning` option was set; effort-to-wire-id routing now runs only when the model advertises reasoning.
 
 ## [17.4.0] - 2026-08-20
 

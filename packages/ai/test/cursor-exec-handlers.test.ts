@@ -575,6 +575,20 @@ describe("Cursor request action encoding", () => {
 		expect(xhighPayload.modelDetails?.displayModelId).toBe("cursor-grok-4.6-fast");
 	});
 
+	it("ignores a generic reasoning option on non-reasoning Cursor models", async () => {
+		// Composer 2.5 has no effort siblings. A leftover SDK/global `reasoning`
+		// option used to throw "does not support thinking" inside mapOptionsForApi
+		// and never built the Run RPC. The request must still go out on the
+		// catalog id.
+		const payload = await captureCursorPayloadFromStreamSimple(
+			{ messages: [{ role: "user", content: "continue", timestamp: 0 }] },
+			cursorModel,
+			{ reasoning: Effort.XHigh },
+		);
+		expect(payload.modelDetails?.modelId).toBe("cursor-composer-2.5");
+		expect(payload.requestedModel?.modelId).toBe("cursor-composer-2.5");
+	});
+
 	it("sends max-mode metadata with prior history when switching providers mid-conversation", async () => {
 		const payload = await captureCursorPayload(
 			{
