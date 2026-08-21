@@ -5,9 +5,11 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
+import { clearCache as clearFsCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
+import { getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import { type MCPServer, mcpCapability } from "../src/capability/mcp";
-import { convertToLegacyConfig } from "../src/mcp/config";
 import { MCPManager } from "../src/mcp/manager";
 import {
 	hasServerTool,
@@ -18,6 +20,9 @@ import {
 	TOOL_DEF,
 	waitFor,
 } from "./mcp-lifecycle-harness";
+
+const originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
+const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
 
 describe("MCP lifecycle precedence: per-server overrides the default", () => {
 	let workDir: string;
@@ -65,51 +70,40 @@ describe("MCP lifecycle precedence: per-server overrides the default", () => {
 	}, 15_000);
 });
 
-describe("convertToLegacyConfig threads lifecycle + idleTimeout", () => {
-	it("carries both fields onto a stdio legacy config", () => {
-		const legacy = convertToLegacyConfig({
-			name: "s",
-			command: "cmd",
-			lifecycle: "lazy",
-			idleTimeout: 1000,
-		} as unknown as MCPServer);
-		expect(legacy.type).toBe("stdio");
-		expect(legacy.lifecycle).toBe("lazy");
-		expect(legacy.idleTimeout).toBe(1000);
-	});
+describe("project MCP config preserves lifecycle settings", () => {
+	it("discovers and reaps a lazy stdio server from project config", async () => {
+		const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-mcp-convert-agent-"));
+		setAgentDir(agentDir);
+		clearFsCache();
 
-	it("carries both fields onto an http legacy config", () => {
-		const legacy = convertToLegacyConfig({
-			name: "h",
-			transport: "http",
-			url: "https://example.test/mcp",
-			lifecycle: "eager",
-			idleTimeout: 0,
-		} as unknown as MCPServer);
-		expect(legacy.type).toBe("http");
-		expect(legacy.lifecycle).toBe("eager");
-		// idleTimeout 0 ("never reap") must survive, not be dropped as falsy.
-		expect(legacy.idleTimeout).toBe(0);
-	});
+		const projectDir = makeWorkDir();
+		const spawnLog = path.join(projectDir, "project-discovery.log");
+		const config = lazyConfig({ lifecycle: "lazy", idleTimeout: 50, spawnLog });
+		const projectConfigPath = path.join(projectDir, ".omp", "mcp.json");
+		fs.mkdirSync(path.dirname(projectConfigPath), { recursive: true });
+		fs.writeFileSync(projectConfigPath, JSON.stringify({ mcpServers: { lazy: config } }));
 
-	it("carries both fields onto an sse legacy config", () => {
-		const legacy = convertToLegacyConfig({
-			name: "e",
-			transport: "sse",
-			url: "https://example.test/sse",
-			lifecycle: "lazy",
-			idleTimeout: 5000,
-		} as unknown as MCPServer);
-		expect(legacy.type).toBe("sse");
-		expect(legacy.lifecycle).toBe("lazy");
-		expect(legacy.idleTimeout).toBe(5000);
-	});
+		const manager = new MCPManager(projectDir);
+		try {
+			const result = await manager.discoverAndConnect({ enableProjectConfig: true });
 
-	it("leaves both fields undefined when the canonical server omits them", () => {
-		const legacy = convertToLegacyConfig({ name: "s", command: "cmd" } as unknown as MCPServer);
-		expect(legacy.lifecycle).toBeUndefined();
-		expect(legacy.idleTimeout).toBeUndefined();
-	});
+			expect(result.errors.has("lazy")).toBe(false);
+			expect(result.connectedServers).toContain("lazy");
+			expect(spawnCount(spawnLog)).toBe(1);
+			expect(await waitFor(() => manager.getConnectionStatus("lazy") === "deferred")).toBe(true);
+		} finally {
+			await manager.disconnectAll();
+			clearFsCache();
+			if (originalAgentDirEnv) {
+				setAgentDir(originalAgentDirEnv);
+			} else {
+				setAgentDir(fallbackAgentDir);
+				delete process.env.PI_CODING_AGENT_DIR;
+			}
+			fs.rmSync(agentDir, { recursive: true, force: true });
+			fs.rmSync(projectDir, { recursive: true, force: true });
+		}
+	}, 20_000);
 });
 
 describe("mcpCapability validates lifecycle fields", () => {
