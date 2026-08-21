@@ -2393,6 +2393,51 @@ describe("AuthStorage codex oauth ranking", () => {
 		expect(maxConcurrent).toBe(3);
 	});
 
+	test("refreshes a single expired plan-gated credential before its cold usage lookup", async () => {
+		if (!store) throw new Error("test setup failed");
+
+		const usageAccesses: string[] = [];
+		const fetchUsageSpy = vi.spyOn(usageProvider, "fetchUsage").mockImplementation(async params => {
+			usageAccesses.push(params.credential.accessToken ?? "");
+			if (params.credential.accessToken !== "refreshed-access") return null;
+			return createCodexUsageReport({
+				accountId: "acct-plan-gated",
+				primary: { usedFraction: 0.2, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.2, resetInMs: WEEK_MS },
+				metadata: { planType: "plus", email: "plan-gated@example.com" },
+			});
+		});
+		let refreshCalls = 0;
+		authStorage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
+			async refreshOAuthCredential(_provider, _credentialId, credential) {
+				refreshCalls += 1;
+				return {
+					...credential,
+					access: "refreshed-access",
+					expires: Date.now() + HOUR_MS,
+				};
+			},
+		});
+		await authStorage.set("openai-codex", [
+			{
+				type: "oauth",
+				...createCredential("acct-plan-gated", "plan-gated@example.com"),
+				access: "expired-access",
+				expires: Date.now() - HOUR_MS,
+			},
+		]);
+
+		expect(
+			await authStorage.getApiKey("openai-codex", "single-plan-gated-refresh", {
+				modelId: "gpt-5.6-sol",
+			}),
+		).toBe("api-acct-plan-gated");
+		expect(refreshCalls).toBe(1);
+		expect(fetchUsageSpy).toHaveBeenCalledTimes(1);
+		expect(usageAccesses).toEqual(["refreshed-access"]);
+	});
+
 	test("skips expired access-token-only sticky credential and selects fresh sibling", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 		const sessionId = "sticky-token-only-session";

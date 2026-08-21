@@ -22,6 +22,8 @@
 - Fixed the official DeepSeek Chat Completions route clamping models with a documented 384k output budget to the generic 64k OpenAI-compatible ceiling; third-party endpoints keep the conservative cap.
 - Fixed official DeepSeek V4 cost estimates to use the documented recurring UTC peak and 50%-discount windows, including cache and provider-orchestration token buckets; proxies and unknown models keep catalog pricing.
 - Fixed official DeepSeek Chat Completions streams losing transport context when the SSE socket closed before `finish_reason`; terminal errors now retain bounded status, request/trace IDs, event progress, and timing diagnostics.
+- Fixed definitive OAuth refresh failures looping indefinitely when a SQLite disable CAS missed semantically equivalent JSON or a nested credential-selection pass reset the peer-rotation replay budget. Credential replay now requires a full persisted OAuth value change and remains bounded to one replay per resolution chain.
+- Fixed structured xAI OAuth bootstrap JSON being sent as a bearer token after a persisted credential was disabled.
 
 ## [17.4.0] - 2026-08-20
 

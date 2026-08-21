@@ -34,6 +34,7 @@ import type {
 	UsageHistoryEntry,
 	UsageHistoryQuery,
 } from "../usage";
+import { areJsonValuesEqual } from "../utils/schema/equality";
 
 // 5 min stale tolerance. Anthropic / OpenAI rate-limit /usage hard at the IP
 // level so we can't fetch all N credentials every cycle; with a long cache
@@ -113,36 +114,6 @@ function normalizeStoredIdentityKey(identityKey: string | null | undefined): str
 	return normalized && normalized.length > 0 ? normalized : null;
 }
 
-function jsonValuesHaveSameSemantics(left: unknown, right: unknown): boolean {
-	if (left === right) return true;
-	if (Array.isArray(left) || Array.isArray(right)) {
-		if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
-		for (let index = 0; index < left.length; index += 1) {
-			if (!jsonValuesHaveSameSemantics(left[index], right[index])) return false;
-		}
-		return true;
-	}
-	if (left === null || right === null || typeof left !== "object" || typeof right !== "object") return false;
-	const leftObject = left as Record<string, unknown>;
-	const rightObject = right as Record<string, unknown>;
-	const leftKeys = Object.keys(leftObject);
-	if (leftKeys.length !== Object.keys(rightObject).length) return false;
-	for (const key of leftKeys) {
-		if (!Object.hasOwn(rightObject, key) || !jsonValuesHaveSameSemantics(leftObject[key], rightObject[key])) {
-			return false;
-		}
-	}
-	return true;
-}
-
-function credentialDataHasSameCanonicalSemantics(expectedData: string, actualData: string): boolean {
-	try {
-		return jsonValuesHaveSameSemantics(JSON.parse(expectedData), JSON.parse(actualData));
-	} catch {
-		return false;
-	}
-}
-
 export function serializeCredential(provider: string, credential: AuthCredential): SerializedCredentialRecord | null {
 	if (credential.type === "api_key") {
 		const data = credential.source === "login" ? { key: credential.key, source: "login" } : { key: credential.key };
@@ -184,6 +155,14 @@ function deserializeCredential(row: AuthRow): AuthCredential | null {
 		return { type: "oauth", ...(parsed as Record<string, unknown>) } as AuthCredential;
 	}
 	return null;
+}
+
+function areSerializedCredentialDataEqual(left: string, right: string): boolean {
+	try {
+		return areJsonValuesEqual(JSON.parse(left), JSON.parse(right));
+	} catch {
+		return false;
+	}
 }
 
 function normalizeDisabledCause(disabledCause: string): string {
@@ -373,6 +352,7 @@ function extractOAuthTokenIdentifiers(token: string | undefined): string[] | und
 export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	#db: Database;
 	#listActiveStmt: Statement;
+	#getActiveByIdStmt: Statement;
 	#listActiveByProviderStmt: Statement;
 	#listDisabledStmt: Statement;
 	#listDisabledByProviderStmt: Statement;
@@ -420,6 +400,9 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 
 		this.#listActiveStmt = this.#db.prepare(
 			"SELECT id, provider, credential_type, data, disabled_cause, identity_key FROM auth_credentials WHERE disabled_cause IS NULL ORDER BY id ASC",
+		);
+		this.#getActiveByIdStmt = this.#db.prepare(
+			"SELECT id, provider, credential_type, data, disabled_cause, identity_key FROM auth_credentials WHERE id = ? AND disabled_cause IS NULL",
 		);
 		this.#listActiveByProviderStmt = this.#db.prepare(
 			"SELECT id, provider, credential_type, data, disabled_cause, identity_key FROM auth_credentials WHERE provider = ? AND disabled_cause IS NULL ORDER BY id ASC",
@@ -1478,7 +1461,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		if (result.changes === 0) {
 			const actualRow = this.#getActiveCredentialDataStmt.get(id) as { data?: unknown } | undefined;
 			const actualData = typeof actualRow?.data === "string" ? actualRow.data : undefined;
-			if (actualData === undefined || !credentialDataHasSameCanonicalSemantics(expectedData, actualData)) {
+			if (actualData === undefined || !areSerializedCredentialDataEqual(expectedData, actualData)) {
 				return false;
 			}
 			result = lease
@@ -1537,7 +1520,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		if (result.changes === 0) {
 			const actualRow = this.#getActiveCredentialDataStmt.get(id) as { data?: unknown } | undefined;
 			const actualData = typeof actualRow?.data === "string" ? actualRow.data : undefined;
-			if (actualData === undefined || !credentialDataHasSameCanonicalSemantics(expectedData, actualData)) {
+			if (actualData === undefined || !areSerializedCredentialDataEqual(expectedData, actualData)) {
 				return false;
 			}
 			result = lease
@@ -2033,6 +2016,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#closed = true;
 		this.#listActiveStmt.finalize();
 		this.#listActiveByProviderStmt.finalize();
+		this.#getActiveByIdStmt.finalize();
 		this.#listDisabledStmt.finalize();
 		this.#listDisabledByProviderStmt.finalize();
 		this.#insertStmt.finalize();
