@@ -457,6 +457,7 @@ export interface InteractiveModeContext {
 	handleCleanseEscape(): boolean;
 	beginMcpTest(abortController: AbortController, name: string): void;
 	settleMcpTest(abortController: AbortController): void;
+	clearMcpTest(abortController: AbortController): void;
 	hasActiveMcpTest(): boolean;
 	handleMcpTestEscape(): boolean;
 	cycleThinkingLevel(): void;

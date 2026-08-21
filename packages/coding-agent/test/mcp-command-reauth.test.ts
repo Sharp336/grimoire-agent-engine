@@ -58,6 +58,9 @@ function createController(authStorage: AuthStorage, mcpManagerOverrides: Record<
 	const settleMcpTest = vi.fn((abortController: AbortController) => {
 		mcpTestEscape.settle(abortController);
 	});
+	const clearMcpTest = vi.fn((abortController: AbortController) => {
+		mcpTestEscape.clear(abortController);
+	});
 	const prepareConfig = vi.fn(async (config: MCPServerConfig) => config);
 	const mcpManager = {
 		prepareConfig,
@@ -91,6 +94,7 @@ function createController(authStorage: AuthStorage, mcpManagerOverrides: Record<
 		mcpManager,
 		beginMcpTest,
 		settleMcpTest,
+		clearMcpTest,
 	} as never;
 	const controller = new MCPCommandController(ctx);
 
@@ -106,6 +110,8 @@ function createController(authStorage: AuthStorage, mcpManagerOverrides: Record<
 		mcpManager,
 		beginMcpTest,
 		settleMcpTest,
+		clearMcpTest,
+		mcpTestEscape,
 	};
 }
 
@@ -545,8 +551,8 @@ describe("/mcp auth commands", () => {
 
 		const testPromise = controller.handle("/mcp test envserver");
 
-		// #handleTest registers Esc ownership after server validation (a couple
-		// of awaits in); the poll waits for that registration.
+		// #handleTest registers Esc ownership synchronously on entry (before the
+		// config-file resolution); the poll waits for that registration.
 		const deadline = Date.now() + 1_000;
 		while (beginMcpTest.mock.calls.length === 0 && Date.now() < deadline) {
 			await Bun.sleep(10);
@@ -557,6 +563,13 @@ describe("/mcp auth commands", () => {
 
 		const [registeredController, registeredName] = beginMcpTest.mock.calls[0] as [AbortController, string];
 		expect(registeredName).toBe("envserver");
+
+		// Press Esc while the connection is in flight (not during resolution, which
+		// is a different cancellation path covered by its own test below).
+		while (connectSignal === undefined && Date.now() < deadline) {
+			await Bun.sleep(10);
+		}
+		expect(connectSignal).toBeDefined();
 		registeredController.abort();
 
 		await Promise.race([
@@ -571,18 +584,83 @@ describe("/mcp auth commands", () => {
 		expect(settleMcpTest).toHaveBeenCalledWith(registeredController);
 	});
 
-	test("/mcp test does not arm Esc state for a missing server", async () => {
+	test("/mcp test releases Esc ownership without grace for a missing server", async () => {
 		const authStorage = freshAuthStorage();
 		await authStorage.reload();
-		const { controller, showError, beginMcpTest, settleMcpTest } = createController(authStorage);
+		const { controller, showError, beginMcpTest, settleMcpTest, clearMcpTest, mcpTestEscape } =
+			createController(authStorage);
 
 		await controller.handle("/mcp test nonexistent");
 
-		// Validation exits must not own Esc: no begin, no settle — a streaming
-		// session keeps interruptible and no five-second grace state is armed.
+		// Esc ownership is registered before the config-file resolution, so the
+		// missing-server exit must release it immediately (no begin-without-clear
+		// leak, no settle grace window): a streaming session stays interruptible
+		// and the state is gone before the handle returns.
 		expect(showError).toHaveBeenCalledWith(expect.stringContaining('Server "nonexistent" not found'));
-		expect(beginMcpTest).not.toHaveBeenCalled();
+		expect(beginMcpTest).toHaveBeenCalledTimes(1);
+		const [registeredController] = beginMcpTest.mock.calls[0] as [AbortController, string];
+		expect(clearMcpTest).toHaveBeenCalledWith(registeredController);
 		expect(settleMcpTest).not.toHaveBeenCalled();
+		expect(mcpTestEscape.hasActive()).toBe(false);
+	});
+
+	test("/mcp test releases Esc ownership without grace for a disabled server", async () => {
+		const authStorage = freshAuthStorage();
+		await authStorage.reload();
+		// "disabled-server" is not in the temp user config, so resolution reaches
+		// the runtime-discovered fallback (getServerConfig) with a disabled entry.
+		const { controller, showError, clearMcpTest, mcpTestEscape } = createController(authStorage, {
+			getServerConfig: () => ({ enabled: false, type: "http", url: "http://localhost:1" }),
+			getSource: () => "user",
+		});
+
+		await controller.handle("/mcp test disabled-server");
+
+		expect(showError).toHaveBeenCalledWith(expect.stringContaining('Server "disabled-server" is disabled'));
+		expect(clearMcpTest).toHaveBeenCalledTimes(1);
+		expect(mcpTestEscape.hasActive()).toBe(false);
+	});
+
+	test("Esc during /mcp test config resolution cancels the test, not the session", async () => {
+		const authStorage = freshAuthStorage();
+		await authStorage.reload();
+		// Holds #resolveServerForAuth open past #findConfiguredServer — mirrors a
+		// slow (network-backed) config lookup while the user presses Esc.
+		const resolution = Promise.withResolvers<{ type: "http"; url: string } | undefined>();
+		const { controller, showError, showStatus, beginMcpTest, settleMcpTest, mcpTestEscape } = createController(
+			authStorage,
+			{
+				getServerConfig: () => resolution.promise,
+				getSource: () => "user",
+			},
+		);
+
+		const testPromise = controller.handle("/mcp test envserver");
+
+		// Esc ownership is armed before resolution starts.
+		const deadline = Date.now() + 1_000;
+		while (beginMcpTest.mock.calls.length === 0 && Date.now() < deadline) {
+			await Bun.sleep(10);
+		}
+		expect(beginMcpTest).toHaveBeenCalledTimes(1);
+		const [registeredController] = beginMcpTest.mock.calls[0] as [AbortController, string];
+		registeredController.abort();
+
+		// Resolution completes after the Esc: the test is reported cancelled —
+		// not "not found" — and settles with the grace window (cancelled), so a
+		// reflexive second Esc is consumed instead of aborting the session.
+		resolution.resolve({ type: "http", url: "http://localhost:1" });
+		await Promise.race([
+			testPromise,
+			Bun.sleep(2_000).then(() => {
+				throw new Error("/mcp test did not resolve after Esc during resolution");
+			}),
+		]);
+
+		expect(showError).not.toHaveBeenCalled();
+		expect(showStatus).toHaveBeenCalledWith('Cancelled MCP test for "envserver"');
+		expect(settleMcpTest).toHaveBeenCalledWith(registeredController);
+		expect(mcpTestEscape.handleEscape()).toBe("consume");
 	});
 
 	test("a second /mcp test supersedes a pending one by aborting its connection", async () => {
@@ -606,11 +684,15 @@ describe("/mcp auth commands", () => {
 
 		const first = controller.handle("/mcp test envserver");
 		const deadline = Date.now() + 1_000;
-		while (beginMcpTest.mock.calls.length < 1 && Date.now() < deadline) {
+		// The second test supersedes the first while its connection attempt is in
+		// flight (begin runs before the config resolution, so a bare begin-count
+		// poll would abort the first during resolution instead).
+		while (signals.length < 1 && Date.now() < deadline) {
 			await Bun.sleep(10);
 		}
+		expect(signals[0]).toBeDefined();
 		const second = controller.handle("/mcp test envserver");
-		while (beginMcpTest.mock.calls.length < 2 && Date.now() < deadline) {
+		while ((beginMcpTest.mock.calls.length < 2 || signals.length < 2) && Date.now() < deadline) {
 			await Bun.sleep(10);
 		}
 		expect(beginMcpTest).toHaveBeenCalledTimes(2);

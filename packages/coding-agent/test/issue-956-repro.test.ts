@@ -92,6 +92,7 @@ describe("issue #956: interactive /mcp test", () => {
 			editor: {},
 			beginMcpTest: vi.fn(),
 			settleMcpTest: vi.fn(),
+			clearMcpTest: vi.fn(),
 			showError,
 			showStatus,
 			session: { refreshMCPTools },

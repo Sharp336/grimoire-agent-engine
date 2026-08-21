@@ -1577,10 +1577,25 @@ export class MCPCommandController {
 
 		let connection: MCPServerConnection | undefined;
 		let testStarted = false;
+		// Own Esc before the config-file resolution: the lookup reads user/project and
+		// fallback configs from disk, which can be slow on network-backed filesystems.
+		// Esc during that window must cancel the test rather than fall through to
+		// aborting the streaming session. Validation exits below release ownership
+		// immediately (no grace window) because no cancellable test ever started.
+		this.ctx.beginMcpTest(abortController, name);
 		try {
 			const found = await this.#resolveServerForAuth(name);
 
+			if (abortController.signal.aborted) {
+				// Esc during resolution: the test never started. Settle (not clear) so
+				// the grace window still consumes a reflexive second Esc.
+				this.ctx.settleMcpTest(abortController);
+				this.ctx.showStatus(`Cancelled MCP test for "${name}"`);
+				return;
+			}
+
 			if (!found) {
+				this.ctx.clearMcpTest(abortController);
 				this.ctx.showError(
 					`Server "${name}" not found.\n\nTip: Run ${theme.fg("accent", "/mcp list")} to see available servers.`,
 				);
@@ -1589,14 +1604,11 @@ export class MCPCommandController {
 
 			const { config } = found;
 			if (config.enabled === false) {
+				this.ctx.clearMcpTest(abortController);
 				this.ctx.showError(`Server "${name}" is disabled. Run /mcp enable ${name} first.`);
 				return;
 			}
 
-			// Own Esc only once the cancellable test actually starts; validation
-			// exits above must not arm the post-settle grace state (a missing or
-			// disabled server would otherwise swallow Esc for five seconds).
-			this.ctx.beginMcpTest(abortController, name);
 			testStarted = true;
 
 			this.#showMessage(
@@ -1641,8 +1653,20 @@ export class MCPCommandController {
 			this.#showMessage(lines.join("\n"));
 		} catch (error) {
 			if (abortController.signal.aborted || (error instanceof Error && error.name === "AbortError")) {
+				// Settle here when the abort raced a resolution failure (testStarted is
+				// still false, so `finally` will not); a connect-phase abort settles via
+				// the testStarted path below.
+				if (!testStarted) {
+					this.ctx.settleMcpTest(abortController);
+				}
 				this.ctx.showStatus(`Cancelled MCP test for "${name}"`);
 				return;
+			}
+
+			if (!testStarted) {
+				// Resolution itself failed (e.g. unreadable config): no test ever
+				// started, so Esc ownership is released without the grace window.
+				this.ctx.clearMcpTest(abortController);
 			}
 
 			const errorMsg = error instanceof Error ? error.message : String(error);

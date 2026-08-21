@@ -39,6 +39,29 @@ describe("McpTestEscapeState", () => {
 		expect(state.hasActive()).toBe(false);
 	});
 
+	test("clear releases Esc ownership immediately, without the grace window", () => {
+		const state = new McpTestEscapeState();
+		const controller = new AbortController();
+		state.begin(controller, "missing");
+		state.clear(controller);
+
+		expect(state.hasActive()).toBe(false);
+		expect(state.handleEscape()).toBe("fallthrough");
+	});
+
+	test("clear is identity-guarded: a stale controller cannot release the active test", () => {
+		const state = new McpTestEscapeState();
+		const stale = new AbortController();
+		const active = new AbortController();
+		state.begin(stale, "old");
+		state.begin(active, "new");
+		state.clear(stale); // superseded controller must be ignored
+
+		expect(state.hasActive()).toBe(true);
+		expect(state.handleEscape()).toBe("abort");
+		expect(active.signal.aborted).toBe(true);
+	});
+
 	test("settle records cancellation when the signal was already aborted", () => {
 		const state = new McpTestEscapeState();
 		const controller = new AbortController();

@@ -5301,6 +5301,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#mcpTestEscape.settle(abortController);
 	}
 
+	clearMcpTest(abortController: AbortController): void {
+		this.#mcpTestEscape.clear(abortController);
+	}
+
 	hasActiveMcpTest(): boolean {
 		return this.#mcpTestEscape.hasActive();
 	}

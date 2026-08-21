@@ -42,6 +42,15 @@ export class McpTestEscapeState {
 		}, MCP_TEST_ESC_GRACE_MS);
 	}
 
+	/** Release Esc ownership immediately, without the grace window. Used when a test is registered
+	 *  before validation but never actually starts (missing/disabled server): Esc must fall through
+	 *  to normal semantics right away. Identity-guarded like {@link settle}. */
+	clear(abortController: AbortController): void {
+		if (this.#active?.abortController === abortController) {
+			this.#active = undefined;
+		}
+	}
+
 	hasActive(): boolean {
 		return this.#active !== undefined;
 	}
