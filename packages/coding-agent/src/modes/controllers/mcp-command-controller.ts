@@ -1574,9 +1574,9 @@ export class MCPCommandController {
 		}
 
 		const abortController = new AbortController();
-		this.ctx.beginMcpTest(abortController, name);
 
 		let connection: MCPServerConnection | undefined;
+		let testStarted = false;
 		try {
 			const found = await this.#resolveServerForAuth(name);
 
@@ -1592,6 +1592,12 @@ export class MCPCommandController {
 				this.ctx.showError(`Server "${name}" is disabled. Run /mcp enable ${name} first.`);
 				return;
 			}
+
+			// Own Esc only once the cancellable test actually starts; validation
+			// exits above must not arm the post-settle grace state (a missing or
+			// disabled server would otherwise swallow Esc for five seconds).
+			this.ctx.beginMcpTest(abortController, name);
+			testStarted = true;
 
 			this.#showMessage(
 				["", theme.fg("muted", `Testing connection to "${name}"... (esc to cancel)`), ""].join("\n"),
@@ -1657,7 +1663,9 @@ export class MCPCommandController {
 
 			this.ctx.showError(`Failed to connect to "${name}": ${errorMsg}${helpText}`);
 		} finally {
-			this.ctx.settleMcpTest(abortController);
+			if (testStarted) {
+				this.ctx.settleMcpTest(abortController);
+			}
 			if (connection) {
 				// Best-effort: don't block UI on cleanup.
 				void disconnectServer(connection);

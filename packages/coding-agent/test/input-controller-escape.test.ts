@@ -218,6 +218,8 @@ function createContext(): {
 		hasActiveOmfg,
 		handleCleanseEscape,
 		hasActiveCleanse,
+		handleMcpTestEscape: vi.fn(() => true),
+		hasActiveMcpTest: vi.fn(() => false),
 		showTreeSelector: vi.fn(),
 		showUserMessageSelector: vi.fn(),
 		showSessionSelector: vi.fn(),
@@ -453,6 +455,34 @@ describe("InputController escape behavior", () => {
 
 		expect(spies.handleBtwEscape).toHaveBeenCalledTimes(1);
 		expect(spies.abort).not.toHaveBeenCalled();
+	});
+
+	it("consumes Esc for an active /mcp test before aborting the main stream", () => {
+		const { ctx, editor, spies } = createContext();
+		(ctx.session as { isStreaming: boolean }).isStreaming = true;
+		ctx.hasActiveMcpTest = vi.fn(() => true);
+		ctx.handleMcpTestEscape = vi.fn(() => true);
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.onEscape?.();
+
+		expect(ctx.handleMcpTestEscape).toHaveBeenCalledTimes(1);
+		expect(spies.abort).not.toHaveBeenCalled();
+	});
+
+	it("falls through to the stream abort when the /mcp test escape is not handled", () => {
+		const { ctx, editor, spies } = createContext();
+		(ctx.session as { isStreaming: boolean }).isStreaming = true;
+		ctx.hasActiveMcpTest = vi.fn(() => true);
+		ctx.handleMcpTestEscape = vi.fn(() => false);
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.onEscape?.();
+
+		expect(ctx.handleMcpTestEscape).toHaveBeenCalledTimes(1);
+		expect(spies.abort).toHaveBeenCalledTimes(1);
 	});
 
 	it("dismisses an active /btw panel before canceling a pending optimistic submission", () => {

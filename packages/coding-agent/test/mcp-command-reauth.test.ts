@@ -57,6 +57,8 @@ function createController(authStorage: AuthStorage, mcpManagerOverrides: Record<
 		getTools: vi.fn(() => []),
 		waitForConnection: vi.fn(async () => {}),
 		getConnectionStatus: vi.fn(() => "connected"),
+		getServerConfig: vi.fn(() => undefined),
+		getSource: vi.fn(() => undefined),
 		...mcpManagerOverrides,
 	};
 	const oauthManualInput = new OAuthManualInputManager();
@@ -518,16 +520,15 @@ describe("/mcp auth commands", () => {
 			// server whose connection is still in flight when Esc is pressed).
 			// An already-aborted signal must reject immediately — the abort
 			// event has already fired and cannot re-trigger a later listener.
-			return new Promise((_, reject) => {
-				const signal = options?.signal;
-				if (signal?.aborted) {
-					reject(new DOMException("Aborted", "AbortError"));
-					return;
-				}
-				signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), {
-					once: true,
-				});
-			});
+			const pending = Promise.withResolvers<never>();
+			const reject = (): void => pending.reject(new DOMException("Aborted", "AbortError"));
+			const signal = options?.signal;
+			if (signal?.aborted) {
+				reject();
+			} else {
+				signal?.addEventListener("abort", reject, { once: true });
+			}
+			return pending.promise;
 		});
 		vi.spyOn(mcpClient, "listTools").mockResolvedValue([]);
 
@@ -535,8 +536,8 @@ describe("/mcp auth commands", () => {
 
 		const testPromise = controller.handle("/mcp test envserver");
 
-		// #handleTest registers its abort controller synchronously, before the
-		// first await — the poll is just a safety net.
+		// #handleTest registers Esc ownership after server validation (a couple
+		// of awaits in); the poll waits for that registration.
 		const deadline = Date.now() + 1_000;
 		while (beginMcpTest.mock.calls.length === 0 && Date.now() < deadline) {
 			await Bun.sleep(10);
@@ -559,6 +560,20 @@ describe("/mcp auth commands", () => {
 		expect(connectSignal?.aborted).toBe(true);
 		expect(showStatus).toHaveBeenCalledWith('Cancelled MCP test for "envserver"');
 		expect(settleMcpTest).toHaveBeenCalledWith(registeredController);
+	});
+
+	test("/mcp test does not arm Esc state for a missing server", async () => {
+		const authStorage = freshAuthStorage();
+		await authStorage.reload();
+		const { controller, showError, beginMcpTest, settleMcpTest } = createController(authStorage);
+
+		await controller.handle("/mcp test nonexistent");
+
+		// Validation exits must not own Esc: no begin, no settle — a streaming
+		// session keeps interruptible and no five-second grace state is armed.
+		expect(showError).toHaveBeenCalledWith(expect.stringContaining('Server "nonexistent" not found'));
+		expect(beginMcpTest).not.toHaveBeenCalled();
+		expect(settleMcpTest).not.toHaveBeenCalled();
 	});
 
 	test("reauth supersedes an unfinished MCP OAuth flow", async () => {

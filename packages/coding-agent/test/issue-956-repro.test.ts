@@ -90,6 +90,8 @@ describe("issue #956: interactive /mcp test", () => {
 			},
 			ui: { requestRender },
 			editor: {},
+			beginMcpTest: vi.fn(),
+			settleMcpTest: vi.fn(),
 			showError,
 			showStatus,
 			session: { refreshMCPTools },

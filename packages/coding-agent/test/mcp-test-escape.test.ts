@@ -1,5 +1,9 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, vi } from "bun:test";
 import { MCP_TEST_ESC_GRACE_MS, McpTestEscapeState } from "@oh-my-pi/pi-coding-agent/modes/mcp-test-escape";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 describe("McpTestEscapeState", () => {
 	test('pending test: Esc aborts it and returns "abort"', () => {
@@ -13,15 +17,19 @@ describe("McpTestEscapeState", () => {
 	});
 
 	test("settled test: Esc is consumed within the grace window, falls through after it", () => {
+		// Freeze the clock so the grace boundary is measured from one stable
+		// settlement timestamp instead of two wall-clock reads.
+		const now = 1_000_000;
+		vi.spyOn(Date, "now").mockReturnValue(now);
 		const state = new McpTestEscapeState();
 		const controller = new AbortController();
 		state.begin(controller, "fast");
 		state.settle(controller);
 
-		expect(state.handleEscape(Date.now() + 1000)).toBe("consume");
-		expect(state.handleEscape(Date.now() + MCP_TEST_ESC_GRACE_MS - 1)).toBe("consume");
+		expect(state.handleEscape(now + 1000)).toBe("consume");
+		expect(state.handleEscape(now + MCP_TEST_ESC_GRACE_MS - 1)).toBe("consume");
 		// Past the grace window: Esc is released back to normal semantics.
-		expect(state.handleEscape(Date.now() + MCP_TEST_ESC_GRACE_MS + 1)).toBe("fallthrough");
+		expect(state.handleEscape(now + MCP_TEST_ESC_GRACE_MS + 1)).toBe("fallthrough");
 		expect(state.hasActive()).toBe(false);
 	});
 
