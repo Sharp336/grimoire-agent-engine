@@ -1926,6 +1926,15 @@ describe("lsp regressions", () => {
 		expect(detectLanguageId(emacsPath)).toBe("emacs-lisp");
 	});
 
+	it("detects vala, vapi, and genie files for LSP language ids", () => {
+		expect(detectLanguageId("source.vala")).toBe("vala");
+		expect(detectLanguageId("source.vapi")).toBe("vala");
+		expect(detectLanguageId("source.gs")).toBe("genie");
+		expect(getLanguageFromPath("source.vala")).toBe("vala");
+		expect(getLanguageFromPath("source.vapi")).toBe("vala");
+		expect(getLanguageFromPath("source.gs")).toBe("genie");
+	});
+
 	it("loads config-only marketplace LSP servers from Claude plugin cache", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-marketplace-config-");
 		const home = path.join(tempDir.path(), "home");

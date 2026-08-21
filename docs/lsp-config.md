@@ -268,3 +268,4 @@ The following servers ship in `defaults.json` and are eligible for auto-detectio
 | `sourcekit-lsp`               | Swift                         | `sourcekit-lsp`                   |
 | `swiftlint`                   | Swift (linter)                | `swiftlint`                       |
 | `tlaplus`                     | TLA+                          | `tlapm_lsp`                       |
+| `vala-language-server`        | Vala                          | `vala-language-server`            |
