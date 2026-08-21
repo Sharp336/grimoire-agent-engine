@@ -231,4 +231,33 @@ describe("MCP list runtime join", () => {
 		list.handleClick(3);
 		expect(toggles).toEqual([{ id: "mcp:github", enabled: false }]);
 	});
+
+	test("disabled shadowed loser with the production duplicate id is not toggleable", () => {
+		const toggles: Array<{ id: string; enabled: boolean }> = [];
+		const winner = mcpExtension("active");
+		const loser: Extension = {
+			...mcpExtension("disabled"),
+			id: "mcp:github",
+			path: "/home/sf/.omp/agent/mcp.json",
+			disabledReason: "item-disabled",
+			raw: { ...githubServer, enabled: false, _shadowed: true, command: "/usr/bin/shadowed-github" },
+		};
+		const list = new ExtensionList([winner, loser], {
+			mcpSource: connectedSource(),
+			onToggle: (id, enabled) => toggles.push({ id, enabled }),
+		});
+		list.setFocused(true);
+		list.render(80);
+		list.handleClick(4);
+		expect(list.getSelectedExtension()?.state).toBe("disabled");
+		expect(list.getSelectedExtension()?.id).toBe("mcp:github");
+		list.handleClick(4);
+		list.handleInput(" ");
+		expect(toggles).toEqual([]);
+
+		const rendered = Bun.stripANSI(list.render(80).join("\n"));
+		const secondGithub = rendered.indexOf("github", rendered.indexOf("2 tools · 1 resource") + 1);
+		expect(secondGithub).toBeGreaterThan(-1);
+		expect(rendered.slice(secondGithub)).not.toContain("2 tools");
+	});
 });

@@ -25,7 +25,7 @@ import {
 	type MCPRuntimeSource,
 	snapshotMcpRuntime,
 } from "./mcp-runtime";
-import { applyFilter } from "./state-manager";
+import { applyFilter, isShadowedExtension } from "./state-manager";
 import type { Extension, ExtensionKind, ExtensionState } from "./types";
 
 export interface ExtensionListCallbacks {
@@ -226,25 +226,21 @@ export class ExtensionList implements Component {
 	}
 
 	#renderExtensionRow(ext: Extension, isSelected: boolean, width: number, masterDisabled: boolean): string {
-		// When master is disabled, all items appear dimmed
+		const shadowed = isShadowedExtension(ext);
 		const effectivelyDisabled = masterDisabled || ext.state === "disabled";
 		const mcpSnap =
-			ext.kind === "mcp" && isDiscoveredMcpServer(ext.raw) && ext.state !== "shadowed"
+			ext.kind === "mcp" && isDiscoveredMcpServer(ext.raw) && !shadowed
 				? snapshotMcpRuntime(ext.raw, this.#mcpSource, {
 						enabled: !effectivelyDisabled,
 						shadowed: false,
 					})
 				: undefined;
 
-		// Status icon: MCP rows use live connection health, not "enabled in config".
-		// Shadowed same-name configs keep the shadowed glyph — never the winner's health.
-		const stateIcon =
-			ext.state === "shadowed"
-				? this.#getStateIcon(ext.state, masterDisabled)
-				: mcpSnap
-					? this.#getMcpHealthIcon(mcpSnap.health, masterDisabled)
-					: this.#getStateIcon(ext.state, masterDisabled);
-
+		const stateIcon = shadowed
+			? this.#getStateIcon("shadowed", masterDisabled)
+			: mcpSnap
+				? this.#getMcpHealthIcon(mcpSnap.health, masterDisabled)
+				: this.#getStateIcon(ext.state, masterDisabled);
 		let name = sanitizeDisplayText(ext.displayName);
 		const nameWidth = Math.min(24, width - 16);
 
@@ -255,7 +251,7 @@ export class ExtensionList implements Component {
 			name = theme.bold(theme.fg("accent", name));
 		} else if (effectivelyDisabled) {
 			name = theme.fg("dim", name);
-		} else if (ext.state === "shadowed") {
+		} else if (shadowed) {
 			name = theme.fg("warning", name);
 		}
 
@@ -276,7 +272,7 @@ export class ExtensionList implements Component {
 					: "muted";
 			const remainingWidth = width - visibleWidth(line) - 2;
 			if (remainingWidth > 5) {
-				line += `  ${truncateToWidth(theme.fg(triggerStyle, hint), remainingWidth)}`;
+				line += `  ${truncateToWidth(theme.fg(triggerStyle, sanitizeDisplayText(hint)), remainingWidth)}`;
 			}
 		}
 
@@ -465,7 +461,7 @@ export class ExtensionList implements Component {
 		} else if (item?.type === "extension") {
 			// Shadowed same-name rows share the winner's id (`mcp:github`).
 			// Toggling them would mutate whichever config `find(id)` hits first.
-			if (item.item.state === "shadowed") return;
+			if (isShadowedExtension(item.item)) return;
 			const masterDisabled = this.#masterSwitchProvider !== null && !isProviderEnabled(this.#masterSwitchProvider);
 			if (!masterDisabled) {
 				const newEnabled = item.item.state === "disabled";

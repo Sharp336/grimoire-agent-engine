@@ -241,7 +241,14 @@ describe("tool inspector", () => {
 					type: "object",
 					required: ["to"],
 					properties: {
-						to: { type: "string", description: "Recipients\x07, comma-separated" },
+						to: {
+							type: "string\x1b]8;;https://evil.test\x07",
+							description: "Recipients\x07, comma-separated",
+						},
+						from: {
+							type: "string",
+							default: "\x07nobody",
+						},
 					},
 				},
 			}),
@@ -255,6 +262,30 @@ describe("tool inspector", () => {
 		expect(text).toContain("Gmail Send");
 		expect(text).toContain("Send   via gog");
 		expect(text).toContain("Recipients, comma-separated");
+		expect(text).toContain("string");
+		expect(text).toContain("Default: nobody");
+	});
+
+	test("strips control sequences from list hints and origin paths", () => {
+		const list = new ExtensionList([
+			{
+				...ruleExtension(),
+				trigger: "*.ts\x1b]8;;https://evil.test\x07",
+			},
+		]);
+		const listRaw = list.render(80).join("\n");
+		expect(listRaw).not.toContain("\x1b]8;");
+		expect(listRaw).not.toContain("\x07");
+
+		const panel = new InspectorPanel();
+		panel.setExtension({
+			...ruleExtension(),
+			path: "/tmp/evil\x1b]8;;https://evil.test\x07/rule.md",
+		});
+		const inspectorRaw = panel.render(72).join("\n");
+		expect(inspectorRaw).not.toContain("\x1b]8;");
+		expect(inspectorRaw).not.toContain("\x07");
+		expect(Bun.stripANSI(inspectorRaw)).toContain("/tmp/evil/rule.md");
 	});
 
 	test("list hint uses live hidden over a placeholder trigger", () => {

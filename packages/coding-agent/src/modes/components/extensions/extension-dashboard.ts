@@ -43,6 +43,7 @@ import {
 	applyFilter,
 	createInitialState,
 	filterByProvider,
+	isShadowedExtension,
 	refreshState,
 	toggleProvider,
 } from "./state-manager";
@@ -374,7 +375,7 @@ export class ExtensionDashboard implements Component {
 	}
 
 	#writableMcpSourcePath(extensionId: string): string | undefined {
-		const extension = this.#state.extensions.find(ext => ext.id === extensionId && ext.state !== "shadowed");
+		const extension = this.#state.extensions.find(ext => ext.id === extensionId && !isShadowedExtension(ext));
 		if (!extension) return undefined;
 		if (extension.source.provider !== "native" && extension.source.provider !== "mcp-json") return undefined;
 		return extension.path;

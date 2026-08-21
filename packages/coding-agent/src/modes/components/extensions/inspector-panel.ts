@@ -34,6 +34,7 @@ import {
 	snapshotMcpRuntime,
 	visibleMcpTools,
 } from "./mcp-runtime";
+import { isShadowedExtension } from "./state-manager";
 import type { Extension, ExtensionState } from "./types";
 
 export type { ToolRuntimeSource };
@@ -145,11 +146,12 @@ export class InspectorPanel implements Component {
 
 	#mcpKind(ext: Extension): KindView {
 		const width = this.#width;
+		const shadowed = isShadowedExtension(ext);
 		const snap =
-			isDiscoveredMcpServer(ext.raw) && ext.state !== "shadowed"
+			isDiscoveredMcpServer(ext.raw) && !shadowed
 				? snapshotMcpRuntime(ext.raw, this.#mcpSource, { enabled: ext.state !== "disabled" })
 				: undefined;
-		if (ext.state === "shadowed") {
+		if (shadowed) {
 			const config: string[] = [];
 			const transport = isDiscoveredMcpServer(ext.raw) ? inferMcpTransport(ext.raw) : "stdio";
 			config.push(theme.fg("muted", "Connection"));
@@ -457,7 +459,7 @@ export class InspectorPanel implements Component {
 			width,
 			"  ",
 		);
-		this.#pushWrapped(lines, shortenPath(ext.path, os.homedir()), width, "  ");
+		this.#pushWrapped(lines, sanitizeDisplayText(shortenPath(ext.path, os.homedir())), width, "  ");
 		lines.push("");
 	}
 

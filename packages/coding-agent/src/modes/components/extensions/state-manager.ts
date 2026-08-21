@@ -532,8 +532,15 @@ export function filterByProvider(extensions: Extension[], providerId: string): E
 	return extensions.filter(ext => ext.source.provider === providerId);
 }
 
-function isShadowedExtension(ext: Extension): boolean {
-	if (ext.shadowedBy) return true;
+/**
+ * True when this row is a lower-precedence copy of another same-name item.
+ * Disablement takes display precedence (`state === "disabled"`), but the
+ * discovery `_shadowed` flag (and `shadowedBy`) still mark the row as a
+ * loser — it must not be toggleable and must not join the winner's live MCP
+ * connection.
+ */
+export function isShadowedExtension(ext: Extension): boolean {
+	if (ext.state === "shadowed" || ext.shadowedBy) return true;
 	return Boolean((ext.raw as { _shadowed?: boolean } | null | undefined)?._shadowed);
 }
 
