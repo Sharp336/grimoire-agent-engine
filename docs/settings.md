@@ -56,6 +56,14 @@ omp config set startup.showSplash true
 
 This only controls the startup splash animation. It does not rerun setup or change setup state, and `startup.quiet: true` still suppresses all startup chrome including the splash.
 
+To keep tmux scrollback at the current pane width after zoom or split changes, enable the **Reflow tmux Scrollback** toggle in `/settings` or set it from the CLI:
+
+```bash
+omp config set tui.tmuxHistoryRebuild true
+```
+
+This setting replaces tmux pane history with one synchronized current-width OMP transcript after width changes. It requires a direct tmux 3.7 or newer session, remains inactive inside nested screen, Zellij, or cmux, and fixes capped-width and duplicate history at the cost of discarding shell output that predates OMP in the same pane.
+
 ### Subcommands
 
 | Command                        | Effect                                                                                                                                                                                                                                                                                            |

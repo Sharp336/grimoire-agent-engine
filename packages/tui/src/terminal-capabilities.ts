@@ -385,6 +385,17 @@ function parseTmuxVersionFromEnv(env: NodeJS.ProcessEnv): { major: number; minor
 	return parseMajorMinorVersion(env.TERM_PROGRAM_VERSION);
 }
 
+/** Whether tmux self-reports at least the requested major/minor version. */
+export function isTmuxVersionAtLeast(
+	requiredMajor: number,
+	requiredMinor: number,
+	env: NodeJS.ProcessEnv = Bun.env,
+): boolean {
+	const version = parseTmuxVersionFromEnv(env);
+	if (!version) return false;
+	return version.major > requiredMajor || (version.major === requiredMajor && version.minor >= requiredMinor);
+}
+
 /**
  * Whether OSC 8 hyperlinks should be enabled by default.
  *
@@ -426,11 +437,7 @@ export function shouldEnableHyperlinksByDefault(
 	// tmux check before TERM heuristics: TMUX is the authoritative current-session
 	// signal and supersedes TERM, which may be `screen-256color` under tmux's
 	// historical default-terminal setting.
-	if (env.TMUX) {
-		const version = parseTmuxVersionFromEnv(env);
-		if (!version) return false;
-		return version.major > 3 || (version.major === 3 && version.minor >= 4);
-	}
+	if (env.TMUX) return isTmuxVersionAtLeast(3, 4, env);
 
 	const term = env.TERM?.toLowerCase() ?? "";
 	if (term.startsWith("screen")) return false;

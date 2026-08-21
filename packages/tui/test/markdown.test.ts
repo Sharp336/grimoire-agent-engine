@@ -682,6 +682,37 @@ Average Latency: 1,240 ms
 			expect(topBorder(markdown.render(80))).not.toBe(growingBorder);
 		});
 
+		it("replaces an old-width table lock when the committed frame reflows", () => {
+			const initial = `| Entry | Value |
+| --- | --- |
+| ${"W".repeat(55)} | R000 |`;
+			const appended = `${initial}
+| ${"Z".repeat(70)} | R001 |`;
+			const markdown = new Markdown(initial, 0, 0, defaultMarkdownTheme);
+			markdown.transientRenderCache = true;
+
+			const border = (lines: readonly string[]): string => {
+				const value = lines
+					.map(line => stripVTControlCharacters(line).trimEnd())
+					.find(line => line.startsWith("+"));
+				expect(value).toBeDefined();
+				return value!;
+			};
+
+			const wideLines = markdown.render(80);
+			const wideStart = wideLines.findIndex(line => stripVTControlCharacters(line).trimStart().startsWith("+"));
+			markdown.setNativeScrollbackCommittedRows(wideStart + 1);
+
+			const narrowLines = markdown.render(40);
+			const narrowBorder = border(narrowLines);
+			expect(narrowBorder).not.toBe(border(wideLines));
+			const narrowStart = narrowLines.findIndex(line => stripVTControlCharacters(line).trimStart().startsWith("+"));
+			markdown.setNativeScrollbackCommittedRows(narrowStart + 1);
+
+			markdown.setText(appended);
+			expect(border(markdown.render(40))).toBe(narrowBorder);
+		});
+
 		it("keeps layout locks independent across streamed tables", () => {
 			const first = `| First table column | Value |
 | --- | --- |

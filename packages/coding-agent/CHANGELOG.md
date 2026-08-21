@@ -38,6 +38,7 @@
 - Pasted images and large text pastes appear in the composer as compact icon tokens instead of bracketed markers; the bracketed form remains the outgoing/stored format, and the transcript renders it back as the compact chip.
 - Deleting an attachment's inline token now removes the attachment from the submission (surviving image markers are renumbered).
 - Restored prompts (esc-esc, `/tree`, branch, queued-message dequeue, failed-submit recovery) collapse image markers back into clickable atomic chip tokens and re-materialize their file links instead of degrading to dead text.
+- Added a **Reflow tmux Scrollback** setting (`tui.tmuxHistoryRebuild`) that replaces pane history with a current-width transcript after tmux width changes; enabling it intentionally discards pre-OMP shell history in that pane.
 
 ## [17.4.1] - 2026-08-21
 

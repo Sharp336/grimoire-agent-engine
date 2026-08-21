@@ -914,6 +914,95 @@ describe("TUI inline-image budget", () => {
 		}
 	});
 
+	it("defers tmux history clearing with the first Ghostty image paint", () => {
+		const originalId = terminal.id;
+		const originalGraphics = { ...getKittyGraphics() };
+		const savedEnvKeys = [
+			"TMUX_PANE",
+			"PI_TUI_SYNC_OUTPUT",
+			"TERM_PROGRAM",
+			"TERM_PROGRAM_VERSION",
+			"STY",
+			"ZELLIJ",
+			"CMUX_WORKSPACE_ID",
+			"CMUX_SURFACE_ID",
+			"CMUX_REMOTE_TRANSPORT",
+		] as const;
+		const savedEnv: Record<(typeof savedEnvKeys)[number], string | undefined> = Object.fromEntries(
+			savedEnvKeys.map(key => [key, Bun.env[key]]),
+		) as Record<(typeof savedEnvKeys)[number], string | undefined>;
+		const term = new VirtualTerminal(40, 12);
+		let now = 0;
+		const scheduled: Array<{ delayMs: number; callback: () => void; canceled: boolean }> = [];
+		const renderScheduler = {
+			now: () => now,
+			scheduleImmediate: (callback: () => void) => callback(),
+			scheduleRender: (callback: () => void, delayMs: number) => {
+				const entry = { delayMs, callback, canceled: false };
+				scheduled.push(entry);
+				return {
+					cancel: () => {
+						entry.canceled = true;
+					},
+				};
+			},
+		};
+		Bun.env.TERM_PROGRAM = "tmux";
+		Bun.env.TERM_PROGRAM_VERSION = "3.7b";
+		let clears = 0;
+
+		Bun.env.TMUX = "/tmp/tmux-1000/default,1,0";
+		Bun.env.TMUX_PANE = "%999";
+		Bun.env.PI_TUI_SYNC_OUTPUT = "1";
+		delete Bun.env.STY;
+		delete Bun.env.ZELLIJ;
+		delete Bun.env.CMUX_WORKSPACE_ID;
+		delete Bun.env.CMUX_SURFACE_ID;
+		delete Bun.env.CMUX_REMOTE_TRANSPORT;
+		terminal.id = "ghostty";
+		terminal.imageProtocol = ImageProtocol.Kitty;
+		setKittyGraphics({ unicodePlaceholders: true });
+
+		const tui = new TUI(term, undefined, {
+			renderScheduler,
+			clearTmuxHistory: () => {
+				clears++;
+				return true;
+			},
+			waitForTmuxGridClear: () => true,
+		});
+		tui.setTmuxHistoryRebuild(true);
+		tui.addChild(new Text("base", 0, 0));
+
+		try {
+			tui.start();
+			tui.addChild(makeImage(tui.imageBudget, "deferred-resize-image"));
+			term.resize(80, 12);
+			const resizeSettle = scheduled.find(entry => !entry.canceled && entry.delayMs === 50);
+			expect(resizeSettle).toBeDefined();
+			now = 50;
+			resizeSettle!.canceled = true;
+			resizeSettle!.callback();
+
+			expect(clears).toBe(0);
+			const imageDelay = scheduled.find(entry => !entry.canceled && entry.delayMs === 50);
+			expect(imageDelay).toBeDefined();
+			now = 100;
+			imageDelay!.canceled = true;
+			imageDelay!.callback();
+			expect(clears).toBe(2);
+		} finally {
+			tui.stop();
+			terminal.id = originalId;
+			setKittyGraphics(originalGraphics);
+			for (const key of savedEnvKeys) {
+				const value = savedEnv[key];
+				if (value === undefined) delete Bun.env[key];
+				else Bun.env[key] = value;
+			}
+		}
+	});
+
 	it("holds the first Ghostty image paint until the startup settle window passes", () => {
 		const originalId = terminal.id;
 		const originalGraphics = { ...getKittyGraphics() };

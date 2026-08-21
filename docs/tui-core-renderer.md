@@ -346,6 +346,7 @@ default-on only for kitty/ghostty (`PI_NO_KITTY_PLACEHOLDERS` /
 | `PI_DEBUG_REDRAW=1`                                      | Log the chosen render intent + ledger state per frame to the debug log.                                                                                                     |
 | `PI_TUI_RESIZE_IN_PLACE=1\|0`                            | Force resize to repaint in place (no alt-screen borrow, no ED3 rewrap) on / off. Default-on for terminals that re-report size on alt-screen toggles (Warp).                 |
 | `PI_TUI_SCROLLBACK_REBUILD=1`                            | Initialize low-level `TUI` divergence rebuild on. Coding-agent subsequently applies `tui.scrollbackRebuild` (default `false`), so use the setting for interactive sessions. |
+| `PI_TUI_TMUX_HISTORY_REBUILD=1`                          | Force-enable `tui.tmuxHistoryRebuild` for this process. On direct tmux 3.7+ width changes, replace pane history with a synchronized current-width replay. Disabled in nested multiplexers; discards pre-OMP pane history.          |
 
 Removed with the old engine: `PI_TUI_ED3_SAFE` (no ED3-risk lever exists),
 `PI_CLEAR_ON_SHRINK`, and `PI_TUI_DEBUG` (per-render dump superseded by

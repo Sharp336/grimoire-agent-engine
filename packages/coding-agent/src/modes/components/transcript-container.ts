@@ -234,6 +234,13 @@ export class TranscriptContainer
 		super.clear();
 		this.#committedRows = 0;
 	}
+	override prepareNativeScrollbackReplay(): void {
+		// A destructive replay rebuilds history at the new width, so old-width
+		// committed snapshots are no longer authoritative. In-place multiplexer
+		// resizes never call this hook and retain their immutable physical rows.
+		this.#committedRows = 0;
+		super.prepareNativeScrollbackReplay();
+	}
 
 	override setNativeScrollbackCommittedRows(rows: number): void {
 		this.#committedRows = Number.isFinite(rows) ? Math.max(0, Math.trunc(rows)) : 0;
@@ -289,39 +296,55 @@ export class TranscriptContainer
 		if (typeof boundary !== "object" || boundary === null) return undefined;
 		const marker = this.#widthEpochBoundaries.get(boundary);
 		if (!marker) return undefined;
-		const currentIndex = this.#segments.findIndex(segment => segment.component === marker.segment.component);
-		const current = this.#segments[currentIndex];
-		if (!current) return undefined;
-		if (currentIndex !== marker.precedingSegments.length) return undefined;
-		for (let i = 0; i < marker.precedingSegments.length; i++) {
+		const sourceIndex = marker.precedingSegments.length;
+		for (let i = 0; i < sourceIndex; i++) {
 			const captured = marker.precedingSegments[i]!;
-			const preceding = this.#segments[i]!;
-			// A width-dependent physical row count cannot distinguish ordinary
-			// reflow from logical growth. Without a mutation version the leading
-			// boundary is unverifiable, so replay the epoch conservatively.
+			const preceding = this.#segments[i];
+			// Blocks without a mutation version are immutable after finalization
+			// by contract. A structural/finalization/version divergence makes the
+			// remainder uncertain, but the stable transcript before this block is
+			// still a valid source boundary.
 			if (
-				preceding.component !== captured.component ||
+				preceding?.component !== captured.component ||
 				!captured.finalized ||
 				!preceding.finalized ||
-				captured.version === undefined ||
-				preceding.version !== captured.version
+				(captured.version !== undefined && preceding.version !== captured.version)
 			) {
-				return undefined;
+				return preceding?.startRow ?? this.#lines.length;
 			}
 		}
+		const current = this.#segments[sourceIndex];
+		if (current?.component !== marker.segment.component) return current?.startRow ?? this.#lines.length;
 		if (!marker.childHasBoundary) {
 			if (marker.segment.rowCount === 0) return current.startRow;
-			if (!marker.segment.finalized) return undefined;
-			if (marker.segment.version !== current.version) return undefined;
+			if (!marker.segment.finalized) {
+				// No logical cursor inside a live block: conservatively replay that
+				// block, not the immutable transcript preceding it. This may
+				// duplicate the live preview but cannot lose growth queued during
+				// resize settlement.
+				return current.startRow;
+			}
+			if (marker.segment.version !== current.version) return current.startRow;
 			return current.startRow + current.rowCount;
 		}
 		const child = current.component as Component & NativeScrollbackWidthEpoch;
 		const rawRows = child.resolveNativeScrollbackWidthEpoch(marker.childBoundary);
-		if (rawRows === undefined) return undefined;
+		if (rawRows === undefined) return current.startRow;
 		let rows = this.#mapNativeScrollbackWidthEpochRows(current, rawRows);
-		for (const captured of marker.trailingSegments) {
-			const trailing = this.#segments.find(segment => segment.component === captured.component);
-			if (!captured.finalized || !trailing?.finalized || trailing.version !== captured.version) return undefined;
+		for (let index = 0; index < marker.trailingSegments.length; index++) {
+			const captured = marker.trailingSegments[index]!;
+			const trailing = this.#segments[sourceIndex + 1 + index];
+			if (
+				trailing?.component !== captured.component ||
+				!captured.finalized ||
+				!trailing.finalized ||
+				trailing.version !== captured.version
+			) {
+				// The source boundary precedes every trailing segment, so replaying
+				// from it covers a changed/replaced tail without discarding the
+				// immutable transcript above.
+				return rows;
+			}
 			rows += trailing.rowCount;
 		}
 		return rows;
@@ -352,6 +375,30 @@ export class TranscriptContainer
 		if (typeof boundary !== "object" || boundary === null) return true;
 		const marker = this.#widthEpochBoundaries.get(boundary);
 		if (!marker) return true;
+		const sourceIndex = marker.precedingSegments.length;
+		for (let index = 0; index < sourceIndex; index++) {
+			const captured = marker.precedingSegments[index]!;
+			const current = this.#segments[index];
+			if (
+				current?.component !== captured.component ||
+				!captured.finalized ||
+				!current.finalized ||
+				(captured.version !== undefined && current.version !== captured.version)
+			) {
+				return false;
+			}
+		}
+		const current = this.#segments[sourceIndex];
+		if (current?.component !== marker.segment.component) return false;
+		if (
+			!marker.childHasBoundary &&
+			(!marker.segment.finalized ||
+				!current.finalized ||
+				marker.segment.version !== current.version ||
+				marker.segment.rowCount !== current.rowCount)
+		) {
+			return false;
+		}
 		const child = marker.segment.component as Component & Partial<NativeScrollbackWidthEpoch>;
 		if (child.isNativeScrollbackWidthEpochAppendOnly?.(marker.childBoundary) === false) return false;
 		return !marker.trailingSegments.some(segment => segment.rowCount > 0);
