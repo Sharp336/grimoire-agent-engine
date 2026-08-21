@@ -28,6 +28,7 @@ import type {
 import { createAbortSourceTracker } from "../utils/abort";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
+import { notifyPromptProgress } from "../utils/prompt-progress";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { isPiNativePromptProgressFrame, PI_NATIVE_CLIENT_CAPABILITIES } from "./pi-native-protocol";
 
@@ -227,11 +228,7 @@ export function streamPiNative<TApi extends Api>(
 			for await (const frame of watchedSource) {
 				if (getPiNativeFrameType(frame) === "prompt_progress") {
 					if (isPiNativePromptProgressFrame(frame)) {
-						try {
-							options?.onPromptProgress?.(frame.progress, model);
-						} catch {
-							// Progress observers are diagnostic/UI-only and cannot break generation.
-						}
+						notifyPromptProgress(options?.onPromptProgress, frame.progress, model);
 					}
 					continue;
 				}

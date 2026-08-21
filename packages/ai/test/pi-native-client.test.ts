@@ -393,6 +393,26 @@ describe("streamPiNative event flow", () => {
 		expect(result).toEqual(final);
 	});
 
+	it("isolates rejected async pi-native prompt-progress observers from generation", async () => {
+		const final = baseAssistant({ content: [{ type: "text", text: "done" }] });
+		const fetchImpl: FetchImpl = (async () =>
+			fakeResponse([
+				{ type: "prompt_progress", progress: { total: 100, processed: 56, cached: 40 } },
+				{ type: "done", reason: "stop", message: final },
+			])) as FetchImpl;
+
+		const result = await streamPiNative(fakeModel(), baseContext, {
+			apiKey: "k",
+			fetch: fetchImpl,
+			onPromptProgress: async () => {
+				throw new Error("observer failed");
+			},
+		}).result();
+		await Bun.sleep(0);
+
+		expect(result).toEqual(final);
+	});
+
 	it("classifies non-2xx responses into Errors with status + type tags", async () => {
 		const fetchImpl: FetchImpl = (async () =>
 			new Response(JSON.stringify({ error: { type: "authentication_error", message: "no credential" } }), {

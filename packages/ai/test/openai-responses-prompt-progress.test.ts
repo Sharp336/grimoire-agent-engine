@@ -129,4 +129,27 @@ describe("llama.cpp Responses prompt progress", () => {
 
 		expect(result.progress).toEqual([]);
 	});
+
+	it("isolates rejected async progress observers from generation", async () => {
+		const transport = mockFetch(
+			responseEvents([
+				{
+					type: "response.in_progress",
+					response: { id: "resp_1", status: "in_progress" },
+					prompt_progress: { total: 100, cache: 40, processed: 56 },
+				},
+			]),
+		);
+
+		const result = await streamSimple(makeModel("llama.cpp"), context, {
+			apiKey: "test",
+			fetch: transport.fetch,
+			onPromptProgress: async () => {
+				throw new Error("observer failed");
+			},
+		}).result();
+		await Bun.sleep(0);
+
+		expect(result.content).toContainEqual(expect.objectContaining({ type: "text", text: "pong" }));
+	});
 });

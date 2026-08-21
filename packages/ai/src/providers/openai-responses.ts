@@ -35,6 +35,7 @@ import {
 	iterateWithIdleTimeout,
 } from "../utils/idle-iterator";
 import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
+import { notifyPromptProgress } from "../utils/prompt-progress";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { callWithCopilotModelRetry } from "../utils/retry";
 import {
@@ -779,13 +780,7 @@ const streamOpenAIResponsesOnce = (
 					for await (const event of timedOpenaiStream) {
 						if (supportsPromptProgress) {
 							const progress = parseLlamaCppPromptProgress(event);
-							if (progress) {
-								try {
-									options?.onPromptProgress?.(progress, model);
-								} catch {
-									// Progress observers are diagnostic/UI-only and cannot break generation.
-								}
-							}
+							if (progress) notifyPromptProgress(options?.onPromptProgress, progress, model);
 						}
 						if (isOpenAIResponsesReplayUnsafeEvent(event)) {
 							sawReplayUnsafeOutput = true;
