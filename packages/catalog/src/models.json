@@ -98877,9 +98877,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.14,
-				"output": 0.58,
-				"cacheRead": 0.035,
+				"input": 0.132,
+				"output": 0.528,
+				"cacheRead": 0.033,
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
