@@ -35,6 +35,9 @@ if (entry.version !== manifest.source?.version) {
 if (!/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(entry.version)) {
   throw new Error(`native version is not exact: ${entry.version}`);
 }
+if (!/^sha512-[A-Za-z0-9+/]+={0,2}$/.test(entry.distIntegrity ?? "")) {
+  throw new Error(`invalid npm SHA-512 integrity for ${target}`);
+}
 const files = Object.entries(entry.files ?? {}).sort(([a], [b]) => a.localeCompare(b));
 if (files.length === 0) {
   throw new Error(`${target} has no locked .node files`);
@@ -59,13 +62,28 @@ locked_integrity="${metadata[2]:-}"
 [[ -n "$locked_integrity" ]] || die "missing locked npm integrity for $target"
 
 spec="${package_name}@${version}"
-tarball="$(npm view "$spec" dist.tarball)"
+tarball_url="$(npm view "$spec" dist.tarball)"
 registry_integrity="$(npm view "$spec" dist.integrity)"
-[[ -n "$tarball" ]] || die "npm returned no tarball for $spec"
-[[ "$registry_integrity" == "$locked_integrity" ]] || die "npm integrity changed for $spec"
+[[ -n "$tarball_url" ]] || die "npm returned no tarball for $spec"
+[[ "$registry_integrity" == "$locked_integrity" ]] || die "npm integrity metadata changed for $spec"
 
+tarball_file="$work/package.tgz"
+curl -fsSL --retry 3 --proto '=https' --proto-redir '=https' "$tarball_url" -o "$tarball_file"
+actual_integrity="$(node - "$tarball_file" <<'NODE'
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const [tarballPath] = process.argv.slice(2);
+const digest = crypto.createHash("sha512").update(fs.readFileSync(tarballPath)).digest("base64");
+process.stdout.write(`sha512-${digest}`);
+NODE
+)"
+[[ "$actual_integrity" == "$locked_integrity" ]] || die "downloaded tarball integrity mismatch for $spec"
+
+# The package-level SHA-512 is checked before extraction; GNU tar additionally
+# rejects unsafe parent traversal. Keep extraction non-privileged and avoid
+# restoring archive ownership or broad permissions.
 mkdir -p "$work/extracted"
-curl -fsSL --retry 3 "$tarball" | tar -xz -C "$work/extracted"
+tar --no-same-owner --no-same-permissions -xzf "$tarball_file" -C "$work/extracted"
 package_dir="$work/extracted/package"
 [[ -f "$package_dir/package.json" ]] || die "downloaded tarball has no package.json: $spec"
 
