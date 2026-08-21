@@ -5,13 +5,6 @@ import {
 	DEEPSEEK_VISION_STATIC_MODELS,
 	deepseekModelManagerOptions,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
-import modelsJson from "../src/models.json";
-
-interface BundledModel {
-	input: string[];
-	contextWindow: number | null;
-	maxTokens: number | null;
-}
 
 describe("DeepSeek built-in provider", () => {
 	test("maps vision ids to image input in /models discovery", async () => {
@@ -43,9 +36,15 @@ describe("DeepSeek built-in provider", () => {
 		expect(models?.find(item => item.id === "deepseek-v5-vision")?.input).toEqual(["text", "image"]);
 	});
 
-	test("bundled vision seed derives the V4 flash thinking ladder", () => {
+	test("vision seed resolves image input, binary limits, and the V4 flash thinking ladder", () => {
+		// buildModel is the same constructor the generator runs over the seed
+		// when bundling models.json, so this pins the authored contract at the
+		// source level without coupling to generated catalog output.
 		const model = buildModel(DEEPSEEK_VISION_STATIC_MODELS[0]);
 
+		expect(model.input).toEqual(["text", "image"]);
+		expect(model.contextWindow).toBe(1_048_576);
+		expect(model.maxTokens).toBe(393_216);
 		expect(model.reasoning).toBe(true);
 		expect(model.thinking?.mode).toBe("effort");
 		expect(model.thinking && "efforts" in model.thinking ? model.thinking.efforts : undefined).toEqual([
@@ -53,15 +52,5 @@ describe("DeepSeek built-in provider", () => {
 			Effort.High,
 			Effort.Max,
 		]);
-	});
-
-	test("pins the vision seed in the bundled catalog", () => {
-		const deepseekModels = modelsJson.deepseek as Record<string, BundledModel>;
-		const model = deepseekModels["deepseek-v4-flash-vision-exp"];
-
-		expect(model).toBeDefined();
-		expect(model.input).toEqual(["text", "image"]);
-		expect(model.contextWindow).toBe(1_048_576);
-		expect(model.maxTokens).toBe(393_216);
 	});
 });
