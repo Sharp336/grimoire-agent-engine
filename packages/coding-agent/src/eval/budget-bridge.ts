@@ -6,6 +6,7 @@
  * user's immediate intent) wins; otherwise an active Goal Mode budget; otherwise
  * no ceiling, with `spent` still reflecting this turn's output where available.
  */
+import { getEffectiveEvalTurnBudget } from "../task/structured-subagent";
 import type { ToolSession } from "../tools";
 import type { JsStatusEvent } from "./js/shared/types";
 
@@ -31,7 +32,7 @@ export interface EvalBudgetResult {
  * helpers read `.total`/`.spent`/`.hard` directly.
  */
 export async function runEvalBudget(_args: unknown, options: EvalBudgetBridgeOptions): Promise<EvalBudgetResult> {
-	const turn = options.session.getTurnBudget?.();
+	const turn = getEffectiveEvalTurnBudget(options.session);
 	if (turn && turn.total !== null) {
 		return { total: turn.total, spent: turn.spent, hard: turn.hard };
 	}
