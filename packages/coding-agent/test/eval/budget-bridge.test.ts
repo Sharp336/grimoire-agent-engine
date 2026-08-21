@@ -8,6 +8,7 @@ type TurnBudget = { total: number | null; spent: number; hard: boolean };
 
 function makeSession(parts: { turn?: TurnBudget; goal?: GoalModeState; usage?: UsageStatistics }): ToolSession {
 	return {
+		getSessionFile: () => null,
 		getTurnBudget: parts.turn ? () => parts.turn as TurnBudget : undefined,
 		getGoalModeState: parts.goal ? () => parts.goal : undefined,
 		getUsageStatistics: parts.usage ? () => parts.usage as UsageStatistics : undefined,
