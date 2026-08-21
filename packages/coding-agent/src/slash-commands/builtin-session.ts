@@ -13,6 +13,7 @@ import { buildContextReportText } from "./helpers/context-report";
 import { formatDuration } from "./helpers/format";
 import { handleMcpAcp } from "./helpers/mcp";
 import { commandConsumed, errorMessage, parseSubcommand, usage } from "./helpers/parse";
+import { getProfileReport } from "./helpers/profile-report";
 import { describeRedeemOutcome, type ResetUsageAccount, toResetUsageAccounts } from "./helpers/reset-usage";
 import { matchSessionPinAccounts, toSessionPinAccounts } from "./helpers/session-pin";
 import { launchStatsDashboard, parseStatsDashboardArgs } from "./helpers/stats-dashboard";
@@ -293,6 +294,20 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 		handleTui: async (_command, runtime) => {
 			await runtime.ctx.handleJobsCommand();
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "profile",
+		description: "Show the active OMP profile and Anthropic account",
+		handle: async (_command, runtime) => {
+			await runtime.output(getProfileReport(runtime.session.modelRegistry.authStorage, runtime.session.sessionId));
+			return commandConsumed();
+		},
+		handleTui: (_command, runtime) => {
+			runtime.ctx.showStatus(
+				getProfileReport(runtime.ctx.session.modelRegistry.authStorage, runtime.ctx.session.sessionId),
+			);
 			runtime.ctx.editor.setText("");
 		},
 	},

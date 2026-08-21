@@ -28,6 +28,9 @@
 ### Fixed
 
 - Made malformed advanced-serialization frames from a worker subprocess non-fatal: Bun surfaces an undecodable IPC frame as a process-level `uncaughtException` in the parent (oven-sh/bun#37287), which the postmortem handler treated as fatal and tore down every active session and subagent. The handler now recognizes the decode failure and, keeping the session alive, faults the active advanced-IPC worker subsystems so their clients reject in-flight requests and recycle the subprocess instead of awaiting forever — mirroring the existing ipc-send EPIPE containment. ([#9158](https://github.com/can1357/oh-my-pi/issues/9158))
+### Added
+
+- Added bootstrap-safe Git repository discovery and atomic JSON writes for profile bindings and other config registries.
 
 ## [17.4.1] - 2026-08-21
 

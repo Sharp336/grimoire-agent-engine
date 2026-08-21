@@ -12,10 +12,9 @@
  * can fail with EPERM — fallback: unlink target then rename.
  */
 
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
-import { getPluginsDir, isEnoent, logger, tryParseJson } from "@oh-my-pi/pi-utils";
+import { atomicWriteJson, getPluginsDir, isEnoent, logger, tryParseJson } from "@oh-my-pi/pi-utils";
 
 export { getMarketplacesRegistryPath } from "@oh-my-pi/pi-utils";
 
@@ -36,37 +35,6 @@ export function getMarketplacesCacheDir(): string {
 
 export function getPluginsCacheDir(): string {
 	return path.join(getPluginsDir(), "cache", "plugins");
-}
-
-// ── Atomic write ─────────────────────────────────────────────────────
-
-async function atomicWriteJson(filePath: string, data: unknown): Promise<void> {
-	const content = `${JSON.stringify(data, null, 2)}\n`;
-	const tmpPath = `${filePath}.tmp`;
-
-	await Bun.write(tmpPath, content);
-
-	try {
-		await fs.rename(tmpPath, filePath);
-	} catch (err) {
-		// Windows EPERM fallback: unlink target, then rename
-		if ((err as NodeJS.ErrnoException).code === "EPERM") {
-			try {
-				await fs.unlink(filePath);
-			} catch {
-				// Target may not exist — that's fine
-			}
-			await fs.rename(tmpPath, filePath);
-		} else {
-			// Clean up tmp on unexpected errors
-			try {
-				await fs.unlink(tmpPath);
-			} catch {
-				// Best effort
-			}
-			throw err;
-		}
-	}
 }
 
 // ── Marketplaces registry ────────────────────────────────────────────

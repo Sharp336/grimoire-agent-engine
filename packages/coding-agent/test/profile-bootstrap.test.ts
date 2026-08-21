@@ -149,7 +149,15 @@ describe("extractProfileFlags", () => {
 		// bootstrap must not treat `--profile <path>` as a profile selection.
 		const result = extractProfileFlags(["grep", "--profile", "packages/coding-agent/src/cli.ts"]);
 		expect(result.profile).toBeUndefined();
+		expect(result.command).toBe("grep");
 		expect(result.argv).toEqual(["grep", "--profile", "packages/coding-agent/src/cli.ts"]);
+	});
+
+	it("identifies profile management behind a leading cwd flag", () => {
+		const result = extractProfileFlags(["--cwd", "/bound", "profile", "unbind"]);
+		expect(result.cwd).toBe("/bound");
+		expect(result.command).toBe("profile");
+		expect(result.argv).toEqual(["--cwd", "/bound", "profile", "unbind"]);
 	});
 
 	it("extracts a global --profile that precedes a subcommand", () => {

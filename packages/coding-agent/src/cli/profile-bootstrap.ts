@@ -33,7 +33,7 @@
  * them also activates (`omp --print --profile work`).
  */
 
-import { isSubcommand, LAUNCH_FLAG_COMMANDS } from "../cli-commands";
+import { isSubcommand, LAUNCH_FLAG_COMMANDS, resolveCliArgv } from "../cli-commands";
 import {
 	EXTENSION_SHADOWABLE_STRING_FLAGS,
 	isUnknownLongValueCandidate,
@@ -57,6 +57,8 @@ export interface ProfileBootstrapResult {
 	argv: string[];
 	profile?: string;
 	aliasName?: string;
+	cwd?: string;
+	command?: string;
 }
 
 /**
@@ -78,6 +80,7 @@ export function extractProfileFlags(argv: readonly string[]): ProfileBootstrapRe
 	const stripped: string[] = [];
 	let profile: string | undefined;
 	let aliasName: string | undefined;
+	let cwd: string | undefined;
 	let passThrough = false;
 	let sawSubcommand = false;
 	let canDispatchSubcommand = true;
@@ -102,6 +105,12 @@ export function extractProfileFlags(argv: readonly string[]): ProfileBootstrapRe
 		// downstream tools without the bootstrap stealing them.
 		if (arg === "--") {
 			passThrough = true;
+			stripped.push(arg);
+			continue;
+		}
+
+		if (arg.startsWith("--cwd=")) {
+			cwd = arg.slice("--cwd=".length);
 			stripped.push(arg);
 			continue;
 		}
@@ -169,7 +178,9 @@ export function extractProfileFlags(argv: readonly string[]): ProfileBootstrapRe
 			canDispatchSubcommand = false;
 			stripped.push(arg);
 			if (index + 1 < argv.length) {
-				stripped.push(argv[index + 1]);
+				const value = argv[index + 1];
+				stripped.push(value);
+				if (arg === "--cwd") cwd = value;
 				index += 1;
 			}
 			continue;
@@ -225,5 +236,13 @@ export function extractProfileFlags(argv: readonly string[]): ProfileBootstrapRe
 		stripped.push(arg);
 	}
 
-	return { argv: stripped, profile, aliasName };
+	const routed = resolveCliArgv(stripped);
+	const command = "argv" in routed && LAUNCH_FLAG_COMMANDS[routed.argv[0]] !== true ? routed.argv[0] : undefined;
+	return {
+		argv: stripped,
+		profile,
+		aliasName,
+		...(cwd !== undefined ? { cwd } : {}),
+		...(command !== undefined && isSubcommand(command) ? { command } : {}),
+	};
 }

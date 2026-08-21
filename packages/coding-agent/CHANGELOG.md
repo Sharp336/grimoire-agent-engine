@@ -312,6 +312,7 @@
 - Pasted images and large text pastes appear in the composer as compact icon tokens instead of bracketed markers; the bracketed form remains the outgoing/stored format, and the transcript renders it back as the compact chip.
 - Deleting an attachment's inline token now removes the attachment from the submission (surviving image markers are renumbered).
 - Restored prompts (esc-esc, `/tree`, branch, queued-message dequeue, failed-submit recovery) collapse image markers back into clickable atomic chip tokens and re-materialize their file links instead of degrading to dead text.
+- Added folder bindings that automatically select an OMP profile when `omp` starts inside a bound directory or Git worktree. Interactive startup and `/profile` show the active profile and its Anthropic account email.
 
 ## [17.4.1] - 2026-08-21
 

@@ -1,5 +1,6 @@
 export { once, untilAborted } from "./abortable";
 export * from "./async";
+export * from "./atomic-write";
 export * from "./binary";
 export * from "./color";
 export * from "./dirs";
@@ -9,6 +10,7 @@ export * from "./file-lock";
 export * from "./format";
 export * from "./frontmatter";
 export * from "./fs-error";
+export * from "./git-repository";
 export * from "./glob";
 export * from "./json";
 export * from "./json-parse";

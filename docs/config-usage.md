@@ -85,6 +85,21 @@ On macOS and Linux, an existing `$XDG_DATA_HOME/omp`, `$XDG_STATE_HOME/omp`, or 
 
 The other source bases are not profile-scoped and load identically under every profile: the external-tool bases (`~/.claude`, `~/.codex`, `~/.gemini`) belong to those tools, and the project-level bases (`<cwd>/.omp`, `<cwd>/.claude`, ...) are keyed to the working directory. Throughout this document, read `~/.omp/agent` as shorthand for the active profile's agent directory unless an environment override or XDG path is being discussed.
 
+### Folder bindings
+
+Bind a folder or Git repository to a profile so plain `omp` selects it automatically:
+
+```bash
+omp profile bind work [path]
+omp profile show [path]
+omp profile unbind [path]
+omp profile list
+```
+
+Bindings are stored in the profile-independent `~/.omp/profile-bindings.json`, never in the project. A Git binding uses the shared Git directory, so repository subdirectories and linked worktrees select the same profile. A non-Git folder binding applies to all of its subdirectories.
+
+Explicit selection always wins: `--profile`, then `OMP_PROFILE`, then `PI_PROFILE`, then a folder binding, then the default profile. Setting `OMP_PROFILE` to an empty value explicitly selects the default profile and disables automatic binding for that launch. Interactive startup and `/profile` show the active profile and its Anthropic account email.
+
 ## Important constraint
 
 The generic helpers in `src/config.ts` do **not** include `.pi` in source discovery order.
