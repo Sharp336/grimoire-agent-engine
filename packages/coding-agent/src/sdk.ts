@@ -28,7 +28,17 @@ import {
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import type { Component } from "@oh-my-pi/pi-tui";
-import { $env, $flag, getAgentDir, getProjectDir, logger, postmortem, prompt, Snowflake } from "@oh-my-pi/pi-utils";
+import {
+	$env,
+	$flag,
+	applyDotenvFiles,
+	getAgentDir,
+	getProjectDir,
+	logger,
+	postmortem,
+	prompt,
+	Snowflake,
+} from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import {
 	discoverAdvisorConfigs,
@@ -684,8 +694,9 @@ export {
  * Delegates to {@link ./session/auth-broker-config} so the TUI and the catalog
  * generator share the same credential-discovery logic.
  */
-export async function discoverAuthStorage(agentDir: string = getAgentDir()): Promise<AuthStorage> {
-	return discoverAuthStorageFromConfig(agentDir);
+export async function discoverAuthStorage(agentDir?: string): Promise<AuthStorage> {
+	applyDotenvFiles();
+	return discoverAuthStorageFromConfig(agentDir ?? getAgentDir());
 }
 
 /**
@@ -1233,6 +1244,12 @@ export function createAutoLearnCaptureRunner(
  * ```
  */
 export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
+	// SDK consumers import `$env` from the barrel, whose static graph no longer
+	// applies the agent `.env` (the barrel re-exports side-effect-free env-core
+	// so the CLI's `--profile` bootstrap keeps owning that side effect). Apply
+	// it at the session boundary instead; idempotent — the CLI path already
+	// imported `@oh-my-pi/pi-utils/env` after `setProfile()`.
+	applyDotenvFiles();
 	const rootMode = options.disableExtensionDiscovery ? "explicit-only" : "merge";
 	return await withOmpExtensionRootScope(options.additionalExtensionPaths ?? [], rootMode, () =>
 		createAgentSessionScoped(options),

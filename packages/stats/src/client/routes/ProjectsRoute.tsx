@@ -1,8 +1,9 @@
 import { useMemo } from "react";
 import { getFolderStats } from "../api";
-import { formatCost, formatDurationMs, formatInteger, formatPercent } from "../data/formatters";
+import { formatDurationMs, formatInteger, formatPercent, useFormatCost } from "../data/formatters";
 import { useResource } from "../data/useResource";
 import { buildFolderRows, type FolderRowView } from "../data/view-models";
+import { useTranslation } from "../i18n";
 import type { TimeRange } from "../types";
 import { AsyncBoundary, DataTable, Panel, StatusPill } from "../ui";
 
@@ -13,6 +14,9 @@ export interface ProjectsRouteProps {
 }
 
 export function ProjectsRoute({ active, range, refreshTrigger }: ProjectsRouteProps) {
+	const { t, locale } = useTranslation();
+	const formatCost = useFormatCost();
+
 	const {
 		data: foldersData,
 		error,
@@ -31,19 +35,19 @@ export function ProjectsRoute({ active, range, refreshTrigger }: ProjectsRoutePr
 		() => [
 			{
 				key: "folder",
-				header: "Project/Folder",
+				header: t("projects.column.folder"),
 				render: (item: FolderRowView) => (
 					<div
 						className="stats-font-medium stats-text-primary truncate max-w-[440px]"
-						title={item.folder || "(root)"}
+						title={item.folder || t("projects.root")}
 					>
-						{item.folder || "(root)"}
+						{item.folder || t("projects.root")}
 					</div>
 				),
 			},
 			{
 				key: "totalRequests",
-				header: "Requests",
+				header: t("projects.column.requests"),
 				numeric: true,
 				render: (item: FolderRowView) => (
 					<div className="stats-text-right">
@@ -60,11 +64,11 @@ export function ProjectsRoute({ active, range, refreshTrigger }: ProjectsRoutePr
 			},
 			{
 				key: "totalCost",
-				header: "Cost",
+				header: t("projects.column.cost"),
 				numeric: true,
 				render: (item: FolderRowView) => (
 					<div className="stats-text-right">
-						<div className="font-mono">{formatCost(item.totalCost)}</div>
+						<div className="font-mono">{formatCost(item.totalCost, undefined, locale)}</div>
 						<div className="stats-progress-bar-track mt-1 ml-auto w-24 h-1">
 							<div
 								className="stats-progress-bar-fill"
@@ -77,7 +81,7 @@ export function ProjectsRoute({ active, range, refreshTrigger }: ProjectsRoutePr
 			},
 			{
 				key: "totalTokens",
-				header: "Tokens",
+				header: t("projects.column.tokens"),
 				numeric: true,
 				render: (item: FolderRowView) => (
 					<div className="font-mono">{formatInteger(item.totalInputTokens + item.totalOutputTokens)}</div>
@@ -85,7 +89,7 @@ export function ProjectsRoute({ active, range, refreshTrigger }: ProjectsRoutePr
 			},
 			{
 				key: "cacheRate",
-				header: "Cache Rate",
+				header: t("projects.column.cacheRate"),
 				numeric: true,
 				render: (item: FolderRowView) => <span className="font-mono">{formatPercent(item.cacheRate)}</span>,
 			},
@@ -101,7 +105,7 @@ export function ProjectsRoute({ active, range, refreshTrigger }: ProjectsRoutePr
 			},
 			{
 				key: "errorRate",
-				header: "Error Rate",
+				header: t("projects.column.errorRate"),
 				numeric: true,
 				render: (item: FolderRowView) => (
 					<StatusPill variant={item.errorRate > 0.1 ? "danger" : item.errorRate > 0 ? "warning" : "success"}>
@@ -111,33 +115,33 @@ export function ProjectsRoute({ active, range, refreshTrigger }: ProjectsRoutePr
 			},
 			{
 				key: "avgDuration",
-				header: "Avg Duration",
+				header: t("projects.column.avgDuration"),
 				numeric: true,
 				render: (item: FolderRowView) => formatDurationMs(item.avgDuration),
 			},
 		],
-		[],
+		[t, locale, formatCost],
 	);
 
 	const renderMobileCard = (item: FolderRowView) => (
 		<div className="stats-mobile-card">
 			<div className="stats-mobile-card-header mb-2">
-				<div className="stats-font-semibold stats-text-primary">{item.folder || "(root)"}</div>
+				<div className="stats-font-semibold stats-text-primary">{item.folder || t("projects.root")}</div>
 				<StatusPill variant={item.errorRate > 0.1 ? "danger" : item.errorRate > 0 ? "warning" : "success"}>
-					{formatPercent(item.errorRate)} Err
+					{formatPercent(item.errorRate)} {t("projects.errSuffix")}
 				</StatusPill>
 			</div>
 			<div className="stats-mobile-card-grid">
 				<div>
-					<div className="stats-mobile-card-label">Requests</div>
+					<div className="stats-mobile-card-label">{t("projects.column.requests")}</div>
 					<div className="stats-mobile-card-value font-mono">{formatInteger(item.totalRequests)}</div>
 				</div>
 				<div>
-					<div className="stats-mobile-card-label">Cost</div>
-					<div className="stats-mobile-card-value font-mono">{formatCost(item.totalCost)}</div>
+					<div className="stats-mobile-card-label">{t("projects.column.cost")}</div>
+					<div className="stats-mobile-card-value font-mono">{formatCost(item.totalCost, undefined, locale)}</div>
 				</div>
 				<div>
-					<div className="stats-mobile-card-label">Cache Rate</div>
+					<div className="stats-mobile-card-label">{t("projects.column.cacheRate")}</div>
 					<div className="stats-mobile-card-value">{formatPercent(item.cacheRate)}</div>
 				</div>
 				<div>
@@ -145,7 +149,7 @@ export function ProjectsRoute({ active, range, refreshTrigger }: ProjectsRoutePr
 					<div className="stats-mobile-card-value">{formatPercent(item.cacheSavings)}</div>
 				</div>
 				<div>
-					<div className="stats-mobile-card-label">Duration</div>
+					<div className="stats-mobile-card-label">{t("projects.column.avgDuration")}</div>
 					<div className="stats-mobile-card-value">{formatDurationMs(item.avgDuration)}</div>
 				</div>
 			</div>
@@ -154,19 +158,14 @@ export function ProjectsRoute({ active, range, refreshTrigger }: ProjectsRoutePr
 
 	return (
 		<div className="stats-route-container">
-			<Panel title="Projects & Folders" subtitle="Aggregate proxy metrics grouped by folder path">
-				<AsyncBoundary
-					loading={loading}
-					error={error}
-					data={foldersData}
-					emptyText="No project folders recorded for this range."
-				>
+			<Panel title={t("projects.title")} subtitle={t("projects.subtitle")}>
+				<AsyncBoundary loading={loading} error={error} data={foldersData} emptyText={t("projects.noFolders")}>
 					<DataTable
 						columns={columns}
 						data={folderRows}
 						keyExtractor={item => item.folder}
 						renderMobileCard={renderMobileCard}
-						emptyText="No project folders recorded for this range."
+						emptyText={t("projects.noFolders")}
 					/>
 				</AsyncBoundary>
 			</Panel>

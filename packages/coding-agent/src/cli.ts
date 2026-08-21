@@ -70,11 +70,12 @@ function formatLicenseOutput(): string {
 async function showHelp(config: CliConfig<CommandMetadata>): Promise<void> {
 	// Root help historically loads the selected profile's environment. The
 	// lazily loaded help module imports it statically after profile bootstrap.
-	const [{ renderRootHelp }, { getExtraHelpText }] = await Promise.all([
+	const [{ renderRootHelp }, { cliTranslator }, { getExtraHelpText }] = await Promise.all([
 		import("@oh-my-pi/pi-utils/cli"),
+		import("./i18n/interceptor"),
 		import("./cli/help-extra"),
 	]);
-	renderRootHelp(config);
+	renderRootHelp(config, cliTranslator);
 	const extra = getExtraHelpText();
 	if (extra.trim().length > 0) {
 		process.stdout.write(`\n${extra}\n`);
@@ -350,6 +351,7 @@ export async function runCli(argv: string[]): Promise<void> {
 			// profile instead of the default agent directory.
 			setProfile(resolveProfileEnv(process.env.OMP_PROFILE, process.env.PI_PROFILE));
 		}
+
 		if (extracted.aliasName !== undefined) {
 			const profile = extracted.profile ?? getActiveProfile();
 			if (!profile) {
@@ -388,6 +390,30 @@ export async function runCli(argv: string[]): Promise<void> {
 		return;
 	}
 
+	// `--version`/`-v` mirror run()'s output but must be served before the
+	// i18n bootstrap: that graph reaches pi_natives and would break
+	// `--no-addons` spawns that must stay natives-free.
+	if (resolvedArgv[0] === "--version" || resolvedArgv[0] === "-v") {
+		process.stdout.write(`${APP_NAME}/${VERSION}\n`);
+		return;
+	}
+
+	// Apply dotenv files before initializing i18n so that OMP_LANG is visible
+	// during language detection. This is idempotent: keys already in Bun.env are
+	// never overwritten, so later imports of @oh-my-pi/pi-utils/env are no-ops.
+	const { applyDotenvFiles } = await import("@oh-my-pi/pi-utils/env-core");
+	applyDotenvFiles();
+
+	// Initialize i18n system after profile is set and worker dispatch. These
+	// modules reach pi_natives, so they load dynamically to keep the static
+	// entry graph natives-free for `--no-addons` worker/version processes.
+	const { i18n } = await import("./i18n");
+	await i18n.init();
+	const { invalidateSettingDefsCache } = await import("./modes/components/settings-defs");
+	invalidateSettingDefsCache();
+	const { invalidateTipsCache } = await import("./modes/components/welcome");
+	invalidateTipsCache();
+
 	// Declare this module as the worker-host entry now that the active profile
 	// is resolved. The worker-host module is side-effect-free; importing
 	// `@oh-my-pi/pi-utils/env` here would snapshot the wrong agent `.env`.
@@ -407,9 +433,10 @@ export async function runCli(argv: string[]): Promise<void> {
 		process.stdout.write(formatLicenseOutput());
 		return;
 	}
-	const [{ run }, { commands, resolveCliArgv }] = await Promise.all([
+	const [{ run }, { commands, resolveCliArgv }, { cliTranslator }] = await Promise.all([
 		import("@oh-my-pi/pi-utils/cli"),
 		import("./cli-commands"),
+		import("./i18n/interceptor"),
 	]);
 	// --help and --version are handled by run() directly; --license returned above.
 	// Everything else that isn't a known subcommand routes to "launch".
@@ -419,7 +446,14 @@ export async function runCli(argv: string[]): Promise<void> {
 		process.exitCode = 1;
 		return;
 	}
-	return run({ bin: APP_NAME, version: VERSION, argv: resolved.argv, commands, metadataHelp: showHelp });
+	return run({
+		bin: APP_NAME,
+		version: VERSION,
+		argv: resolved.argv,
+		commands,
+		metadataHelp: showHelp,
+		translator: cliTranslator,
+	});
 }
 
 // Floating call instead of top-level await: TLA forces `--bytecode` (CJS

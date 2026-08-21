@@ -3,10 +3,12 @@
  *
  * Handles /ssh subcommands for managing SSH host configurations.
  */
+
 import { getProjectDir, getSSHConfigPath } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../../capability";
 import { type SSHHost, sshCapability } from "../../capability/ssh";
 import { loadCapability } from "../../discovery";
+import { i18n } from "../../i18n";
 import { addSSHHost, readSSHConfigFile, removeSSHHost, type SSHHostConfig } from "../../ssh/config-writer";
 import { parseCommandArgs } from "../shared";
 import { theme } from "../theme/theme";
@@ -229,7 +231,7 @@ export class SSHCommandController {
 
 			let helpText = "";
 			if (errorMsg.includes("already exists")) {
-				helpText = `\n\nTip: Use ${theme.fg("accent", "/ssh remove")} first, or choose a different name.`;
+				helpText = `\n\n${i18n.t("ui.tip.useSshRemove", "Tip: Use {action} first, or choose a different name.", { action: theme.fg("accent", "/ssh remove") })}`;
 			}
 
 			this.ctx.showError(`Failed to add host: ${errorMsg}${helpText}`);

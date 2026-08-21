@@ -181,6 +181,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 	appearance: ["Theme", "Composer", "Status Line", "Display", "Images"],
 	model: ["Thinking", "Sampling", "Prompt", "Retry & Fallback", "Advisor", "Prewalk", "Vision"],
 	interaction: [
+		"General",
 		"Input",
 		"Approvals",
 		"Notifications",
@@ -1771,6 +1772,33 @@ export const SETTINGS_SCHEMA = {
 	// ────────────────────────────────────────────────────────────────────────
 	// Interaction
 	// ────────────────────────────────────────────────────────────────────────
+
+	// Language
+	"i18n.language": {
+		type: "string",
+		default: "en",
+		ui: {
+			tab: "interaction",
+			group: "General",
+			label: "Language",
+			description: "UI language (applies on next screen refresh)",
+			options: [
+				{ value: "en", label: "English" },
+				{ value: "zh", label: "简体中文" },
+			],
+		},
+	},
+
+	"i18n.exchangeRate": {
+		type: "number",
+		default: undefined,
+		ui: {
+			tab: "interaction",
+			group: "General",
+			label: "Exchange Rate (USD→CNY)",
+			description: "Manual exchange rate for CNY cost display. Leave empty to auto-fetch.",
+		},
+	},
 
 	// Conversation flow
 	steeringMode: {

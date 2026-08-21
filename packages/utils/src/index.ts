@@ -3,7 +3,7 @@ export * from "./async";
 export * from "./binary";
 export * from "./color";
 export * from "./dirs";
-export * from "./env";
+export * from "./env-core";
 export * from "./fetch-retry";
 export * from "./file-lock";
 export * from "./format";

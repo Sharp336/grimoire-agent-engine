@@ -18,8 +18,10 @@ import {
 	TrendEmpty,
 } from "../components/models-table-shared";
 import { formatRangeTick, rangeMeta } from "../components/range-meta";
+import { useFormatCost } from "../data/formatters";
 import { useResource } from "../data/useResource";
 import { buildModelPerformanceLookup } from "../data/view-models";
+import { useTranslation } from "../i18n";
 import type { ModelPerformancePoint, ModelStats, ModelTimeSeriesPoint, TimeRange } from "../types";
 import { AsyncBoundary, Panel } from "../ui";
 import { useSystemTheme } from "../useSystemTheme";
@@ -59,9 +61,10 @@ export function ModelsRoute({ active, range, refreshTrigger }: ModelsRouteProps)
 }
 
 function ModelShareChart({ modelSeries, timeRange }: { modelSeries: ModelTimeSeriesPoint[]; timeRange: TimeRange }) {
+	const { t } = useTranslation();
 	const theme = useSystemTheme();
 	const chartTheme = CHART_THEMES[theme];
-	const meta = rangeMeta(timeRange);
+	const meta = rangeMeta(timeRange, t);
 
 	const chartData = useMemo(() => buildModelPreferenceSeries(modelSeries), [modelSeries]);
 
@@ -148,10 +151,15 @@ function ModelShareChart({ modelSeries, timeRange }: { modelSeries: ModelTimeSer
 	}, [chartTheme]);
 
 	return (
-		<Panel title="Model Preference" subtitle={`Share of requests over ${meta.windowLabel}`}>
+		<Panel
+			title={t("models.shareChart-title")}
+			subtitle={t("models.shareChart-subtitle", { window: meta.windowLabel })}
+		>
 			<div className="h-[280px]">
 				{chartData.data.length === 0 ? (
-					<div className="h-full flex items-center justify-center text-stats-muted text-sm">No data available</div>
+					<div className="h-full flex items-center justify-center text-stats-muted text-sm">
+						{t("models.shareChart-noData")}
+					</div>
 				) : (
 					<Line data={data} options={options} />
 				)}
@@ -243,7 +251,9 @@ function ModelsTable({
 	timeRange: TimeRange;
 }) {
 	const [expandedKey, setExpandedKey] = useState<string | null>(null);
-	const meta = rangeMeta(timeRange);
+	const { t, locale } = useTranslation();
+	const formatCost = useFormatCost();
+	const meta = rangeMeta(timeRange, t);
 
 	const performanceSeriesByKey = useMemo(
 		() => buildModelPerformanceLookup(performanceSeries, timeRange),
@@ -260,16 +270,16 @@ function ModelsTable({
 	}, [models]);
 
 	return (
-		<ModelTableShell title="Model Statistics">
+		<ModelTableShell title={t("models.table.title")}>
 			<ModelTableHeader
 				gridTemplate={GRID_TEMPLATE}
 				columns={[
-					{ label: "Model" },
-					{ label: "Requests", align: "right" },
-					{ label: "Cost", align: "right" },
-					{ label: "Tokens", align: "right" },
-					{ label: "Tokens/s", align: "right" },
-					{ label: "TTFT", align: "right" },
+					{ label: t("models.table.columns.model") },
+					{ label: t("models.table.columns.requests"), align: "right" },
+					{ label: t("models.table.columns.cost"), align: "right" },
+					{ label: t("models.table.columns.tokens"), align: "right" },
+					{ label: t("models.table.columns.tokensPerSec"), align: "right" },
+					{ label: t("models.table.columns.ttft"), align: "right" },
 					{ label: meta.trendLabel, align: "center" },
 				]}
 			/>
@@ -295,7 +305,7 @@ function ModelsTable({
 									{model.totalRequests.toLocaleString()}
 								</div>,
 								<div key="cost" className="text-right text-[var(--text-secondary)] font-mono text-sm">
-									${model.totalCost.toFixed(2)}
+									{formatCost(model.totalCost, undefined, locale)}
 								</div>,
 								<div key="tokens" className="text-right text-[var(--text-secondary)] font-mono text-sm">
 									{(model.totalInputTokens + model.totalOutputTokens).toLocaleString()}
@@ -322,10 +332,12 @@ function ModelsTable({
 								<div className="grid gap-4" style={{ gridTemplateColumns: "200px 1fr" }}>
 									<div className="space-y-4 text-sm">
 										<div>
-											<div className="text-[var(--text-primary)] font-medium mb-2">Efficiency</div>
+											<div className="text-[var(--text-primary)] font-medium mb-2">
+												{t("models.expanded-quality")}
+											</div>
 											<div className="space-y-1 text-[var(--text-secondary)]">
 												<div className="flex items-center justify-between">
-													<span>Error rate</span>
+													<span>{t("models.expanded-errorRate")}</span>
 													<span
 														className={
 															errorRate > 5 ? "text-[var(--accent-red)]" : "text-[var(--accent-green)]"
@@ -335,11 +347,7 @@ function ModelsTable({
 													</span>
 												</div>
 												<div className="flex items-center justify-between">
-													<span>Cache rate</span>
-													<span className="font-mono">{(model.cacheRate * 100).toFixed(1)}%</span>
-												</div>
-												<div className="flex items-center justify-between">
-													<span>Cache savings</span>
+													<span>{t("models.expanded-cacheRate")}</span>
 													<span
 														className={
 															model.cacheSavings < 0
@@ -347,22 +355,24 @@ function ModelsTable({
 																: "text-[var(--accent-green)]"
 														}
 													>
-														{(model.cacheSavings * 100).toFixed(1)}%
+														{(model.cacheRate * 100).toFixed(1)}%
 													</span>
 												</div>
 											</div>
 										</div>
 										<div>
-											<div className="text-[var(--text-primary)] font-medium mb-2">Latency</div>
+											<div className="text-[var(--text-primary)] font-medium mb-2">
+												{t("models.expanded-latency")}
+											</div>
 											<div className="space-y-1 text-[var(--text-secondary)]">
 												<div className="flex items-center justify-between">
-													<span>Avg duration</span>
+													<span>{t("models.expanded-avgDuration")}</span>
 													<span className="font-mono">
 														{model.avgDuration ? `${(model.avgDuration / 1000).toFixed(2)}s` : "-"}
 													</span>
 												</div>
 												<div className="flex items-center justify-between">
-													<span>Avg TTFT</span>
+													<span>{t("models.expanded-avgTTFT")}</span>
 													<span className="font-mono">
 														{model.avgTtft ? `${(model.avgTtft / 1000).toFixed(2)}s` : "-"}
 													</span>
@@ -407,25 +417,26 @@ function PerformanceChart({
 	chartTheme: TableChartTheme;
 	timeRange: TimeRange;
 }) {
+	const { t } = useTranslation();
 	const chartData = useMemo(() => {
 		return {
 			labels: data.map(d => formatRangeTick(d.timestamp, timeRange)),
 			datasets: [
 				{
-					label: "TTFT",
+					label: t("models.ttft"),
 					data: data.map(d => d.avgTtftSeconds ?? null),
 					...lineSeriesStyle("#5ad8e6"),
 					yAxisID: "y" as const,
 				},
 				{
-					label: "Tokens/s",
+					label: t("models.tokensPerSec"),
 					data: data.map(d => d.avgTokensPerSecond ?? null),
 					...lineSeriesStyle(color),
 					yAxisID: "y1" as const,
 				},
 			],
 		};
-	}, [data, color, timeRange]);
+	}, [data, color, timeRange, t]);
 
 	const options = useMemo(() => {
 		return {

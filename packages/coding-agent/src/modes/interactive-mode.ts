@@ -82,6 +82,7 @@ import type { CompactOptions } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import { loadSlashCommands } from "../extensibility/slash-commands";
 import type { Goal, GoalModeState } from "../goals/state";
+import { i18n } from "../i18n";
 import { copyLocalArtifacts, resolveLocalUrlToPath } from "../internal-urls";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
 import type { MCPManager } from "../mcp";
@@ -1342,6 +1343,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		const retainedCommands = this.#pendingSlashCommands.filter(command => !command.name.startsWith("skill:"));
 		const skillCommands = this.#rebuildSkillCommandsFromSession();
 		this.#pendingSlashCommands = [...retainedCommands, ...skillCommands];
+	}
+
+	/** Rebuild built-in slash commands (e.g., after language change). */
+	rebuildBuiltinSlashCommands(): void {
+		const builtinCommands = buildTuiBuiltinSlashCommands({ ctx: this });
+		const retained = this.#pendingSlashCommands.filter(
+			cmd => !builtinCommands.some(builtin => builtin.name === cmd.name),
+		);
+		this.#pendingSlashCommands = [...builtinCommands, ...retained];
 	}
 
 	/** Reload slash commands and autocomplete for the provided working directory. */
@@ -4260,8 +4270,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	async #promptAutoQaConsent(): Promise<boolean | null> {
 		const pool = InteractiveMode.#AUTOQA_CONSENT_PROMPTS;
 		const [headline, body] = pool[Math.floor(Math.random() * pool.length)];
-		const choice = await this.showHookSelector(`${headline}\n${body}`, ["Yes", "No"]);
-		return choice === "Yes";
+		const choice = await this.showHookSelector(`${headline}\n${body}`, [
+			i18n.t("ui.yes", "Yes"),
+			i18n.t("ui.no", "No"),
+		]);
+		return choice === i18n.t("ui.yes", "Yes");
 	}
 
 	stop(): void {

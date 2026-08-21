@@ -25,6 +25,8 @@ import {
 	type SubmenuOption,
 	TAB_GROUPS,
 } from "../../config/settings-schema";
+import { registerCacheInvalidator } from "../../i18n";
+import { interceptSettingDefs } from "../../i18n/interceptor";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // UI Definition Types
@@ -63,6 +65,7 @@ type OptionList = ReadonlyArray<SubmenuOption>;
 export interface SubmenuSettingDef extends BaseSettingDef {
 	type: "submenu";
 	options: OptionList;
+	secret?: boolean;
 	onPreview?: (value: string) => void;
 	onPreviewCancel?: (originalValue: string) => void;
 }
@@ -190,18 +193,21 @@ function pathToSettingDef(path: SettingPath): SettingDef | null {
 	}
 
 	if (schemaType === "number") {
-		// Numbers without options are intentionally hidden from the UI.
-		if (!options || options === "runtime") return null;
-		return { ...base, type: "submenu", options };
+		if (options === "runtime") return null;
+		if (options) {
+			return { ...base, type: "submenu", options };
+		}
+		// Numbers without options render as a numeric text input
+		return { ...base, type: "text", secret: false };
 	}
 
 	if (schemaType === "string") {
 		if (options === "runtime") {
 			// Empty list now; the selector layer (theme handling, etc.) injects choices.
-			return { ...base, type: "submenu", options: [] };
+			return { ...base, type: "submenu", options: [], secret: ui.secret === true };
 		}
 		if (options) {
-			return { ...base, type: "submenu", options };
+			return { ...base, type: "submenu", options, secret: ui.secret === true };
 		}
 		// One classification drives both surfaces: a setting marked `credential`
 		// masks here too, so the panel cannot display one that only the CLI knows
@@ -232,7 +238,15 @@ function pathToSettingDef(path: SettingPath): SettingDef | null {
 /** Cache of generated definitions */
 let cachedDefs: SettingDef[] | null = null;
 
-/** Get all setting definitions with UI */
+/** Invalidate the settings definition cache (call after language change) */
+export function invalidateSettingDefsCache(): void {
+	cachedDefs = null;
+}
+
+// Register cache invalidator with i18n system
+registerCacheInvalidator(invalidateSettingDefsCache);
+
+/** Get all setting definitions with UI — translations intercepted at output boundary */
 export function getAllSettingDefs(): SettingDef[] {
 	if (cachedDefs) return cachedDefs;
 
@@ -243,8 +257,8 @@ export function getAllSettingDefs(): SettingDef[] {
 			if (def) defs.push(def);
 		}
 	}
-	cachedDefs = defs;
-	return defs;
+	cachedDefs = interceptSettingDefs(defs);
+	return cachedDefs;
 }
 
 /**

@@ -13,11 +13,13 @@ import {
 	MODEL_COLORS,
 	styleDatasets,
 } from "../components/chart-shared";
-import { formatCost } from "../data/formatters";
+import { formatCost, useFormatCost } from "../data/formatters";
 import { useResource } from "../data/useResource";
 import { buildCostSummary } from "../data/view-models";
+import { useTranslation } from "../i18n";
 import type { CostTimeSeriesPoint, TimeRange } from "../types";
 import { AsyncBoundary, Panel, SegmentedControl } from "../ui";
+
 import { useSystemTheme } from "../useSystemTheme";
 
 export interface CostsRouteProps {
@@ -51,15 +53,17 @@ export function CostsRoute({ active, range, refreshTrigger }: CostsRouteProps) {
 }
 
 function CostOverviewPanel({ costSeries }: { costSeries: CostTimeSeriesPoint[] }) {
+	const { t, locale } = useTranslation();
+	const formatCost = useFormatCost();
 	const summary = useMemo(() => buildCostSummary(costSeries), [costSeries]);
 
 	const cards = [
-		{ label: "Total Cost", value: formatCost(summary.totalCost) },
-		{ label: "Average / Day", value: formatCost(summary.avgDailyCost) },
+		{ label: t("costs.totalCost"), value: formatCost(summary.totalCost, undefined, locale) },
+		{ label: t("costs.avgDailyCost"), value: formatCost(summary.avgDailyCost, undefined, locale) },
 		{
-			label: "Top Model",
+			label: t("costs.topModel"),
 			value: summary.topModelName || "—",
-			sub: summary.topModelName ? formatCost(summary.topModelCost) : undefined,
+			sub: summary.topModelName ? formatCost(summary.topModelCost, undefined, locale) : undefined,
 		},
 	];
 
@@ -71,7 +75,11 @@ function CostOverviewPanel({ costSeries }: { costSeries: CostTimeSeriesPoint[] }
 					<p className="text-2xl font-bold stats-text-primary truncate" title={card.value}>
 						{card.value}
 					</p>
-					{card.sub && <p className="text-xs stats-text-muted mt-1 font-medium">Total spent: {card.sub}</p>}
+					{card.sub && (
+						<p className="text-xs stats-text-muted mt-1 font-medium">
+							{t("costs.totalSpent", { amount: card.sub })}
+						</p>
+					)}
 				</Panel>
 			))}
 		</div>
@@ -84,7 +92,7 @@ const BAR_LABEL_COLORS = {
 } as const;
 
 // Inline Chart.js plugin to draw cost value above bars
-function makeBarLabelPlugin(color: string): Plugin<"bar"> {
+function makeBarLabelPlugin(color: string, locale: "en" | "zh"): Plugin<"bar"> {
 	return {
 		id: "costBarLabels",
 		afterDatasetsDraw(chart) {
@@ -101,7 +109,7 @@ function makeBarLabelPlugin(color: string): Plugin<"bar"> {
 				// Accessing Chart.js internal parsed coordinates via unknown cast
 				const value = (bar as unknown as { $context: { parsed: { y: number } } }).$context.parsed.y;
 				if (!value) continue;
-				const label = `$${Math.round(value)}`;
+				const label = formatCost(value, 0, locale);
 				// Accessing internal getProps for positioning via unknown cast
 				const { x, y } = bar.getProps(["x", "y"], true) as {
 					x: number;
@@ -115,6 +123,8 @@ function makeBarLabelPlugin(color: string): Plugin<"bar"> {
 }
 
 function CostTrendPanel({ costSeries }: { costSeries: CostTimeSeriesPoint[] }) {
+	const { t, locale } = useTranslation();
+	const formatCost = useFormatCost();
 	const [byModel, setByModel] = useState(false);
 	const theme = useSystemTheme();
 	const chartTheme = CHART_THEMES[theme];
@@ -130,39 +140,39 @@ function CostTrendPanel({ costSeries }: { costSeries: CostTimeSeriesPoint[] }) {
 				bucketToValue: bucket => bucket.total,
 			});
 		}
-		return buildAggregateTimeSeries<CostTimeSeriesPoint, { total: number }>(costSeries, "Cost", {
+		return buildAggregateTimeSeries<CostTimeSeriesPoint, { total: number }>(costSeries, t("costs.label"), {
 			initBucket: () => ({ total: 0 }),
 			accumulate: (bucket, point) => {
 				bucket.total += point.cost;
 			},
 			bucketToValue: bucket => bucket.total,
 		});
-	}, [costSeries, byModel]);
+	}, [costSeries, byModel, t]);
 
 	const sharedPlugins = useMemo(() => {
 		return buildSharedPlugins({
 			chartTheme,
-			showLegend: byModel,
-			defaultLabel: "Cost",
-			formatValue: v => `$${v.toFixed(2)}`,
+			showLegend: !!byModel,
+			defaultLabel: t("costs.label"),
+			formatValue: v => formatCost(v, 2, locale),
 			footer: items => {
 				if (!byModel || items.length < 2) return undefined;
 				const total = items.reduce((sum, item) => sum + (item.parsed.y ?? 0), 0);
-				return `Total: $${total.toFixed(2)}`;
+				return `${t("costs.total")}: ${formatCost(total, 2, locale)}`;
 			},
 		});
-	}, [chartTheme, byModel]);
+	}, [chartTheme, byModel, t, locale, formatCost]);
 
 	const { sharedScaleBase, yScale } = useMemo(() => {
 		return buildSharedScales({
 			chartTheme,
-			formatY: v => `$${Math.round(v)}`,
+			formatY: v => formatCost(v, 0, locale),
 		});
-	}, [chartTheme]);
+	}, [chartTheme, locale, formatCost]);
 
 	const barLabelPlugin = useMemo(() => {
-		return makeBarLabelPlugin(BAR_LABEL_COLORS[theme]);
-	}, [theme]);
+		return makeBarLabelPlugin(BAR_LABEL_COLORS[theme], locale);
+	}, [theme, locale]);
 
 	const lineData = useMemo(() => {
 		if (!byModel) return null;
@@ -208,20 +218,20 @@ function CostTrendPanel({ costSeries }: { costSeries: CostTimeSeriesPoint[] }) {
 	}, [sharedPlugins, sharedScaleBase, yScale]);
 
 	const toggleOptions = [
-		{ value: false, label: "All Models" },
-		{ value: true, label: "By Model" },
+		{ value: false, label: t("costs.allModels") },
+		{ value: true, label: t("costs.byModel") },
 	];
 
 	return (
 		<Panel
-			title="Daily Cost"
-			subtitle="API spending over time"
+			title={t("costs.dailyCost")}
+			subtitle={t("costs.apiSpending")}
 			actions={<SegmentedControl options={toggleOptions} value={byModel} onChange={setByModel} />}
 		>
 			<div className="h-[300px]">
 				{chartData.labels.length === 0 ? (
 					<div className="h-full flex items-center justify-center text-stats-muted text-sm">
-						No cost data available
+						{t("costs.noData")}
 					</div>
 				) : byModel && lineData ? (
 					<Line data={lineData} options={lineOptions} />

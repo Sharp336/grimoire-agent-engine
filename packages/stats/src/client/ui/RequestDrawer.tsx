@@ -1,7 +1,8 @@
 import { Clock, Coins, Gauge, Hash, Star, X, Zap } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { getRequestDetails } from "../api";
-import { formatCost, formatDurationMs, formatInteger } from "../data/formatters";
+import { formatDurationMs, formatInteger, useFormatCost } from "../data/formatters";
+import { useTranslation } from "../i18n";
 import type { RequestDetails } from "../types";
 import { JsonBlock } from "./JsonBlock";
 import { Skeleton } from "./Skeleton";
@@ -13,6 +14,8 @@ export interface RequestDrawerProps {
 }
 
 export function RequestDrawer({ id, onClose }: RequestDrawerProps) {
+	const { t, locale } = useTranslation();
+	const formatCost = useFormatCost();
 	const [details, setDetails] = useState<RequestDetails | null>(null);
 	const [loading, setLoading] = useState(false);
 	const [error, setError] = useState<Error | null>(null);
@@ -20,12 +23,21 @@ export function RequestDrawer({ id, onClose }: RequestDrawerProps) {
 	const closeButtonRef = useRef<HTMLButtonElement>(null);
 
 	useEffect(() => {
+		if (id !== null) {
+			previousActiveElement.current = document.activeElement as HTMLElement;
+			// Focus close button for keyboard/screen-reader users
+			setTimeout(() => closeButtonRef.current?.focus(), 0);
+		}
+	}, [id]);
+
+	useEffect(() => {
 		if (id === null) {
-			setDetails(null);
+			if (previousActiveElement.current) {
+				previousActiveElement.current.focus();
+			}
 			return;
 		}
 
-		previousActiveElement.current = document.activeElement as HTMLElement | null;
 		setLoading(true);
 		setError(null);
 		setDetails(null);
@@ -35,35 +47,26 @@ export function RequestDrawer({ id, onClose }: RequestDrawerProps) {
 			.then(data => {
 				if (controller.signal.aborted) return;
 				setDetails(data);
-				// Focus the close button for accessibility
-				setTimeout(() => closeButtonRef.current?.focus(), 50);
+				setLoading(false);
 			})
 			.catch(err => {
 				if (controller.signal.aborted) return;
-				setError(err instanceof Error ? err : new Error(String(err)));
-			})
-			.finally(() => {
-				if (!controller.signal.aborted) setLoading(false);
+				if (err.name !== "AbortError") {
+					setError(err instanceof Error ? err : new Error(String(err)));
+				}
+				setLoading(false);
 			});
-
-		return () => controller.abort();
-	}, [id]);
-
-	useEffect(() => {
-		if (id === null) return;
 
 		const handleKeyDown = (e: KeyboardEvent) => {
 			if (e.key === "Escape") {
 				onClose();
 			}
 		};
-
 		window.addEventListener("keydown", handleKeyDown);
+
 		return () => {
+			controller.abort();
 			window.removeEventListener("keydown", handleKeyDown);
-			if (previousActiveElement.current) {
-				previousActiveElement.current.focus();
-			}
 		};
 	}, [id, onClose]);
 
@@ -77,19 +80,23 @@ export function RequestDrawer({ id, onClose }: RequestDrawerProps) {
 
 	return (
 		<div className="stats-drawer-overlay" onClick={handleOverlayClick} role="presentation">
-			<div className="stats-drawer" role="dialog" aria-modal="true" aria-label="Request details">
+			<div className="stats-drawer" role="dialog" aria-modal="true" aria-label={t("detail.title")}>
 				{/* Drawer Header */}
 				<div className="stats-drawer-header">
 					<div className="stats-drawer-header-left">
-						<h2 className="stats-drawer-title">Request Details</h2>
-						{details && <span className="stats-drawer-id">ID: {id}</span>}
+						<h2 className="stats-drawer-title">{t("detail.title")}</h2>
+						{details && (
+							<span className="stats-drawer-id">
+								{t("detail.id")}: {id}
+							</span>
+						)}
 					</div>
 					<button
 						ref={closeButtonRef}
 						type="button"
 						onClick={onClose}
 						className="stats-drawer-close-btn"
-						aria-label="Close request details"
+						aria-label={t("detail.close")}
 					>
 						<X size={18} />
 					</button>
@@ -107,7 +114,7 @@ export function RequestDrawer({ id, onClose }: RequestDrawerProps) {
 
 					{error && (
 						<div className="stats-drawer-error">
-							<p className="stats-drawer-error-title">Failed to load request details</p>
+							<p className="stats-drawer-error-title">{t("detail.failedToLoad")}</p>
 							<p className="stats-drawer-error-message">{error.message}</p>
 						</div>
 					)}
@@ -122,12 +129,12 @@ export function RequestDrawer({ id, onClose }: RequestDrawerProps) {
 										<div className="stats-drawer-provider">{details.provider}</div>
 									</div>
 									<StatusPill variant={details.errorMessage ? "danger" : "success"}>
-										{details.errorMessage ? "Error" : "Success"}
+										{details.errorMessage ? t("common.error") : t("common.success")}
 									</StatusPill>
 								</div>
 								{details.errorMessage && (
 									<div className="stats-drawer-error-block">
-										<div className="stats-drawer-error-label">Error Message</div>
+										<div className="stats-drawer-error-label">{t("detail.errorMessage")}</div>
 										<div className="stats-drawer-error-text">{details.errorMessage}</div>
 									</div>
 								)}
@@ -138,15 +145,17 @@ export function RequestDrawer({ id, onClose }: RequestDrawerProps) {
 								<div className="stats-drawer-metric-card">
 									<div className="stats-drawer-metric-label">
 										<Coins size={14} className="stats-drawer-metric-icon" />
-										Cost
+										{t("detail.cost")}
 									</div>
-									<div className="stats-drawer-metric-value">{formatCost(details.usage.cost.total, 4)}</div>
+									<div className="stats-drawer-metric-value">
+										{formatCost(details.usage.cost.total, 4, locale)}
+									</div>
 								</div>
 
 								<div className="stats-drawer-metric-card">
 									<div className="stats-drawer-metric-label">
 										<Star size={14} className="stats-drawer-metric-icon" />
-										Premium
+										{t("detail.premium")}
 									</div>
 									<div className="stats-drawer-metric-value">
 										{formatInteger(details.usage.premiumRequests ?? 0)}
@@ -156,18 +165,21 @@ export function RequestDrawer({ id, onClose }: RequestDrawerProps) {
 								<div className="stats-drawer-metric-card">
 									<div className="stats-drawer-metric-label">
 										<Hash size={14} className="stats-drawer-metric-icon" />
-										Total Tokens
+										{t("detail.totalTokens")}
 									</div>
 									<div className="stats-drawer-metric-value">{formatInteger(details.usage.totalTokens)}</div>
 									<div className="stats-drawer-metric-sub">
-										{formatInteger(details.usage.input)} in · {formatInteger(details.usage.output)} out
+										{t("detail.inOut", {
+											input: formatInteger(details.usage.input),
+											output: formatInteger(details.usage.output),
+										})}
 									</div>
 								</div>
 
 								<div className="stats-drawer-metric-card">
 									<div className="stats-drawer-metric-label">
 										<Clock size={14} className="stats-drawer-metric-icon" />
-										Duration
+										{t("detail.duration")}
 									</div>
 									<div className="stats-drawer-metric-value">{formatDurationMs(details.duration)}</div>
 								</div>
@@ -175,7 +187,7 @@ export function RequestDrawer({ id, onClose }: RequestDrawerProps) {
 								<div className="stats-drawer-metric-card">
 									<div className="stats-drawer-metric-label">
 										<Zap size={14} className="stats-drawer-metric-icon" />
-										TTFT
+										{t("detail.ttft")}
 									</div>
 									<div className="stats-drawer-metric-value">{formatDurationMs(details.ttft)}</div>
 								</div>
@@ -184,20 +196,20 @@ export function RequestDrawer({ id, onClose }: RequestDrawerProps) {
 									<div className="stats-drawer-metric-card">
 										<div className="stats-drawer-metric-label">
 											<Gauge size={14} className="stats-drawer-metric-icon" />
-											Throughput
+											{t("detail.throughput")}
 										</div>
 										<div className="stats-drawer-metric-value">
 											{((details.usage.output * 1000) / details.duration).toFixed(1)}
 										</div>
-										<div className="stats-drawer-metric-sub">tokens/second</div>
+										<div className="stats-drawer-metric-sub">{t("detail.tokensPerSecond")}</div>
 									</div>
 								)}
 							</div>
 
 							{/* JSON blocks */}
 							<div className="stats-drawer-json-blocks">
-								<JsonBlock data={details.output} title="Output Payload" initialCollapsed={false} />
-								<JsonBlock data={details} title="Raw Request Metadata" initialCollapsed={true} />
+								<JsonBlock data={details.output} title={t("detail.outputPayload")} initialCollapsed={false} />
+								<JsonBlock data={details} title={t("detail.rawMetadata")} initialCollapsed={true} />
 							</div>
 						</div>
 					)}

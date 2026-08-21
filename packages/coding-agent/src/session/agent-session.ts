@@ -148,6 +148,7 @@ import { normalizeToolEventInput, resolveToolEventInput } from "../extensibility
 import { GoalRuntime } from "../goals/runtime";
 import type { GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
+import { formatCost } from "../i18n/exchange-rate";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import type { IrcMessage } from "../irc/bus";
 import type { DaemonCompletionNotification } from "../launch/protocol";
@@ -9624,9 +9625,10 @@ export class AgentSession {
 
 	/**
 	 * Format a concise advisor status line for ACP/text output.
+	 * Delegates to SessionAdvisors with locale-aware cost formatting.
 	 */
 	formatAdvisorStatus(): string {
-		return this.#advisors.formatAdvisorStatus();
+		return this.#advisors.formatAdvisorStatus(formatCost);
 	}
 
 	/**

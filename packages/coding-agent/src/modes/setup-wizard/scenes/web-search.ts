@@ -5,6 +5,7 @@ import {
 	type SgrMouseEvent,
 	truncateToWidth,
 } from "@oh-my-pi/pi-tui";
+import { i18n } from "../../../i18n";
 import { getSearchProvider, setSearchProviderOrder } from "../../../web/search/provider";
 import {
 	isSearchProviderId,
@@ -34,7 +35,7 @@ type Availability = "checking" | boolean;
  */
 export class WebSearchTab implements SetupTab {
 	readonly id = "web-search";
-	readonly label = "Web search";
+	readonly label = i18n.t("setup.webSearch.tabLabel", "Web search");
 	readonly modal = false;
 
 	#list: SelectList;
@@ -82,7 +83,13 @@ export class WebSearchTab implements SetupTab {
 	}
 
 	render(width: number, maxLines?: number): readonly string[] {
-		const lines = [theme.fg("muted", "Choose the provider the web_search tool should prefer."), ""];
+		const lines = [
+			theme.fg(
+				"muted",
+				i18n.t("setup.webSearch.pickProvider", "Choose the provider the web_search tool should prefer."),
+			),
+			"",
+		];
 		this.#listRowStart = lines.length;
 		if (maxLines !== undefined) {
 			// Above: hint + blank. Below: the list's own search-status row plus

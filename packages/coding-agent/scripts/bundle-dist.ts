@@ -89,6 +89,7 @@ async function main(): Promise<void> {
 	// the bundled CLI entrypoint, and written to dist/docs-index.generated.txt so
 	// SDK consumers importing `@oh-my-pi/pi-coding-agent/*` (TypeScript source, no
 	// build-time embed) can still resolve omp:// docs (see src/internal-urls/docs-index.ts).
+	await runCommand(["bun", "scripts/generate-embedded-translations.ts"]);
 	try {
 		const docsPayload = await buildDocsIndexPayload();
 		// Build in-process: the docs embed payload is far larger than Linux's
@@ -119,6 +120,12 @@ async function main(): Promise<void> {
 	} finally {
 		await runCommand(["bun", "--cwd=../stats", "run", "gen:stats:reset"]);
 	}
+	// Copy bundled i18n translations so dist/cli.js can find them at runtime
+	// (import.meta.dir resolves to dist/, not src/i18n/).
+	const langSrc = path.join(packageDir, "src", "i18n", "lang");
+	const langDst = path.join(outDir, "lang");
+	await fs.rm(langDst, { recursive: true, force: true });
+	await fs.cp(langSrc, langDst, { recursive: true });
 	const stat = await fs.stat(cliPath);
 	const elapsedMs = (Bun.nanoseconds() - start) / 1_000_000;
 	process.stdout.write(

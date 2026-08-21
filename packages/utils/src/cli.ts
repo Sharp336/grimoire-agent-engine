@@ -293,27 +293,40 @@ export abstract class Command {
 // ---------------------------------------------------------------------------
 
 /** Render full root help: header, default command details, subcommand list. */
-export function renderRootHelp(config: CliConfig<CommandMetadata>): void {
+export function renderRootHelp(
+	config: CliConfig<CommandMetadata>,
+	translator?: (text: string, key: string) => string,
+): void {
 	const { bin, version, commands } = config;
 	const lines: string[] = [];
+	const t = translator
+		? (text: string, key: string) => {
+				const result = translator(text, key);
+				// If translator returns the key itself, fall back to original text
+				return result === key ? text : result;
+			}
+		: (text: string, _key: string) => text;
+
 	lines.push(`${bin} v${version}\n`);
-	lines.push("USAGE");
+	lines.push(t("USAGE", "cli.usage"));
 	lines.push(`  $ ${bin} [COMMAND]\n`);
 
 	// Show the default command's flags/args/examples inline.
 	// The default command is the one marked hidden (it's the implicit entry point).
 	const defaultCmd = [...commands.values()].find(command => command.hidden);
 	if (defaultCmd) {
-		renderCommandBody(lines, defaultCmd);
+		const defaultId = [...commands.entries()].find(([, C]) => C === defaultCmd)?.[0] ?? "";
+		renderCommandBody(lines, defaultCmd, defaultId, translator);
 	}
 
 	// List visible subcommands
 	const visible = [...commands.entries()].filter(([, C]) => !C.hidden);
 	if (visible.length > 0) {
-		lines.push("COMMANDS");
+		lines.push(t("COMMANDS", "cli.commands"));
 		const maxLen = Math.max(...visible.map(([n]) => n.length));
 		for (const [name, command] of visible.sort((a, b) => a[0].localeCompare(b[0]))) {
-			lines.push(`  ${name.padEnd(maxLen + 2)}${command.description ?? ""}`);
+			const desc = command.description ? t(command.description, `commands.${name}.description`) : "";
+			lines.push(`  ${name.padEnd(maxLen + 2)}${desc}`);
 		}
 		lines.push("");
 	}
@@ -338,33 +351,71 @@ function formatUsageArgs(Cmd: CommandCtor): string {
 }
 
 /** Build the single USAGE line for a command (without the leading label). */
-export function commandUsageLine(bin: string, id: string, Cmd: CommandCtor): string {
+export function commandUsageLine(
+	bin: string,
+	id: string,
+	Cmd: CommandCtor,
+	translator?: (text: string, key: string) => string,
+): string {
+	const t = translator
+		? (text: string, key: string) => {
+				const result = translator(text, key);
+				return result === key ? text : result;
+			}
+		: (text: string, _key: string) => text;
 	const hasFlags = Object.keys(Cmd.flags ?? {}).length > 0;
-	return `$ ${bin} ${id}${formatUsageArgs(Cmd)}${hasFlags ? " [FLAGS]" : ""}`;
+	return `$ ${bin} ${id}${formatUsageArgs(Cmd)}${hasFlags ? ` [${t("FLAGS", "cli.flags")}]` : ""}`;
 }
 
 /** Render help for a single command. */
-export function renderCommandHelp(bin: string, id: string, Cmd: CommandCtor): void {
+export function renderCommandHelp(
+	bin: string,
+	id: string,
+	Cmd: CommandCtor,
+	translator?: (text: string, key: string) => string,
+): void {
 	const lines: string[] = [];
-	if (Cmd.description) lines.push(`${Cmd.description}\n`);
-	lines.push("USAGE");
-	lines.push(`  ${commandUsageLine(bin, id, Cmd)}\n`);
-	renderCommandBody(lines, Cmd);
+
+	if (Cmd.description) {
+		const t = translator
+			? (text: string, key: string) => {
+					const result = translator(text, key);
+					return result === key ? text : result;
+				}
+			: (text: string, _key: string) => text;
+		lines.push(t(Cmd.description, `commands.${id}.description`));
+		lines.push("");
+		lines.push(t("USAGE", "cli.usage"));
+	}
+	lines.push(`  ${commandUsageLine(bin, id, Cmd, translator)}\n`);
+	renderCommandBody(lines, Cmd, id, translator);
 	process.stdout.write(lines.join("\n"));
 }
 
-function renderCommandBody(lines: string[], command: CommandMetadata): void {
+function renderCommandBody(
+	lines: string[],
+	command: CommandMetadata,
+	commandId: string,
+	translator?: (text: string, key: string) => string,
+): void {
 	const argDefs = command.args ?? {};
 	const flagDefs = command.flags ?? {};
+	const t = translator
+		? (text: string, key: string) => {
+				const result = translator(text, key);
+				// If translator returns the key itself, fall back to original text
+				return result === key ? text : result;
+			}
+		: (text: string, _key: string) => text;
 
 	// Arguments
 	const argEntries = Object.entries(argDefs);
 	if (argEntries.length > 0) {
-		lines.push("ARGUMENTS");
+		lines.push(t("ARGUMENTS", "cli.arguments"));
 		const maxLen = Math.max(...argEntries.map(([n]) => n.length));
 		for (const [name, desc] of argEntries) {
 			const parts = [name.toUpperCase().padEnd(maxLen + 2)];
-			if (desc.description) parts.push(desc.description);
+			if (desc.description) parts.push(t(desc.description, `${commandId}.args.${name}.description`));
 			if (desc.options) parts.push(`(${[...desc.options].join("|")})`);
 			lines.push(`  ${parts.join(" ")}`);
 		}
@@ -374,13 +425,14 @@ function renderCommandBody(lines: string[], command: CommandMetadata): void {
 	// Flags
 	const flagEntries = Object.entries(flagDefs);
 	if (flagEntries.length > 0) {
-		lines.push("FLAGS");
+		lines.push(t("FLAGS", "cli.flags"));
 		const formatted: [string, string][] = [];
 		for (const [name, desc] of flagEntries) {
 			const charPart = desc.char ? `-${desc.char}, ` : "    ";
 			const namePart = `--${name}`;
 			const typePart = desc.kind === "boolean" ? "" : desc.kind === "integer" ? "=<int>" : "=<value>";
-			formatted.push([`  ${charPart}${namePart}${typePart}`, desc.description ?? ""]);
+			const descText = desc.description ? t(desc.description, `${commandId}.flags.${name}.description`) : "";
+			formatted.push([`  ${charPart}${namePart}${typePart}`, descText]);
 		}
 		const maxLeft = Math.max(...formatted.map(([l]) => l.length));
 		for (const [left, right] of formatted) {
@@ -391,7 +443,7 @@ function renderCommandBody(lines: string[], command: CommandMetadata): void {
 
 	// Examples
 	if (command.examples && command.examples.length > 0) {
-		lines.push("EXAMPLES");
+		lines.push(t("EXAMPLES", "cli.examples"));
 		for (const ex of command.examples) {
 			for (const line of ex.split("\n")) {
 				lines.push(`  ${line}`);
@@ -422,6 +474,8 @@ export interface RunOptions {
 	help?: (config: CliConfig) => Promise<void> | void;
 	/** Lightweight help renderer backed by static command metadata. */
 	metadataHelp?: (config: CliConfig<CommandMetadata>) => Promise<void> | void;
+	/** Optional translator for i18n. Receives (text, key) and returns translated text. */
+	translator?: (text: string, key: string) => string;
 }
 
 /** Find a command entry by exact name or alias. */
@@ -450,7 +504,7 @@ export async function run(opts: RunOptions): Promise<void> {
 			if (opts.metadataHelp) {
 				await opts.metadataHelp(config);
 			} else {
-				renderRootHelp(config);
+				renderRootHelp(config, opts.translator);
 			}
 		}
 		return;
@@ -469,7 +523,7 @@ export async function run(opts: RunOptions): Promise<void> {
 		const entry = findEntry(opts.commands, commandId);
 		if (entry) {
 			const Cmd = await loadEntry(entry);
-			renderCommandHelp(bin, entry.name, Cmd);
+			renderCommandHelp(bin, entry.name, Cmd, opts.translator);
 		} else {
 			process.stderr.write(`Unknown command: ${commandId}\n`);
 		}

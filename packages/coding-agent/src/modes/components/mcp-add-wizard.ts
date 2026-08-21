@@ -5,6 +5,7 @@
  */
 import { Container, Input, matchesKey, replaceTabs, Spacer, Text, truncateToWidth } from "@oh-my-pi/pi-tui";
 import { getMCPConfigPath, getProjectDir } from "@oh-my-pi/pi-utils";
+import { i18n } from "../../i18n";
 import { validateServerName } from "../../mcp/config-writer";
 import { analyzeAuthError, discoverOAuthEndpoints, fetchResourceMetadataScopes } from "../../mcp/oauth-discovery";
 import type { MCPHttpServerConfig, MCPServerConfig, MCPSseServerConfig, MCPStdioServerConfig } from "../../mcp/types";
@@ -439,9 +440,9 @@ export class MCPAddWizard extends OverlayPanel {
 
 		// Auth info
 		if (this.#state.authMethod === "none") {
-			this.#contentContainer.addChild(new Text("Auth: None", 0, 0));
+			this.#contentContainer.addChild(new Text(i18n.t("ui.mcp.authNone", "Auth: None"), 0, 0));
 		} else if (this.#state.authMethod === "oauth") {
-			this.#contentContainer.addChild(new Text("Auth: OAuth (authenticated)", 0, 0));
+			this.#contentContainer.addChild(new Text(i18n.t("ui.mcp.authOAuth", "Auth: OAuth (authenticated)"), 0, 0));
 		} else if (this.#state.authMethod === "manual") {
 			if (this.#state.authLocation === "env") {
 				this.#contentContainer.addChild(new Text(`Auth: API key via env (${this.#state.envVarName})`, 0, 0));
@@ -450,14 +451,17 @@ export class MCPAddWizard extends OverlayPanel {
 			}
 		}
 
-		const scopeLabel = this.#state.scope === "user" ? "User level" : "Project level";
+		const scopeLabel =
+			this.#state.scope === "user"
+				? i18n.t("ui.mcp.userLevel", "User level")
+				: i18n.t("ui.mcp.projectLevel", "Project level");
 		this.#contentContainer.addChild(new Text(`Scope: ${scopeLabel}`, 0, 0));
 
 		this.#contentContainer.addChild(new Spacer(1));
-		this.#contentContainer.addChild(new Text("Save this configuration?", 0, 0));
+		this.#contentContainer.addChild(new Text(i18n.t("ui.mcp.saveConfirm", "Save this configuration?"), 0, 0));
 		this.#contentContainer.addChild(new Spacer(1));
 
-		const options = ["Yes", "No"];
+		const options = [i18n.t("ui.yes", "Yes"), i18n.t("ui.no", "No")];
 		for (let i = 0; i < options.length; i++) {
 			const isSelected = i === this.#selectedIndex;
 			const prefix = isSelected ? theme.fg("accent", `${theme.nav.cursor} `) : "  ";
@@ -467,7 +471,11 @@ export class MCPAddWizard extends OverlayPanel {
 
 		this.#contentContainer.addChild(new Spacer(1));
 		this.#contentContainer.addChild(
-			new Text(theme.fg("muted", "[↑↓ to navigate, Enter to select, Esc to go back]"), 0, 0),
+			new Text(
+				theme.fg("muted", i18n.t("ui.mcp.navigateHint", "[↑↓ to navigate, Enter to select, Esc to go back]")),
+				0,
+				0,
+			),
 		);
 	}
 
@@ -821,8 +829,16 @@ export class MCPAddWizard extends OverlayPanel {
 		this.#contentContainer.addChild(new Spacer(1));
 
 		const options = [
-			{ value: "oauth" as const, label: "OAuth flow (web-based)", desc: "(opens browser)" },
-			{ value: "manual" as const, label: "Manual API key/token", desc: "(paste or use shell command)" },
+			{
+				value: "oauth" as const,
+				label: i18n.t("ui.oauthFlow", "OAuth flow (web-based)"),
+				desc: i18n.t("ui.opensBrowser", "(opens browser)"),
+			},
+			{
+				value: "manual" as const,
+				label: i18n.t("ui.manualApiKey", "Manual API key/token"),
+				desc: i18n.t("ui.pasteOrShellCmd", "(paste or use shell command)"),
+			},
 		];
 
 		for (let i = 0; i < options.length; i++) {
@@ -922,7 +938,10 @@ export class MCPAddWizard extends OverlayPanel {
 		this.#contentContainer.addChild(new Text("Choose next action:", 0, 0));
 		this.#contentContainer.addChild(new Spacer(1));
 
-		const options = ["Retry OAuth authentication", "Edit OAuth settings"];
+		const options = [
+			i18n.t("ui.mcp.retryOAuth", "Retry OAuth authentication"),
+			i18n.t("ui.mcp.editOAuth", "Edit OAuth settings"),
+		];
 		for (let i = 0; i < options.length; i++) {
 			const isSelected = i === this.#selectedIndex;
 			const prefix = isSelected ? theme.fg("accent", `${theme.nav.cursor} `) : "  ";
@@ -932,7 +951,11 @@ export class MCPAddWizard extends OverlayPanel {
 
 		this.#contentContainer.addChild(new Spacer(1));
 		this.#contentContainer.addChild(
-			new Text(theme.fg("muted", "[↑↓ to navigate, Enter to select, Esc to go back]"), 0, 0),
+			new Text(
+				theme.fg("muted", i18n.t("ui.mcp.navigateHint", "[↑↓ to navigate, Enter to select, Esc to go back]")),
+				0,
+				0,
+			),
 		);
 	}
 
@@ -1281,24 +1304,40 @@ export class MCPAddWizard extends OverlayPanel {
 				);
 			} else if (errorMsg.includes("timeout") || errorMsg.includes("timed out")) {
 				this.#contentContainer.addChild(
-					new Text(theme.fg("muted", "Tip: Complete authorization faster next time"), 0, 0),
+					new Text(
+						theme.fg("muted", i18n.t("ui.tip.authFaster", "Tip: Complete authorization faster next time")),
+						0,
+						0,
+					),
 				);
 			} else if (errorMsg.includes("Invalid OAuth URLs")) {
 				this.#contentContainer.addChild(
-					new Text(theme.fg("muted", "Tip: Check that the OAuth URLs are correct"), 0, 0),
+					new Text(
+						theme.fg("muted", i18n.t("ui.tip.oauthUrls", "Tip: Check that the OAuth URLs are correct")),
+						0,
+						0,
+					),
 				);
 			} else if (errorMsg.includes("ECONNREFUSED")) {
 				this.#contentContainer.addChild(
-					new Text(theme.fg("muted", "Tip: Verify the OAuth server is accessible"), 0, 0),
+					new Text(
+						theme.fg("muted", i18n.t("ui.tip.oauthAccessible", "Tip: Verify the OAuth server is accessible")),
+						0,
+						0,
+					),
 				);
 			}
 
 			this.#contentContainer.addChild(new Spacer(1));
 			this.#contentContainer.addChild(new Text(`${theme.fg("accent", "→ ")}Retry`, 0, 0));
-			this.#contentContainer.addChild(new Text("  Edit OAuth settings", 0, 0));
+			this.#contentContainer.addChild(new Text(`  ${i18n.t("ui.mcp.editOAuth", "Edit OAuth settings")}`, 0, 0));
 			this.#contentContainer.addChild(new Spacer(1));
 			this.#contentContainer.addChild(
-				new Text(theme.fg("muted", "[↑↓ to navigate, Enter to select, Esc to go back]"), 0, 0),
+				new Text(
+					theme.fg("muted", i18n.t("ui.mcp.navigateHint", "[↑↓ to navigate, Enter to select, Esc to go back]")),
+					0,
+					0,
+				),
 			);
 			this.#requestRender();
 

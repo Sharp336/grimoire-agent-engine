@@ -1,0 +1,31 @@
+{
+  "meta": {
+    "version": "1.0",
+    "language": "en",
+    "lastUpdated": "2026-06-28"
+  },
+  "tips.tired_of_typing_keep_going": "Tired of typing \"keep going\"? Just send a '.' instead",
+  "tips.btw_side_question": "You can use /btw to ask a side question",
+  "tips.tan_background_agent": "Use /tan to branch the current conversation to a background agent",
+  "tips.ctrl_d_exit": "Ctrl+D exits, but your draft is saved!",
+  "tips.ompt_stats": "Use `omp stats` to see which model you use most",
+  "tips.task_isolation": "Try task isolation to create a CoW worktree",
+  "tips.completion_nested": "Need a cheap nested model call? Use `completion(x...)`. Got lots of tasks? Let clanker handle it!",
+  "tips.spaghetti_code": "Code looking like spaghetti? Try /omfg to vent about it",
+  "tips.multi_session": "Did you know? Each kitty/tmux/cmux/zellij/wezterm pane has its own session — `omp -c` auto-resumes the right one",
+  "tips.ultrathink": "Add `ultrathink` to a message for deeper multi-step reasoning — rainbow glow while typing",
+  "tips.orchestrate": "Say `orchestrate` in a message to drive multi-stage parallel subagent tasks — glow while typing",
+  "tips.workflowz": "Say `workflowz` in a message to drive eval tasks with parallel subagents — glow while typing",
+  "tips.multi_account": "Log into multiple accounts on the same provider — `/login` again — omp auto-load-balances",
+  "tips.auth_broker": "Run `omp auth-broker serve` once, all machines pull live tokens — refresh keys never leave the host; `omp auth-gateway` as an OpenAI-compatible proxy",
+  "tips.switch_provider": "Press alt+p (or /switch) to switch providers, ctrl+p to cycle role models",
+  "tips.ctrl_r_history": "Press ctrl+r to search your prompt history and reuse previous messages",
+  "tips.force_read": "`/force read` makes the next turn use only the read tool, useful when the model keeps picking wrong",
+  "tips.copy_code": "`/copy code` copies the last code block to clipboard — `/copy cmd` copies the last shell/python command",
+  "tips.shake": "`/shake` removes large tool results from context to free tokens, without a full /compact — `/shake images` removes only images",
+  "tips.collab": "Live collaboration: `/collab` shares your session via end-to-end encrypted relay — teammates run `/join <link>` to watch tool calls and prompt the agent",
+  "tips.inspect_transcript": "Press ← ← to drill into a running or completed agent, inspect its tool calls and conversation",
+  "tips.usage_reset": "Hit Codex rate limit? `/usage reset` uses saved reset credits to restore quota immediately",
+  "tips.pi_dialect": "No native tool_calling? Reasoning provider parsing errors? Set `PI_DIALECT=glm|kimi|anthropic…` to handle it locally!",
+  "tips.advisor": "Enable `/advisor` to attach a second model that reviews each turn and quietly injects suggestions [NEW]"
+}

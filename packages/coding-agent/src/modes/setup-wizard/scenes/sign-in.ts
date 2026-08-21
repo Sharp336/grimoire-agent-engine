@@ -10,17 +10,18 @@ import {
 	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
 import { getAgentDbPath } from "@oh-my-pi/pi-utils";
+import { i18n } from "../../../i18n";
 import { copyToClipboard } from "../../../utils/clipboard";
 import { OAuthSelectorComponent } from "../../components/oauth-selector";
 import { theme } from "../../theme/theme";
 import type { SetupSceneHost, SetupTab } from "./types";
 
 function loginUrlLink(url: string): string {
-	return `\x1b]8;;${url}\x07Open login URL\x1b]8;;\x07`;
+	return `\x1b]8;;${url}\x07${i18n.t("setup.signIn.openLoginUrl", "Open login URL")}\x1b]8;;\x07`;
 }
 
 function loginCopyHint(): string {
-	return theme.fg("dim", "(clipboard copy attempted; Alt+C retries)");
+	return theme.fg("dim", i18n.t("setup.signIn.clipboardHint", "(clipboard copy attempted; Alt+C retries)"));
 }
 
 class CopyablePromptInput implements Component, Focusable {
@@ -74,7 +75,7 @@ interface PromptState {
  */
 export class SignInTab implements SetupTab {
 	readonly id = "sign-in";
-	readonly label = "Sign in";
+	readonly label = i18n.t("setup.signIn.tabLabel", "Sign in");
 
 	#authStorage: AuthStorage;
 	#selector: OAuthSelectorComponent;
@@ -140,7 +141,13 @@ export class SignInTab implements SetupTab {
 			// this panel, so on short screens the rows go to the provider list
 			// instead (17 = full selector: 4 chrome above, 10 rows, 3 below).
 			if (maxLines === undefined || maxLines >= 17 + 2) {
-				lines.push(theme.fg("muted", "Pick a provider to sign in — you can connect more than one."), "");
+				lines.push(
+					theme.fg(
+						"muted",
+						i18n.t("setup.signIn.pickProvider", "Pick a provider to sign in — you can connect more than one."),
+					),
+					"",
+				);
 			}
 			this.#selectorRowStart = lines.length;
 			if (maxLines !== undefined) this.#selector.setMaxHeight(maxLines - lines.length);

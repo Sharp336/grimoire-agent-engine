@@ -19,6 +19,7 @@ import { type Component, Editor, matchesKey, routeSgrMouseInput, ScrollView, typ
 import { formatDuration, formatNumber, logger } from "@oh-my-pi/pi-utils";
 import type { KeyId } from "../../config/keybindings";
 import type { MessageRenderer } from "../../extensibility/extensions/types";
+import { formatCost } from "../../i18n/exchange-rate";
 import type { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import type { AgentRegistry, AgentStatus } from "../../registry/agent-registry";
 import type { FileEntry, SessionMessageEntry } from "../../session/session-entries";
@@ -634,7 +635,7 @@ export class AgentTranscriptViewer implements Component {
 				progress.toolCount > 0 ? `${formatNumber(progress.toolCount)} ${theme.icon.extensionTool}` : "";
 			parts.push(theme.fg("dim", [toolStat, ...stats].filter(Boolean).join(theme.sep.dot)));
 		}
-		if (progress.cost > 0) parts.push(theme.fg("statusLineCost", `$${progress.cost.toFixed(2)}`));
+		if (progress.cost > 0) parts.push(theme.fg("statusLineCost", formatCost(progress.cost)));
 		return parts.join(theme.sep.dot);
 	}
 

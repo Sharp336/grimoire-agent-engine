@@ -396,6 +396,9 @@ export interface InteractiveModeContext {
 		isAuto?: boolean,
 	): Promise<CompactionOutcome>;
 	openInBrowser(urlOrPath: string): void;
+	/** Rebuild built-in slash commands (e.g., after language change). */
+	rebuildBuiltinSlashCommands(): void;
+	/** Reload slash commands and autocomplete. */
 	refreshSlashCommandState(cwd?: string): Promise<void>;
 	/** Reload session skills and derived `/skill:<name>` commands. */
 	refreshSkillState(): Promise<void>;

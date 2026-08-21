@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { getStatsDbPath, workerHostEntry } from "@oh-my-pi/pi-utils";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import {
+	getDistinctModels as dbGetDistinctModels,
 	getRecentErrors as dbGetRecentErrors,
 	getRecentRequests as dbGetRecentRequests,
 	getBehaviorByModel,
@@ -17,6 +18,8 @@ import {
 	getOverallStats,
 	getProviderHourlyBurn,
 	getProviderTimeSeries,
+	countRecentErrors as getRecentErrorCount,
+	countRecentRequests as getRecentRequestCount,
 	getStatsByAgentType,
 	getStatsByFolder,
 	getStatsByModel,
@@ -478,15 +481,41 @@ export async function getCostDashboardStats(range?: string | null): Promise<Pick
 		costSeries: getCostTimeSeries(costSeriesDays, cutoff),
 	};
 }
-export async function getRecentRequests(limit?: number): Promise<MessageStats[]> {
-	await initDb();
-	return dbGetRecentRequests(limit);
+export interface PaginatedResult<T> {
+	items: T[];
+	total: number;
 }
 
-export async function getRecentErrors(range?: string | null, limit?: number): Promise<MessageStats[]> {
+export async function getRecentRequests(
+	limit?: number,
+	offset?: number,
+	model?: string,
+	range?: string,
+): Promise<PaginatedResult<MessageStats>> {
 	await initDb();
 	const { cutoff } = getTimeRangeConfig(range);
-	return dbGetRecentErrors(limit, cutoff);
+	const cutoffMs = cutoff ?? undefined;
+	const items = dbGetRecentRequests(limit, offset, model, cutoffMs);
+	const total = getRecentRequestCount(model, cutoffMs);
+	return { items, total };
+}
+
+export async function getRecentErrors(
+	limit?: number,
+	offset?: number,
+	model?: string,
+	range?: string,
+): Promise<PaginatedResult<MessageStats>> {
+	await initDb();
+	const { cutoff } = getTimeRangeConfig(range);
+	const items = dbGetRecentErrors(limit, offset, model, cutoff ?? undefined);
+	const total = getRecentErrorCount(model, cutoff ?? undefined);
+	return { items, total };
+}
+
+export async function getModelList(): Promise<string[]> {
+	await initDb();
+	return dbGetDistinctModels();
 }
 
 export async function getRequestDetails(id: number): Promise<RequestDetails | null> {

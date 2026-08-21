@@ -14,6 +14,7 @@ import {
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import { formatBytes } from "@oh-my-pi/pi-utils";
+import { i18n } from "../../i18n";
 import { theme } from "../../modes/theme/theme";
 import { matchesAppInterrupt, matchesSelectDown, matchesSelectUp } from "../../modes/utils/keybinding-matchers";
 import type { SessionInfo, SessionStatus } from "../../session/session-listing";
@@ -957,9 +958,9 @@ export class SessionSelectorComponent extends OverlayPanel {
 		};
 		this.#confirmationDialog = new HookSelectorComponent(
 			`Delete session?\n${displayName}`,
-			["Yes", "No"],
+			[i18n.t("ui.yes", "Yes"), i18n.t("ui.no", "No")],
 			async (option: string) => {
-				if (option === "Yes" && this.#onDelete) {
+				if (option === i18n.t("ui.yes", "Yes") && this.#onDelete) {
 					this.#clearError();
 					try {
 						const deleted = await this.#onDelete(session);

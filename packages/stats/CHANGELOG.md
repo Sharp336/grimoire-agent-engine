@@ -28,6 +28,10 @@
 
 - Ensured the embedded dashboard archive is byte-reproducible by sorting entries and zeroing tar and gzip timestamps during compilation.
 
+### Fixed
+
+- Requests page time column now correctly displays in Chinese when locale is set to zh (previously always showed English due to custom `formatDistanceToNow` in pi-utils not supporting locale parameter)
+
 ## [17.2.10] - 2026-08-06
 
 ### Changed
@@ -162,6 +166,7 @@
 
 - New Projects view summarizing usage, cost, and reliability per project folder (backed by the existing `/api/stats/folders` endpoint).
 - System-aware light/dark theme toggle — follows the OS by default, and an explicit choice persists across reloads.
+- Added i18n (internationalization) support for the stats dashboard UI with English and Chinese translations. Language preference persists in localStorage and auto-detects browser language.
 
 ### Changed
 

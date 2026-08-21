@@ -17,6 +17,7 @@ import {
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import type { ComposerShape } from "../../config/settings-schema";
+import { i18n } from "../../i18n";
 import { theme } from "../theme/theme";
 
 /**
@@ -72,7 +73,10 @@ export function renderComposerShapePreview(
 
 	const gutter = style.defaultPromptGutter ?? "";
 	const contentWidth = Math.max(1, previewWidth - chromeWidth * 2 - visibleWidth(gutter));
-	const promptText = truncateToWidth("Ask anything, edit files, run tools", Math.max(1, contentWidth - 1));
+	const promptText = truncateToWidth(
+		i18n.t("composer.promptText", "Ask anything, edit files, run tools"),
+		Math.max(1, contentWidth - 1),
+	);
 	const text = `${theme.fg("text", promptText)}${theme.inverse(" ")}`;
 	const pad = padding(Math.max(0, contentWidth - visibleWidth(promptText) - 1));
 	const styledGutter = gutter ? theme.fg("accent", gutter) : "";
@@ -122,6 +126,6 @@ export class ComposerShapePreview implements Component {
 
 	render(width: number): readonly string[] {
 		const lines = renderComposerShapePreview(this.#shape, width, this.#options.status);
-		return ["", theme.fg("muted", "Preview:"), ...lines];
+		return ["", theme.fg("muted", i18n.t("composer.previewLabel", "Preview:")), ...lines];
 	}
 }

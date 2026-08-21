@@ -49,6 +49,7 @@ export const ADDON_OUTPUTS: Record<string, string> = {
 	"linux-musl-x64-baseline": "pi_natives.linux-x64-baseline.node",
 	"linux-musl-arm64": "pi_natives.linux-arm64.node",
 	"darwin-x64-baseline": "pi_natives.darwin-x64-baseline.node",
+	"darwin-x64-modern": "pi_natives.darwin-x64-modern.node",
 	"darwin-arm64": "pi_natives.darwin-arm64.node",
 	"win32-x64-baseline": "pi_natives.win32-x64-baseline.node",
 };
@@ -63,7 +64,7 @@ export const AGGREGATE_TARGETS: Record<string, string[]> = {
 		"linux-x64-modern",
 		"win32-x64-baseline",
 	],
-	"darwin-all": ["darwin-arm64", "darwin-x64-baseline"],
+	"darwin-all": ["darwin-arm64", "darwin-x64-baseline", "darwin-x64-modern"],
 };
 
 export interface HostInfo {
@@ -76,7 +77,7 @@ export interface HostInfo {
 export function hostTargetName(host: HostInfo): string {
 	if (host.platform === "darwin") {
 		if (host.arch === "arm64") return "darwin-arm64";
-		if (host.arch === "x64") return "darwin-x64-baseline";
+		if (host.arch === "x64") return host.avx2 ? "darwin-x64-modern" : "darwin-x64-baseline";
 	}
 	if (host.platform === "linux") {
 		if (host.arch === "arm64") return "linux-arm64";

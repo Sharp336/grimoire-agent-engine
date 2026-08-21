@@ -435,7 +435,7 @@ describe("AgentSession advisor toggle", () => {
 
 		expect(session.applyAdvisorConfigs([{ name: "Security" }], undefined)).toBe(1);
 		expect(session.getAdvisorCost()).toBeCloseTo(0.5, 8);
-		expect(session.formatAdvisorStatus()).toContain("$0.5000");
+		expect(session.formatAdvisorStatus()).toContain("$0.500");
 	});
 	it("retains cumulative advisor cost after an in-session history rewrite", async () => {
 		const advisor = enableAdvisor();
@@ -454,7 +454,7 @@ describe("AgentSession advisor toggle", () => {
 		expect(advisor.state.messages).toHaveLength(0);
 		expect(session.getAdvisorCost()).toBeCloseTo(0.5, 8);
 		expect(session.getAdvisorStats().cost).toBeCloseTo(0.5, 8);
-		expect(session.formatAdvisorStatus()).toContain("$0.5000");
+		expect(session.formatAdvisorStatus()).toContain("$0.500");
 	});
 	it("retains cumulative advisor cost when reloading the same session", async () => {
 		const advisor = enableAdvisor();
