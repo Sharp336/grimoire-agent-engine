@@ -99,7 +99,13 @@ import {
 	withTimeout,
 } from "@oh-my-pi/pi-utils";
 import { type AdvisorConfig, type AdvisorRuntimeStatus, loadAdvisorTranscriptCosts } from "../advisor";
-import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager, type AsyncJobProgressInfo } from "../async";
+import {
+	ASYNC_JOB_MANAGER_SHUTDOWN_REASON,
+	type AsyncJob,
+	AsyncJobManager,
+	type AsyncJobProgressDelivery,
+	type AsyncJobProgressInfo,
+} from "../async";
 import { reset as resetCapabilities } from "../capability";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import type { ModelRegistry } from "../config/model-registry";
@@ -152,7 +158,7 @@ import type { GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import type { IrcMessage } from "../irc/bus";
-import type { DaemonCompletionNotification } from "../launch/protocol";
+import type { DaemonCompletionNotification, DaemonOutputNotification } from "../launch/protocol";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
 import { containsOrchestrate, renderOrchestrateNotice } from "../modes/orchestrate";
@@ -581,6 +587,10 @@ export class AgentSession {
 	#unregisterAsyncProgressSink: (() => void) | undefined;
 	#unregisterAsyncProgressQueue: (() => void) | undefined;
 	#unregisterAsyncProgressWakeQueue: (() => void) | undefined;
+	readonly #activeLaunchWakeMonitors = new Set<string>();
+	#launchMonitorStateChanged = Promise.withResolvers<void>();
+	#launchProgressBoundaryDepth = 0;
+	#launchProgressEpoch = 0;
 	/**
 	 * Async-delivery generation, bumped on every session transition that evicts
 	 * this owner's jobs (see {@link AgentSession.#cancelOwnAsyncJobs}). Stamped
@@ -954,7 +964,11 @@ export class AgentSession {
 		const pending = this.#pendingAgentEndEmit;
 		if (!pending) return;
 		this.#pendingAgentEndEmit = undefined;
-		this.#emit(pending);
+		const event =
+			pending.type === "agent_end" && pending.isTerminal !== false && this.#hasPendingAsyncWake()
+				? { ...pending, isTerminal: false }
+				: pending;
+		this.#emit(event);
 	}
 
 	/**
@@ -1296,11 +1310,6 @@ export class AgentSession {
 				}
 			},
 		});
-		this.yieldQueue.register<LaunchCompletionEntry>(LAUNCH_COMPLETION_MESSAGE_TYPE, {
-			isStale: entry =>
-				this.#isDisposed || !isLaunchCompletionOwner(entry.owner, this.sessionManager.getSessionId()),
-			build: buildLaunchCompletionBatchMessage,
-		});
 		// Background-job completions / late diagnostics are pulled into the run at
 		// each step boundary as non-interrupting asides. Peer IRCs share the aside
 		// injection boundary, but also expose a non-consuming interrupt peek so
@@ -1423,7 +1432,7 @@ export class AgentSession {
 		this.#unregisterAsyncProgressQueue = this.yieldQueue.register<AsyncProgressEntry>(ASYNC_PROGRESS_MESSAGE_TYPE, {
 			skipIdleFlush: true,
 			isStale: entry =>
-				entry.epoch !== this.#asyncDeliveryEpoch ||
+				entry.epoch !== (entry.source?.type === "process" ? this.#launchProgressEpoch : this.#asyncDeliveryEpoch) ||
 				(entry.job !== undefined && this.#asyncJobManager?.isDeliverySuppressed(entry.jobId) === true),
 			// Ambient entries accumulate for as long as the owner stays idle; fold
 			// them into one bounded window per job so the queue cannot grow (and
@@ -1436,13 +1445,22 @@ export class AgentSession {
 			ASYNC_PROGRESS_WAKE_QUEUE_KIND,
 			{
 				isStale: entry =>
-					entry.epoch !== this.#asyncDeliveryEpoch ||
+					entry.epoch !==
+						(entry.source?.type === "process" ? this.#launchProgressEpoch : this.#asyncDeliveryEpoch) ||
 					(entry.job !== undefined && this.#asyncJobManager?.isDeliverySuppressed(entry.jobId) === true),
 				coalesceKey: asyncProgressCoalesceKey,
 				coalesce: mergeAsyncProgressEntries,
 				build: buildAsyncProgressBatchMessage,
 			},
 		);
+		// Progress queues must drain before terminal process completions. The broker
+		// flushes its final progress batch first; preserve that ordering when both
+		// kinds accumulate while the model is busy.
+		this.yieldQueue.register<LaunchCompletionEntry>(LAUNCH_COMPLETION_MESSAGE_TYPE, {
+			isStale: entry =>
+				this.#isDisposed || !isLaunchCompletionOwner(entry.owner, this.sessionManager.getSessionId()),
+			build: buildLaunchCompletionBatchMessage,
+		});
 		if (this.#asyncJobManager && this.#agentId) {
 			const manager = this.#asyncJobManager;
 			this.yieldQueue.register<AsyncResultEntry>("async-result", {
@@ -1944,7 +1962,8 @@ export class AgentSession {
 	 */
 	#hasPendingAsyncWake(): boolean {
 		const manager = this.#asyncJobManager;
-		const queuedWake = this.yieldQueue.has(ASYNC_PROGRESS_WAKE_QUEUE_KIND);
+		const queuedWake =
+			this.yieldQueue.has(ASYNC_PROGRESS_WAKE_QUEUE_KIND) || this.yieldQueue.has(LAUNCH_COMPLETION_MESSAGE_TYPE);
 		if (!manager) return queuedWake;
 		const ownerFilter = this.#agentId ? { ownerId: this.#agentId } : undefined;
 		return (
@@ -1961,11 +1980,14 @@ export class AgentSession {
 	}
 
 	/**
-	 * Public view of the pending-async-wake state for run drivers: true while
-	 * owner-scoped async work can still re-wake this session's run.
+	 * Public view for run drivers: true while owner-scoped async work or an active
+	 * wake process monitor can re-wake this session. Active monitors belong here,
+	 * but not in {@link #hasPendingAsyncWake}: a subscription with no queued event
+	 * must keep a subagent alive without preventing its current model turn from
+	 * settling and making room for the future wake.
 	 */
 	hasPendingAsyncWork(): boolean {
-		return this.#hasPendingAsyncWake();
+		return this.#hasPendingAsyncWake() || this.#activeLaunchWakeMonitors.size > 0;
 	}
 
 	/**
@@ -1977,10 +1999,14 @@ export class AgentSession {
 	 * jobs.
 	 */
 	async settleAsyncWork(): Promise<void> {
+		const launchMonitorChanged = this.#launchMonitorStateChanged.promise;
 		const manager = this.#asyncJobManager;
-		if (!manager || !this.#agentId) return;
-		await manager.waitForOwnerJobs(this.#agentId, { excludeSuppressed: true });
-		await manager.drainDeliveries({ filter: { ownerId: this.#agentId } });
+		if (manager && this.#agentId) {
+			await manager.waitForOwnerJobs(this.#agentId, { excludeSuppressed: true });
+			await manager.drainDeliveries({ filter: { ownerId: this.#agentId } });
+		}
+		await this.waitForIdle();
+		if (this.#activeLaunchWakeMonitors.size > 0) await launchMonitorChanged;
 		await this.waitForIdle();
 	}
 
@@ -6406,6 +6432,67 @@ export class AgentSession {
 		return delivered;
 	}
 
+	queueLaunchProgress(
+		notification: DaemonOutputNotification,
+		delivery: AsyncJobProgressDelivery,
+		startedAt: number,
+		artifactId?: string,
+	): void {
+		if (this.#isDisposed) throw new Error("Session disposed before launch progress delivery");
+		if (this.#launchProgressBoundaryDepth > 0) return;
+		const queueKind = delivery === "wake" ? ASYNC_PROGRESS_WAKE_QUEUE_KIND : ASYNC_PROGRESS_MESSAGE_TYPE;
+		this.yieldQueue.enqueue<AsyncProgressEntry>(queueKind, {
+			jobId: notification.name,
+			text: notification.text,
+			job: undefined,
+			source: {
+				id: notification.daemonId,
+				type: "process",
+				label: notification.name,
+				startedAt,
+			},
+			seq: notification.seq,
+			elapsedMs: Math.max(0, Date.now() - startedAt),
+			epoch: this.#launchProgressEpoch,
+			delivery,
+			artifactId,
+			sourceTruncated: notification.truncated,
+			suppressedEvents: notification.suppressedEvents || undefined,
+			reminder: notification.reminder,
+		});
+		this.#signalLaunchMonitorChanged();
+	}
+
+	#signalLaunchMonitorChanged(): void {
+		const changed = this.#launchMonitorStateChanged;
+		this.#launchMonitorStateChanged = Promise.withResolvers<void>();
+		changed.resolve();
+	}
+
+	#beginLaunchProgressBoundary(): Disposable {
+		this.#launchProgressBoundaryDepth += 1;
+		this.#launchProgressEpoch += 1;
+		let active = true;
+		return {
+			[Symbol.dispose]: () => {
+				if (!active) return;
+				active = false;
+				this.#launchProgressBoundaryDepth -= 1;
+			},
+		};
+	}
+
+	setLaunchMonitorActive(monitorId: string, delivery: AsyncJobProgressDelivery, active: boolean): void {
+		const wasActive = this.#activeLaunchWakeMonitors.has(monitorId);
+		if (delivery !== "wake" || !active) {
+			this.#activeLaunchWakeMonitors.delete(monitorId);
+		} else {
+			this.#activeLaunchWakeMonitors.add(monitorId);
+		}
+		if (wasActive === this.#activeLaunchWakeMonitors.has(monitorId)) return;
+		this.#signalLaunchMonitorChanged();
+	}
+
 	#queueHiddenNextTurnMessage(message: CustomMessage, triggerTurn: boolean): void {
 		this.#pendingNextTurnMessages.push(message);
 		if (!triggerTurn) return;
@@ -7064,6 +7151,7 @@ export class AgentSession {
 		}
 
 		this.#disconnectFromAgent();
+		using _launchProgressBoundary = this.#beginLaunchProgressBoundary();
 		let advisorRecordersDetached = false;
 		await this.abort();
 		this.#cancelOwnAsyncJobs();
@@ -7179,6 +7267,7 @@ export class AgentSession {
 				return false;
 			}
 		}
+		using _launchProgressBoundary = this.#beginLaunchProgressBoundary();
 
 		await this.#bash.flushPending();
 		// Flush current session to ensure all entries are written
@@ -8140,6 +8229,7 @@ export class AgentSession {
 		}
 
 		this.#disconnectFromAgent();
+		using _launchProgressBoundary = switchingToDifferentSession ? this.#beginLaunchProgressBoundary() : undefined;
 		await this.abort({ goalReason: "internal" });
 		await this.#sessionBeforeSwitchReconciler?.();
 
@@ -8450,6 +8540,7 @@ export class AgentSession {
 			}
 			skipConversationRestore = result?.skipConversationRestore ?? false;
 		}
+		using _launchProgressBoundary = this.#beginLaunchProgressBoundary();
 
 		// Clear pending messages (bound to old session state)
 		this.#pendingNextTurnMessages = [];
@@ -8563,6 +8654,7 @@ export class AgentSession {
 		if (this.sessionManager.getSessionId() !== sessionId || this.sessionManager.getLeafId() !== leafId) {
 			throw new Error("Cannot branch /btw: session changed since /btw started");
 		}
+		using _launchProgressBoundary = this.#beginLaunchProgressBoundary();
 
 		await withTimeout(
 			this.#cancelPostPromptTasks(),
