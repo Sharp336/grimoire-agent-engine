@@ -1961,10 +1961,11 @@ export const worktree = {
 		cwd: string,
 		worktreePath: string,
 		refName: string,
-		options: { detach?: boolean; signal?: AbortSignal } = {},
+		options: { detach?: boolean; newBranch?: string; signal?: AbortSignal } = {},
 	): Promise<void> {
 		const args = ["worktree", "add"];
 		if (options.detach) args.push("--detach");
+		if (options.newBranch) args.push("-b", options.newBranch);
 		args.push(worktreePath, refName);
 		await runEffect(cwd, args, { signal: options.signal });
 	},

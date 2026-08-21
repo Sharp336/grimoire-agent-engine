@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added `/worktree` to list, create, and remove managed worktrees, plus `/cd` as an alias for `/move`.
 
 ## [17.4.1] - 2026-08-21
 
