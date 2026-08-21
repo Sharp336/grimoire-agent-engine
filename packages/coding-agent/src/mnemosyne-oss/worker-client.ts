@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { logger, readLines, Snowflake } from "@oh-my-pi/pi-utils";
-import { resolveExplicitPythonRuntime, resolvePythonRuntime } from "../eval/py/runtime";
+import { filterEnv, resolveExplicitPythonRuntime, resolvePythonRuntime } from "../eval/py/runtime";
 import { stageRunnerScript } from "../eval/runner-cache";
 import WORKER_SCRIPT from "./worker.py" with { type: "text" };
 import {
@@ -36,7 +36,7 @@ export interface MnemosyneOssWorkerClientOptions {
 interface PendingRequest<T> {
 	resolve(value: T): void;
 	reject(error: Error): void;
-	timer?: ReturnType<typeof setTimeout>;
+	timer?: Timer;
 	removeAbort?: () => void;
 	mutation: boolean;
 	method: MnemosyneOssWorkerMethod;
@@ -182,8 +182,8 @@ export class MnemosyneOssWorkerClient {
 		const temporaryConfigDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mnemosyne-oss-config-"));
 		try {
 			const runtime = this.#options.executable
-				? resolveExplicitPythonRuntime(this.#options.executable, this.#options.cwd, safePythonEnv())
-				: resolvePythonRuntime(this.#options.cwd, safePythonEnv());
+				? resolveExplicitPythonRuntime(this.#options.executable, this.#options.cwd, filterEnv(process.env))
+				: resolvePythonRuntime(this.#options.cwd, filterEnv(process.env));
 			const environment = buildWorkerEnvironment(runtime.env, temporaryConfigDir, this.#options.context);
 			const scriptPath = await stageRunnerScript("omp-mnemosyne-oss-worker", "py", WORKER_SCRIPT);
 			const child = Bun.spawn([runtime.pythonPath, "-u", scriptPath], {
@@ -393,40 +393,6 @@ function rpcError(message: string, code: number): Error {
 }
 function unknownMutationError(error: Error): Error {
 	return new Error(`${error.message} operation outcome unknown; the mutation was not replayed.`);
-}
-
-function safePythonEnv(): Record<string, string | undefined> {
-	const allowed = new Set([
-		"PATH",
-		"HOME",
-		"USER",
-		"LOGNAME",
-		"SHELL",
-		"LANG",
-		"LC_ALL",
-		"LC_CTYPE",
-		"TMPDIR",
-		"TEMP",
-		"TMP",
-		"XDG_CACHE_HOME",
-		"XDG_CONFIG_HOME",
-		"XDG_DATA_HOME",
-		"XDG_RUNTIME_DIR",
-		"VIRTUAL_ENV",
-		"CONDA_PREFIX",
-		"CONDA_DEFAULT_ENV",
-		"PYTHONPATH",
-		"HF_HOME",
-		"HF_HUB_CACHE",
-		"TRANSFORMERS_CACHE",
-		"SENTENCE_TRANSFORMERS_HOME",
-	]);
-	const environment: Record<string, string | undefined> = {};
-	for (const [key, value] of Object.entries(process.env)) {
-		if (value === undefined || key.startsWith("MNEMOSYNE_")) continue;
-		if (allowed.has(key) || key.startsWith("LC_")) environment[key] = value;
-	}
-	return environment;
 }
 
 function buildWorkerEnvironment(

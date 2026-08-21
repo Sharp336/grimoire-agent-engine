@@ -9,6 +9,7 @@ import type { DiagnosticSummary } from "@oh-my-pi/pi-mnemopi/diagnose";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { resolveRoleSelection } from "../config/model-resolver";
+import { abortedMemorySearch, resolveAliasedState, uninitializedMemorySearch } from "../memory-backend/messages";
 import type {
 	MemoryBackend,
 	MemoryBackendEditOperation,
@@ -140,7 +141,7 @@ export const mnemopiBackend: MemoryBackend = {
 
 	async buildDeveloperInstructions(_agentDir, settings, session): Promise<string | undefined> {
 		const state = getMnemopiSessionState(session);
-		const primary = state?.aliasOf ?? state;
+		const primary = resolveAliasedState(state);
 		const parts = [STATIC_INSTRUCTIONS];
 		if (primary?.lastRecallSnippet) parts.push(primary.lastRecallSnippet);
 		const rendered = parts.join("\n\n").trim();
@@ -223,7 +224,7 @@ export const mnemopiBackend: MemoryBackend = {
 
 	async status({ agentDir, session }): Promise<MemoryBackendStatus> {
 		const state = getMnemopiSessionState(session);
-		const primary = state?.aliasOf ?? state;
+		const primary = resolveAliasedState(state);
 		if (!primary) {
 			return {
 				backend: "mnemopi",
@@ -253,24 +254,12 @@ export const mnemopiBackend: MemoryBackend = {
 
 	async search({ session }, query, options) {
 		const state = getMnemopiSessionState(session);
-		const primary = state?.aliasOf ?? state;
-		if (!primary) {
-			return {
-				backend: "mnemopi",
-				query,
-				count: 0,
-				items: [],
-				message: "Mnemopi backend is not initialised for this session.",
-			};
-		}
-		if (options?.signal?.aborted) {
-			return { backend: "mnemopi", query, count: 0, items: [], message: "Search aborted." };
-		}
+		const primary = resolveAliasedState(state);
+		if (!primary) return uninitializedMemorySearch("mnemopi", query, "Mnemopi");
+		if (options?.signal?.aborted) return abortedMemorySearch("mnemopi", query);
 		const limit = clampLimit(options?.limit);
 		const results = (await primary.recallResultsScoped(query)).slice(0, limit);
-		if (options?.signal?.aborted) {
-			return { backend: "mnemopi", query, count: 0, items: [], message: "Search aborted." };
-		}
+		if (options?.signal?.aborted) return abortedMemorySearch("mnemopi", query);
 		const items: MemoryBackendSearchItem[] = results.map(result => ({
 			id: result.id,
 			content: result.content,
@@ -289,7 +278,7 @@ export const mnemopiBackend: MemoryBackend = {
 
 	async save({ cwd, session }, input: MemoryBackendSaveInput) {
 		const state = getMnemopiSessionState(session);
-		const primary = state?.aliasOf ?? state;
+		const primary = resolveAliasedState(state);
 		if (!primary) {
 			return {
 				backend: "mnemopi",
@@ -324,7 +313,7 @@ export const mnemopiBackend: MemoryBackend = {
 
 	async get({ session }, id: string): Promise<MemoryBackendGetResult> {
 		const state = getMnemopiSessionState(session);
-		const primary = state?.aliasOf ?? state;
+		const primary = resolveAliasedState(state);
 		if (!primary) {
 			return {
 				backend: "mnemopi",
@@ -371,7 +360,7 @@ export const mnemopiBackend: MemoryBackend = {
 		options?: MemoryBackendEditOptions,
 	): Promise<MemoryBackendEditResult> {
 		const state = getMnemopiSessionState(session);
-		const primary = state?.aliasOf ?? state;
+		const primary = resolveAliasedState(state);
 		if (!primary) throw new Error("Mnemopi backend is not initialised for this session.");
 		const result = primary.editScopedMemory(op, id, options);
 		return { backend: "mnemopi", id, ...result };
@@ -383,7 +372,7 @@ export const mnemopiBackend: MemoryBackend = {
 		options?: MemoryBackendReflectOptions,
 	): Promise<MemoryBackendReflectResult> {
 		const state = getMnemopiSessionState(session);
-		const primary = state?.aliasOf ?? state;
+		const primary = resolveAliasedState(state);
 		if (!primary) throw new Error("Mnemopi backend is not initialised for this session.");
 		if (options?.signal?.aborted) {
 			return { backend: "mnemopi", query, text: "No relevant information found to reflect on.", count: 0 };
@@ -503,7 +492,7 @@ function summarizeMnemopiStatus(
 		database ??= stats.database ? shortenPath(stats.database) : undefined;
 	}
 	const state = getMnemopiSessionState(session);
-	const primary = state?.aliasOf ?? state;
+	const primary = resolveAliasedState(state);
 	return {
 		backend: "mnemopi",
 		active: true,
@@ -701,7 +690,7 @@ async function resolveMnemopiProviderOptions(
 
 function getMnemopiSessionStateFromParent(options: MemoryBackendStartOptions): MnemopiSessionState | undefined {
 	const parent = options.parentMnemopiSessionState;
-	return parent?.aliasOf ?? parent;
+	return resolveAliasedState(parent);
 }
 
 export function getMnemopiDbDirForTests(session: AgentSession): string | undefined {

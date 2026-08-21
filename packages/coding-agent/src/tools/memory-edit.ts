@@ -22,7 +22,7 @@ export class MemoryEditTool implements AgentTool<typeof memoryEditSchema> {
 	readonly parameters = memoryEditSchema;
 	readonly strict = true;
 	readonly loadMode = "discoverable";
-	readonly summary = "Update, forget, or invalidate Mnemopi memories";
+	readonly summary = "Update, forget, or invalidate editable long-term memories";
 
 	constructor(private readonly session: ToolSession) {}
 

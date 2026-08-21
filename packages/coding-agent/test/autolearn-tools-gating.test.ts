@@ -6,7 +6,6 @@ import { type } from "@oh-my-pi/omptype";
 import { getManagedSkillsDir } from "@oh-my-pi/pi-coding-agent/autolearn/managed-skills";
 import { type SettingPath, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { resetActiveSkillsForTests, type Skill, setActiveSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
-import type { HindsightSessionState } from "@oh-my-pi/pi-coding-agent/hindsight/state";
 import type { MnemopiSessionState } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
 import { createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { LearnTool } from "@oh-my-pi/pi-coding-agent/tools/learn";
@@ -260,12 +259,14 @@ describe("learn execute", () => {
 		const session = makeSession(
 			{ "autolearn.enabled": true, "memory.backend": "hindsight" },
 			{
-				getHindsightSessionState: () =>
-					({
-						enqueueRetain: (memory: string, context?: string) => {
-							queued.push({ memory, context });
-						},
-					}) as unknown as HindsightSessionState,
+				memory: {
+					save: async input => {
+						const content = typeof input === "string" ? input : input.content;
+						const context = typeof input === "string" ? undefined : input.context;
+						queued.push({ memory: content, context });
+						return { backend: "hindsight", stored: 1, queued: true };
+					},
+				} as ToolSession["memory"],
 			},
 		);
 
@@ -283,12 +284,12 @@ describe("learn execute", () => {
 		const session = makeSession(
 			{ "autolearn.enabled": true, "memory.backend": "hindsight" },
 			{
-				getHindsightSessionState: () =>
-					({
-						enqueueRetain: (memory: string) => {
-							queued.push(memory);
-						},
-					}) as unknown as HindsightSessionState,
+				memory: {
+					save: async input => {
+						queued.push(typeof input === "string" ? input : input.content);
+						return { backend: "hindsight", stored: 1, queued: true };
+					},
+				} as ToolSession["memory"],
 			},
 		);
 

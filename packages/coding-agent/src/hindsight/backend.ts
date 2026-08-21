@@ -10,6 +10,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import { onHindsightScopeChanged, type Settings } from "../config/settings";
+import { abortedMemorySearch, resolveAliasedState, uninitializedMemorySearch } from "../memory-backend/messages";
 import type {
 	MemoryBackend,
 	MemoryBackendGetResult,
@@ -99,7 +100,7 @@ export const hindsightBackend: MemoryBackend = {
 		if (!isHindsightConfigured(config)) return undefined;
 
 		const state = session?.getHindsightSessionState();
-		const primary = state?.aliasOf ?? state;
+		const primary = resolveAliasedState(state);
 		const recallSnippet = primary?.lastRecallSnippet;
 		const mentalModelsSnippet = primary?.mentalModelsSnippet;
 
@@ -148,18 +149,8 @@ export const hindsightBackend: MemoryBackend = {
 		options?: MemoryBackendSearchOptions,
 	): Promise<MemoryBackendSearchResult> {
 		const state = session?.getHindsightSessionState();
-		if (!state) {
-			return {
-				backend: "hindsight",
-				query,
-				count: 0,
-				items: [],
-				message: "Hindsight backend is not initialised for this session.",
-			};
-		}
-		if (options?.signal?.aborted) {
-			return { backend: "hindsight", query, count: 0, items: [], message: "Search aborted." };
-		}
+		if (!state) return uninitializedMemorySearch("hindsight", query, "Hindsight");
+		if (options?.signal?.aborted) return abortedMemorySearch("hindsight", query);
 		const response = await state.client.recall(state.bankId, query, {
 			budget: state.config.recallBudget,
 			maxTokens: state.config.recallMaxTokens,
@@ -168,9 +159,7 @@ export const hindsightBackend: MemoryBackend = {
 			tagsMatch: state.recallTagsMatch,
 			signal: options?.signal,
 		});
-		if (options?.signal?.aborted) {
-			return { backend: "hindsight", query, count: 0, items: [], message: "Search aborted." };
-		}
+		if (options?.signal?.aborted) return abortedMemorySearch("hindsight", query);
 		const results = response.results ?? [];
 		const items: MemoryBackendSearchItem[] = results.map(result => ({
 			id: result.id,

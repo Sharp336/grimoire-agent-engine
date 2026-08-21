@@ -23,7 +23,7 @@ export type LearnParams = typeof learnSchema.infer;
  * Orchestrating "learn" tool: persists a lesson to long-term memory and,
  * given a `skill` payload, mints/enhances a managed skill via the shared
  * `writeManagedSkill` primitive. Gated behind `autolearn.enabled` plus a live
- * memory backend — `hindsight`/`mnemopi` (remote/SQLite) or `local` (the
+ * memory backend — `hindsight`/`mnemopi`/`mnemosyne-oss` (remote/SQLite) or `local` (the
  * file-based rollout backend, where lessons append to `learned.md`).
  */
 export class LearnTool implements AgentTool<typeof learnSchema> {
@@ -86,23 +86,20 @@ export class LearnTool implements AgentTool<typeof learnSchema> {
 			if (!result || result.stored === 0) {
 				throw new Error("Lesson was empty after sanitization; nothing stored.");
 			}
-		} else if (backend === "mnemosyne-oss") {
-			const result = await this.session.memory?.save({
+		} else {
+			const memory = this.session.memory;
+			if (!memory) throw new Error("Memory backend is not initialised for this session.");
+			const result = await memory.save({
 				content: params.memory,
 				context: params.context,
 				source: "coding-agent-learn",
 				importance: 0.8,
 			});
-			if (!result || result.stored === 0) {
-				throw new Error(result?.message ?? "Mnemosyne OSS did not store the lesson.");
+			if (result.queued) {
+				memoryMessage = "Lesson queued for retention";
+			} else if (!result.stored) {
+				throw new Error(result.message ?? "Memory backend did not store the lesson.");
 			}
-		} else {
-			const state = this.session.getHindsightSessionState?.();
-			if (!state) {
-				throw new Error("Hindsight backend is not initialised for this session.");
-			}
-			state.enqueueRetain(params.memory, params.context);
-			memoryMessage = "Lesson queued for retention";
 		}
 
 		// 2) Optionally mint/enhance a managed skill. A failure here is surfaced

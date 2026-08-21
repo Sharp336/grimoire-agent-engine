@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getAgentDir, isEnoent } from "@oh-my-pi/pi-utils";
 import { getMemoryRoot } from "../memories";
-import type { MemoryBackendRecord } from "../memory-backend";
+import { type MemoryBackendRecord, resolveAliasedState } from "../memory-backend";
 import { getMnemopiSessionState, type MnemopiScopedMemoryHit, type MnemopiSessionState } from "../mnemopi/state";
 import { AgentRegistry } from "../registry/agent-registry";
 import { isMarkdownPath } from "../utils/lang-from-path";
@@ -215,7 +215,7 @@ function mnemopiSessionStatesFromRegistry(): MnemopiSessionState[] {
 		if (!session) continue;
 		const state = getMnemopiSessionState(session);
 		if (!state) continue;
-		const primary = state.aliasOf ?? state;
+		const primary = resolveAliasedState(state);
 		if (seen.has(primary)) continue;
 		seen.add(primary);
 		states.push(primary);

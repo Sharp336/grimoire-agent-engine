@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { mnemosyneOssBackend } from "@oh-my-pi/pi-coding-agent/mnemosyne-oss/backend";
 import type { MnemosyneOssBackendConfig } from "@oh-my-pi/pi-coding-agent/mnemosyne-oss/config";
 import {
@@ -13,9 +15,21 @@ import type {
 } from "@oh-my-pi/pi-coding-agent/mnemosyne-oss/worker-protocol";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 
+type FakeSessionEntry =
+	| {
+			type: "message";
+			message: { role: "user" | "assistant"; content: string | Array<{ type: "text"; text: string }> };
+	  }
+	| { type: "custom"; customType: string; data: unknown };
+
+interface RememberCallOptions {
+	source?: string;
+	metadata?: { sourceId?: string };
+}
+
 interface FakeSessionData {
 	session: AgentSession;
-	entries: any[];
+	entries: FakeSessionEntry[];
 	customEntries: Array<{ customType: string; data: unknown }>;
 	refreshes: number;
 }
@@ -59,7 +73,7 @@ afterEach(() => {
 	for (const { session } of sessions.splice(0)) setMnemosyneOssSessionState(session, undefined);
 });
 
-function createSession(sessionId = "session-1", entries: any[] = []): FakeSessionData {
+function createSession(sessionId = "session-1", entries: FakeSessionEntry[] = []): FakeSessionData {
 	const customEntries: Array<{ customType: string; data: unknown }> = [];
 	const manager = {
 		getCwd: () => "/tmp/project",
@@ -96,6 +110,13 @@ function addTurn(data: FakeSessionData, index: number): void {
 	});
 }
 
+function rememberSourceId(params: Record<string, unknown>): string | undefined {
+	const options = params.options;
+	if (!options || typeof options !== "object") return undefined;
+	const metadata = (options as RememberCallOptions).metadata;
+	return metadata?.sourceId;
+}
+
 function createWorker(recallItems: MnemosyneOssWorkerRecallItem[] = []): FakeWorkerData {
 	const calls: FakeWorkerData["calls"] = [];
 	const memories = new Map<string, MnemosyneOssWorkerRecord>();
@@ -107,7 +128,7 @@ function createWorker(recallItems: MnemosyneOssWorkerRecallItem[] = []): FakeWor
 			if (method === "recall") return { items: recallItems } as T;
 			if (method === "remember") {
 				const id = `memory-${nextId++}`;
-				const options = (params.options ?? {}) as Record<string, any>;
+				const options = (params.options ?? {}) as RememberCallOptions;
 				const record: MnemosyneOssWorkerRecord = {
 					id,
 					content: String(params.content),
@@ -163,7 +184,7 @@ function createWorker(recallItems: MnemosyneOssWorkerRecallItem[] = []): FakeWor
 				memories.clear();
 				return { deleted: true } as T;
 			}
-			return {} as T;
+			throw new Error(`Unhandled Mnemosyne OSS worker method: ${method}`);
 		},
 		shutdown: async () => {
 			shutdowns++;
@@ -176,7 +197,7 @@ function createWorker(recallItems: MnemosyneOssWorkerRecallItem[] = []): FakeWor
 		get shutdowns() {
 			return shutdowns;
 		},
-	} as FakeWorkerData;
+	};
 }
 
 describe("Mnemosyne OSS backend", () => {
@@ -197,12 +218,12 @@ describe("Mnemosyne OSS backend", () => {
 		expect(first).toContain("<memories>");
 		expect(first).toContain("stored background");
 		expect(second).toBeUndefined();
-		expect((await mnemosyneOssBackend.buildDeveloperInstructions("/tmp", {} as any, session.session))!).toContain(
-			"stored background",
-		);
+		expect(
+			(await mnemosyneOssBackend.buildDeveloperInstructions("/tmp", Settings.isolated({}), session.session))!,
+		).toContain("stored background");
 		const compacted = await mnemosyneOssBackend.preCompactionContext!(
-			[{ role: "user", content: "question" } as any],
-			{} as any,
+			[{ role: "user", content: "question" }] as AgentMessage[],
+			Settings.isolated({}),
 			session.session,
 		);
 		expect(compacted).toContain("stored background");
@@ -219,13 +240,13 @@ describe("Mnemosyne OSS backend", () => {
 			session: session.session,
 			worker: fake.worker,
 		});
-		await state.maybeRetainOnAgentEnd([] as any);
+		await state.maybeRetainOnAgentEnd([]);
 		for (let index = 5; index <= 6; index++) addTurn(session, index);
 		await state.forceRetainCurrentSession();
 		const remembers = fake.calls.filter(call => call.method === "remember");
 		expect(remembers).toHaveLength(2);
-		expect((remembers[0].params.options as any).metadata.sourceId).toBe("session-1:turns:1-4");
-		expect((remembers[1].params.options as any).metadata.sourceId).toBe("session-1:turns:5-6");
+		expect(rememberSourceId(remembers[0].params)).toBe("session-1:turns:1-4");
+		expect(rememberSourceId(remembers[1].params)).toBe("session-1:turns:5-6");
 		expect(session.customEntries.at(-1)).toEqual({
 			customType: "mnemosyne-oss-retention-cursor",
 			data: { sessionId: "session-1", retainedThroughUserTurn: 6, sourceId: "session-1:turns:5-6" },
@@ -240,9 +261,9 @@ describe("Mnemosyne OSS backend", () => {
 		});
 		addTurn(resumed, 7);
 		await resumedState.forceRetainCurrentSession();
-		expect(
-			(resumedWorker.calls.find(call => call.method === "remember")!.params.options as any).metadata.sourceId,
-		).toBe("session-1:turns:7-7");
+		expect(rememberSourceId(resumedWorker.calls.find(call => call.method === "remember")!.params)).toBe(
+			"session-1:turns:7-7",
+		);
 	});
 
 	it("aliases share explicit operations but never auto-retain, enqueue, sleep, clear, or shut down", async () => {

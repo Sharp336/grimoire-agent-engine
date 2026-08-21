@@ -127,23 +127,27 @@ export class MnemosyneOssSessionState {
 		return this.aliasOf?.worker ?? this.#worker;
 	}
 
+	get #owner(): MnemosyneOssSessionState {
+		return this.aliasOf ?? this;
+	}
+
 	attachSessionListeners(): void {
 		if (this.aliasOf) return;
 		this.#unsubscribe?.();
 		this.#unsubscribe = this.session.subscribe((event: AgentSessionEvent) => {
 			if (event.type === "agent_start") {
-				void this.maybeRecallOnAgentStart().catch(error => this.logLifecycleFailure("agent_start recall", error));
+				void this.maybeRecallOnAgentStart().catch(error => this.#logLifecycleFailure("agent_start recall", error));
 			}
 			if (event.type === "agent_end") {
 				void this.maybeRetainOnAgentEnd(event.messages).catch(error =>
-					this.logLifecycleFailure("agent_end retention", error),
+					this.#logLifecycleFailure("agent_end retention", error),
 				);
 			}
 		});
 	}
 
 	async recall(query: string, signal?: AbortSignal): Promise<MnemosyneOssWorkerRecallItem[]> {
-		const primary = this.aliasOf ?? this;
+		const primary = this.#owner;
 		const result = await primary.worker.request<{ items: MnemosyneOssWorkerRecallItem[] }>(
 			"recall",
 			{ query, limit: primary.config.recallLimit },
@@ -161,7 +165,7 @@ export class MnemosyneOssSessionState {
 	}
 
 	async remember(content: string, options: Record<string, unknown>): Promise<string | undefined> {
-		const primary = this.aliasOf ?? this;
+		const primary = this.#owner;
 		const result = await primary.worker.request<{ id?: string }>(
 			"remember",
 			{ content, options },
@@ -172,7 +176,7 @@ export class MnemosyneOssSessionState {
 	}
 
 	async get(id: string): Promise<{ status: "found" | "not_found"; record?: MnemosyneOssWorkerRecord }> {
-		const primary = this.aliasOf ?? this;
+		const primary = this.#owner;
 		return await primary.worker.request("get", { id });
 	}
 
@@ -181,7 +185,7 @@ export class MnemosyneOssSessionState {
 		id: string,
 		options: Record<string, unknown>,
 	): Promise<MnemosyneOssWorkerMutation> {
-		const primary = this.aliasOf ?? this;
+		const primary = this.#owner;
 		const method = operation === "update" ? "update" : operation;
 		const result = await primary.worker.request<MnemosyneOssWorkerMutation>(
 			method,
@@ -202,7 +206,7 @@ export class MnemosyneOssSessionState {
 		consolidation_mode: "local" | "heuristic";
 		clear_mode: string;
 	}> {
-		return await (this.aliasOf ?? this).worker.request("capabilities");
+		return await this.#owner.worker.request("capabilities");
 	}
 
 	async beforeAgentStartPrompt(promptText: string): Promise<string | undefined> {
@@ -219,7 +223,7 @@ export class MnemosyneOssSessionState {
 			const memories = await this.recall(query);
 			this.hasRecalledForFirstTurn = true;
 			if (memories.length === 0) return undefined;
-			const snippet = this.formatRecallBlock(memories);
+			const snippet = this.#formatRecallBlock(memories);
 			this.lastRecallSnippet = snippet;
 			return snippet;
 		} catch (error) {
@@ -245,7 +249,7 @@ export class MnemosyneOssSessionState {
 				this.config.recallMaxQueryChars,
 			);
 			const memories = await this.recall(query);
-			return memories.length === 0 ? undefined : this.formatRecallBlock(memories);
+			return memories.length === 0 ? undefined : this.#formatRecallBlock(memories);
 		} catch {
 			return undefined;
 		}
@@ -262,7 +266,7 @@ export class MnemosyneOssSessionState {
 
 	async maybeRetainOnAgentEnd(_messages: AgentMessage[]): Promise<void> {
 		if (!this.config.autoRetain || this.aliasOf) return;
-		await this.queueRetention(async () => {
+		await this.#queueRetention(async () => {
 			const messages = extractMessages(this.session.sessionManager);
 			const throughTurn = countUserTurns(messages);
 			if (throughTurn - this.lastRetainedTurn < this.config.retainEveryNTurns) return;
@@ -272,7 +276,7 @@ export class MnemosyneOssSessionState {
 
 	async forceRetainCurrentSession(): Promise<void> {
 		if (this.aliasOf) return;
-		await this.queueRetention(async () => {
+		await this.#queueRetention(async () => {
 			const messages = extractMessages(this.session.sessionManager);
 			await this.retain(messages, countUserTurns(messages));
 		});
@@ -288,7 +292,7 @@ export class MnemosyneOssSessionState {
 	}
 
 	async status(): Promise<MnemosyneOssWorkerStatus> {
-		return await (this.aliasOf ?? this).worker.request("status");
+		return await this.#owner.worker.request("status");
 	}
 
 	async dispose(): Promise<void> {
@@ -302,7 +306,7 @@ export class MnemosyneOssSessionState {
 	}
 
 	async clearAndRehydrate(): Promise<void> {
-		const primary = this.aliasOf ?? this;
+		const primary = this.#owner;
 		if (primary.aliasOf) return;
 		await primary.worker.request("clear", {}, { mutation: true });
 		if (!primary.#workerFactory) return;
@@ -312,7 +316,7 @@ export class MnemosyneOssSessionState {
 	}
 
 	async retain(messages: Array<{ role: string; content: string }>, throughTurn: number): Promise<void> {
-		const primary = this.aliasOf ?? this;
+		const primary = this.#owner;
 		if (primary.aliasOf || throughTurn <= primary.lastRetainedTurn) return;
 		const unretained = sliceUnretainedMessages(messages, primary.lastRetainedTurn);
 		const { transcript } = prepareRetentionTranscript(unretained, true);
@@ -345,19 +349,19 @@ export class MnemosyneOssSessionState {
 		primary.lastRetainedTurn = throughTurn;
 	}
 
-	private formatRecallBlock(memories: readonly MnemosyneOssWorkerRecallItem[]): string {
+	#formatRecallBlock(memories: readonly MnemosyneOssWorkerRecallItem[]): string {
 		const rendered = `<memories>\n${formatMemories(
 			memories.map(item => ({ text: item.content, type: item.source, mentioned_at: item.timestamp })),
 		)}\n</memories>`;
 		return truncateInjection(rendered, this.config.injectionTokenLimit);
 	}
-	private async queueRetention(task: () => Promise<void>): Promise<void> {
+	async #queueRetention(task: () => Promise<void>): Promise<void> {
 		const next = this.#retentionQueue.then(task, task);
 		this.#retentionQueue = next.catch(() => undefined);
 		await next;
 	}
 
-	private logLifecycleFailure(operation: string, error: unknown): void {
+	#logLifecycleFailure(operation: string, error: unknown): void {
 		if (this.config.debug) logger.warn("Mnemosyne OSS lifecycle hook failed", { operation, error: String(error) });
 	}
 }
