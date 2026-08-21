@@ -19,7 +19,6 @@ type ChatCompletionsValidation = {
 	provider: string;
 	baseUrl: string;
 	model: string;
-	headers?: Record<string, string>;
 };
 
 type AnthropicMessagesValidation = {
@@ -98,7 +97,6 @@ export function createApiKeyLogin(config: ApiKeyLoginConfig): (options: OAuthCon
 					apiKey: trimmed,
 					baseUrl: config.validation.baseUrl,
 					model: config.validation.model,
-					headers: config.validation.headers,
 					signal: options.signal,
 					fetch: options.fetch,
 				});

@@ -2317,7 +2317,12 @@ describe("ModelRegistry", () => {
 			authStorage.setRuntimeApiKey("featherless", "featherless-test-key");
 			const requests: Request[] = [];
 			const fetchMock: FetchImpl = async (input, init) => {
-				requests.push(input instanceof Request ? new Request(input, init) : new Request(input.toString(), init));
+				const request = input instanceof Request ? new Request(input, init) : new Request(input.toString(), init);
+				requests.push(request);
+				// The plan does not include the provider default.
+				if (new URL(request.url).searchParams.get("q") === "zai-org/GLM-5.2") {
+					return Response.json({ total: 0, data: [] });
+				}
 				return Response.json({
 					total: 43_750,
 					data: Array.from({ length: 25 }, (_, index) => ({
@@ -2332,7 +2337,8 @@ describe("ModelRegistry", () => {
 
 			await registry.refreshProvider("featherless", "online");
 
-			expect(getModelsForProvider(registry, "featherless")).toHaveLength(26);
+			expect(getModelsForProvider(registry, "featherless")).toHaveLength(25);
+			expect(registry.find("featherless", "zai-org/GLM-5.2")).toBeUndefined();
 			expect(registry.getProviderModelTotal("featherless")).toBe(43_750);
 			const cachedRegistry = new ModelRegistry(authStorage, modelsJsonPath, {
 				fetch: () => {
@@ -2340,9 +2346,87 @@ describe("ModelRegistry", () => {
 				},
 			});
 			await cachedRegistry.refresh("offline");
-			expect(getModelsForProvider(cachedRegistry, "featherless")).toHaveLength(26);
+			expect(getModelsForProvider(cachedRegistry, "featherless")).toHaveLength(25);
 			expect(cachedRegistry.getProviderModelTotal("featherless")).toBe(43_750);
-			expect(requests).toHaveLength(1);
+			// One bounded page plus the entitlement lookup for the absent default.
+			expect(requests).toHaveLength(2);
+		});
+
+		test("drops another credential's plan-filtered Featherless models", async () => {
+			const planScopedFetch = (id: string): FetchImpl => {
+				return async input => {
+					const url = new URL(String(input));
+					if (url.searchParams.get("q") === "zai-org/GLM-5.2") return Response.json({ total: 0, data: [] });
+					return Response.json({
+						total: 1,
+						data: [
+							{ id, context_length: 262_144, features: { tool_use: true }, available_on_current_plan: true },
+						],
+					});
+				};
+			};
+			authStorage.setRuntimeApiKey("featherless", "featherless-key-a");
+			const registryA = new ModelRegistry(authStorage, modelsJsonPath, { fetch: planScopedFetch("plan-a/only") });
+			await registryA.refreshProvider("featherless", "online");
+			expect(registryA.find("featherless", "plan-a/only")).toBeDefined();
+
+			authStorage.setRuntimeApiKey("featherless", "featherless-key-b");
+			const registryB = new ModelRegistry(authStorage, modelsJsonPath, { fetch: planScopedFetch("plan-b/only") });
+			await registryB.refreshProvider("featherless", "online");
+
+			expect(registryB.find("featherless", "plan-b/only")).toBeDefined();
+			// Accumulated entries are plan-scoped; key B must not inherit key A's.
+			expect(registryB.find("featherless", "plan-a/only")).toBeUndefined();
+			expect(getModelsForProvider(registryB, "featherless")).toHaveLength(1);
+		});
+
+		test("keeps both results when two Featherless searches overlap", async () => {
+			authStorage.setRuntimeApiKey("featherless", "featherless-test-key");
+			// Both searches must reach their fetch before either merges — the
+			// interleaving the model hub produces with overlapping debounced queries.
+			const fetchStartedSignals: Array<() => void> = [];
+			const bothFetchesStarted = Promise.all([
+				new Promise<void>(resolve => fetchStartedSignals.push(resolve)),
+				new Promise<void>(resolve => fetchStartedSignals.push(resolve)),
+			]);
+			let openGate: () => void = () => {};
+			const gate = new Promise<void>(resolve => {
+				openGate = resolve;
+			});
+			const fetchMock: FetchImpl = async input => {
+				fetchStartedSignals.shift()?.();
+				const query = new URL(String(input)).searchParams.get("q") ?? "";
+				await gate;
+				return Response.json({
+					total: 2,
+					data: [
+						{
+							id: `example/${query}`,
+							context_length: 262_144,
+							features: { tool_use: true },
+							available_on_current_plan: true,
+						},
+					],
+				});
+			};
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+			const first = registry.searchProviderModels("featherless", "old");
+			const second = registry.searchProviderModels("featherless", "new");
+			await bothFetchesStarted;
+			openGate();
+			expect(await Promise.all([first, second])).toEqual([1, 1]);
+
+			expect(registry.find("featherless", "example/old")).toBeDefined();
+			expect(registry.find("featherless", "example/new")).toBeDefined();
+			const cachedRegistry = new ModelRegistry(authStorage, modelsJsonPath, {
+				fetch: () => {
+					throw new Error("offline overlapping-search hydration must not fetch");
+				},
+			});
+			await cachedRegistry.refresh("offline");
+			expect(cachedRegistry.find("featherless", "example/old")).toBeDefined();
+			expect(cachedRegistry.find("featherless", "example/new")).toBeDefined();
 		});
 
 		test("searches and merges bounded Featherless results into an initially empty provider", async () => {
@@ -2352,6 +2436,7 @@ describe("ModelRegistry", () => {
 				const request = input instanceof Request ? new Request(input, init) : new Request(input.toString(), init);
 				requests.push(request);
 				const query = new URL(request.url).searchParams.get("q");
+				if (query === "zai-org/GLM-5.2") return Response.json({ total: 0, data: [] });
 				return query
 					? Response.json({
 							total: 812,
@@ -2410,7 +2495,8 @@ describe("ModelRegistry", () => {
 			await cachedRegistry.refresh("offline");
 			expect(cachedRegistry.find("featherless", "Qwen/Qwen3-Coder-Next")).toBeDefined();
 			expect(cachedRegistry.find("featherless", "example/initial")).toBeDefined();
-			expect(requests).toHaveLength(2);
+			// Search, initial page, and the entitlement lookup for the absent default.
+			expect(requests).toHaveLength(3);
 		});
 
 		test("does not re-add bundled synthetic models after authoritative refresh", async () => {

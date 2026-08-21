@@ -1,10 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
-import {
-	FEATHERLESS_DEFAULT_MODEL,
-	featherlessModelManagerOptions,
-} from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import { featherlessModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 
 describe("Featherless built-in provider", () => {
@@ -15,11 +12,20 @@ describe("Featherless built-in provider", () => {
 		expect(descriptor?.dynamicModelsAuthoritative).toBeUndefined();
 		expect(descriptor?.catalogDiscovery).toBeUndefined();
 		expect(DEFAULT_MODEL_PER_PROVIDER.featherless).toBe("zai-org/GLM-5.2");
-		expect(FEATHERLESS_DEFAULT_MODEL.id).toBe("zai-org/GLM-5.2");
 		const options = featherlessModelManagerOptions();
-		expect(options.dynamicModelsAuthoritative).toBe(false);
+		expect(options.dynamicModelsAuthoritative).toBe(true);
 		expect(options.dynamicModelsPartial).toBe(true);
 		expect(getBundledProviders()).not.toContain("featherless");
+	});
+
+	test("scopes cache identity to the credential whose plan filtered the snapshot", () => {
+		const anonymous = featherlessModelManagerOptions().cacheFingerprintSalt;
+		const keyA = featherlessModelManagerOptions({ apiKey: "key-a" }).cacheFingerprintSalt;
+		const keyB = featherlessModelManagerOptions({ apiKey: "key-b" }).cacheFingerprintSalt;
+
+		expect(keyA).toBe(featherlessModelManagerOptions({ apiKey: "key-a" }).cacheFingerprintSalt);
+		expect(new Set([anonymous, keyA, keyB]).size).toBe(3);
+		expect(keyA).not.toContain("key-a");
 	});
 
 	test("caches one bounded conversational API page on demand, ordered by context then newest age", async () => {
@@ -27,6 +33,8 @@ describe("Featherless built-in provider", () => {
 		const totals: Array<[number, string]> = [];
 		const fetchMock: FetchImpl = async input => {
 			requests.push(String(input));
+			// The plan excludes GLM 5.2, so neither the popularity page nor the
+			// entitlement lookup returns it.
 			const models = Array.from({ length: 25 }, (_, index) => ({
 				id: `example/tool-${index}`,
 				context_length: index < 10 ? 131_072 : 65_536,
@@ -56,19 +64,79 @@ describe("Featherless built-in provider", () => {
 
 		const models = await options.fetchDynamicModels?.();
 
-		expect(models).toHaveLength(27);
+		expect(models).toHaveLength(26);
 		expect(models?.map(model => model.id)).toEqual([
 			"example/no-tools",
-			"zai-org/GLM-5.2",
 			...Array.from({ length: 10 }, (_, index) => `example/tool-${9 - index}`),
 			...Array.from({ length: 15 }, (_, index) => `example/tool-${24 - index}`),
 		]);
 		expect(models?.find(model => model.id === "example/no-tools")?.supportsTools).toBe(false);
-		expect(models?.map(model => model.priority)).toEqual(Array.from({ length: 27 }, (_, index) => index));
+		// Priorities encode upstream age, so they stay comparable across pages.
+		expect(models?.map(model => model.priority)).toEqual([
+			4_102_444_800 - 1_800_000_000,
+			...Array.from({ length: 10 }, (_, index) => 4_102_444_800 - (1_700_000_009 - index)),
+			...Array.from({ length: 15 }, (_, index) => 4_102_444_800 - (1_700_000_024 - index)),
+		]);
 		expect(requests).toEqual([
 			"https://api.featherless.ai/v1/models?conversational=true&per_page=100&sort=-popularity&available_on_current_plan=true",
+			"https://api.featherless.ai/v1/models?q=zai-org%2FGLM-5.2&conversational=true&per_page=10&available_on_current_plan=true",
 		]);
+		// The entitlement lookup is not a user query and reports no total.
 		expect(totals).toEqual([[43_750, ""]]);
+	});
+
+	test("omits the default model when the plan-filtered catalog is empty", async () => {
+		const requests: string[] = [];
+		const fetchMock: FetchImpl = async input => {
+			requests.push(String(input));
+			return Response.json({ total: 0, data: [] });
+		};
+		const options = featherlessModelManagerOptions({ apiKey: "featherless-test-key", fetch: fetchMock });
+
+		expect(await options.fetchDynamicModels?.()).toEqual([]);
+		expect(requests).toHaveLength(2);
+	});
+
+	test("adds the default model when the plan-filtered lookup confirms it", async () => {
+		const fetchMock: FetchImpl = async input => {
+			const url = new URL(String(input));
+			if (url.searchParams.get("q") !== "zai-org/GLM-5.2") {
+				return Response.json({
+					total: 1,
+					data: [
+						{
+							id: "example/other",
+							context_length: 32_768,
+							features: { tool_use: true },
+							available_on_current_plan: true,
+						},
+					],
+				});
+			}
+			return Response.json({
+				total: 1,
+				data: [
+					{
+						id: "zai-org/GLM-5.2",
+						context_length: 262_144,
+						pricing: { input: 1.39, output: 4.4 },
+						features: { tool_use: true },
+						available_on_current_plan: true,
+					},
+				],
+			});
+		};
+		const options = featherlessModelManagerOptions({ apiKey: "featherless-test-key", fetch: fetchMock });
+
+		const models = await options.fetchDynamicModels?.();
+
+		expect(models?.map(model => model.id)).toEqual(["zai-org/GLM-5.2", "example/other"]);
+		expect(models?.[0]).toMatchObject({
+			name: "GLM 5.2",
+			reasoning: true,
+			contextWindow: 262_144,
+			cost: { input: 1.39, output: 4.4, cacheRead: 0, cacheWrite: 0 },
+		});
 	});
 
 	test("searches remotely and marks non-tool conversational models", async () => {
@@ -193,6 +261,36 @@ describe("Featherless built-in provider", () => {
 		const models = await options.searchDynamicModels?.("example");
 
 		expect(models?.map(model => model.id)).toEqual(["example/large-new", "example/large-old", "example/small-new"]);
-		expect(models?.map(model => model.priority)).toEqual([0, 1, 2]);
+		expect(models?.map(model => model.priority)).toEqual([
+			4_102_444_800 - 1_800_000_000,
+			4_102_444_800 - 1_700_000_000,
+			4_102_444_800 - 1_800_000_000,
+		]);
+	});
+
+	test("ranks models found by separate searches newest-first across accumulated pages", async () => {
+		const bySearch: Record<string, { id: string; created: number }> = {
+			old: { id: "example/a-old", created: 1_700_000_000 },
+			new: { id: "example/z-new", created: 1_800_000_000 },
+		};
+		const fetchMock: FetchImpl = async input => {
+			const entry = bySearch[new URL(String(input)).searchParams.get("q") ?? ""];
+			if (!entry) return Response.json({ total: 0, data: [] });
+			return Response.json({
+				total: 1,
+				data: [{ id: entry.id, context_length: 262_144, created: entry.created, features: { tool_use: true } }],
+			});
+		};
+		const options = featherlessModelManagerOptions({ fetch: fetchMock });
+
+		const [older] = (await options.searchDynamicModels?.("old")) ?? [];
+		const [newer] = (await options.searchDynamicModels?.("new")) ?? [];
+
+		// Same context window: the accumulated snapshot must order by age, so the
+		// newer model needs the lower priority — a page-local ordinal gave both 0
+		// and degraded to id order, putting `a-old` first.
+		expect(older?.id).toBe("example/a-old");
+		expect(newer?.id).toBe("example/z-new");
+		expect(newer?.priority).toBeLessThan(older?.priority ?? 0);
 	});
 });

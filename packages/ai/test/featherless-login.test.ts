@@ -9,15 +9,11 @@ describe("Featherless login", () => {
 		expect(provider).toMatchObject({ id: "featherless", name: "Featherless", available: true });
 	});
 
-	test("validates GLM 5.2 with Featherless application attribution", async () => {
-		const requests: Array<{ url: string; headers: Headers; body: unknown }> = [];
+	test("validates the key against the models endpoint instead of a plan-gated model", async () => {
+		const requests: Array<{ url: string; method: string | undefined; headers: Headers }> = [];
 		const fetchMock: FetchImpl = vi.fn(async (input, init) => {
-			requests.push({
-				url: String(input),
-				headers: new Headers(init?.headers),
-				body: typeof init?.body === "string" ? JSON.parse(init.body) : init?.body,
-			});
-			return Response.json({ choices: [{ message: { role: "assistant", content: "" } }] });
+			requests.push({ url: String(input), method: init?.method, headers: new Headers(init?.headers) });
+			return Response.json({ total: 43_750, data: [{ id: "example/model" }] });
 		});
 
 		const apiKey = await loginFeatherless({
@@ -28,15 +24,12 @@ describe("Featherless login", () => {
 		expect(apiKey).toBe("featherless-test-key");
 		expect(requests).toHaveLength(1);
 		const request = requests[0];
-		expect(request.url).toBe("https://api.featherless.ai/v1/chat/completions");
+		// A chat-completions probe would reject a valid key whose plan excludes
+		// the probed model; Featherless gates model access per plan.
+		expect(request.url).toBe("https://api.featherless.ai/v1/models?per_page=1");
+		expect(request.method).toBe("GET");
 		expect(request.headers.get("authorization")).toBe("Bearer featherless-test-key");
 		expect(request.headers.get("http-referer")).toBe("https://omp.sh/");
 		expect(request.headers.get("x-title")).toBe("Oh-My-Pi");
-		expect(request.body).toEqual({
-			model: "zai-org/GLM-5.2",
-			messages: [{ role: "user", content: "ping" }],
-			max_tokens: 1,
-			temperature: 0,
-		});
 	});
 });

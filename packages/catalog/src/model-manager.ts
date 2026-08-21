@@ -39,7 +39,13 @@ export interface ModelManagerOptions<TApi extends Api = Api, TModelsDevPayload =
 	cacheTtlMs?: number;
 	/** When true, a successful dynamic fetch is the complete provider catalog and prunes static-only models. */
 	dynamicModelsAuthoritative?: boolean;
-	/** When true, a successful dynamic fetch is a partial page merged with matching cached models. */
+	/**
+	 * When true, a successful dynamic fetch is one bounded page rather than the
+	 * whole catalog: models cached under the *same* cache identity survive the
+	 * refresh and accumulate. Combine with `dynamicModelsAuthoritative` to prune
+	 * rows that no longer belong (a different credential's accumulation, static
+	 * or stencil.so filler) while still keeping the accumulated page set.
+	 */
 	dynamicModelsPartial?: boolean;
 	/** Cached model ids whose presence forces refresh when the static or migration-policy fingerprint changes. */
 	dropCachedModelIdsOnStaticMismatch?: readonly string[];
@@ -288,8 +294,15 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const dynamicCacheAuthoritative = dynamicFetchSucceeded && dynamicModels.length > 0;
 	const mergedWithCache = mergeDynamicModels(mergeModelSources(staticModels, modelsDevModels), cacheModels);
 	const mergedModels = mergeDynamicModels(mergedWithCache, dynamicModels);
+	// A partial page is authoritative together with the entries it accumulates
+	// onto — never alone, or every previously accumulated page would be pruned.
+	const authoritativeModels = options.dynamicModelsPartial
+		? [...preservedCacheModels, ...dynamicModels]
+		: dynamicModels;
 	const models = collapseBuiltModelVariants(
-		dynamicModelsAuthoritative && dynamicFetchSucceeded ? retainModelIds(mergedModels, dynamicModels) : mergedModels,
+		dynamicModelsAuthoritative && dynamicFetchSucceeded
+			? retainModelIds(mergedModels, authoritativeModels)
+			: mergedModels,
 	);
 	const dynamicAuthoritative = !hasDynamicFetcher || dynamicFetchSucceeded || shouldUseFreshCacheAsAuthoritative;
 	if (shouldFetchFromNetwork) {
@@ -299,7 +312,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 				dynamicModels,
 			);
 			const snapshotModels = dynamicModelsAuthoritative
-				? retainModelIds(mergedSnapshot, dynamicModels)
+				? retainModelIds(mergedSnapshot, authoritativeModels)
 				: mergedSnapshot;
 			writeModelCache(
 				cacheProviderId,

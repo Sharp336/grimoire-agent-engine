@@ -3933,7 +3933,9 @@ export function togetherModelManagerOptions(
 // 15.25 Featherless
 // ---------------------------------------------------------------------------
 
+/** Featherless OpenAI-compatible inference endpoint. */
 export const FEATHERLESS_BASE_URL = "https://api.featherless.ai/v1";
+/** Application-attribution headers sent with every Featherless request. */
 export const FEATHERLESS_HEADERS: Record<string, string> = {
 	"HTTP-Referer": "https://omp.sh/",
 	"X-Title": "Oh-My-Pi",
@@ -3941,12 +3943,23 @@ export const FEATHERLESS_HEADERS: Record<string, string> = {
 
 const FEATHERLESS_FETCH_LIMIT = 100;
 const FEATHERLESS_DEFAULT_MODEL_ID = "zai-org/GLM-5.2";
-const FEATHERLESS_DEFAULT_MODEL_CREATED_AT = 1_781_637_564;
+/**
+ * Upper bound (epoch seconds, 2100-01-01) mapping an upstream creation time to
+ * a `Model.priority` (lower = higher priority, so lower = newer).
+ *
+ * The catalog is accumulated one bounded page at a time, so a page-local
+ * ordinal is not comparable across pages: two models found by separate
+ * searches would both persist `priority: 0` and degrade to id order. Encoding
+ * the creation time keeps newest-first ordering globally comparable.
+ */
+const FEATHERLESS_PRIORITY_EPOCH = 4_102_444_800;
 
+/** Runtime configuration for the Featherless model manager. */
 export interface FeatherlessModelManagerConfig {
 	apiKey?: string;
 	baseUrl?: string;
 	fetch?: FetchImpl;
+	/** Provider-reported catalog total; `query` is `""` for the initial page. */
 	onModelCount?: (count: number, query: string) => void;
 }
 
@@ -3987,25 +4000,6 @@ function mapFeatherlessModel(
 	};
 }
 
-export const FEATHERLESS_DEFAULT_MODEL: ModelSpec<"openai-completions"> = {
-	id: FEATHERLESS_DEFAULT_MODEL_ID,
-	name: "GLM 5.2",
-	api: "openai-completions",
-	provider: "featherless",
-	baseUrl: FEATHERLESS_BASE_URL,
-	reasoning: true,
-	input: ["text"],
-	cost: { input: 1.39, output: 4.4, cacheRead: 0, cacheWrite: 0 },
-	contextWindow: 262_144,
-	maxTokens: null,
-	headers: FEATHERLESS_HEADERS,
-	thinking: { mode: "effort", efforts: [Effort.High] },
-	compat: {
-		thinkingFormat: "qwen-chat-template",
-		replayReasoningContent: true,
-	},
-};
-
 interface RankedFeatherlessModel {
 	model: ModelSpec<"openai-completions">;
 	createdAt: number;
@@ -4033,7 +4027,13 @@ function materializeRankedFeatherlessModels(
 	return models
 		.sort(compareRankedFeatherlessModels)
 		.slice(0, limit)
-		.map(({ model }, priority) => ({ ...model, priority }));
+		.map(({ model, createdAt }) => ({
+			...model,
+			priority:
+				createdAt > 0
+					? Math.max(0, FEATHERLESS_PRIORITY_EPOCH - Math.floor(createdAt))
+					: FEATHERLESS_PRIORITY_EPOCH,
+		}));
 }
 
 async function fetchRankedFeatherlessModels(
@@ -4072,6 +4072,34 @@ async function fetchRankedFeatherlessModels(
 	return models.map(model => ({ model, createdAt: createdAtById.get(model.id) ?? 0 }));
 }
 
+/**
+ * Look the default model up in the plan-filtered catalog.
+ *
+ * Featherless access is plan-scoped and rejects models outside the plan, so a
+ * default missing from the bounded popularity page is only added when the API
+ * itself returns it — never as a hardcoded spec.
+ */
+async function fetchEntitledFeatherlessDefault(
+	config: FeatherlessModelManagerConfig,
+	planQuery: Readonly<Record<string, string>>,
+): Promise<RankedFeatherlessModel | null> {
+	const ranked = await fetchRankedFeatherlessModels(
+		// The probe is not a user query: it must not report a catalog total.
+		{ ...config, onModelCount: undefined },
+		{ q: FEATHERLESS_DEFAULT_MODEL_ID, conversational: "true", per_page: "10", ...planQuery },
+		FEATHERLESS_DEFAULT_MODEL_ID,
+	);
+	return ranked?.find(({ model }) => model.id === FEATHERLESS_DEFAULT_MODEL_ID) ?? null;
+}
+
+/**
+ * Featherless model-manager options.
+ *
+ * Featherless serves tens of thousands of models, so nothing is bundled: one
+ * bounded popularity page seeds the catalog and typed queries accumulate
+ * further matches into the same credential-scoped cache. Results are ordered
+ * by descending context window, then newest upstream creation time.
+ */
 export function featherlessModelManagerOptions(
 	config?: FeatherlessModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
@@ -4087,9 +4115,15 @@ export function featherlessModelManagerOptions(
 	};
 	return {
 		providerId: "featherless",
-		dynamicModelsAuthoritative: false,
+		// Authoritative *together with* the accumulated same-credential cache
+		// (see `dynamicModelsPartial`): entries left by another credential's plan
+		// are pruned instead of staying selectable and 403ing.
+		dynamicModelsAuthoritative: true,
 		dynamicModelsPartial: true,
-		cacheFingerprintSalt: "featherless-all-conversational-v1",
+		// Accumulated entries are plan-filtered, so another credential must never
+		// inherit them. Only this digest reaches the salt, and the model manager
+		// hashes the salt again before the fingerprint is written to disk.
+		cacheFingerprintSalt: `featherless-conversational-v2:${apiKey ? Bun.hash(apiKey).toString(36) : "anonymous"}`,
 		restorableHeaderFallback: FEATHERLESS_HEADERS,
 		getReportedModelTotal: () => reportedTotal,
 		restoreReportedModelTotal: total => {
@@ -4111,10 +4145,13 @@ export function featherlessModelManagerOptions(
 			);
 			if (ranked === null) return null;
 			if (!ranked.some(({ model }) => model.id === FEATHERLESS_DEFAULT_MODEL_ID)) {
-				ranked.push({
-					model: FEATHERLESS_DEFAULT_MODEL,
-					createdAt: FEATHERLESS_DEFAULT_MODEL_CREATED_AT,
-				});
+				const entitledDefault = await fetchEntitledFeatherlessDefault(trackedConfig, planQuery);
+				if (entitledDefault) {
+					// Reserve its slot before truncation: the account default must not
+					// be ranked out of the very page fetched to hold it.
+					ranked.sort(compareRankedFeatherlessModels).splice(FEATHERLESS_FETCH_LIMIT - 1);
+					ranked.push(entitledDefault);
+				}
 			}
 			return materializeRankedFeatherlessModels(ranked, FEATHERLESS_FETCH_LIMIT);
 		},

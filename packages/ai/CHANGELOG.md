@@ -27,7 +27,7 @@
 - Added Codex Responses support for Code Mode, preserving tool modes and passing tool namespace metadata during sessions.
 ### Added
 
-- Added Featherless API-key login with chat-completions credential validation and `FEATHERLESS_API_KEY` environment-variable discovery.
+- Added Featherless API-key login with models-endpoint credential validation (Featherless gates model access per plan, so probing a fixed model would reject a valid key whose plan excludes it) and `FEATHERLESS_API_KEY` environment-variable discovery.
 
 ### Fixed
 

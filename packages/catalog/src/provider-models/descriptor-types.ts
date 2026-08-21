@@ -6,6 +6,7 @@ export type ModelManagerConfig = {
 	apiKey?: string;
 	baseUrl?: string;
 	fetch?: FetchImpl;
+	/** Provider-reported catalog total for a fetch; `query` is `""` for a provider's initial page. */
 	onModelCount?: (count: number, query: string) => void;
 	/** The supplied fetch already applies provider-specific authentication. */
 	authenticated?: boolean;

@@ -195,6 +195,8 @@ export class ModelRegistry {
 	#lastDiscoveryWarnings: Map<string, string> = new Map();
 	#searchableBuiltInProviders?: ReadonlySet<string>;
 	#providerModelTotals: Map<string, number> = new Map();
+	/** Tail of each provider's in-flight search-merge chain; see `#mergeSearchedProviderModels`. */
+	#providerSearchMerges: Map<string, Promise<void>> = new Map();
 	// Runtime extension model overlays — persist across refresh() cycles so that
 	// models registered by extensions survive the model selector's offline reload.
 	#runtimeModelOverlays: CustomModelOverlay[] = [];
@@ -448,23 +450,51 @@ export class ModelRegistry {
 		if (searchedModels === null) {
 			throw new Error(`Remote model search failed for ${providerId}`);
 		}
-
-		this.#ensureFullSnapshot();
-		const mergedSpecs = new Map<string, ModelSpec<Api>>();
-		for (const model of this.#unprojectedModels) {
-			if (model.provider === providerId) mergedSpecs.set(model.id, toModelSpec(model));
-		}
-		for (const model of searchedModels) mergedSpecs.set(model.id, model);
-
-		const discovery = await this.#discoverWithModelManager(
-			{
-				...options,
-				fetchDynamicModels: async () => [...mergedSpecs.values()],
-			},
-			"online",
-		);
-		this.#mergeDiscoveredModels(discovery.models, new Set([providerId]));
+		await this.#mergeSearchedProviderModels(options, searchedModels);
 		return searchedModels.length;
+	}
+
+	/**
+	 * Fold one bounded search result into the live snapshot and the provider cache.
+	 *
+	 * Serialized per provider: the snapshot read, the merge, and the
+	 * authoritative replacement must not interleave with another search for the
+	 * same provider. The model hub releases overlapping debounced queries, and
+	 * two searches reading the pre-merge snapshot would each replace the
+	 * provider with their own result — dropping the other's models from both the
+	 * registry and the offline cache.
+	 */
+	async #mergeSearchedProviderModels(
+		options: ModelManagerOptions<Api>,
+		searchedModels: readonly ModelSpec<Api>[],
+	): Promise<void> {
+		const providerId = options.providerId;
+		const merge = (this.#providerSearchMerges.get(providerId) ?? Promise.resolve()).then(async () => {
+			this.#ensureFullSnapshot();
+			const mergedSpecs = new Map<string, ModelSpec<Api>>();
+			for (const model of this.#unprojectedModels) {
+				if (model.provider === providerId) mergedSpecs.set(model.id, toModelSpec(model));
+			}
+			for (const model of searchedModels) mergedSpecs.set(model.id, model);
+
+			const discovery = await this.#discoverWithModelManager(
+				{
+					...options,
+					fetchDynamicModels: async () => [...mergedSpecs.values()],
+				},
+				"online",
+			);
+			this.#mergeDiscoveredModels(discovery.models, new Set([providerId]));
+		});
+		// The queue tail must never reject, or the next waiter would inherit the
+		// failure instead of running.
+		const tail = merge.catch(() => {});
+		this.#providerSearchMerges.set(providerId, tail);
+		try {
+			await merge;
+		} finally {
+			if (this.#providerSearchMerges.get(providerId) === tail) this.#providerSearchMerges.delete(providerId);
+		}
 	}
 
 	/**
