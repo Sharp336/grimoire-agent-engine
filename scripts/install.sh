@@ -2,7 +2,7 @@
 set -e
 
 # OMP Coding Agent Installer
-# Usage: curl -fsSL https://raw.githubusercontent.com/can1357/oh-my-pi/main/scripts/install.sh | sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/jchanghong023/oh-my-pi/main/scripts/install.sh | sh
 #
 # Options:
 #   --source       Install via bun (installs bun if needed)
@@ -222,9 +222,12 @@ install_binary() {
     ARCH="$(host_arch)"
 
     case "$OS" in
-        Linux)  PLATFORM="linux" ;;
-        Darwin) PLATFORM="darwin" ;;
-        *)      echo "Unsupported OS: $OS"; exit 1 ;;
+        Linux) PLATFORM="linux" ;;
+        Darwin)
+            echo "This fork does not publish macOS binaries. Re-run with --source to install from the fork repository."
+            exit 1
+            ;;
+        *) echo "Unsupported OS: $OS"; exit 1 ;;
     esac
 
     case "$ARCH" in
@@ -232,10 +235,9 @@ install_binary() {
         *)         echo "Unsupported architecture: $ARCH"; exit 1 ;;
     esac
 
-    if [ "$PLATFORM" = "linux" ]; then
-        if [ -f /etc/alpine-release ] || { command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl; }; then
-            PLATFORM="linux-musl"
-        fi
+    if [ -f /etc/alpine-release ] || { command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl; }; then
+        echo "This fork publishes glibc Linux binaries only; musl users should re-run with --source."
+        exit 1
     fi
 
     BINARY="omp-${PLATFORM}-${ARCH}"
@@ -269,23 +271,11 @@ install_binary() {
     chmod +x "${INSTALL_DIR}/omp"
 
     # Verify the freshly installed binary can actually start before reporting
-    # success. Bun's musl-target binaries link libstdc++/libgcc dynamically,
-    # which stock Alpine/musl systems do not ship, so the download succeeds while
-    # the binary exits 127 with relocation errors. Never claim success for a
-    # binary that cannot run.
+    # success; never claim success for a download that cannot run.
     if ! SMOKE_OUTPUT="$("${INSTALL_DIR}/omp" --version 2>&1)"; then
         echo ""
         echo "✗ omp was downloaded to ${INSTALL_DIR}/omp but cannot start:"
         echo "$SMOKE_OUTPUT" | sed 's/^/    /'
-        if [ "$PLATFORM" = "linux-musl" ]; then
-            echo ""
-            echo "The musl build links libstdc++/libgcc dynamically. Install them, then re-run 'omp':"
-            if command -v apk >/dev/null 2>&1; then
-                echo "    apk add libstdc++ libgcc"
-            else
-                echo "    (install the libstdc++ and libgcc runtime packages for your distro)"
-            fi
-        fi
         exit 1
     fi
 
@@ -302,6 +292,9 @@ install_binary() {
 # Main logic
 case "$MODE" in
     source)
+        if [ -z "$REF" ]; then
+            REF="main"
+        fi
         if ! has_bun; then
             install_bun
         fi
