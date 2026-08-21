@@ -3057,6 +3057,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				),
 				taskIrcEnabled: !restrictToolNames && isIrcEnabled(settings, options.taskDepth ?? 0),
 				autoQaEnabled: !restrictToolNames && isAutoQaEnabled(settings),
+				asyncProgress: {
+					bash: settings.get("async.enabled") && scopedAsyncJobManager !== undefined,
+					hub: settings.get("launch.enabled"),
+				},
 				secretsEnabled,
 				workspaceTree: workspaceTreePromise,
 				includeWorkspaceTree,

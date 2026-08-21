@@ -92,6 +92,69 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 		expect(AsyncJobManager.instance()).toBeUndefined();
 	}, 60000);
 
+	it("advertises available harness-pushed progress surfaces under Tool Policy", async () => {
+		const session = await spawnTopLevelSession({ "async.enabled": true });
+		try {
+			const systemPrompt = session.systemPrompt.join("\n\n");
+			const toolPolicyIndex = systemPrompt.indexOf("§ Tool Policy");
+			const progressIndex = systemPrompt.indexOf("<async-progress>");
+			const workflowIndex = systemPrompt.indexOf("§ Workflow");
+			expect(toolPolicyIndex).toBeGreaterThanOrEqual(0);
+			expect(progressIndex).toBeGreaterThan(toolPolicyIndex);
+			expect(progressIndex).toBeLessThan(workflowIndex);
+			expect(systemPrompt).toContain("<async-progress>");
+			expect(systemPrompt).toContain(
+				'Potentially slow finite commands → `bash` with `async: "auto"`; simple known-fast commands omit `async`.',
+			);
+			expect(systemPrompt).toContain('Use `progress: "wake"` only when pre-exit output may change the next action.');
+			expect(systemPrompt).not.toContain("200 ms batches");
+			expect(systemPrompt).not.toContain("10-event burst");
+			expect(systemPrompt).not.toContain("Every fifth progress update");
+			expect(systemPrompt).toContain("Repeated non-actionable progress → NEVER narrate or echo each event.");
+			expect(systemPrompt).toContain(
+				"Transient burst? Ignore it and await completion. Sustained/chatty? Reduce source verbosity.",
+			);
+			expect(systemPrompt).toContain("Safe restart? Stop/cancel; relaunch with native quiet/warning-only flags.");
+			expect(systemPrompt).toContain("Retune its monitor to `ambient` or `off`.");
+			expect(systemPrompt).toContain("Unsafe restart? Let it finish silently.");
+			expect(systemPrompt).toContain(
+				'Actionable process output → `hub`, `progress: "wake"` (`op: "start"` new; `op: "monitor"` existing).',
+			);
+			expect(systemPrompt).toContain(
+				"NEVER call `hub wait`, follow logs, or block to receive progress or keep the turn alive; use async progress and end the turn instead.",
+			);
+			expect(systemPrompt).toContain("</async-progress>");
+		} finally {
+			await session.dispose();
+		}
+	}, 60000);
+
+	it("advertises only Hub progress when async Bash is disabled", async () => {
+		const session = await spawnTopLevelSession({ "async.enabled": false });
+		try {
+			const systemPrompt = session.systemPrompt.join("\n\n");
+			expect(systemPrompt).toContain("<async-progress>");
+			expect(systemPrompt).not.toContain("finite commands");
+			expect(systemPrompt).not.toContain('`bash` with `async: "auto"`');
+			expect(systemPrompt).toContain("Unsafe restart? Let it finish silently.");
+			expect(systemPrompt).toContain("Actionable process output");
+			expect(systemPrompt).toContain("Transient burst? Ignore it and await completion.");
+			expect(systemPrompt).toContain("Repeated non-actionable progress → NEVER narrate or echo each event.");
+			expect(systemPrompt).toContain("Retune its monitor");
+		} finally {
+			await session.dispose();
+		}
+	}, 60000);
+
+	it("omits push guidance when neither progress surface is available", async () => {
+		const session = await spawnTopLevelSession({ "async.enabled": false, "launch.enabled": false });
+		try {
+			expect(session.systemPrompt.join("\n\n")).not.toContain("<async-progress>");
+		} finally {
+			await session.dispose();
+		}
+	}, 60000);
+
 	it("does not cancel the primary session's running jobs when a secondary session disposes", async () => {
 		const primary = await spawnTopLevelSession();
 		try {

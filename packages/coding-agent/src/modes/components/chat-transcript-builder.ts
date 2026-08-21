@@ -32,6 +32,7 @@ import {
 	assistantHasVisibleContent,
 	assistantUsageIsBilled,
 	buildAsyncProgressDisplayMessage,
+	buildAsyncProgressBlock,
 	buildAsyncResultBlock,
 	buildFileMentionBlock,
 	buildIrcMessageCard,
@@ -471,6 +472,10 @@ export class ChatTranscriptBuilder {
 		if (message.customType === "async-result") {
 			const component = buildAsyncResultBlock(message);
 			this.container.addChild(component);
+			return;
+		}
+		if (message.customType === "async-progress") {
+			this.container.addChild(buildAsyncProgressBlock(message));
 			return;
 		}
 		if (message.customType === LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE) {

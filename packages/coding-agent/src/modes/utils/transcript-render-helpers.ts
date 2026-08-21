@@ -6,10 +6,10 @@
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
-import { formatBytes, formatDuration } from "@oh-my-pi/pi-utils";
+import { formatBytes, formatDuration, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { AsyncJobType } from "../../async";
 import type { DaemonSnapshot } from "../../launch/protocol";
-import { ASYNC_PROGRESS_MESSAGE_TYPE } from "../../session/async-job-delivery";
+import { ASYNC_PROGRESS_MESSAGE_TYPE, type AsyncProgressSourceType } from "../../session/async-job-delivery";
 import {
 	type CustomMessage,
 	type FileMentionMessage,
@@ -17,7 +17,9 @@ import {
 	shouldRenderAbortReason,
 } from "../../session/messages";
 import { createIrcMessageCard } from "../../tools/hub";
+import { formatStyledArtifactReference } from "../../tools/output-meta";
 import { replaceTabs, shortenEmbeddedPaths, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
+import { renderStatusLine } from "../../tui/status-line";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 import { ToolActivityContainer } from "../components/tool-activity";
 import { TranscriptBlock } from "../components/transcript-container";
@@ -48,6 +50,20 @@ export function buildAsyncProgressDisplayMessage(message: CustomOrHookMessage): 
 }
 
 type AssistantAgentMessage = Extract<AgentMessage, { role: "assistant" }>;
+type BackgroundWorkType = AsyncJobType | "process";
+
+function backgroundWorkNoun(type: BackgroundWorkType | undefined): "command" | "task" | "process" | "job" {
+	switch (type) {
+		case "bash":
+			return "command";
+		case "task":
+			return "task";
+		case "process":
+			return "process";
+		default:
+			return "job";
+	}
+}
 
 /**
  * Render an `async-result` custom message (a completed background bash/task job,
@@ -78,11 +94,9 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): ToolActivit
 	const block = new TranscriptBlock();
 	for (const job of jobs) {
 		const jobId = job.jobId ?? "unknown";
-		const typeLabel = job.type ? `[${job.type}]` : "[job]";
 		const duration = typeof job.durationMs === "number" ? formatDuration(job.durationMs) : undefined;
 		const line = [
-			theme.fg("success", `${theme.status.done} Background job completed`),
-			theme.fg("dim", typeLabel),
+			theme.fg("success", `${theme.status.done} Background ${backgroundWorkNoun(job.type)} completed`),
 			theme.fg("accent", jobId),
 			duration ? theme.fg("dim", `(${duration})`) : undefined,
 		]
@@ -91,6 +105,56 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): ToolActivit
 		block.addChild(new Text(line, 1, 0));
 	}
 	return new ToolActivityContainer(block);
+}
+
+/** Render bounded progress from a background job that is still running. */
+export function buildAsyncProgressBlock(message: CustomOrHookMessage): TranscriptBlock {
+	const details = (
+		message as CustomMessage<{
+			jobs?: Array<{
+				jobId?: string;
+				type?: AsyncProgressSourceType;
+				elapsedMs?: number;
+				text?: string;
+				head?: string;
+				tail?: string;
+				artifactId?: string;
+				truncated?: boolean;
+				suppressedEvents?: number;
+			}>;
+		}>
+	).details;
+	const block = new TranscriptBlock();
+	for (const job of details?.jobs ?? []) {
+		const jobId = job.jobId ?? "unknown";
+		const elapsed = typeof job.elapsedMs === "number" ? formatDuration(job.elapsedMs) : undefined;
+		const header = renderStatusLine(
+			{
+				iconOverride: theme.fg("accent", theme.status.running),
+				title: `Background ${backgroundWorkNoun(job.type)} progress ${jobId}`,
+				meta: elapsed ? [`(${elapsed})`] : undefined,
+			},
+			theme,
+		);
+		block.addChild(new Text(header, 1, 0));
+		if (typeof job.suppressedEvents === "number" && job.suppressedEvents > 0) {
+			block.addChild(
+				new Text(theme.fg("dim", `  … ${job.suppressedEvents} progress events suppressed (rate limit)`), 1, 0),
+			);
+		}
+		const preview = job.truncated
+			? [job.head, "[…progress truncated…]", job.tail].filter(part => part !== undefined).join("\n")
+			: (job.text ?? "");
+		for (const line of preview.split("\n")) {
+			if (line.trim().length === 0) continue;
+			const rendered = truncateToWidth(replaceTabs(shortenPath(sanitizeText(line))), TRUNCATE_LENGTHS.LINE);
+			block.addChild(new Text(theme.fg("dim", `  ${rendered}`), 1, 0));
+		}
+		if ((job.truncated || (job.suppressedEvents ?? 0) > 0) && job.artifactId) {
+			block.addChild(new Text(`  ${formatStyledArtifactReference(job.artifactId, theme)}`, 1, 0));
+		}
+	}
+	return block;
 }
 
 /**
