@@ -37,6 +37,44 @@ describe("loadMnemosyneOssConfig", () => {
 		expect(config.localLlmRepo).toBeUndefined();
 		expect(config.recallLimit).toBe(1);
 		expect(config.injectionTokenLimit).toBe(256);
+		expect(config.consolidationMode).toBe("heuristic");
+	});
+
+	it("defaults scoping to per-project", () => {
+		const config = loadMnemosyneOssConfig(
+			Settings.isolated({
+				"memory.backend": "mnemosyne-oss",
+			}),
+			"/tmp/agent",
+		);
+		expect(config.scoping).toBe("per-project");
+	});
+
+	it("keeps heuristic consolidation when localConsolidation is on without a local LLM path", () => {
+		const config = loadMnemosyneOssConfig(
+			Settings.isolated({
+				"memory.backend": "mnemosyne-oss",
+				"mnemosyne-oss.localConsolidation": true,
+			}),
+			"/tmp/agent",
+		);
+		expect(config.localConsolidation).toBe(true);
+		expect(config.localLlmRepo).toBeUndefined();
+		expect(config.localLlmFile).toBeUndefined();
+		expect(config.consolidationMode).toBe("heuristic");
+	});
+
+	it("selects local consolidation only when a local LLM selector is configured", () => {
+		const config = loadMnemosyneOssConfig(
+			Settings.isolated({
+				"memory.backend": "mnemosyne-oss",
+				"mnemosyne-oss.localConsolidation": true,
+				"mnemosyne-oss.localLlmFile": "/models/local-llm.gguf",
+			}),
+			"/tmp/agent",
+		);
+		expect(config.consolidationMode).toBe("local");
+		expect(config.localLlmFile).toBe("/models/local-llm.gguf");
 	});
 
 	it("returns an inert diagnostic for an invalid explicit bank name", () => {

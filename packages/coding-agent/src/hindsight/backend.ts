@@ -10,7 +10,12 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import { onHindsightScopeChanged, type Settings } from "../config/settings";
-import { abortedMemorySearch, resolveAliasedState, uninitializedMemorySearch } from "../memory-backend/messages";
+import {
+	abortedMemorySearch,
+	HINDSIGHT_MEMORY_URL_MESSAGE,
+	resolveAliasedState,
+	uninitializedMemorySearch,
+} from "../memory-backend/messages";
 import type {
 	MemoryBackend,
 	MemoryBackendGetResult,
@@ -195,8 +200,7 @@ export const hindsightBackend: MemoryBackend = {
 			backend: "hindsight",
 			id,
 			status: "not_addressable",
-			message:
-				"Hindsight memories are not addressable via memory://. Recall results are final — use `recall` to search or `reflect` to synthesize. `read memory://<id>` is only available with memory.backend=mnemopi.",
+			message: HINDSIGHT_MEMORY_URL_MESSAGE,
 		};
 	},
 

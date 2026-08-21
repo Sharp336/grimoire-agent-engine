@@ -4,6 +4,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { mnemosyneOssBackend } from "@oh-my-pi/pi-coding-agent/mnemosyne-oss/backend";
 import type { MnemosyneOssBackendConfig } from "@oh-my-pi/pi-coding-agent/mnemosyne-oss/config";
 import {
+	getMnemosyneOssSessionState,
 	MnemosyneOssSessionState,
 	type MnemosyneOssWorkerLike,
 	setMnemosyneOssSessionState,
@@ -55,6 +56,7 @@ const config: MnemosyneOssBackendConfig = {
 	autoRetain: true,
 	localEmbeddings: false,
 	localConsolidation: false,
+	consolidationMode: "heuristic",
 	autoMigrate: false,
 	retainEveryNTurns: 4,
 	recallLimit: 8,
@@ -180,6 +182,7 @@ function createWorker(recallItems: MnemosyneOssWorkerRecallItem[] = []): FakeWor
 					embedding_mode: "lexical",
 					consolidation_mode: "heuristic",
 				} as T;
+			if (method === "sleep") return { slept: true } as T;
 			if (method === "clear") {
 				memories.clear();
 				return { deleted: true } as T;
@@ -347,5 +350,42 @@ describe("Mnemosyne OSS backend", () => {
 			"active bank is shared",
 		);
 		expect(sharedWorker.calls.some(call => call.method === "clear")).toBe(false);
+	});
+
+	it("sleeps the retain bank without forcing other sessions", async () => {
+		const session = createSession();
+		const fake = createWorker();
+		setMnemosyneOssSessionState(
+			session.session,
+			new MnemosyneOssSessionState({
+				sessionId: "session-1",
+				config,
+				session: session.session,
+				worker: fake.worker,
+			}),
+		);
+		await mnemosyneOssBackend.enqueue("/tmp", "/tmp", session.session);
+		expect(fake.calls.find(call => call.method === "sleep")?.params).toEqual({
+			all_sessions: false,
+			dry_run: false,
+			force: false,
+		});
+	});
+
+	it("stays inert when the Python worker cannot handshake", async () => {
+		const session = createSession();
+		await mnemosyneOssBackend.start({
+			session: session.session,
+			settings: Settings.isolated({
+				"memory.backend": "mnemosyne-oss",
+				"mnemosyne-oss.executable": "/nonexistent/mnemosyne-oss-python",
+				"mnemosyne-oss.requestTimeoutMs": 250,
+				"mnemosyne-oss.shutdownTimeoutMs": 100,
+			}),
+			modelRegistry: {} as never,
+			agentDir: "/tmp/agent",
+			taskDepth: 0,
+		});
+		expect(getMnemosyneOssSessionState(session.session)).toBeUndefined();
 	});
 });

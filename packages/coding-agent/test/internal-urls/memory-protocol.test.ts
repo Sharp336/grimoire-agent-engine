@@ -611,7 +611,7 @@ describe("MemoryProtocolHandler — hindsight (issue #7587)", () => {
 		await withHindsightSession(async () => {
 			const router = InternalUrlRouter.instance();
 			await expect(router.resolve("memory://a1b2c3d4e5f6")).rejects.toThrow(
-				/Hindsight memories are not addressable via memory:\/\/.*use `recall`.*`reflect`/s,
+				/Hindsight memories are not addressable via memory:\/\/.*use `recall`.*`reflect`.*mnemopi or mnemosyne-oss/s,
 			);
 		});
 	});

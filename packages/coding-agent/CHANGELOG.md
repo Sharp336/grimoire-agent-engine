@@ -33,6 +33,8 @@
 
 ### Fixed
 
+- Mnemosyne OSS now stays inert when Python or the SDK cannot handshake, sleeps only the retain bank without forcing other sessions, and uses local consolidation only when a local LLM path is set.
+- Exact `memory://<id>` reads are available with `memory.backend=mnemopi` or `mnemosyne-oss`; Hindsight still points agents at `recall`/`reflect` instead of claiming the protocol is Mnemopi-only.
 - Fixed regional HTTP 401 data-residency errors during Codex chat, web search, and image generation requests by passing token residency metadata on requests.
 - Fixed macOS SSH ControlMaster socket creation failures caused by `sun_path` length limits when using named profiles.
 - Fixed an issue where Nix-packaged builds failed to load on-demand native addons (`onnxruntime-node`/`sherpa-onnx`) due to missing shared C++ runtime library paths.

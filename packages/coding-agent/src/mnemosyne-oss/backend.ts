@@ -47,6 +47,16 @@ export const mnemosyneOssBackend: MemoryBackend = {
 		});
 		const previous = setMnemosyneOssSessionState(session, state);
 		await previous?.dispose();
+		if (!parent) {
+			try {
+				await state.probe();
+			} catch (error) {
+				setMnemosyneOssSessionState(session, undefined);
+				await state.worker.shutdown();
+				logger.warn("Mnemosyne OSS backend inert", { diagnostic: String(error) });
+				return;
+			}
+		}
 		state.attachSessionListeners();
 	},
 

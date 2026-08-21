@@ -108,7 +108,7 @@ export class MnemosyneOssSessionState {
 								channel_id: options.sessionId,
 								embedding_mode: options.config.localEmbeddings ? "local" : "lexical",
 								embedding_model: options.config.embeddingModel,
-								consolidation_mode: options.config.localConsolidation ? "local" : "heuristic",
+								consolidation_mode: options.config.consolidationMode,
 								local_llm_repo: options.config.localLlmRepo,
 								local_llm_file: options.config.localLlmFile,
 								auto_migrate: options.config.autoMigrate,
@@ -282,11 +282,16 @@ export class MnemosyneOssSessionState {
 		});
 	}
 
+	async probe(): Promise<void> {
+		if (this.aliasOf) return;
+		await this.worker.request("capabilities");
+	}
+
 	async sleep(): Promise<void> {
 		if (this.aliasOf) return;
 		await this.worker.request(
 			"sleep",
-			{ all_sessions: true, dry_run: false, force: true },
+			{ all_sessions: false, dry_run: false, force: false },
 			{ mutation: true, timeoutMs: this.config.sleepTimeoutMs },
 		);
 	}

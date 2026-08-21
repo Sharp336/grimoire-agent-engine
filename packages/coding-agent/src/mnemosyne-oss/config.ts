@@ -23,6 +23,7 @@ export interface MnemosyneOssBackendConfig {
 	localConsolidation: boolean;
 	localLlmRepo?: string;
 	localLlmFile?: string;
+	consolidationMode: "local" | "heuristic";
 	autoMigrate: boolean;
 	retainEveryNTurns: number;
 	recallLimit: number;
@@ -56,6 +57,12 @@ export function loadMnemosyneOssConfig(settings: Settings, _agentDir: string): M
 			: dataDir.includes("\0")
 				? "Mnemosyne OSS data directory contains a null byte."
 				: undefined;
+	const localLlmRepo = localConsolidation
+		? settings.get("mnemosyne-oss.localLlmRepo")?.trim() || undefined
+		: undefined;
+	const localLlmFile = localConsolidation
+		? settings.get("mnemosyne-oss.localLlmFile")?.trim() || undefined
+		: undefined;
 	return {
 		executable: settings.get("mnemosyne-oss.executable")?.trim() || undefined,
 		dataDir,
@@ -72,8 +79,9 @@ export function loadMnemosyneOssConfig(settings: Settings, _agentDir: string): M
 		localEmbeddings: settings.get("mnemosyne-oss.localEmbeddings"),
 		embeddingModel: settings.get("mnemosyne-oss.embeddingModel")?.trim() || undefined,
 		localConsolidation,
-		localLlmRepo: localConsolidation ? settings.get("mnemosyne-oss.localLlmRepo")?.trim() || undefined : undefined,
-		localLlmFile: localConsolidation ? settings.get("mnemosyne-oss.localLlmFile")?.trim() || undefined : undefined,
+		localLlmRepo,
+		localLlmFile,
+		consolidationMode: localConsolidation && (localLlmRepo || localLlmFile) ? "local" : "heuristic",
 		autoMigrate: settings.get("mnemosyne-oss.autoMigrate"),
 		retainEveryNTurns: normalizePositiveInteger(settings.get("mnemosyne-oss.retainEveryNTurns")),
 		recallLimit: normalizePositiveInteger(settings.get("mnemosyne-oss.recallLimit")),

@@ -13,7 +13,7 @@ python -m pip install mnemosyne-memory
 python -m pip install 'mnemosyne-memory[embeddings]'
 ```
 
-The base package supports lexical recall. The embeddings extra permits local semantic recall. OMP does not install Python packages, parse an SDK CLI, use MCP, or fall back to another memory backend. A missing interpreter, package, supported method, or SDK major version leaves the backend inert with an actionable diagnostic.
+The base package supports lexical recall. The embeddings extra permits local semantic recall. OMP does not install Python packages, parse an SDK CLI, use MCP, or fall back to another memory backend. A missing interpreter, package, supported method, or SDK major version leaves the backend inert with an actionable diagnostic. Tools and `/memory` commands then report that the backend is not initialised; OMP does not pretend the worker is live.
 
 ## Configuration
 
@@ -24,7 +24,7 @@ mnemosyne-oss:
   executable: /absolute/path/to/python # optional; blank resolves the existing Python runtime
   dataDir: ~/.hermes/mnemosyne/data
   bank: omp-team
-  scoping: per-project-tagged
+  scoping: per-project
   ownership: shared
   autoRecall: true
   autoRetain: true
@@ -49,6 +49,8 @@ mnemosyne-oss:
 
 `bank` is optional. Unset resolves to `default` for global scope. Explicit names must start with an alphanumeric character and contain only letters, numbers, underscores, and hyphens. Project names are deterministic: OMP sanitizes the cwd basename and adds a stable hash of the absolute cwd; changing an enclosing Git layout does not change the bank.
 
+`scoping` defaults to `per-project`. Use `per-project-tagged` when project-local writes should also recall the configured shared bank.
+
 ## Store and bank semantics
 
 - **Store data directory**: the shared Mnemosyne data directory. Its default-bank database is `<dataDir>/mnemosyne.db`; named banks use `<dataDir>/banks/<bank>/mnemosyne.db`.
@@ -64,7 +66,7 @@ Scoping is deterministic:
 | `scoping` | Writes | Recall |
 | --- | --- | --- |
 | `global` | configured shared bank | configured shared bank |
-| `per-project` | project bank | project bank |
+| `per-project` (default) | project bank | project bank |
 | `per-project-tagged` | project bank | project bank, then configured shared bank |
 
 Run `/memory status` to see the resolved retain and recall banks. For cross-agent sharing, configure each client with the same data directory and either the same `global` bank or the same resolved project bank. Do not point unrelated writers at an OMP-owned bank.
@@ -77,7 +79,7 @@ The root session owns one worker. Subagents alias the root worker and may perfor
 - Automatic retention writes only the completed root-session suffix. It stores a deterministic source ID and no extraction flags, so assistant prose cannot be converted into instructions.
 - OMP persists a hidden `mnemosyne-oss-retention-cursor` custom session entry only after the worker acknowledges a write. Resumed sessions continue after that cursor.
 - Pre-compaction recall uses the same fail-open behavior.
-- `/memory enqueue` force-retains, then requests Mnemosyne sleep for the retain bank. Normal disposal retains the final suffix but does not run sleep.
+- `/memory enqueue` force-retains, then requests Mnemosyne sleep for the retain bank only. Sleep does not consolidate every session in a shared store. Normal disposal retains the final suffix but does not run sleep.
 
 `recall`, `retain`, `reflect`, `memory_edit`, and `learn` use the shared memory interface. `read memory://<id>` fetches a full exact record. If an ID exists in more than one recall bank, OMP reports ambiguity rather than choosing a bank. Edits use SDK authorization; OMP does not write SQLite tables directly.
 

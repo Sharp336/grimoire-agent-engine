@@ -3165,7 +3165,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "memory",
 			group: "Mnemosyne OSS",
 			label: "Local consolidation model",
-			description: "Permit consolidation with a local LLM. Off uses Mnemosyne's no-LLM heuristic consolidation.",
+			description:
+				"Permit consolidation with a local LLM only when a local LLM repository or file is also set. Off, or on without a local model path, uses Mnemosyne's no-LLM heuristic consolidation.",
 			condition: "mnemosyneOssActive",
 		},
 	},

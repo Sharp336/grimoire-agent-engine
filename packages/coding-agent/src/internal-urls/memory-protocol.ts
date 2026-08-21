@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getAgentDir, isEnoent } from "@oh-my-pi/pi-utils";
 import { getMemoryRoot } from "../memories";
-import { type MemoryBackendRecord, resolveAliasedState } from "../memory-backend";
+import { HINDSIGHT_MEMORY_URL_MESSAGE, type MemoryBackendRecord, resolveAliasedState } from "../memory-backend";
 import { getMnemopiSessionState, type MnemopiScopedMemoryHit, type MnemopiSessionState } from "../mnemopi/state";
 import { AgentRegistry } from "../registry/agent-registry";
 import { isMarkdownPath } from "../utils/lang-from-path";
@@ -346,13 +346,11 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 				// Return a corrective pointer so that stray read self-corrects in
 				// one turn instead of derailing on the generic namespace error
 				// (issue #7587).
-				throw new Error(
-					"Hindsight memories are not addressable via memory://. Recall results are final — use `recall` to search or `reflect` to synthesize. `read memory://<id>` is only available with memory.backend=mnemopi.",
-				);
+				throw new Error(HINDSIGHT_MEMORY_URL_MESSAGE);
 			}
 			if (mnemopiStates.length === 0) {
 				throw new Error(
-					`Unknown memory namespace: ${namespace}. Supported: ${MEMORY_NAMESPACE} (file-backed memory summary), or a mnemopi memory id when memory.backend=mnemopi is active.`,
+					`Unknown memory namespace: ${namespace}. Supported: ${MEMORY_NAMESPACE} (file-backed memory summary), or an exact memory id when memory.backend is mnemopi or mnemosyne-oss.`,
 				);
 			}
 			const hit = tryResolveMnemopiMemory(namespace);
@@ -396,10 +394,10 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 		if (memoryRootsForContext(context).length > 0) {
 			completions.push({ value: MEMORY_NAMESPACE, description: "Project memory summary" });
 		}
-		if (mnemopiSessionStatesFromRegistry().length > 0) {
+		if (context?.memory || mnemopiSessionStatesFromRegistry().length > 0) {
 			completions.push({
 				value: "<memory-id>",
-				description: "Full mnemopi memory by id (from recall)",
+				description: "Full memory by id (from recall)",
 			});
 		}
 		return completions;

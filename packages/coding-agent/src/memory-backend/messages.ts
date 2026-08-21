@@ -10,6 +10,10 @@ export function resolveAliasedState<T extends { readonly aliasOf?: T }>(state: T
 	return state?.aliasOf ?? state;
 }
 
+/** Exact `memory://<id>` reads exist for mnemopi and mnemosyne-oss, not Hindsight. */
+export const HINDSIGHT_MEMORY_URL_MESSAGE =
+	"Hindsight memories are not addressable via memory://. Recall results are final — use `recall` to search or `reflect` to synthesize. `read memory://<id>` is available with memory.backend=mnemopi or mnemosyne-oss.";
+
 export function abortedMemorySearch(backend: MemoryBackendId, query: string): MemoryBackendSearchResult {
 	return { backend, query, count: 0, items: [], message: "Search aborted." };
 }

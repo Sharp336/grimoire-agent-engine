@@ -180,6 +180,7 @@ export class MnemosyneOssWorkerClient {
 
 	async #start(): Promise<void> {
 		const temporaryConfigDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mnemosyne-oss-config-"));
+		this.#temporaryConfigDir = temporaryConfigDir;
 		try {
 			const runtime = this.#options.executable
 				? resolveExplicitPythonRuntime(this.#options.executable, this.#options.cwd, filterEnv(process.env))
@@ -195,7 +196,6 @@ export class MnemosyneOssWorkerClient {
 			});
 			this.#process = child;
 			this.#writer = child.stdin;
-			this.#temporaryConfigDir = temporaryConfigDir;
 			this.#stderrTail = "";
 			this.#crashed = false;
 			void this.#drainStdout(child, child.stdout as ReadableStream<Uint8Array>);
