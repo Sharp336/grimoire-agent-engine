@@ -67,6 +67,7 @@ jobs:
             ':(exclude)packages/coding-agent/src/tools/hub/compact.ts' \
             ':(exclude)packages/coding-agent/src/tools/hub/index.ts' \
             ':(exclude)packages/coding-agent/src/tools/hub/jobs.ts' \
+            ':(exclude)packages/coding-agent/src/tools/hub/schema.ts' \
             ':(exclude)packages/coding-agent/CHANGELOG.md' \
             ':(exclude)packages/coding-agent/test/task/task-spawn.test.ts' \
             ':(exclude)packages/coding-agent/test/tools/hub-mode.test.ts')"

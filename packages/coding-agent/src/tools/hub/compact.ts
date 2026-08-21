@@ -4,7 +4,8 @@ import type { ToolExample } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import compactHubDescription from "../../prompts/tools/hub-compact.md" with { type: "text" };
 import type { ToolSession } from "..";
-import { HubTool, hubApproval, hubSchema } from "./index";
+import { HubTool, hubApproval } from "./index";
+import { hubSchema } from "./schema";
 import { type HubDetails, hubErrorResult } from "./types";
 
 export const compactHubSchema = hubSchema

@@ -5,7 +5,7 @@ import { SETTINGS_SCHEMA } from "@oh-my-pi/pi-coding-agent/config/settings-schem
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import { createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { HubTool } from "@oh-my-pi/pi-coding-agent/tools/hub";
+import { type CoordinationDetails, type HubDetails, HubTool } from "@oh-my-pi/pi-coding-agent/tools/hub";
 import { CompactHubTool, createHubTool } from "@oh-my-pi/pi-coding-agent/tools/hub/compact";
 
 function makeSession(
@@ -28,6 +28,10 @@ function schemaExpression(tool: HubTool | CompactHubTool): string {
 
 function resultText(result: { content: Array<{ type: string; text?: string }> }): string {
 	return result.content.find(part => part.type === "text")?.text ?? "";
+}
+
+function resultAgents(details: HubDetails | undefined): CoordinationDetails["agents"] | undefined {
+	return details && "agents" in details ? details.agents : undefined;
 }
 
 describe("Hub modes", () => {
@@ -94,11 +98,11 @@ describe("Hub modes", () => {
 
 		try {
 			const jobs = await tool.execute("compact_jobs", { op: "jobs" });
-			expect(jobs.details?.agents).toBeUndefined();
+			expect(resultAgents(jobs.details)).toBeUndefined();
 			expect(resultText(jobs)).toBe("No background jobs.");
 
 			const wait = await tool.execute("compact_wait", { op: "wait" });
-			expect(wait.details?.agents).toBeUndefined();
+			expect(resultAgents(wait.details)).toBeUndefined();
 			expect(resultText(wait)).toBe("No running background jobs to wait for.");
 			const missing = await tool.execute("compact_missing", { op: "wait", ids: ["Worker"] });
 			expect(resultText(missing)).not.toMatch(/running agent|history:\/\//i);
