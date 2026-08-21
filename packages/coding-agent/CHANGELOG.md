@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `tui.scrollbackRebuild` now defaults to on: when a finalized block diverges from its committed scrollback rows (a live preview replaced by its final form), direct-terminal sessions erase and replay history instead of appending the final form below the stale copy. Set it to `false` to keep the previous append-only behavior.
+
 ## [17.4.1] - 2026-08-21
 
 ### Added

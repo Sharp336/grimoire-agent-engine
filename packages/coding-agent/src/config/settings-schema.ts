@@ -1098,13 +1098,13 @@ export const SETTINGS_SCHEMA = {
 	},
 	"tui.scrollbackRebuild": {
 		type: "boolean",
-		default: false,
+		default: true,
 		ui: {
 			tab: "appearance",
 			group: "Display",
 			label: "Rewrite Scrollback",
 			description:
-				"Erase and replay terminal scrollback when a block's final form replaces its live preview. When off (default), stale preview copies remain in history and the final content is appended below.",
+				"This setting erases and replays terminal scrollback when a block's final form replaces its live preview. Stale preview copies then never stay in history. When off, stale previews stay in history and the final form is appended below them.",
 		},
 	},
 
