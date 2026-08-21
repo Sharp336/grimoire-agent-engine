@@ -58,6 +58,8 @@ export interface LazyConfigOptions {
 	callLog?: string;
 	/** Make the fixture expose prompt capability through prompts/list and prompts/get. */
 	advertisePrompts?: boolean;
+	/** Make the fixture advertise that tools/list can change. */
+	advertiseToolListChanged?: boolean;
 	/** Advertise prompt capability while returning an empty current prompt list. */
 	emptyPrompts?: boolean;
 	/** Server instructions the fixture returns from `initialize`. */
@@ -74,6 +76,7 @@ export function lazyConfig(options: LazyConfigOptions = {}): MCPStdioServerConfi
 	if (options.initializeDelayMs) env.MCP_INITIALIZE_DELAY_MS = String(options.initializeDelayMs);
 	if (options.callLog) env.MCP_CALL_LOG = options.callLog;
 	if (options.advertisePrompts) env.MCP_ADVERTISE_PROMPTS = "1";
+	if (options.advertiseToolListChanged) env.MCP_ADVERTISE_TOOL_LIST_CHANGED = "1";
 	if (options.emptyPrompts) env.MCP_EMPTY_PROMPTS = "1";
 	if (options.instructions) env.MCP_INSTRUCTIONS = options.instructions;
 	if (options.noTools) env.MCP_NO_TOOLS = "1";

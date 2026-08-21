@@ -159,6 +159,25 @@ describe("translated MCP importers propagate enabled: false", () => {
 		expect(result.warnings?.some(warning => warning.includes('Invalid lifecycle "lazyy"'))).toBe(true);
 	});
 
+	test("claude preserves invalid idleTimeout values for capability validation", async () => {
+		const filePath = path.join(tempCwd, ".claude", ".mcp.json");
+		await fs.mkdir(path.dirname(filePath), { recursive: true });
+		await fs.writeFile(
+			filePath,
+			JSON.stringify({ mcpServers: { invalid: { command: "invalid-server", idleTimeout: "300000" } } }),
+		);
+
+		const result = await loadCapability<MCPServer>(mcpCapability.id, {
+			cwd: tempCwd,
+			providers: ["claude"],
+		});
+		expect(result.items.find(server => server.name === "invalid")).toBeUndefined();
+		expect(String(result.all.find(server => server.name === "invalid")?.idleTimeout)).toBe("300000");
+		expect(result.warnings?.some(warning => warning.includes("idleTimeout must be a non-negative number"))).toBe(
+			true,
+		);
+	});
+
 	for (const { provider, userFile, projectFile } of COMPOUND_FIXTURES) {
 		test(`${provider} project enabled: false suppresses a same-named user server`, async () => {
 			const userPath = path.join(tempHome, userFile);

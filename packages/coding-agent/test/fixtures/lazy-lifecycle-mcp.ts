@@ -39,7 +39,9 @@ function buildResult(method: string): Record<string, unknown> {
 				protocolVersion: "2025-03-26",
 				serverInfo: { name: "lazy-lifecycle-fixture", version: "1.0.0" },
 				capabilities: {
-					tools: {},
+					tools: {
+						...(process.env.MCP_ADVERTISE_TOOL_LIST_CHANGED === "1" ? { listChanged: true } : {}),
+					},
 					...(process.env.MCP_ADVERTISE_PROMPTS === "1" ? { prompts: {} } : {}),
 				},
 				...(process.env.MCP_INSTRUCTIONS ? { instructions: process.env.MCP_INSTRUCTIONS } : {}),

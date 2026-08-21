@@ -14,6 +14,7 @@ import {
 	makeWorkDir,
 	spawnCount,
 	TOOL_DEF,
+	waitFor,
 } from "./mcp-lifecycle-harness";
 
 describe("MCP lazy lifecycle: warm cache does not spawn", () => {
@@ -48,4 +49,38 @@ describe("MCP lazy lifecycle: warm cache does not spawn", () => {
 			await manager.disconnectAll();
 		}
 	}, 15_000);
+
+	it("connects from a warm cache and stays live for tool-list changes", async () => {
+		const spawnLog = path.join(workDir, "list-changed.log");
+		const cache = inMemoryToolCache();
+		const config = lazyConfig({
+			lifecycle: "lazy",
+			idleTimeout: 50,
+			spawnLog,
+			advertiseToolListChanged: true,
+		});
+
+		const first = new MCPManager(workDir, cache);
+		try {
+			await first.connectServers({ lazy: config }, {});
+			expect(await waitFor(() => first.getConnectionStatus("lazy") === "connected")).toBe(true);
+			expect(await waitFor(async () => (await cache.getEntry("lazy", config))?.requiresConnection === true)).toBe(
+				true,
+			);
+			expect(spawnCount(spawnLog)).toBe(1);
+		} finally {
+			await first.disconnectAll();
+		}
+
+		const second = new MCPManager(workDir, cache);
+		try {
+			await second.connectServers({ lazy: config }, {});
+			expect(second.getConnectionStatus("lazy")).toBe("connected");
+			expect(spawnCount(spawnLog)).toBe(2);
+			await Bun.sleep(300);
+			expect(second.getConnectionStatus("lazy")).toBe("connected");
+		} finally {
+			await second.disconnectAll();
+		}
+	}, 20_000);
 });

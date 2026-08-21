@@ -59,14 +59,15 @@ import { MCPNotificationMethods } from "./types";
 /**
  * Whether a server's state is only reachable while its transport is live.
  *
- * Prompts, resources, templates and `instructions` are read from the connection
- * (or injected into the system prompt) through synchronous accessors, so such a
+ * Prompts, resources, templates, dynamic tool catalogs, and `instructions` are
+ * read from the connection or updated by transport notifications. Such a
  * server must neither be idle-reaped nor started from cached tools alone.
  */
 function needsLiveConnection(connection: MCPServerConnection): boolean {
 	return (
 		serverSupportsPrompts(connection.capabilities) ||
 		serverSupportsResources(connection.capabilities) ||
+		connection.capabilities.tools?.listChanged === true ||
 		(connection.instructions?.trim().length ?? 0) > 0
 	);
 }
