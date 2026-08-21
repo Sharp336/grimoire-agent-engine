@@ -17,6 +17,7 @@ import { $env, isRecord, Snowflake } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../../capability";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
+	type AutocompleteProviderFactory,
 	type ExtensionUIContext,
 	type ExtensionUIDialogOptions,
 	type ExtensionUISelectItem,
@@ -888,6 +889,10 @@ export class RpcExtensionUIContext implements ExtensionUIContext {
 
 	setToolsExpanded(_expanded: boolean) {
 		// Tool expansion not supported in RPC mode - no TUI
+	}
+
+	addAutocompleteProvider(_factory: AutocompleteProviderFactory): void {
+		// Autocomplete providers are ignored in RPC mode because no interactive editor exists.
 	}
 
 	setEditorComponent(): void {
