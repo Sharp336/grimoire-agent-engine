@@ -4814,6 +4814,8 @@ export const SETTINGS_SCHEMA = {
 
 	"skills.includeSkills": { type: "array", default: [] as string[] },
 
+	"skills.optInSkills": { type: "array", default: [] as string[] },
+
 	// Commands
 	"commands.enableClaudeUser": {
 		type: "boolean",
@@ -5764,6 +5766,7 @@ export interface SkillsSettings {
 	customDirectories?: string[];
 	ignoredSkills?: string[];
 	includeSkills?: string[];
+	optInSkills?: string[];
 	disabledExtensions?: string[];
 }
 
