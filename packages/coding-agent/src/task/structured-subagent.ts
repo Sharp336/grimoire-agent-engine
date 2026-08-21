@@ -158,6 +158,26 @@ export class StructuredSubagentError extends Error {
 
 const PLAN_MODE_TOOLS = ["read", "grep", "glob", "web_search"] as const;
 
+type EvalSubagentUsageRecorder = (output: number) => void;
+
+/**
+ * Eval-spawned children do not appear in their parent's transcript usage. Keep
+ * an in-flight recorder chain keyed by child agent id so nested eval `agent()`
+ * output is charged to every eval ancestor without touching ordinary task
+ * accounting.
+ */
+const evalSubagentUsageRecorders = new Map<string, EvalSubagentUsageRecorder>();
+
+function createEvalSubagentUsageRecorder(request: StructuredSubagentRequest): EvalSubagentUsageRecorder | undefined {
+	if (request.invocationKind !== "eval") return undefined;
+	const parentAgentId = request.session.getAgentId?.();
+	const ancestorRecorder = parentAgentId ? evalSubagentUsageRecorders.get(parentAgentId) : undefined;
+	return output => {
+		request.session.recordEvalSubagentUsage?.(output);
+		ancestorRecorder?.(output);
+	};
+}
+
 function renderSubagentPrompt(assignment: string): string {
 	return prompt.render(subagentUserPromptTemplate, { assignment: assignment.trim() });
 }
@@ -555,15 +575,20 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 	let requiresRecoveryArtifacts = false;
 	let completedSuccessfully = false;
 	let deferredCleanup: Promise<void> | undefined;
-	const recordEvalSubagentUsage =
-		request.invocationKind === "eval"
-			? (result: SingleResult) => request.session.recordEvalSubagentUsage?.(result.usage?.output ?? 0)
-			: undefined;
+	let evalUsageRecorderId: string | undefined;
+	const recordEvalSubagentOutput = createEvalSubagentUsageRecorder(request);
+	const recordEvalSubagentUsage = recordEvalSubagentOutput
+		? (result: SingleResult) => recordEvalSubagentOutput(result.usage?.output ?? 0)
+		: undefined;
 	try {
 		const id = await reserveStructuredSubagentId(request.session, {
 			...request.identity,
 			label: request.identity?.label ?? (request.invocationKind === "eval" ? "EvalAgent" : undefined),
 		});
+		if (recordEvalSubagentOutput) {
+			evalSubagentUsageRecorders.set(id, recordEvalSubagentOutput);
+			evalUsageRecorderId = id;
+		}
 		const baseOptions = buildExecutorOptions(request, policy, lease, id);
 		baseOptions.onCleanupDeferred = completion => {
 			deferredCleanup = completion;
@@ -661,6 +686,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			{ cause: error },
 		);
 	} finally {
+		if (evalUsageRecorderId) evalSubagentUsageRecorders.delete(evalUsageRecorderId);
 		const shouldRetainArtifacts =
 			(request.retainArtifacts && completedSuccessfully) ||
 			(policy.isIsolated && (!policy.applyChanges || changesApplied === false || requiresRecoveryArtifacts));
