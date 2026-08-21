@@ -25,9 +25,17 @@ node - "$manifest" "$target" "$work/metadata" <<'NODE'
 const fs = require("node:fs");
 const [manifestPath, target, outputPath] = process.argv.slice(2);
 const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+const expectedPackages = {
+  "linux-x64": "@oh-my-pi/pi-natives-linux-x64",
+  "linux-arm64": "@oh-my-pi/pi-natives-linux-arm64",
+  "win32-x64": "@oh-my-pi/pi-natives-win32-x64",
+};
 const entry = manifest.targets?.[target];
-if (!entry) {
+if (!entry || !(target in expectedPackages)) {
   throw new Error(`unknown native target ${JSON.stringify(target)}`);
+}
+if (entry.package !== expectedPackages[target]) {
+  throw new Error(`${target} package must be ${expectedPackages[target]}, got ${entry.package}`);
 }
 if (entry.version !== manifest.source?.version) {
   throw new Error(`${target} version ${entry.version} does not match source ${manifest.source?.version}`);
