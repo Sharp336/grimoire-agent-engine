@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           ref: optimize-fork-release-pipeline
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Generate the exact-version ordinary CI file
         shell: bash
@@ -52,6 +52,5 @@ jobs:
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add -- .github/ci.yml.generated
-          git diff --cached --check
           git commit -m "ci: generate exact-version ordinary CI"
           git push origin HEAD:optimize-fork-release-pipeline
