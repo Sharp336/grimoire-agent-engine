@@ -113,7 +113,7 @@ async function detectProjectType(cwd: string, signal?: AbortSignal): Promise<Pro
 
 	// Check for Dart/Flutter (pubspec.yaml). `dart analyze` covers Flutter packages
 	// too, so there is no need to branch on whether this is a Flutter project.
-	if (fs.existsSync(path.join(cwd, "pubspec.yaml"))) {
+	if (await Bun.file(path.join(cwd, "pubspec.yaml")).exists()) {
 		return { type: "dart", command: ["dart", "analyze"], description: "Dart (dart analyze)" };
 	}
 
