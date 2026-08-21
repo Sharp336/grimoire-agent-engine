@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [17.4.1] - 2026-08-21
+
 ### Added
 
 - Kiro requests now promote images returned by tools onto the paired user input message: tool results keep their text, status, and `toolUseId` pairing, image-only tool results carry a `(see attached image)` placeholder, and the image bytes travel through the capture-verified `userInputMessage.images` wire shape instead of failing the turn ([#12](https://github.com/ajdiyassin/oh-my-pi/issues/12)).

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [17.4.1] - 2026-08-21
+
 ### Added
 
 - Added credential-scoped Kiro model discovery and cache namespaces for OAuth profiles and API keys.
