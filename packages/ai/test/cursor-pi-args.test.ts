@@ -3,6 +3,8 @@ import { type } from "@oh-my-pi/omptype";
 import {
 	cursorEditOwnedReadPath,
 	cursorRawReadPath,
+	cursorWriteDisplayContent,
+	cursorWritePayload,
 	omitUndefinedArgs,
 	piGrepSkip,
 	piReadPath,
@@ -10,6 +12,56 @@ import {
 
 import type { Tool } from "../src/types";
 import { validateToolArguments } from "../src/utils/validation";
+
+describe("cursorWritePayload", () => {
+	it("prefers non-empty file_bytes over empty proto3 file_text", () => {
+		const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+		const payload = cursorWritePayload({ fileText: "", fileBytes: png });
+		expect(payload).toEqual({ mode: "bytes", bytes: png });
+		expect(cursorWriteDisplayContent(payload)).toBe("[binary 8 bytes]");
+	});
+
+	it("uses file_text when file_bytes is empty", () => {
+		expect(cursorWritePayload({ fileText: "hello", fileBytes: new Uint8Array() })).toEqual({
+			mode: "text",
+			text: "hello",
+		});
+	});
+
+	it("decodes JSON/base64 file_bytes that have no byteLength", () => {
+		const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+		const b64 = Buffer.from(png).toString("base64");
+		expect(cursorWritePayload({ fileText: "", fileBytes: b64 })).toEqual({ mode: "bytes", bytes: png });
+		expect(cursorWritePayload({ fileText: "", fileBytes: { type: "Buffer", data: Array.from(png) } })).toEqual({
+			mode: "bytes",
+			bytes: png,
+		});
+	});
+
+	it("decodes file_text when encoding_hint is base64", () => {
+		const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+		const payload = cursorWritePayload({
+			fileText: Buffer.from(png).toString("base64"),
+			fileBytes: new Uint8Array(),
+			encodingHint: "base64",
+		});
+		expect(payload).toEqual({ mode: "bytes", bytes: png });
+	});
+
+	it("keeps non-base64 file_text when encoding_hint is base64", () => {
+		expect(cursorWritePayload({ fileText: "not-valid-base64!!!", encodingHint: "base64" })).toEqual({
+			mode: "text",
+			text: "not-valid-base64!!!",
+		});
+	});
+
+	it("ignores { data: number[] } objects that are not Node Buffers", () => {
+		expect(cursorWritePayload({ fileText: "hello", fileBytes: { data: [1, 2, 3] } })).toEqual({
+			mode: "text",
+			text: "hello",
+		});
+	});
+});
 
 describe("omitUndefinedArgs", () => {
 	it("drops keys whose value is undefined and keeps defined optionals", () => {

@@ -11,6 +11,7 @@ import type {
 	AgentToolUpdateCallback,
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
+import { emptyImageWriteReason } from "@oh-my-pi/pi-ai/providers/cursor-pi-args";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
 import { isEnoent, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import {
@@ -1116,6 +1117,13 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		// Peel a read-tool selector (`:raw`, `:1-20`, …) so the write target matches
 		// what `read` resolves for the same URL; line-range/malformed selectors throw.
 		const path = peelWriteUrlSelector(unwrapHashlineHeaderPath(rawPath));
+		// Cursor hosted GenerateImage follows up with writeArgs whose proto3
+		// `file_text` is `""`. That arrives here as empty `content` and would
+		// truncate the PNG persist already wrote.
+		const emptyImageReason = emptyImageWriteReason(path, { mode: "text", text: content });
+		if (emptyImageReason) {
+			throw new ToolError(emptyImageReason);
+		}
 		return untilAborted(signal, async () => {
 			// Strip hashline display prefixes ([PATH#HASH] + LINE:) if the model copied them from read output
 			const { text: cleanContent, stripped } = stripWriteContent(this.session, content);

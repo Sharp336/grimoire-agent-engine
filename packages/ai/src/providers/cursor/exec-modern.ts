@@ -76,6 +76,11 @@ import type { ToolResultMessage } from "../../types";
 export {
 	cursorEditOwnedReadPath,
 	cursorRawReadPath,
+	cursorWriteDisplayContent,
+	cursorWritePayload,
+	decodeCursorWriteBytes,
+	emptyImageWriteReason,
+	isRasterImagePath,
 	omitUndefinedArgs,
 	piEscapeRegexLiteral,
 	piGrepSkip,

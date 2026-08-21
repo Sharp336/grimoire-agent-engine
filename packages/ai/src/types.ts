@@ -587,6 +587,8 @@ export interface StreamOptions {
 	fetch?: FetchImpl;
 	/** Current session working directory for providers that need workspace-scoped discovery. */
 	cwd?: string;
+	/** Extra workspace roots for Cursor requestContext (defaults to `cwd`). */
+	workspacePaths?: string[];
 
 	/** Cursor exec/MCP tool handlers (cursor-agent only). */
 	execHandlers?: CursorExecHandlers;

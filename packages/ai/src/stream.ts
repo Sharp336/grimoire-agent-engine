@@ -2313,6 +2313,8 @@ function mapOptionsForApi<TApi extends Api>(
 				...base,
 				execHandlers,
 				onToolResult,
+				cwd: options?.cwd,
+				workspacePaths: options?.workspacePaths,
 			});
 		}
 

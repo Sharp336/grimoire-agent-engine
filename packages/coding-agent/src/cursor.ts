@@ -18,6 +18,8 @@ import type {
 	ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
 import {
+	cursorWritePayload,
+	emptyImageWriteReason,
 	omitUndefinedArgs,
 	piEscapeRegexLiteral,
 	piGrepSkip,
@@ -27,6 +29,7 @@ import {
 	piReadPath,
 	piTimeout,
 } from "@oh-my-pi/pi-ai/providers/cursor/exec-modern";
+import { confineCursorWorkspacePath } from "@oh-my-pi/pi-ai/providers/cursor/workspace";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { cursorMcpPrefersReplaceEdit, normalizeCursorReplaceArgs } from "./cursor-bridge-tools";
 import type { MCPResourceReadResult } from "./mcp/types";
@@ -139,7 +142,8 @@ interface CursorExecBridgeOptions {
 }
 
 /**
- * Write a downloaded resource without following a link at the target.
+ * Write bytes without following a link at the target (MCP `download_path` and
+ * Cursor `file_bytes` / Imagine PNGs).
  *
  * The containment check and the write are separate syscalls, so a link planted
  * at the target in between would redirect the bytes — the check cannot close
@@ -365,6 +369,62 @@ async function executeDelete(options: CursorExecBridgeOptions, pathArg: string, 
 	return createToolResultMessage(toolCallId, toolName, result, isError);
 }
 
+async function executeBinaryWrite(
+	options: CursorExecBridgeOptions,
+	pathArg: string,
+	bytes: Uint8Array,
+	toolCallId: string,
+) {
+	const toolName = "write";
+
+	if (options.allowDirectFileMutation === false) {
+		const result = buildToolErrorResult(`Tool "${toolName}" not available`);
+		return createToolResultMessage(toolCallId, toolName, result, true);
+	}
+
+	const refusal = refuseByWritePolicy(options, toolName, pathArg);
+	if (refusal) {
+		return createToolResultMessage(toolCallId, toolName, buildToolErrorResult(refusal), true);
+	}
+
+	options.emitEvent?.({
+		type: "tool_execution_start",
+		toolCallId,
+		toolName,
+		args: { path: pathArg, content: `[binary ${bytes.byteLength} bytes]` },
+	});
+
+	// Binary payloads cannot go through WriteTool (UTF-8 / newline munging).
+	// Remap often yields an absolute workspace path, so `confineToWorkspace`
+	// (absolute-reject; MCP `download_path` is relative-by-contract) cannot
+	// be used. Lexical-under-cwd plus `O_NOFOLLOW` closes the symlink TOCTOU
+	// a contain-then-writeFile would leave.
+	const cwd = options.getCwd?.() ?? options.cwd;
+	const confined = confineCursorWorkspacePath(pathArg, [cwd]);
+	if (!confined) {
+		const result = buildToolErrorResult(`Refused to write outside the workspace: ${pathArg}`);
+		return createToolResultMessage(toolCallId, toolName, result, true);
+	}
+
+	let isError = false;
+	let result: AgentToolResult<unknown>;
+
+	try {
+		await writeWithoutFollowingLinks(confined, Buffer.from(bytes));
+		result = {
+			content: [{ type: "text", text: `Successfully wrote ${bytes.byteLength} bytes to ${pathArg}` }],
+			details: { path: pathArg, bytes: bytes.byteLength },
+		};
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		result = buildToolErrorResult(message);
+		isError = true;
+	}
+
+	options.emitEvent?.({ type: "tool_execution_end", toolCallId, toolName, result, isError });
+	return createToolResultMessage(toolCallId, toolName, result, isError);
+}
+
 function decodeToolCallId(toolCallId?: string): string {
 	return toolCallId && toolCallId.length > 0 ? toolCallId : randomUUID();
 }
@@ -477,10 +537,20 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 
 	async write(args: Parameters<NonNullable<ICursorExecHandlers["write"]>>[0]) {
 		const toolCallId = decodeToolCallId(args.toolCallId);
-		const content = args.fileText ?? new TextDecoder().decode(args.fileBytes ?? new Uint8Array());
+		// `file_bytes` is raw octets; WriteTool would UTF-8 / newline-munge them.
+		// Proto3 empty `file_text` plus a raster path is the hosted-Imagine
+		// follow-up write — refuse it rather than truncating the PNG to 0 bytes.
+		const payload = cursorWritePayload(args);
+		if (payload.mode === "bytes") {
+			return await executeBinaryWrite(this.options, args.path, payload.bytes, toolCallId);
+		}
+		const emptyImageReason = emptyImageWriteReason(args.path, payload);
+		if (emptyImageReason) {
+			return createToolResultMessage(toolCallId, "write", buildToolErrorResult(emptyImageReason), true);
+		}
 		const toolResultMessage = await executeTool(this.options, "write", toolCallId, {
 			path: args.path,
-			content,
+			content: payload.text,
 		});
 		return toolResultMessage;
 	}

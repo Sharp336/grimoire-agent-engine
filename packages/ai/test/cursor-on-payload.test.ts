@@ -4,8 +4,10 @@
 // google: await the hook and use its non-undefined return as the request.
 // buildGrpcRequest is exercised directly (the transport is HTTP/2), and the
 // serialized run request is decoded back from the wire bytes.
+
 import { describe, expect, it } from "bun:test";
-import { buildGrpcRequest } from "@oh-my-pi/pi-ai/providers/cursor";
+import path from "node:path";
+import { buildGrpcRequest, toCursorFileUri } from "@oh-my-pi/pi-ai/providers/cursor";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { AgentClientMessageSchema } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
@@ -95,6 +97,85 @@ describe("cursor onPayload replacement", () => {
 		// The hook saw customSystemPrompt already applied (set before the hook) and
 		// returned a replacement that does not carry it — that replacement is final.
 		expect(message.value.customSystemPrompt).toBeUndefined();
+	});
+
+	it("seeds previousWorkspaceUris from cwd on a new conversation", async () => {
+		const cwd = path.resolve("/tmp/omp-payload-workspace");
+		const { conversationState } = await buildGrpcRequest(
+			model,
+			context,
+			{ cwd },
+			{
+				conversationId: "conv-workspace",
+				blobStore: new Map(),
+			},
+		);
+		expect(conversationState.previousWorkspaceUris).toEqual([toCursorFileUri(cwd)]);
+	});
+
+	it("prefers workspacePaths over cwd when seeding previousWorkspaceUris", async () => {
+		const cwd = path.resolve("/tmp/omp-payload-cwd");
+		const workspace = path.resolve("/tmp/omp-payload-workspace-override");
+		const { conversationState } = await buildGrpcRequest(
+			model,
+			context,
+			{ cwd, workspacePaths: [workspace] },
+			{ conversationId: "conv-workspace-override", blobStore: new Map() },
+		);
+		expect(conversationState.previousWorkspaceUris).toEqual([toCursorFileUri(workspace)]);
+	});
+
+	it("backfills an empty checkpoint previousWorkspaceUris from cwd", async () => {
+		const cwd = path.resolve("/tmp/omp-payload-empty-checkpoint");
+		const blobStore = new Map<string, Uint8Array>();
+		const seeded = await buildGrpcRequest(
+			model,
+			context,
+			{ cwd },
+			{
+				conversationId: "conv-workspace-empty",
+				blobStore,
+			},
+		);
+		seeded.conversationState.previousWorkspaceUris = [];
+		const { conversationState } = await buildGrpcRequest(
+			model,
+			context,
+			{ cwd },
+			{
+				conversationId: "conv-workspace-empty",
+				blobStore,
+				conversationState: seeded.conversationState,
+			},
+		);
+		expect(conversationState.previousWorkspaceUris).toEqual([toCursorFileUri(cwd)]);
+	});
+
+	it("appends the live cwd when a checkpoint already has a workspace URI", async () => {
+		const oldCwd = path.resolve("/tmp/omp-payload-old");
+		const cwd = path.resolve("/tmp/omp-payload-live");
+		const blobStore = new Map<string, Uint8Array>();
+		const seeded = await buildGrpcRequest(
+			model,
+			context,
+			{ cwd: oldCwd },
+			{
+				conversationId: "conv-workspace-cached",
+				blobStore,
+			},
+		);
+		expect(seeded.conversationState.previousWorkspaceUris).toEqual([toCursorFileUri(oldCwd)]);
+		const { conversationState } = await buildGrpcRequest(
+			model,
+			context,
+			{ cwd },
+			{
+				conversationId: "conv-workspace-cached",
+				blobStore,
+				conversationState: seeded.conversationState,
+			},
+		);
+		expect(conversationState.previousWorkspaceUris).toEqual([toCursorFileUri(oldCwd), toCursorFileUri(cwd)]);
 	});
 
 	it("lets the onPayload replacement override customSystemPrompt", async () => {

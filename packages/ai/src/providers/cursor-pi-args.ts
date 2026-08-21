@@ -1,22 +1,10 @@
 /**
- * Translate a Pi frame's args into the local tool kwargs that run it.
+ * Pure Pi-frame arg translation (no protobuf).
  *
- * Shared deliberately by three consumers: the provider synthesizes a display
- * block from these, the coding-agent bridge executes with them, and the legacy
- * pi shim performs the identical translation for the old wire. Separate
- * hand-rolled copies drift, and the drift is invisible — the transcript shows
- * one operation while a different one runs.
- *
- * Kept apart from `cursor/exec-modern.ts` on purpose: these are pure
- * string/path functions with no protobuf coupling, while that module pulls in
- * the generated cursor protobuf graph. The legacy shim is
- * compiled into the bundled virtual module registry, so importing it from a
- * nested path would drag the whole exec implementation in with it — and
- * `./providers/*` is a single-segment wildcard export that cannot serve a
- * nested specifier under bunfs (issue #3442).
- *
- * Every `optional int32` here is presence-sensitive: `0` is a supplied value,
- * not "unset", so it must never be folded into a default.
+ * Kept out of `cursor/exec-modern.ts` so the legacy pi shim can import these
+ * without pulling the generated cursor protobuf graph through the bundled
+ * virtual registry (`./providers/*` is a single-segment wildcard under bunfs).
+ * Every `optional int32` is presence-sensitive: `0` is a supplied value.
  */
 
 import * as path from "node:path";
@@ -220,4 +208,129 @@ export function omitUndefinedArgs<T extends Record<string, unknown>>(
 		if (value !== undefined) out[key] = value;
 	}
 	return out as { [K in keyof T]?: Exclude<T[K], undefined> };
+}
+
+export type CursorWritePayload = { mode: "bytes"; bytes: Uint8Array } | { mode: "text"; text: string };
+
+/** Cap decoded `file_bytes` / image_data so a hostile frame cannot fill the disk. */
+export const MAX_CURSOR_WRITE_BYTES = 32 * 1024 * 1024;
+
+const RASTER_IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|ico|tiff?|avif)$/i;
+
+/**
+ * Raster destination check. Strips a trailing Win32-ignored `.` / space and an
+ * NTFS ADS suffix (`dog.png:zone.identifier`) so those cannot bypass the
+ * empty-image guard and truncate the real PNG.
+ */
+export function isRasterImagePath(filePath: string): boolean {
+	const base = filePath.replace(/^.*[/\\]/, "").replace(/[.\s]+$/, "");
+	const withoutAds = base.replace(/:.*$/, "");
+	return RASTER_IMAGE_EXT.test(withoutAds);
+}
+
+/**
+ * Refuse a text write that would create or truncate a raster file to 0 bytes.
+ * Hosted GenerateImage delivers PNG octets in `file_bytes` / `image_data`; proto3
+ * leaves `file_text` as `""`, which looks like a successful empty write.
+ * Bytes payloads skip the guard — they already have the image.
+ */
+export function emptyImageWriteReason(filePath: string, payload: CursorWritePayload): string | undefined {
+	if (payload.mode === "bytes") return undefined;
+	if (payload.text.length > 0) return undefined;
+	if (!isRasterImagePath(filePath)) return undefined;
+	return (
+		"Refusing to write a 0-byte image. Hosted GenerateImage delivers PNG bytes in " +
+		"file_bytes or generate_image.image_data, not empty file_text."
+	);
+}
+
+/** Decoded `WriteArgs` fields the payload chooser reads. */
+export type CursorWriteArgsLike = {
+	fileText?: string;
+	fileBytes?: unknown;
+	encodingHint?: string;
+};
+
+function boundedBytes(bytes: Uint8Array): Uint8Array | undefined {
+	if (bytes.byteLength === 0 || bytes.byteLength > MAX_CURSOR_WRITE_BYTES) return undefined;
+	return bytes;
+}
+
+function decodeBase64(value: string, encoding: "base64" | "base64url"): Uint8Array | undefined {
+	try {
+		const decoded = Buffer.from(value, encoding);
+		if (decoded.byteLength === 0 || decoded.byteLength > MAX_CURSOR_WRITE_BYTES) return undefined;
+		// Buffer.from is permissive; reject strings that are not actually this encoding.
+		const roundTrip = decoded.toString(encoding).replace(/=+$/, "");
+		const compact = value.replace(/\s+/g, "").replace(/=+$/, "");
+		if (roundTrip !== compact) return undefined;
+		return new Uint8Array(decoded);
+	} catch {
+		return undefined;
+	}
+}
+
+/** Decode GenerateImageSuccess.image_data (proto string, base64 PNG). */
+export function decodeCursorImageData(imageData: string | undefined): Uint8Array | undefined {
+	if (!imageData) return undefined;
+	// Encoded size is ~4/3 of decoded bytes; reject before allocating the buffer.
+	if (imageData.length > Math.ceil((MAX_CURSOR_WRITE_BYTES * 4) / 3) + 8) return undefined;
+	return decodeBase64(imageData, "base64");
+}
+
+/**
+ * Coerce a WriteArgs `file_bytes` value into raw octets.
+ *
+ * Wire decode yields `Uint8Array`. JSON / JS bridges re-encode `bytes` as a
+ * base64 string or `{ type: "Buffer", data: number[] }` with no `byteLength`,
+ * so a Uint8Array-only check would fall through to proto3-empty `file_text`.
+ */
+export function decodeCursorWriteBytes(value: unknown): Uint8Array | undefined {
+	if (value == null) return undefined;
+	if (value instanceof Uint8Array) return boundedBytes(value);
+	if (
+		typeof value === "object" &&
+		value !== null &&
+		(value as { type?: string }).type === "Buffer" &&
+		"data" in value
+	) {
+		const data = (value as { data?: unknown }).data;
+		if (
+			Array.isArray(data) &&
+			data.length > 0 &&
+			data.length <= MAX_CURSOR_WRITE_BYTES &&
+			data.every(n => typeof n === "number")
+		) {
+			return boundedBytes(Uint8Array.from(data));
+		}
+	}
+	if (typeof value === "string" && value.length > 0) {
+		return decodeBase64(value, "base64");
+	}
+	return undefined;
+}
+
+/**
+ * Choose the payload a Cursor `WriteArgs` frame actually wants on disk.
+ *
+ * Proto3 `file_text` is a plain `string`, so an unset field decodes as `""`.
+ * Non-empty `file_bytes` (or `encoding_hint=base64` on `file_text`) wins and
+ * must be written raw. Imagine's PNG is `image_data` on the conversation step,
+ * not this frame — empty raster `writeArgs` are a clobber guard.
+ */
+export function cursorWritePayload(args: CursorWriteArgsLike): CursorWritePayload {
+	const bytes = decodeCursorWriteBytes(args.fileBytes);
+	if (bytes) return { mode: "bytes", bytes };
+	const text = args.fileText ?? "";
+	const hint = args.encodingHint?.trim().toLowerCase();
+	if (text && (hint === "base64" || hint === "base64url")) {
+		const decoded = decodeBase64(text, hint === "base64url" ? "base64url" : "base64");
+		if (decoded) return { mode: "bytes", bytes: decoded };
+	}
+	return { mode: "text", text };
+}
+
+/** Transcript/display form: never dump raw image bytes into a text block. */
+export function cursorWriteDisplayContent(payload: CursorWritePayload): string {
+	return payload.mode === "bytes" ? `[binary ${payload.bytes.byteLength} bytes]` : payload.text;
 }

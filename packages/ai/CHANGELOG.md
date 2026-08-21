@@ -17,6 +17,7 @@
 - Fixed Google Cloud Code Assist and Antigravity rejecting MCP tool schemas with unsupported annotations (`x-mcp-header`, `deprecated`, `readOnly`, `writeOnly`, `$comment`).
 - Fixed Cursor provider issues with native file edit streaming (`editToolCall`) and ensuring always-apply system rules are properly preserved.
 - Fixed Cursor HTTP/2 requests ignoring standard proxy environment variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`).
+- Fixed Cursor hosted GenerateImage failing with "Workspace folder not found" and writing 0-byte PNGs: `requestContext` now sends the session workspace, Imagine `image_data` is saved into the repo, and empty image writes are rejected.
 
 ## [17.4.0] - 2026-08-20
 

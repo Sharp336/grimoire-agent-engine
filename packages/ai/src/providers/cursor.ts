@@ -104,7 +104,6 @@ import {
 	RecordScreenFailureSchema,
 	RecordScreenResultSchema,
 	RequestContextResultSchema,
-	RequestContextSchema,
 	RequestContextSuccessSchema,
 	RequestedModelSchema,
 	ResumeActionSchema,
@@ -223,6 +222,9 @@ import {
 	buildPiWriteRejected,
 	buildPiWriteResult,
 	cursorEditOwnedReadPath,
+	cursorWriteDisplayContent,
+	cursorWritePayload,
+	emptyImageWriteReason,
 	omitUndefinedArgs,
 	piEscapeRegexLiteral,
 	piGrepSkip,
@@ -234,6 +236,28 @@ import {
 	piTimeout,
 } from "./cursor/exec-modern";
 import { handleInteractionQuery } from "./cursor/interaction-query";
+import {
+	buildCursorRequestContext,
+	confineCursorWorkspacePath,
+	cursorPreviousWorkspaceUris,
+	mergeCursorPreviousWorkspaceUris,
+	normalizeCursorFsPath,
+	remapCursorArtifactPath,
+	resolveCursorWorkspacePaths,
+} from "./cursor/workspace";
+import { persistGenerateImageResult, selectGenerateImageCall } from "./cursor-generate-image";
+
+export {
+	buildCursorRequestContext,
+	confineCursorWorkspacePath,
+	cursorPreviousWorkspaceUris,
+	cursorProjectFolder,
+	mergeCursorPreviousWorkspaceUris,
+	normalizeCursorFsPath,
+	remapCursorArtifactPath,
+	resolveCursorWorkspacePaths,
+	toCursorFileUri,
+} from "./cursor/workspace";
 
 export const CURSOR_API_URL = "https://api2.cursor.sh";
 export const CURSOR_CLIENT_VERSION = "cli-2026.07.23-e383d2b";
@@ -330,6 +354,8 @@ export interface CursorOptions extends StreamOptions {
 	conversationId?: string;
 	execHandlers?: CursorExecHandlers;
 	onToolResult?: CursorToolResultHandler;
+	/** Extra workspace roots for Cursor requestContext (defaults to `cwd`). */
+	workspacePaths?: string[];
 }
 
 const CONNECT_END_STREAM_FLAG = 0b00000010;
@@ -729,6 +755,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 				setFirstTokenTime: () => {
 					if (!firstTokenTime) firstTokenTime = performance.now();
 				},
+				workspacePaths: resolveCursorWorkspacePaths(options),
 				onTodoSnapshot: options?.execHandlers?.todoSync?.bind(options.execHandlers),
 				onToolResult: options?.onToolResult,
 			};
@@ -796,6 +823,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 							requestContextTools,
 							requestContextRules,
 							onConversationCheckpoint,
+							resolveCursorWorkspacePaths(options),
 						).catch(error => {
 							log("error", "handleServerMessage", { error: String(error) });
 						});
@@ -956,7 +984,14 @@ export type ToolCallState = ToolCall & {
 	[kStreamingBlockIndex]: number;
 	[kStreamingPartialJson]?: string;
 	[kStreamingLastParseLen]?: number;
-	[kStreamingBlockKind]: "mcp" | "todo" | "cursor-exec" | "cursor-edit" | "connect-scm" | "web-fetch";
+	[kStreamingBlockKind]:
+		| "mcp"
+		| "todo"
+		| "cursor-exec"
+		| "cursor-edit"
+		| "connect-scm"
+		| "web-fetch"
+		| "generate-image";
 	[kStreamingEnvelopeId]?: string;
 	[kCursorExecResolved]?: true;
 };
@@ -994,6 +1029,10 @@ export interface BlockState {
 	setThinkingBlock: (b: (ThinkingContent & { [kStreamingBlockIndex]: number }) | null) => void;
 	setToolCall: (t: ToolCallState | null) => void;
 	setFirstTokenTime: () => void;
+	/** Session cwd / extra roots used to confine hosted GenerateImage writes. */
+	workspacePaths?: string[];
+	/** Absolute paths persisted from hosted GenerateImage this turn; later writeArgs must not clobber them. */
+	persistedGenerateImagePaths?: Set<string>;
 	/** Mirror a server-confirmed todo snapshot into local session state. */
 	onTodoSnapshot?: CursorTodoSyncHandler;
 	/**
@@ -1026,6 +1065,7 @@ export async function handleServerMessage(
 	requestContextTools: McpToolDefinition[],
 	requestContextRules: CursorRule[] = [],
 	onConversationCheckpoint?: (checkpoint: ConversationStateStructure) => void,
+	workspacePaths: string[] = [],
 ): Promise<void> {
 	const msgCase = msg.message.case;
 
@@ -1051,6 +1091,7 @@ export async function handleServerMessage(
 				output,
 				stream,
 				state,
+				workspacePaths,
 			),
 		);
 	} else if (msgCase === "interactionQuery") {
@@ -1469,20 +1510,12 @@ async function handleExecServerMessage(
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
 	state: BlockState,
+	workspacePaths: string[] = [],
 ): Promise<void> {
 	const execCase = execMsg.message.case;
 	log("exec", "dispatch", { execCase, execId: execMsg.execId, hasHandlers: !!execHandlers });
 	if (execCase === "requestContextArgs") {
-		const requestContext = create(RequestContextSchema, {
-			rules: requestContextRules,
-			repositoryInfo: [],
-			tools: requestContextTools,
-			gitRepos: [],
-			projectLayouts: [],
-			mcpInstructions: [],
-			fileContents: {},
-			customSubagents: [],
-		});
+		const requestContext = buildCursorRequestContext(requestContextTools, workspacePaths, requestContextRules);
 
 		const requestContextResult = create(RequestContextResultSchema, {
 			result: {
@@ -1606,14 +1639,42 @@ async function handleExecServerMessage(
 		}
 		case "writeArgs": {
 			const args = execMsg.message.value;
+			// Imagine `file_path` is under `env.project_folder`. Remap onto the
+			// workspace; relative non-artifact paths come back unchanged so the
+			// bridge still resolves them against session cwd, not process.cwd().
+			args.path = remapCursorArtifactPath(args.path, workspacePaths);
 			if (!args.toolCallId) args.toolCallId = crypto.randomUUID();
 			const editOwned = isEditOwnedToolCallId(state, output, args.toolCallId);
-			// Match the bridge: prefer `fileText`, fall back to decoded `fileBytes`.
-			const content = args.fileText ?? new TextDecoder().decode(args.fileBytes ?? new Uint8Array());
+			// Proto3 `file_text` is `""` when unset. Hosted GenerateImage already
+			// persisted `image_data`; a follow-up writeArgs with empty text would
+			// truncate that PNG. Compare the confined path so a relative writeArgs
+			// still hits the persist set when session cwd ≠ process.cwd().
+			const payload = cursorWritePayload(args);
+			const confined = confineCursorWorkspacePath(args.path, workspacePaths);
+			const alreadyPersisted = confined
+				? state.persistedGenerateImagePaths?.has(normalizeCursorFsPath(confined))
+				: false;
+			const emptyImageReason = alreadyPersisted
+				? "Refusing to overwrite a generated image that was already saved this turn."
+				: emptyImageWriteReason(args.path, payload);
+			if (emptyImageReason) {
+				synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "write", {
+					path: args.path,
+					content: cursorWriteDisplayContent(payload),
+				});
+				sendExecClientMessage(
+					h2Request,
+					execMsg,
+					"writeResult",
+					buildWriteRejectedResult(args.path, emptyImageReason),
+				);
+				await pairSynthesizedExecResult(state, onToolResult, args.toolCallId, "write", emptyImageReason, true);
+				return;
+			}
 			if (!editOwned) {
 				synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "write", {
 					path: args.path,
-					content,
+					content: cursorWriteDisplayContent(payload),
 				});
 			}
 			const write = execHandlers?.write?.bind(execHandlers);
@@ -2748,8 +2809,9 @@ function buildWriteResultFromToolResult(
 	if (toolResult.isError) {
 		return buildWriteErrorResult(args.path, text || "Write failed");
 	}
-	const fileText = args.fileText ?? "";
-	const fileSize = args.fileBytes?.length ?? Buffer.byteLength(fileText, "utf-8");
+	const payload = cursorWritePayload(args);
+	const fileText = payload.mode === "text" ? payload.text : "";
+	const fileSize = payload.mode === "bytes" ? payload.bytes.byteLength : Buffer.byteLength(fileText, "utf-8");
 	const linesCreated = fileText ? fileText.split("\n").length : 0;
 	return create(WriteResultSchema, {
 		result: {
@@ -3554,7 +3616,7 @@ export function flushOpenToolCalls(
 			clearStreamingPartialJson(block);
 		}
 		const kind = block[kStreamingBlockKind];
-		if (kind === "connect-scm" || kind === "todo" || kind === "cursor-edit") {
+		if (kind === "connect-scm" || kind === "todo" || kind === "cursor-edit" || kind === "generate-image") {
 			if (!(kind === "cursor-edit" && state.pairedEditToolCallIds?.has(block.id))) {
 				state.onToolResult?.({
 					role: "toolResult",
@@ -4210,6 +4272,29 @@ export function processInteractionUpdate(
 				return;
 			}
 
+			const generateImageCall = selectGenerateImageCall(toolCall);
+			if (generateImageCall) {
+				const filePath = generateImageCall.args?.filePath;
+				const callId = update.message.value.callId || crypto.randomUUID();
+				const block: ToolCallState = {
+					type: "toolCall",
+					id: callId,
+					name: "generate_image",
+					arguments: {
+						path: filePath,
+						description: generateImageCall.args?.description,
+					},
+					[kStreamingBlockIndex]: output.content.length,
+					[kStreamingBlockKind]: "generate-image",
+					[kStreamingEnvelopeId]: update.message.value.callId || undefined,
+					[kCursorExecResolved]: true,
+				};
+				output.content.push(block);
+				retainStreamedCall(state, block, update.message.value.callId);
+				stream.push({ type: "toolcall_start", contentIndex: output.content.length - 1, partial: output });
+				return;
+			}
+
 			openOrUpdateEditBlock(output, stream, state, toolCall, update.message.value.callId);
 		}
 	} else if (updateCase === "toolCallDelta" || updateCase === "partialToolCall") {
@@ -4311,6 +4396,33 @@ export function processInteractionUpdate(
 					role: "toolResult",
 					toolCallId: settled.id,
 					toolName: "web_fetch",
+					content: [{ type: "text", text }],
+					isError,
+					timestamp: Date.now(),
+				});
+			} else if (settled[kStreamingBlockKind] === "generate-image") {
+				// Persist here: this conversation step carries `image_data`. The
+				// later `writeArgs` is proto3-empty `file_text` and must not be
+				// the write that creates the file.
+				const generateImageCall = selectGenerateImageCall(toolCall);
+				const persisted = persistGenerateImageResult(generateImageCall, state.workspacePaths ?? []);
+				const { text, isError } = persisted;
+				if (persisted.filePath || generateImageCall?.args?.description || generateImageCall?.args?.filePath) {
+					settled.arguments = {
+						path: persisted.filePath ?? generateImageCall?.args?.filePath,
+						description: generateImageCall?.args?.description,
+					};
+				}
+				if (persisted.filePath) {
+					if (!state.persistedGenerateImagePaths) {
+						state.persistedGenerateImagePaths = new Set();
+					}
+					state.persistedGenerateImagePaths.add(normalizeCursorFsPath(persisted.filePath));
+				}
+				state.onToolResult?.({
+					role: "toolResult",
+					toolCallId: settled.id,
+					toolName: "generate_image",
 					content: [{ type: "text", text }],
 					isError,
 					timestamp: Date.now(),
@@ -5084,6 +5196,7 @@ export async function buildGrpcRequest(
 		model.id,
 	);
 
+	const workspaceUris = cursorPreviousWorkspaceUris(options);
 	// Preserve cached non-history state fields (todos, file states, summaries, etc.)
 	// when the system prompt is unchanged; otherwise start fresh.
 	const cachedPromptHead = state.conversationState?.rootPromptMessagesJson?.slice(0, systemPromptIds.length) ?? [];
@@ -5098,7 +5211,7 @@ export async function buildGrpcRequest(
 					turns: [],
 					todos: [],
 					pendingToolCalls: [],
-					previousWorkspaceUris: [],
+					previousWorkspaceUris: workspaceUris,
 					fileStates: {},
 					fileStatesV2: {},
 					summaryArchives: [],
@@ -5115,6 +5228,7 @@ export async function buildGrpcRequest(
 		...baseState,
 		rootPromptMessagesJson,
 		turns,
+		previousWorkspaceUris: mergeCursorPreviousWorkspaceUris(baseState.previousWorkspaceUris, workspaceUris),
 	});
 
 	const wireModelId = model.requestModelId ?? model.id;
