@@ -6,8 +6,11 @@ on:
     paths:
       - .github/fork-release-native-manifest.json
       - .github/scripts/fork-release-native.sh
+      - .github/workflows/ci.yml
       - .github/workflows/fork-release.yml
       - .github/workflows/verify-fork-release-pr.yml
+      - scripts/install.sh
+      - scripts/install.ps1
 
 permissions:
   contents: write
@@ -51,7 +54,7 @@ jobs:
             bash .github/scripts/fork-release-native.sh "$target" "$RUNNER_TEMP/native-$target"
           done
 
-      - name: Generate coherent release and installer files
+      - name: Generate final release, CI, and installer files
         shell: bash
         run: |
           set -euo pipefail
@@ -67,8 +70,22 @@ jobs:
           release = release.replace('-f make_latest=false', '-f make_latest=true')
           (generated / 'fork-release.yml').write_text(release)
 
-          install_path = Path('scripts/install.sh')
-          install_sh = install_path.read_text().replace(
+          ci_lines = Path('.github/workflows/ci.yml').read_text().splitlines()
+          ci_start = ci_lines.index('              tarball="$(npm view @oh-my-pi/pi-natives-linux-x64@17.4.0 dist.tarball)"')
+          expected_ci = [
+              '              tarball="$(npm view @oh-my-pi/pi-natives-linux-x64@17.4.0 dist.tarball)"',
+              '              echo "Fetching $tarball"',
+              '              curl -fsSL --retry 3 "$tarball" | tar -xz -C "$RUNNER_TEMP"',
+          ]
+          if ci_lines[ci_start:ci_start + len(expected_ci)] != expected_ci:
+              raise SystemExit('ordinary CI native download block changed unexpectedly')
+          ci_lines[ci_start:ci_start + len(expected_ci)] = [
+              '              native_dir="$RUNNER_TEMP/package"',
+              '              bash .github/scripts/fork-release-native.sh linux-x64 "$native_dir"',
+          ]
+          (generated / 'ci.yml').write_text('\n'.join(ci_lines) + '\n')
+
+          install_sh = Path('scripts/install.sh').read_text().replace(
               'https://raw.githubusercontent.com/can1357/oh-my-pi/main/scripts/install.sh',
               'https://raw.githubusercontent.com/jchanghong023/oh-my-pi/main/scripts/install.sh',
           )
@@ -112,6 +129,37 @@ jobs:
               '    fi',
           ]
 
+          smoke_comment = lines.index('    # Verify the freshly installed binary can actually start before reporting')
+          expected_comment = [
+              '    # Verify the freshly installed binary can actually start before reporting',
+              "    # success. Bun's musl-target binaries link libstdc++/libgcc dynamically,",
+              '    # which stock Alpine/musl systems do not ship, so the download succeeds while',
+              '    # the binary exits 127 with relocation errors. Never claim success for a',
+              '    # binary that cannot run.',
+          ]
+          if lines[smoke_comment:smoke_comment + len(expected_comment)] != expected_comment:
+              raise SystemExit('install.sh binary smoke comment changed unexpectedly')
+          lines[smoke_comment:smoke_comment + len(expected_comment)] = [
+              '    # Verify the freshly installed binary can actually start before reporting',
+              '    # success; never claim success for a download that cannot run.',
+          ]
+
+          stale_musl = lines.index('        if [ "$PLATFORM" = "linux-musl" ]; then')
+          expected_stale = [
+              '        if [ "$PLATFORM" = "linux-musl" ]; then',
+              '            echo ""',
+              '            echo "The musl build links libstdc++/libgcc dynamically. Install them, then re-run \'omp\':"',
+              '            if command -v apk >/dev/null 2>&1; then',
+              '                echo "    apk add libstdc++ libgcc"',
+              '            else',
+              '                echo "    (install the libstdc++ and libgcc runtime packages for your distro)"',
+              '            fi',
+              '        fi',
+          ]
+          if lines[stale_musl:stale_musl + len(expected_stale)] != expected_stale:
+              raise SystemExit('install.sh stale musl diagnostic changed unexpectedly')
+          del lines[stale_musl:stale_musl + len(expected_stale)]
+
           main_logic = lines.index('# Main logic')
           source_index = lines.index('    source)', main_logic)
           if lines[source_index + 1] != '        if ! has_bun; then':
@@ -122,12 +170,11 @@ jobs:
               '        fi',
           ]
           install_sh = '\n'.join(lines) + '\n'
-          if 'PLATFORM="darwin"' in install_sh or 'PLATFORM="linux-musl"' in install_sh:
+          if 'PLATFORM="darwin"' in install_sh or 'linux-musl' in install_sh:
               raise SystemExit('unsupported binary platform remains in install.sh')
           (generated / 'install.sh').write_text(install_sh)
 
-          ps_path = Path('scripts/install.ps1')
-          install_ps1 = ps_path.read_text().replace(
+          install_ps1 = Path('scripts/install.ps1').read_text().replace(
               'https://raw.githubusercontent.com/can1357/oh-my-pi/main/scripts/install.ps1',
               'https://raw.githubusercontent.com/jchanghong023/oh-my-pi/main/scripts/install.ps1',
           )
@@ -146,5 +193,5 @@ jobs:
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add -- .github/generated
-          git commit -m "ci: stage coherent release installer files"
+          git commit -m "ci: stage final release and installer files"
           git push origin HEAD:optimize-fork-release-pipeline
