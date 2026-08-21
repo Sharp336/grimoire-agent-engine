@@ -184,7 +184,8 @@ function getEvalAncestorContext(session: ToolSession): EvalSubagentContext | und
 export function getEffectiveEvalTurnBudget(session: ToolSession): EvalTurnBudget | undefined {
 	const ancestorContext = getEvalAncestorContext(session);
 	const localBudget = session.getTurnBudget?.();
-	const ancestorBudget = ancestorContext?.getTurnBudget?.();
+	if (!ancestorContext) return localBudget;
+	const ancestorBudget = ancestorContext.getTurnBudget?.();
 	if (!ancestorBudget) return localBudget;
 	if (!localBudget) return ancestorBudget;
 	const unforwardedLocalOutput = Math.max(0, localBudget.spent - ancestorContext.forwardedOutput);
