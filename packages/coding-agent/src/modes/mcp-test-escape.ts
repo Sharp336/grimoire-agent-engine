@@ -17,8 +17,14 @@ export type McpTestEscDecision = "abort" | "consume" | "fallthrough";
 export class McpTestEscapeState {
 	#active: { abortController: AbortController; name: string; settledAt?: number; cancelled?: boolean } | undefined;
 
-	/** Register an in-flight test. Replaces any previous active state (concurrent tests are not supported). */
+	/** Register an in-flight test. Supersedes any previous active state (concurrent tests are not
+	 *  supported): a still-pending predecessor is aborted so its connection attempt and subprocess
+	 *  are not orphaned when Esc ownership moves to the new test. */
 	begin(abortController: AbortController, name: string): void {
+		const previous = this.#active;
+		if (previous && previous.settledAt === undefined) {
+			previous.abortController.abort();
+		}
 		this.#active = { abortController, name };
 	}
 

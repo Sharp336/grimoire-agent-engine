@@ -47,7 +47,16 @@ function createController(authStorage: AuthStorage, mcpManagerOverrides: Record<
 	const showStatus = vi.fn();
 	const present = vi.fn();
 	const editor: { onEscape?: () => void } = {};
-	const beginMcpTest = vi.fn();
+	const beginMcpTest = vi.fn((_abortController: AbortController, _name: string) => {
+		// Mirror McpTestEscapeState.begin: superseding a still-pending test
+		// aborts its predecessor so the first connection attempt is not
+		// orphaned when Esc ownership moves to the new test. mock.calls
+		// already contains the current call, so the predecessor is at -2.
+		const prior = beginMcpTest.mock.calls.at(-2)?.[0] as AbortController | undefined;
+		if (prior && prior !== _abortController && !prior.signal.aborted) {
+			prior.abort();
+		}
+	});
 	const settleMcpTest = vi.fn();
 	const prepareConfig = vi.fn(async (config: MCPServerConfig) => config);
 	const mcpManager = {
@@ -574,6 +583,64 @@ describe("/mcp auth commands", () => {
 		expect(showError).toHaveBeenCalledWith(expect.stringContaining('Server "nonexistent" not found'));
 		expect(beginMcpTest).not.toHaveBeenCalled();
 		expect(settleMcpTest).not.toHaveBeenCalled();
+	});
+
+	test("a second /mcp test supersedes a pending one by aborting its connection", async () => {
+		const authStorage = freshAuthStorage();
+		await authStorage.reload();
+		const signals: AbortSignal[] = [];
+		vi.spyOn(mcpClient, "connectToServer").mockImplementation((_name, _config, options) => {
+			signals.push(options?.signal as AbortSignal);
+			const pending = Promise.withResolvers<never>();
+			const reject = (): void => pending.reject(new DOMException("Aborted", "AbortError"));
+			const signal = options?.signal;
+			if (signal?.aborted) {
+				reject();
+			} else {
+				signal?.addEventListener("abort", reject, { once: true });
+			}
+			return pending.promise;
+		});
+		vi.spyOn(mcpClient, "listTools").mockResolvedValue([]);
+		const { controller, showStatus, beginMcpTest } = createController(authStorage);
+
+		const first = controller.handle("/mcp test envserver");
+		const deadline = Date.now() + 1_000;
+		while (beginMcpTest.mock.calls.length < 1 && Date.now() < deadline) {
+			await Bun.sleep(10);
+		}
+		const second = controller.handle("/mcp test envserver");
+		while (beginMcpTest.mock.calls.length < 2 && Date.now() < deadline) {
+			await Bun.sleep(10);
+		}
+		expect(beginMcpTest).toHaveBeenCalledTimes(2);
+
+		// The superseded test's connection attempt is aborted when the new test
+		// takes over Esc ownership; the new test's signal stays untouched.
+		expect(signals[0]?.aborted).toBe(true);
+		expect(signals[1]?.aborted).toBe(false);
+
+		// The first command resolves as cancelled; the second is still pending.
+		await Promise.race([
+			first,
+			Bun.sleep(2_000).then(() => {
+				throw new Error("superseded /mcp test did not resolve within 2s");
+			}),
+		]);
+		expect(showStatus).toHaveBeenCalledWith('Cancelled MCP test for "envserver"');
+		expect(signals[1]?.aborted).toBe(false);
+
+		// Esc now owns only the second test: cancelling it resolves the command.
+		const [secondController] = beginMcpTest.mock.calls[1] as [AbortController, string];
+		secondController.abort();
+		await Promise.race([
+			second,
+			Bun.sleep(2_000).then(() => {
+				throw new Error("active /mcp test did not resolve within 2s of Esc");
+			}),
+		]);
+		expect(signals[1]?.aborted).toBe(true);
+		expect(showStatus).toHaveBeenCalledTimes(2);
 	});
 
 	test("reauth supersedes an unfinished MCP OAuth flow", async () => {

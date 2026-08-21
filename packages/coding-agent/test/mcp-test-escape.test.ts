@@ -60,6 +60,21 @@ describe("McpTestEscapeState", () => {
 		expect(state.cancelled).toBe(false);
 	});
 
+	test("begin supersedes a pending test by aborting its predecessor", () => {
+		const state = new McpTestEscapeState();
+		const first = new AbortController();
+		const second = new AbortController();
+		state.begin(first, "old");
+		state.begin(second, "new");
+
+		// The orphaned predecessor's connection attempt must not survive the
+		// Esc-ownership handover.
+		expect(first.signal.aborted).toBe(true);
+		expect(second.signal.aborted).toBe(false);
+		expect(state.handleEscape()).toBe("abort");
+		expect(second.signal.aborted).toBe(true);
+	});
+
 	test("a superseded test cannot settle or cancel the newer one", () => {
 		const state = new McpTestEscapeState();
 		const first = new AbortController();
@@ -71,6 +86,7 @@ describe("McpTestEscapeState", () => {
 		expect(state.hasActive()).toBe(true);
 		expect(state.handleEscape()).toBe("abort");
 		expect(second.signal.aborted).toBe(true);
-		expect(first.signal.aborted).toBe(false);
+		// The superseded test was aborted by begin, not by this Esc.
+		expect(first.signal.aborted).toBe(true);
 	});
 });
