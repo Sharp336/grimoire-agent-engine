@@ -1,13 +1,19 @@
 import { describe, expect, test } from "bun:test";
+import type { ExtensionUISelectItem } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import {
-	buildRpcSelectRequestOptions,
 	dispatchRpcInputFrame,
-	parseValueDialogResponse,
 	type PendingExtensionRequest,
+	parseValueDialogResponse,
+	RpcExtensionUIContext,
 	type RpcInputFrameDeps,
 	RpcShutdownCoordinator,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
-import type { RpcCommand, RpcExtensionUIResponse, RpcResponse } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
+import type {
+	RpcCommand,
+	RpcExtensionUIRequest,
+	RpcExtensionUIResponse,
+	RpcResponse,
+} from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
 
 type OutputFrame = RpcResponse | object;
 
@@ -363,48 +369,73 @@ describe("RpcShutdownCoordinator", () => {
 	});
 });
 
-describe("buildRpcSelectRequestOptions", () => {
-	test("preserves legacy label-only select requests", () => {
-		expect(buildRpcSelectRequestOptions(["Alpha", "Beta"])).toEqual({ options: ["Alpha", "Beta"] });
+describe("RpcExtensionUIContext", () => {
+	const selectThroughRpcContext = async (options: ExtensionUISelectItem[], selectedValue: string) => {
+		const pending = new Map<string, PendingExtensionRequest>();
+		const outputs: object[] = [];
+		const context = new RpcExtensionUIContext(pending, output => outputs.push(output));
+		const selection = context.select("Pick one", options);
+
+		expect(outputs).toHaveLength(1);
+		const request = outputs[0] as Extract<RpcExtensionUIRequest, { method: "select" }>;
+		expect(request).toMatchObject({ type: "extension_ui_request", method: "select", title: "Pick one" });
+		const pendingRequest = pending.get(request.id);
+		expect(pendingRequest).toBeDefined();
+		pendingRequest!.resolve({ type: "extension_ui_response", id: request.id, value: selectedValue });
+
+		return { request, selection: await selection };
+	};
+
+	test("emits legacy label-only select requests", async () => {
+		const { request, selection } = await selectThroughRpcContext(["Alpha", "Beta"], "Beta");
+
+		expect(request.options).toEqual(["Alpha", "Beta"]);
+		expect(request).not.toHaveProperty("optionDetails");
+		expect(selection).toBe("Beta");
 	});
 
-	test("emits aligned details for described options", () => {
-		expect(
-			buildRpcSelectRequestOptions([
+	test("emits aligned details for described options", async () => {
+		const { request, selection } = await selectThroughRpcContext(
+			[
 				{ label: "Alpha", description: "First choice" },
 				{ label: "Beta", description: "Second choice" },
-			]),
-		).toEqual({
-			options: ["Alpha", "Beta"],
-			optionDetails: [{ description: "First choice" }, { description: "Second choice" }],
-		});
+			],
+			"Beta",
+		);
+
+		expect(request.options).toEqual(["Alpha", "Beta"]);
+		expect(request.optionDetails).toEqual([{ description: "First choice" }, { description: "Second choice" }]);
+		expect(selection).toBe("Beta");
 	});
 
-	test("keeps mixed labels and descriptions index-aligned", () => {
-		expect(
-			buildRpcSelectRequestOptions([
+	test("keeps mixed labels and descriptions index-aligned", async () => {
+		const { request } = await selectThroughRpcContext(
+			[
 				"Alpha",
 				{ label: "Beta (Recommended)", description: "Recommended choice" },
 				{ label: "Gamma", description: " \t" },
 				"Other (type your own)",
-			]),
-		).toEqual({
-			options: ["Alpha", "Beta (Recommended)", "Gamma", "Other (type your own)"],
-			optionDetails: [{}, { description: "Recommended choice" }, {}, {}],
-		});
+			],
+			"Other (type your own)",
+		);
+
+		expect(request.options).toEqual(["Alpha", "Beta (Recommended)", "Gamma", "Other (type your own)"]);
+		expect(request.optionDetails).toEqual([{}, { description: "Recommended choice" }, {}, {}]);
 	});
 
-	test("omits whitespace-only descriptions and metadata when none are usable", () => {
-		expect(
-			buildRpcSelectRequestOptions([
-				{ label: "Alpha", description: " \t\n" },
-				{ label: "Beta" },
-			]),
-		).toEqual({ options: ["Alpha", "Beta"] });
+	test("omits whitespace-only descriptions and metadata when none are usable", async () => {
+		const { request } = await selectThroughRpcContext(
+			[{ label: "Alpha", description: " \t\n" }, { label: "Beta" }],
+			"Beta",
+		);
+
+		expect(request.options).toEqual(["Alpha", "Beta"]);
+		expect(request).not.toHaveProperty("optionDetails");
 	});
 });
 
-test("returns selected label unchanged from a select response", () => {
+describe("parseValueDialogResponse", () => {
+	test("returns selected label unchanged from a select response", () => {
 		const response: RpcExtensionUIResponse = {
 			type: "extension_ui_response",
 			id: "select-1",
@@ -412,3 +443,4 @@ test("returns selected label unchanged from a select response", () => {
 		};
 		expect(parseValueDialogResponse(response, undefined)).toBe("Beta (Recommended)");
 	});
+});

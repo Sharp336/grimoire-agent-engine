@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserve described select-option metadata in RPC requests while keeping selected responses label-only ([#9175](https://github.com/can1357/oh-my-pi/issues/9175))
+
 ## [16.3.12] - 2026-07-08
 
 ### Added
