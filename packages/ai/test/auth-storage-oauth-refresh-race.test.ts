@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, setSystemTime, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -16,6 +17,17 @@ const SUPPRESS_ANTHROPIC_ENV = {
 	ANTHROPIC_API_KEY: undefined,
 	ANTHROPIC_OAUTH_TOKEN: undefined,
 } as const;
+function readCredentialData(db: Database, credentialId: number): string {
+	const row: unknown = db.prepare("SELECT data FROM auth_credentials WHERE id = ?").get(credentialId);
+	if (!row || typeof row !== "object" || !("data" in row) || typeof row.data !== "string") {
+		throw new Error(`credential ${credentialId} not found`);
+	}
+	return row.data;
+}
+
+function writeCredentialData(db: Database, credentialId: number, data: string): void {
+	db.prepare("UPDATE auth_credentials SET data = ? WHERE id = ?").run(data, credentialId);
+}
 
 describe("AuthStorage OAuth refresh race", () => {
 	let tempDir = "";
@@ -45,6 +57,161 @@ describe("AuthStorage OAuth refresh race", () => {
 			await removeWithRetries(tempDir);
 			tempDir = "";
 		}
+	});
+
+	test("matches semantically identical external JSON TEXT while preserving peer rotations", async () => {
+		if (!authStorage || !store?.tryUpdateAuthCredentialIfMatches) throw new Error("test setup failed");
+
+		const provider = "unit-semantic-cas";
+		const dbPath = path.join(tempDir, "agent.db");
+		await authStorage.set(provider, [
+			{
+				type: "oauth",
+				access: "stale-access",
+				refresh: "stale-refresh",
+				expires: 1_700_000_000_000,
+			},
+		]);
+		const storedBefore = store.listAuthCredentials(provider);
+		expect(storedBefore).toHaveLength(1);
+		const credentialId = storedBefore[0]!.id;
+
+		const externalWriter = new Database(dbPath);
+		try {
+			const expectedData = readCredentialData(externalWriter, credentialId);
+			const parsedExpected = JSON.parse(expectedData) as Record<string, unknown>;
+			const differentlySerializedData = JSON.stringify(
+				Object.fromEntries(Object.entries(parsedExpected).reverse()),
+				null,
+				2,
+			);
+			expect(differentlySerializedData).not.toBe(expectedData);
+			writeCredentialData(externalWriter, credentialId, differentlySerializedData);
+
+			expect(
+				store.tryUpdateAuthCredentialIfMatches(credentialId, expectedData, {
+					type: "oauth",
+					access: "locally-refreshed-access",
+					refresh: "locally-refreshed-refresh",
+					expires: 1_800_000_000_000,
+				}),
+			).toBe(true);
+
+			const locallyRefreshedData = readCredentialData(externalWriter, credentialId);
+			const peerRotationData = JSON.stringify(
+				{
+					refresh: "peer-refresh",
+					expires: 1_900_000_000_000,
+					access: "peer-access",
+				},
+				null,
+				2,
+			);
+			writeCredentialData(externalWriter, credentialId, peerRotationData);
+			expect(
+				store.tryUpdateAuthCredentialIfMatches(credentialId, locallyRefreshedData, {
+					type: "oauth",
+					access: "stale-writer-access",
+					refresh: "stale-writer-refresh",
+					expires: 2_000_000_000_000,
+				}),
+			).toBe(false);
+		} finally {
+			externalWriter.close();
+		}
+
+		const storedAfter = store.listAuthCredentials(provider);
+		expect(storedAfter).toHaveLength(1);
+		expect(storedAfter[0]?.credential).toMatchObject({
+			type: "oauth",
+			access: "peer-access",
+			refresh: "peer-refresh",
+			expires: 1_900_000_000_000,
+		});
+	});
+
+	test("disables after semantically identical external JSON TEXT serialization", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+
+		const provider = "unit-semantic-disable-cas";
+		const dbPath = path.join(tempDir, "agent.db");
+		await authStorage.set(provider, [
+			{
+				type: "oauth",
+				access: "expired-access",
+				refresh: "invalid-refresh",
+				expires: 1_700_000_000_000,
+			},
+		]);
+		const storedBefore = store.listAuthCredentials(provider);
+		expect(storedBefore).toHaveLength(1);
+		const credentialId = storedBefore[0]!.id;
+
+		const externalWriter = new Database(dbPath);
+		try {
+			const expectedData = readCredentialData(externalWriter, credentialId);
+			const parsedExpected = JSON.parse(expectedData) as Record<string, unknown>;
+			const differentlySerializedData = JSON.stringify(
+				Object.fromEntries(Object.entries(parsedExpected).reverse()),
+				null,
+				2,
+			);
+			expect(differentlySerializedData).not.toBe(expectedData);
+			writeCredentialData(externalWriter, credentialId, differentlySerializedData);
+
+			expect(store.tryDisableAuthCredentialIfMatches(credentialId, expectedData, "definitive invalid_grant")).toBe(
+				true,
+			);
+			const disabledRow = externalWriter
+				.prepare("SELECT data, disabled_cause FROM auth_credentials WHERE id = ?")
+				.get(credentialId) as { data: string; disabled_cause: string | null };
+			expect(disabledRow.data).toBe(differentlySerializedData);
+			expect(disabledRow.disabled_cause).toBe("definitive invalid_grant");
+		} finally {
+			externalWriter.close();
+		}
+	});
+
+	test("disables a semantically unchanged external serialization after definitive invalid_grant", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+
+		await authStorage.set("anthropic", [
+			{
+				type: "oauth",
+				access: "expired-access",
+				refresh: "invalid-refresh",
+				expires: Date.now() - 60_000,
+			},
+		]);
+		const storedBefore = store.listAuthCredentials("anthropic");
+		expect(storedBefore).toHaveLength(1);
+		const credentialId = storedBefore[0]!.id;
+
+		const externalWriter = new Database(path.join(tempDir, "agent.db"));
+		try {
+			const serializedData = readCredentialData(externalWriter, credentialId);
+			const parsedData = JSON.parse(serializedData) as Record<string, unknown>;
+			const differentlySerializedData = JSON.stringify(
+				Object.fromEntries(Object.entries(parsedData).reverse()),
+				null,
+				2,
+			);
+			expect(differentlySerializedData).not.toBe(serializedData);
+			writeCredentialData(externalWriter, credentialId, differentlySerializedData);
+		} finally {
+			externalWriter.close();
+		}
+
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockRejectedValue(
+			new Error('HTTP 400 invalid_grant {"error":"invalid_grant","error_description":"Refresh token invalid"}'),
+		);
+		await withEnv(SUPPRESS_ANTHROPIC_ENV, async () => {
+			expect(await authStorage!.getApiKey("anthropic", "session-semantic-disable")).toBeUndefined();
+		});
+
+		expect(events).toHaveLength(1);
+		expect(events[0]?.disabledCause).toContain("invalid_grant");
+		expect(store.listAuthCredentials("anthropic")).toHaveLength(0);
 	});
 
 	test("does not disable a credential another process already rotated", async () => {
