@@ -4,6 +4,7 @@ import {
 	Container,
 	type NativeScrollbackCommittedRows,
 	type NativeScrollbackLiveRegion,
+	type NativeScrollbackReplay,
 	type NativeScrollbackWidthEpoch,
 	type RenderScheduler,
 	type RenderTimer,
@@ -94,6 +95,12 @@ class WrappingLinesComponent implements Component {
 	}
 }
 
+class StableWrappingLinesComponent extends WrappingLinesComponent {
+	getNativeScrollbackWidthEpochRevision(): number {
+		return 0;
+	}
+}
+
 class RecoveringWrappingLinesComponent extends WrappingLinesComponent implements NativeScrollbackWidthEpoch {
 	#resolveAttempts = 0;
 	#lastRows = 0;
@@ -133,6 +140,20 @@ class UnresolvedWrappingLinesComponent extends WrappingLinesComponent implements
 
 	getNativeScrollbackWidthEpochRows(): undefined {
 		return undefined;
+	}
+}
+
+class ThrowingWidthEpochComponent extends WrappingLinesComponent implements NativeScrollbackWidthEpoch {
+	captureNativeScrollbackWidthEpoch(): unknown {
+		return {};
+	}
+
+	resolveNativeScrollbackWidthEpoch(): never {
+		throw new Error("width epoch resolution failed");
+	}
+
+	getNativeScrollbackWidthEpochRows(): number {
+		return 0;
 	}
 }
 
@@ -511,15 +532,24 @@ const MULTIPLEXER_ENV_KEYS = [
 	"ZELLIJ",
 	"CMUX_WORKSPACE_ID",
 	"CMUX_SURFACE_ID",
+	"CMUX_REMOTE_TRANSPORT",
 	"CMUX_PANEL_ID",
 	"CMUX_TAB_ID",
 	"CMUX_SOCKET_PATH",
 	"HERDR_ENV",
+	"PI_TUI_TMUX_HISTORY_REBUILD",
+	"TMUX_PANE",
+	"TERM_PROGRAM_VERSION",
 ];
 const NO_MULTIPLEXER_ENV: Record<string, string | undefined> = Object.fromEntries(
 	MULTIPLEXER_ENV_KEYS.map(key => [key, undefined]),
 );
-const TMUX_ENV: Record<string, string | undefined> = { ...NO_MULTIPLEXER_ENV, TMUX: "1" };
+const TMUX_ENV: Record<string, string | undefined> = {
+	...NO_MULTIPLEXER_ENV,
+	TMUX: "1",
+	TERM_PROGRAM: "tmux",
+	TERM_PROGRAM_VERSION: "3.7b",
+};
 const MULTIPLEXER_ENV_CASES: Array<[string, Record<string, string | undefined>]> = [
 	["CMUX_WORKSPACE_ID", { ...NO_MULTIPLEXER_ENV, TERM: "dumb", CMUX_WORKSPACE_ID: "workspace:cmux-2088" }],
 	["CMUX_SURFACE_ID", { ...NO_MULTIPLEXER_ENV, TERM: "dumb", CMUX_SURFACE_ID: "surface:cmux-2088" }],
@@ -537,6 +567,7 @@ NO_MULTIPLEXER_ENV.TERM = "xterm-256color";
 // path) and PI_TUI_RESIZE_IN_PLACE, so neutralize them to keep this
 // direct-terminal case deterministic.
 NO_MULTIPLEXER_ENV.TERM_PROGRAM = undefined;
+NO_MULTIPLEXER_ENV.TERM_PROGRAM_VERSION = undefined;
 NO_MULTIPLEXER_ENV.PI_TUI_RESIZE_IN_PLACE = undefined;
 
 describe("issue #2088: tmux pane-resize race produces viewport flash", () => {
@@ -982,6 +1013,558 @@ describe("issue #2088: tmux pane-resize race produces viewport flash", () => {
 				tui.stop();
 			}
 		});
+	});
+
+	it("ignores a delayed duplicate SIGWINCH after the settled geometry was painted", async () => {
+		await withEnvPatch(TMUX_ENV, async () => {
+			const term = new VirtualTerminal(40, 6, 1_000);
+			const scheduler = new ManualRenderScheduler();
+			const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+			tui.addChild(new MutableLinesComponent(Array.from({ length: 12 }, (_value, index) => `line-${index}`)));
+
+			try {
+				tui.start();
+				await scheduler.advanceBy(0, term);
+				term.resize(80, 6);
+				await scheduler.advanceBy(DEBOUNCE_SETTLE_WAIT_MS, term);
+				const settledRedraws = tui.fullRedraws;
+				const writes = captureWrites(term);
+
+				term.resize(80, 6);
+				await scheduler.advanceBy(DEBOUNCE_SETTLE_WAIT_MS, term);
+
+				expect(writes).toHaveLength(0);
+				expect(tui.fullRedraws).toBe(settledRedraws);
+			} finally {
+				tui.stop();
+			}
+		});
+	});
+
+	it("does not treat stable leading-root reflow as transcript mutation", async () => {
+		await withEnvPatch(TMUX_ENV, async () => {
+			const term = new VirtualTerminal(17, 6, 10_000);
+			const scheduler = new ManualRenderScheduler();
+			const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+			tui.addChild(new StableWrappingLinesComponent([`leading ${"L".repeat(80)}`]));
+			const stream = new WrappingStreamComponent();
+			for (let index = 0; index < 30; index++) stream.append(`stream-${index.toString().padStart(2, "0")}`);
+			tui.addChild(stream);
+
+			try {
+				tui.start();
+				await scheduler.advanceBy(0, term);
+				const writes = captureWrites(term);
+
+				term.resize(40, 6);
+				stream.append("stream-30");
+				tui.requestRender();
+				await scheduler.advanceBy(DEBOUNCE_SETTLE_WAIT_MS, term);
+
+				const replayRows = writes.join("").match(/\r\n/g)?.length ?? 0;
+				expect(replayRows).toBeLessThan(10);
+				const buffer = term.getScrollBuffer().join("\n");
+				expect(buffer.split("stream-30").length - 1).toBe(1);
+			} finally {
+				tui.stop();
+			}
+		});
+	});
+
+	it("does not treat stable nested-leading reflow as transcript mutation", async () => {
+		await withEnvPatch(TMUX_ENV, async () => {
+			const term = new VirtualTerminal(17, 6, 10_000);
+			const scheduler = new ManualRenderScheduler();
+			const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+			const root = new Container();
+			root.addChild(new StableWrappingLinesComponent([`leading ${"L".repeat(80)}`]));
+			const stream = new WrappingStreamComponent();
+			for (let index = 0; index < 30; index++) stream.append(`stream-${index.toString().padStart(2, "0")}`);
+			root.addChild(stream);
+			tui.addChild(root);
+
+			try {
+				tui.start();
+				await scheduler.advanceBy(0, term);
+				const writes = captureWrites(term);
+
+				term.resize(40, 6);
+				stream.append("stream-30");
+				tui.requestRender();
+				await scheduler.advanceBy(DEBOUNCE_SETTLE_WAIT_MS, term);
+
+				const replayRows = writes.join("").match(/\r\n/g)?.length ?? 0;
+				expect(replayRows).toBeLessThan(10);
+				const buffer = term.getScrollBuffer().join("\n");
+				expect(buffer.split("stream-30").length - 1).toBe(1);
+			} finally {
+				tui.stop();
+			}
+		});
+	});
+
+	it("atomically replaces tmux history with the current-width transcript", async () => {
+		await withEnvPatch(
+			{
+				...TMUX_ENV,
+				PI_TUI_SYNC_OUTPUT: "1",
+				TMUX_PANE: "%999",
+			},
+			async () => {
+				const term = new VirtualTerminal(17, 6, 10_000);
+				const scheduler = new ManualRenderScheduler();
+				const component = new WrappingLinesComponent(
+					Array.from(
+						{ length: 20 },
+						(_value, index) => `reflow-${index.toString().padStart(2, "0")} ${"X".repeat(24)}`,
+					),
+				);
+				let clears = 0;
+				const transactionEvents: string[] = [];
+				const tui = new TUI(term, undefined, {
+					renderScheduler: scheduler,
+					clearTmuxHistory: () => {
+						transactionEvents.push("clear");
+						clears++;
+						// VirtualTerminal models a native history replacement with
+						// the same destructive reset it uses for ED3. The production
+						// callback uses `tmux clear-history`, which preserves the
+						// grid until the synchronized replay arrives.
+						term.write("\x1b[H\x1b[3J");
+						return true;
+					},
+					waitForTmuxGridClear: () => {
+						transactionEvents.push("wait");
+						return true;
+					},
+				});
+				tui.setTmuxHistoryRebuild(true);
+				tui.addChild(component);
+
+				try {
+					tui.start();
+					await scheduler.advanceBy(0, term);
+					const writes = captureWrites(term);
+
+					term.resize(40, 6);
+					await scheduler.advanceBy(DEBOUNCE_SETTLE_WAIT_MS, term);
+
+					expect(clears).toBe(2);
+					expect(transactionEvents).toEqual(["clear", "wait", "clear"]);
+					const expected = component.render(40);
+					const buffer = term
+						.getScrollBuffer()
+						.map(line => line.trimEnd())
+						.filter(line => line.length > 0);
+					expect(buffer).toEqual(expected);
+					for (let index = 0; index < 20; index++) {
+						const marker = `reflow-${index.toString().padStart(2, "0")}`;
+						expect(
+							buffer.filter(line => line.includes(marker)),
+							marker,
+						).toHaveLength(1);
+					}
+					const clearIndices = writes.flatMap((write, index) => (write.includes("\x1b[H\x1b[3J") ? [index] : []));
+					const prefixIndex = writes.findIndex(
+						write =>
+							write.includes("\x1b[?2026h") && write.includes("\x1b[2J\x1b[H") && !write.includes("reflow-19"),
+					);
+					const replayIndex = writes.findIndex(write => write.includes("reflow-19"));
+					expect(clearIndices).toHaveLength(2);
+					expect(clearIndices[0]!).toBeLessThan(prefixIndex);
+					expect(clearIndices[1]!).toBeGreaterThan(prefixIndex);
+					expect(replayIndex).toBeGreaterThan(clearIndices[1]!);
+					const replay = writes[replayIndex]!;
+					expect(replay).toContain("\x1b[?2026h");
+					expect(replay).toContain("\x1b[2J\x1b[H");
+					expect(replay).not.toContain("\x1b[22J");
+				} finally {
+					tui.stop();
+				}
+			},
+		);
+	});
+
+	it("restores the frame when grid-clear acknowledgment throws", async () => {
+		await withEnvPatch(
+			{
+				...TMUX_ENV,
+				PI_TUI_SYNC_OUTPUT: "1",
+				TMUX_PANE: "%999",
+			},
+			async () => {
+				const term = new VirtualTerminal(17, 6, 10_000);
+				const scheduler = new ManualRenderScheduler();
+				const lines = Array.from(
+					{ length: 20 },
+					(_value, index) => `ack-throw-${index.toString().padStart(2, "0")}`,
+				);
+				let clears = 0;
+				const tui = new TUI(term, undefined, {
+					renderScheduler: scheduler,
+					clearTmuxHistory: () => {
+						clears++;
+						term.write("\x1b[H\x1b[3J");
+						return true;
+					},
+					waitForTmuxGridClear: () => {
+						throw new Error("capture-pane spawn failed");
+					},
+				});
+				tui.setTmuxHistoryRebuild(true);
+				tui.addChild(new MutableLinesComponent(lines));
+
+				try {
+					tui.start();
+					await scheduler.advanceBy(0, term);
+					term.resize(40, 6);
+					await scheduler.advanceBy(DEBOUNCE_SETTLE_WAIT_MS, term);
+					expect(clears).toBe(1);
+					let buffer = term.getScrollBuffer().join("\n");
+					for (const line of lines) {
+						expect(buffer.split(line).length - 1, line).toBe(1);
+					}
+
+					term.resize(17, 6);
+					await scheduler.advanceBy(DEBOUNCE_SETTLE_WAIT_MS, term);
+					expect(clears).toBe(1);
+					buffer = term.getScrollBuffer().join("\n");
+					for (const line of lines) {
+						expect(buffer.split(line).length - 1, line).toBe(1);
+					}
+				} finally {
+					tui.stop();
+				}
+			},
+		);
+	});
+
+	it("keeps tmux history when width-epoch resolution throws", async () => {
+		await withEnvPatch(
+			{
+				...TMUX_ENV,
+				PI_TUI_SYNC_OUTPUT: "1",
+				TMUX_PANE: "%999",
+			},
+			async () => {
+				const term = new VirtualTerminal(17, 6, 10_000);
+				const scheduler = new ManualRenderScheduler();
+				let clears = 0;
+				const tui = new TUI(term, undefined, {
+					renderScheduler: scheduler,
+					clearTmuxHistory: () => {
+						clears++;
+						return true;
+					},
+				});
+				tui.setTmuxHistoryRebuild(true);
+				tui.addChild(
+					new ThrowingWidthEpochComponent(Array.from({ length: 20 }, (_value, index) => `epoch-${index}`)),
+				);
+
+				try {
+					tui.start();
+					await scheduler.advanceBy(0, term);
+					term.resize(40, 6);
+					await expect(scheduler.advanceBy(DEBOUNCE_SETTLE_WAIT_MS, term)).rejects.toThrow(
+						"width epoch resolution failed",
+					);
+					expect(clears).toBe(0);
+				} finally {
+					tui.stop();
+				}
+			},
+		);
+	});
+
+	it("keeps tmux history when current-width composition throws", async () => {
+		await withEnvPatch(
+			{
+				...TMUX_ENV,
+				PI_TUI_SYNC_OUTPUT: "1",
+				TMUX_PANE: "%999",
+			},
+			async () => {
+				const term = new VirtualTerminal(17, 6, 10_000);
+				const scheduler = new ManualRenderScheduler();
+				const lines = Array.from({ length: 20 }, (_value, index) => `throw-${index.toString().padStart(2, "0")}`);
+				let clears = 0;
+				const tui = new TUI(term, undefined, {
+					renderScheduler: scheduler,
+					clearTmuxHistory: () => {
+						clears++;
+						return true;
+					},
+				});
+				tui.setTmuxHistoryRebuild(true);
+				tui.addChild({
+					invalidate(): void {},
+					render(width: number): readonly string[] {
+						if (width !== 17) throw new Error("current-width render failed");
+						return lines;
+					},
+				});
+
+				try {
+					tui.start();
+					await scheduler.advanceBy(0, term);
+					term.resize(40, 6);
+					await expect(scheduler.advanceBy(DEBOUNCE_SETTLE_WAIT_MS, term)).rejects.toThrow(
+						"current-width render failed",
+					);
+					expect(clears).toBe(0);
+					const buffer = term.getScrollBuffer().join("\n");
+					for (const line of lines.slice(0, 14)) {
+						expect(buffer.split(line).length - 1, line).toBe(1);
+					}
+				} finally {
+					tui.stop();
+				}
+			},
+		);
+	});
+
+	it("does not clear tmux history before a visible overlay finishes rendering", async () => {
+		await withEnvPatch(
+			{
+				...TMUX_ENV,
+				PI_TUI_SYNC_OUTPUT: "1",
+				TMUX_PANE: "%999",
+			},
+			async () => {
+				const term = new VirtualTerminal(17, 6, 10_000);
+				const scheduler = new ManualRenderScheduler();
+				let clears = 0;
+				let throwOnRender = false;
+				const overlay: Component = {
+					invalidate(): void {},
+					render(): readonly string[] {
+						if (throwOnRender) throw new Error("overlay render failed");
+						return ["overlay"];
+					},
+				};
+				const tui = new TUI(term, undefined, {
+					renderScheduler: scheduler,
+					clearTmuxHistory: () => {
+						clears++;
+						return true;
+					},
+				});
+				tui.setTmuxHistoryRebuild(true);
+				tui.addChild(new MutableLinesComponent(Array.from({ length: 20 }, (_value, index) => `base-${index}`)));
+
+				try {
+					tui.start();
+					await scheduler.advanceBy(0, term);
+					tui.showOverlay(overlay, { anchor: "top-left", row: 0, col: 0 });
+					await scheduler.advanceBy(0, term);
+					throwOnRender = true;
+					term.resize(40, 6);
+					await expect(scheduler.advanceBy(DEBOUNCE_SETTLE_WAIT_MS, term)).rejects.toThrow(
+						"overlay render failed",
+					);
+					expect(clears).toBe(0);
+				} finally {
+					tui.stop();
+				}
+			},
+		);
+	});
+
+	it("runs a deferred tmux history replacement after an overlay closes", async () => {
+		await withEnvPatch(
+			{
+				...TMUX_ENV,
+				PI_TUI_SYNC_OUTPUT: "1",
+				TMUX_PANE: "%999",
+			},
+			async () => {
+				const term = new VirtualTerminal(17, 6, 10_000);
+				const scheduler = new ManualRenderScheduler();
+				let clears = 0;
+				const tui = new TUI(term, undefined, {
+					renderScheduler: scheduler,
+					clearTmuxHistory: () => {
+						clears++;
+						term.write("\x1b[H\x1b[3J");
+						return true;
+					},
+					waitForTmuxGridClear: () => true,
+				});
+				tui.setTmuxHistoryRebuild(true);
+				tui.addChild(
+					new MutableLinesComponent(
+						Array.from({ length: 20 }, (_value, index) => `deferred-${index.toString().padStart(2, "0")}`),
+					),
+				);
+
+				try {
+					tui.start();
+					await scheduler.advanceBy(0, term);
+					const overlay = tui.showOverlay(new MutableLinesComponent(["overlay"]), {
+						anchor: "top-left",
+						row: 0,
+						col: 0,
+					});
+					await scheduler.advanceBy(0, term);
+					term.resize(40, 6);
+					await scheduler.advanceBy(DEBOUNCE_SETTLE_WAIT_MS, term);
+					expect(clears).toBe(0);
+
+					overlay.hide();
+					tui.requestRender(true);
+					await scheduler.advanceBy(0, term);
+					expect(clears).toBe(2);
+					const buffer = term.getScrollBuffer().join("\n");
+					for (let index = 0; index < 20; index++) {
+						const marker = `deferred-${index.toString().padStart(2, "0")}`;
+						expect(buffer.split(marker).length - 1, marker).toBe(1);
+					}
+				} finally {
+					tui.stop();
+				}
+			},
+		);
+	});
+
+	it("does not clear history when tmux is older than 3.7", async () => {
+		await withEnvPatch(
+			{
+				...TMUX_ENV,
+				PI_TUI_SYNC_OUTPUT: "1",
+				TMUX_PANE: "%999",
+				TERM_PROGRAM_VERSION: "3.6a",
+			},
+			async () => {
+				const term = new VirtualTerminal(17, 6, 10_000);
+				const scheduler = new ManualRenderScheduler();
+				let clears = 0;
+				const tui = new TUI(term, undefined, {
+					renderScheduler: scheduler,
+					clearTmuxHistory: () => {
+						clears++;
+						return true;
+					},
+				});
+				tui.setTmuxHistoryRebuild(true);
+				tui.addChild(new MutableLinesComponent(Array.from({ length: 20 }, (_value, index) => `old-tmux-${index}`)));
+
+				try {
+					tui.start();
+					await scheduler.advanceBy(0, term);
+					term.resize(40, 6);
+					await scheduler.advanceBy(DEBOUNCE_SETTLE_WAIT_MS, term);
+					expect(clears).toBe(0);
+				} finally {
+					tui.stop();
+				}
+			},
+		);
+	});
+
+	it("does not clear inherited outer tmux history from inside GNU screen", async () => {
+		await withEnvPatch(
+			{
+				...TMUX_ENV,
+				PI_TUI_SYNC_OUTPUT: "1",
+				TMUX_PANE: "%999",
+				STY: "nested-screen",
+			},
+			async () => {
+				const term = new VirtualTerminal(17, 6, 10_000);
+				const scheduler = new ManualRenderScheduler();
+				let clears = 0;
+				const tui = new TUI(term, undefined, {
+					renderScheduler: scheduler,
+					clearTmuxHistory: () => {
+						clears++;
+						return true;
+					},
+				});
+				tui.setTmuxHistoryRebuild(true);
+				tui.addChild(new MutableLinesComponent(Array.from({ length: 20 }, (_value, index) => `nested-${index}`)));
+
+				try {
+					tui.start();
+					await scheduler.advanceBy(0, term);
+					term.resize(40, 6);
+					await scheduler.advanceBy(DEBOUNCE_SETTLE_WAIT_MS, term);
+					expect(clears).toBe(0);
+				} finally {
+					tui.stop();
+				}
+			},
+		);
+	});
+
+	it("repaints and preserves pending image transmits when tmux history clearing fails", async () => {
+		await withEnvPatch(
+			{
+				...TMUX_ENV,
+				PI_TUI_SYNC_OUTPUT: "1",
+				TMUX_PANE: "%999",
+			},
+			async () => {
+				const term = new VirtualTerminal(17, 6, 10_000);
+				const scheduler = new ManualRenderScheduler();
+				let clears = 0;
+				const tui = new TUI(term, undefined, {
+					renderScheduler: scheduler,
+					clearTmuxHistory: () => {
+						clears++;
+						return false;
+					},
+				});
+				const imageId = tui.imageBudget.acquireId("pending-resize-image");
+				const lines = Array.from(
+					{ length: 20 },
+					(_value, index) => `failed-clear-${index.toString().padStart(2, "0")}`,
+				);
+				let replayPreparations = 0;
+				const component: Component & NativeScrollbackReplay = {
+					invalidate(): void {},
+					prepareNativeScrollbackReplay(): void {
+						replayPreparations++;
+					},
+					render(width: number): readonly string[] {
+						tui.imageBudget.observe(imageId);
+						return lines.map(line => line.slice(0, width));
+					},
+				};
+				tui.addChild(component);
+				tui.setTmuxHistoryRebuild(true);
+
+				try {
+					tui.start();
+					await scheduler.advanceBy(0, term);
+					tui.imageBudget.enqueueTransmit(imageId, "pending-image-transmit");
+					const writes = captureWrites(term);
+
+					term.resize(40, 6);
+					await scheduler.advanceBy(DEBOUNCE_SETTLE_WAIT_MS, term);
+
+					expect(clears).toBe(1);
+					expect(replayPreparations).toBe(0);
+					expect(writes.join("")).toContain("pending-image-transmit");
+					let buffer = term.getScrollBuffer().join("\n");
+					for (const line of lines) {
+						expect(buffer.split(line).length - 1, line).toBe(1);
+					}
+
+					writes.length = 0;
+					term.resize(17, 6);
+					await scheduler.advanceBy(DEBOUNCE_SETTLE_WAIT_MS, term);
+					expect(clears).toBe(1);
+					expect(replayPreparations).toBe(0);
+					buffer = term.getScrollBuffer().join("\n");
+					for (const line of lines) {
+						expect(buffer.split(line).length - 1, line).toBe(1);
+					}
+				} finally {
+					tui.stop();
+				}
+			},
+		);
 	});
 
 	it("retains streamed rows across a net-unchanged width resize epoch", async () => {

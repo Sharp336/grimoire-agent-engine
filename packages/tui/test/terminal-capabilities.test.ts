@@ -4,6 +4,7 @@ import {
 	getTerminalInfo,
 	hyperlinksUserOverride,
 	ImageProtocol,
+	isTmuxVersionAtLeast,
 	NotifyProtocol,
 	resolveWarpImageProtocol,
 	shouldEnableHyperlinksByDefault,
@@ -236,6 +237,16 @@ describe("hyperlinksUserOverride", () => {
 		expect(hyperlinksUserOverride({ PI_FORCE_HYPERLINKS: "true" })).toBeNull();
 		expect(hyperlinksUserOverride({ PI_FORCE_HYPERLINKS: "0" })).toBeNull();
 		expect(hyperlinksUserOverride({ PI_NO_HYPERLINKS: "0" })).toBeNull();
+	});
+});
+
+describe("isTmuxVersionAtLeast", () => {
+	it("requires a self-reported tmux version at or above the requested boundary", () => {
+		expect(isTmuxVersionAtLeast(3, 7, {})).toBe(false);
+		expect(isTmuxVersionAtLeast(3, 7, { TERM_PROGRAM: "screen", TERM_PROGRAM_VERSION: "4.0" })).toBe(false);
+		expect(isTmuxVersionAtLeast(3, 7, { TERM_PROGRAM: "tmux", TERM_PROGRAM_VERSION: "3.6a" })).toBe(false);
+		expect(isTmuxVersionAtLeast(3, 7, { TERM_PROGRAM: "tmux", TERM_PROGRAM_VERSION: "3.7b" })).toBe(true);
+		expect(isTmuxVersionAtLeast(3, 7, { TERM_PROGRAM: "tmux", TERM_PROGRAM_VERSION: "4.0" })).toBe(true);
 	});
 });
 

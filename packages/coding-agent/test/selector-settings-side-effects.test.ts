@@ -67,6 +67,16 @@ describe("selector setting side effects", () => {
 		expect(invalidate).toHaveBeenCalledTimes(1);
 		expect(requestRender).toHaveBeenCalledTimes(1);
 	});
+	it("applies tmux history rebuild changes to the live renderer", () => {
+		const setTmuxHistoryRebuild = vi.fn();
+		const controller = new SelectorController({
+			ui: { setTmuxHistoryRebuild },
+		} as unknown as InteractiveModeContext);
+
+		controller.handleSettingChange("tui.tmuxHistoryRebuild", true);
+
+		expect(setTmuxHistoryRebuild).toHaveBeenCalledWith(true);
+	});
 	it("applies memory backend changes to the live session", () => {
 		const applyMemoryBackend = vi.fn(async () => {});
 		const controller = new SelectorController({

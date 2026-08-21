@@ -2246,14 +2246,13 @@ class StressDriver {
 	}
 
 	// Synchronized-output (DEC 2026) + autowrap (DECAWM) bracket discipline.
-	// Every paint write opens with PAINT_BEGIN (`\x1b[?2026h\x1b[?7l`) and closes
-	// with PAINT_END (`\x1b[?7h\x1b[?2026l`); the standalone cursor write brackets
-	// its move in `\x1b[?2026h…\x1b[?2026l`. The contract: across the entire byte
-	// stream the brackets must strictly alternate open/close (depth stays in
-	// {0,1}) and return to 0 at every op boundary. A renderer path that opens a
-	// sync block and returns before closing it freezes the terminal until the
-	// next keystroke — the "output froze until I pressed a key" bug class — and
-	// an unbalanced `\x1b[?7l` leaves autowrap off, producing staircase trails on
+	// Paints open with BSU and close with ESU. Long paints may reassert BSU while
+	// already synchronized to refresh terminal timeout guards; DECSET is
+	// idempotent, so these keepalives do not increase depth. Every op must still
+	// finish outside synchronized mode, and every ESU must follow a BSU. A
+	// renderer path that opens without closing freezes the terminal until a later
+	// reset — the "output froze until I pressed a key" bug class.
+	// An unbalanced `\x1b[?7l` leaves autowrap off, producing staircase trails on
 	// the next non-TUI write. There is no terminal-side timeout for an unclosed
 	// 2026 block (Contour synchronized-output spec), so the renderer alone owns
 	// the invariant. Audits incrementally from #writeLogScanned to stay O(bytes).
@@ -2327,16 +2326,15 @@ class StressDriver {
 					{ sequence: final === "h" ? "BSU" : "ESU" },
 				);
 			}
-			this.#syncDepth += final === "h" ? 1 : -1;
-			if (this.#syncDepth > 1) {
-				this.#fail("nested synchronized-output begin (BSU within BSU)", op, before, after, index, {
-					syncDepth: this.#syncDepth,
-				});
-			}
-			if (this.#syncDepth < 0) {
-				this.#fail("synchronized-output end (ESU) without matching begin", op, before, after, index, {
-					syncDepth: this.#syncDepth,
-				});
+			if (final === "h") {
+				this.#syncDepth = 1;
+			} else {
+				if (this.#syncDepth === 0) {
+					this.#fail("synchronized-output end (ESU) without matching begin", op, before, after, index, {
+						syncDepth: this.#syncDepth,
+					});
+				}
+				this.#syncDepth = 0;
 			}
 		}
 		if (params.includes(7)) {

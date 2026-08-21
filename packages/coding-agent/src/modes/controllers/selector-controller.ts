@@ -585,6 +585,10 @@ export class SelectorController {
 				this.ctx.ui.setScrollbackRebuild(value as boolean);
 				break;
 
+			case "tui.tmuxHistoryRebuild":
+				this.ctx.ui.setTmuxHistoryRebuild(value as boolean);
+				break;
+
 			case "tui.renderMermaid":
 				setMarkdownMermaidRendering(value as boolean);
 				this.ctx.session.refreshBaseSystemPrompt().catch(err => {

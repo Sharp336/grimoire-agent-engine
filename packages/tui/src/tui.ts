@@ -30,6 +30,7 @@ import {
 	ImageProtocol,
 	isImageProtocolForced,
 	isInsideTerminalMultiplexer,
+	isTmuxVersionAtLeast,
 	parseKittyDirectPlacementLine,
 	setCellDimensions,
 	setTerminalImageProtocol,
@@ -76,6 +77,7 @@ const LINE_FIT_SOURCE_WIDTH_MULTIPLIER = 64;
 const HIDE_CURSOR = "\x1b[?25l";
 const SYNC_OUTPUT_BEGIN = "\x1b[?2026h";
 const SYNC_OUTPUT_END = "\x1b[?2026l";
+const SYNC_OUTPUT_KEEPALIVE_ROWS = 64;
 const DISABLE_AUTOWRAP = "\x1b[?7l";
 const ENABLE_AUTOWRAP = "\x1b[?7h";
 const PAINT_BEGIN = `${HIDE_CURSOR}${SYNC_OUTPUT_BEGIN}${DISABLE_AUTOWRAP}`;
@@ -112,6 +114,10 @@ export interface RenderScheduler {
 
 export interface TUIOptions {
 	renderScheduler?: RenderScheduler;
+	/** Test seam for the tmux-native history clear used by synchronized width rebuilds. */
+	clearTmuxHistory?: () => boolean;
+	/** Test seam that acknowledges tmux consumed the synchronized grid clear. */
+	waitForTmuxGridClear?: () => boolean;
 }
 
 export interface TUIStartOptions {
@@ -447,6 +453,59 @@ function isMultiplexerSession(): boolean {
 			term.startsWith("tmux") ||
 			term.startsWith("screen"),
 	);
+}
+
+function isDirectTmuxSession(): boolean {
+	const pane = Bun.env.TMUX_PANE;
+	return Boolean(
+		Bun.env.TMUX &&
+			isTmuxVersionAtLeast(3, 7) &&
+			pane !== undefined &&
+			/^%\d+$/.test(pane) &&
+			!Bun.env.STY &&
+			!Bun.env.ZELLIJ &&
+			!Bun.env.CMUX_WORKSPACE_ID &&
+			!Bun.env.CMUX_SURFACE_ID &&
+			!Bun.env.CMUX_REMOTE_TRANSPORT &&
+			Bun.env.HERDR_ENV !== "1",
+	);
+}
+
+/** Clear a direct tmux pane's history without changing its visible grid. */
+function clearCurrentTmuxPaneHistory(): boolean {
+	const pane = Bun.env.TMUX_PANE;
+	if (!isDirectTmuxSession() || pane === undefined) return false;
+	try {
+		return (
+			Bun.spawnSync(["tmux", "clear-history", "-t", pane], {
+				stdout: "ignore",
+				stderr: "ignore",
+			}).exitCode === 0
+		);
+	} catch {
+		return false;
+	}
+}
+
+/** Wait until tmux has consumed the ED2 grid clear preceding history replacement. */
+function waitForCurrentTmuxPaneGridClear(): boolean {
+	const pane = Bun.env.TMUX_PANE;
+	if (!isDirectTmuxSession() || pane === undefined) return false;
+	try {
+		const decoder = new TextDecoder();
+		for (let attempt = 0; attempt < 25; attempt++) {
+			const capture = Bun.spawnSync(["tmux", "capture-pane", "-p", "-t", pane], {
+				stdout: "pipe",
+				stderr: "ignore",
+			});
+			if (capture.exitCode !== 0) return false;
+			if (decoder.decode(capture.stdout).trim().length === 0) return true;
+			Bun.sleepSync(4);
+		}
+		return false;
+	} catch {
+		return false;
+	}
 }
 
 /**
@@ -881,7 +940,7 @@ export class Container
  *   scrollback seam (if any) and repaints the window with relative moves.
  */
 type RenderIntent =
-	| { kind: "fullPaint"; clearScrollback: boolean }
+	| { kind: "fullPaint"; clearScrollback: boolean; clearTmuxHistory: boolean }
 	| { kind: "update"; chunkTo: number; windowTop: number };
 
 interface HardwareCursorState {
@@ -1189,6 +1248,11 @@ export class TUI extends Container {
 	#renderRequested = false;
 	#renderTimer: RenderTimer | undefined;
 	#renderScheduler: RenderScheduler;
+	#clearTmuxHistory: () => boolean;
+	#waitForTmuxGridClear: () => boolean;
+	#tmuxHistoryRebuildDisabled = false;
+	#tmuxHistoryRebuildEnabled = $flag("PI_TUI_TMUX_HISTORY_REBUILD");
+	#tmuxHistoryRebuildPending = false;
 	#lastRenderAt = 0;
 	/**
 	 * Wall-clock cost of the most recent `#doRender()` call. Used by
@@ -1505,6 +1569,8 @@ export class TUI extends Container {
 		super();
 		this.terminal = terminal;
 		this.#renderScheduler = options?.renderScheduler ?? DEFAULT_RENDER_SCHEDULER;
+		this.#clearTmuxHistory = options?.clearTmuxHistory ?? clearCurrentTmuxPaneHistory;
+		this.#waitForTmuxGridClear = options?.waitForTmuxGridClear ?? waitForCurrentTmuxPaneGridClear;
 		this.#showHardwareCursor = showHardwareCursor === undefined ? this.#showHardwareCursor : showHardwareCursor;
 		this.#watchdog = new LoopWatchdog();
 	}
@@ -1973,6 +2039,21 @@ export class TUI extends Container {
 		this.#scrollbackRebuildEnabled = enabled;
 	}
 
+	/** Whether tmux width changes replace pane history with a current-width replay. */
+	getTmuxHistoryRebuild(): boolean {
+		return this.#tmuxHistoryRebuildEnabled;
+	}
+
+	/**
+	 * Enable or disable synchronized tmux width reflow. The environment override
+	 * is a force-on compatibility path; persisted settings control the normal
+	 * case.
+	 */
+	setTmuxHistoryRebuild(enabled: boolean): void {
+		this.#tmuxHistoryRebuildEnabled = enabled || $flag("PI_TUI_TMUX_HISTORY_REBUILD");
+		if (!this.#tmuxHistoryRebuildEnabled) this.#tmuxHistoryRebuildPending = false;
+	}
+
 	getShowHardwareCursor(): boolean {
 		return this.#showHardwareCursor;
 	}
@@ -2191,6 +2272,15 @@ export class TUI extends Container {
 					}
 					this.#resizeEventPending = true;
 					this.requestRender();
+					return;
+				}
+				if (
+					this.#resizeRepaintsInPlace() &&
+					this.#multiplexerResizeTimer === undefined &&
+					this.#hasEverRendered &&
+					this.terminal.columns === this.#previousWidth &&
+					this.terminal.rows === this.#previousHeight
+				) {
 					return;
 				}
 				this.#resizeEventPending = true;
@@ -3522,10 +3612,25 @@ export class TUI extends Container {
 			return;
 		}
 
-		// A destructive replay erases native history and must receive the complete
-		// component frame. Give virtualized roots one compose to rehydrate rows
-		// they dropped after commit. Height-only and net-unchanged resize events
-		// count too: both enter the geometry rebuild path below.
+		// A direct-terminal destructive replay needs a complete frame before the
+		// first compose. Tmux width changes latch until an uncovered render can
+		// safely replace history; an overlay-covered resize still commits the new
+		// geometry, so the explicit latch is the only evidence left on close.
+		const tmuxHistoryRebuildEligible =
+			this.#hasEverRendered &&
+			!this.#tmuxHistoryRebuildDisabled &&
+			this.#tmuxHistoryRebuildEnabled &&
+			this.#synchronizedOutputEnabled &&
+			isDirectTmuxSession() &&
+			this.#previousWidth > 0;
+		const tmuxWidthChanged = tmuxHistoryRebuildEligible && this.#previousWidth !== width;
+		if (tmuxWidthChanged) this.#tmuxHistoryRebuildPending = true;
+		else if (!tmuxHistoryRebuildEligible) this.#tmuxHistoryRebuildPending = false;
+		const tmuxHistoryRebuildRequested =
+			tmuxHistoryRebuildEligible &&
+			this.#tmuxHistoryRebuildPending &&
+			this.#getTopmostVisibleOverlay() === undefined;
+		let tmuxHistoryRebuild = false;
 		const replayFullHistory =
 			this.#hasEverRendered &&
 			!this.#resizeRepaintsInPlace() &&
@@ -3564,6 +3669,7 @@ export class TUI extends Container {
 		// render recomposes from scratch, so consuming state here would
 		// misclassify a pending resize as an ordinary diff and corrupt the paint.
 		if (this.#maybeDeferGhosttyInitialImagePaint()) return;
+
 		// Cursor markers were stripped at compose time (they are internal
 		// sentinels and must never reach the terminal, the committed prefix, or
 		// the audit); the visible marker is chosen after the window top is
@@ -3607,6 +3713,14 @@ export class TUI extends Container {
 		const widthEpochAppendOnly = widthEpochOccurred
 			? this.#isNativeScrollbackWidthEpochAppendOnly(widthEpochBoundary)
 			: true;
+		if (tmuxHistoryRebuildRequested) {
+			this.#tmuxHistoryRebuildPending = false;
+			// Width-epoch callbacks above are arbitrary component code. Attempt
+			// the destructive clear only after all of them have returned, so no
+			// component failure can strand the pane without its old history.
+			tmuxHistoryRebuild = this.#clearTmuxHistory();
+			if (!tmuxHistoryRebuild) this.#tmuxHistoryRebuildDisabled = true;
+		}
 		if (resizeEventOccurred) {
 			this.#multiplexerWidthEpochBoundary = undefined;
 			this.#multiplexerWidthEpochPending = false;
@@ -3772,12 +3886,9 @@ export class TUI extends Container {
 				widthEpochSourceBoundary === undefined);
 		if (replayUnresolvedWidthEpoch) prevWindowTop = 0;
 
-		// 4. Classify. A resize is an explicit user gesture: normally the engine
-		// erases and replays so history rewraps at the new geometry (the reader
-		// snapped to the bottom just dragged the window). Multiplexer panes — and
-		// terminals that re-report size on alt-screen toggles — instead repaint in
-		// place, because an ED3 rewrap is unsafe (pane scrollback / alt-screen
-		// feedback loop), so committed history keeps its old wrap.
+		// 4. Classify. Direct terminals rebuild with ED3. Multiplexers normally
+		// repaint in place because ED3 is unsafe, but an opted-in tmux pane can
+		// clear its own history natively and receive one synchronized replay.
 		const firstPaint = !this.#hasEverRendered;
 		const replaceRequested = this.#clearScrollbackOnNextRender;
 		const geometryRebuild = geometryChanged && !this.#resizeRepaintsInPlace();
@@ -3795,7 +3906,7 @@ export class TUI extends Container {
 			!geometryChanged &&
 			!isMultiplexerSession() &&
 			(committedRowsResynced || frameLength <= this.#committedRows);
-		const fullPaint = firstPaint || replaceRequested || geometryRebuild || divergenceRebuild;
+		const fullPaint = firstPaint || replaceRequested || geometryRebuild || divergenceRebuild || tmuxHistoryRebuild;
 		// Height-only mux resizes move rows between the pane's scrollback and its
 		// grid. A shrink with a full grid pushes the grid-top rows into pane
 		// scrollback without a commit; a grow pulls the scrollback tail back into
@@ -3937,6 +4048,26 @@ export class TUI extends Container {
 			}
 		}
 
+		if (tmuxHistoryRebuild) {
+			// The successful pre-compose clear made replay preparation safe.
+			// Clear the grid under synchronized output, then clear once more so
+			// the old viewport can never be scrolled back above the replacement.
+			// The replay is emitted regardless of this second command's result:
+			// history was already removed and the ordered pane writes still
+			// repaint the cleared grid.
+			this.terminal.write(`${this.#paintBeginSequence}${deferredAltExit}\x1b[2J\x1b[H`);
+			deferredAltExit = "";
+			this.#pendingAltExit = "";
+			let gridClearAcknowledged = false;
+			try {
+				gridClearAcknowledged = this.#waitForTmuxGridClear();
+			} catch {
+				// Custom terminals/test seams may throw; the replay below still
+				// restores the frame after the already-successful first clear.
+			}
+			if (!gridClearAcknowledged || !this.#clearTmuxHistory()) this.#tmuxHistoryRebuildDisabled = true;
+		}
+
 		// 5. Pick the visible cursor marker (bottom-most at or below the window
 		// top), prepare lines, and build the visible window slice.
 		let cursorPos: { row: number; col: number } | null = null;
@@ -3970,6 +4101,7 @@ export class TUI extends Container {
 			? {
 					kind: "fullPaint",
 					clearScrollback: divergenceRebuild || ((replaceRequested || geometryRebuild) && !isMultiplexerSession()),
+					clearTmuxHistory: tmuxHistoryRebuild,
 				}
 			: { kind: "update", chunkTo, windowTop };
 		this.#logRedraw(intent, frameLength, height);
@@ -4008,12 +4140,13 @@ export class TUI extends Container {
 		if (intent.kind === "fullPaint") {
 			this.#emitFullPaint(frame, window, width, height, cursorPos, purgeSequence, imageTransmitBuffer, {
 				clearScrollback: intent.clearScrollback,
+				clearTmuxHistory: intent.clearTmuxHistory,
 				chunkTo,
 				windowTop,
 				cursorTrackingLineCount,
 				boundConptyPaint: !unboundedConptyPaint,
 				leadingSequence: deferredAltExit,
-				copyScreenToScrollback: true,
+				copyScreenToScrollback: !intent.clearTmuxHistory,
 			});
 			this.#pendingAltExit = "";
 			this.#committedPrefix = rawFrame.slice(0, chunkTo);
@@ -4582,10 +4715,22 @@ export class TUI extends Container {
 	): void {
 		this.#fullRedrawCount += 1;
 		let buffer = this.#paintBeginSequence + purgeSequence + options.leadingSequence + imageTransmitBuffer;
+		let synchronizedRows = 0;
+		const appendSyncKeepalive = (): void => {
+			if (
+				this.#synchronizedOutputEnabled &&
+				synchronizedRows > 0 &&
+				synchronizedRows % SYNC_OUTPUT_KEEPALIVE_ROWS === 0
+			) {
+				buffer += SYNC_OUTPUT_BEGIN;
+			}
+			synchronizedRows++;
+		};
 		if (options.commitTo > options.commitFrom) {
 			if (options.appendOnly) {
 				if (options.prepaintWindowTop !== undefined) {
 					for (let screenRow = 0; screenRow < height; screenRow++) {
+						appendSyncKeepalive();
 						const frameRow = options.prepaintWindowTop + screenRow;
 						buffer += `\x1b[${screenRow + 1};1H`;
 						buffer += this.#lineRewriteSequence(
@@ -4599,6 +4744,7 @@ export class TUI extends Container {
 				}
 				buffer += `\x1b[${height};1H`;
 				for (let row = options.commitFrom; row < options.commitTo; row++) {
+					appendSyncKeepalive();
 					const enteringRow = options.prepaintWindowTop === undefined ? row : row + height;
 					buffer += "\r\n";
 					buffer += this.#lineRewriteSequence(
@@ -4610,6 +4756,7 @@ export class TUI extends Container {
 					);
 				}
 				for (let screenRow = 0; screenRow < height; screenRow++) {
+					appendSyncKeepalive();
 					buffer += `\x1b[${screenRow + 1};1H`;
 					buffer += this.#lineRewriteSequence(
 						window[screenRow] ?? "",
@@ -4623,6 +4770,7 @@ export class TUI extends Container {
 				buffer += "\x1b[1;1H";
 				let wroteLine = false;
 				for (let row = options.commitFrom; row < options.commitTo; row++) {
+					appendSyncKeepalive();
 					if (wroteLine) buffer += "\r\n";
 					buffer += this.#lineRewriteSequence(
 						frame[row] ?? "",
@@ -4634,6 +4782,7 @@ export class TUI extends Container {
 					wroteLine = true;
 				}
 				for (let screenRow = 0; screenRow < height; screenRow++) {
+					appendSyncKeepalive();
 					if (wroteLine) buffer += "\r\n";
 					buffer += this.#lineRewriteSequence(
 						window[screenRow] ?? "",
@@ -4647,6 +4796,7 @@ export class TUI extends Container {
 			}
 		} else {
 			for (let screenRow = options.repaintFromScreenRow; screenRow < height; screenRow++) {
+				appendSyncKeepalive();
 				buffer += `\x1b[${screenRow + 1};1H`;
 				buffer += this.#lineRewriteSequence(
 					window[screenRow] ?? "",
@@ -4678,11 +4828,10 @@ export class TUI extends Container {
 		});
 	}
 	/**
-	 * Replay the frame from home, optionally clearing native scrollback first:
-	 * committed prefix `[0, chunkTo)` followed by the visible window. ED3
-	 * (`CSI 3 J`) is emitted here and only here, and only for gesture-driven
-	 * paints (session replace, resize, resetDisplay, or an explicit
-	 * `clearScrollback` initial paint).
+	 * Replay the frame from home, optionally replacing native scrollback first:
+	 * committed prefix `[0, chunkTo)` followed by the visible window. Direct
+	 * terminals use ED3; opted-in tmux panes clear history after a synchronized
+	 * grid clear, then receive this complete current-width replay.
 	 */
 	#emitFullPaint(
 		frame: readonly string[],
@@ -4694,6 +4843,7 @@ export class TUI extends Container {
 		imageTransmitBuffer: string,
 		options: {
 			clearScrollback: boolean;
+			clearTmuxHistory: boolean;
 			chunkTo: number;
 			windowTop: number;
 			cursorTrackingLineCount: number;
@@ -4754,24 +4904,24 @@ export class TUI extends Container {
 			// Clear native history without blanking the live viewport first. The
 			// replay below rewrites every visible row from home, including blanks,
 			// so terminals without DEC 2026 never expose an ED2-cleared frame.
-			// The clear also destroys every placement cell, so placement epochs
-			// restart and every registry entry each image ever placed is deleted
-			// explicitly (`d=i` keeps the transmitted data, so the replay needs
-			// no retransmit). Deleting epoch 1 too matters for images absent from
-			// the replay — nothing would ever replace their stale entry.
 			buffer += "\x1b[H\x1b[3J";
+		} else {
+			// ED2 clears only the viewport. Initial/non-destructive replays may
+			// first ask supporting terminals to preserve the prior screen. A
+			// tmux-native history rebuild has already removed the old tape, so it
+			// must never copy the invalidated viewport back into history.
+			if (options.copyScreenToScrollback && TERMINAL.supportsScreenToScrollback) buffer += "\x1b[22J";
+			buffer += "\x1b[2J\x1b[H";
+		}
+		if (options.clearScrollback || options.clearTmuxHistory) {
+			// Both destructive paths remove every placement cell. Restart the
+			// placement epochs and delete every old registry entry (`d=i` keeps
+			// transmitted image data, so the replay needs no retransmit).
 			for (const { imageId, lastEpoch } of this.#imageBudget.resetPlacementEpochs()) {
 				for (let placementId = 1; placementId <= lastEpoch; placementId++) {
 					buffer += encodeKittyDeletePlacement(imageId, placementId);
 				}
 			}
-		} else {
-			// ED2 clears only the viewport. Initial/non-destructive replays may
-			// first ask supporting terminals to preserve the prior screen, but a
-			// width-epoch repaint MUST NOT copy that invalidated viewport into
-			// native history.
-			if (options.copyScreenToScrollback && TERMINAL.supportsScreenToScrollback) buffer += "\x1b[22J";
-			buffer += "\x1b[2J\x1b[H";
 		}
 		if (imageTransmitBuffer.length > 0) buffer += imageTransmitBuffer;
 		// DECCARA fills optimize only the rows that stay visible; history-bound
@@ -4793,12 +4943,21 @@ export class TUI extends Container {
 			visibleTexts = plan.texts;
 			fillSequence = plan.sequence;
 		}
+		let synchronizedRows = 0;
 		if (paintLines === null) {
 			// Common path: emit straight from the source arrays (the
 			// pre-merge two-loop form); byte-identical to replaying the
 			// merged array. Destructive history clears deliberately avoid ED2, so
 			// each row must self-clear stale cells left by the previous viewport.
 			for (let i = 0; i < chunkTo; i++) {
+				if (
+					this.#synchronizedOutputEnabled &&
+					synchronizedRows > 0 &&
+					synchronizedRows % SYNC_OUTPUT_KEEPALIVE_ROWS === 0
+				) {
+					buffer += SYNC_OUTPUT_BEGIN;
+				}
+				synchronizedRows++;
 				if (i > 0) buffer += "\r\n";
 				const writeRow = Math.min(i, height - 1);
 				buffer += options.clearScrollback
@@ -4813,6 +4972,14 @@ export class TUI extends Container {
 					: this.#terminalLine(frame[i] ?? "", writeRow, i, chunkTo);
 			}
 			for (let screenRow = 0; screenRow < height; screenRow++) {
+				if (
+					this.#synchronizedOutputEnabled &&
+					synchronizedRows > 0 &&
+					synchronizedRows % SYNC_OUTPUT_KEEPALIVE_ROWS === 0
+				) {
+					buffer += SYNC_OUTPUT_BEGIN;
+				}
+				synchronizedRows++;
 				if (chunkTo + screenRow > 0) buffer += "\r\n";
 				const line = visibleTexts ? (visibleTexts[screenRow] ?? "") : (window[screenRow] ?? "");
 				const writeRow = Math.min(chunkTo + screenRow, height - 1);
@@ -4833,6 +5000,14 @@ export class TUI extends Container {
 			// positions are unknown — placements still clip to the write row but
 			// skip epoch bookkeeping.
 			for (let i = 0; i < paintLines.length; i++) {
+				if (
+					this.#synchronizedOutputEnabled &&
+					synchronizedRows > 0 &&
+					synchronizedRows % SYNC_OUTPUT_KEEPALIVE_ROWS === 0
+				) {
+					buffer += SYNC_OUTPUT_BEGIN;
+				}
+				synchronizedRows++;
 				if (i > 0) buffer += "\r\n";
 				const line = visibleTexts && i >= visibleStart ? visibleTexts[i - visibleStart] : (paintLines[i] ?? "");
 				const writeRow = Math.min(i, height - 1);

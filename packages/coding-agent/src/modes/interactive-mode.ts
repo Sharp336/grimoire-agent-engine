@@ -819,6 +819,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui = new TUI(new ProcessTerminal(), settings.get("showHardwareCursor"));
 		this.ui.setMaxInlineImages(settings.get("tui.maxInlineImages"));
 		this.ui.setScrollbackRebuild(settings.get("tui.scrollbackRebuild"));
+		this.ui.setTmuxHistoryRebuild(settings.get("tui.tmuxHistoryRebuild"));
 		// OSC 66 text-sizing is Kitty-only; resolve the setting against the terminal's
 		// capability (`TERMINAL.textSizing` defaults on for Kitty) so it stays off
 		// unless the user opts in, and never emits raw escapes on other terminals.

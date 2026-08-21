@@ -1230,6 +1230,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"tui.tmuxHistoryRebuild": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Reflow tmux Scrollback",
+			description:
+				"Replace tmux pane history after width changes with a synchronized current-width transcript. Requires direct tmux 3.7+, stays off inside nested multiplexers, and fixes capped and duplicate history, but discards pre-OMP shell history in that pane.",
+		},
+	},
+
 	"display.shimmer": {
 		type: "enum",
 		values: ["classic", "kitt", "disabled"] as const,

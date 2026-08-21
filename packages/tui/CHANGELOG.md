@@ -7,6 +7,7 @@
 ### Added
 
 - Editor atom table: `insertAtom`/`registerAtom` stage compact atomic tokens whose registered expansion is emitted on submit (`getExpandedText`), alongside the existing paste-marker store.
+- Added opt-in synchronized tmux transcript reflow for pane-width changes, avoiding stale-width and duplicate scrollback without changing the default resize path.
 
 ## [17.4.1] - 2026-08-21
 
