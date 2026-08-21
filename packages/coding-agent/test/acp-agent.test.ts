@@ -6,6 +6,7 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
+import { DeferredMCPTool } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import {
 	ACP_BOOTSTRAP_RACE_GUARD_MS,
 	AcpAgent,
@@ -46,6 +47,7 @@ import {
 	zSessionNotification,
 } from "@oh-my-pi/pi-utils/acp";
 import { TOOL_NAME as DELAYED_MCP_TOOL_NAME } from "./fixtures/delayed-tool-mcp";
+import { FIXTURE, LAZY_TOOL_NAME, resultText, spawnCount } from "./mcp-lifecycle-harness";
 
 /** Validates an ACP wire payload against the in-house protocol schemas. */
 function expectAcpStructure(schema: Validator<unknown>, value: unknown): void {
@@ -2786,7 +2788,7 @@ describe("ACP agent", () => {
 	});
 });
 
-describe("ACP agent MCP server configuration (late-connecting servers)", () => {
+describe("ACP agent MCP server configuration", () => {
 	const FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "delayed-tool-mcp.ts");
 	const BUN_EXEC = process.execPath;
 
@@ -2834,6 +2836,54 @@ describe("ACP agent MCP server configuration (late-connecting servers)", () => {
 			await pollUntil(() => refreshSpy.mock.calls.length > 1);
 			expect(namesOf(refreshSpy.mock.calls.at(-1)?.[0] ?? [])).toEqual([`mcp__delayed_${DELAYED_MCP_TOOL_NAME}`]);
 		} finally {
+			refreshSpy.mockRestore();
+		}
+	}, 15_000);
+
+	it("applies session settings' MCP lifecycle defaults to the ACP-configured manager", async () => {
+		const harness = await createHarness();
+		Settings.instance.set("mcp.defaultLifecycle", "lazy");
+		Settings.instance.set("mcp.defaultIdleTimeoutMs", 50);
+		const refreshSpy = spyOn(FakeAgentSession.prototype, "refreshMCPTools");
+		const spawnLog = path.join(harness.cwdA, "spawns.log");
+
+		let sessionId: string | undefined;
+		try {
+			const created = await harness.agent.newSession({
+				cwd: harness.cwdA,
+				mcpServers: [
+					{
+						name: "lazylc",
+						command: BUN_EXEC,
+						args: [FIXTURE],
+						env: [{ name: "MCP_SPAWN_LOG", value: spawnLog }],
+					},
+				],
+			});
+			sessionId = created.sessionId;
+			expectAcpStructure(zNewSessionResponse, created);
+
+			// A cold-cache lazy server does one eager connect to populate its tool
+			// list; after the 50ms idle window the manager must reap it and the
+			// queued refresh must deliver deferred placeholders to the session.
+			await pollUntil(() =>
+				(refreshSpy.mock.calls.at(-1)?.[0] ?? []).some(
+					tool => tool instanceof DeferredMCPTool && tool.name === `mcp__lazylc_${LAZY_TOOL_NAME}`,
+				),
+			);
+			expect(spawnCount(spawnLog)).toBe(1);
+
+			// Invoking a deferred placeholder transparently re-spawns the server.
+			const deferred = refreshSpy.mock.calls
+				.at(-1)![0]
+				.find(tool => tool instanceof DeferredMCPTool) as DeferredMCPTool;
+			const result = await deferred.execute("call-1", {}, undefined, {} as Parameters<typeof deferred.execute>[3]);
+			expect(resultText(result)).toBe("pong");
+			expect(spawnCount(spawnLog)).toBe(2);
+		} finally {
+			if (sessionId) {
+				await harness.agent.closeSession({ sessionId });
+			}
 			refreshSpy.mockRestore();
 		}
 	}, 15_000);

@@ -2441,6 +2441,11 @@ export class AcpAgent implements Agent {
 		}
 
 		const manager = new MCPManager(record.session.sessionManager.getCwd());
+		const managerSettings = record.session.settings;
+		manager.setLifecycleDefaults(
+			managerSettings.get("mcp.defaultLifecycle") === "lazy" ? "lazy" : "eager",
+			managerSettings.get("mcp.defaultIdleTimeoutMs"),
+		);
 		// MCP servers connect and reconnect independently, so `onToolsChanged` can fire
 		// several times back to back. Each firing is chained onto `record.mcpRefreshChain`
 		// so refreshes apply in order, and each one re-reads `manager.getTools()` at the
