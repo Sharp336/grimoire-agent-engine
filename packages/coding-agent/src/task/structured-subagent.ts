@@ -169,16 +169,15 @@ interface EvalSubagentContext {
 
 /**
  * Eval-spawned children do not appear in their parent's transcript usage. Keep
- * the active eval context by child id so nested `agent()` output reaches every
- * ancestor and nested hard-budget checks see the root ceiling. Registration is
- * ownership-guarded: a colliding top-level spawn cannot overwrite or delete a
- * recorder that belongs to an already-running child.
+ * the active eval context by the child's session file so nested `agent()`
+ * output reaches every ancestor without conflating identical agent IDs from
+ * independent top-level sessions.
  */
 const evalSubagentContexts = new Map<string, EvalSubagentContext>();
 
 function getEvalAncestorContext(session: ToolSession): EvalSubagentContext | undefined {
-	const parentAgentId = session.getAgentId?.();
-	return parentAgentId ? evalSubagentContexts.get(parentAgentId) : undefined;
+	const sessionFile = session.getSessionFile();
+	return sessionFile ? evalSubagentContexts.get(sessionFile) : undefined;
 }
 
 export function getEffectiveEvalTurnBudget(session: ToolSession): EvalTurnBudget | undefined {
@@ -590,7 +589,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 	let requiresRecoveryArtifacts = false;
 	let completedSuccessfully = false;
 	let deferredCleanup: Promise<void> | undefined;
-	let registeredEvalContext: { id: string; context: EvalSubagentContext } | undefined;
+	let registeredEvalContext: { key: string; context: EvalSubagentContext } | undefined;
 	const evalContext = createEvalSubagentContext(request);
 	const recordEvalSubagentUsage = evalContext
 		? (result: SingleResult) => evalContext.recordOutput(result.usage?.output ?? 0)
@@ -600,9 +599,10 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			...request.identity,
 			label: request.identity?.label ?? (request.invocationKind === "eval" ? "EvalAgent" : undefined),
 		});
-		if (evalContext && !evalSubagentContexts.has(id)) {
-			evalSubagentContexts.set(id, evalContext);
-			registeredEvalContext = { id, context: evalContext };
+		if (evalContext) {
+			const key = path.join(lease.artifactsDir, `${id}.jsonl`);
+			evalSubagentContexts.set(key, evalContext);
+			registeredEvalContext = { key, context: evalContext };
 		}
 		const baseOptions = buildExecutorOptions(request, policy, lease, id);
 		baseOptions.onCleanupDeferred = completion => {
@@ -703,9 +703,9 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 	} finally {
 		if (
 			registeredEvalContext &&
-			evalSubagentContexts.get(registeredEvalContext.id) === registeredEvalContext.context
+			evalSubagentContexts.get(registeredEvalContext.key) === registeredEvalContext.context
 		) {
-			evalSubagentContexts.delete(registeredEvalContext.id);
+			evalSubagentContexts.delete(registeredEvalContext.key);
 		}
 		const shouldRetainArtifacts =
 			(request.retainArtifacts && completedSuccessfully) ||
