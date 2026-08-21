@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `readJsonl` no longer aborts a stream when a frame contains raw control characters (e.g. unescaped tabs or `\x01` inside a string, which `Bun.JSONL.parseChunk` rejects). The offending record is repaired via `repairJson` and re-parsed; if it still does not parse, it is skipped and streaming resumes at the next line. A partial record at end-of-stream is dropped instead of throwing `"JSONL stream ended unexpectedly"`. This fixes provider turns aborting with `Failed to parse JSONL` on ollama-cloud thinking-model streams.
+
 ### Added
 
 - New unified archive API `@oh-my-pi/pi-utils/ar`, providing an `openArchive`/`ArchiveReader` interface across formats (including ZIP/ZIP64, tar with gz/bz2/xz/zst compression, ASAR, RAR 4/5, 7z, ISO 9660, CAB, cpio, RPM, Unix ar, Debian packages, LZH, ARJ, and single-stream compressed files) with lazy ranged reads for local files or HTTP range requests via `httpByteSource`, size limits, symlink-safe extraction, and deterministic archive creation for zip, tar, tar.gz, tar.zst, and asar.
