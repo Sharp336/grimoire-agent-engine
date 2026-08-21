@@ -248,6 +248,11 @@ export class TurnRecovery {
 		return this.#retryAttempt;
 	}
 
+	#resetRetryAttempts(): void {
+		this.#retryAttempt = 0;
+		this.#currentModelRetryAttempt = 0;
+	}
+
 	/** Promise settled when the active retry saga finishes. */
 	get retryPromise(): Promise<void> | undefined {
 		return this.#retryPromise;
@@ -377,14 +382,14 @@ export class TurnRecovery {
 			retryErrors,
 		});
 		this.#clearPendingRetryErrors();
-		this.#retryAttempt = 0;
+		this.#resetRetryAttempts();
 	}
 
 	/** Closes a failed retry saga when no compaction continuation took ownership. */
 	async onErrorSettledWithoutRetry(message: AssistantMessage, compaction: RecoveryCompactionResult): Promise<void> {
 		if (message.stopReason !== "error" || this.#retryAttempt === 0 || compaction.continuationScheduled) return;
 		const attempt = this.#retryAttempt;
-		this.#retryAttempt = 0;
+		this.#resetRetryAttempts();
 		await this.#host.emitSessionEvent({
 			type: "auto_retry_end",
 			success: false,
@@ -714,7 +719,7 @@ export class TurnRecovery {
 				finalError,
 			});
 			this.#clearPendingRetryErrors();
-			this.#retryAttempt = 0;
+			this.#resetRetryAttempts();
 			this.resolveRetry();
 			// A turn with no actionable output carries no transcript value, while its
 			// provider usage can anchor the next prompt at the full failed-request size
@@ -2066,7 +2071,7 @@ export class TurnRecovery {
 					retryErrors,
 				});
 				this.#clearPendingRetryErrors();
-				this.#retryAttempt = 0;
+				this.#resetRetryAttempts();
 				this.resolveRetry(); // Resolve so waitForRetry() completes
 				return false;
 			}
@@ -2093,7 +2098,7 @@ export class TurnRecovery {
 				});
 				this.#clearPendingRetryErrors();
 			}
-			this.#retryAttempt = 0;
+			this.#resetRetryAttempts();
 			this.resolveRetry();
 			return false;
 		}
@@ -2118,7 +2123,7 @@ export class TurnRecovery {
 				});
 				this.#clearPendingRetryErrors();
 			}
-			this.#retryAttempt = 0;
+			this.#resetRetryAttempts();
 			this.resolveRetry();
 			return false;
 		}
@@ -2133,7 +2138,7 @@ export class TurnRecovery {
 		if (maxDelayMs > 0 && delayMs > maxDelayMs && !switchedCredential && !switchedModel) {
 			await this.persistTerminalEmptyErrorTurn(message);
 			const attempt = this.#retryAttempt;
-			this.#retryAttempt = 0;
+			this.#resetRetryAttempts();
 			await this.#host.emitSessionEvent({
 				type: "auto_retry_end",
 				success: false,
@@ -2183,7 +2188,7 @@ export class TurnRecovery {
 			}
 			// Aborted during sleep - emit end event so UI can clean up
 			const attempt = this.#retryAttempt;
-			this.#retryAttempt = 0;
+			this.#resetRetryAttempts();
 			this.#retryAbortController = undefined;
 			await this.#host.emitSessionEvent({
 				type: "auto_retry_end",
@@ -2254,7 +2259,7 @@ export class TurnRecovery {
 	async #failRetryAfterLocalContinueError(message: AssistantMessage, error: unknown): Promise<void> {
 		if (this.#retryAttempt === 0) return;
 		const attempt = this.#retryAttempt;
-		this.#retryAttempt = 0;
+		this.#resetRetryAttempts();
 		const localError = error instanceof Error ? error.message : String(error);
 		await this.persistTerminalEmptyErrorTurn(message);
 		await this.#host.emitSessionEvent({
@@ -2377,7 +2382,7 @@ export class TurnRecovery {
 		}
 
 		// Reset retry budget for a fresh attempt
-		this.#retryAttempt = 0;
+		this.#resetRetryAttempts();
 
 		// Re-attempt the turn
 		this.#host.scheduleAgentContinue({ delayMs: 1 });
