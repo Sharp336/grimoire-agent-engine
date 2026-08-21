@@ -1,16 +1,16 @@
 # memory_edit
 
-> Update, forget, or invalidate Mnemopi long-term memories by id.
+> Update, forget, or invalidate an editable long-term memory by id.
 
 ## Source
 - Entry: `packages/coding-agent/src/tools/memory-edit.ts`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/memory-edit.md`
-- Backend collaborator: `packages/coding-agent/src/mnemopi/state.ts` (`editScopedMemory(...)`)
+- Backend collaborator: `packages/coding-agent/src/memory-backend/types.ts` (`MemoryBackend.edit(...)`).
 
 ## Registration / Visibility
 - Tool metadata: `approval = "read"`, `strict = true`, `loadMode = "discoverable"`, even though successful calls mutate local memory.
-- Registration requires `memory.backend = "mnemopi"`; the tool is absent for `"off"`, `"local"`, and `"hindsight"`.
-- In an unrestricted session with an explicit tool list, registration auto-includes `memory_edit` for Mnemopi. Restricted lists are not widened.
+- Registration requires an edit-capable backend: `mnemopi` or `mnemosyne-oss`; the tool is absent for `"off"`, `"local"`, and `"hindsight"`.
+- In an unrestricted session with an explicit tool list, registration auto-includes `memory_edit` for an edit-capable backend. Restricted lists are not widened.
 - In an ordinary `tools.xdev` session, discoverable built-ins may be presented as `xd://memory_edit`; an explicitly requested tool remains top-level.
 - Execution is synchronous and single-shot, with no progress callback or cancellation parameter.
 
@@ -29,11 +29,13 @@
 - Successful mutations render `Memory <id> updated|deleted|invalidated in bank <bank> (<store>).`
 - Unknown or operation-ineligible ids render `Memory <id> was not found...`; this is a normal result with status `not_found`.
 - Fact ids render `Memory <id> is a read-only fact...; it cannot be edited. Read it with memory://<id>.`; this is a normal result with status `not_editable`.
-- `details` is `{ status, bank?, store? }`, where status is `"updated" | "deleted" | "invalidated" | "not_found" | "not_editable"` and store is `"working" | "episodic" | "fact"` when a row was resolved.
+- `details` contains `{ backend, id, status, bank?, store?, message? }`, where status is `"updated" | "deleted" | "invalidated" | "not_found" | "not_editable"`.
+
+Mnemosyne OSS edits only initialized recall banks and honors SDK authorization. A `not_editable` result is final; OMP never bypasses it with direct SQLite writes. Read the complete record through `memory://<id>` first. `/memory clear` remains separately fail-closed for shared/default Mnemosyne OSS banks.
 
 ## Flow
-1. `MemoryEditTool.createIf(...)` exposes the tool only when `memory.backend == "mnemopi"`.
-2. `execute(...)` fetches `session.getMnemopiSessionState()` and fails if the backend is not initialized.
+1. `MemoryEditTool.createIf(...)` exposes the tool when the selected backend has edit capability.
+2. `execute(...)` delegates to the session-bound shared memory runtime and fails if the selected backend is not initialized.
 3. `update` requires at least one of `content` or `importance`.
 4. `importance` is clamped to `0..1` before the backend call.
 5. The tool calls `state.editScopedMemory(op, id, { content, importance, replacementId })`.

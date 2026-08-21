@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { getMemoryRoot } from "@oh-my-pi/pi-coding-agent/memories";
+import { createMemoryRuntimeContext } from "@oh-my-pi/pi-coding-agent/memory-backend";
 import {
 	loadMnemopi,
 	loadMnemopiCore,
@@ -421,6 +422,7 @@ async function withMnemopiSession(fn: (fixture: MnemopiFixture) => Promise<void>
 			llmMode: "none" as const,
 		} as unknown as ConstructorParameters<typeof MnemopiSessionState>[0]["config"];
 		const session = {
+			settings: Settings.isolated({ "memory.backend": "mnemopi" }),
 			sessionId: "test-mnemopi",
 			sessionManager: {
 				getEntries: () => [],
@@ -482,6 +484,24 @@ describe("MemoryProtocolHandler — mnemopi bridge (issue #4443)", () => {
 			expect(resource.content).toContain(`id: ${id}`);
 			expect(resource.content).toContain("bank: test-bank");
 			expect(resource.content).toContain("store: working");
+		});
+	});
+
+	it("uses the caller's runtime for exact reads instead of registry selection", async () => {
+		await withMnemopiSession(async ({ state, dbDir, session }) => {
+			const id = state.rememberInScope("runtime-owned exact record");
+			if (!id) throw new Error("Expected Mnemopi to return a memory id.");
+			const router = InternalUrlRouter.instance();
+			const resource = await router.resolve(`memory://${id}`, {
+				memory: createMemoryRuntimeContext({
+					agentDir: dbDir.path(),
+					cwd: dbDir.path(),
+					session,
+				}),
+			});
+
+			expect(resource.content).toContain("runtime-owned exact record");
+			expect(resource.content).toContain(`id: ${id}`);
 		});
 	});
 

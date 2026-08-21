@@ -2,7 +2,7 @@ import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { sanitizeSkillName, writeManagedSkill } from "../autolearn/managed-skills";
 import { isNameClaimedByAuthoredSkill } from "../extensibility/skills";
-import { localBackend } from "../memory-backend/local-backend";
+import { localBackend, memoryBackendSupports } from "../memory-backend";
 import learnDescription from "../prompts/tools/learn.md" with { type: "text" };
 import type { ToolSession } from ".";
 
@@ -44,7 +44,7 @@ export class LearnTool implements AgentTool<typeof learnSchema> {
 	static createIf(session: ToolSession): LearnTool | null {
 		if (!session.settings.get("autolearn.enabled")) return null;
 		const backend = session.settings.get("memory.backend");
-		if (backend !== "hindsight" && backend !== "mnemopi" && backend !== "local") return null;
+		if (backend !== "local" && !memoryBackendSupports(backend, "retain")) return null;
 		return new LearnTool(session);
 	}
 
@@ -85,6 +85,16 @@ export class LearnTool implements AgentTool<typeof learnSchema> {
 			);
 			if (!result || result.stored === 0) {
 				throw new Error("Lesson was empty after sanitization; nothing stored.");
+			}
+		} else if (backend === "mnemosyne-oss") {
+			const result = await this.session.memory?.save({
+				content: params.memory,
+				context: params.context,
+				source: "coding-agent-learn",
+				importance: 0.8,
+			});
+			if (!result || result.stored === 0) {
+				throw new Error(result?.message ?? "Mnemosyne OSS did not store the lesson.");
 			}
 		} else {
 			const state = this.session.getHindsightSessionState?.();

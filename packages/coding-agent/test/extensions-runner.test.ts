@@ -2013,6 +2013,9 @@ describe("ExtensionRunner", () => {
 					}),
 					search: async query => ({ backend: "mnemopi", query, count: 0, items: [] }),
 					save: async () => ({ backend: "mnemopi", stored: 1 }),
+					get: async id => ({ backend: "mnemopi", id, status: "not_found" as const }),
+					edit: async (_op, id) => ({ backend: "mnemopi", id, status: "not_editable" as const }),
+					reflect: async query => ({ backend: "mnemopi", query, text: "", count: 0 }),
 				}),
 			);
 			runner.initialize(

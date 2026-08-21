@@ -11,6 +11,12 @@ import type { ModelRegistry } from "../config/model-registry";
 import { resolveRoleSelection } from "../config/model-resolver";
 import type {
 	MemoryBackend,
+	MemoryBackendEditOperation,
+	MemoryBackendEditOptions,
+	MemoryBackendEditResult,
+	MemoryBackendGetResult,
+	MemoryBackendReflectOptions,
+	MemoryBackendReflectResult,
 	MemoryBackendSaveInput,
 	MemoryBackendSearchItem,
 	MemoryBackendStartOptions,
@@ -272,7 +278,13 @@ export const mnemopiBackend: MemoryBackend = {
 			timestamp: result.timestamp ?? undefined,
 			score: result.score,
 		}));
-		return { backend: "mnemopi", query, count: items.length, items };
+		return {
+			backend: "mnemopi",
+			query,
+			count: items.length,
+			items,
+			rendered: primary.formatScopedRecallWithIds(results),
+		};
 	},
 
 	async save({ cwd, session }, input: MemoryBackendSaveInput) {
@@ -307,6 +319,87 @@ export const mnemopiBackend: MemoryBackend = {
 			stored: id ? 1 : 0,
 			ids: id ? [id] : [],
 			message: id ? undefined : "Mnemopi did not return a stored memory id.",
+		};
+	},
+
+	async get({ session }, id: string): Promise<MemoryBackendGetResult> {
+		const state = getMnemopiSessionState(session);
+		const primary = state?.aliasOf ?? state;
+		if (!primary) {
+			return {
+				backend: "mnemopi",
+				id,
+				status: "not_found",
+				message: "Mnemopi backend is not initialised for this session.",
+			};
+		}
+		const hit = primary.getScopedMemory(id);
+		if (!hit) {
+			return {
+				backend: "mnemopi",
+				id,
+				status: "not_found",
+				message: `Mnemopi memory ${id} not found in any scoped bank. Use \`recall\` to list available ids.`,
+			};
+		}
+		return {
+			backend: "mnemopi",
+			id,
+			status: "found",
+			record: {
+				id: hit.row.id,
+				content: hit.row.content,
+				source: hit.row.source ?? undefined,
+				timestamp: hit.row.timestamp ?? undefined,
+				importance: hit.row.importance ?? undefined,
+				metadata: hit.row.metadata,
+				bank: hit.bank,
+				store: hit.store,
+				editable: hit.store !== "fact",
+				memoryType: hit.row.memory_type ?? undefined,
+				createdAt: hit.row.created_at ?? undefined,
+				veracity: hit.row.veracity ?? undefined,
+				sessionId: hit.row.session_id ?? undefined,
+			},
+		};
+	},
+
+	async edit(
+		{ session },
+		op: MemoryBackendEditOperation,
+		id: string,
+		options?: MemoryBackendEditOptions,
+	): Promise<MemoryBackendEditResult> {
+		const state = getMnemopiSessionState(session);
+		const primary = state?.aliasOf ?? state;
+		if (!primary) throw new Error("Mnemopi backend is not initialised for this session.");
+		const result = primary.editScopedMemory(op, id, options);
+		return { backend: "mnemopi", id, ...result };
+	},
+
+	async reflect(
+		{ session },
+		query: string,
+		options?: MemoryBackendReflectOptions,
+	): Promise<MemoryBackendReflectResult> {
+		const state = getMnemopiSessionState(session);
+		const primary = state?.aliasOf ?? state;
+		if (!primary) throw new Error("Mnemopi backend is not initialised for this session.");
+		if (options?.signal?.aborted) {
+			return { backend: "mnemopi", query, text: "No relevant information found to reflect on.", count: 0 };
+		}
+		const recallQuery = options?.context?.trim()
+			? `${query.trim()}\n\nAdditional context:\n${options.context.trim()}`
+			: query;
+		const results = await primary.recallResultsScoped(recallQuery);
+		if (options?.signal?.aborted || results.length === 0) {
+			return { backend: "mnemopi", query, text: "No relevant information found to reflect on.", count: 0 };
+		}
+		return {
+			backend: "mnemopi",
+			query,
+			text: `Based on recalled memories:\n\n${primary.formatContextScoped(results)}`,
+			count: results.length,
 		};
 	},
 

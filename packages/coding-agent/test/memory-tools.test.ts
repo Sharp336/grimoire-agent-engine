@@ -15,6 +15,7 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import { HindsightApi } from "@oh-my-pi/pi-coding-agent/hindsight/client";
 import type { HindsightConfig } from "@oh-my-pi/pi-coding-agent/hindsight/config";
 import { HindsightSessionState } from "@oh-my-pi/pi-coding-agent/hindsight/state";
+import { createMemoryRuntimeContext } from "@oh-my-pi/pi-coding-agent/memory-backend";
 import { mnemopiBackend } from "@oh-my-pi/pi-coding-agent/mnemopi/backend";
 import { loadMnemopiConfig, type MnemopiBackendConfig } from "@oh-my-pi/pi-coding-agent/mnemopi/config";
 import {
@@ -78,10 +79,17 @@ function makeConfig(overrides: Partial<HindsightConfig> = {}): HindsightConfig {
 }
 
 function makeSession(settings: Settings, sessionId: string | null = TEST_SESSION_ID): ToolSession {
+	const runtimeSession =
+		registeredMnemopiState?.session ??
+		({
+			settings,
+			getHindsightSessionState: () => (sessionId === TEST_SESSION_ID ? registeredState : undefined),
+		} as never);
 	return {
 		cwd: "/tmp",
 		hasUI: false,
 		settings,
+		memory: createMemoryRuntimeContext({ agentDir: "/tmp", cwd: "/tmp", session: runtimeSession }),
 		getSessionFile: () => null,
 		getSessionId: () => sessionId,
 		getSessionSpawns: () => null,
@@ -257,6 +265,14 @@ describe("Mnemopi tool factories", () => {
 
 	it("retain/recall/reflect/edit factories return tool instances when memory.backend === mnemopi", () => {
 		const settings = Settings.isolated({ "memory.backend": "mnemopi" });
+		const session = makeSession(settings);
+		expect(MemoryRetainTool.createIf(session)).toBeInstanceOf(MemoryRetainTool);
+		expect(MemoryRecallTool.createIf(session)).toBeInstanceOf(MemoryRecallTool);
+		expect(MemoryReflectTool.createIf(session)).toBeInstanceOf(MemoryReflectTool);
+		expect(MemoryEditTool.createIf(session)).toBeInstanceOf(MemoryEditTool);
+	});
+	it("retain/recall/reflect/edit factories return tool instances when memory.backend === mnemosyne-oss", () => {
+		const settings = Settings.isolated({ "memory.backend": "mnemosyne-oss" });
 		const session = makeSession(settings);
 		expect(MemoryRetainTool.createIf(session)).toBeInstanceOf(MemoryRetainTool);
 		expect(MemoryRecallTool.createIf(session)).toBeInstanceOf(MemoryRecallTool);
@@ -1459,7 +1475,7 @@ describe("memory_edit.execute (Mnemopi backend)", () => {
 			id: "missing-memory-id",
 		});
 
-		expect(result.details).toEqual({ status: "not_found" });
+		expect(result.details).toEqual({ backend: "mnemopi", id: "missing-memory-id", status: "not_found" });
 		expect((result.content[0] as { text: string }).text).toContain("not found");
 	});
 

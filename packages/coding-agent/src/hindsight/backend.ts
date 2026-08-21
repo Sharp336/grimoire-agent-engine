@@ -10,12 +10,23 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import { onHindsightScopeChanged, type Settings } from "../config/settings";
-import type { MemoryBackend, MemoryBackendStartOptions } from "../memory-backend/types";
+import type {
+	MemoryBackend,
+	MemoryBackendGetResult,
+	MemoryBackendReflectOptions,
+	MemoryBackendReflectResult,
+	MemoryBackendSaveInput,
+	MemoryBackendSaveResult,
+	MemoryBackendSearchItem,
+	MemoryBackendSearchOptions,
+	MemoryBackendSearchResult,
+	MemoryBackendStartOptions,
+} from "../memory-backend/types";
 import type { AgentSession } from "../session/agent-session";
-import { type BankScope, computeBankScope } from "./bank";
+import { type BankScope, computeBankScope, ensureBankExists } from "./bank";
 import { createHindsightClient } from "./client";
 import { isHindsightConfigured, loadHindsightConfig } from "./config";
-import { type HindsightMessage, hasSubstantiveContent } from "./content";
+import { formatMemories, type HindsightMessage, hasSubstantiveContent } from "./content";
 import { HindsightSessionState } from "./state";
 
 const STATIC_INSTRUCTIONS = [
@@ -129,6 +140,94 @@ export const hindsightBackend: MemoryBackend = {
 		if (!primary) return;
 		await primary.flushRetainQueue();
 		await primary.forceRetainCurrentSession();
+	},
+
+	async search(
+		{ session }: { session?: AgentSession },
+		query: string,
+		options?: MemoryBackendSearchOptions,
+	): Promise<MemoryBackendSearchResult> {
+		const state = session?.getHindsightSessionState();
+		if (!state) {
+			return {
+				backend: "hindsight",
+				query,
+				count: 0,
+				items: [],
+				message: "Hindsight backend is not initialised for this session.",
+			};
+		}
+		if (options?.signal?.aborted) {
+			return { backend: "hindsight", query, count: 0, items: [], message: "Search aborted." };
+		}
+		const response = await state.client.recall(state.bankId, query, {
+			budget: state.config.recallBudget,
+			maxTokens: state.config.recallMaxTokens,
+			types: state.config.recallTypes.length > 0 ? state.config.recallTypes : undefined,
+			tags: state.recallTags,
+			tagsMatch: state.recallTagsMatch,
+			signal: options?.signal,
+		});
+		if (options?.signal?.aborted) {
+			return { backend: "hindsight", query, count: 0, items: [], message: "Search aborted." };
+		}
+		const results = response.results ?? [];
+		const items: MemoryBackendSearchItem[] = results.map(result => ({
+			id: result.id,
+			content: result.text,
+			source: result.type ?? undefined,
+			timestamp: result.mentioned_at ?? undefined,
+		}));
+		const limitedItems = options?.limit === undefined ? items : items.slice(0, Math.max(0, options.limit));
+		const limitedResults = results.slice(0, limitedItems.length);
+		return {
+			backend: "hindsight",
+			query,
+			count: limitedItems.length,
+			items: limitedItems,
+			rendered: formatMemories(limitedResults),
+		};
+	},
+
+	async save(
+		{ session }: { session?: AgentSession },
+		input: MemoryBackendSaveInput,
+	): Promise<MemoryBackendSaveResult> {
+		const state = session?.getHindsightSessionState();
+		if (!state) {
+			return { backend: "hindsight", stored: 0, message: "Hindsight backend is not initialised for this session." };
+		}
+		state.enqueueRetain(input.content, input.context);
+		return { backend: "hindsight", stored: 1, queued: true };
+	},
+
+	async get(_context, id: string): Promise<MemoryBackendGetResult> {
+		return {
+			backend: "hindsight",
+			id,
+			status: "not_addressable",
+			message:
+				"Hindsight memories are not addressable via memory://. Recall results are final — use `recall` to search or `reflect` to synthesize. `read memory://<id>` is only available with memory.backend=mnemopi.",
+		};
+	},
+
+	async reflect(
+		{ session }: { session?: AgentSession },
+		query: string,
+		options?: MemoryBackendReflectOptions,
+	): Promise<MemoryBackendReflectResult> {
+		const state = session?.getHindsightSessionState();
+		if (!state) throw new Error("Hindsight backend is not initialised for this session.");
+		await ensureBankExists(state.client, state.bankId, state.config, state.banksSet);
+		const response = await state.client.reflect(state.bankId, query, {
+			context: options?.context,
+			budget: state.config.recallBudget,
+			tags: state.recallTags,
+			tagsMatch: state.recallTagsMatch,
+			signal: options?.signal,
+		});
+		const text = response.text?.trim() || "No relevant information found to reflect on.";
+		return { backend: "hindsight", query, text, count: response.text?.trim() ? 1 : 0 };
 	},
 
 	async preCompactionContext(

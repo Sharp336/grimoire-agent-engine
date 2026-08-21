@@ -20,6 +20,8 @@ export async function resolveMemoryBackend(settings: Settings): Promise<MemoryBa
 	const id = settings.get("memory.backend");
 	if (id === "hindsight") return (await import("../hindsight/backend")).hindsightBackend;
 	if (id === "mnemopi") return (await import("../mnemopi/backend")).mnemopiBackend;
+	// Lazy loading keeps the Python worker asset out of CLI startup unless selected.
+	if (id === "mnemosyne-oss") return (await import("../mnemosyne-oss/backend")).mnemosyneOssBackend;
 	if (id === "local") return localBackend;
 	return offBackend;
 }

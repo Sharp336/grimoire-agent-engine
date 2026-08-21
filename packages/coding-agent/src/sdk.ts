@@ -118,9 +118,10 @@ import {
 	parseMCPToolName,
 } from "./mcp";
 import { MCP_CONNECTION_STATUS_EVENT_CHANNEL, type McpConnectionStatusEvent } from "./mcp/startup-events";
-import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
+import { createSessionMemoryRuntimeContext, type MemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
 import { MEMORY_BACKEND_TOOL_NAMES } from "./memory-backend/tool-names";
 import type { MnemopiSessionState } from "./mnemopi/state";
+import type { MnemosyneOssSessionState } from "./mnemosyne-oss/state";
 import mcpXdevGuidanceTemplate from "./prompts/system/mcp-xdev-guidance.md" with { type: "text" };
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
@@ -519,6 +520,8 @@ export interface CreateAgentSessionOptions {
 	parentHindsightSessionState?: HindsightSessionState;
 	/** Parent Mnemopi state to alias for subagent memory tools. */
 	parentMnemopiSessionState?: MnemopiSessionState;
+	/** Parent Mnemosyne OSS state to alias for subagent memory tools. */
+	parentMnemosyneOssSessionState?: MnemosyneOssSessionState;
 	/** Pre-allocated agent identity for IRC routing. Default: "Main" for top-level, parentTaskPrefix-derived for sub. */
 	agentId?: string;
 	/** Display name for the agent in IRC. Default: "main" or "sub". */
@@ -1673,6 +1676,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				activeToolNames.add(name);
 			}
 		};
+		let memoryRuntime: MemoryRuntimeContext | undefined;
+		let memoryRuntimeCwd: string | undefined;
+		const getMemoryRuntime = (): MemoryRuntimeContext | undefined => {
+			if (!hasSession) return undefined;
+			const cwd = sessionManager.getCwd();
+			if (!memoryRuntime || memoryRuntimeCwd !== cwd) {
+				memoryRuntime = createSessionMemoryRuntimeContext(session, agentDir, cwd);
+				memoryRuntimeCwd = cwd;
+			}
+			return memoryRuntime;
+		};
 		const toolSession: ToolSession = {
 			get cwd() {
 				return sessionManager.getCwd();
@@ -1722,6 +1736,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			isDisposed: () => session?.isDisposed ?? false,
 			getHindsightSessionState: () => session?.getHindsightSessionState(),
 			getMnemopiSessionState: () => session?.getMnemopiSessionState(),
+			getMnemosyneOssSessionState: () => session?.getMnemosyneOssSessionState(),
+			get memory() {
+				return getMemoryRuntime();
+			},
 			getAgentId: () => resolvedAgentId,
 			getToolByName: name => session?.getToolByName(name),
 			getToolForEvalBridge: name => session?.getToolForEvalBridge(name),
@@ -3794,6 +3812,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				taskDepth,
 				parentHindsightSessionState: options.parentHindsightSessionState,
 				parentMnemopiSessionState: options.parentMnemopiSessionState,
+				parentMnemosyneOssSessionState: options.parentMnemosyneOssSessionState,
 			});
 		};
 

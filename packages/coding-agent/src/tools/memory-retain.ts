@@ -1,5 +1,6 @@
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import { type MemoryBackendSaveResult, memoryBackendSupports } from "../memory-backend";
 import retainDescription from "../prompts/tools/retain.md" with { type: "text" };
 import type { ToolSession } from ".";
 
@@ -27,62 +28,29 @@ export class MemoryRetainTool implements AgentTool<typeof memoryRetainSchema> {
 	constructor(private readonly session: ToolSession) {}
 
 	static createIf(session: ToolSession): MemoryRetainTool | null {
-		const backend = session.settings.get("memory.backend");
-		if (backend !== "hindsight" && backend !== "mnemopi") return null;
+		if (!memoryBackendSupports(session.settings.get("memory.backend"), "retain")) return null;
 		return new MemoryRetainTool(session);
 	}
 
 	async execute(_id: string, params: MemoryRetainParams): Promise<AgentToolResult> {
-		const backend = this.session.settings.get("memory.backend");
-		if (backend === "mnemopi") {
-			const state = this.session.getMnemopiSessionState?.();
-			if (!state) {
-				throw new Error("Mnemopi backend is not initialised for this session.");
-			}
-
-			for (const item of params.items) {
-				state.rememberScoped(item.content, {
-					source: "coding-agent-retain",
-					importance: 0.75,
-					metadata: {
-						session_id: state.sessionId,
-						cwd: state.session.sessionManager.getCwd(),
-						context: item.context ?? null,
-						tool: "retain",
-					},
-					scope: "bank",
-					extract: true,
-					extractEntities: true,
-					veracity: "tool",
-					memoryType: "fact",
-				});
-			}
-
-			const count = params.items.length;
-			const noun = count === 1 ? "memory" : "memories";
-			return {
-				content: [{ type: "text", text: `${count} ${noun} stored.` }],
-				details: { count },
-			};
-		}
-
-		const state = this.session.getHindsightSessionState?.();
-		if (!state) {
-			throw new Error("Hindsight backend is not initialised for this session.");
-		}
-
-		// Push every item onto the session-owned queue and return immediately.
-		// The queue flushes either when it reaches its batch threshold or when
-		// its debounce timer fires. If the eventual batch fails, the queue
-		// surfaces a UI-only warning notice — the LLM is not informed.
+		const memory = this.session.memory;
+		if (!memory) throw new Error("Memory backend is not initialised for this session.");
+		const results: MemoryBackendSaveResult[] = [];
 		for (const item of params.items) {
-			state.enqueueRetain(item.content, item.context);
+			const result = await memory.save({
+				content: item.content,
+				context: item.context,
+				source: "coding-agent-retain",
+				importance: 0.75,
+			});
+			if (result.message) throw new Error(result.message);
+			results.push(result);
 		}
-
 		const count = params.items.length;
 		const noun = count === 1 ? "memory" : "memories";
+		const queued = results.some(result => result.queued);
 		return {
-			content: [{ type: "text", text: `${count} ${noun} queued.` }],
+			content: [{ type: "text", text: `${count} ${noun} ${queued ? "queued" : "stored"}.` }],
 			details: { count },
 		};
 	}

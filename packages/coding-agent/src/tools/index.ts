@@ -19,7 +19,9 @@ import type { LocalProtocolOptions } from "../internal-urls";
 import type { DaemonCompletionNotification } from "../launch/protocol";
 import { LspTool } from "../lsp";
 import type { MCPManager } from "../mcp";
+import { type MemoryRuntimeContext, memoryBackendSupports } from "../memory-backend";
 import type { MnemopiSessionState } from "../mnemopi/state";
+import type { MnemosyneOssSessionState } from "../mnemosyne-oss/state";
 import type { PlanModeState } from "../plan-mode/state";
 import type { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import type { AgentRegistry } from "../registry/agent-registry";
@@ -250,6 +252,10 @@ export interface ToolSession {
 	getHindsightSessionState?: () => HindsightSessionState | undefined;
 	/** Get Mnemopi runtime state for this agent session. */
 	getMnemopiSessionState?: () => MnemopiSessionState | undefined;
+	/** Get Mnemosyne OSS runtime state for this agent session. */
+	getMnemosyneOssSessionState?: () => MnemosyneOssSessionState | undefined;
+	/** Session-bound memory operations for the active backend. */
+	memory?: MemoryRuntimeContext;
 	/** Agent identity used for IRC routing. Returns the registry id (e.g. "Main", "AuthLoader"). */
 	getAgentId?: () => string | null;
 	/** Look up a registered tool by name (used by the eval js backend's tool bridge). */
@@ -568,12 +574,13 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		) {
 			requestedTools.push("ast_edit");
 		}
-		if (["hindsight", "mnemopi"].includes(session.settings.get("memory.backend") ?? "")) {
+		const memoryBackend = session.settings.get("memory.backend");
+		if (memoryBackendSupports(memoryBackend, "recall")) {
 			for (const name of ["recall", "retain", "reflect"]) {
 				if (!requestedTools.includes(name)) requestedTools.push(name);
 			}
 		}
-		if (session.settings.get("memory.backend") === "mnemopi" && !requestedTools.includes("memory_edit")) {
+		if (memoryBackendSupports(memoryBackend, "edit") && !requestedTools.includes("memory_edit")) {
 			requestedTools.push("memory_edit");
 		}
 		if (externalThinkingActive && !requestedTools.includes("think")) {
@@ -588,7 +595,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (session.settings.get("autolearn.enabled") && (session.taskDepth ?? 0) === 0) {
 			if (!requestedTools.includes("manage_skill")) requestedTools.push("manage_skill");
 			if (
-				["hindsight", "mnemopi", "local"].includes(session.settings.get("memory.backend") ?? "") &&
+				(memoryBackendSupports(memoryBackend, "retain") || memoryBackend === "local") &&
 				!requestedTools.includes("learn")
 			) {
 				requestedTools.push("learn");
@@ -635,10 +642,11 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 				!restrictToolNames && session.enableIrc !== false && isIrcEnabled(session.settings, session.taskDepth ?? 0)
 			);
 		}
-		if (name === "retain" || name === "recall" || name === "reflect") {
-			return ["hindsight", "mnemopi"].includes(session.settings.get("memory.backend") ?? "");
-		}
-		if (name === "memory_edit") return session.settings.get("memory.backend") === "mnemopi";
+		const memoryBackend = session.settings.get("memory.backend");
+		if (name === "retain") return memoryBackendSupports(memoryBackend, "retain");
+		if (name === "recall") return memoryBackendSupports(memoryBackend, "recall");
+		if (name === "reflect") return memoryBackendSupports(memoryBackend, "reflect");
+		if (name === "memory_edit") return memoryBackendSupports(memoryBackend, "edit");
 		if (name === "manage_skill")
 			return (
 				session.settings.get("autolearn.enabled") &&
@@ -648,7 +656,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			return (
 				session.settings.get("autolearn.enabled") &&
 				((session.taskDepth ?? 0) === 0 || requestedTools !== undefined) &&
-				["hindsight", "mnemopi", "local"].includes(session.settings.get("memory.backend") ?? "")
+				(memoryBackendSupports(memoryBackend, "retain") || memoryBackend === "local")
 			);
 		}
 		if (name === "task") {

@@ -1,13 +1,14 @@
 # Autonomous Memory
 
-Oh My Pi supports four memory modes. Memory is disabled by default; select one backend via `/settings` or `config.yml`:
+Oh My Pi supports five memory modes. Memory is disabled by default; select one backend via `/settings` or `config.yml`:
 
-| `memory.backend` | Storage and behavior                                                   | Guide                                                   |
-| ---------------- | ---------------------------------------------------------------------- | ------------------------------------------------------- |
-| `off`            | No memory backend                                                      | —                                                       |
-| `local`          | Project-scoped summaries and lessons generated from persisted sessions | This page                                               |
-| `hindsight`      | Remote, bank-scoped Hindsight memory                                   | [Hindsight](#hindsight-remote-backend)                  |
-| `mnemopi`        | Local Mnemopi SQLite memory                                            | [Mnemopi memory backend](./mnemosyne-memory-backend.md) |
+| `memory.backend` | Storage and behavior | Guide |
+| --- | --- | --- |
+| `off` | No memory backend | — |
+| `local` | Project-scoped summaries and lessons generated from persisted sessions | This page |
+| `hindsight` | Remote, bank-scoped Hindsight memory | [Hindsight](#hindsight-remote-backend) |
+| `mnemopi` | Local Mnemopi SQLite memory | [Mnemopi memory backend](./mnemosyne-memory-backend.md) |
+| `mnemosyne-oss` | User-managed Mnemosyne 4.x SDK with interoperable local SQLite banks | [Mnemosyne OSS memory backend](./mnemosyne-oss-memory-backend.md) |
 
 Enable the local summary pipeline:
 

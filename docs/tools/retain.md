@@ -22,8 +22,8 @@
 
 ## Registration / Visibility
 - Tool metadata: `approval = "read"`, `strict = true`, `loadMode = "discoverable"`, even though successful calls enqueue or perform memory writes.
-- The tool is registered only for `memory.backend = "hindsight"` or `"mnemopi"`; it is absent for `"off"` and `"local"`.
-- In unrestricted sessions with an explicit tool list, registration auto-includes the shared `recall`/`retain`/`reflect` set for either supported backend. Restricted lists are not widened.
+- The tool is registered for every backend with retain capability: `hindsight`, `mnemopi`, and `mnemosyne-oss`; it is absent for `off` and `local`.
+- In unrestricted sessions with an explicit tool list, registration auto-includes the shared `recall`/`retain`/`reflect` set. Restricted lists are not widened.
 - In an ordinary `tools.xdev` session, discoverable built-ins may be presented as `xd://retain`; an explicitly requested tool remains top-level.
 - Execution returns one final result and has no progress callback or cancellation parameter.
 
@@ -46,6 +46,8 @@ Mnemopi:
 - `content[0].type = "text"`
 - `content[0].text = "<count> memory stored."` or `"<count> memories stored."`
 - `details = { count: number }`
+
+Mnemosyne OSS retains into its resolved retain bank. Its shared/default bank clear policy does not affect `retain`; it only prevents destructive `/memory clear`. See [Mnemosyne OSS memory backend](../mnemosyne-oss-memory-backend.md#clear-policy).
 - The tool invokes local writes synchronously, but `rememberScoped(...)` catches each write failure and returns `undefined`; `retain` ignores that return and still reports the requested count. The response is therefore not a per-item durability receipt.
 
 ## Flow

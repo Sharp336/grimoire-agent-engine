@@ -153,6 +153,11 @@ import type { IrcMessage } from "../irc/bus";
 import type { DaemonCompletionNotification } from "../launch/protocol";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
+import {
+	getMnemosyneOssSessionState,
+	type MnemosyneOssSessionState,
+	setMnemosyneOssSessionState,
+} from "../mnemosyne-oss/state";
 import { containsOrchestrate, renderOrchestrateNotice } from "../modes/orchestrate";
 import { theme } from "../modes/theme/theme";
 import { parseTurnBudget } from "../modes/turn-budget";
@@ -1181,6 +1186,8 @@ export class AgentSession {
 			setHindsightSessionState: state => this.setHindsightSessionState(state),
 			getMnemopiSessionState: () => this.getMnemopiSessionState(),
 			takeMnemopiSessionState: () => setMnemopiSessionState(this, undefined),
+			getMnemosyneOssSessionState: () => this.getMnemosyneOssSessionState(),
+			takeMnemosyneOssSessionState: () => setMnemosyneOssSessionState(this, undefined),
 			setBaseSystemPrompt: prompt => {
 				this.#tools.setBaseSystemPrompt(prompt);
 				this.agent.setSystemPrompt(prompt);
@@ -1797,6 +1804,12 @@ export class AgentSession {
 
 	getMnemopiSessionState(): MnemopiSessionState | undefined {
 		return getMnemopiSessionState(this);
+	}
+	getMnemosyneOssSessionState(): MnemosyneOssSessionState | undefined {
+		return getMnemosyneOssSessionState(this);
+	}
+	setMnemosyneOssSessionState(state: MnemosyneOssSessionState | undefined): MnemosyneOssSessionState | undefined {
+		return setMnemosyneOssSessionState(this, state);
 	}
 
 	/** TTSR manager for time-traveling stream rules */
@@ -4074,9 +4087,9 @@ export class AgentSession {
 		}
 		await this.#drainAutolearnCapture();
 		await this.#memory.transition;
-
 		const hindsightState = this.getHindsightSessionState();
 		const mnemopiState = setMnemopiSessionState(this, undefined);
+		const mnemosyneOssState = setMnemosyneOssSessionState(this, undefined);
 		const advisorRecorderClosed = this.#advisors.recorderClosed();
 		const results = await Promise.allSettled([
 			this.#disposeOwnedAsyncJobs(),
@@ -4088,6 +4101,7 @@ export class AgentSession {
 			advisorRecorderClosed,
 			hindsightState?.flushRetainQueue() ?? Promise.resolve(),
 			this.#disposeMnemopi(mnemopiState, options.mnemopiConsolidateTimeoutMs),
+			mnemosyneOssState?.dispose() ?? Promise.resolve(),
 		]);
 		for (const result of results) {
 			if (result.status === "rejected") {
@@ -4102,8 +4116,9 @@ export class AgentSession {
 		this.#movedFromEmptySessionFile = undefined;
 		this.#closeAllProviderSessions("dispose");
 		this.#maintenance.cancelSpeculation();
-		this.setHindsightSessionState(undefined);
 		hindsightState?.dispose();
+		this.setHindsightSessionState(undefined);
+		this.setMnemosyneOssSessionState(undefined);
 		this.#disconnectFromAgent();
 		if (this.#unsubscribeAppendOnly) {
 			this.#unsubscribeAppendOnly();
@@ -7063,6 +7078,7 @@ export class AgentSession {
 	async moveSession(newCwd: string, targetSessionDir?: string): Promise<void> {
 		this.#assertVibeSessionTransitionAllowed("move the session");
 		await this.sessionManager.moveTo(newCwd, targetSessionDir);
+		await this.#memory.applyMemoryBackend();
 	}
 
 	// =========================================================================
