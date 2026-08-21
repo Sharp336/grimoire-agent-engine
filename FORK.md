@@ -242,4 +242,4 @@ Hub 模式专项测试至少验证：
 | 日期 | 上游正式 tag | 上游 tag SHA | Fork 版本/Tag | Fork SHA | Fork 差异摘要 | 验证结果 |
 | --- | --- | --- | --- | --- | --- | --- |
 | 2026-08-21 | `v17.4.0` | `72000acfeb902e21816252699482887f34d1a5a4` | `17.4.0` / `v17.4.0-fork.3` | `7f5a51fff` | 精简 Hub 模型表面；增加 fork 发布流程 | 已核验上游 tag SHA、本地 fork tag 和 package 版本；Hub 双模式改造尚待最终验收 |
-| 2026-08-21 | `v17.4.2` | `7ab849ade53d905c30ba2d1ae2126d92a47d2db8` | `17.4.2` / `v17.4.2-fork.1` | `待写入` | 合并上游 17.4.2（607 文件，含 image broker、composer attachment chips、cli-reference、archive 扩展等）；保留 fork Hub compact/full 双模式与 Plan 提示词定制；更新 native manifest 与 CI 钉版本至 17.4.2 | 合并完成，待验证 |
+| 2026-08-21 | `v17.4.2` | `7ab849ade53d905c30ba2d1ae2126d92a47d2db8` | `17.4.2` / `v17.4.2-fork.1` | `1e814d8` | 合并上游 17.4.2（607 文件，含 image broker、composer attachment chips、cli-reference、archive 扩展等）；保留 fork Hub compact/full 双模式与 Plan 提示词定制；更新 native manifest 与 CI 钉版本至 17.4.2 | 已完成合并与文档/流水线更新，待 CI 验证 |
