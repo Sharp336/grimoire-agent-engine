@@ -47,6 +47,8 @@ function createController(authStorage: AuthStorage, mcpManagerOverrides: Record<
 	const showStatus = vi.fn();
 	const present = vi.fn();
 	const editor: { onEscape?: () => void } = {};
+	const beginMcpTest = vi.fn();
+	const settleMcpTest = vi.fn();
 	const prepareConfig = vi.fn(async (config: MCPServerConfig) => config);
 	const mcpManager = {
 		prepareConfig,
@@ -76,10 +78,24 @@ function createController(authStorage: AuthStorage, mcpManagerOverrides: Record<
 			modelRegistry: { authStorage },
 		},
 		mcpManager,
+		beginMcpTest,
+		settleMcpTest,
 	} as never;
 	const controller = new MCPCommandController(ctx);
 
-	return { controller, ctx, showError, showStatus, present, editor, oauthManualInput, prepareConfig, mcpManager };
+	return {
+		controller,
+		ctx,
+		showError,
+		showStatus,
+		present,
+		editor,
+		oauthManualInput,
+		prepareConfig,
+		mcpManager,
+		beginMcpTest,
+		settleMcpTest,
+	};
 }
 
 describe("/mcp auth commands", () => {
@@ -490,6 +506,59 @@ describe("/mcp auth commands", () => {
 		// onEscape must be restored to its previous value so subsequent user
 		// input does not keep aborting the (now-finished) flow.
 		expect(editor.onEscape).not.toBe(installedEscape);
+	});
+
+	test("/mcp test registers Esc cancellation through ctx state, not editor.onEscape", async () => {
+		const authStorage = freshAuthStorage();
+		await authStorage.reload();
+		let connectSignal: AbortSignal | undefined;
+		vi.spyOn(mcpClient, "connectToServer").mockImplementation((_name, _config, options) => {
+			connectSignal = options?.signal;
+			// Pending until the test's abort controller fires (mirrors a slow
+			// server whose connection is still in flight when Esc is pressed).
+			// An already-aborted signal must reject immediately — the abort
+			// event has already fired and cannot re-trigger a later listener.
+			return new Promise((_, reject) => {
+				const signal = options?.signal;
+				if (signal?.aborted) {
+					reject(new DOMException("Aborted", "AbortError"));
+					return;
+				}
+				signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), {
+					once: true,
+				});
+			});
+		});
+		vi.spyOn(mcpClient, "listTools").mockResolvedValue([]);
+
+		const { controller, editor, showStatus, beginMcpTest, settleMcpTest } = createController(authStorage);
+
+		const testPromise = controller.handle("/mcp test envserver");
+
+		// #handleTest registers its abort controller synchronously, before the
+		// first await — the poll is just a safety net.
+		const deadline = Date.now() + 1_000;
+		while (beginMcpTest.mock.calls.length === 0 && Date.now() < deadline) {
+			await Bun.sleep(10);
+		}
+		expect(beginMcpTest).toHaveBeenCalledTimes(1);
+		// Esc ownership moved to ctx state: the editor slot must stay untouched.
+		expect(editor.onEscape).toBeUndefined();
+
+		const [registeredController, registeredName] = beginMcpTest.mock.calls[0] as [AbortController, string];
+		expect(registeredName).toBe("envserver");
+		registeredController.abort();
+
+		await Promise.race([
+			testPromise,
+			Bun.sleep(2_000).then(() => {
+				throw new Error("/mcp test did not resolve within 2s of Esc");
+			}),
+		]);
+
+		expect(connectSignal?.aborted).toBe(true);
+		expect(showStatus).toHaveBeenCalledWith('Cancelled MCP test for "envserver"');
+		expect(settleMcpTest).toHaveBeenCalledWith(registeredController);
 	});
 
 	test("reauth supersedes an unfinished MCP OAuth flow", async () => {

@@ -194,6 +194,7 @@ import {
 	type LoopLimitRuntime,
 	parseLoopLimitArgs,
 } from "./loop-limit";
+import { McpTestEscapeState } from "./mcp-test-escape";
 import { OAuthManualInputManager } from "./oauth-manual-input";
 import { countRunningSubagentBadgeAgents, getRunningSubagentBadgeRegistry } from "./running-subagent-badge";
 import {
@@ -687,6 +688,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	readonly #tanCommandController: TanCommandController;
 	readonly #omfgController: OmfgController;
 	readonly #cleanseController: CleanseCommandController;
+	readonly #mcpTestEscape: McpTestEscapeState = new McpTestEscapeState();
 	readonly #commandController: CommandController;
 	readonly #todoCommandController: TodoCommandController;
 	readonly #liveCommandController: LiveCommandController;
@@ -5289,6 +5291,29 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	handleCleanseEscape(): boolean {
 		return this.#cleanseController.handleEscape();
+	}
+
+	beginMcpTest(abortController: AbortController, name: string): void {
+		this.#mcpTestEscape.begin(abortController, name);
+	}
+
+	settleMcpTest(abortController: AbortController): void {
+		this.#mcpTestEscape.settle(abortController);
+	}
+
+	hasActiveMcpTest(): boolean {
+		return this.#mcpTestEscape.hasActive();
+	}
+
+	handleMcpTestEscape(): boolean {
+		const decision = this.#mcpTestEscape.handleEscape();
+		if (decision === "fallthrough") return false;
+		if (decision === "consume") {
+			const name = this.#mcpTestEscape.name ?? "unknown";
+			const cancelled = this.#mcpTestEscape.cancelled ?? false;
+			this.showStatus(`MCP test for "${name}" ${cancelled ? "was cancelled" : "already completed"}`);
+		}
+		return true;
 	}
 
 	cycleThinkingLevel(): void {

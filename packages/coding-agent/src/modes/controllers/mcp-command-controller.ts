@@ -1573,11 +1573,8 @@ export class MCPCommandController {
 			return;
 		}
 
-		const originalOnEscape = this.ctx.editor.onEscape;
 		const abortController = new AbortController();
-		this.ctx.editor.onEscape = () => {
-			abortController.abort();
-		};
+		this.ctx.beginMcpTest(abortController, name);
 
 		let connection: MCPServerConnection | undefined;
 		try {
@@ -1660,7 +1657,7 @@ export class MCPCommandController {
 
 			this.ctx.showError(`Failed to connect to "${name}": ${errorMsg}${helpText}`);
 		} finally {
-			this.ctx.editor.onEscape = originalOnEscape;
+			this.ctx.settleMcpTest(abortController);
 			if (connection) {
 				// Best-effort: don't block UI on cleanup.
 				void disconnectServer(connection);

@@ -455,6 +455,10 @@ export interface InteractiveModeContext {
 	handleCleanseCommand(args: string): Promise<void>;
 	hasActiveCleanse(): boolean;
 	handleCleanseEscape(): boolean;
+	beginMcpTest(abortController: AbortController, name: string): void;
+	settleMcpTest(abortController: AbortController): void;
+	hasActiveMcpTest(): boolean;
+	handleMcpTestEscape(): boolean;
 	cycleThinkingLevel(): void;
 	cycleRoleModel(direction?: "forward" | "backward"): Promise<void>;
 	toggleToolOutputExpansion(): void;
