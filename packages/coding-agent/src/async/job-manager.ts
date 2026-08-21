@@ -1,4 +1,6 @@
 import { logger } from "@oh-my-pi/pi-utils";
+import { buildProgressPreview, mergeProgressPreviews } from "../session/progress-preview";
+import { type ProgressBatch, ProgressBatcher, type ProgressReminder } from "./progress-batcher";
 
 const DELIVERY_RETRY_BASE_MS = 500;
 const DELIVERY_RETRY_MAX_MS = 30_000;
@@ -63,10 +65,48 @@ export interface AsyncJob {
 	 * until the caller invokes `markRunning()` from the run context.
 	 */
 	queued?: boolean;
+	/** How intentional progress reaches the owning agent; undefined keeps the channel off. */
+	progressDelivery?: AsyncJobProgressDelivery;
+	/** Stable artifact containing the complete raw output behind bounded progress previews. */
+	progressArtifactId?: string;
+}
+
+export type AsyncJobProgressDelivery = "ambient" | "wake";
+
+export interface AsyncJobProgressInfo {
+	artifactId?: string;
+	truncated?: boolean;
+	suppressedEvents?: number;
+	reminder?: ProgressReminder;
+}
+
+interface AsyncJobProgressRecord extends AsyncJobProgressInfo {
+	text: string;
+}
+
+function mergeAsyncJobProgressRecords(
+	left: AsyncJobProgressRecord,
+	right: AsyncJobProgressRecord,
+): AsyncJobProgressRecord {
+	const preview = mergeProgressPreviews(
+		buildProgressPreview(left.text, left.truncated),
+		buildProgressPreview(right.text, right.truncated),
+	);
+	return {
+		text:
+			preview.text ?? [preview.head, preview.tail].filter((part): part is string => part !== undefined).join("\n"),
+		artifactId: right.artifactId ?? left.artifactId,
+		truncated: preview.truncated,
+	};
 }
 
 /** Delivery callback for a settled job's result text. */
 export type AsyncJobDeliverySink = (jobId: string, text: string, job?: AsyncJob) => void | Promise<void>;
+
+/** Best-effort owner-routed delivery for progress from a still-running job. */
+export interface AsyncJobProgressSink {
+	deliver(jobId: string, text: string, job: AsyncJob, seq: number, info: AsyncJobProgressInfo): void | Promise<void>;
+}
 
 export interface AsyncJobManagerOptions {
 	/**
@@ -114,6 +154,8 @@ export interface AsyncJobRegisterOptions {
 	onProgress?: (text: string, details?: Record<string, unknown>) => void | Promise<void>;
 	/** Register the job in queued state; see {@link AsyncJob.queued}. */
 	queued?: boolean;
+	/** Opt into model-facing progress and choose whether it wakes an idle agent. */
+	progressDelivery?: AsyncJobProgressDelivery;
 }
 
 /**
@@ -151,6 +193,11 @@ export class AsyncJobManager {
 	readonly #evictionTimers = new Map<string, NodeJS.Timeout>();
 	readonly #pollEscalation = new Map<string | undefined, PollEscalationState>();
 	readonly #deliverySinks = new Map<string, AsyncJobDeliverySink>();
+	readonly #progressSinks = new Map<string, AsyncJobProgressSink>();
+	readonly #progressBatcher = new ProgressBatcher<AsyncJobProgressRecord>(
+		(jobId, batch) => this.#deliverAgentProgress(jobId, batch),
+		{ merge: mergeAsyncJobProgressRecords },
+	);
 	readonly #onJobComplete: AsyncJobManagerOptions["onJobComplete"];
 	readonly #maxRunningJobs: number;
 	readonly #retentionMs: number;
@@ -192,6 +239,8 @@ export class AsyncJobManager {
 			jobId: string;
 			signal: AbortSignal;
 			reportProgress: (text: string, details?: Record<string, unknown>) => Promise<void>;
+			/** Report intentional progress to the owning model, separately from TUI updates. */
+			reportAgentProgress: (text: string, info?: AsyncJobProgressInfo) => void;
 			/** Clear the queued flag once the job actually starts executing. */
 			markRunning: () => void;
 		}) => Promise<string>,
@@ -228,6 +277,7 @@ export class AsyncJobManager {
 			ownerId: options?.ownerId,
 			agentId: options?.agentId,
 			queued: options?.queued === true,
+			progressDelivery: options?.progressDelivery,
 		};
 
 		const reportProgress = async (text: string, details?: Record<string, unknown>): Promise<void> => {
@@ -248,6 +298,7 @@ export class AsyncJobManager {
 					jobId: id,
 					signal: abortController.signal,
 					reportProgress,
+					reportAgentProgress: (text, info) => this.#recordAgentProgress(job, text, info),
 					markRunning: () => {
 						job.queued = false;
 					},
@@ -257,6 +308,7 @@ export class AsyncJobManager {
 					this.#scheduleEviction(id);
 					return;
 				}
+				await this.#flushAgentProgress(id);
 				job.status = "completed";
 				job.resultText = text;
 				this.#enqueueDelivery(id, text);
@@ -268,6 +320,7 @@ export class AsyncJobManager {
 					return;
 				}
 				const errorText = error instanceof Error ? error.message : String(error);
+				await this.#flushAgentProgress(id);
 				job.status = "failed";
 				job.errorText = errorText;
 				this.#enqueueDelivery(id, errorText);
@@ -338,6 +391,7 @@ export class AsyncJobManager {
 		const uniqueJobIds = Array.from(new Set(jobIds.map(id => id.trim()).filter(id => id.length > 0)));
 		for (const jobId of uniqueJobIds) {
 			this.#watchedJobs.add(jobId);
+			this.#clearAgentProgress(jobId);
 		}
 		this.#notifyDeliveryQueueChanged();
 		return uniqueJobIds.length;
@@ -386,6 +440,7 @@ export class AsyncJobManager {
 
 		for (const jobId of uniqueJobIds) {
 			this.#suppressedDeliveries.add(jobId);
+			this.#clearAgentProgress(jobId);
 		}
 
 		const before = this.#deliveries.length;
@@ -479,6 +534,75 @@ export class AsyncJobManager {
 		return () => {
 			if (this.#deliverySinks.get(ownerId) === sink) this.#deliverySinks.delete(ownerId);
 		};
+	}
+
+	/**
+	 * Route progress for jobs owned by `ownerId`. The newest registration wins,
+	 * matching completion delivery ownership.
+	 */
+	registerProgressSink(ownerId: string, sink: AsyncJobProgressSink): () => void {
+		this.#progressSinks.set(ownerId, sink);
+		return () => {
+			if (this.#progressSinks.get(ownerId) === sink) this.#progressSinks.delete(ownerId);
+		};
+	}
+
+	/** Enable model-facing progress for a running job after a caller-managed foreground phase. */
+	activateProgressDelivery(jobId: string, delivery: AsyncJobProgressDelivery): boolean {
+		const job = this.#jobs.get(jobId);
+		if (job?.status !== "running") return false;
+		job.progressDelivery = delivery;
+		return true;
+	}
+
+	#recordAgentProgress(job: AsyncJob, text: string, info: AsyncJobProgressInfo = {}): void {
+		if (
+			this.#disposed ||
+			job.status !== "running" ||
+			job.progressDelivery === undefined ||
+			this.isDeliverySuppressed(job.id)
+		)
+			return;
+		if (job.ownerId === undefined || !this.#progressSinks.has(job.ownerId)) return;
+		if (info.artifactId) job.progressArtifactId = info.artifactId;
+		this.#progressBatcher.push(job.id, { text, artifactId: info.artifactId, truncated: info.truncated });
+	}
+
+	async #deliverAgentProgress(jobId: string, batch: ProgressBatch<AsyncJobProgressRecord>): Promise<void> {
+		const job = this.#jobs.get(jobId);
+		if (job?.status !== "running" || this.isDeliverySuppressed(jobId)) {
+			return;
+		}
+		if (batch.kind === "artifact-only") return;
+		const sink = job.ownerId === undefined ? undefined : this.#progressSinks.get(job.ownerId);
+		if (!sink) return;
+		const info: AsyncJobProgressInfo = {
+			artifactId:
+				batch.values.findLast(record => record.artifactId !== undefined)?.artifactId ?? job.progressArtifactId,
+			truncated: batch.suppressedEvents > 0 || batch.values.some(record => record.truncated === true),
+			suppressedEvents: batch.suppressedEvents || undefined,
+			reminder: batch.reminder,
+		};
+		try {
+			await sink.deliver(jobId, batch.values.map(record => record.text).join("\n"), job, batch.seq, info);
+		} catch (error) {
+			logger.warn("Async job progress delivery failed", {
+				jobId,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+
+	#flushAgentProgress(jobId: string): Promise<void> {
+		return this.#progressBatcher.finish(jobId);
+	}
+
+	#clearAgentProgress(jobId: string): void {
+		this.#progressBatcher.clear(jobId);
+	}
+
+	#clearAllAgentProgress(): void {
+		this.#progressBatcher.dispose();
 	}
 
 	/**
@@ -615,6 +739,8 @@ export class AsyncJobManager {
 		this.#watchedJobs.clear();
 		this.#pollEscalation.clear();
 		this.#deliverySinks.clear();
+		this.#progressSinks.clear();
+		this.#clearAllAgentProgress();
 		return jobsSettled && drained;
 	}
 
@@ -648,10 +774,12 @@ export class AsyncJobManager {
 		this.#evictionTimers.delete(jobId);
 		this.#suppressedDeliveries.delete(jobId);
 		this.#watchedJobs.delete(jobId);
+		this.#clearAgentProgress(jobId);
 		return this.#jobs.delete(jobId);
 	}
 
 	#scheduleEviction(jobId: string): void {
+		this.#clearAgentProgress(jobId);
 		if (this.#disposed) return;
 		if (this.#retentionMs <= 0) {
 			this.#evictJob(jobId);

@@ -1,5 +1,5 @@
 import type { AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatBytes } from "../tools/render-utils";
 import { sanitizeWithOptionalSixelPassthrough } from "../utils/sixel";
 
@@ -53,6 +53,8 @@ export interface OutputSummary {
 export interface OutputSinkOptions {
 	artifactPath?: string;
 	artifactId?: string;
+	/** `mirror` writes every raw chunk to the artifact; `spill` opens it only when inline output loses bytes. */
+	artifactWriteMode?: "spill" | "mirror";
 	/**
 	 * Total inline body budget (bytes). Default DEFAULT_MAX_BYTES. The head
 	 * window and rolling tail window share this budget, so a composed
@@ -745,6 +747,7 @@ export class OutputSink {
 	#pendingChunk = "";
 	#pendingCarriageReturn = false;
 	#pendingChunkTimer: Timer | undefined;
+	#chunkDeliveryTail: Promise<void> | undefined;
 
 	// Per-line column cap streaming state (persists across `push` calls so a
 	// long line split across chunks still trips the same trigger).
@@ -768,6 +771,7 @@ export class OutputSink {
 
 	readonly #artifactPath?: string;
 	readonly #artifactId?: string;
+	readonly #artifactWriteMode: "spill" | "mirror";
 	readonly #spillThreshold: number;
 	readonly #headLimit: number;
 	readonly #onChunk?: (chunk: string) => void;
@@ -793,6 +797,7 @@ export class OutputSink {
 		const {
 			artifactPath,
 			artifactId,
+			artifactWriteMode = "spill",
 			spillThreshold = DEFAULT_MAX_BYTES,
 			headBytes = 0,
 			maxColumns = 0,
@@ -803,6 +808,7 @@ export class OutputSink {
 		} = options ?? {};
 		this.#artifactPath = artifactPath;
 		this.#artifactId = artifactId;
+		this.#artifactWriteMode = artifactWriteMode;
 		this.#spillThreshold = spillThreshold;
 		this.#headLimit = Math.max(0, Math.min(headBytes, Math.floor(spillThreshold / 2)));
 		this.#maxColumns = Math.max(0, maxColumns);
@@ -887,7 +893,13 @@ export class OutputSink {
 		// Mirror RAW chunk to the artifact file so the on-disk record is the full
 		// uncapped stream. Mirror triggers on: in-memory overflow OR this chunk's
 		// column cap dropped bytes (otherwise we'd lose data) OR file already open.
-		if (this.#artifactPath && (this.#file != null || cappedThisChunk || this.#willOverflow(cappedBytes))) {
+		if (
+			this.#artifactPath &&
+			(this.#artifactWriteMode === "mirror" ||
+				this.#file != null ||
+				cappedThisChunk ||
+				this.#willOverflow(cappedBytes))
+		) {
 			this.#writeToFile(chunk);
 		}
 
@@ -1203,7 +1215,18 @@ export class OutputSink {
 		this.#lastChunkTime = now;
 		const merged = this.#pendingChunk + chunk;
 		this.#pendingChunk = "";
-		this.#onChunk?.(merged);
+		if (this.#artifactWriteMode !== "mirror") {
+			this.#onChunk?.(merged);
+			return;
+		}
+		const deliver = async () => {
+			// push() finishes routing the raw chunk to the file before this microtask
+			// resumes, then flushArtifact makes it readable before model-facing progress.
+			await Promise.resolve();
+			await this.flushArtifact();
+			this.#onChunk?.(merged);
+		};
+		this.#chunkDeliveryTail = this.#chunkDeliveryTail?.then(deliver, deliver) ?? deliver();
 	}
 
 	#flushPendingChunk(): void {
@@ -1270,6 +1293,13 @@ export class OutputSink {
 		// Flush any chunk still held back by the throttle so the live preview
 		// ends with the complete stream.
 		this.#flushPendingChunk();
+		try {
+			await this.#chunkDeliveryTail;
+		} catch (error) {
+			logger.warn("Output preview delivery failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
 		const totalLines = this.#sawData ? this.#totalLines + 1 : 0;
 
 		await this.#finalizeFile();
@@ -1379,6 +1409,16 @@ export class OutputSink {
 	async dispose(): Promise<void> {
 		this.#clearPendingChunkTimer();
 		await this.#finalizeFile();
+	}
+
+	/** Make mirrored bytes readable without closing the stable artifact. */
+	async flushArtifact(): Promise<void> {
+		if (this.#fileCreation) await this.#fileCreation.catch(() => undefined);
+		try {
+			await this.#file?.sink.flush();
+		} catch {
+			/* Artifact persistence is best-effort, matching finalization. */
+		}
 	}
 }
 

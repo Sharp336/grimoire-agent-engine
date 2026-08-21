@@ -320,6 +320,26 @@ describe("OutputSink", () => {
 		expect(artifactText).toBe("headabcdefgh");
 	});
 
+	test("finalizes a mirrored artifact when preview delivery throws", async () => {
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "preview-failure.log");
+		const sink = new OutputSink({
+			artifactPath,
+			artifactId: "artifact-preview-failure",
+			artifactWriteMode: "mirror",
+			onChunk: () => {
+				throw new Error("preview unavailable");
+			},
+		});
+
+		sink.push("persisted despite preview failure");
+		const dumped = await sink.dump();
+
+		expect(dumped.output).toBe("persisted despite preview failure");
+		expect(dumped.artifactId).toBe("artifact-preview-failure");
+		expect(await Bun.file(artifactPath).text()).toBe("persisted despite preview failure");
+	});
+
 	test("throttled onChunk coalesces held-back chunks instead of dropping them", async () => {
 		const chunks: string[] = [];
 		const sink = new OutputSink({ onChunk: chunk => chunks.push(chunk), chunkThrottleMs: 60_000 });

@@ -99,7 +99,7 @@ import {
 	withTimeout,
 } from "@oh-my-pi/pi-utils";
 import { type AdvisorConfig, type AdvisorRuntimeStatus, loadAdvisorTranscriptCosts } from "../advisor";
-import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager } from "../async";
+import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager, type AsyncJobProgressInfo } from "../async";
 import { reset as resetCapabilities } from "../capability";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import type { ModelRegistry } from "../config/model-registry";
@@ -248,8 +248,12 @@ import type {
 import {
 	ASYNC_INLINE_RESULT_MAX_CHARS,
 	ASYNC_PREVIEW_MAX_CHARS,
+	ASYNC_PROGRESS_MESSAGE_TYPE,
+	ASYNC_PROGRESS_WAKE_QUEUE_KIND,
 	ASYNC_RESULT_MESSAGE_TYPE,
+	type AsyncProgressEntry,
 	type AsyncResultEntry,
+	buildAsyncProgressBatchMessage,
 	buildAsyncResultBatchMessage,
 } from "./async-job-delivery";
 import { BashRunner, type BashRunnerHost } from "./bash-runner";
@@ -571,6 +575,9 @@ export class AgentSession {
 	readonly #asyncJobManager: AsyncJobManager | undefined;
 	/** Clears this session's owner delivery sink registration; set when a manager + agent id exist. */
 	#unregisterAsyncDeliverySink: (() => void) | undefined;
+	#unregisterAsyncProgressSink: (() => void) | undefined;
+	#unregisterAsyncProgressQueue: (() => void) | undefined;
+	#unregisterAsyncProgressWakeQueue: (() => void) | undefined;
 	/**
 	 * Async-delivery generation, bumped on every session transition that evicts
 	 * this owner's jobs (see {@link AgentSession.#cancelOwnAsyncJobs}). Stamped
@@ -1410,15 +1417,34 @@ export class AgentSession {
 		// registered sink the manager dead-letters owned deliveries, so this
 		// registration is what makes background jobs usable — for the main
 		// session and for subagents inheriting the process manager alike.
+		this.#unregisterAsyncProgressQueue = this.yieldQueue.register<AsyncProgressEntry>(ASYNC_PROGRESS_MESSAGE_TYPE, {
+			skipIdleFlush: true,
+			isStale: entry =>
+				entry.epoch !== this.#asyncDeliveryEpoch ||
+				(entry.job !== undefined && this.#asyncJobManager?.isDeliverySuppressed(entry.jobId) === true),
+			build: buildAsyncProgressBatchMessage,
+		});
+		this.#unregisterAsyncProgressWakeQueue = this.yieldQueue.register<AsyncProgressEntry>(
+			ASYNC_PROGRESS_WAKE_QUEUE_KIND,
+			{
+				isStale: entry =>
+					entry.epoch !== this.#asyncDeliveryEpoch ||
+					(entry.job !== undefined && this.#asyncJobManager?.isDeliverySuppressed(entry.jobId) === true),
+				build: buildAsyncProgressBatchMessage,
+			},
+		);
 		if (this.#asyncJobManager && this.#agentId) {
 			const manager = this.#asyncJobManager;
-			this.#unregisterAsyncDeliverySink = manager.registerDeliverySink(this.#agentId, (jobId, text, job) =>
-				this.#deliverAsyncJobResult(manager, jobId, text, job),
-			);
 			this.yieldQueue.register<AsyncResultEntry>("async-result", {
 				isStale: entry => entry.epoch !== this.#asyncDeliveryEpoch || manager.isDeliverySuppressed(entry.jobId),
 				build: buildAsyncResultBatchMessage,
 			});
+			this.#unregisterAsyncProgressSink = manager.registerProgressSink(this.#agentId, {
+				deliver: (jobId, text, job, seq, info) => this.#deliverAsyncJobProgress(jobId, text, job, seq, info),
+			});
+			this.#unregisterAsyncDeliverySink = manager.registerDeliverySink(this.#agentId, (jobId, text, job) =>
+				this.#deliverAsyncJobResult(manager, jobId, text, job),
+			);
 		}
 		this.agent.setAssistantMessageEventInterceptor((message, assistantMessageEvent) => {
 			const event: AgentEvent = {
@@ -1886,6 +1912,8 @@ export class AgentSession {
 		// prior session's background result cannot inject into the next transcript.
 		this.#asyncDeliveryEpoch += 1;
 		this.yieldQueue.clear("async-result");
+		this.yieldQueue.clear(ASYNC_PROGRESS_MESSAGE_TYPE);
+		this.yieldQueue.clear(ASYNC_PROGRESS_WAKE_QUEUE_KIND);
 	}
 
 	/**
@@ -1901,7 +1929,8 @@ export class AgentSession {
 	 */
 	#hasPendingAsyncWake(): boolean {
 		const manager = this.#asyncJobManager;
-		if (!manager) return false;
+		const queuedWake = this.yieldQueue.has(ASYNC_PROGRESS_WAKE_QUEUE_KIND);
+		if (!manager) return queuedWake;
 		const ownerFilter = this.#agentId ? { ownerId: this.#agentId } : undefined;
 		return (
 			manager.getRunningJobs(ownerFilter).some(job => !manager.isDeliverySuppressed(job.id)) ||
@@ -1911,16 +1940,14 @@ export class AgentSession {
 			// longer reports it. Without this leg a terminal yield in the
 			// (idle-flush delay / step-boundary) handoff window would read as
 			// quiescent and the run driver would drop the queued result.
-			this.yieldQueue.has(ASYNC_RESULT_MESSAGE_TYPE)
+			this.yieldQueue.has(ASYNC_RESULT_MESSAGE_TYPE) ||
+			queuedWake
 		);
 	}
 
 	/**
 	 * Public view of the pending-async-wake state for run drivers: true while
-	 * owner-scoped async work can still re-wake this session's run (a running
-	 * background job with an unsuppressed delivery, or a queued / in-flight
-	 * delivery). The task executor's quiescence barrier polls this to
-	 * distinguish a scheduling pause from terminal completion.
+	 * owner-scoped async work can still re-wake this session's run.
 	 */
 	hasPendingAsyncWork(): boolean {
 		return this.#hasPendingAsyncWake();
@@ -1962,6 +1989,24 @@ export class AgentSession {
 		if (manager.isDeliverySuppressed(jobId)) return;
 		const durationMs = job ? Math.max(0, Date.now() - job.startTime) : undefined;
 		this.yieldQueue.enqueue<AsyncResultEntry>("async-result", { jobId, result: formatted, job, durationMs, epoch });
+	}
+
+	#deliverAsyncJobProgress(jobId: string, text: string, job: AsyncJob, seq: number, info: AsyncJobProgressInfo): void {
+		if (this.#isDisposed || job.progressDelivery === undefined) return;
+		const queueKind = job.progressDelivery === "wake" ? ASYNC_PROGRESS_WAKE_QUEUE_KIND : ASYNC_PROGRESS_MESSAGE_TYPE;
+		this.yieldQueue.enqueue<AsyncProgressEntry>(queueKind, {
+			jobId,
+			text,
+			job,
+			seq,
+			elapsedMs: Math.max(0, Date.now() - job.startTime),
+			epoch: this.#asyncDeliveryEpoch,
+			delivery: job.progressDelivery,
+			artifactId: info.artifactId,
+			sourceTruncated: info.truncated,
+			suppressedEvents: info.suppressedEvents,
+			reminder: info.reminder,
+		});
 	}
 
 	async #formatAsyncResultForFollowUp(result: string): Promise<string> {
@@ -4000,6 +4045,12 @@ export class AgentSession {
 		// dead-letter rather than enqueue a follow-up into a disposing session.
 		this.#unregisterAsyncDeliverySink?.();
 		this.#unregisterAsyncDeliverySink = undefined;
+		this.#unregisterAsyncProgressSink?.();
+		this.#unregisterAsyncProgressSink = undefined;
+		this.#unregisterAsyncProgressQueue?.();
+		this.#unregisterAsyncProgressQueue = undefined;
+		this.#unregisterAsyncProgressWakeQueue?.();
+		this.#unregisterAsyncProgressWakeQueue = undefined;
 		const manager = this.#ownedAsyncJobManager;
 		// The shutdown reason is reserved for the top-level session that OWNS the
 		// manager — the genuine process/handled-shutdown path — so the task

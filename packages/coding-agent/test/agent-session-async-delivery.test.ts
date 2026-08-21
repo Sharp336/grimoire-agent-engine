@@ -14,7 +14,11 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { DaemonCompletionNotification } from "@oh-my-pi/pi-coding-agent/launch/protocol";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import type { AsyncResultEntry } from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
+import {
+	ASYNC_PROGRESS_WAKE_QUEUE_KIND,
+	type AsyncProgressEntry,
+	type AsyncResultEntry,
+} from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -343,6 +347,268 @@ describe("AgentSession owner-routed async delivery", () => {
 		// reaches quiescence.
 		await session.settleAsyncWork();
 		expect(session.hasPendingAsyncWork()).toBe(false);
+	});
+
+	it("holds progress while idle and injects it at the next active turn", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "Main",
+			ownedAsyncJobManager: manager,
+		});
+
+		const gate = Promise.withResolvers<string>();
+		manager.register("bash", "progress job", () => gate.promise, { id: "progress-job", ownerId: "Main" });
+		const job = manager.getJob("progress-job");
+		if (!job) throw new Error("Expected registered progress job");
+		session.yieldQueue.enqueue<AsyncProgressEntry>("async-progress", {
+			jobId: job.id,
+			text: "LAZY PROGRESS MARKER",
+			job,
+			seq: 1,
+			elapsedMs: 10,
+			epoch: 0,
+			delivery: "ambient",
+		});
+
+		await Promise.resolve();
+		expect(mock.calls).toHaveLength(0);
+
+		await session.sendUserMessage("inspect progress");
+		expect(
+			mock.calls.some(call =>
+				call.context.messages.some(message =>
+					typeof message.content === "string"
+						? message.content.includes("LAZY PROGRESS MARKER")
+						: message.content.some(
+								content => content.type === "text" && content.text.includes("LAZY PROGRESS MARKER"),
+							),
+				),
+			),
+		).toBe(true);
+
+		manager.watchJobs([job.id]);
+		gate.resolve("done");
+		await manager.waitForAll();
+	});
+
+	it("pushes wake progress into an idle session before the job completes", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const marker = "WAKE PROGRESS BEFORE COMPLETION";
+		const wakeObserved = Promise.withResolvers<void>();
+		const mock = createMockModel({
+			handler: context => {
+				const sawMarker = context.messages.some(message =>
+					typeof message.content === "string"
+						? message.content.includes(marker)
+						: message.content.some(content => content.type === "text" && content.text.includes(marker)),
+				);
+				if (sawMarker) wakeObserved.resolve();
+				return { content: ["Done"] };
+			},
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "Main",
+			ownedAsyncJobManager: manager,
+		});
+
+		await session.sendUserMessage("initialize then wait");
+		expect(mock.calls).toHaveLength(1);
+
+		const gate = Promise.withResolvers<string>();
+		const reporter = Promise.withResolvers<(text: string) => void>();
+		const jobId = manager.register(
+			"bash",
+			"wake progress job",
+			async ({ reportAgentProgress }) => {
+				reporter.resolve(reportAgentProgress);
+				return gate.promise;
+			},
+			{ ownerId: "Main", progressDelivery: "wake" },
+		);
+		const report = await reporter.promise;
+		report(marker);
+
+		await wakeObserved.promise;
+		expect(manager.getJob(jobId)?.status).toBe("running");
+		expect(mock.calls).toHaveLength(2);
+
+		manager.watchJobs([jobId]);
+		gate.resolve("done");
+		await manager.waitForAll();
+	}, 10_000);
+
+	it("batches every wake event queued while busy even when the job completes before the follow-up", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const busyStarted = Promise.withResolvers<void>();
+		const releaseBusy = Promise.withResolvers<void>();
+		const batchObserved = Promise.withResolvers<string>();
+		let invocation = 0;
+		const mock = createMockModel({
+			handler: async context => {
+				invocation += 1;
+				if (invocation === 2) {
+					busyStarted.resolve();
+					await releaseBusy.promise;
+				}
+				const text = context.messages
+					.flatMap(message =>
+						typeof message.content === "string"
+							? [message.content]
+							: message.content.flatMap(content => (content.type === "text" ? [content.text] : [])),
+					)
+					.join("\n");
+				if (
+					text.includes("BUSY EVENT TWO") &&
+					text.includes("BUSY EVENT THREE") &&
+					text.includes("BUSY COMPLETION AFTER EVENTS")
+				)
+					batchObserved.resolve(text);
+				return { content: ["Done"] };
+			},
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "Main",
+			ownedAsyncJobManager: manager,
+		});
+		await session.sendUserMessage("initialize then wait");
+
+		const gate = Promise.withResolvers<string>();
+		manager.register("bash", "busy batching job", () => gate.promise, {
+			id: "busy-batch",
+			ownerId: "Main",
+			progressDelivery: "wake",
+		});
+		const job = manager.getJob("busy-batch");
+		if (!job) throw new Error("Expected registered busy batching job");
+		const progressEntry = (text: string, seq: number): AsyncProgressEntry => ({
+			jobId: job.id,
+			text,
+			job,
+			seq,
+			elapsedMs: seq,
+			epoch: 0,
+			delivery: "wake",
+		});
+
+		session.yieldQueue.enqueue(ASYNC_PROGRESS_WAKE_QUEUE_KIND, progressEntry("BUSY EVENT ONE", 1));
+		await busyStarted.promise;
+		session.yieldQueue.enqueue(ASYNC_PROGRESS_WAKE_QUEUE_KIND, progressEntry("BUSY EVENT TWO", 2));
+		session.yieldQueue.enqueue(ASYNC_PROGRESS_WAKE_QUEUE_KIND, progressEntry("BUSY EVENT THREE", 3));
+		gate.resolve("BUSY COMPLETION AFTER EVENTS");
+		await manager.waitForAll();
+		releaseBusy.resolve();
+
+		const batch = await batchObserved.promise;
+		expect(batch.indexOf("BUSY EVENT TWO")).toBeLessThan(batch.indexOf("BUSY EVENT THREE"));
+		expect(batch.indexOf("BUSY EVENT THREE")).toBeLessThan(batch.indexOf("BUSY COMPLETION AFTER EVENTS"));
+		expect(mock.calls).toHaveLength(3);
+		expect(manager.getJob(job.id)?.status).toBe("completed");
+	}, 10_000);
+
+	it("drops late progress from a prior session after its job id is reused", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "Main",
+			ownedAsyncJobManager: manager,
+		});
+		expect(await session.newSession()).toBe(true);
+
+		const gate = Promise.withResolvers<string>();
+		manager.register("bash", "reused progress job", () => gate.promise, { id: "reused-job", ownerId: "Main" });
+		const job = manager.getJob("reused-job");
+		if (!job) throw new Error("Expected registered reused job");
+		session.yieldQueue.enqueue<AsyncProgressEntry>("async-progress", {
+			jobId: job.id,
+			text: "STALE PROGRESS MARKER",
+			job,
+			seq: 1,
+			elapsedMs: 10,
+			epoch: 0,
+			delivery: "ambient",
+		});
+
+		await session.sendUserMessage("fresh turn");
+		expect(
+			mock.calls.every(call =>
+				call.context.messages.every(message =>
+					typeof message.content === "string"
+						? !message.content.includes("STALE PROGRESS MARKER")
+						: message.content.every(
+								content => content.type !== "text" || !content.text.includes("STALE PROGRESS MARKER"),
+							),
+				),
+			),
+		).toBe(true);
+
+		manager.watchJobs([job.id]);
+		gate.resolve("done");
+		await manager.waitForAll();
 	});
 
 	it("keeps the event loop live until a delayed idle flush runs", async () => {
