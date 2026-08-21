@@ -1,20 +1,86 @@
 /**
- * InspectorPanel - Detail view for selected extension.
+ * InspectorPanel — detail pane for the selected extension.
  *
- * Shows name, description, origin, status, and kind-specific preview.
+ * One inspection grammar for every kind:
+ * identity → runtime/enablement → description → origin →
+ * kind-specific surface → contents → boring config.
  */
 import * as os from "node:os";
-import { arkToWireSchema, isArkSchema } from "@oh-my-pi/pi-ai/utils/schema";
-import { type Component, truncateToWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
+import { type Component, visibleWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
 import { theme } from "../../../modes/theme/theme";
-import { shortenPath } from "../../../tools/render-utils";
+import { expandKeyHint, shortenPath } from "../../../tools/render-utils";
+import {
+	commandInspectorData,
+	contextInspectorData,
+	enablementLabel,
+	hookInspectorData,
+	instructionInspectorData,
+	liveToolsForExtension,
+	promptInspectorData,
+	ruleInspectorData,
+	skillInspectorData,
+	type ToolRuntimeSource,
+	toolInspectorData,
+	toolParamsFromSchema,
+} from "./inspector-model";
+import {
+	formatMcpHealthLabel,
+	isDiscoveredMcpServer,
+	type MCPConnectionHealth,
+	type MCPRuntimeSource,
+	snapshotMcpRuntime,
+	visibleMcpTools,
+} from "./mcp-runtime";
 import type { Extension, ExtensionState } from "./types";
+
+export type { ToolRuntimeSource };
+
+interface KindView {
+	title?: string;
+	description?: string;
+	runtimeLine?: string;
+	runtimeExtra?: string[];
+	surface: string[];
+	contents: string[];
+	preview?: { heading: string; text: string };
+	config: string[];
+}
+
+const PREVIEW_LINE_BUDGET = 12;
+const MCP_TOOL_BUDGET = 8;
 
 export class InspectorPanel implements Component {
 	#extension: Extension | null = null;
+	#mcpSource: MCPRuntimeSource | undefined;
+	#toolSource: ToolRuntimeSource | undefined;
+	#expanded = false;
+	#width = 72;
+	#height = 0;
 
 	setExtension(extension: Extension | null): void {
 		this.#extension = extension;
+		this.#expanded = false;
+	}
+
+	setMcpSource(source: MCPRuntimeSource | undefined): void {
+		this.#mcpSource = source;
+	}
+
+	setToolSource(source: ToolRuntimeSource | undefined): void {
+		this.#toolSource = source;
+	}
+
+	setHeight(height: number): void {
+		this.#height = Number.isFinite(height) ? Math.max(0, Math.trunc(height)) : 0;
+	}
+
+	isExpanded(): boolean {
+		return this.#expanded;
+	}
+
+	toggleExpanded(): boolean {
+		this.#expanded = !this.#expanded;
+		return this.#expanded;
 	}
 
 	invalidate(): void {}
@@ -23,304 +89,448 @@ export class InspectorPanel implements Component {
 		if (!this.#extension) {
 			return [theme.fg("muted", "Select an extension"), theme.fg("dim", "to view details")];
 		}
+		this.#width = width;
+		return this.#renderExtension(this.#extension, width);
+	}
 
-		const ext = this.#extension;
+	#renderExtension(ext: Extension, width: number): string[] {
 		const lines: string[] = [];
+		const kind = this.#kindView(ext);
 
-		// Name header
+		this.#pushIdentity(lines, ext, kind.title);
+		this.#pushRuntime(lines, ext, kind);
+		this.#pushDescription(lines, kind.description, width);
+		this.#pushOrigin(lines, ext, width);
+		if (kind.surface.length > 0) lines.push(...kind.surface);
+		if (kind.contents.length > 0) lines.push(...kind.contents);
+		if (kind.preview) {
+			lines.push(theme.fg("muted", kind.preview.heading));
+			lines.push(this.#rule());
+			const reserved = kind.config.length + 1;
+			const remaining = this.#height > 0 ? Math.max(4, this.#height - lines.length - reserved) : PREVIEW_LINE_BUDGET;
+			this.#pushPreview(lines, kind.preview.text, width, remaining);
+			lines.push("");
+		}
+		if (kind.config.length > 0) lines.push(...kind.config);
+		return lines;
+	}
+
+	#kindView(ext: Extension): KindView {
+		switch (ext.kind) {
+			case "mcp":
+				return this.#mcpKind(ext);
+			case "tool":
+				return this.#toolKind(ext);
+			case "rule":
+				return this.#ruleKind(ext);
+			case "skill":
+				return this.#skillKind(ext);
+			case "slash-command":
+				return this.#commandKind(ext);
+			case "hook":
+				return this.#hookKind(ext);
+			case "prompt":
+				return this.#promptKind(ext);
+			case "context-file":
+				return this.#contextKind(ext);
+			case "instruction":
+				return this.#instructionKind(ext);
+			default:
+				return this.#fallbackKind(ext);
+		}
+	}
+
+	#mcpKind(ext: Extension): KindView {
+		const width = this.#width;
+		const snap = isDiscoveredMcpServer(ext.raw)
+			? snapshotMcpRuntime(ext.raw, this.#mcpSource, { enabled: ext.state !== "disabled" })
+			: undefined;
+		const health: MCPConnectionHealth = snap?.health ?? "disconnected";
+		const transport = snap?.transport ?? "stdio";
+		const runtimeLine = `${this.#mcpHealthGlyph(health)} ${formatMcpHealthLabel(health)}     ${theme.fg("muted", transport)}`;
+		const runtimeExtra: string[] = [];
+		if (snap?.implementationName) {
+			const version = snap.implementationVersion ? ` ${snap.implementationVersion}` : "";
+			runtimeExtra.push(theme.fg("dim", `${snap.implementationName}${version}`));
+			if (snap.websiteUrl) runtimeExtra.push(theme.fg("dim", snap.websiteUrl));
+		}
+		const surface: string[] = [];
+		const contents: string[] = [];
+		const config: string[] = [];
+
+		const toolCount = snap?.tools.length ?? 0;
+		const resourceCount = snap?.resources.length ?? 0;
+		const promptCount = snap?.prompts.length ?? 0;
+		surface.push(theme.fg("muted", "Capabilities"));
+		surface.push(
+			`  ${theme.fg("accent", String(toolCount))} Tools    ${theme.fg("accent", String(resourceCount))} Resources    ${theme.fg("accent", String(promptCount))} Prompts`,
+		);
+		surface.push("");
+
+		if (snap && snap.tools.length > 0) {
+			contents.push(theme.fg("muted", "Tools"));
+			contents.push(this.#rule());
+			const { shown, hidden } = visibleMcpTools(snap.tools, this.#expanded ? snap.tools.length : MCP_TOOL_BUDGET);
+			for (const tool of shown) {
+				contents.push(`  ${theme.fg("accent", tool.name)}`);
+				if (tool.description) this.#pushWrapped(contents, tool.description, width, "    ");
+				contents.push("");
+			}
+			if (hidden > 0) {
+				contents.push(theme.fg("dim", `  … ${hidden} more (${expandKeyHint()} to expand)`));
+				contents.push("");
+			}
+		}
+
+		if (snap && snap.resources.length > 0) {
+			contents.push(theme.fg("muted", "Resources"));
+			contents.push(this.#rule());
+			for (const resource of snap.resources) {
+				contents.push(`  ${theme.fg("accent", resource.name)}`);
+			}
+			contents.push("");
+		}
+
+		if (snap && snap.prompts.length > 0) {
+			contents.push(theme.fg("muted", "Prompts"));
+			contents.push(this.#rule());
+			for (const prompt of snap.prompts) {
+				contents.push(`  ${theme.fg("accent", prompt.name)}`);
+			}
+			contents.push("");
+		}
+
+		if (snap?.instructions) {
+			contents.push(theme.fg("muted", "Server guidance"));
+			contents.push(this.#rule());
+			this.#pushPreview(contents, snap.instructions, width, 12);
+			contents.push("");
+		}
+
+		config.push(theme.fg("muted", "Connection"));
+		config.push(this.#rule());
+		this.#pushLabeled(config, "Transport", transport, width);
+		if (snap?.command)
+			this.#pushLabeled(config, "Command", shortenPath(snap.command, os.homedir()), width, "success");
+		if (snap?.url) this.#pushLabeled(config, "URL", snap.url, width, "success");
+		if (snap?.args && snap.args.length > 0) this.#pushLabeled(config, "Args", snap.args.join(" "), width, "dim");
+		if (snap && snap.envCount > 0) {
+			this.#pushLabeled(config, "Env vars", `${snap.envCount} defined`, width, "dim");
+		}
+		config.push("");
+
+		return {
+			title: snap?.title,
+			description: snap?.description,
+			runtimeLine,
+			runtimeExtra,
+			surface,
+			contents,
+			config,
+		};
+	}
+
+	#toolKind(ext: Extension): KindView {
+		const width = this.#width;
+		const lives = liveToolsForExtension(ext, this.#toolSource);
+		const data = toolInspectorData(ext, lives);
+		const surface: string[] = [];
+		if (data.factory.length > 1) {
+			surface.push(theme.fg("muted", "Tools"));
+			surface.push(this.#rule());
+			for (const tool of data.factory) {
+				surface.push(`  ${theme.fg("accent", tool.name)}`);
+				if (tool.label && tool.label !== tool.name) {
+					surface.push(`    ${theme.fg("muted", tool.label)}`);
+				}
+				if (tool.description) this.#pushWrapped(surface, tool.description, width, "    ");
+				const params = toolParamsFromSchema(tool.parameters);
+				if (params.length > 0) {
+					surface.push(`    ${theme.fg("dim", `${params.length} arg${params.length === 1 ? "" : "s"}`)}`);
+				}
+				surface.push("");
+			}
+			return { description: data.description, surface, contents: [], config: [] };
+		}
+		surface.push(theme.fg("muted", "Arguments"));
+		surface.push(this.#rule());
+		if (data.params.length === 0) {
+			surface.push(theme.fg("dim", "  (no arguments)"));
+		} else {
+			for (const param of data.params) {
+				const nameCol = theme.fg("accent", param.name.padEnd(12));
+				const typeCol = theme.fg("muted", param.type.padEnd(10));
+				const reqCol = param.required ? theme.fg("warning", param.flag) : theme.fg("dim", param.flag);
+				surface.push(`  ${nameCol} ${typeCol} ${reqCol}`);
+				if (param.description) this.#pushWrapped(surface, param.description, width, "    ");
+			}
+		}
+		surface.push("");
+		return {
+			title: data.label,
+			description: data.description,
+			surface,
+			contents: [],
+			config: [],
+		};
+	}
+
+	#ruleKind(ext: Extension): KindView {
+		const width = this.#width;
+		const data = ruleInspectorData(ext);
+		const surface: string[] = [];
+		surface.push(theme.fg("muted", "Applies"));
+		surface.push(this.#rule());
+		if (data.alwaysApply) surface.push(`  ${theme.fg("accent", "always")}`);
+		if (data.globs) this.#pushLabeled(surface, "globs", data.globs.join(", "), width);
+		if (data.condition) this.#pushLabeledList(surface, "condition", data.condition, width);
+		if (data.astCondition) this.#pushLabeledList(surface, "ast", data.astCondition, width);
+		if (data.scope) this.#pushLabeledList(surface, "scope", data.scope, width);
+		if (data.interruptMode) this.#pushLabeled(surface, "interrupt", data.interruptMode, width, "dim");
+		if (!data.alwaysApply && !data.globs && !data.condition && !data.astCondition) {
+			surface.push(theme.fg("dim", "  (no apply conditions)"));
+		}
+		surface.push("");
+		return {
+			description: data.description,
+			surface,
+			contents: [],
+			preview: { heading: "Rule", text: data.content },
+			config: [],
+		};
+	}
+
+	#skillKind(ext: Extension): KindView {
+		const width = this.#width;
+		const data = skillInspectorData(ext);
+		const surface: string[] = [];
+		surface.push(theme.fg("muted", "Discovery"));
+		surface.push(this.#rule());
+		if (data.hidden) {
+			surface.push(`  ${theme.fg("warning", "opt-in")}  omitted from the system-prompt listing`);
+		} else {
+			surface.push(`  ${theme.fg("accent", "listed")}  available for model discovery`);
+		}
+		if (data.alwaysApply) surface.push(`  ${theme.fg("accent", "always apply")}`);
+		if (data.globs) this.#pushLabeled(surface, "globs", data.globs.join(", "), width);
+		surface.push("");
+		return {
+			description: data.description,
+			surface,
+			contents: [],
+			preview: { heading: "Instruction", text: data.content },
+			config: [],
+		};
+	}
+
+	#commandKind(ext: Extension): KindView {
+		const data = commandInspectorData(ext);
+		const surface: string[] = [];
+		surface.push(theme.fg("muted", "Invocation"));
+		surface.push(this.#rule());
+		surface.push(`  ${theme.fg("accent", `/${ext.name}`)}`);
+		if (data.argumentHint) this.#pushLabeled(surface, "hint", data.argumentHint, this.#width, "dim");
+		if (data.usesArguments) surface.push(`  ${theme.fg("dim", "accepts $ARGUMENTS")}`);
+		surface.push("");
+		return {
+			description: data.description,
+			surface,
+			contents: [],
+			preview: { heading: "Template", text: data.body },
+			config: [],
+		};
+	}
+
+	#hookKind(ext: Extension): KindView {
+		const data = hookInspectorData(ext);
+		const surface: string[] = [];
+		surface.push(theme.fg("muted", "Hook"));
+		surface.push(this.#rule());
+		if (data.hookType) this.#pushLabeled(surface, "when", data.hookType, this.#width);
+		if (data.tool) this.#pushLabeled(surface, "tool", data.tool, this.#width);
+		surface.push("");
+		return { description: ext.description, surface, contents: [], config: [] };
+	}
+
+	#promptKind(ext: Extension): KindView {
+		const data = promptInspectorData(ext);
+		return {
+			description: ext.description,
+			surface: [],
+			contents: [],
+			preview: { heading: "Prompt", text: data.content },
+			config: [],
+		};
+	}
+
+	#contextKind(ext: Extension): KindView {
+		const data = contextInspectorData(ext);
+		return {
+			description: ext.description,
+			surface: [],
+			contents: [],
+			preview: { heading: "Preview", text: data.content },
+			config: [],
+		};
+	}
+
+	#instructionKind(ext: Extension): KindView {
+		const data = instructionInspectorData(ext);
+		const surface: string[] = [];
+		if (data.applyTo) {
+			surface.push(theme.fg("muted", "Applies"));
+			surface.push(this.#rule());
+			this.#pushLabeled(surface, "files", data.applyTo, this.#width);
+			surface.push("");
+		}
+		return {
+			description: ext.description,
+			surface,
+			contents: [],
+			preview: { heading: "Instruction", text: data.content },
+			config: [],
+		};
+	}
+
+	#fallbackKind(ext: Extension): KindView {
+		const surface: string[] = [];
+		if (ext.trigger) {
+			surface.push(theme.fg("muted", "Trigger"));
+			surface.push(this.#rule());
+			surface.push(`  ${theme.fg("accent", ext.trigger)}`);
+			surface.push("");
+		}
+		return { description: ext.description, surface, contents: [], config: [] };
+	}
+
+	#pushIdentity(lines: string[], ext: Extension, title: string | undefined): void {
 		lines.push(theme.bold(theme.fg("accent", ext.displayName)));
+		if (title && title !== ext.displayName) lines.push(theme.fg("muted", title));
 		lines.push("");
-
-		// Kind badge
-		lines.push(theme.fg("muted", "Type: ") + this.#getKindBadge(ext.kind));
-		lines.push("");
-
-		// Description (wrapped)
-		const desc = ext.description;
-		const isValidDescription = typeof desc === "string" && desc.length > 0;
-		if (isValidDescription && width > 2) {
-			const wrapped = wrapTextWithAnsi(desc, width - 2);
-			for (const line of wrapped) {
-				lines.push(truncateToWidth(line, width));
+	}
+	#pushRuntime(lines: string[], ext: Extension, kind: KindView): void {
+		if (kind.runtimeLine) {
+			lines.push(kind.runtimeLine);
+			if (kind.runtimeExtra) lines.push(...kind.runtimeExtra);
+			if (ext.state !== "active") {
+				lines.push(`  ${this.#getStatusBadge(ext.state, ext.disabledReason, ext.shadowedBy)}`);
 			}
 			lines.push("");
-		} else if (isValidDescription) {
-			// Width too small for wrapping, show truncated single line
-			lines.push(truncateToWidth(desc, width));
-			lines.push("");
+			return;
 		}
+		lines.push(this.#getStatusBadge(ext.state, ext.disabledReason, ext.shadowedBy));
+		lines.push("");
+	}
 
-		// Origin
+	#pushDescription(lines: string[], description: string | undefined, width: number): void {
+		if (typeof description !== "string" || description.length === 0) return;
+		this.#pushWrapped(lines, description, width);
+		lines.push("");
+	}
+
+	#pushOrigin(lines: string[], ext: Extension, width: number): void {
 		lines.push(theme.fg("muted", "Origin:"));
 		const levelLabel = ext.source.level === "user" ? "User" : ext.source.level === "project" ? "Project" : "Native";
-		lines.push(`  ${theme.italic(`via ${ext.source.providerName} (${levelLabel})`)}`);
-		const shortened = shortenPath(ext.path, os.homedir());
-		// If path is very long, show just the last parts
-		const displayPath =
-			shortened.length > 40 && shortened.split("/").length > 3
-				? `.../${shortened.split("/").slice(-3).join("/")}`
-				: shortened;
-		lines.push(`  ${theme.fg("dim", displayPath)}`);
+		this.#pushWrapped(lines, theme.italic(`via ${ext.source.providerName} (${levelLabel})`), width, "  ");
+		this.#pushWrapped(lines, shortenPath(ext.path, os.homedir()), width, "  ");
 		lines.push("");
-
-		// Status badge
-		lines.push(theme.fg("muted", "Status:"));
-		lines.push(`  ${this.#getStatusBadge(ext.state, ext.disabledReason, ext.shadowedBy)}`);
-		lines.push("");
-
-		// Preview section (routed based on kind)
-		const previewLines = this.#renderPreview(ext, width);
-		lines.push(...previewLines);
-
-		return lines;
 	}
 
-	#renderPreview(ext: Extension, width: number): string[] {
-		const lines: string[] = [];
-		let content: string[] = [];
-
-		switch (ext.kind) {
-			case "context-file":
-				content = this.#renderFilePreview(ext.raw, width);
-				break;
-			case "tool":
-				content = this.#renderToolArgs(ext.raw, width);
-				break;
-			case "skill":
-				content = this.#renderSkillContent(ext.raw, width);
-				break;
-			case "mcp":
-				content = this.#renderMcpDetails(ext.raw, width);
-				break;
-			default:
-				content = this.#renderDefaultPreview(ext, width);
-				break;
+	#pushLabeled(
+		lines: string[],
+		label: string,
+		value: string,
+		width: number,
+		valueColor: "accent" | "dim" | "success" = "accent",
+	): void {
+		const prefix = `  ${label.padEnd(10)} `;
+		const indent = " ".repeat(visibleWidth(prefix));
+		const wrapped = wrapTextWithAnsi(theme.fg(valueColor, value), Math.max(8, width - indent.length));
+		lines.push(`${prefix}${wrapped[0] ?? ""}`);
+		for (const extra of wrapped.slice(1)) {
+			lines.push(`${indent}${extra}`);
 		}
-
-		if (content.length > 0) {
-			lines.push(...content);
-		}
-
-		return lines;
 	}
 
-	#renderFilePreview(raw: unknown, width: number): string[] {
-		const lines: string[] = [];
-		lines.push(theme.fg("muted", "Preview:"));
-		lines.push(theme.fg("dim", theme.boxRound.horizontal.repeat(Math.min(width - 2, 40))));
-
-		const content = this.#getContextFileContent(raw);
-		if (!content) {
-			lines.push(theme.fg("dim", "  (no content)"));
-			lines.push("");
-			return lines;
+	#pushLabeledList(lines: string[], label: string, items: string[], width: number): void {
+		if (items.length === 1) {
+			this.#pushLabeled(lines, label, items[0], width);
+			return;
 		}
-
-		const fileLines = content.split("\n");
-		for (const line of fileLines.slice(0, 20)) {
-			const highlighted = this.#highlightMarkdown(line);
-			lines.push(truncateToWidth(highlighted, width - 2));
+		const cap = this.#expanded ? items.length : 3;
+		const shown = items.slice(0, cap);
+		const hidden = items.length - shown.length;
+		const indent = "             ";
+		if (hidden > 0) {
+			this.#pushLabeled(lines, label, `${items.length} patterns`, width, "dim");
+			for (const item of shown) this.#pushWrapped(lines, item, width, indent);
+			lines.push(theme.fg("dim", `${indent}… ${hidden} more (${expandKeyHint()} to expand)`));
+			return;
 		}
-
-		if (fileLines.length > 20) {
-			lines.push(theme.fg("dim", "(truncated at line 20)"));
-		}
-
-		lines.push("");
-		return lines;
+		this.#pushLabeled(lines, label, shown[0] ?? "", width);
+		for (const item of shown.slice(1)) this.#pushWrapped(lines, item, width, indent);
 	}
 
-	#getContextFileContent(raw: unknown): string | null {
-		if (raw && typeof raw === "object" && "content" in raw) {
-			const content = (raw as { content?: unknown }).content;
-			return typeof content === "string" ? content : null;
+	#pushPreview(lines: string[], text: string, width: number, budget: number): void {
+		if (!text) {
+			lines.push(theme.fg("dim", "  (empty)"));
+			return;
 		}
-		return null;
+		const wrapped: string[] = [];
+		for (const raw of text.split("\n")) {
+			const highlighted = this.#highlightMarkdown(raw);
+			const folded = wrapTextWithAnsi(highlighted, Math.max(8, width - 1));
+			if (folded.length === 0) wrapped.push("");
+			else wrapped.push(...folded);
+		}
+		const shown = this.#expanded ? wrapped : wrapped.slice(0, budget);
+		lines.push(...shown);
+		if (!this.#expanded && wrapped.length > budget) {
+			lines.push(theme.fg("dim", `  … ${wrapped.length - budget} more (${expandKeyHint()} to expand)`));
+		}
 	}
 
 	#highlightMarkdown(line: string): string {
-		// Basic markdown syntax highlighting
-		let highlighted = line;
-
-		// Headers
-		if (/^#{1,6}\s/.test(highlighted)) {
-			highlighted = theme.bold(theme.fg("accent", highlighted));
-		}
-		// Code blocks
-		else if (/^```/.test(highlighted)) {
-			highlighted = theme.fg("dim", highlighted);
-		}
-		// Lists
-		else if (/^[\s]*[-*+]\s/.test(highlighted)) {
-			highlighted = highlighted.replace(/^([\s]*[-*+]\s)/, theme.fg("accent", "$1"));
-		}
-		// Numbered lists
-		else if (/^[\s]*\d+\.\s/.test(highlighted)) {
-			highlighted = highlighted.replace(/^([\s]*\d+\.\s)/, theme.fg("accent", "$1"));
-		}
-
-		return highlighted;
+		if (/^#{1,6}\s/.test(line)) return theme.bold(theme.fg("accent", line));
+		if (/^```/.test(line)) return theme.fg("dim", line);
+		if (/^[\s]*[-*+]\s/.test(line)) return line.replace(/^([\s]*[-*+]\s)/, theme.fg("accent", "$1"));
+		if (/^[\s]*\d+\.\s/.test(line)) return line.replace(/^([\s]*\d+\.\s)/, theme.fg("accent", "$1"));
+		return line;
 	}
 
-	#renderToolArgs(raw: unknown, width: number): string[] {
-		const lines: string[] = [];
-		lines.push(theme.fg("muted", "Arguments:"));
-		lines.push(theme.fg("dim", theme.boxRound.horizontal.repeat(Math.min(width - 2, 40))));
-
-		try {
-			const tool = raw as { parameters?: unknown; inputSchema?: unknown };
-			const wire = (schema: unknown): unknown => (isArkSchema(schema) ? arkToWireSchema(schema) : schema);
-			const paramSchema = wire(tool.parameters) as Record<string, unknown> | undefined;
-			const inputSchema = wire(tool.inputSchema) as Record<string, unknown> | undefined;
-			const params = paramSchema?.properties || inputSchema?.properties || {};
-
-			if (Object.keys(params).length === 0) {
-				lines.push(theme.fg("dim", "  (no arguments)"));
-			} else {
-				const requiredValue = paramSchema?.required ?? inputSchema?.required;
-				const required = new Set(
-					Array.isArray(requiredValue)
-						? requiredValue.filter((value): value is string => typeof value === "string")
-						: [],
-				);
-
-				for (const [name, spec] of Object.entries(params)) {
-					const param = spec as any;
-					const type = param.type || "any";
-					const isRequired = required.has(name);
-					const defaultVal = param.default !== undefined ? `Default: ${param.default}` : null;
-
-					const nameCol = theme.fg("accent", name.padEnd(12));
-					const typeCol = theme.fg("muted", type.padEnd(10));
-					const reqCol = isRequired
-						? theme.fg("warning", "Required")
-						: defaultVal
-							? theme.fg("dim", defaultVal)
-							: theme.fg("dim", "Optional");
-
-					lines.push(`  ${nameCol} ${typeCol} ${reqCol}`);
-				}
-			}
-		} catch {
-			lines.push(theme.fg("dim", "  (unable to parse tool definition)"));
+	#pushWrapped(lines: string[], text: string, width: number, indent = ""): void {
+		const budget = Math.max(1, width - indent.length);
+		const wrapped = wrapTextWithAnsi(text, budget);
+		for (const line of wrapped.length > 0 ? wrapped : [""]) {
+			lines.push(`${indent}${line}`);
 		}
-
-		lines.push("");
-		return lines;
 	}
 
-	#renderSkillContent(raw: unknown, width: number): string[] {
-		const lines: string[] = [];
-		lines.push(theme.fg("muted", "Instruction:"));
-		lines.push(theme.fg("dim", theme.boxRound.horizontal.repeat(Math.min(width - 2, 40))));
-
-		try {
-			const skill = raw as any;
-			const instruction = skill?.prompt || skill?.instruction || skill?.content || "";
-
-			if (!instruction) {
-				lines.push(theme.fg("dim", "  (no instruction text)"));
-			} else {
-				const instructionLines = instruction.split("\n").slice(0, 15);
-				for (const line of instructionLines) {
-					lines.push(truncateToWidth(line, width - 2));
-				}
-
-				if (instruction.split("\n").length > 15) {
-					lines.push(theme.fg("dim", "(truncated at line 15)"));
-				}
-			}
-		} catch {
-			lines.push(theme.fg("dim", "  (unable to parse skill content)"));
-		}
-
-		lines.push("");
-		return lines;
+	#rule(): string {
+		return theme.fg("dim", "────────────────────────────────────────");
 	}
 
-	#renderMcpDetails(raw: unknown, width: number): string[] {
-		const lines: string[] = [];
-		lines.push(theme.fg("muted", "Connection:"));
-		lines.push(theme.fg("dim", theme.boxRound.horizontal.repeat(Math.min(width - 2, 40))));
-
-		try {
-			const mcp = raw as any;
-			const transport = mcp?.transport || mcp?.type || "unknown";
-			const command = mcp?.command || mcp?.cmd || "";
-			const args = mcp?.args || mcp?.arguments || [];
-
-			lines.push(`  ${theme.fg("muted", "Transport:")}  ${theme.fg("accent", transport)}`);
-
-			if (command) {
-				lines.push(`  ${theme.fg("muted", "Command:")}    ${theme.fg("success", command)}`);
-			}
-
-			if (Array.isArray(args) && args.length > 0) {
-				lines.push(`  ${theme.fg("muted", "Args:")}       ${theme.fg("dim", args.join(" "))}`);
-			}
-
-			// Environment variables if present
-			if (mcp?.env && typeof mcp.env === "object") {
-				const envCount = Object.keys(mcp.env).length;
-				if (envCount > 0) {
-					lines.push(`  ${theme.fg("muted", "Env vars:")}   ${theme.fg("dim", `${envCount} defined`)}`);
-				}
-			}
-		} catch {
-			lines.push(theme.fg("dim", "  (unable to parse MCP configuration)"));
+	#mcpHealthGlyph(health: MCPConnectionHealth): string {
+		switch (health) {
+			case "connected":
+				return theme.fg("success", theme.status.enabled);
+			case "connecting":
+				return theme.fg("muted", theme.status.running);
+			case "disconnected":
+				return theme.fg("dim", theme.status.shadowed);
+			case "inactive":
+				return theme.fg("warning", theme.status.disabled);
 		}
-
-		lines.push("");
-		return lines;
-	}
-
-	#renderDefaultPreview(ext: Extension, width: number): string[] {
-		const lines: string[] = [];
-
-		// Show trigger pattern if present
-		if (ext.trigger) {
-			lines.push(theme.fg("muted", "Trigger:"));
-			lines.push(theme.fg("dim", theme.boxRound.horizontal.repeat(Math.min(width - 2, 40))));
-			lines.push(`  ${theme.fg("accent", ext.trigger)}`);
-			lines.push("");
-		}
-
-		return lines;
-	}
-
-	#getKindBadge(kind: string): string {
-		const kindColors: Record<string, string> = {
-			"extension-module": "accent",
-			skill: "accent",
-			rule: "success",
-			tool: "warning",
-			mcp: "accent",
-			prompt: "muted",
-			hook: "warning",
-			"context-file": "dim",
-			instruction: "muted",
-			"slash-command": "accent",
-		};
-
-		const color = kindColors[kind] || "muted";
-		return theme.fg(color as any, kind);
 	}
 
 	#getStatusBadge(state: ExtensionState, reason?: string, shadowedBy?: string): string {
 		switch (state) {
 			case "active":
-				return theme.fg("success", `${theme.status.enabled} Active`);
-			case "disabled": {
-				const reasonText =
-					reason === "provider-disabled"
-						? "provider disabled"
-						: reason === "item-disabled"
-							? "manually disabled"
-							: "unknown";
-				return theme.fg("dim", `${theme.status.disabled} Disabled (${reasonText})`);
-			}
+				return theme.fg("success", `${theme.status.enabled} ${enablementLabel(state)}`);
+			case "disabled":
+				return theme.fg("dim", `${theme.status.disabled} ${enablementLabel(state, reason)}`);
 			case "shadowed":
-				return theme.fg("warning", `${theme.status.shadowed} Shadowed${shadowedBy ? ` by ${shadowedBy}` : ""}`);
+				return theme.fg("warning", `${theme.status.shadowed} ${enablementLabel(state, reason, shadowedBy)}`);
 		}
 	}
 }

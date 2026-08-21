@@ -23,6 +23,8 @@ import {
 	loadCapability,
 } from "../../../discovery";
 import { readDisabledServers, readEnabledServers } from "../../../mcp/config-writer";
+import { commandPreview } from "./inspector-model";
+import { inferMcpTransport } from "./mcp-runtime";
 import type {
 	DashboardState,
 	Extension,
@@ -192,8 +194,10 @@ export async function loadAllExtensions(cwd?: string, disabledIds?: string[]): P
 				kind: "mcp",
 				name: server.name,
 				displayName: server.name,
-				description: server.command || server.url,
-				trigger: server.transport || "stdio",
+				// Config command/url is plumbing, not a description. Live
+				// identity comes from serverInfo at inspector render time.
+				description: undefined,
+				trigger: inferMcpTransport(server),
 				path: server._source.path,
 				source: sourceFromMeta(server._source),
 				state,
@@ -220,7 +224,7 @@ export async function loadAllExtensions(cwd?: string, disabledIds?: string[]): P
 	try {
 		const commands = await loadCapability<SlashCommand>("slash-commands", loadOpts);
 		addItems(commands.all, "slash-command", {
-			getDescription: () => undefined,
+			getDescription: c => commandPreview(c.content).description,
 			getTrigger: c => `/${c.name}`,
 		});
 	} catch (error) {

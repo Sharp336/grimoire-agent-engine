@@ -27,12 +27,16 @@ import {
 import { getMCPConfigPath, logger } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../../config/settings";
 import { setMcpServerEnabled } from "../../../mcp/config-writer";
+import type { MCPManager } from "../../../mcp/manager";
+import { MCP_CONNECTION_STATUS_EVENT_CHANNEL } from "../../../mcp/startup-events";
 import { getTabBarTheme } from "../../../modes/shared";
 import { theme } from "../../../modes/theme/theme";
 import { matchesAppInterrupt } from "../../../modes/utils/keybinding-matchers";
+import { expandKeyHint } from "../../../tools/render-utils";
+import type { EventBus } from "../../../utils/event-bus";
 import { bottomBorder, divider, row, topBorder } from "../overlay-box";
 import { ExtensionList } from "./extension-list";
-import { InspectorPanel } from "./inspector-panel";
+import { InspectorPanel, type ToolRuntimeSource } from "./inspector-panel";
 import {
 	applyDisabledExtensionsToState,
 	applyFilter,
@@ -43,7 +47,18 @@ import {
 } from "./state-manager";
 import type { DashboardState, ProviderTab } from "./types";
 
-const EXT_FOOTER = " ↑/↓: navigate · Space: toggle · ←/→: provider · Esc: close";
+export interface ExtensionDashboardOptions {
+	cwd: string;
+	settings?: Settings | null;
+	terminalHeight?: number;
+	mcpManager?: MCPManager;
+	eventBus?: EventBus;
+	toolSource?: ToolRuntimeSource;
+}
+
+function extFooter(): string {
+	return ` ↑/↓: navigate · Space: toggle · ←/→: provider · ${expandKeyHint()}: expand · Esc: close`;
+}
 
 /**
  * Map dashboard provider tabs to {@link TabBar} tabs. Empty *enabled* providers
@@ -79,19 +94,32 @@ export class ExtensionDashboard implements Component {
 
 	onClose?: () => void;
 	onRequestRender?: () => void;
+	#unsubscribers: Array<() => void> = [];
 
 	private constructor(
 		private readonly cwd: string,
 		private readonly settings: Settings | null,
 		private readonly terminalHeight: number,
+		private readonly mcpManager: MCPManager | undefined,
+		private readonly eventBus: EventBus | undefined,
+		private readonly toolSource: ToolRuntimeSource | undefined,
 	) {}
 
 	static async create(
-		cwd: string,
+		cwdOrOptions: string | ExtensionDashboardOptions,
 		settings: Settings | null = null,
 		terminalHeight?: number,
 	): Promise<ExtensionDashboard> {
-		const dashboard = new ExtensionDashboard(cwd, settings, terminalHeight ?? process.stdout.rows ?? 24);
+		const options: ExtensionDashboardOptions =
+			typeof cwdOrOptions === "string" ? { cwd: cwdOrOptions, settings, terminalHeight } : cwdOrOptions;
+		const dashboard = new ExtensionDashboard(
+			options.cwd,
+			options.settings ?? settings,
+			options.terminalHeight ?? terminalHeight ?? process.stdout.rows ?? 24,
+			options.mcpManager,
+			options.eventBus,
+			options.toolSource,
+		);
 		await dashboard.#init();
 		return dashboard;
 	}
@@ -102,27 +130,34 @@ export class ExtensionDashboard implements Component {
 		this.#state = await createInitialState(this.cwd, disabledIds);
 
 		const initialMaxVisible = Math.max(3, this.terminalHeight - 9);
+		this.#inspector = new InspectorPanel();
+		this.#inspector.setMcpSource(this.mcpManager);
+		this.#inspector.setToolSource(this.toolSource);
 		this.#mainList = new ExtensionList(
 			this.#state.searchFiltered,
 			{
 				onSelectionChange: ext => {
 					this.#state.selected = ext;
 					this.#inspector.setExtension(ext);
-					// A fresh selection resets the inspector to the top.
 					this.#body.resetInspectorScroll();
 				},
 				onToggle: (extensionId, enabled) => this.#handleExtensionToggle(extensionId, enabled),
 				onMasterToggle: providerId => this.#handleProviderToggle(providerId),
 				masterSwitchProvider: this.#getActiveProviderId(),
+				mcpSource: this.mcpManager,
+				toolSource: this.toolSource,
 			},
 			initialMaxVisible,
 		);
 		this.#mainList.setFocused(true);
+		this.#mainList.setMcpSource(this.mcpManager);
+		this.#mainList.setToolSource(this.toolSource);
 
-		this.#inspector = new InspectorPanel();
 		if (this.#state.selected) {
 			this.#inspector.setExtension(this.#state.selected);
 		}
+
+		this.#subscribeMcpRuntime();
 
 		this.#body = new TwoColumnBody(this.#mainList, this.#inspector, this.terminalHeight);
 
@@ -171,7 +206,7 @@ export class ExtensionDashboard implements Component {
 		this.#bodyRowCount = contentRows;
 		for (let i = 0; i < contentRows; i++) out.push(row(bodyLines[i] ?? "", width));
 		out.push(divider(width));
-		out.push(row(theme.fg("dim", EXT_FOOTER), width));
+		out.push(row(theme.fg("dim", extFooter()), width));
 		out.push(bottomBorder(width));
 		return out;
 	}
@@ -375,6 +410,7 @@ export class ExtensionDashboard implements Component {
 
 		// Ctrl+C - close immediately
 		if (matchesKey(data, "ctrl+c")) {
+			this.dispose();
 			this.onClose?.();
 			return;
 		}
@@ -389,7 +425,14 @@ export class ExtensionDashboard implements Component {
 				this.onRequestRender?.();
 				return;
 			}
+			this.dispose();
 			this.onClose?.();
+			return;
+		}
+
+		if (matchesKey(data, "ctrl+o")) {
+			this.#inspector.toggleExpanded();
+			this.onRequestRender?.();
 			return;
 		}
 
@@ -408,6 +451,33 @@ export class ExtensionDashboard implements Component {
 			this.#state.searchFiltered = applyFilter(this.#state.tabFiltered, query);
 		}
 		this.onRequestRender?.();
+	}
+
+	/**
+	 * Live MCP health is joined at render time. Connection-status events and
+	 * list-changed notifications only need to request a repaint — they must not
+	 * rewrite Extension.raw.
+	 */
+	#subscribeMcpRuntime(): void {
+		if (this.eventBus) {
+			this.#unsubscribers.push(
+				this.eventBus.on(MCP_CONNECTION_STATUS_EVENT_CHANNEL, () => {
+					this.onRequestRender?.();
+				}),
+			);
+		}
+		if (this.mcpManager) {
+			this.#unsubscribers.push(
+				this.mcpManager.addNotificationListener(() => {
+					this.onRequestRender?.();
+				}),
+			);
+		}
+	}
+
+	dispose(): void {
+		for (const unsub of this.#unsubscribers) unsub();
+		this.#unsubscribers = [];
 	}
 }
 
@@ -455,16 +525,15 @@ class TwoColumnBody implements Component {
 		this.#leftWidth = leftWidth;
 		const rightWidth = Math.max(0, width - leftWidth - 3);
 		const numLines = this.#maxHeight;
+		const inspectorWidth = Math.max(0, rightWidth - 2);
 
 		const leftLines = this.leftPane.render(leftWidth);
-		const rightLines = this.rightPane.render(rightWidth);
+		this.rightPane.setHeight(numLines);
+		const rightLines = this.rightPane.render(inspectorWidth);
 		this.#rightTotal = rightLines.length;
 		const maxScroll = Math.max(0, this.#rightTotal - numLines);
 		if (this.#rightScroll > maxScroll) this.#rightScroll = maxScroll;
 
-		// `totalRows` omitted so the ScrollView windows `rightLines` by the scroll
-		// offset (rather than treating them as a pre-windowed slice) and pads short
-		// content to exactly `numLines`.
 		const rightView = new ScrollView(rightLines, {
 			height: numLines,
 			scrollbar: "auto",

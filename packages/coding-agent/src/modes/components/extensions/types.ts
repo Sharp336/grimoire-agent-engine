@@ -59,7 +59,11 @@ export interface Extension {
 	disabledReason?: DisabledReason;
 	/** If shadowed, what shadows it */
 	shadowedBy?: string;
-	/** Raw item data for inspector */
+	/**
+	 * Raw item data for inspector. For `kind: "mcp"` this remains the discovered
+	 * `MCPServer` config — live connection state is joined at render time via
+	 * {@link snapshotMcpRuntime}, not stuffed into this bag.
+	 */
 	raw: unknown;
 }
 

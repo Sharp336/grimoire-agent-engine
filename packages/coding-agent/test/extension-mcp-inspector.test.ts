@@ -1,0 +1,176 @@
+import { beforeAll, describe, expect, test } from "bun:test";
+import type { MCPServer } from "@oh-my-pi/pi-coding-agent/capability/mcp";
+import type { MCPServerConnection, MCPTransport } from "@oh-my-pi/pi-coding-agent/mcp/types";
+import { ExtensionList } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/extension-list";
+import { InspectorPanel } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/inspector-panel";
+import type { MCPRuntimeSource } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/mcp-runtime";
+import type { Extension } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/types";
+import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+
+beforeAll(async () => {
+	await initTheme(false);
+});
+
+function transport(): MCPTransport {
+	return {
+		connected: true,
+		request() {
+			return Promise.reject(new Error("unused"));
+		},
+		notify() {
+			return Promise.resolve();
+		},
+		close() {
+			return Promise.resolve();
+		},
+	};
+}
+
+const githubServer: MCPServer = {
+	name: "github",
+	command: "/usr/bin/github-mcp-server",
+	args: ["stdio"],
+	transport: "stdio",
+	_source: {
+		provider: "native",
+		providerName: "OMP (User)",
+		path: "/home/sf/.omp/agent/mcp.json",
+		level: "user",
+	},
+};
+
+function mcpExtension(state: Extension["state"] = "active"): Extension {
+	return {
+		id: "mcp:github",
+		kind: "mcp",
+		name: "github",
+		displayName: "github",
+		path: githubServer._source.path,
+		source: {
+			provider: githubServer._source.provider,
+			providerName: githubServer._source.providerName,
+			level: githubServer._source.level,
+		},
+		state,
+		raw: githubServer,
+	};
+}
+
+function connectedSource(): MCPRuntimeSource {
+	const conn: MCPServerConnection = {
+		name: "github",
+		config: { command: "/usr/bin/github-mcp-server", args: ["stdio"] },
+		transport: transport(),
+		serverInfo: {
+			name: "github-mcp-server",
+			title: "GitHub MCP Server",
+			version: "0.19.0",
+			description: "Access GitHub repositories, issues, and pull requests.",
+		},
+		capabilities: { tools: {}, resources: {} },
+		tools: [
+			{
+				name: "search_code",
+				description: "Search code across GitHub repositories.",
+				inputSchema: { type: "object" },
+			},
+			{ name: "create_issue", description: "Create a new issue in a repository.", inputSchema: { type: "object" } },
+		],
+		resources: [{ uri: "github://repo", name: "repo" }],
+		instructions: "Prefer search_code over cloning.",
+	};
+	return {
+		getConnectionStatus: () => "connected",
+		getConnection: () => conn,
+		getTools: () =>
+			conn.tools!.map(tool => ({
+				mcpServerName: "github",
+				mcpToolName: tool.name,
+				description: tool.description,
+			})),
+		getServerResources: () => ({ resources: conn.resources ?? [], templates: [] }),
+		getServerPrompts: () => [],
+	};
+}
+
+describe("MCP inspector runtime join", () => {
+	test("shows identity, health, tools, then plumbing last", () => {
+		const panel = new InspectorPanel();
+		panel.setMcpSource(connectedSource());
+		panel.setExtension(mcpExtension());
+		const text = Bun.stripANSI(panel.render(72).join("\n"));
+
+		expect(text).toContain("github");
+		expect(text).toContain("GitHub MCP Server");
+		expect(text).toContain("Access GitHub repositories, issues, and pull requests.");
+		expect(text).toContain("Connected");
+		expect(text).toContain("stdio");
+		expect(text).toContain("github-mcp-server 0.19.0");
+		expect(text).toContain("search_code");
+		expect(text).toContain("Search code across GitHub repositories.");
+		expect(text).toContain("Server guidance");
+		expect(text).toContain("Prefer search_code over cloning.");
+		expect(text).toContain("Connection");
+		expect(text).toContain("/usr/bin/github-mcp-server");
+
+		expect(text).not.toContain("Type: mcp");
+		expect(text).not.toMatch(/Status:\s+.*Active/);
+		expect(text.indexOf("Access GitHub")).toBeLessThan(text.indexOf("Connection"));
+		expect(text.indexOf("search_code")).toBeLessThan(text.indexOf("Command"));
+		expect(text).not.toMatch(/^.*github-mcp-server\n.*Type:/s);
+	});
+
+	test("does not present a dead server as Active", () => {
+		const panel = new InspectorPanel();
+		panel.setMcpSource({
+			getConnectionStatus: () => "disconnected",
+			getConnection: () => undefined,
+			getTools: () => [],
+		});
+		panel.setExtension(mcpExtension());
+		const text = Bun.stripANSI(panel.render(72).join("\n"));
+		expect(text).toContain("Not connected");
+		expect(text).not.toMatch(/Status:\s+.*Active/);
+		expect(text).not.toContain("unknown");
+	});
+
+	test("wraps a long command instead of ellipsizing it", () => {
+		const panel = new InspectorPanel();
+		panel.setMcpSource(connectedSource());
+		panel.setExtension({
+			...mcpExtension(),
+			raw: {
+				...githubServer,
+				command: "/home/sf/worlds/personal/.omp/bin/gog-mcp-readonly",
+			},
+		});
+		const text = Bun.stripANSI(panel.render(42).join("\n"));
+		const connection = text.slice(text.indexOf("Connection"));
+		expect(connection.split("\n").some(line => line.includes("…") || line.endsWith("..."))).toBe(false);
+		expect(connection.replace(/\s+/g, "")).toContain("gog-mcp-readonly");
+		expect(connection).toContain("Command");
+	});
+});
+
+describe("MCP list runtime join", () => {
+	test("connected row shows tool/resource counts instead of transport", () => {
+		const list = new ExtensionList([mcpExtension()], { mcpSource: connectedSource() });
+		list.setFocused(true);
+		const text = Bun.stripANSI(list.render(80).join("\n"));
+		expect(text).toContain("github");
+		expect(text).toContain("2 tools · 1 resource");
+		expect(text).not.toMatch(/github\s+stdio/);
+	});
+
+	test("disconnected enabled server is unavailable, not Active", () => {
+		const list = new ExtensionList([mcpExtension()], {
+			mcpSource: {
+				getConnectionStatus: () => "disconnected",
+				getConnection: () => undefined,
+				getTools: () => [],
+			},
+		});
+		const text = Bun.stripANSI(list.render(80).join("\n"));
+		expect(text).toContain("unavailable");
+	});
+});
