@@ -1,12 +1,12 @@
-import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { runEvalAgent } from "@oh-my-pi/pi-coding-agent/eval/agent-bridge";
 import { runEvalBudget } from "@oh-my-pi/pi-coding-agent/eval/budget-bridge";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as taskDiscovery from "@oh-my-pi/pi-coding-agent/task/discovery";
-import * as taskExecutor from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { ExecutorOptions } from "@oh-my-pi/pi-coding-agent/task/executor";
+import * as taskExecutor from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition, SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
