@@ -171,9 +171,7 @@ fn identity_has_filter(identity: &detect::CommandIdentity, config: &MinimizerCon
 
 fn chain_has_eligible_segment(segments: &[plan::ChainSegment], config: &MinimizerConfig) -> bool {
 	segments.iter().any(|segment| {
-		detect::detect(&segment.command)
-			.is_some_and(|identity| identity_has_filter(&identity, config))
-			|| is_common_chain_utility(&segment.program)
+		detect::detect(&segment.command).is_some_and(|identity| identity_has_filter(&identity, config))
 	})
 }
 
@@ -242,58 +240,6 @@ fn is_env_assignment(word: &str) -> bool {
 	word.split_once('=').is_some_and(|(key, _)| {
 		!key.is_empty() && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 	})
-}
-
-/// Common shell utilities that on their own would not warrant whole-command
-/// minimization, but whose presence in a `&&` / `;` chain alongside other
-/// segments is enough to fire the segmented chain runner. Each such segment
-/// is captured and passes through `minimizer::apply` which will treat it as
-/// `Single` with no matching filter and stream the text unchanged.
-fn is_common_chain_utility(program: &str) -> bool {
-	matches!(
-		program,
-		"echo"
-			| "printf"
-			| "head"
-			| "tail"
-			| "file"
-			| "which"
-			| "type"
-			| "sed"
-			| "awk"
-			| "sleep"
-			| "seq"
-			| "cp" | "mv"
-			| "rm" | "mkdir"
-			| "rmdir"
-			| "touch"
-			| "basename"
-			| "dirname"
-			| "realpath"
-			| "readlink"
-			| "true"
-			| "false"
-			| "yes"
-			| "tr" | "tee"
-			| "sort"
-			| "uniq"
-			| "cut"
-			| "paste"
-			| "rev"
-			| "split"
-			| "comm"
-			| "patch"
-			| "xargs"
-			| "unzip"
-			| "zip"
-			| "tar"
-			| "gzip"
-			| "gunzip"
-			| "cd" | "pwd"
-			| "export"
-			| "env"
-			| "test"
-	)
 }
 
 fn apply_identity(
@@ -815,10 +761,9 @@ strip_lines_matching = [".*"]
 			MinimizerMode::SegmentedChain
 		);
 		assert_eq!(mode_for("git diff ; printf done", &cfg), MinimizerMode::SegmentedChain);
-		// Common shell utilities make a chain eligible for the segmented runner
-		// even when no segment has a dedicated filter — segments stream through
-		// per-segment passthrough so the chain itself is captured for telemetry.
-		assert_eq!(mode_for("false && echo no ; echo yes", &cfg), MinimizerMode::SegmentedChain);
+		// Common utilities have no filter or pipeline, so whole commands run
+		// unchanged instead of becoming telemetry misses.
+		assert_eq!(mode_for("false && echo no ; echo yes", &cfg), MinimizerMode::None);
 		assert_eq!(mode_for("foo || bar", &cfg), MinimizerMode::None);
 		assert_eq!(mode_for("git status | cat", &cfg), MinimizerMode::None);
 		assert_eq!(mode_for("sleep 1 &", &cfg), MinimizerMode::None);
@@ -1079,7 +1024,7 @@ strip_lines_matching = [".*"]
 		assert_eq!(mode_for("unalias cat ; cat file", &cfg), MinimizerMode::None);
 		// A real command merely named with `exec` as an argument is not the
 		// builtin and must NOT block segmentation.
-		assert_eq!(mode_for("echo exec ; printf done", &cfg), MinimizerMode::SegmentedChain);
+		assert_eq!(mode_for("echo exec ; git status", &cfg), MinimizerMode::SegmentedChain);
 		// Such chains pass through untouched.
 		let out = apply("exec >out ; echo hi", "hi\n", 0, &cfg);
 		assert_eq!(out.text, "hi\n");

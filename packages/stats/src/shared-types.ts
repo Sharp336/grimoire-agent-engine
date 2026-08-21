@@ -252,13 +252,35 @@ export interface GainSourceTotals {
 }
 
 /** Per-source breakdown. */
-export type GainSource = "snapcompact";
+export type GainSource = "minimizer" | "snapcompact";
 
 /** Time-series point for gain (daily bucket). */
 export interface GainTimeSeriesPoint {
 	date: string;
+	minimizer: number;
 	snapcompact: number;
 	total: number;
+}
+
+/** Top filter/command gaining the most savings. */
+export interface GainTopFilter {
+	filter: string;
+	savedTokens: number;
+	savedBytes: number;
+	hits: number;
+}
+
+/**
+ * A bash command that passed minimizer eligibility but produced no savings.
+ * These are the prime candidates for writing new minimizer filters.
+ */
+export interface GainMissedCommand {
+	/** The actual full command string used for exact grouping. */
+	command: string;
+	/** Number of times this exact command was seen as a missed minimizer candidate. */
+	hits: number;
+	/** Total input bytes across all occurrences. */
+	inputBytes: number;
 }
 
 /** Complete gain dashboard payload. */
@@ -267,8 +289,12 @@ export interface GainDashboardStats {
 	overall: GainSourceTotals;
 	/** Per-source breakdown. */
 	bySource: Record<GainSource, GainSourceTotals>;
-	/** Daily time series. */
+	/** Daily time series (all sources stacked). */
 	timeSeries: GainTimeSeriesPoint[];
+	/** Top 10 bash minimizer filters by savedTokens. */
+	topFilters: GainTopFilter[];
+	/** Top 25 missed minimizer candidates sorted by hit count — use to write new filters. */
+	missedCommands: GainMissedCommand[];
 	/** Active project filter (cwd prefix), or null for all projects. */
 	project: string | null;
 	/** All distinct projects seen in the data, for the selector. */

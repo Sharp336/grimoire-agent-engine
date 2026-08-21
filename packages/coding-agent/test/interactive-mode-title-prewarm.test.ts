@@ -11,6 +11,12 @@ import { tinyTitleClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
+const flushImmediates = (): Promise<void> => {
+	const { promise, resolve } = Promise.withResolvers<void>();
+	setImmediate(resolve);
+	return promise;
+};
+
 // Issue #6462: the first submit used to spawn the local tiny-title worker
 // synchronously ahead of the first frame, and title generation started before
 // the optimistic user row painted. Startup now prewarms an idle worker, and the
@@ -91,14 +97,7 @@ describe("InteractiveMode tiny-title prewarm", () => {
 		const prewarm = vi.spyOn(tinyTitleClient, "prewarm").mockImplementation(() => {});
 
 		await mode.init();
-		// The prewarm call is deferred behind a setImmediate queued during
-		// init() (see interactive-mode.ts); init()'s own awaits are promise
-		// microtasks that can resolve without yielding to the immediate
-		// queue, so the prewarm may not have fired yet when init() settles.
-		// Flush one immediate tick before asserting.
-		const immediateFlushed = Promise.withResolvers<void>();
-		setImmediate(immediateFlushed.resolve);
-		await immediateFlushed.promise;
+		await flushImmediates();
 
 		expect(prewarm).toHaveBeenCalledWith("lfm2-350m");
 	});
@@ -109,12 +108,14 @@ describe("InteractiveMode tiny-title prewarm", () => {
 		const prewarm = vi.spyOn(tinyTitleClient, "prewarm").mockImplementation(() => {});
 
 		await mode.init();
+		await flushImmediates();
 
 		expect(prewarm).not.toHaveBeenCalled();
 	});
 
 	it("paints the pending user row before starting title generation", async () => {
 		await mode.init();
+		await flushImmediates();
 
 		const order: string[] = [];
 		vi.spyOn(mode, "startPendingSubmission").mockImplementation(input => {

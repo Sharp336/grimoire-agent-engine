@@ -36,6 +36,7 @@ import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
 import { type BashInteractiveResult, runInteractiveBashPty } from "./bash-interactive";
 import { checkBashInterception } from "./bash-interceptor";
+import { appendBashMinimizerGainRecord } from "./bash-minimizer-gain";
 import { canUseInteractiveBashPty } from "./bash-pty-selection";
 import { expandInternalUrls, type InternalUrlExpansionOptions } from "./bash-skill-urls";
 import { resolveEvalBackends } from "./eval-backends";
@@ -300,7 +301,41 @@ function findBashApprovalPatternRule(
 	return rules.find(rule => bashApprovalRuleMatches(command, rule));
 }
 
-async function saveBashOriginalArtifact(session: ToolSession, originalText: string): Promise<string | undefined> {
+/**
+ * Minimal session capabilities used to preserve original minimizer output and
+ * persist opt-in gain telemetry. `makeMinimizedSaveHandler` accepts this
+ * narrow contract so bash telemetry tests can exercise the real handler.
+ */
+export interface MinimizedSaveHandlerSession {
+	cwd: string;
+	settings: {
+		get(path: "shellMinimizer.gainTelemetry"): boolean;
+		getAgentDir(): string;
+		getShellConfig(): { prefix?: string | undefined };
+	};
+	getSessionId?: () => string | null;
+	allocateOutputArtifact?: (toolType: string) => Promise<{ id?: string; path?: string }>;
+}
+
+/** Byte counts for a completed minimizer save, captured before the command's exit code is known. */
+export interface MinimizedSaveInfo {
+	filter: string;
+	inputBytes: number;
+	outputBytes: number;
+}
+
+/** Callbacks returned by `makeMinimizedSaveHandler` to drive the save/telemetry lifecycle of one bash execution. */
+export interface MinimizedSaveHandler {
+	onMinimizedSave: (originalText: string, info: MinimizedSaveInfo) => Promise<string | undefined>;
+	didSave: () => boolean;
+	/** Call after executeBash resolves to write the saved record with its final output byte count and exitCode. */
+	flushSaved: (exitCode: number | null, outputBytes: number) => Promise<void>;
+}
+
+async function saveBashOriginalArtifact(
+	session: MinimizedSaveHandlerSession,
+	originalText: string,
+): Promise<string | undefined> {
 	try {
 		const alloc = await session.allocateOutputArtifact?.("bash-original");
 		if (!alloc?.path || !alloc.id) return undefined;
@@ -311,8 +346,85 @@ async function saveBashOriginalArtifact(session: ToolSession, originalText: stri
 	}
 }
 
-const BASH_TIMEOUT_DESCRIPTION = `timeout in seconds; 0 disables the command deadline; nonzero values are clamped to ${TOOL_TIMEOUTS.bash.min}-${TOOL_TIMEOUTS.bash.max}`;
+function hasBashMinimizerCommandPrefix(session: MinimizedSaveHandlerSession): boolean {
+	return session.settings.getShellConfig?.().prefix !== undefined;
+}
 
+/**
+ * Creates the bash execution callbacks that save original output and append
+ * opt-in gain telemetry once the native command result supplies its exit code.
+ */
+export function makeMinimizedSaveHandler(
+	session: MinimizedSaveHandlerSession,
+	command: string,
+	commandCwd: string,
+): MinimizedSaveHandler {
+	let saved = false;
+	let pendingSaved: MinimizedSaveInfo | null = null;
+	const sessionCwd = session.cwd;
+	const sessionId = session.getSessionId?.() ?? undefined;
+	const gainTelemetry =
+		session.settings.get("shellMinimizer.gainTelemetry") && !hasBashMinimizerCommandPrefix(session);
+	return {
+		onMinimizedSave: async (originalText, info) => {
+			saved = true;
+			if (gainTelemetry) pendingSaved = info;
+			return saveBashOriginalArtifact(session, originalText);
+		},
+		didSave: () => saved,
+		flushSaved: async (exitCode, outputBytes) => {
+			if (!pendingSaved) return;
+			const info = pendingSaved;
+			pendingSaved = null;
+			await appendBashMinimizerGainRecord({
+				command,
+				cwd: commandCwd,
+				sessionCwd,
+				sessionId,
+				filter: info.filter,
+				inputBytes: info.inputBytes,
+				outputBytes,
+				exitCode,
+				kind: "saved",
+				agentDir: session.settings.getAgentDir(),
+			});
+		},
+	};
+}
+
+async function recordBashMinimizerGain(input: {
+	session: ToolSession;
+	command: string;
+	commandCwd: string;
+	result: BashResult | BashInteractiveResult;
+	sessionCwd: string;
+	sessionId?: string;
+}): Promise<void> {
+	if (!input.session.settings.get("shellMinimizer.gainTelemetry")) return;
+	if (!input.session.settings.get("shellMinimizer.enabled")) return;
+	if (hasBashMinimizerCommandPrefix(input.session)) return;
+	try {
+		// Native capture eligibility is exact: it includes shell syntax, settings,
+		// filters, user pipelines, prefixes, and the capture cap.
+		if (!("minimizerEligible" in input.result) || !input.result.minimizerEligible) return;
+		await appendBashMinimizerGainRecord({
+			command: input.command,
+			cwd: input.commandCwd,
+			sessionCwd: input.sessionCwd,
+			sessionId: input.sessionId,
+			filter: "missed",
+			inputBytes: input.result.totalBytes,
+			outputBytes: input.result.totalBytes,
+			exitCode: input.result.exitCode ?? null,
+			kind: "missed",
+			agentDir: input.session.settings.getAgentDir(),
+		});
+	} catch {
+		// Best-effort: gain telemetry failure must not break bash execution
+	}
+}
+
+const BASH_TIMEOUT_DESCRIPTION = `timeout in seconds; 0 disables the command deadline; nonzero values are clamped to ${TOOL_TIMEOUTS.bash.min}-${TOOL_TIMEOUTS.bash.max}`;
 const bashSchemaBase = type({
 	command: type("string").describe("command to execute"),
 	"env?": type({ "[string]": "string" }).describe("extra env vars"),
@@ -829,9 +941,12 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				const tailBuffer = new TailBuffer(DEFAULT_MAX_BYTES);
 				const wallTimeStart = performance.now();
 				try {
+					const sessionCwd = this.session.cwd;
+					const sessionId = this.session.getSessionId?.() ?? undefined;
+					const minimizedSave = makeMinimizedSaveHandler(this.session, options.command, options.commandCwd);
 					const result = await executeBash(options.command, {
 						cwd: options.commandCwd,
-						sessionKey: `${this.session.getSessionId?.() ?? ""}:async:${jobId}`,
+						sessionKey: `${sessionId ?? ""}:async:${jobId}`,
 						timeout: options.timeoutMs ?? 0,
 						signal: runSignal,
 						env: options.resolvedEnv,
@@ -842,8 +957,19 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 							latestText = tailBuffer.text();
 							void reportProgress(latestText, { async: { state: "running", jobId, type: "bash" } });
 						},
-						onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
+						onMinimizedSave: minimizedSave.onMinimizedSave,
 					});
+					await minimizedSave.flushSaved(result.exitCode ?? null, result.totalBytes).catch(() => {});
+					if (!minimizedSave.didSave()) {
+						await recordBashMinimizerGain({
+							session: this.session,
+							command: options.command,
+							commandCwd: options.commandCwd,
+							result,
+							sessionCwd,
+							sessionId,
+						});
+					}
 					const wallTimeMs = performance.now() - wallTimeStart;
 					const finalResult = await this.#buildCompletedResult(result, options.timeoutSec, {
 						requestedTimeoutSec: options.requestedTimeoutSec,
@@ -1353,6 +1479,10 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				if (finalOutput.truncated) bridgeNotices.push("(output truncated)");
 				for (const notice of pendingNotices) bridgeNotices.push(notice);
 
+				// The native minimizer never runs in the bridge path (execution happens
+				// inside the client terminal, not the agent process). Do NOT record a
+				// missed row — it would pollute miss/tuning data with commands the
+				// minimizer never had a chance to process.
 				return this.#buildCompletedResult(bridgeResult, timeoutSec, {
 					requestedTimeoutSec,
 					notices: bridgeNotices,
@@ -1387,6 +1517,9 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			pendingNotices.push("pty requested but unavailable in this environment; ran without a terminal");
 		}
 		const wallTimeStart = performance.now();
+		const sessionCwd = this.session.cwd;
+		const sessionId = this.session.getSessionId?.() ?? undefined;
+		const minimizedSave = makeMinimizedSaveHandler(this.session, command, commandCwd);
 		const result: BashResult | BashInteractiveResult = interactiveUi
 			? await runInteractiveBashPty(interactiveUi, {
 					// PTY bypasses executeBash, so feed it the direnv-transformed
@@ -1405,14 +1538,14 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				// applied twice.
 				await executeBash(command, {
 					cwd: commandCwd,
-					sessionKey: this.session.getSessionId?.() ?? undefined,
+					sessionKey: sessionId,
 					timeout: timeoutMs ?? 0,
 					signal,
 					env: resolvedEnv,
 					artifactPath,
 					artifactId,
 					onChunk: streamTailUpdates(tailBuffer, onUpdate),
-					onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
+					onMinimizedSave: minimizedSave.onMinimizedSave,
 				});
 		const wallTimeMs = performance.now() - wallTimeStart;
 		if (result.cancelled) {
@@ -1436,6 +1569,21 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					throw new ToolAbortError(message);
 				}
 				throw new ToolError(message);
+			}
+		}
+		// Flush the deferred saved record (with real exitCode) or write a missed record.
+		// Skip telemetry for interactive PTY runs — the minimizer never fires there.
+		if (!interactiveUi) {
+			await minimizedSave.flushSaved(result.exitCode ?? null, result.totalBytes).catch(() => {});
+			if (!minimizedSave.didSave()) {
+				await recordBashMinimizerGain({
+					session: this.session,
+					command,
+					commandCwd,
+					result,
+					sessionCwd,
+					sessionId,
+				});
 			}
 		}
 		return this.#buildCompletedResult(result, timeoutSec, {

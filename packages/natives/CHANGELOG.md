@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added `ShellRunResult.minimizerEligible` so callers can distinguish Bash executions eligible for output minimization from skipped or ineligible executions.
+
 
 ## [17.4.1] - 2026-08-21
 

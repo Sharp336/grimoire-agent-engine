@@ -4,6 +4,8 @@ import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import { type BashResult, executeBash as executeBashCommand } from "../exec/bash-executor";
 import type { ExtensionRunner } from "../extensibility/extensions";
+import type { MinimizedSaveInfo } from "../tools/bash";
+import { appendBashMinimizerGainRecord } from "../tools/bash-minimizer-gain";
 import { outputMeta } from "../tools/output-meta";
 import { clampTimeout } from "../tools/tool-timeouts";
 import type { BashExecutionMessage } from "./messages";
@@ -85,12 +87,16 @@ export class BashRunner {
 					cwd,
 				});
 				if (hookResult?.result) {
+					// user_bash extension handled the command — skip minimizer miss recording.
 					targetTransferred = true;
 					await this.#recordResultForTarget(target, command, hookResult.result, options);
 					return hookResult.result;
 				}
 			}
 
+			const settings = this.#host.settings;
+			const gainTelemetry = settings.get("shellMinimizer.gainTelemetry");
+			const savedGain: { info: MinimizedSaveInfo | null } = { info: null };
 			const abortController = new AbortController();
 			this.#abortControllers.add(abortController);
 			let result: BashResult;
@@ -100,8 +106,11 @@ export class BashRunner {
 					signal: abortController.signal,
 					sessionKey: target.sessionId,
 					cwd,
-					timeout: clampTimeout("bash", undefined, this.#host.settings.get("tools.maxTimeout")) * 1000,
-					onMinimizedSave: originalText => this.#saveOriginalArtifact(target, originalText),
+					timeout: clampTimeout("bash", undefined, settings.get("tools.maxTimeout")) * 1000,
+					onMinimizedSave: async (originalText, info) => {
+						if (gainTelemetry) savedGain.info = info;
+						return this.#saveOriginalArtifact(target, originalText);
+					},
 					useUserShell: options?.useUserShell,
 				});
 			} finally {
@@ -109,6 +118,48 @@ export class BashRunner {
 			}
 			targetTransferred = true;
 			await this.#recordResultForTarget(target, command, result, options);
+			if (
+				gainTelemetry &&
+				settings.get("shellMinimizer.enabled") &&
+				settings.getShellConfig().prefix === undefined
+			) {
+				// Native capture eligibility accounts for user-shell wrapping,
+				// prefixes, filters, pipelines, and the output capture cap.
+				if (savedGain.info) {
+					// Flush saved record once the final output bytes and exit code are known.
+					const info = savedGain.info;
+					await appendBashMinimizerGainRecord({
+						command,
+						cwd,
+						sessionCwd: cwd,
+						sessionId: target.sessionId,
+						filter: info.filter,
+						inputBytes: info.inputBytes,
+						outputBytes: result.totalBytes,
+						exitCode: result.exitCode ?? null,
+						kind: "saved",
+						agentDir: settings.getAgentDir(),
+					}).catch(() => {});
+				} else if (
+					!result.cancelled &&
+					result.exitCode !== undefined &&
+					result.totalBytes > 0 &&
+					result.minimizerEligible
+				) {
+					await appendBashMinimizerGainRecord({
+						command,
+						cwd,
+						sessionCwd: cwd,
+						sessionId: target.sessionId,
+						filter: "missed",
+						inputBytes: result.totalBytes,
+						outputBytes: result.totalBytes,
+						exitCode: result.exitCode ?? null,
+						kind: "missed",
+						agentDir: settings.getAgentDir(),
+					}).catch(() => {});
+				}
+			}
 			return result;
 		} finally {
 			if (!targetTransferred) await this.#releaseSessionTarget(target);

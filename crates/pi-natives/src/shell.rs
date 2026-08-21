@@ -170,19 +170,23 @@ pub struct ShellRunResult {
 	/// original buffer + telemetry so the session layer can persist it as
 	/// an artifact and splice an `artifact://<id>` reference into the
 	/// minimized text shown to the agent. `None` when nothing was rewritten.
-	pub minimized:   Option<MinimizerResult>,
+	pub minimized:          Option<MinimizerResult>,
+	/// Whether the native minimizer captured the command without exceeding its
+	/// cap.
+	pub minimizer_eligible: Option<bool>,
 	/// Shell working directory after command completion.
-	pub working_dir: Option<String>,
+	pub working_dir:        Option<String>,
 }
 
 impl From<CoreShellRunResult> for ShellRunResult {
 	fn from(value: CoreShellRunResult) -> Self {
 		Self {
-			exit_code:   value.exit_code,
-			cancelled:   value.cancelled,
-			timed_out:   value.timed_out,
-			minimized:   value.minimized.map(Into::into),
-			working_dir: value.working_dir,
+			exit_code:          value.exit_code,
+			cancelled:          value.cancelled,
+			timed_out:          value.timed_out,
+			minimized:          value.minimized.map(Into::into),
+			minimizer_eligible: Some(value.minimizer_eligible),
+			working_dir:        value.working_dir,
 		}
 	}
 }

@@ -108,8 +108,31 @@ describe("executeBash", () => {
 			maxCaptureBytes: 4096,
 			sourceOutlineLevel: "default",
 			legacyFilters: undefined,
+			gainTelemetry: false,
 		};
 		expect(buildMinimizerOptions(group)).toBeUndefined();
+	});
+
+	it("forwards source outline and legacy filter settings to native minimizer options", () => {
+		const group: ShellMinimizerSettings = {
+			enabled: true,
+			settingsPath: "minimizer.toml",
+			only: ["git"],
+			except: ["docker"],
+			maxCaptureBytes: 1234,
+			sourceOutlineLevel: "aggressive",
+			legacyFilters: true,
+			gainTelemetry: false,
+		};
+		expect(buildMinimizerOptions(group)).toEqual({
+			enabled: true,
+			settingsPath: "minimizer.toml",
+			only: ["git"],
+			except: ["docker"],
+			maxCaptureBytes: 1234,
+			sourceOutlineLevel: "aggressive",
+			legacyFilters: true,
+		});
 	});
 
 	it.each([
@@ -139,6 +162,7 @@ describe("executeBash", () => {
 	] as const)("classifies persistent-shell cd routing for %j", (command, expected) => {
 		expect(isPersistentShellCdCommand(command)).toBe(expected);
 	});
+
 	it("returns non-zero exit codes without cancellation", async () => {
 		const result = await executeBash("exit 7", { cwd: tempDir, timeout: 5000 });
 		expect(result.exitCode).toBe(7);
