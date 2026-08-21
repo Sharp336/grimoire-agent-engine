@@ -4791,7 +4791,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Subagents",
 			label: "Max Subagent Runtime",
 			description:
-				"Hard wall-clock limit per subagent (ms). 0 disables it. Defense-in-depth against provider-side stream hangs that escape the inference-layer watchdog; triggers a normal subagent abort with a 'timed out' reason.",
+				"Hard wall-clock limit per subagent (ms). 0 disables it. Defense-in-depth against provider-side stream hangs that escape the inference-layer watchdog. A subagent that is still producing turns is warned (see task.maxRuntimeNotice) and then force-stopped to yield its partial findings before the deadline; one that has stopped producing is aborted with a 'timed out' reason.",
 			options: [
 				{ value: "0", label: "Unlimited", description: "Default" },
 				{ value: "300000", label: "5 minutes" },
@@ -4799,6 +4799,18 @@ export const SETTINGS_SCHEMA = {
 				{ value: "1800000", label: "30 minutes" },
 				{ value: "3600000", label: "1 hour" },
 			],
+		},
+	},
+
+	"task.maxRuntimeNotice": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Max Subagent Runtime Notice",
+			description:
+				"Inject one steering notice when a subagent approaches its wall-clock limit, asking it to wrap up before the forced-yield stop. Has no effect when Max Subagent Runtime is unlimited.",
 		},
 	},
 

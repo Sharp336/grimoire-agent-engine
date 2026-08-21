@@ -124,6 +124,63 @@ export function buildBudgetNotice(requests: number, budget: number): string {
 	return `[budget notice] You have used ${requests} requests in this run (soft budget: ${budget}). Wrap up now: finish the current step and yield your final report. At ${Math.ceil(budget * 1.5)} requests the run is force-stopped and you will be asked to yield whatever you have.`;
 }
 
+/**
+ * Wall-clock soft phase for `task.maxRuntimeMs`, mirroring the request-budget
+ * ladder above: a wrap-up notice (`task.maxRuntimeNotice`, on by default),
+ * then a forced final `yield`, and only then the pre-existing hard abort at
+ * the deadline itself.
+ *
+ * Both thresholds are expressed as a *window before the deadline* rather than
+ * a fraction of it, because what has to fit in the window is a fixed amount of
+ * work: {@link driveSessionToYield} may need up to `MAX_YIELD_RETRIES` prompts
+ * for the forced yield to land, so the floor is bounded below by real
+ * inference latency, not chosen freely. The fractional term keeps long caps
+ * proportionate; the `Math.min` term keeps short caps from having their whole
+ * lifetime consumed by the soft phase.
+ */
+const RUNTIME_STOP_WINDOW_FRACTION = 0.1;
+const RUNTIME_STOP_MIN_WINDOW_MS = 15_000;
+const RUNTIME_STOP_MAX_WINDOW_FRACTION = 0.5;
+const RUNTIME_NOTICE_WINDOW_FRACTION = 0.25;
+const RUNTIME_NOTICE_MIN_WINDOW_MS = 30_000;
+const RUNTIME_NOTICE_MAX_WINDOW_FRACTION = 0.75;
+
+/** Elapsed-time thresholds at which the runtime notice and the forced yield fire. */
+export interface RuntimeSoftPhase {
+	/** Elapsed ms at which the wrap-up notice is delivered. */
+	noticeAtMs: number;
+	/** Elapsed ms at which the free-running turn is stopped and a final yield demanded. */
+	stopAtMs: number;
+}
+
+/**
+ * Resolves the soft-phase thresholds for a wall-clock cap. Returns `undefined`
+ * when the cap is disabled; for very short caps the windows collapse
+ * proportionally rather than switching the soft phase off, so behaviour
+ * degrades to today's hard abort instead of changing shape.
+ */
+export function resolveRuntimeSoftPhase(maxRuntimeMs: number): RuntimeSoftPhase | undefined {
+	if (!Number.isFinite(maxRuntimeMs) || maxRuntimeMs <= 0) return undefined;
+	const stopWindow = Math.min(
+		maxRuntimeMs * RUNTIME_STOP_MAX_WINDOW_FRACTION,
+		Math.max(maxRuntimeMs * RUNTIME_STOP_WINDOW_FRACTION, RUNTIME_STOP_MIN_WINDOW_MS),
+	);
+	const noticeWindow = Math.min(
+		maxRuntimeMs * RUNTIME_NOTICE_MAX_WINDOW_FRACTION,
+		Math.max(maxRuntimeMs * RUNTIME_NOTICE_WINDOW_FRACTION, RUNTIME_NOTICE_MIN_WINDOW_MS),
+	);
+	return {
+		noticeAtMs: Math.max(0, Math.floor(maxRuntimeMs - noticeWindow)),
+		stopAtMs: Math.max(0, Math.floor(maxRuntimeMs - stopWindow)),
+	};
+}
+
+/** Steering notice injected when a subagent crosses its wall-clock soft phase. */
+export function buildRuntimeNotice(elapsedMs: number, maxRuntimeMs: number, stopAtMs: number): string {
+	const secs = (ms: number) => `${Math.round(ms / 1000)}s`;
+	return `[runtime notice] This run has been going for ${secs(elapsedMs)} of its ${secs(maxRuntimeMs)} wall-clock limit (task.maxRuntimeMs). Wrap up now: finish the current step and yield your final report. At ${secs(stopAtMs)} the run is force-stopped and you will be asked to yield whatever you have; at ${secs(maxRuntimeMs)} it is hard-aborted and anything not yielded is lost.`;
+}
+
 /** Flatten whitespace and clip salvage text for the cancelled-child summary line. */
 function formatSalvageSnippet(text: string, maxLength = 500): string {
 	const flattened = text.replace(/\s+/g, " ").trim();
@@ -909,6 +966,15 @@ export function createSubagentSettings(
 
 export type AbortReason = "signal" | "shutdown" | "terminate" | "timeout" | "budget";
 
+/** Which soft limit stopped the free-running turn to demand a final yield. */
+export type SoftStopKind = "budget" | "runtime";
+
+/** Reminder wording per soft-stop kind; a new kind is a compile error here. */
+const SOFT_STOP_REASONS = {
+	budget: "Request budget crossed",
+	runtime: "Wall-clock runtime limit approaching",
+} satisfies Record<SoftStopKind, string>;
+
 const MAX_YIELD_TOOL_ERRORS = 6;
 
 /** Inputs for the run monitor driving one subagent assignment. */
@@ -936,8 +1002,10 @@ interface RunMonitorArgs {
 	softRequestBudget: number;
 	/** Whether crossing the soft budget injects a wrap-up steering notice. */
 	softRequestBudgetNotice: boolean;
-	/** Wall-clock cap in ms; 0 disables the timer. */
+	/** Wall-clock cap in ms; 0 disables the timer and its soft phase. */
 	maxRuntimeMs: number;
+	/** Whether crossing the wall-clock soft phase injects a wrap-up steering notice. */
+	maxRuntimeNotice: boolean;
 }
 
 /**
@@ -953,10 +1021,16 @@ interface SubagentRunMonitor {
 	hasUsage(): boolean;
 	yieldCalled(): boolean;
 	runtimeLimitExceeded(): boolean;
-	/** True once the soft-budget stop fired: the free-running turn was aborted and the run is being driven to a forced final yield. */
-	budgetStopRequested(): boolean;
-	/** Resolves when the budget-stop session abort has settled (immediately when no stop fired). */
-	waitForBudgetStop(): Promise<void>;
+	/**
+	 * True once a soft stop fired: the free-running turn was aborted and the
+	 * run is being driven to a forced final yield. Raised by the request
+	 * budget (1.5x) and by the wall-clock soft phase alike.
+	 */
+	softStopRequested(): boolean;
+	/** Which limit fired the soft stop, when one did. */
+	softStopKind(): SoftStopKind | undefined;
+	/** Resolves when the soft-stop session abort has settled (immediately when no stop fired). */
+	waitForSoftStop(): Promise<void>;
 	/**
 	 * True when a recorded yield was invalidated by a later async-result
 	 * injection and no fresh yield has landed since: the yield payload
@@ -1020,6 +1094,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		softRequestBudget,
 		softRequestBudgetNotice,
 		maxRuntimeMs,
+		maxRuntimeNotice,
 	} = args;
 	const startTime = Date.now();
 
@@ -1077,8 +1152,10 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	let hasUsage = false;
 	let budgetSteerSent = false;
 	let budgetLimitExceeded = false;
-	let budgetStopRequested = false;
-	let budgetStopAbortPromise: Promise<void> | undefined;
+	let runtimeSteerSent = false;
+	let softStopKind: SoftStopKind | undefined;
+	let softStopAbortPromise: Promise<void> | undefined;
+	const runtimeSoftPhase = resolveRuntimeSoftPhase(maxRuntimeMs);
 	let terminalError: string | undefined;
 	let consecutiveYieldToolErrors = 0;
 	let lastAssistantSalvageText: string | undefined;
@@ -1133,18 +1210,20 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		void abortActiveSession();
 	};
 
-	// Soft-budget stop: cancel the free-running turn WITHOUT aborting the
-	// monitor, so driveSessionToYield can still drive one forced final yield.
+	// Soft stop: cancel the free-running turn WITHOUT aborting the monitor, so
+	// driveSessionToYield can still drive one forced final yield. Raised by the
+	// request budget at 1.5x and by the wall-clock soft phase alike.
 	// Deliberately not routed through abortActiveSession(): that memoizes its
-	// promise, and a later hard abort (grace exhausted) must be able to abort
-	// the session again.
-	const requestBudgetStop = () => {
-		if (budgetStopRequested || abortSent || resolved) return;
-		budgetStopRequested = true;
+	// promise, and a later hard abort (grace exhausted, or the wall-clock
+	// deadline) must be able to abort the session again.
+	const requestSoftStop = (kind: SoftStopKind) => {
+		if (softStopKind || abortSent || resolved) return;
+		softStopKind = kind;
 		const session = activeSession;
-		budgetStopAbortPromise = session
+		softStopAbortPromise = session
 			? session.abort().catch(error => {
-					logger.debug("Subagent budget-stop abort failed", {
+					logger.debug("Subagent soft-stop abort failed", {
+						kind,
 						error: error instanceof Error ? error.message : String(error),
 					});
 				})
@@ -1222,13 +1301,18 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	};
 	const resolveAbortReasonText = (): string => {
 		if (runtimeLimitExceeded) {
-			return `Subagent runtime limit exceeded (task.maxRuntimeMs=${maxRuntimeMs})`;
+			return softStopKind === "runtime"
+				? `Subagent runtime limit exceeded (task.maxRuntimeMs=${maxRuntimeMs}) — agent did not yield when force-stopped`
+				: `Subagent runtime limit exceeded (task.maxRuntimeMs=${maxRuntimeMs})`;
 		}
 		if (budgetLimitExceeded) {
 			return `Soft request budget exceeded (${progress.requests} requests; budget ${softRequestBudget}) — agent did not yield when force-stopped`;
 		}
-		if (budgetStopRequested) {
+		if (softStopKind === "budget") {
 			return `Soft request budget exceeded (${progress.requests} requests; budget ${softRequestBudget})`;
+		}
+		if (softStopKind === "runtime") {
+			return `Subagent wall-clock soft phase reached (task.maxRuntimeMs=${maxRuntimeMs})`;
 		}
 		return resolveSignalAbortReason();
 	};
@@ -1595,17 +1679,27 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 							}
 						}
 					}
+					// Both ladders are evaluated here, at a message boundary, and
+					// nowhere else. That is the liveness gate: a child that has
+					// stopped producing assistant messages (the hung-provider case
+					// `maxRuntimeMs` exists for) never crosses a soft threshold and
+					// falls through to the wall-clock hard abort unchanged. It also
+					// keeps the notice off the mid-tool-call path.
+					const softStopActive = softStopKind !== undefined;
 					if (softRequestBudget > 0 && !abortSent && !yieldCallPending) {
 						const stopThreshold = softRequestBudget * 1.5;
-						if (budgetStopRequested) {
+						if (softStopActive) {
 							// Grace window after the stop: the forced yield needs a
 							// request or two; a child that keeps burning requests
-							// instead of yielding is hard-aborted.
+							// instead of yielding is hard-aborted. The request budget
+							// enforces its own ceiling regardless of which limit
+							// raised the stop, so a wall-clock stop cannot buy an
+							// over-budget child unlimited extra requests.
 							if (progress.requests >= stopThreshold + BUDGET_STOP_GRACE_REQUESTS) {
 								requestAbort("budget");
 							}
 						} else if (progress.requests >= stopThreshold) {
-							requestBudgetStop();
+							requestSoftStop("budget");
 						} else if (softRequestBudgetNotice && !budgetSteerSent && progress.requests >= softRequestBudget) {
 							budgetSteerSent = true;
 							const steerSession = activeSession;
@@ -1618,6 +1712,37 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 									.then(() => steerSession.sendUserMessage(notice, { deliverAs: "steer" }))
 									.catch(err => {
 										logger.warn("Subagent budget steer failed", {
+											error: err instanceof Error ? err.message : String(err),
+										});
+									});
+							}
+						}
+					}
+					// Wall-clock soft phase. The hard abort stays on its timer; this
+					// only adds the notice and the forced yield ahead of it, so a
+					// child that is alive but slow gets the same wrap-up opportunity
+					// the request budget already grants. Skipped entirely once any
+					// soft stop is live: the forced yield it asks for is already
+					// being driven, and a second notice would only be noise.
+					if (runtimeSoftPhase && !abortSent && !yieldCallPending && softStopKind === undefined) {
+						const elapsedMs = Date.now() - startTime;
+						if (elapsedMs >= runtimeSoftPhase.stopAtMs) {
+							logger.debug("Subagent wall-clock soft stop; driving forced yield", {
+								id,
+								agent: agent.name,
+								elapsedMs,
+								maxRuntimeMs,
+							});
+							requestSoftStop("runtime");
+						} else if (maxRuntimeNotice && !runtimeSteerSent && elapsedMs >= runtimeSoftPhase.noticeAtMs) {
+							runtimeSteerSent = true;
+							const steerSession = activeSession;
+							if (steerSession) {
+								const notice = buildRuntimeNotice(elapsedMs, maxRuntimeMs, runtimeSoftPhase.stopAtMs);
+								void Promise.resolve()
+									.then(() => steerSession.sendUserMessage(notice, { deliverAs: "steer" }))
+									.catch(err => {
+										logger.warn("Subagent runtime steer failed", {
 											error: err instanceof Error ? err.message : String(err),
 										});
 									});
@@ -1783,9 +1908,10 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			abortReason === "shutdown" ||
 			runtimeLimitExceeded ||
 			budgetLimitExceeded ||
-			budgetStopRequested,
-		budgetStopRequested: () => budgetStopRequested,
-		waitForBudgetStop: () => budgetStopAbortPromise ?? Promise.resolve(),
+			softStopKind !== undefined,
+		softStopRequested: () => softStopKind !== undefined,
+		softStopKind: () => softStopKind,
+		waitForSoftStop: () => softStopAbortPromise ?? Promise.resolve(),
 		yieldInvalidatedByAsync: () => yieldInvalidatedByAsync,
 		yieldTurnStopRequested: () => yieldTurnStopRequested,
 		waitForYieldTurnStop: async () => {
@@ -1805,9 +1931,15 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				}
 			}
 		},
-		// A soft stop that never escalated still identifies as a budget abort so
-		// the lifecycle can park the agent as resumable instead of killing it.
-		abortKind: () => abortReason ?? (budgetStopRequested ? "budget" : undefined),
+		// A budget soft stop that never escalated still identifies as "budget",
+		// so the lifecycle parks the agent instead of killing it: its request
+		// budget is a soft ceiling a follow-up turn can be granted past.
+		// A runtime soft stop maps to "timeout" and is therefore terminal, which
+		// is deliberate - the wall clock it is racing is nearly spent, and a
+		// parked child would be revived into the last seconds before its own
+		// hard abort.
+		abortKind: () =>
+			abortReason ?? (softStopKind === "runtime" ? "timeout" : softStopKind === "budget" ? "budget" : undefined),
 		isAbortedRun: () =>
 			abortReason === "signal" ||
 			abortReason === "shutdown" ||
@@ -1914,7 +2046,7 @@ async function driveSessionToYield(
 			// prompt. Swallow it and drive the barrier/forced final yield
 			// below; real caller/timeout aborts (monitor signal) and genuine
 			// failures keep the old path.
-			const recoverableStop = monitor.budgetStopRequested() || monitor.yieldTurnStopRequested();
+			const recoverableStop = monitor.softStopRequested() || monitor.yieldTurnStopRequested();
 			if (!recoverableStop || abortSignal.aborted) throw err;
 		}
 
@@ -1923,13 +2055,14 @@ async function driveSessionToYield(
 		const runYieldLadder = async (): Promise<void> => {
 			let retryCount = 0;
 			while (!monitor.yieldCalled() && retryCount < MAX_YIELD_RETRIES && !abortSignal.aborted) {
-				// A budget stop collapses the reminder ladder to a single forced
-				// final yield: wait for the stop's session abort to settle, then
-				// prompt once with the wrap-up reminder + named tool choice.
-				const budgetStop = monitor.budgetStopRequested();
-				if (budgetStop) {
+				// A soft stop (request budget or wall-clock) collapses the reminder
+				// ladder to a single forced final yield: wait for the stop's session
+				// abort to settle, then prompt once with the wrap-up reminder +
+				// named tool choice.
+				const softStop = monitor.softStopRequested();
+				if (softStop) {
 					retryCount = MAX_YIELD_RETRIES - 1;
-					await monitor.waitForBudgetStop();
+					await monitor.waitForSoftStop();
 					if (monitor.yieldCalled() || abortSignal.aborted) break;
 				}
 				// Skip reminders when the model returned a terminal error (e.g.
@@ -1938,12 +2071,14 @@ async function driveSessionToYield(
 				// any chance of producing a yield.
 				const lastBeforeReminder = session.getLastAssistantMessage();
 				if (lastBeforeReminder?.stopReason === "error") break;
+				const softStopKind = monitor.softStopKind();
 				try {
 					retryCount++;
 					const reminder = prompt.render(submitReminderTemplate, {
 						retryCount,
 						maxRetries: MAX_YIELD_RETRIES,
-						budgetStop,
+						softStop,
+						softStopReason: softStopKind ? SOFT_STOP_REASONS[softStopKind] : undefined,
 					});
 
 					const isFinalRetry = retryCount >= MAX_YIELD_RETRIES;
@@ -2005,7 +2140,7 @@ async function driveSessionToYield(
 				if (!monitor.yieldCalled()) break;
 			}
 			// Let the parked yield's turn-stop session abort settle before
-			// prompting again (mirrors waitForBudgetStop).
+			// prompting again (mirrors waitForSoftStop).
 			await awaitAbortable(monitor.waitForYieldTurnStop());
 			if (!session.hasPendingAsyncWork()) break;
 			if (!asyncPendingNoticeSent) {
@@ -2066,9 +2201,9 @@ async function driveSessionToYield(
 			}
 		}
 
-		// A budget-stopped run that still produced no yield is a budget abort:
+		// A soft-stopped run that still produced no yield is a limit abort:
 		// surface the precise reason instead of a generic missing-yield failure.
-		if (!monitor.yieldCalled() && monitor.budgetStopRequested() && !aborted) {
+		if (!monitor.yieldCalled() && monitor.softStopRequested() && !aborted) {
 			aborted = true;
 			abortReasonText ??= monitor.resolveAbortReasonText();
 			exitCode = 1;
@@ -2294,6 +2429,8 @@ export interface IrcWakeTurnMonitorOptions {
 	/** Fallback session file when the registry ref carries none. */
 	sessionFile?: string;
 	maxRuntimeMs?: number;
+	/** Whether the wall-clock soft phase injects a wrap-up notice; defaults to off for wake turns. */
+	maxRuntimeNotice?: boolean;
 	outputSchema?: unknown;
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	outputSchemaSource?: StructuredSubagentSchemaSource;
@@ -2312,6 +2449,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 	const { id, agent } = options;
 	const index = options.index ?? 0;
 	const maxRuntimeMs = options.maxRuntimeMs ?? 0;
+	const maxRuntimeNotice = options.maxRuntimeNotice ?? false;
 	session.setIrcWakeTurnObserver(records => {
 		const ircTask =
 			records
@@ -2341,6 +2479,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			softRequestBudget: 0,
 			softRequestBudgetNotice: false,
 			maxRuntimeMs,
+			maxRuntimeNotice,
 		});
 
 		if (options.eventBus) {
@@ -2550,6 +2689,8 @@ export interface FollowUpTurnOptions {
 	artifactsDir?: string;
 	/** Wall-clock cap in ms for this turn; 0 disables. */
 	maxRuntimeMs?: number;
+	/** Whether the wall-clock soft phase injects a wrap-up notice; defaults to off for follow-up turns. */
+	maxRuntimeNotice?: boolean;
 }
 
 /**
@@ -2587,6 +2728,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		softRequestBudget: 0,
 		softRequestBudgetNotice: false,
 		maxRuntimeMs: options.maxRuntimeMs ?? 0,
+		maxRuntimeNotice: options.maxRuntimeNotice ?? false,
 	});
 
 	if (options.eventBus) {
@@ -2736,6 +2878,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	);
 	const softRequestBudget = resolveSoftRequestBudget(agent.name, configuredDefaultBudget);
 	const softRequestBudgetNotice = settings.get("task.softRequestBudgetNotice") ?? false;
+	const maxRuntimeNotice = settings.get("task.maxRuntimeNotice") ?? false;
 	const parentDepth = options.taskDepth ?? 0;
 	const childDepth = parentDepth + 1;
 	const atMaxDepth = maxRecursionDepth >= 0 && childDepth >= maxRecursionDepth;
@@ -2800,6 +2943,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		softRequestBudget,
 		softRequestBudgetNotice,
 		maxRuntimeMs,
+		maxRuntimeNotice,
 	});
 	const progress = monitor.progress;
 	let unsubscribe: (() => void) | null = null;
@@ -2816,6 +2960,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			parentToolCallId: options.parentToolCallId,
 			sessionFile: subtaskSessionFile,
 			maxRuntimeMs,
+			maxRuntimeNotice,
 			outputSchema,
 			outputSchemaMode: options.outputSchemaMode,
 			outputSchemaSource: options.outputSchemaSource,
