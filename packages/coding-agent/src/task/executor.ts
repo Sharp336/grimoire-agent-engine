@@ -37,6 +37,8 @@ import type { MCPManager } from "../mcp/manager";
 import type { MnemopiSessionState } from "../mnemopi/state";
 import { initializeExtensions } from "../modes/runtime-init";
 import subagentAsyncPendingTemplate from "../prompts/system/subagent-async-pending.md" with { type: "text" };
+import subagentBudgetNoticeTemplate from "../prompts/system/subagent-budget-notice.md" with { type: "text" };
+import subagentRuntimeNoticeTemplate from "../prompts/system/subagent-runtime-notice.md" with { type: "text" };
 import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
 import { AgentLifecycleManager, type AgentReviver } from "../registry/agent-lifecycle";
@@ -121,14 +123,18 @@ export const BUDGET_STOP_GRACE_REQUESTS = 5;
 
 /** Steering notice injected when a subagent crosses its soft request budget. */
 export function buildBudgetNotice(requests: number, budget: number): string {
-	return `[budget notice] You have used ${requests} requests in this run (soft budget: ${budget}). Wrap up now: finish the current step and yield your final report. At ${Math.ceil(budget * 1.5)} requests the run is force-stopped and you will be asked to yield whatever you have.`;
+	return prompt.render(subagentBudgetNoticeTemplate, {
+		requests,
+		budget,
+		stopAtRequests: Math.ceil(budget * 1.5),
+	});
 }
 
 /**
  * Wall-clock soft phase for `task.maxRuntimeMs`, mirroring the request-budget
- * ladder above: a wrap-up notice (`task.maxRuntimeNotice`, on by default),
- * then a forced final `yield`, and only then the pre-existing hard abort at
- * the deadline itself.
+ * ladder above: a wrap-up notice, then a forced final `yield`, and only then
+ * the pre-existing hard abort at the deadline itself.
+ * `task.maxRuntimeSoftPhase` selects how much of that ladder runs.
  *
  * Both thresholds are expressed as a *window before the deadline* rather than
  * a fraction of it, because what has to fit in the window is a fixed amount of
@@ -145,21 +151,28 @@ const RUNTIME_NOTICE_WINDOW_FRACTION = 0.25;
 const RUNTIME_NOTICE_MIN_WINDOW_MS = 30_000;
 const RUNTIME_NOTICE_MAX_WINDOW_FRACTION = 0.75;
 
+/** How much of the wall-clock ladder runs before the deadline. */
+export type RuntimeSoftPhaseMode = "notice" | "yield" | "off";
+
 /** Elapsed-time thresholds at which the runtime notice and the forced yield fire. */
 export interface RuntimeSoftPhase {
-	/** Elapsed ms at which the wrap-up notice is delivered. */
-	noticeAtMs: number;
+	/** Elapsed ms at which the wrap-up notice is delivered; `undefined` in `yield` mode. */
+	noticeAtMs: number | undefined;
 	/** Elapsed ms at which the free-running turn is stopped and a final yield demanded. */
 	stopAtMs: number;
 }
 
 /**
  * Resolves the soft-phase thresholds for a wall-clock cap. Returns `undefined`
- * when the cap is disabled; for very short caps the windows collapse
- * proportionally rather than switching the soft phase off, so behaviour
- * degrades to today's hard abort instead of changing shape.
+ * when the cap is disabled or the soft phase is off; for very short caps the
+ * windows collapse proportionally rather than switching the soft phase off, so
+ * behaviour degrades to today's hard abort instead of changing shape.
  */
-export function resolveRuntimeSoftPhase(maxRuntimeMs: number): RuntimeSoftPhase | undefined {
+export function resolveRuntimeSoftPhase(
+	maxRuntimeMs: number,
+	mode: RuntimeSoftPhaseMode,
+): RuntimeSoftPhase | undefined {
+	if (mode === "off") return undefined;
 	if (!Number.isFinite(maxRuntimeMs) || maxRuntimeMs <= 0) return undefined;
 	const stopWindow = Math.min(
 		maxRuntimeMs * RUNTIME_STOP_MAX_WINDOW_FRACTION,
@@ -170,7 +183,7 @@ export function resolveRuntimeSoftPhase(maxRuntimeMs: number): RuntimeSoftPhase 
 		Math.max(maxRuntimeMs * RUNTIME_NOTICE_WINDOW_FRACTION, RUNTIME_NOTICE_MIN_WINDOW_MS),
 	);
 	return {
-		noticeAtMs: Math.max(0, Math.floor(maxRuntimeMs - noticeWindow)),
+		noticeAtMs: mode === "notice" ? Math.max(0, Math.floor(maxRuntimeMs - noticeWindow)) : undefined,
 		stopAtMs: Math.max(0, Math.floor(maxRuntimeMs - stopWindow)),
 	};
 }
@@ -178,7 +191,11 @@ export function resolveRuntimeSoftPhase(maxRuntimeMs: number): RuntimeSoftPhase 
 /** Steering notice injected when a subagent crosses its wall-clock soft phase. */
 export function buildRuntimeNotice(elapsedMs: number, maxRuntimeMs: number, stopAtMs: number): string {
 	const secs = (ms: number) => `${Math.round(ms / 1000)}s`;
-	return `[runtime notice] This run has been going for ${secs(elapsedMs)} of its ${secs(maxRuntimeMs)} wall-clock limit (task.maxRuntimeMs). Wrap up now: finish the current step and yield your final report. At ${secs(stopAtMs)} the run is force-stopped and you will be asked to yield whatever you have; at ${secs(maxRuntimeMs)} it is hard-aborted and anything not yielded is lost.`;
+	return prompt.render(subagentRuntimeNoticeTemplate, {
+		elapsedSecs: secs(elapsedMs),
+		maxSecs: secs(maxRuntimeMs),
+		stopSecs: secs(stopAtMs),
+	});
 }
 
 /** Flatten whitespace and clip salvage text for the cancelled-child summary line. */
@@ -1004,8 +1021,8 @@ interface RunMonitorArgs {
 	softRequestBudgetNotice: boolean;
 	/** Wall-clock cap in ms; 0 disables the timer and its soft phase. */
 	maxRuntimeMs: number;
-	/** Whether crossing the wall-clock soft phase injects a wrap-up steering notice. */
-	maxRuntimeNotice: boolean;
+	/** How much of the wall-clock ladder (notice, forced yield) runs before the deadline. */
+	maxRuntimeSoftPhase: RuntimeSoftPhaseMode;
 }
 
 /**
@@ -1102,7 +1119,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		softRequestBudget,
 		softRequestBudgetNotice,
 		maxRuntimeMs,
-		maxRuntimeNotice,
+		maxRuntimeSoftPhase,
 	} = args;
 	const startTime = Date.now();
 
@@ -1163,7 +1180,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	let runtimeSteerSent = false;
 	let softStopKind: SoftStopKind | undefined;
 	let softStopAbortPromise: Promise<void> | undefined;
-	const runtimeSoftPhase = resolveRuntimeSoftPhase(maxRuntimeMs);
+	const runtimeSoftPhase = resolveRuntimeSoftPhase(maxRuntimeMs, maxRuntimeSoftPhase);
 	let terminalError: string | undefined;
 	let consecutiveYieldToolErrors = 0;
 	let lastAssistantSalvageText: string | undefined;
@@ -1753,7 +1770,11 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 								maxRuntimeMs,
 							});
 							requestSoftStop("runtime");
-						} else if (maxRuntimeNotice && !runtimeSteerSent && elapsedMs >= runtimeSoftPhase.noticeAtMs) {
+						} else if (
+							runtimeSoftPhase.noticeAtMs !== undefined &&
+							!runtimeSteerSent &&
+							elapsedMs >= runtimeSoftPhase.noticeAtMs
+						) {
 							runtimeSteerSent = true;
 							const steerSession = activeSession;
 							if (steerSession) {
@@ -2455,8 +2476,6 @@ export interface IrcWakeTurnMonitorOptions {
 	/** Fallback session file when the registry ref carries none. */
 	sessionFile?: string;
 	maxRuntimeMs?: number;
-	/** Whether the wall-clock soft phase injects a wrap-up notice; defaults to off for wake turns. */
-	maxRuntimeNotice?: boolean;
 	outputSchema?: unknown;
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	outputSchemaSource?: StructuredSubagentSchemaSource;
@@ -2475,7 +2494,6 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 	const { id, agent } = options;
 	const index = options.index ?? 0;
 	const maxRuntimeMs = options.maxRuntimeMs ?? 0;
-	const maxRuntimeNotice = options.maxRuntimeNotice ?? false;
 	session.setIrcWakeTurnObserver(records => {
 		const ircTask =
 			records
@@ -2505,7 +2523,9 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			softRequestBudget: 0,
 			softRequestBudgetNotice: false,
 			maxRuntimeMs,
-			maxRuntimeNotice,
+			// Wake turns are not driven through the forced-yield ladder, so the
+			// wall-clock cap can only act as the hard abort it has always been.
+			maxRuntimeSoftPhase: "off",
 		});
 
 		if (options.eventBus) {
@@ -2717,8 +2737,8 @@ export interface FollowUpTurnOptions {
 	artifactsDir?: string;
 	/** Wall-clock cap in ms for this turn; 0 disables. */
 	maxRuntimeMs?: number;
-	/** Whether the wall-clock soft phase injects a wrap-up notice; defaults to off for follow-up turns. */
-	maxRuntimeNotice?: boolean;
+	/** Wall-clock ladder for this turn; defaults to the forced yield without a notice. */
+	maxRuntimeSoftPhase?: RuntimeSoftPhaseMode;
 }
 
 /**
@@ -2756,7 +2776,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		softRequestBudget: 0,
 		softRequestBudgetNotice: false,
 		maxRuntimeMs: options.maxRuntimeMs ?? 0,
-		maxRuntimeNotice: options.maxRuntimeNotice ?? false,
+		maxRuntimeSoftPhase: options.maxRuntimeSoftPhase ?? "yield",
 	});
 
 	if (options.eventBus) {
@@ -2909,7 +2929,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	);
 	const softRequestBudget = resolveSoftRequestBudget(agent.name, configuredDefaultBudget);
 	const softRequestBudgetNotice = settings.get("task.softRequestBudgetNotice") ?? false;
-	const maxRuntimeNotice = settings.get("task.maxRuntimeNotice") ?? false;
+	const maxRuntimeSoftPhase = (settings.get("task.maxRuntimeSoftPhase") ?? "notice") as RuntimeSoftPhaseMode;
 	const parentDepth = options.taskDepth ?? 0;
 	const childDepth = parentDepth + 1;
 	const atMaxDepth = maxRecursionDepth >= 0 && childDepth >= maxRecursionDepth;
@@ -2974,7 +2994,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		softRequestBudget,
 		softRequestBudgetNotice,
 		maxRuntimeMs,
-		maxRuntimeNotice,
+		maxRuntimeSoftPhase,
 	});
 	const progress = monitor.progress;
 	let unsubscribe: (() => void) | null = null;
@@ -2991,7 +3011,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			parentToolCallId: options.parentToolCallId,
 			sessionFile: subtaskSessionFile,
 			maxRuntimeMs,
-			maxRuntimeNotice,
 			outputSchema,
 			outputSchemaMode: options.outputSchemaMode,
 			outputSchemaSource: options.outputSchemaSource,

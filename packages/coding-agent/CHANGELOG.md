@@ -14,7 +14,7 @@
 - Added repeat read warning hints when identical file content is read multiple times.
 - Explicit DAP adapters can now attach without a PID or port when `attachDefaults` provide the target arguments.
 - Added `isProjectTrusted()` compatibility shim to `ExtensionContext` for extensions targeting upstream per-directory trust gates.
-- `task.maxRuntimeMs` now gives a live subagent a wrap-up notice (`task.maxRuntimeNotice`, on by default) and a forced final `yield` before its wall-clock deadline, so its partial findings arrive as a submitted report instead of being lost to the hard abort; a subagent that has stopped producing messages is still killed on the timer as before.
+- `task.maxRuntimeMs` now gives a live subagent a configurable soft phase before its wall-clock deadline via `task.maxRuntimeSoftPhase` (default `"notice"`), so its partial findings arrive as a submitted report instead of being lost to the hard abort: `"notice"` sends a wrap-up steering notice at 25% before the deadline and a forced final `yield` at 10% before it, `"yield"` sends only that forced final `yield` with no notice, and `"off"` opts out entirely, restoring the pre-PR behavior of a hard abort on the timer and nothing else. A subagent that has stopped producing messages is still killed on the timer as before.
 
 ### Changed
 

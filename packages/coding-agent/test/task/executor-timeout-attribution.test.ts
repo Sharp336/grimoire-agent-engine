@@ -23,8 +23,6 @@ import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
  * it, which is the thing under test. Matches `executor-wall-clock.test.ts`.
  */
 
-const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
-
 function mockCreateAgentSession(session: AgentSession) {
 	return vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
 		session,
@@ -105,7 +103,7 @@ describe("wall-clock abort attribution", () => {
 				abortCount += 1;
 				// Teardown is slow enough that the wall-clock timer fires while
 				// the budget abort is still settling.
-				await sleep(1500);
+				await Bun.sleep(1500);
 				releaseHang();
 			},
 			dispose: async () => {},
@@ -164,7 +162,7 @@ describe("wall-clock abort attribution", () => {
 			// Post-yield session teardown outlives the remaining wall-clock slack.
 			abort: async () => {
 				abortCount += 1;
-				await sleep(1500);
+				await Bun.sleep(1500);
 			},
 			dispose: async () => {},
 		};

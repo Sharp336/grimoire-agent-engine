@@ -1,0 +1,1 @@
+[runtime notice] This run has been going for {{elapsedSecs}} of its {{maxSecs}} wall-clock limit (task.maxRuntimeMs). Wrap up now: finish the current step and yield your final report. At {{stopSecs}} the run is force-stopped and you will be asked to yield whatever you have; at {{maxSecs}} it is hard-aborted and anything not yielded is lost.

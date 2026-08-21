@@ -241,7 +241,7 @@ describe("runSubprocess wall-clock soft phase (task.maxRuntimeMs)", () => {
 		expect(elapsedMs).toBeLessThan(4000);
 	});
 
-	it("still forces the yield when the notice is disabled", async () => {
+	it("still forces the yield in yield mode, without a notice", async () => {
 		const id = "RuntimeScoutQuiet";
 		let steersAtReminder: string[] = [];
 		const handle = createMockSession(async ({ promptIndex, emit, pushMessage, aborted }) => {
@@ -266,11 +266,29 @@ describe("runSubprocess wall-clock soft phase (task.maxRuntimeMs)", () => {
 		});
 		mockCreateAgentSession(handle.session);
 
-		const result = await runSubprocess(baseOptions(id, { "task.maxRuntimeNotice": false }));
+		const result = await runSubprocess(baseOptions(id, { "task.maxRuntimeSoftPhase": "yield" }));
 
 		expect(steersAtReminder).toEqual([]);
 		expect(result.aborted).toBe(false);
 		expect(result.extractedToolData?.yield).toBeDefined();
+	});
+
+	it("restores pure hard-abort semantics in off mode", async () => {
+		const id = "RuntimeScoutOff";
+		// A live, well-behaved child that would have been warned and force-yielded
+		// under the default: with the soft phase off it is never steered, never
+		// asked for an early yield, and dies on the timer as it did pre-PR.
+		const handle = createMockSession(async ({ emit, pushMessage, aborted }) => {
+			await workUntilStopped({ emit, pushMessage, aborted, budgetMs: 6000 });
+		});
+		mockCreateAgentSession(handle.session);
+
+		const result = await runSubprocess(baseOptions(id, { "task.maxRuntimeSoftPhase": "off" }));
+
+		expect(handle.steers).toEqual([]);
+		expect(result.aborted).toBe(true);
+		expect(result.exitCode).toBe(1);
+		expect(result.abortReason).toContain("Subagent runtime limit exceeded (task.maxRuntimeMs=4000)");
 	});
 
 	it("reports a runtime soft stop the child never answered as a wall-clock stop", async () => {
@@ -339,14 +357,23 @@ describe("runSubprocess wall-clock soft phase (task.maxRuntimeMs)", () => {
 
 describe("resolveRuntimeSoftPhase", () => {
 	it("is disabled when the wall-clock cap is", () => {
-		expect(resolveRuntimeSoftPhase(0)).toBeUndefined();
-		expect(resolveRuntimeSoftPhase(-1)).toBeUndefined();
+		expect(resolveRuntimeSoftPhase(0, "notice")).toBeUndefined();
+		expect(resolveRuntimeSoftPhase(-1, "notice")).toBeUndefined();
+	});
+
+	it("is disabled in off mode however large the cap", () => {
+		expect(resolveRuntimeSoftPhase(3_600_000, "off")).toBeUndefined();
+	});
+
+	it("drops only the notice threshold in yield mode", () => {
+		const phase = resolveRuntimeSoftPhase(3_600_000, "yield");
+		expect(phase).toEqual({ noticeAtMs: undefined, stopAtMs: 3_240_000 });
 	});
 
 	it("keeps both thresholds inside the run for long caps", () => {
 		// 1 hour: the fractional windows (25 % notice / 10 % stop) exceed the
 		// 30 s / 15 s floors, so they set the thresholds.
-		const phase = resolveRuntimeSoftPhase(3_600_000);
+		const phase = resolveRuntimeSoftPhase(3_600_000, "notice");
 		expect(phase).toEqual({ noticeAtMs: 2_700_000, stopAtMs: 3_240_000 });
 	});
 
@@ -354,7 +381,7 @@ describe("resolveRuntimeSoftPhase", () => {
 		// 10 s: the fixed windows would swallow the whole run, so the fractional
 		// ceilings (0.75 / 0.5) apply and the ordering notice → stop → deadline
 		// is preserved.
-		const phase = resolveRuntimeSoftPhase(10_000);
+		const phase = resolveRuntimeSoftPhase(10_000, "notice");
 		expect(phase).toEqual({ noticeAtMs: 2_500, stopAtMs: 5_000 });
 	});
 });
