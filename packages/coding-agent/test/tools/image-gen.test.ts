@@ -281,24 +281,35 @@ describe("imageGenTool", () => {
 
 	it("routes Codex subscription generations and edits through the Images API", async () => {
 		setImageProviderOrder(["openai-codex"]);
+		const pngBytes = Buffer.from(
+			"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+			"base64",
+		);
+		const webpBytes = Buffer.from(await new Bun.Image(pngBytes).webp({ quality: 90 }).bytes());
+		const jpegBytes = Buffer.from(await new Bun.Image(pngBytes).jpeg({ quality: 90 }).bytes());
+		const responseImages = [pngBytes, webpBytes, jpegBytes];
+		const declaredFormats = ["jpeg", "png", "webp"] as const;
 		const requests: Array<{ url: string; headers: Headers; body: Record<string, unknown> }> = [];
 		const fetchMock: typeof fetch = (async (input: string | URL | Request, init?: RequestInit) => {
 			const url = input.toString();
-			const isEdit = url.endsWith("/images/edits");
-			requests.push({
-				url,
-				headers: new Headers(init?.headers),
-				body: JSON.parse(String(init?.body)) as Record<string, unknown>,
-			});
+			const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			const responseIndex = requests.length;
+			requests.push({ url, headers: new Headers(init?.headers), body });
 			return new Response(
 				JSON.stringify({
 					created: 1,
-					background: isEdit ? "transparent" : "auto",
-					data: [{ b64_json: Buffer.from(isEdit ? "edited-png" : "generated-png").toString("base64") }],
-					output_format: "png",
+					background: body.background,
+					data: [{ b64_json: responseImages[responseIndex]?.toString("base64") }],
+					output_format: declaredFormats[responseIndex],
 					quality: "medium",
-					size: isEdit ? "1254x1254" : "1024x1024",
-					usage: { input_tokens: 3, output_tokens: 4, total_tokens: 7 },
+					size: url.endsWith("/images/edits") ? "1254x1254" : "1024x1024",
+					usage: {
+						input_tokens: 3,
+						input_tokens_details: { image_tokens: 2, text_tokens: 1 },
+						output_tokens: 4,
+						output_tokens_details: { image_tokens: 4, text_tokens: 0 },
+						total_tokens: 7,
+					},
 				}),
 				{ status: 200, headers: { "content-type": "application/json" } },
 			);
@@ -316,17 +327,27 @@ describe("imageGenTool", () => {
 			{
 				subject: "make the reference cyan",
 				background: "transparent",
-				input: [{ data: Buffer.from("reference").toString("base64"), mime_type: "image/png" }],
+				input: [{ data: pngBytes.toString("base64"), mime_type: "image/png" }],
 			},
 			undefined,
 			ctx,
 		);
-		generatedImagePaths.push(...(generated.details?.imagePaths ?? []), ...(edited.details?.imagePaths ?? []));
+		const opaque = await imageGenTool.execute(
+			"call-codex-opaque",
+			{ subject: "an opaque icon", background: "opaque" },
+			undefined,
+			ctx,
+		);
+		generatedImagePaths.push(
+			...(generated.details?.imagePaths ?? []),
+			...(edited.details?.imagePaths ?? []),
+			...(opaque.details?.imagePaths ?? []),
+		);
 
-		expect(requests).toHaveLength(2);
+		expect(requests).toHaveLength(3);
 		expect(requests[0]?.url).toBe("https://chatgpt.com/backend-api/codex/images/generations");
 		expect(requests[0]?.headers.get("chatgpt-account-id")).toBe("acct-codex-1");
-		expect(requests[0]?.headers.get("x-codex-image-turn-id")).toBe("call-codex-generate");
+		expect(requests[0]?.headers.has("x-codex-image-turn-id")).toBe(false);
 		expect(requests[0]?.body).toMatchObject({
 			model: "gpt-image-2",
 			prompt: "a neon skyline.",
@@ -337,24 +358,33 @@ describe("imageGenTool", () => {
 
 		expect(requests[1]?.url).toBe("https://chatgpt.com/backend-api/codex/images/edits");
 		expect(requests[1]?.headers.get("chatgpt-account-id")).toBe("acct-codex-1");
-		expect(requests[1]?.headers.get("x-codex-image-turn-id")).toBe("call-codex-edit");
+		expect(requests[1]?.headers.has("x-codex-image-turn-id")).toBe(false);
 		expect(requests[1]?.body).toMatchObject({
 			model: "gpt-image-2",
 			prompt: "make the reference cyan.",
 			background: "transparent",
 			quality: "auto",
 			size: "auto",
-			images: [{ image_url: `data:image/png;base64,${Buffer.from("reference").toString("base64")}` }],
+			images: [{ image_url: `data:image/png;base64,${pngBytes.toString("base64")}` }],
 		});
+		expect(requests[2]?.body).toMatchObject({ background: "opaque" });
 
+		const expectedUsage = {
+			input_tokens: 3,
+			input_tokens_details: { image_tokens: 2, text_tokens: 1 },
+			output_tokens: 4,
+			output_tokens_details: { image_tokens: 4, text_tokens: 0 },
+			total_tokens: 7,
+		};
 		expect(generated.details).toMatchObject({
 			provider: "openai-codex",
 			model: "gpt-image-2",
 			background: "auto",
 			quality: "medium",
 			size: "1024x1024",
-			outputFormat: "png",
+			outputFormat: "jpeg",
 			imageCount: 1,
+			usage: expectedUsage,
 		});
 		expect(edited.details).toMatchObject({
 			provider: "openai-codex",
@@ -364,14 +394,27 @@ describe("imageGenTool", () => {
 			size: "1254x1254",
 			outputFormat: "png",
 			imageCount: 1,
+			usage: expectedUsage,
 		});
+		expect(opaque.details).toMatchObject({
+			provider: "openai-codex",
+			model: "gpt-image-2",
+			background: "opaque",
+			outputFormat: "webp",
+			imageCount: 1,
+			usage: expectedUsage,
+		});
+
 		const generatedPath = generated.details?.imagePaths[0];
 		const editedPath = edited.details?.imagePaths[0];
-		if (!generatedPath || !editedPath) throw new Error("Expected generated image paths");
+		const opaquePath = opaque.details?.imagePaths[0];
+		if (!generatedPath || !editedPath || !opaquePath) throw new Error("Expected generated image paths");
 		expect(generatedPath.endsWith(".png")).toBe(true);
-		expect(editedPath.endsWith(".png")).toBe(true);
-		expect(await Bun.file(generatedPath).bytes()).toEqual(Buffer.from("generated-png"));
-		expect(await Bun.file(editedPath).bytes()).toEqual(Buffer.from("edited-png"));
+		expect(editedPath.endsWith(".webp")).toBe(true);
+		expect(opaquePath.endsWith(".jpg")).toBe(true);
+		expect(await Bun.file(generatedPath).bytes()).toEqual(pngBytes);
+		expect(await Bun.file(editedPath).bytes()).toEqual(webpBytes);
+		expect(await Bun.file(opaquePath).bytes()).toEqual(jpegBytes);
 	});
 
 	it("rejects Codex subscription edits with more than five input images", async () => {
@@ -542,20 +585,32 @@ describe("imageGenTool", () => {
 	it("sends Codex hosted image requests with opaque proxy bearer keys", async () => {
 		let requestUrl: string | undefined;
 		let requestHeaders: Headers | undefined;
+		const requestBodies: Array<Record<string, unknown>> = [];
 
 		const fetchMock: typeof fetch = (async (input: string | URL | Request, init?: RequestInit) => {
 			requestUrl = input.toString();
 			requestHeaders = new Headers(init?.headers);
+			requestBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
 			return new Response(
-				JSON.stringify({
-					created: 1,
-					background: "auto",
-					data: [{ b64_json: Buffer.from("fake-codex-png").toString("base64") }],
-					output_format: "png",
-					quality: "medium",
-					size: "auto",
-				}),
-				{ status: 200, headers: { "content-type": "application/json" } },
+				[
+					"event: response.output_item.done",
+					`data: ${JSON.stringify({
+						type: "response.output_item.done",
+						item: {
+							type: "image_generation_call",
+							result: Buffer.from("fake-codex-webp").toString("base64"),
+							status: "completed",
+						},
+					})}`,
+					"",
+					"event: response.completed",
+					`data: ${JSON.stringify({
+						type: "response.completed",
+						response: { output: [], status: "completed", error: null },
+					})}`,
+					"",
+				].join("\n"),
+				{ status: 200, headers: { "content-type": "text/event-stream" } },
 			);
 		}) as unknown as typeof fetch;
 
@@ -585,18 +640,35 @@ describe("imageGenTool", () => {
 		};
 
 		const result = await imageGenTool.execute("call-codex-opaque", { subject: "a cat" }, undefined, ctx);
-		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+		const manyInputResult = await imageGenTool.execute(
+			"call-codex-opaque-edit",
+			{
+				subject: "combine the references",
+				input: Array.from({ length: 6 }, (_, index) => ({
+					data: Buffer.from(`reference-${index}`).toString("base64"),
+					mime_type: "image/png",
+				})),
+			},
+			undefined,
+			ctx,
+		);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []), ...(manyInputResult.details?.imagePaths ?? []));
 
-		expect(requestUrl).toBe("https://example-proxy.invalid/backend-api/codex/images/generations");
+		expect(requestUrl).toBe("https://example-proxy.invalid/backend-api/codex/responses");
 		expect(requestHeaders?.get("authorization")).toBe("Bearer opaque-proxy-key");
 		expect(requestHeaders?.has("chatgpt-account-id")).toBe(false);
 		expect(requestHeaders?.has("x-openai-internal-codex-residency")).toBe(false);
-		expect(requestHeaders?.has("OpenAI-Beta")).toBe(false);
+		expect(requestHeaders?.get("OpenAI-Beta")).toBe("responses=experimental");
 		expect(requestHeaders?.get("originator")).toBe("pi");
-		expect(requestHeaders?.get("x-codex-image-turn-id")).toBe("call-codex-opaque");
+		expect(requestHeaders?.has("x-codex-image-turn-id")).toBe(false);
+		const secondInput = requestBodies[1]?.input as Array<{ content?: Array<Record<string, unknown>> }> | undefined;
+		const secondContent = secondInput?.[0]?.content ?? [];
+		expect(secondContent.filter(part => part.type === "input_image")).toHaveLength(6);
 		expect(result.details?.provider).toBe("openai-codex");
-		expect(result.details?.model).toBe("gpt-image-2");
+		expect(result.details?.model).toBe("gpt-5.5-codex");
 		expect(result.details?.imageCount).toBe(1);
+		expect(manyInputResult.details?.model).toBe("gpt-5.5-codex");
+		expect(manyInputResult.details?.imageCount).toBe(1);
 	});
 
 	it("adds Codex account and residency headers from bearer token claims", async () => {
