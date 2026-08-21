@@ -121,3 +121,5 @@ jobs:
             args+=(-f sha="$old_sha")
           fi
           gh api "${args[@]}" >/dev/null
+
+# Updating this file intentionally triggers the one-time repair workflow.
