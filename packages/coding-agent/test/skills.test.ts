@@ -464,10 +464,6 @@ enabled: false
 	});
 
 	describe("opt-in skills", () => {
-		type OptInSkillsSettings = NonNullable<Parameters<typeof loadSkills>[0]> & {
-			optInSkills?: string[];
-		};
-
 		let tempSkillsDir: string;
 
 		beforeEach(async () => {
@@ -499,7 +495,7 @@ enabled: false
 		});
 
 		async function observeSkills(optInSkills?: string[]) {
-			const skillsSettings: OptInSkillsSettings = {
+			const skillsSettings: NonNullable<Parameters<typeof loadSkills>[0]> = {
 				...DISABLE_ALL_BUILTIN_SKILLS,
 				customDirectories: [tempSkillsDir],
 				enableSkillCommands: true,
