@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { MCPManager } from "../src/mcp/manager";
+import type { MCPServerConnection } from "../src/mcp/types";
 import {
 	executeServerTool,
 	inMemoryToolCache,
@@ -202,7 +203,7 @@ describe("MCP lazy lifecycle: idle close race", () => {
 		const failedConfig = lazyConfig({ lifecycle: "eager", crashBeforeInit: true, spawnLog });
 		const replacementConfig = lazyConfig({ lifecycle: "eager", crashBeforeInit: true, spawnLog });
 		const manager = new MCPManager(workDir);
-		let reconnecting: Promise<Awaited<ReturnType<typeof manager.reconnectServer>>> | undefined;
+		let reconnecting: Promise<MCPServerConnection | null> | undefined;
 		try {
 			await manager.connectServers({ lazy: initialConfig }, {});
 			manager.setAuthHandler(async () => failedConfig);
@@ -268,7 +269,7 @@ describe("MCP lazy lifecycle: idle close race", () => {
 		const failedConfig = lazyConfig({ lifecycle: "eager", crashBeforeInit: true, spawnLog });
 		const replacementConfig = lazyConfig({ lifecycle: "eager", spawnLog });
 		const manager = new MCPManager(workDir);
-		let staleReconnect: Promise<Awaited<ReturnType<typeof manager.reconnectServer>>> | undefined;
+		let staleReconnect: Promise<MCPServerConnection | null> | undefined;
 		try {
 			await manager.connectServers({ lazy: initialConfig }, {});
 			manager.setAuthHandler(async () => failedConfig);
