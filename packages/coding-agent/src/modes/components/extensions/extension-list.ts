@@ -10,7 +10,13 @@ import { isProviderEnabled } from "../../../discovery";
 import { theme } from "../../../modes/theme/theme";
 import { matchesSelectDown, matchesSelectUp } from "../../utils/keybinding-matchers";
 import { clampSelection, contentRowWidth, renderScrollableList, searchableChar } from "../selector-helpers";
-import { formatExtensionListHint, liveToolsForExtension, type ToolRuntimeSource } from "./inspector-model";
+import {
+	formatExtensionListHint,
+	joinListHints,
+	liveToolsForExtension,
+	projectListHint,
+	type ToolRuntimeSource,
+} from "./inspector-model";
 import {
 	formatMcpListHint,
 	isDiscoveredMcpServer,
@@ -251,7 +257,7 @@ export class ExtensionList implements Component {
 		line += namePadded;
 
 		const hint = mcpSnap
-			? formatMcpListHint(mcpSnap)
+			? joinListHints(formatMcpListHint(mcpSnap), projectListHint(ext))
 			: formatExtensionListHint(ext, ext.kind === "tool" ? liveToolsForExtension(ext, this.#toolSource) : []);
 		if (hint) {
 			const triggerStyle = effectivelyDisabled

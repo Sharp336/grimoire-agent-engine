@@ -1,5 +1,6 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { ExtensionList } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/extension-list";
+import { parseToolFileHeader } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/inspector-model";
 import { InspectorPanel } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/inspector-panel";
 import type { Extension } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/types";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -8,8 +9,12 @@ beforeAll(async () => {
 	await initTheme(false);
 });
 
-function source(): Extension["source"] {
-	return { provider: "native", providerName: "OMP (Project)", level: "project" };
+function userSource(): Extension["source"] {
+	return { provider: "native", providerName: "OMP (User)", level: "user" };
+}
+
+function projectSource(name = "personal"): Extension["source"] {
+	return { provider: "native", providerName: `OMP (${name})`, level: "project" };
 }
 
 function systemdExtension(): Extension {
@@ -19,13 +24,13 @@ function systemdExtension(): Extension {
 		name: "systemd",
 		displayName: "systemd",
 		description: "systemd custom tool",
-		path: "/home/sf/worlds/base/tools/systemd.ts",
-		source: source(),
+		path: "/home/sf/.omp/agent/tools/systemd.ts",
+		source: userSource(),
 		state: "active",
 		raw: {
 			name: "systemd",
 			description: "systemd custom tool",
-			path: "/home/sf/worlds/base/tools/systemd.ts",
+			path: "/home/sf/.omp/agent/tools/systemd.ts",
 		},
 	};
 }
@@ -82,7 +87,7 @@ function toolExtension(): Extension {
 		displayName: "gmail_send",
 		description: "gmail_send custom tool",
 		path: "/home/sf/worlds/personal/.omp/tools/gmail_send.ts",
-		source: source(),
+		source: projectSource(),
 		state: "active",
 		raw: {
 			name: "gmail_send",
@@ -101,7 +106,7 @@ function ruleExtension(): Extension {
 		description: undefined,
 		trigger: "always",
 		path: "/home/sf/worlds/base/rules/orchestration.md",
-		source: source(),
+		source: projectSource("base"),
 		state: "active",
 		raw: {
 			name: "orchestration",
@@ -119,7 +124,7 @@ function commandExtension(): Extension {
 		displayName: "triage",
 		trigger: "/triage",
 		path: "/home/sf/worlds/_template/.omp/commands/triage.md",
-		source: source(),
+		source: userSource(),
 		state: "active",
 		raw: {
 			name: "triage",
@@ -136,8 +141,8 @@ function skillExtension(): Extension {
 		name: "hcom",
 		displayName: "hcom",
 		description: "Named agent sessions that mail, wake, and resume across processes.",
-		path: "/home/sf/worlds/base/skills/hcom/SKILL.md",
-		source: source(),
+		path: "/home/sf/.omp/agent/skills/hcom/SKILL.md",
+		source: userSource(),
 		state: "active",
 		raw: {
 			name: "hcom",
@@ -146,6 +151,27 @@ function skillExtension(): Extension {
 				name: "hcom",
 				description: "Named agent sessions that mail, wake, and resume across processes.",
 				hide: true,
+			},
+		},
+	};
+}
+
+function listedSkillExtension(): Extension {
+	return {
+		id: "skill:fresh-drive",
+		kind: "skill",
+		name: "fresh-drive",
+		displayName: "fresh-drive",
+		description: "Drive Fresh terminal IDE via CLI.",
+		path: "/home/sf/.omp/agent/skills/fresh-drive/SKILL.md",
+		source: userSource(),
+		state: "active",
+		raw: {
+			name: "fresh-drive",
+			content: "# fresh-drive\n\nshared surface.",
+			frontmatter: {
+				name: "fresh-drive",
+				description: "Drive Fresh terminal IDE via CLI.",
 			},
 		},
 	};
@@ -204,7 +230,7 @@ describe("tool inspector", () => {
 		expect(text.indexOf("Active")).toBeLessThan(text.indexOf("Arguments"));
 	});
 
-	test("list hint uses live hidden/discoverable over a placeholder trigger", () => {
+	test("list hint uses live hidden over a placeholder trigger", () => {
 		const list = new ExtensionList([toolExtension()], {
 			toolSource: {
 				getLiveTool: () => ({
@@ -218,23 +244,55 @@ describe("tool inspector", () => {
 		const text = Bun.stripANSI(list.render(80).join("\n"));
 		expect(text).toContain("gmail_send");
 		expect(text).toContain("hidden");
+		expect(text).toContain("personal");
+		expect(text).not.toContain("discoverable");
+		expect(text).not.toContain("9 args");
+	});
+
+	test("project-only tools show the project name instead of an arg count", () => {
+		const list = new ExtensionList([toolExtension()], {
+			toolSource: {
+				getLiveTool: () => ({
+					name: "gmail_send",
+					parameters: {
+						type: "object",
+						properties: { to: { type: "string" }, subject: { type: "string" } },
+					},
+				}),
+			},
+		});
+		list.setFocused(true);
+		const text = Bun.stripANSI(list.render(80).join("\n"));
+		expect(text).toContain("personal");
+		expect(text).not.toContain("args");
 	});
 
 	test("joins a multi-export factory by filename prefix without authoring changes", () => {
 		const panel = new InspectorPanel();
 		panel.setToolSource(systemdSource());
 		panel.setExtension(systemdExtension());
-		const text = render(panel);
-		expect(text).toContain("systemd_inspect");
-		expect(text).toContain("systemd_control");
-		expect(text).toContain("systemd_author");
-		expect(text).toContain("Read systemd state");
-		expect(text).not.toContain("systemd custom tool");
-		expect(text).not.toContain("(no arguments)");
+		const collapsed = render(panel);
+		expect(collapsed).toContain("systemd_inspect");
+		expect(collapsed).toContain("systemd_control");
+		expect(collapsed).toContain("systemd_author");
+		expect(collapsed).toContain("Read systemd state");
+		expect(collapsed).toContain("1 arg");
+		expect(collapsed).toMatch(/args \(.* to expand\)/);
+		expect(collapsed).not.toContain("systemd custom tool");
+		expect(collapsed).not.toContain("(no arguments)");
+		expect(collapsed).not.toMatch(/action\s+string/);
+
+		panel.toggleExpanded();
+		const expanded = render(panel);
+		expect(expanded).toContain("action");
+		expect(expanded).toContain("Required");
+		expect(expanded).not.toMatch(/args \(.* to expand\)/);
 
 		const list = new ExtensionList([systemdExtension()], { toolSource: systemdSource() });
 		list.setFocused(true);
-		expect(Bun.stripANSI(list.render(80).join("\n"))).toContain("3 tools");
+		const text = Bun.stripANSI(list.render(80).join("\n"));
+		expect(text).toContain("3 tools");
+		expect(text).not.toContain("args");
 	});
 });
 
@@ -266,14 +324,51 @@ describe("command inspector", () => {
 });
 
 describe("skill inspector", () => {
-	test("surfaces opt-in discovery and instruction preview", () => {
+	test("puts hidden discovery under Active and on the list row", () => {
 		const panel = new InspectorPanel();
 		panel.setExtension(skillExtension());
 		const text = render(panel);
 		expect(text).toContain("Named agent sessions");
-		expect(text).toContain("opt-in");
+		expect(text).toContain("hidden");
+		expect(text).toContain("omitted from the system-prompt skill list");
 		expect(text).toContain("Instruction");
 		expect(text).toContain("4-letter name");
+		expect(text).not.toContain("opt-in");
+		expect(text).not.toContain("listed");
+		expect(text.indexOf("Active")).toBeLessThan(text.indexOf("hidden"));
+		expect(text.indexOf("hidden")).toBeLessThan(text.indexOf("Origin:"));
+
+		const list = new ExtensionList([skillExtension()]);
+		list.setFocused(true);
+		expect(Bun.stripANSI(list.render(80).join("\n"))).toContain("hidden");
+	});
+
+	test("listed skills stay unmarked in the list and under Active", () => {
+		const panel = new InspectorPanel();
+		panel.setExtension(listedSkillExtension());
+		const text = render(panel);
+		expect(text).toContain("Active");
+		expect(text).not.toContain("listed");
+		expect(text).not.toContain("hidden");
+		expect(text.indexOf("Active")).toBeLessThan(text.indexOf("Origin:"));
+
+		const list = new ExtensionList([listedSkillExtension()]);
+		list.setFocused(true);
+		const row = Bun.stripANSI(list.render(80).join("\n"));
+		expect(row).toContain("fresh-drive");
+		expect(row).not.toContain("listed");
+	});
+
+	test("project-only skills show the project name in the list hint", () => {
+		const list = new ExtensionList([
+			{
+				...listedSkillExtension(),
+				path: "/home/sf/worlds/personal/.omp/skills/gog-google/SKILL.md",
+				source: projectSource(),
+			},
+		]);
+		list.setFocused(true);
+		expect(Bun.stripANSI(list.render(80).join("\n"))).toContain("personal");
 	});
 });
 
@@ -340,10 +435,28 @@ describe("inspector wrap and fill", () => {
 			},
 		});
 		const collapsed = render(panel);
+		const lines = collapsed.split("\n");
+		expect(lines.length).toBeLessThanOrEqual(40);
 		expect(collapsed).toContain("line 1");
-		expect(collapsed).toContain("line 20");
 		expect(collapsed).not.toContain("line 40");
 		expect(collapsed).toMatch(/more \(.* to expand\)/);
+	});
+});
+
+describe("tool file header", () => {
+	test("parses the leading JSDoc and drops symlink footnotes", () => {
+		const description = parseToolFileHeader(`/**
+ * cloak — bind a leased Cloak browser and drive the leased tab.
+ *
+ * Hidden unless an agent tools: list (or --tools) names it.
+ *
+ * Symlink: ~/.omp/agent/tools/cloak.ts → this file.
+ */
+export default function cloakTool() {}
+`);
+		expect(description).toContain("cloak — bind a leased Cloak browser");
+		expect(description).toContain("Hidden unless an agent tools");
+		expect(description).not.toContain("Symlink:");
 	});
 });
 

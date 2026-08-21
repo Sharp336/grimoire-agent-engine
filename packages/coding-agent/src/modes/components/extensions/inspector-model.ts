@@ -4,6 +4,7 @@
  * Discovery `Extension.raw` stays the capability record. Live session tools
  * are joined here at render time — the same seam as {@link snapshotMcpRuntime}.
  */
+import * as fs from "node:fs";
 import { arkToWireSchema, isArkSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { parseFrontmatter } from "@oh-my-pi/pi-utils";
 import { parseRuleConditionAndScope } from "../../../capability/rule";
@@ -41,6 +42,31 @@ export interface CommandPreview {
 export function isPlaceholderToolDescription(name: string, description: string | undefined): boolean {
 	if (!description || description.trim().length === 0) return true;
 	return description === `${name} custom tool`;
+}
+
+/** First JSDoc on a custom-tool file, minus symlink footnotes. */
+export function parseToolFileHeader(source: string): string | undefined {
+	const match = source.match(/^\s*\/\*\*([\s\S]*?)\*\//);
+	if (!match) return undefined;
+	const body = match[1]
+		.split("\n")
+		.map(line => line.replace(/^\s*\*\s?/, "").trimEnd())
+		.join("\n")
+		.trim();
+	const paragraphs = body
+		.split(/\n\s*\n/)
+		.map(paragraph => paragraph.trim())
+		.filter(paragraph => paragraph.length > 0 && !/^symlink:/i.test(paragraph));
+	return paragraphs.length > 0 ? paragraphs.join("\n\n") : undefined;
+}
+
+export function toolFileHeaderDescription(filePath: string | undefined): string | undefined {
+	if (!filePath) return undefined;
+	try {
+		return parseToolFileHeader(fs.readFileSync(filePath, "utf8").slice(0, 4096));
+	} catch {
+		return undefined;
+	}
 }
 
 export function commandPreview(content: string | undefined): CommandPreview {
@@ -144,12 +170,6 @@ export function toolParamsFromSchema(schema: unknown): ToolParamView[] {
 	return params;
 }
 
-export function countToolParams(schema: unknown): number | undefined {
-	const properties = propertiesFromSchema(schema);
-	if (!properties) return undefined;
-	return Object.keys(properties).length;
-}
-
 export function liveToolsForExtension(ext: Extension, source: ToolRuntimeSource | undefined): LiveToolRecord[] {
 	if (!source) return [];
 	const exact = source.getLiveTool(ext.name);
@@ -163,28 +183,46 @@ export function liveToolsForExtension(ext: Extension, source: ToolRuntimeSource 
 export function liveToolDetail(live: LiveToolRecord | undefined): string | undefined {
 	if (!live) return undefined;
 	if (live.hidden) return "hidden";
-	if (live.loadMode === "discoverable") return "discoverable";
 	return undefined;
 }
 
+/** Project-local items only — user/native/global rows stay unlabeled. */
+export function projectListHint(ext: Extension): string | undefined {
+	if (ext.source.level !== "project") return undefined;
+	const worlds = ext.path.match(/(?:^|\/)worlds\/([^/]+)\//)?.[1];
+	if (worlds && worlds !== "_template") return worlds;
+	const omp = ext.path.match(/(?:^|\/)([^/]+)\/\.omp\//)?.[1];
+	if (omp && omp !== "_template") return omp;
+	return undefined;
+}
+
+export function joinListHints(...parts: Array<string | undefined>): string | undefined {
+	const hints = parts.filter((part): part is string => typeof part === "string" && part.length > 0);
+	return hints.length > 0 ? hints.join(" · ") : undefined;
+}
+
 export function formatExtensionListHint(ext: Extension, lives: LiveToolRecord[] = []): string | undefined {
+	let detail: string | undefined;
 	switch (ext.kind) {
 		case "tool": {
-			if (lives.length > 1) return `${lives.length} tools`;
-			const live = lives[0];
-			const liveHint = liveToolDetail(live);
-			if (liveHint) return liveHint;
-			const raw = asRecord(ext.raw);
-			const count = countToolParams(live?.parameters ?? raw?.parameters ?? raw?.inputSchema);
-			if (count === undefined) return ext.trigger;
-			if (count === 0) return "no args";
-			return `${count} arg${count === 1 ? "" : "s"}`;
+			if (lives.length > 1) {
+				detail = `${lives.length} tools`;
+				if (lives.every(tool => tool.hidden)) detail = `hidden · ${detail}`;
+			} else if (lives[0]?.hidden) {
+				detail = "hidden";
+			}
+			break;
 		}
+		case "skill":
+			detail = skillInspectorData(ext).hidden ? "hidden" : undefined;
+			break;
 		case "slash-command":
-			return ext.trigger ?? `/${ext.name}`;
+			detail = ext.trigger ?? `/${ext.name}`;
+			break;
 		default:
-			return ext.trigger;
+			detail = ext.trigger;
 	}
+	return joinListHints(detail, projectListHint(ext));
 }
 
 export function toolInspectorData(
@@ -200,8 +238,11 @@ export function toolInspectorData(
 	if (lives.length > 1) {
 		const raw = asRecord(ext.raw);
 		const discovered = raw ? stringField(raw, "description") : ext.description;
+		const description = isPlaceholderToolDescription(ext.name, discovered)
+			? toolFileHeaderDescription(ext.path)
+			: discovered;
 		return {
-			description: isPlaceholderToolDescription(ext.name, discovered) ? undefined : discovered,
+			description,
 			params: [],
 			runtimeDetail: `${lives.length} tools`,
 			factory: lives,
@@ -213,7 +254,7 @@ export function toolInspectorData(
 	const description =
 		live?.description && (isPlaceholderToolDescription(ext.name, discovered) || !discovered)
 			? live.description
-			: (discovered ?? live?.description);
+			: (discovered ?? live?.description ?? toolFileHeaderDescription(ext.path));
 	return {
 		label: live?.label && live.label !== ext.displayName ? live.label : undefined,
 		description,
@@ -271,7 +312,7 @@ export function skillInspectorData(ext: Extension): {
 	const alwaysApply = frontmatter.alwaysApply === true;
 	const globs = stringArray(frontmatter.globs) ?? stringArray(raw.globs);
 	let runtimeDetail: string | undefined;
-	if (hidden) runtimeDetail = "opt-in";
+	if (hidden) runtimeDetail = "hidden";
 	else if (alwaysApply) runtimeDetail = "always";
 	else if (globs) runtimeDetail = globs.join(", ");
 	return {

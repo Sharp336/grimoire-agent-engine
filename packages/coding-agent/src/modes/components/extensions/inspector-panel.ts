@@ -19,6 +19,7 @@ import {
 	promptInspectorData,
 	ruleInspectorData,
 	skillInspectorData,
+	type ToolParamView,
 	type ToolRuntimeSource,
 	toolInspectorData,
 	toolParamsFromSchema,
@@ -245,26 +246,22 @@ export class InspectorPanel implements Component {
 				}
 				if (tool.description) this.#pushWrapped(surface, tool.description, width, "    ");
 				const params = toolParamsFromSchema(tool.parameters);
-				if (params.length > 0) {
+				if (this.#expanded) {
+					this.#pushParams(surface, params, width, "    ");
+				} else if (params.length > 0) {
 					surface.push(`    ${theme.fg("dim", `${params.length} arg${params.length === 1 ? "" : "s"}`)}`);
 				}
+				surface.push("");
+			}
+			if (!this.#expanded && data.factory.some(tool => toolParamsFromSchema(tool.parameters).length > 0)) {
+				surface.push(theme.fg("dim", `  … args (${expandKeyHint()} to expand)`));
 				surface.push("");
 			}
 			return { description: data.description, surface, contents: [], config: [] };
 		}
 		surface.push(theme.fg("muted", "Arguments"));
 		surface.push(this.#rule());
-		if (data.params.length === 0) {
-			surface.push(theme.fg("dim", "  (no arguments)"));
-		} else {
-			for (const param of data.params) {
-				const nameCol = theme.fg("accent", param.name.padEnd(12));
-				const typeCol = theme.fg("muted", param.type.padEnd(10));
-				const reqCol = param.required ? theme.fg("warning", param.flag) : theme.fg("dim", param.flag);
-				surface.push(`  ${nameCol} ${typeCol} ${reqCol}`);
-				if (param.description) this.#pushWrapped(surface, param.description, width, "    ");
-			}
-		}
+		this.#pushParams(surface, data.params, width, "  ");
 		surface.push("");
 		return {
 			title: data.label,
@@ -303,19 +300,23 @@ export class InspectorPanel implements Component {
 	#skillKind(ext: Extension): KindView {
 		const width = this.#width;
 		const data = skillInspectorData(ext);
-		const surface: string[] = [];
-		surface.push(theme.fg("muted", "Discovery"));
-		surface.push(this.#rule());
+		const runtimeExtra: string[] = [];
 		if (data.hidden) {
-			surface.push(`  ${theme.fg("warning", "opt-in")}  omitted from the system-prompt listing`);
-		} else {
-			surface.push(`  ${theme.fg("accent", "listed")}  available for model discovery`);
+			this.#pushWrapped(
+				runtimeExtra,
+				`${theme.fg("warning", "hidden")}    omitted from the system-prompt skill list`,
+				width,
+				"  ",
+			);
+			runtimeExtra.push(this.#rule());
 		}
+		const surface: string[] = [];
 		if (data.alwaysApply) surface.push(`  ${theme.fg("accent", "always apply")}`);
 		if (data.globs) this.#pushLabeled(surface, "globs", data.globs.join(", "), width);
-		surface.push("");
+		if (surface.length > 0) surface.push("");
 		return {
 			description: data.description,
+			runtimeExtra: runtimeExtra.length > 0 ? runtimeExtra : undefined,
 			surface,
 			contents: [],
 			preview: { heading: "Instruction", text: data.content },
@@ -419,6 +420,7 @@ export class InspectorPanel implements Component {
 			return;
 		}
 		lines.push(this.#getStatusBadge(ext.state, ext.disabledReason, ext.shadowedBy));
+		if (kind.runtimeExtra) lines.push(...kind.runtimeExtra);
 		lines.push("");
 	}
 
@@ -471,6 +473,20 @@ export class InspectorPanel implements Component {
 		for (const item of shown.slice(1)) this.#pushWrapped(lines, item, width, indent);
 	}
 
+	#pushParams(lines: string[], params: ToolParamView[], width: number, indent: string): void {
+		if (params.length === 0) {
+			lines.push(`${indent}${theme.fg("dim", "(no arguments)")}`);
+			return;
+		}
+		for (const param of params) {
+			const nameCol = theme.fg("accent", param.name.padEnd(12));
+			const typeCol = theme.fg("muted", param.type.padEnd(10));
+			const reqCol = param.required ? theme.fg("warning", param.flag) : theme.fg("dim", param.flag);
+			lines.push(`${indent}${nameCol} ${typeCol} ${reqCol}`);
+			if (param.description) this.#pushWrapped(lines, param.description, width, `${indent}  `);
+		}
+	}
+
 	#pushPreview(lines: string[], text: string, width: number, budget: number): void {
 		if (!text) {
 			lines.push(theme.fg("dim", "  (empty)"));
@@ -483,11 +499,13 @@ export class InspectorPanel implements Component {
 			if (folded.length === 0) wrapped.push("");
 			else wrapped.push(...folded);
 		}
-		const shown = this.#expanded ? wrapped : wrapped.slice(0, budget);
-		lines.push(...shown);
-		if (!this.#expanded && wrapped.length > budget) {
-			lines.push(theme.fg("dim", `  … ${wrapped.length - budget} more (${expandKeyHint()} to expand)`));
+		if (this.#expanded || wrapped.length <= budget) {
+			lines.push(...wrapped);
+			return;
 		}
+		const shownBudget = Math.max(1, budget - 1);
+		lines.push(...wrapped.slice(0, shownBudget));
+		lines.push(theme.fg("dim", `  … ${wrapped.length - shownBudget} more (${expandKeyHint()} to expand)`));
 	}
 
 	#highlightMarkdown(line: string): string {
