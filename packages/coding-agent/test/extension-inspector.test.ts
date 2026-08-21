@@ -243,8 +243,7 @@ describe("tool inspector", () => {
 		list.setFocused(true);
 		const text = Bun.stripANSI(list.render(80).join("\n"));
 		expect(text).toContain("gmail_send");
-		expect(text).toContain("hidden");
-		expect(text).toContain("personal");
+		expect(text).toContain("hidden · personal");
 		expect(text).not.toContain("discoverable");
 		expect(text).not.toContain("9 args");
 	});
@@ -288,10 +287,19 @@ describe("tool inspector", () => {
 		expect(expanded).toContain("Required");
 		expect(expanded).not.toMatch(/args \(.* to expand\)/);
 
-		const list = new ExtensionList([systemdExtension()], { toolSource: systemdSource() });
+		const list = new ExtensionList(
+			[
+				{
+					...systemdExtension(),
+					path: "/home/sf/worlds/personal/.omp/tools/systemd.ts",
+					source: projectSource(),
+				},
+			],
+			{ toolSource: systemdSource() },
+		);
 		list.setFocused(true);
 		const text = Bun.stripANSI(list.render(80).join("\n"));
-		expect(text).toContain("3 tools");
+		expect(text).toContain("3 tools · personal");
 		expect(text).not.toContain("args");
 	});
 });
@@ -369,6 +377,28 @@ describe("skill inspector", () => {
 		]);
 		list.setFocused(true);
 		expect(Bun.stripANSI(list.render(80).join("\n"))).toContain("personal");
+	});
+
+	test("project-only context files show the project name without repeating project", () => {
+		const list = new ExtensionList([
+			{
+				id: "context-file:project:AGENTS.md",
+				kind: "context-file",
+				name: "AGENTS.md",
+				displayName: "AGENTS.md",
+				description: "Project-level context",
+				trigger: "project",
+				path: "/home/sf/worlds/personal/AGENTS.md",
+				source: projectSource(),
+				state: "active",
+				raw: { level: "project" },
+			},
+		]);
+		list.setFocused(true);
+		const text = Bun.stripANSI(list.render(80).join("\n"));
+		expect(text).toContain("personal");
+		expect(text).not.toContain("project · personal");
+		expect(text).not.toMatch(/AGENTS\.md\s+project\b/);
 	});
 });
 

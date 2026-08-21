@@ -219,6 +219,8 @@ export function formatExtensionListHint(ext: Extension, lives: LiveToolRecord[] 
 		case "slash-command":
 			detail = ext.trigger ?? `/${ext.name}`;
 			break;
+		case "context-file":
+			break;
 		default:
 			detail = ext.trigger;
 	}

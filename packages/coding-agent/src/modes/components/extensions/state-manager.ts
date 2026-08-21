@@ -307,7 +307,6 @@ export async function loadAllExtensions(cwd?: string, disabledIds?: string[]): P
 				name,
 				displayName: name,
 				description: file.level === "user" ? "User-level context" : "Project-level context",
-				trigger: file.level,
 				path: file.path,
 				source: sourceFromMeta(file._source),
 				state,
