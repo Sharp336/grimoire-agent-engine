@@ -21,6 +21,37 @@ export interface ScopedInstalledPlugin extends InstalledPlugin {
 installLegacyPiSpecifierShim();
 
 const enabledPluginsCache = new Map<string, Promise<ScopedInstalledPlugin[]>>();
+const extensionManifestPaths = new Map<string, string>();
+
+function nearestExtensionManifestPath(extensionPath: string, packageRoot: string): string | undefined {
+	let directory = path.dirname(extensionPath);
+	const root = path.resolve(packageRoot);
+	while (true) {
+		const candidate = path.join(directory, "package.json");
+		if (fs.existsSync(candidate)) {
+			try {
+				const pkg = JSON.parse(fs.readFileSync(candidate, "utf8")) as {
+					omp?: { extensions?: unknown };
+					pi?: { extensions?: unknown };
+				};
+				if (pkg.omp || pkg.pi) return candidate;
+			} catch {}
+		}
+		if (directory === root) return undefined;
+		const parent = path.dirname(directory);
+		if (parent === directory || !directory.startsWith(root + path.sep)) return undefined;
+		directory = parent;
+	}
+}
+export function setExtensionManifestPath(extensionPath: string, manifestPath: string): void {
+	extensionManifestPaths.set(path.resolve(extensionPath), manifestPath);
+}
+export function getExtensionManifestPath(extensionPath: string): string | undefined {
+	const key = path.resolve(extensionPath);
+	const manifestPath = extensionManifestPaths.get(key);
+	extensionManifestPaths.delete(key);
+	return manifestPath;
+}
 
 function enabledPluginsCacheKey(cwd: string, home?: string): string {
 	return `${path.resolve(cwd)}\0${home === undefined ? "" : path.resolve(home)}`;
@@ -384,9 +415,7 @@ function resolveManifestEntryFiles(joined: string, expandDirectory: boolean): st
 function resolvePluginPaths(plugin: InstalledPlugin, key: "tools" | "hooks" | "commands" | "extensions"): string[] {
 	const resolved: string[] = [];
 	for (const entry of resolvePluginManifestEntries(plugin, key)) {
-		if (entry.resolvedPath) {
-			resolved.push(entry.resolvedPath);
-		}
+		if (entry.resolvedPath) resolved.push(entry.resolvedPath);
 	}
 	return resolved;
 }
@@ -401,49 +430,42 @@ function resolvePluginPaths(plugin: InstalledPlugin, key: "tools" | "hooks" | "c
 export function resolvePluginManifestEntries(
 	plugin: InstalledPlugin,
 	key: "tools" | "hooks" | "commands" | "extensions",
-): Array<{ entry: string; resolvedPath: string | null }> {
-	const declared: Array<{ entry: string; resolvedPath: string | null }> = [];
+): Array<{ entry: string; resolvedPath: string | null; manifestPath: string }> {
+	const declared: Array<{ entry: string; resolvedPath: string | null; manifestPath: string }> = [];
 	const manifest = plugin.manifest;
+	const manifestPath = path.join(plugin.path, "package.json");
 
 	const expandDirectory = key === "extensions";
-	const resolveEntry = (entry: string): Array<{ entry: string; resolvedPath: string | null }> => {
+	const resolveEntry = (
+		entry: string,
+	): Array<{ entry: string; resolvedPath: string | null; manifestPath: string }> => {
 		const files = resolveManifestEntryFiles(path.join(plugin.path, entry), expandDirectory);
-		return files.length > 0 ? files.map(resolvedPath => ({ entry, resolvedPath })) : [{ entry, resolvedPath: null }];
+		return files.length > 0
+			? files.map(resolvedPath => ({ entry, resolvedPath, manifestPath }))
+			: [{ entry, resolvedPath: null, manifestPath }];
 	};
 
 	const base = manifest[key];
 	if (base) {
 		const entries = Array.isArray(base) ? base : [base];
-		for (const entry of entries) {
-			declared.push(...resolveEntry(entry));
-		}
+		for (const entry of entries) declared.push(...resolveEntry(entry));
 	}
 
 	if (manifest.features && plugin.enabledFeatures) {
 		const enabledSet = new Set(plugin.enabledFeatures);
 		for (const [featName, feat] of Object.entries(manifest.features)) {
-			if (!enabledSet.has(featName)) continue;
-			if (feat[key]) {
-				for (const entry of feat[key]) {
-					declared.push(...resolveEntry(entry));
-				}
-			}
+			if (!enabledSet.has(featName) || !feat[key]) continue;
+			for (const entry of feat[key]) declared.push(...resolveEntry(entry));
 		}
 	} else if (manifest.features && plugin.enabledFeatures === null) {
-		// null means use defaults - enable features with default: true
-		for (const [_featName, feat] of Object.entries(manifest.features)) {
-			if (!feat.default) continue;
-			if (feat[key]) {
-				for (const entry of feat[key]) {
-					declared.push(...resolveEntry(entry));
-				}
-			}
+		for (const feat of Object.values(manifest.features)) {
+			if (!feat.default || !feat[key]) continue;
+			for (const entry of feat[key]) declared.push(...resolveEntry(entry));
 		}
 	}
 
 	return declared;
 }
-
 export function resolvePluginToolPaths(plugin: InstalledPlugin): string[] {
 	return resolvePluginPaths(plugin, "tools");
 }
@@ -514,7 +536,14 @@ export async function getAllPluginExtensionPaths(cwd: string): Promise<string[]>
 	const paths: string[] = [];
 
 	for (const plugin of plugins) {
-		paths.push(...resolvePluginExtensionPaths(plugin));
+		for (const entry of resolvePluginManifestEntries(plugin, "extensions")) {
+			if (!entry.resolvedPath) continue;
+			paths.push(entry.resolvedPath);
+			extensionManifestPaths.set(
+				path.resolve(entry.resolvedPath),
+				nearestExtensionManifestPath(entry.resolvedPath, plugin.path) ?? entry.manifestPath,
+			);
+		}
 	}
 
 	return paths;

@@ -31,8 +31,9 @@ import type { CustomMessagePayload } from "../../session/messages";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
 import { EventBus } from "../../utils/event-bus";
 import * as TypeBox from "../legacy-typebox";
+import { loadRuntimeModule } from "../module-loader";
 import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/legacy-pi-compat";
-import { getAllPluginExtensionPaths } from "../plugins/loader";
+import { getAllPluginExtensionPaths, getExtensionManifestPath } from "../plugins/loader";
 
 import { resolvePath, withHostGuard } from "../utils";
 import type {
@@ -51,10 +52,18 @@ import type {
 	ToolInfo,
 } from "./types";
 
-installLegacyPiSpecifierShim();
-
 type HandlerFn = (...args: unknown[]) => Promise<unknown>;
 type LoadedExtensionModule = ExtensionFactory | { default?: ExtensionFactory };
+type ExtensionCompatibility = "legacy" | "modern-esm";
+
+type ExtensionManifest = {
+	extensions?: string[];
+	themes?: string[];
+	skills?: string[];
+	compatibility?: ExtensionCompatibility;
+};
+
+installLegacyPiSpecifierShim();
 
 function getExtensionFactory(module: LoadedExtensionModule): ExtensionFactory | null {
 	const candidate = typeof module === "function" ? module : module.default;
@@ -384,20 +393,42 @@ interface ImportedExtensionModule {
 	error: string | null;
 }
 
+async function readExtensionCompatibility(extensionPath: string): Promise<ExtensionCompatibility | undefined> {
+	const manifestPath = getExtensionManifestPath(extensionPath);
+	if (manifestPath) {
+		const manifest = await readExtensionManifest(manifestPath);
+		return manifest?.compatibility === "modern-esm" || manifest?.compatibility === "legacy"
+			? manifest.compatibility
+			: undefined;
+	}
+	const realPath = await fs.realpath(extensionPath).catch(() => extensionPath);
+	let directory = path.dirname(realPath);
+	while (true) {
+		const manifest = await readExtensionManifest(path.join(directory, "package.json"));
+		if (manifest)
+			return manifest.compatibility === "modern-esm" || manifest.compatibility === "legacy"
+				? manifest.compatibility
+				: undefined;
+		const parent = path.dirname(directory);
+		if (parent === directory) return undefined;
+		directory = parent;
+	}
+}
+
 async function importExtensionModule(extensionPath: string, cwd: string): Promise<ImportedExtensionModule> {
 	const resolvedPath = resolvePath(extensionPath, cwd);
 	try {
-		const module = (await withHostGuard(() => loadLegacyPiModule(resolvedPath))) as LoadedExtensionModule;
+		const compatibility = await readExtensionCompatibility(resolvedPath);
+		const module = (await withHostGuard(() =>
+			compatibility === "modern-esm" ? loadRuntimeModule(resolvedPath) : loadLegacyPiModule(resolvedPath),
+		)) as LoadedExtensionModule;
 		const factory = getExtensionFactory(module);
-
-		if (typeof factory !== "function") {
+		if (typeof factory !== "function")
 			return {
 				factory: null,
 				resolvedPath,
 				error: `Extension does not export a valid factory function: ${extensionPath}`,
 			};
-		}
-
 		return { factory, resolvedPath, error: null };
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
@@ -479,12 +510,6 @@ export async function loadExtensions(paths: string[], cwd: string, eventBus?: Ev
 		errors,
 		runtime,
 	};
-}
-
-interface ExtensionManifest {
-	extensions?: string[];
-	themes?: string[];
-	skills?: string[];
 }
 
 async function readExtensionManifest(packageJsonPath: string): Promise<ExtensionManifest | null> {

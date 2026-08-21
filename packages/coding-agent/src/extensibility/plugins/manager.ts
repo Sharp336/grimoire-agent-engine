@@ -15,7 +15,7 @@ import { resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import { loadExtensions } from "../extensions/loader";
 import { refreshBunGitCache } from "./bun-git-cache";
 import { type GitSource, parseGitUrl } from "./git-url";
-import { resolvePluginManifestEntries } from "./loader";
+import { resolvePluginManifestEntries, setExtensionManifestPath } from "./loader";
 import { getInstalledPluginsRegistryPath, readInstalledPluginsRegistry } from "./marketplace/registry";
 import { parsePluginId } from "./marketplace/types";
 import { extractPackageName, parsePluginSpec } from "./parser";
@@ -388,32 +388,23 @@ export class PluginManager {
 
 	async #validateInstalledExtensions(plugin: InstalledPlugin): Promise<void> {
 		const declaredEntries = resolvePluginManifestEntries(plugin, "extensions");
-		if (declaredEntries.length === 0) {
-			return;
-		}
-
+		if (declaredEntries.length === 0) return;
 		const errors: string[] = [];
 		const loadable: string[] = [];
-		for (const { entry, resolvedPath } of declaredEntries) {
-			if (resolvedPath === null) {
-				errors.push(`${entry}: declared extension entry not found on disk`);
-			} else {
+		for (const { entry, resolvedPath, manifestPath } of declaredEntries) {
+			if (resolvedPath === null) errors.push(`${entry}: declared extension entry not found on disk`);
+			else {
 				loadable.push(resolvedPath);
+				setExtensionManifestPath(resolvedPath, manifestPath);
 			}
 		}
-
 		if (loadable.length > 0) {
 			const result = await loadExtensions(loadable, this.#cwd);
-			for (const failure of result.errors) {
-				errors.push(`${failure.path}: ${failure.error}`);
-			}
+			for (const failure of result.errors) errors.push(`${failure.path}: ${failure.error}`);
 		}
-
-		if (errors.length > 0) {
+		if (errors.length > 0)
 			throw new Error(`Plugin ${plugin.name} extension validation failed:\n${errors.join("\n")}`);
-		}
 	}
-
 	// ==========================================================================
 	// Install / Uninstall
 	// ==========================================================================
