@@ -22,14 +22,8 @@ import { DEFAULT_MAX_INLINE_IMAGES, ImageBudget } from "./components/image";
 import { planDeccaraFills } from "./deccara";
 import { isKeyRelease, matchesKey } from "./keys";
 import { LoopWatchdog } from "./loop-watchdog";
-import { isConPTYHosted, setAltScreenActive, type Terminal } from "./terminal";
-import {
-	applySelectionHighlight,
-	applySelectionMouse,
-	reconstructSelectionText,
-	type TextSelection,
-} from "./text-selection";
 import { parseSgrMouse } from "./mouse";
+import { isConPTYHosted, setAltScreenActive, type Terminal } from "./terminal";
 import {
 	encodeKittyDeleteImage,
 	encodeKittyDeletePlacement,
@@ -44,6 +38,12 @@ import {
 	synchronizedOutputUserOverride,
 	TERMINAL,
 } from "./terminal-capabilities";
+import {
+	applySelectionHighlight,
+	applySelectionMouse,
+	reconstructSelectionText,
+	type TextSelection,
+} from "./text-selection";
 import {
 	Ellipsis,
 	extractSegments,

@@ -31,7 +31,6 @@ export function selectionIsEmpty(sel: TextSelection): boolean {
 	return sel.anchor.row === sel.head.row && sel.anchor.col === sel.head.col;
 }
 
-
 /** Reconstruct selected text from composed viewport lines. Strips ANSI. */
 export function reconstructSelectionText(lines: readonly string[], sel: TextSelection): string {
 	if (selectionIsEmpty(sel)) return "";
