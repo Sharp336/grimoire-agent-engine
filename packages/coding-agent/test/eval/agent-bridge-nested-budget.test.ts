@@ -1,3 +1,4 @@
+import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { runEvalAgent } from "@oh-my-pi/pi-coding-agent/eval/agent-bridge";
@@ -5,6 +6,7 @@ import { runEvalBudget } from "@oh-my-pi/pi-coding-agent/eval/budget-bridge";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as taskDiscovery from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as taskExecutor from "@oh-my-pi/pi-coding-agent/task/executor";
+import type { ExecutorOptions } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition, SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
@@ -37,16 +39,20 @@ function createResult(id: string, output: number): SingleResult {
 	};
 }
 
-function createBudgetSession(sessionManager: SessionManager, agentId?: string): ToolSession {
+function createBudgetSession(sessionManager: SessionManager, sessionFile: string | null = null): ToolSession {
 	return {
 		cwd: "/tmp",
 		settings: Settings.isolated(),
 		getSessionSpawns: () => "*",
-		getSessionFile: () => null,
+		getSessionFile: () => sessionFile,
 		getTurnBudget: () => sessionManager.getTurnBudget(),
 		recordEvalSubagentUsage: (output: number) => sessionManager.recordEvalSubagentOutput(output),
-		...(agentId !== undefined ? { getAgentId: () => agentId } : {}),
 	} as unknown as ToolSession;
+}
+
+function childSessionFile(options: ExecutorOptions): string {
+	if (!options.artifactsDir) throw new Error("expected eval artifacts directory");
+	return path.join(options.artifactsDir, `${options.id}.jsonl`);
 }
 
 function createAgent(): AgentDefinition {
@@ -78,7 +84,7 @@ describe("nested eval agent turn-budget accounting", () => {
 			if (invocation === 1) {
 				await runEvalAgent(
 					{ prompt: "nested work", agent: "task" },
-					{ session: createBudgetSession(childSessionManager, options.id) },
+					{ session: createBudgetSession(childSessionManager, childSessionFile(options)) },
 				);
 				return createResult(options.id, parentOutputTokens);
 			}
@@ -112,7 +118,7 @@ describe("nested eval agent turn-budget accounting", () => {
 		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
 			invocation += 1;
 			if (invocation === 1) {
-				const childSession = createBudgetSession(childSessionManager, options.id);
+				const childSession = createBudgetSession(childSessionManager, childSessionFile(options));
 				await runEvalAgent({ prompt: "first nested work", agent: "task" }, { session: childSession });
 				await expect(
 					runEvalAgent({ prompt: "second nested work", agent: "task" }, { session: childSession }),
@@ -148,7 +154,7 @@ describe("nested eval agent turn-budget accounting", () => {
 		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
 			invocation += 1;
 			if (invocation === 1) {
-				const childSession = createBudgetSession(childSessionManager, options.id);
+				const childSession = createBudgetSession(childSessionManager, childSessionFile(options));
 				expect(await runEvalBudget({}, { session: childSession })).toEqual({
 					total: rootBudgetTokens,
 					spent: 0,
@@ -178,7 +184,7 @@ describe("nested eval agent turn-budget accounting", () => {
 		});
 	});
 
-	it("keeps concurrent top-level eval contexts isolated when their local allocators would collide", async () => {
+	it("keeps colliding labels session-scoped while preserving the public agent id", async () => {
 		const rootA = SessionManager.inMemory();
 		const rootB = SessionManager.inMemory();
 		const childA = SessionManager.inMemory();
@@ -201,13 +207,13 @@ describe("nested eval agent turn-budget accounting", () => {
 				if (options.assignment === "parent a") {
 					await runEvalAgent(
 						{ prompt: "nested a", agent: "task" },
-						{ session: createBudgetSession(childA, options.id) },
+						{ session: createBudgetSession(childA, childSessionFile(options)) },
 					);
 					return createResult(options.id, 100);
 				}
 				await runEvalAgent(
 					{ prompt: "nested b", agent: "task" },
-					{ session: createBudgetSession(childB, options.id) },
+					{ session: createBudgetSession(childB, childSessionFile(options)) },
 				);
 				return createResult(options.id, 200);
 			}
@@ -216,12 +222,15 @@ describe("nested eval agent turn-budget accounting", () => {
 			throw new Error(`unexpected assignment: ${options.assignment}`);
 		});
 
-		await Promise.all([
-			runEvalAgent({ prompt: "parent a", agent: "task" }, { session: createBudgetSession(rootA) }),
-			runEvalAgent({ prompt: "parent b", agent: "task" }, { session: createBudgetSession(rootB) }),
+		const [resultA, resultB] = await Promise.all([
+			runEvalAgent({ prompt: "parent a", agent: "task", label: "shared" }, { session: createBudgetSession(rootA) }),
+			runEvalAgent({ prompt: "parent b", agent: "task", label: "shared" }, { session: createBudgetSession(rootB) }),
 		]);
 
-		expect(topLevelIds.get("parent a")).not.toBe(topLevelIds.get("parent b"));
+		expect(topLevelIds.get("parent a")).toBe("shared");
+		expect(topLevelIds.get("parent b")).toBe("shared");
+		expect(resultA.details.id).toBe("shared");
+		expect(resultB.details.id).toBe("shared");
 		expect(rootA.getTurnBudget().spent).toBe(1_100);
 		expect(rootB.getTurnBudget().spent).toBe(2_200);
 	});
