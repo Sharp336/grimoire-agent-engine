@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -12,6 +12,9 @@ import {
 	parseSkillInvocation,
 	type Skill,
 } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
+import { buildAvailableSlashCommands } from "@oh-my-pi/pi-coding-agent/slash-commands/available-commands";
+import { buildSystemPrompt } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const fixturesDir = path.resolve(import.meta.dirname, "fixtures/skills");
@@ -457,6 +460,117 @@ enabled: false
 				ignoredSkills: ["valid-skill"],
 			});
 			expect(skills.every(s => s.name !== "valid-skill")).toBe(true);
+		});
+	});
+
+	describe("opt-in skills", () => {
+		type OptInSkillsSettings = NonNullable<Parameters<typeof loadSkills>[0]> & {
+			optInSkills?: string[];
+		};
+
+		let tempSkillsDir: string;
+
+		beforeEach(async () => {
+			tempSkillsDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-opt-in-skills-"));
+			for (const [name, body] of [
+				["visible-skill", "Visible skill instructions."],
+				["manual-skill", "Manual skill instructions."],
+			] as const) {
+				const skillDir = path.join(tempSkillsDir, name);
+				await fs.mkdir(skillDir, { recursive: true });
+				await fs.writeFile(
+					path.join(skillDir, "SKILL.md"),
+					["---", `name: ${name}`, `description: ${name} description.`, "---", "", `# ${name}`, "", body].join(
+						"\n",
+					),
+				);
+			}
+		});
+
+		afterEach(async () => {
+			await removeWithRetries(tempSkillsDir);
+		});
+
+		async function observeSkills(optInSkills?: string[]) {
+			const skillsSettings: OptInSkillsSettings = {
+				...DISABLE_ALL_BUILTIN_SKILLS,
+				customDirectories: [tempSkillsDir],
+				enableSkillCommands: true,
+				...(optInSkills === undefined ? {} : { optInSkills }),
+			};
+			const { skills, warnings } = await loadSkills(skillsSettings);
+			expect(warnings).toHaveLength(0);
+
+			const { systemPrompt } = await buildSystemPrompt({
+				cwd: tempSkillsDir,
+				contextFiles: [],
+				skillsSettings,
+				toolNames: ["read"],
+				workspaceTree: {
+					rootPath: tempSkillsDir,
+					rendered: "",
+					truncated: false,
+					totalLines: 0,
+					agentsMdFiles: [],
+				},
+				activeRepoContext: null,
+				includeModelInPrompt: false,
+				personality: "none",
+			});
+			const commands = await buildAvailableSlashCommands(
+				{
+					customCommands: [],
+					skills,
+					skillsSettings,
+					setSlashCommands: () => {},
+					sessionManager: { getCwd: () => tempSkillsDir },
+				},
+				async () => [],
+			);
+			const manualSkillResource = await InternalUrlRouter.instance().resolve("skill://manual-skill", { skills });
+
+			return {
+				prompt: systemPrompt.join("\n"),
+				discoveredSkillNames: skills.map(skill => skill.name),
+				skillCommands: commands.filter(command => command.source === "skill").map(command => `/${command.name}`),
+				manualSkillContent: manualSkillResource.content,
+			};
+		}
+
+		async function expectManualSkillToBeOptInOnly(pattern: string) {
+			const observed = await observeSkills([pattern]);
+
+			expect(observed.discoveredSkillNames).toEqual(["manual-skill", "visible-skill"]);
+			expect(observed.prompt).toContain("visible-skill");
+			expect(observed.skillCommands).toContain("/skill:manual-skill");
+			expect(observed.manualSkillContent).toContain("Manual skill instructions.");
+			expect(observed.prompt.includes("manual-skill")).toBe(false);
+		}
+
+		it("omits an exact opt-in skill from the prompt while keeping explicit access", async () => {
+			await expectManualSkillToBeOptInOnly("manual-skill");
+		});
+
+		it("omits a wildcard-matched opt-in skill from the prompt while keeping explicit access", async () => {
+			await expectManualSkillToBeOptInOnly("manual-*");
+		});
+
+		it("preserves current prompt and explicit access behavior for an empty opt-in array", async () => {
+			const withoutOptInSetting = await observeSkills();
+			const withEmptyOptInSetting = await observeSkills([]);
+			const summarize = (observed: Awaited<ReturnType<typeof observeSkills>>) => ({
+				visibleInPrompt: observed.prompt.includes("visible-skill"),
+				manualInPrompt: observed.prompt.includes("manual-skill"),
+				discoveredSkillNames: observed.discoveredSkillNames,
+				skillCommands: observed.skillCommands,
+				manualSkillContent: observed.manualSkillContent,
+			});
+
+			expect(summarize(withEmptyOptInSetting)).toEqual(summarize(withoutOptInSetting));
+			expect(summarize(withEmptyOptInSetting)).toMatchObject({
+				visibleInPrompt: true,
+				manualInPrompt: true,
+			});
 		});
 	});
 
