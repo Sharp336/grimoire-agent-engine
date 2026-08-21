@@ -45,15 +45,24 @@ function createController() {
 				exaApiKeys: [],
 			}),
 		),
-		getTools: vi.fn(() => []),
+		getTools: vi.fn(() => [] as unknown[]),
 		waitForConnection: vi.fn(async () => ({})),
 		getConnectionStatus: vi.fn(() => "connected"),
 		getSource: vi.fn(() => undefined),
 	};
+	const presentCommandOutput = vi.fn();
+	const session = {
+		refreshMCPTools,
+		setMCPPromptCommands: vi.fn(),
+		getEnabledToolNames: vi.fn(() => [] as string[]),
+		getToolByName: vi.fn((_name: string) => undefined as unknown),
+		setActiveToolsByName: vi.fn(async () => {}),
+		modelRegistry: { authStorage: undefined },
+	};
 	const controller = new MCPCommandController({
 		chatContainer: { addChild: vi.fn() },
 		present: vi.fn(),
-		presentCommandOutput: vi.fn(),
+		presentCommandOutput,
 		ui: { requestRender: vi.fn() },
 		editor: {},
 		showError: vi.fn(),
@@ -63,14 +72,20 @@ function createController() {
 			pendingProviderId: undefined,
 			tryClaimInput: vi.fn(),
 		},
-		session: {
-			refreshMCPTools,
-			modelRegistry: { authStorage: undefined },
-		},
+		session,
+		settings: { get: vi.fn(() => false) },
 		mcpManager,
 	} as never);
 
-	return { controller, mcpManager, refreshMCPTools };
+	return { controller, mcpManager, refreshMCPTools, presentCommandOutput, session };
+}
+
+type PresentableComponent = { render(width: number): string[] };
+
+function renderPresentedOutput(presentCommandOutput: { mock: { calls: unknown[][] } }): string {
+	return presentCommandOutput.mock.calls
+		.map(call => Bun.stripANSI((call[0] as PresentableComponent).render(120).join("\n")))
+		.join("\n");
 }
 
 async function writeProjectConfig(projectDir: string, servers: Record<string, MCPServerConfig>): Promise<void> {
@@ -140,5 +155,24 @@ describe("/mcp enable and disable", () => {
 		const [configs] = mcpManager.connectServers.mock.calls[0]!;
 		expect(Object.keys(configs)).toEqual(["mcp1"]);
 		expect(configs.mcp1).toEqual({ type: "stdio", command: "mcp-one", enabled: true });
+	});
+
+	test("quick adding a deferred lazy server reports on-demand availability", async () => {
+		const { controller, mcpManager, presentCommandOutput, session } = createController();
+		mcpManager.getConnectionStatus.mockReturnValue("deferred");
+		const lazyTool = { name: "lazy_echo", description: "", parameters: {}, mcpServerName: "lazy" };
+		mcpManager.getTools.mockReturnValue([lazyTool]);
+		session.getToolByName.mockImplementation((name: string) => (name === lazyTool.name ? lazyTool : undefined));
+
+		await controller.handle("/mcp add lazy -- lazy-server");
+
+		// Deferred cached tools must activate even without a live transport.
+		expect(session.setActiveToolsByName).toHaveBeenCalledWith(["lazy_echo"]);
+		// Deferred state must skip the direct-test fallback entirely.
+		expect(mcpManager.connectServers).not.toHaveBeenCalled();
+		const rendered = renderPresentedOutput(presentCommandOutput);
+		expect(rendered).toContain('Added server "lazy" to project config');
+		expect(rendered).toContain("Server is available on demand");
+		expect(rendered).not.toContain("Successfully connected to server");
 	});
 });

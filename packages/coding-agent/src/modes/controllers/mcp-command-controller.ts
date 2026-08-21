@@ -1306,12 +1306,14 @@ export class MCPCommandController {
 				config.enabled === false
 					? "disconnected"
 					: await this.#waitForServerConnectionWithAnimation(name, { suppressDisconnectedWarning: true });
-			let isConnected = state === "connected" || state === "deferred";
+			let isConnected = state === "connected";
+			const isDeferred = state === "deferred";
 			const isConnecting = state === "connecting";
+			const toolsAvailable = isConnected || isDeferred;
 
 			// Fallback: if manager state is still disconnected but direct test works,
 			// report as connected to avoid false-negative messaging.
-			if (!isConnected && !isConnecting && config.enabled !== false) {
+			if (!toolsAvailable && !isConnecting && config.enabled !== false) {
 				try {
 					await this.#handleTestConnection(config);
 					isConnected = true;
@@ -1324,7 +1326,7 @@ export class MCPCommandController {
 			// refreshMCPTools preserves the prior MCP tool selection, so tools from
 			// brand-new servers are registered in the registry but never activated.
 			// Explicitly activate the newly added server's tools now.
-			if (isConnected && this.ctx.mcpManager) {
+			if (toolsAvailable && this.ctx.mcpManager) {
 				const serverTools = this.ctx.mcpManager.getTools().filter(t => t.mcpServerName === name);
 				if (serverTools.length > 0) {
 					const currentActive = this.ctx.session.getEnabledToolNames();
@@ -1341,6 +1343,9 @@ export class MCPCommandController {
 
 			if (isConnected) {
 				lines.push(theme.fg("success", `${theme.status.enabled} Successfully connected to server`));
+				lines.push("");
+			} else if (isDeferred) {
+				lines.push(theme.fg("muted", `◌ Server is available on demand`));
 				lines.push("");
 			} else if (isConnecting) {
 				lines.push(theme.fg("muted", `◌ Server is connecting in background...`));
