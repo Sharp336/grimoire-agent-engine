@@ -4,7 +4,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type MCPServer, mcpCapability } from "@oh-my-pi/pi-coding-agent/capability/mcp";
 import { loadCapability } from "@oh-my-pi/pi-coding-agent/discovery";
+import { convertToLegacyConfig } from "@oh-my-pi/pi-coding-agent/mcp/config";
+import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { lazyConfig, spawnCount, waitFor } from "../mcp-lifecycle-harness";
 
 async function loadMcp(cwd: string, provider: string): Promise<MCPServer[]> {
 	const result = await loadCapability<MCPServer>(mcpCapability.id, {
@@ -124,23 +127,66 @@ describe("translated MCP importers propagate enabled: false", () => {
 			expect(server?.enabled).toBe(false);
 		});
 	}
-	test("claude carries lifecycle and preserves idleTimeout: 0", async () => {
+	test("claude lifecycle lazy with finite idleTimeout spawns once and defers despite eager manager defaults", async () => {
 		const filePath = path.join(tempCwd, ".claude", ".mcp.json");
+		const spawnLog = path.join(tempCwd, "claude-lazy-reap.log");
 		await fs.mkdir(path.dirname(filePath), { recursive: true });
 		await fs.writeFile(
 			filePath,
 			JSON.stringify({
-				mcpServers: {
-					lazy: { command: "lazy-server", lifecycle: "lazy", idleTimeout: 0 },
-					short: { command: "short-server", lifecycle: "lazy", idleTimeout: 123 },
-				},
+				mcpServers: { lazy: lazyConfig({ lifecycle: "lazy", idleTimeout: 50, spawnLog }) },
 			}),
 		);
 
 		const servers = await loadMcp(tempCwd, "claude");
-		expect(servers.find(server => server.name === "lazy")).toMatchObject({ lifecycle: "lazy", idleTimeout: 0 });
-		expect(servers.find(server => server.name === "short")).toMatchObject({ lifecycle: "lazy", idleTimeout: 123 });
-	});
+		const server = servers.find(item => item.name === "lazy");
+		expect(server).toBeDefined();
+		if (!server) throw new Error("Expected lazy fixture from Claude project .mcp.json discovery");
+
+		const manager = new MCPManager(tempCwd);
+		try {
+			manager.setLifecycleDefaults("eager", 300_000);
+			const connected = await manager.connectServers({ lazy: convertToLegacyConfig(server) }, {});
+			expect(connected.errors.has("lazy")).toBe(false);
+			expect(await waitFor(() => manager.getConnectionStatus("lazy") === "deferred")).toBe(true);
+			expect(spawnCount(spawnLog)).toBe(1);
+		} finally {
+			await manager.disconnectAll();
+		}
+	}, 20_000);
+
+	test("claude idleTimeout: 0 keeps a lazy server connected under reaping manager defaults", async () => {
+		const filePath = path.join(tempCwd, ".claude", ".mcp.json");
+		const spawnLog = path.join(tempCwd, "claude-idle-zero.log");
+		await fs.mkdir(path.dirname(filePath), { recursive: true });
+		await fs.writeFile(
+			filePath,
+			JSON.stringify({
+				mcpServers: { sticky: lazyConfig({ lifecycle: "lazy", idleTimeout: 0, spawnLog }) },
+			}),
+		);
+
+		const servers = await loadMcp(tempCwd, "claude");
+		const server = servers.find(item => item.name === "sticky");
+		expect(server).toBeDefined();
+		if (!server) throw new Error("Expected sticky fixture from Claude project .mcp.json discovery");
+
+		const manager = new MCPManager(tempCwd);
+		try {
+			manager.setLifecycleDefaults("lazy", 50);
+			const connected = await manager.connectServers({ sticky: convertToLegacyConfig(server) }, {});
+			expect(connected.errors.has("sticky")).toBe(false);
+			expect(await waitFor(() => manager.getConnectionStatus("sticky") === "connected")).toBe(true);
+			// Genuine integration wait: idleTimeout 0 must arm no reaper, so let real
+			// wall-clock pass and confirm the connection survives. Fake timers cannot
+			// stand in for "no timer was scheduled at all".
+			await Bun.sleep(300);
+			expect(manager.getConnectionStatus("sticky")).toBe("connected");
+			expect(spawnCount(spawnLog)).toBe(1);
+		} finally {
+			await manager.disconnectAll();
+		}
+	}, 20_000);
 
 	test("claude preserves invalid lifecycle values for capability validation", async () => {
 		const filePath = path.join(tempCwd, ".claude", ".mcp.json");

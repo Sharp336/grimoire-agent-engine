@@ -19,7 +19,7 @@ import * as path from "node:path";
 import { getCapability } from "@oh-my-pi/pi-coding-agent/capability";
 import { clearCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
 import { hookCapability } from "@oh-my-pi/pi-coding-agent/capability/hook";
-import { mcpCapability } from "@oh-my-pi/pi-coding-agent/capability/mcp";
+import { type MCPServer, mcpCapability } from "@oh-my-pi/pi-coding-agent/capability/mcp";
 import { promptCapability } from "@oh-my-pi/pi-coding-agent/capability/prompt";
 import { ruleCapability } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import { skillCapability } from "@oh-my-pi/pi-coding-agent/capability/skill";
@@ -35,7 +35,10 @@ import {
 	withOmpExtensionRootScope,
 } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
 import { discoverExtensionPaths } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { convertToLegacyConfig } from "@oh-my-pi/pi-coding-agent/mcp/config";
+import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { getConfigRootDir, removeSyncWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { lazyConfig, spawnCount, waitFor } from "../mcp-lifecycle-harness";
 
 const PROVIDER_ID = "omp-plugins";
 
@@ -349,24 +352,72 @@ test(".mcp.json expands environment placeholders recursively", async () => {
 	}
 });
 
-test(".mcp.json forwards lifecycle and preserves idleTimeout: 0", async () => {
+test(".mcp.json forwards explicit lifecycle + finite idleTimeout through MCPManager", async () => {
+	const spawnLog = path.join(tempDir, "lazy-forwarded.log");
 	writeFile(
 		path.join(ext, ".mcp.json"),
 		JSON.stringify({
 			mcpServers: {
-				lazy: { command: "lazy-server", lifecycle: "lazy", idleTimeout: 0 },
-				short: { command: "short-server", lifecycle: "lazy", idleTimeout: 123 },
+				lazy: lazyConfig({ lifecycle: "lazy", idleTimeout: 50, spawnLog }),
 			},
 		}),
 	);
 	writeFile(path.join(project, ".omp", "settings.json"), JSON.stringify({ extensions: [ext] }));
 
-	const servers = await loadFromPlugin<{ name: string; lifecycle?: string; idleTimeout?: number }>(
-		mcpCapability.id,
-		ctx(),
+	const servers = await loadFromPlugin<MCPServer>(mcpCapability.id, ctx());
+	const server = servers.find(s => s.name === "lazy");
+	expect(server).toBeDefined();
+	if (!server) throw new Error("Expected lazy fixture server from plugin .mcp.json");
+
+	// Manager defaults are eager with a long idle timeout, so only the fields
+	// discovered from .mcp.json can make this server lazy with a 50ms reap
+	// window: exactly one spawn, then the idle disconnect defers it.
+	const manager = new MCPManager(tempDir);
+	manager.setLifecycleDefaults("eager", 300_000);
+	try {
+		const connected = await manager.connectServers({ lazy: convertToLegacyConfig(server) }, {});
+		expect(connected.errors.has("lazy")).toBe(false);
+		expect(await waitFor(() => manager.getConnectionStatus("lazy") === "deferred")).toBe(true);
+		expect(spawnCount(spawnLog)).toBe(1);
+	} finally {
+		await manager.disconnectAll();
+	}
+});
+
+test(".mcp.json preserves idleTimeout: 0 through MCPManager (never reaped)", async () => {
+	const spawnLog = path.join(tempDir, "zero-timeout.log");
+	writeFile(
+		path.join(ext, ".mcp.json"),
+		JSON.stringify({
+			mcpServers: {
+				lazy: lazyConfig({ lifecycle: "lazy", idleTimeout: 0, spawnLog }),
+			},
+		}),
 	);
-	expect(servers.find(server => server.name === "lazy")).toMatchObject({ lifecycle: "lazy", idleTimeout: 0 });
-	expect(servers.find(server => server.name === "short")).toMatchObject({ lifecycle: "lazy", idleTimeout: 123 });
+	writeFile(path.join(project, ".omp", "settings.json"), JSON.stringify({ extensions: [ext] }));
+
+	const servers = await loadFromPlugin<MCPServer>(mcpCapability.id, ctx());
+	const server = servers.find(s => s.name === "lazy");
+	expect(server).toBeDefined();
+	if (!server) throw new Error("Expected zero-idle-timeout fixture server from plugin .mcp.json");
+
+	// The manager's own default would reap within 50ms; only the discovered
+	// idleTimeout: 0 disables reaping, so the server must still be connected
+	// well past that window with no reconnect respawn.
+	const manager = new MCPManager(tempDir);
+	manager.setLifecycleDefaults("lazy", 50);
+	try {
+		const connected = await manager.connectServers({ lazy: convertToLegacyConfig(server) }, {});
+		expect(connected.errors.has("lazy")).toBe(false);
+		// The startup gate can finish after connectServers under load; wait for
+		// the real connection before holding past the reap window.
+		expect(await waitFor(() => manager.getConnectionStatus("lazy") === "connected")).toBe(true);
+		await Bun.sleep(300);
+		expect(manager.getConnectionStatus("lazy")).toBe("connected");
+		expect(spawnCount(spawnLog)).toBe(1);
+	} finally {
+		await manager.disconnectAll();
+	}
 });
 test("relative path-like command and cwd resolve against the plugin config directory", async () => {
 	writeFile(
