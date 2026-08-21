@@ -23,34 +23,12 @@ installLegacyPiSpecifierShim();
 const enabledPluginsCache = new Map<string, Promise<ScopedInstalledPlugin[]>>();
 const extensionManifestPaths = new Map<string, string>();
 
-function nearestExtensionManifestPath(extensionPath: string, packageRoot: string): string | undefined {
-	let directory = path.dirname(extensionPath);
-	const root = path.resolve(packageRoot);
-	while (true) {
-		const candidate = path.join(directory, "package.json");
-		if (fs.existsSync(candidate)) {
-			try {
-				const pkg = JSON.parse(fs.readFileSync(candidate, "utf8")) as {
-					omp?: { extensions?: unknown };
-					pi?: { extensions?: unknown };
-				};
-				if (pkg.omp || pkg.pi) return candidate;
-			} catch {}
-		}
-		if (directory === root) return undefined;
-		const parent = path.dirname(directory);
-		if (parent === directory || !directory.startsWith(root + path.sep)) return undefined;
-		directory = parent;
-	}
-}
 export function setExtensionManifestPath(extensionPath: string, manifestPath: string): void {
 	extensionManifestPaths.set(path.resolve(extensionPath), manifestPath);
 }
+
 export function getExtensionManifestPath(extensionPath: string): string | undefined {
-	const key = path.resolve(extensionPath);
-	const manifestPath = extensionManifestPaths.get(key);
-	extensionManifestPaths.delete(key);
-	return manifestPath;
+	return extensionManifestPaths.get(path.resolve(extensionPath));
 }
 
 function enabledPluginsCacheKey(cwd: string, home?: string): string {
@@ -539,10 +517,7 @@ export async function getAllPluginExtensionPaths(cwd: string): Promise<string[]>
 		for (const entry of resolvePluginManifestEntries(plugin, "extensions")) {
 			if (!entry.resolvedPath) continue;
 			paths.push(entry.resolvedPath);
-			extensionManifestPaths.set(
-				path.resolve(entry.resolvedPath),
-				nearestExtensionManifestPath(entry.resolvedPath, plugin.path) ?? entry.manifestPath,
-			);
+			extensionManifestPaths.set(path.resolve(entry.resolvedPath), entry.manifestPath);
 		}
 	}
 
