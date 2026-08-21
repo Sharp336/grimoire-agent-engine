@@ -1580,11 +1580,18 @@ export class MCPCommandController {
 		// Own Esc before the config-file resolution: the lookup reads user/project and
 		// fallback configs from disk, which can be slow on network-backed filesystems.
 		// Esc during that window must cancel the test rather than fall through to
-		// aborting the streaming session. Validation exits below release ownership
-		// immediately (no grace window) because no cancellable test ever started.
+		// aborting the streaming session — so the lookup itself is raced against the
+		// signal, unblocking the command (and giving cancellation feedback) the moment
+		// Esc fires instead of waiting out the filesystem read. Validation exits below
+		// release ownership immediately (no grace window) because no cancellable test
+		// ever started.
 		this.ctx.beginMcpTest(abortController, name);
 		try {
-			const found = await this.#resolveServerForAuth(name);
+			const found = await raceAbortSignal(
+				this.#resolveServerForAuth(name),
+				abortController.signal,
+				() => new DOMException("Aborted", "AbortError"),
+			);
 
 			if (abortController.signal.aborted) {
 				// Esc during resolution: the test never started. Settle (not clear) so

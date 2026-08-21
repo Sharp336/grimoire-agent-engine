@@ -5,8 +5,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import * as mcpClient from "@oh-my-pi/pi-coding-agent/mcp/client";
+import * as configWriter from "@oh-my-pi/pi-coding-agent/mcp/config-writer";
 import * as oauthFlow from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
-import type { MCPServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
+import type { MCPConfigFile, MCPServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { MCPCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/mcp-command-controller";
 import { McpTestEscapeState } from "@oh-my-pi/pi-coding-agent/modes/mcp-test-escape";
 import { OAuthManualInputManager } from "@oh-my-pi/pi-coding-agent/modes/oauth-manual-input";
@@ -624,42 +625,45 @@ describe("/mcp auth commands", () => {
 	test("Esc during /mcp test config resolution cancels the test, not the session", async () => {
 		const authStorage = freshAuthStorage();
 		await authStorage.reload();
-		// Holds #resolveServerForAuth open past #findConfiguredServer — mirrors a
-		// slow (network-backed) config lookup while the user presses Esc.
-		const resolution = Promise.withResolvers<{ type: "http"; url: string } | undefined>();
-		const { controller, showError, showStatus, beginMcpTest, settleMcpTest, mcpTestEscape } = createController(
-			authStorage,
-			{
-				getServerConfig: () => resolution.promise,
-				getSource: () => "user",
-			},
-		);
+		// Block the operation #resolveServerForAuth actually awaits — the
+		// config-file read. envserver is found through real config reads before
+		// the (synchronous) manager lookup is ever consulted, so the seam has to
+		// sit on readMCPConfigFile to reproduce a slow (network-backed) lookup.
+		const resolution = Promise.withResolvers<MCPConfigFile>();
+		const readSpy = vi.spyOn(configWriter, "readMCPConfigFile").mockReturnValue(resolution.promise);
+		const { controller, showError, showStatus, beginMcpTest, settleMcpTest, mcpTestEscape } =
+			createController(authStorage);
 
 		const testPromise = controller.handle("/mcp test envserver");
 
-		// Esc ownership is armed before resolution starts.
+		// Esc ownership is armed before the blocked resolution starts.
 		const deadline = Date.now() + 1_000;
 		while (beginMcpTest.mock.calls.length === 0 && Date.now() < deadline) {
 			await Bun.sleep(10);
 		}
 		expect(beginMcpTest).toHaveBeenCalledTimes(1);
+		expect(readSpy).toHaveBeenCalled();
 		const [registeredController] = beginMcpTest.mock.calls[0] as [AbortController, string];
 		registeredController.abort();
 
-		// Resolution completes after the Esc: the test is reported cancelled —
-		// not "not found" — and settles with the grace window (cancelled), so a
-		// reflexive second Esc is consumed instead of aborting the session.
-		resolution.resolve({ type: "http", url: "http://localhost:1" });
+		// The command unblocks on Esc even though the config read never
+		// resolves here: the lookup is raced against the signal, so the
+		// cancellation is reported the moment Esc fires instead of after the
+		// filesystem operation completes.
 		await Promise.race([
 			testPromise,
 			Bun.sleep(2_000).then(() => {
-				throw new Error("/mcp test did not resolve after Esc during resolution");
+				throw new Error("/mcp test did not resolve after Esc during blocked resolution");
 			}),
 		]);
 
 		expect(showError).not.toHaveBeenCalled();
 		expect(showStatus).toHaveBeenCalledWith('Cancelled MCP test for "envserver"');
 		expect(settleMcpTest).toHaveBeenCalledWith(registeredController);
+		// Settled with the grace window (cancelled): a reflexive second Esc is
+		// consumed, not the session. This also proves begin ran before the
+		// blocked resolution — settle's identity guard would otherwise have no
+		// state to record and Esc would fall through.
 		expect(mcpTestEscape.handleEscape()).toBe("consume");
 	});
 
