@@ -17,8 +17,8 @@
 
 ## Registration / Visibility
 - Tool metadata: `approval = "read"`, `strict = true`, `loadMode = "discoverable"`.
-- The tool is registered only for `memory.backend = "hindsight"` or `"mnemopi"`; it is absent for `"off"` and `"local"`.
-- In unrestricted sessions with an explicit tool list, registration auto-includes the shared `recall`/`retain`/`reflect` set for either supported backend. Restricted lists are not widened.
+- The tool is registered for every backend with recall capability: `hindsight`, `mnemopi`, and `mnemosyne-oss`; it is absent for `off` and `local`.
+- In unrestricted sessions with an explicit tool list, registration auto-includes the shared `recall`/`retain`/`reflect` set. Restricted lists are not widened.
 - In an ordinary `tools.xdev` session, discoverable built-ins may be presented as `xd://recall`; an explicitly requested tool remains top-level.
 - Execution is single-shot. The tool does not emit streaming argument/result updates.
 
@@ -43,6 +43,8 @@ Mnemopi bullet format comes from `formatScopedRecallWithIds(...)`:
 - each bullet is `- <content> (id: <id>) [<source>] (<YYYY-MM-DD>) c:<score>`; an unavailable id renders as `(id unavailable)`, and source, date, and score are omitted when absent.
 - Mnemopi recall content is a preview capped at 500 characters by default. A clipped preview ends in `…`; fetch the full row with `read memory://<id>` before a wholesale `memory_edit update`.
 - Although the internal recall row carries `truncated` and `full_length`, this tool returns formatted text with `details = {}` and does not expose those fields.
+
+For Mnemopi and Mnemosyne OSS, an ID is exact-addressable: run `read memory://<id>` before replacing a clipped preview. Mnemosyne OSS searches only its initialized recall banks; an ID present in multiple banks is reported as ambiguous rather than selected arbitrarily.
 
 When no matches exist:
 - `content[0].text = "No relevant memories found."`

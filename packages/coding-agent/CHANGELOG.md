@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `memory.backend: mnemosyne-oss` for a local Mnemosyne 4.x SDK store that shares SQLite banks with other Mnemosyne clients.
 - Sloppy edits now support inline replacements with `⟪old│new⟫` syntax (`⟪old│⟫` for deletions and `⟪│new⟫` for insertions), alongside automatic recovery for common formatting mistakes without needing a retry.
 - Sloppy edits now recover operations that mix `⟪old│new⟫` inline replacements with a `»` REWRITE instead of failing the payload: a redundant REWRITE is dropped, a diverging one is applied as the final text, and a note explains the interpretation.
 - Expanded archive support in `read` and `write` tools: `read` can now inspect and extract members from `.rar`, `.7z`, `.iso`, `.cab`, `.deb`, `.rpm`, `.cpio`, `.ar`/`.a`, `.lzh`, `.arj`, compressed tar files (`.tar.bz2`, `.tar.xz`, `.tar.zst`), package formats (`.whl`, `.ipa`, `.xpi`, `.vsix`, `.nupkg`, `.cbz`, `.cbr`), `.asar` archives, and single-file compressed streams; `write` can create `.tar.zst` and update `.asar` archives.
@@ -32,6 +33,8 @@
 
 ### Fixed
 
+- Mnemosyne OSS now stays inert when Python or the SDK cannot handshake, sleeps only the retain bank without forcing other sessions, and uses local consolidation only when a local LLM path is set.
+- Exact `memory://<id>` reads are available with `memory.backend=mnemopi` or `mnemosyne-oss`; Hindsight still points agents at `recall`/`reflect` instead of claiming the protocol is Mnemopi-only.
 - Fixed regional HTTP 401 data-residency errors during Codex chat, web search, and image generation requests by passing token residency metadata on requests.
 - Fixed macOS SSH ControlMaster socket creation failures caused by `sun_path` length limits when using named profiles.
 - Fixed an issue where Nix-packaged builds failed to load on-demand native addons (`onnxruntime-node`/`sherpa-onnx`) due to missing shared C++ runtime library paths.

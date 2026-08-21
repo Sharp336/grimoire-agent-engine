@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { createMemoryRuntimeContext, resolveMemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend";
+import {
+	createMemoryRuntimeContext,
+	memoryBackendSupports,
+	resolveMemoryBackend,
+} from "@oh-my-pi/pi-coding-agent/memory-backend";
 
 describe("resolveMemoryBackend", () => {
 	beforeEach(() => {
@@ -45,6 +49,39 @@ describe("resolveMemoryBackend", () => {
 		});
 		await expect(memory.search("project preference")).resolves.toMatchObject({
 			backend: "local",
+			count: 0,
+		});
+	});
+
+	it("declares the exact operation surface for active remote and local backends", () => {
+		expect(memoryBackendSupports("hindsight", "recall")).toBe(true);
+		expect(memoryBackendSupports("hindsight", "exact-read")).toBe(false);
+		expect(memoryBackendSupports("mnemopi", "edit")).toBe(true);
+		expect(memoryBackendSupports("local", "retain")).toBe(false);
+		expect(memoryBackendSupports("off", "reflect")).toBe(false);
+	});
+
+	it("returns truthful unsupported explicit-operation results", async () => {
+		const settings = Settings.isolated({ "memory.backend": "local" });
+		const memory = createMemoryRuntimeContext({
+			agentDir: "/tmp/agent",
+			cwd: "/tmp/project",
+			session: { settings } as never,
+		});
+
+		await expect(memory.get("memory-id")).resolves.toMatchObject({
+			backend: "local",
+			id: "memory-id",
+			status: "not_addressable",
+		});
+		await expect(memory.edit("forget", "memory-id")).resolves.toMatchObject({
+			backend: "local",
+			id: "memory-id",
+			status: "not_editable",
+		});
+		await expect(memory.reflect("project preference")).resolves.toMatchObject({
+			backend: "local",
+			query: "project preference",
 			count: 0,
 		});
 	});

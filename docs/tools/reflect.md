@@ -15,7 +15,7 @@
 
 ## Registration / Visibility
 - Tool metadata: `approval = "read"`, `strict = true`, `loadMode = "discoverable"`.
-- The tool is registered only for `memory.backend = "hindsight"` or `"mnemopi"`; it is absent for `"off"` and `"local"`.
+- The tool is registered for every backend with reflect capability: `hindsight`, `mnemopi`, and `mnemosyne-oss`; it is absent for `off` and `local`.
 - In unrestricted sessions with an explicit tool list, registration auto-includes the shared `recall`/`retain`/`reflect` set. Restricted lists are not widened.
 - In an ordinary `tools.xdev` session, discoverable built-ins may be presented as `xd://reflect`; an explicitly requested tool remains top-level.
 - Execution is single-shot and emits no progress updates.
@@ -40,6 +40,8 @@ Mnemopi:
 - if no scoped recall results exist: `content[0].text = "No relevant information found to reflect on."`
 - otherwise: `content[0].text = "Based on recalled memories:\n\n<formatted context>"`
 - `details = {}`
+
+Mnemosyne OSS reflects deterministically from its recalled local records; it does not invoke an optional or hosted LLM for this operation.
 - The local path performs recall plus formatting; it does not call a synthesis model or separate synthesis endpoint. Its result can therefore be raw recalled context rather than a blended answer.
 
 ## Flow

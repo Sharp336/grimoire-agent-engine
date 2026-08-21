@@ -4,10 +4,11 @@ import * as path from "node:path";
 import type { MnemopiOptions } from "@oh-my-pi/pi-mnemopi";
 import { getMemoriesDir, logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
+import { computeMemoryBankScope, type MemoryBankScoping } from "../memory-backend/bank-scope";
 
 export type MnemopiLlmMode = "none" | "smol" | "remote";
 
-export type MnemopiScoping = "global" | "per-project" | "per-project-tagged";
+export type MnemopiScoping = MemoryBankScoping;
 
 export type MnemopiProviderOptions = Pick<
 	MnemopiOptions,
@@ -45,7 +46,7 @@ export function loadMnemopiConfig(settings: Settings, agentDir: string): Mnemopi
 	const cwd = settings.getCwd();
 	const scoping = settings.get("mnemopi.scoping");
 	const dbPath = configuredDbPath ?? path.join(getMemoriesDir(agentDir), "mnemopi", "mnemopi.db");
-	const scope = computeMnemopiBankScope(settings.get("mnemopi.bank"), cwd, scoping);
+	const scope = computeMemoryBankScope(settings.get("mnemopi.bank"), cwd, scoping);
 	const recallBanks =
 		scoping === "global" ? scope.recallBanks : extendRecallWithLegacyBanks(scope.recallBanks, dbPath, cwd);
 	const llmMode = settings.get("mnemopi.llmMode");
@@ -101,87 +102,9 @@ export function loadMnemopiConfig(settings: Settings, agentDir: string): Mnemopi
 	};
 }
 
-const DEFAULT_SHARED_BANK = "default";
-
 // Cap legacy-bank scanning at session start so a pathological banks/
 // directory cannot dominate startup latency.
 const LEGACY_BANK_SCAN_LIMIT = 64;
-
-export interface MnemopiBankScope {
-	baseBank: string;
-	bank: string;
-	globalBank: string;
-	retainBank: string;
-	recallBanks: readonly string[];
-}
-
-/**
- * Resolve write/recall banks for a session.
- *
- * Mnemopi has no tag-filtered recall, so `per-project-tagged` maps to a
- * project-local write bank plus a shared recall-visible bank. The project
- * bank is derived purely from {@link cwd} — see {@link projectBank} for the
- * stability contract.
- */
-export function computeMnemopiBankScope(
-	configured: string | undefined,
-	cwd: string,
-	scoping: MnemopiScoping,
-): MnemopiBankScope {
-	const project = projectBank(configured, cwd);
-	const globalBank = sharedBank(configured);
-	switch (scoping) {
-		case "global":
-			return {
-				baseBank: globalBank,
-				bank: globalBank,
-				globalBank,
-				retainBank: globalBank,
-				recallBanks: [globalBank],
-			};
-		case "per-project":
-			return {
-				baseBank: globalBank,
-				bank: project,
-				globalBank,
-				retainBank: project,
-				recallBanks: [project],
-			};
-		case "per-project-tagged":
-			return {
-				baseBank: globalBank,
-				bank: project,
-				globalBank,
-				retainBank: project,
-				recallBanks: project === globalBank ? [project] : [project, globalBank],
-			};
-	}
-}
-
-function sharedBank(configured: string | undefined): string {
-	return sanitizeBankName(configured) ?? DEFAULT_SHARED_BANK;
-}
-
-/**
- * Derive the per-project bank id from `cwd` alone.
- *
- * Earlier versions resolved the enclosing git root before hashing, which
- * made the bank id unstable: removing or adding a `.git` anywhere above the
- * cwd repointed the same conversation directory to a different bank and
- * fragmented memories (#2412). The git lookup is gone here; the rescue path
- * for already-fragmented installs lives in {@link extendRecallWithLegacyBanks}.
- */
-function projectBank(configured: string | undefined, cwd: string): string {
-	const projectRoot = path.resolve(cwd || ".");
-	const project = projectBankSegment(projectRoot);
-	const base = sanitizeBankName(configured);
-	return limitBankName(base ? `${base}-${project}` : project);
-}
-
-function projectBankSegment(projectRoot: string): string {
-	const project = sanitizeBankName(path.basename(projectRoot)) ?? "default";
-	return limitBankName(`${project}-${Bun.hash(projectRoot).toString(36)}`);
-}
 
 /**
  * Discover sibling banks under `<dbDir>/banks/` whose `working_memory` rows
@@ -243,21 +166,6 @@ function bankOnlyHasCwd(dbPath: string, cwd: string): boolean {
 			// nothing to do — read-only handle.
 		}
 	}
-}
-
-function sanitizeBankName(value: string | undefined): string | undefined {
-	const raw = value?.trim();
-	if (!raw) return undefined;
-	const sanitized = raw.replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
-	return sanitized ? limitBankName(sanitized) : undefined;
-}
-
-function limitBankName(name: string): string {
-	if (name.length <= 64) return name;
-	const hash = Bun.hash(name).toString(36);
-	const prefixLength = Math.max(1, 63 - hash.length);
-	const prefix = name.slice(0, prefixLength).replace(/-+$/g, "") || "bank";
-	return `${prefix}-${hash}`;
 }
 
 export function truncateApproxTokens(text: string, tokenLimit: number): string {

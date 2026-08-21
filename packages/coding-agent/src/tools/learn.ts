@@ -2,7 +2,7 @@ import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { sanitizeSkillName, writeManagedSkill } from "../autolearn/managed-skills";
 import { isNameClaimedByAuthoredSkill } from "../extensibility/skills";
-import { localBackend } from "../memory-backend/local-backend";
+import { localBackend, memoryBackendSupports } from "../memory-backend";
 import learnDescription from "../prompts/tools/learn.md" with { type: "text" };
 import type { ToolSession } from ".";
 
@@ -23,7 +23,7 @@ export type LearnParams = typeof learnSchema.infer;
  * Orchestrating "learn" tool: persists a lesson to long-term memory and,
  * given a `skill` payload, mints/enhances a managed skill via the shared
  * `writeManagedSkill` primitive. Gated behind `autolearn.enabled` plus a live
- * memory backend — `hindsight`/`mnemopi` (remote/SQLite) or `local` (the
+ * memory backend — `hindsight`/`mnemopi`/`mnemosyne-oss` (remote/SQLite) or `local` (the
  * file-based rollout backend, where lessons append to `learned.md`).
  */
 export class LearnTool implements AgentTool<typeof learnSchema> {
@@ -44,7 +44,7 @@ export class LearnTool implements AgentTool<typeof learnSchema> {
 	static createIf(session: ToolSession): LearnTool | null {
 		if (!session.settings.get("autolearn.enabled")) return null;
 		const backend = session.settings.get("memory.backend");
-		if (backend !== "hindsight" && backend !== "mnemopi" && backend !== "local") return null;
+		if (backend !== "local" && !memoryBackendSupports(backend, "retain")) return null;
 		return new LearnTool(session);
 	}
 
@@ -87,12 +87,19 @@ export class LearnTool implements AgentTool<typeof learnSchema> {
 				throw new Error("Lesson was empty after sanitization; nothing stored.");
 			}
 		} else {
-			const state = this.session.getHindsightSessionState?.();
-			if (!state) {
-				throw new Error("Hindsight backend is not initialised for this session.");
+			const memory = this.session.memory;
+			if (!memory) throw new Error("Memory backend is not initialised for this session.");
+			const result = await memory.save({
+				content: params.memory,
+				context: params.context,
+				source: "coding-agent-learn",
+				importance: 0.8,
+			});
+			if (result.queued) {
+				memoryMessage = "Lesson queued for retention";
+			} else if (!result.stored) {
+				throw new Error(result.message ?? "Memory backend did not store the lesson.");
 			}
-			state.enqueueRetain(params.memory, params.context);
-			memoryMessage = "Lesson queued for retention";
 		}
 
 		// 2) Optionally mint/enhance a managed skill. A failure here is surfaced

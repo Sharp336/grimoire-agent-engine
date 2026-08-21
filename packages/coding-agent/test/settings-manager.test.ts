@@ -1152,6 +1152,12 @@ describe("Settings", () => {
 			expect(settings.get("memory.backend")).toBe("mnemopi");
 			expect(settings.get("mnemopi.dbPath")).toBe("/tmp/old.db");
 			expect(settings.get("mnemopi.scoping")).toBe("global");
+			settings.set("display.showTokenUsage", true);
+			await settings.flush();
+			const reloaded = await Settings.loadIsolated({ cwd: projectDir, agentDir });
+			expect(reloaded.get("memory.backend")).toBe("mnemopi");
+			expect(reloaded.get("mnemopi.dbPath")).toBe("/tmp/old.db");
+			expect(reloaded.get("mnemopi.scoping")).toBe("global");
 		});
 
 		it("does not clobber an explicit mnemopi block when the legacy mnemosyne block is also present", async () => {
@@ -1163,6 +1169,39 @@ describe("Settings", () => {
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
 			expect(settings.get("mnemopi.dbPath")).toBe("/tmp/new.db");
+		});
+
+		it("keeps Mnemosyne OSS settings unchanged across load, save, and reload", async () => {
+			await writeSettings({
+				memory: { backend: "mnemosyne-oss" },
+				"mnemosyne-oss": {
+					dataDir: "shared-memory-store",
+					bank: "team-notes",
+					scoping: "per-project-tagged",
+					ownership: "shared",
+					autoRetain: false,
+					localEmbeddings: false,
+				},
+			});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("memory.backend")).toBe("mnemosyne-oss");
+			expect(settings.get("mnemosyne-oss.dataDir")).toBe("shared-memory-store");
+			expect(settings.get("mnemosyne-oss.bank")).toBe("team-notes");
+			expect(settings.get("mnemosyne-oss.scoping")).toBe("per-project-tagged");
+			expect(settings.get("mnemosyne-oss.autoRetain")).toBe(false);
+			expect(settings.get("mnemosyne-oss.localEmbeddings")).toBe(false);
+
+			settings.set("display.showTokenUsage", true);
+			await settings.flush();
+			const reloaded = await Settings.loadIsolated({ cwd: projectDir, agentDir });
+			expect(reloaded.get("memory.backend")).toBe("mnemosyne-oss");
+			expect(reloaded.get("mnemosyne-oss.dataDir")).toBe("shared-memory-store");
+			expect(reloaded.get("mnemosyne-oss.bank")).toBe("team-notes");
+			expect(reloaded.get("mnemosyne-oss.scoping")).toBe("per-project-tagged");
+			expect(reloaded.get("mnemosyne-oss.ownership")).toBe("shared");
+			expect(reloaded.get("mnemosyne-oss.autoRetain")).toBe(false);
+			expect(reloaded.get("mnemosyne-oss.localEmbeddings")).toBe(false);
 		});
 
 		it("migrates boolean task.eager/todo.eager true to always", async () => {

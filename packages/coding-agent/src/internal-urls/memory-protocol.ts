@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getAgentDir, isEnoent } from "@oh-my-pi/pi-utils";
 import { getMemoryRoot } from "../memories";
+import { HINDSIGHT_MEMORY_URL_MESSAGE, type MemoryBackendRecord, resolveAliasedState } from "../memory-backend";
 import { getMnemopiSessionState, type MnemopiScopedMemoryHit, type MnemopiSessionState } from "../mnemopi/state";
 import { AgentRegistry } from "../registry/agent-registry";
 import { isMarkdownPath } from "../utils/lang-from-path";
@@ -214,7 +215,7 @@ function mnemopiSessionStatesFromRegistry(): MnemopiSessionState[] {
 		if (!session) continue;
 		const state = getMnemopiSessionState(session);
 		if (!state) continue;
-		const primary = state.aliasOf ?? state;
+		const primary = resolveAliasedState(state);
 		if (seen.has(primary)) continue;
 		seen.add(primary);
 		states.push(primary);
@@ -247,35 +248,51 @@ function tryResolveMnemopiMemory(id: string): MnemopiScopedMemoryHit | null {
 }
 
 /**
- * Render a mnemopi memory row as text/markdown with a small YAML-front-matter
- * header. The frontmatter carries the metadata an agent needs to reason about
- * a working vs episodic memory (bank, store, timestamps, importance) without
- * having to reconstruct it from the recall preview.
+ * Render an exact backend record as text/markdown with a small YAML-front-matter
+ * header. The record carries the metadata an agent needs to reason about its
+ * storage location and mutability before issuing a memory edit.
  */
-function renderMnemopiMemory(url: InternalUrl, hit: MnemopiScopedMemoryHit): InternalResource {
-	const { row, bank, store } = hit;
-	const meta = row.metadata == null ? "" : `metadata: ${JSON.stringify(row.metadata)}\n`;
+function renderMemoryRecord(url: InternalUrl, record: MemoryBackendRecord): InternalResource {
+	const meta = record.metadata == null ? "" : `metadata: ${JSON.stringify(record.metadata)}\n`;
 	const header =
 		"---\n" +
-		`id: ${row.id}\n` +
-		`bank: ${bank}\n` +
-		`store: ${store}\n` +
-		(row.memory_type ? `memory_type: ${row.memory_type}\n` : "") +
-		(row.source ? `source: ${row.source}\n` : "") +
-		(row.timestamp ? `timestamp: ${row.timestamp}\n` : "") +
-		(row.created_at ? `created_at: ${row.created_at}\n` : "") +
-		(row.importance != null ? `importance: ${row.importance}\n` : "") +
-		(row.veracity ? `veracity: ${row.veracity}\n` : "") +
-		(row.session_id ? `session_id: ${row.session_id}\n` : "") +
+		`id: ${record.id}\n` +
+		(record.bank ? `bank: ${record.bank}\n` : "") +
+		(record.store ? `store: ${record.store}\n` : "") +
+		(record.memoryType ? `memory_type: ${record.memoryType}\n` : "") +
+		(record.source ? `source: ${record.source}\n` : "") +
+		(record.timestamp ? `timestamp: ${record.timestamp}\n` : "") +
+		(record.createdAt ? `created_at: ${record.createdAt}\n` : "") +
+		(record.importance != null ? `importance: ${record.importance}\n` : "") +
+		(record.veracity ? `veracity: ${record.veracity}\n` : "") +
+		(record.sessionId ? `session_id: ${record.sessionId}\n` : "") +
 		meta +
 		"---\n\n";
-	const content = `${header}${row.content}`;
+	const content = `${header}${record.content}`;
 	return {
 		url: url.href,
 		content,
 		contentType: "text/markdown",
 		size: Buffer.byteLength(content, "utf-8"),
 		notes: [],
+	};
+}
+
+function memoryBackendRecordFromMnemopiHit(hit: MnemopiScopedMemoryHit): MemoryBackendRecord {
+	return {
+		id: hit.row.id,
+		content: hit.row.content,
+		source: hit.row.source ?? undefined,
+		timestamp: hit.row.timestamp ?? undefined,
+		importance: hit.row.importance ?? undefined,
+		metadata: hit.row.metadata,
+		bank: hit.bank,
+		store: hit.store,
+		editable: hit.store !== "fact",
+		memoryType: hit.row.memory_type ?? undefined,
+		createdAt: hit.row.created_at ?? undefined,
+		veracity: hit.row.veracity ?? undefined,
+		sessionId: hit.row.session_id ?? undefined,
 	};
 }
 
@@ -305,6 +322,16 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 		// `memory_edit update` and lets agents inspect the full content of a
 		// clipped recall preview before overwriting it (issue #4443).
 		if (namespace !== MEMORY_NAMESPACE) {
+			const memory = context?.memory;
+			if (memory) {
+				const result = await memory.get(namespace);
+				if (result.status === "found" && result.record) return renderMemoryRecord(url, result.record);
+				throw new Error(
+					result.message ??
+						`Memory ${namespace} is not addressable by the active memory backend. Use \`recall\` to list available ids.`,
+				);
+			}
+
 			const mnemopiStates = mnemopiSessionStatesFromRegistry();
 			const hindsightActive =
 				backend === "hindsight" ||
@@ -319,17 +346,15 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 				// Return a corrective pointer so that stray read self-corrects in
 				// one turn instead of derailing on the generic namespace error
 				// (issue #7587).
-				throw new Error(
-					"Hindsight memories are not addressable via memory://. Recall results are final — use `recall` to search or `reflect` to synthesize. `read memory://<id>` is only available with memory.backend=mnemopi.",
-				);
+				throw new Error(HINDSIGHT_MEMORY_URL_MESSAGE);
 			}
 			if (mnemopiStates.length === 0) {
 				throw new Error(
-					`Unknown memory namespace: ${namespace}. Supported: ${MEMORY_NAMESPACE} (file-backed memory summary), or a mnemopi memory id when memory.backend=mnemopi is active.`,
+					`Unknown memory namespace: ${namespace}. Supported: ${MEMORY_NAMESPACE} (file-backed memory summary), or an exact memory id when memory.backend is mnemopi or mnemosyne-oss.`,
 				);
 			}
 			const hit = tryResolveMnemopiMemory(namespace);
-			if (hit) return renderMnemopiMemory(url, hit);
+			if (hit) return renderMemoryRecord(url, memoryBackendRecordFromMnemopiHit(hit));
 			throw new Error(
 				`Mnemopi memory ${namespace} not found in any scoped bank. Use \`recall\` to list available ids.`,
 			);
@@ -369,10 +394,10 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 		if (memoryRootsForContext(context).length > 0) {
 			completions.push({ value: MEMORY_NAMESPACE, description: "Project memory summary" });
 		}
-		if (mnemopiSessionStatesFromRegistry().length > 0) {
+		if (context?.memory || mnemopiSessionStatesFromRegistry().length > 0) {
 			completions.push({
 				value: "<memory-id>",
-				description: "Full mnemopi memory by id (from recall)",
+				description: "Full memory by id (from recall)",
 			});
 		}
 		return completions;

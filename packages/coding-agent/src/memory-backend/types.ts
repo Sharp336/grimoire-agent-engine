@@ -11,9 +11,28 @@ import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import type { HindsightSessionState } from "../hindsight/state";
 import type { MnemopiSessionState } from "../mnemopi/state";
+import type { MnemosyneOssSessionState } from "../mnemosyne-oss/state";
 import type { AgentSession } from "../session/agent-session";
 
-export type MemoryBackendId = "off" | "local" | "hindsight" | "mnemopi";
+export type MemoryBackendId = "off" | "local" | "hindsight" | "mnemopi" | "mnemosyne-oss";
+
+export type MemoryBackendCapability = "recall" | "retain" | "reflect" | "exact-read" | "edit";
+
+export interface MemoryBackendRecord {
+	id: string;
+	content: string;
+	source?: string;
+	timestamp?: string;
+	importance?: number;
+	metadata?: unknown;
+	bank?: string;
+	store?: string;
+	editable?: boolean;
+	memoryType?: string;
+	createdAt?: string;
+	veracity?: string;
+	sessionId?: string;
+}
 
 export interface MemoryBackendStatus {
 	backend: MemoryBackendId;
@@ -23,12 +42,19 @@ export interface MemoryBackendStatus {
 	scope?: string;
 	retainBank?: string;
 	recallBanks?: string[];
+	ownership?: "omp" | "shared";
 	workingCount?: number;
 	episodicCount?: number;
 	tripleCount?: number;
 	lastMemory?: string;
 	lastRecall?: boolean;
 	database?: string;
+	databases?: string[];
+	sdkVersion?: string;
+	pythonVersion?: string;
+	embeddingMode?: "local" | "lexical";
+	consolidationMode?: "local" | "heuristic";
+	clearMode?: string;
 	message?: string;
 	error?: string;
 }
@@ -45,6 +71,7 @@ export interface MemoryBackendSearchItem {
 	source?: string;
 	timestamp?: string;
 	score?: number;
+	bank?: string;
 }
 
 export interface MemoryBackendSearchResult {
@@ -52,6 +79,11 @@ export interface MemoryBackendSearchResult {
 	query: string;
 	count: number;
 	items: MemoryBackendSearchItem[];
+	/**
+	 * Backend-specific display text retained for agent-facing tool compatibility.
+	 * Structured consumers should use {@link items}.
+	 */
+	rendered?: string;
 	message?: string;
 }
 
@@ -70,6 +102,43 @@ export interface MemoryBackendSaveResult {
 	message?: string;
 }
 
+export interface MemoryBackendGetResult {
+	backend: MemoryBackendId;
+	id: string;
+	status: "found" | "not_found" | "not_addressable";
+	record?: MemoryBackendRecord;
+	message?: string;
+}
+
+export type MemoryBackendEditOperation = "update" | "forget" | "invalidate";
+
+export interface MemoryBackendEditOptions {
+	content?: string;
+	importance?: number;
+	replacementId?: string;
+}
+
+export interface MemoryBackendEditResult {
+	backend: MemoryBackendId;
+	id: string;
+	status: "updated" | "deleted" | "invalidated" | "not_found" | "not_editable";
+	bank?: string;
+	store?: string;
+	message?: string;
+}
+
+export interface MemoryBackendReflectOptions {
+	context?: string;
+	signal?: AbortSignal;
+}
+
+export interface MemoryBackendReflectResult {
+	backend: MemoryBackendId;
+	query: string;
+	text: string;
+	count: number;
+}
+
 export interface MemoryBackendOperationContext {
 	agentDir: string;
 	cwd: string;
@@ -80,6 +149,13 @@ export interface MemoryRuntimeContext {
 	status(): Promise<MemoryBackendStatus>;
 	search(query: string, options?: MemoryBackendSearchOptions): Promise<MemoryBackendSearchResult>;
 	save(input: string | MemoryBackendSaveInput): Promise<MemoryBackendSaveResult>;
+	get(id: string): Promise<MemoryBackendGetResult>;
+	edit(
+		op: MemoryBackendEditOperation,
+		id: string,
+		options?: MemoryBackendEditOptions,
+	): Promise<MemoryBackendEditResult>;
+	reflect(query: string, options?: MemoryBackendReflectOptions): Promise<MemoryBackendReflectResult>;
 }
 
 export interface MemoryBackendStartOptions {
@@ -90,6 +166,7 @@ export interface MemoryBackendStartOptions {
 	taskDepth: number;
 	parentHindsightSessionState?: HindsightSessionState;
 	parentMnemopiSessionState?: MnemopiSessionState;
+	parentMnemosyneOssSessionState?: MnemosyneOssSessionState;
 }
 
 export interface MemoryBackend {
@@ -97,7 +174,6 @@ export interface MemoryBackend {
 
 	/**
 	 * Wire any background work or session subscriptions for this backend.
-	 *
 	 * Called once per agent session at startup. Implementations MUST be
 	 * non-throwing: failures should be logged and swallowed so a misconfigured
 	 * memory backend cannot break the agent loop.
@@ -132,6 +208,24 @@ export interface MemoryBackend {
 
 	/** Explicit user-facing save operation. */
 	save?(context: MemoryBackendOperationContext, input: MemoryBackendSaveInput): Promise<MemoryBackendSaveResult>;
+
+	/** Fetch an exact, full-content memory row by stable identifier. */
+	get?(context: MemoryBackendOperationContext, id: string): Promise<MemoryBackendGetResult>;
+
+	/** Mutate an addressable memory row. */
+	edit?(
+		context: MemoryBackendOperationContext,
+		op: MemoryBackendEditOperation,
+		id: string,
+		options?: MemoryBackendEditOptions,
+	): Promise<MemoryBackendEditResult>;
+
+	/** Synthesize an answer over recalled memory without altering it. */
+	reflect?(
+		context: MemoryBackendOperationContext,
+		query: string,
+		options?: MemoryBackendReflectOptions,
+	): Promise<MemoryBackendReflectResult>;
 
 	/** Render backend-specific memory statistics as markdown (`/memory stats`). */
 	stats?(agentDir: string, cwd: string, session?: AgentSession): Promise<string | undefined>;

@@ -1,8 +1,11 @@
 import type { AgentSession } from "../session/agent-session";
 import { resolveMemoryBackend } from "./resolve";
 import type {
+	MemoryBackendEditOperation,
+	MemoryBackendEditOptions,
 	MemoryBackendId,
 	MemoryBackendOperationContext,
+	MemoryBackendReflectOptions,
 	MemoryBackendSaveInput,
 	MemoryBackendSearchOptions,
 	MemoryRuntimeContext,
@@ -46,6 +49,27 @@ export function createMemoryRuntimeContext(context: MemoryBackendOperationContex
 				? await backend.save(context, normalized)
 				: unavailableSave(backend.id, `Memory save is not available for the ${backend.id} backend.`);
 		},
+		async get(id: string) {
+			if (!settings) return unavailableGet("off", id, "No active agent session.");
+			const backend = await resolveMemoryBackend(settings);
+			return backend.get
+				? await backend.get(context, id)
+				: unavailableGet(backend.id, id, `Memory exact reads are not available for the ${backend.id} backend.`);
+		},
+		async edit(op: MemoryBackendEditOperation, id: string, options?: MemoryBackendEditOptions) {
+			if (!settings) return unavailableEdit("off", id, "No active agent session.");
+			const backend = await resolveMemoryBackend(settings);
+			return backend.edit
+				? await backend.edit(context, op, id, options)
+				: unavailableEdit(backend.id, id, `Memory editing is not available for the ${backend.id} backend.`);
+		},
+		async reflect(query: string, options?: MemoryBackendReflectOptions) {
+			if (!settings) return unavailableReflect("off", query, "No active agent session.");
+			const backend = await resolveMemoryBackend(settings);
+			return backend.reflect
+				? await backend.reflect(context, query, options)
+				: unavailableReflect(backend.id, query, `Memory reflect is not available for the ${backend.id} backend.`);
+		},
 	};
 }
 
@@ -63,4 +87,16 @@ function unavailableSearch(backend: MemoryBackendId, query: string, message: str
 
 function unavailableSave(backend: MemoryBackendId, message: string) {
 	return { backend, stored: 0, message };
+}
+
+function unavailableGet(backend: MemoryBackendId, id: string, message: string) {
+	return { backend, id, status: "not_addressable" as const, message };
+}
+
+function unavailableEdit(backend: MemoryBackendId, id: string, message: string) {
+	return { backend, id, status: "not_editable" as const, message };
+}
+
+function unavailableReflect(backend: MemoryBackendId, query: string, message: string) {
+	return { backend, query, text: message, count: 0 };
 }

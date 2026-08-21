@@ -118,6 +118,13 @@ const CONDITIONS: Record<string, () => boolean> = {
 			return false;
 		}
 	},
+	mnemosyneOssActive: () => {
+		try {
+			return Settings.instance.get("memory.backend") === "mnemosyne-oss";
+		} catch {
+			return false;
+		}
+	},
 	autolearnActive: () => {
 		try {
 			return Settings.instance.get("autolearn.enabled") === true;

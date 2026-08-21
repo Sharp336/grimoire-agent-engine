@@ -3,7 +3,8 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { mkdirSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { computeMnemopiBankScope, extendRecallWithLegacyBanks } from "@oh-my-pi/pi-coding-agent/mnemopi/config";
+import { computeMemoryBankScope } from "@oh-my-pi/pi-coding-agent/memory-backend";
+import { extendRecallWithLegacyBanks } from "@oh-my-pi/pi-coding-agent/mnemopi/config";
 import { removeWithRetries, TempDir } from "@oh-my-pi/pi-utils";
 
 // Set up a fixture filesystem we can reuse across the two regression
@@ -51,7 +52,7 @@ function createBankFixture(bank: string, metadataRows: readonly Record<string, u
 	}
 }
 
-describe("computeMnemopiBankScope (#2412)", () => {
+describe("computeMemoryBankScope (#2412)", () => {
 	// Regression: same cwd must hash to the same bank no matter what the
 	// ambient git layout looks like. The previous derivation walked
 	// `git.repo.resolveSync(cwd)?.repoRoot ?? path.resolve(cwd)`, so a
@@ -62,18 +63,18 @@ describe("computeMnemopiBankScope (#2412)", () => {
 		try {
 			const project = baseDir.join("projects", "omp-workstation");
 			await fs.mkdir(project, { recursive: true });
-			const withoutGit = computeMnemopiBankScope(undefined, project, "per-project").bank;
+			const withoutGit = computeMemoryBankScope(undefined, project, "per-project").bank;
 
 			// Plant an ancestor `.git` marker — the old code path resolved
 			// `project` to `baseDir/projects` via this file, producing a
 			// `projects-<hash>` bank id distinct from the cwd-derived one.
 			await fs.mkdir(baseDir.join("projects"), { recursive: true });
 			await fs.writeFile(baseDir.join("projects", ".git"), "gitdir: /dev/null\n");
-			const withAncestorGit = computeMnemopiBankScope(undefined, project, "per-project").bank;
+			const withAncestorGit = computeMemoryBankScope(undefined, project, "per-project").bank;
 			expect(withAncestorGit).toBe(withoutGit);
 
 			await removeWithRetries(baseDir.join("projects", ".git"));
-			const afterGitRemoved = computeMnemopiBankScope(undefined, project, "per-project").bank;
+			const afterGitRemoved = computeMemoryBankScope(undefined, project, "per-project").bank;
 			expect(afterGitRemoved).toBe(withoutGit);
 		} finally {
 			await Bun.sleep(0);
@@ -82,23 +83,34 @@ describe("computeMnemopiBankScope (#2412)", () => {
 	});
 
 	it("derives different banks for different cwds (sanity)", () => {
-		const a = computeMnemopiBankScope(undefined, "/projects/repo-a", "per-project").bank;
-		const b = computeMnemopiBankScope(undefined, "/projects/repo-b", "per-project").bank;
+		const a = computeMemoryBankScope(undefined, "/projects/repo-a", "per-project").bank;
+		const b = computeMemoryBankScope(undefined, "/projects/repo-b", "per-project").bank;
 		expect(a).not.toBe(b);
 	});
 
 	it("per-project-tagged opens both the project bank and the shared default", () => {
-		const scope = computeMnemopiBankScope(undefined, "/projects/repo", "per-project-tagged");
+		const scope = computeMemoryBankScope(undefined, "/projects/repo", "per-project-tagged");
 		expect(scope.retainBank).toBe(scope.bank);
 		expect(scope.recallBanks).toContain(scope.bank);
 		expect(scope.recallBanks).toContain("default");
 	});
 
 	it("global ignores the cwd entirely", () => {
-		const here = computeMnemopiBankScope(undefined, "/projects/here", "global");
-		const there = computeMnemopiBankScope(undefined, "/elsewhere", "global");
+		const here = computeMemoryBankScope(undefined, "/projects/here", "global");
+		const there = computeMemoryBankScope(undefined, "/elsewhere", "global");
 		expect(here).toEqual(there);
 		expect(here.bank).toBe("default");
+	});
+
+	it("normalizes and bounds configured bank names deterministically", () => {
+		const configured = `  shared bank/${"x".repeat(96)}  `;
+		const first = computeMemoryBankScope(configured, "/projects/repo", "per-project-tagged");
+		const second = computeMemoryBankScope(configured, "/projects/repo", "per-project-tagged");
+
+		expect(first).toEqual(second);
+		expect(first.baseBank).toMatch(/^[a-zA-Z0-9_-]+$/);
+		expect(first.baseBank.length).toBeLessThanOrEqual(64);
+		expect(first.bank.length).toBeLessThanOrEqual(64);
 	});
 });
 

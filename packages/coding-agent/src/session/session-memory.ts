@@ -8,6 +8,7 @@ import type { HindsightSessionState } from "../hindsight/state";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
 import type { MemoryBackendStartOptions } from "../memory-backend/types";
 import type { MnemopiSessionState } from "../mnemopi/state";
+import type { MnemosyneOssSessionState } from "../mnemosyne-oss/state";
 
 /** Capabilities borrowed from the owning AgentSession. */
 export interface SessionMemoryHost {
@@ -20,6 +21,8 @@ export interface SessionMemoryHost {
 	setHindsightSessionState(state: HindsightSessionState | undefined): void;
 	getMnemopiSessionState(): MnemopiSessionState | undefined;
 	takeMnemopiSessionState(): MnemopiSessionState | undefined;
+	getMnemosyneOssSessionState(): MnemosyneOssSessionState | undefined;
+	takeMnemosyneOssSessionState(): MnemosyneOssSessionState | undefined;
 	setBaseSystemPrompt(prompt: string[]): void;
 	refreshBaseSystemPrompt(): Promise<void>;
 	replaceMemoryTools(tools: AgentTool[]): Promise<void>;
@@ -77,6 +80,7 @@ export class SessionMemory {
 	rekeyForCurrentSessionId(): void {
 		this.#rekeyHindsightMemoryForCurrentSessionId();
 		this.#rekeyMnemopiMemoryForCurrentSessionId();
+		this.#rekeyMnemosyneOssMemoryForCurrentSessionId();
 	}
 
 	#rekeyHindsightMemoryForCurrentSessionId(): void {
@@ -91,6 +95,15 @@ export class SessionMemory {
 		const sid = this.#host.agent.sessionId;
 		if (!sid) return;
 		this.#host.getMnemopiSessionState()?.setSessionId(sid);
+	}
+	#rekeyMnemosyneOssMemoryForCurrentSessionId(): void {
+		if (this.#host.settings.get("memory.backend") !== "mnemosyne-oss") return;
+		const state = this.#host.getMnemosyneOssSessionState();
+		const sessionId = this.#host.agent.sessionId;
+		if (!state || state.aliasOf || !sessionId || state.sessionId === sessionId) return;
+		void this.applyMemoryBackend().catch(error => {
+			logger.warn("Memory lifecycle: Mnemosyne OSS session rekey failed", { error: String(error) });
+		});
 	}
 
 	/** New session file: reset auto-recall / retain-threshold counters for the new transcript. */
@@ -110,16 +123,27 @@ export class SessionMemory {
 		return true;
 	}
 
+	#resetMnemosyneOssConversationTrackingIfMnemosyneOss(): boolean {
+		if (this.#host.settings.get("memory.backend") !== "mnemosyne-oss") return false;
+		const state = this.#host.getMnemosyneOssSessionState();
+		if (!state || state.aliasOf) return false;
+		state.lastRetainedTurn = 0;
+		state.hasRecalledForFirstTurn = false;
+		state.lastRecallSnippet = undefined;
+		return true;
+	}
+
 	/** Resets transcript-scoped memory counters and removes a promoted prompt. */
 	async resetContextForNewTranscript(): Promise<void> {
 		const hadPromotedMemoryPrompt = this.#baseSystemPromptBeforeMemoryPromotion !== undefined;
 		const resetHindsight = this.#resetHindsightConversationTrackingIfHindsight();
 		const resetMnemopi = this.#resetMnemopiConversationTrackingIfMnemopi();
+		const resetMnemosyneOss = this.#resetMnemosyneOssConversationTrackingIfMnemosyneOss();
 		if (hadPromotedMemoryPrompt) {
 			this.#host.setBaseSystemPrompt(this.#baseSystemPromptBeforeMemoryPromotion!);
 			this.#baseSystemPromptBeforeMemoryPromotion = undefined;
 		}
-		if (resetHindsight || resetMnemopi || hadPromotedMemoryPrompt) {
+		if (resetHindsight || resetMnemopi || resetMnemosyneOss || hadPromotedMemoryPrompt) {
 			await this.#host.refreshBaseSystemPrompt();
 		}
 	}
@@ -162,6 +186,15 @@ export class SessionMemory {
 				await mnemopi.dispose({ consolidate: consolidateMnemopi });
 			} catch (error) {
 				logger.warn("Memory lifecycle: Mnemopi dispose failed", { error: String(error) });
+			}
+		}
+
+		const mnemosyneOss = this.#host.takeMnemosyneOssSessionState();
+		if (mnemosyneOss) {
+			try {
+				await mnemosyneOss.dispose();
+			} catch (error) {
+				logger.warn("Memory lifecycle: Mnemosyne OSS dispose failed", { error: String(error) });
 			}
 		}
 	}

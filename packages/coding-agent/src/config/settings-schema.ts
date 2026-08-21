@@ -2736,18 +2736,19 @@ export const SETTINGS_SCHEMA = {
 
 	"memories.summaryInjectionTokenLimit": { type: "number", default: 5000 },
 
-	// Memory backend selector — picks between local memories pipeline,
-	// Mnemopi local SQLite, Hindsight remote memory, or off. The legacy
-	// `memories.enabled` flag is migration input only; see config/settings.ts.
+	// Memory backend selector — picks between the local memories pipeline,
+	// Mnemopi local SQLite, Mnemosyne OSS local SQLite, Hindsight remote memory,
+	// or off. The legacy `memories.enabled` flag is migration input only; see
+	// config/settings.ts.
 	"memory.backend": {
 		type: "enum",
-		values: ["off", "local", "hindsight", "mnemopi"] as const,
+		values: ["off", "local", "hindsight", "mnemopi", "mnemosyne-oss"] as const,
 		default: "off",
 		ui: {
 			tab: "memory",
 			group: "General",
 			label: "Memory Backend",
-			description: "Off, local summary pipeline, Mnemopi SQLite, or Hindsight remote memory",
+			description: "Off, local summary pipeline, Mnemopi SQLite, Mnemosyne OSS SQLite, or Hindsight remote memory",
 			options: [
 				{ value: "off", label: "Off", description: "No memory subsystem runs" },
 				{ value: "local", label: "Local", description: "Local rollout summarisation pipeline (memory_summary.md)" },
@@ -2756,6 +2757,11 @@ export const SETTINGS_SCHEMA = {
 					value: "mnemopi",
 					label: "Mnemopi",
 					description: "Local SQLite recall/retain backend with optional embeddings",
+				},
+				{
+					value: "mnemosyne-oss",
+					label: "Mnemosyne OSS",
+					description: "User-managed Mnemosyne Python SDK with interoperable local SQLite banks",
 				},
 			],
 		},
@@ -3032,6 +3038,181 @@ export const SETTINGS_SCHEMA = {
 	"mnemopi.recallMaxQueryChars": { type: "number", default: 4000 },
 	"mnemopi.injectionTokenLimit": { type: "number", default: 5000 },
 	"mnemopi.debug": { type: "boolean", default: false },
+
+	// Mnemosyne OSS local SQLite memory backend. The Python SDK is user-managed;
+	// OMP never installs it and never forwards provider credentials to it.
+	"mnemosyne-oss.executable": {
+		type: "string",
+		default: "",
+		ui: {
+			tab: "memory",
+			group: "Mnemosyne OSS",
+			label: "Python executable",
+			description:
+				"Optional Python interpreter with mnemosyne-memory 4.x installed. Blank resolves the configured Python/PATH runtime.",
+			condition: "mnemosyneOssActive",
+		},
+	},
+	"mnemosyne-oss.dataDir": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "memory",
+			group: "Mnemosyne OSS",
+			label: "Store data directory",
+			description: "Shared Mnemosyne store directory. Defaults to MNEMOSYNE_DATA_DIR or ~/.hermes/mnemosyne/data.",
+			condition: "mnemosyneOssActive",
+		},
+	},
+	"mnemosyne-oss.bank": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "memory",
+			group: "Mnemosyne OSS",
+			label: "Bank",
+			description: "Optional shared bank base name. Per-project modes derive a stable project-local bank from it.",
+			condition: "mnemosyneOssActive",
+		},
+	},
+	"mnemosyne-oss.scoping": {
+		type: "enum",
+		values: ["global", "per-project", "per-project-tagged"] as const,
+		default: "per-project",
+		ui: {
+			tab: "memory",
+			group: "Mnemosyne OSS",
+			label: "Scoping",
+			description:
+				"global = one shared bank; per-project = isolated bank per cwd; per-project-tagged = project-local writes plus shared-bank recall",
+			options: [
+				{ value: "global", label: "Global", description: "One shared Mnemosyne bank for every project" },
+				{ value: "per-project", label: "Per project", description: "Project-local Mnemosyne bank per cwd" },
+				{
+					value: "per-project-tagged",
+					label: "Per project (tagged)",
+					description: "Write to a project-local bank and recall both project and shared banks",
+				},
+			],
+			condition: "mnemosyneOssActive",
+		},
+	},
+	"mnemosyne-oss.ownership": {
+		type: "enum",
+		values: ["shared", "omp"] as const,
+		default: "shared",
+		ui: {
+			tab: "memory",
+			group: "Mnemosyne OSS",
+			label: "Bank ownership",
+			description:
+				"Shared banks cannot be cleared by OMP. Choose OMP only for a non-default bank owned exclusively by OMP.",
+			options: [
+				{ value: "shared", label: "Shared", description: "Safe default; OMP refuses destructive bank deletion" },
+				{ value: "omp", label: "OMP-owned", description: "Allows clearing this non-default bank" },
+			],
+			condition: "mnemosyneOssActive",
+		},
+	},
+	"mnemosyne-oss.autoRecall": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "memory",
+			group: "Mnemosyne OSS",
+			label: "Auto recall",
+			description: "Recall local memories into the first turn of each root session",
+			condition: "mnemosyneOssActive",
+		},
+	},
+	"mnemosyne-oss.autoRetain": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "memory",
+			group: "Mnemosyne OSS",
+			label: "Auto retain",
+			description: "Retain completed root-session conversation suffixes",
+			condition: "mnemosyneOssActive",
+		},
+	},
+	"mnemosyne-oss.localEmbeddings": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "memory",
+			group: "Mnemosyne OSS",
+			label: "Local embeddings",
+			description: "Use only local embeddings. Turn off for lexical-only recall; hosted embeddings are never used.",
+			condition: "mnemosyneOssActive",
+		},
+	},
+	"mnemosyne-oss.embeddingModel": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "memory",
+			group: "Mnemosyne OSS",
+			label: "Local embedding model",
+			description: "Optional local embedding model ID. Leave empty for the SDK default.",
+			condition: "mnemosyneOssActive",
+		},
+	},
+	"mnemosyne-oss.localConsolidation": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "memory",
+			group: "Mnemosyne OSS",
+			label: "Local consolidation model",
+			description:
+				"Permit consolidation with a local LLM only when a local LLM repository or file is also set. Off, or on without a local model path, uses Mnemosyne's no-LLM heuristic consolidation.",
+			condition: "mnemosyneOssActive",
+		},
+	},
+	"mnemosyne-oss.localLlmRepo": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "memory",
+			group: "Mnemosyne OSS",
+			label: "Local LLM repository",
+			description: "Optional local consolidation model repository; used only when local consolidation is on.",
+			condition: "mnemosyneOssActive",
+		},
+	},
+	"mnemosyne-oss.localLlmFile": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "memory",
+			group: "Mnemosyne OSS",
+			label: "Local LLM file",
+			description: "Optional local consolidation model file; used only when local consolidation is on.",
+			condition: "mnemosyneOssActive",
+		},
+	},
+	"mnemosyne-oss.autoMigrate": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "memory",
+			group: "Mnemosyne OSS",
+			label: "Allow schema migration",
+			description:
+				"Permit Mnemosyne schema migration. Shared databases are never migrated unless explicitly enabled.",
+			condition: "mnemosyneOssActive",
+		},
+	},
+	"mnemosyne-oss.retainEveryNTurns": { type: "number", default: 4 },
+	"mnemosyne-oss.recallLimit": { type: "number", default: 8 },
+	"mnemosyne-oss.recallContextTurns": { type: "number", default: 3 },
+	"mnemosyne-oss.recallMaxQueryChars": { type: "number", default: 4000 },
+	"mnemosyne-oss.injectionTokenLimit": { type: "number", default: 5000 },
+	"mnemosyne-oss.requestTimeoutMs": { type: "number", default: 30000 },
+	"mnemosyne-oss.sleepTimeoutMs": { type: "number", default: 120000 },
+	"mnemosyne-oss.shutdownTimeoutMs": { type: "number", default: 1500 },
+	"mnemosyne-oss.debug": { type: "boolean", default: false },
 
 	// Hindsight (https://hindsight.vectorize.io)
 	"hindsight.apiUrl": {
