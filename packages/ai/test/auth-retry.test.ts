@@ -8,7 +8,7 @@ import {
 	withAuth,
 	withOAuthAccess,
 } from "@oh-my-pi/pi-ai";
-import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import { OAuthError, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { KiroApiError } from "@oh-my-pi/pi-ai/providers/kiro/errors";
 
 function authError(status = 401): Error & { status: number } {
@@ -55,6 +55,25 @@ describe("isAuthRetryableError", () => {
 		expect(isAuthRetryableError(new KiroApiError("Kiro HTTP 429 Too many requests", 429))).toBe(false);
 		expect(isAuthRetryableError(new KiroApiError("Kiro HTTP 429 INSUFFICIENT_MODEL_CAPACITY", 429))).toBe(false);
 		expect(isAuthRetryableError(new KiroApiError("Kiro HTTP 429 quota exceeded", 429))).toBe(true);
+	});
+
+	it("retries typed token-refresh requests without treating other OAuth failures as retryable", () => {
+		expect(
+			isAuthRetryableError(
+				new OAuthError("OAuth token expired before request", {
+					kind: "token-refresh",
+					provider: "google-antigravity",
+				}),
+			),
+		).toBe(true);
+		expect(
+			isAuthRetryableError(
+				new OAuthError("OAuth provider is misconfigured", {
+					kind: "configuration",
+					provider: "google-antigravity",
+				}),
+			),
+		).toBe(false);
 	});
 
 	it("treats 401/403 and usage-limit phrasing as retryable, everything else as not", () => {
@@ -534,6 +553,64 @@ describe("withOAuthAccess", () => {
 		expect(result).toBe("proj-2");
 		expect(attempts.map(a => a.accessToken)).toEqual(["stale", "fresh"]);
 		expect(storage.calls).toEqual([{ forceRefresh: undefined }, { forceRefresh: true }]);
+	});
+
+	it("allows one token-refresh replay without rotating to a sibling", async () => {
+		const storage = fakeStorage({
+			initial: access("stale", { credentialId: 7 }),
+			forced: access("fresh", { credentialId: 7 }),
+			rotated: access("sibling", { credentialId: 8 }),
+		});
+		const firstError = new OAuthError("First token expired before request", {
+			kind: "token-refresh",
+			provider: "prov",
+		});
+		const secondError = new OAuthError("Refreshed token also expired before request", {
+			kind: "token-refresh",
+			provider: "prov",
+		});
+		const attempts: string[] = [];
+		await expect(
+			withOAuthAccess(storage, "prov", async a => {
+				attempts.push(a.accessToken);
+				throw attempts.length === 1 ? firstError : secondError;
+			}),
+		).rejects.toBe(secondError);
+
+		expect(attempts).toEqual(["stale", "fresh"]);
+		expect(storage.calls).toEqual([{ forceRefresh: undefined }, { forceRefresh: true }]);
+	});
+
+	it("honors a token-refresh request after an earlier 401 refresh", async () => {
+		const attempts: string[] = [];
+		const calls: Array<{ forceRefresh: boolean | undefined } | "rotate"> = [];
+		const forced = [access("fresh-but-expired", { credentialId: 7 }), access("renewed", { credentialId: 7 })];
+		const storage: OAuthAccessSource = {
+			async getOAuthAccess(_provider, _sessionId, options) {
+				calls.push({ forceRefresh: options?.forceRefresh });
+				if (options?.forceRefresh) return forced.shift();
+				return access("stale", { credentialId: 7 });
+			},
+			async rotateSessionCredential() {
+				calls.push("rotate");
+				return true;
+			},
+		};
+		const refreshRequest = new OAuthError("Refreshed token expired before request", {
+			kind: "token-refresh",
+			provider: "prov",
+		});
+
+		const result = await withOAuthAccess(storage, "prov", async a => {
+			attempts.push(a.accessToken);
+			if (a.accessToken === "stale") throw authError();
+			if (a.accessToken === "fresh-but-expired") throw refreshRequest;
+			return "ok";
+		});
+
+		expect(result).toBe("ok");
+		expect(attempts).toEqual(["stale", "fresh-but-expired", "renewed"]);
+		expect(calls).toEqual([{ forceRefresh: undefined }, { forceRefresh: true }, { forceRefresh: true }]);
 	});
 
 	it("tries a refreshed bearer for the same credential id on 401 before rotating", async () => {
