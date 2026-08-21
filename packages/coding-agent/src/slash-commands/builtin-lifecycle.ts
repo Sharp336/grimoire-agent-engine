@@ -137,24 +137,36 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		handle: async (command, runtime) => {
 			const parsed = parseCompactArgs(command.args);
 			if ("error" in parsed) return usage(parsed.error, runtime);
-			const before = runtime.session.getContextUsage?.();
-			const beforeTokens = before?.tokens;
-			try {
-				await runtime.session.compact(parsed.instructions, parsed.mode ? { mode: parsed.mode } : undefined);
-			} catch (err) {
-				// Compaction precondition failures (no model, already compacted, too
-				// small) and provider errors propagate as plain Errors; surface them
-				// via runtime.output so they don't fail the ACP prompt turn.
-				return usage(`Compaction failed: ${errorMessage(err)}`, runtime);
+			const runCompact = async (): Promise<void> => {
+				const before = runtime.session.getContextUsage?.();
+				const beforeTokens = before?.tokens;
+				try {
+					await runtime.session.compact(parsed.instructions, parsed.mode ? { mode: parsed.mode } : undefined);
+				} catch (err) {
+					// Compaction precondition failures (no model, already compacted, too
+					// small) and provider errors propagate as plain Errors; surface them
+					// via runtime.output so they don't fail the ACP prompt turn.
+					await runtime.output(`Compaction failed: ${errorMessage(err)}`);
+					return;
+				}
+				const after = runtime.session.getContextUsage?.();
+				const afterTokens = after?.tokens;
+				if (beforeTokens != null && afterTokens != null) {
+					const saved = beforeTokens - afterTokens;
+					await runtime.output(`Compaction complete. Tokens: ${beforeTokens} -> ${afterTokens} (saved ${saved}).`);
+				} else {
+					await runtime.output("Compaction complete.");
+				}
+			};
+			// `/compact` is provider-backed: it calls the model to summarize. RPC's
+			// prompt API must return immediately so its serialized command queue stays
+			// free for `abort` — the same contract `/handoff` uses. Hosts that omit the
+			// hook (ACP, TUI) keep the inline await.
+			if (runtime.runCommandInBackground) {
+				runtime.runCommandInBackground(runCompact);
+				return commandConsumed();
 			}
-			const after = runtime.session.getContextUsage?.();
-			const afterTokens = after?.tokens;
-			if (beforeTokens != null && afterTokens != null) {
-				const saved = beforeTokens - afterTokens;
-				await runtime.output(`Compaction complete. Tokens: ${beforeTokens} -> ${afterTokens} (saved ${saved}).`);
-			} else {
-				await runtime.output("Compaction complete.");
-			}
+			await runCompact();
 			return commandConsumed();
 		},
 		handleTui: async (command, runtime) => {
