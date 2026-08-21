@@ -672,12 +672,17 @@ describe("UiHelpers.renderInitialMessages — hidden tool activity", () => {
 });
 
 describe("async progress transcript rendering", () => {
-	it("uses the compact informational block on live and reusable transcript paths", async () => {
+	it("uses the expandable informational block on live and reusable transcript paths", async () => {
+		const progressLines = [
+			"first hidden",
+			"second hidden",
+			...Array.from({ length: 10 }, (_, index) => `visible ${index + 1}`),
+		];
+		const progressText = progressLines.join("\n");
 		const progressMessage = {
 			role: "custom",
 			customType: "async-progress",
-			content:
-				'<system-notice><job-progress id="job_42" type="process" elapsed="17m55s"><output>check e2e-tests-prod: fail</output></job-progress></system-notice>',
+			content: `<system-notice><job-progress id="job_42" type="process" elapsed="17m55s"><output>${progressText}</output></job-progress></system-notice>`,
 			display: true,
 			attribution: "agent",
 			details: {
@@ -686,7 +691,7 @@ describe("async progress transcript rendering", () => {
 						jobId: "job_42",
 						type: "process",
 						elapsedMs: 1_075_000,
-						text: "check e2e-tests-prod: fail",
+						text: progressText,
 					},
 				],
 			},
@@ -715,10 +720,25 @@ describe("async progress transcript rendering", () => {
 
 		for (const rendered of [liveRender, reusableRender]) {
 			expect(rendered).toContain("Background process progress job_42 (17m55s)");
-			expect(rendered).toContain("check e2e-tests-prod: fail");
+			expect(rendered).not.toContain("first hidden");
+			expect(rendered).toContain("visible 10");
+			expect(rendered).toContain("… 2 more lines");
+			expect(rendered).toContain("Ctrl+O");
 			expect(rendered).not.toContain("<system-notice>");
 			expect(rendered).not.toContain("<job-progress");
 			expect(rendered).not.toContain("async-progress");
+		}
+
+		const expandedLive = makeRenderCtx(transcriptWith([progressMessage]));
+		expandedLive.ctx.toolOutputExpanded = true;
+		await new UiHelpers(expandedLive.ctx).renderInitialMessages();
+		const expandedLiveRender = Bun.stripANSI(expandedLive.chatContainer.render(120).join("\n"));
+		reusable.setExpanded(true);
+		const expandedReusableRender = Bun.stripANSI(reusable.container.render(120).join("\n"));
+		for (const rendered of [expandedLiveRender, expandedReusableRender]) {
+			expect(rendered).toContain("first hidden");
+			expect(rendered).not.toContain("more lines");
+			expect(rendered).not.toContain("Ctrl+O");
 		}
 	});
 });

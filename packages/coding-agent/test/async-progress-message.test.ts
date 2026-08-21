@@ -95,6 +95,18 @@ describe("async progress messages", () => {
 		expect(rendered).toContain("Read artifact://chatty-output for full output");
 	});
 
+	test("hides progress rendering with other tool activity", () => {
+		const message = buildAsyncProgressBatchMessage([entry("bg_hidden", "working")]);
+		if (!message) throw new Error("Expected progress message");
+		const component = buildAsyncProgressBlock(message);
+
+		expect(component.render(100).length).toBeGreaterThan(0);
+		component.setToolActivityVisible(false);
+		expect(component.render(100)).toEqual([]);
+		component.setToolActivityVisible(true);
+		expect(Bun.stripANSI(component.render(100).join("\n"))).toContain("Background command progress bg_hidden");
+	});
+
 	test("routes chatty guidance to Bash without Hub-only controls", () => {
 		const message = buildAsyncProgressBatchMessage([
 			{
@@ -181,7 +193,9 @@ describe("async progress messages", () => {
 		);
 		expect(content(message)).toContain("TAIL\n</tail>\n</output>");
 		expect(content(message)).not.toContain("<output>\nHEAD");
-		const rendered = Bun.stripANSI(buildAsyncProgressBlock(message).render(100).join("\n"));
+		const component = buildAsyncProgressBlock(message);
+		component.setExpanded(true);
+		const rendered = Bun.stripANSI(component.render(100).join("\n"));
 		expect(rendered).toContain("HEAD");
 		expect(rendered).toContain("TAIL");
 		expect(rendered).toContain("[…progress truncated…]");
@@ -240,19 +254,56 @@ describe("async progress messages", () => {
 		expect(rendered).not.toContain("completed");
 	});
 
-	test("names the work instead of rendering an implementation badge", () => {
+	test("collapses terminal progress to ten lines and expands the retained preview", () => {
+		const output = [
+			"first hidden",
+			"second hidden",
+			...Array.from({ length: 10 }, (_, index) => `visible ${index + 1}`),
+		];
+		const message = buildAsyncProgressBatchMessage([entry("bg_expand", output.join("\n"))]);
+		if (!message) throw new Error("Expected progress message");
+		const component = buildAsyncProgressBlock(message);
+
+		const collapsed = Bun.stripANSI(component.render(100).join("\n"));
+		expect(collapsed).not.toContain("first hidden");
+		expect(collapsed).not.toContain("second hidden");
+		expect(collapsed).toContain("visible 1");
+		expect(collapsed).toContain("visible 10");
+		expect(collapsed).toContain("… 2 more lines");
+		expect(collapsed).toContain("Ctrl+O");
+
+		component.setExpanded(true);
+		const expanded = Bun.stripANSI(component.render(100).join("\n"));
+		expect(expanded).toContain("first hidden");
+		expect(expanded).toContain("second hidden");
+		expect(expanded).not.toContain("more lines");
+		expect(expanded).not.toContain("Ctrl+O");
+	});
+
+	test("renders successful Bash completion with its exit value", () => {
 		const runningJob = job("bg_8");
+		const completedJob: AsyncJob = {
+			...runningJob,
+			status: "completed",
+			latestDetails: { exitCode: 0 },
+		};
 		const progressMessage = buildAsyncProgressBatchMessage([{ ...entry("bg_8", "working"), job: runningJob }]);
 		const completionMessage = buildAsyncResultBatchMessage([
-			{ jobId: "bg_8", result: "done", job: runningJob, durationMs: 5_000, epoch: 0 },
+			{ jobId: "bg_8", result: "done", job: completedJob, durationMs: 5_000, epoch: 0 },
 		]);
 		if (!progressMessage || !completionMessage) throw new Error("Expected progress and completion messages");
 
 		const progress = Bun.stripANSI(buildAsyncProgressBlock(progressMessage).render(80).join("\n"));
 		const completion = Bun.stripANSI(buildAsyncResultBlock(completionMessage).render(80).join("\n"));
 
+		expect(completionMessage.details?.jobs[0]).toMatchObject({
+			jobId: "bg_8",
+			status: "completed",
+			exitCode: 0,
+		});
+		expect(content(completionMessage)).toContain("Background job bg_8 (bg_8) completed with exit code 0.");
 		expect(progress).toContain("Background command progress bg_8");
-		expect(completion).toContain("Background command completed bg_8");
+		expect(completion).toContain("Background command completed bg_8 (exit 0)");
 		expect(progress).not.toContain("[bash]");
 		expect(completion).not.toContain("[bash]");
 	});
@@ -284,5 +335,36 @@ describe("async progress messages", () => {
 		expect(block.render(100)).toEqual([]);
 		block.setToolActivityVisible(true);
 		expect(Bun.stripANSI(block.render(100).join("\n"))).toContain("hidden progress line");
+	});
+
+	test("renders failed Bash completion in red with its exit value", () => {
+		const failedJob: AsyncJob = {
+			...job("bg_failed"),
+			status: "failed",
+			latestDetails: { exitCode: 7 },
+		};
+		const completionMessage = buildAsyncResultBatchMessage([
+			{
+				jobId: "bg_failed",
+				result: "Command exited with code 7",
+				job: failedJob,
+				durationMs: 5_000,
+				epoch: 0,
+			},
+		]);
+		if (!completionMessage) throw new Error("Expected completion message");
+
+		const raw = buildAsyncResultBlock(completionMessage).render(80).join("\n");
+		const rendered = Bun.stripANSI(raw);
+
+		expect(completionMessage.details?.jobs[0]).toMatchObject({
+			jobId: "bg_failed",
+			status: "failed",
+			exitCode: 7,
+		});
+		expect(content(completionMessage)).toContain("Background job bg_failed (bg_failed) failed with exit code 7.");
+		expect(rendered).toContain("Background command failed bg_failed (exit 7)");
+		expect(raw).toContain(theme.fg("error", `${theme.status.error} Background command failed`));
+		expect(raw).not.toContain(theme.fg("success", `${theme.status.done} Background command completed`));
 	});
 });

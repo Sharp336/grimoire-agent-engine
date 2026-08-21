@@ -475,7 +475,9 @@ export class ChatTranscriptBuilder {
 			return;
 		}
 		if (message.customType === "async-progress") {
-			this.container.addChild(buildAsyncProgressBlock(message));
+			const component = buildAsyncProgressBlock(message);
+			this.#trackExpandable(component);
+			this.container.addChild(component);
 			return;
 		}
 		if (message.customType === LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE) {

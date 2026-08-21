@@ -190,7 +190,9 @@ export class UiHelpers {
 						break;
 					}
 					if (message.customType === "async-progress") {
-						this.ctx.chatContainer.addChild(buildAsyncProgressBlock(message));
+						const component = buildAsyncProgressBlock(message);
+						component.setExpanded(this.ctx.toolOutputExpanded);
+						this.ctx.chatContainer.addChild(component);
 						break;
 					}
 					if (message.customType === LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE) {
