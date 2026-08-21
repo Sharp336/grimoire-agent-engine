@@ -1126,6 +1126,8 @@ describe("ModelHub", () => {
 				});
 
 				for (const ch of "qwen") hub.handleInput(ch);
+				// Typing focuses the model list; ← hands the arrows back to the sidebar.
+				hub.handleInput(LEFT);
 				hub.handleInput(DOWN); // All models → zero-local-match Featherless
 				expect(normalize(hub.render(220))).toContain("featherless ·");
 
