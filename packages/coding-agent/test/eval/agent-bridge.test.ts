@@ -93,4 +93,40 @@ describe("runEvalAgent", () => {
 		expect(result.data).toEqual({ status: "ok" });
 		expect(result.details).toMatchObject({ structured: true, schemaSource: "agent", schemaMode: "strict" });
 	});
+
+	it("charges eval-spawned subagent output to the current turn budget", async () => {
+		const subagentOutputTokens = 1234;
+		const agent: AgentDefinition = {
+			name: "task",
+			description: "Task agent",
+			systemPrompt: "Handle task",
+			source: "bundled",
+		};
+		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
+		vi.spyOn(taskExecutor, "runSubprocess").mockResolvedValue(
+			createResult({
+				usage: {
+					input: 0,
+					output: subagentOutputTokens,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: subagentOutputTokens,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+			}),
+		);
+		const recordEvalSubagentUsage = vi.fn();
+		const session = {
+			cwd: "/tmp",
+			settings: Settings.isolated(),
+			getSessionSpawns: () => "*",
+			getSessionFile: () => null,
+			recordEvalSubagentUsage,
+		} as unknown as ToolSession;
+
+		await runEvalAgent({ prompt: "do work", agent: "task" }, { session });
+
+		expect(recordEvalSubagentUsage).toHaveBeenCalledTimes(1);
+		expect(recordEvalSubagentUsage).toHaveBeenCalledWith(subagentOutputTokens);
+	});
 });
