@@ -39,6 +39,7 @@ import {
 	buildXaiOAuthStaticSeed,
 	clampFireworksKimiMaxTokens,
 	clampKimiK27CodeMaxTokens,
+	DEEPSEEK_VISION_STATIC_MODELS,
 	fetchWellKnownModels,
 	GMI_CLOUD_STATIC_MODELS,
 	isFireworksKimiK2ModelId,
@@ -683,6 +684,11 @@ async function generateModels() {
 	if (!authoritativeCatalogProviders.has("alibaba-token-plan")) {
 		allModels.unshift(...ALIBABA_TOKEN_PLAN_STATIC_MODELS);
 	}
+	// Seed DeepSeek's vision SKU ahead of stencil.so. unshift (not push): bundle
+	// dedup keeps earlier rows ("Earlier sources win" below), and a credentialed
+	// regen's live discovery row is sparse (cost 0, null limits) — it must not
+	// shadow the curated seed. Same rationale as the alibaba-token-plan seed above.
+	allModels.unshift(...DEEPSEEK_VISION_STATIC_MODELS);
 	allModels = applyUmansPricingFallback(allModels, modelsDevModels);
 	allModels = applyPremiumMultiplierOverrides(allModels);
 	allModels = applyCodexPricingFallback(allModels);

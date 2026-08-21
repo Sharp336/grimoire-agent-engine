@@ -1702,8 +1702,46 @@ export interface DeepSeekModelManagerConfig {
 export function deepseekModelManagerOptions(
 	config?: DeepSeekModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
-	return createSimpleOpenAICompletionsOptions("deepseek", "https://api.deepseek.com", config);
+	return createOpenAICompatibleModelManagerOptions({
+		api: "openai-completions",
+		providerId: "deepseek",
+		defaultBaseUrl: "https://api.deepseek.com",
+		config,
+		requireApiKey: true,
+		mapModel: (entry, defaults, reference) => {
+			const model = mapWithBundledReference(entry, defaults, reference);
+			// DeepSeek /models rows are bare ids, so an unreferenced vision SKU
+			// (deepseek-v4-flash-vision-exp, future -vision- ids) would default
+			// to text-only and the agent drops image input upstream. Every
+			// current non-vision DeepSeek id contains no "vision" token.
+			return defaults.id.toLowerCase().includes("vision") ? { ...model, input: ["text", "image"] } : model;
+		},
+	});
 }
+
+/**
+ * Seed DeepSeek's multimodal vision SKU so the bundled catalog resolves it
+ * before stencil.so picks the id up and before any credentialed discovery.
+ * Limits mirror the official model page (1M context / 384K output) in
+ * DeepSeek's binary units — the live API rejects max_tokens above 393216
+ * (384 × 1024), so 1M means 1,048,576. Cost is identical to deepseek-v4-flash
+ * per DeepSeek's pricing page. Thinking (low/high/max) and deepseekDirect
+ * compat quirks are derived by the generator's policy pass from the model id.
+ */
+export const DEEPSEEK_VISION_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
+	{
+		id: "deepseek-v4-flash-vision-exp",
+		name: "DeepSeek V4 Flash Vision Exp",
+		api: "openai-completions",
+		provider: "deepseek",
+		baseUrl: "https://api.deepseek.com",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0.14, output: 0.28, cacheRead: 0.0028, cacheWrite: 0 },
+		contextWindow: 1_048_576,
+		maxTokens: 393_216,
+	},
+];
 
 // ---------------------------------------------------------------------------
 // 6.6 SiliconFlow
