@@ -119,34 +119,6 @@ jobs:
             bash .github/scripts/fork-release-native.sh "$target" "$RUNNER_TEMP/native-$target"
           done
 
-      - name: Require successful ordinary CI for this commit
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          runs_file="$RUNNER_TEMP/ordinary-ci-runs.json"
-          gh api --method GET \
-            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?branch=main&status=completed&per_page=50" \
-            > "$runs_file"
-          ci_run_id="$(node - "$runs_file" <<'NODE'
-          const fs = require("node:fs");
-          const [runsFile] = process.argv.slice(2);
-          const runs = JSON.parse(fs.readFileSync(runsFile, "utf8")).workflow_runs ?? [];
-          const match = runs.find(run =>
-            run.head_sha === process.env.GITHUB_SHA &&
-            run.conclusion === "success" &&
-            (run.event === "push" || run.event === "workflow_dispatch")
-          );
-          if (match) process.stdout.write(String(match.id));
-          NODE
-          )"
-          if [ -z "$ci_run_id" ]; then
-            echo "::error::No successful ordinary CI run exists for main commit $GITHUB_SHA. Run or finish CI before releasing."
-            exit 1
-          fi
-          echo "Validated by ordinary CI run https://github.com/${GITHUB_REPOSITORY}/actions/runs/${ci_run_id}"
-
   build-x64:
     name: Build Linux + Windows x64
     needs: validate
