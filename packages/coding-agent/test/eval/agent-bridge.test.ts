@@ -3,8 +3,10 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { runEvalAgent } from "@oh-my-pi/pi-coding-agent/eval/agent-bridge";
 import type { LocalProtocolOptions } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as taskDiscovery from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as taskExecutor from "@oh-my-pi/pi-coding-agent/task/executor";
+import { runStructuredSubagent } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import type { AgentDefinition, SingleResult, StructuredSubagentOutput } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
@@ -24,6 +26,28 @@ function createResult(overrides: Partial<SingleResult> = {}): SingleResult {
 		requests: 0,
 		...overrides,
 	};
+}
+
+function createUsage(output: number) {
+	return {
+		input: 9_000,
+		output,
+		cacheRead: 8_000,
+		cacheWrite: 7_000,
+		totalTokens: 24_000 + output,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+}
+
+function createBudgetSession(sessionManager: SessionManager): ToolSession {
+	return {
+		cwd: "/tmp",
+		settings: Settings.isolated(),
+		getSessionSpawns: () => "*",
+		getSessionFile: () => null,
+		getTurnBudget: () => sessionManager.getTurnBudget(),
+		recordEvalSubagentUsage: (output: number) => sessionManager.recordEvalSubagentOutput(output),
+	} as unknown as ToolSession;
 }
 
 describe("runEvalAgent", () => {
@@ -128,5 +152,88 @@ describe("runEvalAgent", () => {
 
 		expect(recordEvalSubagentUsage).toHaveBeenCalledTimes(1);
 		expect(recordEvalSubagentUsage).toHaveBeenCalledWith(subagentOutputTokens);
+	});
+
+	it("updates the real turn budget by output tokens only", async () => {
+		const subagentOutputTokens = 1_234;
+		const turnBudgetTokens = 100_000;
+		const agent: AgentDefinition = {
+			name: "task",
+			description: "Task agent",
+			systemPrompt: "Handle task",
+			source: "bundled",
+		};
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.beginTurnBudget(turnBudgetTokens, true);
+		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
+		vi.spyOn(taskExecutor, "runSubprocess").mockResolvedValue(
+			createResult({ usage: createUsage(subagentOutputTokens) }),
+		);
+
+		await runEvalAgent({ prompt: "do work", agent: "task" }, { session: createBudgetSession(sessionManager) });
+
+		expect(sessionManager.getTurnBudget()).toEqual({
+			total: turnBudgetTokens,
+			spent: subagentOutputTokens,
+			hard: true,
+		});
+	});
+
+	it("charges output exactly once when an eval-spawned subagent returns an error", async () => {
+		const subagentOutputTokens = 2_345;
+		const agent: AgentDefinition = {
+			name: "task",
+			description: "Task agent",
+			systemPrompt: "Handle task",
+			source: "bundled",
+		};
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.beginTurnBudget(100_000, false);
+		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
+		vi.spyOn(taskExecutor, "runSubprocess").mockResolvedValue(
+			createResult({
+				exitCode: 1,
+				error: "agent failed",
+				stderr: "agent failed",
+				usage: createUsage(subagentOutputTokens),
+			}),
+		);
+
+		await expect(
+			runEvalAgent({ prompt: "do work", agent: "task" }, { session: createBudgetSession(sessionManager) }),
+		).rejects.toThrow("agent failed");
+
+		expect(sessionManager.getTurnBudget().spent).toBe(subagentOutputTokens);
+	});
+
+	it("does not route ordinary task subagents through the eval budget accumulator", async () => {
+		const subagentOutputTokens = 3_456;
+		const agent: AgentDefinition = {
+			name: "task",
+			description: "Task agent",
+			systemPrompt: "Handle task",
+			source: "bundled",
+		};
+		const recordEvalSubagentUsage = vi.fn();
+		const session = {
+			cwd: "/tmp",
+			settings: Settings.isolated(),
+			getSessionSpawns: () => "*",
+			getSessionFile: () => null,
+			recordEvalSubagentUsage,
+		} as unknown as ToolSession;
+		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
+		vi.spyOn(taskExecutor, "runSubprocess").mockResolvedValue(
+			createResult({ usage: createUsage(subagentOutputTokens) }),
+		);
+
+		await runStructuredSubagent({
+			session,
+			invocationKind: "task",
+			assignment: "do work",
+			agent: "task",
+		});
+
+		expect(recordEvalSubagentUsage).not.toHaveBeenCalled();
 	});
 });

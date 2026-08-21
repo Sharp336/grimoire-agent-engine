@@ -124,6 +124,8 @@ export interface IsolatedRunOptions {
 	 * build a result shape consistent with their non-isolated path.
 	 */
 	buildFailureResult: (err: unknown) => SingleResult;
+	/** Observe only a real child result returned by `runSubprocess`, before fallible post-run cleanup. */
+	onSubprocessResult?: (result: SingleResult) => void;
 }
 
 async function writeIsolationPatch(
@@ -172,6 +174,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				opts.baseOptions.onCleanupDeferred?.(completion);
 			},
 		});
+		opts.onSubprocessResult?.(result);
 		if (deferredCleanup) return result;
 		if (opts.mergeMode === "branch" && result.exitCode === 0) {
 			try {
