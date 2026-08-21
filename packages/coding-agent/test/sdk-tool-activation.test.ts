@@ -27,6 +27,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { VIBE_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/tools/vibe";
 import { logger, removeSyncWithRetries, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
+import { INITIALIZE_DELAY_MS, TOOL_NAME } from "./fixtures/delayed-tool-mcp";
 
 const toolActivationExtension: ExtensionFactory = pi => {
 	pi.registerTool({
@@ -1804,6 +1805,47 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			await session.dispose();
 		}
 	});
+
+	it("syncs a background MCP connection that lands before setOnToolsChanged is installed", async () => {
+		const tempDir = makeTempDir();
+		const ompDir = path.join(tempDir, ".omp");
+		fs.mkdirSync(ompDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(ompDir, "mcp.json"),
+			JSON.stringify({
+				mcpServers: {
+					delayed: {
+						type: "stdio",
+						command: process.execPath,
+						args: [path.join(import.meta.dir, "fixtures", "delayed-tool-mcp.ts")],
+					},
+				},
+			}),
+		);
+		// Blocking extension loading until after the fixture's INITIALIZE_DELAY_MS
+		// widens the window between the 250ms MCP startup snapshot and
+		// setOnToolsChanged installation: the delayed server finishes connecting
+		// inside it, so its tools-changed notification fires (and is dropped)
+		// before the session installs the callback.
+		const slowStartupExtension: ExtensionFactory = async () => {
+			await Bun.sleep(INITIALIZE_DELAY_MS + 300);
+		};
+
+		const { session, mcpManager } = await createAgentSession({
+			...baseOptions(tempDir),
+			enableMCP: true,
+			extensions: [slowStartupExtension],
+		});
+
+		try {
+			const toolName = `mcp__delayed_${TOOL_NAME}`;
+			expect(mcpManager?.getTools().map(tool => tool.name)).toContain(toolName);
+			expect(session.getAllToolNames()).toContain(toolName);
+			expect(session.getEnabledToolNames()).toContain(toolName);
+		} finally {
+			await session.dispose();
+		}
+	}, 15_000);
 
 	it("keeps restricted host tool lists isolated from configured custom capabilities", async () => {
 		const restrictedDir = makeTempDir();

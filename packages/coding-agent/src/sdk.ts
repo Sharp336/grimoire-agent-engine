@@ -3894,6 +3894,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					});
 				}
 			});
+			// A background connection may have completed between the initial
+			// discovery snapshot above and this callback installation. Its
+			// notification fired into the void, so re-sync once from the
+			// manager's current catalog.
+			await session.refreshMCPTools(mcpManager.getTools());
 			// Wire prompt refresh → rebuild MCP prompt slash commands
 			mcpManager.setOnPromptsChanged(serverName => {
 				const promptCommands = buildMCPPromptCommands(mcpManager);
