@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { Effort } from "@oh-my-pi/pi-ai";
 import {
 	type BlockState,
 	buildCursorHistoryForTest,
@@ -36,6 +35,7 @@ import {
 	ReadSuccessSchema,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import { create } from "@oh-my-pi/pi-catalog/discovery/protobuf";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { logger } from "@oh-my-pi/pi-utils";
 
 afterEach(() => {

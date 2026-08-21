@@ -8,6 +8,8 @@
 
 ### Fixed
 
+- Fixed Cursor Grok 4.5/4.6 (and Fast) effort selections being billed and served as the collapsed default Low sibling: `cursor-agent` now resolves `thinking.effortRouting` onto the outbound wire id (`cursor-grok-4.6-xhigh-fast` for xHigh Fast), matching Devin/Gemini CLI.
+- Fixed Cursor turns on non-reasoning models (e.g. Composer 2.5) throwing when a leftover SDK or global `reasoning` option was set; effort-to-wire-id routing now runs only when the model advertises reasoning.
 - Fixed OpenAI Codex requests failing with HTTP 401 data residency errors on enterprise ChatGPT workspaces when connecting from a different region via VPN or proxy.
 - Fixed concurrent xAI OAuth token refreshes revoking shared credentials across multiple processes.
 - Fixed Amazon Bedrock Converse multi-turn conversations failing on models like Amazon Nova due to unsigned reasoning content in replayed turns.
@@ -17,10 +19,6 @@
 - Fixed Google Cloud Code Assist and Antigravity rejecting MCP tool schemas with unsupported annotations (`x-mcp-header`, `deprecated`, `readOnly`, `writeOnly`, `$comment`).
 - Fixed Cursor provider issues with native file edit streaming (`editToolCall`) and ensuring always-apply system rules are properly preserved.
 - Fixed Cursor HTTP/2 requests ignoring standard proxy environment variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`).
-### Fixed
-
-- Fixed Cursor Grok 4.5/4.6 (and Fast) effort selections being billed and served as the collapsed default Low sibling: `cursor-agent` now resolves `thinking.effortRouting` onto the outbound wire id (`cursor-grok-4.6-xhigh-fast` for xHigh Fast), matching Devin/Gemini CLI.
-- Fixed Cursor turns on non-reasoning models (e.g. Composer 2.5) throwing when a leftover SDK or global `reasoning` option was set; effort-to-wire-id routing now runs only when the model advertises reasoning.
 
 ## [17.4.0] - 2026-08-20
 
