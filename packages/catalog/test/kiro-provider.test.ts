@@ -371,4 +371,19 @@ describe("Kiro provider discovery", () => {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
 	});
+	test("resolves exact tokenizers from model identity while keeping API context limits", async () => {
+		const options = kiroModelManagerOptions({
+			apiKey: JSON.stringify({ token: "tokenizer-token", apiEndpoint: API_ENDPOINT }),
+			fetch: jsonFetch(catalogResponse(["claude-opus-4-5", "gpt-5.6-luna"])),
+		});
+
+		const result = await resolveProviderModels(options, "online");
+		const claude = result.models.find(model => model.id === "claude-opus-4-5");
+		const gpt = result.models.find(model => model.id === "gpt-5.6-luna");
+
+		expect(claude?.tokenizer).toBe("claude-v3");
+		expect(gpt?.tokenizer).toBeUndefined();
+		expect(claude?.contextWindow).toBe(100_000);
+		expect(gpt?.contextWindow).toBe(100_000);
+	});
 });
