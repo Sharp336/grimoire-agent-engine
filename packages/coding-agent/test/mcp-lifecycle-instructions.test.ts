@@ -81,10 +81,36 @@ describe("MCP lazy lifecycle: tool-less servers", () => {
 		const second = new MCPManager(workDir, cache);
 		try {
 			await second.connectServers({ lazy: config }, {});
-			expect(second.getConnectionStatus("lazy")).toBe("disconnected");
+			expect(second.getConnectionStatus("lazy")).toBe("deferred");
 			expect(spawnCount(spawnLog)).toBe(1);
 		} finally {
 			await second.disconnectAll();
 		}
 	}, 20_000);
+	it("clears deferred state before a failed eager replacement", async () => {
+		const cache = inMemoryToolCache();
+		const lazy = lazyConfig({ lifecycle: "lazy" });
+		await cache.set("lazy", lazy, [{ name: "ping", inputSchema: { type: "object" } }]);
+
+		const manager = new MCPManager(workDir, cache);
+		try {
+			await manager.connectServers({ lazy }, {});
+			expect(manager.getConnectionStatus("lazy")).toBe("deferred");
+			expect(manager.getAllServerNames()).toContain("lazy");
+
+			const invalidEager = lazyConfig({ lifecycle: "eager" });
+			invalidEager.command = "";
+			const result = await manager.connectServers({ lazy: invalidEager }, {});
+			expect(result.errors.has("lazy")).toBe(true);
+			expect(manager.getConnectionStatus("lazy")).toBe("disconnected");
+			await manager.connectServers({ lazy }, {});
+			expect(manager.getConnectionStatus("lazy")).toBe("deferred");
+
+			const failingEager = lazyConfig({ lifecycle: "eager", crashBeforeInit: true });
+			await manager.connectServers({ lazy: failingEager }, {});
+			expect(manager.getConnectionStatus("lazy")).toBe("disconnected");
+		} finally {
+			await manager.disconnectAll();
+		}
+	}, 15_000);
 });
