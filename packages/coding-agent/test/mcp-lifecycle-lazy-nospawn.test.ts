@@ -92,6 +92,47 @@ describe("MCP lazy lifecycle: fresh cache does not spawn, expired cache revalida
 		}
 	}, 15_000);
 
+	it("keeps stale tools advertised when a fast revalidation failure rejects inside the startup gate", async () => {
+		const spawnLog = path.join(workDir, "fast-crash.log");
+		// Mutable cache clock: seed two hours ago, run at real time.
+		let nowMs = Date.now() - 2 * 60 * 60 * 1000;
+		let manager: MCPManager | undefined;
+		try {
+			const storage = await AgentStorage.open(path.join(workDir, "agent.db"));
+			const cache = new MCPToolCache(storage, () => nowMs);
+			const config = lazyConfig({
+				lifecycle: "lazy",
+				spawnLog,
+				// Crash before initialize so the connect rejects well inside the
+				// 250 ms startup gate.
+				crashBeforeInit: true,
+			});
+			await cache.set("lazy", config, [TOOL_DEF]);
+
+			// Advance past the one-hour freshness window.
+			nowMs = Date.now();
+
+			// Simulate AuthStorage startup hygiene: DB-expired rows are physically
+			// deleted, so only stale-in-payload retention can survive.
+			storage.cleanExpiredCache();
+
+			manager = new MCPManager(workDir, cache);
+			const result = await manager.connectServers({ lazy: config }, {});
+
+			// The revalidation spawned exactly once and failed fast.
+			expect(spawnCount(spawnLog)).toBe(1);
+			expect(result.errors.get("lazy")).toBeTruthy();
+			// Config-matching stale definitions still come back as recoverable
+			// deferred tools despite the rejection.
+			expect(hasServerTool(manager, "lazy")).toBe(true);
+			expect(result.tools.length).toBeGreaterThan(0);
+			expect(manager.getConnectionStatus("lazy")).toBe("deferred");
+		} finally {
+			await manager?.disconnectAll();
+			AgentStorage.resetInstance();
+		}
+	}, 15_000);
+
 	it("connects from a warm cache and stays live for tool-list changes", async () => {
 		const spawnLog = path.join(workDir, "list-changed.log");
 		const cache = inMemoryToolCache();

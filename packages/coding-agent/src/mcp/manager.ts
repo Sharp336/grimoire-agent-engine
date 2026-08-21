@@ -1008,14 +1008,14 @@ export class MCPManager {
 			]);
 
 			const cachedTools = new Map<string, MCPToolDefinition[]>();
-			const pendingTasks = connectionTasks.filter(task => task.tracked.status === "pending");
+			const unfulfilledTasks = connectionTasks.filter(task => task.tracked.status !== "fulfilled");
 
-			if (pendingTasks.length > 0 && this.toolCache) {
+			if (unfulfilledTasks.length > 0 && this.toolCache) {
 				await Promise.all(
-					pendingTasks.map(async task => {
+					unfulfilledTasks.map(async task => {
 						// Include stale entries: the freshness-lapsed row triggered
 						// revalidation above, so its config-matching stale definitions
-						// still advertise until the live handshake replaces them.
+						// still advertise until a live handshake replaces them.
 						const cached = await this.toolCache?.get(task.name, task.config, { includeStale: true });
 						if (cached) {
 							cachedTools.set(task.name, cached);
@@ -1049,12 +1049,15 @@ export class MCPManager {
 					connectedServers.add(name);
 					const reconnect = () => this.reconnectServer(name);
 					allTools.push(...MCPTool.fromTools(connection, serverTools, reconnect, this.#activityHooks(name)));
-				} else if (task.tracked.status === "rejected") {
-					const message =
-						task.tracked.reason instanceof Error ? task.tracked.reason.message : String(task.tracked.reason);
-					errors.set(name, message);
-					reportedErrors.add(name);
 				} else {
+					// Rejections still report the failure while retaining stale tools,
+					// whose reconnect callback can recover on first use.
+					if (task.tracked.status === "rejected") {
+						const message =
+							task.tracked.reason instanceof Error ? task.tracked.reason.message : String(task.tracked.reason);
+						errors.set(name, message);
+						reportedErrors.add(name);
+					}
 					const cached = cachedTools.get(name);
 					if (cached) {
 						const source = this.#sources.get(name);
