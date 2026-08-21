@@ -9,7 +9,7 @@ import type { MCPServerConfig, MCPToolDefinition } from "./types";
 
 const CACHE_VERSION = 1;
 const CACHE_PREFIX = "mcp_tools:";
-const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const CACHE_TTL_MS = 60 * 60 * 1000;
 
 type MCPToolCachePayload = {
 	version: number;

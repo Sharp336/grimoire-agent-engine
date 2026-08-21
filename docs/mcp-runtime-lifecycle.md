@@ -110,7 +110,7 @@ Each server may set `lifecycle` to `eager` or `lazy`. A per-server value overrid
 
 An eager server follows the connection pipeline above. A lazy server behaves according to its cache entry:
 
-- A warm tool cache with `requiresConnection: false` creates `DeferredMCPTool`s without starting a transport. The first tool call connects and replaces that server's deferred tools with live tools.
+- A warm tool cache with `requiresConnection: false` creates `DeferredMCPTool`s without starting a transport. The first tool call connects and replaces that server's deferred tools with live tools. Warm entries suppress startup for at most one hour; after expiry, the next startup performs one handshake to revalidate the entry and refresh tool definitions.
 - A cold cache connects once to discover and cache tools.
 - A cache entry that records prompts, resources, resource templates, or server instructions as live-only state connects at startup so that state remains available.
 
