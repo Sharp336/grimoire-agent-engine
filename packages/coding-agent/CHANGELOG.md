@@ -29,6 +29,7 @@
 - Settings menus now support click-to-toggle and drag-to-reorder for list items, as well as warning indicators and risk notes on sensitive options such as External Thinking.
 - Supervised process completion notices now render as compact single-line entries.
 - The todo HUD header now displays a consolidated progress bar showing task completion across all stages.
+- Retry fallback chains can now wait for a configurable number of same-model retries before switching providers or models.
 
 ### Fixed
 
