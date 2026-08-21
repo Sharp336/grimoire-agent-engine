@@ -80,8 +80,8 @@ async function resolveGoWorkspaceDiagnosticsCommand(cwd: string, signal?: AbortS
 	}
 }
 
-/** Detect project type from root markers. Exported for tests. */
-export async function detectProjectType(cwd: string, signal?: AbortSignal): Promise<ProjectType> {
+/** Detect project type from root markers. */
+async function detectProjectType(cwd: string, signal?: AbortSignal): Promise<ProjectType> {
 	// Check for Rust (Cargo.toml)
 	if (fs.existsSync(path.join(cwd, "Cargo.toml"))) {
 		return { type: "rust", command: ["cargo", "check", "--message-format=short"], description: "Rust (cargo check)" };
