@@ -113,6 +113,36 @@ function normalizeStoredIdentityKey(identityKey: string | null | undefined): str
 	return normalized && normalized.length > 0 ? normalized : null;
 }
 
+function jsonValuesHaveSameSemantics(left: unknown, right: unknown): boolean {
+	if (left === right) return true;
+	if (Array.isArray(left) || Array.isArray(right)) {
+		if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+		for (let index = 0; index < left.length; index += 1) {
+			if (!jsonValuesHaveSameSemantics(left[index], right[index])) return false;
+		}
+		return true;
+	}
+	if (left === null || right === null || typeof left !== "object" || typeof right !== "object") return false;
+	const leftObject = left as Record<string, unknown>;
+	const rightObject = right as Record<string, unknown>;
+	const leftKeys = Object.keys(leftObject);
+	if (leftKeys.length !== Object.keys(rightObject).length) return false;
+	for (const key of leftKeys) {
+		if (!Object.hasOwn(rightObject, key) || !jsonValuesHaveSameSemantics(leftObject[key], rightObject[key])) {
+			return false;
+		}
+	}
+	return true;
+}
+
+function credentialDataHasSameCanonicalSemantics(expectedData: string, actualData: string): boolean {
+	try {
+		return jsonValuesHaveSameSemantics(JSON.parse(expectedData), JSON.parse(actualData));
+	} catch {
+		return false;
+	}
+}
+
 export function serializeCredential(provider: string, credential: AuthCredential): SerializedCredentialRecord | null {
 	if (credential.type === "api_key") {
 		const data = credential.source === "login" ? { key: credential.key, source: "login" } : { key: credential.key };
@@ -351,6 +381,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	#deleteStmt: Statement;
 	#deleteIfMatchesStmt: Statement;
 	#updateIfMatchesStmt: Statement;
+	#getActiveCredentialDataStmt: Statement;
 	#deleteByProviderStmt: Statement;
 	#hardDeleteStmt: Statement;
 	#getCacheStmt: Statement;
@@ -404,6 +435,9 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		);
 		this.#updateStmt = this.#db.prepare(
 			`UPDATE auth_credentials SET credential_type = ?, data = ?, identity_key = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE id = ?`,
+		);
+		this.#getActiveCredentialDataStmt = this.#db.prepare(
+			"SELECT data FROM auth_credentials WHERE id = ? AND disabled_cause IS NULL",
 		);
 		this.#updateIfMatchesStmt = this.#db.prepare(
 			`UPDATE auth_credentials SET credential_type = ?, data = ?, identity_key = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE id = ? AND data = ? AND disabled_cause IS NULL`,
@@ -1423,7 +1457,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		const provider = providerRow?.provider ?? "";
 		const serialized = serializeCredential(provider, credential);
 		if (!serialized) return false;
-		const result = lease
+		let result = lease
 			? (this.#updateIfMatchesWithLeaseStmt.run(
 					serialized.credentialType,
 					serialized.data,
@@ -1441,6 +1475,31 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 					id,
 					expectedData,
 				) as { changes: number });
+		if (result.changes === 0) {
+			const actualRow = this.#getActiveCredentialDataStmt.get(id) as { data?: unknown } | undefined;
+			const actualData = typeof actualRow?.data === "string" ? actualRow.data : undefined;
+			if (actualData === undefined || !credentialDataHasSameCanonicalSemantics(expectedData, actualData)) {
+				return false;
+			}
+			result = lease
+				? (this.#updateIfMatchesWithLeaseStmt.run(
+						serialized.credentialType,
+						serialized.data,
+						serialized.identityKey,
+						id,
+						actualData,
+						id,
+						lease.owner,
+						lease.nowMs,
+					) as { changes: number })
+				: (this.#updateIfMatchesStmt.run(
+						serialized.credentialType,
+						serialized.data,
+						serialized.identityKey,
+						id,
+						actualData,
+					) as { changes: number });
+		}
 		if (result.changes === 0) return false;
 		if (provider) {
 			this.#purgeSupersededDisabledRows(provider, this.listAuthCredentials(provider));
@@ -1457,10 +1516,11 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	/**
-	 * CAS-style disable: only soft-deletes the row when its `data` column still
-	 * matches `expectedData` and the row has not already been disabled. Used by
-	 * the OAuth refresh-failure path to avoid clobbering a peer that rotated the
-	 * row between our pre-check and the disable.
+	 * CAS-style disable: soft-delete only while the row still has the expected
+	 * credential semantics and remains active. A non-canonical external JSON
+	 * serialization is accepted by retrying against the exact raw `data` value
+	 * observed after the fast-path miss; a peer rotation between that read and
+	 * the retry still loses the atomic write predicate.
 	 */
 	tryDisableAuthCredentialIfMatches(
 		id: number,
@@ -1468,18 +1528,29 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		disabledCause: string,
 		lease?: CredentialRefreshLeaseFence,
 	): boolean {
-		const result = lease
-			? (this.#deleteIfMatchesWithLeaseStmt.run(
-					normalizeDisabledCause(disabledCause),
-					id,
-					expectedData,
-					id,
-					lease.owner,
-					lease.nowMs,
-				) as { changes: number })
-			: (this.#deleteIfMatchesStmt.run(normalizeDisabledCause(disabledCause), id, expectedData) as {
+		const normalizedCause = normalizeDisabledCause(disabledCause);
+		let result = lease
+			? (this.#deleteIfMatchesWithLeaseStmt.run(normalizedCause, id, expectedData, id, lease.owner, lease.nowMs) as {
 					changes: number;
-				});
+				})
+			: (this.#deleteIfMatchesStmt.run(normalizedCause, id, expectedData) as { changes: number });
+		if (result.changes === 0) {
+			const actualRow = this.#getActiveCredentialDataStmt.get(id) as { data?: unknown } | undefined;
+			const actualData = typeof actualRow?.data === "string" ? actualRow.data : undefined;
+			if (actualData === undefined || !credentialDataHasSameCanonicalSemantics(expectedData, actualData)) {
+				return false;
+			}
+			result = lease
+				? (this.#deleteIfMatchesWithLeaseStmt.run(
+						normalizedCause,
+						id,
+						actualData,
+						id,
+						lease.owner,
+						lease.nowMs,
+					) as { changes: number })
+				: (this.#deleteIfMatchesStmt.run(normalizedCause, id, actualData) as { changes: number });
+		}
 		return result.changes > 0;
 	}
 	deleteAuthCredentialsForProvider(provider: string, disabledCause: string): void {
@@ -1987,6 +2058,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#updateIfMatchesStmt.finalize();
 		this.#updateIfMatchesWithLeaseStmt.finalize();
 		this.#deleteIfMatchesWithLeaseStmt.finalize();
+		this.#getActiveCredentialDataStmt.finalize();
 		this.#deleteCachePrefixStmt.finalize();
 		this.#acquireCredentialRefreshLeaseStmt.finalize();
 		this.#getCredentialRefreshLeaseStmt.finalize();
