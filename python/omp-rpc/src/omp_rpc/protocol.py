@@ -149,6 +149,14 @@ def _optional_json_object(value: object, *, field: str) -> JsonObject | None:
     return _clone_json_object(value, field=field)
 
 
+def _optional_json_objects(values: object, *, field: str) -> tuple[JsonObject, ...] | None:
+    if values is None:
+        return None
+    if not isinstance(values, list):
+        raise ValueError(f"{field} must be a list")
+    return tuple(_clone_json_object(item, field=f"{field}[]") for item in values)
+
+
 def _clone_json_objects(values: object, *, field: str) -> tuple[JsonObject, ...]:
     if values is None:
         return ()
@@ -858,6 +866,7 @@ class ExtensionUiRequest:
     method: ExtensionUiMethod
     title: str | None = None
     options: tuple[str, ...] | None = None
+    option_details: tuple[JsonObject, ...] | None = None
     message: str | None = None
     placeholder: str | None = None
     prefill: str | None = None
@@ -1436,6 +1445,9 @@ def parse_extension_ui_request(payload: JsonObject) -> ExtensionUiRequest:
                 _EXTENSION_UI_METHOD_VALUES,
                 field="extension_ui_request.method",
             ),
+        ),
+        option_details=_optional_json_objects(
+            payload.get("optionDetails"), field="extension_ui_request.optionDetails"
         ),
         title=_optional_str(payload, "title"),
         options=_tuple_of_strings(
