@@ -14,6 +14,7 @@
 - Added repeat read warning hints when identical file content is read multiple times.
 - Explicit DAP adapters can now attach without a PID or port when `attachDefaults` provide the target arguments.
 - Added `isProjectTrusted()` compatibility shim to `ExtensionContext` for extensions targeting upstream per-directory trust gates.
+- `task.maxRuntimeMs` now gives a live subagent a configurable soft phase before its wall-clock deadline via `task.maxRuntimeSoftPhase` (default `"notice"`), so its partial findings arrive as a submitted report instead of being lost to the hard abort: `"notice"` sends a wrap-up steering notice at 25% before the deadline and a forced final `yield` at 10% before it, `"yield"` sends only that forced final `yield` with no notice, and `"off"` opts out entirely, restoring the pre-PR behavior of a hard abort on the timer and nothing else. A subagent that has stopped producing messages is still killed on the timer as before.
 
 ### Changed
 
@@ -33,6 +34,7 @@
 ### Fixed
 
 - Fixed regional HTTP 401 data-residency errors during Codex chat, web search, and image generation requests by passing token residency metadata on requests.
+- Fixed a `task.maxRuntimeMs` timer that fired after a subagent run had already finished rewriting its outcome: budget-exhausted runs were reported as timeouts, and children that submitted a complete result just before the deadline were reported as aborted.
 - Fixed macOS SSH ControlMaster socket creation failures caused by `sun_path` length limits when using named profiles.
 - Fixed an issue where Nix-packaged builds failed to load on-demand native addons (`onnxruntime-node`/`sherpa-onnx`) due to missing shared C++ runtime library paths.
 - Fixed external editor spawning (Ctrl+G, plan review, `/todo edit`) failing to attach to visible terminals for editors like `emacsclient`.

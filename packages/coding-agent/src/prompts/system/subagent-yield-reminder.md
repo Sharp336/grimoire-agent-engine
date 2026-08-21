@@ -1,6 +1,6 @@
-{{#if budgetStop}}
+{{#if softStop}}
 <system-reminder>
-Request budget crossed; in-flight turn stopped → forced wrap-up. MUST call `yield` NOW with best final report from completed work.
+{{softStopReason}}; in-flight turn stopped → forced wrap-up. MUST call `yield` NOW with best final report from completed work.
 
 - Consolidate all gathered value; mark remaining gaps incomplete, do not investigate further.
 - Do NOT call another tool or resume assignment.

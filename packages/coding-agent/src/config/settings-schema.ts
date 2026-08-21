@@ -4791,13 +4791,31 @@ export const SETTINGS_SCHEMA = {
 			group: "Subagents",
 			label: "Max Subagent Runtime",
 			description:
-				"Hard wall-clock limit per subagent (ms). 0 disables it. Defense-in-depth against provider-side stream hangs that escape the inference-layer watchdog; triggers a normal subagent abort with a 'timed out' reason.",
+				"Hard wall-clock limit per subagent (ms). 0 disables it. Defense-in-depth against provider-side stream hangs that escape the inference-layer watchdog. A subagent that is still producing turns is warned and force-stopped to yield its partial findings before the deadline (see task.maxRuntimeSoftPhase); one that has stopped producing is aborted with a 'timed out' reason.",
 			options: [
 				{ value: "0", label: "Unlimited", description: "Default" },
 				{ value: "300000", label: "5 minutes" },
 				{ value: "900000", label: "15 minutes" },
 				{ value: "1800000", label: "30 minutes" },
 				{ value: "3600000", label: "1 hour" },
+			],
+		},
+	},
+
+	"task.maxRuntimeSoftPhase": {
+		type: "enum",
+		values: ["notice", "yield", "off"] as const,
+		default: "notice",
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Max Subagent Runtime Soft Phase",
+			description:
+				"What happens before a subagent's wall-clock deadline: 'notice' injects one wrap-up steering notice and then force-stops the agent to yield its partial findings, 'yield' skips the notice and only force-stops, 'off' restores pure hard-abort semantics (the deadline kills the run with nothing submitted). Has no effect when Max Subagent Runtime is unlimited.",
+			options: [
+				{ value: "notice", label: "Notice + forced yield", description: "Default" },
+				{ value: "yield", label: "Forced yield only" },
+				{ value: "off", label: "Off (hard abort only)" },
 			],
 		},
 	},
