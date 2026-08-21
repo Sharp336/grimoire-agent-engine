@@ -2,9 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Exported `resolveAsides` for evaluating aside thunks at injection boundaries.
+
 ### Fixed
 
 - Fixed Codex remote compaction requests failing for region-pinned enterprise ChatGPT workspaces when requests egress from a different region.
+- Fixed `continue()` sending a queued follow-up or steer without pending asides, so stranded asides arrived one model call later than the in-loop yield drain.
+- Fixed `continue()` omitting pending asides on `toolResult` tails, so a queued follow-up or steer after a terminal tool result still sent the aside one model call late.
 
 ## [17.4.0] - 2026-08-20
 

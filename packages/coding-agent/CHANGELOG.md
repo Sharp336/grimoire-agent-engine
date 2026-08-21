@@ -53,6 +53,16 @@
 - Fixed prompt guidance and descriptions for Task tools and SSH usage.
 - ACP editor clients that support elicitation forms (Zed) can now use `ask`, so the agent can pose single-choice, multi-select, and free-text questions inline instead of guessing.
 - `/retry` and `/handoff` now work over ACP, so editor clients (Zed) list them and can run them instead of sending the text to the model.
+- Added `deliverAs: "aside"` to extension `pi.sendMessage` for mid-turn custom message injection at the next agent step boundary without interrupting tools or aborting the stream; idle appends unless `triggerTurn`, stranded content persists with no wake. See `examples/extensions/aside-delivery.ts`.
+
+### Fixed
+
+- Fixed stranded extension asides flushed at settle blocking queued follow-up auto-resume by poisoning the transcript tail before the follow-up drain.
+- Fixed stranded extension asides arriving one model call after a queued follow-up resume instead of in the same continuation request.
+- Fixed RPC `prompt_result { agentInvoked: false }` after a streaming `triggerTurn` send that queued a continuation (`nextTurn` / steer / follow-up), not only a parked aside.
+- Fixed RPC `prompt_result { agentInvoked: false }` when `triggerTurn` send started idle but queued after image normalization because another prompt began streaming.
+- Fixed `deliverAs: "aside"` with `triggerTurn` starting a surprise turn when the primary stream settled during image normalization.
+- Fixed `/clear` and `/btw` leaving stranded extension asides that could re-enter the rewritten conversation on the next prompt.
 
 ## [17.4.0] - 2026-08-20
 

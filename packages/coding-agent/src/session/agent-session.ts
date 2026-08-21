@@ -34,6 +34,8 @@ import {
 	type AgentToolResult,
 	type AgentTurnEndContext,
 	AppendOnlyContextManager,
+	ASIDE_MESSAGE_COMMIT,
+	ASIDE_MESSAGE_DISCARD,
 	type AsideMessage,
 	type BeforeToolCallContext,
 	type BeforeToolCallResult,
@@ -140,7 +142,7 @@ import type {
 import { emitSessionShutdownEvent } from "../extensibility/extensions";
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import { createExtensionModelQuery } from "../extensibility/extensions/model-api";
-import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
+import type { CompactOptions, ContextUsage, CustomMessageDeliverAs } from "../extensibility/extensions/types";
 import type { HookCommandContext } from "../extensibility/hooks/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slash-commands";
@@ -272,6 +274,7 @@ import {
 	shouldPromptCodexAutoRedeem,
 } from "./codex-auto-reset";
 import { recordCredentialPin, seedCredentialPins } from "./credential-pin";
+import { emitPersistedCustomMessages } from "./custom-message-delivery";
 import { EvalRunner, type EvalRunnerHost } from "./eval-runner";
 import {
 	collectPendingToolCalls,
@@ -580,6 +583,8 @@ export class AgentSession {
 	#ircWakeTurnObserver:
 		| ((records: CustomMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined)
 		| undefined;
+	// Extension asides queued while a turn is streaming; drained at step boundaries.
+	#pendingExtensionAsides: CustomMessage[] = [];
 	// Agent identity (registry id) used for IRC routing and job ownership.
 	#agentId: string | undefined;
 	#agentKind: "main" | "sub" = "main";
@@ -787,6 +792,12 @@ export class AgentSession {
 				this.#preserveAdvisorCard(card);
 			}
 		}
+		// Skip flush when a queued steer/follow-up will resume — a custom tail
+		// blocks follow-up-only auto-continue. Same gate as #resumeStrandedIrcAsides.
+		// Agent.continue() prefixes pending asides onto that queued continuation.
+		if (!this.#isDisposed && !(this.#canAutoContinueForFollowUp() && this.agent.hasQueuedMessages())) {
+			this.#flushPendingExtensionAsides();
+		}
 		this.#scheduleQueuedMessageDrain();
 		this.#resumeStrandedIrcAsides();
 	}
@@ -912,7 +923,7 @@ export class AgentSession {
 	/** Record a suppressed advisor concern as visible, persisted advice without
 	 *  triggering a turn. When the agent is idle (the normal post-interrupt case,
 	 *  including the post-prompt unwind window where the core loop has ended), emit
-	 *  message_start/message_end like #flushPendingIrcAsides so #handleAgentEvent
+	 *  message_start/message_end like IrcBridge.flushPending so #handleAgentEvent
 	 *  renders it live (TUI/ACP) and persists it as a CustomMessageEntry. Only while
 	 *  an abort is still tearing a live turn down do we park it hidden, so abort's
 	 *  settle step replays it once idle — never appended into a live streamMessage. */
@@ -921,8 +932,22 @@ export class AgentSession {
 			this.#pendingNextTurnMessages.push(card);
 			return;
 		}
-		this.agent.emitExternalEvent({ type: "message_start", message: card });
-		this.agent.emitExternalEvent({ type: "message_end", message: card });
+		emitPersistedCustomMessages(this.agent, [card]);
+	}
+
+	#appendAndPersistCustomMessage(message: CustomMessage): void {
+		this.agent.appendMessage(message);
+		this.sessionManager.appendCustomMessageEntry(
+			message.customType,
+			message.content,
+			message.display,
+			message.details,
+			message.attribution,
+		);
+	}
+
+	#clearPendingExtensionAsides(): void {
+		this.#pendingExtensionAsides = [];
 	}
 
 	#resetInFlight(): void {
@@ -1295,6 +1320,9 @@ export class AgentSession {
 		this.agent.hasIrcInterrupts = () => this.#irc.hasInterrupts();
 		this.agent.setAsideMessageProvider(() => {
 			const thunks: AsideMessage[] = this.#irc.drainPending().map(record => () => record);
+			const pendingExtension = [...this.#pendingExtensionAsides];
+			this.#pendingExtensionAsides = [];
+			thunks.push(...pendingExtension.map(record => this.#createExtensionAsideThunk(record)));
 			thunks.push(...this.yieldQueue.drainLazy());
 			// Mid-run todo reconciliation — evaluated at injection time so a turn
 			// that flips a todo just before this poll suppresses the nudge.
@@ -3920,7 +3948,7 @@ export class AgentSession {
 
 	/**
 	 * Synchronously mark the session as disposing so new work is rejected
-	 * immediately: eval starts throw, queued asides are dropped, and the
+	 * immediately: eval starts throw, pending asides are flushed, and the
 	 * aside provider is detached. Idempotent; `dispose()` runs it first.
 	 *
 	 * Wrappers that await other teardown before delegating to `dispose()` MUST
@@ -3939,6 +3967,7 @@ export class AgentSession {
 		this.#titleGenerationAbortController.abort();
 		this.#abortAutolearnCapture();
 		this.#irc.flushPending();
+		this.#flushPendingExtensionAsides();
 		this.yieldQueue.clear();
 		this.agent.setAsideMessageProvider(undefined);
 		this.agent.hasIrcInterrupts = undefined;
@@ -4276,6 +4305,7 @@ export class AgentSession {
 		this.agent.reset();
 		this.#pendingNextTurnMessages = [];
 		this.#scheduledHiddenNextTurnGeneration = undefined;
+		this.#clearPendingExtensionAsides();
 		// Reset the session_stop continuation chain: the queued continuation
 		// message is gone with the conversation, but the counters would otherwise
 		// carry over, so the next post-reset turn is reported to hooks as part of
@@ -5672,6 +5702,7 @@ export class AgentSession {
 			await this.#bash.flushPending();
 			this.#eval.flushPending();
 			this.#irc.flushPending();
+			this.#flushPendingExtensionAsides();
 
 			this.#todo.resetCycle();
 			this.#resetPromptMaintenanceState();
@@ -6387,10 +6418,17 @@ export class AgentSession {
 	/**
 	 * Send a custom message to the session. Creates a CustomMessageEntry.
 	 *
-	 * Handles three cases:
-	 * - Streaming: queue as steer/follow-up or store for next turn
-	 * - Not streaming + triggerTurn: appends to state/session, starts new turn unless the client cannot own it
-	 * - Not streaming + no trigger: appends to state/session, no turn
+	 * Delivery (`deliverAs`):
+	 * - omitted / `"steer"` while streaming: steer queue (interrupting)
+	 * - `"followUp"`: end-of-run queue
+	 * - `"nextTurn"`: hidden until the next user prompt (optional `triggerTurn`)
+	 * - `"aside"`: non-interrupting fold at the next agent step boundary while
+	 *   streaming/compacting/disconnected; idle append/persist unless
+	 *   `triggerTurn` starts a turn; stranded flush persists with no wake
+	 *
+	 * Idle without an explicit mid-stream queue path: `triggerTurn` starts a
+	 * turn (unless the client defers agent-initiated turns); otherwise append
+	 * to state/session with no turn.
 	 *
 	 * @returns true iff this call synchronously started a new turn (awaited
 	 * `agent.prompt`); false when the message was queued/appended without a turn
@@ -6402,7 +6440,7 @@ export class AgentSession {
 		message: CustomMessagePayload<T>,
 		options?: {
 			triggerTurn?: boolean;
-			deliverAs?: "steer" | "followUp" | "nextTurn";
+			deliverAs?: CustomMessageDeliverAs;
 			queueChipText?: string;
 			acceptTerminalEmptyStop?: boolean;
 		},
@@ -6426,7 +6464,29 @@ export class AgentSession {
 			attribution: normalizedPayload.attribution,
 			timestamp: Date.now(),
 		};
+		const arrivedWhileBusy = options?.deliverAs === "aside" && this.#shouldParkExtensionAside();
 		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
+		if (this.#isDisposed) {
+			return false;
+		}
+
+		if (options?.deliverAs === "aside") {
+			if (this.#shouldParkExtensionAside()) {
+				this.#pendingExtensionAsides.push(normalizedAppMessage);
+				return false;
+			}
+			if (options?.triggerTurn && !arrivedWhileBusy) {
+				if (this.#clientBridge?.deferAgentInitiatedTurns && !this.#allowAcpAgentInitiatedTurns) {
+					this.#queueHiddenNextTurnMessage(normalizedAppMessage, false);
+					return false;
+				}
+				await this.#promptAgentInitiatedMessage(normalizedAppMessage);
+				return true;
+			}
+			this.#appendAndPersistCustomMessage(normalizedAppMessage);
+			return false;
+		}
+
 		if (this.isStreaming) {
 			if (options?.deliverAs === "nextTurn") {
 				this.#queueHiddenNextTurnMessage(normalizedAppMessage, options?.triggerTurn ?? false);
@@ -6454,14 +6514,7 @@ export class AgentSession {
 				});
 				return true;
 			}
-			this.agent.appendMessage(normalizedAppMessage);
-			this.sessionManager.appendCustomMessageEntry(
-				normalizedAppMessage.customType,
-				normalizedAppMessage.content,
-				normalizedAppMessage.display,
-				normalizedAppMessage.details,
-				normalizedAppMessage.attribution,
-			);
+			this.#appendAndPersistCustomMessage(normalizedAppMessage);
 			return false;
 		}
 
@@ -6474,14 +6527,7 @@ export class AgentSession {
 			return true;
 		}
 
-		this.agent.appendMessage(normalizedAppMessage);
-		this.sessionManager.appendCustomMessageEntry(
-			normalizedAppMessage.customType,
-			normalizedAppMessage.content,
-			normalizedAppMessage.display,
-			normalizedAppMessage.details,
-			normalizedAppMessage.attribution,
-		);
+		this.#appendAndPersistCustomMessage(normalizedAppMessage);
 		return false;
 	}
 
@@ -6939,6 +6985,7 @@ export class AgentSession {
 			await this.#memory.resetContextForNewTranscript();
 			this.#pendingNextTurnMessages = [];
 			this.#scheduledHiddenNextTurnGeneration = undefined;
+			this.#clearPendingExtensionAsides();
 			this.#queuedMessageDrainBlocked = false;
 			this.#usagePreflightReadyForNextModelCall = false;
 
@@ -6950,6 +6997,7 @@ export class AgentSession {
 			this.#planReferencePath = "local://PLAN.md";
 			this.#advisors.resetSessionState();
 			advisorRecordersDetached = false;
+			this.#clearPendingExtensionAsides();
 			this.#reconnectToAgent();
 			// The workspace-roots block must reflect the new session's directory set,
 			// not the previous session's — refresh before the next turn goes out.
@@ -7027,6 +7075,7 @@ export class AgentSession {
 				this.#bash.finishSessionTransition(bashTransition, false);
 				return false;
 			}
+			this.#clearPendingExtensionAsides();
 			this.#bash.markSessionTransition(bashTransition);
 			this.#bash.finishSessionTransition(bashTransition, true);
 			// The fork clones the transcript and keeps this recovery state running
@@ -7228,8 +7277,10 @@ export class AgentSession {
 	 * @param options Handoff execution options
 	 * @returns The handoff document text, or undefined if cancelled/failed
 	 */
-	handoff(customInstructions?: string, options?: SessionHandoffOptions): Promise<HandoffResult | undefined> {
-		return this.#maintenance.handoff(customInstructions, options);
+	async handoff(customInstructions?: string, options?: SessionHandoffOptions): Promise<HandoffResult | undefined> {
+		const result = await this.#maintenance.handoff(customInstructions, options);
+		if (result) this.#clearPendingExtensionAsides();
+		return result;
 	}
 
 	#isTerminalYieldToolResult(event: { toolName: string; isError?: boolean; result?: { details?: unknown } }): boolean {
@@ -7923,6 +7974,46 @@ export class AgentSession {
 		return messages;
 	}
 
+	/** True when aside must queue: streaming, compacting, or agent disconnected. */
+	#shouldParkExtensionAside(): boolean {
+		return this.isStreaming || this.isCompacting || this.#unsubscribeAgent === undefined;
+	}
+
+	/** Persist extension asides that missed step-boundary injection (stranded at
+	 *  turn tail, next prompt, or dispose). Never wakes a turn — unlike IRC. */
+	#flushPendingExtensionAsides(): void {
+		if (this.#pendingExtensionAsides.length === 0) return;
+		const records = [...this.#pendingExtensionAsides];
+		this.#pendingExtensionAsides = [];
+		emitPersistedCustomMessages(this.agent, records);
+	}
+
+	/** Single-shot thunk for a drained extension aside. COMMIT marks settled only
+	 *  (loop already inserted + emits); DISCARD persists without waking a turn. */
+	#createExtensionAsideThunk(record: CustomMessage): AsideMessage {
+		let settled = false;
+		return () => {
+			Object.defineProperties(record, {
+				[ASIDE_MESSAGE_COMMIT]: {
+					configurable: true,
+					value: () => {
+						if (settled) return;
+						settled = true;
+					},
+				},
+				[ASIDE_MESSAGE_DISCARD]: {
+					configurable: true,
+					value: (_error: Error) => {
+						if (settled) return;
+						settled = true;
+						emitPersistedCustomMessages(this.agent, [record]);
+					},
+				},
+			});
+			return record;
+		};
+	}
+
 	// =========================================================================
 	// Session Management
 	// =========================================================================
@@ -7988,6 +8079,7 @@ export class AgentSession {
 		const previousSteeringMessages = [...this.agent.peekSteeringQueue()];
 		const previousFollowUpMessages = [...this.agent.peekFollowUpQueue()];
 		const previousPendingNextTurnMessages = [...this.#pendingNextTurnMessages];
+		const previousPendingExtensionAsides = [...this.#pendingExtensionAsides];
 		const previousScheduledHiddenNextTurnGeneration = this.#scheduledHiddenNextTurnGeneration;
 		const previousQueuedMessageDrainBlocked = this.#queuedMessageDrainBlocked;
 		const previousUsagePreflightReadyForNextModelCall = this.#usagePreflightReadyForNextModelCall;
@@ -8016,6 +8108,7 @@ export class AgentSession {
 		this.agent.clearAllQueues();
 		this.#pendingNextTurnMessages = [];
 		this.#scheduledHiddenNextTurnGeneration = undefined;
+		this.#clearPendingExtensionAsides();
 		this.#queuedMessageDrainBlocked = false;
 		this.#usagePreflightReadyForNextModelCall = false;
 		this.#usagePreflightReadyModel = undefined;
@@ -8141,6 +8234,7 @@ export class AgentSession {
 			if (switchingToDifferentSession || didReloadConversationChange) {
 				this.#clearSessionScopedToolState();
 			}
+			this.#clearPendingExtensionAsides();
 			this.#reconnectToAgent();
 			try {
 				await this.#sessionSwitchReconciler?.();
@@ -8186,6 +8280,7 @@ export class AgentSession {
 			this.agent.replaceMessages(previousAgentMessages);
 			this.agent.replaceQueues(previousSteeringMessages, previousFollowUpMessages);
 			this.#pendingNextTurnMessages = previousPendingNextTurnMessages;
+			this.#pendingExtensionAsides = previousPendingExtensionAsides;
 			this.#scheduledHiddenNextTurnGeneration = previousScheduledHiddenNextTurnGeneration;
 			this.#queuedMessageDrainBlocked = previousQueuedMessageDrainBlocked;
 			this.#usagePreflightReadyForNextModelCall = previousUsagePreflightReadyForNextModelCall;
@@ -8278,6 +8373,7 @@ export class AgentSession {
 		// Clear pending messages (bound to old session state)
 		this.#pendingNextTurnMessages = [];
 		this.#scheduledHiddenNextTurnGeneration = undefined;
+		this.#clearPendingExtensionAsides();
 		this.#queuedMessageDrainBlocked = false;
 		this.#usagePreflightReadyForNextModelCall = false;
 
@@ -8406,6 +8502,7 @@ export class AgentSession {
 
 		this.#pendingNextTurnMessages = [];
 		this.#scheduledHiddenNextTurnGeneration = undefined;
+		this.#clearPendingExtensionAsides();
 		this.agent.replaceQueues([], []);
 		this.#queuedMessageDrainBlocked = false;
 		this.#usagePreflightReadyForNextModelCall = false;

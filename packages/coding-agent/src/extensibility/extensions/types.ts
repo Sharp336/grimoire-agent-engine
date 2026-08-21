@@ -124,6 +124,9 @@ export type { AppKeybinding, KeybindingsManager } from "../../config/keybindings
 export type { ExecOptions, ExecResult } from "../../exec/exec";
 export type { AgentToolResult, AgentToolUpdateCallback };
 
+/** Delivery mode for `sendMessage` / `sendCustomMessage`. */
+export type CustomMessageDeliverAs = "steer" | "followUp" | "nextTurn" | "aside";
+
 // ============================================================================
 // UI Context
 // ============================================================================
@@ -1405,13 +1408,13 @@ export interface ExtensionAPI {
 	/**
 	 * Send a custom message to the session.
 	 *
-	 * `deliverAs: "nextTurn"` keeps the message hidden from the editable pending-message UI.
-	 * If `triggerTurn` is also true while the current turn is still unwinding, the session schedules
-	 * an internal continuation that consumes the message on the next turn.
+	 * Delivery: omit `deliverAs` mid-stream steers (interrupting). `followUp` waits until end-of-run.
+	 * `nextTurn` hides until the next user prompt. `aside` folds at the next agent step boundary
+	 * without interrupting tools; idle appends unless `triggerTurn`, stranded content persists with no wake.
 	 */
 	sendMessage<T = unknown>(
 		message: CustomMessagePayload<T>,
-		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+		options?: { triggerTurn?: boolean; deliverAs?: CustomMessageDeliverAs },
 	): void;
 
 	/** Send a user prompt: idle starts a turn; streaming queues as steer unless deliverAs is set. */
@@ -1623,11 +1626,11 @@ type HandlerFn = (...args: unknown[]) => Promise<unknown>;
 export type SendMessageHandler = <T = unknown>(
 	message: CustomMessagePayload<T>,
 	/**
-	 * `deliverAs: "nextTurn"` queues hidden custom context for the next turn.
-	 * When paired with `triggerTurn: true` during prompt teardown, the session schedules
-	 * an internal continuation without surfacing the message in the editable pending queue.
+	 * Delivery: omit `deliverAs` mid-stream steers (interrupting). `followUp` waits until end-of-run.
+	 * `nextTurn` hides until the next user prompt. `aside` folds at the next agent step boundary
+	 * without interrupting tools; idle appends unless `triggerTurn`, stranded content persists with no wake.
 	 */
-	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+	options?: { triggerTurn?: boolean; deliverAs?: CustomMessageDeliverAs },
 ) => void;
 
 export type SendUserMessageHandler = (

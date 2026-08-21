@@ -17,6 +17,7 @@ import { $env, isRecord, Snowflake } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../../capability";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
+	type CustomMessageDeliverAs,
 	type ExtensionUIContext,
 	type ExtensionUIDialogOptions,
 	type ExtensionUISelectItem,
@@ -164,6 +165,29 @@ type RpcExtensionUserMessageScope = {
 	pendingAgentMessageTasks: Set<Promise<void>>;
 };
 
+/** Context for deciding whether a false sendCustomMessage still scheduled agent work. */
+export interface RpcAgentMessageTaskHint {
+	deliverAs?: CustomMessageDeliverAs;
+	/** Read at send-task settlement so image-normalize races see post-delivery streaming. */
+	isStreaming?: boolean | (() => boolean);
+}
+
+function hintIsStreaming(hint: RpcAgentMessageTaskHint | undefined): boolean {
+	const value = hint?.isStreaming;
+	return typeof value === "function" ? value() : value === true;
+}
+
+/**
+ * `sendCustomMessage` returns false whenever it did not synchronously
+ * `agent.prompt`. Parked asides and idle appends are local-only; streaming
+ * steer/follow-up/nextTurn queues still invoke the agent.
+ */
+function isAgentInvokingSendResult(result: unknown, hint: RpcAgentMessageTaskHint | undefined): boolean {
+	if (result !== false) return true;
+	if (hint?.deliverAs === "aside") return false;
+	return hintIsStreaming(hint);
+}
+
 /**
  * Tracks extension-originated messages while an RPC prompt is executing.
  * A slash command can resolve the outer prompt as local-only while also
@@ -179,15 +203,20 @@ export class RpcExtensionUserMessageTracker {
 		}
 	}
 
-	trackAgentMessageTask(task: Promise<unknown>): void {
+	trackAgentMessageTask(task: Promise<unknown>, hint?: RpcAgentMessageTaskHint): void {
 		for (const scope of this.#activePromptScopes) {
-			this.#trackAgentMessageTaskForScope(scope, task);
+			this.#trackAgentMessageTaskForScope(scope, task, hint);
 		}
 	}
 
-	#trackAgentMessageTaskForScope(scope: RpcExtensionUserMessageScope, task: Promise<unknown>): void {
+	#trackAgentMessageTaskForScope(
+		scope: RpcExtensionUserMessageScope,
+		task: Promise<unknown>,
+		hint: RpcAgentMessageTaskHint | undefined,
+	): void {
 		const scopedTask = task.then(
-			() => {
+			result => {
+				if (!isAgentInvokingSendResult(result, hint)) return;
 				scope.hasAgentMessageTask = true;
 			},
 			() => {},
@@ -943,8 +972,8 @@ export async function runRpcMode(
 		onShutdown: () => {
 			shutdownState.requested = true;
 		},
-		trackAgentInvokingMessage: task => {
-			extensionUserMessageTracker.trackAgentMessageTask(task);
+		trackAgentInvokingMessage: (task, hint) => {
+			extensionUserMessageTracker.trackAgentMessageTask(task, hint);
 		},
 		uiContext: rpcUiContext,
 	});
