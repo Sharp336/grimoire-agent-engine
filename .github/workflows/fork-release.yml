@@ -260,8 +260,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          existing_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" --jq '.object.sha' 2>/dev/null || true)"
-          if [ -n "$existing_sha" ]; then
+          if existing_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" --jq '.object.sha' 2>/dev/null)"; then
             if [ "$existing_sha" != "$GITHUB_SHA" ]; then
               echo "::error::Existing tag ${RELEASE_TAG} points to ${existing_sha}, not ${GITHUB_SHA}"
               exit 1
@@ -291,19 +290,17 @@ jobs:
           The fork defaults \`hub.mode\` to \`compact\`; set it to \`full\` to restore the upstream Hub model surface without rebuilding. The upstream Hub/IRC runtime remains intact.
           EOF
           title="OMP ${VERSION} fork build ${GITHUB_RUN_NUMBER}"
-          release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq '.id' 2>/dev/null || true)"
-          if [ -z "$release_id" ]; then
-            release_id="$(gh api --method POST "repos/${GITHUB_REPOSITORY}/releases" \
-              -f tag_name="$RELEASE_TAG" \
-              -f target_commitish="$GITHUB_SHA" \
+          if release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq '.id' 2>/dev/null)"; then
+            gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
               -f name="$title" \
               -f body="$(cat "$notes")" \
               -F draft=false \
               -F prerelease=false \
-              -f make_latest=true \
-              --jq '.id')"
+              -f make_latest=true >/dev/null
           else
-            gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/releases" \
+              -f tag_name="$RELEASE_TAG" \
+              -f target_commitish="$GITHUB_SHA" \
               -f name="$title" \
               -f body="$(cat "$notes")" \
               -F draft=false \
