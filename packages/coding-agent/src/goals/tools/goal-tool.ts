@@ -83,6 +83,9 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 		let response: GoalToolResponse;
 		if (params.op === "create") {
 			const created = await runtime.createGoal(validateCreateParams(params));
+			if (this.#session.settings.get("goal.injectAsUserMessage")) {
+				await this.#session.queueGoalUserMessage?.(created.goal.objective);
+			}
 			response = buildGoalToolResponse(created.goal);
 		} else if (params.op === "get") {
 			const state = this.#session.getGoalModeState?.();

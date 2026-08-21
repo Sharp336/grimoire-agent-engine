@@ -329,6 +329,8 @@ export interface ToolSession {
 	getGoalModeState?: () => GoalModeState | undefined;
 	/** Goal runtime for the active agent session. */
 	getGoalRuntime?: () => GoalRuntime | undefined;
+	/** Queue a tool-created goal objective as a user follow-up after the current turn. */
+	queueGoalUserMessage?: (objective: string) => Promise<void>;
 	/** Get cumulative session usage statistics (input/output tokens, cost). */
 	getUsageStatistics?: () => UsageStatistics;
 	/** Current per-turn token budget {total, spent, hard} for the eval `budget` helper. */

@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -96,6 +96,7 @@ async function createGoalHarness(shared: SharedFixture): Promise<GoalHarness> {
 	const toolSession = createToolSession(tempDir.path(), settings, {
 		getGoalModeState: () => session.getGoalModeState(),
 		getGoalRuntime: () => session.goalRuntime,
+		queueGoalUserMessage: objective => session.sendUserMessage(objective, { deliverAs: "followUp" }),
 		getTodoPhases: () => session.getTodoPhases(),
 		setTodoPhases: phases => session.setTodoPhases(phases),
 	});
@@ -148,6 +149,29 @@ async function armInputWaiter(mode: InteractiveMode): Promise<{
 	};
 }
 
+function countUserObjectiveMessages(messages: readonly AgentMessage[], objective: string): number {
+	return messages.filter(
+		message =>
+			message.role === "user" &&
+			(typeof message.content === "string"
+				? message.content === objective
+				: message.content.some(content => content.type === "text" && content.text === objective)),
+	).length;
+}
+
+function countPersistedUserObjectiveMessages(session: AgentSession, objective: string): number {
+	return session.sessionManager
+		.getBranch()
+		.filter(
+			entry =>
+				entry.type === "message" &&
+				entry.message.role === "user" &&
+				(typeof entry.message.content === "string"
+					? entry.message.content === objective
+					: entry.message.content.some(content => content.type === "text" && content.text === objective)),
+		).length;
+}
+
 describe("InteractiveMode goal mode integration", () => {
 	let harness: GoalHarness;
 	let shared: SharedFixture;
@@ -188,6 +212,49 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(harness.mode.goalModePaused).toBe(true);
 		expect(harness.session.getGoalModeState()?.goal.status).toBe("paused");
 		expect(await toolNamesFor(harness)).not.toContain("goal");
+	});
+
+	it("submits a direct goal once through the ordinary input path when injection is enabled", async () => {
+		harness.settings.set("goal.injectAsUserMessage", true);
+		const objective = "Ship the directly submitted goal";
+		const submissions: SubmittedUserInput[] = [];
+		harness.mode.onInputCallback = input => submissions.push(input);
+
+		expect(await harness.mode.handleGoalModeCommand(objective)).toBe(true);
+
+		expect(submissions).toHaveLength(1);
+		expect(submissions[0]?.text).toBe(objective);
+		// The main input loop owns persistence of this pending submission. Goal setup
+		// must not append a second copy directly to either live or persisted history.
+		expect(countUserObjectiveMessages(harness.session.agent.state.messages, objective)).toBe(0);
+		expect(countPersistedUserObjectiveMessages(harness.session, objective)).toBe(0);
+	});
+
+	it("does not queue tool-created goal objectives when injection is disabled", async () => {
+		const goalTool = new GoalTool(harness.toolSession);
+		const objective = "Ship the private tool goal";
+
+		await goalTool.execute("call-1", { op: "create", objective });
+
+		expect(harness.session.getGoalModeState()?.goal.objective).toBe(objective);
+		expect(harness.session.getQueuedMessages()).toEqual({ steering: [], followUp: [] });
+	});
+
+	it("queues an enabled tool-created goal objective once as a user follow-up", async () => {
+		harness.settings.set("goal.injectAsUserMessage", true);
+		const goalTool = new GoalTool(harness.toolSession);
+		const objective = "Ship the preserved tool goal";
+
+		await goalTool.execute("call-1", { op: "create", objective: `  ${objective}  ` });
+
+		expect(harness.session.getQueuedMessages()).toEqual({ steering: [], followUp: [objective] });
+		expect(harness.session.agent.peekSteeringQueue()).toEqual([]);
+		expect(harness.session.agent.peekFollowUpQueue()).toHaveLength(1);
+		expect(harness.session.agent.peekFollowUpQueue()[0]).toMatchObject({
+			role: "user",
+			content: [{ type: "text", text: objective }],
+			attribution: "user",
+		});
 	});
 
 	it("replaces the active goal via /goal set", async () => {
@@ -531,10 +598,15 @@ describe("InteractiveMode goal mode integration", () => {
 	});
 
 	it("resumes the paused goal via the bare /goal menu", async () => {
-		await harness.mode.handleGoalModeCommand("Ship the release");
+		harness.settings.set("goal.injectAsUserMessage", true);
+		const objective = "Ship the release";
+		await harness.mode.handleGoalModeCommand(objective);
 		const selector = vi.spyOn(harness.mode, "showHookSelector").mockResolvedValueOnce("Pause");
 		await harness.mode.handleGoalModeCommand();
 		expect(harness.mode.goalModePaused).toBe(true);
+		const liveMessagesBeforeResume = countUserObjectiveMessages(harness.session.agent.state.messages, objective);
+		const persistedMessagesBeforeResume = countPersistedUserObjectiveMessages(harness.session, objective);
+		const queuedMessagesBeforeResume = harness.session.getQueuedMessages();
 		selector.mockResolvedValueOnce("Resume");
 		const showStatus = vi.spyOn(harness.mode, "showStatus");
 
@@ -544,8 +616,13 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(harness.mode.goalModeEnabled).toBe(true);
 		expect(harness.mode.goalModePaused).toBe(false);
 		expect(harness.session.getGoalModeState()?.enabled).toBe(true);
-		expect(harness.session.getGoalModeState()?.goal.objective).toBe("Ship the release");
+		expect(harness.session.getGoalModeState()?.goal.objective).toBe(objective);
 		expect(harness.session.getGoalModeState()?.goal.status).toBe("active");
+		expect(countUserObjectiveMessages(harness.session.agent.state.messages, objective)).toBe(
+			liveMessagesBeforeResume,
+		);
+		expect(countPersistedUserObjectiveMessages(harness.session, objective)).toBe(persistedMessagesBeforeResume);
+		expect(harness.session.getQueuedMessages()).toEqual(queuedMessagesBeforeResume);
 		expect(await toolNamesFor(harness)).toContain("goal");
 	});
 
