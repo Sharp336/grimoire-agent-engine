@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type Model, serviceTierFamily } from "@oh-my-pi/pi-ai";
+import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
@@ -159,6 +159,7 @@ class FakeAgentSession {
 	constructor(
 		cwd: string,
 		private readonly models: Model[] = TEST_MODELS,
+		private readonly fastModeSupported: boolean = true,
 	) {
 		this.sessionManager = SessionManager.create(cwd);
 		this.sessionId = this.sessionManager.getSessionId();
@@ -384,10 +385,11 @@ class FakeAgentSession {
 		return true;
 	}
 
-	// Mirrors ModelControls.supportsFastMode so the Fireworks (no service-tier
-	// family) case stays a real classification, not a hardcoded fake answer.
+	// ACP only ever asks the session this question, so tests state the answer
+	// directly instead of re-deriving it from the model. Whether a given model
+	// has a service-tier family is `ModelControls`' contract, covered there.
 	supportsFastMode(): boolean {
-		return this.model !== undefined && serviceTierFamily(this.model) !== undefined;
+		return this.fastModeSupported;
 	}
 
 	isFastModeEnabled(): boolean {
@@ -513,6 +515,8 @@ async function createHarness(
 		/** Runs before a notification is recorded, so a test can delay one delivery. */
 		sessionUpdateHook?: (notification: SessionNotification) => Promise<void> | void;
 		sessionModels?: Model[];
+		/** Answer ACP gets from `session.supportsFastMode()`; ACP never inspects the model itself. */
+		sessionFastModeSupported?: boolean;
 	} = {},
 ): Promise<AgentHarness> {
 	const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-acp-test-"));
@@ -545,10 +549,10 @@ async function createHarness(
 		closed: Promise.withResolvers<void>().promise,
 	} as unknown as AgentSideConnection;
 
-	const initialSession = new FakeAgentSession(cwdA, options.sessionModels);
+	const initialSession = new FakeAgentSession(cwdA, options.sessionModels, options.sessionFastModeSupported);
 	sessions.push(initialSession);
 	const factory = async (cwd: string, factoryOptions?: { interactivePrompts?: boolean }) => {
-		const session = new FakeAgentSession(cwd, options.sessionModels);
+		const session = new FakeAgentSession(cwd, options.sessionModels, options.sessionFastModeSupported);
 		const setToolUIContext = vi.fn();
 		sessions.push(session);
 		setToolUIContextSpies.push(setToolUIContext);
@@ -3342,10 +3346,11 @@ describe("ACP boolean config options", () => {
 		await Bun.sleep(0);
 	});
 
-	it("hides fast mode for a model with no service-tier family", async () => {
+	it("hides fast mode when the session reports no service-tier control", async () => {
 		const harness = await createHarness({
 			clientCapabilities: BOOLEAN_CAPABILITIES,
 			sessionModels: [FIREWORKS_MODEL],
+			sessionFastModeSupported: false,
 		});
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 
@@ -3438,10 +3443,11 @@ describe("ACP boolean config options", () => {
 		await Bun.sleep(0);
 	});
 
-	it("skips setting fast mode on a model with no service-tier family", async () => {
+	it("skips setting fast mode when the session reports no service-tier control", async () => {
 		const harness = await createHarness({
 			clientCapabilities: BOOLEAN_CAPABILITIES,
 			sessionModels: [FIREWORKS_MODEL],
+			sessionFastModeSupported: false,
 		});
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
