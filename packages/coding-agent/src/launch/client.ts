@@ -12,7 +12,9 @@ import {
 	DAEMON_PROJECT_DIR_ENV,
 	DAEMON_RUNTIME_DIR_ENV,
 	type DaemonCompletionNotification,
+	type DaemonMonitorNotification,
 	type DaemonOperation,
+	type DaemonOutputSubscription,
 	type DaemonRpcResult,
 	type DaemonWireMessage,
 	parseDaemonRpcResult,
@@ -36,6 +38,12 @@ interface PendingRequest {
 	removeAbort?: () => void;
 }
 
+interface OutputSinkRegistration {
+	subscription: DaemonOutputSubscription;
+	sink: (notification: DaemonMonitorNotification) => Promise<void> | void;
+	deliveryTail?: Promise<void>;
+}
+
 /** Broker location and lifecycle overrides used by smoke tests and isolated consumers. */
 export interface DaemonBrokerClientOptions {
 	/** Runtime directory override; defaults to the project-scoped config path. */
@@ -55,6 +63,10 @@ export interface DaemonBrokerClient {
 		owner: string,
 		sink: (notification: DaemonCompletionNotification) => Promise<void> | void,
 	): (options?: DaemonCompletionUnregisterOptions) => void;
+	onOutput?(
+		subscription: DaemonOutputSubscription,
+		sink: (notification: DaemonMonitorNotification) => Promise<void> | void,
+	): () => void;
 	/** Canonical project directory or synthetic directory identifying a global scope. */
 	readonly projectDir: string;
 	request(operation: DaemonOperation, signal?: AbortSignal): Promise<DaemonRpcResult>;
@@ -141,11 +153,13 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	readonly #idleGraceMs: number | undefined;
 	readonly #pending = new Map<string, PendingRequest>();
 	readonly #completionSinks = new Map<string, (notification: DaemonCompletionNotification) => Promise<void> | void>();
+	readonly #outputSinks = new Map<string, OutputSinkRegistration>();
 	readonly #completionUnsubscribes = new Set<string>();
 	readonly #preservedCompletionOwners = new Set<string>();
 	readonly #completionReplays = new Set<string>();
 	readonly #inFlightCompletionIds = new Set<string>();
 	readonly #completionSubscriptionId = crypto.randomUUID();
+	readonly #outputSubscriptionId = crypto.randomUUID();
 	#socket: net.Socket | undefined;
 	#connectPromise: Promise<void> | undefined;
 	#buffer = "";
@@ -199,6 +213,8 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				completionUnsubscribes,
 				completionReplays,
 				completionSubscriptionId: this.#completionSubscriptionId,
+				outputSubscriptions: [...this.#outputSinks.values()].map(entry => entry.subscription),
+				outputSubscriptionId: this.#outputSubscriptionId,
 				operation,
 			})}\n`,
 		);
@@ -219,6 +235,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		this.#completionReconnectTimer = undefined;
 		this.#socket?.destroy();
 		this.#completionSinks.clear();
+		this.#outputSinks.clear();
 		this.#preservedCompletionOwners.clear();
 		this.#completionReplays.clear();
 		this.#socket = undefined;
@@ -242,7 +259,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				this.#preservedCompletionOwners.delete(owner);
 				this.#completionUnsubscribes.add(owner);
 			}
-			if (this.#completionSinks.size === 0 && this.#completionReconnectTimer) {
+			if (this.#completionSinks.size === 0 && this.#outputSinks.size === 0 && this.#completionReconnectTimer) {
 				clearTimeout(this.#completionReconnectTimer);
 				this.#completionReconnectTimer = undefined;
 			}
@@ -250,7 +267,30 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		};
 	}
 
+	onOutput(
+		subscription: DaemonOutputSubscription,
+		sink: (notification: DaemonMonitorNotification) => Promise<void> | void,
+	): () => void {
+		this.#outputSinks.set(subscription.id, { subscription, sink });
+		this.#publishSubscriptions();
+		return () => {
+			const current = this.#outputSinks.get(subscription.id);
+			if (current?.sink !== sink) return;
+			this.#outputSinks.delete(subscription.id);
+			if (this.#completionSinks.size === 0 && this.#outputSinks.size === 0 && this.#completionReconnectTimer) {
+				clearTimeout(this.#completionReconnectTimer);
+				this.#completionReconnectTimer = undefined;
+			}
+			this.#publishSubscriptions();
+		};
+	}
+
 	#publishCompletionOwners(): void {
+		if (this.#closed) return;
+		this.#publishSubscriptions();
+	}
+
+	#publishSubscriptions(): void {
 		if (this.#closed) return;
 		void this.request({ op: "ping" }).catch(() => this.#scheduleCompletionReconnect());
 	}
@@ -258,7 +298,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	#scheduleCompletionReconnect(): void {
 		if (
 			this.#closed ||
-			this.#completionSinks.size === 0 ||
+			(this.#completionSinks.size === 0 && this.#outputSinks.size === 0) ||
 			this.#completionReconnectTimer !== undefined ||
 			(this.#socket !== undefined && !this.#socket.destroyed)
 		) {
@@ -358,20 +398,16 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				message = parseDaemonWireMessage(decoded);
 			} catch (error) {
 				const parseError = error instanceof Error ? error : new Error(String(error));
-				if (
-					typeof decoded === "object" &&
-					decoded !== null &&
-					"event" in decoded &&
-					decoded.event === "daemon-completed"
-				) {
-					logger.warn("Ignoring malformed daemon completion", { error: parseError.message });
+				if (typeof decoded === "object" && decoded !== null && "event" in decoded) {
+					logger.warn("Ignoring malformed daemon notification", { error: parseError.message });
 					continue;
 				}
 				this.#rejectPending(parseError);
 				continue;
 			}
 			if ("event" in message) {
-				void this.#deliverCompletion(message);
+				if (message.event === "daemon-completed") void this.#deliverCompletion(message);
+				else void this.#deliverOutput(message);
 				continue;
 			}
 			const response = message;
@@ -421,6 +457,28 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		}
 	}
 
+	async #deliverOutput(message: DaemonMonitorNotification): Promise<void> {
+		const entry = this.#outputSinks.get(message.monitorId);
+		if (!entry) return;
+		const deliver = async (): Promise<void> => {
+			if (this.#outputSinks.get(message.monitorId) !== entry) return;
+			await entry.sink(message);
+			if (message.event === "daemon-monitor-completed" && this.#outputSinks.get(message.monitorId) === entry) {
+				this.#outputSinks.delete(message.monitorId);
+				this.#publishSubscriptions();
+			}
+		};
+		const delivery = entry.deliveryTail ? entry.deliveryTail.then(deliver) : deliver();
+		entry.deliveryTail = delivery.catch(error => {
+			logger.warn("Daemon output sink failed", {
+				monitorId: message.monitorId,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			this.#socket?.destroy();
+		});
+		await entry.deliveryTail;
+	}
+
 	#ackCompletion(completionId: string): void {
 		const socket = this.#socket;
 		if (!socket || socket.destroyed) return;
@@ -434,6 +492,8 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				completionAcks: [completionId],
 				completionUnsubscribes: [...this.#completionUnsubscribes],
 				completionSubscriptionId: this.#completionSubscriptionId,
+				outputSubscriptions: [...this.#outputSinks.values()].map(entry => entry.subscription),
+				outputSubscriptionId: this.#outputSubscriptionId,
 				operation: { op: "ping" },
 			})}\n`,
 		);

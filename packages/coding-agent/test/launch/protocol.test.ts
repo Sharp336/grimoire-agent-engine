@@ -3,6 +3,7 @@ import {
 	type DaemonOperation,
 	parseDaemonRpcResult,
 	parseDaemonSnapshot,
+	parseDaemonWireMessage,
 	parseDaemonWireRequest,
 } from "../../src/launch/protocol";
 
@@ -85,10 +86,120 @@ describe("launch logs compatibility", () => {
 		expect(request.completionSubscriptionId).toBe("subscription-1");
 	});
 
+	it("preserves live output subscriptions on broker requests", () => {
+		const request = parseDaemonWireRequest({
+			id: "request-1",
+			token: "token-1",
+			outputSubscriptions: [
+				{ id: "monitor-1", name: "web", owner: "session-owner", artifactPath: "/tmp/monitor.log" },
+			],
+			outputSubscriptionId: "output-subscription-1",
+			operation: { op: "ping" },
+		});
+
+		expect(request.outputSubscriptions).toEqual([
+			{ id: "monitor-1", name: "web", owner: "session-owner", artifactPath: "/tmp/monitor.log" },
+		]);
+		expect(request.outputSubscriptionId).toBe("output-subscription-1");
+	});
+
 	it("decodes raw terminal text from an already-running legacy broker", () => {
 		const result = parseDaemonRpcResult(operation, { ...baseResult, terminalText: "progress\rready" });
 		if (result.op !== "logs") throw new Error("unexpected result");
 		expect("terminalText" in result ? result.terminalText : undefined).toBe("progress\rready");
+	});
+});
+
+describe("launch monitor notifications", () => {
+	it("decodes one ordered output batch", () => {
+		expect(
+			parseDaemonWireMessage({
+				event: "daemon-output",
+				monitorId: "monitor-1",
+				name: "web",
+				daemonId: "daemon-1",
+				seq: 2,
+				text: "second\nthird",
+				batchKind: "progress",
+				suppressedEvents: 9,
+				reminder: "chatty-monitor",
+				truncated: true,
+			}),
+		).toEqual({
+			event: "daemon-output",
+			monitorId: "monitor-1",
+			name: "web",
+			daemonId: "daemon-1",
+			seq: 2,
+			text: "second\nthird",
+			batchKind: "progress",
+			suppressedEvents: 9,
+			reminder: "chatty-monitor",
+			truncated: true,
+		});
+	});
+
+	it("preserves an empty output batch without breaking its sequence", () => {
+		expect(
+			parseDaemonWireMessage({
+				event: "daemon-output",
+				monitorId: "monitor-1",
+				name: "web",
+				daemonId: "daemon-1",
+				seq: 0,
+				text: "",
+				batchKind: "suppression-summary",
+				suppressedEvents: 1,
+			}),
+		).toMatchObject({
+			event: "daemon-output",
+			seq: 0,
+			text: "",
+			batchKind: "suppression-summary",
+			suppressedEvents: 1,
+		});
+	});
+
+	it("decodes terminal state separately from output", () => {
+		expect(
+			parseDaemonWireMessage({
+				event: "daemon-monitor-completed",
+				monitorId: "monitor-1",
+				daemon: { ...baseSnapshot, state: "exited", exitedAt: 2, exitCode: 0 },
+			}),
+		).toEqual({
+			event: "daemon-monitor-completed",
+			monitorId: "monitor-1",
+			daemon: { ...baseSnapshot, state: "exited", exitedAt: 2, exitCode: 0 },
+		});
+	});
+
+	it.each([-1, 1.5])("rejects invalid output sequence %s", seq => {
+		expect(() =>
+			parseDaemonWireMessage({
+				event: "daemon-output",
+				monitorId: "monitor-1",
+				name: "web",
+				daemonId: "daemon-1",
+				seq,
+				text: "progress",
+				batchKind: "progress",
+				suppressedEvents: 0,
+			}),
+		).toThrow("output.seq must be a non-negative integer");
+	});
+
+	it("rejects malformed monitor payloads at the socket boundary", () => {
+		expect(() =>
+			parseDaemonWireMessage({
+				event: "daemon-output",
+				monitorId: "monitor-1",
+				name: "web",
+				daemonId: "daemon-1",
+				seq: "2",
+				text: "progress",
+			}),
+		).toThrow("output.seq must be a finite number");
 	});
 });
 
