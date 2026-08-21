@@ -168,6 +168,9 @@ class ProtocolParsingTests(unittest.TestCase):
             notification.option_details,
             ({}, {"description": "Push to production"}),
         )
+        legacy = ExtensionUiRequest("id", "confirm", "Title", None, "Body")
+        self.assertEqual(legacy.message, "Body")
+        self.assertIsNone(legacy.option_details)
 
     def test_parse_todo_reminder_notification(self) -> None:
         notification = parse_notification(

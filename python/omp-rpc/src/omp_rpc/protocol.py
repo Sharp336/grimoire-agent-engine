@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 import mimetypes
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final, Literal, NotRequired, TypedDict, TypeAlias, cast
 
@@ -866,8 +866,8 @@ class ExtensionUiRequest:
     method: ExtensionUiMethod
     title: str | None = None
     options: tuple[str, ...] | None = None
-    option_details: tuple[JsonObject, ...] | None = None
     message: str | None = None
+    option_details: tuple[JsonObject, ...] | None = field(default=None, kw_only=True)
     placeholder: str | None = None
     prefill: str | None = None
     timeout: int | None = None
