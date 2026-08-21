@@ -14,6 +14,7 @@
  *   MCP_EMPTY_PROMPTS="1"     return no current prompts from prompts/list.
  *   MCP_INSTRUCTIONS    return these server instructions from `initialize`.
  *   MCP_NO_TOOLS="1"    return an empty `tools/list`, as a tool-less server does.
+ *   MCP_OMIT_TOOLS_CAPABILITY="1" omit the tools capability from initialize.
  *
  * Speaks newline-delimited JSON-RPC 2.0 (the wire format of `StdioTransport`),
  * same shape as `many-tools-mcp.ts`. Exported constants are imported by tests;
@@ -39,9 +40,13 @@ function buildResult(method: string): Record<string, unknown> {
 				protocolVersion: "2025-03-26",
 				serverInfo: { name: "lazy-lifecycle-fixture", version: "1.0.0" },
 				capabilities: {
-					tools: {
-						...(process.env.MCP_ADVERTISE_TOOL_LIST_CHANGED === "1" ? { listChanged: true } : {}),
-					},
+					...(process.env.MCP_OMIT_TOOLS_CAPABILITY === "1"
+						? {}
+						: {
+								tools: {
+									...(process.env.MCP_ADVERTISE_TOOL_LIST_CHANGED === "1" ? { listChanged: true } : {}),
+								},
+							}),
 					...(process.env.MCP_ADVERTISE_PROMPTS === "1" ? { prompts: {} } : {}),
 				},
 				...(process.env.MCP_INSTRUCTIONS ? { instructions: process.env.MCP_INSTRUCTIONS } : {}),

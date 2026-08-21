@@ -212,7 +212,8 @@ export async function listTools(
 ): Promise<MCPToolDefinition[]> {
 	// Check if server supports tools
 	if (!connection.capabilities.tools) {
-		return [];
+		connection.tools = [];
+		return connection.tools;
 	}
 
 	// Return cached tools if available

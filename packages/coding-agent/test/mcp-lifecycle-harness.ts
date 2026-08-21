@@ -66,6 +66,8 @@ export interface LazyConfigOptions {
 	instructions?: string;
 	/** Make the fixture return an empty `tools/list`. */
 	noTools?: boolean;
+	/** Make the fixture omit the tools capability from initialize. */
+	omitToolsCapability?: boolean;
 }
 
 export function lazyConfig(options: LazyConfigOptions = {}): MCPStdioServerConfig {
@@ -80,6 +82,7 @@ export function lazyConfig(options: LazyConfigOptions = {}): MCPStdioServerConfi
 	if (options.emptyPrompts) env.MCP_EMPTY_PROMPTS = "1";
 	if (options.instructions) env.MCP_INSTRUCTIONS = options.instructions;
 	if (options.noTools) env.MCP_NO_TOOLS = "1";
+	if (options.omitToolsCapability) env.MCP_OMIT_TOOLS_CAPABILITY = "1";
 
 	const config: MCPStdioServerConfig = { type: "stdio", command: BUN, args: [FIXTURE] };
 	if (options.lifecycle) config.lifecycle = options.lifecycle;

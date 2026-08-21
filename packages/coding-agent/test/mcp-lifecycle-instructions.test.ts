@@ -87,6 +87,22 @@ describe("MCP lazy lifecycle: tool-less servers", () => {
 			await second.disconnectAll();
 		}
 	}, 20_000);
+	it("idle-reaps a tool-less server without a cache", async () => {
+		const spawnLog = path.join(workDir, "no-tools-capability.log");
+		const config = lazyConfig({ lifecycle: "lazy", idleTimeout: 50, omitToolsCapability: true, spawnLog });
+		const manager = new MCPManager(workDir);
+		try {
+			const result = await manager.connectServers({ lazy: config }, {});
+			expect(result.errors.has("lazy")).toBe(false);
+			expect(result.connectedServers).toContain("lazy");
+			expect(manager.getConnectionStatus("lazy")).toBe("connected");
+			expect(await waitFor(() => manager.getConnectionStatus("lazy") === "deferred")).toBe(true);
+			expect(manager.getConnection("lazy")).toBeUndefined();
+			expect(spawnCount(spawnLog)).toBe(1);
+		} finally {
+			await manager.disconnectAll();
+		}
+	}, 15_000);
 	it("clears deferred state before a failed eager replacement", async () => {
 		const cache = inMemoryToolCache();
 		const lazy = lazyConfig({ lifecycle: "lazy" });
