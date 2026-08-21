@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { runEvalAgent } from "@oh-my-pi/pi-coding-agent/eval/agent-bridge";
+import { runEvalBudget } from "@oh-my-pi/pi-coding-agent/eval/budget-bridge";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as taskDiscovery from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as taskExecutor from "@oh-my-pi/pi-coding-agent/task/executor";
@@ -132,6 +133,48 @@ describe("nested eval agent turn-budget accounting", () => {
 			total: rootBudgetTokens,
 			spent: parentOutputTokens + nestedOutputTokens,
 			hard: true,
+		});
+	});
+
+	it("reports the ancestor budget through nested eval budget helpers", async () => {
+		const rootBudgetTokens = 4_000;
+		const nestedOutputTokens = 1_250;
+		const rootSessionManager = SessionManager.inMemory();
+		const childSessionManager = SessionManager.inMemory();
+		rootSessionManager.beginTurnBudget(rootBudgetTokens, false);
+		childSessionManager.beginTurnBudget(100_000, true);
+		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents: [createAgent()], projectAgentsDir: null });
+		let invocation = 0;
+		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
+			invocation += 1;
+			if (invocation === 1) {
+				const childSession = createBudgetSession(childSessionManager, options.id);
+				expect(await runEvalBudget({}, { session: childSession })).toEqual({
+					total: rootBudgetTokens,
+					spent: 0,
+					hard: false,
+				});
+				await runEvalAgent({ prompt: "nested work", agent: "task" }, { session: childSession });
+				expect(await runEvalBudget({}, { session: childSession })).toEqual({
+					total: rootBudgetTokens,
+					spent: nestedOutputTokens,
+					hard: false,
+				});
+				return createResult(options.id, 0);
+			}
+			return createResult(options.id, nestedOutputTokens);
+		});
+
+		await runEvalAgent(
+			{ prompt: "parent work", agent: "task" },
+			{ session: createBudgetSession(rootSessionManager) },
+		);
+
+		expect(invocation).toBe(2);
+		expect(rootSessionManager.getTurnBudget()).toEqual({
+			total: rootBudgetTokens,
+			spent: nestedOutputTokens,
+			hard: false,
 		});
 	});
 });
