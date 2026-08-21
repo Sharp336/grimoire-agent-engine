@@ -318,10 +318,11 @@ function querySnapshot(
 		resolve(result);
 	};
 	socket.setEncoding("utf8");
-	socket.once("error", () => {
-		// Endpoints die with their host process: connection failure means the
-		// host is gone (even if the PID was reused), so the entry is stale.
-		finish({ status: "dead" });
+	socket.once("error", err => {
+		const code = (err as NodeJS.ErrnoException).code;
+		finish({
+			status: code === "ENOENT" || code === "ECONNREFUSED" ? "dead" : "skip",
+		});
 	});
 	socket.once("connect", () => {
 		socket.write(`${JSON.stringify({ v: COLLAB_REGISTRY_VERSION, token: meta.token, mode })}\n`);
