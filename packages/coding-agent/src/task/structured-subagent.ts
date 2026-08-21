@@ -163,6 +163,7 @@ type EvalSubagentUsageRecorder = (output: number) => void;
 
 interface EvalSubagentContext {
 	owner: object;
+	forwardedOutput: number;
 	recordOutput: EvalSubagentUsageRecorder;
 	getTurnBudget?: () => EvalTurnBudget;
 }
@@ -181,20 +182,33 @@ function getEvalAncestorContext(session: ToolSession): EvalSubagentContext | und
 }
 
 export function getEffectiveEvalTurnBudget(session: ToolSession): EvalTurnBudget | undefined {
-	return getEvalAncestorContext(session)?.getTurnBudget?.() ?? session.getTurnBudget?.();
+	const ancestorContext = getEvalAncestorContext(session);
+	const localBudget = session.getTurnBudget?.();
+	const ancestorBudget = ancestorContext?.getTurnBudget?.();
+	if (!ancestorBudget) return localBudget;
+	if (!localBudget) return ancestorBudget;
+	const unforwardedLocalOutput = Math.max(0, localBudget.spent - ancestorContext.forwardedOutput);
+	return {
+		total: ancestorBudget.total,
+		spent: ancestorBudget.spent + unforwardedLocalOutput,
+		hard: ancestorBudget.hard,
+	};
 }
 
 function createEvalSubagentContext(request: StructuredSubagentRequest): EvalSubagentContext | undefined {
 	if (request.invocationKind !== "eval") return undefined;
 	const ancestorContext = getEvalAncestorContext(request.session);
-	return {
+	const context: EvalSubagentContext = {
 		owner: {},
-		getTurnBudget: ancestorContext?.getTurnBudget ?? request.session.getTurnBudget,
+		forwardedOutput: 0,
+		getTurnBudget: () => getEffectiveEvalTurnBudget(request.session) as EvalTurnBudget,
 		recordOutput: output => {
+			context.forwardedOutput += output;
 			request.session.recordEvalSubagentUsage?.(output);
 			ancestorContext?.recordOutput(output);
 		},
 	};
+	return context;
 }
 
 function renderSubagentPrompt(assignment: string): string {
