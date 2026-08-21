@@ -168,7 +168,13 @@ type RpcExtensionUserMessageScope = {
 /** Context for deciding whether a false sendCustomMessage still scheduled agent work. */
 export interface RpcAgentMessageTaskHint {
 	deliverAs?: CustomMessageDeliverAs;
-	isStreaming?: boolean;
+	/** Read at send-task settlement so image-normalize races see post-delivery streaming. */
+	isStreaming?: boolean | (() => boolean);
+}
+
+function hintIsStreaming(hint: RpcAgentMessageTaskHint | undefined): boolean {
+	const value = hint?.isStreaming;
+	return typeof value === "function" ? value() : value === true;
 }
 
 /**
@@ -179,7 +185,7 @@ export interface RpcAgentMessageTaskHint {
 function isAgentInvokingSendResult(result: unknown, hint: RpcAgentMessageTaskHint | undefined): boolean {
 	if (result !== false) return true;
 	if (hint?.deliverAs === "aside") return false;
-	return hint?.isStreaming === true;
+	return hintIsStreaming(hint);
 }
 
 /**

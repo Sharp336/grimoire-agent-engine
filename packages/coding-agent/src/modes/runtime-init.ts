@@ -36,7 +36,7 @@ export interface InitializeExtensionsOptions {
 	/** Optional lifecycle hook for extension-originated sends whose success/failure determines turn ownership. */
 	trackAgentInvokingMessage?: (
 		task: Promise<unknown>,
-		hint?: { deliverAs?: CustomMessageDeliverAs; isStreaming?: boolean },
+		hint?: { deliverAs?: CustomMessageDeliverAs; isStreaming?: boolean | (() => boolean) },
 	) => void;
 }
 
@@ -70,7 +70,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 					if (trackAgentInvokingMessage) {
 						trackAgentInvokingMessage(sendTask, {
 							deliverAs: sendOptions.deliverAs,
-							isStreaming: session.isStreaming,
+							isStreaming: () => session.isStreaming,
 						});
 					} else {
 						markAgentInvokingMessage?.();
@@ -83,7 +83,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 			sendUserMessage: (content, sendOptions) => {
 				const sendTask = session.sendUserMessage(content, sendOptions);
 				if (trackAgentInvokingMessage) {
-					trackAgentInvokingMessage(sendTask, { isStreaming: session.isStreaming });
+					trackAgentInvokingMessage(sendTask, { isStreaming: () => session.isStreaming });
 				} else {
 					markAgentInvokingMessage?.();
 				}

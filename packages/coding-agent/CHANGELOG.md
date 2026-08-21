@@ -60,6 +60,7 @@
 - Fixed stranded extension asides flushed at settle blocking queued follow-up auto-resume by poisoning the transcript tail before the follow-up drain.
 - Fixed stranded extension asides arriving one model call after a queued follow-up resume instead of in the same continuation request.
 - Fixed RPC `prompt_result { agentInvoked: false }` after a streaming `triggerTurn` send that queued a continuation (`nextTurn` / steer / follow-up), not only a parked aside.
+- Fixed RPC `prompt_result { agentInvoked: false }` when `triggerTurn` send started idle but queued after image normalization because another prompt began streaming.
 - Fixed `deliverAs: "aside"` with `triggerTurn` starting a surprise turn when the primary stream settled during image normalization.
 - Fixed `/clear` and `/btw` leaving stranded extension asides that could re-enter the rewritten conversation on the next prompt.
 

@@ -224,6 +224,62 @@ describe("reportLocalOnlyPromptResult", () => {
 		expect(output).toEqual([]);
 	});
 
+	test("suppresses prompt_result when triggerTurn nextTurn send becomes streaming during sendCustomMessage", async () => {
+		let extensionActions: ExtensionActions | undefined;
+		const output: object[] = [];
+		const extensionUserMessages = new RpcExtensionUserMessageTracker();
+		let streaming = false;
+		const session = {
+			get isStreaming() {
+				return streaming;
+			},
+			extensionRunner: {
+				initialize: (actions: ExtensionActions) => {
+					extensionActions = actions;
+				},
+				onError: () => {},
+				emit: async () => {},
+			},
+			sendCustomMessage: async () => {
+				streaming = true;
+				return false;
+			},
+		} as unknown as AgentSession;
+
+		await initializeExtensions(session, {
+			reportSendError: (_action, error) => {
+				throw error;
+			},
+			reportRuntimeError: error => {
+				throw error.error;
+			},
+			trackAgentInvokingMessage: (task, hint) => {
+				extensionUserMessages.trackAgentMessageTask(task, hint);
+			},
+		});
+
+		const trackedPrompt = extensionUserMessages.watchPrompt(() => {
+			if (!extensionActions) throw new Error("extensions not initialized");
+			extensionActions.sendMessage(triggerTurnCustomMessage, {
+				triggerTurn: true,
+				deliverAs: "nextTurn",
+			});
+			return Promise.resolve(false);
+		});
+		reportLocalOnlyPromptResult({
+			id: "req_normalize_race",
+			prompt: trackedPrompt.prompt,
+			output: frame => output.push(frame),
+			onError: error => {
+				throw error;
+			},
+			hasExtensionAgentMessageTask: trackedPrompt.hasAgentMessageTask,
+			waitForExtensionAgentMessageTasks: trackedPrompt.waitForAgentMessageTasks,
+		});
+		await waitForTrackedPromptHandlers(trackedPrompt);
+		expect(output).toEqual([]);
+	});
+
 	test("suppresses prompt_result when triggerTurn sendCustomMessage resolves true", async () => {
 		const output = await reportTriggerTurnCustomMessage(true, "req_aside_turn");
 		expect(output).toEqual([]);
