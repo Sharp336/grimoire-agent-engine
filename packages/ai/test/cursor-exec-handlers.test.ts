@@ -589,6 +589,33 @@ describe("Cursor request action encoding", () => {
 		expect(payload.requestedModel?.modelId).toBe("cursor-composer-2.5");
 	});
 
+	it("ignores a generic reasoning option on reasoning Cursor models without an effort surface", async () => {
+		// Discovery marks unbundled `cursor-grok-*` ids reasoning:true from the id
+		// heuristic. buildModel then bakes a default Grok effort ladder with no
+		// effortRouting, so requireSupportedEffort would reject leftover xhigh
+		// ("Supported efforts: minimal, low, medium, high") and never build the
+		// Run RPC. The request must still go out on the catalog id.
+		const discoveredGrok = buildModel({
+			id: "cursor-grok-9.9",
+			name: "Grok 9.9",
+			api: "cursor-agent",
+			provider: "cursor",
+			baseUrl: "",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1,
+			maxTokens: 1,
+		});
+		const payload = await captureCursorPayloadFromStreamSimple(
+			{ messages: [{ role: "user", content: "continue", timestamp: 0 }] },
+			discoveredGrok,
+			{ reasoning: Effort.XHigh },
+		);
+		expect(payload.modelDetails?.modelId).toBe("cursor-grok-9.9");
+		expect(payload.requestedModel?.modelId).toBe("cursor-grok-9.9");
+	});
+
 	it("sends max-mode metadata with prior history when switching providers mid-conversation", async () => {
 		const payload = await captureCursorPayload(
 			{

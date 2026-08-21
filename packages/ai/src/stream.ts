@@ -2308,10 +2308,15 @@ function mapOptionsForApi<TApi extends Api>(
 
 		case "cursor-agent": {
 			const cursorModel = model as Model<"cursor-agent">;
-			// Skip effort resolution when the model has no thinking surface; a leftover
-			// global/SDK `reasoning` option must not throw on Composer-class ids.
+			// Cursor effort lives in the sibling wire id (`thinking.effortRouting`).
+			// Discovery can mark unbundled `cursor-grok-*` rows reasoning:true and
+			// buildModel may bake a default effort ladder with no routing — a leftover
+			// global/SDK `reasoning` option must not trip requireSupportedEffort.
 			const effort =
-				options?.reasoning && cursorModel.reasoning && !options.disableReasoning && !options.forceReasoningOff
+				options?.reasoning &&
+				cursorModel.thinking?.effortRouting &&
+				!options.disableReasoning &&
+				!options.forceReasoningOff
 					? requireSupportedEffort(cursorModel, options.reasoning)
 					: undefined;
 			const execHandlers = options?.cursorExecHandlers ?? options?.execHandlers;

@@ -9,7 +9,7 @@
 ### Fixed
 
 - Fixed Cursor Grok 4.5/4.6 (and Fast) effort selections being billed and served as the collapsed default Low sibling: `cursor-agent` now resolves `thinking.effortRouting` onto the outbound wire id (`cursor-grok-4.6-xhigh-fast` for xHigh Fast), matching Devin/Gemini CLI.
-- Fixed Cursor turns on non-reasoning models (e.g. Composer 2.5) throwing when a leftover SDK or global `reasoning` option was set; effort-to-wire-id routing now runs only when the model advertises reasoning.
+- Fixed Cursor turns throwing when a leftover SDK or global `reasoning` option was set on models without effort-tier siblings (Composer 2.5, discovered `cursor-grok-*` ids); effort-to-wire-id routing now runs only when `thinking.effortRouting` is present.
 - Fixed OpenAI Codex requests failing with HTTP 401 data residency errors on enterprise ChatGPT workspaces when connecting from a different region via VPN or proxy.
 - Fixed concurrent xAI OAuth token refreshes revoking shared credentials across multiple processes.
 - Fixed Amazon Bedrock Converse multi-turn conversations failing on models like Amazon Nova due to unsigned reasoning content in replayed turns.
