@@ -50,6 +50,20 @@ function createBudgetSession(sessionManager: SessionManager, sessionFile: string
 	} as unknown as ToolSession;
 }
 
+function createLiveBudgetSession(sessionFile: string, ownOutput: () => number): ToolSession {
+	let evalOutput = 0;
+	return {
+		cwd: "/tmp",
+		settings: Settings.isolated(),
+		getSessionSpawns: () => "*",
+		getSessionFile: () => sessionFile,
+		getTurnBudget: () => ({ total: null, spent: ownOutput() + evalOutput, hard: false }),
+		recordEvalSubagentUsage: (output: number) => {
+			evalOutput += output;
+		},
+	} as unknown as ToolSession;
+}
+
 function childSessionFile(options: ExecutorOptions): string {
 	if (!options.artifactsDir) throw new Error("expected eval artifacts directory");
 	return path.join(options.artifactsDir, `${options.id}.jsonl`);
@@ -101,6 +115,41 @@ describe("nested eval agent turn-budget accounting", () => {
 		expect(rootSessionManager.getTurnBudget()).toEqual({
 			total: turnBudgetTokens,
 			spent: parentOutputTokens + nestedOutputTokens,
+			hard: true,
+		});
+	});
+
+	it("includes in-flight child output before allowing another nested spawn", async () => {
+		const rootBudgetTokens = 2_000;
+		const childOwnOutputTokens = 2_500;
+		const rootSessionManager = SessionManager.inMemory();
+		rootSessionManager.beginTurnBudget(rootBudgetTokens, true);
+		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents: [createAgent()], projectAgentsDir: null });
+		let invocation = 0;
+		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
+			invocation += 1;
+			if (invocation !== 1) throw new Error("nested subprocess should have been blocked");
+			const childSession = createLiveBudgetSession(childSessionFile(options), () => childOwnOutputTokens);
+			expect(await runEvalBudget({}, { session: childSession })).toEqual({
+				total: rootBudgetTokens,
+				spent: childOwnOutputTokens,
+				hard: true,
+			});
+			await expect(runEvalAgent({ prompt: "nested work", agent: "task" }, { session: childSession })).rejects.toThrow(
+				"agent() blocked: turn token budget exhausted",
+			);
+			return createResult(options.id, childOwnOutputTokens);
+		});
+
+		await runEvalAgent(
+			{ prompt: "parent work", agent: "task" },
+			{ session: createBudgetSession(rootSessionManager) },
+		);
+
+		expect(invocation).toBe(1);
+		expect(rootSessionManager.getTurnBudget()).toEqual({
+			total: rootBudgetTokens,
+			spent: childOwnOutputTokens,
 			hard: true,
 		});
 	});
