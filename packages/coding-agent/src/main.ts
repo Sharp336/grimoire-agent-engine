@@ -475,6 +475,7 @@ async function runInteractiveMode(
 	initialMessage?: string,
 	initialImages?: ImageContent[],
 	joinLink?: string,
+	onModeReady?: (mode: InteractiveMode) => void,
 ): Promise<void> {
 	const mode = new InteractiveMode(
 		session,
@@ -485,6 +486,7 @@ async function runInteractiveMode(
 		mcpManager,
 		eventBus,
 	);
+	onModeReady?.(mode);
 
 	// Cold-launch gate: the full setup wizard (every scene + the overlay and
 	// their TUI/OAuth/search/theme deps) is heavy, yet the common case only needs
@@ -1253,6 +1255,7 @@ export async function runRootCommand(
 		process.exit(1);
 	}
 	const mode = parsedArgs.mode || "text";
+	let activeInteractiveMode: InteractiveMode | undefined;
 	// RPC owns stdin. Claim its singleton stream before plugin/extension discovery can load an in-process consumer.
 	const rpcInput = mode === "rpc" || mode === "rpc-ui" ? claimRpcInput() : undefined;
 
@@ -1583,6 +1586,13 @@ export async function runRootCommand(
 	sessionOptions.modelRegistry = modelRegistry;
 	sessionOptions.hasUI = isInteractive || mode === "rpc-ui";
 	sessionOptions.settings = settingsInstance;
+	if (mode === "text") {
+		sessionOptions.moveToCwd = async newCwd => {
+			if (!sessionManager) return;
+			await sessionManager.moveTo(newCwd);
+			await activeInteractiveMode?.applyCwdChange(newCwd);
+		};
+	}
 
 	// OTEL: register global OTLP exporters when an endpoint is configured via
 	// env, then switch on the agent loop's telemetry hooks so traces, run-level
@@ -1818,6 +1828,9 @@ export async function runRootCommand(
 				initialMessage,
 				initialImages,
 				parsedArgs.join,
+				modeInstance => {
+					activeInteractiveMode = modeInstance;
+				},
 			);
 		} else {
 			// Branch-only single-shot runner: keep print-mode code out of normal interactive startup.

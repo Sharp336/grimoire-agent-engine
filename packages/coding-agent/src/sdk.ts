@@ -545,9 +545,11 @@ export interface CreateAgentSessionOptions {
 	/** Inherited eval executor session id for subagents sharing parent eval state. */
 	parentEvalSessionId?: string;
 
+	/** Session move callback used by worktree-aware tools. */
+	moveToCwd?: (cwd: string) => Promise<void>;
+
 	/** Session manager. Default: session stored under the configured agentDir sessions root */
 	sessionManager?: SessionManager;
-
 	/** Override local:// protocol options for subagent local:// sharing. Default: uses the session's own artifacts dir and session ID. */
 	localProtocolOptions?: LocalProtocolOptions;
 
@@ -1677,7 +1679,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			get cwd() {
 				return sessionManager.getCwd();
 			},
-			moveToCwd: newCwd => sessionManager.moveTo(newCwd),
+			moveToCwd: options.moveToCwd,
 			isToolActive: name => activeToolNames.has(name),
 			setActiveToolNames,
 			toolRegistry,

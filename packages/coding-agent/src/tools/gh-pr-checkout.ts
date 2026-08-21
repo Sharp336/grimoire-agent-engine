@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import { getWorktreeDir, hashPath, isEnoent } from "@oh-my-pi/pi-utils";
+import { getWorktreeDir, hashPath, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import * as git from "../utils/git";
 import type { ToolSession } from ".";
 import type { GhPrCheckoutSummary, GhToolDetails } from "./gh";
@@ -327,8 +327,23 @@ export async function executePrCheckout(
 
 	if (!isMulti) {
 		const [outcome] = outcomes;
-		await session.moveToCwd?.(outcome.worktreePath);
-		return buildTextResult(formatPrCheckoutResult(outcome), outcome.data.url, {
+		let moveWarning: string | undefined;
+		if (session.moveToCwd) {
+			try {
+				await session.moveToCwd(outcome.worktreePath);
+			} catch (error) {
+				const reason = error instanceof Error ? error.message : String(error);
+				logger.warn("PR checkout succeeded but moving the session failed", {
+					worktreePath: outcome.worktreePath,
+					error: reason,
+				});
+				moveWarning = `Warning: worktree checked out at ${outcome.worktreePath}, but the session was not moved: ${reason}`;
+			}
+		} else {
+			moveWarning = "Warning: this host does not support moving the session into the checked-out worktree.";
+		}
+		const text = [formatPrCheckoutResult(outcome), moveWarning].filter(Boolean).join("\n\n");
+		return buildTextResult(text, outcome.data.url, {
 			repo: repo ?? outcome.data.headRepository?.nameWithOwner,
 			branch: outcome.localBranch,
 			worktreePath: outcome.worktreePath,

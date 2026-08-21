@@ -1111,6 +1111,43 @@ describe("github tool", () => {
 			expect(moveToCwd).toHaveBeenCalledWith(worktreePath);
 		});
 
+		it("reports a completed checkout when moving the session fails", async () => {
+			vi.spyOn(git.github, "json")
+				.mockResolvedValueOnce({
+					number: 125,
+					title: "Session move failure",
+					url: "https://github.com/base/repo/pull/125",
+					baseRefName: "main",
+					headRefName: fixture.headRefName,
+					headRefOid: fixture.headRefOid,
+					headRepository: { nameWithOwner: "contrib/repo" },
+					headRepositoryOwner: { login: "contrib" },
+					isCrossRepository: true,
+					maintainerCanModify: true,
+				})
+				.mockResolvedValueOnce({
+					nameWithOwner: "contrib/repo",
+					sshUrl: fixture.forkBare,
+					url: fixture.forkBare,
+				});
+
+			const session = {
+				...createSession(fixture.repoRoot),
+				moveToCwd: async () => {
+					throw new Error("session move denied");
+				},
+			} as ToolSession;
+			const tool = new GithubTool(session);
+			const result = await tool.execute("pr-checkout-session-move-failure", {
+				op: "pr_checkout",
+				pr: "125",
+			});
+
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+			expect(text).toContain("Checked Out Pull Request #125");
+			expect(text).toContain("session was not moved: session move denied");
+		});
+
 		// These assertions are non-mutating (a no-op add and rejected adds), so
 		// reuse the checkout fixture instead of cloning another repository.
 		describe("git.remote.add idempotency", () => {
@@ -1370,7 +1407,9 @@ echo ok
 					maintainerCanModify: true,
 				});
 
-			const tool = new GithubTool(createSession(fixture.repoRoot));
+			const moveToCwd = vi.fn(async (_cwd: string) => {});
+			const session = { ...createSession(fixture.repoRoot), moveToCwd } as ToolSession;
+			const tool = new GithubTool(session);
 			const result = await tool.execute("pr-checkout", { op: "pr_checkout", pr: ["100", "200"] });
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 			const primaryRoot = (await git.repo.primaryRoot(fixture.repoRoot)) ?? fixture.repoRoot;
@@ -1394,6 +1433,7 @@ echo ok
 			expect(summaries?.length).toBe(2);
 			expect(summaries?.map(s => s.prNumber)).toEqual([100, 200]);
 			expect(summaries?.every(s => s.reused === false)).toBe(true);
+			expect(moveToCwd).not.toHaveBeenCalled();
 		}, 30_000);
 
 		describe("pr_push without checkout metadata", () => {
