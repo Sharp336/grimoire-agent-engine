@@ -15,6 +15,7 @@ import { truncateForPrompt } from "../tools/approval";
 import { formatPathRelativeToCwd, resolveToCwd } from "../tools/path-utils";
 import { ToolAbortError, ToolError, throwIfAborted } from "../tools/tool-errors";
 import { clampTimeout } from "../tools/tool-timeouts";
+import * as git from "../utils/git";
 import {
 	applyWorkspaceEditWithLsp,
 	clearInitializationFailure,
@@ -147,6 +148,22 @@ async function enumerateRenamePairs(
 }
 
 /**
+ * Resolve the project root that owns an explicit LSP target.
+ *
+ * A session may be started from one checkout while a tool call names a file
+ * in a sibling linked worktree. The language server must be initialized in
+ * the target's own repository root so its index and workspace edits stay
+ * inside that worktree.
+ */
+async function resolveLspCwd(file: string | undefined, sessionCwd: string): Promise<string> {
+	if (!file || file === "*") return sessionCwd;
+	const resolvedFile = resolveToCwd(file, sessionCwd);
+	const stat = await fs.promises.stat(resolvedFile).catch(() => undefined);
+	const repositoryLookupPath = stat?.isDirectory() ? resolvedFile : path.dirname(resolvedFile);
+	return (await git.repo.root(repositoryLookupPath)) ?? sessionCwd;
+}
+
+/**
  * LSP tool for language server protocol operations.
  */
 export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Theme> {
@@ -196,7 +213,8 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		signal = callerSignal ? AbortSignal.any([callerSignal, timeoutSignal]) : timeoutSignal;
 		throwIfAborted(signal);
 
-		const config = getConfig(this.session.cwd);
+		const cwd = await resolveLspCwd(file, this.session.cwd);
+		const config = getConfig(cwd);
 
 		// Status action doesn't need a file
 		if (action === "status") {
@@ -250,7 +268,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		if (action === "diagnostics") {
 			if (file === "*") {
 				// `*` => run workspace diagnostics across all configured servers
-				const result = await runWorkspaceDiagnostics(this.session.cwd, signal);
+				const result = await runWorkspaceDiagnostics(cwd, signal);
 				return {
 					content: [
 						{
@@ -276,7 +294,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 
 			let targets: string[];
 			let truncatedGlobTargets = false;
-			const resolvedTargets = await resolveDiagnosticTargets(file, this.session.cwd, MAX_GLOB_DIAGNOSTIC_TARGETS);
+			const resolvedTargets = await resolveDiagnosticTargets(file, cwd, MAX_GLOB_DIAGNOSTIC_TARGETS);
 			targets = resolvedTargets.matches;
 			truncatedGlobTargets = resolvedTargets.truncated;
 
@@ -303,7 +321,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 
 			for (const target of targets) {
 				throwIfAborted(signal);
-				const resolved = resolveToCwd(target, this.session.cwd);
+				const resolved = resolveToCwd(target, cwd);
 				const servers = getServersForFile(config, resolved);
 				if (servers.length === 0) {
 					results.push(`${theme.status.error} ${target}: No language server found`);
@@ -311,7 +329,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				}
 
 				const uri = fileToUri(resolved);
-				const relPath = formatPathRelativeToCwd(resolved, this.session.cwd);
+				const relPath = formatPathRelativeToCwd(resolved, cwd);
 				const allDiagnostics: Diagnostic[] = [];
 				const failedServers: string[] = [];
 				let succeededServers = 0;
@@ -323,14 +341,14 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					try {
 						throwIfAborted(signal);
 						if (serverConfig.createClient) {
-							const linterClient = getLinterClient(serverName, serverConfig, this.session.cwd);
+							const linterClient = getLinterClient(serverName, serverConfig, cwd);
 							const diagnostics = await linterClient.lint(resolved, signal);
 							allDiagnostics.push(...diagnostics);
 							succeededServers++;
 							totalServerSuccesses++;
 							continue;
 						}
-						const client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
+						const client = await getOrCreateClient(serverConfig, cwd, undefined, signal);
 						if (isProjectAwareLspServer(serverConfig)) {
 							await waitForProjectLoaded(client, signal);
 							throwIfAborted(signal);
@@ -454,8 +472,8 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				};
 			}
 
-			const source = resolveToCwd(file, this.session.cwd);
-			const dest = resolveToCwd(new_name, this.session.cwd);
+			const source = resolveToCwd(file, cwd);
+			const dest = resolveToCwd(new_name, cwd);
 
 			if (source === dest) {
 				return {
@@ -472,7 +490,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					content: [
 						{
 							type: "text",
-							text: `Error: source path does not exist: ${formatPathRelativeToCwd(source, this.session.cwd)}`,
+							text: `Error: source path does not exist: ${formatPathRelativeToCwd(source, cwd)}`,
 						},
 					],
 					details: { action, success: false, request: params },
@@ -491,7 +509,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					content: [
 						{
 							type: "text",
-							text: `Error: destination already exists: ${formatPathRelativeToCwd(dest, this.session.cwd)}`,
+							text: `Error: destination already exists: ${formatPathRelativeToCwd(dest, cwd)}`,
 						},
 					],
 					details: { action, success: false, request: params },
@@ -553,7 +571,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				throwIfAborted(signal);
 				let client: LspClient;
 				try {
-					client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
+					client = await getOrCreateClient(serverConfig, cwd, undefined, signal);
 					if (isProjectAwareLspServer(serverConfig)) {
 						await waitForProjectLoaded(client, signal);
 					}
@@ -593,8 +611,8 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				}
 			}
 
-			const sourceLabel = formatPathRelativeToCwd(source, this.session.cwd);
-			const destLabel = formatPathRelativeToCwd(dest, this.session.cwd);
+			const sourceLabel = formatPathRelativeToCwd(source, cwd);
+			const destLabel = formatPathRelativeToCwd(dest, cwd);
 			const fileCountLabel = sourceStat.isDirectory()
 				? `${pairs.length} file${pairs.length !== 1 ? "s" : ""} under ${sourceLabel}`
 				: sourceLabel;
@@ -607,7 +625,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					lines.push("  No LSP edits would be applied");
 				} else {
 					for (const { serverName, edit } of perServerEdits) {
-						const edits = formatWorkspaceEdit(edit, this.session.cwd);
+						const edits = formatWorkspaceEdit(edit, cwd);
 						if (edits.length === 0) continue;
 						lines.push(`  ${serverName}:`);
 						for (const e of edits) {
@@ -724,7 +742,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			for (const [uri, bucket] of acceptedByUri) {
 				const filePath = uriToFile(uri);
 				referenceEdits.push({ filePath, edits: bucket.edits });
-				const rel = formatPathRelativeToCwd(filePath, this.session.cwd);
+				const rel = formatPathRelativeToCwd(filePath, cwd);
 				summary.push(`  ${bucket.primaryServer}: applied ${bucket.edits.length} edit(s) to ${rel}`);
 				if (bucket.discarded > 0) {
 					const others = Array.from(bucket.conflictServers).join(", ");
@@ -745,7 +763,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 
 			for (const [serverName, serverConfig] of servers) {
 				try {
-					const client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
+					const client = await getOrCreateClient(serverConfig, cwd, undefined, signal);
 					for (const { oldUri } of pairs) {
 						if (client.openFiles.has(oldUri)) {
 							await sendNotification(client, "textDocument/didClose", { textDocument: { uri: oldUri } }, signal);
@@ -782,7 +800,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		if (action === "capabilities") {
 			let serverList: Array<[string, ServerConfig]>;
 			if (file && file !== "*") {
-				const resolved = resolveToCwd(file, this.session.cwd);
+				const resolved = resolveToCwd(file, cwd);
 				serverList = getLspServersForFile(config, resolved);
 				if (serverList.length === 0) {
 					return {
@@ -806,7 +824,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			for (const [serverName, serverConfig] of serverList) {
 				throwIfAborted(signal);
 				try {
-					const client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
+					const client = await getOrCreateClient(serverConfig, cwd, undefined, signal);
 					respondingServers.add(serverName);
 					const caps = client.serverCapabilities ?? {};
 					sections.push(`${serverName}:`);
@@ -848,7 +866,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			let chosenServer: [string, ServerConfig] | null = null;
 			let resolvedTarget: string | null = null;
 			if (file && file !== "*") {
-				resolvedTarget = resolveToCwd(file, this.session.cwd);
+				resolvedTarget = resolveToCwd(file, cwd);
 				chosenServer = getLspServerForFile(config, resolvedTarget);
 				if (!chosenServer) {
 					return {
@@ -892,7 +910,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			}
 
 			try {
-				const client = await getOrCreateClient(chosenConfig, this.session.cwd, undefined, signal);
+				const client = await getOrCreateClient(chosenConfig, cwd, undefined, signal);
 				if (resolvedTarget) {
 					await ensureFileOpen(client, resolvedTarget, signal);
 				}
@@ -942,7 +960,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			};
 		}
 
-		const resolvedFile = file && !isWorkspace ? resolveToCwd(file, this.session.cwd) : null;
+		const resolvedFile = file && !isWorkspace ? resolveToCwd(file, cwd) : null;
 		if (action === "symbols" && (isWorkspace || !resolvedFile)) {
 			const normalizedQuery = query?.trim();
 			if (!normalizedQuery) {
@@ -963,12 +981,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			for (const [workspaceServerName, workspaceServerConfig] of servers) {
 				throwIfAborted(signal);
 				try {
-					const workspaceClient = await getOrCreateClient(
-						workspaceServerConfig,
-						this.session.cwd,
-						undefined,
-						signal,
-					);
+					const workspaceClient = await getOrCreateClient(workspaceServerConfig, cwd, undefined, signal);
 					const workspaceResult = (await sendRequest(
 						workspaceClient,
 						"workspace/symbol",
@@ -999,7 +1012,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				};
 			}
 			const limitedSymbols = dedupedSymbols.slice(0, WORKSPACE_SYMBOL_LIMIT);
-			const lines = limitedSymbols.map(s => formatSymbolInformation(s, this.session.cwd));
+			const lines = limitedSymbols.map(s => formatSymbolInformation(s, cwd));
 			const truncationLine =
 				dedupedSymbols.length > WORKSPACE_SYMBOL_LIMIT
 					? `\n[…${dedupedSymbols.length - WORKSPACE_SYMBOL_LIMIT} symbols elided…]`
@@ -1026,8 +1039,8 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			// and plugin configs added after the first LSP call become visible —
 			// otherwise `getConfig` returns the first observation for the rest of
 			// the process lifetime (#3546).
-			configCache.delete(this.session.cwd);
-			const refreshedConfig = getConfig(this.session.cwd);
+			configCache.delete(cwd);
+			const refreshedConfig = getConfig(cwd);
 			const servers = getLspServers(refreshedConfig);
 			if (servers.length === 0) {
 				return {
@@ -1038,14 +1051,9 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			const outputs: string[] = [];
 			for (const [workspaceServerName, workspaceServerConfig] of servers) {
 				throwIfAborted(signal);
-				clearInitializationFailure(workspaceServerConfig, this.session.cwd);
+				clearInitializationFailure(workspaceServerConfig, cwd);
 				try {
-					const workspaceClient = await getOrCreateClient(
-						workspaceServerConfig,
-						this.session.cwd,
-						undefined,
-						signal,
-					);
+					const workspaceClient = await getOrCreateClient(workspaceServerConfig, cwd, undefined, signal);
 					outputs.push(await reloadServer(workspaceClient, workspaceServerName, signal));
 				} catch (err) {
 					if (err instanceof ToolAbortError || signal?.aborted) {
@@ -1071,10 +1079,10 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 
 		const [serverName, serverConfig] = serverInfo;
 
-		if (action === "reload") clearInitializationFailure(serverConfig, this.session.cwd);
+		if (action === "reload") clearInitializationFailure(serverConfig, cwd);
 
 		try {
-			const client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
+			const client = await getOrCreateClient(serverConfig, cwd, undefined, signal);
 			const targetFile = resolvedFile;
 			const isRustAnalyzerServer = isRustAnalyzerClient(client) || serverName === "rust-analyzer";
 			const needsProjectIndex =
@@ -1143,9 +1151,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						output = "No definition found";
 						useless = true;
 					} else {
-						const lines = await Promise.all(
-							locations.map(location => formatLocationWithContext(location, this.session.cwd)),
-						);
+						const lines = await Promise.all(locations.map(location => formatLocationWithContext(location, cwd)));
 						output = `Found ${locations.length} definition(s):\n${lines.join("\n")}`;
 					}
 					break;
@@ -1168,9 +1174,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						output = "No type definition found";
 						useless = true;
 					} else {
-						const lines = await Promise.all(
-							locations.map(location => formatLocationWithContext(location, this.session.cwd)),
-						);
+						const lines = await Promise.all(locations.map(location => formatLocationWithContext(location, cwd)));
 						output = `Found ${locations.length} type definition(s):\n${lines.join("\n")}`;
 					}
 					break;
@@ -1193,9 +1197,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						output = "No implementation found";
 						useless = true;
 					} else {
-						const lines = await Promise.all(
-							locations.map(location => formatLocationWithContext(location, this.session.cwd)),
-						);
+						const lines = await Promise.all(locations.map(location => formatLocationWithContext(location, cwd)));
 						output = `Found ${locations.length} implementation(s):\n${lines.join("\n")}`;
 					}
 					break;
@@ -1234,9 +1236,9 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						const contextualReferences = result.slice(0, REFERENCE_CONTEXT_LIMIT);
 						const plainReferences = result.slice(REFERENCE_CONTEXT_LIMIT);
 						const contextualLines = await Promise.all(
-							contextualReferences.map(location => formatLocationWithContext(location, this.session.cwd)),
+							contextualReferences.map(location => formatLocationWithContext(location, cwd)),
 						);
-						const plainLines = plainReferences.map(location => `  ${formatLocation(location, this.session.cwd)}`);
+						const plainLines = plainReferences.map(location => `  ${formatLocation(location, cwd)}`);
 						const lines = plainLines.length
 							? [
 									...contextualLines,
@@ -1315,7 +1317,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						const appliedAction = await applyCodeAction(selectedAction, {
 							resolveCodeAction: async actionItem =>
 								(await sendRequest(client, "codeAction/resolve", actionItem, signal)) as CodeAction,
-							applyWorkspaceEdit: async edit => applyWorkspaceEditWithLsp(edit, this.session.cwd, signal),
+							applyWorkspaceEdit: async edit => applyWorkspaceEditWithLsp(edit, cwd, signal),
 							executeCommand: async commandItem => {
 								await sendRequest(
 									client,
@@ -1371,7 +1373,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						output = "No symbols found";
 						useless = true;
 					} else {
-						const relPath = formatPathRelativeToCwd(targetFile, this.session.cwd);
+						const relPath = formatPathRelativeToCwd(targetFile, cwd);
 						if ("selectionRange" in result[0]) {
 							const lines = (result as DocumentSymbol[]).flatMap(s => formatDocumentSymbol(s));
 							output = `Symbols in ${relPath}:\n${lines.join("\n")}`;
@@ -1411,10 +1413,10 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					} else {
 						const shouldApply = apply !== false;
 						if (shouldApply) {
-							const applied = await applyWorkspaceEditWithLsp(result, this.session.cwd, signal);
+							const applied = await applyWorkspaceEditWithLsp(result, cwd, signal);
 							output = `Applied rename:\n${applied.map(a => `  ${a}`).join("\n")}`;
 						} else {
-							const preview = formatWorkspaceEdit(result, this.session.cwd);
+							const preview = formatWorkspaceEdit(result, cwd);
 							output = `Rename preview:\n${preview.map(p => `  ${p}`).join("\n")}`;
 						}
 					}

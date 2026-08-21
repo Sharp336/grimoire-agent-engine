@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- LSP requests targeting files in linked worktrees now initialize against the target worktree root instead of the session checkout.
 
 ## [17.4.1] - 2026-08-21
 

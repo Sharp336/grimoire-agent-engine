@@ -54,6 +54,7 @@ import { sanitizeText, TempDir } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
 import DEFAULTS from "../../src/lsp/defaults.json" with { type: "json" };
 import { renderResult as renderLocalResult } from "../../src/lsp/render";
+import * as git from "../../src/utils/git";
 import { getLanguageFromPath } from "../../src/utils/lang-from-path";
 
 const lspTestSettings = Settings.isolated();
@@ -634,6 +635,121 @@ describe("lsp regressions", () => {
 		} finally {
 			await lspClient.shutdownAll();
 			tempDir.removeSync();
+		}
+	});
+
+	it("roots LSP at the target worktree for absolute files", async () => {
+		const primaryDir = TempDir.createSync("@omp-lsp-primary-root-");
+		const worktreeDir = TempDir.createSync("@omp-lsp-linked-worktree-");
+		const primaryPath = path.join(primaryDir.path(), "src", "lib.rs");
+		const sourcePath = path.join(worktreeDir.path(), "src", "lib.rs");
+		const otherPath = path.join(worktreeDir.path(), "src", "other.rs");
+		fs.mkdirSync(path.dirname(primaryPath), { recursive: true });
+		fs.mkdirSync(path.dirname(sourcePath), { recursive: true });
+		await Bun.write(primaryPath, "pub struct Primary;\n");
+		await Bun.write(sourcePath, "pub struct Target;\n");
+		await Bun.write(otherPath, "pub fn use_target() {}\n");
+		try {
+			const serverConfig: ServerConfig = {
+				command: "rust-analyzer",
+				fileTypes: ["rs"],
+				rootMarkers: [],
+			};
+			const server = installFakeLsp((message, srv) => {
+				if (message.method === "initialize") {
+					srv.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: { capabilities: { referencesProvider: true, renameProvider: true } },
+					});
+				} else if (message.method === "textDocument/references") {
+					srv.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: [
+							{
+								uri: fileToUri(sourcePath),
+								range: {
+									start: { line: 0, character: 11 },
+									end: { line: 0, character: 17 },
+								},
+							},
+							{
+								uri: fileToUri(otherPath),
+								range: {
+									start: { line: 0, character: 8 },
+									end: { line: 0, character: 18 },
+								},
+							},
+						],
+					});
+				} else if (message.method === "textDocument/rename") {
+					srv.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: {
+							changes: {
+								[fileToUri(sourcePath)]: [
+									{
+										range: {
+											start: { line: 0, character: 11 },
+											end: { line: 0, character: 17 },
+										},
+										newText: "Renamed",
+									},
+								],
+							},
+						},
+					});
+				} else if (message.method === "shutdown") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					srv.exit(0);
+				}
+			});
+			vi.spyOn(git.repo, "root").mockImplementation(async cwd => {
+				return cwd.startsWith(worktreeDir.path()) ? worktreeDir.path() : primaryDir.path();
+			});
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+				servers: { "fake-worktree-lsp": serverConfig },
+				idleTimeoutMs: undefined,
+			});
+
+			const tool = new LspTool(makeLspSession(primaryDir.path()));
+			const references = await tool.execute("worktree-references", {
+				action: "references",
+				file: sourcePath,
+				line: 1,
+				symbol: "Target",
+			});
+			expect(textResult(references)).toContain("src/lib.rs");
+
+			await tool.execute("worktree-rename", {
+				action: "rename",
+				file: sourcePath,
+				line: 1,
+				symbol: "Target",
+				new_name: "Renamed",
+				apply: true,
+			});
+
+			const initialize = server.received.find(message => message.method === "initialize");
+			const params = initialize?.params as {
+				rootUri?: string;
+				workspaceFolders?: Array<{ uri: string; name: string }>;
+			};
+			expect(params.rootUri).toBe(fileToUri(worktreeDir.path()));
+			expect(params.workspaceFolders).toEqual([
+				{ uri: fileToUri(worktreeDir.path()), name: path.basename(worktreeDir.path()) },
+			]);
+			expect(await Bun.file(sourcePath).text()).toBe("pub struct Renamed;\n");
+			expect(await Bun.file(primaryPath).text()).toBe("pub struct Primary;\n");
+		} finally {
+			configCache.delete(primaryDir.path());
+			configCache.delete(worktreeDir.path());
+			await lspClient.shutdownAll();
+			primaryDir.removeSync();
+			worktreeDir.removeSync();
 		}
 	});
 
