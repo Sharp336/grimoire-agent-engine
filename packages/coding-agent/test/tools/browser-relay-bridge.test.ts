@@ -279,4 +279,25 @@ describe("RelayBridge tab grouping", () => {
 		expect(groups).toHaveLength(1);
 		expect(groups[0]!.tabIds).toEqual([1]);
 	});
+
+	it("re-attaches a claimed tab after the orphan sweep detached it before extension reconnect", async () => {
+		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		await claimTab(bridge, ext, cdp, connId, 1);
+		ack(bridge, ext, "group", { grouped: { "1": 42 } });
+		await flush();
+
+		bridge.extClosed(ext);
+
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })]);
+		await flush();
+
+		const attaches = ext2.rpcs("attach");
+		expect(attaches).toHaveLength(1);
+		expect(attaches[0]!.tabId).toBe(1);
+	});
 });

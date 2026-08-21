@@ -2,29 +2,30 @@
 class AttachmentGuard {
   options;
   #attached = new Set;
+  #disconnected = false;
   #pending = null;
   constructor(options) {
     this.options = options;
   }
   track(tabId) {
     this.#attached.add(tabId);
+    this.#scheduleSweep();
   }
   untrack(tabId) {
     this.#attached.delete(tabId);
+    if (this.#attached.size === 0)
+      this.#cancel();
   }
   attachedTabIds() {
     return [...this.#attached];
   }
   onConnected() {
+    this.#disconnected = false;
     this.#cancel();
   }
   onDisconnected() {
-    if (this.#pending !== null || this.#attached.size === 0)
-      return;
-    this.#pending = this.options.setTimer(() => {
-      this.#pending = null;
-      this.#sweep();
-    }, this.options.graceMs);
+    this.#disconnected = true;
+    this.#scheduleSweep();
   }
   onSuspend() {
     this.#cancel();
@@ -35,6 +36,14 @@ class AttachmentGuard {
       return;
     this.options.clearTimer(this.#pending);
     this.#pending = null;
+  }
+  #scheduleSweep() {
+    if (!this.#disconnected || this.#pending !== null || this.#attached.size === 0)
+      return;
+    this.#pending = this.options.setTimer(() => {
+      this.#pending = null;
+      this.#sweep();
+    }, this.options.graceMs);
   }
   #sweep() {
     if (this.#attached.size === 0)

@@ -88,6 +88,19 @@ describe("AttachmentGuard", () => {
 		expect(detached).toEqual([[1]]);
 	});
 
+	it("arms a sweep when a new attachment appears after the relay already disconnected", () => {
+		const { guard, timers, detached } = makeGuard();
+		guard.onDisconnected();
+		expect(timers.pendingCount).toBe(0);
+
+		guard.track(5);
+		expect(timers.pendingCount).toBe(1);
+
+		timers.flush();
+		expect(detached).toEqual([[5]]);
+		expect(guard.attachedTabIds()).toEqual([]);
+	});
+
 	it("stops tracking a tab that was explicitly detached before the sweep", () => {
 		const { guard, timers, detached } = makeGuard();
 		guard.track(3);
@@ -112,6 +125,19 @@ describe("AttachmentGuard", () => {
 		// A late-firing stale timer must not double-detach.
 		timers.flush();
 		expect(detached).toEqual([[9]]);
+	});
+
+	it("cancels a pending sweep when the last tracked attachment disappears", () => {
+		const { guard, timers, detached } = makeGuard();
+		guard.track(12);
+		guard.onDisconnected();
+		expect(timers.pendingCount).toBe(1);
+
+		guard.untrack(12);
+		expect(timers.pendingCount).toBe(0);
+
+		timers.flush();
+		expect(detached).toEqual([]);
 	});
 
 	it("suspend with nothing attached is a no-op", () => {

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed browser-relay reconnects failing to re-attach tabs that still had live session holders after the extension's orphan sweep detached them, so an extension/service-worker restart no longer strands active relay-controlled tabs in a permanently detached state until the next manual claim ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
+
 ## [17.3.8] - 2026-08-19
 
 ### Added

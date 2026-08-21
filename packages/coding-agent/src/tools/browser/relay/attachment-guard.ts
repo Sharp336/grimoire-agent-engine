@@ -32,6 +32,7 @@ export interface AttachmentGuardOptions<H> {
 
 export class AttachmentGuard<H> {
 	readonly #attached = new Set<number>();
+	#disconnected = false;
 	#pending: H | null = null;
 
 	constructor(private readonly options: AttachmentGuardOptions<H>) {}
@@ -39,11 +40,13 @@ export class AttachmentGuard<H> {
 	/** Record a tab the extension just attached. */
 	track(tabId: number): void {
 		this.#attached.add(tabId);
+		this.#scheduleSweep();
 	}
 
 	/** Forget a tab that has been detached (explicit RPC, user cancel, or navigation). */
 	untrack(tabId: number): void {
 		this.#attached.delete(tabId);
+		if (this.#attached.size === 0) this.#cancel();
 	}
 
 	/** Tabs currently believed to hold an extension-owned attachment. */
@@ -53,16 +56,14 @@ export class AttachmentGuard<H> {
 
 	/** Relay connected (or reconnected): cancel any pending orphan sweep. */
 	onConnected(): void {
+		this.#disconnected = false;
 		this.#cancel();
 	}
 
 	/** Relay connection lost: sweep orphaned attachments after the grace period. */
 	onDisconnected(): void {
-		if (this.#pending !== null || this.#attached.size === 0) return;
-		this.#pending = this.options.setTimer(() => {
-			this.#pending = null;
-			this.#sweep();
-		}, this.options.graceMs);
+		this.#disconnected = true;
+		this.#scheduleSweep();
 	}
 
 	/** Service worker suspending: detach immediately so nothing is orphaned. */
@@ -75,6 +76,14 @@ export class AttachmentGuard<H> {
 		if (this.#pending === null) return;
 		this.options.clearTimer(this.#pending);
 		this.#pending = null;
+	}
+
+	#scheduleSweep(): void {
+		if (!this.#disconnected || this.#pending !== null || this.#attached.size === 0) return;
+		this.#pending = this.options.setTimer(() => {
+			this.#pending = null;
+			this.#sweep();
+		}, this.options.graceMs);
 	}
 
 	#sweep(): void {

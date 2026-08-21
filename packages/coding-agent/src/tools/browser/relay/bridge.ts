@@ -296,12 +296,11 @@ export class RelayBridge {
 			if (!seen.has(tabId)) this.#onTabRemoved(tabId);
 		}
 		for (const tab of this.#tabs.values()) {
-			const wasAttached = tab.attached;
 			tab.attached = attachedNow.has(tab.tabId);
 			tab.attaching = null;
-			// A service-worker restart can drop attachments while downstream
-			// connections still hold sessions: restore them best-effort.
-			if (wasAttached && !tab.attached && this.#sessionHolders(tab.tabId).length > 0) {
+			// A service-worker restart or orphan sweep can drop attachments while
+			// downstream connections still hold sessions: restore them best-effort.
+			if (!tab.attached && this.#sessionHolders(tab.tabId).length > 0) {
 				void this.#ensureAttached(tab).then(ok => {
 					if (!ok) this.#onTabDetached(tab.tabId, "reattach_failed");
 				});
