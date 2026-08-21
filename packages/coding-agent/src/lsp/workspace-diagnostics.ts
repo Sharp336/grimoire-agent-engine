@@ -3,8 +3,8 @@ import path from "node:path";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 
 /** Project type detection result */
-interface ProjectType {
-	type: "rust" | "typescript" | "go" | "python" | "unknown";
+export interface ProjectType {
+	type: "rust" | "typescript" | "go" | "python" | "dart" | "unknown";
 	command?: string[];
 	description: string;
 }
@@ -80,8 +80,8 @@ async function resolveGoWorkspaceDiagnosticsCommand(cwd: string, signal?: AbortS
 	}
 }
 
-/** Detect project type from root markers */
-async function detectProjectType(cwd: string, signal?: AbortSignal): Promise<ProjectType> {
+/** Detect project type from root markers. Exported for tests. */
+export async function detectProjectType(cwd: string, signal?: AbortSignal): Promise<ProjectType> {
 	// Check for Rust (Cargo.toml)
 	if (fs.existsSync(path.join(cwd, "Cargo.toml"))) {
 		return { type: "rust", command: ["cargo", "check", "--message-format=short"], description: "Rust (cargo check)" };
@@ -111,6 +111,12 @@ async function detectProjectType(cwd: string, signal?: AbortSignal): Promise<Pro
 		return { type: "python", command: ["pyright"], description: "Python (pyright)" };
 	}
 
+	// Check for Dart/Flutter (pubspec.yaml). `dart analyze` covers Flutter packages
+	// too, so there is no need to branch on whether this is a Flutter project.
+	if (fs.existsSync(path.join(cwd, "pubspec.yaml"))) {
+		return { type: "dart", command: ["dart", "analyze"], description: "Dart (dart analyze)" };
+	}
+
 	return { type: "unknown", description: "Unknown project type" };
 }
 
@@ -134,7 +140,7 @@ export async function runWorkspaceDiagnostics(
 	const projectType = await detectProjectType(cwd, signal);
 	if (!projectType.command) {
 		return {
-			output: `Cannot detect project type. Supported: Rust (Cargo.toml), TypeScript (tsconfig.json), Go (go.work/go.mod), Python (pyproject.toml)`,
+			output: `Cannot detect project type. Supported: Rust (Cargo.toml), TypeScript (tsconfig.json), Go (go.work/go.mod), Python (pyproject.toml), Dart (pubspec.yaml)`,
 			projectType,
 		};
 	}
