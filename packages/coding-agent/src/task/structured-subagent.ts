@@ -158,23 +158,43 @@ export class StructuredSubagentError extends Error {
 
 const PLAN_MODE_TOOLS = ["read", "grep", "glob", "web_search"] as const;
 
+type EvalTurnBudget = { total: number | null; spent: number; hard: boolean };
 type EvalSubagentUsageRecorder = (output: number) => void;
+
+interface EvalSubagentContext {
+	owner: object;
+	recordOutput: EvalSubagentUsageRecorder;
+	getTurnBudget?: () => EvalTurnBudget;
+}
 
 /**
  * Eval-spawned children do not appear in their parent's transcript usage. Keep
- * an in-flight recorder chain keyed by child agent id so nested eval `agent()`
- * output is charged to every eval ancestor without touching ordinary task
- * accounting.
+ * the active eval context by child id so nested `agent()` output reaches every
+ * ancestor and nested hard-budget checks see the root ceiling. Registration is
+ * ownership-guarded: a colliding top-level spawn cannot overwrite or delete a
+ * recorder that belongs to an already-running child.
  */
-const evalSubagentUsageRecorders = new Map<string, EvalSubagentUsageRecorder>();
+const evalSubagentContexts = new Map<string, EvalSubagentContext>();
 
-function createEvalSubagentUsageRecorder(request: StructuredSubagentRequest): EvalSubagentUsageRecorder | undefined {
+function getEvalAncestorContext(session: ToolSession): EvalSubagentContext | undefined {
+	const parentAgentId = session.getAgentId?.();
+	return parentAgentId ? evalSubagentContexts.get(parentAgentId) : undefined;
+}
+
+export function getEffectiveEvalTurnBudget(session: ToolSession): EvalTurnBudget | undefined {
+	return getEvalAncestorContext(session)?.getTurnBudget?.() ?? session.getTurnBudget?.();
+}
+
+function createEvalSubagentContext(request: StructuredSubagentRequest): EvalSubagentContext | undefined {
 	if (request.invocationKind !== "eval") return undefined;
-	const parentAgentId = request.session.getAgentId?.();
-	const ancestorRecorder = parentAgentId ? evalSubagentUsageRecorders.get(parentAgentId) : undefined;
-	return output => {
-		request.session.recordEvalSubagentUsage?.(output);
-		ancestorRecorder?.(output);
+	const ancestorContext = getEvalAncestorContext(request.session);
+	return {
+		owner: {},
+		getTurnBudget: ancestorContext?.getTurnBudget ?? request.session.getTurnBudget,
+		recordOutput: output => {
+			request.session.recordEvalSubagentUsage?.(output);
+			ancestorContext?.recordOutput(output);
+		},
 	};
 }
 
@@ -183,12 +203,12 @@ function renderSubagentPrompt(assignment: string): string {
 }
 
 function trimToUndefined(value: string | undefined): string | undefined {
-	const trimmed = value?.trim();
+	const trimmed = trimToUndefined(value);
 	return trimmed || undefined;
 }
 
 function sanitizeAgentId(value: string | undefined): string | undefined {
-	const trimmed = trimToUndefined(value);
+	const trimmed = value?.trim();
 	const sanitized = trimmed?.replace(/[^A-Za-z0-9_-]+/g, "").slice(0, 48);
 	return sanitized || undefined;
 }
@@ -309,9 +329,6 @@ export async function resolveEffectiveSubagentPolicy(
 		activeModelPattern: parentActiveModelPattern,
 		fallbackModelPattern: request.session.getModelString?.(),
 	};
-	// Role identity and patterns come from one call so they cannot be derived
-	// from different sources: the expansion below discards the alias, and the
-	// child's inherited retry-fallback chain is keyed off the role.
 	const { patterns: modelOverride, role: modelRole } = resolveAgentModelSelection(modelResolution);
 	const isolationMode = request.session.settings.get("task.isolation.mode");
 	const isIsolated = request.isolation?.requested === true;
@@ -414,8 +431,6 @@ function buildExecutorOptions(
 		assignment: request.assignment.trim(),
 		context: request.context?.trim() || undefined,
 		planReference: undefined,
-		// Task `name` is the spawn handle (id allocation). Eval `label` is a
-		// real UI description. Copy it only for eval so generateTaskLabel can run.
 		description: request.invocationKind === "eval" ? trimToUndefined(request.identity?.label) : undefined,
 		index: request.index ?? 0,
 		parentToolCallId: request.parentToolCallId,
@@ -575,19 +590,19 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 	let requiresRecoveryArtifacts = false;
 	let completedSuccessfully = false;
 	let deferredCleanup: Promise<void> | undefined;
-	let evalUsageRecorderId: string | undefined;
-	const recordEvalSubagentOutput = createEvalSubagentUsageRecorder(request);
-	const recordEvalSubagentUsage = recordEvalSubagentOutput
-		? (result: SingleResult) => recordEvalSubagentOutput(result.usage?.output ?? 0)
+	let registeredEvalContext: { id: string; context: EvalSubagentContext } | undefined;
+	const evalContext = createEvalSubagentContext(request);
+	const recordEvalSubagentUsage = evalContext
+		? (result: SingleResult) => evalContext.recordOutput(result.usage?.output ?? 0)
 		: undefined;
 	try {
 		const id = await reserveStructuredSubagentId(request.session, {
 			...request.identity,
 			label: request.identity?.label ?? (request.invocationKind === "eval" ? "EvalAgent" : undefined),
 		});
-		if (recordEvalSubagentOutput) {
-			evalSubagentUsageRecorders.set(id, recordEvalSubagentOutput);
-			evalUsageRecorderId = id;
+		if (evalContext && !evalSubagentContexts.has(id)) {
+			evalSubagentContexts.set(id, evalContext);
+			registeredEvalContext = { id, context: evalContext };
 		}
 		const baseOptions = buildExecutorOptions(request, policy, lease, id);
 		baseOptions.onCleanupDeferred = completion => {
@@ -686,7 +701,12 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			{ cause: error },
 		);
 	} finally {
-		if (evalUsageRecorderId) evalSubagentUsageRecorders.delete(evalUsageRecorderId);
+		if (
+			registeredEvalContext &&
+			evalSubagentContexts.get(registeredEvalContext.id) === registeredEvalContext.context
+		) {
+			evalSubagentContexts.delete(registeredEvalContext.id);
+		}
 		const shouldRetainArtifacts =
 			(request.retainArtifacts && completedSuccessfully) ||
 			(policy.isIsolated && (!policy.applyChanges || changesApplied === false || requiresRecoveryArtifacts));
