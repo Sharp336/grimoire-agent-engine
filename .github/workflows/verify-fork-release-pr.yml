@@ -10,7 +10,7 @@ on:
       - .github/workflows/verify-fork-release-pr.yml
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   verify:
@@ -18,6 +18,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: optimize-fork-release-pipeline
 
       - name: Validate workflow and shell syntax
         shell: bash
@@ -48,3 +50,90 @@ jobs:
           for target in linux-x64 linux-arm64 win32-x64; do
             bash .github/scripts/fork-release-native.sh "$target" "$RUNNER_TEMP/native-$target"
           done
+
+      - name: Generate coherent release and installer files
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+
+          generated = Path('.github/generated')
+          generated.mkdir(parents=True, exist_ok=True)
+
+          release = Path('.github/workflows/fork-release.yml').read_text()
+          if release.count('-f make_latest=false') != 2:
+              raise SystemExit('expected two make_latest=false release API fields')
+          release = release.replace('-f make_latest=false', '-f make_latest=true')
+          (generated / 'fork-release.yml').write_text(release)
+
+          install_sh = Path('scripts/install.sh').read_text()
+          install_sh = install_sh.replace(
+              'https://raw.githubusercontent.com/can1357/oh-my-pi/main/scripts/install.sh',
+              'https://raw.githubusercontent.com/jchanghong023/oh-my-pi/main/scripts/install.sh',
+          )
+          old_os = '''    case "$OS" in
+              Linux)  PLATFORM="linux" ;;
+              Darwin) PLATFORM="darwin" ;;
+              *)      echo "Unsupported OS: $OS"; exit 1 ;;
+          esac'''
+          new_os = '''    case "$OS" in
+              Linux) PLATFORM="linux" ;;
+              Darwin)
+                  echo "This fork does not publish macOS binaries. Re-run with --source to install from the fork repository."
+                  exit 1
+                  ;;
+              *) echo "Unsupported OS: $OS"; exit 1 ;;
+          esac'''
+          if install_sh.count(old_os) != 1:
+              raise SystemExit('install.sh OS block changed unexpectedly')
+          install_sh = install_sh.replace(old_os, new_os)
+          old_musl = '''    if [ "$PLATFORM" = "linux" ]; then
+              if [ -f /etc/alpine-release ] || { command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl; }; then
+                  PLATFORM="linux-musl"
+              fi
+          fi'''
+          new_musl = '''    if [ -f /etc/alpine-release ] || { command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl; }; then
+              echo "This fork publishes glibc Linux binaries only; musl users should re-run with --source."
+              exit 1
+          fi'''
+          if install_sh.count(old_musl) != 1:
+              raise SystemExit('install.sh musl block changed unexpectedly')
+          install_sh = install_sh.replace(old_musl, new_musl)
+          old_source = '''    source)
+              if ! has_bun; then'''
+          new_source = '''    source)
+              if [ -z "$REF" ]; then
+                  REF="main"
+              fi
+              if ! has_bun; then'''
+          if install_sh.count(old_source) != 1:
+              raise SystemExit('install.sh source branch changed unexpectedly')
+          install_sh = install_sh.replace(old_source, new_source)
+          if 'PLATFORM="darwin"' in install_sh or 'PLATFORM="linux-musl"' in install_sh:
+              raise SystemExit('unsupported binary platform remains in install.sh')
+          (generated / 'install.sh').write_text(install_sh)
+
+          install_ps1 = Path('scripts/install.ps1').read_text()
+          install_ps1 = install_ps1.replace(
+              'https://raw.githubusercontent.com/can1357/oh-my-pi/main/scripts/install.ps1',
+              'https://raw.githubusercontent.com/jchanghong023/oh-my-pi/main/scripts/install.ps1',
+          )
+          old_ps_source = '''if ($Source) {
+              if (-not (Test-BunInstalled)) {'''
+          new_ps_source = '''if ($Source) {
+              if (-not $Ref) {
+                  $Ref = "main"
+              }
+              if (-not (Test-BunInstalled)) {'''
+          if install_ps1.count(old_ps_source) != 1:
+              raise SystemExit('install.ps1 source branch changed unexpectedly')
+          install_ps1 = install_ps1.replace(old_ps_source, new_ps_source)
+          (generated / 'install.ps1').write_text(install_ps1)
+          PY
+
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -- .github/generated
+          git commit -m "ci: stage coherent release installer files"
+          git push origin HEAD:optimize-fork-release-pipeline
