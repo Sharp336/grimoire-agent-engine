@@ -199,10 +199,16 @@ describe("nested eval agent turn-budget accounting", () => {
 				if (topLevelStarts === 2) resolveBothStarted();
 				await bothStarted;
 				if (options.assignment === "parent a") {
-					await runEvalAgent({ prompt: "nested a", agent: "task" }, { session: createBudgetSession(childA, options.id) });
+					await runEvalAgent(
+						{ prompt: "nested a", agent: "task" },
+						{ session: createBudgetSession(childA, options.id) },
+					);
 					return createResult(options.id, 100);
 				}
-				await runEvalAgent({ prompt: "nested b", agent: "task" }, { session: createBudgetSession(childB, options.id) });
+				await runEvalAgent(
+					{ prompt: "nested b", agent: "task" },
+					{ session: createBudgetSession(childB, options.id) },
+				);
 				return createResult(options.id, 200);
 			}
 			if (options.assignment === "nested a") return createResult(options.id, 1_000);
