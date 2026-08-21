@@ -813,6 +813,16 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui = new TUI(new ProcessTerminal(), settings.get("showHardwareCursor"));
 		this.ui.setMaxInlineImages(settings.get("tui.maxInlineImages"));
 		this.ui.setScrollbackRebuild(settings.get("tui.scrollbackRebuild"));
+		if (settings.get("tui.mainTextSelection")) {
+			this.ui.enableMainTextSelection(async text => {
+				try {
+					await copyToClipboard(text);
+					this.showStatus("Copied!");
+				} catch (error) {
+					this.showWarning(`Copy failed: ${error instanceof Error ? error.message : String(error)}`);
+				}
+			});
+		}
 		// OSC 66 text-sizing is Kitty-only; resolve the setting against the terminal's
 		// capability (`TERMINAL.textSizing` defaults on for Kitty) so it stays off
 		// unless the user opts in, and never emits raw escapes on other terminals.

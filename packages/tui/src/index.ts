@@ -45,6 +45,8 @@ export type * from "./symbols";
 export * from "./terminal";
 // Terminal image support
 export * from "./terminal-capabilities";
+// Visible-window drag selection
+export * from "./text-selection";
 // TTY ID
 export * from "./ttyid";
 export * from "./tui";

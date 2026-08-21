@@ -22,6 +22,9 @@ export interface EditorComponent extends Component {
 	/** Handle raw terminal input (key presses, paste sequences, etc.) */
 	handleInput(data: string): void;
 
+	/** Place the caret from a local-frame mouse click. Returns false for chrome. */
+	placeCursorFromMouse?(row: number, col: number): boolean;
+
 	// =========================================================================
 	// Callbacks (required)
 	// =========================================================================

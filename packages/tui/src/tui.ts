@@ -22,6 +22,7 @@ import { DEFAULT_MAX_INLINE_IMAGES, ImageBudget } from "./components/image";
 import { planDeccaraFills } from "./deccara";
 import { isKeyRelease, matchesKey } from "./keys";
 import { LoopWatchdog } from "./loop-watchdog";
+import { parseSgrMouse } from "./mouse";
 import { isConPTYHosted, setAltScreenActive, type Terminal } from "./terminal";
 import {
 	encodeKittyDeleteImage,
@@ -37,6 +38,12 @@ import {
 	synchronizedOutputUserOverride,
 	TERMINAL,
 } from "./terminal-capabilities";
+import {
+	applySelectionHighlight,
+	applySelectionMouse,
+	reconstructSelectionText,
+	type TextSelection,
+} from "./text-selection";
 import {
 	Ellipsis,
 	extractSegments,
@@ -86,13 +93,12 @@ const CURSOR_BEGIN = `${HIDE_CURSOR}${SYNC_OUTPUT_BEGIN}`;
 const CURSOR_BEGIN_NO_SYNC = HIDE_CURSOR;
 const CURSOR_END = SYNC_OUTPUT_END;
 const CURSOR_END_NO_SYNC = "";
-// Mouse reporting is scoped to fullscreen overlays that opt into pointer
-// interaction. 1000h = button click tracking, 1003h = any-motion tracking for
-// hover targets, and 1006h = SGR extended coordinates past column/row 223.
-// Selection-first overlays leave these modes disabled so the terminal retains
-// native text selection.
+// Overlay mouse reporting: 1000h click + 1003h any-motion (hover) + 1006h SGR.
 const MOUSE_TRACKING_ON = "\x1b[?1000h\x1b[?1003h\x1b[?1006h";
 const MOUSE_TRACKING_OFF = "\x1b[?1006l\x1b[?1003l\x1b[?1000l";
+// Main-view drag-select: 1002h button-motion only (no hover flood).
+const MAIN_MOUSE_TRACKING_ON = "\x1b[?1000h\x1b[?1002h\x1b[?1006h";
+const MAIN_MOUSE_TRACKING_OFF = "\x1b[?1006l\x1b[?1002l\x1b[?1000l";
 const ALT_SCREEN_ENTER = "\x1b[?1049h";
 const ALT_SCREEN_EXIT = "\x1b[?1049l";
 
@@ -867,6 +873,22 @@ export class Container
 		this.#memoLines = lines;
 		return lines;
 	}
+
+	/** Last-compose frame offset of `target` under this container, if present. */
+	locateDescendant(target: Component): { start: number; rows: number } | undefined {
+		let start = 0;
+		for (let i = 0; i < this.children.length; i++) {
+			const child = this.children[i]!;
+			const rows = this.#memoChildLines[i]?.length ?? 0;
+			if (child === target) return { start, rows };
+			if (child instanceof Container) {
+				const inner = child.locateDescendant(target);
+				if (inner) return { start: start + inner.start, rows: inner.rows };
+			}
+			start += rows;
+		}
+		return undefined;
+	}
 }
 
 /**
@@ -1433,6 +1455,13 @@ export class TUI extends Container {
 	// normal screen. #altPreviousLines is the last alt frame, for repaint-skip.
 	#altActive = false;
 	#altMouseTrackingActive = false;
+	#mainMouseTracking = false;
+	#textSelection: TextSelection | null = null;
+	#selectionSourceWindow: string[] | null = null;
+	#onSelectionCopy: ((text: string) => void | Promise<void>) | undefined;
+	/** Lines the live window is peeked above the tail. 0 follows the composer. */
+	#viewOffset = 0;
+	#tuiStarted = false;
 	#altPreviousLines: string[] = [];
 	#altEnterWidth = 0;
 	#altEnterHeight = 0;
@@ -2134,6 +2163,7 @@ export class TUI extends Container {
 
 	start(options?: TUIStartOptions): void {
 		this.#stopped = false;
+		this.#tuiStarted = true;
 		this.#watchdog.start();
 		this.#ghosttyInitialImageDelayDone = false;
 		this.#ghosttyImageReadyAtMs = this.#renderScheduler.now() + TUI.#GHOSTTY_INITIAL_IMAGE_DELAY_MS;
@@ -2229,6 +2259,7 @@ export class TUI extends Container {
 		this.#recordHardwareCursorHidden();
 		this.#querySixelSupport();
 		this.#queryCellSize();
+		if (this.#mainMouseTracking) this.terminal.write(MAIN_MOUSE_TRACKING_ON);
 		this.requestRender(true, { clearScrollback: options?.clearScrollback === true });
 	}
 
@@ -2248,6 +2279,93 @@ export class TUI extends Container {
 
 	removeInputListener(listener: InputListener): void {
 		this.#inputListeners.delete(listener);
+	}
+
+	/**
+	 * Enable main-view drag-select. SGR button-motion tracking stays on the
+	 * normal screen; fullscreen overlays take over and this is restored on exit.
+	 */
+	enableMainTextSelection(onCopy: (text: string) => void | Promise<void>): void {
+		this.#onSelectionCopy = onCopy;
+		this.#mainMouseTracking = true;
+		if (this.#tuiStarted && !this.#altActive) this.terminal.write(MAIN_MOUSE_TRACKING_ON);
+	}
+
+	/** Turn off main-view drag-select and restore native terminal mouse handling. */
+	disableMainTextSelection(): void {
+		this.#onSelectionCopy = undefined;
+		this.#mainMouseTracking = false;
+		this.#textSelection = null;
+		this.#selectionSourceWindow = null;
+		this.#viewOffset = 0;
+		if (this.#tuiStarted && !this.#altActive) this.terminal.write(MAIN_MOUSE_TRACKING_OFF);
+		this.requestRender();
+	}
+
+	#handleMainSelectionInput(data: string): boolean {
+		const event = parseSgrMouse(data);
+		if (!event) return false;
+		if (event.leftClick && this.#tryPlaceEditorCursor(event.row, event.col)) return true;
+		const result = applySelectionMouse(this.#textSelection, event);
+		if (result.action === "ignore") return false;
+		if (result.action === "scroll") {
+			this.#textSelection = null;
+			this.#selectionSourceWindow = null;
+			this.#scrollMainView(event.wheel ?? -1);
+			return true;
+		}
+		if (result.action === "copy") {
+			const text = result.selection
+				? reconstructSelectionText(this.#selectionSourceWindow ?? [], result.selection)
+				: "";
+			this.#textSelection = null;
+			this.#selectionSourceWindow = null;
+			if (text.length > 0) void this.#onSelectionCopy?.(text);
+			this.requestRender();
+			return true;
+		}
+		this.#textSelection = result.selection;
+		if (result.action === "start" || result.action === "move") this.requestRender();
+		return true;
+	}
+
+	#scrollMainView(delta: -1 | 1): void {
+		const maxOffset = this.#windowTopRow;
+		const next = delta < 0 ? Math.min(maxOffset, this.#viewOffset + 3) : Math.max(0, this.#viewOffset - 3);
+		if (next === this.#viewOffset) return;
+		this.#viewOffset = next;
+		this.requestRender();
+	}
+
+	#tryPlaceEditorCursor(screenRow: number, screenCol: number): boolean {
+		const focused = this.#focusedComponent;
+		if (!focused || typeof focused.placeCursorFromMouse !== "function") return false;
+		const loc = this.#locateInFrame(focused);
+		if (!loc) return false;
+		const height = this.terminal.rows;
+		const editorRows = Math.min(height, loc.rows);
+		const scrollRows = height - editorRows;
+		const viewTop = Math.max(0, this.#windowTopRow - this.#viewOffset);
+		const frameRow =
+			this.#viewOffset > 0 && editorRows > 0 && screenRow >= scrollRows
+				? this.#windowTopRow + screenRow
+				: viewTop + screenRow;
+		const localRow = frameRow - loc.start;
+		if (localRow < 0 || localRow >= loc.rows) return false;
+		if (!focused.placeCursorFromMouse(localRow, screenCol)) return false;
+		this.requestRender();
+		return true;
+	}
+
+	#locateInFrame(target: Component): { start: number; rows: number } | undefined {
+		for (const seg of this.#frameSegments) {
+			if (seg.component === target) return { start: seg.start, rows: seg.rowCount };
+			if (seg.component instanceof Container) {
+				const inner = seg.component.locateDescendant(target);
+				if (inner) return { start: seg.start + inner.start, rows: inner.rows };
+			}
+		}
+		return undefined;
 	}
 
 	#querySixelSupport(): void {
@@ -2386,6 +2504,10 @@ export class TUI extends Container {
 		if (this.#resizeAltActive) {
 			this.terminal.write(this.#leaveResizeAltSequence());
 		}
+		this.#tuiStarted = false;
+		if (this.#mainMouseTracking) this.terminal.write(MAIN_MOUSE_TRACKING_OFF);
+		this.#textSelection = null;
+		this.#selectionSourceWindow = null;
 		if (this.#altActive || this.#pendingAltExit) {
 			const mouseExit = this.#altMouseTrackingActive ? MOUSE_TRACKING_OFF : "";
 			const exitSequence = this.#pendingAltExit || `${mouseExit}${this.#keyboardEnhancementExit()}\x1b[?1049l`;
@@ -2981,6 +3103,15 @@ export class TUI extends Container {
 		if (matchesKey(data, "ctrl+c") || matchesKey(data, "escape")) {
 			this.#inputRenderGraceUntilMs = this.#renderScheduler.now() + TUI.#INPUT_RENDER_GRACE_MS;
 		}
+		if (
+			this.#mainMouseTracking &&
+			!this.#altActive &&
+			this.#getTopmostVisibleOverlay() === undefined &&
+			data.startsWith("\x1b[<") &&
+			this.#handleMainSelectionInput(data)
+		) {
+			return;
+		}
 		if (this.#inputListeners.size > 0) {
 			let current = data;
 			for (const listener of this.#inputListeners) {
@@ -3435,7 +3566,11 @@ export class TUI extends Container {
 			// modified-key reporting sequence on the freshly entered alternate
 			// screen, or Esc/modified keys revert to legacy encoding inside
 			// fullscreen overlays (Ghostty/kitty/iTerm2).
-			const mouseEnter = wantMouseTracking ? MOUSE_TRACKING_ON : "";
+			const mouseEnter = wantMouseTracking
+				? MOUSE_TRACKING_ON
+				: this.#mainMouseTracking
+					? MAIN_MOUSE_TRACKING_OFF
+					: "";
 			this.terminal.write(`\x1b[?1049h${this.#keyboardEnhancementEnter()}${mouseEnter}`);
 			setAltScreenActive(true);
 			this.terminal.hideCursor();
@@ -3450,7 +3585,8 @@ export class TUI extends Container {
 		} else if (!wantAlt && this.#altActive) {
 			const mouseExit = this.#altMouseTrackingActive ? MOUSE_TRACKING_OFF : "";
 			const enhancementExit = this.#keyboardEnhancementExit();
-			const exitSequence = `${mouseExit}${enhancementExit}\x1b[?1049l`;
+			const mouseRestore = this.#mainMouseTracking ? MAIN_MOUSE_TRACKING_ON : "";
+			const exitSequence = `${mouseExit}${enhancementExit}\x1b[?1049l${mouseRestore}`;
 			// Session replacement can finish while a fullscreen selector is still
 			// covering the old normal buffer. Keep the overlay visible until the
 			// replacement is ready, then fuse the buffer restore into that full paint;
@@ -3928,7 +4064,7 @@ export class TUI extends Container {
 			// accepted wrap drift does not read as a violation on the next
 			// ordinary frame.
 			chunkTo =
-				hasVisibleOverlay || geometryChanged
+				hasVisibleOverlay || geometryChanged || this.#viewOffset > 0
 					? this.#committedRows
 					: Math.min(windowTop, Math.max(this.#committedRows, commitCeiling));
 			if (widthChanged) {
@@ -3948,8 +4084,19 @@ export class TUI extends Container {
 			}
 		}
 		const frame = this.#prepareFrame(rawFrame, width);
+		this.#viewOffset = Math.min(this.#viewOffset, windowTop);
+		const viewTop = Math.max(0, windowTop - this.#viewOffset);
+		const peekEditor = this.#viewOffset > 0 ? this.#focusedComponent : null;
+		const peekEditorLoc = peekEditor ? this.#locateInFrame(peekEditor) : undefined;
+		const editorRows = peekEditorLoc ? Math.min(height, peekEditorLoc.rows) : 0;
+		const peekScrollRows = height - editorRows;
 		let window: string[] = new Array(height);
-		for (let r = 0; r < height; r++) window[r] = frame[windowTop + r] ?? "";
+		for (let r = 0; r < peekScrollRows; r++) window[r] = frame[viewTop + r] ?? "";
+		for (let r = 0; r < editorRows; r++) window[peekScrollRows + r] = frame[windowTop + peekScrollRows + r] ?? "";
+		if (this.#textSelection && !hasVisibleOverlay) {
+			this.#selectionSourceWindow = window.slice();
+			applySelectionHighlight(window, this.#textSelection);
+		}
 		if (hasVisibleOverlay) {
 			window = this.#compositeOverlaysIntoWindow(window, width, height);
 			const overlayMarkers = this.#extractCursorMarkers(window);
@@ -4069,7 +4216,7 @@ export class TUI extends Container {
 				scrollRows = Math.min(logicalSuffixRows, appendWindowMovement);
 				commitTo = commitFrom + scrollRows;
 			}
-			if (hasVisibleOverlay) {
+			if (hasVisibleOverlay || this.#viewOffset > 0) {
 				scrollRows = 0;
 				commitTo = commitFrom;
 			}

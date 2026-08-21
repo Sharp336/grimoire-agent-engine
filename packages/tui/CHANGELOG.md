@@ -6,6 +6,11 @@
 
 - Added optional `getNativeScrollbackLiveRegionPinnedStart()` hook to allow nested transcripts to pin a later dashboard without shifting the earliest live seam.
 
+### Fixed
+
+- Main-view drag-select now copies the highlighted text to the clipboard, and a click in the composer places the caret on that word.
+- Wheel reports scroll the in-app transcript (composer stays pinned). Native history is left alone so drag-select and wheel can both stay on.
+
 ## [17.4.0] - 2026-08-20
 
 ### Added
