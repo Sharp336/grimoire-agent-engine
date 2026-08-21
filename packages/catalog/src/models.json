@@ -47921,9 +47921,9 @@
 				"image"
 			],
 			"cost": {
-				"input": 0.14,
-				"output": 0.28,
-				"cacheRead": 0.0028,
+				"input": 0.44,
+				"output": 1.32,
+				"cacheRead": 0.014,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,

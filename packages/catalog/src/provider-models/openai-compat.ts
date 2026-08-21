@@ -1724,9 +1724,12 @@ export function deepseekModelManagerOptions(
  * before stencil.so picks the id up and before any credentialed discovery.
  * Limits mirror the official model page (1M context / 384K output) in
  * DeepSeek's binary units — the live API rejects max_tokens above 393216
- * (384 × 1024), so 1M means 1,048,576. Cost is identical to deepseek-v4-flash
- * per DeepSeek's pricing page. Thinking (low/high/max) and deepseekDirect
- * compat quirks are derived by the generator's policy pass from the model id.
+ * (384 × 1024), so 1M means 1,048,576. Cost is the peak tier of DeepSeek's
+ * current pricing page (2026-08-21: $0.44 cache-miss input / $1.32 output /
+ * $0.014 cache-hit per 1M tokens; off-peak is half). Stencil.so's
+ * deepseek-v4-flash row still carries pre-Aug-16 prices — do not copy it.
+ * Thinking (low/high/max) and deepseekDirect compat quirks are derived by the
+ * generator's policy pass from the model id.
  */
 export const DEEPSEEK_VISION_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
 	{
@@ -1737,7 +1740,7 @@ export const DEEPSEEK_VISION_STATIC_MODELS: readonly ModelSpec<"openai-completio
 		baseUrl: "https://api.deepseek.com",
 		reasoning: true,
 		input: ["text", "image"],
-		cost: { input: 0.14, output: 0.28, cacheRead: 0.0028, cacheWrite: 0 },
+		cost: { input: 0.44, output: 1.32, cacheRead: 0.014, cacheWrite: 0 },
 		contextWindow: 1_048_576,
 		maxTokens: 393_216,
 	},
