@@ -390,6 +390,19 @@ function getModelDefinedEfforts<TApi extends Api>(
 	if (isOpenAICompatReasoningApi(spec.api) && isQwenTemplateReasoningEffortCompat(compat)) {
 		return QWEN38_TEMPLATE_REASONING_EFFORTS;
 	}
+	// DeepSeek V4 Flash served over non-OpenAI-compat transports: OpenCode Go
+	// forces its deepseek-v4-flash SKU onto openai-responses
+	// (OPENCODE_GO_API_ID_OVERRIDES), and umans / vercel-ai-gateway expose it
+	// via anthropic-messages gateways. Without this branch those SKUs fall
+	// through to inferFallbackEfforts and inherit the generic xhigh ladder
+	// even though the wire accepts low/high/max (#9134).
+	if (
+		(spec.api === "openai-responses" || spec.api === "anthropic-messages") &&
+		isDeepseekReasoningModel(spec) &&
+		isDeepseekV4FlashModelId(spec.id)
+	) {
+		return LOW_HIGH_MAX_REASONING_EFFORTS;
+	}
 	if (
 		(isOpenAICompatReasoningApi(spec.api) || (spec.api === "ollama-chat" && spec.provider === "ollama-cloud")) &&
 		isDeepseekReasoningModel(spec)
