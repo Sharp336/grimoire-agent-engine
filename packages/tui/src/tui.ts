@@ -19,9 +19,11 @@ import * as fs from "node:fs";
 import { performance } from "node:perf_hooks";
 import { $flag, getDebugLogPath } from "@oh-my-pi/pi-utils";
 import { DEFAULT_MAX_INLINE_IMAGES, ImageBudget } from "./components/image";
+import { ImageGallery, type ImageGalleryImage } from "./components/image-gallery";
 import { planDeccaraFills } from "./deccara";
 import { isKeyRelease, matchesKey } from "./keys";
 import { LoopWatchdog } from "./loop-watchdog";
+import { type MouseRoutable, routeSgrMouseInput, type SgrMouseEvent } from "./mouse";
 import { isConPTYHosted, setAltScreenActive, type Terminal } from "./terminal";
 import {
 	encodeKittyDeleteImage,
@@ -550,7 +552,12 @@ export interface OverlayHandle {
  * Container - a component that contains other components
  */
 export class Container
-	implements Component, NativeScrollbackCommittedRows, NativeScrollbackReplay, NativeScrollbackWidthEpoch
+	implements
+		Component,
+		MouseRoutable,
+		NativeScrollbackCommittedRows,
+		NativeScrollbackReplay,
+		NativeScrollbackWidthEpoch
 {
 	children: Component[] = [];
 
@@ -596,6 +603,33 @@ export class Container
 		}
 		this.invalidate();
 		return this;
+	}
+	/** True when a descendant has an opt-in pointer target in the last frame. */
+	hasMouseTargets(): boolean {
+		return this.children.some(child => this.#hasMouseTargets(child));
+	}
+
+	/**
+	 * Route a frame-local mouse event through the last rendered child layout.
+	 * Components are not re-rendered here: pointer coordinates must stay tied to
+	 * the exact memoized rows that are currently on screen.
+	 */
+	routeMouse(event: SgrMouseEvent, line: number, col: number): boolean | void {
+		const refs = this.#memoChildLines;
+		if (this.#memoLines === undefined || refs.length !== this.children.length) return false;
+		let offset = 0;
+		for (let i = 0; i < this.children.length; i++) {
+			const childLines = refs[i];
+			if (childLines === undefined) return false;
+			if (line >= offset && line < offset + childLines.length && this.#hasMouseTargets(this.children[i]!)) {
+				const target = this.children[i] as Component & MouseRoutable;
+				if (target.routeMouse === undefined) return false;
+				const routed = target.routeMouse(event, line - offset, col);
+				return routed !== false;
+			}
+			offset += childLines.length;
+		}
+		return false;
 	}
 
 	addChild(component: Component): void {
@@ -866,6 +900,10 @@ export class Container
 		}
 		this.#memoLines = lines;
 		return lines;
+	}
+	#hasMouseTargets(child: Component): boolean {
+		const target = child as Component & MouseRoutable;
+		return target.hasMouseTargets?.() === true;
 	}
 }
 
@@ -1433,6 +1471,7 @@ export class TUI extends Container {
 	// normal screen. #altPreviousLines is the last alt frame, for repaint-skip.
 	#altActive = false;
 	#altMouseTrackingActive = false;
+	#normalMouseTrackingActive = false;
 	#altPreviousLines: string[] = [];
 	#altEnterWidth = 0;
 	#altEnterHeight = 0;
@@ -2034,6 +2073,27 @@ export class TUI extends Container {
 	}
 
 	/**
+	 * Open the reusable fullscreen image gallery and focus it for keyboard/mouse
+	 * interaction. The returned handle closes the gallery permanently.
+	 */
+	openImageGallery(images: readonly ImageGalleryImage[], initialIndex = 0): OverlayHandle {
+		let handle: OverlayHandle | undefined;
+		const gallery = new ImageGallery(images, initialIndex, {
+			onClose: () => handle?.hide(),
+			onChange: () => this.requestRender(),
+			viewportHeight: this.terminal.rows,
+		});
+		handle = this.showOverlay(gallery, {
+			fullscreen: true,
+			mouseTracking: true,
+			width: "100%",
+			maxHeight: "100%",
+			anchor: "center",
+		});
+		return handle;
+	}
+
+	/**
 	 * Show an overlay component with configurable positioning and sizing.
 	 * Returns a handle to control the overlay's visibility.
 	 */
@@ -2395,6 +2455,10 @@ export class TUI extends Container {
 			this.#altMouseTrackingActive = false;
 			this.#altPreviousLines = [];
 			this.#pendingAltExit = "";
+		}
+		if (this.#normalMouseTrackingActive) {
+			this.terminal.write(MOUSE_TRACKING_OFF);
+			this.#normalMouseTrackingActive = false;
 		}
 		this.#purgeInlineImages();
 		this.#clearSixelProbeState();
@@ -2974,6 +3038,12 @@ export class TUI extends Container {
 		this.#lastFrameCostMs = this.#renderScheduler.now() - start;
 	}
 
+	#syncNormalMouseTracking(enabled: boolean): void {
+		if (this.#normalMouseTrackingActive === enabled) return;
+		this.terminal.write(enabled ? MOUSE_TRACKING_ON : MOUSE_TRACKING_OFF);
+		this.#normalMouseTrackingActive = enabled;
+	}
+
 	#handleInput(data: string): void {
 		// Ctrl+C/Esc use app-level double-press windows. Give those gestures one
 		// frame to drain queued input before an ordinary repaint; delaying every
@@ -2997,8 +3067,23 @@ export class TUI extends Container {
 			}
 			data = current;
 		}
+		if (this.#altActive) {
+			const focused = this.#focusedComponent as (Component & MouseRoutable) | null;
+			if (focused?.routeMouse) {
+				const routed = routeSgrMouseInput(
+					data,
+					event => focused.routeMouse!(event, event.row, event.col) !== false,
+				);
+				if (routed) return;
+			}
+		}
 
 		// Consume terminal cell size responses without blocking unrelated input.
+		if (!this.#altActive && this.#getTopmostVisibleOverlay() === undefined && this.hasMouseTargets()) {
+			const routed = routeSgrMouseInput(data, event => this.routeMouse(event, event.row, event.col) !== false);
+			if (routed) return;
+		}
+
 		if (this.#consumeCellSizeResponse(data)) {
 			return;
 		}
@@ -3184,7 +3269,6 @@ export class TUI extends Container {
 
 	#resolveAnchorCol(anchor: OverlayAnchor, width: number, availWidth: number, marginLeft: number): number {
 		switch (anchor) {
-			case "top-left":
 			case "left-center":
 			case "bottom-left":
 				return marginLeft;
@@ -3197,6 +3281,7 @@ export class TUI extends Container {
 			case "bottom-center":
 				return marginLeft + Math.floor((availWidth - width) / 2);
 		}
+		return marginLeft + Math.floor((availWidth - width) / 2);
 	}
 
 	/**
@@ -3214,6 +3299,8 @@ export class TUI extends Container {
 			// Get layout with height=0 first to determine width and maxHeight
 			// (width and maxHeight don't depend on overlay height).
 			const { width, maxHeight } = this.#resolveOverlayLayout(options, 0, termWidth, termHeight);
+			const viewportAware = component as Component & { setViewportHeight?: (height: number) => void };
+			viewportAware.setViewportHeight?.(termHeight);
 			let overlayLines = component.render(width);
 			if (overlayLines.length > maxHeight) {
 				const anchor = options?.anchor ?? "center";
@@ -3430,6 +3517,7 @@ export class TUI extends Container {
 		const topOverlay = this.#getTopmostVisibleOverlay();
 		const wantAlt = topOverlay?.options?.fullscreen === true;
 		const wantMouseTracking = wantAlt && topOverlay.options?.mouseTracking !== false;
+		const wantNormalMouseTracking = !wantAlt && this.hasMouseTargets();
 		if (wantAlt && !this.#altActive) {
 			// Enhanced keyboard modes can be buffer-local: re-push the active
 			// modified-key reporting sequence on the freshly entered alternate
@@ -3443,6 +3531,7 @@ export class TUI extends Container {
 			this.#recordHardwareCursorHidden();
 			this.#altActive = true;
 			this.#altMouseTrackingActive = wantMouseTracking;
+			this.#normalMouseTrackingActive = false;
 			this.#altPreviousLines = [];
 			this.#altEnterWidth = width;
 			this.#altEnterHeight = height;
@@ -3450,7 +3539,8 @@ export class TUI extends Container {
 		} else if (!wantAlt && this.#altActive) {
 			const mouseExit = this.#altMouseTrackingActive ? MOUSE_TRACKING_OFF : "";
 			const enhancementExit = this.#keyboardEnhancementExit();
-			const exitSequence = `${mouseExit}${enhancementExit}\x1b[?1049l`;
+			const normalMouseEnter = wantNormalMouseTracking ? MOUSE_TRACKING_ON : "";
+			const exitSequence = `${mouseExit}${enhancementExit}\x1b[?1049l${normalMouseEnter}`;
 			// Session replacement can finish while a fullscreen selector is still
 			// covering the old normal buffer. Keep the overlay visible until the
 			// replacement is ready, then fuse the buffer restore into that full paint;
@@ -3463,6 +3553,7 @@ export class TUI extends Container {
 			this.#forgetHardwareCursorState();
 			this.#altActive = false;
 			this.#altMouseTrackingActive = false;
+			this.#normalMouseTrackingActive = wantNormalMouseTracking;
 			this.#altPreviousLines = [];
 			this.#altWidthEpochBoundary = undefined;
 			// A resize while on the alt buffer reflowed the terminal's saved
@@ -3477,9 +3568,11 @@ export class TUI extends Container {
 				this.#resizeEventPending = true;
 				if (width === this.#altEnterWidth) this.#altToggleResizesInPlace = true;
 			}
-		} else if (wantMouseTracking !== this.#altMouseTrackingActive) {
+		} else if (wantAlt && wantMouseTracking !== this.#altMouseTrackingActive) {
 			this.terminal.write(wantMouseTracking ? MOUSE_TRACKING_ON : MOUSE_TRACKING_OFF);
 			this.#altMouseTrackingActive = wantMouseTracking;
+		} else if (!wantAlt && !this.#altActive) {
+			this.#syncNormalMouseTracking(wantNormalMouseTracking);
 		}
 		if (this.#altActive) {
 			this.#componentRenderTargets.clear();

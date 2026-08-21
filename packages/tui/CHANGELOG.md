@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a responsive `ImageGrid` component for safely composing multiple inline images as a contact sheet when the terminal supports Kitty Unicode placeholders.
+
+
 ## [17.4.2] - 2026-08-21
 
 ### Added

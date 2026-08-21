@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `FAL_KEY` to the image-generation env-key table so `getEnvApiKey("fal")` and the credential cascade resolve FAL credentials.
+
+
 ## [17.4.3] - 2026-08-21
 
 ### Fixed
