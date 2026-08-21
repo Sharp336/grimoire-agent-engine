@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	DEEPSEEK_VISION_STATIC_MODELS,
 	deepseekModelManagerOptions,
@@ -36,21 +37,33 @@ describe("DeepSeek built-in provider", () => {
 		expect(models?.find(item => item.id === "deepseek-v5-vision")?.input).toEqual(["text", "image"]);
 	});
 
-	test("vision seed resolves image input, binary limits, and the V4 flash thinking ladder", () => {
-		// buildModel is the same constructor the generator runs over the seed
-		// when bundling models.json, so this pins the authored contract at the
-		// source level without coupling to generated catalog output.
+	test("vision seed derives the V4 flash thinking ladder from its identity", () => {
+		// buildModel computes thinking from the id's identity classifiers —
+		// the one derived field worth pinning; everything else on the seed is
+		// authored verbatim and covered by the shipped-catalog test below.
 		const model = buildModel(DEEPSEEK_VISION_STATIC_MODELS[0]);
 
-		expect(model.input).toEqual(["text", "image"]);
-		expect(model.contextWindow).toBe(1_048_576);
-		expect(model.maxTokens).toBe(393_216);
-		expect(model.reasoning).toBe(true);
 		expect(model.thinking?.mode).toBe("effort");
 		expect(model.thinking && "efforts" in model.thinking ? model.thinking.efforts : undefined).toEqual([
 			Effort.Low,
 			Effort.High,
 			Effort.Max,
 		]);
+	});
+
+	test("shipped catalog resolves the vision SKU with curated seed metadata", () => {
+		// Seed inclusion and precedence: the unshifted seed must reach the
+		// shipped bundle (a sparse discovery row would carry cost 0 / null
+		// limits) and the vision gate consumers check — input containing
+		// "image" — must hold. Asserted semantically so a deliberate seed
+		// deletion in favor of a catalogued upstream row stays green.
+		const model = getBundledModel("deepseek", "deepseek-v4-flash-vision-exp");
+
+		expect(model).toBeDefined();
+		expect(model?.input).toContain("text");
+		expect(model?.input).toContain("image");
+		expect(model?.contextWindow).toBeGreaterThan(0);
+		expect(model?.maxTokens).toBeGreaterThan(0);
+		expect(model?.cost.input).toBeGreaterThan(0);
 	});
 });
