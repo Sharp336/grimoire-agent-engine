@@ -17,6 +17,7 @@
 
 ### Changed
 
+- Kiro models now default to the `replace` edit mode instead of hashline: the Kiro wire format carries JSON tool specifications only, so the grammar-constrained hashline variant cannot reach these models. Explicit `edit.mode` and `edit.modelVariants` configuration still wins.
 - Added `compaction.asyncEnabled` (default: on) to speculatively summarize context in the background before hitting threshold limits, avoiding blocking summarization pauses.
 - Replaced `compaction.strategy` and `compaction.remoteEnabled` with an ordered `compaction.methodOrder` preference list.
 - Handoff maintenance (`/handoff` and automatic handoff compaction) now commits generated summaries directly to the active session instead of starting a new session.
