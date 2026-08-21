@@ -86,6 +86,10 @@
       "types": "./src/providers/*.ts",
       "import": "./src/providers/*.ts"
     },
+    "./providers/cursor/*": {
+      "types": "./src/providers/cursor/*.ts",
+      "import": "./src/providers/cursor/*.ts"
+    },
     "./providers/openai-codex/*": {
       "types": "./src/providers/openai-codex/*.ts",
       "import": "./src/providers/openai-codex/*.ts"

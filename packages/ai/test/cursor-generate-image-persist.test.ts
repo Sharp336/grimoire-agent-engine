@@ -2,8 +2,8 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { cursorProjectFolder } from "../src/providers/cursor/workspace.ts";
-import { persistGenerateImageResult } from "../src/providers/cursor-generate-image.ts";
+import { cursorProjectFolder } from "../src/providers/cursor/workspace";
+import { persistGenerateImageResult } from "../src/providers/cursor-generate-image";
 
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x0d, 0x0a]);
 

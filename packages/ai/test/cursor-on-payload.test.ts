@@ -4,8 +4,9 @@
 // google: await the hook and use its non-undefined return as the request.
 // buildGrpcRequest is exercised directly (the transport is HTTP/2), and the
 // serialized run request is decoded back from the wire bytes.
-import path from "node:path";
+
 import { describe, expect, it } from "bun:test";
+import path from "node:path";
 import { buildGrpcRequest, toCursorFileUri } from "@oh-my-pi/pi-ai/providers/cursor";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -100,10 +101,15 @@ describe("cursor onPayload replacement", () => {
 
 	it("seeds previousWorkspaceUris from cwd on a new conversation", async () => {
 		const cwd = path.resolve("/tmp/omp-payload-workspace");
-		const { conversationState } = await buildGrpcRequest(model, context, { cwd }, {
-			conversationId: "conv-workspace",
-			blobStore: new Map(),
-		});
+		const { conversationState } = await buildGrpcRequest(
+			model,
+			context,
+			{ cwd },
+			{
+				conversationId: "conv-workspace",
+				blobStore: new Map(),
+			},
+		);
 		expect(conversationState.previousWorkspaceUris).toEqual([toCursorFileUri(cwd)]);
 	});
 
@@ -122,16 +128,26 @@ describe("cursor onPayload replacement", () => {
 	it("backfills an empty checkpoint previousWorkspaceUris from cwd", async () => {
 		const cwd = path.resolve("/tmp/omp-payload-empty-checkpoint");
 		const blobStore = new Map<string, Uint8Array>();
-		const seeded = await buildGrpcRequest(model, context, { cwd }, {
-			conversationId: "conv-workspace-empty",
-			blobStore,
-		});
+		const seeded = await buildGrpcRequest(
+			model,
+			context,
+			{ cwd },
+			{
+				conversationId: "conv-workspace-empty",
+				blobStore,
+			},
+		);
 		seeded.conversationState.previousWorkspaceUris = [];
-		const { conversationState } = await buildGrpcRequest(model, context, { cwd }, {
-			conversationId: "conv-workspace-empty",
-			blobStore,
-			conversationState: seeded.conversationState,
-		});
+		const { conversationState } = await buildGrpcRequest(
+			model,
+			context,
+			{ cwd },
+			{
+				conversationId: "conv-workspace-empty",
+				blobStore,
+				conversationState: seeded.conversationState,
+			},
+		);
 		expect(conversationState.previousWorkspaceUris).toEqual([toCursorFileUri(cwd)]);
 	});
 
@@ -139,16 +155,26 @@ describe("cursor onPayload replacement", () => {
 		const oldCwd = path.resolve("/tmp/omp-payload-old");
 		const cwd = path.resolve("/tmp/omp-payload-live");
 		const blobStore = new Map<string, Uint8Array>();
-		const seeded = await buildGrpcRequest(model, context, { cwd: oldCwd }, {
-			conversationId: "conv-workspace-cached",
-			blobStore,
-		});
+		const seeded = await buildGrpcRequest(
+			model,
+			context,
+			{ cwd: oldCwd },
+			{
+				conversationId: "conv-workspace-cached",
+				blobStore,
+			},
+		);
 		expect(seeded.conversationState.previousWorkspaceUris).toEqual([toCursorFileUri(oldCwd)]);
-		const { conversationState } = await buildGrpcRequest(model, context, { cwd }, {
-			conversationId: "conv-workspace-cached",
-			blobStore,
-			conversationState: seeded.conversationState,
-		});
+		const { conversationState } = await buildGrpcRequest(
+			model,
+			context,
+			{ cwd },
+			{
+				conversationId: "conv-workspace-cached",
+				blobStore,
+				conversationState: seeded.conversationState,
+			},
+		);
 		expect(conversationState.previousWorkspaceUris).toEqual([toCursorFileUri(oldCwd), toCursorFileUri(cwd)]);
 	});
 

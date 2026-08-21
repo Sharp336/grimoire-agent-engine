@@ -12,7 +12,7 @@ import {
 	remapCursorArtifactPath,
 	resolveCursorWorkspacePaths,
 	toCursorFileUri,
-} from "../src/providers/cursor/workspace.ts";
+} from "../src/providers/cursor/workspace";
 
 describe("cursor workspace helpers", () => {
 	it("prefers explicit workspacePaths over cwd", () => {

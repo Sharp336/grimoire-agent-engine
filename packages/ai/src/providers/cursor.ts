@@ -984,7 +984,14 @@ export type ToolCallState = ToolCall & {
 	[kStreamingBlockIndex]: number;
 	[kStreamingPartialJson]?: string;
 	[kStreamingLastParseLen]?: number;
-	[kStreamingBlockKind]: "mcp" | "todo" | "cursor-exec" | "cursor-edit" | "connect-scm" | "web-fetch" | "generate-image";
+	[kStreamingBlockKind]:
+		| "mcp"
+		| "todo"
+		| "cursor-exec"
+		| "cursor-edit"
+		| "connect-scm"
+		| "web-fetch"
+		| "generate-image";
 	[kStreamingEnvelopeId]?: string;
 	[kCursorExecResolved]?: true;
 };
