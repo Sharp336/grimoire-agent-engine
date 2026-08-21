@@ -1069,6 +1069,14 @@ interface SubagentRunMonitor {
 	/** Final raw output: end-of-run assistant text when available, else accumulated chunks. */
 	rawOutput(): string;
 	scheduleProgress(flush?: boolean): void;
+	/**
+	 * Freeze the run's outcome: cancels the wall-clock timer and makes any
+	 * later self-inflicted abort (`timeout`/`budget`) a no-op. Called the
+	 * moment the drive loop returns, because teardown - session dispose,
+	 * worktree merge, async-job reap - can outlive the deadline and must not
+	 * relabel a run that already finished (#9191).
+	 */
+	sealOutcome(): void;
 	/** Stop processing events and clear listeners/timers. Call once the run settled. */
 	finish(): void;
 }
@@ -1160,6 +1168,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	let consecutiveYieldToolErrors = 0;
 	let lastAssistantSalvageText: string | undefined;
 	let activeSessionAbortPromise: Promise<void> | undefined;
+	let outcomeSealed = false;
 
 	const abortActiveSession = (): Promise<void> => {
 		const session = activeSession;
@@ -1177,12 +1186,6 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	};
 
 	const requestAbort = (reason: AbortReason) => {
-		if (reason === "timeout") {
-			runtimeLimitExceeded = true;
-		}
-		if (reason === "budget") {
-			budgetLimitExceeded = true;
-		}
 		if (abortSent) {
 			// Shutdown is a superseding external abort: a process teardown that
 			// races a self-inflicted budget hard-abort must still follow the
@@ -1204,6 +1207,15 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			return;
 		}
 		if (resolved) return;
+		// The run's outcome is already decided; only external aborts still have
+		// anything to say about the teardown that follows.
+		if (outcomeSealed && (reason === "timeout" || reason === "budget")) return;
+		if (reason === "timeout") {
+			runtimeLimitExceeded = true;
+		}
+		if (reason === "budget") {
+			budgetLimitExceeded = true;
+		}
 		abortSent = true;
 		abortReason = reason;
 		abortController.abort();
@@ -1276,14 +1288,21 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	let runtimeTimeoutId: NodeJS.Timeout | undefined;
 	if (maxRuntimeMs > 0) {
 		runtimeTimeoutId = setTimeout(() => {
-			if (!resolved) {
-				logger.warn("Subagent runtime limit exceeded; aborting", {
+			if (resolved || abortSent || outcomeSealed) {
+				// The run already settled; the timer lost the race and says nothing.
+				logger.debug("Subagent runtime timer fired after the outcome settled; ignoring", {
 					id,
 					agent: agent.name,
 					maxRuntimeMs,
 				});
-				requestAbort("timeout");
+				return;
 			}
+			logger.warn("Subagent runtime limit exceeded; aborting", {
+				id,
+				agent: agent.name,
+				maxRuntimeMs,
+			});
+			requestAbort("timeout");
 		}, maxRuntimeMs);
 	}
 
@@ -1965,6 +1984,13 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		lastAssistantSalvageText: () => lastAssistantSalvageText,
 		rawOutput: () => (finalOutputChunks.length > 0 ? finalOutputChunks.join("") : outputChunks.join("")),
 		scheduleProgress,
+		sealOutcome: () => {
+			outcomeSealed = true;
+			if (runtimeTimeoutId !== undefined) {
+				clearTimeout(runtimeTimeoutId);
+				runtimeTimeoutId = undefined;
+			}
+		},
 		finish: () => {
 			resolved = true;
 			listenerController.abort();
@@ -2499,6 +2525,8 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 		turnMonitor.setActiveSession(session);
 		const unsubscribeTurn = turnMonitor.attach(session);
 		return async turnError => {
+			// The turn is over: freeze its outcome before reading the flags below.
+			turnMonitor.sealOutcome();
 			unsubscribeTurn();
 			const activeSession = turnMonitor.takeActiveSession();
 			if (activeSession) turnMonitor.captureSalvage(activeSession);
@@ -2751,6 +2779,9 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	try {
 		outcome = await driveSessionToYield(session, monitor, message);
 	} finally {
+		// Freeze the outcome before any teardown await (#9191): the wall-clock
+		// timer is a macrotask, so it cannot interleave before this point.
+		monitor.sealOutcome();
 		try {
 			await untilAborted(AbortSignal.timeout(5000), () => monitor.waitForActiveSessionAbort());
 		} catch {
@@ -3477,6 +3508,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				error = err instanceof Error ? err.stack || err.message : String(err);
 			}
 		} finally {
+			// First statement in the teardown, synchronously: dispose, worktree
+			// merge and the async-job reap can all outlive the deadline, and none
+			// of them may relabel the outcome the run just produced (#9191). The
+			// timer is a macrotask, so it cannot interleave before this point.
+			monitor.sealOutcome();
 			const cleanupDeadlineAt = Date.now() + cleanupGraceMs;
 			const cleanupChangeStatus =
 				worktree === undefined

@@ -34,6 +34,7 @@
 ### Fixed
 
 - Fixed regional HTTP 401 data-residency errors during Codex chat, web search, and image generation requests by passing token residency metadata on requests.
+- Fixed a `task.maxRuntimeMs` timer that fired after a subagent run had already finished rewriting its outcome: budget-exhausted runs were reported as timeouts, and children that submitted a complete result just before the deadline were reported as aborted.
 - Fixed macOS SSH ControlMaster socket creation failures caused by `sun_path` length limits when using named profiles.
 - Fixed an issue where Nix-packaged builds failed to load on-demand native addons (`onnxruntime-node`/`sherpa-onnx`) due to missing shared C++ runtime library paths.
 - Fixed external editor spawning (Ctrl+G, plan review, `/todo edit`) failing to attach to visible terminals for editors like `emacsclient`.
