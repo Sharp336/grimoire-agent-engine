@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import {
+	buildRpcSelectRequestOptions,
 	dispatchRpcInputFrame,
+	parseValueDialogResponse,
 	type PendingExtensionRequest,
 	type RpcInputFrameDeps,
 	RpcShutdownCoordinator,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
-import type { RpcCommand, RpcResponse } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
+import type { RpcCommand, RpcExtensionUIResponse, RpcResponse } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
 
 type OutputFrame = RpcResponse | object;
 
@@ -360,3 +362,53 @@ describe("RpcShutdownCoordinator", () => {
 		expect(drained).toBe(true);
 	});
 });
+
+describe("buildRpcSelectRequestOptions", () => {
+	test("preserves legacy label-only select requests", () => {
+		expect(buildRpcSelectRequestOptions(["Alpha", "Beta"])).toEqual({ options: ["Alpha", "Beta"] });
+	});
+
+	test("emits aligned details for described options", () => {
+		expect(
+			buildRpcSelectRequestOptions([
+				{ label: "Alpha", description: "First choice" },
+				{ label: "Beta", description: "Second choice" },
+			]),
+		).toEqual({
+			options: ["Alpha", "Beta"],
+			optionDetails: [{ description: "First choice" }, { description: "Second choice" }],
+		});
+	});
+
+	test("keeps mixed labels and descriptions index-aligned", () => {
+		expect(
+			buildRpcSelectRequestOptions([
+				"Alpha",
+				{ label: "Beta (Recommended)", description: "Recommended choice" },
+				{ label: "Gamma", description: " \t" },
+				"Other (type your own)",
+			]),
+		).toEqual({
+			options: ["Alpha", "Beta (Recommended)", "Gamma", "Other (type your own)"],
+			optionDetails: [{}, { description: "Recommended choice" }, {}, {}],
+		});
+	});
+
+	test("omits whitespace-only descriptions and metadata when none are usable", () => {
+		expect(
+			buildRpcSelectRequestOptions([
+				{ label: "Alpha", description: " \t\n" },
+				{ label: "Beta" },
+			]),
+		).toEqual({ options: ["Alpha", "Beta"] });
+	});
+});
+
+test("returns selected label unchanged from a select response", () => {
+		const response: RpcExtensionUIResponse = {
+			type: "extension_ui_response",
+			id: "select-1",
+			value: "Beta (Recommended)",
+		};
+		expect(parseValueDialogResponse(response, undefined)).toBe("Beta (Recommended)");
+	});

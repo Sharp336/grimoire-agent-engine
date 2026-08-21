@@ -422,7 +422,20 @@ function normalizeHostToolDefinitions(tools: RpcHostToolDefinition[]): RpcHostTo
 	});
 }
 
-function parseValueDialogResponse(
+export function buildRpcSelectRequestOptions(options: ExtensionUISelectItem[]): {
+	options: string[];
+	optionDetails?: Array<{ description?: string }>;
+} {
+	const labels = options.map(getExtensionUISelectOptionLabel);
+	const optionDetails = options.map(option => {
+		const description = typeof option === "string" ? undefined : option.description;
+		return description?.trim() ? { description } : {};
+	});
+	if (!optionDetails.some(detail => detail.description !== undefined)) return { options: labels };
+	return { options: labels, optionDetails };
+}
+
+export function parseValueDialogResponse(
 	response: RpcExtensionUIResponse,
 	dialogOptions: ExtensionUIDialogOptions | undefined,
 ): string | undefined {
@@ -607,7 +620,6 @@ export async function runRpcMode(
 			this.output({ type: "extension_ui_request", id, ...request } as RpcExtensionUIRequest);
 			return promise;
 		}
-
 		select(
 			title: string,
 			options: ExtensionUISelectItem[],
@@ -619,7 +631,7 @@ export async function runRpcMode(
 				{
 					method: "select",
 					title,
-					options: options.map(getExtensionUISelectOptionLabel),
+					...buildRpcSelectRequestOptions(options),
 					timeout: dialogOptions?.timeout,
 				},
 				response => parseValueDialogResponse(response, dialogOptions),
