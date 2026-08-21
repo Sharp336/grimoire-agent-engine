@@ -10,12 +10,15 @@ import {
 	parseClaudePluginsRegistry,
 } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { loadSlashCommands } from "@oh-my-pi/pi-coding-agent/extensibility/slash-commands";
+import { convertToLegacyConfig } from "@oh-my-pi/pi-coding-agent/mcp/config";
+import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { discoverAgents } from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import "@oh-my-pi/pi-coding-agent/discovery/claude-plugins";
 import { type MCPServer, mcpCapability } from "@oh-my-pi/pi-coding-agent/capability/mcp";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/capability/skill";
 import type { SlashCommand } from "@oh-my-pi/pi-coding-agent/capability/slash-command";
+import { lazyConfig, spawnCount, waitFor } from "../mcp-lifecycle-harness";
 
 describe("parseClaudePluginsRegistry", () => {
 	test("parses valid registry", () => {
@@ -1496,7 +1499,7 @@ describe("Claude plugin MCP lifecycle fields", () => {
 		await removeWithRetries(tempDir);
 	});
 
-	test("forwards lifecycle and preserves idleTimeout: 0", async () => {
+	test("discovers and consumes lifecycle fields through the MCP manager", async () => {
 		const pluginsDir = path.join(tempDir, ".claude", "plugins");
 		const pluginPath = path.join(tempDir, "plugins", "lifecycle");
 		await fs.mkdir(pluginsDir, { recursive: true });
@@ -1518,29 +1521,31 @@ describe("Claude plugin MCP lifecycle fields", () => {
 				},
 			}),
 		);
-		await fs.writeFile(
-			path.join(pluginPath, ".mcp.json"),
-			JSON.stringify({
-				probe: { command: "probe", lifecycle: "lazy", idleTimeout: 0 },
-				short: { command: "short", lifecycle: "lazy", idleTimeout: 123 },
-			}),
-		);
+
+		const spawnLog = path.join(tempDir, "plugin-lifecycle.log");
+		const config = lazyConfig({ lifecycle: "lazy", idleTimeout: 50, spawnLog });
+		await fs.writeFile(path.join(pluginPath, ".mcp.json"), JSON.stringify({ fixture: config }));
 
 		const result = await loadCapability<MCPServer>(mcpCapability.id, {
 			cwd: tempDir,
 			providers: ["claude-plugins"],
 		});
-		expect(result.all.find(server => server.name === "lifecycle:probe")).toMatchObject({
-			lifecycle: "lazy",
-			idleTimeout: 0,
-		});
-		expect(result.all.find(server => server.name === "lifecycle:short")).toMatchObject({
-			lifecycle: "lazy",
-			idleTimeout: 123,
-		});
+		const server = result.all.find(item => item.name === "lifecycle:fixture");
+		expect(server).toBeDefined();
+		if (!server) throw new Error("Expected lifecycle fixture from Claude plugin discovery");
+
+		const manager = new MCPManager(tempDir);
+		try {
+			const connected = await manager.connectServers({ fixture: convertToLegacyConfig(server) }, {});
+			expect(connected.errors.has("fixture")).toBe(false);
+			expect(connected.connectedServers).toContain("fixture");
+			expect(spawnCount(spawnLog)).toBe(1);
+			expect(await waitFor(() => manager.getConnectionStatus("fixture") === "deferred")).toBe(true);
+		} finally {
+			await manager.disconnectAll();
+		}
 	});
 });
-
 describe("discoverAgents plugin precedence", () => {
 	let tempDir: string;
 	let originalClaudeConfigDir: string | undefined;
