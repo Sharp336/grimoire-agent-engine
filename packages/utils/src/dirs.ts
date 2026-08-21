@@ -22,8 +22,14 @@ export const APP_NAME: string = "omp";
 /** Config directory name (e.g. ".omp") */
 export const CONFIG_DIR_NAME: string = ".omp";
 
+/** Ordered main settings filenames: canonical write target first, legacy-compatible YAML fallback second. */
+export const MAIN_CONFIG_FILENAMES = ["config.yml", "config.yaml"] as const;
+
 /** Version (e.g. "1.0.0") */
 export const VERSION: string = version;
+
+/** Default User-Agent header string (e.g. "omp/17.2.12") */
+export const USER_AGENT = `omp/${VERSION}`;
 
 /** Minimum Bun version */
 export const MIN_BUN_VERSION: string = engines.bun.replace(/[^0-9.]/g, "");
@@ -510,9 +516,9 @@ export function getLogsDir(): string {
 	return dirs.rootSubdir("logs", "state");
 }
 
-/** Get the path to a dated log file (~/.omp/logs/omp.YYYY-MM-DD.log). */
-export function getLogPath(date = new Date()): string {
-	return path.join(getLogsDir(), `${APP_NAME}.${date.toISOString().slice(0, 10)}.log`);
+/** Get this process's dated log path (~/.omp/logs/omp.YYYY-MM-DD.PID.log). */
+export function getLogPath(date = new Date(), pid = process.pid): string {
+	return path.join(getLogsDir(), `${APP_NAME}.${date.toISOString().slice(0, 10)}.${pid}.log`);
 }
 
 /**
@@ -624,13 +630,18 @@ export function getPuppeteerDir(): string {
 	return dirs.rootSubdir("puppeteer", "cache");
 }
 
+/** Get the browser relay extension install directory (~/.omp/browser-relay). */
+export function getBrowserRelayDir(): string {
+	return dirs.rootSubdir("browser-relay", "data");
+}
+
 /** Get DOCS_RS cache directory () */
 export function getDocsRsCacheDir(): string {
 	return dirs.rootSubdir("webcache", "cache");
 }
 
-/**Get AutoQa db directory */
-export function getAutoQaDbDir(): string {
+/** Get the auto-QA grievances SQLite database path (~/.omp/autoqa.db; XDG: $XDG_DATA_HOME/omp/autoqa.db). */
+export function getAutoQaDbPath(): string {
 	return dirs.rootSubdir("autoqa.db", "data");
 }
 /**
@@ -665,6 +676,11 @@ export function getGithubCacheDbPath(): string {
 	const override = process.env.OMP_GITHUB_CACHE_DB;
 	if (override) return override;
 	return dirs.rootSubdir(path.join("cache", "github-cache.db"), "cache");
+}
+
+/** Get the legacy Pi extension parse cache database path. */
+export function getLegacyPiExtensionCacheDbPath(): string {
+	return dirs.rootSubdir(path.join("cache", "legacy-pi-extension-cache.db"), "cache");
 }
 
 /**
@@ -716,6 +732,16 @@ export function getAutoresearchDbPath(encodedProject: string): string {
 /** Get the per-run artifact directory (~/.omp/autoresearch/<encoded-project>/runs/<runId>). */
 export function getAutoresearchRunDir(encodedProject: string, runId: number): string {
 	return path.join(getAutoresearchProjectDir(encodedProject), "runs", String(runId).padStart(4, "0"));
+}
+
+/** Get the security-analysis state directory (~/.omp/security). */
+export function getSecurityDir(): string {
+	return dirs.rootSubdir("security", "state");
+}
+
+/** Get one project's security-analysis state directory (~/.omp/security/<project-key>). */
+export function getSecurityProjectDir(projectKey: string): string {
+	return path.join(getSecurityDir(), projectKey);
 }
 
 // =============================================================================
@@ -805,6 +831,68 @@ export function getCrashLogPath(agentDir?: string): string {
 /** Get the debug log path (~/.omp/agent/omp-debug.log). */
 export function getDebugLogPath(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, `${APP_NAME}-debug.log`, "state");
+}
+
+/**
+ * Best-effort one-time copy of a legacy config-root file to its redirected XDG
+ * location. Existing installs that enable XDG after the file was created keep
+ * their data (e.g. a placeholder key whose loss would break deobfuscation of
+ * persisted transcripts). The legacy file is left in place for older omp
+ * versions sharing the profile.
+ */
+function adoptLegacyFile(legacyPath: string, targetPath: string): void {
+	if (targetPath === legacyPath) return;
+	try {
+		if (fs.existsSync(targetPath) || !fs.existsSync(legacyPath)) return;
+		fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+		fs.copyFileSync(legacyPath, targetPath, fs.constants.COPYFILE_EXCL);
+	} catch {
+		// Opportunistic: a copy race or unwritable XDG dir falls back to a fresh
+		// file at the new path — the pre-adoption behavior.
+	}
+}
+
+/** Get the secret placeholder key path (~/.omp/agent/secret-placeholder.key; XDG default: $XDG_STATE_HOME/omp/secret-placeholder.key). Adopts a legacy key on first XDG resolution. */
+export function getSecretPlaceholderKeyPath(): string {
+	const keyPath = dirs.agentSubdir(undefined, "secret-placeholder.key", "state");
+	adoptLegacyFile(path.join(dirs.agentDir, "secret-placeholder.key"), keyPath);
+	return keyPath;
+}
+
+/** Root directory containing every per-project daemon runtime scope (~/.omp/run/daemons; XDG default: $XDG_STATE_HOME/omp/run/daemons). */
+export function getDaemonRuntimeRoot(): string {
+	return dirs.rootSubdir(path.join("run", "daemons"), "state");
+}
+
+/** Get the daemon runtime directory for a project (~/.omp/run/daemons/<hash>; XDG default: $XDG_STATE_HOME/omp/run/daemons/<hash>). */
+export function getDaemonRuntimeDir(projectDir: string): string {
+	const key = Bun.hash.wyhash(path.resolve(projectDir)).toString(16).padStart(16, "0");
+	return path.join(getDaemonRuntimeRoot(), key);
+}
+
+/** Root directory containing every machine-global daemon service scope. */
+export function getGlobalDaemonRuntimeRoot(): string {
+	return path.join(getBaseConfigRoot(), "run", "daemons", "global");
+}
+
+/** Get a profile-independent runtime directory for a machine-global daemon service. */
+export function getGlobalDaemonRuntimeDir(service: string): string {
+	if (!/^[a-z0-9][a-z0-9._-]*$/i.test(service)) {
+		throw new Error(`Invalid global daemon service name: ${JSON.stringify(service)}`);
+	}
+	return path.join(getGlobalDaemonRuntimeRoot(), service);
+}
+
+/** Get the provider in-flight root directory (~/.omp/run/provider-inflight; XDG default: $XDG_STATE_HOME/omp/run/provider-inflight). */
+export function getProviderInFlightRoot(): string {
+	return dirs.rootSubdir(path.join("run", "provider-inflight"), "state");
+}
+
+/** Get the marketplaces registry path (~/.omp/marketplaces.json; XDG default: $XDG_DATA_HOME/omp/marketplaces.json). Adopts a legacy registry on first XDG resolution. */
+export function getMarketplacesRegistryPath(): string {
+	const registryPath = dirs.rootSubdir("marketplaces.json", "data");
+	adoptLegacyFile(path.join(dirs.configRoot, "marketplaces.json"), registryPath);
+	return registryPath;
 }
 
 // =============================================================================

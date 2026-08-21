@@ -1,20 +1,62 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
+import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Message, ThinkingContent } from "@oh-my-pi/pi-ai";
-import { z } from "@oh-my-pi/pi-ai";
-import { createMockModel, type MockContent, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
+import {
+	createMockModel,
+	type MockContent,
+	type MockModel,
+	type MockResponseSource,
+} from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { RewindTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { CheckpointTool, RewindTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
-const checkpointSchema = z.object({ goal: z.string() });
-const rewindSchema = z.object({ report: z.string() });
+const checkpointSchema = type({ goal: type("string") });
+const rewindSchema = type({ report: type("string") });
+
+const xdevWriteSchema = type({ path: type("string"), content: type("string") });
+
+const xdevWriteTool: AgentTool<typeof xdevWriteSchema, unknown> = {
+	name: "write",
+	label: "Write",
+	description: "Dispatch a write to an xd:// device",
+	parameters: xdevWriteSchema,
+	async execute(_toolCallId, params) {
+		const tool = params.path === "xd://checkpoint" ? "checkpoint" : "rewind";
+		if (/^\s*(?:\?|help)?\s*$/i.test(params.content)) {
+			return {
+				content: [{ type: "text" as const, text: `${tool} docs via xdev` }],
+				details: { xdev: { tool, mode: "help" } },
+			};
+		}
+		const parsed: unknown = JSON.parse(params.content);
+		const args = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+		const goal = "goal" in args && typeof args.goal === "string" ? args.goal : undefined;
+		const report = "report" in args && typeof args.report === "string" ? args.report : undefined;
+		const inner = tool === "checkpoint" ? { goal, startedAt: "2026-01-01T00:00:00.000Z" } : { report, rewound: true };
+		return {
+			content: [{ type: "text" as const, text: `${tool} via xdev` }],
+			details: {
+				xdev: {
+					tool,
+					mode: "execute",
+					args,
+					inner,
+				},
+			},
+		};
+	},
+};
 
 const checkpointTool: AgentTool<typeof checkpointSchema, { startedAt: string }> = {
 	name: "checkpoint",
@@ -67,9 +109,13 @@ function signedThinking(thinking: string, thinkingSignature: string): MockConten
 	return { type: "thinking", thinking, thinkingSignature } as unknown as MockContent;
 }
 
-async function createHarness(responses: MockResponse[]): Promise<Harness & { mock: MockModel }> {
+async function createHarness(
+	responses: MockResponseSource,
+	tools: AgentTool[] = [checkpointTool as AgentTool, rewindTool as AgentTool],
+	options?: { onAgentEnd?: (willContinue: boolean | undefined) => void },
+): Promise<Harness & { mock: MockModel }> {
 	const tempDir = TempDir.createSync("@pi-checkpoint-rewind-branch-");
-	const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+	const authStorage = await AuthStorage.create(":memory:");
 	authStorage.setRuntimeApiKey("mock", "test-key");
 
 	const mock = createMockModel({ responses });
@@ -82,8 +128,6 @@ async function createHarness(responses: MockResponse[]): Promise<Harness & { moc
 		"todo.reminders": false,
 	});
 	settings.setModelRole("default", `${mock.provider}/${mock.id}`);
-
-	const tools = [checkpointTool as AgentTool, rewindTool as AgentTool];
 	const agent = new Agent({
 		getApiKey: () => "test-key",
 		initialState: {
@@ -96,12 +140,29 @@ async function createHarness(responses: MockResponse[]): Promise<Harness & { moc
 		streamFn: mock.stream,
 	});
 
+	const sessionManager = SessionManager.inMemory(tempDir.path());
+	let extensionRunner: ExtensionRunner | undefined;
+	if (options?.onAgentEnd) {
+		const runtime = new ExtensionRuntime();
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("agent_end", event => options.onAgentEnd?.(event.willContinue));
+			},
+			tempDir.path(),
+			new EventBus(),
+			runtime,
+			"capture-agent-end",
+		);
+		extensionRunner = new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry);
+	}
+
 	const session = new AgentSession({
 		agent,
-		sessionManager: SessionManager.inMemory(tempDir.path()),
+		sessionManager,
 		settings,
 		modelRegistry,
 		toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
+		extensionRunner,
 	});
 	const harness = { session, authStorage, tempDir, extraSessions: [] };
 	activeHarnesses.push(harness);
@@ -175,9 +236,17 @@ describe("AgentSession checkpoint rewind branch context", () => {
 		expect(mock.calls.length).toBe(3);
 		const finalCall = mock.calls[2];
 		if (!finalCall) throw new Error("Expected final post-rewind provider call");
-		const summaryIndex = finalCall.context.messages.findIndex(
-			message => message.role === "user" && messageText(message).includes("summary of a branch"),
-		);
+		const summaryIndex = finalCall.context.messages.findIndex(message => {
+			if (message.role !== "user") return false;
+			const text = messageText(message);
+			const openIndex = text.indexOf("<summary>");
+			const closeIndex = text.indexOf("</summary>", openIndex + "<summary>".length);
+			return (
+				openIndex >= 0 &&
+				closeIndex > openIndex + "<summary>".length &&
+				text.slice(openIndex + "<summary>".length, closeIndex).trim().length > 0
+			);
+		});
 		const reportIndex = finalCall.context.messages.findIndex(
 			message => message.role === "developer" && messageText(message).includes(report),
 		);
@@ -186,8 +255,9 @@ describe("AgentSession checkpoint rewind branch context", () => {
 		const reportMessage = finalCall.context.messages[reportIndex];
 		if (!reportMessage) throw new Error("Expected rewind report context");
 		const reportText = messageText(reportMessage);
-		expect(reportText).toContain("Checkpoint completed.");
-		expect(reportText).toContain("Do not call `rewind` again");
+		expect(reportText).toContain(
+			"Checkpoint called and rewound. Report retained below. Need explore again → new `checkpoint`.",
+		);
 		expect(reportText).toContain(report);
 
 		expect(
@@ -202,6 +272,220 @@ describe("AgentSession checkpoint rewind branch context", () => {
 		const finalThinking = finalAssistant.content.find((block): block is ThinkingContent => block.type === "thinking");
 		expect(finalThinking?.thinking).toBe("answer after rewind");
 		expect(finalThinking?.thinkingSignature).toBe("sig_after_rewind");
+	});
+
+	it("shows a transient checkpoint-active reminder that is branch-cut away on rewind", async () => {
+		const report = "findings: transient reminder";
+		const proceed = Promise.withResolvers<void>();
+		const { session, mock } = await createHarness(
+			(async function* () {
+				yield {
+					content: [
+						{ type: "toolCall", id: "call_checkpoint", name: "checkpoint", arguments: { goal: "inspect" } },
+					],
+					stopReason: "toolUse",
+				};
+				await proceed.promise;
+				yield {
+					content: [{ type: "toolCall", id: "call_rewind", name: "rewind", arguments: { report } }],
+					stopReason: "toolUse",
+				};
+				yield { content: ["DONE"], stopReason: "stop" };
+			})() as MockResponseSource,
+		);
+
+		const promptPromise = session.prompt("investigate with a checkpoint");
+		// Pause the model between the checkpoint and rewind calls to observe the
+		// active-checkpoint state: the transient notice must be in the active path.
+		const deadline = Date.now() + 5000;
+		while (
+			!session.messages.some(
+				message => message.role === "custom" && message.customType === "checkpoint-active-reminder",
+			) ||
+			mock.calls.length < 2
+		) {
+			if (Date.now() > deadline) throw new Error("checkpoint reminder/provider call never appeared");
+			await Bun.sleep(10);
+		}
+		const reminder = session.messages.find(
+			(message): message is Extract<AgentMessage, { role: "custom" }> =>
+				message.role === "custom" && message.customType === "checkpoint-active-reminder",
+		);
+		expect(reminder).toBeDefined();
+		expect(reminder?.content).toContain("MUST `rewind` before yielding");
+		const activeCall = mock.calls[1];
+		expect(activeCall).toBeDefined();
+		expect(
+			activeCall?.context.messages.some(message => messageText(message).includes("Exploration checkpoint active.")),
+		).toBe(true);
+		// #checkpointState is set synchronously with the reminder (pre-await), so an
+		// immediate rewind would find an active checkpoint, not "No active checkpoint".
+		expect(session.getCheckpointState()).toBeDefined();
+		proceed.resolve();
+		await promptPromise;
+
+		// After rewind the branch cut dropped the reminder from the active path.
+		expect(
+			session.messages.some(
+				message => message.role === "custom" && message.customType === "checkpoint-active-reminder",
+			),
+		).toBe(false);
+
+		// No negation guard anywhere in the model-visible context.
+		const finalCall = mock.calls.at(-1);
+		if (!finalCall) throw new Error("Expected final post-rewind provider call");
+		for (const message of finalCall.context.messages) {
+			const text = messageText(message);
+			expect(text).not.toContain("NEVER call");
+			expect(text).not.toContain("Do not call `rewind` again");
+		}
+
+		// Exactly one developer message carries the forward-looking rewind report.
+		const reportMessages = finalCall.context.messages.filter(
+			message => message.role === "developer" && messageText(message).includes("Checkpoint called and rewound."),
+		);
+		expect(reportMessages).toHaveLength(1);
+		expect(messageText(reportMessages[0]!)).toContain("Need explore again → new `checkpoint`.");
+		expect(messageText(reportMessages[0]!)).toContain(report);
+	});
+
+	it("checkpoint tool result carries only the goal and a forward-looking line", async () => {
+		const tool = new CheckpointTool(
+			createToolSession({
+				getCheckpointState: () => undefined,
+			}),
+		);
+		const result = await tool.execute("call_checkpoint", { goal: "inspect" });
+		const text = result.content.find(part => part.type === "text")?.text;
+		expect(text).toBe("Checkpoint: inspect\nFinish exploration and formulate findings.");
+		expect(text).not.toContain("Run your investigation");
+		expect(text).not.toContain("call rewind");
+	});
+
+	it("ignores a completed cycle's rewind result after rebuilding context", async () => {
+		const staleReport = "findings from the previous checkpoint";
+		const currentReport = "findings from the current checkpoint";
+		const { session, mock } = await createHarness([
+			{
+				content: [
+					{ type: "toolCall", id: "call_checkpoint_a", name: "checkpoint", arguments: { goal: "inspect A" } },
+				],
+				stopReason: "toolUse",
+			},
+			{
+				content: [{ type: "toolCall", id: "call_rewind_a", name: "rewind", arguments: { report: staleReport } }],
+				stopReason: "toolUse",
+			},
+			{ content: ["DONE"], stopReason: "stop" },
+		]);
+		await session.prompt("investigate the first checkpoint");
+
+		session.sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: "call_rewind_a_late",
+			toolName: "rewind",
+			content: [{ type: "text", text: "rewind requested" }],
+			details: { report: staleReport, rewound: true },
+			isError: false,
+			timestamp: Date.now(),
+		});
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+		mock.push({
+			content: [{ type: "toolCall", id: "call_checkpoint_b", name: "checkpoint", arguments: { goal: "inspect B" } }],
+			stopReason: "toolUse",
+		});
+		mock.push({
+			content: [{ type: "toolCall", id: "call_rewind_b", name: "rewind", arguments: { report: currentReport } }],
+			stopReason: "toolUse",
+		});
+		mock.push({ content: ["DONE"], stopReason: "stop" });
+
+		await session.prompt("investigate the second checkpoint");
+
+		expect(session.getLastCompletedRewind()?.report).toBe(currentReport);
+	});
+
+	it("does not start checkpoint tracking for xdev help envelopes", async () => {
+		const { session } = await createHarness(
+			[
+				{
+					content: [
+						{
+							type: "toolCall",
+							id: "call_checkpoint_help",
+							name: "write",
+							arguments: { path: "xd://checkpoint", content: "help" },
+						},
+					],
+					stopReason: "toolUse",
+				},
+				{ content: ["DONE"], stopReason: "stop" },
+			],
+			[xdevWriteTool],
+		);
+
+		await session.prompt("show checkpoint help");
+
+		expect(session.getCheckpointState()).toBeUndefined();
+	});
+
+	it("tracks checkpoint and rewind through execute xdev write results", async () => {
+		const report = "findings: xdev wrapper";
+		const { session, mock } = await createHarness(
+			[
+				{
+					content: [
+						{
+							type: "toolCall",
+							id: "call_checkpoint_xdev",
+							name: "write",
+							arguments: {
+								path: "xd://checkpoint",
+								content: JSON.stringify({ goal: "inspect" }),
+							},
+						},
+					],
+					stopReason: "toolUse",
+				},
+				{
+					content: [
+						{
+							type: "toolCall",
+							id: "call_rewind_xdev",
+							name: "write",
+							arguments: {
+								path: "xd://rewind",
+								content: JSON.stringify({ report }),
+							},
+						},
+					],
+					stopReason: "toolUse",
+				},
+				{ content: ["DONE"], stopReason: "stop" },
+			],
+			[xdevWriteTool],
+		);
+
+		await session.prompt("investigate with an xdev checkpoint");
+
+		const finalCall = mock.calls.at(-1);
+		if (!finalCall) throw new Error("Expected final post-rewind provider call");
+		expect(
+			finalCall.context.messages.some(
+				message => message.role === "toolResult" && message.toolCallId === "call_rewind_xdev",
+			),
+		).toBe(false);
+		expect(
+			session.messages.some(message => message.role === "toolResult" && message.toolCallId === "call_rewind_xdev"),
+		).toBe(false);
+		expect(session.messages).toEqual(session.sessionManager.buildSessionContext().messages);
+
+		expect(session.getLastCompletedRewind()).toEqual({
+			report,
+			startedAt: "2026-01-01T00:00:00.000Z",
+			rewoundAt: expect.any(String),
+		});
 	});
 
 	it("rehydrates completed rewind state from the retained report on resume", async () => {
@@ -418,5 +702,135 @@ describe("AgentSession checkpoint rewind branch context", () => {
 		expect(rewindResult.content.some(part => part.type === "text" && part.text.includes("Rewind requested"))).toBe(
 			true,
 		);
+	});
+	it("marks extension agent_end willContinue when enforceRewindBeforeYield continues", async () => {
+		const agentEnds: Array<boolean | undefined> = [];
+
+		const report = "findings: enforced rewind before yield";
+		const { session, mock } = await createHarness(
+			[
+				{
+					content: [
+						{ type: "toolCall", id: "call_checkpoint", name: "checkpoint", arguments: { goal: "inspect" } },
+					],
+					stopReason: "toolUse",
+				},
+				// Text-only stop while checkpoint is open → #enforceRewindBeforeYield.
+				{ content: ["done without rewind"], stopReason: "stop" },
+				{
+					content: [{ type: "toolCall", id: "call_rewind", name: "rewind", arguments: { report } }],
+					stopReason: "toolUse",
+				},
+				{ content: ["terminal after rewind"], stopReason: "stop" },
+			],
+			undefined,
+			{ onAgentEnd: willContinue => agentEnds.push(willContinue) },
+		);
+
+		await session.prompt("investigate with a checkpoint then yield early");
+		await session.waitForIdle();
+
+		// Intermediate enforceRewindBeforeYield settle, then terminal post-rewind settle.
+		expect(agentEnds.length).toBeGreaterThanOrEqual(2);
+		const continuing = agentEnds.filter(willContinue => willContinue === true);
+		expect(continuing).toHaveLength(1);
+		const intermediateIndex = agentEnds.indexOf(true);
+		expect(intermediateIndex).toBeGreaterThanOrEqual(0);
+		expect(intermediateIndex).toBeLessThan(agentEnds.length - 1);
+		expect(agentEnds.at(-1)).toBeFalsy();
+		expect(mock.calls.length).toBeGreaterThanOrEqual(3);
+		expect(expectLastAssistant(session.messages).stopReason).toBe("stop");
+	});
+
+	it("rehydrates an active checkpoint from an xdev write after branching and resume", async () => {
+		const harness = await createHarness(
+			[
+				{
+					content: [
+						{
+							type: "toolCall",
+							id: "call_checkpoint_xdev",
+							name: "write",
+							arguments: {
+								path: "xd://checkpoint",
+								content: JSON.stringify({ goal: "inspect" }),
+							},
+						},
+					],
+					stopReason: "toolUse",
+				},
+				{
+					content: [
+						{
+							type: "toolCall",
+							id: "call_rewind_xdev",
+							name: "write",
+							arguments: {
+								path: "xd://rewind",
+								content: JSON.stringify({ report: "findings" }),
+							},
+						},
+					],
+					stopReason: "toolUse",
+				},
+				{ content: ["DONE"], stopReason: "stop" },
+			],
+			[xdevWriteTool],
+		);
+		await harness.session.prompt("investigate with an xdev checkpoint");
+
+		const checkpointEntry = harness.session.sessionManager.getBranch().find(entry => {
+			if (entry.type !== "message" || entry.message.role !== "toolResult" || entry.message.toolName !== "write") {
+				return false;
+			}
+			const details = entry.message.details as { xdev?: { tool?: string } } | undefined;
+			return details?.xdev?.tool === "checkpoint";
+		});
+		if (!checkpointEntry) throw new Error("Expected xdev checkpoint tool result entry");
+		harness.session.sessionManager.branch(checkpointEntry.id);
+
+		const reloadedMock = createMockModel({ responses: [] });
+		const reloadedSettings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.enabled": false,
+			"todo.enabled": false,
+			"todo.eager": "default",
+			"todo.reminders": false,
+		});
+		reloadedSettings.setModelRole("default", `${reloadedMock.provider}/${reloadedMock.id}`);
+		const reloadedTools = [xdevWriteTool as AgentTool];
+		const reloadedAgent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: {
+				model: reloadedMock,
+				systemPrompt: ["Test"],
+				tools: reloadedTools,
+				messages: harness.session.sessionManager.buildSessionContext().messages,
+			},
+			convertToLlm,
+			streamFn: reloadedMock.stream,
+		});
+		const reloadedSession = new AgentSession({
+			agent: reloadedAgent,
+			sessionManager: harness.session.sessionManager,
+			settings: reloadedSettings,
+			modelRegistry: new ModelRegistry(
+				harness.authStorage,
+				path.join(harness.tempDir.path(), "models-xdev-reloaded.yml"),
+			),
+			toolRegistry: new Map(reloadedTools.map(tool => [tool.name, tool])),
+		});
+		harness.extraSessions.push(reloadedSession);
+
+		expect(reloadedSession.getCheckpointState()).toMatchObject({
+			checkpointEntryId: checkpointEntry.id,
+			startedAt: "2026-01-01T00:00:00.000Z",
+		});
+		expect(reloadedSession.getLastCompletedRewind()).toBeUndefined();
+		await expect(
+			rewindToolForSession(reloadedSession).execute("call_rewind_after_xdev_resume", {
+				report: "post-resume findings",
+			}),
+		).resolves.toMatchObject({ details: { report: "post-resume findings", rewound: true } });
 	});
 });

@@ -1,16 +1,22 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import {
+	expandPath,
 	probeLiteralPathExists,
+	resolveToCwd,
 	splitPathAndSel,
 	splitPathAndSelPreferringLiteral,
 } from "@oh-my-pi/pi-coding-agent/tools/path-utils";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { GrepOutputMode } from "@oh-my-pi/pi-natives";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { runGrepCommand } from "../../src/cli/grep-cli";
+import { initTheme } from "../../src/modes/theme/theme";
 import { GrepTool } from "../../src/tools/grep";
 
 function getText(result: { content: Array<{ type: string; text?: string }> }): string {
@@ -28,6 +34,7 @@ const EMPTY_ZIP_EOCD = new Uint8Array([0x50, 0x4b, 0x05, 0x06, 0, 0, 0, 0, 0, 0,
 // must prefer a real literal file over the selector interpretation.
 describe("literal colon filename resolution (issue #4618)", () => {
 	let tmpDir: string;
+	const sessionSettings = Settings.isolated({ "grep.contextBefore": 0, "grep.contextAfter": 0 });
 
 	beforeEach(async () => {
 		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "literal-colon-"));
@@ -43,7 +50,7 @@ describe("literal colon filename resolution (issue #4618)", () => {
 			hasUI: false,
 			getSessionFile: () => null,
 			getSessionSpawns: () => "*",
-			settings: Settings.isolated({ "grep.contextBefore": 0, "grep.contextAfter": 0 }),
+			settings: sessionSettings,
 			...overrides,
 		};
 	}
@@ -115,6 +122,13 @@ describe("literal colon filename resolution (issue #4618)", () => {
 			await fs.symlink(path.join(tmpDir, "nowhere"), literal);
 			expect(await probeLiteralPathExists(literal, tmpDir)).toBe("exists");
 		});
+
+		it('returns "missing" for an ENAMETOOLONG path (issue #7597)', async () => {
+			// A single component past NAME_MAX can never name a real entry, so the
+			// probe must report "missing" (not "unknown") to let delimited splits run.
+			const overlong = path.join(tmpDir, "x".repeat(300));
+			expect(await probeLiteralPathExists(overlong, tmpDir)).toBe("missing");
+		});
 	});
 
 	describe("read tool", () => {
@@ -163,8 +177,13 @@ describe("literal colon filename resolution (issue #4618)", () => {
 			const lines = Array.from({ length: 40 }, (_, i) => `line ${i + 1}`).join("\n");
 			await Bun.write(absolute, `${lines}\n`);
 
-			const session = createSession();
-			session.settings.set("read.summarize.enabled", false);
+			const session = createSession({
+				settings: Settings.isolated({
+					"grep.contextBefore": 0,
+					"grep.contextAfter": 0,
+					"read.summarize.enabled": false,
+				}),
+			});
 			const tool = new ReadTool(session);
 			const result = await tool.execute("read-selector-preserved", {
 				path: `${absolute}:5-10`,
@@ -177,28 +196,6 @@ describe("literal colon filename resolution (issue #4618)", () => {
 			// still peels because the raw `notes:5-10` path does not exist literally.
 			expect(output).not.toContain("line 30");
 			expect(output).not.toContain("line 40");
-		});
-
-		it("uses explicit `selector` to read lines from a literal selector-shaped filename deterministically", async () => {
-			const literal = path.join(tmpDir, "test:1-2");
-			const longerLiteral = path.join(tmpDir, "test:1-2:5-6");
-			const lines = Array.from({ length: 40 }, (_, i) => `literal line ${i + 1}`).join("\n");
-			await Bun.write(literal, `${lines}\n`);
-			await Bun.write(longerLiteral, "wrong longer literal\n");
-
-			const session = createSession();
-			session.settings.set("read.summarize.enabled", false);
-			const tool = new ReadTool(session);
-			const result = await tool.execute("read-explicit-selector-literal", {
-				path: literal,
-				selector: "5-6",
-			});
-			const output = getText(result);
-
-			expect(output).toContain("literal line 5");
-			expect(output).toContain("literal line 6");
-			expect(output).not.toContain("literal line 30");
-			expect(output).not.toContain("wrong longer literal");
 		});
 
 		it("reads a literal file that looks like an archive selector (`data.zip:1-2`)", async () => {
@@ -254,25 +251,6 @@ describe("literal colon filename resolution (issue #4618)", () => {
 
 			expect(output).toContain("needle");
 			expect(output).not.toMatch(/not found/i);
-		});
-
-		it("uses explicit `selector` to grep a literal selector-shaped filename deterministically", async () => {
-			const literal = path.join(tmpDir, "test:1-2");
-			const longerLiteral = path.join(tmpDir, "test:1-2:2-2");
-			await Bun.write(literal, "needle outside\nneedle inside\nneedle outside again\n");
-			await Bun.write(longerLiteral, "wrong longer literal needle\n");
-
-			const tool = new GrepTool(createSession());
-			const result = await tool.execute("grep-explicit-selector-literal", {
-				pattern: "needle",
-				path: literal,
-				selector: "2-2",
-			});
-			const output = getText(result);
-
-			expect(output).toContain("needle inside");
-			expect(output).not.toContain("needle outside again");
-			expect(output).not.toContain("wrong longer literal");
 		});
 
 		it("searches a shell-escaped literal file whose name ends in a selector-shaped suffix", async () => {
@@ -342,5 +320,174 @@ describe("literal colon filename resolution (issue #4618)", () => {
 			expect(rangedOutput).not.toContain("three");
 			expect(rangedOutput).not.toContain("four");
 		});
+	});
+});
+
+// Regression: some models intermittently prefix an otherwise-valid path with a
+// stray leading `:` (e.g. `:/abs/path`, `:../rel`). The literal `:/abs/path`
+// does not exist on disk, so the #4618 literal-preferring probe cannot save it;
+// `expandPath` strips the mangled prefix before resolution so `read`, `grep`,
+// and `edit` all open the intended file — see issue #5508.
+describe("leading-colon path recovery (issue #5508)", () => {
+	let tmpDir: string;
+	const sessionSettings = Settings.isolated({
+		"grep.contextBefore": 0,
+		"grep.contextAfter": 0,
+		"edit.mode": "patch",
+	});
+
+	beforeEach(async () => {
+		resetSettingsForTest();
+		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "leading-colon-"));
+	});
+
+	afterEach(async () => {
+		resetSettingsForTest();
+		await removeWithRetries(tmpDir);
+	});
+
+	function createSession(overrides: Partial<ToolSession> = {}): ToolSession {
+		return {
+			cwd: tmpDir,
+			hasUI: false,
+			enableLsp: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			getArtifactsDir: () => null,
+			getSessionId: () => null,
+			getPlanModeState: () => undefined,
+			settings: sessionSettings,
+			...overrides,
+		} as unknown as ToolSession;
+	}
+
+	it("strips a leading colon before an absolute path in resolveToCwd", () => {
+		expect(resolveToCwd(":/tmp/omp-colon-test.txt", tmpDir)).toBe("/tmp/omp-colon-test.txt");
+	});
+
+	it("strips a leading colon before `./` and `../` relative paths in resolveToCwd", () => {
+		expect(resolveToCwd(":./sub/file.md", tmpDir)).toBe(path.join(tmpDir, "sub/file.md"));
+		expect(resolveToCwd(":../sibling.md", tmpDir)).toBe(path.resolve(tmpDir, "../sibling.md"));
+	});
+
+	it("does not strip a colon that is not a mangled path prefix", () => {
+		// `:selector` shapes and bare tokens must round-trip unchanged — the
+		// lookahead only fires before `/`, `~/`, `./`, or `../`.
+		expect(resolveToCwd(":raw", tmpDir)).toBe(path.join(tmpDir, ":raw"));
+		expect(resolveToCwd(":name.txt", tmpDir)).toBe(path.join(tmpDir, ":name.txt"));
+	});
+
+	it("strips a leading colon before Windows path shapes in expandPath (issue #5624)", () => {
+		// Windows native paths mangled with a stray leading colon: drive-letter
+		// absolutes and `\`/`.\`/`..\` relative forms. expandPath runs before any
+		// path.resolve, so the strip is platform-independent.
+		expect(expandPath(":C:\\repo\\file.ts")).toBe("C:\\repo\\file.ts");
+		expect(expandPath(":.\\src")).toBe(".\\src");
+		expect(expandPath(":..\\sibling")).toBe("..\\sibling");
+		expect(expandPath(":\\\\server\\share")).toBe("\\\\server\\share");
+	});
+
+	it("does not strip a colon before a bare drive letter without a path (expandPath)", () => {
+		// `:selector` shapes still round-trip; the drive-letter branch requires
+		// the `<letter>:` colon to follow, distinguishing `:C:\x` from `:cache`.
+		expect(expandPath(":raw")).toBe(":raw");
+		expect(expandPath(":cache")).toBe(":cache");
+	});
+
+	it("read opens a file addressed with a leading colon", async () => {
+		const abs = path.join(tmpDir, "colon-read.txt");
+		await Bun.write(abs, "test line A\ntest line B\n");
+
+		const result = await new ReadTool(createSession()).execute("read-leading-colon", { path: `:${abs}` });
+		const output = getText(result);
+
+		expect(output).toContain("test line A");
+		expect(output).not.toMatch(/not found/i);
+	});
+
+	it("read opens a relative file addressed with a leading colon", async () => {
+		await Bun.write(path.join(tmpDir, "rel.txt"), "relative body\n");
+
+		const result = await new ReadTool(createSession()).execute("read-leading-colon-rel", { path: ":./rel.txt" });
+		const output = getText(result);
+
+		expect(output).toContain("relative body");
+		expect(output).not.toMatch(/not found/i);
+	});
+
+	it("grep searches a file addressed with a leading colon", async () => {
+		const abs = path.join(tmpDir, "colon-grep.txt");
+		await Bun.write(abs, "needle here\nsecond line\n");
+
+		const result = await new GrepTool(createSession()).execute("grep-leading-colon", {
+			pattern: "needle",
+			path: `:${abs}`,
+		});
+		const output = getText(result);
+
+		expect(output).toContain("needle");
+		expect(output).not.toMatch(/not found/i);
+	});
+
+	it("edit updates a file addressed with a leading colon", async () => {
+		const abs = path.join(tmpDir, "colon-edit.txt");
+		await Bun.write(abs, "needle here\nsecond\n");
+		await Settings.init({ inMemory: true, cwd: tmpDir });
+
+		const result = await new EditTool(createSession()).execute("edit-leading-colon", {
+			path: `:${abs}`,
+			edits: [{ op: "update", diff: "@@\n-needle here\n+replaced" }],
+		});
+
+		expect(result.isError).toBeFalsy();
+		expect(getText(result)).not.toMatch(/not found/i);
+		expect(await Bun.file(abs).text()).toBe("replaced\nsecond\n");
+	});
+});
+
+// Regression: the `omp grep` CLI subcommand resolved its path argument with a
+// bare `path.resolve`, bypassing `expandPath`, so the leading-colon strip from
+// #5529 never reached it — see issue #5624.
+describe("grep CLI subcommand leading-colon path (issue #5624)", () => {
+	let tmpDir: string;
+
+	beforeEach(async () => {
+		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "grep-cli-colon-"));
+		await initTheme();
+	});
+
+	afterEach(async () => {
+		await removeWithRetries(tmpDir);
+	});
+
+	it("strips a leading colon before an absolute path", async () => {
+		const abs = path.join(tmpDir, "colon-grep-cli.txt");
+		await Bun.write(abs, "needle line A\nneedle line B\n");
+
+		const lines: string[] = [];
+		const logSpy = spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+			lines.push(args.map(String).join(" "));
+		});
+		const errSpy = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+			lines.push(args.map(String).join(" "));
+		});
+		try {
+			await runGrepCommand({
+				pattern: "needle",
+				path: `:${abs}`,
+				limit: 20,
+				context: 2,
+				mode: GrepOutputMode.Content,
+				gitignore: true,
+			});
+		} finally {
+			logSpy.mockRestore();
+			errSpy.mockRestore();
+		}
+
+		const output = lines.join("\n");
+		expect(output).toContain(`Searching in: ${abs}`);
+		expect(output).toContain("needle line A");
+		expect(output).not.toMatch(/not found/i);
 	});
 });

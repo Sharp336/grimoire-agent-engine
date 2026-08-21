@@ -12,12 +12,28 @@
  * the same module identity as a direct `@oh-my-pi/pi-coding-agent` import.
  */
 
-import * as fs from "node:fs/promises";
+import { Database } from "bun:sqlite";
+import * as fs from "node:fs";
 import * as path from "node:path";
-import type { AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import type { TSchema } from "@oh-my-pi/pi-ai";
-import { Text } from "@oh-my-pi/pi-tui";
-import { getAgentDir, getProjectDir, parseFrontmatter as parseOmpFrontmatter } from "@oh-my-pi/pi-utils";
+import {
+	type AgentMessage,
+	type AgentToolResult,
+	type AgentToolUpdateCallback,
+	type MessageCountOptions,
+	Tokenizer,
+} from "@oh-my-pi/pi-agent-core";
+import { type AuthCredential, SqliteAuthCredentialStore, type TSchema } from "@oh-my-pi/pi-ai";
+import { piEscapeRegexLiteral, piJoinPath } from "@oh-my-pi/pi-ai/providers/cursor-pi-args";
+import { getKeybindings, type Keybinding, Text } from "@oh-my-pi/pi-tui";
+import {
+	getAgentDbPath,
+	getAgentDir,
+	getProjectDir,
+	isCompiledBinary,
+	parseFrontmatter as parseOmpFrontmatter,
+} from "@oh-my-pi/pi-utils";
+import { getPackageDir as getOmpPackageDir } from "../config";
+import { formatKeyHints } from "../config/keybindings";
 import type { PromptTemplate } from "../config/prompt-templates";
 import { type SettingPath, Settings } from "../config/settings";
 import { EditTool } from "../edit";
@@ -44,12 +60,23 @@ import { ReadTool } from "../tools/read";
 import { formatBytes } from "../tools/render-utils";
 import { WriteTool } from "../tools/write";
 import { EventBus } from "../utils/event-bus";
-import { loadExtensionFromFactory, loadExtensions } from "./extensions";
+import { convertImageToPng } from "../utils/image-loading";
+import { discoverExtensionPaths, loadExtensionFromFactory, loadExtensions } from "./extensions";
 import { ExtensionRuntime } from "./extensions/loader";
-import type { ExtensionFactory, ToolDefinition } from "./extensions/types";
+import type {
+	BashToolResultEvent,
+	EditToolResultEvent,
+	ExtensionFactory,
+	GrepToolResultEvent,
+	ReadToolResultEvent,
+	ToolDefinition,
+	ToolResultEvent,
+	WriteToolResultEvent,
+} from "./extensions/types";
+import { Type } from "./legacy-typebox";
+import { getEnabledPlugins, resolvePluginExtensionPaths, type ScopedInstalledPlugin } from "./plugins/loader";
 import type { Skill } from "./skills";
 import { loadSkillsFromDir } from "./skills";
-import { Type } from "./typebox";
 
 const TOOL_DEFINITION_MARKER = "__isToolDefinition";
 const LEGACY_BUILTIN_TOOL_MARKER = "__ompLegacyBuiltinTool";
@@ -127,6 +154,25 @@ export interface LsOperations {
 
 export interface LsToolOptions {
 	operations?: LsOperations;
+}
+
+export interface EditOperations {
+	readFile: (absolutePath: string) => Promise<Buffer>;
+	writeFile: (absolutePath: string, content: string) => Promise<void>;
+	access: (absolutePath: string) => Promise<void>;
+}
+
+export interface EditToolOptions {
+	operations?: EditOperations;
+}
+
+export interface WriteOperations {
+	writeFile: (absolutePath: string, content: string) => Promise<void>;
+	mkdir: (dir: string) => Promise<void>;
+}
+
+export interface WriteToolOptions {
+	operations?: WriteOperations;
 }
 
 const legacyBashSchema = Type.Object({
@@ -288,16 +334,6 @@ function lineRangePath(readPath: string, offset: number | undefined, limit: numb
 	return `${readPath}:${start}-${end}`;
 }
 
-function escapeRegexLiteral(value: string): string {
-	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function joinLegacyGlob(searchPath: string, pattern: string): string {
-	if (path.isAbsolute(pattern)) return pattern;
-	if (!searchPath || searchPath === ".") return pattern;
-	return path.join(searchPath, pattern);
-}
-
 function normalizeLegacyLimit(limit: number | undefined, fallback: number): number {
 	if (limit === undefined || !Number.isFinite(limit)) return fallback;
 	return Math.max(1, Math.floor(limit));
@@ -362,6 +398,33 @@ async function executeLegacyBashOperations(
 		}
 		throw err;
 	}
+}
+
+/**
+ * Convert an image attachment to PNG using the legacy package-root contract.
+ *
+ * Invalid or unsupported image data returns `null`, matching Pi's historical
+ * helper instead of surfacing Bun's decoder error to extensions.
+ */
+export async function convertToPng(
+	base64Data: string,
+	mimeType: string,
+): Promise<{ data: string; mimeType: string } | null> {
+	if (mimeType === "image/png") {
+		return { data: base64Data, mimeType };
+	}
+
+	try {
+		const converted = await convertImageToPng({ type: "image", data: base64Data, mimeType });
+		return { data: converted.data, mimeType: converted.mimeType };
+	} catch {
+		return null;
+	}
+}
+
+/** Format the active shortcut for legacy extensions that render keybinding hints. */
+export function keyText(action: Keybinding): string {
+	return formatKeyHints(getKeybindings().getKeys(action));
 }
 
 /** Parse frontmatter using the historical Pi package-root helper. */
@@ -497,7 +560,7 @@ export function createGrepToolDefinition(cwd: string, options?: GrepToolOptions)
 		renderResult: legacyRenderResult,
 		execute: (toolCallId, params, signal, onUpdate) => {
 			const rawPattern = stringField(params, "pattern") ?? "";
-			const pattern = booleanField(params, "literal") ? escapeRegexLiteral(rawPattern) : rawPattern;
+			const pattern = booleanField(params, "literal") ? piEscapeRegexLiteral(rawPattern) : rawPattern;
 			const searchPath = stringField(params, "path") ?? ".";
 			const glob = stringField(params, "glob");
 			const context = numberField(params, "context");
@@ -514,7 +577,7 @@ export function createGrepToolDefinition(cwd: string, options?: GrepToolOptions)
 				toolCallId,
 				{
 					pattern,
-					path: glob ? joinLegacyGlob(searchPath, glob) : searchPath,
+					path: glob ? piJoinPath(searchPath, glob) : searchPath,
 					case: booleanField(params, "ignoreCase") ? false : undefined,
 				},
 				signal,
@@ -572,7 +635,7 @@ export function createFindToolDefinition(cwd: string, options?: FindToolOptions)
 			}
 			return tool.execute(
 				toolCallId,
-				{ path: joinLegacyGlob(searchPath, pattern), hidden: true, gitignore: true, limit },
+				{ path: piJoinPath(searchPath, pattern), hidden: true, gitignore: true, limit },
 				signal,
 				onUpdate,
 			);
@@ -605,16 +668,16 @@ export function createLsToolDefinition(cwd: string, options?: LsToolOptions): To
 			const ops = options?.operations;
 			const exists = ops
 				? await ops.exists(absolutePath)
-				: await fs.stat(absolutePath).then(
+				: await fs.promises.stat(absolutePath).then(
 						() => true,
 						() => false,
 					);
 			if (!exists) throw new Error(`Path not found: ${absolutePath}`);
-			const stat = ops ? await ops.stat(absolutePath) : await fs.stat(absolutePath);
+			const stat = ops ? await ops.stat(absolutePath) : await fs.promises.stat(absolutePath);
 			if (!stat.isDirectory()) {
 				return { content: [{ type: "text", text: rawPath }] };
 			}
-			const entries = ops ? await ops.readdir(absolutePath) : await fs.readdir(absolutePath);
+			const entries = ops ? await ops.readdir(absolutePath) : await fs.promises.readdir(absolutePath);
 			const sorted = [...entries].sort((a, b) => a.localeCompare(b));
 			const limited = sorted.slice(0, limit);
 			const output = limited.join("\n");
@@ -628,6 +691,40 @@ export function createLsToolDefinition(cwd: string, options?: LsToolOptions): To
 /** Create the legacy ls tool. */
 export function createLsTool(cwd: string, options?: LsToolOptions): ToolDefinition {
 	return createLsToolDefinition(cwd, options);
+}
+
+/** Create the legacy edit tool definition. */
+export function createEditToolDefinition(cwd: string, options?: EditToolOptions): ToolDefinition {
+	if (options?.operations) {
+		throw new Error(
+			"Legacy EditToolOptions.operations is not supported: OMP's built-in edit tool writes the local " +
+				"filesystem natively and exposes no pluggable operations seam. Register a custom edit tool via " +
+				"defineTool() instead of passing operations to createEditTool()/createEditToolDefinition().",
+		);
+	}
+	return legacyBuiltinTool(cwd, "edit");
+}
+
+/** Create the legacy edit tool. */
+export function createEditTool(cwd: string, options?: EditToolOptions): ToolDefinition {
+	return createEditToolDefinition(cwd, options);
+}
+
+/** Create the legacy write tool definition. */
+export function createWriteToolDefinition(cwd: string, options?: WriteToolOptions): ToolDefinition {
+	if (options?.operations) {
+		throw new Error(
+			"Legacy WriteToolOptions.operations is not supported: OMP's built-in write tool writes the local " +
+				"filesystem natively and exposes no pluggable operations seam. Register a custom write tool via " +
+				"defineTool() instead of passing operations to createWriteTool()/createWriteToolDefinition().",
+		);
+	}
+	return legacyBuiltinTool(cwd, "write");
+}
+
+/** Create the legacy write tool. */
+export function createWriteTool(cwd: string, options?: WriteToolOptions): ToolDefinition {
+	return createWriteToolDefinition(cwd, options);
 }
 
 /** Create legacy read, bash, edit, and write tools. */
@@ -654,6 +751,100 @@ export const SettingsManager = {
 		return Settings.isolated();
 	},
 } as const;
+
+/** Scope used by the legacy package manager for discovered resources. */
+export type SourceScope = "user" | "project" | "temporary";
+
+/** Discovery metadata exposed alongside a legacy package resource path. */
+export interface PathMetadata {
+	source: string;
+	scope: SourceScope;
+	origin: "package" | "top-level";
+	baseDir?: string;
+}
+
+/** One extension, skill, prompt, or theme resolved by the legacy package manager. */
+export interface ResolvedResource {
+	path: string;
+	enabled: boolean;
+	metadata: PathMetadata;
+}
+
+/** Resource groups returned by {@link DefaultPackageManager.resolve}. */
+export interface ResolvedPaths {
+	extensions: ResolvedResource[];
+	skills: ResolvedResource[];
+	prompts: ResolvedResource[];
+	themes: ResolvedResource[];
+}
+
+/** Action a legacy caller requests when a configured package is unavailable. */
+export type MissingSourceAction = "install" | "skip" | "error";
+
+/** Construction inputs accepted by the legacy package manager. */
+export interface DefaultPackageManagerOptions {
+	cwd: string;
+	agentDir: string;
+	settingsManager: Settings | Promise<Settings>;
+}
+
+/**
+ * Enumerates the extensions OMP would load through the historical package
+ * manager surface used by legacy extensions.
+ */
+export class DefaultPackageManager {
+	#cwd: string;
+	#agentDir: string;
+	#settingsManager: Settings | Promise<Settings>;
+
+	constructor(options: DefaultPackageManagerOptions) {
+		this.#cwd = options.cwd;
+		this.#agentDir = options.agentDir;
+		this.#settingsManager = options.settingsManager;
+	}
+
+	/** Resolve enabled extension paths with their OMP plugin provenance. */
+	async resolve(_onMissing?: (source: string) => Promise<MissingSourceAction>): Promise<ResolvedPaths> {
+		const settings = await this.#settingsManager;
+		const configuredPaths = settings.get("extensions") ?? [];
+		const disabledExtensionIds = settings.get("disabledExtensions") ?? [];
+		const [extensionPaths, plugins] = await Promise.all([
+			discoverExtensionPaths(configuredPaths, this.#cwd, disabledExtensionIds),
+			getEnabledPlugins(this.#cwd),
+		]);
+		const pluginByExtensionPath = new Map<string, ScopedInstalledPlugin>();
+		for (const plugin of plugins) {
+			for (const extensionPath of resolvePluginExtensionPaths(plugin)) {
+				pluginByExtensionPath.set(path.resolve(extensionPath), plugin);
+			}
+		}
+
+		const extensions = extensionPaths.map(extensionPath => {
+			const resolvedPath = path.resolve(extensionPath);
+			const plugin = pluginByExtensionPath.get(resolvedPath);
+			const agentDirRelative = path.relative(path.resolve(this.#agentDir), resolvedPath);
+			const metadata: PathMetadata = plugin
+				? {
+						source: `npm:${plugin.name}`,
+						scope: plugin.scope,
+						origin: "package",
+						baseDir: plugin.path,
+					}
+				: {
+						source: "auto",
+						scope:
+							agentDirRelative === "" ||
+							(!agentDirRelative.startsWith("..") && !path.isAbsolute(agentDirRelative))
+								? "user"
+								: "project",
+						origin: "top-level",
+					};
+			return { path: resolvedPath, enabled: true, metadata };
+		});
+
+		return { extensions, skills: [], prompts: [], themes: [] };
+	}
+}
 
 /**
  * Resource-loader compatibility layer for legacy pi extensions.
@@ -752,6 +943,11 @@ export interface ResourceLoader {
 	readonly __ompLegacyPiLoader?: true;
 }
 
+/** Create a pre-initialization runtime for legacy extension resource loaders. */
+export function createExtensionRuntime(): ExtensionRuntime {
+	return new ExtensionRuntime();
+}
+
 /**
  * Loader-owned inputs that {@link createAgentSession} needs regardless of
  * whether the caller provided extra options. `cwd`/`agentDir` fall back to
@@ -785,7 +981,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 	readonly __ompLegacyPiLoader = true as const;
 	#state: ResolvedLoaderState;
 	#options: DefaultResourceLoaderOptions;
-	#extensionsResult: LoadExtensionsResult = { extensions: [], errors: [], runtime: new ExtensionRuntime() };
+	#extensionsResult: LoadExtensionsResult = { extensions: [], errors: [], runtime: createExtensionRuntime() };
 	#skills: Skill[] = [];
 	#skillDiagnostics: ResourceDiagnostic[] = [];
 	#prompts: PromptTemplate[] = [];
@@ -934,7 +1130,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 		const { cwd, noExtensions, additionalExtensionPaths, extensionFactories, eventBus } = this.#state;
 
 		if (noExtensions && additionalExtensionPaths.length === 0 && extensionFactories.length === 0) {
-			return { extensions: [], errors: [], runtime: new ExtensionRuntime() };
+			return { extensions: [], errors: [], runtime: createExtensionRuntime() };
 		}
 
 		const paths = await discoverSessionExtensionPaths(
@@ -1005,7 +1201,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 				: path.resolve(this.#state.cwd, resourcePath);
 			const files: string[] = [];
 			try {
-				const stat = await fs.stat(resolvedPath);
+				const stat = await fs.promises.stat(resolvedPath);
 				if (stat.isDirectory()) {
 					const glob = new Bun.Glob("**/*.md");
 					for await (const entry of glob.scan({ cwd: resolvedPath, absolute: false, onlyFiles: true })) {
@@ -1193,6 +1389,151 @@ export async function createAgentSession(
 	return ompCreateAgentSession(forwarded);
 }
 
+/**
+ * Synchronous auth storage surface retained for legacy extensions.
+ *
+ * Modern OMP auth storage is asynchronous, while older provider extensions
+ * call `AuthStorage.create().get()` during module initialization.
+ */
+export class AuthStorage {
+	constructor() {
+		fs.mkdirSync(path.dirname(getAgentDbPath()), { recursive: true, mode: 0o700 });
+	}
+
+	static create(): AuthStorage {
+		return new AuthStorage();
+	}
+
+	get(provider: string): AuthCredential | undefined {
+		const store = new SqliteAuthCredentialStore(new Database(getAgentDbPath()));
+		try {
+			return store.listAuthCredentials(provider)[0]?.credential;
+		} finally {
+			store.close();
+		}
+	}
+
+	set(provider: string, credential: AuthCredential): void {
+		const store = new SqliteAuthCredentialStore(new Database(getAgentDbPath()));
+		try {
+			store.upsertAuthCredentialForProvider(provider, credential);
+		} finally {
+			store.close();
+		}
+	}
+}
+
+/** Read the first active credential for a legacy extension provider. */
+export function readStoredCredential(provider: string): AuthCredential | undefined {
+	const storage = AuthStorage.create();
+	return storage.get(provider);
+}
+
+// Pi SDK path helpers. `export * from "../index"` above only forwards
+// `getAgentDir`; `getProjectDir` (a `@oh-my-pi/pi-utils` helper) and
+// `getPackageDir` are absent from that barrel, so legacy extensions importing
+// either fail Bun's static export check during validation (issue #5968).
+export { getProjectDir } from "@oh-my-pi/pi-utils";
+
+/**
+ * Coding-agent package install directory, matching pi's string-valued
+ * `getPackageDir()` contract (extensions do `path.join(getPackageDir(), ...)`
+ * to auto-allow bundled docs/resources).
+ *
+ * omp's canonical `getPackageDir()` (`../config`) returns `undefined` inside a
+ * `bun --compile` binary — `import.meta.dir` is `/$bunfs/root` and no owning
+ * `package.json` exists (issue #1423). Returning `undefined` there would crash
+ * every legacy `path.join(getPackageDir(), ...)` at runtime in the shipped
+ * binary, the primary distribution. So fall back to the executable's own
+ * directory in compiled mode, where the binary *is* the install root. The
+ * `PI_PACKAGE_DIR` override and dev/source/npm-dist walk-up still win via the
+ * canonical helper.
+ */
+export function getPackageDir(): string {
+	return getOmpPackageDir() ?? (isCompiledBinary() ? path.dirname(process.execPath) : process.cwd());
+}
+
+// Legacy pi's `@earendil-works/pi-coding-agent` re-exported `estimateTokens`,
+// `compact`, and `serializeConversation` from its package root (via
+// `./core/compaction/index.ts`). In omp `compact` and `serializeConversation`
+// live in `@oh-my-pi/pi-agent-core/compaction`, and the coding-agent barrel
+// below does not forward them, so legacy extensions importing them fail Bun's
+// static export check during validation (issues #6583, #7174, #7403).
+export { compact, serializeConversation } from "@oh-my-pi/pi-agent-core/compaction";
+
+const legacyTokenizer = new Tokenizer();
+
+/**
+ * Legacy `estimateTokens(message, tokenizer?, options?)` export. The core API
+ * became `Tokenizer.countMessage`, but legacy pi extensions still import this
+ * free function by name (issues #6583, #7174, #7403), so the export surface
+ * must survive; a shared model-agnostic Tokenizer backs the tokenizer-less
+ * legacy call shape.
+ */
+export function estimateTokens(message: AgentMessage, tokenizer?: Tokenizer, options?: MessageCountOptions): number {
+	return (tokenizer ?? legacyTokenizer).countMessage(message, options);
+}
+
+// Same barrel gap for two more legacy package-root exports: pi re-exported the
+// `CONFIG_DIR_NAME` constant and the CLI parser `parseArgs`. In omp
+// `CONFIG_DIR_NAME` lives in `@oh-my-pi/pi-utils` and `parseArgs` in
+// `../cli/args`, neither of which the barrel below forwards, so legacy
+// extensions importing either fail Bun's static export check during validation.
+export { CONFIG_DIR_NAME } from "@oh-my-pi/pi-utils";
+export { parseArgs } from "../cli/args";
+
 export * from "../index";
 export { formatBytes as formatSize } from "../tools/render-utils";
-export { Type } from "./typebox";
+export { copyToClipboard } from "../utils/clipboard";
+export { Type } from "./legacy-typebox";
+
+// Legacy pi's `@earendil-works/pi-coding-agent` root exported an `is<Tool>ToolResult`
+// family of type guards that narrow a `tool_result` event (`ToolResultEvent`) by
+// tool name. omp removed them from the public API in 10.2.3, and the barrel above
+// does not forward them, so legacy extensions importing them (e.g.
+// `pi-lean-ctx@3.9.18`, which uses `isEditToolResult`/`isWriteToolResult` to
+// invalidate its read cache after a native edit/write) fail Bun's static export
+// check during validation (issue #8161). Restore the full guard family; legacy
+// `find`/`ls` tool results arrive through omp's custom-event branch, so those
+// guards narrow the tool name while leaving their details unknown.
+
+/** Narrow a `tool_result` event to the `bash` tool. */
+export function isBashToolResult(e: ToolResultEvent): e is BashToolResultEvent {
+	return e.toolName === "bash";
+}
+
+/** Narrow a `tool_result` event to the `read` tool. */
+export function isReadToolResult(e: ToolResultEvent): e is ReadToolResultEvent {
+	return e.toolName === "read";
+}
+
+/** Narrow a `tool_result` event to the `edit` tool. */
+export function isEditToolResult(e: ToolResultEvent): e is EditToolResultEvent {
+	return e.toolName === "edit";
+}
+
+/** Narrow a `tool_result` event to the `write` tool. */
+export function isWriteToolResult(e: ToolResultEvent): e is WriteToolResultEvent {
+	return e.toolName === "write";
+}
+
+/** Narrow a `tool_result` event to the `grep` tool. */
+export function isGrepToolResult(e: ToolResultEvent): e is GrepToolResultEvent {
+	return e.toolName === "grep";
+}
+
+/** Legacy `find` result event represented by omp's custom-event branch. */
+export type FindToolResultEvent = ToolResultEvent & { toolName: "find" };
+
+/** Narrow a `tool_result` event to the legacy `find` tool. */
+export function isFindToolResult(e: ToolResultEvent): e is FindToolResultEvent {
+	return e.toolName === "find";
+}
+
+/** Legacy `ls` result event represented by omp's custom-event branch. */
+export type LsToolResultEvent = ToolResultEvent & { toolName: "ls" };
+
+/** Narrow a `tool_result` event to the legacy `ls` tool. */
+export function isLsToolResult(e: ToolResultEvent): e is LsToolResultEvent {
+	return e.toolName === "ls";
+}

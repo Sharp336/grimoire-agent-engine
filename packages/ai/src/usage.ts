@@ -4,7 +4,7 @@
  * Provides a normalized schema to represent multiple limit windows, model tiers,
  * and shared quotas across providers.
  */
-import { type } from "arktype";
+import { type } from "@oh-my-pi/omptype";
 import type { FetchImpl, Provider } from "./types";
 export type UsageUnit = "percent" | "tokens" | "requests" | "usd" | "minutes" | "bytes" | "unknown";
 
@@ -20,6 +20,12 @@ export interface UsageWindow {
 	durationMs?: number;
 	/** Absolute reset timestamp in milliseconds since epoch. */
 	resetsAt?: number;
+	/**
+	 * Verb rendered before the {@link resetsAt} countdown (e.g. "tick", "regen").
+	 * Defaults to "resets" — override for rolling windows where the timestamp is
+	 * an incremental regeneration step rather than a full window reset.
+	 */
+	resetLabel?: string;
 }
 
 /** Quantitative usage data. */
@@ -160,23 +166,60 @@ export interface UsageHistoryQuery {
 	/** Inclusive lower bound on {@link UsageHistoryEntry.recordedAt} (epoch ms). */
 	sinceMs?: number;
 }
-/** One observed provider request cost, attributed to the credential that made it. */
-export interface UsageCostHistoryEntry {
-	/** Epoch ms the request completed. */
-	recordedAt: number;
+
+/**
+ * Aggregated request usage a client observed for one (provider, model) pair.
+ * Clients fold every completed request into per-pair buckets and flush them to
+ * the auth broker on a short cadence, so the broker can attribute token burn
+ * to the install that produced it.
+ */
+export interface ObservedUsageEntry {
+	/** Epoch ms of the newest request folded into this bucket. */
+	at: number;
 	provider: Provider;
-	/** Stable credential identity key (account/email/project/secret derived). */
-	accountKey: string;
-	/** Estimated request cost in USD. */
+	model: string;
+	/** Completed requests folded into this bucket. */
+	requests: number;
+	inputTokens: number;
+	outputTokens: number;
+	cacheReadTokens: number;
+	cacheWriteTokens: number;
+	/** Estimated USD cost of the folded requests (0 when unknown). */
 	costUsd: number;
 }
 
-/** Filter for reading observed request costs. */
-export interface UsageCostHistoryQuery {
-	provider?: string;
-	accountKey?: string;
-	/** Inclusive lower bound on {@link UsageCostHistoryEntry.recordedAt} (epoch ms). */
-	sinceMs?: number;
+/** One client's observed-usage report, keyed by its stable install id. */
+export interface ClientUsageReport {
+	/** Stable per-machine install id — the client primary key. */
+	installId: string;
+	/** Human-readable machine name for display surfaces. */
+	hostname?: string;
+	entries: ObservedUsageEntry[];
+}
+
+/** Per-provider aggregate of one client's recorded usage. */
+export interface ClientProviderUsage {
+	provider: string;
+	requests: number;
+	inputTokens: number;
+	outputTokens: number;
+	cacheReadTokens: number;
+	cacheWriteTokens: number;
+	costUsd: number;
+}
+
+/** One known client with its usage aggregates over the queried window. */
+export interface ClientUsageClientSummary {
+	installId: string;
+	hostname?: string;
+	firstSeen: number;
+	lastSeen: number;
+	providers: ClientProviderUsage[];
+}
+
+/** Aggregated per-client usage recorded by the broker host. */
+export interface ClientUsageSummary {
+	clients: ClientUsageClientSummary[];
 }
 
 // ─── Zod schemas (wire-shape validation for the broker `/v1/usage` endpoint) ─
@@ -189,6 +232,7 @@ export const usageWindowSchema = type({
 	label: "string",
 	"durationMs?": "number",
 	"resetsAt?": "number",
+	"resetLabel?": "string",
 });
 
 export const usageAmountSchema = type({
@@ -260,6 +304,10 @@ export interface UsageCredential {
 	accountId?: string;
 	projectId?: string;
 	email?: string;
+	/** Organization/workspace the credential is scoped to (see OAuthCredentials.orgId). */
+	orgId?: string;
+	/** Human-readable organization name for display. */
+	orgName?: string;
 	enterpriseUrl?: string;
 	metadata?: Record<string, unknown>;
 	apiEndpoint?: string;
@@ -280,8 +328,6 @@ export interface UsageFetchContext {
 	fetch: FetchImpl;
 	logger?: UsageLogger;
 	retryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
-	/** Observed request-cost history for providers without upstream usage APIs. */
-	listUsageCosts?: (query?: UsageCostHistoryQuery) => UsageCostHistoryEntry[];
 }
 
 /** Provider implementation for fetching usage information. */
@@ -293,6 +339,8 @@ export interface UsageProvider {
 	supports?(params: UsageFetchParams): boolean;
 	/** True when fetchUsage contacts upstream and can authenticate the credential for health checks. */
 	validatesCredentials?: boolean;
+	/** Whether a failed refresh may serve the previous successful report. Defaults to true. */
+	retainLastGoodOnFailure?: boolean;
 }
 
 /** Request context used when ranking usage for a specific model. */
@@ -318,11 +366,31 @@ export interface CredentialRankingStrategy {
 	 */
 	scopeLimits?(report: UsageReport, context?: CredentialRankingContext): UsageLimit[];
 	/**
+	 * Restrict limits for the opt-in, non-destructive usage-reserve health
+	 * check ({@link AuthStorage.getModelUsageHealth}). Distinct from
+	 * {@link scopeLimits}, which gates credential-wide hard blocks: a provider
+	 * whose model/tier counters are trusted only at confirmed exhaustion for
+	 * hard-blocking can still expose them here so the reserve margin protects
+	 * the mapped quota before it hits the cap. Falls back to {@link scopeLimits}
+	 * when omitted.
+	 */
+	scopeLimitsForReserve?(report: UsageReport, context?: CredentialRankingContext): UsageLimit[];
+	/**
 	 * Return a provider-local backoff scope for the requested model. Providers
 	 * with backend-specific quotas use this so one exhausted model family does
 	 * not block unrelated families on the same OAuth credential.
 	 */
 	blockScope?(context?: CredentialRankingContext): string | undefined;
+	/**
+	 * Scopes that apply to a request, most specific first. With a context, the
+	 * request's own scope plus any legacy catch-all scope whose blocks still
+	 * apply to everything. Without one — reconciliation runs with no request —
+	 * every scope whose blocks must be healed.
+	 *
+	 * A provider that scopes backoff by model family must implement this, or a
+	 * block written under one scope is invisible to requests and to healing.
+	 */
+	blockScopes?(context?: CredentialRankingContext): string[];
 	/** Fallback window durations (ms) when limits don't specify durationMs. */
 	windowDefaults: {
 		primaryMs: number;

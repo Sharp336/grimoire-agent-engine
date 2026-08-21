@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { KeybindingsManager as AppKeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
+import {
+	KeybindingsManager as AppKeybindingsManager,
+	setKeyHintPlatform,
+} from "@oh-my-pi/pi-coding-agent/config/keybindings";
 import { createPromptActionAutocompleteProvider } from "@oh-my-pi/pi-coding-agent/modes/prompt-action-autocomplete";
 import { KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "@oh-my-pi/pi-tui";
 
@@ -12,10 +15,12 @@ describe("prompt action autocomplete", () => {
 				"tui.editor.undo": { defaultKeys: "f8", description: "Undo" },
 			}),
 		);
+		setKeyHintPlatform("linux");
 	});
 
 	afterEach(() => {
 		setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+		setKeyHintPlatform(undefined);
 	});
 
 	it("shows prompt actions with configured shortcut hints", async () => {
@@ -183,6 +188,57 @@ describe("prompt action autocomplete", () => {
 			prefix: "repro #copy",
 			items: [{ value: "repro #copy-title", label: "Keep #copy in the title" }],
 		});
+	});
+
+	it("falls through to internal-url completion for allowArgs commands without argument completions", async () => {
+		const provider = createPromptActionAutocompleteProvider({
+			commands: [{ name: "btw", description: "By the way", allowArgs: true }],
+			basePath: process.cwd(),
+			keybindings: AppKeybindingsManager.inMemory(),
+			copyCurrentLine: () => {},
+			copyPrompt: () => {},
+			undo: () => {},
+			moveCursorToMessageEnd: () => {},
+			moveCursorToMessageStart: () => {},
+			moveCursorToLineStart: () => {},
+			moveCursorToLineEnd: () => {},
+		});
+
+		const line = "/btw omp://";
+		const suggestions = await provider.getSuggestions([line], 0, line.length);
+
+		expect(suggestions).not.toBeNull();
+		expect(suggestions?.prefix).toBe("omp://");
+		expect(suggestions?.items.length).toBeGreaterThan(0);
+	});
+
+	it("falls through to internal-url completion when getArgumentCompletions yields no match", async () => {
+		const provider = createPromptActionAutocompleteProvider({
+			commands: [
+				{
+					name: "mcp",
+					description: "MCP",
+					allowArgs: true,
+					getArgumentCompletions: () => null,
+				},
+			],
+			basePath: process.cwd(),
+			keybindings: AppKeybindingsManager.inMemory(),
+			copyCurrentLine: () => {},
+			copyPrompt: () => {},
+			undo: () => {},
+			moveCursorToMessageEnd: () => {},
+			moveCursorToMessageStart: () => {},
+			moveCursorToLineStart: () => {},
+			moveCursorToLineEnd: () => {},
+		});
+
+		const line = "/mcp omp://";
+		const suggestions = await provider.getSuggestions([line], 0, line.length);
+
+		expect(suggestions).not.toBeNull();
+		expect(suggestions?.prefix).toBe("omp://");
+		expect(suggestions?.items.length).toBeGreaterThan(0);
 	});
 
 	it("delegates trySyncSlashCompletion to CombinedAutocompleteProvider", () => {

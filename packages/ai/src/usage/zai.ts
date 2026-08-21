@@ -1,5 +1,7 @@
 import { toNumber } from "@oh-my-pi/pi-catalog/utils";
+import { USER_AGENT } from "@oh-my-pi/pi-utils";
 import type {
+	CredentialRankingStrategy,
 	UsageAmount,
 	UsageFetchContext,
 	UsageFetchParams,
@@ -10,14 +12,11 @@ import type {
 	UsageWindow,
 } from "../usage";
 import { isRecord } from "../utils";
+import { DAY_MS, HOUR_MS, WEEK_MS } from "./shared";
 
 const DEFAULT_ENDPOINT = "https://api.z.ai";
 const QUOTA_PATH = "/api/monitor/usage/quota/limit";
 const MODEL_USAGE_PATH = "/api/monitor/usage/model-usage";
-const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
-const HOUR_MS = 60 * 60 * 1000;
-const DAY_MS = 24 * HOUR_MS;
-const WEEK_MS = 7 * DAY_MS;
 const MONTH_MS = 30 * DAY_MS;
 
 interface ZaiUsageDetail {
@@ -175,33 +174,62 @@ function buildZaiWindow(parsed: ZaiUsageLimitItem): UsageWindow {
 	};
 }
 
-function requestQuotaLabel(parsed: ZaiUsageLimitItem): string {
+function isZaiFeatureRequestLimit(parsed: ZaiUsageLimitItem): boolean {
 	const detailCodes =
 		parsed.usageDetails?.map(detail => detail.modelCode).filter((code): code is string => !!code) ?? [];
-	if (detailCodes.includes("search-prime") && detailCodes.includes("web-reader") && detailCodes.includes("zread")) {
-		return "ZAI Web Search / Reader / Zread Quota";
-	}
+	return detailCodes.includes("search-prime") && detailCodes.includes("web-reader") && detailCodes.includes("zread");
+}
+
+function requestQuotaLabel(parsed: ZaiUsageLimitItem): string {
+	if (isZaiFeatureRequestLimit(parsed)) return "ZAI Zread Quota";
 	return "ZAI Request Quota";
 }
 
 function buildModelUsageUrl(baseUrl: string, now: Date): string {
-	const start = new Date(now.getTime() - SEVEN_DAYS_MS);
+	const start = new Date(now.getTime() - WEEK_MS);
 	const startTime = formatDate(start);
 	const endTime = formatDate(now);
 	return `${baseUrl}${MODEL_USAGE_PATH}?startTime=${encodeURIComponent(startTime)}&endTime=${encodeURIComponent(endTime)}`;
 }
 
+function getZaiCredentialLimits(report: UsageReport): UsageLimit[] {
+	const limits = report.limits.filter(
+		limit => limit.id.startsWith("zai:requests:") || limit.id.startsWith("zai:tokens:"),
+	);
+	return limits;
+}
+
+function rankZaiRequestLimits(report: UsageReport): UsageLimit[] {
+	const requestLimits = report.limits.filter(limit => limit.id.startsWith("zai:requests:"));
+	const credentialLimits = getZaiCredentialLimits(report);
+	const limits = requestLimits.length > 0 ? requestLimits : credentialLimits;
+	const ranked = [...limits];
+	ranked.sort((left, right) => {
+		const leftDuration = left.window?.durationMs ?? Number.POSITIVE_INFINITY;
+		const rightDuration = right.window?.durationMs ?? Number.POSITIVE_INFINITY;
+		if (leftDuration !== rightDuration) return leftDuration - rightDuration;
+		const leftReset = left.window?.resetsAt ?? Number.POSITIVE_INFINITY;
+		const rightReset = right.window?.resetsAt ?? Number.POSITIVE_INFINITY;
+		return leftReset - rightReset;
+	});
+	return ranked;
+}
+
 async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): Promise<UsageReport | null> {
 	if (params.provider !== "zai") return null;
 	const credential = params.credential;
-	if (credential.type !== "api_key" || !credential.apiKey) return null;
+	// Sign-in (oauth) stores the minted id.secret key in accessToken; the paste
+	// path stores it in apiKey. Both are the same raw key used verbatim as the
+	// Authorization header (no Bearer prefix).
+	const token = credential.type === "oauth" ? credential.accessToken : credential.apiKey;
+	if (!token) return null;
 
 	const baseUrl = normalizeZaiBaseUrl(params.baseUrl);
 	const url = `${baseUrl}${QUOTA_PATH}`;
 	const headers: Record<string, string> = {
-		Authorization: credential.apiKey,
+		Authorization: token,
 		"Content-Type": "application/json",
-		"User-Agent": "OpenCode-Status-Plugin/1.0",
+		"User-Agent": USER_AGENT,
 	};
 
 	let payload: ZaiQuotaPayload | null = null;
@@ -263,13 +291,15 @@ async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): 
 				percentage: parsed.percentage,
 				unit: "requests",
 			});
+			const featureLimit = isZaiFeatureRequestLimit(parsed);
 			limits.push({
-				id: `zai:requests:${window.id}`,
+				id: featureLimit ? `zai:features:zread:${window.id}` : `zai:requests:${window.id}`,
 				label: requestQuotaLabel(parsed),
 				scope: {
 					provider: params.provider,
 					windowId: window.id,
-					shared: true,
+					shared: !featureLimit,
+					...(featureLimit ? { tier: "zread" } : {}),
 				},
 				window,
 				amount,
@@ -317,5 +347,22 @@ async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): 
 export const zaiUsageProvider: UsageProvider = {
 	id: "zai",
 	fetchUsage: fetchZaiUsage,
-	supports: params => params.provider === "zai" && params.credential.type === "api_key",
+	supports: params =>
+		params.provider === "zai" &&
+		(params.credential.type === "oauth" ? Boolean(params.credential.accessToken) : Boolean(params.credential.apiKey)),
+};
+
+export const zaiRankingStrategy: CredentialRankingStrategy = {
+	findWindowLimits(report) {
+		const ranked = rankZaiRequestLimits(report);
+		return { primary: ranked[0], secondary: ranked[1] };
+	},
+	scopeLimits(report) {
+		const limits = getZaiCredentialLimits(report);
+		return limits;
+	},
+	windowDefaults: {
+		primaryMs: 5 * HOUR_MS,
+		secondaryMs: WEEK_MS,
+	},
 };

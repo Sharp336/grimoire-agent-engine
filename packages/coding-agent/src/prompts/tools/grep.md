@@ -1,22 +1,13 @@
-Greps files using regex.
+Searches files/internal URLs: Rust regex, PCRE2 fallback.
 
 <instruction>
-- Rust regex (RE2-style): alternation is `foo|bar`, not GNU BRE-style `foo\|bar`; Rust word boundaries like `\bword\b` are supported. Use line anchors or post-filters instead of lookaround/backreferences.
-- `path`: SHOULD scope to a known path (e.g. `src`); pass several as a delimited list (`src; tests`). Literal colon filename + line range? Use `selector` (e.g. `{"path":"test:1-2","selector":"1-2"}`), not recursive `path:"test:1-2:1-2"`.
-- Cross-line patterns detected from literal `\n` or `\\n` in `pattern`.
+- `path`: known files, directories, globs, internal URLs; roots `;`-separated.
+- Broad searches may time out → narrow scope or use `glob` first.
+- One-file line selector: `src/foo.ts:50-100`; never selects search root.
+- Literal `\n` or `\\n` enables cross-line patterns.
 </instruction>
 
-<output>
-{{#if IS_HL_MODE}}
-- Per matched file: snapshot tag header + numbered lines: `[src/login.ts#1A2B]`, `*42:if (user.id) {` (match), ` 43:return user;` (context). Copy header for anchored edits; ops use bare line numbers.
-{{else}}
-{{#if IS_LINE_NUMBER_MODE}}
-- Output is line-number-prefixed.
-{{/if}}
-{{/if}}
-</output>
-
 <critical>
-- MUST use built-in `grep` for any content search. NEVER shell out to `grep`, `rg`, `ripgrep`, `ag`, `ack`, `git grep`, `awk`, `sed`-for-search, or any CLI search via Bash — not even for one match or a quick check.
-- Open-ended search needing multiple rounds? MUST use the Task tool with the explore subagent, NOT chained `grep` calls.
+- MUST use instead of shell `grep`/`rg`.
+- Open-ended multi-round search MUST use {{#if scoutAvailable}}Task + scout,{{else}}Task,{{/if}} not chained calls.
 </critical>

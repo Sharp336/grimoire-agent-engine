@@ -9,10 +9,13 @@ import type { ModelManagerConfig, ProviderCatalogEntry, ProviderDescriptor } fro
 import { googleModelManagerOptions, googleVertexModelManagerOptions } from "./google";
 import { ollamaCloudModelManagerOptions } from "./ollama";
 import {
+	aiandModelManagerOptions,
 	aimlApiModelManagerOptions,
 	alibabaCodingPlanModelManagerOptions,
+	alibabaTokenPlanModelManagerOptions,
 	anthropicModelManagerOptions,
 	basetenModelManagerOptions,
+	bedrockMantleModelManagerOptions,
 	cerebrasModelManagerOptions,
 	cloudflareAiGatewayModelManagerOptions,
 	coreWeaveModelManagerOptions,
@@ -20,15 +23,18 @@ import {
 	firepassModelManagerOptions,
 	fireworksModelManagerOptions,
 	githubCopilotModelManagerOptions,
+	gmiCloudModelManagerOptions,
 	groqModelManagerOptions,
 	huggingfaceModelManagerOptions,
 	kiloModelManagerOptions,
 	kimiCodeModelManagerOptions,
 	litellmModelManagerOptions,
 	lmStudioModelManagerOptions,
+	metaModelManagerOptions,
 	mistralModelManagerOptions,
 	moonshotModelManagerOptions,
 	nanoGptModelManagerOptions,
+	novitaModelManagerOptions,
 	nvidiaModelManagerOptions,
 	ollamaModelManagerOptions,
 	openaiModelManagerOptions,
@@ -38,6 +44,8 @@ import {
 	qianfanModelManagerOptions,
 	qwenPortalModelManagerOptions,
 	sakanaModelManagerOptions,
+	siliconflowCnModelManagerOptions,
+	siliconflowModelManagerOptions,
 	syntheticModelManagerOptions,
 	togetherModelManagerOptions,
 	umansModelManagerOptions,
@@ -60,6 +68,14 @@ import {
 
 export const CATALOG_PROVIDERS = [
 	{
+		id: "aiand",
+		defaultModel: "moonshotai/kimi-k2.7-code",
+		envVars: ["AIAND_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => aiandModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "ai&" },
+	},
+	{
 		id: "aimlapi",
 		defaultModel: "gpt-5.5-2026-04-23",
 		envVars: ["AIMLAPI_API_KEY"],
@@ -75,6 +91,14 @@ export const CATALOG_PROVIDERS = [
 		catalogDiscovery: { label: "Alibaba Coding Plan" },
 	},
 	{
+		id: "alibaba-token-plan",
+		defaultModel: "qwen3.7-plus",
+		envVars: ["ALIBABA_TOKEN_PLAN_API_KEY", "BAILIAN_TOKEN_PLAN_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => alibabaTokenPlanModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "QwenCloud Token Plan" },
+	},
+	{
 		id: "baseten",
 		defaultModel: "moonshotai/Kimi-K2.7-Code",
 		envVars: ["BASETEN_API_KEY"],
@@ -85,6 +109,13 @@ export const CATALOG_PROVIDERS = [
 	{
 		id: "amazon-bedrock",
 		defaultModel: "us.anthropic.claude-opus-4-8",
+	},
+	{
+		id: "bedrock-mantle",
+		defaultModel: "openai.gpt-5.6-terra",
+		envVars: ["AWS_BEARER_TOKEN_BEDROCK"],
+		createModelManagerOptions: (config: ModelManagerConfig) => bedrockMantleModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
 	},
 	{
 		id: "anthropic",
@@ -164,6 +195,14 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["GITLAB_TOKEN"],
 		createModelManagerOptions: (config: ModelManagerConfig) => gitLabDuoWorkflowModelManagerOptions(config),
 		dynamicModelsAuthoritative: true,
+	},
+	{
+		id: "gmi-cloud",
+		defaultModel: "deepseek-ai/DeepSeek-V4-Flash",
+		envVars: ["GMI_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => gmiCloudModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "GMI Cloud" },
 	},
 	{
 		id: "google",
@@ -249,6 +288,13 @@ export const CATALOG_PROVIDERS = [
 		createModelManagerOptions: (config: ModelManagerConfig) => mistralModelManagerOptions(config),
 	},
 	{
+		id: "meta",
+		defaultModel: "muse-spark-1.1",
+		envVars: ["MODEL_API_KEY", "META_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => metaModelManagerOptions(config),
+		catalogDiscovery: { label: "Meta Model API" },
+	},
+	{
 		id: "moonshot",
 		defaultModel: "kimi-k2.7-code",
 		// KIMI_API_KEY is the most intuitive name for a Kimi/Moonshot key; accept it
@@ -270,6 +316,14 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["NVIDIA_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => nvidiaModelManagerOptions(config),
 		catalogDiscovery: { label: "NVIDIA" },
+	},
+	{
+		id: "novita",
+		defaultModel: "moonshotai/kimi-k2.7-code",
+		envVars: ["NOVITA_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => novitaModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "Novita", allowUnauthenticated: true },
 	},
 	{
 		id: "ollama",
@@ -302,12 +356,14 @@ export const CATALOG_PROVIDERS = [
 		defaultModel: "kimi-k2.7-code",
 		envVars: ["OPENCODE_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => opencodeGoModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
 	},
 	{
 		id: "opencode-zen",
 		defaultModel: "claude-opus-4-8",
 		envVars: ["OPENCODE_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => opencodeZenModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
 	},
 	{
 		id: "openrouter",
@@ -340,6 +396,20 @@ export const CATALOG_PROVIDERS = [
 		createModelManagerOptions: (config: ModelManagerConfig) => sakanaModelManagerOptions(config),
 		dynamicModelsAuthoritative: true,
 		catalogDiscovery: { label: "Sakana AI" },
+	},
+	{
+		id: "siliconflow",
+		defaultModel: "zai-org/GLM-5.1",
+		envVars: ["SILICONFLOW_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => siliconflowModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+	},
+	{
+		id: "siliconflow-cn",
+		defaultModel: "deepseek-ai/DeepSeek-V4-Pro",
+		envVars: ["SILICONFLOW_CN_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => siliconflowCnModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
 	},
 	{
 		id: "synthetic",
@@ -404,17 +474,18 @@ export const CATALOG_PROVIDERS = [
 		defaultModel: "openai/gpt-oss-120b",
 		envVars: ["COREWEAVE_API_KEY", "WANDB_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => coreWeaveModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
 		catalogDiscovery: { label: "CoreWeave Serverless Inference" },
 	},
 	{
 		id: "xai",
-		defaultModel: "grok-4-fast-non-reasoning",
+		defaultModel: "grok-4.6",
 		envVars: ["XAI_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => xaiModelManagerOptions(config),
 	},
 	{
 		id: "xai-oauth",
-		defaultModel: "grok-4.3",
+		defaultModel: "grok-4.6",
 		envVars: ["XAI_OAUTH_TOKEN", "XAI_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => xaiOAuthModelManagerOptions(config),
 		catalogDiscovery: {
@@ -452,7 +523,7 @@ export const CATALOG_PROVIDERS = [
 	},
 	{
 		id: "zai",
-		defaultModel: "glm-5.2",
+		defaultModel: "glm-5.3",
 		envVars: ["ZAI_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => zaiModelManagerOptions(config),
 		catalogDiscovery: { label: "zAI" },

@@ -3,9 +3,10 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
-import { getWorktreeDir, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { formatBytes, getWorktreeDir, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import * as git from "../utils/git";
 import * as jj from "../utils/jj";
+import { writeIsolationOwner } from "./isolation-ownership";
 import { mapWithConcurrencyLimit } from "./parallel";
 
 const { IsoBackendKind } = natives;
@@ -92,6 +93,56 @@ async function discoverNestedRepos(repoRoot: string): Promise<string[]> {
 	return result;
 }
 
+/**
+ * Ceiling on the working-tree content a single repo baseline may buffer in
+ * memory. Baseline capture embeds every uncommitted byte — staged/unstaged
+ * binary diffs plus a `--no-index` binary diff of each untracked file — into
+ * in-memory strings (see {@link captureUntrackedPatch}). A binary diff is
+ * ~1.3x the raw bytes, so a multi-GB working tree produces a single string
+ * that blows past the engine's string limit and the process's memory, taking
+ * the whole host down (issue #8939). `git ls-files --others
+ * --exclude-standard` already omits gitignored bulk, so this only trips on
+ * pathological non-ignored content; when it does we refuse the isolated spawn
+ * with an actionable error instead of trapping the host.
+ */
+export const ISOLATION_BASELINE_MAX_CONTENT_BYTES = 1024 * 1024 * 1024;
+
+/**
+ * Thrown when a repo's uncommitted content exceeds
+ * {@link ISOLATION_BASELINE_MAX_CONTENT_BYTES}. Surfaced verbatim so the
+ * caller can report the real cause (oversized working tree) rather than
+ * masking it as a missing git repository.
+ */
+export class IsolationBaselineTooLargeError extends Error {
+	constructor(
+		readonly repoRoot: string,
+		readonly contentBytes: number,
+	) {
+		super(
+			`Working tree at ${repoRoot} carries ${formatBytes(contentBytes)} of uncommitted content, ` +
+				`over the ${formatBytes(ISOLATION_BASELINE_MAX_CONTENT_BYTES)} isolation-snapshot budget. ` +
+				`Isolated task snapshots buffer this content in memory, so proceeding would exhaust the host. ` +
+				`Commit or gitignore the bulk (untracked files that aren't ignored are the usual culprit), ` +
+				`or set \`task.isolation.mode: none\` to run tasks without isolation.`,
+		);
+		this.name = "IsolationBaselineTooLargeError";
+	}
+}
+
+/** Sum untracked entry sizes without following symlinks, skipping entries that vanished. */
+async function sumUntrackedBytes(repoRoot: string, untracked: readonly string[]): Promise<number> {
+	if (untracked.length === 0) return 0;
+	const { results } = await mapWithConcurrencyLimit([...untracked], 16, async entry => {
+		try {
+			const stat = await fs.lstat(path.join(repoRoot, entry));
+			return stat.isFile() ? stat.size : 0;
+		} catch {
+			return 0;
+		}
+	});
+	return results.reduce((total: number, size) => total + (size ?? 0), 0);
+}
+
 async function captureUntrackedPatch(repoRoot: string, untracked: readonly string[]): Promise<string> {
 	if (untracked.length === 0) return "";
 	const nullPath = getGitNoIndexNullPath();
@@ -112,11 +163,30 @@ async function captureRepoBaseline(repoRoot: string): Promise<RepoBaseline> {
 	const staged = await git.diff(repoRoot, { binary: true, cached: true });
 	const unstaged = await git.diff(repoRoot, { binary: true });
 	const untracked = await git.ls.untracked(repoRoot);
+	// Gate before capturing the untracked patch: that step embeds every
+	// untracked byte into one in-memory string, so an oversized tree must be
+	// refused here rather than after buffering gigabytes (#8939). Untracked
+	// bytes come from stat (no reads); staged/unstaged are already captured
+	// binary diffs, so their string length is their in-memory footprint.
+	const untrackedBytes = await sumUntrackedBytes(repoRoot, untracked);
+	const contentBytes = untrackedBytes + staged.length + unstaged.length;
+	if (contentBytes > ISOLATION_BASELINE_MAX_CONTENT_BYTES) {
+		throw new IsolationBaselineTooLargeError(repoRoot, contentBytes);
+	}
 	const untrackedPatch = await captureUntrackedPatch(repoRoot, untracked);
 	return { repoRoot, headCommit, staged, unstaged, untracked, untrackedPatch };
 }
 
-async function writeSyntheticTree(repoDir: string, baseTreeish: string, patches: readonly string[]): Promise<string> {
+interface SyntheticTreeOptions {
+	readonly threeWay?: boolean;
+}
+
+async function writeSyntheticTree(
+	repoDir: string,
+	baseTreeish: string,
+	patches: readonly string[],
+	options: SyntheticTreeOptions = {},
+): Promise<string> {
 	const tempIndex = path.join(os.tmpdir(), `omp-task-index-${Snowflake.next()}`);
 	try {
 		await git.readTree(repoDir, baseTreeish, {
@@ -127,6 +197,7 @@ async function writeSyntheticTree(repoDir: string, baseTreeish: string, patches:
 			await git.patch.applyText(repoDir, patch, {
 				cached: true,
 				env: { GIT_INDEX_FILE: tempIndex },
+				threeWay: options.threeWay,
 			});
 		}
 		return await git.writeTree(repoDir, {
@@ -414,6 +485,8 @@ export async function ensureIsolation(
 	preferred?: IsoBackendKind,
 ): Promise<IsolationHandle> {
 	const repoRoot = await getRepoRoot(baseCwd);
+	const repository = await git.repo.resolve(repoRoot);
+	const sourceCommonDir = repository?.commonDir ?? path.join(repoRoot, ".git");
 	const baseDir = getWorktreeDir(getTaskIsolationSegment(repoRoot, id));
 	const mergedDir = path.join(baseDir, TASK_ISOLATION_MOUNT_DIR);
 	const resolution = natives.isoResolve(preferred ?? null);
@@ -422,8 +495,23 @@ export async function ensureIsolation(
 
 	for (const candidate of candidates) {
 		await fs.rm(baseDir, { recursive: true, force: true });
+		// Claim ownership before the backend materialises `m`. Backends only
+		// create/replace `mergedDir` (and overlay upper/work), never the base
+		// dir, so the marker survives `isoStart` — and a concurrent
+		// `omp worktree clear` never sees this sandbox without a live owner,
+		// even while a large clone is still in progress.
+		await fs.mkdir(baseDir, { recursive: true });
+		await writeIsolationOwner(baseDir, id);
 		try {
 			await natives.isoStart(candidate, repoRoot, mergedDir);
+			// Sever the isolation's git metadata from the source checkout. Copy
+			// backends duplicate `repoRoot`'s `.git` verbatim — a linked-worktree
+			// pointer file (or the rcopy `git worktree add` registration) leaves
+			// the isolation sharing the source's HEAD/index/ref namespace, so a
+			// task's git operations would mutate the parent checkout and stack
+			// parallel task branches. Detaching gives each isolation a private,
+			// frozen repo that still borrows the source object DB via alternates.
+			await git.detachGitDir(mergedDir, sourceCommonDir);
 			return {
 				mergedDir,
 				backend: candidate,
@@ -643,11 +731,12 @@ async function replayFilteredAgentCommits(opts: FilteredAgentReplayOptions): Pro
 	try {
 		await git.worktree.add(opts.repoRoot, tmpDir, opts.branchName);
 		const agentCommits = await git.revList.range(opts.isolationDir, baselineSha, opts.isolationHead);
-		const dirtyBaselineTree = await writeSyntheticTree(opts.isolationDir, baselineSha, [
-			opts.baseline.root.staged,
-			opts.baseline.root.unstaged,
-			opts.baseline.root.untrackedPatch,
-		]);
+		const baselineWip = [opts.baseline.root.staged, opts.baseline.root.unstaged, opts.baseline.root.untrackedPatch];
+		// Seed the parent ODB with the dirty-side blobs needed by `git apply
+		// --3way`. Isolation repositories can read parent objects, but the parent
+		// cannot read objects created only inside isolation.
+		await writeSyntheticTree(opts.repoRoot, baselineSha, baselineWip);
+		const dirtyBaselineTree = await writeSyntheticTree(opts.isolationDir, baselineSha, baselineWip);
 		let previousFilteredTree = baselineSha;
 		let filteredCommitsApplied = 0;
 
@@ -656,7 +745,9 @@ async function replayFilteredAgentCommits(opts: FilteredAgentReplayOptions): Pro
 				allowFailure: true,
 				binary: true,
 			});
-			const currentFilteredTree = await writeSyntheticTree(opts.repoRoot, baselineSha, [taskStatePatch]);
+			const currentFilteredTree = await writeSyntheticTree(opts.repoRoot, baselineSha, [taskStatePatch], {
+				threeWay: true,
+			});
 			const commitPatch = await git.diff.tree(opts.repoRoot, previousFilteredTree, currentFilteredTree, {
 				allowFailure: true,
 				binary: true,
@@ -689,10 +780,11 @@ async function replayFilteredAgentCommits(opts: FilteredAgentReplayOptions): Pro
 				await commitPatchToBranchWorktree(tmpDir, opts.taskId, opts.rootPatch, msg, undefined, opts.baseline.root);
 			}
 		} else {
-			// A filtered commit landed; tmpDir has advanced past baselineSha and
-			// previousFilteredTree is HEAD-derived, so writeSyntheticTree +
-			// leftoverPatch stay HEAD-based and no WIP seed is needed.
-			const finalFilteredTree = await writeSyntheticTree(opts.repoRoot, baselineSha, [opts.rootPatch]);
+			// A filtered commit landed; reconstruct the final HEAD-derived tree
+			// with the same dirty-side blobs and 3-way synthesis used above.
+			const finalFilteredTree = await writeSyntheticTree(opts.repoRoot, baselineSha, [opts.rootPatch], {
+				threeWay: true,
+			});
 			const leftoverPatch = await git.diff.tree(opts.repoRoot, previousFilteredTree, finalFilteredTree, {
 				allowFailure: true,
 				binary: true,

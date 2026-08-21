@@ -1,18 +1,17 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import * as fs from "node:fs";
-import * as path from "node:path";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
-import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as unexpectedStopClassifier from "@oh-my-pi/pi-coding-agent/session/unexpected-stop-classifier";
-import { getProjectAgentDir, TempDir, withTimeout } from "@oh-my-pi/pi-utils";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 
 const runtimeSignalStoreKey = "__ompRuntimeSignals";
@@ -37,65 +36,56 @@ describe("AgentSession auto-compaction queue resume", () => {
 	let sessionManager: SessionManager;
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
-
-	beforeEach(async () => {
+	beforeAll(async () => {
 		tempDir = TempDir.createSync("@pi-auto-compaction-queue-");
-		vi.useFakeTimers();
-
-		// Provide an extension that short-circuits compaction so the test doesn't
-		// make any LLM calls.
-		const extensionsDir = path.join(getProjectAgentDir(tempDir.path()), "extensions");
-		fs.mkdirSync(extensionsDir, { recursive: true });
-		const extensionPath = path.join(extensionsDir, "compaction-short-circuit.ts");
-		fs.writeFileSync(
-			extensionPath,
-			[
-				"export default function(pi) {",
-				'\tpi.on("session_before_compact", async (event) => {',
-				`\t\tconst signals = globalThis.${runtimeSignalStoreKey} ?? (globalThis.${runtimeSignalStoreKey} = []);`,
-				'\t\tsignals.push("before_compact:enter");',
-				"\t\tconst gate = globalThis.__ompManualCompactGate;",
-				"\t\tif (gate) await gate;",
-				"\t\treturn {",
-				"\t\t\tcompaction: {",
-				'\t\t\t\tsummary: "compacted",',
-				"\t\t\t\tshortSummary: undefined,",
-				"\t\t\t\tfirstKeptEntryId: event.preparation.firstKeptEntryId,",
-				"\t\t\t\ttokensBefore: event.preparation.tokensBefore,",
-				"\t\t\t\tdetails: {},",
-				"\t\t\t},",
-				"\t\t};",
-				"\t});",
-				'\tpi.on("auto_compaction_start", async (event) => {',
-				`\t\tconst signals = globalThis.${runtimeSignalStoreKey} ?? (globalThis.${runtimeSignalStoreKey} = []);`,
-				'\t\tsignals.push("compaction:start:" + event.reason);',
-				"\t});",
-				'\tpi.on("auto_compaction_end", async (event) => {',
-				`\t\tconst signals = globalThis.${runtimeSignalStoreKey} ?? (globalThis.${runtimeSignalStoreKey} = []);`,
-				'\t\tsignals.push("compaction:end:" + (event.aborted ? "aborted" : "ok"));',
-				"\t});",
-				'\tpi.on("todo_reminder", async (event) => {',
-				`\t\tconst signals = globalThis.${runtimeSignalStoreKey} ?? (globalThis.${runtimeSignalStoreKey} = []);`,
-				'\t\tsignals.push("todo:" + event.attempt + "/" + event.maxAttempts);',
-				"\t});",
-				"}",
-			].join("\n"),
-		);
-
-		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+		authStorage = await AuthStorage.create(":memory:");
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
-		sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+	});
+
+	beforeEach(async () => {
+		vi.useFakeTimers();
+
+		// Install the short-circuit extension directly. Loading a generated
+		// TypeScript file here used to compile the same fixture for every test.
+		const runtime = new ExtensionRuntime();
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("session_before_compact", async event => {
+					getRuntimeSignals().push("before_compact:enter");
+					const gate = (globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> })
+						.__ompManualCompactGate;
+					if (gate) await gate;
+					return {
+						compaction: {
+							summary: "compacted",
+							shortSummary: undefined,
+							firstKeptEntryId: event.preparation.firstKeptEntryId,
+							tokensBefore: event.preparation.tokensBefore,
+							details: {},
+						},
+					};
+				});
+				pi.on("auto_compaction_start", event => {
+					getRuntimeSignals().push(`compaction:start:${event.reason}`);
+				});
+				pi.on("auto_compaction_end", event => {
+					getRuntimeSignals().push(`compaction:end:${event.aborted ? "aborted" : "ok"}`);
+				});
+				pi.on("todo_reminder", event => {
+					getRuntimeSignals().push(`todo:${event.attempt}/${event.maxAttempts}`);
+				});
+			},
+			tempDir.path(),
+			new EventBus(),
+			runtime,
+			"compaction-short-circuit",
+		);
+
+		sessionManager = SessionManager.inMemory(tempDir.path());
 		getRuntimeSignals().length = 0;
 
-		const extensionsResult = await loadExtensions([extensionPath], tempDir.path());
-		const extensionRunner = new ExtensionRunner(
-			extensionsResult.extensions,
-			extensionsResult.runtime,
-			tempDir.path(),
-			sessionManager,
-			modelRegistry,
-		);
+		const extensionRunner = new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry);
 
 		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!bundled) {
@@ -128,7 +118,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 			settings: Settings.isolated({
 				"compaction.autoContinue": false,
 				"todo.reminders": true,
-				"todo.reminders.max": 3,
+				"todo.remindersMax": 3,
 			}),
 			modelRegistry,
 			extensionRunner,
@@ -140,10 +130,8 @@ describe("AgentSession auto-compaction queue resume", () => {
 			await session?.dispose();
 		} finally {
 			try {
-				authStorage?.close();
 				vi.useRealTimers();
 				await Bun.sleep(0);
-				await tempDir?.remove();
 			} finally {
 				getRuntimeSignals().length = 0;
 				(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate =
@@ -151,6 +139,10 @@ describe("AgentSession auto-compaction queue resume", () => {
 				vi.restoreAllMocks();
 			}
 		}
+	});
+	afterAll(() => {
+		authStorage.close();
+		tempDir.removeSync();
 	});
 
 	it("resumes after threshold compaction when only agent-level queued messages exist", async () => {
@@ -172,10 +164,13 @@ describe("AgentSession auto-compaction queue resume", () => {
 			session.agent.clearAllQueues();
 		});
 
-		// Wait for auto_compaction_end event to know when the async handler is done
+		// The continuation is already scheduled when the public agent_end arrives,
+		// so consumers must see it as a non-terminal scheduling pause.
+		const agentEndTerminalStates: Array<boolean | undefined> = [];
 		const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
-		session.subscribe(event => {
+		session.subscribe((event: AgentSessionEvent) => {
 			if (event.type === "auto_compaction_end") onCompactionDone();
+			if (event.type === "agent_end") agentEndTerminalStates.push(event.isTerminal);
 		});
 
 		// Build a fake AssistantMessage with high token usage to trigger threshold
@@ -224,6 +219,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		const runtimeSignals = getRuntimeSignals();
 		expect(runtimeSignals).toContain("compaction:start:threshold");
 		expect(runtimeSignals.some(signal => signal.startsWith("compaction:end:"))).toBe(true);
+		expect(agentEndTerminalStates).toEqual([false]);
 	});
 
 	it("marks manual compaction active before abort teardown can yield", async () => {
@@ -266,6 +262,65 @@ describe("AgentSession auto-compaction queue resume", () => {
 		await compactPromise;
 
 		expect(compactingDuringAbort).toBe(true);
+	});
+
+	it("resumes a message queued during manual compaction once it completes (#5800)", async () => {
+		// Regression for #5800 review: manual /compact disconnects the agent
+		// listener before `await abort()`, so the abort-finally stranded-message
+		// drain is suppressed while disconnected. Unlike /new (which resets the
+		// queue), compaction preserves the agent queues, so a steer/follow-up that
+		// arrives mid-compaction (async IRC, an xd:// mount notice, an SDK steer)
+		// would hang until the next explicit prompt unless compact() re-drains
+		// after reconnecting.
+		session.settings.set("compaction.keepRecentTokens", 1);
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "previous answer" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 1_000,
+				output: 100,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		});
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+		const continueSpy = vi.spyOn(session.agent, "continue").mockImplementation(async () => {
+			session.agent.clearAllQueues();
+		});
+
+		// Park compaction inside its awaited hook so we can queue a follow-up while
+		// the session is disconnected and abort has already run its finally.
+		const gate = Promise.withResolvers<void>();
+		(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate =
+			gate.promise;
+
+		const compactPromise = session.compact();
+		while (!getRuntimeSignals().includes("before_compact:enter")) {
+			await Promise.resolve();
+		}
+
+		// A message arrives DURING compaction (post-abort, still disconnected).
+		session.agent.followUp({
+			role: "user",
+			content: "please respond after compaction",
+			timestamp: Date.now(),
+		});
+		expect(session.agent.hasQueuedMessages()).toBe(true);
+
+		gate.resolve();
+		await compactPromise;
+		await session.waitForIdle();
+
+		// compact()'s finally re-drained the stranded queue after reconnecting.
+		expect(continueSpy).toHaveBeenCalledTimes(1);
 	});
 
 	it("cancels an in-flight auto-compaction when manual compact startup aborts", async () => {
@@ -584,7 +639,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 
 		session.settings.set("compaction.thresholdTokens", 76384);
 		session.settings.set("compaction.thresholdPercent", -1);
-		session.settings.set("compaction.strategy", "context-full");
+		session.settings.set("compaction.methodOrder", ["soft"]);
 		session.settings.set("compaction.dropUseless", true);
 		session.settings.set("compaction.supersedeReads", true);
 		session.settings.set("compaction.keepRecentTokens", 10000);
@@ -721,7 +776,9 @@ describe("AgentSession auto-compaction queue resume", () => {
 
 		const retryableError = {
 			role: "assistant" as const,
-			content: [{ type: "text" as const, text: "Transient provider failure." }],
+			// Thinking-only partial: a committed visible text block would classify the
+			// failed turn as replay-unsafe and suppress the retry this test depends on.
+			content: [{ type: "thinking" as const, thinking: "Transient provider failure." }],
 			api: "anthropic-messages" as const,
 			provider: "anthropic" as const,
 			model: "claude-sonnet-4-5",

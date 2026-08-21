@@ -2,10 +2,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
-import { isEnoent, isEnotdir, stripWindowsExtendedLengthPathPrefix } from "@oh-my-pi/pi-utils";
+import { glob } from "@oh-my-pi/pi-natives";
+import { hasFsCode, isEnoent, isEnotdir, stripWindowsExtendedLengthPathPrefix, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Skill } from "../extensibility/skills";
 import { InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
-import { ToolError } from "./tool-errors";
+import { ToolAbortError, ToolError } from "./tool-errors";
 
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
 // A single line-range chunk: `N`, `N-M`, `N+K`, or open-ended `N-`. `..` is
@@ -35,11 +36,13 @@ const INTERNAL_SCHEMES_WITH_SELECTORS: Record<string, true> = {
 	agent: true,
 	artifact: true,
 	issue: true,
+	history: true,
 	local: true,
 	memory: true,
 	omp: true,
 	pr: true,
 	rule: true,
+	security: true,
 	skill: true,
 	ssh: true,
 	vault: true,
@@ -58,6 +61,7 @@ const TOP_LEVEL_INTERNAL_URL_PREFIXES = [
 	"artifact://",
 	"skill://",
 	"rule://",
+	"security://",
 	"local://",
 	"mcp://",
 	"ssh://",
@@ -115,6 +119,7 @@ function normalizeAtPrefix(filePath: string): string {
 		withoutAt.startsWith("artifact://") ||
 		withoutAt.startsWith("skill://") ||
 		withoutAt.startsWith("rule://") ||
+		withoutAt.startsWith("security://") ||
 		withoutAt.startsWith("local:") ||
 		withoutAt.startsWith("mcp://")
 	) {
@@ -147,8 +152,17 @@ export function expandTilde(filePath: string, home?: string): string {
 }
 
 export function expandPath(filePath: string): string {
+	// Some models intermittently prefix an otherwise-valid path with a stray
+	// `:` (e.g. `:/abs/path`, `:../rel`, or the Windows forms `:C:\repo\file`
+	// and `:.\src`). No real path starts with `:` and it never begins a
+	// selector against an absolute/relative path, so strip it before
+	// resolution — mirroring the `@`-prefix normalization above and the
+	// implicit stripping `write` already tolerates (issues #5508, #5624). The
+	// lookahead admits POSIX (`/`, `~`, `./`, `../`) and Windows (`\`, `.\`,
+	// `..\`, drive-letter `C:`) path shapes.
+	const deColoned = /^:(?=[/\\~]|\.\.?[/\\]|[A-Za-z]:)/.test(filePath) ? filePath.slice(1) : filePath;
 	const normalized = stripWindowsExtendedLengthPathPrefix(
-		stripFileUrl(normalizeUnicodeSpaces(normalizeAtPrefix(filePath))),
+		stripFileUrl(normalizeUnicodeSpaces(normalizeAtPrefix(deColoned))),
 	);
 	return expandTilde(normalized);
 }
@@ -323,6 +337,13 @@ export function splitPathAndSel(rawPath: string): { path: string; sel?: string }
  * plus selector `1-2` (issue #4618). `lstat` inspects the entry itself, so a
  * dangling symlink is still detected as present; ambiguous errors resolve to
  * `"unknown"` so callers keep the raw path instead of guessing.
+ *
+ * `ENAMETOOLONG` resolves to `"missing"` rather than `"unknown"`: a path whose
+ * component or whole length exceeds the OS limit can never name a real single
+ * entry, so it is strictly stronger evidence of non-existence than `ENOENT`.
+ * Without this, a semicolon-joined `path` list long enough to trip the limit
+ * (bare filenames past `NAME_MAX`, or a total past `PATH_MAX`) was read as one
+ * literal path and the delimited split was suppressed (issue #7597).
  */
 export async function probeLiteralPathExists(filePath: string, cwd: string): Promise<"exists" | "missing" | "unknown"> {
 	const resolved = resolveReadPath(filePath, cwd);
@@ -330,7 +351,7 @@ export async function probeLiteralPathExists(filePath: string, cwd: string): Pro
 		await fs.promises.lstat(resolved);
 		return "exists";
 	} catch (err) {
-		if (isEnoent(err) || isEnotdir(err)) return "missing";
+		if (isEnoent(err) || isEnotdir(err) || hasFsCode(err, "ENAMETOOLONG")) return "missing";
 		return "unknown";
 	}
 }
@@ -509,6 +530,173 @@ export function resolveToCwd(filePath: string, cwd: string): string {
 	return path.resolve(cwd, expanded);
 }
 
+/**
+ * Resolve a path that MUST stay inside `cwd`, or `null` when it would escape.
+ *
+ * {@link resolveToCwd} deliberately honors absolute paths, `~`, and `..` —
+ * correct for a path a user typed, wrong for one a remote peer supplied.
+ * Callers handling untrusted input (Cursor's `download_path`) use this instead:
+ * only a non-empty relative path landing under the live cwd is accepted, so
+ * neither `/etc/passwd` nor `../../escape` can be written through.
+ *
+ * The lexical check alone is not containment: a symlink inside the workspace
+ * can point anywhere, so `out/config` under a `ws/out -> /elsewhere` link is
+ * relative, `..`-free, and still writes outside. Both the target and its
+ * deepest existing ancestor are therefore realpath-resolved — the ancestor
+ * because a download names a file that does not exist yet, so the link in its
+ * path is the only thing that can be resolved before the write.
+ *
+ * The cwd itself is rejected: a download names a file, never the directory.
+ */
+export function confineToWorkspace(filePath: string, cwd: string): string | null {
+	if (!filePath || path.isAbsolute(filePath)) return null;
+	// `~` expands to an absolute path, and an internal URL is not a filesystem
+	// target at all; neither is a relative workspace path.
+	if (filePath.startsWith("~") || isInternalUrlPath(filePath)) return null;
+	const root = path.resolve(cwd);
+	const resolved = path.resolve(root, filePath);
+	if (!isUnderRootLexical(resolved, root)) return null;
+
+	// A workspace reached through a link of its own is legitimate (/tmp on
+	// macOS), so the real root is the comparison basis. An unresolvable root is
+	// not a workspace to contain anything in.
+	const realRoot = tryRealpath(root);
+	if (!realRoot) return null;
+
+	// An existing target is authoritative: resolve it outright.
+	const realTarget = tryRealpath(resolved);
+	if (realTarget) return isUnderRootLexical(realTarget, realRoot) ? resolved : null;
+
+	// `realpath` also fails on a *dangling* link, and a write follows that link
+	// to wherever it points. Chasing the chain to decide would mean
+	// reimplementing symlink resolution (multi-hop, relative hops, loops, and
+	// a TOCTOU window against a link that can be re-pointed between the check
+	// and the write). A download names a file to create, so a path that is
+	// already an unresolvable link is refused outright — the one shape where
+	// "cannot tell where this lands" is the whole answer.
+	if (isSymlink(resolved)) return null;
+
+	// Otherwise walk up to the deepest ancestor that does exist and check that,
+	// then re-apply the segments below it. Those segments are `..`-free by the
+	// lexical check above, so they cannot climb back out.
+	let ancestor = path.dirname(resolved);
+	const tail: string[] = [path.basename(resolved)];
+	for (;;) {
+		const real = tryRealpath(ancestor);
+		if (real) {
+			return isUnderRootLexical(path.join(real, ...tail.reverse()), realRoot) ? resolved : null;
+		}
+		const parent = path.dirname(ancestor);
+		// Ran past the root without finding anything real: the workspace itself
+		// resolved above, so this cannot happen unless it vanished mid-check.
+		if (parent === ancestor || !isUnderRootLexical(ancestor, root)) return null;
+		tail.push(path.basename(ancestor));
+		ancestor = parent;
+	}
+}
+
+/** Whether `target` is a strict descendant of `root`, ignoring symlinks. */
+function isUnderRootLexical(target: string, root: string): boolean {
+	const relative = path.relative(root, target);
+	return !!relative && !relative.startsWith("..") && !path.isAbsolute(relative);
+}
+
+function tryRealpath(target: string): string | null {
+	try {
+		return fs.realpathSync.native(target);
+	} catch {
+		return null;
+	}
+}
+
+/** Whether the path itself is a symlink, without following it. */
+function isSymlink(target: string): boolean {
+	try {
+		return fs.lstatSync(target).isSymbolicLink();
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Resolve the path a syscall on `filePath` would really act on, or `null` when
+ * that cannot be established.
+ *
+ * A lexical path is not a destination. The kernel follows every component above
+ * the last, so `ws/link/file` under a `ws/link -> /elsewhere` link lands outside
+ * `ws` while still looking relative and `..`-free. Handing such a path to a
+ * privileged helper defeats the defence a helper author reaches for first — a
+ * prefix allowlist passes, because the link sits inside the allowed root while
+ * its target does not. Callers that hand a path to something more privileged
+ * than the syscall that just failed resolve it here first.
+ *
+ * Rejecting symlinked components outright is not an option: `/var` and `/tmp`
+ * are links on macOS, so every path under `os.tmpdir()` traverses one. They are
+ * resolved instead, and only a path whose real destination cannot be established
+ * is refused, because "where would this land" then has no answer to hand over.
+ * {@link confineToWorkspace} refuses an unresolvable link for the same reason.
+ *
+ * @param followFinal `true` for a syscall that follows a link at the final
+ *   component (`open`, so every write), `false` for one that acts on the link
+ *   itself (`unlink`) and therefore needs it left alone.
+ */
+export async function resolveSyscallTarget(filePath: string, followFinal: boolean): Promise<string | null> {
+	const target = path.resolve(filePath);
+	if (followFinal) {
+		const real = await tryRealpathAsync(target);
+		if (real !== null) return real;
+		// `realpath` also fails on a DANGLING link, which a write follows to a place
+		// this cannot name, and on a path whose ancestor may not be searched. Neither
+		// is proof the final component is a plain name, and only proof continues.
+		if (!(await isProvenNotSymlink(target))) return null;
+	}
+	// Walk up to the deepest ancestor that does resolve, then re-apply the
+	// components below it. A resolved ancestor vouches for the ones above it, so
+	// re-applying them lexically matches what the kernel would have done.
+	const tail: string[] = [path.basename(target)];
+	let ancestor = path.dirname(target);
+	for (;;) {
+		const real = await tryRealpathAsync(ancestor);
+		if (real !== null) return path.join(real, ...tail.reverse());
+		// This component is about to be re-applied lexically without a resolved
+		// ancestor vouching for it, which is exactly the escape being closed — so it
+		// has to prove itself. `realpath` fails here for a component that does not
+		// exist yet AND for one inside a directory the caller may not search (the
+		// usual shape when a sandbox hides a denied path), and the second still
+		// permits `lstat`.
+		if (!(await isProvenNotSymlink(ancestor))) return null;
+		const parent = path.dirname(ancestor);
+		// Ran past the filesystem root: `realpath("/")` cannot fail, so only a
+		// filesystem disappearing mid-walk gets here.
+		if (parent === ancestor) return null;
+		tail.push(path.basename(ancestor));
+		ancestor = parent;
+	}
+}
+
+async function tryRealpathAsync(target: string): Promise<string | null> {
+	try {
+		// `fs.promises.realpath` has no `.native` variant under Bun, unlike its sync
+		// counterpart; the JS implementation resolves links identically.
+		return await fs.promises.realpath(target);
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Whether `target` is known NOT to redirect. A path that does not exist cannot
+ * redirect anything, and nothing below it exists either; any other `lstat`
+ * failure leaves the question unanswered, which is not proof.
+ */
+async function isProvenNotSymlink(target: string): Promise<boolean> {
+	try {
+		return !(await fs.promises.lstat(target)).isSymbolicLink();
+	} catch (error) {
+		return isEnoent(error);
+	}
+}
+
 export function formatPathRelativeToCwd(
 	filePath: string,
 	cwd: string,
@@ -660,7 +848,10 @@ async function delimitedPathPartResolves(entry: string, cwd: string, splitter: P
 		await fs.promises.stat(absoluteBasePath);
 		return true;
 	} catch (err) {
-		if (isEnoent(err)) return false;
+		// ENOENT and ENAMETOOLONG both mean this string cannot name an existing
+		// path, so the whole entry does not resolve and the delimited split may
+		// proceed (issue #7597). Other errors (EACCES, transient I/O) stay fatal.
+		if (isEnoent(err) || hasFsCode(err, "ENAMETOOLONG")) return false;
 		throw err;
 	}
 }
@@ -704,10 +895,18 @@ async function tryDelimitedPathSplit(
 export async function splitDelimitedPathEntry(
 	entry: string,
 	cwd: string,
-	options: { splitter?: PathEntrySplitter } = {},
+	options: {
+		splitter?: PathEntrySplitter;
+		routedUrlPredicate?: (entry: string) => boolean;
+	} = {},
 ): Promise<string[] | null> {
 	const normalizedEntry = normalizePathLikeInput(entry);
 	if (!hasTopLevelPathDelimiter(normalizedEntry)) return null;
+	const splitter = options.splitter ?? parseSearchPath;
+	if (options.routedUrlPredicate?.(normalizedEntry)) {
+		const parts = await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "semicolon", "none");
+		return parts?.every(options.routedUrlPredicate) ? parts : null;
+	}
 	if (isInternalUrlPath(normalizedEntry)) return null;
 	// A real POSIX file may contain the delimiter and a selector-shaped tail
 	// (`a;b:1-2`, `a b:1-2`). Preserve the raw entry whenever the full literal
@@ -715,7 +914,6 @@ export async function splitDelimitedPathEntry(
 	// splitters see it before delimiter expansion peels or splits (issue #4618
 	// reviewer feedback: delimited expansion ran before the literal check).
 	if ((await probeLiteralPathExists(normalizedEntry, cwd)) !== "missing") return null;
-	const splitter = options.splitter ?? parseSearchPath;
 	const peeledEntry = splitPathAndSel(normalizedEntry).path;
 	if (!hasGlobPathChars(peeledEntry) && (await delimitedPathPartResolves(normalizedEntry, cwd, splitter))) {
 		return null;
@@ -1122,6 +1320,52 @@ export function resolveReadPath(filePath: string, cwd: string): string {
 	return resolved;
 }
 
+const WORKSPACE_SUFFIX_TIMEOUT_MS = 5000;
+
+function escapeGlobMetachars(value: string): string {
+	return value.replace(/[*?[{]/g, "[$&]");
+}
+
+/**
+ * Find a unique workspace entry whose trailing path matches a missing authored path.
+ * Returns `null` for no match, ambiguity, timeout, or scan failure.
+ */
+export async function findUniqueWorkspaceSuffix(
+	rawPath: string,
+	cwd: string,
+	signal?: AbortSignal,
+): Promise<{ absolutePath: string; displayPath: string } | null> {
+	const normalized = rawPath.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
+	if (!normalized) return null;
+
+	const timeoutSignal = AbortSignal.timeout(WORKSPACE_SUFFIX_TIMEOUT_MS);
+	const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+
+	let matches: string[];
+	try {
+		const result = await untilAborted(combinedSignal, () =>
+			glob({
+				pattern: `**/${escapeGlobMetachars(normalized)}`,
+				path: cwd,
+				hidden: true,
+			}),
+		);
+		matches = result.matches.map(match => match.path);
+	} catch (error) {
+		if (error instanceof Error && error.name === "AbortError") {
+			if (!signal?.aborted) return null;
+			throw new ToolAbortError();
+		}
+		return null;
+	}
+
+	if (matches.length !== 1) return null;
+	return {
+		absolutePath: path.resolve(cwd, matches[0]),
+		displayPath: matches[0],
+	};
+}
+
 // =============================================================================
 // Tool-scope resolution (search/ast tools)
 // =============================================================================
@@ -1234,7 +1478,7 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 		}
 		if (isSshUrl(rawPath)) {
 			throw new ToolError(
-				`Cannot ${internalUrlAction} a remote ssh:// path (no local file): ${rawPath}. Use \`read ${rawPath}\` to view it, or the \`search\` tool to grep remote files.`,
+				`Cannot ${internalUrlAction} a remote ssh:// path (no local file): ${rawPath}. Use \`read ${rawPath}\` to view it, or use \`grep\` on a specific remote file.`,
 			);
 		}
 		if (hasGlobPathChars(rawPath)) {

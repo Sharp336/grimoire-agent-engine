@@ -15,7 +15,7 @@ import {
 	InMemorySnapshotStore,
 	parsePatch,
 	RECOVERY_LINE_REMAP_WARNING,
-	RECOVERY_SESSION_REPLAY_WARNING,
+	RECOVERY_SESSION_CHAIN_WARNING,
 	Recovery,
 } from "@oh-my-pi/hashline";
 
@@ -44,7 +44,7 @@ describe("Recovery — session-chain replay anchor-content gate", () => {
 		// rewrote. Replaying onto current would overwrite "L5-CHANGED" with
 		// payload the model authored against the stale "L5". That is
 		// corruption, not recovery.
-		const { edits } = parsePatch("SWAP 5.=5:\n|L5-MODEL");
+		const { edits } = parsePatch("PUT 5-5:\n|L5-MODEL");
 
 		const recovered = new Recovery(store).tryRecover({
 			path: PATH,
@@ -58,11 +58,10 @@ describe("Recovery — session-chain replay anchor-content gate", () => {
 
 	it("replays edits onto current when every anchor's line content is unchanged", () => {
 		const { store, v1Text, h0 } = seedTwoSnapshots();
-		// Edit anchored at line 3 — unchanged between v0 and v1. The 3-way
-		// merge fails (patch context includes the rewritten line 5), but the
-		// replay fallback is safe because the model's anchor still names the
-		// same logical content.
-		const { edits } = parsePatch("SWAP 3.=3:\n|L3-MODEL");
+		// Edit anchored at line 3 — unchanged between v0 and v1. Recovery
+		// proves that the target and its surrounding context still map to the
+		// same live lines before replaying the edit.
+		const { edits } = parsePatch("PUT 3-3:\n|L3-MODEL");
 
 		const recovered = new Recovery(store).tryRecover({
 			path: PATH,
@@ -76,11 +75,10 @@ describe("Recovery — session-chain replay anchor-content gate", () => {
 		// Prior in-session change must survive — the model's edit lands on
 		// top of current, not on top of the stale snapshot.
 		expect(recovered?.text).toContain("L5-CHANGED");
-		// The replay path is the less-certain recovery mode (a coincidental
-		// insert+delete pair earlier in the chain could leave indices
-		// pointing at duplicated rows even with both guards satisfied), so
-		// the dedicated REPLAY warning surfaces a "verify the diff" hedge.
-		expect(recovered?.warnings).toContain(RECOVERY_SESSION_REPLAY_WARNING);
+		// Zero-offset recovery against an earlier retained snapshot reports the
+		// session-chain banner; unlike the removed direct replay fallback, this
+		// path has proved the anchors through the unchanged-line map.
+		expect(recovered?.warnings).toContain(RECOVERY_SESSION_CHAIN_WARNING);
 	});
 
 	it("recovers stale anchors shifted by a prior in-session insertion", () => {
@@ -89,7 +87,7 @@ describe("Recovery — session-chain replay anchor-content gate", () => {
 		const h0 = store.record(PATH, v0Text);
 		const v1Text = lines("L1", "L2", "INSERTED", "L3", "L4", "L5", "L6");
 		store.record(PATH, v1Text);
-		const { edits } = parsePatch("SWAP 5.=5:\n+L5-MODEL");
+		const { edits } = parsePatch("PUT 5-5:\n+L5-MODEL");
 
 		const recovered = new Recovery(store).tryRecover({
 			path: PATH,
@@ -109,7 +107,7 @@ describe("Recovery — session-chain replay anchor-content gate", () => {
 		const h0 = store.record(PATH, v0Text);
 		const v1Text = lines("L1", "L3", "L4", "L5", "L6");
 		store.record(PATH, v1Text);
-		const { edits } = parsePatch("SWAP 5.=5:\n+L5-MODEL");
+		const { edits } = parsePatch("PUT 5-5:\n+L5-MODEL");
 
 		const recovered = new Recovery(store).tryRecover({
 			path: PATH,
@@ -129,7 +127,7 @@ describe("Recovery — session-chain replay anchor-content gate", () => {
 		const h0 = store.record(PATH, v0Text);
 		const v1Text = lines("start", "mid", "DUP", "CHANGED", "tail");
 		store.record(PATH, v1Text);
-		const { edits } = parsePatch("SWAP 4.=4:\n+MODEL");
+		const { edits } = parsePatch("PUT 4-4:\n+MODEL");
 
 		const recovered = new Recovery(store).tryRecover({
 			path: PATH,
@@ -141,13 +139,32 @@ describe("Recovery — session-chain replay anchor-content gate", () => {
 		expect(recovered).toBeNull();
 	});
 
-	it("refuses unique-line remaps when following context no longer matches", () => {
+	it("refuses to relocate a stale replacement onto duplicated context", () => {
+		const store = new InMemorySnapshotStore();
+		const block = ["head", "TARGET_A", "TARGET_B", "ctx1", "ctx2", "ctx3"];
+		const v0Text = lines(...block, "middle", ...block, "tail");
+		const hash = store.record(PATH, v0Text);
+		const currentText = lines("head", "CHANGED_A", "CHANGED_B", "ctx1", "ctx2", "ctx3", "middle", ...block, "tail");
+		const { edits } = parsePatch("PUT 2-3:\n+MODEL_A\n+MODEL_B");
+
+		const recovered = new Recovery(store).tryRecover({
+			path: PATH,
+			currentText,
+			fileHash: hash,
+			edits,
+		});
+
+		expect(recovered).toBeNull();
+		expect(currentText).toContain("TARGET_A\nTARGET_B");
+	});
+
+	it("refuses an isolated unique-line remap when neither neighbor follows its offset", () => {
 		const store = new InMemorySnapshotStore();
 		const v0Text = lines("L1", "L2", "L3", "L4", "T", "L6");
 		const h0 = store.record(PATH, v0Text);
-		const v1Text = lines("X", "L1", "L2", "L3", "L4", "T", "T_CHANGED", "L6");
+		const v1Text = lines("X", "L1", "L2", "L3", "L4", "BEFORE", "T", "AFTER", "L6");
 		store.record(PATH, v1Text);
-		const { edits } = parsePatch("SWAP 5.=5:\n+MODEL");
+		const { edits } = parsePatch("PUT 5-5:\n+MODEL");
 
 		const recovered = new Recovery(store).tryRecover({
 			path: PATH,
@@ -169,7 +186,7 @@ describe("Recovery — session-chain replay anchor-content gate", () => {
 		const h0 = store.record(PATH, v0Text);
 		const v1Text = lines("alpha", "INSERTED", "DUP", "beta", "DUP", "omega");
 		store.record(PATH, v1Text);
-		const { edits } = parsePatch("SWAP 3.=4:\n+B-MODEL\n+MODEL");
+		const { edits } = parsePatch("PUT 3-4:\n+B-MODEL\n+MODEL");
 
 		const recovered = new Recovery(store).tryRecover({
 			path: PATH,
@@ -214,22 +231,21 @@ describe("Recovery — colliding snapshot tags", () => {
 		store.record(PATH, newer);
 
 		// Live drifted away from both colliders, so recovery cannot shortcut
-		// via live==snapshot. The tag cannot name a unique base; it resolves
-		// to the most-recently recorded collider and 3-way merges from there.
+		// via live==snapshot. The tag cannot name a unique base; recovery uses
+		// the most-recently retained collider and maps its unchanged anchors.
 		const currentText = `${newer}drifted trailer\n`;
 		const recovered = new Recovery(store).tryRecover({
 			path: PATH,
 			currentText,
 			fileHash: tag,
-			edits: parsePatch("SWAP 2.=2:\n+model payload").edits,
+			edits: parsePatch("PUT 2-2:\n+model payload").edits,
 		});
 
 		expect(recovered?.text).toBe(lines("shared head", "model payload", "shared tail", "drifted trailer"));
 	});
 
 	it("still recovers when exactly one retained text carries the tag", () => {
-		// Same drift scenario with a single retained text for the tag: the
-		// plain 3-way merge path.
+		// Same drift scenario with a single retained text for the tag.
 		const { older } = findCollidingTexts();
 		const store = new InMemorySnapshotStore();
 		const tag = store.record(PATH, older);
@@ -239,10 +255,32 @@ describe("Recovery — colliding snapshot tags", () => {
 			path: PATH,
 			currentText,
 			fileHash: tag,
-			edits: parsePatch("SWAP 2.=2:\n+model payload").edits,
+			edits: parsePatch("PUT 2-2:\n+model payload").edits,
 		});
 
 		expect(recovered).not.toBeNull();
 		expect(recovered?.text).toBe(lines("shared head", "model payload", "shared tail", "drifted trailer"));
+	});
+});
+
+describe("Recovery — ill-formed UTF-16 content", () => {
+	it("remaps line anchors natively when the file contains lone surrogates", () => {
+		// Native diffLineRuns operates directly over UTF-16 code units, so
+		// recovery remaps anchors natively when files contain lone surrogates.
+		const store = new InMemorySnapshotStore();
+		const snapshotText = lines("head", "lone \ud800 surrogate", "target line", "tail");
+		const hash = store.record(PATH, snapshotText);
+		// Current text gained one line above the target; the anchor must shift.
+		const currentText = lines("inserted above", "head", "lone \ud800 surrogate", "target line", "tail");
+
+		const recovered = new Recovery(store).tryRecover({
+			path: PATH,
+			currentText,
+			fileHash: hash,
+			edits: parsePatch("PUT 3-3:\n+model payload").edits,
+		});
+
+		expect(recovered).not.toBeNull();
+		expect(recovered?.text).toBe(lines("inserted above", "head", "lone \ud800 surrogate", "model payload", "tail"));
 	});
 });

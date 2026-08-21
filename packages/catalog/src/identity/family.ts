@@ -42,6 +42,16 @@ export const isKimiK26ModelId = memo((modelId: string): boolean => {
 });
 
 /**
+ * Kimi K3 in any namespace form (`kimi-k3`, `kimi-k3.1`, `kimi-k3-turbo`,
+ * `moonshotai/kimi-k3`). K3 always reasons and drives thinking via OpenAI-style
+ * `reasoning_effort: "max"`, not the K2.x binary `thinking: { type }` block —
+ * see the moonshot discovery mapper and `buildOpenAICompat`.
+ */
+export const isKimiK3ModelId = memo((modelId: string): boolean => {
+	return /(^|\/)kimi-k3(?:\.\d+)?(?:[-.:_]|$)/i.test(modelId);
+});
+
+/**
  * Claude ids in any namespace form: bare (`claude-*`), path-namespaced
  * (`anthropic/claude.x`), or dot-prefixed (`us.anthropic.claude-…`,
  * `global.anthropic.claude-…`, `au.anthropic.claude-…` — Bedrock cross-region
@@ -63,6 +73,25 @@ export const isQwenModelId = memo((modelId: string): boolean => {
 	return modelId.toLowerCase().includes("qwen");
 });
 
+/**
+ * Open-weight Qwen 3.8+ releases (`qwen3.8-27b`, `qwen3.8-2.4t-a95b`, GGUF
+ * names like `Qwen3.8-27B-UD-Q6_K_XL`) whose chat template steers thinking
+ * depth through a `reasoning_effort` template kwarg (`low`/`medium`/`xhigh`,
+ * template default `xhigh`; thinking itself cannot be disabled). Compared
+ * component-wise so `qwen3.10` sorts after `qwen3.8`. API-only `-max` SKUs are
+ * excluded — Dashscope drives them through OpenAI-style `reasoning_effort`
+ * with curated compat. The trailing guard rejects parameter-count lookalikes
+ * (`qwen-3.8b`) without breaking `qwen3.8-27b`.
+ */
+export const isQwen38PlusTemplateEffortModelId = memo((modelId: string): boolean => {
+	const match = /qwen[-_ ]?(\d+)\.(\d+)(?![\dbB])/i.exec(modelId);
+	if (!match) return false;
+	const major = Number.parseInt(match[1], 10);
+	const minor = Number.parseInt(match[2], 10);
+	if (major < 3 || (major === 3 && minor < 8)) return false;
+	return !/^-max(?:$|[-.:])/i.test(modelId.slice(match.index + match[0].length));
+});
+
 /** Gemma open-weights family (`gemma-3-27b-it`, `google/gemma-4-E2B-it`, `gemma2-9b`). */
 export const isGemmaModelId = memo((modelId: string): boolean => {
 	return /(^|\/)gemma[-.]?\d/i.test(modelId);
@@ -73,22 +102,77 @@ export const isDeepseekModelIdOrName = memo((value: string): boolean => {
 	return value.toLowerCase().includes("deepseek");
 });
 
+/**
+ * DeepSeek V4 Flash SKU in any host/namespace form (`deepseek-v4-flash`, dated
+ * `deepseek-v4-flash-0731`, `deepseek-ai/DeepSeek-V4-Flash`). Both V4 SKUs
+ * (Flash and Pro) accept the `low` reasoning_effort tier; this predicate keeps
+ * Flash distinguishable from Pro where a host quirk splits them (e.g.
+ * OpenRouter exposes `low` on Flash but only `high` on non-Flash V4).
+ * See https://api-docs.deepseek.com/api/create-chat-completion.
+ */
+export const isDeepseekV4FlashModelId = memo((modelId: string): boolean => {
+	return bareModelId(modelId).toLowerCase().includes("deepseek-v4-flash");
+});
+
 /** Xiaomi MiMo family by id or display name. */
 export const isMimoModelIdOrName = memo((value: string): boolean => {
 	return value.toLowerCase().includes("mimo");
 });
 
-const GROK_EFFORT_CAPABLE_PREFIXES = ["grok-3-mini", "grok-4.20-multi-agent", "grok-4.3"] as const;
+/** StepFun Step 3.7 Flash SKU in any namespace form (`kilo/stepfun/step-3.7-flash:free`). */
+export const isStep37FlashModelId = memo((modelId: string): boolean => {
+	return modelId.toLowerCase().includes("step-3.7-flash");
+});
+
+/** Gemini family ids in any namespace form (`gemini-*`, `google/gemini-*`, `openrouter/google/gemini-…`). */
+export const isGeminiModelId = memo((modelId: string): boolean => {
+	return /(^|\/)gemini[-.]?/i.test(modelId);
+});
+
+/** Grok family ids across namespace and delimiter forms (`grok-*`, `cursor-grok-*`, `xai/grok-*`). */
+export const isGrokModelId = memo((modelId: string): boolean => {
+	return /(?:^|[./_-])grok(?:[-.]|$)/i.test(modelId);
+});
+
+const GROK_EFFORT_CAPABLE_PREFIXES = [
+	"grok-3-mini",
+	"grok-4.20-multi-agent",
+	"grok-4.3",
+	"grok-4.5",
+	"grok-4.6",
+] as const;
 
 /**
  * Grok SKUs that expose the wire `reasoning.effort` dial. Other Grok reasoners
  * (e.g. `grok-build`, `grok-4.20-0309-reasoning`) think natively but reject the
- * param, so callers must omit reasoning effort for them.
+ * param, so callers must omit reasoning effort for them. `grok-4.6` accepts
+ * `low`/`medium`/`high`/`xhigh` and 400s on `max`.
  */
 export const isGrokReasoningEffortCapable = memo((modelId: string): boolean => {
 	const bare = bareModelId(modelId).trim().toLowerCase();
 	if (!bare) return false;
 	return GROK_EFFORT_CAPABLE_PREFIXES.some(prefix => bare.startsWith(prefix));
+});
+
+/**
+ * `grok-4.20-multi-agent*` uses `reasoning.effort` to pick agent count
+ * (`xhigh` is the 16-agent mode). Other first-party Grok effort SKUs stay on
+ * `low|medium|high` unless {@link isGrokXHighEffortCapable} (currently
+ * `grok-4.6*` plus multi-agent).
+ * https://docs.x.ai/developers/model-capabilities/text/reasoning
+ */
+export const isGrokMultiAgentModelId = memo((modelId: string): boolean => {
+	return bareModelId(modelId).trim().toLowerCase().startsWith("grok-4.20-multi-agent");
+});
+
+/**
+ * First-party Grok SKUs whose Responses wire accepts `reasoning.effort: "xhigh"`.
+ * `grok-4.6*` documents xhigh as a reasoning depth; multi-agent uses it as
+ * 16-agent mode. `grok-4.5` / `grok-4.3` / `grok-3-mini` do not.
+ */
+export const isGrokXHighEffortCapable = memo((modelId: string): boolean => {
+	if (isGrokMultiAgentModelId(modelId)) return true;
+	return bareModelId(modelId).trim().toLowerCase().startsWith("grok-4.6");
 });
 
 /**
@@ -123,6 +207,16 @@ export const isMinimaxM3FamilyModelId = memo((modelId: string): boolean => {
  */
 export const isOpenAIGptOssModelId = memo((modelId: string): boolean => {
 	return /(^|\/)gpt-oss[-:]/i.test(modelId);
+});
+
+/**
+ * Meta Muse Spark ids (`muse-spark-1.1`, `muse-spark-1.2`,
+ * `muse-spark-1.2-contributor`, `meta/muse-spark-1.2`). The Responses
+ * `reasoning.effort` wire accepts `none` (thinking-off) plus
+ * `minimal`/`low`/`medium`/`high`/`xhigh`.
+ */
+export const isMuseSparkModelId = memo((modelId: string): boolean => {
+	return /(^|\/)muse-spark(?:[-.]|$)/i.test(modelId);
 });
 
 /** OpenAI model ids (gpt-*, chatgpt-*, o1/o3/o4 SKUs, codex-*, or openai/*). */
@@ -163,6 +257,32 @@ export const supportsAllTurnsReasoningContext = isOpenAIWireGen54Plus;
  */
 export const supportsCodexReasoningSummary = isOpenAIWireGen54Plus;
 
+/** OpenAI proprietary reasoning families keyed off the parsed gpt version (gpt-5+). */
+const isOpenAIWireGen5Plus = memo((modelId: string): boolean => {
+	const parsed = parseOpenAIModel(bareModelId(modelId));
+	if (!parsed) return false;
+	return semverGte(parsed.version, "5");
+});
+
+/** o-series reasoning ids (`o1`, `o1-pro`, `o3`, `o3-mini`, `o4-mini`, `openai/o3`, …). */
+const O_SERIES_REASONING_RE = /(^|\/)o[134](?:[-.]|$)/i;
+
+/**
+ * OpenAI proprietary models whose serving path rejects explicit sampling
+ * parameters (`temperature`, `top_p`, `top_k`, …) with
+ * `400 Unsupported parameter: 'temperature' is not supported with this model`.
+ * Covers the o-series and the entire gpt-5+ generation — base, `mini`, `nano`,
+ * `codex*`, the `luna`/`sol`/`terra` SKUs, and the `-chat-latest` variants,
+ * since even the non-reasoning gpt-5 chat models reject sampling params (see
+ * litellm#13781). Holds regardless of which OpenAI-serving host proxies the
+ * model (official, Azure, GitHub Copilot). Version floor (not an allowlist) so
+ * 6.x inherits automatically. Issue #5606.
+ */
+export const isOpenAISamplingRestrictedModelId = memo((modelId: string): boolean => {
+	const bare = bareModelId(modelId);
+	return isOpenAIWireGen5Plus(modelId) || O_SERIES_REASONING_RE.test(bare);
+});
+
 /**
  * Reasoning-capable GLM coding SKUs: glm-4.5 and up on the base / `-air` /
  * `-turbo` lines. Excludes the vision (`…v`) shape, the non-reasoning
@@ -193,6 +313,25 @@ export const isGlm52ReasoningEffortModelId = memo((modelId: string): boolean => 
 	return semverGte(glm.version, "5.2");
 });
 
+/**
+ * GLM-5.3+ coding SKUs. Unlike GLM-5.2 (whose reasoning_effort dialect is
+ * host-specific), GLM-5.3+ exposes a uniform wire-exact `low`/`high`/`max`
+ * ladder on every host, and thinking can no longer be disabled —
+ * `thinking.type` must always be `enabled`. Matching the family keeps future
+ * bumps (`glm-5.4`, `glm-6`, …) covered while excluding the vision (`…v`)
+ * shape and the non-reasoning `-flash`/`-flashx`/`-preview` variants.
+ */
+export const isGlm53ReasoningEffortModelId = memo((modelId: string): boolean => {
+	const glm = parseGlmModel(bareModelId(modelId));
+	if (!glm || glm.vision) {
+		return false;
+	}
+	if (glm.variant !== "base" && glm.variant !== "air" && glm.variant !== "turbo") {
+		return false;
+	}
+	return semverGte(glm.version, "5.3");
+});
+
 /** GLM vision SKUs — the `v` that attaches to the version (`glm-4v`, `glm-4.5v`). */
 export const isGlmVisionModelId = memo((modelId: string): boolean => {
 	return parseGlmModel(bareModelId(modelId))?.vision === true;
@@ -213,16 +352,31 @@ export const modelFamilyToken = memo((modelId: string): string => {
 	const parsed = parseKnownModel(modelId);
 	if (parsed.family !== "unknown") return parsed.family;
 	if (isClaudeModelId(modelId) || isAnthropicNamespacedModelId(modelId)) return "anthropic";
+	if (isGeminiModelId(modelId)) return "gemini";
+	if (isGrokModelId(modelId)) return "grok";
+	if (isDeepseekModelIdOrName(modelId)) return "deepseek";
 	if (isOpenAIModelId(modelId)) return "openai";
 	if (isKimiModelId(modelId)) return "kimi";
 	if (isQwenModelId(modelId)) return "qwen";
 	if (isMinimaxM2FamilyModelId(modelId) || isMinimaxM3FamilyModelId(modelId)) return "minimax";
 	if (isOpenAIGptOssModelId(modelId)) return "gpt-oss";
-	if (isDeepseekModelIdOrName(modelId)) return "deepseek";
 	if (isMimoModelIdOrName(modelId)) return "mimo";
 	if (isGemmaModelId(modelId)) return "gemma";
 	if (parseGlmModel(bareModelId(modelId))) return "glm";
 	return "";
+});
+
+/**
+ * True for Claude generations that support extended thinking: Sonnet/Opus 3.7+,
+ * every 4.x/5+ Opus/Sonnet, and the Fable/Mythos generation. Pre-thinking
+ * models (Claude 3.5 and older) are excluded so no thinking effort dial is
+ * fabricated for a model that rejects thinking parameters. Classifier-based, so
+ * dotted and dashed version forms both match; ids the classifier does not parse
+ * (e.g. Haiku, bare dated ids) return false.
+ */
+export const anthropicModelSupportsThinking = memo((modelId: string): boolean => {
+	const parsed = parseAnthropicModel(bareModelId(modelId));
+	return parsed !== null && semverGte(parsed.version, "3.7");
 });
 
 /**
@@ -258,6 +412,22 @@ export const hasOpus47ApiRestrictions = memo((modelId: string): boolean => {
 export const supportsMidConversationSystemMessages = memo((modelId: string): boolean => {
 	const parsed = parseAnthropicModel(bareModelId(modelId));
 	return parsed !== null && isAnthropicAdaptiveGenAtLeast(parsed, "4.8");
+});
+
+/**
+ * Models that reliably follow the hashline line-anchored edit dialect
+ * (`[path#TAG]` headers plus 1-indexed anchors). Kimi, MiMo, DeepSeek V4
+ * Flash, and Step 3.7 Flash miscount anchors or drop the tag header often
+ * enough that hosts fall back to a literal search-replace edit format for
+ * them.
+ */
+export const supportsHashlineEdits = memo((modelId: string): boolean => {
+	return !(
+		isKimiModelId(modelId) ||
+		isMimoModelIdOrName(modelId) ||
+		isDeepseekV4FlashModelId(modelId) ||
+		isStep37FlashModelId(modelId)
+	);
 });
 
 export const isAnthropicFableOrMythosModel = memo((modelId: string): boolean => {

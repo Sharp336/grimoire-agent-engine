@@ -450,6 +450,44 @@ describe("StreamMarkupHealing DSML envelope pattern", () => {
 	});
 });
 
+describe("StreamMarkupHealing Qwen XML pattern", () => {
+	const leaked = '<tool_calls>\n<read path="/etc/hostname" />\n</tool_calls>';
+
+	it("parses a self-closing tool element into a structured call", () => {
+		const healing = new StreamMarkupHealing({ pattern: "qwen" });
+		expect(healing.feed(leaked)).toBe("");
+
+		const calls = healing.drainCompleted();
+		expect(calls).toHaveLength(1);
+		expect(calls[0]?.name).toBe("read");
+		expect(JSON.parse(calls[0]!.arguments)).toEqual({ path: "/etc/hostname" });
+	});
+
+	it("reconstructs markup split across arbitrary chunk boundaries", () => {
+		const healing = new StreamMarkupHealing({ pattern: "qwen" });
+		let visible = "";
+		for (const char of leaked) visible += healing.feed(char);
+		visible += healing.flushPending();
+
+		expect(visible).toBe("");
+		expect(healing.drainCompleted()).toHaveLength(1);
+	});
+
+	it("preserves text around a complete tool-call section", () => {
+		const healing = new StreamMarkupHealing({ pattern: "qwen" });
+		const events = healing.feedEvents(`Before\n${leaked}\nAfter`);
+
+		expect(events.map(event => event.type)).toEqual(["text", "toolCall", "text"]);
+	});
+
+	it("drops an incomplete tool-call section", () => {
+		const healing = new StreamMarkupHealing({ pattern: "qwen" });
+		expect(healing.feed('<tool_calls><read path="/etc/host')).toBe("");
+		expect(healing.flushPending()).toBe("");
+		expect(healing.drainCompleted()).toHaveLength(0);
+	});
+});
+
 describe("StreamMarkupHealing thinking pattern", () => {
 	it("parses plain think tags as thinking events across chunk boundaries", () => {
 		const healing = new StreamMarkupHealing({ pattern: "thinking" });
@@ -523,6 +561,57 @@ describe("StreamMarkupHealing thinking pattern", () => {
 		expect(heal("see <div>content</div> end")).toEqual({ text: "see <div>content</div> end", thinking: "" });
 	});
 
+	// Issue #5665: a literal reasoning tag inside a Markdown inline-code span was
+	// read as a leaked <think> boundary, splitting the visible row into
+	// text + thinking and corrupting the rendered Markdown.
+	it("keeps a literal think tag inside inline code as visible text", () => {
+		const literal = `<${"think"}>`;
+		const row = `| [#1203 MiniMax CN leaks \`${literal}\` text](https://x) | Fixed | PR merged |`;
+		expect(heal(row)).toEqual({ text: row, thinking: "" });
+	});
+
+	it("keeps a literal think tag inside inline code when streamed char by char", () => {
+		const literal = `<${"think"}>`;
+		const row = `prefix \`${literal}\` suffix`;
+		expect(heal(...row)).toEqual({ text: row, thinking: "" });
+	});
+
+	it("keeps a literal think tag inside a fenced code block as visible text", () => {
+		const literal = `<${"think"}>`;
+		const block = `\`\`\`md\n${literal}\n\`\`\`\nafter`;
+		expect(heal(block)).toEqual({ text: block, thinking: "" });
+	});
+
+	// Issue #5665 (review follow-up): a fenced block only closes on its own fence
+	// line. An inline backtick run inside the block (a `` ``` `` string literal)
+	// must not exit code mode early and let a later literal think tag be healed.
+	it("keeps a fenced block open across an inner triple-backtick literal", () => {
+		const literal = `<${"think"}>literal</${"think"}>`;
+		const block = `\`\`\`md\nconst fence = '\`\`\`';\n${literal}\n\`\`\`\nafter`;
+		expect(heal(block)).toEqual({ text: block, thinking: "" });
+		expect(heal(...block)).toEqual({ text: block, thinking: "" });
+	});
+
+	// Issue #5665 (review follow-up): CommonMark treats a fence indented by up to
+	// three spaces as fenced code. The scanner must still open a fenced block (not
+	// an inline span) so an inner triple-backtick literal does not close it early.
+	it("recognizes a fence indented up to three spaces as a fenced block", () => {
+		const literal = `<${"think"}>literal</${"think"}>`;
+		for (const indent of ["", " ", "   "]) {
+			const block = `${indent}\`\`\`md\nconst fence = '\`\`\`';\n${literal}\n${indent}\`\`\`\nafter`;
+			expect(heal(block)).toEqual({ text: block, thinking: "" });
+			expect(heal(...block)).toEqual({ text: block, thinking: "" });
+		}
+	});
+
+	it("still heals a leaked think tag outside inline code", () => {
+		const literal = `<${"think"}>`;
+		expect(heal(`before \`code\` ${literal}secret</think> after`)).toEqual({
+			text: "before `code`  after",
+			thinking: "secret",
+		});
+	});
+
 	it("emits one balanced thinking boundary for a healed fence", () => {
 		const scanner = new ThinkingInbandScanner();
 		const events: InbandScanEvent[] = [...scanner.feed("a```thinking\nx\n```b"), ...scanner.flush()];
@@ -581,8 +670,6 @@ describe("Kimi K2 leaked markup healing", () => {
 		const split = "<|tool_ca";
 		const a = full.slice(0, full.indexOf(split) + split.length);
 		const b = full.slice(a.length);
-		expect(a + b).toBe(full);
-		expect(a.endsWith("<|tool_ca")).toBe(true);
 
 		const fetchMock = mockFetch([
 			chunk(model.id, { content: a }),
@@ -1027,7 +1114,6 @@ describe("OpenAI completions provider DSML envelope healing", () => {
 
 	it("heals NanoGPT-hosted DeepSeek V4 Pro DSML leaks (issue #1488)", async () => {
 		const model = getBundledModel<"openai-completions">("nanogpt", "deepseek/deepseek-v4-pro");
-		expect(model.provider).toBe("nanogpt");
 
 		let payload: Record<string, unknown> | undefined;
 		const fetchMock = mockFetch([

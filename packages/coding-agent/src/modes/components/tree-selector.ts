@@ -7,19 +7,24 @@ import {
 	Input,
 	matchesKey,
 	Spacer,
-	Text,
 	TruncatedText,
 	truncateToWidth,
 } from "@oh-my-pi/pi-tui";
 import type { TreeFilterMode } from "../../config/settings-schema";
 import { theme } from "../../modes/theme/theme";
-import { matchesAppInterrupt, matchesSelectDown, matchesSelectUp } from "../../modes/utils/keybinding-matchers";
+import {
+	matchesAppInterrupt,
+	matchesSelectDown,
+	matchesSelectPageDown,
+	matchesSelectPageUp,
+	matchesSelectUp,
+} from "../../modes/utils/keybinding-matchers";
 import type { SessionTreeNode } from "../../session/session-entries";
 import { toPathList } from "../../tools/path-utils";
 import { shortenPath } from "../../tools/render-utils";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 import { resolveAssistantErrorPresentation } from "../utils/transcript-render-helpers";
-import { DynamicBorder } from "./dynamic-border";
+import { OverlayPanel, PanelDivider } from "./overlay-box";
 import { centeredWindow, contentRowWidth, renderScrollableList } from "./selector-helpers";
 
 /** Gutter info: position (displayIndent where connector was) and whether to show │ */
@@ -66,7 +71,7 @@ class TreeList implements Component {
 	#activePathIds: Set<string> = new Set();
 	#lastSelectedId: string | null = null;
 
-	onSelect?: (entryId: string) => void;
+	onSelect?: (entryId: string, options: { summarize: boolean }) => void;
 	onCancel?: () => void;
 	onLabelEdit?: (entryId: string, currentLabel: string | undefined) => void;
 
@@ -144,13 +149,12 @@ class TreeList implements Component {
 		const result: FlatNode[] = [];
 		this.#toolCallMap.clear();
 
-		// Indentation rules:
-		// - At indent 0: stay at 0 unless parent has >1 children (then +1)
-		// - At indent 1: children always go to indent 2 (visual grouping of subtree)
-		// - At indent 2+: stay flat for single-child chains, +1 only if parent branches
+		// A real branch point adds one indentation level. Linear conversation
+		// chains retain that level so their text stays aligned with the branch
+		// head instead of drifting right after every fork.
 
-		// Stack items: [node, indent, justBranched, showConnector, isLast, gutters, isVirtualRootChild]
-		type StackItem = [SessionTreeNode, number, boolean, boolean, boolean, GutterInfo[], boolean];
+		// Stack items: [node, indent, showConnector, isLast, gutters, isVirtualRootChild]
+		type StackItem = [SessionTreeNode, number, boolean, boolean, GutterInfo[], boolean];
 		const stack: StackItem[] = [];
 
 		// Determine which subtrees contain the active leaf (to sort current branch first)
@@ -188,11 +192,11 @@ class TreeList implements Component {
 		const orderedRoots = [...roots].sort((a, b) => Number(containsActive.get(b)) - Number(containsActive.get(a)));
 		for (let i = orderedRoots.length - 1; i >= 0; i--) {
 			const isLast = i === orderedRoots.length - 1;
-			stack.push([orderedRoots[i], multipleRoots ? 1 : 0, multipleRoots, multipleRoots, isLast, [], multipleRoots]);
+			stack.push([orderedRoots[i], multipleRoots ? 1 : 0, multipleRoots, isLast, [], multipleRoots]);
 		}
 
 		while (stack.length > 0) {
-			const [node, indent, justBranched, showConnector, isLast, gutters, isVirtualRootChild] = stack.pop()!;
+			const [node, indent, showConnector, isLast, gutters, isVirtualRootChild] = stack.pop()!;
 
 			// Extract tool calls from assistant messages for later lookup
 			const entry = node.entry;
@@ -227,18 +231,10 @@ class TreeList implements Component {
 				return [...prioritized, ...rest];
 			})();
 
-			// Calculate child indent
-			let childIndent: number;
-			if (multipleChildren) {
-				// Parent branches: children get +1
-				childIndent = indent + 1;
-			} else if (justBranched && indent > 0) {
-				// First generation after a branch: +1 for visual grouping
-				childIndent = indent + 1;
-			} else {
-				// Single-child chain: stay flat
-				childIndent = indent;
-			}
+			// Real branch points add visual depth, and a virtual root's direct
+			// children (the session roots) nest one level under the shared column-0
+			// root. Linear continuations otherwise stay aligned with their head.
+			const childIndent = multipleChildren || isVirtualRootChild ? indent + 1 : indent;
 
 			// Build gutters for children
 			// If this node showed a connector, add a gutter entry for descendants
@@ -255,15 +251,7 @@ class TreeList implements Component {
 			// Add children in reverse order
 			for (let i = orderedChildren.length - 1; i >= 0; i--) {
 				const childIsLast = i === orderedChildren.length - 1;
-				stack.push([
-					orderedChildren[i],
-					childIndent,
-					multipleChildren,
-					multipleChildren,
-					childIsLast,
-					childGutters,
-					false,
-				]);
+				stack.push([orderedChildren[i], childIndent, multipleChildren, childIsLast, childGutters, false]);
 			}
 		}
 
@@ -297,12 +285,20 @@ class TreeList implements Component {
 
 			// Apply filter mode
 			let passesFilter = true;
-			// Entry types hidden in default view (settings/bookkeeping)
+			// Entry types hidden in default view (settings/bookkeeping). These carry
+			// no conversation content, so the tree only shows them in "all" mode.
 			const isSettingsEntry =
 				entry.type === "label" ||
 				entry.type === "custom" ||
 				entry.type === "model_change" ||
-				entry.type === "thinking_level_change";
+				entry.type === "thinking_level_change" ||
+				entry.type === "service_tier_change" ||
+				entry.type === "title_change" ||
+				entry.type === "credential_pin" ||
+				entry.type === "session_init" ||
+				entry.type === "ttsr_injection" ||
+				entry.type === "mode_change" ||
+				entry.type === "reset_boundary";
 
 			switch (this.#filterMode) {
 				case "user-only":
@@ -401,6 +397,34 @@ class TreeList implements Component {
 			case "label":
 				parts.push("label", entry.label ?? "");
 				break;
+			case "service_tier_change":
+				parts.push("service tier");
+				if (entry.serviceTier) {
+					const serviceTier = entry.serviceTier;
+					for (const family in serviceTier) {
+						const tier = serviceTier[family as keyof typeof serviceTier];
+						if (tier) parts.push(family, tier);
+					}
+				}
+				break;
+			case "title_change":
+				parts.push("title", entry.title);
+				break;
+			case "mode_change":
+				parts.push("mode", entry.mode);
+				break;
+			case "credential_pin":
+				parts.push("credential pin", entry.provider);
+				break;
+			case "ttsr_injection":
+				parts.push("ttsr injection", ...entry.injectedRules);
+				break;
+			case "reset_boundary":
+				parts.push("reset boundary");
+				break;
+			case "session_init":
+				parts.push("session init");
+				break;
 		}
 
 		return parts.join(" ");
@@ -452,25 +476,25 @@ class TreeList implements Component {
 			//    `model_change` + `thinking_level_change` (both hidden by the default filter)
 			//    read as "broken /tree" — see #1909.
 			if (this.#flatNodes.length === 0) {
-				lines.push(truncateToWidth(theme.fg("muted", "  No entries found"), width));
-				lines.push(truncateToWidth(theme.fg("muted", `  (0/0)${this.#getFilterLabel()}`), width));
+				lines.push(truncateToWidth(theme.fg("muted", "No entries found"), width));
+				lines.push(truncateToWidth(theme.fg("muted", `(0/0)${this.#getFilterLabel()}`), width));
 			} else if (this.#searchQuery.length > 0) {
-				lines.push(truncateToWidth(theme.fg("muted", `  No entries match search "${this.#searchQuery}"`), width));
-				lines.push(truncateToWidth(theme.fg("muted", "  Press Backspace to clear the search"), width));
+				lines.push(truncateToWidth(theme.fg("muted", `No entries match search "${this.#searchQuery}"`), width));
+				lines.push(truncateToWidth(theme.fg("muted", "Press Backspace to clear the search"), width));
 				lines.push(
-					truncateToWidth(theme.fg("muted", `  (0/${this.#flatNodes.length})${this.#getFilterLabel()}`), width),
+					truncateToWidth(theme.fg("muted", `(0/${this.#flatNodes.length})${this.#getFilterLabel()}`), width),
 				);
 			} else {
 				const filterLabel = this.#getFilterLabel().trim() || "[default]";
 				lines.push(
 					truncateToWidth(
-						theme.fg("muted", `  ${this.#flatNodes.length} entries hidden by the current filter ${filterLabel}`),
+						theme.fg("muted", `${this.#flatNodes.length} entries hidden by the current filter ${filterLabel}`),
 						width,
 					),
 				);
-				lines.push(truncateToWidth(theme.fg("muted", "  Press Alt+A to show all, Alt+D for default"), width));
+				lines.push(truncateToWidth(theme.fg("muted", "Press Alt+A to show all, Alt+D for default"), width));
 				lines.push(
-					truncateToWidth(theme.fg("muted", `  (0/${this.#flatNodes.length})${this.#getFilterLabel()}`), width),
+					truncateToWidth(theme.fg("muted", `(0/${this.#flatNodes.length})${this.#getFilterLabel()}`), width),
 				);
 			}
 			return lines;
@@ -516,16 +540,8 @@ class TreeList implements Component {
 			const renderedIndent = Math.min(displayIndent, maxIndentLevels);
 			const scrollOffset = displayIndent - renderedIndent;
 			const connectorPositionDisplay = hasConnector ? renderedIndent - 1 : -1;
-			// Chain rows (no connector of their own) under a last-sibling (`└─`)
-			// branch stay anchored by a vertical drawn one level RIGHT of the
-			// suppressed gutter — the column where the row's own connector would
-			// sit, directly below the branch head's content. Drawing it in the
-			// `└─` column itself contradicts the corner and leaves dangling,
-			// drifting verticals once the chain branches deeper (#2298, #2325).
-			// Chains under `├─` heads need no extra anchor: the sibling line
-			// (`show: true` gutter) already ties them to their branch.
-			const nearestGutter = !hasConnector ? flatNode.gutters[flatNode.gutters.length - 1] : undefined;
-			const chainAnchorLevel = nearestGutter && !nearestGutter.show ? nearestGutter.position + 1 : -1;
+			// Linear rows reuse their branch head's depth. Existing sibling
+			// gutters remain visible; terminal gutters remain terminated.
 
 			// Build prefix char by char, placing gutters and connector at their positions
 			const totalChars = renderedIndent * 3;
@@ -545,9 +561,6 @@ class TreeList implements Component {
 					} else {
 						prefixChars.push(" ");
 					}
-				} else if (originalLevel === chainAnchorLevel) {
-					// Chain anchor for rows under a `└─` branch head.
-					prefixChars.push(posInLevel === 0 ? theme.tree.vertical : " ");
 				} else if (hasConnector && level === connectorPositionDisplay) {
 					// Connector at this level
 					if (posInLevel === 0) {
@@ -591,7 +604,7 @@ class TreeList implements Component {
 
 		const filterLabel = this.#getFilterLabel();
 		if (filterLabel) {
-			lines.push(truncateToWidth(theme.fg("muted", `  ${filterLabel.trim()}`), width));
+			lines.push(truncateToWidth(theme.fg("muted", filterLabel.trim()), width));
 		}
 
 		return lines;
@@ -680,8 +693,31 @@ class TreeList implements Component {
 			case "label":
 				result = theme.fg("dim", `[label: ${entry.label ?? "(cleared)"}]`);
 				break;
+			case "service_tier_change": {
+				// Per-family map, or null when the session went back to the default.
+				const tiers = entry.serviceTier
+					? Object.entries(entry.serviceTier)
+							.map(([family, tier]) => `${family}:${tier}`)
+							.join(" ")
+					: "(default)";
+				result = theme.fg("dim", `[service tier: ${tiers}]`);
+				break;
+			}
+			case "title_change":
+				result = theme.fg("dim", `[title: ${normalize(entry.title)}]`);
+				break;
+			case "mode_change":
+				result = theme.fg("dim", `[mode: ${entry.mode}]`);
+				break;
+			case "credential_pin":
+				result = theme.fg("dim", `[credential pin: ${entry.provider}]`);
+				break;
 			default:
-				result = "";
+				// Bookkeeping entries with nothing worth spelling out still get their
+				// type. A row that renders to the empty string is worse than a
+				// useless one: it draws as a bare bullet with no way to tell what it
+				// is or why the tree has a gap in it.
+				result = theme.fg("dim", `[${entry.type.replaceAll("_", " ")}]`);
 		}
 
 		return isSelected ? theme.bold(result) : result;
@@ -781,21 +817,52 @@ class TreeList implements Component {
 		}
 	}
 
+	#moveToAdjacentTurn(direction: -1 | 1): void {
+		for (
+			let index = this.#selectedIndex + direction;
+			index >= 0 && index < this.#filteredNodes.length;
+			index += direction
+		) {
+			const entry = this.#filteredNodes[index]?.node.entry;
+			if (entry?.type === "message" && (entry.message.role === "user" || entry.message.role === "assistant")) {
+				this.#selectedIndex = index;
+				return;
+			}
+		}
+	}
+
 	handleInput(keyData: string): void {
 		if (matchesSelectUp(keyData)) {
 			this.#selectedIndex = this.#selectedIndex === 0 ? this.#filteredNodes.length - 1 : this.#selectedIndex - 1;
 		} else if (matchesSelectDown(keyData)) {
 			this.#selectedIndex = this.#selectedIndex === this.#filteredNodes.length - 1 ? 0 : this.#selectedIndex + 1;
-		} else if (matchesKey(keyData, "left")) {
-			// Page up
+		} else if (matchesKey(keyData, "alt+up")) {
+			this.#moveToAdjacentTurn(-1);
+		} else if (matchesKey(keyData, "alt+down")) {
+			this.#moveToAdjacentTurn(1);
+		} else if (matchesKey(keyData, "home")) {
+			this.#selectedIndex = 0;
+		} else if (matchesKey(keyData, "end")) {
+			this.#selectedIndex = Math.max(0, this.#filteredNodes.length - 1);
+		} else if (matchesSelectPageUp(keyData) || matchesKey(keyData, "left")) {
 			this.#selectedIndex = Math.max(0, this.#selectedIndex - this.maxVisibleLines);
-		} else if (matchesKey(keyData, "right")) {
-			// Page down
+		} else if (matchesSelectPageDown(keyData) || matchesKey(keyData, "right")) {
 			this.#selectedIndex = Math.min(this.#filteredNodes.length - 1, this.#selectedIndex + this.maxVisibleLines);
-		} else if (matchesKey(keyData, "enter") || matchesKey(keyData, "return") || keyData === "\n") {
+		} else if (
+			matchesKey(keyData, "shift+enter") ||
+			matchesKey(keyData, "shift+return") ||
+			keyData === "\n" || // Shift+Enter delivered as bare LF (iTerm2 legacy mapping) — matches the composer (issue #8821)
+			keyData === "\x1b[13;2~" // Shift+Enter legacy CSI ~ form — also accepted by the composer (editor.ts:1466)
+		) {
+			// Summarize-and-switch: fork with a branch summary without the extra prompt.
 			const selected = this.#filteredNodes[this.#selectedIndex];
 			if (selected && this.onSelect) {
-				this.onSelect(selected.node.entry.id);
+				this.onSelect(selected.node.entry.id, { summarize: true });
+			}
+		} else if (matchesKey(keyData, "enter") || matchesKey(keyData, "return")) {
+			const selected = this.#filteredNodes[this.#selectedIndex];
+			if (selected && this.onSelect) {
+				this.onSelect(selected.node.entry.id, { summarize: false });
 			}
 		} else if (matchesAppInterrupt(keyData)) {
 			if (this.#searchQuery) {
@@ -862,9 +929,9 @@ class SearchLine implements Component {
 	render(width: number): readonly string[] {
 		const query = this.treeList.getSearchQuery();
 		if (query) {
-			return [truncateToWidth(`  ${theme.fg("muted", "Search:")} ${theme.fg("accent", query)}`, width)];
+			return [truncateToWidth(`${theme.fg("muted", "Search:")} ${theme.fg("accent", query)}`, width)];
 		}
-		return [truncateToWidth(`  ${theme.fg("muted", "Search:")}`, width)];
+		return [truncateToWidth(theme.fg("muted", "Search:"), width)];
 	}
 
 	handleInput(_keyData: string): void {}
@@ -890,11 +957,9 @@ class LabelInput implements Component {
 
 	render(width: number): readonly string[] {
 		const lines: string[] = [];
-		const indent = "  ";
-		const availableWidth = width - indent.length;
-		lines.push(truncateToWidth(`${indent}${theme.fg("muted", "Label (empty to remove):")}`, width));
-		lines.push(...this.#input.render(availableWidth).map(line => truncateToWidth(`${indent}${line}`, width)));
-		lines.push(truncateToWidth(`${indent}${theme.fg("dim", "enter: save  esc: cancel")}`, width));
+		lines.push(truncateToWidth(theme.fg("muted", "Label (empty to remove):"), width));
+		lines.push(...this.#input.render(width));
+		lines.push(truncateToWidth(theme.fg("dim", "enter: save  esc: cancel"), width));
 		return lines;
 	}
 
@@ -913,7 +978,7 @@ class LabelInput implements Component {
 /**
  * Component that renders a session tree selector for navigation
  */
-export class TreeSelectorComponent extends Container {
+export class TreeSelectorComponent extends OverlayPanel {
 	#treeList: TreeList;
 	#labelInput: LabelInput | null = null;
 	#labelInputContainer: Container;
@@ -923,13 +988,19 @@ export class TreeSelectorComponent extends Container {
 		tree: SessionTreeNode[],
 		currentLeafId: string | null,
 		terminalHeight: number,
-		onSelect: (entryId: string) => void,
+		onSelect: (entryId: string, options: { summarize: boolean }) => void,
 		onCancel: () => void,
 		private readonly onLabelChangeCallback?: (entryId: string, label: string | undefined) => void,
 		initialFilterMode: FilterMode = "default",
 	) {
-		super();
-		const maxVisibleLines = Math.max(5, Math.floor(terminalHeight / 2));
+		super("Session Tree");
+		// The outer panel has eight fixed rows around the tree list: top/bottom
+		// borders, the two spacers, help, search, and section divider.
+		const PANEL_CHROME_ROWS = 8;
+		const maxVisibleLines = Math.max(
+			1,
+			Math.min(Math.max(5, Math.floor(terminalHeight / 2)), terminalHeight - PANEL_CHROME_ROWS),
+		);
 
 		this.#treeList = new TreeList(tree, currentLeafId, maxVisibleLines, initialFilterMode);
 		this.#treeList.onSelect = onSelect;
@@ -942,25 +1013,22 @@ export class TreeSelectorComponent extends Container {
 		this.#labelInputContainer = new Container();
 
 		this.addChild(new Spacer(1));
-		this.addChild(new DynamicBorder());
-		this.addChild(new Text(theme.bold("  Session Tree"), 1, 0));
 		this.addChild(
 			new TruncatedText(
 				theme.fg(
 					"muted",
-					"Up/Down: move. Left/Right: page. Shift+L: label. Ctrl+O/Shift+Ctrl+O: filter. Alt+D/T/U/L/A: filter. Type to search",
+					"Enter: switch. Alt+↑/↓: previous/next turn. PgUp/PgDn (←/→): page. Home/End: first/last item. Shift+Enter: summarize & switch. Shift+L: label. Ctrl+O: filter. Alt+D/T/U/L/A: filter. Type to search",
 				),
 				0,
 				0,
 			),
 		);
 		this.addChild(new SearchLine(this.#treeList));
-		this.addChild(new DynamicBorder());
+		this.addChild(new PanelDivider());
 		this.addChild(new Spacer(1));
 		this.addChild(this.#treeContainer);
 		this.addChild(this.#labelInputContainer);
 		this.addChild(new Spacer(1));
-		this.addChild(new DynamicBorder());
 
 		if (tree.length === 0) {
 			setTimeout(() => onCancel(), 100);

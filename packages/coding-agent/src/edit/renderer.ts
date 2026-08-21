@@ -41,6 +41,7 @@ import type { EditMode } from "../utils/edit-mode";
 import type { DiffError, DiffResult } from "./diff";
 import { type ApplyPatchEntry, expandApplyPatchToEntries, expandApplyPatchToPreviewEntries } from "./modes/apply-patch";
 import type { Operation } from "./modes/patch";
+import { type SloppySection, splitSloppySections } from "./sloppy";
 import type { PerFileDiffPreview } from "./streaming";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -115,7 +116,7 @@ interface EditRenderArgs {
 	patch?: string;
 	input?: string;
 	_input?: string;
-	all?: boolean;
+	replace_all?: boolean;
 	// Patch mode fields
 	op?: Operation;
 	rename?: unknown;
@@ -140,7 +141,7 @@ interface HashlineInputEntry {
 	path: string;
 	op?: Operation;
 	rename?: string;
-	/** A SWAP/DEL/INS line-editing op precedes the file op — keeps a move framed. */
+	/** A PUT/CUT line edit precedes the file op — keeps a move framed. */
 	hasLineEdits?: boolean;
 }
 
@@ -412,6 +413,42 @@ function renderPlainTextPreview(text: string, uiTheme: Theme, _filePath?: string
 	}
 	return preview.trimEnd();
 }
+
+interface StreamingDiffTail {
+	content: string;
+	hidden: boolean;
+}
+
+/**
+ * Select the trailing physical lines that fit the live preview budget.
+ *
+ * Walk backward from the end instead of splitting the complete diff. This keeps
+ * allocation and scanning proportional to the visible suffix. One physical line
+ * may exceed the budget, but it is still kept so the newest change is visible.
+ */
+function sliceStreamingDiffTail(diff: string, innerWidth: number, budget: number): StreamingDiffTail {
+	let end = diff.length;
+	while (end > 0 && diff.charCodeAt(end - 1) === 10) end--;
+	if (end === 0) return { content: "", hidden: false };
+
+	const rowLimit = Math.max(1, budget);
+	let start = end;
+	let cursor = end;
+	let visualRows = 0;
+	while (cursor >= 0) {
+		const newline = cursor > 0 ? diff.lastIndexOf("\n", cursor - 1) : -1;
+		const lineStart = newline + 1;
+		const lineRows = Math.max(1, wrapTextWithAnsi(replaceTabs(diff.slice(lineStart, cursor)), innerWidth).length);
+		if (visualRows > 0 && visualRows + lineRows > rowLimit) break;
+		visualRows += lineRows;
+		start = lineStart;
+		if (newline < 0) break;
+		cursor = newline;
+	}
+
+	return { content: diff.slice(start, end), hidden: start > 0 };
+}
+
 function formatStreamingDiff(
 	diff: string,
 	rawPath: string,
@@ -423,42 +460,33 @@ function formatStreamingDiff(
 	cache?: RenderedStringCache,
 ): string {
 	if (!diff) return "";
-	// Clamp the collapsed tail to the viewport so a tall or fast-growing diff
-	// cannot outgrow the live window. Otherwise its mutating tail scrolls above
-	// the native-scrollback commit boundary and the engine re-commits a fresh
-	// snapshot every streamed frame, stacking duplicate "… more lines above"
-	// previews in history. The budget is VISUAL rows (a long wrapped line counts
+	// Clamp the tail to the viewport so a tall or fast-growing diff cannot
+	// outgrow the live window. Otherwise its mutating rows scroll above the
+	// native-scrollback commit boundary mid-stream and freeze into immutable
+	// history as a stale preview snapshot; the finalize repair then recommits
+	// the final render below it — a duplicated block on the tape. Collapsed
+	// gets a short fixed tail; expanded widens it to the viewport-sized window,
+	// never unbounded. The budget is VISUAL rows (a long wrapped line counts
 	// for more than one) at the framed block's inner width (border only —
-	// contentPaddingLeft is 0); only the visible suffix is syntax-colored, so the
-	// cheap raw-line wrap walk keeps the per-chunk cost bounded. innerWidth/budget
-	// are in the cache salt so a resize re-slices.
+	// contentPaddingLeft is 0); only the visible suffix is syntax-colored, so
+	// the cheap raw-line wrap walk keeps the per-chunk cost bounded.
+	// innerWidth/budget are in the cache salt so a resize re-slices.
 	const innerWidth = Math.max(1, width - 2);
-	const budget = expanded ? Number.POSITIVE_INFINITY : Math.min(EDIT_STREAMING_PREVIEW_LINES, previewWindowRows());
+	const budget = expanded ? previewWindowRows() : Math.min(EDIT_STREAMING_PREVIEW_LINES, previewWindowRows());
 	let text = cachedRenderedString(cache, uiTheme, expanded, `${rawPath}:${innerWidth}:${budget}`, diff, () => {
 		// "Cursor" tail window: pin the last rows to the bottom so freshly streamed
 		// changes stay on screen. The whole-file diff is recomputed every chunk and
 		// its Myers alignment is not monotonic in payload length, so a hunk-aware
-		// window stutters as rows move between hunks. Expanded lifts the cap.
-		const allLines = diff.replace(/\n+$/u, "").split("\n");
-		let visualUsed = 0;
-		let cut = allLines.length;
-		for (let i = allLines.length - 1; i >= 0; i--) {
-			const lineRows = Math.max(1, wrapTextWithAnsi(replaceTabs(allLines[i]!), innerWidth).length);
-			if (visualUsed + lineRows > budget && visualUsed > 0) break;
-			visualUsed += lineRows;
-			cut = i;
-		}
-		const hiddenLines = cut;
-		const visible = hiddenLines > 0 ? allLines.slice(hiddenLines) : allLines;
+		// window stutters as rows move between hunks. Expanded widens the window
+		// to the viewport; the full diff appears once the result finalizes.
+		const tail = sliceStreamingDiffTail(diff, innerWidth, budget);
 		let rendered = "\n\n";
-		if (hiddenLines > 0) {
-			const hiddenHunks = getDiffStats(allLines.slice(0, hiddenLines).join("\n")).hunks;
-			const remainder: string[] = [];
-			if (hiddenHunks > 0) remainder.push(`${hiddenHunks} more hunks`);
-			remainder.push(`${hiddenLines} more lines`);
-			rendered += `${uiTheme.fg("dim", `… (${remainder.join(", ")} above)`)}\n`;
+		if (tail.hidden) {
+			// Exact hidden line/hunk counts require scanning the discarded prefix,
+			// which would make every streaming update scale with the complete diff.
+			rendered += `${uiTheme.fg("dim", "… (content above)")}\n`;
 		}
-		rendered += renderDiffColored(visible.join("\n"), { filePath: rawPath });
+		rendered += renderDiffColored(tail.content, { filePath: rawPath });
 		return rendered;
 	});
 	// The animated glyph rides this trailing line — inside the transcript's
@@ -565,9 +593,9 @@ function parseHashlineInputPreviewHeader(line: string): string | null {
 	return previewPath.length > 0 ? previewPath : null;
 }
 
-// Line-editing op headers (SWAP/DEL/INS family), distinct from the file-level
-// REM/MV ops. Body rows are always `+TEXT`, so this only matches real headers.
-const HL_LINE_OP_HEADER = /^(?:SWAP|DEL|INS)\b/;
+// Line-editing op headers (PUT/CUT family), distinct from file-level
+// REM/MV ops. Body rows are `+TEXT`, so this only matches real headers.
+const HL_LINE_OP_HEADER = /^(?:PUT|CUT)\b/;
 
 /**
  * Walk a (possibly mid-stream) hashline payload into per-section descriptors:
@@ -609,6 +637,23 @@ function getHashlineInputRenderSummary(
 		return undefined;
 	}
 	return { entries: getHashlineInputSections(input) };
+}
+
+/**
+ * Per-file section descriptors for a (possibly mid-stream) sloppy payload.
+ * Paths live inside the payload's `[path]` headers, so the call header would
+ * otherwise render a bare `…` for the whole stream.
+ */
+function getSloppyInputRenderSummary(
+	args: EditRenderArgs,
+	editMode: EditMode | undefined,
+): { entries: SloppySection[] } | undefined {
+	const input = args.input ?? args._input;
+	if (editMode !== "sloppy" || typeof input !== "string") {
+		return undefined;
+	}
+	const entries = splitSloppySections(input);
+	return entries.length > 0 ? { entries } : undefined;
 }
 
 function getApplyPatchRenderSummary(
@@ -722,6 +767,7 @@ export const editToolRenderer = {
 		const renderContext = options.renderContext;
 		const editArgs = args as EditRenderArgs;
 		const hashlineInputSummary = getHashlineInputRenderSummary(editArgs, renderContext?.editMode);
+		const sloppyInputSummary = getSloppyInputRenderSummary(editArgs, renderContext?.editMode);
 		const applyPatchSummary = getApplyPatchRenderSummary(editArgs, options.isPartial, renderContext?.editMode);
 		const firstApplyPatchEntry = applyPatchSummary?.entries[0];
 		const firstHashlineInputEntry = hashlineInputSummary?.entries[0];
@@ -735,6 +781,7 @@ export const editToolRenderer = {
 					: (filePathFromEditEntry(firstEdit?.path) ??
 						getPartialJsonEditPath(editArgs) ??
 						firstHashlineInputEntry?.path ??
+						sloppyInputSummary?.entries[0]?.path ??
 						firstApplyPatchEntry?.path ??
 						"");
 		const rename =
@@ -744,7 +791,11 @@ export const editToolRenderer = {
 			firstApplyPatchEntry?.rename ??
 			firstHashlineInputEntry?.rename;
 		const op = editArgs.op || firstEdit?.op || firstApplyPatchEntry?.op || firstHashlineInputEntry?.op;
-		let fileCount = hashlineInputSummary?.entries.length ?? applyPatchSummary?.entries.length ?? 0;
+		let fileCount =
+			hashlineInputSummary?.entries.length ??
+			sloppyInputSummary?.entries.length ??
+			applyPatchSummary?.entries.length ??
+			0;
 		if (Array.isArray(editArgs.edits)) {
 			fileCount = countEditFiles(editArgs.edits);
 		}
@@ -861,6 +912,7 @@ function renderSingleFileResult(
 
 	let diffSectionRenderDiffFn: ((t: string, o?: { filePath?: string }) => string) | undefined;
 	const diffSectionCache = createRenderedStringCache();
+	const statsSuffixCache = createRenderedStringCache();
 
 	return framedBlock(uiTheme, width => {
 		const { expanded, renderContext } = options;
@@ -884,7 +936,11 @@ function renderSingleFileResult(
 		// Change stats ride inline on the header bar next to the path.
 		const previewDiff = editDiffPreview && !("error" in editDiffPreview) ? editDiffPreview.diff : undefined;
 		const headerDiff = isError ? undefined : details?.diff || previewDiff;
-		const statsSuffix = headerDiff ? formatDiffStatsSuffix(headerDiff, uiTheme) : "";
+		const statsSuffix = headerDiff
+			? cachedRenderedString(statsSuffixCache, uiTheme, false, "", headerDiff, () =>
+					formatDiffStatsSuffix(headerDiff, uiTheme),
+				)
+			: "";
 		const header = renderEditHeader(width, uiTheme, {
 			icon: isError ? "error" : "success",
 			iconOverride: !isError && !options.isPartial ? uiTheme.styledSymbol("tool.edit", "accent") : undefined,

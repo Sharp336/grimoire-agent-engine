@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { resolveContainedPathSync } from "../discovery/contained-path";
 import type { Skill } from "../extensibility/skills";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import { validateRelativePath } from "../internal-urls/skill-protocol";
@@ -8,10 +9,12 @@ import { normalizeLocalScheme } from "./path-utils";
 import { ToolError } from "./tool-errors";
 
 /** Regex to find skill:// tokens in command text. */
-const SKILL_URL_PATTERN = /'skill:\/\/[^'\s")`\\]+'|"skill:\/\/[^"\s')`\\]+"|skill:\/\/[^\s'")`\\]+/g;
+const SKILL_URL_PATTERN = /'skill:\/\/[^'\s")`\\]+'|"skill:\/\/[^"\s')`\\]+"|skill:\/\/[^\s'")`\\;&|<>($]+/g;
 
+// Unquoted URLs stop before shell syntax so expansion cannot quote an adjacent
+// operator or substitution into the resolved path.
 const INTERNAL_URL_PATTERN_INCLUDING_NORMALIZED_LOCAL =
-	/'(?:skill|agent|artifact|plan|memory|rule|local):\/\/[^'\s")`\\]+'|"(?:skill|agent|artifact|plan|memory|rule|local):\/\/[^"\s')`\\]+"|(?:skill|agent|artifact|plan|memory|rule|local):\/\/[^\s'")`\\]+|'local:\/[^'\s")`\\]+'|"local:\/[^"\s')`\\]+"|(?<![./\\\\\w-])local:\/[^\s'")`\\]+/g;
+	/'(?:skill|agent|artifact|plan|memory|rule|local):\/\/[^'\s")`\\]+'|"(?:skill|agent|artifact|plan|memory|rule|local):\/\/[^"\s')`\\]+"|(?:skill|agent|artifact|plan|memory|rule|local):\/\/[^\s'")`\\;&|<>($]+|'local:\/[^'\s")`\\]+'|"local:\/[^"\s')`\\]+"|(?<![./\\\\\w-])local:\/[^\s'")`\\;&|<>($]+/g;
 
 const SUPPORTED_INTERNAL_SCHEMES = ["skill", "agent", "artifact", "plan", "memory", "rule", "local"] as const;
 
@@ -27,6 +30,7 @@ export interface InternalUrlExpansionOptions {
 	noEscape?: boolean;
 	internalRouter?: InternalUrlResolver;
 	localOptions?: LocalProtocolOptions;
+	cwd?: string;
 	ensureLocalParentDirs?: boolean;
 }
 
@@ -66,7 +70,7 @@ export function resolveSkillUrlToPath(url: string, skills: readonly Skill[]): st
 	const hasRelativePath = rawPath !== "" && rawPath !== "/";
 
 	if (!hasRelativePath) {
-		return path.resolve(skill.filePath);
+		return path.resolve(skill.baseDir);
 	}
 
 	let relativePath: string;
@@ -87,6 +91,20 @@ export function resolveSkillUrlToPath(url: string, skills: readonly Skill[]): st
 	const resolvedBaseDir = path.resolve(skill.baseDir);
 	if (!resolvedPath.startsWith(resolvedBaseDir + path.sep) && resolvedPath !== resolvedBaseDir) {
 		throw new ToolError("Path traversal is not allowed in skill:// URLs");
+	}
+	// Agent Plugin skills (§4.1): the resource must canonically resolve within
+	// the plugin root. Fail closed: a dangling or unresolvable path is rejected
+	// rather than handed to bash, where writing through it could create the
+	// outside target. Symlinks may target other files inside the same package.
+	if (skill.containRoot) {
+		const contained = resolveContainedPathSync(skill.containRoot, resolvedPath);
+		if (contained.status === "outside") {
+			throw new ToolError(`skill:// path resolves outside the plugin root: ${url}`);
+		}
+		if (contained.status === "missing") {
+			throw new ToolError(`skill:// path does not exist: ${url}`);
+		}
+		return contained.realPath;
 	}
 
 	return resolvedPath;
@@ -141,9 +159,31 @@ function unquoteToken(token: string): string {
 }
 
 function isInsideShellQuote(command: string, index: number): boolean {
-	let quote: "'" | '"' | undefined;
+	type ShellQuote = "'" | '"' | undefined;
+	interface CommandSubstitution {
+		/** `$(` … `)` tracks paren depth; `` ` `` … `` ` `` is a plain toggle. */
+		kind: "dollar" | "backtick";
+		outerQuote: ShellQuote;
+		depth: number;
+	}
+
+	let quote: ShellQuote;
+	const substitutions: CommandSubstitution[] = [];
 	for (let i = 0; i < index; i++) {
 		const char = command[i];
+		// Inside a backtick substitution nested in double quotes, bash treats `\"`
+		// as a quote delimiter for the inner command, not as an escaped literal.
+		if (
+			char === "\\" &&
+			command[i + 1] === '"' &&
+			quote !== "'" &&
+			substitutions.at(-1)?.kind === "backtick" &&
+			substitutions.at(-1)?.outerQuote === '"'
+		) {
+			quote = quote === '"' ? undefined : '"';
+			i++;
+			continue;
+		}
 		if (char === "\\" && quote !== "'") {
 			i++;
 			continue;
@@ -154,6 +194,36 @@ function isInsideShellQuote(command: string, index: number): boolean {
 		}
 		if (char === '"' && quote !== "'") {
 			quote = quote === '"' ? undefined : '"';
+			continue;
+		}
+		if (char === "$" && command[i + 1] === "(" && quote !== "'") {
+			substitutions.push({ kind: "dollar", outerQuote: quote, depth: 1 });
+			quote = undefined;
+			i++;
+			continue;
+		}
+		if (char === "`" && quote !== "'") {
+			const top = substitutions.at(-1);
+			if (top?.kind === "backtick") {
+				substitutions.pop();
+				quote = top.outerQuote;
+			} else {
+				substitutions.push({ kind: "backtick", outerQuote: quote, depth: 0 });
+				quote = undefined;
+			}
+			continue;
+		}
+		if (quote !== undefined) continue;
+
+		const substitution = substitutions.at(-1);
+		if (substitution?.kind !== "dollar") continue;
+		if (char === "(") {
+			substitution.depth++;
+		} else if (char === ")") {
+			substitution.depth--;
+			if (substitution.depth === 0) {
+				quote = substitutions.pop()?.outerQuote;
+			}
 		}
 	}
 	return quote !== undefined;
@@ -175,6 +245,7 @@ async function resolveInternalUrlToPath(
 	internalRouter?: InternalUrlResolver,
 	localOptions?: LocalProtocolOptions,
 	ensureLocalParentDirs?: boolean,
+	cwd?: string,
 ): Promise<string> {
 	const url = normalizeLocalScheme(rawUrl);
 	const scheme = extractScheme(url);
@@ -208,7 +279,7 @@ async function resolveInternalUrlToPath(
 
 	let resource: InternalResource;
 	try {
-		resource = await internalRouter.resolve(url, { pathOnly: true });
+		resource = await internalRouter.resolve(url, { cwd, pathOnly: true });
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		throw new ToolError(`Failed to resolve ${scheme}:// URL in bash command: ${url}\n${message}`);
@@ -268,6 +339,7 @@ export async function expandInternalUrls(command: string, options: InternalUrlEx
 				options.internalRouter,
 				options.localOptions,
 				options.ensureLocalParentDirs,
+				options.cwd,
 			);
 		} catch {
 			continue;

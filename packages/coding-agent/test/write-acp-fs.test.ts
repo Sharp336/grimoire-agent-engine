@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { computeFileHash } from "@oh-my-pi/hashline";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
@@ -81,6 +82,26 @@ describe("write tool ACP fs routing", () => {
 		} finally {
 			bunWriteSpy.mockRestore();
 		}
+	});
+
+	it("keys the returned snapshot header on bridge-transformed disk content", async () => {
+		const filePath = path.join(tmpDir, "formatted.ts");
+		const requested = "function f() {\n    return 1;\n}\n";
+		const persisted = "function f() {\n\treturn 1;\n}\n";
+		const bridge: ClientBridge = {
+			capabilities: { writeTextFile: true },
+			writeTextFile: async ({ path: target, content }) => {
+				await Bun.write(target, content.replace(/^ {4}/gm, "\t"));
+			},
+		};
+		const session = createSession(tmpDir, { bridge });
+
+		const result = await new WriteTool(session).execute("call-drift", { path: filePath, content: requested });
+		const text = resultText(result);
+
+		expect(await Bun.file(filePath).text()).toBe(persisted);
+		expect(text).toContain(`[formatted.ts#${computeFileHash(persisted)}]`);
+		expect(text).not.toContain(`[formatted.ts#${computeFileHash(requested)}]`);
 	});
 
 	it("emits a progress snapshot before filesystem writes complete", async () => {
@@ -163,5 +184,23 @@ describe("write tool ACP fs routing", () => {
 				}),
 			).text(),
 		).toBe(scratchContent);
+	});
+
+	it("rejects read-only internal URLs without creating scheme-looking paths on disk", async () => {
+		const targetPath = "memory://root/memory_summary.md";
+		const leakedPath = path.join(tmpDir, "memory:/root/memory_summary.md");
+		const session = createSession(tmpDir);
+		const tool = new WriteTool(session);
+
+		let rejection: unknown;
+		try {
+			await tool.execute("call-memory", { path: targetPath, content: "memory summary\n" });
+		} catch (error) {
+			rejection = error;
+		}
+
+		expect(await Bun.file(leakedPath).exists()).toBe(false);
+		if (!(rejection instanceof Error)) throw new Error("Expected memory:// write to reject");
+		expect(rejection.message).toContain("memory:// URLs are read-only for write");
 	});
 });

@@ -3,15 +3,15 @@
  */
 
 import { PROVIDER_REGISTRY } from "@oh-my-pi/pi-ai";
+import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
-import chalk from "chalk";
+import { tokenHelp as commandHelp } from "../cli/command-help";
 import { isAuthenticated, ModelRegistry } from "../config/model-registry";
 import { discoverAuthStorage } from "../sdk";
 import { getAvailableAuthMethods } from "../web/search/providers/perplexity-auth";
 
 export default class Token extends Command {
-	static description = "Get the API key or OAuth token for a provider";
-
+	static description = commandHelp.description;
 	static args = {
 		provider: Args.string({
 			description: "Provider ID (e.g. anthropic, openai)",
@@ -64,12 +64,14 @@ export default class Token extends Command {
 				}
 				if (flags.list) {
 					for (const acct of accounts) {
-						const label =
+						const base =
 							acct.email ??
 							acct.accountId ??
 							acct.projectId ??
 							acct.enterpriseUrl ??
 							`credential #${acct.credentialId}`;
+						const org = acct.orgName ?? acct.orgId;
+						const label = org && org !== base ? `${base} (${org})` : base;
 						process.stdout.write(`${acct.position + 1}. ${label}\n`);
 					}
 					return;

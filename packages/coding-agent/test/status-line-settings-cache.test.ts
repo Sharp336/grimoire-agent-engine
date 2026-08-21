@@ -46,7 +46,7 @@ function makeSession(sessionName = "Cache Session") {
 		autoResolvedThinkingLevel: () => undefined,
 		isFastModeActive: () => false,
 		isAdvisorActive: () => false,
-		getGoalModeState: () => null,
+		getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
 		getAsyncJobSnapshot: () => ({ running: [] }),
 		settings: { get: () => false },
 		modelRegistry: { isUsingOAuth: () => false },
@@ -157,7 +157,7 @@ describe("StatusLineComponent effective settings cache", () => {
 		const customComponent = makeComponent({ preset: "custom", leftSegments: [], rightSegments: [] });
 		expect(customComponent.getEffectiveSettingsForTest().leftSegments).toEqual([]);
 		expect(customComponent.getEffectiveSettingsForTest().rightSegments).toEqual([]);
-		expect(customComponent.getTopBorder(120)).toEqual({ content: "", width: 0 });
+		expect(customComponent.getTopBorder(120)).toEqual({ content: "", width: 0, revision: 0 });
 	});
 
 	it("surfaces active subagents even when custom segments omit subagents", () => {
@@ -266,5 +266,15 @@ describe("StatusLineComponent effective settings cache", () => {
 			statusSpy.mockRestore();
 			headSpy.mockRestore();
 		}
+	});
+});
+
+describe("StatusLineComponent hook statuses", () => {
+	it("renders every keyed status on a deterministic line", () => {
+		const component = makeComponent({ showHookStatus: true });
+		component.setHookStatus("project-time", "$0.04 (dev)");
+		component.setHookStatus("ponytail", "Ponytail");
+
+		expect(component.render(8)).toEqual(["Ponytail", "$0.04 (…"]);
 	});
 });

@@ -1,17 +1,19 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { ToolExample } from "@oh-my-pi/pi-ai";
 import * as natives from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
-import { formatGroupedPaths, isEnoent, prompt, untilAborted } from "@oh-my-pi/pi-utils";
-import { type } from "arktype";
+import { formatGroupedPaths, hasFsCode, isEnoent, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { InternalUrlRouter } from "../internal-urls";
+import { splitMemoryGlobPattern } from "../internal-urls/memory-protocol";
 import type { Theme } from "../modes/theme/theme";
 import globDescription from "../prompts/tools/glob.md" with { type: "text" };
 import { type TruncationResult, truncateHead } from "../session/streaming-output";
+import { isScoutSpawnable } from "../task/spawn-policy";
 import { Ellipsis, fileHyperlink, renderFileList, renderStatusLine, renderTreeList, truncateToWidth } from "../tui";
 import type { ToolSession } from ".";
 import { applyListLimit } from "./list-limit";
@@ -105,7 +107,14 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 	readonly approval = "read" as const;
 	readonly loadMode = "essential";
 	readonly label = "Glob";
-	readonly description: string;
+	get description(): string {
+		return prompt.render(globDescription, {
+			scoutAvailable: isScoutSpawnable(
+				this.session.settings.get("task.disabledAgents") as string[] | undefined,
+				this.session.getSessionSpawns?.() ?? "*",
+			),
+		});
+	}
 	readonly parameters = findSchema;
 
 	readonly examples: readonly ToolExample<typeof findSchema.infer>[] = [
@@ -137,7 +146,6 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 	) {
 		this.#customOps = options?.operations;
 		this.#rootPathAlias = options?.rootPathAlias === true;
-		this.description = prompt.render(globDescription);
 	}
 
 	async execute(
@@ -176,7 +184,25 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 					);
 				}
 				if (hasGlobPathChars(rawPattern)) {
-					throw new ToolError(`Glob patterns are not supported for internal URLs: ${rawPattern}`);
+					if (!/^memory:\/\//i.test(rawPattern)) {
+						throw new ToolError(`Glob patterns are not supported for internal URLs: ${rawPattern}`);
+					}
+					const memoryGlob = splitMemoryGlobPattern(rawPattern);
+					const resource = await internalRouter.resolve(memoryGlob.baseUrl, {
+						cwd: this.session.cwd,
+						settings: this.session.settings,
+						signal,
+						localProtocolOptions: this.session.localProtocolOptions,
+						skills: this.session.skills,
+						pathOnly: true,
+					});
+					if (!resource.sourcePath) {
+						throw new ToolError(`Cannot find internal URL without a backing file: ${memoryGlob.baseUrl}`);
+					}
+					normalizedPatterns.push(
+						path.join(resource.sourcePath.replace(/[*?[{]/g, "[$&]"), memoryGlob.globPattern),
+					);
+					continue;
 				}
 				const resource = await internalRouter.resolve(rawPattern, {
 					cwd: this.session.cwd,
@@ -184,6 +210,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 					signal,
 					localProtocolOptions: this.session.localProtocolOptions,
 					skills: this.session.skills,
+					pathOnly: true,
 				});
 				if (!resource.sourcePath) {
 					throw new ToolError(`Cannot find internal URL without a backing file: ${rawPattern}`);
@@ -258,7 +285,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 
 			const buildResult = (
 				files: string[],
-				opts?: { notice?: string; forceTruncated?: boolean },
+				opts?: { notice?: string; forceTruncated?: boolean; timedOut?: boolean },
 			): AgentToolResult<GlobToolDetails> => {
 				const notice = opts?.notice;
 				const forceTruncated = opts?.forceTruncated ?? false;
@@ -271,7 +298,10 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 						cwd: this.session.cwd,
 						missingPaths: missingPaths.length > 0 ? missingPaths : undefined,
 					};
-					const parts = ["No files found matching pattern"];
+					// A timed-out empty result is an incomplete scan, not a verified
+					// absence — never emit the definitive "No files found" claim next
+					// to a timeout notice (the two statements contradict each other).
+					const parts = opts?.timedOut ? [] : ["No files found matching pattern"];
 					if (notice) parts.push(notice);
 					if (missingPathsNote) parts.push(missingPathsNote);
 					// Zero results is useless regardless of notices: the follow-up
@@ -385,7 +415,9 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 				try {
 					stat = await fs.promises.stat(target.searchPath);
 				} catch (err) {
-					if (isEnoent(err)) {
+					// ENAMETOOLONG can never name a real target; surface a clean
+					// "Path not found" instead of leaking the raw errno (issue #7597).
+					if (isEnoent(err) || hasFsCode(err, "ENAMETOOLONG")) {
 						if (isSingle) throw new ToolError(`Path not found: ${scopePath}`);
 						return [];
 					}
@@ -452,8 +484,15 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 				partial.sort((a, b) => b.m - a.m);
 				const sortedPaths = partial.map(entry => entry.p);
 				const seconds = timeoutMs % 1000 === 0 ? `${timeoutMs / 1000}` : (timeoutMs / 1000).toFixed(1);
-				const notice = `glob timed out after ${seconds}s; returning ${sortedPaths.length} partial matches — narrow the pattern instead of retrying blindly`;
-				return buildResult(sortedPaths, { notice, forceTruncated: true });
+				// Walk cost tracks directory-tree size, not pattern specificity: a
+				// mtime-ranked scan cannot early-exit, so a "narrow" pattern over a
+				// huge tree still times out. Say so instead of implying the pattern
+				// was too broad.
+				const notice =
+					sortedPaths.length > 0
+						? `glob timed out after ${seconds}s; returning ${sortedPaths.length} partial matches — results are incomplete, scope to a deeper directory instead of retrying blindly`
+						: `Glob timed out after ${seconds}s before finding any matches — the scan is incomplete, NOT proof of absence. The walk is bounded by directory size, not pattern width; scope the search to a deeper directory (e.g. \`sub/dir/*.ext\` instead of \`*.ext\` at a huge root).`;
+				return buildResult(sortedPaths, { notice, forceTruncated: true, timedOut: true });
 			}
 
 			// Merge per-target results: native glob already ranks each target's own
@@ -582,17 +621,20 @@ export const globToolRenderer = {
 			missingPaths.length > 0 ? uiTheme.fg("warning", `skipped missing: ${missingPaths.join(", ")}`) : undefined;
 
 		if (fileCount === 0) {
+			// `truncated` on an empty result means the scan timed out mid-walk —
+			// render "incomplete", not a definitive "No files found".
+			const emptyLabel = truncated ? "No matches before timeout (scan incomplete)" : "No files found";
 			const header = renderStatusLine(
 				{
 					icon: "warning",
 					title: "Glob",
 					titleColor: "toolTitle",
 					description: formatGlobRenderPaths(args),
-					meta: ["0 files"],
+					meta: truncated ? ["0 files", uiTheme.fg("warning", "timed out")] : ["0 files"],
 				},
 				uiTheme,
 			);
-			const lines = [header, formatEmptyMessage("No files found", uiTheme)];
+			const lines = [header, formatEmptyMessage(emptyLabel, uiTheme)];
 			if (missingNote) lines.push(missingNote);
 			return new Text(lines.join("\n"), 1, 0);
 		}

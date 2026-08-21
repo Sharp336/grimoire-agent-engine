@@ -7,7 +7,6 @@ import {
 	Ellipsis,
 	extractPrintableText,
 	fuzzyFilter,
-	Markdown,
 	type MarkdownTheme,
 	matchesKey,
 	padding,
@@ -28,7 +27,7 @@ import {
 	matchesSelectUp,
 } from "../../modes/utils/keybinding-matchers";
 import { CountdownTimer } from "./countdown-timer";
-import { DynamicBorder } from "./dynamic-border";
+import { OverlayPanel } from "./overlay-box";
 import { renderSegmentTrack } from "./segment-track";
 
 /** One segment of a {@link HookSelectorSlider} — a label and an optional
@@ -61,6 +60,8 @@ export interface HookSelectorOptions {
 	tui?: TUI;
 	timeout?: number;
 	onTimeout?: () => void;
+	onTimeoutStart?: () => void;
+	onTimeoutReset?: () => void;
 	initialIndex?: number;
 	outline?: boolean;
 	maxVisible?: number;
@@ -133,7 +134,7 @@ class OutlinedList extends Container {
 		this.invalidate();
 	}
 
-	render(width: number): readonly string[] {
+	override render(width: number): readonly string[] {
 		const borderColor = (text: string) => theme.fg("border", text);
 		const horizontal = borderColor(theme.boxRound.horizontal.repeat(Math.max(1, width)));
 		const innerWidth = Math.max(1, width - 2);
@@ -158,7 +159,7 @@ class OutlinedList extends Container {
  *  disabled-index lookups survive fuzzy filtering and reordering. */
 type FilteredOption = { option: HookSelectorOption; index: number };
 
-export class HookSelectorComponent extends Container {
+export class HookSelectorComponent extends OverlayPanel {
 	#options: HookSelectorOption[];
 	#filteredOptions: FilteredOption[];
 	#searchQuery = "";
@@ -172,12 +173,12 @@ export class HookSelectorComponent extends Container {
 	#outlinedList: OutlinedList | undefined;
 	#onSelectCallback: (option: string) => void;
 	#onCancelCallback: () => void;
-	#titleComponent: Markdown;
 	#baseTitle: string;
 	#countdown: CountdownTimer | undefined;
 	#onLeftCallback: (() => void) | undefined;
 	#onRightCallback: (() => void) | undefined;
 	#onExternalEditorCallback: (() => void) | undefined;
+	#onTimeoutResetCallback: (() => void) | undefined;
 	#slider: HookSelectorSlider | undefined;
 	#sliderIndex: number = 0;
 	#sliderComponent: Text | undefined;
@@ -189,7 +190,7 @@ export class HookSelectorComponent extends Container {
 		onCancel: () => void,
 		opts?: HookSelectorOptions,
 	) {
-		super();
+		super(title.split(/\r?\n/, 1)[0] ?? "");
 
 		this.#options = options.map(normalizeHookSelectorOption);
 		this.#filteredOptions = this.#options.map((option, index) => ({ option, index }));
@@ -209,33 +210,34 @@ export class HookSelectorComponent extends Container {
 		this.#maxVisible = Math.max(3, opts?.maxVisible ?? 12);
 		this.#onSelectCallback = onSelect;
 		this.#onCancelCallback = onCancel;
-		this.#baseTitle = title;
+		this.#baseTitle = this.title;
 		this.#onLeftCallback = opts?.onLeft;
 		this.#onRightCallback = opts?.onRight;
 		this.#onExternalEditorCallback = opts?.onExternalEditor;
+		this.#onTimeoutResetCallback = opts?.onTimeoutReset;
 		if (opts?.slider && opts.slider.segments.length > 0) {
 			this.#slider = opts.slider;
 			this.#sliderIndex = Math.max(0, Math.min(opts.slider.index, opts.slider.segments.length - 1));
 		}
 
-		this.addChild(new DynamicBorder());
 		this.addChild(new Spacer(1));
-
-		this.#titleComponent = new Markdown(title, 1, 0, getMarkdownTheme(), { color: t => theme.fg("accent", t) });
-		this.addChild(this.#titleComponent);
+		for (const line of title.split(/\r?\n/).slice(1)) {
+			this.addChild(new Text(theme.fg("accent", line), 0, 0));
+		}
 		this.addChild(new Spacer(1));
 
 		if (this.#slider) {
-			this.#sliderComponent = new Text(this.#renderSliderLine(), 1, 0);
+			this.#sliderComponent = new Text(this.#renderSliderLine(), 0, 0);
 			this.addChild(this.#sliderComponent);
 			this.addChild(new Spacer(1));
 		}
 
 		if (opts?.timeout && opts.timeout > 0 && opts.tui) {
+			opts.onTimeoutStart?.();
 			this.#countdown = new CountdownTimer(
 				opts.timeout,
 				opts.tui,
-				s => this.#titleComponent.setText(`${this.#baseTitle} (${s}s)`),
+				s => (this.title = `${this.#baseTitle} (${s}s)`),
 				() => {
 					opts?.onTimeout?.();
 					// Auto-select current option on timeout (typically the first/recommended option)
@@ -258,9 +260,8 @@ export class HookSelectorComponent extends Container {
 		}
 		this.addChild(new Spacer(1));
 		const controlsHint = opts?.helpText ?? "up/down navigate  enter select  esc cancel";
-		this.addChild(new Text(theme.fg("dim", controlsHint), 1, 0));
+		this.addChild(new Text(theme.fg("dim", controlsHint), 0, 0));
 		this.addChild(new Spacer(1));
-		this.addChild(new DynamicBorder());
 
 		this.#updateList();
 	}
@@ -633,8 +634,10 @@ export class HookSelectorComponent extends Container {
 	}
 
 	handleInput(keyData: string): void {
-		// Reset countdown on any interaction
-		this.#countdown?.reset();
+		if (this.#countdown) {
+			this.#countdown.reset();
+			this.#onTimeoutResetCallback?.();
+		}
 
 		if (matchesSelectCancel(keyData)) {
 			this.#onCancelCallback();
@@ -645,17 +648,23 @@ export class HookSelectorComponent extends Container {
 			return;
 		}
 
-		if (matchesSelectUp(keyData) || (!this.#isSearchEnabled() && keyData === "k")) {
+		if (matchesSelectUp(keyData) || (!this.#isSearchEnabled() && matchesKey(keyData, "k"))) {
 			this.#moveSelection(-1);
-		} else if (matchesSelectDown(keyData) || (!this.#isSearchEnabled() && keyData === "j")) {
+		} else if (matchesSelectDown(keyData) || (!this.#isSearchEnabled() && matchesKey(keyData, "j"))) {
 			this.#moveSelection(1);
 		} else if (matchesKey(keyData, "enter") || matchesKey(keyData, "return") || keyData === "\n") {
 			const selected = this.#filteredOptions[this.#selectedIndex];
 			if (selected && !this.#isDisabled(selected.index)) this.#onSelectCallback(selected.option.label);
-		} else if (matchesKey(keyData, "left") || (this.#slider && !this.#isSearchEnabled() && keyData === "h")) {
+		} else if (
+			matchesKey(keyData, "left") ||
+			(this.#slider && !this.#isSearchEnabled() && matchesKey(keyData, "h"))
+		) {
 			if (this.#slider) this.#moveSlider(-1);
 			else this.#onLeftCallback?.();
-		} else if (matchesKey(keyData, "right") || (this.#slider && !this.#isSearchEnabled() && keyData === "l")) {
+		} else if (
+			matchesKey(keyData, "right") ||
+			(this.#slider && !this.#isSearchEnabled() && matchesKey(keyData, "l"))
+		) {
 			if (this.#slider) this.#moveSlider(1);
 			else this.#onRightCallback?.();
 		} else if (this.#onExternalEditorCallback && matchesAppExternalEditor(keyData)) {
@@ -664,15 +673,15 @@ export class HookSelectorComponent extends Container {
 	}
 
 	override render(width: number): readonly string[] {
-		const renderWidth = Math.max(1, width);
+		const renderWidth = Math.max(1, width - 4);
 		if (this.#lastRenderWidth !== renderWidth) {
 			this.#lastRenderWidth = renderWidth;
 			this.#updateList(renderWidth);
 		}
-		return super.render(renderWidth);
+		return super.render(width);
 	}
 
-	dispose(): void {
+	override dispose(): void {
 		this.#countdown?.dispose();
 	}
 }

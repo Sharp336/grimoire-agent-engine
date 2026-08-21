@@ -6,7 +6,7 @@ import type {
 	StoppingCriteria as TransformersStoppingCriteria,
 } from "@huggingface/transformers";
 import { getTinyModelsCacheDir, prompt } from "@oh-my-pi/pi-utils";
-import tinyTitleSystemPrompt from "../prompts/system/tiny-title-system.md" with { type: "text" };
+import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
 import {
 	errorMessage,
 	errorText,
@@ -19,15 +19,17 @@ import {
 	sendProgress,
 	type TransformersRuntimeMetadata,
 } from "../subprocess/worker-runtime";
+import { buildCompletionPrompt } from "./completion-prompt";
 import { resolveTinyModelDevicePreference, type TinyModelDevice, tinyModelDeviceLoadOrder } from "./device";
 import { resolveTinyModelDtypeOverride, type TinyModelDtype } from "./dtype";
+import { formatTitleUserMessage } from "./message-preproc";
 import {
 	getTinyLocalModelSpec,
 	type TinyLocalModelKey,
 	type TinyTitleLocalModelKey,
 	type TinyTitleLocalModelSpec,
 } from "./models";
-import { formatTitleUserMessage, normalizeGeneratedTitle } from "./text";
+import { normalizeGeneratedTitle } from "./text";
 import type { TinyTitleTransport, TinyTitleWorkerInbound } from "./title-protocol";
 
 const TITLE_PREFILL = "<title>";
@@ -36,12 +38,12 @@ const TITLE_MAX_NEW_TOKENS = 20;
 const STOP_DECODE_WINDOW_TOKENS = 32;
 const MEMORY_COMPLETION_DEFAULT_MAX_NEW_TOKENS = 256;
 const COMPLETION_MAX_NEW_TOKENS = 1024;
-const TINY_TITLE_SYSTEM_PROMPT = prompt.render(tinyTitleSystemPrompt);
+const TINY_TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt);
 
 const tinyModelDevicePreference = resolveTinyModelDevicePreference();
 const tinyModelDtypeOverride = resolveTinyModelDtypeOverride();
 
-interface TransformersRuntime extends TransformersRuntimeMetadata {
+export interface TransformersRuntime extends TransformersRuntimeMetadata {
 	env: {
 		cacheDir?: string;
 		allowLocalModels?: boolean;
@@ -78,7 +80,13 @@ function getTinyTitleRuntimeDir(): string {
 	);
 }
 
-function createStopOnTextCriteria(
+/** Stops generation at the first occurrence of `text` in the *generated* tokens.
+ *
+ *  The window must be anchored to the generation boundary, not to the end of the
+ *  whole sequence: a prompt that itself contains the stop string (chat-level
+ *  few-shot examples ending in `</title>`, for instance) would otherwise match on
+ *  prompt tokens and stop before the model emits anything. */
+export function createStopOnTextCriteria(
 	transformers: TransformersRuntime,
 	tokenizer: TextGenerationPipeline["tokenizer"],
 	text: string,
@@ -86,6 +94,8 @@ function createStopOnTextCriteria(
 	class StopOnTextCriteria extends transformers.StoppingCriteria {
 		#tokenizer: TextGenerationPipeline["tokenizer"];
 		#text: string;
+		/** First generated index per batch entry, captured on the first call. */
+		#generatedStarts: number[] = [];
 
 		constructor() {
 			super();
@@ -93,9 +103,11 @@ function createStopOnTextCriteria(
 			this.#text = text;
 		}
 
-		_call(inputIds: number[][]): boolean[] {
-			return inputIds.map(ids => {
-				const tail = ids.slice(-STOP_DECODE_WINDOW_TOKENS);
+		override _call(inputIds: number[][]): boolean[] {
+			return inputIds.map((ids, index) => {
+				const generatedStart = this.#generatedStarts[index] ?? Math.max(0, ids.length - 1);
+				this.#generatedStarts[index] = generatedStart;
+				const tail = ids.slice(Math.max(generatedStart, ids.length - STOP_DECODE_WINDOW_TOKENS));
 				const decoded = this.#tokenizer.decode(tail, {
 					skip_special_tokens: false,
 					clean_up_tokenization_spaces: false,
@@ -230,6 +242,8 @@ function buildPrompt(generator: TextGenerationPipeline, message: string, systemP
 function extractTinyTitle(text: string, sourceText: string): string | null {
 	const titleStart = text.lastIndexOf(TITLE_PREFILL);
 	const withoutPrefix = titleStart >= 0 ? text.slice(titleStart + TITLE_PREFILL.length) : text;
+	// Self-closing tag: <title/> or <title /> (only when the prefill is present).
+	if (titleStart >= 0 && /^\s*\/>/.test(withoutPrefix)) return null;
 	const closeIndex = withoutPrefix.indexOf(TITLE_CLOSE);
 	const withoutClose = closeIndex >= 0 ? withoutPrefix.slice(0, closeIndex) : withoutPrefix;
 	const tagIndex = withoutClose.indexOf("<");
@@ -262,21 +276,10 @@ async function generateTitle(
 	return extractTinyTitle(output[0]?.generated_text ?? "", message);
 }
 
-function buildCompletionPrompt(generator: TextGenerationPipeline, promptText: string): string {
-	const chat = [{ role: "user", content: promptText }];
-	const chatTemplateOptions = {
-		add_generation_prompt: true,
-		tokenize: false,
-		enable_thinking: false,
-	};
-	return `${generator.tokenizer.apply_chat_template(chat, chatTemplateOptions)}`;
-}
-
 /**
- * Generic single-turn completion used by Mnemopi memory tasks (fact extraction
- * and consolidation). The caller (Mnemopi) supplies the full task prompt; we
- * wrap it as the user turn, decode greedily, and return the raw text for the
- * caller's own parser. Output is capped to keep local inference latency bounded.
+ * Completion path for Mnemopi memory tasks. Extraction can carry a dedicated
+ * system prompt and user payload; consolidation retains the generic user-only
+ * prompt. Output is capped to keep local inference latency bounded.
  */
 async function generateCompletion(
 	transport: TinyTitleTransport,
@@ -284,9 +287,10 @@ async function generateCompletion(
 	modelKey: TinyLocalModelKey,
 	promptText: string,
 	maxTokens: number | undefined,
+	systemPrompt: string | undefined,
 ): Promise<string | null> {
 	const generator = await loadPipeline(modelKey, transport, requestId);
-	const text = buildCompletionPrompt(generator, promptText);
+	const text = buildCompletionPrompt(generator.tokenizer, promptText, systemPrompt);
 	const requested = maxTokens ?? MEMORY_COMPLETION_DEFAULT_MAX_NEW_TOKENS;
 	const maxNewTokens = Math.min(Math.max(1, requested), COMPLETION_MAX_NEW_TOKENS);
 	const output = (await generator(text, {
@@ -329,6 +333,7 @@ async function handleQueuedRequest(
 				request.modelKey,
 				request.prompt,
 				request.maxTokens,
+				request.systemPrompt,
 			);
 			transport.send({ type: "completion", id: request.id, text });
 			return;

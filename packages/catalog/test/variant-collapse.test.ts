@@ -15,8 +15,10 @@ import { googleGeminiCliModelManagerOptions } from "@oh-my-pi/pi-catalog/provide
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import {
 	ANTIGRAVITY_VARIANT_COLLAPSE_TABLE,
+	CURSOR_VARIANT_COLLAPSE_TABLE,
 	collapseEffortVariants,
 	collapseEffortVariantsAcrossProviders,
+	DEVIN_VARIANT_COLLAPSE_TABLE,
 	deriveThinkingPairFamilies,
 	GEMINI_CLI_VARIANT_COLLAPSE_TABLE,
 	getVariantAliasSources,
@@ -106,6 +108,41 @@ describe("collapseEffortVariants", () => {
 			medium: "gemini-3.5-flash-low",
 			high: "gemini-3-flash-agent",
 		});
+	});
+
+	it("collapses Gemini 3.6 Flash tiers into one routed logical spec", () => {
+		const out = collapseEffortVariants(
+			[
+				memberSpec("gemini-3.6-flash-high"),
+				memberSpec("gemini-3.6-flash-low"),
+				memberSpec("gemini-3.6-flash-medium"),
+				memberSpec("gemini-3.6-flash-tiered"),
+			],
+			ANTIGRAVITY_VARIANT_COLLAPSE_TABLE,
+		);
+
+		expect(out).toHaveLength(1);
+		const flash = out[0];
+		expect(flash?.id).toBe("gemini-3.6-flash");
+		expect(flash?.name).toBe("Gemini 3.6 Flash");
+		expect(flash?.requestModelId).toBe("gemini-3.6-flash-low");
+		expect(flash?.thinking).toEqual({
+			mode: "google-level",
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+			requiresEffort: true,
+			effortRouting: {
+				minimal: "gemini-3.6-flash-low",
+				low: "gemini-3.6-flash-low",
+				medium: "gemini-3.6-flash-medium",
+				high: "gemini-3.6-flash-high",
+			},
+		});
+
+		const model = buildModel(flash as ModelSpec<"google-gemini-cli">);
+		expect(resolveWireModelId(model, Effort.Minimal)).toBe("gemini-3.6-flash-low");
+		expect(resolveWireModelId(model, Effort.Low)).toBe("gemini-3.6-flash-low");
+		expect(resolveWireModelId(model, Effort.Medium)).toBe("gemini-3.6-flash-medium");
+		expect(resolveWireModelId(model, Effort.High)).toBe("gemini-3.6-flash-high");
 	});
 
 	it("drops routes whose target member is absent", () => {
@@ -526,6 +563,233 @@ describe("collapseEffortVariantsAcrossProviders", () => {
 	});
 });
 
+describe("Devin tier routing", () => {
+	const family = (id: string) => {
+		const found = DEVIN_VARIANT_COLLAPSE_TABLE.families.find(f => f.id === id);
+		if (!found) throw new Error(`Devin family ${id} missing`);
+		return found;
+	};
+
+	it("routes user efforts 1:1 onto per-tier siblings including max", () => {
+		const opus = family("claude-opus-4-8");
+		expect(opus.routing).toEqual({
+			[Effort.Low]: "claude-opus-4-8-low",
+			[Effort.Medium]: "claude-opus-4-8-medium",
+			[Effort.High]: "claude-opus-4-8-high",
+			[Effort.XHigh]: "claude-opus-4-8-xhigh",
+			[Effort.Max]: "claude-opus-4-8-max",
+		});
+		expect(opus.thinking.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max]);
+		expect(opus.thinking.requiresEffort).toBe(true);
+
+		const sol = family("gpt-5-6-sol");
+		expect(sol.routing[Effort.Max]).toBe("gpt-5-6-sol-max");
+		expect(sol.routing[Effort.Low]).toBe("gpt-5-6-sol-low");
+		expect(sol.routing.off).toBe("gpt-5-6-sol-none");
+		expect(sol.routing[Effort.Minimal]).toBeUndefined();
+
+		const solFast = family("gpt-5-6-sol-fast");
+		expect(solFast.routing[Effort.Max]).toBe("gpt-5-6-sol-max-priority");
+		expect(solFast.thinking.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max]);
+	});
+
+	it("keeps pre-5.6 families without a -max sibling on the xhigh ceiling", () => {
+		const gpt55 = family("gpt-5-5");
+		expect(gpt55.thinking.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh]);
+		expect(gpt55.routing[Effort.Minimal]).toBeUndefined();
+		expect(gpt55.routing[Effort.Max]).toBeUndefined();
+	});
+
+	it("routes current Devin families onto their account-visible wire variants", () => {
+		const fable = family("claude-fable-5");
+		expect(fable.routing[Effort.Low]).toBe("claude-5-fable-low");
+		expect(fable.routing[Effort.Max]).toBe("claude-5-fable-max");
+
+		const swe = family("swe-1-7");
+		expect(swe.thinking.efforts).toEqual([Effort.Medium, Effort.Max]);
+		expect(swe.routing[Effort.Medium]).toBe("swe-1-7-medium");
+		expect(swe.routing[Effort.Max]).toBe("swe-1-7");
+
+		const gemini = family("gemini-3-6-flash");
+		expect(gemini.routing[Effort.Minimal]).toBe("gemini-3-6-flash-minimal");
+		expect(gemini.routing[Effort.High]).toBe("gemini-3-6-flash-high");
+
+		const inkling = family("inkling");
+		expect(inkling.routing.off).toBe("inkling-none");
+		expect(inkling.routing[Effort.Max]).toBe("inkling-max");
+	});
+
+	it("collapses entitled current variants and resolves the selected effort to the wire UID", () => {
+		const rawIds = [
+			"claude-5-fable-low",
+			"claude-5-fable-medium",
+			"claude-5-fable-high",
+			"claude-5-fable-xhigh",
+			"claude-5-fable-max",
+			"swe-1-7-medium",
+			"swe-1-7",
+		];
+		const specs = rawIds.map(
+			(id): ModelSpec<"devin-agent"> => ({
+				id,
+				name: id,
+				api: "devin-agent",
+				provider: "devin",
+				baseUrl: "https://server.codeium.com",
+				reasoning: true,
+				input: ["text"],
+				supportsTools: true,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 200_000,
+				maxTokens: 64_000,
+			}),
+		);
+
+		const collapsed = collapseEffortVariants(specs, DEVIN_VARIANT_COLLAPSE_TABLE);
+		expect(collapsed.map(model => model.id).sort()).toEqual(["claude-fable-5", "swe-1-7"]);
+
+		const fable = collapsed.find(model => model.id === "claude-fable-5");
+		const swe = collapsed.find(model => model.id === "swe-1-7");
+		if (!fable || !swe) throw new Error("Current Devin families did not collapse");
+		expect(resolveWireModelId(buildModel(fable), Effort.XHigh)).toBe("claude-5-fable-xhigh");
+		expect(resolveWireModelId(buildModel(swe), Effort.Medium)).toBe("swe-1-7-medium");
+		expect(resolveWireModelId(buildModel(swe), Effort.Max)).toBe("swe-1-7");
+	});
+});
+
+describe("Cursor Grok tier routing (issue #8803)", () => {
+	function cursorMemberSpec(id: string): ModelSpec<"cursor-agent"> {
+		return {
+			id,
+			name: id,
+			api: "cursor-agent",
+			provider: "cursor",
+			baseUrl: "https://api2.cursor.sh",
+			// Live GetUsableModels + bundled references mark these reasoning:false;
+			// collapse must still recognize the effort ladder.
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 64_000,
+		};
+	}
+
+	const RAW_SIBLINGS = [
+		"cursor-grok-4.5-high",
+		"cursor-grok-4.5-high-fast",
+		"cursor-grok-4.5-low",
+		"cursor-grok-4.5-low-fast",
+		"cursor-grok-4.5-medium",
+		"cursor-grok-4.5-medium-fast",
+		"cursor-grok-4.6-high",
+		"cursor-grok-4.6-high-fast",
+		"cursor-grok-4.6-low",
+		"cursor-grok-4.6-low-fast",
+		"cursor-grok-4.6-medium",
+		"cursor-grok-4.6-medium-fast",
+		"cursor-grok-4.6-xhigh",
+		"cursor-grok-4.6-xhigh-fast",
+	];
+
+	it("collapses the 14 effort siblings into four logical models, split by the -fast lane", () => {
+		const collapsed = collapseEffortVariants(RAW_SIBLINGS.map(cursorMemberSpec), CURSOR_VARIANT_COLLAPSE_TABLE);
+		expect(collapsed.map(model => model.id).sort()).toEqual([
+			"cursor-grok-4.5",
+			"cursor-grok-4.5-fast",
+			"cursor-grok-4.6",
+			"cursor-grok-4.6-fast",
+		]);
+
+		const g46 = collapsed.find(model => model.id === "cursor-grok-4.6");
+		if (!g46) throw new Error("cursor-grok-4.6 did not collapse");
+		expect(g46.name).toBe("Grok 4.6");
+		// Effort route forces reasoning even though every member said false.
+		expect(g46.reasoning).toBe(true);
+		expect(g46.thinking?.mode).toBe("effort");
+		expect(g46.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh]);
+		expect(g46.thinking?.requiresEffort).toBe(true);
+	});
+
+	it("routes each user effort onto the live sibling wire id per service-tier lane", () => {
+		const collapsed = collapseEffortVariants(RAW_SIBLINGS.map(cursorMemberSpec), CURSOR_VARIANT_COLLAPSE_TABLE);
+		const model = (id: string) => {
+			const found = collapsed.find(m => m.id === id);
+			if (!found) throw new Error(`${id} did not collapse`);
+			return buildModel(found as ModelSpec<"cursor-agent">);
+		};
+
+		expect(resolveWireModelId(model("cursor-grok-4.6"), Effort.XHigh)).toBe("cursor-grok-4.6-xhigh");
+		expect(resolveWireModelId(model("cursor-grok-4.6"), Effort.Low)).toBe("cursor-grok-4.6-low");
+		expect(resolveWireModelId(model("cursor-grok-4.6-fast"), Effort.High)).toBe("cursor-grok-4.6-high-fast");
+		expect(resolveWireModelId(model("cursor-grok-4.5"), Effort.Medium)).toBe("cursor-grok-4.5-medium");
+		// 4.5 has no xhigh sibling: the ceiling stays at high.
+		expect(model("cursor-grok-4.5").thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High]);
+	});
+});
+
+describe("Cursor GPT-5.6 tier routing (issue #9025)", () => {
+	function cursorMemberSpec(id: string): ModelSpec<"cursor-agent"> {
+		return {
+			id,
+			name: id,
+			api: "cursor-agent",
+			provider: "cursor",
+			baseUrl: "https://api2.cursor.sh",
+			// Live GetUsableModels marks these reasoning:false; the effort route
+			// must still promote the collapsed family to reasoning.
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 64_000,
+		};
+	}
+
+	const TIERS = ["none", "low", "medium", "high", "xhigh", "max"];
+	const RAW_SIBLINGS = ["luna", "sol", "terra"].flatMap(variant =>
+		TIERS.flatMap(tier => [`gpt-5.6-${variant}-${tier}`, `gpt-5.6-${variant}-${tier}-fast`]),
+	);
+
+	it("collapses the 36 effort siblings into six logical models, split by the -fast lane", () => {
+		expect(RAW_SIBLINGS).toHaveLength(36);
+		const collapsed = collapseEffortVariants(RAW_SIBLINGS.map(cursorMemberSpec), CURSOR_VARIANT_COLLAPSE_TABLE);
+		expect(collapsed.map(model => model.id).sort()).toEqual([
+			"gpt-5.6-luna",
+			"gpt-5.6-luna-fast",
+			"gpt-5.6-sol",
+			"gpt-5.6-sol-fast",
+			"gpt-5.6-terra",
+			"gpt-5.6-terra-fast",
+		]);
+
+		const luna = collapsed.find(model => model.id === "gpt-5.6-luna");
+		if (!luna) throw new Error("gpt-5.6-luna did not collapse");
+		expect(luna.name).toBe("GPT-5.6 Luna");
+		// Effort route forces reasoning even though every member said false.
+		expect(luna.reasoning).toBe(true);
+		expect(luna.thinking?.mode).toBe("effort");
+		expect(luna.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max]);
+	});
+
+	it("routes each user effort onto the live sibling wire id per service-tier lane", () => {
+		const collapsed = collapseEffortVariants(RAW_SIBLINGS.map(cursorMemberSpec), CURSOR_VARIANT_COLLAPSE_TABLE);
+		const model = (id: string) => {
+			const found = collapsed.find(m => m.id === id);
+			if (!found) throw new Error(`${id} did not collapse`);
+			return buildModel(found as ModelSpec<"cursor-agent">);
+		};
+
+		// `-none` is the thinking-off tier; efforts route onto the standard lane.
+		expect(resolveWireModelId(model("gpt-5.6-sol"), undefined)).toBe("gpt-5.6-sol-none");
+		expect(resolveWireModelId(model("gpt-5.6-sol"), Effort.Max)).toBe("gpt-5.6-sol-max");
+		expect(resolveWireModelId(model("gpt-5.6-sol"), Effort.Low)).toBe("gpt-5.6-sol-low");
+		// The -fast lane is a distinct SKU routing onto its own sibling ids.
+		expect(resolveWireModelId(model("gpt-5.6-terra-fast"), Effort.High)).toBe("gpt-5.6-terra-high-fast");
+		expect(resolveWireModelId(model("gpt-5.6-terra-fast"), Effort.XHigh)).toBe("gpt-5.6-terra-xhigh-fast");
+	});
+});
+
 describe("variant aliases", () => {
 	it("resolves members and recycled ids per provider", () => {
 		expect(resolveVariantAlias("google-antigravity", "gemini-3.5-flash-low")).toBe("gemini-3.5-flash");
@@ -684,6 +948,27 @@ describe("antigravity discovery collapsing", () => {
 				supportsImages: true,
 				thinkingBudget: 10_000,
 			},
+			"gemini-3.7-flash-low": {
+				displayName: "Gemini 3.7 Flash Low",
+				supportsThinking: true,
+				supportsImages: true,
+				maxTokens: 1_048_576,
+				maxOutputTokens: 65_536,
+			},
+			"gemini-3.7-flash-medium": {
+				displayName: "Gemini 3.7 Flash Medium",
+				supportsThinking: true,
+				supportsImages: true,
+				maxTokens: 1_048_576,
+				maxOutputTokens: 65_536,
+			},
+			"gemini-3.7-flash-high": {
+				displayName: "Gemini 3.7 Flash High",
+				supportsThinking: true,
+				supportsImages: true,
+				maxTokens: 1_048_576,
+				maxOutputTokens: 65_536,
+			},
 			"claude-sonnet-4-6": { displayName: "Claude Sonnet 4.6", supportsThinking: true, supportsImages: true },
 			"claude-sonnet-4-6-thinking": {
 				displayName: "Claude Sonnet 4.6 Thinking",
@@ -705,7 +990,12 @@ describe("antigravity discovery collapsing", () => {
 	it("returns collapsed logical entries and keeps the denylist", async () => {
 		const models = await fetchAntigravityDiscoveryModels({ token: "t", endpoint: "https://cca.test", fetcher });
 
-		expect(models?.map(m => m.id).sort()).toEqual(["claude-sonnet-4-6", "gemini-2.5-flash", "gemini-3.5-flash"]);
+		expect(models?.map(m => m.id).sort()).toEqual([
+			"claude-sonnet-4-6",
+			"gemini-2.5-flash",
+			"gemini-3.5-flash",
+			"gemini-3.7-flash",
+		]);
 		const flash = models?.find(m => m.id === "gemini-3.5-flash");
 		expect(flash?.requestModelId).toBe("gemini-3.5-flash-extra-low");
 		expect(flash?.thinking?.effortRouting?.[Effort.High]).toBe("gemini-3-flash-agent");
@@ -715,21 +1005,52 @@ describe("antigravity discovery collapsing", () => {
 		const flash25 = models?.find(m => m.id === "gemini-2.5-flash");
 		expect(flash25?.thinking?.effortRouting?.[Effort.High]).toBe("gemini-2.5-flash-thinking");
 		expect(flash25?.thinking?.effortRouting?.off).toBe("gemini-2.5-flash");
+		const flash37 = models?.find(m => m.id === "gemini-3.7-flash");
+		expect(flash37?.requestModelId).toBe("gemini-3.7-flash-low");
+		expect(flash37?.thinking).toEqual({
+			mode: "google-level",
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+			requiresEffort: true,
+			effortRouting: {
+				minimal: "gemini-3.7-flash-low",
+				low: "gemini-3.7-flash-low",
+				medium: "gemini-3.7-flash-medium",
+				high: "gemini-3.7-flash-high",
+			},
+		});
 	});
 
-	it("keeps collapsed routing through the gemini-cli re-provision", async () => {
+	it("discovers Gemini models through Antigravity before provisioning Cloud Code Assist", async () => {
+		const requestedUrls: string[] = [];
+		const geminiCliFetcher = Object.assign(
+			(input: string | URL | Request, _init?: RequestInit) => {
+				const url = String(input);
+				requestedUrls.push(url);
+				if (!url.startsWith(ANTIGRAVITY_PRIMARY_ENDPOINT)) {
+					return Promise.resolve(new Response("Forbidden", { status: 403 }));
+				}
+				return Promise.resolve(new Response(JSON.stringify(payload), { status: 200 }));
+			},
+			{ preconnect: fetch.preconnect },
+		);
 		const options = googleGeminiCliModelManagerOptions({
 			oauthToken: "t",
 			endpoint: "https://cca.test",
-			fetch: fetcher,
+			fetch: geminiCliFetcher,
 		});
 		const models = await options.fetchDynamicModels?.();
 
+		expect(requestedUrls).toContain(`${ANTIGRAVITY_PRIMARY_ENDPOINT}/v1internal:fetchAvailableModels`);
+		expect(models?.some(m => m.id === "claude-sonnet-4-6")).toBe(false);
+		expect(models?.every(m => m.baseUrl === "https://cca.test")).toBe(true);
 		const flash = models?.find(m => m.id === "gemini-3.5-flash");
 		expect(flash?.provider).toBe("google-gemini-cli");
-		expect(flash?.baseUrl).toBe("https://cca.test");
 		expect(flash?.requestModelId).toBe("gemini-3.5-flash-extra-low");
 		expect(flash?.thinking?.effortRouting?.off).toBe("gemini-3.5-flash-extra-low");
+		const flash37 = models?.find(m => m.id === "gemini-3.7-flash");
+		expect(flash37?.requestModelId).toBe("gemini-3.7-flash-low");
+		expect(flash37?.thinking?.requiresEffort).toBe(true);
+		expect(flash37?.thinking?.effortRouting?.[Effort.High]).toBe("gemini-3.7-flash-high");
 	});
 
 	it("uses the primary daily endpoint by default", async () => {
@@ -747,7 +1068,81 @@ describe("antigravity discovery collapsing", () => {
 			fetcher: defaultFetcher,
 		});
 
-		expect(requestedUrls[0]).toContain(ANTIGRAVITY_PRIMARY_ENDPOINT);
+		const discoveryUrl = requestedUrls.find(url => url.includes("/v1internal:fetchAvailableModels"));
+		expect(discoveryUrl).toBeDefined();
+		expect(discoveryUrl).toContain(ANTIGRAVITY_PRIMARY_ENDPOINT);
 		expect(models?.[0]?.baseUrl).toBe(ANTIGRAVITY_PRIMARY_ENDPOINT);
+	});
+});
+
+describe("Devin GLM-5.2 collapse", () => {
+	function devinMemberSpec(id: string, overrides: Partial<ModelSpec<"devin-agent">> = {}): ModelSpec<"devin-agent"> {
+		return {
+			id,
+			name: id,
+			api: "devin-agent",
+			provider: "devin",
+			baseUrl: "https://server.codeium.com",
+			reasoning: true,
+			input: ["text"],
+			supportsTools: true,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 64_000,
+			...overrides,
+		};
+	}
+
+	it("collapses the three 200K GLM-5.2 variants into one logical entry routing all efforts to the free glm-5-2 wire UID", () => {
+		const out = collapseEffortVariants(
+			[
+				devinMemberSpec("glm-5-2"),
+				devinMemberSpec("glm-5-2-max"),
+				devinMemberSpec("glm-5-2-none", { reasoning: false }),
+			],
+			DEVIN_VARIANT_COLLAPSE_TABLE,
+		);
+
+		expect(out).toHaveLength(1);
+		const spec = out[0];
+		expect(spec?.id).toBe("glm-5-2");
+		expect(spec?.thinking?.effortRouting).toEqual({
+			high: "glm-5-2",
+			xhigh: "glm-5-2",
+		});
+	});
+
+	it("routes every effort to glm-5-2 (never to the quota-gated glm-5-2-max or glm-5-2-none)", () => {
+		const out = collapseEffortVariants(
+			[devinMemberSpec("glm-5-2"), devinMemberSpec("glm-5-2-max")],
+			DEVIN_VARIANT_COLLAPSE_TABLE,
+		);
+
+		const spec = out[0];
+		const routing = spec?.thinking?.effortRouting ?? {};
+		for (const wire of Object.values(routing)) {
+			expect(wire).toBe("glm-5-2");
+		}
+	});
+
+	it("collapses the three 1M GLM-5.2 variants into one paid entry with proper effort routing", () => {
+		const out = collapseEffortVariants(
+			[
+				devinMemberSpec("glm-5-2-1m", { contextWindow: 1_000_000 }),
+				devinMemberSpec("glm-5-2-max-1m", { contextWindow: 1_000_000 }),
+				devinMemberSpec("glm-5-2-none-1m", { contextWindow: 1_000_000, reasoning: false }),
+			],
+			DEVIN_VARIANT_COLLAPSE_TABLE,
+		);
+
+		expect(out).toHaveLength(1);
+		const spec = out[0];
+		expect(spec?.id).toBe("glm-5-2-1m");
+		expect(spec?.contextWindow).toBe(1_000_000);
+		expect(spec?.thinking?.effortRouting).toEqual({
+			off: "glm-5-2-none-1m",
+			high: "glm-5-2-1m",
+			xhigh: "glm-5-2-max-1m",
+		});
 	});
 });

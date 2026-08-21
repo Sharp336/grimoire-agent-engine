@@ -156,7 +156,14 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 			const commandName = commandText.slice(1, spaceIndex);
 			const command = this.#commands.find(cmd => cmd.name === commandName || cmd.aliases?.includes(commandName));
 			if (command && (!("allowArgs" in command) || command.allowArgs !== false)) {
-				return this.#baseProvider.getSuggestions(lines, cursorLine, cursorCol);
+				const argumentSuggestions = await this.#baseProvider.getSuggestions(lines, cursorLine, cursorCol);
+				if (argumentSuggestions) return argumentSuggestions;
+				// No slash-argument completion for this input: preserve numeric
+				// GitHub references and internal URLs while keeping prompt-action
+				// tokens such as `#copy` literal.
+				const githubRefSuggestions = getGithubRefSuggestions(textBeforeCursor);
+				if (githubRefSuggestions) return githubRefSuggestions;
+				return getInternalUrlSuggestions(textBeforeCursor, this.#basePath);
 			}
 		}
 

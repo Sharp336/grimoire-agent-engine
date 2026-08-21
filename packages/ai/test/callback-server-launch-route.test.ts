@@ -94,10 +94,13 @@ describe("OAuthCallbackFlow /launch route", () => {
 		abort.abort("test done");
 		await login;
 
-		// Server has stopped and `#pendingAuthUrl` was cleared — the launch URL
-		// no longer connects. The correct end-state is that the redirect NEVER
-		// points at a stale URL; the loopback socket is gone so `fetch` rejects.
-		await expect(fetch(info.launchUrl!)).rejects.toThrow();
+		// Server has stopped and `#pendingAuthUrl` was cleared — the correct
+		// end-state is that the stale authorize URL is NEVER served again.
+		// Usually the loopback socket is gone and `fetch` rejects, but a parallel
+		// test may have reclaimed the freed ephemeral port, so tolerate any
+		// answer that is not our stale redirect.
+		const answer = await fetch(info.launchUrl!, { redirect: "manual" }).catch(() => null);
+		expect(answer?.headers.get("location") ?? null).not.toBe(info.url);
 	});
 
 	it("routes `/callback` and `/launch` on the same server without interfering", async () => {
@@ -111,6 +114,24 @@ describe("OAuthCallbackFlow /launch route", () => {
 		expect(stray.status).toBe(404);
 
 		abort.abort("test done");
+		await login;
+	});
+
+	it("serves success copy that permits manual tab close", async () => {
+		const { info, login } = await startFlowAndWaitForAuth();
+		const authUrl = new URL(info.url);
+		const redirectUri = authUrl.searchParams.get("redirect_uri");
+		expect(redirectUri).toMatch(/^http:\/\/localhost:\d+\/callback$/);
+		const state = authUrl.searchParams.get("state") ?? "";
+
+		const callbackResponse = await fetch(`${redirectUri}?code=test-code&state=${encodeURIComponent(state)}`);
+		expect(callbackResponse.status).toBe(200);
+		const html = await callbackResponse.text();
+
+		expect(html).toContain("Authentication Successful");
+		expect(html).toContain("You have successfully logged in.<br>You can now close this tab.");
+		expect(html).toContain("Close Window");
+		expect(html).not.toContain("This window will close automatically.");
 		await login;
 	});
 

@@ -6,6 +6,8 @@
  * internals, which massively overcounts.
  */
 import { describe, expect, it } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
+import { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import { arkToWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import {
 	type ContextBreakdown,
@@ -14,7 +16,8 @@ import {
 	estimateToolSchemaTokens,
 	renderContextUsage,
 } from "@oh-my-pi/pi-coding-agent/modes/utils/context-usage";
-import { type } from "arktype";
+
+const tokenizer = new Tokenizer();
 
 describe("estimateToolSchemaTokens", () => {
 	it("counts arktype tool schemas by their wire JSON Schema, not arktype internals", () => {
@@ -22,12 +25,14 @@ describe("estimateToolSchemaTokens", () => {
 			"query /** search query */": "string",
 			"limit?": "number",
 		});
-		const arktypeEstimate = estimateToolSchemaTokens([
-			{ name: "web_search", description: "Searches the web.", parameters } as never,
-		]);
-		const wireEstimate = estimateToolSchemaTokens([
-			{ name: "web_search", description: "Searches the web.", parameters: arkToWireSchema(parameters) } as never,
-		]);
+		const arktypeEstimate = estimateToolSchemaTokens(
+			[{ name: "web_search", description: "Searches the web.", parameters } as never],
+			tokenizer,
+		);
+		const wireEstimate = estimateToolSchemaTokens(
+			[{ name: "web_search", description: "Searches the web.", parameters: arkToWireSchema(parameters) } as never],
+			tokenizer,
+		);
 		expect(arktypeEstimate).toBe(wireEstimate);
 	});
 });
@@ -103,37 +108,72 @@ describe("computeNonMessageTokens / computeNonMessageBreakdown memoization", () 
 
 	it("recomputes when the system prompt reference changes and caches otherwise", () => {
 		const session = makeSession(["system prompt alpha"]);
-		const first = computeNonMessageTokens(session as never);
+		const first = computeNonMessageTokens(session as never, tokenizer);
 		// Same inputs (identical refs) → cached, identical value.
-		expect(computeNonMessageTokens(session as never)).toBe(first);
+		expect(computeNonMessageTokens(session as never, tokenizer)).toBe(first);
 		// Replace the system prompt reference (mirrors setSystemPrompt).
 		session.systemPrompt = ["system prompt beta with more tokens than alpha"];
-		const afterChange = computeNonMessageTokens(session as never);
+		const afterChange = computeNonMessageTokens(session as never, tokenizer);
 		expect(afterChange).toBeGreaterThan(first);
 		// Cached on the new inputs.
-		expect(computeNonMessageTokens(session as never)).toBe(afterChange);
+		expect(computeNonMessageTokens(session as never, tokenizer)).toBe(afterChange);
 	});
 
 	it("recomputes the breakdown when the tools reference changes", () => {
 		const session = makeSession(["base"], []);
-		const before = computeNonMessageBreakdown(session as never);
+		const before = computeNonMessageBreakdown(session as never, tokenizer);
 		expect(before.toolsTokens).toBe(0);
 		// New tools array reference (mirrors setTools).
 		session.agent.state.tools = [{ name: "search", description: "search the web", parameters: {} }];
-		const after = computeNonMessageBreakdown(session as never);
+		const after = computeNonMessageBreakdown(session as never, tokenizer);
 		expect(after.toolsTokens).toBeGreaterThan(0);
 		// Cached on the new tools.
-		expect(computeNonMessageBreakdown(session as never).toolsTokens).toBe(after.toolsTokens);
+		expect(computeNonMessageBreakdown(session as never, tokenizer).toolsTokens).toBe(after.toolsTokens);
 	});
 
 	it("shares one cache entry so tokens and breakdown invalidate together", () => {
 		const session = makeSession(["shared prompt"]);
-		const tokens = computeNonMessageTokens(session as never);
-		const breakdown = computeNonMessageBreakdown(session as never);
+		const tokens = computeNonMessageTokens(session as never, tokenizer);
+		const breakdown = computeNonMessageBreakdown(session as never, tokenizer);
 		// Changing the system prompt ref must invalidate BOTH fields, not just
 		// the one most recently touched.
 		session.systemPrompt = ["shared prompt but longer now to shift the count"];
-		expect(computeNonMessageTokens(session as never)).not.toBe(tokens);
-		expect(computeNonMessageBreakdown(session as never).systemPromptTokens).not.toBe(breakdown.systemPromptTokens);
+		expect(computeNonMessageTokens(session as never, tokenizer)).not.toBe(tokens);
+		expect(computeNonMessageBreakdown(session as never, tokenizer).systemPromptTokens).not.toBe(
+			breakdown.systemPromptTokens,
+		);
+	});
+});
+
+/**
+ * Contract: the Skills category counts only skills actually rendered into the
+ * system prompt (mirroring `buildSystemPrompt`'s filter) — hidden/explicit-only
+ * skills, and every skill when the `read` tool is absent, contribute zero. The
+ * System-prompt subtraction must not be inflated by unrendered skill metadata
+ * and clamped to 0 (issue #6498).
+ */
+describe("computeNonMessageBreakdown skills filtering", () => {
+	const readTool = { name: "read", description: "read files", parameters: {} };
+	const hidden = { name: "hidden-skill", description: "X".repeat(4000), filePath: "/s/h.md", hide: true };
+	const visible = { name: "vis", description: "small visible skill", filePath: "/s/v.md" };
+	// First prompt block as rendered: only the visible skill appears.
+	const renderedPrompt = "You are an agent.\nSkills:\n- vis: small visible skill\n";
+
+	function session(tools: unknown[], skills: unknown[]) {
+		return { systemPrompt: [renderedPrompt], agent: { state: { tools } }, skills } as never;
+	}
+
+	it("excludes hidden skills and does not clamp System prompt to 0", () => {
+		const b = computeNonMessageBreakdown(session([readTool], [hidden, visible]), tokenizer);
+		// Only the visible skill is counted, not the large hidden one.
+		expect(b.skillsTokens).toBe(computeNonMessageBreakdown(session([readTool], [visible]), tokenizer).skillsTokens);
+		expect(b.skillsTokens).toBeLessThan(100);
+		expect(b.systemPromptTokens).toBeGreaterThan(0);
+	});
+
+	it("counts zero Skills tokens when the read tool is unavailable", () => {
+		const b = computeNonMessageBreakdown(session([], [hidden, visible]), tokenizer);
+		expect(b.skillsTokens).toBe(0);
+		expect(b.systemPromptTokens).toBe(computeNonMessageBreakdown(session([], []), tokenizer).systemPromptTokens);
 	});
 });

@@ -1,9 +1,12 @@
 /**
  * Generate session titles using a smol, fast model.
  */
+import { dlopen, FFIType, ptr } from "bun:ffi";
 import * as path from "node:path";
 
-import { type Api, type AssistantMessage, completeSimple, type Model } from "@oh-my-pi/pi-ai";
+import { type Api, type AssistantMessage, completeSimple, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
+import { StreamMarkupHealing } from "@oh-my-pi/pi-ai/utils/stream-markup-healing";
+import { isConPTYHosted } from "@oh-my-pi/pi-tui";
 import { isTerminalHeadless, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 
@@ -11,8 +14,9 @@ import { resolveRoleSelection } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import titleMarkerInstruction from "../prompts/system/title-marker-instruction.md" with { type: "text" };
 import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
+import { formatTitleUserMessage } from "../tiny/message-preproc";
 import { isTinyTitleLocalModelKey, ONLINE_TINY_TITLE_MODEL_KEY } from "../tiny/models";
-import { formatTitleUserMessage, isLowSignalTitleInput, normalizeGeneratedTitle } from "../tiny/text";
+import { isLowSignalTitleInput, normalizeGeneratedTitle } from "../tiny/text";
 import { tinyTitleClient } from "../tiny/title-client";
 
 const TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt);
@@ -20,6 +24,59 @@ const TITLE_MARKER_INSTRUCTION = prompt.render(titleMarkerInstruction);
 
 const DEFAULT_TERMINAL_TITLE = "π";
 const TERMINAL_TITLE_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
+
+interface WindowsConsoleTitleApi {
+	set(title: string): boolean;
+	close(): void;
+}
+
+let windowsConsoleTitleApi: WindowsConsoleTitleApi | null | undefined;
+let lastTerminalTitle: string | undefined;
+
+function getWindowsConsoleTitleApi(): WindowsConsoleTitleApi | null {
+	if (process.platform !== "win32") return null;
+	if (windowsConsoleTitleApi !== undefined) return windowsConsoleTitleApi;
+	try {
+		const kernel32 = dlopen("kernel32.dll", {
+			SetConsoleTitleW: { args: [FFIType.ptr], returns: FFIType.bool },
+		});
+		windowsConsoleTitleApi = {
+			set(title) {
+				const wideTitle = Buffer.from(`${title}\0`, "utf16le");
+				return kernel32.symbols.SetConsoleTitleW(ptr(wideTitle));
+			},
+			close: () => kernel32.close(),
+		};
+	} catch {
+		windowsConsoleTitleApi = null;
+	}
+	return windowsConsoleTitleApi;
+}
+
+function setWindowsConsoleTitle(title: string): boolean {
+	const api = getWindowsConsoleTitleApi();
+	if (!api) return false;
+	try {
+		return api.set(title);
+	} catch {
+		try {
+			api.close();
+		} catch {
+			// Ignore cleanup failures after the native title path has already failed.
+		}
+		windowsConsoleTitleApi = null;
+		return false;
+	}
+}
+
+function disposeWindowsConsoleTitleApi(): void {
+	try {
+		windowsConsoleTitleApi?.close();
+	} catch {
+		// Terminal teardown must remain best-effort.
+	}
+	windowsConsoleTitleApi = undefined;
+}
 
 // Cover the "backend ignores `disableReasoning`" case unconditionally: the
 // static `model.reasoning` catalog flag can't distinguish a thinking model that
@@ -32,7 +89,14 @@ const TERMINAL_TITLE_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
 const TITLE_MAX_TOKENS = 1024;
 
 /** Matches the title the model wraps in `<title>...</title>`. */
-const TITLE_MARKER_RE = /<title>([\s\S]*?)<\/title>/i;
+const TITLE_MARKER_GLOBAL_RE = /<title>([\s\S]*?)<\/title>|<title\s*\/>|<title>\s*$/gi;
+const TITLE_VISIBILITY_SENTINEL = "\uE000omp-title-visible\uE000";
+const THINKING_TAG_ENVELOPE_RE = /<(think|thinking|reasoning)>\s*[\s\S]*?<\/\1>/gi;
+const THINKING_FENCE_ENVELOPE_RE = /```(?:thinking|reasoning)\b[\s\S]*?```/gi;
+const LEADING_THINKING_TAG_RE = /^\s*<(think|thinking|reasoning)>\s*[\s\S]*?<\/\1>\s*/i;
+const LEADING_THINKING_FENCE_RE = /^\s*```(?:thinking|reasoning)\b[\s\S]*?```\s*/i;
+const LEADING_PROSE_THINKING_PREAMBLE_RE =
+	/^[ \t]*(?:(?:here(?:['’]s| is)[ \t]+(?:a|the|my)[ \t]+)|my[ \t]+)?(?:thinking|thought|reasoning)[ \t]+process[ \t]*:?[ \t]*(?:\r?\n|$)/i;
 
 function getTitleModel(registry: ModelRegistry, settings: Settings, currentModel?: Model<Api>): Model<Api> | undefined {
 	const availableModels = registry.getAvailable();
@@ -59,6 +123,7 @@ function getTitleModel(registry: ModelRegistry, settings: Settings, currentModel
  *   resolver instead of a pre-evaluated value ensures the metadata's account_uuid
  *   reflects the credential actually selected for this request.
  * @param customSystemPrompt Optional title-specific system prompt override
+ * @param signal Session-lifecycle cancellation for background title requests
  */
 export async function generateSessionTitle(
 	firstMessage: string,
@@ -68,6 +133,7 @@ export async function generateSessionTitle(
 	currentModel?: Model<Api>,
 	metadataResolver?: (provider: string) => Record<string, unknown> | undefined,
 	customSystemPrompt?: string,
+	signal?: AbortSignal,
 ): Promise<string | null> {
 	// Defer titling for greetings / acknowledgements / empty input. The default
 	// tiny title model can't reliably decline trivial input, so this happens
@@ -88,7 +154,7 @@ export async function generateSessionTitle(
 			sessionId,
 			currentModel,
 			metadataResolver,
-			undefined,
+			signal,
 			titleSystemPrompt,
 		);
 	}
@@ -108,9 +174,18 @@ export async function generateSessionTitle(
 		return null;
 	}
 	try {
-		const localTitle = titleSystemPrompt
-			? await tinyTitleClient.generate(tinyModel, firstMessage, { systemPrompt: titleSystemPrompt })
-			: await tinyTitleClient.generate(tinyModel, firstMessage);
+		let localTitle: string | null;
+		if (signal) {
+			localTitle = await tinyTitleClient.generate(
+				tinyModel,
+				firstMessage,
+				titleSystemPrompt ? { signal, systemPrompt: titleSystemPrompt } : { signal },
+			);
+		} else if (titleSystemPrompt) {
+			localTitle = await tinyTitleClient.generate(tinyModel, firstMessage, { systemPrompt: titleSystemPrompt });
+		} else {
+			localTitle = await tinyTitleClient.generate(tinyModel, firstMessage);
+		}
 		if (!localTitle) {
 			logger.warn("title-generator: local tiny model produced no title; skipping (no online fallback)", {
 				sessionId,
@@ -179,19 +254,28 @@ export async function generateTitleOnline(
 		const maxTokens = TITLE_MAX_TOKENS;
 		logger.debug("title-generator: request", { ...modelContext, maxTokens });
 
-		const response = await completeSimple(
-			model,
-			{
-				systemPrompt,
-				messages: [{ role: "user", content: userMessage, timestamp: Date.now() }],
-			},
-			{
-				apiKey: registry.resolver(model, sessionId),
-				maxTokens,
-				disableReasoning: true,
-				metadata,
-				signal,
-			},
+		const response = await retryTransientCompletion(
+			() =>
+				completeSimple(
+					model,
+					{
+						systemPrompt,
+						messages: [{ role: "user", content: userMessage, timestamp: Date.now() }],
+					},
+					{
+						apiKey: registry.resolver(model, sessionId),
+						maxTokens,
+						disableReasoning: true,
+						// Greedy decode: titling is extraction, not generation. Backends that
+						// default temperature high (e.g. Ollama's 0.8) otherwise garble names
+						// from the message ("hashline" → "HasHroshi"). Providers whose models
+						// reject sampling params drop this via `supportsSamplingParams`.
+						temperature: 0,
+						metadata,
+						signal,
+					},
+				),
+			{ signal },
 		);
 
 		if (response.stopReason === "error") {
@@ -241,12 +325,71 @@ function extractGeneratedTitle(contentBlocks: AssistantMessage["content"]): stri
 			textTitle += content.text;
 		}
 	}
-	// Stay lenient: prefer the marker when the model closed it, otherwise
-	// accept a plain sentence after stripping any stray/unclosed tag fragment
-	// (e.g. output truncated before the closing tag).
-	const marker = TITLE_MARKER_RE.exec(textTitle);
-	const candidate = marker ? marker[1].trim() : textTitle.replace(/<\/?title>/gi, "").trim();
-	return unwrapJsonTitle(candidate);
+	// Stay lenient: prefer the first closed title marker in visible text, then
+	// fall back to a plain sentence after stripping only known leading leaked
+	// thinking envelopes plus any stray/unclosed title tag fragment. Reject a
+	// prose thinking preamble only on the markerless path: a later marked title
+	// remains authoritative.
+	const markedTitle = extractVisibleMarkedTitle(textTitle);
+	if (markedTitle !== undefined) return unwrapJsonTitle(markedTitle);
+	const cleanedTextTitle = stripLeadingLeakedThinkingMarkup(textTitle)
+		.replace(/<\/?title>/gi, "")
+		.trim();
+	if (LEADING_PROSE_THINKING_PREAMBLE_RE.test(cleanedTextTitle)) return "";
+	return unwrapJsonTitle(cleanedTextTitle);
+}
+
+function extractVisibleMarkedTitle(text: string): string | undefined {
+	TITLE_MARKER_GLOBAL_RE.lastIndex = 0;
+	let marker: RegExpExecArray | null = TITLE_MARKER_GLOBAL_RE.exec(text);
+	while (marker !== null) {
+		const content = marker[1];
+		if (isVisibleTitleMarker(text, marker.index)) return content?.trim() ?? "";
+		marker = TITLE_MARKER_GLOBAL_RE.exec(text);
+	}
+	return undefined;
+}
+
+function isVisibleTitleMarker(text: string, markerIndex: number): boolean {
+	if (isInsideKnownThinkingEnvelope(text, markerIndex)) return false;
+	return stripLeakedThinkingMarkup(`${text.slice(0, markerIndex)}${TITLE_VISIBILITY_SENTINEL}`).endsWith(
+		TITLE_VISIBILITY_SENTINEL,
+	);
+}
+
+function isInsideKnownThinkingEnvelope(text: string, index: number): boolean {
+	return (
+		isInsideEnvelopeMatchedBy(THINKING_TAG_ENVELOPE_RE, text, index) ||
+		isInsideEnvelopeMatchedBy(THINKING_FENCE_ENVELOPE_RE, text, index)
+	);
+}
+
+function isInsideEnvelopeMatchedBy(pattern: RegExp, text: string, index: number): boolean {
+	pattern.lastIndex = 0;
+	let marker = pattern.exec(text);
+	while (marker !== null) {
+		const start = marker.index;
+		const end = start + marker[0].length;
+		if (index > start && index < end) return true;
+		if (start > index) return false;
+		marker = pattern.exec(text);
+	}
+	return false;
+}
+
+function stripLeadingLeakedThinkingMarkup(text: string): string {
+	let current = text;
+	while (true) {
+		const withoutTag = current.replace(LEADING_THINKING_TAG_RE, "");
+		const withoutFence = withoutTag.replace(LEADING_THINKING_FENCE_RE, "");
+		if (withoutFence === current) return current;
+		current = withoutFence;
+	}
+}
+
+function stripLeakedThinkingMarkup(text: string): string {
+	const healer = new StreamMarkupHealing({ pattern: "thinking" });
+	return healer.feed(text) + healer.flushPending();
 }
 
 /**
@@ -300,15 +443,152 @@ export function formatSessionTerminalTitle(sessionName: string | undefined, cwd?
 }
 
 /**
- * Set the terminal title using OSC 0 (sets both tab and window title). Unsupported terminals ignore it.
+ * Set the terminal title through the native Win32 API or OSC 0.
+ *
+ * Repeating the same sanitized title is a no-op on every platform.
  */
 export function setTerminalTitle(title: string): void {
 	if (!process.stdout.isTTY || isTerminalHeadless()) return;
-	process.stdout.write(`\x1b]0;${sanitizeTerminalTitlePart(title) ?? DEFAULT_TERMINAL_TITLE}\x07`);
+	const next = sanitizeTerminalTitlePart(title) ?? DEFAULT_TERMINAL_TITLE;
+	if (next === lastTerminalTitle) return;
+	if (!setWindowsConsoleTitle(next)) process.stdout.write(`\x1b]0;${next}\x07`);
+	lastTerminalTitle = next;
 }
 
 export function setSessionTerminalTitle(sessionName: string | undefined, cwd?: string): void {
-	setTerminalTitle(formatSessionTerminalTitle(sessionName, cwd));
+	// An authoritative session title (rename, new session, focus swap) supersedes
+	// any extension override so the base title tracks the real session again.
+	terminalTitleRuntime.extensionOverride = undefined;
+	terminalTitleRuntime.label = sanitizeTerminalTitlePart(sessionName) ?? getFallbackTerminalTitle(cwd);
+	emitTerminalTitle();
+}
+
+/**
+ * Set a terminal title from an extension's `setTitle()`. Unlike the session base
+ * title, this owns the terminal verbatim: periodic and run-state updates will not
+ * rewrite it. Cleared when the app next sets an authoritative session title via
+ * {@link setSessionTerminalTitle}.
+ */
+export function setExtensionTerminalTitle(title: string): void {
+	terminalTitleRuntime.extensionOverride = title;
+	emitTerminalTitle();
+}
+
+export type TerminalTitleState = "idle" | "working" | "attention";
+
+/** Windows uses a static working separator instead of scheduling title animation. */
+const WINDOWS_TITLE_WORKING_SEPARATOR = ":";
+const TITLE_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const TITLE_SPINNER_INTERVAL_MS = 80;
+/** The user's turn: the title reads like a shell prompt awaiting input. */
+const TITLE_IDLE_SEPARATOR = ">";
+/** Agent blocked on the user (ask / approval prompt). */
+const TITLE_ATTENTION_SEPARATOR = "!";
+
+const terminalTitleRuntime: {
+	label: string | undefined;
+	state: TerminalTitleState;
+	frame: number;
+	enabled: boolean;
+	timer: NodeJS.Timeout | undefined;
+	/** A title an extension set via `setTitle()`. While set, it owns the terminal
+	 *  title verbatim: the run-state separator never rewrites it. Cleared when the
+	 *  app next establishes an authoritative session title (rename, new session,
+	 *  focus swap) via `setSessionTerminalTitle`. */
+	extensionOverride: string | undefined;
+} = {
+	label: undefined,
+	state: "idle",
+	frame: 0,
+	enabled: true,
+	timer: undefined,
+	extensionOverride: undefined,
+};
+
+/**
+ * Compose the terminal title from the `π` brand, a state-carrying separator, and
+ * the session label. Pure (no I/O) so the state→separator contract is testable:
+ *   - `idle` (user's turn):  `π > label`;
+ *   - `working`:             `π ⠋ label` (`π : label` on Windows);
+ *   - `attention`:           `π ! label`;
+ *   - disabled:              `π: label`.
+ * Without a label the separator trails the brand (`π >`) so the state stays visible.
+ */
+export function buildTerminalTitleWithState(
+	label: string | undefined,
+	state: TerminalTitleState,
+	frame: number,
+	enabled: boolean,
+	platform: NodeJS.Platform = process.platform,
+): string {
+	if (!enabled) return label ? `${DEFAULT_TERMINAL_TITLE}: ${label}` : DEFAULT_TERMINAL_TITLE;
+	const separator =
+		state === "working"
+			? platform === "win32"
+				? WINDOWS_TITLE_WORKING_SEPARATOR
+				: TITLE_SPINNER_FRAMES[frame % TITLE_SPINNER_FRAMES.length]
+			: state === "attention"
+				? TITLE_ATTENTION_SEPARATOR
+				: TITLE_IDLE_SEPARATOR;
+	return label ? `${DEFAULT_TERMINAL_TITLE} ${separator} ${label}` : `${DEFAULT_TERMINAL_TITLE} ${separator}`;
+}
+
+function emitTerminalTitle(): void {
+	// An extension override owns the terminal verbatim; the terminal sink
+	// deduplicates repeated state updates.
+	const next =
+		terminalTitleRuntime.extensionOverride ??
+		buildTerminalTitleWithState(
+			terminalTitleRuntime.label,
+			terminalTitleRuntime.state,
+			terminalTitleRuntime.frame,
+			terminalTitleRuntime.enabled,
+			isConPTYHosted() ? "win32" : process.platform,
+		);
+	setTerminalTitle(next);
+}
+
+function stopTerminalTitleSpinner(): void {
+	clearInterval(terminalTitleRuntime.timer);
+	terminalTitleRuntime.timer = undefined;
+}
+
+function startTerminalTitleSpinner(): void {
+	if (isConPTYHosted() || terminalTitleRuntime.timer || !process.stdout.isTTY) return;
+	terminalTitleRuntime.timer = setInterval(() => {
+		terminalTitleRuntime.frame = (terminalTitleRuntime.frame + 1) % TITLE_SPINNER_FRAMES.length;
+		emitTerminalTitle();
+	}, TITLE_SPINNER_INTERVAL_MS);
+	// Never keep the event loop alive for a cosmetic animation.
+	terminalTitleRuntime.timer.unref?.();
+}
+
+/**
+ * Reflect the agent run state in the terminal title's separator: `working`
+ * animates outside Windows and stays `:` on Windows, `idle` shows `>` (your
+ * turn), and `attention` shows `!` (agent blocked on you). Gated off by
+ * `tui.titleState`.
+ */
+export function setTerminalTitleState(state: TerminalTitleState): void {
+	terminalTitleRuntime.state = state;
+	if (state === "working" && terminalTitleRuntime.enabled) startTerminalTitleSpinner();
+	else stopTerminalTitleSpinner();
+	emitTerminalTitle();
+}
+
+/** Enable/disable the run-state separator (driven by the `tui.titleState` setting). */
+export function setTerminalTitleStateEnabled(enabled: boolean): void {
+	terminalTitleRuntime.enabled = enabled;
+	if (enabled && terminalTitleRuntime.state === "working") startTerminalTitleSpinner();
+	else stopTerminalTitleSpinner();
+	emitTerminalTitle();
+}
+
+/** Release terminal-title runtime resources. */
+export function disposeTerminalTitleState(): void {
+	stopTerminalTitleSpinner();
+	disposeWindowsConsoleTitleApi();
+	lastTerminalTitle = undefined;
 }
 
 /**

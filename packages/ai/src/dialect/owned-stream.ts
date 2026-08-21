@@ -7,6 +7,7 @@ import type {
 } from "../types";
 import {
 	clearStreamingPartialJson,
+	copyCursorExecResolved,
 	getStreamingPartialJson,
 	type StreamingPartialJsonCarrier,
 	setStreamingPartialJson,
@@ -54,6 +55,7 @@ function cloneToolCall(source: StreamingToolCall): StreamingToolCall {
 	};
 	const partialJson = getStreamingPartialJson(source);
 	if (partialJson !== undefined) setStreamingPartialJson(block, partialJson);
+	copyCursorExecResolved(block, source);
 	return block;
 }
 
@@ -65,6 +67,7 @@ function syncToolCall(target: StreamingToolCall, source: StreamingToolCall): voi
 	const partialJson = getStreamingPartialJson(source);
 	if (partialJson === undefined) clearStreamingPartialJson(target);
 	else setStreamingPartialJson(target, partialJson);
+	copyCursorExecResolved(target, source);
 }
 
 function hasNamedNativeToolCall(source: StreamingToolCall | undefined): source is StreamingToolCall {
@@ -108,6 +111,9 @@ export function wrapInbandToolStream(
 						break;
 					case "thinking_end":
 						projector?.thinkingEnd();
+						break;
+					case "image_end":
+						projector?.keep(event.content);
 						break;
 					case "text_delta":
 						// `text()` returns true once the model starts fabricating its own
@@ -206,6 +212,14 @@ class InbandStreamProjector {
 		this.#closeText();
 		this.#closeThinking();
 		this.#partial.content.push(block);
+		if (this.#emitEvents && block.type === "image") {
+			this.#out.push({
+				type: "image_end",
+				contentIndex: this.#partial.content.length - 1,
+				content: block,
+				partial: this.#partial,
+			});
+		}
 	}
 
 	// Forward a native tool call's lifecycle live. `source` comes from the inner

@@ -1,6 +1,11 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
+import { Shell } from "@oh-my-pi/pi-natives";
+
+afterEach(() => {
+	mock.restore();
+});
 
 function makeSession(): ToolSession {
 	return {
@@ -43,6 +48,42 @@ describe("BashTool execution results", () => {
 		// The LLM-facing text still states the exit code verbatim.
 		const text = result.content.find(c => c.type === "text")?.text ?? "";
 		expect(text).toContain("Command exited with code 3");
+	});
+
+	it("returns a warning-state timeout result with one timeout notice", async () => {
+		// Keep the real native subprocess timeout path, but compress its backend
+		// deadline; BashTool must still report the user-facing one-second timeout.
+		const realRun = Shell.prototype.run;
+		spyOn(Shell.prototype, "run").mockImplementation(function (this: Shell, options, onChunk) {
+			return realRun.call(this, { ...options, timeoutMs: 20 }, onChunk);
+		});
+		const tool = new BashTool(makeSession());
+		const result = await tool.execute("call-timeout", { command: "sleep 3", timeout: 1 });
+
+		expect(result.isError).toBe(true);
+		expect(result.details?.timedOut).toBe(true);
+		const text = result.content.find(c => c.type === "text")?.text ?? "";
+		expect(text.match(/\[Command timed out after 1 seconds\]/gu)).toHaveLength(1);
+	});
+
+	it("preserves the executor cancellation notice without classifying it as a timeout", async () => {
+		const dispatched = Promise.withResolvers<void>();
+		const realRun = Shell.prototype.run;
+		spyOn(Shell.prototype, "run").mockImplementation(function (this: Shell, options, onChunk) {
+			dispatched.resolve();
+			return realRun.call(this, options, onChunk);
+		});
+		const tool = new BashTool(makeSession());
+		const controller = new AbortController();
+		const execution = tool.execute("call-cancel", { command: "sleep 3" }, controller.signal);
+		await dispatched.promise;
+		controller.abort();
+
+		const error = await execution.catch(error => error);
+		expect(error).toBeInstanceOf(Error);
+		const message = (error as Error).message;
+		expect(message.match(/\[Command cancelled\]/gu)).toHaveLength(1);
+		expect(message).not.toContain("Command aborted");
 	});
 
 	it("returns a success result with no exit-code detail for a zero exit", async () => {

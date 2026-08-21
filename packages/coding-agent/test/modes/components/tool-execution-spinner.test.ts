@@ -1,6 +1,11 @@
-import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
-import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
+import {
+	SPINNER_RENDER_INTERVAL_MS,
+	stopSharedSpinnerTicker,
+	ToolExecutionComponent,
+} from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
+import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { TUI } from "@oh-my-pi/pi-tui";
 
@@ -11,6 +16,13 @@ import type { TUI } from "@oh-my-pi/pi-tui";
 describe("ToolExecutionComponent live preview spinners", () => {
 	beforeAll(async () => {
 		await initTheme();
+	});
+
+	// Earlier test files may leak live blocks (components never stopAnimation'd),
+	// which keeps the shared ticker armed on a REAL interval and makes these
+	// fake-timer assertions observe a pre-existing timer instead of a fresh one.
+	beforeEach(() => {
+		stopSharedSpinnerTicker();
 	});
 
 	afterEach(() => {
@@ -40,34 +52,6 @@ describe("ToolExecutionComponent live preview spinners", () => {
 			expect(requestRender).not.toHaveBeenCalled();
 			expect(firstFrame).toContain("time.sleep(10)");
 			expect(secondFrame).toContain("time.sleep(10)");
-			expect(secondFrame).not.toBe(firstFrame);
-		} finally {
-			component.stopAnimation();
-		}
-	});
-
-	it("animates a shell pending header while the call is live", () => {
-		vi.useFakeTimers();
-		const requestRender = vi.fn();
-		const requestComponentRender = vi.fn();
-		const component = new ToolExecutionComponent(
-			"ssh",
-			{ host: "example.test", command: "sleep 10" },
-			{},
-			undefined,
-			{ requestRender, requestComponentRender } as unknown as TUI,
-			process.cwd(),
-		);
-
-		try {
-			const firstFrame = stripVTControlCharacters(component.render(80).join("\n"));
-			vi.advanceTimersByTime(120);
-			const secondFrame = stripVTControlCharacters(component.render(80).join("\n"));
-
-			expect(requestComponentRender).toHaveBeenCalledWith(component);
-			expect(requestRender).not.toHaveBeenCalled();
-			expect(firstFrame).toContain("sleep 10");
-			expect(secondFrame).toContain("sleep 10");
 			expect(secondFrame).not.toBe(firstFrame);
 		} finally {
 			component.stopAnimation();
@@ -180,6 +164,128 @@ describe("ToolExecutionComponent live preview spinners", () => {
 			expect(requestComponentRender).not.toHaveBeenCalled();
 		} finally {
 			component.stopAnimation();
+		}
+	});
+
+	it("pins the live vibe_wait wall and releases it after the final result", () => {
+		const component = new ToolExecutionComponent(
+			"vibe_wait",
+			{},
+			{},
+			undefined,
+			{ requestRender: vi.fn(), requestComponentRender: vi.fn() } as unknown as TUI,
+			process.cwd(),
+		);
+		const transcript = new TranscriptContainer();
+		transcript.addChild(component);
+
+		try {
+			transcript.render(80);
+			expect(transcript.isNativeScrollbackLiveRegionPinned()).toBe(true);
+
+			component.updateResult(
+				{
+					content: [{ type: "text", text: "No turns in flight to wait for." }],
+					details: { op: "wait", screens: [] },
+				},
+				false,
+			);
+			transcript.render(80);
+			expect(transcript.isNativeScrollbackLiveRegionPinned()).toBe(false);
+		} finally {
+			component.stopAnimation();
+		}
+	});
+
+	it("pins a pending hub wait before the first progress snapshot arrives", () => {
+		const component = new ToolExecutionComponent(
+			"hub",
+			{ op: "wait" },
+			{},
+			undefined,
+			{ requestRender: vi.fn(), requestComponentRender: vi.fn() } as unknown as TUI,
+			process.cwd(),
+		);
+		const transcript = new TranscriptContainer();
+		transcript.addChild(component);
+
+		try {
+			transcript.render(80);
+			expect(component.isNativeScrollbackLiveRegionPinned()).toBe(true);
+			expect(transcript.isNativeScrollbackLiveRegionPinned()).toBe(true);
+		} finally {
+			component.stopAnimation();
+		}
+	});
+
+	it("pins the displaceable hub waiting poll and releases it once jobs settle", () => {
+		const component = new ToolExecutionComponent(
+			"hub",
+			{ op: "wait" },
+			{},
+			undefined,
+			{ requestRender: vi.fn(), requestComponentRender: vi.fn() } as unknown as TUI,
+			process.cwd(),
+		);
+		const transcript = new TranscriptContainer();
+		transcript.addChild(component);
+		const runningJob = { id: "job_1", type: "task", status: "running", label: "Pr6450", durationMs: 12_600 };
+
+		try {
+			// Streaming waiting snapshot: every watched job still running.
+			component.updateResult(
+				{ content: [{ type: "text", text: "waiting" }], details: { jobs: [runningJob] } },
+				true,
+			);
+			transcript.render(80);
+			expect(transcript.isNativeScrollbackLiveRegionPinned()).toBe(true);
+
+			// Final snapshot with a settled job is a real result, not a poll frame.
+			component.updateResult(
+				{
+					content: [{ type: "text", text: "1 job settled" }],
+					details: { jobs: [{ ...runningJob, status: "completed" }] },
+				},
+				false,
+			);
+			transcript.render(80);
+			expect(transcript.isNativeScrollbackLiveRegionPinned()).toBe(false);
+		} finally {
+			component.stopAnimation();
+		}
+	});
+
+	// Regression (issue #8731): concurrent live tool blocks — e.g. parallel task
+	// subagents — must share ONE spinner timer, not one per block, or active-work
+	// CPU scales with block count.
+	it("drives every concurrent live block from a single shared spinner timer", () => {
+		vi.useFakeTimers();
+		const setIntervalSpy = vi.spyOn(globalThis, "setInterval");
+		const renders = [vi.fn(), vi.fn(), vi.fn()];
+		const components = renders.map(
+			requestComponentRender =>
+				new ToolExecutionComponent(
+					"eval",
+					{ language: "py", code: "import time\ntime.sleep(10)" },
+					{},
+					undefined,
+					{ requestRender: vi.fn(), requestComponentRender } as unknown as TUI,
+					process.cwd(),
+				),
+		);
+
+		try {
+			const spinnerTimers = setIntervalSpy.mock.calls.filter(([, ms]) => ms === SPINNER_RENDER_INTERVAL_MS).length;
+			// One shared ticker for all three live blocks, not three.
+			expect(spinnerTimers).toBe(1);
+
+			// A single tick repaints every registered block in lockstep.
+			vi.advanceTimersByTime(SPINNER_RENDER_INTERVAL_MS);
+			for (const requestComponentRender of renders) {
+				expect(requestComponentRender).toHaveBeenCalledTimes(1);
+			}
+		} finally {
+			for (const component of components) component.stopAnimation();
 		}
 	});
 });

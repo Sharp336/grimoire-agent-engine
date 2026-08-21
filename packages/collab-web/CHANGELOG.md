@@ -2,6 +2,66 @@
 
 ## [Unreleased]
 
+## [17.3.8] - 2026-08-19
+
+### Fixed
+
+- The ask tool card now renders the note the user attached to their answer; previously it was dropped from HTML exports and the collab guest view.
+
+## [17.2.10] - 2026-08-06
+
+### Changed
+
+- Updated the Markdown parsing implementation to use @oh-my-pi/pi-utils.
+
+## [17.2.2] - 2026-07-31
+
+### Fixed
+
+- Fixed an issue where the guest UI could incorrectly appear idle (such as the loading spinner disappearing) while the host agent was still running after a reconnection, and ensured tool cards are properly cleared if a connection drop occurs.
+
+## [17.2.0] - 2026-07-30
+
+### Fixed
+
+- Fixed an issue where the agent would stop silently without a message by ensuring terminal auto-retry failures are properly surfaced as error notices.
+
+## [17.1.0] - 2026-07-24
+
+### Fixed
+
+- Fixed action metadata loss on xd://resolve, xd://reject, and xd://propose cards to ensure correct action badges are rendered.
+- Added proper rendering support for reject, propose, and hub-family aliases (irc, job, await, poll, cancel_job) to prevent them from falling back to generic JSON.
+
+## [17.0.8] - 2026-07-22
+
+### Fixed
+
+- Fixed an issue where IME composition (Korean, Japanese, and Chinese) duplicated the last character when pressing Enter to commit in the composer.
+
+## [17.0.1] - 2026-07-16
+
+### Fixed
+
+- Rendered user and host transcript messages as Markdown and separated adjacent assistant content blocks. ([#5559](https://github.com/can1357/oh-my-pi/issues/5559))
+
+## [17.0.0] - 2026-07-15
+
+### Changed
+
+- Consolidated the legacy irc and job tool renderers into a unified hub renderer for messaging, background jobs, and process supervision, while preserving existing visual styles.
+- Enhanced rendering for xd:// device dispatches to resolve through their inner tool's renderer, preserving generated-image thumbnails and MCP/autoresearch presentations under a unified xd://<tool> card label.
+
+### Removed
+
+- Removed custom visualization for the search_tool_bm25 tool, which now falls back to generic rendering.
+
+## [16.5.1] - 2026-07-14
+
+### Fixed
+
+- Fixed an issue in the live collaboration transcript where duplicate tool cards and a stale "thinking..." shimmer were rendered while a committed tool call was running.
+
 ## [16.3.7] - 2026-07-05
 
 ### Fixed

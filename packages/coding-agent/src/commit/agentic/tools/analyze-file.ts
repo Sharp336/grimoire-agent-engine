@@ -1,5 +1,5 @@
+import { type } from "@oh-my-pi/omptype";
 import { prompt } from "@oh-my-pi/pi-utils";
-import { type } from "arktype";
 import analyzeFilePrompt from "../../../commit/agentic/prompts/analyze-file.md" with { type: "text" };
 import type { CommitAgentState } from "../../../commit/agentic/state";
 import type { NumstatEntry } from "../../../commit/types";
@@ -83,10 +83,9 @@ export function createAnalyzeFileTool(options: {
 						related_files: relatedFiles,
 					});
 					const taskParams: TaskParams = {
+						name: `AnalyzeFile${index + 1}`,
 						agent: "sonic",
-						id: `AnalyzeFile${index + 1}`,
-						description: `Analyze ${file}`,
-						assignment,
+						task: assignment,
 					};
 					return taskTool.execute(`${toolCallId}-${index + 1}`, taskParams, signal);
 				}),

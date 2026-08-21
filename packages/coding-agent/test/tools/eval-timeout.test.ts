@@ -1,8 +1,9 @@
-import { afterAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
+import * as toolTimeouts from "@oh-my-pi/pi-coding-agent/tools/tool-timeouts";
 
 function makeSession(): ToolSession {
 	return {
@@ -25,11 +26,31 @@ describe("EvalTool timeout semantics", () => {
 	afterAll(async () => {
 		await disposeAllVmContexts();
 	});
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("disables the cell timeout when timeout is zero", async () => {
+		// Keep the integration path real while making a mistakenly armed timeout
+		// fail quickly. Fake timers cannot drive the isolated worker's clock, and
+		// a zero timeout must bypass the production clamp entirely.
+		vi.spyOn(toolTimeouts, "clampTimeout").mockReturnValue(0.05);
+		const tool = new EvalTool(makeSession());
+		const result = await tool.execute("call-unlimited-timeout", {
+			language: "js",
+			code: "await Bun.sleep(100); print('completed');",
+			timeout: 0,
+		});
+
+		expect(result.content.some(block => block.type === "text" && block.text.includes("completed"))).toBe(true);
+		expect(result.details?.cells?.[0]?.status).toBe("complete");
+	});
 
 	it("bounds a compute cell (no agent/completion) by a plain wall-clock timeout", async () => {
+		// Exercise the real worker cancellation path without spending a full
+		// second waiting for the requested public timeout.
+		vi.spyOn(toolTimeouts, "clampTimeout").mockReturnValue(0.05);
 		const tool = new EvalTool(makeSession());
-		// 1s budget; the cell idles for 5s and emits no status, so nothing extends
-		// the budget — it must be cut off at the wall-clock limit.
 		const result = await tool.execute("call-compute-timeout", {
 			language: "js",
 			code: "await Bun.sleep(2000); return 'never';",

@@ -11,6 +11,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
 	collectPendingToolCalls,
+	createInterruptedTurnAbortMessage,
 	describePendingToolCalls,
 	SESSION_EXIT_CUSTOM_TYPE,
 	TOOL_EXECUTION_START_CUSTOM_TYPE,
@@ -66,7 +67,7 @@ describe("session exit diagnostics", () => {
 		const modelRegistry = new ModelRegistry(authStorage);
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected built-in anthropic model to exist");
-		const sessionManager = SessionManager.inMemory(tempDir.path());
+		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		const agent = new Agent({
 			initialState: {
 				model,
@@ -115,9 +116,15 @@ describe("session exit diagnostics", () => {
 
 		await session.dispose();
 		session = undefined;
-		const exitEntry = sessionManager
+		// dispose() released the in-memory transcript; the exit marker's contract
+		// is durability, so assert against the persisted file.
+		const sessionFile = sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file");
+		const reopened = await SessionManager.open(sessionFile, tempDir.path());
+		const exitEntry = reopened
 			.getEntries()
 			.find(entry => entry.type === "custom" && entry.customType === SESSION_EXIT_CUSTOM_TYPE);
+		await reopened.close();
 		if (exitEntry?.type !== "custom") throw new Error("Expected session exit marker");
 		expect(exitEntry.data).toMatchObject({
 			reason: "dispose",
@@ -139,7 +146,7 @@ describe("session exit diagnostics", () => {
 		const modelRegistry = new ModelRegistry(authStorage);
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected built-in anthropic model to exist");
-		const sessionManager = SessionManager.inMemory(tempDir.path());
+		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		const agent = new Agent({
 			initialState: {
 				model,
@@ -186,9 +193,13 @@ describe("session exit diagnostics", () => {
 		await teardown(postmortem.Reason.SIGTERM);
 		session = undefined;
 
-		const exitEntry = sessionManager
+		const sessionFile = sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file");
+		const reopened = await SessionManager.open(sessionFile, tempDir.path());
+		const exitEntry = reopened
 			.getEntries()
 			.find(entry => entry.type === "custom" && entry.customType === SESSION_EXIT_CUSTOM_TYPE);
+		await reopened.close();
 		if (exitEntry?.type !== "custom") throw new Error("Expected session exit marker");
 		expect(exitEntry.data).toMatchObject({
 			reason: "sigterm",
@@ -266,5 +277,197 @@ describe("session exit diagnostics", () => {
 
 		expect(collectPendingToolCalls(sessionManager.getBranch())).toEqual([]);
 		expect(describePendingToolCalls(sessionManager.getBranch())).toBeUndefined();
+	});
+
+	it("reconstructs an abnormal process-exit tail as one terminal aborted assistant message", () => {
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage({ role: "user", content: "inspect the file", timestamp: Date.now() });
+		sessionManager.appendMessage(pendingAssistant);
+		sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: "toolu_repro",
+			toolName: "bash",
+			content: [{ type: "text", text: "partial result stays in history" }],
+			isError: false,
+			timestamp: Date.now(),
+		});
+		sessionManager.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, {
+			reason: "exit",
+			kind: "process_exit",
+			recordedAt: "2026-07-11T02:20:08.800Z",
+		});
+
+		const recovered = createInterruptedTurnAbortMessage(sessionManager.getBranch());
+		expect(recovered).toMatchObject({
+			role: "assistant",
+			content: [],
+			api: pendingAssistant.api,
+			provider: pendingAssistant.provider,
+			model: pendingAssistant.model,
+			stopReason: "aborted",
+		});
+		expect(recovered?.errorMessage).toContain("process exited");
+
+		sessionManager.appendMessage(recovered!);
+		expect(createInterruptedTurnAbortMessage(sessionManager.getBranch())).toBeUndefined();
+		expect(
+			sessionManager
+				.buildSessionContext()
+				.messages.some(
+					message =>
+						message.role === "toolResult" &&
+						message.content.some(part => part.type === "text" && part.text === "partial result stays in history"),
+				),
+		).toBe(true);
+	});
+
+	it("reconstructs a normal exit that reports pending tool calls", () => {
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage({ role: "user", content: "inspect the file", timestamp: Date.now() });
+		sessionManager.appendMessage(pendingAssistant);
+		sessionManager.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, {
+			reason: "manual exit",
+			kind: "normal",
+			recordedAt: "2026-07-11T02:20:08.800Z",
+			pendingToolCalls: [{ toolCallId: "toolu_repro", toolName: "bash" }],
+		});
+
+		expect(createInterruptedTurnAbortMessage(sessionManager.getBranch())).toMatchObject({
+			role: "assistant",
+			stopReason: "aborted",
+		});
+	});
+
+	it("ignores malformed pending tool diagnostics on normal exits", () => {
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage({ role: "user", content: "inspect the file", timestamp: Date.now() });
+		sessionManager.appendMessage(pendingAssistant);
+		sessionManager.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, {
+			reason: "manual exit",
+			kind: "normal",
+			recordedAt: "2026-07-11T02:20:08.800Z",
+			pendingToolCalls: "not an array",
+		});
+
+		expect(createInterruptedTurnAbortMessage(sessionManager.getBranch())).toBeUndefined();
+	});
+
+	it("reconstructs an interrupted assistant tool-call tail", () => {
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage({ role: "user", content: "inspect the file", timestamp: Date.now() });
+		sessionManager.appendMessage(pendingAssistant);
+		sessionManager.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, {
+			reason: "exit",
+			kind: "process_exit",
+			recordedAt: "2026-07-11T02:20:08.800Z",
+		});
+
+		expect(createInterruptedTurnAbortMessage(sessionManager.getBranch())).toMatchObject({
+			role: "assistant",
+			content: [],
+			api: pendingAssistant.api,
+			provider: pendingAssistant.provider,
+			model: pendingAssistant.model,
+			stopReason: "aborted",
+		});
+	});
+
+	it("reconstructs tool-call content even when stopReason is stop", () => {
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage({ role: "user", content: "inspect the file", timestamp: Date.now() });
+		sessionManager.appendMessage({ ...pendingAssistant, stopReason: "stop" });
+		sessionManager.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, {
+			reason: "exit",
+			kind: "process_exit",
+			recordedAt: "2026-07-11T02:20:08.800Z",
+		});
+
+		expect(createInterruptedTurnAbortMessage(sessionManager.getBranch())).toMatchObject({
+			role: "assistant",
+			stopReason: "aborted",
+		});
+	});
+
+	it("does not reconstruct a failed tool turn already closed by synthetic results", () => {
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage({ role: "user", content: "inspect the file", timestamp: Date.now() });
+		sessionManager.appendMessage({ ...pendingAssistant, stopReason: "error" });
+		sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: "toolu_repro",
+			toolName: "bash",
+			content: [{ type: "text", text: "Tool execution stopped after model failure." }],
+			isError: true,
+			timestamp: Date.now(),
+		});
+		sessionManager.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, {
+			reason: "exit",
+			kind: "process_exit",
+			recordedAt: "2026-07-11T02:20:08.800Z",
+		});
+
+		expect(createInterruptedTurnAbortMessage(sessionManager.getBranch())).toBeUndefined();
+	});
+
+	it("reconstructs a first user-message tail with selected model metadata", () => {
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage({ role: "user", content: "inspect the file", timestamp: Date.now() });
+		sessionManager.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, {
+			reason: "exit",
+			kind: "process_exit",
+			recordedAt: "2026-07-11T02:20:08.800Z",
+		});
+
+		expect(
+			createInterruptedTurnAbortMessage(sessionManager.getBranch(), {
+				api: pendingAssistant.api,
+				provider: pendingAssistant.provider,
+				model: pendingAssistant.model,
+			}),
+		).toMatchObject({
+			role: "assistant",
+			api: pendingAssistant.api,
+			provider: pendingAssistant.provider,
+			model: pendingAssistant.model,
+			stopReason: "aborted",
+		});
+	});
+
+	it("does not reconstruct clean, completed, or superseded exits", () => {
+		const normalExit = SessionManager.inMemory();
+		normalExit.appendMessage({ role: "user", content: "inspect the file", timestamp: Date.now() });
+		normalExit.appendMessage(pendingAssistant);
+		normalExit.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, {
+			reason: "dispose",
+			kind: "normal",
+			recordedAt: "2026-07-11T02:20:08.800Z",
+		});
+
+		const completedTurn = SessionManager.inMemory();
+		completedTurn.appendMessage({ role: "user", content: "inspect the file", timestamp: Date.now() });
+		completedTurn.appendMessage({
+			...pendingAssistant,
+			content: [{ type: "text", text: "done" }],
+			stopReason: "stop",
+		});
+		completedTurn.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, {
+			reason: "exit",
+			kind: "process_exit",
+			recordedAt: "2026-07-11T02:20:08.800Z",
+		});
+
+		const supersededExit = SessionManager.inMemory();
+		supersededExit.appendMessage({ role: "user", content: "first turn", timestamp: Date.now() });
+		supersededExit.appendMessage(pendingAssistant);
+		supersededExit.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, {
+			reason: "exit",
+			kind: "process_exit",
+			recordedAt: "2026-07-11T02:20:08.800Z",
+		});
+		supersededExit.appendMessage({ role: "user", content: "new turn", timestamp: Date.now() });
+
+		expect(createInterruptedTurnAbortMessage(normalExit.getBranch())).toBeUndefined();
+		expect(createInterruptedTurnAbortMessage(completedTurn.getBranch())).toBeUndefined();
+		expect(createInterruptedTurnAbortMessage(supersededExit.getBranch())).toBeUndefined();
 	});
 });

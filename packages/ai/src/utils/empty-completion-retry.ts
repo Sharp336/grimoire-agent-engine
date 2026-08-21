@@ -27,12 +27,13 @@ export const EMPTY_COMPLETION_BASE_DELAY_MS = 500;
 const NON_WHITESPACE_RE = /\S/;
 
 /**
- * Whether a completed assistant message carries content worth delivering: a tool
- * call or any non-whitespace text. An empty/whitespace-only message — or one
- * that only ever produced thinking — is the "empty response" failure.
+ * Whether a completed assistant message carries content worth delivering: an
+ * image, tool call, or any non-whitespace text. An empty/whitespace-only message
+ * — or one that only ever produced thinking — is the "empty response" failure.
  */
 export function hasVisibleAssistantContent(message: AssistantMessage): boolean {
 	for (const block of message.content) {
+		if (block.type === "image") return true;
 		if (block.type === "toolCall") return true;
 		if (block.type === "text" && NON_WHITESPACE_RE.test(block.text)) return true;
 	}
@@ -49,6 +50,8 @@ function isMeaningfulCompletionEvent(event: AssistantMessageEvent): boolean {
 		case "text_end":
 		case "thinking_end":
 			return event.content.length > 0;
+		case "image_end":
+			return true;
 		case "toolcall_start":
 		case "toolcall_end":
 			return true;
@@ -60,6 +63,7 @@ function isMeaningfulCompletionEvent(event: AssistantMessageEvent): boolean {
 interface EmptyCompletionRetryOptions {
 	signal?: AbortSignal;
 	providerRetryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
+	acceptEmptyResponse?: boolean;
 }
 
 /**
@@ -79,7 +83,7 @@ export function withEmptyCompletionRetry<M, O extends EmptyCompletionRetryOption
 		for (let emptyAttempt = 0; ; emptyAttempt++) {
 			const inner = attempt(model, context, options);
 			const buffered: AssistantMessageEvent[] = [];
-			let committed = false;
+			let committed = options?.acceptEmptyResponse === true;
 			let terminal: AssistantMessageEvent | undefined;
 			const flush = (): void => {
 				for (const event of buffered) outer.push(event);
@@ -114,9 +118,11 @@ export function withEmptyCompletionRetry<M, O extends EmptyCompletionRetryOption
 			// one-token invisible stop is still the same empty-completion failure.
 			const message = terminal?.type === "done" ? terminal.message : undefined;
 			const isRetryableEmpty =
+				options?.acceptEmptyResponse !== true &&
 				!committed &&
 				message !== undefined &&
 				message.stopReason === "stop" &&
+				message.stopDetails?.type !== "pause_turn" &&
 				!message.errorMessage &&
 				(message.usage?.output ?? 0) <= 1 &&
 				!hasVisibleAssistantContent(message);

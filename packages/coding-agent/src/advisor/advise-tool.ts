@@ -1,3 +1,4 @@
+import { type } from "@oh-my-pi/omptype";
 import type {
 	AgentIdentity,
 	AgentTelemetryConfig,
@@ -7,7 +8,6 @@ import type {
 	AgentToolUpdateCallback,
 } from "@oh-my-pi/pi-agent-core";
 import { escapeXmlAttribute, escapeXmlText } from "@oh-my-pi/pi-utils";
-import { type } from "arktype";
 import adviseDescription from "../prompts/advisor/advise-tool.md" with { type: "text" };
 
 const adviseSchema = type({
@@ -90,10 +90,18 @@ export function isAdvisorInterruptImmuneTurnActive(opts: {
 /**
  * Decide how one advisor note reaches the primary agent.
  *
+ * - A `preserveOnly` caller records every note that arrives while the primary
+ *   is idle as a visible card and never starts a new primary turn.
  * - A non-interrupting `nit` always rides the non-interrupting aside queue.
  * - An interrupting `concern`/`blocker` is normally steered into the agent: into
  *   the live turn while one is streaming, or (when idle) a triggered turn so the
  *   advice is acted on immediately.
+ * - If the primary tail is already a terminal text answer and there is no queued
+ *   work, a late `concern` is preserved as a visible card instead of waking the
+ *   primary to restate completion. A `blocker` is the exception: it means the
+ *   agent handed off broken or unexercised work, so it still steers a triggered
+ *   turn to force the primary to acknowledge and continue before the turn is
+ *   considered done (#5628) — deferring it to the next user turn is the bug.
  * - After a deliberate user interrupt (`autoResumeSuppressed`) the advisor must
  *   not auto-resume the stopped run. While the agent is idle — or still tearing
  *   the interrupted turn down (`aborting`) — the note is preserved as a visible
@@ -102,19 +110,26 @@ export function isAdvisorInterruptImmuneTurnActive(opts: {
  *   auto-resume anything, so it is delivered live. Parking it during an active
  *   run instead strands it (it never reaches the running agent) and the withheld
  *   notes dump as one burst at the next user prompt — the bug this guards.
- * - During the post-interrupt immune-turn window, further `concern`/`blocker`
- *   notes are downgraded to asides; suppression preservation still wins.
+ * - During the post-interrupt immune-turn window, further `concern` notes are
+ *   downgraded to asides; preservation still wins. A `blocker` is exempt: it
+ *   means the agent handed off broken or unexercised work, so it still steers a
+ *   triggered turn even right after a prior interrupt (#5628).
  */
 export function resolveAdvisorDeliveryChannel(opts: {
 	severity: AdvisorSeverity | undefined;
 	autoResumeSuppressed: boolean;
 	streaming: boolean;
 	aborting: boolean;
+	terminalAnswerNoQueuedWork?: boolean;
 	interruptImmuneTurnActive?: boolean;
+	preserveOnly?: boolean;
 }): AdvisorDeliveryChannel {
+	if (opts.preserveOnly && !opts.streaming) return "preserve";
 	if (!isInterruptingSeverity(opts.severity)) return "aside";
 	if (opts.autoResumeSuppressed && (opts.aborting || !opts.streaming)) return "preserve";
-	if (opts.interruptImmuneTurnActive) return "aside";
+	if (opts.terminalAnswerNoQueuedWork && opts.severity !== "blocker" && !opts.streaming && !opts.aborting)
+		return "preserve";
+	if (opts.interruptImmuneTurnActive && opts.severity !== "blocker") return "aside";
 	return "steer";
 }
 
@@ -167,12 +182,40 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 	 *  escalation: nit → concern → blocker), so an advisor cannot bypass dedupe
 	 *  by retagging the same text at a lower or equal severity. */
 	#deliveredNoteSeverities = new Map<string, number>();
+	#inProgressUpdate = false;
+	/** Notes withheld while the primary was mid-turn, in arrival order. Flushed
+	 *  deterministically on the first `beginUpdate(false)` so delivery does not
+	 *  depend on the advisor model choosing to re-raise (it may not, since the
+	 *  tool previously returned "Recorded." for a note that was never routed).
+	 *  Cleared on `resetDeliveredNotes` alongside the delivered-rank map. */
+	#deferredNotes: { key: string; note: string; severity?: AdviseDetails["severity"] }[] = [];
 
 	constructor(private readonly onAdvice: (note: string, severity?: AdviseDetails["severity"]) => void) {}
+
+	/**
+	 * Mark whether the next advisor prompt reviews an in-progress primary turn.
+	 * Non-blockers are withheld until a completed update so partial work does
+	 * not interrupt the primary before it can finish its planned steps.
+	 */
+	beginUpdate(inProgress: boolean): void {
+		const wasInProgress = this.#inProgressUpdate;
+		this.#inProgressUpdate = inProgress;
+		// Turn just completed: flush everything withheld mid-turn, oldest first.
+		// Each flush re-enters the normal dedupe path (escalation rank > delivered
+		// rank), so a note the advisor already got through at a higher severity
+		// stays suppressed while a genuinely-new deferred note is delivered once.
+		if (wasInProgress && !inProgress && this.#deferredNotes.length > 0) {
+			const pending = this.#deferredNotes;
+			this.#deferredNotes = [];
+			for (const { note, severity } of pending) this.#deliver(note, severity);
+		}
+	}
 
 	/** Clear delivered-note memory when the advisor starts a fresh conversation. */
 	resetDeliveredNotes(): void {
 		this.#deliveredNoteSeverities.clear();
+		this.#inProgressUpdate = false;
+		this.#deferredNotes = [];
 	}
 
 	async execute(
@@ -182,22 +225,48 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 		_onUpdate?: AgentToolUpdateCallback<AdviseDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<AdviseDetails>> {
-		const key = advisorNoteDedupeKey(args.note);
-		const rank = advisorSeverityRank(args.severity);
-		const previousRank = this.#deliveredNoteSeverities.get(key) ?? 0;
-		if (rank <= previousRank) {
+		if (this.#inProgressUpdate && args.severity !== "blocker") {
+			// Withheld, not delivered: queue for the deterministic flush on the next
+			// completed update. Skip if an identical note is already pending so a
+			// long mid-turn can't pile up 20 copies of the same advice. Tell the
+			// advisor the truth — the previous "Recorded." made it believe the note
+			// reached the primary, so it never re-raised and the advice was lost.
+			const key = advisorNoteDedupeKey(args.note);
+			const pending = this.#deferredNotes.find(item => item.key === key);
+			if (!pending) {
+				this.#deferredNotes.push({ key, note: args.note, severity: args.severity });
+			} else if (advisorSeverityRank(args.severity) > advisorSeverityRank(pending.severity)) {
+				pending.severity = args.severity;
+			}
 			return {
-				content: [{ type: "text", text: "Duplicate advice ignored." }],
+				content: [
+					{
+						type: "text",
+						text: "Deferred — primary is mid-turn; this note will be delivered automatically when the turn completes. Do not re-raise the same point.",
+					},
+				],
 				details: { note: args.note, severity: args.severity },
 				useless: true,
 			};
 		}
-		this.#deliveredNoteSeverities.set(key, rank);
-		this.onAdvice(args.note, args.severity);
+		const delivered = this.#deliver(args.note, args.severity);
 		return {
-			content: [{ type: "text", text: "Recorded." }],
+			content: [{ type: "text", text: delivered ? "Recorded." : "Duplicate advice ignored." }],
 			details: { note: args.note, severity: args.severity },
 			useless: true,
 		};
+	}
+
+	/** Run one note through the escalation-rank dedupe and, if it passes, route it
+	 *  to the primary. Returns true when the note was actually delivered. Shared by
+	 *  the live path (`execute`) and the deferred flush (`beginUpdate(false)`). */
+	#deliver(note: string, severity?: AdviseDetails["severity"]): boolean {
+		const key = advisorNoteDedupeKey(note);
+		const rank = advisorSeverityRank(severity);
+		const previousRank = this.#deliveredNoteSeverities.get(key) ?? 0;
+		if (rank <= previousRank) return false;
+		this.#deliveredNoteSeverities.set(key, rank);
+		this.onAdvice(note, severity);
+		return true;
 	}
 }

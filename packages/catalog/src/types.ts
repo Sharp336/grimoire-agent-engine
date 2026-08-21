@@ -103,6 +103,8 @@ export interface Usage {
 	cacheWrite: number;
 	/** Sum of input + output + cacheRead + cacheWrite plus provider-side orchestration tokens when reported. */
 	totalTokens: number;
+	/** Provider-reported occupied context tokens when the value is authoritative but not a billable input/output bucket. */
+	contextTokens?: number;
 	/** Provider-side orchestration tokens, billed but not part of the conversation prompt/cache buckets. */
 	orchestration?: {
 		/** Non-cached orchestration input tokens. */
@@ -148,17 +150,18 @@ export interface Usage {
 	};
 }
 
-export type OpenAIReasoningFormat = "openai" | "openrouter" | "zai" | "qwen" | "qwen-chat-template";
+export type OpenAIReasoningFormat = "openai" | "openrouter" | "zai" | "kimi" | "qwen" | "qwen-chat-template";
 
 export type OpenAIReasoningDisableMode =
 	| "omit"
 	| "lowest-effort"
+	| "none-effort"
 	| "openrouter-enabled-false"
 	| "zai-thinking-disabled"
 	| "qwen-enable-thinking-false"
 	| "qwen-template-false";
 
-export type OpenAIStreamMarkupHealingPattern = "kimi" | "dsml" | "thinking";
+export type OpenAIStreamMarkupHealingPattern = "kimi" | "dsml" | "qwen" | "thinking";
 
 /**
  * Compatibility settings for openai-completions API.
@@ -188,13 +191,6 @@ export interface OpenAICompat {
 	reasoningEffortMap?: Partial<Record<Effort, string>>;
 	/** Whether the provider supports `stream_options: { include_usage: true }` for token usage in streaming responses. Default: true. */
 	supportsUsageInStreaming?: boolean;
-	/**
-	 * Enable the Gemini thinking-loop guard (pi-ai stream layer) for this model.
-	 * Defaults to true when the model id classifies as the gemini family. Set
-	 * explicitly to cover an opaque OpenAI-compat proxy alias (e.g. `my-model`)
-	 * that routes to Gemini, or to false to opt a gemini-family id out.
-	 */
-	enableGeminiThinkingLoopGuard?: boolean;
 	/** Which field to use for max tokens. Default: auto-detected from URL. */
 	maxTokensField?: "max_completion_tokens" | "max_tokens";
 	/** Whether tool results require the `name` field. Default: auto-detected from URL. */
@@ -205,8 +201,10 @@ export interface OpenAICompat {
 	requiresThinkingAsText?: boolean;
 	/** Whether tool call IDs must be normalized to Mistral format (exactly 9 alphanumeric chars). Default: auto-detected from URL. */
 	requiresMistralToolIds?: boolean;
-	/** Format for reasoning/thinking parameter. "openai" uses reasoning_effort, "openrouter" uses reasoning: { effort }, "zai" uses thinking: { type: "enabled" | "disabled" } (also used by Moonshot Kimi), "qwen" uses top-level enable_thinking, and "qwen-chat-template" uses chat_template_kwargs.enable_thinking. Default: "openai". */
+	/** Format for reasoning/thinking parameter. `"kimi"` uses `thinking: { type, effort }`; other values select their provider-native reasoning fields. Default: `"openai"`. */
 	thinkingFormat?: OpenAIReasoningFormat;
+	/** Kimi Code transport selected by live per-model protocol metadata. User settings take precedence. */
+	kimiApiFormat?: "openai" | "anthropic";
 	/** Request-time disable encoding for the selected reasoning/thinking format. Default: derived from `thinkingFormat`. */
 	reasoningDisableMode?: OpenAIReasoningDisableMode;
 	/** Whether the provider rejects `reasoning.effort`/`reasoning_effort` even when the model reasons natively. Default: false unless reasoning effort is unsupported. */
@@ -261,6 +259,16 @@ export interface OpenAICompat {
 	 * Non-Qwen templates ignore the flag, so the auto-detection is safe.
 	 */
 	qwenPreserveThinking?: boolean;
+	/**
+	 * Route the requested thinking effort onto the Qwen 3.8+ chat template's
+	 * `reasoning_effort` kwarg (`low`/`medium`/`xhigh`; template default
+	 * `xhigh`). Emitted inside `chat_template_kwargs` for both Qwen dialects
+	 * (plus the top-level field on the `qwen` dialect, which newer llama.cpp
+	 * builds map natively). Without it the qwen dialects only toggle
+	 * `enable_thinking` and the template always thinks at its `xhigh` default.
+	 * Default: auto-detected (Qwen 3.8+ id on a local llama.cpp-style backend).
+	 */
+	qwenTemplateReasoningEffort?: boolean;
 	/** Whether assistant tool-call messages must include non-empty content. Default: false. */
 	requiresAssistantContentForToolCalls?: boolean;
 	/** Whether the provider supports the `tool_choice` parameter. Default: true. */
@@ -304,18 +312,47 @@ export interface OpenAICompat {
 	promptCacheSessionHeader?: "x-grok-conv-id";
 	/** Whether chat-completions payloads should include provider-specific prompt-cache markers. */
 	cacheControlFormat?: "anthropic" | undefined;
+	/**
+	 * Whether this endpoint/model accepts OpenAI's explicit
+	 * `prompt_cache_breakpoint` content markers and `prompt_cache_options`.
+	 * Defaults to the exact first-party model generation allowlist.
+	 */
+	supportsPromptCacheBreakpoints?: boolean;
+	/** The only currently supported minimum lifetime for explicit OpenAI cache breakpoints. */
+	promptCacheBreakpointTtl?: "30m";
 	/** Whether the provider supports the `strict` field in tool definitions. Default: auto-detected per provider/baseUrl (conservative for unknown providers). */
 	supportsStrictMode?: boolean;
 	/**
 	 * Tool-schema dialect the endpoint validates `tools.function.parameters`
-	 * against. `"moonshot-mfjs"` triggers Moonshot Flavored JSON Schema
-	 * normalization (collapse `const`→`enum`, infer `type` on bare enums, strip
-	 * unsupported validators/`prefixItems`) because Moonshot/Kimi native hosts
-	 * reject standard JSON Schema constructs with HTTP 400. Default:
-	 * auto-detected (`"moonshot-mfjs"` on api.moonshot.ai / api.kimi.com). Set
-	 * `"none"` to opt a custom Moonshot-compatible host out.
+	 * against.
+	 *
+	 * `"moonshot-mfjs"` triggers Moonshot Flavored JSON Schema normalization
+	 * (collapse `const`→`enum`, infer `type` on bare enums, strip unsupported
+	 * validators/`prefixItems`) because Moonshot/Kimi native hosts reject
+	 * standard JSON Schema constructs with HTTP 400.
+	 *
+	 * `"grammar"` triggers grammar-sampler normalization (widen bare boolean
+	 * `true`/`{}` subschemas in genuine subschema slots into a value-accepting
+	 * union of primitives) because grammar-constrained backends (llama.cpp, LM
+	 * Studio, vLLM) build a GBNF grammar from the JSON Schema and 400 with
+	 * `Unrecognized schema: true` on a bare boolean subschema (issue #5914).
+	 * Boolean `additionalProperties`/`unevaluatedProperties` are preserved — the
+	 * grammar converter reads them as closed/open-object semantics, and
+	 * `additionalProperties: false` pins the strict object shape.
+	 *
+	 * Default: auto-detected — `"moonshot-mfjs"` on Moonshot native hosts
+	 * (api.moonshot.ai / api.kimi.com) and Kimi-family model ids on any host,
+	 * since proxies (OpenRouter, custom gateways) forward schemas to Moonshot
+	 * verbatim; `"grammar"` on local OpenAI-compatible backends. Set `"none"`
+	 * to opt a host out.
 	 */
-	toolSchemaFlavor?: "moonshot-mfjs" | "none";
+	toolSchemaFlavor?: "moonshot-mfjs" | "grammar" | "none";
+	/**
+	 * Stream-watchdog first-event timeout in ms.
+	 * Set to `0` to allow unbounded prompt processing. Default: auto-detected
+	 * (disabled for local OpenAI-compatible backends).
+	 */
+	streamFirstEventTimeoutMs?: number;
 	/**
 	 * Stream-watchdog idle-timeout floor in ms for slow reasoning hosts.
 	 * Default: auto-detected (GLM coding-plan hosts, direct DeepSeek reasoning).
@@ -327,6 +364,22 @@ export interface OpenAICompat {
 	toolStrictMode?: "all_strict" | "none";
 	/** Whether request shaping may send reasoning params at all. Default: auto-detected (disabled for GitHub Copilot chat-completions). */
 	supportsReasoningParams?: boolean;
+	/**
+	 * Whether the endpoint accepts explicit sampling parameters (`temperature`,
+	 * `top_p`, `top_k`, `min_p`, penalties). OpenAI proprietary reasoning models
+	 * (o-series, gpt-5+) reject them with `400 Unsupported parameter:
+	 * 'temperature' is not supported with this model` on every serving host
+	 * (official, Azure, GitHub Copilot). When unset, auto-detected from the
+	 * model id. Default: true. Issue #5606.
+	 */
+	supportsSamplingParams?: boolean;
+	/**
+	 * Whether presence/frequency penalties and stop sequences may be sent.
+	 * First-party xAI `/v1/responses` rejects penalty fields for every model.
+	 * xAI reasoning models also reject them (and `stop`) on chat completions.
+	 * When unset, auto-detected. Default: true.
+	 */
+	supportsPenaltyAndStopParams?: boolean;
 	/** Always send a max-token field when the caller did not provide one. Default: auto-detected (Kimi-family models derive TPM limits from max_tokens). */
 	alwaysSendMaxTokens?: boolean;
 	/** Whether Responses-API tool-call/result history must be strictly paired. Default: auto-detected (Azure OpenAI, GitHub Copilot). */
@@ -360,6 +413,15 @@ export interface OpenAICompat {
  */
 export interface AnthropicCompat {
 	/**
+	 * Stream-watchdog idle-timeout fallback in ms for slow reasoning hosts.
+	 * Set to 0 to disable the inter-event idle watchdog entirely, matching
+	 * `OpenAICompat.streamIdleTimeoutMs`.
+	 *
+	 * When unset, direct Anthropic streams use `PI_STREAM_IDLE_TIMEOUT_MS`,
+	 * then the legacy `PI_OPENAI_STREAM_IDLE_TIMEOUT_MS` alias, then 300s.
+	 */
+	streamIdleTimeoutMs?: number;
+	/**
 	 * Drop the top-level `strict: true` field on tool definitions. Vertex AI's
 	 * Anthropic-compatible endpoint rejects unknown tool fields with
 	 * `tools.<n>.custom.strict: Extra inputs are not permitted`.
@@ -372,7 +434,7 @@ export interface AnthropicCompat {
 	 * tags: 'disabled', 'enabled'`.
 	 */
 	disableAdaptiveThinking?: boolean;
-	/** Whether tools may include Anthropic's per-tool eager_input_streaming flag. Default: true. */
+	/** Whether tools may include Anthropic's per-tool eager_input_streaming flag. Default: true for the canonical Anthropic API. */
 	supportsEagerToolInputStreaming?: boolean;
 	/** Whether long prompt-cache retention (`ttl: "1h"`) is supported. Default: true for canonical Anthropic API. */
 	supportsLongCacheRetention?: boolean;
@@ -406,6 +468,11 @@ export interface AnthropicCompat {
 	 */
 	requiresToolResultId?: boolean;
 	/**
+	 * Allow configured Claude Code fingerprint headers to replace generated
+	 * OAuth defaults on non-official Anthropic endpoints.
+	 */
+	allowAnthropicHeaderOverrides?: boolean;
+	/**
 	 * Replay unsigned `thinking` blocks from prior assistant turns as native
 	 * thinking instead of demoting them to text. Official Anthropic enforces
 	 * signature-based thinking-chain integrity, so unsigned blocks must stay
@@ -426,6 +493,63 @@ export interface AnthropicCompat {
 	 * blocks instead of normal `tool_use` calls.
 	 */
 	escapeBuiltinToolNames?: boolean;
+	/**
+	 * The configured endpoint enforces Anthropic's signature protocol on
+	 * replayed thinking blocks — either the official API itself or a proxy
+	 * that forwards to it (GitHub Copilot, ZenMux, Cloudflare AI Gateway's
+	 * `/anthropic` route, Google Vertex's `publishers/anthropic/…`).
+	 * Downstream transforms strip stale cross-model thinking signatures on
+	 * these endpoints so the signing proxy doesn't 400 with
+	 * `Invalid signature in thinking block` (#4297), and adaptive-thinking
+	 * models keep the interleaved-thinking beta on them (#6717). Known hosts
+	 * are auto-detected from provider id and baseUrl; set this to mark an
+	 * opaque signing proxy the URL list can't recognize. Superset of
+	 * {@link ResolvedAnthropicCompat.officialEndpoint}.
+	 */
+	signingEndpoint?: boolean;
+}
+
+/**
+ * Compatibility settings for Bedrock Converse prompt caching. Cache pricing is
+ * deliberately not used to infer these request-shape capabilities.
+ */
+export interface BedrockCompat {
+	/** Whether this endpoint accepts no checkpoints, automatic caching, or explicit cachePoint blocks. */
+	promptCacheMode?: "none" | "automatic" | "explicit";
+	/** Whether explicit cachePoint blocks accept `ttl: "1h"`; omitted TTL means Bedrock's 5-minute default. */
+	supportsLongPromptCacheRetention?: boolean;
+	/**
+	 * Bedrock-enforced minimum prompt-prefix tokens for an effective checkpoint.
+	 * Capability metadata only: emitters must not estimate local token counts.
+	 * Zero means no explicit checkpoints.
+	 */
+	promptCacheMinimumTokens?: number;
+	/**
+	 * Bedrock-enforced maximum explicit cache checkpoints per request.
+	 * Capability metadata only; zero means no explicit checkpoints.
+	 */
+	promptCacheMaximumCheckpoints?: number;
+	/**
+	 * Stream-watchdog idle-timeout fallback in ms; 0 disables the idle watchdog.
+	 * Undefined defers to `PI_STREAM_IDLE_TIMEOUT_MS`, then the legacy
+	 * `PI_OPENAI_STREAM_IDLE_TIMEOUT_MS` alias, then the 300s default.
+	 */
+	streamIdleTimeoutMs?: number;
+}
+
+/** Fully-resolved Bedrock Converse prompt-cache capabilities, materialized once by `buildModel`. */
+export interface ResolvedBedrockCompat {
+	promptCacheMode: NonNullable<BedrockCompat["promptCacheMode"]>;
+	supportsLongPromptCacheRetention: boolean;
+	promptCacheMinimumTokens: number;
+	promptCacheMaximumCheckpoints: number;
+	/**
+	 * Stream-watchdog idle-timeout fallback in ms for hosts with no keepalive
+	 * events; 0 disables the idle watchdog. Undefined defers to
+	 * `PI_STREAM_IDLE_TIMEOUT_MS`, then the legacy
+	 * `PI_OPENAI_STREAM_IDLE_TIMEOUT_MS` alias, then the 300s default.
+	 */
+	streamIdleTimeoutMs?: number;
 }
 
 /**
@@ -450,6 +574,12 @@ export interface VercelGatewayRouting {
 	only?: string[];
 	/** List of provider slugs to try in order (e.g., ["anthropic", "openai"]). */
 	order?: string[];
+	/** Enables Vercel AI Gateway's provider-aware automatic prompt caching. */
+	caching?: "auto";
+	/** Stable Responses input-item prefix to anchor for automatic caching. */
+	cacheAnchorItems?: number;
+	/** Requested automatic-cache lifetime for the Responses API. */
+	cacheTtl?: "5m" | "1h";
 }
 
 type ResolvedToolStrictMode = NonNullable<OpenAICompat["toolStrictMode"]> | "mixed";
@@ -464,7 +594,11 @@ export interface ResolvedOpenAISharedCompat {
 	supportsReasoningEffort: boolean;
 	reasoningEffortMap: Partial<Record<Effort, string>>;
 	supportsReasoningParams: boolean;
+	supportsSamplingParams: boolean;
+	supportsPenaltyAndStopParams: boolean;
 	thinkingFormat: OpenAIReasoningFormat;
+	/** Kimi Code transport selected by live per-model protocol metadata. */
+	kimiApiFormat?: OpenAICompat["kimiApiFormat"];
 	reasoningDisableMode: OpenAIReasoningDisableMode;
 	omitReasoningEffort: boolean;
 	includeEncryptedReasoning: boolean;
@@ -480,6 +614,7 @@ export interface ResolvedOpenAISharedCompat {
 	allowsSyntheticReasoningContentForToolCalls: boolean;
 	replayReasoningContent: boolean;
 	qwenPreserveThinking: boolean;
+	qwenTemplateReasoningEffort: boolean;
 	requiresThinkingAsText: boolean;
 	requiresMistralToolIds: boolean;
 	requiresToolResultName: boolean;
@@ -487,19 +622,29 @@ export interface ResolvedOpenAISharedCompat {
 	requiresAssistantContentForToolCalls: boolean;
 	stripDeepseekSpecialTokens: boolean;
 	streamMarkupHealingPattern?: OpenAIStreamMarkupHealingPattern;
+	/** See {@link OpenAICompat.streamFirstEventTimeoutMs}. */
+	streamFirstEventTimeoutMs?: number;
 	reasoningDeltasMayBeCumulative: boolean;
 	emptyLengthFinishIsContextError: boolean;
 	usesOpenAIToolCallIdLimit: boolean;
 	promptCacheSessionHeader?: OpenAICompat["promptCacheSessionHeader"];
+	/**
+	 * Whether this model accepts explicit OpenAI prompt-cache breakpoints.
+	 * Built catalog models always materialize this false-by-default value;
+	 * optionality preserves hand-authored resolved compat fixtures.
+	 */
+	supportsPromptCacheBreakpoints?: boolean;
+	/** Minimum cache lifetime supported by explicit OpenAI prompt-cache breakpoints. */
+	promptCacheBreakpointTtl?: "30m";
 	/** The model sits behind OpenRouter (routing prefs and max-token omission apply). */
 	isOpenRouterHost: boolean;
 	/** Whether this endpoint needs a max-token field even when caller did not set one. */
 	alwaysSendMaxTokens: boolean;
-	/** See {@link OpenAICompat.enableGeminiThinkingLoopGuard}. Set by the builder from the family classifier. */
-	enableGeminiThinkingLoopGuard?: boolean;
 	openRouterRouting?: OpenAICompat["openRouterRouting"];
 	/** Provider-specific wire model-id transform applied to the base id. */
 	wireModelIdMode: "raw" | "firepass" | "fireworks" | "openrouter";
+	/** See {@link OpenAICompat.toolSchemaFlavor}. Read by both wire paths when converting tools. */
+	toolSchemaFlavor?: OpenAICompat["toolSchemaFlavor"];
 }
 
 /**
@@ -516,7 +661,10 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "supportsReasoningEffort"
 			| "reasoningEffortMap"
 			| "supportsReasoningParams"
+			| "supportsSamplingParams"
+			| "supportsPenaltyAndStopParams"
 			| "thinkingFormat"
+			| "kimiApiFormat"
 			| "reasoningDisableMode"
 			| "omitReasoningEffort"
 			| "includeEncryptedReasoning"
@@ -532,6 +680,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "allowsSyntheticReasoningContentForToolCalls"
 			| "replayReasoningContent"
 			| "qwenPreserveThinking"
+			| "qwenTemplateReasoningEffort"
 			| "requiresThinkingAsText"
 			| "requiresMistralToolIds"
 			| "requiresToolResultName"
@@ -543,6 +692,8 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "emptyLengthFinishIsContextError"
 			| "usesOpenAIToolCallIdLimit"
 			| "promptCacheSessionHeader"
+			| "supportsPromptCacheBreakpoints"
+			| "promptCacheBreakpointTtl"
 			| "openRouterRouting"
 			| "isOpenRouterHost"
 			| "supportsStrictMode"
@@ -553,12 +704,12 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "extraBody"
 			| "toolStrictMode"
 			| "toolSchemaFlavor"
+			| "streamFirstEventTimeoutMs"
 			| "streamIdleTimeoutMs"
 			| "cacheControlFormat"
 			| "thinkingKeep"
 			| "strictResponsesPairing"
 			| "supportsImageDetailOriginal"
-			| "enableGeminiThinkingLoopGuard"
 			| "whenThinking"
 		>
 	> & {
@@ -568,7 +719,6 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 		thinkingKeep?: OpenAICompat["thinkingKeep"];
 		streamIdleTimeoutMs?: number;
 		toolStrictMode: ResolvedToolStrictMode;
-		toolSchemaFlavor?: OpenAICompat["toolSchemaFlavor"];
 		/** The model sits behind Vercel AI Gateway. */
 		isVercelGatewayHost: boolean;
 		dropThinkingWhenReasoningEffort: boolean;
@@ -582,7 +732,16 @@ export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompa
 	strictResponsesPairing: boolean;
 	supportsImageDetailOriginal: boolean;
 	supportsObfuscationOptOut: boolean;
+	/**
+	 * Whether `reasoning.summary` may be sent. First-party xAI `/v1/responses`
+	 * rejects the field; handlers pass `null` so the wire omits it instead of
+	 * filling `"auto"`.
+	 */
+	supportsReasoningSummary: boolean;
 	streamIdleTimeoutMs?: number;
+	vercelGatewayRouting?: OpenAICompat["vercelGatewayRouting"];
+	/** The model sits behind Vercel AI Gateway's Responses endpoint. */
+	isVercelGatewayHost: boolean;
 }
 
 /**
@@ -593,7 +752,13 @@ export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompa
 export type ResolvedOpenRouterCompat = ResolvedOpenAICompat & ResolvedOpenAIResponsesCompat;
 
 /** Fully-resolved anthropic-messages compat view (same contract as `ResolvedOpenAICompat`). */
-export type ResolvedAnthropicCompat = Required<AnthropicCompat> & {
+export type ResolvedAnthropicCompat = Required<Omit<AnthropicCompat, "streamIdleTimeoutMs">> & {
+	/**
+	 * Stream-watchdog idle-timeout fallback in ms for slow reasoning hosts; 0 disables the idle watchdog.
+	 * Undefined defers to `PI_STREAM_IDLE_TIMEOUT_MS`, then the legacy
+	 * `PI_OPENAI_STREAM_IDLE_TIMEOUT_MS` alias, then 300s.
+	 */
+	streamIdleTimeoutMs?: number;
 	/**
 	 * The configured endpoint is the official first-party Anthropic API
 	 * (https + exact `api.anthropic.com` host; a missing baseUrl counts as
@@ -601,17 +766,6 @@ export type ResolvedAnthropicCompat = Required<AnthropicCompat> & {
 	 * env headers, and cache-TTL shaping without per-request URL parsing.
 	 */
 	officialEndpoint: boolean;
-	/**
-	 * The configured endpoint enforces Anthropic's signature protocol on
-	 * replayed thinking blocks — either the official API itself or a proxy
-	 * that forwards to it (GitHub Copilot, ZenMux, Cloudflare AI Gateway's
-	 * `/anthropic` route, Google Vertex's `publishers/anthropic/…`).
-	 * Downstream transforms strip stale cross-model thinking signatures on
-	 * these endpoints so the signing proxy doesn't 400 with
-	 * `Invalid signature in thinking block` (#4297). Superset of
-	 * {@link officialEndpoint}.
-	 */
-	signingEndpoint: boolean;
 };
 
 /**
@@ -644,9 +798,11 @@ export type CompatConfigOf<TApi extends Api> = TApi extends
 	? OpenAICompat
 	: TApi extends "anthropic-messages"
 		? AnthropicCompat
-		: TApi extends "devin-agent"
-			? DevinCompat
-			: undefined;
+		: TApi extends "bedrock-converse-stream"
+			? BedrockCompat
+			: TApi extends "devin-agent"
+				? DevinCompat
+				: undefined;
 
 /** Resolved compat for a given API: complete record, materialized once by `buildModel`. */
 export type CompatOf<TApi extends Api> = TApi extends "openrouter"
@@ -657,9 +813,11 @@ export type CompatOf<TApi extends Api> = TApi extends "openrouter"
 			? ResolvedOpenAIResponsesCompat
 			: TApi extends "anthropic-messages"
 				? ResolvedAnthropicCompat
-				: TApi extends "devin-agent"
-					? ResolvedDevinCompat
-					: undefined;
+				: TApi extends "bedrock-converse-stream"
+					? ResolvedBedrockCompat
+					: TApi extends "devin-agent"
+						? ResolvedDevinCompat
+						: undefined;
 
 /** Provider-native compaction endpoint configuration for one model. */
 export interface RemoteCompactionConfig<TApi extends Api = Api> {
@@ -679,6 +837,46 @@ export interface RemoteCompactionConfig<TApi extends Api = Api> {
 	model?: string;
 }
 
+/** Per-million-token rates for one model pricing tier. */
+export interface TokenCost {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+}
+
+/**
+ * Rates applied to the full request when its prompt exceeds `inputThreshold`.
+ * Prompt input is the sum of uncached, cached-read, cache-write, and
+ * provider-orchestration input tokens.
+ */
+export interface LongContextTokenCost extends TokenCost {
+	inputThreshold: number;
+}
+
+/** Base token rates plus an optional long-context tier. */
+export interface ModelCost extends TokenCost {
+	longContext?: LongContextTokenCost;
+}
+
+/**
+ * Exact local content tokenizer family for a model.
+ *
+ * Absent means no first-party local tokenizer is known and consumers retain
+ * their estimate/default-tokenizer policy. The values name tokenizer
+ * generations rather than providers: DeepSeek V3 through V4 share
+ * `"deepseek-v3"`; Kimi K2 through K3 share `"kimi-k2"`.
+ */
+export type ModelTokenizer =
+	| "claude-v3"
+	| "claude-v47"
+	| "claude-v5"
+	| "claude-v5-sonnet"
+	| "qwen3"
+	| "deepseek-v3"
+	| "kimi-k2"
+	| "glm5";
+
 // Model interface for the unified model system
 export interface Model<TApi extends Api = Api> {
 	id: string;
@@ -691,11 +889,24 @@ export interface Model<TApi extends Api = Api> {
 	 * everything local (selection, caching, usage attribution) keys on `id`.
 	 */
 	requestModelId?: string;
+	/**
+	 * `reasoning.mode` to send on OpenAI Responses-family requests. Set on
+	 * generated pro aliases (`gpt-5.6-*-pro` on `openai`/`openai-codex`) that
+	 * pair a base wire id (`requestModelId`) with OpenAI's pro reasoning
+	 * serving path. Absent everywhere else; providers omit the wire field.
+	 */
+	reasoningMode?: "pro";
 	name: string;
 	api: TApi;
 	provider: Provider;
 	baseUrl: string;
 	reasoning: boolean;
+	/**
+	 * Exact local tokenizer family resolved from the model identity or supplied
+	 * explicitly by a catalog/discovery source. Absent leaves local counting to
+	 * the consumer's fallback policy.
+	 */
+	tokenizer?: ModelTokenizer;
 	input: ("text" | "image")[];
 	/**
 	 * Decoder family used for image inputs when it has narrower format support
@@ -709,14 +920,15 @@ export interface Model<TApi extends Api = Api> {
 	 * reports that native tool calling is unsupported.
 	 */
 	supportsTools?: boolean;
+	/** Whether this model accepts the GA OpenAI Responses `{ type: "computer" }` native tool. */
+	supportsComputerUse?: boolean;
+	/** Verbatim explicit computer-use support from the spec; undefined when `buildModel` inferred the runtime value. */
+	supportsComputerUseConfig?: boolean;
 	/** GitLab Duo Workflow root namespace selected during catalog discovery. */
 	gitlabDuoWorkflowRootNamespaceId?: string;
-	cost: {
-		input: number; // $/million tokens
-		output: number; // $/million tokens
-		cacheRead: number; // $/million tokens
-		cacheWrite: number; // $/million tokens
-	};
+	/** Cursor `max_mode` request flag returned by `GetUsableModels` for premium models that require max mode. */
+	cursorMaxMode?: boolean;
+	cost: ModelCost;
 	/** Premium Copilot requests charged per user-initiated request (defaults to 1). */
 	premiumMultiplier?: number;
 	contextWindow: number | null;
@@ -751,6 +963,10 @@ export interface Model<TApi extends Api = Api> {
 	transport?: "pi-native";
 	/** Hint that websocket transport should be preferred when supported by the provider implementation. */
 	preferWebsockets?: boolean;
+	/** Codex Responses Lite transport: send the lite marker and carry instructions/tools as input items (mirrors codex-rs `use_responses_lite`). */
+	useResponsesLite?: boolean;
+	/** Codex Code Mode restriction: model expects tools routed through a programmatic exec surface (mirrors codex-rs `tool_mode`). */
+	toolMode?: "code_mode_only";
 	/** Preferred model to switch to when context promotion is triggered (model id or provider/id). */
 	contextPromotionTarget?: string;
 	/** Preferred model to use only for compaction (model id or provider/id); the active session model is unchanged. */
@@ -790,7 +1006,8 @@ export interface Model<TApi extends Api = Api> {
  * vocabulary of `buildModel`. Identical to `Model` except `compat` carries the
  * sparse override shape and nothing is resolved yet.
  */
-export interface ModelSpec<TApi extends Api = Api> extends Omit<Model<TApi>, "compat" | "compatConfig"> {
+export interface ModelSpec<TApi extends Api = Api>
+	extends Omit<Model<TApi>, "compat" | "compatConfig" | "supportsComputerUseConfig"> {
 	/** Sparse compatibility overrides; resolved into `Model.compat` by `buildModel`. */
 	compat?: CompatConfigOf<TApi>;
 }

@@ -7,7 +7,7 @@ import { Effort, type FetchImpl, type Model, type OpenAICompat, type ThinkingCon
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
@@ -163,6 +163,11 @@ describe("ModelRegistry", () => {
 		return model?.compatConfig as OpenAICompat | undefined;
 	}
 
+	function getReplayUnsignedThinking(model: Model | undefined): boolean | undefined {
+		const compat = model?.compat;
+		return compat && "replayUnsignedThinking" in compat ? compat.replayUnsignedThinking : undefined;
+	}
+
 	/** Create a baseUrl-only override (no custom models) */
 	function overrideConfig(baseUrl: string, headers?: Record<string, string>) {
 		return { baseUrl, ...(headers && { headers }) };
@@ -268,6 +273,9 @@ describe("ModelRegistry", () => {
 		let anthropicHeadersOnly: ModelRegistry;
 		let anthropicAuthHeader: ModelRegistry;
 		let mixGoogleCustom: ModelRegistry;
+		let openaiProxy: ModelRegistry;
+		let xaiModelScopedHeaders: ModelRegistry;
+		let otherXaiModelId: string;
 		beforeAll(() => {
 			anthropicProxy = readonlyRegistry({
 				providers: { anthropic: overrideConfig("https://my-proxy.example.com/v1") },
@@ -297,6 +305,24 @@ describe("ModelRegistry", () => {
 						[{ id: "gemini-custom" }],
 						"google-generative-ai",
 					),
+				},
+			});
+			openaiProxy = readonlyRegistry({
+				providers: { openai: overrideConfig("https://openai-proxy.example.com/v1") },
+			});
+			const otherXaiModel = sharedBuiltin
+				.getAll()
+				.find(model => model.provider === "xai" && model.id !== "grok-4.3");
+			if (!otherXaiModel) throw new Error("Expected another bundled xAI model");
+			otherXaiModelId = otherXaiModel.id;
+			xaiModelScopedHeaders = readonlyRegistry({
+				providers: {
+					xai: {
+						headers: { "X-Provider-Tenant": "search-tenant" },
+						modelOverrides: {
+							[otherXaiModelId]: { headers: { "X-Model-Tenant": "other-model-tenant" } },
+						},
+					},
 				},
 			});
 		});
@@ -329,6 +355,22 @@ describe("ModelRegistry", () => {
 			for (const model of anthropicModels) {
 				expect(model.headers?.["X-Custom-Header"]).toBe("custom-only");
 			}
+		});
+
+		test("rerouted bundled OpenAI models recompute inferred computer capability", () => {
+			const model = openaiProxy.find("openai", "gpt-5.4");
+
+			expect(model?.baseUrl).toBe("https://openai-proxy.example.com/v1");
+			expect(model?.supportsComputerUse).toBe(false);
+		});
+
+		test("provider header lookup excludes unrelated model overrides", () => {
+			expect(xaiModelScopedHeaders.find("xai", otherXaiModelId)?.headers?.["X-Model-Tenant"]).toBe(
+				"other-model-tenant",
+			);
+			expect({ ...xaiModelScopedHeaders.getProviderHeaders("xai") }).toEqual({
+				"X-Provider-Tenant": "search-tenant",
+			});
 		});
 
 		test("authHeader override applies bearer auth to built-in models without custom models", () => {
@@ -509,6 +551,7 @@ describe("ModelRegistry", () => {
 	describe("provider compat overrides", () => {
 		let providerCompat: ModelRegistry;
 		let customCompat: ModelRegistry;
+		let customAnthropicCompat: ModelRegistry;
 		let customModelCompat: ModelRegistry;
 		let customResponsesCompat: ModelRegistry;
 		beforeAll(() => {
@@ -544,6 +587,29 @@ describe("ModelRegistry", () => {
 								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 								contextWindow: 1000,
 								maxTokens: 100,
+							},
+						],
+					},
+				},
+			});
+			customAnthropicCompat = readonlyRegistry({
+				providers: {
+					"anthropic-proxy": {
+						baseUrl: "https://example.com/v1/messages",
+						apiKey: "ANTHROPIC_PROXY_KEY",
+						api: "anthropic-messages",
+						compat: {
+							supportsEagerToolInputStreaming: true,
+							allowAnthropicHeaderOverrides: true,
+						},
+						models: [
+							{
+								id: "claude-haiku-4.5",
+								reasoning: false,
+								input: ["text"],
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+								contextWindow: 200_000,
+								maxTokens: 8_192,
 							},
 						],
 					},
@@ -632,6 +698,40 @@ describe("ModelRegistry", () => {
 			expect(compat?.supportsUsageInStreaming).toBe(false);
 			expect(compat?.maxTokensField).toBe("max_tokens");
 			expect(compat?.cacheControlFormat).toBe("anthropic");
+		});
+
+		test("custom Anthropic providers can opt into eager tool input streaming", () => {
+			const model = customAnthropicCompat.find("anthropic-proxy", "claude-haiku-4.5");
+			expect(model?.compat).toMatchObject({
+				supportsEagerToolInputStreaming: true,
+				allowAnthropicHeaderOverrides: true,
+			});
+		});
+
+		test("provider-level Anthropic compat survives dynamic discovery refresh", async () => {
+			writeRawModelsJson({
+				anthropic: {
+					baseUrl: "https://proxy.example/v1",
+					apiKey: "TEST_KEY",
+					compat: { replayUnsignedThinking: false },
+				},
+			});
+			const fetchMock: FetchImpl = async input => {
+				const url = String(input);
+				if (url === "https://catalog.stencil.so/models.json.zstd") return Response.json({});
+				if (url === "https://proxy.example/v1/models") {
+					return Response.json({
+						data: [{ id: "claude-sonnet-5", display_name: "Claude Sonnet 5" }],
+					});
+				}
+				throw new Error(`Unexpected URL: ${url}`);
+			};
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+			expect(getReplayUnsignedThinking(registry.find("anthropic", "claude-sonnet-5"))).toBe(false);
+
+			await registry.refreshProvider("anthropic", "online");
+
+			expect(getReplayUnsignedThinking(registry.find("anthropic", "claude-sonnet-5"))).toBe(false);
 		});
 
 		test("custom Responses providers can disable original image detail", () => {
@@ -956,7 +1056,9 @@ describe("ModelRegistry", () => {
 
 			const model = registry.find("custom-local", "gpt-5.4");
 			expect(model?.contextWindow).toBe(1_000_000);
-			expect(model?.baseUrl).toBe("http://127.0.0.1:8080");
+			// llama.cpp discovery probes the bare root (`/models`, `/props`); chat
+			// traffic must go to the OpenAI-compatible `/v1` prefix.
+			expect(model?.baseUrl).toBe("http://127.0.0.1:8080/v1");
 		});
 
 		test("discoverable custom compat survives refresh", async () => {
@@ -1074,6 +1176,7 @@ describe("ModelRegistry", () => {
 		};
 		let thinkingCustom: ModelRegistry;
 		let thinkingOverride: ModelRegistry;
+		let deepseekOverride: ModelRegistry;
 		beforeAll(() => {
 			thinkingCustom = readonlyRegistry({
 				providers: {
@@ -1093,16 +1196,28 @@ describe("ModelRegistry", () => {
 					},
 				},
 			});
+			deepseekOverride = readonlyRegistry({
+				providers: {
+					openrouter: {
+						modelOverrides: {
+							"deepseek/deepseek-v4-flash-0731": {
+								thinking: {
+									mode: "effort",
+									efforts: [Effort.Max, Effort.High, Effort.Low],
+									defaultLevel: Effort.High,
+								},
+							},
+						},
+					},
+				},
+			});
 		});
 
-		test("custom models preserve explicit thinking and gain backfilled wire facts", () => {
+		test("custom models preserve explicit thinking verbatim", () => {
 			const model = getModelsForProvider(thinkingCustom, "anthropic").find(m => m.id === "claude-custom");
-			expect(model?.thinking).toEqual({
-				...customThinking,
-				// Versionless claude ids resolve to the 4-tier adaptive wire map,
-				// filtered to the declared efforts (no xhigh).
-				effortMap: { minimal: "low" },
-			});
+			// Adaptive effort ladders are wire-exact — explicit thinking passes
+			// through without a backfilled effortMap.
+			expect(model?.thinking).toEqual(customThinking);
 		});
 
 		test("model overrides can replace canonical thinking metadata", () => {
@@ -1112,6 +1227,17 @@ describe("ModelRegistry", () => {
 			expect(model?.thinking).toEqual({
 				mode: "budget",
 				efforts: [Effort.Low, Effort.Medium],
+			});
+		});
+
+		test("model overrides preserve explicit OpenRouter DeepSeek thinking metadata", () => {
+			const model = getModelsForProvider(deepseekOverride, "openrouter").find(
+				m => m.id === "deepseek/deepseek-v4-flash-0731",
+			);
+			expect(model?.thinking).toEqual({
+				mode: "effort",
+				efforts: [Effort.Max, Effort.High, Effort.Low],
+				defaultLevel: Effort.High,
 			});
 		});
 	});
@@ -1188,7 +1314,7 @@ describe("ModelRegistry", () => {
 				},
 			});
 			costPartial = readonlyRegistry({
-				providers: { openrouter: { modelOverrides: { "anthropic/claude-sonnet-4": { cost: { input: 99 } } } } },
+				providers: { openai: { modelOverrides: { "gpt-5.6": { cost: { input: 99 } } } } },
 			});
 			addHeaders = readonlyRegistry({
 				providers: {
@@ -1314,12 +1440,15 @@ describe("ModelRegistry", () => {
 			expect(invalid.find("myprovider", "my-model")).toBeUndefined();
 		});
 
-		test("model override can change cost fields partially", () => {
-			const sonnet = getModelsForProvider(costPartial, "openrouter").find(m => m.id === "anthropic/claude-sonnet-4");
-			// Input cost should be overridden
-			expect(sonnet?.cost.input).toBe(99);
-			// Other cost fields should be preserved from built-in
-			expect(sonnet?.cost.output).toBeGreaterThan(0);
+		test("model override can change cost fields partially without dropping long-context pricing", () => {
+			const gpt56 = getModelsForProvider(costPartial, "openai").find(m => m.id === "gpt-5.6");
+			expect(gpt56?.cost.input).toBe(99);
+			expect(gpt56?.cost.output).toBeGreaterThan(0);
+			expect(gpt56?.cost.longContext).toMatchObject({
+				inputThreshold: 272_000,
+				input: 10,
+				output: 45,
+			});
 		});
 
 		test("model override can add headers", () => {
@@ -1532,6 +1661,33 @@ describe("ModelRegistry", () => {
 				url => url.includes("127.0.0.1:11434") || url.includes("127.0.0.1:8080") || url.includes("127.0.0.1:1234"),
 			);
 			expect(disabledProbeUrls).toEqual([]);
+		});
+	});
+	describe("extended context", () => {
+		test("off caps premium long-context models at the standard-pricing threshold", async () => {
+			await Settings.init({ inMemory: true, overrides: { extendedContext: false } });
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+
+			// GPT-5.6 bills 2x input above 272K on both the API and Codex.
+			expect(registry.find("openai", "gpt-5.6-sol")?.contextWindow).toBe(272_000);
+			expect(registry.find("openai-codex", "gpt-5.6-sol")?.contextWindow).toBe(272_000);
+			// Standard-priced 1M models (no long-context tier) keep their window.
+			expect(registry.find("anthropic", "claude-opus-4-8")?.contextWindow).toBe(1_000_000);
+		});
+
+		test("reapplyModelPolicies re-clamps and restores premium windows on toggle", async () => {
+			await Settings.init({ inMemory: true });
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			expect(registry.find("openai", "gpt-5.6-terra")?.contextWindow).toBe(1_050_000);
+
+			settings.set("extendedContext", false);
+			await registry.reapplyModelPolicies();
+			expect(registry.find("openai", "gpt-5.6-terra")?.contextWindow).toBe(272_000);
+
+			settings.set("extendedContext", true);
+			await registry.reapplyModelPolicies();
+			expect(registry.find("openai", "gpt-5.6-terra")?.contextWindow).toBe(1_050_000);
+			expect(registry.find("openai-codex", "gpt-5.6-terra")?.contextWindow).toBe(1_000_000);
 		});
 	});
 	describe("bundled Anthropic catalog availability", () => {
@@ -1752,6 +1908,7 @@ describe("ModelRegistry", () => {
 		let vertexStale: ModelRegistry;
 		let litellmStaleNamespaceCache: ModelRegistry;
 		let litellmCurrentNamespaceCache: ModelRegistry;
+		let openaiModelsListStaleNamespaceCache: ModelRegistry;
 		const vertexProjectModel = () =>
 			buildModel({
 				id: "zai-org/glm-4.7-maas",
@@ -1977,7 +2134,7 @@ describe("ModelRegistry", () => {
 				{
 					seedCache: dbPath =>
 						writeModelCache(
-							"cached-compact-proxy:openai-models-list-context-v2",
+							"cached-compact-proxy:openai-models-list-context-v3",
 							Date.now(),
 							[
 								buildModel({
@@ -2024,11 +2181,11 @@ describe("ModelRegistry", () => {
 					maxTokens: 16_384,
 				});
 			litellmStaleNamespaceCache = readonlyRegistry(litellmProxyConfig(), {
-				// Row under the retired pre-reseller-suffix-stripping namespace; the
-				// rich-v2 bump must orphan it instead of serving the stale name.
+				// Rows cached before per-model Responses routing must be orphaned
+				// instead of keeping OpenAI-backed groups on Chat Completions.
 				seedCache: dbPath =>
 					writeModelCache(
-						"litellm-proxy:litellm-rich-v1",
+						"litellm-proxy:litellm-rich-v2",
 						Date.now(),
 						[litellmCachedModel("MiniMax-M3 (3x usage)")],
 						true,
@@ -2039,7 +2196,7 @@ describe("ModelRegistry", () => {
 			litellmCurrentNamespaceCache = readonlyRegistry(litellmProxyConfig(), {
 				seedCache: dbPath =>
 					writeModelCache(
-						"litellm-proxy:litellm-rich-v2",
+						"litellm-proxy:litellm-rich-v3",
 						Date.now(),
 						[litellmCachedModel("MiniMax-M3")],
 						true,
@@ -2047,6 +2204,45 @@ describe("ModelRegistry", () => {
 						dbPath,
 					),
 			});
+			openaiModelsListStaleNamespaceCache = readonlyRegistry(
+				{
+					providers: {
+						"stale-openai-proxy": {
+							baseUrl: "https://stale-proxy.example.com/v1",
+							apiKey: "TEST_KEY",
+							api: "openai-completions",
+							discovery: { type: "openai-models-list" },
+							models: [],
+						},
+					},
+				},
+				{
+					// Row under the retired pre-modality namespace; the context-v3
+					// bump must orphan it instead of serving the stale text-only row.
+					seedCache: dbPath =>
+						writeModelCache(
+							"stale-openai-proxy:openai-models-list-context-v2",
+							Date.now(),
+							[
+								buildModel({
+									id: "stale-vlm",
+									name: "Stale VLM",
+									api: "openai-completions",
+									provider: "stale-openai-proxy",
+									baseUrl: "https://stale-proxy.example.com/v1",
+									reasoning: false,
+									input: ["text"],
+									cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+									contextWindow: 128_000,
+									maxTokens: 16_384,
+								}),
+							],
+							true,
+							"",
+							dbPath,
+						),
+				},
+			);
 		});
 
 		test("legacy cached discovery sentinels are ignored after nullable limit cutover", () => {
@@ -2086,17 +2282,23 @@ describe("ModelRegistry", () => {
 			});
 		});
 
-		test("ignores litellm discovery rows cached under the retired rich-v1 namespace", () => {
-			// PR #3717 changed the LiteLLM mappers (reseller usage-suffix stripping);
-			// warm rich-v1 rows carry pre-change display names and must not load.
+		test("ignores litellm discovery rows cached under the retired rich-v2 namespace", () => {
+			// Warm rich-v2 rows carry the pre-change provider-wide API and must not load.
 			expect(litellmStaleNamespaceCache.find("litellm-proxy", "minimax/minimax-m3")).toBeUndefined();
 			expect(getModelsForProvider(litellmStaleNamespaceCache, "litellm-proxy")).toHaveLength(0);
 		});
 
-		test("loads litellm discovery rows cached under the rich-v2 namespace", () => {
+		test("loads litellm discovery rows cached under the rich-v3 namespace", () => {
 			const model = litellmCurrentNamespaceCache.find("litellm-proxy", "minimax/minimax-m3");
 			expect(model?.name).toBe("MiniMax-M3");
 			expect(model?.provider).toBe("litellm-proxy");
+		});
+
+		test("ignores openai-models-list rows cached under the retired context-v2 namespace", () => {
+			// PR #7584 added server-advertised input-modality parsing; warm v2 rows
+			// pinned vision-capable ids at text-only and must not load.
+			expect(openaiModelsListStaleNamespaceCache.find("stale-openai-proxy", "stale-vlm")).toBeUndefined();
+			expect(getModelsForProvider(openaiModelsListStaleNamespaceCache, "stale-openai-proxy")).toHaveLength(0);
 		});
 
 		test("replaces bundled google-vertex models with authoritative Vertex project discovery", () => {

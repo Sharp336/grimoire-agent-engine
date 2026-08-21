@@ -116,16 +116,18 @@ function findTaskFuzzy(phases: TodoPhase[], query: string): { task: TodoItem; ph
 // Build system reminder
 // =============================================================================
 
-function buildSystemReminder(action: string, phases: TodoPhase[]): string {
+function buildSystemReminder(action: string, phases: TodoPhase[], removed = false): string {
 	const md = phases.length === 0 ? "(empty)" : phasesToMarkdown(phases).trimEnd();
-	return [
-		"<system-reminder>",
-		`The user manually modified the todo list (${action}).`,
-		"Current todo list:",
-		"",
-		md,
-		"</system-reminder>",
-	].join("\n");
+	const lines = ["<system-reminder>", `The user manually modified the todo list (${action}).`];
+	if (removed) {
+		lines.push(
+			phases.length === 0
+				? "The user intentionally cleared the todo list. Do NOT recreate or re-populate it unless the user explicitly asks; continue the current request without a todo list."
+				: "The user intentionally removed the entries no longer shown below. Do NOT re-add them unless the user explicitly asks.",
+		);
+	}
+	lines.push("Current todo list:", "", md, "</system-reminder>");
+	return lines.join("\n");
 }
 
 export class TodoCommandController {
@@ -133,8 +135,7 @@ export class TodoCommandController {
 
 	/**
 	 * True latest todo state for the user-facing /todo verbs. Reads from session
-	 * entries so that completed/abandoned tasks remain visible after resume
-	 * (where `session.getTodoPhases()` would have stripped them).
+	 * entries or falls back to the active session state.
 	 */
 	#currentPhases(): TodoPhase[] {
 		const fromEntries = getLatestTodoPhasesFromEntries(this.ctx.sessionManager.getBranch());
@@ -367,7 +368,7 @@ export class TodoCommandController {
 		const current = this.#currentPhases();
 		const trimmed = rest.trim();
 		if (!trimmed) {
-			this.#commit([], "/todo rm (all)");
+			this.#commit([], "/todo rm (all)", { removed: true });
 			this.ctx.showStatus("Cleared all todos.");
 			return;
 		}
@@ -378,7 +379,7 @@ export class TodoCommandController {
 				this.ctx.showError(errors.join("; "));
 				return;
 			}
-			this.#commit(phases, `/todo rm ${taskHit.task.content}`);
+			this.#commit(phases, `/todo rm ${taskHit.task.content}`, { removed: true });
 			this.ctx.showStatus(`Removed: ${taskHit.task.content}`);
 			return;
 		}
@@ -389,7 +390,7 @@ export class TodoCommandController {
 				this.ctx.showError(errors.join("; "));
 				return;
 			}
-			this.#commit(phases, `/todo rm ${phaseHit.name}`);
+			this.#commit(phases, `/todo rm ${phaseHit.name}`, { removed: true });
 			this.ctx.showStatus(`Removed phase: ${phaseHit.name}`);
 			return;
 		}
@@ -409,16 +410,9 @@ export class TodoCommandController {
 		const initialMarkdown =
 			current.length > 0 ? phasesToMarkdown(current) : "# Todos\n- [ ] (replace this with your tasks)\n";
 
-		const fileHandle = await this.#openTtyHandle();
 		this.ctx.ui.stop();
 		try {
-			const stdio: [number | "inherit", number | "inherit", number | "inherit"] = fileHandle
-				? [fileHandle.fd, fileHandle.fd, fileHandle.fd]
-				: ["inherit", "inherit", "inherit"];
-			const result = await openInEditor(editorCmd, initialMarkdown, {
-				extension: ".todo.md",
-				stdio,
-			});
+			const result = await openInEditor(editorCmd, initialMarkdown, { extension: ".todo.md" });
 			if (result === null) {
 				this.ctx.showWarning("Editor exited without saving; todos unchanged.");
 				return;
@@ -436,26 +430,12 @@ export class TodoCommandController {
 				`Failed to open external editor: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		} finally {
-			if (fileHandle) {
-				await fileHandle.close().catch(() => {});
-			}
 			this.ctx.ui.start();
 			this.ctx.ui.requestRender();
 		}
 	}
 
-	async #openTtyHandle(): Promise<fs.FileHandle | null> {
-		const stdinPath = (process.stdin as unknown as { path?: string }).path;
-		const candidate = typeof stdinPath === "string" ? stdinPath : undefined;
-		if (!candidate) return null;
-		try {
-			return await fs.open(candidate, "r+");
-		} catch {
-			return null;
-		}
-	}
-
-	#commit(nextPhases: TodoPhase[], action: string): void {
+	#commit(nextPhases: TodoPhase[], action: string, opts?: { removed?: boolean }): void {
 		// 1. In-memory + UI state
 		this.ctx.session.setTodoPhases(nextPhases);
 		this.ctx.setTodos(nextPhases);
@@ -464,7 +444,9 @@ export class TodoCommandController {
 		this.ctx.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: nextPhases });
 
 		// 3. Inject system reminder so the agent learns about the change next turn.
-		const reminderText = buildSystemReminder(action, nextPhases);
+		//    Removals carry explicit intent so the agent does not rebuild the
+		//    cleared/removed items on its next turn (issue #5258).
+		const reminderText = buildSystemReminder(action, nextPhases, opts?.removed ?? false);
 		const message = {
 			role: "developer" as const,
 			content: [{ type: "text" as const, text: reminderText }],

@@ -9,6 +9,8 @@ export type ProviderResponseErrorKind =
 	| "output"
 	/** Response body was empty/missing when content was required. */
 	| "empty-body"
+	/** Response completed without actionable output (for example, thoughts only). */
+	| "empty-output"
 	/** Malformed wire envelope (unexpected message ordering / shape). */
 	| "envelope"
 	/** Content was blocked by a provider safety filter. */
@@ -36,13 +38,13 @@ export class ProviderResponseError extends Error {
 		this.name = "ProviderResponseError";
 		this.provider = options.provider;
 		this.kind = options.kind ?? "output";
-		// A safety filter block is a terminal provider finish, not a transient fault.
-		if (this.kind === "content-blocked") attach(this, create(Flag.ProviderFinishError));
-		// An incomplete stream (connection dropped / truncated before any terminal
-		// event) never produced a finish reason — the request didn't complete, so it
-		// is safe to retry. The retry layer's replay-unsafe guard still blocks a
-		// retry when partial tool output was already emitted.
-		else if (this.kind === "incomplete-stream") attach(this, create(Flag.Transient));
+		// A safety filter block is terminal and intentionally non-retryable.
+		if (this.kind === "content-blocked") attach(this, create(Flag.ContentBlocked));
+		// A logically empty completed output needs a session-level reminder that
+		// asks for the missing final answer. Empty bodies and incomplete streams
+		// stay on the generic transient retry/model-fallback path.
+		else if (this.kind === "empty-output") attach(this, create(Flag.Transient, Flag.EmptyResponse));
+		else if (this.kind === "incomplete-stream" || this.kind === "empty-body") attach(this, create(Flag.Transient));
 	}
 }
 
