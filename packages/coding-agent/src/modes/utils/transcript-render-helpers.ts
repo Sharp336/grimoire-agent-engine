@@ -159,9 +159,13 @@ export class AsyncProgressMessageComponent extends TranscriptBlock {
 					new Text(theme.fg("dim", `  … ${job.suppressedEvents} progress events suppressed (rate limit)`), 1, 0),
 				);
 			}
-			const preview = job.truncated
-				? [job.head, "[…progress truncated…]", job.tail].filter(part => part !== undefined).join("\n")
-				: (job.text ?? "");
+			// A fitting source-truncated window has no head/tail split: its text is
+			// already the complete retained representation - render it verbatim. The
+			// marker only belongs between an actual head/tail byte-split pair.
+			const preview =
+				job.truncated && (job.head !== undefined || job.tail !== undefined)
+					? [job.head, "[…progress truncated…]", job.tail].filter(part => part !== undefined).join("\n")
+					: (job.text ?? "");
 			const outputLines = preview.split("\n").filter(line => line.trim().length > 0);
 			const rendered = outputLines.map(line =>
 				theme.fg(
