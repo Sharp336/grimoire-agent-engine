@@ -386,7 +386,7 @@ interface ManagedBashJobHandle {
 	completion: Promise<ManagedBashJobCompletion>;
 	getLatestText: () => string;
 	stopUpdates: () => void;
-	activateProgress: (delivery: AsyncJobProgressDelivery) => boolean;
+	promote: (delivery?: AsyncJobProgressDelivery) => Promise<boolean>;
 }
 
 function normalizeResultOutput(result: BashResult | BashInteractiveResult): string {
@@ -836,6 +836,23 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		const label = options.command.length > 120 ? `${options.command.slice(0, 117)}...` : options.command;
 		let latestText = "";
 		let progressSampler: ProgressLines | undefined;
+		let promotionRequested = false;
+		let trackPromotionDeliveries = options.forwardUpdates;
+		const pendingChunkDeliveries: PromiseWithResolvers<void>[] = [];
+		let nextChunkDelivery = 0;
+		let chunkDeliveryBarrier = Promise.resolve();
+		const trackChunkDelivery = (): number => {
+			const stamp = (progressSampler?.epoch ?? 0) + (promotionRequested ? 1 : 0);
+			if (!trackPromotionDeliveries) return stamp;
+			const delivery = Promise.withResolvers<void>();
+			pendingChunkDeliveries.push(delivery);
+			chunkDeliveryBarrier = chunkDeliveryBarrier.then(() => delivery.promise);
+			return stamp;
+		};
+		const finishChunkDelivery = (): void => {
+			pendingChunkDeliveries[nextChunkDelivery]?.resolve();
+			nextChunkDelivery++;
+		};
 		let forwardUpdates = options.forwardUpdates;
 		const completion = Promise.withResolvers<ManagedBashJobCompletion>();
 
@@ -873,15 +890,20 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 							artifactWriteMode: progressLines ? "mirror" : "spill",
 							// The stamp is captured when a chunk enters the sink; mirror
 							// mode and chunk throttling can deliver it after the promotion
-							// boundary bumped the sampler epoch, in which case append()
-							// drops the stale chunk from progress (the tail preview and
-							// the artifact still keep it).
-							chunkStamp: () => progressLines?.epoch ?? 0,
+							// boundary, in which case append() drops the stale chunk from
+							// progress. The matching barrier token lets promotion first
+							// drain every chunk that already crossed that boundary into
+							// the foreground preview.
+							chunkStamp: trackChunkDelivery,
 							onChunk: (chunk, stamp) => {
-								tailBuffer.append(chunk);
-								latestText = tailBuffer.text();
-								void reportProgress(latestText, { async: { state: "running", jobId, type: "bash" } });
-								progressLines?.append(chunk, stamp);
+								try {
+									tailBuffer.append(chunk);
+									latestText = tailBuffer.text();
+									void reportProgress(latestText, { async: { state: "running", jobId, type: "bash" } });
+									progressLines?.append(chunk, stamp);
+								} finally {
+									finishChunkDelivery();
+								}
 							},
 							onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
 						});
@@ -947,17 +969,27 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			stopUpdates: () => {
 				forwardUpdates = false;
 			},
-			activateProgress: delivery => {
-				// Progress must start at the promotion boundary. The sampler has
-				// been fed since process start (its complete lines were dropped
-				// while delivery was inactive), so a partial line buffered during
-				// the inline grace would otherwise replay output already shown in
-				// the foreground result once its remainder arrives. reset() drops
-				// that partial AND bumps the sampler epoch, so chunk deliveries
-				// still queued inside the sink (mirror mode flushes the artifact
-				// before notifying; throttling holds quiet tails) are recognized
-				// as pre-promotion and never surface as live progress.
+			promote: async delivery => {
+				// Mark the boundary before yielding. Chunks entering from this
+				// point receive the next sampler epoch, while a throttle-merged
+				// delivery keeps the stamp of its earliest pre-boundary byte.
+				promotionRequested = true;
+				trackPromotionDeliveries = false;
+				const prePromotionDeliveries = chunkDeliveryBarrier;
+				// Mirror-mode artifact flushing and throttling can delay onChunk,
+				// which owns latestText. Drain those entry-time-stamped chunks
+				// through the inactive foreground gate before taking the preview
+				// and resetting/activating progress. A failed executor can dispose
+				// a held chunk, so its terminal completion also releases this wait.
+				await Promise.race([prePromotionDeliveries, completion.promise.then(() => undefined)]);
+				pendingChunkDeliveries.length = 0;
+				nextChunkDelivery = 0;
+				if (!delivery) {
+					promotionRequested = false;
+					return false;
+				}
 				progressSampler?.reset();
+				promotionRequested = false;
 				return manager.activateProgressDelivery(jobId, delivery);
 			},
 		};
@@ -995,6 +1027,9 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			}
 		}
 		const executionMode = asyncRequested === true ? "background" : asyncRequested === "auto" ? "auto" : "foreground";
+		if (pty && executionMode === "auto") {
+			throw new ToolError('`pty: true` cannot be combined with `async: "auto"`.');
+		}
 		if (executionMode !== "foreground" && !this.#asyncEnabled) {
 			throw new ToolError("Async bash execution is disabled. Enable async.enabled to use async mode.");
 		}
@@ -1174,7 +1209,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				throw new ToolAbortError(job.getLatestText() || "Command aborted");
 			}
 			job.stopUpdates();
-			if (progress) job.activateProgress(progress);
+			await job.promote(progress);
 			autoBgManager.resumeDeliveries([job.jobId]);
 			// "steer": a queued user/peer message arrived mid-wait — background
 			// the command (it keeps running) so the message injects promptly.

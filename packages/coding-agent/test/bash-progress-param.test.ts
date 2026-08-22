@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import * as path from "node:path";
+import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { type AsyncJob, AsyncJobManager, type AsyncJobProgressInfo } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { ProgressLines } from "@oh-my-pi/pi-coding-agent/async/progress-lines";
 import { OutputSink } from "@oh-my-pi/pi-coding-agent/session/streaming-output";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
+import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const SETTINGS: Record<string, unknown> = {
@@ -139,6 +141,21 @@ describe("bash progress parameter", () => {
 		);
 	});
 
+	test("rejects PTY with async auto at the tool boundary", async () => {
+		const manager = new AsyncJobManager({});
+		const tool = new BashTool(makeSession(manager));
+
+		const execution = tool.execute("pty-auto", {
+			command: "printf unreachable",
+			async: "auto",
+			pty: true,
+		});
+
+		await expect(execution).rejects.toBeInstanceOf(ToolError);
+		await expect(execution).rejects.toThrow('`pty: true` cannot be combined with `async: "auto"`.');
+		await manager.dispose();
+	});
+
 	test("keeps a quick auto command inline without progress or completion delivery", async () => {
 		const manager = new AsyncJobManager({});
 		const progress = collectProgress(manager);
@@ -261,8 +278,8 @@ describe("bash progress parameter", () => {
 		});
 
 		sink.push("inline-shown\n");
-		// Promotion boundary: activateProgress() resets the sampler while the
-		// chunk above is still in the sink's delivery queue.
+		// Promotion boundary: reset the sampler while the chunk above is still
+		// in the sink's delivery queue.
 		sampler.reset();
 		sink.push("post-promotion\n");
 		await sink.dump();
@@ -270,6 +287,89 @@ describe("bash progress parameter", () => {
 
 		expect(reported).toEqual(["post-promotion"]);
 	});
+
+	test("drains a throttle-held chunk into the preview without replaying it after promotion", async () => {
+		using tempDir = TempDir.createSync("@omp-bash-throttled-promotion-");
+		const gatePath = path.join(tempDir.path(), "emit-held");
+		const heldPath = path.join(tempDir.path(), "held-emitted");
+		const releasePath = path.join(tempDir.path(), "emit-post");
+		const manager = new AsyncJobManager({});
+		const events: string[] = [];
+		manager.registerProgressSink("Main", {
+			deliver: (_jobId, text) => {
+				events.push(`progress:${text}`);
+			},
+		});
+		manager.registerDeliverySink("Main", (_jobId, text) => {
+			events.push(`completion:${text}`);
+		});
+		const tool = new BashTool(makeSession(manager, { "bash.asyncAuto.inlineGraceMs": 60_000 }));
+		const steering = new AbortController();
+		let openedGate = false;
+		const execution = tool.execute(
+			"throttled-auto-promote",
+			{
+				command:
+					"printf 'inline-first\\n'; " +
+					"while [ ! -f \"$GATE\" ]; do sleep 0.01; done; " +
+					"printf 'throttle-held\\n'; sleep 0.01; : > \"$HELD\"; " +
+					"while [ ! -f \"$RELEASE\" ]; do sleep 0.01; done; " +
+					"printf 'post-promotion\\n'",
+				env: { GATE: gatePath, HELD: heldPath, RELEASE: releasePath },
+				async: "auto",
+				progress: "wake",
+			},
+			undefined,
+			async update => {
+				const text = update.content.find(block => block.type === "text")?.text ?? "";
+				if (!openedGate && text.includes("inline-first")) {
+					openedGate = true;
+					await Bun.write(gatePath, "");
+				}
+			},
+			{
+				toolCall: {
+					batchId: "throttled-promotion",
+					index: 0,
+					total: 1,
+					toolCalls: [{ id: "throttled-auto-promote", name: "bash" }],
+					steeringSignal: steering.signal,
+				},
+			} as AgentToolContext,
+		);
+
+		const heldDeadline = Date.now() + 5_000;
+		// This is a subprocess integration boundary: fake JS timers cannot drive
+		// the shell's marker write, so poll the observable file state briefly.
+		while (!(await Bun.file(heldPath).exists())) {
+			if (Date.now() >= heldDeadline) throw new Error("Timed out waiting for throttle-held output");
+			await Bun.sleep(5);
+		}
+		// The command delays its marker until after the native output bridge has
+		// received the held chunk. Promote immediately: the sink's 50 ms timer
+		// still owns that chunk, so this crosses the actual throttle boundary.
+		steering.abort();
+
+		const result = await execution;
+		await Bun.write(releasePath, "");
+		await manager.waitForAll();
+		await manager.drainDeliveries({ timeoutMs: 10 });
+
+		expect(result.details?.async?.state).toBe("running");
+		expect(result.content).toContainEqual(
+			expect.objectContaining({ type: "text", text: expect.stringContaining("inline-first") }),
+		);
+		expect(result.content).toContainEqual(
+			expect.objectContaining({ type: "text", text: expect.stringContaining("throttle-held") }),
+		);
+
+		expect(events.filter(event => event.startsWith("progress:"))).toEqual(["progress:post-promotion"]);
+		expect(events.at(-1)).toContain("completion:");
+		expect(events.at(-1)).toContain("inline-first");
+		expect(events.at(-1)).toContain("throttle-held");
+		expect(events.at(-1)).toContain("post-promotion");
+		await manager.dispose();
+	}, 10_000);
 
 	test("retains successful and failed exit values for completion delivery", async () => {
 		const manager = new AsyncJobManager({});
