@@ -540,6 +540,11 @@ export class Editor implements Component, Focusable {
 		this.borderColor = theme.borderColor;
 	}
 
+	setTheme(theme: EditorTheme): void {
+		this.#theme = theme;
+		this.borderColor = theme.borderColor;
+	}
+
 	setAutocompleteProvider(provider: AutocompleteProvider): void {
 		this.#autocompleteProvider = provider;
 	}
