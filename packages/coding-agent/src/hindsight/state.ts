@@ -156,6 +156,7 @@ export class HindsightRetainQueue {
 				metadata: { session_id: sessionId },
 				tags: state.retainTags,
 				timestamp: item.timestamp,
+				strategy: state.config.retainStrategy || undefined,
 			}));
 			await state.client.retainBatch(state.bankId, batch, { async: true });
 			if (state.config.debug) {
@@ -364,6 +365,7 @@ export class HindsightSessionState {
 			tags: this.retainTags,
 			timestamp: sourceTimestamp,
 			async: true,
+			strategy: this.config.retainStrategy || undefined,
 		});
 		if (nextCachedTranscript !== undefined) {
 			this.#cachedTranscript = nextCachedTranscript;
