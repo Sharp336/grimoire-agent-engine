@@ -2,11 +2,13 @@
 
 ## [Unreleased]
 
-## [17.4.1] - 2026-08-21
-
 ### Added
 
 - `lsp diagnostics file: "*"` now covers Dart and Flutter projects via `dart analyze`.
+
+## [17.4.1] - 2026-08-21
+
+### Added
 - Added `PERSONALITY.md` support: `~/.omp/agent/PERSONALITY.md` (profile/XDG-aware agent dir) replaces the system prompt's personality block text; `personality: none` still omits the block ([#8528](https://github.com/can1357/oh-my-pi/issues/8528))
 - Sloppy edits now support inline replacements with `⟪old│new⟫` syntax (`⟪old│⟫` for deletions and `⟪│new⟫` for insertions), alongside automatic recovery for common formatting mistakes without needing a retry.
 - Sloppy edits now recover operations that mix `⟪old│new⟫` inline replacements with a `»` REWRITE instead of failing the payload: a redundant REWRITE is dropped, a diverging one is applied as the final text, and a note explains the interpretation.
