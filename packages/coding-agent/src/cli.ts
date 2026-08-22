@@ -415,19 +415,49 @@ export async function runCli(argv: string[]): Promise<void> {
 		process.stdout.write(formatLicenseOutput());
 		return;
 	}
-	const [{ run }, { commands, resolveCliArgv }] = await Promise.all([
-		import("@oh-my-pi/pi-utils/cli"),
-		import("./cli-commands"),
-	]);
-	// --help and --version are handled by run() directly; --license returned above.
-	// Everything else that isn't a known subcommand routes to "launch".
-	const resolved = resolveCliArgv(resolvedArgv);
-	if ("error" in resolved) {
-		process.stderr.write(`error: ${resolved.error}\n`);
-		process.exitCode = 1;
-		return;
+	let stopStartupComposer: (() => void) | undefined;
+	if (
+		process.stdin.isTTY === true &&
+		process.stdout.isTTY === true &&
+		(resolvedArgv.length === 0 || (resolvedArgv.length === 1 && resolvedArgv[0] === "--no-session"))
+	) {
+		// This conditional import is the latency boundary: loading cli-commands
+		// pulls in the full agent graph, while the provisional editor can paint
+		// independently and then transfer terminal ownership to InteractiveMode.
+		const [{ beginStartupComposer, stopPendingStartupComposer }, { getDefault }, { initTheme }] = await Promise.all([
+			import("./modes/startup-composer"),
+			import("./config/settings"),
+			import("./modes/theme/theme"),
+		]);
+		await initTheme();
+		beginStartupComposer({
+			showHardwareCursor: getDefault("showHardwareCursor"),
+			maxInlineImages: getDefault("tui.maxInlineImages"),
+			scrollbackRebuild: getDefault("tui.scrollbackRebuild"),
+			resizeScrollback: getDefault("tui.resizeScrollback"),
+			imeSafeCursor: getDefault("tui.imeSafeCursor"),
+			autocompleteMaxVisible: getDefault("autocompleteMaxVisible"),
+		});
+		stopStartupComposer = stopPendingStartupComposer;
 	}
-	return run({ bin: APP_NAME, version: VERSION, argv: resolved.argv, commands, metadataHelp: showHelp });
+
+	try {
+		const [{ run }, { commands, resolveCliArgv }] = await Promise.all([
+			import("@oh-my-pi/pi-utils/cli"),
+			import("./cli-commands"),
+		]);
+		// --help and --version are handled by run() directly; --license returned above.
+		// Everything else that isn't a known subcommand routes to "launch".
+		const resolved = resolveCliArgv(resolvedArgv);
+		if ("error" in resolved) {
+			process.stderr.write(`error: ${resolved.error}\n`);
+			process.exitCode = 1;
+			return;
+		}
+		await run({ bin: APP_NAME, version: VERSION, argv: resolved.argv, commands, metadataHelp: showHelp });
+	} finally {
+		stopStartupComposer?.();
+	}
 }
 
 // Floating call instead of top-level await: TLA forces `--bytecode` (CJS

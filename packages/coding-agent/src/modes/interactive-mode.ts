@@ -207,6 +207,7 @@ import { createSessionTeardown, type SessionTeardown } from "./session-teardown"
 import { runProviderSetupWizard } from "./setup-wizard/lazy";
 import { interruptHint } from "./shared";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "./skill-command";
+import type { StartupComposerSurface } from "./startup-composer";
 import { clearMermaidCache } from "./theme/mermaid-cache";
 import { type ShimmerPalette, shimmerEnabled, shimmerSegments, shimmerText } from "./theme/shimmer";
 import type { Theme } from "./theme/theme";
@@ -518,6 +519,8 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 const CTRL_L_APPEARANCE_RESPONSE_DEADLINE_MS = 2000;
 
 export class InteractiveMode implements InteractiveModeContext {
+	readonly #adoptedStartupSurface: boolean;
+	#ownsStartedUi: boolean;
 	session: AgentSession;
 	sessionManager: SessionManager;
 	settings: Settings;
@@ -781,10 +784,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		lspServers: LspStartupServerInfo[] | undefined = undefined,
 		mcpManager?: MCPManager,
 		eventBus?: EventBus,
+		startupSurface?: StartupComposerSurface,
 	) {
 		this.session = session;
 		this.sessionManager = session.sessionManager;
 		this.settings = session.settings;
+		this.ui = startupSurface?.ui ?? new TUI(new ProcessTerminal(), settings.get("showHardwareCursor"));
+		this.editor = startupSurface?.editor ?? new CustomEditor(getEditorTheme());
+		this.#adoptedStartupSurface = startupSurface !== undefined;
+		this.#ownsStartedUi = startupSurface !== undefined;
 		this.keybindings = KeybindingsManager.inMemory();
 		this.agent = session.agent;
 		this.#version = version;
@@ -816,10 +824,12 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		setTuiTight(settings.get("tui.tight"));
 		setMarkdownMermaidRendering(settings.get("tui.renderMermaid"));
-		this.ui = new TUI(new ProcessTerminal(), settings.get("showHardwareCursor"));
+		// A cold-start composer already owns the terminal. Reuse it so input
+		// buffered during startup remains in the same editor instance.
 		this.ui.setMaxInlineImages(settings.get("tui.maxInlineImages"));
 		this.ui.setScrollbackRebuild(settings.get("tui.scrollbackRebuild"));
 		this.ui.setResizeScrollback(settings.get("tui.resizeScrollback"));
+		this.ui.setShowHardwareCursor(settings.get("showHardwareCursor"));
 		// OSC 66 text-sizing is Kitty-only; resolve the setting against the terminal's
 		// capability (`TERMINAL.textSizing` defaults on for Kitty) so it stays off
 		// unless the user opts in, and never emits raw escapes on other terminals.
@@ -835,7 +845,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.errorBannerContainer = new AnchoredLiveContainer();
 		this.modelCycleContainer = new AnchoredLiveContainer();
 		this.deferredCommandContainer = new AnchoredLiveContainer();
-		this.editor = new CustomEditor(getEditorTheme());
 		this.ui.enableScopedInputRender(this.editor);
 		this.editor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		this.editor.setImeSafeCursorLayout(settings.get("tui.imeSafeCursor"));
@@ -1058,6 +1067,11 @@ export class InteractiveMode implements InteractiveModeContext {
 				})),
 			),
 		);
+		if (this.#adoptedStartupSurface) {
+			// Replace the provisional startup frame in-place. The editor object
+			// itself survives and is reattached below with its draft intact.
+			this.ui.clear();
+		}
 
 		const startupQuiet = settings.get("startup.quiet");
 		this.#welcomeComponent = undefined;
@@ -1128,6 +1142,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		this.#inputController.setupKeyHandlers();
 		this.#inputController.setupEditorSubmitHandler();
+		this.editor.disableSubmit = false;
 
 		// Wire observer registry to EventBus
 		if (this.#eventBus) {
@@ -1149,9 +1164,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#eventBusUnsubscribers.push(startMacOSAppearanceReprobeFallback(this.ui.terminal));
 		}
 
-		// Start the UI. Cold `omp` launch opts into clearing on the first paint so
-		// the initial welcome frame does not append over the previous run's scrollback.
-		this.ui.start({ clearScrollback: options.clearInitialTerminalHistory === true });
+		// A startup composer may already own raw mode and the render loop. Do not
+		// restart the terminal or clear scrollback during that in-place handoff.
+		if (!this.#ownsStartedUi) {
+			this.ui.start({ clearScrollback: options.clearInitialTerminalHistory === true });
+			this.#ownsStartedUi = true;
+		}
 		pushTerminalTitle();
 		setTerminalTitleStateEnabled(this.settings.get("tui.titleState"));
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
@@ -4330,10 +4348,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Clear the process-global consent handler so it doesn't outlive this
 		// InteractiveMode instance (e.g. test harnesses, headless re-init).
 		setAutoQaConsentHandler(null, null);
-		if (this.isInitialized) {
+		if (this.#ownsStartedUi) {
 			this.ui.stop();
-			this.isInitialized = false;
+			this.#ownsStartedUi = false;
 		}
+		this.isInitialized = false;
 	}
 
 	async shutdown(): Promise<void> {
