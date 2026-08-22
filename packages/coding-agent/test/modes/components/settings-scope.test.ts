@@ -370,4 +370,37 @@ describe("SettingsSelectorComponent persistence scope", () => {
 		// The global layer itself is untouched.
 		expect(settings.getGlobalValue("providers.maxInFlightRequests")).toEqual({ anthropic: 3 });
 	});
+
+	it("does not copy unchanged inherited provider limits into the project layer", async () => {
+		settings.set("providers.maxInFlightRequests", { anthropic: 3, openai: 5 }, "global");
+		const selector = new SettingsSelectorComponent(
+			{
+				availableThinkingLevels: [],
+				thinkingLevel: undefined,
+				availableThemes: [],
+				providers: ["anthropic", "openai"],
+				cwd: projectDir,
+			},
+			{
+				onChange: (settingPath, value) => changes.push({ path: settingPath, value }),
+				onCancel: () => {},
+			},
+		);
+		selector.handleInput("\x1bs");
+		selector.handleInput("\x1bs");
+		for (const ch of "max in flight requests") selector.handleInput(ch);
+		selector.handleInput("\n");
+		selector.handleInput("\n");
+		selector.handleInput("\x15");
+		selector.handleInput("7");
+		selector.handleInput("\n");
+		expect(settings.get("providers.maxInFlightRequests")).toEqual({ anthropic: 7, openai: 5 });
+		expect(settings.getGlobalValue("providers.maxInFlightRequests")).toEqual({ anthropic: 3, openai: 5 });
+		await settings.flush();
+		expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+			ask: { enabled: true },
+			custom: { keep: true },
+			providers: { maxInFlightRequests: { anthropic: 7 } },
+		});
+	});
 });

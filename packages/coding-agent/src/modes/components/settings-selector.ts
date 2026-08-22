@@ -1297,29 +1297,30 @@ export class SettingsSelectorComponent implements Component {
 		return settings.get(path);
 	}
 	/**
-	 * Persist a record setting in the selected scope, tombstoning entries the
-	 * new value clears so they cannot be re-inherited from a lower layer.
-	 * `#deepMerge` recurses per key and drops `undefined`, so a plain record
-	 * without a key cannot mask a global or non-native project cap; clearing
-	 * requires an explicit `null` in the native project layer.
+	 * Persist a record setting in the selected scope. The submenu always
+	 * submits the full effective map; write only keys that differ from the
+	 * inherited layer, plus `null` tombstones for cleared keys, so an
+	 * unchanged inherited cap is not copied into `.omp/config.yml`.
 	 */
 	#persistRecordScopeSetting(path: SettingPath, value: Record<string, number>): unknown {
 		if (this.#scope === "global") {
 			settings.set(path, value, "global");
 			return settings.get(path);
 		}
-		const inherited = {
-			...normalizeProviderMaxInFlightRequests(settings.getGlobalValue(path)),
-			...normalizeProviderMaxInFlightRequests(settings.get(path)),
-		};
-		const next: Record<string, number | null> = { ...value };
-		for (const provider of Object.keys(inherited)) {
-			if (next[provider] === undefined) next[provider] = null;
+		const inherited = normalizeProviderMaxInFlightRequests(settings.get(path));
+		const next: Record<string, number | null> = {};
+		for (const provider of new Set([...Object.keys(inherited), ...Object.keys(value)])) {
+			const nextLimit = value[provider];
+			if (nextLimit === undefined) {
+				next[provider] = null;
+				continue;
+			}
+			if (nextLimit !== inherited[provider]) next[provider] = nextLimit;
 		}
 		const currentRaw = settings.get(path);
 		if (currentRaw && typeof currentRaw === "object" && !Array.isArray(currentRaw)) {
 			for (const [provider, raw] of Object.entries(currentRaw as Record<string, unknown>)) {
-				if (raw === null && next[provider] === undefined) next[provider] = null;
+				if (raw === null && value[provider] === undefined) next[provider] = null;
 			}
 		}
 		settings.set(path, next as never, "project");
