@@ -6424,6 +6424,20 @@ export class AgentSession {
 
 	queueLaunchCompletion(notification: DaemonCompletionNotification): Promise<void> {
 		if (this.#isDisposed) return Promise.reject(new Error("Session disposed before launch completion delivery"));
+		// Ambient monitor output queued while this owner sat idle would be
+		// skipped by the completion-triggered idle flush (its queue registers
+		// with `skipIdleFlush`) and would inject only on a later turn — after
+		// the terminal notification for the process it belongs to. Promote it
+		// to the wake queue, which registers ahead of launch-completion, so the
+		// flush injects the remaining output before the completion. Mirrors the
+		// async-job completion path in #deliverAsyncJobResult.
+		const queuedProgress = this.yieldQueue.take<AsyncProgressEntry>(
+			ASYNC_PROGRESS_MESSAGE_TYPE,
+			entry => entry.source?.type === "process" && entry.source.id === notification.daemon.id,
+		);
+		for (const entry of queuedProgress) {
+			this.yieldQueue.enqueue<AsyncProgressEntry>(ASYNC_PROGRESS_WAKE_QUEUE_KIND, entry);
+		}
 		const delivered = this.yieldQueue.enqueueWithReceipt<LaunchCompletionEntry>(
 			LAUNCH_COMPLETION_MESSAGE_TYPE,
 			notification,

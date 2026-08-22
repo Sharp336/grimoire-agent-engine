@@ -70,6 +70,8 @@ interface OutputRegistration {
 	delivery: AsyncJobProgressDelivery;
 	startedAt: number;
 	active: boolean;
+	/** A stop issued by this session's own hub tool call is in flight; its tool result is the terminal surface. */
+	localStopRequested?: boolean;
 	artifactId?: string;
 	cleanup: () => Promise<void>;
 }
@@ -194,6 +196,12 @@ async function registerOutputSink(
 		// signal the monitoring session will ever get. An absent flag means an
 		// older broker: keep the historical suppression.
 		if (notification.daemon.owner === owner && notification.ownerNotified !== false) return;
+		// A stop this session itself issued through the hub tool settles with
+		// ownerNotified=false (stop-requested settlements skip daemon-completed),
+		// but the in-flight stop call already returns the authoritative
+		// `Stopped …` result — synthesizing a completion would surface the same
+		// terminal state twice. Only stops from a DIFFERENT client synthesize.
+		if (registration.localStopRequested) return;
 		await session.queueLaunchCompletion?.({
 			event: "daemon-completed",
 			completionId: `monitor:${id}:${notification.daemon.id}:${notification.daemon.exitedAt ?? Date.now()}`,
@@ -660,7 +668,23 @@ export async function executeLaunch(
 				throw new ToolError("The running daemon broker cannot monitor output; restart it with this omp build");
 			}
 		}
-		const result = await client.request(operation, signal);
+		// A locally-issued stop's tool result is the single terminal surface,
+		// but the broker's terminal monitor notification (ownerNotified=false —
+		// stop settlements skip daemon-completed) may race this RPC response.
+		// Flag the live monitor before the request so its sink suppresses the
+		// synthesized completion; the registration dies with the settled stop.
+		const stopRegistration =
+			operation.op === "stop" ? outputRegistrations.get(session)?.get(client)?.get(operation.name) : undefined;
+		if (stopRegistration) stopRegistration.localStopRequested = true;
+		let result: DaemonRpcResult;
+		try {
+			result = await client.request(operation, signal);
+		} catch (error) {
+			// The stop never settled the process; a later stop from another
+			// client must still synthesize its terminal notification.
+			if (stopRegistration) stopRegistration.localStopRequested = false;
+			throw error;
+		}
 		const detached =
 			params.op === "monitor" && params.progress === "off" && name
 				? await detachOutputSink(session, client, name)

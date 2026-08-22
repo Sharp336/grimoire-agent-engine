@@ -422,6 +422,43 @@ describe("hub process output monitoring", () => {
 		]);
 	});
 
+	it("suppresses the synthesized completion when the monitoring session stopped the process itself", async () => {
+		const harness = createHarness();
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+		const stopped: DaemonSnapshot = { ...daemon, state: "exited", pid: undefined, exitedAt: 3, exitCode: 143 };
+		vi.spyOn(harness.client, "request").mockImplementation(async operation => {
+			if (operation.op === "ping") {
+				return { op: "ping", projectDir: process.cwd(), capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] };
+			}
+			if (operation.op === "describe") return { op: "describe", daemon, spec };
+			if (operation.op !== "stop") throw new Error(`Unexpected operation: ${operation.op}`);
+			// A stop settlement skips the owner completion (stopRequested), and
+			// the terminal monitor notification (ownerNotified=false) can race
+			// ahead of the RPC response — the local-stop marker must already be
+			// set when it arrives.
+			const subscription = harness.getSubscription();
+			if (!subscription) throw new Error("Expected output subscription");
+			await harness.getOutputSink()?.({
+				event: "daemon-monitor-completed",
+				monitorId: subscription.id,
+				daemon: stopped,
+				ownerNotified: false,
+			});
+			return { op: "stop", daemon: stopped };
+		});
+
+		await executeLaunch(harness.session, { op: "monitor", name: daemon.name, progress: "wake" });
+		const result = await executeLaunch(harness.session, { op: "stop", name: daemon.name, timeout: 1 });
+		await drainMicrotasks();
+
+		// The in-flight stop call's own result is the single terminal surface.
+		expect(harness.unregisterCount()).toBe(1);
+		expect(harness.completions).toEqual([]);
+		expect(result.content).toEqual([
+			expect.objectContaining({ type: "text", text: expect.stringContaining("Stopped") }),
+		]);
+	});
+
 	it("buffers speculative progress until the start is retained, then flushes it", async () => {
 		const harness = createHarness();
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);

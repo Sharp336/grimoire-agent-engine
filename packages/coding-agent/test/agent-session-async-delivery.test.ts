@@ -938,6 +938,87 @@ describe("AgentSession owner-routed async delivery", () => {
 		expect(session.hasPendingAsyncWork()).toBe(false);
 	}, 10_000);
 
+	it("promotes queued ambient process output ahead of the launch completion", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const progressMarker = "AMBIENT PROCESS OUTPUT MARKER";
+		const completionMarker = "Supervised process watcher exited";
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const sessionManager = SessionManager.inMemory();
+
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "Main",
+		});
+
+		// Ambient monitor output while the owner idles sits on the
+		// skip-idle-flush queue without waking the session.
+		session.queueLaunchProgress(
+			{
+				event: "daemon-output",
+				monitorId: "monitor-ambient",
+				name: "watcher",
+				daemonId: "daemon-ambient",
+				seq: 1,
+				text: progressMarker,
+				batchKind: "progress",
+				suppressedEvents: 0,
+			},
+			"ambient",
+			Date.now(),
+		);
+		await Promise.resolve();
+		expect(mock.calls).toHaveLength(0);
+
+		// The terminal notification's idle flush must carry the queued ambient
+		// output with it, ahead of the completion — not strand it for a later
+		// out-of-order turn.
+		await session.queueLaunchCompletion({
+			event: "daemon-completed",
+			completionId: "completion-ambient",
+			owner: sessionManager.getSessionId(),
+			daemon: {
+				name: "watcher",
+				id: "daemon-ambient",
+				state: "exited",
+				createdAt: 1,
+				startedAt: 1,
+				exitedAt: 2,
+				exitCode: 0,
+				restartCount: 0,
+				outputBytes: 0,
+				owner: sessionManager.getSessionId(),
+				persist: false,
+				detached: false,
+			},
+		});
+		await session.waitForIdle();
+
+		const markerIndex = (messages: (typeof mock.calls)[number]["context"]["messages"], marker: string) =>
+			messages.findIndex(message =>
+				typeof message.content === "string"
+					? message.content.includes(marker)
+					: message.content.some(content => content.type === "text" && content.text.includes(marker)),
+			);
+		const followUp = mock.calls.find(call => markerIndex(call.context.messages, completionMarker) >= 0);
+		if (!followUp) throw new Error("Launch completion follow-up never reached the model");
+		const progressIndex = markerIndex(followUp.context.messages, progressMarker);
+		const completionIndex = markerIndex(followUp.context.messages, completionMarker);
+		expect(progressIndex).toBeGreaterThanOrEqual(0);
+		expect(completionIndex).toBeGreaterThan(progressIndex);
+	}, 10_000);
+
 	it("pushes wake progress into an idle session before the job completes", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const marker = "WAKE PROGRESS BEFORE COMPLETION";
