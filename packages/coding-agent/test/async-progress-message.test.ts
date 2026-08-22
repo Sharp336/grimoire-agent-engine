@@ -189,27 +189,28 @@ describe("async progress messages", () => {
 		expect(rendered).toContain("Read artifact://async-output-4 for full output");
 	});
 
-	test("renders a source-truncated line as structured head and tail", () => {
+	test("renders a fitting source-truncated line verbatim behind a suppression marker", () => {
+		const line = `${"H".repeat(250)}${"T".repeat(250)}`;
 		const message = buildAsyncProgressBatchMessage([
 			{
-				...entry("bg_5", `${"H".repeat(250)}${"T".repeat(250)}`),
+				...entry("bg_5", line),
 				artifactId: "async-output-5",
 				sourceTruncated: true,
 			},
 		]);
 		if (!message) throw new Error("Expected progress message");
 
+		// The window fits the preview budget, so its text must stay verbatim -
+		// never byte-split into a fabricated head/tail pair.
 		expect(message.details?.jobs[0]).toMatchObject({
-			head: "H".repeat(250),
-			tail: "T".repeat(250),
+			text: line,
 			artifactId: "async-output-5",
 			truncated: true,
 		});
-		expect(content(message)).toContain(`<head>\n${"H".repeat(250)}\n</head>`);
-		expect(content(message)).toContain(`<tail>\n${"T".repeat(250)}\n</tail>`);
 		expect(content(message)).toContain(
-			'<suppressed reason="preview-limit" full-output="artifact://async-output-5" />',
+			`<suppressed reason="preview-limit" full-output="artifact://async-output-5" />\n${line}\n</output>`,
 		);
+		expect(content(message)).not.toContain("<head>");
 	});
 
 	test("renders the custom message as sanitized progress rather than a completion", () => {
