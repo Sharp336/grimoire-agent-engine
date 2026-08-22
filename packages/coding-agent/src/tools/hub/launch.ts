@@ -91,6 +91,42 @@ async function registerOutputSink(
 	startPending: boolean,
 ): Promise<OutputLease | undefined> {
 	if (!session.queueLaunchProgress || !session.queueLaunchCompletion || !client.onOutput) return undefined;
+	const existing = outputRegistrations.get(session)?.get(client)?.get(name);
+	if (existing) {
+		if (startPending) {
+			// A monitored start targets a new process incarnation. Reusing the
+			// old registration would keep advertising its subscription id — with
+			// the start-pending marker long cleared and the old artifact path —
+			// so the broker could replay the previous daemon's terminal
+			// notification and tear the monitor down before the new process
+			// launches; retain() would then retain an inactive registration and
+			// the successful start would silently lose progress. Replace the
+			// stale registration with a fresh start-pending subscription.
+			await existing.cleanup();
+		} else {
+			// Retune of a live monitor. The operation is still validating, so
+			// keep the prior delivery mode until retain(): output arriving
+			// during a failed retune must be delivered under the old mode —
+			// once queued it cannot be retracted by reject().
+			let settled = false;
+			return {
+				registration: existing,
+				retain: () => {
+					if (settled) return;
+					settled = true;
+					if (!existing.active || existing.delivery === delivery) return;
+					session.setLaunchMonitorActive?.(existing.id, existing.delivery, false);
+					existing.delivery = delivery;
+					session.setLaunchMonitorActive?.(existing.id, delivery, true);
+				},
+				reject: async () => {
+					settled = true;
+				},
+			};
+		}
+	}
+	// (Re-)link the per-session maps only after the stale registration was
+	// replaced above: its cleanup may have unlinked the maps it lived in.
 	let clients = outputRegistrations.get(session);
 	if (!clients) {
 		clients = new Map();
@@ -100,26 +136,6 @@ async function registerOutputSink(
 	if (!monitors) {
 		monitors = new Map();
 		clients.set(client, monitors);
-	}
-	const existing = monitors.get(name);
-	const previousDelivery = existing?.delivery;
-	if (existing) {
-		session.setLaunchMonitorActive?.(existing.id, existing.delivery, false);
-		existing.delivery = delivery;
-		session.setLaunchMonitorActive?.(existing.id, delivery, true);
-		let settled = false;
-		return {
-			registration: existing,
-			retain: () => {
-				settled = true;
-			},
-			reject: async () => {
-				if (settled || !existing.active || previousDelivery === undefined) return;
-				session.setLaunchMonitorActive?.(existing.id, existing.delivery, false);
-				existing.delivery = previousDelivery;
-				session.setLaunchMonitorActive?.(existing.id, previousDelivery, true);
-			},
-		};
 	}
 
 	const id = crypto.randomUUID();
