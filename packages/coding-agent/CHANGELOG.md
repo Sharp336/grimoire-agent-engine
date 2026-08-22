@@ -16,6 +16,7 @@
 ### Changed
 
 - Bash commands now automatically transition to the background by default when exceeding the threshold
+- Thinking-block display formatting is now incremental: `formatThinkingForDisplay` caches the formatted output and fence state for the verified prefix and re-processes only appended lines on each streaming tick (O(delta) instead of O(n) per tick, 7–15× on prose thinking streams at 128KB), while keeping both prose and raw modes byte-identical to a full re-format at every prefix ([#9048](https://github.com/can1357/oh-my-pi/issues/9048)).
 - Transcript blocks now retire to terminal history as explicit ordered batches, active tools collapse to compact indicators under viewport pressure, and the `tui.scrollbackRebuild` and `tui.resizeScrollback` settings were removed.
 - Transcript retirement is now capacity-driven: finalized blocks (and the welcome header) stay live in the viewport — reflowing to the current width on resize and visible the instant a message is submitted — and only commit to immutable terminal history when the screen runs out of room.
 - Resizing no longer duplicates the editor and status rows: the settled repaint recovers its anchor from the terminal's own cursor-position report after reflow.
