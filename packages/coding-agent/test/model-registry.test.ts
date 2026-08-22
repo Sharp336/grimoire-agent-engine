@@ -2473,6 +2473,56 @@ describe("ModelRegistry", () => {
 			expect(registry.find("featherless", "example/initial")).toBeDefined();
 		});
 
+		test("keeps searched Featherless models when a full refresh lands after them", async () => {
+			authStorage.setRuntimeApiKey("featherless", "featherless-test-key");
+			// Same race as above but through the startup/background refresh() path,
+			// which reaches discovery without going through refreshProvider().
+			const refreshReachedFetch = Promise.withResolvers<void>();
+			const refreshGate = Promise.withResolvers<void>();
+			const fetchMock: FetchImpl = async input => {
+				const url = new URL(String(input));
+				if (!url.hostname.includes("featherless")) return Response.json({ data: [] });
+				const query = url.searchParams.get("q");
+				if (query === "zai-org/GLM-5.2") return Response.json({ total: 0, data: [] });
+				if (!query) {
+					refreshReachedFetch.resolve();
+					await refreshGate.promise;
+					return Response.json({
+						total: 43_750,
+						data: [
+							{
+								id: "example/initial",
+								context_length: 131_072,
+								features: { tool_use: true },
+								available_on_current_plan: true,
+							},
+						],
+					});
+				}
+				return Response.json({
+					total: 7,
+					data: [
+						{
+							id: "example/searched",
+							context_length: 262_144,
+							features: { tool_use: true },
+							available_on_current_plan: true,
+						},
+					],
+				});
+			};
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+			const refresh = registry.refresh("online");
+			await refreshReachedFetch.promise;
+			const search = registry.searchProviderModels("featherless", "searched");
+			refreshGate.resolve();
+			await Promise.all([refresh, search]);
+
+			expect(registry.find("featherless", "example/searched")).toBeDefined();
+			expect(registry.find("featherless", "example/initial")).toBeDefined();
+		});
+
 		test("does not hydrate another credential's Featherless cache when the refresh fails", async () => {
 			authStorage.setRuntimeApiKey("featherless", "featherless-key-a");
 			const keyAFetch: FetchImpl = async input => {

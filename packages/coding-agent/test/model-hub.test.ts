@@ -1221,6 +1221,32 @@ describe("ModelHub", () => {
 			}
 		});
 
+		test("surfaces a failed remote search instead of an empty result", async () => {
+			vi.useFakeTimers();
+			try {
+				const { hub } = createHub({
+					models: [makeModel("featherless", "zai-org/GLM-5.2")],
+					registry: {
+						supportsProviderSearch: providerId => providerId === "featherless",
+						searchProviderModels: async () => {
+							throw new Error("Remote model search failed for featherless");
+						},
+					},
+				});
+
+				hub.handleInput(DOWN); // All models → Featherless
+				for (const ch of "qwen") hub.handleInput(ch);
+				vi.advanceTimersByTime(250);
+				await Promise.resolve();
+				await Promise.resolve();
+
+				// The registry sync that follows the search must not erase the error.
+				expect(normalize(hub.render(220))).toContain("Remote model search failed for featherless");
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
 		test("fetches the initial page for a provider first populated by a search", async () => {
 			vi.useFakeTimers();
 			try {

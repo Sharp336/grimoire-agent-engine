@@ -383,52 +383,58 @@ export class ModelRegistry {
 	}
 
 	async refreshProvider(providerId: string, strategy: ModelRefreshStrategy = "online"): Promise<void> {
-		await this.#withProviderDiscoveryLock(providerId, async () => {
-			this.#reloadStaticModels();
-			for (const selector of this.#suppressedSelectors.keys()) {
-				if (selector.startsWith(`${providerId}/`)) {
-					this.#suppressedSelectors.delete(selector);
-				}
+		this.#reloadStaticModels();
+		for (const selector of this.#suppressedSelectors.keys()) {
+			if (selector.startsWith(`${providerId}/`)) {
+				this.#suppressedSelectors.delete(selector);
 			}
-			await this.#refreshRuntimeDiscoveries(strategy, new Set([providerId]));
-			// #reloadStaticModels above may have rebuilt #models from static sources,
-			// dropping models previously discovered by OTHER runtime providers (their
-			// fetchDynamicModels results live only in #models + the SQLite cache, not
-			// in #loadModels' static inputs). Restore them from cache with the default
-			// online-if-uncached strategy: no network while their cached row is
-			// fresh, so the scoped refresh above stays the only forced fetch.
-			const otherRuntimeProviderIds = new Set(
-				[...this.#runtimeModelManagers.keys()].filter(runtimeId => runtimeId !== providerId),
-			);
-			if (otherRuntimeProviderIds.size > 0) {
-				await this.#refreshRuntimeDiscoveries("online-if-uncached", otherRuntimeProviderIds);
-			}
-		});
+		}
+		await this.#refreshRuntimeDiscoveries(strategy, new Set([providerId]));
+		// #reloadStaticModels above may have rebuilt #models from static sources,
+		// dropping models previously discovered by OTHER runtime providers (their
+		// fetchDynamicModels results live only in #models + the SQLite cache, not
+		// in #loadModels' static inputs). Restore them from cache with the default
+		// online-if-uncached strategy: no network while their cached row is
+		// fresh, so the scoped refresh above stays the only forced fetch.
+		const otherRuntimeProviderIds = new Set(
+			[...this.#runtimeModelManagers.keys()].filter(runtimeId => runtimeId !== providerId),
+		);
+		if (otherRuntimeProviderIds.size > 0) {
+			await this.#refreshRuntimeDiscoveries("online-if-uncached", otherRuntimeProviderIds);
+		}
 	}
 
 	/**
 	 * Run one catalog-mutating discovery at a time per provider.
 	 *
-	 * A refresh and a bounded search both read the accumulated state (live
-	 * snapshot plus the provider's cache row) and then authoritatively replace
-	 * it. The model hub starts an empty provider's initial refresh the moment it
-	 * is selected and a debounced remote search as soon as the user types, so
-	 * unserialized the slower writer replays its pre-merge snapshot and drops
-	 * the other's models from both the registry and the offline cache.
+	 * A discovery and a bounded search both read a searchable provider's
+	 * accumulated state (live snapshot plus its cache row) and then
+	 * authoritatively replace it. The fetch is what snapshots that state, so the
+	 * lock spans the whole discovery, not just the merge — otherwise a refresh
+	 * that started first but finished last replays its pre-search snapshot over
+	 * the search result in both the registry and SQLite.
+	 *
+	 * Callers never hold one of these locks while acquiring another, so taking a
+	 * whole set at once cannot deadlock.
 	 */
-	async #withProviderDiscoveryLock<T>(providerId: string, run: () => Promise<T>): Promise<T> {
-		const task = (this.#providerDiscoveryLocks.get(providerId) ?? Promise.resolve()).then(run);
-		// The queue tail must never reject, or the next waiter would inherit the
+	async #withProviderDiscoveryLocks<T>(providerIds: readonly string[], run: () => Promise<T>): Promise<T> {
+		const lockedIds = [...new Set(providerIds)];
+		if (lockedIds.length === 0) return await run();
+		const predecessors = lockedIds.map(id => this.#providerDiscoveryLocks.get(id) ?? Promise.resolve());
+		const task = Promise.all(predecessors).then(run);
+		// A queue tail must never reject, or the next waiter would inherit the
 		// failure instead of running.
 		const tail = task.then(
 			() => {},
 			() => {},
 		);
-		this.#providerDiscoveryLocks.set(providerId, tail);
+		for (const id of lockedIds) this.#providerDiscoveryLocks.set(id, tail);
 		try {
 			return await task;
 		} finally {
-			if (this.#providerDiscoveryLocks.get(providerId) === tail) this.#providerDiscoveryLocks.delete(providerId);
+			for (const id of lockedIds) {
+				if (this.#providerDiscoveryLocks.get(id) === tail) this.#providerDiscoveryLocks.delete(id);
+			}
 		}
 	}
 
@@ -495,7 +501,7 @@ export class ModelRegistry {
 		searchedModels: readonly ModelSpec<Api>[],
 	): Promise<void> {
 		const providerId = options.providerId;
-		await this.#withProviderDiscoveryLock(providerId, async () => {
+		await this.#withProviderDiscoveryLocks([providerId], async () => {
 			this.#ensureFullSnapshot();
 			const mergedSpecs = new Map<string, ModelSpec<Api>>();
 			for (const model of this.#unprojectedModels) {
@@ -1270,26 +1276,34 @@ export class ModelRegistry {
 		strategy: ModelRefreshStrategy,
 		providerFilter?: ReadonlySet<string>,
 	): Promise<void> {
-		const disabledProviders = getDisabledProviderIdsFromSettings(this.#settings);
-		const selectedDiscoverableProviders = (
-			providerFilter
-				? this.#discoverableProviders.filter(provider => providerFilter.has(provider.provider))
-				: this.#discoverableProviders
-		).filter(provider => !disabledProviders.has(provider.provider));
-		const configuredDiscoveriesPromise =
-			selectedDiscoverableProviders.length === 0
-				? Promise.resolve<Model<Api>[]>([])
-				: Promise.all(
-						selectedDiscoverableProviders.map(provider => this.#discoverProviderModels(provider, strategy)),
-					).then(results => results.flat());
-		const [configuredDiscovered, builtInDiscovery] = await Promise.all([
-			configuredDiscoveriesPromise,
-			this.#discoverBuiltInProviderModels(strategy, providerFilter),
-		]);
-		this.#mergeDiscoveredModels(
-			[...configuredDiscovered, ...builtInDiscovery.models],
-			builtInDiscovery.authoritativeProviders,
+		// Every discovery path funnels through here — the scoped `refreshProvider`
+		// and the full startup/background `refresh()` alike — so this is where the
+		// searchable providers in scope are locked against concurrent searches.
+		const lockedProviders = [...this.#getSearchableBuiltInProviders()].filter(
+			providerId => providerFilter === undefined || providerFilter.has(providerId),
 		);
+		await this.#withProviderDiscoveryLocks(lockedProviders, async () => {
+			const disabledProviders = getDisabledProviderIdsFromSettings(this.#settings);
+			const selectedDiscoverableProviders = (
+				providerFilter
+					? this.#discoverableProviders.filter(provider => providerFilter.has(provider.provider))
+					: this.#discoverableProviders
+			).filter(provider => !disabledProviders.has(provider.provider));
+			const configuredDiscoveriesPromise =
+				selectedDiscoverableProviders.length === 0
+					? Promise.resolve<Model<Api>[]>([])
+					: Promise.all(
+							selectedDiscoverableProviders.map(provider => this.#discoverProviderModels(provider, strategy)),
+						).then(results => results.flat());
+			const [configuredDiscovered, builtInDiscovery] = await Promise.all([
+				configuredDiscoveriesPromise,
+				this.#discoverBuiltInProviderModels(strategy, providerFilter),
+			]);
+			this.#mergeDiscoveredModels(
+				[...configuredDiscovered, ...builtInDiscovery.models],
+				builtInDiscovery.authoritativeProviders,
+			);
+		});
 	}
 
 	#mergeDiscoveredModels(discovered: readonly Model<Api>[], builtInAuthoritativeProviders: ReadonlySet<string>): void {

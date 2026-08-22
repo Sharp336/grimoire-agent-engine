@@ -740,6 +740,7 @@ export class ModelHubComponent implements Component {
 					providerId => this.#registry.searchProviderModels?.(providerId, query) ?? Promise.resolve(0),
 				),
 			);
+			let searchError: string | undefined;
 			for (let index = 0; index < providerIds.length; index++) {
 				const providerId = providerIds[index];
 				const result = results[index];
@@ -747,12 +748,16 @@ export class ModelHubComponent implements Component {
 				// A rejected search must stay retryable: recording it as completed
 				// would leave the empty result on screen until the query is edited.
 				if (result.status === "fulfilled") this.#completedProviderSearches.add(`${providerId}\0${query}`);
-				if (result.status === "rejected" && generation === this.#providerSearchGeneration) {
-					this.#configError = result.reason instanceof Error ? result.reason.message : String(result.reason);
+				if (result.status === "rejected") {
+					searchError = result.reason instanceof Error ? result.reason.message : String(result.reason);
 				}
 			}
 			if (generation !== this.#providerSearchGeneration) return;
+			// #syncFromRegistryState reloads #configError from the registry, so the
+			// failure has to be re-applied after it or the user just sees an empty
+			// result instead of the network error.
 			this.#syncFromRegistryState();
+			if (searchError !== undefined) this.#configError = searchError;
 			this.#onQueryChanged(this.#browser.query);
 		} finally {
 			for (const providerId of providerIds) {
