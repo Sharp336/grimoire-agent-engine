@@ -11,6 +11,7 @@ import {
 	DAEMON_PROJECT_DIR_ENV,
 	DAEMON_RUNTIME_DIR_ENV,
 	type DaemonMonitorNotification,
+	type DaemonSpec,
 } from "../../src/launch/protocol";
 
 function restoreEnv(name: string, value: string | undefined): void {
@@ -328,6 +329,180 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 			await secondClient.request({ op: "shutdown" }).catch(() => undefined);
 			firstClient.close();
 			secondClient.close();
+			await broker;
+			setProcessName(previousTitle);
+		}
+	}, 20_000);
+
+	it("treats a re-registered subscription id with new metadata as a replacement", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-rebind-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		const scriptPath = path.join(projectDir, "service.ts");
+		await Bun.write(
+			scriptPath,
+			`process.stdin.setEncoding("utf8");
+process.stdin.resume();
+process.stdin.on("data", chunk => process.stdout.write(chunk));
+`,
+		);
+		const oldArtifactPath = path.join(tempDir.path(), "old-progress.log");
+		const newArtifactPath = path.join(tempDir.path(), "new-progress.log");
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const previousTitle = process.title;
+		const broker = startBroker(projectDir, runtimeDir, { progressBatchIntervalMs: 5_000 });
+		const oldNotifications: DaemonMonitorNotification[] = [];
+		const newNotifications: DaemonMonitorNotification[] = [];
+		const completed = Promise.withResolvers<void>();
+		const oldUnregister = client.onOutput?.(
+			{ id: "rebound-monitor", name: "old", owner: "owner-1", artifactPath: oldArtifactPath },
+			notification => {
+				oldNotifications.push(notification);
+			},
+		);
+		if (!oldUnregister) throw new Error("Expected output monitoring support");
+		let newUnregister: (() => void) | undefined;
+		const spec = (name: string): DaemonSpec => ({
+			name,
+			application: process.execPath,
+			args: [scriptPath],
+			env: {},
+			cwd: projectDir,
+			pty: false,
+			restart: "no",
+			persist: false,
+			detached: false,
+		});
+		try {
+			await client.request({ op: "ping" });
+			await client.request({ op: "start", spec: spec("old") });
+			await client.request({ op: "send", name: "old", data: "OLD_OUTPUT\n" });
+			const oldObserved = await client.request({
+				op: "wait",
+				name: "old",
+				for: "exit",
+				pattern: "OLD_OUTPUT",
+				timeoutMs: 5_000,
+			});
+			if (oldObserved.op !== "wait") throw new Error("unexpected wait result");
+			expect(oldObserved.timedOut).toBeFalse();
+			expect(oldNotifications).toEqual([]);
+
+			// Re-register the same subscription id against a different daemon and
+			// artifact path without unregistering first: the broker must replace the
+			// registration instead of mutating it in place.
+			newUnregister = client.onOutput?.(
+				{ id: "rebound-monitor", name: "new", owner: "owner-1", artifactPath: newArtifactPath },
+				notification => {
+					newNotifications.push(notification);
+					if (notification.event === "daemon-monitor-completed") completed.resolve();
+				},
+			);
+			if (!newUnregister) throw new Error("Expected output monitoring support");
+			await client.request({ op: "ping" });
+			await client.request({ op: "start", spec: spec("new") });
+			await client.request({ op: "send", name: "new", data: "NEW_OUTPUT\n" });
+			const newObserved = await client.request({
+				op: "wait",
+				name: "new",
+				for: "exit",
+				pattern: "NEW_OUTPUT",
+				timeoutMs: 5_000,
+			});
+			if (newObserved.op !== "wait") throw new Error("unexpected wait result");
+			expect(newObserved.timedOut).toBeFalse();
+			await client.request({ op: "stop", name: "new", timeoutMs: 2_000 });
+			await completed.promise;
+
+			const output = newNotifications.filter(notification => notification.event === "daemon-output");
+			expect(output.map(notification => notification.text)).toEqual(["NEW_OUTPUT"]);
+			expect(await Bun.file(oldArtifactPath).text()).toBe("OLD_OUTPUT\n");
+			expect(await Bun.file(newArtifactPath).text()).toBe("NEW_OUTPUT\n");
+		} finally {
+			oldUnregister();
+			newUnregister?.();
+			await client.request({ op: "stop", name: "old", timeoutMs: 2_000 }).catch(() => undefined);
+			await client.request({ op: "stop", name: "new", timeoutMs: 2_000 }).catch(() => undefined);
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
+			await broker;
+			setProcessName(previousTitle);
+		}
+	}, 20_000);
+
+	it("keeps a mid-line attach preview aligned with the monitor's own artifact", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-midline-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		const scriptPath = path.join(projectDir, "service.ts");
+		await Bun.write(
+			scriptPath,
+			`process.stdin.setEncoding("utf8");
+process.stdin.resume();
+process.stdout.write("abc");
+process.stdin.once("data", () => {
+	process.stdout.write("def\\n");
+	process.exit(0);
+});
+`,
+		);
+		const artifactPath = path.join(tempDir.path(), "midline-progress.log");
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const previousTitle = process.title;
+		const broker = startBroker(projectDir, runtimeDir);
+		const notifications: DaemonMonitorNotification[] = [];
+		const completed = Promise.withResolvers<void>();
+		let unregister: (() => void) | undefined;
+		try {
+			const started = await client.request({
+				op: "start",
+				spec: {
+					name: "midline",
+					application: process.execPath,
+					args: [scriptPath],
+					env: {},
+					cwd: projectDir,
+					pty: false,
+					restart: "no",
+					persist: false,
+					detached: false,
+				},
+			});
+			if (started.op !== "start") throw new Error("unexpected start result");
+			// Ensure the unterminated "abc" prefix was consumed before the monitor attaches.
+			await client.request({
+				op: "logs",
+				name: "midline",
+				lines: 20,
+				head: false,
+				follow: true,
+				cursor: 0,
+				timeoutMs: 5_000,
+			});
+			unregister = client.onOutput?.(
+				{ id: "midline-monitor", name: "midline", owner: "owner", artifactPath },
+				notification => {
+					notifications.push(notification);
+					if (notification.event === "daemon-monitor-completed") completed.resolve();
+				},
+			);
+			if (!unregister) throw new Error("Expected output monitoring support");
+			await client.request({ op: "ping" });
+			await client.request({ op: "send", name: "midline", data: "finish\n" });
+			await completed.promise;
+
+			const output = notifications.filter(notification => notification.event === "daemon-output");
+			// The pre-attach "abc" prefix belongs to the record, not this monitor:
+			// its preview and artifact must share the same attach boundary.
+			expect(output.map(notification => notification.text)).toEqual(["def"]);
+			expect(await Bun.file(artifactPath).text()).toBe("def\n");
+		} finally {
+			unregister?.();
+			await client.request({ op: "stop", name: "midline", timeoutMs: 2_000 }).catch(() => undefined);
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
 			await broker;
 			setProcessName(previousTitle);
 		}

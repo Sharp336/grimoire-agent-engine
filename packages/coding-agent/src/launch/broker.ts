@@ -106,8 +106,6 @@ interface ManagedDaemon {
 	completionSubscriptionId?: string;
 	persistQueue: Promise<void>;
 	settlementQueue: Promise<void>;
-	progressLines?: ProgressLines;
-	progressPreview: ProgressPreviewAccumulator;
 	monitorRestarting: boolean;
 	monitorSettlementPending: boolean;
 }
@@ -122,6 +120,9 @@ interface OutputRegistration extends DaemonOutputSubscription {
 	pending: DaemonMonitorNotification[];
 	artifactSink: OutputSink;
 	offlineTimer?: NodeJS.Timeout;
+	/** Model-facing line previews accumulated from this registration's attach point. */
+	progressPreview: ProgressPreviewAccumulator;
+	progressLines: ProgressLines;
 }
 
 interface BrokerLease {
@@ -137,6 +138,27 @@ interface DaemonLogRead {
 
 function quoteShellArg(value: string): string {
 	return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+/** Build a live output registration whose line fragments and artifact both start at attach time. */
+function createOutputRegistration(
+	subscription: DaemonOutputSubscription,
+	socket: net.Socket,
+	subscriptionId: string,
+): OutputRegistration {
+	const progressPreview = new ProgressPreviewAccumulator();
+	return {
+		...subscription,
+		socket,
+		subscriptionId,
+		pending: [],
+		artifactSink: new OutputSink({
+			artifactPath: subscription.artifactPath,
+			artifactWriteMode: "mirror",
+		}),
+		progressPreview,
+		progressLines: new ProgressLines(line => progressPreview.append(line.text, line.truncated)),
+	};
 }
 
 function terminalState(state: DaemonSnapshot["state"]): boolean {
@@ -730,7 +752,6 @@ class DaemonBroker {
 				consecutiveFailures: 0,
 				persistQueue: Promise.resolve(),
 				settlementQueue: Promise.resolve(),
-				progressPreview: new ProgressPreviewAccumulator(),
 				monitorRestarting: false,
 				monitorSettlementPending: false,
 				completionCapable: owner !== undefined && this.#completionSubscriptions.has(owner),
@@ -778,10 +799,6 @@ class DaemonBroker {
 		syncReadyPending(record);
 		record.readinessBuffer = "";
 		record.outputOffset = 0;
-		record.progressLines = record.spec.detached
-			? undefined
-			: new ProgressLines(line => record.progressPreview.append(line.text, line.truncated));
-		record.progressPreview.clear();
 		this.#persist(record);
 		try {
 			if (record.spec.detached) await this.#launchDetached(record, generation);
@@ -923,25 +940,16 @@ class DaemonBroker {
 		const text = record.log?.append(output) ?? output;
 		record.snapshot.outputBytes += Buffer.byteLength(text, "utf8");
 		const sanitized = sanitizeText(text);
-		record.progressLines?.append(sanitized);
-		const registrations = [...this.#outputRegistrations.values()].filter(
-			registration => registration.name === record.snapshot.name,
-		);
-		for (const registration of registrations) registration.artifactSink.push(output);
-		const preview = record.progressPreview.take();
-		if (record.progressLines && preview) {
-			for (const registration of registrations) {
-				this.#progressBatcher.push(registration.id, { preview });
-			}
+		for (const registration of this.#outputRegistrations.values()) {
+			if (registration.name !== record.snapshot.name) continue;
+			registration.artifactSink.push(output);
+			// Line fragments accumulate per registration from its attach point, so a
+			// monitor never previews prefix text its own artifact does not contain.
+			registration.progressLines.append(sanitized);
+			const preview = registration.progressPreview.take();
+			if (preview) this.#progressBatcher.push(registration.id, { preview });
 		}
 		this.#trackOutput(record, generation, sanitized);
-	}
-
-	#hasOutputRegistration(name: string): boolean {
-		for (const registration of this.#outputRegistrations.values()) {
-			if (registration.name === name) return true;
-		}
-		return false;
 	}
 
 	#outputMonitorIds(name: string): string[] {
@@ -978,10 +986,14 @@ class DaemonBroker {
 		}
 		for (const subscription of subscriptions) {
 			const existing = this.#outputRegistrations.get(subscription.id);
-			if (existing && existing.subscriptionId === subscriptionId) {
+			if (
+				existing &&
+				existing.subscriptionId === subscriptionId &&
+				existing.name === subscription.name &&
+				existing.artifactPath === subscription.artifactPath
+			) {
 				clearTimeout(existing.offlineTimer);
 				existing.offlineTimer = undefined;
-				existing.name = subscription.name;
 				existing.owner = subscription.owner;
 				existing.socket = socket;
 				const replayedTerminal = existing.pending.some(
@@ -1001,20 +1013,15 @@ class DaemonBroker {
 				continue;
 			}
 			if (existing) {
+				// A changed daemon name or artifact path is a replacement, not a
+				// reconnect: drop the old registration's batcher window and sink so
+				// queued output from the old daemon never reaches the new monitor and
+				// no further bytes flow to the old artifact path.
 				clearTimeout(existing.offlineTimer);
 				this.#progressBatcher.clear(subscription.id);
 				void existing.artifactSink.dispose();
 			}
-			this.#outputRegistrations.set(subscription.id, {
-				...subscription,
-				socket,
-				subscriptionId,
-				pending: [],
-				artifactSink: new OutputSink({
-					artifactPath: subscription.artifactPath,
-					artifactWriteMode: "mirror",
-				}),
-			});
+			this.#outputRegistrations.set(subscription.id, createOutputRegistration(subscription, socket, subscriptionId));
 			const record = this.#records.get(subscription.name);
 			if (record && terminalState(record.snapshot.state) && !record.monitorSettlementPending) {
 				this.#notifyMonitorCompletion(record, subscription.id);
@@ -1181,14 +1188,11 @@ class DaemonBroker {
 		await this.#readDetachedOutput(record, generation);
 		// The output read yields, so a concurrent refresh may settle this generation first.
 		if (generation !== record.generation || settledState(record.snapshot.state)) return;
-		record.progressLines?.finish();
-		record.progressLines = undefined;
-		const finalPreview = record.progressPreview.take();
-		if (finalPreview && this.#hasOutputRegistration(record.snapshot.name)) {
-			const chunk = { preview: finalPreview };
-			for (const monitorId of this.#outputMonitorIds(record.snapshot.name)) {
-				this.#progressBatcher.push(monitorId, chunk);
-			}
+		for (const registration of this.#outputRegistrations.values()) {
+			if (registration.name !== record.snapshot.name) continue;
+			registration.progressLines.finish();
+			const finalPreview = registration.progressPreview.take();
+			if (finalPreview) this.#progressBatcher.push(registration.id, { preview: finalPreview });
 		}
 		await this.#flushOutputProgress(record.snapshot.name);
 		if (generation !== record.generation || settledState(record.snapshot.state)) return;
@@ -1554,7 +1558,6 @@ class DaemonBroker {
 					consecutiveFailures: 0,
 					persistQueue: Promise.resolve(),
 					settlementQueue: Promise.resolve(),
-					progressPreview: new ProgressPreviewAccumulator(),
 					monitorRestarting: false,
 					monitorSettlementPending: false,
 					completionCapable: "completionEvents" in decoded && decoded.completionEvents === true,
