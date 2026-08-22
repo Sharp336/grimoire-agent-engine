@@ -1238,25 +1238,59 @@ export class SessionTools {
 		};
 	}
 
-	/** Rediscovers reloadable skills and refreshes prompt metadata. */
+	/** Reruns skill discovery with the given extension-contributed directories and refreshes prompt metadata. */
+	async #applyDiscoveredSkills(extensionDirectories: string[] | undefined): Promise<void> {
+		const skillsSettings = this.#host.settings.getGroup("skills");
+		const discovered = await loadSkills({
+			...skillsSettings,
+			cwd: this.#host.sessionManager.getCwd(),
+			disabledExtensions: this.#host.settings.get("disabledExtensions") ?? [],
+			extensionRoots: this.#host.effectiveExtensionRoots(),
+			extensionDirectories,
+		});
+		this.#skills = discovered.skills;
+		this.#skillWarnings = discovered.warnings;
+		this.#skillsSettings = skillsSettings;
+
+		if (this.#host.agentKind() === "main") {
+			setActiveSkills(this.#skills);
+		}
+	}
+
+	/** Rediscovers reloadable skills and refreshes prompt metadata. Used by `/reload-plugins`. */
 	async refreshSkills(): Promise<void> {
 		resetCapabilities();
 		if (this.#skillsReloadable) {
-			const skillsSettings = this.#host.settings.getGroup("skills");
-			const discovered = await loadSkills({
-				...skillsSettings,
-				cwd: this.#host.sessionManager.getCwd(),
-				disabledExtensions: this.#host.settings.get("disabledExtensions") ?? [],
-				extensionRoots: this.#host.effectiveExtensionRoots(),
-			});
-			this.#skills = discovered.skills;
-			this.#skillWarnings = discovered.warnings;
-			this.#skillsSettings = skillsSettings;
-
-			if (this.#host.agentKind() === "main") {
-				setActiveSkills(this.#skills);
-			}
+			// Extensions may contribute skill directories (resources_discover).
+			// Re-emit on every refresh so /reload-plugins picks up changes.
+			const runner = this.#host.extensionRunner();
+			const discoveredResources = runner
+				? await runner.emitResourcesDiscover(this.#host.sessionManager.getCwd(), "reload")
+				: undefined;
+			await this.#applyDiscoveredSkills(discoveredResources?.skillPaths.map(entry => entry.path));
 		}
+		await this.refreshBaseSystemPrompt();
+		this.#host.notifyCommandMetadataChanged();
+	}
+
+	/**
+	 * One-time post-`session_start` `resources_discover` emission (reason
+	 * `"startup"`), called by every mode's extension-lifecycle init
+	 * (`initializeExtensions`, ACP, interactive) right after `session_start`
+	 * fires — matching the event's public contract (fires after
+	 * `session_start`, when runtime actions and the error listener are wired).
+	 * Every session reaches this call, so it stays a cheap no-op (no capability
+	 * reset, no skill rescan, no prompt rebuild) unless a handler actually
+	 * contributed a directory.
+	 */
+	async discoverStartupSkillPaths(): Promise<void> {
+		if (!this.#skillsReloadable) return;
+		const runner = this.#host.extensionRunner();
+		if (!runner) return;
+		const discoveredResources = await runner.emitResourcesDiscover(this.#host.sessionManager.getCwd(), "startup");
+		if (discoveredResources.skillPaths.length === 0) return;
+		resetCapabilities();
+		await this.#applyDiscoveredSkills(discoveredResources.skillPaths.map(entry => entry.path));
 		await this.refreshBaseSystemPrompt();
 		this.#host.notifyCommandMetadataChanged();
 	}

@@ -2733,6 +2733,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			void extensionRunner.emitCredentialDisabled(event);
 		}
 
+		// resources_discover: extensions may contribute skill directories, but the
+		// event's public contract fires it AFTER `session_start` (so handlers that
+		// build state there, or use runtime actions wired by `initialize()`, work
+		// correctly). Session construction happens before any mode calls
+		// `initialize()`/emits `session_start`, so that emission — and the resulting
+		// skill-snapshot refresh — happens later, in `initializeExtensions`
+		// (modes/runtime-init.ts), right after `session_start`.
+
 		const getSessionContext = () => ({
 			sessionManager,
 			modelRegistry,

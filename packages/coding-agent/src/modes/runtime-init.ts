@@ -145,4 +145,9 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 
 	runner.onError(reportRuntimeError);
 	await runner.emit({ type: "session_start" });
+	// resources_discover fires after `session_start` per its public contract
+	// (extensibility/extensions/types.ts) — only now are runtime actions and
+	// `onError` wired, so extension-contributed skill directories are folded
+	// into the session's skill snapshot before the first prompt.
+	await session.discoverStartupSkillPaths();
 }

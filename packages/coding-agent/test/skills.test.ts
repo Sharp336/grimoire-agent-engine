@@ -2,9 +2,16 @@ import { beforeAll, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Agent } from "@oh-my-pi/pi-agent-core";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { type Skill as CapabilitySkill, skillCapability } from "@oh-my-pi/pi-coding-agent/capability/skill";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { getCapability } from "@oh-my-pi/pi-coding-agent/discovery";
 import { getWslWindowsHomeCandidate, runHostProbe } from "@oh-my-pi/pi-coding-agent/discovery/agents";
+import { ExtensionRunner, loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import type { ExtensionError } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import {
 	type LoadSkillsResult,
 	loadSkills,
@@ -12,7 +19,11 @@ import {
 	parseSkillInvocation,
 	type Skill,
 } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
+import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 const fixturesDir = path.resolve(import.meta.dirname, "fixtures/skills");
 const collisionFixturesDir = path.resolve(import.meta.dirname, "fixtures/skills-collision");
@@ -464,6 +475,98 @@ enabled: false
 		});
 	});
 
+	describe("extensionDirectories (resources_discover)", () => {
+		async function writeSkill(root: string, relDir: string, name: string, description: string): Promise<string> {
+			const skillDir = path.join(root, relDir);
+			await fs.mkdir(skillDir, { recursive: true });
+			const skillPath = path.join(skillDir, "SKILL.md");
+			await fs.writeFile(skillPath, `---\nname: ${name}\ndescription: ${description}\n---\n\n# ${name}\n`);
+			return skillPath;
+		}
+
+		it("should load skills from extension directories with extension source labeling", async () => {
+			const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ext-skills-"));
+			try {
+				await writeSkill(tempDir, "flat-ext-skill", "flat-ext-skill", "Flat extension-provided skill.");
+				await writeSkill(tempDir, "second-ext-skill", "second-ext-skill", "Second extension-provided skill.");
+
+				const { skills } = await loadSkills({
+					...DISABLE_ALL_BUILTIN_SKILLS,
+					extensionDirectories: [tempDir],
+				});
+
+				const flat = skills.find(s => s.name === "flat-ext-skill");
+				expect(flat).toBeDefined();
+				expect(skills.some(s => s.name === "second-ext-skill")).toBe(true);
+				expect(flat!.source).toBe("extension:user");
+				expect(flat!._source?.providerName).toBe("Extension");
+			} finally {
+				await removeWithRetries(tempDir);
+			}
+		});
+
+		it("should prefer customDirectories over extensionDirectories on name collision", async () => {
+			const customDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ext-custom-"));
+			const extensionDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ext-ext-"));
+			try {
+				const customPath = await writeSkill(customDir, "shared-name", "shared-name", "From custom directory.");
+				await writeSkill(extensionDir, "shared-name", "shared-name", "From extension directory.");
+
+				const { skills, warnings } = await loadSkills({
+					...DISABLE_ALL_BUILTIN_SKILLS,
+					customDirectories: [customDir],
+					extensionDirectories: [extensionDir],
+				});
+
+				const shared = skills.filter(s => s.name === "shared-name");
+				expect(shared).toHaveLength(1);
+				expect(shared[0].filePath).toBe(customPath);
+				expect(shared[0].source).toBe("custom:user");
+				expect(warnings.some(w => w.message.includes(`name collision: \"shared-name\"`))).toBe(true);
+			} finally {
+				await removeWithRetries(customDir);
+				await removeWithRetries(extensionDir);
+			}
+		});
+
+		it("should apply ignoredSkills to extension directories", async () => {
+			const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ext-ignored-"));
+			try {
+				await writeSkill(tempDir, "ignored-ext-skill", "ignored-ext-skill", "Should be filtered out.");
+				await writeSkill(tempDir, "kept-ext-skill", "kept-ext-skill", "Should survive the filter.");
+
+				const { skills } = await loadSkills({
+					...DISABLE_ALL_BUILTIN_SKILLS,
+					extensionDirectories: [tempDir],
+					ignoredSkills: ["ignored-ext-skill"],
+				});
+
+				expect(skills.some(s => s.name === "ignored-ext-skill")).toBe(false);
+				expect(skills.some(s => s.name === "kept-ext-skill")).toBe(true);
+			} finally {
+				await removeWithRetries(tempDir);
+			}
+		});
+
+		it("should dedupe by real path when custom and extension directories overlap", async () => {
+			const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ext-overlap-"));
+			try {
+				await writeSkill(tempDir, "overlap-skill", "overlap-skill", "Reached via two configured routes.");
+
+				const { skills, warnings } = await loadSkills({
+					...DISABLE_ALL_BUILTIN_SKILLS,
+					customDirectories: [tempDir],
+					extensionDirectories: [tempDir],
+				});
+
+				expect(skills.filter(s => s.name === "overlap-skill")).toHaveLength(1);
+				expect(warnings.some(w => w.message.includes(`name collision: \"overlap-skill\"`))).toBe(false);
+			} finally {
+				await removeWithRetries(tempDir);
+			}
+		});
+	});
+
 	it("should expand ~ in customDirectories", async () => {
 		const fakeHome = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-home-"));
 		const homedirSpy = spyOn(os, "homedir").mockReturnValue(fakeHome);
@@ -545,6 +648,126 @@ description: Skill loaded from a tilde-expanded custom directory.
 			customDirectories: [fixturesDir],
 		});
 		expect(withEmpty.length).toBe(withoutOption.length);
+	});
+});
+
+describe("session resources_discover lifecycle (issue: PR #9379 review)", () => {
+	/**
+	 * Writes an on-disk extension whose `resources_discover` handler only
+	 * returns a skill path once its `session_start` handler has already run
+	 * (recorded via a marker file — the extension runs in its own dynamic
+	 * import, so it can't share a closure variable with the test) — mirroring
+	 * a real extension that derives discovery state during `session_start`.
+	 * Pre-fix, `sdk.ts` emitted `resources_discover` before any mode called
+	 * `initialize()`/`session_start`, so this handler always saw no marker and
+	 * returned nothing — the skill never reached `session.skills`.
+	 */
+	async function writeStartupOrderingExtension(
+		extensionsDir: string,
+		markerPath: string,
+		skillDir: string,
+	): Promise<string> {
+		await fs.mkdir(extensionsDir, { recursive: true });
+		const extPath = path.join(extensionsDir, "startup-ordering.ts");
+		await fs.writeFile(
+			extPath,
+			`import * as fs from "node:fs";
+export default function (pi) {
+	pi.on("session_start", () => {
+		fs.writeFileSync(${JSON.stringify(markerPath)}, "started");
+	});
+	pi.on("resources_discover", () => {
+		if (!fs.existsSync(${JSON.stringify(markerPath)})) return undefined;
+		return { skillPaths: [${JSON.stringify(skillDir)}] };
+	});
+}
+`,
+		);
+		return extPath;
+	}
+
+	async function writeStartupSkill(root: string): Promise<void> {
+		const skillDir = path.join(root, "startup-discovered-skill");
+		await fs.mkdir(skillDir, { recursive: true });
+		await fs.writeFile(
+			path.join(skillDir, "SKILL.md"),
+			"---\nname: startup-discovered-skill\ndescription: Contributed via resources_discover at startup.\n---\n\nbody\n",
+		);
+	}
+
+	it("folds resources_discover skillPaths into session.skills only after session_start has fired", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-session-startup-skill-"));
+		const authStorage = createInMemoryAuthStorage();
+		let session: AgentSession | undefined;
+		try {
+			await writeStartupSkill(tempDir);
+			const markerPath = path.join(tempDir, "session-started.marker");
+			const extPath = await writeStartupOrderingExtension(path.join(tempDir, "ext"), markerPath, tempDir);
+
+			// Direct extension loading + `new AgentSession(...)`, not
+			// `createAgentSession()`: the SDK entrypoint also runs
+			// `initializeWithSettings` and wires process-global registries
+			// (model lifecycle, settings) that other suites assert against —
+			// unrelated global state this test must not touch.
+			const loaded = await loadExtensions([extPath], tempDir);
+			expect(loaded.errors).toEqual([]);
+
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+			const mock = createMockModel({ handler: () => ({ content: ["ok"] }) });
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model, systemPrompt: ["Test"], tools: [] },
+				streamFn: mock.stream,
+			});
+			const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+			const sessionManager = SessionManager.inMemory(tempDir);
+			const extensionRunner = new ExtensionRunner(
+				loaded.extensions,
+				loaded.runtime,
+				tempDir,
+				sessionManager,
+				modelRegistry,
+			);
+
+			session = new AgentSession({
+				agent,
+				sessionManager,
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				extensionRunner,
+			});
+
+			const runtimeErrors: ExtensionError[] = [];
+
+			// The bug this regresses: emitting resources_discover before
+			// session_start means the marker file doesn't exist yet, and the
+			// handler above returns nothing.
+			const markerExistsBeforeStart = await fs.access(markerPath).then(
+				() => true,
+				() => false,
+			);
+			expect(markerExistsBeforeStart).toBe(false);
+
+			await initializeExtensions(session, {
+				reportSendError: () => {},
+				reportRuntimeError: error => {
+					runtimeErrors.push(error);
+				},
+			});
+
+			expect(runtimeErrors).toEqual([]);
+			expect(session.skills.some(skill => skill.name === "startup-discovered-skill")).toBe(true);
+
+			// `/reload-plugins` re-emits resources_discover with reason "reload";
+			// the marker persists across reloads, so the skill must still be found.
+			await session.refreshSkills();
+			expect(session.skills.some(skill => skill.name === "startup-discovered-skill")).toBe(true);
+		} finally {
+			await session?.dispose();
+			authStorage.close();
+			await removeWithRetries(tempDir);
+		}
 	});
 });
 

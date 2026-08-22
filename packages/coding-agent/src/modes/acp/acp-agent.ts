@@ -2618,6 +2618,10 @@ export class AcpAgent implements Agent {
 			"rpc",
 		);
 		await extensionRunner.emit({ type: "session_start" });
+		// resources_discover fires after `session_start` (extensibility/extensions/types.ts) —
+		// only now are runtime actions wired, so extension-contributed skill directories
+		// are folded into the session's skill snapshot before the first prompt.
+		await record.session.discoverStartupSkillPaths();
 		record.extensionsConfigured = true;
 	}
 
