@@ -728,20 +728,29 @@ describe("hub process output monitoring", () => {
 			persist: true,
 			progress: "wake",
 		});
-		const rejection = expect(replacement).rejects.toThrow("already running");
+		const settlement = replacement.then(
+			() => ({ ok: true as const }),
+			(error: unknown) => ({ ok: false as const, error }),
+		);
 		await allocationStarted.promise;
-		await priorSink({
-			event: "daemon-monitor-completed",
-			monitorId: prior.id,
-			daemon: { ...daemon, state: "exited", pid: undefined, exitedAt: 3, exitCode: 0 },
-			ownerNotified: false,
-		});
-		artifact.resolve({
-			id: `hub-progress-${crypto.randomUUID()}`,
-			path: path.join(process.cwd(), `.hub-progress-${crypto.randomUUID()}.log`),
-		});
+		try {
+			await priorSink({
+				event: "daemon-monitor-completed",
+				monitorId: prior.id,
+				daemon: { ...daemon, state: "exited", pid: undefined, exitedAt: 3, exitCode: 0 },
+				ownerNotified: false,
+			});
+		} finally {
+			artifact.resolve({
+				id: `hub-progress-${crypto.randomUUID()}`,
+				path: path.join(process.cwd(), `.hub-progress-${crypto.randomUUID()}.log`),
+			});
+		}
 
-		await rejection;
+		expect(await settlement).toEqual({
+			ok: false,
+			error: expect.objectContaining({ message: expect.stringContaining("already running") }),
+		});
 		await drainMicrotasks();
 
 		expect(harness.completions).toHaveLength(1);
