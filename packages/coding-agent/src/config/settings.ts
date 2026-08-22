@@ -231,6 +231,7 @@ export function validateProviderMaxInFlightRequests(value: unknown): Record<stri
 	const invalidProviders: string[] = [];
 	const normalized: Record<string, number> = {};
 	for (const [provider, rawLimit] of Object.entries(value)) {
+		if (rawLimit === null) continue;
 		if (typeof rawLimit !== "number" || !Number.isFinite(rawLimit) || rawLimit <= 0) {
 			invalidProviders.push(provider);
 			continue;

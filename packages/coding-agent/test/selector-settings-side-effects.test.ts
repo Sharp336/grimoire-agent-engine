@@ -78,6 +78,26 @@ describe("selector setting side effects", () => {
 
 		expect(applyMemoryBackend).toHaveBeenCalledTimes(1);
 	});
+
+	it("applies a thinking-level change without re-persisting it globally", () => {
+		const setThinkingLevel = vi.fn();
+		const invalidate = vi.fn();
+		const updateEditorBorderColor = vi.fn();
+		Settings.instance.set("defaultThinkingLevel", "medium");
+		const controller = new SelectorController({
+			session: { setThinkingLevel },
+			statusLine: { invalidate },
+			updateEditorBorderColor,
+		} as unknown as InteractiveModeContext);
+
+		controller.handleSettingChange("defaultThinkingLevel", "high");
+
+		expect(setThinkingLevel).toHaveBeenCalledTimes(1);
+		expect(setThinkingLevel).toHaveBeenCalledWith("high");
+		expect(setThinkingLevel.mock.calls[0]).toHaveLength(1);
+		expect(Settings.instance.get("defaultThinkingLevel")).toBe("medium");
+	});
+
 	it("stops the live advisor runtime when advisor.enabled is turned off in /settings", () => {
 		const setAdvisorEnabled = vi.fn();
 		const invalidate = vi.fn();

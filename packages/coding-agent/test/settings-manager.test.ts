@@ -243,6 +243,24 @@ describe("Settings", () => {
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			expect(() => settings.getShellConfig()).toThrow(`Please update shellPath in ${projectConfigPath}`);
 		});
+
+		it("lets a project null tombstone mask a globally capped provider", async () => {
+			await writeSettings({ providers: { maxInFlightRequests: { anthropic: 3, openai: 5 } } });
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({}, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			settings.set("providers.maxInFlightRequests", { openai: 5, anthropic: null }, "project");
+			expect(settings.get("providers.maxInFlightRequests")).toEqual({ openai: 5, anthropic: null });
+			expect(settings.getGlobalValue("providers.maxInFlightRequests")).toEqual({
+				anthropic: 3,
+				openai: 5,
+			});
+			await settings.flush();
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+				providers: { maxInFlightRequests: { openai: 5, anthropic: null } },
+			});
+		});
 	});
 
 	describe("shell configuration errors", () => {

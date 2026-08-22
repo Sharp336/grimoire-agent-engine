@@ -1225,7 +1225,7 @@ export class SettingsSelectorComponent implements Component {
 			this.context.providers,
 			() => normalizeProviderMaxInFlightRequests(this.#scopedValue("providers.maxInFlightRequests")),
 			value => {
-				const effective = this.#persistSetting("providers.maxInFlightRequests", value);
+				const effective = this.#persistRecordScopeSetting("providers.maxInFlightRequests", value);
 				this.callbacks.onChange("providers.maxInFlightRequests", effective);
 				done(this.#formatProviderLimitsValue(this.#scopedValue("providers.maxInFlightRequests")));
 			},
@@ -1299,6 +1299,26 @@ export class SettingsSelectorComponent implements Component {
 	 */
 	#persistSetting(path: SettingPath, value: unknown): unknown {
 		settings.set(path, value as never, this.#scope);
+		return settings.get(path);
+	}
+	/**
+	 * Persist a record setting in the selected scope, tombstoning entries the
+	 * new value clears so they cannot be re-inherited from the global layer.
+	 * `#deepMerge` recurses per key and drops `undefined`, so a plain record
+	 * without a key cannot mask a global cap; clearing a capped provider
+	 * requires an explicit `null` in the project layer.
+	 */
+	#persistRecordScopeSetting(path: SettingPath, value: Record<string, number>): unknown {
+		if (this.#scope === "global") {
+			settings.set(path, value, "global");
+			return settings.get(path);
+		}
+		const globalRecord = normalizeProviderMaxInFlightRequests(settings.getGlobalValue(path));
+		const next: Record<string, number | null> = { ...value };
+		for (const provider of Object.keys(globalRecord)) {
+			if (next[provider] === undefined) next[provider] = null;
+		}
+		settings.set(path, next as never, "project");
 		return settings.get(path);
 	}
 

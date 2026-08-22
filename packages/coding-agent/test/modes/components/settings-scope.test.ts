@@ -1,6 +1,11 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
-import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import {
+	normalizeProviderMaxInFlightRequests,
+	resetSettingsForTest,
+	Settings,
+	settings,
+} from "@oh-my-pi/pi-coding-agent/config/settings";
 import { SettingsSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/settings-selector";
 import {
 	initTheme,
@@ -292,5 +297,40 @@ describe("SettingsSelectorComponent persistence scope", () => {
 		selector.handleInput("\n");
 		selector.handleInput("\x1b");
 		expect(previews.at(-1)?.preset).toBe("full");
+	});
+	it("clears a provider limit inherited from the global layer when editing in project scope", () => {
+		// Global caps "anthropic"; the project layer has no override. A project
+		// edit must be able to clear that cap without a leftover global record
+		// key re-inheriting the cap through the record deep-merge.
+		settings.set("providers.maxInFlightRequests", { anthropic: 3 }, "global");
+		const selector = new SettingsSelectorComponent(
+			{
+				availableThinkingLevels: [],
+				thinkingLevel: undefined,
+				availableThemes: [],
+				providers: ["anthropic"],
+				cwd: projectDir,
+			},
+			{
+				onChange: (settingPath, value) => changes.push({ path: settingPath, value }),
+				onCancel: () => {},
+			},
+		);
+		// Switch to global scope, then back to project scope; open the
+		// Max In-Flight Requests submenu and pick "Clear all limits".
+		selector.handleInput("\x1bs");
+		selector.handleInput("\x1bs");
+		for (const ch of "max in flight requests") selector.handleInput(ch);
+		selector.handleInput("\n");
+		// "Clear all limits" is the second item in the submenu.
+		selector.handleInput("\x1b[B");
+		selector.handleInput("\n");
+		selector.handleInput("\x1b");
+		// Clear-all produced an empty map; the project scope must tombstone the
+		// global provider so the effective limits are empty, not the global cap.
+		expect(normalizeProviderMaxInFlightRequests(settings.get("providers.maxInFlightRequests"))).toEqual({});
+		expect(settings.get("providers.maxInFlightRequests")).toEqual({ anthropic: null });
+		// The global layer itself is untouched.
+		expect(settings.getGlobalValue("providers.maxInFlightRequests")).toEqual({ anthropic: 3 });
 	});
 });
