@@ -105,6 +105,8 @@ function createContext(): {
 	const hasActiveBtw = vi.fn(() => false);
 	const handleOmfgEscape = vi.fn(() => true);
 	const hasActiveOmfg = vi.fn(() => false);
+	const handleCleanseEscape = vi.fn(() => true);
+	const hasActiveCleanse = vi.fn(() => false);
 	const updatePendingMessagesDisplay = vi.fn();
 	const prompt = vi.fn();
 	const startPendingSubmission = vi.fn(
@@ -189,6 +191,7 @@ function createContext(): {
 			getKeys: () => [],
 		} as unknown as InteractiveModeContext["keybindings"],
 		compactionQueuedMessages: [],
+		mcpTestEscapeHandlers: new Set(),
 		isBashMode: false,
 		isPythonMode: false,
 		optimisticUserMessageSignature: undefined,
@@ -214,6 +217,8 @@ function createContext(): {
 		hasActiveBtw,
 		handleOmfgEscape,
 		hasActiveOmfg,
+		handleCleanseEscape,
+		hasActiveCleanse,
 		showTreeSelector: vi.fn(),
 		showUserMessageSelector: vi.fn(),
 		showSessionSelector: vi.fn(),
@@ -435,6 +440,30 @@ describe("InputController escape behavior", () => {
 		editor.onEscape?.();
 
 		expect(spies.abortEval).toHaveBeenCalledTimes(1);
+		expect(spies.abort).not.toHaveBeenCalled();
+	});
+
+	it("keeps every overlapping /mcp test cancellable before aborting the stream", () => {
+		const { ctx, editor, spies } = createContext();
+		mutableSessionState(ctx).isStreaming = true;
+		const firstTestEscapeHandler = vi.fn();
+		const latestTestEscapeHandler = vi.fn();
+		ctx.mcpTestEscapeHandlers.add(firstTestEscapeHandler);
+		ctx.mcpTestEscapeHandlers.add(latestTestEscapeHandler);
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.onEscape?.();
+
+		expect(firstTestEscapeHandler).toHaveBeenCalledTimes(1);
+		expect(latestTestEscapeHandler).toHaveBeenCalledTimes(1);
+		expect(spies.abort).not.toHaveBeenCalled();
+
+		ctx.mcpTestEscapeHandlers.delete(latestTestEscapeHandler);
+		editor.onEscape?.();
+
+		expect(firstTestEscapeHandler).toHaveBeenCalledTimes(2);
+		expect(latestTestEscapeHandler).toHaveBeenCalledTimes(1);
 		expect(spies.abort).not.toHaveBeenCalled();
 	});
 
