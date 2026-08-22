@@ -430,6 +430,25 @@ export async function scanSkillsFromDir(
 		const skillPath = path.join(dir, entry.name, "SKILL.md");
 		if (fs.existsSync(skillPath)) {
 			work.push(loadSkill(skillPath));
+			continue;
+		}
+		// Namespace directory: curated pools nest one level (<dir>/<ns>/<skill>/SKILL.md),
+		// e.g. skills/core-ops/deel/SKILL.md via the symlinked pools in ~/.claude/skills
+		// and ~/.config/opencode/skills. A dir without its own SKILL.md is scanned exactly
+		// one level deeper; deeper nesting stays invisible.
+		let children: fs.Dirent[];
+		try {
+			children = await fs.promises.readdir(path.join(dir, entry.name), { withFileTypes: true });
+		} catch {
+			continue;
+		}
+		for (const child of children) {
+			if (child.name.startsWith(".")) continue;
+			if (!child.isDirectory() && !child.isSymbolicLink()) continue;
+			const nestedSkillPath = path.join(dir, entry.name, child.name, "SKILL.md");
+			if (fs.existsSync(nestedSkillPath)) {
+				work.push(loadSkill(nestedSkillPath));
+			}
 		}
 	}
 	await Promise.all(work);

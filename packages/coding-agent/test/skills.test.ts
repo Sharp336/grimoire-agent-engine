@@ -20,6 +20,7 @@ const collisionFixturesDir = path.resolve(import.meta.dirname, "fixtures/skills-
 const longSkillName = "this-is-a-very-long-skill-name-that-exceeds-the-sixty-four-character-limit-set-by-the-standard";
 const expectedFixtureSkillOrder: string[] = [
 	"bad--name",
+	"child-skill",
 	"different-name",
 	"Invalid_Name",
 	longSkillName,
@@ -100,10 +101,13 @@ describe("skills", () => {
 			expect(skills.some(skill => skill.name === "unknown-field")).toBe(true);
 		});
 
-		it("should not load nested skills recursively", async () => {
+		it("should load skills one namespace level deep but not deeper", async () => {
 			const { skills } = await loadFixtureRoot();
 
-			expect(skills.some(skill => skill.name === "child-skill")).toBe(false);
+			// nested/child-skill: one namespace level below the root — discovered.
+			expect(skills.some(skill => skill.name === "child-skill")).toBe(true);
+			// nested/deeper/grandchild-skill: two levels down — stays invisible.
+			expect(skills.some(skill => skill.name === "grandchild-skill")).toBe(false);
 		});
 
 		it("should skip files without frontmatter description", async () => {
@@ -130,10 +134,10 @@ describe("skills", () => {
 					"this-is-a-very-long-skill-name-that-exceeds-the-sixty-four-character-limit-set-by-the-standard",
 					"unknown-field",
 					"bad--name",
+					"child-skill",
 				]),
 			);
-			expect(names).not.toContain("child-skill");
-			expect(skills).toHaveLength(6);
+			expect(skills).toHaveLength(7);
 		});
 
 		it("should return skills sorted by name (case-insensitive)", async () => {
