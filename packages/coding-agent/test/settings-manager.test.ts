@@ -301,6 +301,24 @@ describe("Settings", () => {
 				providers: { maxInFlightRequests: { anthropic: null } },
 			});
 		});
+
+		it("keeps a non-native provider cap live after a sibling native override", async () => {
+			await fs.promises.mkdir(path.join(projectDir, ".claude"), { recursive: true });
+			await Bun.write(
+				path.join(projectDir, ".claude", "settings.json"),
+				`${JSON.stringify({ providers: { maxInFlightRequests: { anthropic: 3 } } }, null, 2)}\n`,
+			);
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({}, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			settings.set("providers.maxInFlightRequests", { openai: 9 }, "project");
+			expect(settings.get("providers.maxInFlightRequests")).toEqual({ anthropic: 3, openai: 9 });
+			await settings.flush();
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+				providers: { maxInFlightRequests: { openai: 9 } },
+			});
+		});
 	});
 
 	describe("shell configuration errors", () => {

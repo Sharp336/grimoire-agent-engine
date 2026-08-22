@@ -637,7 +637,7 @@ export class Settings {
 		this.#persistedMutationGeneration++;
 		if (scope === "project") {
 			setByPath(this.#projectFileSettings, segments, value);
-			setByPath(this.#project, segments, value);
+			this.#rebuildProjectLayer();
 			this.#projectConfigExists = true;
 			if (path === "shellPath") {
 				this.#projectShellPathSource = `${this.#cwd}/.omp/config.yml`;
@@ -662,12 +662,7 @@ export class Settings {
 		const prev = this.get(path);
 		this.#persistedMutationGeneration++;
 		deleteByPath(this.#projectFileSettings, segments);
-		const fallback = getByPath(this.#projectWithoutNative, segments);
-		if (fallback === undefined) {
-			deleteByPath(this.#project, segments);
-		} else {
-			setByPath(this.#project, [...segments], fallback);
-		}
+		this.#rebuildProjectLayer();
 		if (path === "shellPath") {
 			this.#projectShellPathSource = Object.hasOwn(this.#project, "shellPath")
 				? this.#projectWithoutNativeShellPathSource
@@ -1182,7 +1177,7 @@ export class Settings {
 		} else {
 			current[role] = modelId;
 		}
-		// Persist per-role rather than marking the whole `modelRoles` path
+		// Persist per-role rather thanking the whole `modelRoles` path
 		// modified: #saveNow merges only the changed role into the re-read
 		// file, so a concurrent external edit to a sibling role is not
 		// clobbered by this process's stale in-memory snapshot.
@@ -2622,6 +2617,13 @@ export class Settings {
 			delete filteredRoles[role];
 		}
 		return filteredRoles ? { ...this.#project, modelRoles: filteredRoles } : this.#project;
+	}
+
+	#rebuildProjectLayer(): void {
+		this.#project = this.#deepMerge(
+			structuredClone(this.#projectWithoutNative),
+			structuredClone(this.#projectFileSettings),
+		);
 	}
 
 	#rebuildMerged(): void {

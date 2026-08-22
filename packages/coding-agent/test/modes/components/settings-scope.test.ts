@@ -12,6 +12,7 @@ import {
 	onTerminalAppearanceChange,
 	previewTheme,
 	setTheme,
+	stopThemeWatcher,
 	theme,
 } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
@@ -46,6 +47,7 @@ describe("SettingsSelectorComponent persistence scope", () => {
 	});
 
 	afterEach(async () => {
+		stopThemeWatcher();
 		resetSettingsForTest();
 		AgentStorage.resetInstance();
 		restoreSettingsTestState(settingsState);
