@@ -2018,6 +2018,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			segmentOptions: settings.get("statusLine.segmentOptions"),
 			compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
 			contextLine: settings.get("statusLine.contextLine"),
+			contextPercentBase: settings.get("statusLine.contextPercentBase"),
 		});
 	}
 	syncComposerShape(): void {

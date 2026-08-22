@@ -10,11 +10,12 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-coding-agent/modes/components/read-tool-group";
+import { StatusLineComponent } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import type { ResolvedRoleModel } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AgentSession, ResolvedRoleModel } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
@@ -53,6 +54,76 @@ describe("selector setting side effects", () => {
 		// The setting-change side effect is a single render request — the lazy
 		// top-border provider rebuilds during paint (#4145).
 		expect(requestRender).toHaveBeenCalledTimes(1);
+	});
+
+	it("pushes a context-percent-base change through the controller into the live status line", async () => {
+		const testTheme = await getThemeByName("dark");
+		if (!testTheme) throw new Error("Failed to load dark theme for status-line propagation test");
+		setThemeInstance(testTheme);
+		const globalSettings = Settings.instance;
+		globalSettings.override("statusLine.preset", "custom");
+		globalSettings.override("statusLine.leftSegments", ["context_pct"]);
+		globalSettings.override("statusLine.rightSegments", []);
+		globalSettings.override("statusLine.contextPercentBase", "model");
+		globalSettings.override("compaction.enabled", true);
+		globalSettings.override("compaction.thresholdTokens", 100_000);
+		globalSettings.override("compaction.thresholdPercent", -1);
+
+		try {
+			const contextWindow = 200_000;
+			const messages = [{ role: "user", content: "hi" }];
+			const model = { id: "test-model", contextWindow };
+			const session = {
+				messages,
+				systemPrompt: ["You are a helpful assistant."],
+				agent: { state: { tools: [] } },
+				skills: [],
+				model,
+				modelRegistry: { isUsingOAuth: () => false },
+				state: { messages, model },
+				sessionManager: {
+					getUsageStatistics: () => ({
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						orchestrationInput: 0,
+						orchestrationOutput: 0,
+						orchestrationCacheRead: 0,
+						premiumRequests: 0,
+						cost: 0,
+					}),
+					getSessionName: () => "selector test",
+				},
+				getAsyncJobSnapshot: () => ({ running: [] }),
+				isFastModeActive: () => false,
+				getContextUsage: () => ({ tokens: 150_000, contextWindow, percent: 75 }),
+			} as unknown as AgentSession;
+			const statusLine = new StatusLineComponent(session);
+			expect(statusLine.getTopBorder(80).content.replaceAll(/\x1b\[[0-9;]*m/g, "")).toContain("75.0%/200K");
+
+			const requestRender = vi.fn();
+			const controller = new SelectorController({
+				statusLine,
+				ui: { requestRender },
+			} as unknown as InteractiveModeContext);
+
+			globalSettings.override("statusLine.contextPercentBase", "compaction");
+			controller.handleSettingChange("statusLine.contextPercentBase", "compaction");
+
+			expect(statusLine.getEffectiveSettingsForTest().contextPercentBase).toBe("compaction");
+			expect(statusLine.getTopBorder(80).content.replaceAll(/\x1b\[[0-9;]*m/g, "")).toContain("150.0%/100K");
+			expect(requestRender).toHaveBeenCalledTimes(1);
+		} finally {
+			globalSettings.clearOverride("statusLine.preset");
+			globalSettings.clearOverride("statusLine.leftSegments");
+			globalSettings.clearOverride("statusLine.rightSegments");
+			globalSettings.clearOverride("statusLine.contextPercentBase");
+			globalSettings.clearOverride("compaction.enabled");
+			globalSettings.clearOverride("compaction.thresholdTokens");
+			globalSettings.clearOverride("compaction.thresholdPercent");
+		}
 	});
 
 	it("invalidates the UI and requests a repaint when tui.tight changes", () => {

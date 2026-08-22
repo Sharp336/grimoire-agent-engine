@@ -9,8 +9,10 @@ import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import { arkToWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	type ContextBreakdown,
+	computeContextBreakdown,
 	computeNonMessageBreakdown,
 	computeNonMessageTokens,
 	estimateToolSchemaTokens,
@@ -91,6 +93,38 @@ describe("renderContextUsage snapcompact section", () => {
 	it("omits the section entirely when no snapcompact setting is on", () => {
 		const output = renderContextUsage(breakdownWith(undefined), themeStub);
 		expect(output).not.toContain("Snapcompact");
+	});
+
+	it("keeps the /context breakdown on the full model window when status-line compaction mode is selected", () => {
+		const model = { id: "test-model", name: "Test Model", contextWindow: 200_000 };
+		const session = {
+			model,
+			agent: { tokenizer, state: { tools: [] } },
+			systemPrompt: [],
+			messages: [],
+			skills: [],
+			settings: Settings.isolated({
+				"statusLine.contextPercentBase": "compaction",
+				"compaction.enabled": true,
+				"compaction.thresholdTokens": 100_000,
+				"compaction.thresholdPercent": -1,
+			}),
+			getContextBreakdown: () => ({
+				contextWindow: 200_000,
+				anchored: true,
+				usedTokens: 150_000,
+				systemPromptTokens: 0,
+				systemToolsTokens: 0,
+				systemContextTokens: 0,
+				skillsTokens: 0,
+				messagesTokens: 150_000,
+			}),
+		};
+
+		const breakdown = computeContextBreakdown(session as never);
+		expect(breakdown.contextWindow).toBe(200_000);
+		expect(breakdown.usedTokens).toBe(150_000);
+		expect(renderContextUsage(breakdown, themeStub)).toContain("150K/200k tokens (75.0%)");
 	});
 });
 

@@ -476,6 +476,56 @@ function makeHostContext(): InteractiveModeContext {
 		collabHost: undefined,
 	} as unknown as InteractiveModeContext;
 }
+function makeCompactionStateHostContext(): InteractiveModeContext {
+	const ctx = {
+		settings: {
+			get: () => "",
+			getGroup: () => ({
+				enabled: true,
+				methodOrder: ["soft"],
+				thresholdTokens: 80_000,
+				thresholdPercent: -1,
+				asyncEnabled: true,
+			}),
+		},
+		sessionManager: {
+			getSessionId: () => "sess-compaction-state",
+			getCwd: () => "/tmp",
+			snapshotForReplication: () => ({
+				header: {
+					type: "session",
+					id: "sess-compaction-state",
+					timestamp: new Date().toISOString(),
+					cwd: "/tmp",
+				},
+				entries: [],
+			}),
+			onEntryAppended: undefined,
+		},
+		session: {
+			isStreaming: false,
+			queuedMessageCount: 0,
+			sessionName: "compaction state test",
+			model: { provider: "test", id: "test-model" },
+			thinkingLevel: undefined,
+			hasExtensionHandlers: (eventType: string) => eventType === "session_before_compact",
+			subscribe: () => () => {},
+			emitNotice: () => {},
+			promptCustomMessage: () => Promise.resolve(),
+			abort: () => Promise.resolve(),
+		},
+		eventBus: undefined,
+		statusLine: {
+			setCollabStatus: () => {},
+			invalidate: () => {},
+			getCachedContextBreakdown: () => ({ usedTokens: 70_000, contextWindow: 100_000 }),
+		},
+		ui: { requestRender: () => {} },
+		showStatus: () => {},
+		collabHost: undefined,
+	};
+	return ctx as unknown as InteractiveModeContext;
+}
 
 /** Raw wire-speaking guest with a configurable hello proto. */
 async function joinRawGuest(
@@ -554,6 +604,22 @@ describe("collab proto handshake (#4049)", () => {
 			if (request.t !== "ui-request") throw new Error(`expected ui-request, got ${request.t}`);
 			guest.socket.send({ t: "ui-response", reqId: request.request.reqId, value: "Yes" });
 			expect(await pending).toEqual({ kind: "answered", value: "Yes" });
+		} finally {
+			guest.socket.close();
+			await host.stop("test done");
+		}
+	});
+	it("broadcasts the compaction threshold without a speculation boundary when before-compact is intercepted", async () => {
+		const host = new CollabHost(makeCompactionStateHostContext());
+		await host.start("ws://localhost:8787");
+		const guest = await joinRawGuest(host.link, COLLAB_PROTO);
+		try {
+			const welcome = await guest.nextFrame();
+			if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+			const contextUsage = welcome.state.contextUsage;
+			if (!contextUsage) throw new Error("expected compaction context usage");
+			expect(contextUsage.compactionThresholdTokens).toBe(80_000);
+			expect(contextUsage.compactionSpeculationTokens).toBeNull();
 		} finally {
 			guest.socket.close();
 			await host.stop("test done");

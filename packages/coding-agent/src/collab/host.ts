@@ -11,6 +11,7 @@
 
 import { timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs/promises";
+import { resolveThresholdTokens } from "@oh-my-pi/pi-agent-core/compaction";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type {
@@ -21,12 +22,15 @@ import type {
 	AgentEvent as WireAgentEvent,
 	SessionEntry as WireSessionEntry,
 } from "@oh-my-pi/pi-wire";
+import type { CompactionSettings } from "../config/settings-schema";
 import type { InteractiveModeContext } from "../modes/types";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
+import { hasAvailableCompactionMethod, resolveSpeculationMethod } from "../session/compaction-methods";
 import { stripImagesFromMessage, USER_INTERRUPT_LABEL } from "../session/messages";
 import type { SessionEntry as StoredSessionEntry } from "../session/session-entries";
+import { resolveSpeculationLeadTokens } from "../session/speculation-lead";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "../task/types";
 import { generateRoomKey, generateWriteToken, importRoomKey } from "./crypto";
 import { collabDisplayName } from "./display-name";
@@ -34,6 +38,7 @@ import {
 	type AgentSnapshot,
 	COLLAB_PROMPT_MESSAGE_TYPE,
 	COLLAB_PROTO,
+	type CollabContextUsage,
 	type CollabFrame,
 	type CollabParticipant,
 	type CollabPromptDetails,
@@ -169,6 +174,10 @@ export class CollabHost {
 			list.push({ name: peer.name, role: "guest", readOnly: peer.canWrite ? undefined : true });
 		}
 		return list;
+	}
+	/** Schedule a debounced guest state refresh after a host-side setting change. */
+	scheduleStateBroadcast(): void {
+		this.#scheduleStateBroadcast();
 	}
 
 	requestGuestUi(request: CollabUiRequestDraft, signal?: AbortSignal): Promise<CollabGuestUiResult> | null {
@@ -526,6 +535,46 @@ export class CollabHost {
 		// status line shows.
 		const breakdown = this.#ctx.statusLine.getCachedContextBreakdown();
 		const tokens = breakdown.usedTokens ?? 0;
+		const contextWindow = breakdown.contextWindow;
+		const configured = this.#ctx.settings?.getGroup?.("compaction");
+		const compactionSettings = configured as CompactionSettings | undefined;
+		let compactionThresholdTokens: number | undefined;
+		let compactionSpeculationTokens: number | null | undefined;
+		if (
+			Number.isFinite(contextWindow) &&
+			contextWindow > 0 &&
+			compactionSettings?.enabled === true &&
+			hasAvailableCompactionMethod(session.model, compactionSettings)
+		) {
+			const resolvedThresholdTokens = resolveThresholdTokens(contextWindow, compactionSettings);
+			if (
+				Number.isFinite(resolvedThresholdTokens) &&
+				resolvedThresholdTokens > 0 &&
+				resolvedThresholdTokens <= contextWindow
+			) {
+				compactionThresholdTokens = resolvedThresholdTokens;
+				const strategy = (compactionSettings as CompactionSettings & { strategy?: unknown }).strategy;
+				const speculationMethod =
+					compactionSettings.asyncEnabled !== false &&
+					strategy !== "off" &&
+					!session.hasExtensionHandlers("session_before_compact")
+						? resolveSpeculationMethod(session.model, compactionSettings)
+						: undefined;
+				compactionSpeculationTokens =
+					speculationMethod === undefined
+						? null
+						: Math.max(0, resolvedThresholdTokens - resolveSpeculationLeadTokens(resolvedThresholdTokens));
+			}
+		}
+		const contextUsage: CollabContextUsage = {
+			tokens,
+			contextWindow,
+			percent: contextWindow > 0 ? (tokens / contextWindow) * 100 : 0,
+		};
+		if (compactionThresholdTokens !== undefined) {
+			contextUsage.compactionThresholdTokens = compactionThresholdTokens;
+			contextUsage.compactionSpeculationTokens = compactionSpeculationTokens ?? null;
+		}
 		return {
 			isStreaming: session.isStreaming,
 			isAborting: session.isAborting,
@@ -534,11 +583,7 @@ export class CollabHost {
 			cwd: this.#ctx.sessionManager.getCwd(),
 			model: session.model,
 			thinkingLevel: session.thinkingLevel,
-			contextUsage: {
-				tokens,
-				contextWindow: breakdown.contextWindow,
-				percent: breakdown.contextWindow > 0 ? (tokens / breakdown.contextWindow) * 100 : 0,
-			},
+			contextUsage,
 			participants: this.participants,
 		};
 	}
