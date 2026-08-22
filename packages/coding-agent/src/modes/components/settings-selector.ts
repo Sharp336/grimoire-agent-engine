@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Effort } from "@oh-my-pi/pi-ai";
 import {
@@ -43,8 +44,15 @@ import type {
 	StatusLineSeparatorStyle,
 } from "../../config/settings-schema";
 import { SETTING_TABS, TAB_METADATA } from "../../config/settings-schema";
-import { getCurrentThemeName, getSelectListTheme, getSettingsListTheme, theme } from "../../modes/theme/theme";
+import {
+	getCurrentThemeName,
+	getSelectListTheme,
+	getSettingsListTheme,
+	isLightTheme,
+	theme,
+} from "../../modes/theme/theme";
 import { AUTO_THINKING, type ConfiguredThinkingLevel } from "../../thinking";
+import * as git from "../../utils/git";
 import { getTabBarTheme } from "../shared";
 import { type ComposerPreviewStatusSource, ComposerShapePreview } from "./composer-shape-preview";
 import { getComposerShapeOptions } from "./composer-shape-registry";
@@ -725,7 +733,7 @@ export class SettingsSelectorComponent implements Component {
 		}
 
 		const out: string[] = [];
-		out.push(topBorder(width, this.#currentTabId === "plugins" ? "Settings" : `Settings · ${this.#scope}`));
+		out.push(topBorder(width, this.#title()));
 		this.#tabRowStart = out.length;
 		this.#tabRowCount = tabLines.length;
 		for (const line of tabLines) {
@@ -981,7 +989,7 @@ export class SettingsSelectorComponent implements Component {
 	 */
 	#defToItem(def: SettingDef): SettingItem | null {
 		// Check condition: applies to every variant — booleans, enums, submenus, text inputs.
-		if (def.condition && !def.condition()) {
+		if (def.condition && !def.condition(this.#scope)) {
 			return null;
 		}
 
@@ -1235,7 +1243,7 @@ export class SettingsSelectorComponent implements Component {
 
 	#getMultiSelectOptions(def: SettingDef & { type: "multiselect" }) {
 		if (def.path !== "providers.webSearchOrder") return def.options;
-		const excluded: unknown = settings.get("providers.webSearchExclude");
+		const excluded: unknown = this.#scopedValue("providers.webSearchExclude");
 		if (!Array.isArray(excluded)) return def.options;
 		return def.options.filter(option => !excluded.includes(option.value));
 	}
@@ -1420,12 +1428,14 @@ export class SettingsSelectorComponent implements Component {
 	 */
 	#triggerStatusLinePreview(): void {
 		const statusLineSettings: StatusLinePreviewSettings = {
-			preset: settings.get("statusLine.preset"),
-			leftSegments: settings.get("statusLine.leftSegments"),
-			rightSegments: settings.get("statusLine.rightSegments"),
-			separator: settings.get("statusLine.separator"),
-			sessionAccent: settings.get("statusLine.sessionAccent"),
-			transparent: settings.get("statusLine.transparent"),
+			preset: this.#scopedValue("statusLine.preset") as StatusLinePreset,
+			leftSegments: this.#scopedValue("statusLine.leftSegments") as StatusLineSegmentId[],
+			rightSegments: this.#scopedValue("statusLine.rightSegments") as StatusLineSegmentId[],
+			separator: this.#scopedValue("statusLine.separator") as StatusLineSeparatorStyle,
+			sessionAccent: this.#scopedValue("statusLine.sessionAccent") as boolean,
+			transparent: this.#scopedValue("statusLine.transparent") as boolean,
+			compactThinkingLevel: this.#scopedValue("statusLine.compactThinkingLevel") as boolean,
+			contextLine: this.#scopedValue("statusLine.contextLine") as ContextLineMode,
 		};
 		this.callbacks.onStatusLinePreview?.(statusLineSettings);
 	}
@@ -1438,6 +1448,12 @@ export class SettingsSelectorComponent implements Component {
 		});
 	}
 
+	#title(): string {
+		if (this.#currentTabId === "plugins") return "Settings";
+		if (this.#scope === "global") return "Settings · global";
+		return `Settings · ${settingsProjectLabel(this.context.cwd)}`;
+	}
+
 	#switchScope(): void {
 		this.#scope = this.#scope === "project" ? "global" : "project";
 		if (this.#searchList) {
@@ -1447,7 +1463,24 @@ export class SettingsSelectorComponent implements Component {
 			this.#switchToTab(this.#currentTabId);
 			if (selectedId) this.#currentList?.selectItem(selectedId);
 		}
+		this.#previewAppearanceForScope();
 		this.context.requestRender?.();
+	}
+
+	#previewAppearanceForScope(): void {
+		const themeName = this.#scopedThemeName();
+		if (themeName) void this.callbacks.onThemePreview?.(themeName);
+		this.#triggerStatusLinePreview();
+	}
+
+	#scopedThemeName(): string | undefined {
+		const dark = this.#scopedValue("theme.dark");
+		const light = this.#scopedValue("theme.light");
+		const preferred = isLightTheme(getCurrentThemeName()) ? light : dark;
+		if (typeof preferred === "string" && preferred.length > 0) return preferred;
+		if (typeof dark === "string" && dark.length > 0) return dark;
+		if (typeof light === "string" && light.length > 0) return light;
+		return undefined;
 	}
 
 	#inheritSelectedSetting(): void {
@@ -1457,7 +1490,7 @@ export class SettingsSelectorComponent implements Component {
 		const effective = settings.get(def.path);
 		this.callbacks.onChange(def.path, effective);
 		if (def.tab === "appearance") {
-			this.#triggerStatusLinePreview();
+			this.#previewAppearanceForScope();
 		}
 		this.#refreshCurrentTabItems(getSettingsForTab(def.tab));
 		this.context.requestRender?.();
@@ -1561,4 +1594,11 @@ export class SettingsSelectorComponent implements Component {
 		const value = this.#searchInput.getValue();
 		if (value !== this.#searchQuery) this.#setSearchQuery(value);
 	}
+}
+
+function settingsProjectLabel(cwd: string): string {
+	const primary = git.repo.primaryRootSync(cwd);
+	const base = path.basename(primary ?? cwd);
+	const name = base.endsWith(".git") ? base.slice(0, -4) : base;
+	return name || "project";
 }

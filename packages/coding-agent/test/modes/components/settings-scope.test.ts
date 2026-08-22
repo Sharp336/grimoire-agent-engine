@@ -63,7 +63,7 @@ describe("SettingsSelectorComponent persistence scope", () => {
 		// false. The persisted scope and active effective value must diverge.
 		settings.set("ask.enabled", true, "global");
 		const selector = createSelector();
-		expect(selector.render(120).join("\n")).toContain("Settings · project");
+		expect(selector.render(120).join("\n")).toContain(`Settings · ${path.basename(projectDir)}`);
 		expect(settings.getGlobalValue("ask.enabled")).toBe(true);
 		expect(settings.get("ask.enabled")).toBe(true);
 
@@ -102,5 +102,49 @@ describe("SettingsSelectorComponent persistence scope", () => {
 		await settings.flush();
 		expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({ custom: { keep: true } });
 		expect(YAML.parse(await Bun.file(path.join(agentDir, "config.yml")).text())).toEqual({ ask: { enabled: false } });
+	});
+
+	it("labels project scope with the directory name", () => {
+		const selector = createSelector();
+		expect(selector.render(120).join("\n")).toContain(`Settings · ${path.basename(projectDir)}`);
+		selector.handleInput("\x1bs");
+		expect(selector.render(120).join("\n")).toContain("Settings · global");
+	});
+
+	it("previews the selected scope's theme without persisting", () => {
+		const previews: string[] = [];
+		const selector = new SettingsSelectorComponent(
+			{
+				availableThinkingLevels: [],
+				thinkingLevel: undefined,
+				availableThemes: ["dark-one", "titanium"],
+				providers: [],
+				cwd: projectDir,
+			},
+			{
+				onChange: (settingPath, value) => changes.push({ path: settingPath, value }),
+				onThemePreview: themeName => {
+					previews.push(themeName);
+				},
+				onCancel: () => {},
+			},
+		);
+		settings.set("theme.dark", "dark-one", "project");
+		settings.set("theme.dark", "titanium", "global");
+		selector.handleInput("\x1bs");
+		expect(previews.at(-1)).toBe("titanium");
+		expect(settings.get("theme.dark")).toBe("dark-one");
+		selector.handleInput("\x1bs");
+		expect(previews.at(-1)).toBe("dark-one");
+	});
+
+	it("shows hindsight settings in global scope when only the global backend is hindsight", () => {
+		settings.set("memory.backend", "hindsight", "global");
+		settings.set("memory.backend", "off", "project");
+		const selector = createSelector();
+		expect(selector.render(120).join("\n")).not.toContain("Hindsight API URL");
+		selector.handleInput("\x1bs");
+		for (const char of "hindsight api") selector.handleInput(char);
+		expect(selector.render(120).join("\n")).toContain("Hindsight API URL");
 	});
 });

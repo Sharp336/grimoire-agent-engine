@@ -1527,6 +1527,9 @@ export class Settings {
 		// source) cannot hide a native edit across reload.
 		if (loadedNativeProject !== null) {
 			merged = this.#deepMerge(merged, nativeProject);
+			if (Object.hasOwn(nativeProject, "shellPath")) {
+				shellPathSource = projectConfigPath;
+			}
 		}
 		return {
 			settings: this.#migrateRawSettings(merged, quarantineInvalid),

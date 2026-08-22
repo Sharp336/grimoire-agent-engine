@@ -229,6 +229,20 @@ describe("Settings", () => {
 			expect(reloaded.get("ask.enabled")).toBe(false);
 			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({ ask: { enabled: false } });
 		});
+
+		it("attributes an invalid native shellPath to .omp/config.yml when another project source also sets it", async () => {
+			await fs.promises.mkdir(path.join(projectDir, ".claude"), { recursive: true });
+			const missingShell = tempDir.join("missing-native-bash");
+			await Bun.write(
+				path.join(projectDir, ".claude", "settings.json"),
+				`${JSON.stringify({ shellPath: tempDir.join("missing-claude-bash") }, null, 2)}
+`,
+			);
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ shellPath: missingShell }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(() => settings.getShellConfig()).toThrow(`Please update shellPath in ${projectConfigPath}`);
+		});
 	});
 
 	describe("shell configuration errors", () => {
