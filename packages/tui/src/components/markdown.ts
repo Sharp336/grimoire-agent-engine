@@ -38,6 +38,27 @@ function normalizeOsc8Terminators(text: string): string {
 	return text.replace(OSC8_ST_PREFIX_REGEX, "$1\x07");
 }
 
+/** The longest suffix of `text` a future append could still complete into a
+ *  full `\x1b]8;[^\x07\x1b]*\x1b\\` match: the last `\x1b]8;` plus clean
+ *  body (or that plus the pending ST-ESC `\x1b`), or a strict prefix of the
+ *  escape start. Any other suffix is already normalized or uncompletable
+ *  (a BEL or an ESC follows it), so this is exactly the region a crossing
+ *  match can occupy. */
+function trailingOsc8Partial(text: string): string | undefined {
+	const start = text.lastIndexOf("\x1b]8;");
+	if (start !== -1) {
+		const body = text.slice(start + 4);
+		const cut = body.search(/[\x07\x1b]/);
+		if (cut === -1 || (cut === body.length - 1 && body.charCodeAt(cut) === 0x1b)) {
+			return text.slice(start);
+		}
+	}
+	if (text.endsWith("\x1b]8;") || text.endsWith("\x1b]8") || text.endsWith("\x1b]") || text.endsWith("\x1b")) {
+		return text.slice(text.lastIndexOf("\x1b"));
+	}
+	return undefined;
+}
+
 const MARKDOWN_FENCE_LINE = /^ {0,3}(`{3,}|~{3,})[ \t]*(.*)$/;
 const MARKDOWN_HEADING_LINE = /^ {0,3}#{1,6}[ \t]+\S/;
 const FENCED_SOURCE_INTRO = /\b(?:code|example|markdown|output|snippet|source)\s*:?\s*$/i;
@@ -1474,6 +1495,9 @@ function splitPushedHighlightLines(pushed: string): string[] {
 
 export class Markdown implements Component {
 	#text: string;
+	// Suffix of #text a future append could still complete into a match
+	// (see trailingOsc8Partial); drives the append-only fast path.
+	#oscPartialEscape?: string;
 	#paddingX: number; // Left/right padding
 	#paddingY: number; // Top/bottom padding
 	#defaultTextStyle?: DefaultTextStyle;
@@ -1527,6 +1551,7 @@ export class Markdown implements Component {
 		codeBlockIndent: number = 2,
 	) {
 		this.#text = normalizeOsc8Terminators(text);
+		this.#oscPartialEscape = trailingOsc8Partial(this.#text);
 		this.#paddingX = paddingX;
 		this.#paddingY = paddingY;
 		this.#theme = theme;
@@ -1535,7 +1560,35 @@ export class Markdown implements Component {
 	}
 
 	setText(text: string): boolean {
+		// Identical re-emit (throttled tick): fully normalized already.
+		if (text === this.#text) return false;
+		// Streaming path: append-only growth. Only the memoized pending escape
+		// suffix plus the delta can hold a not-yet-normalized match (a crossing
+		// match starts in the pending suffix; everything else is in the delta).
+		// Normalize that region alone and splice it onto the old prefix;
+		// String.replace returns the input unchanged when nothing matches, so
+		// the common clean-delta frame allocates nothing. Once a match is
+		// rewritten (ST → BEL), the caller's raw text no longer aligns with
+		// #text (2-byte ST vs 1-byte BEL), so later frames fall back to the
+		// cold full-document pass — still byte-correct, just not faster.
+		if (text.length > this.#text.length && text.startsWith(this.#text)) {
+			const memoized = this.#oscPartialEscape;
+			const pending = (memoized ?? "") + text.slice(this.#text.length);
+			const normalized = normalizeOsc8Terminators(pending);
+			if (normalized !== pending) {
+				// A stored byte was rewritten (ST → BEL on a crossing match): the
+				// stream-prefix lex caches self-invalidate via startsWith guards
+				// against #text, so nothing else needs clearing.
+				text = this.#text.slice(0, this.#text.length - (memoized?.length ?? 0)) + normalized;
+			}
+			this.#oscPartialEscape = trailingOsc8Partial(normalized);
+			this.#text = text;
+			this.invalidate();
+			return true;
+		}
+		// Non-append edits / cold path: full-document pass.
 		text = normalizeOsc8Terminators(text);
+		this.#oscPartialEscape = trailingOsc8Partial(text);
 		// Equality guard: streaming re-emits identical text on ticks that carried
 		// no delta (throttled provider frames, reconciled tool-execution updates).
 		// Without this, the caller-side `#cachedLines` gets thrown away and the

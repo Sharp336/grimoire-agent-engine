@@ -37,7 +37,7 @@
 - Fixed editor input lag when autocomplete providers are slow by keeping only the latest pending lookup.
 - Fixed pasting an image in kitty occasionally spraying base64 text into the composer alongside the image attachment: a kitty OSC 5522 clipboard packet torn by the incomplete-escape flush is now discarded up to its terminator instead of being replayed as keystrokes.
 - Fixed Kitty OSC 66 headings activating before the host explicitly enables text sizing.
-- Markdown streaming renderer now scans only the mutable tail (not the full document) for reference-link definitions and CR on every frame, eliminating the O(n²) `RegExp.test` cost that accounted for ~26% CPU during active streaming ([#9048](https://github.com/can1357/oh-my-pi/issues/9048)).
+- The Markdown streaming renderer now normalizes OSC 8 hyperlink terminators only in the pending append region instead of re-scanning the whole document on every frame, cutting per-frame OSC8 scan cost from ~25µs to sub-µs at 128KB documents ([#9048](https://github.com/can1357/oh-my-pi/issues/9048)).
 
 ## [18.0.0] - 2026-08-22
 
