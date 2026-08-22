@@ -4,7 +4,7 @@
  * Handles /mcp subcommands for managing MCP servers.
  */
 import * as path from "node:path";
-import { type Component, replaceTabs, Spacer, Text } from "@oh-my-pi/pi-tui";
+import { type Component, Loader, replaceTabs, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { getMCPConfigPath, getProjectDir } from "@oh-my-pi/pi-utils";
 import type { SourceMeta } from "../../capability/types";
 import { expandEnvVarsDeep } from "../../discovery/helpers";
@@ -1575,18 +1575,46 @@ export class MCPCommandController {
 		}
 
 		const abortController = new AbortController();
-		const handleEscape = (): void => abortController.abort();
+		let settled = false;
+		let connection: MCPServerConnection | undefined;
+		// The "(esc to cancel)" affordance lives in the anchored status container
+		// — never the transcript — so it costs no scrollback rows and can be
+		// retired in place on settle. A mid-stream transcript mount would
+		// re-render rows below the live block, duplicate them in native
+		// scrollback, and commit an immutable hint that settle could not retire.
+		let hintLoader: Loader | undefined;
+		let hintShown = false;
+		const retireHint = (): void => {
+			if (!hintLoader) return;
+			hintLoader.stop();
+			this.ctx.mcpTestHintContainer.removeChild(hintLoader);
+			hintLoader = undefined;
+			this.ctx.ui.requestRender();
+		};
+		const handleEscape = (): void => {
+			if (settled) {
+				// Ownership is retained across the settling frame only to absorb a
+				// trailing Esc; the controller is already done, so aborting it would
+				// be a silent no-op. Report the finished test instead — the dispatcher
+				// has already consumed ownership, so the next Esc reaches the agent
+				// turn (#9310).
+				this.ctx.showStatus(`MCP test for "${name}" already finished`);
+				return;
+			}
+			// Retire the affordance synchronously; the connection/auth stack may
+			// take another event-loop turn to reject from the abort signal.
+			retireHint();
+			abortController.abort();
+		};
 
 		// Claim Esc before the first await: a slow `#resolveServerForAuth()` (e.g.
 		// config on a network filesystem) must not let Esc fall through to the
 		// agent-turn abort while the command is already running.
 		this.ctx.mcpTestEscapeHandlers.add(handleEscape);
 
-		let connection: MCPServerConnection | undefined;
-		// The grace window only applies once the "(esc to cancel)" hint is on
-		// screen; a pre-hint failure must release Esc immediately so it is not
-		// swallowed for a prompt the user never saw.
-		let hintShown = false;
+		// The grace window below only applies once the hint is shown, so a
+		// pre-hint failure releases Esc immediately rather than swallowing it for
+		// a prompt the user never saw.
 		try {
 			const found = await this.#resolveServerForAuth(name);
 
@@ -1605,9 +1633,24 @@ export class MCPCommandController {
 				return;
 			}
 
-			this.#showMessage(
-				["", theme.fg("muted", `Testing connection to "${name}"... (esc to cancel)`), ""].join("\n"),
+			// Esc may have been consumed during the awaited lookup, before a hint
+			// existed. Stop here instead of publishing a cancellation affordance
+			// whose ownership is already gone.
+			if (abortController.signal.aborted) {
+				this.ctx.mcpTestEscapeHandlers.delete(handleEscape);
+				this.ctx.showStatus(`Cancelled MCP test for "${name}"`);
+				return;
+			}
+
+			hintLoader = new Loader(
+				this.ctx.ui,
+				spinner => theme.fg("accent", spinner),
+				text => theme.fg("muted", text),
+				`Testing connection to "${name}"... (esc to cancel)`,
+				theme.spinnerFrames,
 			);
+			this.ctx.mcpTestHintContainer.addChild(hintLoader);
+			this.ctx.ui.requestRender();
 			hintShown = true;
 
 			// Resolve auth config if needed
@@ -1670,6 +1713,11 @@ export class MCPCommandController {
 
 			this.ctx.showError(`Failed to connect to "${name}": ${errorMsg}${helpText}`);
 		} finally {
+			settled = true;
+			// Retire the affordance the instant the test settles so a later Esc
+			// press is never mistaken for test cancellation and cannot abort the
+			// running agent turn once the grace window expires.
+			retireHint();
 			if (this.ctx.mcpTestEscapeHandlers.has(handleEscape)) {
 				if (hintShown) {
 					const timer = setTimeout(() => {
