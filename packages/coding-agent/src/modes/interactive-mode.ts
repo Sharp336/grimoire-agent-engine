@@ -186,7 +186,7 @@ import { SessionFocusController } from "./controllers/session-focus-controller";
 import { SSHCommandController } from "./controllers/ssh-command-controller";
 import { TanCommandController } from "./controllers/tan-command-controller";
 import { TodoCommandController } from "./controllers/todo-command-controller";
-import { materializeImageReferenceLinks } from "./image-references";
+import { imageReferenceHyperlink, materializeImageReferenceLinks } from "./image-references";
 import {
 	consumeLoopLimitIteration,
 	createLoopLimitRuntime,
@@ -521,6 +521,7 @@ const CTRL_L_APPEARANCE_RESPONSE_DEADLINE_MS = 2000;
 export class InteractiveMode implements InteractiveModeContext {
 	readonly #adoptedStartupSurface: boolean;
 	#ownsStartedUi: boolean;
+	#startupSubmitGated: boolean;
 	session: AgentSession;
 	sessionManager: SessionManager;
 	settings: Settings;
@@ -793,8 +794,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		const editorTheme = getEditorTheme();
 		this.editor = startupSurface?.editor ?? new CustomEditor(editorTheme);
 		if (startupSurface) this.editor.setTheme(editorTheme);
+		this.editor.magicKeywordsEnabled = () => this.settings.get("magicKeywords.enabled");
+		this.editor.imageReferenceHyperlink = imageReferenceHyperlink;
 		this.#adoptedStartupSurface = startupSurface !== undefined;
 		this.#ownsStartedUi = startupSurface !== undefined;
+		this.#startupSubmitGated = startupSurface !== undefined;
 		this.keybindings = KeybindingsManager.inMemory();
 		this.agent = session.agent;
 		this.#version = version;
@@ -1144,7 +1148,6 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		this.#inputController.setupKeyHandlers();
 		this.#inputController.setupEditorSubmitHandler();
-		this.editor.disableSubmit = false;
 
 		// Wire observer registry to EventBus
 		if (this.#eventBus) {
@@ -1499,6 +1502,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.onInputCallback = undefined;
 			resolve(input);
 		};
+		if (this.#startupSubmitGated) {
+			this.#startupSubmitGated = false;
+			this.editor.disableSubmit = false;
+			this.ui.requestRender();
+		}
 		this.#scheduleLoopAutoSubmit();
 		this.#scheduleGoalContinuation();
 
@@ -4450,6 +4458,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		nextEditor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		nextEditor.setImeSafeCursorLayout(this.settings.get("tui.imeSafeCursor"));
 		nextEditor.setAutocompleteMaxVisible(this.settings.get("autocompleteMaxVisible"));
+		nextEditor.magicKeywordsEnabled = () => this.settings.get("magicKeywords.enabled");
+		nextEditor.imageReferenceHyperlink = imageReferenceHyperlink;
 		nextEditor.onAutocompleteCancel = () => {
 			this.ui.requestRender(true);
 		};

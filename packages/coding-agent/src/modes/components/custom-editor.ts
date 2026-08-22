@@ -12,15 +12,13 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { BracketedPasteHandler } from "@oh-my-pi/pi-tui/bracketed-paste";
 import type { AppKeybinding } from "../../config/keybindings";
-import { isSettingsInitialized, settings } from "../../config/settings";
 import {
 	attachmentSgr,
 	COMPOSER_TOKEN_REGEX,
 	chipLabel,
 	collapseImageMarkers,
-	imageReferenceHyperlink,
 	renderPlaceholders,
-} from "../image-references";
+} from "../composer-attachments";
 import { hasMagicKeyword, highlightMagicKeywords } from "../magic-keywords";
 import { isQueuedMessageList, parseQueueShorthand, QUEUE_LIST_MARKER_RE } from "../queue-input";
 import { fgOrPlain, theme } from "../theme/theme";
@@ -593,10 +591,12 @@ export class CustomEditor extends Editor {
 				if (form === "chip") {
 					// Chip tokens carry their attachment identity color (matches the band card).
 					const styled = `${attachmentSgr(kind, index)}\x1b[1m${value}\x1b[22m\x1b[39m`;
-					return kind === "image" ? imageReferenceHyperlink(value, index, this.imageLinks, () => styled) : styled;
+					return kind === "image"
+						? this.imageReferenceHyperlink(value, index, this.imageLinks, () => styled)
+						: styled;
 				}
 				return kind === "image"
-					? imageReferenceHyperlink(value, index, this.imageLinks, label =>
+					? this.imageReferenceHyperlink(value, index, this.imageLinks, label =>
 							fgOrPlain("accent", label, `\x1b[1m\x1b[4m${label}\x1b[24m\x1b[22m`),
 						)
 					: fgOrPlain("accent", value, `\x1b[1m${value}\x1b[22m`);
@@ -604,22 +604,28 @@ export class CustomEditor extends Editor {
 		});
 	};
 
-	/** Optional test/host override for the magic-keyword shimmer gate. When
-	 *  defined, takes precedence over the global `magicKeywords.enabled` setting,
-	 *  letting tests assert the gating behaviour without mutating the
-	 *  process-wide Settings singleton (which races with parallel test files —
-	 *  see issue #2582). Production wires this through the host's Settings
-	 *  reader and updates it on the relevant setting change. */
+	/** Optional test override for the magic-keyword shimmer gate. */
 	magicKeywordsEnabledOverride: boolean | undefined;
 
-	/** Whether the shimmer should advance this frame. Defaults to "on" before
-	 *  settings have initialised (tests, early boot) so the animation does not
-	 *  silently disappear during a race; settings disabling the feature wins
-	 *  once they are loaded. An explicit `magicKeywordsEnabledOverride` overrides
-	 *  both paths. */
+	/**
+	 * Host-owned setting reader. Startup defaults to enabled without loading the
+	 * settings graph; InteractiveMode replaces this with the live session setting.
+	 */
+	magicKeywordsEnabled: () => boolean = () => true;
+
+	/**
+	 * Late-bound OSC hyperlink renderer. Startup stays plain until the full
+	 * interactive graph supplies the settings-aware implementation.
+	 */
+	imageReferenceHyperlink: (
+		label: string,
+		index: number,
+		imageLinks: readonly (string | undefined)[] | undefined,
+		renderLabel: (text: string) => string,
+	) => string = (label, _index, _imageLinks, renderLabel) => renderLabel(label);
+
 	#shimmerEnabled(): boolean {
-		if (this.magicKeywordsEnabledOverride !== undefined) return this.magicKeywordsEnabledOverride;
-		return isSettingsInitialized() ? settings.get("magicKeywords.enabled") : true;
+		return this.magicKeywordsEnabledOverride ?? this.magicKeywordsEnabled();
 	}
 
 	/** Bind the host's render request callback. Idempotent — the host wires this
