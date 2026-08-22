@@ -183,8 +183,8 @@ describe("AgentSession concurrent disposal", () => {
 		try {
 			await asyncStarted.promise;
 			await Promise.resolve();
-			expect(order).toContain("hindsight:start");
 			expect(order).toContain("mnemopi:start");
+			expect(order).not.toContain("hindsight:start");
 			expect(order).not.toContain("async:end");
 			expect(order).not.toContain("hindsight:end");
 			expect(order).not.toContain("mnemopi:end");

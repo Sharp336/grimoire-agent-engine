@@ -494,4 +494,89 @@ describe("Hindsight append-mode session retention", () => {
 		expect(String(firstItem(bodies[1]).content)).toContain("hello first turn here");
 		expect(String(firstItem(bodies[1]).content)).toContain("hello second turn here");
 	});
+
+	it("does not re-retain a resumed last-turn session on close without new turns", async () => {
+		const bodies = captureBodies();
+		const client = new HindsightApi({ baseUrl: "http://hindsight.local" });
+		const entries = [
+			userEntry("u1", null, "turn one has enough text", "2026-08-17T10:00:00.000Z"),
+			assistantEntry("a1", "u1", "reply one has enough text", "2026-08-17T10:00:01.000Z"),
+			userEntry("u2", "a1", "turn two has enough text", "2026-08-17T10:01:00.000Z"),
+			assistantEntry("a2", "u2", "reply two has enough text", "2026-08-17T10:01:01.000Z"),
+			userEntry("u3", "a2", "turn three has enough text", "2026-08-17T10:02:00.000Z"),
+			assistantEntry("a3", "u3", "reply three has enough text", "2026-08-17T10:02:01.000Z"),
+			userEntry("u4", "a3", "turn four has enough text", "2026-08-17T10:03:00.000Z"),
+			assistantEntry("a4", "u4", "reply four has enough text", "2026-08-17T10:03:01.000Z"),
+			userEntry("u5", "a4", "turn five has enough text", "2026-08-17T10:04:00.000Z"),
+			assistantEntry("a5", "u5", "reply five has enough text", "2026-08-17T10:04:01.000Z"),
+		];
+		const state = new HindsightSessionState({
+			sessionId: "sess-lastturn-resume",
+			client,
+			bankId: "personal",
+			config: makeConfig({ retainMode: "last-turn", retainEveryNTurns: 5, retainOverlapTurns: 0 }),
+			session: {
+				sessionId: "sess-lastturn-resume",
+				sessionManager: {
+					getHeader: () => ({
+						type: "session",
+						id: "sess-lastturn-resume",
+						timestamp: SESSION_START,
+						cwd: "/tmp",
+					}),
+					getEntries: () => entries,
+				},
+				getHindsightSessionState: () => state,
+			} as object as AgentSession,
+			banksSet: new Set(["personal"]),
+		});
+
+		await state.drainOnClose();
+		expect(bodies).toHaveLength(0);
+	});
+
+	it("does not keep a rekeyed session's cadence cursor after an in-flight retain", async () => {
+		const gate = Promise.withResolvers<void>();
+		const bodies = captureBodies({ delay: gate.promise });
+		const client = new HindsightApi({ baseUrl: "http://hindsight.local" });
+		const entries = [
+			userEntry("u1", null, "turn one has enough text", "2026-08-17T10:00:00.000Z"),
+			assistantEntry("a1", "u1", "reply one has enough text", "2026-08-17T10:00:01.000Z"),
+			userEntry("u2", "a1", "turn two has enough text", "2026-08-17T10:01:00.000Z"),
+			assistantEntry("a2", "u2", "reply two has enough text", "2026-08-17T10:01:01.000Z"),
+			userEntry("u3", "a2", "turn three has enough text", "2026-08-17T10:02:00.000Z"),
+			assistantEntry("a3", "u3", "reply three has enough text", "2026-08-17T10:02:01.000Z"),
+			userEntry("u4", "a3", "turn four has enough text", "2026-08-17T10:03:00.000Z"),
+			assistantEntry("a4", "u4", "reply four has enough text", "2026-08-17T10:03:01.000Z"),
+			userEntry("u5", "a4", "turn five has enough text", "2026-08-17T10:04:00.000Z"),
+			assistantEntry("a5", "u5", "reply five has enough text", "2026-08-17T10:04:01.000Z"),
+		];
+		const state = new HindsightSessionState({
+			sessionId: "sess-cadence-rekey",
+			client,
+			bankId: "personal",
+			config: makeConfig({ retainMode: "last-turn", retainEveryNTurns: 5, retainOverlapTurns: 0 }),
+			session: {
+				sessionId: "sess-cadence-rekey",
+				sessionManager: {
+					getHeader: () => ({
+						type: "session",
+						id: "sess-cadence-rekey",
+						timestamp: SESSION_START,
+						cwd: "/tmp",
+					}),
+					getEntries: () => entries,
+				},
+				getHindsightSessionState: () => state,
+			} as object as AgentSession,
+			banksSet: new Set(["personal"]),
+		});
+
+		const cadence = state.maybeRetainOnAgentEnd();
+		state.resetConversationTracking();
+		gate.resolve();
+		await cadence;
+		expect(bodies).toHaveLength(1);
+		expect(state.lastRetainedTurn).toBe(0);
+	});
 });

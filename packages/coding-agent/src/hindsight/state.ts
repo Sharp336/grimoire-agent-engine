@@ -227,6 +227,7 @@ export class HindsightSessionState {
 	#retainInFlight: Promise<void> = Promise.resolve();
 	#autoRetainInFlight: Promise<void> = Promise.resolve();
 	#retainGeneration = 0;
+	#closeRetainBaselineTurns = 0;
 	hasRecalledForFirstTurn: boolean;
 	lastRecallSnippet?: string;
 	/** Cached `<mental_models>` block injected into developer instructions. */
@@ -267,6 +268,9 @@ export class HindsightSessionState {
 		this.hasRecalledForFirstTurn = options.hasRecalledForFirstTurn ?? false;
 		this.aliasOf = options.aliasOf;
 		this.retainQueue = new HindsightRetainQueue(this);
+		this.#closeRetainBaselineTurns = this.session.sessionManager
+			? extractMessages(this.session.sessionManager).filter(m => m.role === "user").length
+			: 0;
 	}
 
 	setSessionId(sessionId: string): void {
@@ -278,6 +282,7 @@ export class HindsightSessionState {
 		this.lastRetainedTurn = 0;
 		this.hasRecalledForFirstTurn = false;
 		this.lastRecallSnippet = undefined;
+		this.#closeRetainBaselineTurns = 0;
 		this.#invalidateRetainCache();
 	}
 
@@ -303,21 +308,25 @@ export class HindsightSessionState {
 		const messages = extractMessages(this.session.sessionManager);
 		if (messages.length === 0) return;
 		const userTurns = messages.filter(m => m.role === "user").length;
+		const retainedThrough = Math.max(this.lastRetainedTurn, this.#closeRetainBaselineTurns);
 		if (this.config.retainMode === "last-turn") {
 			// Last-turn retain resets #lastRetainedMessageIndex to 0 by design
 			// (each retain is a unique document). An already-retained session
 			// therefore looks "pending" if we only inspect the message index.
-			if (userTurns <= this.lastRetainedTurn) return;
+			// Resume also starts lastRetainedTurn at 0, so treat loaded history
+			// as the close-path baseline until this process retains new turns.
+			if (userTurns <= retainedThrough) return;
 		} else if (this.#lastRetainedMessageIndex >= messages.length && userTurns <= this.lastRetainedTurn) {
 			return;
 		}
 		try {
+			const generation = this.#retainGeneration;
 			const lastTurnWindow =
 				this.config.retainMode === "last-turn"
-					? userTurns - this.lastRetainedTurn + this.config.retainOverlapTurns
+					? userTurns - retainedThrough + this.config.retainOverlapTurns
 					: undefined;
 			await this.retainSession(messages, lastTurnWindow === undefined ? undefined : { lastTurnWindow });
-			this.lastRetainedTurn = userTurns;
+			if (generation === this.#retainGeneration) this.lastRetainedTurn = userTurns;
 		} catch (err) {
 			logger.warn("Hindsight: session-end retain flush failed", {
 				sessionId: this.sessionId,
@@ -456,9 +465,10 @@ export class HindsightSessionState {
 	}
 
 	async maybeRetainOnAgentEnd(): Promise<void> {
+		const generation = this.#retainGeneration;
 		const run = this.#autoRetainInFlight.then(
-			() => this.#maybeRetainOnAgentEndLocked(),
-			() => this.#maybeRetainOnAgentEndLocked(),
+			() => this.#maybeRetainOnAgentEndLocked(generation),
+			() => this.#maybeRetainOnAgentEndLocked(generation),
 		);
 		this.#autoRetainInFlight = run.then(
 			() => undefined,
@@ -467,7 +477,7 @@ export class HindsightSessionState {
 		await run;
 	}
 
-	async #maybeRetainOnAgentEndLocked(): Promise<void> {
+	async #maybeRetainOnAgentEndLocked(generation: number): Promise<void> {
 		if (!this.config.autoRetain) return;
 		const messages = extractMessages(this.session.sessionManager);
 		if (messages.length === 0) return;
@@ -476,7 +486,7 @@ export class HindsightSessionState {
 
 		try {
 			await this.retainSession(messages);
-			this.lastRetainedTurn = userTurns;
+			if (generation === this.#retainGeneration) this.lastRetainedTurn = userTurns;
 			if (this.config.debug) {
 				logger.debug("Hindsight: auto-retain succeeded", {
 					sessionId: this.sessionId,
