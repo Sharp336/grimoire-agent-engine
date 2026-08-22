@@ -5,6 +5,99 @@
 ### Added
 
 - `lsp diagnostics file: "*"` now covers Dart and Flutter projects via `dart analyze`.
+- Added `/shake thinking` to remove model reasoning blocks from session history
+- Added icon support to slash command autocomplete, with unique visuals for actions, files, settings, and other command types
+- Slash-command autocomplete now ranks equally matching commands by how often you use them; usage counts persist across sessions in agent.db
+- Edit tool payloads now accept `＋`-prefixed add lines to insert whole lines in place (consecutive `＋` lines insert together, both marker indent styles supported), and the prompt documents multi-line inline selections for contained restructures.
+- Edit tool now recovers common payload dialect slips instead of erroring: selections trailing their retyped line, elided unchanged lines in inline operations, guillemets used as brackets around old/new blocks, a stray trailing rewrite separator, rewrites written as replacement-directive lists, and apply-patch sentinels mixed into payloads.
+- Edit tool now defers ambiguous operations and resolves them against sibling operations' claimed spans, merges a pure deletion with a contained sibling rewrite into one union replace, reads a bare *** line as the rewrite separator, and strips split envelope sentinels plus decoding noise between an End sentinel and the next Begin.
+- Edit tool moves are now taught as delete-plus-restate; the register re-emit idiom left the prompt and constrained-decoding grammar (the engine still applies it), after benchmarks showed models inventing conflicting semantics for it.
+- Edit tool now reads a bare selection in a rewrite-less operation as the desired text: the current span is captured in place and replaced, keeping boundary whitespace outside the replacement.
+- Added an experimental `mono` edit variant: header-less `§relative/path` operation openers (bare `§` continues in the same file), inline-only changes, a real transpiler front-end, and dialect-voiced errors so retry guidance is always expressible under the mono grammar. Benchmarks with the corrected error surface still favor keeping the block form.
+- Edit tool now accepts the pretrained diff schema wherever models emit it: unified-diff-shaped operations (`@@` hunks, `-`/`+` runs, context lines) apply as inline changes, an added line that is a near-variant of its anchor replaces it instead of duplicating it.
+- Added an experimental `wdiff` edit variant speaking git word-diff (`@@ path` operation headers, `[-old-]{+new+}` inline changes, line-diff runs, `...` skips); benchmarks show block-instinct models roughly double their first-try edit success on it versus the inline-only mono dialect.
+- Edit tool now collapses back-to-back duplicate blocks when a payload states the desired text once, drops overlapping fuzzy-match artifacts of the same operation, and removes a dangling blank line left directly above a closing delimiter after a block deletion.
+- Edit tool now resolves delimiter-garbled punctuation selections against the file, rejects matches that would rewrite part of a longer punctuation run, treats candidates with whitespace-equivalent outcomes as unambiguous, recovers a dropped seam between a selection and its following text, and cleans blank lines left beside opening or closing delimiters after deletions.
+
+### Changed
+
+- Switched fallback edit mode from replace to sloppy for models that do not support hashline
+- Autocomplete dropdown now shows up to 10 rows by default (was 5), clamped to the terminal height (`autocompleteMaxVisible` setting)
+- Long slash-command descriptions now truncate to two rows with an ellipsis in the autocomplete popup instead of wrapping in full
+- Sloppy edits now treat all authored whitespace as verbatim and require explicit `»` or `⟪⟫` markers for all operations, forbidding marker-less changes.
+
+### Removed
+
+- Removed the experimental `wdiff` edit variant (git word-diff surface); `sloppy` is the single sparse-edit dialect.
+- Removed the experimental `mono` edit variant: its syntax and recoveries are now native to `sloppy`, which teaches `§relative/path` operation openers (bare `§` continues in the same file, `§*` for every match) instead of separate header lines, voices errors in the same vocabulary, and applies marker-less operations as desired text when the delta is punctuation-level or collapses an adjacent duplicate. Legacy bracket headers and guillemet openers remain accepted.
+
+### Fixed
+
+- Code blocks now syntax-highlight live while the response streams instead of staying plain until the block settles
+- Fixed `/shake thinking` reporting "Nothing to shake" after removing reasoning; it now reports the dropped count and leaves thinking-only turns empty.
+- Fixed session teardown occasionally losing pending input drafts during shutdown
+- Fixed streaming edit failures caused by trailing partial lines
+- Interrupting a Claude model mid-thinking no longer replays the partial reasoning as quoted conversation text on the next turn, which Anthropic's `reasoning_extraction` classifier refused.
+- Sloppy edit `＋` inserts before an anchor line no longer double their typed indentation or flatten the anchor.
+- Session restore no longer re-runs the edit-matching engine for every historical edit in the transcript; large sessions with many edits resume several times faster.
+- Fixed image requests to Kimi Code / Moonshot failing with 400 `unsupported image url`: their catalog api is openai-completions so the image URL mirror gate wrongly admitted them; Moonshot-native hosts now always receive inline base64 images.
+- Fixed Read failing with `unable to open database file` for cleanly closed WAL-mode SQLite databases without `-wal`/`-shm` sidecars.
+- Fixed collapsed edit results with long wrapped diff lines growing beyond their rendered-row budget and corrupting native Windows terminal transcript layout ([#9302](https://github.com/can1357/oh-my-pi/issues/9302)).
+- Fixed edit tool section header paths not trimming surrounding whitespace, so a header with padded brackets failed with file-not-found.
+- Fixed transcript content disappearing from terminal scrollback below a live hub-wait/todo/jobs card: the card's viewport pin froze scrollback commits at its own rows, so everything the turn streamed below it scrolled off-screen without ever entering terminal history (and was lost for good when the session exited first). A displaceable card with content below it no longer holds the commit ceiling; its rows commit as they scroll off and the card seals in place, so the next poll stacks a fresh card instead of retracting history.
+- Fixed the composer attachment chip thumbnail showing an empty box for pasted images: the paste pipeline re-encodes images as JPEG/WebP, and transmitting those bytes as Kitty PNG data made the terminal reject them (blank placeholder cells). Non-PNG attachments now convert to PNG before the thumbnail transmit, like transcript images.
+- Added an immediately editable startup composer for plain interactive launches; drafts typed while session initialization runs transfer intact into the full UI.
+
+## [17.4.4] - 2026-08-22
+
+### Added
+
+- Added the `tui.resizeScrollback` setting (default `append`) controlling how a settled width resize refreshes pane scrollback when the terminal repaints in place (tmux/screen/Zellij panes, in-place direct terminals). Multiplexers rewrap old output naively on width changes, leaving history hard-broken at the old width; `append` re-emits the transcript at the new width below it (one fresh copy per settled resize), `rebuild` clears pane history first so it holds exactly one current-width copy (needs a host that honors ED3, like tmux; erases pre-session scrollback), and `preserve` keeps the old-width history untouched with zero growth ([#8193](https://github.com/can1357/oh-my-pi/issues/8193)).
+
+### Fixed
+
+- Fixed the composer image chip painting its right border inside the card and mangling the thumbnail's first row: the Kitty placement prefix was counted as visible width, breaking the thumbnail centering.
+- Fixed edit-tool whole-line inserts (an insert selection alone on its own line) splicing into the anchor line instead of landing on a new line when the anchor was the last matched line, preceded a blank line, or sat at EOF.
+- Edit tool prompt now documents whole-line insert selections and that a REWRITE `…` with no captured MATCH gap is written to the file literally.
+- Fixed multiplexer width resizes (tmux/screen/Zellij/cmux/Herdr panes) replaying the entire transcript into pane history — one duplicated transcript copy and seconds of visible scrolling per width change. The width-epoch boundary now resolves for real transcripts: finalized blocks without `getTranscriptBlockVersion` are treated as immutable per the documented contract, Container-derived blocks without a nested epoch source fall back to whole-segment stability instead of failing, and bash/eval/tool/read-group blocks report a block version for their genuine post-finalize mutations. The interactive resize listener no longer marks every SIGWINCH as "render pending", which forced the conservative replay-from-row-zero fallback on every settled resize ([#8193](https://github.com/can1357/oh-my-pi/issues/8193), [#7026](https://github.com/can1357/oh-my-pi/issues/7026)).
+- Edit tool prompt now documents whole-line insert selections, steers multi-line edits toward inline selections instead of block rewrites that retype unchanged lines, and warns that a REWRITE gap with nothing captured in MATCH is written to the file literally.
+
+## [17.4.3] - 2026-08-21
+
+### Fixed
+
+- Fixed the edit tool rejecting payloads containing a glued `«»` line: after MATCH it now reads as the mistyped `»` separator, elsewhere as a stray terminator to drop.
+
+## [17.4.2] - 2026-08-21
+
+### Added
+
+- Added an opt-in image URL broker (`images.urls.enabled`) that publishes outgoing images through an ordered chain of backends instead of sending inline base64 to URL-fetching providers
+- Composer attachment chips (ported from omp2): pasted images and large text pastes stage as rounded preview cards above the prompt — image cards show a live thumbnail (Kitty Unicode placeholders) with pixel dimensions, text cards a snippet with `+N lines`/`N chars` — while the editor buffer holds a compact `<icon> #N` token in the card's identity color.
+
+### Changed
+
+- Pasted images now insert only the `[Image #N, WxH]` marker; the redundant trailing `attachment://N` URI is no longer added to the composer.
+- Added a consolidated CLI reference (`docs/cli-reference.md`) documenting every top-level subcommand and launch flag, including headless print mode (`--print`/`-p`, `--print-thoughts`) ([#9252](https://github.com/can1357/oh-my-pi/issues/9252))
+
+### Fixed
+
+- Fixed unreadable colors in macOS Terminal.app by using its supported 256-color mode ([#9162](https://github.com/can1357/oh-my-pi/issues/9162)).
+- Fixed Esc after a fast `/mcp test` result aborting the active agent turn instead of consuming the advertised cancellation input ([#9173](https://github.com/can1357/oh-my-pi/issues/9173)).
+- Fixed task spawns crashing when legacy boolean per-agent prewalk or advisor overrides are present in `config.yml`.
+- Fixed ACP `session/prompt` requests hanging forever when a builtin slash command's residual prompt (e.g. `/force:<tool> /some-command`) resolved locally, which also wedged all subsequent prompts on the session ([#9206](https://github.com/can1357/oh-my-pi/issues/9206)).
+- Fixed eval-spawned subagent output being omitted from per-turn output-token budgets, including failed and isolated runs ([#9187](https://github.com/can1357/oh-my-pi/issues/9187)).
+- Fixed `/compact` over RPC blocking the serialized command queue for the full summarization round-trip, so a follow-up `abort` could not interrupt it ([#9200](https://github.com/can1357/oh-my-pi/issues/9200)).
+- Fixed RPC UI select requests dropping option descriptions, allowing hosts to render described choices ([#9175](https://github.com/can1357/oh-my-pi/issues/9175)).
+- Fixed `/todo edit` failing with "Could not parse Markdown" when checklist items had backslash-escaped brackets (`- \[x\]`), which editors and markdown renderers commonly emit ([#9188](https://github.com/can1357/oh-my-pi/issues/9188)).
+- Fixed `omp setup --check`/`--json` with no component printing usage text to stdout and exiting 0; it now errors on stderr and exits non-zero so scripted JSON health checks fail loudly ([#9221](https://github.com/can1357/oh-my-pi/issues/9221)).
+- Fixed an aggressive `task.maxRuntimeMs` mislabeling committed subagent outcomes: a budget-killed run is no longer reported as a runtime-limit timeout, and a subagent that yielded a complete result before the deadline is no longer reported as aborted when teardown crosses the deadline ([#9191](https://github.com/can1357/oh-my-pi/issues/9191)).
+- Fixed startup fallback-chain warnings for discovered OpenCode Zen, OpenCode Go, and GitHub Copilot models cached under credential-scoped IDs ([#9205](https://github.com/can1357/oh-my-pi/issues/9205)).
+- Fixed interactive `/models` and Ctrl+P cycling omitting an `enabledModels`/`--models` model discovered by a background provider refresh (e.g. `opencode-go/ox-alpha-free`) after startup, by rebuilding the scoped list once discovery completes ([#9220](https://github.com/can1357/oh-my-pi/issues/9220)).
+- Documented how to enable, trigger, target, and manually re-arm prewalk ([#9179](https://github.com/can1357/oh-my-pi/issues/9179)).
+- Pasted images and large text pastes appear in the composer as compact icon tokens instead of bracketed markers; the bracketed form remains the outgoing/stored format, and the transcript renders it back as the compact chip.
+- Deleting an attachment's inline token now removes the attachment from the submission (surviving image markers are renumbered).
+- Restored prompts (esc-esc, `/tree`, branch, queued-message dequeue, failed-submit recovery) collapse image markers back into clickable atomic chip tokens and re-materialize their file links instead of degrading to dead text.
 
 ## [17.4.1] - 2026-08-21
 

@@ -46,6 +46,7 @@ const SLASH_COMMAND_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	minPrimaryColumnWidth: 12,
 	maxPrimaryColumnWidth: 32,
 	wrapDescription: true,
+	maxDescriptionRows: 2,
 	overflowSearch: false,
 };
 
@@ -477,12 +478,17 @@ export class Editor implements Component, Focusable {
 	#autocompleteState: "regular" | "force" | null = null;
 	#autocompletePrefix: string = "";
 	#autocompleteRequestId: number = 0;
-	#autocompleteMaxVisible: number = 5;
+	#autocompleteMaxVisible: number = 10;
 	onAutocompleteUpdate?: () => void;
+	/** Terminal height source for clamping the autocomplete dropdown. Hosts wire this to their Terminal's rows. */
+	viewportRowsProvider?: () => number;
 
 	// Paste tracking for large pastes
 	#pastes: Map<number, string> = new Map();
 	#pasteCounter: number = 0;
+
+	// Host-registered atomic chip tokens: exact buffer label → expansion emitted on submit.
+	#atoms: Map<string, string> = new Map();
 
 	/** Optional pattern matching atomic placeholder tokens (e.g. `[Image #1, 800x600]` or
 	 *  `[Paste #2, +30 lines]`) that the editor treats as indivisible: a backspace or forward-delete
@@ -533,6 +539,11 @@ export class Editor implements Component, Focusable {
 	#borderVisible = true;
 	#borderStyle: EditorBorderStyle = "box";
 	constructor(theme: EditorTheme) {
+		this.#theme = theme;
+		this.borderColor = theme.borderColor;
+	}
+
+	setTheme(theme: EditorTheme): void {
 		this.#theme = theme;
 		this.borderColor = theme.borderColor;
 	}
@@ -655,7 +666,7 @@ export class Editor implements Component, Focusable {
 	}
 
 	setAutocompleteMaxVisible(maxVisible: number): void {
-		const newMaxVisible = Number.isFinite(maxVisible) ? Math.max(3, Math.min(20, Math.floor(maxVisible))) : 5;
+		const newMaxVisible = Number.isFinite(maxVisible) ? Math.max(3, Math.min(20, Math.floor(maxVisible))) : 10;
 		if (this.#autocompleteMaxVisible !== newMaxVisible) {
 			this.#autocompleteMaxVisible = newMaxVisible;
 			if (this.#autocompleteState !== null) {
@@ -1187,6 +1198,12 @@ export class Editor implements Component, Focusable {
 
 		// Add autocomplete list if active
 		if (this.#autocompleteState && this.#autocompleteList) {
+			// Clamp the dropdown to the terminal viewport: the editor rows already
+			// rendered above plus a small reserve must stay visible.
+			const viewportRows = this.viewportRowsProvider?.() || process.stdout.rows || Number(Bun.env.LINES) || 24;
+			this.#autocompleteList.setMaxVisible(
+				Math.max(3, Math.min(this.#autocompleteMaxVisible, viewportRows - result.length - 2)),
+			);
 			const autocompleteResult = this.#autocompleteList.render(width);
 			result.push(...autocompleteResult);
 		}
@@ -1752,13 +1769,48 @@ export class Editor implements Component, Focusable {
 		return this.getText() === value;
 	}
 
+	/** Expand collapsed markers — `[Paste #N]` tokens and registered atom labels — into their
+	 *  stored content. Single pass so replaced content is never rescanned (a pasted body that
+	 *  happens to contain another token's label must survive verbatim). Longer atom labels are
+	 *  tried first so `#1` never shadows `#10`. */
 	#expandPasteMarkers(text: string): string {
-		let result = text;
-		for (const [pasteId, pasteContent] of this.#pastes) {
-			const markerRegex = new RegExp(`\\[Paste #${pasteId}(?:, (?:\\+\\d+ lines|\\d+ chars))?\\]`, "g");
-			result = result.replace(markerRegex, () => pasteContent);
+		const sources: string[] = [];
+		for (const pasteId of this.#pastes.keys()) {
+			sources.push(`\\[Paste #${pasteId}(?:, (?:\\+\\d+ lines|\\d+ chars))?\\]`);
 		}
-		return result;
+		const labels = [...this.#atoms.keys()].sort((a, b) => b.length - a.length);
+		for (const label of labels) sources.push(RegExp.escape(label));
+		if (sources.length === 0) return text;
+		const markerRegex = new RegExp(sources.join("|"), "g");
+		return text.replace(markerRegex, match => {
+			const paste = /^\[Paste #(\d+)/.exec(match);
+			if (paste) return this.#pastes.get(Number(paste[1])) ?? match;
+			return this.#atoms.get(match) ?? match;
+		});
+	}
+
+	/** Register `label` as a collapsed atom expanding to `expansion` on submit, without inserting
+	 *  it — for hosts that re-collapse restored draft text via {@link setText}. */
+	registerAtom(label: string, expansion: string): void {
+		this.#atoms.set(label, expansion);
+	}
+
+	/** Insert `label` (plus a trailing space) at the cursor and register it as an atom expanding
+	 *  to `expansion` on submit. Pair with {@link atomicTokenPattern} so the label deletes as a
+	 *  unit. */
+	insertAtom(label: string, expansion: string): void {
+		this.#historyIndex = -1;
+		this.#resetKillSequence();
+		this.#recordUndoState();
+		this.registerAtom(label, expansion);
+		this.#withUndoSuspended(() => {
+			this.#insertTextAtCursor(`${label} `);
+		});
+	}
+
+	/** Drop every registered atom expansion (draft cleared or replaced by the host). */
+	clearAtoms(): void {
+		this.#atoms.clear();
 	}
 
 	/**
@@ -2213,6 +2265,7 @@ export class Editor implements Component, Focusable {
 		this.#state = { lines: [""], cursorLine: 0, cursorCol: 0 };
 		this.#pastes.clear();
 		this.#pasteCounter = 0;
+		this.#atoms.clear();
 		this.#historyIndex = -1;
 		this.#scrollOffset = 0;
 		this.#undoStack.length = 0;

@@ -2,6 +2,38 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added icon support to autocomplete and select lists, with customizable theming
+- `MarkdownTheme.createHighlightStream` lets themes supply a stateful incremental highlighter; streaming Markdown now syntax-highlights the completed lines of any open code fence (previously only diff/patch fences), and a fence highlights whole-block as soon as it closes
+- `SelectList` layouts accept `maxDescriptionRows` to cap wrapped descriptions with a trailing ellipsis
+- `CombinedAutocompleteProvider` accepts a `commandUsage` callback that ranks equal-score slash matches by usage frequency
+- `Editor.viewportRowsProvider` lets hosts clamp the autocomplete dropdown to the live terminal height
+
+### Changed
+
+- Increased default autocomplete dropdown height from 5 to 10 items
+- Changed the test `VirtualTerminal` engine from ghostty-web to `kitty-vt-wasm` (kitty's real screen.c/vt-parser.c). Retires the ghostty-web 0.4 crash workarounds (combining-mark input stripping, event-log replay/compaction, allocator-exhaustion engine rotation, full-clear ED3 recreate), gives the render-stress oracles exact default-color detection from typed cell snapshots, and lets full-clear/ED3 repaints exercise the engine natively instead of being masked by an engine recreate.
+- Added `Editor.setTheme()` so an adopted editor can switch from its lightweight startup theme to the configured interactive theme without replacing the editor or losing its draft.
+
+## [17.4.4] - 2026-08-22
+
+### Added
+
+- Added `setResizeScrollback()` / `ResizeScrollbackMode` (`PI_TUI_RESIZE_SCROLLBACK` env initializer) controlling what a settled in-place width resize does to native scrollback, which the host rewraps naively at the old width: `append` replays the transcript at the settled width below the old-wrap history, `rebuild` clears pane history first (ED3) so it holds exactly one current-width copy, and `preserve` repaints the viewport only with zero history growth. The raw engine defaults to `preserve`; the coding agent's `tui.resizeScrollback` setting (default `append`) governs interactive sessions.
+
+### Fixed
+
+- `visibleWidth` now measures APC sequences (Kitty graphics commands, cursor markers) as zero cells instead of counting their payload as printable text, matching the native width engine.
+- Kitty Unicode-placeholder rows with long styled prefixes (e.g. bordered thumbnail cards) are recognized as image lines again, keeping them on the verbatim render path instead of SGR coalescing/truncation.
+- Fixed multiplexer width-epoch resolution failing for every real component tree, which forced the conservative full-transcript replay (and one duplicated transcript copy in pane history) on every settled width resize: leading children without a width-epoch revision are no longer validated by width-dependent row counts (reflow is not mutation — identity plus the revision, when reported, is the stability proof), and `Markdown` now reports a width-independent mutation revision so it can sit above an epoch source ([#8193](https://github.com/can1357/oh-my-pi/issues/8193), [#7026](https://github.com/can1357/oh-my-pi/issues/7026)).
+
+## [17.4.2] - 2026-08-21
+
+### Added
+
+- Editor atom table: `insertAtom`/`registerAtom` stage compact atomic tokens whose registered expansion is emitted on submit (`getExpandedText`), alongside the existing paste-marker store.
+
 ## [17.4.1] - 2026-08-21
 
 ### Added

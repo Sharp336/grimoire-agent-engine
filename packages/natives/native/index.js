@@ -20,6 +20,7 @@ export const AudioCapture = nativeBindings.AudioCapture;
 export const AudioPlayback = nativeBindings.AudioPlayback;
 export const DesktopSession = nativeBindings.DesktopSession;
 export const FileLock = nativeBindings.FileLock;
+export const HighlightStream = nativeBindings.HighlightStream;
 export const LiveWebRtcPeer = nativeBindings.LiveWebRtcPeer;
 export const MacAppearanceObserver = nativeBindings.MacAppearanceObserver;
 export const MacOSPowerAssertion = nativeBindings.MacOSPowerAssertion;
@@ -29,7 +30,7 @@ export const Shell = nativeBindings.Shell;
 
 // functions
 export const __ompInstallTokioRuntime = nativeBindings.__ompInstallTokioRuntime;
-export const __piNativesV17_4_1 = nativeBindings.__piNativesV17_4_1;
+export const __piNativesV17_4_4 = nativeBindings.__piNativesV17_4_4;
 export const astEdit = nativeBindings.astEdit;
 export const astGrep = nativeBindings.astGrep;
 export const astMatch = nativeBindings.astMatch;
