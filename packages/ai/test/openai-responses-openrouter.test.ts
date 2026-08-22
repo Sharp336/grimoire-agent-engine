@@ -213,6 +213,7 @@ describe("OpenRouter pseudo API dual-surface request parity", () => {
 			stream: true,
 			stream_options: { include_usage: true },
 			store: false,
+			session_id: "workflow-123",
 			reasoning: { effort: "high" },
 			provider: routing,
 		});
@@ -261,6 +262,7 @@ describe("OpenRouter pseudo API dual-surface request parity", () => {
 			stream: true,
 			stream_options: { include_usage: true },
 			store: false,
+			session_id: "workflow-456",
 			reasoning: { effort: "high" },
 			provider: routing,
 		});
