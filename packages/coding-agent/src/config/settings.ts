@@ -1689,6 +1689,12 @@ export class Settings {
 	}
 
 	/** Apply schema migrations to raw settings */
+	#dropLegacyNativeKeys(target: RawSettings, path: string): void {
+		if (path === "steeringMode") {
+			delete target.queueMode;
+		}
+	}
+
 	#migrateRawSettings(raw: RawSettings, captureLegacyChangelogVersion = true): RawSettings {
 		// queueMode -> steeringMode
 		if ("queueMode" in raw && !("steeringMode" in raw)) {
@@ -2581,6 +2587,7 @@ export class Settings {
 					} else {
 						setByPath(projectSettings, segments, value);
 					}
+					this.#dropLegacyNativeKeys(projectSettings, modifiedPath);
 				}
 				for (const role of modifiedModelRoles) {
 					if (Object.hasOwn(projectRolesAtStart, role)) {
@@ -2604,6 +2611,7 @@ export class Settings {
 					} else {
 						setByPath(projectSettings, segments, value);
 					}
+					this.#dropLegacyNativeKeys(projectSettings, pendingPath);
 				}
 				const latestProjectRoles = this.#rawModelRolesFromLayer(this.#projectFileSettings);
 				for (const role of this.#modifiedProjectModelRoles) {
