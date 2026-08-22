@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added support for the `deepseek-v4-flash-vision-exp` model (DeepSeek's multimodal vision SKU).
+
 ## [17.4.2] - 2026-08-21
 
 ### Added
@@ -17,7 +21,6 @@
 ### Added
 
 - Added helper functions and constants for reading enterprise ChatGPT workspace data-residency regions from Codex OAuth access tokens and forwarding the residency header to Codex backend endpoints.
-- Added support for the `deepseek-v4-flash-vision-exp` model (DeepSeek's multimodal vision SKU).
 
 ### Changed
 
