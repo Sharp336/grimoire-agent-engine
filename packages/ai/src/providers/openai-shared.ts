@@ -2667,6 +2667,32 @@ function getOpenAIResponsesTerminalEvent(event: ResponseStreamEvent): OpenAIResp
 		: undefined;
 }
 
+const FENCED_THINKING_RESPONSE = /^```html[ \t]*\r?\n<(thinking|think)>\r?\n?([\s\S]*?)<\/\1>([\s\S]*)\r?\n```[ \t]*$/u;
+
+/**
+ * Recover a rare OpenAI-compatible failure where the model puts leaked
+ * thinking and its entire Markdown answer inside one `html` fence. The normal
+ * stream healer correctly ignores thinking tags inside code, so repair only
+ * this exact whole-response envelope after the terminal event: the outer fence
+ * disappears, inner answer fences keep their original meaning, and unsigned
+ * reasoning returns to a thinking block instead of conversation text.
+ */
+function repairFencedThinkingResponse(output: AssistantMessage): void {
+	for (let index = 0; index < output.content.length; index++) {
+		const block = output.content[index];
+		if (block?.type !== "text") continue;
+		const match = FENCED_THINKING_RESPONSE.exec(block.text);
+		if (!match) continue;
+		const thinking = match[2]!.trim();
+		const visibleText = match[3]!.replace(/^\r?\n/u, "");
+		const replacement: Array<ThinkingContent | TextContent> = [];
+		if (thinking) replacement.push({ type: "thinking", thinking });
+		replacement.push({ ...block, text: visibleText });
+		output.content.splice(index, 1, ...replacement);
+		index += replacement.length - 1;
+	}
+}
+
 export interface ProcessResponsesStreamOptions {
 	onFirstToken?: () => void;
 	onOutputItemDone?: (item: ResponseOutputItem) => void;
@@ -3300,7 +3326,13 @@ export async function processResponsesStream<TApi extends Api>(
 				(response as { end_turn?: boolean } | undefined)?.end_turn,
 				shouldPromoteIncompleteToolUse,
 			);
-			// A completed provider-hosted web search that yielded no visible answer
+			if (
+				model.compat !== undefined &&
+				"streamMarkupHealingPattern" in model.compat &&
+				model.compat.streamMarkupHealingPattern === "thinking"
+			) {
+				repairFencedThinkingResponse(output);
+			}
 			// (no text, image, or client tool call) is progress, not a dead end:
 			// pause the turn so the agent loop re-samples with the search results
 			// instead of silently ending. Reasoning/native output items are preserved

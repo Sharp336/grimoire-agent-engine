@@ -28,6 +28,21 @@ function makeModel(): Model<"openai-responses"> {
 	});
 }
 
+function makeOpenRouterHealingModel(): Model<"openai-responses"> {
+	return buildModel({
+		api: "openai-responses",
+		name: "Ox Alpha",
+		id: "stealth/ox-alpha",
+		provider: "openrouter",
+		baseUrl: "https://openrouter.ai/api/v1",
+		contextWindow: 1_048_576,
+		maxTokens: 131_072,
+		input: ["text"],
+		reasoning: true,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	});
+}
+
 function makeOutput(): AssistantMessage {
 	return {
 		role: "assistant",
@@ -118,6 +133,73 @@ describe("processResponsesStream: terminal events", () => {
 		expect(output.usage.output).toBe(9);
 		expect(output.usage.totalTokens).toBe(16);
 		expect(output.content).toEqual([expect.objectContaining({ type: "text", text: "Hello, trunc" })]);
+	});
+
+	test("unwraps a whole-response HTML fence around leaked thinking", async () => {
+		const output = makeOutput();
+		const stream = { push: () => {}, end: () => {} } as never;
+		const malformed = [
+			"```html",
+			"<thinking>",
+			"Assessing production constraints",
+			"</thinking>Visible answer.",
+			"",
+			"```",
+			"step one",
+			"step two",
+			"```",
+			"",
+			"Final paragraph.",
+			"```",
+		].join("\n");
+
+		await processResponsesStream(
+			makeStream([
+				{
+					type: "response.output_item.added",
+					output_index: 0,
+					item: { type: "message", id: "msg_wrapped", role: "assistant", status: "in_progress", content: [] },
+				},
+				{
+					type: "response.content_part.added",
+					output_index: 0,
+					item_id: "msg_wrapped",
+					part: { type: "output_text", text: "", annotations: [] },
+				},
+				{
+					type: "response.output_text.delta",
+					output_index: 0,
+					item_id: "msg_wrapped",
+					delta: malformed,
+				},
+				{
+					type: "response.output_item.done",
+					output_index: 0,
+					item: {
+						type: "message",
+						id: "msg_wrapped",
+						role: "assistant",
+						status: "completed",
+						content: [{ type: "output_text", text: malformed, annotations: [] }],
+					},
+				},
+				{
+					type: "response.completed",
+					response: { id: "resp_wrapped", status: "completed" },
+				},
+			]),
+			output,
+			stream,
+			makeOpenRouterHealingModel(),
+		);
+
+		expect(output.content).toEqual([
+			{ type: "thinking", thinking: "Assessing production constraints" },
+			expect.objectContaining({
+				type: "text",
+				text: "Visible answer.\n\n```\nstep one\nstep two\n```\n\nFinal paragraph.",
+			}),
+		]);
 	});
 
 	test("promotes max-output incomplete function calls with strict-complete arguments", async () => {

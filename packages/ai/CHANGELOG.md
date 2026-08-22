@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Recovered OpenAI-compatible Responses turns that wrap leaked thinking and the entire Markdown answer in one HTML fence, restoring the thinking block and preserving the answer's intended inner code fences.
+
 ## [18.0.0] - 2026-08-22
 
 ### Added
