@@ -1259,6 +1259,31 @@ export const SETTINGS_SCHEMA = {
 			],
 		},
 	},
+	"tui.rewindScrollback": {
+		type: "enum",
+		values: ["replay", "preserve"] as const,
+		default: "replay",
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Rewind Scrollback",
+			description:
+				"How Esc-Esc and /tree history rewinds refresh terminal scrollback when the dropped tail already reached it. These modes decide whether the transcript replays after a rewind cuts into committed history.",
+			options: [
+				{
+					value: "replay",
+					label: "Replay",
+					description: "Clear scrollback and re-render the transcript when a rewind cuts into committed history",
+				},
+				{
+					value: "preserve",
+					label: "Preserve",
+					description:
+						"Drop the rewound tail in place and leave already-committed rows untouched in scrollback — stale tail rows remain above the cut, but nothing replays",
+				},
+			],
+		},
+	},
 
 	"display.shimmer": {
 		type: "enum",

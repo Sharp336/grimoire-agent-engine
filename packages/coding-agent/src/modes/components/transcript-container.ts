@@ -418,6 +418,27 @@ export class TranscriptContainer
 	}
 
 	/**
+	 * Local frame row (this container's own render coordinate space) where
+	 * `component`'s segment begins — the row its leading separator would
+	 * occupy when present, otherwise its first content row. Equivalently:
+	 * the exact row count this container renders to once `component` and
+	 * every later child are removed, since the container never emits a
+	 * trailing separator after its last surviving block. Preserve-mode
+	 * rewind (`UiHelpers.truncateTranscriptFromMessage`) translates this
+	 * into the TUI's absolute frame row (`TUI.getComponentFrameRow`) to
+	 * declare the amputation boundary via `TUI.amputateCommittedTail`.
+	 * Undefined when `component` has no current segment (never rendered, or
+	 * a stale reference).
+	 */
+	getBlockStartRow(component: Component): number | undefined {
+		for (const segment of this.#segments) {
+			if (segment.component !== component) continue;
+			return segment.startRow;
+		}
+		return undefined;
+	}
+
+	/**
 	 * Whether `component` is inside the live (repaintable) region exactly as
 	 * {@link render} computes it: at/after the first still-mutating block, or
 	 * the transcript tail when every block has finalized. Self-animating

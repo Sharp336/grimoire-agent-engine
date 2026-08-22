@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `tui.rewindScrollback` setting (default `replay`) controlling whether an Esc-Esc or `/tree` history rewind that cuts into already-committed terminal scrollback clears and replays the transcript. `preserve` drops the rewound tail in place instead, leaving stale rows above the cut in scrollback but never replaying.
+
 ## [18.0.0] - 2026-08-22
 
 ### Added

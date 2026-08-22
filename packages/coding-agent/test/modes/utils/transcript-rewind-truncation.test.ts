@@ -5,10 +5,10 @@
  * scrollback (committed rows are immutable tape). Covers the fast-path gates
  * in UiHelpers.truncateTranscriptFromMessage.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
@@ -80,6 +80,16 @@ function createHarness() {
 		buildTranscriptSessionContext: () => ({ messages: remainingMessages }),
 	};
 
+	const ui = {
+		requestRender: vi.fn(),
+		// Fake harness treats `chat` as sitting at TUI frame offset 0 — the real
+		// TUI.getComponentFrameRow/amputateCommittedTail are covered by the tui
+		// package's own tests; this exercises only the wiring/gating contract.
+		getComponentFrameRow: vi.fn((component: unknown, localRow: number) =>
+			component === chat ? localRow : undefined,
+		),
+		amputateCommittedTail: vi.fn(() => true),
+	};
 	const ctx = {
 		initialChatRendered: true,
 		focusedAgentId: undefined,
@@ -92,7 +102,7 @@ function createHarness() {
 		lastAssistantUsage: undefined,
 		statusLine: { invalidate: vi.fn() },
 		updateEditorBorderColor: vi.fn(),
-		ui: { requestRender: vi.fn() },
+		ui,
 	} as unknown as InteractiveModeContext;
 
 	return {
@@ -162,5 +172,56 @@ describe("UiHelpers.truncateTranscriptFromMessage", () => {
 		pending.ctx.pendingTools.set("call-1", {} as never);
 		expect(pending.helpers.truncateTranscriptFromMessage(pending.messages.user2)).toBe(false);
 		expect(pending.chat.children).toHaveLength(4);
+	});
+
+	it("preserve mode amputates the committed tail in place instead of falling back", () => {
+		const { ctx, chat, blocks, messages, helpers } = createHarness();
+		settings.set("tui.rewindScrollback", "preserve");
+		chat.render(40);
+		// Commit through user-2's row: the boundary block is now immutable tape.
+		chat.setNativeScrollbackCommittedRows(5);
+		const renderSpy2 = vi.spyOn(blocks[2]!, "render");
+
+		expect(helpers.truncateTranscriptFromMessage(messages.user2)).toBe(true);
+
+		// Amputation targeted user-2's own segment boundary — row 3 (user-1,
+		// blank, assistant-1), never the pre-cut committed rows.
+		expect(ctx.ui.getComponentFrameRow).toHaveBeenCalledWith(chat, 3);
+		expect(ctx.ui.amputateCommittedTail).toHaveBeenCalledWith(3);
+		expect(chat.children).toEqual([blocks[0]!, blocks[1]!]);
+		expect(blocks[2]!.disposed).toBe(true);
+		expect(blocks[3]!.disposed).toBe(true);
+		// Surviving components are neither disposed nor re-rendered from scratch.
+		expect(blocks[0]!.disposed).toBe(false);
+		expect(blocks[1]!.disposed).toBe(false);
+		expect(renderSpy2).not.toHaveBeenCalled();
+		expect(ctx.ui.requestRender).toHaveBeenCalled();
+	});
+
+	it("preserve mode still falls back when the engine refuses amputation (unresolved coordinate state)", () => {
+		const { ctx, chat, blocks, messages, helpers } = createHarness();
+		settings.set("tui.rewindScrollback", "preserve");
+		chat.render(40);
+		chat.setNativeScrollbackCommittedRows(5);
+		(ctx.ui.amputateCommittedTail as Mock<(frameRow: number) => boolean>).mockReturnValue(false);
+
+		expect(helpers.truncateTranscriptFromMessage(messages.user2)).toBe(false);
+
+		expect(chat.children).toHaveLength(4);
+		expect(blocks[2]!.disposed).toBe(false);
+	});
+
+	it("preserve mode never attempts amputation when the session was not actually rewound", () => {
+		const { ctx, chat, blocks, messages, remainingMessages, helpers } = createHarness();
+		settings.set("tui.rewindScrollback", "preserve");
+		chat.render(40);
+		chat.setNativeScrollbackCommittedRows(5);
+		remainingMessages.push(messages.user2, messages.assistant2);
+
+		expect(helpers.truncateTranscriptFromMessage(messages.user2)).toBe(false);
+
+		expect(ctx.ui.amputateCommittedTail).not.toHaveBeenCalled();
+		expect(chat.children).toHaveLength(4);
+		expect(blocks[2]!.disposed).toBe(false);
 	});
 });

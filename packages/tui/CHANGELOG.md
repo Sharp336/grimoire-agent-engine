@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `TUI.amputateCommittedTail()` and `TUI.getComponentFrameRow()`: a history-rewind caller can now disown already-committed frame rows in place — declaring a boundary below which the tape is abandoned rather than reconciled — so a rewind that cuts into native scrollback no longer forces a clear-and-replay of the whole transcript. Refuses (falls back to the caller's replay path) during an unresolved width epoch, a live resize, or a visible overlay.
+
 ## [18.0.0] - 2026-08-22
 
 ### Breaking Changes

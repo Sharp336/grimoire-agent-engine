@@ -739,9 +739,15 @@ export class UiHelpers {
 	 * Fast-path history rewind (esc-esc branch, /tree rewind to an ancestor):
 	 * drop the rendered components at/after `message` in place instead of the
 	 * destructive clear-scrollback replay. Rows already committed to native
-	 * scrollback are immutable, so the drop is expressible only while every
-	 * affected block is still wholly inside the visible window; returns false
-	 * when the caller must fall back to
+	 * scrollback are immutable to the render engine's ordinary diffing, so by
+	 * default the drop is expressible only while every affected block is
+	 * still wholly inside the visible window. `tui.rewindScrollback:
+	 * "preserve"` widens that: a dropped block with committed rows first asks
+	 * `TUI.amputateCommittedTail` to disown those rows from the tape in
+	 * place — no replay, stale tail rows left above the cut — and only falls
+	 * back to full replay when the engine's own coordinate state (an
+	 * unresolved width epoch, a visible overlay) makes that unsafe. Returns
+	 * false when the caller must fall back to
 	 * `renderInitialMessages({ clearTerminalHistory: true })`.
 	 *
 	 * Callers must have already rewound the session so that `message` and
@@ -763,12 +769,19 @@ export class UiHelpers {
 		if (!cut) return false;
 		const index = chat.children.indexOf(cut);
 		if (index < 0) return false;
-		// Every dropped block must still be uncommitted: removing rows already on
-		// the tape is an interior deletion of committed history the render engine
-		// cannot express (see TranscriptContainer.isBlockUncommitted).
+		// A dropped block with committed rows is an interior deletion of
+		// committed history ordinary diffing cannot express (see
+		// TranscriptContainer.isBlockUncommitted) — replay unless preserve mode
+		// can amputate the tape in place instead (checked below, after the
+		// ground-truth gate).
+		let committedTailDropped = false;
 		for (let i = index; i < chat.children.length; i++) {
-			if (!chat.isBlockUncommitted(chat.children[i]!)) return false;
+			if (!chat.isBlockUncommitted(chat.children[i]!)) {
+				committedTailDropped = true;
+				break;
+			}
 		}
+		if (committedTailDropped && settings.get("tui.rewindScrollback") !== "preserve") return false;
 		// Ground truth for the surviving prefix. The cut message still present
 		// means the session was not actually rewound past it — bail before
 		// mutating anything.
@@ -777,6 +790,13 @@ export class UiHelpers {
 		});
 		for (const remaining of context.messages) {
 			if (remaining === message) return false;
+		}
+		if (committedTailDropped) {
+			const localRow = chat.getBlockStartRow(cut);
+			if (localRow === undefined) return false;
+			const frameRow = this.ctx.ui.getComponentFrameRow(chat, localRow);
+			if (frameRow === undefined) return false;
+			if (!this.ctx.ui.amputateCommittedTail(frameRow)) return false;
 		}
 		const dropped = chat.children.slice(index);
 		for (let i = dropped.length - 1; i >= 0; i--) {
