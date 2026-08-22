@@ -7,7 +7,12 @@ import { isEexist, isEnoent, logger, postmortem, procmgr, sanitizeText, setProce
 import { PROGRESS_BATCH_INTERVAL_MS, type ProgressBatch, ProgressBatcher } from "../async/progress-batcher";
 import { ProgressLines } from "../async/progress-lines";
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
-import { mergeProgressPreviews, type ProgressPreview, ProgressPreviewAccumulator } from "../session/progress-preview";
+import {
+	flattenPreviewText,
+	mergeProgressPreviews,
+	type ProgressPreview,
+	ProgressPreviewAccumulator,
+} from "../session/progress-preview";
 import {
 	OutputSink,
 	truncateHead,
@@ -1053,7 +1058,7 @@ class DaemonBroker {
 		const daemon = this.#records.get(registration.name)?.snapshot;
 		if (!daemon) return;
 		const preview = batch.kind === "artifact-only" ? undefined : batch.values[0]?.preview;
-		const text = preview?.text ?? `${preview?.head ?? ""}${preview?.tail ?? ""}`;
+		const text = preview ? flattenPreviewText(preview) : "";
 		await registration.artifactSink.flushArtifact();
 		const notification: DaemonOutputNotification = {
 			event: "daemon-output",
