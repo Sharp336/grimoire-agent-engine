@@ -517,6 +517,7 @@ describe("Hindsight append-mode session retention", () => {
 			config: makeConfig({ retainMode: "last-turn", retainEveryNTurns: 5, retainOverlapTurns: 0 }),
 			session: {
 				sessionId: "sess-lastturn-resume",
+				loadedUserTurnCount: 5,
 				sessionManager: {
 					getHeader: () => ({
 						type: "session",
@@ -578,5 +579,106 @@ describe("Hindsight append-mode session retention", () => {
 		await cadence;
 		expect(bodies).toHaveLength(1);
 		expect(state.lastRetainedTurn).toBe(0);
+	});
+
+	it("does not re-retain a resumed last-turn session that added no new turns", async () => {
+		const bodies = captureBodies();
+		const client = new HindsightApi({ baseUrl: "http://hindsight.local" });
+		const entries = [
+			userEntry("u1", null, "turn one has enough text", "2026-08-17T10:00:00.000Z"),
+			assistantEntry("a1", "u1", "reply one has enough text", "2026-08-17T10:00:01.000Z"),
+			userEntry("u2", "a1", "turn two has enough text", "2026-08-17T10:01:00.000Z"),
+			assistantEntry("a2", "u2", "reply two has enough text", "2026-08-17T10:01:01.000Z"),
+		];
+		const state = new HindsightSessionState({
+			sessionId: "sess-resume-idle",
+			client,
+			bankId: "personal",
+			config: makeConfig({ retainMode: "last-turn", retainEveryNTurns: 5, retainOverlapTurns: 0 }),
+			session: {
+				sessionId: "sess-resume-idle",
+				loadedUserTurnCount: 2,
+				sessionManager: {
+					getHeader: () => ({
+						type: "session",
+						id: "sess-resume-idle",
+						timestamp: SESSION_START,
+						cwd: "/tmp",
+					}),
+					getEntries: () => entries,
+				},
+				getHindsightSessionState: () => state,
+			} as object as AgentSession,
+			banksSet: new Set(["personal"]),
+		});
+
+		await state.drainOnClose();
+		expect(bodies).toHaveLength(0);
+	});
+
+	it("still retains a first turn that arrived before delayed last-turn backend start", async () => {
+		const bodies = captureBodies();
+		const client = new HindsightApi({ baseUrl: "http://hindsight.local" });
+		const entries = [
+			userEntry("u1", null, "turn one has enough text", "2026-08-17T10:00:00.000Z"),
+			assistantEntry("a1", "u1", "reply one has enough text", "2026-08-17T10:00:01.000Z"),
+		];
+		const state = new HindsightSessionState({
+			sessionId: "sess-first-turn-race",
+			client,
+			bankId: "personal",
+			config: makeConfig({ retainMode: "last-turn", retainEveryNTurns: 5, retainOverlapTurns: 0 }),
+			session: {
+				sessionId: "sess-first-turn-race",
+				loadedUserTurnCount: 0,
+				sessionManager: {
+					getHeader: () => ({
+						type: "session",
+						id: "sess-first-turn-race",
+						timestamp: SESSION_START,
+						cwd: "/tmp",
+					}),
+					getEntries: () => entries,
+				},
+				getHindsightSessionState: () => state,
+			} as object as AgentSession,
+			banksSet: new Set(["personal"]),
+		});
+
+		await state.drainOnClose();
+		expect(bodies).toHaveLength(1);
+		expect(String(firstItem(bodies[0]).content)).toContain("turn one has enough text");
+	});
+
+	it("flushes queued tool retains on drainOnClose before the queue is closed", async () => {
+		const bodies = captureBodies();
+		const client = new HindsightApi({ baseUrl: "http://hindsight.local" });
+		const state = new HindsightSessionState({
+			sessionId: "sess-queue-drain",
+			client,
+			bankId: "personal",
+			config: makeConfig(),
+			session: {
+				sessionId: "sess-queue-drain",
+				loadedUserTurnCount: 0,
+				sessionManager: {
+					getHeader: () => ({
+						type: "session",
+						id: "sess-queue-drain",
+						timestamp: SESSION_START,
+						cwd: "/tmp",
+					}),
+					getEntries: () => [],
+				},
+				getHindsightSessionState: () => state,
+			} as object as AgentSession,
+			banksSet: new Set(["personal"]),
+		});
+
+		state.enqueueRetain("user asked me to remember the deploy token rotation");
+		await state.drainOnClose();
+		expect(bodies).toHaveLength(1);
+		expect(String(firstItem(bodies[0]).content)).toContain("deploy token rotation");
+		state.dispose();
 	});
 });

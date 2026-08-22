@@ -694,6 +694,13 @@ export class AgentSession {
 	#synchronouslyTerminatedYieldToolCallIds = new Set<string>();
 	#providerSessionState = new Map<string, ProviderSessionState>();
 	#hindsightSessionState: HindsightSessionState | undefined = undefined;
+	/**
+	 * User turns present when this AgentSession was constructed. Hindsight
+	 * close-tail last-turn resume uses this as the pre-activity baseline so a
+	 * delayed backend start cannot treat an in-progress first prompt as old
+	 * history.
+	 */
+	readonly loadedUserTurnCount: number;
 	readonly #memory: SessionMemory;
 	readonly rawSseDebugBuffer: RawSseDebugBuffer;
 
@@ -996,6 +1003,9 @@ export class AgentSession {
 		this.agent = config.agent;
 		this.#codeModeState = config.codeModeState ?? {};
 		this.sessionManager = config.sessionManager;
+		this.loadedUserTurnCount = this.sessionManager
+			.getEntries()
+			.filter(entry => entry.type === "message" && entry.message.role === "user").length;
 		this.settings = config.settings;
 		this.#modelRegistry = config.modelRegistry;
 		this.#codexResetCoordinator = config.codexResetCoordinator ?? defaultCodexAutoRedeemCoordinator;
@@ -4185,8 +4195,6 @@ export class AgentSession {
 		this.#movedFromEmptySessionFile = undefined;
 		this.#closeAllProviderSessions("dispose");
 		this.#maintenance.cancelSpeculation();
-		this.setHindsightSessionState(undefined);
-		hindsightState?.dispose();
 		this.#disconnectFromAgent();
 		if (this.#unsubscribeAppendOnly) {
 			this.#unsubscribeAppendOnly();
@@ -4246,6 +4254,8 @@ export class AgentSession {
 		} catch (error) {
 			logger.warn("Hindsight retain still draining at dispose deadline", { error: String(error) });
 		}
+		this.setHindsightSessionState(undefined);
+		hindsightState?.dispose();
 
 		// Event handlers can reopen the append writer while they persist their
 		// terminal message; that pipeline has drained (or hit the deadline).

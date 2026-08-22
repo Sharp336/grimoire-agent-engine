@@ -162,7 +162,9 @@ describe("AgentSession concurrent disposal", () => {
 			await hindsightGate.promise;
 			order.push("hindsight:end");
 		});
-		vi.spyOn(hindsight, "dispose").mockImplementation(() => {});
+		vi.spyOn(hindsight, "dispose").mockImplementation(() => {
+			order.push("hindsight:dispose");
+		});
 		current.setHindsightSessionState(hindsight);
 
 		const mnemopi: MnemopiSessionState = Object.create(MnemopiSessionState.prototype);
@@ -201,6 +203,7 @@ describe("AgentSession concurrent disposal", () => {
 		expect(closeAt).toBeGreaterThan(order.indexOf("async:end"));
 		expect(closeAt).toBeGreaterThan(order.indexOf("hindsight:end"));
 		expect(closeAt).toBeGreaterThan(order.indexOf("mnemopi:end"));
+		expect(order.indexOf("hindsight:dispose")).toBeGreaterThan(order.indexOf("hindsight:end"));
 	});
 
 	it("bounds post-prompt work that ignores abort", async () => {

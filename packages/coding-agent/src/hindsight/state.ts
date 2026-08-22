@@ -49,6 +49,8 @@ export interface HindsightSessionStateOptions {
 	banksSet: Set<string>;
 	lastRetainedTurn?: number;
 	hasRecalledForFirstTurn?: boolean;
+	/** User turns loaded before this process added new activity. */
+	closeRetainBaselineTurns?: number;
 	/**
 	 * When set, this entry is a subagent alias that reuses the parent's bank,
 	 * scope, config, client, and banksSet. Aliases skip auto-recall and
@@ -268,9 +270,7 @@ export class HindsightSessionState {
 		this.hasRecalledForFirstTurn = options.hasRecalledForFirstTurn ?? false;
 		this.aliasOf = options.aliasOf;
 		this.retainQueue = new HindsightRetainQueue(this);
-		this.#closeRetainBaselineTurns = this.session.sessionManager
-			? extractMessages(this.session.sessionManager).filter(m => m.role === "user").length
-			: 0;
+		this.#closeRetainBaselineTurns = options.closeRetainBaselineTurns ?? this.session.loadedUserTurnCount ?? 0;
 	}
 
 	setSessionId(sessionId: string): void {
