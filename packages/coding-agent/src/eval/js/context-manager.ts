@@ -656,14 +656,16 @@ function logWorkerMessage(msg: Extract<WorkerOutbound, { type: "log" }>): void {
 }
 
 async function raceWithTimeout<T>(promise: Promise<T>, timeoutMs: number, reason: string): Promise<T> {
-	const timeoutSignal = AbortSignal.timeout(timeoutMs);
+	// Manual timer rather than `AbortSignal.timeout()` — under the Bun test
+	// runner an `AbortSignal.timeout`-driven race member never fires while a
+	// bare pending member is in the same race (see the note in
+	// `tools/browser/tab-supervisor.ts` `raceWithTimeout`).
 	const { promise: timeoutPromise, reject } = Promise.withResolvers<never>();
-	const onAbort = (): void => reject(new ToolError(reason));
-	timeoutSignal.addEventListener("abort", onAbort, { once: true });
+	const timer = setTimeout(() => reject(new ToolError(reason)), timeoutMs);
 	try {
 		return await Promise.race([promise, timeoutPromise]);
 	} finally {
-		timeoutSignal.removeEventListener("abort", onAbort);
+		clearTimeout(timer);
 	}
 }
 
