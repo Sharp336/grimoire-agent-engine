@@ -1157,6 +1157,7 @@ class DaemonBroker {
 
 	#notifyCompletion(completion: DaemonCompletionNotification): void {
 		const pending = this.#pendingCompletions.get(completion.owner) ?? new Map<string, DaemonCompletionNotification>();
+		pending.set(completion.completionId, completion);
 		this.#pendingCompletions.set(completion.owner, pending);
 		const registration = this.#ownerSockets.get(completion.owner);
 		if (!registration || registration.socket.destroyed) return;
