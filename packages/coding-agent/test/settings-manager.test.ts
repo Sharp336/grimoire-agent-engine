@@ -319,6 +319,40 @@ describe("Settings", () => {
 				providers: { maxInFlightRequests: { openai: 9 } },
 			});
 		});
+
+		it("keeps a pending project model role across an unrelated native set", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ custom: { keep: true } }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			settings.setProjectModelRole("smol", "new/smol");
+			settings.set("ask.enabled", false, "project");
+			expect(settings.get("modelRoles")).toEqual(expect.objectContaining({ smol: "new/smol" }));
+			await settings.flush();
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+				custom: { keep: true },
+				ask: { enabled: false },
+				modelRoles: { smol: "new/smol" },
+			});
+		});
+
+		it("keeps migrated native settings after an unrelated project edit", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ queueMode: "one-at-a-time" }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("steeringMode")).toBe("one-at-a-time");
+			settings.set("ask.enabled", true, "project");
+			expect(settings.get("steeringMode")).toBe("one-at-a-time");
+		});
+
+		it("resolves project-scope values without config overlays", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ ask: { enabled: false } }, null, 2));
+			const overlayPath = tempDir.join("overlay.yml");
+			await Bun.write(overlayPath, YAML.stringify({ ask: { enabled: true } }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir, configFiles: [overlayPath] });
+			expect(settings.get("ask.enabled")).toBe(true);
+			expect(settings.getProjectScopedValue("ask.enabled")).toBe(false);
+		});
 	});
 
 	describe("shell configuration errors", () => {

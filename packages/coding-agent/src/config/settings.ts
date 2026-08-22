@@ -620,6 +620,19 @@ export class Settings {
 	}
 
 	/**
+	 * Resolve a setting from global plus project sources, excluding `--config`
+	 * overlays and runtime overrides. Project-scope `/settings` rows use this
+	 * so an overlay cannot pin the displayed value while edits write below it.
+	 */
+	getProjectScopedValue<P extends SettingPath>(path: P): SettingValue<P> {
+		const merged = this.#deepMerge(this.#deepMerge({}, this.#global), this.#projectSettingsForMerge());
+		const value = getByPath(merged, SETTING_PATH_SEGMENTS[path]);
+		const resolved =
+			value !== undefined ? (resolvePathScopedStringArray(path, value, this.#cwd) ?? value) : getDefault(path);
+		return resolved as SettingValue<P>;
+	}
+
+	/**
 	 * Whether `path` has an explicitly configured value (global config, project
 	 * config, or runtime override) rather than falling back to the schema default.
 	 */
@@ -1144,12 +1157,13 @@ export class Settings {
 
 	#setProjectModelRoleValue(role: ModelRole | string, modelId: string | null): void {
 		const prev = this.get("modelRoles");
-		const projectRoles = getByPath(this.#project, ["modelRoles"]);
-		const current: Record<string, unknown> = isRecord(projectRoles) ? { ...projectRoles } : {};
+		const fileRoles = getByPath(this.#projectFileSettings, ["modelRoles"]);
+		const current: Record<string, unknown> = isRecord(fileRoles) ? { ...fileRoles } : {};
 		current[role] = modelId;
-		setByPath(this.#project, ["modelRoles"], current);
+		setByPath(this.#projectFileSettings, ["modelRoles"], current);
 		this.#modifiedProjectModelRoles.add(role);
 		this.#persistedMutationGeneration++;
+		this.#rebuildProjectLayer();
 		this.#rebuildMerged();
 		this.#fireEffectiveSettingChanged("modelRoles", this.get("modelRoles"), prev);
 		this.#queueProjectSave();
@@ -1177,7 +1191,7 @@ export class Settings {
 		} else {
 			current[role] = modelId;
 		}
-		// Persist per-role rather thanking the whole `modelRoles` path
+		// Persist per-role rather than marking the whole `modelRoles` path
 		// modified: #saveNow merges only the changed role into the re-read
 		// file, so a concurrent external edit to a sibling role is not
 		// clobbered by this process's stale in-memory snapshot.
@@ -2620,10 +2634,8 @@ export class Settings {
 	}
 
 	#rebuildProjectLayer(): void {
-		this.#project = this.#deepMerge(
-			structuredClone(this.#projectWithoutNative),
-			structuredClone(this.#projectFileSettings),
-		);
+		const native = this.#migrateRawSettings(structuredClone(this.#projectFileSettings), false);
+		this.#project = this.#deepMerge(structuredClone(this.#projectWithoutNative), native);
 	}
 
 	#rebuildMerged(): void {

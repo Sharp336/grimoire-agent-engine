@@ -1036,12 +1036,12 @@ export class SettingsSelectorComponent implements Component {
 
 	/**
 	 * Value shown and edited for a setting in the active persistence scope:
-	 * the global-layer value (plus defaults) in global scope, or the merged
-	 * effective value in project scope. Reading the global layer directly keeps
-	 * a project override from masking the value a global-scope edit writes.
+	 * the global-layer value in global scope, or global plus project sources
+	 * in project scope. Overlays and runtime overrides are excluded so a
+	 * `--config` pin cannot freeze the row while edits write below it.
 	 */
 	#scopedValue(path: SettingPath): unknown {
-		return this.#scope === "global" ? settings.getGlobalValue(path) : settings.get(path);
+		return this.#scope === "global" ? settings.getGlobalValue(path) : settings.getProjectScopedValue(path);
 	}
 
 	/**
