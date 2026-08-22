@@ -8,13 +8,14 @@
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { AsyncJobProgressDelivery } from "../../async";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
 import { type DaemonBrokerClient, DaemonBrokerRejectedError, daemonClientForProject } from "../../launch/client";
 import type {
 	DaemonMonitorNotification,
 	DaemonOperation,
+	DaemonOutputSubscription,
 	DaemonRpcResult,
 	DaemonSnapshot,
 	DaemonSpec,
@@ -87,6 +88,7 @@ async function registerOutputSink(
 	name: string,
 	owner: string,
 	delivery: AsyncJobProgressDelivery,
+	startPending: boolean,
 ): Promise<OutputLease | undefined> {
 	if (!session.queueLaunchProgress || !session.queueLaunchCompletion || !client.onOutput) return undefined;
 	let clients = outputRegistrations.get(session);
@@ -150,7 +152,7 @@ async function registerOutputSink(
 			return cleanupPromise;
 		},
 	};
-	const sink = async (notification: DaemonMonitorNotification): Promise<void> => {
+	const deliver = async (notification: DaemonMonitorNotification): Promise<void> => {
 		if (!registration.active || session.isDisposed?.())
 			throw new Error("Session disposed before launch output delivery");
 		if (notification.event === "daemon-output") {
@@ -176,7 +178,23 @@ async function registerOutputSink(
 			daemon: notification.daemon,
 		});
 	};
-	unregisterOutput = client.onOutput({ id, name, owner, artifactPath: artifact.path }, sink);
+	// The subscription is published before the broker capability check and the
+	// start/describe operation are validated, so anything arriving in that
+	// window is speculative: buffer it until the lease is retained and discard
+	// it on reject, so a failed operation never wakes the session.
+	let speculative: DaemonMonitorNotification[] | undefined = [];
+	let speculativeFlush: Promise<void> = Promise.resolve();
+	const sink = async (notification: DaemonMonitorNotification): Promise<void> => {
+		if (speculative) {
+			speculative.push(notification);
+			return;
+		}
+		await speculativeFlush;
+		await deliver(notification);
+	};
+	const subscription: DaemonOutputSubscription = { id, name, owner, artifactPath: artifact.path };
+	if (startPending) subscription.startPending = true;
+	unregisterOutput = client.onOutput(subscription, sink);
 	monitors.set(name, registration);
 	session.setLaunchMonitorActive?.(id, delivery, true);
 	unregisterDispose = session.registerDisposeCallback?.(() => void registration.cleanup());
@@ -186,8 +204,25 @@ async function registerOutputSink(
 		registration,
 		retain: () => {
 			retained = true;
+			// The broker cleared its start-pending marker when the start replaced
+			// the record; stop advertising it on future reconnect envelopes too.
+			subscription.startPending = undefined;
+			const buffered = speculative;
+			speculative = undefined;
+			if (buffered && buffered.length > 0) {
+				speculativeFlush = (async () => {
+					for (const notification of buffered) await deliver(notification);
+				})().catch(error => {
+					logger.warn("Buffered launch monitor delivery failed", {
+						monitorId: id,
+						name,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				});
+			}
 		},
 		reject: async () => {
+			speculative = undefined;
 			if (!retained) await registration.cleanup();
 		},
 	};
@@ -315,7 +350,10 @@ export interface LaunchToolDetails {
 	matched?: string;
 	/** describe: immutable launch spec backing the command/cwd detail lines. */
 	spec?: DaemonSpec;
+	/** monitor: progress delivery mode this call resulted in. */
 	monitoring?: AsyncJobProgressDelivery | "off";
+	/** monitor off: whether an active monitor was actually detached. */
+	monitorDetached?: boolean;
 }
 
 function requiredName(params: LaunchParams): string {
@@ -513,7 +551,11 @@ export async function renderLaunchLogTerminalRows(
 	});
 }
 
-async function toolDetails(result: DaemonRpcResult, params: LaunchParams): Promise<LaunchToolDetails> {
+async function toolDetails(
+	result: DaemonRpcResult,
+	params: LaunchParams,
+	detached?: boolean,
+): Promise<LaunchToolDetails> {
 	switch (result.op) {
 		case "start":
 			return { op: "start", daemon: result.daemon, timedOut: result.readyTimedOut };
@@ -541,6 +583,7 @@ async function toolDetails(result: DaemonRpcResult, params: LaunchParams): Promi
 				daemon: result.daemon,
 				spec: result.spec,
 				monitoring: params.op === "monitor" ? params.progress : undefined,
+				monitorDetached: params.op === "monitor" && params.progress === "off" ? detached === true : undefined,
 			};
 		case "ping":
 		case "shutdown":
@@ -570,7 +613,7 @@ export async function executeLaunch(
 	const progressDelivery = params.progress === "wake" || params.progress === "ambient" ? params.progress : undefined;
 	const outputLease =
 		name && owner && progressDelivery
-			? await registerOutputSink(session, client, name, owner, progressDelivery)
+			? await registerOutputSink(session, client, name, owner, progressDelivery, params.op === "start")
 			: undefined;
 	if (progressDelivery && !outputLease) throw new ToolError("This session cannot accept process progress delivery");
 	const operation = operationFor(params, session);
@@ -615,7 +658,7 @@ export async function executeLaunch(
 		else completionLease?.retain();
 		return {
 			content: [{ type: "text", text: replaceTabs(toolContent(result, params, detached)) }],
-			details: await toolDetails(result, params),
+			details: await toolDetails(result, params, detached),
 		};
 	} catch (error) {
 		await outputLease?.reject();
@@ -815,8 +858,19 @@ export function launchRenderResult(
 				}
 				break;
 			}
-			case "describe":
 			case "monitor": {
+				// Surface the resulting delivery mode so wake/ambient/off/no-op are
+				// distinguishable at a glance; details carry the authoritative state.
+				const mode = details?.monitoring ?? params.progress;
+				if (mode === "off") {
+					meta.push(theme.fg("muted", details?.monitorDetached === false ? "no active monitor" : "monitor off"));
+				} else if (mode) {
+					meta.push(theme.fg("accent", `monitor ${mode}`));
+				}
+				if (daemon) meta.push(...daemonMeta(daemon, theme));
+				break;
+			}
+			case "describe": {
 				if (daemon) meta.push(...daemonMeta(daemon, theme));
 				const spec = details?.spec;
 				if (spec) {

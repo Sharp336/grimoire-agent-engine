@@ -140,6 +140,11 @@ function createHarness(artifact?: { id: string; path: string }): MonitorHarness 
 	};
 }
 
+/** Settle the speculative-flush promise chain deterministically — microtasks only, no timers. */
+async function drainMicrotasks(): Promise<void> {
+	for (let i = 0; i < 16; i++) await Promise.resolve();
+}
+
 afterEach(() => {
 	vi.restoreAllMocks();
 });
@@ -338,5 +343,99 @@ describe("hub process output monitoring", () => {
 		expect(harness.unregisterCount()).toBe(1);
 		expect(harness.active.at(-1)).toEqual({ monitorId: subscription.id, delivery: "wake", active: false });
 		expect(harness.completions).toEqual([]);
+	});
+
+	it("buffers speculative progress until the start is retained, then flushes it", async () => {
+		const harness = createHarness();
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+		vi.spyOn(harness.client, "request").mockImplementation(async operation => {
+			if (operation.op === "ping") {
+				return { op: "ping", projectDir: process.cwd(), capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] };
+			}
+			if (operation.op !== "start") throw new Error(`Unexpected operation: ${operation.op}`);
+			// The subscription advertised ahead of the start request is marked
+			// start-pending so the broker defers stale terminal replay.
+			expect(harness.getSubscription()?.startPending).toBeTrue();
+			const subscription = harness.getSubscription();
+			if (!subscription) throw new Error("Expected output subscription");
+			await harness.getOutputSink()?.({
+				event: "daemon-output",
+				monitorId: subscription.id,
+				name: daemon.name,
+				daemonId: daemon.id,
+				seq: 1,
+				text: "early",
+				batchKind: "progress",
+				suppressedEvents: 0,
+			});
+			// Still speculative: nothing may wake the session before validation.
+			expect(harness.progress).toEqual([]);
+			return { op: "start", daemon, readyTimedOut: false };
+		});
+
+		await executeLaunch(harness.session, {
+			op: "start",
+			name: daemon.name,
+			application: process.execPath,
+			pty: false,
+			persist: true,
+			progress: "wake",
+		});
+		await drainMicrotasks();
+
+		expect(harness.progress.map(item => item.notification.text)).toEqual(["early"]);
+		expect(harness.getSubscription()?.startPending).toBeUndefined();
+		expect(harness.unregisterCount()).toBe(0);
+	});
+
+	it("discards speculative progress when the start fails", async () => {
+		const harness = createHarness();
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+		vi.spyOn(harness.client, "request").mockImplementation(async operation => {
+			if (operation.op === "ping") {
+				return { op: "ping", projectDir: process.cwd(), capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] };
+			}
+			if (operation.op !== "start") throw new Error(`Unexpected operation: ${operation.op}`);
+			const subscription = harness.getSubscription();
+			if (!subscription) throw new Error("Expected output subscription");
+			// An already-running process emits during the validation window.
+			await harness.getOutputSink()?.({
+				event: "daemon-output",
+				monitorId: subscription.id,
+				name: daemon.name,
+				daemonId: daemon.id,
+				seq: 1,
+				text: "leaked",
+				batchKind: "progress",
+				suppressedEvents: 0,
+			});
+			throw new Error(`Daemon ${daemon.name} is already running`);
+		});
+
+		await expect(
+			executeLaunch(harness.session, {
+				op: "start",
+				name: daemon.name,
+				application: process.execPath,
+				pty: false,
+				persist: true,
+				progress: "wake",
+			}),
+		).rejects.toThrow("already running");
+		await drainMicrotasks();
+
+		expect(harness.progress).toEqual([]);
+		expect(harness.completions).toEqual([]);
+		expect(harness.unregisterCount()).toBe(1);
+		expect(harness.active.at(-1)?.active).toBe(false);
+	});
+
+	it("does not mark monitor-op subscriptions as start-pending", async () => {
+		const harness = createHarness();
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+
+		await executeLaunch(harness.session, { op: "monitor", name: daemon.name, progress: "wake" });
+
+		expect(harness.getSubscription()?.startPending).toBeUndefined();
 	});
 });

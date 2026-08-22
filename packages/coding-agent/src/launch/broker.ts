@@ -1141,6 +1141,7 @@ class DaemonBroker {
 						existing.owner = subscription.owner;
 						existing.startPending = subscription.startPending;
 						const reconnected = existing.socket !== socket;
+						existing.startPending = subscription.startPending;
 						existing.socket = socket;
 						this.#pruneAcknowledgedOutput(existing, subscription);
 						const replayedTerminal = existing.pending.some(
