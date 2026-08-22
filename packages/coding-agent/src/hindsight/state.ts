@@ -298,6 +298,12 @@ export class HindsightSessionState {
 		this.#lastRetainedPrefixKey = "";
 	}
 
+	#retainedPrefixDiverged(messages: HindsightMessage[]): boolean {
+		if (this.#lastRetainedMessageIndex === 0) return false;
+		if (this.#lastRetainedMessageIndex > messages.length) return true;
+		return retentionPrefixKey(messages, this.#lastRetainedMessageIndex) !== this.#lastRetainedPrefixKey;
+	}
+
 	enqueueRetain(content: string, context?: string): void {
 		this.retainQueue.enqueue(content, context);
 	}
@@ -319,7 +325,7 @@ export class HindsightSessionState {
 		// transcript already contains history. Treat loaded history as already
 		// retained on the close path so idle open/close does not reconsolidate
 		// the full document; only a below-cadence tail of new turns is flushed.
-		if (userTurns <= retainedThrough) return;
+		if (userTurns <= retainedThrough && !this.#retainedPrefixDiverged(messages)) return;
 		try {
 			const generation = this.#retainGeneration;
 			const lastTurnWindow =
@@ -490,7 +496,12 @@ export class HindsightSessionState {
 		const messages = extractMessages(this.session.sessionManager);
 		if (messages.length === 0) return;
 		const userTurns = messages.filter(m => m.role === "user").length;
-		if (userTurns - this.lastRetainedTurn < this.config.retainEveryNTurns) return;
+		if (
+			userTurns - this.lastRetainedTurn < this.config.retainEveryNTurns &&
+			!this.#retainedPrefixDiverged(messages)
+		) {
+			return;
+		}
 
 		try {
 			await this.retainSession(messages);

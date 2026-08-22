@@ -187,6 +187,57 @@ describe("Hindsight append-mode session retention", () => {
 		expect(String(firstItem(bodies[1]).content)).not.toContain("original tail is long enough");
 	});
 
+	it("rebuilds with replace after /tree navigation onto a new branch in append mode", async () => {
+		const bodies = captureBodies();
+		const client = new HindsightApi({ baseUrl: "http://hindsight.local" });
+		const shared = [
+			userEntry("u1", null, "turn one has enough text", "2026-08-17T10:00:00.000Z"),
+			assistantEntry("a1", "u1", "reply one has enough text", "2026-08-17T10:00:01.000Z"),
+		];
+		const abandoned = [
+			userEntry("u2", "a1", "abandoned turn has enough text", "2026-08-17T10:01:00.000Z"),
+			assistantEntry("a2", "u2", "abandoned reply has enough text", "2026-08-17T10:01:01.000Z"),
+		];
+		const replacement = [
+			userEntry("u3", "a1", "replacement turn has enough text", "2026-08-17T10:02:00.000Z"),
+			assistantEntry("a3", "u3", "replacement reply has enough text", "2026-08-17T10:02:01.000Z"),
+		];
+		let branch = [...shared, ...abandoned];
+		const allEntries = [...shared, ...abandoned, ...replacement];
+		const state = new HindsightSessionState({
+			sessionId: "sess-tree-nav",
+			client,
+			bankId: "personal",
+			config: makeConfig({ retainUpdateMode: "append", retainEveryNTurns: 2, retainOverlapTurns: 0 }),
+			session: {
+				sessionId: "sess-tree-nav",
+				sessionManager: {
+					getHeader: () => ({
+						type: "session",
+						id: "sess-tree-nav",
+						timestamp: SESSION_START,
+						cwd: "/tmp",
+					}),
+					getEntries: () => allEntries,
+					getBranch: () => branch,
+				},
+				getHindsightSessionState: () => state,
+			} as object as AgentSession,
+			banksSet: new Set(["personal"]),
+		});
+
+		await state.maybeRetainOnAgentEnd();
+		expect(bodies).toHaveLength(1);
+		expect(String(firstItem(bodies[0]).content)).toContain("abandoned turn has enough text");
+
+		branch = [...shared, ...replacement];
+		await state.maybeRetainOnAgentEnd();
+		expect(bodies).toHaveLength(2);
+		expect(firstItem(bodies[1]).update_mode).toBe("replace");
+		expect(String(firstItem(bodies[1]).content)).toContain("replacement turn has enough text");
+		expect(String(firstItem(bodies[1]).content)).not.toContain("abandoned turn has enough text");
+	});
+
 	it("force-rebuilds the full canonical transcript with replace", async () => {
 		const bodies = captureBodies();
 		const client = new HindsightApi({ baseUrl: "http://hindsight.local" });

@@ -16,10 +16,14 @@ import { type HindsightMessage, hasSubstantiveContent } from "./content";
 
 export interface ReadonlySessionManagerLike {
 	getEntries(): SessionEntry[];
+	/** Active root→leaf path. Prefer this over getEntries(), which includes abandoned branches. */
+	getBranch?: (fromId?: string) => SessionEntry[];
 }
 
 /**
- * Walk session entries top-to-bottom, returning a flat user/assistant list.
+ * Walk the active branch (root→leaf) top-to-bottom. `getEntries()` includes
+ * abandoned `/tree` suffixes; using `getBranch()` keeps retain transcripts and
+ * prefix-cache keys aligned with the conversation the user is actually in.
  *
  * Implementation choices:
  * - Skip entries whose type isn't `"message"` (compaction, branch_summary,
@@ -39,7 +43,7 @@ export function countRetainableUserTurns(sessionManager: ReadonlySessionManagerL
 export function extractMessages(sessionManager: ReadonlySessionManagerLike): HindsightMessage[] {
 	const messages: HindsightMessage[] = [];
 
-	for (const entry of sessionManager.getEntries()) {
+	for (const entry of sessionManager.getBranch?.() ?? sessionManager.getEntries()) {
 		if (entry.type !== "message") continue;
 		const msg = entry.message;
 		const role = msg.role;
