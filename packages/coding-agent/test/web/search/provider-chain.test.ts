@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import {
+	getSearchProviderLabel,
 	resolveProviderCandidates,
 	resolveProviderChain,
 	setExcludedSearchProviders,
@@ -54,6 +55,14 @@ describe("resolveProviderCandidates", () => {
 			"exa",
 			...SEARCH_PROVIDER_ORDER.filter(id => id !== "perplexity" && id !== "gemini" && id !== "exa"),
 		]);
+	});
+
+	it("allows OpenAI API Hosted web_search to be configured and distinguishes it from Codex", () => {
+		expect(getSearchProviderLabel("openai")).toBe("OpenAI API");
+		expect(getSearchProviderLabel("codex")).toBe("OpenAI Codex");
+
+		setSearchProviderOrder(["openai"]);
+		expect(resolveProviderCandidates()[0]).toEqual({ id: "openai", explicit: true });
 	});
 
 	it("marks configured-order entries explicit so hand-listed providers keep explicit-selection semantics", () => {

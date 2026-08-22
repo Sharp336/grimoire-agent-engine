@@ -44,6 +44,11 @@ const PROVIDER_META: Record<SearchProviderId, ProviderMeta> = {
 		label: SEARCH_PROVIDER_LABELS.codex,
 		load: async () => new (await import("./providers/codex")).CodexProvider(),
 	},
+	openai: {
+		id: "openai",
+		label: SEARCH_PROVIDER_LABELS.openai,
+		load: async () => new (await import("./providers/openai")).OpenAIProvider(),
+	},
 	xai: {
 		id: "xai",
 		label: SEARCH_PROVIDER_LABELS.xai,

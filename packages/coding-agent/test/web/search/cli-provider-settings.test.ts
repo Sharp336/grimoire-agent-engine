@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { AuthStorage, Model } from "@oh-my-pi/pi-ai";
+import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { runSearchQuery } from "@oh-my-pi/pi-coding-agent/web/search";
 import {
 	SEARCH_PROVIDER_ORDER,
 	setExcludedSearchProviders,
@@ -159,5 +162,99 @@ describe("runSearchCommand provider settings", () => {
 		const plain = stripVTControlCharacters(stdout);
 		expect(plain).toContain("Provider: Jina");
 		expect(plain).not.toContain("Provider: Tavily (API)");
+	});
+
+	it("uses configured OpenAI settings end to end with SearchParams auth and registry transport settings", async () => {
+		settings.set("providers.webSearchOpenAIProvider", "pindo");
+		settings.set("providers.webSearchOpenAIModel", "pindo-search");
+
+		const model = {
+			provider: "pindo",
+			id: "pindo-model-id",
+			requestModelId: "pindo-wire-model",
+			api: "openai-responses",
+			baseUrl: "https://proxy.example/v1",
+			headers: {
+				"X-Model-Header": "model-value",
+				Authorization: "Bearer model-header-must-not-win",
+				"chatgpt-account-id": "acct-must-not-leak",
+			},
+		} as unknown as Model<"openai-responses">;
+		const registryAuthStorage = {
+			resolver() {
+				return async () => "registry-auth-key";
+			},
+		} as unknown as AuthStorage;
+		const resolverCalls: Array<{
+			provider: string;
+			options?: { sessionId?: string; baseUrl?: string; modelId?: string };
+		}> = [];
+		const authStorage = {
+			resolver(provider: string, options?: { sessionId?: string; baseUrl?: string; modelId?: string }) {
+				resolverCalls.push({ provider, options });
+				return async () => "search-auth-key";
+			},
+		} as unknown as AuthStorage;
+		const modelRegistry = {
+			authStorage: registryAuthStorage,
+			find(provider: string, modelId: string) {
+				expect(provider).toBe("pindo");
+				expect(modelId).toBe("pindo-search");
+				return model;
+			},
+			getProviderHeaders(provider: string) {
+				expect(provider).toBe("pindo");
+				return {
+					Authorization: "Bearer provider-header-must-not-win",
+					"X-Provider-Header": "provider-value",
+				};
+			},
+			resolver() {
+				return registryAuthStorage.resolver("pindo");
+			},
+		} as unknown as ModelRegistry;
+
+		let capturedUrl: string | undefined;
+		let capturedHeaders: Headers | undefined;
+		let capturedBody: Record<string, unknown> | undefined;
+		const configuredFetch: typeof fetch = Object.assign(
+			async (input: string | Request | URL, init?: RequestInit): Promise<Response> => {
+				capturedUrl = responseUrl(input);
+				capturedHeaders = new Headers(init?.headers);
+				capturedBody = init?.body ? (JSON.parse(init.body as string) as Record<string, unknown>) : undefined;
+				const sse = [
+					`data: ${JSON.stringify({ type: "response.web_search_call.completed" })}`,
+					"",
+					`data: ${JSON.stringify({ type: "response.output_text.delta", delta: "configured OpenAI result" })}`,
+					"",
+				].join("\n");
+				return new Response(sse, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+			},
+			{ preconnect: fetch.preconnect },
+		);
+		vi.spyOn(globalThis, "fetch").mockImplementation(configuredFetch);
+
+		const result = await runSearchQuery(
+			{ query: "configured OpenAI search", provider: "openai" },
+			{ authStorage, modelRegistry, sessionId: "configured-search-session" },
+		);
+
+		expect(result.details.response.provider).toBe("openai");
+		expect(capturedUrl).toBe("https://proxy.example/v1/responses");
+		expect(capturedBody?.model).toBe("pindo-wire-model");
+		expect(capturedHeaders?.get("x-provider-header")).toBe("provider-value");
+		expect(capturedHeaders?.get("x-model-header")).toBe("model-value");
+		expect(capturedHeaders?.get("authorization")).toBe("Bearer search-auth-key");
+		expect(capturedHeaders?.has("chatgpt-account-id")).toBe(false);
+		expect(resolverCalls).toEqual([
+			{
+				provider: "pindo",
+				options: {
+					sessionId: "configured-search-session",
+					baseUrl: "https://proxy.example/v1",
+					modelId: "pindo-model-id",
+				},
+			},
+		]);
 	});
 });

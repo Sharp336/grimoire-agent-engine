@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
-import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { SearchParams } from "@oh-my-pi/pi-coding-agent/web/search/providers/base";
 import { hasCodexSearch, searchCodex } from "@oh-my-pi/pi-coding-agent/web/search/providers/codex";
 
@@ -215,47 +214,10 @@ describe("searchCodex model selection", () => {
 		hasOAuth() {
 			return true;
 		},
-	} as unknown as AuthStorage;
-	const proxyAuthStorage = {
 		hasAuth(provider: string) {
 			return provider === "openai-codex";
 		},
-		getCredentialOrigin() {
-			return { kind: "config" as const };
-		},
-		resolver() {
-			return async () => "test-proxy-key";
-		},
 	} as unknown as AuthStorage;
-	const oauthOnlyAuthStorage = {
-		...proxyAuthStorage,
-		getCredentialOrigin() {
-			return { kind: "oauth" as const };
-		},
-	} as unknown as AuthStorage;
-	const proxyModelRegistry = {
-		find(_provider: string, modelId: string) {
-			return {
-				provider: "openai-codex",
-				id: modelId,
-				api: "openai-codex-responses",
-				baseUrl: "https://proxy.example/backend-api",
-				headers: { "X-Proxy-Tenant": "tenant-1" },
-			};
-		},
-		getProviderBaseUrl() {
-			return "https://proxy.example/backend-api";
-		},
-		getProviderHeaders() {
-			return { "X-Proxy-Tenant": "tenant-1" };
-		},
-		hasCommandBackedApiKey() {
-			return false;
-		},
-		resolver() {
-			return async () => "test-proxy-key";
-		},
-	} as unknown as ModelRegistry;
 	let capturedRequest: CapturedRequest | null = null;
 
 	function makeSearchParams(query: string, fetch?: FetchImpl): SearchParams {
@@ -295,13 +257,17 @@ describe("searchCodex model selection", () => {
 		}
 	});
 
-	it("uses GPT-5.6 Luna as the first bundled default", async () => {
+	it("uses the official Codex Responses URL with openai-codex OAuth", async () => {
 		delete process.env.PI_CODEX_WEB_SEARCH_MODEL;
 		const result = await searchCodex(makeSearchParams("default codex model", mockCodexFetch("gpt-5.6-luna")));
 
+		expect(await hasCodexSearch(fakeAuthStorage)).toBe(true);
 		expect(capturedRequest).not.toBeNull();
 		expect(capturedRequest?.url).toBe("https://chatgpt.com/backend-api/codex/responses");
-		expect(new Headers(capturedRequest?.headers).get("x-openai-internal-codex-residency")).toBe("us");
+		const headers = new Headers(capturedRequest?.headers);
+		expect(headers.get("authorization")).toBe(`Bearer ${residencyToken}`);
+		expect(headers.get("chatgpt-account-id")).toBe("acct-test");
+		expect(headers.get("x-openai-internal-codex-residency")).toBe("us");
 		expect(capturedRequest?.body?.model).toBe("gpt-5.6-luna");
 		expect(result.model).toBe("gpt-5.6-luna");
 		expect(result.sources).toEqual([{ title: "Example Article", url: "https://example.com/article" }]);
@@ -349,84 +315,6 @@ describe("searchCodex model selection", () => {
 		await searchCodex(makeSearchParams(query, mockCodexFetch("gpt-5.6-luna")));
 
 		expect(sentUserText()).toBe(query);
-	});
-
-	it("uses configured Codex endpoint, API key, and headers without OAuth", async () => {
-		process.env.PI_CODEX_WEB_SEARCH_MODEL = "gpt-5.4";
-		const result = await searchCodex({
-			...makeSearchParams("proxy codex model", mockCodexFetch("gpt-5.4")),
-			authStorage: proxyAuthStorage,
-			modelRegistry: proxyModelRegistry,
-		});
-
-		expect(await hasCodexSearch(proxyAuthStorage)).toBe(true);
-		expect(capturedRequest?.url).toBe("https://proxy.example/backend-api/codex/responses");
-		const headers = new Headers(capturedRequest?.headers);
-		expect(headers.get("authorization")).toBe("Bearer test-proxy-key");
-		expect(headers.get("x-proxy-tenant")).toBe("tenant-1");
-		expect(headers.has("chatgpt-account-id")).toBe(false);
-		expect(headers.has("x-openai-internal-codex-residency")).toBe(false);
-		expect(result.answer).toBe("Codex answer");
-	});
-
-	it("refuses to send official OAuth credentials to a configured Codex endpoint", async () => {
-		process.env.PI_CODEX_WEB_SEARCH_MODEL = "gpt-5.4";
-		const fetchMock = vi.fn();
-
-		await expect(
-			searchCodex({
-				...makeSearchParams("unsafe proxy", fetchMock),
-				authStorage: oauthOnlyAuthStorage,
-				modelRegistry: proxyModelRegistry,
-			}),
-		).rejects.toThrow("Refusing to send official Codex OAuth credentials");
-		expect(fetchMock).not.toHaveBeenCalled();
-	});
-
-	it("validates the credential origin from the registry storage that supplies the key", async () => {
-		process.env.PI_CODEX_WEB_SEARCH_MODEL = "gpt-5.4";
-		const fetchMock = vi.fn();
-		const oauthBackedRegistry = {
-			...proxyModelRegistry,
-			authStorage: oauthOnlyAuthStorage,
-			resolver() {
-				return async () => "official-oauth-token";
-			},
-		} as unknown as ModelRegistry;
-
-		await expect(
-			searchCodex({
-				...makeSearchParams("registry oauth leak", fetchMock),
-				authStorage: proxyAuthStorage,
-				modelRegistry: oauthBackedRegistry,
-			}),
-		).rejects.toThrow("Refusing to send official Codex OAuth credentials");
-		expect(fetchMock).not.toHaveBeenCalled();
-	});
-
-	it("prefers a command-backed proxy key over stored OAuth on a custom endpoint", async () => {
-		process.env.PI_CODEX_WEB_SEARCH_MODEL = "gpt-5.4";
-		const commandBackedRegistry = {
-			...proxyModelRegistry,
-			authStorage: oauthOnlyAuthStorage,
-			hasCommandBackedApiKey(provider: string) {
-				return provider === "openai-codex";
-			},
-			resolver() {
-				return async () => "command-proxy-key";
-			},
-		} as unknown as ModelRegistry;
-
-		const result = await searchCodex({
-			...makeSearchParams("command proxy key", mockCodexFetch("gpt-5.4")),
-			authStorage: oauthOnlyAuthStorage,
-			modelRegistry: commandBackedRegistry,
-		});
-
-		const headers = new Headers(capturedRequest?.headers);
-		expect(headers.get("authorization")).toBe("Bearer command-proxy-key");
-		expect(headers.has("chatgpt-account-id")).toBe(false);
-		expect(result.answer).toBe("Codex answer");
 	});
 
 	it("falls back to the default model when PI_CODEX_WEB_SEARCH_MODEL is blank", async () => {
