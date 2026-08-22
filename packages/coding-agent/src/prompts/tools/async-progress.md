@@ -2,16 +2,16 @@
 {{#each jobs}}<job-progress id="{{jobId}}"{{#if type}} type="{{type}}"{{/if}} elapsed="{{elapsed}}">
 {{#if truncated}}<output>
 <head>
-{{head}}
+{{escapeXml head}}
 </head>
 {{#if suppressedEvents}}<suppressed reason="rate-limit" events="{{suppressedEvents}}"{{#if artifactId}} full-output="artifact://{{artifactId}}"{{/if}} />
 {{else}}<suppressed reason="preview-limit"{{#if artifactId}} full-output="artifact://{{artifactId}}"{{/if}} />
 {{/if}}<tail>
-{{tail}}
+{{escapeXml tail}}
 </tail>
 </output>
 {{else}}{{#if hasOutput}}<output>
-{{text}}
+{{escapeXml text}}
 </output>
 {{else}}{{#if suppressedEvents}}<output>
 <suppressed reason="rate-limit" events="{{suppressedEvents}}"{{#if artifactId}} full-output="artifact://{{artifactId}}"{{/if}} />

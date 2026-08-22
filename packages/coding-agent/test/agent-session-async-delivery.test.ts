@@ -724,4 +724,71 @@ describe("AgentSession owner-routed async delivery", () => {
 		expect(completion).toContain("LEFTOVER LINE");
 		expect(completion).not.toContain("FULL RESULT BODY MUST NOT REAPPEAR");
 	}, 10_000);
+
+	it("folds a failed artifact-backed job's never-progressed error into the completion", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const progressObserved = Promise.withResolvers<void>();
+		const completionObserved = Promise.withResolvers<string>();
+		const mock = createMockModel({
+			handler: context => {
+				const text = context.messages
+					.flatMap(message =>
+						typeof message.content === "string"
+							? [message.content]
+							: message.content.flatMap(content => (content.type === "text" ? [content.text] : [])),
+					)
+					.join("\n");
+				if (text.includes("DELIVERED PROGRESS LINE")) progressObserved.resolve();
+				if (text.includes("Resume your work using the result below")) completionObserved.resolve(text);
+				return { content: ["Done"] };
+			},
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "Main",
+			ownedAsyncJobManager: manager,
+		});
+		await session.sendUserMessage("initialize then wait");
+
+		const gate = Promise.withResolvers<never>();
+		const reporter = Promise.withResolvers<(text: string, info?: { artifactId?: string }) => void>();
+		manager.register(
+			"bash",
+			"failing summarized job",
+			async ({ reportAgentProgress }) => {
+				reporter.resolve(reportAgentProgress);
+				return gate.promise;
+			},
+			{ ownerId: "Main", progressDelivery: "wake" },
+		);
+		const report = await reporter.promise;
+		report("DELIVERED PROGRESS LINE", { artifactId: "88" });
+		await progressObserved.promise;
+
+		// The failure text never flows through reportAgentProgress — it must
+		// still reach the completion instead of being dropped with the
+		// already-delivered stream.
+		gate.reject(new Error("TERMINAL SPAWN FAILURE NEVER PROGRESSED"));
+		await manager.waitForAll();
+
+		const completion = await completionObserved.promise;
+		expect(completion).toContain("artifact://88");
+		expect(completion).toContain("failed");
+		expect(completion).toContain("TERMINAL SPAWN FAILURE NEVER PROGRESSED");
+	}, 10_000);
 });

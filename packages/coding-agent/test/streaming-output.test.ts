@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { setImmediate as macrotask } from "node:timers/promises";
 import {
 	enforceInlineByteCap,
 	formatHeadTruncationNotice,
@@ -17,7 +18,7 @@ import {
 	truncateTailBytes,
 } from "@oh-my-pi/pi-coding-agent/session/streaming-output";
 import { formatOutputNotice, outputMeta } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { logger, removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const createdTempDirs: string[] = [];
 const originalForceProtocol = Bun.env.PI_FORCE_IMAGE_PROTOCOL;
@@ -338,6 +339,46 @@ describe("OutputSink", () => {
 		expect(dumped.output).toBe("persisted despite preview failure");
 		expect(dumped.artifactId).toBe("artifact-preview-failure");
 		expect(await Bun.file(artifactPath).text()).toBe("persisted despite preview failure");
+	});
+
+	test("mirror-mode preview failure between pushes never escapes as an unhandled rejection", async () => {
+		const rejections: unknown[] = [];
+		const onUnhandled = (reason: unknown) => {
+			rejections.push(reason);
+		};
+		process.on("unhandledRejection", onUnhandled);
+		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			const dir = await createTempDir();
+			const artifactPath = path.join(dir, "midstream-failure.log");
+			const sink = new OutputSink({
+				artifactPath,
+				artifactId: "artifact-midstream-failure",
+				artifactWriteMode: "mirror",
+				onChunk: () => {
+					throw new Error("preview exploded");
+				},
+			});
+
+			sink.push("first ");
+			// Cross real macrotask boundaries (not a duration guess): unhandled
+			// rejections are reported at macrotask checkpoints, which is exactly
+			// the window where the tail previously sat rejected before dump()
+			// attached a handler.
+			await macrotask();
+			sink.push("second");
+			await macrotask();
+			const dumped = await sink.dump();
+
+			expect(rejections).toEqual([]);
+			// dump() surfaces the recorded failure instead of swallowing it.
+			expect(warnSpy.mock.calls.some(call => call[0] === "Output preview delivery failed")).toBe(true);
+			expect(dumped.output).toBe("first second");
+			expect(await Bun.file(artifactPath).text()).toBe("first second");
+		} finally {
+			process.off("unhandledRejection", onUnhandled);
+			warnSpy.mockRestore();
+		}
 	});
 
 	test("throttled onChunk coalesces held-back chunks instead of dropping them", async () => {

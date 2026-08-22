@@ -122,6 +122,34 @@ export interface AsyncJobProgressSink {
 	deliver(jobId: string, text: string, job: AsyncJob, seq: number, info: AsyncJobProgressInfo): void | Promise<void>;
 }
 
+/**
+ * Terminal payload a job's run callback may resolve with instead of a plain
+ * string: `details` carries executor metadata (`exitCode`, `timedOut`, …)
+ * that the manager merges into {@link AsyncJob.latestDetails} at settlement.
+ * Tools overwrite `latestDetails` with render payloads on every
+ * `reportProgress` call, so without this merge a completion delivery would
+ * read whatever the last progress report happened to contain.
+ */
+export interface AsyncJobRunResult {
+	text: string;
+	details?: Record<string, unknown>;
+}
+
+/**
+ * Failure-path counterpart of {@link AsyncJobRunResult}: a run callback that
+ * throws this error attaches executor metadata (`exitCode`, `timedOut`, …)
+ * which the manager merges into {@link AsyncJob.latestDetails} at settlement.
+ */
+export class AsyncJobRunError extends Error {
+	readonly details: Record<string, unknown>;
+
+	constructor(message: string, details: Record<string, unknown>, options?: ErrorOptions) {
+		super(message, options);
+		this.name = "AsyncJobRunError";
+		this.details = details;
+	}
+}
+
 export interface AsyncJobManagerOptions {
 	/**
 	 * Delivery sink for UNOWNED completions (jobs registered without an
@@ -257,7 +285,7 @@ export class AsyncJobManager {
 			reportAgentProgress: (text: string, info?: AsyncJobProgressInfo) => void;
 			/** Clear the queued flag once the job actually starts executing. */
 			markRunning: () => void;
-		}) => Promise<string>,
+		}) => Promise<string | AsyncJobRunResult>,
 		options?: AsyncJobRegisterOptions,
 	): string {
 		if (this.#disposed) {
@@ -308,7 +336,7 @@ export class AsyncJobManager {
 		};
 		job.promise = (async () => {
 			try {
-				const text = await run({
+				const outcome = await run({
 					jobId: id,
 					signal: abortController.signal,
 					reportProgress,
@@ -317,6 +345,12 @@ export class AsyncJobManager {
 						job.queued = false;
 					},
 				});
+				const text = typeof outcome === "string" ? outcome : outcome.text;
+				// Settlement metadata wins over the last reportProgress payload:
+				// tools overwrite latestDetails with render details on every
+				// progress call, so the completion delivery must read the
+				// executor's real exitCode/timedOut from here.
+				if (typeof outcome !== "string") this.#mergeSettledDetails(job, outcome.details);
 				if (job.status === "cancelled") {
 					job.resultText = text;
 					this.#scheduleEviction(id);
@@ -328,6 +362,7 @@ export class AsyncJobManager {
 				this.#enqueueDelivery(id, text);
 				this.#scheduleEviction(id);
 			} catch (error) {
+				if (error instanceof AsyncJobRunError) this.#mergeSettledDetails(job, error.details);
 				if (job.status === "cancelled") {
 					job.errorText = error instanceof Error ? error.message : String(error);
 					this.#scheduleEviction(id);
@@ -344,6 +379,11 @@ export class AsyncJobManager {
 
 		this.#jobs.set(id, job);
 		return id;
+	}
+
+	#mergeSettledDetails(job: AsyncJob, details: Record<string, unknown> | undefined): void {
+		if (!details) return;
+		job.latestDetails = { ...job.latestDetails, ...details };
 	}
 
 	/**

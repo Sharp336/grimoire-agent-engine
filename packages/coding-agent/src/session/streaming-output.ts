@@ -748,6 +748,7 @@ export class OutputSink {
 	#pendingCarriageReturn = false;
 	#pendingChunkTimer: Timer | undefined;
 	#chunkDeliveryTail: Promise<void> | undefined;
+	#chunkDeliveryFailure: { error: unknown } | undefined;
 
 	// Per-line column cap streaming state (persists across `push` calls so a
 	// long line split across chunks still trips the same trigger).
@@ -1226,7 +1227,14 @@ export class OutputSink {
 			await this.flushArtifact();
 			this.#onChunk?.(merged);
 		};
-		this.#chunkDeliveryTail = this.#chunkDeliveryTail?.then(deliver, deliver) ?? deliver();
+		const tail = this.#chunkDeliveryTail?.then(deliver, deliver) ?? deliver();
+		// Handle the rejection at creation: a preview failure between pushes must
+		// never sit as an unhandled rejection (which can kill the process) while
+		// waiting for dump() to drain the tail. The first failure is recorded and
+		// surfaced by dump() instead.
+		this.#chunkDeliveryTail = tail.catch(error => {
+			this.#chunkDeliveryFailure ??= { error };
+		});
 	}
 
 	#flushPendingChunk(): void {
@@ -1293,9 +1301,10 @@ export class OutputSink {
 		// Flush any chunk still held back by the throttle so the live preview
 		// ends with the complete stream.
 		this.#flushPendingChunk();
-		try {
-			await this.#chunkDeliveryTail;
-		} catch (error) {
+		await this.#chunkDeliveryTail;
+		if (this.#chunkDeliveryFailure) {
+			const { error } = this.#chunkDeliveryFailure;
+			this.#chunkDeliveryFailure = undefined;
 			logger.warn("Output preview delivery failed", {
 				error: error instanceof Error ? error.message : String(error),
 			});

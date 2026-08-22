@@ -8,6 +8,10 @@ export interface YieldDispatcher<P> {
 	build(survivors: P[]): AgentMessage | null;
 	/** If true, entries for this kind are drained only by {@link drainLazy} and never trigger the idle flush. */
 	skipIdleFlush?: boolean;
+	/** Group key for enqueue-time coalescing; a queued entry with the same key folds via {@link coalesce}. */
+	coalesceKey?(entry: P): string;
+	/** Fold an incoming entry into the queued entry with the same key; the result replaces the queued entry. */
+	coalesce?(queued: P, incoming: P): P;
 }
 
 export interface YieldQueueOptions {
@@ -23,6 +27,8 @@ interface StoredDispatcher {
 	isStale?: (entry: unknown) => boolean;
 	build: (survivors: unknown[]) => AgentMessage | null;
 	skipIdleFlush?: boolean;
+	coalesceKey?: (entry: unknown) => string;
+	coalesce?: (queued: unknown, incoming: unknown) => unknown;
 }
 
 interface StoredEntry {
@@ -55,6 +61,12 @@ export class YieldQueue {
 			...(dispatcher.isStale ? { isStale: entry => dispatcher.isStale?.(entry as P) ?? false } : {}),
 			build: survivors => dispatcher.build(survivors as P[]),
 			...(dispatcher.skipIdleFlush ? { skipIdleFlush: true } : {}),
+			...(dispatcher.coalesceKey && dispatcher.coalesce
+				? {
+						coalesceKey: (entry: unknown) => dispatcher.coalesceKey!(entry as P),
+						coalesce: (queued: unknown, incoming: unknown) => dispatcher.coalesce!(queued as P, incoming as P),
+					}
+				: {}),
 		};
 		this.#dispatchers.set(kind, stored);
 		return () => {
@@ -78,7 +90,8 @@ export class YieldQueue {
 	}
 
 	#enqueue(kind: string, entry: StoredEntry): boolean {
-		if (!this.#dispatchers.has(kind)) {
+		const dispatcher = this.#dispatchers.get(kind);
+		if (!dispatcher) {
 			logger.warn("Yield queue entry ignored for unregistered kind", { kind });
 			return false;
 		}
@@ -87,11 +100,34 @@ export class YieldQueue {
 			entries = [];
 			this.#entries.set(kind, entries);
 		}
-		entries.push(entry);
-		if (!this.#options.isStreaming() && !this.#dispatchers.get(kind)!.skipIdleFlush) {
+		if (!this.#coalesce(dispatcher, entries, entry)) {
+			entries.push(entry);
+		}
+		if (!this.#options.isStreaming() && !dispatcher.skipIdleFlush) {
 			this.#scheduleIdleFlush();
 		}
 		return true;
+	}
+
+	/**
+	 * Fold `entry` into an already-queued entry with the same coalesce key so a
+	 * sustained producer (e.g. ambient job progress while the owner is idle)
+	 * keeps ONE bounded entry per key instead of growing the queue without
+	 * limit. Entries carrying a settlement receipt are never folded — their
+	 * resolve/reject must observe their own dispatch.
+	 */
+	#coalesce(dispatcher: StoredDispatcher, entries: StoredEntry[], entry: StoredEntry): boolean {
+		if (!dispatcher.coalesceKey || !dispatcher.coalesce) return false;
+		if (entry.resolve || entry.reject) return false;
+		const key = dispatcher.coalesceKey(entry.value);
+		for (let index = entries.length - 1; index >= 0; index--) {
+			const queued = entries[index];
+			if (queued.resolve || queued.reject) continue;
+			if (dispatcher.coalesceKey(queued.value) !== key) continue;
+			queued.value = dispatcher.coalesce(queued.value, entry.value);
+			return true;
+		}
+		return false;
 	}
 
 	has(kind?: string): boolean {

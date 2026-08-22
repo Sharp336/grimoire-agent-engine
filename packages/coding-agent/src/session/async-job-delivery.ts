@@ -15,7 +15,7 @@ import chattyProgressGuidanceTemplate from "../prompts/system/chatty-progress-gu
 import asyncProgressTemplate from "../prompts/tools/async-progress.md" with { type: "text" };
 import asyncResultTemplate from "../prompts/tools/async-result.md" with { type: "text" };
 import type { CustomMessage } from "./messages";
-import { buildLineSnappedPreview } from "./progress-preview";
+import { buildLineSnappedPreview, buildProgressPreview, mergeProgressPreviews } from "./progress-preview";
 
 /**
  * `customType` of the injected async-result follow-up message. The task
@@ -78,6 +78,51 @@ export interface AsyncProgressSource {
 	type: AsyncProgressSourceType;
 	label: string;
 	startedAt: number;
+}
+
+/** Coalesce key for enqueue-time folding: one bounded queue entry per job per delivery generation. */
+export function asyncProgressCoalesceKey(entry: AsyncProgressEntry): string {
+	return `${entry.epoch}:${entry.jobId}`;
+}
+
+/**
+ * Fold a newly delivered progress entry into the queued entry for the same
+ * job, retaining one bounded head/tail window. Ambient progress enqueues
+ * every batcher window (~2 s) indefinitely while the owner is idle; without
+ * folding, both the queue and the batch message built from it grow without
+ * limit. A fold that drops middle content counts as one suppressed event so
+ * the rendered marker reflects the coalescing.
+ */
+export function mergeAsyncProgressEntries(
+	queued: AsyncProgressEntry,
+	incoming: AsyncProgressEntry,
+): AsyncProgressEntry {
+	let text: string;
+	let sourceTruncated = queued.sourceTruncated === true || incoming.sourceTruncated === true;
+	let foldedEvents = 0;
+	if (queued.text.length === 0 || incoming.text.length === 0) {
+		text = queued.text.length === 0 ? incoming.text : queued.text;
+	} else {
+		const preview = mergeProgressPreviews(
+			buildProgressPreview(queued.text, queued.sourceTruncated === true),
+			buildProgressPreview(incoming.text, incoming.sourceTruncated === true),
+		);
+		text =
+			preview.text ?? [preview.head, preview.tail].filter((part): part is string => part !== undefined).join("\n");
+		if (preview.truncated) {
+			sourceTruncated = true;
+			foldedEvents = 1;
+		}
+	}
+	const suppressedEvents = (queued.suppressedEvents ?? 0) + (incoming.suppressedEvents ?? 0) + foldedEvents;
+	return {
+		...incoming,
+		text,
+		sourceTruncated: sourceTruncated || undefined,
+		suppressedEvents: suppressedEvents || undefined,
+		artifactId: incoming.artifactId ?? queued.artifactId,
+		reminder: queued.reminder ?? incoming.reminder,
+	};
 }
 
 type AsyncProgressJobDetails = {
@@ -206,6 +251,11 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			failed: status === "failed" || timedOut || (exitCode !== undefined && exitCode !== 0),
 			hasExitCode: exitCode !== undefined,
 			progressSummarized: entry.progressSummary !== undefined,
+			// Terminal-only content for an artifact-backed job: a thrown error or
+			// post-processing result that never flowed through progress must not
+			// be dropped with the already-delivered stream (delivery passes ""
+			// when the terminal text is fully covered by progress).
+			terminalText: entry.progressSummary && entry.result ? sanitizeText(entry.result) : undefined,
 			artifactId: entry.progressSummary?.artifactId,
 			leftoverText: leftover?.text ? sanitizeText(leftover.text) : undefined,
 			leftoverHead: leftover?.head ? sanitizeText(leftover.head) : undefined,

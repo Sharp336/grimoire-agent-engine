@@ -253,8 +253,10 @@ import {
 	ASYNC_RESULT_MESSAGE_TYPE,
 	type AsyncProgressEntry,
 	type AsyncResultEntry,
+	asyncProgressCoalesceKey,
 	buildAsyncProgressBatchMessage,
 	buildAsyncResultBatchMessage,
+	mergeAsyncProgressEntries,
 } from "./async-job-delivery";
 import { BashRunner, type BashRunnerHost } from "./bash-runner";
 import {
@@ -1422,6 +1424,11 @@ export class AgentSession {
 			isStale: entry =>
 				entry.epoch !== this.#asyncDeliveryEpoch ||
 				(entry.job !== undefined && this.#asyncJobManager?.isDeliverySuppressed(entry.jobId) === true),
+			// Ambient entries accumulate for as long as the owner stays idle; fold
+			// them into one bounded window per job so the queue cannot grow (and
+			// the eventual batch message cannot materialize) without limit.
+			coalesceKey: asyncProgressCoalesceKey,
+			coalesce: mergeAsyncProgressEntries,
 			build: buildAsyncProgressBatchMessage,
 		});
 		this.#unregisterAsyncProgressWakeQueue = this.yieldQueue.register<AsyncProgressEntry>(
@@ -1430,6 +1437,8 @@ export class AgentSession {
 				isStale: entry =>
 					entry.epoch !== this.#asyncDeliveryEpoch ||
 					(entry.job !== undefined && this.#asyncJobManager?.isDeliverySuppressed(entry.jobId) === true),
+				coalesceKey: asyncProgressCoalesceKey,
+				coalesce: mergeAsyncProgressEntries,
 				build: buildAsyncProgressBatchMessage,
 			},
 		);
@@ -1993,7 +2002,11 @@ export class AgentSession {
 			job.progressArtifactId !== undefined
 				? { artifactId: job.progressArtifactId, leftover: job.completionLeftover }
 				: undefined;
-		const formatted = progressSummary ? "" : await this.#formatAsyncResultForFollowUp(text);
+		// A failed job's terminal text (thrown error, spawn failure) may never
+		// have flowed through progress — preserve it beside the artifact link
+		// instead of discarding it with the already-delivered stream.
+		const formatted =
+			progressSummary && job?.status !== "failed" ? "" : await this.#formatAsyncResultForFollowUp(text);
 		if (this.#isDisposed) return;
 		if (epoch !== this.#asyncDeliveryEpoch) return;
 		if (manager.isDeliverySuppressed(jobId)) return;
