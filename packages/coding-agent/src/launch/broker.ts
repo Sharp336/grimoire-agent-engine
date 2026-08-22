@@ -1073,8 +1073,11 @@ class DaemonBroker {
 					this.#progressBatcher.clear(registration.batchKey);
 					void registration.artifactSink.dispose();
 				};
-				if (record?.snapshot.id === registration.daemonId) await this.#queueRecordOutputWork(record, remove);
-				else remove();
+				if (record && record.snapshot.id === registration.daemonId) {
+					await this.#queueRecordOutputWork(record, remove);
+				} else {
+					remove();
+				}
 			}
 			for (const subscription of subscriptions) {
 				if (!current()) return;
