@@ -109,8 +109,7 @@ export function canUseRemoteCompaction(model: Model | null | undefined, settings
 
 /**
  * Whether a configured method can run for the active model. This deliberately
- * includes handoff and shake: speculation preserves their historical behavior,
- * while automatic threshold selection filters them out separately.
+ * includes handoff, soft, and shake as threshold-capable methods.
  */
 function isCompactionMethodAvailable(
 	model: Model | null | undefined,
@@ -130,7 +129,6 @@ export function hasAvailableCompactionMethod(
 	settings: CompactionSettings,
 ): boolean {
 	for (const candidate of resolveCompactionMethodOrder(settings.methodOrder)) {
-		if (candidate === "handoff" || candidate === "shake") continue;
 		if (isCompactionMethodAvailable(model, settings, candidate)) return true;
 	}
 	return false;

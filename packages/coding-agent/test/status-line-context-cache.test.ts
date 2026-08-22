@@ -145,6 +145,25 @@ function renderGuestContextSegment(session: AgentSession, contextUsage: CollabCo
 	return comp.getTopBorder(80).content.replaceAll(/\x1b\[[0-9;]*m/g, "");
 }
 
+function renderGuestAnnotatedGauge(session: AgentSession, contextUsage: CollabContextUsage): string {
+	const comp = new StatusLineComponent(session);
+	comp.setCollabStatus({
+		role: "guest",
+		participantCount: 2,
+		stateOverride: { contextUsage } as CollabSessionState,
+	});
+	comp.updateSettings({
+		preset: "custom",
+		leftSegments: ["pi"],
+		rightSegments: ["session_name"],
+		separator: "none",
+		sessionAccent: false,
+		contextLine: "annotated",
+		contextPercentBase: "model",
+	});
+	return comp.getTopBorder(80).content.replaceAll(/\x1b\[[0-9;]*m/g, "");
+}
+
 describe("StatusLineComponent context breakdown", () => {
 	it("surfaces the provider-anchored tokens and context window from getContextUsage", () => {
 		const { session } = makeSession({
@@ -379,6 +398,38 @@ describe("StatusLineComponent context breakdown", () => {
 		expect(renderContextSegment(session, "context_pct", "compaction")).toContain("75.0%/200K");
 	});
 
+	it("uses the compaction denominator when handoff is the only method", () => {
+		const { session } = makeSession({
+			messages: [userMessage("hi")],
+			contextWindow: 200_000,
+			usage: { tokens: 150_000, contextWindow: 200_000, percent: 75 },
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.methodOrder": ["handoff"],
+				"compaction.thresholdTokens": 100_000,
+				"compaction.thresholdPercent": -1,
+			}),
+		});
+
+		expect(renderContextSegment(session, "context_pct", "compaction")).toContain("150.0%/100K");
+	});
+
+	it("uses the compaction denominator when shake is the only method", () => {
+		const { session } = makeSession({
+			messages: [userMessage("hi")],
+			contextWindow: 200_000,
+			usage: { tokens: 150_000, contextWindow: 200_000, percent: 75 },
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.methodOrder": ["shake"],
+				"compaction.thresholdTokens": 100_000,
+				"compaction.thresholdPercent": -1,
+			}),
+		});
+
+		expect(renderContextSegment(session, "context_pct", "compaction")).toContain("150.0%/100K");
+	});
+
 	it("falls back to the model denominator when remote compaction has no route", () => {
 		const { session } = makeSession({
 			messages: [userMessage("hi")],
@@ -438,6 +489,76 @@ describe("StatusLineComponent context breakdown", () => {
 		});
 		expect(plain).toContain("60.0%/200K");
 		expect(plain).not.toContain("150.0%/80K");
+	});
+
+	it("uses only the host speculation boundary for guests", () => {
+		const hostUsage: CollabContextUsage = {
+			tokens: 50_000,
+			contextWindow: 200_000,
+			percent: 25,
+			compactionThresholdTokens: 150_000,
+			compactionSpeculationTokens: 120_000,
+		};
+		const render = (compactionSettings: AgentSession["settings"], usage = hostUsage): string => {
+			const { session } = makeSession({
+				messages: [userMessage("hi"), assistantMessage("done")],
+				contextWindow: 200_000,
+				usage: { tokens: 50_000, contextWindow: 200_000, percent: 25 },
+				settings: compactionSettings,
+			});
+			return renderGuestAnnotatedGauge(session, usage);
+		};
+		const speculationGlyph = theme.symbol("context.speculation");
+		const compactionGlyph = theme.symbol("context.compaction");
+		const disabledGuest = render(
+			Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.asyncEnabled": false,
+				"compaction.thresholdTokens": 80_000,
+				"compaction.thresholdPercent": -1,
+			}),
+		);
+		const conflictingGuest = render(
+			Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.asyncEnabled": true,
+				"compaction.methodOrder": ["snapcompact"],
+				"compaction.thresholdTokens": 20_000,
+				"compaction.thresholdPercent": -1,
+			}),
+		);
+		expect(disabledGuest.indexOf(speculationGlyph)).toBeGreaterThanOrEqual(0);
+		expect(disabledGuest.indexOf(compactionGlyph)).toBeGreaterThan(disabledGuest.indexOf(speculationGlyph));
+		expect(conflictingGuest.indexOf(speculationGlyph)).toBe(disabledGuest.indexOf(speculationGlyph));
+		expect(conflictingGuest.indexOf(compactionGlyph)).toBe(disabledGuest.indexOf(compactionGlyph));
+
+		const explicitNoSpeculation = render(
+			Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.asyncEnabled": true,
+				"compaction.thresholdTokens": 80_000,
+				"compaction.thresholdPercent": -1,
+			}),
+			{ ...hostUsage, compactionSpeculationTokens: null },
+		);
+		const oldHost = render(
+			Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.asyncEnabled": true,
+				"compaction.thresholdTokens": 80_000,
+				"compaction.thresholdPercent": -1,
+			}),
+			{
+				tokens: hostUsage.tokens,
+				contextWindow: hostUsage.contextWindow,
+				percent: hostUsage.percent,
+				compactionThresholdTokens: hostUsage.compactionThresholdTokens,
+			},
+		);
+		expect(explicitNoSpeculation).not.toContain(speculationGlyph);
+		expect(oldHost).not.toContain(speculationGlyph);
+		expect(explicitNoSpeculation).toContain(compactionGlyph);
+		expect(oldHost).toContain(compactionGlyph);
 	});
 
 	it("places the compaction marker in the final cell of a threshold-relative gauge", () => {

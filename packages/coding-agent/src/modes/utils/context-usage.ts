@@ -84,16 +84,6 @@ export function resolveContextPercentDenominator(options: ContextPercentDenomina
 	const settings = options.compactionSettings;
 	if (!settings || typeof settings !== "object" || settings.enabled !== true) return modelWindow;
 	const strategy = (settings as { strategy?: unknown }).strategy;
-	if (
-		strategy !== undefined &&
-		strategy !== "context-full" &&
-		strategy !== "handoff" &&
-		strategy !== "shake" &&
-		strategy !== "snapcompact" &&
-		strategy !== "off"
-	) {
-		return modelWindow;
-	}
 	if (strategy === "off") return modelWindow;
 
 	const methodOrder = (settings as { methodOrder?: unknown }).methodOrder;
@@ -127,12 +117,17 @@ export interface CompactionBoundaries {
  * when compaction is disabled/off or the window is unknown — the gauge then
  * renders without markers. `model` resolves which configured method a real
  * pass would run; without it, model-gated methods count as unavailable.
+ *
+ * `speculationOverrideTokens` is authoritative collab metadata: when supplied
+ * (including `null`) it bypasses local async/method settings. An absent
+ * override preserves local rendering.
  */
 export function computeCompactionBoundaries(
 	settings: AgentSession["settings"],
 	contextWindow: number,
 	model?: Model | null,
 	thresholdOverrideTokens?: number | null,
+	speculationOverrideTokens?: number | null,
 ): CompactionBoundaries | null {
 	if (!(contextWindow > 0)) return null;
 	if (thresholdOverrideTokens === null) return null;
@@ -148,13 +143,24 @@ export function computeCompactionBoundaries(
 				: undefined;
 	}
 	if (thresholdTokens === undefined || !(thresholdTokens > 0) || thresholdTokens > contextWindow) return null;
-	const configuredForSpeculation =
-		configured.enabled === true &&
-		compactionSettings.strategy !== "off" &&
-		configured.asyncEnabled !== false &&
-		resolveSpeculationMethod(model, configured) !== undefined;
-	const leadTokens = resolveSpeculationLeadTokens(thresholdTokens);
-	const speculationTokens = configuredForSpeculation ? Math.max(0, thresholdTokens - leadTokens) : null;
+	let speculationTokens: number | null;
+	if (speculationOverrideTokens !== undefined) {
+		speculationTokens =
+			typeof speculationOverrideTokens === "number" &&
+			Number.isFinite(speculationOverrideTokens) &&
+			speculationOverrideTokens >= 0 &&
+			speculationOverrideTokens <= thresholdTokens
+				? speculationOverrideTokens
+				: null;
+	} else {
+		const configuredForSpeculation =
+			configured.enabled === true &&
+			compactionSettings.strategy !== "off" &&
+			configured.asyncEnabled !== false &&
+			resolveSpeculationMethod(model, configured) !== undefined;
+		const leadTokens = resolveSpeculationLeadTokens(thresholdTokens);
+		speculationTokens = configuredForSpeculation ? Math.max(0, thresholdTokens - leadTokens) : null;
+	}
 	return {
 		thresholdPercent: (thresholdTokens / contextWindow) * 100,
 		thresholdTokens,

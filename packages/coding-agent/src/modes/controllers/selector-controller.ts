@@ -681,7 +681,6 @@ export class SelectorController {
 			case "statusLine.sessionAccent":
 			case "statusLine.transparent":
 			case "statusLine.compactThinkingLevel":
-			case "statusLine.contextLine":
 			case "statusLine.contextPercentBase":
 			case "statusLineSegments":
 			case "statusLineModelThinking":

@@ -325,6 +325,21 @@ function resolveCollabCompactionThreshold(status: CollabStatus | null): number |
 	return typeof threshold === "number" && Number.isFinite(threshold) && threshold > 0 ? threshold : null;
 }
 
+/**
+ * Three-state host-speculation selector for context gauge markers:
+ * `undefined` means local/no collab state, a number is the host's
+ * authoritative boundary, and `null` means the host omitted or disabled
+ * speculation. Missing metadata is intentionally treated as `null` so old
+ * hosts cannot make guests infer a boundary from local settings.
+ */
+function resolveCollabCompactionSpeculation(status: CollabStatus | null): number | null | undefined {
+	if (status?.role !== "guest") return undefined;
+	const state = status.stateOverride;
+	if (state === undefined || state === null) return undefined;
+	const speculation = state.contextUsage?.compactionSpeculationTokens;
+	return typeof speculation === "number" && Number.isFinite(speculation) && speculation >= 0 ? speculation : null;
+}
+
 function hasGitSegment(segments: readonly StatusLineSegmentId[]): boolean {
 	return segments.includes("git");
 }
@@ -2089,16 +2104,20 @@ export class StatusLineComponent implements Component {
 		const usedCount = Math.min(scaleWidth, Math.max(1, Math.round((clampedPct / 100) * scaleWidth)));
 		const unusedColor = theme.getFgAnsi("border");
 
-		// Boundary markers follow the authoritative host threshold while a collab
-		// state is present; only local/no-state rendering consults the local
-		// auto-compaction toggle.
+		// Boundary markers follow authoritative host values while a collab state
+		// is present; only local/no-state rendering consults local settings.
 		const thresholdOverrideTokens = resolveCollabCompactionThreshold(ctx.collab);
+		const speculationOverrideTokens = resolveCollabCompactionSpeculation(ctx.collab);
 		const hasCollabThresholdState = thresholdOverrideTokens !== undefined;
 		const shouldRenderCompactionMarkers = hasCollabThresholdState
 			? thresholdOverrideTokens !== null
 			: ctx.autoCompactEnabled;
 		if ((mode === "annotated" || mode === "embedded") && shouldRenderCompactionMarkers && gapWidth >= 8) {
-			const boundaries = this.#compactionBoundaries(ctx.contextWindow, thresholdOverrideTokens);
+			const boundaries = this.#compactionBoundaries(
+				ctx.contextWindow,
+				thresholdOverrideTokens,
+				speculationOverrideTokens,
+			);
 			if (boundaries) {
 				const markerDenominator =
 					effectiveSettings.contextPercentBase === "compaction"
@@ -2178,6 +2197,7 @@ export class StatusLineComponent implements Component {
 	#compactionBoundaries(
 		contextWindow: number,
 		thresholdOverrideTokens?: number | null,
+		speculationOverrideTokens?: number | null,
 	): CompactionBoundaries | null {
 		// Collab-guest replicas and test mocks have no session-scoped settings;
 		// the global store carries the same compaction knobs.
@@ -2186,7 +2206,13 @@ export class StatusLineComponent implements Component {
 		// (and therefore whether a speculation tick is meaningful).
 		const model = this.session.state?.model ?? this.session.model;
 		try {
-			return computeCompactionBoundaries(source, contextWindow, model, thresholdOverrideTokens);
+			return computeCompactionBoundaries(
+				source,
+				contextWindow,
+				model,
+				thresholdOverrideTokens,
+				speculationOverrideTokens,
+			);
 		} catch {
 			return null;
 		}

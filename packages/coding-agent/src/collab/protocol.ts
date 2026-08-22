@@ -48,6 +48,12 @@ export type AgentSnapshot = WireAgentSnapshot;
 export interface CollabContextUsage extends ContextUsage {
 	/** Host's runnable automatic-compaction threshold in context tokens. */
 	compactionThresholdTokens?: number;
+	/**
+	 * Host's authoritative background-speculation start in context tokens.
+	 * `null` explicitly means no speculation will run. The field is optional
+	 * so guests remain compatible with snapshots from older hosts.
+	 */
+	compactionSpeculationTokens?: number | null;
 }
 
 /** Debounced footer snapshot broadcast by the host. */

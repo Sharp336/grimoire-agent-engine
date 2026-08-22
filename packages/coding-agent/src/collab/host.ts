@@ -27,8 +27,9 @@ import type { InteractiveModeContext } from "../modes/types";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
-import { hasAvailableCompactionMethod } from "../session/compaction-methods";
+import { hasAvailableCompactionMethod, resolveSpeculationMethod } from "../session/compaction-methods";
 import { stripImagesFromMessage, USER_INTERRUPT_LABEL } from "../session/messages";
+import { resolveSpeculationLeadTokens } from "../session/speculation-lead";
 import type { SessionEntry as StoredSessionEntry } from "../session/session-entries";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "../task/types";
 import { generateRoomKey, generateWriteToken, importRoomKey } from "./crypto";
@@ -538,6 +539,7 @@ export class CollabHost {
 		const configured = this.#ctx.settings?.getGroup?.("compaction");
 		const compactionSettings = configured as CompactionSettings | undefined;
 		let compactionThresholdTokens: number | undefined;
+		let compactionSpeculationTokens: number | null | undefined;
 		if (
 			Number.isFinite(contextWindow) &&
 			contextWindow > 0 &&
@@ -547,6 +549,15 @@ export class CollabHost {
 			const resolvedThresholdTokens = resolveThresholdTokens(contextWindow, compactionSettings);
 			if (Number.isFinite(resolvedThresholdTokens) && resolvedThresholdTokens > 0 && resolvedThresholdTokens <= contextWindow) {
 				compactionThresholdTokens = resolvedThresholdTokens;
+				const strategy = (compactionSettings as CompactionSettings & { strategy?: unknown }).strategy;
+				const speculationMethod =
+					compactionSettings.asyncEnabled !== false && strategy !== "off"
+						? resolveSpeculationMethod(session.model, compactionSettings)
+						: undefined;
+				compactionSpeculationTokens =
+					speculationMethod === undefined
+						? null
+						: Math.max(0, resolvedThresholdTokens - resolveSpeculationLeadTokens(resolvedThresholdTokens));
 			}
 		}
 		const contextUsage: CollabContextUsage = {
@@ -556,6 +567,7 @@ export class CollabHost {
 		};
 		if (compactionThresholdTokens !== undefined) {
 			contextUsage.compactionThresholdTokens = compactionThresholdTokens;
+			contextUsage.compactionSpeculationTokens = compactionSpeculationTokens ?? null;
 		}
 		return {
 			isStreaming: session.isStreaming,
