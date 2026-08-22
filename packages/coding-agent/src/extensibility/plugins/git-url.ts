@@ -1,3 +1,5 @@
+import { redactUrlCredentials } from "@oh-my-pi/pi-utils";
+
 /**
  * Parsed git URL information.
  */
@@ -48,18 +50,15 @@ const SHORTHAND_PREFIXES: Record<string, string> = {
  */
 const SHORTHAND_RE = /^([a-z]+):([^/:#]+)\/([^#]+?)(?:\.git)?(?:#(.+))?$/i;
 
+/**
+ * {@link redactUrlCredentials} plus this module's trailing-slash normalization,
+ * which `URL.toString()` re-adds for a bare-origin remote. Applied only when
+ * credentials were actually removed, so a caller-supplied trailing slash on an
+ * uncredentialed URL still round-trips untouched.
+ */
 function stripUrlCredentials(url: string): string {
-	if (!url.includes("://")) return url;
-	try {
-		const parsed = new URL(url);
-		if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return url;
-		if (!parsed.username && !parsed.password) return url;
-		parsed.username = "";
-		parsed.password = "";
-		return parsed.toString().replace(/\/$/, "");
-	} catch {
-		return url;
-	}
+	const redacted = redactUrlCredentials(url);
+	return redacted === url ? url : redacted.replace(/\/$/, "");
 }
 
 function extractStandard(pathname: string, _hash: string): { user: string; project: string } | null {

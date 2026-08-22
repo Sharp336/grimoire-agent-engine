@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { postmortem, Snowflake, untilAborted, withTimeout } from "@oh-my-pi/pi-utils";
+import { postmortem, redactUrlCredentials, Snowflake, untilAborted, withTimeout } from "@oh-my-pi/pi-utils";
 import type { HTMLElement } from "@oh-my-pi/pi-utils/dom";
 import type {
 	Browser,
@@ -340,25 +340,6 @@ async function fillViaHandle(handle: ElementHandle, value: string, signal?: Abor
 		}),
 	);
 	await untilAborted(signal, () => handle.type(value, { delay: 0 }));
-}
-
-/**
- * Strip `user:pass@` from a URL before surfacing it in tool outputs / details
- * so Basic Auth credentials don't leak into transcripts. Returns the original
- * string verbatim when it doesn't parse as a URL or when there are no
- * credentials to redact.
- */
-function redactUrlCredentials(url: string): string {
-	if (!url || (!url.includes("@") && !url.includes("//"))) return url;
-	try {
-		const parsed = new URL(url);
-		if (!parsed.username && !parsed.password) return url;
-		parsed.username = "";
-		parsed.password = "";
-		return parsed.toString();
-	} catch {
-		return url;
-	}
 }
 
 class RequestInterceptionCleanupError extends ToolError {}

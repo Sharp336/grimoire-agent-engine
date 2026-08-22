@@ -22,6 +22,7 @@ import {
 	pruneBunInstallCache,
 	type ReleaseInfo,
 	type RenameMigrationSteps,
+	registryRequest,
 	replaceBinaryForUpdate,
 	resolveBunGlobalNodeModulesDirFromLocations,
 	resolveReleaseBinaryAsset,
@@ -81,21 +82,24 @@ describe("update command plugin dispatch", () => {
 		expect(updateSpy).toHaveBeenCalledWith({ force: true, check: true });
 		expect(pluginSpy).not.toHaveBeenCalled();
 	});
+
+	it("forwards --registry to the app updater so the override reaches the version check", async () => {
+		// The live path is oclif `Update.flags`; a dropped binding here sends
+		// the update silently back to the official registry, which is the whole
+		// failure the flag exists to prevent.
+		const registry = "https://nexus.corp/repository/npm-group/";
+		const updateSpy = spyOn(updateCli, "runUpdateCommand").mockResolvedValue(undefined);
+
+		const command = new Update(["--registry", registry], TEST_CONFIG);
+		await command.run();
+
+		expect(updateSpy).toHaveBeenCalledWith({ force: false, check: false, registry });
+	});
 });
 
 describe("parseUpdateArgs", () => {
 	it("preserves the legacy plugin update shorthand", () => {
 		expect(parseUpdateArgs(["update", "-l"])).toEqual({ force: false, check: false, plugins: true });
-	});
-
-	it("reads the registry override from both the attached and separated argv forms", () => {
-		// A dropped value would silently send the update back to the default
-		// registry — the exact failure the override exists to avoid.
-		const registry = "https://nexus.corp/repository/npm-group/";
-		expect(parseUpdateArgs(["update", `--registry=${registry}`])?.registry).toBe(registry);
-		expect(parseUpdateArgs(["update", "--registry", registry])?.registry).toBe(registry);
-		expect(parseUpdateArgs(["update", "-r", registry])?.registry).toBe(registry);
-		expect(parseUpdateArgs(["update", "--check"])?.registry).toBeUndefined();
 	});
 });
 
@@ -1396,6 +1400,40 @@ describe("update-cli configurable registry", () => {
 		expect(() => normalizeRegistryUrl("   ")).toThrow("value is empty");
 		expect(() => normalizeRegistryUrl("nexus.corp/npm")).toThrow("not a valid URL");
 		expect(() => normalizeRegistryUrl("ftp://nexus.corp/npm")).toThrow("http:// or https://");
+	});
+
+	it("rejects a query or fragment instead of appending the package name inside it", () => {
+		// `${registry}${pkg}/latest` on `https://mirror/npm?tenant=blue` yields
+		// `https://mirror/npm?tenant=blue/@oh-my-pi/pi-coding-agent/latest` —
+		// the package name lands in the query string and every lookup 404s.
+		expect(() => normalizeRegistryUrl("https://mirror/npm?tenant=blue")).toThrow("query or fragment");
+		expect(() => normalizeRegistryUrl("https://mirror/npm#frag")).toThrow("query or fragment");
+	});
+
+	it("promotes url credentials to a Basic header and drops them from the request url", () => {
+		// Bun's fetch silently discards URL userinfo instead of deriving Basic
+		// auth from it, so an authenticated mirror would 401 the version check
+		// while the bun/npm install (which does honor userinfo) succeeded.
+		const { url, headers } = registryRequest("https://user:tok3n@mirror/npm/");
+		expect(url).toBe("https://mirror/npm/");
+		expect(Buffer.from(headers.Authorization!.replace("Basic ", ""), "base64").toString()).toBe("user:tok3n");
+
+		expect(registryRequest("https://mirror/npm/")).toEqual({ url: "https://mirror/npm/", headers: {} });
+	});
+
+	it("keeps credentials usable but out of the messages it surfaces", () => {
+		// A mirror reachable only as user:token@host must still resolve, while
+		// the token must not reach a terminal or CI log.
+		expect(normalizeRegistryUrl("https://user:tok3n@mirror/npm")).toBe("https://user:tok3n@mirror/npm/");
+
+		let message = "";
+		try {
+			normalizeRegistryUrl("https://user:tok3n@mirror/npm?tenant=blue");
+		} catch (err) {
+			message = err instanceof Error ? err.message : String(err);
+		}
+		expect(message).toContain("query or fragment");
+		expect(message).not.toContain("tok3n");
 	});
 
 	it("points the version check, the bun install and the npm install at the same overridden catalog", async () => {

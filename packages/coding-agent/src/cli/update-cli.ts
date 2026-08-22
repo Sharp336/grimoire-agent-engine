@@ -10,7 +10,17 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { $env, $pickenv, $which, APP_NAME, compareVersions, isEnoent, VERSION } from "@oh-my-pi/pi-utils";
+import {
+	$env,
+	$pickenv,
+	$which,
+	APP_NAME,
+	compareVersions,
+	isEnoent,
+	redactUrlCredentials,
+	VERSION,
+	wrapFetchForExtraCa,
+} from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import { $ } from "bun";
@@ -54,6 +64,16 @@ export const REGISTRY_ENV_VAR = "OMP_UPDATE_REGISTRY";
  * mounted under a path prefix (`https://nexus.corp/repository/npm-group`) is
  * supported; the trailing slash is added when missing so the prefix is not
  * swallowed by the package name.
+ *
+ * A query or fragment is rejected rather than repaired. The package name is
+ * appended to this value, so `https://mirror/npm?tenant=blue` would resolve to
+ * `https://mirror/npm?tenant=blue/@oh-my-pi/pi-coding-agent/latest` — the
+ * package name lands inside the query string and every lookup 404s. There is
+ * no correct place to splice it in, so the value is refused up front.
+ *
+ * Credentials embedded as `user:pass@` are preserved (some mirrors are only
+ * reachable that way) but never echoed: every rejection here reports the value
+ * through {@link redactUrlCredentials}.
  */
 export function normalizeRegistryUrl(value: string, source = "--registry"): string {
 	const trimmed = value.trim();
@@ -62,10 +82,17 @@ export function normalizeRegistryUrl(value: string, source = "--registry"): stri
 	try {
 		url = new URL(trimmed);
 	} catch {
-		throw new Error(`Invalid npm registry from ${source}: ${trimmed} is not a valid URL`);
+		throw new Error(`Invalid npm registry from ${source}: ${redactUrlCredentials(trimmed)} is not a valid URL`);
 	}
 	if (url.protocol !== "http:" && url.protocol !== "https:") {
-		throw new Error(`Invalid npm registry from ${source}: ${trimmed} must use http:// or https://`);
+		throw new Error(
+			`Invalid npm registry from ${source}: ${redactUrlCredentials(trimmed)} must use http:// or https://`,
+		);
+	}
+	if (url.search || url.hash) {
+		throw new Error(
+			`Invalid npm registry from ${source}: ${redactUrlCredentials(trimmed)} must not have a query or fragment`,
+		);
 	}
 	const normalized = url.href;
 	return normalized.endsWith("/") ? normalized : `${normalized}/`;
@@ -421,9 +448,7 @@ export interface BinaryReplacementOptions {
  * Parse update subcommand arguments.
  * Returns undefined if not an update command.
  */
-export function parseUpdateArgs(
-	args: string[],
-): { force: boolean; check: boolean; plugins: boolean; registry?: string } | undefined {
+export function parseUpdateArgs(args: string[]): { force: boolean; check: boolean; plugins: boolean } | undefined {
 	if (args.length === 0 || args[0] !== "update") {
 		return undefined;
 	}
@@ -432,21 +457,7 @@ export function parseUpdateArgs(
 		force: args.includes("--force") || args.includes("-f"),
 		check: args.includes("--check") || args.includes("-c"),
 		plugins: args.includes("--plugins") || args.includes("-l"),
-		registry: parseValueFlag(args, "--registry", "-r"),
 	};
-}
-
-/** Read a `--name=value` / `--name value` (or short-alias) option out of an argv slice. */
-function parseValueFlag(args: string[], name: string, alias: string): string | undefined {
-	for (let i = 0; i < args.length; i++) {
-		const arg = args[i];
-		if (arg === undefined) continue;
-		if (arg === name || arg === alias) return args[i + 1];
-		for (const prefix of [`${name}=`, `${alias}=`]) {
-			if (arg.startsWith(prefix)) return arg.slice(prefix.length);
-		}
-	}
-	return undefined;
 }
 
 async function getBunGlobalBinDir(): Promise<string | undefined> {
@@ -787,13 +798,42 @@ async function resolveUpdateTarget(options: { allowPackageManagers: boolean }): 
 /** Bound on `omp.rename` hops so a broken pointer chain cannot loop forever. */
 const MAX_RENAME_HOPS = 3;
 
+/**
+ * Split a registry base into the URL to request and the auth header it implies.
+ *
+ * `user:pass@` in the registry URL must be promoted to an explicit
+ * `Authorization` header: Bun's `fetch` drops URL userinfo silently rather
+ * than deriving Basic auth from it, so leaving it in the URL would send the
+ * manifest request unauthenticated while the bun/npm install — which does
+ * honor userinfo — succeeds. The credentials are removed from the request URL
+ * once they are in the header so they cannot resurface in an error message.
+ */
+export function registryRequest(registry: string): { url: string; headers: Record<string, string> } {
+	const url = new URL(registry);
+	if (!url.username && !url.password) return { url: registry, headers: {} };
+	// Userinfo is percent-encoded in a URL; the header carries the raw bytes.
+	const user = decodeURIComponent(url.username);
+	const pass = decodeURIComponent(url.password);
+	url.username = "";
+	url.password = "";
+	return {
+		url: url.toString(),
+		headers: { Authorization: `Basic ${Buffer.from(`${user}:${pass}`).toString("base64")}` },
+	};
+}
+
 async function fetchLatestManifest(
 	pkg: string,
 	timeoutMs: number,
 ): Promise<{ version: string; manifest: Record<string, unknown> }> {
 	let response: Response;
+	const { url: registryUrl, headers } = registryRequest(getUpdateRegistry());
 	try {
-		response = await fetch(`${getUpdateRegistry()}${pkg}/latest`, {
+		// Wrapped so a mirror served under a private corporate CA resolves at
+		// the version check too; bun/npm already honor NODE_EXTRA_CA_CERTS at
+		// install time, and the two steps must not disagree. No-op when unset.
+		response = await wrapFetchForExtraCa(fetch)(`${registryUrl}${pkg}/latest`, {
+			headers,
 			signal: withTimeoutSignal(timeoutMs),
 		});
 	} catch (err) {
@@ -1810,7 +1850,7 @@ export async function runUpdateCommand(opts: { force: boolean; check: boolean; r
 		process.exit(1);
 	}
 	if (registry !== DEFAULT_NPM_REGISTRY) {
-		console.log(chalk.dim(`Using npm registry: ${registry}`));
+		console.log(chalk.dim(`Using npm registry: ${redactUrlCredentials(registry)}`));
 	}
 
 	// Check for updates
