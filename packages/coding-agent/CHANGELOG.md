@@ -18,6 +18,9 @@
 - The git TUI sidebar now groups new files separately from tracked changes in the Unstaged section, while Staged and commit file lists use a unified status-based view.
 - Improved resilience when streaming output changes during rendering, preventing incomplete blocks from causing further display updates to fail.
 
+- Hindsight now retains any remaining below-cadence session tail on clean close (`AgentSession.dispose` / session-memory teardown), independent of `retainUpdateMode`.
+- Slash-command autocomplete now collapses skills into a single `/skill:` row; the individual skills list once the prefix reaches `/skill:` (accepting the row with Tab/Enter expands it in place).
+- Subagents in a shared working tree no longer run formatters, linters, or project-wide builds/test suites unless their assignment asks for it; validation runs once by the main agent.
 ### Fixed
 
 - Commit-message generation errors in the git TUI now remain visible in the status bar instead of disappearing and returning to an idle state.

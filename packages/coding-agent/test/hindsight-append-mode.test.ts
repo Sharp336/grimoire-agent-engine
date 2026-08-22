@@ -6,10 +6,11 @@ import { HindsightSessionState } from "@oh-my-pi/pi-coding-agent/hindsight/state
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 
-function captureBodies(): unknown[] {
+function captureBodies(opts?: { delay?: Promise<void> }): unknown[] {
 	const bodies: unknown[] = [];
 	const fetchMock: typeof globalThis.fetch = Object.assign(
 		async (_input: string | URL | Request, init?: RequestInit | BunFetchRequestInit): Promise<Response> => {
+			if (opts?.delay) await opts.delay;
 			bodies.push(JSON.parse(String(init?.body ?? "{}")));
 			return new Response("{}", { status: 200 });
 		},
@@ -373,5 +374,87 @@ describe("Hindsight append-mode session retention", () => {
 		expect(String(firstItem(bodies[1]).document_id)).toMatch(/^sess-lastturn-tail-\d+$/);
 		expect(String(firstItem(bodies[1]).content)).toContain("turn seven has enough text");
 		expect(firstItem(bodies[1])).not.toHaveProperty("update_mode");
+	});
+
+	it("force-rebuilds even when a cadence retain is still in flight", async () => {
+		const gate = Promise.withResolvers<void>();
+		const bodies = captureBodies({ delay: gate.promise });
+		const client = new HindsightApi({ baseUrl: "http://hindsight.local" });
+		const first = [turn("user", "hello first turn here"), turn("assistant", "first reply is long enough")];
+		const entries = [
+			userEntry("u1", null, "hello first turn here", "2026-08-17T10:00:00.000Z"),
+			assistantEntry("a1", "u1", "first reply is long enough", "2026-08-17T10:00:05.000Z"),
+		];
+		const state = new HindsightSessionState({
+			sessionId: "sess-force-race",
+			client,
+			bankId: "personal",
+			config: makeConfig({ retainUpdateMode: "append" }),
+			session: {
+				sessionId: "sess-force-race",
+				sessionManager: {
+					getHeader: () => ({ type: "session", id: "sess-force-race", timestamp: SESSION_START, cwd: "/tmp" }),
+					getEntries: () => entries,
+				},
+				getHindsightSessionState: () => state,
+			} as object as AgentSession,
+			banksSet: new Set(["personal"]),
+		});
+
+		const cadence = state.retainSession(first);
+		const forced = state.forceRetainCurrentSession();
+		gate.resolve();
+		await Promise.all([cadence, forced]);
+
+		expect(bodies).toHaveLength(2);
+		expect(firstItem(bodies[1]).update_mode).toBe("replace");
+		expect(firstItem(bodies[1]).document_id).toBe("sess-force-race");
+		expect(String(firstItem(bodies[1]).content)).toContain("hello first turn here");
+		expect(String(firstItem(bodies[1]).content)).toContain("first reply is long enough");
+	});
+
+	it("does not duplicate last-turn documents when close races an in-flight cadence retain", async () => {
+		const gate = Promise.withResolvers<void>();
+		const bodies = captureBodies({ delay: gate.promise });
+		const client = new HindsightApi({ baseUrl: "http://hindsight.local" });
+		const entries = [
+			userEntry("u1", null, "turn one has enough text", "2026-08-17T10:00:00.000Z"),
+			assistantEntry("a1", "u1", "reply one has enough text", "2026-08-17T10:00:01.000Z"),
+			userEntry("u2", "a1", "turn two has enough text", "2026-08-17T10:01:00.000Z"),
+			assistantEntry("a2", "u2", "reply two has enough text", "2026-08-17T10:01:01.000Z"),
+			userEntry("u3", "a2", "turn three has enough text", "2026-08-17T10:02:00.000Z"),
+			assistantEntry("a3", "u3", "reply three has enough text", "2026-08-17T10:02:01.000Z"),
+			userEntry("u4", "a3", "turn four has enough text", "2026-08-17T10:03:00.000Z"),
+			assistantEntry("a4", "u4", "reply four has enough text", "2026-08-17T10:03:01.000Z"),
+			userEntry("u5", "a4", "turn five has enough text", "2026-08-17T10:04:00.000Z"),
+			assistantEntry("a5", "u5", "reply five has enough text", "2026-08-17T10:04:01.000Z"),
+		];
+		const state = new HindsightSessionState({
+			sessionId: "sess-lastturn-race",
+			client,
+			bankId: "personal",
+			config: makeConfig({ retainMode: "last-turn", retainEveryNTurns: 5, retainOverlapTurns: 0 }),
+			session: {
+				sessionId: "sess-lastturn-race",
+				sessionManager: {
+					getHeader: () => ({
+						type: "session",
+						id: "sess-lastturn-race",
+						timestamp: SESSION_START,
+						cwd: "/tmp",
+					}),
+					getEntries: () => entries,
+				},
+				getHindsightSessionState: () => state,
+			} as object as AgentSession,
+			banksSet: new Set(["personal"]),
+		});
+
+		const cadence = state.maybeRetainOnAgentEnd();
+		const close = state.drainOnClose();
+		gate.resolve();
+		await Promise.all([cadence, close]);
+		expect(bodies).toHaveLength(1);
+		expect(String(firstItem(bodies[0]).document_id)).toMatch(/^sess-lastturn-race-\d+$/);
 	});
 });

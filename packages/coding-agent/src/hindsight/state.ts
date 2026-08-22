@@ -225,6 +225,7 @@ export class HindsightSessionState {
 	// cheaper than the re-formatting this cache avoids.
 	#lastRetainedPrefixKey: string = "";
 	#retainInFlight: Promise<void> = Promise.resolve();
+	#autoRetainInFlight: Promise<void> = Promise.resolve();
 	hasRecalledForFirstTurn: boolean;
 	lastRecallSnippet?: string;
 	/** Cached `<mental_models>` block injected into developer instructions. */
@@ -294,6 +295,7 @@ export class HindsightSessionState {
 	async flushPendingSessionRetain(): Promise<void> {
 		if (this.aliasOf) return;
 		if (!this.config.autoRetain) return;
+		await this.#autoRetainInFlight;
 		const messages = extractMessages(this.session.sessionManager);
 		if (messages.length === 0) return;
 		const userTurns = messages.filter(m => m.role === "user").length;
@@ -368,6 +370,11 @@ export class HindsightSessionState {
 	}
 
 	async #retainSessionLocked(messages: HindsightMessage[], opts?: { forceReplace?: boolean }): Promise<void> {
+		if (opts?.forceReplace) {
+			this.#lastRetainedMessageIndex = 0;
+			this.#cachedTranscript = "";
+			this.#lastRetainedPrefixKey = "";
+		}
 		const retainedAt = new Date();
 		const sourceTimestamp = this.#sessionSourceTimestamp() ?? retainedAt;
 		const retainFullWindow = this.config.retainMode === "full-session";
@@ -432,6 +439,18 @@ export class HindsightSessionState {
 	}
 
 	async maybeRetainOnAgentEnd(): Promise<void> {
+		const run = this.#autoRetainInFlight.then(
+			() => this.#maybeRetainOnAgentEndLocked(),
+			() => this.#maybeRetainOnAgentEndLocked(),
+		);
+		this.#autoRetainInFlight = run.then(
+			() => undefined,
+			() => undefined,
+		);
+		await run;
+	}
+
+	async #maybeRetainOnAgentEndLocked(): Promise<void> {
 		if (!this.config.autoRetain) return;
 		const messages = extractMessages(this.session.sessionManager);
 		if (messages.length === 0) return;
@@ -461,14 +480,10 @@ export class HindsightSessionState {
 	async forceRetainCurrentSession(): Promise<void> {
 		const messages = extractMessages(this.session.sessionManager);
 		if (messages.length === 0) return;
-		// Forced retains are user-initiated rebuilds (`/memory enqueue`): drop the
-		// incremental cache so the full transcript is reformatted and resent even
-		// when no new messages arrived since the last auto-retain — otherwise a
-		// rebuild could never recover an upstream document that was deleted or a
-		// previous async retain that never materialized.
-		this.#lastRetainedMessageIndex = 0;
-		this.#cachedTranscript = "";
-		this.#lastRetainedPrefixKey = "";
+		// Forced retains are user-initiated rebuilds (`/memory enqueue`). The
+		// incremental cache is dropped inside the serialized retain so an
+		// in-flight cadence retain cannot repopulate the cursor and suppress
+		// the canonical replace.
 		try {
 			await this.retainSession(messages, { forceReplace: true });
 			this.lastRetainedTurn = messages.filter(m => m.role === "user").length;
