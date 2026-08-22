@@ -600,6 +600,16 @@ describe("UiHelpers.renderInitialMessages — hidden tool activity", () => {
 				display: true,
 				timestamp: 3,
 			},
+			{
+				role: "custom",
+				customType: "async-progress",
+				content: "",
+				display: true,
+				details: {
+					jobs: [{ jobId: "bg_hidden", type: "bash", elapsedMs: 1_000, text: "ASYNC_PROGRESS_MARKER" }],
+				},
+				timestamp: 4,
+			},
 		]);
 
 		const hidden = makeRenderCtx(transcript, true, true);
@@ -608,6 +618,7 @@ describe("UiHelpers.renderInitialMessages — hidden tool activity", () => {
 		expect(hiddenRender).not.toContain("ASYNC_JOB_MARKER");
 		expect(hiddenRender).not.toContain("LATE_DIAGNOSTIC_MARKER");
 		expect(hiddenRender).not.toContain("LAUNCH_COMPLETION_MARKER");
+		expect(hiddenRender).not.toContain("ASYNC_PROGRESS_MARKER");
 
 		const visible = makeRenderCtx(transcript, true, false);
 		await new UiHelpers(visible.ctx).renderInitialMessages();
@@ -615,6 +626,7 @@ describe("UiHelpers.renderInitialMessages — hidden tool activity", () => {
 		expect(visibleRender).toContain("ASYNC_JOB_MARKER");
 		expect(visibleRender).toContain("LATE_DIAGNOSTIC_MARKER");
 		expect(visibleRender).toContain("LAUNCH_COMPLETION_MARKER");
+		expect(visibleRender).toContain("ASYNC_PROGRESS_MARKER");
 	});
 
 	it("keeps normal warnings visible and hides warnings tied to tool activity", () => {

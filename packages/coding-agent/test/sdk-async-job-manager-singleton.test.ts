@@ -155,6 +155,51 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 		}
 	}, 60000);
 
+	function overrideBuiltinExtension(name: "bash" | "hub"): ExtensionFactory {
+		return pi => {
+			pi.registerTool({
+				name,
+				label: `Custom ${name}`,
+				description: `Custom ${name} replacement without async progress parameters.`,
+				parameters: type({}),
+				approval: "read",
+				async execute() {
+					return { content: [{ type: "text" as const, text: "custom" }] };
+				},
+			});
+		};
+	}
+
+	it("drops async Bash guidance when an extension replaces the built-in bash tool", async () => {
+		const session = await spawnTopLevelSession({ "async.enabled": true }, [overrideBuiltinExtension("bash")]);
+		try {
+			const systemPrompt = session.systemPrompt.join("\n\n");
+			// The custom `bash` keeps the name but not the built-in's async/progress
+			// schema, so the prompt must not instruct async:"auto"/progress for it.
+			expect(systemPrompt).not.toContain('`bash` with `async: "auto"`');
+			expect(systemPrompt).not.toContain("finite commands");
+			// Hub guidance is unaffected by the bash override.
+			expect(systemPrompt).toContain("<async-progress>");
+			expect(systemPrompt).toContain("Actionable process output");
+		} finally {
+			await session.dispose();
+		}
+	}, 60000);
+
+	it("drops Hub progress guidance when an extension replaces the built-in hub tool", async () => {
+		const session = await spawnTopLevelSession({ "async.enabled": true }, [overrideBuiltinExtension("hub")]);
+		try {
+			const systemPrompt = session.systemPrompt.join("\n\n");
+			expect(systemPrompt).not.toContain("Actionable process output");
+			expect(systemPrompt).not.toContain("Retune its monitor");
+			// Bash guidance is unaffected by the hub override.
+			expect(systemPrompt).toContain("<async-progress>");
+			expect(systemPrompt).toContain('`bash` with `async: "auto"`');
+		} finally {
+			await session.dispose();
+		}
+	}, 60000);
+
 	it("does not cancel the primary session's running jobs when a secondary session disposes", async () => {
 		const primary = await spawnTopLevelSession();
 		try {

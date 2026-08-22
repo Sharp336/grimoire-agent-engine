@@ -3057,9 +3057,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				),
 				taskIrcEnabled: !restrictToolNames && isIrcEnabled(settings, options.taskDepth ?? 0),
 				autoQaEnabled: !restrictToolNames && isAutoQaEnabled(settings),
+				// Gate on built-in provenance, not just tool NAME: an extension can replace a
+				// same-named built-in (see the wrappedExtensionTools override loop above), and
+				// the async:"auto"/progress guidance would then describe a schema the custom
+				// tool does not implement.
 				asyncProgress: {
-					bash: settings.get("async.enabled") && scopedAsyncJobManager !== undefined,
-					hub: settings.get("launch.enabled"),
+					bash:
+						settings.get("async.enabled") &&
+						scopedAsyncJobManager !== undefined &&
+						builtInRegistryToolNames.has("bash"),
+					hub: settings.get("launch.enabled") && builtInRegistryToolNames.has("hub"),
 				},
 				secretsEnabled,
 				workspaceTree: workspaceTreePromise,

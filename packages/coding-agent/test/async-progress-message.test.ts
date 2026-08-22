@@ -248,4 +248,33 @@ describe("async progress messages", () => {
 		expect(progress).not.toContain("[bash]");
 		expect(completion).not.toContain("[bash]");
 	});
+
+	test("sanitizes and bounds a model-supplied job name in the header", () => {
+		// Hub job ids are the model-supplied process name: tabs, ANSI, and paths
+		// must be cleaned and width-bounded like the preview lines below.
+		const nastyName = `${os.homedir()}/secret\u001b[31m\tname ${"x".repeat(100)}`;
+		const message = buildAsyncProgressBatchMessage([entry(nastyName, "one line")]);
+		if (!message) throw new Error("Expected progress message");
+		const raw = buildAsyncProgressBlock(message).render(200).join("\n");
+		const rendered = Bun.stripANSI(raw);
+		const headerLine = rendered.split("\n").find(line => line.includes("Background command progress"));
+		if (!headerLine) throw new Error("Expected progress header");
+		expect(raw).not.toContain("\u001b[31m");
+		expect(headerLine).not.toContain("\t");
+		expect(headerLine).not.toContain(os.homedir());
+		expect(headerLine).toContain("~/");
+		// The 100-char run cannot survive the TITLE-width bound.
+		expect(headerLine).not.toContain("x".repeat(60));
+	});
+
+	test("hides progress rows when tool activity is hidden", () => {
+		const message = buildAsyncProgressBatchMessage([entry("bg_9", "hidden progress line")]);
+		if (!message) throw new Error("Expected progress message");
+		const block = buildAsyncProgressBlock(message);
+		expect(Bun.stripANSI(block.render(100).join("\n"))).toContain("hidden progress line");
+		block.setToolActivityVisible(false);
+		expect(block.render(100)).toEqual([]);
+		block.setToolActivityVisible(true);
+		expect(Bun.stripANSI(block.render(100).join("\n"))).toContain("hidden progress line");
+	});
 });

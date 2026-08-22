@@ -107,8 +107,12 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): ToolActivit
 	return new ToolActivityContainer(block);
 }
 
-/** Render bounded progress from a background job that is still running. */
-export function buildAsyncProgressBlock(message: CustomOrHookMessage): TranscriptBlock {
+/**
+ * Render bounded progress from a background job that is still running. Wrapped
+ * in {@link ToolActivityContainer} so `display.hideToolActivity` propagates,
+ * matching the adjacent async-result/launch-completion rows.
+ */
+export function buildAsyncProgressBlock(message: CustomOrHookMessage): ToolActivityContainer {
 	const details = (
 		message as CustomMessage<{
 			jobs?: Array<{
@@ -126,7 +130,12 @@ export function buildAsyncProgressBlock(message: CustomOrHookMessage): Transcrip
 	).details;
 	const block = new TranscriptBlock();
 	for (const job of details?.jobs ?? []) {
-		const jobId = job.jobId ?? "unknown";
+		// Hub job ids are the model-supplied process name (arbitrary text): sanitize
+		// and bound like the preview lines below before it reaches the header.
+		const jobId = truncateToWidth(
+			replaceTabs(shortenPath(sanitizeText(job.jobId ?? "unknown"))),
+			TRUNCATE_LENGTHS.TITLE,
+		);
 		const elapsed = typeof job.elapsedMs === "number" ? formatDuration(job.elapsedMs) : undefined;
 		const header = renderStatusLine(
 			{
@@ -154,7 +163,7 @@ export function buildAsyncProgressBlock(message: CustomOrHookMessage): Transcrip
 			block.addChild(new Text(`  ${formatStyledArtifactReference(job.artifactId, theme)}`, 1, 0));
 		}
 	}
-	return block;
+	return new ToolActivityContainer(block);
 }
 
 /**
