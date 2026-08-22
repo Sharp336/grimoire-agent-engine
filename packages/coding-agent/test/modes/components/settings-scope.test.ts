@@ -48,6 +48,7 @@ describe("SettingsSelectorComponent persistence scope", () => {
 
 	afterEach(async () => {
 		stopThemeWatcher();
+		await initTheme();
 		resetSettingsForTest();
 		AgentStorage.resetInstance();
 		restoreSettingsTestState(settingsState);
