@@ -14,6 +14,7 @@ import {
 	ProgressPreviewAccumulator,
 } from "../session/progress-preview";
 import {
+	CarriageReturnNormalizer,
 	OutputSink,
 	truncateHead,
 	truncateHeadBytes,
@@ -121,6 +122,8 @@ interface ManagedDaemon {
 	logReady: boolean;
 	portReady: boolean;
 	readinessBuffer: string;
+	/** Turns `\r` progress rewrites into line boundaries before sanitizing strips them. */
+	crNormalizer: CarriageReturnNormalizer;
 	outputOffset: number;
 	readyPattern?: RegExp;
 	restartTimer?: NodeJS.Timeout;
@@ -799,6 +802,7 @@ class DaemonBroker {
 				logReady: !spec.ready?.log,
 				portReady: spec.ready?.port === undefined,
 				readinessBuffer: "",
+				crNormalizer: new CarriageReturnNormalizer(),
 				outputOffset: 0,
 				readyPattern: spec.ready?.log ? new RegExp(spec.ready.log, "u") : undefined,
 				consecutiveFailures: 0,
@@ -851,6 +855,7 @@ class DaemonBroker {
 		record.portReady = record.spec.ready?.port === undefined;
 		syncReadyPending(record);
 		record.readinessBuffer = "";
+		record.crNormalizer.reset();
 		record.outputOffset = 0;
 		this.#persist(record);
 		try {
@@ -992,7 +997,7 @@ class DaemonBroker {
 		const output = raw.toWellFormed();
 		const text = record.log?.append(output) ?? output;
 		record.snapshot.outputBytes += Buffer.byteLength(text, "utf8");
-		const sanitized = sanitizeText(text);
+		const sanitized = sanitizeText(record.crNormalizer.normalize(text));
 		this.#forwardToMonitors(record, output, sanitized);
 		this.#trackOutput(record, generation, sanitized);
 	}
@@ -1216,7 +1221,7 @@ class DaemonBroker {
 		if (generation !== record.generation) return;
 		record.outputOffset = size;
 		record.snapshot.outputBytes = size;
-		const sanitized = sanitizeText(raw);
+		const sanitized = sanitizeText(record.crNormalizer.normalize(raw));
 		this.#forwardToMonitors(record, raw, sanitized);
 		this.#trackOutput(record, generation, sanitized);
 	}
@@ -1671,6 +1676,7 @@ class DaemonBroker {
 					logReady: detached && (!spec.ready?.log || snapshot.state === "ready"),
 					portReady: detached && (spec.ready?.port === undefined || snapshot.state === "ready"),
 					readinessBuffer: "",
+					crNormalizer: new CarriageReturnNormalizer(),
 					outputOffset: detached ? snapshot.outputBytes : 0,
 					readyPattern: spec.ready?.log ? new RegExp(spec.ready.log, "u") : undefined,
 					consecutiveFailures: 0,

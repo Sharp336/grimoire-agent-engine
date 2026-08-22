@@ -1,4 +1,4 @@
-import { closeSync, openSync } from "node:fs";
+import * as fs from "node:fs";
 import type { AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatBytes } from "../tools/render-utils";
@@ -738,6 +738,52 @@ export class TailBuffer {
 // OutputSink — line-buffered output with file spill support
 // =============================================================================
 
+/**
+ * Converts carriage-return progress updates into line boundaries while
+ * collapsing CRLF to one newline. A trailing CR is held until the next
+ * chunk so split CRLF sequences do not create blank lines.
+ */
+export class CarriageReturnNormalizer {
+	#pendingCarriageReturn = false;
+
+	/** True when the last chunk ended in a bare CR awaiting its line boundary. */
+	get pending(): boolean {
+		return this.#pendingCarriageReturn;
+	}
+
+	reset(): void {
+		this.#pendingCarriageReturn = false;
+	}
+
+	normalize(text: string): string {
+		if (text.length === 0 || (!this.#pendingCarriageReturn && !text.includes(CR))) return text;
+
+		let cursor = 0;
+		let normalized = "";
+		if (this.#pendingCarriageReturn) {
+			this.#pendingCarriageReturn = false;
+			normalized = NL;
+			if (text.startsWith(NL)) cursor = 1;
+		}
+
+		while (cursor < text.length) {
+			const carriageReturn = text.indexOf(CR, cursor);
+			if (carriageReturn === -1) {
+				normalized += text.substring(cursor);
+				break;
+			}
+			normalized += text.substring(cursor, carriageReturn);
+			if (carriageReturn === text.length - 1) {
+				this.#pendingCarriageReturn = true;
+				break;
+			}
+			normalized += NL;
+			cursor = text.startsWith(NL, carriageReturn + 1) ? carriageReturn + 2 : carriageReturn + 1;
+		}
+		return normalized;
+	}
+}
+
 export class OutputSink {
 	#buffer = "";
 	#bufferBytes = 0;
@@ -751,7 +797,7 @@ export class OutputSink {
 	#truncated = false;
 	#lastChunkTime = 0;
 	#pendingChunk = "";
-	#pendingCarriageReturn = false;
+	readonly #crNormalizer = new CarriageReturnNormalizer();
 	#pendingChunkTimer: Timer | undefined;
 	#chunkDeliveryTail: Promise<void> | undefined;
 	#chunkDeliveryFailure: { error: unknown } | undefined;
@@ -832,45 +878,12 @@ export class OutputSink {
 	}
 
 	/**
-	 * Converts carriage-return progress updates into line boundaries while
-	 * collapsing CRLF to one newline. A trailing CR is held until the next
-	 * chunk so split CRLF sequences do not create blank lines.
-	 */
-	#normalizeCarriageReturns(text: string): string {
-		if (text.length === 0 || (!this.#pendingCarriageReturn && !text.includes(CR))) return text;
-
-		let cursor = 0;
-		let normalized = "";
-		if (this.#pendingCarriageReturn) {
-			this.#pendingCarriageReturn = false;
-			normalized = NL;
-			if (text.startsWith(NL)) cursor = 1;
-		}
-
-		while (cursor < text.length) {
-			const carriageReturn = text.indexOf(CR, cursor);
-			if (carriageReturn === -1) {
-				normalized += text.substring(cursor);
-				break;
-			}
-			normalized += text.substring(cursor, carriageReturn);
-			if (carriageReturn === text.length - 1) {
-				this.#pendingCarriageReturn = true;
-				break;
-			}
-			normalized += NL;
-			cursor = text.startsWith(NL, carriageReturn + 1) ? carriageReturn + 2 : carriageReturn + 1;
-		}
-		return normalized;
-	}
-
-	/**
 	 * Push a chunk of output. The buffer management and onChunk callback run
 	 * synchronously. File sink writes are deferred and serialized internally.
 	 */
 	push(chunk: string): void {
 		if (this.#finalized) return;
-		chunk = sanitizeWithOptionalSixelPassthrough(chunk, text => sanitizeText(this.#normalizeCarriageReturns(text)));
+		chunk = sanitizeWithOptionalSixelPassthrough(chunk, text => sanitizeText(this.#crNormalizer.normalize(text)));
 
 		// Throttled onChunk: coalesce chunks arriving inside the throttle window.
 		// A timer flushes quiet tails at the throttle boundary; dump() catches a
@@ -1142,7 +1155,7 @@ export class OutputSink {
 				// replay below — an await here would let new pushes land in both
 				// #buffer and #pendingFileWrites and duplicate them on drain. The
 				// fd writer does not take ownership; #finalizeFile closes it.
-				this.#appendFd = openSync(this.#artifactPath, "a", 0o600);
+				this.#appendFd = fs.openSync(this.#artifactPath, "a", 0o600);
 				sink = Bun.file(this.#appendFd).writer();
 			} else {
 				sink = Bun.file(this.#artifactPath).writer();
@@ -1225,7 +1238,7 @@ export class OutputSink {
 		this.#columnDroppedBytes = 0;
 		this.#columnTruncatedLines = 0;
 		this.#pendingChunk = "";
-		this.#pendingCarriageReturn = false;
+		this.#crNormalizer.reset();
 	}
 
 	#clearPendingChunkTimer(): void {
@@ -1330,10 +1343,7 @@ export class OutputSink {
 	}
 
 	async dump(notice?: string): Promise<OutputSummary> {
-		if (this.#pendingCarriageReturn) {
-			this.#pendingCarriageReturn = false;
-			this.push(NL);
-		}
+		if (this.#crNormalizer.pending) this.push(NL);
 		const noticeLine = notice ? `[${notice}]\n` : "";
 
 		await this.#settleChunkDelivery();
@@ -1444,7 +1454,7 @@ export class OutputSink {
 	#closeAppendFd(): void {
 		if (this.#appendFd === undefined) return;
 		try {
-			closeSync(this.#appendFd);
+			fs.closeSync(this.#appendFd);
 		} catch {
 			/* ignore */
 		}

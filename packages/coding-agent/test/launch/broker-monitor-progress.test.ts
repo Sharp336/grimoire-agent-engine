@@ -1292,4 +1292,163 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 			await serverClosed.promise;
 		}
 	}, 20_000);
+
+	it("turns carriage-return progress rewrites into line-bounded previews", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-cr-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		const scriptPath = path.join(projectDir, "service.ts");
+		const monitorArtifactPath = path.join(tempDir.path(), "cr-progress.log");
+		await Bun.write(
+			scriptPath,
+			`process.stdin.setEncoding("utf8");
+process.stdin.resume();
+process.stdout.write("progress 1\\rprogress 2\\rprogress 3\\n");
+process.stdin.once("data", () => process.exit(0));
+`,
+		);
+
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const previousTitle = process.title;
+		const broker = startBroker(projectDir, runtimeDir, { progressBatchIntervalMs: 25 });
+
+		const notifications: DaemonMonitorNotification[] = [];
+		const completed = Promise.withResolvers<void>();
+		const unregister = client.onOutput?.(
+			{ id: "monitor-cr", name: "cr-watched", owner: "owner-cr", artifactPath: monitorArtifactPath },
+			notification => {
+				notifications.push(notification);
+				if (notification.event === "daemon-monitor-completed") completed.resolve();
+			},
+		);
+		if (!unregister) throw new Error("Expected output monitoring support");
+
+		try {
+			// Publish the subscription before start, closing the immediate-output race.
+			await client.request({ op: "ping" });
+			const started = await client.request({
+				op: "start",
+				owner: "owner-cr",
+				spec: {
+					name: "cr-watched",
+					application: process.execPath,
+					args: [scriptPath],
+					env: {},
+					cwd: projectDir,
+					pty: false,
+					restart: "no",
+					persist: false,
+					detached: false,
+				},
+			});
+			if (started.op !== "start") throw new Error("unexpected start result");
+			await waitForOutputCount(notifications, 1);
+			await client.request({ op: "send", name: "cr-watched", data: "finish\n" });
+			await client.request({ op: "wait", name: "cr-watched", for: "exit", timeoutMs: 5_000 });
+			await completed.promise;
+
+			const output = notifications.filter(
+				(notification): notification is Extract<DaemonMonitorNotification, { event: "daemon-output" }> =>
+					notification.event === "daemon-output",
+			);
+			// Each \r-overwritten state is its own preview line, not one concatenated blob.
+			expect(output.map(notification => notification.text).join("\n")).toBe("progress 1\nprogress 2\nprogress 3");
+			expect(await Bun.file(monitorArtifactPath).text()).toBe("progress 1\nprogress 2\nprogress 3\n");
+		} finally {
+			unregister();
+			await client.request({ op: "stop", name: "cr-watched", timeoutMs: 2_000 }).catch(() => undefined);
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
+			await broker;
+			setProcessName(previousTitle);
+		}
+	}, 20_000);
+
+	it("emits live batches for a carriage-return-only stream with no trailing newline", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-cr-only-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		const scriptPath = path.join(projectDir, "service.ts");
+		const monitorArtifactPath = path.join(tempDir.path(), "cr-only-progress.log");
+		// Spinner-style process: only \r-terminated rewrites, never a newline.
+		// The child's real setTimeout forces two separate pipe chunks; fake
+		// timers cannot drive a subprocess clock.
+		await Bun.write(
+			scriptPath,
+			`process.stdin.setEncoding("utf8");
+process.stdin.resume();
+process.stdout.write("step 1\\r");
+setTimeout(() => {
+	process.stdout.write("step 2\\r");
+}, 50);
+process.stdin.once("data", () => process.exit(0));
+`,
+		);
+
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const previousTitle = process.title;
+		const broker = startBroker(projectDir, runtimeDir, { progressBatchIntervalMs: 25 });
+
+		const notifications: DaemonMonitorNotification[] = [];
+		const completed = Promise.withResolvers<void>();
+		const unregister = client.onOutput?.(
+			{ id: "monitor-cr-only", name: "cr-only", owner: "owner-cr-only", artifactPath: monitorArtifactPath },
+			notification => {
+				notifications.push(notification);
+				if (notification.event === "daemon-monitor-completed") completed.resolve();
+			},
+		);
+		if (!unregister) throw new Error("Expected output monitoring support");
+
+		try {
+			await client.request({ op: "ping" });
+			const started = await client.request({
+				op: "start",
+				owner: "owner-cr-only",
+				spec: {
+					name: "cr-only",
+					application: process.execPath,
+					args: [scriptPath],
+					env: {},
+					cwd: projectDir,
+					pty: false,
+					restart: "no",
+					persist: false,
+					detached: false,
+				},
+			});
+			if (started.op !== "start") throw new Error("unexpected start result");
+			// The second \r completes the first state into a line; a live batch
+			// must arrive while the process is still running (pre-fix this hung
+			// until exit because sanitizeText stripped every \r first).
+			await waitForOutputCount(notifications, 1);
+			const liveTexts = notifications
+				.filter(
+					(notification): notification is Extract<DaemonMonitorNotification, { event: "daemon-output" }> =>
+						notification.event === "daemon-output",
+				)
+				.map(notification => notification.text);
+			expect(liveTexts[0]).toBe("step 1");
+
+			await client.request({ op: "send", name: "cr-only", data: "finish\n" });
+			await client.request({ op: "wait", name: "cr-only", for: "exit", timeoutMs: 5_000 });
+			await completed.promise;
+
+			const output = notifications.filter(
+				(notification): notification is Extract<DaemonMonitorNotification, { event: "daemon-output" }> =>
+					notification.event === "daemon-output",
+			);
+			// The trailing partial (after the final \r) flushes at settlement.
+			expect(output.map(notification => notification.text).join("\n")).toBe("step 1\nstep 2");
+		} finally {
+			unregister();
+			await client.request({ op: "stop", name: "cr-only", timeoutMs: 2_000 }).catch(() => undefined);
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
+			await broker;
+			setProcessName(previousTitle);
+		}
+	}, 20_000);
 });
