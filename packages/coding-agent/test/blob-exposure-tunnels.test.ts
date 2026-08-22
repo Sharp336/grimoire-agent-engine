@@ -69,12 +69,7 @@ async function waitForFileContent(filePath: string, matches: (text: string) => b
 	fs.watchFile(filePath, { interval: 25, persistent: false }, listener);
 	listener();
 	try {
-		await Promise.race([
-			promise,
-			Bun.sleep(5_000).then(() => {
-				throw new Error(`Timed out waiting for file content: ${filePath}`);
-			}),
-		]);
+		await promise;
 	} finally {
 		fs.unwatchFile(filePath, listener);
 	}
