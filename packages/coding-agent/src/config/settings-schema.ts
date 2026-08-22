@@ -1220,13 +1220,13 @@ export const SETTINGS_SCHEMA = {
 	},
 	"tui.scrollbackRebuild": {
 		type: "boolean",
-		default: true,
+		default: false,
 		ui: {
 			tab: "appearance",
 			group: "Display",
 			label: "Rewrite Scrollback",
 			description:
-				"This setting erases and replays terminal scrollback when a block's final form replaces its live preview. Stale preview copies then never stay in history on a direct terminal. A multiplexer session keeps the stale copy and adds the final form below it.",
+				"This setting erases and replays terminal scrollback when a block's final form replaces its live preview. The repair runs only in a direct terminal. A multiplexer session keeps the stale copy and adds the final form below it. A HerdR session starts the repair when the setting has no configured value. An explicit off value stops the repair.",
 		},
 	},
 

@@ -125,8 +125,10 @@ The second caller is an ordinary-render divergence when
 `tui.scrollbackRebuild` is enabled: if the committed prefix structurally
 resynchronizes or the current frame collapses into committed rows, the renderer
 clears and replays the current frame to replace stale preview history with the
-final form. This path is on by default in interactive coding-agent sessions.
-It never runs after the first paint, during an explicit replacement/geometry frame, or inside a multiplexer.
+final form. Coding-agent keeps this path off by default. A direct HerdR
+session starts it when `tui.scrollbackRebuild` has no configured value. The path
+does not run after the first paint, during an explicit replacement/geometry
+frame, or inside a multiplexer.
 Multiplexers never get ED3 (it is a no-op there and a replay would duplicate
 pane history).
 
@@ -345,7 +347,7 @@ default-on only for kitty/ghostty (`PI_NO_KITTY_PLACEHOLDERS` /
 | `PI_NOTIFICATIONS=off\|0\|false`                         | Suppress terminal notifications.                                                                                                                                            |
 | `PI_DEBUG_REDRAW=1`                                      | Log the chosen render intent + ledger state per frame to the debug log.                                                                                                     |
 | `PI_TUI_RESIZE_IN_PLACE=1\|0`                            | Force resize to repaint in place (no alt-screen borrow, no ED3 rewrap) on / off. Default-on for terminals that re-report size on alt-screen toggles (Warp).                 |
-| `PI_TUI_SCROLLBACK_REBUILD=1`                            | Initialize low-level `TUI` divergence rebuild on. Coding-agent subsequently applies `tui.scrollbackRebuild` (default `true`), so use the setting for interactive sessions. |
+| `PI_TUI_SCROLLBACK_REBUILD=1`                            | The low-level `TUI` starts with divergence repair on. Coding-agent then applies `tui.scrollbackRebuild` (default `false`, on in HerdR when no value is configured). For interactive sessions, the setting controls the behavior. |
 
 Removed with the old engine: `PI_TUI_ED3_SAFE` (no ED3-risk lever exists),
 `PI_CLEAR_ON_SHRINK`, and `PI_TUI_DEBUG` (per-render dump superseded by

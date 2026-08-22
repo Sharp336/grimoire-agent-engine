@@ -4,7 +4,8 @@
 
 ### Changed
 
-- `tui.scrollbackRebuild` now defaults to on: when a finalized block diverges from its committed scrollback rows (a live preview replaced by its final form), direct-terminal sessions erase and replay history instead of appending the final form below the stale copy. Set it to `false` to keep the previous append-only behavior.
+- In a HerdR session with no configured `tui.scrollbackRebuild` value, the erase-and-replay scrollback repair now starts on. When a finalized block changes after commit, the pane erases and replays its history. Thus, the pane does not add the final form below a stale copy. An explicit value controls this repair, and other terminals keep the repair off by default.
+
 ### Added
 
 - Added an opt-in image URL broker (`images.urls.enabled`) that publishes outgoing images through an ordered chain of backends instead of sending inline base64 to URL-fetching providers

@@ -35,17 +35,19 @@ interface HarnessOptions {
 	initialModel?: { provider: string; id: string };
 }
 
-describe("InteractiveMode plan.defaultOnStartup", () => {
+describe("InteractiveMode startup settings", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
 	let mode: InteractiveMode | undefined;
 	let session: AgentSession | undefined;
+	let savedHerdrEnv: string | undefined;
 
 	beforeAll(() => {
 		initTheme();
 	});
 
 	beforeEach(async () => {
+		savedHerdrEnv = Bun.env.HERDR_ENV;
 		resetSettingsForTest();
 		tempDir = TempDir.createSync("@pi-default-plan-");
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
@@ -55,6 +57,8 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 	});
 
 	afterEach(async () => {
+		if (savedHerdrEnv === undefined) delete Bun.env.HERDR_ENV;
+		else Bun.env.HERDR_ENV = savedHerdrEnv;
 		vi.restoreAllMocks();
 		mode?.stop();
 		await session?.dispose();
@@ -139,6 +143,30 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 			sessionSettings,
 		);
 	}
+
+	describe("tui.scrollbackRebuild", () => {
+		it("stays off outside HerdR when no value is configured", () => {
+			delete Bun.env.HERDR_ENV;
+			const created = createHarness(Settings.instance);
+
+			expect(created.ui.getScrollbackRebuild()).toBe(false);
+		});
+
+		it("starts on in HerdR when no value is configured", () => {
+			Bun.env.HERDR_ENV = "1";
+			const created = createHarness(Settings.instance);
+
+			expect(created.ui.getScrollbackRebuild()).toBe(true);
+		});
+
+		it("respects an explicit off value in HerdR", () => {
+			Bun.env.HERDR_ENV = "1";
+			Settings.instance.set("tui.scrollbackRebuild", false);
+			const created = createHarness(Settings.instance);
+
+			expect(created.ui.getScrollbackRebuild()).toBe(false);
+		});
+	});
 
 	it("enters plan mode at startup when the setting is enabled", async () => {
 		const created = createHarness(Settings.isolated({ "plan.defaultOnStartup": true, "compaction.enabled": false }));
