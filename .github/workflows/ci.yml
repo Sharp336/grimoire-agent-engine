@@ -32,7 +32,7 @@ on:
          skip_npm:
             description: "Skip npm publish"
             type: boolean
-            default: false
+            default: true
 
 # Manual release dispatches may target a `v*` tag ref or a tagged main HEAD.
 # Scope them to a per-sha group with no cancellation; PR runs retain
