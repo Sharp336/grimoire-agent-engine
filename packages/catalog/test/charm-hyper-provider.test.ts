@@ -36,7 +36,7 @@ describe("Charm Hyper provider support", () => {
 		expect(descriptor).toBeDefined();
 		expect(descriptor?.defaultModel).toBe("deepseek-v4-pro");
 		expect(descriptor?.dynamicModelsAuthoritative).toBe(true);
-		expect(DEFAULT_MODEL_PER_PROVIDER["charm-hyper"]).toBe("deepseek-v4-pro");
+		expect(DEFAULT_MODEL_PER_PROVIDER["charm-hyper"]).toBe("deepseek-v4-pro-0813");
 
 		const provider = getOAuthProviders().find(item => item.id === "charm-hyper");
 		expect(provider?.name).toBe("Charm Hyper");
