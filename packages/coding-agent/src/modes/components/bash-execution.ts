@@ -24,6 +24,7 @@ import {
 	type ExecutionStatus,
 	resolveExecutionStatus,
 } from "./execution-shared";
+import { noteSealedTranscriptMutation } from "./transcript-container";
 
 // Preview line limit when not expanded (matches tool execution behavior)
 const PREVIEW_LINES = 20;
@@ -86,7 +87,10 @@ export class BashExecutionComponent extends Container {
 	 * Set whether the output is expanded (shows full output) or collapsed (preview only).
 	 */
 	setExpanded(expanded: boolean): void {
-		if (this.#expanded !== expanded) this.#blockVersion++;
+		if (this.#expanded !== expanded) {
+			if (this.isTranscriptBlockFinalized()) noteSealedTranscriptMutation();
+			this.#blockVersion++;
+		}
 		this.#expanded = expanded;
 		this.#updateDisplay();
 	}

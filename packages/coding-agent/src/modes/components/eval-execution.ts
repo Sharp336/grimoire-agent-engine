@@ -15,6 +15,7 @@ import {
 	type ExecutionStatus,
 	resolveExecutionStatus,
 } from "./execution-shared";
+import { noteSealedTranscriptMutation } from "./transcript-container";
 
 const PREVIEW_LINES = 20;
 const MAX_DISPLAY_LINE_CHARS = 4000;
@@ -80,7 +81,10 @@ export class EvalExecutionComponent extends Container {
 	}
 
 	setExpanded(expanded: boolean): void {
-		if (this.#expanded !== expanded) this.#blockVersion++;
+		if (this.#expanded !== expanded) {
+			if (this.isTranscriptBlockFinalized()) noteSealedTranscriptMutation();
+			this.#blockVersion++;
+		}
 		this.#expanded = expanded;
 		this.#updateDisplay();
 	}

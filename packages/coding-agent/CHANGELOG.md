@@ -69,6 +69,7 @@
 - Context file deduplication now checks paragraph containment instead of byte-exact matching: a less-authoritative file whose normalized paragraphs appear contiguously within a more authoritative file is omitted, reducing redundant prompt context.
 - Context file containment dedup now sorts by depth descending internally, treating files without a depth as least authoritative, so concatenated multi-root or user-level context cannot drop a closer-to-cwd file.
 - Paragraph splitting for containment comparison is now fenced-code-block-aware: text inside a fenced example in a more authoritative file no longer counts as a contained instruction, preventing active context rules from being discarded.
+- Transcript live-tail rendering no longer slows down as the session grows: sealed, already-committed transcript history is compacted out of per-tick composition, keeping streaming ticks flat from the first turn to tens of thousands of rows.
 
 ### Fixed
 
