@@ -50,14 +50,34 @@ export function createMCPTimeout(
 	}
 
 	const abortController = new AbortController();
-	const timeoutId = setTimeout(() => abortController.abort(), timeoutMs);
+	// Record which abort source fired first so a later caller abort can't erase
+	// an already-fired timeout. Without this, when the timer fires during
+	// response.json() but the caller's signal also aborts before the catch
+	// block runs, both signals are aborted and `!signal?.aborted` is false —
+	// the timeout leaks as a SyntaxError ("Unexpected end of JSON input").
+	let timerFired = false;
+	const clearFns: Array<() => void> = [];
+	if (signal?.aborted) {
+		abortController.abort();
+	} else {
+		const timeoutId = setTimeout(() => {
+			timerFired = true;
+			abortController.abort();
+		}, timeoutMs);
+		clearFns.push(() => clearTimeout(timeoutId));
+	}
 	const operationSignal = signal ? AbortSignal.any([signal, abortController.signal]) : abortController.signal;
 
 	return {
 		signal: operationSignal,
-		clear: () => clearTimeout(timeoutId),
+		clear: () => {
+			for (const fn of clearFns) fn();
+		},
 		isTimeoutAbort: error =>
-			error instanceof Error && error.name === "AbortError" && abortController.signal.aborted && !signal?.aborted,
-		timedOut: () => abortController.signal.aborted && !signal?.aborted,
+			timerFired &&
+			(error instanceof Error
+				? error.name === "AbortError" || (error.name === "SyntaxError" && operationSignal.aborted)
+				: false),
+		timedOut: () => timerFired,
 	};
 }
