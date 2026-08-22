@@ -36,7 +36,10 @@ function exposure(kind: ExposureConfig["kind"], overrides: Partial<ExposureConfi
 	} as ExposureConfig;
 }
 
-function prepareFake(output: string, options: { exitCode?: number; restartOnce?: boolean } = {}): FakeInvocation {
+function prepareFake(
+	output: string,
+	options: { exitCode?: number; exitDelaySeconds?: number; restartOnce?: boolean } = {},
+): FakeInvocation {
 	const suffix = String(invocationSequence++);
 	const argsFile = path.join(fakeBinDir, `args-${suffix}.json`);
 	const runsFile = path.join(fakeBinDir, `runs-${suffix}.txt`);
@@ -47,6 +50,8 @@ function prepareFake(output: string, options: { exitCode?: number; restartOnce?:
 	process.env.OMP_FAKE_TUNNEL_OUTPUT = output;
 	if (options.exitCode === undefined) delete process.env.OMP_FAKE_TUNNEL_EXIT_CODE;
 	else process.env.OMP_FAKE_TUNNEL_EXIT_CODE = String(options.exitCode);
+	if (options.exitDelaySeconds === undefined) delete process.env.OMP_FAKE_TUNNEL_EXIT_DELAY;
+	else process.env.OMP_FAKE_TUNNEL_EXIT_DELAY = String(options.exitDelaySeconds);
 	const restartMarker = options.restartOnce ? path.join(fakeBinDir, `restart-${suffix}.txt`) : undefined;
 	if (restartMarker === undefined) delete process.env.OMP_FAKE_TUNNEL_RESTART_MARKER;
 	else process.env.OMP_FAKE_TUNNEL_RESTART_MARKER = restartMarker;
@@ -114,7 +119,10 @@ beforeAll(() => {
 			`  fi\n` +
 			`  printf 'restarted\\n' >> "$OMP_FAKE_TUNNEL_RESTART_MARKER"\n` +
 			`fi\n` +
-			`if [ -n "$OMP_FAKE_TUNNEL_EXIT_CODE" ]; then exit "$OMP_FAKE_TUNNEL_EXIT_CODE"; fi\n` +
+			`if [ -n "$OMP_FAKE_TUNNEL_EXIT_CODE" ]; then\n` +
+			`  if [ -n "$OMP_FAKE_TUNNEL_EXIT_DELAY" ]; then /bin/sleep "$OMP_FAKE_TUNNEL_EXIT_DELAY"; fi\n` +
+			`  exit "$OMP_FAKE_TUNNEL_EXIT_CODE"\n` +
+			`fi\n` +
 			`while :; do /bin/sleep 1; done\n`,
 	);
 	fs.chmodSync(target, 0o755);
@@ -134,6 +142,7 @@ afterAll(async () => {
 	delete process.env.OMP_FAKE_TUNNEL_SIGNALS;
 	delete process.env.OMP_FAKE_TUNNEL_OUTPUT;
 	delete process.env.OMP_FAKE_TUNNEL_EXIT_CODE;
+	delete process.env.OMP_FAKE_TUNNEL_EXIT_DELAY;
 	delete process.env.OMP_FAKE_TUNNEL_RESTART_MARKER;
 	fs.rmSync(fakeBinDir, { recursive: true, force: true });
 });
@@ -205,7 +214,13 @@ describe("startExposure tunnel adapters", () => {
 	});
 
 	it("never reconnects a free Pinggy tunnel behind a different published hostname", async () => {
-		const invocation = prepareFake("Tunnel established at https://random-one.a.pinggy.link", { exitCode: 23 });
+		// The delayed exit keeps startup deterministic: free Pinggy is
+		// unsupervised, so a child that dies before its URL is scanned is
+		// rejected rather than recovered from the log after exit.
+		const invocation = prepareFake("Tunnel established at https://random-one.a.pinggy.link", {
+			exitCode: 23,
+			exitDelaySeconds: 1,
+		});
 		const active = await startExposure(exposure("pinggy"), PORT);
 		activeExposures.push(active);
 		expect(active.baseUrl).toBe("https://random-one.a.pinggy.link");
