@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Cursor MCP history replay aborting when a string argument looks like a JSON number (`1e234567` → `Infinity`). Hash-like tokens stay strings; leftover non-finite values encode as null instead of failing the turn.
+
 ## [18.0.0] - 2026-08-22
 
 ### Added
