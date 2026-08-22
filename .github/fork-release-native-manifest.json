@@ -1,33 +1,33 @@
 {
   "source": {
-    "version": "17.4.2",
-    "officialTag": "v17.4.2",
-    "officialSha": "7ab849ade53d905c30ba2d1ae2126d92a47d2db8"
+    "version": "18.0.0",
+    "officialTag": "v18.0.0",
+    "officialSha": "96f42809764f0907f7d6b115eab5710de28941de"
   },
   "targets": {
     "linux-x64": {
       "package": "@oh-my-pi/pi-natives-linux-x64",
-      "version": "17.4.2",
-      "distIntegrity": "sha512-91UL4pNOGoccUWtexflO/IFx/u2igC2q5pS7qJwNcKrb1rqGztTuJlgaQlNHdOMa1N9sNGzFCn8dZEAusLS50Q==",
+      "version": "18.0.0",
+      "distIntegrity": "sha512-b4SC8nFApDOg+02Ba4X/KWh81ikYaql5QFwaKbzYex4lPlxKPJ9veuMfNd+j6ISdwgdPSa8/wqvlSYMdCvFSlg==",
       "files": {
-        "pi_natives.linux-x64-baseline.node": "b9ff54f56329c23ced1faff72151e80a6d6e1b24b7705823b5fb8251df9353fc",
-        "pi_natives.linux-x64-modern.node": "ae09ff9c44d51200fe827e384a8714dd73a4fb59d530706b74c52503ee24a2c7"
+        "pi_natives.linux-x64-baseline.node": "594e3aec3147c2a4782efe8a49ad40ed85d09634df6e227fc8feb9461a6dee3e",
+        "pi_natives.linux-x64-modern.node": "44f6ebb2622b59836eacce6489a1b6b19a0545cd2e5ef2475831f537ba9854ad"
       }
     },
     "linux-arm64": {
       "package": "@oh-my-pi/pi-natives-linux-arm64",
-      "version": "17.4.2",
-      "distIntegrity": "sha512-XpN2LM+4gXQGNZSWmkPP+3vYDJa1gBY62ThqVHIKCrfEXidNauNXilUzWgVTEg488Z52LNth0AXndQTaEI7I+g==",
+      "version": "18.0.0",
+      "distIntegrity": "sha512-IVmp613KGhyzcOTQ0o8KDlmpK/E6hvuSjErxsd01KK2k0Y0w51T8+JrcEbykFJk/VU4tGo6YMD1TOtvlEn1IKQ==",
       "files": {
-        "pi_natives.linux-arm64.node": "b47ff5aeccf60cd8c9f30f335e83b82c9e49e5aa3c022e690336221872f5e62c"
+        "pi_natives.linux-arm64.node": "39263edb947965ec8196c6e698cc718a072636754f36a3497e59bb84ed5ae4f8"
       }
     },
     "win32-x64": {
       "package": "@oh-my-pi/pi-natives-win32-x64",
-      "version": "17.4.2",
-      "distIntegrity": "sha512-/BNvunF+PeuCcTr2RMU4K3kDS0Dq2MPh9gueSEH9xmkK3eZv9Hu2s6MwYNa+uAdHskyd1ScShmgxYiVXgsYQNg==",
+      "version": "18.0.0",
+      "distIntegrity": "sha512-pY/7oNipTI2kC5Nw+MZErqAx7jR93Xr8I7hk1lGdqR/t6a2AsB5ELp1Yhwb9f1TGWDyivL+foANyJDq0Ae8cIg==",
       "files": {
-        "pi_natives.win32-x64-baseline.node": "ba4deea4e962136be2dda544e13b05d072d35bd322e8c0042545b3227b23f50f"
+        "pi_natives.win32-x64-baseline.node": "44c091a3486558decc048f872eda1e9ced2101cdf8e32780b80028323744a43f"
       }
     }
   }

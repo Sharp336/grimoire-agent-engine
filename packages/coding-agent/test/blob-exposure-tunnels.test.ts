@@ -53,13 +53,35 @@ function prepareFake(output: string, options: { exitCode?: number; restartOnce?:
 	return { argsFile, runsFile, signalsFile, restartMarker };
 }
 
-async function waitForRestart(marker: string): Promise<void> {
-	const deadline = Date.now() + 5_000;
-	while (Date.now() < deadline) {
-		if (fs.existsSync(marker) && fs.readFileSync(marker, "utf8").includes("restarted")) return;
-		await Bun.sleep(10);
+async function waitForFileContent(filePath: string, matches: (text: string) => boolean): Promise<void> {
+	const matchesCurrentContent = (): boolean => {
+		try {
+			return matches(fs.readFileSync(filePath, "utf8"));
+		} catch {
+			return false;
+		}
+	};
+	if (matchesCurrentContent()) return;
+	const { promise, resolve } = Promise.withResolvers<void>();
+	const listener = (): void => {
+		if (matchesCurrentContent()) resolve();
+	};
+	fs.watchFile(filePath, { interval: 25, persistent: false }, listener);
+	listener();
+	try {
+		await Promise.race([
+			promise,
+			Bun.sleep(5_000).then(() => {
+				throw new Error(`Timed out waiting for file content: ${filePath}`);
+			}),
+		]);
+	} finally {
+		fs.unwatchFile(filePath, listener);
 	}
-	throw new Error(`Timed out waiting for tunnel restart marker: ${marker}`);
+}
+
+async function waitForRestart(marker: string): Promise<void> {
+	await waitForFileContent(marker, text => text.includes("restarted"));
 }
 
 function recordedArgs(invocation: FakeInvocation): string[] {
@@ -68,14 +90,7 @@ function recordedArgs(invocation: FakeInvocation): string[] {
 }
 
 async function waitForSignal(invocation: FakeInvocation): Promise<void> {
-	if (fs.existsSync(invocation.signalsFile)) return;
-	const { promise, resolve } = Promise.withResolvers<void>();
-	const watcher = fs.watch(fakeBinDir, (_event, filename) => {
-		if (filename === path.basename(invocation.signalsFile) && fs.existsSync(invocation.signalsFile)) resolve();
-	});
-	if (fs.existsSync(invocation.signalsFile)) resolve();
-	await promise;
-	watcher.close();
+	await waitForFileContent(invocation.signalsFile, text => text.includes("SIGTERM"));
 }
 
 async function stopAndObserve(exposure: ActiveExposure, invocation: FakeInvocation): Promise<void> {
