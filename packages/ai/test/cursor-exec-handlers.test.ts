@@ -666,6 +666,35 @@ describe("Cursor history encoding", () => {
 		]);
 	});
 
+	it("encodes non-finite MCP args instead of aborting history replay (#9394)", () => {
+		const messages: Context["messages"] = [
+			{ role: "user", content: "Edit.", timestamp: 1 },
+			cursorAssistant(
+				"cursor-composer-2.5",
+				[
+					{
+						type: "toolCall",
+						id: "call-edit",
+						name: "mcp__example",
+						arguments: { expectedHash: Number.POSITIVE_INFINITY },
+					},
+				],
+				2,
+				"toolUse",
+			),
+			{
+				role: "toolResult",
+				toolCallId: "call-edit",
+				toolName: "mcp__example",
+				content: [{ type: "text", text: "ok" }],
+				isError: false,
+				timestamp: 3,
+			},
+			{ role: "user", content: "Continue.", timestamp: 4 },
+		];
+		expect(() => buildCursorHistoryForTest(messages)).not.toThrow();
+	});
+
 	it("preserves same-model K3 thinking and paired tool structure in request history", () => {
 		const messages: Context["messages"] = [
 			{ role: "user", content: "Inspect package.json", timestamp: 1 },

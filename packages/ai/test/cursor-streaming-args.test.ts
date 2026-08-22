@@ -10,6 +10,7 @@ import {
 import type { AssistantMessage, AssistantMessageEvent } from "@oh-my-pi/pi-ai/types";
 import { getStreamingPartialJson, kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { encodeJsonValue } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 
 interface Harness {
 	output: AssistantMessage;
@@ -358,6 +359,19 @@ describe("processInteractionUpdate args_text_delta handling", () => {
 			tasks: [{ assignment: "do A" }, { assignment: "do B" }],
 			context: "ctx",
 		});
+	});
+
+	it("does not parse hex-like MCP string args as JSON numbers (#9394)", () => {
+		const h = newHarness();
+		startMcpToolCall(h, "mcp__example");
+		completeMcpToolCall(h, {
+			expectedHash: encodeJsonValue("1e234567"),
+			edits: encodeJsonValue('{"a":1}'),
+		});
+		const finalBlock = h.output.content[0];
+		expect(finalBlock?.type).toBe("toolCall");
+		if (finalBlock?.type !== "toolCall") throw new Error("expected toolCall block");
+		expect(finalBlock.arguments).toEqual({ expectedHash: "1e234567", edits: { a: 1 } });
 	});
 });
 

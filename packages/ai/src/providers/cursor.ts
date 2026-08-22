@@ -3153,6 +3153,12 @@ function parseToolArgsJson(text: string): unknown {
 	if (!trimmed) {
 		return text;
 	}
+	// Only unwrap objects/arrays/quoted strings. Bare tokens such as hex hashes
+	// ("57785654", "1e234567") are valid JSON numbers — the latter is Infinity.
+	const start = trimmed[0];
+	if (start !== "{" && start !== "[" && start !== '"') {
+		return text;
+	}
 	try {
 		return parseJsonWithRepair<unknown>(trimmed);
 	} catch {
@@ -3165,6 +3171,9 @@ function decodeMcpArgValue(value: Uint8Array): unknown {
 		const jsonValue = decodeJsonValue(value);
 		if (typeof jsonValue === "string") {
 			return parseToolArgsJson(jsonValue);
+		}
+		if (typeof jsonValue === "number" && !Number.isFinite(jsonValue)) {
+			return null;
 		}
 		return jsonValue;
 	} catch {}
@@ -4771,10 +4780,15 @@ function encodeCursorMcpArguments(toolCall: ToolCall): Record<string, Uint8Array
 	for (const name in toolCall.arguments) {
 		const value = toolCall.arguments[name];
 		if (value === undefined) continue;
-		if (!isJsonValue(value)) {
-			throw new AIError.ValidationError(`Cursor tool argument ${toolCall.name}.${name} is not JSON-serializable`);
+		if (isJsonValue(value)) {
+			encoded[name] = encodeJsonValue(value);
+			continue;
 		}
-		encoded[name] = encodeJsonValue(value);
+		// Non-finite numbers (hash strings re-parsed as Infinity) used to abort
+		// the whole Cursor turn, including history replay and compaction.
+		if (typeof value === "number") {
+			encoded[name] = encodeJsonValue(null);
+		}
 	}
 	return encoded;
 }
