@@ -145,4 +145,21 @@ describe("createMCPTimeout abort-source tracking", () => {
 			op.clear();
 		}
 	});
+
+	test("does not report timeout when caller aborts before the timer fires", async () => {
+		const caller = new AbortController();
+		const op = createMCPTimeout(10_000, caller.signal);
+		try {
+			// Caller aborts first — timer is cancelled, not a timeout
+			caller.abort();
+			expect(op.timedOut()).toBe(false);
+			expect(op.isTimeoutAbort(new DOMException("aborted", "AbortError"))).toBe(false);
+			// Even if we wait past the timeoutMs, the timer was cancelled and
+			// must not fire
+			await Bun.sleep(20);
+			expect(op.timedOut()).toBe(false);
+		} finally {
+			op.clear();
+		}
+	});
 });
