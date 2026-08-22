@@ -311,9 +311,9 @@ describe("bash progress parameter", () => {
 			{
 				command:
 					"printf 'inline-first\\n'; " +
-					"while [ ! -f \"$GATE\" ]; do sleep 0.01; done; " +
+					'while [ ! -f "$GATE" ]; do sleep 0.01; done; ' +
 					"printf 'throttle-held\\n'; sleep 0.01; : > \"$HELD\"; " +
-					"while [ ! -f \"$RELEASE\" ]; do sleep 0.01; done; " +
+					'while [ ! -f "$RELEASE" ]; do sleep 0.01; done; ' +
 					"printf 'post-promotion\\n'",
 				env: { GATE: gatePath, HELD: heldPath, RELEASE: releasePath },
 				async: "auto",
