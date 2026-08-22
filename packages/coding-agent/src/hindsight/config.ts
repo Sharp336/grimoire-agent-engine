@@ -146,11 +146,7 @@ export function loadHindsightConfig(settings: Settings, env: NodeJS.ProcessEnv =
 			value: settings.get("hindsight.scoping"),
 		});
 	}
-	const settingsRetainStrategy = envString(
-		typeof settings.get("hindsight.retainStrategy") === "string"
-			? settings.get("hindsight.retainStrategy")
-			: undefined,
-	);
+	const settingsRetainStrategy = envString(settings.get("hindsight.retainStrategy"));
 
 	const config: HindsightConfig = {
 		hindsightApiUrl: apiUrlEnv ?? settings.get("hindsight.apiUrl") ?? null,
