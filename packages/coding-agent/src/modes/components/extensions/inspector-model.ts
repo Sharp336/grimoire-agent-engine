@@ -10,7 +10,7 @@ import { arkToWireSchema, isArkSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { parseFrontmatter } from "@oh-my-pi/pi-utils";
 import { parseRuleConditionAndScope } from "../../../capability/rule";
 import { sanitizeDisplayField, sanitizeDisplayLine, sanitizeDisplayText } from "./display-text";
-import type { Extension, ExtensionState } from "./types";
+import { type Extension, type ExtensionState, isShadowedExtension } from "./types";
 
 export interface LiveToolRecord {
 	name: string;
@@ -211,9 +211,14 @@ function isFactoryExportName(extensionName: string, toolName: string): boolean {
 }
 
 export function liveToolsForExtension(ext: Extension, source: ToolRuntimeSource | undefined): LiveToolRecord[] {
-	if (!source) return [];
+	if (!source || isShadowedExtension(ext)) return [];
 	const exact = source.getLiveTool(ext.name);
-	if (exact) return [exact];
+	if (exact) {
+		if (exact.sourcePath && isFilesystemToolPath(exact.sourcePath) && !sameToolPath(exact.sourcePath, ext.path)) {
+			return [];
+		}
+		return [exact];
+	}
 	const listed = source.listLiveTools?.() ?? [];
 	const fromSameFile = listed.filter(
 		tool => tool.sourcePath && isFilesystemToolPath(tool.sourcePath) && sameToolPath(tool.sourcePath, ext.path),

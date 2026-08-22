@@ -25,8 +25,8 @@ import {
 	type MCPRuntimeSource,
 	snapshotMcpRuntime,
 } from "./mcp-runtime";
-import { applyFilter, isShadowedExtension } from "./state-manager";
-import type { Extension, ExtensionKind, ExtensionState } from "./types";
+import { applyFilter } from "./state-manager";
+import { type Extension, type ExtensionKind, type ExtensionState, isShadowedExtension } from "./types";
 
 export interface ExtensionListCallbacks {
 	onSelectionChange?: (extension: Extension | null) => void;

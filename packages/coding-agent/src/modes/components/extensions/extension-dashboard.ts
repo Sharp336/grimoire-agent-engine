@@ -44,11 +44,10 @@ import {
 	applyFilter,
 	createInitialState,
 	filterByProvider,
-	isShadowedExtension,
 	refreshState,
 	toggleProvider,
 } from "./state-manager";
-import type { DashboardState, ProviderTab } from "./types";
+import { type DashboardState, isShadowedExtension, type ProviderTab } from "./types";
 
 export interface ExtensionDashboardOptions {
 	cwd: string;

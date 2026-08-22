@@ -68,6 +68,17 @@ export interface Extension {
 }
 
 /**
+ * True when this row is a lower-precedence copy of another same-name item.
+ * Disablement takes display precedence (`state === "disabled"`), but the
+ * discovery `_shadowed` flag (and `shadowedBy`) still mark the row as a
+ * loser — it must not be toggleable and must not join the winner's live state.
+ */
+export function isShadowedExtension(ext: Extension): boolean {
+	if (ext.state === "shadowed" || ext.shadowedBy) return true;
+	return Boolean((ext.raw as { _shadowed?: boolean } | null | undefined)?._shadowed);
+}
+
+/**
  * Tree node types for sidebar hierarchy.
  */
 export type TreeNodeType = "provider" | "kind" | "item";

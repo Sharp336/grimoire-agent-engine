@@ -397,6 +397,37 @@ describe("tool inspector", () => {
 		expect(text).not.toContain("Search the web");
 		expect(text).not.toContain("web_fetch");
 	});
+
+	test("does not join a shadowed custom-tool row against the winner's live schema", () => {
+		const panel = new InspectorPanel();
+		panel.setToolSource({
+			getLiveTool: () => ({
+				name: "gmail_send",
+				label: "Gmail Send",
+				description: "Send an email via gog for an authorized personal Gmail account.",
+				source: "extension",
+				sourcePath: "/home/sf/worlds/personal/.omp/tools/gmail_send.ts",
+				parameters: { type: "object", properties: { to: { type: "string" } } },
+			}),
+		});
+		panel.setExtension({
+			...toolExtension(),
+			state: "shadowed",
+			shadowedBy: "gmail_send",
+			path: "/home/sf/.omp/agent/tools/gmail_send.ts",
+			raw: {
+				name: "gmail_send",
+				description: "gmail_send custom tool",
+				path: "/home/sf/.omp/agent/tools/gmail_send.ts",
+				_shadowed: true,
+			},
+		});
+		const text = render(panel);
+		expect(text).toContain("Shadowed");
+		expect(text).not.toContain("Gmail Send");
+		expect(text).not.toContain("Send an email via gog");
+		expect(text).not.toContain("Arguments");
+	});
 });
 
 describe("rule inspector", () => {

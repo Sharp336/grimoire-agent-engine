@@ -25,16 +25,18 @@ import {
 import { readDisabledServers, readEnabledServers } from "../../../mcp/config-writer";
 import { commandPreview } from "./inspector-model";
 import { inferMcpTransport } from "./mcp-runtime";
-import type {
-	DashboardState,
-	Extension,
-	ExtensionKind,
-	ExtensionState,
-	FlatTreeItem,
-	ProviderTab,
-	TreeNode,
+import {
+	type DashboardState,
+	type Extension,
+	type ExtensionKind,
+	type ExtensionState,
+	type FlatTreeItem,
+	isShadowedExtension,
+	makeExtensionId,
+	type ProviderTab,
+	sourceFromMeta,
+	type TreeNode,
 } from "./types";
-import { makeExtensionId, sourceFromMeta } from "./types";
 
 /**
  * Settings manager interface for granular toggle persistence.
@@ -532,17 +534,7 @@ export function filterByProvider(extensions: Extension[], providerId: string): E
 	return extensions.filter(ext => ext.source.provider === providerId);
 }
 
-/**
- * True when this row is a lower-precedence copy of another same-name item.
- * Disablement takes display precedence (`state === "disabled"`), but the
- * discovery `_shadowed` flag (and `shadowedBy`) still mark the row as a
- * loser — it must not be toggleable and must not join the winner's live MCP
- * connection.
- */
-export function isShadowedExtension(ext: Extension): boolean {
-	if (ext.state === "shadowed" || ext.shadowedBy) return true;
-	return Boolean((ext.raw as { _shadowed?: boolean } | null | undefined)?._shadowed);
-}
+export { isShadowedExtension } from "./types";
 
 /**
  * Apply setting-backed item disable overrides to an existing dashboard state.

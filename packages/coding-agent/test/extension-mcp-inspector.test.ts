@@ -150,6 +150,43 @@ describe("MCP inspector runtime join", () => {
 		expect(connection.replace(/\s+/g, "")).toContain("gog-mcp-readonly");
 		expect(connection).toContain("Command");
 	});
+
+	test("collapses large resource and prompt catalogs until expand", () => {
+		const resources = Array.from({ length: 20 }, (_, i) => ({
+			uri: `github://repo/${i}`,
+			name: `resource_${i}`,
+		}));
+		const prompts = Array.from({ length: 12 }, (_, i) => ({ name: `prompt_${i}` }));
+		const panel = new InspectorPanel();
+		panel.setMcpSource({
+			getConnectionStatus: () => "connected",
+			getConnection: () => ({
+				name: "github",
+				config: { command: "/usr/bin/github-mcp-server" },
+				transport: transport(),
+				serverInfo: { name: "github-mcp-server", version: "0.19.0" },
+				capabilities: { resources: {}, prompts: {} },
+				tools: [],
+				resources,
+				prompts,
+			}),
+			getTools: () => [],
+			getServerResources: () => ({ resources, templates: [] }),
+			getServerPrompts: () => prompts,
+		});
+		panel.setExtension(mcpExtension());
+		const collapsed = Bun.stripANSI(panel.render(72).join("\n"));
+		expect(collapsed).toContain("resource_0");
+		expect(collapsed).not.toContain("resource_19");
+		expect(collapsed).toContain("prompt_0");
+		expect(collapsed).not.toContain("prompt_11");
+		expect(collapsed).toMatch(/more \(.* to expand\)/);
+
+		panel.toggleExpanded();
+		const expanded = Bun.stripANSI(panel.render(72).join("\n"));
+		expect(expanded).toContain("resource_19");
+		expect(expanded).toContain("prompt_11");
+	});
 });
 
 describe("MCP list runtime join", () => {

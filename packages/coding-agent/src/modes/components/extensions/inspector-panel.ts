@@ -39,8 +39,7 @@ import {
 	snapshotMcpRuntime,
 	visibleMcpTools,
 } from "./mcp-runtime";
-import { isShadowedExtension } from "./state-manager";
-import type { Extension, ExtensionState } from "./types";
+import { type Extension, type ExtensionState, isShadowedExtension } from "./types";
 
 export type { ToolRuntimeSource };
 
@@ -208,8 +207,15 @@ export class InspectorPanel implements Component {
 		if (snap && snap.resources.length > 0) {
 			contents.push(theme.fg("muted", "Resources"));
 			contents.push(this.#rule());
-			for (const resource of snap.resources) {
+			const { shown, hidden } = visibleMcpTools(
+				snap.resources,
+				this.#expanded ? snap.resources.length : MCP_TOOL_BUDGET,
+			);
+			for (const resource of shown) {
 				contents.push(`  ${theme.fg("accent", resource.name)}`);
+			}
+			if (hidden > 0) {
+				contents.push(theme.fg("dim", `  … ${hidden} more (${expandKeyHint()} to expand)`));
 			}
 			contents.push("");
 		}
@@ -217,8 +223,15 @@ export class InspectorPanel implements Component {
 		if (snap && snap.prompts.length > 0) {
 			contents.push(theme.fg("muted", "Prompts"));
 			contents.push(this.#rule());
-			for (const prompt of snap.prompts) {
+			const { shown, hidden } = visibleMcpTools(
+				snap.prompts,
+				this.#expanded ? snap.prompts.length : MCP_TOOL_BUDGET,
+			);
+			for (const prompt of shown) {
 				contents.push(`  ${theme.fg("accent", prompt.name)}`);
+			}
+			if (hidden > 0) {
+				contents.push(theme.fg("dim", `  … ${hidden} more (${expandKeyHint()} to expand)`));
 			}
 			contents.push("");
 		}
@@ -280,6 +293,9 @@ export class InspectorPanel implements Component {
 				surface.push("");
 			}
 			return { description: data.description, surface, contents: [], config: [] };
+		}
+		if (lives.length === 0 && data.params.length === 0) {
+			return { description: data.description, surface: [], contents: [], config: [] };
 		}
 		surface.push(theme.fg("muted", "Arguments"));
 		surface.push(this.#rule());
