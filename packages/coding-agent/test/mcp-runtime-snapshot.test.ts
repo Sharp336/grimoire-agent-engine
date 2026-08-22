@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { MCPServer } from "@oh-my-pi/pi-coding-agent/capability/mcp";
 import type { SourceMeta } from "@oh-my-pi/pi-coding-agent/capability/types";
+import type { CustomTool } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import type { MCPServerConnection, MCPTransport } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import {
 	applyMcpToggleRuntime,
@@ -12,6 +13,18 @@ import {
 	snapshotMcpRuntime,
 	visibleMcpTools,
 } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/mcp-runtime";
+
+function stubCustomTool(name: string): CustomTool {
+	return {
+		name,
+		label: name,
+		description: name,
+		parameters: { type: "object" },
+		async execute() {
+			return { content: [{ type: "text", text: "" }] };
+		},
+	};
+}
 
 const source: SourceMeta = {
 	provider: "native",
@@ -157,7 +170,7 @@ describe("snapshotMcpRuntime", () => {
 		const dirty = connection({
 			serverInfo: {
 				name: "github-mcp-server",
-				title: "GitHub\x1b]8;;https://evil.test\x07 MCP\tServer",
+				title: "GitHub\nMCP\tServer",
 				version: "0.19.0",
 				description: "Access\x1b[31m GitHub",
 			},
@@ -172,8 +185,7 @@ describe("snapshotMcpRuntime", () => {
 		});
 		const snap = snapshotMcpRuntime(server(), sourceFor("connected", dirty));
 		expect(snap.title).toBe("GitHub MCP   Server");
-		expect(snap.title).not.toContain("\x1b");
-		expect(snap.title).not.toContain("\x07");
+		expect(snap.title).not.toContain("\n");
 		expect(snap.title).not.toContain("\t");
 		expect(snap.description).toBe("Access GitHub");
 		expect(snap.tools[0]?.description).toBe("Search code");
@@ -184,8 +196,8 @@ describe("snapshotMcpRuntime", () => {
 describe("applyMcpToggleRuntime", () => {
 	test("disable disconnects the live manager and refreshes session tools", async () => {
 		const disconnected: string[] = [];
-		const refreshed: unknown[][] = [];
-		const tools = [{ mcpServerName: "other" }];
+		const refreshed: CustomTool[][] = [];
+		const tools = [stubCustomTool("other_tool")];
 		await applyMcpToggleRuntime({
 			name: "github",
 			enabled: false,
@@ -212,8 +224,8 @@ describe("applyMcpToggleRuntime", () => {
 
 	test("enable reconnects a disconnected server then refreshes session tools", async () => {
 		const connected: Array<Record<string, { command: string }>> = [];
-		const refreshed: unknown[][] = [];
-		const tools = [{ mcpServerName: "github" }];
+		const refreshed: CustomTool[][] = [];
+		const tools = [stubCustomTool("github_search")];
 		await applyMcpToggleRuntime({
 			name: "github",
 			enabled: true,

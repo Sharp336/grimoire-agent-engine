@@ -10,7 +10,7 @@ import { isProviderEnabled } from "../../../discovery";
 import { theme } from "../../../modes/theme/theme";
 import { matchesSelectDown, matchesSelectUp } from "../../utils/keybinding-matchers";
 import { clampSelection, contentRowWidth, renderScrollableList, searchableChar } from "../selector-helpers";
-import { sanitizeDisplayText } from "./display-text";
+import { sanitizeDisplayLine, sanitizeDisplayText } from "./display-text";
 import {
 	formatExtensionListHint,
 	joinListHints,
@@ -241,7 +241,7 @@ export class ExtensionList implements Component {
 			: mcpSnap
 				? this.#getMcpHealthIcon(mcpSnap.health, masterDisabled)
 				: this.#getStateIcon(ext.state, masterDisabled);
-		let name = sanitizeDisplayText(ext.displayName);
+		let name = sanitizeDisplayLine(ext.displayName);
 		const nameWidth = Math.min(24, width - 16);
 
 		// Build the line with indentation (visually "inside" the master switch)

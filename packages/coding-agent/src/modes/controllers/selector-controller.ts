@@ -114,6 +114,9 @@ function liveToolRecordFromSession(
 ): LiveToolRecord | undefined {
 	const tool = session.getToolByName(name);
 	if (!tool) return undefined;
+	const info = session.getAllToolInfos().find(entry => entry.name === name);
+	const origin = info?.sourceInfo.source;
+	const originPath = info?.sourceInfo.path;
 	return {
 		name: tool.name,
 		label: tool.label,
@@ -121,6 +124,9 @@ function liveToolRecordFromSession(
 		parameters: tool.parameters,
 		hidden: tool.hidden,
 		loadMode: tool.loadMode,
+		source:
+			origin === "builtin" || origin === "mcp" || origin === "sdk" || origin === "extension" ? origin : undefined,
+		sourcePath: originPath && !originPath.startsWith("<") ? originPath : undefined,
 	};
 }
 
@@ -404,8 +410,7 @@ export class SelectorController {
 					return tools;
 				},
 			},
-			onMcpToolsChanged: tools =>
-				this.ctx.session.refreshMCPTools(tools as Parameters<typeof this.ctx.session.refreshMCPTools>[0]),
+			onMcpToolsChanged: tools => this.ctx.session.refreshMCPTools(tools),
 		});
 		// Fullscreen dashboard on the alternate screen (the /settings idiom): the
 		// overlay borrows the terminal's alt buffer and enables mouse tracking for

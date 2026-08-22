@@ -5,10 +5,11 @@
  * are joined here at render time — the same seam as {@link snapshotMcpRuntime}.
  */
 import * as fs from "node:fs";
+import * as path from "node:path";
 import { arkToWireSchema, isArkSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { parseFrontmatter } from "@oh-my-pi/pi-utils";
 import { parseRuleConditionAndScope } from "../../../capability/rule";
-import { sanitizeDisplayField, sanitizeDisplayText } from "./display-text";
+import { sanitizeDisplayField, sanitizeDisplayLine, sanitizeDisplayText } from "./display-text";
 import type { Extension, ExtensionState } from "./types";
 
 export interface LiveToolRecord {
@@ -18,6 +19,10 @@ export interface LiveToolRecord {
 	parameters?: unknown;
 	hidden?: boolean;
 	loadMode?: "essential" | "discoverable";
+	/** Origin class from session `ToolInfo.sourceInfo.source`. */
+	source?: "builtin" | "mcp" | "sdk" | "extension";
+	/** Originating module path when the session actually has one. */
+	sourcePath?: string;
 }
 
 export interface ToolRuntimeSource {
@@ -61,10 +66,26 @@ export function parseToolFileHeader(source: string): string | undefined {
 	return paragraphs.length > 0 ? sanitizeDisplayField(paragraphs.join("\n\n")) : undefined;
 }
 
+const TOOL_HEADER_BYTES = 4096;
+const toolHeaderCache = new Map<string, { mtimeMs: number; description: string | undefined }>();
+
 export function toolFileHeaderDescription(filePath: string | undefined): string | undefined {
 	if (!filePath) return undefined;
 	try {
-		return parseToolFileHeader(fs.readFileSync(filePath, "utf8").slice(0, 4096));
+		const stat = fs.statSync(filePath);
+		const cached = toolHeaderCache.get(filePath);
+		if (cached && cached.mtimeMs === stat.mtimeMs) return cached.description;
+		const fd = fs.openSync(filePath, "r");
+		try {
+			const length = Math.min(TOOL_HEADER_BYTES, stat.size);
+			const buf = Buffer.alloc(length);
+			const n = fs.readSync(fd, buf, 0, length, 0);
+			const description = parseToolFileHeader(buf.toString("utf8", 0, n));
+			toolHeaderCache.set(filePath, { mtimeMs: stat.mtimeMs, description });
+			return description;
+		} finally {
+			fs.closeSync(fd);
+		}
 	} catch {
 		return undefined;
 	}
@@ -165,7 +186,7 @@ export function toolParamsFromSchema(schema: unknown): ToolParamView[] {
 		const defaultVal =
 			record.default !== undefined ? `Default: ${sanitizeDisplayText(String(record.default))}` : null;
 		params.push({
-			name: sanitizeDisplayText(name),
+			name: sanitizeDisplayLine(name),
 			type: paramType(record),
 			required: isRequired,
 			flag: isRequired ? "Required" : (defaultVal ?? "Optional"),
@@ -175,14 +196,37 @@ export function toolParamsFromSchema(schema: unknown): ToolParamView[] {
 	return params;
 }
 
+function isFilesystemToolPath(value: string): boolean {
+	return value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value);
+}
+
+function sameToolPath(left: string, right: string): boolean {
+	return path.resolve(left) === path.resolve(right);
+}
+
+function isFactoryExportName(extensionName: string, toolName: string): boolean {
+	return (
+		toolName === extensionName || toolName.startsWith(`${extensionName}_`) || toolName.startsWith(`${extensionName}-`)
+	);
+}
+
 export function liveToolsForExtension(ext: Extension, source: ToolRuntimeSource | undefined): LiveToolRecord[] {
 	if (!source) return [];
 	const exact = source.getLiveTool(ext.name);
 	if (exact) return [exact];
 	const listed = source.listLiveTools?.() ?? [];
-	return listed.filter(
-		tool => tool.name === ext.name || tool.name.startsWith(`${ext.name}_`) || tool.name.startsWith(`${ext.name}-`),
+	const fromSameFile = listed.filter(
+		tool => tool.sourcePath && isFilesystemToolPath(tool.sourcePath) && sameToolPath(tool.sourcePath, ext.path),
 	);
+	if (fromSameFile.length > 0) return fromSameFile;
+	if (listed.some(tool => tool.sourcePath && isFilesystemToolPath(tool.sourcePath))) {
+		return [];
+	}
+	return listed.filter(tool => {
+		if (!isFactoryExportName(ext.name, tool.name)) return false;
+		if (tool.source === "builtin" || tool.source === "mcp" || tool.source === "sdk") return false;
+		return true;
+	});
 }
 
 export function liveToolDetail(live: LiveToolRecord | undefined): string | undefined {

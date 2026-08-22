@@ -26,12 +26,13 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { getMCPConfigPath, logger } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../../config/settings";
+import type { CustomTool } from "../../../extensibility/custom-tools/types";
 import { setMcpServerEnabled } from "../../../mcp/config-writer";
 import type { MCPManager } from "../../../mcp/manager";
 import { MCP_CONNECTION_STATUS_EVENT_CHANNEL } from "../../../mcp/startup-events";
 import { getTabBarTheme } from "../../../modes/shared";
 import { theme } from "../../../modes/theme/theme";
-import { matchesAppInterrupt } from "../../../modes/utils/keybinding-matchers";
+import { matchesAppInterrupt, matchesAppToolsExpand } from "../../../modes/utils/keybinding-matchers";
 import { expandKeyHint } from "../../../tools/render-utils";
 import type { EventBus } from "../../../utils/event-bus";
 import { bottomBorder, divider, row, topBorder } from "../overlay-box";
@@ -56,7 +57,7 @@ export interface ExtensionDashboardOptions {
 	mcpManager?: MCPManager;
 	eventBus?: EventBus;
 	toolSource?: ToolRuntimeSource;
-	onMcpToolsChanged?: (tools: unknown[]) => Promise<void> | void;
+	onMcpToolsChanged?: (tools: CustomTool[]) => Promise<void> | void;
 }
 
 function extFooter(): string {
@@ -106,7 +107,7 @@ export class ExtensionDashboard implements Component {
 		private readonly mcpManager: MCPManager | undefined,
 		private readonly eventBus: EventBus | undefined,
 		private readonly toolSource: ToolRuntimeSource | undefined,
-		private readonly onMcpToolsChanged?: (tools: unknown[]) => Promise<void> | void,
+		private readonly onMcpToolsChanged?: (tools: CustomTool[]) => Promise<void> | void,
 	) {}
 
 	static async create(
@@ -354,6 +355,10 @@ export class ExtensionDashboard implements Component {
 				cwd: this.cwd,
 				manager: this.mcpManager,
 				session: this.onMcpToolsChanged ? { refreshMCPTools: this.onMcpToolsChanged } : undefined,
+				onStatus: event => {
+					this.eventBus?.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, event);
+					this.onRequestRender?.();
+				},
 			});
 		} catch (error) {
 			logger.warn("Failed to apply MCP toggle to live manager", { name, enabled, error: String(error) });
@@ -449,7 +454,7 @@ export class ExtensionDashboard implements Component {
 			return;
 		}
 
-		if (matchesKey(data, "ctrl+o")) {
+		if (matchesAppToolsExpand(data)) {
 			this.#inspector.toggleExpanded();
 			this.onRequestRender?.();
 			return;

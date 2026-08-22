@@ -9,7 +9,12 @@ import * as os from "node:os";
 import { type Component, visibleWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
 import { theme } from "../../../modes/theme/theme";
 import { expandKeyHint, PREVIEW_LIMITS, replaceTabs, shortenPath } from "../../../tools/render-utils";
-import { sanitizeDisplayField, sanitizeDisplayText } from "./display-text";
+import {
+	sanitizeDisplayField,
+	sanitizeDisplayLine,
+	sanitizeDisplayLineField,
+	sanitizeDisplayText,
+} from "./display-text";
 import {
 	commandInspectorData,
 	contextInspectorData,
@@ -422,9 +427,9 @@ export class InspectorPanel implements Component {
 	}
 
 	#pushIdentity(lines: string[], ext: Extension, title: string | undefined): void {
-		const name = sanitizeDisplayText(ext.displayName);
+		const name = sanitizeDisplayLine(ext.displayName);
 		lines.push(theme.bold(theme.fg("accent", name)));
-		const cleanTitle = sanitizeDisplayField(title);
+		const cleanTitle = sanitizeDisplayLineField(title);
 		if (cleanTitle && cleanTitle !== name) lines.push(theme.fg("muted", cleanTitle));
 		lines.push("");
 	}

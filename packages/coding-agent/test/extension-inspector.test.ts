@@ -360,6 +360,43 @@ describe("tool inspector", () => {
 		expect(text).toContain("3 tools · personal");
 		expect(text).not.toContain("args");
 	});
+
+	test("does not adopt builtin tools that only share a name prefix", () => {
+		const panel = new InspectorPanel();
+		panel.setToolSource({
+			getLiveTool: () => undefined,
+			listLiveTools: () => [
+				{
+					name: "web_search",
+					description: "Search the web.",
+					source: "builtin",
+					parameters: { type: "object", properties: { query: { type: "string" } } },
+				},
+				{
+					name: "web_fetch",
+					description: "Fetch a URL.",
+					source: "extension",
+					sourcePath: "/tmp/web.ts",
+					parameters: { type: "object", properties: { url: { type: "string" } } },
+				},
+			],
+		});
+		panel.setExtension({
+			id: "tool:web",
+			kind: "tool",
+			name: "web",
+			displayName: "web",
+			description: "web custom tool",
+			path: "/tmp/other.ts",
+			source: userSource(),
+			state: "active",
+			raw: { name: "web", description: "web custom tool", path: "/tmp/other.ts" },
+		});
+		const text = render(panel);
+		expect(text).not.toContain("web_search");
+		expect(text).not.toContain("Search the web");
+		expect(text).not.toContain("web_fetch");
+	});
 });
 
 describe("rule inspector", () => {

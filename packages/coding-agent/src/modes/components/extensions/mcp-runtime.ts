@@ -7,8 +7,10 @@
  */
 import type { MCPServer } from "../../../capability/mcp";
 import type { SourceMeta } from "../../../capability/types";
+import type { CustomTool } from "../../../extensibility/custom-tools/types";
 import { loadAllMCPConfigs } from "../../../mcp/config";
 import type { MCPLoadResult, MCPManager } from "../../../mcp/manager";
+import type { McpConnectionStatusEvent } from "../../../mcp/startup-events";
 import type {
 	MCPImplementation,
 	MCPPrompt,
@@ -18,7 +20,12 @@ import type {
 	MCPServerConnection,
 } from "../../../mcp/types";
 import { PREVIEW_LIMITS } from "../../../tools/render-utils";
-import { sanitizeDisplayField, sanitizeDisplayText } from "./display-text";
+import {
+	sanitizeDisplayField,
+	sanitizeDisplayLine,
+	sanitizeDisplayLineField,
+	sanitizeDisplayText,
+} from "./display-text";
 
 export type MCPConnectionHealth = "connected" | "connecting" | "disconnected" | "inactive";
 
@@ -63,16 +70,17 @@ export interface MCPRuntimeSource {
 /** Manager methods `/extensions` needs to match `/mcp enable` / `/mcp disable`. */
 export interface MCPToggleManager {
 	getConnectionStatus(name: string): "connected" | "connecting" | "disconnected";
-	getTools(): unknown[];
+	getTools(): CustomTool[];
 	disconnectServer(name: string): Promise<void>;
 	connectServers(
 		configs: Record<string, MCPServerConfig>,
 		sources: Record<string, SourceMeta>,
+		onStatus?: (event: McpConnectionStatusEvent) => void,
 	): Promise<Pick<MCPLoadResult, "errors"> | MCPLoadResult>;
 }
 
 export interface MCPToggleSession {
-	refreshMCPTools(tools: unknown[]): Promise<void> | void;
+	refreshMCPTools(tools: CustomTool[]): Promise<void> | void;
 }
 
 export interface ApplyMcpToggleRuntimeOptions {
@@ -82,6 +90,7 @@ export interface ApplyMcpToggleRuntimeOptions {
 	manager?: MCPToggleManager;
 	session?: MCPToggleSession;
 	loadConfigs?: typeof loadAllMCPConfigs;
+	onStatus?: (event: McpConnectionStatusEvent) => void;
 }
 
 /**
@@ -90,7 +99,7 @@ export interface ApplyMcpToggleRuntimeOptions {
  * already do. Config persistence stays in `setMcpServerEnabled`.
  */
 export async function applyMcpToggleRuntime(options: ApplyMcpToggleRuntimeOptions): Promise<void> {
-	const { name, enabled, cwd, manager, session, loadConfigs = loadAllMCPConfigs } = options;
+	const { name, enabled, cwd, manager, session, loadConfigs = loadAllMCPConfigs, onStatus } = options;
 	if (!manager) return;
 
 	if (!enabled) {
@@ -111,7 +120,7 @@ export async function applyMcpToggleRuntime(options: ApplyMcpToggleRuntimeOption
 		return;
 	}
 	const source = sources[name];
-	await manager.connectServers({ [name]: config }, source ? { [name]: source } : {});
+	await manager.connectServers({ [name]: config }, source ? { [name]: source } : {}, onStatus);
 	await session?.refreshMCPTools(manager.getTools());
 }
 
@@ -140,8 +149,8 @@ export function inferMcpTransport(server: MCPServer | MCPServerConfig): "stdio" 
 }
 
 function catalogItem(name: string, title?: string, description?: string): MCPRuntimeCatalogItem {
-	const cleanName = sanitizeDisplayText(name);
-	const cleanTitle = sanitizeDisplayField(title);
+	const cleanName = sanitizeDisplayLine(name);
+	const cleanTitle = sanitizeDisplayLineField(title);
 	const cleanDescription = sanitizeDisplayField(description);
 	return {
 		name: cleanName,
@@ -185,14 +194,14 @@ function identityFrom(
 	fallbackName: string,
 ): Pick<MCPRuntimeSnapshot, "title" | "description" | "websiteUrl" | "implementationName" | "implementationVersion"> {
 	if (!info) return {};
-	const implementationName = sanitizeDisplayField(info.name);
-	const displayTitle = sanitizeDisplayField(info.title);
+	const implementationName = sanitizeDisplayLineField(info.name);
+	const displayTitle = sanitizeDisplayLineField(info.title);
 	return {
 		title: displayTitle && displayTitle !== fallbackName ? displayTitle : undefined,
 		description: sanitizeDisplayField(info.description),
-		websiteUrl: sanitizeDisplayField(info.websiteUrl),
+		websiteUrl: sanitizeDisplayLineField(info.websiteUrl),
 		implementationName,
-		implementationVersion: sanitizeDisplayField(info.version),
+		implementationVersion: sanitizeDisplayLineField(info.version),
 	};
 }
 
