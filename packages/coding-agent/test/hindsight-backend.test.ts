@@ -648,6 +648,7 @@ describe("hindsightBackend live bank routing", () => {
 	// fresh mental-model bootstrap for no observable reason.
 	it("applies hindsight.retainUpdateMode to the live state without rebuilding", async () => {
 		vi.spyOn(HindsightApi.prototype, "createBank").mockResolvedValue({} as never);
+		const retain = vi.spyOn(HindsightApi.prototype, "retain").mockResolvedValue({} as never);
 		const settings = Settings.isolated({
 			"memory.backend": "hindsight",
 			"hindsight.apiUrl": "http://localhost:8888",
@@ -663,8 +664,19 @@ describe("hindsightBackend live bank routing", () => {
 			taskDepth: 0,
 		});
 
+		const first = [
+			{ role: "user" as const, content: "turn one has enough text" },
+			{ role: "assistant" as const, content: "reply one has enough text" },
+		];
+		const second = [
+			...first,
+			{ role: "user" as const, content: "turn two has enough text" },
+			{ role: "assistant" as const, content: "reply two has enough text" },
+		];
 		const initial = session.getHindsightSessionState();
 		expect(initial?.config.retainUpdateMode).toBe("replace");
+		await initial!.retainSession(first);
+		expect(retain.mock.calls[0]?.[2]?.updateMode).toBeUndefined();
 
 		settings.set("hindsight.retainUpdateMode", "append");
 		await Bun.sleep(0);
@@ -672,6 +684,8 @@ describe("hindsightBackend live bank routing", () => {
 		const next = session.getHindsightSessionState();
 		expect(next).toBe(initial);
 		expect(next?.config.retainUpdateMode).toBe("append");
+		await next!.retainSession(second);
+		expect(retain.mock.calls[1]?.[2]?.updateMode).toBe("append");
 	});
 
 	it("does not rebuild when the bank-routing setting is rewritten with the same value", async () => {
