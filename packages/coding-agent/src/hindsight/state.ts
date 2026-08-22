@@ -314,16 +314,12 @@ export class HindsightSessionState {
 		if (messages.length === 0) return;
 		const userTurns = messages.filter(m => m.role === "user").length;
 		const retainedThrough = Math.max(this.lastRetainedTurn, this.#closeRetainBaselineTurns);
-		if (this.config.retainMode === "last-turn") {
-			// Last-turn retain resets #lastRetainedMessageIndex to 0 by design
-			// (each retain is a unique document). An already-retained session
-			// therefore looks "pending" if we only inspect the message index.
-			// Resume also starts lastRetainedTurn at 0, so treat loaded history
-			// as the close-path baseline until this process retains new turns.
-			if (userTurns <= retainedThrough) return;
-		} else if (this.#lastRetainedMessageIndex >= messages.length && userTurns <= this.lastRetainedTurn) {
-			return;
-		}
+		// Last-turn retains reset #lastRetainedMessageIndex to 0 by design, and
+		// resume starts both that cursor and lastRetainedTurn at 0 even when the
+		// transcript already contains history. Treat loaded history as already
+		// retained on the close path so idle open/close does not reconsolidate
+		// the full document; only a below-cadence tail of new turns is flushed.
+		if (userTurns <= retainedThrough) return;
 		try {
 			const generation = this.#retainGeneration;
 			const lastTurnWindow =
