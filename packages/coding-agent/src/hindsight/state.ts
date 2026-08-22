@@ -42,6 +42,8 @@ export interface HindsightConversationTrackingSnapshot {
 	lastRetainedMessageIndex: number;
 	cachedTranscript: string;
 	lastRetainedPrefixKey: string;
+	loadedMessageCount: number;
+	loadedPrefixKey: string;
 }
 
 export interface HindsightSessionStateOptions {
@@ -240,6 +242,8 @@ export class HindsightSessionState {
 	#autoRetainInFlight: Promise<void> = Promise.resolve();
 	#retainGeneration = 0;
 	#closeRetainBaselineTurns = 0;
+	#loadedMessageCount = 0;
+	#loadedPrefixKey = "";
 	hasRecalledForFirstTurn: boolean;
 	lastRecallSnippet?: string;
 	/** Cached `<mental_models>` block injected into developer instructions. */
@@ -284,6 +288,7 @@ export class HindsightSessionState {
 			options.closeRetainBaselineTurns ??
 			this.session.loadedUserTurnCount ??
 			(this.session.sessionManager ? countRetainableUserTurns(this.session.sessionManager) : 0);
+		this.#captureLoadedBranchIdentity();
 	}
 
 	setSessionId(sessionId: string): void {
@@ -301,6 +306,8 @@ export class HindsightSessionState {
 			lastRetainedMessageIndex: this.#lastRetainedMessageIndex,
 			cachedTranscript: this.#cachedTranscript,
 			lastRetainedPrefixKey: this.#lastRetainedPrefixKey,
+			loadedMessageCount: this.#loadedMessageCount,
+			loadedPrefixKey: this.#loadedPrefixKey,
 		};
 	}
 
@@ -312,6 +319,8 @@ export class HindsightSessionState {
 		this.#lastRetainedMessageIndex = snapshot.lastRetainedMessageIndex;
 		this.#cachedTranscript = snapshot.cachedTranscript;
 		this.#lastRetainedPrefixKey = snapshot.lastRetainedPrefixKey;
+		this.#loadedMessageCount = snapshot.loadedMessageCount;
+		this.#loadedPrefixKey = snapshot.loadedPrefixKey;
 	}
 
 	resetConversationTracking(closeRetainBaselineTurns?: number): void {
@@ -322,6 +331,7 @@ export class HindsightSessionState {
 			closeRetainBaselineTurns ??
 			(this.session.sessionManager ? countRetainableUserTurns(this.session.sessionManager) : 0);
 		this.#invalidateRetainCache();
+		this.#captureLoadedBranchIdentity();
 	}
 
 	#invalidateRetainCache(): void {
@@ -331,10 +341,26 @@ export class HindsightSessionState {
 		this.#lastRetainedPrefixKey = "";
 	}
 
+	#captureLoadedBranchIdentity(): void {
+		const loaded = this.session.sessionManager ? extractMessages(this.session.sessionManager) : [];
+		this.#loadedMessageCount = loaded.length;
+		this.#loadedPrefixKey = retentionPrefixKey(loaded, loaded.length);
+	}
+
 	#retainedPrefixDiverged(messages: HindsightMessage[]): boolean {
 		if (this.#lastRetainedMessageIndex === 0) return false;
 		if (this.#lastRetainedMessageIndex > messages.length) return true;
 		return retentionPrefixKey(messages, this.#lastRetainedMessageIndex) !== this.#lastRetainedPrefixKey;
+	}
+
+	#sessionHistoryDiverged(messages: HindsightMessage[]): boolean {
+		if (this.#retainedPrefixDiverged(messages)) return true;
+		// Resume starts with no retained-prefix identity. Detect `/tree` rewinds
+		// against the loaded branch so a shorter replacement is not treated as
+		// already-retained history.
+		if (this.#lastRetainedMessageIndex > 0 || this.#loadedMessageCount === 0) return false;
+		if (messages.length < this.#loadedMessageCount) return true;
+		return retentionPrefixKey(messages, this.#loadedMessageCount) !== this.#loadedPrefixKey;
 	}
 
 	enqueueRetain(content: string, context?: string): void {
@@ -349,6 +375,7 @@ export class HindsightSessionState {
 		if (this.aliasOf) return;
 		if (!this.config.autoRetain) return;
 		await this.#autoRetainInFlight;
+		await this.#retainInFlight;
 		const messages = extractMessages(this.session.sessionManager);
 		if (messages.length === 0) return;
 		const userTurns = messages.filter(m => m.role === "user").length;
@@ -358,7 +385,7 @@ export class HindsightSessionState {
 		// path so idle open/close does not reconsolidate the full document; only
 		// a below-cadence tail of new turns is flushed. Last-turn retains still
 		// record the retained branch identity so `/tree` rewinds can diverge.
-		const prefixDiverged = this.#retainedPrefixDiverged(messages);
+		const prefixDiverged = this.#sessionHistoryDiverged(messages);
 		if (userTurns <= retainedThrough && !prefixDiverged) return;
 		try {
 			const generation = this.#retainGeneration;
@@ -530,7 +557,7 @@ export class HindsightSessionState {
 		const userTurns = messages.filter(m => m.role === "user").length;
 		if (
 			userTurns - this.lastRetainedTurn < this.config.retainEveryNTurns &&
-			!this.#retainedPrefixDiverged(messages)
+			!this.#sessionHistoryDiverged(messages)
 		) {
 			return;
 		}
@@ -556,12 +583,25 @@ export class HindsightSessionState {
 	}
 
 	async forceRetainCurrentSession(): Promise<void> {
+		const run = this.#autoRetainInFlight.then(
+			() => this.#forceRetainCurrentSessionLocked(),
+			() => this.#forceRetainCurrentSessionLocked(),
+		);
+		this.#autoRetainInFlight = run.then(
+			() => undefined,
+			() => undefined,
+		);
+		await run;
+	}
+
+	async #forceRetainCurrentSessionLocked(): Promise<void> {
 		const messages = extractMessages(this.session.sessionManager);
 		if (messages.length === 0) return;
 		// Forced retains are user-initiated rebuilds (`/memory enqueue`). The
 		// incremental cache is dropped inside the serialized retain so an
 		// in-flight cadence retain cannot repopulate the cursor and suppress
-		// the canonical replace.
+		// the canonical replace. Joining `#autoRetainInFlight` keeps close
+		// drains from emitting a duplicate last-turn document behind this call.
 		try {
 			await this.retainSession(messages, { forceReplace: true });
 			this.lastRetainedTurn = messages.filter(m => m.role === "user").length;
