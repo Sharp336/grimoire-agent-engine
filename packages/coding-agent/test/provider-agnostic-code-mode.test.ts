@@ -1,11 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import { ExtensionToolWrapper } from "../src/extensibility/extensions/wrapper";
-import { resolveCodeMode } from "../src/session/code-mode";
+import { type ResolveCodeModeArgs, resolveCodeMode } from "../src/session/code-mode";
 import { SessionTools, type SessionToolsHost } from "../src/session/session-tools";
 
 const enabledToolNames = ["eval", "todo", "read", "bash"];
 
-function resolve(provider: string, overrides: Partial<Parameters<typeof resolveCodeMode>[0]> = {}) {
+function resolve(provider: string, overrides: Partial<ResolveCodeModeArgs> = {}) {
 	return resolveCodeMode({
 		provider,
 		setting: "off",

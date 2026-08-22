@@ -19,7 +19,7 @@ export interface CodeModeResolution {
 	directToolNames: Set<string>;
 }
 
-export function resolveCodeMode(args: {
+export interface ResolveCodeModeArgs {
 	provider: string;
 	toolMode?: string;
 	setting: "off" | "on" | "auto";
@@ -27,7 +27,9 @@ export function resolveCodeMode(args: {
 	extraDirectTools?: readonly string[];
 	enabledToolNames: readonly string[];
 	evalTransportAvailable: boolean;
-}): CodeModeResolution {
+}
+
+export function resolveCodeMode(args: ResolveCodeModeArgs): CodeModeResolution {
 	const nativeCodexActivation =
 		args.provider === "openai-codex" &&
 		(args.setting === "on" || (args.setting === "auto" && args.toolMode === "code_mode_only"));
