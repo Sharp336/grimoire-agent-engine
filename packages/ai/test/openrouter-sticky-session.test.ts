@@ -7,7 +7,7 @@
  * (once per process) that upstream skips session-affinity endpoint
  * prioritization while the order is active.
  */
-import { describe, expect, it, spyOn } from "bun:test";
+import { beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import {
 	applyOpenAIGatewayRouting,
@@ -15,6 +15,7 @@ import {
 	normalizeOpenRouterResponsesSessionId,
 	type OpenAIGatewayRoutingCompat,
 	type OpenAIGatewayRoutingParams,
+	resetOpenRouterOrderSessionAffinityWarned,
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import type { Context, FetchImpl, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -46,7 +47,7 @@ function makeCompletionsModel(overrides: Partial<ModelSpec<"openai-completions">
 
 async function captureChatBody(
 	model: Model<"openai-completions">,
-	options: { sessionId?: string } = {},
+	options: { sessionId?: string; cacheRetention?: "none" } = {},
 ): Promise<Record<string, unknown>> {
 	let body: Record<string, unknown> | undefined;
 	const fetchMock: FetchImpl = async (_input: string | URL | Request, init?: RequestInit) => {
@@ -89,9 +90,38 @@ describe("OpenRouter completions sticky sessions", () => {
 
 		expect("session_id" in body).toBe(false);
 	});
+
+	it("omits session_id when the caller opts out via cacheRetention none", async () => {
+		const body = await captureChatBody(makeCompletionsModel(), {
+			sessionId: "0190fb1e-0000-7000-8000-000000000001",
+			cacheRetention: "none",
+		});
+
+		expect("session_id" in body).toBe(false);
+	});
 });
 
 describe("applyOpenAIGatewayRouting order/session-affinity warning", () => {
+	beforeEach(() => {
+		resetOpenRouterOrderSessionAffinityWarned();
+	});
+
+	it("does not warn when the host is not OpenRouter even with an order set", () => {
+		const warnSpy = spyOn(logger, "warn");
+		try {
+			const params: OpenAIGatewayRoutingParams = {};
+			applyOpenAIGatewayRouting(params, {
+				isOpenRouterHost: false,
+				openRouterRouting: { order: ["anthropic", "openai"] },
+			});
+
+			expect(warnSpy).not.toHaveBeenCalled();
+			expect(params.provider).toBeUndefined();
+		} finally {
+			warnSpy.mockRestore();
+		}
+	});
+
 	it("warns exactly once per process even when routing runs twice", () => {
 		const warnSpy = spyOn(logger, "warn");
 		try {
@@ -101,8 +131,8 @@ describe("applyOpenAIGatewayRouting order/session-affinity warning", () => {
 				openRouterRouting: { order: ["anthropic", "openai"] },
 			};
 
-			applyOpenAIGatewayRouting(params, compat, true, "openrouter");
-			applyOpenAIGatewayRouting(params, compat, true, "openrouter");
+			applyOpenAIGatewayRouting(params, compat, true);
+			applyOpenAIGatewayRouting(params, compat, true);
 
 			expect(warnSpy).toHaveBeenCalledTimes(1);
 			expect(String(warnSpy.mock.calls[0]?.[0])).toContain("provider.order");

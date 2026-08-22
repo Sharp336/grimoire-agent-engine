@@ -658,6 +658,14 @@ function warnOpenRouterOrderSkipsSessionAffinity(): void {
 }
 
 /**
+ * Test-only seam: reset the once-per-process order/session-affinity warning
+ * flag so suites can assert the warning deterministically.
+ */
+export function resetOpenRouterOrderSessionAffinityWarned(): void {
+	openRouterOrderSessionAffinityWarned = false;
+}
+
+/**
  * Apply gateway routing preferences to the request body. OpenRouter routes via
  * the top-level `provider` field; the Vercel AI Gateway routes Chat
  * Completions through `providerOptions.gateway`.
@@ -669,12 +677,11 @@ export function applyOpenAIGatewayRouting(
 	params: OpenAIGatewayRoutingParams,
 	compat: OpenAIGatewayRoutingCompat,
 	cacheEnabled = true,
-	modelProvider?: string,
 ): void {
-	if (modelProvider === "openrouter" && compat.openRouterRouting?.order && compat.openRouterRouting.order.length > 0) {
-		warnOpenRouterOrderSkipsSessionAffinity();
-	}
 	if (compat.isOpenRouterHost && compat.openRouterRouting) {
+		if (compat.openRouterRouting.order && compat.openRouterRouting.order.length > 0) {
+			warnOpenRouterOrderSkipsSessionAffinity();
+		}
 		params.provider = compat.openRouterRouting;
 	}
 	if (compat.isVercelGatewayHost && compat.vercelGatewayRouting) {
