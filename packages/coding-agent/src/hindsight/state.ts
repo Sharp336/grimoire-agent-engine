@@ -358,12 +358,13 @@ export class HindsightSessionState {
 		// path so idle open/close does not reconsolidate the full document; only
 		// a below-cadence tail of new turns is flushed. Last-turn retains still
 		// record the retained branch identity so `/tree` rewinds can diverge.
-		if (userTurns <= retainedThrough && !this.#retainedPrefixDiverged(messages)) return;
+		const prefixDiverged = this.#retainedPrefixDiverged(messages);
+		if (userTurns <= retainedThrough && !prefixDiverged) return;
 		try {
 			const generation = this.#retainGeneration;
 			const lastTurnWindow =
 				this.config.retainMode === "last-turn"
-					? userTurns - retainedThrough + this.config.retainOverlapTurns
+					? Math.max(prefixDiverged ? userTurns : userTurns - retainedThrough, 1) + this.config.retainOverlapTurns
 					: undefined;
 			await this.retainSession(messages, lastTurnWindow === undefined ? undefined : { lastTurnWindow });
 			if (generation === this.#retainGeneration) this.lastRetainedTurn = userTurns;
