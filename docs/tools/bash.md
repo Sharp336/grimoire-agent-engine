@@ -40,7 +40,7 @@ A command that finishes within `bash.asyncAuto.inlineGraceMs` returns one ordina
 ```xml
 <system-notice>
 <job-progress id="<job-id>" type="bash" elapsed="<elapsed>">
-<output truncated="true" full-output="artifact://<id>">
+<output>
 <all output events queued for this job>
 </output>
 </job-progress>
@@ -54,17 +54,18 @@ When either async Bash or Hub process monitoring is available, the system prompt
 <async-progress>
 Potentially slow finite commands → `bash` with `async: "auto"`; simple known-fast commands omit `async`. Use `progress: "wake"` only when pre-exit output may change the next action.
 Actionable process output → `hub`, `progress: "wake"` (`op: "start"` new; `op: "monitor"` existing).
-Noisy output → lower source verbosity or filter to actionable lines. If safe to retry, stop/cancel and relaunch with less output.
-Hub: retune the monitor to `ambient` or `off` without stopping the process.
-Bash: progress cannot be retuned; if retry is unsafe, let it finish.
-Truncated progress links its complete capture as `artifact://<id>`.
+Repeated non-actionable progress → NEVER narrate or echo each event.
+Transient burst? Ignore it and await completion. Sustained/chatty? Reduce source verbosity.
+Safe restart? Stop/cancel; relaunch with native quiet/warning-only flags. No native quiet mode? Filter to actionable lines.
+Unsafe restart? Let it finish silently. Retune its monitor to `ambient` or `off`.
+Truncated or suppressed progress links its complete capture as `artifact://<id>`.
 NEVER call `hub wait`, follow logs, or block to receive progress or keep the turn alive; use async progress and end the turn instead.
 </async-progress>
 ```
 
 Each delivered progress batch is a harness-injected `async-progress` message in the model's conversation. Rate limiting suppresses whole post-batch events by timing, not severity. A suppression count names events, not lines. When delivery resumes—or a terminal suppression summary is emitted—the batch retains bounded previews from the first and last suppressed events while omitting text from the events between them; delivered progress therefore cannot prove that an error or state transition did not occur. The artifact is authoritative. The resumed event or terminal summary includes `<suppressed events="N" reason="rate-limit" full-output="artifact://<id>" />`. Every fifth suppression-bearing progress message appends a `<system-reminder>` containing the same chatty-progress instructions from the system prompt.
 
-The truncation attributes appear only when the inline batch or one source line was truncated. Bash uses the same artifact as its final command output, so the URI stays stable for the job.
+When a batch was rate-limited or its preview exceeded the size bound, `<output>` instead carries a structured split: a `<head>` block, a `<suppressed reason="rate-limit|preview-limit" [events="N"] [full-output="artifact://<id>"] />` marker, and a `<tail>` block. The `<output>` element itself never carries attributes. Bash uses the same artifact as its final command output, so the URI stays stable for the job.
 
 ### Choosing a progress mode
 
