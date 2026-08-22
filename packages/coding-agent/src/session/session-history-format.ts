@@ -289,8 +289,11 @@ function customOneLiner(msg: CustomMessage | HookMessage): string {
 			const parts = jobs.map(job => {
 				const entry = (job ?? {}) as Record<string, unknown>;
 				const id = typeof entry.jobId === "string" ? entry.jobId : "job";
+				// A source-truncated window that still fits the preview budget arrives
+				// as `{ text, truncated: true }` with no head/tail split: keep its
+				// retained text and reserve the elision marker for an actual gap.
 				const text =
-					entry.truncated === true
+					entry.truncated === true && (typeof entry.head === "string" || typeof entry.tail === "string")
 						? [entry.head, entry.tail].filter((part): part is string => typeof part === "string").join(" … ")
 						: typeof entry.text === "string"
 							? entry.text
