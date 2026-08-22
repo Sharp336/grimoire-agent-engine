@@ -1,175 +1,191 @@
-import { ProcessTerminal, type ResizeScrollbackMode, Spacer, type Terminal, Text, TUI } from "@oh-my-pi/pi-tui";
-import { CustomEditor } from "./components/custom-editor";
-import { getEditorTheme } from "./theme/theme";
+import type { Terminal } from "@oh-my-pi/pi-tui";
+import { logger } from "@oh-my-pi/pi-utils";
+import { getRecentSessions } from "../session/session-listing";
+import { computeDefaultSessionDir } from "../session/session-paths";
+import { FileSessionStorage } from "../session/session-storage";
+import type { LspServerInfo, RecentSession } from "./components/welcome";
+import {
+	COMPOSER_DEFAULTS,
+	Composer,
+	type ComposerPreferences,
+	type ComposerStatusSnapshot,
+	type ComposerWelcomeUpdate,
+} from "./composer";
+import {
+	type ComposerThemePreferences,
+	readComposerStartupCache,
+	writeComposerLspCache,
+	writeComposerRecentSessionsCache,
+	writeComposerUiCache,
+} from "./composer-cache";
+import { initThemeSync } from "./theme/theme";
 
-const DOUBLE_INTERRUPT_MS = 500;
-
-export interface StartupComposerSurface {
-	readonly ui: TUI;
-	readonly editor: CustomEditor;
-}
-
-export interface StartupComposerConfig {
-	readonly showHardwareCursor: boolean;
-	readonly maxInlineImages: number;
-	readonly scrollbackRebuild: boolean;
-	readonly resizeScrollback: ResizeScrollbackMode;
-	readonly imeSafeCursor: boolean;
-	readonly autocompleteMaxVisible: number;
-}
-
-/**
- * Mirrors the canonical settings-schema defaults without importing the settings
- * runtime graph on the first-paint path. startup-composer.test.ts guards these
- * values against schema drift.
- */
-export const STARTUP_COMPOSER_DEFAULTS: StartupComposerConfig = {
-	showHardwareCursor: true,
-	maxInlineImages: 8,
-	scrollbackRebuild: false,
-	resizeScrollback: "append",
-	imeSafeCursor: false,
-	autocompleteMaxVisible: 10,
-};
-
-export interface StartupComposerOptions {
+/** Inputs available at the CLI prepaint boundary before command modules load. */
+export interface PrepaintComposerOptions {
 	readonly terminal?: Terminal;
 	readonly exit?: (code: number) => void;
 	readonly now?: () => number;
+	readonly version?: string;
+	readonly cwd?: string;
+	readonly preferences?: Partial<ComposerPreferences>;
+	readonly theme?: ComposerThemePreferences;
+	readonly status?: ComposerStatusSnapshot;
+	readonly recentSessions?: () => Promise<RecentSession[]>;
+	readonly cache?: boolean;
 }
-let pendingStartupComposer: StartupComposer | undefined;
 
-export class StartupComposerLease {
-	readonly surface: StartupComposerSurface;
+/** Final settings pushed into the live composer after Settings and the theme resolve. */
+export interface PrepaintComposerPreferences extends ComposerPreferences {
+	readonly theme: ComposerThemePreferences;
+}
 
-	readonly #composer: StartupComposer;
+interface PendingComposer {
+	readonly composer: Composer;
+	readonly cwd: string;
+	readonly cache: boolean;
+}
+
+let pendingComposer: PendingComposer | undefined;
+
+/** Ownership token that transfers one already-started Composer to InteractiveMode. */
+export class ComposerLease {
+	readonly composer: Composer;
 	#adopted = false;
 
-	constructor(composer: StartupComposer) {
-		this.#composer = composer;
-		this.surface = { ui: composer.ui, editor: composer.editor };
+	constructor(composer: Composer) {
+		this.composer = composer;
 	}
 
+	/** Transfer terminal ownership exactly once. */
 	adopt(): void {
 		if (this.#adopted) return;
-		this.#composer.handoff();
+		this.composer.transfer();
 		this.#adopted = true;
 	}
 
+	/** Stop an unadopted composer when startup exits before InteractiveMode. */
 	dispose(): void {
-		if (!this.#adopted) this.#composer.stop();
+		if (!this.#adopted) this.composer.stop();
 	}
 }
 
-export function beginStartupComposer(config: StartupComposerConfig, options: StartupComposerOptions = {}): void {
-	if (pendingStartupComposer) {
-		throw new Error("Startup composer is already active");
-	}
-	const composer = new StartupComposer(config, options);
+/** Start the canonical Composer with speculative cached state, then refresh recent sessions. */
+export function beginStartupComposer(options: PrepaintComposerOptions = {}): void {
+	if (pendingComposer) throw new Error("A prepaint composer is already active");
+	const cwd = options.cwd ?? process.cwd();
+	const useCache = options.cache !== false;
+	const cached = useCache
+		? readComposerStartupCache(cwd)
+		: {
+				preferences: undefined,
+				theme: undefined,
+				welcome: undefined,
+				recentSessions: [],
+				lspServers: [],
+				status: undefined,
+			};
+	const theme = { ...cached.theme, ...options.theme };
+	initThemeSync(theme.symbolPreset, theme.colorBlindMode, theme.darkTheme, theme.lightTheme);
+	const preferences = { ...COMPOSER_DEFAULTS, ...cached.preferences, ...options.preferences };
+	const welcome: ComposerWelcomeUpdate = {
+		version: options.version ?? "",
+		modelName: cached.welcome?.modelName,
+		providerName: cached.welcome?.providerName,
+		recentSessions: cached.recentSessions,
+		lspServers: cached.lspServers,
+	};
+	const composer = new Composer({
+		terminal: options.terminal,
+		exit: options.exit,
+		now: options.now,
+		preferences,
+		welcome,
+		status: options.status ?? cached.status,
+	});
 	try {
-		composer.start();
+		composer.start({ clearScrollback: true });
 	} catch (error) {
 		try {
 			composer.stop();
 		} catch {}
 		throw error;
 	}
-	pendingStartupComposer = composer;
+	const pending = { composer, cwd, cache: useCache };
+	pendingComposer = pending;
+	void refreshRecentSessions(pending, options.recentSessions);
 }
 
-export function takeStartupComposerLease(): StartupComposerLease | undefined {
-	const composer = pendingStartupComposer;
-	pendingStartupComposer = undefined;
-	return composer ? new StartupComposerLease(composer) : undefined;
+/** Take the live prepaint composer away from the module-level startup owner. */
+export function takeStartupComposerLease(): ComposerLease | undefined {
+	const pending = pendingComposer;
+	pendingComposer = undefined;
+	return pending ? new ComposerLease(pending.composer) : undefined;
 }
 
+/** Stop and forget any prepaint composer that never reached InteractiveMode. */
 export function stopPendingStartupComposer(): void {
-	pendingStartupComposer?.stop();
-	pendingStartupComposer = undefined;
+	pendingComposer?.composer.stop();
+	pendingComposer = undefined;
 }
 
-/**
- * Owns the real interactive editor while session startup is still running.
- * The surface is deliberately non-submitting until InteractiveMode installs
- * the session-aware handlers and adopts the same TUI and editor instances.
- */
-export class StartupComposer {
-	readonly ui: TUI;
-	readonly editor: CustomEditor;
-
-	readonly #exit: (code: number) => void;
-	readonly #now: () => number;
-	#lastInterruptAt = 0;
-	#started = false;
-	#stopped = false;
-
-	#transferred = false;
-	constructor(config: StartupComposerConfig, options: StartupComposerOptions = {}) {
-		this.#exit = options.exit ?? (code => process.exit(code));
-		this.#now = options.now ?? Date.now;
-		this.ui = new TUI(options.terminal ?? new ProcessTerminal(), config.showHardwareCursor);
-		this.ui.setMaxInlineImages(config.maxInlineImages);
-		this.ui.setScrollbackRebuild(config.scrollbackRebuild);
-		this.ui.setResizeScrollback(config.resizeScrollback);
-
-		this.editor = new CustomEditor(getEditorTheme());
-		this.editor.disableSubmit = true;
-		this.editor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
-		this.editor.setImeSafeCursorLayout(config.imeSafeCursor);
-		this.editor.setAutocompleteMaxVisible(config.autocompleteMaxVisible);
-		// Keep conventional emergency controls available during bootstrap. InteractiveMode
-		// replaces these with the user's configured bindings when it adopts the editor.
-		this.editor.setActionKeys("app.clear", ["ctrl+c"]);
-		this.editor.setActionKeys("app.exit", ["ctrl+d"]);
-		this.editor.onClear = () => this.#handleInterrupt();
-		this.editor.onExit = () => this.#requestExit(0);
-		this.editor.setShimmerRepaintHandler(() => this.ui.requestDirectWrite(this.editor));
-		this.ui.addChild(new Text("Starting OMP. You can type while startup finishes.", 1, 0));
-		this.ui.enableScopedInputRender(this.editor);
-		this.ui.addChild(new Spacer(1));
-		this.ui.addChild(this.editor);
-		this.ui.setFocus(this.editor);
+/** Apply final settings to the pending Composer and cache them for the next first frame. */
+export function applyStartupComposerPreferences(update: PrepaintComposerPreferences): void {
+	const pending = pendingComposer;
+	if (!pending) return;
+	const preferences: ComposerPreferences = {
+		quiet: update.quiet,
+		composerShape: update.composerShape,
+		showHardwareCursor: update.showHardwareCursor,
+		maxInlineImages: update.maxInlineImages,
+		scrollbackRebuild: update.scrollbackRebuild,
+		resizeScrollback: update.resizeScrollback,
+		imeSafeCursor: update.imeSafeCursor,
+		autocompleteMaxVisible: update.autocompleteMaxVisible,
+		spellingTypoDetection: update.spellingTypoDetection,
+		spellingAutocomplete: update.spellingAutocomplete,
+		spellingAutocorrect: update.spellingAutocorrect,
+	};
+	pending.composer.setPreferences(preferences);
+	if (pending.cache) {
+		void writeComposerUiCache(pending.cwd, preferences, update.theme).catch(error => {
+			logger.debug("composer UI cache write failed", { error });
+		});
 	}
+}
 
-	start(): void {
-		if (this.#started || this.#stopped) return;
-		this.#started = true;
-		this.ui.start({ clearScrollback: true });
+/** Apply discovered project LSP rows and cache them for the next first frame. */
+export function setStartupComposerLspServers(servers: LspServerInfo[]): void {
+	const pending = pendingComposer;
+	if (!pending) return;
+	pending.composer.updateWelcome({ lspServers: servers });
+	if (pending.cache) {
+		void writeComposerLspCache(pending.cwd, servers).catch(error => {
+			logger.debug("composer LSP cache write failed", { error });
+		});
 	}
+}
 
-	handoff(): StartupComposerSurface {
-		if (!this.#started || this.#stopped || this.#transferred) {
-			throw new Error("Startup composer is not available for handoff");
+async function refreshRecentSessions(
+	pending: PendingComposer,
+	loadOverride: (() => Promise<RecentSession[]>) | undefined,
+): Promise<void> {
+	try {
+		const sessions = loadOverride ? await loadOverride() : await loadRecentSessions(pending.cwd);
+		if (pending.cache) {
+			void writeComposerRecentSessionsCache(pending.cwd, sessions).catch(error => {
+				logger.debug("composer recent sessions cache write failed", { error });
+			});
 		}
-		this.#transferred = true;
-		return { ui: this.ui, editor: this.editor };
+		if (pendingComposer !== pending) return;
+		pending.composer.updateWelcome({ recentSessions: sessions });
+	} catch (error) {
+		logger.debug("composer recent sessions load failed", { error });
 	}
+}
 
-	stop(): void {
-		if (!this.#started || this.#stopped || this.#transferred) return;
-		this.#stopped = true;
-		this.ui.stop();
-	}
-
-	#handleInterrupt(): void {
-		const now = this.#now();
-		if (now - this.#lastInterruptAt < DOUBLE_INTERRUPT_MS) {
-			this.#requestExit(130);
-			return;
-		}
-		this.editor.setText("");
-		this.#lastInterruptAt = now;
-	}
-
-	#requestExit(code: number): void {
-		// Deliberately still live after handoff: InteractiveMode does not install the
-		// configured exit bindings until InputController.setupKeyHandlers() runs deep
-		// inside async init(), and a raw-mode user must be able to abort a stalled
-		// startup in that window. Once the interactive handlers are installed these
-		// callbacks become unreachable.
-		if (this.#stopped) return;
-		this.#stopped = true;
-		if (this.#started) this.ui.stop();
-		this.#exit(code);
-	}
+async function loadRecentSessions(cwd: string): Promise<RecentSession[]> {
+	const storage = new FileSessionStorage();
+	const dir = computeDefaultSessionDir(cwd, storage);
+	const list = await getRecentSessions(dir, 4, storage);
+	return list.map(session => ({ name: session.name, timeAgo: session.timeAgo }));
 }

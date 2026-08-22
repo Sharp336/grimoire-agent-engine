@@ -379,6 +379,11 @@ function normalizeBlock(lines: string[], rewrite: boolean): string {
 			/^\d+(?:-\d+)?:\s*(?:…|\.\.\.)\s*$/u.test(trimmed)
 		);
 	});
+	if (!rewrite) {
+		for (let index = 0; index < cleaned.length; index++) {
+			if (cleaned[index].trim() === "") cleaned[index] = "";
+		}
+	}
 	while (cleaned.at(-1)?.trim() === "") cleaned.pop();
 	const nonBlank = cleaned.filter(line => line.trim() !== "");
 	if (
@@ -1469,8 +1474,7 @@ function fuzzyOccurrences(content: string, pattern: string, allowSinglePunctuati
 			const punctuationEdits = candidateSignature === structural ? 0 : 1;
 			if (
 				punctuationEdits !== 0 &&
-				(!allowSinglePunctuationInsertion ||
-					!differsByOnePunctuationInsertion(structural, candidateSignature))
+				(!allowSinglePunctuationInsertion || !differsByOnePunctuationInsertion(structural, candidateSignature))
 			) {
 				continue;
 			}
@@ -2022,8 +2026,29 @@ function nonConsecutiveGuidance(
 	const previewOffset = fileLines.slice(0, previewLine).reduce((sum, line) => sum + line.length + 1, 0);
 	return {
 		locations,
-		correctedPattern: authoredLines.join(`\n${GAP}\n`),
+		correctedPattern: authoredLines.join(`${GAP}\n`),
 		previewOffset,
+	};
+}
+/**
+ * Preserve skipped source rows when explicit MATCH/REWRITE lines correspond
+ * positionally but the MATCH omitted `…` between them.
+ */
+function recoverNonConsecutiveOperation(content: string, operation: Operation): Operation | undefined {
+	if (operation.rewrite.kind !== "explicit") return undefined;
+	const separated = nonConsecutiveGuidance(content, operation);
+	if (!separated) return undefined;
+	const patternLines = operation.patternText.split("\n").filter(line => line.trim() !== "");
+	const rewriteLines = operation.rewrite.text.split("\n");
+	while (rewriteLines[0]?.trim() === "") rewriteLines.shift();
+	while (rewriteLines.at(-1)?.trim() === "") rewriteLines.pop();
+	if (rewriteLines.length !== patternLines.length || rewriteLines.some(line => line.trim() === "")) {
+		return undefined;
+	}
+	return {
+		...operation,
+		patternText: separated.correctedPattern,
+		rewrite: { kind: "explicit", text: rewriteLines.join(`${GAP}\n`) },
 	};
 }
 
@@ -3085,6 +3110,16 @@ function locateWithEchoRecovery(
 	try {
 		return { operation, pattern, candidates: locate(content, pattern, operation, operationNumber, path, exclusions) };
 	} catch (error) {
+		const nonConsecutive = recoverNonConsecutiveOperation(content, operation);
+		if (nonConsecutive) {
+			try {
+				const retryPattern = parsePattern(nonConsecutive.patternText, operationNumber);
+				const candidates = locate(content, retryPattern, nonConsecutive, operationNumber, path, exclusions);
+				return { operation: nonConsecutive, pattern: retryPattern, candidates };
+			} catch {
+				// Preserve the original diagnosis when the inferred gaps are not unique.
+			}
+		}
 		for (const candidatePattern of recoverPatternCandidates(
 			operation.patternText,
 			operation.rewrite.kind === "inline",

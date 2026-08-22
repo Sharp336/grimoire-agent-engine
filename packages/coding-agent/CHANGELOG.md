@@ -5,6 +5,12 @@
 ### Added
 
 - Added immutable host-owned selected-agent provenance, bound to the selected definition's origin, canonical location, and exact parser input, to discovered definitions, persisted subagent revivals, lifecycle events, and `SingleResult`, plus extension APIs for resolving the authoritative winning definition and identifying the current manifest package without consumer path heuristics.
+- Added independently configurable macOS typo detection (`Ctrl+.` suggestions), word autocomplete (Tab), and autocorrect in the prompt editor. Typo detection and autocomplete default on; autocorrect is opt-in.
+- Startup composer now renders welcome, theme, and status UI immediately using cached session/LSP info
+- `omp bench` now runs a mixed suite of randomized built-in challenges by default (chat, prefill, generation); `--profile` isolates one kind
+- Added p50/p95 statistics, distinct input/output throughput metrics, and cost to benchmark output
+- Added live benchmark dashboard with progress tracking and real-time performance estimates
+- Added `--prefill-bytes` to configure synthetic input sizes for prefill benchmarks
 - Added `/shake thinking` to remove model reasoning blocks from session history
 - Added icon support to slash command autocomplete, with unique visuals for actions, files, settings, and other command types
 - Slash-command autocomplete now ranks equally matching commands by how often you use them; usage counts persist across sessions in agent.db
@@ -33,11 +39,13 @@
 
 ### Fixed
 
+- Benchmark input-token counts now include cache-read/cache-write prompt tokens, so prefill throughput is no longer understated on providers with automatic prompt caching
 - Code blocks now syntax-highlight live while the response streams instead of staying plain until the block settles
 - Fixed `/shake thinking` reporting "Nothing to shake" after removing reasoning; it now reports the dropped count and leaves thinking-only turns empty.
 - Fixed session teardown occasionally losing pending input drafts during shutdown
 - Fixed streaming edit failures caused by trailing partial lines
 - Interrupting a Claude model mid-thinking no longer replays the partial reasoning as quoted conversation text on the next turn, which Anthropic's `reasoning_extraction` classifier refused.
+- Sloppy edits now ignore whitespace on otherwise blank MATCH rows and preserve omitted source rows when corresponding explicit MATCH/REWRITE lines are uniquely ordered but non-consecutive.
 - Sloppy edit `＋` inserts before an anchor line no longer double their typed indentation or flatten the anchor.
 - Session restore no longer re-runs the edit-matching engine for every historical edit in the transcript; large sessions with many edits resume several times faster.
 - Fixed image requests to Kimi Code / Moonshot failing with 400 `unsupported image url`: their catalog api is openai-completions so the image URL mirror gate wrongly admitted them; Moonshot-native hosts now always receive inline base64 images.

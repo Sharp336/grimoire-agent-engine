@@ -17,6 +17,7 @@ import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import type {
 	AutocompleteProvider,
 	Component,
+	ComposerStyle,
 	EditorTheme,
 	LoaderMessageColorFn,
 	NativeScrollbackLiveRegion,
@@ -29,13 +30,12 @@ import {
 	getComposerStyle,
 	Loader,
 	Markdown,
-	ProcessTerminal,
 	Spacer,
 	setTerminalTextSizing,
 	setTuiTight,
 	TERMINAL,
 	Text,
-	TUI,
+	type TUI,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import type { TerminalAppearanceRequestToken } from "@oh-my-pi/pi-tui/terminal";
@@ -171,7 +171,9 @@ import { type PlanReviewAnnotationState, PlanReviewOverlay } from "./components/
 import { StatusLineComponent } from "./components/status-line";
 import { stopSharedSpinnerTicker, type ToolExecutionHandle } from "./components/tool-execution";
 import { TranscriptContainer } from "./components/transcript-container";
-import { WelcomeComponent, type LspServerInfo as WelcomeLspServerInfo } from "./components/welcome";
+import type { LspServerInfo as WelcomeLspServerInfo } from "./components/welcome";
+import { Composer } from "./composer";
+import { writeComposerStatusCache, writeComposerWelcomeCache } from "./composer-cache";
 import { BtwController } from "./controllers/btw-controller";
 import { CleanseCommandController } from "./controllers/cleanse-command-controller";
 import { CommandController } from "./controllers/command-controller";
@@ -207,7 +209,6 @@ import { createSessionTeardown, type SessionTeardown } from "./session-teardown"
 import { runProviderSetupWizard } from "./setup-wizard/lazy";
 import { interruptHint } from "./shared";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "./skill-command";
-import type { StartupComposerSurface } from "./startup-composer";
 import { clearMermaidCache } from "./theme/mermaid-cache";
 import { type ShimmerPalette, shimmerEnabled, shimmerSegments, shimmerText } from "./theme/shimmer";
 import type { Theme } from "./theme/theme";
@@ -520,7 +521,6 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 const CTRL_L_APPEARANCE_RESPONSE_DEADLINE_MS = 2000;
 
 export class InteractiveMode implements InteractiveModeContext {
-	readonly #adoptedStartupSurface: boolean;
 	#ownsStartedUi: boolean;
 	#startupSubmitGated: boolean;
 	session: AgentSession;
@@ -530,6 +530,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	agent: Agent;
 	historyStorage?: HistoryStorage;
 
+	/** Canonical composer shared by cold prepaint and the session-aware runtime. */
+	readonly composer: Composer;
 	ui: TUI;
 	chatContainer: TranscriptContainer;
 	pendingMessagesContainer: Container;
@@ -775,7 +777,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	#mcpPendingServers = new Set<string>();
 	#mcpConnectedServers = new Set<string>();
 	#mcpFailedServers = new Map<string, { error: string; sourcePath?: string }>();
-	#welcomeComponent?: WelcomeComponent;
 	readonly #chatHost: ChatBlockHost = { requestRender: () => this.ui.requestRender() };
 
 	constructor(
@@ -786,20 +787,47 @@ export class InteractiveMode implements InteractiveModeContext {
 		lspServers: LspStartupServerInfo[] | undefined = undefined,
 		mcpManager?: MCPManager,
 		eventBus?: EventBus,
-		startupSurface?: StartupComposerSurface,
+		composer?: Composer,
 	) {
 		this.session = session;
 		this.sessionManager = session.sessionManager;
 		this.settings = session.settings;
-		this.ui = startupSurface?.ui ?? new TUI(new ProcessTerminal(), settings.get("showHardwareCursor"));
-		const editorTheme = getEditorTheme();
-		this.editor = startupSurface?.editor ?? new CustomEditor(editorTheme);
-		if (startupSurface) this.editor.setTheme(editorTheme);
+		const preferences = {
+			quiet: settings.get("startup.quiet"),
+			composerShape: settings.get("composer.shape") ?? "box",
+			showHardwareCursor: settings.get("showHardwareCursor"),
+			maxInlineImages: settings.get("tui.maxInlineImages"),
+			scrollbackRebuild: settings.get("tui.scrollbackRebuild"),
+			resizeScrollback: settings.get("tui.resizeScrollback"),
+			imeSafeCursor: settings.get("tui.imeSafeCursor"),
+			autocompleteMaxVisible: settings.get("autocompleteMaxVisible"),
+			spellingTypoDetection: settings.get("spelling.typoDetection"),
+			spellingAutocomplete: settings.get("spelling.autocomplete"),
+			spellingAutocorrect: settings.get("spelling.autocorrect"),
+		};
+		const wasStarted = composer?.started ?? false;
+		this.composer =
+			composer ??
+			new Composer({
+				preferences,
+				welcome: {
+					version,
+					modelName: session.model?.name ?? "Unknown",
+					providerName: session.model?.provider ?? "Unknown",
+					lspServers: lspServers?.map(server => ({
+						name: server.name,
+						status: server.status,
+						fileTypes: server.fileTypes,
+					})),
+				},
+			});
+		this.composer.setPreferences(preferences);
+		this.ui = this.composer.ui;
+		this.editor = this.composer.editor;
 		this.editor.magicKeywordsEnabled = () => this.settings.get("magicKeywords.enabled");
 		this.editor.imageReferenceHyperlink = imageReferenceHyperlink;
-		this.#adoptedStartupSurface = startupSurface !== undefined;
-		this.#ownsStartedUi = startupSurface !== undefined;
-		this.#startupSubmitGated = startupSurface !== undefined;
+		this.#ownsStartedUi = wasStarted;
+		this.#startupSubmitGated = true;
 		this.keybindings = KeybindingsManager.inMemory();
 		this.agent = session.agent;
 		this.#version = version;
@@ -856,6 +884,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		this.editor.setImeSafeCursorLayout(settings.get("tui.imeSafeCursor"));
 		this.editor.setAutocompleteMaxVisible(settings.get("autocompleteMaxVisible"));
+		this.syncEditorSpelling();
 		this.editor.viewportRowsProvider = () => this.ui.terminal.rows;
 		this.editor.onAutocompleteCancel = () => {
 			this.ui.requestRender(true);
@@ -911,12 +940,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.statusLine.setVibeWorkerTokenRateProvider(() =>
 			aggregateVibeWorkerTokensPerSecond(this.session.getAgentId() ?? MAIN_AGENT_ID),
 		);
-		// Lazy provider — the top border rebuild coalesces to at most one
-		// invocation per painted frame instead of firing on every session event
-		// (#4145). The TUI throttles renders at ~30fps, so a long-running eval
-		// spraying events no longer runs `getTopBorder` synchronously in the
-		// hot path where the render never gets to paint the result.
-		this.editor.setTopBorderProvider(availableWidth => this.statusLine.getTopBorder(availableWidth));
 
 		this.hideToolActivity = settings.get("display.hideToolActivity");
 		this.chatContainer.setToolActivityVisible(!this.hideToolActivity);
@@ -1020,10 +1043,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	playWelcomeIntro(): void {
-		const welcome = this.#welcomeComponent;
-		// Component-scoped: the intro only mutates the welcome box's own rows,
-		// so a resumed long transcript is not re-walked per animation frame.
-		welcome?.playIntro(() => this.ui.requestComponentRender(welcome));
+		this.composer.playWelcomeIntro();
 	}
 
 	async init(options: InteractiveModeInitOptions = {}): Promise<void> {
@@ -1082,76 +1102,68 @@ export class InteractiveMode implements InteractiveModeContext {
 				})),
 			),
 		);
-		if (this.#adoptedStartupSurface) {
-			// Replace the provisional startup frame in-place. The editor object
-			// itself survives and is reattached below with its draft intact.
-			this.ui.clear();
-		}
-
 		const startupQuiet = settings.get("startup.quiet");
-		this.#welcomeComponent = undefined;
-
+		this.composer.setPreferences({ quiet: startupQuiet });
+		this.composer.updateWelcome({
+			version: this.#version,
+			modelName,
+			providerName,
+			recentSessions,
+			lspServers: this.#getWelcomeLspServers(),
+		});
+		this.#persistComposerWelcome(modelName, providerName);
+		const headerBefore: Component[] = [];
 		for (const warning of this.session.configWarnings) {
-			this.ui.addChild(new Text(theme.fg("warning", `Warning: ${warning}`), 1, 0));
-			this.ui.addChild(new Spacer(1));
+			headerBefore.push(new Text(theme.fg("warning", `Warning: ${warning}`), 1, 0), new Spacer(1));
 		}
-
-		if (!startupQuiet) {
-			// Add welcome header
-			this.#welcomeComponent = new WelcomeComponent(
-				this.#version,
-				modelName,
-				providerName,
-				recentSessions,
-				this.#getWelcomeLspServers(),
+		const headerAfter: Component[] = [];
+		if (!startupQuiet && this.#startupChangelog && settings.get("startup.changelogMode") !== "hidden") {
+			headerAfter.push(
+				new DynamicBorder(),
+				new Text(theme.bold(theme.fg("accent", "What's New")), 1, 0),
+				new Spacer(1),
 			);
-
-			// Setup UI layout
-			this.ui.addChild(new Spacer(1));
-			this.ui.addChild(this.#welcomeComponent);
-			this.ui.addChild(new Spacer(1));
-			if (!options.suppressWelcomeIntro) {
-				this.playWelcomeIntro();
+			if (settings.get("startup.changelogMode") === "summary") {
+				const summary = formatStartupChangelogSummary(this.#startupChangelog).replace(
+					/\/changelog(?: full)?/g,
+					command => theme.bold(command),
+				);
+				headerAfter.push(new Text(summary, 1, 0));
+			} else {
+				headerAfter.push(new Markdown(this.#startupChangelog.markdown?.trim() ?? "", 1, 0, getMarkdownTheme()));
 			}
-
-			// Add changelog if provided
-			if (this.#startupChangelog && settings.get("startup.changelogMode") !== "hidden") {
-				this.ui.addChild(new DynamicBorder());
-				this.ui.addChild(new Text(theme.bold(theme.fg("accent", "What's New")), 1, 0));
-				this.ui.addChild(new Spacer(1));
-				if (settings.get("startup.changelogMode") === "summary") {
-					const summary = formatStartupChangelogSummary(this.#startupChangelog).replace(
-						/\/changelog(?: full)?/g,
-						command => theme.bold(command),
-					);
-					this.ui.addChild(new Text(summary, 1, 0));
-				} else {
-					this.ui.addChild(new Markdown(this.#startupChangelog.markdown?.trim() ?? "", 1, 0, getMarkdownTheme()));
-				}
-				this.ui.addChild(new Spacer(1));
-				this.ui.addChild(new DynamicBorder());
-			}
+			headerAfter.push(new Spacer(1), new DynamicBorder());
 		}
+		this.composer.setHeaderExtras(headerBefore, headerAfter);
+		// Install the refresh callback before the first real status render starts
+		// async git/PR/usage hydration. Cached segments remain visible until all
+		// data needed by that render is authoritative.
+		this.statusLine.watchBranch(() => {
+			this.#persistComposerStatus();
+			this.ui.requestRender();
+		});
+		this.composer.setStatusComponent(this.statusLine, () => !this.statusLine.isHydrating());
 
-		this.ui.addChild(this.chatContainer);
-		this.ui.addChild(this.pendingMessagesContainer);
-		this.ui.addChild(this.todoContainer);
-		this.ui.addChild(this.subagentContainer);
-		this.ui.addChild(this.btwContainer);
-		this.ui.addChild(this.omfgContainer);
-		this.ui.addChild(this.cleanseContainer);
-		this.ui.addChild(this.errorBannerContainer);
-		this.ui.addChild(this.modelCycleContainer);
-		this.ui.addChild(this.deferredCommandContainer);
-		// Working loader / transient status sits below the sticky todo + subagent
-		// HUDs, just above the editor's hook-widget top margin — so it reads next to
-		// the prompt while keeping the one-line gap above the editor.
-		this.ui.addChild(this.statusContainer);
-		this.ui.addChild(this.attachmentChipsContainer);
-		this.ui.addChild(this.hookWidgetContainerAbove);
-		this.ui.addChild(this.editorContainer);
-		this.ui.addChild(this.hookWidgetContainerBelow);
-		this.ui.addChild(this.statusLine);
+		this.composer.setRuntimeChildren([
+			this.chatContainer,
+			this.pendingMessagesContainer,
+			this.todoContainer,
+			this.subagentContainer,
+			this.btwContainer,
+			this.omfgContainer,
+			this.cleanseContainer,
+			this.errorBannerContainer,
+			this.modelCycleContainer,
+			this.deferredCommandContainer,
+			// Working loader / transient status sits below the sticky todo + subagent
+			// HUDs, just above the editor's hook-widget top margin — so it reads next to
+			// the prompt while keeping the one-line gap above the editor.
+			this.statusContainer,
+			this.attachmentChipsContainer,
+			this.hookWidgetContainerAbove,
+			this.editorContainer,
+			this.hookWidgetContainerBelow,
+		]);
 		this.ui.setFocus(this.editor);
 		this.syncComposerShape();
 
@@ -1178,10 +1190,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#eventBusUnsubscribers.push(startMacOSAppearanceReprobeFallback(this.ui.terminal));
 		}
 
-		// A startup composer may already own raw mode and the render loop. Do not
-		// restart the terminal or clear scrollback during that in-place handoff.
+		// A prepaint Composer may already own raw mode and the render loop.
 		if (!this.#ownsStartedUi) {
-			this.ui.start({ clearScrollback: options.clearInitialTerminalHistory === true });
+			this.composer.start({
+				clearScrollback: options.clearInitialTerminalHistory === true,
+				playWelcomeIntro: !options.suppressWelcomeIntro,
+			});
 			this.#ownsStartedUi = true;
 		}
 		pushTerminalTitle();
@@ -1355,13 +1369,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			// change, commit that change so theme loading performs a second full
 			// replay with the newly detected palette.
 			onTerminalAppearanceChange(mode, appearanceRefreshWasRequested ? {} : undefined);
-		});
-
-		// A branch change (checkout, worktree switch, `git switch`) invalidates
-		// the status-line git segments; the lazy top-border provider picks up
-		// the fresh branch on the next painted frame.
-		this.statusLine.watchBranch(() => {
-			this.ui.requestRender();
 		});
 	}
 
@@ -1963,6 +1970,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editor.setMaxHeight(this.#computeEditorMaxHeight());
 	}
 
+	syncEditorSpelling(): void {
+		this.editor.setSpellingFeatures({
+			typoDetection: this.settings.get("spelling.typoDetection"),
+			autocomplete: this.settings.get("spelling.autocomplete"),
+			autocorrect: this.settings.get("spelling.autocorrect"),
+		});
+	}
+
 	#syncStatusLineSettings(): void {
 		this.statusLine.updateSettings({
 			preset: settings.get("statusLine.preset"),
@@ -1980,14 +1995,24 @@ export class InteractiveMode implements InteractiveModeContext {
 	syncComposerShape(): void {
 		const shape = settings.get("composer.shape") ?? "box";
 		const style = getComposerStyle(shape);
-		this.editor.setBorderStyle(shape);
+		this.composer.setPreferences({ composerShape: shape });
 		this.statusLine.setAutocompleteActiveProbe(() => this.editor.isAutocompleteActive());
 		switch (style.statusAttachment) {
 			case "top-border":
-				this.editor.setTopBorderProvider(availableWidth => this.statusLine.getTopBorder(availableWidth));
+				this.editor.setTopBorderProvider(availableWidth => {
+					const real = this.statusLine.getTopBorder(availableWidth);
+					return this.statusLine.isHydrating()
+						? (this.composer.getSpeculativeTopBorder(availableWidth) ?? real)
+						: real;
+				});
 				break;
 			case "top-rule-chip":
-				this.editor.setTopBorderProvider(availableWidth => this.statusLine.getStandaloneTopBorder(availableWidth));
+				this.editor.setTopBorderProvider(availableWidth => {
+					const real = this.statusLine.getStandaloneTopBorder(availableWidth);
+					return this.statusLine.isHydrating()
+						? (this.composer.getSpeculativeTopBorder(availableWidth) ?? real)
+						: real;
+				});
 				break;
 			case "none":
 				this.editor.setTopBorderProvider(undefined);
@@ -1996,7 +2021,51 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.statusLine.setComposerStyle(style);
 		this.updateEditorBorderColor();
+		this.#persistComposerStatus();
 		this.ui.requestRender();
+	}
+
+	#persistComposerStatus(): void {
+		const sessionFile = this.sessionManager.getSessionFile();
+		if (!sessionFile) return;
+		const shape = settings.get("composer.shape") ?? "box";
+		const style: ComposerStyle = getComposerStyle(shape);
+		const terminalWidth = this.ui.terminal.columns;
+		const availableWidth = this.editor.getTopBorderAvailableWidth(terminalWidth);
+		const topBorder =
+			style.statusAttachment === "top-border"
+				? this.statusLine.getTopBorder(availableWidth)
+				: style.statusAttachment === "top-rule-chip"
+					? this.statusLine.getStandaloneTopBorder(availableWidth)
+					: undefined;
+		const bottomLines: string[] = [];
+		if (style.bottomBar !== "none") {
+			const content = this.statusLine.renderBottomBar(terminalWidth, style.bottomBar === "left" ? "left" : "full");
+			if (content) {
+				if (style.bottomBarGap) bottomLines.push("");
+				bottomLines.push(content);
+			}
+		}
+		if (this.statusLine.isHydrating()) return;
+		const borderMarker = "\0";
+		const coloredBorderMarker = this.editor.borderColor(borderMarker);
+		const markerIndex = coloredBorderMarker.indexOf(borderMarker);
+		const snapshot = {
+			shape,
+			borderColor:
+				markerIndex < 0
+					? undefined
+					: {
+							prefix: coloredBorderMarker.slice(0, markerIndex),
+							suffix: coloredBorderMarker.slice(markerIndex + borderMarker.length),
+						},
+			topBorder: topBorder ? { content: topBorder.content, width: topBorder.width } : undefined,
+			bottomLines,
+		};
+		this.composer.setStatusSnapshot(snapshot);
+		void writeComposerStatusCache(this.sessionManager.getCwd(), snapshot).catch(error => {
+			logger.debug("composer status cache write failed", { error });
+		});
 	}
 
 	#handleSessionAccentInputsChanged(): void {
@@ -4471,6 +4540,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		nextEditor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		nextEditor.setImeSafeCursorLayout(this.settings.get("tui.imeSafeCursor"));
 		nextEditor.setAutocompleteMaxVisible(this.settings.get("autocompleteMaxVisible"));
+		nextEditor.setSpellingFeatures({
+			typoDetection: this.settings.get("spelling.typoDetection"),
+			autocomplete: this.settings.get("spelling.autocomplete"),
+			autocorrect: this.settings.get("spelling.autocorrect"),
+		});
 		nextEditor.viewportRowsProvider = () => this.ui.terminal.rows;
 		nextEditor.magicKeywordsEnabled = () => this.settings.get("magicKeywords.enabled");
 		nextEditor.imageReferenceHyperlink = imageReferenceHyperlink;
@@ -4482,6 +4556,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 		nextEditor.setShimmerRepaintHandler(() => this.ui.requestDirectWrite(nextEditor));
 		this.editor = nextEditor;
+		this.composer.setEditor(nextEditor);
 		this.syncComposerShape();
 		nextEditor.setMaxHeight(this.#computeEditorMaxHeight());
 		if (this.historyStorage) {
@@ -4490,7 +4565,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		nextEditor.setText(previousText);
 
 		this.editorContainer.clear();
-		this.editor = nextEditor;
 		this.editorContainer.addChild(nextEditor);
 		this.ui.setFocus(nextEditor);
 
@@ -4660,21 +4734,21 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	#updateWelcomeModel(): void {
-		if (!this.#welcomeComponent) {
-			return;
-		}
+		const modelName = this.session.model?.name ?? "Unknown";
+		const providerName = this.session.model?.provider ?? "Unknown";
+		this.composer.updateWelcome({ modelName, providerName });
+		this.#persistComposerWelcome(modelName, providerName);
+	}
 
-		this.#welcomeComponent.setModel(this.session.model?.name ?? "Unknown", this.session.model?.provider ?? "Unknown");
-		this.ui.requestRender();
+	#persistComposerWelcome(modelName: string, providerName: string): void {
+		if (!this.sessionManager.getSessionFile()) return;
+		void writeComposerWelcomeCache(this.sessionManager.getCwd(), { modelName, providerName }).catch(error => {
+			logger.debug("composer welcome cache write failed", { error });
+		});
 	}
 
 	#updateWelcomeLspServers(): void {
-		if (!this.#welcomeComponent) {
-			return;
-		}
-
-		this.#welcomeComponent.setLspServers(this.#getWelcomeLspServers());
-		this.ui.requestRender();
+		this.composer.updateWelcome({ lspServers: this.#getWelcomeLspServers() });
 	}
 
 	#clearWorkingMessageAccentCache(): void {

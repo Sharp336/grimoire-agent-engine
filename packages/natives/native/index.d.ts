@@ -1418,6 +1418,28 @@ export declare enum MacOSAppearance {
 }
 
 /**
+ * Return the autocorrection macOS chooses for one completed-word range.
+ *
+ * Returns `null` when no confident correction exists or the service is
+ * unavailable.
+ */
+export declare function macOSAutocorrectWord(text: string, start: number, length: number): string | null
+
+/**
+ * Find every misspelled word using the active macOS dictionaries.
+ *
+ * Returns an empty list when Apple's spelling service is unavailable.
+ */
+export declare function macOSCheckSpelling(text: string): Array<SpellingRange>
+
+/**
+ * Return macOS dictionary completions for one partial-word range.
+ *
+ * Returns an empty list when Apple's spelling service is unavailable.
+ */
+export declare function macOSCompleteWord(text: string, start: number, length: number): Array<string>
+
+/**
  * Options for starting a macOS power assertion.
  *
  * Each boolean maps to a `caffeinate(8)` flag and a corresponding `IOKit`
@@ -1440,6 +1462,16 @@ export interface MacOSPowerAssertionOptions {
   /** `caffeinate -d`: prevent the display from idle-sleeping. */
   display?: boolean
 }
+
+/** Whether the host can use Apple's native spelling service. */
+export declare function macOSSpellCheckerAvailable(): boolean
+
+/**
+ * Return macOS replacement guesses for one misspelled-word range.
+ *
+ * Returns an empty list when Apple's spelling service is unavailable.
+ */
+export declare function macOSSpellingGuesses(text: string, start: number, length: number): Array<string>
 
 /** A single match in the content. */
 export interface Match {
@@ -1969,6 +2001,14 @@ export interface SnapcompactRenderOptions {
  * considered renderable because they are interpreted outside font lookup.
  */
 export declare function snapcompactSupportedChars(font: string, chars: string): string
+
+/** A misspelled span measured in JavaScript/UTF-16 code units. */
+export interface SpellingRange {
+  /** Inclusive UTF-16 start offset. */
+  start: number
+  /** UTF-16 length of the misspelled span. */
+  length: number
+}
 
 /**
  * Unified-diff hunks with jsdiff

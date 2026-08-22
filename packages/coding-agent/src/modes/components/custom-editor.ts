@@ -4,6 +4,7 @@ import {
 	addKeyAliases,
 	canonicalKeyId,
 	Editor,
+	type EditorTextDecorationContext,
 	type EditorTheme,
 	type KeyId,
 	parseKey,
@@ -19,6 +20,7 @@ import {
 	collapseImageMarkers,
 	renderPlaceholders,
 } from "../composer-attachments";
+import { MacOSSpellingProvider, type SpellingFeatures } from "../macos-spelling";
 import { hasMagicKeyword, highlightMagicKeywords } from "../magic-keywords";
 import { isQueuedMessageList, parseQueueShorthand, QUEUE_LIST_MARKER_RE } from "../queue-input";
 import { fgOrPlain, theme } from "../theme/theme";
@@ -401,6 +403,7 @@ export type ComposerChipDescriptor =
  * Custom editor that handles configurable app-level shortcuts for coding-agent.
  */
 export class CustomEditor extends Editor {
+	#spelling = new MacOSSpellingProvider();
 	imageLinks?: readonly (string | undefined)[];
 
 	/** Draft images pasted into the composer, consumed on submit. Co-located with
@@ -442,7 +445,13 @@ export class CustomEditor extends Editor {
 	 */
 	constructor(...args: readonly unknown[]) {
 		super(pickEditorTheme(args));
+		this.setTextAssistProvider(this.#spelling);
 		if (args[0] instanceof TUI) this.tui = args[0];
+	}
+
+	/** Independently configure typo detection, word autocomplete, and autocorrect. */
+	setSpellingFeatures(features: SpellingFeatures): void {
+		this.#spelling.setFeatures(features);
 	}
 
 	/** Clear the composer draft: optionally commit `historyText` to history, then
@@ -553,26 +562,45 @@ export class CustomEditor extends Editor {
 	 *  listening (tests, headless callers); the timer chain still self-cleans. */
 	#requestShimmerRepaint: (() => void) | undefined;
 	#queueDecorationText: string | undefined;
+	#decorationLines: readonly string[] = [""];
 	#queueShorthandActive = false;
 	#queueListActive = false;
 
 	/** Decorate magic keywords, attachments, and the queue-composer header/list markers.
 	 *  Queue shorthand reserves its first logical line as a dim `Queueing` label; sequential
 	 *  item markers use the accent color so separate follow-ups remain visible while composing. */
-	override decorateText = (text: string): string => {
+	override decorateText = (text: string, context: EditorTextDecorationContext): string => {
 		const editorText = this.getText();
 		const animated = this.focused && this.#shimmerEnabled() && hasMagicKeyword(editorText);
 		const phase = animated ? (Date.now() % CustomEditor.SHIMMER_PERIOD_MS) / CustomEditor.SHIMMER_PERIOD_MS : 0;
 		if (animated) this.#scheduleShimmerFrame();
 		if (this.#queueDecorationText !== editorText) {
 			this.#queueDecorationText = editorText;
+			this.#decorationLines = this.getLines();
 			const queueBody = parseQueueShorthand(editorText);
 			this.#queueShorthandActive = queueBody !== undefined;
 			this.#queueListActive = queueBody !== undefined && isQueuedMessageList(queueBody);
 		}
+		let sourceSearchOffset = 0;
+		const locateSource = (value: string): number => {
+			const offset = text.indexOf(value, sourceSearchOffset);
+			if (offset === -1) return sourceSearchOffset;
+			sourceSearchOffset = offset + value.length;
+			return offset;
+		};
 		return renderPlaceholders(text, {
 			renderText: value => {
-				const highlighted = highlightMagicKeywords(value, undefined, phase);
+				const sourceOffset = locateSource(value);
+				const highlighted = this.#spelling.decorateTypos(
+					value,
+					{
+						editorText,
+						lines: this.#decorationLines,
+						line: context.line,
+						startCol: context.startCol + sourceOffset,
+					},
+					span => highlightMagicKeywords(span, undefined, phase),
+				);
 				if (this.#queueShorthandActive && (value.startsWith("->") || value.startsWith("=>"))) {
 					const icon = typeof theme === "undefined" ? "➤" : theme.nav.selected;
 					return `${fgOrPlain("dim", `Queueing ${icon}`)}${highlighted.slice(2)}`;
@@ -588,6 +616,7 @@ export class CustomEditor extends Editor {
 				return highlighted;
 			},
 			renderReference: (value, kind, index, form) => {
+				locateSource(value);
 				if (form === "chip") {
 					// Chip tokens carry their attachment identity color (matches the band card).
 					const styled = `${attachmentSgr(kind, index)}\x1b[1m${value}\x1b[22m\x1b[39m`;

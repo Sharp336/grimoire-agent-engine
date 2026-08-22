@@ -471,6 +471,19 @@ export class StatusLineComponent implements Component {
 			contextLine: settings.get("statusLine.contextLine"),
 		};
 	}
+
+	/** Whether real status data is still replacing speculative cached segments. */
+	isHydrating(): boolean {
+		return (
+			this.#branchResolveActive !== undefined ||
+			this.#gitStatusInFlightCwd !== undefined ||
+			this.#jjBranchActive !== undefined ||
+			this.#jjStatusActive !== undefined ||
+			this.#prLookupInFlight ||
+			this.#usageInFlight
+		);
+	}
+
 	#gitEnabled(): boolean {
 		return settings.get("git.enabled");
 	}

@@ -499,6 +499,12 @@ export class SelectorController {
 			case "autocompleteMaxVisible":
 				this.ctx.editor.setAutocompleteMaxVisible(typeof value === "number" ? value : Number(value));
 				break;
+			case "spelling.typoDetection":
+			case "spelling.autocomplete":
+			case "spelling.autocorrect":
+				this.ctx.syncEditorSpelling();
+				this.ctx.ui.requestRender();
+				break;
 
 			// Settings with UI side effects
 			case "display.hideToolActivity": {

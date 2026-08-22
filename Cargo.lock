@@ -5090,6 +5090,7 @@ dependencies = [
  "napi",
  "napi-build",
  "napi-derive",
+ "objc2",
  "objc2-app-kit",
  "objc2-application-services",
  "objc2-core-foundation",

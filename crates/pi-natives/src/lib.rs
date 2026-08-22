@@ -46,6 +46,7 @@ pub mod live;
 pub mod pdf;
 pub mod sixel;
 pub mod snapcompact;
+pub mod spelling;
 pub mod utok;
 pub use pi_ast::language;
 

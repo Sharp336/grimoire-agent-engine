@@ -2,8 +2,16 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Changed `EditorTextAssistProvider.tryAutocorrect` signature to receive editor state instead of raw text
+- Changed `Editor.decorateText` signature to provide line and column context instead of raw text string
+
 ### Added
 
+- Added spelling suggestion support; implement `getWordReplacements` to provide word choices
+- Added `ctrl+.` keybinding to trigger spelling suggestions
+- Added `EditorTextAssistProvider` to support independent word completion and autocorrection
 - Added icon support to autocomplete and select lists, with customizable theming
 - `MarkdownTheme.createHighlightStream` lets themes supply a stateful incremental highlighter; streaming Markdown now syntax-highlights the completed lines of any open code fence (previously only diff/patch fences), and a fence highlights whole-block as soon as it closes
 - `SelectList` layouts accept `maxDescriptionRows` to cap wrapped descriptions with a trailing ellipsis
