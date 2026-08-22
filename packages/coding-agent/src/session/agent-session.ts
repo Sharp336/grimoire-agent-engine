@@ -150,6 +150,7 @@ import { normalizeToolEventInput, resolveToolEventInput } from "../extensibility
 import { GoalRuntime } from "../goals/runtime";
 import type { GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
+import { countRetainableUserTurns } from "../hindsight/transcript";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import type { IrcMessage } from "../irc/bus";
 import type { DaemonCompletionNotification } from "../launch/protocol";
@@ -1003,9 +1004,7 @@ export class AgentSession {
 		this.agent = config.agent;
 		this.#codeModeState = config.codeModeState ?? {};
 		this.sessionManager = config.sessionManager;
-		this.loadedUserTurnCount = this.sessionManager
-			.getEntries()
-			.filter(entry => entry.type === "message" && entry.message.role === "user").length;
+		this.loadedUserTurnCount = countRetainableUserTurns(this.sessionManager);
 		this.settings = config.settings;
 		this.#modelRegistry = config.modelRegistry;
 		this.#codexResetCoordinator = config.codexResetCoordinator ?? defaultCodexAutoRedeemCoordinator;
@@ -4253,6 +4252,17 @@ export class AgentSession {
 			);
 		} catch (error) {
 			logger.warn("Hindsight retain still draining at dispose deadline", { error: String(error) });
+			try {
+				await withTimeout(
+					hindsightState?.flushRetainQueue() ?? Promise.resolve(),
+					options.drainTimeoutMs ?? POST_PROMPT_DRAIN_TIMEOUT_MS,
+					"Timed out flushing Hindsight retain queue on dispose",
+				);
+			} catch (queueError) {
+				logger.warn("Hindsight retain queue still flushing at dispose deadline", {
+					error: String(queueError),
+				});
+			}
 		}
 		this.setHindsightSessionState(undefined);
 		hindsightState?.dispose();

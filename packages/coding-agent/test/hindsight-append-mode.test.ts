@@ -3,6 +3,7 @@ import { HindsightApi } from "@oh-my-pi/pi-coding-agent/hindsight/client";
 import type { HindsightConfig } from "@oh-my-pi/pi-coding-agent/hindsight/config";
 import type { HindsightMessage } from "@oh-my-pi/pi-coding-agent/hindsight/content";
 import { HindsightSessionState } from "@oh-my-pi/pi-coding-agent/hindsight/state";
+import { countRetainableUserTurns } from "@oh-my-pi/pi-coding-agent/hindsight/transcript";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 
@@ -680,5 +681,125 @@ describe("Hindsight append-mode session retention", () => {
 		expect(bodies).toHaveLength(1);
 		expect(String(firstItem(bodies[0]).content)).toContain("deploy token rotation");
 		state.dispose();
+	});
+
+	it("flushes queued tool retains before a slow session retain on close", async () => {
+		const bodies = captureBodies();
+		const client = new HindsightApi({ baseUrl: "http://hindsight.local" });
+		const entries = [
+			userEntry("u1", null, "turn one has enough text", "2026-08-17T10:00:00.000Z"),
+			assistantEntry("a1", "u1", "reply one has enough text", "2026-08-17T10:00:01.000Z"),
+		];
+		const state = new HindsightSessionState({
+			sessionId: "sess-queue-first",
+			client,
+			bankId: "personal",
+			config: makeConfig({ retainMode: "last-turn", retainEveryNTurns: 5, retainOverlapTurns: 0 }),
+			session: {
+				sessionId: "sess-queue-first",
+				loadedUserTurnCount: 0,
+				sessionManager: {
+					getHeader: () => ({
+						type: "session",
+						id: "sess-queue-first",
+						timestamp: SESSION_START,
+						cwd: "/tmp",
+					}),
+					getEntries: () => entries,
+				},
+				getHindsightSessionState: () => state,
+			} as object as AgentSession,
+			banksSet: new Set(["personal"]),
+		});
+
+		state.enqueueRetain("user asked me to remember the deploy token rotation");
+		await state.drainOnClose();
+		expect(bodies).toHaveLength(2);
+		expect(String(firstItem(bodies[0]).content)).toContain("deploy token rotation");
+		expect(String(firstItem(bodies[1]).content)).toContain("turn one has enough text");
+	});
+
+	it("rebases last-turn close history when conversation tracking is reset onto a loaded transcript", async () => {
+		const bodies = captureBodies();
+		const client = new HindsightApi({ baseUrl: "http://hindsight.local" });
+		const entries = [
+			userEntry("u1", null, "turn one has enough text", "2026-08-17T10:00:00.000Z"),
+			assistantEntry("a1", "u1", "reply one has enough text", "2026-08-17T10:00:01.000Z"),
+			userEntry("u2", "a1", "turn two has enough text", "2026-08-17T10:01:00.000Z"),
+			assistantEntry("a2", "u2", "reply two has enough text", "2026-08-17T10:01:01.000Z"),
+		];
+		const state = new HindsightSessionState({
+			sessionId: "sess-switch",
+			client,
+			bankId: "personal",
+			config: makeConfig({ retainMode: "last-turn", retainEveryNTurns: 5, retainOverlapTurns: 0 }),
+			session: {
+				sessionId: "sess-switch",
+				loadedUserTurnCount: 0,
+				sessionManager: {
+					getHeader: () => ({
+						type: "session",
+						id: "sess-switch",
+						timestamp: SESSION_START,
+						cwd: "/tmp",
+					}),
+					getEntries: () => entries,
+				},
+				getHindsightSessionState: () => state,
+			} as object as AgentSession,
+			banksSet: new Set(["personal"]),
+		});
+
+		state.resetConversationTracking();
+		await state.drainOnClose();
+		expect(bodies).toHaveLength(0);
+	});
+
+	it("does not treat an image-only user entry as a retainable close baseline turn", async () => {
+		const bodies = captureBodies();
+		const client = new HindsightApi({ baseUrl: "http://hindsight.local" });
+		const imageOnly = {
+			type: "message",
+			id: "u-image",
+			parentId: null,
+			timestamp: "2026-08-17T09:59:00.000Z",
+			message: {
+				role: "user",
+				content: [{ type: "image", data: "abc", mimeType: "image/png" }],
+				timestamp: Date.parse("2026-08-17T09:59:00.000Z"),
+			},
+		} as SessionEntry;
+		const entries = [
+			imageOnly,
+			userEntry("u1", "u-image", "turn one has enough text", "2026-08-17T10:00:00.000Z"),
+			assistantEntry("a1", "u1", "reply one has enough text", "2026-08-17T10:00:01.000Z"),
+		];
+		expect(countRetainableUserTurns({ getEntries: () => [imageOnly] })).toBe(0);
+		expect(countRetainableUserTurns({ getEntries: () => entries })).toBe(1);
+		const state = new HindsightSessionState({
+			sessionId: "sess-image-baseline",
+			client,
+			bankId: "personal",
+			config: makeConfig({ retainMode: "last-turn", retainEveryNTurns: 5, retainOverlapTurns: 0 }),
+			session: {
+				sessionId: "sess-image-baseline",
+				loadedUserTurnCount: countRetainableUserTurns({ getEntries: () => [imageOnly] }),
+				sessionManager: {
+					getHeader: () => ({
+						type: "session",
+						id: "sess-image-baseline",
+						timestamp: SESSION_START,
+						cwd: "/tmp",
+					}),
+					getEntries: () => entries,
+				},
+				getHindsightSessionState: () => state,
+			} as object as AgentSession,
+			banksSet: new Set(["personal"]),
+		});
+
+		await state.drainOnClose();
+		expect(bodies).toHaveLength(1);
+		expect(String(firstItem(bodies[0]).content)).toContain("turn one has enough text");
 	});
 });

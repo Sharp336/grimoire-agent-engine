@@ -32,6 +32,10 @@ export interface ReadonlySessionManagerLike {
  *   toolCall blocks are intentionally dropped: the user never saw them, so
  *   retaining them would prime recall on internal monologue.
  */
+export function countRetainableUserTurns(sessionManager: ReadonlySessionManagerLike): number {
+	return extractMessages(sessionManager).filter(message => message.role === "user").length;
+}
+
 export function extractMessages(sessionManager: ReadonlySessionManagerLike): HindsightMessage[] {
 	const messages: HindsightMessage[] = [];
 

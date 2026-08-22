@@ -18,7 +18,7 @@ import {
 	MENTAL_MODEL_FIRST_TURN_DEADLINE_MS,
 	resolveSeedsForScope,
 } from "./mental-models";
-import { extractMessages } from "./transcript";
+import { countRetainableUserTurns, extractMessages } from "./transcript";
 
 const RETAIN_FLUSH_BATCH_SIZE = 16;
 const RETAIN_FLUSH_INTERVAL_MS = 5_000;
@@ -270,7 +270,10 @@ export class HindsightSessionState {
 		this.hasRecalledForFirstTurn = options.hasRecalledForFirstTurn ?? false;
 		this.aliasOf = options.aliasOf;
 		this.retainQueue = new HindsightRetainQueue(this);
-		this.#closeRetainBaselineTurns = options.closeRetainBaselineTurns ?? this.session.loadedUserTurnCount ?? 0;
+		this.#closeRetainBaselineTurns =
+			options.closeRetainBaselineTurns ??
+			this.session.loadedUserTurnCount ??
+			(this.session.sessionManager ? countRetainableUserTurns(this.session.sessionManager) : 0);
 	}
 
 	setSessionId(sessionId: string): void {
@@ -282,7 +285,9 @@ export class HindsightSessionState {
 		this.lastRetainedTurn = 0;
 		this.hasRecalledForFirstTurn = false;
 		this.lastRecallSnippet = undefined;
-		this.#closeRetainBaselineTurns = 0;
+		this.#closeRetainBaselineTurns = this.session.sessionManager
+			? countRetainableUserTurns(this.session.sessionManager)
+			: 0;
 		this.#invalidateRetainCache();
 	}
 
@@ -337,8 +342,10 @@ export class HindsightSessionState {
 	}
 
 	async drainOnClose(): Promise<void> {
-		await this.flushPendingSessionRetain();
+		// Flush user-requested retain/learn items before the (potentially slow)
+		// session transcript retain so a dispose deadline cannot drop them.
 		await this.flushRetainQueue();
+		await this.flushPendingSessionRetain();
 	}
 
 	async recallForContext(query: string, signal?: AbortSignal): Promise<RecallOutcome> {
