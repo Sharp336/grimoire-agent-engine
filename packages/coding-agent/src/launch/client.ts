@@ -43,6 +43,10 @@ interface OutputSinkRegistration {
 	subscription: DaemonOutputSubscription;
 	sink: (notification: DaemonMonitorNotification) => Promise<void> | void;
 	deliveryTail?: Promise<void>;
+	/** Connection generation whose rejected callback suppresses already-queued deliveries. */
+	failedDeliveryGeneration?: number;
+	/** A callback rejection permanently suppresses terminal delivery to this sink. */
+	completionBlocked?: boolean;
 	/** Broker registration epoch of the last output batch delivered to the sink. */
 	lastEpoch?: string;
 	/** Highest seq delivered for {@link lastEpoch}; advertised as a cumulative replay ack. */
@@ -176,6 +180,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	#closed = false;
 	#completionReconnectTimer: NodeJS.Timeout | undefined;
 	#brokerCapabilities: string[] | undefined;
+	#socketGeneration = 0;
 
 	constructor(projectDir: string, runtimeDir: string, token: string, options: DaemonBrokerClientOptions) {
 		this.projectDir = projectDir;
@@ -396,10 +401,11 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	}
 
 	#bindSocket(socket: net.Socket): void {
+		const generation = ++this.#socketGeneration;
 		this.#socket = socket;
 		this.#buffer = "";
 		socket.setEncoding("utf8");
-		socket.on("data", chunk => this.#onData(chunk));
+		socket.on("data", chunk => this.#onData(chunk, generation));
 		socket.on("error", () => {
 			// The close handler rejects pending requests with one stable error.
 		});
@@ -410,7 +416,8 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		});
 	}
 
-	#onData(chunk: string | Buffer): void {
+	#onData(chunk: string | Buffer, generation: number): void {
+		if (generation !== this.#socketGeneration) return;
 		this.#buffer += typeof chunk === "string" ? chunk : chunk.toString("utf8");
 		for (;;) {
 			const newline = this.#buffer.indexOf("\n");
@@ -439,7 +446,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			}
 			if ("event" in message) {
 				if (message.event === "daemon-completed") void this.#deliverCompletion(message);
-				else void this.#deliverOutput(message);
+				else void this.#deliverOutput(message, generation);
 				continue;
 			}
 			const response = message;
@@ -489,11 +496,20 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		}
 	}
 
-	async #deliverOutput(message: DaemonMonitorNotification): Promise<void> {
+	async #deliverOutput(message: DaemonMonitorNotification, generation: number): Promise<void> {
 		const entry = this.#outputSinks.get(message.monitorId);
 		if (!entry) return;
 		const deliver = async (): Promise<void> => {
 			if (this.#outputSinks.get(message.monitorId) !== entry) return;
+			// Destroying a socket does not retract frames already parsed from that
+			// socket. Once this connection's callback rejects, suppress everything
+			// queued behind it instead of invoking the sink again.
+			if (entry.failedDeliveryGeneration === generation) return;
+			if (message.event === "daemon-monitor-completed" && entry.completionBlocked) {
+				this.#outputSinks.delete(message.monitorId);
+				this.#publishSubscriptions();
+				return;
+			}
 			if (message.event === "daemon-output" && message.epoch !== undefined) {
 				// A reconnect replays broker-retained batches; the epoch-scoped
 				// cumulative ack identifies the ones this sink already consumed.
@@ -514,11 +530,13 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		};
 		const delivery = entry.deliveryTail ? entry.deliveryTail.then(deliver) : deliver();
 		entry.deliveryTail = delivery.catch(error => {
+			entry.failedDeliveryGeneration = generation;
+			entry.completionBlocked = true;
 			logger.warn("Daemon output sink failed", {
 				monitorId: message.monitorId,
 				error: error instanceof Error ? error.message : String(error),
 			});
-			this.#socket?.destroy();
+			if (generation === this.#socketGeneration) this.#socket?.destroy();
 		});
 		await entry.deliveryTail;
 	}
