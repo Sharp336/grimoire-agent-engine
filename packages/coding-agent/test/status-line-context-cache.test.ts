@@ -14,11 +14,11 @@
  * redraw — that per-event recompute is what previously froze large sessions.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import type { CollabContextUsage, CollabSessionState } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ContextUsage } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { StatusLineComponent } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
 import { initTheme, setSymbolPreset, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { CollabContextUsage, CollabSessionState } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { getSessionAccentAnsi } from "@oh-my-pi/pi-coding-agent/utils/session-color";
 import { adjustHsv } from "@oh-my-pi/pi-utils";
@@ -562,48 +562,41 @@ describe("StatusLineComponent context breakdown", () => {
 	});
 
 	it("places the compaction marker in the final cell of a threshold-relative gauge", () => {
-		const renderGauge = (contextPercentBase: "model" | "compaction"): string[] => {
+		const renderGauge = (contextPercentBase: "model" | "compaction"): string => {
 			const { session } = makeSession({
 				messages: [userMessage("hi"), assistantMessage("done")],
 				contextWindow: 200_000,
 				usage: { tokens: 50_000, contextWindow: 200_000, percent: 25 },
 				settings: Settings.isolated({
 					"compaction.enabled": true,
+					"compaction.methodOrder": ["handoff"],
 					"compaction.thresholdTokens": 100_000,
 					"compaction.thresholdPercent": -1,
 				}),
 			});
-			const render = (
-				leftSegments: ("pi" | "context_pct")[],
-				rightSegments: ("session_name" | "context_total")[],
-			) => {
-				const comp = new StatusLineComponent(session);
-				comp.updateSettings({
-					preset: "custom",
-					leftSegments,
-					rightSegments,
-					separator: "none",
-					sessionAccent: false,
-					contextLine: "annotated",
-					contextPercentBase,
-				});
-				return comp.getTopBorder(80);
-			};
-
-			const full = render(["pi"], ["session_name"]);
-			const left = render(["pi"], []);
-			const right = render([], ["session_name"]);
-			const plain = full.content.replaceAll(/\x1b\[[0-9;]*m/g, "");
-			return [...plain].slice(left.width, full.width - right.width);
+			const comp = new StatusLineComponent(session);
+			comp.updateSettings({
+				preset: "custom",
+				leftSegments: ["pi"],
+				rightSegments: ["session_name"],
+				separator: "none",
+				sessionAccent: false,
+				contextLine: "annotated",
+				contextPercentBase,
+			});
+			return Bun.stripANSI(comp.getTopBorder(80).content);
 		};
 
 		const modelGauge = renderGauge("model");
 		const compactionGauge = renderGauge("compaction");
 		const compactionMarker = theme.symbol("context.compaction");
 		const modelMarkerIndex = modelGauge.indexOf(compactionMarker);
+		const modelRightGroupStart = modelGauge.indexOf(" test ");
+		const compactionMarkerIndex = compactionGauge.indexOf(compactionMarker);
+		const compactionRightGroupStart = compactionGauge.indexOf(" test ");
 		expect(modelMarkerIndex).toBeGreaterThanOrEqual(0);
-		expect(modelMarkerIndex).toBeLessThan(modelGauge.length - 1);
-		expect(compactionGauge.at(-1)).toBe(compactionMarker);
+		expect(modelMarkerIndex).toBeLessThan(modelRightGroupStart - 1);
+		expect(compactionMarkerIndex).toBe(compactionRightGroupStart - 1);
 	});
 	it("clamps the >100% gauge fill at the model window", () => {
 		const renderPercentageGauge = (tokens: number): string => {
@@ -676,7 +669,6 @@ describe("StatusLineComponent context breakdown", () => {
 		mutableModel.contextWindow = 100_000;
 		fake.setUsage({ tokens: 75_000, contextWindow: 100_000, percent: 75 });
 		expect(update("compaction")).toContain("150.0%/50K");
-
 	});
 
 	it("renders speculative percent instead of ? after compaction", () => {

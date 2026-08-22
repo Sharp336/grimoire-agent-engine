@@ -4,7 +4,7 @@ import { effectiveReserveTokens, resolveThresholdTokens } from "@oh-my-pi/pi-age
 import type { Tool as AiTool, Model } from "@oh-my-pi/pi-ai";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { formatNumber } from "@oh-my-pi/pi-utils";
-import type { ContextPercentBase, CompactionSettings as CodingCompactionSettings } from "../../config/settings-schema";
+import type { CompactionSettings as CodingCompactionSettings, ContextPercentBase } from "../../config/settings-schema";
 import type { Skill } from "../../extensibility/skills";
 import type { AgentSession } from "../../session/agent-session";
 import { hasAvailableCompactionMethod, resolveSpeculationMethod } from "../../session/compaction-methods";

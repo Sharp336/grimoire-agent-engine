@@ -124,10 +124,7 @@ function isCompactionMethodAvailable(
 }
 
 /** Whether the configured order contains a runnable threshold compaction method. */
-export function hasAvailableCompactionMethod(
-	model: Model | null | undefined,
-	settings: CompactionSettings,
-): boolean {
+export function hasAvailableCompactionMethod(model: Model | null | undefined, settings: CompactionSettings): boolean {
 	for (const candidate of resolveCompactionMethodOrder(settings.methodOrder)) {
 		if (isCompactionMethodAvailable(model, settings, candidate)) return true;
 	}

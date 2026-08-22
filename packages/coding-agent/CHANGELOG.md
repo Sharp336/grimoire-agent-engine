@@ -7,6 +7,7 @@
 - Plan review can save a plan to a chosen path and start a new session.
 - Added the `/pin` slash command to pin and unpin sessions so they stay at the top of the `--resume` picker UI.
 - Optional edit parse-regression capture appends the before/after content, model, variant, and arguments to `~/.omp/agent/edit-blackbox.jsonl` when `edit.blackbox.enabled` is enabled.
+- Added a status-line option to show context usage relative to the active compaction threshold instead of the model's full context window.
 ### Changed
 
 - Slash-command autocomplete now collapses skills into a single `/skill:` row; the individual skills list once the prefix reaches `/skill:` (accepting the row with Tab/Enter expands it in place).
@@ -77,7 +78,6 @@
 ### Fixed
 
 - Fixed the edit tool rejecting payloads containing a glued `«»` line: after MATCH it now reads as the mistyped `»` separator, elsewhere as a stray terminator to drop.
-- Added a status-line option to show context usage relative to the active compaction threshold instead of the model's full context window.
 
 ## [17.4.2] - 2026-08-21
 

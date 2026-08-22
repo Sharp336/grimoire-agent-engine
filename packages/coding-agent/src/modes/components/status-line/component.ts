@@ -1669,7 +1669,7 @@ export class StatusLineComponent implements Component {
 			stateContextWindow > 0 ? stateContextWindow : sessionContextWindow > 0 ? sessionContextWindow : 0;
 		let contextWindow = breakdown.contextWindow > 0 ? breakdown.contextWindow : fallbackContextWindow;
 		let contextTokens = breakdown.usedTokens;
-		let compactionThresholdTokens = resolveCollabCompactionThreshold(this.#collabStatus);
+		const compactionThresholdTokens = resolveCollabCompactionThreshold(this.#collabStatus);
 		// Collab guest: context comes from the host's state frames — the local
 		// replica does no accounting of its own.
 		const collabState = this.#collabStatus?.stateOverride;
@@ -1687,8 +1687,7 @@ export class StatusLineComponent implements Component {
 			compactionSettings,
 			compactionThresholdTokens,
 		});
-		const contextPercent =
-			contextPercentDenominator > 0 ? (contextTokens / contextPercentDenominator) * 100 : null;
+		const contextPercent = contextPercentDenominator > 0 ? (contextTokens / contextPercentDenominator) * 100 : null;
 
 		const shouldResolveActiveRepo = this.#gitEnabled() && (includePath || includeGit || includePr);
 		const projectDir = getProjectDir();
@@ -1791,7 +1790,8 @@ export class StatusLineComponent implements Component {
 			rightSegments,
 			separator: this.#settings.separator ?? presetDef.separator,
 			segmentOptions: mergedSegmentOptions,
-			contextPercentBase: this.#settings.contextPercentBase ?? settings.get("statusLine.contextPercentBase") ?? "model",
+			contextPercentBase:
+				this.#settings.contextPercentBase ?? settings.get("statusLine.contextPercentBase") ?? "model",
 		};
 	}
 

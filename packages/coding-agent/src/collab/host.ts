@@ -29,8 +29,8 @@ import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
 import { hasAvailableCompactionMethod, resolveSpeculationMethod } from "../session/compaction-methods";
 import { stripImagesFromMessage, USER_INTERRUPT_LABEL } from "../session/messages";
-import { resolveSpeculationLeadTokens } from "../session/speculation-lead";
 import type { SessionEntry as StoredSessionEntry } from "../session/session-entries";
+import { resolveSpeculationLeadTokens } from "../session/speculation-lead";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "../task/types";
 import { generateRoomKey, generateWriteToken, importRoomKey } from "./crypto";
 import { collabDisplayName } from "./display-name";
@@ -38,11 +38,11 @@ import {
 	type AgentSnapshot,
 	COLLAB_PROMPT_MESSAGE_TYPE,
 	COLLAB_PROTO,
+	type CollabContextUsage,
 	type CollabFrame,
 	type CollabParticipant,
 	type CollabPromptDetails,
 	type CollabSessionState,
-	type CollabContextUsage,
 	formatCollabLink,
 	formatCollabWebLink,
 	generateRoomId,
@@ -547,7 +547,11 @@ export class CollabHost {
 			hasAvailableCompactionMethod(session.model, compactionSettings)
 		) {
 			const resolvedThresholdTokens = resolveThresholdTokens(contextWindow, compactionSettings);
-			if (Number.isFinite(resolvedThresholdTokens) && resolvedThresholdTokens > 0 && resolvedThresholdTokens <= contextWindow) {
+			if (
+				Number.isFinite(resolvedThresholdTokens) &&
+				resolvedThresholdTokens > 0 &&
+				resolvedThresholdTokens <= contextWindow
+			) {
 				compactionThresholdTokens = resolvedThresholdTokens;
 				const strategy = (compactionSettings as CompactionSettings & { strategy?: unknown }).strategy;
 				const speculationMethod =
