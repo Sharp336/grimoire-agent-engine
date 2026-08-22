@@ -204,6 +204,7 @@ function createGlobalModelsDevReferenceMap(modelsDevModels: readonly ModelSpec[]
 function applyGlobalModelsDevFallback(
 	models: readonly ModelSpec[],
 	modelsDevModels: readonly ModelSpec[],
+	authoritativeProviders: ReadonlySet<string> = new Set(),
 ): ModelSpec[] {
 	const providerScopedKeys = new Set(modelsDevModels.map(model => `${model.provider}/${model.id}`));
 	const globalReferences = createGlobalModelsDevReferenceMap(modelsDevModels);
@@ -221,9 +222,14 @@ function applyGlobalModelsDevFallback(
 		}
 		return {
 			...model,
-			name: reference.name,
-			reasoning: reference.reasoning,
-			input: reference.input,
+			// Authoritative endpoint snapshots own their display names, reasoning
+			// and input capabilities — a same-id stencil.so row from a DIFFERENT
+			// provider (e.g. DeepSeek's lowercase catalog name shadowing a
+			// gateway's "DeepSeek V4 Flash") must not overwrite them. Only the
+			// documented limit fills apply.
+			name: authoritativeProviders.has(model.provider) ? model.name : reference.name,
+			reasoning: authoritativeProviders.has(model.provider) ? model.reasoning : reference.reasoning,
+			input: authoritativeProviders.has(model.provider) ? model.input : reference.input,
 			// Fill unknown endpoint limits from same-id stencil.so references, but keep
 			// provider-specific values when discovery returned them explicitly.
 			contextWindow: model.contextWindow ?? reference.contextWindow,
@@ -534,6 +540,7 @@ async function generateModels() {
 	let allModels = applyGlobalModelsDevFallback(
 		[...bundledModelsDevModels, ...catalogProviderModels, ...gitLabDuoModels],
 		modelsDevModels,
+		authoritativeCatalogProviders,
 	);
 
 	if (!allModels.some(model => model.provider === "cloudflare-ai-gateway")) {
@@ -674,7 +681,7 @@ async function generateModels() {
 		}
 	}
 
-	allModels = applyGlobalModelsDevFallback(allModels, modelsDevModels);
+	allModels = applyGlobalModelsDevFallback(allModels, modelsDevModels, authoritativeCatalogProviders);
 	// Seed QwenCloud's documented Token Plan models when credentialed
 	// discovery is unavailable. A successful `/models` response is authoritative
 	// for the subscribed edition and must not be widened by the fallback.

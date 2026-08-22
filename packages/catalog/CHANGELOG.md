@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added support for the Charm Hyper provider (`charm-hyper`), an OpenAI-compatible inference gateway with dynamic model discovery from the public `/v1/models` endpoint (reasoning effort levels, vision capabilities, context/output limits, and per-model pricing) and API-key authentication via the `HYPER_API_KEY` environment variable.
 ## [18.0.0] - 2026-08-22
 
 ### Added
