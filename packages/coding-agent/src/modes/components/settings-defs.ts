@@ -10,7 +10,7 @@
  */
 
 import { TERMINAL } from "@oh-my-pi/pi-tui";
-import { Settings, type SettingsScope } from "../../config/settings";
+import { type SettingValue as SchemaSettingValue, Settings, type SettingsScope } from "../../config/settings";
 import {
 	type AnyUiMetadata,
 	getDefault,
@@ -95,7 +95,7 @@ export type SettingDef =
 // Condition Functions
 // ═══════════════════════════════════════════════════════════════════════════
 
-function readSetting<P extends SettingPath>(path: P, scope?: SettingsScope): ReturnType<Settings["get"]> | undefined {
+function readSetting<P extends SettingPath>(path: P, scope?: SettingsScope): SchemaSettingValue<P> | undefined {
 	try {
 		const sm = Settings.instance;
 		return scope === "global" ? sm.getGlobalValue(path) : sm.get(path);

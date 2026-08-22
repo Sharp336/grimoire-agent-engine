@@ -147,4 +147,63 @@ describe("SettingsSelectorComponent persistence scope", () => {
 		for (const char of "hindsight api") selector.handleInput(char);
 		expect(selector.render(120).join("\n")).toContain("Hindsight API URL");
 	});
+
+	it("restores the effective theme when closing after a scope preview", () => {
+		const previews: string[] = [];
+		const selector = new SettingsSelectorComponent(
+			{
+				availableThinkingLevels: [],
+				thinkingLevel: undefined,
+				availableThemes: ["dark-one", "titanium"],
+				providers: [],
+				cwd: projectDir,
+			},
+			{
+				onChange: (settingPath, value) => changes.push({ path: settingPath, value }),
+				onThemePreview: themeName => {
+					previews.push(themeName);
+				},
+				onCancel: () => {},
+			},
+		);
+		settings.set("theme.dark", "dark-one", "project");
+		settings.set("theme.dark", "titanium", "global");
+		// Alt+S previews the global layer's theme...
+		selector.handleInput("\x1bs");
+		expect(previews.at(-1)).toBe("titanium");
+		// ...closing restores the effective (project) theme without persisting.
+		selector.handleInput("\x1b");
+		expect(previews.at(-1)).toBe("dark-one");
+		expect(settings.get("theme.dark")).toBe("dark-one");
+	});
+
+	it("keeps the selected scope's status-line baseline when canceling a submenu", () => {
+		settings.set("statusLine.preset", "minimal", "project");
+		settings.set("statusLine.preset", "full", "global");
+		const previews: Array<{ preset?: string }> = [];
+		const selector = new SettingsSelectorComponent(
+			{
+				availableThinkingLevels: [],
+				thinkingLevel: undefined,
+				availableThemes: [],
+				providers: [],
+				cwd: projectDir,
+			},
+			{
+				onChange: (settingPath, value) => changes.push({ path: settingPath, value }),
+				onStatusLinePreview: payload => {
+					previews.push(payload);
+				},
+				onCancel: () => {},
+			},
+		);
+		// Global scope previews the global baseline (preset "full").
+		selector.handleInput("\x1bs");
+		// Open the Status Line Separator submenu and cancel it: the preview must
+		// fall back to the full scoped baseline, not the effective project layer.
+		for (const ch of "status line separator") selector.handleInput(ch);
+		selector.handleInput("\n");
+		selector.handleInput("\x1b");
+		expect(previews.at(-1)?.preset).toBe("full");
+	});
 });

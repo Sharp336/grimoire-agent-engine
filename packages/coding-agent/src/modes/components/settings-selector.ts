@@ -835,7 +835,7 @@ export class SettingsSelectorComponent implements Component {
 			10,
 			getSettingsListTheme(),
 			(id, newValue) => this.#onSearchSettingChange(id as SettingPath, newValue),
-			() => this.callbacks.onCancel(),
+			() => this.#close(),
 			{
 				layout: "flat",
 				typeToSearch: false,
@@ -1119,7 +1119,7 @@ export class SettingsSelectorComponent implements Component {
 				const presetDef = getPreset(
 					value as "default" | "minimal" | "compact" | "full" | "nerd" | "ascii" | "custom",
 				);
-				this.callbacks.onStatusLinePreview?.({
+				this.#triggerStatusLinePreview({
 					preset: value as StatusLinePreset,
 					leftSegments: presetDef.leftSegments,
 					rightSegments: presetDef.rightSegments,
@@ -1127,29 +1127,21 @@ export class SettingsSelectorComponent implements Component {
 				});
 			};
 			onPreviewCancel = () => {
-				const currentPreset = settings.get("statusLine.preset");
-				const presetDef = getPreset(currentPreset);
-				this.callbacks.onStatusLinePreview?.({
-					preset: currentPreset,
-					leftSegments: presetDef.leftSegments,
-					rightSegments: presetDef.rightSegments,
-					separator: presetDef.separator,
-				});
+				this.#triggerStatusLinePreview();
 			};
 		} else if (def.path === "statusLine.separator") {
 			onPreview = value => {
-				this.callbacks.onStatusLinePreview?.({ separator: value as StatusLineSeparatorStyle });
+				this.#triggerStatusLinePreview({ separator: value as StatusLineSeparatorStyle });
 			};
 			onPreviewCancel = () => {
-				const separator = settings.get("statusLine.separator");
-				this.callbacks.onStatusLinePreview?.({ separator });
+				this.#triggerStatusLinePreview();
 			};
 		} else if (def.path === "statusLine.contextLine") {
 			onPreview = value => {
-				this.callbacks.onStatusLinePreview?.({ contextLine: value as ContextLineMode });
+				this.#triggerStatusLinePreview({ contextLine: value as ContextLineMode });
 			};
 			onPreviewCancel = () => {
-				this.callbacks.onStatusLinePreview?.({ contextLine: settings.get("statusLine.contextLine") });
+				this.#triggerStatusLinePreview();
 			};
 		} else if (def.path === "snapcompact.shape") {
 			const shapePreview = new SnapcompactShapePreview(currentValue, {
@@ -1380,7 +1372,7 @@ export class SettingsSelectorComponent implements Component {
 				// immediately instead of waiting for the next tab switch.
 				this.#refreshCurrentTabItems(defs);
 			},
-			() => this.callbacks.onCancel(),
+			() => this.#close(),
 			// The selector owns type-to-search and the footer hint; pin the
 			// split sidebar width so the divider never jumps between tabs.
 			{ typeToSearch: false, hint: "", sidebarWidth: settingsSidebarWidth() },
@@ -1426,7 +1418,7 @@ export class SettingsSelectorComponent implements Component {
 	/**
 	 * Trigger status line preview with current settings.
 	 */
-	#triggerStatusLinePreview(): void {
+	#triggerStatusLinePreview(overrides?: StatusLinePreviewSettings): void {
 		const statusLineSettings: StatusLinePreviewSettings = {
 			preset: this.#scopedValue("statusLine.preset") as StatusLinePreset,
 			leftSegments: this.#scopedValue("statusLine.leftSegments") as StatusLineSegmentId[],
@@ -1436,13 +1428,14 @@ export class SettingsSelectorComponent implements Component {
 			transparent: this.#scopedValue("statusLine.transparent") as boolean,
 			compactThinkingLevel: this.#scopedValue("statusLine.compactThinkingLevel") as boolean,
 			contextLine: this.#scopedValue("statusLine.contextLine") as ContextLineMode,
+			...overrides,
 		};
 		this.callbacks.onStatusLinePreview?.(statusLineSettings);
 	}
 
 	#showPluginsTab(): void {
 		this.#pluginComponent = new PluginSettingsComponent(this.context.cwd, {
-			onClose: () => this.callbacks.onCancel(),
+			onClose: () => this.#close(),
 			onPluginChanged: () => this.callbacks.onPluginsChanged?.(),
 			requestRender: this.context.requestRender,
 		});
@@ -1474,13 +1467,31 @@ export class SettingsSelectorComponent implements Component {
 	}
 
 	#scopedThemeName(): string | undefined {
-		const dark = this.#scopedValue("theme.dark");
-		const light = this.#scopedValue("theme.light");
+		return this.#themeName(this.#scopedValue("theme.dark"), this.#scopedValue("theme.light"));
+	}
+
+	#effectiveThemeName(): string | undefined {
+		return this.#themeName(settings.get("theme.dark"), settings.get("theme.light"));
+	}
+
+	#themeName(dark: unknown, light: unknown): string | undefined {
 		const preferred = isLightTheme(getCurrentThemeName()) ? light : dark;
 		if (typeof preferred === "string" && preferred.length > 0) return preferred;
 		if (typeof dark === "string" && dark.length > 0) return dark;
 		if (typeof light === "string" && light.length > 0) return light;
 		return undefined;
+	}
+
+	/**
+	 * Close the selector. Alt+S previews the selected layer's theme through
+	 * onThemePreview, which swaps the exported theme instance; reload the
+	 * effective theme so closing does not keep rendering with a scope whose
+	 * theme was never persisted.
+	 */
+	#close(): void {
+		const themeName = this.#effectiveThemeName();
+		if (themeName) void this.callbacks.onThemePreview?.(themeName);
+		this.callbacks.onCancel();
 	}
 
 	#inheritSelectedSetting(): void {
