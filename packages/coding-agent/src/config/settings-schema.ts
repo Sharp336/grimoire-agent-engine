@@ -13,6 +13,13 @@ import {
 	type CompactionMethod,
 	DEFAULT_COMPACTION_METHOD_ORDER,
 } from "../session/compaction-methods";
+import {
+	DEFAULT_MAX_TOKENS_PER_USER_MESSAGE,
+	PRESERVE_USER_MESSAGES_FILTERS,
+	PRUNE_LONG_USER_MESSAGE_MODES,
+	type PreserveUserMessagesFilter,
+	type PruneLongUserMessageMode,
+} from "../session/preserve-user-messages-settings";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS, STT_MODEL_VALUES } from "../stt/models";
 import { STT_SUBMIT_TRIGGER_OPTIONS, STT_SUBMIT_TRIGGER_VALUES } from "../stt/submit-trigger";
 import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "../thinking";
@@ -63,6 +70,23 @@ import {
 	SERVICE_TIER_OPENAI_OPTIONS,
 	SERVICE_TIER_OPENAI_VALUES,
 } from "./service-tier";
+
+const PRESERVED_USER_MESSAGE_WINDOW_OPTIONS = [
+	"1",
+	"3",
+	"5",
+	"10",
+	"15",
+	"25",
+	"50",
+	"100",
+	"250",
+	"500",
+	"1000",
+	"2500",
+	"5000",
+	"10000",
+].map(value => ({ value, label: value }));
 
 /** Unified settings schema - single source of truth for all settings.
  *
@@ -2678,6 +2702,149 @@ export const SETTINGS_SCHEMA = {
 			label: "Elide Uneventful Results",
 			description:
 				"Prune tool results flagged contextually useless (no matches, timed-out waits) once consumed (cache-aware)",
+		},
+	},
+
+	"compaction.keepUserMessages": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "context",
+			group: "Compaction",
+			label: "Keep User Messages",
+			description: "Transiently re-emit selected user-authored messages after the active compaction summary",
+		},
+	},
+
+	"compaction.keepUserMessagesFilter": {
+		type: "enum",
+		values: PRESERVE_USER_MESSAGES_FILTERS,
+		default: "heuristic",
+		ui: {
+			tab: "context",
+			group: "Compaction",
+			label: "Keep User Messages Filter",
+			description:
+				"Which real user-authored messages are eligible for re-emission: every one, all except pure acknowledgments, LLM-judged important ones, or only pinned ones",
+			condition: "keepUserMessages",
+			options: [
+				{
+					value: "heuristic",
+					label: "Heuristic",
+					description: 'Preserve every user message except pure acknowledgments ("ok", "sounds good", …).',
+				},
+				{ value: "all", label: "All", description: "Preserve every user message, verbatim." },
+				{
+					value: "llm",
+					label: "LLM-judged",
+					description:
+						"Ask a cheap model at each compaction to keep only the user messages that carry a lasting instruction, rule, or correction.",
+				},
+				{
+					value: "pinned",
+					label: "Pinned only",
+					description: "Preserve only the user messages explicitly pinned with /pin-message.",
+				},
+			],
+		},
+	},
+
+	"compaction.keepFirstNMessages": {
+		type: "number",
+		default: 0,
+		ui: {
+			tab: "context",
+			group: "Compaction",
+			label: "Keep First N Messages",
+			description: "Keep the first N eligible preserved user messages from the folded region (0 = off)",
+			condition: "keepUserMessages",
+			options: [
+				{
+					value: "0",
+					label: "Off",
+					description: "Disable the first-message edge (both edges off keeps every eligible message).",
+				},
+				...PRESERVED_USER_MESSAGE_WINDOW_OPTIONS,
+			],
+		},
+	},
+
+	"compaction.keepLastNMessages": {
+		type: "number",
+		default: 0,
+		ui: {
+			tab: "context",
+			group: "Compaction",
+			label: "Keep Last N Messages",
+			description: "Keep the last N eligible preserved user messages from the folded region (0 = off)",
+			condition: "keepUserMessages",
+			options: [
+				{
+					value: "0",
+					label: "Off",
+					description: "Disable the last-message edge (both edges off keeps every eligible message).",
+				},
+				...PRESERVED_USER_MESSAGE_WINDOW_OPTIONS,
+			],
+		},
+	},
+
+	"compaction.pruneLongUserMessages": {
+		type: "enum",
+		values: PRUNE_LONG_USER_MESSAGE_MODES,
+		default: "no",
+		ui: {
+			tab: "context",
+			group: "Compaction",
+			label: "Prune Long User Messages",
+			description: "How preserved user messages above the per-message token limit are handled",
+			condition: "keepUserMessages",
+			options: [
+				{ value: "no", label: "No", description: "Keep preserved user messages verbatim." },
+				{
+					value: "middle-out",
+					label: "Middle-out",
+					description: "Keep the beginning and end, replacing the removed middle with [truncated].",
+				},
+				{
+					value: "head-only",
+					label: "Head only",
+					description: "Keep the beginning and append [truncated].",
+				},
+				{
+					value: "tail-only",
+					label: "Tail only",
+					description: "Prepend [truncated] and keep the end.",
+				},
+				{
+					value: "exclude",
+					label: "Exclude",
+					description: "Exclude preserved user messages above the token limit.",
+				},
+			],
+		},
+	},
+
+	"compaction.maxTokensPerUserMessage": {
+		type: "number",
+		default: DEFAULT_MAX_TOKENS_PER_USER_MESSAGE,
+		ui: {
+			tab: "context",
+			group: "Compaction",
+			label: "Max Tokens per User Message",
+			description: "Maximum text-plus-image token estimate before the selected pruning mode applies",
+			condition: "pruneLongUserMessages",
+			options: [
+				{ value: "100", label: "100" },
+				{ value: "250", label: "250" },
+				{ value: "500", label: "500" },
+				{ value: "1000", label: "1,000" },
+				{ value: "2000", label: "2,000" },
+				{ value: "4000", label: "4,000" },
+				{ value: "8000", label: "8,000" },
+				{ value: "16000", label: "16,000" },
+				{ value: "32000", label: "32,000" },
+			],
 		},
 	},
 
@@ -6094,6 +6261,12 @@ export interface CompactionSettings {
 	idleTimeoutSeconds: number;
 	supersedeReads: boolean;
 	dropUseless: boolean;
+	keepUserMessages: boolean;
+	keepUserMessagesFilter: PreserveUserMessagesFilter;
+	keepFirstNMessages: number;
+	keepLastNMessages: number;
+	pruneLongUserMessages: PruneLongUserMessageMode;
+	maxTokensPerUserMessage: number;
 }
 
 export interface RecapSettings {

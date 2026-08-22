@@ -1487,6 +1487,24 @@ export class Settings {
 			raw.steeringMode = raw.queueMode;
 			delete raw.queueMode;
 		}
+		// Early preserve-user-message builds used `preserve*`; normalize only
+		// those two aliases while keeping canonical nested values authoritative.
+		const migratePreservedUserSetting = (legacyLeaf: string, canonicalLeaf: string): void => {
+			const compaction = isRecord(raw.compaction) ? (raw.compaction as Record<string, unknown>) : undefined;
+			const canonicalPath = `compaction.${canonicalLeaf}`;
+			const legacyPath = `compaction.${legacyLeaf}`;
+			const value = compaction?.[canonicalLeaf] ?? raw[canonicalPath] ?? compaction?.[legacyLeaf] ?? raw[legacyPath];
+			if (value !== undefined) {
+				const target = compaction ?? {};
+				target[canonicalLeaf] = value;
+				raw.compaction = target;
+			}
+			if (isRecord(raw.compaction)) delete (raw.compaction as Record<string, unknown>)[legacyLeaf];
+			delete raw[canonicalPath];
+			delete raw[legacyPath];
+		};
+		migratePreservedUserSetting("preserveUserMessages", "keepUserMessages");
+		migratePreservedUserSetting("preserveUserMessagesFilter", "keepUserMessagesFilter");
 
 		// lastChangelogVersion moved out of config.yml into the
 		// <agentDir>/last-changelog-version marker file so version bumps no

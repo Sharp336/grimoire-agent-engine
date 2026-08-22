@@ -154,6 +154,23 @@ const CONDITIONS: Record<string, () => boolean> = {
 			return false;
 		}
 	},
+	keepUserMessages: () => {
+		try {
+			return Settings.instance.get("compaction.keepUserMessages") === true;
+		} catch {
+			return false;
+		}
+	},
+	pruneLongUserMessages: () => {
+		try {
+			return (
+				Settings.instance.get("compaction.keepUserMessages") === true &&
+				Settings.instance.get("compaction.pruneLongUserMessages") !== "no"
+			);
+		} catch {
+			return false;
+		}
+	},
 };
 
 // ═══════════════════════════════════════════════════════════════════════════

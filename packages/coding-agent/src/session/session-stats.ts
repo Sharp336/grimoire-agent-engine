@@ -38,6 +38,7 @@ export interface SessionStatsTrackerHost {
 	modelRegistry: ModelRegistry;
 	model(): Model | undefined;
 	sessionId(): string;
+	transientOverlayTokens(): number;
 }
 
 function correctedPromptTokens(assistant: AssistantMessage): number {
@@ -174,6 +175,7 @@ export class SessionStatsTracker {
 		}
 
 		const activeMessages = this.#host.agent.state.messages;
+		const overlayTokens = this.#host.transientOverlayTokens();
 		let anchorIndex = -1;
 		let anchorAssistant: AssistantMessage | undefined;
 		if (anchorEntry?.message.role === "assistant") {
@@ -235,7 +237,16 @@ export class SessionStatsTracker {
 			}
 		}
 		if (!anchored) {
-			usedTokens = currentNonMessageTokens + this.#tokenizer.countMessages(activeMessages) + pendingTokens;
+			usedTokens =
+				currentNonMessageTokens + this.#tokenizer.countMessages(activeMessages) + pendingTokens + overlayTokens;
+		} else if (overlayTokens > 0) {
+			const countOptions = { excludeEncryptedReasoning: true } as const;
+			const localFloor =
+				currentNonMessageTokens +
+				this.#tokenizer.countMessages(activeMessages, countOptions) +
+				this.#tokenizer.countMessages(pendingMessages, countOptions) +
+				overlayTokens;
+			usedTokens = Math.max(usedTokens, localFloor);
 		}
 		return {
 			contextWindow,

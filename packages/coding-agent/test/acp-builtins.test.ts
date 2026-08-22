@@ -11,8 +11,13 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { PIN_MARKER_CUSTOM_TYPE } from "@oh-my-pi/pi-coding-agent/session/preserve-user-messages";
+import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
+import {
+	ACP_BUILTIN_SLASH_COMMANDS,
+	executeAcpBuiltinSlashCommand,
+} from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import { removeWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
 
 interface FakeAcpBuiltinSession {
@@ -59,7 +64,7 @@ interface FakeAcpBuiltinSession {
 interface FakeAcpBuiltinSessionManager {
 	_sessionFile: string | undefined;
 	_cwd: string;
-	_entries: { type: string }[];
+	_entries: SessionEntry[];
 	_customEntries: Array<{ customType: string; data: unknown }>;
 	_movedTo: string | undefined;
 	_flushed: boolean;
@@ -67,8 +72,8 @@ interface FakeAcpBuiltinSessionManager {
 	_sessionName: string | undefined;
 	getSessionId(): string;
 	getSessionFile(): string | undefined;
-	getEntries(): { type: string }[];
-	getBranch(): { type: string }[];
+	getEntries(): SessionEntry[];
+	getBranch(): SessionEntry[];
 	appendCustomEntry(customType: string, data?: unknown): string;
 	flush(): Promise<void>;
 	moveTo(newCwd: string): Promise<void>;
@@ -163,7 +168,7 @@ function createRuntime() {
 	fakeSessionManager = {
 		_sessionFile: undefined as string | undefined,
 		_cwd: "/tmp/project",
-		_entries: [] as { type: string }[],
+		_entries: [] as SessionEntry[],
 		_customEntries: [] as Array<{ customType: string; data: unknown }>,
 		_movedTo: undefined as string | undefined,
 		_flushed: false,
@@ -175,15 +180,24 @@ function createRuntime() {
 		getSessionFile(): string | undefined {
 			return this._sessionFile;
 		},
-		getEntries(): { type: string }[] {
+		getEntries(): SessionEntry[] {
 			return this._entries;
 		},
-		getBranch(): { type: string }[] {
+		getBranch(): SessionEntry[] {
 			return this._entries;
 		},
 		appendCustomEntry(customType: string, data?: unknown): string {
+			const id = `custom-${this._customEntries.length + 1}`;
 			this._customEntries.push({ customType, data });
-			return "fake-entry-id";
+			this._entries.push({
+				type: "custom",
+				id,
+				parentId: this._entries.at(-1)?.id ?? null,
+				timestamp: new Date().toISOString(),
+				customType,
+				data,
+			});
+			return id;
 		},
 		async flush() {
 			this._flushed = true;
@@ -234,6 +248,39 @@ function createRuntime() {
 }
 
 describe("ACP builtin slash commands", () => {
+	it("persists pin markers for the latest real user message", async () => {
+		const { fakeSessionManager, output, runtime } = createRuntime();
+		fakeSessionManager._entries.push({
+			type: "message",
+			id: "user-1",
+			parentId: null,
+			timestamp: new Date().toISOString(),
+			message: { role: "user", content: "Remember this", timestamp: Date.now() },
+		});
+		fakeSessionManager._entries.push({
+			type: "message",
+			id: "agent-user-1",
+			parentId: "user-1",
+			timestamp: new Date().toISOString(),
+			message: { role: "user", content: "Internal steering", attribution: "agent", timestamp: Date.now() },
+		});
+		expect(ACP_BUILTIN_SLASH_COMMANDS.map(command => command.name)).toEqual(
+			expect.arrayContaining(["pin-message", "unpin-message"]),
+		);
+
+		expect(await executeAcpBuiltinSlashCommand("/pin-message", runtime)).toEqual({ consumed: true });
+		expect(fakeSessionManager._customEntries).toEqual([
+			{ customType: PIN_MARKER_CUSTOM_TYPE, data: { messageId: "user-1", pinned: true } },
+		]);
+		expect(output.at(-1)).toContain("Pinned the most recent user message");
+		expect(await executeAcpBuiltinSlashCommand("/unpin-message", runtime)).toEqual({ consumed: true });
+		expect(fakeSessionManager._customEntries.at(-1)).toEqual({
+			customType: PIN_MARKER_CUSTOM_TYPE,
+			data: { messageId: "user-1", pinned: false },
+		});
+		expect(output.at(-1)).toContain("Unpinned the most recently pinned user message");
+	});
+
 	it("consumes fast status without returning prompt text", async () => {
 		const { output, runtime } = createRuntime();
 

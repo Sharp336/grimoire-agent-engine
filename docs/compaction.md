@@ -181,6 +181,16 @@ Tools can flag a finished result as contextually useless — a search with zero 
 
 The flag never reaches provider wire formats, and flagged pairs are never removed from history (only blanked in place), so tool-call/result pairing and provider-native history replay stay intact.
 
+### Preserved user messages
+
+`compaction.keepUserMessages` (default off) transiently inserts selected user-authored messages after the active compaction summary when each provider request is assembled. The folded region starts after the latest `/clear` (or at session start) and ends at that exact compaction boundary. Existing strategies—including snapcompact and remote compaction—still summarize or archive history normally. The overlay never enters `Agent.state`, the display transcript, or persisted session messages, and it adds no synthetic assistant traffic. Reusable OpenAI-compatible native history remains authoritative: selected messages already present there are suppressed from the added overlay by multiset-matching their original source after the same steering, image, and secret normalization used outbound, so kept-tail native users cannot be dropped and duplicate selected turns are avoided.
+
+`compaction.keepUserMessagesFilter` (`all` | `heuristic` | `llm` | `pinned`, default `heuristic`) determines eligibility. `all` accepts every real user-authored message; synthetic and agent-attributed user-role messages are never candidates. `heuristic` rejects only pure acknowledgments and errs toward keeping. `llm` classifies each newly folded message once with a tiny model and stores cumulative positive and negative coverage in a namespaced, versioned compaction preserve slot; classification failure falls back to the heuristic. `pinned` accepts only messages selected by `/pin-message` (remove with `/unpin-message`).
+
+`compaction.keepFirstNMessages` and `compaction.keepLastNMessages` then select from the eligible messages at the two edges of folded history. `0` disables that edge; `0` on both edges keeps every eligible message. Filter-rejected messages do not consume window slots and overlapping windows are de-duplicated. These windows are reapplied whenever folded history grows: first-window membership stays anchored at the start of the epoch, while last-window membership moves forward with new eligible messages.
+
+`compaction.pruneLongUserMessages` controls oversized selected messages before the first/last windows run: `no` leaves them intact, `middle-out` keeps both ends, `head-only` keeps the beginning, `tail-only` keeps the end, and `exclude` rejects the message without consuming a window slot. Truncated text contains `[truncated]` at the removed boundary. The token ceiling is `compaction.maxTokensPerUserMessage` (default `2000`) and appears in Settings only when pruning is enabled. Image blocks remain in source order and consume the shared `1200`-token-per-image estimate; if attachments leave no room for the marker, a truncating mode excludes the message rather than silently dropping an attachment.
+
 ### Boundary and cut-point logic
 
 `prepareCompaction()` only considers entries since the last compaction entry (if any).
@@ -435,6 +445,11 @@ From `settings-schema.ts`:
 - `compaction.idleTimeoutSeconds` = `300`
 - `compaction.supersedeReads` = `true`
 - `compaction.dropUseless` = `true`
+- `compaction.keepUserMessages` = `false`
+- `compaction.keepUserMessagesFilter` = `"heuristic"` (`"all"` accepts every user message; `"llm"` classifies via a tiny model; `"pinned"` requires `/pin-message`)
+- `compaction.keepFirstNMessages` = `0` and `compaction.keepLastNMessages` = `0` (`0`/`0` keeps all eligible messages)
+- `compaction.pruneLongUserMessages` = `"no"`
+- `compaction.maxTokensPerUserMessage` = `2000`
 - `snapcompact.systemPrompt` = `"none"` (`"agents-md"` and `"all"` opt into transient system-prompt imaging)
 - `snapcompact.toolResults` = `false` (transient imaging of large historical tool results)
 - `snapcompact.shape` = `"auto"`

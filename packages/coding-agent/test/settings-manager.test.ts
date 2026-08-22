@@ -1039,6 +1039,43 @@ describe("Settings", () => {
 		});
 	});
 	describe("migrations", () => {
+		it("normalizes nested and dotted preserved-user aliases", async () => {
+			await writeSettings({
+				compaction: { preserveUserMessages: true },
+				"compaction.preserveUserMessagesFilter": "all",
+			});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("compaction.keepUserMessages")).toBe(true);
+			expect(settings.get("compaction.keepUserMessagesFilter")).toBe("all");
+			settings.set("display.showTokenUsage", true);
+			await settings.flush();
+			const persisted = await readSettings();
+			expect(persisted.compaction).toMatchObject({ keepUserMessages: true, keepUserMessagesFilter: "all" });
+			expect(persisted["compaction.preserveUserMessagesFilter"]).toBeUndefined();
+		});
+
+		it("keeps canonical nested preservation values ahead of dotted and legacy aliases", async () => {
+			await writeSettings({
+				compaction: {
+					keepUserMessages: false,
+					keepUserMessagesFilter: "pinned",
+					preserveUserMessages: true,
+					preserveUserMessagesFilter: "all",
+				},
+				"compaction.keepUserMessages": true,
+				"compaction.keepUserMessagesFilter": "llm",
+				"compaction.preserveUserMessages": true,
+				"compaction.preserveUserMessagesFilter": "heuristic",
+			});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("compaction.keepUserMessages")).toBe(false);
+			expect(settings.get("compaction.keepUserMessagesFilter")).toBe("pinned");
+		});
+
 		it("consolidates legacy Exa suite toggles onto exa.enabled", async () => {
 			await writeSettings({
 				exa: {

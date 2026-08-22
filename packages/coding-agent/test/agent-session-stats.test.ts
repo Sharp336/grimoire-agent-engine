@@ -3,8 +3,14 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Message, UserMessage } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { computeNonMessageTokens } from "@oh-my-pi/pi-coding-agent/modes/utils/context-usage";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import {
+	resolvePreservedUserMessagePolicy,
+	selectPreservedUserMessages,
+} from "@oh-my-pi/pi-coding-agent/session/preserve-user-messages";
+import type { CompactionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 
 describe("AgentSession session stats", () => {
@@ -85,6 +91,59 @@ describe("AgentSession session stats", () => {
 			percent: (120_000 / model.contextWindow) * 100,
 		});
 		expect(stats.contextUsage).toEqual(directUsage);
+	});
+
+	it("floors anchored post-compaction usage by the local context plus transient overlay", () => {
+		const model = modelRegistry.getAll().find(candidate => candidate.contextWindow && candidate.contextWindow > 0);
+		if (!model?.contextWindow) throw new Error("Expected bundled model with a context window");
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage({
+			role: "user",
+			content: `preserved requirement ${"detail ".repeat(2_000)}`,
+			timestamp: 1,
+		});
+		const keptId = sessionManager.appendMessage({ role: "user", content: "kept tail", timestamp: 2 });
+		const compactionId = sessionManager.appendCompaction("summary", undefined, keptId, 10_000);
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "provider anchor with deliberately tiny reported input" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: 3,
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"compaction.keepUserMessages": true,
+			"compaction.keepUserMessagesFilter": "all",
+		});
+		const agent = new Agent({
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: sessionManager.buildSessionContext().messages,
+			},
+		});
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
+		const policy = resolvePreservedUserMessagePolicy(settings.getGroup("compaction"), agent.tokenizer);
+		if (!policy) throw new Error("Expected preservation policy");
+		const compaction = sessionManager.getEntry(compactionId) as CompactionEntry;
+		const overlayTokens = selectPreservedUserMessages(sessionManager.getBranch(), compaction, policy).tokenCount;
+		const localTokens =
+			computeNonMessageTokens(session, agent.tokenizer) + agent.tokenizer.countMessages(session.messages);
+
+		expect(overlayTokens).toBeGreaterThan(0);
+		expect(session.getContextUsage()?.tokens).toBe(localTokens + overlayTokens);
 	});
 
 	it("reconstructs persisted and active tool-loop context when provider prompt usage is unavailable", async () => {
