@@ -15,6 +15,7 @@ import { cursorProvider } from "./cursor";
 import { deepseekProvider } from "./deepseek";
 import { devinProvider } from "./devin";
 import { exaProvider } from "./exa";
+import { featherlessProvider } from "./featherless";
 import { firepassProvider } from "./firepass";
 import { fireworksProvider } from "./fireworks";
 import { githubCopilotProvider } from "./github-copilot";
@@ -122,6 +123,7 @@ const ALL = [
 	cerebrasProvider,
 	basetenProvider,
 	fireworksProvider,
+	featherlessProvider,
 	togetherProvider,
 	nvidiaProvider,
 	novitaProvider,

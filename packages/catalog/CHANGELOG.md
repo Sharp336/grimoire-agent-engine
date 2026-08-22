@@ -11,6 +11,15 @@
 ### Fixed
 
 - Fixed Cursor model discovery showing separate picker rows for pure effort-suffixed models beyond GPT-5.6 by collapsing each standard and Fast lane into one reasoning-effort model ([#9237](https://github.com/can1357/oh-my-pi/issues/9237)).
+### Added
+
+- Added Featherless as a built-in OpenAI-compatible provider with GLM 5.2 as its default, provider headers and pricing metadata, and no prebundled model list. The initial authenticated refresh makes one bounded 100-record request and caches every eligible conversational model from that page, including models without tool use; typed queries use bounded server-side search and merge additional matches into the same local cache. Both paths order results by descending context window, then newest upstream creation time — persisted as an age-derived `priority` so the order stays correct across separately accumulated pages — and the model hub reapplies that order locally after MRU or fuzzy-search ranking. Featherless availability is plan-scoped, so the default model is added only when a plan-filtered lookup confirms it, and the accumulated cache is keyed to the credential that filtered it: another key never inherits entries its plan cannot call. The provider-reported total is displayed alongside the loaded count and persisted with the initial cache snapshot so offline and fresh-cache reloads retain the remote catalog size.
+
+### Fixed
+
+- Fixed Featherless searches returning no official GLM, Kimi, or MiniMax models because its server-side `capabilities=tool-use` index omits models whose response metadata explicitly reports `features.tool_use: true`; conversational candidates are now fetched without that incomplete index and their tool-use support is preserved as model metadata.
+- Fixed `alibaba-token-plan` dynamic discovery dropping newly advertised chat models by replacing the stale static allowlist with dedicated non-chat media-model filters ([#7391](https://github.com/can1357/oh-my-pi/issues/7391)).
+- Fixed DeepSeek reasoning models on the OpenCode Zen/Go gateways (e.g. `opencode-zen/deepseek-v4-flash-free`) failing with `400 Thinking mode does not support this tool_choice` when a specific tool was forced. Dropping `reasoning_effort` does not disable the gateway's default thinking mode, so the OpenAI-compat descriptor now marks forced `tool_choice` unsupported for DeepSeek reasoning models, downgrading the selector to `auto` while keeping the tool advertised ([#7315](https://github.com/can1357/oh-my-pi/issues/7315)).
 
 ## [17.4.1] - 2026-08-21
 

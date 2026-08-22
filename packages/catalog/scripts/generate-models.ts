@@ -642,10 +642,10 @@ async function generateModels() {
 		}
 	}
 
-	const modelsDevSnapshotExcludedProviders = new Set<string>();
+	const previousSnapshotExcludedProviders = new Set<string>(["featherless"]);
 	for (const model of modelsDevModels) {
 		if (model.provider === "google-vertex") {
-			modelsDevSnapshotExcludedProviders.add(model.provider);
+			previousSnapshotExcludedProviders.add(model.provider);
 		}
 	}
 	// Merge previous models.json entries as fallback for provider/model pairs not
@@ -667,7 +667,7 @@ async function generateModels() {
 				!RETIRED_PROVIDERS.has(model.provider) &&
 				!authoritativeCatalogProviders.has(model.provider) &&
 				!authoritativeSpecialDiscoveryProviders.has(model.provider) &&
-				!modelsDevSnapshotExcludedProviders.has(model.provider)
+				!previousSnapshotExcludedProviders.has(model.provider)
 			) {
 				allModels.push(model);
 			}

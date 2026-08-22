@@ -39,8 +39,18 @@ export interface ModelManagerOptions<TApi extends Api = Api, TModelsDevPayload =
 	cacheTtlMs?: number;
 	/** When true, a successful dynamic fetch is the complete provider catalog and prunes static-only models. */
 	dynamicModelsAuthoritative?: boolean;
+	/**
+	 * When true, a successful dynamic fetch is one bounded page rather than the
+	 * whole catalog: models cached under the *same* cache identity survive the
+	 * refresh and accumulate. Combine with `dynamicModelsAuthoritative` to prune
+	 * rows that no longer belong (a different credential's accumulation, static
+	 * or stencil.so filler) while still keeping the accumulated page set.
+	 */
+	dynamicModelsPartial?: boolean;
 	/** Cached model ids whose presence forces refresh when the static or migration-policy fingerprint changes. */
 	dropCachedModelIdsOnStaticMismatch?: readonly string[];
+	/** Provider-owned cache identity revision for dynamic mapping or inclusion policy changes. */
+	cacheFingerprintSalt?: string;
 	/**
 	 * Trusted, provider-wide request headers that can be safely re-derived at
 	 * cache-read time. The cache never persists their values. Models whose live
@@ -51,6 +61,12 @@ export interface ModelManagerOptions<TApi extends Api = Api, TModelsDevPayload =
 	restorableHeaderFallback?: Record<string, string>;
 	/** Optional dynamic endpoint fetcher. */
 	fetchDynamicModels?: () => Promise<readonly ModelSpec<TApi>[] | null>;
+	/** Optional bounded remote search hook for providers whose complete catalog is too large to preload. */
+	searchDynamicModels?: (query: string) => Promise<readonly ModelSpec<TApi>[] | null>;
+	/** Current provider-reported total to persist beside a successful dynamic snapshot. */
+	getReportedModelTotal?: () => number | undefined;
+	/** Restores a provider-reported total when a cached snapshot is hydrated. */
+	restoreReportedModelTotal?: (total: number) => void;
 	/** Optional stencil.so fallback hook. */
 	modelsDev?: ModelsDevFallback<TApi, TModelsDevPayload>;
 	/** Clock override for deterministic tests. */
@@ -201,22 +217,39 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const dynamicModelsAuthoritative = options.dynamicModelsAuthoritative ?? false;
 	const cacheDropIds = options.dropCachedModelIdsOnStaticMismatch;
 	const staticCatalogFingerprint = fingerprintStatic(staticModels, dynamicModelsAuthoritative);
+	const saltedStaticCatalogFingerprint = options.cacheFingerprintSalt
+		? `${staticCatalogFingerprint}:salt:${Bun.hash(options.cacheFingerprintSalt).toString(36)}`
+		: staticCatalogFingerprint;
 	// Endpoint-migration policy is cache identity: adding an id must invalidate
 	// matching-static-catalog caches written by the prior resolver.
 	const staticFingerprint =
 		cacheDropIds && cacheDropIds.length > 0
-			? `${staticCatalogFingerprint}:drop:${Bun.hash(cacheDropIds.join("\0")).toString(36)}`
-			: staticCatalogFingerprint;
+			? `${saltedStaticCatalogFingerprint}:drop:${Bun.hash(cacheDropIds.join("\0")).toString(36)}`
+			: saltedStaticCatalogFingerprint;
 	const cacheFingerprintMatches = cache?.staticFingerprint === staticFingerprint && staticFingerprint.length > 0;
+	// A provider-owned salt IS cache identity — Featherless folds the credential
+	// whose plan filtered the rows into it. A mismatch means the row belongs to a
+	// different identity, so neither its models nor its reported total may be
+	// hydrated. Without this, a provider with no static catalog leaks the other
+	// identity's rows through the offline/failed-fetch path, where
+	// `prepareCacheModelsForStaticMismatch` retains every dynamic-only model.
+	const cacheIdentityMatches = options.cacheFingerprintSalt === undefined || cacheFingerprintMatches;
+	const identityScopedCachedModels = cacheIdentityMatches ? usableCachedModels : [];
+	if (cacheIdentityMatches && cache?.reportedTotal !== undefined) {
+		options.restoreReportedModelTotal?.(cache.reportedTotal);
+	}
 	const cacheNeedsModelMigration =
 		!cacheFingerprintMatches &&
 		cacheDropIds !== undefined &&
 		usableCachedModels.some(model => cacheDropIds.includes(model.id));
+	const cacheHasRequiredReportedTotal =
+		options.restoreReportedModelTotal === undefined || cache?.reportedTotal !== undefined;
 	const hasUsableFreshCache =
 		(cache?.fresh ?? false) &&
 		!cacheHasUnresolvedHeaders &&
 		!cacheNeedsModelMigration &&
-		(!dynamicModelsAuthoritative || cacheFingerprintMatches);
+		cacheHasRequiredReportedTotal &&
+		((!dynamicModelsAuthoritative && options.cacheFingerprintSalt === undefined) || cacheFingerprintMatches);
 	const dynamicFetcher = options.fetchDynamicModels;
 	const hasDynamicFetcher = typeof dynamicFetcher === "function";
 	const hasAuthoritativeCache = ((cache?.authoritative ?? false) && hasUsableFreshCache) || !hasDynamicFetcher;
@@ -250,10 +283,12 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const shouldUseFreshCacheAsAuthoritative =
 		strategy === "online-if-uncached" && hasUsableFreshCache && hasAuthoritativeCache;
 	const dynamicFetchSucceeded = fetchedDynamicModels !== null;
+	const preservedCacheModels =
+		dynamicFetchSucceeded && options.dynamicModelsPartial && cacheFingerprintMatches ? usableCachedModels : [];
 	const cacheModels = dynamicFetchSucceeded
-		? []
+		? preservedCacheModels
 		: prepareCacheModelsForStaticMismatch(
-				usableCachedModels,
+				identityScopedCachedModels,
 				staticModels,
 				cacheFingerprintMatches,
 				options.dropCachedModelIdsOnStaticMismatch,
@@ -267,15 +302,25 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const dynamicCacheAuthoritative = dynamicFetchSucceeded && dynamicModels.length > 0;
 	const mergedWithCache = mergeDynamicModels(mergeModelSources(staticModels, modelsDevModels), cacheModels);
 	const mergedModels = mergeDynamicModels(mergedWithCache, dynamicModels);
+	// A partial page is authoritative together with the entries it accumulates
+	// onto — never alone, or every previously accumulated page would be pruned.
+	const authoritativeModels = options.dynamicModelsPartial
+		? [...preservedCacheModels, ...dynamicModels]
+		: dynamicModels;
 	const models = collapseBuiltModelVariants(
-		dynamicModelsAuthoritative && dynamicFetchSucceeded ? retainModelIds(mergedModels, dynamicModels) : mergedModels,
+		dynamicModelsAuthoritative && dynamicFetchSucceeded
+			? retainModelIds(mergedModels, authoritativeModels)
+			: mergedModels,
 	);
 	const dynamicAuthoritative = !hasDynamicFetcher || dynamicFetchSucceeded || shouldUseFreshCacheAsAuthoritative;
 	if (shouldFetchFromNetwork) {
 		if (dynamicFetchSucceeded) {
-			const mergedSnapshot = mergeDynamicModels(mergeModelSources(staticModels, modelsDevModels), dynamicModels);
+			const mergedSnapshot = mergeDynamicModels(
+				mergeDynamicModels(mergeModelSources(staticModels, modelsDevModels), preservedCacheModels),
+				dynamicModels,
+			);
 			const snapshotModels = dynamicModelsAuthoritative
-				? retainModelIds(mergedSnapshot, dynamicModels)
+				? retainModelIds(mergedSnapshot, authoritativeModels)
 				: mergedSnapshot;
 			writeModelCache(
 				cacheProviderId,
@@ -286,6 +331,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 				dbPath,
 				staticModels,
 				restorableHeaderFallback,
+				options.getReportedModelTotal?.(),
 			);
 		} else {
 			// Dynamic fetch failed — update cache with a non-authoritative snapshot so
@@ -302,11 +348,18 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			const latestUsableCacheModels = latestRestoredCache.models.filter(
 				model => !latestRestoredCache.unresolvedModelIds.has(model.id),
 			);
+			// The snapshot below is rewritten under the CURRENT fingerprint, so rows
+			// left by another cache identity would be laundered into this one and
+			// served for the rest of the TTL. Keep them only when the row on disk
+			// still belongs to this identity.
+			const latestCacheIdentityMatches =
+				options.cacheFingerprintSalt === undefined ||
+				(latestCache ?? cache)?.staticFingerprint === staticFingerprint;
 			const fallbackSnapshotModels = collapseBuiltModelVariants(
 				mergeDynamicModels(
 					mergeModelSources(staticModels, modelsDevModels),
 					prepareCacheModelsForStaticMismatch(
-						latestUsableCacheModels,
+						latestCacheIdentityMatches ? latestUsableCacheModels : [],
 						staticModels,
 						cacheFingerprintMatches,
 						options.dropCachedModelIdsOnStaticMismatch,
@@ -322,6 +375,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 				dbPath,
 				staticModels,
 				restorableHeaderFallback,
+				latestCacheIdentityMatches ? (latestCache?.reportedTotal ?? cache?.reportedTotal) : undefined,
 			);
 		}
 	}

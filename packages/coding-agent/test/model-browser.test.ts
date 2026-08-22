@@ -9,7 +9,11 @@ import {
 } from "@oh-my-pi/pi-coding-agent/modes/components/model-browser";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 
-function makeModel(provider: string, id: string): Model {
+function makeModel(
+	provider: string,
+	id: string,
+	options: { contextWindow?: number; priority?: number; supportsTools?: boolean } = {},
+): Model {
 	return buildModel({
 		id,
 		name: id,
@@ -18,9 +22,11 @@ function makeModel(provider: string, id: string): Model {
 		baseUrl: "https://example.com",
 		reasoning: false,
 		input: ["text"],
+		supportsTools: options.supportsTools,
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 128_000,
+		contextWindow: options.contextWindow ?? 128_000,
 		maxTokens: 1024,
+		priority: options.priority,
 	});
 }
 
@@ -62,9 +68,35 @@ describe("ModelBrowser search ranking", () => {
 
 		expect(browser.getSelected()?.selector).toBe("zenmux/gpt-5.5");
 	});
+
+	test("context-first providers override MRU and fuzzy ordering locally", () => {
+		const browser = makeBrowser(
+			[
+				makeModel("featherless", "small", { contextWindow: 32_768, priority: 2 }),
+				makeModel("featherless", "large-old", { contextWindow: 262_144, priority: 1 }),
+				makeModel("featherless", "large-new", { contextWindow: 262_144, priority: 0 }),
+			],
+			["featherless/small"],
+		);
+		browser.setContextFirstProviders(new Set(["featherless"]));
+
+		expect(browser.getSelected()?.id).toBe("large-new");
+		browser.moveSelection(1);
+		expect(browser.getSelected()?.id).toBe("large-old");
+		browser.moveSelection(1);
+		expect(browser.getSelected()?.id).toBe("small");
+
+		browser.setQuery("featherless");
+		browser.moveSelection(-100, { wrap: false });
+		expect(browser.getSelected()?.id).toBe("large-new");
+		browser.moveSelection(1);
+		expect(browser.getSelected()?.id).toBe("large-old");
+		browser.moveSelection(1);
+		expect(browser.getSelected()?.id).toBe("small");
+	});
 });
 
-describe("ModelBrowser perf display", () => {
+describe("ModelBrowser metadata display", () => {
 	beforeAll(async () => {
 		// render() reads the global theme singleton.
 		await initTheme(false);
@@ -102,5 +134,21 @@ describe("ModelBrowser perf display", () => {
 		browser.setItems(buildBrowserItems([makeModel("openai", "gpt-5")]));
 
 		expect(renderPlain(browser, 120)[2]).not.toContain("t/s");
+	});
+
+	test("non-tool models show a warning and remain selectable", () => {
+		const browser = new ModelBrowser(Settings.isolated({}));
+		browser.setItems(buildBrowserItems([makeModel("featherless", "no-tools", { supportsTools: false })]));
+		let activated: string | undefined;
+		browser.onActivate = item => {
+			activated = item.selector;
+		};
+
+		const lines = renderPlain(browser, 120);
+		expect(lines[2]).toContain("featherless/no-tools !");
+		expect(lines[lines.length - 1]).toContain("! no tool use");
+
+		browser.handleInput("\n");
+		expect(activated).toBe("featherless/no-tools");
 	});
 });

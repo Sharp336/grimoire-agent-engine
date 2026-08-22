@@ -2313,6 +2313,331 @@ describe("ModelRegistry", () => {
 			expect(syntheticCacheLoad.find("synthetic", "hf:moonshotai/Kimi-K2.5")).toBeUndefined();
 		});
 
+		test("fills the Featherless local cache from one bounded initial request", async () => {
+			authStorage.setRuntimeApiKey("featherless", "featherless-test-key");
+			const requests: Request[] = [];
+			const fetchMock: FetchImpl = async (input, init) => {
+				const request = input instanceof Request ? new Request(input, init) : new Request(input.toString(), init);
+				requests.push(request);
+				// The plan does not include the provider default.
+				if (new URL(request.url).searchParams.get("q") === "zai-org/GLM-5.2") {
+					return Response.json({ total: 0, data: [] });
+				}
+				return Response.json({
+					total: 43_750,
+					data: Array.from({ length: 25 }, (_, index) => ({
+						id: `example/tool-${index}`,
+						context_length: 32_768 + index,
+						features: { tool_use: true },
+						available_on_current_plan: true,
+					})),
+				});
+			};
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+			await registry.refreshProvider("featherless", "online");
+
+			expect(getModelsForProvider(registry, "featherless")).toHaveLength(25);
+			expect(registry.find("featherless", "zai-org/GLM-5.2")).toBeUndefined();
+			expect(registry.getProviderModelTotal("featherless")).toBe(43_750);
+			const cachedRegistry = new ModelRegistry(authStorage, modelsJsonPath, {
+				fetch: () => {
+					throw new Error("offline cache hydration must not fetch");
+				},
+			});
+			await cachedRegistry.refresh("offline");
+			expect(getModelsForProvider(cachedRegistry, "featherless")).toHaveLength(25);
+			expect(cachedRegistry.getProviderModelTotal("featherless")).toBe(43_750);
+			// One bounded page plus the entitlement lookup for the absent default.
+			expect(requests).toHaveLength(2);
+		});
+
+		test("drops another credential's plan-filtered Featherless models", async () => {
+			const planScopedFetch = (id: string): FetchImpl => {
+				return async input => {
+					const url = new URL(String(input));
+					if (url.searchParams.get("q") === "zai-org/GLM-5.2") return Response.json({ total: 0, data: [] });
+					return Response.json({
+						total: 1,
+						data: [
+							{ id, context_length: 262_144, features: { tool_use: true }, available_on_current_plan: true },
+						],
+					});
+				};
+			};
+			authStorage.setRuntimeApiKey("featherless", "featherless-key-a");
+			const registryA = new ModelRegistry(authStorage, modelsJsonPath, { fetch: planScopedFetch("plan-a/only") });
+			await registryA.refreshProvider("featherless", "online");
+			expect(registryA.find("featherless", "plan-a/only")).toBeDefined();
+
+			authStorage.setRuntimeApiKey("featherless", "featherless-key-b");
+			const registryB = new ModelRegistry(authStorage, modelsJsonPath, { fetch: planScopedFetch("plan-b/only") });
+			await registryB.refreshProvider("featherless", "online");
+
+			expect(registryB.find("featherless", "plan-b/only")).toBeDefined();
+			// Accumulated entries are plan-scoped; key B must not inherit key A's.
+			expect(registryB.find("featherless", "plan-a/only")).toBeUndefined();
+			expect(getModelsForProvider(registryB, "featherless")).toHaveLength(1);
+		});
+
+		test("keeps both results when two Featherless searches overlap", async () => {
+			authStorage.setRuntimeApiKey("featherless", "featherless-test-key");
+			// Both searches must reach their fetch before either merges — the
+			// interleaving the model hub produces with overlapping debounced queries.
+			const fetchStarted = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+			const fetchStartedSignals = fetchStarted.map(deferred => deferred.resolve);
+			const bothFetchesStarted = Promise.all(fetchStarted.map(deferred => deferred.promise));
+			const gate = Promise.withResolvers<void>();
+			const fetchMock: FetchImpl = async input => {
+				fetchStartedSignals.shift()?.();
+				const query = new URL(String(input)).searchParams.get("q") ?? "";
+				await gate.promise;
+				return Response.json({
+					total: 2,
+					data: [
+						{
+							id: `example/${query}`,
+							context_length: 262_144,
+							features: { tool_use: true },
+							available_on_current_plan: true,
+						},
+					],
+				});
+			};
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+			const first = registry.searchProviderModels("featherless", "old");
+			const second = registry.searchProviderModels("featherless", "new");
+			await bothFetchesStarted;
+			gate.resolve();
+			expect(await Promise.all([first, second])).toEqual([1, 1]);
+
+			expect(registry.find("featherless", "example/old")).toBeDefined();
+			expect(registry.find("featherless", "example/new")).toBeDefined();
+			const cachedRegistry = new ModelRegistry(authStorage, modelsJsonPath, {
+				fetch: () => {
+					throw new Error("offline overlapping-search hydration must not fetch");
+				},
+			});
+			await cachedRegistry.refresh("offline");
+			expect(cachedRegistry.find("featherless", "example/old")).toBeDefined();
+			expect(cachedRegistry.find("featherless", "example/new")).toBeDefined();
+		});
+
+		test("keeps searched Featherless models when an in-flight refresh lands after them", async () => {
+			authStorage.setRuntimeApiKey("featherless", "featherless-test-key");
+			// The hub fires the initial refresh when an empty provider is selected,
+			// then a debounced search as soon as the user types. The refresh read the
+			// pre-search cache, so finishing last must not replay it over the search.
+			const refreshReachedFetch = Promise.withResolvers<void>();
+			const refreshGate = Promise.withResolvers<void>();
+			const fetchMock: FetchImpl = async input => {
+				const query = new URL(String(input)).searchParams.get("q");
+				if (query === "zai-org/GLM-5.2") return Response.json({ total: 0, data: [] });
+				if (!query) {
+					refreshReachedFetch.resolve();
+					await refreshGate.promise;
+					return Response.json({
+						total: 43_750,
+						data: [
+							{
+								id: "example/initial",
+								context_length: 131_072,
+								features: { tool_use: true },
+								available_on_current_plan: true,
+							},
+						],
+					});
+				}
+				return Response.json({
+					total: 7,
+					data: [
+						{
+							id: "example/searched",
+							context_length: 262_144,
+							features: { tool_use: true },
+							available_on_current_plan: true,
+						},
+					],
+				});
+			};
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+			const refresh = registry.refreshProvider("featherless", "online");
+			await refreshReachedFetch.promise;
+			const search = registry.searchProviderModels("featherless", "searched");
+			refreshGate.resolve();
+			await Promise.all([refresh, search]);
+
+			expect(registry.find("featherless", "example/searched")).toBeDefined();
+			expect(registry.find("featherless", "example/initial")).toBeDefined();
+		});
+
+		test("keeps searched Featherless models when a full refresh lands after them", async () => {
+			authStorage.setRuntimeApiKey("featherless", "featherless-test-key");
+			// Same race as above but through the startup/background refresh() path,
+			// which reaches discovery without going through refreshProvider().
+			const refreshReachedFetch = Promise.withResolvers<void>();
+			const refreshGate = Promise.withResolvers<void>();
+			const fetchMock: FetchImpl = async input => {
+				const url = new URL(String(input));
+				if (!url.hostname.includes("featherless")) return Response.json({ data: [] });
+				const query = url.searchParams.get("q");
+				if (query === "zai-org/GLM-5.2") return Response.json({ total: 0, data: [] });
+				if (!query) {
+					refreshReachedFetch.resolve();
+					await refreshGate.promise;
+					return Response.json({
+						total: 43_750,
+						data: [
+							{
+								id: "example/initial",
+								context_length: 131_072,
+								features: { tool_use: true },
+								available_on_current_plan: true,
+							},
+						],
+					});
+				}
+				return Response.json({
+					total: 7,
+					data: [
+						{
+							id: "example/searched",
+							context_length: 262_144,
+							features: { tool_use: true },
+							available_on_current_plan: true,
+						},
+					],
+				});
+			};
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+			const refresh = registry.refresh("online");
+			await refreshReachedFetch.promise;
+			const search = registry.searchProviderModels("featherless", "searched");
+			refreshGate.resolve();
+			await Promise.all([refresh, search]);
+
+			expect(registry.find("featherless", "example/searched")).toBeDefined();
+			expect(registry.find("featherless", "example/initial")).toBeDefined();
+		});
+
+		test("does not hydrate another credential's Featherless cache when the refresh fails", async () => {
+			authStorage.setRuntimeApiKey("featherless", "featherless-key-a");
+			const keyAFetch: FetchImpl = async input => {
+				if (new URL(String(input)).searchParams.get("q") === "zai-org/GLM-5.2") {
+					return Response.json({ total: 0, data: [] });
+				}
+				return Response.json({
+					total: 1,
+					data: [
+						{
+							id: "plan-a/only",
+							context_length: 262_144,
+							features: { tool_use: true },
+							available_on_current_plan: true,
+						},
+					],
+				});
+			};
+			const registryA = new ModelRegistry(authStorage, modelsJsonPath, { fetch: keyAFetch });
+			await registryA.refreshProvider("featherless", "online");
+			expect(registryA.find("featherless", "plan-a/only")).toBeDefined();
+			expect(registryA.getProviderModelTotal("featherless")).toBe(1);
+
+			// Key B's refresh fails: the fallback path must not resurrect key A's
+			// plan-scoped rows, which Featherless can 403 for key B.
+			authStorage.setRuntimeApiKey("featherless", "featherless-key-b");
+			const registryB = new ModelRegistry(authStorage, modelsJsonPath, {
+				fetch: async () => new Response("upstream down", { status: 503 }),
+			});
+			await registryB.refreshProvider("featherless", "online");
+
+			expect(registryB.find("featherless", "plan-a/only")).toBeUndefined();
+			expect(registryB.getProviderModelTotal("featherless")).toBeUndefined();
+
+			// The failed refresh must not have laundered key A's rows into key B's
+			// cache identity either.
+			const offlineB = new ModelRegistry(authStorage, modelsJsonPath, {
+				fetch: () => {
+					throw new Error("offline hydration must not fetch");
+				},
+			});
+			await offlineB.refresh("offline");
+			expect(offlineB.find("featherless", "plan-a/only")).toBeUndefined();
+		});
+
+		test("searches and merges bounded Featherless results into an initially empty provider", async () => {
+			authStorage.setRuntimeApiKey("featherless", "featherless-test-key");
+			const requests: Request[] = [];
+			const fetchMock: FetchImpl = async (input, init) => {
+				const request = input instanceof Request ? new Request(input, init) : new Request(input.toString(), init);
+				requests.push(request);
+				const query = new URL(request.url).searchParams.get("q");
+				if (query === "zai-org/GLM-5.2") return Response.json({ total: 0, data: [] });
+				return query
+					? Response.json({
+							total: 812,
+							data: [
+								{
+									id: "Qwen/Qwen3-Coder-Next",
+									context_length: 262_144,
+									max_completion_tokens: 32_768,
+									pricing: { input: 0.25, output: 1 },
+									features: { tool_use: true },
+									available_on_current_plan: true,
+								},
+							],
+						})
+					: Response.json({
+							total: 43_750,
+							data: [
+								{
+									id: "example/initial",
+									context_length: 131_072,
+									features: { tool_use: true },
+									available_on_current_plan: true,
+								},
+							],
+						});
+			};
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+			expect(registry.supportsProviderSearch("featherless")).toBe(true);
+			expect(registry.getSearchableProviders()).toContain("featherless");
+			expect(await registry.searchProviderModels("featherless", "qwen coder")).toBe(1);
+			expect(registry.getProviderModelTotal("featherless", "qwen coder")).toBe(812);
+
+			const model = registry.find("featherless", "Qwen/Qwen3-Coder-Next");
+			expect(model).toMatchObject({
+				contextWindow: 262_144,
+				maxTokens: 32_768,
+				cost: { input: 0.25, output: 1 },
+			});
+			expect(registry.find("featherless", "zai-org/GLM-5.2")).toBeUndefined();
+			expect(requests).toHaveLength(1);
+			expect(requests[0]?.url).toBe(
+				"https://api.featherless.ai/v1/models?q=qwen+coder&conversational=true&per_page=100&sort=-popularity&available_on_current_plan=true",
+			);
+			expect(requests[0]?.headers.get("authorization")).toBe("Bearer featherless-test-key");
+
+			await registry.refreshProvider("featherless", "online");
+			expect(registry.find("featherless", "Qwen/Qwen3-Coder-Next")).toBeDefined();
+			expect(registry.find("featherless", "example/initial")).toBeDefined();
+
+			const cachedRegistry = new ModelRegistry(authStorage, modelsJsonPath, {
+				fetch: () => {
+					throw new Error("offline accumulated-cache hydration must not fetch");
+				},
+			});
+			await cachedRegistry.refresh("offline");
+			expect(cachedRegistry.find("featherless", "Qwen/Qwen3-Coder-Next")).toBeDefined();
+			expect(cachedRegistry.find("featherless", "example/initial")).toBeDefined();
+			// Search, initial page, and the entitlement lookup for the absent default.
+			expect(requests).toHaveLength(3);
+		});
+
 		test("does not re-add bundled synthetic models after authoritative refresh", async () => {
 			authStorage.setRuntimeApiKey("synthetic", "synthetic-test-key");
 			const fetchMock = mockOpenAiCompatibleModels("https://api.synthetic.new/openai/v1/models", [

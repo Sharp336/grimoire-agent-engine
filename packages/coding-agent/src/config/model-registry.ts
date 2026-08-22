@@ -193,6 +193,10 @@ export class ModelRegistry {
 	#credentialScopedCacheHydration?: Promise<void>;
 	#policyReapply?: Promise<void>;
 	#lastDiscoveryWarnings: Map<string, string> = new Map();
+	#searchableBuiltInProviders?: ReadonlySet<string>;
+	#providerModelTotals: Map<string, number> = new Map();
+	/** Tail of each provider's serialized discovery chain; see `#withProviderDiscoveryLock`. */
+	#providerDiscoveryLocks: Map<string, Promise<void>> = new Map();
 	// Runtime extension model overlays — persist across refresh() cycles so that
 	// models registered by extensions survive the model selector's offline reload.
 	#runtimeModelOverlays: CustomModelOverlay[] = [];
@@ -398,6 +402,122 @@ export class ModelRegistry {
 		if (otherRuntimeProviderIds.size > 0) {
 			await this.#refreshRuntimeDiscoveries("online-if-uncached", otherRuntimeProviderIds);
 		}
+	}
+
+	/**
+	 * Run one catalog-mutating discovery at a time per provider.
+	 *
+	 * A discovery and a bounded search both read a searchable provider's
+	 * accumulated state (live snapshot plus its cache row) and then
+	 * authoritatively replace it. The fetch is what snapshots that state, so the
+	 * lock spans the whole discovery, not just the merge — otherwise a refresh
+	 * that started first but finished last replays its pre-search snapshot over
+	 * the search result in both the registry and SQLite.
+	 *
+	 * Callers never hold one of these locks while acquiring another, so taking a
+	 * whole set at once cannot deadlock.
+	 */
+	async #withProviderDiscoveryLocks<T>(providerIds: readonly string[], run: () => Promise<T>): Promise<T> {
+		const lockedIds = [...new Set(providerIds)];
+		if (lockedIds.length === 0) return await run();
+		const predecessors = lockedIds.map(id => this.#providerDiscoveryLocks.get(id) ?? Promise.resolve());
+		const task = Promise.all(predecessors).then(run);
+		// A queue tail must never reject, or the next waiter would inherit the
+		// failure instead of running.
+		const tail = task.then(
+			() => {},
+			() => {},
+		);
+		for (const id of lockedIds) this.#providerDiscoveryLocks.set(id, tail);
+		try {
+			return await task;
+		} finally {
+			for (const id of lockedIds) {
+				if (this.#providerDiscoveryLocks.get(id) === tail) this.#providerDiscoveryLocks.delete(id);
+			}
+		}
+	}
+
+	#getSearchableBuiltInProviders(): ReadonlySet<string> {
+		if (!this.#searchableBuiltInProviders) {
+			this.#searchableBuiltInProviders = new Set(
+				PROVIDER_DESCRIPTORS.flatMap(descriptor => {
+					const createOptions = descriptor.createModelManagerOptions;
+					if (!createOptions) return [];
+					const options = createOptions({ fetch: this.#fetch });
+					return options.searchDynamicModels ? [descriptor.providerId] : [];
+				}),
+			);
+		}
+		return this.#searchableBuiltInProviders;
+	}
+
+	/** Built-in providers that can populate an initially empty catalog on demand. */
+	getSearchableProviders(): string[] {
+		return [...this.#getSearchableBuiltInProviders()];
+	}
+
+	/** Whether a built-in provider offers bounded server-side model search. */
+	supportsProviderSearch(providerId: string): boolean {
+		return this.#getSearchableBuiltInProviders().has(providerId);
+	}
+
+	/** Provider-reported total for an initial page or a specific remote query. */
+	getProviderModelTotal(providerId: string, query = ""): number | undefined {
+		return this.#providerModelTotals.get(`${providerId}\0${query.trim()}`);
+	}
+
+	/**
+	 * Search one provider's remote catalog, merge the bounded result into the
+	 * current snapshot, and persist it in the normal provider model cache.
+	 */
+	async searchProviderModels(providerId: string, query: string): Promise<number> {
+		const trimmedQuery = query.trim();
+		if (!trimmedQuery || !this.supportsProviderSearch(providerId)) return 0;
+		const configuredDiscoveryProviders = new Set(this.#discoverableProviders.map(provider => provider.provider));
+		const options = (
+			await this.#collectBuiltInModelManagerOptions("online", new Set([providerId]), configuredDiscoveryProviders)
+		).find(candidate => candidate.providerId === providerId);
+		const search = options?.searchDynamicModels;
+		if (!options || !search) return 0;
+		const searchedModels = await search(trimmedQuery);
+		if (searchedModels === null) {
+			throw new Error(`Remote model search failed for ${providerId}`);
+		}
+		await this.#mergeSearchedProviderModels(options, searchedModels);
+		return searchedModels.length;
+	}
+
+	/**
+	 * Fold one bounded search result into the live snapshot and the provider cache.
+	 *
+	 * Runs under the provider's discovery lock: the snapshot read, the merge and
+	 * the authoritative replacement must not interleave with another search or
+	 * with a provider refresh. Only the remote fetch above stays outside the
+	 * lock — it touches neither the snapshot nor the cache.
+	 */
+	async #mergeSearchedProviderModels(
+		options: ModelManagerOptions<Api>,
+		searchedModels: readonly ModelSpec<Api>[],
+	): Promise<void> {
+		const providerId = options.providerId;
+		await this.#withProviderDiscoveryLocks([providerId], async () => {
+			this.#ensureFullSnapshot();
+			const mergedSpecs = new Map<string, ModelSpec<Api>>();
+			for (const model of this.#unprojectedModels) {
+				if (model.provider === providerId) mergedSpecs.set(model.id, toModelSpec(model));
+			}
+			for (const model of searchedModels) mergedSpecs.set(model.id, model);
+
+			const discovery = await this.#discoverWithModelManager(
+				{
+					...options,
+					fetchDynamicModels: async () => [...mergedSpecs.values()],
+				},
+				"online",
+			);
+			this.#mergeDiscoveredModels(discovery.models, new Set([providerId]));
+		});
 	}
 
 	/**
@@ -1156,26 +1276,38 @@ export class ModelRegistry {
 		strategy: ModelRefreshStrategy,
 		providerFilter?: ReadonlySet<string>,
 	): Promise<void> {
-		const disabledProviders = getDisabledProviderIdsFromSettings(this.#settings);
-		const selectedDiscoverableProviders = (
-			providerFilter
-				? this.#discoverableProviders.filter(provider => providerFilter.has(provider.provider))
-				: this.#discoverableProviders
-		).filter(provider => !disabledProviders.has(provider.provider));
-		const configuredDiscoveriesPromise =
-			selectedDiscoverableProviders.length === 0
-				? Promise.resolve<Model<Api>[]>([])
-				: Promise.all(
-						selectedDiscoverableProviders.map(provider => this.#discoverProviderModels(provider, strategy)),
-					).then(results => results.flat());
-		const [configuredDiscovered, builtInDiscovery] = await Promise.all([
-			configuredDiscoveriesPromise,
-			this.#discoverBuiltInProviderModels(strategy, providerFilter),
-		]);
-		const discovered = [...configuredDiscovered, ...builtInDiscovery.models];
-		if (discovered.length === 0 && builtInDiscovery.authoritativeProviders.size === 0) {
-			return;
-		}
+		// Every discovery path funnels through here — the scoped `refreshProvider`
+		// and the full startup/background `refresh()` alike — so this is where the
+		// searchable providers in scope are locked against concurrent searches.
+		const lockedProviders = [...this.#getSearchableBuiltInProviders()].filter(
+			providerId => providerFilter === undefined || providerFilter.has(providerId),
+		);
+		await this.#withProviderDiscoveryLocks(lockedProviders, async () => {
+			const disabledProviders = getDisabledProviderIdsFromSettings(this.#settings);
+			const selectedDiscoverableProviders = (
+				providerFilter
+					? this.#discoverableProviders.filter(provider => providerFilter.has(provider.provider))
+					: this.#discoverableProviders
+			).filter(provider => !disabledProviders.has(provider.provider));
+			const configuredDiscoveriesPromise =
+				selectedDiscoverableProviders.length === 0
+					? Promise.resolve<Model<Api>[]>([])
+					: Promise.all(
+							selectedDiscoverableProviders.map(provider => this.#discoverProviderModels(provider, strategy)),
+						).then(results => results.flat());
+			const [configuredDiscovered, builtInDiscovery] = await Promise.all([
+				configuredDiscoveriesPromise,
+				this.#discoverBuiltInProviderModels(strategy, providerFilter),
+			]);
+			this.#mergeDiscoveredModels(
+				[...configuredDiscovered, ...builtInDiscovery.models],
+				builtInDiscovery.authoritativeProviders,
+			);
+		});
+	}
+
+	#mergeDiscoveredModels(discovered: readonly Model<Api>[], builtInAuthoritativeProviders: ReadonlySet<string>): void {
+		if (discovered.length === 0 && builtInAuthoritativeProviders.size === 0) return;
 		this.#ensureFullSnapshot();
 		const discoveredModels = this.#applyHardcodedModelPolicies(
 			discovered.map(model =>
@@ -1187,9 +1319,7 @@ export class ModelRegistry {
 			),
 		);
 		const authoritativeProviders = providersWithAuthoritativeProjectCatalog(discoveredModels);
-		for (const provider of builtInDiscovery.authoritativeProviders) {
-			authoritativeProviders.add(provider);
-		}
+		for (const provider of builtInAuthoritativeProviders) authoritativeProviders.add(provider);
 		const baseModels =
 			authoritativeProviders.size > 0
 				? dropProviderModels(this.#unprojectedModels, authoritativeProviders)
@@ -1200,6 +1330,7 @@ export class ModelRegistry {
 		const withModelOverrides = this.#applyModelOverrides(collapseBuiltModelVariants(combined), this.#modelOverrides);
 		this.#unprojectedModels = this.#applyLlamaCppModelFixups(this.#applyRuntimeProviderOverrides(withModelOverrides));
 		this.#models = this.#applyRuntimeModelModifiers(this.#unprojectedModels);
+		this.#providerLookupSnapshots.clear();
 	}
 
 	#configuredDiscoveryCacheProviderId(providerConfig: DiscoveryProviderConfig): string {
@@ -1512,6 +1643,9 @@ export class ModelRegistry {
 					apiKey: isDiscoveryBearerApiKey(apiKey) ? apiKey : undefined,
 					baseUrl: this.#descriptorBaseUrl(descriptor.providerId),
 					fetch: this.#fetch,
+					onModelCount: (count: number, query: string) => {
+						this.#providerModelTotals.set(`${descriptor.providerId}\0${query.trim()}`, count);
+					},
 				};
 				const preparedConfig =
 					getProviderDefinition(descriptor.providerId)?.prepareModelDiscovery?.(discoveryConfig) ??

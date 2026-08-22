@@ -363,6 +363,8 @@ export class ModelBrowser implements Component {
 	#emptyText?: () => string | undefined;
 	/** Keep role-like virtual rows in their host-defined order during search. */
 	#preserveQueryOrder = false;
+	/** Providers whose local rows are ordered by descending context window. */
+	#contextFirstProviders: ReadonlySet<string> = new Set();
 	/** First visible list row; panned by the wheel, snapped to the selection on keyboard navigation. */
 	#windowStart = 0;
 	#windowCount = 0;
@@ -427,6 +429,11 @@ export class ModelBrowser implements Component {
 	/** Keep the source order after fuzzy filtering instead of applying model-specific ranking. */
 	setPreserveQueryOrder(preserve: boolean): void {
 		this.#preserveQueryOrder = preserve;
+	}
+	/** Order each configured provider's local rows by context window, preserving provider placement. */
+	setContextFirstProviders(providers: ReadonlySet<string>): void {
+		this.#contextFirstProviders = new Set(providers);
+		this.#applyQuery();
 	}
 	/** Allow hosts to toggle context-window flagging between browser modes. */
 	setMarkOverContext(mark: boolean): void {
@@ -576,6 +583,31 @@ export class ModelBrowser implements Component {
 		return filtered;
 	}
 
+	#applyContextFirstOrdering(items: ModelBrowserItem[]): ModelBrowserItem[] {
+		if (this.#contextFirstProviders.size === 0 || items.length < 2) return items;
+		const ordered = [...items];
+		for (const provider of this.#contextFirstProviders) {
+			const providerItems = ordered
+				.filter(item => item.provider === provider)
+				.sort((left, right) => {
+					const contextDifference = (right.model.contextWindow ?? 0) - (left.model.contextWindow ?? 0);
+					if (contextDifference !== 0) return contextDifference;
+					const priorityDifference =
+						(left.model.priority ?? Number.MAX_SAFE_INTEGER) - (right.model.priority ?? Number.MAX_SAFE_INTEGER);
+					if (priorityDifference !== 0) return priorityDifference;
+					return left.id.localeCompare(right.id);
+				});
+			let providerIndex = 0;
+			for (let index = 0; index < ordered.length; index++) {
+				if (ordered[index]?.provider === provider) {
+					const providerItem = providerItems[providerIndex++];
+					if (providerItem) ordered[index] = providerItem;
+				}
+			}
+		}
+		return ordered;
+	}
+
 	#applyQuery(): void {
 		const query = this.#searchInput.getValue();
 		let items: ModelBrowserItem[];
@@ -603,7 +635,7 @@ export class ModelBrowser implements Component {
 		} else {
 			items = this.#baseItems;
 		}
-		this.#visibleItems = this.#insertSeparator(items);
+		this.#visibleItems = this.#insertSeparator(this.#applyContextFirstOrdering(items));
 		this.#selectedIndex = this.#coerceSelectedIndex(Math.min(this.#selectedIndex, this.#visibleItems.length - 1));
 		this.#ensureSelectedVisible();
 		this.onSelectionChange?.(this.getSelected());
@@ -741,10 +773,11 @@ export class ModelBrowser implements Component {
 				: item.id;
 		const currentMark =
 			item.selector === this.#currentSelector ? ` ${theme.fg("success", theme.status.enabled)}` : "";
+		const toolWarning = item.model.supportsTools === false ? ` ${theme.fg("warning", "!")}` : "";
 		const overLimit = overContext
 			? ` ${theme.status.disabled} context>${formatNumber(item.model.contextWindow ?? 0).toLowerCase()}`
 			: "";
-		let left = `${prefix}${providerPrefix}${name}${currentMark}${overLimit}`;
+		let left = `${prefix}${providerPrefix}${name}${currentMark}${toolWarning}${overLimit}`;
 
 		// Perf column collapses entirely when no visible row has measurements.
 		const perfCol =
@@ -794,6 +827,9 @@ export class ModelBrowser implements Component {
 		}
 
 		const chips: string[] = [];
+		if (model.supportsTools === false) {
+			chips.push(theme.fg("warning", "! no tool use"));
+		}
 		if (selected.selector === this.#currentSelector) {
 			chips.push(theme.fg("success", `${theme.status.enabled} current`));
 		}

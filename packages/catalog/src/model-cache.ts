@@ -36,6 +36,7 @@ interface CacheRow {
 	header_omitted_model_ids: string;
 	unrestorable_header_model_ids: string;
 	header_restore_version: number;
+	reported_total: number | null;
 }
 
 interface TableInfoRow {
@@ -47,6 +48,8 @@ interface CacheEntry<TApi extends Api = Api> {
 	fresh: boolean;
 	authoritative: boolean;
 	updatedAt: number;
+	/** Provider-reported catalog total from the fetch that produced this snapshot. */
+	reportedTotal?: number;
 	/** Model ids whose live headers were intentionally omitted from disk. */
 	headerOmittedModelIds: readonly string[];
 	/** Header-bearing model ids that cannot be rebuilt from the static source. */
@@ -85,6 +88,7 @@ function openDb(resolvedPath: string): Database {
 			header_omitted_model_ids TEXT NOT NULL DEFAULT '[]',
 			unrestorable_header_model_ids TEXT NOT NULL DEFAULT '[]',
 			header_restore_version INTEGER NOT NULL DEFAULT 0,
+			reported_total INTEGER DEFAULT NULL,
 			models TEXT NOT NULL
 		)
 	`);
@@ -195,6 +199,9 @@ function migrateCacheSchema(db: Database): void {
 			// header matching was introduced.
 			db.run("ALTER TABLE model_cache ADD COLUMN header_restore_version INTEGER NOT NULL DEFAULT 0");
 		}
+		if (!columns.some(column => column.name === "reported_total")) {
+			db.run("ALTER TABLE model_cache ADD COLUMN reported_total INTEGER DEFAULT NULL");
+		}
 	} finally {
 		stmt.finalize();
 	}
@@ -236,6 +243,10 @@ export function readModelCache<TApi extends Api>(
 					fresh,
 					authoritative: row.authoritative === 1,
 					updatedAt: row.updated_at,
+					reportedTotal:
+						typeof row.reported_total === "number" && Number.isFinite(row.reported_total)
+							? row.reported_total
+							: undefined,
 					headerOmittedModelIds,
 					unrestorableHeaderModelIds,
 					legacyHeaderRestoreMarkers: row.header_restore_version < HEADER_RESTORE_VERSION,
@@ -292,6 +303,7 @@ export function writeModelCache<TApi extends Api>(
 	dbPath?: string,
 	staticHeaderSources: readonly Model<TApi>[] = [],
 	restorableHeaderFallback?: Record<string, string>,
+	reportedTotal?: number,
 ): void {
 	try {
 		withModelCacheDb(dbPath, db => {
@@ -325,8 +337,8 @@ export function writeModelCache<TApi extends Api>(
 				`INSERT OR REPLACE INTO model_cache (
 					provider_id, version, updated_at, authoritative, static_fingerprint,
 					header_omitted_model_ids, unrestorable_header_model_ids,
-					header_restore_version, models
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+					header_restore_version, reported_total, models
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				[
 					providerId,
 					CACHE_SCHEMA_VERSION,
@@ -336,6 +348,7 @@ export function writeModelCache<TApi extends Api>(
 					JSON.stringify(headerOmittedModelIds),
 					JSON.stringify(unrestorableHeaderModelIds),
 					HEADER_RESTORE_VERSION,
+					reportedTotal ?? null,
 					JSON.stringify(cachedModels),
 				],
 			);

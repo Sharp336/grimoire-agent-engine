@@ -150,6 +150,8 @@ interface ChipRange {
 }
 
 const PROVIDER_REFRESH_DEBOUNCE_MS = 120;
+const PROVIDER_SEARCH_DEBOUNCE_MS = 250;
+const PROVIDER_SEARCH_MIN_QUERY_LENGTH = 2;
 const RECENT_LIMIT = 15;
 const SIDEBAR_MIN_WIDTH = 18;
 const SIDEBAR_MAX_WIDTH = 26;
@@ -222,6 +224,10 @@ export class ModelHubComponent implements Component {
 	#scheduledProviderRefreshes = new Map<string, Timer>();
 	#refreshSpinnerFrame = 0;
 	#refreshSpinnerInterval?: Timer;
+	#providerSearchTimer?: Timer;
+	#providerSearchGeneration = 0;
+	#providerSearchInFlight = new Map<string, number>();
+	#completedProviderSearches = new Set<string>();
 
 	// Frame geometry from the last render, for mouse hit-testing (the
 	// fullscreen overlay paints from screen row 0, so mouse rows map 1:1).
@@ -250,9 +256,10 @@ export class ModelHubComponent implements Component {
 		this.#browser = new ModelBrowser(settings, {
 			emptyText: () => this.#emptyStateMessage(),
 		});
+		this.#browser.setContextFirstProviders(new Set(["featherless"]));
 		this.#browser.onActivate = item => this.#activateItem(item);
 		this.#browser.onCancel = () => this.#callbacks.onCancel();
-		this.#browser.onQueryChange = query => this.#onQueryChanged(query);
+		this.#browser.onQueryChange = query => this.#onUserQueryChanged(query);
 
 		// Hydrate synchronously from the current registry snapshot so the first
 		// Enter after opening acts on cached models instead of being dropped
@@ -284,6 +291,12 @@ export class ModelHubComponent implements Component {
 	dispose(): void {
 		for (const [, timer] of this.#scheduledProviderRefreshes) clearTimeout(timer);
 		this.#scheduledProviderRefreshes.clear();
+		if (this.#providerSearchTimer) {
+			clearTimeout(this.#providerSearchTimer);
+			this.#providerSearchTimer = undefined;
+		}
+		this.#providerSearchGeneration++;
+		this.#providerSearchInFlight.clear();
 		this.#refreshingProviders.clear();
 		if (this.#refreshSpinnerInterval) {
 			clearInterval(this.#refreshSpinnerInterval);
@@ -387,19 +400,35 @@ export class ModelHubComponent implements Component {
 					unlocked.add(provider);
 				}
 			}
+			for (const provider of this.#registry.getSearchableProviders?.() ?? []) {
+				if (unlocked.has(provider) || disabledProviders.has(provider)) continue;
+				if (authStorage.hasAuth(provider)) {
+					unlocked.add(provider);
+				} else {
+					locked.add(provider);
+				}
+			}
 		}
 
 		const oauthIds = new Set(getOAuthProviders().map(provider => provider.id));
-		const providerEntry = (providerId: string, isLocked: boolean): SidebarEntry => ({
-			id: `provider:${providerId}`,
-			kind: "provider",
-			label: providerId,
-			providerId,
-			locked: isLocked,
-			annotation: isLocked ? undefined : String(availableCounts.get(providerId) ?? 0),
-			oauth: oauthIds.has(providerId),
-			catalogCount: catalogCounts.get(providerId) ?? 0,
-		});
+		const providerEntry = (providerId: string, isLocked: boolean): SidebarEntry => {
+			const loadedCount = availableCounts.get(providerId) ?? 0;
+			const totalCount = this.#providerModelTotal(providerId);
+			return {
+				id: `provider:${providerId}`,
+				kind: "provider",
+				label: providerId,
+				providerId,
+				locked: isLocked,
+				annotation: isLocked
+					? undefined
+					: totalCount === undefined
+						? String(loadedCount)
+						: `${loadedCount}/${totalCount}`,
+				oauth: oauthIds.has(providerId),
+				catalogCount: catalogCounts.get(providerId) ?? 0,
+			};
+		};
 
 		const visibleRoles = this.#visibleRoleIds();
 		let assignedCount = 0;
@@ -478,8 +507,17 @@ export class ModelHubComponent implements Component {
 		// or a click on the Roles entry).
 		this.#focus = "scope";
 		if (entry.kind === "provider" && !entry.locked) {
-			this.#scheduleProviderRefresh(entry.providerId ?? "");
+			const providerId = entry.providerId ?? "";
+			if (!this.#supportsProviderSearch(providerId)) {
+				this.#scheduleProviderRefresh(providerId);
+			} else if (!autoRefreshedProviders.has(providerId) && !this.#browser.query.trim()) {
+				// Whether the initial page is still missing is tracked by the refresh
+				// itself, not by the row count: a remote search can populate rows
+				// without ever fetching the provider's own first page.
+				this.#scheduleProviderRefresh(providerId, { initialLoad: true });
+			}
 		}
+		this.#scheduleProviderSearch(this.#browser.query);
 		this.#cancelScheduledRefreshesExcept(entry.kind === "provider" ? entry.providerId : undefined);
 	}
 
@@ -576,13 +614,24 @@ export class ModelHubComponent implements Component {
 		this.#refreshAfterMutation();
 	}
 
+	/** User edits invalidate an earlier completed result for the same query. */
+	#onUserQueryChanged(query: string): void {
+		const trimmedQuery = query.trim();
+		for (const providerId of this.#remoteSearchProviders(query)) {
+			this.#completedProviderSearches.delete(`${providerId}\0${trimmedQuery}`);
+		}
+		this.#onQueryChanged(query);
+	}
+
 	/**
 	 * Recompute per-provider match counts for the active query. Providers
-	 * without matches gray out and the scope hop skips them; a provider scope
-	 * that just lost its last match falls back to All models so the results
-	 * never silently vanish.
+	 * without matches gray out and the scope hop skips them. A provider scope
+	 * with only local discovery falls back to All models when its last match
+	 * disappears; remotely searchable providers stay selected so the query can
+	 * populate them.
 	 */
 	#onQueryChanged(query: string): void {
+		this.#scheduleProviderSearch(query);
 		if (!query.trim()) {
 			this.#searchCounts = null;
 			this.#composeEntries();
@@ -605,7 +654,8 @@ export class ModelHubComponent implements Component {
 		if (
 			this.#assigning === null &&
 			entry.kind === "provider" &&
-			(entry.locked || (counts.get(entry.providerId ?? "") ?? 0) === 0)
+			(entry.locked ||
+				((counts.get(entry.providerId ?? "") ?? 0) === 0 && !this.#supportsProviderSearch(entry.providerId ?? "")))
 		) {
 			this.#setActiveEntry("all");
 		}
@@ -614,7 +664,8 @@ export class ModelHubComponent implements Component {
 	/**
 	 * Entries the scope hop skips: separators always; while searching, also
 	 * the Roles view (not a model scope), an empty Recent, locked providers,
-	 * and providers without matches.
+	 * and local-only providers without matches. Remotely searchable providers
+	 * remain reachable so selecting one can run its server-side query.
 	 */
 	#isHopSkipped(entry: SidebarEntry): boolean {
 		if (entry.kind === "separator") return true;
@@ -623,7 +674,10 @@ export class ModelHubComponent implements Component {
 		if (entry.kind === "recent") return this.#recentSearchCount === 0;
 		if (entry.kind === "provider") {
 			if (entry.locked) return true;
-			return (this.#searchCounts.get(entry.providerId ?? "") ?? 0) === 0;
+			return (
+				(this.#searchCounts.get(entry.providerId ?? "") ?? 0) === 0 &&
+				!this.#supportsProviderSearch(entry.providerId ?? "")
+			);
 		}
 		return false;
 	}
@@ -631,6 +685,90 @@ export class ModelHubComponent implements Component {
 	// ═══════════════════════════════════════════════════════════════════════
 	// Provider discovery refresh
 	// ═══════════════════════════════════════════════════════════════════════
+
+	#supportsProviderSearch(providerId: string): boolean {
+		return this.#registry.supportsProviderSearch?.(providerId) ?? false;
+	}
+
+	#providerModelTotal(providerId: string, query = ""): number | undefined {
+		return this.#registry.getProviderModelTotal?.(providerId, query);
+	}
+	#remoteSearchProviders(query: string): string[] {
+		if (query.trim().length < PROVIDER_SEARCH_MIN_QUERY_LENGTH) return [];
+
+		const entry = this.#activeEntry();
+		if (entry.kind === "provider") {
+			const providerId = entry.providerId;
+			return !entry.locked && providerId && this.#supportsProviderSearch(providerId) ? [providerId] : [];
+		}
+		if (entry.kind !== "all") return [];
+		return this.#entries.flatMap(candidate =>
+			candidate.kind === "provider" &&
+			!candidate.locked &&
+			candidate.providerId &&
+			this.#supportsProviderSearch(candidate.providerId)
+				? [candidate.providerId]
+				: [],
+		);
+	}
+
+	#scheduleProviderSearch(query: string): void {
+		if (this.#providerSearchTimer) {
+			clearTimeout(this.#providerSearchTimer);
+			this.#providerSearchTimer = undefined;
+		}
+		const generation = ++this.#providerSearchGeneration;
+		const trimmedQuery = query.trim();
+		const providerIds = this.#remoteSearchProviders(query).filter(
+			providerId => !this.#completedProviderSearches.has(`${providerId}\0${trimmedQuery}`),
+		);
+		if (providerIds.length === 0) return;
+		this.#providerSearchTimer = setTimeout(() => {
+			this.#providerSearchTimer = undefined;
+			void this.#searchProvidersInBackground(providerIds, trimmedQuery, generation);
+		}, PROVIDER_SEARCH_DEBOUNCE_MS);
+	}
+
+	async #searchProvidersInBackground(providerIds: string[], query: string, generation: number): Promise<void> {
+		for (const providerId of providerIds) {
+			this.#providerSearchInFlight.set(providerId, generation);
+			this.#setProviderRefreshing(providerId, true);
+		}
+		try {
+			const results = await Promise.allSettled(
+				providerIds.map(
+					providerId => this.#registry.searchProviderModels?.(providerId, query) ?? Promise.resolve(0),
+				),
+			);
+			let searchError: string | undefined;
+			for (let index = 0; index < providerIds.length; index++) {
+				const providerId = providerIds[index];
+				const result = results[index];
+				if (!providerId || !result) continue;
+				// A rejected search must stay retryable: recording it as completed
+				// would leave the empty result on screen until the query is edited.
+				if (result.status === "fulfilled") this.#completedProviderSearches.add(`${providerId}\0${query}`);
+				if (result.status === "rejected") {
+					searchError = result.reason instanceof Error ? result.reason.message : String(result.reason);
+				}
+			}
+			if (generation !== this.#providerSearchGeneration) return;
+			// #syncFromRegistryState reloads #configError from the registry, so the
+			// failure has to be re-applied after it or the user just sees an empty
+			// result instead of the network error.
+			this.#syncFromRegistryState();
+			if (searchError !== undefined) this.#configError = searchError;
+			this.#onQueryChanged(this.#browser.query);
+		} finally {
+			for (const providerId of providerIds) {
+				if (this.#providerSearchInFlight.get(providerId) === generation) {
+					this.#providerSearchInFlight.delete(providerId);
+					this.#setProviderRefreshing(providerId, false);
+				}
+			}
+			this.#tui.requestRender();
+		}
+	}
 
 	#startRefreshSpinner(): void {
 		if (this.#refreshSpinnerInterval) return;
@@ -671,8 +809,12 @@ export class ModelHubComponent implements Component {
 		}
 	}
 
-	#scheduleProviderRefresh(providerId: string, options?: { force?: boolean }): void {
-		if (this.#scopedModels.length > 0 || !providerId) return;
+	#scheduleProviderRefresh(providerId: string, options?: { force?: boolean; initialLoad?: boolean }): void {
+		if (!providerId) return;
+		// Rows already on screen normally mean there is nothing to fetch — except
+		// for a searchable provider whose visible rows came from a remote search
+		// rather than from its own (still unfetched) initial page.
+		if (!options?.initialLoad && this.#scopedModels.length > 0) return;
 		if (this.#scheduledProviderRefreshes.has(providerId) || this.#refreshingProviders.has(providerId)) return;
 		// Hovering a provider must not re-fetch on every visit: auto-refresh runs
 		// at most once per provider for the process lifetime. F5 forces a re-fetch.
@@ -714,10 +856,20 @@ export class ModelHubComponent implements Component {
 		const entry = this.#activeEntry();
 		if (entry.kind === "recent") return "  No recently used models yet";
 		if (entry.kind !== "provider" || entry.locked) return undefined;
-		if (this.#browser.query.trim()) {
+		const providerId = entry.providerId ?? "";
+		const query = this.#browser.query.trim();
+		if (this.#refreshingProviders.has(providerId) && this.#supportsProviderSearch(providerId)) {
+			return query ? `  Searching the ${entry.label} model catalog…` : `  Loading the ${entry.label} model list…`;
+		}
+		if (query) {
+			if (this.#supportsProviderSearch(providerId)) {
+				if (query.length < PROVIDER_SEARCH_MIN_QUERY_LENGTH) {
+					return `  Type at least ${PROVIDER_SEARCH_MIN_QUERY_LENGTH} characters to search ${entry.label}.`;
+				}
+				return `  No ${entry.label} models matched "${query}".`;
+			}
 			return `  No matching models in ${entry.label}. Switch to All models to search every provider.`;
 		}
-		const providerId = entry.providerId ?? "";
 		const state = this.#registry.getProviderDiscoveryState(providerId);
 		if (!state) return undefined;
 		const age = this.#formatDiscoveryAge(state.fetchedAt);
@@ -1181,7 +1333,14 @@ export class ModelHubComponent implements Component {
 		}
 		if (matchesKey(data, "f5")) {
 			if (entry.kind === "provider" && !entry.locked) {
-				this.#scheduleProviderRefresh(entry.providerId ?? "", { force: true });
+				const providerId = entry.providerId ?? "";
+				const query = this.#browser.query.trim();
+				if (query.length >= PROVIDER_SEARCH_MIN_QUERY_LENGTH && this.#supportsProviderSearch(providerId)) {
+					this.#completedProviderSearches.delete(`${providerId}\0${query}`);
+					this.#scheduleProviderSearch(query);
+				} else {
+					this.#scheduleProviderRefresh(providerId, { force: true });
+				}
 			}
 			return;
 		}
@@ -1575,10 +1734,22 @@ export class ModelHubComponent implements Component {
 	// Rendering
 	// ═══════════════════════════════════════════════════════════════════════
 
+	#sidebarAnnotation(entry: SidebarEntry, matchCount?: number): string {
+		if (matchCount === undefined) return entry.annotation ?? "";
+		const remoteTotal = entry.providerId
+			? this.#providerModelTotal(entry.providerId, this.#browser.query)
+			: undefined;
+		return remoteTotal === undefined ? String(matchCount) : `${matchCount}/${remoteTotal}`;
+	}
+
 	#sidebarWidth(): number {
 		let longest = 0;
 		for (const entry of this.#entries) {
-			const annotation = entry.annotation ?? "";
+			const matchCount =
+				this.#searchCounts !== null && entry.kind === "provider" && !entry.locked
+					? (this.#searchCounts.get(entry.providerId ?? "") ?? 0)
+					: undefined;
+			const annotation = this.#sidebarAnnotation(entry, matchCount);
 			longest = Math.max(longest, visibleWidth(entry.label) + visibleWidth(annotation) + 5);
 		}
 		return Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, longest));
@@ -1648,7 +1819,7 @@ export class ModelHubComponent implements Component {
 					: entry.label;
 
 			const refreshing = entry.providerId ? this.#refreshingProviders.has(entry.providerId) : false;
-			const annotationText = matchCount !== undefined ? String(matchCount) : (entry.annotation ?? "");
+			const annotationText = this.#sidebarAnnotation(entry, matchCount);
 			const annotationStyled = refreshing
 				? theme.fg("warning", theme.spinnerFrames[this.#refreshSpinnerFrame % theme.spinnerFrames.length] ?? "")
 				: theme.fg("dim", annotationText);
@@ -1956,8 +2127,12 @@ export class ModelHubComponent implements Component {
 			return entry.oauth ? "Enter log in · ↑/↓ providers · Esc close" : "↑/↓ providers · Esc close";
 		}
 		const arrows = this.#focus === "scope" ? "↑/↓ providers · → models" : "↑/↓ models · ← providers";
+		const searchable = entry.kind === "provider" && this.#supportsProviderSearch(entry.providerId ?? "");
+		const search = searchable
+			? `type ${PROVIDER_SEARCH_MIN_QUERY_LENGTH}+ chars to search catalog`
+			: "type to search";
 		const refresh = entry.kind === "provider" ? " · F5 refresh" : "";
-		return `Enter assign roles · ${arrows} · type to search${refresh} · Esc close`;
+		return `Enter assign roles · ${arrows} · ${search}${refresh} · Esc close`;
 	}
 
 	/** Footer row: active strip (chips) or the contextual hint line. */
