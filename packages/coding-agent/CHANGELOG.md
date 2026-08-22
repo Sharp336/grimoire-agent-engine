@@ -7,6 +7,7 @@
 ### Added
 
 - Added `omp usage clients` to report per-client token usage recorded by the auth broker, including the machine and application responsible for usage by provider. Supports `--days` and `--json` output.
+- Added support for declaring skill directories in plugin manifests (`omp.skills` / `pi.skills`), including entries pointing directly at a single skill directory.
 
 ### Changed
 
