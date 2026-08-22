@@ -32,6 +32,8 @@ interface PromptActionAutocompleteItem extends AutocompleteItem {
 interface PromptActionAutocompleteOptions {
 	commands: SlashCommand[];
 	basePath: string;
+	/** Whether slash-command autocomplete entries retain their type icons. */
+	showSlashCommandIcons?: boolean;
 	/** Usage count per command name for frequency-ranked slash completions. */
 	commandUsage?: (name: string) => number;
 	keybindings: KeybindingsManager;
@@ -327,5 +329,9 @@ export function createPromptActionAutocompleteProvider(
 		},
 	];
 
-	return new PromptActionAutocompleteProvider(options.commands, options.basePath, actions, options.commandUsage);
+	const commands =
+		options.showSlashCommandIcons === false
+			? options.commands.map(command => ({ ...command, icon: undefined }))
+			: options.commands;
+	return new PromptActionAutocompleteProvider(commands, options.basePath, actions, options.commandUsage);
 }
