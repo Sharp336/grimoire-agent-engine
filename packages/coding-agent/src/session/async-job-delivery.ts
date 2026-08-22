@@ -15,7 +15,12 @@ import chattyProgressGuidanceTemplate from "../prompts/system/chatty-progress-gu
 import asyncProgressTemplate from "../prompts/tools/async-progress.md" with { type: "text" };
 import asyncResultTemplate from "../prompts/tools/async-result.md" with { type: "text" };
 import type { CustomMessage } from "./messages";
-import { buildLineSnappedPreview, buildProgressPreview, mergeProgressPreviews } from "./progress-preview";
+import {
+	buildLineSnappedPreview,
+	buildProgressPreview,
+	flattenPreviewText,
+	mergeProgressPreviews,
+} from "./progress-preview";
 
 /**
  * `customType` of the injected async-result follow-up message. The task
@@ -107,8 +112,7 @@ export function mergeAsyncProgressEntries(
 			buildProgressPreview(queued.text, queued.sourceTruncated === true),
 			buildProgressPreview(incoming.text, incoming.sourceTruncated === true),
 		);
-		text =
-			preview.text ?? [preview.head, preview.tail].filter((part): part is string => part !== undefined).join("\n");
+		text = flattenPreviewText(preview);
 		if (preview.truncated) {
 			sourceTruncated = true;
 			foldedEvents = 1;

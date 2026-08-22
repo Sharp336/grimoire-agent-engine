@@ -2,6 +2,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import {
 	buildLineSnappedPreview,
 	buildProgressPreview,
+	flattenPreviewText,
 	mergeProgressPreviews,
 	type ProgressPreview,
 } from "../session/progress-preview";
@@ -107,8 +108,7 @@ function mergeAsyncJobProgressRecords(
 		buildProgressPreview(right.text, right.truncated),
 	);
 	return {
-		text:
-			preview.text ?? [preview.head, preview.tail].filter((part): part is string => part !== undefined).join("\n"),
+		text: flattenPreviewText(preview),
 		artifactId: right.artifactId ?? left.artifactId,
 		truncated: preview.truncated,
 	};

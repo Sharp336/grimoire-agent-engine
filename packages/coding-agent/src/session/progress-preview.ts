@@ -25,14 +25,16 @@ function snapTailToLine(tail: string): string {
 }
 
 /**
- * Build one UTF-8-safe head/tail preview shared by broker transport and model
- * delivery. The split is a pure byte split: `head + tail` always rejoins to
- * the retained text, which the broker wire relies on.
+ * Build one UTF-8-safe preview shared by broker transport and model delivery.
+ * Windows that fit the byte budget keep their exact text; only oversized
+ * windows split into a pure byte-split head/tail pair whose middle bytes were
+ * dropped. `head + tail` always rejoins to the retained text, which the
+ * broker wire relies on.
  */
 export function buildProgressPreview(text: string, sourceTruncated = false): ProgressPreview {
 	const fullBytes = Buffer.byteLength(text, "utf8");
-	if (!sourceTruncated && fullBytes <= PROGRESS_PREVIEW_MAX_BYTES) {
-		return { text, truncated: false };
+	if (fullBytes <= PROGRESS_PREVIEW_MAX_BYTES) {
+		return { text, truncated: sourceTruncated };
 	}
 	const retainedBytes = Math.min(fullBytes, PROGRESS_PREVIEW_MAX_BYTES);
 	const headBytes = Math.floor(retainedBytes / 2);
@@ -52,7 +54,7 @@ export function buildProgressPreview(text: string, sourceTruncated = false): Pro
  */
 export function buildLineSnappedPreview(text: string, sourceTruncated = false): ProgressPreview {
 	const preview = buildProgressPreview(text, sourceTruncated);
-	if (!preview.truncated || preview.text !== undefined) return preview;
+	if (!preview.truncated) return preview;
 	const fullBytes = Buffer.byteLength(text, "utf8");
 	if (fullBytes <= PROGRESS_PREVIEW_MAX_BYTES) {
 		const midpoint = Math.floor(text.length / 2);
@@ -107,7 +109,7 @@ export class ProgressPreviewAccumulator {
 	}
 
 	appendPreview(preview: ProgressPreview): void {
-		this.append(preview.text ?? `${preview.head ?? ""}${preview.tail ?? ""}`, preview.truncated);
+		this.append(flattenPreviewText(preview), preview.truncated);
 	}
 
 	take(): ProgressPreview | undefined {
@@ -130,6 +132,21 @@ export class ProgressPreviewAccumulator {
 	#hasOutput(): boolean {
 		return this.#text.length > 0 || this.#head.length > 0 || this.#tail.length > 0;
 	}
+}
+
+/**
+ * Flatten a preview back into running text for display or further merging.
+ * Truncated head/tail pairs dropped their middle bytes, so the seam between
+ * them is a fabricated boundary: snap both cut points to complete lines so
+ * the seam never splits a line mid-way. Single-line sides keep the byte cut.
+ */
+export function flattenPreviewText(preview: ProgressPreview): string {
+	if (preview.text !== undefined) return preview.text;
+	const head = snapHeadToLine(preview.head ?? "");
+	const tail = snapTailToLine(preview.tail ?? "");
+	if (head.length === 0) return tail;
+	if (tail.length === 0) return head;
+	return `${head}\n${tail}`;
 }
 
 /** Merge two already-bounded windows while retaining only their outer head and tail. */
