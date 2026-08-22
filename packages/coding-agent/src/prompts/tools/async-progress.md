@@ -1,6 +1,6 @@
 <system-notice>
 {{#each jobs}}<job-progress id="{{jobId}}"{{#if type}} type="{{type}}"{{/if}} elapsed="{{elapsed}}">
-{{#if truncated}}<output>
+{{#if head}}<output>
 <head>
 {{escapeXml head}}
 </head>
@@ -11,7 +11,9 @@
 </tail>
 </output>
 {{else}}{{#if hasOutput}}<output>
-{{escapeXml text}}
+{{#if truncated}}{{#if suppressedEvents}}<suppressed reason="rate-limit" events="{{suppressedEvents}}"{{#if artifactId}} full-output="artifact://{{artifactId}}"{{/if}} />
+{{else}}<suppressed reason="preview-limit"{{#if artifactId}} full-output="artifact://{{artifactId}}"{{/if}} />
+{{/if}}{{/if}}{{escapeXml text}}
 </output>
 {{else}}{{#if suppressedEvents}}<output>
 <suppressed reason="rate-limit" events="{{suppressedEvents}}"{{#if artifactId}} full-output="artifact://{{artifactId}}"{{/if}} />
