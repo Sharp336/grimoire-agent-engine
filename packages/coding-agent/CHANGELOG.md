@@ -125,7 +125,6 @@
 - Added bounded, rate-limited progress delivery for background jobs: batched previews with stable overflow artifacts, ambient and wake queues, and completion notices that carry exit status; inspired by Claude Code's Monitor tool ([#2762](https://github.com/can1357/oh-my-pi/issues/2762)).
 - Added Hub process monitoring modes (wake, ambient, off) to attach, retune, or detach live progress delivery without changing process lifetime.
 - Added Bash async: "auto": potentially slow finite commands run inline for a grace window and promote to a background job without restarting.
-- Added bounded ambient or wake progress for asynchronous Bash jobs and supervised Hub processes. Bash `async: "auto"` keeps quick commands inline, agents can attach to existing processes without polling, rate-limited previews retain complete artifacts, and completion notices surface failure and exit status; inspired by Claude Code's Monitor tool ([#2762](https://github.com/can1357/oh-my-pi/issues/2762)).
 
 ### Changed
 
