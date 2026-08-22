@@ -81,7 +81,15 @@ export interface OutputSinkOptions {
 	 * writes still respect the budget. Default 0 = no per-line cap.
 	 */
 	maxColumns?: number;
-	onChunk?: (chunk: string) => void;
+	onChunk?: (chunk: string, stamp: number) => void;
+	/**
+	 * Sampled when a chunk's first byte enters the sink and passed to the
+	 * matching (possibly delayed) `onChunk` call. Mirror mode and chunk
+	 * throttling can deliver a chunk after the caller has crossed a boundary
+	 * (e.g. async promotion); the stamp lets the consumer detect and discard
+	 * such stale chunks. Deliveries default to stamp 0 when omitted.
+	 */
+	chunkStamp?: () => number;
 	/** Minimum ms between onChunk calls. 0 = every chunk (default). */
 	chunkThrottleMs?: number;
 	/**
@@ -798,6 +806,8 @@ export class OutputSink {
 	#lastChunkTime = 0;
 	#pendingChunk = "";
 	readonly #crNormalizer = new CarriageReturnNormalizer();
+	/** `chunkStamp()` captured when the first held-back byte entered the sink. */
+	#pendingChunkStamp: number | undefined;
 	#pendingChunkTimer: Timer | undefined;
 	#chunkDeliveryTail: Promise<void> | undefined;
 	#chunkDeliveryFailure: { error: unknown } | undefined;
@@ -834,7 +844,8 @@ export class OutputSink {
 	#appendFd?: number;
 	readonly #spillThreshold: number;
 	readonly #headLimit: number;
-	readonly #onChunk?: (chunk: string) => void;
+	readonly #onChunk?: (chunk: string, stamp: number) => void;
+	readonly #chunkStamp?: () => number;
 	readonly #chunkThrottleMs: number;
 	readonly #maxColumns: number;
 
@@ -863,6 +874,7 @@ export class OutputSink {
 			headBytes = 0,
 			maxColumns = 0,
 			onChunk,
+			chunkStamp,
 			chunkThrottleMs = 0,
 			artifactMaxBytes = ARTIFACT_DEFAULT_MAX_BYTES,
 			artifactHeadBytes = ARTIFACT_DEFAULT_HEAD_BYTES,
@@ -875,6 +887,7 @@ export class OutputSink {
 		this.#headLimit = Math.max(0, Math.min(headBytes, Math.floor(spillThreshold / 2)));
 		this.#maxColumns = Math.max(0, maxColumns);
 		this.#onChunk = onChunk;
+		this.#chunkStamp = chunkStamp;
 		this.#chunkThrottleMs = chunkThrottleMs;
 		this.#artifactMaxBytes = Math.max(0, artifactMaxBytes);
 		this.#artifactHeadBudget = Math.max(0, Math.min(artifactHeadBytes, this.#artifactMaxBytes));
@@ -899,6 +912,7 @@ export class OutputSink {
 			if (now - this.#lastChunkTime >= this.#chunkThrottleMs) {
 				this.#emitPendingChunkWith(chunk, now);
 			} else {
+				this.#pendingChunkStamp ??= this.#chunkStamp?.() ?? 0;
 				this.#pendingChunk += chunk;
 				this.#schedulePendingChunkFlush();
 			}
@@ -1255,6 +1269,7 @@ export class OutputSink {
 		this.#columnTruncatedLines = 0;
 		this.#pendingChunk = "";
 		this.#crNormalizer.reset();
+		this.#pendingChunkStamp = undefined;
 	}
 
 	#clearPendingChunkTimer(): void {
@@ -1266,10 +1281,15 @@ export class OutputSink {
 	#emitPendingChunkWith(chunk: string, now: number): void {
 		this.#clearPendingChunkTimer();
 		this.#lastChunkTime = now;
+		// The stamp travels with the bytes: a merged chunk keeps the stamp of its
+		// earliest byte so a boundary crossed mid-hold marks the whole delivery
+		// as pre-boundary (consumers drop toward the boundary, never replay).
+		const stamp = this.#pendingChunkStamp ?? this.#chunkStamp?.() ?? 0;
+		this.#pendingChunkStamp = undefined;
 		const merged = this.#pendingChunk + chunk;
 		this.#pendingChunk = "";
 		if (this.#artifactWriteMode !== "mirror") {
-			this.#onChunk?.(merged);
+			this.#onChunk?.(merged, stamp);
 			return;
 		}
 		const deliver = async () => {
@@ -1277,7 +1297,7 @@ export class OutputSink {
 			// resumes, then flushArtifact makes it readable before model-facing progress.
 			await Promise.resolve();
 			await this.flushArtifact();
-			this.#onChunk?.(merged);
+			this.#onChunk?.(merged, stamp);
 		};
 		const tail = this.#chunkDeliveryTail?.then(deliver, deliver) ?? deliver();
 		// Handle the rejection at creation: a preview failure between pushes must

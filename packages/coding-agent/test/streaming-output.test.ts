@@ -410,6 +410,48 @@ describe("OutputSink", () => {
 		expect(await artifactFile.text()).toBe(notified);
 	});
 
+	test("mirror mode delivers a queued chunk with the stamp captured at entry", async () => {
+		let epoch = 0;
+		const deliveries: Array<{ chunk: string; stamp: number }> = [];
+		const sink = new OutputSink({
+			artifactWriteMode: "mirror",
+			chunkStamp: () => epoch,
+			onChunk: (chunk, stamp) => deliveries.push({ chunk, stamp }),
+		});
+
+		sink.push("pre-boundary\n");
+		// The mirror delivery is still queued behind the artifact flush when the
+		// boundary moves; the stamp must reflect entry time, not delivery time.
+		epoch = 1;
+		sink.push("post-boundary\n");
+		await sink.dump();
+
+		expect(deliveries).toEqual([
+			{ chunk: "pre-boundary\n", stamp: 0 },
+			{ chunk: "post-boundary\n", stamp: 1 },
+		]);
+	});
+
+	test("a throttle-held chunk keeps the stamp of its first held byte", async () => {
+		let epoch = 0;
+		const deliveries: Array<{ chunk: string; stamp: number }> = [];
+		const sink = new OutputSink({
+			chunkThrottleMs: 60_000,
+			chunkStamp: () => epoch,
+			onChunk: (chunk, stamp) => deliveries.push({ chunk, stamp }),
+		});
+
+		sink.push("first");
+		sink.push("held");
+		epoch = 1;
+		await sink.dump();
+
+		expect(deliveries).toEqual([
+			{ chunk: "first", stamp: 0 },
+			{ chunk: "held", stamp: 0 },
+		]);
+	});
+
 	test("throttled onChunk coalesces held-back chunks instead of dropping them", async () => {
 		const chunks: string[] = [];
 		const sink = new OutputSink({ onChunk: chunk => chunks.push(chunk), chunkThrottleMs: 60_000 });

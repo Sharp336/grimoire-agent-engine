@@ -18,7 +18,13 @@ export interface BashExecutorOptions {
 	cwd?: string;
 	/** Milliseconds before aborting the command; 0 disables the executor deadline. */
 	timeout?: number;
-	onChunk?: (chunk: string) => void;
+	onChunk?: (chunk: string, stamp: number) => void;
+	/**
+	 * Sampled when a chunk enters the output sink and delivered with the
+	 * matching `onChunk` call, so callers can discard chunks captured before
+	 * a boundary (e.g. async promotion) that the sink delivered after it.
+	 */
+	chunkStamp?: () => number;
 	chunkThrottleMs?: number;
 	signal?: AbortSignal;
 	/** Session key suffix to isolate shell sessions per agent */
@@ -479,6 +485,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	// Create output sink for truncation and artifact handling
 	const sink = new OutputSink({
 		onChunk: usePty ? undefined : options?.onChunk,
+		chunkStamp: options?.chunkStamp,
 		artifactPath: options?.artifactPath,
 		artifactId: options?.artifactId,
 		artifactWriteMode: options?.artifactWriteMode,

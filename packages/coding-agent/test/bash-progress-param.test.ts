@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import * as path from "node:path";
 import { type AsyncJob, AsyncJobManager, type AsyncJobProgressInfo } from "@oh-my-pi/pi-coding-agent/async/job-manager";
+import { ProgressLines } from "@oh-my-pi/pi-coding-agent/async/progress-lines";
+import { OutputSink } from "@oh-my-pi/pi-coding-agent/session/streaming-output";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -242,6 +244,32 @@ describe("bash progress parameter", () => {
 		expect(events.at(-1)).toContain("beforeafter");
 		await manager.dispose();
 	}, 10_000);
+
+	test("never surfaces a sink-queued pre-promotion chunk as progress", async () => {
+		// The exact wiring bash uses for auto-promotion: a mirror-mode sink
+		// stamps each chunk with the sampler epoch at entry, and the sampler
+		// drops stale-stamped chunks. The first chunk's delivery is still
+		// queued behind the sink's artifact flush when the promotion boundary
+		// resets the sampler, so without the stamp it would replay
+		// inline-shown output as the first background progress event.
+		const reported: string[] = [];
+		const sampler = new ProgressLines(line => reported.push(line.text));
+		const sink = new OutputSink({
+			artifactWriteMode: "mirror",
+			chunkStamp: () => sampler.epoch,
+			onChunk: (chunk, stamp) => sampler.append(chunk, stamp),
+		});
+
+		sink.push("inline-shown\n");
+		// Promotion boundary: activateProgress() resets the sampler while the
+		// chunk above is still in the sink's delivery queue.
+		sampler.reset();
+		sink.push("post-promotion\n");
+		await sink.dump();
+		sampler.finish();
+
+		expect(reported).toEqual(["post-promotion"]);
+	});
 
 	test("retains successful and failed exit values for completion delivery", async () => {
 		const manager = new AsyncJobManager({});

@@ -69,12 +69,24 @@ export class ProgressLines {
 	#streamCodeUnits = 0;
 	#pendingHighSurrogate = "";
 	#latestReportedStreamProvenance: ProgressStreamProvenance | undefined;
+	#epoch = 0;
 
 	constructor(report: (line: ProgressLine) => void) {
 		this.#report = report;
 	}
 
-	append(chunk: string): void {
+	/**
+	 * Current boundary generation. Feeds whose chunk delivery can lag (e.g.
+	 * mirror-mode sinks that flush an artifact before notifying) capture this
+	 * value when a chunk enters the pipeline and pass it back to `append` so
+	 * chunks that predate a `reset()` boundary are discarded on arrival.
+	 */
+	get epoch(): number {
+		return this.#epoch;
+	}
+
+	append(chunk: string, epoch?: number): void {
+		if (epoch !== undefined && epoch !== this.#epoch) return;
 		let start = 0;
 		let newline = chunk.indexOf("\n");
 		while (newline !== -1) {
@@ -107,7 +119,13 @@ export class ProgressLines {
 		this.#truncated = false;
 	}
 
+	/**
+	 * Marks a sampling boundary: drops buffered partial state and bumps the
+	 * epoch so stamped chunks captured before the boundary (but delivered
+	 * after it) are ignored by `append`.
+	 */
 	reset(): void {
+		this.#epoch++;
 		this.#partial = "";
 		this.#head = "";
 		this.#tail = "";

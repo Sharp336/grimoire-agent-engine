@@ -871,11 +871,17 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 							artifactPath,
 							artifactId,
 							artifactWriteMode: progressLines ? "mirror" : "spill",
-							onChunk: chunk => {
+							// The stamp is captured when a chunk enters the sink; mirror
+							// mode and chunk throttling can deliver it after the promotion
+							// boundary bumped the sampler epoch, in which case append()
+							// drops the stale chunk from progress (the tail preview and
+							// the artifact still keep it).
+							chunkStamp: () => progressLines?.epoch ?? 0,
+							onChunk: (chunk, stamp) => {
 								tailBuffer.append(chunk);
 								latestText = tailBuffer.text();
 								void reportProgress(latestText, { async: { state: "running", jobId, type: "bash" } });
-								progressLines?.append(chunk);
+								progressLines?.append(chunk, stamp);
 							},
 							onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
 						});
@@ -946,7 +952,11 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				// been fed since process start (its complete lines were dropped
 				// while delivery was inactive), so a partial line buffered during
 				// the inline grace would otherwise replay output already shown in
-				// the foreground result once its remainder arrives. Drop it.
+				// the foreground result once its remainder arrives. reset() drops
+				// that partial AND bumps the sampler epoch, so chunk deliveries
+				// still queued inside the sink (mirror mode flushes the artifact
+				// before notifying; throttling holds quiet tails) are recognized
+				// as pre-promotion and never surface as live progress.
 				progressSampler?.reset();
 				return manager.activateProgressDelivery(jobId, delivery);
 			},
