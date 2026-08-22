@@ -477,7 +477,7 @@ class DaemonBroker {
 	readonly #completionSubscriptions = new Map<string, string | undefined>();
 	readonly #pendingCompletions = new Map<string, Map<string, DaemonCompletionNotification>>();
 	readonly #outputRegistrations = new Map<string, OutputRegistration>();
-	readonly #outputSubscriptionRevisions = new Map<string, number>();
+	readonly #outputSubscriptionSyncTokens = new Map<string, symbol>();
 	readonly #progressBatcher: ProgressBatcher<MonitorProgressChunk>;
 	readonly #finished = Promise.withResolvers<void>();
 	readonly #sockets = new Set<net.Socket>();
@@ -615,10 +615,7 @@ class DaemonBroker {
 				if (registration.socket !== socket) continue;
 				registration.socket = undefined;
 				registration.offlineTimer = setTimeout(() => {
-					if (
-						registration.socket ||
-						this.#outputRegistrations.get(registrationKey) !== registration
-					) {
+					if (registration.socket || this.#outputRegistrations.get(registrationKey) !== registration) {
 						return;
 					}
 					this.#outputRegistrations.delete(registrationKey);
@@ -1056,97 +1053,98 @@ class DaemonBroker {
 		subscriptions: DaemonOutputSubscription[] | undefined,
 	): Promise<void> {
 		if (!subscriptionId || !subscriptions) return;
-		const revision = (this.#outputSubscriptionRevisions.get(subscriptionId) ?? 0) + 1;
-		this.#outputSubscriptionRevisions.set(subscriptionId, revision);
+		const syncToken = Symbol(subscriptionId);
+		this.#outputSubscriptionSyncTokens.set(subscriptionId, syncToken);
 		const current = (): boolean =>
-			!socket.destroyed && this.#outputSubscriptionRevisions.get(subscriptionId) === revision;
-		const advertised = new Set(subscriptions.map(subscription => subscription.id));
-		const removed = [...this.#outputRegistrations.values()].filter(
-			registration => registration.subscriptionId === subscriptionId && !advertised.has(registration.id),
-		);
-		for (const registration of removed) {
-			const record = this.#records.get(registration.name);
-			const remove = (): void => {
-				if (!current()) return;
-				const key = outputRegistrationKey(subscriptionId, registration.id);
-				if (this.#outputRegistrations.get(key) !== registration) return;
-				clearTimeout(registration.offlineTimer);
-				this.#outputRegistrations.delete(key);
-				this.#progressBatcher.clear(registration.batchKey);
-				void registration.artifactSink.dispose();
-			};
-			if (record?.snapshot.id === registration.daemonId) await this.#queueRecordOutputWork(record, remove);
-			else remove();
-		}
-		for (const subscription of subscriptions) {
-			if (!current()) return;
-			const key = outputRegistrationKey(subscriptionId, subscription.id);
-			const record = this.#records.get(subscription.name);
-			const synchronize = async (): Promise<void> => {
-				if (!current()) return;
-				const existing = this.#outputRegistrations.get(key);
-				if (
-					existing &&
-					existing.name === subscription.name &&
-					existing.artifactPath === subscription.artifactPath
-				) {
-					clearTimeout(existing.offlineTimer);
-					existing.offlineTimer = undefined;
-					existing.owner = subscription.owner;
-					const reconnected = existing.socket !== socket;
-					existing.socket = socket;
-					this.#pruneAcknowledgedOutput(existing, subscription);
-					const replayedTerminal = existing.pending.some(
-						notification => notification.event === "daemon-monitor-completed",
-					);
-					// Retained notifications replay only across an actual socket change;
-					// on a steady-state envelope the client already holds them.
-					if (reconnected) {
-						for (const notification of existing.pending) {
-							this.#writeMonitorNotification(existing, notification);
-						}
-					}
-					if (
-						record &&
-						existing.daemonId === record.snapshot.id &&
-						terminalState(record.snapshot.state) &&
-						!record.monitorSettlementPending &&
-						!replayedTerminal
-					) {
-						this.#notifyMonitorCompletion(record, existing);
-					}
-					return;
-				}
-				// A registration's capture starts at its attach point. For a detached
-				// daemon the log file may already hold bytes written before this
-				// subscription existed, so drain it while holding the record's output
-				// queue. Replacement and unregister envelopes join this same queue,
-				// preventing pre-attach bytes from crossing registration boundaries.
-				if (record?.spec.detached && !settledState(record.snapshot.state)) {
-					await this.#consumeDetachedOutput(record, record.generation);
-					if (!current() || this.#records.get(subscription.name) !== record) return;
-				}
-				if (!current()) return;
-				const replaced = this.#outputRegistrations.get(key);
-				if (replaced) {
-					clearTimeout(replaced.offlineTimer);
+			!socket.destroyed && this.#outputSubscriptionSyncTokens.get(subscriptionId) === syncToken;
+		try {
+			const advertised = new Set(subscriptions.map(subscription => subscription.id));
+			const removed = [...this.#outputRegistrations.values()].filter(
+				registration => registration.subscriptionId === subscriptionId && !advertised.has(registration.id),
+			);
+			for (const registration of removed) {
+				const record = this.#records.get(registration.name);
+				const remove = (): void => {
+					if (!current()) return;
+					const key = outputRegistrationKey(subscriptionId, registration.id);
+					if (this.#outputRegistrations.get(key) !== registration) return;
+					clearTimeout(registration.offlineTimer);
 					this.#outputRegistrations.delete(key);
-					this.#progressBatcher.clear(replaced.batchKey);
-					void replaced.artifactSink.dispose();
-				}
-				const registration = createOutputRegistration(
-					subscription,
-					socket,
-					subscriptionId,
-					record?.snapshot.id,
-				);
-				this.#outputRegistrations.set(key, registration);
-				if (record && terminalState(record.snapshot.state) && !record.monitorSettlementPending) {
-					this.#notifyMonitorCompletion(record, registration);
-				}
-			};
-			if (record) await this.#queueRecordOutputWork(record, synchronize);
-			else await synchronize();
+					this.#progressBatcher.clear(registration.batchKey);
+					void registration.artifactSink.dispose();
+				};
+				if (record?.snapshot.id === registration.daemonId) await this.#queueRecordOutputWork(record, remove);
+				else remove();
+			}
+			for (const subscription of subscriptions) {
+				if (!current()) return;
+				const key = outputRegistrationKey(subscriptionId, subscription.id);
+				const record = this.#records.get(subscription.name);
+				const synchronize = async (): Promise<void> => {
+					if (!current()) return;
+					const existing = this.#outputRegistrations.get(key);
+					if (
+						existing &&
+						existing.name === subscription.name &&
+						existing.artifactPath === subscription.artifactPath
+					) {
+						clearTimeout(existing.offlineTimer);
+						existing.offlineTimer = undefined;
+						existing.owner = subscription.owner;
+						const reconnected = existing.socket !== socket;
+						existing.socket = socket;
+						this.#pruneAcknowledgedOutput(existing, subscription);
+						const replayedTerminal = existing.pending.some(
+							notification => notification.event === "daemon-monitor-completed",
+						);
+						// Retained notifications replay only across an actual socket change;
+						// on a steady-state envelope the client already holds them.
+						if (reconnected) {
+							for (const notification of existing.pending) {
+								this.#writeMonitorNotification(existing, notification);
+							}
+						}
+						if (
+							record &&
+							existing.daemonId === record.snapshot.id &&
+							terminalState(record.snapshot.state) &&
+							!record.monitorSettlementPending &&
+							!replayedTerminal
+						) {
+							this.#notifyMonitorCompletion(record, existing);
+						}
+						return;
+					}
+					// A registration's capture starts at its attach point. For a detached
+					// daemon the log file may already hold bytes written before this
+					// subscription existed, so drain it while holding the record's output
+					// queue. Replacement and unregister envelopes join this same queue,
+					// preventing pre-attach bytes from crossing registration boundaries.
+					if (record?.spec.detached && !settledState(record.snapshot.state)) {
+						await this.#consumeDetachedOutput(record, record.generation);
+						if (!current() || this.#records.get(subscription.name) !== record) return;
+					}
+					if (!current()) return;
+					const replaced = this.#outputRegistrations.get(key);
+					if (replaced) {
+						clearTimeout(replaced.offlineTimer);
+						this.#outputRegistrations.delete(key);
+						this.#progressBatcher.clear(replaced.batchKey);
+						void replaced.artifactSink.dispose();
+					}
+					const registration = createOutputRegistration(subscription, socket, subscriptionId, record?.snapshot.id);
+					this.#outputRegistrations.set(key, registration);
+					if (record && terminalState(record.snapshot.state) && !record.monitorSettlementPending) {
+						this.#notifyMonitorCompletion(record, registration);
+					}
+				};
+				if (record) await this.#queueRecordOutputWork(record, synchronize);
+				else await synchronize();
+			}
+		} finally {
+			if (this.#outputSubscriptionSyncTokens.get(subscriptionId) === syncToken) {
+				this.#outputSubscriptionSyncTokens.delete(subscriptionId);
+			}
 		}
 	}
 

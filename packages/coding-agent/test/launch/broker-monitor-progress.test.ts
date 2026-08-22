@@ -1289,7 +1289,7 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 		}
 	}, 30_000);
 
-	it("serializes detached monitor replacement and unregister envelopes with pre-attach drains", async () => {
+	it("releases monitor sync tokens without reviving obsolete detached envelopes", async () => {
 		using tempDir = TempDir.createSync("@omp-launch-monitor-sync-race-");
 		const projectDir = path.join(tempDir.path(), "project");
 		const runtimeDir = path.join(tempDir.path(), "runtime");
@@ -1321,11 +1321,15 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 			});
 			const token = (await Bun.file(path.join(runtimeDir, "broker.token")).text()).trim();
 			raw = await openRawBrokerSocket(endpoint);
-			const request = (id: string, outputSubscriptions: Record<string, unknown>[]): string =>
+			const request = (
+				id: string,
+				outputSubscriptions: Record<string, unknown>[],
+				outputSubscriptionId = "sync-race-client",
+			): string =>
 				JSON.stringify({
 					id,
 					token,
-					outputSubscriptionId: "sync-race-client",
+					outputSubscriptionId,
 					outputSubscriptions,
 					operation: { op: "ping" },
 				});
@@ -1347,9 +1351,7 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 			const logPath = path.join(runtimeDir, "daemons", "sync-race", "output.log");
 			await Bun.write(logPath, "REPLACEMENT\n");
 			await client.request({ op: "describe", name: "sync-race" });
-			await raw.waitFor(
-				message => message.event === "daemon-output" && message.monitorId === "race-monitor",
-			);
+			await raw.waitFor(message => message.event === "daemon-output" && message.monitorId === "race-monitor");
 			expect(await Bun.file(newArtifactPath).text()).toBe("REPLACEMENT\n");
 			expect(await Bun.file(oldArtifactPath).exists()).toBeFalse();
 
@@ -1359,12 +1361,16 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 				owner: "race-owner",
 				artifactPath: staleArtifactPath,
 			};
-			// The first line begins attaching stale-monitor and yields in its drain;
-			// the second line unregisters it before that drain can resume.
+			// The first line begins attaching stale-monitor and yields in its drain.
+			// The newer empty envelope has no registration to remove, so it finishes
+			// and releases its sync token before the obsolete attach resumes. The
+			// obsolete token must still remain distinguishable after that release.
 			raw.socket.write(
-				`${request("register-stale", [newSubscription, staleSubscription])}\n${request("unregister-stale", [
-					newSubscription,
-				])}\n`,
+				`${request("register-stale", [staleSubscription], "obsolete-token-client")}\n${request(
+					"unregister-stale",
+					[],
+					"obsolete-token-client",
+				)}\n`,
 			);
 			await Promise.all([
 				raw.waitFor(message => message.id === "register-stale"),
@@ -1405,6 +1411,7 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 		let first: RawBrokerSocket | undefined;
 		let reconnect: RawBrokerSocket | undefined;
 		try {
+			await client.request({ op: "ping" });
 			const token = (await Bun.file(path.join(runtimeDir, "broker.token")).text()).trim();
 			const subscription = {
 				id: "incarnation-monitor",
