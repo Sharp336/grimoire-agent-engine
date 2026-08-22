@@ -5,6 +5,7 @@
 ### Added
 
 - Plan review can save a plan to a chosen path and start a new session.
+- Added provider-agnostic Code Mode opt-in and live hidden-tool declarations for extension eval replacements, gated on a same-name native eval transport.
 - Added the `/pin` slash command to pin and unpin sessions so they stay at the top of the `--resume` picker UI.
 - Optional edit parse-regression capture appends the before/after content, model, variant, and arguments to `~/.omp/agent/edit-blackbox.jsonl` when `edit.blackbox.enabled` is enabled.
 ### Changed

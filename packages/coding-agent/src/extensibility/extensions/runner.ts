@@ -556,6 +556,14 @@ export class ExtensionRunner {
 		return this.#nativeToolResolver?.(name) !== undefined;
 	}
 
+	/** Whether the native built-in can currently carry Code Mode bridge calls. */
+	nativeToolSupportsCodeModeTransport(name: string): boolean {
+		const tool = this.#nativeToolResolver?.(name)?.tool as
+			| (AgentTool & { supportsCodeModeTransport?: () => boolean })
+			| undefined;
+		return tool?.supportsCodeModeTransport?.() ?? false;
+	}
+
 	/**
 	 * Run the native built-in of `name` with `params` and return its result — the delegation target
 	 * of a same-tool `ctx.invokeTool`. Calls the unwrapped native `execute` directly with the loop's

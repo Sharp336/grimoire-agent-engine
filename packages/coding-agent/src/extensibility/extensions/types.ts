@@ -598,6 +598,12 @@ export interface ToolSessionEvent {
 	previousSessionFile: string | undefined;
 }
 
+/** Live Code Mode metadata supplied by the session to an eval replacement. */
+export interface CodeModeBridge {
+	/** Current declarations for tools hidden behind eval, or undefined while Code Mode is inactive. */
+	getDeclarations(): string | undefined;
+}
+
 /**
  * Tool definition for registerTool().
  */
@@ -625,6 +631,12 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	/** Structured-output strict grammar opt-in/out. `false` is meaningful: OpenAI-family
 	 *  serializers preserve an explicit `strict: false` on the wire (#4336/#4340). */
 	strict?: boolean;
+	/** Activate Code Mode for every model while this eval replacement is registered. */
+	codeModeActivation?: "all-models";
+	/** Return true only when this eval replacement can call enabled tools through the native bridge. */
+	supportsCodeModeTransport?: () => boolean;
+	/** Receive the host-owned live declarations for tools hidden behind this eval replacement. */
+	setCodeModeBridge?: (bridge: CodeModeBridge) => void;
 	/** MCP server name for discovery/search metadata when this tool fronts an MCP server. */
 	mcpServerName?: string;
 	/** Original MCP tool name for discovery/search metadata. */

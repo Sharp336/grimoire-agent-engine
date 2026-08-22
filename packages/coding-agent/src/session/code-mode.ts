@@ -1,7 +1,7 @@
 /**
- * Codex Code Mode: collapse the direct tool surface for code_mode_only models
- * to a small keep-set and expose every other session tool through the eval
- * bridge, mirroring codex-rs ToolMode::CodeModeOnly.
+ * Collapse the direct tool list to a small keep-set and expose every other
+ * session tool through an eval bridge. Native Codex models and trusted eval
+ * extensions can activate it.
  */
 
 /** Tool names that always stay directly model-visible under code mode. */
@@ -19,19 +19,24 @@ export interface CodeModeResolution {
 	directToolNames: Set<string>;
 }
 
-export function resolveCodeMode(args: {
+export interface ResolveCodeModeArgs {
 	provider: string;
 	toolMode?: string;
 	setting: "off" | "on" | "auto";
+	extensionActivation?: "all-models";
 	extraDirectTools?: readonly string[];
 	enabledToolNames: readonly string[];
 	evalTransportAvailable: boolean;
-}): CodeModeResolution {
-	const active =
+}
+
+export function resolveCodeMode(args: ResolveCodeModeArgs): CodeModeResolution {
+	const nativeCodexActivation =
 		args.provider === "openai-codex" &&
+		(args.setting === "on" || (args.setting === "auto" && args.toolMode === "code_mode_only"));
+	const active =
 		args.enabledToolNames.includes("eval") &&
 		args.evalTransportAvailable &&
-		(args.setting === "on" || (args.setting === "auto" && args.toolMode === "code_mode_only"));
+		(args.extensionActivation === "all-models" || nativeCodexActivation);
 	if (!active) return { active: false, directToolNames: new Set(args.enabledToolNames) };
 	const direct = new Set<string>();
 	for (const name of args.enabledToolNames) {

@@ -160,6 +160,20 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 	}
 
 	/**
+	 * Code Mode may hide every non-keep tool, so an extension replacement must
+	 * both declare bridge support and have a native same-name delegation target.
+	 */
+	supportsCodeModeTransport(): boolean {
+		const target = this.tool as AgentTool<TParameters, TDetails> & {
+			supportsCodeModeTransport?: () => boolean;
+		};
+		return (
+			this.runner.nativeToolSupportsCodeModeTransport(this.tool.name) &&
+			(target.supportsCodeModeTransport?.() ?? false)
+		);
+	}
+
+	/**
 	 * Forward browser mode changes when available.
 	 */
 	restartForModeChange(): Promise<void> {
