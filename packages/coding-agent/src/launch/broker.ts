@@ -83,12 +83,24 @@ const SIGNAL_NUMBER: Record<DaemonSignal, number> = {
 
 const OUTPUT_RECONNECT_GRACE_MS = 30_000;
 /**
- * Bounded retain-until-ack buffer per monitor registration. Notifications stay
- * buffered after a locally successful write so a socket that dies before the
- * client reads the frame can be replayed on reconnect; the client's cumulative
- * `lastEpoch`/`lastSeq` ack prunes delivered entries.
+ * Bounds for the per-registration retain-until-ack notification buffer.
+ * Notifications stay buffered after a locally successful write so a socket
+ * that dies before the client reads the frame can be replayed on reconnect;
+ * the client's cumulative `lastEpoch`/`lastSeq` ack prunes delivered entries.
+ *
+ * The effective limit is derived in the constructor from the reconnect grace
+ * and the batch cadence: while a client is disconnected (up to
+ * `outputReconnectGraceMs`) the batcher emits at most one notification per
+ * `progressBatchIntervalMs` — rate-limited windows still produce an
+ * artifact-only batch — so covering the whole grace window takes
+ * ceil(grace / interval) entries (150 at the 30s / 200ms defaults), plus
+ * headroom for the boundary batch and the terminal completion. The floor
+ * keeps degenerate configurations replayable; the ceiling keeps a
+ * pathological interval (e.g. 0) from retaining unbounded state.
  */
-const MONITOR_PENDING_LIMIT = 32;
+const MONITOR_PENDING_MIN = 32;
+const MONITOR_PENDING_MAX = 2_048;
+const MONITOR_PENDING_HEADROOM = 8;
 
 interface ManagedProcess {
 	pid: number;
@@ -118,6 +130,12 @@ interface ManagedDaemon {
 	completionSubscriptionId?: string;
 	persistQueue: Promise<void>;
 	settlementQueue: Promise<void>;
+	/**
+	 * Serializes detached log reads: {@link DaemonBroker.#readDetachedOutput}
+	 * yields between observing `outputOffset` and advancing it, so concurrent
+	 * refreshes must coalesce here instead of double-reading the same range.
+	 */
+	outputReadQueue: Promise<void>;
 	monitorRestarting: boolean;
 	monitorSettlementPending: boolean;
 }
@@ -433,6 +451,7 @@ class DaemonBroker {
 	readonly #restartBackoffBaseMs: number;
 	readonly #clientAuthTimeoutMs: number;
 	readonly #outputReconnectGraceMs: number;
+	readonly #monitorPendingLimit: number;
 	readonly #records = new Map<string, ManagedDaemon>();
 	/**
 	 * Names reserved by an in-flight `start` before its record lands in
@@ -472,6 +491,13 @@ class DaemonBroker {
 		this.#restartBackoffBaseMs = restartBackoffBaseMs;
 		this.#clientAuthTimeoutMs = clientAuthTimeoutMs;
 		this.#outputReconnectGraceMs = outputReconnectGraceMs;
+		this.#monitorPendingLimit = Math.min(
+			MONITOR_PENDING_MAX,
+			Math.max(
+				MONITOR_PENDING_MIN,
+				Math.ceil(outputReconnectGraceMs / Math.max(progressBatchIntervalMs, 1)) + MONITOR_PENDING_HEADROOM,
+			),
+		);
 		this.#progressBatcher = new ProgressBatcher<MonitorProgressChunk>(
 			(batchKey, batch) => this.#notifyOutput(batchKey, batch),
 			{
@@ -595,7 +621,7 @@ class DaemonBroker {
 			id = request.id;
 			if (request.token !== this.#token) throw new Error("Daemon broker authentication failed");
 			onAuthenticated();
-			this.#syncOutputSubscriptions(socket, request.outputSubscriptionId, request.outputSubscriptions);
+			await this.#syncOutputSubscriptions(socket, request.outputSubscriptionId, request.outputSubscriptions);
 			for (const owner of request.completionUnsubscribes ?? []) {
 				const subscriptionId = this.#completionSubscriptions.get(owner);
 				if (
@@ -778,6 +804,7 @@ class DaemonBroker {
 				consecutiveFailures: 0,
 				persistQueue: Promise.resolve(),
 				settlementQueue: Promise.resolve(),
+				outputReadQueue: Promise.resolve(),
 				monitorRestarting: false,
 				monitorSettlementPending: false,
 				completionCapable: owner !== undefined && this.#completionSubscriptions.has(owner),
@@ -997,11 +1024,11 @@ class DaemonBroker {
 		await Promise.all(registrations.map(registration => registration.artifactSink.dispose()));
 	}
 
-	#syncOutputSubscriptions(
+	async #syncOutputSubscriptions(
 		socket: net.Socket,
 		subscriptionId: string | undefined,
 		subscriptions: DaemonOutputSubscription[] | undefined,
-	): void {
+	): Promise<void> {
 		if (!subscriptionId || !subscriptions) return;
 		const advertised = new Set(subscriptions.map(subscription => subscription.id));
 		for (const [monitorId, registration] of this.#outputRegistrations) {
@@ -1044,6 +1071,20 @@ class DaemonBroker {
 				}
 				continue;
 			}
+			// A registration's capture starts at its attach point. For a detached
+			// daemon the log file may already hold bytes written before this
+			// subscription existed, so drain them (advancing the record's read
+			// offset, forwarding only to pre-existing registrations) before this
+			// registration is installed; otherwise the next refresh would forward
+			// pre-attach output into the new artifact and previews.
+			const record = this.#records.get(subscription.name);
+			if (record?.spec.detached && !settledState(record.snapshot.state)) {
+				await this.#readDetachedOutput(record, record.generation);
+				// The drain yields: skip installation when a concurrent envelope
+				// already synced this id or the client vanished meanwhile (its
+				// reconnect republishes the subscription).
+				if (socket.destroyed || this.#outputRegistrations.get(subscription.id) !== existing) continue;
+			}
 			if (existing) {
 				// A changed daemon name or artifact path is a replacement, not a
 				// reconnect: drop the old registration's batcher window and sink so
@@ -1054,7 +1095,6 @@ class DaemonBroker {
 				void existing.artifactSink.dispose();
 			}
 			this.#outputRegistrations.set(subscription.id, createOutputRegistration(subscription, socket, subscriptionId));
-			const record = this.#records.get(subscription.name);
 			if (record && terminalState(record.snapshot.state) && !record.monitorSettlementPending) {
 				this.#notifyMonitorCompletion(record, subscription.id);
 			}
@@ -1077,8 +1117,8 @@ class DaemonBroker {
 		// cumulative ack has not pruned. The buffer is bounded; overflow drops the
 		// oldest entries first (a terminal completion is always last).
 		registration.pending.push(notification);
-		if (registration.pending.length > MONITOR_PENDING_LIMIT) {
-			registration.pending.splice(0, registration.pending.length - MONITOR_PENDING_LIMIT);
+		if (registration.pending.length > this.#monitorPendingLimit) {
+			registration.pending.splice(0, registration.pending.length - this.#monitorPendingLimit);
 		}
 		this.#writeMonitorNotification(registration, notification);
 	}
@@ -1146,8 +1186,21 @@ class DaemonBroker {
 		}
 	}
 
-	async #readDetachedOutput(record: ManagedDaemon, generation: number): Promise<void> {
-		if (!record.spec.detached || generation !== record.generation) return;
+	#readDetachedOutput(record: ManagedDaemon, generation: number): Promise<void> {
+		if (!record.spec.detached) return Promise.resolve();
+		// Chain onto the record's read queue: the read below yields between
+		// observing outputOffset and advancing it, and two concurrent refreshes
+		// (e.g. parallel describe/list requests) would otherwise both read the
+		// same [offset, size) range and forward the bytes twice into artifacts
+		// and previews.
+		const read = record.outputReadQueue.then(() => this.#consumeDetachedOutput(record, generation));
+		record.outputReadQueue = read.catch(() => {});
+		return read;
+	}
+
+	/** Serialized body of {@link DaemonBroker.#readDetachedOutput}; never call directly. */
+	async #consumeDetachedOutput(record: ManagedDaemon, generation: number): Promise<void> {
+		if (generation !== record.generation) return;
 		const logPath = path.join(record.dir, LOG_FILE);
 		let size: number;
 		try {
@@ -1623,6 +1676,7 @@ class DaemonBroker {
 					consecutiveFailures: 0,
 					persistQueue: Promise.resolve(),
 					settlementQueue: Promise.resolve(),
+					outputReadQueue: Promise.resolve(),
 					monitorRestarting: false,
 					monitorSettlementPending: false,
 					completionCapable: "completionEvents" in decoded && decoded.completionEvents === true,

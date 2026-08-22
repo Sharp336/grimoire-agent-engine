@@ -823,10 +823,10 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 			ack?: { lastEpoch: string; lastSeq: number },
 		): Promise<RawMonitorSocket> => {
 			const socket = net.createConnection(endpoint);
-			await new Promise<void>((resolve, reject) => {
-				socket.once("connect", resolve);
-				socket.once("error", reject);
-			});
+			const connected = Promise.withResolvers<void>();
+			socket.once("connect", () => connected.resolve());
+			socket.once("error", connected.reject);
+			await connected.promise;
 			const messages: Record<string, unknown>[] = [];
 			let buffer = "";
 			socket.on("data", chunk => {
@@ -925,6 +925,317 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 		}
 	}, 20_000);
 
+	it("does not duplicate detached output into monitors when refreshes race", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-detached-dup-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		const scriptPath = path.join(projectDir, "service.ts");
+		const flagPath = path.join(tempDir.path(), "exit-flag");
+		await Bun.write(
+			scriptPath,
+			`import * as fs from "node:fs";
+fs.writeSync(1, "PAYLOAD\\n");
+const timer = setInterval(() => {
+	if (fs.existsSync(${JSON.stringify(flagPath)})) {
+		clearInterval(timer);
+		process.exit(0);
+	}
+}, 25);
+`,
+		);
+		const artifactPath = path.join(tempDir.path(), "detached-dup-progress.log");
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const secondClient = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const previousTitle = process.title;
+		const broker = startBroker(projectDir, runtimeDir);
+		const notifications: DaemonMonitorNotification[] = [];
+		const completed = Promise.withResolvers<void>();
+		const unregister = client.onOutput?.(
+			{ id: "detached-dup-monitor", name: "detached-dup", owner: "owner", artifactPath },
+			notification => {
+				notifications.push(notification);
+				if (notification.event === "daemon-monitor-completed") completed.resolve();
+			},
+		);
+		if (!unregister) throw new Error("Expected output monitoring support");
+		try {
+			// Publish the subscription before start so the daemon's first bytes land
+			// after this registration's attach point.
+			await client.request({ op: "ping" });
+			await client.request({
+				op: "start",
+				spec: {
+					name: "detached-dup",
+					application: process.execPath,
+					args: [scriptPath],
+					env: {},
+					cwd: projectDir,
+					pty: false,
+					restart: "no",
+					persist: false,
+					detached: true,
+				},
+			});
+			// Wait on the detached log file itself: no broker op may consume the
+			// bytes before the racing refreshes both observe the same unread range.
+			const logPath = path.join(runtimeDir, "daemons", "detached-dup", "output.log");
+			const deadline = Date.now() + 5_000;
+			while (
+				!(
+					await Bun.file(logPath)
+						.text()
+						.catch(() => "")
+				).includes("PAYLOAD\n")
+			) {
+				if (Date.now() > deadline) throw new Error("Detached daemon never wrote its payload");
+				await Bun.sleep(10);
+			}
+			// Two concurrent refreshes over separate sockets: without per-record
+			// read serialization both would read [offset, size) before either
+			// advances the offset and forward the payload twice.
+			await Promise.all([
+				client.request({ op: "describe", name: "detached-dup" }),
+				secondClient.request({ op: "describe", name: "detached-dup" }),
+			]);
+			await Bun.write(flagPath, "done");
+			await completed.promise;
+
+			expect(await Bun.file(artifactPath).text()).toBe("PAYLOAD\n");
+			const output = notifications.filter(
+				(notification): notification is Extract<DaemonMonitorNotification, { event: "daemon-output" }> =>
+					notification.event === "daemon-output",
+			);
+			const joined = output.map(notification => notification.text).join("\n");
+			expect(joined.split("PAYLOAD").length - 1).toBe(1);
+		} finally {
+			unregister();
+			await Bun.write(flagPath, "done").catch(() => undefined);
+			await client.request({ op: "stop", name: "detached-dup", timeoutMs: 2_000 }).catch(() => undefined);
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
+			secondClient.close();
+			await broker;
+			setProcessName(previousTitle);
+		}
+	}, 20_000);
+
+	it("starts a detached monitor at its attach point instead of replaying earlier log bytes", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-detached-attach-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		const scriptPath = path.join(projectDir, "service.ts");
+		const flagPath = path.join(tempDir.path(), "finish-flag");
+		await Bun.write(
+			scriptPath,
+			`import * as fs from "node:fs";
+fs.writeSync(1, "PRE_ATTACH\\n");
+const timer = setInterval(() => {
+	if (fs.existsSync(${JSON.stringify(flagPath)})) {
+		clearInterval(timer);
+		fs.writeSync(1, "POST_ATTACH\\n");
+		process.exit(0);
+	}
+}, 25);
+`,
+		);
+		const artifactPath = path.join(tempDir.path(), "detached-attach-progress.log");
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const previousTitle = process.title;
+		const broker = startBroker(projectDir, runtimeDir);
+		const notifications: DaemonMonitorNotification[] = [];
+		const completed = Promise.withResolvers<void>();
+		let unregister: (() => void) | undefined;
+		try {
+			await client.request({
+				op: "start",
+				spec: {
+					name: "detached-attach",
+					application: process.execPath,
+					args: [scriptPath],
+					env: {},
+					cwd: projectDir,
+					pty: false,
+					restart: "no",
+					persist: false,
+					detached: true,
+				},
+			});
+			// The pre-attach bytes must exist in the log before the subscription is
+			// installed; the broker has not read the detached log yet, so its read
+			// offset still points at the file head.
+			const logPath = path.join(runtimeDir, "daemons", "detached-attach", "output.log");
+			const deadline = Date.now() + 5_000;
+			while (
+				!(
+					await Bun.file(logPath)
+						.text()
+						.catch(() => "")
+				).includes("PRE_ATTACH\n")
+			) {
+				if (Date.now() > deadline) throw new Error("Detached daemon never wrote its pre-attach line");
+				await Bun.sleep(10);
+			}
+			unregister = client.onOutput?.(
+				{ id: "detached-attach-monitor", name: "detached-attach", owner: "owner", artifactPath },
+				notification => {
+					notifications.push(notification);
+					if (notification.event === "daemon-monitor-completed") completed.resolve();
+				},
+			);
+			if (!unregister) throw new Error("Expected output monitoring support");
+			// Publishing the subscription drains the pre-attach log bytes so the
+			// registration's capture starts here.
+			await client.request({ op: "ping" });
+			await Bun.write(flagPath, "done");
+			await completed.promise;
+
+			const output = notifications.filter(
+				(notification): notification is Extract<DaemonMonitorNotification, { event: "daemon-output" }> =>
+					notification.event === "daemon-output",
+			);
+			const joined = output.map(notification => notification.text).join("\n");
+			expect(joined).toContain("POST_ATTACH");
+			expect(joined).not.toContain("PRE_ATTACH");
+			expect(await Bun.file(artifactPath).text()).toBe("POST_ATTACH\n");
+		} finally {
+			unregister?.();
+			await Bun.write(flagPath, "done").catch(() => undefined);
+			await client.request({ op: "stop", name: "detached-attach", timeoutMs: 2_000 }).catch(() => undefined);
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
+			await broker;
+			setProcessName(previousTitle);
+		}
+	}, 20_000);
+
+	it("retains enough unacknowledged batches to replay a full reconnect grace window", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-replay-depth-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		const scriptPath = path.join(projectDir, "service.ts");
+		await Bun.write(
+			scriptPath,
+			`process.stdin.setEncoding("utf8");
+process.stdin.resume();
+process.stdin.on("data", chunk => process.stdout.write(chunk));
+`,
+		);
+		const artifactPath = path.join(tempDir.path(), "replay-depth-progress.log");
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const previousTitle = process.title;
+		// A short batch window makes each send below its own batch, so the
+		// disconnected registration accumulates far more notifications than the
+		// old flat 32-entry retention — all still within the reconnect grace.
+		const broker = startBroker(projectDir, runtimeDir, { progressBatchIntervalMs: 10 });
+		const endpoint = daemonBrokerEndpoint(projectDir, runtimeDir);
+
+		interface RawMonitorSocket {
+			socket: net.Socket;
+			messages: Record<string, unknown>[];
+			waitFor(predicate: (message: Record<string, unknown>) => boolean): Promise<Record<string, unknown>>;
+		}
+		const openMonitorSocket = async (token: string): Promise<RawMonitorSocket> => {
+			const socket = net.createConnection(endpoint);
+			const connected = Promise.withResolvers<void>();
+			socket.once("connect", () => connected.resolve());
+			socket.once("error", connected.reject);
+			await connected.promise;
+			const messages: Record<string, unknown>[] = [];
+			let buffer = "";
+			socket.on("data", chunk => {
+				buffer += chunk.toString("utf8");
+				let newline = buffer.indexOf("\n");
+				while (newline !== -1) {
+					const line = buffer.slice(0, newline);
+					buffer = buffer.slice(newline + 1);
+					if (line.trim()) messages.push(JSON.parse(line) as Record<string, unknown>);
+					newline = buffer.indexOf("\n");
+				}
+			});
+			socket.write(
+				`${JSON.stringify({
+					id: crypto.randomUUID(),
+					token,
+					outputSubscriptions: [
+						{ id: "replay-depth-monitor", name: "replay-depth", owner: "raw-owner", artifactPath },
+					],
+					outputSubscriptionId: "raw-depth-subscription",
+					operation: { op: "ping" },
+				})}\n`,
+			);
+			return {
+				socket,
+				messages,
+				async waitFor(predicate) {
+					const deadline = Date.now() + 5_000;
+					while (Date.now() < deadline) {
+						const match = messages.find(predicate);
+						if (match) return match;
+						await Bun.sleep(10);
+					}
+					throw new Error(`No matching wire message among ${JSON.stringify(messages)}`);
+				},
+			};
+		};
+
+		let first: RawMonitorSocket | undefined;
+		let second: RawMonitorSocket | undefined;
+		try {
+			await client.request({
+				op: "start",
+				spec: {
+					name: "replay-depth",
+					application: process.execPath,
+					args: [scriptPath],
+					env: {},
+					cwd: projectDir,
+					pty: false,
+					restart: "no",
+					persist: false,
+					detached: false,
+				},
+			});
+			const token = (await Bun.file(path.join(runtimeDir, "broker.token")).text()).trim();
+
+			first = await openMonitorSocket(token);
+			await first.waitFor(message => message.ok === true);
+			// Abrupt drop before any output: every batch below goes unacknowledged.
+			first.socket.destroy();
+
+			const sends = 48;
+			for (let index = 1; index <= sends; index++) {
+				await client.request({ op: "send", name: "replay-depth", data: `LINE_${index}\n` });
+				// Separate flush windows: each send becomes its own batch and seq.
+				await Bun.sleep(40);
+			}
+
+			second = await openMonitorSocket(token);
+			await second.waitFor(message => message.ok === true);
+			// Replays are written before the envelope's response, so everything the
+			// broker retained already precedes the ok frame in the stream.
+			const seqs = second.messages
+				.filter(message => message.event === "daemon-output")
+				.map(message => Number(message.seq))
+				.sort((left, right) => left - right);
+			// Retention must cover the grace window's worst case, not a flat 32
+			// entries: a shallower buffer evicts the oldest batches, so seq 1 would
+			// be missing and the sequence would start past the eviction point.
+			expect(seqs.length).toBeGreaterThan(32);
+			expect(seqs).toEqual(Array.from({ length: seqs.length }, (_, index) => index + 1));
+		} finally {
+			first?.socket.destroy();
+			second?.socket.destroy();
+			await client.request({ op: "stop", name: "replay-depth", timeoutMs: 2_000 }).catch(() => undefined);
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
+			await broker;
+			setProcessName(previousTitle);
+		}
+	}, 30_000);
+
 	it("rejects onOutput against a broker that lacks the output monitor capability", async () => {
 		using tempDir = TempDir.createSync("@omp-launch-monitor-capability-");
 		const projectDir = path.join(tempDir.path(), "project");
@@ -956,10 +1267,10 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 				}
 			});
 		});
-		await new Promise<void>((resolve, reject) => {
-			server.once("error", reject);
-			server.listen(endpoint, resolve);
-		});
+		const listening = Promise.withResolvers<void>();
+		server.once("error", listening.reject);
+		server.listen(endpoint, () => listening.resolve());
+		await listening.promise;
 		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
 		try {
 			await client.request({ op: "ping" });
@@ -976,7 +1287,9 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 			).toThrow(/does not support output monitoring/);
 		} finally {
 			client.close();
-			await new Promise<void>(resolve => server.close(() => resolve()));
+			const serverClosed = Promise.withResolvers<void>();
+			server.close(() => serverClosed.resolve());
+			await serverClosed.promise;
 		}
 	}, 20_000);
 });
