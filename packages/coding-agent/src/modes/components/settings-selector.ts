@@ -44,13 +44,7 @@ import type {
 	StatusLineSeparatorStyle,
 } from "../../config/settings-schema";
 import { SETTING_TABS, TAB_METADATA } from "../../config/settings-schema";
-import {
-	detectTerminalAppearance,
-	getCurrentThemeName,
-	getSelectListTheme,
-	getSettingsListTheme,
-	theme,
-} from "../../modes/theme/theme";
+import { detectTerminalAppearance, getSelectListTheme, getSettingsListTheme, theme } from "../../modes/theme/theme";
 import { AUTO_THINKING, type ConfiguredThinkingLevel } from "../../thinking";
 import * as git from "../../utils/git";
 import { getTabBarTheme } from "../shared";
@@ -1114,7 +1108,7 @@ export class SettingsSelectorComponent implements Component {
 		let onPreviewCancel: (() => void) | undefined;
 		let footer: Component | undefined;
 
-		const activeThemeBeforePreview = getCurrentThemeName() ?? currentValue;
+		const activeThemeBeforePreview = this.#scopedThemeName() ?? currentValue;
 		if (def.path === "theme.dark" || def.path === "theme.light") {
 			onPreview = value => {
 				return this.callbacks.onThemePreview?.(value);

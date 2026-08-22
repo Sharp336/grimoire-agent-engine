@@ -86,6 +86,7 @@ type ProjectSettingsReadResult = {
 	withoutNative: RawSettings;
 	configExists: boolean;
 	shellPathSource: string | undefined;
+	withoutNativeShellPathSource: string | undefined;
 };
 
 type ConfigOverlayReadResult = {
@@ -434,6 +435,8 @@ export class Settings {
 	#configOverlay: RawSettings = {};
 	/** Project settings file that most recently supplied shellPath. */
 	#projectShellPathSource: string | undefined;
+	/** Non-native project file that most recently supplied shellPath, if any. */
+	#projectWithoutNativeShellPathSource: string | undefined;
 	/** Explicit config overlay that most recently supplied shellPath. */
 	#overlayShellPathSource: string | undefined;
 	/** Runtime overrides (not persisted) */
@@ -622,6 +625,9 @@ export class Settings {
 			setByPath(this.#projectFileSettings, segments, value);
 			setByPath(this.#project, segments, value);
 			this.#projectConfigExists = true;
+			if (path === "shellPath") {
+				this.#projectShellPathSource = `${this.#cwd}/.omp/config.yml`;
+			}
 			this.#modifiedProject.add(path);
 			this.#queueProjectSave();
 		} else {
@@ -647,6 +653,11 @@ export class Settings {
 			deleteByPath(this.#project, segments);
 		} else {
 			setByPath(this.#project, [...segments], fallback);
+		}
+		if (path === "shellPath") {
+			this.#projectShellPathSource = Object.hasOwn(this.#project, "shellPath")
+				? this.#projectWithoutNativeShellPathSource
+				: undefined;
 		}
 		this.#modifiedProject.add(path);
 		this.#queueProjectSave();
@@ -783,6 +794,7 @@ export class Settings {
 			cloned.#projectFileSettings = structuredClone(this.#projectFileSettings);
 			cloned.#projectConfigExists = this.#projectConfigExists;
 			cloned.#projectShellPathSource = this.#projectShellPathSource;
+			cloned.#projectWithoutNativeShellPathSource = this.#projectWithoutNativeShellPathSource;
 		}
 		cloned.#configFiles = [...this.#configFiles];
 		cloned.#configOverlay = structuredClone(this.#configOverlay);
@@ -847,6 +859,7 @@ export class Settings {
 			this.#projectWithoutNative = projectResult.value.withoutNative;
 			this.#projectConfigExists = projectResult.value.configExists;
 			this.#projectShellPathSource = projectResult.value.shellPathSource;
+			this.#projectWithoutNativeShellPathSource = projectResult.value.withoutNativeShellPathSource;
 			this.#configOverlay = overlayResult.value.settings;
 			this.#overlayShellPathSource = overlayResult.value.shellPathSource;
 			this.#rebuildMerged();
@@ -1500,6 +1513,7 @@ export class Settings {
 
 	async #readProjectSettings(quarantineInvalid: boolean): Promise<ProjectSettingsReadResult> {
 		let shellPathSource: string | undefined;
+		let withoutNativeShellPathSource: string | undefined;
 		const projectConfigPath = path.join(this.#cwd, ".omp", "config.yml");
 		let merged: RawSettings = {};
 		let withoutNative: RawSettings = {};
@@ -1511,11 +1525,13 @@ export class Settings {
 				merged = this.#deepMerge(merged, data);
 				if (path.normalize(item.path) !== path.normalize(projectConfigPath)) {
 					withoutNative = this.#deepMerge(withoutNative, data);
+					if (Object.hasOwn(data, "shellPath")) withoutNativeShellPathSource = item.path;
 				}
 				if (Object.hasOwn(data, "shellPath")) shellPathSource = item.path;
 			}
 		} catch {
 			shellPathSource = undefined;
+			withoutNativeShellPathSource = undefined;
 			// Capability discovery is best-effort; the native project config below
 			// remains authoritative for its model-role layer and must not be hidden.
 		}
@@ -1538,6 +1554,7 @@ export class Settings {
 			withoutNative: this.#migrateRawSettings(withoutNative, quarantineInvalid),
 			configExists: loadedNativeProject !== null,
 			shellPathSource,
+			withoutNativeShellPathSource,
 		};
 	}
 
@@ -1547,6 +1564,7 @@ export class Settings {
 		this.#projectWithoutNative = result.withoutNative;
 		this.#projectConfigExists = result.configExists;
 		this.#projectShellPathSource = result.shellPathSource;
+		this.#projectWithoutNativeShellPathSource = result.withoutNativeShellPathSource;
 		return result.settings;
 	}
 

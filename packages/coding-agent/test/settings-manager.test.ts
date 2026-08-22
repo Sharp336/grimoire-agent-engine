@@ -244,6 +244,26 @@ describe("Settings", () => {
 			expect(() => settings.getShellConfig()).toThrow(`Please update shellPath in ${projectConfigPath}`);
 		});
 
+		it("attributes a live project-scope shellPath edit to .omp/config.yml", async () => {
+			await fs.promises.mkdir(path.join(projectDir, ".claude"), { recursive: true });
+			await Bun.write(
+				path.join(projectDir, ".claude", "settings.json"),
+				`${JSON.stringify({ shellPath: tempDir.join("missing-claude-bash") }, null, 2)}\n`,
+			);
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({}, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const nativeShell = tempDir.join("missing-native-bash");
+
+			settings.set("shellPath", nativeShell, "project");
+			expect(() => settings.getShellConfig()).toThrow(`Please update shellPath in ${projectConfigPath}`);
+
+			settings.clearProject("shellPath");
+			expect(() => settings.getShellConfig()).toThrow(
+				`Please update shellPath in ${path.join(projectDir, ".claude", "settings.json")}`,
+			);
+		});
+
 		it("lets a project null tombstone mask a globally capped provider", async () => {
 			await writeSettings({ providers: { maxInFlightRequests: { anthropic: 3, openai: 5 } } });
 			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
