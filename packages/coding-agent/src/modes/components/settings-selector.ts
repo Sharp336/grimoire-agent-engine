@@ -571,6 +571,7 @@ export interface StatusLinePreviewSettings {
 	leftSegments?: StatusLineSegmentId[];
 	rightSegments?: StatusLineSegmentId[];
 	separator?: StatusLineSeparatorStyle;
+	showHookStatus?: boolean;
 	sessionAccent?: boolean;
 	transparent?: boolean;
 	compactThinkingLevel?: boolean;
@@ -1297,20 +1298,29 @@ export class SettingsSelectorComponent implements Component {
 	}
 	/**
 	 * Persist a record setting in the selected scope, tombstoning entries the
-	 * new value clears so they cannot be re-inherited from the global layer.
+	 * new value clears so they cannot be re-inherited from a lower layer.
 	 * `#deepMerge` recurses per key and drops `undefined`, so a plain record
-	 * without a key cannot mask a global cap; clearing a capped provider
-	 * requires an explicit `null` in the project layer.
+	 * without a key cannot mask a global or non-native project cap; clearing
+	 * requires an explicit `null` in the native project layer.
 	 */
 	#persistRecordScopeSetting(path: SettingPath, value: Record<string, number>): unknown {
 		if (this.#scope === "global") {
 			settings.set(path, value, "global");
 			return settings.get(path);
 		}
-		const globalRecord = normalizeProviderMaxInFlightRequests(settings.getGlobalValue(path));
+		const inherited = {
+			...normalizeProviderMaxInFlightRequests(settings.getGlobalValue(path)),
+			...normalizeProviderMaxInFlightRequests(settings.get(path)),
+		};
 		const next: Record<string, number | null> = { ...value };
-		for (const provider of Object.keys(globalRecord)) {
+		for (const provider of Object.keys(inherited)) {
 			if (next[provider] === undefined) next[provider] = null;
+		}
+		const currentRaw = settings.get(path);
+		if (currentRaw && typeof currentRaw === "object" && !Array.isArray(currentRaw)) {
+			for (const [provider, raw] of Object.entries(currentRaw as Record<string, unknown>)) {
+				if (raw === null && next[provider] === undefined) next[provider] = null;
+			}
 		}
 		settings.set(path, next as never, "project");
 		return settings.get(path);
@@ -1446,6 +1456,7 @@ export class SettingsSelectorComponent implements Component {
 			leftSegments: this.#scopedValue("statusLine.leftSegments") as StatusLineSegmentId[],
 			rightSegments: this.#scopedValue("statusLine.rightSegments") as StatusLineSegmentId[],
 			separator: this.#scopedValue("statusLine.separator") as StatusLineSeparatorStyle,
+			showHookStatus: this.#scopedValue("statusLine.showHookStatus") as boolean,
 			sessionAccent: this.#scopedValue("statusLine.sessionAccent") as boolean,
 			transparent: this.#scopedValue("statusLine.transparent") as boolean,
 			compactThinkingLevel: this.#scopedValue("statusLine.compactThinkingLevel") as boolean,

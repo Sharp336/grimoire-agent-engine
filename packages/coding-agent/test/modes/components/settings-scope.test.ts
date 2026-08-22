@@ -305,7 +305,9 @@ describe("SettingsSelectorComponent persistence scope", () => {
 	it("keeps the selected scope's status-line baseline when canceling a submenu", () => {
 		settings.set("statusLine.preset", "minimal", "project");
 		settings.set("statusLine.preset", "full", "global");
-		const previews: Array<{ preset?: string }> = [];
+		settings.set("statusLine.showHookStatus", false, "project");
+		settings.set("statusLine.showHookStatus", true, "global");
+		const previews: Array<{ preset?: string; showHookStatus?: boolean }> = [];
 		const selector = new SettingsSelectorComponent(
 			{
 				availableThinkingLevels: [],
@@ -322,14 +324,16 @@ describe("SettingsSelectorComponent persistence scope", () => {
 				onCancel: () => {},
 			},
 		);
-		// Global scope previews the global baseline (preset "full").
+		// Global scope previews the global baseline (preset "full", hooks on).
 		selector.handleInput("\x1bs");
+		expect(previews.at(-1)?.showHookStatus).toBe(true);
 		// Open the Status Line Separator submenu and cancel it: the preview must
 		// fall back to the full scoped baseline, not the effective project layer.
 		for (const ch of "status line separator") selector.handleInput(ch);
 		selector.handleInput("\n");
 		selector.handleInput("\x1b");
 		expect(previews.at(-1)?.preset).toBe("full");
+		expect(previews.at(-1)?.showHookStatus).toBe(true);
 	});
 	it("clears a provider limit inherited from the global layer when editing in project scope", () => {
 		// Global caps "anthropic"; the project layer has no override. A project

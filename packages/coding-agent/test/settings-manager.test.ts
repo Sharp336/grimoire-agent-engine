@@ -8,6 +8,7 @@ import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock
 import { __providerInFlightForTesting, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context } from "@oh-my-pi/pi-ai/types";
 import {
+	normalizeProviderMaxInFlightRequests,
 	onAppendOnlyModeChanged,
 	onCodeModeChanged,
 	onModelRolesChanged,
@@ -279,6 +280,25 @@ describe("Settings", () => {
 			await settings.flush();
 			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
 				providers: { maxInFlightRequests: { openai: 5, anthropic: null } },
+			});
+		});
+
+		it("lets a project null tombstone mask a non-native project provider cap", async () => {
+			await fs.promises.mkdir(path.join(projectDir, ".claude"), { recursive: true });
+			await Bun.write(
+				path.join(projectDir, ".claude", "settings.json"),
+				`${JSON.stringify({ providers: { maxInFlightRequests: { anthropic: 3 } } }, null, 2)}\n`,
+			);
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({}, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("providers.maxInFlightRequests")).toEqual({ anthropic: 3 });
+
+			settings.set("providers.maxInFlightRequests", { anthropic: null }, "project");
+			expect(normalizeProviderMaxInFlightRequests(settings.get("providers.maxInFlightRequests"))).toEqual({});
+			await settings.flush();
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+				providers: { maxInFlightRequests: { anthropic: null } },
 			});
 		});
 	});
