@@ -8,7 +8,7 @@ import { formatModelString } from "../config/model-resolver";
 import type { Settings, SkillsSettings } from "../config/settings";
 import type { CustomTool, CustomToolContext } from "../extensibility/custom-tools/types";
 import { CustomToolAdapter } from "../extensibility/custom-tools/wrapper";
-import type { ExtensionRunner, SourceInfo, ToolInfo } from "../extensibility/extensions";
+import type { CodeModeBridge, ExtensionRunner, SourceInfo, ToolInfo } from "../extensibility/extensions";
 import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
 import { loadSkills, type Skill, type SkillWarning, setActiveSkills } from "../extensibility/skills";
 import { type LocalProtocolOptions, XD_URL_PREFIX } from "../internal-urls";
@@ -20,6 +20,7 @@ import xdevMountNoticePrompt from "../prompts/system/xdev-mount-notice.md" with 
 import { usesCodexTaskPrompt } from "../task/prompt-policy";
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
 import { computerExposureMode } from "../tools/computer/exposure";
+import { generateCodeModeDeclarations } from "../tools/eval-format/code-mode-declarations";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
 import { supportsExternalThinking } from "../tools/think";
 import { ToolAbortError, ToolError } from "../tools/tool-errors";
@@ -182,9 +183,18 @@ interface XdevMountNoticeDetails {
 	removed: string[];
 }
 
+interface CodeModeEvalTool extends AgentTool {
+	codeModeActivation?: "all-models";
+	supportsCodeModeTransport?: () => boolean;
+	setCodeModeBridge?: (bridge: CodeModeBridge) => void;
+}
+
 /** Owns tool registration, presentation, prompt rebuilding, skills, and permissions. */
 export class SessionTools {
 	readonly #host: SessionToolsHost;
+	readonly #codeModeBridge: CodeModeBridge = {
+		getDeclarations: () => this.#codeModeDeclarations(),
+	};
 	#autoApprove: boolean;
 	#toolRegistry: Map<string, AgentTool>;
 	#createVibeTools: (() => AgentTool[]) | undefined;
@@ -399,15 +409,38 @@ export class SessionTools {
 		return this.getEnabledToolNames();
 	}
 
-	#hasCodeModeEvalTransport(): boolean {
-		const evalTool = this.#toolRegistry.get("eval") as
-			| (AgentTool & { supportsCodeModeTransport?: () => boolean })
-			| undefined;
-		if (!evalTool) return false;
-		// A replacement `eval` that cannot state the capability cannot be assumed
-		// to run `tool.<name>()`; demoting the direct surface behind it would
-		// leave every other tool unreachable.
-		return evalTool.supportsCodeModeTransport?.() ?? false;
+	#codeModeEvalCapability(): { activation?: "all-models"; transportAvailable: boolean } {
+		const evalTool = this.#toolRegistry.get("eval") as CodeModeEvalTool | undefined;
+		if (!evalTool) return { transportAvailable: false };
+		evalTool.setCodeModeBridge?.(this.#codeModeBridge);
+		// Extension wrappers gate this claim on a native same-name delegation target.
+		return {
+			activation: evalTool.codeModeActivation,
+			transportAvailable: evalTool.supportsCodeModeTransport?.() ?? false,
+		};
+	}
+
+	#codeModeDeclarations(): string | undefined {
+		const evalTool = this.#toolRegistry.get("eval") as CodeModeEvalTool | undefined;
+		if (!evalTool) return undefined;
+		const enabledToolNames = this.getEnabledToolNames();
+		const codeMode = resolveCodeMode({
+			provider: this.#host.model()?.provider ?? "",
+			toolMode: this.#host.model()?.toolMode,
+			setting: this.#host.settings.get("providers.openai-codex.codeMode"),
+			extensionActivation: evalTool.codeModeActivation,
+			extraDirectTools: this.#host.settings.get("providers.openai-codex.codeModeDirectTools"),
+			enabledToolNames,
+			evalTransportAvailable: evalTool.supportsCodeModeTransport?.() ?? false,
+		});
+		if (!codeMode.active) return undefined;
+		return generateCodeModeDeclarations(
+			enabledToolNames.flatMap(name => {
+				if (codeMode.directToolNames.has(name)) return [];
+				const tool = this.#toolRegistry.get(name);
+				return tool ? [{ name, parameters: tool.parameters }] : [];
+			}),
+		);
 	}
 
 	/**
@@ -642,19 +675,22 @@ export class SessionTools {
 	/** Whether a model transition crosses a Code Mode presentation boundary. */
 	codeModeChangesBetween(previousModel: Model | undefined, nextModel: Model): boolean {
 		const enabledToolNames = this.getEnabledToolNames();
+		const codeModeEval = this.#codeModeEvalCapability();
 		const setting = this.#host.settings.get("providers.openai-codex.codeMode");
 		const extraDirectTools = this.#host.settings.get("providers.openai-codex.codeModeDirectTools");
-		const resolve = (model: Model | undefined) =>
+		const resolve = (model: Model) =>
 			resolveCodeMode({
-				provider: model?.provider ?? "",
-				toolMode: model?.toolMode,
+				provider: model.provider,
+				toolMode: model.toolMode,
 				setting,
+				extensionActivation: codeModeEval.activation,
 				extraDirectTools,
 				enabledToolNames,
-				evalTransportAvailable: this.#hasCodeModeEvalTransport(),
+				evalTransportAvailable: codeModeEval.transportAvailable,
 			});
-		const previous = resolve(previousModel);
 		const next = resolve(nextModel);
+		if (!previousModel) return next.active;
+		const previous = resolve(previousModel);
 		if (previous.active !== next.active) return true;
 		if (!next.active) return false;
 		if (previous.directToolNames.size !== next.directToolNames.size) return true;
@@ -825,13 +861,15 @@ export class SessionTools {
 		toolNames = normalizeToolNames(toolNames);
 		const injectEval = this.#toolRegistry.has("eval") && !toolNames.includes("eval");
 		const codeModeToolNames = injectEval ? [...toolNames, "eval"] : toolNames;
+		const codeModeEval = this.#codeModeEvalCapability();
 		const codeMode = resolveCodeMode({
 			provider: this.#host.model()?.provider ?? "",
 			toolMode: this.#host.model()?.toolMode,
 			setting: this.#host.settings.get("providers.openai-codex.codeMode"),
+			extensionActivation: codeModeEval.activation,
 			extraDirectTools: this.#host.settings.get("providers.openai-codex.codeModeDirectTools"),
 			enabledToolNames: codeModeToolNames,
-			evalTransportAvailable: this.#hasCodeModeEvalTransport(),
+			evalTransportAvailable: codeModeEval.transportAvailable,
 		});
 		const nextCodeModeInjectedEval = codeMode.active && injectEval;
 		if (codeMode.active) toolNames = codeModeToolNames;
