@@ -50,6 +50,10 @@
 - Fixed long CPU-bound event-loop stalls being misclassified as system sleep and omitted from loop-blocked diagnostics.
 - Fixed focused components with markers falling back to full-screen redraws instead of direct row updates, preserving cursor position and native scrollback across marker changes.
 
+### Added
+
+- Runtime-probe the terminal's Hangul Compatibility Jamo (U+3131..U+318E) cell width at startup via a DSR/CPR cursor-position query, so the hardware cursor (and IME preedit anchor) lands on the actual glyph instead of 1 cell early per jamo when the static macOS "platform" fallback mismatches the terminal's font (e.g. Terminal.app 2.15 + SF Mono renders these at 2 cells, not 1). Falls back to the static width table after 750 ms when the terminal ignores the query.
+
 ## [17.3.4] - 2026-08-14
 
 ### Fixed

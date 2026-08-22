@@ -594,6 +594,9 @@ export class ProcessTerminal implements Terminal {
 	> = [];
 	#appearance: TerminalAppearance | undefined;
 	#osc11Pending = false;
+	/** Outstanding runtime Hangul Compatibility Jamo width CPR probe. */
+	#jamoWidthPending = false;
+	#jamoWidthTimeout: ReturnType<typeof setTimeout> | undefined = undefined;
 	#osc11ActiveToken?: TerminalAppearanceRequestToken;
 	#osc11QueuedQuery?: { route: Osc11QueryRoute; token?: TerminalAppearanceRequestToken };
 	#nextAppearanceRequestToken = 1;
@@ -782,6 +785,13 @@ export class ProcessTerminal implements Terminal {
 		// data handler are installed. Keep this false throughout temporary stops.
 		this.#active = true;
 		setHangulCompatibilityJamoWidth(TERMINAL.hangulJamoWidth);
+		// Runtime Hangul Compatibility Jamo width: the static table cannot know
+		// the client font's real width (Terminal.app 2.15 with SF Mono renders
+		// Compatibility Jamo at 2 cells via CPR; some Korean fonts render 1).
+		// Measure once at startup; the first frame paint erases the probe glyph.
+		if (this.#shouldQueryHangulJamoWidth()) {
+			this.#queryHangulJamoWidth();
+		}
 
 		// Query terminal background color via OSC 11 for dark/light detection.
 		// Uses DA1 (Primary Device Attributes) as a sentinel: terminals process
@@ -912,6 +922,9 @@ export class ProcessTerminal implements Terminal {
 		// DECRPM private-mode report (DECRQM reply): \x1b[?<mode>;<status>$y
 		const decrpmResponsePattern = /^\x1b\[\?(\d+);(\d+)\$y$/;
 
+		// Cursor Position Report (DSR reply to `CSI 6 n`): \x1b[<row>;<col>R
+		const cprResponsePattern = /^\x1b\[(\d+);(\d+)R$/;
+
 		// In-band resize report (DEC mode 2048): \x1b[48;rows;cols;yPixels;xPixels t
 		// Any field may carry `:`-separated subparameters, which clients MUST
 		// ignore per spec (#4748): capture the leading digits of each field and
@@ -1035,6 +1048,18 @@ export class ProcessTerminal implements Terminal {
 			const decrpmMatch = sequence.match(decrpmResponsePattern);
 			if (decrpmMatch) {
 				this.#handlePrivateModeReport(parseInt(decrpmMatch[1]!, 10), decrpmMatch[2]!);
+				return;
+			}
+
+			// Cursor Position Report (DSR `CSI 6 n` reply): `\x1b[{row};{col}R`.
+			// Exclusively a terminal->host report, so swallow it even with no
+			// outstanding probe (late replies must never reach the composer).
+			// Resolves the runtime Hangul Compatibility Jamo width probe.
+			const cprMatch = sequence.match(cprResponsePattern);
+			if (cprMatch) {
+				if (this.#jamoWidthPending) {
+					this.#resolveJamoWidth(Number(cprMatch[2]));
+				}
 				return;
 			}
 
@@ -1383,6 +1408,59 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	/**
+	 * Measure the terminal's real Hangul Compatibility Jamo (U+3131..U+318E)
+	 * cell width with a Cursor Position Report (DSR `CSI 6 n`): write one
+	 * visible jamo (`ㅁ`, U+3141 — never the zero-width U+3164 filler), query
+	 * the cursor column, derive the width from the column delta (1-based start
+	 * col 1): col 3 → 2 cells, col 2 → 1 cell. A terminal that ignores DSR
+	 * resolves as `null` (keep the static fallback) after the timeout; the
+	 * probe glyph is erased by the first frame paint.
+	 *
+	 * The probe deliberately does NOT ride the DA1 sentinel FIFO: the other
+	 * capability probes fuse a sentinel because their responses are optional
+	 * (a no-answer terminal would otherwise hang the startup), while a CPR
+	 * reply is answered by far more terminals and a plain timeout is enough.
+	 * Keeping the FIFO untouched also leaves the OSC 11/DECRQM queue ordering
+	 * tests deterministic.
+	 *
+	 * The static width table cannot know the client font's real width —
+	 * Terminal.app 2.15 with SF Mono renders Compatibility Jamo at 2 cells
+	 * (UAX#11), Ghostty at 2, Warp at 1, and fonts without full-width jamo
+	 * glyphs at 1 — so the cursor column (and the IME preedit anchor) drifts
+	 * 1 cell per jamo whenever the static value mismatches the terminal.
+	 */
+	#shouldQueryHangulJamoWidth(): boolean {
+		// Like the OSC 99 probe: off under the test runtime unless the test
+		// opts in, so probe-driven suites keep deterministic write/timer state.
+		return !isBunTestRuntime() || $env.PI_TUI_JAMO_WIDTH_PROBE === "1";
+	}
+
+	#queryHangulJamoWidth(): void {
+		if (this.#dead || this.#jamoWidthPending) return;
+		this.#jamoWidthPending = true;
+		this.#safeWrite("\u3141\x1b[6n");
+		this.#jamoWidthTimeout = setTimeout(() => {
+			this.#jamoWidthTimeout = undefined;
+			this.#resolveJamoWidth(null);
+		}, 750);
+	}
+
+	#resolveJamoWidth(cursorCol: number | null): void {
+		if (!this.#jamoWidthPending) return;
+		this.#jamoWidthPending = false;
+		if (this.#jamoWidthTimeout) {
+			clearTimeout(this.#jamoWidthTimeout);
+			this.#jamoWidthTimeout = undefined;
+		}
+		if (cursorCol !== null) {
+			const measured = cursorCol === 3 ? 2 : cursorCol === 2 ? 1 : null;
+			if (measured !== null) {
+				setHangulCompatibilityJamoWidth(measured);
+			}
+		}
+	}
+
+	/**
 	 * Record DECRQM support for a private mode (idempotent — first result wins)
 	 * and notify subscribers. `confirmed` distinguishes an explicit DECRPM
 	 * unsupported response from an absent response followed by the DA1 sentinel.
@@ -1597,6 +1675,11 @@ export class ProcessTerminal implements Terminal {
 		this.#osc99ResponseBuffer = "";
 		this.#osc99Capabilities.clear();
 		setOsc99Supported(false);
+		this.#jamoWidthPending = false;
+		if (this.#jamoWidthTimeout) {
+			clearTimeout(this.#jamoWidthTimeout);
+			this.#jamoWidthTimeout = undefined;
+		}
 		this.#privateCsiResponseBuffer = "";
 		this.#inBandResizeBuffer = "";
 		this.#da1SentinelOwners.length = 0;

@@ -266,6 +266,9 @@ function hangulCompatibilityJamoTargetWidth(): 1 | 2 | null {
 			return null;
 		default:
 			// "platform": macOS terminals historically render these narrow.
+			// NOTE: Terminal.app 2.15 (macOS 26.5, SF Mono 12 pt) measures 2 cells
+			// via CPR — the static table cannot be right for every font/build, so
+			// the runtime probe in ProcessTerminal.start() overrides this.
 			return process.platform === "darwin" ? 1 : null;
 	}
 }
