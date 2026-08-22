@@ -54,14 +54,22 @@ function prepareFake(output: string, options: { exitCode?: number; restartOnce?:
 }
 
 async function waitForRestart(marker: string): Promise<void> {
-	if (fs.existsSync(marker) && fs.readFileSync(marker, "utf8").includes("restarted")) return;
+	const isReady = () => fs.existsSync(marker) && fs.readFileSync(marker, "utf8").includes("restarted");
+	if (isReady()) return;
 	const { promise, resolve } = Promise.withResolvers<void>();
+	// inotify (fs.watch) can miss events when files are written quickly or coalesce
+	// multiple writes into a single callback. Poll as a fallback so we don't hang
+	// waiting for an event that was already dropped.
 	const watcher = fs.watch(fakeBinDir, () => {
-		if (fs.existsSync(marker) && fs.readFileSync(marker, "utf8").includes("restarted")) resolve();
+		if (isReady()) resolve();
 	});
-	if (fs.existsSync(marker) && fs.readFileSync(marker, "utf8").includes("restarted")) resolve();
+	const interval = setInterval(() => {
+		if (isReady()) resolve();
+	}, 50);
+	if (isReady()) resolve();
 	await promise;
 	watcher.close();
+	clearInterval(interval);
 }
 
 function recordedArgs(invocation: FakeInvocation): string[] {
@@ -70,14 +78,20 @@ function recordedArgs(invocation: FakeInvocation): string[] {
 }
 
 async function waitForSignal(invocation: FakeInvocation): Promise<void> {
-	if (fs.existsSync(invocation.signalsFile)) return;
+	const isReady = () => fs.existsSync(invocation.signalsFile);
+	if (isReady()) return;
 	const { promise, resolve } = Promise.withResolvers<void>();
+	// Same inotify-missed-event fallback as waitForRestart above.
 	const watcher = fs.watch(fakeBinDir, (_event, filename) => {
-		if (filename === path.basename(invocation.signalsFile) && fs.existsSync(invocation.signalsFile)) resolve();
+		if (filename === path.basename(invocation.signalsFile) && isReady()) resolve();
 	});
-	if (fs.existsSync(invocation.signalsFile)) resolve();
+	const interval = setInterval(() => {
+		if (isReady()) resolve();
+	}, 50);
+	if (isReady()) resolve();
 	await promise;
 	watcher.close();
+	clearInterval(interval);
 }
 
 async function stopAndObserve(exposure: ActiveExposure, invocation: FakeInvocation): Promise<void> {
