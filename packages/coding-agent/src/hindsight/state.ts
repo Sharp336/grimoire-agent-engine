@@ -482,6 +482,11 @@ export class HindsightSessionState {
 
 	async #maybeRetainOnAgentEndLocked(generation: number): Promise<void> {
 		if (!this.config.autoRetain) return;
+		// A queued cadence retain can outlive /resume, /new, or a fork. The
+		// generation fence after client.retain only skips the cursor write; this
+		// check drops the call before it extracts and sends the replacement
+		// session's transcript under the new document id.
+		if (generation !== this.#retainGeneration) return;
 		const messages = extractMessages(this.session.sessionManager);
 		if (messages.length === 0) return;
 		const userTurns = messages.filter(m => m.role === "user").length;

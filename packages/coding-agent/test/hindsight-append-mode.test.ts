@@ -7,10 +7,11 @@ import { countRetainableUserTurns } from "@oh-my-pi/pi-coding-agent/hindsight/tr
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 
-function captureBodies(opts?: { delay?: Promise<void> }): unknown[] {
+function captureBodies(opts?: { delay?: Promise<void>; onStart?: () => void }): unknown[] {
 	const bodies: unknown[] = [];
 	const fetchMock: typeof globalThis.fetch = Object.assign(
 		async (_input: string | URL | Request, init?: RequestInit | BunFetchRequestInit): Promise<Response> => {
+			opts?.onStart?.();
 			if (opts?.delay) await opts.delay;
 			bodies.push(JSON.parse(String(init?.body ?? "{}")));
 			return new Response("{}", { status: 200 });
@@ -539,7 +540,8 @@ describe("Hindsight append-mode session retention", () => {
 
 	it("does not keep a rekeyed session's cadence cursor after an in-flight retain", async () => {
 		const gate = Promise.withResolvers<void>();
-		const bodies = captureBodies({ delay: gate.promise });
+		const started = Promise.withResolvers<void>();
+		const bodies = captureBodies({ delay: gate.promise, onStart: () => started.resolve() });
 		const client = new HindsightApi({ baseUrl: "http://hindsight.local" });
 		const entries = [
 			userEntry("u1", null, "turn one has enough text", "2026-08-17T10:00:00.000Z"),
@@ -575,10 +577,61 @@ describe("Hindsight append-mode session retention", () => {
 		});
 
 		const cadence = state.maybeRetainOnAgentEnd();
+		await started.promise;
 		state.resetConversationTracking();
 		gate.resolve();
 		await cadence;
 		expect(bodies).toHaveLength(1);
+		expect(state.lastRetainedTurn).toBe(0);
+	});
+
+	it("does not retain a rekeyed session from a queued stale cadence retain", async () => {
+		const gate = Promise.withResolvers<void>();
+		const started = Promise.withResolvers<void>();
+		const bodies = captureBodies({ delay: gate.promise, onStart: () => started.resolve() });
+		const client = new HindsightApi({ baseUrl: "http://hindsight.local" });
+		const entries = [
+			userEntry("u1", null, "turn one has enough text", "2026-08-17T10:00:00.000Z"),
+			assistantEntry("a1", "u1", "reply one has enough text", "2026-08-17T10:00:01.000Z"),
+			userEntry("u2", "a1", "turn two has enough text", "2026-08-17T10:01:00.000Z"),
+			assistantEntry("a2", "u2", "reply two has enough text", "2026-08-17T10:01:01.000Z"),
+			userEntry("u3", "a2", "turn three has enough text", "2026-08-17T10:02:00.000Z"),
+			assistantEntry("a3", "u3", "reply three has enough text", "2026-08-17T10:02:01.000Z"),
+			userEntry("u4", "a3", "turn four has enough text", "2026-08-17T10:03:00.000Z"),
+			assistantEntry("a4", "u4", "reply four has enough text", "2026-08-17T10:03:01.000Z"),
+			userEntry("u5", "a4", "turn five has enough text", "2026-08-17T10:04:00.000Z"),
+			assistantEntry("a5", "u5", "reply five has enough text", "2026-08-17T10:04:01.000Z"),
+		];
+		const state = new HindsightSessionState({
+			sessionId: "sess-queued-stale-cadence",
+			client,
+			bankId: "personal",
+			config: makeConfig({ retainMode: "last-turn", retainEveryNTurns: 5, retainOverlapTurns: 0 }),
+			session: {
+				sessionId: "sess-queued-stale-cadence",
+				sessionManager: {
+					getHeader: () => ({
+						type: "session",
+						id: "sess-queued-stale-cadence",
+						timestamp: SESSION_START,
+						cwd: "/tmp",
+					}),
+					getEntries: () => entries,
+				},
+				getHindsightSessionState: () => state,
+			} as object as AgentSession,
+			banksSet: new Set(["personal"]),
+		});
+
+		const first = state.maybeRetainOnAgentEnd();
+		await started.promise;
+		const queued = state.maybeRetainOnAgentEnd();
+		state.resetConversationTracking();
+		state.setSessionId("sess-queued-stale-cadence-resumed");
+		gate.resolve();
+		await Promise.all([first, queued]);
+		expect(bodies).toHaveLength(1);
+		expect(firstItem(bodies[0]).document_id).not.toContain("resumed");
 		expect(state.lastRetainedTurn).toBe(0);
 	});
 
