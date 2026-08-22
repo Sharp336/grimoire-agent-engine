@@ -2983,6 +2983,65 @@ export function kiloModelManagerOptions(config?: KiloModelManagerConfig): ModelM
 }
 
 // ---------------------------------------------------------------------------
+// 10.7 MindsHub
+// ---------------------------------------------------------------------------
+
+export interface MindsHubModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * MindsHub's `GET /v1/models` row shape (see docs.mindshub.ai/inference/models).
+ * `id` is a stable alias (`sonnet`, `kimi`, …), not a raw provider model id;
+ * `label` is the human-readable display name normal OpenAI-compatible
+ * `name` would carry. `reasoning_efforts` is the per-model effort ladder, or
+ * `null` when the model isn't tunable (it may still reason internally).
+ * `embedding` flags rows meant for `/v1/embeddings`, not chat.
+ */
+interface MindsHubModelRecord extends OpenAICompatibleModelRecord {
+	label?: unknown;
+	enabled?: unknown;
+	embedding?: unknown;
+	reasoning_efforts?: unknown;
+}
+
+export function mindshubModelManagerOptions(
+	config?: MindsHubModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? "https://api.mindshub.ai/v1";
+	return {
+		providerId: "mindshub",
+		fetchDynamicModels: () =>
+			fetchOpenAICompatibleModels<"openai-completions">({
+				api: "openai-completions",
+				provider: "mindshub",
+				baseUrl,
+				apiKey,
+				// The catalog also lists embedding-only rows (e.g. `embed-small`) for
+				// `/v1/embeddings`; they are not chat models and never carry the
+				// `chat.completions` capabilities the coding agent expects.
+				filterModel: (entry: OpenAICompatibleModelRecord) => (entry as MindsHubModelRecord).embedding !== true,
+				mapModel: (entry: OpenAICompatibleModelRecord, defaults: ModelSpec<"openai-completions">) => {
+					const record = entry as MindsHubModelRecord;
+					const reasoningEfforts = Array.isArray(record.reasoning_efforts) ? record.reasoning_efforts : undefined;
+					return {
+						...defaults,
+						name: toModelName(record.label, defaults.name),
+						reasoning: (reasoningEfforts?.length ?? 0) > 0,
+						// Every catalog model accepts image parts (docs: "Image parts are
+						// accepted on every chat model").
+						input: ["text", "image"],
+					};
+				},
+				fetch: config?.fetch,
+			}),
+	};
+}
+
+// ---------------------------------------------------------------------------
 // Alibaba Coding Plan
 // ---------------------------------------------------------------------------
 

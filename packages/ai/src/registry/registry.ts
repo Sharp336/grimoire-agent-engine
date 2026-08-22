@@ -34,6 +34,7 @@ import { litellmProvider } from "./litellm";
 import { llamaCppProvider } from "./llama-cpp";
 import { lmStudioProvider } from "./lm-studio";
 import { metaProvider } from "./meta";
+import { mindshubProvider } from "./mindshub";
 import { minimaxProvider } from "./minimax";
 import { minimaxCodeProvider } from "./minimax-code";
 import { minimaxCodeCnProvider } from "./minimax-code-cn";
@@ -140,6 +141,7 @@ const ALL = [
 	litellmProvider,
 	kiloProvider,
 	zenmuxProvider,
+	mindshubProvider,
 	opencodeZenProvider,
 	opencodeGoProvider,
 	tavilyProvider,

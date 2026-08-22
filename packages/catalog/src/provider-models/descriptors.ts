@@ -31,6 +31,7 @@ import {
 	litellmModelManagerOptions,
 	lmStudioModelManagerOptions,
 	metaModelManagerOptions,
+	mindshubModelManagerOptions,
 	mistralModelManagerOptions,
 	moonshotModelManagerOptions,
 	nanoGptModelManagerOptions,
@@ -293,6 +294,14 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["MODEL_API_KEY", "META_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => metaModelManagerOptions(config),
 		catalogDiscovery: { label: "Meta Model API" },
+	},
+	{
+		id: "mindshub",
+		defaultModel: "sonnet",
+		envVars: ["MINDSHUB_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => mindshubModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "MindsHub" },
 	},
 	{
 		id: "moonshot",
