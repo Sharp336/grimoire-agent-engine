@@ -555,7 +555,9 @@ export class CollabHost {
 				compactionThresholdTokens = resolvedThresholdTokens;
 				const strategy = (compactionSettings as CompactionSettings & { strategy?: unknown }).strategy;
 				const speculationMethod =
-					compactionSettings.asyncEnabled !== false && strategy !== "off"
+					compactionSettings.asyncEnabled !== false &&
+					strategy !== "off" &&
+					!session.hasExtensionHandlers("session_before_compact")
 						? resolveSpeculationMethod(session.model, compactionSettings)
 						: undefined;
 				compactionSpeculationTokens =
