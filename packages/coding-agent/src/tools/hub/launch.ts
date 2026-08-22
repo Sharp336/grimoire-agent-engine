@@ -117,13 +117,15 @@ async function registerOutputSink(
 	}
 	const artifact = await session.allocateOutputArtifact?.("hub-progress");
 	if (!artifact?.id || !artifact.path) return undefined;
-	const previous = existing
+	const current = outputRegistrations.get(session)?.get(client)?.get(name);
+	const replaceable = existing?.active === true && current === existing ? existing : undefined;
+	const previous = replaceable
 		? {
-				owner: existing.owner,
-				delivery: existing.delivery,
+				owner: replaceable.owner,
+				delivery: replaceable.delivery,
 			}
 		: undefined;
-	if (existing) {
+	if (replaceable) {
 		// A monitored start targets a new process incarnation. Reusing the
 		// old registration would keep advertising its subscription id — with
 		// the start-pending marker long cleared and the old artifact path —
@@ -132,8 +134,10 @@ async function registerOutputSink(
 		// launches. Replace it with a fresh start-pending subscription. If the
 		// start fails, reject() attaches a fresh monitor under the prior mode;
 		// this intentionally cannot replay the old registration's pending
-		// batches or output from before the restoration boundary.
-		await existing.cleanup();
+		// batches or output from before the restoration boundary. Recheck after
+		// artifact allocation because terminal delivery can clean up the old
+		// registration while allocation is pending.
+		await replaceable.cleanup();
 	}
 	// (Re-)link the per-session maps only after the stale registration was
 	// replaced above: its cleanup may have unlinked the maps it lived in.
@@ -263,14 +267,7 @@ async function registerOutputSink(
 			if (retained) return;
 			await registration.cleanup();
 			if (!previous) return;
-			const restored = await registerOutputSink(
-				session,
-				client,
-				name,
-				previous.owner,
-				previous.delivery,
-				false,
-			);
+			const restored = await registerOutputSink(session, client, name, previous.owner, previous.delivery, false);
 			restored?.retain();
 		},
 	};

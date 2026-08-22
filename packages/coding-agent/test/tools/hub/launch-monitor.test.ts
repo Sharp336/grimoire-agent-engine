@@ -58,6 +58,7 @@ interface MonitorHarness {
 	getOutputSink(): ((notification: DaemonMonitorNotification) => void | Promise<void>) | undefined;
 	getSubscription(): DaemonOutputSubscription | undefined;
 	unregisterCount(): number;
+	registrationCount(): number;
 }
 
 function createHarness(artifact?: { id: string; path: string }): MonitorHarness {
@@ -75,6 +76,7 @@ function createHarness(artifact?: { id: string; path: string }): MonitorHarness 
 	let outputSink: ((notification: DaemonMonitorNotification) => void | Promise<void>) | undefined;
 	let subscription: DaemonOutputSubscription | undefined;
 	let unregisters = 0;
+	const registrations = new Set<string>();
 	const client = {
 		projectDir: process.cwd(),
 		onCompletion: () => () => {},
@@ -84,9 +86,11 @@ function createHarness(artifact?: { id: string; path: string }): MonitorHarness 
 		) => {
 			subscription = registered;
 			outputSink = sink;
+			registrations.add(registered.id);
 			return () => {
 				unregisters++;
-				outputSink = undefined;
+				registrations.delete(registered.id);
+				if (outputSink === sink) outputSink = undefined;
 			};
 		},
 		request: async (operation: DaemonOperation): Promise<DaemonRpcResult> => {
@@ -140,6 +144,7 @@ function createHarness(artifact?: { id: string; path: string }): MonitorHarness 
 		getOutputSink: () => outputSink,
 		getSubscription: () => subscription,
 		unregisterCount: () => unregisters,
+		registrationCount: () => registrations.size,
 	};
 }
 
@@ -690,6 +695,59 @@ describe("hub process output monitoring", () => {
 			{ text: "still monitored", delivery: "ambient" },
 		]);
 		expect(harness.unregisterCount()).toBe(2);
+	});
+
+	it("does not restore a monitor that completed during replacement artifact allocation", async () => {
+		const harness = createHarness();
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+
+		await executeLaunch(harness.session, { op: "monitor", name: daemon.name, progress: "ambient" });
+		const prior = harness.getSubscription();
+		const priorSink = harness.getOutputSink();
+		if (!prior || !priorSink) throw new Error("Expected output subscription");
+
+		const allocationStarted = Promise.withResolvers<void>();
+		const artifact = Promise.withResolvers<{ id: string; path: string }>();
+		vi.spyOn(harness.session, "allocateOutputArtifact").mockImplementation(() => {
+			allocationStarted.resolve();
+			return artifact.promise;
+		});
+		vi.spyOn(harness.client, "request").mockImplementation(async operation => {
+			if (operation.op === "ping") {
+				return { op: "ping", projectDir: process.cwd(), capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] };
+			}
+			if (operation.op === "start") throw new Error(`Daemon ${daemon.name} is already running`);
+			throw new Error(`Unexpected operation: ${operation.op}`);
+		});
+
+		const replacement = executeLaunch(harness.session, {
+			op: "start",
+			name: daemon.name,
+			application: process.execPath,
+			pty: false,
+			persist: true,
+			progress: "wake",
+		});
+		const rejection = expect(replacement).rejects.toThrow("already running");
+		await allocationStarted.promise;
+		await priorSink({
+			event: "daemon-monitor-completed",
+			monitorId: prior.id,
+			daemon: { ...daemon, state: "exited", pid: undefined, exitedAt: 3, exitCode: 0 },
+			ownerNotified: false,
+		});
+		artifact.resolve({
+			id: `hub-progress-${crypto.randomUUID()}`,
+			path: path.join(process.cwd(), `.hub-progress-${crypto.randomUUID()}.log`),
+		});
+
+		await rejection;
+		await drainMicrotasks();
+
+		expect(harness.completions).toHaveLength(1);
+		expect(harness.registrationCount()).toBe(0);
+		expect(harness.getOutputSink()).toBeUndefined();
+		expect(harness.active.at(-1)?.active).toBeFalse();
 	});
 
 	it("keeps the prior delivery mode when a monitor retune fails validation", async () => {
