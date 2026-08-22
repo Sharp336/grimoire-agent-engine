@@ -34,6 +34,16 @@ interface RecallOutcome {
 	ok: boolean;
 }
 
+export interface HindsightConversationTrackingSnapshot {
+	lastRetainedTurn: number;
+	closeRetainBaselineTurns: number;
+	hasRecalledForFirstTurn: boolean;
+	lastRecallSnippet?: string;
+	lastRetainedMessageIndex: number;
+	cachedTranscript: string;
+	lastRetainedPrefixKey: string;
+}
+
 export interface HindsightSessionStateOptions {
 	/** Session id used for retain-queue metadata. */
 	sessionId: string;
@@ -281,6 +291,29 @@ export class HindsightSessionState {
 		this.#invalidateRetainCache();
 	}
 
+	/** Snapshot retain/recall counters so a failed `/resume` can roll them back. */
+	captureConversationTracking(): HindsightConversationTrackingSnapshot {
+		return {
+			lastRetainedTurn: this.lastRetainedTurn,
+			closeRetainBaselineTurns: this.#closeRetainBaselineTurns,
+			hasRecalledForFirstTurn: this.hasRecalledForFirstTurn,
+			lastRecallSnippet: this.lastRecallSnippet,
+			lastRetainedMessageIndex: this.#lastRetainedMessageIndex,
+			cachedTranscript: this.#cachedTranscript,
+			lastRetainedPrefixKey: this.#lastRetainedPrefixKey,
+		};
+	}
+
+	restoreConversationTracking(snapshot: HindsightConversationTrackingSnapshot): void {
+		this.lastRetainedTurn = snapshot.lastRetainedTurn;
+		this.#closeRetainBaselineTurns = snapshot.closeRetainBaselineTurns;
+		this.hasRecalledForFirstTurn = snapshot.hasRecalledForFirstTurn;
+		this.lastRecallSnippet = snapshot.lastRecallSnippet;
+		this.#lastRetainedMessageIndex = snapshot.lastRetainedMessageIndex;
+		this.#cachedTranscript = snapshot.cachedTranscript;
+		this.#lastRetainedPrefixKey = snapshot.lastRetainedPrefixKey;
+	}
+
 	resetConversationTracking(closeRetainBaselineTurns?: number): void {
 		this.lastRetainedTurn = 0;
 		this.hasRecalledForFirstTurn = false;
@@ -320,11 +353,11 @@ export class HindsightSessionState {
 		if (messages.length === 0) return;
 		const userTurns = messages.filter(m => m.role === "user").length;
 		const retainedThrough = Math.max(this.lastRetainedTurn, this.#closeRetainBaselineTurns);
-		// Last-turn retains reset #lastRetainedMessageIndex to 0 by design, and
-		// resume starts both that cursor and lastRetainedTurn at 0 even when the
-		// transcript already contains history. Treat loaded history as already
-		// retained on the close path so idle open/close does not reconsolidate
-		// the full document; only a below-cadence tail of new turns is flushed.
+		// Resume starts lastRetainedTurn at 0 even when the transcript already
+		// contains history. Treat loaded history as already retained on the close
+		// path so idle open/close does not reconsolidate the full document; only
+		// a below-cadence tail of new turns is flushed. Last-turn retains still
+		// record the retained branch identity so `/tree` rewinds can diverge.
 		if (userTurns <= retainedThrough && !this.#retainedPrefixDiverged(messages)) return;
 		try {
 			const generation = this.#retainGeneration;
@@ -448,9 +481,7 @@ export class HindsightSessionState {
 			const windowTurns = opts?.lastTurnWindow ?? this.config.retainEveryNTurns + this.config.retainOverlapTurns;
 			const target = sliceLastTurnsByUserBoundary(messages, windowTurns);
 			documentId = `${sessionId}-${retainedAt.getTime()}`;
-			this.#lastRetainedMessageIndex = 0;
 			this.#cachedTranscript = "";
-			this.#lastRetainedPrefixKey = "";
 			const { transcript: windowTranscript } = prepareRetentionTranscript(target, true, { includeTimestamps: true });
 			if (!windowTranscript) return;
 			transcript = windowTranscript;
@@ -466,8 +497,8 @@ export class HindsightSessionState {
 			async: true,
 			updateMode,
 		});
-		if (nextCachedTranscript !== undefined && generation === this.#retainGeneration) {
-			this.#cachedTranscript = nextCachedTranscript;
+		if (generation === this.#retainGeneration) {
+			if (nextCachedTranscript !== undefined) this.#cachedTranscript = nextCachedTranscript;
 			this.#lastRetainedMessageIndex = messages.length;
 			this.#lastRetainedPrefixKey = retentionPrefixKey(messages, messages.length);
 		}

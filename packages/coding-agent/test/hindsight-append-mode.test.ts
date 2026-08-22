@@ -238,6 +238,129 @@ describe("Hindsight append-mode session retention", () => {
 		expect(String(firstItem(bodies[1]).content)).not.toContain("abandoned turn has enough text");
 	});
 
+	it("retains last-turn replacement-branch work after /tree rewind below cadence", async () => {
+		const bodies = captureBodies();
+		const client = new HindsightApi({ baseUrl: "http://hindsight.local" });
+		const shared = [
+			userEntry("u1", null, "turn one has enough text", "2026-08-17T10:00:00.000Z"),
+			assistantEntry("a1", "u1", "reply one has enough text", "2026-08-17T10:00:01.000Z"),
+			userEntry("u2", "a1", "turn two has enough text", "2026-08-17T10:01:00.000Z"),
+			assistantEntry("a2", "u2", "reply two has enough text", "2026-08-17T10:01:01.000Z"),
+		];
+		const abandoned = [
+			userEntry("u3", "a2", "abandoned three has enough text", "2026-08-17T10:02:00.000Z"),
+			assistantEntry("a3", "u3", "abandoned reply three has enough text", "2026-08-17T10:02:01.000Z"),
+			userEntry("u4", "a3", "abandoned four has enough text", "2026-08-17T10:03:00.000Z"),
+			assistantEntry("a4", "u4", "abandoned reply four has enough text", "2026-08-17T10:03:01.000Z"),
+			userEntry("u5", "a4", "abandoned five has enough text", "2026-08-17T10:04:00.000Z"),
+			assistantEntry("a5", "u5", "abandoned reply five has enough text", "2026-08-17T10:04:01.000Z"),
+		];
+		const replacement = [
+			userEntry("u6", "a2", "replacement three has enough text", "2026-08-17T10:05:00.000Z"),
+			assistantEntry("a6", "u6", "replacement reply three has enough text", "2026-08-17T10:05:01.000Z"),
+		];
+		let branch = [...shared, ...abandoned];
+		const state = new HindsightSessionState({
+			sessionId: "sess-tree-lastturn",
+			client,
+			bankId: "personal",
+			config: makeConfig({ retainMode: "last-turn", retainEveryNTurns: 5, retainOverlapTurns: 0 }),
+			session: {
+				sessionId: "sess-tree-lastturn",
+				sessionManager: {
+					getHeader: () => ({
+						type: "session",
+						id: "sess-tree-lastturn",
+						timestamp: SESSION_START,
+						cwd: "/tmp",
+					}),
+					getEntries: () => [...shared, ...abandoned, ...replacement],
+					getBranch: () => branch,
+				},
+				getHindsightSessionState: () => state,
+			} as object as AgentSession,
+			banksSet: new Set(["personal"]),
+		});
+
+		await state.maybeRetainOnAgentEnd();
+		expect(bodies).toHaveLength(1);
+		expect(String(firstItem(bodies[0]).content)).toContain("abandoned five has enough text");
+
+		branch = [...shared, ...replacement];
+		await state.maybeRetainOnAgentEnd();
+		expect(bodies).toHaveLength(2);
+		expect(String(firstItem(bodies[1]).content)).toContain("replacement three has enough text");
+		expect(String(firstItem(bodies[1]).content)).not.toContain("abandoned five has enough text");
+	});
+
+	it("restores the close baseline when a session switch rolls back", async () => {
+		const bodies = captureBodies();
+		const client = new HindsightApi({ baseUrl: "http://hindsight.local" });
+		const restored = [
+			userEntry("u1", null, "home turn one has enough text", "2026-08-17T10:00:00.000Z"),
+			assistantEntry("a1", "u1", "home reply one has enough text", "2026-08-17T10:00:01.000Z"),
+			userEntry("u2", "a1", "home turn two has enough text", "2026-08-17T10:01:00.000Z"),
+			assistantEntry("a2", "u2", "home reply two has enough text", "2026-08-17T10:01:01.000Z"),
+		];
+		const target = Array.from({ length: 10 }, (_, i) => [
+			userEntry(
+				`tu${i + 1}`,
+				i === 0 ? null : `ta${i}`,
+				`target turn ${i + 1} has enough text`,
+				`2026-08-17T11:0${i}:00.000Z`,
+			),
+			assistantEntry(
+				`ta${i + 1}`,
+				`tu${i + 1}`,
+				`target reply ${i + 1} has enough text`,
+				`2026-08-17T11:0${i}:01.000Z`,
+			),
+		]).flat();
+		let entries = restored;
+		const state = new HindsightSessionState({
+			sessionId: "sess-switch-rollback",
+			client,
+			bankId: "personal",
+			config: makeConfig({ retainEveryNTurns: 5, retainOverlapTurns: 0 }),
+			session: {
+				sessionId: "sess-switch-rollback",
+				loadedUserTurnCount: 2,
+				sessionManager: {
+					getHeader: () => ({
+						type: "session",
+						id: "sess-switch-rollback",
+						timestamp: SESSION_START,
+						cwd: "/tmp",
+					}),
+					getEntries: () => entries,
+					getBranch: () => entries,
+				},
+				getHindsightSessionState: () => state,
+			} as object as AgentSession,
+			banksSet: new Set(["personal"]),
+			lastRetainedTurn: 2,
+			closeRetainBaselineTurns: 2,
+		});
+
+		const snapshot = state.captureConversationTracking();
+		entries = target;
+		state.setSessionId("sess-switch-target");
+		state.resetConversationTracking();
+		expect(state.lastRetainedTurn).toBe(0);
+
+		entries = [
+			...restored,
+			userEntry("u3", "a2", "home turn three has enough text", "2026-08-17T10:02:00.000Z"),
+			assistantEntry("a3", "u3", "home reply three has enough text", "2026-08-17T10:02:01.000Z"),
+		];
+		state.setSessionId("sess-switch-rollback");
+		state.restoreConversationTracking(snapshot);
+		await state.drainOnClose();
+		expect(bodies).toHaveLength(1);
+		expect(String(firstItem(bodies[0]).content)).toContain("home turn three has enough text");
+		expect(String(firstItem(bodies[0]).content)).not.toContain("target turn 10 has enough text");
+	});
+
 	it("force-rebuilds the full canonical transcript with replace", async () => {
 		const bodies = captureBodies();
 		const client = new HindsightApi({ baseUrl: "http://hindsight.local" });

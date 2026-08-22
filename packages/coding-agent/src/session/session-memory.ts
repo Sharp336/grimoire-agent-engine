@@ -4,7 +4,7 @@ import type { Agent, AgentTool } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
-import type { HindsightSessionState } from "../hindsight/state";
+import type { HindsightConversationTrackingSnapshot, HindsightSessionState } from "../hindsight/state";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
 import type { MemoryBackendStartOptions } from "../memory-backend/types";
 import type { MnemopiSessionState } from "../mnemopi/state";
@@ -84,6 +84,21 @@ export class SessionMemory {
 		const sid = this.#host.agent.sessionId;
 		if (!sid) return;
 		this.#host.getHindsightSessionState()?.setSessionId(sid);
+	}
+
+	captureHindsightConversationTracking(): HindsightConversationTrackingSnapshot | undefined {
+		if (this.#host.settings.get("memory.backend") !== "hindsight") return undefined;
+		const state = this.#host.getHindsightSessionState();
+		if (!state || state.aliasOf) return undefined;
+		return state.captureConversationTracking();
+	}
+
+	restoreHindsightConversationTracking(snapshot?: HindsightConversationTrackingSnapshot): void {
+		if (!snapshot) return;
+		if (this.#host.settings.get("memory.backend") !== "hindsight") return;
+		const state = this.#host.getHindsightSessionState();
+		if (!state || state.aliasOf) return;
+		state.restoreConversationTracking(snapshot);
 	}
 
 	#rekeyMnemopiMemoryForCurrentSessionId(): void {
