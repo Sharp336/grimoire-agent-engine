@@ -122,6 +122,16 @@ describe("collectShakeRegions — tool results", () => {
 		expect(collectShakeRegions([entry], tokenizer, cfg({ minSavings: tokens * 10 }))).toHaveLength(0);
 		expect(collectShakeRegions([entry], tokenizer, cfg({ minSavings: 0 }))).toHaveLength(1);
 	});
+
+	test("rewriteStartIndex takes precedence over the legacy id boundary", () => {
+		const old = messageEntry(toolResultMessage("bash", "old".repeat(400)));
+		const live = messageEntry(toolResultMessage("bash", "live".repeat(400)));
+		const entries: SessionEntry[] = [old, live];
+
+		const regions = collectShakeRegions(entries, tokenizer, cfg({ keepBoundaryId: old.id, rewriteStartIndex: 1 }));
+
+		expect(regions.map(region => region.entry)).toEqual([live]);
+	});
 });
 
 describe("collectShakeRegions — fenced / XML blocks", () => {

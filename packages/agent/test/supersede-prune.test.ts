@@ -454,6 +454,7 @@ describe("pruneSupersededToolResults — useless results", () => {
 		});
 
 		expect(result.prunedCount).toBe(1);
+		expect(result.prunedEntries).toEqual([{ entry: result1, tokensSaved: result.tokensSaved }]);
 		expect(resultText(result1)).toBe(USELESS_NOTICE);
 	});
 
@@ -495,6 +496,7 @@ describe("pruneToolOutputs — useless results", () => {
 		});
 
 		expect(result.prunedCount).toBe(1);
+		expect(result.prunedEntries).toEqual([{ entry: result1, tokensSaved: result.tokensSaved }]);
 		expect(resultText(result1)).toBe(USELESS_NOTICE);
 		expect(resultText(result2)).toBe(FILE_CONTENT);
 	});
@@ -665,5 +667,20 @@ describe("cache-stable boundary — warm prefix protection", () => {
 		expect(resultText(result1)).toBe(FILE_CONTENT); // before boundary -> untouched
 		expect(resultMessage(result1).prunedAt).toBeUndefined();
 		expect(resultMessage(result2).prunedAt).toBeDefined(); // at/after boundary, in tail -> pruned
+	});
+
+	test("rewriteStartIndex takes precedence over the legacy id boundary", () => {
+		const [call1, result1] = readPair("src/foo.ts", FILE_CONTENT, T0);
+		const [call2, result2] = readPair("src/foo.ts", FILE_CONTENT, T0 + 1_000);
+		const entries: SessionEntry[] = [call1, result1, call2, result2];
+
+		const result = pruneSupersededToolResults(
+			entries,
+			tokenizer,
+			cfg({ keepBoundaryId: call1.id, rewriteStartIndex: entries.length, now: T0 + 1_000 }),
+		);
+
+		expect(result.prunedCount).toBe(0);
+		expect(resultText(result1)).toBe(FILE_CONTENT);
 	});
 });

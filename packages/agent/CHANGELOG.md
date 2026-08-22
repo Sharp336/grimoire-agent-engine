@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- Prune helpers now return per-entry token savings and accept an index boundary for context-visible history rewrites.
+
 ## [18.0.0] - 2026-08-22
 
 ### Fixed

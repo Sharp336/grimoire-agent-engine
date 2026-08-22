@@ -7,6 +7,7 @@ import type { Tokenizer } from "../tokenizer";
 import type { AgentMessage, AgentToolCall } from "../types";
 import type { SessionEntry, SessionMessageEntry } from "./entries";
 import { invalidateMessageCache } from "./message-cache";
+import { resolveHistoryRewriteStartIndex } from "./rewrite-boundary";
 import {
 	collectToolCallsById,
 	isProtectedToolResult,
@@ -39,6 +40,8 @@ export interface PruneConfig {
 	 * whole branch is sent).
 	 */
 	keepBoundaryId?: string;
+	/** Inclusive entry index for context-visible rewrites. Takes precedence over {@link keepBoundaryId}. */
+	rewriteStartIndex?: number;
 	/**
 	 * Prompt-cache guard. When set, a tool result whose all-message suffix
 	 * (tokens of every message after it) EXCEEDS this is part of the warm,
@@ -58,9 +61,16 @@ export const DEFAULT_PRUNE_CONFIG: PruneConfig = {
 	pruneUseless: true,
 };
 
+export interface PrunedEntrySavings {
+	entry: SessionMessageEntry;
+	tokensSaved: number;
+}
+
 export interface PruneResult {
 	prunedCount: number;
 	tokensSaved: number;
+	/** Entry-level savings for callers that maintain provider-anchored usage. Present only when pruning commits. */
+	prunedEntries?: PrunedEntrySavings[];
 }
 
 /** Exact placeholder written over a superseded tool result. */
@@ -101,6 +111,8 @@ export interface SupersedePruneConfig {
 	 * Undefined = no compaction (the whole branch is sent).
 	 */
 	keepBoundaryId?: string;
+	/** Inclusive entry index for context-visible rewrites. Takes precedence over {@link keepBoundaryId}. */
+	rewriteStartIndex?: number;
 	/** Tool-result protection matchers (same contract as {@link PruneConfig.protectedTools}). */
 	protectedTools: ProtectedToolMatcher[];
 }
@@ -149,18 +161,6 @@ function computeMessageSuffixTokens(entries: readonly SessionEntry[], tokenizer:
 		if (entry.type === "message") accumulated += tokenizer.countMessage(entry.message as AgentMessage);
 	}
 	return suffix;
-}
-
-/**
- * Resolve the array index of the compaction boundary (`keepBoundaryId`). Entries
- * before this index are summarized away by the latest compaction and never sent,
- * so prune passes must not mutate them. Returns 0 when there is no boundary (no
- * compaction → whole branch is sent) or the id is absent from `entries`.
- */
-function resolveBoundaryIndex(entries: readonly SessionEntry[], keepBoundaryId: string | undefined): number {
-	if (keepBoundaryId === undefined) return 0;
-	const index = entries.findIndex(entry => entry.id === keepBoundaryId);
-	return index < 0 ? 0 : index;
 }
 
 interface SupersedeCandidate {
@@ -276,7 +276,7 @@ export function pruneSupersededToolResults(
 	const idle =
 		lastMessageTimestamp !== undefined && now - lastMessageTimestamp >= (config.idleFlushMs ?? DEFAULT_IDLE_FLUSH_MS);
 
-	const boundaryIndex = resolveBoundaryIndex(entries, config.keepBoundaryId);
+	const boundaryIndex = resolveHistoryRewriteStartIndex(entries, config.rewriteStartIndex, config.keepBoundaryId);
 
 	let toPrune: SupersedeCandidate[];
 	if (idle) {
@@ -299,13 +299,16 @@ export function pruneSupersededToolResults(
 
 	const prunedAt = Date.now();
 	let tokensSaved = 0;
+	const prunedEntries: PrunedEntrySavings[] = [];
 	for (const candidate of toPrune) {
+		const saved = estimatePrunedSavings(candidate.tokens, candidate.notice);
 		candidate.message.content = [{ type: "text", text: candidate.notice }];
 		candidate.message.prunedAt = prunedAt;
 		invalidateMessageCache(candidate.message as AgentMessage);
-		tokensSaved += estimatePrunedSavings(candidate.tokens, candidate.notice);
+		tokensSaved += saved;
+		prunedEntries.push({ entry: candidate.entry, tokensSaved: saved });
 	}
-	return { prunedCount: toPrune.length, tokensSaved };
+	return { prunedCount: toPrune.length, tokensSaved, prunedEntries };
 }
 
 export function pruneToolOutputs(
@@ -339,7 +342,7 @@ export function pruneToolOutputs(
 				)
 			: undefined;
 
-	const boundaryIndex = resolveBoundaryIndex(entries, config.keepBoundaryId);
+	const boundaryIndex = resolveHistoryRewriteStartIndex(entries, config.rewriteStartIndex, config.keepBoundaryId);
 	const cacheWarmSuffixTokens = config.cacheWarmSuffixTokens;
 	// All-message suffix per index, only when the cache guard is armed.
 	const messageSuffix =
@@ -403,6 +406,7 @@ export function pruneToolOutputs(
 	}
 
 	const prunedAt = Date.now();
+	const prunedEntries: PrunedEntrySavings[] = [];
 	for (const candidate of candidates) {
 		const message = candidate.entry.message as ToolResultMessage;
 		const notice = candidate.superseded
@@ -410,13 +414,15 @@ export function pruneToolOutputs(
 			: candidate.useless
 				? USELESS_NOTICE
 				: createPrunedNotice(candidate.tokens);
+		const saved = estimatePrunedSavings(candidate.tokens, notice);
 		message.content = [{ type: "text", text: notice }];
 		message.prunedAt = prunedAt;
 		invalidateMessageCache(message as AgentMessage);
+		prunedEntries.push({ entry: candidate.entry, tokensSaved: saved });
 		prunedCount++;
 	}
 
-	return { prunedCount, tokensSaved };
+	return { prunedCount, tokensSaved, prunedEntries };
 }
 
 /**
