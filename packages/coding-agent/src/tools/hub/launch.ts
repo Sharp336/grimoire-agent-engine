@@ -611,11 +611,17 @@ export async function executeLaunch(
 	const name = params.op === "start" || params.op === "monitor" ? requiredName(params) : undefined;
 	const owner = session.getSessionId?.() ?? undefined;
 	const progressDelivery = params.progress === "wake" || params.progress === "ambient" ? params.progress : undefined;
-	const outputLease =
-		name && owner && progressDelivery
-			? await registerOutputSink(session, client, name, owner, progressDelivery, params.op === "start")
+	// Starts must subscribe before the process launches so no early lines are
+	// missed. Monitor attaches subscribe only after the describe result
+	// validates the attach: registering earlier lets the speculative buffer
+	// replay output that predates the successful-attach boundary.
+	let outputLease =
+		name && owner && progressDelivery && params.op === "start"
+			? await registerOutputSink(session, client, name, owner, progressDelivery, true)
 			: undefined;
-	if (progressDelivery && !outputLease) throw new ToolError("This session cannot accept process progress delivery");
+	if (params.op === "start" && progressDelivery && !outputLease) {
+		throw new ToolError("This session cannot accept process progress delivery");
+	}
 	const operation = operationFor(params, session);
 	const completionOwner = operation.op === "start" ? operation.owner : undefined;
 	const resumedOwner = params.op !== "start" ? (session.getSessionId?.() ?? undefined) : undefined;
@@ -636,12 +642,16 @@ export async function executeLaunch(
 			params.op === "monitor" && params.progress === "off" && name
 				? await detachOutputSink(session, client, name)
 				: undefined;
-		if (outputLease && "daemon" in result && result.daemon) {
+		if (progressDelivery && "daemon" in result && result.daemon) {
 			if (result.daemon.detached)
 				throw new ToolError("Live progress monitoring is unavailable for detached processes");
 			if (params.op === "monitor" && TERMINAL_STATES[result.daemon.state]) {
 				throw new ToolError(`Cannot monitor ${params.name}: process is ${result.daemon.state}`);
 			}
+			if (!outputLease && name && owner) {
+				outputLease = await registerOutputSink(session, client, name, owner, progressDelivery, false);
+			}
+			if (!outputLease) throw new ToolError("This session cannot accept process progress delivery");
 			outputLease.registration.startedAt = result.daemon.startedAt;
 			outputLease.retain();
 		}

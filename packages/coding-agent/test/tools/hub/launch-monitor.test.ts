@@ -92,10 +92,13 @@ function createHarness(artifact?: { id: string; path: string }): MonitorHarness 
 		request: async (operation: DaemonOperation): Promise<DaemonRpcResult> => {
 			requests.push(operation);
 			if (operation.op === "ping") {
-				expect(subscription).toMatchObject({ name: daemon.name, owner: OWNER });
 				return { op: "ping", projectDir: process.cwd(), capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] };
 			}
-			if (operation.op === "start") return { op: "start", daemon, readyTimedOut: false };
+			if (operation.op === "start") {
+				// Starts subscribe before the launch so no early lines are missed.
+				expect(subscription).toMatchObject({ name: daemon.name, owner: OWNER });
+				return { op: "start", daemon, readyTimedOut: false };
+			}
 			if (operation.op === "describe") return { op: "describe", daemon, spec };
 			throw new Error(`Unexpected operation: ${operation.op}`);
 		},
@@ -196,6 +199,25 @@ describe("hub process output monitoring", () => {
 		expect(harness.active).toEqual([{ monitorId: subscription.id, delivery: "wake", active: true }]);
 	});
 
+	it("never replays output that predates a successful monitor attach", async () => {
+		const harness = createHarness();
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+		const request = harness.client.request;
+		vi.spyOn(harness.client, "request").mockImplementation(async operation => {
+			// Output produced while the attach is still validating must never
+			// reach the session: the sink may only exist after the describe
+			// result confirms the attach.
+			if (operation.op === "describe") expect(harness.getOutputSink()).toBeUndefined();
+			return request(operation);
+		});
+
+		await executeLaunch(harness.session, { op: "monitor", name: daemon.name, progress: "wake" });
+
+		expect(harness.progress).toHaveLength(0);
+		expect(harness.getSubscription()).toMatchObject({ name: daemon.name, owner: OWNER });
+		expect(harness.getOutputSink()).toBeDefined();
+	});
+
 	it("attaches to an existing process and updates its delivery mode in place", async () => {
 		const harness = createHarness();
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
@@ -279,8 +301,11 @@ describe("hub process output monitoring", () => {
 		await expect(
 			executeLaunch(harness.session, { op: "monitor", name: daemon.name, progress: "wake" }),
 		).rejects.toThrow("restart it with this omp build");
-		expect(harness.unregisterCount()).toBe(1);
-		expect(harness.active.at(-1)?.active).toBe(false);
+		// The capability check fails before the attach, so no subscription was
+		// ever registered and no monitor state was touched.
+		expect(harness.unregisterCount()).toBe(0);
+		expect(harness.getOutputSink()).toBeUndefined();
+		expect(harness.active).toHaveLength(0);
 	});
 
 	it("does not resurrect wake state when terminal cleanup races a retune", async () => {
@@ -308,9 +333,12 @@ describe("hub process output monitoring", () => {
 		).rejects.toThrow("process exited during retune");
 
 		expect(harness.unregisterCount()).toBe(1);
+		// The retune fails before its registration exists, so the last state
+		// change is the terminal cleanup of the original wake monitor - never
+		// a resurrected active entry.
 		expect(harness.active.at(-1)).toEqual({
 			monitorId: subscription.id,
-			delivery: "ambient",
+			delivery: "wake",
 			active: false,
 		});
 	});
