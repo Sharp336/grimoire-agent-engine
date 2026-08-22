@@ -149,6 +149,88 @@ describe("Settings", () => {
 		});
 	});
 
+	describe("project setting scope", () => {
+		it("persists scoped edits to the native project config without modifying the global layer", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ theme: { dark: "dark-one" }, ask: { enabled: true }, custom: { keep: true } }, null, 2),
+			);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.hasProjectConfig()).toBe(true);
+			settings.set("theme.dark", "titanium", "project");
+			settings.set("ask.enabled", false, "project");
+			expect(settings.get("theme.dark")).toBe("titanium");
+			expect(settings.get("ask.enabled")).toBe(false);
+			await settings.flush();
+
+			expect(await readSettings()).toEqual({});
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+				theme: { dark: "titanium" },
+				ask: { enabled: false },
+				custom: { keep: true },
+			});
+		});
+		it("resolves the global layer independently of a shadowing project override", async () => {
+			await writeSettings({ ask: { enabled: false } });
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ ask: { enabled: true } }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			// Effective view is the project override; the global getter ignores it.
+			expect(settings.get("ask.enabled")).toBe(true);
+			expect(settings.getGlobalValue("ask.enabled")).toBe(false);
+
+			settings.set("ask.enabled", true, "global");
+			expect(settings.getGlobalValue("ask.enabled")).toBe(true);
+			expect(settings.get("ask.enabled")).toBe(true);
+			await settings.flush();
+
+			expect(await readSettings()).toEqual({ ask: { enabled: true } });
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({ ask: { enabled: true } });
+		});
+
+		it("removes a project override and immediately restores the global fallback", async () => {
+			await writeSettings({ ask: { enabled: false } });
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ theme: { dark: "dark-one" }, ask: { enabled: true } }, null, 2),
+			);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("ask.enabled")).toBe(true);
+			expect(settings.clearProject("ask.enabled")).toBe(true);
+			expect(settings.get("ask.enabled")).toBe(false);
+			expect(settings.clearProject("ask.enabled")).toBe(false);
+			await settings.flush();
+
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+				theme: { dark: "dark-one" },
+			});
+			expect(await readSettings()).toEqual({ ask: { enabled: false } });
+		});
+
+		it("keeps native .omp/config.yml winning over another project source after reload", async () => {
+			await fs.promises.mkdir(path.join(projectDir, ".claude"), { recursive: true });
+			await Bun.write(
+				path.join(projectDir, ".claude", "settings.json"),
+				`${JSON.stringify({ ask: { enabled: true } }, null, 2)}\n`,
+			);
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ ask: { enabled: false } }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("ask.enabled")).toBe(false);
+
+			settings.set("ask.enabled", false, "project");
+			await settings.flush();
+			const reloaded = await Settings.init({ cwd: projectDir, agentDir });
+			expect(reloaded.get("ask.enabled")).toBe(false);
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({ ask: { enabled: false } });
+		});
+	});
+
 	describe("shell configuration errors", () => {
 		it("points to the selected global config in the active agent directory", async () => {
 			const configPath = path.join(agentDir, "config.yaml");
