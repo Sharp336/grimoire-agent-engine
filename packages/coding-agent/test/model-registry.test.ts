@@ -2384,19 +2384,14 @@ describe("ModelRegistry", () => {
 			authStorage.setRuntimeApiKey("featherless", "featherless-test-key");
 			// Both searches must reach their fetch before either merges — the
 			// interleaving the model hub produces with overlapping debounced queries.
-			const fetchStartedSignals: Array<() => void> = [];
-			const bothFetchesStarted = Promise.all([
-				new Promise<void>(resolve => fetchStartedSignals.push(resolve)),
-				new Promise<void>(resolve => fetchStartedSignals.push(resolve)),
-			]);
-			let openGate: () => void = () => {};
-			const gate = new Promise<void>(resolve => {
-				openGate = resolve;
-			});
+			const fetchStarted = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+			const fetchStartedSignals = fetchStarted.map(deferred => deferred.resolve);
+			const bothFetchesStarted = Promise.all(fetchStarted.map(deferred => deferred.promise));
+			const gate = Promise.withResolvers<void>();
 			const fetchMock: FetchImpl = async input => {
 				fetchStartedSignals.shift()?.();
 				const query = new URL(String(input)).searchParams.get("q") ?? "";
-				await gate;
+				await gate.promise;
 				return Response.json({
 					total: 2,
 					data: [
@@ -2414,7 +2409,7 @@ describe("ModelRegistry", () => {
 			const first = registry.searchProviderModels("featherless", "old");
 			const second = registry.searchProviderModels("featherless", "new");
 			await bothFetchesStarted;
-			openGate();
+			gate.resolve();
 			expect(await Promise.all([first, second])).toEqual([1, 1]);
 
 			expect(registry.find("featherless", "example/old")).toBeDefined();
@@ -2427,6 +2422,100 @@ describe("ModelRegistry", () => {
 			await cachedRegistry.refresh("offline");
 			expect(cachedRegistry.find("featherless", "example/old")).toBeDefined();
 			expect(cachedRegistry.find("featherless", "example/new")).toBeDefined();
+		});
+
+		test("keeps searched Featherless models when an in-flight refresh lands after them", async () => {
+			authStorage.setRuntimeApiKey("featherless", "featherless-test-key");
+			// The hub fires the initial refresh when an empty provider is selected,
+			// then a debounced search as soon as the user types. The refresh read the
+			// pre-search cache, so finishing last must not replay it over the search.
+			const refreshReachedFetch = Promise.withResolvers<void>();
+			const refreshGate = Promise.withResolvers<void>();
+			const fetchMock: FetchImpl = async input => {
+				const query = new URL(String(input)).searchParams.get("q");
+				if (query === "zai-org/GLM-5.2") return Response.json({ total: 0, data: [] });
+				if (!query) {
+					refreshReachedFetch.resolve();
+					await refreshGate.promise;
+					return Response.json({
+						total: 43_750,
+						data: [
+							{
+								id: "example/initial",
+								context_length: 131_072,
+								features: { tool_use: true },
+								available_on_current_plan: true,
+							},
+						],
+					});
+				}
+				return Response.json({
+					total: 7,
+					data: [
+						{
+							id: "example/searched",
+							context_length: 262_144,
+							features: { tool_use: true },
+							available_on_current_plan: true,
+						},
+					],
+				});
+			};
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+			const refresh = registry.refreshProvider("featherless", "online");
+			await refreshReachedFetch.promise;
+			const search = registry.searchProviderModels("featherless", "searched");
+			refreshGate.resolve();
+			await Promise.all([refresh, search]);
+
+			expect(registry.find("featherless", "example/searched")).toBeDefined();
+			expect(registry.find("featherless", "example/initial")).toBeDefined();
+		});
+
+		test("does not hydrate another credential's Featherless cache when the refresh fails", async () => {
+			authStorage.setRuntimeApiKey("featherless", "featherless-key-a");
+			const keyAFetch: FetchImpl = async input => {
+				if (new URL(String(input)).searchParams.get("q") === "zai-org/GLM-5.2") {
+					return Response.json({ total: 0, data: [] });
+				}
+				return Response.json({
+					total: 1,
+					data: [
+						{
+							id: "plan-a/only",
+							context_length: 262_144,
+							features: { tool_use: true },
+							available_on_current_plan: true,
+						},
+					],
+				});
+			};
+			const registryA = new ModelRegistry(authStorage, modelsJsonPath, { fetch: keyAFetch });
+			await registryA.refreshProvider("featherless", "online");
+			expect(registryA.find("featherless", "plan-a/only")).toBeDefined();
+			expect(registryA.getProviderModelTotal("featherless")).toBe(1);
+
+			// Key B's refresh fails: the fallback path must not resurrect key A's
+			// plan-scoped rows, which Featherless can 403 for key B.
+			authStorage.setRuntimeApiKey("featherless", "featherless-key-b");
+			const registryB = new ModelRegistry(authStorage, modelsJsonPath, {
+				fetch: async () => new Response("upstream down", { status: 503 }),
+			});
+			await registryB.refreshProvider("featherless", "online");
+
+			expect(registryB.find("featherless", "plan-a/only")).toBeUndefined();
+			expect(registryB.getProviderModelTotal("featherless")).toBeUndefined();
+
+			// The failed refresh must not have laundered key A's rows into key B's
+			// cache identity either.
+			const offlineB = new ModelRegistry(authStorage, modelsJsonPath, {
+				fetch: () => {
+					throw new Error("offline hydration must not fetch");
+				},
+			});
+			await offlineB.refresh("offline");
+			expect(offlineB.find("featherless", "plan-a/only")).toBeUndefined();
 		});
 
 		test("searches and merges bounded Featherless results into an initially empty provider", async () => {

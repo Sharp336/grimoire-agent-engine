@@ -195,8 +195,8 @@ export class ModelRegistry {
 	#lastDiscoveryWarnings: Map<string, string> = new Map();
 	#searchableBuiltInProviders?: ReadonlySet<string>;
 	#providerModelTotals: Map<string, number> = new Map();
-	/** Tail of each provider's in-flight search-merge chain; see `#mergeSearchedProviderModels`. */
-	#providerSearchMerges: Map<string, Promise<void>> = new Map();
+	/** Tail of each provider's serialized discovery chain; see `#withProviderDiscoveryLock`. */
+	#providerDiscoveryLocks: Map<string, Promise<void>> = new Map();
 	// Runtime extension model overlays — persist across refresh() cycles so that
 	// models registered by extensions survive the model selector's offline reload.
 	#runtimeModelOverlays: CustomModelOverlay[] = [];
@@ -383,24 +383,52 @@ export class ModelRegistry {
 	}
 
 	async refreshProvider(providerId: string, strategy: ModelRefreshStrategy = "online"): Promise<void> {
-		this.#reloadStaticModels();
-		for (const selector of this.#suppressedSelectors.keys()) {
-			if (selector.startsWith(`${providerId}/`)) {
-				this.#suppressedSelectors.delete(selector);
+		await this.#withProviderDiscoveryLock(providerId, async () => {
+			this.#reloadStaticModels();
+			for (const selector of this.#suppressedSelectors.keys()) {
+				if (selector.startsWith(`${providerId}/`)) {
+					this.#suppressedSelectors.delete(selector);
+				}
 			}
-		}
-		await this.#refreshRuntimeDiscoveries(strategy, new Set([providerId]));
-		// #reloadStaticModels above may have rebuilt #models from static sources,
-		// dropping models previously discovered by OTHER runtime providers (their
-		// fetchDynamicModels results live only in #models + the SQLite cache, not
-		// in #loadModels' static inputs). Restore them from cache with the default
-		// online-if-uncached strategy: no network while their cached row is
-		// fresh, so the scoped refresh above stays the only forced fetch.
-		const otherRuntimeProviderIds = new Set(
-			[...this.#runtimeModelManagers.keys()].filter(runtimeId => runtimeId !== providerId),
+			await this.#refreshRuntimeDiscoveries(strategy, new Set([providerId]));
+			// #reloadStaticModels above may have rebuilt #models from static sources,
+			// dropping models previously discovered by OTHER runtime providers (their
+			// fetchDynamicModels results live only in #models + the SQLite cache, not
+			// in #loadModels' static inputs). Restore them from cache with the default
+			// online-if-uncached strategy: no network while their cached row is
+			// fresh, so the scoped refresh above stays the only forced fetch.
+			const otherRuntimeProviderIds = new Set(
+				[...this.#runtimeModelManagers.keys()].filter(runtimeId => runtimeId !== providerId),
+			);
+			if (otherRuntimeProviderIds.size > 0) {
+				await this.#refreshRuntimeDiscoveries("online-if-uncached", otherRuntimeProviderIds);
+			}
+		});
+	}
+
+	/**
+	 * Run one catalog-mutating discovery at a time per provider.
+	 *
+	 * A refresh and a bounded search both read the accumulated state (live
+	 * snapshot plus the provider's cache row) and then authoritatively replace
+	 * it. The model hub starts an empty provider's initial refresh the moment it
+	 * is selected and a debounced remote search as soon as the user types, so
+	 * unserialized the slower writer replays its pre-merge snapshot and drops
+	 * the other's models from both the registry and the offline cache.
+	 */
+	async #withProviderDiscoveryLock<T>(providerId: string, run: () => Promise<T>): Promise<T> {
+		const task = (this.#providerDiscoveryLocks.get(providerId) ?? Promise.resolve()).then(run);
+		// The queue tail must never reject, or the next waiter would inherit the
+		// failure instead of running.
+		const tail = task.then(
+			() => {},
+			() => {},
 		);
-		if (otherRuntimeProviderIds.size > 0) {
-			await this.#refreshRuntimeDiscoveries("online-if-uncached", otherRuntimeProviderIds);
+		this.#providerDiscoveryLocks.set(providerId, tail);
+		try {
+			return await task;
+		} finally {
+			if (this.#providerDiscoveryLocks.get(providerId) === tail) this.#providerDiscoveryLocks.delete(providerId);
 		}
 	}
 
@@ -457,19 +485,17 @@ export class ModelRegistry {
 	/**
 	 * Fold one bounded search result into the live snapshot and the provider cache.
 	 *
-	 * Serialized per provider: the snapshot read, the merge, and the
-	 * authoritative replacement must not interleave with another search for the
-	 * same provider. The model hub releases overlapping debounced queries, and
-	 * two searches reading the pre-merge snapshot would each replace the
-	 * provider with their own result — dropping the other's models from both the
-	 * registry and the offline cache.
+	 * Runs under the provider's discovery lock: the snapshot read, the merge and
+	 * the authoritative replacement must not interleave with another search or
+	 * with a provider refresh. Only the remote fetch above stays outside the
+	 * lock — it touches neither the snapshot nor the cache.
 	 */
 	async #mergeSearchedProviderModels(
 		options: ModelManagerOptions<Api>,
 		searchedModels: readonly ModelSpec<Api>[],
 	): Promise<void> {
 		const providerId = options.providerId;
-		const merge = (this.#providerSearchMerges.get(providerId) ?? Promise.resolve()).then(async () => {
+		await this.#withProviderDiscoveryLock(providerId, async () => {
 			this.#ensureFullSnapshot();
 			const mergedSpecs = new Map<string, ModelSpec<Api>>();
 			for (const model of this.#unprojectedModels) {
@@ -486,15 +512,6 @@ export class ModelRegistry {
 			);
 			this.#mergeDiscoveredModels(discovery.models, new Set([providerId]));
 		});
-		// The queue tail must never reject, or the next waiter would inherit the
-		// failure instead of running.
-		const tail = merge.catch(() => {});
-		this.#providerSearchMerges.set(providerId, tail);
-		try {
-			await merge;
-		} finally {
-			if (this.#providerSearchMerges.get(providerId) === tail) this.#providerSearchMerges.delete(providerId);
-		}
 	}
 
 	/**

@@ -204,9 +204,6 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		? passModelList<TApi>(options.staticModels)
 		: (getBundledModels(options.providerId as GeneratedProvider) as Model<TApi>[]);
 	const cache = readModelCache<TApi>(cacheProviderId, ttlMs, now, dbPath);
-	if (cache?.reportedTotal !== undefined) {
-		options.restoreReportedModelTotal?.(cache.reportedTotal);
-	}
 	const restoredCache = restoreCachedModelHeaders(
 		cache?.models ?? [],
 		staticModels,
@@ -230,6 +227,17 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			? `${saltedStaticCatalogFingerprint}:drop:${Bun.hash(cacheDropIds.join("\0")).toString(36)}`
 			: saltedStaticCatalogFingerprint;
 	const cacheFingerprintMatches = cache?.staticFingerprint === staticFingerprint && staticFingerprint.length > 0;
+	// A provider-owned salt IS cache identity — Featherless folds the credential
+	// whose plan filtered the rows into it. A mismatch means the row belongs to a
+	// different identity, so neither its models nor its reported total may be
+	// hydrated. Without this, a provider with no static catalog leaks the other
+	// identity's rows through the offline/failed-fetch path, where
+	// `prepareCacheModelsForStaticMismatch` retains every dynamic-only model.
+	const cacheIdentityMatches = options.cacheFingerprintSalt === undefined || cacheFingerprintMatches;
+	const identityScopedCachedModels = cacheIdentityMatches ? usableCachedModels : [];
+	if (cacheIdentityMatches && cache?.reportedTotal !== undefined) {
+		options.restoreReportedModelTotal?.(cache.reportedTotal);
+	}
 	const cacheNeedsModelMigration =
 		!cacheFingerprintMatches &&
 		cacheDropIds !== undefined &&
@@ -280,7 +288,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const cacheModels = dynamicFetchSucceeded
 		? preservedCacheModels
 		: prepareCacheModelsForStaticMismatch(
-				usableCachedModels,
+				identityScopedCachedModels,
 				staticModels,
 				cacheFingerprintMatches,
 				options.dropCachedModelIdsOnStaticMismatch,
@@ -340,11 +348,18 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			const latestUsableCacheModels = latestRestoredCache.models.filter(
 				model => !latestRestoredCache.unresolvedModelIds.has(model.id),
 			);
+			// The snapshot below is rewritten under the CURRENT fingerprint, so rows
+			// left by another cache identity would be laundered into this one and
+			// served for the rest of the TTL. Keep them only when the row on disk
+			// still belongs to this identity.
+			const latestCacheIdentityMatches =
+				options.cacheFingerprintSalt === undefined ||
+				(latestCache ?? cache)?.staticFingerprint === staticFingerprint;
 			const fallbackSnapshotModels = collapseBuiltModelVariants(
 				mergeDynamicModels(
 					mergeModelSources(staticModels, modelsDevModels),
 					prepareCacheModelsForStaticMismatch(
-						latestUsableCacheModels,
+						latestCacheIdentityMatches ? latestUsableCacheModels : [],
 						staticModels,
 						cacheFingerprintMatches,
 						options.dropCachedModelIdsOnStaticMismatch,
@@ -360,7 +375,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 				dbPath,
 				staticModels,
 				restorableHeaderFallback,
-				latestCache?.reportedTotal ?? cache?.reportedTotal,
+				latestCacheIdentityMatches ? (latestCache?.reportedTotal ?? cache?.reportedTotal) : undefined,
 			);
 		}
 	}
