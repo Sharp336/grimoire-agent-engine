@@ -1315,7 +1315,7 @@ export function buildParams(
 	if (model.compat.isVercelGatewayHost) {
 		applyVercelResponsesCacheControls(params, model.compat, cacheRetention);
 	} else {
-		applyOpenAIGatewayRouting(params, model.compat);
+		applyOpenAIGatewayRouting(params, model.compat, true, model.provider);
 	}
 
 	applyOpenAIExtraBody(params, options?.extraBody);

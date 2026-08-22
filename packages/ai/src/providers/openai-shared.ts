@@ -639,16 +639,41 @@ export interface OpenAIGatewayRoutingCompat {
 	vercelGatewayRouting?: VercelGatewayRouting;
 }
 
+let openRouterOrderSessionAffinityWarned = false;
+
+/**
+ * Warn once per process that a manual `provider.order` disables OpenRouter's
+ * session-affinity endpoint prioritization (openrouter-web
+ * `prioritize-endpoints-by-session` skips reordering when manual order is set),
+ * degrading prompt-cache hit rate.
+ */
+function warnOpenRouterOrderSkipsSessionAffinity(): void {
+	if (openRouterOrderSessionAffinityWarned) return;
+	openRouterOrderSessionAffinityWarned = true;
+	logger.warn(
+		"OpenRouter: provider.order is set — upstream skips session-affinity endpoint prioritization while " +
+			"a manual order is active, so prompt-cache hit rate degrades across endpoints. Rely on session " +
+			"affinity for sticky routing, or accept cold caches on failover.",
+	);
+}
+
 /**
  * Apply gateway routing preferences to the request body. OpenRouter routes via
  * the top-level `provider` field; the Vercel AI Gateway routes Chat
  * Completions through `providerOptions.gateway`.
+ *
+ * When an OpenRouter model carries a non-empty `provider.order`, upstream skips
+ * its session-affinity endpoint prioritization step, so warn once per process.
  */
 export function applyOpenAIGatewayRouting(
 	params: OpenAIGatewayRoutingParams,
 	compat: OpenAIGatewayRoutingCompat,
 	cacheEnabled = true,
+	modelProvider?: string,
 ): void {
+	if (modelProvider === "openrouter" && compat.openRouterRouting?.order && compat.openRouterRouting.order.length > 0) {
+		warnOpenRouterOrderSkipsSessionAffinity();
+	}
 	if (compat.isOpenRouterHost && compat.openRouterRouting) {
 		params.provider = compat.openRouterRouting;
 	}
@@ -764,6 +789,7 @@ export type OpenAICompletionsParams = Omit<ChatCompletionCreateParamsStreaming, 
 	reasoning_effort?: string | null;
 	service_tier?: ServiceTier;
 	tool_stream?: boolean;
+	session_id?: string;
 	provider?: OpenAICompat["openRouterRouting"];
 	providerOptions?: { gateway?: { only?: string[]; order?: string[] } };
 };
