@@ -674,6 +674,44 @@ describe("hindsightBackend live bank routing", () => {
 		expect(next?.config.retainStrategy).toBe("personal_chat");
 	});
 
+	it("propagates retainStrategy to live subagent aliases without rebuilding", async () => {
+		vi.spyOn(HindsightApi.prototype, "createBank").mockResolvedValue({} as never);
+		const settings = Settings.isolated({
+			"memory.backend": "hindsight",
+			"hindsight.apiUrl": "http://localhost:8888",
+		});
+		settings.set("hindsight.scoping", "global");
+		const parentSession = makeFakeSession({ sessionId: "s-parent", settings });
+		const aliasSession = makeFakeSession({ sessionId: "s-alias", settings });
+
+		await hindsightBackend.start({
+			session: parentSession as never,
+			settings,
+			modelRegistry: {} as never,
+			agentDir: "/tmp",
+			taskDepth: 0,
+		});
+		const parent = parentSession.getHindsightSessionState();
+		expect(parent).toBeDefined();
+
+		await hindsightBackend.start({
+			session: aliasSession as never,
+			settings,
+			modelRegistry: {} as never,
+			agentDir: "/tmp",
+			taskDepth: 1,
+			parentHindsightSessionState: parent,
+		});
+
+		settings.set("hindsight.retainStrategy", "personal_chat");
+		await Bun.sleep(0);
+
+		expect(parentSession.getHindsightSessionState()).toBe(parent);
+		expect(parent?.config.retainStrategy).toBe("personal_chat");
+		expect(aliasSession.getHindsightSessionState()?.aliasOf).toBe(parent);
+		expect(aliasSession.getHindsightSessionState()?.config.retainStrategy).toBe("personal_chat");
+	});
+
 	it("does not rebuild when the bank-routing setting is rewritten with the same value", async () => {
 		vi.spyOn(HindsightApi.prototype, "createBank").mockResolvedValue({} as never);
 		const settings = Settings.isolated({
