@@ -197,11 +197,19 @@ export interface DaemonOutputWireNotification extends DaemonOutputNotification {
 	registrationId: string;
 }
 
-/** Terminal process state for a monitor whose owner is not the process owner. */
+/** Terminal process state for a registered output monitor. */
 export interface DaemonMonitorCompletionNotification {
 	event: "daemon-monitor-completed";
 	monitorId: string;
 	daemon: DaemonSnapshot;
+	/**
+	 * True when the broker emitted (or queued) a `daemon-completed`
+	 * notification to the daemon's owner for this settlement. False when no
+	 * owner completion covered it (e.g. the daemon was stopped by another
+	 * client), so an owner-session monitor must synthesize its own terminal
+	 * notification instead of waiting for one that will never arrive.
+	 */
+	ownerNotified?: boolean;
 }
 
 /** Socket form of monitor completion, scoped to the exact advertised registration. */
@@ -492,6 +500,10 @@ export function parseDaemonWireMessage(value: unknown): DaemonWireMessage {
 			monitorId: stringValue(source.monitorId, "monitor completion.monitorId"),
 			registrationId: stringValue(source.registrationId, "monitor completion.registrationId"),
 			daemon: parseDaemonSnapshot(source.daemon),
+			ownerNotified:
+				source.ownerNotified === undefined
+					? undefined
+					: booleanValue(source.ownerNotified, "monitor completion.ownerNotified"),
 		};
 	}
 	if (source.event === "daemon-monitor-expired") {

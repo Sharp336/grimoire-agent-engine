@@ -104,6 +104,13 @@ interface ManagedDaemon {
 	pty?: PtySession;
 	generation: number;
 	stopRequested: boolean;
+	/**
+	 * True when the record's last settlement emitted (or queued) a
+	 * `daemon-completed` notification for its owner; forwarded on
+	 * `daemon-monitor-completed` so owner-session monitors know whether a
+	 * separate owner completion covers the terminal state.
+	 */
+	ownerCompletionEmitted: boolean;
 	logReady: boolean;
 	portReady: boolean;
 	readinessBuffer: string;
@@ -826,6 +833,7 @@ class DaemonBroker {
 				log: await DaemonLog.open(dir),
 				generation: 0,
 				stopRequested: false,
+				ownerCompletionEmitted: false,
 				logReady: !spec.ready?.log,
 				portReady: spec.ready?.port === undefined,
 				readinessBuffer: "",
@@ -872,6 +880,7 @@ class DaemonBroker {
 		record.generation++;
 		const generation = record.generation;
 		record.stopRequested = false;
+		record.ownerCompletionEmitted = false;
 		record.snapshot.state = record.spec.ready ? "starting" : "running";
 		record.snapshot.startedAt = Date.now();
 		record.snapshot.readyAt = undefined;
@@ -1365,6 +1374,7 @@ class DaemonBroker {
 				monitorId: registration.id,
 				registrationId: registration.registrationId,
 				daemon: { ...record.snapshot },
+				ownerNotified: record.ownerCompletionEmitted,
 			});
 		}
 	}
@@ -1589,6 +1599,7 @@ class DaemonBroker {
 					} satisfies DaemonCompletionNotification)
 				: undefined;
 		if (completion) record.pendingCompletions.push(completion);
+		record.ownerCompletionEmitted = completion !== undefined;
 		this.#persist(record);
 		await record.log?.close();
 		record.log = undefined;
@@ -1820,6 +1831,7 @@ class DaemonBroker {
 			spec: record.spec,
 			completionEvents: record.completionCapable,
 			completionSubscriptionId: record.completionSubscriptionId,
+			ownerNotified: record.ownerCompletionEmitted,
 			completionPending: record.pendingCompletions.length > 0,
 			pendingCompletion: record.pendingCompletions.at(-1)?.daemon,
 			pendingCompletions: record.pendingCompletions.map(completion => ({
@@ -1901,6 +1913,7 @@ class DaemonBroker {
 					dir,
 					generation: 0,
 					stopRequested: !detached || snapshot.state === "stopping",
+					ownerCompletionEmitted: "ownerNotified" in decoded && decoded.ownerNotified === true,
 					logReady: detached && (!spec.ready?.log || snapshot.state === "ready"),
 					portReady: detached && (spec.ready?.port === undefined || snapshot.state === "ready"),
 					readinessBuffer: "",
@@ -1955,6 +1968,7 @@ class DaemonBroker {
 						daemon: { ...snapshot },
 					});
 				}
+				if (record.pendingCompletions.length > 0) record.ownerCompletionEmitted = true;
 				syncReadyPending(record);
 				this.#records.set(snapshot.name, record);
 				if (snapshot.owner && record.completionCapable && (detached || record.pendingCompletions.length > 0)) {

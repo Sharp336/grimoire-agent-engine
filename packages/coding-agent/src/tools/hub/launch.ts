@@ -186,7 +186,14 @@ async function registerOutputSink(
 			return;
 		}
 		await registration.cleanup();
-		if (notification.daemon.owner === owner) return;
+		// The owner session receives the real daemon-completed through its
+		// completion subscription, so a synthesized one would duplicate it — but
+		// only when the broker actually emitted one. A stop issued by another
+		// client (or a settlement without a completion subscription) sets
+		// ownerNotified=false and this terminal notification is then the only
+		// signal the monitoring session will ever get. An absent flag means an
+		// older broker: keep the historical suppression.
+		if (notification.daemon.owner === owner && notification.ownerNotified !== false) return;
 		await session.queueLaunchCompletion?.({
 			event: "daemon-completed",
 			completionId: `monitor:${id}:${notification.daemon.id}:${notification.daemon.exitedAt ?? Date.now()}`,

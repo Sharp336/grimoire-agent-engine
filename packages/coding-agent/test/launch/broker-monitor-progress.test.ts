@@ -225,9 +225,12 @@ process.stdin.once("data", () => {
 			);
 			expect(output.map(notification => notification.truncated)).toEqual([false, true]);
 			expect(output.map(notification => notification.seq)).toEqual([1, 2]);
+			// No completion subscription exists for owner-1, so the broker must
+			// mark the terminal notification as not owner-covered.
 			expect(notifications.at(-1)).toMatchObject({
 				event: "daemon-monitor-completed",
 				daemon: { name: "watched", state: "exited", exitCode: 0 },
+				ownerNotified: false,
 			});
 			expect(entered).toEqual(["daemon-output:1", "daemon-output:2", "daemon-monitor-completed"]);
 		} finally {

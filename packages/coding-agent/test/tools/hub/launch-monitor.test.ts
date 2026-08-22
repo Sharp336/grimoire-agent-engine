@@ -373,6 +373,55 @@ describe("hub process output monitoring", () => {
 		expect(harness.completions).toEqual([]);
 	});
 
+	it("suppresses the synthesized completion when the broker confirmed the owner was notified", async () => {
+		const harness = createHarness();
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+
+		await executeLaunch(harness.session, { op: "monitor", name: daemon.name, progress: "wake" });
+		const subscription = harness.getSubscription();
+		if (!subscription) throw new Error("Expected output subscription");
+		await harness.getOutputSink()?.({
+			event: "daemon-monitor-completed",
+			monitorId: subscription.id,
+			daemon: { ...daemon, state: "exited", pid: undefined, exitedAt: 3, exitCode: 0 },
+			ownerNotified: true,
+		});
+
+		expect(harness.unregisterCount()).toBe(1);
+		expect(harness.active.at(-1)).toEqual({ monitorId: subscription.id, delivery: "wake", active: false });
+		expect(harness.completions).toEqual([]);
+	});
+
+	it("delivers a terminal completion when a stop bypassed the owner notification", async () => {
+		const harness = createHarness();
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+
+		await executeLaunch(harness.session, { op: "monitor", name: daemon.name, progress: "wake" });
+		const subscription = harness.getSubscription();
+		if (!subscription) throw new Error("Expected output subscription");
+		// Another client stopped the daemon: the broker skipped the owner
+		// completion (stopRequested) and this monitor notification is the only
+		// terminal signal the owning session will ever receive.
+		const stopped: DaemonSnapshot = { ...daemon, state: "exited", pid: undefined, exitedAt: 3, exitCode: 143 };
+		await harness.getOutputSink()?.({
+			event: "daemon-monitor-completed",
+			monitorId: subscription.id,
+			daemon: stopped,
+			ownerNotified: false,
+		});
+
+		expect(harness.unregisterCount()).toBe(1);
+		expect(harness.active.at(-1)).toEqual({ monitorId: subscription.id, delivery: "wake", active: false });
+		expect(harness.completions).toEqual([
+			{
+				event: "daemon-completed",
+				completionId: `monitor:${subscription.id}:${stopped.id}:3`,
+				owner: OWNER,
+				daemon: stopped,
+			},
+		]);
+	});
+
 	it("buffers speculative progress until the start is retained, then flushes it", async () => {
 		const harness = createHarness();
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
