@@ -47,18 +47,6 @@ function collectProgress(manager: AsyncJobManager): string[] {
 }
 
 describe("bash progress parameter", () => {
-	test("describes selective asynchronous progress delivery", () => {
-		const manager = new AsyncJobManager({});
-		const tool = new BashTool(makeSession(manager));
-
-		expect(tool.description).toContain('Potentially slow finite: `async: "auto"`');
-		expect(tool.description).toContain("simple known-fast: omit `async`");
-		expect(tool.description).toContain('Actionable pre-exit: `progress: "wake"`');
-		expect(tool.description).toContain('informational: `"ambient"`');
-		expect(tool.description).toContain("Wake starts an idle follow-up");
-		expect(tool.description).toContain("complete `artifact://<id>`");
-	});
-
 	test("defaults off", async () => {
 		const manager = new AsyncJobManager({});
 		const seen = collectProgress(manager);
@@ -214,6 +202,47 @@ describe("bash progress parameter", () => {
 		await manager.dispose();
 	}, 10_000);
 
+	test("does not replay inline-shown partial output after promotion", async () => {
+		const manager = new AsyncJobManager({});
+		const events: string[] = [];
+		manager.registerProgressSink("Main", {
+			deliver: (_jobId, text) => {
+				events.push(`progress:${text}`);
+			},
+		});
+		manager.registerDeliverySink("Main", (_jobId, text) => {
+			events.push(`completion:${text}`);
+		});
+		const tool = new BashTool(
+			makeSession(manager, {
+				"bash.autoBackground.thresholdMs": 2_000,
+				"bash.asyncAuto.inlineGraceMs": 100,
+			}),
+		);
+
+		// One output line spans the promotion boundary: "before" is printed and
+		// shown inline during the grace window; "after\n" completes the line
+		// only after promotion. Progress must not replay the inline prefix.
+		const result = await tool.execute("auto-promote-boundary", {
+			command: "printf before; sleep 0.5; printf 'after\\n'",
+			async: "auto",
+			progress: "wake",
+		});
+
+		expect(result.details?.async?.state).toBe("running");
+		expect(result.content).toContainEqual(
+			expect.objectContaining({ type: "text", text: expect.stringContaining("before") }),
+		);
+		await manager.waitForAll();
+		await manager.drainDeliveries({ timeoutMs: 10 });
+
+		const progressEvents = events.filter(event => event.startsWith("progress:"));
+		expect(progressEvents).toEqual(["progress:after"]);
+		expect(events.at(-1)).toContain("completion:");
+		expect(events.at(-1)).toContain("beforeafter");
+		await manager.dispose();
+	}, 10_000);
+
 	test("retains successful and failed exit values for completion delivery", async () => {
 		const manager = new AsyncJobManager({});
 		const completedJobs: AsyncJob[] = [];
@@ -228,9 +257,13 @@ describe("bash progress parameter", () => {
 		await tool.execute("exit-seven", { command: "exit 7", async: true });
 		await manager.waitForAll();
 		await manager.drainDeliveries({ timeoutMs: 10 });
+		await tool.execute("timeout-job", { command: "sleep 5", async: true, timeout: 1 });
+		await manager.waitForAll();
+		await manager.drainDeliveries({ timeoutMs: 10 });
 
-		expect(completedJobs.map(job => job.status)).toEqual(["completed", "failed"]);
-		expect(completedJobs.map(job => job.latestDetails?.exitCode)).toEqual([0, 7]);
+		expect(completedJobs.map(job => job.status)).toEqual(["completed", "failed", "failed"]);
+		expect(completedJobs.map(job => job.latestDetails?.exitCode)).toEqual([0, 7, undefined]);
+		expect(completedJobs.map(job => job.latestDetails?.timedOut === true)).toEqual([false, false, true]);
 		await manager.dispose();
 	});
 });

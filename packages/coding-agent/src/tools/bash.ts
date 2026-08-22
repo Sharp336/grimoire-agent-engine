@@ -835,6 +835,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 
 		const label = options.command.length > 120 ? `${options.command.slice(0, 117)}...` : options.command;
 		let latestText = "";
+		let progressSampler: ProgressLines | undefined;
 		let forwardUpdates = options.forwardUpdates;
 		const completion = Promise.withResolvers<ManagedBashJobCompletion>();
 
@@ -854,6 +855,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 								}),
 							)
 						: undefined;
+				progressSampler = progressLines;
 				const wallTimeStart = performance.now();
 				let exitCode: number | undefined;
 				let timedOut = false;
@@ -939,7 +941,15 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			stopUpdates: () => {
 				forwardUpdates = false;
 			},
-			activateProgress: delivery => manager.activateProgressDelivery(jobId, delivery),
+			activateProgress: delivery => {
+				// Progress must start at the promotion boundary. The sampler has
+				// been fed since process start (its complete lines were dropped
+				// while delivery was inactive), so a partial line buffered during
+				// the inline grace would otherwise replay output already shown in
+				// the foreground result once its remainder arrives. Drop it.
+				progressSampler?.reset();
+				return manager.activateProgressDelivery(jobId, delivery);
+			},
 		};
 	}
 
