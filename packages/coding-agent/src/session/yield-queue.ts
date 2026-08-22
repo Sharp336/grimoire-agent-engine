@@ -138,6 +138,30 @@ export class YieldQueue {
 		return false;
 	}
 
+	/**
+	 * Remove and return queued entries matching `predicate`, e.g. to promote
+	 * them to a kind that participates in the idle flush. Entries carrying a
+	 * settlement receipt stay queued — their resolve/reject must observe their
+	 * own dispatch.
+	 */
+	take<P>(kind: string, predicate: (entry: P) => boolean): P[] {
+		const entries = this.#entries.get(kind);
+		if (!entries || entries.length === 0) return [];
+		const taken: P[] = [];
+		const kept: StoredEntry[] = [];
+		for (const entry of entries) {
+			if (entry.resolve === undefined && entry.reject === undefined && predicate(entry.value as P)) {
+				taken.push(entry.value as P);
+			} else {
+				kept.push(entry);
+			}
+		}
+		if (taken.length === 0) return taken;
+		if (kept.length === 0) this.#entries.delete(kind);
+		else this.#entries.set(kind, kept);
+		return taken;
+	}
+
 	/** Arrange an idle flush for entries queued near the end of a streaming run. */
 	requestIdleFlush(): void {
 		for (const [kind, dispatcher] of this.#dispatchers) {

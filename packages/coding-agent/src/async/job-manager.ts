@@ -107,10 +107,13 @@ function mergeAsyncJobProgressRecords(
 		buildProgressPreview(left.text, left.truncated),
 		buildProgressPreview(right.text, right.truncated),
 	);
+	const suppressedEvents = (left.suppressedEvents ?? 0) + (right.suppressedEvents ?? 0);
 	return {
 		text: flattenPreviewText(preview),
 		artifactId: right.artifactId ?? left.artifactId,
 		truncated: preview.truncated,
+		suppressedEvents: suppressedEvents || undefined,
+		reminder: right.reminder ?? left.reminder,
 	};
 }
 
@@ -619,7 +622,11 @@ export class AsyncJobManager {
 			return;
 		if (job.ownerId === undefined || !this.#progressSinks.has(job.ownerId)) return;
 		if (info.artifactId) job.progressArtifactId = info.artifactId;
-		this.#progressBatcher.push(job.id, { text, artifactId: info.artifactId, truncated: info.truncated });
+		// Upstream producers (e.g. broker monitor batches) may arrive already
+		// rate-limited: carry their suppression metadata into the record so this
+		// second batcher's merge preserves the suppressed-event count and any
+		// chatty-monitor reminder instead of silently dropping them.
+		this.#progressBatcher.push(job.id, { text, ...info });
 	}
 
 	async #deliverAgentProgress(jobId: string, batch: ProgressBatch<AsyncJobProgressRecord>): Promise<void> {
@@ -630,15 +637,22 @@ export class AsyncJobManager {
 		if (batch.kind === "artifact-only") return;
 		const sink = job.ownerId === undefined ? undefined : this.#progressSinks.get(job.ownerId);
 		if (!sink) return;
+		const recordSuppressedEvents = batch.values.reduce((total, record) => total + (record.suppressedEvents ?? 0), 0);
+		const suppressedEvents = batch.suppressedEvents + recordSuppressedEvents;
 		const info: AsyncJobProgressInfo = {
 			artifactId:
 				batch.values.findLast(record => record.artifactId !== undefined)?.artifactId ?? job.progressArtifactId,
-			truncated: batch.suppressedEvents > 0 || batch.values.some(record => record.truncated === true),
-			suppressedEvents: batch.suppressedEvents || undefined,
-			reminder: batch.reminder,
+			truncated: suppressedEvents > 0 || batch.values.some(record => record.truncated === true),
+			suppressedEvents: suppressedEvents || undefined,
+			reminder: batch.reminder ?? batch.values.findLast(record => record.reminder !== undefined)?.reminder,
 		};
 		try {
 			await sink.deliver(jobId, batch.values.map(record => record.text).join("\n"), job, batch.seq, info);
+			// An ambient sink may only ENQUEUE this batch while the owner is
+			// idle; that still counts as delivered because the owner folds any
+			// still-queued ambient progress into the completion-triggered flush
+			// ahead of the result (AgentSession's async-result sink), so a
+			// completion never outruns output this counter claims was delivered.
 			job.progressDeliveredCount = (job.progressDeliveredCount ?? 0) + 1;
 		} catch (error) {
 			logger.warn("Async job progress delivery failed", {
@@ -669,12 +683,13 @@ export class AsyncJobManager {
 			await this.#flushAgentProgress(job.id);
 			return;
 		}
-		const pending = this.#progressBatcher.takePending(job.id);
+		const pending = await this.#progressBatcher.takePending(job.id);
 		if (!pending) return;
 		const record = pending.values[0];
-		const sourceTruncated = pending.suppressedEvents > 0 || record?.truncated === true;
+		const suppressedEvents = pending.suppressedEvents + (record?.suppressedEvents ?? 0);
+		const sourceTruncated = suppressedEvents > 0 || record?.truncated === true;
 		const preview = record ? buildLineSnappedPreview(record.text, sourceTruncated) : { truncated: true };
-		job.completionLeftover = { ...preview, suppressedEvents: pending.suppressedEvents || undefined };
+		job.completionLeftover = { ...preview, suppressedEvents: suppressedEvents || undefined };
 	}
 
 	#clearAgentProgress(jobId: string): void {

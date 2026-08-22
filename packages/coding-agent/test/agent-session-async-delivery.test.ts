@@ -408,6 +408,73 @@ describe("AgentSession owner-routed async delivery", () => {
 		await manager.waitForAll();
 	});
 
+	it("folds queued ambient progress into the completion-triggered flush before the result", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const progressMarker = "AMBIENT PROGRESS MARKER";
+		const resultMarker = "AMBIENT RESULT MARKER";
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "Main",
+			ownedAsyncJobManager: manager,
+		});
+
+		const gate = Promise.withResolvers<string>();
+		manager.register("bash", "ambient job", () => gate.promise, {
+			id: "ambient-ordered-job",
+			ownerId: "Main",
+			progressDelivery: "ambient",
+		});
+		const job = manager.getJob("ambient-ordered-job");
+		if (!job) throw new Error("Expected registered ambient job");
+		// Ambient progress delivered while the owner idles sits on the
+		// skip-idle-flush queue without waking the session.
+		session.yieldQueue.enqueue<AsyncProgressEntry>("async-progress", {
+			jobId: job.id,
+			text: progressMarker,
+			job,
+			seq: 1,
+			elapsedMs: 10,
+			epoch: 0,
+			delivery: "ambient",
+		});
+		await Promise.resolve();
+		expect(mock.calls).toHaveLength(0);
+
+		gate.resolve(`finished: ${resultMarker}`);
+		await session.settleAsyncWork();
+
+		// The completion-triggered flush must inject the queued ambient
+		// progress ahead of the completion result that references it.
+		const markerIndex = (messages: (typeof mock.calls)[number]["context"]["messages"], marker: string) =>
+			messages.findIndex(message =>
+				typeof message.content === "string"
+					? message.content.includes(marker)
+					: message.content.some(content => content.type === "text" && content.text.includes(marker)),
+			);
+		const followUp = mock.calls.find(call => markerIndex(call.context.messages, resultMarker) >= 0);
+		if (!followUp) throw new Error("Completion follow-up never reached the model");
+		const progressIndex = markerIndex(followUp.context.messages, progressMarker);
+		const resultIndex = markerIndex(followUp.context.messages, resultMarker);
+		expect(progressIndex).toBeGreaterThanOrEqual(0);
+		expect(resultIndex).toBeGreaterThan(progressIndex);
+	}, 10_000);
+
 	it("pushes wake progress into an idle session before the job completes", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const marker = "WAKE PROGRESS BEFORE COMPLETION";

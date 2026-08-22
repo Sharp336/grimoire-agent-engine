@@ -2011,6 +2011,20 @@ export class AgentSession {
 		if (epoch !== this.#asyncDeliveryEpoch) return;
 		if (manager.isDeliverySuppressed(jobId)) return;
 		const durationMs = job ? Math.max(0, Date.now() - job.startTime) : undefined;
+		// Ambient progress queued while this owner sat idle would be skipped by
+		// the completion-triggered idle flush (its queue registers with
+		// `skipIdleFlush`) and could inject only on a later turn — after the
+		// completion that references it, whose progressSummary may even claim
+		// the output was already delivered. Promote it to the wake queue: that
+		// kind registers ahead of async-result, so the flush injects the
+		// remaining progress before the completion result.
+		const queuedProgress = this.yieldQueue.take<AsyncProgressEntry>(
+			ASYNC_PROGRESS_MESSAGE_TYPE,
+			entry => entry.jobId === jobId,
+		);
+		for (const entry of queuedProgress) {
+			this.yieldQueue.enqueue<AsyncProgressEntry>(ASYNC_PROGRESS_WAKE_QUEUE_KIND, entry);
+		}
 		this.yieldQueue.enqueue<AsyncResultEntry>("async-result", {
 			jobId,
 			result: formatted,

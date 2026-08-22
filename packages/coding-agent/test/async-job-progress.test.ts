@@ -293,4 +293,104 @@ describe("AsyncJobManager model progress", () => {
 		expect(job.completionLeftover).toEqual({ text: "leftover line", truncated: false, suppressedEvents: undefined });
 		expect(completions).toEqual(["full result body"]);
 	});
+
+	test("carries upstream suppression metadata into the delivered batch", async () => {
+		vi.useFakeTimers();
+		const manager = new AsyncJobManager({});
+		const recorder = recordingSink();
+		manager.registerProgressSink("Main", recorder.sink);
+		const gate = Promise.withResolvers<void>();
+		const started = Promise.withResolvers<(text: string, info?: AsyncJobProgressInfo) => void>();
+		const jobId = manager.register(
+			"bash",
+			"pre-limited",
+			async ({ reportAgentProgress }) => {
+				started.resolve(reportAgentProgress);
+				await gate.promise;
+				return "done";
+			},
+			{ ownerId: "Main", progressDelivery: "ambient" },
+		);
+		const report = await started.promise;
+
+		// Upstream batches arrive already rate-limited (e.g. broker monitor
+		// windows); their suppression metadata must survive merge and delivery.
+		report("window a", { suppressedEvents: 4, reminder: "chatty-monitor" });
+		report("window b", { suppressedEvents: 2 });
+		vi.advanceTimersByTime(200);
+
+		expect(recorder.seen).toEqual([
+			{
+				jobId,
+				text: "window a\nwindow b",
+				seq: 1,
+				truncated: true,
+				suppressedEvents: 6,
+				reminder: "chatty-monitor",
+			},
+		]);
+
+		gate.resolve();
+		await manager.waitForAll();
+	});
+
+	test("settlement waits for an in-flight progress delivery before completing", async () => {
+		const order: string[] = [];
+		const manager = new AsyncJobManager({});
+		const firstDelivered = Promise.withResolvers<void>();
+		const secondStarted = Promise.withResolvers<void>();
+		const releaseSecond = Promise.withResolvers<void>();
+		manager.registerProgressSink("Main", {
+			deliver: async (_jobId, text) => {
+				if (text === "first") {
+					order.push("progress:first");
+					firstDelivered.resolve();
+					return;
+				}
+				order.push("progress:second:start");
+				secondStarted.resolve();
+				await releaseSecond.promise;
+				order.push("progress:second:end");
+			},
+		});
+		manager.registerDeliverySink("Main", () => {
+			order.push("completion");
+		});
+		const gate = Promise.withResolvers<void>();
+		const started = Promise.withResolvers<(text: string, info?: AsyncJobProgressInfo) => void>();
+		const jobId = manager.register(
+			"bash",
+			"in-flight",
+			async ({ reportAgentProgress }) => {
+				started.resolve(reportAgentProgress);
+				await gate.promise;
+				return "done";
+			},
+			{ ownerId: "Main", progressDelivery: "ambient" },
+		);
+		const report = await started.promise;
+
+		report("first", { artifactId: "9" });
+		await firstDelivered.promise;
+		report("second", { artifactId: "9" });
+		await secondStarted.promise;
+
+		gate.resolve();
+		// Settlement must block on the in-flight delivery tail: drain a bounded
+		// run of microtasks (the settle path is promise-only) and confirm the
+		// job has not settled and no completion raced past the held delivery.
+		let settled = false;
+		void manager.getJob(jobId)?.promise.then(() => {
+			settled = true;
+		});
+		for (let i = 0; i < 20; i++) await Promise.resolve();
+		expect(settled).toBe(false);
+		expect(order).toEqual(["progress:first", "progress:second:start"]);
+
+		releaseSecond.resolve();
+		await manager.waitForAll();
+		await manager.drainDeliveries({ timeoutMs: 2_000 });
+		expect(order).toEqual(["progress:first", "progress:second:start", "progress:second:end", "completion"]);
+		expect(manager.getJob(jobId)?.completionLeftover).toBeUndefined();
+	}, 10_000);
 });

@@ -146,11 +146,25 @@ export class ProgressBatcher<T> {
 
 	/**
 	 * Drain undelivered content without delivering it: the pending window plus
-	 * the bounded values retained from rate-limited windows. Used at settlement
-	 * when the caller folds the remainder into the terminal delivery instead of
-	 * racing one final progress batch ahead of it.
+	 * the bounded values retained from rate-limited windows. An already-enqueued
+	 * delivery may still be awaiting its sink; it settles first so its batch
+	 * reaches the sink before the terminal remainder is taken — otherwise a
+	 * completion could observably outrun progress the sink was still handling.
+	 * Used at settlement when the caller folds the remainder into the terminal
+	 * delivery instead of racing one final progress batch ahead of it.
 	 */
-	takePending(id: string): { values: T[]; suppressedEvents: number } | undefined {
+	async takePending(id: string): Promise<{ values: T[]; suppressedEvents: number } | undefined> {
+		for (;;) {
+			const tail = this.#states.get(id)?.deliveryTail;
+			if (!tail) break;
+			await tail.then(
+				() => {},
+				() => {},
+			);
+			// The settle cleanup normally clears/replaces the tail before this
+			// resumes; an unchanged reference means it already settled.
+			if (this.#states.get(id)?.deliveryTail === tail) break;
+		}
 		const state = this.#states.get(id);
 		if (!state) return undefined;
 		const values = this.#takeSuppressedValues(state, state.pending);
