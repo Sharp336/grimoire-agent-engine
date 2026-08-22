@@ -42,6 +42,17 @@ export function resolveKiroModelCacheProviderId(apiKey?: string): string {
 	return `kiro:models-v1:${Bun.hash(identity).toString(36)}`;
 }
 
+const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = {
+	"opencode-go": true,
+	"opencode-zen": true,
+	"github-copilot": true,
+};
+
+/** Whether a provider's model-cache namespace requires its resolved credential. */
+export function isCredentialScopedModelCacheProvider(providerId: string): boolean {
+	return CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS[providerId] === true;
+}
+
 export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | undefined {
 	switch (providerId) {
 		case "ollama":
