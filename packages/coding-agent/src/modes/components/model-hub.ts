@@ -508,10 +508,13 @@ export class ModelHubComponent implements Component {
 		this.#focus = "scope";
 		if (entry.kind === "provider" && !entry.locked) {
 			const providerId = entry.providerId ?? "";
-			const searchable = this.#supportsProviderSearch(providerId);
-			const needsInitialModels = searchable && entry.annotation === "0" && !this.#browser.query.trim();
-			if (!searchable || needsInitialModels) {
+			if (!this.#supportsProviderSearch(providerId)) {
 				this.#scheduleProviderRefresh(providerId);
+			} else if (!autoRefreshedProviders.has(providerId) && !this.#browser.query.trim()) {
+				// Whether the initial page is still missing is tracked by the refresh
+				// itself, not by the row count: a remote search can populate rows
+				// without ever fetching the provider's own first page.
+				this.#scheduleProviderRefresh(providerId, { initialLoad: true });
 			}
 		}
 		this.#scheduleProviderSearch(this.#browser.query);
@@ -741,7 +744,9 @@ export class ModelHubComponent implements Component {
 				const providerId = providerIds[index];
 				const result = results[index];
 				if (!providerId || !result) continue;
-				this.#completedProviderSearches.add(`${providerId}\0${query}`);
+				// A rejected search must stay retryable: recording it as completed
+				// would leave the empty result on screen until the query is edited.
+				if (result.status === "fulfilled") this.#completedProviderSearches.add(`${providerId}\0${query}`);
 				if (result.status === "rejected" && generation === this.#providerSearchGeneration) {
 					this.#configError = result.reason instanceof Error ? result.reason.message : String(result.reason);
 				}
@@ -799,8 +804,12 @@ export class ModelHubComponent implements Component {
 		}
 	}
 
-	#scheduleProviderRefresh(providerId: string, options?: { force?: boolean }): void {
-		if (this.#scopedModels.length > 0 || !providerId) return;
+	#scheduleProviderRefresh(providerId: string, options?: { force?: boolean; initialLoad?: boolean }): void {
+		if (!providerId) return;
+		// Rows already on screen normally mean there is nothing to fetch — except
+		// for a searchable provider whose visible rows came from a remote search
+		// rather than from its own (still unfetched) initial page.
+		if (!options?.initialLoad && this.#scopedModels.length > 0) return;
 		if (this.#scheduledProviderRefreshes.has(providerId) || this.#refreshingProviders.has(providerId)) return;
 		// Hovering a provider must not re-fetch on every visit: auto-refresh runs
 		// at most once per provider for the process lifetime. F5 forces a re-fetch.

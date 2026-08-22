@@ -1180,6 +1180,90 @@ describe("ModelHub", () => {
 			}
 		});
 
+		test("retries a remote search that failed instead of recording it as completed", async () => {
+			vi.useFakeTimers();
+			try {
+				const queries: string[] = [];
+				let failNext = true;
+				const { hub } = createHub({
+					models: [makeModel("featherless", "zai-org/GLM-5.2")],
+					registry: {
+						supportsProviderSearch: providerId => providerId === "featherless",
+						searchProviderModels: async (_providerId, query) => {
+							queries.push(query);
+							if (failNext) {
+								failNext = false;
+								throw new Error("Remote model search failed for featherless");
+							}
+							return 1;
+						},
+					},
+				});
+
+				hub.handleInput(DOWN); // All models → Featherless
+				for (const ch of "qwen") hub.handleInput(ch);
+				vi.advanceTimersByTime(250);
+				await Promise.resolve();
+				await Promise.resolve();
+				expect(queries).toEqual(["qwen"]);
+
+				// Re-entering the same scope must reissue the unchanged query: the
+				// failure left no result to show, so it is not a completed search.
+				hub.handleInput(UP);
+				hub.handleInput(DOWN);
+				vi.advanceTimersByTime(250);
+				await Promise.resolve();
+				await Promise.resolve();
+
+				expect(queries).toEqual(["qwen", "qwen"]);
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		test("fetches the initial page for a provider first populated by a search", async () => {
+			vi.useFakeTimers();
+			try {
+				const models = [makeModel("openrouter", "z-ai/glm-5.2")];
+				const refreshProvider = vi.fn(async () => {
+					models.push(makeModel("featherless", "example/initial"));
+				});
+				const { hub } = createHub({
+					models: () => models,
+					registry: {
+						refreshProvider,
+						getSearchableProviders: () => ["featherless"],
+						supportsProviderSearch: providerId => providerId === "featherless",
+						hasAuth: providerId => providerId === "featherless",
+						searchProviderModels: async () => {
+							models.push(makeModel("featherless", "example/searched"));
+							return 1;
+						},
+					},
+				});
+
+				// A search populates the provider before its own page is ever fetched.
+				for (const ch of "qwen") hub.handleInput(ch);
+				vi.advanceTimersByTime(250);
+				await Promise.resolve();
+				await Promise.resolve();
+				expect(refreshProvider).not.toHaveBeenCalled();
+
+				// Clearing the query and selecting the provider must still load it:
+				// a nonzero row count is not proof the initial page was fetched.
+				for (let index = 0; index < 4; index++) hub.handleInput("\x7f");
+				hub.handleInput(LEFT); // typing focused the list; hand arrows back
+				hub.handleInput(DOWN);
+				vi.advanceTimersByTime(250);
+				await Promise.resolve();
+				await Promise.resolve();
+
+				expect(refreshProvider).toHaveBeenCalledTimes(1);
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
 		test("a provider scope that loses every match falls back to All models", () => {
 			const openrouterGlm = makeModel("openrouter", "z-ai/glm-5.2");
 			const customGlm = makeModel("custom-provider", "glm-5.2");
