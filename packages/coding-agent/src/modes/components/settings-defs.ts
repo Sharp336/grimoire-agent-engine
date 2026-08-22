@@ -98,7 +98,9 @@ export type SettingDef =
 function readSetting<P extends SettingPath>(path: P, scope?: SettingsScope): SchemaSettingValue<P> | undefined {
 	try {
 		const sm = Settings.instance;
-		return scope === "global" ? sm.getGlobalValue(path) : sm.get(path);
+		if (scope === "global") return sm.getGlobalValue(path);
+		if (scope === "project") return sm.getProjectScopedValue(path);
+		return sm.get(path);
 	} catch {
 		return undefined;
 	}

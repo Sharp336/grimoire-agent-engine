@@ -353,6 +353,35 @@ describe("Settings", () => {
 			expect(settings.get("ask.enabled")).toBe(true);
 			expect(settings.getProjectScopedValue("ask.enabled")).toBe(false);
 		});
+
+		it("persists a native null when clearing a non-native project model role", async () => {
+			await fs.promises.mkdir(path.join(projectDir, ".claude"), { recursive: true });
+			await Bun.write(
+				path.join(projectDir, ".claude", "settings.json"),
+				`${JSON.stringify({ modelRoles: { smol: "claude/smol" } }, null, 2)}\n`,
+			);
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({}, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.getProjectModelRole("smol")).toBe("claude/smol");
+			settings.clearProjectModelRole("smol");
+			await settings.flush();
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+				modelRoles: { smol: null },
+			});
+		});
+
+		it("clears a migrated native queueMode via the steeringMode path", async () => {
+			await writeSettings({ steeringMode: "all" });
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ queueMode: "one-at-a-time" }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("steeringMode")).toBe("one-at-a-time");
+			expect(settings.clearProject("steeringMode")).toBe(true);
+			expect(settings.get("steeringMode")).toBe("all");
+			await settings.flush();
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({});
+		});
 	});
 
 	describe("shell configuration errors", () => {

@@ -670,11 +670,20 @@ export class Settings {
 	 */
 	clearProject<P extends SettingPath>(path: P): boolean {
 		const segments = SETTING_PATH_SEGMENTS[path];
-		if (getByPath(this.#projectFileSettings, segments) === undefined) return false;
+		const migratedNative = this.#migrateRawSettings(structuredClone(this.#projectFileSettings), false);
+		if (
+			getByPath(this.#projectFileSettings, segments) === undefined &&
+			getByPath(migratedNative, segments) === undefined
+		) {
+			return false;
+		}
 
 		const prev = this.get(path);
 		this.#persistedMutationGeneration++;
 		deleteByPath(this.#projectFileSettings, segments);
+		if (path === "steeringMode") {
+			delete this.#projectFileSettings.queueMode;
+		}
 		this.#rebuildProjectLayer();
 		if (path === "shellPath") {
 			this.#projectShellPathSource = Object.hasOwn(this.#project, "shellPath")
@@ -1044,6 +1053,11 @@ export class Settings {
 	 */
 	getBashInterceptorRules(): BashInterceptorRule[] {
 		return this.get("bashInterceptor.patterns");
+	}
+
+	#rawModelRolesFromLayer(layer: RawSettings): Record<string, unknown> {
+		const value = getByPath(layer, ["modelRoles"]);
+		return isRecord(value) ? { ...value } : {};
 	}
 
 	#modelRolesFromLayer(layer: RawSettings): Record<string, string> {
@@ -2547,7 +2561,7 @@ export class Settings {
 		const modifiedPaths = [...this.#modifiedProject];
 		const modifiedModelRoles = [...this.#modifiedProjectModelRoles];
 		const projectFileAtStart = structuredClone(this.#projectFileSettings);
-		const projectRolesAtStart = this.#modelRolesFromLayer(this.#project);
+		const projectRolesAtStart = this.#rawModelRolesFromLayer(this.#projectFileSettings);
 		this.#modifiedProject.clear();
 		this.#modifiedProjectModelRoles.clear();
 
@@ -2591,7 +2605,7 @@ export class Settings {
 						setByPath(projectSettings, segments, value);
 					}
 				}
-				const latestProjectRoles = this.#modelRolesFromLayer(this.#project);
+				const latestProjectRoles = this.#rawModelRolesFromLayer(this.#projectFileSettings);
 				for (const role of this.#modifiedProjectModelRoles) {
 					if (Object.hasOwn(latestProjectRoles, role)) {
 						setByPath(projectSettings, ["modelRoles", role], latestProjectRoles[role]);

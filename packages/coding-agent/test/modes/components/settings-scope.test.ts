@@ -161,6 +161,17 @@ describe("SettingsSelectorComponent persistence scope", () => {
 		expect(selector.render(120).join("\n")).toContain("Hindsight API URL");
 	});
 
+	it("hides hindsight rows in project scope when only an overlay enables hindsight", async () => {
+		resetSettingsForTest();
+		AgentStorage.resetInstance();
+		const overlayPath = tempDir.join("overlay.yml");
+		await Bun.write(overlayPath, YAML.stringify({ memory: { backend: "hindsight" } }, null, 2));
+		await Settings.init({ cwd: projectDir, agentDir, configFiles: [overlayPath] });
+		settings.set("memory.backend", "off", "project");
+		const selector = createSelector();
+		expect(selector.render(120).join("\n")).not.toContain("Hindsight API URL");
+	});
+
 	it("restores the effective theme when closing after a scope preview", () => {
 		const previews: string[] = [];
 		const selector = new SettingsSelectorComponent(
