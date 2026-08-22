@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import MODELS_JSON from "@oh-my-pi/pi-catalog/models.json" with { type: "json" };
 import {
 	DEEPSEEK_VISION_STATIC_MODELS,
 	deepseekModelManagerOptions,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
 describe("DeepSeek built-in provider", () => {
 	test("maps vision ids to image input in /models discovery", async () => {
@@ -40,7 +41,7 @@ describe("DeepSeek built-in provider", () => {
 	test("vision seed derives the V4 flash thinking ladder from its identity", () => {
 		// buildModel computes thinking from the id's identity classifiers —
 		// the one derived field worth pinning; everything else on the seed is
-		// authored verbatim and covered by the shipped-catalog test below.
+		// authored verbatim and covered by the bundled-parity tests below.
 		const model = buildModel(DEEPSEEK_VISION_STATIC_MODELS[0]);
 
 		expect(model.thinking?.mode).toBe("effort");
@@ -50,20 +51,46 @@ describe("DeepSeek built-in provider", () => {
 			Effort.Max,
 		]);
 	});
+});
 
-	test("shipped catalog resolves the vision SKU with curated seed metadata", () => {
-		// Seed inclusion and precedence: the unshifted seed must reach the
-		// shipped bundle (a sparse discovery row would carry cost 0 / null
-		// limits) and the vision gate consumers check — input containing
-		// "image" — must hold. Asserted semantically so a deliberate seed
-		// deletion in favor of a catalogued upstream row stays green.
-		const model = getBundledModel("deepseek", "deepseek-v4-flash-vision-exp");
+// Pins the invariant: bundled `models.json` carries every entry the curated
+// vision seed emits, with the seed's authored metadata intact. This mirrors
+// the merged `xai-oauth-bundle.test.ts` precedent for authored seeds: the
+// runtime boot path (`ModelRegistry.#loadModels`) reads only `models.json`,
+// so a seed that never reaches the bundle is invisible until `refresh()`.
+// Without the parity check, editing or dropping `DEEPSEEK_VISION_STATIC_MODELS`
+// (or its generator `unshift`) without regenerating silently regresses the
+// boot-time resolver. The AGENTS.md "test the resolver, not bundled JSON"
+// rule targets upstream-derived rows, which shift on refresh; this seed is
+// prepended ahead of every upstream source and wins the generator's
+// earlier-rows-wins dedup, so unrelated refreshes cannot alter it — the only
+// failure modes are exactly the regressions this suite is meant to catch.
+// Failure here means: run `bun run gen:models` and commit the diff.
+describe("deepseek vision bundled catalog (regression)", () => {
+	const bundled =
+		(MODELS_JSON as unknown as Record<string, Record<string, ModelSpec<"openai-completions">>>).deepseek ?? {};
+	const seed = DEEPSEEK_VISION_STATIC_MODELS;
 
-		expect(model).toBeDefined();
-		expect(model?.input).toContain("text");
-		expect(model?.input).toContain("image");
-		expect(model?.contextWindow).toBeGreaterThan(0);
-		expect(model?.maxTokens).toBeGreaterThan(0);
-		expect(model?.cost.input).toBeGreaterThan(0);
+	test("bundles every curated vision seed id", () => {
+		for (const model of seed) {
+			const entry = bundled[model.id];
+			expect(entry, `deepseek/${model.id} missing from models.json`).toBeDefined();
+			expect(entry.id).toBe(model.id);
+			expect(entry.provider).toBe("deepseek");
+			// The vision gate consumers check (input containing "image") must
+			// survive both the seed and the bundle.
+			expect(entry.input).toEqual(["text", "image"]);
+			expect(entry.contextWindow).toBe(model.contextWindow);
+			expect(entry.maxTokens).toBe(model.maxTokens);
+		}
+	});
+
+	// A sparse credentialed discovery row (cost 0, null limits) must never
+	// shadow the curated seed: the generator's unshift places the seed ahead
+	// of every upstream source, and dedup keeps earlier rows.
+	test("keeps non-sparse curated cost in the bundle", () => {
+		const entry = bundled["deepseek-v4-flash-vision-exp"];
+		expect(entry?.cost.input).toBeGreaterThan(0);
+		expect(entry?.cost.output).toBeGreaterThan(0);
 	});
 });
