@@ -606,6 +606,20 @@ export class Settings {
 	}
 
 	/**
+	 * Resolve a setting from global plus non-native project sources, ignoring
+	 * the native `.omp/config.yml` layer. Used to compute a project-scope
+	 * record delta so unchanged inherited keys are not copied into the native
+	 * file, while existing native overrides are preserved.
+	 */
+	getProjectInheritedValue<P extends SettingPath>(path: P): SettingValue<P> {
+		const merged = this.#deepMerge(this.#deepMerge({}, this.#global), this.#projectWithoutNative);
+		const value = getByPath(merged, SETTING_PATH_SEGMENTS[path]);
+		const resolved =
+			value !== undefined ? (resolvePathScopedStringArray(path, value, this.#cwd) ?? value) : getDefault(path);
+		return resolved as SettingValue<P>;
+	}
+
+	/**
 	 * Whether `path` has an explicitly configured value (global config, project
 	 * config, or runtime override) rather than falling back to the schema default.
 	 */

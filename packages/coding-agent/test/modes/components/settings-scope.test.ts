@@ -262,6 +262,32 @@ describe("SettingsSelectorComponent persistence scope", () => {
 		expect(previews.at(-1)).toBe("dark-one");
 		expect(settings.get("theme.dark")).toBe("dark-one");
 	});
+
+	it("follows a live terminal appearance change when closing", () => {
+		const previews: string[] = [];
+		const selector = new SettingsSelectorComponent(
+			{
+				availableThinkingLevels: [],
+				thinkingLevel: undefined,
+				availableThemes: ["dark-one", "titanium"],
+				providers: [],
+				cwd: projectDir,
+			},
+			{
+				onChange: (settingPath, value) => changes.push({ path: settingPath, value }),
+				onThemePreview: themeName => {
+					previews.push(themeName);
+				},
+				onCancel: () => {},
+			},
+		);
+		settings.set("theme.dark", "dark-one", "project");
+		settings.set("theme.light", "titanium", "project");
+		onTerminalAppearanceChange("light");
+		selector.handleInput("\x1b");
+		expect(previews.at(-1)).toBe("titanium");
+	});
+
 	it("restores from the dark slot when the dark slot itself holds a light theme", () => {
 		// Terminal is dark (test env). The dark slot maps to a LIGHT theme
 		// (alabaster), so the loaded theme/currentThemeName are light — but the
@@ -401,6 +427,40 @@ describe("SettingsSelectorComponent persistence scope", () => {
 			ask: { enabled: true },
 			custom: { keep: true },
 			providers: { maxInFlightRequests: { anthropic: 7 } },
+		});
+	});
+
+	it("keeps an existing native provider override when editing a sibling", async () => {
+		settings.set("providers.maxInFlightRequests", { anthropic: 3, openai: 5 }, "global");
+		settings.set("providers.maxInFlightRequests", { anthropic: 7 }, "project");
+		const selector = new SettingsSelectorComponent(
+			{
+				availableThinkingLevels: [],
+				thinkingLevel: undefined,
+				availableThemes: [],
+				providers: ["anthropic", "openai"],
+				cwd: projectDir,
+			},
+			{
+				onChange: (settingPath, value) => changes.push({ path: settingPath, value }),
+				onCancel: () => {},
+			},
+		);
+		selector.handleInput("\x1bs");
+		selector.handleInput("\x1bs");
+		for (const ch of "max in flight requests") selector.handleInput(ch);
+		selector.handleInput("\n");
+		selector.handleInput("\x1b[B");
+		selector.handleInput("\n");
+		selector.handleInput("\x15");
+		selector.handleInput("9");
+		selector.handleInput("\n");
+		expect(settings.get("providers.maxInFlightRequests")).toEqual({ anthropic: 7, openai: 9 });
+		await settings.flush();
+		expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+			ask: { enabled: true },
+			custom: { keep: true },
+			providers: { maxInFlightRequests: { anthropic: 7, openai: 9 } },
 		});
 	});
 });

@@ -618,20 +618,12 @@ export class SettingsSelectorComponent implements Component {
 	#tabRowCount = 0;
 	#contentRowStart = 0;
 	#contentRowCount = 0;
-	/**
-	 * The terminal's light/dark luminance captured before any scope preview
-	 * swaps the exported theme. #themeName must pick the dark/light slot from
-	 * this original mode, not from the currently active theme, which Alt+S
-	 * previews mutate (e.g. a light theme previewed into a dark terminal).
-	 */
-	#terminalIsLight: boolean;
 
 	constructor(
 		private readonly context: SettingsRuntimeContext,
 		private readonly callbacks: SettingsCallbacks,
 	) {
 		this.#scope = settings.hasProjectConfig() ? "project" : "global";
-		this.#terminalIsLight = detectTerminalAppearance() === "light";
 		// No label prefix (the frame title already says Settings) and no
 		// "(tab to cycle)" hint (folded into the footer hint line).
 		this.#tabBar = new TabBar("", getSettingsTabs(), getTabBarTheme());
@@ -1299,15 +1291,15 @@ export class SettingsSelectorComponent implements Component {
 	/**
 	 * Persist a record setting in the selected scope. The submenu always
 	 * submits the full effective map; write only keys that differ from the
-	 * inherited layer, plus `null` tombstones for cleared keys, so an
-	 * unchanged inherited cap is not copied into `.omp/config.yml`.
+	 * inherited (global + non-native project) layer, plus `null` tombstones
+	 * for cleared keys. Existing native overrides that still differ are kept.
 	 */
 	#persistRecordScopeSetting(path: SettingPath, value: Record<string, number>): unknown {
 		if (this.#scope === "global") {
 			settings.set(path, value, "global");
 			return settings.get(path);
 		}
-		const inherited = normalizeProviderMaxInFlightRequests(settings.get(path));
+		const inherited = normalizeProviderMaxInFlightRequests(settings.getProjectInheritedValue(path));
 		const next: Record<string, number | null> = {};
 		for (const provider of new Set([...Object.keys(inherited), ...Object.keys(value)])) {
 			const nextLimit = value[provider];
@@ -1316,12 +1308,6 @@ export class SettingsSelectorComponent implements Component {
 				continue;
 			}
 			if (nextLimit !== inherited[provider]) next[provider] = nextLimit;
-		}
-		const currentRaw = settings.get(path);
-		if (currentRaw && typeof currentRaw === "object" && !Array.isArray(currentRaw)) {
-			for (const [provider, raw] of Object.entries(currentRaw as Record<string, unknown>)) {
-				if (raw === null && value[provider] === undefined) next[provider] = null;
-			}
 		}
 		settings.set(path, next as never, "project");
 		return settings.get(path);
@@ -1509,7 +1495,7 @@ export class SettingsSelectorComponent implements Component {
 	}
 
 	#themeName(dark: unknown, light: unknown): string | undefined {
-		const preferred = this.#terminalIsLight ? light : dark;
+		const preferred = detectTerminalAppearance() === "light" ? light : dark;
 		if (typeof preferred === "string" && preferred.length > 0) return preferred;
 		if (typeof dark === "string" && dark.length > 0) return dark;
 		if (typeof light === "string" && light.length > 0) return light;
