@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added automatic `CMUX_SOCKET_PATH` protocol detection and typed cmux-tui browser backends for release raw-v10/`cmux.protocol/1` and current raw-v12/`cmux.protocol/2`, with stable resource targeting through `app.surface`, load-complete navigation, guarded pointer input, abort/deadline propagation, versioned viewer/stream semantics, reconnect/gap recovery, correlation-backed uncertain-creation recovery, terminal close handling, and read-reconciled ownership-safe close.
+
 ## [17.4.4] - 2026-08-22
 
 ### Added
