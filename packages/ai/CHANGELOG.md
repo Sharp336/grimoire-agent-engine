@@ -2,10 +2,6 @@
 
 ## [Unreleased]
 
-### Changed
-
-- Auth-broker wire schemas are now plain module-level values in `auth-broker/wire-schemas`; the internal `wire-schema-resource` getter facade and `getAuthBrokerWireSchemas()` were removed.
-
 ## [17.4.3] - 2026-08-21
 
 ### Fixed

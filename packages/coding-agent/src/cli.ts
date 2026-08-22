@@ -425,10 +425,8 @@ export async function runCli(argv: string[]): Promise<void> {
 		// Intentional exception to the static-import convention: this latency boundary
 		// keeps the TUI graph out of worker, subcommand, help, and version launches.
 		// Loading it statically would erase the measured cold-start improvement.
-		const { beginStartupComposer, STARTUP_COMPOSER_DEFAULTS, stopPendingStartupComposer } = await import(
-			"./modes/startup-composer"
-		);
-		beginStartupComposer(STARTUP_COMPOSER_DEFAULTS);
+		const { beginStartupComposer, stopPendingStartupComposer } = await import("./modes/startup-composer");
+		beginStartupComposer({ version: VERSION });
 		stopStartupComposer = stopPendingStartupComposer;
 	}
 

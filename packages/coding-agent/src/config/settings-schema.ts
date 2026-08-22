@@ -2030,6 +2030,42 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"spelling.typoDetection": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "Typo Detection (macOS)",
+			description: "Mark misspelled prompt words with the active macOS dictionaries",
+			condition: "macOS",
+		},
+	},
+
+	"spelling.autocomplete": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "Word Autocomplete (macOS)",
+			description: "Show macOS dictionary word completions as inline hints accepted with Tab",
+			condition: "macOS",
+		},
+	},
+
+	"spelling.autocorrect": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "Autocorrect (macOS)",
+			description: "Apply confident macOS spelling corrections after completed words",
+			condition: "macOS",
+		},
+	},
+
 	emojiAutocomplete: {
 		type: "boolean",
 		default: true,

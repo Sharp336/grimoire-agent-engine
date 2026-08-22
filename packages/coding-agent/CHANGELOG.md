@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.0.0] - 2026-08-22
+
 ### Added
 
 - `lsp diagnostics file: "*"` now covers Dart and Flutter projects via `dart analyze`.
@@ -18,35 +20,37 @@
 - Added an experimental `wdiff` edit variant speaking git word-diff (`@@ path` operation headers, `[-old-]{+new+}` inline changes, line-diff runs, `...` skips); benchmarks show block-instinct models roughly double their first-try edit success on it versus the inline-only mono dialect.
 - Edit tool now collapses back-to-back duplicate blocks when a payload states the desired text once, drops overlapping fuzzy-match artifacts of the same operation, and removes a dangling blank line left directly above a closing delimiter after a block deletion.
 - Edit tool now resolves delimiter-garbled punctuation selections against the file, rejects matches that would rewrite part of a longer punctuation run, treats candidates with whitespace-equivalent outcomes as unambiguous, recovers a dropped seam between a selection and its following text, and cleans blank lines left beside opening or closing delimiters after deletions.
+- Added the `omp render` command to replay session threads and benchmark transcript pipeline performance.
+- Added configurable typo detection (`Ctrl+.` suggestions), Tab word completion, and opt-in autocorrect to the macOS prompt editor.
+- Added a live benchmark dashboard to `omp bench` with real-time performance estimates, p50/p95 statistics, distinct input/output throughput metrics, cost tracking, mixed challenge suites by default, and a `--prefill-bytes` option for synthetic prefill benchmarks.
+- Added the `/shake thinking` command to strip model reasoning blocks from session history.
+- Added icon support and usage-frequency ranking to slash-command autocomplete suggestions.
+- Enhanced the edit tool to support `＋`-prefixed line insertions, unified diff formats, bare selection replacements, and robust recovery for common syntax variations and ambiguous match spans.
+- Startup composer now renders immediately using cached session and theme data, allowing typing before session initialization finishes without dropping keystrokes.
 
 ### Changed
 
-- Switched fallback edit mode from replace to sloppy for models that do not support hashline
-- Autocomplete dropdown now shows up to 10 rows by default (was 5), clamped to the terminal height (`autocompleteMaxVisible` setting)
-- Long slash-command descriptions now truncate to two rows with an ellipsis in the autocomplete popup instead of wrapping in full
-- Sloppy edits now treat all authored whitespace as verbatim and require explicit `»` or `⟪⟫` markers for all operations, forbidding marker-less changes.
-
-### Removed
-
-- Removed the experimental `wdiff` edit variant (git word-diff surface); `sloppy` is the single sparse-edit dialect.
-- Removed the experimental `mono` edit variant: its syntax and recoveries are now native to `sloppy`, which teaches `§relative/path` operation openers (bare `§` continues in the same file, `§*` for every match) instead of separate header lines, voices errors in the same vocabulary, and applies marker-less operations as desired text when the delta is punctuation-level or collapses an adjacent duplicate. Legacy bracket headers and guillemet openers remain accepted.
+- Session history rewinds (via `Esc-Esc` or `/tree`) now truncate transcript tails in place instead of clearing and replaying the entire terminal scrollback.
+- Switched the fallback edit mode to `sloppy` for models lacking hashline support.
+- macOS spelling checks now run in the background to avoid blocking editor rendering and keystroke responsiveness.
+- Word completions accepted via Tab now insert a trailing space when not immediately followed by whitespace or punctuation.
+- Increased default visible autocomplete dropdown rows to 10 and added the `autocompleteMaxVisible` configuration setting.
+- Slash-command descriptions in the autocomplete popup now truncate to two lines instead of wrapping indefinitely.
 
 ### Fixed
 
-- Code blocks now syntax-highlight live while the response streams instead of staying plain until the block settles
-- Fixed `/shake thinking` reporting "Nothing to shake" after removing reasoning; it now reports the dropped count and leaves thinking-only turns empty.
-- Fixed session teardown occasionally losing pending input drafts during shutdown
-- Fixed streaming edit failures caused by trailing partial lines
-- Interrupting a Claude model mid-thinking no longer replays the partial reasoning as quoted conversation text on the next turn, which Anthropic's `reasoning_extraction` classifier refused.
-- Sloppy edit `＋` inserts before an anchor line no longer double their typed indentation or flatten the anchor.
-- Session restore no longer re-runs the edit-matching engine for every historical edit in the transcript; large sessions with many edits resume several times faster.
-- Fixed image requests to Kimi Code / Moonshot failing with 400 `unsupported image url`: their catalog api is openai-completions so the image URL mirror gate wrongly admitted them; Moonshot-native hosts now always receive inline base64 images.
-- Fixed Read failing with `unable to open database file` for cleanly closed WAL-mode SQLite databases without `-wal`/`-shm` sidecars.
-- Fixed collapsed edit results with long wrapped diff lines growing beyond their rendered-row budget and corrupting native Windows terminal transcript layout ([#9302](https://github.com/can1357/oh-my-pi/issues/9302)).
-- Fixed edit tool section header paths not trimming surrounding whitespace, so a header with padded brackets failed with file-not-found.
-- Fixed transcript content disappearing from terminal scrollback below a live hub-wait/todo/jobs card: the card's viewport pin froze scrollback commits at its own rows, so everything the turn streamed below it scrolled off-screen without ever entering terminal history (and was lost for good when the session exited first). A displaceable card with content below it no longer holds the commit ceiling; its rows commit as they scroll off and the card seals in place, so the next poll stacks a fresh card instead of retracting history.
-- Fixed the composer attachment chip thumbnail showing an empty box for pasted images: the paste pipeline re-encodes images as JPEG/WebP, and transmitting those bytes as Kitty PNG data made the terminal reject them (blank placeholder cells). Non-PNG attachments now convert to PNG before the thumbnail transmit, like transcript images.
-- Added an immediately editable startup composer for plain interactive launches; drafts typed while session initialization runs transfer intact into the full UI.
+- Fixed streaming code blocks not rendering syntax highlighting live until completion.
+- Fixed an issue where interrupting Claude during reasoning would replay partial thinking blocks on subsequent turns and cause API rejection errors.
+- Fixed session resume performance by avoiding redundant edit-matching execution across historical transcripts.
+- Fixed image requests to Kimi Code / Moonshot failing with 400 errors by sending inline base64 images directly.
+- Fixed reading WAL-mode SQLite databases that do not have active `-wal` or `-shm` files.
+- Fixed terminal transcript layout corruption on Windows caused by collapsed edit results with long wrapped diff lines ([#9302](https://github.com/can1357/oh-my-pi/issues/9302)).
+- Fixed disappearing terminal scrollback history below updating cards such as background jobs or hub status cards.
+- Fixed pasted image attachment thumbnails rendering as blank boxes in Kitty terminal graphics mode.
+- Fixed context gauge display issues in the status line for unnamed sessions.
+- Fixed accurate benchmark input token counts on providers with automatic prompt caching.
+- Fixed C# files incorrectly displaying D3.js icons in edit results ([#9323](https://github.com/can1357/oh-my-pi/issues/9323)).
+- Fixed incorrect token delta reporting in expanded context compaction summaries when pre-compaction usage was omitted by the provider ([#9293](https://github.com/can1357/oh-my-pi/issues/9293)).
 
 ## [17.4.4] - 2026-08-22
 
@@ -60,7 +64,6 @@
 - Fixed edit-tool whole-line inserts (an insert selection alone on its own line) splicing into the anchor line instead of landing on a new line when the anchor was the last matched line, preceded a blank line, or sat at EOF.
 - Edit tool prompt now documents whole-line insert selections and that a REWRITE `…` with no captured MATCH gap is written to the file literally.
 - Fixed multiplexer width resizes (tmux/screen/Zellij/cmux/Herdr panes) replaying the entire transcript into pane history — one duplicated transcript copy and seconds of visible scrolling per width change. The width-epoch boundary now resolves for real transcripts: finalized blocks without `getTranscriptBlockVersion` are treated as immutable per the documented contract, Container-derived blocks without a nested epoch source fall back to whole-segment stability instead of failing, and bash/eval/tool/read-group blocks report a block version for their genuine post-finalize mutations. The interactive resize listener no longer marks every SIGWINCH as "render pending", which forced the conservative replay-from-row-zero fallback on every settled resize ([#8193](https://github.com/can1357/oh-my-pi/issues/8193), [#7026](https://github.com/can1357/oh-my-pi/issues/7026)).
-- Edit tool prompt now documents whole-line insert selections, steers multi-line edits toward inline selections instead of block rewrites that retype unchanged lines, and warns that a REWRITE gap with nothing captured in MATCH is written to the file literally.
 
 ## [17.4.3] - 2026-08-21
 

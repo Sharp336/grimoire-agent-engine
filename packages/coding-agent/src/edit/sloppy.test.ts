@@ -86,6 +86,15 @@ describe("sloppy v8", () => {
 		);
 	});
 
+	test("normalizes whitespace-only MATCH rows around add lines", () => {
+		const content = "function run() {\n  start();\n\n  end();\n}\n";
+		const input = inlineOperation("  start();\n\n＋  inserted();\n \n  end();");
+
+		expect(variant.apply(content, input, context)).toBe(
+			"function run() {\n  start();\n  inserted();\n\n  end();\n}\n",
+		);
+	});
+
 	test("mixes add lines with inline replacements in one operation", () => {
 		const content = "const retries = 3;\nrun();\n";
 		const input = inlineOperation("const retries = ⟪3│5⟫;\n＋const backoff = 250;");
@@ -1178,7 +1187,7 @@ describe("sloppy v8", () => {
 		expect(() => variant.apply(content, input, context)).toThrow(new RegExp(`${esc(M.open)}\\* found 0 matches`));
 	});
 
-	test("diagnoses individually ordered but non-consecutive MATCH lines", () => {
+	test("preserves skipped rows for corresponding non-consecutive rewrites", () => {
 		const content = [
 			"const entries = source",
 			"  ? avlue",
@@ -1193,11 +1202,18 @@ describe("sloppy v8", () => {
 			"  ? value\n    ? value.models\n    : typeof value === 'object'",
 		);
 
-		expect(() => variant.apply(content, input, context)).toThrow(
-			/your lines match individually at lines 2, 5, 6 but are not consecutive[\s\S]*\? avlue\n…\n {4}\? avlue\.models\n…\n {4}: typeof avlue[\s\S]*replaces the whole span lines 2-6, including the skipped lines — re-emit kept gaps with …/,
+		expect(variant.apply(content, input, context)).toBe(
+			[
+				"const entries = source",
+				"  ? value",
+				"  : typeof value === 'object' &&",
+				"      Array.isArray(value.models)",
+				"    ? value.models",
+				"    : typeof value === 'object'",
+				"",
+			].join("\n"),
 		);
 	});
-
 	test("accepts a small fragment typo only when the fuzzy tuple is unique", () => {
 		const content = "const result = calculateValue(input);\nreport(result);\n";
 		const pattern = "const result = …⟪calculateVale(input)⟫…\nreport(result)";
@@ -1501,7 +1517,7 @@ describe("sloppy v8", () => {
 		expect(message).not.toContain("MissingTailFac");
 	});
 
-	test("rejects fuzzy matches that add or remove structural tokens", () => {
+	test("preserves structural rows omitted between corresponding rewrite lines", () => {
 		const content = [
 			"function parseCatalog(value: unknown) {",
 			"  const entries = Array.isArray(value)",
@@ -1519,9 +1535,9 @@ describe("sloppy v8", () => {
 			"}",
 		].join("\n");
 
-		expect(() =>
-			variant.apply(content, operation(wrongBoundary, wrongBoundary.replace("avlue", "value")), context),
-		).toThrow(/did not match/);
+		expect(variant.apply(content, operation(wrongBoundary, wrongBoundary.replace("avlue", "value")), context)).toBe(
+			content.replace("avlue", "value"),
+		);
 	});
 
 	test("strips full-statement envelope echoes around an inner selection", () => {

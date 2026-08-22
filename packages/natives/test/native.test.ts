@@ -23,6 +23,8 @@ import {
 	invalidateFsScanCache,
 	listWorkspace,
 	MacOSPowerAssertion,
+	macOSCheckSpelling,
+	macOSSpellCheckerAvailable,
 	matchesKey,
 	PtySession,
 	parseKey,
@@ -35,6 +37,20 @@ import {
 } from "../native/index.js";
 
 const addonUrl = new URL("../native/index.js", import.meta.url).href;
+
+describe("macOS spelling", () => {
+	it("reports platform capability and uses UTF-16 ranges", async () => {
+		const nonsense = "qzxvplmokn";
+		if (process.platform !== "darwin") {
+			expect(macOSSpellCheckerAvailable()).toBeFalse();
+			expect(await macOSCheckSpelling(nonsense)).toEqual([]);
+			return;
+		}
+
+		expect(macOSSpellCheckerAvailable()).toBeTrue();
+		expect(await macOSCheckSpelling(nonsense)).toContainEqual({ start: 0, length: nonsense.length });
+	});
+});
 
 let testDir: string;
 

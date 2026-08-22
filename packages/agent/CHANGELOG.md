@@ -2,9 +2,11 @@
 
 ## [Unreleased]
 
+## [18.0.0] - 2026-08-22
+
 ### Fixed
 
-- Fixed post-handoff identity confusion: the injected handoff document now tells the successor it was written by its own prior instance (first person = you, plan = your resumed plan, handoff already complete), and handoff generation now writes successor-addressed imperatives and never lists the handoff itself as progress or a next step.
+- Fixed agent identity confusion after session handoffs by clarifying context framing and ensuring successor instances seamlessly resume existing execution plans.
 
 ## [17.4.1] - 2026-08-21
 

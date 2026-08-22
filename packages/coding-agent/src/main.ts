@@ -59,6 +59,7 @@ import { ExtensionRunner } from "./extensibility/extensions/runner";
 import type { ExtensionUIContext } from "./extensibility/extensions/types";
 import { scheduleMarketplaceAutoUpdate } from "./extensibility/plugins/marketplace-auto-update";
 import { registerDaemonProjectPresence } from "./launch/presence";
+import { discoverStartupLspServers } from "./lsp/servers";
 import type { MCPManager } from "./mcp";
 import { InteractiveMode } from "./modes/interactive-mode";
 import type { PrintModeOptions } from "./modes/print-mode";
@@ -67,11 +68,13 @@ import { CURRENT_SETUP_VERSION } from "./modes/setup-version";
 import type * as SetupWizardModule from "./modes/setup-wizard";
 import type { SetupScene } from "./modes/setup-wizard";
 import {
-	type StartupComposerLease,
+	applyStartupComposerPreferences,
+	type ComposerLease,
+	setStartupComposerLspServers,
 	stopPendingStartupComposer,
 	takeStartupComposerLease,
 } from "./modes/startup-composer";
-import { initTheme, stopThemeWatcher } from "./modes/theme/theme";
+import { ensureTheme, initTheme, stopThemeWatcher } from "./modes/theme/theme";
 import type { SubmittedUserInput } from "./modes/types";
 import { createWarpEventBridgeExtension } from "./modes/warp-events";
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
@@ -490,7 +493,7 @@ async function runInteractiveMode(
 	initialMessage?: string,
 	initialImages?: ImageContent[],
 	joinLink?: string,
-	startupLease?: StartupComposerLease,
+	startupLease?: ComposerLease,
 ): Promise<void> {
 	let mode: InteractiveMode;
 	try {
@@ -502,7 +505,7 @@ async function runInteractiveMode(
 			lspServers,
 			mcpManager,
 			eventBus,
-			startupLease?.surface,
+			startupLease?.composer,
 		);
 		startupLease?.adopt();
 	} catch (error) {
@@ -1330,9 +1333,9 @@ export async function runRootCommand(
 	logger.startTiming();
 	startStartupWatchdog();
 	try {
-		// Initialize theme early with defaults (CLI commands need symbols)
-		// Will be re-initialized with user preferences later
-		await logger.time("initTheme:initial", initTheme);
+		// Non-prepaint commands still need a default theme; an existing Composer
+		// already initialized its cached theme synchronously for the first frame.
+		await logger.time("initTheme:initial", ensureTheme);
 
 		const parsedArgs = parsed;
 		await logger.time("applyStartupCwd", applyStartupCwd, parsedArgs);
@@ -1501,6 +1504,27 @@ export async function runRootCommand(
 			settingsInstance.get("theme.dark"),
 			settingsInstance.get("theme.light"),
 		);
+
+		applyStartupComposerPreferences({
+			quiet: settingsInstance.get("startup.quiet"),
+			composerShape: settingsInstance.get("composer.shape") ?? "box",
+			showHardwareCursor: settingsInstance.get("showHardwareCursor"),
+			maxInlineImages: settingsInstance.get("tui.maxInlineImages"),
+			scrollbackRebuild: settingsInstance.get("tui.scrollbackRebuild"),
+			resizeScrollback: settingsInstance.get("tui.resizeScrollback"),
+			imeSafeCursor: settingsInstance.get("tui.imeSafeCursor"),
+			autocompleteMaxVisible: settingsInstance.get("autocompleteMaxVisible"),
+			spellingTypoDetection: settingsInstance.get("spelling.typoDetection"),
+			spellingAutocomplete: settingsInstance.get("spelling.autocomplete"),
+			spellingAutocorrect: settingsInstance.get("spelling.autocorrect"),
+			theme: {
+				symbolPreset: settingsInstance.get("symbolPreset"),
+				colorBlindMode: settingsInstance.get("colorBlindMode"),
+				darkTheme: settingsInstance.get("theme.dark"),
+				lightTheme: settingsInstance.get("theme.light"),
+			},
+		});
+		setStartupComposerLspServers(discoverStartupLspServers(cwd, "connecting"));
 
 		let scopedModels = await logger.time(
 			"resolveModelScope",

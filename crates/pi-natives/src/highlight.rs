@@ -418,17 +418,17 @@ pub fn highlight_code(
 /// Color palette as array for quick indexing.
 fn palette(colors: &HighlightColors) -> [&str; 11] {
 	[
-		&*colors.comment,                            // 0
-		&*colors.keyword,                            // 1
-		&*colors.function,                           // 2
-		&*colors.variable,                           // 3
-		&*colors.string,                             // 4
-		&*colors.number,                             // 5
-		&*colors.r#type,                             // 6
-		&*colors.operator,                           // 7
-		&*colors.punctuation,                        // 8
-		colors.inserted.as_deref().unwrap_or(""),   // 9
-		colors.deleted.as_deref().unwrap_or(""),    // 10
+		&*colors.comment,                         // 0
+		&*colors.keyword,                         // 1
+		&*colors.function,                        // 2
+		&*colors.variable,                        // 3
+		&*colors.string,                          // 4
+		&*colors.number,                          // 5
+		&*colors.r#type,                          // 6
+		&*colors.operator,                        // 7
+		&*colors.punctuation,                     // 8
+		colors.inserted.as_deref().unwrap_or(""), // 9
+		colors.deleted.as_deref().unwrap_or(""),  // 10
 	]
 }
 
@@ -474,7 +474,7 @@ fn highlight_into(
 			// Output text BEFORE this operation using current scope
 			if offset > prev_end {
 				let text = &line[prev_end..offset];
-				let color_idx = scope_to_color_index(&scope_stack);
+				let color_idx = scope_to_color_index(scope_stack);
 
 				if color_idx < palette.len() && !palette[color_idx].is_empty() {
 					result.push_str(palette[color_idx]);
@@ -503,7 +503,7 @@ fn highlight_into(
 		// Output remaining text with current scope
 		if prev_end < line.len() {
 			let text = &line[prev_end..];
-			let color_idx = scope_to_color_index(&scope_stack);
+			let color_idx = scope_to_color_index(scope_stack);
 
 			if color_idx < palette.len() && !palette[color_idx].is_empty() {
 				result.push_str(palette[color_idx]);
@@ -544,7 +544,7 @@ impl HighlightStream {
 
 	/// Whether the language resolved to a grammar; `false` means passthrough.
 	#[napi(getter)]
-	pub fn supported(&self) -> bool {
+	pub const fn supported(&self) -> bool {
 		self.state.is_some()
 	}
 
@@ -556,7 +556,14 @@ impl HighlightStream {
 			return Ok(chunk.to_owned());
 		};
 		let mut result = String::with_capacity(chunk.len() * 2);
-		highlight_into(&chunk, get_syntax_set(), parse_state, scope_stack, &palette(&self.colors), &mut result);
+		highlight_into(
+			&chunk,
+			get_syntax_set(),
+			parse_state,
+			scope_stack,
+			&palette(&self.colors),
+			&mut result,
+		);
 		Ok(result)
 	}
 }

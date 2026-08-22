@@ -963,7 +963,7 @@ const NERD_SYMBOLS: SymbolMap = {
 	"lang.java": "\u{E738}",
 	"lang.c": "\u{E61E}",
 	"lang.cpp": "\u{E61D}",
-	"lang.csharp": "\u{E7BC}",
+	"lang.csharp": "\u{E7B2}",
 	"lang.ruby": "\u{E791}",
 	"lang.julia": "\u{E624}",
 	"lang.php": "\u{E608}",
