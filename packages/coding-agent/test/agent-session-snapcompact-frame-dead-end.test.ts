@@ -466,6 +466,34 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 		expect(shakeSpy).toHaveBeenCalledWith("elide", expect.objectContaining({ config: RESCUE_SHAKE_CONFIG }));
 	});
 
+	it("does not rescue a snapcompact archive superseded by a reset boundary", async () => {
+		await createSession({ frameCount: SEEDED_FRAME_COUNT });
+		const compactionIdsBefore = sessionManager
+			.getBranch()
+			.filter(entry => entry.type === "compaction")
+			.map(entry => entry.id);
+		sessionManager.appendResetBoundary();
+		vi.spyOn(compactionModule, "prepareCompaction").mockReturnValue(undefined);
+		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		vi.spyOn(session.agent, "continue").mockResolvedValue();
+		vi.spyOn(session, "getContextUsage").mockReturnValue({ tokens: 190000, contextWindow: 200000, percent: 95 });
+		const shakeSpy = vi
+			.spyOn(session, "shake")
+			.mockResolvedValue({ mode: "elide", toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 });
+		const compactSpy = vi.spyOn(snapcompact, "compact");
+
+		await triggerMaintenance();
+
+		expect(compactSpy).not.toHaveBeenCalled();
+		expect(shakeSpy).toHaveBeenCalledWith("elide", expect.objectContaining({ config: RESCUE_SHAKE_CONFIG }));
+		expect(
+			sessionManager
+				.getBranch()
+				.filter(entry => entry.type === "compaction")
+				.map(entry => entry.id),
+		).toEqual(compactionIdsBefore);
+	});
+
 	it("leaves an oversized non-archive tail to the elide tiers instead of rescuing the archive", async () => {
 		// Codex review on #6362 (round 4): with […, archive, HUGE kept tool
 		// result], rebuilding the archive would append the replacement at the
