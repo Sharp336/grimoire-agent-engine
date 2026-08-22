@@ -8591,6 +8591,10 @@ export class AgentSession {
 			this.#clearSessionScopedToolState();
 
 			this.#rehydrateCheckpointRewindState();
+			// Capture retainable history before promoting the /btw exchange so
+			// the close-path baseline does not treat the unanswered (no agent_end)
+			// promoted question as already retained.
+			const closeRetainBaselineTurns = countRetainableUserTurns(this.sessionManager);
 			this.sessionManager.appendMessage({
 				role: "user",
 				content: [{ type: "text", text: question }],
@@ -8601,7 +8605,7 @@ export class AgentSession {
 			this.#freshProviderSessionId = undefined;
 			this.#syncAgentSessionId();
 			this.#memory.rekeyForCurrentSessionId();
-			await this.#memory.resetContextForNewTranscript();
+			await this.#memory.resetContextForNewTranscript({ closeRetainBaselineTurns });
 
 			const sessionContext = this.buildDisplaySessionContext();
 

@@ -881,6 +881,43 @@ describe("Hindsight append-mode session retention", () => {
 		expect(bodies).toHaveLength(0);
 	});
 
+	it("does not treat a promoted /btw turn as already-retained close history", async () => {
+		const bodies = captureBodies();
+		const client = new HindsightApi({ baseUrl: "http://hindsight.local" });
+		const entries = [
+			userEntry("u1", null, "turn one has enough text", "2026-08-17T10:00:00.000Z"),
+			assistantEntry("a1", "u1", "reply one has enough text", "2026-08-17T10:00:01.000Z"),
+			userEntry("u2", "a1", "promoted btw question has enough text", "2026-08-17T10:02:00.000Z"),
+			assistantEntry("a2", "u2", "promoted btw answer has enough text", "2026-08-17T10:02:01.000Z"),
+		];
+		const state = new HindsightSessionState({
+			sessionId: "sess-btw-promote",
+			client,
+			bankId: "personal",
+			config: makeConfig({ retainMode: "last-turn", retainEveryNTurns: 5, retainOverlapTurns: 0 }),
+			session: {
+				sessionId: "sess-btw-promote",
+				loadedUserTurnCount: 1,
+				sessionManager: {
+					getHeader: () => ({
+						type: "session",
+						id: "sess-btw-promote",
+						timestamp: SESSION_START,
+						cwd: "/tmp",
+					}),
+					getEntries: () => entries,
+				},
+				getHindsightSessionState: () => state,
+			} as object as AgentSession,
+			banksSet: new Set(["personal"]),
+		});
+
+		state.resetConversationTracking(1);
+		await state.drainOnClose();
+		expect(bodies).toHaveLength(1);
+		expect(String(firstItem(bodies[0]).content)).toContain("promoted btw question has enough text");
+	});
+
 	it("does not treat an image-only user entry as a retainable close baseline turn", async () => {
 		const bodies = captureBodies();
 		const client = new HindsightApi({ baseUrl: "http://hindsight.local" });

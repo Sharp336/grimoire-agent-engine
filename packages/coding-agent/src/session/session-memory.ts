@@ -94,11 +94,11 @@ export class SessionMemory {
 	}
 
 	/** New session file: reset auto-recall / retain-threshold counters for the new transcript. */
-	#resetHindsightConversationTrackingIfHindsight(): boolean {
+	#resetHindsightConversationTrackingIfHindsight(closeRetainBaselineTurns?: number): boolean {
 		if (this.#host.settings.get("memory.backend") !== "hindsight") return false;
 		const state = this.#host.getHindsightSessionState();
 		if (!state || state.aliasOf) return false;
-		state.resetConversationTracking();
+		state.resetConversationTracking(closeRetainBaselineTurns);
 		return true;
 	}
 
@@ -111,9 +111,9 @@ export class SessionMemory {
 	}
 
 	/** Resets transcript-scoped memory counters and removes a promoted prompt. */
-	async resetContextForNewTranscript(): Promise<void> {
+	async resetContextForNewTranscript(options?: { closeRetainBaselineTurns?: number }): Promise<void> {
 		const hadPromotedMemoryPrompt = this.#baseSystemPromptBeforeMemoryPromotion !== undefined;
-		const resetHindsight = this.#resetHindsightConversationTrackingIfHindsight();
+		const resetHindsight = this.#resetHindsightConversationTrackingIfHindsight(options?.closeRetainBaselineTurns);
 		const resetMnemopi = this.#resetMnemopiConversationTrackingIfMnemopi();
 		if (hadPromotedMemoryPrompt) {
 			this.#host.setBaseSystemPrompt(this.#baseSystemPromptBeforeMemoryPromotion!);

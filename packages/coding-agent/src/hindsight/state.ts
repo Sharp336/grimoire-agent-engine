@@ -281,13 +281,13 @@ export class HindsightSessionState {
 		this.#invalidateRetainCache();
 	}
 
-	resetConversationTracking(): void {
+	resetConversationTracking(closeRetainBaselineTurns?: number): void {
 		this.lastRetainedTurn = 0;
 		this.hasRecalledForFirstTurn = false;
 		this.lastRecallSnippet = undefined;
-		this.#closeRetainBaselineTurns = this.session.sessionManager
-			? countRetainableUserTurns(this.session.sessionManager)
-			: 0;
+		this.#closeRetainBaselineTurns =
+			closeRetainBaselineTurns ??
+			(this.session.sessionManager ? countRetainableUserTurns(this.session.sessionManager) : 0);
 		this.#invalidateRetainCache();
 	}
 
