@@ -154,20 +154,38 @@ export function resolveModelThinking<TApi extends Api>(
 	} else {
 		// Friendli: discovery is authoritative. `mapFriendliThinking` gives
 		// effort models their API ladder from `type: "effort"`; toggle-only
-		// models (e.g. GLM-4.5) are left with `thinking: undefined` so the
-		// `qwen-template-false` disable mode drives `enable_thinking` on/off
-		// without misclassifying them as having an effort surface. This
-		// early-return fires for a Friendli model with
+		// models (e.g. GLM-4.5) are left with `spec.thinking === undefined`
+		// by the generator deliberately — a synthetic effort tier baked into
+		// `spec.thinking` would leak into `friendliHasEffortSurface`
+		// (compat/openai.ts, computed BEFORE this function runs) and make
+		// `buildOpenAICompat` misclassify the model as having a real effort
+		// surface, emitting a top-level `reasoning_effort` the endpoint
+		// rejects. This early-return fires for a Friendli model with
 		// `spec.thinking === undefined` AND no identity-known effort ladder
-		// — i.e. the API reported reasoning with neither a
-		// `type: "effort"` entry nor a GLM-5.2 identity match. Return
-		// undefined instead of fabricating a generic effort ladder the
-		// endpoint rejects.
+		// — i.e. the API reported reasoning with neither a `type: "effort"`
+		// entry nor a GLM-5.2 identity match.
+		//
+		// Because `compat` is already fully resolved by the time this
+		// function runs (`buildModel` calls `buildCompat` first), it's safe
+		// to synthesize a single-tier `ThinkingConfig` HERE instead of on
+		// `spec.thinking` — `friendliHasEffortSurface` has already been
+		// computed and cannot see it. The synthetic tier only exists to give
+		// `collapseQwenTemplateBinaryThinking` a non-empty `efforts` array to
+		// collapse to 1, which is what makes the on/off toggle observable to
+		// `getSupportedEfforts`/the picker while `compat.supportsReasoningEffort`
+		// stays false and `reasoningDisableMode: "qwen-template-false"` drives
+		// `chat_template_kwargs.enable_thinking` on the wire.
+		//
 		// A custom provider pointing at Friendli with GLM-5.2 but no
 		// `thinking` block is identity-known → getModelDefinedEfforts returns
-		// HIGH_MAX → fall through to deriveThinking.
+		// HIGH_MAX → fall through to deriveThinking instead of this branch.
 		if (modelMatchesHost(spec, "friendli") && spec.thinking === undefined) {
-			if (getModelDefinedEfforts(spec, compat) === undefined) return undefined;
+			if (getModelDefinedEfforts(spec, compat) === undefined) {
+				if (isQwenTemplateBinaryThinking(spec.api, compat)) {
+					return { mode: "effort", efforts: [Effort.High] };
+				}
+				return undefined;
+			}
 		}
 		// Cascade selects effort only by routing to a sibling model id, so a
 		// Devin model with no explicit routed thinking has no controllable

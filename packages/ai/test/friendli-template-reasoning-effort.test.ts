@@ -297,4 +297,38 @@ describe("Friendli extraBody serializes conditionally in the wire payload", () =
 		const body = await captureBody(model, undefined);
 		expect(body.chat_template_kwargs).toEqual({ enable_thinking: false });
 	});
+
+	it("emits enable_thinking:true and omits reasoning_effort in the serialized body when a toggle-only Friendli model is explicitly enabled", async () => {
+		// Companion to the disable test above: the actual P1 regression this
+		// discriminator fixes was that toggle-only models COULD be disabled
+		// (via the fix above) but could no longer be ENABLED — the model's
+		// `thinking` was left undefined so `getSupportedEfforts` returned an
+		// empty array and callers had no on-state to select. This exercises
+		// the full request path with an explicit `reasoning: "high"` request
+		// on a toggle-only model (no `thinking.efforts` from discovery, no
+		// static seed — GLM-4.5 is not the GLM-5.2 identity match) and
+		// asserts the wire carries the template toggle WITHOUT the top-level
+		// `reasoning_effort` field the endpoint rejects for toggle-only SKUs.
+		const spec: ModelSpec<"openai-completions"> = {
+			id: "zai-org/GLM-4.5",
+			name: "GLM-4.5",
+			api: "openai-completions",
+			provider: "friendli",
+			baseUrl: "https://api.friendli.ai/serverless/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 131_072,
+			maxTokens: 8_192,
+		};
+		const model = buildModel(spec) as Model<"openai-completions">;
+		// The toggle IS observable: getSupportedEfforts must return a
+		// non-empty on-state, or the picker has nothing to select.
+		expect(model.thinking?.efforts.length).toBeGreaterThan(0);
+		expect(model.compat.supportsReasoningEffort).toBe(false);
+
+		const body = await captureBody(model, Effort.High);
+		expect(body.chat_template_kwargs).toEqual({ enable_thinking: true });
+		expect(body.reasoning_effort).toBeUndefined();
+	});
 });
