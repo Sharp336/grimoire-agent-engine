@@ -116,7 +116,6 @@ export interface SelectCpuVariantResult {
 export function selectCpuVariant(input: SelectCpuVariantInput): SelectCpuVariantResult;
 
 export interface ValidateLoadedBindingsContext {
-	isWorkspaceLoad: boolean;
 	packageVersion: string;
 	versionSentinelExport: string;
 }

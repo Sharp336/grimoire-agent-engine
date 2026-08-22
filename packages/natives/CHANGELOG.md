@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Native API mismatches in workspace development now fail at startup instead of crashing later when newly declared functions or enum variants are used.
+
 ## [17.4.1] - 2026-08-21
 
 ### Changed

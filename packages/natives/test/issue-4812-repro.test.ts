@@ -34,7 +34,6 @@ async function withCandidate(contents: string, test: (candidate: string) => void
 
 function ctxFor(version: string) {
 	return {
-		isWorkspaceLoad: false,
 		packageVersion: version,
 		versionSentinelExport: `__piNativesV${version.replace(/[^A-Za-z0-9]/g, "_")}`,
 	};
@@ -71,8 +70,8 @@ describe("issue 4812: pi-natives sentinel process-stale diagnosis", () => {
 		});
 	});
 
-	it("skips validation entirely in workspace dev", () => {
-		const ctx = { ...ctxFor("16.3.11"), isWorkspaceLoad: true };
-		expect(() => validateLoadedBindings(ctx, { grep: () => {} }, unusedCandidate)).not.toThrow();
+	it("rejects stale bindings in workspace development before unsupported calls run", () => {
+		const ctx = ctxFor("16.3.11");
+		expect(() => validateLoadedBindings(ctx, { grep: () => {} }, unusedCandidate)).toThrow("reinstall to re-sync");
 	});
 });

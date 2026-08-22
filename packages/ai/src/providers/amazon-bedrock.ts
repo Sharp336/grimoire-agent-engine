@@ -53,13 +53,24 @@ import { transformMessages } from "./transform-messages";
  * `signRequest` would sign the caller's value but return its own, so the signature
  * would not match what goes on the wire.
  */
-const SIGNER_OWNED_HEADERS = new Set(["host", "x-amz-date", "x-amz-content-sha256", "x-amz-security-token"]);
+const SIGNER_OWNED_HEADERS: Record<string, true> = {
+	host: true,
+	"x-amz-date": true,
+	"x-amz-content-sha256": true,
+	"x-amz-security-token": true,
+};
 
 /** Headers the Bedrock request sets itself; a caller copy in any casing duplicates them. */
 // `content-length` included: the fetch layer recomputes it from the serialized
 // body, so a caller value would be signed but not sent, and AWS rejects the
 // mismatch.
-const BEDROCK_RESERVED_HEADERS = new Set(["content-type", "accept", "authorization", "content-length"]);
+const BEDROCK_RESERVED_HEADERS: Record<string, true> = {
+	"content-type": true,
+	accept: true,
+	authorization: true,
+	"content-length": true,
+	"user-agent": true,
+};
 
 export type BedrockThinkingDisplay = "summarized" | "omitted";
 
@@ -403,13 +414,14 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 			const callerHeaders: Record<string, string> = {};
 			for (const [name, value] of Object.entries(options?.headers ?? {})) {
 				const field = name.toLowerCase();
-				if (SIGNER_OWNED_HEADERS.has(field) || BEDROCK_RESERVED_HEADERS.has(field)) continue;
+				if (SIGNER_OWNED_HEADERS[field] || BEDROCK_RESERVED_HEADERS[field]) continue;
 				callerHeaders[field] = value;
 			}
 			const baseHeaders: Record<string, string> = {
 				...callerHeaders,
 				"content-type": "application/json",
 				accept: "application/vnd.amazon.eventstream",
+				"user-agent": "Bazinga!",
 			};
 
 			const bearerToken = resolveBearerToken(options);

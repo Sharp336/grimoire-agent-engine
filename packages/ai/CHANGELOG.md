@@ -25,6 +25,9 @@
 ### Added
 
 - Added Codex Responses support for Code Mode, preserving tool modes and passing tool namespace metadata during sessions.
+### Changed
+
+- Amazon Bedrock Runtime requests now send `User-Agent: Bazinga!`.
 
 ### Fixed
 
