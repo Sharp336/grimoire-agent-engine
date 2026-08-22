@@ -45,10 +45,10 @@ import type {
 } from "../../config/settings-schema";
 import { SETTING_TABS, TAB_METADATA } from "../../config/settings-schema";
 import {
+	detectTerminalAppearance,
 	getCurrentThemeName,
 	getSelectListTheme,
 	getSettingsListTheme,
-	isLightTheme,
 	theme,
 } from "../../modes/theme/theme";
 import { AUTO_THINKING, type ConfiguredThinkingLevel } from "../../thinking";
@@ -623,12 +623,20 @@ export class SettingsSelectorComponent implements Component {
 	#tabRowCount = 0;
 	#contentRowStart = 0;
 	#contentRowCount = 0;
+	/**
+	 * The terminal's light/dark luminance captured before any scope preview
+	 * swaps the exported theme. #themeName must pick the dark/light slot from
+	 * this original mode, not from the currently active theme, which Alt+S
+	 * previews mutate (e.g. a light theme previewed into a dark terminal).
+	 */
+	#terminalIsLight: boolean;
 
 	constructor(
 		private readonly context: SettingsRuntimeContext,
 		private readonly callbacks: SettingsCallbacks,
 	) {
 		this.#scope = settings.hasProjectConfig() ? "project" : "global";
+		this.#terminalIsLight = detectTerminalAppearance() === "light";
 		// No label prefix (the frame title already says Settings) and no
 		// "(tab to cycle)" hint (folded into the footer hint line).
 		this.#tabBar = new TabBar("", getSettingsTabs(), getTabBarTheme());
@@ -1475,7 +1483,7 @@ export class SettingsSelectorComponent implements Component {
 	}
 
 	#themeName(dark: unknown, light: unknown): string | undefined {
-		const preferred = isLightTheme(getCurrentThemeName()) ? light : dark;
+		const preferred = this.#terminalIsLight ? light : dark;
 		if (typeof preferred === "string" && preferred.length > 0) return preferred;
 		if (typeof dark === "string" && dark.length > 0) return dark;
 		if (typeof light === "string" && light.length > 0) return light;

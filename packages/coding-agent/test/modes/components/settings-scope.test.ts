@@ -2,7 +2,13 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test
 import * as path from "node:path";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { SettingsSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/settings-selector";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import {
+	initTheme,
+	onTerminalAppearanceChange,
+	previewTheme,
+	setTheme,
+	theme,
+} from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
@@ -175,6 +181,87 @@ describe("SettingsSelectorComponent persistence scope", () => {
 		selector.handleInput("\x1b");
 		expect(previews.at(-1)).toBe("dark-one");
 		expect(settings.get("theme.dark")).toBe("dark-one");
+	});
+	it("keeps the dark/light theme slot of the terminal when closing after a preview", async () => {
+		// This terminal is dark (test env). The project layer sets the dark
+		// slot; Alt+S previews the global layer, which maps the DARK slot to a
+		// LIGHT theme (alabaster) and the LIGHT slot to a dark theme
+		// (titanium). The runtime swaps the exported theme and re-derives the
+		// active theme name (setTheme). Closing must restore the effective
+		// theme from the terminal's DARK slot (dark-one) — the dark/light
+		// decision is captured once, not recomputed from the previewed theme.
+		const previews: string[] = [];
+		const selector = new SettingsSelectorComponent(
+			{
+				availableThinkingLevels: [],
+				thinkingLevel: undefined,
+				availableThemes: ["dark-one", "titanium", "alabaster"],
+				providers: [],
+				cwd: projectDir,
+			},
+			{
+				onChange: (settingPath, value) => changes.push({ path: settingPath, value }),
+				onThemePreview: async themeName => {
+					previews.push(themeName);
+					await previewTheme(themeName);
+				},
+				onCancel: () => {},
+			},
+		);
+		settings.set("theme.dark", "dark-one", "project");
+		settings.set("theme.dark", "alabaster", "global");
+		settings.set("theme.light", "titanium", "global");
+		// Alt+S previews the global layer and the exported theme swaps to the
+		// light theme; the active theme name now resolves to that light theme.
+		selector.handleInput("\x1bs");
+		await setTheme("alabaster");
+		expect(previews.at(-1)).toBe("alabaster");
+		expect(theme.isLight).toBe(true);
+		// Closing restores the effective project theme (dark slot) — the
+		// dark/light decision stays captured at the terminal's original mode
+		// and must NOT pick the light slot despite the previewed theme.
+		selector.handleInput("\x1b");
+		expect(previews.at(-1)).toBe("dark-one");
+		expect(settings.get("theme.dark")).toBe("dark-one");
+	});
+	it("restores from the dark slot when the dark slot itself holds a light theme", () => {
+		// Terminal is dark (test env). The dark slot maps to a LIGHT theme
+		// (alabaster), so the loaded theme/currentThemeName are light — but the
+		// terminal's actual appearance is dark. Closing must restore the
+		// effective theme from the terminal's own dark/light mode, read via
+		// the reported appearance, not from the loaded theme's luminance.
+		onTerminalAppearanceChange("dark");
+		const previews: string[] = [];
+		const selector = new SettingsSelectorComponent(
+			{
+				availableThinkingLevels: [],
+				thinkingLevel: undefined,
+				availableThemes: ["dark-one", "titanium", "alabaster"],
+				providers: [],
+				cwd: projectDir,
+			},
+			{
+				onChange: (settingPath, value) => changes.push({ path: settingPath, value }),
+				onThemePreview: themeName => {
+					previews.push(themeName);
+				},
+				onCancel: () => {},
+			},
+		);
+		settings.set("theme.dark", "alabaster", "project");
+		settings.set("theme.light", "titanium", "project");
+		settings.set("theme.dark", "titanium", "global");
+		settings.set("theme.light", "alabaster", "global");
+		// Alt+S previews the global layer: the dark terminal picks the dark
+		// slot, which is the dark theme titanium.
+		selector.handleInput("\x1bs");
+		expect(previews.at(-1)).toBe("titanium");
+		// Closing restores the effective project theme. The terminal is dark,
+		// so it must come from the dark slot (alabaster) — even though the
+		// loaded theme is light and currentThemeName reports a light theme.
+		selector.handleInput("\x1b");
+		expect(previews.at(-1)).toBe("alabaster");
+		expect(settings.get("theme.dark")).toBe("alabaster");
 	});
 
 	it("keeps the selected scope's status-line baseline when canceling a submenu", () => {
