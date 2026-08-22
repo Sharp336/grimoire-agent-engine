@@ -269,9 +269,9 @@ async function installPrimaryState(
 
 /**
  * `onHindsightScopeChanged` handler: re-evaluate the bank scope from current
- * settings and rebuild the primary state when it has actually drifted. No-op
- * when the scope is unchanged or the session is no longer hosting a primary
- * state (e.g. it was wiped to `undefined`, or this is a subagent alias).
+ * settings and rebuild the primary state when it has actually drifted. When
+ * only non-routing config changed (e.g. retainUpdateMode), refresh the live
+ * state's config snapshot without resetting retain/recall tracking.
  */
 async function rebuildPrimaryStateOnScopeChange(session: AgentSession): Promise<void> {
 	const current = session.getHindsightSessionState();
@@ -289,7 +289,14 @@ async function rebuildPrimaryStateOnScopeChange(session: AgentSession): Promise<
 	}
 
 	const next = computeBankScope(config, session.sessionManager.getCwd());
-	if (bankScopesEqual(next, current)) return;
+	if (bankScopesEqual(next, current)) {
+		// Bank routing is unchanged, but other live settings such as
+		// retainUpdateMode still need to replace the config snapshot. Mutate
+		// in place so subagent aliases that captured `parent.config` by
+		// reference observe the same update.
+		Object.assign(current.config, config);
+		return;
+	}
 
 	// Preserve the banksSet so we don't re-PUT banks we've already confirmed.
 	await installPrimaryState(session, settings, current.banksSet);
