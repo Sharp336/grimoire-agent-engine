@@ -151,9 +151,13 @@ export function buildAsyncProgressBlock(message: CustomOrHookMessage): ToolActiv
 				new Text(theme.fg("dim", `  … ${job.suppressedEvents} progress events suppressed (rate limit)`), 1, 0),
 			);
 		}
-		const preview = job.truncated
-			? [job.head, "[…progress truncated…]", job.tail].filter(part => part !== undefined).join("\n")
-			: (job.text ?? "");
+		// A source-truncated window that still fits the preview budget arrives as
+		// `{ text, truncated: true }` with no head/tail split: render its retained
+		// text and reserve the marker for an actual head/tail gap.
+		const preview =
+			job.truncated && (job.head !== undefined || job.tail !== undefined)
+				? [job.head, "[…progress truncated…]", job.tail].filter(part => part !== undefined).join("\n")
+				: (job.text ?? "");
 		for (const line of preview.split("\n")) {
 			if (line.trim().length === 0) continue;
 			const rendered = truncateToWidth(replaceTabs(shortenPath(sanitizeText(line))), TRUNCATE_LENGTHS.LINE);

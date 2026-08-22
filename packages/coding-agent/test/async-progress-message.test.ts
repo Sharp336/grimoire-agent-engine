@@ -186,6 +186,7 @@ describe("async progress messages", () => {
 		const rendered = Bun.stripANSI(buildAsyncProgressBlock(message).render(100).join("\n"));
 		expect(rendered).toContain("HEAD");
 		expect(rendered).toContain("TAIL");
+		expect(rendered).toContain("[…progress truncated…]");
 		expect(rendered).toContain("Read artifact://async-output-4 for full output");
 	});
 
@@ -211,6 +212,14 @@ describe("async progress messages", () => {
 			`<suppressed reason="preview-limit" full-output="artifact://async-output-5" />\n${line}\n</output>`,
 		);
 		expect(content(message)).not.toContain("<head>");
+
+		// The transcript renderer must show the retained text (width-bounded),
+		// not collapse the row to a bare truncation marker: the marker belongs
+		// only between an actual head/tail split.
+		const rendered = Bun.stripANSI(buildAsyncProgressBlock(message).render(400).join("\n"));
+		expect(rendered).toContain("H".repeat(40));
+		expect(rendered).not.toContain("[…progress truncated…]");
+		expect(rendered).toContain("artifact://async-output-5");
 	});
 
 	test("renders the custom message as sanitized progress rather than a completion", () => {

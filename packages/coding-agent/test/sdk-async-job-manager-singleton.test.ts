@@ -92,6 +92,20 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 		expect(AsyncJobManager.instance()).toBeUndefined();
 	}, 60000);
 
+	// Capability markers, not prose: each is a parameter literal the guidance can
+	// only instruct when the built-in tool's schema exposes it, so copy edits to
+	// the surrounding sentences never fail these tests.
+	const BASH_ASYNC_MARKER = 'async: "auto"';
+	const HUB_PROGRESS_MARKER = 'op: "start"';
+
+	function asyncProgressBlock(systemPrompt: string): string | undefined {
+		const start = systemPrompt.indexOf("<async-progress>");
+		if (start < 0) return undefined;
+		const end = systemPrompt.indexOf("</async-progress>", start);
+		if (end < 0) throw new Error("Unclosed <async-progress> block");
+		return systemPrompt.slice(start, end);
+	}
+
 	it("advertises available harness-pushed progress surfaces under Tool Policy", async () => {
 		const session = await spawnTopLevelSession({ "async.enabled": true });
 		try {
@@ -102,28 +116,12 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 			expect(toolPolicyIndex).toBeGreaterThanOrEqual(0);
 			expect(progressIndex).toBeGreaterThan(toolPolicyIndex);
 			expect(progressIndex).toBeLessThan(workflowIndex);
-			expect(systemPrompt).toContain("<async-progress>");
-			expect(systemPrompt).toContain(
-				'Potentially slow finite commands → `bash` with `async: "auto"`; simple known-fast commands omit `async`.',
-			);
-			expect(systemPrompt).toContain('Use `progress: "wake"` only when pre-exit output may change the next action.');
-			expect(systemPrompt).not.toContain("200 ms batches");
-			expect(systemPrompt).not.toContain("10-event burst");
-			expect(systemPrompt).not.toContain("Every fifth progress update");
-			expect(systemPrompt).toContain("Repeated non-actionable progress → NEVER narrate or echo each event.");
-			expect(systemPrompt).toContain(
-				"Transient burst? Ignore it and await completion. Sustained/chatty? Reduce source verbosity.",
-			);
-			expect(systemPrompt).toContain("Safe restart? Stop/cancel; relaunch with native quiet/warning-only flags.");
-			expect(systemPrompt).toContain("Retune its monitor to `ambient` or `off`.");
-			expect(systemPrompt).toContain("Unsafe restart? Let it finish silently.");
-			expect(systemPrompt).toContain(
-				'Actionable process output → `hub`, `progress: "wake"` (`op: "start"` new; `op: "monitor"` existing).',
-			);
-			expect(systemPrompt).toContain(
-				"NEVER call `hub wait`, follow logs, or block to receive progress or keep the turn alive; use async progress and end the turn instead.",
-			);
-			expect(systemPrompt).toContain("</async-progress>");
+			const block = asyncProgressBlock(systemPrompt);
+			if (block === undefined) throw new Error("Expected <async-progress> block");
+			// Both built-in surfaces are registered, so both async-parameter
+			// instructions must render inside the block.
+			expect(block).toContain(BASH_ASYNC_MARKER);
+			expect(block).toContain(HUB_PROGRESS_MARKER);
 		} finally {
 			await session.dispose();
 		}
@@ -132,15 +130,10 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 	it("advertises only Hub progress when async Bash is disabled", async () => {
 		const session = await spawnTopLevelSession({ "async.enabled": false });
 		try {
-			const systemPrompt = session.systemPrompt.join("\n\n");
-			expect(systemPrompt).toContain("<async-progress>");
-			expect(systemPrompt).not.toContain("finite commands");
-			expect(systemPrompt).not.toContain('`bash` with `async: "auto"`');
-			expect(systemPrompt).toContain("Unsafe restart? Let it finish silently.");
-			expect(systemPrompt).toContain("Actionable process output");
-			expect(systemPrompt).toContain("Transient burst? Ignore it and await completion.");
-			expect(systemPrompt).toContain("Repeated non-actionable progress → NEVER narrate or echo each event.");
-			expect(systemPrompt).toContain("Retune its monitor");
+			const block = asyncProgressBlock(session.systemPrompt.join("\n\n"));
+			if (block === undefined) throw new Error("Expected <async-progress> block");
+			expect(block).not.toContain(BASH_ASYNC_MARKER);
+			expect(block).toContain(HUB_PROGRESS_MARKER);
 		} finally {
 			await session.dispose();
 		}
@@ -173,14 +166,13 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 	it("drops async Bash guidance when an extension replaces the built-in bash tool", async () => {
 		const session = await spawnTopLevelSession({ "async.enabled": true }, [overrideBuiltinExtension("bash")]);
 		try {
-			const systemPrompt = session.systemPrompt.join("\n\n");
 			// The custom `bash` keeps the name but not the built-in's async/progress
-			// schema, so the prompt must not instruct async:"auto"/progress for it.
-			expect(systemPrompt).not.toContain('`bash` with `async: "auto"`');
-			expect(systemPrompt).not.toContain("finite commands");
+			// schema, so the block must not instruct bash async parameters.
+			const block = asyncProgressBlock(session.systemPrompt.join("\n\n"));
+			if (block === undefined) throw new Error("Expected <async-progress> block");
+			expect(block).not.toContain(BASH_ASYNC_MARKER);
 			// Hub guidance is unaffected by the bash override.
-			expect(systemPrompt).toContain("<async-progress>");
-			expect(systemPrompt).toContain("Actionable process output");
+			expect(block).toContain(HUB_PROGRESS_MARKER);
 		} finally {
 			await session.dispose();
 		}
@@ -189,12 +181,11 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 	it("drops Hub progress guidance when an extension replaces the built-in hub tool", async () => {
 		const session = await spawnTopLevelSession({ "async.enabled": true }, [overrideBuiltinExtension("hub")]);
 		try {
-			const systemPrompt = session.systemPrompt.join("\n\n");
-			expect(systemPrompt).not.toContain("Actionable process output");
-			expect(systemPrompt).not.toContain("Retune its monitor");
+			const block = asyncProgressBlock(session.systemPrompt.join("\n\n"));
+			if (block === undefined) throw new Error("Expected <async-progress> block");
+			expect(block).not.toContain(HUB_PROGRESS_MARKER);
 			// Bash guidance is unaffected by the hub override.
-			expect(systemPrompt).toContain("<async-progress>");
-			expect(systemPrompt).toContain('`bash` with `async: "auto"`');
+			expect(block).toContain(BASH_ASYNC_MARKER);
 		} finally {
 			await session.dispose();
 		}
