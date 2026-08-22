@@ -146,6 +146,10 @@ export interface DaemonOutputSubscription {
 	owner: string;
 	/** Session artifact written directly by the broker while the subscription is active. */
 	artifactPath: string;
+	/** Client-managed cumulative ack: broker registration epoch of the last delivered output batch. */
+	lastEpoch?: string;
+	/** Client-managed cumulative ack: highest `seq` delivered for {@link lastEpoch}. */
+	lastSeq?: number;
 }
 
 /** Response envelope kept raw until matched with its pending operation. */
@@ -165,6 +169,8 @@ export interface DaemonOutputNotification {
 	monitorId: string;
 	name: string;
 	daemonId: string;
+	/** Broker registration epoch; `seq` ordering and replay acks are scoped to it. */
+	epoch?: string;
 	seq: number;
 	text: string;
 	batchKind: ProgressBatchKind;
@@ -269,6 +275,11 @@ function outputSubscriptions(value: unknown): DaemonOutputSubscription[] {
 			name: stringValue(source.name, `request.outputSubscriptions[${index}].name`),
 			owner: stringValue(source.owner, `request.outputSubscriptions[${index}].owner`),
 			artifactPath: stringValue(source.artifactPath, `request.outputSubscriptions[${index}].artifactPath`),
+			lastEpoch: optionalString(source.lastEpoch, `request.outputSubscriptions[${index}].lastEpoch`),
+			lastSeq:
+				source.lastSeq === undefined
+					? undefined
+					: nonNegativeInteger(source.lastSeq, `request.outputSubscriptions[${index}].lastSeq`),
 		};
 	});
 }
@@ -418,6 +429,7 @@ export function parseDaemonWireMessage(value: unknown): DaemonWireMessage {
 			monitorId: stringValue(source.monitorId, "output.monitorId"),
 			name: stringValue(source.name, "output.name"),
 			daemonId: stringValue(source.daemonId, "output.daemonId"),
+			epoch: optionalString(source.epoch, "output.epoch"),
 			seq: nonNegativeInteger(source.seq, "output.seq"),
 			text: rawString(source.text, "output.text"),
 			batchKind: progressBatchKind(source.batchKind),

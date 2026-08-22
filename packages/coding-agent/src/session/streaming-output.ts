@@ -1,3 +1,4 @@
+import { closeSync, openSync } from "node:fs";
 import type { AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatBytes } from "../tools/render-utils";
@@ -55,6 +56,11 @@ export interface OutputSinkOptions {
 	artifactId?: string;
 	/** `mirror` writes every raw chunk to the artifact; `spill` opens it only when inline output loses bytes. */
 	artifactWriteMode?: "spill" | "mirror";
+	/**
+	 * Open the artifact for appending so an existing capture at `artifactPath`
+	 * survives this sink (broker monitor reattach). Default false: truncate.
+	 */
+	artifactAppend?: boolean;
 	/**
 	 * Total inline body budget (bytes). Default DEFAULT_MAX_BYTES. The head
 	 * window and rolling tail window share this budget, so a composed
@@ -773,6 +779,9 @@ export class OutputSink {
 	readonly #artifactPath?: string;
 	readonly #artifactId?: string;
 	readonly #artifactWriteMode: "spill" | "mirror";
+	readonly #artifactAppend: boolean;
+	/** Descriptor backing an append-mode sink; Bun's fd writer does not own it. */
+	#appendFd?: number;
 	readonly #spillThreshold: number;
 	readonly #headLimit: number;
 	readonly #onChunk?: (chunk: string) => void;
@@ -799,6 +808,7 @@ export class OutputSink {
 			artifactPath,
 			artifactId,
 			artifactWriteMode = "spill",
+			artifactAppend = false,
 			spillThreshold = DEFAULT_MAX_BYTES,
 			headBytes = 0,
 			maxColumns = 0,
@@ -810,6 +820,7 @@ export class OutputSink {
 		this.#artifactPath = artifactPath;
 		this.#artifactId = artifactId;
 		this.#artifactWriteMode = artifactWriteMode;
+		this.#artifactAppend = artifactAppend;
 		this.#spillThreshold = spillThreshold;
 		this.#headLimit = Math.max(0, Math.min(headBytes, Math.floor(spillThreshold / 2)));
 		this.#maxColumns = Math.max(0, maxColumns);
@@ -1124,7 +1135,18 @@ export class OutputSink {
 	async #createFileSink(): Promise<void> {
 		if (!this.#artifactPath || this.#fileReady) return;
 		try {
-			const sink = Bun.file(this.#artifactPath).writer();
+			let sink: Bun.FileSink;
+			if (this.#artifactAppend) {
+				// Bun.file(path).writer() truncates; append via an "a" descriptor.
+				// Opened synchronously so creation stays atomic with the buffer
+				// replay below — an await here would let new pushes land in both
+				// #buffer and #pendingFileWrites and duplicate them on drain. The
+				// fd writer does not take ownership; #finalizeFile closes it.
+				this.#appendFd = openSync(this.#artifactPath, "a", 0o600);
+				sink = Bun.file(this.#appendFd).writer();
+			} else {
+				sink = Bun.file(this.#artifactPath).writer();
+			}
 			this.#file = { path: this.#artifactPath, artifactId: this.#artifactId, sink };
 			this.#fileReady = true;
 
@@ -1153,6 +1175,7 @@ export class OutputSink {
 			} catch {
 				/* ignore */
 			}
+			this.#closeAppendFd();
 			this.#file = undefined;
 			this.#pendingFileWrites = undefined;
 			this.#fileReady = false;
@@ -1395,7 +1418,10 @@ export class OutputSink {
 			await this.#fileCreation.catch(() => undefined);
 		}
 		const file = this.#file;
-		if (!file) return;
+		if (!file) {
+			this.#closeAppendFd();
+			return;
+		}
 		// The tail/notice replay writes to the sink and can throw (e.g. a disk
 		// write error). Closing the descriptor MUST still happen — otherwise the
 		// fd leaks and the replay error masks the original tool error that put us
@@ -1410,7 +1436,19 @@ export class OutputSink {
 			} catch {
 				/* ignore */
 			}
+			this.#closeAppendFd();
 		}
+	}
+
+	/** Release the append-mode descriptor; Bun's fd writer never closes it. */
+	#closeAppendFd(): void {
+		if (this.#appendFd === undefined) return;
+		try {
+			closeSync(this.#appendFd);
+		} catch {
+			/* ignore */
+		}
+		this.#appendFd = undefined;
 	}
 
 	/**

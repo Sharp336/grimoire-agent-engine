@@ -82,6 +82,13 @@ const SIGNAL_NUMBER: Record<DaemonSignal, number> = {
 };
 
 const OUTPUT_RECONNECT_GRACE_MS = 30_000;
+/**
+ * Bounded retain-until-ack buffer per monitor registration. Notifications stay
+ * buffered after a locally successful write so a socket that dies before the
+ * client reads the frame can be replayed on reconnect; the client's cumulative
+ * `lastEpoch`/`lastSeq` ack prunes delivered entries.
+ */
+const MONITOR_PENDING_LIMIT = 32;
 
 interface ManagedProcess {
 	pid: number;
@@ -122,6 +129,12 @@ interface MonitorProgressChunk {
 interface OutputRegistration extends DaemonOutputSubscription {
 	socket?: net.Socket;
 	subscriptionId: string;
+	/**
+	 * Unique per registration instance. Scopes batcher state and wire `seq`
+	 * numbering (sent as the notification `epoch`), so queued or in-flight
+	 * deliveries of a replaced registration can be recognized as stale.
+	 */
+	batchKey: string;
 	pending: DaemonMonitorNotification[];
 	artifactSink: OutputSink;
 	offlineTimer?: NodeJS.Timeout;
@@ -156,10 +169,15 @@ function createOutputRegistration(
 		...subscription,
 		socket,
 		subscriptionId,
+		batchKey: crypto.randomUUID(),
 		pending: [],
 		artifactSink: new OutputSink({
 			artifactPath: subscription.artifactPath,
 			artifactWriteMode: "mirror",
+			// A republish after the offline grace expired re-creates the sink on
+			// the same artifact path; append so capture behind already-delivered
+			// artifact links survives (a fresh path starts empty either way).
+			artifactAppend: true,
 		}),
 		progressPreview,
 		progressLines: new ProgressLines(line => progressPreview.append(line.text, line.truncated)),
@@ -414,6 +432,7 @@ class DaemonBroker {
 	readonly #idleGraceMs: number;
 	readonly #restartBackoffBaseMs: number;
 	readonly #clientAuthTimeoutMs: number;
+	readonly #outputReconnectGraceMs: number;
 	readonly #records = new Map<string, ManagedDaemon>();
 	/**
 	 * Names reserved by an in-flight `start` before its record lands in
@@ -443,6 +462,7 @@ class DaemonBroker {
 		restartBackoffBaseMs: number,
 		clientAuthTimeoutMs: number,
 		progressBatchIntervalMs: number,
+		outputReconnectGraceMs: number,
 	) {
 		this.#projectDir = projectDir;
 		this.#runtimeDir = runtimeDir;
@@ -451,8 +471,9 @@ class DaemonBroker {
 		this.#idleGraceMs = idleGraceMs;
 		this.#restartBackoffBaseMs = restartBackoffBaseMs;
 		this.#clientAuthTimeoutMs = clientAuthTimeoutMs;
+		this.#outputReconnectGraceMs = outputReconnectGraceMs;
 		this.#progressBatcher = new ProgressBatcher<MonitorProgressChunk>(
-			(name, batch) => this.#notifyOutput(name, batch),
+			(batchKey, batch) => this.#notifyOutput(batchKey, batch),
 			{
 				merge: (left, right) => ({ preview: mergeProgressPreviews(left.preview, right.preview) }),
 				intervalMs: progressBatchIntervalMs,
@@ -558,9 +579,9 @@ class DaemonBroker {
 				registration.offlineTimer = setTimeout(() => {
 					if (registration.socket || this.#outputRegistrations.get(monitorId) !== registration) return;
 					this.#outputRegistrations.delete(monitorId);
-					this.#progressBatcher.clear(monitorId);
+					this.#progressBatcher.clear(registration.batchKey);
 					void registration.artifactSink.dispose();
-				}, OUTPUT_RECONNECT_GRACE_MS);
+				}, this.#outputReconnectGraceMs);
 				registration.offlineTimer.unref();
 			}
 		});
@@ -945,33 +966,34 @@ class DaemonBroker {
 		const text = record.log?.append(output) ?? output;
 		record.snapshot.outputBytes += Buffer.byteLength(text, "utf8");
 		const sanitized = sanitizeText(text);
+		this.#forwardToMonitors(record, output, sanitized);
+		this.#trackOutput(record, generation, sanitized);
+	}
+
+	/** Fan raw bytes and their preview lines out to every registration monitoring this daemon. */
+	#forwardToMonitors(record: ManagedDaemon, raw: string, sanitized: string): void {
 		for (const registration of this.#outputRegistrations.values()) {
 			if (registration.name !== record.snapshot.name) continue;
-			registration.artifactSink.push(output);
+			registration.artifactSink.push(raw);
 			// Line fragments accumulate per registration from its attach point, so a
 			// monitor never previews prefix text its own artifact does not contain.
 			registration.progressLines.append(sanitized);
 			const preview = registration.progressPreview.take();
-			if (preview) this.#progressBatcher.push(registration.id, { preview });
+			if (preview) this.#progressBatcher.push(registration.batchKey, { preview });
 		}
-		this.#trackOutput(record, generation, sanitized);
-	}
-
-	#outputMonitorIds(name: string): string[] {
-		const ids: string[] = [];
-		for (const registration of this.#outputRegistrations.values()) {
-			if (registration.name === name) ids.push(registration.id);
-		}
-		return ids;
 	}
 
 	async #flushOutputProgress(name: string): Promise<void> {
-		await Promise.all(this.#outputMonitorIds(name).map(id => this.#progressBatcher.flush(id)));
+		const flushes: Promise<void>[] = [];
+		for (const registration of this.#outputRegistrations.values()) {
+			if (registration.name === name) flushes.push(this.#progressBatcher.flush(registration.batchKey));
+		}
+		await Promise.all(flushes);
 	}
 
 	async #finishOutputProgress(name: string): Promise<void> {
 		const registrations = [...this.#outputRegistrations.values()].filter(registration => registration.name === name);
-		await Promise.all(registrations.map(registration => this.#progressBatcher.finish(registration.id)));
+		await Promise.all(registrations.map(registration => this.#progressBatcher.finish(registration.batchKey)));
 		await Promise.all(registrations.map(registration => registration.artifactSink.dispose()));
 	}
 
@@ -986,7 +1008,7 @@ class DaemonBroker {
 			if (registration.subscriptionId !== subscriptionId || advertised.has(monitorId)) continue;
 			clearTimeout(registration.offlineTimer);
 			this.#outputRegistrations.delete(monitorId);
-			this.#progressBatcher.clear(monitorId);
+			this.#progressBatcher.clear(registration.batchKey);
 			void registration.artifactSink.dispose();
 		}
 		for (const subscription of subscriptions) {
@@ -1000,12 +1022,17 @@ class DaemonBroker {
 				clearTimeout(existing.offlineTimer);
 				existing.offlineTimer = undefined;
 				existing.owner = subscription.owner;
+				const reconnected = existing.socket !== socket;
 				existing.socket = socket;
+				this.#pruneAcknowledgedOutput(existing, subscription);
 				const replayedTerminal = existing.pending.some(
 					notification => notification.event === "daemon-monitor-completed",
 				);
-				const pending = existing.pending.splice(0);
-				for (const notification of pending) this.#sendMonitorNotification(existing, notification);
+				// Retained notifications replay only across an actual socket change;
+				// on a steady-state envelope the client already holds them.
+				if (reconnected) {
+					for (const notification of existing.pending) this.#writeMonitorNotification(existing, notification);
+				}
 				const record = this.#records.get(subscription.name);
 				if (
 					record &&
@@ -1023,7 +1050,7 @@ class DaemonBroker {
 				// queued output from the old daemon never reaches the new monitor and
 				// no further bytes flow to the old artifact path.
 				clearTimeout(existing.offlineTimer);
-				this.#progressBatcher.clear(subscription.id);
+				this.#progressBatcher.clear(existing.batchKey);
 				void existing.artifactSink.dispose();
 			}
 			this.#outputRegistrations.set(subscription.id, createOutputRegistration(subscription, socket, subscriptionId));
@@ -1034,15 +1061,33 @@ class DaemonBroker {
 		}
 	}
 
+	/** Drop retained output batches the client has cumulatively acknowledged. */
+	#pruneAcknowledgedOutput(registration: OutputRegistration, subscription: DaemonOutputSubscription): void {
+		const { lastEpoch, lastSeq } = subscription;
+		if (lastEpoch === undefined || lastSeq === undefined || registration.pending.length === 0) return;
+		registration.pending = registration.pending.filter(
+			notification =>
+				notification.event !== "daemon-output" || notification.epoch !== lastEpoch || notification.seq > lastSeq,
+		);
+	}
+
 	#sendMonitorNotification(registration: OutputRegistration, notification: DaemonMonitorNotification): void {
-		if (!registration.socket || registration.socket.destroyed) {
-			registration.pending.push(notification);
-			return;
+		// Retain even after a locally successful write: the socket can die before
+		// the client reads the frame, and reconnect replays whatever the client's
+		// cumulative ack has not pruned. The buffer is bounded; overflow drops the
+		// oldest entries first (a terminal completion is always last).
+		registration.pending.push(notification);
+		if (registration.pending.length > MONITOR_PENDING_LIMIT) {
+			registration.pending.splice(0, registration.pending.length - MONITOR_PENDING_LIMIT);
 		}
+		this.#writeMonitorNotification(registration, notification);
+	}
+
+	#writeMonitorNotification(registration: OutputRegistration, notification: DaemonMonitorNotification): void {
+		if (!registration.socket || registration.socket.destroyed) return;
 		try {
 			registration.socket.write(`${JSON.stringify(notification)}\n`);
 		} catch (error) {
-			registration.pending.push(notification);
 			registration.socket.destroy();
 			logger.warn("Failed to write daemon monitor notification", {
 				monitorId: registration.id,
@@ -1052,19 +1097,32 @@ class DaemonBroker {
 		}
 	}
 
-	async #notifyOutput(monitorId: string, batch: ProgressBatch<MonitorProgressChunk>): Promise<void> {
-		const registration = this.#outputRegistrations.get(monitorId);
+	async #notifyOutput(batchKey: string, batch: ProgressBatch<MonitorProgressChunk>): Promise<void> {
+		let registration: OutputRegistration | undefined;
+		for (const candidate of this.#outputRegistrations.values()) {
+			if (candidate.batchKey !== batchKey) continue;
+			registration = candidate;
+			break;
+		}
+		// A batch keyed to a batchKey no longer registered belongs to a replaced
+		// registration; dropping it keeps old-daemon output away from a monitor
+		// that reused the same subscription id.
 		if (!registration) return;
 		const daemon = this.#records.get(registration.name)?.snapshot;
 		if (!daemon) return;
 		const preview = batch.kind === "artifact-only" ? undefined : batch.values[0]?.preview;
 		const text = preview ? flattenPreviewText(preview) : "";
 		await registration.artifactSink.flushArtifact();
+		// A replacement can land while the artifact flush yields; this delivery
+		// then belongs to the retired registration and must not reach the new
+		// monitor or its socket.
+		if (this.#outputRegistrations.get(registration.id) !== registration) return;
 		const notification: DaemonOutputNotification = {
 			event: "daemon-output",
 			monitorId: registration.id,
 			name: registration.name,
 			daemonId: daemon.id,
+			epoch: registration.batchKey,
 			seq: batch.seq,
 			text,
 			batchKind: batch.kind,
@@ -1105,7 +1163,9 @@ class DaemonBroker {
 		if (generation !== record.generation) return;
 		record.outputOffset = size;
 		record.snapshot.outputBytes = size;
-		this.#trackOutput(record, generation, sanitizeText(raw));
+		const sanitized = sanitizeText(raw);
+		this.#forwardToMonitors(record, raw, sanitized);
+		this.#trackOutput(record, generation, sanitized);
 	}
 
 	#trackOutput(record: ManagedDaemon, generation: number, text: string): void {
@@ -1197,7 +1257,7 @@ class DaemonBroker {
 			if (registration.name !== record.snapshot.name) continue;
 			registration.progressLines.finish();
 			const finalPreview = registration.progressPreview.take();
-			if (finalPreview) this.#progressBatcher.push(registration.id, { preview: finalPreview });
+			if (finalPreview) this.#progressBatcher.push(registration.batchKey, { preview: finalPreview });
 		}
 		await this.#flushOutputProgress(record.snapshot.name);
 		if (generation !== record.generation || settledState(record.snapshot.state)) return;
@@ -1662,6 +1722,8 @@ export interface DaemonBrokerStartOptions {
 	clientAuthTimeoutMs?: number;
 	/** Collection window for monitored output previews. */
 	progressBatchIntervalMs?: number;
+	/** Grace for a disconnected monitor client to reconnect before its registration is dropped. */
+	outputReconnectGraceMs?: number;
 	/** Called after the broker endpoint is ready to accept authenticated requests. */
 	onListening?: () => void | Promise<void>;
 }
@@ -1692,6 +1754,11 @@ export async function startDaemonBrokerFromEnvironment(options: DaemonBrokerStar
 		Number.isFinite(requestedProgressBatchIntervalMs) && requestedProgressBatchIntervalMs >= 0
 			? requestedProgressBatchIntervalMs
 			: PROGRESS_BATCH_INTERVAL_MS;
+	const requestedOutputReconnectGraceMs = options.outputReconnectGraceMs ?? OUTPUT_RECONNECT_GRACE_MS;
+	const outputReconnectGraceMs =
+		Number.isFinite(requestedOutputReconnectGraceMs) && requestedOutputReconnectGraceMs >= 0
+			? requestedOutputReconnectGraceMs
+			: OUTPUT_RECONNECT_GRACE_MS;
 	await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
 	const lease = await acquireBrokerLease(runtimeDir);
 	if (!lease) return;
@@ -1720,6 +1787,7 @@ export async function startDaemonBrokerFromEnvironment(options: DaemonBrokerStar
 		restartBackoffBaseMs,
 		clientAuthTimeoutMs,
 		progressBatchIntervalMs,
+		outputReconnectGraceMs,
 	);
 	const cancelCleanup = postmortem.register("daemon-broker", () => broker.shutdown());
 	try {

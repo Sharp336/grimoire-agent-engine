@@ -9,6 +9,7 @@ import { canonicalProjectDir, daemonBrokerEndpoint, daemonRuntimeDir } from "./p
 import {
 	DAEMON_BROKER_WORKER_ARG,
 	DAEMON_IDLE_GRACE_ENV,
+	DAEMON_OUTPUT_MONITOR_CAPABILITY,
 	DAEMON_PROJECT_DIR_ENV,
 	DAEMON_RUNTIME_DIR_ENV,
 	type DaemonCompletionNotification,
@@ -42,6 +43,10 @@ interface OutputSinkRegistration {
 	subscription: DaemonOutputSubscription;
 	sink: (notification: DaemonMonitorNotification) => Promise<void> | void;
 	deliveryTail?: Promise<void>;
+	/** Broker registration epoch of the last output batch delivered to the sink. */
+	lastEpoch?: string;
+	/** Highest seq delivered for {@link lastEpoch}; advertised as a cumulative replay ack. */
+	lastSeq?: number;
 }
 
 /** Broker location and lifecycle overrides used by smoke tests and isolated consumers. */
@@ -63,6 +68,11 @@ export interface DaemonBrokerClient {
 		owner: string,
 		sink: (notification: DaemonCompletionNotification) => Promise<void> | void,
 	): (options?: DaemonCompletionUnregisterOptions) => void;
+	/**
+	 * Register a live output sink. Throws when the connected broker is known
+	 * (from a prior ping) to lack {@link DAEMON_OUTPUT_MONITOR_CAPABILITY};
+	 * callers that need a hard guarantee ping first and check capabilities.
+	 */
 	onOutput?(
 		subscription: DaemonOutputSubscription,
 		sink: (notification: DaemonMonitorNotification) => Promise<void> | void,
@@ -165,6 +175,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	#buffer = "";
 	#closed = false;
 	#completionReconnectTimer: NodeJS.Timeout | undefined;
+	#brokerCapabilities: string[] | undefined;
 
 	constructor(projectDir: string, runtimeDir: string, token: string, options: DaemonBrokerClientOptions) {
 		this.projectDir = projectDir;
@@ -213,12 +224,13 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				completionUnsubscribes,
 				completionReplays,
 				completionSubscriptionId: this.#completionSubscriptionId,
-				outputSubscriptions: [...this.#outputSinks.values()].map(entry => entry.subscription),
+				outputSubscriptions: this.#outputSubscriptionPayloads(),
 				outputSubscriptionId: this.#outputSubscriptionId,
 				operation,
 			})}\n`,
 		);
 		const result = await promise;
+		if (result.op === "ping") this.#brokerCapabilities = result.capabilities ?? [];
 		for (const owner of completionUnsubscribes) {
 			if (!this.#completionSinks.has(owner)) this.#completionUnsubscribes.delete(owner);
 		}
@@ -271,6 +283,14 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		subscription: DaemonOutputSubscription,
 		sink: (notification: DaemonMonitorNotification) => Promise<void> | void,
 	): () => void {
+		if (
+			this.#brokerCapabilities !== undefined &&
+			!this.#brokerCapabilities.includes(DAEMON_OUTPUT_MONITOR_CAPABILITY)
+		) {
+			throw new Error(
+				"The running daemon broker does not support output monitoring; restart it with this omp build",
+			);
+		}
 		this.#outputSinks.set(subscription.id, { subscription, sink });
 		this.#publishSubscriptions();
 		return () => {
@@ -283,6 +303,18 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			}
 			this.#publishSubscriptions();
 		};
+	}
+
+	/**
+	 * Advertised subscriptions carry the cumulative delivery ack so a
+	 * reconnecting envelope replays only retained batches the sink never saw.
+	 */
+	#outputSubscriptionPayloads(): DaemonOutputSubscription[] {
+		return [...this.#outputSinks.values()].map(entry =>
+			entry.lastEpoch === undefined
+				? entry.subscription
+				: { ...entry.subscription, lastEpoch: entry.lastEpoch, lastSeq: entry.lastSeq ?? 0 },
+		);
 	}
 
 	#publishCompletionOwners(): void {
@@ -462,6 +494,18 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		if (!entry) return;
 		const deliver = async (): Promise<void> => {
 			if (this.#outputSinks.get(message.monitorId) !== entry) return;
+			if (message.event === "daemon-output" && message.epoch !== undefined) {
+				// A reconnect replays broker-retained batches; the epoch-scoped
+				// cumulative ack identifies the ones this sink already consumed.
+				if (message.epoch === entry.lastEpoch && message.seq <= (entry.lastSeq ?? 0)) return;
+				await entry.sink(message);
+				if (message.epoch === entry.lastEpoch) entry.lastSeq = Math.max(entry.lastSeq ?? 0, message.seq);
+				else {
+					entry.lastEpoch = message.epoch;
+					entry.lastSeq = message.seq;
+				}
+				return;
+			}
 			await entry.sink(message);
 			if (message.event === "daemon-monitor-completed" && this.#outputSinks.get(message.monitorId) === entry) {
 				this.#outputSinks.delete(message.monitorId);
@@ -492,7 +536,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				completionAcks: [completionId],
 				completionUnsubscribes: [...this.#completionUnsubscribes],
 				completionSubscriptionId: this.#completionSubscriptionId,
-				outputSubscriptions: [...this.#outputSinks.values()].map(entry => entry.subscription),
+				outputSubscriptions: this.#outputSubscriptionPayloads(),
 				outputSubscriptionId: this.#outputSubscriptionId,
 				operation: { op: "ping" },
 			})}\n`,

@@ -1,10 +1,12 @@
 // Integration test — real timers are required because this drives the actual broker and child process.
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
+import * as net from "node:net";
 import * as path from "node:path";
 import { setProcessName, TempDir } from "@oh-my-pi/pi-utils";
 import { type DaemonBrokerStartOptions, startDaemonBrokerFromEnvironment } from "../../src/launch/broker";
 import { createDaemonBrokerClient } from "../../src/launch/client";
+import { daemonBrokerEndpoint } from "../../src/launch/paths";
 import {
 	DAEMON_IDLE_GRACE_ENV,
 	DAEMON_OUTPUT_MONITOR_CAPABILITY,
@@ -708,6 +710,273 @@ process.stdout.write("GENERATION_STARTED\\n");
 			client.close();
 			await broker;
 			setProcessName(previousTitle);
+		}
+	}, 20_000);
+	it("preserves an expired registration's artifact capture when the monitor republishes", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-expire-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		const scriptPath = path.join(projectDir, "service.ts");
+		await Bun.write(
+			scriptPath,
+			`process.stdin.setEncoding("utf8");
+process.stdin.resume();
+process.stdin.on("data", chunk => process.stdout.write(chunk));
+`,
+		);
+		const artifactPath = path.join(tempDir.path(), "expire-progress.log");
+		const firstClient = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const secondClient = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const previousTitle = process.title;
+		const broker = startBroker(projectDir, runtimeDir, { outputReconnectGraceMs: 100 });
+		const firstNotifications: DaemonMonitorNotification[] = [];
+		const secondNotifications: DaemonMonitorNotification[] = [];
+		const completed = Promise.withResolvers<void>();
+		const firstUnregister = firstClient.onOutput?.(
+			{ id: "expire-monitor", name: "expire", owner: "first-owner", artifactPath },
+			notification => {
+				firstNotifications.push(notification);
+			},
+		);
+		if (!firstUnregister) throw new Error("Expected output monitoring support");
+		let secondUnregister: (() => void) | undefined;
+		try {
+			await firstClient.request({ op: "ping" });
+			await firstClient.request({
+				op: "start",
+				spec: {
+					name: "expire",
+					application: process.execPath,
+					args: [scriptPath],
+					env: {},
+					cwd: projectDir,
+					pty: false,
+					restart: "no",
+					persist: false,
+					detached: false,
+				},
+			});
+			await firstClient.request({ op: "send", name: "expire", data: "FIRST\n" });
+			await waitForOutputCount(firstNotifications, 1);
+			firstUnregister();
+			firstClient.close();
+			// Exceed the 100ms offline grace so the broker drops the registration
+			// while the daemon keeps running.
+			await Bun.sleep(400);
+
+			secondUnregister = secondClient.onOutput?.(
+				{ id: "expire-monitor", name: "expire", owner: "second-owner", artifactPath },
+				notification => {
+					secondNotifications.push(notification);
+					if (notification.event === "daemon-monitor-completed") completed.resolve();
+				},
+			);
+			if (!secondUnregister) throw new Error("Expected output monitoring support");
+			await secondClient.request({ op: "ping" });
+			await secondClient.request({ op: "send", name: "expire", data: "SECOND\n" });
+			await waitForOutputCount(secondNotifications, 1);
+			await secondClient.request({ op: "stop", name: "expire", timeoutMs: 2_000 });
+			await completed.promise;
+
+			// The republished sink appends: output captured before the expiry stays
+			// readable behind already-delivered artifact links.
+			expect(await Bun.file(artifactPath).text()).toBe("FIRST\nSECOND\n");
+		} finally {
+			firstUnregister();
+			secondUnregister?.();
+			await secondClient.request({ op: "stop", name: "expire", timeoutMs: 2_000 }).catch(() => undefined);
+			await secondClient.request({ op: "shutdown" }).catch(() => undefined);
+			firstClient.close();
+			secondClient.close();
+			await broker;
+			setProcessName(previousTitle);
+		}
+	}, 20_000);
+
+	it("replays unacknowledged output batches to a reconnecting subscription and honors cumulative acks", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-replay-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		const scriptPath = path.join(projectDir, "service.ts");
+		await Bun.write(
+			scriptPath,
+			`process.stdin.setEncoding("utf8");
+process.stdin.resume();
+process.stdin.on("data", chunk => process.stdout.write(chunk));
+`,
+		);
+		const artifactPath = path.join(tempDir.path(), "replay-progress.log");
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const previousTitle = process.title;
+		const broker = startBroker(projectDir, runtimeDir);
+		const endpoint = daemonBrokerEndpoint(projectDir, runtimeDir);
+
+		interface RawMonitorSocket {
+			socket: net.Socket;
+			messages: Record<string, unknown>[];
+			waitFor(predicate: (message: Record<string, unknown>) => boolean): Promise<Record<string, unknown>>;
+		}
+		const openMonitorSocket = async (
+			token: string,
+			ack?: { lastEpoch: string; lastSeq: number },
+		): Promise<RawMonitorSocket> => {
+			const socket = net.createConnection(endpoint);
+			await new Promise<void>((resolve, reject) => {
+				socket.once("connect", resolve);
+				socket.once("error", reject);
+			});
+			const messages: Record<string, unknown>[] = [];
+			let buffer = "";
+			socket.on("data", chunk => {
+				buffer += chunk.toString("utf8");
+				let newline = buffer.indexOf("\n");
+				while (newline !== -1) {
+					const line = buffer.slice(0, newline);
+					buffer = buffer.slice(newline + 1);
+					if (line.trim()) messages.push(JSON.parse(line) as Record<string, unknown>);
+					newline = buffer.indexOf("\n");
+				}
+			});
+			socket.write(
+				`${JSON.stringify({
+					id: crypto.randomUUID(),
+					token,
+					outputSubscriptions: [
+						{ id: "replay-monitor", name: "replay", owner: "raw-owner", artifactPath, ...ack },
+					],
+					outputSubscriptionId: "raw-subscription",
+					operation: { op: "ping" },
+				})}\n`,
+			);
+			return {
+				socket,
+				messages,
+				async waitFor(predicate) {
+					const deadline = Date.now() + 5_000;
+					while (Date.now() < deadline) {
+						const match = messages.find(predicate);
+						if (match) return match;
+						await Bun.sleep(10);
+					}
+					throw new Error(`No matching wire message among ${JSON.stringify(messages)}`);
+				},
+			};
+		};
+		const outputsOf = (raw: RawMonitorSocket): Record<string, unknown>[] =>
+			raw.messages.filter(message => message.event === "daemon-output");
+
+		let first: RawMonitorSocket | undefined;
+		let second: RawMonitorSocket | undefined;
+		let third: RawMonitorSocket | undefined;
+		try {
+			await client.request({
+				op: "start",
+				spec: {
+					name: "replay",
+					application: process.execPath,
+					args: [scriptPath],
+					env: {},
+					cwd: projectDir,
+					pty: false,
+					restart: "no",
+					persist: false,
+					detached: false,
+				},
+			});
+			const token = (await Bun.file(path.join(runtimeDir, "broker.token")).text()).trim();
+
+			first = await openMonitorSocket(token);
+			await first.waitFor(message => message.ok === true);
+			await client.request({ op: "send", name: "replay", data: "ONE\n" });
+			const delivered = await first.waitFor(message => message.event === "daemon-output");
+			const epoch = delivered.epoch;
+			if (typeof epoch !== "string") throw new Error("Expected an epoch on the output batch");
+			expect(delivered.seq).toBe(1);
+			// Abrupt drop: the write succeeded locally but the client never acked.
+			first.socket.destroy();
+
+			second = await openMonitorSocket(token);
+			const replayed = await second.waitFor(message => message.event === "daemon-output");
+			expect(replayed.epoch).toBe(epoch);
+			expect(replayed.seq).toBe(1);
+			expect(replayed.text).toBe("ONE");
+			await client.request({ op: "send", name: "replay", data: "TWO\n" });
+			await second.waitFor(message => message.event === "daemon-output" && message.seq === 2);
+			second.socket.destroy();
+
+			// Cumulative ack through seq 2: nothing replays, live output resumes.
+			third = await openMonitorSocket(token, { lastEpoch: epoch, lastSeq: 2 });
+			await third.waitFor(message => message.ok === true);
+			await client.request({ op: "send", name: "replay", data: "THREE\n" });
+			await third.waitFor(message => message.event === "daemon-output");
+			expect(outputsOf(third).map(message => message.seq)).toEqual([3]);
+			expect(outputsOf(third).map(message => message.text)).toEqual(["THREE"]);
+		} finally {
+			first?.socket.destroy();
+			second?.socket.destroy();
+			third?.socket.destroy();
+			await client.request({ op: "stop", name: "replay", timeoutMs: 2_000 }).catch(() => undefined);
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
+			await broker;
+			setProcessName(previousTitle);
+		}
+	}, 20_000);
+
+	it("rejects onOutput against a broker that lacks the output monitor capability", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-capability-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
+		const endpoint = daemonBrokerEndpoint(projectDir, runtimeDir);
+		// Pre-v4 broker: authenticates and answers pings but advertises no
+		// output-monitor capability.
+		const server = net.createServer(socket => {
+			let buffer = "";
+			socket.on("data", chunk => {
+				buffer += chunk.toString("utf8");
+				let newline = buffer.indexOf("\n");
+				while (newline !== -1) {
+					const line = buffer.slice(0, newline);
+					buffer = buffer.slice(newline + 1);
+					if (line.trim()) {
+						const request = JSON.parse(line) as { id: string };
+						socket.write(
+							`${JSON.stringify({
+								id: request.id,
+								ok: true,
+								result: { op: "ping", projectDir, capabilities: [] },
+							})}\n`,
+						);
+					}
+					newline = buffer.indexOf("\n");
+				}
+			});
+		});
+		await new Promise<void>((resolve, reject) => {
+			server.once("error", reject);
+			server.listen(endpoint, resolve);
+		});
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		try {
+			await client.request({ op: "ping" });
+			expect(() =>
+				client.onOutput?.(
+					{
+						id: "capability-monitor",
+						name: "anything",
+						owner: "owner",
+						artifactPath: path.join(tempDir.path(), "capability-progress.log"),
+					},
+					() => undefined,
+				),
+			).toThrow(/does not support output monitoring/);
+		} finally {
+			client.close();
+			await new Promise<void>(resolve => server.close(() => resolve()));
 		}
 	}, 20_000);
 });
