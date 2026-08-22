@@ -1,7 +1,7 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../session/agent-session";
 import { type BankScope, ensureBankExists } from "./bank";
-import type { HindsightApi, MemoryItemInput } from "./client";
+import type { HindsightApi, MemoryItemInput, UpdateMode } from "./client";
 import type { HindsightConfig } from "./config";
 import {
 	composeRecallQuery,
@@ -224,6 +224,7 @@ export class HindsightSessionState {
 	// or silently retaining nothing forever. Hashing is orders of magnitude
 	// cheaper than the re-formatting this cache avoids.
 	#lastRetainedPrefixKey: string = "";
+	#retainInFlight: Promise<void> = Promise.resolve();
 	hasRecalledForFirstTurn: boolean;
 	lastRecallSnippet?: string;
 	/** Cached `<mental_models>` block injected into developer instructions. */
@@ -290,6 +291,37 @@ export class HindsightSessionState {
 		await this.retainQueue.flush();
 	}
 
+	async flushPendingSessionRetain(): Promise<void> {
+		if (this.aliasOf) return;
+		if (!this.config.autoRetain) return;
+		const messages = extractMessages(this.session.sessionManager);
+		if (messages.length === 0) return;
+		const userTurns = messages.filter(m => m.role === "user").length;
+		if (this.config.retainMode === "last-turn") {
+			// Last-turn retain resets #lastRetainedMessageIndex to 0 by design
+			// (each retain is a unique document). An already-retained session
+			// therefore looks "pending" if we only inspect the message index.
+			if (userTurns <= this.lastRetainedTurn) return;
+		} else if (this.#lastRetainedMessageIndex >= messages.length && userTurns <= this.lastRetainedTurn) {
+			return;
+		}
+		try {
+			await this.retainSession(messages);
+			this.lastRetainedTurn = userTurns;
+		} catch (err) {
+			logger.warn("Hindsight: session-end retain flush failed", {
+				sessionId: this.sessionId,
+				bankId: this.bankId,
+				error: String(err),
+			});
+		}
+	}
+
+	async drainOnClose(): Promise<void> {
+		await this.flushPendingSessionRetain();
+		await this.flushRetainQueue();
+	}
+
 	async recallForContext(query: string, signal?: AbortSignal): Promise<RecallOutcome> {
 		try {
 			const response = await this.client.recall(this.bankId, query, {
@@ -323,27 +355,53 @@ export class HindsightSessionState {
 		return Number.isNaN(parsed.getTime()) ? undefined : parsed;
 	}
 
-	async retainSession(messages: HindsightMessage[]): Promise<void> {
+	async retainSession(messages: HindsightMessage[], opts?: { forceReplace?: boolean }): Promise<void> {
+		const run = this.#retainInFlight.then(
+			() => this.#retainSessionLocked(messages, opts),
+			() => this.#retainSessionLocked(messages, opts),
+		);
+		this.#retainInFlight = run.then(
+			() => undefined,
+			() => undefined,
+		);
+		await run;
+	}
+
+	async #retainSessionLocked(messages: HindsightMessage[], opts?: { forceReplace?: boolean }): Promise<void> {
 		const retainedAt = new Date();
 		const sourceTimestamp = this.#sessionSourceTimestamp() ?? retainedAt;
 		const retainFullWindow = this.config.retainMode === "full-session";
 		let documentId: string;
 		let transcript: string;
 		let nextCachedTranscript: string | undefined;
+		let updateMode: UpdateMode | undefined;
 
 		if (retainFullWindow) {
 			documentId = this.sessionId;
-			const boundary = this.#lastRetainedMessageIndex;
-			if (boundary > messages.length || retentionPrefixKey(messages, boundary) !== this.#lastRetainedPrefixKey) {
+			const previousBoundary = this.#lastRetainedMessageIndex;
+			let rebuiltDivergentPrefix = false;
+			if (
+				previousBoundary > messages.length ||
+				retentionPrefixKey(messages, previousBoundary) !== this.#lastRetainedPrefixKey
+			) {
+				rebuiltDivergentPrefix = previousBoundary > 0;
 				this.#lastRetainedMessageIndex = 0;
 				this.#cachedTranscript = "";
 				this.#lastRetainedPrefixKey = "";
 			}
-			const newMessages = messages.slice(this.#lastRetainedMessageIndex);
+			const start = this.#lastRetainedMessageIndex;
+			const newMessages = messages.slice(start);
 			const { transcript: newPart } = prepareRetentionTranscript(newMessages, true, { includeTimestamps: true });
 			if (!newPart) return;
 			nextCachedTranscript = this.#cachedTranscript ? `${this.#cachedTranscript}\n\n${newPart}` : newPart;
-			transcript = nextCachedTranscript;
+			const appendDelta = this.config.retainUpdateMode === "append" && start > 0 && !opts?.forceReplace;
+			if (appendDelta) {
+				transcript = newPart;
+				updateMode = "append";
+			} else {
+				transcript = nextCachedTranscript;
+				if (opts?.forceReplace || rebuiltDivergentPrefix) updateMode = "replace";
+			}
 		} else {
 			const windowTurns = this.config.retainEveryNTurns + this.config.retainOverlapTurns;
 			const target = sliceLastTurnsByUserBoundary(messages, windowTurns);
@@ -364,6 +422,7 @@ export class HindsightSessionState {
 			tags: this.retainTags,
 			timestamp: sourceTimestamp,
 			async: true,
+			updateMode,
 		});
 		if (nextCachedTranscript !== undefined) {
 			this.#cachedTranscript = nextCachedTranscript;
@@ -411,7 +470,7 @@ export class HindsightSessionState {
 		this.#cachedTranscript = "";
 		this.#lastRetainedPrefixKey = "";
 		try {
-			await this.retainSession(messages);
+			await this.retainSession(messages, { forceReplace: true });
 			this.lastRetainedTurn = messages.filter(m => m.role === "user").length;
 		} catch (err) {
 			logger.warn("Hindsight: forced retain failed", {

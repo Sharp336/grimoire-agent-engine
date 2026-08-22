@@ -157,7 +157,7 @@ describe("AgentSession concurrent disposal", () => {
 
 		const current = createSession(owned);
 		const hindsight: HindsightSessionState = Object.create(HindsightSessionState.prototype);
-		vi.spyOn(hindsight, "flushRetainQueue").mockImplementation(async () => {
+		vi.spyOn(hindsight, "drainOnClose").mockImplementation(async () => {
 			order.push("hindsight:start");
 			await hindsightGate.promise;
 			order.push("hindsight:end");

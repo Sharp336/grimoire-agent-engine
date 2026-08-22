@@ -148,7 +148,7 @@ export class SessionMemory {
 		const hindsight = this.#host.getHindsightSessionState();
 		if (hindsight) {
 			try {
-				await hindsight.flushRetainQueue();
+				await hindsight.drainOnClose();
 			} catch (error) {
 				logger.warn("Memory lifecycle: Hindsight flush failed", { error: String(error) });
 			}

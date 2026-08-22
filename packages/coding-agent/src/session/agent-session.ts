@@ -4170,7 +4170,7 @@ export class AgentSession {
 			shutdownTinyTitleClient(),
 			this.#disconnectOwnedMcp(),
 			advisorRecorderClosed,
-			hindsightState?.flushRetainQueue() ?? Promise.resolve(),
+			hindsightState?.drainOnClose() ?? Promise.resolve(),
 			this.#disposeMnemopi(mnemopiState, options.mnemopiConsolidateTimeoutMs),
 		]);
 		for (const result of results) {
