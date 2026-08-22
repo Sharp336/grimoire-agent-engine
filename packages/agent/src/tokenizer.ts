@@ -202,6 +202,8 @@ export class Tokenizer {
 					for (const block of content) {
 						if (block.type === "text" && block.text) {
 							fragments.push(block.text);
+						} else if (block.type === "image") {
+							extra += IMAGE_TOKEN_ESTIMATE;
 						}
 					}
 				}

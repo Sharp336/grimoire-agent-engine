@@ -52,6 +52,26 @@ describe("Tokenizer", () => {
 		expect(t2.encoding).toBe(Encoding.Qwen3);
 		expect(t3.encoding).toBeNull();
 	});
+
+	test("counts image blocks in user messages toward the context estimate", () => {
+		const tokenizer = new Tokenizer();
+		const textOnly = tokenizer.countMessage({
+			role: "user",
+			content: [{ type: "text", text: "Describe these images" }],
+			timestamp: 1,
+		});
+		const withImages = tokenizer.countMessage({
+			role: "user",
+			content: [
+				{ type: "text", text: "Describe these images" },
+				{ type: "image", data: "ZmFrZQ==", mimeType: "image/png" },
+				{ type: "image", data: "ZmFrZTI=", mimeType: "image/png" },
+			],
+			timestamp: 1,
+		});
+
+		expect(withImages - textOnly).toBe(2_400);
+	});
 });
 
 describe("countTokens with modes", () => {

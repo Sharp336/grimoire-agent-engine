@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- User image attachments now count toward local context estimates and compaction thresholds.
+
 ## [18.0.0] - 2026-08-22
 
 ### Fixed
