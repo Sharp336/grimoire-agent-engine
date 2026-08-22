@@ -26,6 +26,7 @@ import type {
 import {
 	Container,
 	clearRenderCache,
+	getComposerStyle,
 	Loader,
 	Markdown,
 	ProcessTerminal,
@@ -41,7 +42,6 @@ import type { TerminalAppearanceRequestToken } from "@oh-my-pi/pi-tui/terminal";
 import { isInsideTerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import {
 	$env,
-	APP_NAME,
 	adjustHsv,
 	formatNumber,
 	getProjectDir,
@@ -139,6 +139,7 @@ import { formatStartupChangelogSummary, type StartupChangelogSelection } from ".
 import { copyToClipboard } from "../utils/clipboard";
 import type { EventBus } from "../utils/event-bus";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
+import { resumeCommand } from "../utils/resume-command";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../utils/session-color";
 import { messageHasDisplayableThinking } from "../utils/thinking-display";
 import {
@@ -155,6 +156,7 @@ import {
 	VibeSessionRegistry,
 } from "../vibe/runtime";
 import type { AssistantMessageComponent } from "./components/assistant-message";
+import { AttachmentChipsBand } from "./components/attachment-chips";
 import type { BashExecutionComponent } from "./components/bash-execution";
 import { ChatBlock, type ChatBlockHost } from "./components/chat-block";
 import { CodexResetFireworksController } from "./components/codex-reset-fireworks";
@@ -184,6 +186,7 @@ import { SessionFocusController } from "./controllers/session-focus-controller";
 import { SSHCommandController } from "./controllers/ssh-command-controller";
 import { TanCommandController } from "./controllers/tan-command-controller";
 import { TodoCommandController } from "./controllers/todo-command-controller";
+import { imageReferenceHyperlink, materializeImageReferenceLinks } from "./image-references";
 import {
 	consumeLoopLimitIteration,
 	createLoopLimitRuntime,
@@ -204,6 +207,7 @@ import { createSessionTeardown, type SessionTeardown } from "./session-teardown"
 import { runProviderSetupWizard } from "./setup-wizard/lazy";
 import { interruptHint } from "./shared";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "./skill-command";
+import type { StartupComposerSurface } from "./startup-composer";
 import { clearMermaidCache } from "./theme/mermaid-cache";
 import { type ShimmerPalette, shimmerEnabled, shimmerSegments, shimmerText } from "./theme/shimmer";
 import type { Theme } from "./theme/theme";
@@ -217,6 +221,7 @@ import {
 	startMacOSAppearanceReprobeFallback,
 	theme,
 } from "./theme/theme";
+import { getSlashCommandTypeIcon } from "./theme/tui-adapters";
 import type {
 	CompactionQueuedMessage,
 	InteractiveModeContext,
@@ -452,11 +457,6 @@ const MODEL_CYCLE_TRACK_CLEAR_MS = 4000;
 
 const SUBAGENT_HUD_VISIBLE_LIMIT = 8;
 const SUBAGENT_OBSERVER_UI_COALESCE_MS = 100;
-// Instant, independent of `tasks.todoClearDelay`: fires the moment every todo
-// closes, shrinking the header bar to nothing before the row is dropped. The
-// phase/task tree below is unaffected and keeps following the clear delay.
-const TODO_BAR_COLLAPSE_DURATION_MS = 260;
-const TODO_BAR_COLLAPSE_TICK_MS = 1000 / 30;
 
 /**
  * Build the anchored subagent HUD block: a bold accent "Subagents" header plus
@@ -520,6 +520,9 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 const CTRL_L_APPEARANCE_RESPONSE_DEADLINE_MS = 2000;
 
 export class InteractiveMode implements InteractiveModeContext {
+	readonly #adoptedStartupSurface: boolean;
+	#ownsStartedUi: boolean;
+	#startupSubmitGated: boolean;
 	session: AgentSession;
 	sessionManager: SessionManager;
 	settings: Settings;
@@ -541,6 +544,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	deferredCommandContainer: Container;
 	editor: CustomEditor;
 	editorContainer: Container;
+	/** Composer attachment band (chip cards) rendered directly above the prompt box. */
+	attachmentChipsContainer: Container;
 	hookWidgetContainerAbove: Container;
 	hookWidgetContainerBelow: Container;
 	statusLine: StatusLineComponent;
@@ -563,10 +568,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	loopLimit: LoopLimitRuntime | undefined = undefined;
 	#loopAutoSubmitTimer: NodeJS.Timeout | undefined;
 	#todoAutoClearTimer: NodeJS.Timeout | undefined;
-	#todoBarCollapseTimer: NodeJS.Timeout | undefined;
-	#todoBarCollapseStartedAt: number | undefined;
-	#todoBarCollapsed = false;
-	#todoListWasSettled = false;
 	#modelCycleClearTimer: NodeJS.Timeout | undefined;
 	#nextAppearanceRequestToken = 1;
 	#appearanceRefreshRequest: { token: TerminalAppearanceRequestToken; deadline: number } | undefined;
@@ -632,6 +633,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	optimisticSkillMessagePending = false;
 	lastSigintTime = 0;
 	lastEscapeTime = 0;
+	/** Owns Esc for every `/mcp test` that is active or whose cancellation hint may still be visible. */
+	mcpTestEscapeHandlers = new Set<() => void>();
 	lastLeftTapTime = 0;
 	shutdownRequested = false;
 	#isShuttingDown = false;
@@ -783,10 +786,20 @@ export class InteractiveMode implements InteractiveModeContext {
 		lspServers: LspStartupServerInfo[] | undefined = undefined,
 		mcpManager?: MCPManager,
 		eventBus?: EventBus,
+		startupSurface?: StartupComposerSurface,
 	) {
 		this.session = session;
 		this.sessionManager = session.sessionManager;
 		this.settings = session.settings;
+		this.ui = startupSurface?.ui ?? new TUI(new ProcessTerminal(), settings.get("showHardwareCursor"));
+		const editorTheme = getEditorTheme();
+		this.editor = startupSurface?.editor ?? new CustomEditor(editorTheme);
+		if (startupSurface) this.editor.setTheme(editorTheme);
+		this.editor.magicKeywordsEnabled = () => this.settings.get("magicKeywords.enabled");
+		this.editor.imageReferenceHyperlink = imageReferenceHyperlink;
+		this.#adoptedStartupSurface = startupSurface !== undefined;
+		this.#ownsStartedUi = startupSurface !== undefined;
+		this.#startupSubmitGated = startupSurface !== undefined;
 		this.keybindings = KeybindingsManager.inMemory();
 		this.agent = session.agent;
 		this.#version = version;
@@ -818,9 +831,12 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		setTuiTight(settings.get("tui.tight"));
 		setMarkdownMermaidRendering(settings.get("tui.renderMermaid"));
-		this.ui = new TUI(new ProcessTerminal(), settings.get("showHardwareCursor"));
+		// A cold-start composer already owns the terminal. Reuse it so input
+		// buffered during startup remains in the same editor instance.
 		this.ui.setMaxInlineImages(settings.get("tui.maxInlineImages"));
 		this.ui.setScrollbackRebuild(settings.get("tui.scrollbackRebuild"));
+		this.ui.setResizeScrollback(settings.get("tui.resizeScrollback"));
+		this.ui.setShowHardwareCursor(settings.get("showHardwareCursor"));
 		// OSC 66 text-sizing is Kitty-only; resolve the setting against the terminal's
 		// capability (`TERMINAL.textSizing` defaults on for Kitty) so it stays off
 		// unless the user opts in, and never emits raw escapes on other terminals.
@@ -836,11 +852,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.errorBannerContainer = new AnchoredLiveContainer();
 		this.modelCycleContainer = new AnchoredLiveContainer();
 		this.deferredCommandContainer = new AnchoredLiveContainer();
-		this.editor = new CustomEditor(getEditorTheme());
 		this.ui.enableScopedInputRender(this.editor);
 		this.editor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		this.editor.setImeSafeCursorLayout(settings.get("tui.imeSafeCursor"));
 		this.editor.setAutocompleteMaxVisible(settings.get("autocompleteMaxVisible"));
+		this.editor.viewportRowsProvider = () => this.ui.terminal.rows;
 		this.editor.onAutocompleteCancel = () => {
 			this.ui.requestRender(true);
 		};
@@ -849,9 +865,17 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 		this.editor.setShimmerRepaintHandler(() => this.ui.requestDirectWrite(this.editor));
 		this.#syncEditorMaxHeight();
+		// Sync editor geometry only; never request a render here. This listener is
+		// registered before ProcessTerminal's own stdout "resize" listener (added in
+		// tui.start()), so it runs first on every SIGWINCH. The TUI's resize path
+		// already owns the repaint on every route (viewport fast path + settle,
+		// multiplexer debounce, alt-overlay repaint) and its settled render picks up
+		// the new editor max height. Requesting an ordinary render here additionally
+		// marked every resize as "render pending" (TUI hasPendingRender), which forced
+		// the multiplexer width epoch's conservative full-transcript replay — one
+		// duplicated transcript copy in pane history per tmux width change.
 		this.#resizeHandler = () => {
 			this.#syncEditorMaxHeight();
-			this.ui.requestRender();
 		};
 		process.stdout.on("resize", this.#resizeHandler);
 		try {
@@ -864,6 +888,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.hookWidgetContainerAbove = new Container();
 		this.hookWidgetContainerAbove.addChild(new Spacer(1));
 		this.hookWidgetContainerBelow = new Container();
+		this.attachmentChipsContainer = new Container();
+		this.attachmentChipsContainer.addChild(
+			new AttachmentChipsBand(this.editor, this.ui.imageBudget, () => this.ui.requestRender()),
+		);
+		// Restored drafts (esc-esc, /tree, branch) re-materialize blob-store links off the render
+		// path so their chip tokens become clickable again instead of degrading to dead text.
+		this.editor.draftImageLinkMaterializer = images =>
+			materializeImageReferenceLinks(images, this.sessionManager.putBlob.bind(this.sessionManager));
 		this.editorContainer = new Container();
 		this.editorContainer.addChild(this.editor);
 		this.statusLine = new StatusLineComponent(session);
@@ -896,6 +928,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		).map(cmd => ({
 			name: cmd.name,
 			description: cmd.description ?? "(hook command)",
+			icon: getSlashCommandTypeIcon("extension"),
 			getArgumentCompletions: cmd.getArgumentCompletions,
 		}));
 
@@ -903,11 +936,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		const customCommands: SlashCommand[] = this.session.customCommands.map(loaded => ({
 			name: loaded.command.name,
 			description: `${loaded.command.description} (${loaded.source})`,
+			icon: getSlashCommandTypeIcon(loaded.path.startsWith("mcp:") ? "mcp" : "prompt"),
 		}));
 
 		const skillCommandList = this.#rebuildSkillCommandsFromSession();
 
-		const builtinCommands = buildTuiBuiltinSlashCommands({ ctx: this });
+		const builtinCommands: SlashCommand[] = buildTuiBuiltinSlashCommands({ ctx: this }).map(cmd => ({
+			...cmd,
+			icon: getSlashCommandTypeIcon(cmd.icon ?? "action"),
+		}));
 		// Store pending commands for init() where file commands are loaded async
 		this.#pendingSlashCommands = [...builtinCommands, ...hookCommands, ...customCommands, ...skillCommandList];
 
@@ -1005,7 +1042,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// callback and `shutdown()` share one promise-memoized teardown, so a
 		// signal arriving mid-Ctrl+C no-ops instead of racing a second dispose.
 		this.#signalTeardown = createSessionTeardown({
-			getDraftText: () => this.editor.getText(),
+			getDraftText: () => this.#inputController.getDraftText(),
 			beginDispose: () => this.session.beginDispose(),
 			saveDraft: text => this.sessionManager.saveDraft(text),
 			disposeSession: reason =>
@@ -1045,6 +1082,11 @@ export class InteractiveMode implements InteractiveModeContext {
 				})),
 			),
 		);
+		if (this.#adoptedStartupSurface) {
+			// Replace the provisional startup frame in-place. The editor object
+			// itself survives and is reattached below with its draft intact.
+			this.ui.clear();
+		}
 
 		const startupQuiet = settings.get("startup.quiet");
 		this.#welcomeComponent = undefined;
@@ -1105,11 +1147,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		// HUDs, just above the editor's hook-widget top margin — so it reads next to
 		// the prompt while keeping the one-line gap above the editor.
 		this.ui.addChild(this.statusContainer);
-		this.ui.addChild(this.statusLine); // Only renders hook statuses (main status in editor border)
+		this.ui.addChild(this.attachmentChipsContainer);
 		this.ui.addChild(this.hookWidgetContainerAbove);
 		this.ui.addChild(this.editorContainer);
 		this.ui.addChild(this.hookWidgetContainerBelow);
+		this.ui.addChild(this.statusLine);
 		this.ui.setFocus(this.editor);
+		this.syncComposerShape();
 
 		this.#inputController.setupKeyHandlers();
 		this.#inputController.setupEditorSubmitHandler();
@@ -1134,9 +1178,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#eventBusUnsubscribers.push(startMacOSAppearanceReprobeFallback(this.ui.terminal));
 		}
 
-		// Start the UI. Cold `omp` launch opts into clearing on the first paint so
-		// the initial welcome frame does not append over the previous run's scrollback.
-		this.ui.start({ clearScrollback: options.clearInitialTerminalHistory === true });
+		// A startup composer may already own raw mode and the render loop. Do not
+		// restart the terminal or clear scrollback during that in-place handoff.
+		if (!this.#ownsStartedUi) {
+			this.ui.start({ clearScrollback: options.clearInitialTerminalHistory === true });
+			this.#ownsStartedUi = true;
+		}
 		pushTerminalTitle();
 		setTerminalTitleStateEnabled(this.settings.get("tui.titleState"));
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
@@ -1334,10 +1381,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		const commands: SlashCommand[] = [];
 		this.skillCommands.clear();
 		if (this.session.skillsSettings?.enableSkillCommands !== false) {
+			const icon = getSlashCommandTypeIcon("skill");
 			for (const skill of this.session.skills) {
 				const commandName = `skill:${skill.name}`;
 				this.skillCommands.set(commandName, skill);
-				commands.push({ name: commandName, description: skill.description });
+				commands.push({ name: commandName, description: skill.description, icon });
 			}
 		}
 		return commands;
@@ -1356,9 +1404,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		const basePath = cwd ?? this.sessionManager.getCwd();
 		const fileCommands = await loadSlashCommands({ cwd: basePath });
 		this.fileSlashCommands = new Set(fileCommands.map(cmd => cmd.name));
+		const promptIcon = getSlashCommandTypeIcon("prompt");
 		const fileSlashCommands: SlashCommand[] = fileCommands.map(cmd => ({
 			name: cmd.name,
 			description: cmd.description,
+			icon: promptIcon,
 		}));
 		// Surface discovered prompt templates in the picker. AgentSession.prompt() expands
 		// `expandSlashCommand` before `expandPromptTemplate`, and builtin command
@@ -1381,6 +1431,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				// `PromptTemplate.description` from `loadTemplatesFromDir` already includes the
 				// source suffix (e.g. "Review code (project)"), so pass it through verbatim.
 				description: template.description,
+				icon: promptIcon,
 			}));
 		this.#baseAutocompleteProvider = this.#inputController.createAutocompleteProvider(
 			[...this.#pendingSlashCommands, ...fileSlashCommands, ...promptTemplateCommands],
@@ -1464,6 +1515,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.onInputCallback = undefined;
 			resolve(input);
 		};
+		if (this.#startupSubmitGated) {
+			this.#startupSubmitGated = false;
+			this.editor.disableSubmit = false;
+			this.ui.requestRender();
+		}
 		this.#scheduleLoopAutoSubmit();
 		this.#scheduleGoalContinuation();
 
@@ -1918,7 +1974,29 @@ export class InteractiveMode implements InteractiveModeContext {
 			transparent: settings.get("statusLine.transparent"),
 			segmentOptions: settings.get("statusLine.segmentOptions"),
 			compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
+			contextLine: settings.get("statusLine.contextLine"),
 		});
+	}
+	syncComposerShape(): void {
+		const shape = settings.get("composer.shape") ?? "box";
+		const style = getComposerStyle(shape);
+		this.editor.setBorderStyle(shape);
+		this.statusLine.setAutocompleteActiveProbe(() => this.editor.isAutocompleteActive());
+		switch (style.statusAttachment) {
+			case "top-border":
+				this.editor.setTopBorderProvider(availableWidth => this.statusLine.getTopBorder(availableWidth));
+				break;
+			case "top-rule-chip":
+				this.editor.setTopBorderProvider(availableWidth => this.statusLine.getStandaloneTopBorder(availableWidth));
+				break;
+			case "none":
+				this.editor.setTopBorderProvider(undefined);
+				this.editor.setTopBorder(undefined);
+				break;
+		}
+		this.statusLine.setComposerStyle(style);
+		this.updateEditorBorderColor();
+		this.ui.requestRender();
 	}
 
 	#handleSessionAccentInputsChanged(): void {
@@ -2230,39 +2308,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#todoAutoClearTimer.unref?.();
 	}
 
-	#cancelTodoBarCollapseAnimation(): void {
-		if (!this.#todoBarCollapseTimer) return;
-		clearInterval(this.#todoBarCollapseTimer);
-		this.#todoBarCollapseTimer = undefined;
-	}
-
-	#todoBarCollapseFraction(): number {
-		if (this.#todoBarCollapseStartedAt === undefined) return 0;
-		const elapsed = Date.now() - this.#todoBarCollapseStartedAt;
-		return Math.min(1, Math.max(0, elapsed / TODO_BAR_COLLAPSE_DURATION_MS));
-	}
-
-	/**
-	 * Fires once, the instant the todo list first fully closes: shrinks the
-	 * header bar to nothing over `TODO_BAR_COLLAPSE_DURATION_MS` and then drops
-	 * the whole row. Independent of `tasks.todoClearDelay`, which governs when
-	 * the remaining phase/task tree disappears — the tree is untouched here.
-	 */
-	#startTodoBarCollapseAnimation(): void {
-		this.#cancelTodoBarCollapseAnimation();
-		this.#todoBarCollapsed = false;
-		this.#todoBarCollapseStartedAt = Date.now();
-		this.#todoBarCollapseTimer = setInterval(() => {
-			if (this.#todoBarCollapseFraction() >= 1) {
-				this.#todoBarCollapsed = true;
-				this.#cancelTodoBarCollapseAnimation();
-			}
-			this.#renderTodoList();
-			this.ui.requestRender();
-		}, TODO_BAR_COLLAPSE_TICK_MS);
-		this.#todoBarCollapseTimer.unref?.();
-	}
-
 	/**
 	 * Render the ctrl+p model-role cycle chip track into its own anchored
 	 * container (just above the editor), mirroring the todo HUD: the container is
@@ -2341,23 +2386,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#renderTodoList(): void {
 		this.todoContainer.clear();
 		const phases = this.todoPhases.filter(phase => phase.tasks.length > 0);
-		if (phases.length === 0) {
-			this.#cancelTodoBarCollapseAnimation();
-			this.#todoBarCollapsed = false;
-			this.#todoBarCollapseStartedAt = undefined;
-			this.#todoListWasSettled = false;
-			return;
-		}
-		const settled = this.#isTodoListSettled(phases);
-		if (settled && !this.#todoListWasSettled) {
-			this.#startTodoBarCollapseAnimation();
-		} else if (!settled && this.#todoListWasSettled) {
-			this.#cancelTodoBarCollapseAnimation();
-			this.#todoBarCollapsed = false;
-			this.#todoBarCollapseStartedAt = undefined;
-		}
-		this.#todoListWasSettled = settled;
-
+		if (phases.length === 0) return;
 		const expanded = this.todoExpanded;
 		const multiPhase = phases.length > 1;
 		const activeIdx = phases.indexOf(this.#getActivePhase(phases) ?? phases[0]);
@@ -2400,7 +2429,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		// One phase node. The active stage is highlighted with normal-brightness task
 		// progress; other stages render their whole row (name + progress) in the
-		// brighter muted gray. The root header carries the summed progress bar.
+		// brighter muted gray. Overall progress lives in the tree spine (below).
 		const renderPhase = (phase: TodoPhase, oneBased: number, isActive: boolean): string | string[] => {
 			const label = multiPhase ? formatPhaseDisplayName(phase.name, oneBased) : phase.name;
 			// Closed, not just completed: the collapsed task window hides abandoned
@@ -2421,44 +2450,52 @@ export class InteractiveMode implements InteractiveModeContext {
 		const baseIdx = expanded ? 0 : activeIdx;
 		const phaseSlice = expanded ? phases.slice(baseIdx) : phases.slice(baseIdx, baseIdx + 1 + subsequentStageCap);
 		const hiddenStages = phases.length - baseIdx - phaseSlice.length;
-		const phaseTreeLines = renderTreeList(
-			{
-				items: phaseSlice,
-				expanded,
-				trailingSummary: hiddenStages > 0 ? formatMoreItems(hiddenStages, "stage") : "",
-				renderItem: (phase, ctx) => renderPhase(phase, baseIdx + ctx.index + 1, baseIdx + ctx.index === activeIdx),
-			},
-			theme,
-		);
 
-		// Header: overall task progress as a bar summed across every stage (no
-		// trailing count — the bar itself carries the signal). Once the list
-		// fully closes, `#startTodoBarCollapseAnimation` shrinks the bar to
-		// nothing over `TODO_BAR_COLLAPSE_DURATION_MS` and the whole row is then
-		// dropped — the phase/task tree below is untouched and keeps its own
-		// per-stage counts until the separate `tasks.todoClearDelay` timer fires.
-		const headerLines: string[] = [""];
-		if (!this.#todoBarCollapsed) {
-			const barWidth = 20;
-			const collapseFraction = this.#todoBarCollapseFraction();
-			let bar: string;
-			if (collapseFraction > 0) {
-				const shrunkWidth = Math.max(0, Math.round(barWidth * (1 - collapseFraction)));
-				bar = theme.fg("accent", theme.progress.filled.repeat(shrunkWidth));
-			} else {
-				const totalTasks = phases.reduce((sum, phase) => sum + phase.tasks.length, 0);
-				const closedTasks = phases.reduce((sum, phase) => sum + phase.tasks.filter(isClosedTodo).length, 0);
-				// Clamp so any progress shows a sliver and only 100% fills the bar.
-				let filledWidth = Math.round((closedTasks / totalTasks) * barWidth);
-				if (closedTasks > 0) filledWidth = Math.max(filledWidth, 1);
-				if (closedTasks < totalTasks) filledWidth = Math.min(filledWidth, barWidth - 1);
-				bar =
-					theme.fg("accent", theme.progress.filled.repeat(filledWidth)) +
-					theme.fg("dim", theme.progress.empty.repeat(barWidth - filledWidth));
+		// Flatten the stage tree into content rows plus a per-row top-level spine
+		// glyph (`├─` for stage rows, `│` for continuations). The spine never
+		// closes downward — a short elbow tail (`└────`) ends the block instead,
+		// so spine + bend + tail form one continuous progress path.
+		const spineGlyphs: string[] = [];
+		const contentLines: string[] = [];
+		const pushBlock = (block: string | string[]): void => {
+			const rows = Array.isArray(block) ? block : [block];
+			if (rows.length === 0) return;
+			spineGlyphs.push(`${theme.tree.branch} `);
+			contentLines.push(replaceTabs(rows[0]!));
+			for (let i = 1; i < rows.length; i++) {
+				spineGlyphs.push(`${theme.tree.vertical}  `);
+				contentLines.push(replaceTabs(rows[i]!));
 			}
-			headerLines.push(`${theme.bold(theme.fg("accent", "Todos"))} ${bar}`);
+		};
+		for (let i = 0; i < phaseSlice.length; i++) {
+			pushBlock(renderPhase(phaseSlice[i], baseIdx + i + 1, baseIdx + i === activeIdx));
 		}
-		const lines = [...headerLines, ...phaseTreeLines.map(line => ` ${line}`)];
+		if (hiddenStages > 0) {
+			pushBlock(theme.fg("muted", formatMoreItems(hiddenStages, "stage")));
+		}
+
+		// Closing tail: hook + a few horizontals. Every tail cell is 1 column in
+		// both glyph sets, so string slicing below splits it by visible cells.
+		const tailLen = 6;
+		const tail = theme.tree.hook + theme.tree.horizontal.repeat(Math.max(0, tailLen - visibleWidth(theme.tree.hook)));
+
+		// Overall progress (summed across every stage) fills the path in reading
+		// order: down the spine, around the bend, out along the tail.
+		// Clamp so partial progress lights at least one cell; a closed plan fills
+		// the entire path until the configured auto-clear removes the HUD.
+		const totalTasks = phases.reduce((sum, phase) => sum + phase.tasks.length, 0);
+		const closedTasks = phases.reduce((sum, phase) => sum + phase.tasks.filter(isClosedTodo).length, 0);
+		const pathLen = contentLines.length + tailLen;
+		let filled = Math.round((closedTasks / totalTasks) * pathLen);
+		if (closedTasks > 0) filled = Math.max(filled, 1);
+		if (closedTasks < totalTasks) filled = Math.min(filled, pathLen - 1);
+
+		const lines = ["", theme.bold(theme.fg("accent", "TODO"))];
+		for (let i = 0; i < contentLines.length; i++) {
+			lines.push(` ${theme.fg(i < filled ? "accent" : "dim", spineGlyphs[i]!)}${contentLines[i]}`);
+		}
+		const tailFilled = Math.max(0, Math.min(filled - contentLines.length, tail.length));
+		lines.push(` ${theme.fg("accent", tail.slice(0, tailFilled))}${theme.fg("dim", tail.slice(tailFilled))}`);
 		this.todoContainer.addChild(new Text(lines.join("\n"), 1, 0));
 	}
 
@@ -2906,13 +2943,23 @@ export class InteractiveMode implements InteractiveModeContext {
 		// prompt, which predictably invalidates the cache.
 		this.lastAssistantUsage = undefined;
 
-		await this.session.setActiveToolsByName(uniquePlanTools);
+		// Plan mode state must land before the tool partition: under Code Mode the
+		// direct surface keeps `write` only while a transport needs it, and plan
+		// approval is a top-level `write` to `xd://propose`.
+		const previousPlanModeState = this.session.getPlanModeState();
 		this.session.setPlanModeState({
 			enabled: true,
 			planFilePath,
 			workflow: options?.workflow ?? "parallel",
 			reentry: this.#planModeHasEntered,
 		});
+		try {
+			await this.session.setActiveToolsByName(uniquePlanTools);
+		} catch (error) {
+			this.session.setPlanModeState(previousPlanModeState);
+			this.planModeEnabled = false;
+			throw error;
+		}
 		this.session.setPlanProposalHandler?.(title => this.session.preparePlanForReview(title));
 		if (this.session.isStreaming) {
 			await this.session.sendPlanModeContext({ deliverAs: "steer" });
@@ -3225,25 +3272,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#hidePlanReview();
 	}
 
-	#getEditorTerminalPath(): string | null {
-		if (process.platform === "win32") {
-			return null;
-		}
-		return "/dev/tty";
-	}
-
-	async #openEditorTerminalHandle(): Promise<fs.FileHandle | null> {
-		const terminalPath = this.#getEditorTerminalPath();
-		if (!terminalPath) {
-			return null;
-		}
-		try {
-			return await fs.open(terminalPath, "r+");
-		} catch {
-			return null;
-		}
-	}
-
 	#getPlanApprovalContextUsage(): ContextUsage | undefined {
 		const executionModel = this.#planModePreviousModelState?.model ?? this.session.model;
 		const contextWindow = executionModel?.contextWindow;
@@ -3297,18 +3325,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 
-		let ttyHandle: fs.FileHandle | null = null;
 		try {
-			ttyHandle = await this.#openEditorTerminalHandle();
 			this.ui.stop();
-
-			const stdio: [number | "inherit", number | "inherit", number | "inherit"] = ttyHandle
-				? [ttyHandle.fd, ttyHandle.fd, ttyHandle.fd]
-				: ["inherit", "inherit", "inherit"];
-
 			const result = await openInEditor(editorCmd, currentText, {
 				extension: path.extname(resolvedPath) || ".md",
-				stdio,
 				trimTrailingNewline: false,
 			});
 			if (result !== null) {
@@ -3319,9 +3339,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		} catch (error) {
 			this.showWarning(`Failed to open external editor: ${error instanceof Error ? error.message : String(error)}`);
 		} finally {
-			if (ttyHandle) {
-				await ttyHandle.close();
-			}
 			this.ui.start();
 			this.ui.requestRender(true);
 		}
@@ -3334,25 +3351,15 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 
-		let ttyHandle: fs.FileHandle | null = null;
 		try {
-			ttyHandle = await this.#openEditorTerminalHandle();
 			this.ui.stop();
-
-			const stdio: [number | "inherit", number | "inherit", number | "inherit"] = ttyHandle
-				? [ttyHandle.fd, ttyHandle.fd, ttyHandle.fd]
-				: ["inherit", "inherit", "inherit"];
-
-			const result = await openInEditor(editorCmd, draft, { extension: ".md", stdio });
+			const result = await openInEditor(editorCmd, draft, { extension: ".md" });
 			if (result !== null) {
 				commit(result);
 			}
 		} catch (error) {
 			this.showWarning(`Failed to open external editor: ${error instanceof Error ? error.message : String(error)}`);
 		} finally {
-			if (ttyHandle) {
-				await ttyHandle.close();
-			}
 			this.ui.start();
 			this.ui.requestRender(true);
 		}
@@ -4331,7 +4338,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		stopSharedSpinnerTicker();
 		this.#liveCommandController.dispose();
 		this.#cancelTodoAutoClearTimer();
-		this.#cancelTodoBarCollapseAnimation();
 		this.#cancelObserverUiSyncTimer();
 		this.#cancelGoalContinuation();
 		if (this.#sttController) {
@@ -4340,6 +4346,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.#extensionUiController.clearExtensionTerminalInputListeners();
 		this.#extensionUiController.clearHookWidgets();
+		this.#extensionUiController.disposeComposerShapes();
 		for (const unsubscribe of this.#eventBusUnsubscribers) {
 			unsubscribe();
 		}
@@ -4364,10 +4371,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Clear the process-global consent handler so it doesn't outlive this
 		// InteractiveMode instance (e.g. test harnesses, headless re-init).
 		setAutoQaConsentHandler(null, null);
-		if (this.isInitialized) {
+		if (this.#ownsStartedUi) {
 			this.ui.stop();
-			this.isInitialized = false;
+			this.#ownsStartedUi = false;
 		}
+		this.isInitialized = false;
 	}
 
 	async shutdown(): Promise<void> {
@@ -4430,7 +4438,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const sessionId = this.sessionManager.getSessionId();
 		const sessionFile = this.sessionManager.getSessionFile();
 		if (sessionId && sessionFile && this.sessionManager.isSessionOnDisk()) {
-			process.stderr.write(`\n${chalk.dim(`Resume this session with ${APP_NAME} --resume ${sessionId}`)}\n`);
+			process.stderr.write(`\n${chalk.dim(`Resume this session with ${resumeCommand(sessionId)}`)}\n`);
 		}
 
 		await postmortem.quit(0);
@@ -4463,6 +4471,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		nextEditor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		nextEditor.setImeSafeCursorLayout(this.settings.get("tui.imeSafeCursor"));
 		nextEditor.setAutocompleteMaxVisible(this.settings.get("autocompleteMaxVisible"));
+		nextEditor.viewportRowsProvider = () => this.ui.terminal.rows;
+		nextEditor.magicKeywordsEnabled = () => this.settings.get("magicKeywords.enabled");
+		nextEditor.imageReferenceHyperlink = imageReferenceHyperlink;
 		nextEditor.onAutocompleteCancel = () => {
 			this.ui.requestRender(true);
 		};
@@ -4470,7 +4481,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.ui.requestRender();
 		};
 		nextEditor.setShimmerRepaintHandler(() => this.ui.requestDirectWrite(nextEditor));
-		nextEditor.setTopBorderProvider(availableWidth => this.statusLine.getTopBorder(availableWidth));
+		this.editor = nextEditor;
+		this.syncComposerShape();
 		nextEditor.setMaxHeight(this.#computeEditorMaxHeight());
 		if (this.historyStorage) {
 			nextEditor.setHistoryStorage(this.historyStorage);

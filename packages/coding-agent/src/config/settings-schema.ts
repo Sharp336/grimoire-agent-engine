@@ -1,6 +1,11 @@
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-ai";
 import { DEFAULT_SHARE_URL } from "@oh-my-pi/pi-wire";
 import { SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
+import {
+	type BlobDestinationId,
+	type BlobDestinationMetadata,
+	BUILTIN_BLOB_DESTINATIONS,
+} from "../blob-broker/destinations";
 import { DEFAULT_RELAY_URL } from "../collab/protocol";
 import { DEFAULT_LIVE_VOICE, LIVE_VOICE_OPTIONS, LIVE_VOICE_VALUES } from "../live/voices";
 import {
@@ -81,6 +86,67 @@ import {
 
 export type ModelRoleStorage = "global" | "project";
 
+const BUILTIN_BLOB_DESTINATION_METADATA: readonly BlobDestinationMetadata<BlobDestinationId>[] =
+	Object.values(BUILTIN_BLOB_DESTINATIONS);
+
+const BLOB_BACKEND_CHOICES = BUILTIN_BLOB_DESTINATION_METADATA.filter(
+	destination =>
+		destination.id === "provider-files" ||
+		(destination.directImage && destination.status !== "incompatible" && destination.status !== "defunct"),
+).map(destination => ({
+	value: destination.id,
+	label: destination.label,
+	description: destination.reason ?? destination.family,
+}));
+
+/** Composer shape id; extensions may register additional values at runtime. */
+export type ComposerShape = string;
+
+/** Built-in composer choices and their shared settings/setup copy. */
+export const BUILTIN_COMPOSER_SHAPES = [
+	{
+		value: "box",
+		label: "Rounded Box (Default)",
+		description: "Status line embedded in top border, compact 2-line prompt",
+	},
+	{
+		value: "claude",
+		label: "Claude Code",
+		description: "Full-width horizontal rules above and below, status line at bottom",
+	},
+	{
+		value: "pi",
+		label: "Pi",
+		description: "Framed horizontal rules with status line at bottom",
+	},
+	{
+		value: "borderless",
+		label: "Borderless",
+		description: "Clean prompt glyph with status line at bottom, no box borders",
+	},
+	{
+		value: "rule",
+		label: "Top Rule Dock",
+		description: "Single top rule with status docked onto it and below",
+	},
+	{
+		value: "field",
+		label: "Compact Field",
+		description: "Filled one-row field with accent end caps",
+	},
+	{
+		value: "rail",
+		label: "Accent Rail",
+		description: "Filled one-row field anchored by a single accent rail",
+	},
+] as const;
+
+/** Built-in composer ids used by tests and non-runtime consumers. */
+export const COMPOSER_SHAPE_VALUES = BUILTIN_COMPOSER_SHAPES.map(shape => shape.value);
+
+export type ContextLineMode = "off" | "percentage" | "annotated" | "embedded";
+export const CONTEXT_LINE_MODE_VALUES = ["off", "percentage", "annotated", "embedded"] as const;
+
 export type SettingTab =
 	| "appearance"
 	| "model"
@@ -130,7 +196,7 @@ export const TAB_METADATA: Record<SettingTab, { label: string; icon: `tab.${stri
  * Ungrouped settings render first, before any section heading.
  */
 export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
-	appearance: ["Theme", "Status Line", "Display", "Images"],
+	appearance: ["Theme", "Composer", "Status Line", "Display", "Images"],
 	model: ["Thinking", "Sampling", "Prompt", "Retry & Fallback", "Advisor", "Prewalk", "Vision"],
 	interaction: [
 		"Input",
@@ -543,6 +609,31 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"providers.openai-codex.codeMode": {
+		type: "enum",
+		values: ["off", "on", "auto"] as const,
+		default: "off",
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Codex Code Mode",
+			description:
+				"Route Codex code_mode_only models (GPT-5.6) through the eval tool as a programmatic execution surface: the direct tool surface collapses to eval/ask/todo and every other session tool is invoked from eval cells. Mirrors codex-rs Code Mode. 'auto' follows the model catalog flag.",
+		},
+	},
+
+	"providers.openai-codex.codeModeDirectTools": {
+		type: "array",
+		default: EMPTY_STRING_ARRAY,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Codex Code Mode Direct Tools",
+			description:
+				"Extra tool names to keep directly callable alongside eval/ask/todo when Codex Code Mode is active.",
+		},
+	},
+
 	disabledExtensions: { type: "array", default: EMPTY_STRING_ARRAY },
 
 	modelRoleStorage: {
@@ -633,6 +724,18 @@ export const SETTINGS_SCHEMA = {
 			description: "Use blue instead of green for diff additions",
 		},
 	},
+	// Composer
+	"composer.shape": {
+		type: "string",
+		default: "box",
+		ui: {
+			tab: "appearance",
+			group: "Composer",
+			label: "Composer Shape",
+			description: "Visual layout of the input editor and status line",
+			options: "runtime",
+		},
+	},
 
 	// Status line
 	"statusLine.preset": {
@@ -673,6 +776,36 @@ export const SETTINGS_SCHEMA = {
 				{ value: "block", label: "Block", description: "Solid blocks" },
 				{ value: "none", label: "None", description: "Space only" },
 				{ value: "ascii", label: "ASCII", description: "Greater-than signs" },
+			],
+		},
+	},
+
+	"statusLine.contextLine": {
+		type: "enum",
+		values: CONTEXT_LINE_MODE_VALUES,
+		default: "embedded",
+		ui: {
+			tab: "appearance",
+			group: "Status Line",
+			label: "Context-Reactive Line",
+			description: "How the line between the left and right segments reflects context usage (box composer only)",
+			options: [
+				{ value: "off", label: "Off", description: "Solid accent line, no context feedback" },
+				{
+					value: "percentage",
+					label: "Percentage",
+					description: "Used portion in accent color, remainder dimmed",
+				},
+				{
+					value: "annotated",
+					label: "Annotated",
+					description: "Percentage plus ticks at the speculative and auto-compaction boundaries",
+				},
+				{
+					value: "embedded",
+					label: "Embedded",
+					description: "Annotated line with the context percentage and window embedded in the gauge",
+				},
 			],
 		},
 	},
@@ -880,6 +1013,110 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"images.urls.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Vision",
+			label: "Serve Images as URLs",
+			description:
+				"Publish outgoing images through the configured backend chain and send URL-fetching providers short URLs instead of inline base64. Falls back to inline automatically when every backend or a provider fetch fails",
+		},
+	},
+
+	"images.urls.backends": {
+		type: "array",
+		default: ["provider-files", "tailscale", "cloudflared", "litterbox"] as BlobDestinationId[],
+		ui: {
+			tab: "model",
+			group: "Vision",
+			label: "Image URL Backends",
+			description: "Ordered destinations tried when publishing images for provider access",
+			options: BLOB_BACKEND_CHOICES,
+			ordered: true,
+		},
+	},
+
+	"images.urls.options": {
+		type: "record",
+		default: {} as Partial<Record<BlobDestinationId, Record<string, unknown>>>,
+	},
+
+	"images.urls.credentials": {
+		type: "record",
+		default: {} as Partial<Record<BlobDestinationId, Record<string, string>>>,
+		credential: true,
+	},
+
+	"images.urls.command": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "model",
+			group: "Vision",
+			label: "Image Upload Command",
+			description:
+				"Argv template for the command backend; {file} is the image path, {mime}/{ext} optional. The last URL printed on stdout is used (e.g. pasta -b -f {file})",
+		},
+	},
+
+	"images.urls.publicBaseUrl": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "model",
+			group: "Vision",
+			label: "Image URL Public Base",
+			description: "Externally reachable base URL fronting the blob server (required for ssh, optional for direct)",
+		},
+	},
+
+	"images.urls.ttlHours": {
+		type: "number",
+		default: 72,
+		ui: {
+			tab: "model",
+			group: "Vision",
+			label: "Image URL Lifetime (hours)",
+			description:
+				"Serving window for locally hosted image URLs, measured from the last time a conversation sent them; resuming a conversation re-arms the window at the same link. 0 keeps links alive while the broker runs",
+		},
+	},
+
+	"images.urls.bindHost": {
+		type: "string",
+		default: "127.0.0.1",
+		ui: {
+			tab: "model",
+			group: "Vision",
+			label: "Image URL Bind Host",
+			description: "Host the blob server binds to; loopback for tunnels, 0.0.0.0 for direct serving",
+		},
+	},
+
+	"images.urls.sshTarget": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "model",
+			group: "Vision",
+			label: "Image URL SSH Target",
+			description: "user@host destination for the ssh reverse forward",
+		},
+	},
+
+	"images.urls.sshRemotePort": {
+		type: "number",
+		default: 8787,
+		ui: {
+			tab: "model",
+			group: "Vision",
+			label: "Image URL SSH Remote Port",
+			description: "Remote listen port of the ssh reverse forward that your web server proxies to",
+		},
+	},
+
 	"tui.maxInlineImageColumns": {
 		type: "number",
 		default: 100,
@@ -990,6 +1227,36 @@ export const SETTINGS_SCHEMA = {
 			label: "Rewrite Scrollback",
 			description:
 				"Erase and replay terminal scrollback when a block's final form replaces its live preview. When off (default), stale preview copies remain in history and the final content is appended below.",
+		},
+	},
+	"tui.resizeScrollback": {
+		type: "enum",
+		values: ["append", "rebuild", "preserve"] as const,
+		default: "append",
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Resize Scrollback",
+			description:
+				"How a settled width resize refreshes terminal scrollback when the pane repaints in place (tmux/screen/zellij, or in-place direct terminals). The host rewraps old output naively on resize; these modes decide whether the transcript is re-emitted at the new width.",
+			options: [
+				{
+					value: "append",
+					label: "Append",
+					description: "Replay the transcript at the new width below the old history (one fresh copy per resize)",
+				},
+				{
+					value: "rebuild",
+					label: "Rebuild",
+					description:
+						"DESTRUCTIVE: erases the pane's ENTIRE scrollback (including pre-session shell output) and replays the transcript, leaving exactly one current-width copy. Needs a host that honors ED3: tmux does; when nested, the innermost honoring host clears; hosts that ignore it (GNU screen) behave like Append",
+				},
+				{
+					value: "preserve",
+					label: "Preserve",
+					description: "Repaint the viewport only; history keeps its old-width wrap (zero growth)",
+				},
+			],
 		},
 	},
 
@@ -1746,7 +2013,7 @@ export const SETTINGS_SCHEMA = {
 
 	autocompleteMaxVisible: {
 		type: "number",
-		default: 5,
+		default: 10,
 		ui: {
 			tab: "interaction",
 			group: "Input",
@@ -3613,6 +3880,22 @@ export const SETTINGS_SCHEMA = {
 			label: "Julia Eval Backend",
 			description: "Allow the eval tool to dispatch Julia cells to the persistent Julia kernel",
 		},
+	},
+
+	"eval.autoBackground.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "shell",
+			group: "Eval & Runtimes",
+			label: "Eval Auto-Background",
+			description: "Automatically background long-running eval cells and deliver the result later",
+		},
+	},
+
+	"eval.autoBackground.thresholdMs": {
+		type: "number",
+		default: 60_000,
 	},
 
 	// Runtime knobs (consumed by eval backends and the /python slash command)

@@ -5,29 +5,199 @@
 ### Added
 
 - Added immutable host-owned selected-agent provenance, bound to the selected definition's origin, canonical location, and exact parser input, to discovered definitions, persisted subagent revivals, lifecycle events, and `SingleResult`, plus extension APIs for resolving the authoritative winning definition and identifying the current manifest package without consumer path heuristics.
-- Added `qwenTemplateReasoningEffort` to the `models.yml` `compat` schema, so the auto-enabled Qwen 3.8+ template effort dialect (`chat_template_kwargs.reasoning_effort`) can be switched off per provider/model for strict local servers that reject unknown `chat_template_kwargs`.
-- Added `tokenizer` to custom model and `modelOverrides` configuration. It overrides the catalog-resolved local tokenizer family for a model when a proxy serves a known model id with a different tokenizer.
-- Added `extendedContext` setting (`/settings` → Context → General, default on). When off, models with a premium long-context price tier (OpenAI GPT-5.6 Sol/Terra/Luna bill 2x input / 1.5x output above 272K input tokens, on both the API and subscription Codex) are capped at the standard-pricing threshold — they appear as 272K again and compaction fires before a request crosses into premium billing. Toggling mid-session re-clamps or restores the active model's window immediately. Anthropic Claude 4.6+ serves its full 1M window at standard pricing, so no Anthropic model is affected.
-- Added click-to-toggle and drag-to-reorder controls for list-valued `/settings` editors.
-- Added `compaction.asyncEnabled` (Async Compaction, default on): when context enters the band just below the compaction threshold, maintenance speculatively summarizes in the background off a branch snapshot (first configured LLM-backed method — remote, handoff, or soft — isolated from the live turn by a side session id) and holds the armed result; crossing the threshold then splices it in instantly instead of blocking on a summarization round-trip. Armed results are invalidated by branch changes, reset boundaries, model switches that strand provider-native replay payloads, and context growth past `keepRecentTokens` (which re-speculates). The status line pulses the auto-compact icon while a speculation runs and holds it in accent once a result is armed.
+- Added `/shake thinking` to remove model reasoning blocks from session history
+- Added icon support to slash command autocomplete, with unique visuals for actions, files, settings, and other command types
+- Slash-command autocomplete now ranks equally matching commands by how often you use them; usage counts persist across sessions in agent.db
+- Edit tool payloads now accept `＋`-prefixed add lines to insert whole lines in place (consecutive `＋` lines insert together, both marker indent styles supported), and the prompt documents multi-line inline selections for contained restructures.
+- Edit tool now recovers common payload dialect slips instead of erroring: selections trailing their retyped line, elided unchanged lines in inline operations, guillemets used as brackets around old/new blocks, a stray trailing rewrite separator, rewrites written as replacement-directive lists, and apply-patch sentinels mixed into payloads.
+- Edit tool now defers ambiguous operations and resolves them against sibling operations' claimed spans, merges a pure deletion with a contained sibling rewrite into one union replace, reads a bare *** line as the rewrite separator, and strips split envelope sentinels plus decoding noise between an End sentinel and the next Begin.
+- Edit tool moves are now taught as delete-plus-restate; the register re-emit idiom left the prompt and constrained-decoding grammar (the engine still applies it), after benchmarks showed models inventing conflicting semantics for it.
+- Edit tool now reads a bare selection in a rewrite-less operation as the desired text: the current span is captured in place and replaced, keeping boundary whitespace outside the replacement.
+- Added an experimental `mono` edit variant: header-less `§relative/path` operation openers (bare `§` continues in the same file), inline-only changes, a real transpiler front-end, and dialect-voiced errors so retry guidance is always expressible under the mono grammar. Benchmarks with the corrected error surface still favor keeping the block form.
+- Edit tool now accepts the pretrained diff schema wherever models emit it: unified-diff-shaped operations (`@@` hunks, `-`/`+` runs, context lines) apply as inline changes, an added line that is a near-variant of its anchor replaces it instead of duplicating it.
+- Added an experimental `wdiff` edit variant speaking git word-diff (`@@ path` operation headers, `[-old-]{+new+}` inline changes, line-diff runs, `...` skips); benchmarks show block-instinct models roughly double their first-try edit success on it versus the inline-only mono dialect.
+- Edit tool now collapses back-to-back duplicate blocks when a payload states the desired text once, drops overlapping fuzzy-match artifacts of the same operation, and removes a dangling blank line left directly above a closing delimiter after a block deletion.
+- Edit tool now resolves delimiter-garbled punctuation selections against the file, rejects matches that would rewrite part of a longer punctuation run, treats candidates with whitespace-equivalent outcomes as unambiguous, recovers a dropped seam between a selection and its following text, and cleans blank lines left beside opening or closing delimiters after deletions.
 
 ### Changed
 
-- `omp cleanse` and the `/cleanse` slash command now render a live interactive status board with running checkers, repair subagents, tool counts, token/cost totals, and live scrollback in both the CLI and interactive terminal modes
-- Replaced the single `compaction.strategy` / `compaction.remoteEnabled` policy with ordered `compaction.methodOrder` preferences. The default now tries OpenAI-compatible server compaction, snapcompact, handoff, shake, then soft compaction; unavailable or failed methods advance through that list.
-- `/settings` rows can now carry a risk note: a warning glyph on the row plus a warning-colored line above the description. `External Thinking` (`externalThinking`, `--external-thinking`) is the first user — providers have flagged the request shape it produces as abuse, up to account-level enforcement, so both the settings entry and `--help` now say so.
-- The todo HUD header now draws a summed progress bar counting closed/total tasks across every stage. Once all tasks close, the bar smoothly collapses before the row disappears.
-- Token counting is now scoped to the model being billed rather than to a process-global tokenizer: session maintenance, stats, advisors, `/context`, snapcompact inline imaging, and `compress` each count through the owning agent's `Tokenizer` (`agent.tokenizer`). Message counting is `Tokenizer.countMessage`/`countMessages` (replacing the free `estimateTokens(message, tokenizer)` helper; the legacy shim keeps a compat `estimateTokens` export for legacy pi extensions). `estimateToolSchemaTokens`, `estimateSkillsTokens`, `computeNonMessageTokens`, and `computeNonMessageBreakdown` take an explicit tokenizer; standalone prompt inspection intentionally keeps the default estimate because it has no resolved catalog model.
-- The advisor runtime's `maintainContext` hook now receives the pending update as a message instead of a pre-computed token count — sizing it needs the advisor model's tokenizer, which the host owns.
-- Handoff no longer starts a new session: `/handoff` and the auto-maintenance `handoff` method now commit the generated document as a regular compaction entry on the current session (document becomes the summary, recent history is kept per `compaction.keepRecentTokens`, session id/transcript/cache key unchanged). The `session_before_switch`/`session_switch` extension events no longer fire with reason `"handoff"`, mid-turn maintenance no longer skips the handoff preference, and overflow recovery can now apply a pre-armed handoff result.
+- Switched fallback edit mode from replace to sloppy for models that do not support hashline
+- Autocomplete dropdown now shows up to 10 rows by default (was 5), clamped to the terminal height (`autocompleteMaxVisible` setting)
+- Long slash-command descriptions now truncate to two rows with an ellipsis in the autocomplete popup instead of wrapping in full
+- Sloppy edits now treat all authored whitespace as verbatim and require explicit `»` or `⟪⟫` markers for all operations, forbidding marker-less changes.
+
+### Removed
+
+- Removed the experimental `wdiff` edit variant (git word-diff surface); `sloppy` is the single sparse-edit dialect.
+- Removed the experimental `mono` edit variant: its syntax and recoveries are now native to `sloppy`, which teaches `§relative/path` operation openers (bare `§` continues in the same file, `§*` for every match) instead of separate header lines, voices errors in the same vocabulary, and applies marker-less operations as desired text when the delta is punctuation-level or collapses an adjacent duplicate. Legacy bracket headers and guillemet openers remain accepted.
 
 ### Fixed
 
-- Fixed a prompt cancelled during turn setup (Esc while the pre-stream spinner is up, after dispatch had started) vanishing entirely: it was never persisted to the session — so the `/tree` and `/branch` selectors had nothing to rewind to — and was not returned to the editor either, while its optimistic transcript row kept lingering. A prompt dropped before reaching the agent (abort or usage-preflight denial racing setup) is now handed back: the stale transcript row is removed and the typed text and image attachments are restored to the editor for editing.
-- Fixed macOS `top`-style single-dash long options in the `top` shell builtin: `top -l 2 -pid 56943 -stats pid,cpu,th,mem,pstate` previously failed with `invalid value 'id' for '--pid <PIDS>'` because clap read `-pid` as `-p id`. Single-dash long spellings now parse, and `-stats` selects and orders output columns using macOS stat keys (`pid`, `cpu`, `th`, `mem`, `pstate`, ...).
-- Fixed a sweep of GNU/BSD compatibility gaps in the built-in shell utilities, found by auditing every builtin against its real counterpart: `timeout` gained `-s`/`-k`/`--preserve-status`/`--foreground`/`-v`, GNU exit codes (124/125/137), signal delivery to the child process group with `-k` SIGKILL escalation, and `timeout 0` disabling the limit; `diff` gained normal-format default output, `-w`/`-b`/`-B`/`-i`/`-x`/`-L`/`-s`/`--strip-trailing-cr`, context format (`-c`/`-C`), bundled flags (`-ru`, `-urN`), timestamped unified headers, and no longer recurses directories without `-r`; `find` fixed inverted `-newerXY` timestamp comparisons, anchored `-regex` to whole paths, and gained BSD `-perm +mode`, `-type f,d` lists, `-size` `T`/`P` suffixes, ISO dates in `-newermt`, and BSD leading flags `-E`/`-x`/`-s`; `date` gained BSD `-r <epoch>`, `-v` adjustments, and `-j -f` strptime parsing, and `-I` no longer swallows a following `+FORMAT`; `tail`/`head` accept obsolete `-N`/`+N` counts at any argv position with any file count, `tail -r -n N` works, and `head` continues past per-file I/O errors with GNU header/separator placement; `rg` resolves `-s`/`-i`/`-S` by last occurrence, accepts `--no-config`/`-j`/`--threads`/`--no-column`, implements `--path-separator`, and emits clean NUL-delimited output under `-0`/`-l0`; `stat` prints integer epochs for `%X`/`%Y`/`%Z` (bash arithmetic on `stat -c %Y` works) and gained BSD `-s`/`-x` output modes plus `-t` time formatting; `cksum` is now registered (multi-algorithm `cksum -a sha256`); `truncate` implements `-o`/`--io-blocks` (previously silently truncated to the raw byte count), accepts `b` (512-byte) suffix and BSD `=` prefix; `sleep`/`timeout` accept `infinity` and keep sub-millisecond precision; `yes` and `errno` accept hyphen-prefixed operands (`yes -n`, `errno -2`); `nohup -- cmd` no longer tries to run `--` (including backgrounded via the brush wrapper); `which` gained BSD `-s` and errors on zero operands; `kill` accepts attached values (`-s9`, `-sKILL`, `-l9`) and maps exit statuses above 128 (`kill -l 137` → `KILL`).
+- Code blocks now syntax-highlight live while the response streams instead of staying plain until the block settles
+- Fixed `/shake thinking` reporting "Nothing to shake" after removing reasoning; it now reports the dropped count and leaves thinking-only turns empty.
+- Fixed session teardown occasionally losing pending input drafts during shutdown
+- Fixed streaming edit failures caused by trailing partial lines
+- Interrupting a Claude model mid-thinking no longer replays the partial reasoning as quoted conversation text on the next turn, which Anthropic's `reasoning_extraction` classifier refused.
+- Sloppy edit `＋` inserts before an anchor line no longer double their typed indentation or flatten the anchor.
+- Session restore no longer re-runs the edit-matching engine for every historical edit in the transcript; large sessions with many edits resume several times faster.
+- Fixed image requests to Kimi Code / Moonshot failing with 400 `unsupported image url`: their catalog api is openai-completions so the image URL mirror gate wrongly admitted them; Moonshot-native hosts now always receive inline base64 images.
+- Fixed Read failing with `unable to open database file` for cleanly closed WAL-mode SQLite databases without `-wal`/`-shm` sidecars.
+- Fixed collapsed edit results with long wrapped diff lines growing beyond their rendered-row budget and corrupting native Windows terminal transcript layout ([#9302](https://github.com/can1357/oh-my-pi/issues/9302)).
+- Fixed edit tool section header paths not trimming surrounding whitespace, so a header with padded brackets failed with file-not-found.
+- Fixed transcript content disappearing from terminal scrollback below a live hub-wait/todo/jobs card: the card's viewport pin froze scrollback commits at its own rows, so everything the turn streamed below it scrolled off-screen without ever entering terminal history (and was lost for good when the session exited first). A displaceable card with content below it no longer holds the commit ceiling; its rows commit as they scroll off and the card seals in place, so the next poll stacks a fresh card instead of retracting history.
+- Fixed the composer attachment chip thumbnail showing an empty box for pasted images: the paste pipeline re-encodes images as JPEG/WebP, and transmitting those bytes as Kitty PNG data made the terminal reject them (blank placeholder cells). Non-PNG attachments now convert to PNG before the thumbnail transmit, like transcript images.
+- Added an immediately editable startup composer for plain interactive launches; drafts typed while session initialization runs transfer intact into the full UI.
+
+## [17.4.4] - 2026-08-22
+
+### Added
+
+- Added the `tui.resizeScrollback` setting (default `append`) controlling how a settled width resize refreshes pane scrollback when the terminal repaints in place (tmux/screen/Zellij panes, in-place direct terminals). Multiplexers rewrap old output naively on width changes, leaving history hard-broken at the old width; `append` re-emits the transcript at the new width below it (one fresh copy per settled resize), `rebuild` clears pane history first so it holds exactly one current-width copy (needs a host that honors ED3, like tmux; erases pre-session scrollback), and `preserve` keeps the old-width history untouched with zero growth ([#8193](https://github.com/can1357/oh-my-pi/issues/8193)).
+
+### Fixed
+
+- Fixed the composer image chip painting its right border inside the card and mangling the thumbnail's first row: the Kitty placement prefix was counted as visible width, breaking the thumbnail centering.
+- Fixed edit-tool whole-line inserts (an insert selection alone on its own line) splicing into the anchor line instead of landing on a new line when the anchor was the last matched line, preceded a blank line, or sat at EOF.
+- Edit tool prompt now documents whole-line insert selections and that a REWRITE `…` with no captured MATCH gap is written to the file literally.
+- Fixed multiplexer width resizes (tmux/screen/Zellij/cmux/Herdr panes) replaying the entire transcript into pane history — one duplicated transcript copy and seconds of visible scrolling per width change. The width-epoch boundary now resolves for real transcripts: finalized blocks without `getTranscriptBlockVersion` are treated as immutable per the documented contract, Container-derived blocks without a nested epoch source fall back to whole-segment stability instead of failing, and bash/eval/tool/read-group blocks report a block version for their genuine post-finalize mutations. The interactive resize listener no longer marks every SIGWINCH as "render pending", which forced the conservative replay-from-row-zero fallback on every settled resize ([#8193](https://github.com/can1357/oh-my-pi/issues/8193), [#7026](https://github.com/can1357/oh-my-pi/issues/7026)).
+- Edit tool prompt now documents whole-line insert selections, steers multi-line edits toward inline selections instead of block rewrites that retype unchanged lines, and warns that a REWRITE gap with nothing captured in MATCH is written to the file literally.
+
+## [17.4.3] - 2026-08-21
+
+### Fixed
+
+- Fixed the edit tool rejecting payloads containing a glued `«»` line: after MATCH it now reads as the mistyped `»` separator, elsewhere as a stray terminator to drop.
+
+## [17.4.2] - 2026-08-21
+
+### Added
+
+- Added an opt-in image URL broker (`images.urls.enabled`) that publishes outgoing images through an ordered chain of backends instead of sending inline base64 to URL-fetching providers
+- Composer attachment chips (ported from omp2): pasted images and large text pastes stage as rounded preview cards above the prompt — image cards show a live thumbnail (Kitty Unicode placeholders) with pixel dimensions, text cards a snippet with `+N lines`/`N chars` — while the editor buffer holds a compact `<icon> #N` token in the card's identity color.
+
+### Changed
+
+- Pasted images now insert only the `[Image #N, WxH]` marker; the redundant trailing `attachment://N` URI is no longer added to the composer.
+- Added a consolidated CLI reference (`docs/cli-reference.md`) documenting every top-level subcommand and launch flag, including headless print mode (`--print`/`-p`, `--print-thoughts`) ([#9252](https://github.com/can1357/oh-my-pi/issues/9252))
+
+### Fixed
+
+- Fixed unreadable colors in macOS Terminal.app by using its supported 256-color mode ([#9162](https://github.com/can1357/oh-my-pi/issues/9162)).
+- Fixed Esc after a fast `/mcp test` result aborting the active agent turn instead of consuming the advertised cancellation input ([#9173](https://github.com/can1357/oh-my-pi/issues/9173)).
+- Fixed task spawns crashing when legacy boolean per-agent prewalk or advisor overrides are present in `config.yml`.
+- Fixed ACP `session/prompt` requests hanging forever when a builtin slash command's residual prompt (e.g. `/force:<tool> /some-command`) resolved locally, which also wedged all subsequent prompts on the session ([#9206](https://github.com/can1357/oh-my-pi/issues/9206)).
+- Fixed eval-spawned subagent output being omitted from per-turn output-token budgets, including failed and isolated runs ([#9187](https://github.com/can1357/oh-my-pi/issues/9187)).
+- Fixed `/compact` over RPC blocking the serialized command queue for the full summarization round-trip, so a follow-up `abort` could not interrupt it ([#9200](https://github.com/can1357/oh-my-pi/issues/9200)).
+- Fixed RPC UI select requests dropping option descriptions, allowing hosts to render described choices ([#9175](https://github.com/can1357/oh-my-pi/issues/9175)).
+- Fixed `/todo edit` failing with "Could not parse Markdown" when checklist items had backslash-escaped brackets (`- \[x\]`), which editors and markdown renderers commonly emit ([#9188](https://github.com/can1357/oh-my-pi/issues/9188)).
+- Fixed `omp setup --check`/`--json` with no component printing usage text to stdout and exiting 0; it now errors on stderr and exits non-zero so scripted JSON health checks fail loudly ([#9221](https://github.com/can1357/oh-my-pi/issues/9221)).
+- Fixed an aggressive `task.maxRuntimeMs` mislabeling committed subagent outcomes: a budget-killed run is no longer reported as a runtime-limit timeout, and a subagent that yielded a complete result before the deadline is no longer reported as aborted when teardown crosses the deadline ([#9191](https://github.com/can1357/oh-my-pi/issues/9191)).
+- Fixed startup fallback-chain warnings for discovered OpenCode Zen, OpenCode Go, and GitHub Copilot models cached under credential-scoped IDs ([#9205](https://github.com/can1357/oh-my-pi/issues/9205)).
+- Fixed interactive `/models` and Ctrl+P cycling omitting an `enabledModels`/`--models` model discovered by a background provider refresh (e.g. `opencode-go/ox-alpha-free`) after startup, by rebuilding the scoped list once discovery completes ([#9220](https://github.com/can1357/oh-my-pi/issues/9220)).
+- Documented how to enable, trigger, target, and manually re-arm prewalk ([#9179](https://github.com/can1357/oh-my-pi/issues/9179)).
+- Pasted images and large text pastes appear in the composer as compact icon tokens instead of bracketed markers; the bracketed form remains the outgoing/stored format, and the transcript renders it back as the compact chip.
+- Deleting an attachment's inline token now removes the attachment from the submission (surviving image markers are renumbered).
+- Restored prompts (esc-esc, `/tree`, branch, queued-message dequeue, failed-submit recovery) collapse image markers back into clickable atomic chip tokens and re-materialize their file links instead of degrading to dead text.
+
+## [17.4.1] - 2026-08-21
+
+### Added
+
+- Added `PERSONALITY.md` support: `~/.omp/agent/PERSONALITY.md` (profile/XDG-aware agent dir) replaces the system prompt's personality block text; `personality: none` still omits the block ([#8528](https://github.com/can1357/oh-my-pi/issues/8528))
+- Sloppy edits now support inline replacements with `⟪old│new⟫` syntax (`⟪old│⟫` for deletions and `⟪│new⟫` for insertions), alongside automatic recovery for common formatting mistakes without needing a retry.
+- Sloppy edits now recover operations that mix `⟪old│new⟫` inline replacements with a `»` REWRITE instead of failing the payload: a redundant REWRITE is dropped, a diverging one is applied as the final text, and a note explains the interpretation.
+- Expanded archive support in `read` and `write` tools: `read` can now inspect and extract members from `.rar`, `.7z`, `.iso`, `.cab`, `.deb`, `.rpm`, `.cpio`, `.ar`/`.a`, `.lzh`, `.arj`, compressed tar files (`.tar.bz2`, `.tar.xz`, `.tar.zst`), package formats (`.whl`, `.ipa`, `.xpi`, `.vsix`, `.nupkg`, `.cbz`, `.cbr`), `.asar` archives, and single-file compressed streams; `write` can create `.tar.zst` and update `.asar` archives.
+- Added Code Mode for Codex `code_mode_only` models via `providers.openai-codex.codeMode` (`off`/`on`/`auto`), demoting non-essential tools into an eval bridge with generated TypeScript definitions.
+- MCP tool names longer than 64 characters are now automatically truncated with a deterministic hash suffix to comply with strict provider validators.
+- Marketplace-installed plugins with manifest settings can now be configured through `omp plugin config` and Settings → Plugins.
+- Configured discovery providers with `authHeader` now preserve cached models across application restarts.
+- Added repeat read warning hints when identical file content is read multiple times.
+- Explicit DAP adapters can now attach without a PID or port when `attachDefaults` provide the target arguments.
+- Added `isProjectTrusted()` compatibility shim to `ExtensionContext` for extensions targeting upstream per-directory trust gates.
+
+### Changed
+
+- Added `compaction.asyncEnabled` (default: on) to speculatively summarize context in the background before hitting threshold limits, avoiding blocking summarization pauses.
+- Replaced `compaction.strategy` and `compaction.remoteEnabled` with an ordered `compaction.methodOrder` preference list.
+- Handoff maintenance (`/handoff` and automatic handoff compaction) now commits generated summaries directly to the active session instead of starting a new session.
+- Added `extendedContext` setting (`/settings` → Context → General, default: on) to optionally clamp models with premium long-context pricing tiers (such as OpenAI GPT-5.6 Sol/Terra/Luna) to standard-pricing token limits before compaction triggers.
+- Token counting and token estimations are now dynamically scoped to each specific model tokenizer rather than using a single process-global tokenizer.
+- `omp cleanse` and `/cleanse` now feature a live interactive status board displaying active checkers, repair subagents, tool metrics, and token/cost totals in real time.
+- Eval-bridge nested `tool.<name>()` calls now enforce ACP permission gates and tool allowlists identically to direct tool calls.
+- Added `tokenizer` option to custom models and `modelOverrides` to allow overriding the local tokenizer family for proxied model endpoints.
+- Added `qwenTemplateReasoningEffort` to the `models.yml` `compat` schema to configure or disable reasoning effort flags for strict local inference servers.
+- Settings menus now support click-to-toggle and drag-to-reorder for list items, as well as warning indicators and risk notes on sensitive options such as External Thinking.
+- Supervised process completion notices now render as compact single-line entries.
+- The todo HUD header now displays a consolidated progress bar showing task completion across all stages.
+- `/settings` rows can now carry a risk note: a warning glyph on the row plus a warning-colored line above the description. `External Thinking` (`externalThinking`, `--external-thinking`) is the first user — providers have flagged the request shape it produces as abuse, up to account-level enforcement, so both the settings entry and `--help` now say so.
+
+### Fixed
+
+- Fixed regional HTTP 401 data-residency errors during Codex chat, web search, and image generation requests by passing token residency metadata on requests.
+- Fixed macOS SSH ControlMaster socket creation failures caused by `sun_path` length limits when using named profiles.
+- Fixed an issue where Nix-packaged builds failed to load on-demand native addons (`onnxruntime-node`/`sherpa-onnx`) due to missing shared C++ runtime library paths.
+- Fixed external editor spawning (Ctrl+G, plan review, `/todo edit`) failing to attach to visible terminals for editors like `emacsclient`.
+- Fixed `omp --resume` spinning at 100% CPU when new session entries arrived during initial transcript rendering.
+- Fixed session resume hints and fatal exit messages omitting the active `--profile` argument.
+- Fixed MCP OAuth authorization requests failing on pre-registered clients with restricted scopes by using RFC 9728 `scopes_supported`.
+- Fixed isolated task subagents causing out-of-memory crashes on repositories with large uncommitted binary files by pre-sizing diffs and enforcing snapshot limits.
+- Fixed LM Studio and lazy-loaded local models retaining uninitialized context lengths by re-probing loaded context lengths after initial inference.
+- Fixed project-scoped Claude Code marketplace plugins incorrectly loading into sessions in other projects.
+- Fixed configured advisors backed by discoverable providers remaining inactive on initial session startup until manually toggled.
+- Fixed resolving `--model @<role>` failing for roles backed by discovery providers like oMLX, Ollama, and llama-swap.
+- Fixed retry fallback chains stopping prematurely when encountering nested fallback configurations, and fixed session role priority during fallback chain selection.
+- Fixed cancelled prompts disappearing upon abort during turn setup, properly restoring user text and attachments to the input editor.
+- Fixed built-in shell utilities (`grep`, `rg`, `diff`, `find`, `timeout`, `top`, `date`, `head`, `tail`, `stat`, `truncate`, `kill`) across numerous POSIX/GNU/BSD compatibility edge cases and early-pipeline SIGPIPE handling.
+- Fixed Cursor sessions missing standard string-replacement edit tooling after server tool injection.
+- Fixed `hub wait` duplicating frozen rows into native scrollback during viewport overflow.
+- Fixed dark-theme contrast issues on markdown code-fence headers.
+- Fixed prompt guidance and descriptions for Task tools and SSH usage.
+- ACP editor clients that support elicitation forms (Zed) can now use `ask`, so the agent can pose single-choice, multi-select, and free-text questions inline instead of guessing.
+- `/retry` and `/handoff` now work over ACP, so editor clients (Zed) list them and can run them instead of sending the text to the model.
+- Added `qwenTemplateReasoningEffort` to the `models.yml` `compat` schema, so the auto-enabled Qwen 3.8+ template effort dialect (`chat_template_kwargs.reasoning_effort`) can be switched off per provider/model for strict local servers that reject unknown `chat_template_kwargs`.
+- Extensions can provide a normalized `usage` provider through `pi.registerProvider()`. Its reports now flow through AuthStorage caching, history, and usage displays, and the override is removed when the extension provider is unregistered.
+
+## [17.4.0] - 2026-08-20
+
+### Added
+
+- `/cleanse` (and `omp cleanse`) — run the checker/repair loop in-session, with a live status board of running checkers, repair subagents, and token/cost totals.
+- `omp ps` — interactive monitor for daemon-supervised background processes.
+- Composer layouts — `composer.shape` picks the editor frame (rounded box, Claude Code rules, upstream-pi rules, borderless), with live previews in `/settings` and the setup wizard.
+- Context line — `statusLine.contextLine` gauge (`percentage`, `annotated`, `embedded`) showing context usage and compaction boundaries.
+- Backgroundable Python — `eval` cells can run async and auto-background like `bash`, with configurable thresholds.
+- Local Claude token counting — Anthropic-family tokens now count via a native local tokenizer, and every counter (session maintenance, advisor, stats, context tools) uses the active model's own tokenizer.
+- `extendedContext` setting — pick whether models with premium long-context pricing (272K/1M tiers on Codex-class models) use the extended window or compact early and stay on standard pricing.
+- `/extended-context` — toggle premium long-context windows without leaving the session.
+- Speculative compaction — with `compaction.asyncEnabled`, all compaction modes compact in parallel while the session continues, then splice the result in instantly.
+- `tokenizer` property on custom models and `modelOverrides` to pin the tokenizer family for proxy models.
+- `qwenTemplateReasoningEffort` in `models.yml` `compat` to disable the Qwen 3.8+ reasoning-effort template parameter for strict local servers.
+- Click-to-toggle and drag-to-reorder for list-valued editors in `/settings`.
+- `icon.subscription` and `icon.advisor` symbol-theme tokens (Nerd Font, Unicode, ASCII).
+
+### Changed
+
+- Typing anywhere in the /models UI now immediately focuses the model list for instant search and arrow navigation.
+- Revamped the todo HUD — overall progress renders along the tree-spine connector with smooth completion transitions.
+- Compaction divider now names the maintenance method that fired (`remote-compacted`, `soft-compacted`, `handed-off`, `snap-compacted`) and shows the before → after context size (e.g. `256K→20K`).
+- `/handoff` (and automatic handoff compaction) now compacts in place, replacing the session context instead of forking a new session.
+- Compaction method priorities — `compaction.methodOrder` takes an ordered preference list (e.g. `[remote, snap]` uses remote compaction where the provider supports it, such as OpenAI, and snap everywhere else), replacing `compaction.strategy`/`compaction.remoteEnabled`.
+- Unified inline overlays and selectors (model picker, settings, `/cleanse`) into one titled rounded-box panel style.
+- Risk badges and warnings on `/settings` rows, starting with External Thinking.
+- Faster CLI Startup
+
+### Fixed
+
+- `/models` keeps `auto` thinking on non-default roles such as `task` instead of changing the active model and displaying the role as `max`.
+- Subagent `yield` structured results no longer get corrupted by lossy argument repairs; prompt guidance improved for weak callers.
+- GitHub `file_read` returns proper image blocks and direct view URLs for image/binary files.
+- Cancelled prompts during pre-stream turn setup restore the text and image attachments to the editor.
+- `top` builtin accepts single-dash macOS flags such as `-pid` and `-stats`.
+- GNU/BSD compat sweep across built-in shell utilities (`timeout`, `diff`, `find`, `date`, `tail`, `head`, `rg`, `stat`, `truncate`, `cksum`, `sleep`, `which`, `nohup`, `kill`).
 
 ## [17.3.8] - 2026-08-19
+
+- Fixed unquoted internal URLs in `bash` commands consuming adjacent shell operators into the resolved filesystem path.
 
 ### Added
 
