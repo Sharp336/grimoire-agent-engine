@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an immediately editable startup composer for plain interactive launches; drafts typed while session initialization runs transfer intact into the full UI.
+
 ## [17.4.4] - 2026-08-22
 
 ### Added
