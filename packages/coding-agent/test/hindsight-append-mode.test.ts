@@ -372,7 +372,10 @@ describe("Hindsight append-mode session retention", () => {
 		await state.drainOnClose();
 		expect(bodies).toHaveLength(2);
 		expect(String(firstItem(bodies[1]).document_id)).toMatch(/^sess-lastturn-tail-\d+$/);
+		expect(String(firstItem(bodies[1]).content)).toContain("turn six has enough text");
 		expect(String(firstItem(bodies[1]).content)).toContain("turn seven has enough text");
+		expect(String(firstItem(bodies[1]).content)).not.toContain("turn one has enough text");
+		expect(String(firstItem(bodies[1]).content)).not.toContain("turn five has enough text");
 		expect(firstItem(bodies[1])).not.toHaveProperty("update_mode");
 	});
 
@@ -456,5 +459,39 @@ describe("Hindsight append-mode session retention", () => {
 		await Promise.all([cadence, close]);
 		expect(bodies).toHaveLength(1);
 		expect(String(firstItem(bodies[0]).document_id)).toMatch(/^sess-lastturn-race-\d+$/);
+	});
+
+	it("does not append onto a rekeyed session from an in-flight retain cache", async () => {
+		const gate = Promise.withResolvers<void>();
+		const bodies = captureBodies({ delay: gate.promise });
+		const client = new HindsightApi({ baseUrl: "http://hindsight.local" });
+		const first = [turn("user", "hello first turn here"), turn("assistant", "first reply is long enough")];
+		const later = [
+			...first,
+			turn("user", "hello second turn here"),
+			turn("assistant", "second reply is long enough"),
+		];
+		const state = new HindsightSessionState({
+			sessionId: "sess-old",
+			client,
+			bankId: "personal",
+			config: makeConfig({ retainUpdateMode: "append" }),
+			session: { sessionId: "sess-old", getHindsightSessionState: () => state } as object as AgentSession,
+			banksSet: new Set(["personal"]),
+		});
+
+		const inFlight = state.retainSession(first);
+		state.setSessionId("sess-forked");
+		gate.resolve();
+		await inFlight;
+		expect(bodies).toHaveLength(1);
+		expect(firstItem(bodies[0]).document_id).toBe("sess-old");
+
+		await state.retainSession(later);
+		expect(bodies).toHaveLength(2);
+		expect(firstItem(bodies[1]).document_id).toBe("sess-forked");
+		expect(firstItem(bodies[1])).not.toHaveProperty("update_mode");
+		expect(String(firstItem(bodies[1]).content)).toContain("hello first turn here");
+		expect(String(firstItem(bodies[1]).content)).toContain("hello second turn here");
 	});
 });

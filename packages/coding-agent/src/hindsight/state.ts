@@ -226,6 +226,7 @@ export class HindsightSessionState {
 	#lastRetainedPrefixKey: string = "";
 	#retainInFlight: Promise<void> = Promise.resolve();
 	#autoRetainInFlight: Promise<void> = Promise.resolve();
+	#retainGeneration = 0;
 	hasRecalledForFirstTurn: boolean;
 	lastRecallSnippet?: string;
 	/** Cached `<mental_models>` block injected into developer instructions. */
@@ -270,15 +271,18 @@ export class HindsightSessionState {
 
 	setSessionId(sessionId: string): void {
 		this.sessionId = sessionId;
-		this.#lastRetainedMessageIndex = 0;
-		this.#cachedTranscript = "";
-		this.#lastRetainedPrefixKey = "";
+		this.#invalidateRetainCache();
 	}
 
 	resetConversationTracking(): void {
 		this.lastRetainedTurn = 0;
 		this.hasRecalledForFirstTurn = false;
 		this.lastRecallSnippet = undefined;
+		this.#invalidateRetainCache();
+	}
+
+	#invalidateRetainCache(): void {
+		this.#retainGeneration++;
 		this.#lastRetainedMessageIndex = 0;
 		this.#cachedTranscript = "";
 		this.#lastRetainedPrefixKey = "";
@@ -308,7 +312,11 @@ export class HindsightSessionState {
 			return;
 		}
 		try {
-			await this.retainSession(messages);
+			const lastTurnWindow =
+				this.config.retainMode === "last-turn"
+					? userTurns - this.lastRetainedTurn + this.config.retainOverlapTurns
+					: undefined;
+			await this.retainSession(messages, lastTurnWindow === undefined ? undefined : { lastTurnWindow });
 			this.lastRetainedTurn = userTurns;
 		} catch (err) {
 			logger.warn("Hindsight: session-end retain flush failed", {
@@ -357,10 +365,14 @@ export class HindsightSessionState {
 		return Number.isNaN(parsed.getTime()) ? undefined : parsed;
 	}
 
-	async retainSession(messages: HindsightMessage[], opts?: { forceReplace?: boolean }): Promise<void> {
+	async retainSession(
+		messages: HindsightMessage[],
+		opts?: { forceReplace?: boolean; lastTurnWindow?: number },
+	): Promise<void> {
+		const identity = { sessionId: this.sessionId, generation: this.#retainGeneration };
 		const run = this.#retainInFlight.then(
-			() => this.#retainSessionLocked(messages, opts),
-			() => this.#retainSessionLocked(messages, opts),
+			() => this.#retainSessionLocked(messages, opts, identity),
+			() => this.#retainSessionLocked(messages, opts, identity),
 		);
 		this.#retainInFlight = run.then(
 			() => undefined,
@@ -369,12 +381,17 @@ export class HindsightSessionState {
 		await run;
 	}
 
-	async #retainSessionLocked(messages: HindsightMessage[], opts?: { forceReplace?: boolean }): Promise<void> {
+	async #retainSessionLocked(
+		messages: HindsightMessage[],
+		opts: { forceReplace?: boolean; lastTurnWindow?: number } | undefined,
+		identity: { sessionId: string; generation: number },
+	): Promise<void> {
 		if (opts?.forceReplace) {
 			this.#lastRetainedMessageIndex = 0;
 			this.#cachedTranscript = "";
 			this.#lastRetainedPrefixKey = "";
 		}
+		const { sessionId, generation } = identity;
 		const retainedAt = new Date();
 		const sourceTimestamp = this.#sessionSourceTimestamp() ?? retainedAt;
 		const retainFullWindow = this.config.retainMode === "full-session";
@@ -384,7 +401,7 @@ export class HindsightSessionState {
 		let updateMode: UpdateMode | undefined;
 
 		if (retainFullWindow) {
-			documentId = this.sessionId;
+			documentId = sessionId;
 			const previousBoundary = this.#lastRetainedMessageIndex;
 			let rebuiltDivergentPrefix = false;
 			if (
@@ -410,9 +427,9 @@ export class HindsightSessionState {
 				if (opts?.forceReplace || rebuiltDivergentPrefix) updateMode = "replace";
 			}
 		} else {
-			const windowTurns = this.config.retainEveryNTurns + this.config.retainOverlapTurns;
+			const windowTurns = opts?.lastTurnWindow ?? this.config.retainEveryNTurns + this.config.retainOverlapTurns;
 			const target = sliceLastTurnsByUserBoundary(messages, windowTurns);
-			documentId = `${this.sessionId}-${retainedAt.getTime()}`;
+			documentId = `${sessionId}-${retainedAt.getTime()}`;
 			this.#lastRetainedMessageIndex = 0;
 			this.#cachedTranscript = "";
 			this.#lastRetainedPrefixKey = "";
@@ -425,13 +442,13 @@ export class HindsightSessionState {
 		await this.client.retain(this.bankId, transcript, {
 			documentId,
 			context: this.config.retainContext,
-			metadata: { session_id: this.sessionId },
+			metadata: { session_id: sessionId },
 			tags: this.retainTags,
 			timestamp: sourceTimestamp,
 			async: true,
 			updateMode,
 		});
-		if (nextCachedTranscript !== undefined) {
+		if (nextCachedTranscript !== undefined && generation === this.#retainGeneration) {
 			this.#cachedTranscript = nextCachedTranscript;
 			this.#lastRetainedMessageIndex = messages.length;
 			this.#lastRetainedPrefixKey = retentionPrefixKey(messages, messages.length);
