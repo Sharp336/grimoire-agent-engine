@@ -230,11 +230,24 @@ function killTunnelProcess(proc: Bun.Subprocess): void {
  * eventually block — or SIGPIPE-kill — the Go tunnel binaries. A file sink
  * has neither failure mode, so `exited` remains a trustworthy death signal.
  */
+interface SpawnUrlTunnelOptions {
+	/** Hold a scanned URL until this marker also appears in the log. */
+	readyPattern?: RegExp;
+	/**
+	 * Accept a URL published by a child that already exited. Only supervised
+	 * callers can recover a dead tunnel (their supervisor respawns it);
+	 * unsupervised adapters must reject immediately so the broker falls back
+	 * instead of health-probing a dead tunnel.
+	 */
+	recoverPostExitUrl?: boolean;
+}
+
 async function spawnUrlTunnel(
 	argv: string[],
 	extract: (line: string) => string | null,
-	readyPattern?: RegExp,
+	options: SpawnUrlTunnelOptions = {},
 ): Promise<{ proc: Bun.Subprocess; baseUrl: string }> {
+	const { readyPattern, recoverPostExitUrl = false } = options;
 	const logPath = path.join(os.tmpdir(), `omp-blob-tunnel-${Date.now().toString(36)}-${process.pid}.log`);
 	const fd = fs.openSync(logPath, "w");
 	let proc: Bun.Subprocess;
@@ -274,17 +287,19 @@ async function spawnUrlTunnel(
 		let readyUrl = scanLog(text);
 		if (readyUrl) return { proc, baseUrl: readyUrl };
 		if (proc.exitCode !== null) {
-			// exitCode may become visible after the poll's read but before the
-			// child descriptor is fully drained. Read once more after exit so a
-			// short-lived supervised tunnel can still publish its URL.
-			await proc.exited;
-			try {
-				text = await Bun.file(logPath).text();
-			} catch {
-				// The diagnostic below remains authoritative when no log exists.
+			if (recoverPostExitUrl) {
+				// exitCode may become visible after the poll's read but before the
+				// child descriptor is fully drained. Read once more after exit so a
+				// short-lived supervised tunnel can still publish its URL.
+				await proc.exited;
+				try {
+					text = await Bun.file(logPath).text();
+				} catch {
+					// The diagnostic below remains authoritative when no log exists.
+				}
+				readyUrl = scanLog(text);
+				if (readyUrl) return { proc, baseUrl: readyUrl };
 			}
-			readyUrl = scanLog(text);
-			if (readyUrl) return { proc, baseUrl: readyUrl };
 			throw new Error(`${argv[0]} exited with code ${proc.exitCode} before reporting a tunnel URL`);
 		}
 		await Bun.sleep(150);
@@ -342,13 +357,16 @@ function restartingPinggyExposure(baseUrl: string, argv: string[], initialProc: 
 				quickExits = 0;
 			}
 			try {
-				spawnedAt = Date.now();
-				const restarted = await spawnUrlTunnel(argv, parsePinggyUrl);
+				const restarted = await spawnUrlTunnel(argv, parsePinggyUrl, { recoverPostExitUrl: true });
 				if (stopping) {
 					killTunnelProcess(restarted.proc);
 					await restarted.proc.exited;
 					return;
 				}
+				// Measure the quick-exit window from readiness, matching the initial
+				// child: including the spawnUrlTunnel() wait would misclassify a
+				// slow-to-publish child that dies right after publishing as long-lived.
+				spawnedAt = Date.now();
 				proc = restarted.proc;
 				proc.unref();
 			} catch {
@@ -383,7 +401,7 @@ export async function startExposure(config: ExposureConfig, port: number): Promi
 			const { proc, baseUrl } = await spawnUrlTunnel(
 				[binary, "tunnel", "--no-autoupdate", "--url", `http://127.0.0.1:${port}`],
 				parseCloudflaredUrl,
-				/Registered tunnel connection/,
+				{ readyPattern: /Registered tunnel connection/ },
 			);
 			return processExposure("cloudflared", baseUrl, proc);
 		}
@@ -460,7 +478,8 @@ export async function startExposure(config: ExposureConfig, port: number): Promi
 						`0:127.0.0.1:${port}`,
 						"free.pinggy.io",
 					];
-			const { proc, baseUrl } = await spawnUrlTunnel(argv, parsePinggyUrl);
+			const supervised = Boolean(token && config.publicBaseUrl);
+			const { proc, baseUrl } = await spawnUrlTunnel(argv, parsePinggyUrl, { recoverPostExitUrl: supervised });
 			if (token && config.publicBaseUrl) {
 				return restartingPinggyExposure(normalizeBaseUrl(config.publicBaseUrl), argv, proc);
 			}
@@ -512,11 +531,9 @@ export async function startExposure(config: ExposureConfig, port: number): Promi
 				argv = [binary, "tunnel", "--no-autoupdate", "--config", configFile, "run", tunnelName];
 			}
 			const baseUrl = normalizeBaseUrl(config.publicBaseUrl);
-			const { proc } = await spawnUrlTunnel(
-				argv,
-				() => baseUrl,
-				/Registered tunnel connection|Connection [a-z0-9-]+ registered/i,
-			);
+			const { proc } = await spawnUrlTunnel(argv, () => baseUrl, {
+				readyPattern: /Registered tunnel connection|Connection [a-z0-9-]+ registered/i,
+			});
 			return processExposure("named-cloudflared", baseUrl, proc);
 		}
 		case "ssh": {
