@@ -12,7 +12,23 @@ export interface ProgressPreview {
 const PROGRESS_PREVIEW_HEAD_BYTES = Math.floor(PROGRESS_PREVIEW_MAX_BYTES / 2);
 const PROGRESS_PREVIEW_TAIL_BYTES = PROGRESS_PREVIEW_MAX_BYTES - PROGRESS_PREVIEW_HEAD_BYTES;
 
-/** Build one UTF-8-safe head/tail preview shared by broker transport and model delivery. */
+/** Drop a partial trailing line so a truncated head ends on a complete line. */
+function snapHeadToLine(head: string): string {
+	const cut = head.lastIndexOf("\n");
+	return cut > 0 ? head.slice(0, cut) : head;
+}
+
+/** Drop a partial leading line so a truncated tail starts on a complete line. */
+function snapTailToLine(tail: string): string {
+	const cut = tail.indexOf("\n");
+	return cut >= 0 && cut < tail.length - 1 ? tail.slice(cut + 1) : tail;
+}
+
+/**
+ * Build one UTF-8-safe head/tail preview shared by broker transport and model
+ * delivery. The split is a pure byte split: `head + tail` always rejoins to
+ * the retained text, which the broker wire relies on.
+ */
 export function buildProgressPreview(text: string, sourceTruncated = false): ProgressPreview {
 	const fullBytes = Buffer.byteLength(text, "utf8");
 	if (!sourceTruncated && fullBytes <= PROGRESS_PREVIEW_MAX_BYTES) {
@@ -24,6 +40,35 @@ export function buildProgressPreview(text: string, sourceTruncated = false): Pro
 	return {
 		head: truncateHeadBytes(text, headBytes).text,
 		tail: truncateTailBytes(text, tailBytes).text,
+		truncated: true,
+	};
+}
+
+/**
+ * Model-facing variant of {@link buildProgressPreview}: head and tail snap to
+ * complete lines so structured `<head>` / `<tail>` blocks never split a line.
+ * Windows that fit the budget split at the newline nearest the midpoint;
+ * single-line windows keep the byte split.
+ */
+export function buildLineSnappedPreview(text: string, sourceTruncated = false): ProgressPreview {
+	const preview = buildProgressPreview(text, sourceTruncated);
+	if (!preview.truncated || preview.text !== undefined) return preview;
+	const fullBytes = Buffer.byteLength(text, "utf8");
+	if (fullBytes <= PROGRESS_PREVIEW_MAX_BYTES) {
+		const midpoint = Math.floor(text.length / 2);
+		const before = text.lastIndexOf("\n", midpoint);
+		const after = text.indexOf("\n", midpoint + 1);
+		let cut = before;
+		if (before <= 0) cut = after;
+		else if (after >= 0 && after - midpoint < midpoint - before) cut = after;
+		if (cut > 0 && cut < text.length - 1) {
+			return { head: text.slice(0, cut), tail: text.slice(cut + 1), truncated: true };
+		}
+		return preview;
+	}
+	return {
+		head: snapHeadToLine(preview.head ?? ""),
+		tail: snapTailToLine(preview.tail ?? ""),
 		truncated: true,
 	};
 }

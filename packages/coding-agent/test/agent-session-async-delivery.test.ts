@@ -659,4 +659,69 @@ describe("AgentSession owner-routed async delivery", () => {
 		expect(flushed).toBe(true);
 		expect(vi.getTimerCount()).toBe(baselineTimers + 1);
 	});
+
+	it("summarizes an artifact-backed progressed job's completion to leftover plus artifact link", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const progressObserved = Promise.withResolvers<void>();
+		const completionObserved = Promise.withResolvers<string>();
+		const mock = createMockModel({
+			handler: context => {
+				const text = context.messages
+					.flatMap(message =>
+						typeof message.content === "string"
+							? [message.content]
+							: message.content.flatMap(content => (content.type === "text" ? [content.text] : [])),
+					)
+					.join("\n");
+				if (text.includes("DELIVERED PROGRESS LINE")) progressObserved.resolve();
+				if (text.includes("Resume your work using the result below")) completionObserved.resolve(text);
+				return { content: ["Done"] };
+			},
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "Main",
+			ownedAsyncJobManager: manager,
+		});
+		await session.sendUserMessage("initialize then wait");
+
+		const gate = Promise.withResolvers<string>();
+		const reporter = Promise.withResolvers<(text: string, info?: { artifactId?: string }) => void>();
+		manager.register(
+			"bash",
+			"summarized job",
+			async ({ reportAgentProgress }) => {
+				reporter.resolve(reportAgentProgress);
+				return gate.promise;
+			},
+			{ ownerId: "Main", progressDelivery: "wake" },
+		);
+		const report = await reporter.promise;
+		report("DELIVERED PROGRESS LINE", { artifactId: "77" });
+		await progressObserved.promise;
+
+		report("LEFTOVER LINE", { artifactId: "77" });
+		gate.resolve("FULL RESULT BODY MUST NOT REAPPEAR");
+		await manager.waitForAll();
+
+		const completion = await completionObserved.promise;
+		expect(completion).toContain("artifact://77");
+		expect(completion).toContain("LEFTOVER LINE");
+		expect(completion).not.toContain("FULL RESULT BODY MUST NOT REAPPEAR");
+	}, 10_000);
 });

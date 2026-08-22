@@ -144,6 +144,22 @@ export class ProgressBatcher<T> {
 		if (summaryError !== undefined) throw summaryError;
 	}
 
+	/**
+	 * Drain undelivered content without delivering it: the pending window plus
+	 * the bounded values retained from rate-limited windows. Used at settlement
+	 * when the caller folds the remainder into the terminal delivery instead of
+	 * racing one final progress batch ahead of it.
+	 */
+	takePending(id: string): { values: T[]; suppressedEvents: number } | undefined {
+		const state = this.#states.get(id);
+		if (!state) return undefined;
+		const values = this.#takeSuppressedValues(state, state.pending);
+		const suppressedEvents = state.suppressedEvents;
+		this.clear(id);
+		if (values.length === 0 && suppressedEvents === 0) return undefined;
+		return { values, suppressedEvents };
+	}
+
 	clear(id: string): void {
 		const state = this.#states.get(id);
 		if (!state) return;

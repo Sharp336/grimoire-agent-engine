@@ -1,5 +1,10 @@
 import { logger } from "@oh-my-pi/pi-utils";
-import { buildProgressPreview, mergeProgressPreviews } from "../session/progress-preview";
+import {
+	buildLineSnappedPreview,
+	buildProgressPreview,
+	mergeProgressPreviews,
+	type ProgressPreview,
+} from "../session/progress-preview";
 import { type ProgressBatch, ProgressBatcher, type ProgressReminder } from "./progress-batcher";
 
 const DELIVERY_RETRY_BASE_MS = 500;
@@ -67,8 +72,17 @@ export interface AsyncJob {
 	queued?: boolean;
 	/** How intentional progress reaches the owning agent; undefined keeps the channel off. */
 	progressDelivery?: AsyncJobProgressDelivery;
+	/** Progress batches actually handed to the owner sink; >0 means the agent has seen live output. */
+	progressDeliveredCount?: number;
+	/** Undelivered progress captured at settlement, folded into the completion delivery. */
+	completionLeftover?: AsyncJobCompletionLeftover;
 	/** Stable artifact containing the complete raw output behind bounded progress previews. */
 	progressArtifactId?: string;
+}
+
+/** Progress content that never reached the agent before the job settled. */
+export interface AsyncJobCompletionLeftover extends ProgressPreview {
+	suppressedEvents?: number;
 }
 
 export type AsyncJobProgressDelivery = "ambient" | "wake";
@@ -308,7 +322,7 @@ export class AsyncJobManager {
 					this.#scheduleEviction(id);
 					return;
 				}
-				await this.#flushAgentProgress(id);
+				await this.#settleAgentProgress(job);
 				job.status = "completed";
 				job.resultText = text;
 				this.#enqueueDelivery(id, text);
@@ -320,7 +334,7 @@ export class AsyncJobManager {
 					return;
 				}
 				const errorText = error instanceof Error ? error.message : String(error);
-				await this.#flushAgentProgress(id);
+				await this.#settleAgentProgress(job);
 				job.status = "failed";
 				job.errorText = errorText;
 				this.#enqueueDelivery(id, errorText);
@@ -585,6 +599,7 @@ export class AsyncJobManager {
 		};
 		try {
 			await sink.deliver(jobId, batch.values.map(record => record.text).join("\n"), job, batch.seq, info);
+			job.progressDeliveredCount = (job.progressDeliveredCount ?? 0) + 1;
 		} catch (error) {
 			logger.warn("Async job progress delivery failed", {
 				jobId,
@@ -595,6 +610,31 @@ export class AsyncJobManager {
 
 	#flushAgentProgress(jobId: string): Promise<void> {
 		return this.#progressBatcher.finish(jobId);
+	}
+
+	/**
+	 * Settle the progress channel at job completion. Once the agent has seen
+	 * live output and an artifact holds the complete stream, the completion
+	 * delivery only needs the never-delivered remainder — capture the pending
+	 * window instead of racing one last progress message ahead of the result.
+	 * Jobs whose progress never reached the agent keep the old flush so their
+	 * recorded output is not lost.
+	 */
+	async #settleAgentProgress(job: AsyncJob): Promise<void> {
+		if (
+			job.progressDelivery === undefined ||
+			(job.progressDeliveredCount ?? 0) === 0 ||
+			job.progressArtifactId === undefined
+		) {
+			await this.#flushAgentProgress(job.id);
+			return;
+		}
+		const pending = this.#progressBatcher.takePending(job.id);
+		if (!pending) return;
+		const record = pending.values[0];
+		const sourceTruncated = pending.suppressedEvents > 0 || record?.truncated === true;
+		const preview = record ? buildLineSnappedPreview(record.text, sourceTruncated) : { truncated: true };
+		job.completionLeftover = { ...preview, suppressedEvents: pending.suppressedEvents || undefined };
 	}
 
 	#clearAgentProgress(jobId: string): void {

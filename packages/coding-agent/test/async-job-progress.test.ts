@@ -3,6 +3,7 @@ import {
 	type AsyncJob,
 	AsyncJobManager,
 	type AsyncJobProgressDelivery,
+	type AsyncJobProgressInfo,
 	type AsyncJobProgressSink,
 } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import type { ProgressReminder } from "@oh-my-pi/pi-coding-agent/async/progress-batcher";
@@ -249,5 +250,47 @@ describe("AsyncJobManager model progress", () => {
 
 		expect(manager.getJob(jobId)?.status).toBe("completed");
 		expect(completions).toEqual(["complete"]);
+	});
+
+	test("folds never-delivered leftover into completion for artifact-backed progress", async () => {
+		vi.useFakeTimers();
+		const manager = new AsyncJobManager({});
+		const recorder = recordingSink();
+		const completions: string[] = [];
+		manager.registerProgressSink("Main", recorder.sink);
+		manager.registerDeliverySink("Main", (_jobId, text) => {
+			completions.push(text);
+		});
+		const gate = Promise.withResolvers<void>();
+		const started = Promise.withResolvers<(text: string, info?: AsyncJobProgressInfo) => void>();
+		const jobId = manager.register(
+			"bash",
+			"artifact backed",
+			async ({ reportAgentProgress }) => {
+				started.resolve(reportAgentProgress);
+				await gate.promise;
+				return "full result body";
+			},
+			{ ownerId: "Main", progressDelivery: "ambient" },
+		);
+		const report = await started.promise;
+
+		report("delivered line", { artifactId: "42" });
+		vi.advanceTimersByTime(200);
+		expect(recorder.seen.map(item => item.text)).toEqual(["delivered line"]);
+
+		report("leftover line", { artifactId: "42" });
+		gate.resolve();
+		await manager.waitForAll();
+		await manager.drainDeliveries({ timeoutMs: 2_000 });
+
+		// The pending window folds into the completion instead of racing one
+		// final progress batch ahead of the result.
+		expect(recorder.seen).toHaveLength(1);
+		const job = manager.getJob(jobId)!;
+		expect(job.progressDeliveredCount).toBe(1);
+		expect(job.progressArtifactId).toBe("42");
+		expect(job.completionLeftover).toEqual({ text: "leftover line", truncated: false, suppressedEvents: undefined });
+		expect(completions).toEqual(["full result body"]);
 	});
 });

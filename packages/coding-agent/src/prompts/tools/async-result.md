@@ -3,6 +3,17 @@
 
 {{else}}Background job {{jobs.[0].jobId}}{{#if jobs.[0].label}} ({{jobs.[0].label}}){{/if}} {{#if jobs.[0].failed}}failed{{else}}completed{{/if}}{{#if jobs.[0].bash}}{{#if jobs.[0].hasExitCode}} with exit code {{jobs.[0].exitCode}}{{else}}{{#if jobs.[0].failed}} without an exit code{{#if jobs.[0].timedOut}} (timed out){{/if}}{{/if}}{{/if}}{{/if}}. Resume your work using the result below.
 {{/if}}{{#each jobs}}{{#if @root.multiple}}── Job {{this.jobId}}{{#if this.label}} ({{this.label}}){{/if}}: {{#if this.failed}}failed{{else}}completed{{/if}}{{#if this.bash}}{{#if this.hasExitCode}}, exit {{this.exitCode}}{{else}}{{#if this.failed}}, no exit code{{#if this.timedOut}} (timed out){{/if}}{{/if}}{{/if}}{{/if}} ──
-{{/if}}{{this.result}}{{#unless @last}}
+{{/if}}{{#if this.progressSummarized}}{{#if this.hasLeftover}}<output>
+{{#if this.leftoverHead}}<head>
+{{this.leftoverHead}}
+</head>
+{{#if this.leftoverSuppressed}}<suppressed reason="rate-limit" events="{{this.leftoverSuppressed}}" full-output="artifact://{{this.artifactId}}" />
+{{else}}<suppressed reason="preview-limit" full-output="artifact://{{this.artifactId}}" />
+{{/if}}<tail>
+{{this.leftoverTail}}
+</tail>
+{{else}}{{this.leftoverText}}
+{{/if}}</output>
+Remaining output since the last progress update; earlier output was already delivered. Full output: artifact://{{this.artifactId}}{{else}}All output was already delivered as progress updates. Full output: artifact://{{this.artifactId}}{{/if}}{{else}}{{this.result}}{{/if}}{{#unless @last}}
 {{/unless}}{{/each}}
 </system-notice>

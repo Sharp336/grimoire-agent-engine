@@ -1983,12 +1983,29 @@ export class AgentSession {
 		// must not enqueue — the suppression marker alone is unreliable because
 		// job-id reuse clears it.
 		const epoch = this.#asyncDeliveryEpoch;
-		const formatted = await this.#formatAsyncResultForFollowUp(text);
+		// A job whose live output already reached this agent (and whose complete
+		// stream sits in a stable artifact) must not re-send that output with the
+		// completion: point at the artifact and carry only the never-delivered
+		// remainder captured at settlement.
+		const progressSummary =
+			job?.progressDelivery !== undefined &&
+			(job.progressDeliveredCount ?? 0) > 0 &&
+			job.progressArtifactId !== undefined
+				? { artifactId: job.progressArtifactId, leftover: job.completionLeftover }
+				: undefined;
+		const formatted = progressSummary ? "" : await this.#formatAsyncResultForFollowUp(text);
 		if (this.#isDisposed) return;
 		if (epoch !== this.#asyncDeliveryEpoch) return;
 		if (manager.isDeliverySuppressed(jobId)) return;
 		const durationMs = job ? Math.max(0, Date.now() - job.startTime) : undefined;
-		this.yieldQueue.enqueue<AsyncResultEntry>("async-result", { jobId, result: formatted, job, durationMs, epoch });
+		this.yieldQueue.enqueue<AsyncResultEntry>("async-result", {
+			jobId,
+			result: formatted,
+			job,
+			durationMs,
+			epoch,
+			progressSummary,
+		});
 	}
 
 	#deliverAsyncJobProgress(jobId: string, text: string, job: AsyncJob, seq: number, info: AsyncJobProgressInfo): void {

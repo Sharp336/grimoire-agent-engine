@@ -9,13 +9,13 @@
  * every completion — regardless of owner — into the first top-level session.
  */
 import { formatDuration, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
-import type { AsyncJob, AsyncJobProgressDelivery, AsyncJobType } from "../async";
+import type { AsyncJob, AsyncJobCompletionLeftover, AsyncJobProgressDelivery, AsyncJobType } from "../async";
 import type { ProgressReminder } from "../async/progress-batcher";
 import chattyProgressGuidanceTemplate from "../prompts/system/chatty-progress-guidance.md" with { type: "text" };
 import asyncProgressTemplate from "../prompts/tools/async-progress.md" with { type: "text" };
 import asyncResultTemplate from "../prompts/tools/async-result.md" with { type: "text" };
 import type { CustomMessage } from "./messages";
-import { buildProgressPreview } from "./progress-preview";
+import { buildLineSnappedPreview } from "./progress-preview";
 
 /**
  * `customType` of the injected async-result follow-up message. The task
@@ -43,6 +43,17 @@ export interface AsyncResultEntry {
 	 * the manager's per-id suppression marker.
 	 */
 	epoch: number;
+	/**
+	 * Present when the job's live output already reached the agent: the
+	 * completion message points at the artifact and inlines only the
+	 * never-delivered leftover instead of re-sending the full result.
+	 */
+	progressSummary?: AsyncResultProgressSummary;
+}
+
+export interface AsyncResultProgressSummary {
+	artifactId: string;
+	leftover?: AsyncJobCompletionLeftover;
 }
 
 export interface AsyncProgressEntry {
@@ -113,7 +124,7 @@ export function buildAsyncProgressBatchMessage(
 		const hasOutput = fullText.length > 0;
 		const suppressedEvents = jobEntries.reduce((total, entry) => total + (entry.suppressedEvents ?? 0), 0);
 		const sourceTruncated = suppressedEvents > 0 || jobEntries.some(entry => entry.sourceTruncated);
-		const preview = buildProgressPreview(fullText, sourceTruncated);
+		const preview = buildLineSnappedPreview(fullText, sourceTruncated);
 		const truncated = hasOutput && preview.truncated;
 		const artifactId = [...jobEntries].reverse().find(entry => entry.artifactId)?.artifactId;
 		const reminder = jobEntries.find(entry => entry.reminder !== undefined)?.reminder;
@@ -181,6 +192,7 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 		const exitCode = typeof rawExitCode === "number" ? rawExitCode : undefined;
 		const timedOut = entry.job?.latestDetails?.timedOut === true;
 		const status = entry.job?.status;
+		const leftover = entry.progressSummary?.leftover;
 		return {
 			jobId: entry.jobId,
 			result: entry.result,
@@ -193,6 +205,13 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			exitCode,
 			failed: status === "failed" || timedOut || (exitCode !== undefined && exitCode !== 0),
 			hasExitCode: exitCode !== undefined,
+			progressSummarized: entry.progressSummary !== undefined,
+			artifactId: entry.progressSummary?.artifactId,
+			leftoverText: leftover?.text ? sanitizeText(leftover.text) : undefined,
+			leftoverHead: leftover?.head ? sanitizeText(leftover.head) : undefined,
+			leftoverTail: leftover?.tail ? sanitizeText(leftover.tail) : undefined,
+			leftoverSuppressed: leftover?.suppressedEvents,
+			hasLeftover: Boolean(leftover?.text || leftover?.head || leftover?.tail),
 		};
 	});
 	const details: AsyncResultDetails = {
