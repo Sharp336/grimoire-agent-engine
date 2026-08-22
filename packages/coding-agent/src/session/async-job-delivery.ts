@@ -85,16 +85,23 @@ export interface AsyncProgressSource {
 	startedAt: number;
 }
 
-/** Coalesce key for enqueue-time folding: one bounded queue entry per job per delivery generation. */
+type AsyncProgressIdentity = Pick<AsyncProgressEntry, "jobId" | "source">;
+
+/** Stable typed identity shared by queue folding, batch grouping, and completion promotion. */
+export function asyncProgressSourceKey(entry: AsyncProgressIdentity): string {
+	return entry.source ? `${entry.source.type}:${entry.source.id}` : `job:${entry.jobId}`;
+}
+
+/** Coalesce key for enqueue-time folding: one bounded queue entry per source per delivery generation. */
 export function asyncProgressCoalesceKey(entry: AsyncProgressEntry): string {
-	return `${entry.epoch}:${entry.jobId}`;
+	return `${entry.epoch}:${asyncProgressSourceKey(entry)}`;
 }
 
 /**
  * Fold a newly delivered progress entry into the queued entry for the same
- * job, retaining one bounded head/tail window. Ambient progress enqueues
- * every batcher window (~2 s) indefinitely while the owner is idle; without
- * folding, both the queue and the batch message built from it grow without
+ * typed source, retaining one bounded head/tail window. Ambient progress
+ * enqueues every batcher window (~2 s) indefinitely while the owner is idle;
+ * without folding, both the queue and the batch message built from it grow without
  * limit. A fold that drops middle content counts as one suppressed event so
  * the rendered marker reflects the coalescing.
  */
@@ -150,22 +157,23 @@ export type AsyncProgressDetails = {
 	jobs: AsyncProgressJobDetails[];
 };
 
-/** Build one progress message, preserving every rate-limit-permitted event and grouping entries by job. */
+/** Build one progress message, preserving every rate-limit-permitted event and grouping entries by typed source. */
 export function buildAsyncProgressBatchMessage(
 	entries: AsyncProgressEntry[],
 ): CustomMessage<AsyncProgressDetails> | null {
 	if (entries.length === 0) return null;
-	const entriesByJob = new Map<string, AsyncProgressEntry[]>();
+	const entriesBySource = new Map<string, AsyncProgressEntry[]>();
 	for (const entry of entries) {
-		const queued = entriesByJob.get(entry.jobId);
+		const sourceKey = asyncProgressSourceKey(entry);
+		const queued = entriesBySource.get(sourceKey);
 		if (queued) {
 			queued.push(entry);
 			continue;
 		}
-		entriesByJob.set(entry.jobId, [entry]);
+		entriesBySource.set(sourceKey, [entry]);
 	}
 
-	const jobs = Array.from(entriesByJob.values()).map(jobEntries => {
+	const jobs = Array.from(entriesBySource.values()).map(jobEntries => {
 		const latest = jobEntries.at(-1)!;
 		const type = latest.job?.type;
 		const fullText = jobEntries

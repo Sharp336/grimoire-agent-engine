@@ -254,6 +254,7 @@ import {
 	type AsyncProgressEntry,
 	type AsyncResultEntry,
 	asyncProgressCoalesceKey,
+	asyncProgressSourceKey,
 	buildAsyncProgressBatchMessage,
 	buildAsyncResultBatchMessage,
 	mergeAsyncProgressEntries,
@@ -2018,9 +2019,10 @@ export class AgentSession {
 		// the output was already delivered. Promote it to the wake queue: that
 		// kind registers ahead of async-result, so the flush injects the
 		// remaining progress before the completion result.
+		const completedProgressSourceKey = asyncProgressSourceKey({ jobId });
 		const queuedProgress = this.yieldQueue.take<AsyncProgressEntry>(
 			ASYNC_PROGRESS_MESSAGE_TYPE,
-			entry => entry.jobId === jobId,
+			entry => asyncProgressSourceKey(entry) === completedProgressSourceKey,
 		);
 		for (const entry of queuedProgress) {
 			this.yieldQueue.enqueue<AsyncProgressEntry>(ASYNC_PROGRESS_WAKE_QUEUE_KIND, entry);

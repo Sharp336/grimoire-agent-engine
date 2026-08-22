@@ -12,6 +12,7 @@ import {
 	type AsyncProgressEntry,
 	type AsyncResultEntry,
 	asyncProgressCoalesceKey,
+	asyncProgressSourceKey,
 	buildAsyncProgressBatchMessage,
 	buildAsyncResultBatchMessage,
 	mergeAsyncProgressEntries,
@@ -248,6 +249,36 @@ describe("async progress coalescing", () => {
 		expect(asyncProgressCoalesceKey(progressEntry({ epoch: 0 }))).not.toBe(
 			asyncProgressCoalesceKey(progressEntry({ epoch: 1 })),
 		);
+	});
+
+	test("keeps a managed job and process with the same identifier in separate queue and batch groups", () => {
+		const managedJob = progressEntry({
+			jobId: "build",
+			text: "managed job output",
+			job: fakeJob({ id: "build", label: "managed build" }),
+		});
+		const process = progressEntry({
+			jobId: "build",
+			text: "process output",
+			source: {
+				id: "build",
+				type: "process",
+				label: "supervised build",
+				startedAt: Date.now(),
+			},
+		});
+
+		expect(asyncProgressSourceKey(managedJob)).toBe("job:build");
+		expect(asyncProgressSourceKey(process)).toBe("process:build");
+		expect(asyncProgressCoalesceKey(managedJob)).not.toBe(asyncProgressCoalesceKey(process));
+
+		const message = buildAsyncProgressBatchMessage([managedJob, process]);
+		expect(message).not.toBeNull();
+		expect(message!.details?.jobs).toHaveLength(2);
+		expect(message!.details?.jobs.map(job => ({ type: job.type, text: job.text }))).toEqual([
+			{ type: "bash", text: "managed job output" },
+			{ type: "process", text: "process output" },
+		]);
 	});
 
 	test("sustained idle ambient progress keeps queue and message bounded", async () => {

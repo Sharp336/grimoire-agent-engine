@@ -201,7 +201,9 @@ export class ProgressBatcher<T> {
 			state.suppressedValues.push(last);
 			return;
 		}
-		state.suppressedValues[1] = last;
+		// Keep the outer representation bounded, but merge the displaced tail so
+		// metadata accumulated by every suppressed window survives the replacement.
+		state.suppressedValues[1] = this.#merge ? this.#merge(state.suppressedValues[1]!, last) : last;
 	}
 
 	#takeSuppressedValues(state: ProgressBatchState<T>, current: readonly T[]): T[] {

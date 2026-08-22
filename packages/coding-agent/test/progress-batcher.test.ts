@@ -49,6 +49,68 @@ describe("ProgressBatcher", () => {
 		expect(seen[0]?.values).toEqual(["first|second|third"]);
 	});
 
+	test("accumulates metadata from every suppressed window while retaining bounded outer text", async () => {
+		vi.useFakeTimers();
+		interface Record {
+			text: string;
+			suppressedEvents?: number;
+			sourceTruncated?: boolean;
+			byteTruncated?: boolean;
+			reminder?: "chatty-monitor";
+		}
+		const seen: ProgressBatch<Record>[] = [];
+		const batcher = new ProgressBatcher<Record>(
+			(_id, batch) => {
+				seen.push(batch);
+			},
+			{
+				merge: (left, right) => ({
+					text: `${left.text.split("|")[0]}|${right.text.split("|").at(-1)}`,
+					suppressedEvents: (left.suppressedEvents ?? 0) + (right.suppressedEvents ?? 0) || undefined,
+					sourceTruncated: left.sourceTruncated === true || right.sourceTruncated === true || undefined,
+					byteTruncated: left.byteTruncated === true || right.byteTruncated === true || undefined,
+					reminder: left.reminder ?? right.reminder,
+				}),
+			},
+		);
+
+		for (let event = 1; event <= 10; event++) {
+			batcher.push("source", { text: `burst-${event}` });
+			await batcher.flush("source");
+		}
+		batcher.push("source", { text: "suppressed-first", suppressedEvents: 2 });
+		await batcher.flush("source");
+		batcher.push("source", {
+			text: "suppressed-middle",
+			suppressedEvents: 3,
+			sourceTruncated: true,
+			byteTruncated: true,
+			reminder: "chatty-monitor",
+		});
+		await batcher.flush("source");
+		batcher.push("source", { text: "suppressed-last", suppressedEvents: 5 });
+		await batcher.flush("source");
+
+		vi.advanceTimersByTime(2_000);
+		batcher.push("source", { text: "delivered" });
+		await batcher.flush("source");
+
+		expect(seen.at(-1)).toEqual({
+			kind: "progress",
+			values: [
+				{
+					text: "suppressed-first|delivered",
+					suppressedEvents: 10,
+					sourceTruncated: true,
+					byteTruncated: true,
+					reminder: "chatty-monitor",
+				},
+			],
+			seq: 14,
+			suppressedEvents: 3,
+		});
+	});
+
 	test("allows an eleven-event burst, suppresses nine, then reports the gap before event twenty-one", () => {
 		vi.useFakeTimers();
 		const seen: ProgressBatch<string>[] = [];
