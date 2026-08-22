@@ -1,7 +1,9 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import type { TUI } from "@oh-my-pi/pi-tui";
+import { resetSettingsForTest, Settings } from "../../../src/config/settings";
 import { ChatTranscriptBuilder } from "../../../src/modes/components/chat-transcript-builder";
 import { TranscriptContainer } from "../../../src/modes/components/transcript-container";
+import { initTheme } from "../../../src/modes/theme/theme";
 import type { InteractiveModeContext } from "../../../src/modes/types";
 import { UiHelpers } from "../../../src/modes/utils/ui-helpers";
 import {
@@ -13,6 +15,18 @@ import type { CustomMessage } from "../../../src/session/messages";
 import type { SessionMessageEntry } from "../../../src/session/session-entries";
 
 const RAW_PROGRESS = "stdout\tvalue\nError:\tfailed";
+beforeAll(async () => {
+	await initTheme(false);
+});
+
+beforeEach(async () => {
+	resetSettingsForTest();
+	await Settings.init({ inMemory: true });
+});
+
+afterEach(() => {
+	resetSettingsForTest();
+});
 
 function progressMessage(): CustomMessage<AsyncProgressDetails> {
 	const entry: AsyncProgressEntry = {
