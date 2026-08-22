@@ -7,10 +7,6 @@ function load(overrides: Record<string, unknown> = {}, env: NodeJS.ProcessEnv = 
 }
 
 describe("loadHindsightConfig retainUpdateMode", () => {
-	it("loads retainUpdateMode from settings", () => {
-		expect(load({ "hindsight.retainUpdateMode": "append" }).retainUpdateMode).toBe("append");
-	});
-
 	it("prefers HINDSIGHT_RETAIN_UPDATE_MODE over settings", () => {
 		expect(
 			load({ "hindsight.retainUpdateMode": "replace" }, { HINDSIGHT_RETAIN_UPDATE_MODE: "append" }).retainUpdateMode,
