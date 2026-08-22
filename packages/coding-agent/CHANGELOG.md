@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Mid-turn compaction now keeps parallel tool results ordered and present exactly once in the next model request.
+
 ## [18.0.3] - 2026-08-23
 
 ### Added
