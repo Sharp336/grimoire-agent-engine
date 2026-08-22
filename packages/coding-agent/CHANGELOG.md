@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Custom and API-key Codex web-search configurations must migrate to provider `openai` and configure `providers.webSearchOpenAIProvider` plus `providers.webSearchOpenAIModel`. Codex web search now uses official ChatGPT OAuth transport only.
 ## [18.0.0] - 2026-08-22
 
 ### Added

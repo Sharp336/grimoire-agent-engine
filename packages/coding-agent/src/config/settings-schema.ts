@@ -5264,6 +5264,28 @@ export const SETTINGS_SCHEMA = {
 			description: "Model ID for Gemini Google Search grounding. Defaults to gemini-2.5-flash.",
 		},
 	},
+	"providers.webSearchOpenAIProvider": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "OpenAI web_search provider",
+			description:
+				"Provider ID from models.yml; use with OpenAI web_search model to select a provider whose model uses api: openai-responses",
+		},
+	},
+	"providers.webSearchOpenAIModel": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "OpenAI web_search model",
+			description:
+				"Model ID from models.yml; use with OpenAI web_search provider to select a model whose API is openai-responses",
+		},
+	},
 	"providers.antigravityEndpoint": {
 		type: "enum",
 		values: ["auto", "production", "sandbox"] as const,

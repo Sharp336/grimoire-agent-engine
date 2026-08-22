@@ -1,7 +1,7 @@
 /**
  * Unified Web Search Tool
  *
- * Single tool supporting Anthropic, Perplexity, Exa, Brave, Jina, Kimi, Gemini, Codex, Tavily, Kagi, Z.AI, SearXNG, and Synthetic
+ * Single tool supporting Anthropic, Perplexity, Exa, Brave, Jina, Kimi, Gemini, Codex, OpenAI API, Tavily, Kagi, Z.AI, SearXNG, and Synthetic
  * providers with provider-specific parameters exposed conditionally.
  */
 
@@ -170,6 +170,16 @@ async function executeSearch(
 		geminiModel = undefined;
 	}
 
+	let openaiProvider: string | undefined;
+	let openaiModel: string | undefined;
+	try {
+		openaiProvider = settings.get("providers.webSearchOpenAIProvider");
+		openaiModel = settings.get("providers.webSearchOpenAIModel");
+	} catch {
+		openaiProvider = undefined;
+		openaiModel = undefined;
+	}
+
 	let timeoutMs = DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS * 1_000;
 	try {
 		const configuredSeconds = settings.get("providers.webSearchTimeoutSeconds");
@@ -218,6 +228,8 @@ async function executeSearch(
 				sessionId,
 				antigravityEndpointMode,
 				geminiModel,
+				openaiProvider,
+				openaiModel,
 			});
 
 			// Lenient constraint pass over whatever the provider returned: enforce
