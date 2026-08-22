@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Compaction preparation can account for fixed prompt prefixes when calibrating recent-history retention.
+
 ## [18.0.0] - 2026-08-22
 
 ### Fixed

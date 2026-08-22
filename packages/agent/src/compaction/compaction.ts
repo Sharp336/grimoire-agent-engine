@@ -1253,6 +1253,17 @@ export interface CompactionPreparation {
 	settings: CompactionSettings;
 }
 
+/** Caller-known prompt costs outside the branch range calibrated by {@link prepareCompaction}. */
+export interface PrepareCompactionOptions {
+	/**
+	 * Tokens already present in the provider prompt but absent from the branch
+	 * range passed to `estimateEntriesTokens`. This fixed cost cannot be reduced
+	 * by moving the recent-history cut point, so exclude it from the
+	 * provider/local calibration ratio.
+	 */
+	fixedPrefixTokens?: number;
+}
+
 /**
  * Whether a prior remote compaction's provider-native replay can still be read
  * by the active model — the model that assembles the request context on every
@@ -1317,6 +1328,7 @@ export function prepareCompaction(
 	settings: CompactionSettings,
 	activeModel?: Model,
 	tokenizer: Tokenizer = new Tokenizer(activeModel),
+	options?: PrepareCompactionOptions,
 ): CompactionPreparation | undefined {
 	if (pathEntries.length > 0 && pathEntries[pathEntries.length - 1].type === "compaction") {
 		return undefined;
@@ -1350,7 +1362,12 @@ export function prepareCompaction(
 	let keepRecentTokens = settings.keepRecentTokens;
 	if (lastUsage) {
 		const estimatedTokens = estimateEntriesTokens(pathEntries, tokenizer, boundaryStart, boundaryEnd);
-		const promptTokens = calculatePromptTokens(lastUsage);
+		const declaredFixedPrefixTokens = options?.fixedPrefixTokens;
+		const fixedPrefixTokens =
+			declaredFixedPrefixTokens !== undefined && Number.isFinite(declaredFixedPrefixTokens)
+				? Math.max(0, Math.floor(declaredFixedPrefixTokens))
+				: 0;
+		const promptTokens = Math.max(0, calculatePromptTokens(lastUsage) - fixedPrefixTokens);
 		const ratio = estimatedTokens > 0 ? promptTokens / estimatedTokens : 0;
 		if (Number.isFinite(ratio) && ratio > 1) {
 			keepRecentTokens = Math.max(1, Math.floor(keepRecentTokens / ratio));
