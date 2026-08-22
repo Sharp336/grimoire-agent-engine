@@ -1,5 +1,5 @@
 <system-notice>
-{{#each jobs}}<job-progress id="{{jobId}}"{{#if type}} type="{{type}}"{{/if}} elapsed="{{elapsed}}">
+{{#each jobs}}<job-progress id="{{escapeXml jobId}}"{{#if type}} type="{{type}}"{{/if}} elapsed="{{elapsed}}">
 {{#if head}}<output>
 <head>
 {{escapeXml head}}

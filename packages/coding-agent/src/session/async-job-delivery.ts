@@ -108,12 +108,14 @@ export function mergeAsyncProgressEntries(
 	if (queued.text.length === 0 || incoming.text.length === 0) {
 		text = queued.text.length === 0 ? incoming.text : queued.text;
 	} else {
-		const preview = mergeProgressPreviews(
-			buildProgressPreview(queued.text, queued.sourceTruncated === true),
-			buildProgressPreview(incoming.text, incoming.sourceTruncated === true),
-		);
+		// Build the merge previews without propagating upstream `sourceTruncated`
+		// markers: the flag is tracked separately above, and threading it through
+		// would mark the merged preview truncated even when the combined text
+		// fully fits the budget, inflating fold counts with phantom events.
+		const preview = mergeProgressPreviews(buildProgressPreview(queued.text), buildProgressPreview(incoming.text));
 		text = flattenPreviewText(preview);
 		if (preview.truncated) {
+			// This merge genuinely dropped bytes; surface it as one folded event.
 			sourceTruncated = true;
 			foldedEvents = 1;
 		}
