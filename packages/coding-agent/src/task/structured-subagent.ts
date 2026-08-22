@@ -158,60 +158,6 @@ export class StructuredSubagentError extends Error {
 
 const PLAN_MODE_TOOLS = ["read", "grep", "glob", "web_search"] as const;
 
-type EvalTurnBudget = { total: number | null; spent: number; hard: boolean };
-type EvalSubagentUsageRecorder = (output: number) => void;
-
-interface EvalSubagentContext {
-	owner: object;
-	forwardedOutput: number;
-	recordOutput: EvalSubagentUsageRecorder;
-	getTurnBudget?: () => EvalTurnBudget;
-}
-
-/**
- * Eval-spawned children do not appear in their parent's transcript usage. Keep
- * the active eval context by the child's session file so nested `agent()`
- * output reaches every ancestor without conflating identical agent IDs from
- * independent top-level sessions.
- */
-const evalSubagentContexts = new Map<string, EvalSubagentContext>();
-
-function getEvalAncestorContext(session: ToolSession): EvalSubagentContext | undefined {
-	const sessionFile = session.getSessionFile();
-	return sessionFile ? evalSubagentContexts.get(sessionFile) : undefined;
-}
-
-export function getEffectiveEvalTurnBudget(session: ToolSession): EvalTurnBudget | undefined {
-	const ancestorContext = getEvalAncestorContext(session);
-	const localBudget = session.getTurnBudget?.();
-	if (!ancestorContext) return localBudget;
-	const ancestorBudget = ancestorContext.getTurnBudget?.();
-	if (!ancestorBudget) return localBudget;
-	if (!localBudget) return ancestorBudget;
-	const unforwardedLocalOutput = Math.max(0, localBudget.spent - ancestorContext.forwardedOutput);
-	return {
-		total: ancestorBudget.total,
-		spent: ancestorBudget.spent + unforwardedLocalOutput,
-		hard: ancestorBudget.hard,
-	};
-}
-
-function createEvalSubagentContext(request: StructuredSubagentRequest): EvalSubagentContext | undefined {
-	if (request.invocationKind !== "eval") return undefined;
-	const ancestorContext = getEvalAncestorContext(request.session);
-	const context: EvalSubagentContext = {
-		owner: {},
-		forwardedOutput: 0,
-		getTurnBudget: () => getEffectiveEvalTurnBudget(request.session) as EvalTurnBudget,
-		recordOutput: output => {
-			context.forwardedOutput += output;
-			request.session.recordEvalSubagentUsage?.(output);
-			ancestorContext?.recordOutput(output);
-		},
-	};
-	return context;
-}
-
 function renderSubagentPrompt(assignment: string): string {
 	return prompt.render(subagentUserPromptTemplate, { assignment: assignment.trim() });
 }
@@ -343,6 +289,9 @@ export async function resolveEffectiveSubagentPolicy(
 		activeModelPattern: parentActiveModelPattern,
 		fallbackModelPattern: request.session.getModelString?.(),
 	};
+	// Role identity and patterns come from one call so they cannot be derived
+	// from different sources: the expansion below discards the alias, and the
+	// child's inherited retry-fallback chain is keyed off the role.
 	const { patterns: modelOverride, role: modelRole } = resolveAgentModelSelection(modelResolution);
 	const isolationMode = request.session.settings.get("task.isolation.mode");
 	const isIsolated = request.isolation?.requested === true;
@@ -445,6 +394,8 @@ function buildExecutorOptions(
 		assignment: request.assignment.trim(),
 		context: request.context?.trim() || undefined,
 		planReference: undefined,
+		// Task `name` is the spawn handle (id allocation). Eval `label` is a
+		// real UI description. Copy it only for eval so generateTaskLabel can run.
 		description: request.invocationKind === "eval" ? trimToUndefined(request.identity?.label) : undefined,
 		index: request.index ?? 0,
 		parentToolCallId: request.parentToolCallId,
@@ -604,21 +555,15 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 	let requiresRecoveryArtifacts = false;
 	let completedSuccessfully = false;
 	let deferredCleanup: Promise<void> | undefined;
-	let registeredEvalContext: { key: string; context: EvalSubagentContext } | undefined;
-	const evalContext = createEvalSubagentContext(request);
-	const recordEvalSubagentUsage = evalContext
-		? (result: SingleResult) => evalContext.recordOutput(result.usage?.output ?? 0)
-		: undefined;
+	const onSubprocessResult =
+		request.invocationKind === "eval"
+			? (result: SingleResult) => request.session.recordEvalSubagentUsage?.(result.usage?.output ?? 0)
+			: undefined;
 	try {
 		const id = await reserveStructuredSubagentId(request.session, {
 			...request.identity,
 			label: request.identity?.label ?? (request.invocationKind === "eval" ? "EvalAgent" : undefined),
 		});
-		if (evalContext) {
-			const key = path.join(lease.artifactsDir, `${id}.jsonl`);
-			evalSubagentContexts.set(key, evalContext);
-			registeredEvalContext = { key, context: evalContext };
-		}
 		const baseOptions = buildExecutorOptions(request, policy, lease, id);
 		baseOptions.onCleanupDeferred = completion => {
 			deferredCleanup = completion;
@@ -640,7 +585,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 		let result: SingleResult;
 		if (!isolationContext) {
 			result = await runSubprocess(baseOptions);
-			recordEvalSubagentUsage?.(result);
+			onSubprocessResult?.(result);
 		} else {
 			result = await runIsolatedSubprocess({
 				baseOptions,
@@ -652,7 +597,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 				description: trimToUndefined(request.identity?.label),
 				buildCommitMessage: makeIsolationCommitMessage(request.session),
 				buildFailureResult: buildFailureResult(request, policy, id, Date.now()),
-				onSubprocessResult: recordEvalSubagentUsage,
+				onSubprocessResult,
 			});
 		}
 		attachStructuredOutputMetadata(result, policy.schema);
@@ -716,12 +661,6 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			{ cause: error },
 		);
 	} finally {
-		if (
-			registeredEvalContext &&
-			evalSubagentContexts.get(registeredEvalContext.key) === registeredEvalContext.context
-		) {
-			evalSubagentContexts.delete(registeredEvalContext.key);
-		}
 		const shouldRetainArtifacts =
 			(request.retainArtifacts && completedSuccessfully) ||
 			(policy.isIsolated && (!policy.applyChanges || changesApplied === false || requiresRecoveryArtifacts));

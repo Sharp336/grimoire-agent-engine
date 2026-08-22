@@ -4,7 +4,6 @@
 import { type } from "@oh-my-pi/omptype";
 import {
 	buildStructuredSubagentRecoveryHint,
-	getEffectiveEvalTurnBudget,
 	runStructuredSubagent,
 	StructuredSubagentError,
 	type StructuredSubagentSchemaMode,
@@ -124,7 +123,7 @@ function buildSubagentFailureMessage(agentName: string, result: SingleResult): s
  */
 export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOptions): Promise<EvalAgentResult> {
 	const parsed = parseAgentArgs(args);
-	const turnBudget = getEffectiveEvalTurnBudget(options.session);
+	const turnBudget = options.session.getTurnBudget?.();
 	if (turnBudget?.hard && turnBudget.total !== null && turnBudget.spent >= turnBudget.total) {
 		throw new ToolError(
 			`agent() blocked: turn token budget exhausted (${turnBudget.spent}/${turnBudget.total} output tokens). Raise or drop the +Nk! ceiling to continue.`,

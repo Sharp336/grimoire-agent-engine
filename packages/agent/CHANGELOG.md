@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [18.0.0] - 2026-08-22
+
+### Fixed
+
+- Fixed agent identity confusion after session handoffs by clarifying context framing and ensuring successor instances seamlessly resume existing execution plans.
+
+## [17.4.1] - 2026-08-21
+
 ### Fixed
 
 - Fixed Codex remote compaction requests failing for region-pinned enterprise ChatGPT workspaces when requests egress from a different region.

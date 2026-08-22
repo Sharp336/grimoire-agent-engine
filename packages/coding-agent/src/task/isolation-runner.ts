@@ -124,7 +124,7 @@ export interface IsolatedRunOptions {
 	 * build a result shape consistent with their non-isolated path.
 	 */
 	buildFailureResult: (err: unknown) => SingleResult;
-	/** Observe only a real child result returned by `runSubprocess`, before fallible post-run cleanup. */
+	/** Observe the real child result before post-run isolation work. */
 	onSubprocessResult?: (result: SingleResult) => void;
 }
 
