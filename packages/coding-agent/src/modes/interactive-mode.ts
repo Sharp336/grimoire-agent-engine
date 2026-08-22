@@ -156,6 +156,7 @@ import {
 	VibeSessionRegistry,
 } from "../vibe/runtime";
 import type { AssistantMessageComponent } from "./components/assistant-message";
+import { AttachmentChipsBand } from "./components/attachment-chips";
 import type { BashExecutionComponent } from "./components/bash-execution";
 import { ChatBlock, type ChatBlockHost } from "./components/chat-block";
 import { CodexResetFireworksController } from "./components/codex-reset-fireworks";
@@ -185,6 +186,7 @@ import { SessionFocusController } from "./controllers/session-focus-controller";
 import { SSHCommandController } from "./controllers/ssh-command-controller";
 import { TanCommandController } from "./controllers/tan-command-controller";
 import { TodoCommandController } from "./controllers/todo-command-controller";
+import { materializeImageReferenceLinks } from "./image-references";
 import {
 	consumeLoopLimitIteration,
 	createLoopLimitRuntime,
@@ -537,6 +539,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	deferredCommandContainer: Container;
 	editor: CustomEditor;
 	editorContainer: Container;
+	/** Composer attachment band (chip cards) rendered directly above the prompt box. */
+	attachmentChipsContainer: Container;
 	hookWidgetContainerAbove: Container;
 	hookWidgetContainerBelow: Container;
 	statusLine: StatusLineComponent;
@@ -624,6 +628,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	optimisticSkillMessagePending = false;
 	lastSigintTime = 0;
 	lastEscapeTime = 0;
+	/** Owns Esc for every `/mcp test` that is active or whose cancellation hint may still be visible. */
+	mcpTestEscapeHandlers = new Set<() => void>();
 	lastLeftTapTime = 0;
 	shutdownRequested = false;
 	#isShuttingDown = false;
@@ -813,6 +819,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui = new TUI(new ProcessTerminal(), settings.get("showHardwareCursor"));
 		this.ui.setMaxInlineImages(settings.get("tui.maxInlineImages"));
 		this.ui.setScrollbackRebuild(settings.get("tui.scrollbackRebuild"));
+		this.ui.setResizeScrollback(settings.get("tui.resizeScrollback"));
 		// OSC 66 text-sizing is Kitty-only; resolve the setting against the terminal's
 		// capability (`TERMINAL.textSizing` defaults on for Kitty) so it stays off
 		// unless the user opts in, and never emits raw escapes on other terminals.
@@ -841,9 +848,17 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 		this.editor.setShimmerRepaintHandler(() => this.ui.requestDirectWrite(this.editor));
 		this.#syncEditorMaxHeight();
+		// Sync editor geometry only; never request a render here. This listener is
+		// registered before ProcessTerminal's own stdout "resize" listener (added in
+		// tui.start()), so it runs first on every SIGWINCH. The TUI's resize path
+		// already owns the repaint on every route (viewport fast path + settle,
+		// multiplexer debounce, alt-overlay repaint) and its settled render picks up
+		// the new editor max height. Requesting an ordinary render here additionally
+		// marked every resize as "render pending" (TUI hasPendingRender), which forced
+		// the multiplexer width epoch's conservative full-transcript replay — one
+		// duplicated transcript copy in pane history per tmux width change.
 		this.#resizeHandler = () => {
 			this.#syncEditorMaxHeight();
-			this.ui.requestRender();
 		};
 		process.stdout.on("resize", this.#resizeHandler);
 		try {
@@ -856,6 +871,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.hookWidgetContainerAbove = new Container();
 		this.hookWidgetContainerAbove.addChild(new Spacer(1));
 		this.hookWidgetContainerBelow = new Container();
+		this.attachmentChipsContainer = new Container();
+		this.attachmentChipsContainer.addChild(new AttachmentChipsBand(this.editor, this.ui.imageBudget));
+		// Restored drafts (esc-esc, /tree, branch) re-materialize blob-store links off the render
+		// path so their chip tokens become clickable again instead of degrading to dead text.
+		this.editor.draftImageLinkMaterializer = images =>
+			materializeImageReferenceLinks(images, this.sessionManager.putBlob.bind(this.sessionManager));
 		this.editorContainer = new Container();
 		this.editorContainer.addChild(this.editor);
 		this.statusLine = new StatusLineComponent(session);
@@ -1097,6 +1118,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// HUDs, just above the editor's hook-widget top margin — so it reads next to
 		// the prompt while keeping the one-line gap above the editor.
 		this.ui.addChild(this.statusContainer);
+		this.ui.addChild(this.attachmentChipsContainer);
 		this.ui.addChild(this.hookWidgetContainerAbove);
 		this.ui.addChild(this.editorContainer);
 		this.ui.addChild(this.hookWidgetContainerBelow);
