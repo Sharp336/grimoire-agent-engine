@@ -1020,12 +1020,22 @@ const NO_BLOCK_BOUNDARY = { end: 0, count: 0 } as const;
  *  - A preceding `list` must be provably closed: CommonMark lets a same-marker
  *    item continue the list across the blank line, and marked merges both into
  *    one renumbered loose list (`listMayContinueAt`).
+ *
+ * `startIndex` resumes the scan at `tokens[startIndex]` (positions still
+ * accumulate from `base`). The streaming freeze passes the frozen-prefix
+ * token count: that prefix's boundary is permanent under append-only growth
+ * (re-verified when frozen), so only the mutable tail can hold a new one.
  */
-function stableBlockBoundary(text: string, base: number, tokens: Token[]): { end: number; count: number } {
+function stableBlockBoundary(
+	text: string,
+	base: number,
+	tokens: Token[],
+	startIndex = 0,
+): { end: number; count: number } {
 	let pos = base;
 	let end = 0;
 	let count = 0;
-	for (let i = 0; i < tokens.length; i++) {
+	for (let i = startIndex; i < tokens.length; i++) {
 		const raw = tokens[i].raw;
 		const tokenEnd = pos + raw.length;
 		if (raw.endsWith("\n\n")) {
@@ -1612,7 +1622,21 @@ export class Markdown implements Component {
 	// reference definitions, so each token's `raw` is a verbatim slice of `text`
 	// and the summed offsets address `text` exactly.
 	#freezeStablePrefix(text: string, tokens: Token[], opts: { preserveExisting: boolean }): void {
-		const frozen = stableBlockBoundary(text, 0, tokens);
+		// On the streaming-concat path (preserveExisting), tokens[0..prefixCount)
+		// ARE the previously frozen prefix and the text above it is byte-
+		// identical, so its boundary cannot move: re-walking those tokens every
+		// frame is pure overhead (O(prefix) per frame, O(n²) over a stream).
+		// Skip them and resume at the first tail token; `base` starts at the
+		// prefix length so accumulated offsets stay global. The cold full-lex
+		// path (preserveExisting: false) re-derives the whole stream, so it
+		// must keep walking from 0.
+		const skipPrefix = opts.preserveExisting ? (this.#streamPrefixTokens?.length ?? 0) : 0;
+		const frozen = stableBlockBoundary(
+			text,
+			skipPrefix > 0 ? (this.#streamPrefixText?.length ?? 0) : 0,
+			tokens,
+			skipPrefix,
+		);
 		if (frozen.count > 0) {
 			this.#streamPrefixText = text.slice(0, frozen.end);
 			this.#streamPrefixTokens = tokens.slice(0, frozen.count);
