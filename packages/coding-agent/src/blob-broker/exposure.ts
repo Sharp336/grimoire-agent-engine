@@ -285,23 +285,22 @@ async function spawnUrlTunnel(
 			// Log file not flushed yet; keep polling.
 		}
 		let readyUrl = scanLog(text);
-		if (readyUrl) return { proc, baseUrl: readyUrl };
 		if (proc.exitCode !== null) {
-			if (recoverPostExitUrl) {
-				// exitCode may become visible after the poll's read but before the
-				// child descriptor is fully drained. Read once more after exit so a
-				// short-lived supervised tunnel can still publish its URL.
-				await proc.exited;
-				try {
-					text = await Bun.file(logPath).text();
-				} catch {
-					// The diagnostic below remains authoritative when no log exists.
-				}
-				readyUrl = scanLog(text);
-				if (readyUrl) return { proc, baseUrl: readyUrl };
+			// exitCode may become visible after the poll's read but before the
+			// child descriptor is fully drained. Read once more after exit so a
+			// valid URL is not mistaken for a missing banner.
+			await proc.exited;
+			try {
+				text = await Bun.file(logPath).text();
+			} catch {
+				// The diagnostic below remains authoritative when no log exists.
 			}
-			throw new Error(`${argv[0]} exited with code ${proc.exitCode} before reporting a tunnel URL`);
+			readyUrl = scanLog(text);
+			if (recoverPostExitUrl && readyUrl) return { proc, baseUrl: readyUrl };
+			const lifecycle = readyUrl ? "after reporting a tunnel URL" : "before reporting a tunnel URL";
+			throw new Error(`${argv[0]} exited with code ${proc.exitCode} ${lifecycle}`);
 		}
+		if (readyUrl) return { proc, baseUrl: readyUrl };
 		await Bun.sleep(150);
 	}
 	killTunnelProcess(proc);
