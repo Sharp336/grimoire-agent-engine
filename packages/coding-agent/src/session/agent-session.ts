@@ -667,6 +667,7 @@ export class AgentSession {
 	// Cursor exec, TUI listeners) is held back. Without this, a client that resumes
 	// on `agent_end` can fire its next `prompt` before #promptWithMessage's finally
 	#promptGeneration = 0;
+	#deferredTerminalAdvisorReview: { generation: number; message: AgentMessage } | undefined = undefined;
 	#pendingAgentEndEmit: AgentSessionEvent | undefined;
 	#inFlightSettledCallbacks: Array<() => void | Promise<void>> = [];
 	#sessionStopContinuationCount = 0;
@@ -1246,6 +1247,24 @@ export class AgentSession {
 			}
 			this.#loopGuards.recordTurn(messages, context);
 			await this.#prewalk.advanceAtTurnEnd(messages, context);
+			if (signal?.aborted) return;
+			const compactBeforeGuidance =
+				this.settings.get("advisor.compactBeforeGuidance") && this.#advisors.isAdvisorActive();
+			if (compactBeforeGuidance && context?.willContinue) {
+				await this.#maintenance.maintainContextMidRun(messages, signal, context);
+				if (signal?.aborted) return;
+				await this.#advisors.onPrimaryTurnEnd(messages, true, signal);
+				return;
+			}
+			if (compactBeforeGuidance && context?.message.role === "assistant") {
+				if (context.message.stopReason !== "aborted" && context.message.stopReason !== "error") {
+					this.#deferredTerminalAdvisorReview = {
+						generation: this.#promptGeneration,
+						message: context.message,
+					};
+				}
+				return;
+			}
 			await this.#advisors.onPrimaryTurnEnd(messages, context?.willContinue, signal);
 			await this.#maintenance.maintainContextMidRun(messages, signal, context);
 		});
@@ -2875,6 +2894,7 @@ export class AgentSession {
 			// maintenance can emit agent_end, so preserve the state at settle entry.
 			const ttsrAbortPendingAtAgentEnd = this.#ttsr.abortPending;
 			const emitAgentEndNotification = async (options?: { willContinue?: boolean }) => {
+				await this.#deliverDeferredTerminalAdvisorReview(settledMessages, options?.willContinue);
 				this.#emitRunState("idle");
 				// Public agent_end is held out of the eager display pass and emitted
 				// here after maintenance routing, tagged isTerminal so subscribers can
@@ -3533,6 +3553,28 @@ export class AgentSession {
 			messages,
 			willContinue: options?.willContinue,
 		});
+	}
+
+	async #deliverDeferredTerminalAdvisorReview(
+		settledMessages: AgentMessage[],
+		willContinue: boolean | undefined,
+	): Promise<void> {
+		const deferred = this.#deferredTerminalAdvisorReview;
+		this.#deferredTerminalAdvisorReview = undefined;
+		if (
+			!deferred ||
+			deferred.generation !== this.#promptGeneration ||
+			!settledMessages.includes(deferred.message) ||
+			this.#abortInProgress ||
+			this.#isDisposed
+		) {
+			return;
+		}
+		await this.#advisors.onPrimaryTurnEnd(
+			[...this.agent.state.messages],
+			willContinue,
+			this.#postPromptTasksAbortController.signal,
+		);
 	}
 
 	/** @returns true when a hidden session_stop continuation turn was scheduled. */

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Advisor guidance can optionally wait for primary context maintenance before reviewing each completed turn.
+
 ## [18.0.3] - 2026-08-23
 
 ### Added
