@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Advisor context resets no longer retain an aborted in-flight review in the fresh advisor transcript.
+
 ## [18.0.3] - 2026-08-23
 
 ### Added

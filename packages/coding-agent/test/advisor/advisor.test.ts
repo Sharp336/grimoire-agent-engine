@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
-import { type AgentMessage, type AgentTelemetryConfig, Tokenizer } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentMessage, type AgentTelemetryConfig, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import type { TUI } from "@oh-my-pi/pi-tui";
 import {
@@ -4739,6 +4740,50 @@ describe("advisor", () => {
 			expect(promptInputs).toHaveLength(2);
 			expect(promptText(promptInputs[1])).toContain("new-conversation");
 			expect(promptText(promptInputs[1])).not.toContain("old-conversation");
+		});
+
+		it("clears real Agent state appended after an in-flight reset", async () => {
+			const firstPromptStarted = Promise.withResolvers<void>();
+			const mock = createMockModel({
+				responses: [
+					() => {
+						firstPromptStarted.resolve();
+						return { content: ["stale review"], delayMs: 60_000 };
+					},
+					{ content: ["fresh review"] },
+				],
+			});
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: mock.model, systemPrompt: [], tools: [], messages: [] },
+				streamFn: mock.stream,
+			});
+			const messages: AgentMessage[] = [{ role: "user", content: "old-conversation", timestamp: 1 } as AgentMessage];
+			const runtime = new AdvisorRuntime(agent, {
+				snapshotMessages: () => messages,
+				enqueueAdvice: () => {},
+			});
+
+			runtime.onTurnEnd(messages);
+			await firstPromptStarted.promise;
+			messages.splice(0, messages.length, {
+				role: "user",
+				content: "new-conversation",
+				timestamp: 2,
+			} as AgentMessage);
+			runtime.reset();
+			runtime.onTurnEnd(messages);
+
+			expect(await runtime.waitForCatchup(2_000, 1)).toBe(true);
+			expect(mock.calls).toHaveLength(2);
+			const replay = JSON.stringify(mock.calls[1]?.context.messages);
+			expect(replay).toContain("new-conversation");
+			expect(replay).not.toContain("old-conversation");
+			expect(replay).not.toContain("advisor reset");
+			expect(
+				agent.state.messages.some(message => message.role === "assistant" && message.stopReason === "aborted"),
+			).toBe(false);
+			expect(agent.state.error).toBeUndefined();
 		});
 
 		it("retries the interrupted batch after a session transition rolls back", async () => {
