@@ -24,9 +24,8 @@ import {
 import { createIrcMessageCard } from "../../tools/hub";
 import { formatStyledArtifactReference } from "../../tools/output-meta";
 import {
+	capPreviewLines,
 	DEFAULT_TERMINAL_PREVIEW_LINES,
-	formatExpandHint,
-	formatMoreItems,
 	replaceTabs,
 	shortenEmbeddedPaths,
 	TRUNCATE_LENGTHS,
@@ -164,16 +163,19 @@ export class AsyncProgressMessageComponent extends TranscriptBlock {
 				? [job.head, "[…progress truncated…]", job.tail].filter(part => part !== undefined).join("\n")
 				: (job.text ?? "");
 			const outputLines = preview.split("\n").filter(line => line.trim().length > 0);
-			const visibleLines = this.#expanded ? outputLines : outputLines.slice(-DEFAULT_TERMINAL_PREVIEW_LINES);
+			const rendered = outputLines.map(line =>
+				theme.fg(
+					"dim",
+					`  ${truncateToWidth(sanitizeAsyncProgressDisplayText(sanitizeText(line)), TRUNCATE_LENGTHS.LINE)}`,
+				),
+			);
+			const visibleLines = capPreviewLines(rendered, theme, {
+				max: DEFAULT_TERMINAL_PREVIEW_LINES,
+				expanded: this.#expanded,
+				prefix: "  ",
+			});
 			for (const line of visibleLines) {
-				const rendered = truncateToWidth(sanitizeAsyncProgressDisplayText(sanitizeText(line)), TRUNCATE_LENGTHS.LINE);
-				this.addChild(new Text(theme.fg("dim", `  ${rendered}`), 1, 0));
-			}
-			const hiddenLines = outputLines.length - visibleLines.length;
-			if (hiddenLines > 0) {
-				const hint = formatExpandHint(theme, this.#expanded, true);
-				const more = theme.fg("dim", `  ${formatMoreItems(hiddenLines, "line")}`);
-				this.addChild(new Text(`${more}${hint ? ` ${hint}` : ""}`, 1, 0));
+				this.addChild(new Text(line, 1, 0));
 			}
 			if ((job.truncated || (job.suppressedEvents ?? 0) > 0) && job.artifactId) {
 				this.addChild(new Text(`  ${formatStyledArtifactReference(job.artifactId, theme)}`, 1, 0));
@@ -182,6 +184,12 @@ export class AsyncProgressMessageComponent extends TranscriptBlock {
 	}
 }
 
+/**
+ * Render an `async-progress` custom message (bounded live output from
+ * background jobs) as a collapsible transcript block: latest lines behind an
+ * "… N earlier lines" marker, expandable with ctrl+o, hidden with the rest of
+ * tool activity when `display.hideToolActivity` is enabled.
+ */
 export function buildAsyncProgressBlock(message: CustomOrHookMessage): ToolActivityContainer {
 	return new ToolActivityContainer(new AsyncProgressMessageComponent(message));
 }

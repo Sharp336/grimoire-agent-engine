@@ -722,7 +722,7 @@ describe("async progress transcript rendering", () => {
 			expect(rendered).toContain("Background process progress job_42 (17m55s)");
 			expect(rendered).not.toContain("first hidden");
 			expect(rendered).toContain("visible 10");
-			expect(rendered).toContain("… 2 more lines");
+			expect(rendered).toContain("… 3 earlier lines");
 			expect(rendered).toContain("Ctrl+O");
 			expect(rendered).not.toContain("<system-notice>");
 			expect(rendered).not.toContain("<job-progress");
@@ -737,7 +737,7 @@ describe("async progress transcript rendering", () => {
 		const expandedReusableRender = Bun.stripANSI(reusable.container.render(120).join("\n"));
 		for (const rendered of [expandedLiveRender, expandedReusableRender]) {
 			expect(rendered).toContain("first hidden");
-			expect(rendered).not.toContain("more lines");
+			expect(rendered).not.toContain("earlier lines");
 			expect(rendered).not.toContain("Ctrl+O");
 		}
 	});

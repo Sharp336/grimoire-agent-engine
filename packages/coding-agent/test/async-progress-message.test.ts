@@ -267,16 +267,19 @@ describe("async progress messages", () => {
 		const collapsed = Bun.stripANSI(component.render(100).join("\n"));
 		expect(collapsed).not.toContain("first hidden");
 		expect(collapsed).not.toContain("second hidden");
-		expect(collapsed).toContain("visible 1");
+		expect(collapsed).not.toContain("visible 1\n");
 		expect(collapsed).toContain("visible 10");
-		expect(collapsed).toContain("… 2 more lines");
+		expect(collapsed).toContain("… 3 earlier lines");
 		expect(collapsed).toContain("Ctrl+O");
+		const markerIndex = collapsed.indexOf("… 3 earlier lines");
+		expect(markerIndex).toBeGreaterThan(-1);
+		expect(markerIndex).toBeLessThan(collapsed.indexOf("visible 2"));
 
 		component.setExpanded(true);
 		const expanded = Bun.stripANSI(component.render(100).join("\n"));
 		expect(expanded).toContain("first hidden");
 		expect(expanded).toContain("second hidden");
-		expect(expanded).not.toContain("more lines");
+		expect(expanded).not.toContain("earlier lines");
 		expect(expanded).not.toContain("Ctrl+O");
 	});
 
