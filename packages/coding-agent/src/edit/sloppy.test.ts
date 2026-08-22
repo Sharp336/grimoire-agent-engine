@@ -301,14 +301,22 @@ describe("sloppy v8", () => {
 		);
 	});
 
-	test("fails closed on a marker-less op that already matches the file", () => {
-		// A restated unchanged line asserts nothing; the merged dialect keeps the
-		// fail-closed separator diagnosis instead of silently skipping.
-		const content = "keep();\nconst limit = options.limit;\n";
+	test("returns the complete atomic payload when a marker-less operation needs a rewrite", () => {
+		const content = "const a = 1;\nkeep();\n";
+		const input = "§\nconst a = ⟪1│2⟫;\n§\nkeep();";
+		let message = "";
 
-		expect(() =>
-			applySloppy(content, "§\nkeep();\n§\nconst limit = options⟪.│?.⟫limit;", { path: "i.ts", notes: [] }),
-		).toThrow(/needs »/);
+		try {
+			applySloppy(content, input, { path: "i.ts", notes: [] });
+		} catch (error) {
+			message = error instanceof Error ? error.message : String(error);
+		}
+
+		expect(message).toContain("Operation 2 needs ».");
+		expect(message.match(/Copy-ready corrected payload/g)).toHaveLength(1);
+		expect(message).toContain(
+			"Copy-ready corrected payload (fill in the new text):\n§i.ts\nconst a = ⟪1│2⟫;\n§\nkeep();\n»\n<new text>",
+		);
 	});
 
 	test("collapses back-to-back duplicates when desired text matches both copies", () => {
@@ -376,6 +384,55 @@ describe("sloppy v8", () => {
 		const input = [M.open, " alpha();", "+inserted();", "@@", "-gamma();", "+delta();"].join("\n");
 
 		expect(variant.apply(content, input, context)).toBe("alpha();\ninserted();\nbeta();\ndelta();\n");
+	});
+	test("keeps a diff-shaped body away from missing-separator recovery", () => {
+		// Regression: a uniquely matching context prefix let missing-» recovery
+		// adopt the collapsed remainder as a rewrite — deleting the prefix,
+		// writing the diff context gap `…` into the file literally, and leaving
+		// the original block in place as a duplicate.
+		const content = [
+			"fn load() {",
+			"\tlet mut items = Vec::new();",
+			"\tfor entry in dir {",
+			"\t\tlet parsed = entry.parse();",
+			"\t\titems.push(parsed);",
+			"\t}",
+			"\titems.sort();",
+			"\tOk(items)",
+			"}",
+			"",
+		].join("\n");
+		const input = [
+			M.open,
+			"fn load() {",
+			"-\tlet mut items = Vec::new();",
+			"+\tlet mut items = Vec::new();",
+			"\tfor entry in dir {",
+			M.gap,
+			"-\t\titems.push(parsed);",
+			"+\t\titems.push((entry.name(), parsed));",
+			"\t}",
+			"-\titems.sort();",
+			"-\tOk(items)",
+			"+\titems.sort_by_key(|(name, _)| name.clone());",
+			"+\tOk(items.into_iter().map(|(_, item)| item).collect())",
+			"}",
+		].join("\n");
+
+		expect(variant.apply(content, input, context)).toBe(
+			[
+				"fn load() {",
+				"\tlet mut items = Vec::new();",
+				"\tfor entry in dir {",
+				"\t\tlet parsed = entry.parse();",
+				"\t\titems.push((entry.name(), parsed));",
+				"\t}",
+				"\titems.sort_by_key(|(name, _)| name.clone());",
+				"\tOk(items.into_iter().map(|(_, item)| item).collect())",
+				"}",
+				"",
+			].join("\n"),
+		);
 	});
 
 	test("clamps a bare desired selection at line end to its own line", () => {
@@ -1002,6 +1059,16 @@ describe("sloppy v8", () => {
 		expect(variant.apply(content, operation(pattern, rewrite), context)).toBe(
 			"if (newA) {\n  keep();\n  return newB;\n}\n",
 		);
+	});
+
+	test("fails closed on a whole-line rewrite gap when the pattern captured none", () => {
+		// Regression: an explicit » rewrite with `…` context elision against a
+		// gapless MATCH wrote literal `…` lines into the file and duplicated the
+		// blocks the gaps had elided.
+		const content = "use std::time::Duration;\n\nfn combined() {}\n";
+		const input = operation("use std::time::Duration;", "use std::{sync::Arc, time::Duration};\n…\nfn combined() {}");
+
+		expect(() => variant.apply(content, input, context)).toThrow(/whole-line … with no MATCH gap to re-emit/);
 	});
 
 	test("fails closed when a multi-selection rewrite proves neither interpretation", () => {

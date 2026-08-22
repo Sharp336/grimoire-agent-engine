@@ -1,9 +1,11 @@
 import { getProjectDir, logger } from "@oh-my-pi/pi-utils";
 import {
+	type AutocompleteItem,
 	type AutocompleteProvider,
 	findLeadingSlashCommandStart,
 	findTrailingSlashCommandStart,
 	midPromptSkillTokenMatches,
+	SKILL_NAMESPACE,
 } from "../autocomplete";
 import { BracketedPasteHandler, decodeReencodedPasteControls } from "../bracketed-paste";
 import { canonicalKeyId, getKeybindings, type KeybindingsManager } from "../keybindings";
@@ -460,6 +462,7 @@ export interface EditorTextAssistProvider {
 }
 
 type HistoryCursorAnchor = "start" | "end";
+type AutocompleteRequest = { kind: "regular"; explicitTab: boolean } | { kind: "force" };
 
 export class Editor implements Component, Focusable {
 	#state: EditorState = {
@@ -528,6 +531,10 @@ export class Editor implements Component, Focusable {
 		| undefined;
 	#autocompletePrefix: string = "";
 	#autocompleteRequestId: number = 0;
+	#autocompletePendingRequest: AutocompleteRequest | undefined;
+	#autocompleteRequestRunning = false;
+	#autocompleteAbortController: AbortController | undefined;
+	#autocompleteWaiters: Array<() => void> = [];
 	#autocompleteMaxVisible: number = 10;
 	onAutocompleteUpdate?: () => void;
 	/** Called after an async text-assist result mutates the document outside an input event, so hosts can schedule a repaint. */
@@ -734,6 +741,7 @@ export class Editor implements Component, Focusable {
 		}
 	}
 
+	/** Loads persistent prompts for navigation and enables future persistence. */
 	setHistoryStorage(storage: HistoryStorage): void {
 		this.#historyStorage = storage;
 		const recent = storage.getRecent(100);
@@ -748,19 +756,20 @@ export class Editor implements Component, Focusable {
 	addToHistory(text: string): void {
 		const trimmed = text.trim();
 		if (!trimmed) return;
-		// Don't add consecutive duplicates
-		if (this.#history.length > 0 && this.#history[0] === trimmed) return;
-		this.#history.unshift(trimmed);
-		// Limit history size
-		if (this.#history.length > 100) {
-			this.#history.pop();
-		}
 
 		const stor = this.#historyStorage;
 		if (stor) {
 			stor.add(trimmed, getProjectDir()).catch(error => {
 				logger.error("HistoryStorage add failed", { error: String(error) });
 			});
+		}
+
+		// Don't add consecutive duplicates
+		if (this.#history.length > 0 && this.#history[0] === trimmed) return;
+		this.#history.unshift(trimmed);
+		// Limit history size
+		if (this.#history.length > 100) {
+			this.#history.pop();
 		}
 	}
 
@@ -1322,6 +1331,11 @@ export class Editor implements Component, Focusable {
 		// lookup instead of re-parsing `data` per probe (~35 probes per key).
 		const parsedKey = parseKey(data);
 		const canonical = parsedKey === undefined ? undefined : canonicalKeyId(parsedKey);
+		// Input wins over a pending provider lookup. The next completable edit
+		// queues one fresh request after the stale request acknowledges abort.
+		if (this.#autocompleteRequestRunning && this.#autocompleteState === null) {
+			this.#invalidateAutocompleteRequests();
+		}
 
 		// Handle character jump mode (awaiting next character to jump to)
 		if (this.#jumpMode !== null) {
@@ -1476,7 +1490,8 @@ export class Editor implements Component, Focusable {
 					(kb.matchesCanonical(canonical, "tui.input.submit") || data === "\n") &&
 					findLeadingSlashCommandStart(this.#autocompletePrefix) !== null &&
 					this.#isInSubmittedSlashCommandContext() &&
-					!this.#selectedCompletionIsPath()
+					!this.#selectedCompletionIsPath() &&
+					!this.#selectedCompletionIsSkillNamespace()
 				) {
 					const selected = this.#autocompleteList.getSelectedItem();
 					// Check for stale autocomplete state due to debounce
@@ -1515,6 +1530,7 @@ export class Editor implements Component, Focusable {
 						this.#cancelAutocomplete();
 					} else {
 						if (selected && this.#autocompleteProvider) {
+							const shouldChainSlashCommandAutocomplete = this.#isSlashCommandNameAutocompleteSelection();
 							const result = this.#autocompleteProvider.applyCompletion(
 								this.#state.lines,
 								this.#state.cursorLine,
@@ -1535,6 +1551,9 @@ export class Editor implements Component, Focusable {
 							}
 
 							result.onApplied?.();
+							if (shouldChainSlashCommandAutocomplete && this.#isCompletedSlashCommandAtCursor()) {
+								void this.#tryTriggerAutocomplete();
+							}
 						}
 						return;
 					}
@@ -3363,6 +3382,14 @@ export class Editor implements Component, Focusable {
 		if (!selected) return false;
 		return selected.value.startsWith("/") || selected.value.startsWith('"');
 	}
+	/**
+	 * Whether the current popup selection is the collapsed `/skill:` namespace
+	 * row. Accepting it expands the namespace (insert `/skill:`, reopen the
+	 * popup) instead of submitting, since the bare namespace is not a command.
+	 */
+	#selectedCompletionIsSkillNamespace(): boolean {
+		return this.#autocompleteList?.getSelectedItem()?.value === SKILL_NAMESPACE;
+	}
 
 	#isSlashCommandNameAutocompleteSelection(): boolean {
 		if (this.#autocompleteState !== "regular") {
@@ -3383,7 +3410,10 @@ export class Editor implements Component, Focusable {
 		}
 
 		const textBeforeCursor = currentLine.slice(0, this.#state.cursorCol).trimStart();
-		return this.#isInSubmittedSlashCommandContext() && /^\/\S+ $/.test(textBeforeCursor);
+		return (
+			this.#isInSubmittedSlashCommandContext() &&
+			(/^\/\S+ $/.test(textBeforeCursor) || textBeforeCursor === `/${SKILL_NAMESPACE}`)
+		);
 	}
 
 	// Autocomplete methods
@@ -3400,39 +3430,18 @@ export class Editor implements Component, Focusable {
 
 	async #tryTriggerAutocomplete(explicitTab: boolean = false): Promise<void> {
 		if (!this.#autocompleteProvider) return;
-		// Check if we should trigger file completion on Tab
-		if (explicitTab) {
-			const shouldTrigger =
-				!this.#autocompleteProvider.shouldTriggerFileCompletion ||
-				this.#autocompleteProvider.shouldTriggerFileCompletion(
-					this.#state.lines,
-					this.#state.cursorLine,
-					this.#state.cursorCol,
-				);
-			if (!shouldTrigger) {
-				return;
-			}
+		if (
+			explicitTab &&
+			this.#autocompleteProvider.shouldTriggerFileCompletion &&
+			!this.#autocompleteProvider.shouldTriggerFileCompletion(
+				this.#state.lines,
+				this.#state.cursorLine,
+				this.#state.cursorCol,
+			)
+		) {
+			return;
 		}
-
-		const requestId = ++this.#autocompleteRequestId;
-
-		const suggestions = await this.#autocompleteProvider.getSuggestions(
-			this.#state.lines,
-			this.#state.cursorLine,
-			this.#state.cursorCol,
-		);
-		if (requestId !== this.#autocompleteRequestId) return;
-
-		if (suggestions && Array.isArray(suggestions.items) && suggestions.items.length > 0) {
-			this.#autocompletePrefix = suggestions.prefix;
-			this.#autocompleteList = this.#createAutocompleteList(suggestions.prefix, suggestions.items);
-			this.#autocompleteState = "regular";
-			this.#widthEpochRevision++;
-			this.onAutocompleteUpdate?.();
-		} else {
-			this.#cancelAutocomplete();
-			this.onAutocompleteUpdate?.();
-		}
+		await this.#queueAutocompleteRequest({ kind: "regular", explicitTab });
 	}
 	#createAutocompleteList(
 		prefix: string,
@@ -3534,39 +3543,17 @@ export class Editor implements Component, Focusable {
 
 	async #forceFileAutocomplete(): Promise<void> {
 		if (!this.#autocompleteProvider) return;
-
-		// File-aware providers expose getForceFileSuggestions; slash-only ones fall back to regular completion.
-		const getForceFileSuggestions = this.#autocompleteProvider.getForceFileSuggestions;
-		if (typeof getForceFileSuggestions !== "function") {
+		if (typeof this.#autocompleteProvider.getForceFileSuggestions !== "function") {
 			await this.#tryTriggerAutocomplete(true);
 			return;
 		}
-
-		const requestId = ++this.#autocompleteRequestId;
-		const suggestions = await getForceFileSuggestions.call(
-			this.#autocompleteProvider,
-			this.#state.lines,
-			this.#state.cursorLine,
-			this.#state.cursorCol,
-		);
-		if (requestId !== this.#autocompleteRequestId) return;
-
-		if (suggestions && Array.isArray(suggestions.items) && suggestions.items.length > 0) {
-			this.#autocompletePrefix = suggestions.prefix;
-			this.#autocompleteList = this.#createAutocompleteList(suggestions.prefix, suggestions.items);
-			this.#autocompleteState = "force";
-			this.#widthEpochRevision++;
-			this.onAutocompleteUpdate?.();
-		} else {
-			this.#cancelAutocomplete();
-			this.onAutocompleteUpdate?.();
-		}
+		await this.#queueAutocompleteRequest({ kind: "force" });
 	}
 
 	#cancelAutocomplete(notifyCancel: boolean = false): void {
 		const wasAutocompleting = this.#autocompleteState !== null;
 		this.#clearAutocompleteTimeout();
-		this.#autocompleteRequestId += 1;
+		this.#invalidateAutocompleteRequests();
 		this.#autocompleteState = null;
 		this.#autocompleteList = undefined;
 		this.#textAssistReplacement = undefined;
@@ -3582,34 +3569,98 @@ export class Editor implements Component, Focusable {
 	}
 
 	async #updateAutocomplete(): Promise<void> {
-		if (!this.#autocompleteState || !this.#autocompleteProvider) return;
-		if (this.#autocompleteState === "assist") return;
-
-		// In force mode, use forceFileAutocomplete to get suggestions
+		if (!this.#autocompleteState || !this.#autocompleteProvider || this.#autocompleteState === "assist") return;
 		if (this.#autocompleteState === "force") {
-			this.#forceFileAutocomplete();
+			await this.#forceFileAutocomplete();
+			return;
+		}
+		await this.#queueAutocompleteRequest({ kind: "regular", explicitTab: false });
+	}
+
+	#queueAutocompleteRequest(request: AutocompleteRequest): Promise<void> {
+		const waiter = Promise.withResolvers<void>();
+		this.#autocompleteWaiters.push(waiter.resolve);
+		this.#autocompletePendingRequest = request;
+		this.#autocompleteRequestId++;
+		this.#autocompleteAbortController?.abort();
+		if (!this.#autocompleteRequestRunning) void this.#drainAutocompleteRequests();
+		return waiter.promise;
+	}
+
+	async #drainAutocompleteRequests(): Promise<void> {
+		if (this.#autocompleteRequestRunning) return;
+		this.#autocompleteRequestRunning = true;
+		try {
+			while (this.#autocompletePendingRequest) {
+				const request = this.#autocompletePendingRequest;
+				this.#autocompletePendingRequest = undefined;
+				const requestId = this.#autocompleteRequestId;
+				const controller = new AbortController();
+				this.#autocompleteAbortController = controller;
+				await this.#runAutocompleteRequest(request, requestId, controller.signal);
+				if (this.#autocompleteAbortController === controller) {
+					this.#autocompleteAbortController = undefined;
+				}
+			}
+		} finally {
+			this.#autocompleteRequestRunning = false;
+			const waiters = this.#autocompleteWaiters.splice(0);
+			for (const resolve of waiters) resolve();
+		}
+	}
+
+	async #runAutocompleteRequest(request: AutocompleteRequest, requestId: number, signal: AbortSignal): Promise<void> {
+		const provider = this.#autocompleteProvider;
+		if (!provider) return;
+		const lines = [...this.#state.lines];
+		const cursorLine = this.#state.cursorLine;
+		const cursorCol = this.#state.cursorCol;
+		let suggestions: { items: AutocompleteItem[]; prefix: string } | null;
+		try {
+			if (request.kind === "force") {
+				const getForceFileSuggestions = provider.getForceFileSuggestions;
+				if (!getForceFileSuggestions) return;
+				suggestions = await getForceFileSuggestions.call(provider, lines, cursorLine, cursorCol, signal);
+			} else {
+				suggestions = await provider.getSuggestions(lines, cursorLine, cursorCol, signal);
+			}
+		} catch (error) {
+			if (!signal.aborted && requestId === this.#autocompleteRequestId) {
+				logger.debug("Autocomplete provider failed", { error: String(error) });
+				this.#cancelAutocomplete();
+				this.onAutocompleteUpdate?.();
+			}
+			return;
+		}
+		if (
+			signal.aborted ||
+			requestId !== this.#autocompleteRequestId ||
+			cursorLine !== this.#state.cursorLine ||
+			cursorCol !== this.#state.cursorCol ||
+			lines.length !== this.#state.lines.length ||
+			lines.some((line, index) => line !== this.#state.lines[index])
+		) {
 			return;
 		}
 
-		const requestId = ++this.#autocompleteRequestId;
-
-		const suggestions = await this.#autocompleteProvider.getSuggestions(
-			this.#state.lines,
-			this.#state.cursorLine,
-			this.#state.cursorCol,
-		);
-		if (requestId !== this.#autocompleteRequestId) return;
-
 		if (suggestions && Array.isArray(suggestions.items) && suggestions.items.length > 0) {
 			this.#autocompletePrefix = suggestions.prefix;
-			// Always create new SelectList to ensure update
 			this.#autocompleteList = this.#createAutocompleteList(suggestions.prefix, suggestions.items);
+			this.#autocompleteState = request.kind === "force" ? "force" : "regular";
 			this.#widthEpochRevision++;
 			this.onAutocompleteUpdate?.();
-		} else {
-			this.#cancelAutocomplete();
-			this.onAutocompleteUpdate?.();
+			return;
 		}
+		this.#cancelAutocomplete();
+		this.onAutocompleteUpdate?.();
+	}
+
+	#invalidateAutocompleteRequests(): void {
+		this.#autocompletePendingRequest = undefined;
+		this.#autocompleteRequestId++;
+		this.#autocompleteAbortController?.abort();
+		const waiters = this.#autocompleteWaiters.splice(0);
+		for (const resolve of waiters) resolve();
 	}
 
 	#debouncedUpdateAutocomplete(): void {
@@ -3617,7 +3668,7 @@ export class Editor implements Component, Focusable {
 			clearTimeout(this.#autocompleteTimeout);
 		}
 		this.#autocompleteTimeout = setTimeout(() => {
-			this.#updateAutocomplete();
+			void this.#updateAutocomplete();
 			this.#autocompleteTimeout = undefined;
 		}, 100);
 	}
