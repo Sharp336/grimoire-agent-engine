@@ -148,15 +148,53 @@ export function resolveModelThinking<TApi extends Api>(
 ): ThinkingConfig | undefined {
 	if (!spec.reasoning) return undefined;
 	if (omitsWireReasoningEffort(spec.api, compat)) return undefined;
+	let thinking: ThinkingConfig;
 	if (spec.thinking && Array.isArray(spec.thinking.efforts) && spec.thinking.efforts.length > 0) {
-		return fillThinkingWireDefaults(spec, compat, spec.thinking);
+		thinking = fillThinkingWireDefaults(spec, compat, spec.thinking);
+	} else {
+		// Friendli: discovery is authoritative. `mapFriendliThinking` gives
+		// effort models their API ladder from `type: "effort"`; toggle-only
+		// models (e.g. GLM-4.5) are left with `spec.thinking === undefined`
+		// by the generator deliberately — a synthetic effort tier baked into
+		// `spec.thinking` would leak into `friendliHasEffortSurface`
+		// (compat/openai.ts, computed BEFORE this function runs) and make
+		// `buildOpenAICompat` misclassify the model as having a real effort
+		// surface, emitting a top-level `reasoning_effort` the endpoint
+		// rejects. This early-return fires for a Friendli model with
+		// `spec.thinking === undefined` AND no identity-known effort ladder
+		// — i.e. the API reported reasoning with neither a `type: "effort"`
+		// entry nor a GLM-5.2 identity match.
+		//
+		// Because `compat` is already fully resolved by the time this
+		// function runs (`buildModel` calls `buildCompat` first), it's safe
+		// to synthesize a single-tier `ThinkingConfig` HERE instead of on
+		// `spec.thinking` — `friendliHasEffortSurface` has already been
+		// computed and cannot see it. The synthetic tier only exists to give
+		// `collapseQwenTemplateBinaryThinking` a non-empty `efforts` array to
+		// collapse to 1, which is what makes the on/off toggle observable to
+		// `getSupportedEfforts`/the picker while `compat.supportsReasoningEffort`
+		// stays false and `reasoningDisableMode: "qwen-template-false"` drives
+		// `chat_template_kwargs.enable_thinking` on the wire.
+		//
+		// A custom provider pointing at Friendli with GLM-5.2 but no
+		// `thinking` block is identity-known → getModelDefinedEfforts returns
+		// HIGH_MAX → fall through to deriveThinking instead of this branch.
+		if (modelMatchesHost(spec, "friendli") && spec.thinking === undefined) {
+			if (getModelDefinedEfforts(spec, compat) === undefined) {
+				if (isQwenTemplateBinaryThinking(spec.api, compat)) {
+					return { mode: "effort", efforts: [Effort.High] };
+				}
+				return undefined;
+			}
+		}
+		// Cascade selects effort only by routing to a sibling model id, so a
+		// Devin model with no explicit routed thinking has no controllable
+		// surface — never fabricate an effort ladder from identity.
+		if ((compat as ResolvedDevinCompat | undefined)?.trustExplicitThinkingOnly === true) return undefined;
+		// Empty/malformed explicit metadata is treated as absent — infer instead.
+		thinking = deriveThinking(spec, compat);
 	}
-	// Cascade selects effort only by routing to a sibling model id, so a Devin
-	// model with no explicit routed thinking has no controllable surface —
-	// never fabricate an effort ladder from identity.
-	if ((compat as ResolvedDevinCompat | undefined)?.trustExplicitThinkingOnly === true) return undefined;
-	// Empty/malformed explicit metadata is treated as absent — infer instead.
-	return deriveThinking(spec, compat);
+	return collapseQwenTemplateBinaryThinking(thinking, spec, compat);
 }
 
 /**
@@ -252,13 +290,60 @@ export function deriveThinking<TApi extends Api>(spec: ModelSpec<TApi>, compat: 
  * (xAI Grok off the `isGrokReasoningEffortCapable` allowlist: grok-build,
  * grok-4.20-0309-reasoning). openai-completions keeps its thinking config even
  * without effort support — binary thinking formats (zai/qwen) drive reasoning
- * through other request fields.
+ * through other request fields, and qwen-chat-template models whose compat
+ * suppresses `reasoning_effort` collapse to a binary `enable_thinking` toggle
+ * in `collapseQwenTemplateBinaryThinking` rather than dropping thinking here.
  */
 function omitsWireReasoningEffort(api: Api, compat: CompatOf<Api>): boolean {
-	if (api !== "openai-responses" && api !== "openai-codex-responses" && api !== "azure-openai-responses") {
-		return false;
+	if (api === "openai-responses" || api === "openai-codex-responses" || api === "azure-openai-responses") {
+		return (compat as ResolvedOpenAIResponsesCompat | undefined)?.supportsReasoningEffort === false;
 	}
-	return (compat as ResolvedOpenAIResponsesCompat | undefined)?.supportsReasoningEffort === false;
+	return false;
+}
+
+/**
+ * openai-completions qwen-chat-template whose compat suppresses
+ * `reasoning_effort` (`omitReasoningEffort: true`, e.g. NVIDIA NIM). The wire
+ * body carries only the binary `chat_template_kwargs.enable_thinking` toggle,
+ * so every effort tier produces an identical body — the only tier-specific
+ * field (`reasoning_effort`) is never emitted. Friendli's GLM-5.2 route keeps
+ * `omitReasoningEffort: false` (it accepts `reasoning_effort`), so it stays on
+ * the multi-tier path and is not detected here.
+ */
+function isQwenTemplateBinaryThinking(api: Api, compat: CompatOf<Api>): boolean {
+	if (api !== "openai-completions" && api !== "openrouter") return false;
+	const resolved = compat as ResolvedOpenAICompat | undefined;
+	return resolved?.thinkingFormat === "qwen-chat-template" && resolved?.omitReasoningEffort === true;
+}
+
+/**
+ * Collapse the resolved effort ladder to a single binary tier for
+ * qwen-chat-template models whose compat suppresses `reasoning_effort`. The
+ * wire exposes only `chat_template_kwargs.enable_thinking` (true/false), so
+ * the picker should offer one binary on/off control rather than the bundled
+ * multi-tier ladder (whose tiers are indistinguishable on the wire).
+ *
+ * Without this collapse, `resolveModelThinking` would have to drop thinking
+ * entirely to avoid the indistinguishable tiers, which forces
+ * `enable_thinking: false` on every request and leaves users unable to enable
+ * reasoning. The single tier is the model's `defaultLevel` when present, else
+ * the highest bundled effort.
+ */
+function collapseQwenTemplateBinaryThinking<TApi extends Api>(
+	thinking: ThinkingConfig,
+	spec: ModelSpec<TApi>,
+	compat: CompatOf<TApi>,
+): ThinkingConfig {
+	if (!isQwenTemplateBinaryThinking(spec.api, compat)) return thinking;
+	if (thinking.efforts.length <= 1) return thinking;
+	const tier = thinking.defaultLevel ?? thinking.efforts[thinking.efforts.length - 1];
+	const collapsed: ThinkingConfig = { ...thinking, efforts: [tier] };
+	// The wire carries only the binary `enable_thinking` toggle
+	// (`omitReasoningEffort` suppresses `reasoning_effort`), so the per-tier
+	// `effortMap` is no longer consulted. Drop it rather than keep a stale
+	// multi-tier map pointing at tiers the collapsed ladder no longer exposes.
+	delete collapsed.effortMap;
+	return collapsed;
 }
 
 function inferEffortMap<TApi extends Api>(
@@ -329,7 +414,17 @@ function getModelDefinedEfforts<TApi extends Api>(
 		// impliesMandatoryReasoning), and the default effort is `max`.
 		return LOW_HIGH_MAX_REASONING_EFFORTS;
 	}
-	if (isGlm52ReasoningEffortModelId(spec.id)) {
+	const isFriendliHost = modelMatchesHost(spec, "friendli");
+	// Friendli: `thinking.efforts` is resolved at discovery time from
+	// `/v1/models` `reasoning_options` (`type: "effort"`), or from the
+	// static seed for GLM-5.2's offline fallback. When present it is the
+	// authoritative effort ladder — no identity-based derivation needed.
+	if (isFriendliHost && spec.reasoning && spec.thinking?.efforts?.length) {
+		return spec.thinking.efforts;
+	}
+	// Friendli serves GLM under uppercase ids (`zai-org/GLM-5.2`); the
+	// caseInsensitive parser is scoped to this code path only.
+	if (isGlm52ReasoningEffortModelId(isFriendliHost ? spec.id.toLowerCase() : spec.id)) {
 		// GLM-5.2's reasoning_effort dialect is host-specific (verified against
 		// live endpoints):
 		//   - Z.ai/Zhipu ("zai" dialect) expose only high/max ("none" is the
@@ -348,7 +443,8 @@ function getModelDefinedEfforts<TApi extends Api>(
 			isZaiThinkingFormat(compat) ||
 			isAnthropicMessagesGlm52ReasoningEffortModel(spec) ||
 			isOllamaCloudGlm52ReasoningEffortModel(spec) ||
-			spec.provider === "baseten"
+			spec.provider === "baseten" ||
+			isFriendliHost
 		) {
 			return HIGH_MAX_REASONING_EFFORTS;
 		}

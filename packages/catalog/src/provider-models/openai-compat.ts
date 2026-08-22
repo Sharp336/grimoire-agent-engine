@@ -34,7 +34,15 @@ import type {
 	Provider,
 	ThinkingConfig,
 } from "../types";
-import { discoveryFetch, isAnthropicOAuthToken, isRecord, toBoolean, toNumber, toPositiveNumber } from "../utils";
+import {
+	discoveryFetch,
+	isAnthropicOAuthToken,
+	isRecord,
+	toBoolean,
+	toNumber,
+	toPositiveNumber,
+	toPositiveNumberOrNull,
+} from "../utils";
 import { ALIBABA_TOKEN_PLAN_BASE_URL, parseAlibabaTokenPlanCredential } from "../wire/alibaba-token-plan";
 import { coreWeaveProjectHeaders } from "../wire/coreweave";
 import {
@@ -2277,6 +2285,201 @@ export function fireworksModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 7.55 FriendliAI
+// ---------------------------------------------------------------------------
+
+/**
+ * Bundled seed for FriendliAI. Generation has no `FRIENDLI_API_KEY`, so a regen
+ * without credentials would leave the provider slice empty and the declared
+ * `defaultModel` unresolvable on a fresh install before the async runtime
+ * discovery fires. Live `/v1/models` discovery is authoritative for the model
+ * ID set and overrides context/max-token limits.
+ */
+export const FRIENDLI_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
+	{
+		id: "zai-org/GLM-5.2",
+		name: "GLM-5.2",
+		api: "openai-completions",
+		provider: "friendli",
+		baseUrl: "https://api.friendli.ai/serverless/v1",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 },
+		contextWindow: 1048576,
+		maxTokens: 1048576,
+		thinking: { mode: "effort", efforts: [Effort.High, Effort.Max] },
+	},
+];
+
+/**
+ * Derive `thinking` from Friendli `/v1/models` `reasoning_options`.
+ *
+ * The API returns `reasoning_options` as a coexisting array of toggle,
+ * effort, and budget_tokens entries. Only `type: "effort"` resolves to an
+ * effort ladder; the rest describe the wire surface but don't determine
+ * the user-facing effort tiers. When the API does not expose
+ * `type: "effort"` for a model, fall back to the reference's `thinking`
+ * — but only when the reference is from Friendli's own bundled seed
+ * (`provider === "friendli"`). A cross-provider global reference (e.g.
+ * an OpenRouter or Hugging Face entry sharing the same model id) may
+ * advertise effort tiers the Friendli endpoint rejects, so it must never
+ * be borrowed.
+ *
+ * When the API exposes only a `type: "toggle"` entry (no effort ladder),
+ * the endpoint still advertises the `enable_thinking` binary toggle. Give
+ * the model a single-tier thinking config so the binary-collapse path
+ * (`collapseQwenTemplateBinaryThinking`) exposes an on/off control and the
+ * `qwen-template-false` disable mode can emit `enable_thinking: false` on
+ * an explicit disable. Without it, `thinking` is undefined — the picker
+ * offers no control and callers can neither enable nor disable reasoning,
+ * even though the endpoint supports the toggle.
+ */
+function mapFriendliThinking(
+	reasoning: boolean,
+	reasoningOptions: unknown,
+	reference: ModelSpec<"openai-completions"> | undefined,
+): ThinkingConfig | undefined {
+	if (!reasoning) return undefined;
+	if (Array.isArray(reasoningOptions)) {
+		const effortOption = reasoningOptions.find(
+			(opt): opt is { type: "effort"; values: unknown } => isRecord(opt) && opt.type === "effort",
+		);
+		if (effortOption && Array.isArray(effortOption.values)) {
+			const efforts = THINKING_EFFORTS.filter(effort => (effortOption.values as readonly string[]).includes(effort));
+			if (efforts.length > 0) {
+				return { mode: "effort", efforts };
+			}
+		}
+	}
+	// The API didn't expose `type: "effort"` for this model. Fall back to the
+	// reference's `thinking` first — but only when the reference is from
+	// Friendli's own bundled seed (`provider === "friendli"`). Pre-rollout,
+	// the static seed's effort ladder (e.g. GLM-5.2's high/max) is the
+	// authoritative surface, and downgrading it to a binary toggle would lose
+	// the effort tiers the endpoint accepts alongside the template toggle.
+	if (reference?.provider === "friendli" && reference.thinking) {
+		return reference.thinking;
+	}
+	// No Friendli reference and no `type: "effort"`. A `type: "toggle"`
+	// entry advertises the binary `enable_thinking` control, but returning
+	// a synthetic effort tier here would misclassify the model as having an
+	// effort surface in `buildOpenAICompat` and emit top-level
+	// `reasoning_effort`, which toggle-only models reject. Leave `thinking`
+	// undefined — `reasoning: true` + `qwen-template-false` still drives
+	// `enable_thinking: true/false` on the wire, and
+	// `supportsReasoningEffort: false` keeps `reasoning_effort` suppressed.
+	return undefined;
+}
+
+export interface FriendliModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+const FRIENDLI_DEFAULT_BASE_URL = "https://api.friendli.ai/serverless/v1";
+
+export function friendliModelManagerOptions(
+	config?: FriendliModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? FRIENDLI_DEFAULT_BASE_URL;
+	const resolveReference = createReferenceResolver(createBundledReferenceMap<"openai-completions">("friendli"));
+	return {
+		providerId: "friendli",
+		dynamicModelsAuthoritative: true,
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "friendli",
+					baseUrl,
+					apiKey,
+					mapModel: (entry, defaults) => {
+						const reference = resolveReference(defaults.id);
+						const raw = entry as Record<string, unknown> & {
+							context_length?: unknown;
+							max_completion_tokens?: unknown;
+							pricing?: Record<string, unknown>;
+							functionality?: Record<string, unknown>;
+							reasoning?: unknown;
+							reasoning_options?: unknown;
+							input_modalities?: unknown;
+							interleaved?: unknown;
+						};
+
+						const contextWindow = toPositiveNumber(
+							raw.context_length,
+							reference?.contextWindow ?? defaults.contextWindow,
+						);
+						const maxTokens = toPositiveNumber(
+							raw.max_completion_tokens,
+							reference?.maxTokens ?? defaults.maxTokens,
+						);
+
+						const pricing = raw.pricing ?? {};
+						const refCost = reference?.cost;
+						// Friendli's `pricing.*` fields are per-token USD strings, so a parsed
+						// API price is scaled by 1e6 to reach the per-million-token unit the
+						// catalog stores. The reference fallback (`refCost`) is already in
+						// per-million units (the seeded GLM-5.2 carries 0.6/2.2), so it must
+						// pass through unscaled — the unconditional multiplier previously
+						// turned the fallback into 600000/2200000. Apply the multiplier only
+						// to a parsed API price and fall back to the reference afterward.
+						const apiInput = toPositiveNumberOrNull(pricing.input);
+						const apiOutput = toPositiveNumberOrNull(pricing.output);
+						const apiCacheRead = toPositiveNumberOrNull(pricing.input_cache_read);
+						const apiCacheWrite = toPositiveNumberOrNull(pricing.cache_write);
+						const cost = {
+							input: apiInput !== null ? apiInput * 1_000_000 : (refCost?.input ?? 0),
+							output: apiOutput !== null ? apiOutput * 1_000_000 : (refCost?.output ?? 0),
+							cacheRead: apiCacheRead !== null ? apiCacheRead * 1_000_000 : (refCost?.cacheRead ?? 0),
+							cacheWrite: apiCacheWrite !== null ? apiCacheWrite * 1_000_000 : (refCost?.cacheWrite ?? 0),
+						};
+
+						const functionality = raw.functionality ?? {};
+						const toolCallFlag = toBoolean(functionality.tool_call);
+						// Explicit tool_call: false → supportsTools: false.
+						// Explicit tool_call: true → supportsTools: true (overrides a
+						// cross-provider reference's host-specific false).
+						// Absent → defer to reference/baseModel.
+						const supportsTools = toolCallFlag === false ? false : toolCallFlag === true ? true : undefined;
+						const hasModalities = Array.isArray(raw.input_modalities);
+						const modalities = hasModalities ? (raw.input_modalities as unknown[]) : [];
+						// Only fall back to the reference when the API omits
+						// input_modalities entirely. An explicit text-only array must NOT
+						// inherit vision from a cross-provider reference — the Friendli
+						// deployment declared itself text-only.
+						const vision =
+							modalities.includes("image") || (!hasModalities && (reference?.input.includes("image") ?? false));
+
+						const reasoning = toBoolean(raw.reasoning) ?? reference?.reasoning ?? false;
+						const interleaved = raw.interleaved === "reasoning_content";
+						const thinking = mapFriendliThinking(reasoning, raw.reasoning_options, reference);
+
+						const baseModel = mapWithBundledReference(entry, defaults, reference);
+
+						return {
+							...baseModel,
+							reasoning,
+							...(thinking !== undefined ? { thinking } : { thinking: undefined }),
+							input: vision ? ["text", "image"] : ["text"],
+							cost,
+							contextWindow,
+							maxTokens,
+							...(supportsTools !== undefined ? { supportsTools } : {}),
+							...(interleaved
+								? { compat: { ...baseModel.compat, reasoningContentField: "reasoning_content" } }
+								: {}),
+						};
+					},
+					fetch: config?.fetch,
+				}),
+		}),
+	};
+}
+
+// ---------------------------------------------------------------------------
 // 7.6 Fire Pass (Fireworks Kimi K2.6 Turbo subscription)
 // ---------------------------------------------------------------------------
 
@@ -3900,6 +4103,16 @@ export function basetenModelManagerOptions(
 			const maxTokens = toPositiveNumber(raw.max_completion_tokens, reference?.maxTokens ?? defaults.maxTokens);
 			const baseModel = mapWithBundledReference(entry, defaults, reference);
 
+			// Baseten's reasoning router accepts only the high/max
+			// effort tiers for its GLM-5.2 and gpt-oss routes.
+			const isEffortReasoning = defaults.id === "openai/gpt-oss-120b" || defaults.id === "zai-org/GLM-5.2";
+			const thinking = isEffortReasoning
+				? {
+						mode: "effort" as const,
+						efforts: [Effort.High, Effort.Max],
+					}
+				: undefined;
+
 			return {
 				...baseModel,
 				reasoning,
@@ -3907,6 +4120,7 @@ export function basetenModelManagerOptions(
 				cost,
 				contextWindow,
 				maxTokens,
+				...(thinking ? { thinking } : {}),
 				...(supportsTools === false ? { supportsTools } : {}),
 			};
 		},

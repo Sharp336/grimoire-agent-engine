@@ -878,6 +878,49 @@ describe("model thinking runtime helpers", () => {
 		);
 	});
 
+	it("collapses qwen-chat-template + omitReasoningEffort to a single binary tier instead of dropping thinking", () => {
+		// NVIDIA NIM resolves qwen models to `thinkingFormat: "qwen-chat-template"`
+		// with `omitReasoningEffort: true` (its strict schema rejects top-level
+		// `reasoning_effort`), so every effort tier produces an identical wire
+		// body — only `chat_template_kwargs.enable_thinking` toggles. The
+		// bundled multi-tier ladder must collapse to a single binary on/off
+		// control rather than be discarded entirely; dropping it would clamp
+		// every effort to undefined and force `enable_thinking: false`, leaving
+		// users unable to enable reasoning.
+		const nim = createModel({
+			id: "qwen/qwen3.5-397b-a17b",
+			api: "openai-completions",
+			provider: "nvidia",
+			baseUrl: "https://integrate.api.nvidia.com/v1",
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+			},
+		});
+		expect(nim.compat.thinkingFormat).toBe("qwen-chat-template");
+		expect(nim.compat.omitReasoningEffort).toBe(true);
+		// Thinking is preserved (not undefined) and collapsed to the single
+		// highest bundled tier — the binary "on" state.
+		expect(nim.thinking).toBeDefined();
+		expect(nim.thinking?.efforts).toEqual([Effort.High]);
+		// The per-tier effortMap is dropped: the wire carries only the binary
+		// `enable_thinking` toggle, so a stale multi-tier map has no consumer.
+		expect(nim.thinking?.effortMap).toBeUndefined();
+
+		// Friendli keeps `omitReasoningEffort: false` (it accepts
+		// `reasoning_effort`), so its high/max ladder stays distinct on the wire
+		// and is NOT collapsed.
+		const friendli = createModel({
+			id: "zai-org/GLM-5.2",
+			api: "openai-completions",
+			provider: "friendli",
+			baseUrl: "https://api.friendli.ai/serverless/v1",
+			thinking: { mode: "effort", efforts: [Effort.High, Effort.Max] },
+		});
+		expect(friendli.compat.omitReasoningEffort).toBe(false);
+		expect(friendli.thinking?.efforts).toEqual([Effort.High, Effort.Max]);
+	});
+
 	it("exposes wire-exact adaptive ladders for OpenRouter-hosted Anthropic models", () => {
 		const fable = createModel({
 			id: "anthropic/claude-fable-5",

@@ -297,6 +297,7 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 	const isCerebras = modelMatchesHost(hostModel, "cerebras");
 	const isZai = modelMatchesHost(hostModel, "zai");
 	const isZhipu = modelMatchesHost(hostModel, "zhipu");
+	const isFriendli = modelMatchesHost(hostModel, "friendli");
 	const supportsZaiReasoningEffort = (isZai || isZhipu) && isGlm52ReasoningEffortModelId(spec.id);
 	const isKilo = modelMatchesHost(hostModel, "kilo");
 	const isKimiModel = isKimiModelId(spec.id);
@@ -377,6 +378,7 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		isMoonshotNative ||
 		isZai ||
 		isZhipu ||
+		isFriendli ||
 		hostMatchesUrl(baseUrl, "chutes") ||
 		hostMatchesUrl(baseUrl, "fireworks") ||
 		isDirectDeepseekApi;
@@ -469,9 +471,23 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 					? "qwen-chat-template"
 					: isQwen && isFireworks
 						? "openai"
-						: isAlibaba || isQwen
-							? "qwen"
-							: "openai";
+						: isFriendli
+							? "qwen-chat-template"
+							: isAlibaba || isQwen
+								? "qwen"
+								: "openai";
+
+	// Friendli: only reasoning models with a real effort surface (discovered
+	// `thinking.efforts` or identity-known GLM-5.2) should accept top-level
+	// `reasoning_effort`. Toggle-only models (e.g. GLM-4.5) reject the field —
+	// `supportsReasoningEffort: false` flows to `omitReasoningEffort: true` and
+	// suppresses emission in the `qwen-template-false` branch. NIM's strict
+	// schema already rejects the field; it stays off because NIM models never
+	// reach this Friendli-specific check.
+	const friendliHasEffortSurface =
+		isFriendli &&
+		spec.reasoning &&
+		((spec.thinking?.efforts?.length ?? 0) > 0 || isGlm52ReasoningEffortModelId(spec.id.toLowerCase()));
 
 	const compat: ResolvedOpenAICompat = {
 		supportsStore: !isNonStandard,
@@ -483,7 +499,15 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		// OpenAI's reasoning-API surface.
 		supportsDeveloperRole: isOpenAIHost || isAzureHost,
 		supportsMultipleSystemMessages: supportsMultipleSystemMessagesDefault,
-		supportsReasoningEffort: !isGrok && !isXiaomiMimo && (!(isZai || isZhipu) || supportsZaiReasoningEffort),
+		supportsReasoningEffort:
+			!isGrok &&
+			!isXiaomiMimo &&
+			(!(isZai || isZhipu) || supportsZaiReasoningEffort) &&
+			// `qwen-chat-template` hosts reject top-level `reasoning_effort`
+			// (NIM's strict `additionalProperties: false` schema 400s on it).
+			// Friendli is the sole exception: it accepts the field alongside
+			// the template toggle when the model has an effort surface.
+			(thinkingFormat !== "qwen-chat-template" || friendliHasEffortSurface),
 		// GitHub Copilot's chat-completions endpoint rejects reasoning params wholesale.
 		supportsReasoningParams: provider !== "github-copilot",
 		// OpenAI proprietary reasoning models (o-series, gpt-5+) reject explicit
@@ -551,7 +575,8 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 			(isKimiModel && !isOpenCodeProvider) ||
 			(isDeepseekFamily && Boolean(spec.reasoning)) ||
 			isXiaomiMimo ||
-			(isOpenRouter && Boolean(spec.reasoning)),
+			(isOpenRouter && Boolean(spec.reasoning)) ||
+			(isFriendli && Boolean(spec.reasoning)),
 		requiresReasoningContentForAllAssistantTurns:
 			((isDeepseekFamily && Boolean(spec.reasoning)) || isXiaomiMimo) && !isOpenRouter,
 		// DeepSeek V4 and Xiaomi MiMo reject synthetic reasoning_content placeholders (".") on tool-call turns.
@@ -610,7 +635,11 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		wireModelIdMode,
 		isVercelGatewayHost: isVercelGateway,
 		supportsStrictMode: detectStrictModeSupport(provider, baseUrl),
-		extraBody: undefined,
+		extraBody: isDirectDeepseekReasoning
+			? { thinking: { type: "enabled" } }
+			: isFriendli && spec.reasoning
+				? { parse_reasoning: true, include_reasoning: true }
+				: undefined,
 		toolStrictMode: isCerebras ? "all_strict" : "mixed",
 		// Kimi-family ids trigger MFJS on any host, not just native base URLs:
 		// proxies (OpenRouter, custom gateways) forward `tools.function.parameters`
@@ -644,6 +673,17 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		compat.extraBody = Object.keys(extraBody).length > 0 ? extraBody : undefined;
 	}
 	if (spec.compat?.reasoningDisableMode === undefined) {
+		// Friendli toggle-only reasoning models (e.g. GLM-4.5 with only a
+		// `type: "toggle"` in reasoning_options) get a single-tier thinking
+		// config from `mapFriendliThinking` so the binary-collapse path
+		// exposes an on/off control. Like every other `qwen-chat-template`
+		// model, they use `qwen-template-false` — enabled sends
+		// `enable_thinking: true`, the not-requested default and an explicit
+		// `disableReasoning` both send `enable_thinking: false`. The former
+		// `"omit"` special case left an explicit disable emitting only
+		// `delete params.reasoning` (the default branch) with no toggle at
+		// all, so callers could never turn these models off despite the
+		// endpoint advertising the toggle.
 		compat.reasoningDisableMode = requiresEnabledThinking
 			? "omit"
 			: isDirectDeepseekReasoning

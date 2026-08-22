@@ -711,12 +711,39 @@ export interface OpenAIExtraBodyOptions {
 	 * `reasoning_effort`; drop `thinking` when the effort field carries the level.
 	 */
 	dropThinkingWhenReasoningEffort?: boolean;
+	/**
+	 * When true, strip reasoning-specific keys from `extraBody` before
+	 * merging. `extraBody` is an arbitrary record — it commonly carries
+	 * gateway routing hints and controller fields unrelated to reasoning
+	 * (see the `extraBody` docstring on `OpenAICompat`). Skipping the entire
+	 * merge would drop those provider-required fields and route the request
+	 * to the wrong backend, so only the known reasoning-only keys
+	 * (`thinking`, `parse_reasoning`, `include_reasoning`) are removed; the
+	 * rest flows through unchanged.
+	 */
+	reasoningDisabled?: boolean;
 }
+
+/**
+ * Reasoning-specific `extraBody` keys that are no-ops when thinking is off.
+ * When `reasoningDisabled` is set, these are stripped from the `extraBody`
+ * before merging — every other key (gateway routing, controller fields, …)
+ * flows through unchanged so provider-required configuration is preserved.
+ */
+const REASONING_ONLY_EXTRA_BODY_KEYS: Record<string, true> = {
+	thinking: true,
+	parse_reasoning: true,
+	include_reasoning: true,
+};
 
 /**
  * Merge a compat/options `extraBody` blob into the request params. When
  * `dropThinkingWhenReasoningEffort` is set and `reasoning_effort` is present,
  * delete the conflicting `thinking` toggle (Fireworks rejects both together).
+ * When `reasoningDisabled` is set, strip the reasoning-specific keys from the
+ * blob before merging — the rest of the record (gateway routing, controller
+ * fields, …) flows through unchanged so provider-required configuration
+ * survives the disable path.
  */
 export function applyOpenAIExtraBody<P extends object>(
 	params: P,
@@ -724,6 +751,16 @@ export function applyOpenAIExtraBody<P extends object>(
 	options?: OpenAIExtraBodyOptions,
 ): void {
 	if (!extraBody) return;
+	if (options?.reasoningDisabled) {
+		const filtered: Record<string, unknown> = {};
+		for (const [key, value] of Object.entries(extraBody)) {
+			if (!REASONING_ONLY_EXTRA_BODY_KEYS[key]) {
+				filtered[key] = value;
+			}
+		}
+		Object.assign(params, filtered);
+		return;
+	}
 	Object.assign(params, extraBody);
 	if (options?.dropThinkingWhenReasoningEffort) {
 		const shaped = params as { reasoning_effort?: unknown; thinking?: unknown };
@@ -1093,13 +1130,15 @@ export function applyChatCompletionsCompatPolicy(params: OpenAICompletionsParams
 				// Spread so the `preserve_thinking` kwarg hoisted above
 				// survives the merge — a bare `{ enable_thinking: true }`
 				// would clobber it.
-				params.chat_template_kwargs = {
-					...params.chat_template_kwargs,
-					enable_thinking: true,
-					...(policy.compat.qwenTemplateReasoningEffort && reasoning.wireEffort !== undefined
-						? { reasoning_effort: reasoning.wireEffort }
-						: {}),
-				};
+				params.chat_template_kwargs = { ...params.chat_template_kwargs, enable_thinking: true };
+				// Emit top-level `reasoning_effort` when the resolved policy allows it.
+				// NIM's strict `additionalProperties: false` schema 400s on the field,
+				// so `omitReasoningEffort` is true for NIM and the gate stays closed.
+				// Friendli GLM-5.2 accepts the field — `omitReasoningEffort` is false
+				// because `supportsReasoningEffort` is true (effort surface declared).
+				if (!reasoning.omitReasoningEffort && reasoning.wireEffort !== undefined) {
+					params.reasoning_effort = reasoning.wireEffort as Effort;
+				}
 				break;
 			case "openrouter-enabled-false":
 				if (reasoning.wireEffort !== undefined) {
