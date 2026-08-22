@@ -199,6 +199,27 @@ describe("hub process output monitoring", () => {
 		expect(harness.active).toEqual([{ monitorId: subscription.id, delivery: "wake", active: true }]);
 	});
 
+	it("validates a monitored start before advertising its subscription", async () => {
+		const harness = createHarness();
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+
+		await expect(
+			executeLaunch(harness.session, {
+				op: "start",
+				name: daemon.name,
+				application: process.execPath,
+				ready: { log: "(" },
+				progress: "wake",
+			}),
+		).rejects.toThrow("Invalid readiness regex");
+
+		expect(harness.requests).toEqual([]);
+		expect(harness.getSubscription()).toBeUndefined();
+		expect(harness.getOutputSink()).toBeUndefined();
+		expect(harness.unregisterCount()).toBe(0);
+		expect(harness.active).toEqual([]);
+	});
+
 	it("never replays output that predates a successful monitor attach", async () => {
 		const harness = createHarness();
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
@@ -606,11 +627,13 @@ describe("hub process output monitoring", () => {
 		expect(harness.active.at(-1)).toEqual({ monitorId: replacement.id, delivery: "wake", active: true });
 	});
 
-	it("delivers nothing under the new mode when a start over an existing monitor fails", async () => {
+	it("restores the prior monitor mode when a replacement start fails", async () => {
 		const harness = createHarness();
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
 
 		await executeLaunch(harness.session, { op: "monitor", name: daemon.name, progress: "ambient" });
+		const prior = harness.getSubscription();
+		if (!prior) throw new Error("Expected output subscription");
 		vi.spyOn(harness.client, "request").mockImplementation(async operation => {
 			if (operation.op === "ping") {
 				return { op: "ping", projectDir: process.cwd(), capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] };
@@ -618,14 +641,16 @@ describe("hub process output monitoring", () => {
 			if (operation.op !== "start") throw new Error(`Unexpected operation: ${operation.op}`);
 			const advertised = harness.getSubscription();
 			if (!advertised) throw new Error("Expected output subscription");
-			// Output emitted while the failing start is still validating.
+			expect(advertised.id).not.toBe(prior.id);
+			// Output emitted while the failing start is still validating belongs
+			// only to the speculative replacement and must be discarded.
 			await harness.getOutputSink()?.({
 				event: "daemon-output",
 				monitorId: advertised.id,
 				name: daemon.name,
 				daemonId: daemon.id,
 				seq: 1,
-				text: "leaked",
+				text: "speculative",
 				batchKind: "progress",
 				suppressedEvents: 0,
 			});
@@ -644,10 +669,27 @@ describe("hub process output monitoring", () => {
 		).rejects.toThrow("already running");
 		await drainMicrotasks();
 
-		// Nothing was queued as wake progress during the failed start: the
-		// replacement registration buffers speculatively and discards on reject.
+		const restored = harness.getSubscription();
+		if (!restored) throw new Error("Expected restored output subscription");
+		expect(restored.id).not.toBe(prior.id);
+		expect(restored.startPending).toBeUndefined();
 		expect(harness.progress).toEqual([]);
-		expect(harness.active.at(-1)?.active).toBe(false);
+		expect(harness.active.at(-1)).toEqual({ monitorId: restored.id, delivery: "ambient", active: true });
+
+		await harness.getOutputSink()?.({
+			event: "daemon-output",
+			monitorId: restored.id,
+			name: daemon.name,
+			daemonId: daemon.id,
+			seq: 1,
+			text: "still monitored",
+			batchKind: "progress",
+			suppressedEvents: 0,
+		});
+		expect(harness.progress.map(item => ({ text: item.notification.text, delivery: item.delivery }))).toEqual([
+			{ text: "still monitored", delivery: "ambient" },
+		]);
+		expect(harness.unregisterCount()).toBe(2);
 	});
 
 	it("keeps the prior delivery mode when a monitor retune fails validation", async () => {

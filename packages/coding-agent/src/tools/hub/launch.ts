@@ -94,38 +94,46 @@ async function registerOutputSink(
 ): Promise<OutputLease | undefined> {
 	if (!session.queueLaunchProgress || !session.queueLaunchCompletion || !client.onOutput) return undefined;
 	const existing = outputRegistrations.get(session)?.get(client)?.get(name);
+	if (existing && !startPending) {
+		// Retune of a live monitor. The operation is still validating, so
+		// keep the prior delivery mode until retain(): output arriving
+		// during a failed retune must be delivered under the old mode —
+		// once queued it cannot be retracted by reject().
+		let settled = false;
+		return {
+			registration: existing,
+			retain: () => {
+				if (settled) return;
+				settled = true;
+				if (!existing.active || existing.delivery === delivery) return;
+				session.setLaunchMonitorActive?.(existing.id, existing.delivery, false);
+				existing.delivery = delivery;
+				session.setLaunchMonitorActive?.(existing.id, delivery, true);
+			},
+			reject: async () => {
+				settled = true;
+			},
+		};
+	}
+	const artifact = await session.allocateOutputArtifact?.("hub-progress");
+	if (!artifact?.id || !artifact.path) return undefined;
+	const previous = existing
+		? {
+				owner: existing.owner,
+				delivery: existing.delivery,
+			}
+		: undefined;
 	if (existing) {
-		if (startPending) {
-			// A monitored start targets a new process incarnation. Reusing the
-			// old registration would keep advertising its subscription id — with
-			// the start-pending marker long cleared and the old artifact path —
-			// so the broker could replay the previous daemon's terminal
-			// notification and tear the monitor down before the new process
-			// launches; retain() would then retain an inactive registration and
-			// the successful start would silently lose progress. Replace the
-			// stale registration with a fresh start-pending subscription.
-			await existing.cleanup();
-		} else {
-			// Retune of a live monitor. The operation is still validating, so
-			// keep the prior delivery mode until retain(): output arriving
-			// during a failed retune must be delivered under the old mode —
-			// once queued it cannot be retracted by reject().
-			let settled = false;
-			return {
-				registration: existing,
-				retain: () => {
-					if (settled) return;
-					settled = true;
-					if (!existing.active || existing.delivery === delivery) return;
-					session.setLaunchMonitorActive?.(existing.id, existing.delivery, false);
-					existing.delivery = delivery;
-					session.setLaunchMonitorActive?.(existing.id, delivery, true);
-				},
-				reject: async () => {
-					settled = true;
-				},
-			};
-		}
+		// A monitored start targets a new process incarnation. Reusing the
+		// old registration would keep advertising its subscription id — with
+		// the start-pending marker long cleared and the old artifact path —
+		// so the broker could replay the previous daemon's terminal
+		// notification and tear the monitor down before the new process
+		// launches. Replace it with a fresh start-pending subscription. If the
+		// start fails, reject() attaches a fresh monitor under the prior mode;
+		// this intentionally cannot replay the old registration's pending
+		// batches or output from before the restoration boundary.
+		await existing.cleanup();
 	}
 	// (Re-)link the per-session maps only after the stale registration was
 	// replaced above: its cleanup may have unlinked the maps it lived in.
@@ -141,8 +149,6 @@ async function registerOutputSink(
 	}
 
 	const id = crypto.randomUUID();
-	const artifact = await session.allocateOutputArtifact?.("hub-progress");
-	if (!artifact?.id || !artifact.path) return undefined;
 	const artifactId = artifact.id;
 	let unregisterDispose: (() => void) | void;
 	let unregisterSessionChange: (() => void) | void;
@@ -209,10 +215,10 @@ async function registerOutputSink(
 			daemon: notification.daemon,
 		});
 	};
-	// The subscription is published before the broker capability check and the
-	// start/describe operation are validated, so anything arriving in that
-	// window is speculative: buffer it until the lease is retained and discard
-	// it on reject, so a failed operation never wakes the session.
+	// A start subscription is published before the launch request, so output
+	// arriving while that request is validating remains speculative: buffer it
+	// until the lease is retained and discard it on reject, so a failed
+	// operation never wakes the session.
 	let speculative: DaemonMonitorNotification[] | undefined = [];
 	let speculativeFlush: Promise<void> = Promise.resolve();
 	const sink = async (notification: DaemonMonitorNotification): Promise<void> => {
@@ -254,7 +260,18 @@ async function registerOutputSink(
 		},
 		reject: async () => {
 			speculative = undefined;
-			if (!retained) await registration.cleanup();
+			if (retained) return;
+			await registration.cleanup();
+			if (!previous) return;
+			const restored = await registerOutputSink(
+				session,
+				client,
+				name,
+				previous.owner,
+				previous.delivery,
+				false,
+			);
+			restored?.retain();
 		},
 	};
 }
@@ -406,6 +423,13 @@ function commandSpec(params: LaunchParams, session: ToolSession): DaemonSpec {
 		throw new ToolError("ready.port must be an integer from 1 to 65535");
 	}
 	if (ready && !ready.log && ready.port === undefined) throw new ToolError("ready requires log or port");
+	if (ready?.log) {
+		try {
+			new RegExp(ready.log, "u");
+		} catch (error) {
+			throw new ToolError(`Invalid readiness regex: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
 	return {
 		name,
 		application: params.application,
@@ -639,21 +663,11 @@ export async function executeLaunch(
 	if (params.op === "monitor" && params.progress === undefined) {
 		throw new ToolError("monitor requires progress: wake, ambient, or off");
 	}
+	const operation = operationFor(params, session);
 	const name = params.op === "start" || params.op === "monitor" ? requiredName(params) : undefined;
 	const owner = session.getSessionId?.() ?? undefined;
 	const progressDelivery = params.progress === "wake" || params.progress === "ambient" ? params.progress : undefined;
-	// Starts must subscribe before the process launches so no early lines are
-	// missed. Monitor attaches subscribe only after the describe result
-	// validates the attach: registering earlier lets the speculative buffer
-	// replay output that predates the successful-attach boundary.
-	let outputLease =
-		name && owner && progressDelivery && params.op === "start"
-			? await registerOutputSink(session, client, name, owner, progressDelivery, true)
-			: undefined;
-	if (params.op === "start" && progressDelivery && !outputLease) {
-		throw new ToolError("This session cannot accept process progress delivery");
-	}
-	const operation = operationFor(params, session);
+	let outputLease: OutputLease | undefined;
 	const completionOwner = operation.op === "start" ? operation.owner : undefined;
 	const resumedOwner = params.op !== "start" ? (session.getSessionId?.() ?? undefined) : undefined;
 	const completionLease = completionOwner
@@ -667,6 +681,13 @@ export async function executeLaunch(
 			if (ping.op !== "ping" || !ping.capabilities?.includes(DAEMON_OUTPUT_MONITOR_CAPABILITY)) {
 				throw new ToolError("The running daemon broker cannot monitor output; restart it with this omp build");
 			}
+		}
+		// Valid monitored starts advertise their start-pending subscription
+		// after all local and broker-capability validation, but before the
+		// process-launch request, so early output cannot be lost.
+		if (name && owner && progressDelivery && params.op === "start") {
+			outputLease = await registerOutputSink(session, client, name, owner, progressDelivery, true);
+			if (!outputLease) throw new ToolError("This session cannot accept process progress delivery");
 		}
 		// A locally-issued stop's tool result is the single terminal surface,
 		// but the broker's terminal monitor notification (ownerNotified=false —
