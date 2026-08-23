@@ -689,7 +689,16 @@ process.stdin.once("data", () => {
 		await fs.mkdir(projectDir);
 		const firstScriptPath = path.join(projectDir, "first.ts");
 		const secondScriptPath = path.join(projectDir, "second.ts");
-		await Bun.write(firstScriptPath, `process.stdout.write("FIRST_RUN\\n");\n`);
+		await Bun.write(
+			firstScriptPath,
+			`process.stdin.setEncoding("utf8");
+process.stdin.resume();
+process.stdin.once("data", () => {
+	process.stdout.write("FIRST_RUN_TERMINAL\\n");
+	process.exit(0);
+});
+`,
+		);
 		await Bun.write(
 			secondScriptPath,
 			`process.stdin.setEncoding("utf8");
@@ -724,9 +733,6 @@ process.stdin.once("data", () => {
 				spec: spec(process.execPath, [firstScriptPath]),
 			});
 			if (firstStart.op !== "start") throw new Error("unexpected start result");
-			const firstWait = await client.request({ op: "wait", name: "reuse", for: "exit", timeoutMs: 5_000 });
-			if (firstWait.op !== "wait") throw new Error("unexpected wait result");
-			expect(firstWait.timedOut).toBeFalse();
 
 			const token = (await Bun.file(path.join(runtimeDir, "broker.token")).text()).trim();
 			raw = await openRawBrokerSocket(endpoint);
@@ -742,6 +748,25 @@ process.stdin.once("data", () => {
 					outputSubscriptions,
 					operation: { op: "ping" },
 				})}\n`;
+
+			const futureSubscription = {
+				id: "replacement-monitor",
+				name: "reuse",
+				owner: "owner-1",
+				artifactPath,
+				startPending: true,
+			};
+			raw.socket.write(envelope("attach-next-start", "future-client", [futureSubscription]));
+			await raw.waitFor(message => message.id === "attach-next-start");
+
+			// The predecessor emits its terminal output after the replacement
+			// monitor is registered. That output and settlement must not bind,
+			// notify, or dispose the start-pending registration.
+			await client.request({ op: "send", name: "reuse", data: "finish\n" });
+			const firstWait = await client.request({ op: "wait", name: "reuse", for: "exit", timeoutMs: 5_000 });
+			if (firstWait.op !== "wait") throw new Error("unexpected wait result");
+			expect(firstWait.timedOut).toBeFalse();
+			expect(raw.messages.some(message => message.monitorId === futureSubscription.id)).toBeFalse();
 
 			const ordinarySubscription = {
 				id: "ordinary-terminal-monitor",
@@ -771,7 +796,6 @@ process.stdin.once("data", () => {
 			raw.socket.write(envelope("attach-next-start", "future-client", [futureSubscription]));
 			await raw.waitFor(message => message.id === "attach-next-start");
 			expect(raw.messages.some(message => message.monitorId === futureSubscription.id)).toBeFalse();
-
 			const secondStart = await client.request({
 				op: "start",
 				spec: spec(process.execPath, [secondScriptPath]),
@@ -998,39 +1022,45 @@ process.stdin.once("data", () => process.stdout.write("OLD_LATE\\n"));
 		}
 	}, 20_000);
 
-	it("merges retained first and last previews into a suppression summary", async () => {
-		using tempDir = TempDir.createSync("@omp-launch-monitor-suppression-");
+	it("merges retained rate-limited windows with fresh output in the next permitted preview", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-retained-");
 		const projectDir = path.join(tempDir.path(), "project");
 		const runtimeDir = path.join(tempDir.path(), "runtime");
-		const artifactPath = path.join(tempDir.path(), "suppressed-progress.log");
 		await fs.mkdir(projectDir);
 		const scriptPath = path.join(projectDir, "service.ts");
 		await Bun.write(
 			scriptPath,
 			`process.stdin.setEncoding("utf8");
-process.stdin.on("data", chunk => process.stdout.write(chunk));
 process.stdin.resume();
+process.stdin.on("data", chunk => process.stdout.write(chunk));
 `,
 		);
+		const artifactPath = path.join(tempDir.path(), "retained-progress.log");
 		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const realNow = Date.now.bind(Date);
+		let nowOffset = 0;
+		const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => realNow() + nowOffset);
 		const previousTitle = process.title;
-		const broker = startBroker(projectDir, runtimeDir, { progressBatchIntervalMs: 0 });
+		const broker = startBroker(projectDir, runtimeDir, { progressBatchIntervalMs: 10 });
 		const notifications: DaemonMonitorNotification[] = [];
-		const completed = Promise.withResolvers<void>();
 		const unregister = client.onOutput?.(
-			{ id: "suppression-monitor", name: "suppression", owner: "owner", artifactPath },
+			{ id: "retained-monitor", name: "retained", owner: "owner", artifactPath },
 			notification => {
 				notifications.push(notification);
-				if (notification.event === "daemon-monitor-completed") completed.resolve();
 			},
 		);
 		if (!unregister) throw new Error("Expected output monitoring support");
+		const output = (): Array<Extract<DaemonMonitorNotification, { event: "daemon-output" }>> =>
+			notifications.filter(
+				(notification): notification is Extract<DaemonMonitorNotification, { event: "daemon-output" }> =>
+					notification.event === "daemon-output",
+			);
 		try {
 			await unregister.ready;
 			await client.request({
 				op: "start",
 				spec: {
-					name: "suppression",
+					name: "retained",
 					application: process.execPath,
 					args: [scriptPath],
 					env: {},
@@ -1041,28 +1071,44 @@ process.stdin.resume();
 					detached: false,
 				},
 			});
-			for (let index = 0; index < 12; index++) {
-				await client.request({ op: "send", name: "suppression", data: `LINE_${index}\n` });
+
+			for (let index = 0; index < 10; index++) {
+				await client.request({ op: "send", name: "retained", data: `WARMUP_${index}\n` });
 				await waitForOutputCount(notifications, index + 1);
 			}
-			await client.request({ op: "stop", name: "suppression", timeoutMs: 2_000 });
-			await completed.promise;
+			await client.request({ op: "send", name: "retained", data: "RETAINED_FIRST\n" });
+			await waitForOutputCount(notifications, 11);
+			await client.request({ op: "send", name: "retained", data: "RETAINED_TAIL\n" });
+			await waitForOutputCount(notifications, 12);
+			expect(
+				output()
+					.slice(10)
+					.map(notification => notification.batchKind),
+			).toEqual(["artifact-only", "artifact-only"]);
+			expect(
+				output()
+					.slice(10)
+					.map(notification => notification.text),
+			).toEqual(["", ""]);
 
-			const summary = notifications.find(
-				(notification): notification is Extract<DaemonMonitorNotification, { event: "daemon-output" }> =>
-					notification.event === "daemon-output" && notification.batchKind === "suppression-summary",
-			);
-			expect(summary).toMatchObject({
-				text: "LINE_10\nLINE_11",
+			// Advance only the broker rate-limit clock: real socket/timer delivery
+			// remains observable, while the refill boundary is deterministic.
+			nowOffset += 2_100;
+			await client.request({ op: "send", name: "retained", data: "FRESH_CURRENT\n" });
+			await waitForOutputCount(notifications, 13);
+			const merged = output().at(-1);
+			expect(merged).toMatchObject({
+				batchKind: "progress",
 				suppressedEvents: 2,
+				text: "RETAINED_FIRST\nRETAINED_TAIL\nFRESH_CURRENT",
 				truncated: true,
 			});
-			expect(await Bun.file(artifactPath).text()).toBe(
-				Array.from({ length: 12 }, (_, index) => `LINE_${index}\n`).join(""),
-			);
+			expect(Buffer.byteLength(merged?.text ?? "", "utf8")).toBeLessThanOrEqual(3_000);
+			expect(await Bun.file(artifactPath).text()).toEndWith("RETAINED_FIRST\nRETAINED_TAIL\nFRESH_CURRENT\n");
 		} finally {
+			nowSpy.mockRestore();
 			unregister();
-			await client.request({ op: "stop", name: "suppression", timeoutMs: 2_000 }).catch(() => undefined);
+			await client.request({ op: "stop", name: "retained", timeoutMs: 2_000 }).catch(() => undefined);
 			await client.request({ op: "shutdown" }).catch(() => undefined);
 			client.close();
 			await broker;
@@ -3056,7 +3102,7 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 		}
 	}, 20_000);
 
-	it("delivers final output before owner completion from the same socket chunk", async () => {
+	it("orders one daemon's completion without blocking unrelated monitor output", async () => {
 		using tempDir = TempDir.createSync("@omp-launch-monitor-wire-order-");
 		const projectDir = path.join(tempDir.path(), "project");
 		const runtimeDir = path.join(tempDir.path(), "runtime");
@@ -3110,10 +3156,16 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 		};
 		const outputStarted = Promise.withResolvers<void>();
 		const releaseOutput = Promise.withResolvers<void>();
+		const completionStarted = Promise.withResolvers<void>();
+		const releaseCompletion = Promise.withResolvers<void>();
 		const completionDelivered = Promise.withResolvers<void>();
+		const otherOutputDelivered = Promise.withResolvers<void>();
 		const deliveryOrder: string[] = [];
-		const unregisterCompletion = client.onCompletion("owner", () => {
-			deliveryOrder.push("completion");
+		const unregisterCompletion = client.onCompletion("owner", async () => {
+			deliveryOrder.push("completion:start");
+			completionStarted.resolve();
+			await releaseCompletion.promise;
+			deliveryOrder.push("completion:end");
 			completionDelivered.resolve();
 		});
 		const brokerSocket = await connected.promise;
@@ -3136,6 +3188,22 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 		if (!unregisterOutput) throw new Error("Expected output monitoring registration");
 		replyToPing(brokerSocket, await nextRequest());
 		await unregisterOutput.ready;
+		const unregisterOtherOutput = client.onOutput?.(
+			{
+				id: "other-monitor",
+				name: "other-service",
+				owner: "other-owner",
+				artifactPath: path.join(tempDir.path(), "other-progress.log"),
+			},
+			notification => {
+				if (notification.event !== "daemon-output") return;
+				deliveryOrder.push("other-output");
+				otherOutputDelivered.resolve();
+			},
+		);
+		if (!unregisterOtherOutput) throw new Error("Expected second output monitoring registration");
+		replyToPing(brokerSocket, await nextRequest());
+		await unregisterOtherOutput.ready;
 
 		try {
 			const probe = client.request({ op: "ping" });
@@ -3155,7 +3223,7 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 				detached: false,
 			};
 			brokerSocket.write(
-				[
+				`${[
 					{
 						event: "daemon-output",
 						monitorId: "monitor",
@@ -3175,18 +3243,46 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 					},
 				]
 					.map(message => JSON.stringify(message))
-					.join("\n") + "\n",
+					.join("\n")}\n`,
 			);
 			await probe;
 			await outputStarted.promise;
 			expect(deliveryOrder).toEqual(["output:start"]);
 
 			releaseOutput.resolve();
+			await completionStarted.promise;
+			expect(deliveryOrder).toEqual(["output:start", "output:end", "completion:start"]);
+
+			brokerSocket.write(
+				`${JSON.stringify({
+					event: "daemon-output",
+					monitorId: "other-monitor",
+					name: "other-service",
+					daemonId: "other-daemon",
+					epoch: "other-epoch",
+					seq: 1,
+					text: "still live",
+					batchKind: "progress",
+					suppressedEvents: 0,
+				})}\n`,
+			);
+			await otherOutputDelivered.promise;
+			expect(deliveryOrder).toEqual(["output:start", "output:end", "completion:start", "other-output"]);
+
+			releaseCompletion.resolve();
 			await completionDelivered.promise;
-			expect(deliveryOrder).toEqual(["output:start", "output:end", "completion"]);
+			expect(deliveryOrder).toEqual([
+				"output:start",
+				"output:end",
+				"completion:start",
+				"other-output",
+				"completion:end",
+			]);
 		} finally {
 			releaseOutput.resolve();
+			releaseCompletion.resolve();
 			unregisterOutput();
+			unregisterOtherOutput();
 			unregisterCompletion();
 			client.close();
 			brokerSocket.destroy();

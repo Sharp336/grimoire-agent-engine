@@ -1049,6 +1049,7 @@ class DaemonBroker {
 			if (registration.disabled) continue;
 			if (registration.name !== record.snapshot.name) continue;
 			if (registration.daemonId === undefined) {
+
 				if (registration.startPending === true) continue;
 				registration.daemonId = record.snapshot.id;
 			}

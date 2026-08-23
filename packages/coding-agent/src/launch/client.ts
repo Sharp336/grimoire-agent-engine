@@ -210,8 +210,8 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	#completionReconnectTimer: NodeJS.Timeout | undefined;
 	#brokerCapabilities: string[] | undefined;
 	#socketGeneration = 0;
-	/** Serializes unsolicited frames from the current socket generation in wire order. */
-	#notificationTail: Promise<void> = Promise.resolve();
+	/** Serializes unsolicited frames per daemon while allowing unrelated daemons to deliver concurrently. */
+	readonly #notificationTails = new Map<string, Promise<void>>();
 
 	constructor(projectDir: string, runtimeDir: string, token: string, options: DaemonBrokerClientOptions) {
 		this.projectDir = projectDir;
@@ -292,7 +292,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		if (this.#closed) return;
 		this.#closed = true;
 		this.#socketGeneration++;
-		this.#notificationTail = Promise.resolve();
+		this.#notificationTails.clear();
 		clearTimeout(this.#completionReconnectTimer);
 		this.#completionReconnectTimer = undefined;
 		this.#socket?.destroy();
@@ -505,7 +505,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	}
 
 	#bindSocket(socket: net.Socket): void {
-		this.#notificationTail = Promise.resolve();
+		this.#notificationTails.clear();
 		const generation = ++this.#socketGeneration;
 		this.#socket = socket;
 		this.#brokerCapabilities = undefined;
@@ -520,7 +520,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				this.#socket = undefined;
 				if (generation === this.#socketGeneration) {
 					this.#socketGeneration++;
-					this.#notificationTail = Promise.resolve();
+					this.#notificationTails.clear();
 				}
 			}
 			this.#rejectPending(new Error("Daemon broker connection closed"));
