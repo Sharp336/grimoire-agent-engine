@@ -1625,7 +1625,15 @@ export class Markdown implements Component {
 		// (appends cannot delete an existing ref def or CR), so it is reused
 		// even when the delta is suspicious; only a true verdict on a suspicious
 		// delta re-runs the tail scan (PR #9303). The tail scan is also the
-		// cold path after non-append edits, which clear the memo.
+		// cold path after non-append edits, which clear the memo. A FALSE
+		// verdict is monotone under appends alone (transient mode: no repair,
+		// appends cannot delete a ref-def or CR), so there it is reused even
+		// on a suspicious delta. Final mode is the exception: render() detects
+		// repairOrphanClosingFence deletions (the normalized buffer shrank)
+		// and invalidates the memo on the affected frame, so the re-derive
+		// happens exactly when the CR/ref-def trigger behind a false verdict
+		// may have been deleted — never left stale, and never re-scanned on
+		// frames where the memo is sound.
 		let canStream: boolean;
 		if (this.#lastScanValid && this.#appendOnlySinceLastScan && text.length > this.#lastScanLength) {
 			const delta = text.slice(this.#lastScanLength);
@@ -1707,10 +1715,17 @@ export class Markdown implements Component {
 			return EMPTY_RENDER_LINES;
 		}
 
-		// Replace tabs with 3 spaces for consistent rendering
-		const normalizedText = this.transientRenderCache
-			? replaceTabs(this.#text)
-			: repairOrphanClosingFence(replaceTabs(this.#text));
+		// Replace tabs with spaces, then repair orphan fences in final mode.
+		const tabbed = replaceTabs(this.#text);
+		const normalizedText = this.transientRenderCache ? tabbed : repairOrphanClosingFence(tabbed);
+		if (!this.transientRenderCache && normalizedText.length < tabbed.length) {
+			// repairOrphanClosingFence deleted bytes this frame (orphan fence
+			// removed): the guard-scan memo's checked region is no longer
+			// byte-identical, and a cached false verdict may have been based
+			// on the very CR/ref-def line that was deleted. Invalidate so the
+			// next #lexTokens re-derives on the repaired buffer.
+			this.#lastScanValid = false;
+		}
 		const signature = this.#renderSignature(width, paddingX);
 
 		// L2: module-level LRU — survives component disposal/recreation across
