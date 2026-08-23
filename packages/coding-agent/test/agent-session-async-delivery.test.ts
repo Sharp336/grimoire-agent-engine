@@ -163,7 +163,8 @@ describe("AgentSession owner-routed async delivery", () => {
 			modelRegistry: new ModelRegistry(authStorage),
 			agentId: "SubAgent",
 		});
-		session.setLaunchMonitorActive("monitor-1", "wake", true);
+		const monitorEpoch = session.captureLaunchProgressEpoch();
+		session.setLaunchMonitorActive("monitor-1", "wake", true, monitorEpoch);
 		await session.prompt("start monitoring");
 		expect(session.hasPendingAsyncWork()).toBe(true);
 		let settled = false;
@@ -186,6 +187,7 @@ describe("AgentSession owner-routed async delivery", () => {
 			},
 			"wake",
 			Date.now(),
+			monitorEpoch,
 		);
 		await settling;
 		expect(session.hasPendingAsyncWork()).toBe(true);
@@ -208,7 +210,7 @@ describe("AgentSession owner-routed async delivery", () => {
 		await Bun.sleep(1);
 		expect(settledAgain).toBe(false);
 
-		session.setLaunchMonitorActive("monitor-1", "wake", false);
+		session.setLaunchMonitorActive("monitor-1", "wake", false, monitorEpoch);
 		await settlingAgain;
 		expect(session.hasPendingAsyncWork()).toBe(false);
 	});
@@ -243,8 +245,8 @@ describe("AgentSession owner-routed async delivery", () => {
 		if (!targetFile) throw new Error("Expected target session file");
 		await targetManager.close();
 
-		session.setLaunchMonitorActive("old-monitor", "wake", true);
-		session.registerSessionChangeCallback(() => session.setLaunchMonitorActive("old-monitor", "wake", false));
+		const oldMonitorEpoch = session.captureLaunchProgressEpoch();
+		session.setLaunchMonitorActive("old-monitor", "wake", true, oldMonitorEpoch);
 		session.queueLaunchProgress(
 			{
 				event: "daemon-output",
@@ -258,6 +260,7 @@ describe("AgentSession owner-routed async delivery", () => {
 			},
 			"ambient",
 			Date.now(),
+			oldMonitorEpoch,
 		);
 		session.setSessionBeforeSwitchReconciler(async () => {
 			session.queueLaunchProgress(
@@ -273,10 +276,28 @@ describe("AgentSession owner-routed async delivery", () => {
 				},
 				"wake",
 				Date.now(),
+				oldMonitorEpoch,
 			);
 		});
 
 		await expect(session.switchSession(targetFile)).resolves.toBe(true);
+		session.setLaunchMonitorActive("old-monitor", "wake", true, oldMonitorEpoch);
+		session.queueLaunchProgress(
+			{
+				event: "daemon-output",
+				monitorId: "old-monitor",
+				name: "old-process",
+				daemonId: "old-daemon",
+				seq: 2,
+				text: "LATE OLD SESSION PROCESS EVENT",
+				batchKind: "progress",
+				suppressedEvents: 0,
+			},
+			"wake",
+			Date.now(),
+			oldMonitorEpoch,
+		);
+		const newMonitorEpoch = session.captureLaunchProgressEpoch();
 		session.queueLaunchProgress(
 			{
 				event: "daemon-output",
@@ -290,6 +311,7 @@ describe("AgentSession owner-routed async delivery", () => {
 			},
 			"ambient",
 			Date.now(),
+			newMonitorEpoch,
 		);
 		await session.sendUserMessage("inspect target");
 
@@ -305,6 +327,7 @@ describe("AgentSession owner-routed async delivery", () => {
 			.join("\n");
 		expect(observedText).not.toContain("OLD SESSION PROCESS EVENT");
 		expect(observedText).not.toContain("QUEUED OLD AMBIENT EVENT");
+		expect(observedText).not.toContain("LATE OLD SESSION PROCESS EVENT");
 		expect(observedText).toContain("FRESH SESSION PROCESS EVENT");
 	});
 
@@ -630,6 +653,7 @@ describe("AgentSession owner-routed async delivery", () => {
 			},
 			"ambient",
 			Date.now(),
+			session.captureLaunchProgressEpoch(),
 		);
 
 		manager.watchJobs([job.id]);
@@ -780,7 +804,7 @@ describe("AgentSession owner-routed async delivery", () => {
 			batchKind: "progress",
 			suppressedEvents: 0,
 		};
-		session.queueLaunchProgress(notification, "wake", Date.now());
+		session.queueLaunchProgress(notification, "wake", Date.now(), session.captureLaunchProgressEpoch());
 
 		await wakeObserved.promise;
 		expect(mock.calls).toHaveLength(2);
@@ -832,6 +856,7 @@ describe("AgentSession owner-routed async delivery", () => {
 					},
 					"wake",
 					Date.now(),
+					session.captureLaunchProgressEpoch(),
 				);
 				return Promise.resolve();
 			}),
@@ -924,11 +949,12 @@ describe("AgentSession owner-routed async delivery", () => {
 			suppressedEvents: 0,
 		});
 
-		session.setLaunchMonitorActive("monitor-1", "wake", true);
-		session.queueLaunchProgress(progress("PROCESS EVENT ONE", 1), "wake", Date.now());
+		const monitorEpoch = session.captureLaunchProgressEpoch();
+		session.setLaunchMonitorActive("monitor-1", "wake", true, monitorEpoch);
+		session.queueLaunchProgress(progress("PROCESS EVENT ONE", 1), "wake", Date.now(), monitorEpoch);
 		await busyStarted.promise;
-		session.queueLaunchProgress(progress("PROCESS EVENT TWO", 2), "wake", Date.now());
-		session.queueLaunchProgress(progress("PROCESS EVENT THREE", 3), "wake", Date.now());
+		session.queueLaunchProgress(progress("PROCESS EVENT TWO", 2), "wake", Date.now(), monitorEpoch);
+		session.queueLaunchProgress(progress("PROCESS EVENT THREE", 3), "wake", Date.now(), monitorEpoch);
 		const completion = session.queueLaunchCompletion({
 			event: "daemon-completed",
 			completionId: "completion-1",
@@ -948,7 +974,7 @@ describe("AgentSession owner-routed async delivery", () => {
 				detached: false,
 			},
 		});
-		session.setLaunchMonitorActive("monitor-1", "wake", false);
+		session.setLaunchMonitorActive("monitor-1", "wake", false, monitorEpoch);
 		expect(session.hasPendingAsyncWork()).toBe(true);
 		releaseBusy.resolve();
 
@@ -1001,6 +1027,7 @@ describe("AgentSession owner-routed async delivery", () => {
 			},
 			"ambient",
 			Date.now(),
+			session.captureLaunchProgressEpoch(),
 		);
 		await Promise.resolve();
 		expect(mock.calls).toHaveLength(0);

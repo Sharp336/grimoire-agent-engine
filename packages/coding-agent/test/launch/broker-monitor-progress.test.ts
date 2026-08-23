@@ -1491,6 +1491,123 @@ process.stdin.on("data", chunk => {
 			setProcessName(previousTitle);
 		}
 	}, 20_000);
+
+	it("expires an artifact-failed registration after its monitor disconnects", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-offline-artifact-failure-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		const artifactPath = path.join(tempDir.path(), "artifact-is-a-directory");
+		await fs.mkdir(projectDir);
+		await fs.mkdir(artifactPath);
+		const scriptPath = path.join(projectDir, "service.ts");
+		await Bun.write(
+			scriptPath,
+			`process.stdin.setEncoding("utf8");
+process.stdin.resume();
+process.stdin.on("data", chunk => process.stdout.write(chunk));
+`,
+		);
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const previousTitle = process.title;
+		const broker = startBroker(projectDir, runtimeDir, {
+			progressBatchIntervalMs: 0,
+			outputReconnectGraceMs: 250,
+		});
+		const endpoint = daemonBrokerEndpoint(projectDir, runtimeDir);
+		const subscription = {
+			id: "offline-artifact-failure-monitor",
+			registrationId: "offline-artifact-failure-registration",
+			name: "offline-artifact-failure",
+			owner: "raw-owner",
+			artifactPath,
+		};
+		const subscriptionId = "offline-artifact-failure-client";
+		let first: RawBrokerSocket | undefined;
+		let second: RawBrokerSocket | undefined;
+		try {
+			await client.request({
+				op: "start",
+				spec: {
+					name: "offline-artifact-failure",
+					application: process.execPath,
+					args: [scriptPath],
+					env: {},
+					cwd: projectDir,
+					pty: false,
+					restart: "no",
+					persist: false,
+					detached: false,
+				},
+			});
+			const token = (await Bun.file(path.join(runtimeDir, "broker.token")).text()).trim();
+			const envelope = (id: string, outputSubscriptions: Record<string, unknown>[]): string =>
+				`${JSON.stringify({
+					id,
+					token,
+					outputSubscriptionId: subscriptionId,
+					outputSubscriptions,
+					operation: { op: "ping" },
+				})}\n`;
+
+			first = await openRawBrokerSocket(endpoint);
+			first.socket.write(envelope("register-offline-artifact-failure", [subscription]));
+			await first.waitFor(message => message.id === "register-offline-artifact-failure");
+			const disconnected = Promise.withResolvers<void>();
+			first.socket.once("close", disconnected.resolve);
+			first.socket.destroy();
+			await disconnected.promise;
+
+			await client.request({ op: "send", name: "offline-artifact-failure", data: "OFFLINE_FAILURE\n" });
+			const observedFailureOutput = await client.request({
+				op: "wait",
+				name: "offline-artifact-failure",
+				for: "exit",
+				pattern: "OFFLINE_FAILURE",
+				timeoutMs: 2_000,
+			});
+			if (observedFailureOutput.op !== "wait") throw new Error("unexpected wait result");
+			expect(observedFailureOutput.timedOut).toBeFalse();
+
+			// Keep the invalid path in place past reconnect grace so persistence
+			// fails while no monitor socket can receive or acknowledge the expiry.
+			await Bun.sleep(750);
+			await fs.rm(artifactPath, { recursive: true });
+
+			second = await openRawBrokerSocket(endpoint);
+			second.socket.write(envelope("recreate-offline-artifact-failure", [subscription]));
+			await second.waitFor(message => message.id === "recreate-offline-artifact-failure");
+			await client.request({ op: "send", name: "offline-artifact-failure", data: "RECOVERED\n" });
+
+			const deadline = Date.now() + 2_000;
+			while (
+				!second.messages.some(
+					message => message.event === "daemon-output" && message.monitorId === subscription.id,
+				) &&
+				Date.now() < deadline
+			) {
+				await Bun.sleep(10);
+			}
+			expect(second.messages.filter(message => typeof message.event === "string")).toMatchObject([
+				{
+					event: "daemon-output",
+					monitorId: subscription.id,
+					registrationId: subscription.registrationId,
+					name: subscription.name,
+				},
+			]);
+			expect(await Bun.file(artifactPath).text()).toBe("RECOVERED\n");
+		} finally {
+			first?.socket.destroy();
+			second?.socket.destroy();
+			await client
+				.request({ op: "stop", name: "offline-artifact-failure", timeoutMs: 2_000 })
+				.catch(() => undefined);
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
+			await broker;
+			setProcessName(previousTitle);
+		}
+	}, 20_000);
 	it("preserves an expired registration's artifact capture when the monitor republishes", async () => {
 		using tempDir = TempDir.createSync("@omp-launch-monitor-expire-");
 		const projectDir = path.join(tempDir.path(), "project");
@@ -2237,6 +2354,7 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 		});
 		const endpoint = daemonBrokerEndpoint(projectDir, runtimeDir);
 		let raw: RawBrokerSocket | undefined;
+		let disposeSpy: { mockRestore(): void } | undefined;
 		try {
 			await client.request({
 				op: "start",
@@ -2276,13 +2394,26 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 				await client.request({ op: "send", name: "backlog", data: `LINE_${index}\n` });
 				await raw.waitFor(message => message.event === "daemon-output" && message.seq === index);
 			}
+			disposeSpy = vi.spyOn(OutputSink.prototype, "dispose").mockRejectedValue(new Error("overflow close failed"));
 			await client.request({ op: "send", name: "backlog", data: "LINE_4\n" });
 			await raw.waitFor(message => message.event === "daemon-monitor-expired");
+			raw.socket.write(
+				`${JSON.stringify({
+					id: "unregister-backlog",
+					token,
+					outputSubscriptionId: "backlog-subscription",
+					outputSubscriptions: [],
+					operation: { op: "ping" },
+				})}\n`,
+			);
+			await raw.waitFor(message => message.id === "unregister-backlog" && message.ok === true);
 
 			expect(raw.messages.filter(message => message.event === "daemon-output")).toHaveLength(3);
 			expect(raw.messages.filter(message => message.event === "daemon-monitor-expired")).toHaveLength(1);
 			expect(await Bun.file(artifactPath).text()).toBe("LINE_1\nLINE_2\nLINE_3\nLINE_4\n");
+			expect(disposeSpy).toHaveBeenCalledTimes(1);
 		} finally {
+			disposeSpy?.mockRestore();
 			raw?.socket.destroy();
 			await client.request({ op: "stop", name: "backlog", timeoutMs: 2_000 }).catch(() => undefined);
 			await client.request({ op: "shutdown" }).catch(() => undefined);
@@ -2834,6 +2965,142 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 			releaseSink.resolve();
 			unregister?.();
 			client.close();
+			const serverClosed = Promise.withResolvers<void>();
+			server.close(() => serverClosed.resolve());
+			await serverClosed.promise;
+		}
+	}, 20_000);
+
+	it("ignores a stale close event after reconnecting on a replacement socket", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-stale-close-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
+		const endpoint = daemonBrokerEndpoint(projectDir, runtimeDir);
+		const secondRequest = Promise.withResolvers<{ request: BrokerRequest; socket: net.Socket }>();
+		const firstRequest = Promise.withResolvers<BrokerRequest>();
+		let firstServerSocket: net.Socket | undefined;
+		let connectionCount = 0;
+		const server = net.createServer(socket => {
+			connectionCount++;
+			const connection = connectionCount;
+			if (connection === 1) firstServerSocket = socket;
+			let buffer = "";
+			socket.on("data", chunk => {
+				buffer += chunk.toString("utf8");
+				let newline = buffer.indexOf("\n");
+				while (newline !== -1) {
+					const line = buffer.slice(0, newline);
+					buffer = buffer.slice(newline + 1);
+					if (line.trim()) {
+						const request = JSON.parse(line) as BrokerRequest;
+						if (connection === 1) firstRequest.resolve(request);
+						if (connection === 1) {
+							socket.write(
+								`${JSON.stringify({
+									id: request.id,
+									ok: true,
+									result: {
+										op: "ping",
+										projectDir,
+										capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY],
+									},
+								})}\n`,
+							);
+						} else {
+							secondRequest.resolve({ request, socket });
+						}
+					}
+					newline = buffer.indexOf("\n");
+				}
+			});
+		});
+		const listening = Promise.withResolvers<void>();
+		server.once("error", listening.reject);
+		server.listen(endpoint, listening.resolve);
+		await listening.promise;
+
+		const originalEmit = net.Socket.prototype.emit;
+		let firstClientSocket: net.Socket | undefined;
+		let heldCloseArgs: unknown[] | undefined;
+		let holdFirstClose = true;
+		const closeHeld = Promise.withResolvers<void>();
+		const emitSpy = vi.spyOn(net.Socket.prototype, "emit").mockImplementation(function (
+			this: net.Socket,
+			event: string | symbol,
+			...args: unknown[]
+		): boolean {
+			if (event === "connect" && !firstClientSocket) firstClientSocket = this;
+			if (event === "close" && this === firstClientSocket && holdFirstClose) {
+				heldCloseArgs = args;
+				closeHeld.resolve();
+				return false;
+			}
+			return Reflect.apply(originalEmit, this, [event, ...args]) as boolean;
+		});
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		let unregister: DaemonOutputUnregister | undefined;
+		try {
+			unregister = client.onOutput?.(
+				{
+					id: "stale-close",
+					name: "stale-close",
+					owner: "owner",
+					artifactPath: path.join(tempDir.path(), "stale-close.log"),
+				},
+				notification => {
+					if (notification.event === "daemon-output") throw new Error("force reconnect");
+				},
+			);
+			if (!unregister) throw new Error("Expected output monitoring registration");
+			const publication = await firstRequest.promise;
+			await unregister.ready;
+			const registrationId = publication.outputSubscriptions?.[0]?.registrationId;
+			if (typeof registrationId !== "string") throw new Error("Expected advertised registration id");
+			if (!firstClientSocket || !firstServerSocket) throw new Error("Expected first broker connection");
+			firstServerSocket.write(
+				`${JSON.stringify({
+					event: "daemon-output",
+					monitorId: "stale-close",
+					registrationId,
+					name: "stale-close",
+					daemonId: "stale-close-daemon",
+					epoch: "stale-close-epoch",
+					seq: 1,
+					text: "FAIL",
+					batchKind: "progress",
+					suppressedEvents: 0,
+				})}\n`,
+			);
+			await closeHeld.promise;
+
+			const replacement = client.request({ op: "ping" });
+			const { request, socket } = await secondRequest.promise;
+			if (!heldCloseArgs) throw new Error("Expected held close event");
+			holdFirstClose = false;
+			Reflect.apply(originalEmit, firstClientSocket, ["close", ...heldCloseArgs]);
+			heldCloseArgs = undefined;
+			socket.write(
+				`${JSON.stringify({
+					id: request.id,
+					ok: true,
+					result: {
+						op: "ping",
+						projectDir,
+						capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY],
+					},
+				})}\n`,
+			);
+
+			await expect(replacement).resolves.toMatchObject({ op: "ping", projectDir });
+		} finally {
+			holdFirstClose = false;
+			if (firstClientSocket && heldCloseArgs)
+				Reflect.apply(originalEmit, firstClientSocket, ["close", ...heldCloseArgs]);
+			unregister?.();
+			client.close();
+			emitSpy.mockRestore();
 			const serverClosed = Promise.withResolvers<void>();
 			server.close(() => serverClosed.resolve());
 			await serverClosed.promise;

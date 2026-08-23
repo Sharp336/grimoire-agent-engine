@@ -514,12 +514,9 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			// The close handler rejects pending requests with one stable error.
 		});
 		socket.on("close", () => {
-			if (this.#socket === socket) {
-				this.#socket = undefined;
-				if (generation === this.#socketGeneration) {
-					this.#socketGeneration++;
-				}
-			}
+			if (this.#socket !== socket || generation !== this.#socketGeneration) return;
+			this.#socket = undefined;
+			this.#socketGeneration++;
 			this.#rejectPending(new Error("Daemon broker connection closed"));
 			this.#scheduleCompletionReconnect();
 		});
@@ -585,7 +582,6 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			}
 		}
 	}
-
 
 	#queueNotificationDelivery(daemonId: string, consumerId: string, deliver: () => Promise<void>): Promise<void> {
 		let consumerTails = this.#notificationDeliveryTails.get(daemonId);

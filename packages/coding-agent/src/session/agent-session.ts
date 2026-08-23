@@ -6446,15 +6446,19 @@ export class AgentSession {
 		this.yieldQueue.requestIdleFlush();
 		return delivered;
 	}
+	captureLaunchProgressEpoch(): number {
+		return this.#launchProgressEpoch;
+	}
 
 	queueLaunchProgress(
 		notification: DaemonOutputNotification,
 		delivery: AsyncJobProgressDelivery,
 		startedAt: number,
+		epoch: number,
 		artifactId?: string,
 	): void {
 		if (this.#isDisposed) throw new Error("Session disposed before launch progress delivery");
-		if (this.#launchProgressBoundaryDepth > 0) return;
+		if (this.#launchProgressBoundaryDepth > 0 || epoch !== this.#launchProgressEpoch) return;
 		const queueKind = delivery === "wake" ? ASYNC_PROGRESS_WAKE_QUEUE_KIND : ASYNC_PROGRESS_MESSAGE_TYPE;
 		this.yieldQueue.enqueue<AsyncProgressEntry>(queueKind, {
 			jobId: notification.name,
@@ -6468,7 +6472,7 @@ export class AgentSession {
 			},
 			seq: notification.seq,
 			elapsedMs: Math.max(0, Date.now() - startedAt),
-			epoch: this.#launchProgressEpoch,
+			epoch,
 			delivery,
 			artifactId,
 			sourceTruncated: notification.truncated,
@@ -6487,6 +6491,10 @@ export class AgentSession {
 	#beginLaunchProgressBoundary(): Disposable {
 		this.#launchProgressBoundaryDepth += 1;
 		this.#launchProgressEpoch += 1;
+		if (this.#activeLaunchWakeMonitors.size > 0) {
+			this.#activeLaunchWakeMonitors.clear();
+			this.#signalLaunchMonitorChanged();
+		}
 		let active = true;
 		return {
 			[Symbol.dispose]: () => {
@@ -6497,9 +6505,9 @@ export class AgentSession {
 		};
 	}
 
-	setLaunchMonitorActive(monitorId: string, delivery: AsyncJobProgressDelivery, active: boolean): void {
+	setLaunchMonitorActive(monitorId: string, delivery: AsyncJobProgressDelivery, active: boolean, epoch: number): void {
 		const wasActive = this.#activeLaunchWakeMonitors.has(monitorId);
-		if (delivery !== "wake" || !active) {
+		if (delivery !== "wake" || !active || epoch !== this.#launchProgressEpoch) {
 			this.#activeLaunchWakeMonitors.delete(monitorId);
 		} else {
 			this.#activeLaunchWakeMonitors.add(monitorId);

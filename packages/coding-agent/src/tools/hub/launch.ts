@@ -79,6 +79,7 @@ interface OutputRegistration {
 	name: string;
 	owner: string;
 	delivery: AsyncJobProgressDelivery;
+	epoch: number;
 	startedAt: number;
 	/** Daemon incarnation this monitor accepted; never rebound by process name. */
 	daemonId?: string;
@@ -116,12 +117,21 @@ async function registerOutputSink(
 	startPending: boolean,
 	daemonId?: string,
 ): Promise<OutputLease | undefined> {
-	if (!session.queueLaunchProgress || !session.queueLaunchCompletion || !client.onOutput) return undefined;
+	const captureLaunchProgressEpoch = session.captureLaunchProgressEpoch;
+	if (
+		!captureLaunchProgressEpoch ||
+		!session.queueLaunchProgress ||
+		!session.queueLaunchCompletion ||
+		!client.onOutput
+	) {
+		return undefined;
+	}
+	const epoch = captureLaunchProgressEpoch();
 	const existing = outputRegistrations.get(session)?.get(client)?.get(name);
-	if (existing?.binding === "start-pending" && startPending) {
+	if (existing?.epoch === epoch && existing.binding === "start-pending" && startPending) {
 		return existing.acquirePendingStart?.(delivery);
 	}
-	if (existing && !startPending && existing.daemonId === daemonId) {
+	if (existing?.epoch === epoch && existing.active && !startPending && existing.daemonId === daemonId) {
 		// Retune of a live monitor. The operation is still validating, so
 		// keep the prior delivery mode until retain(): output arriving
 		// during a failed retune must be delivered under the old mode —
@@ -134,10 +144,14 @@ async function registerOutputSink(
 				if (settled) return;
 				await existing.ready;
 				settled = true;
+				if (captureLaunchProgressEpoch() !== existing.epoch) {
+					await existing.cleanup();
+					return;
+				}
 				if (!existing.active || existing.delivery === delivery) return;
-				session.setLaunchMonitorActive?.(existing.id, existing.delivery, false);
+				session.setLaunchMonitorActive?.(existing.id, existing.delivery, false, existing.epoch);
 				existing.delivery = delivery;
-				session.setLaunchMonitorActive?.(existing.id, delivery, true);
+				session.setLaunchMonitorActive?.(existing.id, delivery, true, existing.epoch);
 			},
 			reject: async () => {
 				settled = true;
@@ -146,8 +160,9 @@ async function registerOutputSink(
 	}
 	const artifact = await session.allocateOutputArtifact?.("hub-progress");
 	if (!artifact?.id || !artifact.path) return undefined;
+	if (captureLaunchProgressEpoch() !== epoch) return undefined;
 	const current = outputRegistrations.get(session)?.get(client)?.get(name);
-	if (current?.active && current.binding === "start-pending" && startPending) {
+	if (current?.epoch === epoch && current.active && current.binding === "start-pending" && startPending) {
 		return current.acquirePendingStart?.(delivery);
 	}
 	const replaceable = current?.active === true ? current : undefined;
@@ -172,6 +187,7 @@ async function registerOutputSink(
 		// registration while allocation is pending.
 		await replaceable.cleanup();
 	}
+	if (captureLaunchProgressEpoch() !== epoch) return undefined;
 	// (Re-)link the per-session maps only after the stale registration was
 	// replaced above: its cleanup may have unlinked the maps it lived in.
 	let clients = outputRegistrations.get(session);
@@ -195,6 +211,7 @@ async function registerOutputSink(
 		id,
 		name,
 		owner,
+		epoch,
 		delivery,
 		daemonId,
 		binding: startPending ? "start-pending" : "attached",
@@ -206,7 +223,7 @@ async function registerOutputSink(
 		cleanup: () => {
 			if (cleanupPromise) return cleanupPromise;
 			registration.active = false;
-			session.setLaunchMonitorActive?.(id, registration.delivery, false);
+			session.setLaunchMonitorActive?.(id, registration.delivery, false, registration.epoch);
 			unregisterOutput();
 			unregisterDispose?.();
 			unregisterSessionChange?.();
@@ -229,6 +246,7 @@ async function registerOutputSink(
 					notification,
 					registration.delivery,
 					registration.startedAt,
+					registration.epoch,
 					registration.artifactId,
 				);
 			}
@@ -287,13 +305,13 @@ async function registerOutputSink(
 	// lease is retained and discard them on reject, so a failed operation
 	// never wakes the session.
 	let speculative: DaemonMonitorNotification[] | undefined = [];
-	let speculativeFlush: Promise<void> = Promise.resolve();
+	let speculativeFlush: Promise<void> | undefined;
 	const sink = async (notification: DaemonMonitorNotification): Promise<void> => {
 		if (speculative) {
 			speculative.push(notification);
 			return;
 		}
-		await speculativeFlush;
+		if (speculativeFlush) await speculativeFlush;
 		await deliver(notification);
 	};
 	const subscription: DaemonOutputSubscription = { id, name, owner, artifactPath: artifact.path, daemonId };
@@ -308,18 +326,19 @@ async function registerOutputSink(
 	const flushSpeculative = async (): Promise<void> => {
 		const buffered = speculative;
 		speculative = undefined;
-		if (buffered && buffered.length > 0) {
-			speculativeFlush = (async () => {
-				for (const notification of buffered) await deliver(notification, false);
-			})().catch(error => {
-				logger.warn("Buffered launch monitor delivery failed", {
-					monitorId: id,
-					name,
-					error: error instanceof Error ? error.message : String(error),
-				});
+		if (!buffered || buffered.length === 0) return;
+		const pendingFlush = (async () => {
+			for (const notification of buffered) await deliver(notification, false);
+		})().catch(error => {
+			logger.warn("Buffered launch monitor delivery failed", {
+				monitorId: id,
+				name,
+				error: error instanceof Error ? error.message : String(error),
 			});
-		}
-		await speculativeFlush;
+		});
+		speculativeFlush = pendingFlush;
+		await pendingFlush;
+		if (speculativeFlush === pendingFlush) speculativeFlush = undefined;
 	};
 	const restorePrevious = async (): Promise<void> => {
 		if (!previous) return;
@@ -347,17 +366,28 @@ async function registerOutputSink(
 					if (settled) return;
 					settled = true;
 					pendingLeases--;
+					if (captureLaunchProgressEpoch() !== registration.epoch) {
+						await registration.cleanup();
+						return;
+					}
 					if (!registration.active) return;
 					if (registration.delivery !== requestedDelivery) {
-						session.setLaunchMonitorActive?.(id, registration.delivery, false);
+						session.setLaunchMonitorActive?.(id, registration.delivery, false, registration.epoch);
 						registration.delivery = requestedDelivery;
-						session.setLaunchMonitorActive?.(id, requestedDelivery, true);
+						session.setLaunchMonitorActive?.(id, requestedDelivery, true, registration.epoch);
 					}
 					if (startAccepted) return;
 					startAccepted = true;
 					registration.binding = "attached";
 					subscription.startPending = undefined;
+					if (captureLaunchProgressEpoch() !== registration.epoch) {
+						await registration.cleanup();
+						return;
+					}
 					await flushSpeculative();
+					if (captureLaunchProgressEpoch() !== registration.epoch) {
+						await registration.cleanup();
+					}
 				},
 				reject: async () => {
 					if (settled) return;
@@ -371,13 +401,13 @@ async function registerOutputSink(
 			};
 		};
 		monitors.set(name, registration);
-		session.setLaunchMonitorActive?.(id, delivery, true);
+		session.setLaunchMonitorActive?.(id, delivery, true, registration.epoch);
 		unregisterDispose = session.registerDisposeCallback?.(() => void registration.cleanup());
 		unregisterSessionChange = session.registerSessionChangeCallback?.(() => void registration.cleanup());
 		return registration.acquirePendingStart(delivery);
 	}
 	monitors.set(name, registration);
-	session.setLaunchMonitorActive?.(id, delivery, true);
+	session.setLaunchMonitorActive?.(id, delivery, true, registration.epoch);
 	unregisterDispose = session.registerDisposeCallback?.(() => void registration.cleanup());
 	unregisterSessionChange = session.registerSessionChangeCallback?.(() => void registration.cleanup());
 	let retained = false;
@@ -385,9 +415,20 @@ async function registerOutputSink(
 		registration,
 		bindDaemon,
 		retain: async () => {
+			if (captureLaunchProgressEpoch() !== registration.epoch) {
+				await registration.cleanup();
+				return;
+			}
 			await registration.ready;
+			if (captureLaunchProgressEpoch() !== registration.epoch) {
+				await registration.cleanup();
+				return;
+			}
 			retained = true;
 			await flushSpeculative();
+			if (captureLaunchProgressEpoch() !== registration.epoch) {
+				await registration.cleanup();
+			}
 		},
 		reject: async () => {
 			speculative = undefined;
@@ -886,7 +927,14 @@ export async function executeLaunch(
 			details: await toolDetails(result, params, detached),
 		};
 	} catch (error) {
-		await outputLease?.reject();
+		try {
+			await outputLease?.reject();
+		} catch (rejectError) {
+			logger.warn("Launch monitor lease rollback failed", {
+				name,
+				error: rejectError instanceof Error ? rejectError.message : String(rejectError),
+			});
+		}
 		if (error instanceof DaemonBrokerRejectedError && completionOwner) {
 			if (completionLease?.hasConcurrentRequest()) {
 				completionLease.reject();

@@ -54,6 +54,7 @@ interface MonitorHarness {
 	}>;
 	completions: DaemonCompletionNotification[];
 	active: Array<{ monitorId: string; delivery: string; active: boolean }>;
+	epochs: number[];
 	disposeCallbacks: Array<() => void>;
 	getOutputSink(): ((notification: DaemonMonitorNotification) => void | Promise<void>) | undefined;
 	getSubscription(): DaemonOutputSubscription | undefined;
@@ -75,6 +76,7 @@ function createHarness(
 	const progress: MonitorHarness["progress"] = [];
 	const completions: DaemonCompletionNotification[] = [];
 	const active: MonitorHarness["active"] = [];
+	const epochs: number[] = [];
 	const disposeCallbacks: Array<() => void> = [];
 	let outputSink: ((notification: DaemonMonitorNotification) => void | Promise<void>) | undefined;
 	let subscription: DaemonOutputSubscription | undefined;
@@ -119,18 +121,22 @@ function createHarness(
 		allocateOutputArtifact: async () => allocatedArtifact,
 		getSessionId: () => OWNER,
 		isDisposed: () => false,
+		captureLaunchProgressEpoch: () => 17,
 		queueLaunchProgress: (
 			notification: Extract<DaemonMonitorNotification, { event: "daemon-output" }>,
 			delivery: string,
 			_startedAt: number,
+			epoch: number,
 			artifactId?: string,
 		) => {
+			epochs.push(epoch);
 			progress.push({ notification, delivery, artifactId });
 		},
 		queueLaunchCompletion: async (notification: DaemonCompletionNotification) => {
 			completions.push(notification);
 		},
-		setLaunchMonitorActive: (monitorId: string, delivery: string, isActive: boolean) => {
+		setLaunchMonitorActive: (monitorId: string, delivery: string, isActive: boolean, epoch: number) => {
+			epochs.push(epoch);
 			active.push({ monitorId, delivery, active: isActive });
 		},
 		registerDisposeCallback: (callback: () => void) => {
@@ -146,6 +152,7 @@ function createHarness(
 		completions,
 		active,
 		disposeCallbacks,
+		epochs,
 		getOutputSink: () => outputSink,
 		getSubscription: () => subscription,
 		unregisterCount: () => unregisters,
@@ -207,6 +214,7 @@ describe("hub process output monitoring", () => {
 			},
 		]);
 		expect(harness.active).toEqual([{ monitorId: subscription.id, delivery: "wake", active: true }]);
+		expect(harness.epochs).toEqual([17, 17]);
 	});
 
 	it("validates a monitored start before advertising its subscription", async () => {
@@ -318,6 +326,29 @@ describe("hub process output monitoring", () => {
 		expect(harness.progress.map(item => item.notification.text)).toEqual(["after attach"]);
 	});
 
+	it("enqueues attached output before yielding to independent completion delivery", async () => {
+		const harness = createHarness();
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+
+		await executeLaunch(harness.session, { op: "monitor", name: daemon.name, progress: "ambient" });
+		const subscription = harness.getSubscription();
+		const sink = harness.getOutputSink();
+		if (!subscription || !sink) throw new Error("Expected output subscription");
+		const delivery = sink({
+			event: "daemon-output",
+			monitorId: subscription.id,
+			name: daemon.name,
+			daemonId: daemon.id,
+			seq: 1,
+			text: "final ambient output",
+			batchKind: "progress",
+			suppressedEvents: 0,
+		});
+
+		expect(harness.progress.map(item => item.notification.text)).toEqual(["final ambient output"]);
+		await delivery;
+	});
+
 	it("attaches to an existing process and updates its delivery mode in place", async () => {
 		const harness = createHarness();
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
@@ -382,7 +413,10 @@ describe("hub process output monitoring", () => {
 		expect(harness.unregisterCount()).toBe(1);
 		expect(harness.registrationCount()).toBe(1);
 		expect(harness.progress).toEqual([
-			expect.objectContaining({ delivery: "ambient", notification: expect.objectContaining({ text: "replacement output" }) }),
+			expect.objectContaining({
+				delivery: "ambient",
+				notification: expect.objectContaining({ text: "replacement output" }),
+			}),
 		]);
 	});
 
@@ -451,7 +485,10 @@ describe("hub process output monitoring", () => {
 			suppressedEvents: 0,
 		});
 		expect(harness.progress).toEqual([
-			expect.objectContaining({ delivery: "ambient", notification: expect.objectContaining({ text: "restored output" }) }),
+			expect.objectContaining({
+				delivery: "ambient",
+				notification: expect.objectContaining({ text: "restored output" }),
+			}),
 		]);
 	});
 
@@ -1058,6 +1095,41 @@ describe("hub process output monitoring", () => {
 			{ text: "still monitored", delivery: "ambient" },
 		]);
 		expect(harness.unregisterCount()).toBe(2);
+	});
+
+	it("preserves the launch failure when restoring the prior monitor also fails", async () => {
+		const harness = createHarness();
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+		let allocationCount = 0;
+		vi.spyOn(harness.session, "allocateOutputArtifact").mockImplementation(async () => {
+			allocationCount++;
+			if (allocationCount === 3) throw new Error("restore failed");
+			return {
+				id: `hub-progress-${allocationCount}`,
+				path: path.join(process.cwd(), `.hub-progress-${allocationCount}.log`),
+			};
+		});
+
+		await executeLaunch(harness.session, { op: "monitor", name: daemon.name, progress: "ambient" });
+		vi.spyOn(harness.client, "request").mockImplementation(async operation => {
+			if (operation.op === "ping") {
+				return { op: "ping", projectDir: process.cwd(), capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] };
+			}
+			if (operation.op === "start") throw new Error(`Daemon ${daemon.name} is already running`);
+			throw new Error(`Unexpected operation: ${operation.op}`);
+		});
+
+		await expect(
+			executeLaunch(harness.session, {
+				op: "start",
+				name: daemon.name,
+				application: process.execPath,
+				pty: false,
+				persist: true,
+				progress: "wake",
+			}),
+		).rejects.toThrow("already running");
+		expect(allocationCount).toBe(3);
 	});
 
 	it("restores start-pending state when an overlapping replacement start fails", async () => {

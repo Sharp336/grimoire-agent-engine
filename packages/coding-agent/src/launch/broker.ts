@@ -156,6 +156,8 @@ interface OutputRegistration extends DaemonOutputWireSubscription {
 	batchKey: string;
 	pending: DaemonMonitorWireNotification[];
 	artifactSink: OutputSink;
+	artifactDisposal?: Promise<void>;
+	/** Reconnect-grace cleanup for registrations without an attached live client. */
 	offlineTimer?: NodeJS.Timeout;
 	/** Artifact persistence failed; retain only the terminal expiry until client cleanup. */
 	disabled?: boolean;
@@ -550,15 +552,7 @@ class DaemonBroker {
 		const outputDisposals: Promise<void>[] = [];
 		for (const registration of this.#outputRegistrations.values()) {
 			clearTimeout(registration.offlineTimer);
-			outputDisposals.push(
-				registration.artifactSink.dispose().catch(error => {
-					logger.warn("Failed to dispose daemon monitor artifact sink", {
-						monitorId: registration.id,
-						name: registration.name,
-						error: error instanceof Error ? error.message : String(error),
-					});
-				}),
-			);
+			outputDisposals.push(this.#disposeOutputArtifact(registration));
 		}
 		this.#outputRegistrations.clear();
 		this.#progressBatcher.dispose();
@@ -616,20 +610,7 @@ class DaemonBroker {
 			for (const [registrationKey, registration] of this.#outputRegistrations) {
 				if (registration.socket !== socket) continue;
 				registration.socket = undefined;
-				if (registration.disabled) {
-					clearTimeout(registration.offlineTimer);
-					registration.offlineTimer = undefined;
-					continue;
-				}
-				registration.offlineTimer = setTimeout(() => {
-					if (registration.socket || this.#outputRegistrations.get(registrationKey) !== registration) {
-						return;
-					}
-					this.#outputRegistrations.delete(registrationKey);
-					this.#progressBatcher.clear(registration.batchKey);
-					void registration.artifactSink.dispose();
-				}, this.#outputReconnectGraceMs);
-				registration.offlineTimer.unref();
+				this.#scheduleOutputRegistrationCleanup(registrationKey, registration);
 			}
 		});
 	}
@@ -1049,7 +1030,6 @@ class DaemonBroker {
 			if (registration.disabled) continue;
 			if (registration.name !== record.snapshot.name) continue;
 			if (registration.daemonId === undefined) {
-
 				if (registration.startPending === true) continue;
 				registration.daemonId = record.snapshot.id;
 			}
@@ -1088,17 +1068,41 @@ class DaemonBroker {
 						error: error instanceof Error ? error.message : String(error),
 					});
 				}
-				try {
-					await registration.artifactSink.dispose();
-				} catch (error) {
-					logger.warn("Failed to dispose daemon monitor artifact sink", {
-						monitorId: registration.id,
-						name: registration.name,
-						error: error instanceof Error ? error.message : String(error),
-					});
-				}
+				await this.#disposeOutputArtifact(registration);
 			}),
 		);
+	}
+
+	#disposeOutputArtifact(registration: OutputRegistration): Promise<void> {
+		registration.artifactDisposal ??= registration.artifactSink.dispose().catch(error => {
+			logger.warn("Failed to dispose daemon monitor artifact sink", {
+				monitorId: registration.id,
+				name: registration.name,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		});
+		return registration.artifactDisposal;
+	}
+
+	#disposeOutputRegistration(registrationKey: string, registration: OutputRegistration): void {
+		if (this.#outputRegistrations.get(registrationKey) !== registration) return;
+		clearTimeout(registration.offlineTimer);
+		registration.offlineTimer = undefined;
+		this.#outputRegistrations.delete(registrationKey);
+		this.#progressBatcher.clear(registration.batchKey);
+		void this.#disposeOutputArtifact(registration);
+	}
+
+	#scheduleOutputRegistrationCleanup(registrationKey: string, registration: OutputRegistration): void {
+		clearTimeout(registration.offlineTimer);
+		const timer = setTimeout(() => {
+			if (registration.offlineTimer !== timer) return;
+			registration.offlineTimer = undefined;
+			if (registration.socket && !registration.socket.destroyed) return;
+			this.#disposeOutputRegistration(registrationKey, registration);
+		}, this.#outputReconnectGraceMs);
+		registration.offlineTimer = timer;
+		timer.unref();
 	}
 
 	async #syncOutputSubscriptions(
@@ -1121,11 +1125,7 @@ class DaemonBroker {
 				const remove = (): void => {
 					if (!current()) return;
 					const key = outputRegistrationKey(subscriptionId, registration.id);
-					if (this.#outputRegistrations.get(key) !== registration) return;
-					clearTimeout(registration.offlineTimer);
-					this.#outputRegistrations.delete(key);
-					this.#progressBatcher.clear(registration.batchKey);
-					void registration.artifactSink.dispose();
+					this.#disposeOutputRegistration(key, registration);
 				};
 				if (record && record.snapshot.id === registration.daemonId) {
 					await this.#queueRecordOutputWork(record, remove);
@@ -1188,12 +1188,7 @@ class DaemonBroker {
 					}
 					if (!current()) return;
 					const replaced = this.#outputRegistrations.get(key);
-					if (replaced) {
-						clearTimeout(replaced.offlineTimer);
-						this.#outputRegistrations.delete(key);
-						this.#progressBatcher.clear(replaced.batchKey);
-						void replaced.artifactSink.dispose();
-					}
+					if (replaced) this.#disposeOutputRegistration(key, replaced);
 					const currentDaemonId = subscription.startPending === true ? undefined : record?.snapshot.id;
 					const registration = createOutputRegistration(
 						subscription,
@@ -1268,7 +1263,7 @@ class DaemonBroker {
 		) {
 			registration.disabled = true;
 			this.#progressBatcher.clear(registration.batchKey);
-			void registration.artifactSink.dispose();
+			void this.#disposeOutputArtifact(registration);
 			const expired: DaemonMonitorWireNotification = {
 				event: "daemon-monitor-expired",
 				monitorId: registration.id,
@@ -1331,10 +1326,11 @@ class DaemonBroker {
 		} catch (error) {
 			if (this.#outputRegistrations.get(key) === registration) {
 				registration.disabled = true;
-				clearTimeout(registration.offlineTimer);
-				registration.offlineTimer = undefined;
 				this.#progressBatcher.clear(registration.batchKey);
-				void registration.artifactSink.dispose();
+				void this.#disposeOutputArtifact(registration);
+				if (!registration.socket || registration.socket.destroyed) {
+					this.#scheduleOutputRegistrationCleanup(key, registration);
+				}
 				this.#sendMonitorNotification(registration, {
 					event: "daemon-monitor-expired",
 					monitorId: registration.id,
