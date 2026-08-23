@@ -38,6 +38,15 @@ describe("progress preview line snapping", () => {
 		expect(preview.text).toBe(text);
 	});
 
+	test("empty truncated windows preserve truncation when merged with visible output", () => {
+		const merged = mergeProgressPreviews({ truncated: true }, { text: "visible output", truncated: false });
+		expect(merged).toEqual({ text: "visible output", truncated: true });
+		expect(mergeProgressPreviews({ truncated: true }, { text: "", truncated: false })).toEqual({
+			text: "",
+			truncated: true,
+		});
+	});
+
 	test("oversized byte split rejoins to a prefix and suffix of the source", () => {
 		const text = Array.from({ length: 400 }, (_, i) => `wire line ${i + 1}`).join("\n");
 		const preview = buildProgressPreview(text);

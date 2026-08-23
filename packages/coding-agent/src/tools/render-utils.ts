@@ -737,7 +737,8 @@ export function shortenEmbeddedPaths(text: string, homeDir = os.homedir()): stri
 		? [...new Set([homeDir, homeDir.replaceAll("\\", "/"), homeDir.replaceAll("/", "\\")])]
 		: [homeDir];
 	const caseInsensitive = isWindowsPath;
-	const trailingBoundary = "(?=$|[\\\\/]|\\s|\\x1b|[\"'`()\\[\\]{}<>=:;,|&.!?]+(?=$|\\s))";
+	const trailingBoundary =
+		"(?=$|[\\\\/]|\\s|\\x1b|&(?:quot|apos|gt);|[\"'`)\\]}>]|[\"'`()\\[\\]{}<>=:;,|&.!?]+(?=$|\\s))";
 	for (const homePath of homePaths) {
 		const homePrefix = new RegExp(
 			`(?<![\\p{L}\\p{N}_-])${RegExp.escape(homePath)}${trailingBoundary}`,

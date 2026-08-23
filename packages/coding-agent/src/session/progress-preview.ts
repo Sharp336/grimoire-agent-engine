@@ -88,9 +88,9 @@ export class ProgressPreviewAccumulator {
 	#sourceTruncated = false;
 
 	append(text: string, sourceTruncated = false): void {
+		this.#sourceTruncated ||= sourceTruncated;
 		if (text.length === 0) return;
 		const chunk = this.#hasOutput() ? `\n${text}` : text;
-		this.#sourceTruncated ||= sourceTruncated;
 		if (this.#truncated) {
 			this.#tail = truncateTailBytes(`${this.#tail}${chunk}`, PROGRESS_PREVIEW_TAIL_BYTES).text;
 			return;
@@ -113,7 +113,12 @@ export class ProgressPreviewAccumulator {
 	}
 
 	take(): ProgressPreview | undefined {
-		if (!this.#hasOutput()) return undefined;
+		if (!this.#hasOutput()) {
+			if (!this.#sourceTruncated) return undefined;
+			const preview = buildProgressPreview("", true);
+			this.clear();
+			return preview;
+		}
 		const preview = this.#truncated
 			? { head: this.#head, tail: this.#tail, truncated: true }
 			: buildProgressPreview(this.#text, this.#sourceTruncated);

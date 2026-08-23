@@ -98,11 +98,13 @@ describe("async progress transcript display sanitization", () => {
 		const longerComponent = `${home}2/project`;
 		const punctuationSiblings = [`${home}.backup/log`, `${home}@work/log`, `${home}+work/log`, `${home}$work/log`];
 		const embeddedPath = `/mnt${home}/project`;
+		const adjacentJson = `{"cwd":"${home}","next":1}`;
 		const rawProgress = [
 			`space: ${home} next`,
 			`period: ${home}.`,
 			`backtick: \`${home}\``,
 			`longer: ${longerComponent}`,
+			adjacentJson,
 			...punctuationSiblings.map(sibling => `sibling: ${sibling}`),
 			`embedded: ${embeddedPath}`,
 		].join("\n");
@@ -113,10 +115,11 @@ describe("async progress transcript display sanitization", () => {
 		expect(displayMessage.content).toContain("space: ~ next");
 		expect(displayMessage.content).toContain("period: ~.");
 		expect(displayMessage.content).toContain("backtick: `~`");
+		expect(displayMessage.content).toContain("{&quot;cwd&quot;:&quot;~&quot;,&quot;next&quot;:1}");
 		expect(displayMessage.content).toContain(`longer: ${longerComponent}`);
 		for (const sibling of punctuationSiblings) expect(displayMessage.content).toContain(`sibling: ${sibling}`);
 		expect(displayMessage.content).toContain(`embedded: ${embeddedPath}`);
-		expect(message.content).toContain(rawProgress);
+		expect(message.details?.jobs[0]?.text).toBe(rawProgress);
 	});
 
 	it("shortens mixed-case Windows home paths without exposing the user directory", () => {
