@@ -1,3 +1,5 @@
+import type { AgentDefinition } from "./types";
+
 /** Default agent used when a session has unrestricted spawning. */
 export const DEFAULT_SPAWN_AGENT = "task";
 
@@ -55,6 +57,43 @@ export function resolveSpawnPolicy(parentSpawns: string | boolean | null | undef
 		allowedErrorText: allowedAgents.join(","),
 		allowedPromptText: allowedAgents.map(agent => `\`${agent}\``).join(", "),
 	};
+}
+
+/**
+ * Whether an agent definition can be spawned as a subagent: not
+ * primary/unavailable (structured-subagent preflight rejects those), not
+ * disabled via `task.disabledAgents`, and permitted by the spawn policy.
+ */
+export function isSpawnableAgent(
+	agent: AgentDefinition,
+	spawnPolicy: ResolvedSpawnPolicy,
+	disabledAgents: readonly string[] | undefined,
+): boolean {
+	if (agent.availability === "primary" || agent.availability === "unavailable") return false;
+	if (disabledAgents?.includes(agent.name)) return false;
+	return spawnPolicy.allowedAgents === null || spawnPolicy.allowedAgents.includes(agent.name);
+}
+
+/**
+ * The agent a spawn defaults to when the caller omits `agent`, derived from
+ * SPAWNABLE agents only. The raw policy default comes from the parent's
+ * `spawns` frontmatter and may name an agent that cannot actually be spawned
+ * (primary-only/unavailable, disabled, or not in the allowed list) — the task
+ * schema and execute path must never fill that unspawnable default, or every
+ * omitted-agent call fails preflight. Returns the policy default when it is
+ * spawnable, else the first spawnable agent, else `undefined` (no spawnable
+ * agents remain).
+ */
+export function resolveEffectiveDefaultAgent(
+	spawnPolicy: ResolvedSpawnPolicy,
+	agents: readonly AgentDefinition[],
+	disabledAgents: readonly string[] | undefined,
+): string | undefined {
+	if (!spawnPolicy.enabled) return undefined;
+	const spawnable = agents.filter(agent => isSpawnableAgent(agent, spawnPolicy, disabledAgents));
+	if (spawnable.length === 0) return undefined;
+	if (spawnable.some(agent => agent.name === spawnPolicy.defaultAgent)) return spawnPolicy.defaultAgent;
+	return spawnable[0]!.name;
 }
 
 /**

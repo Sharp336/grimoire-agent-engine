@@ -60,6 +60,79 @@ describe("task spawn policy surfaces", () => {
 		expect(description).toContain("### fact-finder");
 		expect(description).not.toContain("### oracle");
 	});
+
+	it("never advertises an unspawnable primary-only agent as the default", async () => {
+		// Regression: the spawn policy default comes from the parent's raw
+		// `spawns` frontmatter and can name an agent that cannot actually be
+		// spawned (primary-only). The description and the wire schema must
+		// derive the default from the SPAWNABLE roster instead, or every
+		// omitted-agent task call fails preflight.
+		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({
+			agents: [
+				{
+					name: "primary-only",
+					description: "Main-session only.",
+					systemPrompt: "Primary.",
+					source: "bundled",
+					availability: "primary",
+				},
+				factFinderAgent,
+			],
+			projectAgentsDir: null,
+		});
+
+		// The policy allows both agents but names the primary-only one first,
+		// so the raw default is unspawnable.
+		const tool = await TaskTool.create(makeSession("primary-only,fact-finder"));
+		const description = tool.description;
+
+		// The primary-only agent is not advertised as spawnable at all, and
+		// the default falls back to the first spawnable agent.
+		expect(description).not.toContain("primary-only");
+		expect(description).toContain("### fact-finder");
+		expect(description).toContain("spawn-policy default (`fact-finder`)");
+
+		// The wire schema's default agent is the spawnable fallback, not the
+		// unspawnable policy default. (makeSession enables task.batch, so the
+		// schema is the batch shape.)
+		const schema = tool.parameters;
+		const parsed = schema({ context: "ctx", tasks: [{ task: "check" }] });
+		expect(parsed).toEqual({ context: "ctx", tasks: [{ agent: "fact-finder", task: "check" }] });
+	});
+
+	it("disables spawning when every allowed agent is unspawnable", async () => {
+		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({
+			agents: [
+				{
+					name: "primary-only",
+					description: "Main-session only.",
+					systemPrompt: "Primary.",
+					source: "bundled",
+					availability: "primary",
+				},
+			],
+			projectAgentsDir: null,
+		});
+
+		const tool = await TaskTool.create(makeSession("primary-only"));
+		const description = tool.description;
+
+		// No spawnable agents remain: the roster is empty and no default agent
+		// name is advertised — the description reads as spawning-disabled.
+		expect(description).toContain("Agent spawning is currently disabled.");
+		// The merged task.md template always renders the literal "spawn-policy
+		// default" guidance; what must stay absent is a NAMED default (the
+		// `defaultAgent` slot is empty when no spawnable agent exists).
+		expect(description).not.toMatch(/spawn-policy default \(`\S+`\)/);
+		expect(description).not.toContain("primary-only");
+
+		// The schema must not default to the unspawnable agent either; it
+		// falls back to the generic worker, which the preflight then rejects
+		// with the policy's allowed list.
+		const schema = tool.parameters;
+		const parsed = schema({ context: "ctx", tasks: [{ task: "check" }] });
+		expect(parsed).toEqual({ context: "ctx", tasks: [{ agent: "task", task: "check" }] });
+	});
 });
 
 describe("isScoutSpawnable", () => {
@@ -128,5 +201,45 @@ describe("task tool description scout gating", () => {
 		// policy only filters disabledAgents, so reviewer stays); only the
 		// hard-coded scout guidance is dropped.
 		expect(description).toContain("### reviewer");
+	});
+
+	it("omits primary-only and unavailable agents from the task roster", async () => {
+		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({
+			agents: [
+				{ name: "scout", description: "Read-only scout.", systemPrompt: "Scout.", source: "bundled" },
+				{ name: "reviewer", description: "Reviewer.", systemPrompt: "Review.", source: "bundled" },
+				{
+					name: "primary-only",
+					description: "Main-session only.",
+					systemPrompt: "Primary.",
+					source: "bundled",
+					availability: "primary",
+				},
+				{
+					name: "denied",
+					description: "Denied to both roles.",
+					systemPrompt: "Denied.",
+					source: "bundled",
+					availability: "unavailable",
+				},
+			],
+			projectAgentsDir: null,
+		});
+		const settings = Settings.isolated({
+			"async.enabled": false,
+			"task.batch": true,
+			"task.isolation.mode": "none",
+		});
+		const tool = await TaskTool.create({
+			cwd: process.cwd(),
+			hasUI: false,
+			settings,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+		} as unknown as ToolSession);
+		// Spawnable agents stay; primary/unavailable are never advertised.
+		expect(tool.description).toContain("### reviewer");
+		expect(tool.description).not.toContain("primary-only");
+		expect(tool.description).not.toContain("denied");
 	});
 });

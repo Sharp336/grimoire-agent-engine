@@ -25,6 +25,8 @@ import {
 } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
+import type { SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
 import { VIBE_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/tools/vibe";
 import { logger, removeSyncWithRetries, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
 
@@ -932,6 +934,40 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(session.getEnabledToolNames()).toContain("memory_race_lifecycle_tool");
 		} finally {
 			releaseActivation.resolve();
+			await session.dispose();
+		}
+	});
+
+	it("does not widen memory tools past a live persona restriction on backend apply", async () => {
+		// A live `/agent` persona with an explicit `tools:` grant narrows the
+		// session durably. A later `/set memory.backend …` (applyMemoryBackend)
+		// replaces the memory tools; the replacement must register new backend
+		// tools but NOT activate ones the persona did not grant — otherwise a
+		// write-capable `learn` becomes callable under a read-only persona.
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			settings: Settings.isolated({ "memory.backend": "local", "autolearn.enabled": true }),
+		});
+		try {
+			await session.applyMemoryBackend();
+			expect(session.getEnabledToolNames()).toContain("learn");
+
+			await session.setBaselineToolNames(session.getEnabledToolNames());
+			await session.applyPersonaTools(["read"]);
+			expect(session.getEnabledToolNames()).toEqual(["read"]);
+
+			// The backend apply re-creates `learn` (a MEMORY_BACKEND_TOOL_NAMES
+			// member) but must not activate it past the persona grant.
+			await session.applyMemoryBackend();
+			expect(session.getEnabledToolNames()).toEqual(["read"]);
+
+			// Leaving agent mode restores the unrestricted baseline, and a later
+			// backend apply activates the memory tool again.
+			await session.restoreBaselineTools();
+			await session.applyMemoryBackend();
+			expect(session.getEnabledToolNames()).toContain("learn");
+		} finally {
 			await session.dispose();
 		}
 	});
@@ -1978,13 +2014,17 @@ describe("createAgentSession defaultInactive tool activation", () => {
 					"read",
 					"yield",
 					"generate_image",
-					"learn",
-					"manage_skill",
 					"tts",
 					"default_active_tool",
 					"sdk_custom_tool",
 				]),
 			);
+			// An explicit `toolNames` list is the user's EXACT request: the
+			// auto-learn tools are NOT auto-activated from registry presence
+			// (the registry is widened for baseline capture, so presence no
+			// longer proves the user asked for the tool).
+			expect(activeToolNames).not.toContain("manage_skill");
+			expect(activeToolNames).not.toContain("learn");
 			// Without a granted write tool the session allocates no xd:// state;
 			// SDK custom and extension capabilities surface top-level instead.
 			expect(activeToolNames).not.toContain("write");
@@ -2210,6 +2250,534 @@ describe("createAgentSession defaultInactive tool activation", () => {
 				expect(result.isError).toBe(false);
 				expect(fs.existsSync(liveTarget)).toBe(false);
 				expect(fs.existsSync(staleTarget)).toBe(true);
+			} finally {
+				await session.dispose();
+			}
+		});
+	});
+
+	it("revokes Cursor delete after a /agent switch to a read-only persona and restores it on switch back", async () => {
+		// codex #3761853483 (wave-22 P1): `cursorCanMutateFiles` was computed at
+		// launch time, so a session that started with write/edit active kept the
+		// mutation permission after `/agent` switched to a read-only persona
+		// (`tools: [read]`). The bridge now reads the LIVE active set, so the
+		// native `delete` frame follows the persona switch in both directions.
+		// The session is WRITE-ONLY at launch (`toolNames: ["read", "write"]`):
+		// `editWasGranted` is false, so the launch-grant floor (wave-22 P2) does
+		// not apply and the live revocation is observable.
+		const tempDir = makeTempDir();
+		const cursorModel = getBundledModel("cursor", "composer-1.5");
+		if (!cursorModel) throw new Error("expected bundled Cursor model");
+
+		await withProviderAuth(["cursor"], async () => {
+			const sessionManager = SessionManager.inMemory(tempDir);
+			const { session } = await createAgentSession({
+				...baseOptions(tempDir),
+				sessionManager,
+				toolNames: ["read", "write"],
+			});
+			try {
+				const handlers = await captureCursorExecHandlers(session, cursorModel);
+
+				// Control 1: write active at launch -> the delete executes.
+				const firstTarget = path.join(tempDir, "first.txt");
+				fs.writeFileSync(firstTarget, "remove me");
+				const before = await handlers.delete({ toolCallId: "sdk-persona-1", path: "first.txt" } as never);
+				expect(before.isError).toBe(false);
+				expect(fs.existsSync(firstTarget)).toBe(false);
+
+				// The fix: `/agent` switches to a read-only persona (`tools: [read]`),
+				// dropping write from the active set. The delete must be REJECTED
+				// and the file preserved.
+				await session.applyPersonaTools(["read"]);
+				expect(session.getActiveToolNames()).not.toContain("write");
+				const secondTarget = path.join(tempDir, "second.txt");
+				fs.writeFileSync(secondTarget, "keep me");
+				const after = await handlers.delete({ toolCallId: "sdk-persona-2", path: "second.txt" } as never);
+				expect(after.isError).toBe(true);
+				expect(after.content).toEqual([{ type: "text", text: 'Tool "delete" not available' }]);
+				expect(fs.existsSync(secondTarget)).toBe(true);
+
+				// Control 2: switching back to a persona with write re-allows the delete.
+				await session.applyPersonaTools(["read", "write"]);
+				expect(session.getActiveToolNames()).toContain("write");
+				const thirdTarget = path.join(tempDir, "third.txt");
+				fs.writeFileSync(thirdTarget, "remove me again");
+				const back = await handlers.delete({ toolCallId: "sdk-persona-3", path: "third.txt" } as never);
+				expect(back.isError).toBe(false);
+				expect(fs.existsSync(thirdTarget)).toBe(false);
+			} finally {
+				await session.dispose();
+			}
+		});
+	});
+
+	it("keeps the Cursor delete grant for a session that granted edit but not write (wave-22 P2)", async () => {
+		// Internal review (wave-22 P2): the live `cursorCanMutateFiles` reads the
+		// active set; a session that granted `edit` (not `write`) and later
+		// loses `edit` from the active set (a persona switch) would lose the
+		// delete/download grant below what the session was given at launch.
+		// `editWasGranted` is the FLOOR: the same launch-time grant
+		// `getCursorBridgeEditTool` still gates `pi_edit` on, so the session can
+		// execute a file mutation but must not lose the native delete/download
+		// grant it was given at launch. At launch, hashline `edit` is advertised
+		// (Cursor calls it as MCP), so the live active-set check alone covers
+		// the initial grant.
+		const tempDir = makeTempDir();
+		const cursorModel = getBundledModel("cursor", "composer-1.5");
+		if (!cursorModel) throw new Error("expected bundled Cursor model");
+
+		await withProviderAuth(["cursor"], async () => {
+			const sessionManager = SessionManager.inMemory(tempDir);
+			// Created ON Cursor with `tools: [edit]` (a persona's exact tool
+			// list): edit granted, write not.
+			const { session } = await createAgentSession({
+				...baseOptions(tempDir),
+				sessionManager,
+				model: cursorModel,
+				toolNames: ["edit"],
+			});
+			try {
+				const handlers = await captureCursorExecHandlers(session, cursorModel);
+
+				// Hashline `edit` stays advertised on Cursor (called as MCP),
+				// so it is in the active set — the live check covers the grant
+				// at launch; the `editWasGranted` floor covers a later persona
+				// switch that drops it.
+				expect(session.getActiveToolNames()).toContain("edit");
+				expect(session.getActiveToolNames()).not.toContain("write");
+
+				const target = path.join(tempDir, "edit-only.txt");
+				fs.writeFileSync(target, "remove me");
+				const result = await handlers.delete({ toolCallId: "sdk-edit-only-1", path: "edit-only.txt" } as never);
+				expect(result.isError).toBe(false);
+				expect(fs.existsSync(target)).toBe(false);
+			} finally {
+				await session.dispose();
+			}
+		});
+	});
+
+	it("revokes the Cursor delete/download grant after /agent readonly even when editWasGranted was true at launch", async () => {
+		// codex #3762233472 (wave-23 P1): the wave-22 P2 floor
+		// (`editWasGranted || ...`) was PERMANENT — a session that granted
+		// `edit` (not `write`) kept the native delete/download grant after
+		// `/agent` switched to a read-only persona, because the floor never
+		// left. The floor is now REVOCABLE: a persona switch whose tools list
+		// omits both `write` and `edit` drops the floor, and a later switch
+		// back to a persona with `write` restores it.
+		const tempDir = makeTempDir();
+		const cursorModel = getBundledModel("cursor", "composer-1.5");
+		if (!cursorModel) throw new Error("expected bundled Cursor model");
+
+		await withProviderAuth(["cursor"], async () => {
+			const sessionManager = SessionManager.inMemory(tempDir);
+			// Created ON Cursor with `tools: [edit]`: editWasGranted true,
+			// write not granted.
+			const { session } = await createAgentSession({
+				...baseOptions(tempDir),
+				sessionManager,
+				model: cursorModel,
+				toolNames: ["edit"],
+			});
+			try {
+				const handlers = await captureCursorExecHandlers(session, cursorModel);
+
+				// Control 1: the floor holds at launch — the delete executes.
+				const firstTarget = path.join(tempDir, "revocable-first.txt");
+				fs.writeFileSync(firstTarget, "remove me");
+				const before = await handlers.delete({
+					toolCallId: "sdk-revocable-1",
+					path: "revocable-first.txt",
+				} as never);
+				expect(before.isError).toBe(false);
+				expect(fs.existsSync(firstTarget)).toBe(false);
+
+				// The fix: `/agent` switches to a read-only persona
+				// (`tools: [read]`), which omits both `write` and `edit`. The
+				// floor must be revoked — the delete is REJECTED and the file
+				// preserved.
+				await session.applyPersonaTools(["read"]);
+				expect(session.getActiveToolNames()).not.toContain("write");
+				expect(session.getActiveToolNames()).not.toContain("edit");
+				const secondTarget = path.join(tempDir, "revocable-second.txt");
+				fs.writeFileSync(secondTarget, "keep me");
+				const after = await handlers.delete({
+					toolCallId: "sdk-revocable-2",
+					path: "revocable-second.txt",
+				} as never);
+				expect(after.isError).toBe(true);
+				expect(after.content).toEqual([{ type: "text", text: 'Tool "delete" not available' }]);
+				expect(fs.existsSync(secondTarget)).toBe(true);
+
+				// The MCP `download_path` mutation is gated on the same live
+				// grant: revoked under the read-only persona (the gate throws
+				// before the read, so no file is written), granted again once
+				// write returns.
+				await expect(
+					handlers.readMcpResource({ server: "files", uri: "files://x", downloadPath: "revocable-dl.txt" }),
+				).rejects.toThrow(/not available/);
+				expect(fs.existsSync(path.join(tempDir, "revocable-dl.txt"))).toBe(false);
+
+				// Control 2: switching back to a persona with write restores
+				// the delete and the download.
+				await session.applyPersonaTools(["read", "write"]);
+				expect(session.getActiveToolNames()).toContain("write");
+				const thirdTarget = path.join(tempDir, "revocable-third.txt");
+				fs.writeFileSync(thirdTarget, "remove me again");
+				const back = await handlers.delete({ toolCallId: "sdk-revocable-3", path: "revocable-third.txt" } as never);
+				expect(back.isError).toBe(false);
+				expect(fs.existsSync(thirdTarget)).toBe(false);
+
+				// The harness has no MCP manager (`enableMCP: false`), so the
+				// read itself answers `null` — the point is that the mutation
+				// gate no longer throws: the download grant is restored.
+				const download = await handlers.readMcpResource({
+					server: "files",
+					uri: "files://x",
+					downloadPath: "revocable-dl.txt",
+				});
+				expect(download).toBeNull();
+			} finally {
+				await session.dispose();
+			}
+		});
+	});
+
+	it("revokes the Cursor pi_edit override after /agent readonly and restores it on switch back", async () => {
+		// Cursor-focused review (wave-24 P1, empirically proven): the
+		// revocable-floor fix (`editWasGranted && !personaDroppedMutation`)
+		// landed on the native delete/downloadPath grant, but
+		// `getCursorBridgeEditTool` kept checking `editWasGranted` ALONE — a
+		// permanent launch-time capture. Since `executeTool` skips the live
+		// `isToolGranted` re-check when an override is present, a pi_edit
+		// frame still executed after `/agent` switched to a read-only persona
+		// (`tools: [read]`) on a Cursor session that granted `edit` at
+		// launch. The override must read the SAME live floor
+		// `cursorCanMutateFiles` uses, so the read-only persona revokes it and
+		// the frame falls through to the registry, where `isToolGranted`
+		// rejects.
+		const tempDir = makeTempDir();
+		const cursorModel = getBundledModel("cursor", "composer-1.5");
+		if (!cursorModel) throw new Error("expected bundled Cursor model");
+
+		await withProviderAuth(["cursor"], async () => {
+			const sessionManager = SessionManager.inMemory(tempDir);
+			// Created ON Cursor with `tools: [edit]`: editWasGranted true,
+			// write not granted.
+			const { session } = await createAgentSession({
+				...baseOptions(tempDir),
+				sessionManager,
+				model: cursorModel,
+				toolNames: ["edit"],
+			});
+			try {
+				const handlers = await captureCursorExecHandlers(session, cursorModel);
+
+				// Control 1: the floor holds at launch — pi_edit executes and
+				// mutates the file.
+				const target = path.join(tempDir, "pi-edit-revocable.txt");
+				fs.writeFileSync(target, "alpha\nbeta\n");
+				const before = await handlers.piEdit({
+					toolCallId: "sdk-pi-edit-revocable-1",
+					args: { path: target, edits: [{ oldText: "beta", newText: "gamma" }] },
+				} as never);
+				expect(before.isError).toBe(false);
+				expect(fs.readFileSync(target, "utf8")).toBe("alpha\ngamma\n");
+
+				// The fix: `/agent` switches to a read-only persona
+				// (`tools: [read]`), which omits both `write` and `edit` and
+				// sets `personaDroppedMutation`. The override must be REVOKED:
+				// pi_edit is rejected and the file preserved.
+				await session.applyPersonaTools(["read"]);
+				expect(session.getActiveToolNames()).not.toContain("write");
+				expect(session.getActiveToolNames()).not.toContain("edit");
+				fs.writeFileSync(target, "alpha\nbeta\n");
+				const after = await handlers.piEdit({
+					toolCallId: "sdk-pi-edit-revocable-2",
+					args: { path: target, edits: [{ oldText: "beta", newText: "gamma" }] },
+				} as never);
+				expect(after.isError).toBe(true);
+				expect(after.content).toEqual([{ type: "text", text: 'Tool "edit" not available' }]);
+				expect(fs.readFileSync(target, "utf8")).toBe("alpha\nbeta\n");
+
+				// Control 2: switching back to a persona that grants `edit` clears
+				// `personaDroppedEdit` and restores the override — pi_edit executes
+				// again. (A persona with `write` but not `edit` keeps the override
+				// revoked — codex #3818999447.)
+				await session.applyPersonaTools(["read", "edit"]);
+				expect(session.getActiveToolNames()).toContain("edit");
+				const back = await handlers.piEdit({
+					toolCallId: "sdk-pi-edit-revocable-3",
+					args: { path: target, edits: [{ oldText: "beta", newText: "gamma" }] },
+				} as never);
+				expect(back.isError).toBe(false);
+				expect(fs.readFileSync(target, "utf8")).toBe("alpha\ngamma\n");
+			} finally {
+				await session.dispose();
+			}
+		});
+	});
+
+	it("restores the Cursor delete/download floor after leaving a read-only persona (agent mode exit)", async () => {
+		// De-novo review (P1): leaving agent mode via
+		// `#clearPersonaOwnedState` (the `/plan`, `/goal`, `/vibe`,
+		// `/guided-goal` entries and the reconcile else-branches) calls
+		// `restoreBaselineTools()`, which used to re-apply the baseline tools
+		// WITHOUT a persona signal — the SDK's `personaDroppedMutation` flag
+		// stayed `true` and the Cursor `editWasGranted` floor stayed revoked
+		// forever, even though the baseline restore re-activated the session's
+		// full tool set. The restore now passes an explicit `false` signal, so
+		// the native delete/download grant is restored when agent mode is
+		// left. Driven through the `/plan` clear path's session call
+		// (`restoreBaselineTools` — what `#clearPersonaOwnedState` runs after
+		// clearing the persona's spawns/prompt; the launch persona is seeded
+		// with `personaAppendPrompt`/`spawns` so the clear helper would
+		// recognize it as active).
+		const tempDir = makeTempDir();
+		const cursorModel = getBundledModel("cursor", "composer-1.5");
+		if (!cursorModel) throw new Error("expected bundled Cursor model");
+
+		await withProviderAuth(["cursor"], async () => {
+			const sessionManager = SessionManager.inMemory(tempDir);
+			// Created ON Cursor with `tools: [edit]` as the LAUNCH persona's
+			// exact list: `editWasGranted` true, write not granted, and the
+			// baseline is the CLI list `["edit"]` (personaCliToolOverride).
+			const { session } = await createAgentSession({
+				...baseOptions(tempDir),
+				sessionManager,
+				model: cursorModel,
+				toolNames: ["edit"],
+				personaName: "launch-persona",
+				personaCliToolOverride: true,
+				personaAppendPrompt: "You are launch-persona.",
+				spawns: "scout",
+			});
+			try {
+				const handlers = await captureCursorExecHandlers(session, cursorModel);
+
+				// Control 1: the floor holds at launch — the delete executes.
+				const firstTarget = path.join(tempDir, "floor-exit-first.txt");
+				fs.writeFileSync(firstTarget, "remove me");
+				const before = await handlers.delete({
+					toolCallId: "sdk-floor-exit-1",
+					path: "floor-exit-first.txt",
+				} as never);
+				expect(before.isError).toBe(false);
+				expect(fs.existsSync(firstTarget)).toBe(false);
+
+				// The fix: a read-only persona switch revokes the floor…
+				await session.applyPersonaTools(["read"]);
+				expect(session.getLastPersonaDroppedMutation()).toBe(true);
+				const secondTarget = path.join(tempDir, "floor-exit-second.txt");
+				fs.writeFileSync(secondTarget, "keep me");
+				const revoked = await handlers.delete({
+					toolCallId: "sdk-floor-exit-2",
+					path: "floor-exit-second.txt",
+				} as never);
+				expect(revoked.isError).toBe(true);
+				expect(fs.existsSync(secondTarget)).toBe(true);
+
+				// …and leaving agent mode (the `/plan` clear path) restores
+				// it: the baseline re-capture re-activates the pre-persona
+				// tool set, so the persona's revocation no longer applies.
+				// Hashline `edit` stays advertised on Cursor, so the baseline
+				// re-activation puts it back in the active set.
+				await session.restoreBaselineTools();
+				expect(session.getLastPersonaDroppedMutation()).toBe(false);
+				expect(session.getActiveToolNames()).toContain("edit");
+				const thirdTarget = path.join(tempDir, "floor-exit-third.txt");
+				fs.writeFileSync(thirdTarget, "remove me");
+				const back = await handlers.delete({
+					toolCallId: "sdk-floor-exit-3",
+					path: "floor-exit-third.txt",
+				} as never);
+				expect(back.isError).toBe(false);
+				expect(fs.existsSync(thirdTarget)).toBe(false);
+			} finally {
+				await session.dispose();
+			}
+		});
+	});
+
+	it("restores the Cursor delete floor after a FAILED /agent switch to a read-only persona", async () => {
+		// Wave-23 P2 regression: the persona-switch rollback paths
+		// (`switchAgentPersona` and the ACP `/agent` handler) re-applied the
+		// pre-switch tools with NO persona signal, so the SDK's
+		// `personaDroppedMutation` flag stayed `true` after a failed read-only
+		// switch — the Cursor `editWasGranted` floor stayed revoked on the
+		// rolled-back session. The rollback now snapshots the flag before the
+		// apply and forwards it back, restoring the exact pre-switch value.
+		const tempDir = makeTempDir();
+		const cursorModel = getBundledModel("cursor", "composer-1.5");
+		if (!cursorModel) throw new Error("expected bundled Cursor model");
+		const agentsDir = path.join(tempDir, ".omp", "agents");
+		fs.mkdirSync(agentsDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(agentsDir, "persona-readonly.md"),
+			[
+				"---",
+				"name: persona-readonly",
+				"description: read-only persona",
+				"tools: [read]",
+				"model: anthropic/claude-haiku-4-5",
+				"---",
+				"You are a read-only persona.",
+			].join("\n"),
+		);
+
+		await withProviderAuth(["cursor", "anthropic"], async () => {
+			const sessionManager = SessionManager.inMemory(tempDir);
+			// Created ON Cursor with `tools: [edit]`: editWasGranted true, so
+			// the floor holds at launch (same setup as the revocable-floor
+			// test above).
+			const { session } = await createAgentSession({
+				...baseOptions(tempDir),
+				sessionManager,
+				model: cursorModel,
+				toolNames: ["edit"],
+			});
+			try {
+				const handlers = await captureCursorExecHandlers(session, cursorModel);
+
+				// Control 1: the floor holds at launch — the delete executes.
+				const firstTarget = path.join(tempDir, "rollback-first.txt");
+				fs.writeFileSync(firstTarget, "remove me");
+				const before = await handlers.delete({
+					toolCallId: "sdk-rollback-1",
+					path: "rollback-first.txt",
+				} as never);
+				expect(before.isError).toBe(false);
+				expect(fs.existsSync(firstTarget)).toBe(false);
+
+				// Drive the ACP `/agent` path (the shared rollback in
+				// `applyAgentPersonaToSession`) and make the persona's model
+				// switch fail AFTER the read-only tools were applied — the
+				// exact sequence that left `personaDroppedMutation` stale.
+				const output = vi.fn();
+				const runtime: SlashCommandRuntime = {
+					session,
+					sessionManager,
+					settings: session.settings,
+					cwd: tempDir,
+					output,
+					refreshCommands: vi.fn(),
+					reloadPlugins: vi.fn(),
+				};
+				vi.spyOn(session, "setModelTemporary").mockImplementationOnce(async () => {
+					throw new Error("boom");
+				});
+				const result = await executeAcpBuiltinSlashCommand("/agent persona-readonly", runtime);
+
+				expect(result).toEqual({ consumed: true });
+				expect(output).toHaveBeenCalledWith(expect.stringContaining("Failed to switch to agent persona"));
+				// The rollback restored the pre-switch tools AND the exact
+				// pre-switch persona signal (false = floor holds).
+				expect(session.getLastPersonaDroppedMutation()).toBe(false);
+
+				// The fix: the delete EXECUTES again after the failed switch —
+				// the floor was restored, not left revoked.
+				const secondTarget = path.join(tempDir, "rollback-second.txt");
+				fs.writeFileSync(secondTarget, "remove me");
+				const after = await handlers.delete({
+					toolCallId: "sdk-rollback-2",
+					path: "rollback-second.txt",
+				} as never);
+				expect(after.isError).toBe(false);
+				expect(fs.existsSync(secondTarget)).toBe(false);
+			} finally {
+				await session.dispose();
+			}
+		});
+	});
+
+	it("rejects a scoped pi_grep after /agent drops grep and restores it on switch back (codex #3762233481)", async () => {
+		// The bridge is built ONCE at session creation, so the grep override
+		// factory was fixed at construction: a session that started with grep
+		// active kept the per-call factory after `/agent` switched to a
+		// read-only persona, and `executeTool` skips the live `isToolGranted`
+		// re-check for override tools — so scoped frames (`context`/`limit`)
+		// kept searching. The override now consults the LIVE active set at
+		// frame time: after the switch it returns undefined, the frame falls
+		// through to the registry, and the live grant rejects it.
+		const tempDir = makeTempDir();
+		const cursorModel = getBundledModel("cursor", "composer-1.5");
+		if (!cursorModel) throw new Error("expected bundled Cursor model");
+		const target = path.join(tempDir, "needle.txt");
+		fs.writeFileSync(target, "needle\n");
+
+		await withProviderAuth(["cursor"], async () => {
+			const sessionManager = SessionManager.inMemory(tempDir);
+			const { session } = await createAgentSession({
+				...baseOptions(tempDir),
+				sessionManager,
+				toolNames: ["read", "grep"],
+			});
+			try {
+				const handlers = await captureCursorExecHandlers(session, cursorModel);
+
+				// Control 1: grep active at launch -> the scoped frame executes.
+				const before = await handlers.piGrep({
+					toolCallId: "sdk-grep-1",
+					args: { pattern: "needle", path: tempDir, context: 1, limit: 5 },
+				} as never);
+				expect(before.isError).toBe(false);
+				expect((before.details as { matchCount?: number } | undefined)?.matchCount).toBe(1);
+
+				// The fix: `/agent` switches to a read-only persona
+				// (`tools: [read]`), dropping grep from the active set. The
+				// scoped frame must be REJECTED, not executed through the
+				// construction-time override.
+				await session.applyPersonaTools(["read"]);
+				expect(session.getActiveToolNames()).not.toContain("grep");
+				const after = await handlers.piGrep({
+					toolCallId: "sdk-grep-2",
+					args: { pattern: "needle", path: tempDir, context: 1, limit: 5 },
+				} as never);
+				expect(after.isError).toBe(true);
+				expect(after.content).toEqual([{ type: "text", text: 'Tool "grep" not available' }]);
+
+				// Control 2: switching back to a persona with grep re-allows
+				// the scoped frame.
+				await session.applyPersonaTools(["read", "grep"]);
+				expect(session.getActiveToolNames()).toContain("grep");
+				const back = await handlers.piGrep({
+					toolCallId: "sdk-grep-3",
+					args: { pattern: "needle", path: tempDir, context: 1, limit: 5 },
+				} as never);
+				expect(back.isError).toBe(false);
+				expect((back.details as { matchCount?: number } | undefined)?.matchCount).toBe(1);
+			} finally {
+				await session.dispose();
+			}
+		});
+	});
+
+	it("denies Cursor delete for a session that granted neither edit nor write", async () => {
+		// Control for the wave-22 P2 floor: a session granted neither mutating
+		// tool must still be denied — the floor only preserves a grant the
+		// session actually made at launch.
+		const tempDir = makeTempDir();
+		const cursorModel = getBundledModel("cursor", "composer-1.5");
+		if (!cursorModel) throw new Error("expected bundled Cursor model");
+
+		await withProviderAuth(["cursor"], async () => {
+			const sessionManager = SessionManager.inMemory(tempDir);
+			const { session } = await createAgentSession({
+				...baseOptions(tempDir),
+				sessionManager,
+				model: cursorModel,
+				toolNames: ["read"],
+			});
+			try {
+				const handlers = await captureCursorExecHandlers(session, cursorModel);
+
+				const target = path.join(tempDir, "read-only.txt");
+				fs.writeFileSync(target, "keep me");
+				const result = await handlers.delete({ toolCallId: "sdk-read-only-1", path: "read-only.txt" } as never);
+				expect(result.isError).toBe(true);
+				expect(result.content).toEqual([{ type: "text", text: 'Tool "delete" not available' }]);
+				expect(fs.existsSync(target)).toBe(true);
 			} finally {
 				await session.dispose();
 			}

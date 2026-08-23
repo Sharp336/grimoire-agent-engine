@@ -359,6 +359,11 @@ export interface ReviewData {
 export interface AgentDefinition {
 	name: string;
 	description: string;
+	/**
+	 * Which session roles this agent may serve. Defaults to `"all"` when the
+	 * frontmatter carries no availability fields (backward compatible).
+	 */
+	availability?: AgentAvailability;
 	systemPrompt: string;
 	tools?: string[];
 	spawns?: string[] | "*";
@@ -376,6 +381,9 @@ export interface AgentDefinition {
 	source: AgentSource;
 	filePath?: string;
 }
+
+/** Which session roles an agent definition may serve. */
+export type AgentAvailability = "primary" | "subagent" | "all" | "unavailable";
 
 /** Details extracted from a subagent `yield` tool call for final-result assembly and task rendering. */
 export interface YieldItem {

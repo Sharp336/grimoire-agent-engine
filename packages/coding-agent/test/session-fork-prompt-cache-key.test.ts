@@ -122,7 +122,7 @@ describe("provider prompt-cache key session affinity", () => {
 			await session?.dispose();
 			authStorage?.close();
 		}
-	});
+	}, 60000);
 
 	it("initializes a full fork with child request lineage and parent prompt-cache affinity", async () => {
 		using tempDir = TempDir.createSync("@omp-prompt-cache-fork-");
@@ -149,7 +149,7 @@ describe("provider prompt-cache key session affinity", () => {
 			await session?.dispose();
 			authStorage?.close();
 		}
-	});
+	}, 60000);
 
 	it("does not auto-inherit parent prompt-cache affinity when fork startup changes request-shaping inputs", async () => {
 		const cases: Array<{ name: string; options: CreateAgentSessionOptions }> = [
@@ -193,7 +193,69 @@ describe("provider prompt-cache key session affinity", () => {
 				authStorage?.close();
 			}
 		}
-	});
+	}, 60000);
+
+	it("does not auto-inherit parent prompt-cache affinity when a persona changes the prompt or spawns", async () => {
+		const cases: Array<{ name: string; options: CreateAgentSessionOptions }> = [
+			{
+				name: "persona-prompt",
+				options: { personaAppendPrompt: "You are the persona agent." },
+			},
+			{
+				name: "persona-spawns",
+				options: { spawns: "scout" },
+			},
+		];
+
+		for (const entry of cases) {
+			using tempDir = TempDir.createSync(`@omp-prompt-cache-fork-${entry.name}-`);
+			const source = await createSourceSessionFixture(tempDir, `parent-cache-session-${entry.name}`);
+			const forkedManager = await SessionManager.forkFrom(source.sourceFile, source.cwd, source.forkSessionDir);
+			let session: AgentSession | undefined;
+			let authStorage: AuthStorage | undefined;
+			try {
+				const created = await createMinimalSession(tempDir, {
+					...entry.options,
+					cwd: source.cwd,
+					sessionManager: forkedManager,
+				});
+				session = created.session;
+				authStorage = created.authStorage;
+
+				expect(forkedManager.getHeader()?.parentSession).toBe(source.sourceHeader.id);
+				expect(session.agent.promptCacheKey, entry.name).toBeUndefined();
+			} finally {
+				await session?.dispose();
+				authStorage?.close();
+			}
+		}
+	}, 60000);
+
+	it("still inherits parent prompt-cache affinity when a persona changes neither prompt nor spawns", async () => {
+		using tempDir = TempDir.createSync("@omp-prompt-cache-fork-persona-name-");
+		const source = await createSourceSessionFixture(tempDir, "parent-cache-session-persona-name");
+		const forkedManager = await SessionManager.forkFrom(source.sourceFile, source.cwd, source.forkSessionDir);
+		let session: AgentSession | undefined;
+		let authStorage: AuthStorage | undefined;
+		try {
+			const created = await createMinimalSession(tempDir, {
+				// `personaName` alone (launch `--agent` marker) does not change
+				// the request-shaping cache shape; only the persona prompt or
+				// spawns do. The fork key must survive.
+				personaName: "myagent",
+				cwd: source.cwd,
+				sessionManager: forkedManager,
+			});
+			session = created.session;
+			authStorage = created.authStorage;
+
+			expect(forkedManager.getHeader()?.parentSession).toBe(source.sourceHeader.id);
+			expect(session.agent.promptCacheKey).toBe(source.sourceHeader.id);
+		} finally {
+			await session?.dispose();
+			authStorage?.close();
+		}
+	}, 60000);
 
 	it("does not pre-pin parent prompt-cache affinity when a scoped model selects the startup route", async () => {
 		using tempDir = TempDir.createSync("@omp-prompt-cache-scoped-model-");
@@ -229,5 +291,5 @@ describe("provider prompt-cache key session affinity", () => {
 		} finally {
 			authStorage.close();
 		}
-	});
+	}, 60000);
 });

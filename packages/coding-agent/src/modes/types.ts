@@ -93,6 +93,25 @@ export interface InteractiveModeInitOptions {
 	clearInitialTerminalHistory?: boolean;
 	/** Recent-session rows loaded by the prepaint composer while runtime modules initialized. */
 	recentSessions?: Promise<RecentSession[] | undefined>;
+	/**
+	 * Launch `--agent` persona name. When set, init must NOT restore or
+	 * auto-enable any other mode: the persona was already applied to the
+	 * session at creation (buildSessionOptions), so re-entering a restored
+	 * plan/goal/vibe mode or another agent's mode would leave the session
+	 * running under the wrong mode while the transcript claims the persona
+	 * is active.
+	 */
+	personaName?: string;
+	/**
+	 * Explicit CLI override state from the launch flags (`--model`,
+	 * `--thinking`, `--tools`/`--no-tools`). When resuming a persisted
+	 * persona session (`mode_change: agent`), the reconcile must not re-apply
+	 * the agent's frontmatter over these explicit overrides — the same
+	 * precedence `applyAgentPersonaOptions` gives CLI flags at session
+	 * creation. Absent (undefined) = no explicit overrides; the persona's
+	 * frontmatter applies fully.
+	 */
+	explicitPersonaOverrides?: { modelSet: boolean; thinkingSet: boolean; toolsSet: boolean };
 }
 
 export type InteractiveSelectorDialogOptions = ExtensionUIDialogOptions & Pick<HookSelectorOptions, "disabledIndices">;
@@ -419,6 +438,10 @@ export interface InteractiveModeContext {
 	showExtensionsDashboard(): void;
 	showAgentsDashboard(): void;
 	showModelSelector(options?: { temporaryOnly?: boolean }): void;
+	/** Open the `/switch-agent` persona picker overlay (awaits agent discovery). */
+	showAgentPersonaSelector(): Promise<void>;
+	/** Live-switch the main session to a discovered agent persona. */
+	switchAgentPersona(name: string): Promise<void>;
 	showPluginSelector(mode?: "install" | "uninstall"): void;
 	showUserMessageSelector(): void;
 	showCopySelector(): void;
