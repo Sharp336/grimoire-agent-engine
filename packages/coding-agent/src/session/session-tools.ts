@@ -23,7 +23,14 @@ import { computerExposureMode } from "../tools/computer/exposure";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
 import { supportsExternalThinking } from "../tools/think";
 import { ToolAbortError, ToolError } from "../tools/tool-errors";
-import { isMountableUnderXdev, listXdevTools, type XdevState, xdevDocsFor, xdevEntries } from "../tools/xdev";
+import {
+	compileXdevPromoteSet,
+	isMountableUnderXdev,
+	listXdevTools,
+	type XdevState,
+	xdevDocsFor,
+	xdevEntries,
+} from "../tools/xdev";
 import { type EditMode, resolveEditMode } from "../utils/edit-mode";
 import { type InspectImageMode, isInspectImageToolActive } from "../utils/inspect-image-mode";
 import {
@@ -859,13 +866,14 @@ export class SessionTools {
 		const xdevWriteAvailable = builtInWriteAvailable && selectedTools.some(({ name }) => name === "write");
 		const isPresentationPinned = (name: string): boolean =>
 			this.#presentationPinnedToolNames?.has(name) === true || this.#runtimeSelectedToolNames?.has(name) === true;
+		const promotedNames = compileXdevPromoteSet(this.#host.settings.get("tools.xdevPromote"));
 		const mountCandidates = selectedTools.filter(
 			({ name, tool }) =>
 				this.#xdev !== undefined &&
 				xdevReadAvailable &&
 				xdevWriteAvailable &&
 				!isPresentationPinned(name) &&
-				isMountableUnderXdev(tool),
+				isMountableUnderXdev(tool, promotedNames),
 		);
 		const mountNames = new Set(mountCandidates.map(({ name }) => name));
 		// Demoted tools stay reachable through the eval bridge, so nothing is

@@ -113,6 +113,51 @@ describe("read and write route xd:// device URLs", () => {
 		}
 	});
 
+	it("tools.xdevPromote keeps promoted discoverable tools top-level", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-promote-"));
+		try {
+			const tools = await createTools(
+				xdevSession(tempDir, { settings: Settings.isolated({ "tools.xdevPromote": ["ast_edit"] }) }),
+			);
+			// Promoted tool ships first-class; unpromoted discoverables still mount.
+			expect(tools.some(entry => entry.name === "ast_edit")).toBe(true);
+			expect(tools.some(entry => entry.name === "ast_grep")).toBe(false);
+			const listing = await tools.find(entry => entry.name === "read")!.execute("rl", { path: "xd://" });
+			expect(listing.content.find(entry => entry.type === "text")?.text).not.toContain("xd://ast_edit");
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	it("tools.xdevPromote is a no-op when tools.xdev is off", async () => {
+		const [withPromoteDir, withoutPromoteDir] = [
+			await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-promote-off-a-")),
+			await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-promote-off-b-")),
+		];
+		try {
+			// Issue #5648 contract: promotion only re-partitions the xd:// mount
+			// set. With the transport off there is no partition, so a configured
+			// xdevPromote must behave exactly like no promote value at all —
+			// every discoverable tool stays top-level and no xd:// state is
+			// allocated. Guards against hoisting the isMountableUnderXdev
+			// promotion check out of the xdevEnabled gate.
+			const promoteSession = xdevSession(withPromoteDir, {
+				settings: Settings.isolated({ "tools.xdev": false, "tools.xdevPromote": ["ast_edit"] }),
+			});
+			const withPromote = await createTools(promoteSession);
+			const withoutPromote = await createTools(
+				xdevSession(withoutPromoteDir, { settings: Settings.isolated({ "tools.xdev": false }) }),
+			);
+			expect(withPromote.map(entry => entry.name)).toEqual(withoutPromote.map(entry => entry.name));
+			expect(withPromote.some(entry => entry.name === "ast_edit")).toBe(true);
+			// No xd:// transport may be allocated behind the caller's back.
+			expect(promoteSession.xdev).toBeUndefined();
+		} finally {
+			await removeWithRetries(withPromoteDir);
+			await removeWithRetries(withoutPromoteDir);
+		}
+	});
+
 	it("records a read tier on the dispatch of a read-only device", async () => {
 		const readDevice: AgentTool = {
 			name: "peek",

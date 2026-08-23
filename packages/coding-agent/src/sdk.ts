@@ -198,6 +198,7 @@ import {
 import {
 	BashTool,
 	BUILTIN_TOOLS,
+	compileXdevPromoteSet,
 	createTools,
 	createVibeTools,
 	type DeferredDiagnosticsEntry,
@@ -3148,6 +3149,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// constructed and attached. Startup failure therefore leaves it revivable.
 		hasRegistered = options.expectedAgentRef === undefined || options.expectedAgentRef === null;
 
+		// Compiled once so late `registerTool()` activations reuse the same promoted
+		// set as the initial partition instead of bypassing promotion (see scheduleToolRegistration).
+		const promotedNames = compileXdevPromoteSet(settings.get("tools.xdevPromote"));
 		// Partition the initial enabled set for the xd:// transport. Tool instances
 		// remain in the canonical map; only presentation names move between layers.
 		// Mounting requires both transport halves in the granted set (`read xd://`
@@ -3159,7 +3163,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			for (const name of initialToolNames) {
 				const tool = toolRegistry.get(name);
 				const explicitlyRequested = explicitlyRequestedToolNameSet?.has(name) === true;
-				if (tool && xdevReadAvailable && xdevWriteAvailable && !explicitlyRequested && isMountableUnderXdev(tool))
+				if (
+					tool &&
+					xdevReadAvailable &&
+					xdevWriteAvailable &&
+					!explicitlyRequested &&
+					isMountableUnderXdev(tool, promotedNames)
+				)
 					mountedNames.push(name);
 				else topLevelToolNames.push(name);
 			}
@@ -3669,7 +3679,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						builtInRegistryToolNames.has("write") &&
 						enabled.includes("read") &&
 						enabled.includes("write") &&
-						isMountableUnderXdev(liveTool);
+						isMountableUnderXdev(liveTool, promotedNames);
 					const nextMounted = shouldMount
 						? mounted.includes(name)
 							? mounted

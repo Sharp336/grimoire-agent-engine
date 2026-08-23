@@ -2236,6 +2236,7 @@ export class SessionManager {
 		restrictToolNames?: boolean;
 		spawns?: string;
 		readSummarize?: boolean;
+		xdevPromote?: string[];
 		advisor?: string;
 	}): string {
 		const entry: SessionInitEntry = { type: "session_init", ...this.#freshEntryFields(), ...init };
@@ -2771,6 +2772,7 @@ export class SessionManager {
 			restrictToolNames?: boolean;
 			spawns?: string;
 			readSummarize?: boolean;
+			xdevPromote?: string[];
 			advisor?: string;
 		} | null;
 	} | null> {
@@ -2787,6 +2789,7 @@ export class SessionManager {
 			restrictToolNames?: boolean;
 			spawns?: string;
 			readSummarize?: boolean;
+			xdevPromote?: string[];
 			advisor?: string;
 		} | null = null;
 		const visit = (entry: FileEntry): void => {
@@ -2806,6 +2809,7 @@ export class SessionManager {
 					outputSchemaMode: entry.outputSchemaMode,
 					restrictToolNames: entry.restrictToolNames,
 					readSummarize: entry.readSummarize,
+					xdevPromote: entry.xdevPromote,
 					spawns: entry.spawns,
 					advisor: entry.advisor,
 				};
