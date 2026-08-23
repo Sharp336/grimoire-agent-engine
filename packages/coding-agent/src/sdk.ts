@@ -74,7 +74,7 @@ import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate
 import { applyProviderGlobalsFromSettings } from "./config/provider-globals";
 import { buildServiceTierByFamily } from "./config/service-tier";
 import { Settings, type SkillsSettings } from "./config/settings";
-import { CursorExecHandlers, type CursorMcpResourceAdapter } from "./cursor";
+import { CursorExecHandlers, type CursorMcpResourceAdapter, mcpServerScopedIn } from "./cursor";
 import { createBridgeEditTool, createBridgeGrepFactory } from "./cursor-bridge-tools";
 import "./discovery";
 import { createImageUrlServiceFromSettings } from "./blob-broker/service";
@@ -2902,7 +2902,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// live connections have any. Built once: the advisor bridges answer from
 		// the same connections the primary does.
 		const cursorMcpResources: CursorMcpResourceAdapter | undefined = mcpManager && {
-			serverNames: () => mcpManager.getConnectedServers(),
+			serverNames: () =>
+				mcpManager
+					.getConnectedServers()
+					.filter(name => mcpServerScopedIn(toolRegistry.values(), cursorScopeAllows, name)),
 			getServerResources: async name => {
 				// The manager registers a server's tools before its background
 				// resource load finishes, so a frame arriving in that window
@@ -2910,7 +2913,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				await mcpManager.ensureServerResources(name);
 				return mcpManager.getServerResources(name);
 			},
-			readServerResource: (name, uri) => mcpManager.readServerResource(name, uri),
+			readServerResource: (name, uri) => {
+				// Same gate as the listing: a scoped-out server's resources are
+				// not readable, even by direct server address. The primary
+				// bridge's handler re-checks, but the advisor bridge shares this
+				// adapter and has no handler-level gate.
+				if (!mcpServerScopedIn(toolRegistry.values(), cursorScopeAllows, name)) return undefined;
+				return mcpManager.readServerResource(name, uri);
+			},
 		};
 		const cursorExecHandlers = new CursorExecHandlers({
 			cwd,

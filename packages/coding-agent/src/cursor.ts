@@ -233,6 +233,29 @@ function buildToolErrorResult(message: string): AgentToolResult<unknown> {
 		details: {},
 	};
 }
+/**
+ * Whether a server's resources may be listed/read under a scope gate: no gate
+ * configured (unrestricted), or at least one of the server's registered tools
+ * is executable under it. Resource frames answer by server name and never run
+ * a registry tool, so every adapter answering them (primary bridge AND the
+ * advisor bridge, which shares the same adapter) must consult the gate —
+ * otherwise a scoped subagent could still enumerate and read every connected
+ * server's contents through an advisor. Ownership is matched via
+ * `mcpServerName` (never a lossy sanitized name prefix), mirroring the
+ * instructions filter.
+ */
+export function mcpServerScopedIn(
+	tools: Iterable<AgentTool>,
+	isToolExecutable: ((name: string) => boolean) | undefined,
+	serverName: string,
+): boolean {
+	if (!isToolExecutable) return true;
+	return Array.from(tools).some(
+		tool =>
+			(tool as { mcpServerName?: unknown }).mcpServerName === serverName &&
+			isToolExecutable((tool as { name?: string }).name ?? ""),
+	);
+}
 
 /** Shared frame-tool resolution: scope gate first, then overrides, then the canonical map. */
 function resolveFrameTool(options: CursorExecBridgeOptions, toolName: string): AgentTool | undefined {
@@ -462,13 +485,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	 * sanitized name prefix), mirroring the instructions filter.
 	 */
 	#serverScopedIn(serverName: string): boolean {
-		const gate = this.options.isToolExecutable;
-		if (!gate) return true;
-		return Array.from(this.options.tools.values()).some(
-			tool =>
-				(tool as { mcpServerName?: unknown }).mcpServerName === serverName &&
-				gate((tool as { name?: string }).name ?? ""),
-		);
+		return mcpServerScopedIn(this.options.tools.values(), this.options.isToolExecutable, serverName);
 	}
 
 	/**
