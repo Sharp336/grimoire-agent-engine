@@ -2215,4 +2215,189 @@ describe("AgentSession retry delay cap", () => {
 		expect(last.stopReason).toBe("stop");
 		expect(last.content).toContainEqual({ type: "text", text: "recovered after default 502 retry budget" });
 	});
+
+	it("keeps retrying capacity-exhausted errors past a small maxRetries budget", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+
+		const mock = createMockModel();
+		let attempts = 0;
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (requestedModel, context, options) => {
+				attempts += 1;
+				mock.push(
+					attempts <= 4
+						? { throw: "Connect error resource_exhausted: Error" }
+						: { content: ["recovered after capacity window cleared"] },
+				);
+				return mock.stream(requestedModel, context, options);
+			},
+		});
+
+		const settings = Settings.isolated({ "compaction.enabled": false, "retry.maxRetries": 2 });
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		vi.spyOn(Math, "random").mockReturnValue(0);
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const retryStartEvents: AutoRetryStartEvent[] = [];
+		const retryEndEvents: AutoRetryEndEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") retryStartEvents.push(event);
+			if (event.type === "auto_retry_end") retryEndEvents.push(event);
+		});
+
+		await session.prompt("Trigger a capacity outage longer than maxRetries");
+		await session.waitForIdle();
+
+		expect(attempts).toBe(5);
+		expect(retryStartEvents).toHaveLength(4);
+		expect(retryStartEvents.map(event => event.delayMs)).toEqual(new Array(4).fill(45_000));
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]).toMatchObject({ success: true, attempt: 4 });
+		const last = lastAssistant(session);
+		expect(last.stopReason).toBe("stop");
+		expect(last.errorMessage ?? "").not.toContain("Retry budget exhausted");
+		expect(last.content).toContainEqual({ type: "text", text: "recovered after capacity window cleared" });
+	});
+
+	it("survives an interleaved socket reset during a capacity retry saga", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+
+		const mock = createMockModel();
+		let attempts = 0;
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (requestedModel, context, options) => {
+				attempts += 1;
+				let step: { throw: string } | { content: string[] };
+				if (attempts <= 3) step = { throw: "Connect error resource_exhausted: Error" };
+				else if (attempts === 4) step = { throw: "read ECONNRESET" };
+				else step = { content: ["recovered after socket reset"] };
+				mock.push(step);
+				return mock.stream(requestedModel, context, options);
+			},
+		});
+
+		const settings = Settings.isolated({ "compaction.enabled": false, "retry.maxRetries": 2 });
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		vi.spyOn(Math, "random").mockReturnValue(0);
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const retryStartEvents: AutoRetryStartEvent[] = [];
+		const retryEndEvents: AutoRetryEndEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") retryStartEvents.push(event);
+			if (event.type === "auto_retry_end") retryEndEvents.push(event);
+		});
+
+		await session.prompt("Trigger a capacity outage with an interleaved reset");
+		await session.waitForIdle();
+
+		expect(attempts).toBe(5);
+		expect(retryStartEvents).toHaveLength(4);
+		expect(retryStartEvents.map(event => event.delayMs)).toEqual([45_000, 45_000, 45_000, 4_000]);
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]).toMatchObject({ success: true, attempt: 4 });
+		const last = lastAssistant(session);
+		expect(last.stopReason).toBe("stop");
+		expect(last.errorMessage ?? "").not.toContain("Retry budget exhausted");
+		expect(last.content).toContainEqual({ type: "text", text: "recovered after socket reset" });
+	});
+
+	it("persists superseded markers on failed attempts before the saga ends", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+
+		const errorMarkerStatuses = () =>
+			session.sessionManager
+				.getBranch()
+				.flatMap(entry =>
+					entry.type === "message" && entry.message.role === "assistant" && entry.message.stopReason === "error"
+						? [entry.message.retryRecovery?.status]
+						: [],
+				);
+
+		const mock = createMockModel();
+		let attempts = 0;
+		let midSagaMarkers: (string | undefined)[] | undefined;
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (requestedModel, context, options) => {
+				attempts += 1;
+				if (attempts === 3) {
+					midSagaMarkers = errorMarkerStatuses();
+				}
+				mock.push(
+					attempts <= 2
+						? { throw: "Connect error resource_exhausted: Error" }
+						: { content: ["recovered after mid-saga snapshot"] },
+				);
+				return mock.stream(requestedModel, context, options);
+			},
+		});
+
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		vi.spyOn(Math, "random").mockReturnValue(0);
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+
+		await session.prompt("Trigger two capacity failures and inspect mid-saga persistence");
+		await session.waitForIdle();
+
+		expect(attempts).toBe(3);
+		expect(midSagaMarkers?.length).toBeGreaterThanOrEqual(1);
+		expect(midSagaMarkers).toEqual(midSagaMarkers?.map(() => "superseded"));
+		const finalMarkers = errorMarkerStatuses();
+		expect(finalMarkers.length).toBeGreaterThanOrEqual(1);
+		expect(finalMarkers).toEqual(finalMarkers.map(() => "recovered"));
+	});
+
 });

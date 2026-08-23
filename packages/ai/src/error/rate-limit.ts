@@ -37,7 +37,7 @@ const OPENROUTER_DAILY_FREE_LIMIT_PATTERN = /\bfree[-_ ]models[-_ ]per[-_ ]day\b
 // while HTTP bodies use the phrase ("resource exhausted"). Strip either form
 // before classifying explicit details; an otherwise opaque status is transient
 // model capacity, while quota/rate-limit/server wording remains authoritative.
-const RESOURCE_EXHAUSTED_PATTERN = /resource.?exhausted/gi;
+export const RESOURCE_EXHAUSTED_PATTERN = /resource.?exhausted/gi;
 const CONCURRENT_LIMIT_PATTERN =
 	// Require an actual cap signal near "concurrent". "Too many concurrent
 	// requests" is itself a cap signal; bare feature rejections such as

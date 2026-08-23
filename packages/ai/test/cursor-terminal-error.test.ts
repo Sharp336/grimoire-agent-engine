@@ -23,6 +23,7 @@ const CONNECT_END_STREAM_FLAG = 0b00000010;
 type Scenario =
 	| { kind: "success" }
 	| { kind: "connect-error-after-turn" }
+	| { kind: "connect-error-retry-after" }
 	| { kind: "connect-detailed-error-after-turn" }
 	| { kind: "connect-classification-detail-after-turn" }
 	| { kind: "grpc-trailer-after-turn" }
@@ -240,6 +241,19 @@ async function startServer(): Promise<string> {
 			return;
 		}
 
+		if (scenario.kind === "connect-error-retry-after") {
+			stream.write(
+				connectEndErrorFrame("resource_exhausted", "Error", [
+					{
+						"@type": "type.googleapis.com/google.rpc.RetryInfo",
+						retryDelay: "60s",
+					},
+				]),
+			);
+			stream.end();
+			return;
+		}
+
 		if (scenario.kind === "connect-detailed-error-after-turn") {
 			stream.write(
 				connectEndErrorFrame("invalid_argument", "Error", [
@@ -397,6 +411,16 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		expect(eventTypes).not.toContain("done");
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain("Cursor stream ended before turnEnded");
+	});
+
+	it("appends retry-after from Connect RetryInfo onto the error message", async () => {
+		scenario = { kind: "connect-error-retry-after" };
+		const baseUrl = await startServer();
+		const { result } = await collectStream(makeModel(baseUrl));
+		expect(result.stopReason).toBe("error");
+		expect(`${result.errorClassificationMessage ?? ""} ${result.errorMessage ?? ""}`).toContain(
+			"(retry-after: 60s)",
+		);
 	});
 
 	it("pairs and closes a server-owned call the dying stream left open", async () => {

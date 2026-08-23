@@ -2253,6 +2253,7 @@ describe("AgentSession retry fallback", () => {
 			settings,
 			modelRegistry,
 		});
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
 		const { retryStartEvents, retryEndEvents } = trackRetryEvents(session);
 		session.subscribe(event => {
 			if (event.type === "retry_fallback_applied") {
@@ -2993,6 +2994,7 @@ describe("AgentSession retry fallback", () => {
 			settings,
 			modelRegistry,
 		});
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
 		const { retryStartEvents, retryEndEvents } = trackRetryEvents(session);
 
 		await session.prompt("Retry once, then hit a classifier refusal with no fallback");
@@ -3140,7 +3142,9 @@ describe("AgentSession retry fallback", () => {
 		expect(retryStartEvents).toHaveLength(1);
 		expect(retryStartEvents[0]).toMatchObject({
 			attempt: 1,
-			maxAttempts: 1,
+			// Rate-window transients get the capacity attempt floor when model
+			// fallback is disabled; the configured maxRetries of 1 is overridden.
+			maxAttempts: 60,
 			delayMs: 200,
 			errorMessage: "rate limit exceeded retry-after-ms=200",
 		});

@@ -22,7 +22,7 @@ import { calculateRateLimitBackoffMs, parseRateLimitReason } from "@oh-my-pi/pi-
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import { extractRetryHint, logger, prompt } from "@oh-my-pi/pi-utils";
+import { extractRetryHint, isUnexpectedSocketCloseMessage, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelStringWithRouting, resolveModelOverride } from "../config/model-resolver";
 
@@ -71,6 +71,12 @@ const UNEXPECTED_STOP_MAX_RETRIES = 3;
 const UNEXPECTED_STOP_TIMEOUT_MS = 4000;
 const EMPTY_STOP_MAX_RETRIES = 3;
 const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
+// Attempt floor for capacity/rate-window transients (e.g. Cursor
+// "Connect error resource_exhausted"): ~60 waits of 45-75s (~45-75 min)
+// cover the observed provider windows (Cursor local/burst rate limits refill
+// on an hours scale; 2026-08-21 logged a 27-minute and then a 34+ minute
+// rejection window — the latter outlasted the previous 30-attempt floor).
+const CAPACITY_MAX_RETRIES = 60;
 const NON_WHITESPACE_RE = /\S/;
 const USAGE_PREFLIGHT_BLOCKED_PREFIX = "Usage preflight blocked:";
 const STREAM_STALL_ERROR_RE = /stream stall/i;
@@ -83,6 +89,15 @@ const HTTP2_STREAM_RESET_ERROR_RE =
 const PREMATURE_STREAM_CLOSE_ERROR_RE = /stream closed before a (?:finish_reason|terminal response event)/i;
 const IMMUTABLE_ANTHROPIC_THINKING_ERROR_PATTERN =
 	/messages\.\d+\.content\.\d+.*\b(?:thinking|redacted_thinking)\b.*\blatest assistant message cannot be modified\b/is;
+
+function isDroppedStreamErrorMessage(message: string | undefined): boolean {
+	if (!message) return false;
+	if (STREAM_STALL_ERROR_RE.test(message)) return true;
+	if (isUnexpectedSocketCloseMessage(message)) return true;
+	return /stream ended before turnEnded|timed out while waiting for the first event|stalled while waiting for the next event|getaddrinfo|ENOTFOUND/i.test(
+		message,
+	);
+}
 
 function hasNonWhitespace(value: string): boolean {
 	return NON_WHITESPACE_RE.test(value);
@@ -197,6 +212,12 @@ export class TurnRecovery {
 	readonly #host: TurnRecoveryHost;
 	#retryAbortController: AbortController | undefined;
 	#retryAttempt = 0;
+	// True once any attempt in the CURRENT saga was capacity-class: the floor
+	// must stay engaged for the rest of the saga so a single interleaved
+	// non-capacity transient (e.g. "read ECONNRESET" on attempt 8) cannot fail
+	// the turn against the small user budget mid-outage. Reset when a new saga
+	// starts (first attempt), not per-error.
+	#capacityFloorSticky = false;
 	#retryPromise: Promise<void> | undefined;
 	#retryResolve: (() => void) | undefined;
 	#activeRetryFallback: ActiveRetryFallbackState | undefined;
@@ -590,6 +611,20 @@ export class TurnRecovery {
 			attempt: this.#retryAttempt,
 			note,
 		});
+		// Persist the superseded marker immediately instead of deferring to the
+		// saga-end pass: a process exit mid-saga (user restart during a provider
+		// outage) otherwise leaves every failed attempt unmarked on disk, so the
+		// resumed transcript re-renders them as full red error rows and replays
+		// the empty error turns into model context. Saga success later upgrades
+		// these markers to "recovered".
+		branchEntry.message.retryRecovery = {
+			kind: "auto-retry",
+			status: "superseded",
+			attempt: this.#retryAttempt,
+			recovery,
+			note,
+		};
+		await this.#host.sessionManager.rewriteEntries();
 	}
 
 	async #markPendingRetryErrors(
@@ -1171,7 +1206,7 @@ export class TurnRecovery {
 			((message.stopReason === "aborted" && AIError.is(id, AIError.Flag.Abort)) || genericAbort);
 		const errorMessage = message.errorMessage ?? "";
 		const streamStall =
-			message.stopReason === "error" && STREAM_STALL_ERROR_RE.test(errorMessage) && AIError.retriable(id);
+			message.stopReason === "error" && isDroppedStreamErrorMessage(errorMessage) && AIError.retriable(id);
 		const transportReset =
 			message.stopReason === "error" &&
 			HTTP2_STREAM_RESET_ERROR_RE.test(errorMessage) &&
@@ -1911,6 +1946,7 @@ export class TurnRecovery {
 
 		const generation = this.#host.promptGeneration();
 		this.#retryAttempt++;
+		if (this.#retryAttempt === 1) this.#capacityFloorSticky = false;
 
 		// Create retry promise on first attempt so waitForRetry() can await it
 		// Ensure only one promise exists (avoid orphaned promises from concurrent calls)
@@ -1926,18 +1962,32 @@ export class TurnRecovery {
 		// (every rotation sets switchedCredential and skips it), so without
 		// this last resort a provider-wide usage cap never fails over to the
 		// configured chain.
-		const maxRetries = this.#isOpenRouterThinkingStreamClose(message)
-			? Math.min(retrySettings.maxRetries, 1)
-			: retrySettings.maxRetries;
-		const retryBudgetExhausted = this.#retryAttempt > maxRetries;
-
 		const errorMessage = message.errorMessage || "Unknown error";
 		const id = this.#classifyRetryMessage(message);
+		const rateLimitReason = parseRateLimitReason(errorMessage);
+		const capacityClassRetry =
+			!AIError.is(id, AIError.Flag.UsageLimit) &&
+			(rateLimitReason === "CONCURRENT_LIMIT" ||
+				rateLimitReason === "RATE_LIMIT_EXCEEDED" ||
+				rateLimitReason === "MODEL_CAPACITY_EXHAUSTED");
+		if (capacityClassRetry) this.#capacityFloorSticky = true;
+		const openRouterThinkingStreamClose = this.#isOpenRouterThinkingStreamClose(message);
+		let maxRetries = openRouterThinkingStreamClose ? Math.min(retrySettings.maxRetries, 1) : retrySettings.maxRetries;
+		const escapeHatchConfigured =
+			retrySettings.modelFallback && Object.keys(this.#getRetryFallbackChains()).length > 0;
+		if (
+			(capacityClassRetry || this.#capacityFloorSticky) &&
+			!escapeHatchConfigured &&
+			!openRouterThinkingStreamClose
+		) {
+			maxRetries = Math.max(maxRetries, CAPACITY_MAX_RETRIES);
+		}
+		const retryBudgetExhausted = this.#retryAttempt > maxRetries;
+
 		const preserveFailedTurn =
 			options?.preserveFailedTurn === true ||
 			((classifierRefusal || AIError.is(id, AIError.Flag.MalformedFunctionCall)) &&
 				this.#unexecutedToolCallsReplaySafe(message));
-		const rateLimitReason = parseRateLimitReason(errorMessage);
 		const staleOpenAIResponsesReplayError = AIError.is(id, AIError.Flag.StaleResponsesItem);
 		const accountPolicyDenial = AIError.is(id, AIError.Flag.AccountPolicy);
 		const recordedUsageLimitOutcome = await this.#usageLimitOutcomes.get(message);
@@ -1951,14 +2001,16 @@ export class TurnRecovery {
 		// budget before either window can clear. An explicit provider
 		// retry-after is authoritative in both directions, so the heuristic
 		// window only applies when the error carries no parsed timing.
-		if (
-			!staleOpenAIResponsesReplayError &&
-			!AIError.is(id, AIError.Flag.UsageLimit) &&
-			parsedRetryAfterMs === undefined &&
-			(rateLimitReason === "CONCURRENT_LIMIT" || rateLimitReason === "RATE_LIMIT_EXCEEDED")
-		) {
-			const reasonBackoffMs = calculateRateLimitBackoffMs(rateLimitReason);
-			if (reasonBackoffMs > delayMs) delayMs = reasonBackoffMs;
+		if (!staleOpenAIResponsesReplayError && capacityClassRetry) {
+			const maxDelayMs = retrySettings.maxDelayMs;
+			if (parsedRetryAfterMs !== undefined && parsedRetryAfterMs <= 120_000) {
+				const capped = maxDelayMs > 0 ? Math.min(parsedRetryAfterMs, maxDelayMs) : parsedRetryAfterMs;
+				if (capped > delayMs) delayMs = capped;
+			} else if (parsedRetryAfterMs === undefined) {
+				let reasonBackoffMs = calculateRateLimitBackoffMs(rateLimitReason);
+				if (maxDelayMs > 0) reasonBackoffMs = Math.min(reasonBackoffMs, maxDelayMs);
+				if (reasonBackoffMs > delayMs) delayMs = reasonBackoffMs;
+			}
 		}
 		let switchedCredential = false;
 		let switchedModel = false;
