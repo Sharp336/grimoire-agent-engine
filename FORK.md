@@ -4,9 +4,9 @@
 
 ## 上游基线与维护边界
 
-- 上游仓库：[`can1357/oh-my-pi`](https://github.com/can1357/oh-my-pi)。当前同步基线为正式发布 tag `v18.0.3`（提交 `160ed439ac0df594347e7d7018b813a7ffdb5e81`，2026-08-23）。
+- 上游仓库：[`can1357/oh-my-pi`](https://github.com/can1357/oh-my-pi)。
 - 仅同步上游正式发布的 tag，不跟随、合并或采用上游 `main` 及 tag 之后的开发提交。
-- 不修改 Rust 代码、上游构建逻辑、构建脚本或官方 native packages；Rust 源码、native package 版本和源码版本必须与对应的上游正式发布基线一致，不自行编译、重打包或打补丁。
+- 不修改 Rust 代码、上游构建逻辑、构建脚本或官方 native packages；不自行编译、重打包或打补丁官方 native packages。
 - 不新增 Fork 专用测试文件或测试用例；验证复用上游已有测试、现有检查和必要的人工验收。
 
 ## Fork 功能差异
@@ -23,5 +23,4 @@
 
 ## Fork Release
 
-- Fork Release 仅允许从 `main` 手动触发。
-- 发布必须基于对应的上游正式版本，不得使用上游尚未正式发布的代码。
+- CI 与 Fork Release 的构建任务每次运行都会自动下载上游 npm 最新发布的官方 native packages；仓库不维护其版本、提交或文件哈希信息。发布构建仅保留 Windows x64 与 Linux x64/ARM64，不构建或发布 macOS 产物。

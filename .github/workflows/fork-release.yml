@@ -16,20 +16,16 @@ permissions:
 
 jobs:
   validate:
-    name: Validate fork release inputs
+    name: Prepare fork release
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     outputs:
       version: ${{ steps.metadata.outputs.version }}
-      official_tag: ${{ steps.metadata.outputs.official_tag }}
-      official_sha: ${{ steps.metadata.outputs.official_sha }}
       release_tag: ${{ steps.metadata.outputs.release_tag }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          fetch-depth: 0
 
-      - name: Verify official baseline and native source gate
+      - name: Prepare release metadata
         id: metadata
         shell: bash
         run: |
@@ -39,85 +35,14 @@ jobs:
             exit 1
           fi
 
-          manifest=".github/fork-release-native-manifest.json"
-          version="$(node -p "require('./${manifest}').source.version")"
-          official_tag="$(node -p "require('./${manifest}').source.officialTag")"
-          locked_official_sha="$(node -p "require('./${manifest}').source.officialSha")"
+          version="$(node -p "require('./packages/coding-agent/package.json').version")"
           release_tag="v${version}-fork.${GITHUB_RUN_NUMBER}"
-
-          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Locked source version must be an exact stable version, got: $version"
-            exit 1
-          fi
-          coding_agent_version="$(node -p "require('./packages/coding-agent/package.json').version")"
-          native_core_version="$(node -p "require('./packages/natives/package.json').version")"
-          if [ "$coding_agent_version" != "$version" ] || [ "$native_core_version" != "$version" ]; then
-            echo "::error::Source/native versions must both equal the locked official version $version (coding-agent=$coding_agent_version, natives=$native_core_version)"
-            exit 1
-          fi
-          if [ "$official_tag" != "v${version}" ]; then
-            echo "::error::Locked official tag $official_tag does not match source version $version"
-            exit 1
-          fi
-
-          git remote add official https://github.com/can1357/oh-my-pi.git
-          git fetch --no-tags official "+refs/tags/${official_tag}:refs/tags/fork-official-${official_tag}"
-          official_sha="$(git rev-list -n1 "refs/tags/fork-official-${official_tag}")"
-          if [ "$official_sha" != "$locked_official_sha" ]; then
-            echo "::error::Official tag ${official_tag} resolved to ${official_sha}; locked baseline is ${locked_official_sha}"
-            exit 1
-          fi
-          merge_base="$(git merge-base "$official_sha" "$GITHUB_SHA")"
-          if [ "$merge_base" != "$official_sha" ]; then
-            echo "::error::Current main is not based directly on official ${official_tag} (${official_sha}); merge base is ${merge_base}"
-            exit 1
-          fi
-
-          native_paths=(
-            crates/
-            bazel/
-            packages/natives/
-            Cargo.toml
-            Cargo.lock
-            MODULE.bazel
-            MODULE.bazel.lock
-            BUILD.bazel
-            .bazelrc
-            .bazelignore
-            .bazelversion
-            rust-toolchain.toml
-            rustfmt.toml
-          )
-          mapfile -t native_changes < <(git diff --name-only "${official_sha}...${GITHUB_SHA}" -- "${native_paths[@]}")
-          if [ "${#native_changes[@]}" -ne 0 ]; then
-            printf '::error::Fork release is forbidden because native source/build inputs differ from %s:\n' "$official_tag"
-            printf ' - %s\n' "${native_changes[@]}"
-            exit 1
-          fi
-
-          latest_refs="$(git grep -nE '@oh-my-pi/pi-natives-(linux-x64|linux-arm64|win32-x64)@latest' -- .github || true)"
-          if [ -n "$latest_refs" ]; then
-            echo "::error::Floating native package references are forbidden"
-            printf '%s\n' "$latest_refs"
-            exit 1
-          fi
 
           {
             echo "version=$version"
-            echo "official_tag=$official_tag"
-            echo "official_sha=$official_sha"
             echo "release_tag=$release_tag"
           } >> "$GITHUB_OUTPUT"
-          echo "Official source: ${official_tag} (${official_sha})"
-          echo "Fork release: ${release_tag} (${GITHUB_SHA})"
-
-      - name: Verify every locked official native package
-        shell: bash
-        run: |
-          set -euo pipefail
-          for target in linux-x64 linux-arm64 win32-x64; do
-            bash .github/scripts/fork-release-native.sh "$target" "$RUNNER_TEMP/native-$target"
-          done
+          echo "Fork release: ${release_tag}"
 
   build-x64:
     name: Build Linux + Windows x64
@@ -131,7 +56,7 @@ jobs:
 
       - uses: ./.github/actions/bun-install
 
-      - name: Install locked Linux and Windows x64 native addons
+      - name: Install latest official Linux and Windows x64 native addons
         shell: bash
         run: |
           set -euo pipefail
@@ -180,7 +105,7 @@ jobs:
 
       - uses: ./.github/actions/bun-install
 
-      - name: Install locked Linux ARM64 native addon
+      - name: Install latest official Linux ARM64 native addon
         shell: bash
         run: |
           set -euo pipefail
@@ -229,7 +154,7 @@ jobs:
           path: release
           merge-multiple: true
 
-      - name: Verify exact asset set and generate SHA256SUMS.txt
+      - name: Verify exact asset set
         shell: bash
         run: |
           set -euo pipefail
@@ -247,11 +172,6 @@ jobs:
           for file in omp-linux-x64 omp-linux-arm64 omp-windows-x64.exe; do
             test -s "release/$file"
           done
-          (
-            cd release
-            sha256sum omp-linux-x64 omp-linux-arm64 omp-windows-x64.exe > SHA256SUMS.txt
-            sha256sum -c SHA256SUMS.txt
-          )
 
       - name: Create or verify release tag through the GitHub API
         env:
@@ -277,15 +197,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
           VERSION: ${{ needs.validate.outputs.version }}
-          OFFICIAL_TAG: ${{ needs.validate.outputs.official_tag }}
         shell: bash
         run: |
           set -euo pipefail
           notes="$RUNNER_TEMP/release-notes.md"
           cat > "$notes" <<EOF
-          Downstream fork package based on official \`${OFFICIAL_TAG}\`.
+          Downstream fork package built from the current main branch.
 
-          Assets are intentionally limited to Linux x64, Linux ARM64, Windows x64, and \`SHA256SUMS.txt\`. Native addons are the locked official \`${VERSION}\` npm artifacts and this workflow does not compile Rust.
+          Assets are intentionally limited to Linux x64, Linux ARM64, and Windows x64. Native addons are the latest official npm artifacts available when this workflow runs, and this workflow does not compile Rust.
 
           The fork defaults \`hub.mode\` to \`compact\`; set it to \`full\` to restore the upstream Hub model surface without rebuilding. The upstream Hub/IRC runtime remains intact.
           EOF
@@ -316,8 +235,7 @@ jobs:
           for file in \
             release/omp-linux-x64 \
             release/omp-linux-arm64 \
-            release/omp-windows-x64.exe \
-            release/SHA256SUMS.txt; do
+            release/omp-windows-x64.exe; do
             asset="$(basename "$file")"
             existing_asset_id="$(node - "$assets_json" "$asset" <<'NODE'
           const fs = require("node:fs");
