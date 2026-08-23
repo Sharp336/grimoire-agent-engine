@@ -271,8 +271,11 @@ describe("Settings", () => {
 			await Bun.write(projectConfigPath, YAML.stringify({}, null, 2));
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			settings.set("providers.maxInFlightRequests", { openai: 5, anthropic: null }, "project");
-			expect(settings.get("providers.maxInFlightRequests")).toEqual({ openai: 5, anthropic: null });
+			settings.set("providers.maxInFlightRequests", { openai: 5, anthropic: null } as never, "project");
+			expect(settings.get("providers.maxInFlightRequests") as Record<string, number | null>).toEqual({
+				openai: 5,
+				anthropic: null,
+			});
 			expect(settings.getGlobalValue("providers.maxInFlightRequests")).toEqual({
 				anthropic: 3,
 				openai: 5,
@@ -294,7 +297,7 @@ describe("Settings", () => {
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			expect(settings.get("providers.maxInFlightRequests")).toEqual({ anthropic: 3 });
 
-			settings.set("providers.maxInFlightRequests", { anthropic: null }, "project");
+			settings.set("providers.maxInFlightRequests", { anthropic: null } as never, "project");
 			expect(normalizeProviderMaxInFlightRequests(settings.get("providers.maxInFlightRequests"))).toEqual({});
 			await settings.flush();
 			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({

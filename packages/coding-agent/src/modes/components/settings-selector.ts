@@ -1296,7 +1296,7 @@ export class SettingsSelectorComponent implements Component {
 	 */
 	#persistRecordScopeSetting(path: SettingPath, value: Record<string, number>): unknown {
 		if (this.#scope === "global") {
-			settings.set(path, value, "global");
+			settings.set(path, value as never, "global");
 			return settings.get(path);
 		}
 		const inherited = normalizeProviderMaxInFlightRequests(settings.getProjectInheritedValue(path));

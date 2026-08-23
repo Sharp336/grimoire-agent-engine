@@ -406,7 +406,9 @@ describe("SettingsSelectorComponent persistence scope", () => {
 		// Clear-all produced an empty map; the project scope must tombstone the
 		// global provider so the effective limits are empty, not the global cap.
 		expect(normalizeProviderMaxInFlightRequests(settings.get("providers.maxInFlightRequests"))).toEqual({});
-		expect(settings.get("providers.maxInFlightRequests")).toEqual({ anthropic: null });
+		expect(settings.get("providers.maxInFlightRequests") as Record<string, number | null>).toEqual({
+			anthropic: null,
+		});
 		// The global layer itself is untouched.
 		expect(settings.getGlobalValue("providers.maxInFlightRequests")).toEqual({ anthropic: 3 });
 	});
