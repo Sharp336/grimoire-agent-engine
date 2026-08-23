@@ -128,6 +128,19 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		},
 	},
 	{
+		name: "archive",
+		icon: "folderMove",
+		description: "Archive the current session and start a new one",
+		getTuiAutocompleteDescription: runtime =>
+			runtime.ctx.session.isStreaming
+				? "Archive: unavailable while streaming"
+				: "Archive: move current session out of /resume",
+		handleTui: async (_command, runtime) => {
+			runtime.ctx.editor.setText("");
+			await runtime.ctx.handleArchiveCommand();
+		},
+	},
+	{
 		name: "compact",
 		icon: "compress",
 		description: "Manually compact the session context",

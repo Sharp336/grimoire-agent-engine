@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { gunzipSync, gzipSync } from "node:zlib";
+import { gunzipSync } from "node:zlib";
 import { withStatsSyncLock } from "@oh-my-pi/omp-stats/aggregator";
 import {
 	getAgentDir,
@@ -15,7 +15,17 @@ import {
 import { Settings } from "../config/settings";
 import { getDefault } from "../config/settings-schema";
 import { BLOB_HASH_RE } from "../session/blob-store";
-import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
+import {
+	COMPRESSED_SESSION_SUFFIX,
+	getArchivedSessionsDir,
+	LIVE_NESTED_STATUSES,
+	moveSessionWithArtifacts,
+	resolveArchiveDestination,
+	SESSION_SUFFIX,
+	sessionArtifactsPath,
+	sessionHasLiveNestedSessions,
+} from "../session/session-archive";
+import { listSessionsReadOnly, type SessionInfo } from "../session/session-listing";
 import { FileSessionStorage } from "../session/session-storage";
 
 const BLOB_FILE_RE = /^([a-f0-9]{64})(?:\.[A-Za-z0-9][A-Za-z0-9._-]{0,31})?$/;
@@ -23,11 +33,8 @@ const BLOB_REF_RE = /\bblob:sha256:([a-f0-9]{64})\b/gi;
 const JSONL_GLOB = new Bun.Glob("**/*.jsonl");
 const JSONL_GZ_GLOB = new Bun.Glob("**/*.jsonl.gz");
 const JSONL_BACKUP_GLOB = new Bun.Glob("**/*.jsonl.*.bak");
-const ACTIVE_STATUSES: ReadonlySet<SessionStatus> = new Set(["pending", "interrupted", "unknown"]);
 const DAY_MS = 86_400_000;
 const GC_WRITE_GRACE_MS = 5 * 60_000;
-const SESSION_SUFFIX = ".jsonl";
-const COMPRESSED_SESSION_SUFFIX = ".jsonl.gz";
 const GC_LOCK_BREAKER_SUFFIX = ".break";
 
 export interface GcCommandFlags {
@@ -196,10 +203,6 @@ export function collectGcErrors(result: GcResult): string[] {
 		...(result.blobs?.errors ?? []).map(error => `blobs: ${error}`),
 		...(result.archive?.errors ?? []).map(error => `archive: ${error}`),
 	];
-}
-
-function getArchivedSessionsDir(agentDir: string): string {
-	return path.join(path.dirname(getSessionsDir(agentDir)), "archive", "sessions");
 }
 
 function errorMessage(error: unknown): string {
@@ -375,69 +378,11 @@ async function listActiveSessions(sessionsRoot: string): Promise<SessionInfo[]> 
 	return sessions;
 }
 
-async function listNestedSessionsReadOnly(artifactsRoot: string): Promise<SessionInfo[]> {
-	const files = await collectJsonlFiles(artifactsRoot);
-	const dirs = [...new Set(files.map(file => path.dirname(file)))].sort();
-	const storage = new FileSessionStorage();
-	const sessions: SessionInfo[] = [];
-	for (const dir of dirs) sessions.push(...(await listSessionsReadOnly(dir, storage)));
-	sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
-	return sessions;
-}
-
-async function hasLiveNestedSessions(session: SessionInfo, archiveBeforeMs: number): Promise<boolean> {
-	for (const nested of await listNestedSessionsReadOnly(sessionArtifactsPath(session.path))) {
-		if (nested.status && ACTIVE_STATUSES.has(nested.status)) return true;
-		if (nested.modified.getTime() > archiveBeforeMs) return true;
-	}
-	return false;
-}
-
-function archiveDestination(
-	archiveRoot: string,
-	sessionsRoot: string,
-	session: SessionInfo,
-): Omit<ArchiveCandidate, "session"> | null {
-	const sessionPath = session.path;
-	const relativePath = path.relative(sessionsRoot, sessionPath);
-	if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) return null;
-	if (!relativePath.endsWith(SESSION_SUFFIX)) return null;
-	return {
-		relativePath,
-		destinationPath: path.join(archiveRoot, `${relativePath}.gz`),
-	};
-}
-
 function sessionCwdKey(sessionsRoot: string, session: SessionInfo): string {
 	const relativePath = path.relative(sessionsRoot, session.path);
 	if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) return session.cwd || ".";
 	const dirname = path.dirname(relativePath);
 	return dirname === "." ? session.cwd || "." : dirname;
-}
-
-async function movePath(source: string, destination: string): Promise<void> {
-	await fs.mkdir(path.dirname(destination), { recursive: true });
-	try {
-		await fs.rename(source, destination);
-		return;
-	} catch (error) {
-		if (codeOf(error) !== "EXDEV") throw error;
-	}
-	const stat = await fs.stat(source);
-	if (stat.isDirectory()) {
-		await fs.cp(source, destination, { recursive: true });
-		await fs.rm(source, { recursive: true, force: true });
-		return;
-	}
-	await fs.copyFile(source, destination);
-	await fs.unlink(source);
-}
-
-function sessionArtifactsPath(sessionPath: string): string {
-	if (sessionPath.endsWith(COMPRESSED_SESSION_SUFFIX)) {
-		return sessionPath.slice(0, -COMPRESSED_SESSION_SUFFIX.length);
-	}
-	return sessionPath.slice(0, -SESSION_SUFFIX.length);
 }
 
 interface SessionLineageHeader {
@@ -493,66 +438,6 @@ async function readSessionLineageHeader(file: string): Promise<SessionLineageHea
 	return undefined;
 }
 
-async function gzipSessionFile(source: string, destination: string): Promise<void> {
-	await fs.mkdir(path.dirname(destination), { recursive: true });
-	const tempPath = `${destination}.${process.pid}.${Date.now()}.tmp`;
-	let renamed = false;
-	try {
-		const compressed = gzipSync(await Bun.file(source).bytes(), { level: 9 });
-		await Bun.write(tempPath, compressed);
-		await fs.rename(tempPath, destination);
-		renamed = true;
-		await fs.unlink(source);
-	} catch (error) {
-		await fs.rm(tempPath, { force: true });
-		if (renamed) await fs.rm(destination, { force: true });
-		throw error;
-	}
-}
-
-async function restoreGzipSessionFile(source: string, destination: string): Promise<void> {
-	await fs.mkdir(path.dirname(destination), { recursive: true });
-	const decompressed = gunzipSync(await Bun.file(source).bytes());
-	await Bun.write(destination, decompressed);
-	await fs.unlink(source);
-}
-
-async function moveSessionWithArtifacts(candidate: ArchiveCandidate): Promise<void> {
-	const sourceSession = candidate.session.path;
-	const destSession = candidate.destinationPath;
-	const legacyDestSession = destSession.endsWith(".gz") ? destSession.slice(0, -".gz".length) : `${destSession}.gz`;
-	const sourceArtifacts = sessionArtifactsPath(sourceSession);
-	const destArtifacts = sessionArtifactsPath(destSession);
-	if (await pathExists(destSession)) throw new Error(`archive destination exists: ${destSession}`);
-	if (await pathExists(legacyDestSession)) throw new Error(`archive destination exists: ${legacyDestSession}`);
-	if ((await pathExists(sourceArtifacts)) && (await pathExists(destArtifacts))) {
-		throw new Error(`archive artifacts destination exists: ${destArtifacts}`);
-	}
-
-	const moved: Array<{ source: string; destination: string; compressed?: boolean }> = [];
-	try {
-		await gzipSessionFile(sourceSession, destSession);
-		moved.push({ source: sourceSession, destination: destSession, compressed: true });
-		if (await pathExists(sourceArtifacts)) {
-			await movePath(sourceArtifacts, destArtifacts);
-			moved.push({ source: sourceArtifacts, destination: destArtifacts });
-		}
-	} catch (error) {
-		for (const move of moved.reverse()) {
-			try {
-				if (move.compressed) {
-					await restoreGzipSessionFile(move.destination, move.source);
-				} else {
-					await movePath(move.destination, move.source);
-				}
-			} catch {
-				// Preserve the original failure; rollback failure is reported by the next scan.
-			}
-		}
-		throw error;
-	}
-}
-
 function sqliteNumber(value: number | bigint | null | undefined): number {
 	if (typeof value === "bigint") return Number(value);
 	if (typeof value === "number") return value;
@@ -605,7 +490,7 @@ async function collectArchivedSessionIds(archiveRoot: string): Promise<string[]>
 }
 
 async function cleanupHistoryRowsForArchivedSessions(
-	options: ResolvedGcOptions,
+	options: { agentDir: string },
 	archiveRoot: string,
 	archivedSessionIds: string[],
 	result: ArchiveGcResult,
@@ -1154,7 +1039,7 @@ async function collectArchivedStatsSessions(
 }
 
 async function cleanupStatsRowsForArchivedSessions(
-	options: ResolvedGcOptions,
+	options: { agentDir: string },
 	archiveRoot: string,
 	newlyArchivedSessions: SessionInfo[],
 	result: ArchiveGcResult,
@@ -1220,6 +1105,50 @@ async function cleanupStatsRowsForArchivedSessions(
 	}
 }
 
+export async function cleanupRowsForArchivedSessions(
+	agentDir: string,
+	archiveRoot: string,
+	archivedSessions: readonly { id: string; path: string; parentSessionPath?: string }[],
+): Promise<Pick<ArchiveGcResult, "historyRowsDeleted" | "statsRowsDeleted" | "ftsRebuilt" | "errors">> {
+	const result: ArchiveGcResult = {
+		scanned: 0,
+		skippedActive: 0,
+		keptNewestGlobal: 0,
+		keptNewestPerCwd: 0,
+		wouldArchive: 0,
+		archived: 0,
+		historyRowsDeleted: 0,
+		statsRowsDeleted: 0,
+		ftsRebuilt: false,
+		errors: [],
+	};
+	const infos: SessionInfo[] = archivedSessions.map(session => ({
+		path: session.path,
+		id: session.id,
+		cwd: "",
+		created: new Date(0),
+		modified: new Date(0),
+		messageCount: 0,
+		size: 0,
+		firstMessage: "",
+		allMessagesText: "",
+		parentSessionPath: session.parentSessionPath,
+	}));
+	await cleanupHistoryRowsForArchivedSessions(
+		{ agentDir },
+		archiveRoot,
+		archivedSessions.map(session => session.id),
+		result,
+	);
+	await cleanupStatsRowsForArchivedSessions({ agentDir }, archiveRoot, infos, result);
+	return {
+		historyRowsDeleted: result.historyRowsDeleted,
+		statsRowsDeleted: result.statsRowsDeleted,
+		ftsRebuilt: result.ftsRebuilt,
+		errors: result.errors,
+	};
+}
+
 async function runArchiveGc(options: ResolvedGcOptions, archiveRoot: string): Promise<ArchiveGcResult> {
 	const sessionsRoot = getSessionsDir(options.agentDir);
 	const sessions = await listActiveSessions(sessionsRoot);
@@ -1242,7 +1171,7 @@ async function runArchiveGc(options: ResolvedGcOptions, archiveRoot: string): Pr
 	const archiveBeforeMs = Date.now() - GC_WRITE_GRACE_MS;
 
 	for (const session of sessions) {
-		if (session.status && ACTIVE_STATUSES.has(session.status)) {
+		if (session.status && LIVE_NESTED_STATUSES[session.status]) {
 			result.skippedActive += 1;
 			continue;
 		}
@@ -1250,7 +1179,7 @@ async function runArchiveGc(options: ResolvedGcOptions, archiveRoot: string): Pr
 			result.skippedActive += 1;
 			continue;
 		}
-		if (await hasLiveNestedSessions(session, archiveBeforeMs)) {
+		if (await sessionHasLiveNestedSessions(session.path, { recentlyModifiedAfterMs: archiveBeforeMs })) {
 			result.skippedActive += 1;
 			continue;
 		}
@@ -1269,7 +1198,7 @@ async function runArchiveGc(options: ResolvedGcOptions, archiveRoot: string): Pr
 			continue;
 		}
 		if (options.coldArchiveAfterDays > 0 && session.modified.getTime() > cutoffMs) continue;
-		const destination = archiveDestination(archiveRoot, sessionsRoot, session);
+		const destination = resolveArchiveDestination(session.path, sessionsRoot, archiveRoot);
 		if (!destination) continue;
 		candidates.push({ ...destination, session });
 	}
@@ -1281,7 +1210,7 @@ async function runArchiveGc(options: ResolvedGcOptions, archiveRoot: string): Pr
 	const archivedSessions: SessionInfo[] = [];
 	for (const candidate of candidates) {
 		try {
-			await moveSessionWithArtifacts(candidate);
+			await moveSessionWithArtifacts(candidate.session.path, candidate.destinationPath);
 			result.archived += 1;
 			archivedSessionIds.push(candidate.session.id);
 			archivedSessions.push(candidate.session);

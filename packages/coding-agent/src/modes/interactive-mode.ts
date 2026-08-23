@@ -5157,7 +5157,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		return true;
 	}
 
-	#prepareSessionSwitch(): void {
+	prepareSessionSwitch(): void {
 		this.#btwController.dispose();
 		this.#omfgController.dispose();
 		this.#cleanseController.dispose();
@@ -5168,7 +5168,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async handleClearCommand(): Promise<void> {
 		if (this.#vibeSessionTransitionBlocked()) return;
-		this.#prepareSessionSwitch();
+		this.prepareSessionSwitch();
 		await this.#commandController.handleClearCommand();
 	}
 
@@ -5182,8 +5182,13 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async handleDropCommand(): Promise<void> {
 		if (this.#vibeSessionTransitionBlocked()) return;
-		this.#prepareSessionSwitch();
+		this.prepareSessionSwitch();
 		await this.#commandController.handleDropCommand();
+	}
+
+	async handleArchiveCommand(): Promise<void> {
+		if (this.#vibeSessionTransitionBlocked()) return;
+		await this.#commandController.handleArchiveCommand();
 	}
 
 	async handleForkCommand(): Promise<void> {

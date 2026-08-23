@@ -23,6 +23,7 @@ This document describes operator-visible behavior for session export, sharing, c
 | `/fresh`                                | Slash command (TUI/headless) | Yes (provider-facing in-memory id/state only) | No; keeps current session file/header                                                      | None                                                                                |
 | `/clear`                                | Interactive slash command    | Yes (clears live/model conversation context)  | No; retains session identity, metadata, transcript file, and full on-disk history          | Appends a durable `reset_boundary`                                                  |
 | `/drop`                                 | Interactive slash command    | Yes (starts an empty conversation)            | Attempts to delete the current persisted session and artifacts, then switches to a new one | None                                                                                |
+| `/archive`                              | Interactive slash command    | Yes (starts an empty conversation)            | Confirms, switches to a new session, then gzip-moves the previous session and artifacts into `archive/sessions` and prunes matching `history.db` / `stats.db` rows | Leaves `/resume`                                                    |
 | `/fork`                                 | Interactive slash command    | Yes (active session identity changes)         | Creates new session file and switches current session to it (persistent mode only)         | Copies artifact directory to new session namespace when present                     |
 | `--fork <id\|path>`                     | CLI startup                  | Yes after session creation                    | Creates a new session fork from the selected source into current cwd/session dir           | None                                                                                |
 | `/resume [id\|@claude\|@codex]`         | Interactive slash command    | Yes (active in-memory state replaced)         | Switches to a selected/matched session, or imports a selected foreign session              | None                                                                                |
@@ -212,6 +213,26 @@ from `/fresh`, which rotates provider stream state without clearing the
 conversation; `/new`, which creates a new session identity and transcript file;
 and `/drop`, which attempts to delete the old persisted session before starting
 a new one.
+
+## Archive
+
+Interactive `/archive` is TUI-only. It refuses while the parent session is
+streaming or a nested session is still live (`pending` / `interrupted` /
+`unknown`), asks for confirmation, starts a fresh session the same way `/new`
+does, then moves the previous `.jsonl` and artifacts through the same gzip +
+artifact relocation used by `omp gc --archive`. It then reuses that command's
+`history.db` / `stats.db` cleanup so `omp stats` does not keep counting the
+archived session.
+
+The archive root follows the active session directory. Sessions under the
+default profile store go to `archive/sessions` next to `sessions`. A custom
+`--session-dir` or an explicit path outside the profile store archives beside
+that directory. If the session file is not under the session manager directory
+or the default store, `/archive` refuses before switching.
+
+The archived file leaves the active sessions directory, so `/resume` no longer
+lists it. There is no `/unarchive` in this version; restore is a manual file
+move out of the archive tree.
 
 ## Fork
 

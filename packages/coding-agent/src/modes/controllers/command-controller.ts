@@ -12,6 +12,7 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { Loader, Markdown, padding, Spacer, Text, visibleWidth } from "@oh-my-pi/pi-tui";
 import { formatDuration, logger, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
+import { cleanupRowsForArchivedSessions } from "../../cli/gc-cli";
 import { shouldEnableAppendOnlyContext } from "../../config/append-only-context-mode";
 import { type BashResult, isPersistentShellCdCommand } from "../../exec/bash-executor";
 import { type LoadedCustomShare, loadCustomShare } from "../../export/custom-share";
@@ -43,6 +44,12 @@ import { buildToolsMarkdown } from "../../modes/utils/tools-markdown";
 import type { AsyncJobSnapshotItem } from "../../session/agent-session";
 import type { AuthStorage, OAuthAccountIdentity } from "../../session/auth-storage";
 import type { CompactMode } from "../../session/compact-modes";
+import {
+	archiveDestinationExists,
+	archiveSessionFile,
+	resolveArchiveRoots,
+	sessionHasLiveNestedSessions,
+} from "../../session/session-archive";
 import type { NewSessionOptions } from "../../session/session-entries";
 import { formatShakeSummary, type ShakeMode, type ShakeResult } from "../../session/shake-types";
 import { formatActiveAccountLabel, limitMatchesActiveAccount } from "../../slash-commands/helpers/active-oauth-account";
@@ -921,7 +928,11 @@ export class CommandController {
 		}
 	}
 
-	async #runNewSessionFlow(options?: NewSessionOptions, label: string = "New session started"): Promise<void> {
+	async #runNewSessionFlow(
+		options?: NewSessionOptions,
+		label: string = "New session started",
+		afterSwitch?: () => Promise<unknown>,
+	): Promise<boolean> {
 		this.ctx.clearTransientSessionUi();
 
 		if (this.ctx.session.isCompacting) {
@@ -930,7 +941,7 @@ export class CommandController {
 				await Bun.sleep(10);
 			}
 		}
-		if (!(await this.ctx.session.newSession(options))) return;
+		if (!(await this.ctx.session.newSession(options))) return false;
 		this.ctx.resetObserverRegistry();
 		setSessionTerminalTitle(this.ctx.sessionManager.getSessionName(), this.ctx.sessionManager.getCwd());
 
@@ -940,9 +951,23 @@ export class CommandController {
 		this.ctx.clearTransientSessionUi();
 		this.ctx.resetTranscript();
 
+		if (afterSwitch) {
+			try {
+				await afterSwitch();
+			} catch (error) {
+				this.ctx.showError(
+					`Session switched, but archive failed: ${error instanceof Error ? error.message : String(error)}`,
+				);
+				await this.ctx.reloadTodos();
+				this.ctx.ui.requestRender(true, { clearScrollback: true });
+				return false;
+			}
+		}
+
 		this.ctx.present([new Spacer(1), new Text(`${theme.fg("accent", `${theme.status.success} ${label}`)}`, 1, 1)]);
 		await this.ctx.reloadTodos();
 		this.ctx.ui.requestRender(true, { clearScrollback: true });
+		return true;
 	}
 
 	async handleClearCommand(): Promise<void> {
@@ -998,6 +1023,56 @@ export class CommandController {
 			return;
 		}
 		await this.#runNewSessionFlow({ drop: true }, "Session dropped");
+	}
+
+	async handleArchiveCommand(): Promise<void> {
+		const sessionFile = this.ctx.sessionManager.getSessionFile();
+		if (!sessionFile) {
+			this.ctx.showError("Nothing to archive (in-memory session)");
+			return;
+		}
+		if (this.ctx.session.isStreaming) {
+			this.ctx.showWarning("Wait for the current response to finish or abort it before archiving.");
+			return;
+		}
+		if (await sessionHasLiveNestedSessions(sessionFile)) {
+			this.ctx.showWarning("Wait for nested sessions to finish before archiving.");
+			return;
+		}
+
+		const agentDir = this.ctx.settings.getAgentDir();
+		const roots = resolveArchiveRoots({
+			sessionFile,
+			sessionDir: this.ctx.sessionManager.getSessionDir(),
+			cwd: this.ctx.sessionManager.getCwd(),
+			agentDir,
+		});
+		if (!roots) {
+			this.ctx.showError("Cannot archive a session outside a sessions directory");
+			return;
+		}
+		if (await archiveDestinationExists(roots.destinationPath)) {
+			this.ctx.showError("Archive destination already exists");
+			return;
+		}
+
+		const choice = await this.ctx.showHookSelector(
+			"Archive the current session?\nThe session will be removed from the normal /resume list\nand moved to the session archive.",
+			["Archive", "Cancel"],
+		);
+		if (choice !== "Archive") return;
+
+		const sessionId = this.ctx.sessionManager.getSessionId();
+		this.ctx.prepareSessionSwitch();
+		await this.#runNewSessionFlow(undefined, "Session archived", async () => {
+			await archiveSessionFile(sessionFile, roots.sessionsRoot, roots.archiveRoot);
+			const cleanup = await cleanupRowsForArchivedSessions(agentDir, roots.archiveRoot, [
+				{ id: sessionId, path: sessionFile },
+			]);
+			if (cleanup.errors.length > 0) {
+				throw new Error(cleanup.errors.join("; "));
+			}
+		});
 	}
 
 	async handleForkCommand(): Promise<void> {
