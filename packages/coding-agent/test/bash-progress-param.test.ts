@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, vi } from "bun:test";
 import * as path from "node:path";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { type AsyncJob, AsyncJobManager, type AsyncJobProgressInfo } from "@oh-my-pi/pi-coding-agent/async/job-manager";
@@ -19,6 +19,10 @@ const SETTINGS: Record<string, unknown> = {
 	"grep.enabled": false,
 	"glob.enabled": false,
 };
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 function makeSession(manager: AsyncJobManager, overrides: Record<string, unknown> = {}): ToolSession {
 	const settings = { ...SETTINGS, ...overrides };
@@ -324,7 +328,7 @@ describe("bash progress parameter", () => {
 	test("drains a throttle-held chunk into the preview without replaying it after promotion", async () => {
 		using tempDir = TempDir.createSync("@omp-bash-throttled-promotion-");
 		const gatePath = path.join(tempDir.path(), "emit-held");
-		const heldPath = path.join(tempDir.path(), "held-emitted");
+		const heldEnteredSink = Promise.withResolvers<void>();
 		const releasePath = path.join(tempDir.path(), "emit-post");
 		const manager = new AsyncJobManager({});
 		const events: string[] = [];
@@ -338,6 +342,25 @@ describe("bash progress parameter", () => {
 		});
 		const tool = new BashTool(makeSession(manager, { "bash.asyncAuto.inlineGraceMs": 60_000 }));
 		const steering = new AbortController();
+		const originalPush = OutputSink.prototype.push;
+		vi.spyOn(OutputSink.prototype, "push").mockImplementation(function (this: OutputSink, chunk: string) {
+			const syntheticNow = chunk.includes("inline-first")
+				? 1_000
+				: chunk.includes("throttle-held")
+					? 1_001
+					: undefined;
+			if (syntheticNow === undefined) {
+				originalPush.call(this, chunk);
+				return;
+			}
+			const nowSpy = vi.spyOn(Date, "now").mockReturnValue(syntheticNow);
+			try {
+				originalPush.call(this, chunk);
+			} finally {
+				nowSpy.mockRestore();
+			}
+			if (chunk.includes("throttle-held")) heldEnteredSink.resolve();
+		});
 		let openedGate = false;
 		const execution = tool.execute(
 			"throttled-auto-promote",
@@ -345,10 +368,10 @@ describe("bash progress parameter", () => {
 				command:
 					"printf 'inline-first\\n'; " +
 					'while [ ! -f "$GATE" ]; do sleep 0.01; done; ' +
-					"printf 'throttle-held\\n'; sleep 0.01; : > \"$HELD\"; " +
+					"printf 'throttle-held\\n'; " +
 					'while [ ! -f "$RELEASE" ]; do sleep 0.01; done; ' +
 					"printf 'post-promotion\\n'",
-				env: { GATE: gatePath, HELD: heldPath, RELEASE: releasePath },
+				env: { GATE: gatePath, RELEASE: releasePath },
 				async: "auto",
 				progress: "wake",
 			},
@@ -371,16 +394,10 @@ describe("bash progress parameter", () => {
 			} as AgentToolContext,
 		);
 
-		const heldDeadline = Date.now() + 5_000;
-		// This is a subprocess integration boundary: fake JS timers cannot drive
-		// the shell's marker write, so poll the observable file state briefly.
-		while (!(await Bun.file(heldPath).exists())) {
-			if (Date.now() >= heldDeadline) throw new Error("Timed out waiting for throttle-held output");
-			await Bun.sleep(5);
-		}
-		// The command delays its marker until after the native output bridge has
-		// received the held chunk. Promote immediately: the sink's 50 ms timer
-		// still owns that chunk, so this crosses the actual throttle boundary.
+		// Observe the second chunk at OutputSink.push(), before its deterministic
+		// 50 ms throttle expires. Promotion must wait for that pre-boundary chunk
+		// to reach onChunk and enter the inline preview.
+		await heldEnteredSink.promise;
 		steering.abort();
 
 		const result = await execution;
