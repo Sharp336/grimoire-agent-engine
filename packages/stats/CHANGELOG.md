@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added per-request throughput (Tokens/s) to the Requests tab and homepage recent-request surfaces.
 ## [18.0.1] - 2026-08-23
 
 ### Fixed
