@@ -56,14 +56,11 @@ jobs:
 
       - uses: ./.github/actions/bun-install
 
-      - name: Install latest official Linux and Windows x64 native addons
-        shell: bash
-        run: |
-          set -euo pipefail
-          native_dir="packages/natives/native"
-          rm -f "$native_dir"/pi_natives.*.node "$native_dir"/embedded-addons.*.tar.gz
-          bash .github/scripts/fork-release-native.sh linux-x64 "$native_dir"
-          bash .github/scripts/fork-release-native.sh win32-x64 "$native_dir"
+      - name: Build Linux and Windows x64 native addons
+        uses: ./.github/actions/bazel-natives
+        with:
+          targets: linux-x64-baseline linux-x64-modern win32-x64-baseline
+          cache-scope: fork-release-x64
 
       - name: Build both x64 targets with one shared bundle
         env:
@@ -105,13 +102,11 @@ jobs:
 
       - uses: ./.github/actions/bun-install
 
-      - name: Install latest official Linux ARM64 native addon
-        shell: bash
-        run: |
-          set -euo pipefail
-          native_dir="packages/natives/native"
-          rm -f "$native_dir"/pi_natives.*.node "$native_dir"/embedded-addons.*.tar.gz
-          bash .github/scripts/fork-release-native.sh linux-arm64 "$native_dir"
+      - name: Build Linux ARM64 native addon
+        uses: ./.github/actions/bazel-natives
+        with:
+          targets: linux-arm64
+          cache-scope: fork-release-arm64
 
       - name: Build Linux ARM64 target
         env:
@@ -204,7 +199,7 @@ jobs:
           cat > "$notes" <<EOF
           Downstream fork package built from the current main branch.
 
-          Assets are intentionally limited to Linux x64, Linux ARM64, and Windows x64. Native addons are the latest official npm artifacts available when this workflow runs, and this workflow does not compile Rust.
+          Assets are intentionally limited to Linux x64, Linux ARM64, and Windows x64. All native addons are built from this fork's checked-out sources during this workflow run.
 
           The fork defaults \`hub.mode\` to \`compact\`; set it to \`full\` to restore the upstream Hub model surface without rebuilding. The upstream Hub/IRC runtime remains intact.
           EOF
