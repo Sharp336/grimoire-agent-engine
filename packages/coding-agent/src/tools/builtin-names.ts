@@ -95,3 +95,22 @@ export function isToolDisallowed(name: string, patterns: readonly string[]): boo
 	}
 	return false;
 }
+
+/**
+ * Single scope predicate for subagent tool grants: a tool is effectively scoped
+ * in when it is not disallowed and, under an enforced `tools:` allowlist, is
+ * either a hidden protocol tool (`yield`, `goal`, `think`) or named in the
+ * allowlist. Hidden protocol tools are never removable by scoping — stripping
+ * the subagent terminator would leave a `requireYieldTool` session unable to
+ * yield. Shared by the session active-set invariant, the Cursor bridge grant,
+ * and the MCP-instructions prompt filter so all three cannot drift apart.
+ */
+export function isToolScopedIn(
+	name: string,
+	disallowedPatterns: readonly string[],
+	options: { enforceToolAllowlist?: boolean; allowedToolNames?: ReadonlySet<string> },
+): boolean {
+	if (isToolDisallowed(name, disallowedPatterns)) return false;
+	if (!options.enforceToolAllowlist) return true;
+	return HIDDEN_TOOL_NAMES.includes(name as HiddenToolName) || options.allowedToolNames?.has(name) === true;
+}

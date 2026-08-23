@@ -18,7 +18,7 @@ import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
 import type { MemoryBackendStartOptions } from "../memory-backend/types";
 import xdevMountNoticePrompt from "../prompts/system/xdev-mount-notice.md" with { type: "text" };
 import { usesCodexTaskPrompt } from "../task/prompt-policy";
-import { HIDDEN_TOOL_NAMES, isMCPToolName, isToolDisallowed, normalizeToolNames } from "../tools/builtin-names";
+import { isMCPToolName, isToolScopedIn, normalizeToolNames } from "../tools/builtin-names";
 import { computerExposureMode } from "../tools/computer/exposure";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
 import { supportsExternalThinking } from "../tools/think";
@@ -851,12 +851,14 @@ export class SessionTools {
 	 * (unlisted under an enforced `tools:` allowlist, or matched by
 	 * `disallowedTools:`) can never re-enter the active set through
 	 * {@link setActiveToolsByName}, extension hooks, or internal toggles. Hidden
-	 * protocol tools stay permitted, mirroring {@link isToolDisallowed}.
+	 * protocol tools stay permitted, mirroring the shared
+	 * {@link isToolScopedIn} predicate from builtin-names.
 	 */
 	#isToolScopedIn(name: string): boolean {
-		if (isToolDisallowed(name, this.#disallowedToolPatterns)) return false;
-		if (!this.#enforceToolAllowlist) return true;
-		return (HIDDEN_TOOL_NAMES as readonly string[]).includes(name) || this.#allowedToolNames?.has(name) === true;
+		return isToolScopedIn(name, this.#disallowedToolPatterns, {
+			enforceToolAllowlist: this.#enforceToolAllowlist,
+			allowedToolNames: this.#allowedToolNames,
+		});
 	}
 
 	#scopeActiveToolSelection(toolNames: string[]): string[] {

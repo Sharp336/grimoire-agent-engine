@@ -224,7 +224,7 @@ import {
 	xdevDocsAll,
 	xdevEntries,
 } from "./tools";
-import { isMCPToolName, isToolDisallowed, normalizeToolNames } from "./tools/builtin-names";
+import { isMCPToolName, isToolDisallowed, isToolScopedIn, normalizeToolNames } from "./tools/builtin-names";
 import { ToolContextStore } from "./tools/context";
 import { isIrcEnabled } from "./tools/hub";
 import { getImageGenTools } from "./tools/image-gen";
@@ -2782,7 +2782,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// `edit`/`write`/`grep`, so the raw request matches the finalized set.)
 		const cursorRequestedToolNames = new Set(normalizeToolNames(options.toolNames ?? []));
 		const cursorScopeAllows = (name: string): boolean =>
-			!isToolDisallowed(name, disallowedPatterns) && !(enforceToolAllowlist && !cursorRequestedToolNames.has(name));
+			isToolScopedIn(name, disallowedPatterns, {
+				enforceToolAllowlist,
+				allowedToolNames: cursorRequestedToolNames,
+			});
 		const editWasGranted = toolRegistry.has("edit") && cursorScopeAllows("edit");
 		// Built on first use rather than eagerly: a session that never reaches
 		// Cursor never constructs it.
@@ -3011,8 +3014,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					const activeNames = new Set(toolNames);
 					for (const [name, tool] of tools) {
 						if (!activeNames.has(name)) continue;
-						if (isToolDisallowed(name, disallowedPatterns)) continue;
-						if (enforceToolAllowlist && explicitlyRequestedToolNameSet?.has(name) !== true) continue;
+						if (!isToolScopedIn(name, disallowedPatterns, { enforceToolAllowlist, allowedToolNames: explicitlyRequestedToolNameSet }))
+							continue;
 						const mcpServerName = (tool as { mcpServerName?: unknown }).mcpServerName;
 						if (typeof mcpServerName === "string") scopedInServerNames.add(mcpServerName);
 					}
