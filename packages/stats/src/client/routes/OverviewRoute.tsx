@@ -4,8 +4,15 @@ import { Line } from "react-chartjs-2";
 import { getOverviewStats, getRecentRequests } from "../api";
 import { AgentTokenShare } from "../components/AgentTokenShare";
 import { CHART_THEMES } from "../components/chart-shared";
-import { formatCost, formatDurationMs, formatInteger, formatRelativeTime } from "../data/formatters";
+import {
+	formatCost,
+	formatDurationMs,
+	formatInteger,
+	formatRelativeTime,
+	formatTokensPerSecond,
+} from "../data/formatters";
 import { useResource } from "../data/useResource";
+import { calculateTokensPerSecond } from "../data/view-models";
 import type { MessageStats, TimeRange } from "../types";
 import { AsyncBoundary, DataTable, MetricCluster, Panel, Skeleton, StatusPill } from "../ui";
 import { useSystemTheme } from "../useSystemTheme";
@@ -156,6 +163,13 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 				render: (item: MessageStats) => formatInteger(item.usage.totalTokens),
 			},
 			{
+				key: "tokensPerSecond",
+				header: "Tokens/s",
+				numeric: true,
+				render: (item: MessageStats) =>
+					formatTokensPerSecond(calculateTokensPerSecond(item.usage.output, item.duration)),
+			},
+			{
 				key: "cost",
 				header: "Cost",
 				numeric: true,
@@ -204,6 +218,12 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 				<div>
 					<div className="stats-mobile-card-label">Tokens</div>
 					<div className="stats-mobile-card-value">{formatInteger(item.usage.totalTokens)}</div>
+				</div>
+				<div>
+					<div className="stats-mobile-card-label">Tokens/s</div>
+					<div className="stats-mobile-card-value">
+						{formatTokensPerSecond(calculateTokensPerSecond(item.usage.output, item.duration))}
+					</div>
 				</div>
 				<div>
 					<div className="stats-mobile-card-label">Duration</div>
@@ -274,6 +294,7 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 							<div className="stats-feed-ledger overflow-y-auto max-h-[280px] pr-2">
 								{previewRequests.map(req => {
 									const isError = !!req.errorMessage;
+									const tps = calculateTokensPerSecond(req.usage.output, req.duration);
 									return (
 										<div
 											key={req.id || `${req.sessionFile}-${req.entryId}`}
@@ -298,6 +319,7 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 													<div>{req.provider}</div>
 													<div>
 														{req.duration ? formatDurationMs(req.duration) : ""}{" "}
+														{tps !== null ? `· ${formatTokensPerSecond(tps)} tokens/s ` : ""}
 														{req.usage?.cost?.total ? `· ${formatCost(req.usage.cost.total, 4)}` : ""}
 													</div>
 												</div>

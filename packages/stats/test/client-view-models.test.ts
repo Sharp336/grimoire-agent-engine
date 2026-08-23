@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { buildAgentTokenShare, buildModelPerformanceLookup } from "../src/client/data/view-models";
+import {
+	buildAgentTokenShare,
+	buildModelPerformanceLookup,
+	calculateTokensPerSecond,
+} from "../src/client/data/view-models";
 import type { AgentTypeStats, ModelPerformancePoint } from "../src/shared-types";
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -74,5 +78,21 @@ describe("buildAgentTokenShare", () => {
 		const empty = buildAgentTokenShare([]);
 		expect(empty.totalTokens).toBe(0);
 		expect(empty.segments).toEqual([]);
+	});
+});
+
+describe("calculateTokensPerSecond", () => {
+	it("calculates throughput in tokens per second for valid output and duration", () => {
+		expect(calculateTokensPerSecond(80, 2000)).toBe(40);
+	});
+
+	it("returns 0 when output tokens is 0 and duration is positive", () => {
+		expect(calculateTokensPerSecond(0, 1000)).toBe(0);
+	});
+
+	it("returns null when duration is null, zero, or negative", () => {
+		expect(calculateTokensPerSecond(80, null)).toBeNull();
+		expect(calculateTokensPerSecond(80, 0)).toBeNull();
+		expect(calculateTokensPerSecond(80, -500)).toBeNull();
 	});
 });

@@ -1,7 +1,14 @@
 import { useMemo } from "react";
 import { getRecentRequests } from "../api";
-import { formatCost, formatDurationMs, formatInteger, formatRelativeTime } from "../data/formatters";
+import {
+	formatCost,
+	formatDurationMs,
+	formatInteger,
+	formatRelativeTime,
+	formatTokensPerSecond,
+} from "../data/formatters";
 import { useResource } from "../data/useResource";
+import { calculateTokensPerSecond } from "../data/view-models";
 import type { MessageStats, TimeRange } from "../types";
 import { AsyncBoundary, DataTable, Panel, StatusPill } from "../ui";
 
@@ -44,6 +51,13 @@ export function RequestsRoute({ active, refreshTrigger, onRequestClick }: Reques
 				header: "Tokens",
 				numeric: true,
 				render: (item: MessageStats) => formatInteger(item.usage.totalTokens),
+			},
+			{
+				key: "tokensPerSecond",
+				header: "Tokens/s",
+				numeric: true,
+				render: (item: MessageStats) =>
+					formatTokensPerSecond(calculateTokensPerSecond(item.usage.output, item.duration)),
 			},
 			{
 				key: "cost",
@@ -94,6 +108,12 @@ export function RequestsRoute({ active, refreshTrigger, onRequestClick }: Reques
 				<div>
 					<div className="stats-mobile-card-label">Tokens</div>
 					<div className="stats-mobile-card-value">{formatInteger(item.usage.totalTokens)}</div>
+				</div>
+				<div>
+					<div className="stats-mobile-card-label">Tokens/s</div>
+					<div className="stats-mobile-card-value">
+						{formatTokensPerSecond(calculateTokensPerSecond(item.usage.output, item.duration))}
+					</div>
 				</div>
 				<div>
 					<div className="stats-mobile-card-label">Duration</div>

@@ -1,7 +1,8 @@
 import { Clock, Coins, Gauge, Hash, Star, X, Zap } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { getRequestDetails } from "../api";
-import { formatCost, formatDurationMs, formatInteger } from "../data/formatters";
+import { formatCost, formatDurationMs, formatInteger, formatTokensPerSecond } from "../data/formatters";
+import { calculateTokensPerSecond } from "../data/view-models";
 import type { RequestDetails } from "../types";
 import { JsonBlock } from "./JsonBlock";
 import { Skeleton } from "./Skeleton";
@@ -187,7 +188,9 @@ export function RequestDrawer({ id, onClose }: RequestDrawerProps) {
 											Throughput
 										</div>
 										<div className="stats-drawer-metric-value">
-											{((details.usage.output * 1000) / details.duration).toFixed(1)}
+											{formatTokensPerSecond(
+												calculateTokensPerSecond(details.usage.output, details.duration),
+											)}
 										</div>
 										<div className="stats-drawer-metric-sub">tokens/second</div>
 									</div>

@@ -257,3 +257,13 @@ export function buildToolRows(tools: ToolUsageStats[]): ToolRowView[] {
 		callsPercentage: maxCalls > 0 ? (t.calls / maxCalls) * 100 : 0,
 	}));
 }
+
+/**
+ * Calculate per-request throughput in tokens per second from output tokens and duration in ms.
+ * Returns null when duration is null, zero, or negative (invalid or unrecorded duration).
+ * Returns 0 when output is zero (and duration is positive).
+ */
+export function calculateTokensPerSecond(outputTokens: number, durationMs: number | null): number | null {
+	if (durationMs === null || durationMs <= 0) return null;
+	return (outputTokens * 1000) / durationMs;
+}
