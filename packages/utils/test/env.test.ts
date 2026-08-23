@@ -169,26 +169,10 @@ describe("filterProcessEnv", () => {
 });
 
 describe("filterChildShellEnv", () => {
-	// filterChildShellEnv resolves the mode-local dotenv name from the *launch*
-	// NODE_ENV (on Linux, /proc/self/environ — e.g. `test` inside a parallel
-	// bun-test worker), so the fixture must target that same mode instead of
-	// assuming `development`.
-	function launchDotenvMode(): string {
-		if (process.platform === "linux") {
-			try {
-				for (const entry of fs.readFileSync("/proc/self/environ", "utf8").split("\0")) {
-					if (entry.startsWith("NODE_ENV=")) return entry.slice("NODE_ENV=".length) || "development";
-				}
-				return "development";
-			} catch {}
-		}
-		return "development";
-	}
-
 	it("uses the supplied mode for an isolated environment and cwd", async () => {
 		const cwd = path.dirname(writeTempEnv(""));
 		fs.writeFileSync(
-			path.join(cwd, `.env.${launchDotenvMode()}.local`),
+			path.join(cwd, ".env.development.local"),
 			"OMP_DOTENV_REPRO_MARKER=synthetic-mode-local-value\n",
 		);
 		const envModulePath = path.join(import.meta.dir, "..", "src", "env.ts");
