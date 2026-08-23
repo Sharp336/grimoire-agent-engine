@@ -7,6 +7,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/modes/print-mode";
 import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { UsageStatistics } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import type { PlanProposalHandler } from "@oh-my-pi/pi-coding-agent/tools/resolve";
 
 function makeAssistantMessage(text: string): AssistantMessage {
@@ -28,6 +29,20 @@ function makeAssistantMessage(text: string): AssistantMessage {
 		stopReason: "stop",
 		usage,
 		timestamp,
+	};
+}
+function zeroUsageStatistics(): UsageStatistics {
+	return {
+		input: 0,
+		output: 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: 0,
+		orchestrationInput: 0,
+		orchestrationOutput: 0,
+		orchestrationCacheRead: 0,
+		premiumRequests: 0,
+		cost: 0,
 	};
 }
 
@@ -68,6 +83,7 @@ function createDelayedSession(
 			getHeader: () => undefined,
 			buildSessionContext: () => ({ messages: [] }),
 			getEntries: () => [],
+			getUsageStatistics: zeroUsageStatistics,
 			appendModeChange: (mode: string, data?: Record<string, unknown>) => {
 				modeChanges.push({ mode, data });
 				return "mode-change";
@@ -277,6 +293,7 @@ describe("print mode working indicator", () => {
 				getHeader: () => undefined,
 				buildSessionContext: () => ({ messages: [] }),
 				getEntries: () => [],
+				getUsageStatistics: zeroUsageStatistics,
 			},
 			settings: { get: () => false },
 			extensionRunner: undefined,
@@ -343,6 +360,7 @@ describe("print mode working indicator", () => {
 				getHeader: () => undefined,
 				buildSessionContext: () => ({ messages: [] }),
 				getEntries: () => [],
+				getUsageStatistics: zeroUsageStatistics,
 			},
 			settings: { get: () => false },
 			extensionRunner: undefined,

@@ -1033,12 +1033,15 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
 		authStorage.setRuntimeApiKey("openai-codex", "codex-oauth-token");
+		const settings = Settings.isolated({ extendedContext: false });
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"), { settings });
 
 		const { session } = await createAgentSession({
 			cwd: tempDir,
 			agentDir: tempDir,
 			authStorage,
-			settings: Settings.isolated({ extendedContext: false }),
+			settings,
+			modelRegistry,
 			sessionManager: SessionManager.inMemory(),
 			disableExtensionDiscovery: true,
 			skills: [],

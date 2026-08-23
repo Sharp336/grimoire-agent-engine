@@ -18,6 +18,7 @@ describe("ModelRegistry", () => {
 	let originalOllamaBaseUrl: string | undefined;
 	let originalOllamaHost: string | undefined;
 	let originalOllamaContextLength: string | undefined;
+	let originalZhipuApiKey: string | undefined;
 
 	// Shared, read-only fixtures: each registry's heavy bundled-catalog
 	// construction runs once in a `beforeAll` hook (hooks are excluded from a
@@ -36,9 +37,11 @@ describe("ModelRegistry", () => {
 		originalOllamaBaseUrl = Bun.env.OLLAMA_BASE_URL;
 		originalOllamaHost = Bun.env.OLLAMA_HOST;
 		originalOllamaContextLength = Bun.env.OLLAMA_CONTEXT_LENGTH;
+		originalZhipuApiKey = Bun.env.ZHIPU_API_KEY;
 		delete Bun.env.OLLAMA_BASE_URL;
 		delete Bun.env.OLLAMA_HOST;
 		delete Bun.env.OLLAMA_CONTEXT_LENGTH;
+		delete Bun.env.ZHIPU_API_KEY;
 		tempDir = path.join(os.tmpdir(), `pi-test-model-registry-${Snowflake.next()}`);
 		fs.mkdirSync(tempDir, { recursive: true });
 		modelsJsonPath = path.join(tempDir, "models.json");
@@ -64,6 +67,11 @@ describe("ModelRegistry", () => {
 			delete Bun.env.OLLAMA_CONTEXT_LENGTH;
 		} else {
 			Bun.env.OLLAMA_CONTEXT_LENGTH = originalOllamaContextLength;
+		}
+		if (originalZhipuApiKey === undefined) {
+			delete Bun.env.ZHIPU_API_KEY;
+		} else {
+			Bun.env.ZHIPU_API_KEY = originalZhipuApiKey;
 		}
 		authStorage.close();
 		if (tempDir && fs.existsSync(tempDir)) {

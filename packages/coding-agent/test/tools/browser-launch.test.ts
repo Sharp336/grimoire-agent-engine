@@ -234,6 +234,7 @@ describe("browser executable selection", () => {
 				XDG_STATE_HOME: path.join(tempDir.path(), "state"),
 				OMP_BROWSER_PROBE_PLATFORM: "darwin",
 				PUPPETEER_EXECUTABLE_PATH: "",
+				PI_CODING_AGENT_DIR: "",
 			};
 
 			// System Google Chrome bundle (com.google.Chrome) — the LaunchServices
