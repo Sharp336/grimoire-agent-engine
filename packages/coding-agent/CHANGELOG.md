@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `/archive` slash command to confirm, start a fresh session, and move the previous session into the existing `omp gc --archive` store so it leaves the `/resume` picker ([#9029](https://github.com/can1357/oh-my-pi/issues/9029)).
+
 ## [18.0.1] - 2026-08-23
 
 ### Added

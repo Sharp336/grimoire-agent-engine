@@ -11,7 +11,7 @@ import {
 	type UsageReport,
 } from "@oh-my-pi/pi-ai";
 import { Loader, Markdown, padding, Spacer, Text, visibleWidth } from "@oh-my-pi/pi-tui";
-import { formatDuration, logger, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatDuration, getSessionsDir, logger, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
 import { shouldEnableAppendOnlyContext } from "../../config/append-only-context-mode";
 import { type BashResult, isPersistentShellCdCommand } from "../../exec/bash-executor";
 import { type LoadedCustomShare, loadCustomShare } from "../../export/custom-share";
@@ -43,6 +43,11 @@ import { buildToolsMarkdown } from "../../modes/utils/tools-markdown";
 import type { AsyncJobSnapshotItem } from "../../session/agent-session";
 import type { AuthStorage, OAuthAccountIdentity } from "../../session/auth-storage";
 import type { CompactMode } from "../../session/compact-modes";
+import {
+	archiveSessionFile,
+	getArchivedSessionsDir,
+	sessionHasLiveNestedSessions,
+} from "../../session/session-archive";
 import type { NewSessionOptions } from "../../session/session-entries";
 import { formatShakeSummary, type ShakeMode, type ShakeResult } from "../../session/shake-types";
 import { formatActiveAccountLabel, limitMatchesActiveAccount } from "../../slash-commands/helpers/active-oauth-account";
@@ -921,7 +926,11 @@ export class CommandController {
 		}
 	}
 
-	async #runNewSessionFlow(options?: NewSessionOptions, label: string = "New session started"): Promise<void> {
+	async #runNewSessionFlow(
+		options?: NewSessionOptions,
+		label: string = "New session started",
+		afterSwitch?: () => Promise<unknown>,
+	): Promise<boolean> {
 		this.ctx.clearTransientSessionUi();
 
 		if (this.ctx.session.isCompacting) {
@@ -930,7 +939,7 @@ export class CommandController {
 				await Bun.sleep(10);
 			}
 		}
-		if (!(await this.ctx.session.newSession(options))) return;
+		if (!(await this.ctx.session.newSession(options))) return false;
 		this.ctx.resetObserverRegistry();
 		setSessionTerminalTitle(this.ctx.sessionManager.getSessionName(), this.ctx.sessionManager.getCwd());
 
@@ -940,9 +949,23 @@ export class CommandController {
 		this.ctx.clearTransientSessionUi();
 		this.ctx.resetTranscript();
 
+		if (afterSwitch) {
+			try {
+				await afterSwitch();
+			} catch (error) {
+				this.ctx.showError(
+					`Session switched, but archive failed: ${error instanceof Error ? error.message : String(error)}`,
+				);
+				await this.ctx.reloadTodos();
+				this.ctx.ui.requestRender(true, { clearScrollback: true });
+				return false;
+			}
+		}
+
 		this.ctx.present([new Spacer(1), new Text(`${theme.fg("accent", `${theme.status.success} ${label}`)}`, 1, 1)]);
 		await this.ctx.reloadTodos();
 		this.ctx.ui.requestRender(true, { clearScrollback: true });
+		return true;
 	}
 
 	async handleClearCommand(): Promise<void> {
@@ -998,6 +1021,34 @@ export class CommandController {
 			return;
 		}
 		await this.#runNewSessionFlow({ drop: true }, "Session dropped");
+	}
+
+	async handleArchiveCommand(): Promise<void> {
+		const sessionFile = this.ctx.sessionManager.getSessionFile();
+		if (!sessionFile) {
+			this.ctx.showError("Nothing to archive (in-memory session)");
+			return;
+		}
+		if (this.ctx.session.isStreaming) {
+			this.ctx.showWarning("Wait for the current response to finish or abort it before archiving.");
+			return;
+		}
+		if (await sessionHasLiveNestedSessions(sessionFile)) {
+			this.ctx.showWarning("Wait for nested sessions to finish before archiving.");
+			return;
+		}
+
+		const choice = await this.ctx.showHookSelector(
+			"Archive the current session?\nThe session will be removed from the normal /resume list\nand moved to the session archive.",
+			["Archive", "Cancel"],
+		);
+		if (choice !== "Archive") return;
+
+		this.ctx.prepareSessionSwitch();
+		const agentDir = this.ctx.settings.getAgentDir();
+		await this.#runNewSessionFlow(undefined, "Session archived", () =>
+			archiveSessionFile(sessionFile, getSessionsDir(agentDir), getArchivedSessionsDir(agentDir)),
+		);
 	}
 
 	async handleForkCommand(): Promise<void> {

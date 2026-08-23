@@ -384,6 +384,8 @@ export interface InteractiveModeContext {
 	handleFreshCommand(): Promise<void>;
 	handleResetContextCommand(): Promise<void>;
 	handleDropCommand(): Promise<void>;
+	handleArchiveCommand(): Promise<void>;
+	prepareSessionSwitch(): void;
 	handleForkCommand(): Promise<void>;
 	handleBashCommand(command: string, excludeFromContext?: boolean): Promise<void>;
 	handlePythonCommand(code: string, excludeFromContext?: boolean): Promise<void>;

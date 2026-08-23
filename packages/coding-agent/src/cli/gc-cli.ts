@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { gunzipSync, gzipSync } from "node:zlib";
+import { gunzipSync } from "node:zlib";
 import { withStatsSyncLock } from "@oh-my-pi/omp-stats/aggregator";
 import {
 	getAgentDir,
@@ -15,6 +15,13 @@ import {
 import { Settings } from "../config/settings";
 import { getDefault } from "../config/settings-schema";
 import { BLOB_HASH_RE } from "../session/blob-store";
+import {
+	getArchivedSessionsDir,
+	moveSessionWithArtifacts,
+	resolveArchiveDestination,
+	sessionArtifactsPath,
+	sessionHasLiveNestedSessions,
+} from "../session/session-archive";
 import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
 import { FileSessionStorage } from "../session/session-storage";
 
@@ -198,10 +205,6 @@ export function collectGcErrors(result: GcResult): string[] {
 	];
 }
 
-function getArchivedSessionsDir(agentDir: string): string {
-	return path.join(path.dirname(getSessionsDir(agentDir)), "archive", "sessions");
-}
-
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
@@ -375,69 +378,11 @@ async function listActiveSessions(sessionsRoot: string): Promise<SessionInfo[]> 
 	return sessions;
 }
 
-async function listNestedSessionsReadOnly(artifactsRoot: string): Promise<SessionInfo[]> {
-	const files = await collectJsonlFiles(artifactsRoot);
-	const dirs = [...new Set(files.map(file => path.dirname(file)))].sort();
-	const storage = new FileSessionStorage();
-	const sessions: SessionInfo[] = [];
-	for (const dir of dirs) sessions.push(...(await listSessionsReadOnly(dir, storage)));
-	sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
-	return sessions;
-}
-
-async function hasLiveNestedSessions(session: SessionInfo, archiveBeforeMs: number): Promise<boolean> {
-	for (const nested of await listNestedSessionsReadOnly(sessionArtifactsPath(session.path))) {
-		if (nested.status && ACTIVE_STATUSES.has(nested.status)) return true;
-		if (nested.modified.getTime() > archiveBeforeMs) return true;
-	}
-	return false;
-}
-
-function archiveDestination(
-	archiveRoot: string,
-	sessionsRoot: string,
-	session: SessionInfo,
-): Omit<ArchiveCandidate, "session"> | null {
-	const sessionPath = session.path;
-	const relativePath = path.relative(sessionsRoot, sessionPath);
-	if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) return null;
-	if (!relativePath.endsWith(SESSION_SUFFIX)) return null;
-	return {
-		relativePath,
-		destinationPath: path.join(archiveRoot, `${relativePath}.gz`),
-	};
-}
-
 function sessionCwdKey(sessionsRoot: string, session: SessionInfo): string {
 	const relativePath = path.relative(sessionsRoot, session.path);
 	if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) return session.cwd || ".";
 	const dirname = path.dirname(relativePath);
 	return dirname === "." ? session.cwd || "." : dirname;
-}
-
-async function movePath(source: string, destination: string): Promise<void> {
-	await fs.mkdir(path.dirname(destination), { recursive: true });
-	try {
-		await fs.rename(source, destination);
-		return;
-	} catch (error) {
-		if (codeOf(error) !== "EXDEV") throw error;
-	}
-	const stat = await fs.stat(source);
-	if (stat.isDirectory()) {
-		await fs.cp(source, destination, { recursive: true });
-		await fs.rm(source, { recursive: true, force: true });
-		return;
-	}
-	await fs.copyFile(source, destination);
-	await fs.unlink(source);
-}
-
-function sessionArtifactsPath(sessionPath: string): string {
-	if (sessionPath.endsWith(COMPRESSED_SESSION_SUFFIX)) {
-		return sessionPath.slice(0, -COMPRESSED_SESSION_SUFFIX.length);
-	}
-	return sessionPath.slice(0, -SESSION_SUFFIX.length);
 }
 
 interface SessionLineageHeader {
@@ -491,66 +436,6 @@ async function readSessionLineageHeader(file: string): Promise<SessionLineageHea
 		if (header || lines.length >= 2) return header;
 	}
 	return undefined;
-}
-
-async function gzipSessionFile(source: string, destination: string): Promise<void> {
-	await fs.mkdir(path.dirname(destination), { recursive: true });
-	const tempPath = `${destination}.${process.pid}.${Date.now()}.tmp`;
-	let renamed = false;
-	try {
-		const compressed = gzipSync(await Bun.file(source).bytes(), { level: 9 });
-		await Bun.write(tempPath, compressed);
-		await fs.rename(tempPath, destination);
-		renamed = true;
-		await fs.unlink(source);
-	} catch (error) {
-		await fs.rm(tempPath, { force: true });
-		if (renamed) await fs.rm(destination, { force: true });
-		throw error;
-	}
-}
-
-async function restoreGzipSessionFile(source: string, destination: string): Promise<void> {
-	await fs.mkdir(path.dirname(destination), { recursive: true });
-	const decompressed = gunzipSync(await Bun.file(source).bytes());
-	await Bun.write(destination, decompressed);
-	await fs.unlink(source);
-}
-
-async function moveSessionWithArtifacts(candidate: ArchiveCandidate): Promise<void> {
-	const sourceSession = candidate.session.path;
-	const destSession = candidate.destinationPath;
-	const legacyDestSession = destSession.endsWith(".gz") ? destSession.slice(0, -".gz".length) : `${destSession}.gz`;
-	const sourceArtifacts = sessionArtifactsPath(sourceSession);
-	const destArtifacts = sessionArtifactsPath(destSession);
-	if (await pathExists(destSession)) throw new Error(`archive destination exists: ${destSession}`);
-	if (await pathExists(legacyDestSession)) throw new Error(`archive destination exists: ${legacyDestSession}`);
-	if ((await pathExists(sourceArtifacts)) && (await pathExists(destArtifacts))) {
-		throw new Error(`archive artifacts destination exists: ${destArtifacts}`);
-	}
-
-	const moved: Array<{ source: string; destination: string; compressed?: boolean }> = [];
-	try {
-		await gzipSessionFile(sourceSession, destSession);
-		moved.push({ source: sourceSession, destination: destSession, compressed: true });
-		if (await pathExists(sourceArtifacts)) {
-			await movePath(sourceArtifacts, destArtifacts);
-			moved.push({ source: sourceArtifacts, destination: destArtifacts });
-		}
-	} catch (error) {
-		for (const move of moved.reverse()) {
-			try {
-				if (move.compressed) {
-					await restoreGzipSessionFile(move.destination, move.source);
-				} else {
-					await movePath(move.destination, move.source);
-				}
-			} catch {
-				// Preserve the original failure; rollback failure is reported by the next scan.
-			}
-		}
-		throw error;
-	}
 }
 
 function sqliteNumber(value: number | bigint | null | undefined): number {
@@ -1250,7 +1135,7 @@ async function runArchiveGc(options: ResolvedGcOptions, archiveRoot: string): Pr
 			result.skippedActive += 1;
 			continue;
 		}
-		if (await hasLiveNestedSessions(session, archiveBeforeMs)) {
+		if (await sessionHasLiveNestedSessions(session.path, { recentlyModifiedAfterMs: archiveBeforeMs })) {
 			result.skippedActive += 1;
 			continue;
 		}
@@ -1269,7 +1154,7 @@ async function runArchiveGc(options: ResolvedGcOptions, archiveRoot: string): Pr
 			continue;
 		}
 		if (options.coldArchiveAfterDays > 0 && session.modified.getTime() > cutoffMs) continue;
-		const destination = archiveDestination(archiveRoot, sessionsRoot, session);
+		const destination = resolveArchiveDestination(session.path, sessionsRoot, archiveRoot);
 		if (!destination) continue;
 		candidates.push({ ...destination, session });
 	}
@@ -1281,7 +1166,7 @@ async function runArchiveGc(options: ResolvedGcOptions, archiveRoot: string): Pr
 	const archivedSessions: SessionInfo[] = [];
 	for (const candidate of candidates) {
 		try {
-			await moveSessionWithArtifacts(candidate);
+			await moveSessionWithArtifacts(candidate.session.path, candidate.destinationPath);
 			result.archived += 1;
 			archivedSessionIds.push(candidate.session.id);
 			archivedSessions.push(candidate.session);

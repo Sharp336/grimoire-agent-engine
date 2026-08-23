@@ -627,10 +627,11 @@ describe("InteractiveMode vibe mode toggle", () => {
 
 		await expect(mode.handleClearCommand()).resolves.toBeUndefined();
 		await expect(mode.handleDropCommand()).resolves.toBeUndefined();
+		await expect(mode.handleArchiveCommand()).resolves.toBeUndefined();
 		await expect(mode.handleForkCommand()).resolves.toBeUndefined();
 		await expect(mode.handleMoveCommand(path.join(tempDir.path(), "other-project"))).resolves.toBeUndefined();
 
-		expect(warning).toHaveBeenCalledTimes(4);
+		expect(warning).toHaveBeenCalledTimes(5);
 		expect(warning).toHaveBeenCalledWith("Exit vibe mode first.");
 		expect(session.sessionFile).toBe(sessionFile);
 		expect(mode.vibeModeEnabled).toBe(true);
