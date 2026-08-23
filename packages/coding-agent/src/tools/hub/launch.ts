@@ -347,13 +347,14 @@ async function registerOutputSink(
 					if (settled) return;
 					settled = true;
 					pendingLeases--;
-					if (startAccepted || !registration.active) return;
-					startAccepted = true;
+					if (!registration.active) return;
 					if (registration.delivery !== requestedDelivery) {
 						session.setLaunchMonitorActive?.(id, registration.delivery, false);
 						registration.delivery = requestedDelivery;
 						session.setLaunchMonitorActive?.(id, requestedDelivery, true);
 					}
+					if (startAccepted) return;
+					startAccepted = true;
 					registration.binding = "attached";
 					subscription.startPending = undefined;
 					await flushSpeculative();

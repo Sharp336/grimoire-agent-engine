@@ -3541,7 +3541,7 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 		}
 	}, 20_000);
 
-	it("orders one daemon's completion without blocking unrelated monitor output", async () => {
+	it("separates owner completion from monitor output without blocking unrelated output", async () => {
 		using tempDir = TempDir.createSync("@omp-launch-monitor-wire-order-");
 		const projectDir = path.join(tempDir.path(), "project");
 		const runtimeDir = path.join(tempDir.path(), "runtime");
@@ -3701,12 +3701,10 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 					.join("\n")}\n`,
 			);
 			await probe;
-			await outputStarted.promise;
-			expect(deliveryOrder).toEqual(["output:start"]);
+			await Promise.all([outputStarted.promise, completionStarted.promise]);
+			expect(deliveryOrder).toEqual(["output:start", "completion:start"]);
 
 			releaseOutput.resolve();
-			await completionStarted.promise;
-			expect(deliveryOrder).toEqual(["output:start", "output:end", "completion:start"]);
 
 			brokerSocket.write(
 				`${JSON.stringify({
@@ -3723,14 +3721,14 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 				})}\n`,
 			);
 			await otherOutputDelivered.promise;
-			expect(deliveryOrder).toEqual(["output:start", "output:end", "completion:start", "other-output"]);
+			expect(deliveryOrder).toEqual(["output:start", "completion:start", "output:end", "other-output"]);
 
 			releaseCompletion.resolve();
 			await completionDelivered.promise;
 			expect(deliveryOrder).toEqual([
 				"output:start",
-				"output:end",
 				"completion:start",
+				"output:end",
 				"other-output",
 				"completion:end",
 			]);
