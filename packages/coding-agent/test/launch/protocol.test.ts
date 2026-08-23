@@ -91,14 +91,26 @@ describe("launch logs compatibility", () => {
 			id: "request-1",
 			token: "token-1",
 			outputSubscriptions: [
-				{ id: "monitor-1", name: "web", owner: "session-owner", artifactPath: "/tmp/monitor.log" },
+				{
+					id: "monitor-1",
+					registrationId: "registration-1",
+					name: "web",
+					owner: "session-owner",
+					artifactPath: "/tmp/monitor.log",
+				},
 			],
 			outputSubscriptionId: "output-subscription-1",
 			operation: { op: "ping" },
 		});
 
 		expect(request.outputSubscriptions).toEqual([
-			{ id: "monitor-1", name: "web", owner: "session-owner", artifactPath: "/tmp/monitor.log" },
+			{
+				id: "monitor-1",
+				registrationId: "registration-1",
+				name: "web",
+				owner: "session-owner",
+				artifactPath: "/tmp/monitor.log",
+			},
 		]);
 		expect(request.outputSubscriptionId).toBe("output-subscription-1");
 	});
@@ -110,6 +122,7 @@ describe("launch logs compatibility", () => {
 			outputSubscriptions: [
 				{
 					id: "monitor-1",
+					registrationId: "registration-1",
 					name: "web",
 					owner: "session-owner",
 					artifactPath: "/tmp/monitor.log",
@@ -131,6 +144,7 @@ describe("launch logs compatibility", () => {
 				outputSubscriptions: [
 					{
 						id: "monitor-1",
+						registrationId: "registration-1",
 						name: "web",
 						owner: "session-owner",
 						artifactPath: "/tmp/monitor.log",
@@ -156,6 +170,7 @@ describe("launch monitor notifications", () => {
 			parseDaemonWireMessage({
 				event: "daemon-output",
 				monitorId: "monitor-1",
+				registrationId: "registration-1",
 				name: "web",
 				daemonId: "daemon-1",
 				seq: 2,
@@ -168,6 +183,7 @@ describe("launch monitor notifications", () => {
 		).toEqual({
 			event: "daemon-output",
 			monitorId: "monitor-1",
+			registrationId: "registration-1",
 			name: "web",
 			daemonId: "daemon-1",
 			seq: 2,
@@ -184,6 +200,7 @@ describe("launch monitor notifications", () => {
 			parseDaemonWireMessage({
 				event: "daemon-output",
 				monitorId: "monitor-1",
+				registrationId: "registration-1",
 				name: "web",
 				daemonId: "daemon-1",
 				seq: 0,
@@ -205,11 +222,13 @@ describe("launch monitor notifications", () => {
 			parseDaemonWireMessage({
 				event: "daemon-monitor-completed",
 				monitorId: "monitor-1",
+				registrationId: "registration-1",
 				daemon: { ...baseSnapshot, state: "exited", exitedAt: 2, exitCode: 0 },
 			}),
 		).toEqual({
 			event: "daemon-monitor-completed",
 			monitorId: "monitor-1",
+			registrationId: "registration-1",
 			daemon: { ...baseSnapshot, state: "exited", exitedAt: 2, exitCode: 0 },
 		});
 	});
@@ -219,6 +238,7 @@ describe("launch monitor notifications", () => {
 			parseDaemonWireMessage({
 				event: "daemon-output",
 				monitorId: "monitor-1",
+				registrationId: "registration-1",
 				name: "web",
 				daemonId: "daemon-1",
 				seq,
@@ -234,6 +254,7 @@ describe("launch monitor notifications", () => {
 			parseDaemonWireMessage({
 				event: "daemon-output",
 				monitorId: "monitor-1",
+				registrationId: "registration-1",
 				name: "web",
 				daemonId: "daemon-1",
 				seq: "2",

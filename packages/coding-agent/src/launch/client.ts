@@ -14,8 +14,10 @@ import {
 	DAEMON_RUNTIME_DIR_ENV,
 	type DaemonCompletionNotification,
 	type DaemonMonitorNotification,
+	type DaemonMonitorWireNotification,
 	type DaemonOperation,
 	type DaemonOutputSubscription,
+	type DaemonOutputWireSubscription,
 	type DaemonRpcResult,
 	type DaemonWireMessage,
 	parseDaemonRpcResult,
@@ -39,10 +41,24 @@ interface PendingRequest {
 	removeAbort?: () => void;
 }
 
+function publicMonitorNotification(message: DaemonMonitorWireNotification): DaemonMonitorNotification {
+	if (message.event === "daemon-output") {
+		const { registrationId, ...notification } = message;
+		void registrationId;
+		return notification;
+	}
+	const { registrationId, ...notification } = message;
+	void registrationId;
+	return notification;
+}
+
 interface OutputSinkRegistration {
 	subscription: DaemonOutputSubscription;
+	registrationId: string;
 	sink: (notification: DaemonMonitorNotification) => Promise<void> | void;
-	/** Resolves once the broker acknowledges this subscription and capability. */
+	/** Daemon incarnation bound by the first matching notification. */
+	daemonId?: string;
+	/** Resolves once broker acknowledgement or terminal delivery confirms this subscription. */
 	resolveReady: () => void;
 	rejectReady: (error: Error) => void;
 	deliveryTail?: Promise<void>;
@@ -84,7 +100,7 @@ export interface DaemonBrokerClient {
 	/**
 	 * Register a live output sink. {@link DaemonOutputUnregister.ready} settles
 	 * after the broker acknowledges both the subscription and output-monitor
-	 * capability negotiation.
+	 * capability negotiation, or when terminal delivery proves publication first.
 	 */
 	onOutput?(
 		subscription: DaemonOutputSubscription,
@@ -304,15 +320,25 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		subscription: DaemonOutputSubscription,
 		sink: (notification: DaemonMonitorNotification) => Promise<void> | void,
 	): DaemonOutputUnregister {
-		const { promise: ready, resolve: resolveReady, reject: rejectReady } = Promise.withResolvers<void>();
+		const { promise: ready, resolve, reject } = Promise.withResolvers<void>();
+		let readySettled = false;
 		// Callers may only need synchronous detachment. Mark the rejection
 		// observed without changing what consumers awaiting `ready` receive.
 		void ready.catch(() => undefined);
 		const registration: OutputSinkRegistration = {
 			subscription,
+			registrationId: crypto.randomUUID(),
 			sink,
-			resolveReady: () => resolveReady(),
-			rejectReady: error => rejectReady(error),
+			resolveReady: () => {
+				if (readySettled) return;
+				readySettled = true;
+				resolve();
+			},
+			rejectReady: error => {
+				if (readySettled) return;
+				readySettled = true;
+				reject(error);
+			},
 		};
 		const previous = this.#outputSinks.get(subscription.id);
 		if (previous) {
@@ -324,7 +350,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			this.#brokerCapabilities !== undefined &&
 			!this.#brokerCapabilities.includes(DAEMON_OUTPUT_MONITOR_CAPABILITY)
 		) {
-			rejectReady(outputMonitoringUnsupportedError());
+			registration.rejectReady(outputMonitoringUnsupportedError());
 		} else {
 			this.#outputSinks.set(subscription.id, registration);
 			this.#publishSubscriptions();
@@ -334,7 +360,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			const current = this.#outputSinks.get(subscription.id);
 			if (current !== registration) return;
 			this.#outputSinks.delete(subscription.id);
-			rejectReady(new Error("Daemon output registration was removed before it was acknowledged"));
+			registration.rejectReady(new Error("Daemon output registration was removed before it was acknowledged"));
 			if (this.#completionSinks.size === 0 && this.#outputSinks.size === 0 && this.#completionReconnectTimer) {
 				clearTimeout(this.#completionReconnectTimer);
 				this.#completionReconnectTimer = undefined;
@@ -348,12 +374,12 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	 * Advertised subscriptions carry the cumulative delivery ack so a
 	 * reconnecting envelope replays only retained batches the sink never saw.
 	 */
-	#outputSubscriptionPayloads(): DaemonOutputSubscription[] {
-		return [...this.#outputSinks.values()].map(entry =>
-			entry.lastEpoch === undefined
-				? entry.subscription
-				: { ...entry.subscription, lastEpoch: entry.lastEpoch, lastSeq: entry.lastSeq ?? 0 },
-		);
+	#outputSubscriptionPayloads(): DaemonOutputWireSubscription[] {
+		return [...this.#outputSinks.values()].map(entry => ({
+			...entry.subscription,
+			registrationId: entry.registrationId,
+			...(entry.lastEpoch === undefined ? {} : { lastEpoch: entry.lastEpoch, lastSeq: entry.lastSeq ?? 0 }),
+		}));
 	}
 
 	#publishCompletionOwners(): void {
@@ -558,25 +584,33 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		}
 	}
 
-	async #deliverOutput(message: DaemonMonitorNotification, generation: number): Promise<void> {
+	async #deliverOutput(message: DaemonMonitorWireNotification, generation: number): Promise<void> {
 		const entry = this.#outputSinks.get(message.monitorId);
 		if (!entry) return;
 		const deliver = async (): Promise<void> => {
 			if (this.#outputSinks.get(message.monitorId) !== entry) return;
+			if (message.registrationId !== entry.registrationId) return;
+			const notificationName = message.event === "daemon-output" ? message.name : message.daemon.name;
+			const notificationDaemonId = message.event === "daemon-output" ? message.daemonId : message.daemon.id;
+			if (notificationName !== entry.subscription.name) return;
+			if (entry.daemonId === undefined) entry.daemonId = notificationDaemonId;
+			else if (entry.daemonId !== notificationDaemonId) return;
 			// Destroying a socket does not retract frames already parsed from that
 			// socket. Once this connection's callback rejects, suppress everything
 			// queued behind it instead of invoking the sink again.
 			if (entry.failedDeliveryGeneration === generation) return;
 			if (message.event === "daemon-monitor-completed" && entry.completionBlocked) {
+				entry.resolveReady();
 				this.#outputSinks.delete(message.monitorId);
 				this.#publishSubscriptions();
 				return;
 			}
+			const notification = publicMonitorNotification(message);
 			if (message.event === "daemon-output" && message.epoch !== undefined) {
 				// A reconnect replays broker-retained batches; the epoch-scoped
 				// cumulative ack identifies the ones this sink already consumed.
 				if (message.epoch === entry.lastEpoch && message.seq <= (entry.lastSeq ?? 0)) return;
-				await entry.sink(message);
+				await entry.sink(notification);
 				if (message.epoch === entry.lastEpoch) entry.lastSeq = Math.max(entry.lastSeq ?? 0, message.seq);
 				else {
 					entry.lastEpoch = message.epoch;
@@ -584,8 +618,9 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				}
 				return;
 			}
-			await entry.sink(message);
+			await entry.sink(notification);
 			if (message.event === "daemon-monitor-completed" && this.#outputSinks.get(message.monitorId) === entry) {
+				entry.resolveReady();
 				this.#outputSinks.delete(message.monitorId);
 				this.#publishSubscriptions();
 			}

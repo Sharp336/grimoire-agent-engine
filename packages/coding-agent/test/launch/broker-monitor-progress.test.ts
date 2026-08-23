@@ -50,6 +50,19 @@ interface RawBrokerSocket {
 	waitFor(predicate: (message: Record<string, unknown>) => boolean): Promise<Record<string, unknown>>;
 }
 
+interface AdvertisedOutputSubscription {
+	id: string;
+	registrationId: string;
+	name: string;
+	owner: string;
+	artifactPath: string;
+}
+
+interface BrokerRequest {
+	id: string;
+	outputSubscriptions?: AdvertisedOutputSubscription[];
+}
+
 async function openRawBrokerSocket(endpoint: string): Promise<RawBrokerSocket> {
 	const socket = net.createConnection(endpoint);
 	const connected = Promise.withResolvers<void>();
@@ -628,6 +641,7 @@ process.stdin.once("data", () => {
 
 			const ordinarySubscription = {
 				id: "ordinary-terminal-monitor",
+				registrationId: "ordinary-terminal-registration",
 				name: "reuse",
 				owner: "owner-1",
 				artifactPath: path.join(tempDir.path(), "ordinary-terminal.log"),
@@ -644,6 +658,7 @@ process.stdin.once("data", () => {
 
 			const futureSubscription = {
 				id: "replacement-monitor",
+				registrationId: "replacement-registration",
 				name: "reuse",
 				owner: "owner-1",
 				artifactPath,
@@ -704,11 +719,7 @@ process.stdin.once("data", () => {
 		try {
 			await client.request({ op: "ping" });
 			const token = (await Bun.file(path.join(runtimeDir, "broker.token")).text()).trim();
-			const register = (
-				id: string,
-				outputSubscriptionId: string,
-				subscription: Record<string, unknown>,
-			): string =>
+			const register = (id: string, outputSubscriptionId: string, subscription: Record<string, unknown>): string =>
 				`${JSON.stringify({
 					id,
 					token,
@@ -718,6 +729,7 @@ process.stdin.once("data", () => {
 				})}\n`;
 			const oldSubscription = {
 				id: "terminal-old-monitor",
+				registrationId: "terminal-old-registration",
 				name: "terminal-restart",
 				owner: "terminal-owner",
 				artifactPath: oldArtifactPath,
@@ -748,6 +760,7 @@ process.stdin.once("data", () => {
 			await Bun.write(scriptPath, 'process.stdout.write("SECOND_RUN\\n");\n');
 			const newSubscription = {
 				id: "terminal-new-monitor",
+				registrationId: "terminal-new-registration",
 				name: "terminal-restart",
 				owner: "terminal-owner",
 				artifactPath: newArtifactPath,
@@ -766,18 +779,12 @@ process.stdin.once("data", () => {
 			);
 
 			const oldNotifications = oldMonitor.messages.filter(message => message.monitorId === oldSubscription.id);
-			expect(oldNotifications.map(message => message.event)).toEqual([
-				"daemon-output",
-				"daemon-monitor-completed",
-			]);
+			expect(oldNotifications.map(message => message.event)).toEqual(["daemon-output", "daemon-monitor-completed"]);
 			expect(oldNotifications[0]?.text).toBe("FIRST_RUN");
 			expect(await Bun.file(oldArtifactPath).text()).toBe("FIRST_RUN\n");
 
 			const newNotifications = newMonitor.messages.filter(message => message.monitorId === newSubscription.id);
-			expect(newNotifications.map(message => message.event)).toEqual([
-				"daemon-output",
-				"daemon-monitor-completed",
-			]);
+			expect(newNotifications.map(message => message.event)).toEqual(["daemon-output", "daemon-monitor-completed"]);
 			expect(newNotifications[0]).toMatchObject({
 				daemonId: restarted.daemon.id,
 				text: "SECOND_RUN",
@@ -1133,7 +1140,14 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 					id: crypto.randomUUID(),
 					token,
 					outputSubscriptions: [
-						{ id: "replay-monitor", name: "replay", owner: "raw-owner", artifactPath, ...ack },
+						{
+							id: "replay-monitor",
+							registrationId: "replay-registration",
+							name: "replay",
+							owner: "raw-owner",
+							artifactPath,
+							...ack,
+						},
 					],
 					outputSubscriptionId: "raw-subscription",
 					operation: { op: "ping" },
@@ -1214,7 +1228,7 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 		}
 	}, 20_000);
 
-	it("does not duplicate detached output into monitors when refreshes race", async () => {
+	it("streams fresh detached output without another RPC or duplicate polling", async () => {
 		using tempDir = TempDir.createSync("@omp-launch-monitor-detached-dup-");
 		const projectDir = path.join(tempDir.path(), "project");
 		const runtimeDir = path.join(tempDir.path(), "runtime");
@@ -1235,7 +1249,6 @@ const timer = setInterval(() => {
 		);
 		const artifactPath = path.join(tempDir.path(), "detached-dup-progress.log");
 		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
-		const secondClient = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
 		const previousTitle = process.title;
 		const broker = startBroker(projectDir, runtimeDir);
 		const notifications: DaemonMonitorNotification[] = [];
@@ -1251,7 +1264,7 @@ const timer = setInterval(() => {
 		try {
 			// Publish the subscription before start so the daemon's first bytes land
 			// after this registration's attach point.
-			await client.request({ op: "ping" });
+			await unregister.ready;
 			await client.request({
 				op: "start",
 				spec: {
@@ -1266,30 +1279,20 @@ const timer = setInterval(() => {
 					detached: true,
 				},
 			});
-			// Wait on the detached log file itself: no broker op may consume the
-			// bytes before the racing refreshes both observe the same unread range.
-			const logPath = path.join(runtimeDir, "daemons", "detached-dup", "output.log");
+			// Start is the last broker operation before observing progress. The
+			// detached process remains alive until the flag is written below, so
+			// only the generation-owned refresh loop can advance this monitor.
+			await waitForOutputCount(notifications, 1);
 			const deadline = Date.now() + 5_000;
 			while (
-				!(
-					await Bun.file(logPath)
-						.text()
-						.catch(() => "")
-				).includes("PAYLOAD\n")
+				(await Bun.file(artifactPath)
+					.text()
+					.catch(() => "")) !== "PAYLOAD\n"
 			) {
-				if (Date.now() > deadline) throw new Error("Detached daemon never wrote its payload");
+				if (Date.now() > deadline) throw new Error("Detached monitor artifact never received its payload");
 				await Bun.sleep(10);
 			}
-			// Two concurrent refreshes over separate sockets: without per-record
-			// read serialization both would read [offset, size) before either
-			// advances the offset and forward the payload twice.
-			await Promise.all([
-				client.request({ op: "describe", name: "detached-dup" }),
-				secondClient.request({ op: "describe", name: "detached-dup" }),
-			]);
-			await Bun.write(flagPath, "done");
-			await completed.promise;
-
+			expect(notifications.some(notification => notification.event === "daemon-monitor-completed")).toBeFalse();
 			expect(await Bun.file(artifactPath).text()).toBe("PAYLOAD\n");
 			const output = notifications.filter(
 				(notification): notification is Extract<DaemonMonitorNotification, { event: "daemon-output" }> =>
@@ -1297,13 +1300,211 @@ const timer = setInterval(() => {
 			);
 			const joined = output.map(notification => notification.text).join("\n");
 			expect(joined.split("PAYLOAD").length - 1).toBe(1);
+
+			await Bun.write(flagPath, "done");
+			await completed.promise;
+
+			expect(await Bun.file(artifactPath).text()).toBe("PAYLOAD\n");
 		} finally {
 			unregister();
 			await Bun.write(flagPath, "done").catch(() => undefined);
 			await client.request({ op: "stop", name: "detached-dup", timeoutMs: 2_000 }).catch(() => undefined);
 			await client.request({ op: "shutdown" }).catch(() => undefined);
 			client.close();
-			secondClient.close();
+			await broker;
+			setProcessName(previousTitle);
+		}
+	}, 20_000);
+
+	it("preserves a UTF-8 code point split across detached log polls", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-detached-utf8-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		const scriptPath = path.join(projectDir, "service.ts");
+		const firstHalfWrittenPath = path.join(tempDir.path(), "first-half-written");
+		const continuePath = path.join(tempDir.path(), "continue");
+		await Bun.write(
+			scriptPath,
+			`import * as fs from "node:fs";
+fs.writeSync(1, Buffer.from([0xf0, 0x9f]));
+fs.writeFileSync(${JSON.stringify(firstHalfWrittenPath)}, "done");
+const timer = setInterval(() => {
+	if (fs.existsSync(${JSON.stringify(continuePath)})) {
+		clearInterval(timer);
+		fs.writeSync(1, Buffer.from([0x98, 0x80, 0x0a]));
+		process.exit(0);
+	}
+}, 25);
+`,
+		);
+		const artifactPath = path.join(tempDir.path(), "detached-utf8-progress.log");
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const previousTitle = process.title;
+		const broker = startBroker(projectDir, runtimeDir, { progressBatchIntervalMs: 0 });
+		const notifications: DaemonMonitorNotification[] = [];
+		const completed = Promise.withResolvers<void>();
+		const unregister = client.onOutput?.(
+			{ id: "detached-utf8-monitor", name: "detached-utf8", owner: "owner", artifactPath },
+			notification => {
+				notifications.push(notification);
+				if (notification.event === "daemon-monitor-completed") completed.resolve();
+			},
+		);
+		if (!unregister) throw new Error("Expected output monitoring support");
+		try {
+			await unregister.ready;
+			await client.request({
+				op: "start",
+				spec: {
+					name: "detached-utf8",
+					application: process.execPath,
+					args: [scriptPath],
+					env: {},
+					cwd: projectDir,
+					pty: false,
+					restart: "no",
+					persist: false,
+					detached: true,
+				},
+			});
+
+			const deadline = Date.now() + 5_000;
+			while (!(await Bun.file(firstHalfWrittenPath).exists())) {
+				if (Date.now() > deadline) throw new Error("Detached daemon never wrote the first UTF-8 slice");
+				await Bun.sleep(10);
+			}
+			const sliced = await client.request({ op: "describe", name: "detached-utf8" });
+			if (sliced.op !== "describe") throw new Error("unexpected describe result");
+			expect(sliced.daemon.outputBytes).toBe(2);
+			expect(
+				await Bun.file(artifactPath)
+					.text()
+					.catch(() => ""),
+			).toBe("");
+			expect(notifications.some(notification => notification.event === "daemon-output")).toBeFalse();
+
+			await Bun.write(continuePath, "done");
+			await completed.promise;
+			const output = notifications
+				.filter(
+					(notification): notification is Extract<DaemonMonitorNotification, { event: "daemon-output" }> =>
+						notification.event === "daemon-output",
+				)
+				.map(notification => notification.text)
+				.join("");
+			expect(output).toBe("😀");
+			expect(await Bun.file(artifactPath).text()).toBe("😀\n");
+		} finally {
+			unregister();
+			await Bun.write(continuePath, "done").catch(() => undefined);
+			await client.request({ op: "stop", name: "detached-utf8", timeoutMs: 2_000 }).catch(() => undefined);
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
+			await broker;
+			setProcessName(previousTitle);
+		}
+	}, 20_000);
+
+	it("preserves the detached output cursor across automatic restarts", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-detached-restart-cursor-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		const scriptPath = path.join(projectDir, "service.ts");
+		const statePath = path.join(tempDir.path(), "incarnation-count");
+		const holdPath = path.join(tempDir.path(), "hold-third-incarnation");
+		await Bun.write(
+			scriptPath,
+			`import * as fs from "node:fs";
+let incarnation = 0;
+try {
+	incarnation = Number(fs.readFileSync(${JSON.stringify(statePath)}, "utf8"));
+} catch {}
+incarnation++;
+fs.writeFileSync(${JSON.stringify(statePath)}, String(incarnation));
+fs.writeSync(1, \`INCARNATION_\${incarnation}\\n\`);
+if (incarnation < 3) process.exit(0);
+const timer = setInterval(() => {
+	if (fs.existsSync(${JSON.stringify(holdPath)})) {
+		clearInterval(timer);
+		process.exit(0);
+	}
+}, 25);
+`,
+		);
+		const artifactPath = path.join(tempDir.path(), "detached-restart-progress.log");
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const previousTitle = process.title;
+		const broker = startBroker(projectDir, runtimeDir, {
+			progressBatchIntervalMs: 0,
+			restartBackoffBaseMs: 10,
+		});
+		const notifications: DaemonMonitorNotification[] = [];
+		const completed = Promise.withResolvers<void>();
+		const unregister = client.onOutput?.(
+			{ id: "detached-restart-monitor", name: "detached-restart", owner: "owner", artifactPath },
+			notification => {
+				notifications.push(notification);
+				if (notification.event === "daemon-monitor-completed") completed.resolve();
+			},
+		);
+		if (!unregister) throw new Error("Expected output monitoring support");
+		try {
+			await unregister.ready;
+			await client.request({
+				op: "start",
+				spec: {
+					name: "detached-restart",
+					application: process.execPath,
+					args: [scriptPath],
+					env: {},
+					cwd: projectDir,
+					pty: false,
+					restart: "always",
+					persist: false,
+					detached: true,
+				},
+			});
+
+			const expected = ["INCARNATION_1", "INCARNATION_2", "INCARNATION_3"];
+			const deadline = Date.now() + 5_000;
+			for (;;) {
+				const preview = notifications
+					.filter(
+						(notification): notification is Extract<DaemonMonitorNotification, { event: "daemon-output" }> =>
+							notification.event === "daemon-output",
+					)
+					.map(notification => notification.text)
+					.join("\n");
+				const artifact = await Bun.file(artifactPath)
+					.text()
+					.catch(() => "");
+				if (expected.every(marker => preview.includes(marker) && artifact.includes(marker))) break;
+				if (Date.now() > deadline) throw new Error("Detached daemon did not publish three incarnations");
+				await Bun.sleep(10);
+			}
+
+			await client.request({ op: "stop", name: "detached-restart", timeoutMs: 2_000 });
+			await completed.promise;
+			const preview = notifications
+				.filter(
+					(notification): notification is Extract<DaemonMonitorNotification, { event: "daemon-output" }> =>
+						notification.event === "daemon-output",
+				)
+				.map(notification => notification.text)
+				.join("\n");
+			const artifact = await Bun.file(artifactPath).text();
+			for (const marker of expected) {
+				expect(preview.split(marker)).toHaveLength(2);
+				expect(artifact.split(marker)).toHaveLength(2);
+			}
+		} finally {
+			unregister();
+			await Bun.write(holdPath, "done").catch(() => undefined);
+			await client.request({ op: "stop", name: "detached-restart", timeoutMs: 2_000 }).catch(() => undefined);
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
 			await broker;
 			setProcessName(previousTitle);
 		}
@@ -1351,9 +1552,9 @@ const timer = setInterval(() => {
 					detached: true,
 				},
 			});
-			// The pre-attach bytes must exist in the log before the subscription is
-			// installed; the broker has not read the detached log yet, so its read
-			// offset still points at the file head.
+			// The pre-attach bytes must exist before the subscription is installed.
+			// Either the periodic loop has already advanced past them or subscription
+			// synchronization drains them before creating the monitor.
 			const logPath = path.join(runtimeDir, "daemons", "detached-attach", "output.log");
 			const deadline = Date.now() + 5_000;
 			while (
@@ -1449,7 +1650,13 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 					id: crypto.randomUUID(),
 					token,
 					outputSubscriptions: [
-						{ id: "replay-depth-monitor", name: "replay-depth", owner: "raw-owner", artifactPath },
+						{
+							id: "replay-depth-monitor",
+							registrationId: "replay-depth-registration",
+							name: "replay-depth",
+							owner: "raw-owner",
+							artifactPath,
+						},
 					],
 					outputSubscriptionId: "raw-depth-subscription",
 					operation: { op: "ping" },
@@ -1571,11 +1778,16 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 				});
 			const oldSubscription = {
 				id: "race-monitor",
+				registrationId: "old-race-registration",
 				name: "sync-race",
 				owner: "race-owner",
 				artifactPath: oldArtifactPath,
 			};
-			const newSubscription = { ...oldSubscription, artifactPath: newArtifactPath };
+			const newSubscription = {
+				...oldSubscription,
+				registrationId: "new-race-registration",
+				artifactPath: newArtifactPath,
+			};
 			// Both lines are parsed in one data callback. The first registration
 			// yields in the detached pre-attach drain before the replacement starts.
 			raw.socket.write(`${request("old", [oldSubscription])}\n${request("new", [newSubscription])}\n`);
@@ -1593,6 +1805,7 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 
 			const staleSubscription = {
 				id: "stale-monitor",
+				registrationId: "stale-registration",
 				name: "sync-race",
 				owner: "race-owner",
 				artifactPath: staleArtifactPath,
@@ -1651,6 +1864,7 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 			const token = (await Bun.file(path.join(runtimeDir, "broker.token")).text()).trim();
 			const subscription = {
 				id: "incarnation-monitor",
+				registrationId: "incarnation-registration",
 				name: "incarnation",
 				owner: "incarnation-owner",
 				artifactPath,
@@ -1806,6 +2020,326 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 		}
 	}, 20_000);
 
+	it("settles monitor readiness when completion wins publication acknowledgement", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-completion-publication-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
+		const endpoint = daemonBrokerEndpoint(projectDir, runtimeDir);
+		type PublicationRequest = BrokerRequest;
+		const requests: PublicationRequest[] = [];
+		const firstPublication = Promise.withResolvers<PublicationRequest>();
+		const removalPublication = Promise.withResolvers<PublicationRequest>();
+		const acknowledgePublications = Promise.withResolvers<void>();
+		const server = net.createServer(socket => {
+			let buffer = "";
+			socket.on("data", chunk => {
+				buffer += chunk.toString("utf8");
+				let newline = buffer.indexOf("\n");
+				while (newline !== -1) {
+					const line = buffer.slice(0, newline);
+					buffer = buffer.slice(newline + 1);
+					if (line.trim()) {
+						const request = JSON.parse(line) as PublicationRequest;
+						requests.push(request);
+						if (requests.length === 1) {
+							firstPublication.resolve(request);
+							socket.write(
+								`${JSON.stringify({
+									event: "daemon-monitor-completed",
+									monitorId: "completion-before-ping",
+									registrationId: request.outputSubscriptions?.[0]?.registrationId,
+									daemon: {
+										name: "completed",
+										id: "completed-daemon",
+										state: "exited",
+										createdAt: 1,
+										startedAt: 1,
+										exitedAt: 2,
+										exitCode: 0,
+										restartCount: 0,
+										outputBytes: 0,
+										persist: false,
+										detached: false,
+									},
+								})}\n`,
+							);
+						} else if (requests.length === 2) {
+							removalPublication.resolve(request);
+						}
+						void acknowledgePublications.promise.then(() => {
+							socket.write(
+								`${JSON.stringify({
+									id: request.id,
+									ok: true,
+									result: {
+										op: "ping",
+										projectDir,
+										capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY],
+									},
+								})}\n`,
+							);
+						});
+					}
+					newline = buffer.indexOf("\n");
+				}
+			});
+		});
+		const listening = Promise.withResolvers<void>();
+		server.once("error", listening.reject);
+		server.listen(endpoint, () => listening.resolve());
+		await listening.promise;
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const artifactPath = path.join(tempDir.path(), "completion-publication.log");
+		const completionDelivered = Promise.withResolvers<void>();
+		try {
+			const unregister = client.onOutput?.(
+				{
+					id: "completion-before-ping",
+					name: "completed",
+					owner: "owner",
+					artifactPath,
+				},
+				notification => {
+					if (notification.event === "daemon-monitor-completed") completionDelivered.resolve();
+				},
+			);
+			if (!unregister) throw new Error("Expected output monitoring registration");
+			const published = await firstPublication.promise;
+			const registrationId = published.outputSubscriptions?.[0]?.registrationId;
+			if (typeof registrationId !== "string") throw new Error("Expected advertised registration id");
+			expect(published.outputSubscriptions).toEqual([
+				{
+					id: "completion-before-ping",
+					registrationId,
+					name: "completed",
+					owner: "owner",
+					artifactPath,
+				},
+			]);
+			await completionDelivered.promise;
+			const removed = await removalPublication.promise;
+			expect(removed.outputSubscriptions).toEqual([]);
+			await expect(unregister.ready).resolves.toBeUndefined();
+
+			acknowledgePublications.resolve();
+			const ping = await client.request({ op: "ping" });
+			expect(ping.op).toBe("ping");
+			unregister();
+		} finally {
+			acknowledgePublications.resolve();
+			client.close();
+			const serverClosed = Promise.withResolvers<void>();
+			server.close(() => serverClosed.resolve());
+			await serverClosed.promise;
+		}
+	}, 20_000);
+
+	it("ignores stale same-daemon notifications after replacing a monitor registration", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-client-replacement-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
+		const endpoint = daemonBrokerEndpoint(projectDir, runtimeDir);
+		type PublicationRequest = BrokerRequest;
+		const firstPublication = Promise.withResolvers<PublicationRequest>();
+		const replacementPublication = Promise.withResolvers<PublicationRequest>();
+		const removalPublication = Promise.withResolvers<PublicationRequest>();
+		const acknowledgePublications = Promise.withResolvers<void>();
+		let requestCount = 0;
+		let brokerSocket: net.Socket | undefined;
+		const server = net.createServer(socket => {
+			brokerSocket = socket;
+			let buffer = "";
+			socket.on("data", chunk => {
+				buffer += chunk.toString("utf8");
+				let newline = buffer.indexOf("\n");
+				while (newline !== -1) {
+					const line = buffer.slice(0, newline);
+					buffer = buffer.slice(newline + 1);
+					if (line.trim()) {
+						const request = JSON.parse(line) as PublicationRequest;
+						requestCount++;
+						if (requestCount === 1) firstPublication.resolve(request);
+						else if (requestCount === 2) replacementPublication.resolve(request);
+						else if (requestCount === 3) removalPublication.resolve(request);
+						void acknowledgePublications.promise.then(() => {
+							socket.write(
+								`${JSON.stringify({
+									id: request.id,
+									ok: true,
+									result: {
+										op: "ping",
+										projectDir,
+										capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY],
+									},
+								})}\n`,
+							);
+						});
+					}
+					newline = buffer.indexOf("\n");
+				}
+			});
+		});
+		const listening = Promise.withResolvers<void>();
+		server.once("error", listening.reject);
+		server.listen(endpoint, () => listening.resolve());
+		await listening.promise;
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const oldNotifications: DaemonMonitorNotification[] = [];
+		const newNotifications: DaemonMonitorNotification[] = [];
+		const newCompletionDelivered = Promise.withResolvers<void>();
+		let oldUnregister: DaemonOutputUnregister | undefined;
+		let newUnregister: DaemonOutputUnregister | undefined;
+		try {
+			oldUnregister = client.onOutput?.(
+				{
+					id: "replacement-race",
+					name: "same-daemon",
+					owner: "owner",
+					artifactPath: path.join(tempDir.path(), "old.log"),
+				},
+				notification => {
+					oldNotifications.push(notification);
+				},
+			);
+			if (!oldUnregister) throw new Error("Expected output monitoring registration");
+			const first = await firstPublication.promise;
+			const oldRegistrationId = first.outputSubscriptions?.[0]?.registrationId;
+			if (typeof oldRegistrationId !== "string") throw new Error("Expected first advertised registration id");
+
+			newUnregister = client.onOutput?.(
+				{
+					id: "replacement-race",
+					name: "same-daemon",
+					owner: "owner",
+					artifactPath: path.join(tempDir.path(), "new.log"),
+				},
+				notification => {
+					newNotifications.push(notification);
+					if (notification.event === "daemon-monitor-completed") newCompletionDelivered.resolve();
+				},
+			);
+			if (!newUnregister) throw new Error("Expected replacement output monitoring registration");
+			const replacement = await replacementPublication.promise;
+			const newRegistrationId = replacement.outputSubscriptions?.[0]?.registrationId;
+			if (typeof newRegistrationId !== "string") throw new Error("Expected replacement advertised registration id");
+			expect(newRegistrationId).not.toBe(oldRegistrationId);
+			expect(replacement.outputSubscriptions).toEqual([
+				{
+					id: "replacement-race",
+					registrationId: newRegistrationId,
+					name: "same-daemon",
+					owner: "owner",
+					artifactPath: path.join(tempDir.path(), "new.log"),
+				},
+			]);
+			await expect(oldUnregister.ready).rejects.toThrow(/replaced before it was acknowledged/);
+			if (!brokerSocket) throw new Error("Expected connected broker socket");
+
+			brokerSocket.write(
+				`${[
+					{
+						event: "daemon-output",
+						monitorId: "replacement-race",
+						registrationId: oldRegistrationId,
+						name: "same-daemon",
+						daemonId: "same-incarnation",
+						epoch: "old-epoch",
+						seq: 1,
+						text: "OLD_OUTPUT",
+						batchKind: "progress",
+						suppressedEvents: 0,
+					},
+					{
+						event: "daemon-monitor-completed",
+						monitorId: "replacement-race",
+						registrationId: oldRegistrationId,
+						daemon: {
+							name: "same-daemon",
+							id: "same-incarnation",
+							state: "exited",
+							createdAt: 1,
+							startedAt: 1,
+							exitedAt: 2,
+							exitCode: 0,
+							restartCount: 0,
+							outputBytes: 10,
+							persist: false,
+							detached: false,
+						},
+					},
+					{
+						event: "daemon-output",
+						monitorId: "replacement-race",
+						registrationId: newRegistrationId,
+						name: "same-daemon",
+						daemonId: "same-incarnation",
+						epoch: "new-epoch",
+						seq: 1,
+						text: "NEW_OUTPUT",
+						batchKind: "progress",
+						suppressedEvents: 0,
+					},
+					{
+						event: "daemon-monitor-completed",
+						monitorId: "replacement-race",
+						registrationId: newRegistrationId,
+						daemon: {
+							name: "same-daemon",
+							id: "same-incarnation",
+							state: "exited",
+							createdAt: 3,
+							startedAt: 3,
+							exitedAt: 4,
+							exitCode: 0,
+							restartCount: 0,
+							outputBytes: 10,
+							persist: false,
+							detached: false,
+						},
+					},
+				]
+					.map(notification => JSON.stringify(notification))
+					.join("\n")}\n`,
+			);
+
+			await newCompletionDelivered.promise;
+			const removal = await removalPublication.promise;
+			expect(removal.outputSubscriptions).toEqual([]);
+			expect(oldNotifications).toEqual([]);
+			expect(newNotifications.map(notification => notification.event)).toEqual([
+				"daemon-output",
+				"daemon-monitor-completed",
+			]);
+			expect(newNotifications[0]).toMatchObject({
+				name: "same-daemon",
+				daemonId: "same-incarnation",
+				text: "NEW_OUTPUT",
+			});
+			expect(newNotifications[0]).not.toHaveProperty("registrationId");
+			expect(newNotifications[1]).toMatchObject({
+				daemon: { name: "same-daemon", id: "same-incarnation" },
+			});
+			expect(newNotifications[1]).not.toHaveProperty("registrationId");
+			await expect(newUnregister.ready).resolves.toBeUndefined();
+
+			acknowledgePublications.resolve();
+			const ping = await client.request({ op: "ping" });
+			expect(ping.op).toBe("ping");
+		} finally {
+			acknowledgePublications.resolve();
+			oldUnregister?.();
+			newUnregister?.();
+			client.close();
+			const serverClosed = Promise.withResolvers<void>();
+			server.close(() => serverClosed.resolve());
+			await serverClosed.promise;
+		}
+	}, 20_000);
+
 	it("rejects the first onOutput operation after a legacy broker acknowledges its capabilities", async () => {
 		using tempDir = TempDir.createSync("@omp-launch-monitor-capability-");
 		const projectDir = path.join(tempDir.path(), "project");
@@ -1813,9 +2347,8 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 		await fs.mkdir(projectDir);
 		await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
 		const endpoint = daemonBrokerEndpoint(projectDir, runtimeDir);
-		type LegacyRequest = { id: string; outputSubscriptions?: unknown[] };
-		const requests: LegacyRequest[] = [];
-		const firstRequest = Promise.withResolvers<LegacyRequest>();
+		const requests: BrokerRequest[] = [];
+		const firstRequest = Promise.withResolvers<BrokerRequest>();
 		const acknowledgeCapabilities = Promise.withResolvers<void>();
 		// Pre-v4 broker: authenticates and answers pings but advertises no
 		// output-monitor capability.
@@ -1828,7 +2361,7 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 					const line = buffer.slice(0, newline);
 					buffer = buffer.slice(newline + 1);
 					if (line.trim()) {
-						const request = JSON.parse(line) as LegacyRequest;
+						const request = JSON.parse(line) as BrokerRequest;
 						requests.push(request);
 						if (requests.length === 1) firstRequest.resolve(request);
 						void acknowledgeCapabilities.promise.then(() => {
@@ -1867,8 +2400,10 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 				},
 			);
 			const published = await firstRequest.promise;
+			const registrationId = published.outputSubscriptions?.[0]?.registrationId;
+			if (typeof registrationId !== "string") throw new Error("Expected advertised registration id");
 			expect(published.outputSubscriptions).toEqual([
-				{ id: "capability-monitor", name: "anything", owner: "owner", artifactPath },
+				{ id: "capability-monitor", registrationId, name: "anything", owner: "owner", artifactPath },
 			]);
 			await Promise.resolve();
 			expect(readySettled).toBeFalse();

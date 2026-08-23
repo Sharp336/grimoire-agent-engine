@@ -32,10 +32,11 @@ import {
 	DAEMON_PTY_ROWS,
 	DAEMON_RUNTIME_DIR_ENV,
 	type DaemonCompletionNotification,
-	type DaemonMonitorNotification,
+	type DaemonMonitorWireNotification,
 	type DaemonOperation,
-	type DaemonOutputNotification,
 	type DaemonOutputSubscription,
+	type DaemonOutputWireNotification,
+	type DaemonOutputWireSubscription,
 	type DaemonReadySpec,
 	type DaemonRpcResult,
 	type DaemonSignal,
@@ -103,6 +104,8 @@ const MONITOR_PENDING_MIN = 32;
 const MONITOR_PENDING_MAX = 2_048;
 const MONITOR_PENDING_HEADROOM = 8;
 
+type DetachedOutputCursorPolicy = "preserve" | "reset";
+
 interface ManagedProcess {
 	pid: number;
 	exited: Promise<number>;
@@ -125,6 +128,8 @@ interface ManagedDaemon {
 	/** Turns `\r` progress rewrites into line boundaries before sanitizing strips them. */
 	crNormalizer: CarriageReturnNormalizer;
 	outputOffset: number;
+	/** Retains incomplete UTF-8 code points between detached log slices. */
+	detachedOutputDecoder: TextDecoder;
 	readyPattern?: RegExp;
 	restartTimer?: NodeJS.Timeout;
 	consecutiveFailures: number;
@@ -139,6 +144,8 @@ interface ManagedDaemon {
 	 * refreshes must coalesce here instead of double-reading the same range.
 	 */
 	outputReadQueue: Promise<void>;
+	/** Generation currently owned by the detached output refresh loop. */
+	detachedMonitorGeneration?: number;
 	monitorRestarting: boolean;
 	monitorSettlementPending: boolean;
 }
@@ -147,7 +154,7 @@ interface MonitorProgressChunk {
 	preview: ProgressPreview;
 }
 
-interface OutputRegistration extends DaemonOutputSubscription {
+interface OutputRegistration extends DaemonOutputWireSubscription {
 	socket?: net.Socket;
 	subscriptionId: string;
 	/** Daemon incarnation captured when this registration attaches. */
@@ -158,7 +165,7 @@ interface OutputRegistration extends DaemonOutputSubscription {
 	 * deliveries of a replaced registration can be recognized as stale.
 	 */
 	batchKey: string;
-	pending: DaemonMonitorNotification[];
+	pending: DaemonMonitorWireNotification[];
 	artifactSink: OutputSink;
 	offlineTimer?: NodeJS.Timeout;
 	/** Model-facing line previews accumulated from this registration's attach point. */
@@ -187,7 +194,7 @@ function quoteShellArg(value: string): string {
 
 /** Build a live output registration whose line fragments and artifact both start at attach time. */
 function createOutputRegistration(
-	subscription: DaemonOutputSubscription,
+	subscription: DaemonOutputWireSubscription,
 	socket: net.Socket,
 	subscriptionId: string,
 	daemonId?: string,
@@ -815,6 +822,7 @@ class DaemonBroker {
 				readinessBuffer: "",
 				crNormalizer: new CarriageReturnNormalizer(),
 				outputOffset: 0,
+				detachedOutputDecoder: new TextDecoder(),
 				readyPattern: spec.ready?.log ? new RegExp(spec.ready.log, "u") : undefined,
 				consecutiveFailures: 0,
 				persistQueue: Promise.resolve(),
@@ -832,7 +840,7 @@ class DaemonBroker {
 		} finally {
 			this.#startingNames.delete(spec.name);
 		}
-		await this.#launch(record);
+		await this.#launch(record, "reset");
 		let readyTimedOut = false;
 		if (spec.ready && !terminalState(record.snapshot.state)) {
 			// Wake on the sticky readyAt marker or any terminal state, not the live
@@ -851,7 +859,7 @@ class DaemonBroker {
 		return { op: "start", daemon: record.snapshot, readyTimedOut };
 	}
 
-	async #launch(record: ManagedDaemon): Promise<void> {
+	async #launch(record: ManagedDaemon, outputCursor: DetachedOutputCursorPolicy): Promise<void> {
 		record.generation++;
 		const generation = record.generation;
 		record.stopRequested = false;
@@ -868,11 +876,14 @@ class DaemonBroker {
 		syncReadyPending(record);
 		record.readinessBuffer = "";
 		record.crNormalizer.reset();
-		record.outputOffset = 0;
+		record.detachedOutputDecoder = new TextDecoder();
+		if (outputCursor === "reset") record.outputOffset = 0;
 		this.#persist(record);
 		try {
-			if (record.spec.detached) await this.#launchDetached(record, generation);
-			else if (record.spec.pty) await this.#launchPty(record, generation);
+			if (record.spec.detached) {
+				await this.#launchDetached(record, generation);
+				this.#startDetachedMonitor(record, generation);
+			} else if (record.spec.pty) await this.#launchPty(record, generation);
 			else this.#launchPipe(record, generation);
 			if (record.spec.ready?.port !== undefined) void this.#pollPort(record, generation, record.spec.ready);
 			this.#markReady(record);
@@ -1050,7 +1061,7 @@ class DaemonBroker {
 	async #syncOutputSubscriptions(
 		socket: net.Socket,
 		subscriptionId: string | undefined,
-		subscriptions: DaemonOutputSubscription[] | undefined,
+		subscriptions: DaemonOutputWireSubscription[] | undefined,
 	): Promise<void> {
 		if (!subscriptionId || !subscriptions) return;
 		const syncToken = Symbol(subscriptionId);
@@ -1089,6 +1100,7 @@ class DaemonBroker {
 					if (
 						existing &&
 						existing.name === subscription.name &&
+						existing.registrationId === subscription.registrationId &&
 						existing.artifactPath === subscription.artifactPath
 					) {
 						clearTimeout(existing.offlineTimer);
@@ -1182,7 +1194,7 @@ class DaemonBroker {
 		);
 	}
 
-	#sendMonitorNotification(registration: OutputRegistration, notification: DaemonMonitorNotification): void {
+	#sendMonitorNotification(registration: OutputRegistration, notification: DaemonMonitorWireNotification): void {
 		// Retain even after a locally successful write: the socket can die before
 		// the client reads the frame, and reconnect replays whatever the client's
 		// cumulative ack has not pruned. The buffer is bounded; overflow drops the
@@ -1194,7 +1206,7 @@ class DaemonBroker {
 		this.#writeMonitorNotification(registration, notification);
 	}
 
-	#writeMonitorNotification(registration: OutputRegistration, notification: DaemonMonitorNotification): void {
+	#writeMonitorNotification(registration: OutputRegistration, notification: DaemonMonitorWireNotification): void {
 		if (!registration.socket || registration.socket.destroyed) return;
 		try {
 			registration.socket.write(`${JSON.stringify(notification)}\n`);
@@ -1233,9 +1245,10 @@ class DaemonBroker {
 		) {
 			return;
 		}
-		const notification: DaemonOutputNotification = {
+		const notification: DaemonOutputWireNotification = {
 			event: "daemon-output",
 			monitorId: registration.id,
+			registrationId: registration.registrationId,
 			name: registration.name,
 			daemonId: daemon.id,
 			epoch: registration.batchKey,
@@ -1262,6 +1275,7 @@ class DaemonBroker {
 			this.#sendMonitorNotification(registration, {
 				event: "daemon-monitor-completed",
 				monitorId: registration.id,
+				registrationId: registration.registrationId,
 				daemon: { ...record.snapshot },
 			});
 		}
@@ -1284,7 +1298,7 @@ class DaemonBroker {
 		return this.#queueRecordOutputWork(record, () => this.#consumeDetachedOutput(record, generation));
 	}
 
-	/** Serialized body of {@link DaemonBroker.#readDetachedOutput}; never call directly. */
+	/** Detached read body; only call while holding the record output queue. */
 	async #consumeDetachedOutput(record: ManagedDaemon, generation: number): Promise<void> {
 		if (generation !== record.generation) return;
 		const logPath = path.join(record.dir, LOG_FILE);
@@ -1295,13 +1309,35 @@ class DaemonBroker {
 			if (isEnoent(error)) return;
 			throw error;
 		}
-		if (size < record.outputOffset) record.outputOffset = 0;
+		if (size < record.outputOffset) {
+			record.outputOffset = 0;
+			record.detachedOutputDecoder = new TextDecoder();
+		}
 		if (size === record.outputOffset) return;
 		const file = Bun.file(logPath);
-		const raw = await file.slice(record.outputOffset, size).text();
+		const bytes = await file.slice(record.outputOffset, size).bytes();
 		if (generation !== record.generation) return;
 		record.outputOffset = size;
 		record.snapshot.outputBytes = size;
+		const raw = record.detachedOutputDecoder.decode(bytes, { stream: true });
+		this.#forwardDetachedOutput(record, generation, raw);
+	}
+
+	#finishDetachedOutput(record: ManagedDaemon, generation: number): Promise<void> {
+		if (!record.spec.detached) return Promise.resolve();
+		// Final read and decoder flush share one subscription boundary: a monitor
+		// cannot attach between consuming trailing bytes and publishing their text.
+		return this.#queueRecordOutputWork(record, async () => {
+			await this.#consumeDetachedOutput(record, generation);
+			if (generation !== record.generation) return;
+			const raw = record.detachedOutputDecoder.decode();
+			record.detachedOutputDecoder = new TextDecoder();
+			this.#forwardDetachedOutput(record, generation, raw);
+		});
+	}
+
+	#forwardDetachedOutput(record: ManagedDaemon, generation: number, raw: string): void {
+		if (!raw || generation !== record.generation) return;
 		const sanitized = sanitizeText(record.crNormalizer.normalize(raw));
 		this.#forwardToMonitors(record, raw, sanitized);
 		this.#trackOutput(record, generation, sanitized);
@@ -1331,7 +1367,22 @@ class DaemonBroker {
 		await this.#settle(record, generation);
 	}
 
-	async #monitorRecoveredDetached(record: ManagedDaemon, generation: number): Promise<void> {
+	#startDetachedMonitor(record: ManagedDaemon, generation: number): void {
+		if (!record.spec.detached || record.detachedMonitorGeneration === generation) return;
+		record.detachedMonitorGeneration = generation;
+		void this.#monitorDetached(record, generation)
+			.catch(error => {
+				logger.warn("Failed to monitor detached daemon", {
+					name: record.snapshot.name,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			})
+			.finally(() => {
+				if (record.detachedMonitorGeneration === generation) record.detachedMonitorGeneration = undefined;
+			});
+	}
+
+	async #monitorDetached(record: ManagedDaemon, generation: number): Promise<void> {
 		while (!this.#shuttingDown && generation === record.generation && !settledState(record.snapshot.state)) {
 			await Bun.sleep(100);
 			if (this.#shuttingDown || generation !== record.generation) return;
@@ -1389,7 +1440,7 @@ class DaemonBroker {
 		// restartCount and overwrites record.restartTimer, orphaning the armed timer so it fires
 		// after stop() and resurrects the daemon (issue #6852).
 		if (generation !== record.generation || settledState(record.snapshot.state)) return;
-		await this.#readDetachedOutput(record, generation);
+		await this.#finishDetachedOutput(record, generation);
 		// The output read yields, so a concurrent refresh may settle this generation first.
 		if (generation !== record.generation || settledState(record.snapshot.state)) return;
 		for (const registration of this.#outputRegistrations.values()) {
@@ -1432,7 +1483,7 @@ class DaemonBroker {
 			this.#persist(record);
 			record.restartTimer = setTimeout(() => {
 				record.restartTimer = undefined;
-				void this.#launch(record);
+				void this.#launch(record, "preserve");
 			}, delay);
 			return;
 		}
@@ -1637,7 +1688,7 @@ class DaemonBroker {
 				record.snapshot.id = crypto.randomUUID();
 				this.#bindOutputRegistrations(record);
 			}
-			await this.#launch(record);
+			await this.#launch(record, "reset");
 		} finally {
 			record.monitorRestarting = false;
 			try {
@@ -1767,6 +1818,7 @@ class DaemonBroker {
 					readinessBuffer: "",
 					crNormalizer: new CarriageReturnNormalizer(),
 					outputOffset: detached ? snapshot.outputBytes : 0,
+					detachedOutputDecoder: new TextDecoder(),
 					readyPattern: spec.ready?.log ? new RegExp(spec.ready.log, "u") : undefined,
 					consecutiveFailures: 0,
 					persistQueue: Promise.resolve(),
@@ -1826,14 +1878,7 @@ class DaemonBroker {
 				if (detached && spec.ready?.port !== undefined && snapshot.state !== "ready") {
 					void this.#pollPort(record, record.generation, spec.ready);
 				}
-				if (detached) {
-					void this.#monitorRecoveredDetached(record, record.generation).catch(error => {
-						logger.warn("Failed to monitor recovered detached daemon", {
-							name: record.snapshot.name,
-							error: error instanceof Error ? error.message : String(error),
-						});
-					});
-				}
+				if (detached) this.#startDetachedMonitor(record, record.generation);
 				this.#persist(record);
 			} catch (error) {
 				logger.warn("Failed to recover daemon record", {

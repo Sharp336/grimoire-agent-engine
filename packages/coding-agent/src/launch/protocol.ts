@@ -134,7 +134,7 @@ export interface DaemonWireRequest {
 	completionUnsubscribes?: string[];
 	completionReplays?: string[];
 	completionSubscriptionId?: string;
-	outputSubscriptions?: DaemonOutputSubscription[];
+	outputSubscriptions?: DaemonOutputWireSubscription[];
 	outputSubscriptionId?: string;
 	operation: DaemonOperation;
 }
@@ -157,6 +157,11 @@ export interface DaemonOutputSubscription {
 	 * record to it.
 	 */
 	startPending?: boolean;
+}
+
+/** Wire form of a subscription, tagged by the exact client registration that advertised it. */
+export interface DaemonOutputWireSubscription extends DaemonOutputSubscription {
+	registrationId: string;
 }
 
 /** Response envelope kept raw until matched with its pending operation. */
@@ -187,6 +192,11 @@ export interface DaemonOutputNotification {
 	truncated?: boolean;
 }
 
+/** Socket form of monitored output, scoped to the exact advertised registration. */
+export interface DaemonOutputWireNotification extends DaemonOutputNotification {
+	registrationId: string;
+}
+
 /** Terminal process state for a monitor whose owner is not the process owner. */
 export interface DaemonMonitorCompletionNotification {
 	event: "daemon-monitor-completed";
@@ -194,8 +204,14 @@ export interface DaemonMonitorCompletionNotification {
 	daemon: DaemonSnapshot;
 }
 
+/** Socket form of monitor completion, scoped to the exact advertised registration. */
+export interface DaemonMonitorCompletionWireNotification extends DaemonMonitorCompletionNotification {
+	registrationId: string;
+}
+
 export type DaemonMonitorNotification = DaemonOutputNotification | DaemonMonitorCompletionNotification;
-export type DaemonWireMessage = DaemonWireResponse | DaemonCompletionNotification | DaemonMonitorNotification;
+export type DaemonMonitorWireNotification = DaemonOutputWireNotification | DaemonMonitorCompletionWireNotification;
+export type DaemonWireMessage = DaemonWireResponse | DaemonCompletionNotification | DaemonMonitorWireNotification;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -273,7 +289,7 @@ function stringRecord(value: unknown, label: string): Record<string, string> {
 	return result;
 }
 
-function outputSubscriptions(value: unknown): DaemonOutputSubscription[] {
+function outputSubscriptions(value: unknown): DaemonOutputWireSubscription[] {
 	if (!Array.isArray(value)) throw new Error("request.outputSubscriptions must be an array");
 	return value.map((item, index) => {
 		const source = record(item, `request.outputSubscriptions[${index}]`);
@@ -282,6 +298,7 @@ function outputSubscriptions(value: unknown): DaemonOutputSubscription[] {
 			name: stringValue(source.name, `request.outputSubscriptions[${index}].name`),
 			owner: stringValue(source.owner, `request.outputSubscriptions[${index}].owner`),
 			artifactPath: stringValue(source.artifactPath, `request.outputSubscriptions[${index}].artifactPath`),
+			registrationId: stringValue(source.registrationId, `request.outputSubscriptions[${index}].registrationId`),
 			lastEpoch: optionalString(source.lastEpoch, `request.outputSubscriptions[${index}].lastEpoch`),
 			lastSeq:
 				source.lastSeq === undefined
@@ -438,6 +455,7 @@ export function parseDaemonWireMessage(value: unknown): DaemonWireMessage {
 		return {
 			event: "daemon-output",
 			monitorId: stringValue(source.monitorId, "output.monitorId"),
+			registrationId: stringValue(source.registrationId, "output.registrationId"),
 			name: stringValue(source.name, "output.name"),
 			daemonId: stringValue(source.daemonId, "output.daemonId"),
 			epoch: optionalString(source.epoch, "output.epoch"),
@@ -453,6 +471,7 @@ export function parseDaemonWireMessage(value: unknown): DaemonWireMessage {
 		return {
 			event: "daemon-monitor-completed",
 			monitorId: stringValue(source.monitorId, "monitor completion.monitorId"),
+			registrationId: stringValue(source.registrationId, "monitor completion.registrationId"),
 			daemon: parseDaemonSnapshot(source.daemon),
 		};
 	}
