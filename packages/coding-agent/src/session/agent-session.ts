@@ -1470,7 +1470,8 @@ export class AgentSession {
 			this.#unregisterAsyncProgressSink = manager.registerProgressSink(this.#agentId, {
 				deliver: (jobId, text, job, seq, info) => this.#deliverAsyncJobProgress(jobId, text, job, seq, info),
 				acknowledge: jobId => {
-					const matchesJob = (entry: AsyncProgressEntry) => entry.jobId === jobId;
+					const managedJobSourceKey = asyncProgressSourceKey({ jobId });
+					const matchesJob = (entry: AsyncProgressEntry) => asyncProgressSourceKey(entry) === managedJobSourceKey;
 					this.yieldQueue.take<AsyncProgressEntry>(ASYNC_PROGRESS_MESSAGE_TYPE, matchesJob);
 					this.yieldQueue.take<AsyncProgressEntry>(ASYNC_PROGRESS_WAKE_QUEUE_KIND, matchesJob);
 				},

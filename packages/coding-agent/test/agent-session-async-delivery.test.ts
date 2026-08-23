@@ -574,9 +574,10 @@ describe("AgentSession owner-routed async delivery", () => {
 		await manager.waitForAll();
 	});
 
-	it("permanently drops queued ambient progress when its job is acknowledged", async () => {
+	it("acknowledges managed ambient progress without deleting a colliding process source", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const progressMarker = "ACKNOWLEDGED PROGRESS MUST STAY STALE";
+		const processMarker = "COLLIDING PROCESS PROGRESS MUST REMAIN";
 		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
 		const agent = new Agent({
 			getApiKey: () => "test-key",
@@ -616,6 +617,20 @@ describe("AgentSession owner-routed async delivery", () => {
 			epoch: 0,
 			delivery: "ambient",
 		});
+		session.queueLaunchProgress(
+			{
+				event: "daemon-output",
+				monitorId: "colliding-process-monitor",
+				name: job.id,
+				daemonId: "colliding-process-daemon",
+				seq: 1,
+				text: processMarker,
+				batchKind: "progress",
+				suppressedEvents: 0,
+			},
+			"ambient",
+			Date.now(),
+		);
 
 		manager.watchJobs([job.id]);
 		gate.resolve("done");
@@ -623,7 +638,7 @@ describe("AgentSession owner-routed async delivery", () => {
 		expect(manager.getJob(job.id)?.status).toBe("completed");
 
 		manager.acknowledgeDeliveries([job.id]);
-		expect(session.yieldQueue.has("async-progress")).toBe(false);
+		expect(session.yieldQueue.has("async-progress")).toBe(true);
 		manager.unwatchJobs([job.id]);
 		expect(manager.evictCompletedJobs({ ownerId: "Main" })).toBe(1);
 		expect(manager.getJob(job.id)).toBeUndefined();
@@ -635,6 +650,15 @@ describe("AgentSession owner-routed async delivery", () => {
 					typeof message.content === "string"
 						? !message.content.includes(progressMarker)
 						: message.content.every(content => content.type !== "text" || !content.text.includes(progressMarker)),
+				),
+			),
+		).toBe(true);
+		expect(
+			mock.calls.some(call =>
+				call.context.messages.some(message =>
+					typeof message.content === "string"
+						? message.content.includes(processMarker)
+						: message.content.some(content => content.type === "text" && content.text.includes(processMarker)),
 				),
 			),
 		).toBe(true);
