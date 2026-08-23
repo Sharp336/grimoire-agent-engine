@@ -15,6 +15,7 @@ export function progressStreamProvenanceForText(text: string): ProgressStreamPro
 		codeUnits: text.length,
 		sha256: crypto.createHash("sha256").update(text, "utf16le").digest("base64"),
 	};
+}
 /** Keep at most `maxChars` UTF-16 code units from either edge, moving inward rather than splitting a surrogate pair. */
 function boundedSlice(text: string, maxChars: number, fromEnd = false, precedingCodeUnit?: number): string {
 	if (!fromEnd) {

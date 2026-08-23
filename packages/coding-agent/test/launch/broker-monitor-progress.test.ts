@@ -238,6 +238,83 @@ process.stdin.once("data", () => {
 		}
 	}, 20_000);
 
+	it("delivers observer output and terminal state while the owner completion sink is blocked", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-consumer-order-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const previousTitle = process.title;
+		const broker = startBroker(projectDir, runtimeDir, { progressBatchIntervalMs: 0 });
+		const ownerEntered = Promise.withResolvers<void>();
+		const releaseOwner = Promise.withResolvers<void>();
+		const ownerReleased = Promise.withResolvers<void>();
+		const ownerEvents: string[] = [];
+		const observerEvents: string[] = [];
+		const observerCompleted = Promise.withResolvers<void>();
+		const unregisterOwner = client.onCompletion("daemon-owner", async () => {
+			ownerEvents.push("completion-entered");
+			ownerEntered.resolve();
+			await releaseOwner.promise;
+			ownerEvents.push("completion-released");
+			ownerReleased.resolve();
+		});
+		const unregisterObserver = client.onOutput?.(
+			{
+				id: "observer-monitor",
+				name: "consumer-order",
+				owner: "observer-owner",
+				artifactPath: path.join(tempDir.path(), "consumer-order.log"),
+			},
+			notification => {
+				observerEvents.push(
+					notification.event === "daemon-output" ? `output:${notification.text}` : notification.event,
+				);
+				if (notification.event === "daemon-monitor-completed") observerCompleted.resolve();
+			},
+		);
+		if (!unregisterObserver) throw new Error("Expected output monitoring support");
+
+		try {
+			await unregisterObserver.ready;
+			await client.request({ op: "ping" });
+			const started = await client.request({
+				op: "start",
+				owner: "daemon-owner",
+				spec: {
+					name: "consumer-order",
+					application: process.execPath,
+					args: ["-e", 'process.stdout.write("OBSERVED\\n")'],
+					env: {},
+					cwd: projectDir,
+					pty: false,
+					restart: "no",
+					persist: false,
+					detached: false,
+				},
+			});
+			if (started.op !== "start") throw new Error("unexpected start result");
+
+			await ownerEntered.promise;
+			await observerCompleted.promise;
+			expect(ownerEvents).toEqual(["completion-entered"]);
+			expect(observerEvents).toEqual(["output:OBSERVED", "daemon-monitor-completed"]);
+
+			releaseOwner.resolve();
+			await ownerReleased.promise;
+		} finally {
+			releaseOwner.resolve();
+			unregisterObserver();
+			unregisterOwner();
+			await client.request({ op: "stop", name: "consumer-order", timeoutMs: 2_000 }).catch(() => undefined);
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
+			await broker;
+			setProcessName(previousTitle);
+		}
+	}, 20_000);
+
 	it("starts an attached monitor at the current output boundary", async () => {
 		using tempDir = TempDir.createSync("@omp-launch-monitor-attach-");
 		const projectDir = path.join(tempDir.path(), "project");

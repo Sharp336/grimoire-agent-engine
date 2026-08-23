@@ -61,7 +61,6 @@ interface OutputSinkRegistration {
 	/** Resolves once broker acknowledgement or terminal delivery confirms this subscription. */
 	resolveReady: () => void;
 	rejectReady: (error: Error) => void;
-	deliveryTail?: Promise<void>;
 	/** Connection generation whose rejected callback suppresses already-queued deliveries. */
 	failedDeliveryGeneration?: number;
 	/** A callback rejection permanently suppresses terminal delivery to this sink. */
@@ -197,6 +196,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	readonly #pending = new Map<string, PendingRequest>();
 	readonly #completionSinks = new Map<string, (notification: DaemonCompletionNotification) => Promise<void> | void>();
 	readonly #outputSinks = new Map<string, OutputSinkRegistration>();
+	readonly #notificationDeliveryTails = new Map<string, Map<string, Promise<void>>>();
 	readonly #completionUnsubscribes = new Set<string>();
 	readonly #preservedCompletionOwners = new Set<string>();
 	readonly #completionReplays = new Set<string>();
@@ -285,6 +285,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		}
 		this.#completionSinks.clear();
 		this.#outputSinks.clear();
+		this.#notificationDeliveryTails.clear();
 		this.#preservedCompletionOwners.clear();
 		this.#completionReplays.clear();
 		this.#socket = undefined;
@@ -534,8 +535,14 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				continue;
 			}
 			if ("event" in message) {
-				if (message.event === "daemon-completed") void this.#deliverCompletion(message);
-				else void this.#deliverOutput(message, generation);
+				if (message.event === "daemon-completed") {
+					void this.#queueNotificationDelivery(message.daemon.id, message.owner, async () => {
+						if (this.#closed || generation !== this.#socketGeneration) return;
+						await this.#deliverCompletion(message);
+					});
+				} else {
+					void this.#deliverOutput(message, generation);
+				}
 				continue;
 			}
 			const response = message;
@@ -554,6 +561,24 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				pending.reject(error instanceof Error ? error : new Error(String(error)));
 			}
 		}
+	}
+
+	#queueNotificationDelivery(daemonId: string, owner: string, deliver: () => Promise<void>): Promise<void> {
+		let ownerTails = this.#notificationDeliveryTails.get(daemonId);
+		if (!ownerTails) {
+			ownerTails = new Map();
+			this.#notificationDeliveryTails.set(daemonId, ownerTails);
+		}
+		const previous = ownerTails.get(owner);
+		const delivery = previous ? previous.then(deliver, deliver) : deliver();
+		ownerTails.set(owner, delivery);
+		const cleanup = (): void => {
+			if (ownerTails.get(owner) !== delivery) return;
+			ownerTails.delete(owner);
+			if (ownerTails.size === 0) this.#notificationDeliveryTails.delete(daemonId);
+		};
+		void delivery.then(cleanup, cleanup);
+		return delivery;
 	}
 
 	async #deliverCompletion(message: DaemonCompletionNotification): Promise<void> {
@@ -588,11 +613,12 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	async #deliverOutput(message: DaemonMonitorWireNotification, generation: number): Promise<void> {
 		const entry = this.#outputSinks.get(message.monitorId);
 		if (!entry) return;
+		const notificationDaemonId = message.event === "daemon-output" ? message.daemonId : message.daemon.id;
 		const deliver = async (): Promise<void> => {
+			if (this.#closed || generation !== this.#socketGeneration) return;
 			if (this.#outputSinks.get(message.monitorId) !== entry) return;
 			if (message.registrationId !== entry.registrationId) return;
 			const notificationName = message.event === "daemon-output" ? message.name : message.daemon.name;
-			const notificationDaemonId = message.event === "daemon-output" ? message.daemonId : message.daemon.id;
 			if (notificationName !== entry.subscription.name) return;
 			if (entry.daemonId === undefined) entry.daemonId = notificationDaemonId;
 			else if (entry.daemonId !== notificationDaemonId) return;
@@ -626,17 +652,19 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				this.#publishSubscriptions();
 			}
 		};
-		const delivery = entry.deliveryTail ? entry.deliveryTail.then(deliver) : deliver();
-		entry.deliveryTail = delivery.catch(error => {
-			entry.failedDeliveryGeneration = generation;
-			entry.completionBlocked = true;
-			logger.warn("Daemon output sink failed", {
-				monitorId: message.monitorId,
-				error: error instanceof Error ? error.message : String(error),
-			});
-			if (generation === this.#socketGeneration) this.#socket?.destroy();
+		await this.#queueNotificationDelivery(notificationDaemonId, entry.subscription.owner, async () => {
+			try {
+				await deliver();
+			} catch (error) {
+				entry.failedDeliveryGeneration = generation;
+				entry.completionBlocked = true;
+				logger.warn("Daemon output sink failed", {
+					monitorId: message.monitorId,
+					error: error instanceof Error ? error.message : String(error),
+				});
+				if (generation === this.#socketGeneration) this.#socket?.destroy();
+			}
 		});
-		await entry.deliveryTail;
 	}
 
 	#ackCompletion(completionId: string): void {
