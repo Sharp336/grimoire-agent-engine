@@ -17,6 +17,9 @@
 ### Fixed
 
 - Preserved user messages count toward context usage, compaction, and snapcompact budgets, preventing under-reported or oversized provider contexts and repeated maintenance attempts.
+### Added
+
+- Advisor guidance can optionally wait for primary context maintenance before reviewing each completed turn.
 
 ## [18.0.3] - 2026-08-23
 
