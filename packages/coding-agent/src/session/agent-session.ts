@@ -9141,16 +9141,22 @@ export class AgentSession {
 				? `Spend a saved Codex rate-limit reset?\n${lines[0]}`
 				: `Spend ${actions.length} saved Codex rate-limit resets?\n${lines.join("\n")}`;
 		try {
-			const choice = await runner.getUIContext().select(question, [
-				{
-					label: "Yes",
-					description: "Redeem now and remember yes for future eligible Codex resets.",
-				},
-				{
-					label: "No",
-					description: "Do not auto-redeem saved Codex resets.",
-				},
-			]);
+			const choice = await runner.getUIContext().select(
+				question,
+				[
+					{
+						label: "Yes",
+						description: "Redeem now and remember yes for future eligible Codex resets.",
+					},
+					{
+						label: "No",
+						description: "Do not auto-redeem saved Codex resets.",
+					},
+				],
+				// The request is parked on this answer, so a backgrounded pane has to
+				// surface it.
+				{ announce: true },
+			);
 			if (choice === "Yes") {
 				this.settings.set("codexResets.autoRedeem", "yes");
 				return true;

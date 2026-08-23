@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed notifications never arriving in a Herdr pane. Herdr multiplexes panes like tmux but swallows bare OSC 9 / OSC 99 and has no passthrough envelope, so a backgrounded pane got no signal at all; delivery now goes through `herdr notification show`, and the in-band write stays as the fallback when the pane id or the `herdr` binary is missing.
+
 ## [18.0.3] - 2026-08-23
 
 ### Fixed
