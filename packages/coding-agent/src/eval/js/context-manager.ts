@@ -1,3 +1,4 @@
+import * as os from "node:os";
 import { logger, postmortem, Snowflake, workerHostEntry } from "@oh-my-pi/pi-utils";
 import {
 	createWorkerHandle,
@@ -699,8 +700,9 @@ function spawnBunWorker(): WorkerHandle {
 }
 
 function spawnJsProcess(): WorkerHandle {
+	const spawnCommand = resolveWorkerSpawnCmd(JS_EVAL_PROCESS_ARG);
 	const spawned = createWorkerSubprocess<WorkerOutbound>({
-		spawnCommand: resolveWorkerSpawnCmd(JS_EVAL_PROCESS_ARG),
+		spawnCommand: { ...spawnCommand, cwd: os.tmpdir() },
 		env: workerEnvFromParent(),
 		exitLabel: "JS eval worker",
 		detached: shouldDetachKernel(process.platform),
