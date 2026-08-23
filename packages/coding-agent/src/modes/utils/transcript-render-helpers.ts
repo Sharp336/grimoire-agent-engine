@@ -33,13 +33,20 @@ function escapeRegExp(value: string): string {
 function sanitizeAsyncProgressDisplayText(text: string): string {
 	let display = replaceTabs(text);
 	const home = os.homedir();
-	if (!home) return display;
+	if (!home) return truncateAsyncProgressDisplayLines(display);
 	const homePaths = home.includes("\\") ? [home, home.replaceAll("\\", "/")] : [home];
 	for (const homePath of homePaths) {
 		const homePrefix = new RegExp(`${escapeRegExp(homePath)}(?=$|[\\\\/])`, "g");
 		display = display.replace(homePrefix, match => shortenPath(match, homePath));
 	}
-	return display;
+	return truncateAsyncProgressDisplayLines(display);
+}
+
+function truncateAsyncProgressDisplayLines(text: string): string {
+	return text
+		.split("\n")
+		.map(line => truncateToWidth(line, TRUNCATE_LENGTHS.LINE))
+		.join("\n");
 }
 
 /**

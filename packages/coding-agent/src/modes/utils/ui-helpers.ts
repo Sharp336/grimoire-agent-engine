@@ -246,6 +246,7 @@ export class UiHelpers {
 					const renderer = this.ctx.viewSession.extensionRunner?.getMessageRenderer(message.customType);
 					// Both HookMessage and CustomMessage have the same structure, cast for compatibility
 					const component = new CustomMessageComponent(displayMessage as CustomMessage<unknown>, renderer);
+					component.setExpanded(this.ctx.toolOutputExpanded);
 					this.ctx.chatContainer.addChild(component);
 				}
 				break;

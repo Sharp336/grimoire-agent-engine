@@ -1451,6 +1451,11 @@ export class AgentSession {
 			});
 			this.#unregisterAsyncProgressSink = manager.registerProgressSink(this.#agentId, {
 				deliver: (jobId, text, job, seq, info) => this.#deliverAsyncJobProgress(jobId, text, job, seq, info),
+				acknowledge: jobId => {
+					const matchesJob = (entry: AsyncProgressEntry) => entry.jobId === jobId;
+					this.yieldQueue.take<AsyncProgressEntry>(ASYNC_PROGRESS_MESSAGE_TYPE, matchesJob);
+					this.yieldQueue.take<AsyncProgressEntry>(ASYNC_PROGRESS_WAKE_QUEUE_KIND, matchesJob);
+				},
 			});
 			this.#unregisterAsyncDeliverySink = manager.registerDeliverySink(this.#agentId, (jobId, text, job) =>
 				this.#deliverAsyncJobResult(manager, jobId, text, job),

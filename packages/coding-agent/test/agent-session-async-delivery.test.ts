@@ -408,6 +408,72 @@ describe("AgentSession owner-routed async delivery", () => {
 		await manager.waitForAll();
 	});
 
+	it("permanently drops queued ambient progress when its job is acknowledged", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const progressMarker = "ACKNOWLEDGED PROGRESS MUST STAY STALE";
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "Main",
+			ownedAsyncJobManager: manager,
+		});
+
+		const gate = Promise.withResolvers<string>();
+		manager.register("bash", "acknowledged progress job", () => gate.promise, {
+			id: "acknowledged-progress-job",
+			ownerId: "Main",
+			progressDelivery: "ambient",
+		});
+		const job = manager.getJob("acknowledged-progress-job");
+		if (!job) throw new Error("Expected registered acknowledged progress job");
+		session.yieldQueue.enqueue<AsyncProgressEntry>("async-progress", {
+			jobId: job.id,
+			text: progressMarker,
+			job,
+			seq: 1,
+			elapsedMs: 10,
+			epoch: 0,
+			delivery: "ambient",
+		});
+
+		manager.watchJobs([job.id]);
+		gate.resolve("done");
+		await manager.waitForAll();
+		expect(manager.getJob(job.id)?.status).toBe("completed");
+
+		manager.acknowledgeDeliveries([job.id]);
+		expect(session.yieldQueue.has("async-progress")).toBe(false);
+		manager.unwatchJobs([job.id]);
+		expect(manager.evictCompletedJobs({ ownerId: "Main" })).toBe(1);
+		expect(manager.getJob(job.id)).toBeUndefined();
+
+		await session.sendUserMessage("later turn after retention eviction");
+		expect(
+			mock.calls.every(call =>
+				call.context.messages.every(message =>
+					typeof message.content === "string"
+						? !message.content.includes(progressMarker)
+						: message.content.every(content => content.type !== "text" || !content.text.includes(progressMarker)),
+				),
+			),
+		).toBe(true);
+	});
+
 	it("folds queued ambient progress into the completion-triggered flush before the result", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const progressMarker = "AMBIENT PROGRESS MARKER";
@@ -857,8 +923,8 @@ describe("AgentSession owner-routed async delivery", () => {
 
 		const completion = await completionObserved.promise;
 		expect(completion).toContain("artifact://78");
-		expect(completion).toContain("MINIMIZED   SUCCESS OUTPUT");
-		expect(completion).not.toContain("MINIMIZED\tSUCCESS OUTPUT");
+		expect(completion).toContain("MINIMIZED\tSUCCESS OUTPUT");
+		expect(completion).not.toContain("MINIMIZED   SUCCESS OUTPUT");
 	}, 10_000);
 
 	it("folds a failed artifact-backed job's never-progressed error into the completion", async () => {

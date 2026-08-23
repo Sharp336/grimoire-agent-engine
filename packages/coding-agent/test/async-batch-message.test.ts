@@ -196,20 +196,22 @@ describe("async result terminal-only content for artifact-backed jobs", () => {
 		expect(message!.content).toContain("Error: spawn ENOENT &lt;post-processing blew up&gt;");
 	});
 
-	test("replaces tabs only in the artifact-backed terminal display field", () => {
+	test("preserves tabs in artifact-backed terminal text after prior progress", () => {
+		const rawResult = "\x1b[31mcolumn\tpost-processed\x1b[0m";
 		const entry = resultEntry({
-			result: "column\tpost-processed",
+			result: rawResult,
 			job: fakeJob({ terminalTextProvenance: "terminal" }),
 			progressSummary: { artifactId: "art-tabs" },
 		});
 		const message = buildAsyncResultBatchMessage([entry]);
 
 		expect(message).not.toBeNull();
-		expect(message!.content).toContain("column   post-processed");
-		expect(message!.content).not.toContain("\t");
-		// The model/artifact payload remains lossless; only terminalText is a
-		// display field and crosses replaceTabs().
-		expect(entry.result).toBe("column\tpost-processed");
+		expect(message!.content).toContain("<result>\ncolumn\tpost-processed\n</result>");
+		expect(message!.content).toContain("\t");
+		expect(message!.content).not.toContain("\x1b");
+		// Message assembly sanitizes control sequences without mutating the
+		// lossless terminal result retained by the artifact-backed entry.
+		expect(entry.result).toBe(rawResult);
 	});
 
 	test("keeps the summarized completion terse when there is no terminal text", () => {

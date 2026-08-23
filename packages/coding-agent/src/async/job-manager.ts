@@ -148,6 +148,8 @@ export type AsyncJobDeliverySink = (jobId: string, text: string, job?: AsyncJob)
 /** Best-effort owner-routed delivery for progress from a still-running job. */
 export interface AsyncJobProgressSink {
 	deliver(jobId: string, text: string, job: AsyncJob, seq: number, info: AsyncJobProgressInfo): void | Promise<void>;
+	/** Permanently discard progress that the owner already queued before this job was acknowledged. */
+	acknowledge?(jobId: string): void;
 }
 
 /**
@@ -545,6 +547,8 @@ export class AsyncJobManager {
 		if (uniqueJobIds.length === 0) return 0;
 
 		for (const jobId of uniqueJobIds) {
+			const job = this.#jobs.get(jobId);
+			if (job?.ownerId !== undefined) this.#progressSinks.get(job.ownerId)?.acknowledge?.(jobId);
 			this.#suppressedDeliveries.add(jobId);
 			this.#clearAgentProgress(jobId);
 		}

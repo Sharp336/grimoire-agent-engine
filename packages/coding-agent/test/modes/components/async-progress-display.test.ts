@@ -6,6 +6,7 @@ import { ChatTranscriptBuilder } from "../../../src/modes/components/chat-transc
 import { TranscriptContainer } from "../../../src/modes/components/transcript-container";
 import { initTheme } from "../../../src/modes/theme/theme";
 import type { InteractiveModeContext } from "../../../src/modes/types";
+import { buildAsyncProgressDisplayMessage } from "../../../src/modes/utils/transcript-render-helpers";
 import { UiHelpers } from "../../../src/modes/utils/ui-helpers";
 import {
 	type AsyncProgressDetails,
@@ -18,6 +19,7 @@ import type { SessionMessageEntry } from "../../../src/session/session-entries";
 const HOME_PATH = `${os.homedir()}/projects/async-progress/build.log`;
 const DISPLAY_PATH = "~/projects/async-progress/build.log";
 const RAW_PROGRESS = `stdout\tvalue\nError:\tfailed at ${HOME_PATH}`;
+const LONG_PROGRESS_LINE = "x".repeat(500);
 
 beforeAll(async () => {
 	await initTheme(false);
@@ -32,10 +34,10 @@ afterEach(() => {
 	resetSettingsForTest();
 });
 
-function progressMessage(): CustomMessage<AsyncProgressDetails> {
+function progressMessage(text = RAW_PROGRESS): CustomMessage<AsyncProgressDetails> {
 	const entry: AsyncProgressEntry = {
 		jobId: "build",
-		text: RAW_PROGRESS,
+		text,
 		job: undefined,
 		seq: 1,
 		elapsedMs: 1_000,
@@ -99,5 +101,17 @@ describe("async progress transcript display sanitization", () => {
 		expect(message.content).toContain(RAW_PROGRESS);
 		expect(message.details?.jobs[0]?.text).toBe(RAW_PROGRESS);
 		expect(message.content).toBe(modelContent);
+	});
+
+	it("bounds every display-only progress line without truncating the model payload", () => {
+		const message = progressMessage(LONG_PROGRESS_LINE);
+		const displayMessage = buildAsyncProgressDisplayMessage(message);
+		if (typeof displayMessage.content !== "string") throw new Error("Expected string display content");
+		const progressLine = displayMessage.content.split("\n").find(line => line.startsWith("x"));
+
+		expect(progressLine).toBeDefined();
+		expect(Bun.stringWidth(progressLine!)).toBeLessThanOrEqual(110);
+		expect(displayMessage.content).not.toContain(LONG_PROGRESS_LINE);
+		expect(message.content).toContain(LONG_PROGRESS_LINE);
 	});
 });

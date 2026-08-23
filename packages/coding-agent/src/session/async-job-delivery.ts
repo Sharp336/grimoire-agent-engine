@@ -9,7 +9,6 @@
  * every completion — regardless of owner — into the first top-level session.
  */
 
-import { replaceTabs } from "@oh-my-pi/pi-tui";
 import { formatDuration, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobCompletionLeftover, AsyncJobProgressDelivery, AsyncJobType } from "../async";
 import type { ProgressReminder } from "../async/progress-batcher";
@@ -268,10 +267,9 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			failed: status === "failed" || timedOut || (exitCode !== undefined && exitCode !== 0),
 			hasExitCode: exitCode !== undefined,
 			progressSummarized: entry.progressSummary !== undefined,
-			// `result` remains the model/artifact payload. Only this display field
-			// crosses the TUI boundary, so normalize tabs here without mutating
-			// the lossless source bytes.
-			terminalText: entry.progressSummary && entry.result ? replaceTabs(sanitizeText(entry.result)) : undefined,
+			// Preserve tabs in the model-facing completion payload. Transcript
+			// renderers normalize tabs at the TUI boundary.
+			terminalText: entry.progressSummary && entry.result ? sanitizeText(entry.result) : undefined,
 			artifactId: entry.progressSummary?.artifactId,
 			leftoverText: leftover?.text ? sanitizeText(leftover.text) : undefined,
 			leftoverHead: leftover?.head ? sanitizeText(leftover.head) : undefined,
