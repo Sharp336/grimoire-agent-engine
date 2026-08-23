@@ -98,7 +98,7 @@
     "test:scripts": "bun test scripts/ci-test-ts.test.ts scripts/ci-release-build-binaries.test.ts scripts/musl-release.test.ts scripts/ci-release-publish.test.ts scripts/release.test.ts",
     "test:rs": "bun scripts/run-rs-task.ts test:rs",
     "check": "bun run --parallel check:ts check:rs",
-"check:ts": "bun run check:tools && bun run --workspaces --if-present check",
+    "check:ts": "bun run check:tools && bun run --workspaces --if-present check",
     "check:tools": "biome check . --no-errors-on-unmatched",
     "check:rs": "bun scripts/run-rs-task.ts check:rs",
     "lint": "bun run --parallel lint:ts lint:rs",
@@ -187,6 +187,8 @@
     "*.{js,ts,jsx,tsx,json,jsonc,css}": "biome check --write --no-errors-on-unmatched"
   },
   "dependencies": {
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
     "sherpa-onnx": "1.13.2",
     "sherpa-onnx-darwin-arm64": "1.13.3",
     "sherpa-onnx-node": "1.13.2"

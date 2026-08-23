@@ -62,6 +62,10 @@ export interface MCPServer {
 		callbackPath?: string;
 		prompt?: string;
 	};
+	/** Allowlist of raw server-advertised tool names (literal or glob, e.g. "channel_*"). */
+	enabledTools?: string[];
+	/** Denylist of raw server-advertised tool names; wins over enabledTools when both are set. */
+	disabledTools?: string[];
 	/** Transport type */
 	transport?: "stdio" | "sse" | "http";
 	/** Source metadata (added by loader) */
@@ -74,6 +78,10 @@ function isSameMCPConnection(left: MCPServer, right: MCPServer): boolean {
 	// Normalize against the allocator's own default so an explicit "number" is
 	// equivalent to leaving the option unset, not a distinct connection.
 	if ((left.requestIdFormat ?? "number") !== (right.requestIdFormat ?? "number")) return false;
+	// Tool filters change which tools the server exposes to the model, so two
+	// aliases with the same transport but different filters are distinct.
+	if (!Bun.deepEquals(left.enabledTools, right.enabledTools)) return false;
+	if (!Bun.deepEquals(left.disabledTools, right.disabledTools)) return false;
 
 	const leftTransport = left.transport ?? (left.command ? "stdio" : left.url ? "http" : "stdio");
 	const rightTransport = right.transport ?? (right.command ? "stdio" : right.url ? "http" : "stdio");

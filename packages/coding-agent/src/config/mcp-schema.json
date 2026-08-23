@@ -4,7 +4,6 @@
   "title": "OMP MCP configuration",
   "description": "Schema for mcp.json, .mcp.json, .omp/mcp.json, and ~/.omp/agent/mcp.json used by the OMP coding agent.",
   "type": "object",
-  "additionalProperties": false,
   "properties": {
     "$schema": {
       "type": "string",
@@ -39,6 +38,7 @@
       "uniqueItems": true
     }
   },
+  "additionalProperties": false,
   "$defs": {
     "stringMap": {
       "type": "object",
@@ -123,6 +123,22 @@
           "enum": ["string", "number"],
           "description": "Encoding for outgoing JSON-RPC request ids (default: \"number\"). Use \"string\" for servers that need collision-resistant snowflake string ids instead of per-transport integers. OMP-specific: set it in an OMP-owned config (`.omp/mcp.json`, `~/.omp/agent/mcp.json`, a project `mcp.json`/`.mcp.json`, or an OMP plugin). Servers imported from another tool's config (Claude, Cursor, VS Code, Gemini, OpenCode, Windsurf) ignore it, since that key is not part of those formats."
         },
+        "enabledTools": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Allowlist of raw server-advertised tool names to register (default: all tools). Entries may be literal names or glob patterns (e.g. \"search\", \"channel_*\"). Excluded tools never reach the model context."
+        },
+        "disabledTools": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Denylist of raw server-advertised tool names to exclude. Entries may be literal names or glob patterns. When both enabledTools and disabledTools are set, the denylist wins."
+        },
         "auth": {
           "$ref": "#/$defs/authConfig"
         },
@@ -132,13 +148,13 @@
       }
     },
     "stdioServer": {
+      "unevaluatedProperties": false,
       "allOf": [
         {
           "$ref": "#/$defs/serverBase"
         },
         {
           "type": "object",
-          "additionalProperties": false,
           "required": ["command"],
           "properties": {
             "type": {
@@ -174,13 +190,13 @@
       ]
     },
     "httpServer": {
+      "unevaluatedProperties": false,
       "allOf": [
         {
           "$ref": "#/$defs/serverBase"
         },
         {
           "type": "object",
-          "additionalProperties": false,
           "required": ["type", "url"],
           "properties": {
             "type": {
@@ -205,13 +221,13 @@
       ]
     },
     "sseServer": {
+      "unevaluatedProperties": false,
       "allOf": [
         {
           "$ref": "#/$defs/serverBase"
         },
         {
           "type": "object",
-          "additionalProperties": false,
           "required": ["type", "url"],
           "properties": {
             "type": {
