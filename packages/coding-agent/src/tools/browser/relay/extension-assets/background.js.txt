@@ -65,6 +65,12 @@ async function groupTabs(tabIds, title, color) {
       groupId = await chrome.tabs.group({ tabIds: ids });
     }
     await chrome.tabGroups.update(groupId, { title, color });
+    try {
+      const winTabs = await chrome.tabs.query({ windowId });
+      await chrome.tabGroups.move(groupId, { index: winTabs.length });
+    } catch (err) {
+      // Best-effort: keeping the group at the end of the tab strip is cosmetic.
+    }
     for (const id of ids)
       grouped[String(id)] = groupId;
   }
@@ -128,7 +134,7 @@ async function runRpc(msg) {
     case "send":
       return await chrome.debugger.sendCommand(msg.sessionId ? { tabId: msg.tabId, sessionId: msg.sessionId } : { tabId: msg.tabId }, msg.method, msg.params);
     case "createTab": {
-      const tab = await chrome.tabs.create({ url: msg.url });
+      const tab = await chrome.tabs.create({ url: msg.url, active: false });
       const snap = snapshot(tab);
       if (!snap)
         throw new Error("created tab has no id");

@@ -1,6 +1,12 @@
 # Changelog
 
-## [Unreleased]
+
+### Fixed
+
+- Browser relay tabs now open silently in the background (without stealing the
+  current tab or focus) and their "omp" group docks at the end of the tab strip
+  instead of the far left, matching how a drive-by agent session is expected to
+  behave in the user's browser.
 
 ## [18.0.3] - 2026-08-23
 
