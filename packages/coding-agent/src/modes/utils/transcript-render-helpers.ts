@@ -4,7 +4,6 @@
  * transcript rows from persisted message entries; holding the row construction
  * here keeps the two byte-for-byte identical.
  */
-import * as os from "node:os";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
 import { formatBytes, formatDuration } from "@oh-my-pi/pi-utils";
@@ -18,7 +17,7 @@ import {
 	shouldRenderAbortReason,
 } from "../../session/messages";
 import { createIrcMessageCard } from "../../tools/hub";
-import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
+import { replaceTabs, shortenEmbeddedPaths, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 import { ToolActivityContainer } from "../components/tool-activity";
 import { TranscriptBlock } from "../components/transcript-container";
@@ -26,24 +25,8 @@ import { theme } from "../theme/theme";
 
 type CustomOrHookMessage = Extract<AgentMessage, { role: "custom" | "hookMessage" }>;
 
-function escapeRegExp(value: string): string {
-	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 function sanitizeAsyncProgressDisplayText(text: string): string {
-	let display = replaceTabs(text);
-	const home = os.homedir();
-	if (!home) return truncateAsyncProgressDisplayLines(display);
-	const homePaths = home.includes("\\") ? [home, home.replaceAll("\\", "/")] : [home];
-	const caseInsensitive = home.includes("\\") || /^[A-Za-z]:\//.test(home);
-	for (const homePath of homePaths) {
-		const homePrefix = new RegExp(
-			`(?<![\\p{L}\\p{N}_-])${escapeRegExp(homePath)}(?![\\p{L}\\p{N}_-])`,
-			caseInsensitive ? "giu" : "gu",
-		);
-		display = display.replace(homePrefix, "~");
-	}
-	return truncateAsyncProgressDisplayLines(display);
+	return truncateAsyncProgressDisplayLines(shortenEmbeddedPaths(replaceTabs(text)));
 }
 
 function truncateAsyncProgressDisplayLines(text: string): string {

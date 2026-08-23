@@ -725,6 +725,25 @@ export function shortenPath(filePath: unknown, homeDir?: string): string {
 	return filePath;
 }
 
+/**
+ * Replace home-directory paths embedded in display text without matching a
+ * longer path component. Windows-style homes are matched case-insensitively.
+ */
+export function shortenEmbeddedPaths(text: string, homeDir = os.homedir()): string {
+	if (!homeDir) return text;
+	let shortened = text;
+	const homePaths = homeDir.includes("\\") ? [homeDir, homeDir.replaceAll("\\", "/")] : [homeDir];
+	const caseInsensitive = homeDir.includes("\\") || /^[A-Za-z]:\//.test(homeDir);
+	for (const homePath of homePaths) {
+		const homePrefix = new RegExp(
+			`(?<![\\p{L}\\p{N}_-])${RegExp.escape(homePath)}(?![\\p{L}\\p{N}_-])`,
+			caseInsensitive ? "giu" : "gu",
+		);
+		shortened = shortened.replace(homePrefix, "~");
+	}
+	return shortened;
+}
+
 export function formatToolWorkingDirectory(workdir: string | undefined, projectDir: string): string | undefined {
 	if (!workdir) return undefined;
 	const resolvedProjectDir = path.resolve(projectDir);
