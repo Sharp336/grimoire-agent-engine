@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- OpenRouter sticky sessions now work over Chat Completions: requests send the same normalized `session_id` as the Responses transport, and a manual `provider.order` logs a one-time warning on requests with an active session id that upstream skips session-affinity endpoint prioritization (prompt-cache hit rate degrades) while the order is active.
+
 ## [18.0.3] - 2026-08-23
 
 ### Fixed
@@ -46,9 +50,6 @@
 ### Added
 
 - Added reversible private-use glyph tokenization for Claude-compatible provider requests, including prompt notices, streamed response decoding, and safe handling of unresolved model-authored glyph tokens.
-### Added
-
-- OpenRouter sticky sessions now work over Chat Completions: requests send the same normalized `session_id` as the Responses transport, and a manual `provider.order` logs a one-time warning that upstream skips session-affinity endpoint prioritization (prompt-cache hit rate degrades) while the order is active.
 
 ## [17.4.3] - 2026-08-21
 

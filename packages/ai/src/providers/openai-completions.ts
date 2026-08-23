@@ -1743,7 +1743,7 @@ function buildParams(
 	applyChatCompletionsCompatPolicy(params, finalPolicy);
 	dropOpenRouterKimiForcedToolReasoning(params, model, finalPolicy);
 
-	applyOpenAIGatewayRouting(params, compat, cacheRetention !== "none");
+	applyOpenAIGatewayRouting(params, compat, cacheRetention !== "none", options);
 
 	// OpenRouter sticky sessions: send the same normalized id the Responses transport uses.
 	if (compat.isOpenRouterHost) {

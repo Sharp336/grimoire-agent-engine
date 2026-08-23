@@ -671,15 +671,24 @@ export function resetOpenRouterOrderSessionAffinityWarned(): void {
  * Completions through `providerOptions.gateway`.
  *
  * When an OpenRouter model carries a non-empty `provider.order`, upstream skips
- * its session-affinity endpoint prioritization step, so warn once per process.
+ * its session-affinity endpoint prioritization step. Warn once per process —
+ * but only when session affinity is actually active for this request
+ * (`sessionAffinity` yields a session id with caching not opted out), so
+ * non-sticky requests can't consume the latch and mute the warning for later
+ * sticky ones.
  */
 export function applyOpenAIGatewayRouting(
 	params: OpenAIGatewayRoutingParams,
 	compat: OpenAIGatewayRoutingCompat,
 	cacheEnabled = true,
+	sessionAffinity?: Pick<OpenAICacheOptions, "cacheRetention" | "sessionId">,
 ): void {
 	if (compat.isOpenRouterHost && compat.openRouterRouting) {
-		if (compat.openRouterRouting.order && compat.openRouterRouting.order.length > 0) {
+		if (
+			compat.openRouterRouting.order &&
+			compat.openRouterRouting.order.length > 0 &&
+			getOpenRouterResponsesSessionId(sessionAffinity)
+		) {
 			warnOpenRouterOrderSkipsSessionAffinity();
 		}
 		params.provider = compat.openRouterRouting;
