@@ -127,6 +127,34 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 		}
 	}, 60000);
 
+	it("rebuilds async guidance from the currently active built-in tools", async () => {
+		const session = await spawnTopLevelSession({ "async.enabled": true });
+		try {
+			await session.setActiveToolsByName(["read", "hub"]);
+			let block = asyncProgressBlock(session.systemPrompt.join("\n\n"));
+			if (block === undefined) throw new Error("Expected Hub-only <async-progress> block");
+			expect(block).not.toContain(BASH_ASYNC_MARKER);
+			expect(block).toContain(HUB_PROGRESS_MARKER);
+
+			await session.setActiveToolPresentation(["read", "bash"], []);
+			block = asyncProgressBlock(session.systemPrompt.join("\n\n"));
+			if (block === undefined) throw new Error("Expected Bash-only <async-progress> block");
+			expect(block).toContain(BASH_ASYNC_MARKER);
+			expect(block).not.toContain(HUB_PROGRESS_MARKER);
+
+			await session.setActiveToolPresentation(["read"], []);
+			expect(asyncProgressBlock(session.systemPrompt.join("\n\n"))).toBeUndefined();
+
+			await session.setActiveToolsByName(["read", "bash", "hub"]);
+			block = asyncProgressBlock(session.systemPrompt.join("\n\n"));
+			if (block === undefined) throw new Error("Expected restored <async-progress> block");
+			expect(block).toContain(BASH_ASYNC_MARKER);
+			expect(block).toContain(HUB_PROGRESS_MARKER);
+		} finally {
+			await session.dispose();
+		}
+	}, 60000);
+
 	it("advertises only Hub progress when async Bash is disabled", async () => {
 		const session = await spawnTopLevelSession({ "async.enabled": false });
 		try {

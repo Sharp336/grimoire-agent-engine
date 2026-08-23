@@ -114,6 +114,33 @@ describe("AsyncJobManager model progress", () => {
 		]);
 	});
 
+	test("repeated empty progress reports remain deliverable and do not fail the job", async () => {
+		vi.useFakeTimers();
+		const manager = new AsyncJobManager({});
+		const recorder = recordingSink();
+		manager.registerProgressSink("Main", recorder.sink);
+		const job = heldJob(manager);
+		const report = await job.report;
+
+		report("");
+		report("");
+		report("");
+		vi.advanceTimersByTime(200);
+		expect(recorder.seen).toEqual([
+			{
+				jobId: job.jobId,
+				text: "",
+				seq: 1,
+				suppressedEvents: undefined,
+				reminder: undefined,
+			},
+		]);
+
+		job.release();
+		await manager.waitForAll();
+		expect(manager.getJob(job.jobId)?.status).toBe("completed");
+	});
+
 	test("retains the outer progress around a rate-limited middle", async () => {
 		vi.useFakeTimers();
 		const manager = new AsyncJobManager({});

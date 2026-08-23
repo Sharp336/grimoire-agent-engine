@@ -127,6 +127,7 @@ beforeAll(() => {
 			`    if [ -n "$OMP_FAKE_TUNNEL_OUTPUT" ]; then printf '%s\\n' "$OMP_FAKE_TUNNEL_OUTPUT"; fi\n` +
 			`    printf 'first\\n' > "$OMP_FAKE_TUNNEL_RESTART_MARKER"\n` +
 			`    if [ -n "$OMP_FAKE_TUNNEL_OUTPUT" ]; then printf '%s\\n' "$OMP_FAKE_TUNNEL_OUTPUT"; fi\n` +
+			`    if [ -n "$OMP_FAKE_TUNNEL_EXIT_DELAY" ]; then /bin/sleep "$OMP_FAKE_TUNNEL_EXIT_DELAY"; fi\n` +
 			`    exit 23\n` +
 			`  fi\n` +
 			`  if [ -n "$OMP_FAKE_TUNNEL_RESTART_READY_DELAY" ]; then /bin/sleep "$OMP_FAKE_TUNNEL_RESTART_READY_DELAY"; fi\n` +
@@ -299,6 +300,7 @@ describe("startExposure tunnel adapters", () => {
 	it("cancels an authenticated Pinggy restart that has not published readiness", async () => {
 		const invocation = prepareFake("Tunnel established at https://gated-random.a.pinggy.link", {
 			restartOnce: true,
+			exitDelaySeconds: 1,
 			gateRestartReadiness: true,
 		});
 		const active = await startExposure(
@@ -309,7 +311,7 @@ describe("startExposure tunnel adapters", () => {
 			PORT,
 		);
 		activeExposures.push(active);
-		await waitForRestart(invocation.restartMarker!);
+		await waitForFileContent(invocation.restartMarker!, text => text.includes("restarted"));
 		expect(fs.existsSync(invocation.restartReadyGate!)).toBe(false);
 
 		await stopAndObserve(active, invocation);

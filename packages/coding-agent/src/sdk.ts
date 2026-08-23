@@ -3057,16 +3057,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				),
 				taskIrcEnabled: !restrictToolNames && isIrcEnabled(settings, options.taskDepth ?? 0),
 				autoQaEnabled: !restrictToolNames && isAutoQaEnabled(settings),
-				// Gate on built-in provenance, not just tool NAME: an extension can replace a
-				// same-named built-in (see the wrappedExtensionTools override loop above), and
-				// the async:"auto"/progress guidance would then describe a schema the custom
-				// tool does not implement.
+				// Gate on both built-in provenance and the live active-tool projection.
+				// An extension can replace a same-named built-in (see the
+				// wrappedExtensionTools override loop above), while runtime activation can
+				// remove a real built-in. In either case the async:"auto"/progress guidance
+				// must not describe a tool schema the model cannot currently call.
 				asyncProgress: {
 					bash:
 						settings.get("async.enabled") &&
 						scopedAsyncJobManager !== undefined &&
-						builtInRegistryToolNames.has("bash"),
-					hub: settings.get("launch.enabled") && builtInRegistryToolNames.has("hub"),
+						builtInRegistryToolNames.has("bash") &&
+						toolNames.includes("bash"),
+					hub: settings.get("launch.enabled") && builtInRegistryToolNames.has("hub") && toolNames.includes("hub"),
 				},
 				secretsEnabled,
 				workspaceTree: workspaceTreePromise,

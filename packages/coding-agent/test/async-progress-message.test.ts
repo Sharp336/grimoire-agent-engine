@@ -13,6 +13,10 @@ import {
 	buildAsyncResultBatchMessage,
 } from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
 
+// Capability marker rather than prompt prose: only Hub process guidance can
+// instruct the agent to change a live monitor's progress delivery mode.
+const HUB_MONITOR_SETTINGS_MARKER = "`ambient` or `off`";
+
 function job(id: string): AsyncJob {
 	return {
 		id,
@@ -91,7 +95,7 @@ describe("async progress messages", () => {
 		expect(rendered).toContain("Read artifact://chatty-output for full output");
 	});
 
-	test("repeats the system prompt's chatty Bash guidance on every fifth suppression report", () => {
+	test("routes chatty guidance to Bash without Hub-only controls", () => {
 		const message = buildAsyncProgressBatchMessage([
 			{
 				...entry("bg_chatty", "", 62),
@@ -104,17 +108,12 @@ describe("async progress messages", () => {
 		expect(content(message)).toContain(
 			'<output>\n<suppressed reason="rate-limit" events="9" full-output="artifact://chatty-output" />\n</output>',
 		);
-		expect(content(message)).toContain("Repeated non-actionable progress → NEVER narrate or echo each event.");
-		expect(content(message)).toContain(
-			"Transient burst? Ignore it and await completion. Sustained/chatty? Reduce source verbosity.",
-		);
-		expect(content(message)).toContain("Safe restart? Stop/cancel; relaunch with native quiet/warning-only flags.");
-		expect(content(message)).toContain("Unsafe restart? Let it finish silently.");
-		expect(content(message)).not.toContain("Retune its monitor");
-		expect(content(message)).toEndWith("</system-reminder>");
+		const xml = content(message);
+		expect(xml).toMatch(/<system-reminder>\n\S[\s\S]*\n<\/system-reminder>$/);
+		expect(xml).not.toContain(HUB_MONITOR_SETTINGS_MARKER);
 	});
 
-	test("repeats the matching Hub guidance for a chatty process monitor", () => {
+	test("routes chatty guidance with Hub controls for a process monitor", () => {
 		const message = buildAsyncProgressBatchMessage([
 			{
 				...entry("monitor-web", "still compiling", 62),
@@ -126,10 +125,9 @@ describe("async progress messages", () => {
 			},
 		]);
 
-		expect(content(message)).toContain("<system-reminder>");
-		expect(content(message)).toContain("Sustained/chatty? Reduce source verbosity.");
-		expect(content(message)).toContain("Unsafe restart? Let it finish silently.");
-		expect(content(message)).toContain("Retune its monitor to `ambient` or `off`.");
+		const xml = content(message);
+		expect(xml).toMatch(/<system-reminder>\n\S[\s\S]*\n<\/system-reminder>$/);
+		expect(xml).toContain(HUB_MONITOR_SETTINGS_MARKER);
 	});
 
 	test("does not emit an empty chatty reminder for unsupported progress sources", () => {

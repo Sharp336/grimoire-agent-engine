@@ -38,10 +38,16 @@ describe("progress preview line snapping", () => {
 		expect(preview.text).toBe(text);
 	});
 
-	test("empty truncated windows preserve truncation when merged with visible output", () => {
-		const merged = mergeProgressPreviews({ truncated: true }, { text: "visible output", truncated: false });
-		expect(merged).toEqual({ text: "visible output", truncated: true });
-		expect(mergeProgressPreviews({ truncated: true }, { text: "", truncated: false })).toEqual({
+	test("empty previews return valid previews and preserve source truncation", () => {
+		expect(mergeProgressPreviews(buildProgressPreview(""), buildProgressPreview(""))).toEqual({
+			text: "",
+			truncated: false,
+		});
+		expect(mergeProgressPreviews({ truncated: true }, { text: "visible output", truncated: false })).toEqual({
+			text: "visible output",
+			truncated: true,
+		});
+		expect(mergeProgressPreviews(buildProgressPreview("", true), buildProgressPreview(""))).toEqual({
 			text: "",
 			truncated: true,
 		});
