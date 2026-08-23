@@ -146,7 +146,7 @@ function pushFoldLine(state: FoldState, line: string): void {
 	if (line.trim() === "") {
 		// Blank lines are kept verbatim (a `" "` line still renders its space);
 		// they just never become the prose ellipsis target.
-		if (state.hasTail) state.tailBlankSep += "\n" + line;
+		if (state.hasTail) state.tailBlankSep += `\n${line}`;
 		else state.committed += (state.emitted > 1 ? "\n" : "") + line;
 		return;
 	}
