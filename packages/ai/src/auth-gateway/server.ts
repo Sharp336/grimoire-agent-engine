@@ -25,12 +25,30 @@ import type { AuthStorage } from "../auth-storage";
 import * as AIError from "../error";
 import { classifyGatewayError } from "../error/gateway";
 import { isUsageLimitOutcome } from "../error/rate-limit";
+import { assertNoDuplicateJsonKeys, validateProviderCallContext } from "../provider-call-authority";
+import {
+	assertProviderCallExpectedDynamics,
+	type ProviderCallExpectedDynamicsByConfig,
+	type ProviderCallOriginAssignment,
+	planOpenAIProviderCallUrl,
+	resolveProviderCallOriginBinding,
+} from "../provider-call-origin-manifest";
 import * as anthropicMessages from "../providers/anthropic-messages-server";
 import * as openaiChat from "../providers/openai-chat-server";
 import * as openaiResponses from "../providers/openai-responses-server";
 import * as piNative from "../providers/pi-native-server";
 import { completeSimple, streamSimple } from "../stream";
-import type { Api, AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "../types";
+import type {
+	Api,
+	AssistantMessageEventStream,
+	Context,
+	Model,
+	ProviderCallAuthority,
+	ProviderCallContext,
+	ProviderCallCredential,
+	ProviderCallJournal,
+	SimpleStreamOptions,
+} from "../types";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { parseBind } from "../utils/parse-bind";
 import {
@@ -53,6 +71,16 @@ import { DEFAULT_AUTH_GATEWAY_BIND } from "./types";
 // ParsedFormatRequest / ParsedFormatOptions / FormatModule come from ./types.
 
 export type ModelResolver = (modelId: string) => Model<Api> | undefined;
+export interface CodexAuthorityDelegation {
+	authorityOwner: "dedicated-codex-backend";
+	assignment: ProviderCallOriginAssignment;
+	model: Model<Api>;
+	parsed: piNative.PiNativeParsedRequest;
+	/** Exact incoming pi-native JSON evidence; the generic gateway never translates or replays it. */
+	rawRequestBody: string;
+}
+
+export type CodexAuthorityDelegate = (delegation: CodexAuthorityDelegation) => Promise<Response>;
 
 export interface AuthGatewayBootOptions extends AuthGatewayServerOptions {
 	/** Source of credentials. Caller wires this to a broker-backed AuthStorage. */
@@ -65,6 +93,18 @@ export interface AuthGatewayBootOptions extends AuthGatewayServerOptions {
 	resolveModel: ModelResolver;
 	/** Optional supplier for `/v1/models` listing. Returns the full model array. */
 	listModels?: () => Iterable<Model<Api>>;
+	/** Controller client used to authorize strict pi-native provider calls. */
+	providerCallAuthority?: ProviderCallAuthority;
+	/** Durable per-binding journal required before strict provider egress. */
+	providerCallJournal?: ProviderCallJournal;
+	/** Backend-owned deployment expectations keyed by frozen config ID; strict calls fail closed when absent. */
+	expectedProviderCallDynamics?: ProviderCallExpectedDynamicsByConfig;
+	/** Server-only exact credential binding for the reviewed account and generation. */
+	resolveProviderCallCredential?: (
+		context: ProviderCallContext,
+	) => ProviderCallCredential | Promise<ProviderCallCredential>;
+	/** Sole semantic handoff for GPT routes. The generic gateway performs no local authority or credential work. */
+	delegateCodexProviderCall?: CodexAuthorityDelegate;
 }
 
 // `parseBind` lives in ../utils/parse-bind so the gateway and broker can't
@@ -378,6 +418,13 @@ async function handleFormatEndpoint(
 	if (!model) {
 		return route.module.formatError(404, "invalid_request_error", `Unknown model: ${modelId}`);
 	}
+	if (model.provider === "gpt-proxy") {
+		return route.module.formatError(
+			409,
+			"provider_call_assignment_required",
+			"GPT routes require a controller-materialized strict assignment and dedicated Codex authority delegation",
+		);
+	}
 
 	// Parse the wire-format request BEFORE resolving the credential so we
 	// have a stable per-conversation `sessionId` to thread into AuthStorage.
@@ -548,9 +595,12 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	const aborted = (): Response => piNative.formatError(499, "request_aborted", "client closed request");
 	if (controller.signal.aborted) return aborted();
 
+	let rawRequestBody: string;
 	let body: unknown;
 	try {
-		body = await req.json();
+		rawRequestBody = new TextDecoder("utf-8", { fatal: true }).decode(await req.arrayBuffer());
+		assertNoDuplicateJsonKeys(rawRequestBody);
+		body = JSON.parse(rawRequestBody) as unknown;
 	} catch (error) {
 		if (controller.signal.aborted) return aborted();
 		return piNative.formatError(400, "invalid_request_error", `Invalid JSON body: ${String(error)}`);
@@ -570,6 +620,82 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	if (!model) {
 		return piNative.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	}
+	if (model.provider === "gpt-proxy" && parsed.options.providerCallContext?.mode !== "strict") {
+		return piNative.formatError(
+			409,
+			"provider_call_assignment_required",
+			"GPT routes require a controller-materialized strict assignment and dedicated Codex authority delegation",
+		);
+	}
+	const strictProviderCall = parsed.options.providerCallContext?.mode === "strict";
+	let strictRoute: ReturnType<typeof resolveProviderCallOriginBinding> | undefined;
+	if (strictProviderCall) {
+		try {
+			const context = parsed.options.providerCallContext!;
+			validateProviderCallContext(model, context);
+			assertProviderCallExpectedDynamics(
+				context.originAssignment,
+				bootOpts.expectedProviderCallDynamics?.[context.originAssignment.config_id],
+			);
+			strictRoute = resolveProviderCallOriginBinding(
+				context.originAssignment.config_id,
+				context.originAssignment.route_ordinal,
+			);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			return piNative.formatError(409, "provider_call_origin_mismatch", message);
+		}
+	}
+	if (strictRoute?.authorityOwner === "dedicated-codex-backend") {
+		if (!bootOpts.delegateCodexProviderCall) {
+			return piNative.formatError(
+				503,
+				"codex_authority_unavailable",
+				"Dedicated Codex authority backend unavailable",
+			);
+		}
+		try {
+			return await bootOpts.delegateCodexProviderCall({
+				authorityOwner: "dedicated-codex-backend",
+				assignment: parsed.options.providerCallContext!.originAssignment,
+				model,
+				parsed,
+				rawRequestBody,
+			});
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			return piNative.formatError(502, "codex_authority_failed", message);
+		}
+	}
+	let providerCallUrlPlan: SimpleStreamOptions["providerCallUrlPlan"];
+	const openaiApiFamily =
+		model.api === "openai-completions"
+			? ("openai-completions" as const)
+			: model.api === "openai-responses"
+				? ("openai-responses" as const)
+				: undefined;
+	if (strictProviderCall && openaiApiFamily) {
+		try {
+			providerCallUrlPlan = planOpenAIProviderCallUrl(
+				openaiApiFamily,
+				model.baseUrl,
+				parsed.options.providerCallContext!.originAssignment,
+			);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			return piNative.formatError(409, "provider_call_origin_mismatch", message);
+		}
+	}
+	if (
+		strictProviderCall &&
+		(!bootOpts.providerCallAuthority || !bootOpts.providerCallJournal || !bootOpts.resolveProviderCallCredential)
+	) {
+		return piNative.formatError(
+			503,
+			"provider_call_authority_unavailable",
+			"Strict provider-call authority runtime unavailable",
+		);
+	}
 	// Pi-native already parsed `streamOpts.sessionId` (when set by the
 	// client); fall back to the derived key so credential-stickiness lines
 	// up with cache-prefix stickiness — same identity used for both means
@@ -579,40 +705,61 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	parsed.options.sessionId ??= sessionId;
 
 	let apiKey: string | undefined;
-	try {
-		apiKey = await bootOpts.storage.getApiKey(model.provider, sessionId, {
-			modelId: model.id,
-			signal: controller.signal,
-		});
-	} catch (error) {
+	let providerCallCredential: ProviderCallCredential | undefined;
+	if (strictProviderCall) {
+		try {
+			providerCallCredential = await bootOpts.resolveProviderCallCredential!(parsed.options.providerCallContext!);
+			apiKey = providerCallCredential.apiKey;
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			return piNative.formatError(409, "provider_call_credential_mismatch", message);
+		}
+	} else {
+		try {
+			apiKey = await bootOpts.storage.getApiKey(model.provider, sessionId, {
+				modelId: model.id,
+				signal: controller.signal,
+			});
+		} catch (error) {
+			if (controller.signal.aborted) return aborted();
+			const classified = classifyGatewayError(error);
+			logger.warn("auth-gateway getApiKey threw", { provider: model.provider, peer, error: classified.message });
+			return piNative.formatError(classified.status, classified.type, classified.message);
+		}
 		if (controller.signal.aborted) return aborted();
-		const classified = classifyGatewayError(error);
-		logger.warn("auth-gateway getApiKey threw", { provider: model.provider, peer, error: classified.message });
-		return piNative.formatError(classified.status, classified.type, classified.message);
-	}
-	if (controller.signal.aborted) return aborted();
-	if (!apiKey) {
-		return piNative.formatError(
-			401,
-			"authentication_error",
-			`No credential available for provider ${model.provider}`,
-		);
+		if (!apiKey) {
+			return piNative.formatError(
+				401,
+				"authentication_error",
+				`No credential available for provider ${model.provider}`,
+			);
+		}
 	}
 
 	// Build the SimpleStreamOptions actually handed to `streamSimple`. We
 	// trust the client's options (already allow-listed by `parseRequest`) and
 	// only inject server-controlled fields. The codex sampling strip mirrors
 	// `buildStreamOptions` — Codex rejects every one with a 400 (#3117).
-	const streamOpts: SimpleStreamOptions = { ...parsed.options, apiKey, signal: controller.signal };
-	streamOpts.apiKey = buildGatewayApiKeyResolver(
-		bootOpts.storage,
-		model,
-		sessionId,
+	const streamOpts: SimpleStreamOptions = {
+		...parsed.options,
 		apiKey,
-		controller.signal,
-		"pi-native",
-		peer,
-	);
+		signal: strictProviderCall ? undefined : controller.signal,
+		providerCallAuthority: strictProviderCall ? bootOpts.providerCallAuthority : undefined,
+		providerCallCredential: strictProviderCall ? providerCallCredential : undefined,
+		providerCallJournal: strictProviderCall ? bootOpts.providerCallJournal : undefined,
+		providerCallUrlPlan,
+	};
+	if (!strictProviderCall) {
+		streamOpts.apiKey = buildGatewayApiKeyResolver(
+			bootOpts.storage,
+			model,
+			sessionId,
+			apiKey,
+			controller.signal,
+			"pi-native",
+			peer,
+		);
+	}
 	if (model.api === "openai-codex-responses") {
 		delete streamOpts.temperature;
 		delete streamOpts.topP;
@@ -670,19 +817,20 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 
 	let events: AssistantMessageEventStream;
 	try {
-		if (controller.signal.aborted) return aborted();
+		if (controller.signal.aborted && !strictProviderCall) return aborted();
 		events = streamSimple(model, parsed.context, streamOpts);
 	} catch (error) {
 		const classified = classifyGatewayError(error);
 		logger.warn("auth-gateway streamSimple threw", { format: "pi-native", error: classified.message, peer });
 		return piNative.formatError(classified.status, classified.type, classified.message);
 	}
-	if (controller.signal.aborted) return aborted();
+	if (controller.signal.aborted && !strictProviderCall) return aborted();
 
 	const sseStream = piNative.encodeStream(events, parsed.modelId, parsed.options, {
-		signal: controller.signal,
+		signal: strictProviderCall ? undefined : controller.signal,
+		drainOnCancel: strictProviderCall,
 		onCancel: reason => {
-			if (!controller.signal.aborted) {
+			if (!strictProviderCall && !controller.signal.aborted) {
 				controller.abort(reason instanceof Error ? reason : new Error("client closed request"));
 			}
 		},

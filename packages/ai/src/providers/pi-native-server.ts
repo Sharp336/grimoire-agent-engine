@@ -79,6 +79,7 @@ const ALLOWED_OPTION_KEYS: ReadonlySet<keyof SimpleStreamOptions> = new Set([
 	"openrouterVariant",
 	"loopGuard",
 	"acceptEmptyResponse",
+	"providerCallContext",
 ] as const satisfies readonly (keyof SimpleStreamOptions)[]);
 
 // ---------------------------------------------------------------------------
@@ -175,6 +176,7 @@ export function encodeStream(
 	_options?: SimpleStreamOptions,
 	control?: AuthGatewayStreamControl,
 ): ReadableStream<Uint8Array> {
+	const drainOnCancel = control?.drainOnCancel === true;
 	let cancelled = control?.signal?.aborted === true;
 	const markCancelled = () => {
 		cancelled = true;
@@ -183,13 +185,13 @@ export function encodeStream(
 	return new ReadableStream<Uint8Array>({
 		async start(controller) {
 			try {
-				if (cancelled) {
+				if (cancelled && !drainOnCancel) {
 					controller.close();
 					return;
 				}
 				for await (const event of events) {
-					if (cancelled) return;
-					controller.enqueue(SSE_ENCODER.encode(`data: ${JSON.stringify(event)}\n\n`));
+					if (cancelled && !drainOnCancel) return;
+					if (!cancelled) controller.enqueue(SSE_ENCODER.encode(`data: ${JSON.stringify(event)}\n\n`));
 					if (event.type === "done" || event.type === "error") break;
 				}
 				if (!cancelled) {

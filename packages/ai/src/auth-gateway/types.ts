@@ -117,6 +117,8 @@ export interface AuthGatewayStreamControl {
 	signal?: AbortSignal;
 	/** Called when the HTTP response body is cancelled by the client. */
 	onCancel?: (reason?: unknown) => void;
+	/** Keep consuming the upstream stream after the client disconnects. */
+	drainOnCancel?: boolean;
 }
 
 export interface AuthGatewayFormatModule {

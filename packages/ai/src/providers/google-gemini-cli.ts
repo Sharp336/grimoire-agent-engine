@@ -42,6 +42,7 @@ import {
 	convertTools,
 	EMPTY_STREAM_BASE_DELAY_MS,
 	type GoogleThinkingLevel,
+	hasExactGoogleUsageMetadata,
 	hasMeaningfulGoogleContent,
 	isThinkingPart,
 	MAX_EMPTY_STREAM_RETRIES,
@@ -539,12 +540,16 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 				);
 			}
 			const baseUrl = model.baseUrl?.trim();
+			const strictProviderCall = options?.providerCallContext?.mode === "strict";
 			let endpoints: string[];
-			const providerState = isAntigravity
-				? getAntigravityProviderSessionState(options?.providerSessionState)
-				: undefined;
+			const providerState =
+				!strictProviderCall && isAntigravity
+					? getAntigravityProviderSessionState(options?.providerSessionState)
+					: undefined;
 
-			if (isAntigravity) {
+			if (strictProviderCall) {
+				endpoints = [options.providerCallContext!.originAssignment.canonical_origin];
+			} else if (isAntigravity) {
 				const mode = options?.antigravityEndpointMode ?? "auto";
 				if (mode === "sandbox") {
 					endpoints = [ANTIGRAVITY_SANDBOX_ENDPOINT];
@@ -590,7 +595,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			const headers = isAntigravity ? { "User-Agent": getAntigravityUserAgent() } : getGeminiCliHeaders(model.id);
 
 			const requestHeaders = {
-				Authorization: `Bearer ${accessToken}`,
+				...(strictProviderCall ? {} : { Authorization: `Bearer ${accessToken}` }),
 				"Content-Type": "application/json",
 				Accept: "text/event-stream",
 				...headers,
@@ -882,6 +887,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					}
 
 					if (responseData.usageMetadata) {
+						output.providerUsageReported = hasExactGoogleUsageMetadata(responseData.usageMetadata);
 						// promptTokenCount includes cachedContentTokenCount, so subtract to get fresh input
 						const promptTokens = responseData.usageMetadata.promptTokenCount || 0;
 						const cacheReadTokens = responseData.usageMetadata.cachedContentTokenCount || 0;
@@ -951,7 +957,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 							headers: requestHeaders,
 							body: requestBodyJson,
 							signal: watchdog.signal,
-							maxAttempts: isLastEndpoint ? MAX_RETRIES + 1 : 1,
+							maxAttempts: strictProviderCall ? 1 : isLastEndpoint ? MAX_RETRIES + 1 : 1,
 							defaultDelayMs: attempt => BASE_DELAY_MS * 2 ** attempt,
 							maxDelayMs: options?.maxRetryDelayMs ?? RATE_LIMIT_BUDGET_MS,
 							fetch: options?.fetch,
@@ -986,7 +992,11 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					const requestUrl = response.url;
 					let currentResponse = response;
 
-					for (let emptyAttempt = 0; emptyAttempt <= MAX_EMPTY_STREAM_RETRIES; emptyAttempt++) {
+					for (
+						let emptyAttempt = 0;
+						emptyAttempt <= (strictProviderCall ? 0 : MAX_EMPTY_STREAM_RETRIES);
+						emptyAttempt++
+					) {
 						if (options?.signal?.aborted) {
 							throw new AIError.AbortError("Request was aborted");
 						}
@@ -1094,6 +1104,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 				} catch (error) {
 					const status = extractHttpStatusFromError(error);
 					if (
+						!strictProviderCall &&
 						!isLastEndpoint &&
 						!started &&
 						(AIError.isTransientStatus(status) ||

@@ -3338,6 +3338,7 @@ export async function processResponsesStream<TApi extends Api>(
 				output.responseId = response.id;
 			}
 			populateResponsesUsageFromResponse(output, response?.usage);
+			output.providerUsageReported = hasExactResponsesUsage(response?.usage);
 			calculateCost(model, output.usage);
 			applyOpenRouterReportedCost(model, output.usage, response?.usage);
 			applyOpenAIResponsesServiceTierCost(
@@ -3691,6 +3692,40 @@ export function applyResponsesReasoningParams<P extends ResponseCreateParamsStre
 	);
 }
 
+function isExactProviderUsageCounter(value: unknown): value is number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && !Object.is(value, -0);
+}
+
+function hasExactResponsesUsage(value: unknown): boolean {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+	const usage = value as Record<string, unknown>;
+	if (
+		!isExactProviderUsageCounter(usage.input_tokens) ||
+		!isExactProviderUsageCounter(usage.output_tokens) ||
+		!isExactProviderUsageCounter(usage.total_tokens)
+	) {
+		return false;
+	}
+	for (const field of ["prompt_cache_hit_tokens", "prompt_cache_miss_tokens"] as const) {
+		if (usage[field] !== undefined && !isExactProviderUsageCounter(usage[field])) return false;
+	}
+	for (const [details, fields] of [
+		[
+			usage.input_tokens_details,
+			["cached_tokens", "cache_write_tokens", "orchestration_input_tokens", "orchestration_input_cached_tokens"],
+		],
+		[usage.output_tokens_details, ["reasoning_tokens", "orchestration_output_tokens"]],
+	] as const) {
+		if (details === undefined || details === null) continue;
+		if (typeof details !== "object" || Array.isArray(details)) return false;
+		const record = details as Record<string, unknown>;
+		for (const field of fields) {
+			if (record[field] !== undefined && !isExactProviderUsageCounter(record[field])) return false;
+		}
+	}
+	return true;
+}
+
 /** Populate `output.usage` from a Responses-API `response.usage` payload. Does not invoke `calculateCost`. */
 export function populateResponsesUsageFromResponse(
 	output: AssistantMessage,
@@ -3724,7 +3759,7 @@ export function populateResponsesUsageFromResponse(
 	const orchestrationInputTokens = details?.orchestration_input_tokens ?? 0;
 	const orchestrationInputCachedTokens = details?.orchestration_input_cached_tokens ?? 0;
 	const orchestrationOutputTokens = outputDetails?.orchestration_output_tokens ?? 0;
-	const reportedTotalTokens = typeof usage.total_tokens === "number" ? usage.total_tokens : undefined;
+	const reportedTotalTokens = isExactProviderUsageCounter(usage.total_tokens) ? usage.total_tokens : undefined;
 	const reportedPrimaryTokens = reportedInputTokens + reportedOutputTokens;
 	const reportedWithSeparateOrchestration =
 		reportedPrimaryTokens + orchestrationInputTokens + orchestrationOutputTokens;
@@ -3745,6 +3780,7 @@ export function populateResponsesUsageFromResponse(
 		hasDeepSeekCacheHitAndMiss:
 			usage.prompt_cache_hit_tokens !== undefined && usage.prompt_cache_miss_tokens !== undefined,
 	});
+	if (reportedTotalTokens !== undefined) accounting.totalTokens = reportedTotalTokens;
 	const orchestrationTotal = orchestrationInput + orchestrationInputCached + orchestrationOutputTokens;
 	if (orchestrationTotal > 0) {
 		accounting.orchestration = {

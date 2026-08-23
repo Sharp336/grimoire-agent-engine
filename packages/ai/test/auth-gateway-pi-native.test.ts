@@ -5,6 +5,12 @@ import * as path from "node:path";
 import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
+import { InMemoryProviderCallJournal } from "@oh-my-pi/pi-ai/provider-call-journal";
+import {
+	PROVIDER_CALL_ORIGIN_MANIFEST,
+	type ProviderCallOriginAssignment,
+	resolveProviderCallOriginBinding,
+} from "@oh-my-pi/pi-ai/provider-call-origin-manifest";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { encodeStream, formatError, parseRequest } from "@oh-my-pi/pi-ai/providers/pi-native-server";
 import type {
@@ -12,8 +18,11 @@ import type {
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
 	Context,
+	ModelSpec,
+	ProviderCallContext,
 	Usage,
 } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 
 function makeEventStream(events: AssistantMessageEvent[], final: AssistantMessage): AssistantMessageEventStream {
@@ -71,6 +80,121 @@ const baseContext: Context = {
 	systemPrompt: ["you are helpful"],
 	messages: [{ role: "user", content: "hi", timestamp: 0 }],
 };
+
+function strictOriginAssignment(
+	configId: string,
+	credentialGeneration: string,
+	routeOrdinal = 0,
+): ProviderCallOriginAssignment {
+	const binding = resolveProviderCallOriginBinding(configId, routeOrdinal);
+	return {
+		...binding.frozenStaticAssignment,
+		capability_generation: "capability-generation-20260823",
+		credential_generation: credentialGeneration,
+		source_release_digest: `sha256:${"a".repeat(64)}`,
+		restricted_proxy_policy_sha256: `sha256:${"b".repeat(64)}`,
+		origin_descriptor: structuredClone(binding.originDescriptor.preimage),
+		route_binding_descriptor: structuredClone(binding.bindingDescriptor.preimage),
+	};
+}
+
+function expectedDynamics(
+	configIds: readonly string[],
+	credentialGeneration = "generation",
+): Record<
+	string,
+	Pick<
+		ProviderCallOriginAssignment,
+		"capability_generation" | "credential_generation" | "source_release_digest" | "restricted_proxy_policy_sha256"
+	>
+> {
+	return Object.fromEntries(
+		configIds.map(configId => [
+			configId,
+			{
+				capability_generation: "capability-generation-20260823",
+				credential_generation: credentialGeneration,
+				source_release_digest: `sha256:${"a".repeat(64)}`,
+				restricted_proxy_policy_sha256: `sha256:${"b".repeat(64)}`,
+			},
+		]),
+	);
+}
+
+function strictProviderCallContext(gpt = false, requestedConfigId?: string): ProviderCallContext {
+	const configId = requestedConfigId ?? (gpt ? "sol-low" : "deepseek-v4-pro-0813-max-r3");
+	const credentialGeneration = "generation";
+	return {
+		mode: "strict",
+		configId,
+		taskReservationId: "00000000-0000-4000-8000-000000000001",
+		executionBindingId: "00000000-0000-4000-8000-000000000002",
+		podUid: "pod-uid",
+		callSequence: "1",
+		idempotencyKey: "00000000-0000-4000-8000-000000000003",
+		apiFamily: "openai-completions",
+		provider: gpt ? "gpt-proxy" : "deepseek",
+		accountId: "account",
+		modelId: gpt ? "gpt-5.6-sol" : "deepseek-v4-pro",
+		credentialGeneration,
+		assignmentSha256: `sha256:${"f".repeat(64)}`,
+		capabilityId: "00000000-0000-4000-8000-000000000004",
+		snapshotId: "00000000-0000-4000-8000-000000000005",
+		tokenizerContractSha256: `sha256:${"1".repeat(64)}`,
+		inputTokens: "1",
+		maxOutputTokens: "1",
+		expectedDimensions: [
+			{
+				dimension: "concurrency",
+				windowId: "-",
+				amount: "1",
+				unitScale: "0",
+				windowStart: null,
+				windowEnd: null,
+			},
+		],
+		originAssignment: strictOriginAssignment(configId, credentialGeneration),
+	};
+}
+
+const DEEPSEEK_STRICT_MODEL = buildModel({
+	id: "deepseek-v4-pro",
+	name: "DeepSeek V4 Pro",
+	api: "openai-completions",
+	provider: "deepseek",
+	baseUrl: "https://api.deepseek.com",
+	reasoning: true,
+	input: ["text"],
+	contextWindow: 372_000,
+	maxTokens: 65_536,
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+} satisfies ModelSpec<"openai-completions">);
+
+const XAI_STRICT_MODEL = buildModel({
+	id: "grok-4.6",
+	name: "Grok 4.6",
+	api: "openai-responses",
+	provider: "xai-oauth",
+	baseUrl: "https://api.x.ai/v1",
+	reasoning: true,
+	input: ["text"],
+	contextWindow: 372_000,
+	maxTokens: 65_536,
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+} satisfies ModelSpec<"openai-responses">);
+
+const GPT_STRICT_MODEL = buildModel({
+	id: "gpt-5.6-sol",
+	name: "GPT 5.6 Sol",
+	api: "openai-completions",
+	provider: "gpt-proxy",
+	baseUrl: "https://forbidden-local-gpt.invalid",
+	reasoning: true,
+	input: ["text"],
+	contextWindow: 372_000,
+	maxTokens: 65_536,
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+} satisfies ModelSpec<"openai-completions">);
 
 describe("pi-native parseRequest", () => {
 	it("accepts modelId + context and returns canonical shape", () => {
@@ -152,6 +276,24 @@ describe("pi-native parseRequest", () => {
 			options: { acceptEmptyResponse: true },
 		});
 		expect(parsed.options.acceptEmptyResponse).toBe(true);
+	});
+
+	it("forwards strict context but never accepts a serialized authority implementation", () => {
+		const providerCallContext = strictProviderCallContext();
+		const parsed = parseRequest({
+			modelId: "openai/gpt-5",
+			context: baseContext,
+			options: {
+				providerCallContext,
+				providerCallAuthority: { credential: "forbidden" },
+				providerCallCredential: { bearerToken: "forbidden" },
+				providerCallJournal: { file: "forbidden" },
+			},
+		});
+		expect(parsed.options.providerCallContext).toEqual(providerCallContext);
+		expect(parsed.options.providerCallAuthority).toBeUndefined();
+		expect(parsed.options.providerCallCredential).toBeUndefined();
+		expect(parsed.options.providerCallJournal).toBeUndefined();
 	});
 
 	it("forwards an explicit statefulResponses disablement to the native stream", () => {
@@ -272,6 +414,435 @@ describe("pi-native gateway cache controls", () => {
 			clearCustomApis();
 		}
 	});
+
+	it("rejects strict dispatch when only part of the server-controlled runtime is wired", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-strict-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		const model = DEEPSEEK_STRICT_MODEL;
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => model,
+			version: "test",
+			expectedProviderCallDynamics: expectedDynamics(["deepseek-v4-pro-0813-max-r3"]),
+			providerCallAuthority: {
+				async reserve() {
+					throw new Error("must not reserve");
+				},
+				async recover() {
+					throw new Error("must not recover");
+				},
+				async recordReceipt() {
+					throw new Error("must not record");
+				},
+			},
+		});
+		try {
+			const response = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({
+					modelId: model.id,
+					context: baseContext,
+					options: { providerCallContext: strictProviderCallContext() },
+					stream: false,
+				}),
+			});
+			expect(response.status).toBe(503);
+			expect(await response.json()).toEqual({
+				error: {
+					type: "provider_call_authority_unavailable",
+					message: "Strict provider-call authority runtime unavailable",
+				},
+			});
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not treat the catalog baseUrl as route authority for a strict assigned call", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-origin-assignment-authority-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		const journal = new InMemoryProviderCallJournal();
+		const competingCatalogModel = { ...DEEPSEEK_STRICT_MODEL, baseUrl: "https://evil.invalid" };
+		let credentialReads = 0;
+		let controllerCalls = 0;
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => competingCatalogModel,
+			version: "test",
+			expectedProviderCallDynamics: expectedDynamics(["deepseek-v4-pro-0813-max-r3"]),
+			providerCallAuthority: {
+				async reserve() {
+					controllerCalls++;
+					throw new Error("must not reserve");
+				},
+				async recover() {
+					controllerCalls++;
+					throw new Error("must not recover");
+				},
+				async recordReceipt() {
+					controllerCalls++;
+					throw new Error("must not record");
+				},
+			},
+			providerCallJournal: journal,
+			resolveProviderCallCredential() {
+				credentialReads++;
+				throw new Error("credential gate reached after assignment authority accepted");
+			},
+		});
+		try {
+			const response = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({
+					modelId: competingCatalogModel.id,
+					context: baseContext,
+					options: { providerCallContext: strictProviderCallContext() },
+					stream: false,
+				}),
+			});
+			expect(response.status).toBe(409);
+			expect(credentialReads).toBe(1);
+			expect(controllerCalls).toBe(0);
+		} finally {
+			await handle.close();
+			await journal.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects catalog path/query mismatches for both production OpenAI transports before every effect", async () => {
+		const originalFetch = globalThis.fetch;
+		let providerEgress = 0;
+		globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+			const url = new URL(input instanceof Request ? input.url : input);
+			if (url.hostname === "api.deepseek.com" || url.hostname === "api.x.ai") {
+				providerEgress++;
+				throw new Error("must not reach provider egress");
+			}
+			return originalFetch(input, init);
+		}) as typeof fetch;
+		try {
+			for (const scenario of [
+				{
+					configId: "deepseek-v4-pro-0813-max-r3",
+					model: { ...DEEPSEEK_STRICT_MODEL, baseUrl: "https://catalog.invalid/wrong" },
+				},
+				{
+					configId: "grok-4.6-max-official-subscription",
+					model: { ...XAI_STRICT_MODEL, baseUrl: "https://catalog.invalid/wrong" },
+				},
+			] as const) {
+				const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-url-plan-order-"));
+				const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+				const journal = new InMemoryProviderCallJournal();
+				let credentialReads = 0;
+				let controllerCalls = 0;
+				const ctx = strictProviderCallContext();
+				ctx.configId = scenario.configId;
+				ctx.apiFamily = scenario.model.api;
+				ctx.provider = scenario.model.provider;
+				ctx.modelId = scenario.model.id;
+				ctx.originAssignment = strictOriginAssignment(scenario.configId, ctx.credentialGeneration);
+				const handle = startAuthGateway({
+					bind: "127.0.0.1:0",
+					bearerTokens: ["test-token"],
+					storage,
+					resolveModel: () => scenario.model,
+					version: "test",
+					expectedProviderCallDynamics: expectedDynamics([scenario.configId]),
+					providerCallAuthority: {
+						async reserve() {
+							controllerCalls++;
+							throw new Error("must not reserve");
+						},
+						async recover() {
+							controllerCalls++;
+							throw new Error("must not recover");
+						},
+						async recordReceipt() {
+							controllerCalls++;
+							throw new Error("must not record");
+						},
+					},
+					providerCallJournal: journal,
+					resolveProviderCallCredential() {
+						credentialReads++;
+						throw new Error("must not resolve credential");
+					},
+				});
+				try {
+					const response = await originalFetch(`${handle.url}/v1/pi/stream`, {
+						method: "POST",
+						headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+						body: JSON.stringify({
+							modelId: scenario.model.id,
+							context: baseContext,
+							options: { providerCallContext: ctx },
+							stream: false,
+						}),
+					});
+					expect(response.status).toBe(409);
+					expect(await response.text()).toContain("path/query mismatch");
+					expect(credentialReads).toBe(0);
+					expect(controllerCalls).toBe(0);
+					expect(providerEgress).toBe(0);
+				} finally {
+					await handle.close();
+					await journal.close();
+					storage.close();
+					await fs.rm(dir, { recursive: true, force: true });
+				}
+			}
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+
+	it("rejects each well-formed dynamic substitution before credential, controller, or GPT delegation effects", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-dynamic-equality-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		let credentialReads = 0;
+		let controllerCalls = 0;
+		let delegations = 0;
+		const dynamicFields = [
+			"capability_generation",
+			"credential_generation",
+			"source_release_digest",
+			"restricted_proxy_policy_sha256",
+		] as const;
+		const exercise = async (gpt: boolean, field: (typeof dynamicFields)[number]): Promise<Response> => {
+			const configId = gpt ? "sol-low" : "deepseek-v4-pro-0813-max-r3";
+			const model = gpt ? GPT_STRICT_MODEL : DEEPSEEK_STRICT_MODEL;
+			const ctx = strictProviderCallContext(gpt, configId);
+			ctx.originAssignment = {
+				...ctx.originAssignment,
+				[field]:
+					field.endsWith("sha256") || field.endsWith("digest") ? `sha256:${"c".repeat(64)}` : "wrong-generation",
+			};
+			const handle = startAuthGateway({
+				bind: "127.0.0.1:0",
+				bearerTokens: ["test-token"],
+				storage,
+				resolveModel: () => model,
+				expectedProviderCallDynamics: expectedDynamics([configId]),
+				providerCallAuthority: {
+					async reserve() {
+						controllerCalls++;
+						throw new Error("must not reserve");
+					},
+					async recover() {
+						controllerCalls++;
+						throw new Error("must not recover");
+					},
+					async recordReceipt() {
+						controllerCalls++;
+						throw new Error("must not record");
+					},
+				},
+				resolveProviderCallCredential() {
+					credentialReads++;
+					throw new Error("must not resolve");
+				},
+				async delegateCodexProviderCall() {
+					delegations++;
+					throw new Error("must not delegate");
+				},
+			});
+			try {
+				return await fetch(`${handle.url}/v1/pi/stream`, {
+					method: "POST",
+					headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+					body: JSON.stringify({
+						modelId: model.id,
+						context: baseContext,
+						options: { providerCallContext: ctx },
+						stream: true,
+					}),
+				});
+			} finally {
+				await handle.close();
+			}
+		};
+		try {
+			for (const gpt of [false, true]) {
+				for (const field of dynamicFields) expect((await exercise(gpt, field)).status, `${gpt}/${field}`).toBe(409);
+			}
+			expect(credentialReads).toBe(0);
+			expect(controllerCalls).toBe(0);
+			expect(delegations).toBe(0);
+		} finally {
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects GPT format routes before credential lookup when no controller assignment exists", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-gpt-assignment-required-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		let delegates = 0;
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => GPT_STRICT_MODEL,
+			version: "test",
+			async delegateCodexProviderCall() {
+				delegates++;
+				throw new Error("must not delegate without an assignment");
+			},
+		});
+		try {
+			const response = await fetch(`${handle.url}/v1/chat/completions`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({
+					model: GPT_STRICT_MODEL.id,
+					messages: [{ role: "user", content: "hello" }],
+				}),
+			});
+			expect(response.status).toBe(409);
+			expect(await response.text()).toContain("controller-materialized strict assignment");
+			expect(delegates).toBe(0);
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("delegates each of the 20 pinned GPT bindings exactly once without local authority or credentials", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-codex-delegate-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		const gptBindings = PROVIDER_CALL_ORIGIN_MANIFEST.routes.filter(route => route.provider === "gpt-proxy");
+		const delegatedBindings: Array<{ configId: string; modelSelector: string; tuple: string; binding: string }> = [];
+		let credentialReads = 0;
+		let controllerCalls = 0;
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => GPT_STRICT_MODEL,
+			version: "test",
+			expectedProviderCallDynamics: expectedDynamics(gptBindings.map(binding => binding.configId)),
+			providerCallAuthority: {
+				async reserve() {
+					controllerCalls++;
+					throw new Error("generic gateway must not reserve GPT");
+				},
+				async recover() {
+					controllerCalls++;
+					throw new Error("generic gateway must not recover GPT");
+				},
+				async recordReceipt() {
+					controllerCalls++;
+					throw new Error("generic gateway must not settle GPT");
+				},
+			},
+			resolveProviderCallCredential() {
+				credentialReads++;
+				throw new Error("generic gateway must not materialize GPT credentials");
+			},
+			async delegateCodexProviderCall(delegation) {
+				delegatedBindings.push({
+					configId: delegation.assignment.config_id,
+					modelSelector: delegation.assignment.model_selector,
+					tuple: delegation.assignment.canonical_tuple_sha256,
+					binding: delegation.assignment.binding_descriptor_sha256,
+				});
+				expect(delegation.authorityOwner).toBe("dedicated-codex-backend");
+				expect(delegation.parsed.options.providerCallContext?.originAssignment).toEqual(delegation.assignment);
+				return new Response('data: {"choices":[]}\\n\\ndata: [DONE]\\n\\n', {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				});
+			},
+		});
+		try {
+			for (const binding of gptBindings) {
+				const requestBody = JSON.stringify({
+					modelId: GPT_STRICT_MODEL.id,
+					context: baseContext,
+					options: { providerCallContext: strictProviderCallContext(true, binding.configId) },
+					stream: true,
+				});
+				const response = await fetch(`${handle.url}/v1/pi/stream`, {
+					method: "POST",
+					headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+					body: requestBody,
+				});
+				expect(response.status, binding.configId).toBe(200);
+				expect(await response.text()).toContain("data: [DONE]");
+			}
+			expect(gptBindings).toHaveLength(20);
+			expect(delegatedBindings).toEqual(
+				gptBindings.map(binding => ({
+					configId: binding.configId,
+					modelSelector: binding.modelSelector,
+					tuple: binding.canonicalTupleSha256,
+					binding: binding.bindingDescriptor.sha256,
+				})),
+			);
+			expect(credentialReads).toBe(0);
+			expect(controllerCalls).toBe(0);
+
+			const mismatched = strictProviderCallContext(true);
+			mismatched.originAssignment = { ...mismatched.originAssignment, dns_host: "evil.invalid" };
+			const rejected = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({
+					modelId: GPT_STRICT_MODEL.id,
+					context: baseContext,
+					options: { providerCallContext: mismatched },
+					stream: true,
+				}),
+			});
+			expect(rejected.status).toBe(409);
+			expect(delegatedBindings).toHaveLength(20);
+			expect(credentialReads).toBe(0);
+			expect(controllerCalls).toBe(0);
+
+			const duplicateSource = JSON.stringify({
+				modelId: GPT_STRICT_MODEL.id,
+				context: baseContext,
+				options: { providerCallContext: strictProviderCallContext(true) },
+				stream: true,
+			});
+			const duplicated = duplicateSource.replace(
+				'"originAssignment":{',
+				'"originAssignment":{"config_id":"duplicate",',
+			);
+			const duplicateRejected = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: duplicated,
+			});
+			expect(duplicateRejected.status).toBe(400);
+			expect(delegatedBindings).toHaveLength(20);
+
+			const noncanonicalInteger = duplicateSource.replace('"config_ordinal":9', '"config_ordinal":9e0');
+			const noncanonicalRejected = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: noncanonicalInteger,
+			});
+			expect(noncanonicalRejected.status).toBe(400);
+			expect(delegatedBindings).toHaveLength(20);
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
 });
 describe("pi-native encodeStream", () => {
 	it("ships every AssistantMessageEvent verbatim, terminated by [DONE]", async () => {
@@ -359,6 +930,28 @@ describe("pi-native encodeStream", () => {
 		expect((parsed[0] as { type: string }).type).toBe("start");
 		expect(parsed[1]).toEqual({ type: "error", reason: "error", errorMessage: "connection reset" });
 		expect(parsed[2]).toBe("[DONE]");
+	});
+
+	it("continues draining the source after a strict client cancellation", async () => {
+		const gate = Promise.withResolvers<void>();
+		const sourceDrained = Promise.withResolvers<void>();
+		let drained = false;
+		const final = baseAssistant({ content: [{ type: "text", text: "drained" }] });
+		const source = (async function* () {
+			yield { type: "start", partial: baseAssistant() } satisfies AssistantMessageEvent;
+			await gate.promise;
+			drained = true;
+			sourceDrained.resolve();
+			yield { type: "done", reason: "stop", message: final } satisfies AssistantMessageEvent;
+		})() as unknown as AssistantMessageEventStream;
+		(source as { result(): Promise<AssistantMessage> }).result = async () => final;
+		const reader = encodeStream(source, undefined, undefined, { drainOnCancel: true }).getReader();
+		await reader.read();
+		const cancelled = reader.cancel("worker disconnected");
+		gate.resolve();
+		await cancelled;
+		await sourceDrained.promise;
+		expect(drained).toBe(true);
 	});
 });
 

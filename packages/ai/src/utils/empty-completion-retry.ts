@@ -18,7 +18,7 @@
  * Anthropic-messages providers.
  */
 import { scheduler } from "node:timers/promises";
-import type { AssistantMessage, AssistantMessageEvent, Context } from "../types";
+import type { AssistantMessage, AssistantMessageEvent, Context, FetchImpl, ProviderCallContext } from "../types";
 import { AssistantMessageEventStream } from "./event-stream";
 
 export const MAX_EMPTY_COMPLETION_RETRIES = 2;
@@ -64,6 +64,8 @@ interface EmptyCompletionRetryOptions {
 	signal?: AbortSignal;
 	providerRetryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
 	acceptEmptyResponse?: boolean;
+	fetch?: FetchImpl;
+	providerCallContext?: ProviderCallContext;
 }
 
 /**
@@ -79,6 +81,7 @@ export function withEmptyCompletionRetry<M, O extends EmptyCompletionRetryOption
 ): AssistantMessageEventStream {
 	const outer = new AssistantMessageEventStream();
 	const signal = options?.signal;
+	const strictProviderCall = options?.providerCallContext?.mode === "strict";
 	void (async () => {
 		for (let emptyAttempt = 0; ; emptyAttempt++) {
 			const inner = attempt(model, context, options);
@@ -127,7 +130,12 @@ export function withEmptyCompletionRetry<M, O extends EmptyCompletionRetryOption
 				(message.usage?.output ?? 0) <= 1 &&
 				!hasVisibleAssistantContent(message);
 
-			if (isRetryableEmpty && emptyAttempt < MAX_EMPTY_COMPLETION_RETRIES && !signal?.aborted) {
+			if (
+				!strictProviderCall &&
+				isRetryableEmpty &&
+				emptyAttempt < MAX_EMPTY_COMPLETION_RETRIES &&
+				!signal?.aborted
+			) {
 				const delayMs = EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** emptyAttempt;
 				try {
 					if (options?.providerRetryWait) await options.providerRetryWait(delayMs, signal);

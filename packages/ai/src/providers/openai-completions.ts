@@ -12,6 +12,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
+import { planOpenAIProviderCallUrl } from "../provider-call-origin-manifest";
 import { getKimiCommonHeaders } from "../registry/oauth/kimi";
 import { getEnvApiKey } from "../stream";
 import type {
@@ -153,6 +154,7 @@ type OpenAICompletionsToolMessageParam = ChatCompletionToolMessageParam & {
 type OpenAICompletionsUsageLike = {
 	completion_tokens?: unknown;
 	prompt_tokens?: unknown;
+	total_tokens?: unknown;
 	cached_tokens?: unknown;
 	prompt_cache_hit_tokens?: unknown;
 	prompt_cache_miss_tokens?: unknown;
@@ -168,6 +170,35 @@ type OpenAICompletionsPromptTokenDetails = {
 type OpenAICompletionsCompletionTokenDetails = {
 	reasoning_tokens?: unknown;
 };
+function isExactUsageCounter(value: unknown): value is number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && !Object.is(value, -0);
+}
+
+function hasExactOpenAICompletionsUsage(rawUsage: object): boolean {
+	const usage = rawUsage as OpenAICompletionsUsageLike;
+	if (
+		!isExactUsageCounter(usage.prompt_tokens) ||
+		!isExactUsageCounter(usage.completion_tokens) ||
+		!isExactUsageCounter(usage.total_tokens)
+	) {
+		return false;
+	}
+	for (const value of [usage.cached_tokens, usage.prompt_cache_hit_tokens, usage.prompt_cache_miss_tokens]) {
+		if (value !== undefined && !isExactUsageCounter(value)) return false;
+	}
+	for (const [details, fields] of [
+		[usage.prompt_tokens_details, ["cached_tokens", "cache_write_tokens"]],
+		[usage.completion_tokens_details, ["reasoning_tokens"]],
+	] as const) {
+		if (details === undefined || details === null) continue;
+		if (typeof details !== "object" || Array.isArray(details)) return false;
+		const record = details as Record<string, unknown>;
+		for (const field of fields) {
+			if (record[field] !== undefined && !isExactUsageCounter(record[field])) return false;
+		}
+	}
+	return true;
+}
 
 function firstPositiveNumber(...values: unknown[]): number {
 	for (const value of values) {
@@ -677,9 +708,20 @@ const streamOpenAICompletionsOnce = (
 			const strictToolsScope = getOpenAIStrictToolsScope(model, baseUrl);
 			let disableStrictTools = isStrictToolsDisabledForScope(providerSessionState, strictToolsScope);
 			const trimmedBaseUrl = baseUrl.replace(/\/+$/, "");
-			const completionsUrl = query
-				? `${trimmedBaseUrl}/chat/completions?${new URLSearchParams(query)}`
-				: `${trimmedBaseUrl}/chat/completions`;
+			const strictProviderCall = options?.providerCallContext?.mode === "strict";
+			const strictPlan = strictProviderCall
+				? (options.providerCallUrlPlan ??
+					planOpenAIProviderCallUrl(
+						"openai-completions",
+						model.baseUrl,
+						options.providerCallContext!.originAssignment,
+					))
+				: undefined;
+			const completionsUrl = strictPlan
+				? strictPlan.url
+				: query
+					? `${trimmedBaseUrl}/chat/completions?${new URLSearchParams(query)}`
+					: `${trimmedBaseUrl}/chat/completions`;
 			const createCompletionsStream = async (toolStrictModeOverride?: ToolStrictModeOverride) => {
 				const effectiveToolStrictModeOverride = disableStrictTools ? "none" : toolStrictModeOverride;
 				let { params, strictToolsApplied } = buildParams(model, context, options, effectiveToolStrictModeOverride);
@@ -718,7 +760,7 @@ const streamOpenAICompletionsOnce = (
 					);
 				}
 				try {
-					const headersWithTimeout = { ...headers };
+					const headersWithTimeout = { ...(strictProviderCall ? requestHeaders : headers) };
 					if (requestTimeoutMs !== undefined) {
 						headersWithTimeout["X-Stainless-Timeout"] = Math.floor(requestTimeoutMs / 1000).toString();
 					}
@@ -729,6 +771,7 @@ const streamOpenAICompletionsOnce = (
 						body: params,
 						signal: requestSignal,
 						fetch: options?.fetch,
+						maxAttempts: strictProviderCall ? 1 : undefined,
 						// Transient 408/429/5xx get Retry-After-aware transport retries.
 						// The first-event watchdog above aborts `requestSignal`, which
 						// bounds every attempt and backoff sleep — retries cannot
@@ -752,8 +795,10 @@ const streamOpenAICompletionsOnce = (
 				openaiStream = await callWithCopilotModelRetry(() => createCompletionsStream(), {
 					provider: model.provider,
 					signal: requestSignal,
+					maxAttempts: strictProviderCall ? 1 : undefined,
 				});
 			} catch (error) {
+				if (strictProviderCall) throw error;
 				const capturedErrorResponse = error instanceof OpenAIHttpError ? error.captured : undefined;
 				const reasoningEffortFallback =
 					activeReasoningEffortFallbackKey && activeRequestParams && !requestSignal.aborted
@@ -1051,6 +1096,7 @@ const streamOpenAICompletionsOnce = (
 			let awaitTrailingUsageDetails = false;
 			const applyUsagePayload = (rawUsage: object): void => {
 				output.usage = parseChunkUsage(rawUsage, model, premiumRequestsTotal);
+				output.providerUsageReported = hasExactOpenAICompletionsUsage(rawUsage);
 				if (directDeepSeekEndpoint)
 					applyDeepSeekV4TimeWindowCost(model, baseUrl, output.usage, streamRequestStartedAtMs);
 				sawUsagePayload = true;
@@ -1827,6 +1873,7 @@ export function parseChunkUsage(
 	});
 	const usage: AssistantMessage["usage"] = {
 		...accounting,
+		...(isExactUsageCounter(usageLike.total_tokens) ? { totalTokens: usageLike.total_tokens } : {}),
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		...(premiumRequests !== undefined ? { premiumRequests } : {}),
 	};

@@ -67,6 +67,8 @@ export interface OpenAIStreamRequestInit {
 	/** JSON request body; serialized once per call (retries resend the same bytes). */
 	body: unknown;
 	signal: AbortSignal;
+	/** Total physical attempts. Strict provider-call mode sets this to one. */
+	maxAttempts?: number;
 	fetch?: FetchImpl;
 	/** Raw wire-frame observer (`onSseEvent` debug pipeline). */
 	onSseEvent?: SseEventObserver;
@@ -94,7 +96,7 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 		body: JSON.stringify(init.body),
 		signal: init.signal,
 		fetch: init.fetch,
-		maxAttempts: DEFAULT_MAX_ATTEMPTS,
+		maxAttempts: init.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
 		// A proxy concurrency-admission 429 (`rate_limit_type: max_parallel_requests`)
 		// surfaces immediately instead of being slept-and-retried here; session
 		// recovery owns its backoff/fallback (issue #8854).

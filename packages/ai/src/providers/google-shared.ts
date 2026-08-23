@@ -38,6 +38,7 @@ import type {
 	Part,
 	ThinkingConfig,
 	ThinkingLevel,
+	UsageMetadata,
 } from "./google-types";
 import { transformMessages } from "./transform-messages";
 import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
@@ -59,6 +60,25 @@ type GoogleApiType = "google-generative-ai" | "google-gemini-cli" | "google-vert
  * without inducing a circular dependency.
  */
 export type GoogleThinkingLevel = "THINKING_LEVEL_UNSPECIFIED" | "MINIMAL" | "LOW" | "MEDIUM" | "HIGH";
+function isExactGoogleUsageCounter(value: unknown): value is number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && !Object.is(value, -0);
+}
+
+export function hasExactGoogleUsageMetadata(value: unknown): boolean {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+	const usage = value as UsageMetadata;
+	if (
+		!isExactGoogleUsageCounter(usage.promptTokenCount) ||
+		!isExactGoogleUsageCounter(usage.candidatesTokenCount) ||
+		!isExactGoogleUsageCounter(usage.totalTokenCount)
+	) {
+		return false;
+	}
+	for (const optional of [usage.cachedContentTokenCount, usage.thoughtsTokenCount]) {
+		if (optional !== undefined && !isExactGoogleUsageCounter(optional)) return false;
+	}
+	return (usage.cachedContentTokenCount ?? 0) <= usage.promptTokenCount;
+}
 
 /**
  * Sampling/thinking options shared by `streamGoogle` and `streamGoogleVertex`.
@@ -756,6 +776,7 @@ export async function consumeGoogleStream<T extends GoogleApiType>(args: {
 		}
 
 		if (chunk.usageMetadata) {
+			output.providerUsageReported = hasExactGoogleUsageMetadata(chunk.usageMetadata);
 			// promptTokenCount includes cachedContentTokenCount when cached content is used.
 			// Subtract to get non-cached input, matching the OpenAI convention where
 			// input = uncached prompt tokens and cacheRead = cached tokens so that

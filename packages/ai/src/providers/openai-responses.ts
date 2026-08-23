@@ -3,6 +3,7 @@ import { hostMatchesUrl } from "@oh-my-pi/pi-catalog/hosts";
 import { bareModelId, parseOpenAIModel, semverGte } from "@oh-my-pi/pi-catalog/identity";
 import { $flag, logger, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
+import { planOpenAIProviderCallUrl } from "../provider-call-origin-manifest";
 import { getEnvApiKey } from "../stream";
 import type {
 	AssistantMessage,
@@ -445,7 +446,7 @@ const streamOpenAIResponsesOnce = (
 			const routingSessionId = getOpenAIResponsesRoutingSessionId(options);
 			const promptCacheSessionId = getOpenAIPromptCacheKey(options);
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
-			const { headers, copilotPremiumRequests, baseUrl } = resolveOpenAIRequestSetup(model, {
+			const { headers, requestHeaders, copilotPremiumRequests, baseUrl } = resolveOpenAIRequestSetup(model, {
 				apiKey,
 				extraHeaders: options?.headers,
 				initiatorOverride: options?.initiatorOverride,
@@ -479,6 +480,7 @@ const streamOpenAIResponsesOnce = (
 			let activeParams = params;
 			let activeTrailingScaffoldingItems = trailingScaffoldingItems;
 			const resolvedBaseUrl = (baseUrl ?? "https://api.openai.com/v1").replace(/\/+$/, "");
+			const strictProviderCall = options?.providerCallContext?.mode === "strict";
 			const requestReasoningEffortFallbacks = new Map<string, OpenAIReasoningEffortFallback>();
 			const attemptedReasoningEffortFallbacks = new Set<string>();
 			let pendingReasoningEffortFallback: { key: string; fallback: OpenAIReasoningEffortFallback } | undefined;
@@ -515,7 +517,15 @@ const streamOpenAIResponsesOnce = (
 				getOpenAIStreamFirstEventTimeoutMs(idleTimeoutMs, model.compat.streamFirstEventTimeoutMs);
 			const requestTimeoutMs =
 				firstEventTimeoutMs !== undefined && firstEventTimeoutMs > 0 ? firstEventTimeoutMs : undefined;
-			const requestUrl = `${resolvedBaseUrl}/responses`;
+			const strictPlan = strictProviderCall
+				? (options.providerCallUrlPlan ??
+					planOpenAIProviderCallUrl(
+						"openai-responses",
+						model.baseUrl,
+						options.providerCallContext!.originAssignment,
+					))
+				: undefined;
+			const requestUrl = strictPlan ? strictPlan.url : `${resolvedBaseUrl}/responses`;
 			const applyPayloadReplacement = async (requestParams: OpenAIResponsesSamplingParams) => {
 				const replacementPayload = await options?.onPayload?.(requestParams, model);
 				const payload =
@@ -550,7 +560,7 @@ const streamOpenAIResponsesOnce = (
 							);
 						}
 						try {
-							const headersWithTimeout = { ...headers };
+							const headersWithTimeout = { ...(strictProviderCall ? requestHeaders : headers) };
 							if (requestTimeoutMs !== undefined) {
 								headersWithTimeout["X-Stainless-Timeout"] = Math.floor(requestTimeoutMs / 1000).toString();
 							}
@@ -560,6 +570,7 @@ const streamOpenAIResponsesOnce = (
 								body: requestParams,
 								signal: requestSignal,
 								fetch: options?.fetch,
+								maxAttempts: strictProviderCall ? 1 : undefined,
 								// Transient 408/429/5xx get Retry-After-aware transport
 								// retries; the first-event watchdog aborts `requestSignal`,
 								// so retries cannot extend the caller's deadline.
@@ -577,10 +588,10 @@ const streamOpenAIResponsesOnce = (
 							if (requestTimeout !== undefined) clearTimeout(requestTimeout);
 						}
 					},
-					{ provider: model.provider, signal: requestSignal },
+					{ provider: model.provider, signal: requestSignal, maxAttempts: strictProviderCall ? 1 : undefined },
 				);
 			};
-			let strictRetryAvailable = true;
+			let strictRetryAvailable = !strictProviderCall;
 			let activeStrictToolsApplied = builtParams.strictToolsApplied;
 			let forceDisableStrictTools = false;
 			const openResponsesStreamWithFallbacks = async (): Promise<AsyncIterable<ResponseStreamEvent>> => {
@@ -607,7 +618,11 @@ const streamOpenAIResponsesOnce = (
 											(options?.disableReasoning === true && options.reasoning === undefined),
 									})
 								: undefined;
-						if (reasoningEffortFallback !== undefined && activeReasoningEffortFallbackKey) {
+						if (
+							!strictProviderCall &&
+							reasoningEffortFallback !== undefined &&
+							activeReasoningEffortFallbackKey
+						) {
 							const retryMarker = `${activeReasoningEffortFallbackKey}:${String(reasoningEffortFallback)}`;
 							if (attemptedReasoningEffortFallbacks.has(retryMarker)) throw error;
 							attemptedReasoningEffortFallbacks.add(retryMarker);
@@ -667,7 +682,7 @@ const streamOpenAIResponsesOnce = (
 							activeTrailingScaffoldingItems = fallbackBuilt.trailingScaffoldingItems;
 							continue;
 						}
-						if (!chainState || !sentPreviousResponseId || requestSignal.aborted) {
+						if (strictProviderCall || !chainState || !sentPreviousResponseId || requestSignal.aborted) {
 							throw error;
 						}
 						const zdrRejection =
@@ -796,6 +811,7 @@ const streamOpenAIResponsesOnce = (
 				} catch (error) {
 					const streamFailure = abortTracker.getLocalAbortReason() ?? error;
 					const canRetry =
+						!strictProviderCall &&
 						!sawReplayUnsafeOutput &&
 						!requestSignal.aborted &&
 						!abortTracker.wasCallerAbort() &&

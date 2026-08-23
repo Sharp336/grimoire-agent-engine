@@ -21,6 +21,7 @@ import { createAuthRetryKeyState, isApiKeyResolver, resolveNextAuthRetryKey } fr
 import * as AIError from "./error";
 import { ProviderHttpError } from "./error";
 import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-limit";
+import { StrictProviderCallLifecycle } from "./provider-call-authority";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
 import type { MessageCreateParamsStreaming } from "./providers/anthropic-wire";
@@ -1432,10 +1433,20 @@ function streamSimpleRequest<TApi extends Api>(
 	const inputOptions = (options || {}) as SimpleStreamOptions;
 	const baseOptions = { ...inputOptions, fetch: inputOptions.fetch ?? defaultFetchForModel(model) };
 	const debugOptions = withExtraCaFetch(withRequestDebugFetch(baseOptions));
-	const requestOptions = {
+	let requestOptions = {
 		...debugOptions,
 		fetch: wrapFetchForProxy(debugOptions.fetch, model.provider),
 	} as SimpleStreamOptions;
+	const strictProviderCall = requestOptions.providerCallContext?.mode === "strict";
+	if (strictProviderCall && model.transport !== "pi-native" && !requestOptions.providerCallAuthority) {
+		throw new Error("Strict benchmark mode requires a provider-call authority before dispatch");
+	}
+	if (strictProviderCall && requestOptions.providerCallContext?.provider !== model.provider) {
+		throw new Error(`Provider-call authority provider mismatch: expected ${model.provider}`);
+	}
+	if (strictProviderCall && requestOptions.providerCallContext?.modelId !== model.id) {
+		throw new Error(`Provider-call authority model mismatch: expected ${model.id}`);
+	}
 
 	const apiKeyResolver = isApiKeyResolver(requestOptions?.apiKey) ? requestOptions.apiKey : undefined;
 	if (apiKeyResolver) {
@@ -1536,6 +1547,10 @@ function streamSimpleRequest<TApi extends Api>(
 			const retryState = createAuthRetryKeyState(lastKey);
 			let failure = await runAttempt(lastKey);
 			if (!failure) return;
+			if (strictProviderCall) {
+				emitFailure(failure);
+				return;
+			}
 			while (true) {
 				// Caller aborted between attempts: don't mint a fresh token or fire
 				// another doomed request — emit the captured failure instead.
@@ -1563,29 +1578,39 @@ function streamSimpleRequest<TApi extends Api>(
 		);
 	}
 
+	const providerCallLifecycle =
+		strictProviderCall && requestOptions.providerCallAuthority
+			? new StrictProviderCallLifecycle(model, requestOptions, requestOptions.providerCallAuthority)
+			: undefined;
+	if (providerCallLifecycle) requestOptions = providerCallLifecycle.options(requestOptions);
+	const finishProviderCall = (result: AssistantMessageEventStream): AssistantMessageEventStream =>
+		providerCallLifecycle ? providerCallLifecycle.wrap(result) : result;
+
 	// Check custom API registry (extension-provided APIs)
 	const customApiProvider = getCustomApi(model.api);
 	if (customApiProvider) {
-		return withThinkingLoopGuard(model, requestOptions, opts =>
-			withProviderInFlightLimit(model, opts, () => customApiProvider.streamSimple(model, context, opts)),
+		return finishProviderCall(
+			withThinkingLoopGuard(model, requestOptions, opts =>
+				withProviderInFlightLimit(model, opts, () => customApiProvider.streamSimple(model, context, opts)),
+			),
 		);
 	}
 
 	// Vertex AI uses Application Default Credentials, not API keys
 	if (model.api === "google-vertex") {
 		const providerOptions = mapOptionsForApi(model, requestOptions, undefined);
-		return stream(model, context, providerOptions);
+		return finishProviderCall(stream(model, context, providerOptions));
 	} else if (model.api === "bedrock-converse-stream") {
 		// Bedrock doesn't have any API keys instead it sources credentials from standard AWS env variables or from given AWS profile.
 		const providerOptions = mapOptionsForApi(model, requestOptions, undefined);
-		return stream(model, context, providerOptions);
+		return finishProviderCall(stream(model, context, providerOptions));
 	} else if (getProviderDefinition(model.provider)?.allowsMissingApiKey) {
 		const providerOptions = mapOptionsForApi(
 			model,
 			requestOptions,
 			typeof requestOptions.apiKey === "string" ? requestOptions.apiKey : getEnvApiKey(model.provider),
 		);
-		return stream(model, context, providerOptions);
+		return finishProviderCall(stream(model, context, providerOptions));
 	}
 
 	// The resolver form is handled by the wrapper above; only a static string
@@ -1598,12 +1623,14 @@ function streamSimpleRequest<TApi extends Api>(
 
 	// GitLab Duo - wraps Anthropic/OpenAI behind GitLab AI Gateway direct access tokens
 	if (isGitLabDuoModel(model)) {
-		return withThinkingLoopGuard(model, requestOptions, opts =>
-			withProviderInFlightLimit(model, opts, () =>
-				streamGitLabDuo(model, context, {
-					...opts,
-					apiKey,
-				}),
+		return finishProviderCall(
+			withThinkingLoopGuard(model, requestOptions, opts =>
+				withProviderInFlightLimit(model, opts, () =>
+					streamGitLabDuo(model, context, {
+						...opts,
+						apiKey,
+					}),
+				),
 			),
 		);
 	}
@@ -1611,13 +1638,15 @@ function streamSimpleRequest<TApi extends Api>(
 	// GitLab Duo Workflow - IDE workflow protocol + WebSocket action bridge
 	if (model.api === "gitlab-duo-agent") {
 		// Does not route through withProviderInFlightLimit, so heal explicitly.
-		return withThinkingLoopGuard(model, requestOptions, opts =>
-			healLeakedThinking(
-				model,
-				streamGitLabDuoWorkflow(model as Model<"gitlab-duo-agent">, context, {
-					...opts,
-					apiKey,
-				}),
+		return finishProviderCall(
+			withThinkingLoopGuard(model, requestOptions, opts =>
+				healLeakedThinking(
+					model,
+					streamGitLabDuoWorkflow(model as Model<"gitlab-duo-agent">, context, {
+						...opts,
+						apiKey,
+					}),
+				),
 			),
 		);
 	}
@@ -1630,13 +1659,15 @@ function streamSimpleRequest<TApi extends Api>(
 		// thinking, so clamp disabled requests to the lowest supported effort
 		// (mirrors the mapOptionsForApi path every other provider takes).
 		const kimiOptions = normalizeMandatoryReasoningOptions(model, requestOptions);
-		return withThinkingLoopGuard(model, kimiOptions, opts =>
-			withProviderInFlightLimit(model, opts, () =>
-				streamKimi(model as Model<"openai-completions">, context, {
-					...opts,
-					apiKey,
-					format: opts?.kimiApiFormat,
-				}),
+		return finishProviderCall(
+			withThinkingLoopGuard(model, kimiOptions, opts =>
+				withProviderInFlightLimit(model, opts, () =>
+					streamKimi(model as Model<"openai-completions">, context, {
+						...opts,
+						apiKey,
+						format: opts?.kimiApiFormat,
+					}),
+				),
 			),
 		);
 	}
@@ -1644,18 +1675,20 @@ function streamSimpleRequest<TApi extends Api>(
 	// Synthetic - route to dedicated handler that wraps OpenAI or Anthropic API
 	if (isSyntheticModel(model)) {
 		// Pass raw SimpleStreamOptions - streamSynthetic handles mapping internally.
-		return withThinkingLoopGuard(model, requestOptions, opts =>
-			withProviderInFlightLimit(model, opts, () =>
-				streamSynthetic(model as Model<"openai-completions">, context, {
-					...opts,
-					apiKey,
-					format: opts?.syntheticApiFormat ?? "openai",
-				}),
+		return finishProviderCall(
+			withThinkingLoopGuard(model, requestOptions, opts =>
+				withProviderInFlightLimit(model, opts, () =>
+					streamSynthetic(model as Model<"openai-completions">, context, {
+						...opts,
+						apiKey,
+						format: opts?.syntheticApiFormat ?? "openai",
+					}),
+				),
 			),
 		);
 	}
 	const providerOptions = mapOptionsForApi(model, requestOptions, apiKey);
-	return stream(model, context, providerOptions);
+	return finishProviderCall(stream(model, context, providerOptions));
 }
 
 export async function completeSimple<TApi extends Api>(
@@ -1663,6 +1696,7 @@ export async function completeSimple<TApi extends Api>(
 	context: Context,
 	options?: SimpleStreamOptions,
 ): Promise<AssistantMessage> {
+	if (options?.providerCallContext?.mode === "strict") return streamSimple(model, context, options).result();
 	return resolveWithThinkingLoopRetries(options?.signal, () => streamSimple(model, context, options));
 }
 
@@ -1923,6 +1957,8 @@ function mapOptionsForApi<TApi extends Api>(
 		codexSseMaxAttempts: options?.codexSseMaxAttempts,
 		providerSessionState: options?.providerSessionState,
 		maxInFlightRequests: options?.maxInFlightRequests,
+		providerCallContext: options?.providerCallContext,
+		providerCallUrlPlan: options?.providerCallUrlPlan,
 		toolNamespacesInfo: options?.toolNamespacesInfo,
 		onPayload: options?.onPayload,
 		onResponse: options?.onResponse,

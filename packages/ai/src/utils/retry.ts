@@ -31,13 +31,14 @@ const COPILOT_RETRY_AFTER_MAX_WAIT_MS = 30_000;
  */
 export async function callWithCopilotModelRetry<T>(
 	fn: () => Promise<T>,
-	options: { provider: string; signal?: AbortSignal; retryBaseDelayMs?: number },
+	options: { provider: string; signal?: AbortSignal; retryBaseDelayMs?: number; maxAttempts?: number },
 ): Promise<T> {
 	if (options.provider !== "github-copilot") return fn();
 
 	let lastError: unknown;
 	const retryBaseDelayMs = options.retryBaseDelayMs ?? COPILOT_MODEL_RETRY_BASE_DELAY_MS;
-	for (let attempt = 0; attempt < COPILOT_MODEL_RETRY_MAX_ATTEMPTS; attempt++) {
+	const attemptLimit = options.maxAttempts ?? COPILOT_MODEL_RETRY_MAX_ATTEMPTS;
+	for (let attempt = 0; attempt < attemptLimit; attempt++) {
 		try {
 			return await fn();
 		} catch (error) {
@@ -50,9 +51,10 @@ export async function callWithCopilotModelRetry<T>(
 			if (!transientModelError && !isRetryableError(error)) throw error;
 			// Budget is per failure kind, counted over attempts already spent: the
 			// eight-attempt allowance only covers the cheap model-availability reroll.
-			const maxAttempts = transientModelError
-				? COPILOT_MODEL_RETRY_MAX_ATTEMPTS
-				: COPILOT_GENERIC_RETRY_MAX_ATTEMPTS;
+			const maxAttempts = Math.min(
+				attemptLimit,
+				transientModelError ? COPILOT_MODEL_RETRY_MAX_ATTEMPTS : COPILOT_GENERIC_RETRY_MAX_ATTEMPTS,
+			);
 			if (attempt >= maxAttempts - 1) break;
 			// Reroll the model flap on a flat delay: a ramp only adds dead time to a
 			// coin flip the next attempt is equally likely to win. Generic retryable
