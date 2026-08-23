@@ -2623,6 +2623,9 @@ export class SessionMaintenance {
 		if (!this.#model?.input.includes("image")) return undefined;
 		const staleEntry = getLatestCompactionEntry(branchEntries);
 		if (!staleEntry) return undefined;
+		const staleEntryIdx = branchEntries.lastIndexOf(staleEntry);
+		const resetBoundaryIdx = branchEntries.findLastIndex(entry => entry.type === "reset_boundary");
+		if (resetBoundaryIdx > staleEntryIdx) return undefined;
 		// Only rescue when the archive is the actual source of the overflow.
 		// The frame budget below charges every kept entry the rebuilt context
 		// will still carry — the kept-recent region from `firstKeptEntryId`
