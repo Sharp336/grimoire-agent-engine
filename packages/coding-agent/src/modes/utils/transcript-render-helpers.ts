@@ -160,7 +160,7 @@ export function buildAsyncProgressBlock(message: CustomOrHookMessage): ToolActiv
 				: (job.text ?? "");
 		for (const line of preview.split("\n")) {
 			if (line.trim().length === 0) continue;
-			const rendered = truncateToWidth(replaceTabs(shortenPath(sanitizeText(line))), TRUNCATE_LENGTHS.LINE);
+			const rendered = truncateToWidth(sanitizeAsyncProgressDisplayText(sanitizeText(line)), TRUNCATE_LENGTHS.LINE);
 			block.addChild(new Text(theme.fg("dim", `  ${rendered}`), 1, 0));
 		}
 		if ((job.truncated || (job.suppressedEvents ?? 0) > 0) && job.artifactId) {
