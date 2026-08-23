@@ -46,6 +46,10 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	"opencode-go": true,
 	"opencode-zen": true,
 	"github-copilot": true,
+	// resolveKiroModelCacheProviderId hashes the credential (oauth profileArn or
+	// api key + endpoint) into the namespace, so a synchronous bare-provider
+	// read would leak another credential's catalog or hide the scoped one.
+	kiro: true,
 };
 
 /** Whether a provider's model-cache namespace requires its resolved credential. */
@@ -102,13 +106,13 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 		}
 		case "opencode-go":
 		case "opencode-zen": {
-			// v2: muse-spark-1.2 rows cached before the reasoning/thinking
-			// recovery carry `reasoning: false` and must be refetched.
+			// v3: gateway-first rows cached before stencil enrichment carry null
+			// limits and `reasoning: false`; use a fresh namespace so they refetch.
 			const configuredBaseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
 			const trimmedBaseUrl = configuredBaseUrl.endsWith("/") ? configuredBaseUrl.slice(0, -1) : configuredBaseUrl;
 			const discoveryBaseUrl = trimmedBaseUrl.endsWith("/v1") ? trimmedBaseUrl : `${trimmedBaseUrl}/v1`;
 			const scope = `${options.apiKey ?? ""}\u0000${discoveryBaseUrl}`;
-			return `${providerId}:models-v2:${Bun.hash(scope).toString(36)}`;
+			return `${providerId}:models-v3:${Bun.hash(scope).toString(36)}`;
 		}
 		case "github-copilot": {
 			// Copilot model specs bake in the plan-specific endpoint (personal vs
