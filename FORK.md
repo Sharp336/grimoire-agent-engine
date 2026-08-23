@@ -10,7 +10,7 @@
 
 ## Fork 功能差异
 
-- 模型选择界面仅显示 OpenCode Go、OpenCode Zen、OpenAI Codex、DeepSeek，以及所有非 bundled 的自定义 Provider；该限制仅影响界面可见性，不改变底层 Provider 的可用性。
+- 模型选择界面仅显示 OpenCode Go、OpenCode Zen、OpenAI Codex、DeepSeek，以及所有非 bundled 的自定义 Provider；该限制仅影响界面可见性，不改变底层 Provider 的可用性。其中仅 `/models`（Model Hub）的 `opencode-zen` 模型列表进一步只显示免费模型（`cost.input === 0 && cost.output === 0`）；不影响 Model Picker、`--model`、模型配置或底层调用。
 - Hub 默认使用精简模式，并允许切换为与上游一致的完整模式；两种模式必须共用上游 Hub runtime，不复制或改写其核心业务实现。
 - Plan 模式必须先还原用户真正需要解决的问题，自行确认可从对话或仓库探索中确定的信息；仅询问仍会改变最终行为、范围或方案的关键歧义，不得替用户作关键假设。
 
