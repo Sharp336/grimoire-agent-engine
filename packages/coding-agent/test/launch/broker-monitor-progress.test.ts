@@ -5,7 +5,7 @@ import * as net from "node:net";
 import * as path from "node:path";
 import { setProcessName, TempDir } from "@oh-my-pi/pi-utils";
 import { type DaemonBrokerStartOptions, startDaemonBrokerFromEnvironment } from "../../src/launch/broker";
-import { createDaemonBrokerClient } from "../../src/launch/client";
+import { createDaemonBrokerClient, type DaemonOutputUnregister } from "../../src/launch/client";
 import { daemonBrokerEndpoint } from "../../src/launch/paths";
 import {
 	DAEMON_IDLE_GRACE_ENV,
@@ -226,7 +226,7 @@ process.stdin.once("data", () => {
 		const broker = startBroker(projectDir, runtimeDir);
 		const notifications: DaemonMonitorNotification[] = [];
 		const completed = Promise.withResolvers<void>();
-		let unregister: (() => void) | undefined;
+		let unregister: DaemonOutputUnregister | undefined;
 		try {
 			const started = await client.request({
 				op: "start",
