@@ -29,10 +29,9 @@ import {
 } from "@oh-my-pi/pi-tui";
 import type { ModelRegistry } from "../../config/model-registry";
 import { type ModelRoleLookup, type ResolvedModelRoleValue, resolveModelRoleValue } from "../../config/model-resolver";
-import { getKnownRoleIds, getRoleInfo } from "../../config/model-roles";
 import type { Settings } from "../../config/settings";
 import { AUTO_THINKING, type ConfiguredThinkingLevel, getConfiguredThinkingLevelMetadata } from "../../thinking";
-import { isProviderVisible } from "../fork-model-visibility";
+import { collectForkKeptSelectors, filterOpencodeZenToFree, isProviderVisible } from "../fork-model-visibility";
 import { theme } from "../theme/theme";
 import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../utils/keybinding-matchers";
 import {
@@ -328,9 +327,14 @@ export class ModelHubComponent implements Component {
 		}
 		allModels = allModels.filter(model => isProviderVisible(model.provider));
 		availableModels = availableModels.filter(model => isProviderVisible(model.provider));
+		const keepSelectors = collectForkKeptSelectors(
+			undefined,
+			this.#settings.get("modelRoles") as Record<string, string>,
+		);
+		allModels = filterOpencodeZenToFree(allModels, keepSelectors);
+		availableModels = filterOpencodeZenToFree(availableModels, keepSelectors);
 
 		this.#reloadRoles(allModels, availableModels);
-		this.#buildRolesRows();
 
 		const storage = this.#settings.getStorage();
 		const mruOrder = storage?.getModelUsageOrder() ?? [];
