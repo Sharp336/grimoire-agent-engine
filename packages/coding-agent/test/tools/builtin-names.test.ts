@@ -83,6 +83,15 @@ describe("isToolDisallowed", () => {
 		expect(isToolDisallowed("bash", ["bash"], "server-name")).toBe(true);
 		expect(isToolDisallowed("bash", ["read"], "server-name")).toBe(false);
 	});
+	test("ownership fallback applies only to bare mcp__<server>_* wildcards", () => {
+		// A tool-prefix wildcard (`mcp__foo_query*`) matches by name prefix
+		// alone; its last underscore is a tool-name separator, and the ownership
+		// fallback must not overmatch the server's whole tool set.
+		expect(isToolDisallowed("mcp__foo_query_tool", ["mcp__foo_query*"], "foo")).toBe(true);
+		expect(isToolDisallowed("mcp__foo_other", ["mcp__foo_query*"], "foo")).toBe(false);
+		// The bare server wildcard keeps the ownership fallback.
+		expect(isToolDisallowed("mcp__foo_other", ["mcp__foo_*"], "foo")).toBe(true);
+	});
 
 	test("mcp__* keeps matching every MCP tool regardless of metadata", () => {
 		expect(isToolDisallowed("mcp__foo_bar", ["mcp__*"], "server-name")).toBe(true);

@@ -3245,7 +3245,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				// MCP reconnects) must stay allowed for cold revival, while a
 				// parent-owned tool the live spawn stripped (`todo` outside prewalk)
 				// must not regain a capability the original generation lacked.
-				declaredTools: enforceToolAllowlist ? (toolNames ?? []).filter(name => !isParentOwnedTool(name)) : undefined,
+				declaredTools: enforceToolAllowlist
+					? (toolNames ?? []).filter(name => !isParentOwnedTool(name))
+					: undefined,
 			});
 
 			abortSignal.addEventListener(

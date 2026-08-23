@@ -97,6 +97,12 @@ export function sanitizeMCPToolNamePart(value: string, fallback: string): string
 function mcpWildcardServerSegment(pattern: string): string | undefined {
 	const base = pattern.slice(0, -1);
 	if (!base.startsWith("mcp__")) return undefined;
+	// Only the bare `mcp__<server>_*` form (pattern ends with `_` before the
+	// `*`) applies the ownership fallback. A tool-prefix wildcard like
+	// `mcp__foo_query*` matches by name prefix alone — its last underscore is a
+	// tool-name separator, not the server/tool boundary, and the fallback must
+	// not overmatch the server's whole tool set.
+	if (!base.endsWith("_")) return undefined;
 	const afterPrefix = base.slice("mcp__".length);
 	const sep = afterPrefix.lastIndexOf("_");
 	return sep < 0 ? undefined : afterPrefix.slice(0, sep);
