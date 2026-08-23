@@ -36,16 +36,18 @@ function mergeCustomModelHeaders(
 	modelHeaders: Record<string, string> | undefined,
 	authHeader: boolean | undefined,
 	apiKeyConfig: string | undefined,
+	apiKeyOverride?: () => string | undefined,
 ): Record<string, string> | undefined {
-	return createLiveConfigHeaders([providerHeaders, modelHeaders], { authHeader, apiKeyConfig });
+	return createLiveConfigHeaders([providerHeaders, modelHeaders], { authHeader, apiKeyConfig, apiKeyOverride });
 }
 
 export function mergeAuthHeaderSources(
 	sources: readonly HeaderSource[],
 	authHeader: boolean | undefined,
 	apiKeyConfig: string | undefined,
+	apiKeyOverride?: () => string | undefined,
 ): Record<string, string> | undefined {
-	return createLiveConfigHeaders(sources, { authHeader, apiKeyConfig });
+	return createLiveConfigHeaders(sources, { authHeader, apiKeyConfig, apiKeyOverride });
 }
 
 /**
@@ -73,6 +75,7 @@ export function buildCustomModelOverlay(
 	providerAuth: ProviderAuthMode | undefined,
 	providerRemoteCompaction: RemoteCompactionConfig<Api> | undefined,
 	modelDef: CustomModelDefinitionLike,
+	providerApiKeyOverride?: () => string | undefined,
 ): CustomModelOverlay | undefined {
 	const api = modelDef.api ?? providerApi;
 	if (!api) return undefined;
@@ -92,7 +95,13 @@ export function buildCustomModelOverlay(
 		contextWindow: modelDef.contextWindow,
 		maxTokens: modelDef.maxTokens,
 		omitMaxOutputTokens: modelDef.omitMaxOutputTokens,
-		headers: mergeCustomModelHeaders(providerHeaders, modelDef.headers, authHeader, providerApiKey),
+		headers: mergeCustomModelHeaders(
+			providerHeaders,
+			modelDef.headers,
+			authHeader,
+			providerApiKey,
+			providerApiKeyOverride,
+		),
 		compat: mergeCompat(providerCompat, modelDef.compat),
 		contextPromotionTarget: modelDef.contextPromotionTarget,
 		compactionModel: modelDef.compactionModel,

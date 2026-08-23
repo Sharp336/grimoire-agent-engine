@@ -938,7 +938,9 @@ export class ModelRegistry {
 	#configuredDiscoveryHeaderFallback(providerId: string): Record<string, string> | undefined {
 		const override = this.#providerOverrides.get(providerId);
 		if (override?.authHeader !== true || !override.apiKey) return undefined;
-		const headers = mergeAuthHeaderSources([override.headers], override.authHeader, override.apiKey);
+		const headers = mergeAuthHeaderSources([override.headers], override.authHeader, override.apiKey, () =>
+			this.authStorage.getRuntimeApiKey(providerId),
+		);
 		return headers?.Authorization ? headers : undefined;
 	}
 
@@ -1777,7 +1779,12 @@ export class ModelRegistry {
 		};
 	}
 	#applyProviderTransportOverride<
-		T extends { baseUrl?: string; headers?: Record<string, string>; remoteCompaction?: RemoteCompactionConfig<Api> },
+		T extends {
+			provider: string;
+			baseUrl?: string;
+			headers?: Record<string, string>;
+			remoteCompaction?: RemoteCompactionConfig<Api>;
+		},
 	>(
 		entry: T,
 		override: Pick<
@@ -1789,6 +1796,7 @@ export class ModelRegistry {
 			override.headers ? [entry.headers, override.headers] : [entry.headers],
 			override.authHeader,
 			override.apiKey,
+			() => this.authStorage.getRuntimeApiKey(entry.provider),
 		);
 		return {
 			...entry,
@@ -1925,6 +1933,7 @@ export class ModelRegistry {
 					(providerConfig.auth as ProviderAuthMode | undefined) ?? undefined,
 					providerConfig.remoteCompaction,
 					modelDef as CustomModelDefinitionLike,
+					() => this.authStorage.getRuntimeApiKey(providerName),
 				);
 				if (!model) continue;
 				models.push(model);
@@ -2107,6 +2116,8 @@ export class ModelRegistry {
 		sessionId?: string,
 		options?: { signal?: AbortSignal },
 	): Promise<string | undefined> {
+		const runtimeKey = this.authStorage.getRuntimeApiKey(model.provider);
+		if (runtimeKey) return runtimeKey;
 		const commandKey = this.#resolveCommandBackedApiKey(model.provider);
 		if (commandKey.configured) return commandKey.value;
 		if (this.#keylessProviders.has(model.provider) && !this.authStorage.hasAuth(model.provider)) {
@@ -2145,6 +2156,8 @@ export class ModelRegistry {
 		sessionId?: string,
 		options?: { baseUrl?: string; modelId?: string; forceRefresh?: boolean; signal?: AbortSignal },
 	): Promise<string | undefined> {
+		const runtimeKey = this.authStorage.getRuntimeApiKey(provider);
+		if (runtimeKey) return runtimeKey;
 		const commandKey = this.#resolveCommandBackedApiKey(
 			provider,
 			options?.forceRefresh ? { forceCommandRefresh: true } : undefined,
@@ -2183,6 +2196,8 @@ export class ModelRegistry {
 	}
 
 	async #peekApiKeyForProvider(provider: string): Promise<string | undefined> {
+		const runtimeKey = this.authStorage.getRuntimeApiKey(provider);
+		if (runtimeKey) return runtimeKey;
 		const commandKey = this.#resolveCommandBackedApiKey(provider);
 		if (commandKey.configured) return commandKey.value;
 		if (this.#keylessProviders.has(provider) && !this.authStorage.hasAuth(provider)) {
@@ -2357,6 +2372,7 @@ export class ModelRegistry {
 					undefined,
 					config.remoteCompaction,
 					modelDef as CustomModelDefinitionLike,
+					() => this.authStorage.getRuntimeApiKey(providerName),
 				);
 				if (!overlay) {
 					throw new Error(`Provider ${providerName}, model ${modelDef.id}: no "api" specified.`);
@@ -2445,6 +2461,7 @@ export class ModelRegistry {
 							undefined,
 							config.remoteCompaction,
 							modelDef as CustomModelDefinitionLike,
+							() => this.authStorage.getRuntimeApiKey(providerName),
 						);
 						if (overlay) results.push(finalizeCustomModel(overlay, { useDefaults: true }));
 					}
