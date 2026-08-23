@@ -225,7 +225,8 @@ same way `/new` does, then moves the previous `.jsonl` and artifacts through
 the same gzip + artifact relocation used by `omp gc --archive`. It then reuses
 that command's `history.db` / `stats.db` cleanup against the resolved sessions
 root so a retained fork in a custom `--session-dir` keeps shared stats, and
-`omp stats` does not keep counting the archived session.
+`omp stats` does not keep counting the archived session. A cleanup error is
+reported as a warning; the archive itself still counts as completed.
 
 The archive root follows the active session directory. Sessions under the
 default profile store go to `archive/sessions` next to `sessions`. A custom

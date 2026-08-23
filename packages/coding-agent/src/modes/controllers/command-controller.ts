@@ -1074,7 +1074,7 @@ export class CommandController {
 				roots.sessionsRoot,
 			);
 			if (cleanup.errors.length > 0) {
-				throw new Error(cleanup.errors.join("; "));
+				this.ctx.showWarning(`Database cleanup failed: ${cleanup.errors.join("; ")}`);
 			}
 		});
 	}
