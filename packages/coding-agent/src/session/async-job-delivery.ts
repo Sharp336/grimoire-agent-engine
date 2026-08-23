@@ -8,8 +8,9 @@
  * This replaces the old single hardwired `onJobComplete` closure that routed
  * every completion — regardless of owner — into the first top-level session.
  */
-import { formatDuration, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
+
 import { replaceTabs } from "@oh-my-pi/pi-tui";
+import { formatDuration, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobCompletionLeftover, AsyncJobProgressDelivery, AsyncJobType } from "../async";
 import type { ProgressReminder } from "../async/progress-batcher";
 import chattyProgressGuidanceTemplate from "../prompts/system/chatty-progress-guidance.md" with { type: "text" };

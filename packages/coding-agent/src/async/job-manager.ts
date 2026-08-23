@@ -682,10 +682,7 @@ export class AsyncJobManager {
 		if (batch.kind === "artifact-only") return;
 		const sink = job.ownerId === undefined ? undefined : this.#progressSinks.get(job.ownerId);
 		if (!sink) return;
-		const recordSuppressedEvents = batch.values.reduce(
-			(total, record) => total + (record.suppressedEvents ?? 0),
-			0,
-		);
+		const recordSuppressedEvents = batch.values.reduce((total, record) => total + (record.suppressedEvents ?? 0), 0);
 		const suppressedEvents = batch.suppressedEvents + recordSuppressedEvents;
 		const info: AsyncJobProgressInfo = {
 			artifactId:
@@ -744,8 +741,7 @@ export class AsyncJobManager {
 				const suppressedEvents =
 					pending.suppressedEvents +
 					pending.values.reduce((total, value) => total + (value.suppressedEvents ?? 0), 0);
-				const sourceTruncated =
-					suppressedEvents > 0 || pending.values.some(value => value.truncated === true);
+				const sourceTruncated = suppressedEvents > 0 || pending.values.some(value => value.truncated === true);
 				const preview = record ? buildLineSnappedPreview(record.text, sourceTruncated) : { truncated: true };
 				job.completionLeftover = { ...preview, suppressedEvents: suppressedEvents || undefined };
 				pendingCoversTerminal =
